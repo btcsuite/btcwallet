@@ -138,8 +138,6 @@ var (
 	}{
 		m: make(map[uint64]chan []byte),
 	}
-
-	incorrectParameters = errors.New("Incorrect parameters.")
 )
 
 // ProcessFrontendMsg checks the message sent from a frontend.  If the
@@ -262,25 +260,23 @@ func WalletPassphrase(reply chan []byte, msg []byte) {
 	json.Unmarshal(msg, &v)
 	params := v["params"].([]interface{})
 	if len(params) != 2 {
-		log.Error(incorrectParameters)
+		ReplyError(reply, v["id"], &InvalidParams)
 		return
 	}
-	passphrase, ok := params[0].(string)
-	if !ok {
-		log.Error(incorrectParameters)
-		return
-	}
-	timeout, ok := params[1].(float64)
-	if !ok {
-		log.Error(incorrectParameters)
+	passphrase, ok1 := params[0].(string)
+	timeout, ok2 := params[1].(float64)
+	if !ok1 || !ok2 {
+		ReplyError(reply, v["id"], &InvalidParams)
 		return
 	}
 
 	if w := wallets[""]; w != nil {
-		w.Unlock([]byte(passphrase))
+		if err := w.Unlock([]byte(passphrase)); err != nil {
+			ReplyError(reply, v["id"], &WalletPassphraseIncorrect)
+			return
+		}
 		go func() {
 			time.Sleep(time.Second * time.Duration(int64(timeout)))
-			fmt.Println("finally locking")
 			w.Lock()
 		}()
 	}
