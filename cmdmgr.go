@@ -195,7 +195,7 @@ func ReplyError(reply chan []byte, id interface{}, e *btcjson.Error) {
 		Error: e,
 		Id:    &id,
 	}
-	if mr, err := json.Marshal(r); err != nil {
+	if mr, err := json.Marshal(r); err == nil {
 		reply <- mr
 	}
 }
