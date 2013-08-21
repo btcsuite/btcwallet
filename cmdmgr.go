@@ -199,7 +199,7 @@ func ReplyError(reply chan []byte, id interface{}, e *btcjson.Error) {
 func ReplySuccess(reply chan []byte, id interface{}, result interface{}) {
 	r := btcjson.Reply{
 		Result: result,
-		Id: &id,
+		Id:     &id,
 	}
 	if mr, err := json.Marshal(r); err != nil {
 		reply <- mr
@@ -211,21 +211,14 @@ func GetAddressesByAccount(reply chan []byte, msg []byte) {
 	var v map[string]interface{}
 	json.Unmarshal(msg, &v)
 	params := v["params"].([]interface{})
-	id := v["id"]
-	r := btcjson.Reply{
-		Id: &id,
-	}
+
+	var result interface{}
 	if w := wallets[params[0].(string)]; w != nil {
-		r.Result = w.GetActiveAddresses()
+		result = w.GetActiveAddresses()
 	} else {
-		r.Result = []interface{}{}
+		result = []interface{}{}
 	}
-	mr, err := json.Marshal(r)
-	if err != nil {
-		log.Info("Error marshalling reply: %v", err)
-		return
-	}
-	reply <- mr
+	ReplySuccess(reply, v["id"], result)
 }
 
 // GetNewAddress gets or generates a new address for an account.
@@ -238,17 +231,7 @@ func GetNewAddress(reply chan []byte, msg []byte) {
 	if len(params) == 0 || params[0].(string) == "" {
 		if w := wallets[""]; w != nil {
 			addr := w.NextUnusedAddress()
-			id := v["id"]
-			r := btcjson.Reply{
-				Result: addr,
-				Id:     &id,
-			}
-			mr, err := json.Marshal(r)
-			if err != nil {
-				log.Info("Error marshalling reply: %v", err)
-				return
-			}
-			reply <- mr
+			ReplySuccess(reply, v["id"], addr)
 		}
 	}
 }
