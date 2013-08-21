@@ -151,6 +151,7 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 	}
 
 	switch cmd {
+	// Standard bitcoind methods
 	case "getaddressesbyaccount":
 		GetAddressesByAccount(reply, msg)
 	case "getnewaddress":
@@ -159,6 +160,11 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 		WalletLock(reply, msg)
 	case "walletpassphrase":
 		WalletPassphrase(reply, msg)
+
+	// btcwallet extensions
+	case "walletislocked":
+		WalletIsLocked(reply, msg)
+
 	default:
 		// btcwallet does not understand method.  Pass to btcd.
 		log.Info("Unknown btcwallet method", cmd)
@@ -233,6 +239,29 @@ func GetNewAddress(reply chan []byte, msg []byte) {
 			addr := w.NextUnusedAddress()
 			ReplySuccess(reply, v["id"], addr)
 		}
+	}
+}
+
+// WalletIsLocked returns whether the wallet used by the specified
+// account, or default account, is locked.
+func WalletIsLocked(reply chan []byte, msg []byte) {
+	var v map[string]interface{}
+	json.Unmarshal(msg, &v)
+	params := v["params"].([]interface{})
+	account := ""
+	if len(params) > 0 {
+		if acct, ok := params[0].(string); ok {
+			account = acct
+		} else {
+			ReplyError(reply, v["id"], &InvalidParams)
+			return
+		}
+	}
+	if w := wallets[account]; w != nil {
+		result := w.IsLocked()
+		ReplySuccess(reply, v["id"], result)
+	} else {
+		ReplyError(reply, v["id"], &WalletInvalidAccountName)
 	}
 }
 

@@ -383,6 +383,13 @@ func (wallet *Wallet) Lock() (err error) {
 	return err
 }
 
+func (wallet *Wallet) IsLocked() (locked bool) {
+	wallet.key.Lock()
+	locked = wallet.key.secret == nil
+	wallet.key.Unlock()
+	return locked
+}
+
 // Returns wallet version as string and int.
 // TODO(jrick)
 func (wallet *Wallet) Version() (string, int) {
