@@ -294,6 +294,7 @@ func WalletPassphrase(reply chan []byte, msg []byte) {
 			ReplyError(reply, v["id"], &WalletPassphraseIncorrect)
 			return
 		}
+		ReplySuccess(reply, v["id"], nil)
 		go func() {
 			time.Sleep(time.Second * time.Duration(int64(timeout)))
 			w.Lock()
