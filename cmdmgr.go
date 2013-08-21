@@ -20,103 +20,103 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/conformal/btcjson"
-	"time"
 	"sync"
+	"time"
 )
 
 // Errors
 var (
 	// Standard JSON-RPC 2.0 errors
 	InvalidRequest = btcjson.Error{
-		Code: -32600,
+		Code:    -32600,
 		Message: "Invalid request",
 	}
 	MethodNotFound = btcjson.Error{
-		Code: -32601,
+		Code:    -32601,
 		Message: "Method not found",
 	}
 	InvalidParams = btcjson.Error{
-		Code: -32602,
+		Code:    -32602,
 		Message: "Invalid paramaters",
 	}
 	InternalError = btcjson.Error{
-		Code: -32603,
+		Code:    -32603,
 		Message: "Internal error",
 	}
 	ParseError = btcjson.Error{
-		Code: -32700,
+		Code:    -32700,
 		Message: "Parse error",
 	}
 
 	// General application defined errors
 	MiscError = btcjson.Error{
-		Code: -1,
+		Code:    -1,
 		Message: "Miscellaneous error",
 	}
 	ForbiddenBySafeMode = btcjson.Error{
-		Code: -2,
+		Code:    -2,
 		Message: "Server is in safe mode, and command is not allowed in safe mode",
 	}
 	TypeError = btcjson.Error{
-		Code: -3,
+		Code:    -3,
 		Message: "Unexpected type was passed as parameter",
 	}
 	InvalidAddressOrKey = btcjson.Error{
-		Code: -5,
+		Code:    -5,
 		Message: "Invalid address or key",
 	}
 	OutOfMemory = btcjson.Error{
-		Code: -7,
+		Code:    -7,
 		Message: "Ran out of memory during operation",
 	}
 	InvalidParameter = btcjson.Error{
-		Code: -8,
+		Code:    -8,
 		Message: "Invalid, missing or duplicate parameter",
 	}
 	DatabaseError = btcjson.Error{
-		Code: -20,
+		Code:    -20,
 		Message: "Database error",
 	}
 	DeserializationError = btcjson.Error{
-		Code: -22,
+		Code:    -22,
 		Message: "Error parsing or validating structure in raw format",
 	}
 
 	// Wallet errors
 	WalletError = btcjson.Error{
-		Code: -4,
+		Code:    -4,
 		Message: "Unspecified problem with wallet",
 	}
 	WalletInsufficientFunds = btcjson.Error{
-		Code: -6,
+		Code:    -6,
 		Message: "Not enough funds in wallet or account",
 	}
 	WalletInvalidAccountName = btcjson.Error{
-		Code: -11,
+		Code:    -11,
 		Message: "Invalid account name",
 	}
 	WalletKeypoolRanOut = btcjson.Error{
-		Code: -12,
+		Code:    -12,
 		Message: "Keypool ran out, call keypoolrefill first",
 	}
 	WalletUnlockNeeded = btcjson.Error{
-		Code: -13,
+		Code:    -13,
 		Message: "Enter the wallet passphrase with walletpassphrase first",
 	}
 	WalletPassphraseIncorrect = btcjson.Error{
-		Code: -14,
+		Code:    -14,
 		Message: "The wallet passphrase entered was incorrect",
 	}
 	WalletWrongEncState = btcjson.Error{
-		Code: -15,
+		Code:    -15,
 		Message: "Command given in wrong wallet encryption state",
 	}
 	WalletEncryptionFailed = btcjson.Error{
-		Code: -16,
+		Code:    -16,
 		Message: "Failed to encrypt the wallet",
 	}
 	WalletAlreadyUnlocked = btcjson.Error{
-		Code: -17,
+		Code:    -17,
 		Message: "Wallet is already unlocked",
 	}
 )
@@ -187,6 +187,18 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 func ReplyError(reply chan []byte, id interface{}, e *btcjson.Error) {
 	r := btcjson.Reply{
 		Error: e,
+		Id:    &id,
+	}
+	if mr, err := json.Marshal(r); err != nil {
+		reply <- mr
+	}
+}
+
+// ReplySuccess creates and marshalls a btcjson.Reply with the result r,
+// sending the reply to a reply channel.
+func ReplySuccess(reply chan []byte, id interface{}, result interface{}) {
+	r := btcjson.Reply{
+		Result: result,
 		Id: &id,
 	}
 	if mr, err := json.Marshal(r); err != nil {
@@ -246,9 +258,16 @@ func GetNewAddress(reply chan []byte, msg []byte) {
 // TODO(jrick): figure out how multiple wallets/accounts will work
 // with this.
 func WalletLock(reply chan []byte, msg []byte) {
-	// TODO(jrick)
+	var v map[string]interface{}
+	json.Unmarshal(msg, &v)
+	if w := wallets[""]; w != nil {
+		if err := w.Lock(); err != nil {
+			ReplyError(reply, v["id"], &WalletWrongEncState)
+		} else {
+			ReplySuccess(reply, v["id"], nil)
+		}
+	}
 }
-
 
 // WalletPassphrase stores the decryption key for the default account,
 // unlocking the wallet.

@@ -30,6 +30,7 @@ import (
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 	"io"
+	"sync"
 )
 
 const (
@@ -228,6 +229,10 @@ type Wallet struct {
 	appendedEntries  varEntries
 
 	// These are not serialized
+	key struct {
+		sync.Mutex
+		secret []byte
+	}
 	addrMap        map[[ripemd160.Size]byte]*btcAddress
 	addrCommentMap map[[ripemd160.Size]byte]*[]byte
 	chainIdxMap    map[int64]*[ripemd160.Size]byte
@@ -351,13 +356,31 @@ func (wallet *Wallet) Unlock(passphrase []byte) error {
 		wallet.kdfParams.mem, wallet.kdfParams.nIter)
 
 	// Attempt unlocking root address
-	return wallet.keyGenerator.unlock(key)
+	if err := wallet.keyGenerator.unlock(key); err != nil {
+		return err
+	} else {
+		wallet.key.Lock()
+		wallet.key.secret = key
+		wallet.key.Unlock()
+		return nil
+	}
 }
 
 // Lock does a best effort to zero the keys.
 // Being go this might not succeed but try anway.
 // TODO(jrick)
-func (wallet *Wallet) Lock() {
+func (wallet *Wallet) Lock() (err error) {
+	wallet.key.Lock()
+	if wallet.key.secret != nil {
+		for i, _ := range wallet.key.secret {
+			wallet.key.secret[i] = 0
+		}
+		wallet.key.secret = nil
+	} else {
+		err = fmt.Errorf("Wallet already locked")
+	}
+	wallet.key.Unlock()
+	return err
 }
 
 // Returns wallet version as string and int.
