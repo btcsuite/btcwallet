@@ -207,7 +207,7 @@ func ReplySuccess(reply chan []byte, id interface{}, result interface{}) {
 		Result: result,
 		Id:     &id,
 	}
-	if mr, err := json.Marshal(r); err != nil {
+	if mr, err := json.Marshal(r); err == nil {
 		reply <- mr
 	}
 }
