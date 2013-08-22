@@ -323,7 +323,7 @@ func NotifyWalletLockStateChange(reply chan []byte, locked bool) {
 	var id interface{} = "btcwallet:newwalletlockstate"
 	m := btcjson.Reply{
 		Result: locked,
-		Id: &id,
+		Id:     &id,
 	}
 	msg, _ := json.Marshal(&m)
 	frontendNotificationMaster <- msg
