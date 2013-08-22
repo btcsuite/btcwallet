@@ -277,6 +277,7 @@ func WalletLock(reply chan []byte, msg []byte) {
 			ReplyError(reply, v["id"], &WalletWrongEncState)
 		} else {
 			ReplySuccess(reply, v["id"], nil)
+			NotifyWalletLockStateChange(reply, true)
 		}
 	}
 }
@@ -307,9 +308,23 @@ func WalletPassphrase(reply chan []byte, msg []byte) {
 			return
 		}
 		ReplySuccess(reply, v["id"], nil)
+		NotifyWalletLockStateChange(reply, false)
 		go func() {
 			time.Sleep(time.Second * time.Duration(int64(timeout)))
 			w.Lock()
+			NotifyWalletLockStateChange(reply, true)
 		}()
 	}
+}
+
+// NotifyWalletLockStateChange sends a notification to all frontends
+// that the wallet has just been locked or unlocked.
+func NotifyWalletLockStateChange(reply chan []byte, locked bool) {
+	var id interface{} = "btcwallet:newwalletlockstate"
+	m := btcjson.Reply{
+		Result: locked,
+		Id: &id,
+	}
+	msg, _ := json.Marshal(&m)
+	frontendNotificationMaster <- msg
 }
