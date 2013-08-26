@@ -36,7 +36,7 @@ var (
 			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
 			30, 31,
 		},
-		Amt:    69,
+		Amt: 69,
 		SenderAddr: [ripemd160.Size]byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 			16, 17, 18, 19,
@@ -46,7 +46,7 @@ var (
 			34, 35, 36, 37, 38, 39,
 		},
 	}
-	
+
 	sendtx = &SendTx{
 		TxHash: [btcwire.HashSize]byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
@@ -61,21 +61,21 @@ var (
 			Addr [ripemd160.Size]byte
 			Amt  int64
 		}{
-			struct{
+			struct {
 				Addr [ripemd160.Size]byte
 				Amt  int64
 			}{
-				Amt:    69,
+				Amt: 69,
 				Addr: [ripemd160.Size]byte{
 					20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
 					34, 35, 36, 37, 38, 39,
 				},
 			},
-			struct{
+			struct {
 				Addr [ripemd160.Size]byte
 				Amt  int64
 			}{
-				Amt:    96,
+				Amt: 96,
 				Addr: [ripemd160.Size]byte{
 					40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
 					54, 55, 56, 57, 58, 59,
