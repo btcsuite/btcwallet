@@ -104,7 +104,7 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	if n != 20 * (1 + int64(utxoByteSize)) {
+	if n != 20*(1+int64(utxoByteSize)) {
 		t.Error("Incorrect number of bytes written.")
 	}
 
@@ -144,13 +144,13 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 	}
 
 	truncatedReadBuf := bytes.NewBuffer(storeBytes)
-	truncatedReadBuf.Truncate(10 * (1 + utxoByteSize) + btcwire.HashSize)
+	truncatedReadBuf.Truncate(10*(1+utxoByteSize) + btcwire.HashSize)
 	store3 := new(UtxoStore)
 	n, err = store3.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
 		t.Error("Expected err = io.EOF reading from truncated buffer.")
 	}
-	if n != 10 * (1 + int64(utxoByteSize)) + btcwire.HashSize {
+	if n != 10*(1+int64(utxoByteSize))+btcwire.HashSize {
 		t.Error("Incorrect number of bytes read from truncated buffer.")
 	}
 }
