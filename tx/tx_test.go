@@ -18,15 +18,71 @@ package tx
 
 import (
 	"bytes"
+	"code.google.com/p/go.crypto/ripemd160"
 	"encoding/binary"
 	"github.com/conformal/btcwire"
 	"github.com/davecgh/go-spew/spew"
 	"io"
+	"reflect"
 	"testing"
 )
 
 var (
 	utxoByteSize = binary.Size(Utxo{})
+
+	recvtx = &RecvTx{
+		TxHash: [btcwire.HashSize]byte{
+			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+			30, 31,
+		},
+		Amt:    69,
+		SenderAddr: [ripemd160.Size]byte{
+			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+			16, 17, 18, 19,
+		},
+		ReceiverAddr: [ripemd160.Size]byte{
+			20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
+			34, 35, 36, 37, 38, 39,
+		},
+	}
+	
+	sendtx = &SendTx{
+		TxHash: [btcwire.HashSize]byte{
+			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+			30, 31,
+		},
+		SenderAddr: [ripemd160.Size]byte{
+			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+			16, 17, 18, 19,
+		},
+		ReceiverAddrs: []struct {
+			Addr [ripemd160.Size]byte
+			Amt  int64
+		}{
+			struct{
+				Addr [ripemd160.Size]byte
+				Amt  int64
+			}{
+				Amt:    69,
+				Addr: [ripemd160.Size]byte{
+					20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
+					34, 35, 36, 37, 38, 39,
+				},
+			},
+			struct{
+				Addr [ripemd160.Size]byte
+				Amt  int64
+			}{
+				Amt:    96,
+				Addr: [ripemd160.Size]byte{
+					40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+					54, 55, 56, 57, 58, 59,
+				},
+			},
+		},
+	}
 )
 
 func TestUtxoWriteRead(t *testing.T) {
@@ -58,10 +114,7 @@ func TestUtxoWriteRead(t *testing.T) {
 		t.Error("Reading Utxo: Size Mismatch")
 	}
 
-	buf1, buf2 := new(bytes.Buffer), new(bytes.Buffer)
-	binary.Write(buf1, binary.LittleEndian, utxo1)
-	binary.Write(buf2, binary.LittleEndian, utxo2)
-	if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
+	if !reflect.DeepEqual(utxo1, utxo2) {
 		spew.Dump(utxo1, utxo2)
 		t.Error("Utxos do not match.")
 	}
@@ -119,28 +172,8 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 		t.Error("Incorrect number of bytes read.")
 	}
 
-	switch {
-	case len(store1.Confirmed) != len(store2.Confirmed):
-		fallthrough
-	case len(store1.Unconfirmed) != len(store2.Unconfirmed):
-		t.Error("Stores are not equal.")
-	}
-
-	for i, _ := range store1.Confirmed {
-		buf1, buf2 := new(bytes.Buffer), new(bytes.Buffer)
-		binary.Write(buf1, binary.LittleEndian, store1.Confirmed[i])
-		binary.Write(buf2, binary.LittleEndian, store2.Confirmed[i])
-		if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
-			t.Error("Store Utxos do not match.")
-		}
-	}
-	for i, _ := range store1.Unconfirmed {
-		buf1, buf2 := new(bytes.Buffer), new(bytes.Buffer)
-		binary.Write(buf1, binary.LittleEndian, store1.Unconfirmed[i])
-		binary.Write(buf2, binary.LittleEndian, store2.Unconfirmed[i])
-		if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
-			t.Error("Store Utxos do not match.")
-		}
+	if !reflect.DeepEqual(store1, store2) {
+		t.Error("Stores do not match.")
 	}
 
 	truncatedReadBuf := bytes.NewBuffer(storeBytes)
@@ -151,6 +184,109 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 		t.Error("Expected err = io.EOF reading from truncated buffer.")
 	}
 	if n != 10*(1+int64(utxoByteSize))+btcwire.HashSize {
+		t.Error("Incorrect number of bytes read from truncated buffer.")
+	}
+}
+
+func TestRecvTxWriteRead(t *testing.T) {
+	bufWriter := &bytes.Buffer{}
+	n, err := recvtx.WriteTo(bufWriter)
+	if err != nil {
+		t.Error(err)
+	}
+	if int(n) != binary.Size(recvtx) {
+		t.Error("Writing Tx: Size Mismatch")
+	}
+	txBytes := bufWriter.Bytes()
+
+	tx := new(RecvTx)
+	n, err = tx.ReadFrom(bytes.NewBuffer(txBytes))
+	if err != nil {
+		t.Error(err)
+	}
+	if int(n) != binary.Size(tx) {
+		t.Error("Reading Tx: Size Mismatch")
+	}
+
+	if !reflect.DeepEqual(recvtx, tx) {
+		t.Error("Txs do not match.")
+	}
+
+	truncatedReadBuf := bytes.NewBuffer(txBytes)
+	truncatedReadBuf.Truncate(btcwire.HashSize)
+	n, err = tx.ReadFrom(truncatedReadBuf)
+	if err != io.EOF {
+		t.Error("Expected err = io.EOF reading from truncated buffer.")
+	}
+	if n != btcwire.HashSize {
+		t.Error("Incorrect number of bytes read from truncated buffer.")
+	}
+}
+
+func TestSendTxWriteRead(t *testing.T) {
+	bufWriter := &bytes.Buffer{}
+	n1, err := sendtx.WriteTo(bufWriter)
+	if err != nil {
+		t.Error(err)
+	}
+	txBytes := bufWriter.Bytes()
+
+	tx := new(SendTx)
+	n2, err := tx.ReadFrom(bytes.NewBuffer(txBytes))
+	if err != nil {
+		t.Error(err)
+	}
+	if n1 != n2 {
+		t.Error("Number of bytes written and read mismatch.")
+	}
+
+	if !reflect.DeepEqual(sendtx, tx) {
+		t.Error("Txs do not match.")
+	}
+
+	truncatedReadBuf := bytes.NewBuffer(txBytes)
+	truncatedReadBuf.Truncate(btcwire.HashSize)
+	n, err := tx.ReadFrom(truncatedReadBuf)
+	if err != io.EOF {
+		t.Error("Expected err = io.EOF reading from truncated buffer.")
+	}
+	if n != btcwire.HashSize {
+		t.Error("Incorrect number of bytes read from truncated buffer.")
+	}
+}
+
+func TestTxStoreWriteRead(t *testing.T) {
+	s := []interface{}{recvtx, sendtx}
+	store := TxStore(s)
+
+	bufWriter := &bytes.Buffer{}
+	n1, err := store.WriteTo(bufWriter)
+	if err != nil {
+		t.Error(err)
+	}
+	txsBytes := bufWriter.Bytes()
+
+	txs := TxStore{}
+	n2, err := txs.ReadFrom(bytes.NewBuffer(txsBytes))
+	if err != nil {
+		t.Error(err)
+	}
+	if n1 != n2 {
+		t.Error("Number of bytes written and read mismatch.")
+	}
+
+	if !reflect.DeepEqual(store, txs) {
+		spew.Dump(store, txs)
+		t.Error("TxStores do not match.")
+	}
+
+	truncatedReadBuf := bytes.NewBuffer(txsBytes)
+	truncatedReadBuf.Truncate(50)
+	n, err := txs.ReadFrom(truncatedReadBuf)
+	if err != io.EOF {
+		t.Error("Expected err = io.EOF reading from truncated buffer.")
+	}
+	if n != 50 {
 		t.Error("Incorrect number of bytes read from truncated buffer.")
 	}
 }

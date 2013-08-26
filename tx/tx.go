@@ -25,11 +25,13 @@ import (
 	"io"
 )
 
+// Byte headers prepending confirmed and unconfirmed serialized UTXOs.
 const (
 	ConfirmedUtxoHeader byte = iota
 	UnconfirmedUtxoHeader
 )
 
+// Byte headers prepending received and sent serialized transactions.
 const (
 	RecvTxHeader byte = iota
 	SendTxHeader
@@ -255,6 +257,8 @@ func (txs *TxStore) ReadFrom(r io.Reader) (n int64, err error) {
 			return n + read, err
 		}
 		n += read
+
+		store = append(store, tx)
 	}
 }
 
