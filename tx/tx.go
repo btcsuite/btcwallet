@@ -60,11 +60,11 @@ type RecvTx struct {
 
 type SendTx struct {
 	TxHash        btcwire.ShaHash
-	Amt           int64 // Measured in Satoshis
+	Fee           int64 // Measured in Satoshis
 	SenderAddr    [ripemd160.Size]byte
 	ReceiverAddrs []struct {
 		Addr [ripemd160.Size]byte
-		Amt  int64
+		Amt  int64 // Measured in Satoshis
 	}
 }
 
@@ -347,14 +347,14 @@ func (tx *RecvTx) WriteTo(w io.Writer) (n int64, err error) {
 // ReadFrom satisifies the io.WriterTo interface.  A SendTx is read
 // from r with the format:
 //
-//  [TxHash (32 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
+//  [TxHash (32 bytes), Fee (8 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
 //
 // Each field is read little endian.
 func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
 	var nReceivers uint32
 	datas := []interface{}{
 		&tx.TxHash,
-		&tx.Amt,
+		&tx.Fee,
 		&tx.SenderAddr,
 		&nReceivers,
 	}
@@ -395,7 +395,7 @@ func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
 // WriteTo satisifies the io.WriterTo interface.  A RecvTx is written to
 // w in the format:
 //
-//  [TxHash (32 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
+//  [TxHash (32 bytes), Fee (8 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
 //
 // Each field is written little endian.
 func (tx *SendTx) WriteTo(w io.Writer) (n int64, err error) {
@@ -405,7 +405,7 @@ func (tx *SendTx) WriteTo(w io.Writer) (n int64, err error) {
 	}
 	datas := []interface{}{
 		&tx.TxHash,
-		&tx.Amt,
+		&tx.Fee,
 		&tx.SenderAddr,
 		nReceivers,
 	}
