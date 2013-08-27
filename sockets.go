@@ -282,7 +282,7 @@ func ProcessBtcdNotificationReply(b []byte) {
 			var id interface{} = "btcwallet:newblockchainheight"
 			m := &btcjson.Reply{
 				Result: height,
-				Id: &id,
+				Id:     &id,
 			}
 			msg, _ := json.Marshal(m)
 			frontendNotificationMaster <- msg
