@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcwire"
 	"net/http"
 	"sync"
 )
@@ -268,6 +269,27 @@ func ProcessBtcdNotificationReply(b []byte) {
 		// btcd notification must either be handled by btcwallet or sent
 		// to all frontends if btcwallet can not handle it.
 		switch idStr {
+		case "btcd:blockconnected":
+			result := m["result"].(map[string]interface{})
+			hashResult := result["hash"].([]interface{})
+			hash := new(btcwire.ShaHash)
+			for i, _ := range hash[:] {
+				hash[i] = byte(hashResult[i].(float64))
+			}
+			height := int64(result["height"].(float64))
+
+			// TODO(jrick): update TxStore and UtxoStore with new hash
+			var id interface{} = "btcwallet:newblockchainheight"
+			m := &btcjson.Reply{
+				Result: height,
+				Id: &id,
+			}
+			msg, _ := json.Marshal(m)
+			frontendNotificationMaster <- msg
+
+		case "btcd:blockdisconnected":
+			// TODO(jrick): rollback txs and utxos from removed block.
+
 		default:
 			frontendNotificationMaster <- b
 		}
