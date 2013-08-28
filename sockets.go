@@ -280,11 +280,11 @@ func ProcessBtcdNotificationReply(b []byte) {
 
 			// TODO(jrick): update TxStore and UtxoStore with new hash
 			var id interface{} = "btcwallet:newblockchainheight"
-			m := &btcjson.Reply{
+			msgRaw := &btcjson.Reply{
 				Result: height,
 				Id:     &id,
 			}
-			msg, _ := json.Marshal(m)
+			msg, _ := json.Marshal(msgRaw)
 			frontendNotificationMaster <- msg
 
 		case "btcd:blockdisconnected":
