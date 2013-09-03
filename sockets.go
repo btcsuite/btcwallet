@@ -373,7 +373,7 @@ func reqTxsForAddress(addr string) {
 	seq.Unlock()
 
 	m := &btcjson.Message{
-		Jsonrpc: "",
+		Jsonrpc: "1.0",
 		Id:      fmt.Sprintf("btcwallet(%v)", n),
 		Method:  "rescanforutxo",
 		Params: []interface{}{
@@ -402,7 +402,7 @@ func reqUtxoForAddress(addr string) {
 	seq.Unlock()
 
 	m := &btcjson.Message{
-		Jsonrpc: "",
+		Jsonrpc: "1.0",
 		Id:      fmt.Sprintf("btcwallet(%d)", n),
 		Method:  "requestutxos",
 		Params: []interface{}{
