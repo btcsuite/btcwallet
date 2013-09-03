@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcwallet/wallet"
 	"sync"
 	"time"
 )
@@ -162,6 +163,8 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 		WalletPassphrase(reply, msg)
 
 	// btcwallet extensions
+	case "createencryptedwallet":
+		CreateEncryptedWallet(reply, msg)
 	case "walletislocked":
 		WalletIsLocked(reply, msg)
 
@@ -230,22 +233,78 @@ func GetAddressesByAccount(reply chan []byte, msg []byte) {
 	ReplySuccess(reply, v["id"], result)
 }
 
-// GetNewAddress gets or generates a new address for an account.
-//
-// TODO(jrick): support non-default account wallets.
+// GetNewAddress gets or generates a new address for an account.  If
+// the requested wallet does not exist, a JSON error will be returned to
+// the client.
 func GetNewAddress(reply chan []byte, msg []byte) {
 	var v map[string]interface{}
 	json.Unmarshal(msg, &v)
 	params := v["params"].([]interface{})
+	var wname string
 	if len(params) == 0 || params[0].(string) == "" {
-		wallets.RLock()
-		w := wallets.m[""]
-		wallets.RUnlock()
-		if w != nil {
-			addr := w.NextUnusedAddress()
-			ReplySuccess(reply, v["id"], addr)
-		}
+		wname = ""
+	} else {
+		wname = "params[0].(string)"
 	}
+
+	wallets.RLock()
+	w := wallets.m[wname]
+	wallets.RUnlock()
+	if w != nil {
+		// TODO(jrick): generate new addresses if the address pool is empty.
+		addr := w.NextUnusedAddress()
+		ReplySuccess(reply, v["id"], addr)
+	} else {
+		ReplyError(reply, v["id"], &WalletInvalidAccountName)
+	}
+}
+
+// CreateEncryptedWallet creates a new encrypted wallet.  The form of the command is:
+//
+//  createencryptedwallet [account] [description] [passphrase]
+//
+// All three parameters are required, and must be of type string.  If
+// the wallet specified by account already exists, an invalid account
+// name error is returned to the client.
+func CreateEncryptedWallet(reply chan []byte, msg []byte) {
+	var v map[string]interface{}
+	json.Unmarshal(msg, &v)
+	params := v["params"].([]interface{})
+	var wname string
+	if len(params) != 3 {
+		ReplyError(reply, v["id"], &InvalidParams)
+		return
+	}
+	wname, ok1 := params[0].(string)
+	desc, ok2 := params[1].(string)
+	pass, ok3 := params[2].(string)
+	if !ok1 || !ok2 || !ok3 {
+		ReplyError(reply, v["id"], &InvalidParams)
+		return
+	}
+
+	// Does this wallet already exist?
+	wallets.RLock()
+	if w := wallets.m[wname]; w != nil {
+		e := WalletInvalidAccountName
+		e.Message = "Wallet already exists."
+		ReplyError(reply, v["id"], &e)
+		return
+	}
+	wallets.RUnlock()
+
+	w, err := wallet.NewWallet(wname, desc, []byte(pass))
+	if err != nil {
+		log.Error("Error creating wallet: " + err.Error())
+		ReplyError(reply, v["id"], &InternalError)
+		return
+	}
+
+	wallets.Lock()
+	wallets.m[wname] = &BtcWallet{
+		Wallet: w,
+	}
+	wallets.Unlock()
 }
 
 // WalletIsLocked returns whether the wallet used by the specified

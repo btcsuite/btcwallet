@@ -85,8 +85,9 @@ type BtcWallet struct {
 	tx.TxStore
 }
 
-func OpenOrCreateWallet(cfg *config, account string) (*BtcWallet, error) {
-	// Open wallet file specified by account.
+// walletdir returns the directory path which holds the wallet, utxo,
+// and tx files.
+func walletdir(cfg *config, account string) string {
 	var wname string
 	if account == "" {
 		wname = "btcwallet"
@@ -94,7 +95,11 @@ func OpenOrCreateWallet(cfg *config, account string) (*BtcWallet, error) {
 		wname = fmt.Sprintf("btcwallet-%s", account)
 	}
 
-	wdir := filepath.Join(cfg.DataDir, wname)
+	return filepath.Join(cfg.DataDir, wname)
+}
+
+func OpenOrCreateWallet(cfg *config, account string) (*BtcWallet, error) {
+	wdir := walletdir(cfg, account)
 	fi, err := os.Stat(wdir)
 	if err != nil {
 		if os.IsNotExist(err) {
