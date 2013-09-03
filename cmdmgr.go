@@ -155,6 +155,8 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 	// Standard bitcoind methods
 	case "getaddressesbyaccount":
 		GetAddressesByAccount(reply, msg)
+	case "getbalance":
+		GetBalance(reply, msg)
 	case "getnewaddress":
 		GetNewAddress(reply, msg)
 	case "walletlock":
@@ -170,7 +172,7 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 
 	default:
 		// btcwallet does not understand method.  Pass to btcd.
-		log.Info("Unknown btcwallet method", cmd)
+		log.Info("Unknown btcwallet method ", cmd)
 
 		seq.Lock()
 		n := seq.n
@@ -215,7 +217,7 @@ func ReplySuccess(reply chan []byte, id interface{}, result interface{}) {
 	}
 }
 
-// GetAddressesByAccount Gets all addresses for an account.
+// GetAddressesByAccount replies with all addresses for an account.
 func GetAddressesByAccount(reply chan []byte, msg []byte) {
 	var v map[string]interface{}
 	json.Unmarshal(msg, &v)
@@ -231,6 +233,38 @@ func GetAddressesByAccount(reply chan []byte, msg []byte) {
 		result = []interface{}{}
 	}
 	ReplySuccess(reply, v["id"], result)
+}
+
+// GetBalance replies with the balance for an account (wallet).  If
+// the requested wallet does not exist, a JSON error will be returned to
+// the client.
+//
+// TODO(jrick): Actually calculate correct balance.
+func GetBalance(reply chan []byte, msg []byte) {
+	var v map[string]interface{}
+	json.Unmarshal(msg, &v)
+	params := v["params"].([]interface{})
+	var wname string
+	if len(params) > 0 {
+		if s, ok := params[0].(string); ok {
+			wname = s
+		} else {
+			ReplyError(reply, v["id"], &InvalidParams)
+		}
+	}
+
+	wallets.RLock()
+	w := wallets.m[wname]
+	wallets.RUnlock()
+	var result interface{}
+	if w != nil {
+		result = 0 // TODO(jrick)
+		ReplySuccess(reply, v["id"], result)
+	} else {
+		e := WalletInvalidAccountName
+		e.Message = fmt.Sprintf("Wallet for account '%s' does not exist.", wname)
+		ReplyError(reply, v["id"], &e)
+	}
 }
 
 // GetNewAddress gets or generates a new address for an account.  If
