@@ -17,6 +17,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
@@ -25,6 +26,10 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+)
+
+var (
+	ErrNoWallet = errors.New("Wallet file does not exist.")
 )
 
 var (
@@ -59,11 +64,14 @@ func main() {
 	*/
 
 	// Open wallet
-	btcw, err := OpenOrCreateWallet(cfg, "")
+	btcw, err := OpenWallet(cfg, "")
 	if err != nil {
-		panic(err)
+		log.Info(err.Error())
+	} else {
+		wallets.Lock()
+		wallets.m[""] = btcw
+		wallets.Unlock()
 	}
-	_ = btcw
 
 	// Start HTTP server to listen and send messages to frontend and btcd
 	// backend.  Try reconnection if connection failed.
@@ -98,7 +106,7 @@ func walletdir(cfg *config, account string) string {
 	return filepath.Join(cfg.DataDir, wname)
 }
 
-func OpenOrCreateWallet(cfg *config, account string) (*BtcWallet, error) {
+func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 	wdir := walletdir(cfg, account)
 	fi, err := os.Stat(wdir)
 	if err != nil {
@@ -122,9 +130,8 @@ func OpenOrCreateWallet(cfg *config, account string) (*BtcWallet, error) {
 	var wfile, txfile, utxofile *os.File
 	if wfile, err = os.Open(wfilepath); err != nil {
 		if os.IsNotExist(err) {
-			if wfile, err = os.Create(wfilepath); err != nil {
-				return nil, err
-			}
+			// Must create and save wallet first.
+			return nil, ErrNoWallet
 		} else {
 			return nil, err
 		}

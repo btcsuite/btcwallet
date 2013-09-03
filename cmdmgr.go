@@ -255,7 +255,9 @@ func GetNewAddress(reply chan []byte, msg []byte) {
 		addr := w.NextUnusedAddress()
 		ReplySuccess(reply, v["id"], addr)
 	} else {
-		ReplyError(reply, v["id"], &WalletInvalidAccountName)
+		e := WalletInvalidAccountName
+		e.Message = fmt.Sprintf("Wallet for account '%s' does not exist.", wname)
+		ReplyError(reply, v["id"], &e)
 	}
 }
 
