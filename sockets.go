@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwire"
+	"github.com/davecgh/go-spew/spew"
 	"net/http"
 	"sync"
 )
@@ -183,6 +184,8 @@ func BtcdHandler(ws *websocket.Conn) {
 	// TODO(jrick): hook this up with addresses in wallet.
 	// reqTxsForAddress("addr")
 
+	reqUtxoForAddress("1PZ67BehXWbzoqkovph4Cyfiz9LiFfTUot")
+
 	for {
 		select {
 		case rply, ok := <-replies:
@@ -290,6 +293,16 @@ func ProcessBtcdNotificationReply(b []byte) {
 		case "btcd:blockdisconnected":
 			// TODO(jrick): rollback txs and utxos from removed block.
 
+		case "btcd:recvtx":
+			log.Info("got recvtx (ignoring)")
+
+		case "btcd:sendtx":
+			log.Info("got sendtx (ignoring)")
+
+		case "btcd:utxo":
+			result := m["result"].(map[string]interface{})
+			spew.Dump(result)
+
 		default:
 			frontendNotificationMaster <- b
 		}
@@ -376,6 +389,31 @@ func reqTxsForAddress(addr string) {
 	replyHandlers.m[n] = func(result interface{}) bool {
 		fmt.Println("result:", result)
 		return result == nil
+	}
+	replyHandlers.Unlock()
+
+	btcdMsgs <- msg
+}
+
+func reqUtxoForAddress(addr string) {
+	seq.Lock()
+	n := seq.n
+	seq.n++
+	seq.Unlock()
+
+	m := &btcjson.Message{
+		Jsonrpc: "",
+		Id:      fmt.Sprintf("btcwallet(%d)", n),
+		Method:  "requestutxos",
+		Params: []interface{}{
+			addr,
+		},
+	}
+	msg, _ := json.Marshal(m)
+
+	replyHandlers.Lock()
+	replyHandlers.m[n] = func(result interface{}) bool {
+		return true
 	}
 	replyHandlers.Unlock()
 

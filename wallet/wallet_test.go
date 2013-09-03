@@ -17,16 +17,33 @@
 package wallet
 
 import (
-	"bytes"
-	"encoding/binary"
+	"crypto/rand"
 	"github.com/davecgh/go-spew/spew"
 	"os"
+	"reflect"
 	"testing"
 )
 
+var _ = spew.Dump
+
 func TestBtcAddressSerializer(t *testing.T) {
-	var addr = btcAddress{
-		pubKeyHash: [20]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19},
+	kdfp := &kdfParameters{
+		mem:   1024,
+		nIter: 5,
+	}
+	rand.Read(kdfp.salt[:])
+	key := Key([]byte("banana"), kdfp)
+	privKey := make([]byte, 32)
+	rand.Read(privKey)
+	addr, err := newBtcAddress(privKey, nil)
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+	err = addr.encrypt(key)
+	if err != nil {
+		t.Error(err.Error())
+		return
 	}
 
 	file, err := os.Create("btcaddress.bin")
@@ -46,15 +63,63 @@ func TestBtcAddressSerializer(t *testing.T) {
 	var readAddr btcAddress
 	_, err = readAddr.ReadFrom(file)
 	if err != nil {
-		spew.Dump(&readAddr)
 		t.Error(err.Error())
 		return
 	}
 
-	buf1, buf2 := new(bytes.Buffer), new(bytes.Buffer)
-	binary.Write(buf1, binary.LittleEndian, addr)
-	binary.Write(buf2, binary.LittleEndian, readAddr)
-	if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
+	if err = readAddr.unlock(key); err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	if !reflect.DeepEqual(addr, &readAddr) {
 		t.Error("Original and read btcAddress differ.")
+	}
+}
+
+func TestWalletCreationSerialization(t *testing.T) {
+	w1, err := NewWallet("banana wallet", "A wallet for testing.", []byte("banana"))
+	if err != nil {
+		t.Error("Error creating new wallet: " + err.Error())
+	}
+
+	file, err := os.Create("newwallet.bin")
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+	defer file.Close()
+
+	if _, err := w1.WriteTo(file); err != nil {
+		t.Error("Error writing new wallet: " + err.Error())
+		return
+	}
+
+	file.Seek(0, 0)
+
+	w2 := new(Wallet)
+	_, err = w2.ReadFrom(file)
+	if err != nil {
+		t.Error("Error reading newly written wallet: " + err.Error())
+		return
+	}
+
+	w1.Lock()
+	w2.Lock()
+
+	if err = w1.Unlock([]byte("banana")); err != nil {
+		t.Error("Decrypting original wallet failed: " + err.Error())
+		return
+	}
+
+	if err = w2.Unlock([]byte("banana")); err != nil {
+		t.Error("Decrypting newly read wallet failed: " + err.Error())
+		return
+	}
+
+	if !reflect.DeepEqual(w1, w2) {
+		t.Error("Created and read-in wallets do not match.")
+		spew.Dump(w1, w2)
+		return
 	}
 }

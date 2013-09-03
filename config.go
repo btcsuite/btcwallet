@@ -17,7 +17,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"github.com/conformal/go-flags"
 	"os"
@@ -34,6 +33,7 @@ const (
 
 var (
 	defaultConfigFile = filepath.Join(btcwalletHomeDir(), defaultConfigFilename)
+	defaultDataDir    = btcwalletHomeDir()
 )
 
 type config struct {
@@ -42,7 +42,7 @@ type config struct {
 	DebugLevel  string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	ConfigFile  string `short:"C" long:"configfile" description:"Path to configuration file"`
 	SvrPort     int    `short:"p" long:"serverport" description:"Port to serve frontend websocket connections on"`
-	WalletFile  string `short:"f" long:"walletfile" description:"Path to wallet file"`
+	DataDir     string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
 }
 
 // btcwalletHomeDir returns an OS appropriate home directory for btcwallet.
@@ -92,6 +92,7 @@ func loadConfig() (*config, []string, error) {
 		ConfigFile: defaultConfigFile,
 		BtcdPort:   defaultBtcdPort,
 		SvrPort:    defaultServerPort,
+		DataDir:    defaultDataDir,
 	}
 
 	// A config file in the current directory takes precedence.
@@ -141,9 +142,11 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// wallet file must be valid
-	if !fileExists(cfg.WalletFile) {
-		return &cfg, nil, errors.New("Wallet file does not exist.")
-	}
+	/*
+		if !fileExists(cfg.WalletFile) {
+			return &cfg, nil, errors.New("Wallet file does not exist.")
+		}
+	*/
 
 	return &cfg, remainingArgs, nil
 }

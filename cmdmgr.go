@@ -219,8 +219,11 @@ func GetAddressesByAccount(reply chan []byte, msg []byte) {
 	params := v["params"].([]interface{})
 
 	var result interface{}
-	if w := wallets[params[0].(string)]; w != nil {
-		result = w.GetActiveAddresses()
+	wallets.RLock()
+	w := wallets.m[params[0].(string)]
+	wallets.RUnlock()
+	if w != nil {
+		result = w.Wallet.GetActiveAddresses()
 	} else {
 		result = []interface{}{}
 	}
@@ -235,7 +238,10 @@ func GetNewAddress(reply chan []byte, msg []byte) {
 	json.Unmarshal(msg, &v)
 	params := v["params"].([]interface{})
 	if len(params) == 0 || params[0].(string) == "" {
-		if w := wallets[""]; w != nil {
+		wallets.RLock()
+		w := wallets.m[""]
+		wallets.RUnlock()
+		if w != nil {
 			addr := w.NextUnusedAddress()
 			ReplySuccess(reply, v["id"], addr)
 		}
@@ -257,7 +263,10 @@ func WalletIsLocked(reply chan []byte, msg []byte) {
 			return
 		}
 	}
-	if w := wallets[account]; w != nil {
+	wallets.RLock()
+	w := wallets.m[account]
+	wallets.RUnlock()
+	if w != nil {
 		result := w.IsLocked()
 		ReplySuccess(reply, v["id"], result)
 	} else {
@@ -272,7 +281,10 @@ func WalletIsLocked(reply chan []byte, msg []byte) {
 func WalletLock(reply chan []byte, msg []byte) {
 	var v map[string]interface{}
 	json.Unmarshal(msg, &v)
-	if w := wallets[""]; w != nil {
+	wallets.RLock()
+	w := wallets.m[""]
+	wallets.RUnlock()
+	if w != nil {
 		if err := w.Lock(); err != nil {
 			ReplyError(reply, v["id"], &WalletWrongEncState)
 		} else {
@@ -302,7 +314,10 @@ func WalletPassphrase(reply chan []byte, msg []byte) {
 		return
 	}
 
-	if w := wallets[""]; w != nil {
+	wallets.RLock()
+	w := wallets.m[""]
+	wallets.RUnlock()
+	if w != nil {
 		if err := w.Unlock([]byte(passphrase)); err != nil {
 			ReplyError(reply, v["id"], &WalletPassphraseIncorrect)
 			return
