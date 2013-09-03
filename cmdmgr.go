@@ -341,6 +341,7 @@ func CreateEncryptedWallet(reply chan []byte, msg []byte) {
 		Wallet: w,
 	}
 	wallets.Unlock()
+	ReplySuccess(reply, v["id"], nil)
 }
 
 // WalletIsLocked returns whether the wallet used by the specified
