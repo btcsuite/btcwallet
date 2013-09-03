@@ -136,6 +136,7 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 			return nil, err
 		}
 	}
+	defer wfile.Close()
 	if txfile, err = os.Open(txfilepath); err != nil {
 		if os.IsNotExist(err) {
 			if txfile, err = os.Create(txfilepath); err != nil {
@@ -145,6 +146,7 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 			return nil, err
 		}
 	}
+	defer txfile.Close()
 	if utxofile, err = os.Open(utxofilepath); err != nil {
 		if os.IsNotExist(err) {
 			if utxofile, err = os.Create(utxofilepath); err != nil {
@@ -154,6 +156,7 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 			return nil, err
 		}
 	}
+	defer utxofile.Close()
 
 	wlt := new(wallet.Wallet)
 	if _, err = wlt.ReadFrom(wfile); err != nil {
