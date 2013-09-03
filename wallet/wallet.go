@@ -380,7 +380,7 @@ func NewWallet(name, desc string, passphrase []byte) (*Wallet, error) {
 			watchingOnly:  false,
 		},
 		createDate: time.Now().Unix(),
-		//highestUsed:
+		highestUsed: -1,
 		kdfParams:      *kdfp,
 		keyGenerator:   *root,
 		addrMap:        make(map[[ripemd160.Size]byte]*btcAddress),
