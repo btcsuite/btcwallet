@@ -181,11 +181,6 @@ func BtcdHandler(ws *websocket.Conn) {
 		}
 	}()
 
-	// TODO(jrick): hook this up with addresses in wallet.
-	// reqTxsForAddress("addr")
-
-	reqUtxoForAddress("1PZ67BehXWbzoqkovph4Cyfiz9LiFfTUot")
-
 	for {
 		select {
 		case rply, ok := <-replies:
@@ -293,12 +288,18 @@ func ProcessBtcdNotificationReply(b []byte) {
 		case "btcd:blockdisconnected":
 			// TODO(jrick): rollback txs and utxos from removed block.
 
+		// TODO(jrick): Update btcd to send back recvtx replies with the
+		// same id as the requester.
 		case "btcd:recvtx":
 			log.Info("got recvtx (ignoring)")
 
+		// TODO(jrick): Update btcd to send back sendtx replies with the
+		// same id as the requester.
 		case "btcd:sendtx":
 			log.Info("got sendtx (ignoring)")
 
+		// TODO(jrick): Update btcd to send back utxo replies with the
+		// same id as the requester.
 		case "btcd:utxo":
 			result := m["result"].(map[string]interface{})
 			spew.Dump(result)
@@ -341,81 +342,4 @@ func ListenAndServe() error {
 	}
 
 	return nil
-}
-
-func reqTxsForAddress(addr string) {
-	for i := 0; i < 10; i++ {
-		seq.Lock()
-		n := seq.n
-		seq.n++
-		seq.Unlock()
-
-		id := fmt.Sprintf("btcwallet(%v)", n)
-		msg, err := btcjson.CreateMessageWithId("getblockhash", id, i)
-		if err != nil {
-			fmt.Println(msg)
-			panic(err)
-		}
-
-		replyHandlers.Lock()
-		replyHandlers.m[n] = func(result interface{}) bool {
-			fmt.Println(result)
-			return true
-		}
-		replyHandlers.Unlock()
-
-		btcdMsgs <- msg
-	}
-
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
-	m := &btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      fmt.Sprintf("btcwallet(%v)", n),
-		Method:  "rescanforutxo",
-		Params: []interface{}{
-			"17XhEvq9Nahdj7Xe1nv6oRe1tEmaHUuynH",
-		},
-	}
-	msg, err := json.Marshal(m)
-	if err != nil {
-		panic(err)
-	}
-
-	replyHandlers.Lock()
-	replyHandlers.m[n] = func(result interface{}) bool {
-		fmt.Println("result:", result)
-		return result == nil
-	}
-	replyHandlers.Unlock()
-
-	btcdMsgs <- msg
-}
-
-func reqUtxoForAddress(addr string) {
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
-	m := &btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      fmt.Sprintf("btcwallet(%d)", n),
-		Method:  "requestutxos",
-		Params: []interface{}{
-			addr,
-		},
-	}
-	msg, _ := json.Marshal(m)
-
-	replyHandlers.Lock()
-	replyHandlers.m[n] = func(result interface{}) bool {
-		return true
-	}
-	replyHandlers.Unlock()
-
-	btcdMsgs <- msg
 }
