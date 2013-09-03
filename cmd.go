@@ -64,13 +64,11 @@ func main() {
 	*/
 
 	// Open wallet
-	btcw, err := OpenWallet(cfg, "")
+	w, err := OpenWallet(cfg, "")
 	if err != nil {
 		log.Info(err.Error())
 	} else {
-		wallets.Lock()
-		wallets.m[""] = btcw
-		wallets.Unlock()
+		w.Track()
 	}
 
 	// Start HTTP server to listen and send messages to frontend and btcd
@@ -179,10 +177,14 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 		TxStore:   txs,
 	}
 
-	// Associate this wallet with default account.
-	wallets.Lock()
-	wallets.m[account] = w
-	wallets.Unlock()
-
 	return w, nil
+}
+
+func (w *BtcWallet) Track() {
+	wallets.Lock()
+	name := w.Name()
+	if wallets.m[name] == nil {
+		wallets.m[name] = w
+	}
+	wallets.Unlock()
 }

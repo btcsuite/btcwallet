@@ -421,6 +421,10 @@ func NewWallet(name, desc string, passphrase []byte) (*Wallet, error) {
 	return w, nil
 }
 
+func (w *Wallet) Name() string {
+	return string(w.name[:])
+}
+
 // ReadFrom reads data from a io.Reader and saves it to a Wallet,
 // returning the number of bytes read and any errors encountered.
 func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
