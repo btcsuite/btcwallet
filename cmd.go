@@ -23,6 +23,7 @@ import (
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
+	"github.com/conformal/btcwire"
 	"github.com/conformal/seelog"
 	"os"
 	"path/filepath"
@@ -244,7 +245,39 @@ func (w *BtcWallet) ReqUtxoForAddress(addr string) {
 
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}) bool {
-		// TODO(jrick)
+		v, ok := result.(map[string]interface{})
+		if !ok {
+			log.Error("UTXO Handler: Unexpected result type.")
+			return false
+		}
+		addr, ok1 := v["address"].(string)
+		height, ok2 := v["height"].(float64)
+		txhashResult, ok3 := v["txhash"].([]interface{})
+		amt, ok4 := v["amount"].(float64)
+		if !ok1 || !ok2 || !ok3 || !ok4 {
+			log.Error("UTXO Handler: Unexpected parameters.")
+			return false
+		}
+		txhash := UnmangleJsonByteSlice(txhashResult)
+
+		h, err := btcwire.NewShaHashFromStr(addr)
+		if err != nil {
+			log.Error("UTXO Handler: Unable to parse address hash from string.")
+			return false
+		}
+		u := &tx.Utxo{
+			Amt:    int64(amt),
+			Height: int64(height),
+		}
+		copy(u.TxHash[:], txhash)
+		copy(u.Addr[:], h[:])
+
+		w.UtxoStore.Lock()
+		// All newly saved utxos are first classified as unconfirmed.
+		utxos := w.UtxoStore.s.Unconfirmed
+		w.UtxoStore.s.Unconfirmed = append(utxos, u)
+		w.UtxoStore.dirty = true
+		w.UtxoStore.Unlock()
 
 		// Never remove this handler.
 		return false
@@ -278,4 +311,15 @@ func (w *BtcWallet) ReqTxsForAddress(addr string) {
 	replyHandlers.Unlock()
 
 	btcdMsgs <- msg
+}
+
+// Marshalling and unmarshalling byte arrays or slices results in ugly
+// []interface{} slices where each interface{} is a float64.  This
+// function unmangles this to return a byte slice.
+func UnmangleJsonByteSlice(mangled []interface{}) (unmangled []byte) {
+	unmangled = make([]byte, len(mangled))
+	for i, _ := range mangled[:] {
+		unmangled[i] = byte(mangled[i].(float64))
+	}
+	return unmangled
 }

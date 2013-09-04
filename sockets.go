@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwire"
-	"github.com/davecgh/go-spew/spew"
 	"net/http"
 	"sync"
 )
@@ -269,11 +268,8 @@ func ProcessBtcdNotificationReply(b []byte) {
 		switch idStr {
 		case "btcd:blockconnected":
 			result := m["result"].(map[string]interface{})
-			hashResult := result["hash"].([]interface{})
 			hash := new(btcwire.ShaHash)
-			for i, _ := range hash[:] {
-				hash[i] = byte(hashResult[i].(float64))
-			}
+			copy(hash[:], UnmangleJsonByteSlice(result["hash"].([]interface{})))
 			height := int64(result["height"].(float64))
 
 			// TODO(jrick): update TxStore and UtxoStore with new hash
