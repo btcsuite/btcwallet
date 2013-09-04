@@ -43,6 +43,7 @@ type UtxoStore struct {
 }
 
 type Utxo struct {
+	Addr   [ripemd160.Size]byte
 	TxHash btcwire.ShaHash
 	Amt    int64 // Measured in Satoshis
 	Height int64
@@ -180,6 +181,7 @@ func (u *UtxoStore) WriteTo(w io.Writer) (n int64, err error) {
 // Each field is read little endian.
 func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 	datas := []interface{}{
+		&u.Addr,
 		&u.TxHash,
 		&u.Amt,
 		&u.Height,
@@ -203,6 +205,7 @@ func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 // Each field is written little endian.
 func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
 	datas := []interface{}{
+		&u.Addr,
 		&u.TxHash,
 		&u.Amt,
 		&u.Height,
