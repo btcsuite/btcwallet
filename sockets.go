@@ -288,22 +288,6 @@ func ProcessBtcdNotificationReply(b []byte) {
 		case "btcd:blockdisconnected":
 			// TODO(jrick): rollback txs and utxos from removed block.
 
-		// TODO(jrick): Update btcd to send back recvtx replies with the
-		// same id as the requester.
-		case "btcd:recvtx":
-			log.Info("got recvtx (ignoring)")
-
-		// TODO(jrick): Update btcd to send back sendtx replies with the
-		// same id as the requester.
-		case "btcd:sendtx":
-			log.Info("got sendtx (ignoring)")
-
-		// TODO(jrick): Update btcd to send back utxo replies with the
-		// same id as the requester.
-		case "btcd:utxo":
-			result := m["result"].(map[string]interface{})
-			spew.Dump(result)
-
 		default:
 			frontendNotificationMaster <- b
 		}
