@@ -239,7 +239,7 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 	m := &btcjson.Message{
 		Jsonrpc: "1.0",
 		Id:      fmt.Sprintf("btcwallet(%d)", n),
-		Method:  "requesttxs",
+		Method:  "notifynewtxs",
 		Params:  []interface{}{addr},
 	}
 	msg, _ := json.Marshal(m)
