@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
@@ -190,7 +191,7 @@ func (w *BtcWallet) Track() {
 	wallets.Unlock()
 
 	for _, addr := range w.GetActiveAddresses() {
-		go w.ReqUtxoForAddress(addr)
+		go w.ReqNewTxsForAddress(addr)
 	}
 }
 
@@ -229,65 +230,7 @@ func (w *BtcWallet) RescanForAddress(addr string, blocks ...int) {
 	btcdMsgs <- msg
 }
 
-func (w *BtcWallet) ReqUtxoForAddress(addr string) {
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
-	m := &btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      fmt.Sprintf("btcwallet(%d)", n),
-		Method:  "requestutxos",
-		Params:  []interface{}{addr},
-	}
-	msg, _ := json.Marshal(m)
-
-	replyHandlers.Lock()
-	replyHandlers.m[n] = func(result interface{}) bool {
-		v, ok := result.(map[string]interface{})
-		if !ok {
-			log.Error("UTXO Handler: Unexpected result type.")
-			return false
-		}
-		addr, ok1 := v["address"].(string)
-		height, ok2 := v["height"].(float64)
-		txhashResult, ok3 := v["txhash"].([]interface{})
-		amt, ok4 := v["amount"].(float64)
-		if !ok1 || !ok2 || !ok3 || !ok4 {
-			log.Error("UTXO Handler: Unexpected parameters.")
-			return false
-		}
-		txhash := UnmangleJsonByteSlice(txhashResult)
-
-		h, err := btcwire.NewShaHashFromStr(addr)
-		if err != nil {
-			log.Error("UTXO Handler: Unable to parse address hash from string.")
-			return false
-		}
-		u := &tx.Utxo{
-			Amt:    int64(amt),
-			Height: int64(height),
-		}
-		copy(u.TxHash[:], txhash)
-		copy(u.Addr[:], h[:])
-
-		w.UtxoStore.Lock()
-		// All newly saved utxos are first classified as unconfirmed.
-		utxos := w.UtxoStore.s.Unconfirmed
-		w.UtxoStore.s.Unconfirmed = append(utxos, u)
-		w.UtxoStore.dirty = true
-		w.UtxoStore.Unlock()
-
-		// Never remove this handler.
-		return false
-	}
-	replyHandlers.Unlock()
-
-	btcdMsgs <- msg
-}
-
-func (w *BtcWallet) ReqTxsForAddress(addr string) {
+func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 	seq.Lock()
 	n := seq.n
 	seq.n++
@@ -303,7 +246,90 @@ func (w *BtcWallet) ReqTxsForAddress(addr string) {
 
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}) bool {
-		// TODO(jrick)
+		// TODO(jrick): btcd also sends the block hash in the reply.
+		// Do we want it saved as well?
+		v, ok := result.(map[string]interface{})
+		if !ok {
+			log.Error("Tx Handler: Unexpected result type.")
+			return false
+		}
+		sender58, ok := v["sender"].(string)
+		if !ok {
+			log.Error("Tx Handler: Unspecified sender.")
+			return false
+		}
+		receiver58, ok := v["receiver"].(string)
+		if !ok {
+			log.Error("Tx Handler: Unspecified receiver.")
+			return false
+		}
+		height, ok := v["height"].(float64)
+		if !ok {
+			log.Error("Tx Handler: Unspecified height.")
+			return false
+		}
+		txhashBE, ok := v["txhash"].(string)
+		if !ok {
+			log.Error("Tx Handler: Unspecified transaction hash.")
+			return false
+		}
+		amt, ok := v["amount"].(float64)
+		if !ok {
+			log.Error("Tx Handler: Unspecified amount.")
+			return false
+		}
+		spent, ok := v["spent"].(bool)
+		if !ok {
+			log.Error("Tx Handler: Unspecified spent field.")
+			return false
+		}
+
+		// btcd sends the tx  hashe as a BE string.  Convert to a
+		// LE ShaHash.
+		txhash, err := btcwire.NewShaHashFromStr(txhashBE)
+		if err != nil {
+			log.Error("Tx Handler: Tx hash string cannot be parsed: " + err.Error())
+			return false
+		}
+
+		sender := btcutil.Base58Decode(sender58)
+		receiver := btcutil.Base58Decode(receiver58)
+
+		go func() {
+			t := &tx.RecvTx{
+				Amt: int64(amt),
+			}
+			copy(t.TxHash[:], txhash[:])
+			copy(t.SenderAddr[:], sender)
+			copy(t.ReceiverAddr[:], receiver)
+
+			w.TxStore.Lock()
+			txs := w.TxStore.s
+			w.TxStore.s = append(txs, t)
+			w.TxStore.dirty = true
+			w.TxStore.Unlock()
+		}()
+
+		go func() {
+			// Do not add output to utxo store if spent.
+			if spent {
+				return
+			}
+
+			u := &tx.Utxo{
+				Amt:    int64(amt),
+				Height: int64(height),
+			}
+			copy(u.TxHash[:], txhash[:])
+			copy(u.Addr[:], receiver)
+
+			w.UtxoStore.Lock()
+			// All newly saved utxos are first classified as unconfirmed.
+			utxos := w.UtxoStore.s.Unconfirmed
+			w.UtxoStore.s.Unconfirmed = append(utxos, u)
+			w.UtxoStore.dirty = true
+			w.UtxoStore.Unlock()
+		}()
 
 		// Never remove this handler.
 		return false
