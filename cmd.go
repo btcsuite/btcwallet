@@ -320,7 +320,7 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 				Amt:    int64(amt),
 				Height: int64(height),
 			}
-			copy(u.TxHash[:], txhash[:])
+			copy(u.Out.Hash[:], txhash[:])
 			copy(u.Addr[:], receiver)
 
 			w.UtxoStore.Lock()
