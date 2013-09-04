@@ -91,10 +91,13 @@ func TestUtxoWriteRead(t *testing.T) {
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 			16, 17, 18, 19,
 		},
-		TxHash: [btcwire.HashSize]byte{
-			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
-			30, 31,
+		Out: OutPoint{
+			Hash: [btcwire.HashSize]byte{
+				0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+				16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+				30, 31,
+			},
+			Index: 1,
 		},
 		Amt:    69,
 		Height: 1337,
@@ -139,20 +142,22 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 	store1 := new(UtxoStore)
 	for i := 0; i < 10; i++ {
 		utxo := new(Utxo)
-		for j, _ := range utxo.TxHash[:] {
-			utxo.TxHash[j] = byte(i)
+		for j, _ := range utxo.Out.Hash[:] {
+			utxo.Out.Hash[j] = byte(i)
 		}
-		utxo.Amt = int64(i + 1)
-		utxo.Height = int64(i + 2)
+		utxo.Out.Index = uint32(i + 1)
+		utxo.Amt = int64(i + 2)
+		utxo.Height = int64(i + 3)
 		store1.Confirmed = append(store1.Confirmed, utxo)
 	}
 	for i := 10; i < 20; i++ {
 		utxo := new(Utxo)
-		for j, _ := range utxo.TxHash[:] {
-			utxo.TxHash[j] = byte(i)
+		for j, _ := range utxo.Out.Hash[:] {
+			utxo.Out.Hash[j] = byte(i)
 		}
-		utxo.Amt = int64(i + 1)
-		utxo.Height = int64(i + 2)
+		utxo.Out.Index = uint32(i + 1)
+		utxo.Amt = int64(i + 2)
+		utxo.Height = int64(i + 3)
 		store1.Unconfirmed = append(store1.Unconfirmed, utxo)
 	}
 
@@ -197,9 +202,11 @@ func TestRecvTxWriteRead(t *testing.T) {
 	n, err := recvtx.WriteTo(bufWriter)
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	if int(n) != binary.Size(recvtx) {
 		t.Error("Writing Tx: Size Mismatch")
+		return
 	}
 	txBytes := bufWriter.Bytes()
 
@@ -207,13 +214,16 @@ func TestRecvTxWriteRead(t *testing.T) {
 	n, err = tx.ReadFrom(bytes.NewBuffer(txBytes))
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	if int(n) != binary.Size(tx) {
 		t.Error("Reading Tx: Size Mismatch")
+		return
 	}
 
 	if !reflect.DeepEqual(recvtx, tx) {
 		t.Error("Txs do not match.")
+		return
 	}
 
 	truncatedReadBuf := bytes.NewBuffer(txBytes)
@@ -221,9 +231,11 @@ func TestRecvTxWriteRead(t *testing.T) {
 	n, err = tx.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
 		t.Error("Expected err = io.EOF reading from truncated buffer.")
+		return
 	}
 	if n != btcwire.HashSize {
 		t.Error("Incorrect number of bytes read from truncated buffer.")
+		return
 	}
 }
 
@@ -232,6 +244,7 @@ func TestSendTxWriteRead(t *testing.T) {
 	n1, err := sendtx.WriteTo(bufWriter)
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	txBytes := bufWriter.Bytes()
 
@@ -239,13 +252,16 @@ func TestSendTxWriteRead(t *testing.T) {
 	n2, err := tx.ReadFrom(bytes.NewBuffer(txBytes))
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	if n1 != n2 {
 		t.Error("Number of bytes written and read mismatch.")
+		return
 	}
 
 	if !reflect.DeepEqual(sendtx, tx) {
 		t.Error("Txs do not match.")
+		return
 	}
 
 	truncatedReadBuf := bytes.NewBuffer(txBytes)
@@ -253,9 +269,11 @@ func TestSendTxWriteRead(t *testing.T) {
 	n, err := tx.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
 		t.Error("Expected err = io.EOF reading from truncated buffer.")
+		return
 	}
 	if n != btcwire.HashSize {
 		t.Error("Incorrect number of bytes read from truncated buffer.")
+		return
 	}
 }
 
@@ -267,6 +285,7 @@ func TestTxStoreWriteRead(t *testing.T) {
 	n1, err := store.WriteTo(bufWriter)
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	txsBytes := bufWriter.Bytes()
 
@@ -274,14 +293,17 @@ func TestTxStoreWriteRead(t *testing.T) {
 	n2, err := txs.ReadFrom(bytes.NewBuffer(txsBytes))
 	if err != nil {
 		t.Error(err)
+		return
 	}
 	if n1 != n2 {
 		t.Error("Number of bytes written and read mismatch.")
+		return
 	}
 
 	if !reflect.DeepEqual(store, txs) {
 		spew.Dump(store, txs)
 		t.Error("TxStores do not match.")
+		return
 	}
 
 	truncatedReadBuf := bytes.NewBuffer(txsBytes)
@@ -289,8 +311,10 @@ func TestTxStoreWriteRead(t *testing.T) {
 	n, err := txs.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
 		t.Error("Expected err = io.EOF reading from truncated buffer.")
+		return
 	}
 	if n != 50 {
 		t.Error("Incorrect number of bytes read from truncated buffer.")
+		return
 	}
 }

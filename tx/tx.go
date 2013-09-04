@@ -44,10 +44,12 @@ type UtxoStore struct {
 
 type Utxo struct {
 	Addr   [ripemd160.Size]byte
-	TxHash btcwire.ShaHash
+	Out OutPoint
 	Amt    int64 // Measured in Satoshis
 	Height int64
 }
+
+type OutPoint btcwire.OutPoint
 
 // TxStore is a slice holding RecvTx and SendTx pointers.
 type TxStore []interface{}
@@ -176,15 +178,69 @@ func (u *UtxoStore) WriteTo(w io.Writer) (n int64, err error) {
 // ReadFrom satisifies the io.ReaderFrom interface.  A Utxo is read
 // from r with the format:
 //
-//  [TxHash (32 bytes), Amt (8 bytes), Height (8 bytes)]
+//  [Addr (20 bytes), Out (36 bytes), Amt (8 bytes), Height (8 bytes)]
 //
 // Each field is read little endian.
 func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 	datas := []interface{}{
 		&u.Addr,
-		&u.TxHash,
+		&u.Out,
 		&u.Amt,
 		&u.Height,
+	}
+	var read int64
+	for _, data := range datas {
+		if rf, ok := data.(io.ReaderFrom); ok {
+			read, err = rf.ReadFrom(r)
+		} else {
+			read, err = binaryRead(r, binary.LittleEndian, data)
+		}
+		if err != nil {
+			return n + read, err
+		}
+		n += read
+	}
+	return n, nil
+}
+
+// WriteTo satisifies the io.WriterTo interface.  A Utxo is written to
+// w in the format:
+//
+//  [Addr (20 bytes), Out (36 bytes), Amt (8 bytes), Height (8 bytes)]
+//
+// Each field is written little endian.
+func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
+	datas := []interface{}{
+		&u.Addr,
+		&u.Out,
+		&u.Amt,
+		&u.Height,
+	}
+	var written int64
+	for _, data := range datas {
+		if wt, ok := data.(io.WriterTo); ok {
+			written, err = wt.WriteTo(w)
+		} else {
+			written, err = binaryWrite(w, binary.LittleEndian, data)
+		}
+		if err != nil {
+			return n + written, err
+		}
+		n += written
+	}
+	return n, nil
+}
+
+// ReadFrom satisifies the io.ReaderFrom interface.  A OutPoint is read
+// from r with the format:
+//
+//  [Hash (32 bytes), Index (4 bytes)]
+//
+// Each field is read little endian.
+func (o *OutPoint) ReadFrom(r io.Reader) (n int64, err error) {
+	datas := []interface{}{
+		&o.Hash,
+		&o.Index,
 	}
 	var read int64
 	for _, data := range datas {
@@ -197,18 +253,16 @@ func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 	return n, nil
 }
 
-// WriteTo satisifies the io.WriterTo interface.  A Utxo is written to
-// w in the format:
+// WriteTo satisifies the io.WriterTo interface.  A OutPoit is written
+// to w in the format:
 //
-//  [TxHash (32 bytes), Amt (8 bytes), Height (8 bytes)]
+//  [Hash (32 bytes), Index (4 bytes)]
 //
 // Each field is written little endian.
-func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
+func (o *OutPoint) WriteTo(w io.Writer) (n int64, err error) {
 	datas := []interface{}{
-		&u.Addr,
-		&u.TxHash,
-		&u.Amt,
-		&u.Height,
+		&o.Hash,
+		&o.Index,
 	}
 	var written int64
 	for _, data := range datas {
