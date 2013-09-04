@@ -273,6 +273,11 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 			log.Error("Tx Handler: Unspecified transaction hash.")
 			return false
 		}
+		index, ok := v["index"].(float64)
+		if !ok {
+			log.Error("Tx Handler: Unspecified transaction index.")
+			return false
+		}
 		amt, ok := v["amount"].(float64)
 		if !ok {
 			log.Error("Tx Handler: Unspecified amount.")
@@ -321,6 +326,7 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 				Height: int64(height),
 			}
 			copy(u.Out.Hash[:], txhash[:])
+			u.Out.Index = uint32(index)
 			copy(u.Addr[:], receiver)
 
 			w.UtxoStore.Lock()
