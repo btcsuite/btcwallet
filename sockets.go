@@ -313,6 +313,13 @@ func ListenAndServe() error {
 
 	log.Info("Established connection to btcd.")
 
+	// Begin tracking wallets.
+	wallets.RLock()
+	for _, w := range wallets.m {
+		w.Track()
+	}
+	wallets.RUnlock()
+
 	// We'll need to duplicate replies to frontends to each frontend.
 	// Replies are sent to frontendReplyMaster, and duplicated to each valid
 	// channel in frontendReplySet.  This runs a goroutine to duplicate

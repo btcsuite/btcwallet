@@ -60,7 +60,9 @@ func main() {
 	if err != nil {
 		log.Info(err.Error())
 	} else {
-		w.Track()
+		wallets.Lock()
+		wallets.m[""] = w
+		wallets.Unlock()
 	}
 
 	// Start HTTP server to listen and send messages to frontend and btcd
@@ -189,26 +191,9 @@ func (w *BtcWallet) Track() {
 	seq.n++
 	seq.Unlock()
 
-	// Use goroutines and a WaitGroup to prevent unnecessary waiting for
-	// released locks.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		wallets.Lock()
-		name := w.Name()
-		if wallets.m[name] == nil {
-			wallets.m[name] = w
-		}
-		wallets.Unlock()
-	}()
-	go func() {
-		defer wg.Done()
-		w.mtx.Lock()
-		w.NewBlockTxSeqN = n
-		w.mtx.Unlock()
-	}()
-	wg.Wait()
+	w.mtx.Lock()
+	w.NewBlockTxSeqN = n
+	w.mtx.Unlock()
 
 	replyHandlers.Lock()
 	replyHandlers.m[n] = w.NewBlockTxHandler
