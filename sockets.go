@@ -33,7 +33,8 @@ var (
 	// Channel to close to notify that connection to btcd has been lost.
 	btcdDisconnected = make(chan int)
 
-	// Channel to send messages btcwallet does not understand to btcd.
+	// Channel to send messages btcwallet does not understand and requests
+	// from btcwallet to btcd.
 	btcdMsgs = make(chan []byte, 100)
 
 	// Adds a frontend listener channel
@@ -51,9 +52,9 @@ var (
 	// handler function to route the reply to.
 	replyHandlers = struct {
 		sync.Mutex
-		m map[uint64]func(interface{}) bool
+		m map[uint64]func(interface{}, interface{}) bool
 	}{
-		m: make(map[uint64]func(interface{}) bool),
+		m: make(map[uint64]func(interface{}, interface{}) bool),
 	}
 )
 
@@ -231,7 +232,7 @@ func ProcessBtcdNotificationReply(b []byte) {
 		replyHandlers.Unlock()
 		if f != nil {
 			go func() {
-				if f(m["result"]) {
+				if f(m["result"], m["error"]) {
 					replyHandlers.Lock()
 					delete(replyHandlers.m, routeId)
 					replyHandlers.Unlock()

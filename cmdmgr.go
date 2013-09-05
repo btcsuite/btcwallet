@@ -245,9 +245,17 @@ func GetBalance(reply chan []byte, msg []byte) {
 	json.Unmarshal(msg, &v)
 	params := v["params"].([]interface{})
 	var wname string
+	conf := 1
 	if len(params) > 0 {
 		if s, ok := params[0].(string); ok {
 			wname = s
+		} else {
+			ReplyError(reply, v["id"], &InvalidParams)
+		}
+	}
+	if len(params) > 1 {
+		if f, ok := params[1].(float64); ok {
+			conf = int(f)
 		} else {
 			ReplyError(reply, v["id"], &InvalidParams)
 		}
@@ -258,7 +266,7 @@ func GetBalance(reply chan []byte, msg []byte) {
 	wallets.RUnlock()
 	var result interface{}
 	if w != nil {
-		result = 0 // TODO(jrick)
+		result = w.CalculateBalance(conf)
 		ReplySuccess(reply, v["id"], result)
 	} else {
 		e := WalletInvalidAccountName

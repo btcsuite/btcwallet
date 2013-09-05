@@ -32,13 +32,23 @@ import (
 	"time"
 )
 
+const (
+	satoshiPerBTC = 100000000
+)
+
 var (
 	ErrNoWallet = errors.New("Wallet file does not exist.")
 )
 
 var (
-	log     seelog.LoggerInterface = seelog.Default
-	cfg     *config
+	log       seelog.LoggerInterface = seelog.Default
+	cfg       *config
+	curHeight = struct {
+		sync.RWMutex
+		h int64
+	}{
+		h: btcutil.BlockHeightUnknown,
+	}
 	wallets = struct {
 		sync.RWMutex
 		m map[string]*BtcWallet
@@ -185,6 +195,82 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 	return w, nil
 }
 
+func getCurHeight() (height int64) {
+	curHeight.RLock()
+	height = curHeight.h
+	curHeight.RUnlock()
+	if height != btcutil.BlockHeightUnknown {
+		return height
+	} else {
+		seq.Lock()
+		n := seq.n
+		seq.n++
+		seq.Unlock()
+
+		m, err := btcjson.CreateMessageWithId("getblockcount",
+			fmt.Sprintf("btcwallet(%v)", n))
+		if err != nil {
+			// Can't continue.
+			return btcutil.BlockHeightUnknown
+		}
+
+		c := make(chan int64)
+
+		replyHandlers.Lock()
+		replyHandlers.m[n] = func(result, e interface{}) bool {
+			if e != nil {
+				c <- btcutil.BlockHeightUnknown
+				return true
+			}
+			if balance, ok := result.(float64); ok {
+				c <- int64(balance)
+			} else {
+				c <- btcutil.BlockHeightUnknown
+			}
+			return true
+		}
+		replyHandlers.Unlock()
+
+		// send message
+		btcdMsgs <- m
+
+		// Block until reply is ready.
+		height = <-c
+		curHeight.Lock()
+		if height > curHeight.h {
+			curHeight.h = height
+		} else {
+			height = curHeight.h
+		}
+		curHeight.Unlock()
+
+		return height
+	}
+}
+
+func (w *BtcWallet) CalculateBalance(confirmations int) float64 {
+	var bal int64 // Measured in satoshi
+
+	height := getCurHeight()
+	if height == btcutil.BlockHeightUnknown {
+		return 0.
+	}
+
+	w.UtxoStore.RLock()
+	for _, u := range w.UtxoStore.s.Confirmed {
+		if int(height-u.Height) >= confirmations {
+			bal += u.Amt
+		}
+	}
+	for _, u := range w.UtxoStore.s.Unconfirmed {
+		if int(height-u.Height) >= confirmations {
+			bal += u.Amt
+		}
+	}
+	w.UtxoStore.RUnlock()
+	return float64(bal) / satoshiPerBTC
+}
+
 func (w *BtcWallet) Track() {
 	seq.Lock()
 	n := seq.n
@@ -225,7 +311,7 @@ func (w *BtcWallet) RescanForAddress(addr string, blocks ...int) {
 	msg, _ := json.Marshal(m)
 
 	replyHandlers.Lock()
-	replyHandlers.m[n] = func(result interface{}) bool {
+	replyHandlers.m[n] = func(result, e interface{}) bool {
 		// TODO(jrick)
 
 		// btcd returns a nil result when the rescan is complete.
@@ -254,12 +340,26 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 	btcdMsgs <- msg
 }
 
-func (w *BtcWallet) NewBlockTxHandler(result interface{}) bool {
+func (w *BtcWallet) NewBlockTxHandler(result, e interface{}) bool {
+	if e != nil {
+		if v, ok := e.(map[string]interface{}); ok {
+			if msg, ok := v["message"]; ok {
+				log.Errorf("Tx Handler: Error received from btcd: %s", msg)
+				return false
+			}
+		}
+		log.Errorf("Tx Handler: Error is non-nil but cannot be parsed.")
+	}
+
 	// TODO(jrick): btcd also sends the block hash in the reply.
 	// Do we want it saved as well?
 	v, ok := result.(map[string]interface{})
 	if !ok {
-		log.Error("Tx Handler: Unexpected result type.")
+		// The first result sent from btcd is nil.  This could be used to
+		// indicate that the request for notifications succeeded.
+		if result != nil {
+			log.Errorf("Tx Handler: Unexpected result type %T.", result)
+		}
 		return false
 	}
 	sender58, ok := v["sender"].(string)
