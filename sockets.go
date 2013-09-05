@@ -268,11 +268,16 @@ func ProcessBtcdNotificationReply(b []byte) {
 		switch idStr {
 		case "btcd:blockconnected":
 			result := m["result"].(map[string]interface{})
-			hash := new(btcwire.ShaHash)
-			copy(hash[:], UnmangleJsonByteSlice(result["hash"].([]interface{})))
+			hashBE := m["hash"].(string)
+			hash, err := btcwire.NewShaHashFromStr(hashBE)
+			if err != nil {
+				log.Error("btcd:blockconnected handler: Invalid hash string")
+				return
+			}
 			height := int64(result["height"].(float64))
 
 			// TODO(jrick): update TxStore and UtxoStore with new hash
+			_ = hash
 			var id interface{} = "btcwallet:newblockchainheight"
 			msgRaw := &btcjson.Reply{
 				Result: height,
