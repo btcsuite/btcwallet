@@ -272,7 +272,7 @@ func ProcessBtcdNotificationReply(b []byte) {
 		switch idStr {
 		case "btcd:blockconnected":
 			result := m["result"].(map[string]interface{})
-			hashBE := m["hash"].(string)
+			hashBE := result["hash"].(string)
 			hash, err := btcwire.NewShaHashFromStr(hashBE)
 			if err != nil {
 				log.Error("btcd:blockconnected handler: Invalid hash string")
