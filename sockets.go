@@ -319,7 +319,7 @@ func ListenAndServe() error {
 	// requests for each channel in the set.
 	go frontendListenerDuplicator()
 
-	// XXX(jrick): We need some sort of authentication before websocket
+	// TODO(jrick): We need some sort of authentication before websocket
 	// connections are allowed, and perhaps TLS on the server as well.
 	http.Handle("/frontend", websocket.Handler(frontendReqsNotifications))
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", cfg.SvrPort), nil); err != nil {
