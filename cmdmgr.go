@@ -336,10 +336,22 @@ func CreateEncryptedWallet(reply chan []byte, msg []byte) {
 		return
 	}
 
-	wallets.Lock()
-	wallets.m[wname] = &BtcWallet{
-		Wallet: w,
+	// Grab a new unique sequence number for tx notifications in new blocks.
+	seq.Lock()
+	n := seq.n
+	seq.n++
+	seq.Unlock()
+
+	bw := &BtcWallet{
+		Wallet:         w,
+		NewBlockTxSeqN: n,
 	}
+	// TODO(jrick): only begin tracking wallet if btcwallet is already
+	// connected to btcd.
+	bw.Track()
+
+	wallets.Lock()
+	wallets.m[wname] = bw
 	wallets.Unlock()
 	ReplySuccess(reply, v["id"], nil)
 }

@@ -45,6 +45,10 @@ var (
 	// Messages sent to this channel are sent to each connected frontend.
 	frontendNotificationMaster = make(chan []byte, 100)
 
+	// replyHandlers maps between a sequence number (passed as part of
+	// the JSON Id field) and a function to handle a reply or notification
+	// from btcd.  As requests are received, this map is checked for a
+	// handler function to route the reply to.
 	replyHandlers = struct {
 		sync.Mutex
 		m map[uint64]func(interface{}) bool

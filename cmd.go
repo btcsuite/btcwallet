@@ -73,7 +73,7 @@ func main() {
 			log.Info("Unable to connect to btcd. Retrying in 5 seconds.")
 			time.Sleep(5 * time.Second)
 		} else if err != nil {
-			log.Info(err.Error())
+			log.Error(err)
 			break
 		}
 	}
