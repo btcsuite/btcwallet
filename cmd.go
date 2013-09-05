@@ -113,10 +113,10 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 		if os.IsNotExist(err) {
 			// Attempt data directory creation
 			if err = os.MkdirAll(wdir, 0700); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("Cannot create data directory:", err)
 			}
 		} else {
-			return nil, err
+			return nil, fmt.Errorf("Error checking data directory:", err)
 		}
 	} else {
 		if !fi.IsDir() {
@@ -133,44 +133,44 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 			// Must create and save wallet first.
 			return nil, ErrNoWallet
 		} else {
-			return nil, err
+			return nil, fmt.Errorf("Cannot open wallet file:", err)
 		}
 	}
 	defer wfile.Close()
 	if txfile, err = os.Open(txfilepath); err != nil {
 		if os.IsNotExist(err) {
 			if txfile, err = os.Create(txfilepath); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("Cannot create tx file:", err)
 			}
 		} else {
-			return nil, err
+			return nil, fmt.Errorf("Cannot open tx file:", err)
 		}
 	}
 	defer txfile.Close()
 	if utxofile, err = os.Open(utxofilepath); err != nil {
 		if os.IsNotExist(err) {
 			if utxofile, err = os.Create(utxofilepath); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("Cannot create utxo file:", err)
 			}
 		} else {
-			return nil, err
+			return nil, fmt.Errorf("Cannot open utxo file:", err)
 		}
 	}
 	defer utxofile.Close()
 
 	wlt := new(wallet.Wallet)
 	if _, err = wlt.ReadFrom(wfile); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Cannot read wallet:", err)
 	}
 
 	var txs tx.TxStore
 	if _, err = txs.ReadFrom(txfile); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Cannot read tx file:", err)
 	}
 
 	var utxos tx.UtxoStore
 	if _, err = utxos.ReadFrom(utxofile); err != nil {
-
+		return nil, fmt.Errorf("Cannot read utxo file:", err)
 	}
 
 	w := &BtcWallet{
