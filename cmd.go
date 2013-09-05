@@ -344,14 +344,3 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 
 	btcdMsgs <- msg
 }
-
-// Marshalling and unmarshalling byte arrays or slices results in ugly
-// []interface{} slices where each interface{} is a float64.  This
-// function unmangles this to return a byte slice.
-func UnmangleJsonByteSlice(mangled []interface{}) (unmangled []byte) {
-	unmangled = make([]byte, len(mangled))
-	for i, _ := range mangled[:] {
-		unmangled[i] = byte(mangled[i].(float64))
-	}
-	return unmangled
-}
