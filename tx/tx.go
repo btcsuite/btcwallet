@@ -44,19 +44,22 @@ type UtxoStore struct {
 
 type Utxo struct {
 	Addr   [ripemd160.Size]byte
-	Out OutPoint
-	Amt    int64 // Measured in Satoshis
+	Out    OutPoint
+	Subscript PKScript
+	Amt    uint64 // Measured in Satoshis
 	Height int64
 }
 
 type OutPoint btcwire.OutPoint
+
+type PKScript []byte
 
 // TxStore is a slice holding RecvTx and SendTx pointers.
 type TxStore []interface{}
 
 type RecvTx struct {
 	TxHash       btcwire.ShaHash
-	Amt          int64 // Measured in Satoshis
+	Amt          uint64 // Measured in Satoshis
 	SenderAddr   [ripemd160.Size]byte
 	ReceiverAddr [ripemd160.Size]byte
 }
@@ -67,7 +70,7 @@ type SendTx struct {
 	SenderAddr    [ripemd160.Size]byte
 	ReceiverAddrs []struct {
 		Addr [ripemd160.Size]byte
-		Amt  int64 // Measured in Satoshis
+		Amt  uint64 // Measured in Satoshis
 	}
 }
 
@@ -178,13 +181,14 @@ func (u *UtxoStore) WriteTo(w io.Writer) (n int64, err error) {
 // ReadFrom satisifies the io.ReaderFrom interface.  A Utxo is read
 // from r with the format:
 //
-//  [Addr (20 bytes), Out (36 bytes), Amt (8 bytes), Height (8 bytes)]
+//  [Addr (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes)]
 //
 // Each field is read little endian.
 func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 	datas := []interface{}{
 		&u.Addr,
 		&u.Out,
+		&u.Subscript,
 		&u.Amt,
 		&u.Height,
 	}
@@ -206,13 +210,14 @@ func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 // WriteTo satisifies the io.WriterTo interface.  A Utxo is written to
 // w in the format:
 //
-//  [Addr (20 bytes), Out (36 bytes), Amt (8 bytes), Height (8 bytes)]
+//  [Addr (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes)]
 //
 // Each field is written little endian.
 func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
 	datas := []interface{}{
 		&u.Addr,
 		&u.Out,
+		&u.Subscript,
 		&u.Amt,
 		&u.Height,
 	}
@@ -231,7 +236,7 @@ func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
 	return n, nil
 }
 
-// ReadFrom satisifies the io.ReaderFrom interface.  A OutPoint is read
+// ReadFrom satisifies the io.ReaderFrom interface.  An OutPoint is read
 // from r with the format:
 //
 //  [Hash (32 bytes), Index (4 bytes)]
@@ -253,7 +258,7 @@ func (o *OutPoint) ReadFrom(r io.Reader) (n int64, err error) {
 	return n, nil
 }
 
-// WriteTo satisifies the io.WriterTo interface.  A OutPoit is written
+// WriteTo satisifies the io.WriterTo interface.  An OutPoint is written
 // to w in the format:
 //
 //  [Hash (32 bytes), Index (4 bytes)]
@@ -272,6 +277,55 @@ func (o *OutPoint) WriteTo(w io.Writer) (n int64, err error) {
 		}
 		n += written
 	}
+	return n, nil
+}
+
+// ReadFrom satisifies the io.ReaderFrom interface.  A PKScript is read
+// from r with the format:
+//
+//  [Length (4 byte unsigned integer), ScriptBytes (Length bytes)]
+//
+// Length is read little endian.
+func (s *PKScript) ReadFrom(r io.Reader) (n int64, err error) {
+	var scriptlen uint32
+	var read int64
+	read, err = binaryRead(r, binary.LittleEndian, &scriptlen)
+	if err != nil {
+		return n + read, err
+	}
+	n += read
+
+	scriptbuf := new(bytes.Buffer)
+	read, err = scriptbuf.ReadFrom(io.LimitReader(r, int64(scriptlen)))
+	if err != nil {
+		return n + read, err
+	}
+	n += read
+	*s = scriptbuf.Bytes()
+
+	return n, nil
+}
+
+// WriteTo satisifies the io.WriterTo interface.  A PKScript is written
+// to w in the format:
+//
+//  [Length (4 byte unsigned integer), ScriptBytes (Length bytes)]
+//
+// Length is written little endian.
+func (s *PKScript) WriteTo(w io.Writer) (n int64, err error) {
+	var written int64
+	written, err = binaryWrite(w, binary.LittleEndian, uint32(len(*s)))
+	if err != nil {
+		return n + written, nil
+	}
+	n += written
+
+	written, err = bytes.NewBuffer(*s).WriteTo(w)
+	if err != nil {
+		return n + written, nil
+	}
+	n += written
+
 	return n, nil
 }
 
@@ -430,7 +484,7 @@ func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
 
 	tx.ReceiverAddrs = make([]struct {
 		Addr [ripemd160.Size]byte
-		Amt  int64
+		Amt  uint64
 	},
 		nReceivers)
 	for i := uint32(0); i < nReceivers; i++ {

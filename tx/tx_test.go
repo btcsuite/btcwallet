@@ -28,8 +28,6 @@ import (
 )
 
 var (
-	utxoByteSize = binary.Size(Utxo{})
-
 	recvtx = &RecvTx{
 		TxHash: [btcwire.HashSize]byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
@@ -59,11 +57,11 @@ var (
 		},
 		ReceiverAddrs: []struct {
 			Addr [ripemd160.Size]byte
-			Amt  int64
+			Amt  uint64
 		}{
 			struct {
 				Addr [ripemd160.Size]byte
-				Amt  int64
+				Amt  uint64
 			}{
 				Amt: 69,
 				Addr: [ripemd160.Size]byte{
@@ -73,7 +71,7 @@ var (
 			},
 			struct {
 				Addr [ripemd160.Size]byte
-				Amt  int64
+				Amt  uint64
 			}{
 				Amt: 96,
 				Addr: [ripemd160.Size]byte{
@@ -99,26 +97,24 @@ func TestUtxoWriteRead(t *testing.T) {
 			},
 			Index: 1,
 		},
+		Subscript: []byte{},
 		Amt:    69,
 		Height: 1337,
 	}
 	bufWriter := &bytes.Buffer{}
-	n, err := utxo1.WriteTo(bufWriter)
+	written, err := utxo1.WriteTo(bufWriter)
 	if err != nil {
 		t.Error(err)
-	}
-	if int(n) != binary.Size(utxo1) {
-		t.Error("Writing Utxo: Size Mismatch")
 	}
 	utxoBytes := bufWriter.Bytes()
 
 	utxo2 := new(Utxo)
-	n, err = utxo2.ReadFrom(bytes.NewBuffer(utxoBytes))
+	read, err := utxo2.ReadFrom(bytes.NewBuffer(utxoBytes))
 	if err != nil {
 		t.Error(err)
 	}
-	if int(n) != binary.Size(utxo2) {
-		t.Error("Reading Utxo: Size Mismatch")
+	if written != read {
+		t.Error("Reading and Writing Utxo: Size Mismatch")
 	}
 
 	if !reflect.DeepEqual(utxo1, utxo2) {
@@ -129,7 +125,7 @@ func TestUtxoWriteRead(t *testing.T) {
 	truncatedReadBuf := bytes.NewBuffer(utxoBytes)
 	truncatedReadBuf.Truncate(btcwire.HashSize)
 	utxo3 := new(Utxo)
-	n, err = utxo3.ReadFrom(truncatedReadBuf)
+	n, err := utxo3.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
 		t.Error("Expected err = io.EOF reading from truncated buffer.")
 	}
@@ -146,7 +142,8 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 			utxo.Out.Hash[j] = byte(i)
 		}
 		utxo.Out.Index = uint32(i + 1)
-		utxo.Amt = int64(i + 2)
+		utxo.Subscript = []byte{}
+		utxo.Amt = uint64(i + 2)
 		utxo.Height = int64(i + 3)
 		store1.Confirmed = append(store1.Confirmed, utxo)
 	}
@@ -156,7 +153,8 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 			utxo.Out.Hash[j] = byte(i)
 		}
 		utxo.Out.Index = uint32(i + 1)
-		utxo.Amt = int64(i + 2)
+		utxo.Subscript = []byte{}
+		utxo.Amt = uint64(i + 2)
 		utxo.Height = int64(i + 3)
 		store1.Unconfirmed = append(store1.Unconfirmed, utxo)
 	}
@@ -165,9 +163,6 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 	n, err := store1.WriteTo(bufWriter)
 	if err != nil {
 		t.Error(err)
-	}
-	if n != 20*(1+int64(utxoByteSize)) {
-		t.Error("Incorrect number of bytes written.")
 	}
 
 	storeBytes := bufWriter.Bytes()
@@ -182,17 +177,18 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(store1, store2) {
+		spew.Dump(store1, store2)
 		t.Error("Stores do not match.")
 	}
 
 	truncatedReadBuf := bytes.NewBuffer(storeBytes)
-	truncatedReadBuf.Truncate(10*(1+utxoByteSize) + btcwire.HashSize)
+	truncatedReadBuf.Truncate(100)
 	store3 := new(UtxoStore)
 	n, err = store3.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
 		t.Error("Expected err = io.EOF reading from truncated buffer.")
 	}
-	if n != 10*(1+int64(utxoByteSize))+btcwire.HashSize {
+	if n != 100 {
 		t.Error("Incorrect number of bytes read from truncated buffer.")
 	}
 }
