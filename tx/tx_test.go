@@ -98,8 +98,8 @@ func TestUtxoWriteRead(t *testing.T) {
 			Index: 1,
 		},
 		Subscript: []byte{},
-		Amt:    69,
-		Height: 1337,
+		Amt:       69,
+		Height:    1337,
 	}
 	bufWriter := &bytes.Buffer{}
 	written, err := utxo1.WriteTo(bufWriter)
@@ -136,27 +136,16 @@ func TestUtxoWriteRead(t *testing.T) {
 
 func TestUtxoStoreWriteRead(t *testing.T) {
 	store1 := new(UtxoStore)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		utxo := new(Utxo)
-		for j, _ := range utxo.Out.Hash[:] {
-			utxo.Out.Hash[j] = byte(i)
+		for j := range utxo.Out.Hash[:] {
+			utxo.Out.Hash[j] = byte(i + 1)
 		}
-		utxo.Out.Index = uint32(i + 1)
+		utxo.Out.Index = uint32(i + 2)
 		utxo.Subscript = []byte{}
-		utxo.Amt = uint64(i + 2)
-		utxo.Height = int64(i + 3)
-		store1.Confirmed = append(store1.Confirmed, utxo)
-	}
-	for i := 10; i < 20; i++ {
-		utxo := new(Utxo)
-		for j, _ := range utxo.Out.Hash[:] {
-			utxo.Out.Hash[j] = byte(i)
-		}
-		utxo.Out.Index = uint32(i + 1)
-		utxo.Subscript = []byte{}
-		utxo.Amt = uint64(i + 2)
-		utxo.Height = int64(i + 3)
-		store1.Unconfirmed = append(store1.Unconfirmed, utxo)
+		utxo.Amt = uint64(i + 3)
+		utxo.Height = int64(i + 4)
+		*store1 = append(*store1, utxo)
 	}
 
 	bufWriter := &bytes.Buffer{}
@@ -181,14 +170,14 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 		t.Error("Stores do not match.")
 	}
 
-	truncatedReadBuf := bytes.NewBuffer(storeBytes)
-	truncatedReadBuf.Truncate(100)
+	truncatedLen := 100
+	truncatedReadBuf := bytes.NewBuffer(storeBytes[:truncatedLen])
 	store3 := new(UtxoStore)
 	n, err = store3.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
-		t.Error("Expected err = io.EOF reading from truncated buffer.")
+		t.Errorf("Expected err = io.EOF reading from truncated buffer, got: %v", err)
 	}
-	if n != 100 {
+	if int(n) != truncatedLen {
 		t.Error("Incorrect number of bytes read from truncated buffer.")
 	}
 }

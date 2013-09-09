@@ -141,12 +141,5 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
-	// wallet file must be valid
-	/*
-		if !fileExists(cfg.WalletFile) {
-			return &cfg, nil, errors.New("Wallet file does not exist.")
-		}
-	*/
-
 	return &cfg, remainingArgs, nil
 }

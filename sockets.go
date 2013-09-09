@@ -28,10 +28,21 @@ import (
 )
 
 var (
-	ConnRefused = errors.New("Connection refused")
+	// ErrConnRefused represents an error where a connection to another
+	// process cannot be established.
+	ErrConnRefused = errors.New("connection refused")
+
+	// ErrConnLost represents an error where a connection to another
+	// process cannot be established.
+	ErrConnLost = errors.New("connection lost")
 
 	// Channel to close to notify that connection to btcd has been lost.
-	btcdDisconnected = make(chan int)
+	btcdConnected = struct {
+		b bool
+		c chan bool
+	}{
+		c: make(chan bool),
+	}
 
 	// Channel to send messages btcwallet does not understand and requests
 	// from btcwallet to btcd.
@@ -52,9 +63,9 @@ var (
 	// handler function to route the reply to.
 	replyHandlers = struct {
 		sync.Mutex
-		m map[uint64]func(interface{}, interface{}) bool
+		m map[uint64]func(interface{}, *btcjson.Error) bool
 	}{
-		m: make(map[uint64]func(interface{}, interface{}) bool),
+		m: make(map[uint64]func(interface{}, *btcjson.Error) bool),
 	}
 )
 
@@ -88,12 +99,26 @@ func frontendListenerDuplicator() {
 		}
 	}()
 
-	// Duplicate all messages sent across frontendNotificationMaster to each
-	// listening wallet.
+	// Duplicate all messages sent across frontendNotificationMaster, as
+	// well as internal btcwallet notifications, to each listening wallet.
 	for {
-		ntfn := <-frontendNotificationMaster
+		var ntfn []byte
+
+		select {
+		case conn := <-btcdConnected.c:
+			btcdConnected.b = conn
+			var idStr interface{} = "btcwallet:btcconnected"
+			r := btcjson.Reply{
+				Result: conn,
+				Id:     &idStr,
+			}
+			ntfn, _ = json.Marshal(r)
+
+		case ntfn = <-frontendNotificationMaster:
+		}
+
 		mtx.Lock()
-		for c, _ := range frontendListeners {
+		for c := range frontendListeners {
 			c <- ntfn
 		}
 		mtx.Unlock()
@@ -132,14 +157,6 @@ func frontendReqsNotifications(ws *websocket.Conn) {
 
 	for {
 		select {
-		case <-btcdDisconnected:
-			var idStr interface{} = "btcwallet:btcddisconnected"
-			r := btcjson.Reply{
-				Id: &idStr,
-			}
-			m, _ := json.Marshal(r)
-			websocket.Message.Send(ws, m)
-			return
 		case m, ok := <-jsonMsgs:
 			if !ok {
 				// frontend disconnected.
@@ -164,7 +181,6 @@ func BtcdHandler(ws *websocket.Conn) {
 
 	defer func() {
 		close(disconnected)
-		close(btcdDisconnected)
 	}()
 
 	// Listen for replies/notifications from btcd, and decide how to handle them.
@@ -210,12 +226,15 @@ func BtcdHandler(ws *websocket.Conn) {
 // are sent to every connected frontend.
 func ProcessBtcdNotificationReply(b []byte) {
 	// Check if the json id field was set by btcwallet.
-	var routeId uint64
-	var origId string
+	var routeID uint64
+	var origID string
 
-	var m map[string]interface{}
-	json.Unmarshal(b, &m)
-	idStr, ok := m["id"].(string)
+	var r btcjson.Reply
+	if err := json.Unmarshal(b, &r); err != nil {
+		log.Errorf("Unable to unmarshal btcd message: %v", err)
+		return
+	}
+	idStr, ok := (*r.Id).(string)
 	if !ok {
 		// btcd should only ever be sending JSON messages with a string in
 		// the id field.  Log the error and drop the message.
@@ -223,18 +242,18 @@ func ProcessBtcdNotificationReply(b []byte) {
 		return
 	}
 
-	n, _ := fmt.Sscanf(idStr, "btcwallet(%d)-%s", &routeId, &origId)
+	n, _ := fmt.Sscanf(idStr, "btcwallet(%d)-%s", &routeID, &origID)
 	if n == 1 {
 		// Request originated from btcwallet. Run and remove correct
 		// handler.
 		replyHandlers.Lock()
-		f := replyHandlers.m[routeId]
+		f := replyHandlers.m[routeID]
 		replyHandlers.Unlock()
 		if f != nil {
 			go func() {
-				if f(m["result"], m["error"]) {
+				if f(r.Result, r.Error) {
 					replyHandlers.Lock()
-					delete(replyHandlers.m, routeId)
+					delete(replyHandlers.m, routeID)
 					replyHandlers.Unlock()
 				}
 			}()
@@ -242,9 +261,9 @@ func ProcessBtcdNotificationReply(b []byte) {
 	} else if n == 2 {
 		// Attempt to route btcd reply to correct frontend.
 		replyRouter.Lock()
-		c := replyRouter.m[routeId]
+		c := replyRouter.m[routeID]
 		if c != nil {
-			delete(replyRouter.m, routeId)
+			delete(replyRouter.m, routeID)
 		} else {
 			// Can't route to a frontend, drop reply.
 			log.Info("Unable to route btcd reply to frontend. Dropping.")
@@ -253,15 +272,17 @@ func ProcessBtcdNotificationReply(b []byte) {
 		replyRouter.Unlock()
 
 		// Convert string back to number if possible.
-		var origIdNum float64
-		n, _ := fmt.Sscanf(origId, "%f", &origIdNum)
+		var origIDNum float64
+		n, _ := fmt.Sscanf(origID, "%f", &origIDNum)
+		var id interface{}
 		if n == 1 {
-			m["id"] = origIdNum
+			id = origIDNum
 		} else {
-			m["id"] = origId
+			id = origID
 		}
+		r.Id = &id
 
-		b, err := json.Marshal(m)
+		b, err := json.Marshal(r)
 		if err != nil {
 			log.Error("Error marshalling btcd reply. Dropping.")
 			return
@@ -272,27 +293,10 @@ func ProcessBtcdNotificationReply(b []byte) {
 		// to all frontends if btcwallet can not handle it.
 		switch idStr {
 		case "btcd:blockconnected":
-			result := m["result"].(map[string]interface{})
-			hashBE := result["hash"].(string)
-			hash, err := btcwire.NewShaHashFromStr(hashBE)
-			if err != nil {
-				log.Error("btcd:blockconnected handler: Invalid hash string")
-				return
-			}
-			height := int64(result["height"].(float64))
-
-			// TODO(jrick): update TxStore and UtxoStore with new hash
-			_ = hash
-			var id interface{} = "btcwallet:newblockchainheight"
-			msgRaw := &btcjson.Reply{
-				Result: height,
-				Id:     &id,
-			}
-			msg, _ := json.Marshal(msgRaw)
-			frontendNotificationMaster <- msg
+			NtfnBlockConnected(r.Result)
 
 		case "btcd:blockdisconnected":
-			// TODO(jrick): rollback txs and utxos from removed block.
+			NtfnBlockDisconnected(r.Result)
 
 		default:
 			frontendNotificationMaster <- b
@@ -300,43 +304,145 @@ func ProcessBtcdNotificationReply(b []byte) {
 	}
 }
 
-// ListenAndServe connects to a running btcd instance over a websocket
+// NtfnBlockConnected handles btcd notifications resulting from newly
+// connected blocks to the main blockchain.  Currently, this only creates
+// a new notification for frontends with the new blockchain height.
+func NtfnBlockConnected(r interface{}) {
+	result, ok := r.(map[string]interface{})
+	if !ok {
+		log.Error("blockconnected notification: invalid result")
+		return
+	}
+	hashBE, ok := result["hash"].(string)
+	if !ok {
+		log.Error("blockconnected notification: invalid hash")
+		return
+	}
+	hash, err := btcwire.NewShaHashFromStr(hashBE)
+	if err != nil {
+		log.Error("btcd:blockconnected handler: invalid hash string")
+		return
+	}
+	heightf, ok := result["height"].(float64)
+	if !ok {
+		log.Error("blockconnected notification: invalid height")
+	}
+	height := int64(heightf)
+
+	// TODO(jrick): update TxStore and UtxoStore with new hash
+	_ = hash
+	var id interface{} = "btcwallet:newblockchainheight"
+	msgRaw := &btcjson.Reply{
+		Result: height,
+		Id:     &id,
+	}
+	msg, err := json.Marshal(msgRaw)
+	if err != nil {
+		log.Error("btcd:blockconnected handler: unable to marshal reply")
+		return
+	}
+	frontendNotificationMaster <- msg
+}
+
+// NtfnBlockDisconnected handles btcd notifications resulting from
+// blocks disconnected from the main chain in the event of a chain
+// switch and notifies frontends of the new blockchain height.
+//
+// TODO(jrick): Rollback Utxo and Tx data
+func NtfnBlockDisconnected(r interface{}) {
+	result, ok := r.(map[string]interface{})
+	if !ok {
+		log.Error("blockdisconnected notification: invalid result")
+		return
+	}
+	hashBE, ok := result["hash"].(string)
+	if !ok {
+		log.Error("blockdisconnected notification: invalid hash")
+		return
+	}
+	hash, err := btcwire.NewShaHashFromStr(hashBE)
+	if err != nil {
+		log.Error("btcd:blockdisconnected handler: invalid hash string")
+		return
+	}
+	heightf, ok := result["height"].(float64)
+	if !ok {
+		log.Error("blockdisconnected notification: invalid height")
+	}
+	height := int64(heightf)
+
+	// Rollback Utxo and Tx data stores.
+	go func() {
+		wallets.Rollback(height, hash)
+	}()
+
+	var id interface{} = "btcwallet:newblockchainheight"
+	msgRaw := &btcjson.Reply{
+		Result: height,
+		Id:     &id,
+	}
+	msg, err := json.Marshal(msgRaw)
+	if err != nil {
+		log.Error("btcd:blockdisconnected handler: unable to marshal reply")
+		return
+	}
+	frontendNotificationMaster <- msg
+}
+
+var duplicateOnce sync.Once
+
+// FrontendListenAndServe starts a HTTP server to provide websocket
+// connections for any number of btcwallet frontends.
+func FrontendListenAndServe() error {
+	// We'll need to duplicate replies to frontends to each frontend.
+	// Replies are sent to frontendReplyMaster, and duplicated to each valid
+	// channel in frontendReplySet.  This runs a goroutine to duplicate
+	// requests for each channel in the set.
+	//
+	// Use a sync.Once to insure no extra duplicators run.
+	go duplicateOnce.Do(frontendListenerDuplicator)
+
+	// TODO(jrick): We need some sort of authentication before websocket
+	// connections are allowed, and perhaps TLS on the server as well.
+	http.Handle("/frontend", websocket.Handler(frontendReqsNotifications))
+	return http.ListenAndServe(fmt.Sprintf(":%d", cfg.SvrPort), nil)
+}
+
+// BtcdConnect connects to a running btcd instance over a websocket
 // for sending and receiving chain-related messages, failing if the
-// connection can not be established.  An additional HTTP server is then
-// started to provide websocket connections for any number of btcwallet
-// frontends.
-func ListenAndServe() error {
+// connection cannot be established or is lost.
+func BtcdConnect(reply chan error) {
 	// Attempt to connect to running btcd instance. Bail if it fails.
 	btcdws, err := websocket.Dial(
 		fmt.Sprintf("ws://localhost:%d/wallet", cfg.BtcdPort),
 		"",
 		"http://localhost/")
 	if err != nil {
-		return ConnRefused
+		reply <- ErrConnRefused
+		return
 	}
-	go BtcdHandler(btcdws)
+	reply <- nil
 
-	log.Info("Established connection to btcd.")
+	// Remove all reply handlers (if any exist from an old connection).
+	replyHandlers.Lock()
+	for k := range replyHandlers.m {
+		delete(replyHandlers.m, k)
+	}
+	replyHandlers.Unlock()
 
-	// Begin tracking wallets.
+	handlerClosed := make(chan int)
+	go func() {
+		BtcdHandler(btcdws)
+		close(handlerClosed)
+	}()
+
+	// Begin tracking wallets against this btcd instance.
 	wallets.RLock()
 	for _, w := range wallets.m {
 		w.Track()
 	}
 	wallets.RUnlock()
 
-	// We'll need to duplicate replies to frontends to each frontend.
-	// Replies are sent to frontendReplyMaster, and duplicated to each valid
-	// channel in frontendReplySet.  This runs a goroutine to duplicate
-	// requests for each channel in the set.
-	go frontendListenerDuplicator()
-
-	// TODO(jrick): We need some sort of authentication before websocket
-	// connections are allowed, and perhaps TLS on the server as well.
-	http.Handle("/frontend", websocket.Handler(frontendReqsNotifications))
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", cfg.SvrPort), nil); err != nil {
-		return err
-	}
-
-	return nil
+	<-handlerClosed
+	reply <- ErrConnLost
 }
