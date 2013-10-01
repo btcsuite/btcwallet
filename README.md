@@ -81,10 +81,8 @@ signature perform the following:
 - btcd replies are routed back to the correct frontend who initiated the request
 
 ## TODO
-- Create a new wallet if one is not available
-- Update UTXO database based on btcd notifications
 - Require authentication before wallet functionality can be accessed
-- Support TLS
+- Serve websocket connections over TLS
 - Documentation
 - Code cleanup
 - Optimize
