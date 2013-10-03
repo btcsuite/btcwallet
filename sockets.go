@@ -18,6 +18,7 @@ package main
 
 import (
 	"code.google.com/p/go.net/websocket"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -412,11 +413,20 @@ func FrontendListenAndServe() error {
 // for sending and receiving chain-related messages, failing if the
 // connection cannot be established or is lost.
 func BtcdConnect(reply chan error) {
+	// btcd requires basic authorization, so we use a custom config with
+	// the Authorization header set.
+	server := fmt.Sprintf("ws://localhost:%d/wallet", cfg.BtcdPort)
+	login := cfg.Username + ":" + cfg.Password
+	auth := "Basic" + base64.StdEncoding.EncodeToString([]byte(login))
+	config, err := websocket.NewConfig(server, "http://localhost/")
+	if err != nil {
+		reply <- ErrConnRefused
+		return
+	}
+	config.Header.Add("Authorization", auth)
+
 	// Attempt to connect to running btcd instance. Bail if it fails.
-	btcdws, err := websocket.Dial(
-		fmt.Sprintf("ws://localhost:%d/wallet", cfg.BtcdPort),
-		"",
-		"http://localhost/")
+	btcdws, err := websocket.DialConfig(config)
 	if err != nil {
 		reply <- ErrConnRefused
 		return

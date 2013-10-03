@@ -43,6 +43,8 @@ type config struct {
 	ConfigFile  string `short:"C" long:"configfile" description:"Path to configuration file"`
 	SvrPort     int    `short:"p" long:"serverport" description:"Port to serve frontend websocket connections on"`
 	DataDir     string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
+	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
+	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
 }
 
 // btcwalletHomeDir returns an OS appropriate home directory for btcwallet.
