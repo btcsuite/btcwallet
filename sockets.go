@@ -417,7 +417,7 @@ func BtcdConnect(reply chan error) {
 	// the Authorization header set.
 	server := fmt.Sprintf("ws://localhost:%d/wallet", cfg.BtcdPort)
 	login := cfg.Username + ":" + cfg.Password
-	auth := "Basic" + base64.StdEncoding.EncodeToString([]byte(login))
+	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	config, err := websocket.NewConfig(server, "http://localhost/")
 	if err != nil {
 		reply <- ErrConnRefused
