@@ -332,14 +332,15 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 // not sent to the payment address or a fee for the miner are sent
 // back to a new address in the wallet.
 func SendFrom(reply chan []byte, msg *btcjson.Message) {
+	e := InvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
-		log.Error("SendFrom: Cannot parse parameters.")
+		e.Message = "Cannot parse parameters."
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 	var fromaccount, toaddr58, comment, commentto string
 	var famt, minconf float64
-	e := InvalidParams
 	if len(params) < 3 {
 		e.Message = "Too few parameters."
 		ReplyError(reply, msg.Id, &e)
@@ -449,15 +450,16 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 // inputs not sent to the payment address or a fee for the miner are
 // sent back to a new address in the wallet.
 func SendMany(reply chan []byte, msg *btcjson.Message) {
+	e := InvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
-		log.Error("SendFrom: Cannot parse parameters.")
+		e.Message = "Cannot parse parameters."
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 	var fromaccount, comment string
 	var minconf float64
 	var jsonPairs map[string]interface{}
-	e := InvalidParams
 	if len(params) < 2 {
 		e.Message = "Too few parameters."
 		ReplyError(reply, msg.Id, &e)
