@@ -17,6 +17,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/conformal/btcjson"
@@ -418,16 +419,29 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// TODO(jrick): Send rawtx off to btcd
-	_ = rawtx
+	// Send rawtx off to btcd
+	seq.Lock()
+	n := seq.n
+	seq.n++
+	seq.Unlock()
+
+	var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n, msg.Id)
+	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
+		hex.EncodeToString(rawtx))
+	if err != nil {
+		e := InternalError
+		e.Message = err.Error()
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+	replyRouter.Lock()
+	replyRouter.m[n] = reply
+	replyRouter.Unlock()
+	btcdMsgs <- m
 
 	// TODO(jrick): If message succeeded in being sent, save the
 	// transaction details with comments.
 	_, _ = comment, commentto
-
-	e = InternalError
-	e.Message = "Transaction validated but not sent to btcd."
-	ReplyError(reply, msg.Id, &e)
 }
 
 // SendMany creates a new transaction spending unspent transaction
@@ -444,7 +458,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	var minconf float64
 	var jsonPairs map[string]interface{}
 	e := InvalidParams
-	if len(params) < 3 {
+	if len(params) < 2 {
 		e.Message = "Too few parameters."
 		ReplyError(reply, msg.Id, &e)
 		return
@@ -481,7 +495,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		pairs[toaddr58] = uint64(amt)
 	}
 
-	if len(params) > 1 {
+	if len(params) > 2 {
 		if minconf, ok = params[2].(float64); !ok {
 			e.Message = "minconf is not a number"
 			ReplyError(reply, msg.Id, &e)
@@ -490,9 +504,10 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		if minconf < 0 {
 			e.Message = "minconf cannot be negative"
 			ReplyError(reply, msg.Id, &e)
+			return
 		}
 	}
-	if len(params) > 2 {
+	if len(params) > 3 {
 		if comment, ok = params[3].(string); !ok {
 			e.Message = "comment is not a string"
 			ReplyError(reply, msg.Id, &e)
@@ -519,16 +534,29 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// TODO(jrick): Send rawtx off to btcd
-	_ = rawtx
+	// Send rawtx off to btcd
+	seq.Lock()
+	n := seq.n
+	seq.n++
+	seq.Unlock()
+
+	var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n, msg.Id)
+	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
+		hex.EncodeToString(rawtx))
+	if err != nil {
+		e := InternalError
+		e.Message = err.Error()
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+	replyRouter.Lock()
+	replyRouter.m[n] = reply
+	replyRouter.Unlock()
+	btcdMsgs <- m
 
 	// TODO(jrick): If message succeeded in being sent, save the
 	// transaction details with comments.
 	_ = comment
-
-	e = InternalError
-	e.Message = "Transaction validated but not sent to btcd."
-	ReplyError(reply, msg.Id, &e)
 }
 
 // CreateEncryptedWallet creates a new encrypted wallet.  The form of the command is:
