@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
@@ -65,5 +69,19 @@ func TestFakeTxs(t *testing.T) {
 		t.Errorf("Tx creation failed: %s", err)
 		return
 	}
-	_ = rawtx
+
+	msg := btcjson.Message{
+		Jsonrpc: "1.0",
+		Id:      "test",
+		Method:  "sendrawtransaction",
+		Params: []interface{}{
+			hex.EncodeToString(rawtx),
+		},
+	}
+	m, _ := json.Marshal(msg)
+	_ = m
+	_ = fmt.Println
+
+	// Uncomment to print out json to send raw transaction
+	// fmt.Println(string(m))
 }
