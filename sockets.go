@@ -82,7 +82,7 @@ func frontendListenerDuplicator() {
 	// Don't want to add or delete a wallet listener while iterating
 	// through each to propigate to every attached wallet.  Use a mutex to
 	// prevent this.
-	mtx := new(sync.Mutex)
+	var mtx sync.Mutex
 
 	// Check for listener channels to add or remove from set.
 	go func() {
