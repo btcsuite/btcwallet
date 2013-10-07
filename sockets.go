@@ -485,10 +485,10 @@ func BtcdHandshake(ws *websocket.Conn) {
 		}
 
 		var walletNetwork btcwire.BitcoinNet
-		if cfg.TestNet3 {
-			walletNetwork = btcwire.TestNet3
-		} else {
+		if cfg.MainNet {
 			walletNetwork = btcwire.MainNet
+		} else {
+			walletNetwork = btcwire.TestNet3
 		}
 
 		correctNetwork <- btcwire.BitcoinNet(fnet) == walletNetwork

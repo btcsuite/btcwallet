@@ -614,10 +614,10 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	wallets.RUnlock()
 
 	var net btcwire.BitcoinNet
-	if cfg.TestNet3 {
-		net = btcwire.TestNet3
-	} else {
+	if cfg.MainNet {
 		net = btcwire.MainNet
+	} else {
+		net = btcwire.TestNet3
 	}
 	w, err := wallet.NewWallet(wname, desc, []byte(pass), net)
 	if err != nil {
