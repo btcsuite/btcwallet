@@ -45,6 +45,7 @@ type config struct {
 	DataDir     string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
 	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
 	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
+	TestNet3    bool   `long:"testnet" description:"Use the test network"`
 }
 
 // btcwalletHomeDir returns an OS appropriate home directory for btcwallet.

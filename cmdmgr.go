@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwallet/wallet"
+	"github.com/conformal/btcwire"
 	"sync"
 	"time"
 )
@@ -568,22 +569,37 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 // All three parameters are required, and must be of type string.  If
 // the wallet specified by account already exists, an invalid account
 // name error is returned to the client.
+//
+// Wallets will be created on MainNet, or TestNet3 if btcwallet is run with
+// the --testnet option.
 func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	params, ok := msg.Params.([]interface{})
+	e := &InvalidParams
 	if !ok {
-		log.Error("CreateEncryptedWallet: Cannot parse parameters.")
+		ReplyError(reply, msg.Id, e)
 		return
 	}
-	var wname string
 	if len(params) != 3 {
-		ReplyError(reply, msg.Id, &InvalidParams)
+		e.Message = "Incorrect number of parameters"
+		ReplyError(reply, msg.Id, e)
 		return
 	}
-	wname, ok1 := params[0].(string)
-	desc, ok2 := params[1].(string)
-	pass, ok3 := params[2].(string)
-	if !ok1 || !ok2 || !ok3 {
-		ReplyError(reply, msg.Id, &InvalidParams)
+	wname, ok := params[0].(string)
+	if !ok {
+		e.Message = "Account is not a string"
+		ReplyError(reply, msg.Id, e)
+		return
+	}
+	desc, ok := params[1].(string)
+	if !ok {
+		e.Message = "Description is not a string"
+		ReplyError(reply, msg.Id, e)
+		return
+	}
+	pass, ok := params[2].(string)
+	if !ok {
+		e.Message = "Passphrase is not a string"
+		ReplyError(reply, msg.Id, e)
 		return
 	}
 
@@ -597,7 +613,13 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	}
 	wallets.RUnlock()
 
-	w, err := wallet.NewWallet(wname, desc, []byte(pass))
+	var net btcwire.BitcoinNet
+	if cfg.TestNet3 {
+		net = btcwire.TestNet3
+	} else {
+		net = btcwire.MainNet
+	}
+	w, err := wallet.NewWallet(wname, desc, []byte(pass), net)
 	if err != nil {
 		log.Error("Error creating wallet: " + err.Error())
 		ReplyError(reply, msg.Id, &InternalError)

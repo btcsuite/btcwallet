@@ -61,7 +61,8 @@ var (
 	// replyHandlers maps between a sequence number (passed as part of
 	// the JSON Id field) and a function to handle a reply or notification
 	// from btcd.  As requests are received, this map is checked for a
-	// handler function to route the reply to.
+	// handler function to route the reply to.  If the function returns
+	// true, the handler is removed from the map.
 	replyHandlers = struct {
 		sync.Mutex
 		m map[uint64]func(interface{}, *btcjson.Error) bool
@@ -178,8 +179,9 @@ func frontendReqsNotifications(ws *websocket.Conn) {
 // websocket and sends messages that btcwallet does not understand to
 // btcd.  Unlike FrontendHandler, exactly one BtcdHandler goroutine runs.
 func BtcdHandler(ws *websocket.Conn) {
+	// Notification channel to return from listener goroutine when
+	// btcd disconnects.
 	disconnected := make(chan int)
-
 	defer func() {
 		close(disconnected)
 	}()
@@ -214,6 +216,7 @@ func BtcdHandler(ws *websocket.Conn) {
 		case r := <-btcdMsgs:
 			if err := websocket.Message.Send(ws, r); err != nil {
 				// btcd disconnected.
+				log.Error("Unable to send message to btcd: %v", err)
 				return
 			}
 		}
@@ -446,13 +449,67 @@ func BtcdConnect(reply chan error) {
 		close(handlerClosed)
 	}()
 
+	BtcdHandshake(btcdws)
+
+	<-handlerClosed
+	reply <- ErrConnLost
+}
+
+// BtcdHandshake first checks that the websocket connection between
+// btcwallet and btcd is valid, that is, that there are no mismatching
+// settings between the two processes (such as running on different
+// Bitcoin networks).  If the sanity checks pass, all wallets are set to
+// be tracked against chain notifications from this btcd connection.
+func BtcdHandshake(ws *websocket.Conn) {
+	seq.Lock()
+	n := seq.n
+	seq.n++
+	seq.Unlock()
+	msg := btcjson.Message{
+		Method: "getcurrentnet",
+		Id:     fmt.Sprintf("btcwallet(%v)", n),
+	}
+	m, _ := json.Marshal(&msg)
+
+	correctNetwork := make(chan bool)
+
+	replyHandlers.Lock()
+	replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
+		fmt.Println("got reply")
+		fnet, ok := result.(float64)
+		if !ok {
+			log.Error("btcd handshake: result is not a number")
+			ws.Close()
+			correctNetwork <- false
+			return true
+		}
+
+		var walletNetwork btcwire.BitcoinNet
+		if cfg.TestNet3 {
+			walletNetwork = btcwire.TestNet3
+		} else {
+			walletNetwork = btcwire.MainNet
+		}
+
+		correctNetwork <- btcwire.BitcoinNet(fnet) == walletNetwork
+
+		// No additional replies expected, remove handler.
+		return true
+	}
+	replyHandlers.Unlock()
+
+	btcdMsgs <- m
+
+	if !<-correctNetwork {
+		log.Error("btcd and btcwallet running on different Bitcoin networks")
+		ws.Close()
+		return
+	}
+
 	// Begin tracking wallets against this btcd instance.
 	wallets.RLock()
 	for _, w := range wallets.m {
 		w.Track()
 	}
 	wallets.RUnlock()
-
-	<-handlerClosed
-	reply <- ErrConnLost
 }

@@ -18,6 +18,7 @@ package wallet
 
 import (
 	"crypto/rand"
+	"github.com/conformal/btcwire"
 	"github.com/davecgh/go-spew/spew"
 	"os"
 	"reflect"
@@ -78,7 +79,7 @@ func TestBtcAddressSerializer(t *testing.T) {
 }
 
 func TestWalletCreationSerialization(t *testing.T) {
-	w1, err := NewWallet("banana wallet", "A wallet for testing.", []byte("banana"))
+	w1, err := NewWallet("banana wallet", "A wallet for testing.", []byte("banana"), btcwire.MainNet)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 	}

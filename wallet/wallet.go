@@ -353,7 +353,7 @@ type Wallet struct {
 // desc's binary representation must not exceed 32 and 256 bytes,
 // respectively.  All address private keys are encrypted with passphrase.
 // The wallet is returned unlocked.
-func NewWallet(name, desc string, passphrase []byte) (*Wallet, error) {
+func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet) (*Wallet, error) {
 	if binary.Size(name) > 32 {
 		return nil, errors.New("name exceeds 32 byte maximum size")
 	}
@@ -382,7 +382,7 @@ func NewWallet(name, desc string, passphrase []byte) (*Wallet, error) {
 	// compat with armory.
 	w := &Wallet{
 		version: 0, // TODO(jrick): implement versioning
-		net:     btcwire.MainNet,
+		net:     net,
 		flags: walletFlags{
 			useEncryption: true,
 			watchingOnly:  false,
