@@ -25,6 +25,7 @@ import (
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwire"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,13 @@ var ErrInsufficientFunds = errors.New("insufficient funds")
 // ErrUnknownBitcoinNet represents an error where the parsed or
 // requested bitcoin network is invalid (neither mainnet nor testnet).
 var ErrUnknownBitcoinNet = errors.New("unknown bitcoin network")
+
+// TxFee represents the global transaction fee added to newly-created
+// transactions and sent as a reward to the block miner.
+var TxFee struct {
+	sync.Mutex
+	i int64
+}
 
 // ByAmount defines the methods needed to satisify sort.Interface to
 // sort a slice of Utxos by their amount.

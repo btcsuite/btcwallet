@@ -169,6 +169,8 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 		SendFrom(reply, &jsonMsg)
 	case "sendmany":
 		SendMany(reply, &jsonMsg)
+	case "settxfee":
+		SetTxFee(reply, &jsonMsg)
 	case "walletlock":
 		WalletLock(reply, &jsonMsg)
 	case "walletpassphrase":
@@ -408,12 +410,13 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// fee needs to be a global, set from another json method.
-	var fee uint64
+	TxFee.Lock()
+	fee := TxFee.i
+	TxFee.Unlock()
 	pairs := map[string]uint64{
 		toaddr58: uint64(amt),
 	}
-	rawtx, err := w.txToPairs(pairs, fee, int(minconf))
+	rawtx, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := InternalError
 		e.Message = err.Error()
@@ -527,9 +530,10 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// fee needs to be a global, set from another json method.
-	var fee uint64
-	rawtx, err := w.txToPairs(pairs, fee, int(minconf))
+	TxFee.Lock()
+	fee := TxFee.i
+	TxFee.Unlock()
+	rawtx, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := InternalError
 		e.Message = err.Error()
@@ -562,6 +566,45 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	_ = comment
 }
 
+// SetTxFee sets the global transaction fee added to transactions.
+func SetTxFee(reply chan []byte, msg *btcjson.Message) {
+	e := InvalidParams
+	params, ok := msg.Params.([]interface{})
+	if !ok {
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+	if len(params) != 1 {
+		e.Message = "Incorrect number of parameters"
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+	jsonFee, ok := params[0].(float64)
+	if !ok {
+		e.Message = "Amount is not a number"
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+	if jsonFee < 0 {
+		e.Message = "Amount cannot be negative"
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+	fee, err := btcjson.JSONToAmount(jsonFee)
+	if err != nil {
+		e.Message = fmt.Sprintf("Cannot convert JSON number to int64: %v", err)
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+
+	// TODO(jrick): need to notify all frontends of new tx fee.
+	TxFee.Lock()
+	TxFee.i = fee
+	TxFee.Unlock()
+
+	ReplySuccess(reply, msg.Id, true)
+}
+
 // CreateEncryptedWallet creates a new encrypted wallet.  The form of the command is:
 //
 //  createencryptedwallet [account] [description] [passphrase]
@@ -573,33 +616,33 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 // Wallets will be created on MainNet, or TestNet3 if btcwallet is run with
 // the --testnet option.
 func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
+	e := InvalidParams
 	params, ok := msg.Params.([]interface{})
-	e := &InvalidParams
 	if !ok {
-		ReplyError(reply, msg.Id, e)
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 	if len(params) != 3 {
 		e.Message = "Incorrect number of parameters"
-		ReplyError(reply, msg.Id, e)
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 	wname, ok := params[0].(string)
 	if !ok {
 		e.Message = "Account is not a string"
-		ReplyError(reply, msg.Id, e)
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 	desc, ok := params[1].(string)
 	if !ok {
 		e.Message = "Description is not a string"
-		ReplyError(reply, msg.Id, e)
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 	pass, ok := params[2].(string)
 	if !ok {
 		e.Message = "Passphrase is not a string"
-		ReplyError(reply, msg.Id, e)
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 
