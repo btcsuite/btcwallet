@@ -15,7 +15,7 @@ import (
 
 func TestFakeTxs(t *testing.T) {
 	// First we need a wallet.
-	w, err := wallet.NewWallet("banana wallet", "", []byte("banana"))
+	w, err := wallet.NewWallet("banana wallet", "", []byte("banana"), btcwire.MainNet)
 	if err != nil {
 		t.Errorf("Can not create encrypted wallet: %s", err)
 		return
