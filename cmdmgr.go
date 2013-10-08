@@ -664,14 +664,14 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Does this wallet already exist?
-	wallets.RLock()
+	wallets.Lock()
 	if w := wallets.m[wname]; w != nil {
 		e := WalletInvalidAccountName
 		e.Message = "Wallet already exists."
 		ReplyError(reply, msg.Id, &e)
 		return
 	}
-	wallets.RUnlock()
+	defer wallets.Unlock()
 
 	var net btcwire.BitcoinNet
 	if cfg.MainNet {
@@ -700,9 +700,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	// connected to btcd.
 	bw.Track()
 
-	wallets.Lock()
 	wallets.m[wname] = bw
-	wallets.Unlock()
 	ReplySuccess(reply, msg.Id, nil)
 }
 
