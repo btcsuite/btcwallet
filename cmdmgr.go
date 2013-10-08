@@ -310,16 +310,20 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 // the requested wallet does not exist, a JSON error will be returned to
 // the client.
 func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
+	e := InvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
-		log.Error("GetNewAddress: Cannot parse parameters.")
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
 	var wname string
-	if len(params) == 0 || params[0].(string) == "" {
-		wname = ""
-	} else {
-		wname = "params[0].(string)"
+	if len(params) > 0 {
+		var ok bool
+		if wname, ok = params[0].(string); !ok {
+			e.Message = "account is not a string"
+			ReplyError(reply, msg.Id, &e)
+			return
+		}
 	}
 
 	wallets.RLock()
