@@ -338,6 +338,7 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 			ReplyError(reply, msg.Id, &e)
 			return
 		}
+		w.ReqNewTxsForAddress(addr)
 		ReplySuccess(reply, msg.Id, addr)
 	} else {
 		e := WalletInvalidAccountName
