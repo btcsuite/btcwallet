@@ -630,8 +630,8 @@ func SetTxFee(reply chan []byte, msg *btcjson.Message) {
 // the wallet specified by account already exists, an invalid account
 // name error is returned to the client.
 //
-// Wallets will be created on MainNet, or TestNet3 if btcwallet is run with
-// the --testnet option.
+// Wallets will be created on TestNet3, or MainNet if btcwallet is run with
+// the --mainnet option.
 func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	e := InvalidParams
 	params, ok := msg.Params.([]interface{})
