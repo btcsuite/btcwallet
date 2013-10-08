@@ -235,22 +235,34 @@ func ReplySuccess(reply chan []byte, id interface{}, result interface{}) {
 
 // GetAddressesByAccount replies with all addresses for an account.
 func GetAddressesByAccount(reply chan []byte, msg *btcjson.Message) {
+	e := InvalidParams
+
 	// TODO(jrick): check if we can make btcjson.Message.Params
 	// a []interface{} to avoid this.
 	params, ok := msg.Params.([]interface{})
 	if !ok {
-		log.Error("GetAddressesByAccount: Cannot parse parameters.")
+		ReplyError(reply, msg.Id, &e)
 		return
 	}
+	account, ok := params[0].(string)
+	if !ok {
+		e.Message = "account is not a string"
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+
 	var result interface{}
 	wallets.RLock()
-	w := wallets.m[params[0].(string)]
+	w := wallets.m[account]
 	wallets.RUnlock()
+
 	if w != nil {
 		result = w.Wallet.GetActiveAddresses()
 	} else {
-		result = []interface{}{}
+		ReplyError(reply, msg.Id, &WalletInvalidAccountName)
+		return
 	}
+
 	ReplySuccess(reply, msg.Id, result)
 }
 
