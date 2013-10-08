@@ -1036,18 +1036,7 @@ func (a *btcAddress) changeEncryptionKey(oldkey, newkey []byte) error {
 // paymentAddress returns a human readable payment address string for
 // an address.
 func (a *btcAddress) paymentAddress(net btcwire.BitcoinNet) (string, error) {
-	var netID byte
-	switch net {
-	case btcwire.MainNet:
-		netID = btcutil.MainNetAddr
-	case btcwire.TestNet:
-		fallthrough
-	case btcwire.TestNet3:
-		netID = btcutil.TestNetAddr
-	default: // wrong!
-		return "", errors.New("unknown bitcoin network")
-	}
-	return btcutil.EncodeAddress(a.pubKeyHash[:], netID)
+	return btcutil.EncodeAddress(a.pubKeyHash[:], net)
 }
 
 func walletHash(b []byte) uint32 {

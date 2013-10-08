@@ -164,24 +164,12 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 		msgtx.AddTxOut(txout)
 	}
 
-	var netID byte
-	switch w.Wallet.Net() {
-	case btcwire.MainNet:
-		netID = btcutil.MainNetAddr
-	case btcwire.TestNet:
-		fallthrough
-	case btcwire.TestNet3:
-		netID = btcutil.TestNetAddr
-	default: // wrong!
-		return nil, ErrUnknownBitcoinNet
-	}
-
 	// Selected unspent outputs become new transaction's inputs.
 	for _, op := range outputs {
 		msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&op.Out), nil))
 	}
 	for i, op := range outputs {
-		addrstr, err := btcutil.EncodeAddress(op.Addr[:], netID)
+		addrstr, err := btcutil.EncodeAddress(op.Addr[:], w.Wallet.Net())
 		if err != nil {
 			return nil, err
 		}
