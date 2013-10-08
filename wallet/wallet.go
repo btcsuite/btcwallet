@@ -721,7 +721,7 @@ func (w *Wallet) GetActiveAddresses() []string {
 		addr := w.addrMap[*addr160]
 		addrstr, err := addr.paymentAddress(w.net)
 		// TODO(jrick): propigate error
-		if err != nil {
+		if err == nil {
 			addrs = append(addrs, addrstr)
 		}
 	}
