@@ -475,7 +475,6 @@ func BtcdHandshake(ws *websocket.Conn) {
 
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
-		fmt.Println("got reply")
 		fnet, ok := result.(float64)
 		if !ok {
 			log.Error("btcd handshake: result is not a number")
