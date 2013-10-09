@@ -93,6 +93,7 @@ func frontendListenerDuplicator() {
 				mtx.Lock()
 				frontendListeners[c] = true
 				mtx.Unlock()
+
 			case c := <-deleteFrontendListener:
 				mtx.Lock()
 				delete(frontendListeners, c)
@@ -109,7 +110,7 @@ func frontendListenerDuplicator() {
 		select {
 		case conn := <-btcdConnected.c:
 			btcdConnected.b = conn
-			var idStr interface{} = "btcwallet:btcconnected"
+			var idStr interface{} = "btcwallet:btcdconnected"
 			r := btcjson.Reply{
 				Result: conn,
 				Id:     &idStr,
@@ -333,6 +334,10 @@ func NtfnBlockConnected(r interface{}) {
 	}
 	height := int64(heightf)
 
+	curHeight.Lock()
+	curHeight.h = height
+	curHeight.Unlock()
+
 	// TODO(jrick): update TxStore and UtxoStore with new hash
 	_ = hash
 	var id interface{} = "btcwallet:newblockchainheight"
@@ -346,6 +351,15 @@ func NtfnBlockConnected(r interface{}) {
 		return
 	}
 	frontendNotificationMaster <- msg
+
+	wallets.RLock()
+	for _, w := range wallets.m {
+		confirmed := w.CalculateBalance(6)
+		unconfirmed := w.CalculateBalance(0) - confirmed
+		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
+		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+	}
+	wallets.RUnlock()
 }
 
 // NtfnBlockDisconnected handles btcd notifications resulting from
@@ -391,6 +405,15 @@ func NtfnBlockDisconnected(r interface{}) {
 		return
 	}
 	frontendNotificationMaster <- msg
+
+	wallets.RLock()
+	for _, w := range wallets.m {
+		confirmed := w.CalculateBalance(6)
+		unconfirmed := w.CalculateBalance(0) - confirmed
+		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
+		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+	}
+	wallets.RUnlock()
 }
 
 var duplicateOnce sync.Once

@@ -60,6 +60,7 @@ var (
 type BtcWallet struct {
 	*wallet.Wallet
 	mtx            sync.RWMutex
+	name           string
 	dirty          bool
 	NewBlockTxSeqN uint64
 	UtxoStore      struct {
@@ -99,7 +100,6 @@ func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
 }
 
 func (w *BtcWallet) Rollback(height int64, hash *btcwire.ShaHash) {
-	// TODO(jrick): set dirty=true if modified.
 	w.UtxoStore.Lock()
 	w.UtxoStore.dirty = w.UtxoStore.dirty || w.UtxoStore.s.Rollback(height, hash)
 	w.UtxoStore.Unlock()
@@ -193,6 +193,8 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 
 	w := &BtcWallet{
 		Wallet: wlt,
+		name:   account,
+		//NewBlockTxSeqN: // TODO(jrick): this MUST be set or notifications will be lost.
 	}
 	w.UtxoStore.s = utxos
 	w.TxStore.s = txs
@@ -462,6 +464,10 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 			w.UtxoStore.s = append(w.UtxoStore.s, u)
 			w.UtxoStore.dirty = true
 			w.UtxoStore.Unlock()
+			confirmed := w.CalculateBalance(6)
+			unconfirmed := w.CalculateBalance(0) - confirmed
+			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
+			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
 		}()
 	}
 

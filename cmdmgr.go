@@ -165,6 +165,8 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 		GetBalance(reply, &jsonMsg)
 	case "getnewaddress":
 		GetNewAddress(reply, &jsonMsg)
+	case "listaccounts":
+		ListAccounts(reply, &jsonMsg)
 	case "sendfrom":
 		SendFrom(reply, &jsonMsg)
 	case "sendmany":
@@ -179,6 +181,8 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 	// btcwallet extensions
 	case "createencryptedwallet":
 		CreateEncryptedWallet(reply, &jsonMsg)
+	case "getbalances":
+		GetBalances(reply, &jsonMsg)
 	case "walletislocked":
 		WalletIsLocked(reply, &jsonMsg)
 	case "btcdconnected":
@@ -306,6 +310,17 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 	}
 }
 
+func GetBalances(reply chan []byte, msg *btcjson.Message) {
+	wallets.RLock()
+	for _, w := range wallets.m {
+		balance := w.CalculateBalance(6)
+		unconfirmed := w.CalculateBalance(0) - balance
+		NotifyWalletBalance(reply, w.name, balance)
+		NotifyWalletBalanceUnconfirmed(reply, w.name, unconfirmed)
+	}
+	wallets.RUnlock()
+}
+
 // GetNewAddress gets or generates a new address for an account.  If
 // the requested wallet does not exist, a JSON error will be returned to
 // the client.
@@ -345,6 +360,33 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 		e.Message = fmt.Sprintf("Wallet for account '%s' does not exist.", wname)
 		ReplyError(reply, msg.Id, &e)
 	}
+}
+
+// ListAccounts returns a JSON object filled with account names as
+// keys and their balances as values.
+func ListAccounts(reply chan []byte, msg *btcjson.Message) {
+	minconf := 1
+	e := InvalidParams
+	params, ok := msg.Params.([]interface{})
+	if ok && len(params) != 0 {
+		fnum, ok := params[0].(float64)
+		if !ok {
+			e.Message = "minconf is not a number"
+			ReplyError(reply, msg.Id, &e)
+			return
+		}
+		minconf = int(fnum)
+	}
+
+	pairs := make(map[string]float64)
+
+	wallets.RLock()
+	for account, w := range wallets.m {
+		pairs[account] = w.CalculateBalance(minconf)
+	}
+	wallets.RUnlock()
+
+	ReplySuccess(reply, msg.Id, pairs)
 }
 
 // SendFrom creates a new transaction spending unspent transaction
@@ -694,6 +736,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 
 	bw := &BtcWallet{
 		Wallet:         w,
+		name:           wname,
 		NewBlockTxSeqN: n,
 	}
 	// TODO(jrick): only begin tracking wallet if btcwallet is already
@@ -745,7 +788,7 @@ func WalletLock(reply chan []byte, msg *btcjson.Message) {
 			ReplyError(reply, msg.Id, &WalletWrongEncState)
 		} else {
 			ReplySuccess(reply, msg.Id, nil)
-			NotifyWalletLockStateChange(reply, true)
+			NotifyWalletLockStateChange("", true)
 		}
 	}
 }
@@ -780,11 +823,11 @@ func WalletPassphrase(reply chan []byte, msg *btcjson.Message) {
 			return
 		}
 		ReplySuccess(reply, msg.Id, nil)
-		NotifyWalletLockStateChange(reply, false)
+		NotifyWalletLockStateChange("", false)
 		go func() {
 			time.Sleep(time.Second * time.Duration(int64(timeout)))
 			w.Lock()
-			NotifyWalletLockStateChange(reply, true)
+			NotifyWalletLockStateChange("", true)
 		}()
 	}
 }
@@ -796,14 +839,49 @@ func BtcdConnected(reply chan []byte, msg *btcjson.Message) {
 	ReplySuccess(reply, msg.Id, btcdConnected.b)
 }
 
+// TODO(jrick): move somewhere better so it can be shared with frontends.
+type AccountNtfn struct {
+	Account      string      `json:"account"`
+	Notification interface{} `json:"notification"`
+}
+
 // NotifyWalletLockStateChange sends a notification to all frontends
 // that the wallet has just been locked or unlocked.
-func NotifyWalletLockStateChange(reply chan []byte, locked bool) {
+func NotifyWalletLockStateChange(account string, locked bool) {
 	var id interface{} = "btcwallet:newwalletlockstate"
 	m := btcjson.Reply{
-		Result: locked,
-		Id:     &id,
+		Result: &AccountNtfn{
+			Account:      account,
+			Notification: locked,
+		},
+		Id: &id,
 	}
 	msg, _ := json.Marshal(&m)
 	frontendNotificationMaster <- msg
+}
+
+func NotifyWalletBalance(frontend chan []byte, account string, balance float64) {
+	var id interface{} = "btcwallet:accountbalance"
+	m := btcjson.Reply{
+		Result: &AccountNtfn{
+			Account:      account,
+			Notification: balance,
+		},
+		Id: &id,
+	}
+	msg, _ := json.Marshal(&m)
+	frontend <- msg
+}
+
+func NotifyWalletBalanceUnconfirmed(frontend chan []byte, account string, balance float64) {
+	var id interface{} = "btcwallet:accountbalanceunconfirmed"
+	m := btcjson.Reply{
+		Result: &AccountNtfn{
+			Account:      account,
+			Notification: balance,
+		},
+		Id: &id,
+	}
+	msg, _ := json.Marshal(&m)
+	frontend <- msg
 }
