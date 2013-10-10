@@ -39,7 +39,7 @@ type UtxoStore []*Utxo
 // Utxo is a type storing information about a single unspent
 // transaction output.
 type Utxo struct {
-	Addr      [ripemd160.Size]byte
+	AddrHash  [ripemd160.Size]byte
 	Out       OutPoint
 	Subscript PkScript
 	Amt       uint64 // Measured in Satoshis
@@ -183,12 +183,12 @@ func (u *UtxoStore) Rollback(height int64, hash *btcwire.ShaHash) (modified bool
 // ReadFrom satisifies the io.ReaderFrom interface.  A Utxo is read
 // from r with the format:
 //
-//  [Addr (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes), BlockHash (32 bytes)]
+//  [AddrHash (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes), BlockHash (32 bytes)]
 //
 // Each field is read little endian.
 func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 	datas := []interface{}{
-		&u.Addr,
+		&u.AddrHash,
 		&u.Out,
 		&u.Subscript,
 		&u.Amt,
@@ -213,12 +213,12 @@ func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 // WriteTo satisifies the io.WriterTo interface.  A Utxo is written to
 // w in the format:
 //
-//  [Addr (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes), BlockHash (32 bytes)]
+//  [AddrHash (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes), BlockHash (32 bytes)]
 //
 // Each field is written little endian.
 func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
 	datas := []interface{}{
-		&u.Addr,
+		&u.AddrHash,
 		&u.Out,
 		&u.Subscript,
 		&u.Amt,

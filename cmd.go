@@ -375,12 +375,12 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		}
 		return false
 	}
-	sender58, ok := v["sender"].(string)
+	sender, ok := v["sender"].(string)
 	if !ok {
 		log.Error("Tx Handler: Unspecified sender.")
 		return false
 	}
-	receiver58, ok := v["receiver"].(string)
+	receiver, ok := v["receiver"].(string)
 	if !ok {
 		log.Error("Tx Handler: Unspecified receiver.")
 		return false
@@ -429,8 +429,13 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		return false
 	}
 
-	sender := btcutil.Base58Decode(sender58)
-	receiver := btcutil.Base58Decode(receiver58)
+	// TODO(jrick): btcd does not find the sender yet.
+	senderHash, _, _ := btcutil.DecodeAddress(sender)
+	receiverHash, _, err := btcutil.DecodeAddress(receiver)
+	if err != nil {
+		log.Error("Tx Handler: receiver address can not be decoded: " + err.Error())
+		return false
+	}
 
 	go func() {
 		t := &tx.RecvTx{
@@ -438,8 +443,8 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		}
 		copy(t.TxHash[:], txhash[:])
 		copy(t.BlockHash[:], blockhash[:])
-		copy(t.SenderAddr[:], sender)
-		copy(t.ReceiverAddr[:], receiver)
+		copy(t.SenderAddr[:], senderHash)
+		copy(t.ReceiverAddr[:], receiverHash)
 
 		w.TxStore.Lock()
 		txs := w.TxStore.s
@@ -457,7 +462,8 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 			}
 			copy(u.Out.Hash[:], txhash[:])
 			u.Out.Index = uint32(index)
-			copy(u.Addr[:], receiver)
+			
+			copy(u.AddrHash[:], receiverHash)
 			copy(u.BlockHash[:], blockhash[:])
 
 			w.UtxoStore.Lock()

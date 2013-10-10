@@ -169,7 +169,7 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 		msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&op.Out), nil))
 	}
 	for i, op := range outputs {
-		addrstr, err := btcutil.EncodeAddress(op.Addr[:], w.Wallet.Net())
+		addrstr, err := btcutil.EncodeAddress(op.AddrHash[:], w.Wallet.Net())
 		if err != nil {
 			return nil, err
 		}

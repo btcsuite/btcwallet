@@ -648,7 +648,7 @@ func (w *Wallet) NextUnusedAddress() (string, error) {
 }
 
 // GetAddressKey returns the private key for a payment address stored
-// in a wallet.  This can fail if the payment address for a different
+// in a wallet.  This can fail if the payment address is for a different
 // Bitcoin network than what this wallet uses, the address is not
 // contained in the wallet, the address does not include a public and
 // private key, or if the wallet is locked.
