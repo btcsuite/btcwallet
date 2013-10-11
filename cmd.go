@@ -410,6 +410,12 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		log.Error("Tx Handler: Unspecified amount.")
 		return false
 	}
+	pkscript58, ok := v["pkscript"].(string)
+	if !ok {
+		log.Error("Tx Handler: Unspecified pubkey script.")
+		return false
+	}
+	pkscript := btcutil.Base58Decode(pkscript58)
 	spent, ok := v["spent"].(bool)
 	if !ok {
 		log.Error("Tx Handler: Unspecified spent field.")
@@ -459,6 +465,7 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 			u := &tx.Utxo{
 				Amt:    uint64(amt),
 				Height: int64(height),
+				Subscript: pkscript,
 			}
 			copy(u.Out.Hash[:], txhash[:])
 			u.Out.Index = uint32(index)
