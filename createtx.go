@@ -160,8 +160,7 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 		if err != nil {
 			return nil, fmt.Errorf("cannot create txout script: %s", err)
 		}
-		txout := btcwire.NewTxOut(int64(change), pkScript)
-		msgtx.AddTxOut(txout)
+		msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
 	}
 
 	// Selected unspent outputs become new transaction's inputs.
@@ -190,9 +189,10 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 	}
 
 	// Validate msgtx before returning the raw transaction.
+	bip16 := time.Now().After(btcscript.Bip16Activation)
 	for i, txin := range msgtx.TxIn {
 		engine, err := btcscript.NewScript(txin.SignatureScript, outputs[i].Subscript, i,
-			msgtx, time.Now().After(btcscript.Bip16Activation))
+			msgtx, bip16)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create script engine: %s", err)
 		}
