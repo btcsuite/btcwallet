@@ -463,13 +463,13 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 	if !spent {
 		go func() {
 			u := &tx.Utxo{
-				Amt:    uint64(amt),
-				Height: int64(height),
+				Amt:       uint64(amt),
+				Height:    int64(height),
 				Subscript: pkscript,
 			}
 			copy(u.Out.Hash[:], txhash[:])
 			u.Out.Index = uint32(index)
-			
+
 			copy(u.AddrHash[:], receiverHash)
 			copy(u.BlockHash[:], blockhash[:])
 
