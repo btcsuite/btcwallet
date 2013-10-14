@@ -60,18 +60,18 @@ func (u ByAmount) Swap(i, j int) {
 	u[i], u[j] = u[j], u[i]
 }
 
-// selectOutputs selects the minimum number possible of unspent
+// selectInputs selects the minimum number possible of unspent
 // outputs to use to create a new transaction that spends amt satoshis.
-// Outputs with less than minconf confirmations are ignored.  btcout is
-// the total number of satoshis which would be spent by the combination
-// of all selected outputs.  err will equal ErrInsufficientFunds if there
+// Previous outputs with less than minconf confirmations are ignored.  btcout
+// is the total number of satoshis which would be spent by the combination
+// of all selected previous outputs.  err will equal ErrInsufficientFunds if there
 // are not enough unspent outputs to spend amt.
-func selectOutputs(s tx.UtxoStore, amt uint64, minconf int) (outputs []*tx.Utxo, btcout uint64, err error) {
+func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, btcout uint64, err error) {
 	height := getCurHeight()
 
-	// Create list of eligible unspent outputs to use as tx inputs, and
-	// sort by the amount in reverse order  so a minimum number of
-	// inputs is needed.
+	// Create list of eligible unspent previous outputs to use as tx
+	// inputs, and sort by the amount in reverse order so a minimum number
+	// of inputs is needed.
 	var eligible []*tx.Utxo
 	for _, utxo := range s {
 		if int(height-utxo.Height) >= minconf {
@@ -80,20 +80,20 @@ func selectOutputs(s tx.UtxoStore, amt uint64, minconf int) (outputs []*tx.Utxo,
 	}
 	sort.Sort(sort.Reverse(ByAmount(eligible)))
 
-	// Iterate throguh eligible transactions, appending to coins and
+	// Iterate throguh eligible transactions, appending to outputs and
 	// increasing btcout.  This is finished when btcout is greater than the
 	// requested amt to spend.
 	for _, u := range eligible {
-		outputs = append(outputs, u)
+		inputs = append(inputs, u)
 		if btcout += u.Amt; btcout >= amt {
-			return outputs, btcout, nil
+			return inputs, btcout, nil
 		}
 	}
 	if btcout < amt {
 		return nil, 0, ErrInsufficientFunds
 	}
 
-	return outputs, btcout, nil
+	return inputs, btcout, nil
 }
 
 // txToPairs creates a raw transaction sending the amounts for each
@@ -103,7 +103,7 @@ func selectOutputs(s tx.UtxoStore, amt uint64, minconf int) (outputs []*tx.Utxo,
 // to addr or as a fee for the miner are sent to a newly generated
 // address. ErrInsufficientFunds is returned if there are not enough
 // eligible unspent outputs to create the transaction.
-func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) (rawtx []byte, err error) {
+func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) (rawtx []byte, inputs []*tx.Utxo, err error) {
 	// Recorded unspent transactions should not be modified until this
 	// finishes.
 	w.UtxoStore.RLock()
@@ -119,22 +119,22 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 	}
 
 	// Select unspent outputs to be used in transaction.
-	outputs, btcout, err := selectOutputs(w.UtxoStore.s, amt+fee, minconf)
+	inputs, btcout, err := selectInputs(w.UtxoStore.s, amt+fee, minconf)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Add outputs to new tx.
 	for addr, amt := range pairs {
 		addr160, _, err := btcutil.DecodeAddress(addr)
 		if err != nil {
-			return nil, fmt.Errorf("cannot decode address: %s", err)
+			return nil, nil, fmt.Errorf("cannot decode address: %s", err)
 		}
 
 		// Spend amt to addr160
 		pkScript, err := btcscript.PayToPubKeyHashScript(addr160)
 		if err != nil {
-			return nil, fmt.Errorf("cannot create txout script: %s", err)
+			return nil, nil, fmt.Errorf("cannot create txout script: %s", err)
 		}
 		txout := btcwire.NewTxOut(int64(amt), pkScript)
 		msgtx.AddTxOut(txout)
@@ -147,43 +147,43 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 		// TODO(jrick): use the next chained address, not the next unused.
 		newaddr, err := w.NextUnusedAddress()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get next unused address: %s", err)
+			return nil, nil, fmt.Errorf("failed to get next unused address: %s", err)
 		}
 
 		// Spend change
 		change := btcout - (amt + fee)
 		newaddr160, _, err := btcutil.DecodeAddress(newaddr)
 		if err != nil {
-			return nil, fmt.Errorf("cannot decode new address: %s", err)
+			return nil, nil, fmt.Errorf("cannot decode new address: %s", err)
 		}
 		pkScript, err := btcscript.PayToPubKeyHashScript(newaddr160)
 		if err != nil {
-			return nil, fmt.Errorf("cannot create txout script: %s", err)
+			return nil, nil, fmt.Errorf("cannot create txout script: %s", err)
 		}
 		msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
 	}
 
 	// Selected unspent outputs become new transaction's inputs.
-	for _, op := range outputs {
-		msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&op.Out), nil))
+	for _, ip := range inputs {
+		msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&ip.Out), nil))
 	}
-	for i, op := range outputs {
-		addrstr, err := btcutil.EncodeAddress(op.AddrHash[:], w.Wallet.Net())
+	for i, ip := range inputs {
+		addrstr, err := btcutil.EncodeAddress(ip.AddrHash[:], w.Wallet.Net())
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		privkey, err := w.GetAddressKey(addrstr)
 		if err != nil {
-			return nil, fmt.Errorf("cannot get address key: %v", err)
+			return nil, nil, fmt.Errorf("cannot get address key: %v", err)
 		}
 
 		// TODO(jrick): we want compressed pubkeys.  Switch wallet to
 		// generate addresses from the compressed key.  This will break
 		// armory wallet compat but oh well.
 		sigscript, err := btcscript.SignatureScript(msgtx, i,
-			op.Subscript, btcscript.SigHashAll, privkey, false)
+			ip.Subscript, btcscript.SigHashAll, privkey, false)
 		if err != nil {
-			return nil, fmt.Errorf("cannot create sigscript: %s", err)
+			return nil, nil, fmt.Errorf("cannot create sigscript: %s", err)
 		}
 		msgtx.TxIn[i].SignatureScript = sigscript
 	}
@@ -191,17 +191,17 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 	// Validate msgtx before returning the raw transaction.
 	bip16 := time.Now().After(btcscript.Bip16Activation)
 	for i, txin := range msgtx.TxIn {
-		engine, err := btcscript.NewScript(txin.SignatureScript, outputs[i].Subscript, i,
+		engine, err := btcscript.NewScript(txin.SignatureScript, inputs[i].Subscript, i,
 			msgtx, bip16)
 		if err != nil {
-			return nil, fmt.Errorf("cannot create script engine: %s", err)
+			return nil, nil, fmt.Errorf("cannot create script engine: %s", err)
 		}
 		if err = engine.Execute(); err != nil {
-			return nil, fmt.Errorf("cannot validate transaction: %s", err)
+			return nil, nil, fmt.Errorf("cannot validate transaction: %s", err)
 		}
 	}
 
 	buf := new(bytes.Buffer)
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
-	return buf.Bytes(), nil
+	return buf.Bytes(), inputs, nil
 }
