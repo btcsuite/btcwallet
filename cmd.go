@@ -75,6 +75,10 @@ type BtcWallet struct {
 	}
 }
 
+// BtcWalletStore stores all wallets currently being handled by
+// btcwallet.  Wallet are stored in a map with the account name as the
+// key.  A RWMutex is used to protect against incorrect concurrent
+// access.
 type BtcWalletStore struct {
 	sync.RWMutex
 	m map[string]*BtcWallet
@@ -87,10 +91,7 @@ func NewBtcWalletStore() *BtcWalletStore {
 	}
 }
 
-// Rollback reverts each stored BtcWallet to a state before the block
-// with the passed chainheight and block hash was connected to the main
-// chain.  This is used to remove transactions and utxos for each wallet
-// that occured on a chain no longer considered to be the main chain.
+// Rollback rolls back each BtcWallet saved in the store.
 func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
 	s.Lock()
 	for _, w := range s.m {
@@ -99,6 +100,10 @@ func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
 	s.Unlock()
 }
 
+// Rollback reverts each stored BtcWallet to a state before the block
+// with the passed chainheight and block hash was connected to the main
+// chain.  This is used to remove transactions and utxos for each wallet
+// that occured on a chain no longer considered to be the main chain.
 func (w *BtcWallet) Rollback(height int64, hash *btcwire.ShaHash) {
 	w.UtxoStore.Lock()
 	w.UtxoStore.dirty = w.UtxoStore.dirty || w.UtxoStore.s.Rollback(height, hash)

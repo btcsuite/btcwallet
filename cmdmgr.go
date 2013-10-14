@@ -310,6 +310,11 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 	}
 }
 
+// GetBalances notifies each attached wallet of the current confirmed
+// and unconfirmed account balances.
+//
+// TODO(jrick): Switch this to return a JSON object (map) of all accounts
+// and their balances, instead of separate notifications for each account.
 func GetBalances(reply chan []byte, msg *btcjson.Message) {
 	wallets.RLock()
 	for _, w := range wallets.m {
@@ -839,7 +844,10 @@ func BtcdConnected(reply chan []byte, msg *btcjson.Message) {
 	ReplySuccess(reply, msg.Id, btcdConnected.b)
 }
 
-// TODO(jrick): move somewhere better so it can be shared with frontends.
+// AccountNtfn is a struct for marshalling any generic notification
+// about a account for a wallet frontend.
+//
+// TODO(jrick): move to btcjson so it can be shared with frontends?
 type AccountNtfn struct {
 	Account      string      `json:"account"`
 	Notification interface{} `json:"notification"`
@@ -860,6 +868,8 @@ func NotifyWalletLockStateChange(account string, locked bool) {
 	frontendNotificationMaster <- msg
 }
 
+// NotifyWalletBalance sends a confirmed account balance notification
+// to a frontend.
 func NotifyWalletBalance(frontend chan []byte, account string, balance float64) {
 	var id interface{} = "btcwallet:accountbalance"
 	m := btcjson.Reply{
@@ -873,6 +883,8 @@ func NotifyWalletBalance(frontend chan []byte, account string, balance float64) 
 	frontend <- msg
 }
 
+// NotifyWalletBalanceUnconfirmed  sends a confirmed account balance
+// notification to a frontend.
 func NotifyWalletBalanceUnconfirmed(frontend chan []byte, account string, balance float64) {
 	var id interface{} = "btcwallet:accountbalanceunconfirmed"
 	m := btcjson.Reply{

@@ -217,7 +217,7 @@ func BtcdHandler(ws *websocket.Conn) {
 		case r := <-btcdMsgs:
 			if err := websocket.Message.Send(ws, r); err != nil {
 				// btcd disconnected.
-				log.Error("Unable to send message to btcd: %v", err)
+				log.Errorf("Unable to send message to btcd: %v", err)
 				return
 			}
 		}

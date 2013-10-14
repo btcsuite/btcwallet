@@ -64,7 +64,7 @@ func TestFakeTxs(t *testing.T) {
 	pairs := map[string]uint64{
 		"17XhEvq9Nahdj7Xe1nv6oRe1tEmaHUuynH": 5000,
 	}
-	rawtx, err := btcw.txToPairs(pairs, 100, 0)
+	rawtx, _, err := btcw.txToPairs(pairs, 100, 0)
 	if err != nil {
 		t.Errorf("Tx creation failed: %s", err)
 		return
