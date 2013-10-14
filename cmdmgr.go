@@ -23,7 +23,6 @@ import (
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
-	"sync"
 	"time"
 )
 
@@ -127,25 +126,6 @@ var (
 	}
 )
 
-var (
-	// seq holds the btcwallet sequence number for frontend messages
-	// which must be sent to and received from btcd.  A Mutex protects
-	// against concurrent access.
-	seq = struct {
-		sync.Mutex
-		n uint64
-	}{}
-
-	// replyRouter maps uint64 ids to reply channels, so btcd replies can
-	// be routed to the correct frontend.
-	replyRouter = struct {
-		sync.Mutex
-		m map[uint64]chan []byte
-	}{
-		m: make(map[uint64]chan []byte),
-	}
-)
-
 // ProcessFrontendMsg checks the message sent from a frontend.  If the
 // message method is one that must be handled by btcwallet, the request
 // is processed here.  Otherwise, the message is sent to btcd.
@@ -190,11 +170,7 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 
 	default:
 		// btcwallet does not understand method.  Pass to btcd.
-		seq.Lock()
-		n := seq.n
-		seq.n++
-		seq.Unlock()
-
+		n := <-NewJsonID
 		var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n,
 			jsonMsg.Id)
 		jsonMsg.Id = &id
@@ -489,11 +465,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Send rawtx off to btcd
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
+	n := <-NewJsonID
 	var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n, msg.Id)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
@@ -606,11 +578,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Send rawtx off to btcd
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
+	n := <-NewJsonID
 	var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n, msg.Id)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
@@ -734,11 +702,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Grab a new unique sequence number for tx notifications in new blocks.
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
+	n := <-NewJsonID
 	bw := &BtcWallet{
 		Wallet:         w,
 		name:           wname,

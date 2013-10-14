@@ -215,11 +215,7 @@ func getCurHeight() (height int64) {
 		return height
 	}
 
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
+	n := <-NewJsonID
 	m, err := btcjson.CreateMessageWithId("getblockcount",
 		fmt.Sprintf("btcwallet(%v)", n))
 	if err != nil {
@@ -285,11 +281,7 @@ func (w *BtcWallet) CalculateBalance(confirmations int) float64 {
 // each address stored in a wallet and sets up a new reply handler for
 // these notifications.
 func (w *BtcWallet) Track() {
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
+	n := <-NewJsonID
 	w.mtx.Lock()
 	w.NewBlockTxSeqN = n
 	w.mtx.Unlock()
@@ -310,11 +302,7 @@ func (w *BtcWallet) Track() {
 // blocks[0].  If len(blocks) is 2 or greater, the rescan will be
 // performed for the block range blocks[0]...blocks[1] (inclusive).
 func (w *BtcWallet) RescanForAddress(addr string, blocks ...int) {
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
-
+	n := <-NewJsonID
 	params := []interface{}{addr}
 	if len(blocks) > 0 {
 		params = append(params, blocks[0])
@@ -493,6 +481,22 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 	return false
 }
 
+// NewJsonID is used to receive the next unique JSON ID for btcd
+// requests, starting from zero and incrementing by one after each
+// read.
+var NewJsonID = make(chan uint64)
+
+// JsonIDGenerator sends incremental integers across a channel.  This
+// is meant to provide a unique value for the JSON ID field for btcd
+// messages.
+func JsonIDGenerator(c chan uint64) {
+	var n uint64
+	for {
+		c <- n
+		n++
+	}
+}
+
 func main() {
 	tcfg, _, err := loadConfig()
 	if err != nil {
@@ -522,6 +526,9 @@ func main() {
 			}
 		}
 	}()
+
+	// Begin generating new IDs for JSON calls.
+	go JsonIDGenerator(NewJsonID)
 
 	for {
 		replies := make(chan error)

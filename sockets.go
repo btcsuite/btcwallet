@@ -58,7 +58,7 @@ var (
 	// Messages sent to this channel are sent to each connected frontend.
 	frontendNotificationMaster = make(chan []byte, 100)
 
-	// replyHandlers maps between a sequence number (passed as part of
+	// replyHandlers maps between a unique number (passed as part of
 	// the JSON Id field) and a function to handle a reply or notification
 	// from btcd.  As requests are received, this map is checked for a
 	// handler function to route the reply to.  If the function returns
@@ -68,6 +68,15 @@ var (
 		m map[uint64]func(interface{}, *btcjson.Error) bool
 	}{
 		m: make(map[uint64]func(interface{}, *btcjson.Error) bool),
+	}
+
+	// replyRouter maps unique uint64 ids to reply channels, so btcd
+	// replies can be routed to the correct frontend.
+	replyRouter = struct {
+		sync.Mutex
+		m map[uint64]chan []byte
+	}{
+		m: make(map[uint64]chan []byte),
 	}
 )
 
@@ -484,10 +493,7 @@ func BtcdConnect(reply chan error) {
 // Bitcoin networks).  If the sanity checks pass, all wallets are set to
 // be tracked against chain notifications from this btcd connection.
 func BtcdHandshake(ws *websocket.Conn) {
-	seq.Lock()
-	n := seq.n
-	seq.n++
-	seq.Unlock()
+	n := <-NewJsonID
 	msg := btcjson.Message{
 		Method: "getcurrentnet",
 		Id:     fmt.Sprintf("btcwallet(%v)", n),
