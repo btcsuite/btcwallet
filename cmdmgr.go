@@ -334,6 +334,10 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 			ReplyError(reply, msg.Id, &e)
 			return
 		}
+		w.dirty = true
+		if err = w.writeDirtyToDisk(); err != nil {
+			log.Errorf("cannot sync dirty wallet: %v", err)
+		}
 		w.ReqNewTxsForAddress(addr)
 		ReplySuccess(reply, msg.Id, addr)
 	} else {
@@ -493,8 +497,10 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		modified := w.UtxoStore.s.Remove(inputs)
 		if modified {
 			w.UtxoStore.dirty = true
-			AddDirtyAccount(w)
 			w.UtxoStore.Unlock()
+			if err := w.writeDirtyToDisk(); err != nil {
+				log.Errorf("cannot sync dirty wallet: %v", err)
+			}
 
 			// Notify all frontends of new account balances.
 			confirmed := w.CalculateBalance(6)
@@ -638,8 +644,10 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		modified := w.UtxoStore.s.Remove(inputs)
 		if modified {
 			w.UtxoStore.dirty = true
-			AddDirtyAccount(w)
 			w.UtxoStore.Unlock()
+			if err := w.writeDirtyToDisk(); err != nil {
+				log.Errorf("cannot sync dirty wallet: %v", err)
+			}
 
 			// Notify all frontends of new account balances.
 			confirmed := w.CalculateBalance(6)
@@ -778,7 +786,9 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	bw.Track()
 
 	wallets.m[wname] = bw
-	AddDirtyAccount(bw)
+	if err := bw.writeDirtyToDisk(); err != nil {
+		log.Errorf("cannot sync dirty wallet: %v", err)
+	}
 	ReplySuccess(reply, msg.Id, nil)
 }
 

@@ -107,17 +107,15 @@ func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
 func (w *BtcWallet) Rollback(height int64, hash *btcwire.ShaHash) {
 	w.UtxoStore.Lock()
 	w.UtxoStore.dirty = w.UtxoStore.dirty || w.UtxoStore.s.Rollback(height, hash)
-	if w.UtxoStore.dirty {
-		AddDirtyAccount(w)
-	}
 	w.UtxoStore.Unlock()
 
 	w.TxStore.Lock()
 	w.TxStore.dirty = w.TxStore.dirty || w.TxStore.s.Rollback(height, hash)
-	if w.TxStore.dirty {
-		AddDirtyAccount(w)
-	}
 	w.TxStore.Unlock()
+
+	if err := w.writeDirtyToDisk(); err != nil {
+		log.Errorf("cannot sync dirty wallet: %v", err)
+	}
 }
 
 // walletdir returns the directory path which holds the wallet, utxo,
@@ -455,8 +453,11 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		txs := w.TxStore.s
 		w.TxStore.s = append(txs, t)
 		w.TxStore.dirty = true
-		AddDirtyAccount(w)
 		w.TxStore.Unlock()
+
+		if err = w.writeDirtyToDisk(); err != nil {
+			log.Errorf("cannot sync dirty wallet: %v", err)
+		}
 	}()
 
 	// Do not add output to utxo store if spent.
@@ -476,8 +477,11 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 			w.UtxoStore.Lock()
 			w.UtxoStore.s = append(w.UtxoStore.s, u)
 			w.UtxoStore.dirty = true
-			AddDirtyAccount(w)
 			w.UtxoStore.Unlock()
+			if err = w.writeDirtyToDisk(); err != nil {
+				log.Errorf("cannot sync dirty wallet: %v", err)
+			}
+
 			confirmed := w.CalculateBalance(6)
 			unconfirmed := w.CalculateBalance(0) - confirmed
 			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
@@ -537,9 +541,6 @@ func main() {
 
 	// Begin generating new IDs for JSON calls.
 	go JSONIDGenerator(NewJSONID)
-
-	// Begin wallet to disk syncer.
-	go DirtyAccountUpdater()
 
 	for {
 		replies := make(chan error)

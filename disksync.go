@@ -23,43 +23,11 @@ import (
 	"time"
 )
 
-var dirtyAccountSet = make(map[*BtcWallet]bool)
-var addDirtyAccount = make(chan *BtcWallet)
-
-// DirtyAccountUpdater is responsible for listening for listens for new
-// dirty wallets (changed in memory with updaets not yet saved to disk)
-// to add to dirtyAccountSet.  This is designed to run as a single goroutine.
-func DirtyAccountUpdater() {
-	timer := time.Tick(time.Minute)
-	for {
-		select {
-		case w := <-addDirtyAccount:
-			dirtyAccountSet[w] = true
-
-		case <-timer:
-			for w := range dirtyAccountSet {
-				if err := w.writeDirtyToDisk(); err != nil {
-					log.Errorf("cannot sync dirty wallet '%v': %v", w.name, err)
-				} else {
-					delete(dirtyAccountSet, w)
-					log.Infof("removed dirty wallet '%v'", w.name)
-				}
-			}
-		}
-	}
-}
-
-// AddDirtyAccount adds w to a set of items to be synced to disk.  The
-// dirty flag must still be set on the various dirty elements of the
-// account (wallet, transactions, and/or utxos) or nothing will be
-// written to disk during the next scheduled sync.
-func AddDirtyAccount(w *BtcWallet) {
-	addDirtyAccount <- w
-}
-
 // writeDirtyToDisk checks for the dirty flag on an account's wallet,
 // txstore, and utxostore, writing them to disk if any are dirty.
 func (w *BtcWallet) writeDirtyToDisk() error {
+	fmt.Println("entered")
+
 	// Temporary files append the current time to the normal file name.
 	// In caes of failure, the most recent temporary file can be inspected
 	// for validity, and moved to replace the main file.
@@ -72,8 +40,8 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 
 	// Wallet
 	if w.dirty {
-		w.mtx.RLock()
-		defer w.mtx.RUnlock()
+		w.mtx.Lock()
+		defer w.mtx.Unlock()
 		tmpfilepath := wfilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
@@ -88,12 +56,14 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 		if err = os.Rename(tmpfilepath, wfilepath); err != nil {
 			return err
 		}
+
+		w.dirty = false
 	}
 
 	// Transactions
 	if w.TxStore.dirty {
-		w.TxStore.RLock()
-		defer w.TxStore.RUnlock()
+		w.TxStore.Lock()
+		defer w.TxStore.Unlock()
 		tmpfilepath := txfilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
@@ -108,12 +78,14 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 		if err = os.Rename(tmpfilepath, txfilepath); err != nil {
 			return err
 		}
+
+		w.TxStore.dirty = false
 	}
 
 	// UTXOs
 	if w.UtxoStore.dirty {
-		w.UtxoStore.RLock()
-		defer w.UtxoStore.RUnlock()
+		w.UtxoStore.Lock()
+		defer w.UtxoStore.Unlock()
 		tmpfilepath := utxofilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
@@ -128,6 +100,8 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 		if err = os.Rename(tmpfilepath, utxofilepath); err != nil {
 			return err
 		}
+
+		w.UtxoStore.dirty = false
 	}
 
 	return nil
