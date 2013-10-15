@@ -493,7 +493,7 @@ func BtcdConnect(reply chan error) {
 // Bitcoin networks).  If the sanity checks pass, all wallets are set to
 // be tracked against chain notifications from this btcd connection.
 func BtcdHandshake(ws *websocket.Conn) {
-	n := <-NewJsonID
+	n := <-NewJSONID
 	msg := btcjson.Message{
 		Method: "getcurrentnet",
 		Id:     fmt.Sprintf("btcwallet(%v)", n),

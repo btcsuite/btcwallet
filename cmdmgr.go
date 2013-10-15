@@ -170,7 +170,7 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 
 	default:
 		// btcwallet does not understand method.  Pass to btcd.
-		n := <-NewJsonID
+		n := <-NewJSONID
 		var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n,
 			jsonMsg.Id)
 		jsonMsg.Id = &id
@@ -465,7 +465,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Send rawtx off to btcd
-	n := <-NewJsonID
+	n := <-NewJSONID
 	var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
@@ -609,7 +609,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Send rawtx off to btcd
-	n := <-NewJsonID
+	n := <-NewJSONID
 	var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
@@ -764,7 +764,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Grab a new unique sequence number for tx notifications in new blocks.
-	n := <-NewJsonID
+	n := <-NewJSONID
 	bw := &BtcWallet{
 		Wallet:         w,
 		name:           wname,
