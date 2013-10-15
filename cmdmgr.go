@@ -482,14 +482,34 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 			return true
 		}
 
+		// TODO(jrick): btcd cannot be trusted to successfully relay the
+		// tx to the Bitcoin network.  Even if this succeeds, the rawtx
+		// must be saved and checked for if it exists in a later block.
+		// btcd will make a best try effort, but ultimately it's
+		// btcwallet's responsibility.
+
+		// Remove previous unspent outputs now spent by the tx.
+		w.UtxoStore.Lock()
+		modified := w.UtxoStore.s.Remove(inputs)
+		if modified {
+			w.UtxoStore.dirty = true
+			w.UtxoStore.Unlock()
+
+			// Notify all frontends of new account balances.
+			confirmed := w.CalculateBalance(6)
+			unconfirmed := w.CalculateBalance(0) - confirmed
+			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
+			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+		} else {
+			w.UtxoStore.Unlock()
+		}
+
+		ReplySuccess(reply, msg.Id, result)
+
 		// TODO(jrick): If message succeeded in being sent, save the
 		// transaction details with comments.
 		_, _ = comment, commentto
 
-		// TODO(jrick): remove previous unspent outputs now spent by the tx.
-		_ = inputs
-
-		ReplySuccess(reply, msg.Id, result)
 		return true
 	}
 	replyHandlers.Unlock()
@@ -606,14 +626,34 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 			return true
 		}
 
+		// TODO(jrick): btcd cannot be trusted to successfully relay the
+		// tx to the Bitcoin network.  Even if this succeeds, the rawtx
+		// must be saved and checked for if it exists in a later block.
+		// btcd will make a best try effort, but ultimately it's
+		// btcwallet's responsibility.
+
+		// Remove previous unspent outputs now spent by the tx.
+		w.UtxoStore.Lock()
+		modified := w.UtxoStore.s.Remove(inputs)
+		if modified {
+			w.UtxoStore.dirty = true
+			w.UtxoStore.Unlock()
+
+			// Notify all frontends of new account balances.
+			confirmed := w.CalculateBalance(6)
+			unconfirmed := w.CalculateBalance(0) - confirmed
+			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
+			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+		} else {
+			w.UtxoStore.Unlock()
+		}
+
+		ReplySuccess(reply, msg.Id, result)
+
 		// TODO(jrick): If message succeeded in being sent, save the
 		// transaction details with comments.
 		_ = comment
 
-		// TODO(jrick): remove previous unspent outputs now spent by the tx.
-		_ = inputs
-
-		ReplySuccess(reply, msg.Id, result)
 		return true
 	}
 	replyHandlers.Unlock()
