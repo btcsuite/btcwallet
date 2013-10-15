@@ -493,6 +493,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		modified := w.UtxoStore.s.Remove(inputs)
 		if modified {
 			w.UtxoStore.dirty = true
+			AddDirtyAccount(w)
 			w.UtxoStore.Unlock()
 
 			// Notify all frontends of new account balances.
@@ -637,6 +638,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		modified := w.UtxoStore.s.Remove(inputs)
 		if modified {
 			w.UtxoStore.dirty = true
+			AddDirtyAccount(w)
 			w.UtxoStore.Unlock()
 
 			// Notify all frontends of new account balances.
@@ -768,6 +770,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	bw := &BtcWallet{
 		Wallet:         w,
 		name:           wname,
+		dirty:          true,
 		NewBlockTxSeqN: n,
 	}
 	// TODO(jrick): only begin tracking wallet if btcwallet is already
@@ -775,6 +778,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	bw.Track()
 
 	wallets.m[wname] = bw
+	AddDirtyAccount(bw)
 	ReplySuccess(reply, msg.Id, nil)
 }
 
