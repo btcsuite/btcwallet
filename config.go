@@ -45,7 +45,7 @@ type config struct {
 	DataDir     string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
 	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
 	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
-	MainNet     bool   `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
+	MainNet     bool   `long:"mainnet" description:"*DISABLED* Use the main Bitcoin network (default testnet3)"`
 }
 
 // btcwalletHomeDir returns an OS appropriate home directory for btcwallet.
@@ -143,6 +143,9 @@ func loadConfig() (*config, []string, error) {
 		}
 		return nil, nil, err
 	}
+
+	// TODO(jrick): Enable mainnet support again when ready.
+	cfg.MainNet = false
 
 	return &cfg, remainingArgs, nil
 }
