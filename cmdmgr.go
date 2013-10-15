@@ -466,7 +466,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 
 	// Send rawtx off to btcd
 	n := <-NewJsonID
-	var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n, msg.Id)
+	var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
 	if err != nil {
@@ -475,14 +475,24 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		ReplyError(reply, msg.Id, &e)
 		return
 	}
-	replyRouter.Lock()
-	replyRouter.m[n] = reply
-	replyRouter.Unlock()
-	btcdMsgs <- m
+	replyHandlers.Lock()
+	replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
+		if err != nil {
+			ReplyError(reply, msg.Id, err)
+			return true
+		}
 
-	// TODO(jrick): If message succeeded in being sent, save the
-	// transaction details with comments.
-	_, _ = comment, commentto
+		// TODO(jrick): If message succeeded in being sent, save the
+		// transaction details with comments.
+		_, _ = comment, commentto
+
+		// TODO(jrick): remove previous unspent outputs now spent by the tx.
+
+		ReplySuccess(reply, msg.Id, result)
+		return true
+	}
+	replyHandlers.Unlock()
+	btcdMsgs <- m
 }
 
 // SendMany creates a new transaction spending unspent transaction
@@ -579,7 +589,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 
 	// Send rawtx off to btcd
 	n := <-NewJsonID
-	var id interface{} = fmt.Sprintf("btcwallet(%v)-%v", n, msg.Id)
+	var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
 	if err != nil {
@@ -588,14 +598,24 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		ReplyError(reply, msg.Id, &e)
 		return
 	}
-	replyRouter.Lock()
-	replyRouter.m[n] = reply
-	replyRouter.Unlock()
-	btcdMsgs <- m
+	replyHandlers.Lock()
+	replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
+		if err != nil {
+			ReplyError(reply, msg.Id, err)
+			return true
+		}
 
-	// TODO(jrick): If message succeeded in being sent, save the
-	// transaction details with comments.
-	_ = comment
+		// TODO(jrick): If message succeeded in being sent, save the
+		// transaction details with comments.
+		_ = comment
+
+		// TODO(jrick): remove previous unspent outputs now spent by the tx.
+
+		ReplySuccess(reply, msg.Id, result)
+		return true
+	}
+	replyHandlers.Unlock()
+	btcdMsgs <- m
 }
 
 // SetTxFee sets the global transaction fee added to transactions.
