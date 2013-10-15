@@ -456,7 +456,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	pairs := map[string]uint64{
 		toaddr58: uint64(amt),
 	}
-	rawtx, _, err := w.txToPairs(pairs, uint64(fee), int(minconf))
+	rawtx, inputs, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := InternalError
 		e.Message = err.Error()
@@ -487,6 +487,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		_, _ = comment, commentto
 
 		// TODO(jrick): remove previous unspent outputs now spent by the tx.
+		_ = inputs
 
 		ReplySuccess(reply, msg.Id, result)
 		return true
@@ -579,7 +580,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	TxFee.Lock()
 	fee := TxFee.i
 	TxFee.Unlock()
-	rawtx, _, err := w.txToPairs(pairs, uint64(fee), int(minconf))
+	rawtx, inputs, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := InternalError
 		e.Message = err.Error()
@@ -610,6 +611,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		_ = comment
 
 		// TODO(jrick): remove previous unspent outputs now spent by the tx.
+		_ = inputs
 
 		ReplySuccess(reply, msg.Id, result)
 		return true

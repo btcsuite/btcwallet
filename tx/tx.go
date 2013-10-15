@@ -180,6 +180,38 @@ func (u *UtxoStore) Rollback(height int64, hash *btcwire.ShaHash) (modified bool
 	return
 }
 
+// Remove removes all utxos from toRemove from a UtxoStore.  The order
+// of utxos in the resulting UtxoStore is unspecified.
+func (u *UtxoStore) Remove(toRemove []*Utxo) (modified bool) {
+	s := *u
+
+	m := make(map[*Utxo]bool)
+	for _, utxo := range s {
+		m[utxo] = true
+	}
+
+	for _, candidate := range toRemove {
+		if _, ok := m[candidate]; ok {
+			modified = true
+		}
+		delete(m, candidate)
+	}
+
+	if !modified {
+		return
+	}
+
+	s = make([]*Utxo, len(m))
+	i := 0
+	for utxo := range m {
+		s[i] = utxo
+		i++
+	}
+
+	*u = s
+	return
+}
+
 // ReadFrom satisifies the io.ReaderFrom interface.  A Utxo is read
 // from r with the format:
 //
