@@ -441,7 +441,7 @@ func FrontendListenAndServe() error {
 	// TODO(jrick): We need some sort of authentication before websocket
 	// connections are allowed, and perhaps TLS on the server as well.
 	http.Handle("/frontend", websocket.Handler(frontendReqsNotifications))
-	return http.ListenAndServe(fmt.Sprintf(":%d", cfg.SvrPort), nil)
+	return http.ListenAndServe(fmt.Sprintf(":%s", cfg.SvrPort), nil)
 }
 
 // BtcdConnect connects to a running btcd instance over a websocket
@@ -450,7 +450,7 @@ func FrontendListenAndServe() error {
 func BtcdConnect(reply chan error) {
 	// btcd requires basic authorization, so we use a custom config with
 	// the Authorization header set.
-	server := fmt.Sprintf("ws://localhost:%d/wallet", cfg.BtcdPort)
+	server := fmt.Sprintf("ws://localhost:%s/wallet", cfg.BtcdPort)
 	login := cfg.Username + ":" + cfg.Password
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	config, err := websocket.NewConfig(server, "http://localhost/")

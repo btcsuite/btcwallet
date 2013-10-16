@@ -26,6 +26,7 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/seelog"
+	"github.com/davecgh/go-spew/spew"
 	"os"
 	"path/filepath"
 	"sync"
@@ -526,6 +527,7 @@ func main() {
 		wallets.m[""] = w
 		wallets.Unlock()
 	}
+	spew.Dump(cfg)
 
 	go func() {
 		// Start HTTP server to listen and send messages to frontend and btcd

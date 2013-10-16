@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/conformal/btcwire"
 	"github.com/conformal/go-flags"
 	"os"
 	"path/filepath"
@@ -26,9 +27,8 @@ import (
 
 const (
 	defaultConfigFilename = "btcwallet.conf"
-	defaultBtcdPort       = 8334
+	defaultBtcNet         = btcwire.TestNet3
 	defaultLogLevel       = "info"
-	defaultServerPort     = 8332
 )
 
 var (
@@ -38,10 +38,10 @@ var (
 
 type config struct {
 	ShowVersion bool   `short:"V" long:"version" description:"Display version information and exit"`
-	BtcdPort    int    `short:"b" long:"btcdport" description:"Port to connect to btcd on"`
+	BtcdPort    string `short:"b" long:"btcdport" description:"Port to connect to btcd on (default: 18334, mainnet: 18332)"`
 	DebugLevel  string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	ConfigFile  string `short:"C" long:"configfile" description:"Path to configuration file"`
-	SvrPort     int    `short:"p" long:"serverport" description:"Port to serve frontend websocket connections on"`
+	SvrPort     string `short:"p" long:"serverport" description:"Port to serve frontend websocket connections on (default: 18332, mainnet: 8332)"`
 	DataDir     string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
 	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
 	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
@@ -64,6 +64,20 @@ func btcwalletHomeDir() string {
 
 	// In the worst case, use the current directory.
 	return "."
+}
+
+// updateConfigWithActiveParams update the passed config with parameters
+// from the active net params if the relevant options in the passed config
+// object are the default so options specified by the user on the command line
+// are not overridden.
+func updateConfigWithActiveParams(cfg *config) {
+	if cfg.BtcdPort == netParams(defaultBtcNet).btcdPort {
+		cfg.BtcdPort = activeNetParams.btcdPort
+	}
+
+	if cfg.SvrPort == netParams(defaultBtcNet).svrPort {
+		cfg.SvrPort = activeNetParams.svrPort
+	}
 }
 
 // filesExists reports whether the named file or directory exists.
@@ -93,8 +107,8 @@ func loadConfig() (*config, []string, error) {
 	cfg := config{
 		DebugLevel: defaultLogLevel,
 		ConfigFile: defaultConfigFile,
-		BtcdPort:   defaultBtcdPort,
-		SvrPort:    defaultServerPort,
+		BtcdPort:   netParams(defaultBtcNet).btcdPort,
+		SvrPort:    netParams(defaultBtcNet).svrPort,
 		DataDir:    defaultDataDir,
 	}
 
@@ -146,6 +160,12 @@ func loadConfig() (*config, []string, error) {
 
 	// TODO(jrick): Enable mainnet support again when ready.
 	cfg.MainNet = false
+
+	// Choose the active network params based on the mainnet net flag.
+	if cfg.MainNet {
+		activeNetParams = netParams(btcwire.MainNet)
+	}
+	updateConfigWithActiveParams(&cfg)
 
 	return &cfg, remainingArgs, nil
 }
