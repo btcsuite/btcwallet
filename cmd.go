@@ -134,6 +134,9 @@ func walletdir(cfg *config, account string) string {
 // OpenWallet opens a wallet described by account in the data
 // directory specified by cfg.  If the wallet does not exist, ErrNoWallet
 // is returned as an error.
+//
+// Wallets opened from this function are not set to track against a
+// btcd connection.
 func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 	wdir := walletdir(cfg, account)
 	fi, err := os.Stat(wdir)
@@ -203,7 +206,6 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 	w := &BtcWallet{
 		Wallet: wlt,
 		name:   account,
-		//NewBlockTxSeqN: // TODO(jrick): this MUST be set or notifications will be lost.
 	}
 	w.UtxoStore.s = utxos
 	w.TxStore.s = txs
@@ -294,7 +296,7 @@ func (w *BtcWallet) Track() {
 	replyHandlers.m[n] = w.newBlockTxHandler
 	replyHandlers.Unlock()
 	for _, addr := range w.GetActiveAddresses() {
-		go w.ReqNewTxsForAddress(addr)
+		w.ReqNewTxsForAddress(addr)
 	}
 }
 
@@ -339,6 +341,8 @@ func (w *BtcWallet) RescanForAddress(addr string, blocks ...int) {
 // ReqNewTxsForAddress sends a message to btcd to request tx updates
 // for addr for each new block that is added to the blockchain.
 func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
+	log.Debugf("Requesting notifications of TXs sending to address %v", addr)
+
 	w.mtx.RLock()
 	n := w.NewBlockTxSeqN
 	w.mtx.RUnlock()
