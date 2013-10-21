@@ -752,13 +752,13 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 
 	// Does this wallet already exist?
 	wallets.Lock()
+	defer wallets.Unlock()
 	if w := wallets.m[wname]; w != nil {
 		e := WalletInvalidAccountName
 		e.Message = "Wallet already exists."
 		ReplyError(reply, msg.Id, &e)
 		return
 	}
-	defer wallets.Unlock()
 
 	var net btcwire.BitcoinNet
 	if cfg.MainNet {
