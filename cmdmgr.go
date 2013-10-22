@@ -26,106 +26,6 @@ import (
 	"time"
 )
 
-// Standard JSON-RPC 2.0 errors
-var (
-	InvalidRequest = btcjson.Error{
-		Code:    -32600,
-		Message: "Invalid request",
-	}
-	MethodNotFound = btcjson.Error{
-		Code:    -32601,
-		Message: "Method not found",
-	}
-	InvalidParams = btcjson.Error{
-		Code:    -32602,
-		Message: "Invalid paramaters",
-	}
-	InternalError = btcjson.Error{
-		Code:    -32603,
-		Message: "Internal error",
-	}
-	ParseError = btcjson.Error{
-		Code:    -32700,
-		Message: "Parse error",
-	}
-)
-
-// General application defined JSON errors
-var (
-	MiscError = btcjson.Error{
-		Code:    -1,
-		Message: "Miscellaneous error",
-	}
-	ForbiddenBySafeMode = btcjson.Error{
-		Code:    -2,
-		Message: "Server is in safe mode, and command is not allowed in safe mode",
-	}
-	TypeError = btcjson.Error{
-		Code:    -3,
-		Message: "Unexpected type was passed as parameter",
-	}
-	InvalidAddressOrKey = btcjson.Error{
-		Code:    -5,
-		Message: "Invalid address or key",
-	}
-	OutOfMemory = btcjson.Error{
-		Code:    -7,
-		Message: "Ran out of memory during operation",
-	}
-	InvalidParameter = btcjson.Error{
-		Code:    -8,
-		Message: "Invalid, missing or duplicate parameter",
-	}
-	DatabaseError = btcjson.Error{
-		Code:    -20,
-		Message: "Database error",
-	}
-	DeserializationError = btcjson.Error{
-		Code:    -22,
-		Message: "Error parsing or validating structure in raw format",
-	}
-)
-
-// Wallet JSON errors
-var (
-	WalletError = btcjson.Error{
-		Code:    -4,
-		Message: "Unspecified problem with wallet",
-	}
-	WalletInsufficientFunds = btcjson.Error{
-		Code:    -6,
-		Message: "Not enough funds in wallet or account",
-	}
-	WalletInvalidAccountName = btcjson.Error{
-		Code:    -11,
-		Message: "Invalid account name",
-	}
-	WalletKeypoolRanOut = btcjson.Error{
-		Code:    -12,
-		Message: "Keypool ran out, call keypoolrefill first",
-	}
-	WalletUnlockNeeded = btcjson.Error{
-		Code:    -13,
-		Message: "Enter the wallet passphrase with walletpassphrase first",
-	}
-	WalletPassphraseIncorrect = btcjson.Error{
-		Code:    -14,
-		Message: "The wallet passphrase entered was incorrect",
-	}
-	WalletWrongEncState = btcjson.Error{
-		Code:    -15,
-		Message: "Command given in wrong wallet encryption state",
-	}
-	WalletEncryptionFailed = btcjson.Error{
-		Code:    -16,
-		Message: "Failed to encrypt the wallet",
-	}
-	WalletAlreadyUnlocked = btcjson.Error{
-		Code:    -17,
-		Message: "Wallet is already unlocked",
-	}
-)
-
 // ProcessFrontendMsg checks the message sent from a frontend.  If the
 // message method is one that must be handled by btcwallet, the request
 // is processed here.  Otherwise, the message is sent to btcd.
@@ -215,7 +115,7 @@ func ReplySuccess(reply chan []byte, id interface{}, result interface{}) {
 
 // GetAddressesByAccount replies with all addresses for an account.
 func GetAddressesByAccount(reply chan []byte, msg *btcjson.Message) {
-	e := InvalidParams
+	e := btcjson.ErrInvalidParams
 
 	// TODO(jrick): check if we can make btcjson.Message.Params
 	// a []interface{} to avoid this.
@@ -239,7 +139,7 @@ func GetAddressesByAccount(reply chan []byte, msg *btcjson.Message) {
 	if w != nil {
 		result = w.Wallet.GetActiveAddresses()
 	} else {
-		ReplyError(reply, msg.Id, &WalletInvalidAccountName)
+		ReplyError(reply, msg.Id, &btcjson.ErrWalletInvalidAccountName)
 		return
 	}
 
@@ -261,14 +161,14 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 		if s, ok := params[0].(string); ok {
 			wname = s
 		} else {
-			ReplyError(reply, msg.Id, &InvalidParams)
+			ReplyError(reply, msg.Id, &btcjson.ErrInvalidParams)
 		}
 	}
 	if len(params) > 1 {
 		if f, ok := params[1].(float64); ok {
 			conf = int(f)
 		} else {
-			ReplyError(reply, msg.Id, &InvalidParams)
+			ReplyError(reply, msg.Id, &btcjson.ErrInvalidParams)
 		}
 	}
 
@@ -280,7 +180,7 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 		result = w.CalculateBalance(conf)
 		ReplySuccess(reply, msg.Id, result)
 	} else {
-		e := WalletInvalidAccountName
+		e := btcjson.ErrWalletInvalidAccountName
 		e.Message = fmt.Sprintf("Wallet for account '%s' does not exist.", wname)
 		ReplyError(reply, msg.Id, &e)
 	}
@@ -306,7 +206,7 @@ func GetBalances(reply chan []byte, msg *btcjson.Message) {
 // the requested wallet does not exist, a JSON error will be returned to
 // the client.
 func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
-	e := InvalidParams
+	e := btcjson.ErrInvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
 		ReplyError(reply, msg.Id, &e)
@@ -329,7 +229,7 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 		// TODO(jrick): generate new addresses if the address pool is empty.
 		addr, err := w.NextUnusedAddress()
 		if err != nil {
-			e := InternalError
+			e := btcjson.ErrInternal
 			e.Message = fmt.Sprintf("New address generation not implemented yet")
 			ReplyError(reply, msg.Id, &e)
 			return
@@ -341,7 +241,7 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 		w.ReqNewTxsForAddress(addr)
 		ReplySuccess(reply, msg.Id, addr)
 	} else {
-		e := WalletInvalidAccountName
+		e := btcjson.ErrWalletInvalidAccountName
 		e.Message = fmt.Sprintf("Wallet for account '%s' does not exist.", wname)
 		ReplyError(reply, msg.Id, &e)
 	}
@@ -351,7 +251,7 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 // keys and their balances as values.
 func ListAccounts(reply chan []byte, msg *btcjson.Message) {
 	minconf := 1
-	e := InvalidParams
+	e := btcjson.ErrInvalidParams
 	params, ok := msg.Params.([]interface{})
 	if ok && len(params) != 0 {
 		fnum, ok := params[0].(float64)
@@ -379,7 +279,7 @@ func ListAccounts(reply chan []byte, msg *btcjson.Message) {
 // not sent to the payment address or a fee for the miner are sent
 // back to a new address in the wallet.
 func SendFrom(reply chan []byte, msg *btcjson.Message) {
-	e := InvalidParams
+	e := btcjson.ErrInvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
 		e.Message = "Cannot parse parameters."
@@ -450,7 +350,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	w := wallets.m[fromaccount]
 	wallets.Unlock()
 	if w.IsLocked() {
-		ReplyError(reply, msg.Id, &WalletUnlockNeeded)
+		ReplyError(reply, msg.Id, &btcjson.ErrWalletUnlockNeeded)
 		return
 	}
 
@@ -462,7 +362,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	}
 	rawtx, inputs, changeUtxo, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
-		e := InternalError
+		e := btcjson.ErrInternal
 		e.Message = err.Error()
 		ReplyError(reply, msg.Id, &e)
 		return
@@ -474,7 +374,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
 	if err != nil {
-		e := InternalError
+		e := btcjson.ErrInternal
 		e.Message = err.Error()
 		ReplyError(reply, msg.Id, &e)
 		return
@@ -536,7 +436,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 // inputs not sent to the payment address or a fee for the miner are
 // sent back to a new address in the wallet.
 func SendMany(reply chan []byte, msg *btcjson.Message) {
-	e := InvalidParams
+	e := btcjson.ErrInvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
 		e.Message = "Cannot parse parameters."
@@ -608,7 +508,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	w := wallets.m[fromaccount]
 	wallets.Unlock()
 	if w.IsLocked() {
-		ReplyError(reply, msg.Id, &WalletUnlockNeeded)
+		ReplyError(reply, msg.Id, &btcjson.ErrWalletUnlockNeeded)
 		return
 	}
 
@@ -617,7 +517,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	TxFee.Unlock()
 	rawtx, inputs, changeUtxo, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
-		e := InternalError
+		e := btcjson.ErrInternal
 		e.Message = err.Error()
 		ReplyError(reply, msg.Id, &e)
 		return
@@ -629,7 +529,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
 		hex.EncodeToString(rawtx))
 	if err != nil {
-		e := InternalError
+		e := btcjson.ErrInternal
 		e.Message = err.Error()
 		ReplyError(reply, msg.Id, &e)
 		return
@@ -688,7 +588,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 
 // SetTxFee sets the global transaction fee added to transactions.
 func SetTxFee(reply chan []byte, msg *btcjson.Message) {
-	e := InvalidParams
+	e := btcjson.ErrInvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
 		ReplyError(reply, msg.Id, &e)
@@ -736,7 +636,7 @@ func SetTxFee(reply chan []byte, msg *btcjson.Message) {
 // Wallets will be created on TestNet3, or MainNet if btcwallet is run with
 // the --mainnet option.
 func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
-	e := InvalidParams
+	e := btcjson.ErrInvalidParams
 	params, ok := msg.Params.([]interface{})
 	if !ok {
 		ReplyError(reply, msg.Id, &e)
@@ -770,7 +670,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	wallets.Lock()
 	defer wallets.Unlock()
 	if w := wallets.m[wname]; w != nil {
-		e := WalletInvalidAccountName
+		e := btcjson.ErrWalletInvalidAccountName
 		e.Message = "Wallet already exists."
 		ReplyError(reply, msg.Id, &e)
 		return
@@ -785,7 +685,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	w, err := wallet.NewWallet(wname, desc, []byte(pass), net)
 	if err != nil {
 		log.Error("Error creating wallet: " + err.Error())
-		ReplyError(reply, msg.Id, &InternalError)
+		ReplyError(reply, msg.Id, &btcjson.ErrInternal)
 		return
 	}
 
@@ -820,7 +720,7 @@ func WalletIsLocked(reply chan []byte, msg *btcjson.Message) {
 		if acct, ok := params[0].(string); ok {
 			account = acct
 		} else {
-			ReplyError(reply, msg.Id, &InvalidParams)
+			ReplyError(reply, msg.Id, &btcjson.ErrInvalidParams)
 			return
 		}
 	}
@@ -831,7 +731,7 @@ func WalletIsLocked(reply chan []byte, msg *btcjson.Message) {
 		result := w.IsLocked()
 		ReplySuccess(reply, msg.Id, result)
 	} else {
-		ReplyError(reply, msg.Id, &WalletInvalidAccountName)
+		ReplyError(reply, msg.Id, &btcjson.ErrWalletInvalidAccountName)
 	}
 }
 
@@ -846,7 +746,7 @@ func WalletLock(reply chan []byte, msg *btcjson.Message) {
 	wallets.RUnlock()
 	if w != nil {
 		if err := w.Lock(); err != nil {
-			ReplyError(reply, msg.Id, &WalletWrongEncState)
+			ReplyError(reply, msg.Id, &btcjson.ErrWalletWrongEncState)
 		} else {
 			ReplySuccess(reply, msg.Id, nil)
 			NotifyWalletLockStateChange("", true)
@@ -865,13 +765,13 @@ func WalletPassphrase(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 	if len(params) != 2 {
-		ReplyError(reply, msg.Id, &InvalidParams)
+		ReplyError(reply, msg.Id, &btcjson.ErrInvalidParams)
 		return
 	}
 	passphrase, ok1 := params[0].(string)
 	timeout, ok2 := params[1].(float64)
 	if !ok1 || !ok2 {
-		ReplyError(reply, msg.Id, &InvalidParams)
+		ReplyError(reply, msg.Id, &btcjson.ErrInvalidParams)
 		return
 	}
 
@@ -880,7 +780,7 @@ func WalletPassphrase(reply chan []byte, msg *btcjson.Message) {
 	wallets.RUnlock()
 	if w != nil {
 		if err := w.Unlock([]byte(passphrase)); err != nil {
-			ReplyError(reply, msg.Id, &WalletPassphraseIncorrect)
+			ReplyError(reply, msg.Id, &btcjson.ErrWalletPassphraseIncorrect)
 			return
 		}
 		ReplySuccess(reply, msg.Id, nil)
