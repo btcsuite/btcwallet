@@ -554,7 +554,6 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 				}
 				if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
 					// Found it.
-					fmt.Println("omg everything worked.")
 					copy(u.BlockHash[:], blockhash[:])
 					u.Height = int64(height)
 					w.UtxoStore.RUnlock()
