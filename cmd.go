@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,11 +60,12 @@ var (
 // to prevent against incorrect multiple access.
 type BtcWallet struct {
 	*wallet.Wallet
-	mtx            sync.RWMutex
-	name           string
-	dirty          bool
-	NewBlockTxSeqN uint64
-	UtxoStore      struct {
+	mtx               sync.RWMutex
+	name              string
+	dirty             bool
+	NewBlockTxSeqN    uint64
+	SpentOutpointSeqN uint64
+	UtxoStore         struct {
 		sync.RWMutex
 		dirty bool
 		s     tx.UtxoStore
@@ -276,7 +278,11 @@ func (w *BtcWallet) CalculateBalance(confirmations int) float64 {
 	w.UtxoStore.RLock()
 	for _, u := range w.UtxoStore.s {
 		if int(height-u.Height) >= confirmations {
-			bal += u.Amt
+			// Utxos not yet in blocks (height -1) should only be
+			// added if confirmations is 0.
+			if u.Height != -1 || (confirmations == 0 && u.Height == -1) {
+				bal += u.Amt
+			}
 		}
 	}
 	w.UtxoStore.RUnlock()
@@ -298,6 +304,20 @@ func (w *BtcWallet) Track() {
 	for _, addr := range w.GetActiveAddresses() {
 		w.ReqNewTxsForAddress(addr)
 	}
+
+	n = <-NewJSONID
+	w.mtx.Lock()
+	w.SpentOutpointSeqN = n
+	w.mtx.Unlock()
+
+	replyHandlers.Lock()
+	replyHandlers.m[n] = w.spentUtxoHandler
+	replyHandlers.Unlock()
+	w.UtxoStore.RLock()
+	for _, utxo := range w.UtxoStore.s {
+		w.ReqSpentUtxoNtfn(utxo)
+	}
+	w.UtxoStore.RUnlock()
 }
 
 // RescanForAddress requests btcd to rescan the blockchain for new
@@ -356,6 +376,63 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 	msg, _ := json.Marshal(m)
 
 	btcdMsgs <- msg
+}
+
+// ReqSpentUtxoNtfn sends a message to btcd to request updates for when
+// a stored UTXO has been spent.
+func (w *BtcWallet) ReqSpentUtxoNtfn(u *tx.Utxo) {
+	log.Debugf("Requesting spent UTXO notifications for Outpoint hash %s index %d",
+		u.Out.Hash, u.Out.Index)
+
+	w.mtx.RLock()
+	n := w.SpentOutpointSeqN
+	w.mtx.RUnlock()
+
+	m := &btcjson.Message{
+		Jsonrpc: "1.0",
+		Id:      fmt.Sprintf("btcwallet(%d)", n),
+		Method:  "notifyspent",
+		Params: []interface{}{
+			u.Out.Hash.String(),
+			u.Out.Index,
+		},
+	}
+	msg, _ := json.Marshal(m)
+
+	btcdMsgs <- msg
+}
+
+// spentUtxoHandler is the handler function for btcd spent UTXO notifications
+// resulting from transactions in newly-attached blocks.
+func (w *BtcWallet) spentUtxoHandler(result interface{}, e *btcjson.Error) bool {
+	if e != nil {
+		log.Errorf("Spent UTXO Handler: Error %d received from btcd: %s",
+			e.Code, e.Message)
+		return false
+	}
+	v, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	txHashBE, ok := v["txhash"].(string)
+	if !ok {
+		log.Error("Spent UTXO Handler: Unspecified transaction hash.")
+		return false
+	}
+	txHash, err := btcwire.NewShaHashFromStr(txHashBE)
+	if err != nil {
+		log.Errorf("Spent UTXO Handler: Bad transaction hash: %s", err)
+		return false
+	}
+	index, ok := v["index"].(float64)
+	if !ok {
+		log.Error("Spent UTXO Handler: Unspecified index.")
+	}
+
+	_, _ = txHash, index
+
+	// Never remove this handler.
+	return false
 }
 
 // newBlockTxHandler is the handler function for btcd transaction
@@ -467,6 +544,25 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 	// Do not add output to utxo store if spent.
 	if !spent {
 		go func() {
+			// First, iterate through all stored utxos.  If an unconfirmed utxo
+			// (not present in a block) has the same outpoint as this utxo,
+			// update the block height and hash.
+			w.UtxoStore.RLock()
+			for _, u := range w.UtxoStore.s {
+				if u.Height != -1 {
+					continue
+				}
+				if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
+					// Found it.
+					fmt.Println("omg everything worked.")
+					copy(u.BlockHash[:], blockhash[:])
+					u.Height = int64(height)
+					w.UtxoStore.RUnlock()
+					return
+				}
+			}
+			w.UtxoStore.RUnlock()
+
 			u := &tx.Utxo{
 				Amt:       uint64(amt),
 				Height:    int64(height),

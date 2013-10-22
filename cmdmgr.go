@@ -460,7 +460,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	pairs := map[string]uint64{
 		toaddr58: uint64(amt),
 	}
-	rawtx, inputs, err := w.txToPairs(pairs, uint64(fee), int(minconf))
+	rawtx, inputs, changeUtxo, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := InternalError
 		e.Message = err.Error()
@@ -495,6 +495,14 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		// Remove previous unspent outputs now spent by the tx.
 		w.UtxoStore.Lock()
 		modified := w.UtxoStore.s.Remove(inputs)
+
+		// Add unconfirmed change utxo (if any) to UtxoStore.
+		if changeUtxo != nil {
+			w.UtxoStore.s = append(w.UtxoStore.s, changeUtxo)
+			w.ReqSpentUtxoNtfn(changeUtxo)
+			modified = true
+		}
+
 		if modified {
 			w.UtxoStore.dirty = true
 			w.UtxoStore.Unlock()
@@ -607,7 +615,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	TxFee.Lock()
 	fee := TxFee.i
 	TxFee.Unlock()
-	rawtx, inputs, err := w.txToPairs(pairs, uint64(fee), int(minconf))
+	rawtx, inputs, changeUtxo, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := InternalError
 		e.Message = err.Error()
@@ -642,6 +650,14 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		// Remove previous unspent outputs now spent by the tx.
 		w.UtxoStore.Lock()
 		modified := w.UtxoStore.s.Remove(inputs)
+
+		// Add unconfirmed change utxo (if any) to UtxoStore.
+		if changeUtxo != nil {
+			w.UtxoStore.s = append(w.UtxoStore.s, changeUtxo)
+			w.ReqSpentUtxoNtfn(changeUtxo)
+			modified = true
+		}
+
 		if modified {
 			w.UtxoStore.dirty = true
 			w.UtxoStore.Unlock()

@@ -43,7 +43,11 @@ type Utxo struct {
 	Out       OutPoint
 	Subscript PkScript
 	Amt       uint64 // Measured in Satoshis
+
+	// Height is -1 if Utxo has not yet appeared in a block.
 	Height    int64
+
+	// BlockHash is zeroed if Utxo has not yet appeared in a block.
 	BlockHash btcwire.ShaHash
 }
 
