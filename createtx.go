@@ -44,6 +44,18 @@ var TxFee struct {
 	i int64
 }
 
+// UnminedTXs holds a map of transaction IDs as keys mapping to a
+// hex string of a raw transaction.  If sending a raw transaction
+// succeeds, the tx is added to this map and checked again after each
+// new block.  If the new block contains a tx, it is removed from
+// this map.  Otherwise, btcwallet will resend the tx to btcd.
+var UnminedTxs = struct {
+	sync.Mutex
+	m map[string]string
+}{
+	m: make(map[string]string),
+}
+
 // ByAmount defines the methods needed to satisify sort.Interface to
 // sort a slice of Utxos by their amount.
 type ByAmount []*tx.Utxo

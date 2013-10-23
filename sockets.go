@@ -341,8 +341,23 @@ func NtfnBlockConnected(r interface{}) {
 	heightf, ok := result["height"].(float64)
 	if !ok {
 		log.Error("blockconnected notification: invalid height")
+		return
 	}
 	height := int64(heightf)
+	iminedTxs, ok := result["minedtxs"].([]interface{})
+	if !ok {
+		log.Error("blockconnected notification: invalid mined tx array")
+		return
+	}
+	minedTxs := make([]string, len(iminedTxs))
+	for i, iminedTx := range iminedTxs {
+		minedTx, ok := iminedTx.(string)
+		if !ok {
+			log.Error("blockconnected notification: mined tx is not a string")
+			continue
+		}
+		minedTxs[i] = minedTx
+	}
 
 	curHeight.Lock()
 	curHeight.h = height
@@ -370,6 +385,32 @@ func NtfnBlockConnected(r interface{}) {
 		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
 	}
 	wallets.RUnlock()
+
+	// Remove all mined transactions from pool.
+	UnminedTxs.Lock()
+	for _, txid := range minedTxs {
+		delete(UnminedTxs.m, txid)
+	}
+
+	// Resend any remaining transactions still left in pool.  These are
+	// transactions that have not yet been mined into a block.
+	for _, hextx := range UnminedTxs.m {
+		n := <-NewJSONID
+		var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
+		m, err := btcjson.CreateMessageWithId("sendrawtransaction", id, hextx)
+		if err != nil {
+			log.Errorf("cannot create resend request: %v", err)
+			continue
+		}
+		replyHandlers.Lock()
+		replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
+			// Do nothing, just remove the handler.
+			return true
+		}
+		replyHandlers.Unlock()
+		btcdMsgs <- m
+	}
+	UnminedTxs.Unlock()
 }
 
 // NtfnBlockDisconnected handles btcd notifications resulting from

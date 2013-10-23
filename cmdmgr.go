@@ -574,6 +574,12 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 			w.UtxoStore.Unlock()
 		}
 
+		// Add hex string of raw tx to sent tx pool.  If future blocks
+		// do not contain a tx, a resend is attempted.
+		UnminedTxs.Lock()
+		UnminedTxs.m[result.(string)] = hex.EncodeToString(rawtx)
+		UnminedTxs.Unlock()
+
 		ReplySuccess(reply, msg.Id, result)
 
 		// TODO(jrick): If message succeeded in being sent, save the
