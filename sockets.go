@@ -394,6 +394,14 @@ func NtfnBlockConnected(r interface{}) {
 
 	// Resend any remaining transactions still left in pool.  These are
 	// transactions that have not yet been mined into a block.
+	resendUnminedTxs()
+	UnminedTxs.Unlock()
+}
+
+// ResendUnminedTxs resends any transactions in the unmined
+// transaction pool to btcd using the 'sendrawtransaction' RPC
+// command.
+func resendUnminedTxs() {
 	for _, hextx := range UnminedTxs.m {
 		n := <-NewJSONID
 		var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
@@ -410,7 +418,6 @@ func NtfnBlockConnected(r interface{}) {
 		replyHandlers.Unlock()
 		btcdMsgs <- m
 	}
-	UnminedTxs.Unlock()
 }
 
 // NtfnBlockDisconnected handles btcd notifications resulting from
@@ -582,4 +589,7 @@ func BtcdHandshake(ws *websocket.Conn) {
 		w.Track()
 	}
 	wallets.RUnlock()
+
+	// (Re)send any unmined transactions to btcd in case of a btcd restart.
+	resendUnminedTxs()
 }
