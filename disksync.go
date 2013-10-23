@@ -48,6 +48,7 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 		if _, err = w.WriteTo(tmpfile); err != nil {
 			return err
 		}
+		tmpfile.Close()
 
 		// TODO(jrick): this should be atomic on *nix, but is not on
 		// Windows.  Use _windows.go to provide atomic renames.
@@ -70,6 +71,7 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 		if _, err = w.TxStore.s.WriteTo(tmpfile); err != nil {
 			return err
 		}
+		tmpfile.Close()
 
 		// TODO(jrick): this should be atomic on *nix, but is not on
 		// Windows.  Use _windows.go to provide atomic renames.
@@ -92,6 +94,7 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 		if _, err = w.UtxoStore.s.WriteTo(tmpfile); err != nil {
 			return err
 		}
+		tmpfile.Close()
 
 		// TODO(jrick): this should be atomic on *nix, but is not on
 		// Windows.  Use _windows.go to provide atomic renames.
