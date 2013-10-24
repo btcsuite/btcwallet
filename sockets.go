@@ -344,19 +344,17 @@ func NtfnBlockConnected(r interface{}) {
 		return
 	}
 	height := int64(heightf)
-	iminedTxs, ok := result["minedtxs"].([]interface{})
-	if !ok {
-		log.Error("blockconnected notification: invalid mined tx array")
-		return
-	}
-	minedTxs := make([]string, len(iminedTxs))
-	for i, iminedTx := range iminedTxs {
-		minedTx, ok := iminedTx.(string)
-		if !ok {
-			log.Error("blockconnected notification: mined tx is not a string")
-			continue
+	var minedTxs []string
+	if iminedTxs, ok := result["minedtxs"].([]interface{}); ok {
+		minedTxs = make([]string, len(iminedTxs))
+		for i, iminedTx := range iminedTxs {
+			minedTx, ok := iminedTx.(string)
+			if !ok {
+				log.Error("blockconnected notification: mined tx is not a string")
+				continue
+			}
+			minedTxs[i] = minedTx
 		}
-		minedTxs[i] = minedTx
 	}
 
 	curHeight.Lock()
