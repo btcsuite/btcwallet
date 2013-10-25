@@ -389,10 +389,6 @@ func NtfnBlockConnected(r interface{}) {
 	for _, txid := range minedTxs {
 		delete(UnminedTxs.m, txid)
 	}
-
-	// Resend any remaining transactions still left in pool.  These are
-	// transactions that have not yet been mined into a block.
-	resendUnminedTxs()
 	UnminedTxs.Unlock()
 }
 
