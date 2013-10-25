@@ -216,10 +216,14 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 	}
 
 	// Validate msgtx before returning the raw transaction.
+	flags := btcscript.ScriptCanonicalSignatures
 	bip16 := time.Now().After(btcscript.Bip16Activation)
+	if bip16 {
+		flags |= btcscript.ScriptBip16
+	}
 	for i, txin := range msgtx.TxIn {
 		engine, err := btcscript.NewScript(txin.SignatureScript, inputs[i].Subscript, i,
-			msgtx, bip16)
+			msgtx, flags)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("cannot create script engine: %s", err)
 		}
