@@ -368,6 +368,9 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
+	// Request updates for change address.
+	w.ReqNewTxsForAddress(createdTx.changeAddr)
+
 	// Send rawtx off to btcd
 	n := <-NewJSONID
 	var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
@@ -522,6 +525,9 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		ReplyError(reply, msg.Id, &e)
 		return
 	}
+
+	// Request updates for change address.
+	w.ReqNewTxsForAddress(createdTx.changeAddr)
 
 	// Send rawtx off to btcd
 	n := <-NewJSONID
