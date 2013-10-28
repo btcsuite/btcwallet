@@ -360,7 +360,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	pairs := map[string]uint64{
 		toaddr58: uint64(amt),
 	}
-	rawtx, inputs, changeUtxo, err := w.txToPairs(pairs, uint64(fee), int(minconf))
+	createdTx, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := btcjson.ErrInternal
 		e.Message = err.Error()
@@ -372,7 +372,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	n := <-NewJSONID
 	var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
-		hex.EncodeToString(rawtx))
+		hex.EncodeToString(createdTx.rawTx))
 	if err != nil {
 		e := btcjson.ErrInternal
 		e.Message = err.Error()
@@ -394,12 +394,12 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 
 		// Remove previous unspent outputs now spent by the tx.
 		w.UtxoStore.Lock()
-		modified := w.UtxoStore.s.Remove(inputs)
+		modified := w.UtxoStore.s.Remove(createdTx.inputs)
 
 		// Add unconfirmed change utxo (if any) to UtxoStore.
-		if changeUtxo != nil {
-			w.UtxoStore.s = append(w.UtxoStore.s, changeUtxo)
-			w.ReqSpentUtxoNtfn(changeUtxo)
+		if createdTx.changeUtxo != nil {
+			w.UtxoStore.s = append(w.UtxoStore.s, createdTx.changeUtxo)
+			w.ReqSpentUtxoNtfn(createdTx.changeUtxo)
 			modified = true
 		}
 
@@ -515,7 +515,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	TxFee.Lock()
 	fee := TxFee.i
 	TxFee.Unlock()
-	rawtx, inputs, changeUtxo, err := w.txToPairs(pairs, uint64(fee), int(minconf))
+	createdTx, err := w.txToPairs(pairs, uint64(fee), int(minconf))
 	if err != nil {
 		e := btcjson.ErrInternal
 		e.Message = err.Error()
@@ -527,7 +527,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	n := <-NewJSONID
 	var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
 	m, err := btcjson.CreateMessageWithId("sendrawtransaction", id,
-		hex.EncodeToString(rawtx))
+		hex.EncodeToString(createdTx.rawTx))
 	if err != nil {
 		e := btcjson.ErrInternal
 		e.Message = err.Error()
@@ -549,12 +549,12 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 
 		// Remove previous unspent outputs now spent by the tx.
 		w.UtxoStore.Lock()
-		modified := w.UtxoStore.s.Remove(inputs)
+		modified := w.UtxoStore.s.Remove(createdTx.inputs)
 
 		// Add unconfirmed change utxo (if any) to UtxoStore.
-		if changeUtxo != nil {
-			w.UtxoStore.s = append(w.UtxoStore.s, changeUtxo)
-			w.ReqSpentUtxoNtfn(changeUtxo)
+		if createdTx.changeUtxo != nil {
+			w.UtxoStore.s = append(w.UtxoStore.s, createdTx.changeUtxo)
+			w.ReqSpentUtxoNtfn(createdTx.changeUtxo)
 			modified = true
 		}
 
@@ -577,7 +577,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		// Add hex string of raw tx to sent tx pool.  If future blocks
 		// do not contain a tx, a resend is attempted.
 		UnminedTxs.Lock()
-		UnminedTxs.m[result.(string)] = hex.EncodeToString(rawtx)
+		UnminedTxs.m[result.(string)] = hex.EncodeToString(createdTx.rawTx)
 		UnminedTxs.Unlock()
 
 		ReplySuccess(reply, msg.Id, result)
