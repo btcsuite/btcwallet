@@ -194,7 +194,7 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 func GetBalances(reply chan []byte, msg *btcjson.Message) {
 	wallets.RLock()
 	for _, w := range wallets.m {
-		balance := w.CalculateBalance(6)
+		balance := w.CalculateBalance(1)
 		unconfirmed := w.CalculateBalance(0) - balance
 		NotifyWalletBalance(reply, w.name, balance)
 		NotifyWalletBalanceUnconfirmed(reply, w.name, unconfirmed)
@@ -411,7 +411,7 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 			}
 
 			// Notify all frontends of new account balances.
-			confirmed := w.CalculateBalance(6)
+			confirmed := w.CalculateBalance(1)
 			unconfirmed := w.CalculateBalance(0) - confirmed
 			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
 			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
@@ -566,7 +566,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 			}
 
 			// Notify all frontends of new account balances.
-			confirmed := w.CalculateBalance(6)
+			confirmed := w.CalculateBalance(1)
 			unconfirmed := w.CalculateBalance(0) - confirmed
 			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
 			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)

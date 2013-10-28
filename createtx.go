@@ -84,9 +84,13 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 	// Create list of eligible unspent previous outputs to use as tx
 	// inputs, and sort by the amount in reverse order so a minimum number
 	// of inputs is needed.
-	var eligible []*tx.Utxo
+	eligible := make([]*tx.Utxo, 0, len(s))
 	for _, utxo := range s {
-		if int(height-utxo.Height) >= minconf {
+		// TODO(jrick): if Height is -1, the UTXO is the result of spending
+		// to a change address, resulting in a UTXO not yet mined in a block.
+		// For now, disallow creating transactions until these UTXOs are mined
+		// into a block and show up as part of the balance.
+		if utxo.Height != -1 && int(height-utxo.Height) >= minconf {
 			eligible = append(eligible, utxo)
 		}
 	}
