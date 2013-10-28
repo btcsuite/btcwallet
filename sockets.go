@@ -375,15 +375,6 @@ func NtfnBlockConnected(r interface{}) {
 	}
 	frontendNotificationMaster <- msg
 
-	wallets.RLock()
-	for _, w := range wallets.m {
-		confirmed := w.CalculateBalance(6)
-		unconfirmed := w.CalculateBalance(0) - confirmed
-		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
-		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
-	}
-	wallets.RUnlock()
-
 	// Remove all mined transactions from pool.
 	UnminedTxs.Lock()
 	for _, txid := range minedTxs {
@@ -457,15 +448,6 @@ func NtfnBlockDisconnected(r interface{}) {
 		return
 	}
 	frontendNotificationMaster <- msg
-
-	wallets.RLock()
-	for _, w := range wallets.m {
-		confirmed := w.CalculateBalance(6)
-		unconfirmed := w.CalculateBalance(0) - confirmed
-		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
-		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
-	}
-	wallets.RUnlock()
 }
 
 var duplicateOnce sync.Once

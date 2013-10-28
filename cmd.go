@@ -94,6 +94,9 @@ func NewBtcWalletStore() *BtcWalletStore {
 }
 
 // Rollback rolls back each BtcWallet saved in the store.
+//
+// TODO(jrick): This must also roll back the UTXO and TX stores, and notify
+// all wallets of new account balances.
 func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
 	s.Lock()
 	for _, w := range s.m {
@@ -267,6 +270,12 @@ func getCurHeight() (height int64) {
 // CalculateBalance sums the amounts of all unspent transaction
 // outputs to addresses of a wallet and returns the balance as a
 // float64.
+//
+// If confirmations is 0, all UTXOs, even those not present in a
+// block (height -1), will be used to get the balance.  Otherwise,
+// a UTXO must be in a block.  If confirmations is 1 or greater,
+// the balance will be calculated based on how many how many blocks
+// include a UTXO.
 func (w *BtcWallet) CalculateBalance(confirmations int) float64 {
 	var bal uint64 // Measured in satoshi
 
@@ -277,12 +286,10 @@ func (w *BtcWallet) CalculateBalance(confirmations int) float64 {
 
 	w.UtxoStore.RLock()
 	for _, u := range w.UtxoStore.s {
-		if int(height-u.Height) >= confirmations {
-			// Utxos not yet in blocks (height -1) should only be
-			// added if confirmations is 0.
-			if u.Height != -1 || (confirmations == 0 && u.Height == -1) {
-				bal += u.Amt
-			}
+		// Utxos not yet in blocks (height -1) should only be
+		// added if confirmations is 0.
+		if confirmations == 0 || (u.Height != -1 && int(height-u.Height+1) >= confirmations) {
+			bal += u.Amt
 		}
 	}
 	w.UtxoStore.RUnlock()
@@ -581,7 +588,7 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 				log.Errorf("cannot sync dirty wallet: %v", err)
 			}
 
-			confirmed := w.CalculateBalance(6)
+			confirmed := w.CalculateBalance(1)
 			unconfirmed := w.CalculateBalance(0) - confirmed
 			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
 			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
