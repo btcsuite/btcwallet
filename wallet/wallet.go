@@ -807,10 +807,10 @@ type btcAddress struct {
 	initVector [16]byte
 	privKey    [32]byte
 	pubKey     [65]byte
-	firstSeen  uint64
-	lastSeen   uint64
-	firstBlock uint32
-	lastBlock  uint32
+	firstSeen  int64
+	lastSeen   int64
+	firstBlock int32
+	lastBlock  int32
 	privKeyCT  []byte // non-nil if unlocked.
 }
 
@@ -834,8 +834,8 @@ func newBtcAddress(privkey, iv []byte) (addr *btcAddress, err error) {
 			hasPrivKey: true,
 			hasPubKey:  true,
 		},
-		firstSeen:  math.MaxUint64,
-		firstBlock: math.MaxUint32,
+		firstSeen:  math.MaxInt64,
+		firstBlock: math.MaxInt32,
 	}
 	copy(addr.initVector[:], iv)
 	pub := pubkeyFromPrivkey(privkey)
