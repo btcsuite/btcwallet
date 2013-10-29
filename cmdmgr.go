@@ -132,11 +132,7 @@ func GetAddressesByAccount(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	var result interface{}
-	wallets.RLock()
-	w := wallets.m[account]
-	wallets.RUnlock()
-
-	if w != nil {
+	if w := wallets.m[account]; w != nil {
 		result = w.Wallet.GetActiveAddresses()
 	} else {
 		ReplyError(reply, msg.Id, &btcjson.ErrWalletInvalidAccountName)
@@ -172,11 +168,8 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 		}
 	}
 
-	wallets.RLock()
-	w := wallets.m[wname]
-	wallets.RUnlock()
 	var result interface{}
-	if w != nil {
+	if w := wallets.m[wname]; w != nil {
 		result = w.CalculateBalance(conf)
 		ReplySuccess(reply, msg.Id, result)
 	} else {
@@ -186,20 +179,24 @@ func GetBalance(reply chan []byte, msg *btcjson.Message) {
 	}
 }
 
-// GetBalances notifies each attached wallet of the current confirmed
+// GetBalances responds to the extension 'getbalances' command,
+// replying with account balances for a single wallet request.
+func GetBalances(reply chan []byte, msg *btcjson.Message) {
+	NotifyBalances(reply)
+}
+
+// NotifyBalances notifies an attached wallet of the current confirmed
 // and unconfirmed account balances.
 //
 // TODO(jrick): Switch this to return a JSON object (map) of all accounts
 // and their balances, instead of separate notifications for each account.
-func GetBalances(reply chan []byte, msg *btcjson.Message) {
-	wallets.RLock()
+func NotifyBalances(reply chan []byte) {
 	for _, w := range wallets.m {
 		balance := w.CalculateBalance(1)
 		unconfirmed := w.CalculateBalance(0) - balance
 		NotifyWalletBalance(reply, w.name, balance)
 		NotifyWalletBalanceUnconfirmed(reply, w.name, unconfirmed)
 	}
-	wallets.RUnlock()
 }
 
 // GetNewAddress gets or generates a new address for an account.  If
@@ -222,10 +219,7 @@ func GetNewAddress(reply chan []byte, msg *btcjson.Message) {
 		}
 	}
 
-	wallets.RLock()
-	w := wallets.m[wname]
-	wallets.RUnlock()
-	if w != nil {
+	if w := wallets.m[wname]; w != nil {
 		// TODO(jrick): generate new addresses if the address pool is empty.
 		addr, err := w.NextUnusedAddress()
 		if err != nil {
@@ -265,11 +259,9 @@ func ListAccounts(reply chan []byte, msg *btcjson.Message) {
 
 	pairs := make(map[string]float64)
 
-	wallets.RLock()
 	for account, w := range wallets.m {
 		pairs[account] = w.CalculateBalance(minconf)
 	}
-	wallets.RUnlock()
 
 	ReplySuccess(reply, msg.Id, pairs)
 }
@@ -346,9 +338,11 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Is wallet for this account unlocked?
-	wallets.Lock()
-	w := wallets.m[fromaccount]
-	wallets.Unlock()
+	w, ok := wallets.m[fromaccount]
+	if !ok {
+		ReplyError(reply, msg.Id, &btcjson.ErrWalletInvalidAccountName)
+		return
+	}
 	if w.IsLocked() {
 		ReplyError(reply, msg.Id, &btcjson.ErrWalletUnlockNeeded)
 		return
@@ -507,9 +501,11 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 	}
 
 	// Is wallet for this account unlocked?
-	wallets.Lock()
-	w := wallets.m[fromaccount]
-	wallets.Unlock()
+	w, ok := wallets.m[fromaccount]
+	if !ok {
+		ReplyError(reply, msg.Id, &btcjson.ErrWalletInvalidAccountName)
+		return
+	}
 	if w.IsLocked() {
 		ReplyError(reply, msg.Id, &btcjson.ErrWalletUnlockNeeded)
 		return
@@ -678,12 +674,13 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// Does this wallet already exist?
+	// Prevent two wallets with the same account name from being added.
 	wallets.Lock()
 	defer wallets.Unlock()
+
+	// Does this wallet already exist?
 	if w := wallets.m[wname]; w != nil {
 		e := btcjson.ErrWalletInvalidAccountName
-		e.Message = "Wallet already exists."
 		ReplyError(reply, msg.Id, &e)
 		return
 	}
@@ -694,7 +691,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	} else {
 		net = btcwire.TestNet3
 	}
-	w, err := wallet.NewWallet(wname, desc, []byte(pass), net)
+	wlt, err := wallet.NewWallet(wname, desc, []byte(pass), net)
 	if err != nil {
 		log.Error("Error creating wallet: " + err.Error())
 		ReplyError(reply, msg.Id, &btcjson.ErrInternal)
@@ -704,7 +701,7 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	// Grab a new unique sequence number for tx notifications in new blocks.
 	n := <-NewJSONID
 	bw := &BtcWallet{
-		Wallet:         w,
+		Wallet:         wlt,
 		name:           wname,
 		dirty:          true,
 		NewBlockTxSeqN: n,
@@ -736,10 +733,8 @@ func WalletIsLocked(reply chan []byte, msg *btcjson.Message) {
 			return
 		}
 	}
-	wallets.RLock()
-	w := wallets.m[account]
-	wallets.RUnlock()
-	if w != nil {
+
+	if w := wallets.m[account]; w != nil {
 		result := w.IsLocked()
 		ReplySuccess(reply, msg.Id, result)
 	} else {
@@ -753,10 +748,7 @@ func WalletIsLocked(reply chan []byte, msg *btcjson.Message) {
 // with this.  Lock all the wallets, like if all accounts are locked
 // for one bitcoind wallet?
 func WalletLock(reply chan []byte, msg *btcjson.Message) {
-	wallets.RLock()
-	w := wallets.m[""]
-	wallets.RUnlock()
-	if w != nil {
+	if w := wallets.m[""]; w != nil {
 		if err := w.Lock(); err != nil {
 			ReplyError(reply, msg.Id, &btcjson.ErrWalletWrongEncState)
 		} else {
@@ -787,10 +779,7 @@ func WalletPassphrase(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	wallets.RLock()
-	w := wallets.m[""]
-	wallets.RUnlock()
-	if w != nil {
+	if w := wallets.m[""]; w != nil {
 		if err := w.Unlock([]byte(passphrase)); err != nil {
 			ReplyError(reply, msg.Id, &btcjson.ErrWalletPassphraseIncorrect)
 			return

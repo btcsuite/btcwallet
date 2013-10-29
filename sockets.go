@@ -38,7 +38,8 @@ var (
 	// process cannot be established.
 	ErrConnLost = errors.New("connection lost")
 
-	// Channel to close to notify that connection to btcd has been lost.
+	// Channel for updates and boolean with the most recent update of
+	// whether the connection to btcd is active or not.
 	btcdConnected = struct {
 		b bool
 		c chan bool
@@ -103,6 +104,14 @@ func frontendListenerDuplicator() {
 				mtx.Lock()
 				frontendListeners[c] = true
 				mtx.Unlock()
+
+				// TODO(jrick): these notifications belong somewhere better.
+				// Probably want to copy AddWalletListener from btcd, and
+				// place these notifications in that function.
+				if btcdConnected.b {
+					NotifyNewBlockChainHeight(c, getCurHeight())
+					NotifyBalances(c)
+				}
 
 			case c := <-deleteFrontendListener:
 				mtx.Lock()
@@ -319,6 +328,18 @@ func ProcessBtcdNotificationReply(b []byte) {
 	}
 }
 
+// NotifyNewBlockChainHeight notifies all frontends of a new
+// blockchain height.
+func NotifyNewBlockChainHeight(reply chan []byte, height int64) {
+	var id interface{} = "btcwallet:newblockchainheight"
+	msgRaw := &btcjson.Reply{
+		Result: height,
+		Id:     &id,
+	}
+	msg, _ := json.Marshal(msgRaw)
+	reply <- msg
+}
+
 // NtfnBlockConnected handles btcd notifications resulting from newly
 // connected blocks to the main blockchain.  Currently, this only creates
 // a new notification for frontends with the new blockchain height.
@@ -363,17 +384,9 @@ func NtfnBlockConnected(r interface{}) {
 
 	// TODO(jrick): update TxStore and UtxoStore with new hash
 	_ = hash
-	var id interface{} = "btcwallet:newblockchainheight"
-	msgRaw := &btcjson.Reply{
-		Result: height,
-		Id:     &id,
-	}
-	msg, err := json.Marshal(msgRaw)
-	if err != nil {
-		log.Error("btcd:blockconnected handler: unable to marshal reply")
-		return
-	}
-	frontendNotificationMaster <- msg
+
+	// Notify frontends of new blockchain height.
+	NotifyNewBlockChainHeight(frontendNotificationMaster, height)
 
 	// Remove all mined transactions from pool.
 	UnminedTxs.Lock()
@@ -437,17 +450,8 @@ func NtfnBlockDisconnected(r interface{}) {
 		wallets.Rollback(height, hash)
 	}()
 
-	var id interface{} = "btcwallet:newblockchainheight"
-	msgRaw := &btcjson.Reply{
-		Result: height,
-		Id:     &id,
-	}
-	msg, err := json.Marshal(msgRaw)
-	if err != nil {
-		log.Error("btcd:blockdisconnected handler: unable to marshal reply")
-		return
-	}
-	frontendNotificationMaster <- msg
+	// Notify frontends of new blockchain height.
+	NotifyNewBlockChainHeight(frontendNotificationMaster, height)
 }
 
 var duplicateOnce sync.Once
@@ -560,11 +564,19 @@ func BtcdHandshake(ws *websocket.Conn) {
 	}
 
 	// Begin tracking wallets against this btcd instance.
-	wallets.RLock()
 	for _, w := range wallets.m {
 		w.Track()
 	}
-	wallets.RUnlock()
+
+	// Request the new block height, and notify frontends.
+	//
+	// TODO(jrick): Check that there was not any reorgs done
+	// since last connection.
+	NotifyNewBlockChainHeight(frontendNotificationMaster, getCurHeight())
+
+	// Notify frontends of all account balances, calculated based
+	// from the block height of this new btcd connection.
+	NotifyBalances(frontendNotificationMaster)
 
 	// (Re)send any unmined transactions to btcd in case of a btcd restart.
 	resendUnminedTxs()

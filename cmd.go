@@ -82,7 +82,7 @@ type BtcWallet struct {
 // key.  A RWMutex is used to protect against incorrect concurrent
 // access.
 type BtcWalletStore struct {
-	sync.RWMutex
+	sync.Mutex
 	m map[string]*BtcWallet
 }
 
@@ -98,11 +98,9 @@ func NewBtcWalletStore() *BtcWalletStore {
 // TODO(jrick): This must also roll back the UTXO and TX stores, and notify
 // all wallets of new account balances.
 func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
-	s.Lock()
 	for _, w := range s.m {
 		w.Rollback(height, hash)
 	}
-	s.Unlock()
 }
 
 // Rollback reverts each stored BtcWallet to a state before the block
@@ -276,7 +274,7 @@ func getCurHeight() (height int64) {
 // a UTXO must be in a block.  If confirmations is 1 or greater,
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
-func (w *BtcWallet) CalculateBalance(confirmations int) float64 {
+func (w *BtcWallet) CalculateBalance(confirms int) float64 {
 	var bal uint64 // Measured in satoshi
 
 	height := getCurHeight()
@@ -288,7 +286,7 @@ func (w *BtcWallet) CalculateBalance(confirmations int) float64 {
 	for _, u := range w.UtxoStore.s {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
-		if confirmations == 0 || (u.Height != -1 && int(height-u.Height+1) >= confirmations) {
+		if confirms == 0 || (u.Height != -1 && int(height-u.Height+1) >= confirms) {
 			bal += u.Amt
 		}
 	}
@@ -528,71 +526,74 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		return false
 	}
 
-	go func() {
-		t := &tx.RecvTx{
-			Amt: uint64(amt),
+	// Add to TxStore
+	t := &tx.RecvTx{
+		Amt: uint64(amt),
+	}
+	copy(t.TxHash[:], txhash[:])
+	copy(t.BlockHash[:], blockhash[:])
+	copy(t.SenderAddr[:], senderHash)
+	copy(t.ReceiverAddr[:], receiverHash)
+
+	w.TxStore.Lock()
+	txs := w.TxStore.s
+	w.TxStore.s = append(txs, t)
+	w.TxStore.dirty = true
+	w.TxStore.Unlock()
+
+	if err = w.writeDirtyToDisk(); err != nil {
+		log.Errorf("cannot sync dirty wallet: %v", err)
+	}
+
+	// Add to UtxoStore if unspent.
+	if !spent {
+		// First, iterate through all stored utxos.  If an unconfirmed utxo
+		// (not present in a block) has the same outpoint as this utxo,
+		// update the block height and hash.
+		w.UtxoStore.RLock()
+		for _, u := range w.UtxoStore.s {
+			if u.Height != -1 {
+				continue
+			}
+			if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
+				// Found it.
+				w.UtxoStore.RUnlock()
+
+				w.UtxoStore.Lock()
+				copy(u.BlockHash[:], blockhash[:])
+				u.Height = int64(height)
+				w.UtxoStore.dirty = true
+				w.UtxoStore.Unlock()
+
+				if err = w.writeDirtyToDisk(); err != nil {
+					log.Errorf("cannot sync dirty wallet: %v", err)
+				}
+				return false
+			}
 		}
-		copy(t.TxHash[:], txhash[:])
-		copy(t.BlockHash[:], blockhash[:])
-		copy(t.SenderAddr[:], senderHash)
-		copy(t.ReceiverAddr[:], receiverHash)
+		w.UtxoStore.RUnlock()
 
-		w.TxStore.Lock()
-		txs := w.TxStore.s
-		w.TxStore.s = append(txs, t)
-		w.TxStore.dirty = true
-		w.TxStore.Unlock()
-
+		u := &tx.Utxo{
+			Amt:       uint64(amt),
+			Height:    int64(height),
+			Subscript: pkscript,
+		}
+		copy(u.Out.Hash[:], txhash[:])
+		u.Out.Index = uint32(index)
+		copy(u.AddrHash[:], receiverHash)
+		copy(u.BlockHash[:], blockhash[:])
+		w.UtxoStore.Lock()
+		w.UtxoStore.s = append(w.UtxoStore.s, u)
+		w.UtxoStore.dirty = true
+		w.UtxoStore.Unlock()
 		if err = w.writeDirtyToDisk(); err != nil {
 			log.Errorf("cannot sync dirty wallet: %v", err)
 		}
-	}()
 
-	// Do not add output to utxo store if spent.
-	if !spent {
-		go func() {
-			// First, iterate through all stored utxos.  If an unconfirmed utxo
-			// (not present in a block) has the same outpoint as this utxo,
-			// update the block height and hash.
-			w.UtxoStore.RLock()
-			for _, u := range w.UtxoStore.s {
-				if u.Height != -1 {
-					continue
-				}
-				if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
-					// Found it.
-					copy(u.BlockHash[:], blockhash[:])
-					u.Height = int64(height)
-					w.UtxoStore.RUnlock()
-					return
-				}
-			}
-			w.UtxoStore.RUnlock()
-
-			u := &tx.Utxo{
-				Amt:       uint64(amt),
-				Height:    int64(height),
-				Subscript: pkscript,
-			}
-			copy(u.Out.Hash[:], txhash[:])
-			u.Out.Index = uint32(index)
-
-			copy(u.AddrHash[:], receiverHash)
-			copy(u.BlockHash[:], blockhash[:])
-
-			w.UtxoStore.Lock()
-			w.UtxoStore.s = append(w.UtxoStore.s, u)
-			w.UtxoStore.dirty = true
-			w.UtxoStore.Unlock()
-			if err = w.writeDirtyToDisk(); err != nil {
-				log.Errorf("cannot sync dirty wallet: %v", err)
-			}
-
-			confirmed := w.CalculateBalance(1)
-			unconfirmed := w.CalculateBalance(0) - confirmed
-			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
-			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
-		}()
+		confirmed := w.CalculateBalance(1)
+		unconfirmed := w.CalculateBalance(0) - confirmed
+		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
+		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
 	}
 
 	// Never remove this handler.
