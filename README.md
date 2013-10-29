@@ -37,10 +37,10 @@ https://github.com/conformal/btcd/releases
   http://golang.org/doc/install
 
 - Run the following commands to obtain btcwallet, all dependencies, and install it:
-  ```bash
-  $ go get -u -v github.com/conformal/btcd/...
-  $ go get -u -v github.com/conformal/btcwallet/...
-  ```
+```bash
+$ go get -u -v github.com/conformal/btcd/...
+$ go get -u -v github.com/conformal/btcwallet/...
+```
 
 - btcd and btcwallet will now be installed in either ```$GOROOT/bin``` or
   ```$GOPATH/bin``` depending on your configuration.  If you did not already
@@ -57,10 +57,11 @@ https://github.com/conformal/btcd/releases
 ### Linux/BSD/POSIX - Build from Source
 
 - Run the following commands to update btcwallet, all dependencies, and install it:
-  ```bash
-  $ go get -u -v github.com/conformal/btcd/...
-  $ go get -u -v github.com/conformal/btcwallet/...
-  ```
+
+```bash
+$ go get -u -v github.com/conformal/btcd/...
+$ go get -u -v github.com/conformal/btcwallet/...
+```
 
 ## Getting Started
 
@@ -72,10 +73,11 @@ Start Menu.
 ### Linux/BSD/POSIX/Source
 
 - Run the following commands to start btcd and btcwallet:
-  ```bash
-  $ btcd --testnet -u rpcuser -P rpcpass
-  $ btcwallet -u rpcuser -P rpcpass
-  ```
+
+```bash
+$ btcd --testnet -u rpcuser -P rpcpass
+$ btcwallet -u rpcuser -P rpcpass
+```
 
 ## Frontend Usage
 
