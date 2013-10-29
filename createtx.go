@@ -38,10 +38,13 @@ var ErrInsufficientFunds = errors.New("insufficient funds")
 var ErrUnknownBitcoinNet = errors.New("unknown bitcoin network")
 
 // TxFee represents the global transaction fee added to newly-created
-// transactions and sent as a reward to the block miner.
-var TxFee struct {
+// transactions and sent as a reward to the block miner.  i is measured
+// in satoshis.
+var TxFee = struct {
 	sync.Mutex
 	i int64
+}{
+	i: 10000, // This is a fee of 0.0001 BTC.
 }
 
 // UnminedTXs holds a map of transaction IDs as keys mapping to a
