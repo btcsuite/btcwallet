@@ -167,5 +167,33 @@ func loadConfig() (*config, []string, error) {
 	}
 	updateConfigWithActiveParams(&cfg)
 
+	// Validate debug log level
+	if !validLogLevel(cfg.DebugLevel) {
+		str := "%s: The specified debug level [%v] is invalid"
+		err := fmt.Errorf(str, "loadConfig", cfg.DebugLevel)
+		fmt.Fprintln(os.Stderr, err)
+		parser.WriteHelp(os.Stderr)
+		return nil, nil, err
+	}
+
 	return &cfg, remainingArgs, nil
+}
+
+// validLogLevel returns whether or not logLevel is a valid debug log level.
+func validLogLevel(logLevel string) bool {
+	switch logLevel {
+	case "trace":
+		fallthrough
+	case "debug":
+		fallthrough
+	case "info":
+		fallthrough
+	case "warn":
+		fallthrough
+	case "error":
+		fallthrough
+	case "critical":
+		return true
+	}
+	return false
 }

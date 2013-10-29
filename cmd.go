@@ -26,7 +26,6 @@ import (
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
-	"github.com/conformal/seelog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -43,7 +42,6 @@ var (
 	ErrNoWallet = errors.New("wallet file does not exist")
 
 	cfg *config
-	log = seelog.Default
 
 	curHeight = struct {
 		sync.RWMutex
@@ -617,12 +615,26 @@ func JSONIDGenerator(c chan uint64) {
 }
 
 func main() {
+	// Initialize logging and setup deferred flushing to ensure all
+	// outstanding messages are written on shutdown
+	loggers := setLogLevel(defaultLogLevel)
+	defer func() {
+		for _, logger := range loggers {
+			logger.Flush()
+		}
+	}()
+
 	tcfg, _, err := loadConfig()
 	if err != nil {
 		log.Error(err)
 		os.Exit(1)
 	}
 	cfg = tcfg
+
+	// Change the logging level if needed.
+	if cfg.DebugLevel != defaultLogLevel {
+		loggers = setLogLevel(cfg.DebugLevel)
+	}
 
 	// Open default wallet
 	w, err := OpenWallet(cfg, "")
