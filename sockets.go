@@ -108,6 +108,8 @@ func frontendListenerDuplicator() {
 				// TODO(jrick): these notifications belong somewhere better.
 				// Probably want to copy AddWalletListener from btcd, and
 				// place these notifications in that function.
+				NotifyBtcdConnected(frontendNotificationMaster,
+					btcdConnected.b)
 				if btcdConnected.b {
 					NotifyNewBlockChainHeight(c, getCurHeight())
 					NotifyBalances(c)
@@ -128,13 +130,8 @@ func frontendListenerDuplicator() {
 
 		select {
 		case conn := <-btcdConnected.c:
-			btcdConnected.b = conn
-			var idStr interface{} = "btcwallet:btcdconnected"
-			r := btcjson.Reply{
-				Result: conn,
-				Id:     &idStr,
-			}
-			ntfn, _ = json.Marshal(r)
+			NotifyBtcdConnected(frontendNotificationMaster, conn)
+			continue
 
 		case ntfn = <-frontendNotificationMaster:
 		}
@@ -145,6 +142,17 @@ func frontendListenerDuplicator() {
 		}
 		mtx.Unlock()
 	}
+}
+
+func NotifyBtcdConnected(reply chan []byte, conn bool) {
+	btcdConnected.b = conn
+	var idStr interface{} = "btcwallet:btcdconnected"
+	r := btcjson.Reply{
+		Result: conn,
+		Id:     &idStr,
+	}
+	ntfn, _ := json.Marshal(r)
+	frontendNotificationMaster <- ntfn
 }
 
 // frontendReqsNotifications is the handler function for websocket

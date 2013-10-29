@@ -65,8 +65,6 @@ func ProcessFrontendMsg(reply chan []byte, msg []byte) {
 		GetBalances(reply, &jsonMsg)
 	case "walletislocked":
 		WalletIsLocked(reply, &jsonMsg)
-	case "btcdconnected":
-		BtcdConnected(reply, &jsonMsg)
 
 	default:
 		// btcwallet does not understand method.  Pass to btcd.
@@ -792,13 +790,6 @@ func WalletPassphrase(reply chan []byte, msg *btcjson.Message) {
 			NotifyWalletLockStateChange("", true)
 		}()
 	}
-}
-
-// BtcdConnected is the wallet handler for the frontend
-// 'btcdconnected' method.  It returns to the frontend whether btcwallet
-// is currently connected to btcd or not.
-func BtcdConnected(reply chan []byte, msg *btcjson.Message) {
-	ReplySuccess(reply, msg.Id, btcdConnected.b)
 }
 
 // AccountNtfn is a struct for marshalling any generic notification
