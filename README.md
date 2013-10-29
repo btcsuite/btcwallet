@@ -67,8 +67,9 @@ $ go get -u -v github.com/conformal/btcwallet/...
 
 ### Windows (Installed from MSI)
 
-Open Btcd (Testnet) and Btcwallet from the Btcd Suite menu in the
-Start Menu.
+Open ```Btcd Suite``` from the ```Btcd Suite``` menu in the Start
+Menu.  This will also open btcgui, which can be closed if you only
+want btcd and btcwallet running.
 
 ### Linux/BSD/POSIX/Source
 
