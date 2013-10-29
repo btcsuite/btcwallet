@@ -696,22 +696,28 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// Grab a new unique sequence number for tx notifications in new blocks.
-	n := <-NewJSONID
+	// Create a new account, with a new JSON ID for transaction
+	// notifications.
 	bw := &BtcWallet{
 		Wallet:         wlt,
 		name:           wname,
 		dirty:          true,
-		NewBlockTxSeqN: n,
+		NewBlockTxSeqN: <-NewJSONID,
 	}
 	// TODO(jrick): only begin tracking wallet if btcwallet is already
 	// connected to btcd.
 	bw.Track()
 
 	wallets.m[wname] = bw
+
+	// Write new wallet to disk.
 	if err := bw.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot sync dirty wallet: %v", err)
 	}
+
+	// Notify all frontends of this new account, and its balance.
+	NotifyBalances(frontendNotificationMaster)
+
 	ReplySuccess(reply, msg.Id, nil)
 }
 
