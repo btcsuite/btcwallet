@@ -19,11 +19,19 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"time"
+)
+
+var (
+	// ErrBtcdDisconnected describes an error where an operation cannot
+	// successfully complete due to btcd not being connected to
+	// btcwallet.
+	ErrBtcdDisconnected = errors.New("btcd disconnected")
 )
 
 // ProcessFrontendMsg checks the message sent from a frontend.  If the
@@ -129,9 +137,9 @@ func GetAddressesByAccount(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	var result interface{}
+	var result []string
 	if w := wallets.m[account]; w != nil {
-		result = w.Wallet.GetActiveAddresses()
+		result = w.ActivePaymentAddresses()
 	} else {
 		ReplyError(reply, msg.Id, &btcjson.ErrWalletInvalidAccountName)
 		return
@@ -689,7 +697,15 @@ func CreateEncryptedWallet(reply chan []byte, msg *btcjson.Message) {
 	} else {
 		net = btcwire.TestNet3
 	}
-	wlt, err := wallet.NewWallet(wname, desc, []byte(pass), net)
+
+	bs, err := GetCurBlock()
+	if err != nil {
+		e := btcjson.ErrInternal
+		e.Message = "btcd disconnected"
+		ReplyError(reply, msg.Id, &e)
+		return
+	}
+	wlt, err := wallet.NewWallet(wname, desc, []byte(pass), net, &bs)
 	if err != nil {
 		log.Error("Error creating wallet: " + err.Error())
 		ReplyError(reply, msg.Id, &btcjson.ErrInternal)

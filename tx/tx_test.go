@@ -144,7 +144,7 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 		utxo.Out.Index = uint32(i + 2)
 		utxo.Subscript = []byte{}
 		utxo.Amt = uint64(i + 3)
-		utxo.Height = int64(i + 4)
+		utxo.Height = int32(i + 4)
 		*store1 = append(*store1, utxo)
 	}
 

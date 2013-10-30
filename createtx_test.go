@@ -1,10 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
@@ -15,7 +11,8 @@ import (
 
 func TestFakeTxs(t *testing.T) {
 	// First we need a wallet.
-	w, err := wallet.NewWallet("banana wallet", "", []byte("banana"), btcwire.MainNet)
+	w, err := wallet.NewWallet("banana wallet", "", []byte("banana"),
+		btcwire.MainNet, &wallet.BlockStamp{})
 	if err != nil {
 		t.Errorf("Can not create encrypted wallet: %s", err)
 		return
@@ -58,30 +55,15 @@ func TestFakeTxs(t *testing.T) {
 	btcw.UtxoStore.s = append(btcw.UtxoStore.s, utxo)
 
 	// Fake our current block height so btcd doesn't need to be queried.
-	curHeight.h = 12346
+	curBlock.BlockStamp.Height = 12346
 
 	// Create the transaction.
 	pairs := map[string]uint64{
 		"17XhEvq9Nahdj7Xe1nv6oRe1tEmaHUuynH": 5000,
 	}
-	createdTx, err := btcw.txToPairs(pairs, 100, 0)
+	_, err = btcw.txToPairs(pairs, 100, 0)
 	if err != nil {
 		t.Errorf("Tx creation failed: %s", err)
 		return
 	}
-
-	msg := btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      "test",
-		Method:  "sendrawtransaction",
-		Params: []interface{}{
-			hex.EncodeToString(createdTx.rawTx),
-		},
-	}
-	m, _ := json.Marshal(msg)
-	_ = m
-	_ = fmt.Println
-
-	// Uncomment to print out json to send raw transaction
-	// fmt.Println(string(m))
 }

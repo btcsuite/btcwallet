@@ -34,7 +34,6 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"hash"
 	"io"
-	"math"
 	"math/big"
 	"sync"
 	"time"
@@ -326,16 +325,22 @@ func (v *varEntries) ReadFrom(r io.Reader) (n int64, err error) {
 // from and write to any type of byte streams, including files.
 // TODO(jrick) remove as many more magic numbers as possible.
 type Wallet struct {
-	version        uint32
-	net            btcwire.BitcoinNet
-	flags          walletFlags
-	uniqID         [6]byte
-	createDate     int64
-	name           [32]byte
-	desc           [256]byte
-	highestUsed    int64
-	kdfParams      kdfParameters
-	keyGenerator   btcAddress
+	version      uint32
+	net          btcwire.BitcoinNet
+	flags        walletFlags
+	uniqID       [6]byte
+	createDate   int64
+	name         [32]byte
+	desc         [256]byte
+	highestUsed  int64
+	kdfParams    kdfParameters
+	keyGenerator btcAddress
+
+	// These are non-standard and fit in the extra 1024 bytes between the
+	// root address and the appended entries.
+	syncedBlockHeight int32
+	syncedBlockHash   btcwire.ShaHash
+
 	addrMap        map[[ripemd160.Size]byte]*btcAddress
 	addrCommentMap map[[ripemd160.Size]byte]*[]byte
 	txCommentMap   map[[sha256.Size]byte]*[]byte
@@ -349,11 +354,22 @@ type Wallet struct {
 	lastChainIdx int64
 }
 
+// UnusedWalletBytes specifies the number of actually unused bytes
+// between the root address and the appended entries in a serialized
+// wallet.  Armory's wallet file format provides 1024 unused bytes
+// in this space.  btcwallet requires saving a few additional details
+// with the wallet file, so the binary sizes of those are subtracted
+// from 1024.  Currently, these are:
+//
+//  - last synced block height (int32, 4 bytes)
+//  - last synced block hash (btcwire.ShaHash, btcwire.HashSize bytes)
+const UnusedWalletBytes = 1024 - 4 - btcwire.HashSize
+
 // NewWallet creates and initializes a new Wallet.  name's and
 // desc's binary representation must not exceed 32 and 256 bytes,
 // respectively.  All address private keys are encrypted with passphrase.
 // The wallet is returned unlocked.
-func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet) (*Wallet, error) {
+func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, createdAt *BlockStamp) (*Wallet, error) {
 	if binary.Size(name) > 32 {
 		return nil, errors.New("name exceeds 32 byte maximum size")
 	}
@@ -366,7 +382,7 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet) (*W
 	rootkey, chaincode := make([]byte, 32), make([]byte, 32)
 	rand.Read(rootkey)
 	rand.Read(chaincode)
-	root, err := newRootBtcAddress(rootkey, nil, chaincode)
+	root, err := newRootBtcAddress(rootkey, nil, chaincode, createdAt)
 	if err != nil {
 		return nil, err
 	}
@@ -387,15 +403,17 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet) (*W
 			useEncryption: true,
 			watchingOnly:  false,
 		},
-		createDate:     time.Now().Unix(),
-		highestUsed:    -1,
-		kdfParams:      *kdfp,
-		keyGenerator:   *root,
-		addrMap:        make(map[[ripemd160.Size]byte]*btcAddress),
-		addrCommentMap: make(map[[ripemd160.Size]byte]*[]byte),
-		txCommentMap:   make(map[[sha256.Size]byte]*[]byte),
-		chainIdxMap:    make(map[int64]*[ripemd160.Size]byte),
-		lastChainIdx:   pregenerated - 1,
+		createDate:        time.Now().Unix(),
+		highestUsed:       -1,
+		kdfParams:         *kdfp,
+		keyGenerator:      *root,
+		syncedBlockHeight: createdAt.Height,
+		syncedBlockHash:   createdAt.Hash,
+		addrMap:           make(map[[ripemd160.Size]byte]*btcAddress),
+		addrCommentMap:    make(map[[ripemd160.Size]byte]*[]byte),
+		txCommentMap:      make(map[[sha256.Size]byte]*[]byte),
+		chainIdxMap:       make(map[int64]*[ripemd160.Size]byte),
+		lastChainIdx:      pregenerated - 1,
 	}
 
 	// Add root address to maps.
@@ -410,7 +428,7 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet) (*W
 		if err != nil {
 			return nil, err
 		}
-		newaddr, err := newBtcAddress(privkey, nil)
+		newaddr, err := newBtcAddress(privkey, nil, createdAt)
 		if err != nil {
 			return nil, err
 		}
@@ -464,7 +482,9 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 		&w.kdfParams,
 		make([]byte, 256),
 		&w.keyGenerator,
-		make([]byte, 1024),
+		&w.syncedBlockHeight,
+		&w.syncedBlockHash,
+		make([]byte, UnusedWalletBytes),
 		&appendedEntries,
 	}
 	for _, data := range datas {
@@ -558,7 +578,9 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 		&w.kdfParams,
 		make([]byte, 256),
 		&w.keyGenerator,
-		make([]byte, 1024),
+		&w.syncedBlockHeight,
+		&w.syncedBlockHash,
+		make([]byte, UnusedWalletBytes),
 		&appendedEntries,
 	}
 	var written int64
@@ -630,9 +652,10 @@ func (w *Wallet) Version() (string, int) {
 	return "", 0
 }
 
-// NextUnusedAddress attempts to get the next chained address.  It
-// currently relies on pre-generated addresses and will return an empty
-// string if the address pool has run out. TODO(jrick)
+// NextUnusedAddress attempts to get the next chained address.
+//
+// TODO(jrick): this currently relies on pre-generated addresses
+// and will return an empty string if the address pool has run out.
 func (w *Wallet) NextUnusedAddress() (string, error) {
 	_ = w.lastChainIdx
 	w.highestUsed++
@@ -701,6 +724,29 @@ func (w *Wallet) Net() btcwire.BitcoinNet {
 	return w.net
 }
 
+// SetSyncedWith marks the wallet to be in sync with the block
+// described by height and hash.
+func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
+	w.syncedBlockHeight = bs.Height
+	copy(w.syncedBlockHash[:], bs.Hash[:])
+}
+
+// SyncedWith returns the height and hash of the block the wallet is
+// currently marked to be in sync with.
+func (w *Wallet) SyncedWith() *BlockStamp {
+	return &BlockStamp{
+		Height: w.syncedBlockHeight,
+		Hash:   w.syncedBlockHash,
+	}
+}
+
+// CreatedAt returns the height of the blockchain at the time of wallet
+// creation.  This is needed when performaing a full rescan to prevent
+// unnecessary rescanning before wallet addresses first appeared.
+func (w *Wallet) CreatedAt() int32 {
+	return w.keyGenerator.firstBlock
+}
+
 func (w *Wallet) addr160ForIdx(idx int64) (*[ripemd160.Size]byte, error) {
 	if idx > w.lastChainIdx {
 		return nil, errors.New("chain index out of range")
@@ -708,21 +754,27 @@ func (w *Wallet) addr160ForIdx(idx int64) (*[ripemd160.Size]byte, error) {
 	return w.chainIdxMap[idx], nil
 }
 
+// AddressInfo holds information regarding an address needed to manage
+// a complete wallet.
+type AddressInfo struct {
+	Address    string
+	FirstBlock int32
+}
+
 // GetActiveAddresses returns all wallet addresses that have been
 // requested to be generated.  These do not include pre-generated
 // addresses.
-func (w *Wallet) GetActiveAddresses() []string {
-	addrs := []string{}
+func (w *Wallet) GetActiveAddresses() []*AddressInfo {
+	addrs := make([]*AddressInfo, 0, w.highestUsed+1)
 	for i := int64(-1); i <= w.highestUsed; i++ {
 		addr160, err := w.addr160ForIdx(i)
 		if err != nil {
 			return addrs
 		}
 		addr := w.addrMap[*addr160]
-		addrstr, err := addr.paymentAddress(w.net)
-		// TODO(jrick): propigate error
+		info, err := addr.info(w.Net())
 		if err == nil {
-			addrs = append(addrs, addrstr)
+			addrs = append(addrs, info)
 		}
 	}
 	return addrs
@@ -817,7 +869,7 @@ type btcAddress struct {
 // newBtcAddress initializes and returns a new address.  privkey must
 // be 32 bytes.  iv must be 16 bytes, or nil (in which case it is
 // randomly generated).
-func newBtcAddress(privkey, iv []byte) (addr *btcAddress, err error) {
+func newBtcAddress(privkey, iv []byte, bs *BlockStamp) (addr *btcAddress, err error) {
 	if len(privkey) != 32 {
 		return nil, errors.New("private key is not 32 bytes")
 	}
@@ -834,8 +886,8 @@ func newBtcAddress(privkey, iv []byte) (addr *btcAddress, err error) {
 			hasPrivKey: true,
 			hasPubKey:  true,
 		},
-		firstSeen:  math.MaxInt64,
-		firstBlock: math.MaxInt32,
+		firstSeen:  time.Now().Unix(),
+		firstBlock: bs.Height,
 	}
 	copy(addr.initVector[:], iv)
 	pub := pubkeyFromPrivkey(privkey)
@@ -848,12 +900,12 @@ func newBtcAddress(privkey, iv []byte) (addr *btcAddress, err error) {
 // newRootBtcAddress generates a new address, also setting the
 // chaincode and chain index to represent this address as a root
 // address.
-func newRootBtcAddress(privKey, iv, chaincode []byte) (addr *btcAddress, err error) {
+func newRootBtcAddress(privKey, iv, chaincode []byte, bs *BlockStamp) (addr *btcAddress, err error) {
 	if len(chaincode) != 32 {
 		return nil, errors.New("chaincode is not 32 bytes")
 	}
 
-	addr, err = newBtcAddress(privKey, iv)
+	addr, err = newBtcAddress(privKey, iv, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -1037,6 +1089,20 @@ func (a *btcAddress) changeEncryptionKey(oldkey, newkey []byte) error {
 // an address.
 func (a *btcAddress) paymentAddress(net btcwire.BitcoinNet) (string, error) {
 	return btcutil.EncodeAddress(a.pubKeyHash[:], net)
+}
+
+// info returns information about a btcAddress stored in a AddressInfo
+// struct.
+func (a *btcAddress) info(net btcwire.BitcoinNet) (*AddressInfo, error) {
+	address, err := a.paymentAddress(net)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AddressInfo{
+		Address:    address,
+		FirstBlock: a.firstBlock,
+	}, nil
 }
 
 func walletHash(b []byte) uint32 {
@@ -1321,4 +1387,12 @@ func (e *deletedEntry) ReadFrom(r io.Reader) (n int64, err error) {
 		return n + int64(nRead), nil
 	}
 	return n + int64(nRead), err
+}
+
+// BlockStamp defines a block (by height and a unique hash) and is
+// used to mark a point in the blockchain that a wallet element is
+// synced to.
+type BlockStamp struct {
+	Height int32
+	Hash   btcwire.ShaHash
 }

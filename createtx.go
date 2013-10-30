@@ -82,7 +82,10 @@ func (u ByAmount) Swap(i, j int) {
 // of all selected previous outputs.  err will equal ErrInsufficientFunds if there
 // are not enough unspent outputs to spend amt.
 func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, btcout uint64, err error) {
-	height := getCurHeight()
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, 0, err
+	}
 
 	// Create list of eligible unspent previous outputs to use as tx
 	// inputs, and sort by the amount in reverse order so a minimum number
@@ -93,7 +96,7 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 		// to a change address, resulting in a UTXO not yet mined in a block.
 		// For now, disallow creating transactions until these UTXOs are mined
 		// into a block and show up as part of the balance.
-		if utxo.Height != -1 && int(height-utxo.Height) >= minconf {
+		if utxo.Height != -1 && int(bs.Height-utxo.Height) >= minconf {
 			eligible = append(eligible, utxo)
 		}
 	}

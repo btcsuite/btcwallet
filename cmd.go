@@ -32,23 +32,32 @@ import (
 	"time"
 )
 
-const (
-	satoshiPerBTC = 100000000
-)
-
 var (
 	// ErrNoWallet describes an error where a wallet does not exist and
 	// must be created first.
 	ErrNoWallet = errors.New("wallet file does not exist")
 
+	// ErrNoUtxos describes an error where the wallet file was successfully
+	// read, but the UTXO file was not.  To properly handle this error,
+	// a rescan should be done since the wallet creation block.
+	ErrNoUtxos = errors.New("utxo file cannot be read")
+
+	// ErrNoTxs describes an error where the wallet and UTXO files were
+	// successfully read, but the TX history file was not.  It is up to
+	// the caller whether this necessitates a rescan or not.
+	ErrNoTxs = errors.New("tx file cannot be read")
+
 	cfg *config
 
-	curHeight = struct {
+	curBlock = struct {
 		sync.RWMutex
-		h int64
+		wallet.BlockStamp
 	}{
-		h: btcutil.BlockHeightUnknown,
+		BlockStamp: wallet.BlockStamp{
+			Height: int32(btcutil.BlockHeightUnknown),
+		},
 	}
+
 	wallets = NewBtcWalletStore()
 )
 
@@ -61,6 +70,7 @@ type BtcWallet struct {
 	mtx               sync.RWMutex
 	name              string
 	dirty             bool
+	fullRescan        bool
 	NewBlockTxSeqN    uint64
 	SpentOutpointSeqN uint64
 	UtxoStore         struct {
@@ -95,7 +105,7 @@ func NewBtcWalletStore() *BtcWalletStore {
 //
 // TODO(jrick): This must also roll back the UTXO and TX stores, and notify
 // all wallets of new account balances.
-func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
+func (s *BtcWalletStore) Rollback(height int32, hash *btcwire.ShaHash) {
 	for _, w := range s.m {
 		w.Rollback(height, hash)
 	}
@@ -105,7 +115,7 @@ func (s *BtcWalletStore) Rollback(height int64, hash *btcwire.ShaHash) {
 // with the passed chainheight and block hash was connected to the main
 // chain.  This is used to remove transactions and utxos for each wallet
 // that occured on a chain no longer considered to be the main chain.
-func (w *BtcWallet) Rollback(height int64, hash *btcwire.ShaHash) {
+func (w *BtcWallet) Rollback(height int32, hash *btcwire.ShaHash) {
 	w.UtxoStore.Lock()
 	w.UtxoStore.dirty = w.UtxoStore.dirty || w.UtxoStore.s.Rollback(height, hash)
 	w.UtxoStore.Unlock()
@@ -157,9 +167,11 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 	}
 
 	wfilepath := filepath.Join(wdir, "wallet.bin")
-	txfilepath := filepath.Join(wdir, "tx.bin")
 	utxofilepath := filepath.Join(wdir, "utxo.bin")
-	var wfile, txfile, utxofile *os.File
+	txfilepath := filepath.Join(wdir, "tx.bin")
+	var wfile, utxofile, txfile *os.File
+
+	// Read wallet file.
 	if wfile, err = os.Open(wfilepath); err != nil {
 		if os.IsNotExist(err) {
 			// Must create and save wallet first.
@@ -168,80 +180,114 @@ func OpenWallet(cfg *config, account string) (*BtcWallet, error) {
 		return nil, fmt.Errorf("cannot open wallet file: %s", err)
 	}
 	defer wfile.Close()
-	if txfile, err = os.Open(txfilepath); err != nil {
-		if os.IsNotExist(err) {
-			if txfile, err = os.Create(txfilepath); err != nil {
-				return nil, fmt.Errorf("cannot create tx file: %s", err)
-			}
-		} else {
-			return nil, fmt.Errorf("cannot open tx file: %s", err)
-		}
-	}
-	defer txfile.Close()
-	if utxofile, err = os.Open(utxofilepath); err != nil {
-		if os.IsNotExist(err) {
-			if utxofile, err = os.Create(utxofilepath); err != nil {
-				return nil, fmt.Errorf("cannot create utxo file: %s", err)
-			}
-		} else {
-			return nil, fmt.Errorf("cannot open utxo file: %s", err)
-		}
-	}
-	defer utxofile.Close()
 
 	wlt := new(wallet.Wallet)
 	if _, err = wlt.ReadFrom(wfile); err != nil {
 		return nil, fmt.Errorf("cannot read wallet: %s", err)
 	}
 
-	var txs tx.TxStore
-	if _, err = txs.ReadFrom(txfile); err != nil {
-		return nil, fmt.Errorf("cannot read tx file: %s", err)
-	}
-
-	var utxos tx.UtxoStore
-	if _, err = utxos.ReadFrom(utxofile); err != nil {
-		return nil, fmt.Errorf("cannot read utxo file: %s", err)
-	}
-
 	w := &BtcWallet{
 		Wallet: wlt,
 		name:   account,
 	}
+
+	// Read utxo file.  If this fails, return a ErrNoUtxos error so a
+	// rescan can be done since the wallet creation block.
+	var utxos tx.UtxoStore
+	if utxofile, err = os.Open(utxofilepath); err != nil {
+		log.Errorf("cannot open utxo file: %s", err)
+		return w, ErrNoUtxos
+	}
+	defer utxofile.Close()
+	if _, err = utxos.ReadFrom(utxofile); err != nil {
+		log.Errorf("cannot read utxo file: %s", err)
+		return w, ErrNoUtxos
+	}
 	w.UtxoStore.s = utxos
+
+	// Read tx file.  If this fails, return a ErrNoTxs error and let
+	// the caller decide if a rescan is necessary.
+	if txfile, err = os.Open(txfilepath); err != nil {
+		log.Errorf("cannot open tx file: %s", err)
+		return w, ErrNoTxs
+	}
+	defer txfile.Close()
+	var txs tx.TxStore
+	if _, err = txs.ReadFrom(txfile); err != nil {
+		log.Errorf("cannot read tx file: %s", err)
+		return w, ErrNoTxs
+	}
 	w.TxStore.s = txs
 
 	return w, nil
 }
 
-func getCurHeight() (height int64) {
-	curHeight.RLock()
-	height = curHeight.h
-	curHeight.RUnlock()
-	if height != btcutil.BlockHeightUnknown {
-		return height
+// GetCurBlock returns the blockchain height and SHA hash of the most
+// recently seen block.  If no blocks have been seen since btcd has
+// connected, btcd is queried for the current block height and hash.
+func GetCurBlock() (bs wallet.BlockStamp, err error) {
+	curBlock.RLock()
+	bs = curBlock.BlockStamp
+	curBlock.RUnlock()
+	if bs.Height != int32(btcutil.BlockHeightUnknown) {
+		return bs, nil
+	}
+
+	// This is a hack and may result in races, but we need to make
+	// sure that btcd is connected and sending a message will succeed,
+	// or this will block forever. A better solution is to return an
+	// error to the reply handler immediately if btcd is disconnected.
+	if !btcdConnected.b {
+		return wallet.BlockStamp{
+			Height: int32(btcutil.BlockHeightUnknown),
+		}, errors.New("current block unavailable")
 	}
 
 	n := <-NewJSONID
-	m, err := btcjson.CreateMessageWithId("getblockcount",
-		fmt.Sprintf("btcwallet(%v)", n))
-	if err != nil {
-		// Can't continue.
-		return btcutil.BlockHeightUnknown
+	msg := btcjson.Message{
+		Jsonrpc: "1.0",
+		Id:      fmt.Sprintf("btcwallet(%v)", n),
+		Method:  "getbestblock",
 	}
+	m, _ := json.Marshal(msg)
 
-	c := make(chan int64)
+	c := make(chan *struct {
+		hash   *btcwire.ShaHash
+		height int32
+	})
 
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}, e *btcjson.Error) bool {
 		if e != nil {
-			c <- btcutil.BlockHeightUnknown
+			c <- nil
 			return true
 		}
-		if balance, ok := result.(float64); ok {
-			c <- int64(balance)
-		} else {
-			c <- btcutil.BlockHeightUnknown
+		m, ok := result.(map[string]interface{})
+		if !ok {
+			c <- nil
+			return true
+		}
+		hashBE, ok := m["hash"].(string)
+		if !ok {
+			c <- nil
+			return true
+		}
+		hash, err := btcwire.NewShaHashFromStr(hashBE)
+		if err != nil {
+			c <- nil
+			return true
+		}
+		fheight, ok := m["height"].(float64)
+		if !ok {
+			c <- nil
+			return true
+		}
+		c <- &struct {
+			hash   *btcwire.ShaHash
+			height int32
+		}{
+			hash:   hash,
+			height: int32(fheight),
 		}
 		return true
 	}
@@ -251,16 +297,22 @@ func getCurHeight() (height int64) {
 	btcdMsgs <- m
 
 	// Block until reply is ready.
-	height = <-c
-	curHeight.Lock()
-	if height > curHeight.h {
-		curHeight.h = height
-	} else {
-		height = curHeight.h
+	if reply := <-c; reply != nil {
+		curBlock.Lock()
+		if reply.height > curBlock.BlockStamp.Height {
+			bs = wallet.BlockStamp{
+				Height: reply.height,
+				Hash:   *reply.hash,
+			}
+			curBlock.BlockStamp = bs
+		}
+		curBlock.Unlock()
+		return bs, nil
 	}
-	curHeight.Unlock()
 
-	return height
+	return wallet.BlockStamp{
+		Height: int32(btcutil.BlockHeightUnknown),
+	}, errors.New("current block unavailable")
 }
 
 // CalculateBalance sums the amounts of all unspent transaction
@@ -275,8 +327,8 @@ func getCurHeight() (height int64) {
 func (w *BtcWallet) CalculateBalance(confirms int) float64 {
 	var bal uint64 // Measured in satoshi
 
-	height := getCurHeight()
-	if height == btcutil.BlockHeightUnknown {
+	bs, err := GetCurBlock()
+	if bs.Height == int32(btcutil.BlockHeightUnknown) || err != nil {
 		return 0.
 	}
 
@@ -284,12 +336,12 @@ func (w *BtcWallet) CalculateBalance(confirms int) float64 {
 	for _, u := range w.UtxoStore.s {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
-		if confirms == 0 || (u.Height != -1 && int(height-u.Height+1) >= confirms) {
+		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
 			bal += u.Amt
 		}
 	}
 	w.UtxoStore.RUnlock()
-	return float64(bal) / satoshiPerBTC
+	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
 }
 
 // Track requests btcd to send notifications of new transactions for
@@ -305,7 +357,7 @@ func (w *BtcWallet) Track() {
 	replyHandlers.m[n] = w.newBlockTxHandler
 	replyHandlers.Unlock()
 	for _, addr := range w.GetActiveAddresses() {
-		w.ReqNewTxsForAddress(addr)
+		w.ReqNewTxsForAddress(addr.Address)
 	}
 
 	n = <-NewJSONID
@@ -323,21 +375,36 @@ func (w *BtcWallet) Track() {
 	w.UtxoStore.RUnlock()
 }
 
-// RescanForAddress requests btcd to rescan the blockchain for new
-// transactions to addr.  This is useful for making btcwallet catch up to
-// a long-running btcd process, or for importing addresses and rescanning
-// for unspent tx outputs.  If len(blocks) is 0, the entire blockchain is
-// rescanned.  If len(blocks) is 1, the rescan will begin at height
-// blocks[0].  If len(blocks) is 2 or greater, the rescan will be
-// performed for the block range blocks[0]...blocks[1] (inclusive).
-func (w *BtcWallet) RescanForAddress(addr string, blocks ...int) {
-	n := <-NewJSONID
-	params := []interface{}{addr}
-	if len(blocks) > 0 {
-		params = append(params, blocks[0])
+// RescanToBestBlock requests btcd to rescan the blockchain for new
+// transactions to all wallet addresses.  This is needed for making
+// btcwallet catch up to a long-running btcd process, as otherwise
+// it would have missed notifications as blocks are attached to the
+// main chain.
+func (w *BtcWallet) RescanToBestBlock() {
+	beginBlock := int32(0)
+
+	if w.fullRescan {
+		// Need to perform a complete rescan since the wallet creation
+		// block.
+		beginBlock = w.CreatedAt()
+		log.Debugf("Rescanning account '%v' for new transactions since block height %v",
+			w.name, beginBlock)
+	} else {
+		// The last synced block height should be used the starting
+		// point for block rescanning.  Grab the block stamp here.
+		bs := w.SyncedWith()
+
+		log.Debugf("Rescanning account '%v' for new transactions since block height %v hash %v",
+			w.name, bs.Height, bs.Hash)
+
+		// If we're synced with block x, must scan the blocks x+1 to best block.
+		beginBlock = bs.Height + 1
 	}
-	if len(blocks) > 1 {
-		params = append(params, blocks[1])
+
+	n := <-NewJSONID
+	params := []interface{}{
+		beginBlock,
+		w.ActivePaymentAddresses(),
 	}
 	m := &btcjson.Message{
 		Jsonrpc: "1.0",
@@ -349,16 +416,51 @@ func (w *BtcWallet) RescanForAddress(addr string, blocks ...int) {
 
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}, e *btcjson.Error) bool {
-		// TODO(jrick)
+		// Rescan is compatible with new txs from connected block
+		// notifications, so use that handler.
+		_ = w.newBlockTxHandler(result, e)
 
-		// btcd returns a nil result when the rescan is complete.
-		// Returning true signals that this handler is finished
-		// and can be removed.
-		return result == nil
+		if result != nil {
+			// Notify frontends of new account balance.
+			confirmed := w.CalculateBalance(1)
+			unconfirmed := w.CalculateBalance(0) - confirmed
+			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
+			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+
+			return false
+		}
+		if bs, err := GetCurBlock(); err == nil {
+			w.SetSyncedWith(&bs)
+			w.dirty = true
+			if err = w.writeDirtyToDisk(); err != nil {
+				log.Errorf("cannot sync dirty wallet: %v",
+					err)
+			}
+		}
+		// If result is nil, the rescan has completed.  Returning
+		// true removes this handler.
+		return true
 	}
 	replyHandlers.Unlock()
 
 	btcdMsgs <- msg
+}
+
+// ActivePaymentAddresses returns the second parameter for all rescan
+// commands.  The returned slice  maps between payment address strings and
+// the block height to begin rescanning for transactions to that address.
+func (w *BtcWallet) ActivePaymentAddresses() []string {
+	w.mtx.RLock()
+	defer w.mtx.RUnlock()
+
+	infos := w.GetActiveAddresses()
+	addrs := make([]string, len(infos))
+
+	for i := range infos {
+		addrs[i] = infos[i].Address
+	}
+
+	return addrs
 }
 
 // ReqNewTxsForAddress sends a message to btcd to request tx updates
@@ -550,16 +652,17 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		// update the block height and hash.
 		w.UtxoStore.RLock()
 		for _, u := range w.UtxoStore.s {
-			if u.Height != -1 {
-				continue
-			}
 			if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
-				// Found it.
+				// Found a either a duplicate, or a change UTXO.  If not change,
+				// ignore it.
+				if u.Height != -1 {
+					return false
+				}
 				w.UtxoStore.RUnlock()
 
 				w.UtxoStore.Lock()
 				copy(u.BlockHash[:], blockhash[:])
-				u.Height = int64(height)
+				u.Height = int32(height)
 				w.UtxoStore.dirty = true
 				w.UtxoStore.Unlock()
 
@@ -571,9 +674,12 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		}
 		w.UtxoStore.RUnlock()
 
+		// After iterating through all UTXOs, it was not a duplicate or
+		// change UTXO appearing in a block.  Append a new Utxo to the end.
+
 		u := &tx.Utxo{
 			Amt:       uint64(amt),
-			Height:    int64(height),
+			Height:    int32(height),
 			Subscript: pkscript,
 		}
 		copy(u.Out.Hash[:], txhash[:])
@@ -638,13 +744,34 @@ func main() {
 
 	// Open default wallet
 	w, err := OpenWallet(cfg, "")
-	if err != nil {
-		log.Info(err.Error())
-	} else {
+	switch err {
+	case ErrNoTxs:
+		// Do nothing special for now.  This will be implemented when
+		// the tx history file is properly written.
 		wallets.Lock()
 		wallets.m[""] = w
 		wallets.Unlock()
+
+	case ErrNoUtxos:
+		// Add wallet, but mark wallet as needing a full rescan since
+		// the wallet creation block.  This will take place when btcd
+		// connects.
+		wallets.Lock()
+		wallets.m[""] = w
+		wallets.Unlock()
+		w.fullRescan = true
+
+	case nil:
+		wallets.Lock()
+		wallets.m[""] = w
+		wallets.Unlock()
+
+	default:
+		log.Errorf("cannot open wallet: %v", err)
 	}
+
+	// Start wallet disk syncer goroutine.
+	go DirtyWalletSyncer()
 
 	go func() {
 		// Start HTTP server to listen and send messages to frontend and btcd

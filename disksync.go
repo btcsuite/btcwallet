@@ -20,8 +20,46 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
+
+var (
+	// dirtyWallets holds a set of wallets that include dirty components.
+	dirtyWallets = struct {
+		sync.Mutex
+		m map[*BtcWallet]bool
+	}{
+		m: make(map[*BtcWallet]bool),
+	}
+)
+
+// DirtyWalletSyncer synces dirty wallets for cases where the updated
+// information was not required to be immediately written to disk.  Wallets
+// may be added to dirtyWallets and will be checked and processed every 10
+// seconds by this function.
+//
+// This never returns and is meant to be called from a goroutine.
+func DirtyWalletSyncer() {
+	ticker := time.Tick(10 * time.Second)
+	for {
+		select {
+		case <-ticker:
+			dirtyWallets.Lock()
+			for w := range dirtyWallets.m {
+				log.Debugf("Syncing wallet '%v' to disk",
+					w.Wallet.Name())
+				if err := w.writeDirtyToDisk(); err != nil {
+					log.Errorf("cannot sync dirty wallet: %v",
+						err)
+				} else {
+					delete(dirtyWallets.m, w)
+				}
+			}
+			dirtyWallets.Unlock()
+		}
+	}
+}
 
 // writeDirtyToDisk checks for the dirty flag on an account's wallet,
 // txstore, and utxostore, writing them to disk if any are dirty.

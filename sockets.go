@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"net"
 	"net/http"
@@ -110,8 +111,8 @@ func frontendListenerDuplicator() {
 				// place these notifications in that function.
 				NotifyBtcdConnected(frontendNotificationMaster,
 					btcdConnected.b)
-				if btcdConnected.b {
-					NotifyNewBlockChainHeight(c, getCurHeight())
+				if bs, err := GetCurBlock(); err == nil {
+					NotifyNewBlockChainHeight(c, bs.Height)
 					NotifyBalances(c)
 				}
 
@@ -144,6 +145,7 @@ func frontendListenerDuplicator() {
 	}
 }
 
+// NotifyBtcdConnected notifies all frontends of a new btcd connection.
 func NotifyBtcdConnected(reply chan []byte, conn bool) {
 	btcdConnected.b = conn
 	var idStr interface{} = "btcwallet:btcdconnected"
@@ -266,11 +268,17 @@ func ProcessBtcdNotificationReply(b []byte) {
 		log.Errorf("Unable to unmarshal btcd message: %v", err)
 		return
 	}
+	if r.Id == nil {
+		// btcd should only ever be sending JSON messages with a string in
+		// the id field.  Log the error and drop the message.
+		log.Error("Unable to process btcd notification or reply.")
+		return
+	}
 	idStr, ok := (*r.Id).(string)
 	if !ok {
 		// btcd should only ever be sending JSON messages with a string in
 		// the id field.  Log the error and drop the message.
-		log.Error("Unable to process btcd notification or reply.")
+		log.Error("Incorrect btcd notification id type.")
 		return
 	}
 
@@ -338,7 +346,7 @@ func ProcessBtcdNotificationReply(b []byte) {
 
 // NotifyNewBlockChainHeight notifies all frontends of a new
 // blockchain height.
-func NotifyNewBlockChainHeight(reply chan []byte, height int64) {
+func NotifyNewBlockChainHeight(reply chan []byte, height int32) {
 	var id interface{} = "btcwallet:newblockchainheight"
 	msgRaw := &btcjson.Reply{
 		Result: height,
@@ -372,7 +380,7 @@ func NtfnBlockConnected(r interface{}) {
 		log.Error("blockconnected notification: invalid height")
 		return
 	}
-	height := int64(heightf)
+	height := int32(heightf)
 	var minedTxs []string
 	if iminedTxs, ok := result["minedtxs"].([]interface{}); ok {
 		minedTxs = make([]string, len(iminedTxs))
@@ -386,12 +394,35 @@ func NtfnBlockConnected(r interface{}) {
 		}
 	}
 
-	curHeight.Lock()
-	curHeight.h = height
-	curHeight.Unlock()
+	curBlock.Lock()
+	curBlock.BlockStamp = wallet.BlockStamp{
+		Height: height,
+		Hash:   *hash,
+	}
+	curBlock.Unlock()
 
-	// TODO(jrick): update TxStore and UtxoStore with new hash
-	_ = hash
+	// btcd notifies btcwallet about transactions first, and then sends
+	// the block notification.  This prevents any races from saving a
+	// synced-to block before all notifications from the block have been
+	// processed.
+	bs := &wallet.BlockStamp{
+		Height: height,
+		Hash:   *hash,
+	}
+	for _, w := range wallets.m {
+		// We do not write synced info immediatelly out to disk.
+		// If btcd is performing an IBD, that would result in
+		// writing out the wallet to disk for each processed block.
+		// Instead, mark as dirty and let another goroutine process
+		// the dirty wallet.
+		w.mtx.Lock()
+		w.Wallet.SetSyncedWith(bs)
+		w.dirty = true
+		w.mtx.Unlock()
+		dirtyWallets.Lock()
+		dirtyWallets.m[w] = true
+		dirtyWallets.Unlock()
+	}
 
 	// Notify frontends of new blockchain height.
 	NotifyNewBlockChainHeight(frontendNotificationMaster, height)
@@ -451,7 +482,7 @@ func NtfnBlockDisconnected(r interface{}) {
 	if !ok {
 		log.Error("blockdisconnected notification: invalid height")
 	}
-	height := int64(heightf)
+	height := int32(heightf)
 
 	// Rollback Utxo and Tx data stores.
 	go func() {
@@ -571,21 +602,25 @@ func BtcdHandshake(ws *websocket.Conn) {
 		return
 	}
 
+	// TODO(jrick): Check that there was not any reorgs done
+	// since last connection.  If so, rollback and rescan to
+	// catch up.
+
+	for _, w := range wallets.m {
+		w.RescanToBestBlock()
+	}
+
 	// Begin tracking wallets against this btcd instance.
 	for _, w := range wallets.m {
 		w.Track()
 	}
 
-	// Request the new block height, and notify frontends.
-	//
-	// TODO(jrick): Check that there was not any reorgs done
-	// since last connection.
-	NotifyNewBlockChainHeight(frontendNotificationMaster, getCurHeight())
-
-	// Notify frontends of all account balances, calculated based
-	// from the block height of this new btcd connection.
-	NotifyBalances(frontendNotificationMaster)
-
 	// (Re)send any unmined transactions to btcd in case of a btcd restart.
 	resendUnminedTxs()
+
+	// Get current blockchain height and best block hash.
+	if bs, err := GetCurBlock(); err == nil {
+		NotifyNewBlockChainHeight(frontendNotificationMaster, bs.Height)
+		NotifyBalances(frontendNotificationMaster)
+	}
 }

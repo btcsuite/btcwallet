@@ -45,7 +45,7 @@ type Utxo struct {
 	Amt       uint64 // Measured in Satoshis
 
 	// Height is -1 if Utxo has not yet appeared in a block.
-	Height    int64
+	Height int32
 
 	// BlockHash is zeroed if Utxo has not yet appeared in a block.
 	BlockHash btcwire.ShaHash
@@ -66,7 +66,7 @@ type TxStore []interface{}
 type RecvTx struct {
 	TxHash       btcwire.ShaHash
 	BlockHash    btcwire.ShaHash
-	Height       int64
+	Height       int32
 	Amt          uint64 // Measured in Satoshis
 	SenderAddr   [ripemd160.Size]byte
 	ReceiverAddr [ripemd160.Size]byte
@@ -77,7 +77,7 @@ type RecvTx struct {
 type SendTx struct {
 	TxHash        btcwire.ShaHash
 	BlockHash     btcwire.ShaHash
-	Height        int64
+	Height        int32
 	Fee           uint64 // Measured in Satoshis
 	SenderAddr    [ripemd160.Size]byte
 	ReceiverAddrs []struct {
@@ -156,7 +156,7 @@ func (u *UtxoStore) WriteTo(w io.Writer) (n int64, err error) {
 //
 // Correct results rely on u being sorted by block height in
 // increasing order.
-func (u *UtxoStore) Rollback(height int64, hash *btcwire.ShaHash) (modified bool) {
+func (u *UtxoStore) Rollback(height int32, hash *btcwire.ShaHash) (modified bool) {
 	s := *u
 
 	// endlen specifies the final length of the rolled-back UtxoStore.
@@ -219,7 +219,7 @@ func (u *UtxoStore) Remove(toRemove []*Utxo) (modified bool) {
 // ReadFrom satisifies the io.ReaderFrom interface.  A Utxo is read
 // from r with the format:
 //
-//  [AddrHash (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes), BlockHash (32 bytes)]
+//  [AddrHash (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (4 bytes), BlockHash (32 bytes)]
 //
 // Each field is read little endian.
 func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
@@ -249,7 +249,7 @@ func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
 // WriteTo satisifies the io.WriterTo interface.  A Utxo is written to
 // w in the format:
 //
-//  [AddrHash (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (8 bytes), BlockHash (32 bytes)]
+//  [AddrHash (20 bytes), Out (36 bytes), Subscript (varies), Amt (8 bytes), Height (4 bytes), BlockHash (32 bytes)]
 //
 // Each field is written little endian.
 func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
@@ -452,7 +452,7 @@ func (txs *TxStore) WriteTo(w io.Writer) (n int64, err error) {
 //
 // Correct results rely on txs being sorted by block height in
 // increasing order.
-func (txs *TxStore) Rollback(height int64, hash *btcwire.ShaHash) (modified bool) {
+func (txs *TxStore) Rollback(height int32, hash *btcwire.ShaHash) (modified bool) {
 	s := ([]interface{})(*txs)
 
 	// endlen specifies the final length of the rolled-back TxStore.
@@ -470,7 +470,7 @@ func (txs *TxStore) Rollback(height int64, hash *btcwire.ShaHash) (modified bool
 	}()
 
 	for i := len(s) - 1; i >= 0; i-- {
-		var txheight int64
+		var txheight int32
 		var txhash *btcwire.ShaHash
 		switch s[i].(type) {
 		case *RecvTx:
@@ -498,7 +498,7 @@ func (txs *TxStore) Rollback(height int64, hash *btcwire.ShaHash) (modified bool
 // ReadFrom satisifies the io.ReaderFrom interface.  A RecTx is read
 // in from r with the format:
 //
-//  [TxHash (32 bytes), BlockHash (32 bytes), Height (8 bytes), Amt (8 bytes), SenderAddr (20 bytes), ReceiverAddr (20 bytes)]
+//  [TxHash (32 bytes), BlockHash (32 bytes), Height (4 bytes), Amt (8 bytes), SenderAddr (20 bytes), ReceiverAddr (20 bytes)]
 //
 // Each field is read little endian.
 func (tx *RecvTx) ReadFrom(r io.Reader) (n int64, err error) {
@@ -524,7 +524,7 @@ func (tx *RecvTx) ReadFrom(r io.Reader) (n int64, err error) {
 // WriteTo satisifies the io.WriterTo interface.  A RecvTx is written to
 // w in the format:
 //
-//  [TxHash (32 bytes), BlockHash (32 bytes), Height (8 bytes), Amt (8 bytes), SenderAddr (20 bytes), ReceiverAddr (20 bytes)]
+//  [TxHash (32 bytes), BlockHash (32 bytes), Height (4 bytes), Amt (8 bytes), SenderAddr (20 bytes), ReceiverAddr (20 bytes)]
 //
 // Each field is written little endian.
 func (tx *RecvTx) WriteTo(w io.Writer) (n int64, err error) {
@@ -550,7 +550,7 @@ func (tx *RecvTx) WriteTo(w io.Writer) (n int64, err error) {
 // ReadFrom satisifies the io.WriterTo interface.  A SendTx is read
 // from r with the format:
 //
-//  [TxHash (32 bytes), Height (8 bytes), Fee (8 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
+//  [TxHash (32 bytes), Height (4 bytes), Fee (8 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
 //
 // Each field is read little endian.
 func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
@@ -599,7 +599,7 @@ func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
 // WriteTo satisifies the io.WriterTo interface.  A SendTx is written to
 // w in the format:
 //
-//  [TxHash (32 bytes), Height (8 bytes), Fee (8 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
+//  [TxHash (32 bytes), Height (4 bytes), Fee (8 bytes), SenderAddr (20 bytes), len(ReceiverAddrs) (4 bytes), ReceiverAddrs[Addr (20 bytes), Amt (8 bytes)]...]
 //
 // Each field is written little endian.
 func (tx *SendTx) WriteTo(w io.Writer) (n int64, err error) {
