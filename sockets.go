@@ -358,8 +358,7 @@ func NotifyNewBlockChainHeight(reply chan []byte, height int32) {
 }
 
 // NtfnBlockConnected handles btcd notifications resulting from newly
-// connected blocks to the main blockchain.  Currently, this only creates
-// a new notification for frontends with the new blockchain height.
+// connected blocks to the main blockchain.
 func NtfnBlockConnected(r interface{}) {
 	result, ok := r.(map[string]interface{})
 	if !ok {
@@ -382,16 +381,16 @@ func NtfnBlockConnected(r interface{}) {
 		return
 	}
 	height := int32(heightf)
-	var minedTxs []string
+	var minedTxs []TXID
 	if iminedTxs, ok := result["minedtxs"].([]interface{}); ok {
-		minedTxs = make([]string, len(iminedTxs))
+		minedTxs = make([]TXID, len(iminedTxs))
 		for i, iminedTx := range iminedTxs {
 			minedTx, ok := iminedTx.(string)
 			if !ok {
 				log.Error("blockconnected notification: mined tx is not a string")
 				continue
 			}
-			minedTxs[i] = minedTx
+			minedTxs[i] = TXID(minedTx)
 		}
 	}
 
@@ -440,10 +439,10 @@ func NtfnBlockConnected(r interface{}) {
 // transaction pool to btcd using the 'sendrawtransaction' RPC
 // command.
 func resendUnminedTxs() {
-	for _, hextx := range UnminedTxs.m {
+	for _, createdTx := range UnminedTxs.m {
 		n := <-NewJSONID
 		var id interface{} = fmt.Sprintf("btcwallet(%v)", n)
-		m, err := btcjson.CreateMessageWithId("sendrawtransaction", id, hextx)
+		m, err := btcjson.CreateMessageWithId("sendrawtransaction", id, string(createdTx.rawTx))
 		if err != nil {
 			log.Errorf("cannot create resend request: %v", err)
 			continue

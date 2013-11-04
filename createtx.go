@@ -47,6 +47,19 @@ var TxFee = struct {
 	i: 10000, // This is a fee of 0.0001 BTC.
 }
 
+// CreatedTx is a type holding information regarding a newly-created
+// transaction, including the raw bytes, inputs, and an address and UTXO
+// for change (if any).
+type CreatedTx struct {
+	rawTx      []byte
+	inputs     []*tx.Utxo
+	changeAddr string
+	changeUtxo *tx.Utxo
+}
+
+// TXID is a transaction hash identifying a transaction.
+type TXID string
+
 // UnminedTXs holds a map of transaction IDs as keys mapping to a
 // hex string of a raw transaction.  If sending a raw transaction
 // succeeds, the tx is added to this map and checked again after each
@@ -54,9 +67,9 @@ var TxFee = struct {
 // this map.  Otherwise, btcwallet will resend the tx to btcd.
 var UnminedTxs = struct {
 	sync.Mutex
-	m map[string]string
+	m map[TXID]*CreatedTx
 }{
-	m: make(map[string]string),
+	m: make(map[TXID]*CreatedTx),
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
@@ -118,16 +131,6 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 	return inputs, btcout, nil
 }
 
-// createdTx is a type holding information regarding a newly-created
-// transaction, including the raw bytes, inputs, and a address and UTXO
-// for change.
-type createdTx struct {
-	rawTx      []byte
-	inputs     []*tx.Utxo
-	changeAddr string
-	changeUtxo *tx.Utxo
-}
-
 // txToPairs creates a raw transaction sending the amounts for each
 // address/amount pair and fee to each address and the miner.  minconf
 // specifies the minimum number of confirmations required before an
@@ -137,7 +140,7 @@ type createdTx struct {
 // address, changeUtxo will point to a unconfirmed (height = -1, zeroed
 // block hash) Utxo.  ErrInsufficientFunds is returned if there are not
 // enough eligible unspent outputs to create the transaction.
-func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) (*createdTx, error) {
+func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) (*CreatedTx, error) {
 	// Recorded unspent transactions should not be modified until this
 	// finishes.
 	w.UtxoStore.RLock()
@@ -270,5 +273,5 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 
 	buf := new(bytes.Buffer)
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
-	return &createdTx{buf.Bytes(), inputs, changeAddr, changeUtxo}, nil
+	return &CreatedTx{buf.Bytes(), inputs, changeAddr, changeUtxo}, nil
 }

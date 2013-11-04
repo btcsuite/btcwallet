@@ -599,7 +599,7 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		// Add hex string of raw tx to sent tx pool.  If future blocks
 		// do not contain a tx, a resend is attempted.
 		UnminedTxs.Lock()
-		UnminedTxs.m[result.(string)] = hex.EncodeToString(createdTx.rawTx)
+		UnminedTxs.m[TXID(result.(string))] = createdTx
 		UnminedTxs.Unlock()
 
 		ReplySuccess(reply, msg.Id, result)

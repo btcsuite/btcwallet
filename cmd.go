@@ -355,7 +355,7 @@ func (w *BtcWallet) Track() {
 	w.mtx.Unlock()
 
 	replyHandlers.Lock()
-	replyHandlers.m[n] = w.newBlockTxHandler
+	replyHandlers.m[n] = w.newBlockTxOutHandler
 	replyHandlers.Unlock()
 	for _, addr := range w.GetActiveAddresses() {
 		w.ReqNewTxsForAddress(addr.Address)
@@ -419,7 +419,7 @@ func (w *BtcWallet) RescanToBestBlock() {
 	replyHandlers.m[n] = func(result interface{}, e *btcjson.Error) bool {
 		// Rescan is compatible with new txs from connected block
 		// notifications, so use that handler.
-		_ = w.newBlockTxHandler(result, e)
+		_ = w.newBlockTxOutHandler(result, e)
 
 		if result != nil {
 			// Notify frontends of new account balance.
@@ -552,9 +552,9 @@ func (w *BtcWallet) spentUtxoHandler(result interface{}, e *btcjson.Error) bool 
 	return false
 }
 
-// newBlockTxHandler is the handler function for btcd transaction
+// newBlockTxOutHandler is the handler function for btcd transaction
 // notifications resulting from newly-attached blocks.
-func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool {
+func (w *BtcWallet) newBlockTxOutHandler(result interface{}, e *btcjson.Error) bool {
 	if e != nil {
 		log.Errorf("Tx Handler: Error %d received from btcd: %s",
 			e.Code, e.Message)
@@ -611,34 +611,32 @@ func (w *BtcWallet) newBlockTxHandler(result interface{}, e *btcjson.Error) bool
 		return false
 	}
 	pkscript := btcutil.Base58Decode(pkscript58)
-	spent, ok := v["spent"].(bool)
-	if !ok {
-		log.Error("Tx Handler: Unspecified spent field.")
-		return false
+	spent := false
+	if tspent, ok := v["spent"].(bool); ok {
+		spent = tspent
 	}
 
 	// btcd sends the block and tx hashes as BE strings.  Convert both
 	// to a LE ShaHash.
 	blockhash, err := btcwire.NewShaHashFromStr(blockhashBE)
 	if err != nil {
-		log.Error("Tx Handler: Block hash string cannot be parsed: " + err.Error())
+		log.Errorf("Tx Handler: Block hash string cannot be parsed: %v", err)
 		return false
 	}
 	txhash, err := btcwire.NewShaHashFromStr(txhashBE)
 	if err != nil {
-		log.Error("Tx Handler: Tx hash string cannot be parsed: " + err.Error())
+		log.Errorf("Tx Handler: Tx hash string cannot be parsed: %v", err)
 		return false
 	}
-
 	// TODO(jrick): btcd does not find the sender yet.
 	senderHash, _, _ := btcutil.DecodeAddress(sender)
 	receiverHash, _, err := btcutil.DecodeAddress(receiver)
 	if err != nil {
-		log.Error("Tx Handler: receiver address can not be decoded: " + err.Error())
+		log.Errorf("Tx Handler: receiver address can not be decoded: %v", err)
 		return false
 	}
 
-	// Add to TxStore
+	// Add to TxStore.
 	t := &tx.RecvTx{
 		Amt: uint64(amt),
 	}
