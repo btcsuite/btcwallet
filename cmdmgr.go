@@ -368,8 +368,15 @@ func SendFrom(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// Request updates for change address.
-	w.ReqNewTxsForAddress(createdTx.changeAddr)
+	// If a change address was added, mark wallet as dirty, sync to disk,
+	// and Request updates for change address.
+	if len(createdTx.changeAddr) != 0 {
+		w.dirty = true
+		if err := w.writeDirtyToDisk(); err != nil {
+			log.Errorf("cannot write dirty wallet: %v", err)
+		}
+		w.ReqNewTxsForAddress(createdTx.changeAddr)
+	}
 
 	// Send rawtx off to btcd
 	n := <-NewJSONID
@@ -528,8 +535,15 @@ func SendMany(reply chan []byte, msg *btcjson.Message) {
 		return
 	}
 
-	// Request updates for change address.
-	w.ReqNewTxsForAddress(createdTx.changeAddr)
+	// If a change address was added, mark wallet as dirty, sync to disk,
+	// and Request updates for change address.
+	if len(createdTx.changeAddr) != 0 {
+		w.dirty = true
+		if err := w.writeDirtyToDisk(); err != nil {
+			log.Errorf("cannot write dirty wallet: %v", err)
+		}
+		w.ReqNewTxsForAddress(createdTx.changeAddr)
+	}
 
 	// Send rawtx off to btcd
 	n := <-NewJSONID
