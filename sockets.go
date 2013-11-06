@@ -25,6 +25,7 @@ import (
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
+	"github.com/conformal/btcws"
 	"net"
 	"net/http"
 	"sync"
@@ -562,11 +563,13 @@ func BtcdConnect(reply chan error) {
 // be tracked against chain notifications from this btcd connection.
 func BtcdHandshake(ws *websocket.Conn) {
 	n := <-NewJSONID
-	msg := btcjson.Message{
-		Method: "getcurrentnet",
-		Id:     fmt.Sprintf("btcwallet(%v)", n),
+	cmd := btcws.NewGetCurrentNetCmd(fmt.Sprintf("btcwallet(%v)", n))
+	mcmd, err := cmd.MarshalJSON()
+	if err != nil {
+		log.Errorf("Cannot complete btcd handshake: %v", err)
+		ws.Close()
+		return
 	}
-	m, _ := json.Marshal(&msg)
 
 	correctNetwork := make(chan bool)
 
@@ -594,7 +597,7 @@ func BtcdHandshake(ws *websocket.Conn) {
 	}
 	replyHandlers.Unlock()
 
-	btcdMsgs <- m
+	btcdMsgs <- mcmd
 
 	if !<-correctNetwork {
 		log.Error("btcd and btcwallet running on different Bitcoin networks")

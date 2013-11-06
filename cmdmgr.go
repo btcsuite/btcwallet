@@ -139,7 +139,7 @@ func GetAddressesByAccount(reply chan []byte, msg *btcjson.Message) {
 
 	var result []string
 	if w := wallets.m[account]; w != nil {
-		result = w.ActivePaymentAddresses()
+		result = w.SortedActivePaymentAddresses()
 	} else {
 		ReplyError(reply, msg.Id, &btcjson.ErrWalletInvalidAccountName)
 		return

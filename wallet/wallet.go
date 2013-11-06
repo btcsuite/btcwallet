@@ -775,14 +775,16 @@ func (w *Wallet) addr160ForIdx(idx int64) (addressHashKey, error) {
 // a complete wallet.
 type AddressInfo struct {
 	Address    string
+	AddrHash   string
 	FirstBlock int32
 	Compressed bool
 }
 
-// GetActiveAddresses returns all wallet addresses that have been
+// GetSortedActiveAddresses returns all wallet addresses that have been
 // requested to be generated.  These do not include pre-generated
-// addresses.
-func (w *Wallet) GetActiveAddresses() []*AddressInfo {
+// addresses.  Use this when ordered addresses are needed.  Otherwise,
+// GetActiveAddresses is preferred.
+func (w *Wallet) GetSortedActiveAddresses() []*AddressInfo {
 	addrs := make([]*AddressInfo, 0, w.highestUsed+1)
 	for i := int64(-1); i <= w.highestUsed; i++ {
 		addr160, err := w.addr160ForIdx(i)
@@ -793,6 +795,25 @@ func (w *Wallet) GetActiveAddresses() []*AddressInfo {
 		info, err := addr.info(w.Net())
 		if err == nil {
 			addrs = append(addrs, info)
+		}
+	}
+	return addrs
+}
+
+// GetActiveAddresses returns a map between active payment addresses
+// and their full info.  These do not include pre-generated addresses.
+// If addresses must be sorted, use GetSortedActiveAddresses.
+func (w *Wallet) GetActiveAddresses() map[string]*AddressInfo {
+	addrs := make(map[string]*AddressInfo)
+	for i := int64(-1); i <= w.highestUsed; i++ {
+		addr160, err := w.addr160ForIdx(i)
+		if err != nil {
+			return addrs
+		}
+		addr := w.addrMap[addr160]
+		info, err := addr.info(w.Net())
+		if err == nil {
+			addrs[info.Address] = info
 		}
 	}
 	return addrs
@@ -1181,6 +1202,7 @@ func (a *btcAddress) info(net btcwire.BitcoinNet) (*AddressInfo, error) {
 
 	return &AddressInfo{
 		Address:    address,
+		AddrHash:   string(a.pubKeyHash[:]),
 		FirstBlock: a.firstBlock,
 		Compressed: a.flags.compressed,
 	}, nil

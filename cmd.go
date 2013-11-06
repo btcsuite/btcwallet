@@ -18,7 +18,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
@@ -26,6 +25,7 @@ import (
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
+	"github.com/conformal/btcws"
 	"os"
 	"path/filepath"
 	"sync"
@@ -244,12 +244,13 @@ func GetCurBlock() (bs wallet.BlockStamp, err error) {
 	}
 
 	n := <-NewJSONID
-	msg := btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      fmt.Sprintf("btcwallet(%v)", n),
-		Method:  "getbestblock",
+	cmd := btcws.NewGetBestBlockCmd(fmt.Sprintf("btcwallet(%v)", n))
+	mcmd, err := cmd.MarshalJSON()
+	if err != nil {
+		return wallet.BlockStamp{
+			Height: int32(btcutil.BlockHeightUnknown),
+		}, errors.New("cannot ask for best block")
 	}
-	m, _ := json.Marshal(msg)
 
 	c := make(chan *struct {
 		hash   *btcwire.ShaHash
@@ -294,7 +295,7 @@ func GetCurBlock() (bs wallet.BlockStamp, err error) {
 	replyHandlers.Unlock()
 
 	// send message
-	btcdMsgs <- m
+	btcdMsgs <- mcmd
 
 	// Block until reply is ready.
 	if reply := <-c; reply != nil {
@@ -402,17 +403,17 @@ func (w *BtcWallet) RescanToBestBlock() {
 	}
 
 	n := <-NewJSONID
-	params := []interface{}{
-		beginBlock,
-		w.ActivePaymentAddresses(),
+	cmd, err := btcws.NewRescanCmd(fmt.Sprintf("btcwallet(%v)", n),
+		beginBlock, w.ActivePaymentAddresses())
+	if err != nil {
+		log.Errorf("cannot create rescan request: %v", err)
+		return
 	}
-	m := &btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      fmt.Sprintf("btcwallet(%v)", n),
-		Method:  "rescan",
-		Params:  params,
+	mcmd, err := cmd.MarshalJSON()
+	if err != nil {
+		log.Errorf("cannot create rescan request: %v", err)
+		return
 	}
-	msg, _ := json.Marshal(m)
 
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}, e *btcjson.Error) bool {
@@ -443,21 +444,36 @@ func (w *BtcWallet) RescanToBestBlock() {
 	}
 	replyHandlers.Unlock()
 
-	btcdMsgs <- msg
+	btcdMsgs <- mcmd
 }
 
-// ActivePaymentAddresses returns the second parameter for all rescan
-// commands.  The returned slice  maps between payment address strings and
-// the block height to begin rescanning for transactions to that address.
-func (w *BtcWallet) ActivePaymentAddresses() []string {
+// SortedActivePaymentAddresses returns a slice of all active payment
+// addresses in an account.
+func (w *BtcWallet) SortedActivePaymentAddresses() []string {
+	w.mtx.RLock()
+	defer w.mtx.RUnlock()
+
+	infos := w.GetSortedActiveAddresses()
+	addrs := make([]string, len(infos))
+
+	for i, addr := range infos {
+		addrs[i] = addr.Address
+	}
+
+	return addrs
+}
+
+// ActivePaymentAddresses returns a set of all active pubkey hashes
+// in an account.
+func (w *BtcWallet) ActivePaymentAddresses() map[string]struct{} {
 	w.mtx.RLock()
 	defer w.mtx.RUnlock()
 
 	infos := w.GetActiveAddresses()
-	addrs := make([]string, len(infos))
+	addrs := make(map[string]struct{}, len(infos))
 
-	for i := range infos {
-		addrs[i] = infos[i].Address
+	for _, info := range infos {
+		addrs[info.Address] = struct{}{}
 	}
 
 	return addrs
@@ -472,15 +488,14 @@ func (w *BtcWallet) ReqNewTxsForAddress(addr string) {
 	n := w.NewBlockTxSeqN
 	w.mtx.RUnlock()
 
-	m := &btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      fmt.Sprintf("btcwallet(%d)", n),
-		Method:  "notifynewtxs",
-		Params:  []interface{}{addr},
+	cmd := btcws.NewNotifyNewTXsCmd(fmt.Sprintf("btcwallet(%d)", n),
+		[]string{addr})
+	mcmd, err := cmd.MarshalJSON()
+	if err != nil {
+		log.Errorf("cannot request transaction notifications: %v", err)
 	}
-	msg, _ := json.Marshal(m)
 
-	btcdMsgs <- msg
+	btcdMsgs <- mcmd
 }
 
 // ReqSpentUtxoNtfn sends a message to btcd to request updates for when
@@ -493,18 +508,15 @@ func (w *BtcWallet) ReqSpentUtxoNtfn(u *tx.Utxo) {
 	n := w.SpentOutpointSeqN
 	w.mtx.RUnlock()
 
-	m := &btcjson.Message{
-		Jsonrpc: "1.0",
-		Id:      fmt.Sprintf("btcwallet(%d)", n),
-		Method:  "notifyspent",
-		Params: []interface{}{
-			u.Out.Hash.String(),
-			u.Out.Index,
-		},
+	cmd := btcws.NewNotifySpentCmd(fmt.Sprintf("btcwallet(%d)", n),
+		(*btcwire.OutPoint)(&u.Out))
+	mcmd, err := cmd.MarshalJSON()
+	if err != nil {
+		log.Errorf("cannot create spent request: %v", err)
+		return
 	}
-	msg, _ := json.Marshal(m)
 
-	btcdMsgs <- msg
+	btcdMsgs <- mcmd
 }
 
 // spentUtxoHandler is the handler function for btcd spent UTXO notifications
