@@ -665,10 +665,10 @@ func (w *BtcWallet) newBlockTxOutHandler(result interface{}, e *btcjson.Error) b
 			if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
 				// Found a either a duplicate, or a change UTXO.  If not change,
 				// ignore it.
+				w.UtxoStore.RUnlock()
 				if u.Height != -1 {
 					return false
 				}
-				w.UtxoStore.RUnlock()
 
 				w.UtxoStore.Lock()
 				copy(u.BlockHash[:], blockhash[:])
