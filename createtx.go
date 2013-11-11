@@ -234,9 +234,6 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 			return nil, fmt.Errorf("cannot get address info: %v", err)
 		}
 
-		// TODO(jrick): we want compressed pubkeys.  Switch wallet to
-		// generate addresses from the compressed key.  This will break
-		// armory wallet compat but oh well.
 		sigscript, err := btcscript.SignatureScript(msgtx, i,
 			ip.Subscript, btcscript.SigHashAll, privkey, ai.Compressed)
 		if err != nil {
