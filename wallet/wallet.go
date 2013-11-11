@@ -54,9 +54,12 @@ const (
 
 // Possible errors when dealing with wallets.
 var (
+	ErrAddressNotFound    = errors.New("address not found")
 	ErrChecksumMismatch   = errors.New("checksum mismatch")
 	ErrMalformedEntry     = errors.New("malformed entry")
+	ErrNetworkMismatch    = errors.New("network mismatch")
 	ErrWalletDoesNotExist = errors.New("non-existant wallet")
+	ErrWalletLocked       = errors.New("wallet is locked")
 )
 
 var (
@@ -345,10 +348,10 @@ type Wallet struct {
 	addrCommentMap map[addressHashKey]comment
 	txCommentMap   map[transactionHashKey]comment
 
-	// These are not serialized
-	key struct {
+	// These are not serialized.
+	secret struct {
 		sync.Mutex
-		secret []byte
+		key []byte
 	}
 	chainIdxMap  map[int64]addressHashKey
 	lastChainIdx int64
@@ -370,35 +373,41 @@ const UnusedWalletBytes = 1024 - 4 - btcwire.HashSize
 // respectively.  All address private keys are encrypted with passphrase.
 // The wallet is returned unlocked.
 func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, createdAt *BlockStamp) (*Wallet, error) {
-	if binary.Size(name) > 32 {
+	// Check sizes of inputs.
+	if len([]byte(name)) > 32 {
 		return nil, errors.New("name exceeds 32 byte maximum size")
 	}
-	if binary.Size(desc) > 256 {
+	if len([]byte(desc)) > 256 {
 		return nil, errors.New("desc exceeds 256 byte maximum size")
 	}
 
-	kdfp := computeKdfParameters(defaultKdfComputeTime, defaultKdfMaxMem)
-
+	// Randomly-generate rootkey and chaincode.
 	rootkey, chaincode := make([]byte, 32), make([]byte, 32)
 	rand.Read(rootkey)
 	rand.Read(chaincode)
+
+	// Create new root address from key and chaincode.
 	root, err := newRootBtcAddress(rootkey, nil, chaincode, createdAt)
 	if err != nil {
 		return nil, err
 	}
+
+	// Compute AES key and encrypt root address.
+	kdfp := computeKdfParameters(defaultKdfComputeTime, defaultKdfMaxMem)
 	aeskey := Key([]byte(passphrase), kdfp)
 	if err := root.encrypt(aeskey); err != nil {
 		return nil, err
 	}
 
-	// Number of pregenerated addresses.
-	const pregenerated = 100
+	// Define number of addresses to pre-generate for keypool.
+	const nPregenerated = 100
 
-	// TODO(jrick): not sure we will need uniqID, but would be good for
-	// compat with armory.
+	// Create and fill wallet.
 	w := &Wallet{
 		version: 0, // TODO(jrick): implement versioning
-		net:     net,
+		// TODO(jrick): not sure we will need uniqID, but would be good for
+		// compat with armory.
+		net: net,
 		flags: walletFlags{
 			useEncryption: true,
 			watchingOnly:  false,
@@ -413,18 +422,23 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, cre
 		addrCommentMap:    make(map[addressHashKey]comment),
 		txCommentMap:      make(map[transactionHashKey]comment),
 		chainIdxMap:       make(map[int64]addressHashKey),
-		lastChainIdx:      pregenerated - 1,
+		lastChainIdx:      nPregenerated - 1,
 	}
+	copy(w.name[:], []byte(name))
+	copy(w.desc[:], []byte(desc))
 
 	// Add root address to maps.
 	w.addrMap[addressHashKey(w.keyGenerator.pubKeyHash[:])] = &w.keyGenerator
 	w.chainIdxMap[w.keyGenerator.chainIndex] = addressHashKey(w.keyGenerator.pubKeyHash[:])
 
-	// Pre-generate 100 encrypted addresses and add to maps.
+	// Pre-generate encrypted addresses and add to maps.
 	addr := &w.keyGenerator
 	cc := addr.chaincode[:]
-	for i := 0; i < pregenerated; i++ {
-		privkey, err := ChainedPrivKey(addr.privKeyCT, addr.pubKey, cc)
+	for i := 0; i < nPregenerated; i++ {
+		// Wallet has not been returned to the caller yet, so need to
+		// lock and unlock the previous address's key's clear text
+		// private key mutex.
+		privkey, err := ChainedPrivKey(addr.privKeyCT.key, addr.pubKey, cc)
 		if err != nil {
 			return nil, err
 		}
@@ -442,8 +456,6 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, cre
 		addr = newaddr
 	}
 
-	copy(w.name[:], []byte(name))
-	copy(w.desc[:], []byte(desc))
 	return w, nil
 }
 
@@ -600,49 +612,61 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 }
 
 // Unlock derives an AES key from passphrase and wallet's KDF
-// parameters and unlocks the root key of the wallet.
+// parameters and unlocks the root key of the wallet.  If
+// the unlock was successful, the wallet's secret key is saved,
+// allowing the decryption of any encrypted private key.
 func (w *Wallet) Unlock(passphrase []byte) error {
+	// Derive key from KDF parameters and passphrase.
 	key := Key(passphrase, &w.kdfParams)
 
-	// Attempt unlocking root address
-	if err := w.keyGenerator.unlock(key); err != nil {
+	// Unlock root address with derived key.
+	if _, err := w.keyGenerator.unlock(key); err != nil {
 		return err
 	}
-	w.key.Lock()
-	w.key.secret = key
-	w.key.Unlock()
+
+	// If unlock was successful, save the secret key.
+	w.secret.Lock()
+	w.secret.key = key
+	w.secret.Unlock()
 	return nil
 }
 
-// Lock does a best effort to zero the keys.
-// Being go this might not succeed but try anway.
-// TODO(jrick)
+// Lock performs a best try effort to remove and zero all secret keys
+// associated with the wallet.
 func (w *Wallet) Lock() (err error) {
-	// Remove clear text private keys from all entries.
-	for _, addr := range w.addrMap {
-		addr.privKeyCT = nil
-	}
-
-	w.key.Lock()
-	if w.key.secret != nil {
-		for i := range w.key.secret {
-			w.key.secret[i] = 0
-		}
-		w.key.secret = nil
+	// Remove clear text passphrase from wallet.
+	w.secret.Lock()
+	if w.secret.key == nil {
+		err = ErrWalletLocked
 	} else {
-		err = fmt.Errorf("wallet already locked")
+		zero(w.secret.key)
+		w.secret.key = nil
 	}
-	w.key.Unlock()
+	w.secret.Unlock()
 
-	return nil
+	// Remove clear text private keys from all address entries.
+	for _, addr := range w.addrMap {
+		addr.privKeyCT.Lock()
+		zero(addr.privKeyCT.key)
+		addr.privKeyCT.key = nil
+		addr.privKeyCT.Unlock()
+	}
+
+	return err
+}
+
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
 
 // IsLocked returns whether a wallet is unlocked (in which case the
 // key is saved in memory), or locked.
 func (w *Wallet) IsLocked() (locked bool) {
-	w.key.Lock()
-	locked = w.key.secret == nil
-	w.key.Unlock()
+	w.secret.Lock()
+	locked = w.secret.key == nil
+	w.secret.Unlock()
 	return locked
 }
 
@@ -657,17 +681,43 @@ func (w *Wallet) Version() (string, int) {
 // TODO(jrick): this currently relies on pre-generated addresses
 // and will return an empty string if the address pool has run out.
 func (w *Wallet) NextUnusedAddress() (string, error) {
-	_ = w.lastChainIdx
-	w.highestUsed++
-	new160, err := w.addr160ForIdx(w.highestUsed)
+	// Attempt to get address hash of next chained address.
+	next160, err := w.addr160ForIdx(w.highestUsed + 1)
 	if err != nil {
+		// TODO(jrick): Re-fill key pool.
 		return "", errors.New("cannot find generated address")
+	} else {
+		w.highestUsed++
 	}
-	addr := w.addrMap[new160]
+
+	// Look up address.
+	addr := w.addrMap[next160]
 	if addr == nil {
 		return "", errors.New("cannot find generated address")
 	}
+
+	// Create and return payment address for address hash.
 	return addr.paymentAddress(w.net)
+}
+
+// addrHashForAddress decodes and returns the address hash for a
+// payment address string, performing some basic sanity checking that it
+// matches the Bitcoin network used by the wallet.
+func (w *Wallet) addrHashForAddress(addr string) ([]byte, error) {
+	addr160, net, err := btcutil.DecodeAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return error if address is for the wrong Bitcoin network.
+	switch {
+	case net == btcutil.MainNetAddr && w.net != btcwire.MainNet:
+		fallthrough
+	case net == btcutil.TestNetAddr && w.net != btcwire.TestNet:
+		return nil, ErrNetworkMismatch
+	}
+
+	return addr160, nil
 }
 
 // GetAddressKey returns the private key for a payment address stored
@@ -676,22 +726,20 @@ func (w *Wallet) NextUnusedAddress() (string, error) {
 // contained in the wallet, the address does not include a public and
 // private key, or if the wallet is locked.
 func (w *Wallet) GetAddressKey(addr string) (key *ecdsa.PrivateKey, err error) {
-	addr160, net, err := btcutil.DecodeAddress(addr)
+	// Get address hash for payment address string.
+	addr160, err := w.addrHashForAddress(addr)
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case net == btcutil.MainNetAddr && w.net != btcwire.MainNet:
-		fallthrough
-	case net == btcutil.TestNetAddr && w.net != btcwire.TestNet:
-		return nil, errors.New("wallet and address networks mismatch")
-	}
 
+	// Lookup address from map.
 	btcaddr, ok := w.addrMap[addressHashKey(addr160)]
 	if !ok {
-		return nil, errors.New("address not in wallet")
+		return nil, ErrAddressNotFound
 	}
 
+	// Both the pubkey and encrypted privkey must be recorded to return
+	// the private key.  Error if neither are saved.
 	if !btcaddr.flags.hasPubKey {
 		return nil, errors.New("no public key for address")
 	}
@@ -699,35 +747,46 @@ func (w *Wallet) GetAddressKey(addr string) (key *ecdsa.PrivateKey, err error) {
 		return nil, errors.New("no private key for address")
 	}
 
+	// Parse public key.
 	pubkey, err := btcec.ParsePubKey(btcaddr.pubKey, btcec.S256())
 	if err != nil {
 		return nil, err
 	}
 
-	if err = btcaddr.unlock(w.key.secret); err != nil {
-		return nil, err
+	// The wallet's secret will be zeroed on lock, so make a local
+	// copy.
+	localSecret := make([]byte, 32)
+	w.secret.Lock()
+	if len(w.secret.key) != 32 {
+		w.secret.Unlock()
+		return nil, ErrWalletLocked
 	}
+	copy(localSecret, w.secret.key)
+	w.secret.Unlock()
 
-	d := new(big.Int).SetBytes(btcaddr.privKeyCT)
-	key = &ecdsa.PrivateKey{
-		PublicKey: *pubkey,
-		D:         d,
-	}
-	return key, nil
-}
-
-func (w *Wallet) GetAddressInfo(addr string) (*AddressInfo, error) {
-	addr160, net, err := btcutil.DecodeAddress(addr)
+	// Unlock address with wallet secret.  unlock returns a copy of the
+	// clear text private key, and may be used safely even during an address
+	// lock.
+	privKeyCT, err := btcaddr.unlock(localSecret)
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case net == btcutil.MainNetAddr && w.net != btcwire.MainNet:
-		fallthrough
-	case net == btcutil.TestNetAddr && w.net != btcwire.TestNet:
-		return nil, errors.New("wallet and address networks mismatch")
+
+	return &ecdsa.PrivateKey{
+		PublicKey: *pubkey,
+		D:         new(big.Int).SetBytes(privKeyCT),
+	}, nil
+}
+
+// GetAddressInfo returns an AddressInfo for an address in a wallet.
+func (w *Wallet) GetAddressInfo(addr string) (*AddressInfo, error) {
+	// Get address hash for addr.
+	addr160, err := w.addrHashForAddress(addr)
+	if err != nil {
+		return nil, err
 	}
 
+	// Look up address by address hash.
 	btcaddr, ok := w.addrMap[addressHashKey(addr160)]
 	if !ok {
 		return nil, errors.New("address not in wallet")
@@ -781,8 +840,8 @@ type AddressInfo struct {
 }
 
 // GetSortedActiveAddresses returns all wallet addresses that have been
-// requested to be generated.  These do not include pre-generated
-// addresses.  Use this when ordered addresses are needed.  Otherwise,
+// requested to be generated.  These do not include unused addresses in
+// the key pool.  Use this when ordered addresses are needed.  Otherwise,
 // GetActiveAddresses is preferred.
 func (w *Wallet) GetSortedActiveAddresses() []*AddressInfo {
 	addrs := make([]*AddressInfo, 0, w.highestUsed+1)
@@ -801,8 +860,8 @@ func (w *Wallet) GetSortedActiveAddresses() []*AddressInfo {
 }
 
 // GetActiveAddresses returns a map between active payment addresses
-// and their full info.  These do not include pre-generated addresses.
-// If addresses must be sorted, use GetSortedActiveAddresses.
+// and their full info.  These do not include unused addresses in the
+// key pool.  If addresses must be sorted, use GetSortedActiveAddresses.
 func (w *Wallet) GetActiveAddresses() map[string]*AddressInfo {
 	addrs := make(map[string]*AddressInfo)
 	for i := int64(-1); i <= w.highestUsed; i++ {
@@ -916,7 +975,10 @@ type btcAddress struct {
 	lastSeen   int64
 	firstBlock int32
 	lastBlock  int32
-	privKeyCT  []byte // non-nil if unlocked.
+	privKeyCT  struct {
+		sync.Mutex
+		key []byte // non-nil if unlocked.
+	}
 }
 
 const (
@@ -982,7 +1044,6 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp) (addr *btcAddress, err er
 	}
 
 	addr = &btcAddress{
-		privKeyCT: privkey,
 		flags: addrFlags{
 			hasPrivKey: true,
 			hasPubKey:  true,
@@ -991,6 +1052,7 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp) (addr *btcAddress, err er
 		firstSeen:  time.Now().Unix(),
 		firstBlock: bs.Height,
 	}
+	addr.privKeyCT.key = privkey
 	copy(addr.initVector[:], iv)
 	addr.pubKey = pubkeyFromPrivkey(privkey, true)
 	copy(addr.pubKeyHash[:], calcHash160(addr.pubKey))
@@ -1125,7 +1187,9 @@ func (a *btcAddress) encrypt(key []byte) error {
 	if a.flags.encrypted {
 		return errors.New("address already encrypted")
 	}
-	if len(a.privKeyCT) != 32 {
+	a.privKeyCT.Lock()
+	defer a.privKeyCT.Unlock()
+	if len(a.privKeyCT.key) != 32 {
 		return errors.New("invalid clear text private key")
 	}
 
@@ -1135,7 +1199,7 @@ func (a *btcAddress) encrypt(key []byte) error {
 	}
 	aesEncrypter := cipher.NewCFBEncrypter(aesBlockEncrypter, a.initVector[:])
 
-	aesEncrypter.XORKeyStream(a.privKey[:], a.privKeyCT)
+	aesEncrypter.XORKeyStream(a.privKey[:], a.privKeyCT.key)
 
 	a.flags.encrypted = true
 	return nil
@@ -1148,37 +1212,60 @@ func (a *btcAddress) lock() error {
 		return errors.New("unable to lock unencrypted address")
 	}
 
-	a.privKeyCT = nil
+	a.privKeyCT.Lock()
+	zero(a.privKeyCT.key)
+	a.privKeyCT.key = nil
+	a.privKeyCT.Unlock()
 	return nil
 }
 
 // unlock decrypts and stores a pointer to this address's private key,
 // failing if the address is not encrypted, or the provided key is
-// incorrect.
-func (a *btcAddress) unlock(key []byte) error {
+// incorrect.  The returned clear text private key will always be a copy
+// that may be safely used by the caller without worrying about it being
+// zeroed during an address lock.
+func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 	if !a.flags.encrypted {
-		return errors.New("unable to unlock unencrypted address")
+		return nil, errors.New("unable to unlock unencrypted address")
 	}
 
+	// If secret is already saved, return a copy without performing a full
+	// unlock.
+	a.privKeyCT.Lock()
+	if len(a.privKeyCT.key) == 32 {
+		privKeyCT := make([]byte, 32)
+		copy(privKeyCT, a.privKeyCT.key)
+		a.privKeyCT.Unlock()
+		return privKeyCT, nil
+	}
+	a.privKeyCT.Unlock()
+
+	// Decrypt private key with AES key.
 	aesBlockDecrypter, err := aes.NewCipher(key)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	aesDecrypter := cipher.NewCFBDecrypter(aesBlockDecrypter, a.initVector[:])
-	ct := make([]byte, 32)
-	aesDecrypter.XORKeyStream(ct, a.privKey[:])
+	privkey := make([]byte, 32)
+	aesDecrypter.XORKeyStream(privkey, a.privKey[:])
 
+	// Generate new x, y from clear text private key and check that they
+	// match the recorded pubkey.
 	pubKey, err := btcec.ParsePubKey(a.pubKey, btcec.S256())
 	if err != nil {
-		return fmt.Errorf("cannot parse pubkey: %s", err)
+		return nil, fmt.Errorf("cannot parse pubkey: %s", err)
 	}
-	x, y := btcec.S256().ScalarBaseMult(ct)
+	x, y := btcec.S256().ScalarBaseMult(privkey)
 	if x.Cmp(pubKey.X) != 0 || y.Cmp(pubKey.Y) != 0 {
-		return errors.New("decryption failed")
+		return nil, errors.New("decryption failed")
 	}
 
-	a.privKeyCT = ct
-	return nil
+	privkeyCopy := make([]byte, 32)
+	copy(privkeyCopy, privkey)
+	a.privKeyCT.Lock()
+	a.privKeyCT.key = privkey
+	a.privKeyCT.Unlock()
+	return privkeyCopy, nil
 }
 
 // TODO(jrick)

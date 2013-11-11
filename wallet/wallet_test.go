@@ -68,7 +68,7 @@ func TestBtcAddressSerializer(t *testing.T) {
 		return
 	}
 
-	if err = readAddr.unlock(key); err != nil {
+	if _, err = readAddr.unlock(key); err != nil {
 		t.Error(err.Error())
 		return
 	}
