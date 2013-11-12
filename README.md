@@ -20,8 +20,8 @@ asynchronous queries, replies, and notifications between btcd and
 btcwallet, as well as between btcwallet and any number of frontends.
 
 This project is currently under active development is not production
-ready yet.  Because of this, support for using the main Bitcoin is
-currently disabled, and testnet must be used instead.
+ready yet.  Because of this, support for using the main Bitcoin netowrk
+is currently disabled, and testnet must be used instead.
 
 ## Installation
 
