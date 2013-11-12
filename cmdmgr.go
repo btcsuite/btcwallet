@@ -227,7 +227,7 @@ func NotifyBalances(reply chan []byte) {
 // error is returned to the frontend.
 func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 	// Type assert icmd to access parameters.
-	cmd, ok := icmd.(*btcjson.GetAddressesByAccountCmd)
+	cmd, ok := icmd.(*btcjson.GetNewAddressCmd)
 	if !ok {
 		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
 		return
