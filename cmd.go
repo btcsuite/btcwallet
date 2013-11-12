@@ -298,22 +298,23 @@ func GetCurBlock() (bs wallet.BlockStamp, err error) {
 	btcdMsgs <- mcmd
 
 	// Block until reply is ready.
-	if reply := <-c; reply != nil {
-		curBlock.Lock()
-		if reply.height > curBlock.BlockStamp.Height {
-			bs = wallet.BlockStamp{
-				Height: reply.height,
-				Hash:   *reply.hash,
-			}
-			curBlock.BlockStamp = bs
-		}
-		curBlock.Unlock()
-		return bs, nil
+	reply, ok := <-c
+	if !ok || reply == nil {
+		return wallet.BlockStamp{
+			Height: int32(btcutil.BlockHeightUnknown),
+		}, errors.New("current block unavailable")
 	}
 
-	return wallet.BlockStamp{
-		Height: int32(btcutil.BlockHeightUnknown),
-	}, errors.New("current block unavailable")
+	curBlock.Lock()
+	if reply.height > curBlock.BlockStamp.Height {
+		bs = wallet.BlockStamp{
+			Height: reply.height,
+			Hash:   *reply.hash,
+		}
+		curBlock.BlockStamp = bs
+	}
+	curBlock.Unlock()
+	return bs, nil
 }
 
 // CalculateBalance sums the amounts of all unspent transaction

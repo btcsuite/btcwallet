@@ -23,6 +23,7 @@ import (
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
+	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"sort"
 	"sync"
@@ -36,6 +37,14 @@ var ErrInsufficientFunds = errors.New("insufficient funds")
 // ErrUnknownBitcoinNet represents an error where the parsed or
 // requested bitcoin network is invalid (neither mainnet nor testnet).
 var ErrUnknownBitcoinNet = errors.New("unknown bitcoin network")
+
+// ErrNonPositiveAmount represents an error where a bitcoin amount is
+// not positive (either negative, or zero).
+var ErrNonPositiveAmount = errors.New("amount is not positive")
+
+// ErrNegativeFee represents an error where a fee is erroneously
+// negative.
+var ErrNegativeFee = errors.New("fee is negative")
 
 // TxFee represents the global transaction fee added to newly-created
 // transactions and sent as a reward to the block miner.  i is measured
@@ -140,7 +149,7 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 // address, changeUtxo will point to a unconfirmed (height = -1, zeroed
 // block hash) Utxo.  ErrInsufficientFunds is returned if there are not
 // enough eligible unspent outputs to create the transaction.
-func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) (*CreatedTx, error) {
+func (w *BtcWallet) txToPairs(pairs map[string]int64, fee int64, minconf int) (*CreatedTx, error) {
 	// Recorded unspent transactions should not be modified until this
 	// finishes.
 	w.UtxoStore.RLock()
@@ -150,13 +159,22 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 	msgtx := btcwire.NewMsgTx()
 
 	// Calculate minimum amount needed for inputs.
-	var amt uint64
+	var amt int64
 	for _, v := range pairs {
+		// Error out if any amount is negative.
+		if v <= 0 {
+			return nil, ErrNonPositiveAmount
+		}
 		amt += v
 	}
 
+	if fee < 0 {
+		return nil, ErrNegativeFee
+	}
+
 	// Select unspent outputs to be used in transaction.
-	inputs, btcout, err := selectInputs(w.UtxoStore.s, amt+fee, minconf)
+	inputs, btcout, err := selectInputs(w.UtxoStore.s, uint64(amt+fee),
+		minconf)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +199,7 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 	// a new address we own.
 	var changeUtxo *tx.Utxo
 	var changeAddr string
-	if btcout > amt+fee {
+	if btcout > uint64(amt+fee) {
 		// Create a new address to spend leftover outputs to.
 		// TODO(jrick): use the next chained address, not the next unused.
 		var err error
@@ -191,7 +209,7 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 		}
 
 		// Spend change
-		change := btcout - (amt + fee)
+		change := btcout - uint64(amt+fee)
 		changeAddrHash, _, err := btcutil.DecodeAddress(changeAddr)
 		if err != nil {
 			return nil, fmt.Errorf("cannot decode new address: %s", err)
@@ -226,7 +244,9 @@ func (w *BtcWallet) txToPairs(pairs map[string]uint64, fee uint64, minconf int) 
 			return nil, err
 		}
 		privkey, err := w.GetAddressKey(addrstr)
-		if err != nil {
+		if err == wallet.ErrWalletLocked {
+			return nil, wallet.ErrWalletLocked
+		} else if err != nil {
 			return nil, fmt.Errorf("cannot get address key: %v", err)
 		}
 		ai, err := w.GetAddressInfo(addrstr)
