@@ -74,27 +74,32 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 	txfilepath := filepath.Join(wdir, "tx.bin")
 	utxofilepath := filepath.Join(wdir, "utxo.bin")
 
-	// Wallet
-	if w.dirty {
-		w.mtx.Lock()
-		defer w.mtx.Unlock()
-		tmpfilepath := wfilepath + "-" + timeStr
+	// UTXOs and transactions are synced to disk first.  This prevents
+	// any races from saving a wallet marked to be synced with block N
+	// and btcwallet closing while the UTXO and Tx files are only synced
+	// with block N-1.
+
+	// UTXOs
+	if w.UtxoStore.dirty {
+		w.UtxoStore.Lock()
+		defer w.UtxoStore.Unlock()
+		tmpfilepath := utxofilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
 			return err
 		}
-		if _, err = w.WriteTo(tmpfile); err != nil {
+		if _, err = w.UtxoStore.s.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
 
 		// TODO(jrick): this should be atomic on *nix, but is not on
 		// Windows.  Use _windows.go to provide atomic renames.
-		if err = os.Rename(tmpfilepath, wfilepath); err != nil {
+		if err = os.Rename(tmpfilepath, utxofilepath); err != nil {
 			return err
 		}
 
-		w.dirty = false
+		w.UtxoStore.dirty = false
 	}
 
 	// Transactions
@@ -120,27 +125,27 @@ func (w *BtcWallet) writeDirtyToDisk() error {
 		w.TxStore.dirty = false
 	}
 
-	// UTXOs
-	if w.UtxoStore.dirty {
-		w.UtxoStore.Lock()
-		defer w.UtxoStore.Unlock()
-		tmpfilepath := utxofilepath + "-" + timeStr
+	// Wallet
+	if w.dirty {
+		w.mtx.Lock()
+		defer w.mtx.Unlock()
+		tmpfilepath := wfilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
 			return err
 		}
-		if _, err = w.UtxoStore.s.WriteTo(tmpfile); err != nil {
+		if _, err = w.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
 
 		// TODO(jrick): this should be atomic on *nix, but is not on
 		// Windows.  Use _windows.go to provide atomic renames.
-		if err = os.Rename(tmpfilepath, utxofilepath); err != nil {
+		if err = os.Rename(tmpfilepath, wfilepath); err != nil {
 			return err
 		}
 
-		w.UtxoStore.dirty = false
+		w.dirty = false
 	}
 
 	return nil

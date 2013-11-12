@@ -652,10 +652,6 @@ func (w *BtcWallet) newBlockTxOutHandler(result interface{}, e *btcjson.Error) b
 	w.TxStore.dirty = true
 	w.TxStore.Unlock()
 
-	if err = w.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
-	}
-
 	// Add to UtxoStore if unspent.
 	if !spent {
 		// First, iterate through all stored utxos.  If an unconfirmed utxo
@@ -677,9 +673,6 @@ func (w *BtcWallet) newBlockTxOutHandler(result interface{}, e *btcjson.Error) b
 				w.UtxoStore.dirty = true
 				w.UtxoStore.Unlock()
 
-				if err = w.writeDirtyToDisk(); err != nil {
-					log.Errorf("cannot sync dirty wallet: %v", err)
-				}
 				return false
 			}
 		}
@@ -701,14 +694,10 @@ func (w *BtcWallet) newBlockTxOutHandler(result interface{}, e *btcjson.Error) b
 		w.UtxoStore.s = append(w.UtxoStore.s, u)
 		w.UtxoStore.dirty = true
 		w.UtxoStore.Unlock()
-		if err = w.writeDirtyToDisk(); err != nil {
-			log.Errorf("cannot sync dirty wallet: %v", err)
-		}
 
-		confirmed := w.CalculateBalance(1)
-		unconfirmed := w.CalculateBalance(0) - confirmed
-		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
-		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+		// If this notification came from mempool (TODO: currently
+		// unimplemented) notify the new unconfirmed balance immediately.
+		// Otherwise, wait until the blockconnection notifiation is processed.
 	}
 
 	// Never remove this handler.

@@ -381,10 +381,7 @@ func NtfnBlockConnected(n btcws.Notification) {
 		return
 	}
 
-	// btcd notifies btcwallet about transactions first, and then sends
-	// the block notification.  This prevents any races from saving a
-	// synced-to block before all notifications from the block have been
-	// processed.
+	// Update the blockstamp for the newly-connected block.
 	bs := &wallet.BlockStamp{
 		Height: bcn.Height,
 		Hash:   *hash,
@@ -392,16 +389,44 @@ func NtfnBlockConnected(n btcws.Notification) {
 	curBlock.Lock()
 	curBlock.BlockStamp = *bs
 	curBlock.Unlock()
+
+	// btcd notifies btcwallet about transactions first, and then sends
+	// the new block notification.  New balance notifications for txs
+	// in blocks are therefore sent here after all tx notifications
+	// have arrived.
+	//
+	// TODO(jrick): send frontend tx notifications once that's
+	// implemented.
 	for _, w := range wallets.m {
-		// We do not write synced info immediatelly out to disk.
-		// If btcd is performing an IBD, that would result in
-		// writing out the wallet to disk for each processed block.
-		// Instead, mark as dirty and let another goroutine process
-		// the dirty wallet.
+		// Mark wallet as being synced with the new blockstamp.
 		w.mtx.Lock()
 		w.Wallet.SetSyncedWith(bs)
-		w.dirty = true
 		w.mtx.Unlock()
+
+		// The UTXO store will be dirty if it was modified
+		// from a tx notification.
+		if w.UtxoStore.dirty {
+			// Notify all frontends of account's new unconfirmed
+			// and confirmed balance.
+			confirmed := w.CalculateBalance(1)
+			unconfirmed := w.CalculateBalance(0) - confirmed
+			NotifyWalletBalance(frontendNotificationMaster,
+				w.name, confirmed)
+			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster,
+				w.name, unconfirmed)
+		}
+
+		// The account is intentionaly not immediately synced to disk.
+		// If btcd is performing an IBD, writing the wallet file for
+		// each newly-connected block would result in too many
+		// unnecessary disk writes.  The UTXO and transaction stores
+		// could be written, but in the case of btcwallet closing
+		// before writing the dirty wallet, both would have to be
+		// pruned anyways.
+		//
+		// Instead, the wallet is queued to be written to disk at the
+		// next scheduled disk sync.
+		w.dirty = true
 		dirtyWallets.Lock()
 		dirtyWallets.m[w] = true
 		dirtyWallets.Unlock()

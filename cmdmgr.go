@@ -521,7 +521,8 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 			log.Errorf("cannot sync dirty wallet: %v", err)
 		}
 
-		// Notify all frontends of new account balances.
+		// Notify all frontends of account's new unconfirmed and
+		// confirmed balance.
 		confirmed := w.CalculateBalance(1)
 		unconfirmed := w.CalculateBalance(0) - confirmed
 		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
