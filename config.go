@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/go-flags"
 	"os"
@@ -27,13 +28,15 @@ import (
 
 const (
 	defaultConfigFilename = "btcwallet.conf"
+	defaultDataDirname    = "data"
 	defaultBtcNet         = btcwire.TestNet3
 	defaultLogLevel       = "info"
 )
 
 var (
-	defaultConfigFile = filepath.Join(btcwalletHomeDir(), defaultConfigFilename)
-	defaultDataDir    = btcwalletHomeDir()
+	btcwalletHomeDir  = btcutil.AppDataDir("btcwallet", false)
+	defaultConfigFile = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
+	defaultDataDir    = btcwalletHomeDir
 )
 
 type config struct {
@@ -46,24 +49,6 @@ type config struct {
 	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
 	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
 	MainNet     bool   `long:"mainnet" description:"*DISABLED* Use the main Bitcoin network (default testnet3)"`
-}
-
-// btcwalletHomeDir returns an OS appropriate home directory for btcwallet.
-func btcwalletHomeDir() string {
-	// Search for Windows APPDATA first.  This won't exist on POSIX OSes.
-	appData := os.Getenv("APPDATA")
-	if appData != "" {
-		return filepath.Join(appData, "btcwallet")
-	}
-
-	// Fall back to standard HOME directory that works for most POSIX OSes.
-	home := os.Getenv("HOME")
-	if home != "" {
-		return filepath.Join(home, ".btcwallet")
-	}
-
-	// In the worst case, use the current directory.
-	return "."
 }
 
 // updateConfigWithActiveParams update the passed config with parameters
