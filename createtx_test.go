@@ -58,7 +58,7 @@ func TestFakeTxs(t *testing.T) {
 	curBlock.BlockStamp.Height = 12346
 
 	// Create the transaction.
-	pairs := map[string]uint64{
+	pairs := map[string]int64{
 		"17XhEvq9Nahdj7Xe1nv6oRe1tEmaHUuynH": 5000,
 	}
 	_, err = btcw.txToPairs(pairs, 100, 0)
