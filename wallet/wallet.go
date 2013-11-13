@@ -383,8 +383,12 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, cre
 
 	// Randomly-generate rootkey and chaincode.
 	rootkey, chaincode := make([]byte, 32), make([]byte, 32)
-	rand.Read(rootkey)
-	rand.Read(chaincode)
+	if _, err := rand.Read(rootkey); err != nil {
+		return nil, err
+	}
+	if _, err := rand.Read(chaincode); err != nil {
+		return nil, err
+	}
 
 	// Create new root address from key and chaincode.
 	root, err := newRootBtcAddress(rootkey, nil, chaincode, createdAt)
