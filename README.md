@@ -29,7 +29,7 @@ is currently disabled, and testnet must be used instead.
 
 Install the btcd suite MSI here:
 
-https://github.com/conformal/btcd/releases
+https://opensource.conformal.com/packages/windows/btcdsuite/
 
 ### Linux/BSD/POSIX - Build from Source
 
@@ -52,7 +52,7 @@ $ go get -u -v github.com/conformal/btcwallet/...
 
 Install a newer btcd suite MSI here:
 
-https://github.com/conformal/btcd/releases
+https://opensource.conformal.com/packages/windows/btcdsuite/
 
 ### Linux/BSD/POSIX - Build from Source
 
