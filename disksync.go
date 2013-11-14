@@ -28,9 +28,9 @@ var (
 	// dirtyWallets holds a set of wallets that include dirty components.
 	dirtyWallets = struct {
 		sync.Mutex
-		m map[*BtcWallet]bool
+		m map[*Account]bool
 	}{
-		m: make(map[*BtcWallet]bool),
+		m: make(map[*Account]bool),
 	}
 )
 
@@ -63,7 +63,7 @@ func DirtyWalletSyncer() {
 
 // writeDirtyToDisk checks for the dirty flag on an account's wallet,
 // txstore, and utxostore, writing them to disk if any are dirty.
-func (w *BtcWallet) writeDirtyToDisk() error {
+func (w *Account) writeDirtyToDisk() error {
 	// Temporary files append the current time to the normal file name.
 	// In caes of failure, the most recent temporary file can be inspected
 	// for validity, and moved to replace the main file.

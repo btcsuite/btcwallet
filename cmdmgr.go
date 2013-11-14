@@ -495,7 +495,7 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 }
 
 func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
-	result interface{}, err *btcjson.Error, w *BtcWallet,
+	result interface{}, err *btcjson.Error, w *Account,
 	txInfo *CreatedTx) bool {
 
 	if err != nil {
@@ -653,7 +653,7 @@ func CreateEncryptedWallet(frontend chan []byte, icmd btcjson.Cmd) {
 
 	// Create new account with the wallet.  A new JSON ID is set for
 	// transaction notifications.
-	bw := &BtcWallet{
+	bw := &Account{
 		Wallet:         wlt,
 		name:           cmd.Account,
 		dirty:          true,

@@ -149,7 +149,7 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 // address, changeUtxo will point to a unconfirmed (height = -1, zeroed
 // block hash) Utxo.  ErrInsufficientFunds is returned if there are not
 // enough eligible unspent outputs to create the transaction.
-func (w *BtcWallet) txToPairs(pairs map[string]int64, fee int64, minconf int) (*CreatedTx, error) {
+func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*CreatedTx, error) {
 	// Recorded unspent transactions should not be modified until this
 	// finishes.
 	w.UtxoStore.RLock()
