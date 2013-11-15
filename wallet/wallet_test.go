@@ -32,10 +32,16 @@ func TestBtcAddressSerializer(t *testing.T) {
 		mem:   1024,
 		nIter: 5,
 	}
-	rand.Read(kdfp.salt[:])
+	if _, err := rand.Read(kdfp.salt[:]); err != nil {
+		t.Error(err.Error())
+		return
+	}
 	key := Key([]byte("banana"), kdfp)
 	privKey := make([]byte, 32)
-	rand.Read(privKey)
+	if _, err := rand.Read(privKey); err != nil {
+		t.Error(err.Error())
+		return
+	}
 	addr, err := newBtcAddress(privKey, nil, &BlockStamp{})
 	if err != nil {
 		t.Error(err.Error())

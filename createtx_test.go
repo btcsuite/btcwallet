@@ -17,7 +17,7 @@ func TestFakeTxs(t *testing.T) {
 		t.Errorf("Can not create encrypted wallet: %s", err)
 		return
 	}
-	btcw := &BtcWallet{
+	btcw := &Account{
 		Wallet: w,
 	}
 
