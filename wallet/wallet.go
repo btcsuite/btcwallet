@@ -397,7 +397,10 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, cre
 	}
 
 	// Compute AES key and encrypt root address.
-	kdfp := computeKdfParameters(defaultKdfComputeTime, defaultKdfMaxMem)
+	kdfp, err := computeKdfParameters(defaultKdfComputeTime, defaultKdfMaxMem)
+	if err != nil {
+		return nil, err
+	}
 	aeskey := Key([]byte(passphrase), kdfp)
 	if err := root.encrypt(aeskey); err != nil {
 		return nil, err
@@ -1042,7 +1045,9 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp) (addr *btcAddress, err er
 	}
 	if iv == nil {
 		iv = make([]byte, 16)
-		rand.Read(iv)
+		if _, err := rand.Read(iv); err != nil {
+			return nil, err
+		}
 	} else if len(iv) != 16 {
 		return nil, errors.New("init vector must be nil or 16 bytes large")
 	}
@@ -1321,9 +1326,11 @@ type kdfParameters struct {
 // computeKdfParameters returns best guess parameters to the
 // memory-hard key derivation function to make the computation last
 // targetSec seconds, while using no more than maxMem bytes of memory.
-func computeKdfParameters(targetSec float64, maxMem uint64) *kdfParameters {
+func computeKdfParameters(targetSec float64, maxMem uint64) (*kdfParameters, error) {
 	params := &kdfParameters{}
-	rand.Read(params.salt[:])
+	if _, err := rand.Read(params.salt[:]); err != nil {
+		return nil, err
+	}
 
 	testKey := []byte("This is an example key to test KDF iteration speed")
 
@@ -1351,7 +1358,7 @@ func computeKdfParameters(targetSec float64, maxMem uint64) *kdfParameters {
 	params.mem = memoryReqtBytes
 	params.nIter = nIter
 
-	return params
+	return params, nil
 }
 
 func (params *kdfParameters) WriteTo(w io.Writer) (n int64, err error) {
