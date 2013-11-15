@@ -397,23 +397,23 @@ func NtfnBlockConnected(n btcws.Notification) {
 	//
 	// TODO(jrick): send frontend tx notifications once that's
 	// implemented.
-	for _, w := range wallets.m {
+	for _, a := range accounts.m {
 		// Mark wallet as being synced with the new blockstamp.
-		w.mtx.Lock()
-		w.Wallet.SetSyncedWith(bs)
-		w.mtx.Unlock()
+		a.mtx.Lock()
+		a.Wallet.SetSyncedWith(bs)
+		a.mtx.Unlock()
 
 		// The UTXO store will be dirty if it was modified
 		// from a tx notification.
-		if w.UtxoStore.dirty {
+		if a.UtxoStore.dirty {
 			// Notify all frontends of account's new unconfirmed
 			// and confirmed balance.
-			confirmed := w.CalculateBalance(1)
-			unconfirmed := w.CalculateBalance(0) - confirmed
+			confirmed := a.CalculateBalance(1)
+			unconfirmed := a.CalculateBalance(0) - confirmed
 			NotifyWalletBalance(frontendNotificationMaster,
-				w.name, confirmed)
+				a.name, confirmed)
 			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster,
-				w.name, unconfirmed)
+				a.name, unconfirmed)
 		}
 
 		// The account is intentionaly not immediately synced to disk.
@@ -426,10 +426,10 @@ func NtfnBlockConnected(n btcws.Notification) {
 		//
 		// Instead, the wallet is queued to be written to disk at the
 		// next scheduled disk sync.
-		w.dirty = true
-		dirtyWallets.Lock()
-		dirtyWallets.m[w] = true
-		dirtyWallets.Unlock()
+		a.dirty = true
+		dirtyAccounts.Lock()
+		dirtyAccounts.m[a] = true
+		dirtyAccounts.Unlock()
 	}
 
 	// Notify frontends of new blockchain height.
@@ -455,7 +455,7 @@ func NtfnBlockDisconnected(n btcws.Notification) {
 
 	// Rollback Utxo and Tx data stores.
 	go func() {
-		wallets.Rollback(bdn.Height, hash)
+		accounts.Rollback(bdn.Height, hash)
 	}()
 
 	// Notify frontends of new blockchain height.
@@ -619,13 +619,13 @@ func BtcdHandshake(ws *websocket.Conn) {
 	// since last connection.  If so, rollback and rescan to
 	// catch up.
 
-	for _, w := range wallets.m {
-		w.RescanToBestBlock()
+	for _, a := range accounts.m {
+		a.RescanToBestBlock()
 	}
 
 	// Begin tracking wallets against this btcd instance.
-	for _, w := range wallets.m {
-		w.Track()
+	for _, a := range accounts.m {
+		a.Track()
 	}
 
 	// (Re)send any unmined transactions to btcd in case of a btcd restart.

@@ -28,6 +28,8 @@ import (
 	"sync"
 )
 
+var accounts = NewAccountStore()
+
 // Account is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style wallet (to store
 // addresses and keys), and tx and utxo data stores, along with locks
@@ -82,16 +84,16 @@ func (s *AccountStore) Rollback(height int32, hash *btcwire.ShaHash) {
 // with the passed chainheight and block hash was connected to the main
 // chain.  This is used to remove transactions and utxos for each wallet
 // that occured on a chain no longer considered to be the main chain.
-func (w *Account) Rollback(height int32, hash *btcwire.ShaHash) {
-	w.UtxoStore.Lock()
-	w.UtxoStore.dirty = w.UtxoStore.dirty || w.UtxoStore.s.Rollback(height, hash)
-	w.UtxoStore.Unlock()
+func (a *Account) Rollback(height int32, hash *btcwire.ShaHash) {
+	a.UtxoStore.Lock()
+	a.UtxoStore.dirty = a.UtxoStore.dirty || a.UtxoStore.s.Rollback(height, hash)
+	a.UtxoStore.Unlock()
 
-	w.TxStore.Lock()
-	w.TxStore.dirty = w.TxStore.dirty || w.TxStore.s.Rollback(height, hash)
-	w.TxStore.Unlock()
+	a.TxStore.Lock()
+	a.TxStore.dirty = a.TxStore.dirty || a.TxStore.s.Rollback(height, hash)
+	a.TxStore.Unlock()
 
-	if err := w.writeDirtyToDisk(); err != nil {
+	if err := a.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot sync dirty wallet: %v", err)
 	}
 }
@@ -105,7 +107,7 @@ func (w *Account) Rollback(height int32, hash *btcwire.ShaHash) {
 // a UTXO must be in a block.  If confirmations is 1 or greater,
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
-func (w *Account) CalculateBalance(confirms int) float64 {
+func (a *Account) CalculateBalance(confirms int) float64 {
 	var bal uint64 // Measured in satoshi
 
 	bs, err := GetCurBlock()
@@ -113,47 +115,47 @@ func (w *Account) CalculateBalance(confirms int) float64 {
 		return 0.
 	}
 
-	w.UtxoStore.RLock()
-	for _, u := range w.UtxoStore.s {
+	a.UtxoStore.RLock()
+	for _, u := range a.UtxoStore.s {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
 		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
 			bal += u.Amt
 		}
 	}
-	w.UtxoStore.RUnlock()
+	a.UtxoStore.RUnlock()
 	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
 }
 
 // Track requests btcd to send notifications of new transactions for
 // each address stored in a wallet and sets up a new reply handler for
 // these notifications.
-func (w *Account) Track() {
+func (a *Account) Track() {
 	n := <-NewJSONID
-	w.mtx.Lock()
-	w.NewBlockTxSeqN = n
-	w.mtx.Unlock()
+	a.mtx.Lock()
+	a.NewBlockTxSeqN = n
+	a.mtx.Unlock()
 
 	replyHandlers.Lock()
-	replyHandlers.m[n] = w.newBlockTxOutHandler
+	replyHandlers.m[n] = a.newBlockTxOutHandler
 	replyHandlers.Unlock()
-	for _, addr := range w.GetActiveAddresses() {
-		w.ReqNewTxsForAddress(addr.Address)
+	for _, addr := range a.GetActiveAddresses() {
+		a.ReqNewTxsForAddress(addr.Address)
 	}
 
 	n = <-NewJSONID
-	w.mtx.Lock()
-	w.SpentOutpointSeqN = n
-	w.mtx.Unlock()
+	a.mtx.Lock()
+	a.SpentOutpointSeqN = n
+	a.mtx.Unlock()
 
 	replyHandlers.Lock()
-	replyHandlers.m[n] = w.spentUtxoHandler
+	replyHandlers.m[n] = a.spentUtxoHandler
 	replyHandlers.Unlock()
-	w.UtxoStore.RLock()
-	for _, utxo := range w.UtxoStore.s {
-		w.ReqSpentUtxoNtfn(utxo)
+	a.UtxoStore.RLock()
+	for _, utxo := range a.UtxoStore.s {
+		a.ReqSpentUtxoNtfn(utxo)
 	}
-	w.UtxoStore.RUnlock()
+	a.UtxoStore.RUnlock()
 }
 
 // RescanToBestBlock requests btcd to rescan the blockchain for new
@@ -161,22 +163,22 @@ func (w *Account) Track() {
 // btcwallet catch up to a long-running btcd process, as otherwise
 // it would have missed notifications as blocks are attached to the
 // main chain.
-func (w *Account) RescanToBestBlock() {
+func (a *Account) RescanToBestBlock() {
 	beginBlock := int32(0)
 
-	if w.fullRescan {
+	if a.fullRescan {
 		// Need to perform a complete rescan since the wallet creation
 		// block.
-		beginBlock = w.CreatedAt()
+		beginBlock = a.CreatedAt()
 		log.Debugf("Rescanning account '%v' for new transactions since block height %v",
-			w.name, beginBlock)
+			a.name, beginBlock)
 	} else {
 		// The last synced block height should be used the starting
 		// point for block rescanning.  Grab the block stamp here.
-		bs := w.SyncedWith()
+		bs := a.SyncedWith()
 
 		log.Debugf("Rescanning account '%v' for new transactions since block height %v hash %v",
-			w.name, bs.Height, bs.Hash)
+			a.name, bs.Height, bs.Hash)
 
 		// If we're synced with block x, must scan the blocks x+1 to best block.
 		beginBlock = bs.Height + 1
@@ -184,7 +186,7 @@ func (w *Account) RescanToBestBlock() {
 
 	n := <-NewJSONID
 	cmd, err := btcws.NewRescanCmd(fmt.Sprintf("btcwallet(%v)", n),
-		beginBlock, w.ActivePaymentAddresses())
+		beginBlock, a.ActivePaymentAddresses())
 	if err != nil {
 		log.Errorf("cannot create rescan request: %v", err)
 		return
@@ -199,21 +201,21 @@ func (w *Account) RescanToBestBlock() {
 	replyHandlers.m[n] = func(result interface{}, e *btcjson.Error) bool {
 		// Rescan is compatible with new txs from connected block
 		// notifications, so use that handler.
-		_ = w.newBlockTxOutHandler(result, e)
+		_ = a.newBlockTxOutHandler(result, e)
 
 		if result != nil {
 			// Notify frontends of new account balance.
-			confirmed := w.CalculateBalance(1)
-			unconfirmed := w.CalculateBalance(0) - confirmed
-			NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
-			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+			confirmed := a.CalculateBalance(1)
+			unconfirmed := a.CalculateBalance(0) - confirmed
+			NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
+			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
 
 			return false
 		}
 		if bs, err := GetCurBlock(); err == nil {
-			w.SetSyncedWith(&bs)
-			w.dirty = true
-			if err = w.writeDirtyToDisk(); err != nil {
+			a.SetSyncedWith(&bs)
+			a.dirty = true
+			if err = a.writeDirtyToDisk(); err != nil {
 				log.Errorf("cannot sync dirty wallet: %v",
 					err)
 			}
@@ -229,11 +231,11 @@ func (w *Account) RescanToBestBlock() {
 
 // SortedActivePaymentAddresses returns a slice of all active payment
 // addresses in an account.
-func (w *Account) SortedActivePaymentAddresses() []string {
-	w.mtx.RLock()
-	defer w.mtx.RUnlock()
+func (a *Account) SortedActivePaymentAddresses() []string {
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
 
-	infos := w.GetSortedActiveAddresses()
+	infos := a.GetSortedActiveAddresses()
 	addrs := make([]string, len(infos))
 
 	for i, addr := range infos {
@@ -245,11 +247,11 @@ func (w *Account) SortedActivePaymentAddresses() []string {
 
 // ActivePaymentAddresses returns a set of all active pubkey hashes
 // in an account.
-func (w *Account) ActivePaymentAddresses() map[string]struct{} {
-	w.mtx.RLock()
-	defer w.mtx.RUnlock()
+func (a *Account) ActivePaymentAddresses() map[string]struct{} {
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
 
-	infos := w.GetActiveAddresses()
+	infos := a.GetActiveAddresses()
 	addrs := make(map[string]struct{}, len(infos))
 
 	for _, info := range infos {
@@ -261,12 +263,12 @@ func (w *Account) ActivePaymentAddresses() map[string]struct{} {
 
 // ReqNewTxsForAddress sends a message to btcd to request tx updates
 // for addr for each new block that is added to the blockchain.
-func (w *Account) ReqNewTxsForAddress(addr string) {
+func (a *Account) ReqNewTxsForAddress(addr string) {
 	log.Debugf("Requesting notifications of TXs sending to address %v", addr)
 
-	w.mtx.RLock()
-	n := w.NewBlockTxSeqN
-	w.mtx.RUnlock()
+	a.mtx.RLock()
+	n := a.NewBlockTxSeqN
+	a.mtx.RUnlock()
 
 	cmd := btcws.NewNotifyNewTXsCmd(fmt.Sprintf("btcwallet(%d)", n),
 		[]string{addr})
@@ -280,13 +282,13 @@ func (w *Account) ReqNewTxsForAddress(addr string) {
 
 // ReqSpentUtxoNtfn sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func (w *Account) ReqSpentUtxoNtfn(u *tx.Utxo) {
+func (a *Account) ReqSpentUtxoNtfn(u *tx.Utxo) {
 	log.Debugf("Requesting spent UTXO notifications for Outpoint hash %s index %d",
 		u.Out.Hash, u.Out.Index)
 
-	w.mtx.RLock()
-	n := w.SpentOutpointSeqN
-	w.mtx.RUnlock()
+	a.mtx.RLock()
+	n := a.SpentOutpointSeqN
+	a.mtx.RUnlock()
 
 	cmd := btcws.NewNotifySpentCmd(fmt.Sprintf("btcwallet(%d)", n),
 		(*btcwire.OutPoint)(&u.Out))
@@ -301,7 +303,7 @@ func (w *Account) ReqSpentUtxoNtfn(u *tx.Utxo) {
 
 // spentUtxoHandler is the handler function for btcd spent UTXO notifications
 // resulting from transactions in newly-attached blocks.
-func (w *Account) spentUtxoHandler(result interface{}, e *btcjson.Error) bool {
+func (a *Account) spentUtxoHandler(result interface{}, e *btcjson.Error) bool {
 	if e != nil {
 		log.Errorf("Spent UTXO Handler: Error %d received from btcd: %s",
 			e.Code, e.Message)
@@ -334,7 +336,7 @@ func (w *Account) spentUtxoHandler(result interface{}, e *btcjson.Error) bool {
 
 // newBlockTxOutHandler is the handler function for btcd transaction
 // notifications resulting from newly-attached blocks.
-func (w *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) bool {
+func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) bool {
 	if e != nil {
 		log.Errorf("Tx Handler: Error %d received from btcd: %s",
 			e.Code, e.Message)
@@ -425,37 +427,37 @@ func (w *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 	copy(t.SenderAddr[:], senderHash)
 	copy(t.ReceiverAddr[:], receiverHash)
 
-	w.TxStore.Lock()
-	txs := w.TxStore.s
-	w.TxStore.s = append(txs, t)
-	w.TxStore.dirty = true
-	w.TxStore.Unlock()
+	a.TxStore.Lock()
+	txs := a.TxStore.s
+	a.TxStore.s = append(txs, t)
+	a.TxStore.dirty = true
+	a.TxStore.Unlock()
 
 	// Add to UtxoStore if unspent.
 	if !spent {
 		// First, iterate through all stored utxos.  If an unconfirmed utxo
 		// (not present in a block) has the same outpoint as this utxo,
 		// update the block height and hash.
-		w.UtxoStore.RLock()
-		for _, u := range w.UtxoStore.s {
+		a.UtxoStore.RLock()
+		for _, u := range a.UtxoStore.s {
 			if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
 				// Found a either a duplicate, or a change UTXO.  If not change,
 				// ignore it.
-				w.UtxoStore.RUnlock()
+				a.UtxoStore.RUnlock()
 				if u.Height != -1 {
 					return false
 				}
 
-				w.UtxoStore.Lock()
+				a.UtxoStore.Lock()
 				copy(u.BlockHash[:], blockhash[:])
 				u.Height = int32(height)
-				w.UtxoStore.dirty = true
-				w.UtxoStore.Unlock()
+				a.UtxoStore.dirty = true
+				a.UtxoStore.Unlock()
 
 				return false
 			}
 		}
-		w.UtxoStore.RUnlock()
+		a.UtxoStore.RUnlock()
 
 		// After iterating through all UTXOs, it was not a duplicate or
 		// change UTXO appearing in a block.  Append a new Utxo to the end.
@@ -469,10 +471,10 @@ func (w *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		u.Out.Index = uint32(index)
 		copy(u.AddrHash[:], receiverHash)
 		copy(u.BlockHash[:], blockhash[:])
-		w.UtxoStore.Lock()
-		w.UtxoStore.s = append(w.UtxoStore.s, u)
-		w.UtxoStore.dirty = true
-		w.UtxoStore.Unlock()
+		a.UtxoStore.Lock()
+		a.UtxoStore.s = append(a.UtxoStore.s, u)
+		a.UtxoStore.dirty = true
+		a.UtxoStore.Unlock()
 
 		// If this notification came from mempool (TODO: currently
 		// unimplemented) notify the new unconfirmed balance immediately.

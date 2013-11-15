@@ -168,7 +168,7 @@ func GetAddressesByAccount(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	w, ok := wallets.m[cmd.Account]
+	a, ok := accounts.m[cmd.Account]
 	if !ok {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
@@ -176,7 +176,7 @@ func GetAddressesByAccount(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Reply with sorted active payment addresses.
-	ReplySuccess(frontend, cmd.Id(), w.SortedActivePaymentAddresses())
+	ReplySuccess(frontend, cmd.Id(), a.SortedActivePaymentAddresses())
 }
 
 // GetBalance replies to a getbalance request with the balance for an
@@ -191,7 +191,7 @@ func GetBalance(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	w, ok := wallets.m[cmd.Account]
+	a, ok := accounts.m[cmd.Account]
 	if !ok {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
@@ -199,7 +199,7 @@ func GetBalance(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Reply with calculated balance.
-	ReplySuccess(frontend, cmd.Id(), w.CalculateBalance(cmd.MinConf))
+	ReplySuccess(frontend, cmd.Id(), a.CalculateBalance(cmd.MinConf))
 }
 
 // GetBalances replies to a getbalances extension request by notifying
@@ -208,17 +208,17 @@ func GetBalances(frontend chan []byte, cmd btcjson.Cmd) {
 	NotifyBalances(frontend)
 }
 
-// NotifyBalances notifies an attached wallet of the current confirmed
+// NotifyBalances notifies an attached frontend of the current confirmed
 // and unconfirmed account balances.
 //
 // TODO(jrick): Switch this to return a JSON object (map) of all accounts
 // and their balances, instead of separate notifications for each account.
-func NotifyBalances(reply chan []byte) {
-	for _, w := range wallets.m {
-		balance := w.CalculateBalance(1)
-		unconfirmed := w.CalculateBalance(0) - balance
-		NotifyWalletBalance(reply, w.name, balance)
-		NotifyWalletBalanceUnconfirmed(reply, w.name, unconfirmed)
+func NotifyBalances(frontend chan []byte) {
+	for _, a := range accounts.m {
+		balance := a.CalculateBalance(1)
+		unconfirmed := a.CalculateBalance(0) - balance
+		NotifyWalletBalance(frontend, a.name, balance)
+		NotifyWalletBalanceUnconfirmed(frontend, a.name, unconfirmed)
 	}
 }
 
@@ -234,7 +234,7 @@ func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	w, ok := wallets.m[cmd.Account]
+	a, ok := accounts.m[cmd.Account]
 	if !ok {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
@@ -242,7 +242,7 @@ func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Get next address from wallet.
-	addr, err := w.NextUnusedAddress()
+	addr, err := a.NextUnusedAddress()
 	if err != nil {
 		// TODO(jrick): generate new addresses if the address pool is
 		// empty.
@@ -253,13 +253,13 @@ func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Write updated wallet to disk.
-	w.dirty = true
-	if err = w.writeDirtyToDisk(); err != nil {
+	a.dirty = true
+	if err = a.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot sync dirty wallet: %v", err)
 	}
 
 	// Request updates from btcd for new transactions sent to this address.
-	w.ReqNewTxsForAddress(addr)
+	a.ReqNewTxsForAddress(addr)
 
 	// Reply with the new payment address string.
 	ReplySuccess(frontend, cmd.Id(), addr)
@@ -277,8 +277,8 @@ func ListAccounts(frontend chan []byte, icmd btcjson.Cmd) {
 
 	// Create and fill a map of account names and their balances.
 	pairs := make(map[string]float64)
-	for account, w := range wallets.m {
-		pairs[account] = w.CalculateBalance(cmd.MinConf)
+	for aname, a := range accounts.m {
+		pairs[aname] = a.CalculateBalance(cmd.MinConf)
 	}
 
 	// Reply with the map.  This will be marshaled into a JSON object.
@@ -317,7 +317,7 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	w, ok := wallets.m[cmd.FromAccount]
+	a, ok := accounts.m[cmd.FromAccount]
 	if !ok {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
@@ -337,7 +337,7 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := w.txToPairs(pairs, fee, cmd.MinConf)
+	createdTx, err := a.txToPairs(pairs, fee, cmd.MinConf)
 	switch {
 	case err == ErrNonPositiveAmount:
 		e := &btcjson.Error{
@@ -363,11 +363,11 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 	// If a change address was added, mark wallet as dirty, sync to disk,
 	// and Request updates for change address.
 	if len(createdTx.changeAddr) != 0 {
-		w.dirty = true
-		if err := w.writeDirtyToDisk(); err != nil {
+		a.dirty = true
+		if err := a.writeDirtyToDisk(); err != nil {
 			log.Errorf("cannot write dirty wallet: %v", err)
 		}
-		w.ReqNewTxsForAddress(createdTx.changeAddr)
+		a.ReqNewTxsForAddress(createdTx.changeAddr)
 	}
 
 	// Create sendrawtransaction request with hexstring of the raw tx.
@@ -387,7 +387,7 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 	// Set up a reply handler to respond to the btcd reply.
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
-		return handleSendRawTxReply(frontend, cmd, result, err, w,
+		return handleSendRawTxReply(frontend, cmd, result, err, a,
 			createdTx)
 	}
 	replyHandlers.Unlock()
@@ -420,7 +420,7 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	w, ok := wallets.m[cmd.FromAccount]
+	a, ok := accounts.m[cmd.FromAccount]
 	if !ok {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
@@ -435,7 +435,7 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := w.txToPairs(cmd.Amounts, fee, cmd.MinConf)
+	createdTx, err := a.txToPairs(cmd.Amounts, fee, cmd.MinConf)
 	switch {
 	case err == ErrNonPositiveAmount:
 		e := &btcjson.Error{
@@ -461,11 +461,11 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 	// If a change address was added, mark wallet as dirty, sync to disk,
 	// and request updates for change address.
 	if len(createdTx.changeAddr) != 0 {
-		w.dirty = true
-		if err := w.writeDirtyToDisk(); err != nil {
+		a.dirty = true
+		if err := a.writeDirtyToDisk(); err != nil {
 			log.Errorf("cannot write dirty wallet: %v", err)
 		}
-		w.ReqNewTxsForAddress(createdTx.changeAddr)
+		a.ReqNewTxsForAddress(createdTx.changeAddr)
 	}
 
 	// Create sendrawtransaction request with hexstring of the raw tx.
@@ -485,7 +485,7 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 	// Set up a reply handler to respond to the btcd reply.
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
-		return handleSendRawTxReply(frontend, cmd, result, err, w,
+		return handleSendRawTxReply(frontend, cmd, result, err, a,
 			createdTx)
 	}
 	replyHandlers.Unlock()
@@ -495,7 +495,7 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 }
 
 func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
-	result interface{}, err *btcjson.Error, w *Account,
+	result interface{}, err *btcjson.Error, a *Account,
 	txInfo *CreatedTx) bool {
 
 	if err != nil {
@@ -504,31 +504,31 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	}
 
 	// Remove previous unspent outputs now spent by the tx.
-	w.UtxoStore.Lock()
-	modified := w.UtxoStore.s.Remove(txInfo.inputs)
+	a.UtxoStore.Lock()
+	modified := a.UtxoStore.s.Remove(txInfo.inputs)
 
 	// Add unconfirmed change utxo (if any) to UtxoStore.
 	if txInfo.changeUtxo != nil {
-		w.UtxoStore.s = append(w.UtxoStore.s, txInfo.changeUtxo)
-		w.ReqSpentUtxoNtfn(txInfo.changeUtxo)
+		a.UtxoStore.s = append(a.UtxoStore.s, txInfo.changeUtxo)
+		a.ReqSpentUtxoNtfn(txInfo.changeUtxo)
 		modified = true
 	}
 
 	if modified {
-		w.UtxoStore.dirty = true
-		w.UtxoStore.Unlock()
-		if err := w.writeDirtyToDisk(); err != nil {
+		a.UtxoStore.dirty = true
+		a.UtxoStore.Unlock()
+		if err := a.writeDirtyToDisk(); err != nil {
 			log.Errorf("cannot sync dirty wallet: %v", err)
 		}
 
 		// Notify all frontends of account's new unconfirmed and
 		// confirmed balance.
-		confirmed := w.CalculateBalance(1)
-		unconfirmed := w.CalculateBalance(0) - confirmed
-		NotifyWalletBalance(frontendNotificationMaster, w.name, confirmed)
-		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, w.name, unconfirmed)
+		confirmed := a.CalculateBalance(1)
+		unconfirmed := a.CalculateBalance(0) - confirmed
+		NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
+		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
 	} else {
-		w.UtxoStore.Unlock()
+		a.UtxoStore.Unlock()
 	}
 
 	// btcd cannot be trusted to successfully relay the tx to the
@@ -613,11 +613,11 @@ func CreateEncryptedWallet(frontend chan []byte, icmd btcjson.Cmd) {
 	// Grab the account map lock and defer the unlock.  If an
 	// account is successfully created, it will be added to the
 	// map while the lock is held.
-	wallets.Lock()
-	defer wallets.Unlock()
+	accounts.Lock()
+	defer accounts.Unlock()
 
 	// Does this wallet already exist?
-	if _, ok = wallets.m[cmd.Account]; ok {
+	if _, ok = accounts.m[cmd.Account]; ok {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
@@ -653,7 +653,7 @@ func CreateEncryptedWallet(frontend chan []byte, icmd btcjson.Cmd) {
 
 	// Create new account with the wallet.  A new JSON ID is set for
 	// transaction notifications.
-	bw := &Account{
+	a := &Account{
 		Wallet:         wlt,
 		name:           cmd.Account,
 		dirty:          true,
@@ -663,15 +663,15 @@ func CreateEncryptedWallet(frontend chan []byte, icmd btcjson.Cmd) {
 	// Begin tracking account against a connected btcd.
 	//
 	// TODO(jrick): this should *only* happen if btcd is connected.
-	bw.Track()
+	a.Track()
 
 	// Save the account in the global account map.  The mutex is
 	// already held at this point, and will be unlocked when this
 	// func returns.
-	wallets.m[cmd.Account] = bw
+	accounts.m[cmd.Account] = a
 
 	// Write new wallet to disk.
-	if err := bw.writeDirtyToDisk(); err != nil {
+	if err := a.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot sync dirty wallet: %v", err)
 	}
 
@@ -695,7 +695,7 @@ func WalletIsLocked(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	w, ok := wallets.m[cmd.Account]
+	a, ok := accounts.m[cmd.Account]
 	if !ok {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
@@ -703,7 +703,7 @@ func WalletIsLocked(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Reply with true for a locked wallet, and false for unlocked.
-	ReplySuccess(frontend, cmd.Id(), w.IsLocked())
+	ReplySuccess(frontend, cmd.Id(), a.IsLocked())
 }
 
 // WalletLock responds to walletlock request by locking the wallet,
@@ -713,8 +713,8 @@ func WalletIsLocked(frontend chan []byte, icmd btcjson.Cmd) {
 // with this.  Lock all the wallets, like if all accounts are locked
 // for one bitcoind wallet?
 func WalletLock(frontend chan []byte, icmd btcjson.Cmd) {
-	if w, ok := wallets.m[""]; ok {
-		if err := w.Lock(); err != nil {
+	if a, ok := accounts.m[""]; ok {
+		if err := a.Lock(); err != nil {
 			ReplyError(frontend, icmd.Id(),
 				&btcjson.ErrWalletWrongEncState)
 			return
@@ -737,8 +737,8 @@ func WalletPassphrase(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	if w, ok := wallets.m[""]; ok {
-		if err := w.Unlock([]byte(cmd.Passphrase)); err != nil {
+	if a, ok := accounts.m[""]; ok {
+		if err := a.Unlock([]byte(cmd.Passphrase)); err != nil {
 			ReplyError(frontend, cmd.Id(),
 				&btcjson.ErrWalletPassphraseIncorrect)
 			return
@@ -747,7 +747,7 @@ func WalletPassphrase(frontend chan []byte, icmd btcjson.Cmd) {
 		NotifyWalletLockStateChange("", false)
 		go func() {
 			time.Sleep(time.Second * time.Duration(int64(cmd.Timeout)))
-			w.Lock()
+			a.Lock()
 			NotifyWalletLockStateChange("", true)
 		}()
 	}

@@ -56,8 +56,6 @@ var (
 			Height: int32(btcutil.BlockHeightUnknown),
 		},
 	}
-
-	wallets = NewAccountStore()
 )
 
 // walletdir returns the directory path which holds the wallet, utxo,
@@ -73,13 +71,13 @@ func walletdir(cfg *config, account string) string {
 	return filepath.Join(cfg.DataDir, wname)
 }
 
-// OpenWallet opens a wallet described by account in the data
+// OpenAccount opens an account described by account in the data
 // directory specified by cfg.  If the wallet does not exist, ErrNoWallet
 // is returned as an error.
 //
 // Wallets opened from this function are not set to track against a
 // btcd connection.
-func OpenWallet(cfg *config, account string) (*Account, error) {
+func OpenAccount(cfg *config, account string) (*Account, error) {
 	wdir := walletdir(cfg, account)
 	fi, err := os.Stat(wdir)
 	if err != nil {
@@ -117,7 +115,7 @@ func OpenWallet(cfg *config, account string) (*Account, error) {
 		return nil, fmt.Errorf("cannot read wallet: %s", err)
 	}
 
-	w := &Account{
+	a := &Account{
 		Wallet: wlt,
 		name:   account,
 	}
@@ -127,30 +125,30 @@ func OpenWallet(cfg *config, account string) (*Account, error) {
 	var utxos tx.UtxoStore
 	if utxofile, err = os.Open(utxofilepath); err != nil {
 		log.Errorf("cannot open utxo file: %s", err)
-		return w, ErrNoUtxos
+		return a, ErrNoUtxos
 	}
 	defer utxofile.Close()
 	if _, err = utxos.ReadFrom(utxofile); err != nil {
 		log.Errorf("cannot read utxo file: %s", err)
-		return w, ErrNoUtxos
+		return a, ErrNoUtxos
 	}
-	w.UtxoStore.s = utxos
+	a.UtxoStore.s = utxos
 
 	// Read tx file.  If this fails, return a ErrNoTxs error and let
 	// the caller decide if a rescan is necessary.
 	if txfile, err = os.Open(txfilepath); err != nil {
 		log.Errorf("cannot open tx file: %s", err)
-		return w, ErrNoTxs
+		return a, ErrNoTxs
 	}
 	defer txfile.Close()
 	var txs tx.TxStore
 	if _, err = txs.ReadFrom(txfile); err != nil {
 		log.Errorf("cannot read tx file: %s", err)
-		return w, ErrNoTxs
+		return a, ErrNoTxs
 	}
-	w.TxStore.s = txs
+	a.TxStore.s = txs
 
-	return w, nil
+	return a, nil
 }
 
 // GetCurBlock returns the blockchain height and SHA hash of the most
@@ -286,36 +284,36 @@ func main() {
 		loggers = setLogLevel(cfg.DebugLevel)
 	}
 
-	// Open default wallet
-	w, err := OpenWallet(cfg, "")
+	// Open default account
+	a, err := OpenAccount(cfg, "")
 	switch err {
 	case ErrNoTxs:
 		// Do nothing special for now.  This will be implemented when
 		// the tx history file is properly written.
-		wallets.Lock()
-		wallets.m[""] = w
-		wallets.Unlock()
+		accounts.Lock()
+		accounts.m[""] = a
+		accounts.Unlock()
 
 	case ErrNoUtxos:
 		// Add wallet, but mark wallet as needing a full rescan since
 		// the wallet creation block.  This will take place when btcd
 		// connects.
-		wallets.Lock()
-		wallets.m[""] = w
-		wallets.Unlock()
-		w.fullRescan = true
+		accounts.Lock()
+		accounts.m[""] = a
+		accounts.Unlock()
+		a.fullRescan = true
 
 	case nil:
-		wallets.Lock()
-		wallets.m[""] = w
-		wallets.Unlock()
+		accounts.Lock()
+		accounts.m[""] = a
+		accounts.Unlock()
 
 	default:
 		log.Errorf("cannot open wallet: %v", err)
 	}
 
-	// Start wallet disk syncer goroutine.
-	go DirtyWalletSyncer()
+	// Start account disk syncer goroutine.
+	go DirtyAccountSyncer()
 
 	go func() {
 		// Start HTTP server to listen and send messages to frontend and btcd

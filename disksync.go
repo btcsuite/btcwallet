@@ -25,8 +25,8 @@ import (
 )
 
 var (
-	// dirtyWallets holds a set of wallets that include dirty components.
-	dirtyWallets = struct {
+	// dirtyAccounts holds a set of accounts that include dirty components.
+	dirtyAccounts = struct {
 		sync.Mutex
 		m map[*Account]bool
 	}{
@@ -34,29 +34,29 @@ var (
 	}
 )
 
-// DirtyWalletSyncer synces dirty wallets for cases where the updated
-// information was not required to be immediately written to disk.  Wallets
-// may be added to dirtyWallets and will be checked and processed every 10
+// DirtyAccountSyncer synces dirty accounts for cases where the updated
+// information was not required to be immediately written to disk.  Accounts
+// may be added to dirtyAccounts and will be checked and processed every 10
 // seconds by this function.
 //
 // This never returns and is meant to be called from a goroutine.
-func DirtyWalletSyncer() {
+func DirtyAccountSyncer() {
 	ticker := time.Tick(10 * time.Second)
 	for {
 		select {
 		case <-ticker:
-			dirtyWallets.Lock()
-			for w := range dirtyWallets.m {
-				log.Debugf("Syncing wallet '%v' to disk",
-					w.Wallet.Name())
-				if err := w.writeDirtyToDisk(); err != nil {
+			dirtyAccounts.Lock()
+			for a := range dirtyAccounts.m {
+				log.Debugf("Syncing account '%v' to disk",
+					a.Wallet.Name())
+				if err := a.writeDirtyToDisk(); err != nil {
 					log.Errorf("cannot sync dirty wallet: %v",
 						err)
 				} else {
-					delete(dirtyWallets.m, w)
+					delete(dirtyAccounts.m, a)
 				}
 			}
-			dirtyWallets.Unlock()
+			dirtyAccounts.Unlock()
 		}
 	}
 }
