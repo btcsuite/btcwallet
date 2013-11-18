@@ -131,10 +131,17 @@ func (s *server) handleRPCRequest(w http.ResponseWriter, r *http.Request) {
 		log.Errorf("RPCS: Error getting JSON message: %v", err)
 	}
 
+	done := make(chan struct{})
+	go func() {
+		if _, err := w.Write(<-frontend); err != nil {
+			log.Warnf("RPCS: could not respond to RPC request: %v",
+				err)
+		}
+		close(done)
+	}()
+
 	ProcessFrontendMsg(frontend, body, false)
-	if _, err := w.Write(<-frontend); err != nil {
-		log.Warnf("RPCS: could not respond to RPC request: %v", err)
-	}
+	<-done
 }
 
 // frontendListenerDuplicator listens for new wallet listener channels
