@@ -37,7 +37,7 @@ var (
 
 type cmdHandler func(chan []byte, btcjson.Cmd)
 
-var handlers = map[string]cmdHandler{
+var rpcHandlers = map[string]cmdHandler{
 	// Standard bitcoind methods
 	"getaddressesbyaccount": GetAddressesByAccount,
 	"getbalance":            GetBalance,
@@ -49,16 +49,20 @@ var handlers = map[string]cmdHandler{
 	"walletlock":            WalletLock,
 	"walletpassphrase":      WalletPassphrase,
 
-	// btcwallet extensions
+	// Extensions not exclusive to websocket connections.
 	"createencryptedwallet": CreateEncryptedWallet,
-	"getbalances":           GetBalances,
-	"walletislocked":        WalletIsLocked,
+}
+
+// Extensions exclusive to websocket connections.
+var wsHandlers = map[string]cmdHandler{
+	"getbalances":    GetBalances,
+	"walletislocked": WalletIsLocked,
 }
 
 // ProcessFrontendMsg checks the message sent from a frontend.  If the
 // message method is one that must be handled by btcwallet, the request
 // is processed here.  Otherwise, the message is sent to btcd.
-func ProcessFrontendMsg(frontend chan []byte, msg []byte) {
+func ProcessFrontendMsg(frontend chan []byte, msg []byte, ws bool) {
 	// Parse marshaled command and check
 	cmd, err := btcjson.ParseMarshaledCmd(msg)
 	if err != nil {
@@ -71,13 +75,14 @@ func ProcessFrontendMsg(frontend chan []byte, msg []byte) {
 
 		// btcwallet cannot handle this command, so defer handling
 		// to btcd.
-		fmt.Printf("deferring %v with error %v\n", string(msg), err)
 		DeferToBTCD(frontend, msg)
 		return
 	}
 
 	// Check for a handler to reply to cmd.  If none exist, defer to btcd.
-	if f, ok := handlers[cmd.Method()]; ok {
+	if f, ok := rpcHandlers[cmd.Method()]; ok {
+		f(frontend, cmd)
+	} else if f, ok := wsHandlers[cmd.Method()]; ws && ok {
 		f(frontend, cmd)
 	} else {
 		// btcwallet does not have a handler for the command.  Pass

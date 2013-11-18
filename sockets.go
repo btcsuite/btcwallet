@@ -84,6 +84,59 @@ var (
 	}
 )
 
+// server holds the items the RPC server may need to access (auth,
+// config, shutdown, etc.)
+type server struct {
+	port      string
+	wg        sync.WaitGroup
+	listeners []net.Listener
+}
+
+// newServer returns a new instance of the server struct.
+func newServer() (*server, error) {
+	s := server{
+		port: cfg.SvrPort,
+	}
+
+	// IPv4 listener.
+	var listeners []net.Listener
+	listenAddr4 := net.JoinHostPort("127.0.0.1", s.port)
+	listener4, err := net.Listen("tcp4", listenAddr4)
+	if err != nil {
+		log.Errorf("RPCS: Couldn't create listener: %v", err)
+		return nil, err
+	}
+	listeners = append(listeners, listener4)
+
+	// IPv6 listener.
+	listenAddr6 := net.JoinHostPort("::1", s.port)
+	listener6, err := net.Listen("tcp6", listenAddr6)
+	if err != nil {
+		log.Errorf("RPCS: Couldn't create listener: %v", err)
+		return nil, err
+	}
+	listeners = append(listeners, listener6)
+
+	s.listeners = listeners
+
+	return &s, nil
+}
+
+// handleRPCRequest processes a JSON-RPC request from a frontend.
+func (s *server) handleRPCRequest(w http.ResponseWriter, r *http.Request) {
+	frontend := make(chan []byte)
+
+	body, err := btcjson.GetRaw(r.Body)
+	if err != nil {
+		log.Errorf("RPCS: Error getting JSON message: %v", err)
+	}
+
+	ProcessFrontendMsg(frontend, body, false)
+	if _, err := w.Write(<-frontend); err != nil {
+		log.Warnf("RPCS: could not respond to RPC request: %v", err)
+	}
+}
+
 // frontendListenerDuplicator listens for new wallet listener channels
 // and duplicates messages sent to frontendNotificationMaster to all
 // connected listeners.
@@ -158,12 +211,12 @@ func NotifyBtcdConnected(reply chan []byte, conn bool) {
 	frontendNotificationMaster <- ntfn
 }
 
-// frontendReqsNotifications is the handler function for websocket
-// connections from a btcwallet instance.  It reads messages from wallet and
-// sends back replies, as well as notififying wallets of chain updates.
-// There can possibly be many of these running, one for each currently
-// connected frontend.
-func frontendReqsNotifications(ws *websocket.Conn) {
+// frontendSendRecv is the handler function for websocket connections from
+// a btcwallet instance.  It reads requests and sends responses to a
+// frontend, as well as notififying wallets of chain updates.  There can
+// possibly be many of these running, one for each currently connected
+// frontend.
+func frontendSendRecv(ws *websocket.Conn) {
 	// Add frontend notification channel to set so this handler receives
 	// updates.
 	frontendNotification := make(chan []byte)
@@ -195,8 +248,8 @@ func frontendReqsNotifications(ws *websocket.Conn) {
 				// frontend disconnected.
 				return
 			}
-			// Handle JSON message here.
-			go ProcessFrontendMsg(frontendNotification, m)
+			// Handle request here.
+			go ProcessFrontendMsg(frontendNotification, m, true)
 		case ntfn, _ := <-frontendNotification:
 			if err := websocket.Message.Send(ws, ntfn); err != nil {
 				// Frontend disconnected.
@@ -484,9 +537,9 @@ func NtfnTxMined(n btcws.Notification) {
 
 var duplicateOnce sync.Once
 
-// FrontendListenAndServe starts a HTTP server to provide websocket
-// connections for any number of btcwallet frontends.
-func FrontendListenAndServe() error {
+// Start starts a HTTP server to provide standard RPC and extension
+// websocket connections for any number of btcwallet frontends.
+func (s *server) Start() {
 	// We'll need to duplicate replies to frontends to each frontend.
 	// Replies are sent to frontendReplyMaster, and duplicated to each valid
 	// channel in frontendReplySet.  This runs a goroutine to duplicate
@@ -497,8 +550,21 @@ func FrontendListenAndServe() error {
 
 	// TODO(jrick): We need some sort of authentication before websocket
 	// connections are allowed, and perhaps TLS on the server as well.
-	http.Handle("/frontend", websocket.Handler(frontendReqsNotifications))
-	return http.ListenAndServe(net.JoinHostPort("", cfg.SvrPort), nil)
+	serveMux := http.NewServeMux()
+	httpServer := &http.Server{Handler: serveMux}
+	serveMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		s.handleRPCRequest(w, r)
+	})
+	serveMux.Handle("/frontend", websocket.Handler(frontendSendRecv))
+	for _, listener := range s.listeners {
+		s.wg.Add(1)
+		go func(listener net.Listener) {
+			log.Infof("RPCS: RPC server listening on %s", listener.Addr())
+			httpServer.Serve(listener)
+			log.Tracef("RPCS: RPC listener done for %s", listener.Addr())
+			s.wg.Done()
+		}(listener)
+	}
 }
 
 // BtcdConnect connects to a running btcd instance over a websocket

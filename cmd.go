@@ -316,14 +316,15 @@ func main() {
 	go DirtyAccountSyncer()
 
 	go func() {
+		s, err := newServer()
+		if err != nil {
+			log.Errorf("Unable to create HTTP server: %v", err)
+			os.Exit(1)
+		}
+
 		// Start HTTP server to listen and send messages to frontend and btcd
 		// backend.  Try reconnection if connection failed.
-		for {
-			if err := FrontendListenAndServe(); err != nil {
-				log.Info("Unable to start frontend HTTP server: %v", err)
-				os.Exit(1)
-			}
-		}
+		s.Start()
 	}()
 
 	// Begin generating new IDs for JSON calls.
