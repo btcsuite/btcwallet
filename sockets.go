@@ -18,6 +18,8 @@ package main
 
 import (
 	"code.google.com/p/go.net/websocket"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -577,22 +579,30 @@ func (s *server) Start() {
 // BtcdConnect connects to a running btcd instance over a websocket
 // for sending and receiving chain-related messages, failing if the
 // connection cannot be established or is lost.
-func BtcdConnect(reply chan error) {
-	// btcd requires basic authorization, so we use a custom config with
-	// the Authorization header set.
-	server := fmt.Sprintf("ws://%s/wallet", net.JoinHostPort("localhost", cfg.BtcdPort))
-	login := cfg.Username + ":" + cfg.Password
-	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
-	config, err := websocket.NewConfig(server, "http://localhost/")
+func BtcdConnect(certificates []byte, reply chan error) {
+	url := fmt.Sprintf("wss://%s/wallet", cfg.Connect)
+	config, err := websocket.NewConfig(url, "https://localhost/")
 	if err != nil {
 		reply <- ErrConnRefused
 		return
 	}
+
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(certificates)
+	config.TlsConfig = &tls.Config{
+		RootCAs: pool,
+	}
+
+	// btcd requires basic authorization, so we use a custom config with
+	// the Authorization header set.
+	login := cfg.Username + ":" + cfg.Password
+	auth := "Basic" + base64.StdEncoding.EncodeToString([]byte(login))
 	config.Header.Add("Authorization", auth)
 
 	// Attempt to connect to running btcd instance. Bail if it fails.
 	btcdws, err := websocket.DialConfig(config)
 	if err != nil {
+		log.Errorf("%s", err)
 		reply <- ErrConnRefused
 		return
 	}

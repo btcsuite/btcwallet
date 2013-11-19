@@ -25,6 +25,7 @@ var activeNetParams = netParams(defaultBtcNet)
 // params is used to group parameters for various networks such as the main
 // network and test networks.
 type params struct {
+	connect  string
 	btcdPort string
 	svrPort  string
 }
@@ -32,6 +33,7 @@ type params struct {
 // mainNetParams contains parameters specific running btcwallet and
 // btcd on the main network (btcwire.MainNet).
 var mainNetParams = params{
+	connect:  "localhost:8334",
 	btcdPort: "8334",
 	svrPort:  "8332",
 }
@@ -39,6 +41,7 @@ var mainNetParams = params{
 // testNet3Params contains parameters specific running btcwallet and
 // btcd on the test network (version 3) (btcwire.TestNet3).
 var testNet3Params = params{
+	connect:  "localhost:18334",
 	btcdPort: "18334",
 	svrPort:  "18332",
 }

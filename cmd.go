@@ -25,6 +25,7 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -312,6 +313,13 @@ func main() {
 		log.Errorf("cannot open wallet: %v", err)
 	}
 
+	// Read CA file to verify a btcd TLS connection.
+	cafile, err := ioutil.ReadFile(cfg.CAFile)
+	if err != nil {
+		log.Errorf("cannot open CA file: %v", err)
+		os.Exit(1)
+	}
+
 	// Start account disk syncer goroutine.
 	go DirtyAccountSyncer()
 
@@ -334,7 +342,7 @@ func main() {
 		replies := make(chan error)
 		done := make(chan int)
 		go func() {
-			BtcdConnect(replies)
+			BtcdConnect(cafile, replies)
 			close(done)
 		}()
 	selectLoop:
