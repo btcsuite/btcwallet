@@ -596,7 +596,7 @@ func BtcdConnect(certificates []byte, reply chan error) {
 	// btcd requires basic authorization, so we use a custom config with
 	// the Authorization header set.
 	login := cfg.Username + ":" + cfg.Password
-	auth := "Basic" + base64.StdEncoding.EncodeToString([]byte(login))
+	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	config.Header.Add("Authorization", auth)
 
 	// Attempt to connect to running btcd instance. Bail if it fails.
