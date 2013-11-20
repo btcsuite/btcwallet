@@ -53,6 +53,9 @@ type config struct {
 	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
 	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
 	MainNet     bool   `long:"mainnet" description:"*DISABLED* Use the main Bitcoin network (default testnet3)"`
+	Proxy       string `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
+	ProxyUser   string `long:"proxyuser" description:"Username for proxy server"`
+	ProxyPass   string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
 }
 
 // updateConfigWithActiveParams update the passed config with parameters

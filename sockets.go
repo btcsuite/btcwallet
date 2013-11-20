@@ -28,6 +28,7 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
+	"github.com/conformal/go-socks"
 	"net"
 	"net/http"
 	"sync"
@@ -600,9 +601,28 @@ func BtcdConnect(certificates []byte, reply chan error) {
 	config.Header.Add("Authorization", auth)
 
 	// Attempt to connect to running btcd instance. Bail if it fails.
-	btcdws, err := websocket.DialConfig(config)
-	if err != nil {
-		log.Errorf("%s", err)
+	var btcdws *websocket.Conn
+	var cerr error
+	if cfg.Proxy != "" {
+		proxy := &socks.Proxy{
+			Addr:     cfg.Proxy,
+			Username: cfg.ProxyUser,
+			Password: cfg.ProxyPass,
+		}
+		conn, err := proxy.Dial("tcp", cfg.Connect)
+		if err != nil {
+			log.Warnf("Error connecting to proxy: %v", err)
+			reply <- ErrConnRefused
+			return
+		}
+
+		tlsConn := tls.Client(conn, config.TlsConfig)
+		btcdws, cerr = websocket.NewClient(config, tlsConn)
+	} else {
+		btcdws, cerr = websocket.DialConfig(config)
+	}
+	if cerr != nil {
+		log.Errorf("%s", cerr)
 		reply <- ErrConnRefused
 		return
 	}
