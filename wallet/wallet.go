@@ -1164,7 +1164,7 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp, compressed bool) (addr *b
 	}
 	addr.privKeyCT.key = privkey
 	copy(addr.initVector[:], iv)
-	addr.pubKey = pubkeyFromPrivkey(privkey, true)
+	addr.pubKey = pubkeyFromPrivkey(privkey, compressed)
 	copy(addr.pubKeyHash[:], calcHash160(addr.pubKey))
 
 	return addr, nil
