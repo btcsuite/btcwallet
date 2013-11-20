@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/conformal/btcec"
@@ -920,6 +921,7 @@ type AddressInfo struct {
 	Compressed bool
 	FirstBlock int32
 	Imported   bool
+	Pubkey     string
 }
 
 // GetSortedActiveAddresses returns all wallet addresses that have been
@@ -1405,6 +1407,7 @@ func (a *btcAddress) info(net btcwire.BitcoinNet) (*AddressInfo, error) {
 		Compressed: a.flags.compressed,
 		FirstBlock: a.firstBlock,
 		Imported:   a.chainIndex == importedKeyChainIdx,
+		Pubkey:     hex.EncodeToString(a.pubKey),
 	}, nil
 }
 
