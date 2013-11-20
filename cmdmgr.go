@@ -40,7 +40,6 @@ type cmdHandler func(chan []byte, btcjson.Cmd)
 var rpcHandlers = map[string]cmdHandler{
 	// Standard bitcoind methods
 	"dumpprivkey":           DumpPrivKey,
-	"dumpwallet":            DumpWallet,
 	"getaddressesbyaccount": GetAddressesByAccount,
 	"getbalance":            GetBalance,
 	"getnewaddress":         GetNewAddress,
@@ -216,6 +215,7 @@ func DumpPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
 
 // DumpWallet replies to a dumpwallet request with all private keys
 // in a wallet, or an appropiate error if the wallet is locked.
+// TODO: finish this to match bitcoind by writing the dump to a file.
 func DumpWallet(frontend chan []byte, icmd btcjson.Cmd) {
 	// Type assert icmd to access parameters.
 	cmd, ok := icmd.(*btcjson.DumpWalletCmd)
