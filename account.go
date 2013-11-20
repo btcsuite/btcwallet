@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
@@ -75,8 +76,8 @@ func NewAccountStore() *AccountStore {
 // TODO(jrick): This must also roll back the UTXO and TX stores, and notify
 // all wallets of new account balances.
 func (s *AccountStore) Rollback(height int32, hash *btcwire.ShaHash) {
-	for _, w := range s.m {
-		w.Rollback(height, hash)
+	for _, a := range s.m {
+		a.Rollback(height, hash)
 	}
 }
 
@@ -127,6 +128,94 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
 }
 
+// DumpPrivKeys returns the WIF-encoded private keys for all addresses
+// non-watching addresses in a wallets.
+func (a *Account) DumpPrivKeys() ([]string, error) {
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
+
+	// Iterate over each active address, appending the private
+	// key to privkeys.
+	var privkeys []string
+	for _, addr := range a.GetActiveAddresses() {
+		key, err := a.GetAddressKey(addr.Address)
+		if err != nil {
+			return nil, err
+		}
+		encKey, err := btcutil.EncodePrivateKey(key.D.Bytes(),
+			a.Net(), addr.Compressed)
+		if err != nil {
+			return nil, err
+		}
+		privkeys = append(privkeys, encKey)
+	}
+
+	return privkeys, nil
+}
+
+// DumpWIFPrivateKey returns the WIF encoded private key for a
+// single wallet address.
+func (a *Account) DumpWIFPrivateKey(address string) (string, error) {
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
+
+	// Get private key from wallet if it exists.
+	key, err := a.GetAddressKey(address)
+	if err != nil {
+		return "", err
+	}
+
+	// Get address info.  This is needed to determine whether
+	// the pubkey is compressed or not.
+	info, err := a.GetAddressInfo(address)
+	if err != nil {
+		return "", err
+	}
+
+	// Return WIF-encoding of the private key.
+	return btcutil.EncodePrivateKey(key.D.Bytes(), a.Net(), info.Compressed)
+}
+
+// ImportWIFPrivateKey takes a WIF encoded private key and adds it to the
+// wallet.  If the import is successful, the payment address string is
+// returned.
+func (a *Account) ImportWIFPrivateKey(wif, label string,
+	bs *wallet.BlockStamp) (string, error) {
+
+	// Decode WIF private key and perform sanity checking.
+	privkey, net, compressed, err := btcutil.DecodePrivateKey(wif)
+	if err != nil {
+		return "", err
+	}
+	if net != a.Net() {
+		return "", errors.New("wrong network")
+	}
+
+	// Attempt to import private key into wallet.
+	a.mtx.Lock()
+	addr, err := a.ImportPrivateKey(privkey, compressed, bs)
+	if err != nil {
+		a.mtx.Unlock()
+		return "", err
+	}
+
+	// Immediately write dirty wallet to disk.
+	//
+	// TODO(jrick): change writeDirtyToDisk to not grab the writer lock.
+	// Don't want to let another goroutine waiting on the mutex to grab
+	// the mutex before it is written to disk.
+	a.dirty = true
+	a.mtx.Unlock()
+	if err := a.writeDirtyToDisk(); err != nil {
+		log.Errorf("cannot write dirty wallet: %v", err)
+	}
+
+	log.Infof("Imported payment address %v", addr)
+
+	// Return the payment address string of the imported private key.
+	return addr, nil
+}
+
 // Track requests btcd to send notifications of new transactions for
 // each address stored in a wallet and sets up a new reply handler for
 // these notifications.
@@ -158,18 +247,18 @@ func (a *Account) Track() {
 	a.UtxoStore.RUnlock()
 }
 
-// RescanToBestBlock requests btcd to rescan the blockchain for new
-// transactions to all wallet addresses.  This is needed for making
-// btcwallet catch up to a long-running btcd process, as otherwise
+// RescanActiveAddresse requests btcd to rescan the blockchain for new
+// transactions to all active wallet addresses.  This is needed for
+// catching btcwallet up to a long-running btcd process, as otherwise
 // it would have missed notifications as blocks are attached to the
 // main chain.
-func (a *Account) RescanToBestBlock() {
+func (a *Account) RescanActiveAddresses() {
+	// Determine the block to begin the rescan from.
 	beginBlock := int32(0)
-
 	if a.fullRescan {
 		// Need to perform a complete rescan since the wallet creation
 		// block.
-		beginBlock = a.CreatedAt()
+		beginBlock = a.EarliestBlockHeight()
 		log.Debugf("Rescanning account '%v' for new transactions since block height %v",
 			a.name, beginBlock)
 	} else {
@@ -184,9 +273,17 @@ func (a *Account) RescanToBestBlock() {
 		beginBlock = bs.Height + 1
 	}
 
+	// Rescan active addresses starting at the determined block height.
+	a.RescanAddresses(beginBlock, a.ActivePaymentAddresses())
+}
+
+// RescanAddresses requests btcd to rescan a set of addresses.  This
+// is needed when, for example, importing private key(s), where btcwallet
+// is synced with btcd for all but several address.
+func (a *Account) RescanAddresses(beginBlock int32, addrs map[string]struct{}) {
 	n := <-NewJSONID
 	cmd, err := btcws.NewRescanCmd(fmt.Sprintf("btcwallet(%v)", n),
-		beginBlock, a.ActivePaymentAddresses())
+		beginBlock, addrs)
 	if err != nil {
 		log.Errorf("cannot create rescan request: %v", err)
 		return

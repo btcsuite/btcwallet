@@ -142,7 +142,7 @@ func (s *server) handleRPCRequest(w http.ResponseWriter, r *http.Request) {
 		close(done)
 	}()
 
-	ProcessFrontendMsg(frontend, body, false)
+	ProcessRequest(frontend, body, false)
 	<-done
 }
 
@@ -258,7 +258,7 @@ func frontendSendRecv(ws *websocket.Conn) {
 				return
 			}
 			// Handle request here.
-			go ProcessFrontendMsg(frontendNotification, m, true)
+			go ProcessRequest(frontendNotification, m, true)
 		case ntfn, _ := <-frontendNotification:
 			if err := websocket.Message.Send(ws, ntfn); err != nil {
 				// Frontend disconnected.
@@ -703,7 +703,7 @@ func BtcdHandshake(ws *websocket.Conn) {
 	// catch up.
 
 	for _, a := range accounts.m {
-		a.RescanToBestBlock()
+		a.RescanActiveAddresses()
 	}
 
 	// Begin tracking wallets against this btcd instance.

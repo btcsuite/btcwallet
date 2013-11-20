@@ -39,9 +39,12 @@ type cmdHandler func(chan []byte, btcjson.Cmd)
 
 var rpcHandlers = map[string]cmdHandler{
 	// Standard bitcoind methods
+	"dumpprivkey":           DumpPrivKey,
+	"dumpwallet":            DumpWallet,
 	"getaddressesbyaccount": GetAddressesByAccount,
 	"getbalance":            GetBalance,
 	"getnewaddress":         GetNewAddress,
+	"importprivkey":         ImportPrivKey,
 	"listaccounts":          ListAccounts,
 	"sendfrom":              SendFrom,
 	"sendmany":              SendMany,
@@ -59,10 +62,11 @@ var wsHandlers = map[string]cmdHandler{
 	"walletislocked": WalletIsLocked,
 }
 
-// ProcessFrontendMsg checks the message sent from a frontend.  If the
-// message method is one that must be handled by btcwallet, the request
-// is processed here.  Otherwise, the message is sent to btcd.
-func ProcessFrontendMsg(frontend chan []byte, msg []byte, ws bool) {
+// ProcessRequest checks the requests sent from a frontend.  If the
+// request method is one that must be handled by btcwallet, the
+// request is processed here.  Otherwise, the request is sent to btcd
+// and btcd's reply is routed back to the frontend.
+func ProcessRequest(frontend chan []byte, msg []byte, ws bool) {
 	// Parse marshaled command and check
 	cmd, err := btcjson.ParseMarshaledCmd(msg)
 	if err != nil {
@@ -131,7 +135,7 @@ func RouteID(origID, routeID interface{}) string {
 	return fmt.Sprintf("btcwallet(%v)-%v", routeID, origID)
 }
 
-// ReplyError creates and marshalls a btcjson.Reply with the error e,
+// ReplyError creates and marshals a btcjson.Reply with the error e,
 // sending the reply to a frontend reply channel.
 func ReplyError(frontend chan []byte, id interface{}, e *btcjson.Error) {
 	// Create a Reply with a non-nil error to marshal.
@@ -146,7 +150,7 @@ func ReplyError(frontend chan []byte, id interface{}, e *btcjson.Error) {
 	}
 }
 
-// ReplySuccess creates and marshalls a btcjson.Reply with the result r,
+// ReplySuccess creates and marshals a btcjson.Reply with the result r,
 // sending the reply to a frontend reply channel.
 func ReplySuccess(frontend chan []byte, id interface{}, result interface{}) {
 	// Create a Reply with a non-nil result to marshal.
@@ -159,6 +163,90 @@ func ReplySuccess(frontend chan []byte, id interface{}, result interface{}) {
 	if mr, err := json.Marshal(r); err == nil {
 		frontend <- mr
 	}
+}
+
+// DumpPrivKey replies to a dumpprivkey request with the private
+// key for a single address, or an appropiate error if the wallet
+// is locked.
+func DumpPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.DumpPrivKeyCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Iterate over all accounts, returning the key if it is found
+	// in any wallet.
+	for _, a := range accounts.m {
+		switch key, err := a.DumpWIFPrivateKey(cmd.Address); err {
+		case wallet.ErrAddressNotFound:
+			// Move on to the next account.
+			continue
+
+		case wallet.ErrWalletLocked:
+			// Address was found, but the private key isn't
+			// accessible.
+			ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
+			return
+
+		case nil:
+			// Key was found.
+			ReplySuccess(frontend, cmd.Id(), key)
+			return
+
+		default: // all other non-nil errors
+			e := &btcjson.Error{
+				Code:    btcjson.ErrWallet.Code,
+				Message: err.Error(),
+			}
+			ReplyError(frontend, cmd.Id(), e)
+			return
+		}
+	}
+
+	// If this is reached, all accounts have been checked, but none
+	// have they address.
+	e := &btcjson.Error{
+		Code:    btcjson.ErrWallet.Code,
+		Message: "Address does not refer to a key",
+	}
+	ReplyError(frontend, cmd.Id(), e)
+}
+
+// DumpWallet replies to a dumpwallet request with all private keys
+// in a wallet, or an appropiate error if the wallet is locked.
+func DumpWallet(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.DumpWalletCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Iterate over all accounts, appending the private keys
+	// for each.
+	var keys []string
+	for _, a := range accounts.m {
+		switch walletKeys, err := a.DumpPrivKeys(); err {
+		case wallet.ErrWalletLocked:
+			ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
+			return
+
+		case nil:
+			keys = append(keys, walletKeys...)
+
+		default: // any other non-nil error
+			e := &btcjson.Error{
+				Code:    btcjson.ErrWallet.Code,
+				Message: err.Error(),
+			}
+			ReplyError(frontend, cmd.Id(), e)
+		}
+	}
+
+	// Reply with sorted WIF encoded private keys
+	ReplySuccess(frontend, cmd.Id(), keys)
 }
 
 // GetAddressesByAccount replies to a getaddressesbyaccount request with
@@ -211,6 +299,59 @@ func GetBalance(frontend chan []byte, icmd btcjson.Cmd) {
 // the frontend of all balances for each opened account.
 func GetBalances(frontend chan []byte, cmd btcjson.Cmd) {
 	NotifyBalances(frontend)
+}
+
+// ImportPrivKey replies to an importprivkey request by parsing
+// a WIF-encoded private key and adding it to an account.
+func ImportPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.ImportPrivKeyCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Check that the account specified in the requests exists.
+	// Yes, Label is the account name.
+	a, ok := accounts.m[cmd.Label]
+	if !ok {
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
+		return
+	}
+
+	// Create a blockstamp for when this address first appeared.
+	// Because the importprivatekey RPC call does not allow
+	// specifying when the address first appeared, we must make
+	// a worst case guess.
+	bs := &wallet.BlockStamp{Height: 0}
+
+	// Attempt importing the private key, replying with an appropiate
+	// error if the import was unsuccesful.
+	addr, err := a.ImportWIFPrivateKey(cmd.PrivKey, cmd.Label, bs)
+	switch {
+	case err == wallet.ErrWalletLocked:
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
+		return
+
+	case err != nil:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	if cmd.Rescan {
+		addrs := map[string]struct{}{
+			addr: struct{}{},
+		}
+		a.RescanAddresses(bs.Height, addrs)
+	}
+
+	// If the import was successful, reply with nil.
+	ReplySuccess(frontend, cmd.Id(), nil)
 }
 
 // NotifyBalances notifies an attached frontend of the current confirmed
