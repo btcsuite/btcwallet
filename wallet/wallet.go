@@ -712,9 +712,8 @@ func (w *Wallet) NextUnusedAddress() (string, error) {
 	if !ok {
 		// TODO(jrick): Re-fill key pool.
 		return "", errors.New("cannot find generated address")
-	} else {
-		w.highestUsed++
 	}
+	w.highestUsed++
 
 	// Look up address.
 	addr := w.addrMap[next160]

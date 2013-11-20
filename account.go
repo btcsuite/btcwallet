@@ -247,7 +247,7 @@ func (a *Account) Track() {
 	a.UtxoStore.RUnlock()
 }
 
-// RescanActiveAddresse requests btcd to rescan the blockchain for new
+// RescanActiveAddresses requests btcd to rescan the blockchain for new
 // transactions to all active wallet addresses.  This is needed for
 // catching btcwallet up to a long-running btcd process, as otherwise
 // it would have missed notifications as blocks are attached to the
