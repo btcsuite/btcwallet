@@ -83,7 +83,7 @@ $ btcwallet -u rpcuser -P rpcpass
 ## Frontend Usage
 
 Frontends wishing to use btcwallet must connect to the websocket
-`/wallet`.  Messages sent to btcwallet over this websocket are
+`/frontend`.  Messages sent to btcwallet over this websocket are
 expected to follow the standard [Bitcoin JSON
 API](https://en.bitcoin.it/wiki/Original_Bitcoin_client/API_Calls_list)
 and replies follow the same API.  The btcd package `btcjson` provides
