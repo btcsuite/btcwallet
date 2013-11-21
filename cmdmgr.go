@@ -388,8 +388,34 @@ func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
+	// Get current block's height and hash.
+	bs, err := GetCurBlock()
+	if err != nil {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInternal.Code,
+			Message: "btcd disconnected",
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
 	// Get next address from wallet.
-	addr, err := a.NextUnusedAddress()
+	addr, err := a.NextChainedAddress(&bs)
+	if err == wallet.ErrWalletLocked {
+		// The wallet is locked error may be sent if the keypool needs
+		// to be refilled, but the wallet is currently in a locked
+		// state.  Notify the frontend that an unlock is needed to
+		// refill the keypool.
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletKeypoolRanOut)
+		return
+	} else if err != nil {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
 	if err != nil {
 		// TODO(jrick): generate new addresses if the address pool is
 		// empty.
@@ -893,6 +919,7 @@ func WalletPassphrase(frontend chan []byte, icmd btcjson.Cmd) {
 				&btcjson.ErrWalletPassphraseIncorrect)
 			return
 		}
+		// XXX
 		ReplySuccess(frontend, cmd.Id(), nil)
 		NotifyWalletLockStateChange("", false)
 		go func() {

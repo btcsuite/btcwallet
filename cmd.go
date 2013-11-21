@@ -334,7 +334,7 @@ func main() {
 		accounts.Unlock()
 
 	default:
-		log.Errorf("cannot open wallet: %v", err)
+		log.Warnf("cannot open wallet: %v", err)
 	}
 
 	// Read CA file to verify a btcd TLS connection.

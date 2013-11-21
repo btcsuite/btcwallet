@@ -46,6 +46,9 @@ const (
 	// Maximum length in bytes of a comment that can have a size represented
 	// as a uint16.
 	maxCommentLen = (1 << 16) - 1
+
+	// Number of addresses to extend keypool by.
+	nKeypoolIncrement = 100
 )
 
 const (
@@ -409,9 +412,6 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 		return nil, err
 	}
 
-	// Define number of addresses to pre-generate for keypool.
-	const nPregenerated = 100
-
 	// Create and fill wallet.
 	w := &Wallet{
 		version: 0, // TODO(jrick): implement versioning
@@ -432,7 +432,7 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 		addrCommentMap:    make(map[addressHashKey]comment),
 		txCommentMap:      make(map[transactionHashKey]comment),
 		chainIdxMap:       make(map[int64]addressHashKey),
-		lastChainIdx:      nPregenerated - 1,
+		lastChainIdx:      rootKeyChainIdx,
 	}
 	copy(w.name[:], []byte(name))
 	copy(w.desc[:], []byte(desc))
@@ -441,30 +441,9 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 	w.addrMap[addressHashKey(w.keyGenerator.pubKeyHash[:])] = &w.keyGenerator
 	w.chainIdxMap[rootKeyChainIdx] = addressHashKey(w.keyGenerator.pubKeyHash[:])
 
-	// Pre-generate encrypted addresses and add to maps.
-	addr := &w.keyGenerator
-	cc := addr.chaincode[:]
-	for i := 0; i < nPregenerated; i++ {
-		// Wallet has not been returned to the caller yet, so need to
-		// lock and unlock the previous address's key's clear text
-		// private key mutex.
-		privkey, err := ChainedPrivKey(addr.privKeyCT.key, addr.pubKey, cc)
-		if err != nil {
-			return nil, err
-		}
-		newaddr, err := newBtcAddress(privkey, nil, createdAt, true)
-		if err != nil {
-			return nil, err
-		}
-		if err = newaddr.encrypt(aeskey); err != nil {
-			return nil, err
-		}
-		addrKey := addressHashKey(newaddr.pubKeyHash[:])
-		w.addrMap[addrKey] = newaddr
-		newaddr.chainIndex = addr.chainIndex + 1
-		w.chainIdxMap[newaddr.chainIndex] = addrKey
-		copy(newaddr.chaincode[:], cc) // armory does this.. but why?
-		addr = newaddr
+	// Fill keypool.
+	if err := w.extendKeypool(nKeypoolIncrement, aeskey, createdAt); err != nil {
+		return nil, err
 	}
 
 	return w, nil
@@ -703,27 +682,86 @@ func (w *Wallet) Version() (string, int) {
 	return "", 0
 }
 
-// NextUnusedAddress attempts to get the next chained address.
-//
-// TODO(jrick): this currently relies on pre-generated addresses
-// and will return an empty string if the address pool has run out.
-func (w *Wallet) NextUnusedAddress() (string, error) {
+// NextChainedAddress attempts to get the next chained address,
+// refilling the keypool if necessary.
+func (w *Wallet) NextChainedAddress(bs *BlockStamp) (string, error) {
 	// Attempt to get address hash of next chained address.
 	next160, ok := w.chainIdxMap[w.highestUsed+1]
 	if !ok {
-		// TODO(jrick): Re-fill key pool.
-		return "", errors.New("cannot find generated address")
+		// Extending the keypool requires an unlocked wallet.
+		aeskey := make([]byte, 32)
+		w.secret.Lock()
+		if len(w.secret.key) != 32 {
+			w.secret.Unlock()
+			return "", ErrWalletLocked
+		}
+		copy(aeskey, w.secret.key)
+		w.secret.Unlock()
+
+		err := w.extendKeypool(nKeypoolIncrement, aeskey, bs)
+		if err != nil {
+			return "", err
+		}
+
+		next160, ok = w.chainIdxMap[w.highestUsed+1]
+		if !ok {
+			return "", errors.New("chain index map inproperly updated")
+		}
 	}
-	w.highestUsed++
 
 	// Look up address.
-	addr := w.addrMap[next160]
-	if addr == nil {
+	addr, ok := w.addrMap[next160]
+	if !ok {
 		return "", errors.New("cannot find generated address")
 	}
+
+	w.highestUsed++
 
 	// Create and return payment address for address hash.
 	return addr.paymentAddress(w.net)
+}
+
+// extendKeypool grows the keypool by n addresses.
+func (w *Wallet) extendKeypool(n uint, aeskey []byte, bs *BlockStamp) error {
+	// Get last chained address.  New chained addresses will be
+	// chained off of this address's chaincode and private key.
+	addrKey := w.chainIdxMap[w.lastChainIdx]
+	addr, ok := w.addrMap[addrKey]
+	if !ok {
+		return errors.New("expected last chained address not found")
+	}
+	privkey, err := addr.unlock(aeskey)
+	if err != nil {
+		return err
+	}
+	cc := addr.chaincode[:]
+
+	// Create n encrypted addresses and add each to the wallet's
+	// bookkeeping maps.
+	for i := uint(0); i < n; i++ {
+		privkey, err = ChainedPrivKey(privkey, addr.pubKey, cc)
+		if err != nil {
+			return err
+		}
+		newaddr, err := newBtcAddress(privkey, nil, bs, true)
+		if err != nil {
+			return err
+		}
+		if err = newaddr.encrypt(aeskey); err != nil {
+			return err
+		}
+		addrKey := addressHashKey(newaddr.pubKeyHash[:])
+		w.addrMap[addrKey] = newaddr
+		newaddr.chainIndex = addr.chainIndex + 1
+		w.chainIdxMap[newaddr.chainIndex] = addrKey
+		w.lastChainIdx++
+		// armory does this.. but all the chaincodes are equal so why
+		// not use the root's?
+		copy(newaddr.chaincode[:], cc)
+		addr = newaddr
+	}
+
+	return nil
 }
 
 // addrHashForAddress decodes and returns the address hash for a

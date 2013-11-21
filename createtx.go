@@ -203,9 +203,15 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 		// Create a new address to spend leftover outputs to.
 		// TODO(jrick): use the next chained address, not the next unused.
 		var err error
-		changeAddr, err = w.NextUnusedAddress()
+		// Get current block's height and hash.
+		bs, err := GetCurBlock()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get next unused address: %s", err)
+			return nil, err
+		}
+
+		changeAddr, err = w.NextChainedAddress(&bs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get next address: %s", err)
 		}
 
 		// Spend change
