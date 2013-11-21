@@ -868,6 +868,9 @@ func WalletLock(frontend chan []byte, icmd btcjson.Cmd) {
 		}
 		ReplySuccess(frontend, icmd.Id(), nil)
 		NotifyWalletLockStateChange("", true)
+	} else {
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
 	}
 }
 
@@ -897,6 +900,9 @@ func WalletPassphrase(frontend chan []byte, icmd btcjson.Cmd) {
 			a.Lock()
 			NotifyWalletLockStateChange("", true)
 		}()
+	} else {
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
 	}
 }
 
