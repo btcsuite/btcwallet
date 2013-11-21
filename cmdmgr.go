@@ -205,7 +205,7 @@ func DumpPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// If this is reached, all accounts have been checked, but none
-	// have they address.
+	// have the address.
 	e := &btcjson.Error{
 		Code:    btcjson.ErrWallet.Code,
 		Message: "Address does not refer to a key",
