@@ -37,13 +37,13 @@ var accounts = NewAccountStore()
 // to prevent against incorrect multiple access.
 type Account struct {
 	*wallet.Wallet
-	mtx               sync.RWMutex
-	name              string
-	dirty             bool
-	fullRescan        bool
-	NewBlockTxSeqN    uint64
-	SpentOutpointSeqN uint64
-	UtxoStore         struct {
+	mtx                 sync.RWMutex
+	name                string
+	dirty               bool
+	fullRescan          bool
+	NewBlockTxJSONID    uint64
+	SpentOutpointJSONID uint64
+	UtxoStore           struct {
 		sync.RWMutex
 		dirty bool
 		s     tx.UtxoStore
@@ -222,7 +222,7 @@ func (a *Account) ImportWIFPrivateKey(wif, label string,
 func (a *Account) Track() {
 	n := <-NewJSONID
 	a.mtx.Lock()
-	a.NewBlockTxSeqN = n
+	a.NewBlockTxJSONID = n
 	a.mtx.Unlock()
 
 	replyHandlers.Lock()
@@ -234,7 +234,7 @@ func (a *Account) Track() {
 
 	n = <-NewJSONID
 	a.mtx.Lock()
-	a.SpentOutpointSeqN = n
+	a.SpentOutpointJSONID = n
 	a.mtx.Unlock()
 
 	replyHandlers.Lock()
@@ -366,7 +366,7 @@ func (a *Account) ReqNewTxsForAddress(addr string) {
 	log.Debugf("Requesting notifications of TXs sending to address %v", addr)
 
 	a.mtx.RLock()
-	n := a.NewBlockTxSeqN
+	n := a.NewBlockTxJSONID
 	a.mtx.RUnlock()
 
 	cmd := btcws.NewNotifyNewTXsCmd(fmt.Sprintf("btcwallet(%d)", n),
@@ -386,7 +386,7 @@ func (a *Account) ReqSpentUtxoNtfn(u *tx.Utxo) {
 		u.Out.Hash, u.Out.Index)
 
 	a.mtx.RLock()
-	n := a.SpentOutpointSeqN
+	n := a.SpentOutpointJSONID
 	a.mtx.RUnlock()
 
 	cmd := btcws.NewNotifySpentCmd(fmt.Sprintf("btcwallet(%d)", n),

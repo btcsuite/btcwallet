@@ -801,10 +801,10 @@ func CreateEncryptedWallet(frontend chan []byte, icmd btcjson.Cmd) {
 	// Create new account with the wallet.  A new JSON ID is set for
 	// transaction notifications.
 	a := &Account{
-		Wallet:         wlt,
-		name:           cmd.Account,
-		dirty:          true,
-		NewBlockTxSeqN: <-NewJSONID,
+		Wallet:           wlt,
+		name:             cmd.Account,
+		dirty:            true,
+		NewBlockTxJSONID: <-NewJSONID,
 	}
 
 	// Begin tracking account against a connected btcd.
@@ -869,7 +869,7 @@ func WalletLock(frontend chan []byte, icmd btcjson.Cmd) {
 		ReplySuccess(frontend, icmd.Id(), nil)
 		NotifyWalletLockStateChange("", true)
 	} else {
-		ReplyError(frontend, cmd.Id(),
+		ReplyError(frontend, icmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 	}
 }
