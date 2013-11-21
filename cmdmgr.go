@@ -242,6 +242,7 @@ func DumpWallet(frontend chan []byte, icmd btcjson.Cmd) {
 				Message: err.Error(),
 			}
 			ReplyError(frontend, cmd.Id(), e)
+			return
 		}
 	}
 
