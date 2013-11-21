@@ -59,9 +59,9 @@ var (
 	}
 )
 
-// walletdir returns the directory path which holds the wallet, utxo,
+// accountdir returns the directory path which holds an account's wallet, utxo,
 // and tx files.
-func walletdir(cfg *config, account string) string {
+func accountdir(cfg *config, account string) string {
 	var wname string
 	if account == "" {
 		wname = "btcwallet"
@@ -72,6 +72,27 @@ func walletdir(cfg *config, account string) string {
 	return filepath.Join(cfg.DataDir, wname)
 }
 
+// checkCreateAccountDir checks that path exists and is a directory.
+// If path does not exist, it is created.
+func checkCreateAccountDir(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Attempt data directory creation
+			if err = os.MkdirAll(path, 0700); err != nil {
+				return fmt.Errorf("cannot create account directory: %s", err)
+			}
+		} else {
+			return fmt.Errorf("error checking account directory: %s", err)
+		}
+	} else {
+		if !fi.IsDir() {
+			return fmt.Errorf("path '%s' is not a directory", cfg.DataDir)
+		}
+	}
+	return nil
+}
+
 // OpenAccount opens an account described by account in the data
 // directory specified by cfg.  If the wallet does not exist, ErrNoWallet
 // is returned as an error.
@@ -79,30 +100,19 @@ func walletdir(cfg *config, account string) string {
 // Wallets opened from this function are not set to track against a
 // btcd connection.
 func OpenAccount(cfg *config, account string) (*Account, error) {
-	wdir := walletdir(cfg, account)
-	fi, err := os.Stat(wdir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Attempt data directory creation
-			if err = os.MkdirAll(wdir, 0700); err != nil {
-				return nil, fmt.Errorf("cannot create data directory: %s", err)
-			}
-		} else {
-			return nil, fmt.Errorf("error checking data directory: %s", err)
-		}
-	} else {
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("data directory '%s' is not a directory", cfg.DataDir)
-		}
+	adir := accountdir(cfg, account)
+	if err := checkCreateAccountDir(adir); err != nil {
+		return nil, err
 	}
 
-	wfilepath := filepath.Join(wdir, "wallet.bin")
-	utxofilepath := filepath.Join(wdir, "utxo.bin")
-	txfilepath := filepath.Join(wdir, "tx.bin")
+	wfilepath := filepath.Join(adir, "wallet.bin")
+	utxofilepath := filepath.Join(adir, "utxo.bin")
+	txfilepath := filepath.Join(adir, "tx.bin")
 	var wfile, utxofile, txfile *os.File
 
 	// Read wallet file.
-	if wfile, err = os.Open(wfilepath); err != nil {
+	wfile, err := os.Open(wfilepath)
+	if err != nil {
 		if os.IsNotExist(err) {
 			// Must create and save wallet first.
 			return nil, ErrNoWallet

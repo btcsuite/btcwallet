@@ -69,10 +69,14 @@ func (w *Account) writeDirtyToDisk() error {
 	// for validity, and moved to replace the main file.
 	timeStr := fmt.Sprintf("%v", time.Now().Unix())
 
-	wdir := walletdir(cfg, w.name)
-	wfilepath := filepath.Join(wdir, "wallet.bin")
-	txfilepath := filepath.Join(wdir, "tx.bin")
-	utxofilepath := filepath.Join(wdir, "utxo.bin")
+	adir := accountdir(cfg, w.name)
+	if err := checkCreateAccountDir(adir); err != nil {
+		return err
+	}
+
+	wfilepath := filepath.Join(adir, "wallet.bin")
+	txfilepath := filepath.Join(adir, "tx.bin")
+	utxofilepath := filepath.Join(adir, "utxo.bin")
 
 	// UTXOs and transactions are synced to disk first.  This prevents
 	// any races from saving a wallet marked to be synced with block N
