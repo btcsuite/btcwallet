@@ -54,7 +54,7 @@ var (
 
 	// Channel to send messages btcwallet does not understand and requests
 	// from btcwallet to btcd.
-	btcdMsgs = make(chan []byte, 100)
+	btcdMsgs = make(chan []byte)
 
 	// Adds a frontend listener channel
 	addFrontendListener = make(chan (chan []byte))
@@ -272,37 +272,30 @@ func frontendSendRecv(ws *websocket.Conn) {
 // BtcdHandler listens for replies and notifications from btcd over a
 // websocket and sends messages that btcwallet does not understand to
 // btcd.  Unlike FrontendHandler, exactly one BtcdHandler goroutine runs.
+// BtcdHandler spawns goroutines to perform these tasks, and closes the
+// done channel once they are finished.
 func BtcdHandler(ws *websocket.Conn, done chan struct{}) {
 	// Listen for replies/notifications from btcd, and decide how to handle them.
 	replies := make(chan []byte)
 	go func() {
-		defer close(replies)
 		for {
-			select {
-			case <-done:
+			var m []byte
+			if err := websocket.Message.Receive(ws, &m); err != nil {
+				log.Debugf("cannot recevie btcd message: %v", err)
+				close(replies)
 				return
-
-			default:
-				var m []byte
-				if err := websocket.Message.Receive(ws, &m); err != nil {
-					close(done)
-					return
-				}
-				replies <- m
 			}
+			replies <- m
 		}
 	}()
 
 	go func() {
+		defer close(done)
 		for {
 			select {
-			case <-done:
-				return
-
 			case rply, ok := <-replies:
 				if !ok {
 					// btcd disconnected
-					close(done)
 					return
 				}
 				// Handle message here.
@@ -312,7 +305,6 @@ func BtcdHandler(ws *websocket.Conn, done chan struct{}) {
 				if err := websocket.Message.Send(ws, r); err != nil {
 					// btcd disconnected.
 					log.Errorf("Unable to send message to btcd: %v", err)
-					close(done)
 					return
 				}
 			}
@@ -646,6 +638,7 @@ func BtcdConnect(certificates []byte, reply chan error) {
 		return
 	}
 
+	// done is closed when BtcdHandler's goroutines are finished.
 	<-done
 	reply <- ErrConnLost
 }
