@@ -310,8 +310,10 @@ func (a *Account) RescanAddresses(beginBlock int32, addrs map[string]struct{}) {
 			return false
 		}
 		if bs, err := GetCurBlock(); err == nil {
-			a.SetSyncedWith(&bs)
+			a.mtx.Lock()
+			a.Wallet.SetSyncedWith(&bs)
 			a.dirty = true
+			a.mtx.Unlock()
 			if err = a.writeDirtyToDisk(); err != nil {
 				log.Errorf("cannot sync dirty wallet: %v",
 					err)
