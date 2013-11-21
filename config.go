@@ -58,6 +58,20 @@ type config struct {
 	ProxyPass   string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
 }
 
+// cleanAndExpandPath expands environement variables and leading ~ in the
+// passed path, cleans the result, and returns it.
+func cleanAndExpandPath(path string) string {
+	// Expand initial ~ to OS specific home directory.
+	if strings.HasPrefix(path, "~") {
+		homeDir := filepath.Dir(btcwalletHomeDir)
+		path = strings.Replace(path, "~", homeDir, 1)
+	}
+
+	// NOTE: The os.ExpandEnv doesn't work with Windows-style %VARIABLE%,
+	// but they variables can still be expanded via POSIX-style $VARIABLE.
+	return filepath.Clean(os.ExpandEnv(path))
+}
+
 // updateConfigWithActiveParams update the passed config with parameters
 // from the active net params if the relevant options in the passed config
 // object are the default so options specified by the user on the command line
@@ -181,6 +195,9 @@ func loadConfig() (*config, []string, error) {
 
 	// Add default port to connect flag if missing.
 	cfg.Connect = normalizeAddress(cfg.Connect, activeNetParams.btcdPort)
+
+	// Expand environment variable and leading ~ for filepaths.
+	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
 
 	return &cfg, remainingArgs, nil
 }
