@@ -585,7 +585,8 @@ func BtcdConnect(certificates []byte, reply chan error) {
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(certificates)
 	config.TlsConfig = &tls.Config{
-		RootCAs: pool,
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS12,
 	}
 
 	// btcd requires basic authorization, so we use a custom config with
