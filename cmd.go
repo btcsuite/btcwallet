@@ -26,6 +26,9 @@ import (
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
 	"io/ioutil"
+	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	"sync"
@@ -293,6 +296,17 @@ func main() {
 	// Change the logging level if needed.
 	if cfg.DebugLevel != defaultLogLevel {
 		loggers = setLogLevel(cfg.DebugLevel)
+	}
+
+	if cfg.Profile != "" {
+		go func() {
+			listenAddr := net.JoinHostPort("", cfg.Profile)
+			log.Infof("Profile server listening on %s", listenAddr)
+			profileRedirect := http.RedirectHandler("/debug/pprof",
+				http.StatusSeeOther)
+			http.Handle("/", profileRedirect)
+			log.Errorf("%v", http.ListenAndServe(listenAddr, nil))
+		}()
 	}
 
 	// Open default account
