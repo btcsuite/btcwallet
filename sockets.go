@@ -639,7 +639,13 @@ func BtcdConnect(certificates []byte, reply chan error) {
 
 	done := make(chan struct{})
 	BtcdHandler(btcdws, done)
-	BtcdHandshake(btcdws)
+
+	if err := BtcdHandshake(btcdws); err != nil {
+		log.Errorf("%v", err)
+		reply <- ErrConnRefused
+		return
+	}
+
 	<-done
 	reply <- ErrConnLost
 }
@@ -671,14 +677,12 @@ func resendUnminedTxs() {
 // settings between the two processes (such as running on different
 // Bitcoin networks).  If the sanity checks pass, all wallets are set to
 // be tracked against chain notifications from this btcd connection.
-func BtcdHandshake(ws *websocket.Conn) {
+func BtcdHandshake(ws *websocket.Conn) error {
 	n := <-NewJSONID
 	cmd := btcws.NewGetCurrentNetCmd(fmt.Sprintf("btcwallet(%v)", n))
 	mcmd, err := cmd.MarshalJSON()
 	if err != nil {
-		log.Errorf("Cannot complete btcd handshake: %v", err)
-		ws.Close()
-		return
+		return fmt.Errorf("cannot complete btcd handshake: %v", err)
 	}
 
 	correctNetwork := make(chan bool)
@@ -688,7 +692,6 @@ func BtcdHandshake(ws *websocket.Conn) {
 		fnet, ok := result.(float64)
 		if !ok {
 			log.Error("btcd handshake: result is not a number")
-			ws.Close()
 			correctNetwork <- false
 			return true
 		}
@@ -710,9 +713,7 @@ func BtcdHandshake(ws *websocket.Conn) {
 	btcdMsgs <- mcmd
 
 	if !<-correctNetwork {
-		log.Error("btcd and btcwallet running on different Bitcoin networks")
-		ws.Close()
-		return
+		return errors.New("btcd and btcwallet running on different Bitcoin networks")
 	}
 
 	// TODO(jrick): Check that there was not any reorgs done
@@ -736,4 +737,6 @@ func BtcdHandshake(ws *websocket.Conn) {
 		NotifyNewBlockChainHeight(frontendNotificationMaster, bs.Height)
 		NotifyBalances(frontendNotificationMaster)
 	}
+
+	return nil
 }
