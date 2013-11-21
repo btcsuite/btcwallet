@@ -378,6 +378,7 @@ func ProcessBtcdNotificationReply(b []byte) {
 			delete(replyRouter.m, routeID)
 		} else {
 			// Can't route to a frontend, drop reply.
+			replyRouter.Unlock()
 			log.Info("Unable to route btcd reply to frontend. Dropping.")
 			return
 		}
