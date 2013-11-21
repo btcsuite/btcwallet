@@ -84,7 +84,10 @@ func (w *Account) writeDirtyToDisk() error {
 	// with block N-1.
 
 	// UTXOs
-	if w.UtxoStore.dirty {
+	w.UtxoStore.RLock()
+	dirty := w.TxStore.dirty
+	w.UtxoStore.RUnlock()
+	if dirty {
 		w.UtxoStore.Lock()
 		defer w.UtxoStore.Unlock()
 		tmpfilepath := utxofilepath + "-" + timeStr
@@ -107,7 +110,10 @@ func (w *Account) writeDirtyToDisk() error {
 	}
 
 	// Transactions
-	if w.TxStore.dirty {
+	w.TxStore.RLock()
+	dirty = w.TxStore.dirty
+	w.TxStore.RUnlock()
+	if dirty {
 		w.TxStore.Lock()
 		defer w.TxStore.Unlock()
 		tmpfilepath := txfilepath + "-" + timeStr
@@ -130,7 +136,10 @@ func (w *Account) writeDirtyToDisk() error {
 	}
 
 	// Wallet
-	if w.dirty {
+	w.mtx.RLock()
+	dirty = w.dirty
+	w.mtx.RUnlock()
+	if dirty {
 		w.mtx.Lock()
 		defer w.mtx.Unlock()
 		tmpfilepath := wfilepath + "-" + timeStr

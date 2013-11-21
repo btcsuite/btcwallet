@@ -272,25 +272,20 @@ func frontendSendRecv(ws *websocket.Conn) {
 // BtcdHandler listens for replies and notifications from btcd over a
 // websocket and sends messages that btcwallet does not understand to
 // btcd.  Unlike FrontendHandler, exactly one BtcdHandler goroutine runs.
-func BtcdHandler(ws *websocket.Conn) {
-	// Notification channel to return from listener goroutine when
-	// btcd disconnects.
-	disconnected := make(chan int)
-	defer func() {
-		close(disconnected)
-	}()
-
+func BtcdHandler(ws *websocket.Conn, done chan struct{}) {
 	// Listen for replies/notifications from btcd, and decide how to handle them.
 	replies := make(chan []byte)
 	go func() {
 		defer close(replies)
 		for {
 			select {
-			case <-disconnected:
+			case <-done:
 				return
+
 			default:
 				var m []byte
 				if err := websocket.Message.Receive(ws, &m); err != nil {
+					close(done)
 					return
 				}
 				replies <- m
@@ -298,23 +293,31 @@ func BtcdHandler(ws *websocket.Conn) {
 		}
 	}()
 
-	for {
-		select {
-		case rply, ok := <-replies:
-			if !ok {
-				// btcd disconnected
+	go func() {
+		for {
+			select {
+			case <-done:
 				return
-			}
-			// Handle message here.
-			go ProcessBtcdNotificationReply(rply)
-		case r := <-btcdMsgs:
-			if err := websocket.Message.Send(ws, r); err != nil {
-				// btcd disconnected.
-				log.Errorf("Unable to send message to btcd: %v", err)
-				return
+
+			case rply, ok := <-replies:
+				if !ok {
+					// btcd disconnected
+					close(done)
+					return
+				}
+				// Handle message here.
+				go ProcessBtcdNotificationReply(rply)
+
+			case r := <-btcdMsgs:
+				if err := websocket.Message.Send(ws, r); err != nil {
+					// btcd disconnected.
+					log.Errorf("Unable to send message to btcd: %v", err)
+					close(done)
+					return
+				}
 			}
 		}
-	}
+	}()
 }
 
 type notificationHandler func(btcws.Notification)
@@ -462,11 +465,6 @@ func NtfnBlockConnected(n btcws.Notification) {
 	// TODO(jrick): send frontend tx notifications once that's
 	// implemented.
 	for _, a := range accounts.m {
-		// Mark wallet as being synced with the new blockstamp.
-		a.mtx.Lock()
-		a.Wallet.SetSyncedWith(bs)
-		a.mtx.Unlock()
-
 		// The UTXO store will be dirty if it was modified
 		// from a tx notification.
 		if a.UtxoStore.dirty {
@@ -490,7 +488,10 @@ func NtfnBlockConnected(n btcws.Notification) {
 		//
 		// Instead, the wallet is queued to be written to disk at the
 		// next scheduled disk sync.
+		a.mtx.Lock()
+		a.Wallet.SetSyncedWith(bs)
 		a.dirty = true
+		a.mtx.Unlock()
 		dirtyAccounts.Lock()
 		dirtyAccounts.m[a] = true
 		dirtyAccounts.Unlock()
@@ -636,15 +637,10 @@ func BtcdConnect(certificates []byte, reply chan error) {
 	}
 	replyHandlers.Unlock()
 
-	handlerClosed := make(chan int)
-	go func() {
-		BtcdHandler(btcdws)
-		close(handlerClosed)
-	}()
-
+	done := make(chan struct{})
+	BtcdHandler(btcdws, done)
 	BtcdHandshake(btcdws)
-
-	<-handlerClosed
+	<-done
 	reply <- ErrConnLost
 }
 
