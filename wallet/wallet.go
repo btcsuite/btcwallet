@@ -452,7 +452,14 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 // Name returns the name of a wallet.  This name is used as the
 // account name for btcwallet JSON methods.
 func (w *Wallet) Name() string {
-	return string(w.name[:])
+	last := len(w.name[:])
+	for i, b := range w.name[:] {
+		if b == 0x00 {
+			last = i
+			break
+		}
+	}
+	return string(w.name[:last])
 }
 
 // ReadFrom reads data from a io.Reader and saves it to a Wallet,
