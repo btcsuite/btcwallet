@@ -28,7 +28,7 @@ func TestFakeTxs(t *testing.T) {
 	// This will pass validation because btcscript is unaware of invalid
 	// tx inputs, however, this example would fail in btcd.
 	utxo := &tx.Utxo{}
-	addr, err := w.NextUnusedAddress()
+	addr, err := w.NextChainedAddress(&wallet.BlockStamp{})
 	if err != nil {
 		t.Errorf("Cannot get next address: %s", err)
 		return

@@ -42,7 +42,7 @@ func TestBtcAddressSerializer(t *testing.T) {
 		t.Error(err.Error())
 		return
 	}
-	addr, err := newBtcAddress(privKey, nil, &BlockStamp{})
+	addr, err := newBtcAddress(privKey, nil, &BlockStamp{}, true)
 	if err != nil {
 		t.Error(err.Error())
 		return
