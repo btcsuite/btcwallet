@@ -19,7 +19,6 @@ package tx
 import (
 	"bytes"
 	"code.google.com/p/go.crypto/ripemd160"
-	"encoding/binary"
 	"github.com/conformal/btcwire"
 	"github.com/davecgh/go-spew/spew"
 	"io"
@@ -29,55 +28,53 @@ import (
 
 var (
 	recvtx = &RecvTx{
-		TxHash: [btcwire.HashSize]byte{
+		TxID: [btcwire.HashSize]byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
 			30, 31,
 		},
-		Amt: 69,
-		SenderAddr: [ripemd160.Size]byte{
+		BlockHash: [btcwire.HashSize]byte{
+			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+			30, 31,
+		},
+		BlockHeight: 69,
+		Amount:      69,
+		ReceiverHash: []byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 			16, 17, 18, 19,
-		},
-		ReceiverAddr: [ripemd160.Size]byte{
-			20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
-			34, 35, 36, 37, 38, 39,
 		},
 	}
 
 	sendtx = &SendTx{
-		TxHash: [btcwire.HashSize]byte{
+		TxID: [btcwire.HashSize]byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
 			30, 31,
 		},
-		SenderAddr: [ripemd160.Size]byte{
+		Time: 12345,
+		BlockHash: [btcwire.HashSize]byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-			16, 17, 18, 19,
+			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+			30, 31,
 		},
-		ReceiverAddrs: []struct {
-			Addr [ripemd160.Size]byte
-			Amt  uint64
-		}{
-			struct {
-				Addr [ripemd160.Size]byte
-				Amt  uint64
-			}{
-				Amt: 69,
-				Addr: [ripemd160.Size]byte{
+		BlockHeight: 69,
+		BlockTime:   54321,
+		BlockIndex:  3,
+		Receivers: []Pair{
+			Pair{
+				PubkeyHash: []byte{
 					20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
 					34, 35, 36, 37, 38, 39,
 				},
+				Amount: 69,
 			},
-			struct {
-				Addr [ripemd160.Size]byte
-				Amt  uint64
-			}{
-				Amt: 96,
-				Addr: [ripemd160.Size]byte{
+			Pair{
+				PubkeyHash: []byte{
 					40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
 					54, 55, 56, 57, 58, 59,
 				},
+				Amount: 96,
 			},
 		},
 	}
@@ -145,24 +142,36 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 		utxo.Subscript = []byte{}
 		utxo.Amt = uint64(i + 3)
 		utxo.Height = int32(i + 4)
+		utxo.BlockHash = [btcwire.HashSize]byte{
+			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+			30, 31,
+		}
 		*store1 = append(*store1, utxo)
 	}
 
 	bufWriter := &bytes.Buffer{}
-	n, err := store1.WriteTo(bufWriter)
+	nWritten, err := store1.WriteTo(bufWriter)
 	if err != nil {
 		t.Error(err)
+	}
+	if nWritten != int64(bufWriter.Len()) {
+		t.Errorf("Wrote %v bytes but write buffer has %v bytes.", nWritten, bufWriter.Len())
 	}
 
 	storeBytes := bufWriter.Bytes()
+	bufReader := bytes.NewBuffer(storeBytes)
+	if nWritten != int64(bufReader.Len()) {
+		t.Errorf("Wrote %v bytes but read buffer has %v bytes.", nWritten, bufReader.Len())
+	}
 
 	store2 := new(UtxoStore)
-	n, err = store2.ReadFrom(bytes.NewBuffer(storeBytes))
+	nRead, err := store2.ReadFrom(bufReader)
 	if err != nil {
 		t.Error(err)
 	}
-	if int(n) != len(storeBytes) {
-		t.Error("Incorrect number of bytes read.")
+	if nWritten != nRead {
+		t.Errorf("Bytes written (%v) does not match bytes read (%v).", nWritten, nRead)
 	}
 
 	if !reflect.DeepEqual(store1, store2) {
@@ -170,15 +179,15 @@ func TestUtxoStoreWriteRead(t *testing.T) {
 		t.Error("Stores do not match.")
 	}
 
-	truncatedLen := 100
+	truncatedLen := 101
 	truncatedReadBuf := bytes.NewBuffer(storeBytes[:truncatedLen])
 	store3 := new(UtxoStore)
-	n, err = store3.ReadFrom(truncatedReadBuf)
+	n, err := store3.ReadFrom(truncatedReadBuf)
 	if err != io.EOF {
 		t.Errorf("Expected err = io.EOF reading from truncated buffer, got: %v", err)
 	}
 	if int(n) != truncatedLen {
-		t.Error("Incorrect number of bytes read from truncated buffer.")
+		t.Errorf("Incorrect number of bytes (%v) read from truncated buffer (len %v).", n, truncatedLen)
 	}
 }
 
@@ -189,20 +198,12 @@ func TestRecvTxWriteRead(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	if int(n) != binary.Size(recvtx) {
-		t.Error("Writing Tx: Size Mismatch")
-		return
-	}
 	txBytes := bufWriter.Bytes()
 
 	tx := new(RecvTx)
 	n, err = tx.ReadFrom(bytes.NewBuffer(txBytes))
 	if err != nil {
 		t.Error(err)
-		return
-	}
-	if int(n) != binary.Size(tx) {
-		t.Error("Reading Tx: Size Mismatch")
 		return
 	}
 
@@ -240,7 +241,8 @@ func TestSendTxWriteRead(t *testing.T) {
 		return
 	}
 	if n1 != n2 {
-		t.Error("Number of bytes written and read mismatch.")
+		t.Errorf("Number of bytes written and read mismatch, %d != %d",
+			n1, n2)
 		return
 	}
 

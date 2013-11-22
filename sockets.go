@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"code.google.com/p/go.net/websocket"
 	"crypto/tls"
 	"crypto/x509"
@@ -25,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
@@ -527,15 +529,47 @@ func NtfnTxMined(n btcws.Notification) {
 		log.Errorf("%v handler: unexpected type", n.Id())
 		return
 	}
+
 	txid, err := btcwire.NewShaHashFromStr(tmn.TxID)
 	if err != nil {
 		log.Errorf("%v handler: invalid hash string", n.Id())
 		return
 	}
+	blockhash, err := btcwire.NewShaHashFromStr(tmn.BlockHash)
+	if err != nil {
+		log.Errorf("%v handler: invalid block hash string", n.Id())
+		return
+	}
+
+	// Lookup tx in store and add block information.
+	accounts.Lock()
+out:
+	for _, a := range accounts.m {
+		a.TxStore.Lock()
+
+		// Search in reverse order, more likely to find it
+		// sooner that way.
+		for i := len(a.TxStore.s) - 1; i >= 0; i-- {
+			sendtx, ok := a.TxStore.s[i].(*tx.SendTx)
+			if ok {
+				if bytes.Equal(txid.Bytes(), sendtx.TxID[:]) {
+					copy(sendtx.BlockHash[:], blockhash.Bytes())
+					sendtx.BlockHeight = tmn.BlockHeight
+					sendtx.BlockIndex = int32(tmn.Index)
+					sendtx.BlockTime = tmn.BlockTime
+					a.TxStore.Unlock()
+					break out
+				}
+			}
+		}
+
+		a.TxStore.Unlock()
+	}
+	accounts.Unlock()
 
 	// Remove mined transaction from pool.
 	UnminedTxs.Lock()
-	delete(UnminedTxs.m, TXID(txid[:]))
+	delete(UnminedTxs.m, TXID(*txid))
 	UnminedTxs.Unlock()
 }
 

@@ -103,6 +103,8 @@ func checkCreateAccountDir(path string) error {
 // Wallets opened from this function are not set to track against a
 // btcd connection.
 func OpenAccount(cfg *config, account string) (*Account, error) {
+	var finalErr error
+
 	adir := accountdir(cfg, account)
 	if err := checkCreateAccountDir(adir); err != nil {
 		return nil, err
@@ -134,6 +136,25 @@ func OpenAccount(cfg *config, account string) (*Account, error) {
 		name:   account,
 	}
 
+	// Read tx file.  If this fails, return a ErrNoTxs error and let
+	// the caller decide if a rescan is necessary.
+	if txfile, err = os.Open(txfilepath); err != nil {
+		log.Errorf("cannot open tx file: %s", err)
+		// This is not a error we should immediately return with,
+		// but other errors can be more important, so only return
+		// this if none of the others are hit.
+		finalErr = ErrNoTxs
+	} else {
+		defer txfile.Close()
+		var txs tx.TxStore
+		if _, err = txs.ReadFrom(txfile); err != nil {
+			log.Errorf("cannot read tx file: %s", err)
+			finalErr = ErrNoTxs
+		} else {
+			a.TxStore.s = txs
+		}
+	}
+
 	// Read utxo file.  If this fails, return a ErrNoUtxos error so a
 	// rescan can be done since the wallet creation block.
 	var utxos tx.UtxoStore
@@ -144,25 +165,12 @@ func OpenAccount(cfg *config, account string) (*Account, error) {
 	defer utxofile.Close()
 	if _, err = utxos.ReadFrom(utxofile); err != nil {
 		log.Errorf("cannot read utxo file: %s", err)
-		return a, ErrNoUtxos
+		finalErr = ErrNoUtxos
+	} else {
+		a.UtxoStore.s = utxos
 	}
-	a.UtxoStore.s = utxos
 
-	// Read tx file.  If this fails, return a ErrNoTxs error and let
-	// the caller decide if a rescan is necessary.
-	if txfile, err = os.Open(txfilepath); err != nil {
-		log.Errorf("cannot open tx file: %s", err)
-		return a, ErrNoTxs
-	}
-	defer txfile.Close()
-	var txs tx.TxStore
-	if _, err = txs.ReadFrom(txfile); err != nil {
-		log.Errorf("cannot read tx file: %s", err)
-		return a, ErrNoTxs
-	}
-	a.TxStore.s = txs
-
-	return a, nil
+	return a, finalErr
 }
 
 // GetCurBlock returns the blockchain height and SHA hash of the most

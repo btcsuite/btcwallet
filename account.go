@@ -27,6 +27,7 @@ import (
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
 	"sync"
+	"time"
 )
 
 var accounts = NewAccountStore()
@@ -451,19 +452,9 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		}
 		return false
 	}
-	sender, ok := v["sender"].(string)
-	if !ok {
-		log.Error("Tx Handler: Unspecified sender.")
-		return false
-	}
 	receiver, ok := v["receiver"].(string)
 	if !ok {
 		log.Error("Tx Handler: Unspecified receiver.")
-		return false
-	}
-	blockhashBE, ok := v["blockhash"].(string)
-	if !ok {
-		log.Error("Tx Handler: Unspecified block hash.")
 		return false
 	}
 	height, ok := v["height"].(float64)
@@ -471,16 +462,34 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		log.Error("Tx Handler: Unspecified height.")
 		return false
 	}
-	txhashBE, ok := v["txhash"].(string)
+	blockHashBE, ok := v["blockhash"].(string)
+	if !ok {
+		log.Error("Tx Handler: Unspecified block hash.")
+		return false
+	}
+	fblockIndex, ok := v["blockindex"].(float64)
+	if !ok {
+		log.Error("Tx Handler: Unspecified block index.")
+		return false
+	}
+	blockIndex := int32(fblockIndex)
+	fblockTime, ok := v["blocktime"].(float64)
+	if !ok {
+		log.Error("Tx Handler: Unspecified block time.")
+		return false
+	}
+	blockTime := int64(fblockTime)
+	txhashBE, ok := v["txid"].(string)
 	if !ok {
 		log.Error("Tx Handler: Unspecified transaction hash.")
 		return false
 	}
-	index, ok := v["index"].(float64)
+	ftxOutIndex, ok := v["txoutindex"].(float64)
 	if !ok {
-		log.Error("Tx Handler: Unspecified transaction index.")
+		log.Error("Tx Handler: Unspecified transaction output index.")
 		return false
 	}
+	txOutIndex := int32(ftxOutIndex)
 	amt, ok := v["amount"].(float64)
 	if !ok {
 		log.Error("Tx Handler: Unspecified amount.")
@@ -499,18 +508,16 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 
 	// btcd sends the block and tx hashes as BE strings.  Convert both
 	// to a LE ShaHash.
-	blockhash, err := btcwire.NewShaHashFromStr(blockhashBE)
+	blockHash, err := btcwire.NewShaHashFromStr(blockHashBE)
 	if err != nil {
 		log.Errorf("Tx Handler: Block hash string cannot be parsed: %v", err)
 		return false
 	}
-	txhash, err := btcwire.NewShaHashFromStr(txhashBE)
+	txID, err := btcwire.NewShaHashFromStr(txhashBE)
 	if err != nil {
 		log.Errorf("Tx Handler: Tx hash string cannot be parsed: %v", err)
 		return false
 	}
-	// TODO(jrick): btcd does not find the sender yet.
-	senderHash, _, _ := btcutil.DecodeAddress(sender)
 	receiverHash, _, err := btcutil.DecodeAddress(receiver)
 	if err != nil {
 		log.Errorf("Tx Handler: receiver address can not be decoded: %v", err)
@@ -519,12 +526,15 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 
 	// Add to TxStore.
 	t := &tx.RecvTx{
-		Amt: uint64(amt),
+		TxID:         *txID,
+		TimeReceived: time.Now().Unix(),
+		BlockHeight:  int32(height),
+		BlockHash:    *blockHash,
+		BlockIndex:   blockIndex,
+		BlockTime:    blockTime,
+		Amount:       int64(amt),
+		ReceiverHash: receiverHash,
 	}
-	copy(t.TxHash[:], txhash[:])
-	copy(t.BlockHash[:], blockhash[:])
-	copy(t.SenderAddr[:], senderHash)
-	copy(t.ReceiverAddr[:], receiverHash)
 
 	a.TxStore.Lock()
 	txs := a.TxStore.s
@@ -532,14 +542,13 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 	a.TxStore.dirty = true
 	a.TxStore.Unlock()
 
-	// Add to UtxoStore if unspent.
 	if !spent {
 		// First, iterate through all stored utxos.  If an unconfirmed utxo
 		// (not present in a block) has the same outpoint as this utxo,
 		// update the block height and hash.
 		a.UtxoStore.RLock()
 		for _, u := range a.UtxoStore.s {
-			if bytes.Equal(u.Out.Hash[:], txhash[:]) && u.Out.Index == uint32(index) {
+			if bytes.Equal(u.Out.Hash[:], txID[:]) && u.Out.Index == uint32(txOutIndex) {
 				// Found a either a duplicate, or a change UTXO.  If not change,
 				// ignore it.
 				a.UtxoStore.RUnlock()
@@ -548,7 +557,7 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 				}
 
 				a.UtxoStore.Lock()
-				copy(u.BlockHash[:], blockhash[:])
+				copy(u.BlockHash[:], blockHash[:])
 				u.Height = int32(height)
 				a.UtxoStore.dirty = true
 				a.UtxoStore.Unlock()
@@ -566,10 +575,10 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 			Height:    int32(height),
 			Subscript: pkscript,
 		}
-		copy(u.Out.Hash[:], txhash[:])
-		u.Out.Index = uint32(index)
+		copy(u.Out.Hash[:], txID[:])
+		u.Out.Index = uint32(txOutIndex)
 		copy(u.AddrHash[:], receiverHash)
-		copy(u.BlockHash[:], blockhash[:])
+		copy(u.BlockHash[:], blockHash[:])
 		a.UtxoStore.Lock()
 		a.UtxoStore.s = append(a.UtxoStore.s, u)
 		a.UtxoStore.dirty = true

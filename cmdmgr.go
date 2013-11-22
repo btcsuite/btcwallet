@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
@@ -45,6 +46,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"getnewaddress":         GetNewAddress,
 	"importprivkey":         ImportPrivKey,
 	"listaccounts":          ListAccounts,
+	"listtransactions":      ListTransactions,
 	"sendfrom":              SendFrom,
 	"sendmany":              SendMany,
 	"settxfee":              SetTxFee,
@@ -458,6 +460,59 @@ func ListAccounts(frontend chan []byte, icmd btcjson.Cmd) {
 	ReplySuccess(frontend, cmd.Id(), pairs)
 }
 
+// ListTransactions replies to a listtransactions request by returning a
+// JSON object with details of sent and recevied wallet transactions.
+func ListTransactions(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.ListTransactionsCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Check that the account specified in the request exists.
+	a, ok := accounts.m[cmd.Account]
+	if !ok {
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
+		return
+	}
+
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	bs, err := GetCurBlock()
+	if err != nil {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInternal.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	a.mtx.RLock()
+	a.TxStore.RLock()
+	var txInfoList []map[string]interface{}
+	lastLookupIdx := len(a.TxStore.s) - cmd.Count
+	// Search in reverse order: lookup most recently-added first.
+	for i := len(a.TxStore.s) - 1; i >= cmd.From && i >= lastLookupIdx; i-- {
+		switch e := a.TxStore.s[i].(type) {
+		case *tx.SendTx:
+			infos := e.TxInfo(a.Name(), bs.Height, a.Net())
+			txInfoList = append(txInfoList, infos...)
+
+		case *tx.RecvTx:
+			info := e.TxInfo(a.Name(), bs.Height, a.Net())
+			txInfoList = append(txInfoList, info)
+		}
+	}
+	a.mtx.RUnlock()
+	a.TxStore.RUnlock()
+
+	// Reply with the list of tx information.
+	ReplySuccess(frontend, cmd.Id(), txInfoList)
+}
+
 // SendFrom creates a new transaction spending unspent transaction
 // outputs for a wallet to another payment address.  Leftover inputs
 // not sent to the payment address or a fee for the miner are sent
@@ -668,41 +723,70 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 }
 
 func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
-	result interface{}, err *btcjson.Error, a *Account,
+	result interface{}, e *btcjson.Error, a *Account,
 	txInfo *CreatedTx) bool {
 
-	if err != nil {
-		ReplyError(frontend, icmd.Id(), err)
+	if e != nil {
+		ReplyError(frontend, icmd.Id(), e)
 		return true
 	}
+
+	txIDStr, ok := result.(string)
+	if !ok {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInternal.Code,
+			Message: "Unexpected type from btcd reply",
+		}
+		ReplyError(frontend, icmd.Id(), e)
+		return true
+	}
+	txID, err := btcwire.NewShaHashFromStr(txIDStr)
+	if err != nil {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInternal.Code,
+			Message: "Invalid hash string from btcd reply",
+		}
+		ReplyError(frontend, icmd.Id(), e)
+		return true
+	}
+
+	// Add to transaction store.
+	sendtx := &tx.SendTx{
+		TxID:        *txID,
+		Time:        txInfo.time.Unix(),
+		BlockHeight: -1,
+		Fee:         txInfo.fee,
+		Receivers:   txInfo.outputs,
+	}
+	a.TxStore.Lock()
+	a.TxStore.s = append(a.TxStore.s, sendtx)
+	a.TxStore.dirty = true
+	a.TxStore.Unlock()
 
 	// Remove previous unspent outputs now spent by the tx.
 	a.UtxoStore.Lock()
 	modified := a.UtxoStore.s.Remove(txInfo.inputs)
+	a.UtxoStore.dirty = a.UtxoStore.dirty || modified
 
 	// Add unconfirmed change utxo (if any) to UtxoStore.
 	if txInfo.changeUtxo != nil {
 		a.UtxoStore.s = append(a.UtxoStore.s, txInfo.changeUtxo)
 		a.ReqSpentUtxoNtfn(txInfo.changeUtxo)
-		modified = true
-	}
-
-	if modified {
 		a.UtxoStore.dirty = true
-		a.UtxoStore.Unlock()
-		if err := a.writeDirtyToDisk(); err != nil {
-			log.Errorf("cannot sync dirty wallet: %v", err)
-		}
-
-		// Notify all frontends of account's new unconfirmed and
-		// confirmed balance.
-		confirmed := a.CalculateBalance(1)
-		unconfirmed := a.CalculateBalance(0) - confirmed
-		NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
-		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
-	} else {
-		a.UtxoStore.Unlock()
 	}
+	a.UtxoStore.Unlock()
+
+	// Disk sync tx and utxo stores.
+	if err := a.writeDirtyToDisk(); err != nil {
+		log.Errorf("cannot sync dirty wallet: %v", err)
+	}
+
+	// Notify all frontends of account's new unconfirmed and
+	// confirmed balance.
+	confirmed := a.CalculateBalance(1)
+	unconfirmed := a.CalculateBalance(0) - confirmed
+	NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
+	NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
 
 	// btcd cannot be trusted to successfully relay the tx to the
 	// Bitcoin network.  Even if this succeeds, the rawtx must be
@@ -713,7 +797,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	// Add hex string of raw tx to sent tx pool.  If btcd disconnects
 	// and is reconnected, these txs are resent.
 	UnminedTxs.Lock()
-	UnminedTxs.m[TXID(result.(string))] = txInfo
+	UnminedTxs.m[TXID(*txID)] = txInfo
 	UnminedTxs.Unlock()
 
 	log.Debugf("successfully sent transaction %v", result)

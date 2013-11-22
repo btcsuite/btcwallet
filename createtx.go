@@ -61,19 +61,22 @@ var TxFee = struct {
 // for change (if any).
 type CreatedTx struct {
 	rawTx      []byte
+	time       time.Time
 	inputs     []*tx.Utxo
+	outputs    []tx.Pair
+	btcout     int64
+	fee        int64
 	changeAddr string
 	changeUtxo *tx.Utxo
 }
 
 // TXID is a transaction hash identifying a transaction.
-type TXID string
+type TXID btcwire.ShaHash
 
 // UnminedTXs holds a map of transaction IDs as keys mapping to a
-// hex string of a raw transaction.  If sending a raw transaction
-// succeeds, the tx is added to this map and checked again after each
-// new block.  If the new block contains a tx, it is removed from
-// this map.  Otherwise, btcwallet will resend the tx to btcd.
+// CreatedTx structure.  If sending a raw transaction succeeds, the
+// tx is added to this map and checked again after each new block.
+// If the new block contains a tx, it is removed from this map.
 var UnminedTxs = struct {
 	sync.Mutex
 	m map[TXID]*CreatedTx
@@ -179,6 +182,10 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 		return nil, err
 	}
 
+	// outputs is a tx.Pair slice representing each output that is created
+	// by the transaction.
+	outputs := make([]tx.Pair, 0, len(pairs)+1)
+
 	// Add outputs to new tx.
 	for addr, amt := range pairs {
 		addr160, _, err := btcutil.DecodeAddress(addr)
@@ -193,6 +200,13 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 		}
 		txout := btcwire.NewTxOut(int64(amt), pkScript)
 		msgtx.AddTxOut(txout)
+
+		// Create amount, address pair and add to outputs.
+		out := tx.Pair{
+			Amount:     amt,
+			PubkeyHash: addr160,
+		}
+		outputs = append(outputs, out)
 	}
 
 	// Check if there are leftover unspent outputs, and return coins back to
@@ -238,6 +252,13 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 			Subscript: pkScript,
 		}
 		copy(changeUtxo.AddrHash[:], changeAddrHash)
+
+		// Add change to outputs.
+		out := tx.Pair{
+			Amount:     int64(change),
+			PubkeyHash: changeAddrHash,
+		}
+		outputs = append(outputs, out)
 	}
 
 	// Selected unspent outputs become new transaction's inputs.
@@ -296,5 +317,15 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 
 	buf := new(bytes.Buffer)
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
-	return &CreatedTx{buf.Bytes(), inputs, changeAddr, changeUtxo}, nil
+	info := &CreatedTx{
+		rawTx:      buf.Bytes(),
+		time:       time.Now(),
+		inputs:     inputs,
+		outputs:    outputs,
+		btcout:     int64(btcout),
+		fee:        fee,
+		changeAddr: changeAddr,
+		changeUtxo: changeUtxo,
+	}
+	return info, nil
 }
