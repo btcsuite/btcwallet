@@ -527,7 +527,7 @@ func NtfnTxMined(n btcws.Notification) {
 		log.Errorf("%v handler: unexpected type", n.Id())
 		return
 	}
-	hash, err := btcwire.NewShaHashFromStr(tmn.Hash)
+	txid, err := btcwire.NewShaHashFromStr(tmn.TxID)
 	if err != nil {
 		log.Errorf("%v handler: invalid hash string", n.Id())
 		return
@@ -535,7 +535,7 @@ func NtfnTxMined(n btcws.Notification) {
 
 	// Remove mined transaction from pool.
 	UnminedTxs.Lock()
-	delete(UnminedTxs.m, TXID(hash[:]))
+	delete(UnminedTxs.m, TXID(txid[:]))
 	UnminedTxs.Unlock()
 }
 
