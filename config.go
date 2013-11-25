@@ -156,15 +156,16 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Load additional config from file.
+	var configFileError error
 	parser := flags.NewParser(&cfg, flags.Default)
-	err = parser.ParseIniFile(preCfg.ConfigFile)
+	err = flags.NewIniParser(parser).ParseFile(preCfg.ConfigFile)
 	if err != nil {
 		if _, ok := err.(*os.PathError); !ok {
 			fmt.Fprintln(os.Stderr, err)
 			parser.WriteHelp(os.Stderr)
 			return nil, nil, err
 		}
-		log.Warnf("%v", err)
+		configFileError = err
 	}
 
 	// Parse command line options again to ensure they take precedence.
@@ -174,6 +175,13 @@ func loadConfig() (*config, []string, error) {
 			parser.WriteHelp(os.Stderr)
 		}
 		return nil, nil, err
+	}
+
+	// Warn about missing config file after the final command line parse
+	// succeeds.  This prevents the warning on help messages and invalid
+	// options.
+	if configFileError != nil {
+		log.Warnf("%v", configFileError)
 	}
 
 	// TODO(jrick): Enable mainnet support again when ready.
