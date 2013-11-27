@@ -727,7 +727,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	txInfo *CreatedTx) bool {
 
 	if e != nil {
-		log.Errorf("Could not send tx: %v", err)
+		log.Errorf("Could not send tx: %v", e.Message)
 		ReplyError(frontend, icmd.Id(), e)
 		return true
 	}
