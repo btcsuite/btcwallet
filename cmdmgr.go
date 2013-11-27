@@ -727,6 +727,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	txInfo *CreatedTx) bool {
 
 	if e != nil {
+		log.Errorf("Could not send tx: %v", err)
 		ReplyError(frontend, icmd.Id(), e)
 		return true
 	}
@@ -800,7 +801,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	UnminedTxs.m[TXID(*txID)] = txInfo
 	UnminedTxs.Unlock()
 
-	log.Debugf("successfully sent transaction %v", result)
+	log.Infof("Successfully sent transaction %v", result)
 	ReplySuccess(frontend, icmd.Id(), result)
 
 	// The comments to be saved differ based on the underlying type
