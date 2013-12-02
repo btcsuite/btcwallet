@@ -17,7 +17,6 @@
 package main
 
 import (
-	"bytes"
 	"code.google.com/p/go.net/websocket"
 	"crypto/tls"
 	"crypto/x509"
@@ -26,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
-	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
@@ -458,38 +456,8 @@ func NtfnBlockConnected(n btcws.Notification) {
 	//
 	// TODO(jrick): send frontend tx notifications once that's
 	// implemented.
-	for _, a := range accounts.m {
-		// The UTXO store will be dirty if it was modified
-		// from a tx notification.
-		if a.UtxoStore.dirty {
-			// Notify all frontends of account's new unconfirmed
-			// and confirmed balance.
-			confirmed := a.CalculateBalance(1)
-			unconfirmed := a.CalculateBalance(0) - confirmed
-			NotifyWalletBalance(frontendNotificationMaster,
-				a.name, confirmed)
-			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster,
-				a.name, unconfirmed)
-		}
 
-		// The account is intentionaly not immediately synced to disk.
-		// If btcd is performing an IBD, writing the wallet file for
-		// each newly-connected block would result in too many
-		// unnecessary disk writes.  The UTXO and transaction stores
-		// could be written, but in the case of btcwallet closing
-		// before writing the dirty wallet, both would have to be
-		// pruned anyways.
-		//
-		// Instead, the wallet is queued to be written to disk at the
-		// next scheduled disk sync.
-		a.mtx.Lock()
-		a.Wallet.SetSyncedWith(bs)
-		a.dirty = true
-		a.mtx.Unlock()
-		dirtyAccounts.Lock()
-		dirtyAccounts.m[a] = true
-		dirtyAccounts.Unlock()
-	}
+	accountstore.BlockNotify(bs)
 
 	// Notify frontends of new blockchain height.
 	NotifyNewBlockChainHeight(frontendNotificationMaster, bcn.Height)
@@ -514,7 +482,7 @@ func NtfnBlockDisconnected(n btcws.Notification) {
 
 	// Rollback Utxo and Tx data stores.
 	go func() {
-		accounts.Rollback(bdn.Height, hash)
+		accountstore.Rollback(bdn.Height, hash)
 	}()
 
 	// Notify frontends of new blockchain height.
@@ -541,31 +509,12 @@ func NtfnTxMined(n btcws.Notification) {
 		return
 	}
 
-	// Lookup tx in store and add block information.
-	accounts.Lock()
-out:
-	for _, a := range accounts.m {
-		a.TxStore.Lock()
-
-		// Search in reverse order, more likely to find it
-		// sooner that way.
-		for i := len(a.TxStore.s) - 1; i >= 0; i-- {
-			sendtx, ok := a.TxStore.s[i].(*tx.SendTx)
-			if ok {
-				if bytes.Equal(txid.Bytes(), sendtx.TxID[:]) {
-					copy(sendtx.BlockHash[:], blockhash.Bytes())
-					sendtx.BlockHeight = tmn.BlockHeight
-					sendtx.BlockIndex = int32(tmn.Index)
-					sendtx.BlockTime = tmn.BlockTime
-					a.TxStore.Unlock()
-					break out
-				}
-			}
-		}
-
-		a.TxStore.Unlock()
+	err = accountstore.RecordMinedTx(txid, blockhash,
+		tmn.BlockHeight, tmn.Index, tmn.BlockTime)
+	if err != nil {
+		log.Errorf("%v handler: %v", n.Id(), err)
+		return
 	}
-	accounts.Unlock()
 
 	// Remove mined transaction from pool.
 	UnminedTxs.Lock()
@@ -748,14 +697,11 @@ func BtcdHandshake(ws *websocket.Conn) error {
 	// since last connection.  If so, rollback and rescan to
 	// catch up.
 
-	for _, a := range accounts.m {
-		a.RescanActiveAddresses()
-	}
+	accountstore.RescanActiveAddresses()
 
 	// Begin tracking wallets against this btcd instance.
-	for _, a := range accounts.m {
-		a.Track()
-	}
+
+	accountstore.Track()
 
 	// (Re)send any unmined transactions to btcd in case of a btcd restart.
 	resendUnminedTxs()

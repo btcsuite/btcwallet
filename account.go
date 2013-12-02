@@ -26,11 +26,11 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
-
-var accounts = NewAccountStore()
 
 // Account is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style wallet (to store
@@ -56,30 +56,20 @@ type Account struct {
 	}
 }
 
-// AccountStore stores all wallets currently being handled by
-// btcwallet.  Wallet are stored in a map with the account name as the
-// key.  A RWMutex is used to protect against incorrect concurrent
-// access.
-type AccountStore struct {
-	sync.Mutex
-	m map[string]*Account
+// Lock locks the underlying wallet for an account.
+func (a *Account) Lock() error {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+
+	return a.Wallet.Lock()
 }
 
-// NewAccountStore returns an initialized and empty AccountStore.
-func NewAccountStore() *AccountStore {
-	return &AccountStore{
-		m: make(map[string]*Account),
-	}
-}
+// Unlock unlocks the underlying wallet for an account.
+func (a *Account) Unlock(passphrase []byte, timeout int64) error {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
 
-// Rollback rolls back each Account saved in the store.
-//
-// TODO(jrick): This must also roll back the UTXO and TX stores, and notify
-// all wallets of new account balances.
-func (s *AccountStore) Rollback(height int32, hash *btcwire.ShaHash) {
-	for _, a := range s.m {
-		a.Rollback(height, hash)
-	}
+	return a.Wallet.Unlock(passphrase)
 }
 
 // Rollback reverts each stored Account to a state before the block
@@ -129,6 +119,40 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
 }
 
+// ListTransactions returns a slice of maps with details about a recorded
+// transaction.  This is intended to be used for listtransactions RPC
+// replies.
+func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, error) {
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	var txInfoList []map[string]interface{}
+	a.mtx.RLock()
+	a.TxStore.RLock()
+
+	lastLookupIdx := len(a.TxStore.s) - count
+	// Search in reverse order: lookup most recently-added first.
+	for i := len(a.TxStore.s) - 1; i >= from && i >= lastLookupIdx; i-- {
+		switch e := a.TxStore.s[i].(type) {
+		case *tx.SendTx:
+			infos := e.TxInfo(a.name, bs.Height, a.Net())
+			txInfoList = append(txInfoList, infos...)
+
+		case *tx.RecvTx:
+			info := e.TxInfo(a.name, bs.Height, a.Net())
+			txInfoList = append(txInfoList, info)
+		}
+	}
+	a.mtx.RUnlock()
+	a.TxStore.RUnlock()
+
+	return txInfoList, nil
+}
+
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses
 // non-watching addresses in a wallets.
 func (a *Account) DumpPrivKeys() ([]string, error) {
@@ -138,8 +162,8 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 	// Iterate over each active address, appending the private
 	// key to privkeys.
 	var privkeys []string
-	for _, addr := range a.GetActiveAddresses() {
-		key, err := a.GetAddressKey(addr.Address)
+	for _, addr := range a.ActiveAddresses() {
+		key, err := a.AddressKey(addr.Address)
 		if err != nil {
 			return nil, err
 		}
@@ -161,14 +185,14 @@ func (a *Account) DumpWIFPrivateKey(address string) (string, error) {
 	defer a.mtx.RUnlock()
 
 	// Get private key from wallet if it exists.
-	key, err := a.GetAddressKey(address)
+	key, err := a.AddressKey(address)
 	if err != nil {
 		return "", err
 	}
 
 	// Get address info.  This is needed to determine whether
 	// the pubkey is compressed or not.
-	info, err := a.GetAddressInfo(address)
+	info, err := a.AddressInfo(address)
 	if err != nil {
 		return "", err
 	}
@@ -177,12 +201,32 @@ func (a *Account) DumpWIFPrivateKey(address string) (string, error) {
 	return btcutil.EncodePrivateKey(key.D.Bytes(), a.Net(), info.Compressed)
 }
 
-// ImportWIFPrivateKey takes a WIF encoded private key and adds it to the
+// ImportPrivKey imports a WIF-encoded private key into an account's wallet.
+// This function is not recommended, as it gives no hints as to when the
+// address first appeared (not just in the blockchain, but since the address
+// was first generated, or made public), and will cause all future rescans to
+// start from the genesis block.
+func (a *Account) ImportPrivKey(wif string, rescan bool) error {
+	bs := &wallet.BlockStamp{}
+	addr, err := a.ImportWIFPrivateKey(wif, bs)
+	if err != nil {
+		return err
+	}
+
+	if rescan {
+		addrs := map[string]struct{}{
+			addr: struct{}{},
+		}
+
+		a.RescanAddresses(bs.Height, addrs)
+	}
+	return nil
+}
+
+// ImportWIFPrivateKey takes a WIF-encoded private key and adds it to the
 // wallet.  If the import is successful, the payment address string is
 // returned.
-func (a *Account) ImportWIFPrivateKey(wif, label string,
-	bs *wallet.BlockStamp) (string, error) {
-
+func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string, error) {
 	// Decode WIF private key and perform sanity checking.
 	privkey, net, compressed, err := btcutil.DecodePrivateKey(wif)
 	if err != nil {
@@ -229,7 +273,7 @@ func (a *Account) Track() {
 	replyHandlers.Lock()
 	replyHandlers.m[n] = a.newBlockTxOutHandler
 	replyHandlers.Unlock()
-	for _, addr := range a.GetActiveAddresses() {
+	for _, addr := range a.ActiveAddresses() {
 		a.ReqNewTxsForAddress(addr.Address)
 	}
 
@@ -254,6 +298,9 @@ func (a *Account) Track() {
 // it would have missed notifications as blocks are attached to the
 // main chain.
 func (a *Account) RescanActiveAddresses() {
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
+
 	// Determine the block to begin the rescan from.
 	beginBlock := int32(0)
 	if a.fullRescan {
@@ -335,7 +382,7 @@ func (a *Account) SortedActivePaymentAddresses() []string {
 	a.mtx.RLock()
 	defer a.mtx.RUnlock()
 
-	infos := a.GetSortedActiveAddresses()
+	infos := a.SortedActiveAddresses()
 	addrs := make([]string, len(infos))
 
 	for i, addr := range infos {
@@ -351,7 +398,7 @@ func (a *Account) ActivePaymentAddresses() map[string]struct{} {
 	a.mtx.RLock()
 	defer a.mtx.RUnlock()
 
-	infos := a.GetActiveAddresses()
+	infos := a.ActiveAddresses()
 	addrs := make(map[string]struct{}, len(infos))
 
 	for _, info := range infos {
@@ -359,6 +406,35 @@ func (a *Account) ActivePaymentAddresses() map[string]struct{} {
 	}
 
 	return addrs
+}
+
+// NewAddress returns a new payment address for an account.
+func (a *Account) NewAddress() (string, error) {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+
+	// Get current block's height and hash.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return "", err
+	}
+
+	// Get next address from wallet.
+	addr, err := a.NextChainedAddress(&bs)
+	if err != nil {
+		return "", err
+	}
+
+	// Write updated wallet to disk.
+	a.dirty = true
+	if err = a.writeDirtyToDisk(); err != nil {
+		log.Errorf("cannot sync dirty wallet: %v", err)
+	}
+
+	// Request updates from btcd for new transactions sent to this address.
+	a.ReqNewTxsForAddress(addr)
+
+	return addr, nil
 }
 
 // ReqNewTxsForAddress sends a message to btcd to request tx updates
@@ -591,4 +667,38 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 
 	// Never remove this handler.
 	return false
+}
+
+// accountdir returns the directory path which holds an account's wallet, utxo,
+// and tx files.
+func (a *Account) accountdir(cfg *config) string {
+	var wname string
+	if a.name == "" {
+		wname = "btcwallet"
+	} else {
+		wname = fmt.Sprintf("btcwallet-%s", a.name)
+	}
+
+	return filepath.Join(cfg.DataDir, wname)
+}
+
+// checkCreateAccountDir checks that path exists and is a directory.
+// If path does not exist, it is created.
+func (a *Account) checkCreateAccountDir(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Attempt data directory creation
+			if err = os.MkdirAll(path, 0700); err != nil {
+				return fmt.Errorf("cannot create account directory: %s", err)
+			}
+		} else {
+			return fmt.Errorf("error checking account directory: %s", err)
+		}
+	} else {
+		if !fi.IsDir() {
+			return fmt.Errorf("path '%s' is not a directory", cfg.DataDir)
+		}
+	}
+	return nil
 }

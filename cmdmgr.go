@@ -177,42 +177,23 @@ func DumpPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Iterate over all accounts, returning the key if it is found
-	// in any wallet.
-	for _, a := range accounts.m {
-		switch key, err := a.DumpWIFPrivateKey(cmd.Address); err {
-		case wallet.ErrAddressNotFound:
-			// Move on to the next account.
-			continue
+	switch key, err := accountstore.DumpWIFPrivateKey(cmd.Address); err {
+	case nil:
+		// Key was found.
+		ReplySuccess(frontend, cmd.Id(), key)
 
-		case wallet.ErrWalletLocked:
-			// Address was found, but the private key isn't
-			// accessible.
-			ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
-			return
+	case wallet.ErrWalletLocked:
+		// Address was found, but the private key isn't
+		// accessible.
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
 
-		case nil:
-			// Key was found.
-			ReplySuccess(frontend, cmd.Id(), key)
-			return
-
-		default: // all other non-nil errors
-			e := &btcjson.Error{
-				Code:    btcjson.ErrWallet.Code,
-				Message: err.Error(),
-			}
-			ReplyError(frontend, cmd.Id(), e)
-			return
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
 		}
+		ReplyError(frontend, cmd.Id(), e)
 	}
-
-	// If this is reached, all accounts have been checked, but none
-	// have the address.
-	e := &btcjson.Error{
-		Code:    btcjson.ErrWallet.Code,
-		Message: "Address does not refer to a key",
-	}
-	ReplyError(frontend, cmd.Id(), e)
 }
 
 // DumpWallet replies to a dumpwallet request with all private keys
@@ -226,30 +207,22 @@ func DumpWallet(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Iterate over all accounts, appending the private keys
-	// for each.
-	var keys []string
-	for _, a := range accounts.m {
-		switch walletKeys, err := a.DumpPrivKeys(); err {
-		case wallet.ErrWalletLocked:
-			ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
-			return
+	switch keys, err := accountstore.DumpKeys(); err {
+	case nil:
+		// Reply with sorted WIF encoded private keys
+		ReplySuccess(frontend, cmd.Id(), keys)
 
-		case nil:
-			keys = append(keys, walletKeys...)
+	case wallet.ErrWalletLocked:
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
 
-		default: // any other non-nil error
-			e := &btcjson.Error{
-				Code:    btcjson.ErrWallet.Code,
-				Message: err.Error(),
-			}
-			ReplyError(frontend, cmd.Id(), e)
-			return
+	default: // any other non-nil error
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
 		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
 	}
-
-	// Reply with sorted WIF encoded private keys
-	ReplySuccess(frontend, cmd.Id(), keys)
 }
 
 // GetAddressesByAccount replies to a getaddressesbyaccount request with
@@ -263,16 +236,22 @@ func GetAddressesByAccount(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Check that the account specified in the request exists.
-	a, ok := accounts.m[cmd.Account]
-	if !ok {
+	switch a, err := accountstore.Account(cmd.Account); err {
+	case nil:
+		// Reply with sorted active payment addresses.
+		ReplySuccess(frontend, cmd.Id(), a.SortedActivePaymentAddresses())
+
+	case ErrAcctNotExist:
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
-		return
-	}
 
-	// Reply with sorted active payment addresses.
-	ReplySuccess(frontend, cmd.Id(), a.SortedActivePaymentAddresses())
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+	}
 }
 
 // GetBalance replies to a getbalance request with the balance for an
@@ -286,16 +265,15 @@ func GetBalance(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Check that the account specified in the request exists.
-	a, ok := accounts.m[cmd.Account]
-	if !ok {
+	balance, err := accountstore.CalculateBalance(cmd.Account, cmd.MinConf)
+	if err != nil {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
 	}
 
 	// Reply with calculated balance.
-	ReplySuccess(frontend, cmd.Id(), a.CalculateBalance(cmd.MinConf))
+	ReplySuccess(frontend, cmd.Id(), balance)
 }
 
 // GetBalances replies to a getbalances extension request by notifying
@@ -314,30 +292,19 @@ func ImportPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Check that the account specified in the requests exists.
-	// Yes, Label is the account name.
-	a, ok := accounts.m[cmd.Label]
-	if !ok {
+	// Get the acount included in the request. Yes, Label is the
+	// account name...
+	a, err := accountstore.Account(cmd.Label)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
-	}
 
-	// Create a blockstamp for when this address first appeared.
-	// Because the importprivatekey RPC call does not allow
-	// specifying when the address first appeared, we must make
-	// a worst case guess.
-	bs := &wallet.BlockStamp{Height: 0}
-
-	// Attempt importing the private key, replying with an appropiate
-	// error if the import was unsuccesful.
-	addr, err := a.ImportWIFPrivateKey(cmd.PrivKey, cmd.Label, bs)
-	switch {
-	case err == wallet.ErrWalletLocked:
-		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
-		return
-
-	case err != nil:
+	default:
 		e := &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
 			Message: err.Error(),
@@ -346,29 +313,32 @@ func ImportPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	if cmd.Rescan {
-		addrs := map[string]struct{}{
-			addr: struct{}{},
-		}
-		a.RescanAddresses(bs.Height, addrs)
-	}
+	// Import the private key, handling any errors.
+	switch err := a.ImportPrivKey(cmd.PrivKey, cmd.Rescan); err {
+	case nil:
+		// If the import was successful, reply with nil.
+		ReplySuccess(frontend, cmd.Id(), nil)
 
-	// If the import was successful, reply with nil.
-	ReplySuccess(frontend, cmd.Id(), nil)
+	case wallet.ErrWalletLocked:
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletUnlockNeeded)
+
+	default:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+	}
 }
 
 // NotifyBalances notifies an attached frontend of the current confirmed
 // and unconfirmed account balances.
 //
-// TODO(jrick): Switch this to return a JSON object (map) of all accounts
-// and their balances, instead of separate notifications for each account.
+// TODO(jrick): Switch this to return a single JSON object
+// (map[string]interface{}) of all accounts and their balances, instead of
+// separate notifications for each account.
 func NotifyBalances(frontend chan []byte) {
-	for _, a := range accounts.m {
-		balance := a.CalculateBalance(1)
-		unconfirmed := a.CalculateBalance(0) - balance
-		NotifyWalletBalance(frontend, a.name, balance)
-		NotifyWalletBalanceUnconfirmed(frontend, a.name, unconfirmed)
-	}
+	accountstore.NotifyBalances(frontend)
 }
 
 // GetNewAddress responds to a getnewaddress request by getting a new
@@ -382,35 +352,25 @@ func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Check that the account specified in the request exists.
-	a, ok := accounts.m[cmd.Account]
-	if !ok {
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
-	}
 
-	// Get current block's height and hash.
-	bs, err := GetCurBlock()
-	if err != nil {
+	case ErrBtcdDisconnected:
 		e := &btcjson.Error{
 			Code:    btcjson.ErrInternal.Code,
 			Message: "btcd disconnected",
 		}
 		ReplyError(frontend, cmd.Id(), e)
 		return
-	}
 
-	// Get next address from wallet.
-	addr, err := a.NextChainedAddress(&bs)
-	if err == wallet.ErrWalletLocked {
-		// The wallet is locked error may be sent if the keypool needs
-		// to be refilled, but the wallet is currently in a locked
-		// state.  Notify the frontend that an unlock is needed to
-		// refill the keypool.
-		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletKeypoolRanOut)
-		return
-	} else if err != nil {
+	default: // all other non-nil errors
 		e := &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
 			Message: err.Error(),
@@ -418,26 +378,27 @@ func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 		ReplyError(frontend, cmd.Id(), e)
 		return
 	}
-	if err != nil {
-		// TODO(jrick): generate new addresses if the address pool is
-		// empty.
-		e := btcjson.ErrInternal
-		e.Message = fmt.Sprintf("New address generation not implemented yet")
-		ReplyError(frontend, cmd.Id(), &e)
-		return
+
+	addr, err := a.NewAddress()
+	switch err {
+	case nil:
+		// Reply with the new payment address string.
+		ReplySuccess(frontend, cmd.Id(), addr)
+
+	case wallet.ErrWalletLocked:
+		// The wallet is locked error may be sent if the keypool needs
+		// to be refilled, but the wallet is currently in a locked
+		// state.  Notify the frontend that an unlock is needed to
+		// refill the keypool.
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletKeypoolRanOut)
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
 	}
-
-	// Write updated wallet to disk.
-	a.dirty = true
-	if err = a.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
-	}
-
-	// Request updates from btcd for new transactions sent to this address.
-	a.ReqNewTxsForAddress(addr)
-
-	// Reply with the new payment address string.
-	ReplySuccess(frontend, cmd.Id(), addr)
 }
 
 // ListAccounts replies to a listaccounts request by returning a JSON
@@ -450,11 +411,7 @@ func ListAccounts(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Create and fill a map of account names and their balances.
-	pairs := make(map[string]float64)
-	for aname, a := range accounts.m {
-		pairs[aname] = a.CalculateBalance(cmd.MinConf)
-	}
+	pairs := accountstore.ListAccounts(cmd.MinConf)
 
 	// Reply with the map.  This will be marshaled into a JSON object.
 	ReplySuccess(frontend, cmd.Id(), pairs)
@@ -470,47 +427,44 @@ func ListTransactions(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Check that the account specified in the request exists.
-	a, ok := accounts.m[cmd.Account]
-	if !ok {
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
-	}
 
-	// Get current block.  The block height used for calculating
-	// the number of tx confirmations.
-	bs, err := GetCurBlock()
-	if err != nil {
+	default: // all other non-nil errors
 		e := &btcjson.Error{
-			Code:    btcjson.ErrInternal.Code,
+			Code:    btcjson.ErrWallet.Code,
 			Message: err.Error(),
 		}
 		ReplyError(frontend, cmd.Id(), e)
 		return
 	}
 
-	a.mtx.RLock()
-	a.TxStore.RLock()
-	var txInfoList []map[string]interface{}
-	lastLookupIdx := len(a.TxStore.s) - cmd.Count
-	// Search in reverse order: lookup most recently-added first.
-	for i := len(a.TxStore.s) - 1; i >= cmd.From && i >= lastLookupIdx; i-- {
-		switch e := a.TxStore.s[i].(type) {
-		case *tx.SendTx:
-			infos := e.TxInfo(a.Name(), bs.Height, a.Net())
-			txInfoList = append(txInfoList, infos...)
+	switch txList, err := a.ListTransactions(cmd.From, cmd.Count); err {
+	case nil:
+		// Reply with the list of tx information.
+		ReplySuccess(frontend, cmd.Id(), txList)
 
-		case *tx.RecvTx:
-			info := e.TxInfo(a.Name(), bs.Height, a.Net())
-			txInfoList = append(txInfoList, info)
+	case ErrBtcdDisconnected:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInternal.Code,
+			Message: "btcd disconnected",
 		}
-	}
-	a.mtx.RUnlock()
-	a.TxStore.RUnlock()
+		ReplyError(frontend, cmd.Id(), e)
 
-	// Reply with the list of tx information.
-	ReplySuccess(frontend, cmd.Id(), txInfoList)
+	default:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+	}
 }
 
 // SendFrom creates a new transaction spending unspent transaction
@@ -545,8 +499,8 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	a, ok := accounts.m[cmd.FromAccount]
-	if !ok {
+	a, err := accountstore.Account(cmd.FromAccount)
+	if err != nil {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
@@ -648,8 +602,8 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Check that the account specified in the request exists.
-	a, ok := accounts.m[cmd.FromAccount]
-	if !ok {
+	a, err := accountstore.Account(cmd.FromAccount)
+	if err != nil {
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
@@ -868,76 +822,27 @@ func CreateEncryptedWallet(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Grab the account map lock and defer the unlock.  If an
-	// account is successfully created, it will be added to the
-	// map while the lock is held.
-	accounts.Lock()
-	defer accounts.Unlock()
+	err := accountstore.CreateEncryptedWallet(cmd.Account, cmd.Description,
+		[]byte(cmd.Passphrase))
+	switch err {
+	case nil:
+		// A nil reply is sent upon successful wallet creation.
+		ReplySuccess(frontend, cmd.Id(), nil)
 
-	// Does this wallet already exist?
-	if _, ok = accounts.m[cmd.Account]; ok {
+	case ErrAcctNotExist:
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
-		return
-	}
 
-	// Decide which Bitcoin network must be used.
-	var net btcwire.BitcoinNet
-	if cfg.MainNet {
-		net = btcwire.MainNet
-	} else {
-		net = btcwire.TestNet3
-	}
-
-	// Get current block's height and hash.
-	bs, err := GetCurBlock()
-	if err != nil {
+	case ErrBtcdDisconnected:
 		e := &btcjson.Error{
 			Code:    btcjson.ErrInternal.Code,
 			Message: "btcd disconnected",
 		}
 		ReplyError(frontend, cmd.Id(), e)
-		return
-	}
 
-	// Create new wallet in memory.
-	wlt, err := wallet.NewWallet(cmd.Account, cmd.Description,
-		[]byte(cmd.Passphrase), net, &bs)
-	if err != nil {
-		log.Error("Error creating wallet: " + err.Error())
+	default:
 		ReplyError(frontend, cmd.Id(), &btcjson.ErrInternal)
-		return
 	}
-
-	// Create new account with the wallet.  A new JSON ID is set for
-	// transaction notifications.
-	a := &Account{
-		Wallet:           wlt,
-		name:             cmd.Account,
-		dirty:            true,
-		NewBlockTxJSONID: <-NewJSONID,
-	}
-
-	// Begin tracking account against a connected btcd.
-	//
-	// TODO(jrick): this should *only* happen if btcd is connected.
-	a.Track()
-
-	// Save the account in the global account map.  The mutex is
-	// already held at this point, and will be unlocked when this
-	// func returns.
-	accounts.m[cmd.Account] = a
-
-	// Write new wallet to disk.
-	if err := a.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
-	}
-
-	// Notify all frontends of this new account, and its balance.
-	NotifyBalances(frontendNotificationMaster)
-
-	// A nil reply is sent upon successful wallet creation.
-	ReplySuccess(frontend, cmd.Id(), nil)
 }
 
 // WalletIsLocked responds to the walletislocked extension request by
@@ -952,16 +857,31 @@ func WalletIsLocked(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Check that the account specified in the request exists.
-	a, ok := accounts.m[cmd.Account]
-	if !ok {
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
 		return
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
 	}
 
+	a.mtx.RLock()
+	locked := a.Wallet.IsLocked()
+	a.mtx.RUnlock()
+
 	// Reply with true for a locked wallet, and false for unlocked.
-	ReplySuccess(frontend, cmd.Id(), a.IsLocked())
+	ReplySuccess(frontend, cmd.Id(), locked)
 }
 
 // WalletLock responds to walletlock request by locking the wallet,
@@ -971,17 +891,35 @@ func WalletIsLocked(frontend chan []byte, icmd btcjson.Cmd) {
 // with this.  Lock all the wallets, like if all accounts are locked
 // for one bitcoind wallet?
 func WalletLock(frontend chan []byte, icmd btcjson.Cmd) {
-	if a, ok := accounts.m[""]; ok {
-		if err := a.Lock(); err != nil {
-			ReplyError(frontend, icmd.Id(),
-				&btcjson.ErrWalletWrongEncState)
-			return
+	a, err := accountstore.Account("")
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: "default account does not exist",
 		}
+		ReplyError(frontend, icmd.Id(), e)
+		return
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, icmd.Id(), e)
+		return
+	}
+
+	switch err := a.Lock(); err {
+	case nil:
 		ReplySuccess(frontend, icmd.Id(), nil)
-		NotifyWalletLockStateChange("", true)
-	} else {
+
+	default:
 		ReplyError(frontend, icmd.Id(),
-			&btcjson.ErrWalletInvalidAccountName)
+			&btcjson.ErrWalletWrongEncState)
 	}
 }
 
@@ -998,23 +936,45 @@ func WalletPassphrase(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	if a, ok := accounts.m[""]; ok {
-		if err := a.Unlock([]byte(cmd.Passphrase)); err != nil {
-			ReplyError(frontend, cmd.Id(),
-				&btcjson.ErrWalletPassphraseIncorrect)
-			return
+	a, err := accountstore.Account("")
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: "default account does not exist",
 		}
-		// XXX
+		ReplyError(frontend, cmd.Id(), e)
+		return
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	switch err := a.Unlock([]byte(cmd.Passphrase), cmd.Timeout); err {
+	case nil:
 		ReplySuccess(frontend, cmd.Id(), nil)
+
 		NotifyWalletLockStateChange("", false)
-		go func() {
-			time.Sleep(time.Second * time.Duration(int64(cmd.Timeout)))
-			a.Lock()
-			NotifyWalletLockStateChange("", true)
-		}()
-	} else {
+		go func(timeout int64) {
+			time.Sleep(time.Second * time.Duration(timeout))
+			_ = a.Lock()
+		}(cmd.Timeout)
+
+	case ErrAcctNotExist:
 		ReplyError(frontend, cmd.Id(),
 			&btcjson.ErrWalletInvalidAccountName)
+
+	default:
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletPassphraseIncorrect)
 	}
 }
 

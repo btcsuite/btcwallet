@@ -69,8 +69,8 @@ func (w *Account) writeDirtyToDisk() error {
 	// for validity, and moved to replace the main file.
 	timeStr := fmt.Sprintf("%v", time.Now().Unix())
 
-	adir := accountdir(cfg, w.name)
-	if err := checkCreateAccountDir(adir); err != nil {
+	adir := w.accountdir(cfg)
+	if err := w.checkCreateAccountDir(adir); err != nil {
 		return err
 	}
 

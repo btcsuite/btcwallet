@@ -270,13 +270,13 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 		if err != nil {
 			return nil, err
 		}
-		privkey, err := w.GetAddressKey(addrstr)
+		privkey, err := w.AddressKey(addrstr)
 		if err == wallet.ErrWalletLocked {
 			return nil, wallet.ErrWalletLocked
 		} else if err != nil {
 			return nil, fmt.Errorf("cannot get address key: %v", err)
 		}
-		ai, err := w.GetAddressInfo(addrstr)
+		ai, err := w.AddressInfo(addrstr)
 		if err != nil {
 			return nil, fmt.Errorf("cannot get address info: %v", err)
 		}

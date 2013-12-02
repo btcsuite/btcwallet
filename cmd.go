@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
@@ -30,7 +29,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -61,117 +59,6 @@ var (
 		},
 	}
 )
-
-// accountdir returns the directory path which holds an account's wallet, utxo,
-// and tx files.
-func accountdir(cfg *config, account string) string {
-	var wname string
-	if account == "" {
-		wname = "btcwallet"
-	} else {
-		wname = fmt.Sprintf("btcwallet-%s", account)
-	}
-
-	return filepath.Join(cfg.DataDir, wname)
-}
-
-// checkCreateAccountDir checks that path exists and is a directory.
-// If path does not exist, it is created.
-func checkCreateAccountDir(path string) error {
-	fi, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Attempt data directory creation
-			if err = os.MkdirAll(path, 0700); err != nil {
-				return fmt.Errorf("cannot create account directory: %s", err)
-			}
-		} else {
-			return fmt.Errorf("error checking account directory: %s", err)
-		}
-	} else {
-		if !fi.IsDir() {
-			return fmt.Errorf("path '%s' is not a directory", cfg.DataDir)
-		}
-	}
-	return nil
-}
-
-// OpenAccount opens an account described by account in the data
-// directory specified by cfg.  If the wallet does not exist, ErrNoWallet
-// is returned as an error.
-//
-// Wallets opened from this function are not set to track against a
-// btcd connection.
-func OpenAccount(cfg *config, account string) (*Account, error) {
-	var finalErr error
-
-	adir := accountdir(cfg, account)
-	if err := checkCreateAccountDir(adir); err != nil {
-		return nil, err
-	}
-
-	wfilepath := filepath.Join(adir, "wallet.bin")
-	utxofilepath := filepath.Join(adir, "utxo.bin")
-	txfilepath := filepath.Join(adir, "tx.bin")
-	var wfile, utxofile, txfile *os.File
-
-	// Read wallet file.
-	wfile, err := os.Open(wfilepath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Must create and save wallet first.
-			return nil, ErrNoWallet
-		}
-		return nil, fmt.Errorf("cannot open wallet file: %s", err)
-	}
-	defer wfile.Close()
-
-	wlt := new(wallet.Wallet)
-	if _, err = wlt.ReadFrom(wfile); err != nil {
-		return nil, fmt.Errorf("cannot read wallet: %s", err)
-	}
-
-	a := &Account{
-		Wallet: wlt,
-		name:   account,
-	}
-
-	// Read tx file.  If this fails, return a ErrNoTxs error and let
-	// the caller decide if a rescan is necessary.
-	if txfile, err = os.Open(txfilepath); err != nil {
-		log.Errorf("cannot open tx file: %s", err)
-		// This is not a error we should immediately return with,
-		// but other errors can be more important, so only return
-		// this if none of the others are hit.
-		finalErr = ErrNoTxs
-	} else {
-		defer txfile.Close()
-		var txs tx.TxStore
-		if _, err = txs.ReadFrom(txfile); err != nil {
-			log.Errorf("cannot read tx file: %s", err)
-			finalErr = ErrNoTxs
-		} else {
-			a.TxStore.s = txs
-		}
-	}
-
-	// Read utxo file.  If this fails, return a ErrNoUtxos error so a
-	// rescan can be done since the wallet creation block.
-	var utxos tx.UtxoStore
-	if utxofile, err = os.Open(utxofilepath); err != nil {
-		log.Errorf("cannot open utxo file: %s", err)
-		return a, ErrNoUtxos
-	}
-	defer utxofile.Close()
-	if _, err = utxos.ReadFrom(utxofile); err != nil {
-		log.Errorf("cannot read utxo file: %s", err)
-		finalErr = ErrNoUtxos
-	} else {
-		a.UtxoStore.s = utxos
-	}
-
-	return a, finalErr
-}
 
 // GetCurBlock returns the blockchain height and SHA hash of the most
 // recently seen block.  If no blocks have been seen since btcd has
@@ -318,31 +205,10 @@ func main() {
 	}
 
 	// Open default account
-	a, err := OpenAccount(cfg, "")
-	switch err {
-	case ErrNoTxs:
-		// Do nothing special for now.  This will be implemented when
-		// the tx history file is properly written.
-		accounts.Lock()
-		accounts.m[""] = a
-		accounts.Unlock()
-
-	case ErrNoUtxos:
-		// Add wallet, but mark wallet as needing a full rescan since
-		// the wallet creation block.  This will take place when btcd
-		// connects.
-		accounts.Lock()
-		accounts.m[""] = a
-		accounts.Unlock()
-		a.fullRescan = true
-
-	case nil:
-		accounts.Lock()
-		accounts.m[""] = a
-		accounts.Unlock()
-
-	default:
-		log.Warnf("cannot open wallet: %v", err)
+	err = accountstore.OpenAccount("", cfg)
+	if err != nil {
+		log.Errorf("cannot open account: %v", err)
+		os.Exit(1)
 	}
 
 	// Read CA file to verify a btcd TLS connection.

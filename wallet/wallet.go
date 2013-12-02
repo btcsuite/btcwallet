@@ -791,12 +791,12 @@ func (w *Wallet) addrHashForAddress(addr string) ([]byte, error) {
 	return addr160, nil
 }
 
-// GetAddressKey returns the private key for a payment address stored
+// AddressKey returns the private key for a payment address stored
 // in a wallet.  This can fail if the payment address is for a different
 // Bitcoin network than what this wallet uses, the address is not
 // contained in the wallet, the address does not include a public and
 // private key, or if the wallet is locked.
-func (w *Wallet) GetAddressKey(addr string) (key *ecdsa.PrivateKey, err error) {
+func (w *Wallet) AddressKey(addr string) (key *ecdsa.PrivateKey, err error) {
 	// Get address hash for payment address string.
 	addr160, err := w.addrHashForAddress(addr)
 	if err != nil {
@@ -849,8 +849,8 @@ func (w *Wallet) GetAddressKey(addr string) (key *ecdsa.PrivateKey, err error) {
 	}, nil
 }
 
-// GetAddressInfo returns an AddressInfo for an address in a wallet.
-func (w *Wallet) GetAddressInfo(addr string) (*AddressInfo, error) {
+// AddressInfo returns an AddressInfo structure for an address in a wallet.
+func (w *Wallet) AddressInfo(addr string) (*AddressInfo, error) {
 	// Get address hash for addr.
 	addr160, err := w.addrHashForAddress(addr)
 	if err != nil {
@@ -969,11 +969,11 @@ type AddressInfo struct {
 	Pubkey     string
 }
 
-// GetSortedActiveAddresses returns all wallet addresses that have been
+// SortedActiveAddresses returns all wallet addresses that have been
 // requested to be generated.  These do not include unused addresses in
 // the key pool.  Use this when ordered addresses are needed.  Otherwise,
-// GetActiveAddresses is preferred.
-func (w *Wallet) GetSortedActiveAddresses() []*AddressInfo {
+// ActiveAddresses is preferred.
+func (w *Wallet) SortedActiveAddresses() []*AddressInfo {
 	addrs := make([]*AddressInfo, 0,
 		w.highestUsed+int64(len(w.importedAddrs))+1)
 	for i := int64(rootKeyChainIdx); i <= w.highestUsed; i++ {
@@ -996,10 +996,10 @@ func (w *Wallet) GetSortedActiveAddresses() []*AddressInfo {
 	return addrs
 }
 
-// GetActiveAddresses returns a map between active payment addresses
+// ActiveAddresses returns a map between active payment addresses
 // and their full info.  These do not include unused addresses in the
-// key pool.  If addresses must be sorted, use GetSortedActiveAddresses.
-func (w *Wallet) GetActiveAddresses() map[string]*AddressInfo {
+// key pool.  If addresses must be sorted, use SortedActiveAddresses.
+func (w *Wallet) ActiveAddresses() map[string]*AddressInfo {
 	addrs := make(map[string]*AddressInfo)
 	for i := int64(rootKeyChainIdx); i <= w.highestUsed; i++ {
 		addr160, ok := w.chainIdxMap[i]
