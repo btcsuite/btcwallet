@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
@@ -433,105 +432,4 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 		log.Warnf("cannot open wallet: %v", err)
 	}
 	return nil
-}
-
-func (store *AccountStore) handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
-	result interface{}, e *btcjson.Error, a *Account,
-	txInfo *CreatedTx) bool {
-
-	store.Lock()
-	defer store.Unlock()
-
-	if e != nil {
-		ReplyError(frontend, icmd.Id(), e)
-		return true
-	}
-
-	txIDStr, ok := result.(string)
-	if !ok {
-		e := &btcjson.Error{
-			Code:    btcjson.ErrInternal.Code,
-			Message: "Unexpected type from btcd reply",
-		}
-		ReplyError(frontend, icmd.Id(), e)
-		return true
-	}
-	txID, err := btcwire.NewShaHashFromStr(txIDStr)
-	if err != nil {
-		e := &btcjson.Error{
-			Code:    btcjson.ErrInternal.Code,
-			Message: "Invalid hash string from btcd reply",
-		}
-		ReplyError(frontend, icmd.Id(), e)
-		return true
-	}
-
-	// Add to transaction store.
-	sendtx := &tx.SendTx{
-		TxID:        *txID,
-		Time:        txInfo.time.Unix(),
-		BlockHeight: -1,
-		Fee:         txInfo.fee,
-		Receivers:   txInfo.outputs,
-	}
-	a.TxStore.Lock()
-	a.TxStore.s = append(a.TxStore.s, sendtx)
-	a.TxStore.dirty = true
-	a.TxStore.Unlock()
-
-	// Remove previous unspent outputs now spent by the tx.
-	a.UtxoStore.Lock()
-	modified := a.UtxoStore.s.Remove(txInfo.inputs)
-	a.UtxoStore.dirty = a.UtxoStore.dirty || modified
-
-	// Add unconfirmed change utxo (if any) to UtxoStore.
-	if txInfo.changeUtxo != nil {
-		a.UtxoStore.s = append(a.UtxoStore.s, txInfo.changeUtxo)
-		a.ReqSpentUtxoNtfn(txInfo.changeUtxo)
-		a.UtxoStore.dirty = true
-	}
-	a.UtxoStore.Unlock()
-
-	// Disk sync tx and utxo stores.
-	if err := a.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
-	}
-
-	// Notify all frontends of account's new unconfirmed and
-	// confirmed balance.
-	confirmed := a.CalculateBalance(1)
-	unconfirmed := a.CalculateBalance(0) - confirmed
-	NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
-	NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
-
-	// btcd cannot be trusted to successfully relay the tx to the
-	// Bitcoin network.  Even if this succeeds, the rawtx must be
-	// saved and checked for an appearence in a later block. btcd
-	// will make a best try effort, but ultimately it's btcwallet's
-	// responsibility.
-	//
-	// Add hex string of raw tx to sent tx pool.  If btcd disconnects
-	// and is reconnected, these txs are resent.
-	UnminedTxs.Lock()
-	UnminedTxs.m[TXID(*txID)] = txInfo
-	UnminedTxs.Unlock()
-	log.Infof("Successfully sent transaction %v", result)
-	ReplySuccess(frontend, icmd.Id(), result)
-
-	// The comments to be saved differ based on the underlying type
-	// of the cmd, so switch on the type to check whether it is a
-	// SendFromCmd or SendManyCmd.
-	//
-	// TODO(jrick): If message succeeded in being sent, save the
-	// transaction details with comments.
-	switch cmd := icmd.(type) {
-	case *btcjson.SendFromCmd:
-		_ = cmd.Comment
-		_ = cmd.CommentTo
-
-	case *btcjson.SendManyCmd:
-		_ = cmd.Comment
-	}
-
-	return true
 }

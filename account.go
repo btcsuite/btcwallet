@@ -153,6 +153,39 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 	return txInfoList, nil
 }
 
+// ListAllTransactions returns a slice of maps with details about a recorded
+// transaction.  This is intended to be used for listalltransactions RPC
+// replies.
+func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	var txInfoList []map[string]interface{}
+	a.mtx.RLock()
+	a.TxStore.RLock()
+
+	// Search in reverse order: lookup most recently-added first.
+	for i := len(a.TxStore.s) - 1; i >= 0; i-- {
+		switch e := a.TxStore.s[i].(type) {
+		case *tx.SendTx:
+			infos := e.TxInfo(a.name, bs.Height, a.Net())
+			txInfoList = append(txInfoList, infos...)
+
+		case *tx.RecvTx:
+			info := e.TxInfo(a.name, bs.Height, a.Net())
+			txInfoList = append(txInfoList, info)
+		}
+	}
+	a.mtx.RUnlock()
+	a.TxStore.RUnlock()
+
+	return txInfoList, nil
+}
+
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses
 // non-watching addresses in a wallets.
 func (a *Account) DumpPrivKeys() ([]string, error) {
@@ -617,6 +650,10 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 	a.TxStore.s = append(txs, t)
 	a.TxStore.dirty = true
 	a.TxStore.Unlock()
+
+	// Notify frontends of new tx.
+	NotifyNewTxDetails(frontendNotificationMaster, a.Name(), t.TxInfo(a.Name(),
+		int32(height), a.Wallet.Net()))
 
 	if !spent {
 		// First, iterate through all stored utxos.  If an unconfirmed utxo

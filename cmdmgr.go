@@ -59,8 +59,9 @@ var rpcHandlers = map[string]cmdHandler{
 
 // Extensions exclusive to websocket connections.
 var wsHandlers = map[string]cmdHandler{
-	"getbalances":    GetBalances,
-	"walletislocked": WalletIsLocked,
+	"getbalances":         GetBalances,
+	"listalltransactions": ListAllTransactions,
+	"walletislocked":      WalletIsLocked,
 }
 
 // ProcessRequest checks the requests sent from a frontend.  If the
@@ -417,8 +418,9 @@ func ListAccounts(frontend chan []byte, icmd btcjson.Cmd) {
 	ReplySuccess(frontend, cmd.Id(), pairs)
 }
 
-// ListTransactions replies to a listtransactions request by returning a
-// JSON object with details of sent and recevied wallet transactions.
+// ListTransactions replies to a listtransactions request by returning an
+// array of JSON objects with details of sent and recevied wallet
+// transactions.
 func ListTransactions(frontend chan []byte, icmd btcjson.Cmd) {
 	// Type assert icmd to access parameters.
 	cmd, ok := icmd.(*btcjson.ListTransactionsCmd)
@@ -447,6 +449,59 @@ func ListTransactions(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	switch txList, err := a.ListTransactions(cmd.From, cmd.Count); err {
+	case nil:
+		// Reply with the list of tx information.
+		ReplySuccess(frontend, cmd.Id(), txList)
+
+	case ErrBtcdDisconnected:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInternal.Code,
+			Message: "btcd disconnected",
+		}
+		ReplyError(frontend, cmd.Id(), e)
+
+	default:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+	}
+}
+
+// ListAllTransactions replies to a listtransactions request by returning
+// an array of JSON objects with details of sent and recevied wallet
+// transactions.  This is similar to ListTransactions, except it takes
+// only a single optional argument for the account name and replies with
+// all transactions.
+func ListAllTransactions(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcws.ListAllTransactionsCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
+		return
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	switch txList, err := a.ListAllTransactions(); err {
 	case nil:
 		// Reply with the list of tx information.
 		ReplySuccess(frontend, cmd.Id(), txList)
@@ -717,6 +772,15 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	a.TxStore.s = append(a.TxStore.s, sendtx)
 	a.TxStore.dirty = true
 	a.TxStore.Unlock()
+
+	// Notify frontends of new SendTx.
+	bs, err := GetCurBlock()
+	if err == nil {
+		for _, details := range sendtx.TxInfo(a.Name(), bs.Height, a.Net()) {
+			NotifyNewTxDetails(frontendNotificationMaster, a.Name(),
+				details)
+		}
+	}
 
 	// Remove previous unspent outputs now spent by the tx.
 	a.UtxoStore.Lock()
@@ -1017,7 +1081,7 @@ func NotifyWalletBalance(frontend chan []byte, account string, balance float64) 
 	frontend <- msg
 }
 
-// NotifyWalletBalanceUnconfirmed  sends a confirmed account balance
+// NotifyWalletBalanceUnconfirmed sends a confirmed account balance
 // notification to a frontend.
 func NotifyWalletBalanceUnconfirmed(frontend chan []byte, account string, balance float64) {
 	var id interface{} = "btcwallet:accountbalanceunconfirmed"
@@ -1030,4 +1094,13 @@ func NotifyWalletBalanceUnconfirmed(frontend chan []byte, account string, balanc
 	}
 	msg, _ := json.Marshal(&m)
 	frontend <- msg
+}
+
+// NotifyNewTxDetails sends details of a new transaction to a frontend.
+func NotifyNewTxDetails(frontend chan []byte, account string,
+	details map[string]interface{}) {
+
+	ntfn := btcws.NewTxNtfn(account, details)
+	mntfn, _ := ntfn.MarshalJSON()
+	frontend <- mntfn
 }
