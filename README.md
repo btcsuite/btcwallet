@@ -110,9 +110,6 @@ messages they originated from.
 
 ## TODO
 
-- Require authentication before wallet functionality can be accessed
-- Serve frontend websocket connections over TLS
-- Rescan the blockchain for missed transactions
 - Documentation (specifically the websocket API additions)
 - Code cleanup
 - Optimize

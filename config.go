@@ -36,10 +36,12 @@ const (
 )
 
 var (
-	btcwalletHomeDir  = btcutil.AppDataDir("btcwallet", false)
-	defaultCAFile     = filepath.Join(btcwalletHomeDir, defaultCAFilename)
-	defaultConfigFile = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
-	defaultDataDir    = btcwalletHomeDir
+	btcwalletHomeDir   = btcutil.AppDataDir("btcwallet", false)
+	defaultCAFile      = filepath.Join(btcwalletHomeDir, defaultCAFilename)
+	defaultConfigFile  = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
+	defaultDataDir     = btcwalletHomeDir
+	defaultRPCKeyFile  = filepath.Join(btcwalletHomeDir, "rpc.key")
+	defaultRPCCertFile = filepath.Join(btcwalletHomeDir, "rpc.cert")
 )
 
 type config struct {
@@ -52,6 +54,8 @@ type config struct {
 	DataDir     string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
 	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
 	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
+	RPCCert     string `long:"rpccert" description:"File containing the certificate file"`
+	RPCKey      string `long:"rpckey" description:"File containing the certificate key"`
 	MainNet     bool   `long:"mainnet" description:"*DISABLED* Use the main Bitcoin network (default testnet3)"`
 	Proxy       string `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
 	ProxyUser   string `long:"proxyuser" description:"Username for proxy server"`
@@ -128,6 +132,8 @@ func loadConfig() (*config, []string, error) {
 		Connect:    netParams(defaultBtcNet).connect,
 		SvrPort:    netParams(defaultBtcNet).svrPort,
 		DataDir:    defaultDataDir,
+		RPCKey:     defaultRPCKeyFile,
+		RPCCert:    defaultRPCCertFile,
 	}
 
 	// A config file in the current directory takes precedence.
