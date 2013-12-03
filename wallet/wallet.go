@@ -1252,20 +1252,20 @@ func newRootBtcAddress(privKey, iv, chaincode []byte,
 // address will be unspendable.  This step requires an unencrypted or
 // unlocked btcAddress.
 func (a *btcAddress) verifyKeypairs() error {
-        // Parse public key.
-        pubkey, err := btcec.ParsePubKey(a.pubKey, btcec.S256())
-        if err != nil {
-                return err
-        }
+	// Parse public key.
+	pubkey, err := btcec.ParsePubKey(a.pubKey, btcec.S256())
+	if err != nil {
+		return err
+	}
 
 	if len(a.privKeyCT.key) != 32 {
 		return errors.New("private key unavailable")
 	}
 
-        privkey := &ecdsa.PrivateKey{
-                PublicKey: *pubkey,
-                D:         new(big.Int).SetBytes(a.privKeyCT.key),
-        }
+	privkey := &ecdsa.PrivateKey{
+		PublicKey: *pubkey,
+		D:         new(big.Int).SetBytes(a.privKeyCT.key),
+	}
 
 	data := "String to sign."
 	r, s, err := ecdsa.Sign(rand.Reader, privkey, []byte(data))

@@ -467,8 +467,6 @@ func (a *Account) NewAddress() (string, error) {
 	// Request updates from btcd for new transactions sent to this address.
 	a.ReqNewTxsForAddress(addr)
 
-	fmt.Println("after")
-
 	return addr, nil
 }
 
