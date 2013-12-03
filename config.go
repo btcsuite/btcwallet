@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	defaultCAFilename     = "cert.pem"
+	defaultCAFilename     = "btcd.cert"
 	defaultConfigFilename = "btcwallet.conf"
 	defaultDataDirname    = "data"
 	defaultBtcNet         = btcwire.TestNet3

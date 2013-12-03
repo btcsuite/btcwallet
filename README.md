@@ -86,7 +86,7 @@ $ btcd --testnet -u rpcuser -P rpcpass
 
 ```bash
 $ mkdir ~/.btcwallet/
-$ cp ~/.btcd/rpc.cert ~/.btcwallet/cert.pem
+$ cp ~/.btcd/rpc.cert ~/.btcwallet/btcd.cert
 ```
 
 - Run the following command to start btcwallet:
