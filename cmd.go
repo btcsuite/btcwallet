@@ -207,8 +207,7 @@ func main() {
 	// Open default account
 	err = accountstore.OpenAccount("", cfg)
 	if err != nil {
-		log.Errorf("cannot open account: %v", err)
-		os.Exit(1)
+		log.Warnf("cannot open default account: %v", err)
 	}
 
 	// Read CA file to verify a btcd TLS connection.

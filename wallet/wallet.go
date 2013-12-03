@@ -402,6 +402,11 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 		return nil, err
 	}
 
+	// Verify root address keypairs.
+	if err := root.verifyKeypairs(); err != nil {
+		return nil, err
+	}
+
 	// Compute AES key and encrypt root address.
 	kdfp, err := computeKdfParameters(defaultKdfComputeTime, defaultKdfMaxMem)
 	if err != nil {
@@ -752,6 +757,9 @@ func (w *Wallet) extendKeypool(n uint, aeskey []byte, bs *BlockStamp) error {
 		}
 		newaddr, err := newBtcAddress(privkey, nil, bs, true)
 		if err != nil {
+			return err
+		}
+		if err := newaddr.verifyKeypairs(); err != nil {
 			return err
 		}
 		if err = newaddr.encrypt(aeskey); err != nil {
@@ -1236,6 +1244,40 @@ func newRootBtcAddress(privKey, iv, chaincode []byte,
 	addr.chainIndex = rootKeyChainIdx
 
 	return addr, err
+}
+
+// verifyKeypairs creates a signature using the parsed private key and
+// verifies the signature with the parsed public key.  If either of these
+// steps fail, the keypair generation failed and any funds sent to this
+// address will be unspendable.  This step requires an unencrypted or
+// unlocked btcAddress.
+func (a *btcAddress) verifyKeypairs() error {
+        // Parse public key.
+        pubkey, err := btcec.ParsePubKey(a.pubKey, btcec.S256())
+        if err != nil {
+                return err
+        }
+
+	if len(a.privKeyCT.key) != 32 {
+		return errors.New("private key unavailable")
+	}
+
+        privkey := &ecdsa.PrivateKey{
+                PublicKey: *pubkey,
+                D:         new(big.Int).SetBytes(a.privKeyCT.key),
+        }
+
+	data := "String to sign."
+	r, s, err := ecdsa.Sign(rand.Reader, privkey, []byte(data))
+	if err != nil {
+		return err
+	}
+
+	ok := ecdsa.Verify(&privkey.PublicKey, []byte(data), r, s)
+	if !ok {
+		return errors.New("ecdsa verification failed")
+	}
+	return nil
 }
 
 // ReadFrom reads an encrypted address from an io.Reader.

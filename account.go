@@ -444,7 +444,6 @@ func (a *Account) ActivePaymentAddresses() map[string]struct{} {
 // NewAddress returns a new payment address for an account.
 func (a *Account) NewAddress() (string, error) {
 	a.mtx.Lock()
-	defer a.mtx.Unlock()
 
 	// Get current block's height and hash.
 	bs, err := GetCurBlock()
@@ -460,12 +459,15 @@ func (a *Account) NewAddress() (string, error) {
 
 	// Write updated wallet to disk.
 	a.dirty = true
+	a.mtx.Unlock()
 	if err = a.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot sync dirty wallet: %v", err)
 	}
 
 	// Request updates from btcd for new transactions sent to this address.
 	a.ReqNewTxsForAddress(addr)
+
+	fmt.Println("after")
 
 	return addr, nil
 }
