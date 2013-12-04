@@ -566,15 +566,9 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 		cmd.ToAddress: cmd.Amount,
 	}
 
-	// Get fee to add to tx.
-	// TODO(jrick): this needs to be fee per kB.
-	TxFee.Lock()
-	fee := TxFee.i
-	TxFee.Unlock()
-
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := a.txToPairs(pairs, fee, cmd.MinConf)
+	createdTx, err := a.txToPairs(pairs, cmd.MinConf)
 	switch {
 	case err == ErrNonPositiveAmount:
 		e := &btcjson.Error{
@@ -664,15 +658,9 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Get fee to add to tx.
-	// TODO(jrick): this needs to be fee per kB.
-	TxFee.Lock()
-	fee := TxFee.i
-	TxFee.Unlock()
-
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := a.txToPairs(cmd.Amounts, fee, cmd.MinConf)
+	createdTx, err := a.txToPairs(cmd.Amounts, cmd.MinConf)
 	switch {
 	case err == ErrNonPositiveAmount:
 		e := &btcjson.Error{
@@ -840,7 +828,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	return true
 }
 
-// SetTxFee sets the global transaction fee added to transactions.
+// SetTxFee sets the transaction fee per kilobyte added to transactions.
 func SetTxFee(frontend chan []byte, icmd btcjson.Cmd) {
 	// Type assert icmd to access parameters.
 	cmd, ok := icmd.(*btcjson.SetTxFeeCmd)
@@ -860,12 +848,9 @@ func SetTxFee(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Set global tx fee.
-	//
-	// TODO(jrick): this must be a fee per kB.
-	// TODO(jrick): need to notify all frontends of new tx fee.
-	TxFee.Lock()
-	TxFee.i = cmd.Amount
-	TxFee.Unlock()
+	TxFeeIncrement.Lock()
+	TxFeeIncrement.i = cmd.Amount
+	TxFeeIncrement.Unlock()
 
 	// A boolean true result is returned upon success.
 	ReplySuccess(frontend, cmd.Id(), true)

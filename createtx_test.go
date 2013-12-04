@@ -9,6 +9,62 @@ import (
 	"testing"
 )
 
+type allowFreeTest struct {
+	name      string
+	inputs    []*tx.Utxo
+	curHeight int32
+	txSize    int
+	free      bool
+}
+
+var allowFreeTests = []allowFreeTest{
+	allowFreeTest{
+		name: "priority < 57,600,000",
+		inputs: []*tx.Utxo{
+			&tx.Utxo{
+				Amt:    uint64(btcutil.SatoshiPerBitcoin),
+				Height: 0,
+			},
+		},
+		curHeight: 142, // 143 confirmations
+		txSize:    250,
+		free:      false,
+	},
+	allowFreeTest{
+		name: "priority == 57,600,000",
+		inputs: []*tx.Utxo{
+			&tx.Utxo{
+				Amt:    uint64(btcutil.SatoshiPerBitcoin),
+				Height: 0,
+			},
+		},
+		curHeight: 143, // 144 confirmations
+		txSize:    250,
+		free:      false,
+	},
+	allowFreeTest{
+		name: "priority > 57,600,000",
+		inputs: []*tx.Utxo{
+			&tx.Utxo{
+				Amt:    uint64(btcutil.SatoshiPerBitcoin),
+				Height: 0,
+			},
+		},
+		curHeight: 144, // 145 confirmations
+		txSize:    250,
+		free:      true,
+	},
+}
+
+func TestAllowFree(t *testing.T) {
+	for _, test := range allowFreeTests {
+		calcFree := allowFree(test.curHeight, test.inputs, test.txSize)
+		if calcFree != test.free {
+			t.Errorf("Allow free test '%v' failed.", test.name)
+		}
+	}
+}
+
 func TestFakeTxs(t *testing.T) {
 	// First we need a wallet.
 	w, err := wallet.NewWallet("banana wallet", "", []byte("banana"),
@@ -17,7 +73,7 @@ func TestFakeTxs(t *testing.T) {
 		t.Errorf("Can not create encrypted wallet: %s", err)
 		return
 	}
-	btcw := &Account{
+	a := &Account{
 		Wallet: w,
 	}
 
@@ -50,9 +106,9 @@ func TestFakeTxs(t *testing.T) {
 		return
 	}
 	utxo.Subscript = tx.PkScript(ss)
-	utxo.Amt = 10000
+	utxo.Amt = 1000000
 	utxo.Height = 12345
-	btcw.UtxoStore.s = append(btcw.UtxoStore.s, utxo)
+	a.UtxoStore.s = append(a.UtxoStore.s, utxo)
 
 	// Fake our current block height so btcd doesn't need to be queried.
 	curBlock.BlockStamp.Height = 12346
@@ -61,7 +117,7 @@ func TestFakeTxs(t *testing.T) {
 	pairs := map[string]int64{
 		"17XhEvq9Nahdj7Xe1nv6oRe1tEmaHUuynH": 5000,
 	}
-	_, err = btcw.txToPairs(pairs, 100, 0)
+	_, err = a.txToPairs(pairs, 0)
 	if err != nil {
 		t.Errorf("Tx creation failed: %s", err)
 		return

@@ -46,14 +46,18 @@ var ErrNonPositiveAmount = errors.New("amount is not positive")
 // negative.
 var ErrNegativeFee = errors.New("fee is negative")
 
-// TxFee represents the global transaction fee added to newly-created
-// transactions and sent as a reward to the block miner.  i is measured
-// in satoshis.
-var TxFee = struct {
+// minTxFee is the default minimum transation fee (0.0001 BTC,
+// measured in satoshis) added to transactions requiring a fee.
+const minTxFee = 10000
+
+// TxFeeIncrement represents the global transaction fee per KB of Tx
+// added to newly-created transactions and sent as a reward to the block
+// miner.  i is measured in satoshis.
+var TxFeeIncrement = struct {
 	sync.Mutex
 	i int64
 }{
-	i: 10000, // This is a fee of 0.0001 BTC.
+	i: minTxFee,
 }
 
 // CreatedTx is a type holding information regarding a newly-created
@@ -64,7 +68,7 @@ type CreatedTx struct {
 	time       time.Time
 	inputs     []*tx.Utxo
 	outputs    []tx.Pair
-	btcout     int64
+	btcspent   int64
 	fee        int64
 	changeAddr string
 	changeUtxo *tx.Utxo
@@ -152,11 +156,11 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 // address, changeUtxo will point to a unconfirmed (height = -1, zeroed
 // block hash) Utxo.  ErrInsufficientFunds is returned if there are not
 // enough eligible unspent outputs to create the transaction.
-func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*CreatedTx, error) {
+func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, error) {
 	// Recorded unspent transactions should not be modified until this
 	// finishes.
-	w.UtxoStore.RLock()
-	defer w.UtxoStore.RUnlock()
+	a.UtxoStore.RLock()
+	defer a.UtxoStore.RUnlock()
 
 	// Create a new transaction which will include all input scripts.
 	msgtx := btcwire.NewMsgTx()
@@ -169,17 +173,6 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 			return nil, ErrNonPositiveAmount
 		}
 		amt += v
-	}
-
-	if fee < 0 {
-		return nil, ErrNegativeFee
-	}
-
-	// Select unspent outputs to be used in transaction.
-	inputs, btcout, err := selectInputs(w.UtxoStore.s, uint64(amt+fee),
-		minconf)
-	if err != nil {
-		return nil, err
 	}
 
 	// outputs is a tx.Pair slice representing each output that is created
@@ -209,84 +202,139 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 		outputs = append(outputs, out)
 	}
 
-	// Check if there are leftover unspent outputs, and return coins back to
-	// a new address we own.
-	var changeUtxo *tx.Utxo
+	// Get current block's height and hash.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Make a copy of msgtx before any inputs are added.  This will be
+	// used as a starting point when trying a fee and starting over with
+	// a higher fee if not enough was originally chosen.
+	txNoInputs := msgtx.Copy()
+
+	// These are nil/zeroed until a change address is needed, and reused
+	// again in case a change utxo has already been chosen.
+	var changeAddrHash []byte
 	var changeAddr string
-	if btcout > uint64(amt+fee) {
-		// Create a new address to spend leftover outputs to.
-		// TODO(jrick): use the next chained address, not the next unused.
-		var err error
-		// Get current block's height and hash.
-		bs, err := GetCurBlock()
+
+	var btcspent int64
+	var selectedInputs []*tx.Utxo
+	var finalChangeUtxo *tx.Utxo
+
+	// Get the number of satoshis to increment fee by when searching for
+	// the minimum tx fee needed.
+	var fee int64 = 0
+	for {
+		msgtx = txNoInputs.Copy()
+
+		// Select unspent outputs to be used in transaction based on the amount
+		// neededing to sent, and the current fee estimation.
+		inputs, btcin, err := selectInputs(a.UtxoStore.s, uint64(amt+fee),
+			minconf)
 		if err != nil {
 			return nil, err
 		}
 
-		changeAddr, err = w.NextChainedAddress(&bs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get next address: %s", err)
+		// Check if there are leftover unspent outputs, and return coins back to
+		// a new address we own.
+		var changeUtxo *tx.Utxo
+		change := btcin - uint64(amt+fee)
+		if change > 0 {
+			// Create a new address to spend leftover outputs to.
+
+			// Get a new change address if one has not already been found.
+			if changeAddrHash == nil {
+				changeAddr, err = a.NextChainedAddress(&bs)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get next address: %s", err)
+				}
+
+				changeAddrHash, _, err = btcutil.DecodeAddress(changeAddr)
+				if err != nil {
+					return nil, fmt.Errorf("cannot decode new address: %s", err)
+				}
+			}
+
+			// Spend change.
+			pkScript, err := btcscript.PayToPubKeyHashScript(changeAddrHash)
+			if err != nil {
+				return nil, fmt.Errorf("cannot create txout script: %s", err)
+			}
+			msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
+
+			changeUtxo = &tx.Utxo{
+				Amt: change,
+				Out: tx.OutPoint{
+					// Hash is unset (zeroed) here and must be filled in
+					// with the transaction hash of the complete
+					// transaction.
+					Index: uint32(len(pairs)),
+				},
+				Height:    -1,
+				Subscript: pkScript,
+			}
+			copy(changeUtxo.AddrHash[:], changeAddrHash)
 		}
 
-		// Spend change
-		change := btcout - uint64(amt+fee)
-		changeAddrHash, _, err := btcutil.DecodeAddress(changeAddr)
-		if err != nil {
-			return nil, fmt.Errorf("cannot decode new address: %s", err)
+		// Selected unspent outputs become new transaction's inputs.
+		for _, ip := range inputs {
+			msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&ip.Out), nil))
 		}
-		pkScript, err := btcscript.PayToPubKeyHashScript(changeAddrHash)
-		if err != nil {
-			return nil, fmt.Errorf("cannot create txout script: %s", err)
-		}
-		msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
+		for i, ip := range inputs {
+			addrstr, err := btcutil.EncodeAddress(ip.AddrHash[:],
+				a.Wallet.Net())
+			if err != nil {
+				return nil, err
+			}
+			privkey, err := a.AddressKey(addrstr)
+			if err == wallet.ErrWalletLocked {
+				return nil, wallet.ErrWalletLocked
+			} else if err != nil {
+				return nil, fmt.Errorf("cannot get address key: %v", err)
+			}
+			ai, err := a.AddressInfo(addrstr)
+			if err != nil {
+				return nil, fmt.Errorf("cannot get address info: %v", err)
+			}
 
-		changeUtxo = &tx.Utxo{
-			Amt: change,
-			Out: tx.OutPoint{
-				// Hash is unset (zeroed) here and must be filled in
-				// with the transaction hash of the complete
-				// transaction.
-				Index: uint32(len(pairs)),
-			},
-			Height:    -1,
-			Subscript: pkScript,
-		}
-		copy(changeUtxo.AddrHash[:], changeAddrHash)
-
-		// Add change to outputs.
-		out := tx.Pair{
-			Amount:     int64(change),
-			PubkeyHash: changeAddrHash,
-		}
-		outputs = append(outputs, out)
-	}
-
-	// Selected unspent outputs become new transaction's inputs.
-	for _, ip := range inputs {
-		msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&ip.Out), nil))
-	}
-	for i, ip := range inputs {
-		addrstr, err := btcutil.EncodeAddress(ip.AddrHash[:], w.Wallet.Net())
-		if err != nil {
-			return nil, err
-		}
-		privkey, err := w.AddressKey(addrstr)
-		if err == wallet.ErrWalletLocked {
-			return nil, wallet.ErrWalletLocked
-		} else if err != nil {
-			return nil, fmt.Errorf("cannot get address key: %v", err)
-		}
-		ai, err := w.AddressInfo(addrstr)
-		if err != nil {
-			return nil, fmt.Errorf("cannot get address info: %v", err)
+			sigscript, err := btcscript.SignatureScript(msgtx, i,
+				ip.Subscript, btcscript.SigHashAll, privkey,
+				ai.Compressed)
+			if err != nil {
+				return nil, fmt.Errorf("cannot create sigscript: %s", err)
+			}
+			msgtx.TxIn[i].SignatureScript = sigscript
 		}
 
-		sigscript, err := btcscript.SignatureScript(msgtx, i,
-			ip.Subscript, btcscript.SigHashAll, privkey, ai.Compressed)
-		if err != nil {
-			return nil, fmt.Errorf("cannot create sigscript: %s", err)
+		noFeeAllowed := allowFree(bs.Height, inputs, msgtx.SerializeSize())
+		if minFee := minimumFee(msgtx, noFeeAllowed); fee < minFee {
+			fee = minFee
+		} else {
+			// Fill Tx hash of change outpoint with transaction hash.
+			if changeUtxo != nil {
+				txHash, err := msgtx.TxSha()
+				if err != nil {
+					return nil, fmt.Errorf("cannot create transaction hash: %s", err)
+				}
+				copy(changeUtxo.Out.Hash[:], txHash[:])
+
+				// Add change to outputs.
+				out := tx.Pair{
+					Amount:     int64(change),
+					PubkeyHash: changeAddrHash,
+				}
+				outputs = append(outputs, out)
+
+				finalChangeUtxo = changeUtxo
+			}
+
+			selectedInputs = inputs
+
+			btcspent = int64(btcin)
+
+			break
 		}
-		msgtx.TxIn[i].SignatureScript = sigscript
 	}
 
 	// Validate msgtx before returning the raw transaction.
@@ -296,8 +344,8 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 		flags |= btcscript.ScriptBip16
 	}
 	for i, txin := range msgtx.TxIn {
-		engine, err := btcscript.NewScript(txin.SignatureScript, inputs[i].Subscript, i,
-			msgtx, flags)
+		engine, err := btcscript.NewScript(txin.SignatureScript,
+			selectedInputs[i].Subscript, i, msgtx, flags)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create script engine: %s", err)
 		}
@@ -306,26 +354,77 @@ func (w *Account) txToPairs(pairs map[string]int64, fee int64, minconf int) (*Cr
 		}
 	}
 
-	// Fill Tx hash of change outpoint with transaction hash.
-	if changeUtxo != nil {
-		txHash, err := msgtx.TxSha()
-		if err != nil {
-			return nil, fmt.Errorf("cannot create transaction hash: %s", err)
-		}
-		copy(changeUtxo.Out.Hash[:], txHash[:])
-	}
-
 	buf := new(bytes.Buffer)
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
 	info := &CreatedTx{
 		rawTx:      buf.Bytes(),
 		time:       time.Now(),
-		inputs:     inputs,
+		inputs:     selectedInputs,
 		outputs:    outputs,
-		btcout:     int64(btcout),
+		btcspent:   btcspent,
 		fee:        fee,
 		changeAddr: changeAddr,
-		changeUtxo: changeUtxo,
+		changeUtxo: finalChangeUtxo,
 	}
 	return info, nil
+}
+
+// minimumFee calculates the minimum fee required for a transaction.
+// If allowFree is true, a fee may be zero so long as the entire
+// transaction has a serialized length less than 1 kilobyte
+// and none of the outputs contain a value less than 1 bitcent.
+// Otherwise, the fee will be calculated using TxFeeIncrement,
+// incrementing the fee for each kilobyte of transaction.
+func minimumFee(tx *btcwire.MsgTx, allowFree bool) int64 {
+	txLen := tx.SerializeSize()
+	TxFeeIncrement.Lock()
+	incr := TxFeeIncrement.i
+	TxFeeIncrement.Unlock()
+	fee := int64(1+txLen/1000) * incr
+
+	if allowFree && txLen < 1000 {
+		fee = 0
+	}
+
+	if fee < incr {
+		for _, txOut := range tx.TxOut {
+			if txOut.Value < btcutil.SatoshiPerBitcent {
+				return incr
+			}
+		}
+	}
+
+	if fee < 0 || fee > btcutil.MaxSatoshi {
+		fee = btcutil.MaxSatoshi
+	}
+
+	return fee
+}
+
+// allowFree calculates the transaction priority and checks that the
+// priority reaches a certain threshhold.  If the threshhold is
+// reached, a free transaction fee is allowed.
+func allowFree(curHeight int32, inputs []*tx.Utxo, txSize int) bool {
+	const blocksPerDayEstimate = 144
+	const txSizeEstimate = 250
+
+	var weightedSum int64
+	for _, utxo := range inputs {
+		depth := chainDepth(utxo.Height, curHeight)
+		weightedSum += int64(utxo.Amt) * int64(depth)
+	}
+	priority := float64(weightedSum) / float64(txSize)
+	return priority > float64(btcutil.SatoshiPerBitcoin)*blocksPerDayEstimate/txSizeEstimate
+}
+
+// chainDepth returns the chaindepth of a target given the current
+// blockchain height.
+func chainDepth(target, current int32) int32 {
+	if target == -1 {
+		// target is not yet in a block.
+		return 0
+	}
+
+	// target is in a block.
+	return current - target + 1
 }
