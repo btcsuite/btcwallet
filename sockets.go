@@ -21,7 +21,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	_ "crypto/sha512" // for cert generation
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -100,18 +102,18 @@ var (
 // config, shutdown, etc.)
 type server struct {
 	port      string
-	username  string
-	password  string
 	wg        sync.WaitGroup
 	listeners []net.Listener
+	authsha   [sha256.Size]byte
 }
 
 // newServer returns a new instance of the server struct.
 func newServer() (*server, error) {
+	login := cfg.Username + ":" + cfg.Password
+	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	s := server{
-		port:     cfg.SvrPort,
-		username: cfg.Username,
-		password: cfg.Password,
+		authsha: sha256.Sum256([]byte(auth)),
+		port:    cfg.SvrPort,
 	}
 
 	// Check for existence of cert file and key file
@@ -663,24 +665,19 @@ func (s *server) Start() {
 	serveMux := http.NewServeMux()
 	httpServer := &http.Server{Handler: serveMux}
 	serveMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.checkAuth(r); err != nil {
+			http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
+			return
+		}
 		s.handleRPCRequest(w, r)
 	})
-	wsServer := websocket.Server{
-		Handler: websocket.Handler(func(ws *websocket.Conn) {
-			frontendSendRecv(ws)
-		}),
-		Handshake: func(_ *websocket.Config, r *http.Request) error {
-			login := s.username + ":" + s.password
-			auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
-			authhdr := r.Header["Authorization"]
-			if len(authhdr) <= 0 || authhdr[0] != auth {
-				log.Infof("Frontend did not supply correct authentication.")
-				return errors.New("auth failure")
-			}
-			return nil
-		},
-	}
-	serveMux.Handle("/frontend", wsServer)
+	serveMux.HandleFunc("/frontend", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.checkAuth(r); err != nil {
+			http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
+			return
+		}
+		websocket.Handler(frontendSendRecv).ServeHTTP(w, r)
+	})
 	for _, listener := range s.listeners {
 		s.wg.Add(1)
 		go func(listener net.Listener) {
@@ -690,6 +687,28 @@ func (s *server) Start() {
 			s.wg.Done()
 		}(listener)
 	}
+}
+
+// checkAuth checks the HTTP Basic authentication supplied by a frontend
+// in the HTTP request r.  If the frontend's supplied authentication does
+// not match the username and password expected, a non-nil error is
+// returned.
+//
+// This check is time-constant.
+func (s *server) checkAuth(r *http.Request) error {
+	authhdr := r.Header["Authorization"]
+	if len(authhdr) <= 0 {
+		log.Infof("Frontend did not supply authentication.")
+		return errors.New("auth failure")
+	}
+
+	authsha := sha256.Sum256([]byte(authhdr[0]))
+	cmp := subtle.ConstantTimeCompare(authsha[:], s.authsha[:])
+	if cmp != 1 {
+		log.Infof("Frontend did not supply correct authentication.")
+		return errors.New("auth failure")
+	}
+	return nil
 }
 
 // BtcdConnect connects to a running btcd instance over a websocket
