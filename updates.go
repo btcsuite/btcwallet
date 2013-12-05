@@ -102,7 +102,7 @@ func updateOldFileLocations() {
 			os.Exit(1)
 		}
 
-		log.Infof("Updating old file locations for account %v\n", account)
+		log.Infof("Updating old file locations for account %v", account)
 
 		// Move old wallet.bin, if any.
 		old := filepath.Join(cfg.DataDir, fi[i].Name(), "wallet.bin")
