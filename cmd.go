@@ -204,7 +204,11 @@ func main() {
 		}()
 	}
 
-	// Open default account
+	// Check and update any old file locations.
+	updateOldFileLocations()
+
+	// Open default account.
+	// TODO(jrick): open all available accounts.
 	err = accountstore.OpenAccount("", cfg)
 	if err != nil {
 		log.Warnf("cannot open default account: %v", err)

@@ -810,14 +810,7 @@ func BtcdHandshake(ws *websocket.Conn) error {
 			return true
 		}
 
-		var walletNetwork btcwire.BitcoinNet
-		if cfg.MainNet {
-			walletNetwork = btcwire.MainNet
-		} else {
-			walletNetwork = btcwire.TestNet3
-		}
-
-		correctNetwork <- btcwire.BitcoinNet(fnet) == walletNetwork
+		correctNetwork <- btcwire.BitcoinNet(fnet) == cfg.Net()
 
 		// No additional replies expected, remove handler.
 		return true

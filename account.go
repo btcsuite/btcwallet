@@ -706,36 +706,50 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 	return false
 }
 
-// accountdir returns the directory path which holds an account's wallet, utxo,
+// accountdir returns the directory containing an account's wallet, utxo,
 // and tx files.
-func (a *Account) accountdir(cfg *config) string {
-	var wname string
-	if a.name == "" {
-		wname = "btcwallet"
+//
+// This function is deprecated and should only be used when looking up
+// old (before version 0.1.1) account directories so they may be updated
+// to the new directory structure.
+func accountdir(name string, cfg *config) string {
+	var adir string
+	if name == "" { // default account
+		adir = "btcwallet"
 	} else {
-		wname = fmt.Sprintf("btcwallet-%s", a.name)
+		adir = fmt.Sprintf("btcwallet-%s", name)
 	}
 
-	return filepath.Join(cfg.DataDir, wname)
+	return filepath.Join(cfg.DataDir, adir)
 }
 
-// checkCreateAccountDir checks that path exists and is a directory.
+func networkDir(net btcwire.BitcoinNet) string {
+	var netname string
+	if net == btcwire.MainNet {
+		netname = "mainnet"
+	} else {
+		netname = "testnet"
+	}
+	return filepath.Join(cfg.DataDir, netname)
+}
+
+// checkCreateDir checks that the path exists and is a directory.
 // If path does not exist, it is created.
-func (a *Account) checkCreateAccountDir(path string) error {
-	fi, err := os.Stat(path)
-	if err != nil {
+func checkCreateDir(path string) error {
+	if fi, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			// Attempt data directory creation
 			if err = os.MkdirAll(path, 0700); err != nil {
-				return fmt.Errorf("cannot create account directory: %s", err)
+				return fmt.Errorf("cannot create network directory: %s", err)
 			}
 		} else {
-			return fmt.Errorf("error checking account directory: %s", err)
+			return fmt.Errorf("error checking network directory: %s", err)
 		}
 	} else {
 		if !fi.IsDir() {
-			return fmt.Errorf("path '%s' is not a directory", cfg.DataDir)
+			return fmt.Errorf("path '%s' is not a directory", path)
 		}
 	}
+
 	return nil
 }

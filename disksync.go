@@ -34,6 +34,19 @@ var (
 	}
 )
 
+// accountFilename returns the filepath of an account file given the
+// filename suffix ("wallet.bin", "tx.bin", or "utxo.bin"), account
+// name and the network directory holding the file.
+func accountFilename(suffix, account, netdir string) string {
+	if account == "" {
+		// default account
+		return filepath.Join(netdir, suffix)
+	}
+
+	// non-default account
+	return filepath.Join(netdir, fmt.Sprintf("%v-%v", account, suffix))
+}
+
 // DirtyAccountSyncer synces dirty accounts for cases where the updated
 // information was not required to be immediately written to disk.  Accounts
 // may be added to dirtyAccounts and will be checked and processed every 10
@@ -63,20 +76,20 @@ func DirtyAccountSyncer() {
 
 // writeDirtyToDisk checks for the dirty flag on an account's wallet,
 // txstore, and utxostore, writing them to disk if any are dirty.
-func (w *Account) writeDirtyToDisk() error {
+func (a *Account) writeDirtyToDisk() error {
 	// Temporary files append the current time to the normal file name.
 	// In caes of failure, the most recent temporary file can be inspected
 	// for validity, and moved to replace the main file.
 	timeStr := fmt.Sprintf("%v", time.Now().Unix())
 
-	adir := w.accountdir(cfg)
-	if err := w.checkCreateAccountDir(adir); err != nil {
+	netdir := networkDir(cfg.Net())
+	if err := checkCreateDir(netdir); err != nil {
 		return err
 	}
 
-	wfilepath := filepath.Join(adir, "wallet.bin")
-	txfilepath := filepath.Join(adir, "tx.bin")
-	utxofilepath := filepath.Join(adir, "utxo.bin")
+	wfilepath := accountFilename("wallet.bin", a.name, netdir)
+	txfilepath := accountFilename("tx.bin", a.name, netdir)
+	utxofilepath := accountFilename("utxo.bin", a.name, netdir)
 
 	// UTXOs and transactions are synced to disk first.  This prevents
 	// any races from saving a wallet marked to be synced with block N
@@ -84,18 +97,18 @@ func (w *Account) writeDirtyToDisk() error {
 	// with block N-1.
 
 	// UTXOs
-	w.UtxoStore.RLock()
-	dirty := w.TxStore.dirty
-	w.UtxoStore.RUnlock()
+	a.UtxoStore.RLock()
+	dirty := a.TxStore.dirty
+	a.UtxoStore.RUnlock()
 	if dirty {
-		w.UtxoStore.Lock()
-		defer w.UtxoStore.Unlock()
+		a.UtxoStore.Lock()
+		defer a.UtxoStore.Unlock()
 		tmpfilepath := utxofilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
 			return err
 		}
-		if _, err = w.UtxoStore.s.WriteTo(tmpfile); err != nil {
+		if _, err = a.UtxoStore.s.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
@@ -106,22 +119,22 @@ func (w *Account) writeDirtyToDisk() error {
 			return err
 		}
 
-		w.UtxoStore.dirty = false
+		a.UtxoStore.dirty = false
 	}
 
 	// Transactions
-	w.TxStore.RLock()
-	dirty = w.TxStore.dirty
-	w.TxStore.RUnlock()
+	a.TxStore.RLock()
+	dirty = a.TxStore.dirty
+	a.TxStore.RUnlock()
 	if dirty {
-		w.TxStore.Lock()
-		defer w.TxStore.Unlock()
+		a.TxStore.Lock()
+		defer a.TxStore.Unlock()
 		tmpfilepath := txfilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
 			return err
 		}
-		if _, err = w.TxStore.s.WriteTo(tmpfile); err != nil {
+		if _, err = a.TxStore.s.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
@@ -132,22 +145,22 @@ func (w *Account) writeDirtyToDisk() error {
 			return err
 		}
 
-		w.TxStore.dirty = false
+		a.TxStore.dirty = false
 	}
 
 	// Wallet
-	w.mtx.RLock()
-	dirty = w.dirty
-	w.mtx.RUnlock()
+	a.mtx.RLock()
+	dirty = a.dirty
+	a.mtx.RUnlock()
 	if dirty {
-		w.mtx.Lock()
-		defer w.mtx.Unlock()
+		a.mtx.Lock()
+		defer a.mtx.Unlock()
 		tmpfilepath := wfilepath + "-" + timeStr
 		tmpfile, err := os.Create(tmpfilepath)
 		if err != nil {
 			return err
 		}
-		if _, err = w.WriteTo(tmpfile); err != nil {
+		if _, err = a.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
@@ -158,7 +171,7 @@ func (w *Account) writeDirtyToDisk() error {
 			return err
 		}
 
-		w.dirty = false
+		a.dirty = false
 	}
 
 	return nil

@@ -24,7 +24,6 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"os"
-	"path/filepath"
 	"sync"
 )
 
@@ -346,20 +345,19 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 
 	wlt := new(wallet.Wallet)
 
-	account := &Account{
+	a := &Account{
 		Wallet: wlt,
 		name:   name,
 	}
 
-	var finalErr error
-	adir := account.accountdir(cfg)
-	if err := account.checkCreateAccountDir(adir); err != nil {
+	netdir := networkDir(cfg.Net())
+	if err := checkCreateDir(netdir); err != nil {
 		return err
 	}
 
-	wfilepath := filepath.Join(adir, "wallet.bin")
-	utxofilepath := filepath.Join(adir, "utxo.bin")
-	txfilepath := filepath.Join(adir, "tx.bin")
+	wfilepath := accountFilename("wallet.bin", name, netdir)
+	utxofilepath := accountFilename("utxo.bin", name, netdir)
+	txfilepath := accountFilename("tx.bin", name, netdir)
 	var wfile, utxofile, txfile *os.File
 
 	// Read wallet file.
@@ -379,6 +377,7 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 
 	// Read tx file.  If this fails, return a ErrNoTxs error and let
 	// the caller decide if a rescan is necessary.
+	var finalErr error
 	if txfile, err = os.Open(txfilepath); err != nil {
 		log.Errorf("cannot open tx file: %s", err)
 		// This is not a error we should immediately return with,
@@ -392,7 +391,7 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 			log.Errorf("cannot read tx file: %s", err)
 			finalErr = ErrNoTxs
 		} else {
-			account.TxStore.s = txs
+			a.TxStore.s = txs
 		}
 	}
 
@@ -409,7 +408,7 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 			log.Errorf("cannot read utxo file: %s", err)
 			finalErr = ErrNoUtxos
 		} else {
-			account.UtxoStore.s = utxos
+			a.UtxoStore.s = utxos
 		}
 	}
 
@@ -417,16 +416,16 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 	case ErrNoTxs:
 		// Do nothing special for now.  This will be implemented when
 		// the tx history file is properly written.
-		store.accounts[name] = account
+		store.accounts[name] = a
 
 	case ErrNoUtxos:
 		// Add wallet, but mark wallet as needing a full rescan since
 		// the wallet creation block.  This will take place when btcd
 		// connects.
-		account.fullRescan = true
-		store.accounts[name] = account
+		a.fullRescan = true
+		store.accounts[name] = a
 	case nil:
-		store.accounts[name] = account
+		store.accounts[name] = a
 
 	default:
 		log.Warnf("cannot open wallet: %v", err)

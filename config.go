@@ -30,7 +30,6 @@ import (
 const (
 	defaultCAFilename     = "btcd.cert"
 	defaultConfigFilename = "btcwallet.conf"
-	defaultDataDirname    = "data"
 	defaultBtcNet         = btcwire.TestNet3
 	defaultLogLevel       = "info"
 )
@@ -215,6 +214,13 @@ func loadConfig() (*config, []string, error) {
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
 
 	return &cfg, remainingArgs, nil
+}
+
+func (c *config) Net() btcwire.BitcoinNet {
+	if cfg.MainNet {
+		return btcwire.MainNet
+	}
+	return btcwire.TestNet3
 }
 
 // validLogLevel returns whether or not logLevel is a valid debug log level.
