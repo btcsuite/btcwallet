@@ -21,7 +21,7 @@ import (
 )
 
 // Rename provides an atomic file rename.  newpath is replaced if it
-// already exists. 
+// already exists.
 func Rename(oldpath, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }
