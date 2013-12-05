@@ -186,14 +186,6 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 		return ErrAcctExists
 	}
 
-	// Decide which Bitcoin network must be used.
-	var net btcwire.BitcoinNet
-	if cfg.MainNet {
-		net = btcwire.MainNet
-	} else {
-		net = btcwire.TestNet3
-	}
-
 	// Get current block's height and hash.
 	bs, err := GetCurBlock()
 	if err != nil {
@@ -201,7 +193,7 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 	}
 
 	// Create new wallet in memory.
-	wlt, err := wallet.NewWallet(name, desc, passphrase, net, &bs)
+	wlt, err := wallet.NewWallet(name, desc, passphrase, cfg.Net(), &bs)
 	if err != nil {
 		return err
 	}

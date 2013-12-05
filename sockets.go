@@ -41,6 +41,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -101,19 +102,57 @@ var (
 // server holds the items the RPC server may need to access (auth,
 // config, shutdown, etc.)
 type server struct {
-	port      string
 	wg        sync.WaitGroup
 	listeners []net.Listener
 	authsha   [sha256.Size]byte
 }
 
+// parseListeners splits the list of listen addresses passed in addrs into
+// IPv4 and IPv6 slices and returns them.  This allows easy creation of the
+// listeners on the correct interface "tcp4" and "tcp6".  It also properly
+// detects addresses which apply to "all interfaces" and adds the address to
+// both slices.
+func parseListeners(addrs []string) ([]string, []string, error) {
+	ipv4ListenAddrs := make([]string, 0, len(addrs)*2)
+	ipv6ListenAddrs := make([]string, 0, len(addrs)*2)
+	for _, addr := range addrs {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			// Shouldn't happen due to already being normalized.
+			return nil, nil, err
+		}
+
+		// Empty host or host of * on plan9 is both IPv4 and IPv6.
+		if host == "" || (host == "*" && runtime.GOOS == "plan9") {
+			ipv4ListenAddrs = append(ipv4ListenAddrs, addr)
+			ipv6ListenAddrs = append(ipv6ListenAddrs, addr)
+			continue
+		}
+
+		// Parse the IP.
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return nil, nil, fmt.Errorf("'%s' is not a valid IP "+
+				"address", host)
+		}
+
+		// To4 returns nil when the IP is not an IPv4 address, so use
+		// this determine the address type.
+		if ip.To4() == nil {
+			ipv6ListenAddrs = append(ipv6ListenAddrs, addr)
+		} else {
+			ipv4ListenAddrs = append(ipv4ListenAddrs, addr)
+		}
+	}
+	return ipv4ListenAddrs, ipv6ListenAddrs, nil
+}
+
 // newServer returns a new instance of the server struct.
-func newServer() (*server, error) {
+func newServer(listenAddrs []string) (*server, error) {
 	login := cfg.Username + ":" + cfg.Password
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	s := server{
 		authsha: sha256.Sum256([]byte(auth)),
-		port:    cfg.SvrPort,
 	}
 
 	// Check for existence of cert file and key file
@@ -133,24 +172,31 @@ func newServer() (*server, error) {
 		Certificates: []tls.Certificate{keypair},
 	}
 
-	// IPv4 listener.
-	var listeners []net.Listener
-	listenAddr4 := net.JoinHostPort("127.0.0.1", s.port)
-	listener4, err := tls.Listen("tcp4", listenAddr4, &tlsConfig)
-	if err != nil {
-		log.Errorf("RPCS: Couldn't create listener: %v", err)
-		return nil, err
+	ipv4ListenAddrs, ipv6ListenAddrs, err := parseListeners(listenAddrs)
+	listeners := make([]net.Listener, 0,
+		len(ipv6ListenAddrs)+len(ipv4ListenAddrs))
+	for _, addr := range ipv4ListenAddrs {
+		listener, err := tls.Listen("tcp4", addr, &tlsConfig)
+		if err != nil {
+			log.Warnf("RPCS: Can't listen on %s: %v", addr,
+				err)
+			continue
+		}
+		listeners = append(listeners, listener)
 	}
-	listeners = append(listeners, listener4)
 
-	// IPv6 listener.
-	listenAddr6 := net.JoinHostPort("::1", s.port)
-	listener6, err := tls.Listen("tcp6", listenAddr6, &tlsConfig)
-	if err != nil {
-		log.Errorf("RPCS: Couldn't create listener: %v", err)
-		return nil, err
+	for _, addr := range ipv6ListenAddrs {
+		listener, err := tls.Listen("tcp6", addr, &tlsConfig)
+		if err != nil {
+			log.Warnf("RPCS: Can't listen on %s: %v", addr,
+				err)
+			continue
+		}
+		listeners = append(listeners, listener)
 	}
-	listeners = append(listeners, listener6)
+	if len(listeners) == 0 {
+		return nil, errors.New("RPCS: No valid listen address")
+	}
 
 	s.listeners = listeners
 

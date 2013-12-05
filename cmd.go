@@ -225,7 +225,7 @@ func main() {
 	go DirtyAccountSyncer()
 
 	go func() {
-		s, err := newServer()
+		s, err := newServer(cfg.SvrListeners)
 		if err != nil {
 			log.Errorf("Unable to create HTTP server: %v", err)
 			os.Exit(1)

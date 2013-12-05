@@ -44,22 +44,22 @@ var (
 )
 
 type config struct {
-	ShowVersion bool   `short:"V" long:"version" description:"Display version information and exit"`
-	CAFile      string `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
-	Connect     string `short:"c" long:"connect" description:"Server and port of btcd instance to connect to"`
-	DebugLevel  string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
-	ConfigFile  string `short:"C" long:"configfile" description:"Path to configuration file"`
-	SvrPort     string `short:"p" long:"serverport" description:"Port to serve frontend websocket connections on (default: 18332, mainnet: 8332)"`
-	DataDir     string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
-	Username    string `short:"u" long:"username" description:"Username for btcd authorization"`
-	Password    string `short:"P" long:"password" description:"Password for btcd authorization"`
-	RPCCert     string `long:"rpccert" description:"File containing the certificate file"`
-	RPCKey      string `long:"rpckey" description:"File containing the certificate key"`
-	MainNet     bool   `long:"mainnet" description:"*DISABLED* Use the main Bitcoin network (default testnet3)"`
-	Proxy       string `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
-	ProxyUser   string `long:"proxyuser" description:"Username for proxy server"`
-	ProxyPass   string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
-	Profile     string `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+	ShowVersion  bool     `short:"V" long:"version" description:"Display version information and exit"`
+	CAFile       string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
+	Connect      string   `short:"c" long:"connect" description:"Server and port of btcd instance to connect to"`
+	DebugLevel   string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
+	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
+	SvrListeners []string `long:"listen" description:"Listen for RPC/websocket connections on this interface/port (default no listening.  default port: 18332, mainnet: 8332)"`
+	DataDir      string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
+	Username     string   `short:"u" long:"username" description:"Username for btcd authorization"`
+	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for btcd authorization"`
+	RPCCert      string   `long:"rpccert" description:"File containing the certificate file"`
+	RPCKey       string   `long:"rpckey" description:"File containing the certificate key"`
+	MainNet      bool     `long:"mainnet" description:"*DISABLED* Use the main Bitcoin network (default testnet3)"`
+	Proxy        string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
+	ProxyUser    string   `long:"proxyuser" description:"Username for proxy server"`
+	ProxyPass    string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
+	Profile      string   `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -76,18 +76,28 @@ func cleanAndExpandPath(path string) string {
 	return filepath.Clean(os.ExpandEnv(path))
 }
 
-// updateConfigWithActiveParams update the passed config with parameters
-// from the active net params if the relevant options in the passed config
-// object are the default so options specified by the user on the command line
-// are not overridden.
-func updateConfigWithActiveParams(cfg *config) {
-	if cfg.Connect == netParams(defaultBtcNet).connect {
-		cfg.Connect = activeNetParams.connect
+// removeDuplicateAddresses returns a new slice with all duplicate entries in
+// addrs removed.
+func removeDuplicateAddresses(addrs []string) []string {
+	result := make([]string, 0)
+	seen := map[string]bool{}
+	for _, val := range addrs {
+		if _, ok := seen[val]; !ok {
+			result = append(result, val)
+			seen[val] = true
+		}
+	}
+	return result
+}
+
+// normalizeAddresses returns a new slice with all the passed peer addresses
+// normalized with the given default port, and all duplicates removed.
+func normalizeAddresses(addrs []string, defaultPort string) []string {
+	for i, addr := range addrs {
+		addrs[i] = normalizeAddress(addr, defaultPort)
 	}
 
-	if cfg.SvrPort == netParams(defaultBtcNet).svrPort {
-		cfg.SvrPort = activeNetParams.svrPort
-	}
+	return removeDuplicateAddresses(addrs)
 }
 
 // filesExists reports whether the named file or directory exists.
@@ -129,7 +139,6 @@ func loadConfig() (*config, []string, error) {
 		CAFile:     defaultCAFile,
 		ConfigFile: defaultConfigFile,
 		Connect:    netParams(defaultBtcNet).connect,
-		SvrPort:    netParams(defaultBtcNet).svrPort,
 		DataDir:    defaultDataDir,
 		RPCKey:     defaultRPCKeyFile,
 		RPCCert:    defaultRPCCertFile,
@@ -189,14 +198,10 @@ func loadConfig() (*config, []string, error) {
 		log.Warnf("%v", configFileError)
 	}
 
-	// TODO(jrick): Enable mainnet support again when ready.
-	cfg.MainNet = false
-
 	// Choose the active network params based on the mainnet net flag.
 	if cfg.MainNet {
-		activeNetParams = netParams(btcwire.MainNet)
+		//activeNetParams = netParams(btcwire.MainNet)
 	}
-	updateConfigWithActiveParams(&cfg)
 
 	// Validate debug log level
 	if !validLogLevel(cfg.DebugLevel) {
@@ -209,6 +214,28 @@ func loadConfig() (*config, []string, error) {
 
 	// Add default port to connect flag if missing.
 	cfg.Connect = normalizeAddress(cfg.Connect, activeNetParams.btcdPort)
+
+	if len(cfg.SvrListeners) == 0 {
+		addrs, err := net.LookupHost("localhost")
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.SvrListeners = make([]string, 0, len(addrs))
+		for _, addr := range addrs {
+			addr = net.JoinHostPort(addr, activeNetParams.svrPort)
+			cfg.SvrListeners = append(cfg.SvrListeners, addr)
+		}
+	}
+
+	// Add default port to all listener addresses if needed and remove
+	// duplicate addresses.
+	cfg.SvrListeners = normalizeAddresses(cfg.SvrListeners,
+		activeNetParams.svrPort)
+
+	// Add default port to all rpc listener addresses if needed and remove
+	// duplicate addresses.
+	cfg.SvrListeners = normalizeAddresses(cfg.SvrListeners,
+		activeNetParams.svrPort)
 
 	// Expand environment variable and leading ~ for filepaths.
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
