@@ -108,7 +108,7 @@ func updateOldFileLocations() {
 		old := filepath.Join(cfg.DataDir, fi[i].Name(), "wallet.bin")
 		if fileExists(old) {
 			new := accountFilename("wallet.bin", account, netdir)
-			if err := os.Rename(old, new); err != nil {
+			if err := Rename(old, new); err != nil {
 				log.Errorf("Cannot move old %v for account %v to new location: %v",
 					"wallet.bin", account, err)
 				os.Exit(1)
@@ -119,7 +119,7 @@ func updateOldFileLocations() {
 		old = filepath.Join(cfg.DataDir, fi[i].Name(), "tx.bin")
 		if fileExists(old) {
 			new := accountFilename("tx.bin", account, netdir)
-			if err := os.Rename(old, new); err != nil {
+			if err := Rename(old, new); err != nil {
 				log.Errorf("Cannot move old %v for account %v to new location: %v",
 					"tx.bin", account, err)
 				os.Exit(1)
@@ -130,7 +130,7 @@ func updateOldFileLocations() {
 		old = filepath.Join(cfg.DataDir, fi[i].Name(), "utxo.bin")
 		if fileExists(old) {
 			new := accountFilename("utxo.bin", account, netdir)
-			if err := os.Rename(old, new); err != nil {
+			if err := Rename(old, new); err != nil {
 				log.Errorf("Cannot move old %v for account %v to new location: %v",
 					"utxo.bin", account, err)
 				os.Exit(1)
