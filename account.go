@@ -26,7 +26,6 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -721,35 +720,4 @@ func accountdir(name string, cfg *config) string {
 	}
 
 	return filepath.Join(cfg.DataDir, adir)
-}
-
-func networkDir(net btcwire.BitcoinNet) string {
-	var netname string
-	if net == btcwire.MainNet {
-		netname = "mainnet"
-	} else {
-		netname = "testnet"
-	}
-	return filepath.Join(cfg.DataDir, netname)
-}
-
-// checkCreateDir checks that the path exists and is a directory.
-// If path does not exist, it is created.
-func checkCreateDir(path string) error {
-	if fi, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			// Attempt data directory creation
-			if err = os.MkdirAll(path, 0700); err != nil {
-				return fmt.Errorf("cannot create network directory: %s", err)
-			}
-		} else {
-			return fmt.Errorf("error checking network directory: %s", err)
-		}
-	} else {
-		if !fi.IsDir() {
-			return fmt.Errorf("path '%s' is not a directory", path)
-		}
-	}
-
-	return nil
 }
