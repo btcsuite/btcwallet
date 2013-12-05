@@ -674,6 +674,7 @@ func (s *server) Start() {
 			auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 			authhdr := r.Header["Authorization"]
 			if len(authhdr) <= 0 || authhdr[0] != auth {
+				log.Infof("Frontend did not supply correct authentication.")
 				return errors.New("auth failure")
 			}
 			return nil
