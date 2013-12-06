@@ -622,9 +622,6 @@ func NtfnBlockConnected(n btcws.Notification) {
 	// the new block notification.  New balance notifications for txs
 	// in blocks are therefore sent here after all tx notifications
 	// have arrived.
-	//
-	// TODO(jrick): send frontend tx notifications once that's
-	// implemented.
 
 	accountstore.BlockNotify(bs)
 
@@ -635,8 +632,6 @@ func NtfnBlockConnected(n btcws.Notification) {
 // NtfnBlockDisconnected handles btcd notifications resulting from
 // blocks disconnected from the main chain in the event of a chain
 // switch and notifies frontends of the new blockchain height.
-//
-// TODO(jrick): Rollback Utxo and Tx data
 func NtfnBlockDisconnected(n btcws.Notification) {
 	bdn, ok := n.(*btcws.BlockDisconnectedNtfn)
 	if !ok {
@@ -706,8 +701,6 @@ func (s *server) Start() {
 
 	log.Trace("Starting RPC server")
 
-	// TODO(jrick): We need some sort of authentication before websocket
-	// connections are allowed, and perhaps TLS on the server as well.
 	serveMux := http.NewServeMux()
 	httpServer := &http.Server{Handler: serveMux}
 	serveMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -857,9 +850,14 @@ func resendUnminedTxs() {
 // settings between the two processes (such as running on different
 // Bitcoin networks).  If the sanity checks pass, all wallets are set to
 // be tracked against chain notifications from this btcd connection.
+//
+// TODO(jrick): Track and Rescan commands should be replaced with a
+// single TrackSince function (or similar) which requests address
+// notifications and performs the rescan since some block height.
 func BtcdHandshake(ws *websocket.Conn) error {
 	n := <-NewJSONID
-	cmd := btcws.NewGetCurrentNetCmd(fmt.Sprintf("btcwallet(%v)", n))
+	var cmd btcjson.Cmd
+	cmd = btcws.NewGetCurrentNetCmd(fmt.Sprintf("btcwallet(%v)", n))
 	mcmd, err := cmd.MarshalJSON()
 	if err != nil {
 		return fmt.Errorf("cannot complete btcd handshake: %v", err)
@@ -889,24 +887,96 @@ func BtcdHandshake(ws *websocket.Conn) error {
 		return errors.New("btcd and btcwallet running on different Bitcoin networks")
 	}
 
-	// TODO(jrick): Check that there was not any reorgs done
-	// since last connection.  If so, rollback and rescan to
-	// catch up.
-
-	accountstore.RescanActiveAddresses()
-
-	// Begin tracking wallets against this btcd instance.
-
-	accountstore.Track()
-
-	// (Re)send any unmined transactions to btcd in case of a btcd restart.
-	resendUnminedTxs()
-
-	// Get current blockchain height and best block hash.
-	if bs, err := GetCurBlock(); err == nil {
-		NotifyNewBlockChainHeight(frontendNotificationMaster, bs.Height)
-		NotifyBalances(frontendNotificationMaster)
+	// Get default account.  Only the default account is used to
+	// track recently-seen blocks.
+	a, err := accountstore.Account("")
+	if err != nil {
+		return fmt.Errorf("cannot get default account: %v", err)
 	}
 
+	// Get current best block.  If this is before than the oldest
+	// saved block hash, assume that this btcd instance is not yet
+	// synced up to a previous btcd that was last used with this
+	// wallet.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return fmt.Errorf("cannot get best block: %v", err)
+	}
+	NotifyNewBlockChainHeight(frontendNotificationMaster, bs.Height)
+	NotifyBalances(frontendNotificationMaster)
+
+	// TODO(jrick): if height is less than the earliest-saved block
+	// height, should probably wait for btcd to catch up.
+
+	// Check that there was not any reorgs done since last connection.
+	// If so, rollback and rescan to catch up.
+	it := a.Wallet.NewIterateRecentBlocks()
+	for cont := it != nil; cont; cont = it.Prev() {
+		bs := it.BlockStamp()
+		log.Debugf("Checking for previous saved block with height %v hash %v",
+			bs.Height, bs.Hash)
+
+		n = <-NewJSONID
+		// NewGetBlockCmd can't fail, so don't check error.
+		// TODO(jrick): probably want to remove the error return value.
+		cmd, _ = btcjson.NewGetBlockCmd(fmt.Sprintf("btcwallet(%v)", n),
+			bs.Hash.String())
+		mcmd, _ = cmd.MarshalJSON()
+
+		blockMissing := make(chan bool)
+
+		replyHandlers.Lock()
+		replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
+			blockMissing <- err != nil && err.Code == btcjson.ErrBlockNotFound.Code
+
+			// No additional replies expected, remove handler.
+			return true
+		}
+		replyHandlers.Unlock()
+
+		btcdMsgs <- mcmd
+
+		if <-blockMissing {
+			continue
+		}
+
+		log.Debug("Found matching block.")
+
+		// If we had to go back to any previous blocks (it.Next
+		// returns true), then rollback the next and all child blocks.
+		// This rollback is done here instead of in the blockMissing
+		// check above for each removed block because Rollback will
+		// try to write new tx and utxo files on each rollback.
+		if it.Next() {
+			bs := it.BlockStamp()
+			accountstore.Rollback(bs.Height, &bs.Hash)
+		}
+
+		// Set default account to be marked in sync with the current
+		// blockstamp.  This invalidates the iterator.
+		a.Wallet.SetSyncedWith(bs)
+
+		// Begin tracking wallets against this btcd instance.
+		accountstore.Track()
+		accountstore.RescanActiveAddresses()
+
+		// (Re)send any unmined transactions to btcd in case of a btcd restart.
+		resendUnminedTxs()
+
+		// Get current blockchain height and best block hash.
+		return nil
+	}
+
+	log.Warnf("None of the previous saved blocks in btcd chain.  Must perform full rescan.")
+
+	// Iterator was invalid (wallet has never been synced) or there was a
+	// huge chain fork + reorg (more than 20 blocks).  Since we don't know
+	// what block (if any) this wallet is synced to, roll back everything
+	// and start a new rescan since the earliest block wallet must know
+	// about.
+	a.fullRescan = true
+	accountstore.Track()
+	accountstore.RescanActiveAddresses()
+	resendUnminedTxs()
 	return nil
 }

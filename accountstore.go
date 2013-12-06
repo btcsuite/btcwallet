@@ -65,10 +65,10 @@ func (store *AccountStore) Account(name string) (*Account, error) {
 }
 
 // Rollback rolls back each Account saved in the store.
-//
-// TODO(jrick): This must also roll back the UTXO and TX stores, and notify
-// all wallets of new account balances.
 func (store *AccountStore) Rollback(height int32, hash *btcwire.ShaHash) {
+	log.Debugf("Rolling back tx history since block height %v hash %v",
+		height, hash)
+
 	store.Lock()
 	defer store.Unlock()
 
@@ -173,10 +173,6 @@ func (store *AccountStore) CalculateBalance(account string,
 
 // CreateEncryptedWallet creates a new account with a wallet file
 // encrypted with passphrase.
-//
-// TODO(jrick): different passphrases on different accounts in the
-// same wallet is a bad idea.  Switch this to use one passphrase for all
-// account wallet files.
 func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase []byte) error {
 	store.Lock()
 	defer store.Unlock()

@@ -346,7 +346,7 @@ func (a *Account) RescanActiveAddresses() {
 		// point for block rescanning.  Grab the block stamp here.
 		bs := a.SyncedWith()
 
-		log.Debugf("Rescanning account '%v' for new transactions since block height %v hash %v",
+		log.Debugf("Rescanning account '%v' for new transactions after block height %v hash %v",
 			a.name, bs.Height, bs.Hash)
 
 		// If we're synced with block x, must scan the blocks x+1 to best block.
@@ -633,6 +633,9 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 	}
 
 	// Add to TxStore.
+	//
+	// TODO(jrick): check for duplicates.  This could occur if we're
+	// adding txs for an out of sync btcd on its IBD.
 	t := &tx.RecvTx{
 		TxID:         *txID,
 		TimeReceived: time.Now().Unix(),

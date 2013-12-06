@@ -249,6 +249,140 @@ func ChainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 	return pad(32, b), nil
 }
 
+type version struct {
+	major         byte
+	minor         byte
+	bugfix        byte
+	autoincrement byte
+}
+
+// Enforce that version satisifies the io.ReaderFrom and
+// io.WriterTo interfaces.
+var _ io.ReaderFrom = &version{}
+var _ io.WriterTo = &version{}
+
+// ReaderFromVersion is an io.ReaderFrom and io.WriterTo that
+// can specify any particular wallet file format for reading
+// depending on the wallet file version.
+type ReaderFromVersion interface {
+	ReadFromVersion(version, io.Reader) (int64, error)
+	io.WriterTo
+}
+
+func (v version) String() string {
+	str := fmt.Sprintf("%d.%d", v.major, v.minor)
+	if v.bugfix != 0x00 || v.autoincrement != 0x00 {
+		str += fmt.Sprintf(".%d", v.bugfix)
+	}
+	if v.autoincrement != 0x00 {
+		str += fmt.Sprintf(".%d", v.autoincrement)
+	}
+	return str
+}
+
+func (v version) Uint32() uint32 {
+	return uint32(v.major)<<6 | uint32(v.minor)<<4 | uint32(v.bugfix)<<2 | uint32(v.autoincrement)
+}
+
+func (v *version) ReadFrom(r io.Reader) (int64, error) {
+	// Read 4 bytes for the version.
+	versBytes := make([]byte, 4)
+	n, err := r.Read(versBytes)
+	if err != nil {
+		return int64(n), err
+	}
+	v.major = versBytes[0]
+	v.minor = versBytes[1]
+	v.bugfix = versBytes[2]
+	v.autoincrement = versBytes[3]
+	return int64(n), nil
+}
+
+func (v *version) WriteTo(w io.Writer) (int64, error) {
+	// Write 4 bytes for the version.
+	versBytes := []byte{
+		v.major,
+		v.minor,
+		v.bugfix,
+		v.autoincrement,
+	}
+	n, err := w.Write(versBytes)
+	return int64(n), err
+}
+
+// LT returns whether v is an earlier version than v2.
+func (v version) LT(v2 version) bool {
+	switch {
+	case v.major < v2.major:
+		return true
+
+	case v.minor < v2.minor:
+		return true
+
+	case v.bugfix < v2.bugfix:
+		return true
+
+	case v.autoincrement < v2.autoincrement:
+		return true
+
+	default:
+		return false
+	}
+}
+
+// EQ returns whether v2 is an equal version to v.
+func (v version) EQ(v2 version) bool {
+	switch {
+	case v.major != v2.major:
+		return false
+
+	case v.minor != v2.minor:
+		return false
+
+	case v.bugfix != v2.bugfix:
+		return false
+
+	case v.autoincrement != v2.autoincrement:
+		return false
+
+	default:
+		return true
+	}
+}
+
+// GT returns whether v is a later version than v2.
+func (v version) GT(v2 version) bool {
+	switch {
+	case v.major > v2.major:
+		return true
+
+	case v.minor > v2.minor:
+		return true
+
+	case v.bugfix > v2.bugfix:
+		return true
+
+	case v.autoincrement > v2.autoincrement:
+		return true
+
+	default:
+		return false
+	}
+}
+
+// Various versions.
+var (
+	// VersArmory is the latest version used by Armory.
+	VersArmory = version{1, 35, 0, 0}
+
+	// Vers20LastBlocks is the version where wallet files now hold
+	// the 20 most recently seen block hashes.
+	Vers20LastBlocks = version{1, 36, 0, 0}
+
+	// VersCurrent is the current wallet file version.
+	VersCurrent = Vers20LastBlocks
+)
+
 type varEntries []io.WriterTo
 
 func (v *varEntries) WriteTo(w io.Writer) (n int64, err error) {
@@ -327,11 +461,10 @@ type addressHashKey string
 type transactionHashKey string
 type comment []byte
 
-// Wallet represents an btcd/Armory wallet in memory.  It
-// implements the io.ReaderFrom and io.WriterTo interfaces to read
-// from and write to any type of byte streams, including files.
+// Wallet represents an btcwallet wallet in memory.  It implements
+// the io.ReaderFrom and io.WriterTo interfaces to read from and
+// write to any type of byte streams, including files.
 type Wallet struct {
-	version      uint32
 	net          btcwire.BitcoinNet
 	flags        walletFlags
 	uniqID       [6]byte
@@ -344,8 +477,7 @@ type Wallet struct {
 
 	// These are non-standard and fit in the extra 1024 bytes between the
 	// root address and the appended entries.
-	syncedBlockHeight int32
-	syncedBlockHash   btcwire.ShaHash
+	recent recentBlocks
 
 	addrMap        map[addressHashKey]*btcAddress
 	addrCommentMap map[addressHashKey]comment
@@ -360,17 +492,6 @@ type Wallet struct {
 	importedAddrs []*btcAddress
 	lastChainIdx  int64
 }
-
-// UnusedWalletBytes specifies the number of actually unused bytes
-// between the root address and the appended entries in a serialized
-// wallet.  Armory's wallet file format provides 1024 unused bytes
-// in this space.  btcwallet requires saving a few additional details
-// with the wallet file, so the binary sizes of those are subtracted
-// from 1024.  Currently, these are:
-//
-//  - last synced block height (int32, 4 bytes)
-//  - last synced block hash (btcwire.ShaHash, btcwire.HashSize bytes)
-const UnusedWalletBytes = 1024 - 4 - btcwire.HashSize
 
 // NewWallet creates and initializes a new Wallet.  name's and
 // desc's binary representation must not exceed 32 and 256 bytes,
@@ -419,7 +540,6 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 
 	// Create and fill wallet.
 	w := &Wallet{
-		version: 0, // TODO(jrick): implement versioning
 		// TODO(jrick): not sure we will need uniqID, but would be good for
 		// compat with armory.
 		net: net,
@@ -427,17 +547,21 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 			useEncryption: true,
 			watchingOnly:  false,
 		},
-		createDate:        time.Now().Unix(),
-		highestUsed:       rootKeyChainIdx,
-		kdfParams:         *kdfp,
-		keyGenerator:      *root,
-		syncedBlockHeight: createdAt.Height,
-		syncedBlockHash:   createdAt.Hash,
-		addrMap:           make(map[addressHashKey]*btcAddress),
-		addrCommentMap:    make(map[addressHashKey]comment),
-		txCommentMap:      make(map[transactionHashKey]comment),
-		chainIdxMap:       make(map[int64]addressHashKey),
-		lastChainIdx:      rootKeyChainIdx,
+		createDate:   time.Now().Unix(),
+		highestUsed:  rootKeyChainIdx,
+		kdfParams:    *kdfp,
+		keyGenerator: *root,
+		recent: recentBlocks{
+			lastHeight: createdAt.Height,
+			hashes: []*btcwire.ShaHash{
+				&createdAt.Hash,
+			},
+		},
+		addrMap:        make(map[addressHashKey]*btcAddress),
+		addrCommentMap: make(map[addressHashKey]comment),
+		txCommentMap:   make(map[transactionHashKey]comment),
+		chainIdxMap:    make(map[int64]addressHashKey),
+		lastChainIdx:   rootKeyChainIdx,
 	}
 	copy(w.name[:], []byte(name))
 	copy(w.desc[:], []byte(desc))
@@ -478,6 +602,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	w.txCommentMap = make(map[transactionHashKey]comment)
 
 	var id [8]byte
+	var vers version
 	var appendedEntries varEntries
 
 	// Iterate through each entry needing to be read.  If data
@@ -485,7 +610,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	// data is a pointer to a fixed sized value.
 	datas := []interface{}{
 		&id,
-		&w.version,
+		&vers,
 		&w.net,
 		&w.flags,
 		&w.uniqID,
@@ -496,17 +621,20 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 		&w.kdfParams,
 		make([]byte, 256),
 		&w.keyGenerator,
-		&w.syncedBlockHeight,
-		&w.syncedBlockHash,
-		make([]byte, UnusedWalletBytes),
+		newUnusedSpace(1024, &w.recent),
 		&appendedEntries,
 	}
 	for _, data := range datas {
 		var err error
-		if rf, ok := data.(io.ReaderFrom); ok {
-			read, err = rf.ReadFrom(r)
-		} else {
-			read, err = binaryRead(r, binary.LittleEndian, data)
+		switch d := data.(type) {
+		case ReaderFromVersion:
+			read, err = d.ReadFromVersion(vers, r)
+
+		case io.ReaderFrom:
+			read, err = d.ReadFrom(r)
+
+		default:
+			read, err = binaryRead(r, binary.LittleEndian, d)
 		}
 		n += read
 		if err != nil {
@@ -597,7 +725,7 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 	// data is a pointer to a fixed size value.
 	datas := []interface{}{
 		&fileID,
-		&w.version,
+		&VersCurrent,
 		&w.net,
 		&w.flags,
 		&w.uniqID,
@@ -608,9 +736,7 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 		&w.kdfParams,
 		make([]byte, 256),
 		&w.keyGenerator,
-		&w.syncedBlockHeight,
-		&w.syncedBlockHash,
-		make([]byte, UnusedWalletBytes),
+		newUnusedSpace(1024, &w.recent),
 		&appendedEntries,
 	}
 	var written int64
@@ -689,7 +815,6 @@ func (w *Wallet) IsLocked() (locked bool) {
 }
 
 // Version returns a wallet's version as a string and int.
-// TODO(jrick)
 func (w *Wallet) Version() (string, int) {
 	return "", 0
 }
@@ -882,17 +1007,62 @@ func (w *Wallet) Net() btcwire.BitcoinNet {
 // SetSyncedWith marks the wallet to be in sync with the block
 // described by height and hash.
 func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
-	w.syncedBlockHeight = bs.Height
-	copy(w.syncedBlockHash[:], bs.Hash[:])
+	// Check if we're trying to rollback the last seen history.
+	// If so, and this bs is already saved, remove anything
+	// after and return.  Otherwire, remove previous hashes.
+	if bs.Height < w.recent.lastHeight {
+		maybeIdx := len(w.recent.hashes) - 1 - int(w.recent.lastHeight-bs.Height)
+		if maybeIdx >= 0 && maybeIdx < len(w.recent.hashes) &&
+			*w.recent.hashes[maybeIdx] == bs.Hash {
+
+			w.recent.lastHeight = bs.Height
+			// subslice out the removed hashes.
+			w.recent.hashes = w.recent.hashes[:maybeIdx]
+			return
+		}
+		w.recent.hashes = nil
+	}
+
+	if bs.Height != w.recent.lastHeight+1 {
+		w.recent.hashes = nil
+	}
+
+	w.recent.lastHeight = bs.Height
+	blockSha := new(btcwire.ShaHash)
+	copy(blockSha[:], bs.Hash[:])
+	if len(w.recent.hashes) == 20 {
+		// Make room for the most recent hash.
+		copy(w.recent.hashes, w.recent.hashes[1:])
+
+		// Set new block in the last position.
+		w.recent.hashes[19] = blockSha
+	} else {
+		w.recent.hashes = append(w.recent.hashes, blockSha)
+	}
 }
 
 // SyncedWith returns the height and hash of the block the wallet is
 // currently marked to be in sync with.
 func (w *Wallet) SyncedWith() *BlockStamp {
-	return &BlockStamp{
-		Height: w.syncedBlockHeight,
-		Hash:   w.syncedBlockHash,
+	nHashes := len(w.recent.hashes)
+	if nHashes == 0 || w.recent.lastHeight == -1 {
+		return &BlockStamp{
+			Height: -1,
+		}
 	}
+
+	lastSha := w.recent.hashes[nHashes-1]
+	return &BlockStamp{
+		Height: w.recent.lastHeight,
+		Hash:   *lastSha,
+	}
+}
+
+// NewIterateRecentBlocks returns an iterator for recently-seen blocks.
+// The iterator starts at the most recently-added block, and Prev should
+// be used to access earlier blocks.
+func (w *Wallet) NewIterateRecentBlocks() RecentBlockIterator {
+	return w.recent.NewIterator()
 }
 
 // EarliestBlockHeight returns the height of the blockchain for when any
@@ -1111,6 +1281,264 @@ func (af *addrFlags) WriteTo(w io.Writer) (n int64, err error) {
 	}
 
 	return binaryWrite(w, binary.LittleEndian, b)
+}
+
+// recentBlocks holds at most the last 20 seen block hashes as well as
+// the block height of the most recently seen block.
+type recentBlocks struct {
+	hashes     []*btcwire.ShaHash
+	lastHeight int32
+}
+
+type blockIterator struct {
+	height int32
+	index  int
+	rb     *recentBlocks
+}
+
+func (rb *recentBlocks) ReadFromVersion(v version, r io.Reader) (int64, error) {
+	if !v.LT(Vers20LastBlocks) {
+		// Use current version.
+		return rb.ReadFrom(r)
+	}
+
+	// Old file versions only saved the most recently seen
+	// block height and hash, not the last 20.
+
+	var read int64
+	var syncedBlockHash btcwire.ShaHash
+
+	// Read height.
+	heightBytes := make([]byte, 4) // 4 bytes for a int32
+	n, err := r.Read(heightBytes)
+	if err != nil {
+		return read + int64(n), err
+	}
+	read += int64(n)
+	rb.lastHeight = int32(binary.LittleEndian.Uint32(heightBytes))
+
+	// If height is -1, the last synced block is unknown, so don't try
+	// to read a block hash.
+	if rb.lastHeight == -1 {
+		rb.hashes = nil
+		return read, nil
+	}
+
+	// Read block hash.
+	n, err = r.Read(syncedBlockHash[:])
+	if err != nil {
+		return read + int64(n), err
+	}
+	read += int64(n)
+
+	rb.hashes = []*btcwire.ShaHash{
+		&syncedBlockHash,
+	}
+
+	return read, nil
+}
+
+func (rb *recentBlocks) ReadFrom(r io.Reader) (int64, error) {
+	var read int64
+
+	// Read number of saved blocks.  This should not exceed 20.
+	nBlockBytes := make([]byte, 4) // 4 bytes for a uint32
+	n, err := r.Read(nBlockBytes)
+	if err != nil {
+		return read + int64(n), err
+	}
+	read += int64(n)
+	nBlocks := binary.LittleEndian.Uint32(nBlockBytes)
+	if nBlocks > 20 {
+		return read, errors.New("number of last seen blocks exceeds maximum of 20")
+	}
+
+	// If number of blocks is 0, our work here is done.
+	if nBlocks == 0 {
+		rb.lastHeight = -1
+		rb.hashes = nil
+		return read, nil
+	}
+
+	// Read most recently seen block height.
+	heightBytes := make([]byte, 4) // 4 bytes for a int32
+	n, err = r.Read(heightBytes)
+	if err != nil {
+		return read + int64(n), err
+	}
+	read += int64(n)
+	height := int32(binary.LittleEndian.Uint32(heightBytes))
+
+	// height should not be -1 (or any other negative number)
+	// since at this point we should be reading in at least one
+	// known block.
+	if height < 0 {
+		return read, errors.New("expected a block but specified height is negative")
+	}
+
+	// Set last seen height.
+	rb.lastHeight = height
+
+	// Read nBlocks block hashes.  Hashes are expected to be in
+	// order of oldest to newest, but there's no way to check
+	// that here.
+	rb.hashes = make([]*btcwire.ShaHash, 0, nBlocks)
+	for i := uint32(0); i < nBlocks; i++ {
+		blockSha := new(btcwire.ShaHash)
+		n, err := r.Read(blockSha[:])
+		if err != nil {
+			return read + int64(n), err
+		}
+		read += int64(n)
+		rb.hashes = append(rb.hashes, blockSha)
+	}
+
+	return read, nil
+}
+
+func (rb *recentBlocks) WriteTo(w io.Writer) (int64, error) {
+	var written int64
+
+	// Write number of saved blocks.  This should not exceed 20.
+	nBlocks := uint32(len(rb.hashes))
+	if nBlocks > 20 {
+		return written, errors.New("number of last seen blocks exceeds maximum of 20")
+	}
+	if nBlocks != 0 && rb.lastHeight < 0 {
+		return written, errors.New("number of block hashes is positive, but height is negative")
+	}
+	if nBlocks == 0 && rb.lastHeight != -1 {
+		return written, errors.New("no block hashes available, but height is not -1")
+	}
+	nBlockBytes := make([]byte, 4) // 4 bytes for a uint32
+	binary.LittleEndian.PutUint32(nBlockBytes, nBlocks)
+	n, err := w.Write(nBlockBytes)
+	if err != nil {
+		return written + int64(n), err
+	}
+	written += int64(n)
+
+	// If number of blocks is 0, our work here is done.
+	if nBlocks == 0 {
+		return written, nil
+	}
+
+	// Write most recently seen block height.
+	heightBytes := make([]byte, 4) // 4 bytes for a int32
+	binary.LittleEndian.PutUint32(heightBytes, uint32(rb.lastHeight))
+	n, err = w.Write(heightBytes)
+	if err != nil {
+		return written + int64(n), err
+	}
+	written += int64(n)
+
+	// Write block hashes.
+	for _, hash := range rb.hashes {
+		n, err := w.Write(hash[:])
+		if err != nil {
+			return written + int64(n), err
+		}
+		written += int64(n)
+	}
+
+	return written, nil
+}
+
+// RecentBlockIterator is a type to iterate through recent-seen
+// blocks.
+type RecentBlockIterator interface {
+	Next() bool
+	Prev() bool
+	BlockStamp() *BlockStamp
+}
+
+func (rb *recentBlocks) NewIterator() RecentBlockIterator {
+	if rb.lastHeight == -1 {
+		return nil
+	}
+	return &blockIterator{
+		height: rb.lastHeight,
+		index:  len(rb.hashes) - 1,
+		rb:     rb,
+	}
+}
+
+func (it *blockIterator) Next() bool {
+	if it.index+1 >= len(it.rb.hashes) {
+		return false
+	}
+	it.index += 1
+	return true
+}
+
+func (it *blockIterator) Prev() bool {
+	if it.index-1 < 0 {
+		return false
+	}
+	it.index -= 1
+	return true
+}
+
+func (it *blockIterator) BlockStamp() *BlockStamp {
+	return &BlockStamp{
+		Height: it.rb.lastHeight - int32(len(it.rb.hashes)-1-it.index),
+		Hash:   *it.rb.hashes[it.index],
+	}
+}
+
+// unusedSpace is a wrapper type to read or write one or more types
+// that btcwallet fits into an unused space left by Armory's wallet file
+// format.
+type unusedSpace struct {
+	nBytes int // number of unused bytes that armory left.
+	rfvs   []ReaderFromVersion
+}
+
+func newUnusedSpace(nBytes int, rfvs ...ReaderFromVersion) *unusedSpace {
+	return &unusedSpace{
+		nBytes: nBytes,
+		rfvs:   rfvs,
+	}
+}
+
+func (u *unusedSpace) ReadFromVersion(v version, r io.Reader) (int64, error) {
+	var read int64
+
+	for _, rfv := range u.rfvs {
+		n, err := rfv.ReadFromVersion(v, r)
+		if err != nil {
+			return read + n, err
+		}
+		read += n
+		if read > int64(u.nBytes) {
+			return read, errors.New("read too much from armory's unused space")
+		}
+	}
+
+	// Read rest of actually unused bytes.
+	unused := make([]byte, u.nBytes-int(read))
+	n, err := r.Read(unused)
+	return read + int64(n), err
+}
+
+func (u *unusedSpace) WriteTo(w io.Writer) (int64, error) {
+	var written int64
+
+	for _, wt := range u.rfvs {
+		n, err := wt.WriteTo(w)
+		if err != nil {
+			return written + n, err
+		}
+		written += n
+		if written > int64(u.nBytes) {
+			return written, errors.New("wrote too much to armory's unused space")
+		}
+	}
+
+	// Write rest of actually unused bytes.
+	unused := make([]byte, u.nBytes-int(written))
+	n, err := w.Write(unused)
+	return written + int64(n), err
 }
 
 type btcAddress struct {
