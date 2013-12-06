@@ -147,8 +147,6 @@ func (a *Account) writeDirtyToDisk() error {
 		}
 		tmpfile.Close()
 
-		// TODO(jrick): this should be atomic on *nix, but is not on
-		// Windows.  Use _windows.go to provide atomic renames.
 		if err = Rename(tmpfilepath, utxofilepath); err != nil {
 			return err
 		}
@@ -173,8 +171,6 @@ func (a *Account) writeDirtyToDisk() error {
 		}
 		tmpfile.Close()
 
-		// TODO(jrick): this should be atomic on *nix, but is not on
-		// Windows.  Use _windows.go to provide atomic renames.
 		if err = Rename(tmpfilepath, txfilepath); err != nil {
 			return err
 		}
@@ -199,8 +195,6 @@ func (a *Account) writeDirtyToDisk() error {
 		}
 		tmpfile.Close()
 
-		// TODO(jrick): this should be atomic on *nix, but is not on
-		// Windows.  Use _windows.go to provide atomic renames.
 		if err = Rename(tmpfilepath, wfilepath); err != nil {
 			return err
 		}
