@@ -55,7 +55,7 @@ type config struct {
 	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for btcd authorization"`
 	RPCCert      string   `long:"rpccert" description:"File containing the certificate file"`
 	RPCKey       string   `long:"rpckey" description:"File containing the certificate key"`
-	MainNet      bool     `long:"mainnet" description:"*DISABLED* Use the main Bitcoin network (default testnet3)"`
+	MainNet      bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
 	Proxy        string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
 	ProxyUser    string   `long:"proxyuser" description:"Username for proxy server"`
 	ProxyPass    string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
@@ -199,7 +199,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Choose the active network params based on the mainnet net flag.
 	if cfg.MainNet {
-		//activeNetParams = netParams(btcwire.MainNet)
+		activeNetParams = netParams(btcwire.MainNet)
 	}
 
 	// Validate debug log level
