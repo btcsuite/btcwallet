@@ -597,6 +597,11 @@ func NotifyNewBlockChainHeight(reply chan []byte, height int32) {
 
 // NtfnBlockConnected handles btcd notifications resulting from newly
 // connected blocks to the main blockchain.
+//
+// TODO(jrick): Send block time with notification.  This will be used
+// to mark wallet files with a possibly-better earliest block height,
+// and will greatly reduce rescan times for wallets created with an
+// out of sync btcd.
 func NtfnBlockConnected(n btcws.Notification) {
 	bcn, ok := n.(*btcws.BlockConnectedNtfn)
 	if !ok {

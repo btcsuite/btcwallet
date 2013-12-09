@@ -1090,6 +1090,16 @@ func (w *Wallet) EarliestBlockHeight() int32 {
 	return height
 }
 
+// SetBetterEarliestBlockHeight sets a better earliest block height.
+// At wallet creation time, a earliest block is guessed, but this
+// could be incorrect if btcd is out of sync.  This function can be
+// used to correct a previous guess with a better value.
+func (w *Wallet) SetBetterEarliestBlockHeight(height int32) {
+	if height > w.keyGenerator.firstBlock {
+		w.keyGenerator.firstBlock = height
+	}
+}
+
 // ImportPrivateKey creates a new encrypted btcAddress with a
 // user-provided private key and adds it to the wallet.  If the
 // import is successful, the payment address string is returned.
@@ -1134,6 +1144,13 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool,
 	w.importedAddrs = append(w.importedAddrs, addr)
 
 	return addrstr, nil
+}
+
+// CreateDate returns the Unix time of the wallet creation time.  This
+// is used to compare the wallet creation time against block headers and
+// set a better minimum block height of where to being rescans.
+func (w *Wallet) CreateDate() int64 {
+	return w.createDate
 }
 
 // AddressInfo holds information regarding an address needed to manage
