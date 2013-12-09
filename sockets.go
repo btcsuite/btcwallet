@@ -887,13 +887,6 @@ func BtcdHandshake(ws *websocket.Conn) error {
 		return errors.New("btcd and btcwallet running on different Bitcoin networks")
 	}
 
-	// Get default account.  Only the default account is used to
-	// track recently-seen blocks.
-	a, err := accountstore.Account("")
-	if err != nil {
-		return fmt.Errorf("cannot get default account: %v", err)
-	}
-
 	// Get current best block.  If this is before than the oldest
 	// saved block hash, assume that this btcd instance is not yet
 	// synced up to a previous btcd that was last used with this
@@ -904,6 +897,13 @@ func BtcdHandshake(ws *websocket.Conn) error {
 	}
 	NotifyNewBlockChainHeight(frontendNotificationMaster, bs.Height)
 	NotifyBalances(frontendNotificationMaster)
+
+	// Get default account.  Only the default account is used to
+	// track recently-seen blocks.
+	a, err := accountstore.Account("")
+	if err != nil {
+		return nil
+	}
 
 	// TODO(jrick): if height is less than the earliest-saved block
 	// height, should probably wait for btcd to catch up.
