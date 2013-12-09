@@ -1,6 +1,9 @@
 btcwallet
 =========
 
+[![Build Status](https://travis-ci.org/conformal/btcwallet.png?branch=master)]
+(https://travis-ci.org/conformal/btcwallet)
+
 btcwallet is a daemon handling bitcoin wallet functions.  It relies on
 a running btcd instance for asynchronous blockchain queries and
 notifications over websockets.
