@@ -46,7 +46,7 @@ var (
 type config struct {
 	ShowVersion  bool     `short:"V" long:"version" description:"Display version information and exit"`
 	CAFile       string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
-	Connect      string   `short:"c" long:"connect" description:"Server and port of btcd instance to connect to"`
+	Connect      string   `short:"c" long:"connect" description:"Server and port of btcd instance to connect to (default localhost:18334, mainnet: localhost:8334)"`
 	DebugLevel   string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
 	SvrListeners []string `long:"listen" description:"Listen for RPC/websocket connections on this interface/port (default no listening.  default port: 18332, mainnet: 8332)"`
@@ -138,7 +138,6 @@ func loadConfig() (*config, []string, error) {
 		DebugLevel: defaultLogLevel,
 		CAFile:     defaultCAFile,
 		ConfigFile: defaultConfigFile,
-		Connect:    netParams(defaultBtcNet).connect,
 		DataDir:    defaultDataDir,
 		RPCKey:     defaultRPCKeyFile,
 		RPCCert:    defaultRPCCertFile,
@@ -212,6 +211,10 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	if cfg.Connect == "" {
+		cfg.Connect = activeNetParams.connect
+	}
+
 	// Add default port to connect flag if missing.
 	cfg.Connect = normalizeAddress(cfg.Connect, activeNetParams.btcdPort)
 
@@ -226,11 +229,6 @@ func loadConfig() (*config, []string, error) {
 			cfg.SvrListeners = append(cfg.SvrListeners, addr)
 		}
 	}
-
-	// Add default port to all listener addresses if needed and remove
-	// duplicate addresses.
-	cfg.SvrListeners = normalizeAddresses(cfg.SvrListeners,
-		activeNetParams.svrPort)
 
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
