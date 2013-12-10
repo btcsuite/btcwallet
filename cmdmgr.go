@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
@@ -59,6 +60,7 @@ var rpcHandlers = map[string]cmdHandler{
 
 // Extensions exclusive to websocket connections.
 var wsHandlers = map[string]cmdHandler{
+	"getaddressbalance":   GetAddressBalance,
 	"getbalances":         GetBalances,
 	"listalltransactions": ListAllTransactions,
 	"walletislocked":      WalletIsLocked,
@@ -281,6 +283,48 @@ func GetBalance(frontend chan []byte, icmd btcjson.Cmd) {
 // the frontend of all balances for each opened account.
 func GetBalances(frontend chan []byte, cmd btcjson.Cmd) {
 	NotifyBalances(frontend)
+}
+
+// GetAddressBalance replies to a getaddressbalance extension request
+// by replying with the current balance (sum of unspent transaction
+// output amounts) for a single address.
+func GetAddressBalance(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcws.GetAddressBalanceCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Is address valid?
+	pkhash, net, err := btcutil.DecodeAddress(cmd.Address)
+	if err != nil || net != cfg.Net() {
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
+		return
+	}
+
+	// Look up account which holds this address.
+	aname, err := LookupAccountByAddress(cmd.Address)
+	if err == ErrNotFound {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInvalidAddressOrKey.Code,
+			Message: "Address not found in wallet",
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	// Get the account which holds the address in the request.
+	// This should not fail, so if it does, return an internal
+	// error to the frontend.
+	a, err := accountstore.Account(aname)
+	if err != nil {
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	bal := a.CalculateAddressBalance(pkhash, int(cmd.Minconf))
+	ReplySuccess(frontend, cmd.Id(), bal)
 }
 
 // ImportPrivKey replies to an importprivkey request by parsing

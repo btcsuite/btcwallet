@@ -31,6 +31,39 @@ import (
 	"time"
 )
 
+// ErrNotFound describes an error where a map lookup failed due to a
+// key not being in the map.
+var ErrNotFound = errors.New("not found")
+
+// addressAccountMap holds a map of addresses to names of the
+// accounts that hold each address.
+var addressAccountMap = struct {
+	sync.RWMutex
+	m map[string]string
+}{
+	m: make(map[string]string),
+}
+
+// MarkAddressForAccount marks an address as belonging to an account.
+func MarkAddressForAccount(address, account string) {
+	addressAccountMap.Lock()
+	addressAccountMap.m[address] = account
+	addressAccountMap.Unlock()
+}
+
+// LookupAccountByAddress returns the account name for address.  error
+// will be set to ErrNotFound if the address has not been marked as
+// associated with any account.
+func LookupAccountByAddress(address string) (string, error) {
+	addressAccountMap.RLock()
+	defer addressAccountMap.RUnlock()
+	account, ok := addressAccountMap.m[address]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return account, nil
+}
+
 // Account is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style wallet (to store
 // addresses and keys), and tx and utxo data stores, along with locks
@@ -112,6 +145,37 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 		// added if confirmations is 0.
 		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
 			bal += u.Amt
+		}
+	}
+	a.UtxoStore.RUnlock()
+	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
+}
+
+// CalculateAddressBalance sums the amounts of all unspent transaction
+// outputs to a single address's pubkey hash and returns the balance
+// as a float64.
+//
+// If confirmations is 0, all UTXOs, even those not present in a
+// block (height -1), will be used to get the balance.  Otherwise,
+// a UTXO must be in a block.  If confirmations is 1 or greater,
+// the balance will be calculated based on how many how many blocks
+// include a UTXO.
+func (a *Account) CalculateAddressBalance(pubkeyHash []byte, confirms int) float64 {
+	var bal uint64 // Measured in satoshi
+
+	bs, err := GetCurBlock()
+	if bs.Height == int32(btcutil.BlockHeightUnknown) || err != nil {
+		return 0.
+	}
+
+	a.UtxoStore.RLock()
+	for _, u := range a.UtxoStore.s {
+		// Utxos not yet in blocks (height -1) should only be
+		// added if confirmations is 0.
+		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
+			if bytes.Equal(pubkeyHash, u.AddrHash[:]) {
+				bal += u.Amt
+			}
 		}
 	}
 	a.UtxoStore.RUnlock()
@@ -286,6 +350,9 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 	if err := a.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot write dirty wallet: %v", err)
 	}
+
+	// Associate the imported address with this account.
+	MarkAddressForAccount(addr, a.Name())
 
 	log.Infof("Imported payment address %v", addr)
 
@@ -462,6 +529,9 @@ func (a *Account) NewAddress() (string, error) {
 	if err = a.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot sync dirty wallet: %v", err)
 	}
+
+	// Mark this new address as belonging to this account.
+	MarkAddressForAccount(addr, a.Name())
 
 	// Request updates from btcd for new transactions sent to this address.
 	a.ReqNewTxsForAddress(addr)

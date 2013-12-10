@@ -250,6 +250,9 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 					return nil, fmt.Errorf("failed to get next address: %s", err)
 				}
 
+				// Mark change address as belonging to this account.
+				MarkAddressForAccount(changeAddr, a.Name())
+
 				changeAddrHash, _, err = btcutil.DecodeAddress(changeAddr)
 				if err != nil {
 					return nil, fmt.Errorf("cannot decode new address: %s", err)

@@ -418,5 +418,11 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 	default:
 		log.Warnf("cannot open wallet: %v", err)
 	}
+
+	// Mark all active payment addresses as belonging to this account.
+	for addr := range a.ActivePaymentAddresses() {
+		MarkAddressForAccount(addr, name)
+	}
+
 	return nil
 }
