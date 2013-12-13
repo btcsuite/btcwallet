@@ -93,7 +93,11 @@ func (a *Account) Lock() error {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 
-	return a.Wallet.Lock()
+	err := a.Wallet.Lock()
+	if err == nil {
+		NotifyWalletLockStateChange(a.Name(), true)
+	}
+	return err
 }
 
 // Unlock unlocks the underlying wallet for an account.
@@ -101,6 +105,10 @@ func (a *Account) Unlock(passphrase []byte, timeout int64) error {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 
+	err := a.Wallet.Unlock(passphrase)
+	if err == nil {
+		NotifyWalletLockStateChange(a.Name(), false)
+	}
 	return a.Wallet.Unlock(passphrase)
 }
 

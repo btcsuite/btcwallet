@@ -1055,7 +1055,6 @@ func WalletPassphrase(frontend chan []byte, icmd btcjson.Cmd) {
 	case nil:
 		ReplySuccess(frontend, cmd.Id(), nil)
 
-		NotifyWalletLockStateChange("", false)
 		go func(timeout int64) {
 			time.Sleep(time.Second * time.Duration(timeout))
 			_ = a.Lock()
@@ -1083,46 +1082,25 @@ type AccountNtfn struct {
 // NotifyWalletLockStateChange sends a notification to all frontends
 // that the wallet has just been locked or unlocked.
 func NotifyWalletLockStateChange(account string, locked bool) {
-	var id interface{} = "btcwallet:newwalletlockstate"
-	m := btcjson.Reply{
-		Result: &AccountNtfn{
-			Account:      account,
-			Notification: locked,
-		},
-		Id: &id,
-	}
-	msg, _ := json.Marshal(&m)
-	frontendNotificationMaster <- msg
+	ntfn := btcws.NewWalletLockStateNtfn(account, locked)
+	mntfn, _ := ntfn.MarshalJSON()
+	frontendNotificationMaster <- mntfn
 }
 
 // NotifyWalletBalance sends a confirmed account balance notification
 // to a frontend.
 func NotifyWalletBalance(frontend chan []byte, account string, balance float64) {
-	var id interface{} = "btcwallet:accountbalance"
-	m := btcjson.Reply{
-		Result: &AccountNtfn{
-			Account:      account,
-			Notification: balance,
-		},
-		Id: &id,
-	}
-	msg, _ := json.Marshal(&m)
-	frontend <- msg
+	ntfn := btcws.NewAccountBalanceNtfn(account, balance, true)
+	mntfn, _ := ntfn.MarshalJSON()
+	frontend <- mntfn
 }
 
 // NotifyWalletBalanceUnconfirmed sends a confirmed account balance
 // notification to a frontend.
 func NotifyWalletBalanceUnconfirmed(frontend chan []byte, account string, balance float64) {
-	var id interface{} = "btcwallet:accountbalanceunconfirmed"
-	m := btcjson.Reply{
-		Result: &AccountNtfn{
-			Account:      account,
-			Notification: balance,
-		},
-		Id: &id,
-	}
-	msg, _ := json.Marshal(&m)
-	frontend <- msg
+	ntfn := btcws.NewAccountBalanceNtfn(account, balance, false)
+	mntfn, _ := ntfn.MarshalJSON()
+	frontend <- mntfn
 }
 
 // NotifyNewTxDetails sends details of a new transaction to a frontend.

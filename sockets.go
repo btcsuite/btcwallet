@@ -345,7 +345,7 @@ func frontendListenerDuplicator() {
 				NotifyBtcdConnected(frontendNotificationMaster,
 					btcdConnected.b)
 				if bs, err := GetCurBlock(); err == nil {
-					NotifyNewBlockChainHeight(c, bs.Height)
+					NotifyNewBlockChainHeight(c, bs)
 					NotifyBalances(c)
 				}
 
@@ -381,13 +381,10 @@ func frontendListenerDuplicator() {
 // NotifyBtcdConnected notifies all frontends of a new btcd connection.
 func NotifyBtcdConnected(reply chan []byte, conn bool) {
 	btcdConnected.b = conn
-	var idStr interface{} = "btcwallet:btcdconnected"
-	r := btcjson.Reply{
-		Result: conn,
-		Id:     &idStr,
-	}
-	ntfn, _ := json.Marshal(r)
-	frontendNotificationMaster <- ntfn
+
+	ntfn := btcws.NewBtcdConnectedNtfn(conn)
+	mntfn, _ := ntfn.MarshalJSON()
+	frontendNotificationMaster <- mntfn
 }
 
 // frontendSendRecv is the handler function for websocket connections from
@@ -481,12 +478,12 @@ func BtcdHandler(ws *websocket.Conn, done chan struct{}) {
 	}()
 }
 
-type notificationHandler func(btcws.Notification)
+type notificationHandler func(btcjson.Cmd, []byte)
 
 var notificationHandlers = map[string]notificationHandler{
-	btcws.BlockConnectedNtfnId:    NtfnBlockConnected,
-	btcws.BlockDisconnectedNtfnId: NtfnBlockDisconnected,
-	btcws.TxMinedNtfnId:           NtfnTxMined,
+	btcws.BlockConnectedNtfnMethod:    NtfnBlockConnected,
+	btcws.BlockDisconnectedNtfnMethod: NtfnBlockDisconnected,
+	btcws.TxMinedNtfnMethod:           NtfnTxMined,
 }
 
 // ProcessBtcdNotificationReply unmarshalls the JSON notification or
@@ -495,29 +492,63 @@ var notificationHandlers = map[string]notificationHandler{
 // notifications are processed by btcwallet, and frontend notifications
 // are sent to every connected frontend.
 func ProcessBtcdNotificationReply(b []byte) {
-	// Check if the json id field was set by btcwallet.
-	var routeID uint64
-	var origID string
+	// Idea: instead of reading btcd messages from just one websocket
+	// connection, maybe use two so the same connection isn't used
+	// for both notifications and responses?  Should make handling
+	// must faster as unnecessary unmarshal attempts could be avoided.
 
-	var r btcjson.Reply
-	if err := json.Unmarshal(b, &r); err != nil {
-		log.Errorf("Unable to unmarshal btcd message: %v", err)
+	// Check for notifications first.
+	if req, err := btcjson.ParseMarshaledCmd(b); err == nil {
+		// btcd should not be sending Requests except for
+		// notifications.  Check for a nil id.
+		if req.Id() != nil {
+			// Invalid response
+			log.Warnf("btcd sent a non-notification JSON-RPC Request (ID: %v)",
+				req.Id())
+			return
+		}
+
+		// Message is a btcd notification.  Check the method and dispatch
+		// correct handler, or if no handler, pass up to each wallet.
+		if ntfnHandler, ok := notificationHandlers[req.Method()]; ok {
+			ntfnHandler(req, b)
+		} else {
+			// No handler; send to all wallets.
+			frontendNotificationMaster <- b
+		}
 		return
 	}
+
+	// b is not a Request notification, so it must be a Response.
+	// Attempt to parse it as one and handle.
+	var r btcjson.Reply
+	if err := json.Unmarshal(b, &r); err != nil {
+		log.Warn("Unable to process btcd message as notification or response")
+		return
+	}
+
+	// Check for a valid ID.
+	//
+	// TODO(jrick): Remove this terrible ID overloading.  Each
+	// passed-through request should be given a new unique ID number
+	// (reading from the NewJSONID channel) and a reply route with the
+	// frontend's incoming ID should be set.
 	if r.Id == nil {
-		// btcd should only ever be sending JSON messages with a string in
-		// the id field.  Log the error and drop the message.
-		log.Error("Unable to process btcd notification or reply.")
+		// Responses with no IDs cannot be handled.
+		log.Warn("Unable to process btcd response without ID")
 		return
 	}
 	idStr, ok := (*r.Id).(string)
 	if !ok {
-		// btcd should only ever be sending JSON messages with a string in
-		// the id field.  Log the error and drop the message.
+		// btcd's responses to btcwallet should (currently, see TODO above)
+		// only ever be sending string IDs.  If ID is not a string, log the
+		// error and drop the message.
 		log.Error("Incorrect btcd notification id type.")
 		return
 	}
 
+	var routeID uint64
+	var origID string
 	n, _ := fmt.Sscanf(idStr, "btcwallet(%d)-%s", &routeID, &origID)
 	if n == 1 {
 		// Request originated from btcwallet. Run and remove correct
@@ -565,34 +596,16 @@ func ProcessBtcdNotificationReply(b []byte) {
 			return
 		}
 		c <- b
-	} else {
-		// Message is a btcd notification.  Check the id and dispatch
-		// correct handler, or if no handler, pass up to each wallet.
-		if ntfnHandler, ok := notificationHandlers[idStr]; ok {
-			n, err := btcws.ParseMarshaledNtfn(idStr, b)
-			if err != nil {
-				log.Errorf("Error unmarshaling expected "+
-					"notification: %v", err)
-				return
-			}
-			ntfnHandler(n)
-			return
-		}
-
-		frontendNotificationMaster <- b
 	}
 }
 
 // NotifyNewBlockChainHeight notifies all frontends of a new
-// blockchain height.
-func NotifyNewBlockChainHeight(reply chan []byte, height int32) {
-	var id interface{} = "btcwallet:newblockchainheight"
-	msgRaw := &btcjson.Reply{
-		Result: height,
-		Id:     &id,
-	}
-	msg, _ := json.Marshal(msgRaw)
-	reply <- msg
+// blockchain height.  This sends the same notification as
+// btcd, so this can probably be removed.
+func NotifyNewBlockChainHeight(reply chan []byte, bs wallet.BlockStamp) {
+	ntfn := btcws.NewBlockConnectedNtfn(bs.Hash.String(), bs.Height)
+	mntfn, _ := ntfn.MarshalJSON()
+	reply <- mntfn
 }
 
 // NtfnBlockConnected handles btcd notifications resulting from newly
@@ -602,15 +615,15 @@ func NotifyNewBlockChainHeight(reply chan []byte, height int32) {
 // to mark wallet files with a possibly-better earliest block height,
 // and will greatly reduce rescan times for wallets created with an
 // out of sync btcd.
-func NtfnBlockConnected(n btcws.Notification) {
+func NtfnBlockConnected(n btcjson.Cmd, marshaled []byte) {
 	bcn, ok := n.(*btcws.BlockConnectedNtfn)
 	if !ok {
-		log.Errorf("%v handler: unexpected type", n.Id())
+		log.Errorf("%v handler: unexpected type", n.Method())
 		return
 	}
 	hash, err := btcwire.NewShaHashFromStr(bcn.Hash)
 	if err != nil {
-		log.Errorf("%v handler: invalid hash string", n.Id())
+		log.Errorf("%v handler: invalid hash string", n.Method())
 		return
 	}
 
@@ -630,22 +643,22 @@ func NtfnBlockConnected(n btcws.Notification) {
 
 	accountstore.BlockNotify(bs)
 
-	// Notify frontends of new blockchain height.
-	NotifyNewBlockChainHeight(frontendNotificationMaster, bcn.Height)
+	// Pass notification to frontends too.
+	frontendNotificationMaster <- marshaled
 }
 
 // NtfnBlockDisconnected handles btcd notifications resulting from
 // blocks disconnected from the main chain in the event of a chain
 // switch and notifies frontends of the new blockchain height.
-func NtfnBlockDisconnected(n btcws.Notification) {
+func NtfnBlockDisconnected(n btcjson.Cmd, marshaled []byte) {
 	bdn, ok := n.(*btcws.BlockDisconnectedNtfn)
 	if !ok {
-		log.Errorf("%v handler: unexpected type", n.Id())
+		log.Errorf("%v handler: unexpected type", n.Method())
 		return
 	}
 	hash, err := btcwire.NewShaHashFromStr(bdn.Hash)
 	if err != nil {
-		log.Errorf("%v handler: invalid hash string", n.Id())
+		log.Errorf("%v handler: invalid hash string", n.Method())
 		return
 	}
 
@@ -654,34 +667,34 @@ func NtfnBlockDisconnected(n btcws.Notification) {
 		accountstore.Rollback(bdn.Height, hash)
 	}()
 
-	// Notify frontends of new blockchain height.
-	NotifyNewBlockChainHeight(frontendNotificationMaster, bdn.Height)
+	// Pass notification to frontends too.
+	frontendNotificationMaster <- marshaled
 }
 
 // NtfnTxMined handles btcd notifications resulting from newly
 // mined transactions that originated from this wallet.
-func NtfnTxMined(n btcws.Notification) {
+func NtfnTxMined(n btcjson.Cmd, marshaled []byte) {
 	tmn, ok := n.(*btcws.TxMinedNtfn)
 	if !ok {
-		log.Errorf("%v handler: unexpected type", n.Id())
+		log.Errorf("%v handler: unexpected type", n.Method())
 		return
 	}
 
 	txid, err := btcwire.NewShaHashFromStr(tmn.TxID)
 	if err != nil {
-		log.Errorf("%v handler: invalid hash string", n.Id())
+		log.Errorf("%v handler: invalid hash string", n.Method())
 		return
 	}
 	blockhash, err := btcwire.NewShaHashFromStr(tmn.BlockHash)
 	if err != nil {
-		log.Errorf("%v handler: invalid block hash string", n.Id())
+		log.Errorf("%v handler: invalid block hash string", n.Method())
 		return
 	}
 
 	err = accountstore.RecordMinedTx(txid, blockhash,
 		tmn.BlockHeight, tmn.Index, tmn.BlockTime)
 	if err != nil {
-		log.Errorf("%v handler: %v", n.Id(), err)
+		log.Errorf("%v handler: %v", n.Method(), err)
 		return
 	}
 
@@ -900,7 +913,7 @@ func BtcdHandshake(ws *websocket.Conn) error {
 	if err != nil {
 		return fmt.Errorf("cannot get best block: %v", err)
 	}
-	NotifyNewBlockChainHeight(frontendNotificationMaster, bs.Height)
+	NotifyNewBlockChainHeight(frontendNotificationMaster, bs)
 	NotifyBalances(frontendNotificationMaster)
 
 	// Get default account.  Only the default account is used to
