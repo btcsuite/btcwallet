@@ -357,6 +357,7 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 	a.mtx.Unlock()
 	if err := a.writeDirtyToDisk(); err != nil {
 		log.Errorf("cannot write dirty wallet: %v", err)
+		return "", fmt.Errorf("import failed: cannot write wallet: %v", err)
 	}
 
 	// Associate the imported address with this account.
