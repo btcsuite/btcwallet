@@ -65,6 +65,7 @@ var TxFeeIncrement = struct {
 // for change (if any).
 type CreatedTx struct {
 	rawTx      []byte
+	txid       btcwire.ShaHash
 	time       time.Time
 	inputs     []*tx.Utxo
 	outputs    []tx.Pair
@@ -326,6 +327,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 				out := tx.Pair{
 					Amount:     int64(change),
 					PubkeyHash: changeAddrHash,
+					Change:     true,
 				}
 				outputs = append(outputs, out)
 
@@ -357,10 +359,16 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		}
 	}
 
+	txid, err := msgtx.TxSha()
+	if err != nil {
+		return nil, fmt.Errorf("cannot create txid for created tx: %v", err)
+	}
+
 	buf := new(bytes.Buffer)
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
 	info := &CreatedTx{
 		rawTx:      buf.Bytes(),
+		txid:       txid,
 		time:       time.Now(),
 		inputs:     selectedInputs,
 		outputs:    outputs,

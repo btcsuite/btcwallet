@@ -644,6 +644,11 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		log.Error("Tx Handler: Unspecified receiver.")
 		return false
 	}
+	receiverHash, _, err := btcutil.DecodeAddress(receiver)
+	if err != nil {
+		log.Errorf("Tx Handler: receiver address can not be decoded: %v", err)
+		return false
+	}
 	height, ok := v["height"].(float64)
 	if !ok {
 		log.Error("Tx Handler: Unspecified height.")
@@ -652,6 +657,11 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 	blockHashBE, ok := v["blockhash"].(string)
 	if !ok {
 		log.Error("Tx Handler: Unspecified block hash.")
+		return false
+	}
+	blockHash, err := btcwire.NewShaHashFromStr(blockHashBE)
+	if err != nil {
+		log.Errorf("Tx Handler: Block hash string cannot be parsed: %v", err)
 		return false
 	}
 	fblockIndex, ok := v["blockindex"].(float64)
@@ -671,12 +681,17 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		log.Error("Tx Handler: Unspecified transaction hash.")
 		return false
 	}
+	txID, err := btcwire.NewShaHashFromStr(txhashBE)
+	if err != nil {
+		log.Errorf("Tx Handler: Tx hash string cannot be parsed: %v", err)
+		return false
+	}
 	ftxOutIndex, ok := v["txoutindex"].(float64)
 	if !ok {
 		log.Error("Tx Handler: Unspecified transaction output index.")
 		return false
 	}
-	txOutIndex := int32(ftxOutIndex)
+	txOutIndex := uint32(ftxOutIndex)
 	amt, ok := v["amount"].(float64)
 	if !ok {
 		log.Error("Tx Handler: Unspecified amount.")
@@ -693,30 +708,22 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		spent = tspent
 	}
 
-	// btcd sends the block and tx hashes as BE strings.  Convert both
-	// to a LE ShaHash.
-	blockHash, err := btcwire.NewShaHashFromStr(blockHashBE)
-	if err != nil {
-		log.Errorf("Tx Handler: Block hash string cannot be parsed: %v", err)
-		return false
-	}
-	txID, err := btcwire.NewShaHashFromStr(txhashBE)
-	if err != nil {
-		log.Errorf("Tx Handler: Tx hash string cannot be parsed: %v", err)
-		return false
-	}
-	receiverHash, _, err := btcutil.DecodeAddress(receiver)
-	if err != nil {
-		log.Errorf("Tx Handler: receiver address can not be decoded: %v", err)
-		return false
+	if int32(height) != -1 {
+		worker := NotifyBalanceWorker{
+			block: *blockHash,
+			wg:    make(chan *sync.WaitGroup),
+		}
+		NotifyBalanceSyncerChans.add <- worker
+		wg := <-worker.wg
+		defer func() {
+			wg.Done()
+		}()
 	}
 
-	// Add to TxStore.
-	//
-	// TODO(jrick): check for duplicates.  This could occur if we're
-	// adding txs for an out of sync btcd on its IBD.
+	// Create RecvTx to add to tx history.
 	t := &tx.RecvTx{
 		TxID:         *txID,
+		TxOutIdx:     txOutIndex,
 		TimeReceived: time.Now().Unix(),
 		BlockHeight:  int32(height),
 		BlockHash:    *blockHash,
@@ -726,44 +733,49 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		ReceiverHash: receiverHash,
 	}
 
+	// For transactions originating from this wallet, the sent tx history should
+	// be recorded before the received history.  If wallet created this tx, wait
+	// for the sent history to finish being recorded before continuing.
+	req := SendTxHistSyncRequest{
+		txid:     *txID,
+		response: make(chan SendTxHistSyncResponse),
+	}
+	SendTxHistSyncChans.access <- req
+	resp := <-req.response
+	if resp.ok {
+		// Wait until send history has been recorded.
+		<-resp.c
+		SendTxHistSyncChans.remove <- *txID
+	}
+
+	// Actually record the tx history.
 	a.TxStore.Lock()
-	txs := a.TxStore.s
-	a.TxStore.s = append(txs, t)
+	a.TxStore.s.InsertRecvTx(t)
 	a.TxStore.dirty = true
 	a.TxStore.Unlock()
 
-	// Notify frontends of new tx.
-	NotifyNewTxDetails(frontendNotificationMaster, a.Name(), t.TxInfo(a.Name(),
-		int32(height), a.Wallet.Net()))
+	// Notify frontends of tx.  If the tx is unconfirmed, it is always
+	// notified and the outpoint is marked as notified.  If the outpoint
+	// has already been notified and is now in a block, a txmined notifiction
+	// should be sent once to let frontends that all previous send/recvs
+	// for this unconfirmed tx are now confirmed.
+	recvTxOP := btcwire.NewOutPoint(txID, txOutIndex)
+	previouslyNotifiedReq := NotifiedRecvTxRequest{
+		op:       *recvTxOP,
+		response: make(chan NotifiedRecvTxResponse),
+	}
+	NotifiedRecvTxChans.access <- previouslyNotifiedReq
+	if <-previouslyNotifiedReq.response {
+		NotifyMinedTx <- t
+		NotifiedRecvTxChans.remove <- *recvTxOP
+	} else {
+		// Notify frontends of new recv tx and mark as notified.
+		NotifiedRecvTxChans.add <- *recvTxOP
+		NotifyNewTxDetails(frontendNotificationMaster, a.Name(), t.TxInfo(a.Name(),
+			int32(height), a.Wallet.Net()))
+	}
 
 	if !spent {
-		// First, iterate through all stored utxos.  If an unconfirmed utxo
-		// (not present in a block) has the same outpoint as this utxo,
-		// update the block height and hash.
-		a.UtxoStore.RLock()
-		for _, u := range a.UtxoStore.s {
-			if bytes.Equal(u.Out.Hash[:], txID[:]) && u.Out.Index == uint32(txOutIndex) {
-				// Found a either a duplicate, or a change UTXO.  If not change,
-				// ignore it.
-				a.UtxoStore.RUnlock()
-				if u.Height != -1 {
-					return false
-				}
-
-				a.UtxoStore.Lock()
-				copy(u.BlockHash[:], blockHash[:])
-				u.Height = int32(height)
-				a.UtxoStore.dirty = true
-				a.UtxoStore.Unlock()
-
-				return false
-			}
-		}
-		a.UtxoStore.RUnlock()
-
-		// After iterating through all UTXOs, it was not a duplicate or
-		// change UTXO appearing in a block.  Append a new Utxo to the end.
-
 		u := &tx.Utxo{
 			Amt:       uint64(amt),
 			Height:    int32(height),
@@ -774,13 +786,18 @@ func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) boo
 		copy(u.AddrHash[:], receiverHash)
 		copy(u.BlockHash[:], blockHash[:])
 		a.UtxoStore.Lock()
-		a.UtxoStore.s = append(a.UtxoStore.s, u)
+		a.UtxoStore.s.Insert(u)
 		a.UtxoStore.dirty = true
 		a.UtxoStore.Unlock()
 
-		// If this notification came from mempool (TODO: currently
-		// unimplemented) notify the new unconfirmed balance immediately.
-		// Otherwise, wait until the blockconnection notifiation is processed.
+		// If this notification came from mempool, notify frontends of
+		// the new unconfirmed balance immediately.  Otherwise, wait until
+		// the blockconnected notifiation is processed.
+		if u.Height == -1 {
+			bal := a.CalculateBalance(0) - a.CalculateBalance(1)
+			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster,
+				a.name, bal)
+		}
 	}
 
 	// Never remove this handler.

@@ -27,6 +27,7 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
+	"sync"
 	"time"
 )
 
@@ -636,7 +637,7 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// If a change address was added, mark wallet as dirty, sync to disk,
-	// and Request updates for change address.
+	// and request updates for change address.
 	if len(createdTx.changeAddr) != 0 {
 		a.dirty = true
 		if err := a.writeDirtyToDisk(); err != nil {
@@ -751,6 +752,10 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
+	// Mark txid as having send history so handlers adding receive history
+	// wait until all send history has been written.
+	SendTxHistSyncChans.add <- createdTx.txid
+
 	// Set up a reply handler to respond to the btcd reply.
 	replyHandlers.Lock()
 	replyHandlers.m[n] = func(result interface{}, err *btcjson.Error) bool {
@@ -763,6 +768,61 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 	btcdMsgs <- m
 }
 
+// Channels to manage SendBeforeReceiveHistorySync.
+var SendTxHistSyncChans = struct {
+	add, done, remove chan btcwire.ShaHash
+	access            chan SendTxHistSyncRequest
+}{
+	add:    make(chan btcwire.ShaHash),
+	remove: make(chan btcwire.ShaHash),
+	done:   make(chan btcwire.ShaHash),
+	access: make(chan SendTxHistSyncRequest),
+}
+
+// SendTxHistSyncRequest requests a SendTxHistSyncResponse from
+// SendBeforeReceiveHistorySync.
+type SendTxHistSyncRequest struct {
+	txid     btcwire.ShaHash
+	response chan SendTxHistSyncResponse
+}
+
+// SendTxHistSyncResponse is the response
+type SendTxHistSyncResponse struct {
+	c  chan struct{}
+	ok bool
+}
+
+// SendBeforeReceiveHistorySync manages a set of transaction hashes
+// created by this wallet.  For each newly added txid, a channel is
+// created.  Once the send history has been recorded, the txid should
+// be messaged across done, causing the internal channel to be closed.
+// Before receive history is recorded, access should be used to check
+// if there are or were any goroutines writing send history, and if
+// so, wait until the channel is closed after a done message.
+func SendBeforeReceiveHistorySync(add, done, remove chan btcwire.ShaHash,
+	access chan SendTxHistSyncRequest) {
+
+	m := make(map[btcwire.ShaHash]chan struct{})
+	for {
+		select {
+		case txid := <-add:
+			m[txid] = make(chan struct{})
+
+		case txid := <-remove:
+			delete(m, txid)
+
+		case txid := <-done:
+			if c, ok := m[txid]; ok {
+				close(c)
+			}
+
+		case req := <-access:
+			c, ok := m[req.txid]
+			req.response <- SendTxHistSyncResponse{c: c, ok: ok}
+		}
+	}
+}
+
 func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	result interface{}, e *btcjson.Error, a *Account,
 	txInfo *CreatedTx) bool {
@@ -770,6 +830,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 	if e != nil {
 		log.Errorf("Could not send tx: %v", e.Message)
 		ReplyError(frontend, icmd.Id(), e)
+		SendTxHistSyncChans.remove <- txInfo.txid
 		return true
 	}
 
@@ -780,6 +841,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 			Message: "Unexpected type from btcd reply",
 		}
 		ReplyError(frontend, icmd.Id(), e)
+		SendTxHistSyncChans.remove <- txInfo.txid
 		return true
 	}
 	txID, err := btcwire.NewShaHashFromStr(txIDStr)
@@ -789,6 +851,7 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 			Message: "Invalid hash string from btcd reply",
 		}
 		ReplyError(frontend, icmd.Id(), e)
+		SendTxHistSyncChans.remove <- txInfo.txid
 		return true
 	}
 
@@ -814,17 +877,13 @@ func handleSendRawTxReply(frontend chan []byte, icmd btcjson.Cmd,
 		}
 	}
 
+	// Signal that received notifiations are ok to add now.
+	SendTxHistSyncChans.done <- txInfo.txid
+
 	// Remove previous unspent outputs now spent by the tx.
 	a.UtxoStore.Lock()
 	modified := a.UtxoStore.s.Remove(txInfo.inputs)
 	a.UtxoStore.dirty = a.UtxoStore.dirty || modified
-
-	// Add unconfirmed change utxo (if any) to UtxoStore.
-	if txInfo.changeUtxo != nil {
-		a.UtxoStore.s = append(a.UtxoStore.s, txInfo.changeUtxo)
-		a.ReqSpentUtxoNtfn(txInfo.changeUtxo)
-		a.UtxoStore.dirty = true
-	}
 	a.UtxoStore.Unlock()
 
 	// Disk sync tx and utxo stores.
@@ -1110,4 +1169,141 @@ func NotifyNewTxDetails(frontend chan []byte, account string,
 	ntfn := btcws.NewTxNtfn(account, details)
 	mntfn, _ := ntfn.MarshalJSON()
 	frontend <- mntfn
+}
+
+// NotifiedRecvTxRequest is used to check whether the outpoint of
+// a received transaction has already been notified due to
+// arriving first in the btcd mempool.
+type NotifiedRecvTxRequest struct {
+	op       btcwire.OutPoint
+	response chan NotifiedRecvTxResponse
+}
+
+// NotifiedRecvTxResponse is the response of a NotifiedRecvTxRequest
+// request.
+type NotifiedRecvTxResponse bool
+
+// NotifiedRecvTxChans holds the channels to manage
+// StoreNotifiedMempoolTxs.
+var NotifiedRecvTxChans = struct {
+	add, remove chan btcwire.OutPoint
+	access      chan NotifiedRecvTxRequest
+}{
+	add:    make(chan btcwire.OutPoint),
+	remove: make(chan btcwire.OutPoint),
+	access: make(chan NotifiedRecvTxRequest),
+}
+
+// StoreNotifiedMempoolRecvTxs maintains a set of previously-sent
+// received transaction notifications originating from the btcd
+// mempool. This is used to prevent duplicate frontend transaction
+// notifications once a mempool tx is mined into a block.
+func StoreNotifiedMempoolRecvTxs(add, remove chan btcwire.OutPoint,
+	access chan NotifiedRecvTxRequest) {
+
+	m := make(map[btcwire.OutPoint]struct{})
+	for {
+		select {
+		case op := <-add:
+			m[op] = struct{}{}
+
+		case op := <-remove:
+			if _, ok := m[op]; ok {
+				delete(m, op)
+			}
+
+		case req := <-access:
+			_, ok := m[req.op]
+			req.response <- NotifiedRecvTxResponse(ok)
+		}
+	}
+}
+
+// Channel to send received transactions that were previously
+// notified to frontends by the mempool.  A TxMined notification
+// is sent to all connected frontends detailing the block information
+// about the now confirmed transaction.
+var NotifyMinedTx = make(chan *tx.RecvTx)
+
+// NotifyMinedTxSender reads received transactions from in, notifying
+// frontends that the tx has now been confirmed in a block.  Duplicates
+// are filtered out.
+func NotifyMinedTxSender(in chan *tx.RecvTx) {
+	// Create a map to hold a set of already notified
+	// txids.  Do not send duplicates.
+	m := make(map[btcwire.ShaHash]struct{})
+
+	for recv := range in {
+		if _, ok := m[recv.TxID]; !ok {
+			ntfn := btcws.NewTxMinedNtfn(recv.TxID.String(),
+				recv.BlockHash.String(), recv.BlockHeight,
+				recv.BlockTime, int(recv.BlockIndex))
+			mntfn, _ := ntfn.MarshalJSON()
+			frontendNotificationMaster <- mntfn
+
+			// Mark as sent.
+			m[recv.TxID] = struct{}{}
+		}
+	}
+}
+
+// NotifyBalanceSyncerChans holds channels for accessing
+// the NotifyBalanceSyncer goroutine.
+var NotifyBalanceSyncerChans = struct {
+	add    chan NotifyBalanceWorker
+	remove chan btcwire.ShaHash
+	access chan NotifyBalanceRequest
+}{
+	add:    make(chan NotifyBalanceWorker),
+	remove: make(chan btcwire.ShaHash),
+	access: make(chan NotifyBalanceRequest),
+}
+
+// NotifyBalanceWorker holds a block hash to add a worker to
+// NotifyBalanceSyncer and uses a chan to returns the WaitGroup
+// which should be decremented with Done after the worker is finished.
+type NotifyBalanceWorker struct {
+	block btcwire.ShaHash
+	wg    chan *sync.WaitGroup
+}
+
+// NotifyBalanceRequest is used by the blockconnected notification handler
+// to access and wait on the the WaitGroup for workers currently processing
+// transactions for a block.  If no handlers have been added, a nil
+// WaitGroup is returned.
+type NotifyBalanceRequest struct {
+	block btcwire.ShaHash
+	wg    chan *sync.WaitGroup
+}
+
+// NotifyBalanceSyncer maintains a map of block hashes to WaitGroups
+// for worker goroutines that must finish before it is safe to notify
+// frontends of a new balance in the blockconnected notification handler.
+func NotifyBalanceSyncer(add chan NotifyBalanceWorker,
+	remove chan btcwire.ShaHash,
+	access chan NotifyBalanceRequest) {
+
+	m := make(map[btcwire.ShaHash]*sync.WaitGroup)
+
+	for {
+		select {
+		case worker := <-add:
+			wg, ok := m[worker.block]
+			if !ok {
+				wg = &sync.WaitGroup{}
+				m[worker.block] = wg
+			}
+			wg.Add(1)
+			m[worker.block] = wg
+			worker.wg <- wg
+
+		case block := <-remove:
+			if _, ok := m[block]; ok {
+				delete(m, block)
+			}
+
+		case req := <-access:
+			req.wg <- m[req.block]
+		}
+	}
 }

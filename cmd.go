@@ -239,6 +239,19 @@ func main() {
 	// Begin generating new IDs for JSON calls.
 	go JSONIDGenerator(NewJSONID)
 
+	// Begin maintanence goroutines.
+	go SendBeforeReceiveHistorySync(SendTxHistSyncChans.add,
+		SendTxHistSyncChans.done,
+		SendTxHistSyncChans.remove,
+		SendTxHistSyncChans.access)
+	go StoreNotifiedMempoolRecvTxs(NotifiedRecvTxChans.add,
+		NotifiedRecvTxChans.remove,
+		NotifiedRecvTxChans.access)
+	go NotifyMinedTxSender(NotifyMinedTx)
+	go NotifyBalanceSyncer(NotifyBalanceSyncerChans.add,
+		NotifyBalanceSyncerChans.remove,
+		NotifyBalanceSyncerChans.access)
+
 	for {
 		replies := make(chan error)
 		done := make(chan int)

@@ -639,8 +639,16 @@ func NtfnBlockConnected(n btcjson.Cmd, marshaled []byte) {
 	// btcd notifies btcwallet about transactions first, and then sends
 	// the new block notification.  New balance notifications for txs
 	// in blocks are therefore sent here after all tx notifications
-	// have arrived.
-
+	// have arrived and finished being processed by the handlers.
+	workers := NotifyBalanceRequest{
+		block: *hash,
+		wg:    make(chan *sync.WaitGroup),
+	}
+	NotifyBalanceSyncerChans.access <- workers
+	if wg := <-workers.wg; wg != nil {
+		wg.Wait()
+		NotifyBalanceSyncerChans.remove <- *hash
+	}
 	accountstore.BlockNotify(bs)
 
 	// Pass notification to frontends too.

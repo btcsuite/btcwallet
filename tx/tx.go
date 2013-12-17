@@ -43,10 +43,32 @@ const (
 	sendTxHeader
 )
 
-// File format versions.
-const (
-	utxoFileVersion uint32 = 0
-	txFileVersion   uint32 = 0
+// ReaderFromVersion is an io.ReaderFrom and io.WriterTo that
+// can specify any particular wallet file format for reading
+// depending on the wallet file version.
+type ReaderFromVersion interface {
+	ReadFromVersion(uint32, io.Reader) (int64, error)
+	io.WriterTo
+}
+
+// Various versions.
+var (
+	// First file version used.
+	utxoVersFirst uint32 = 0
+	txVersFirst   uint32 = 0
+
+	// txVersRecvTxIndex is the version where the txout index
+	// was added to the RecvTx struct.
+	txVersRecvTxIndex uint32 = 1
+
+	// txVersMarkSentChange is the version where serialized SentTx
+	// added a flags field, used for marking a sent transaction
+	// as change.
+	txVersMarkSentChange uint32 = 2
+
+	// Current versions
+	utxoVersCurrent = utxoVersFirst
+	txVersCurrent   = txVersRecvTxIndex
 )
 
 // UtxoStore is a type used for holding all Utxo structures for all
@@ -159,6 +181,7 @@ func (p *pubkeyHash) WriteTo(w io.Writer) (int64, error) {
 // received by an address in a wallet.
 type RecvTx struct {
 	TxID         btcwire.ShaHash
+	TxOutIdx     uint32
 	TimeReceived int64
 	BlockHeight  int32
 	BlockHash    btcwire.ShaHash
@@ -178,8 +201,7 @@ var pairsVar = Pairs([]Pair{})
 var _ io.ReaderFrom = &pairsVar
 var _ io.WriterTo = &pairsVar
 
-// ReadFrom reades a Pair slice from r.  Part of the io.ReaderFrom interface.
-func (p *Pairs) ReadFrom(r io.Reader) (int64, error) {
+func (p *Pairs) ReadFromVersion(vers uint32, r io.Reader) (int64, error) {
 	var read int64
 
 	nPairsBytes := make([]byte, 4) // Raw bytes for a uint32.
@@ -192,7 +214,7 @@ func (p *Pairs) ReadFrom(r io.Reader) (int64, error) {
 	s := make([]Pair, nPairs)
 
 	for i := range s {
-		n, err := s[i].ReadFrom(r)
+		n, err := s[i].ReadFromVersion(vers, r)
 		if err != nil {
 			return read + n, err
 		}
@@ -201,6 +223,10 @@ func (p *Pairs) ReadFrom(r io.Reader) (int64, error) {
 
 	*p = s
 	return read, nil
+}
+
+func (p *Pairs) ReadFrom(r io.Reader) (int64, error) {
+	return p.ReadFromVersion(txVersCurrent, r)
 }
 
 // WriteTo writes a Pair slice to w.  Part of the io.WriterTo interface.
@@ -234,12 +260,39 @@ func (p *Pairs) WriteTo(w io.Writer) (int64, error) {
 type Pair struct {
 	PubkeyHash pubkeyHash
 	Amount     int64 // Measured in Satoshis
+	Change     bool
 }
 
 // Enforce that Pair satisifies the io.ReaderFrom and io.WriterTo
 // interfaces.
 var _ io.ReaderFrom = &Pair{}
 var _ io.WriterTo = &Pair{}
+
+func (p *Pair) ReadFromVersion(vers uint32, r io.Reader) (int64, error) {
+	if vers >= txVersMarkSentChange {
+		// Use latest version
+		return p.ReadFrom(r)
+	}
+
+	// Old version did not read flags.
+	var read int64
+
+	n, err := p.PubkeyHash.ReadFrom(r)
+	if err != nil {
+		return n, err
+	}
+	read += n
+
+	amountBytes := make([]byte, 8) // raw bytes for a uint64
+	nr, err := r.Read(amountBytes)
+	if err != nil {
+		return read + int64(nr), err
+	}
+	read += int64(nr)
+	p.Amount = int64(binary.LittleEndian.Uint64(amountBytes))
+
+	return read, nil
+}
 
 // ReadFrom reads a serialized Pair from r.  Part of the io.ReaderFrom
 // interface.
@@ -259,6 +312,15 @@ func (p *Pair) ReadFrom(r io.Reader) (int64, error) {
 	}
 	read += int64(nr)
 	p.Amount = int64(binary.LittleEndian.Uint64(amountBytes))
+
+	// Read flags.
+	flags := make([]byte, 1) // raw bytes for 1 byte of flags
+	nr, err = r.Read(flags)
+	if err != nil {
+		return read + int64(nr), err
+	}
+	read += int64(nr)
+	p.Change = flags[0]&1<<0 == 1<<0
 
 	return read, nil
 }
@@ -363,7 +425,7 @@ func (u *UtxoStore) WriteTo(w io.Writer) (int64, error) {
 
 	// Write file version.  This is currently not used.
 	versionBytes := make([]byte, 4) // bytes for a uint32
-	binary.LittleEndian.PutUint32(versionBytes, utxoFileVersion)
+	binary.LittleEndian.PutUint32(versionBytes, utxoVersCurrent)
 	n, err := w.Write(versionBytes)
 	if err != nil {
 		return int64(n), err
@@ -381,6 +443,30 @@ func (u *UtxoStore) WriteTo(w io.Writer) (int64, error) {
 	}
 
 	return written, nil
+}
+
+// Insert inserts an Utxo into the store.
+func (u *UtxoStore) Insert(utxo *Utxo) {
+	s := *u
+	defer func() {
+		*u = s
+	}()
+
+	// First, iterate through all stored utxos.  If an unconfirmed utxo
+	// (not present in a block) has the same outpoint as this utxo,
+	// update the block height and hash.
+	for i := range s {
+		if bytes.Equal(s[i].Out.Hash[:], utxo.Out.Hash[:]) && s[i].Out.Index == utxo.Out.Index {
+			// Fill relevant block information.
+			copy(s[i].BlockHash[:], utxo.BlockHash[:])
+			s[i].Height = utxo.Height
+			return
+		}
+	}
+
+	// After iterating through all UTXOs, it was not a duplicate or
+	// change UTXO appearing in a block.  Append a new Utxo to the end.
+	s = append(s, utxo)
 }
 
 // Rollback removes all utxos from and after the block specified
@@ -619,6 +705,7 @@ func (txs *TxStore) ReadFrom(r io.Reader) (int64, error) {
 	if err != nil {
 		return int64(n), err
 	}
+	vers := binary.LittleEndian.Uint32(versionBytes)
 	read += int64(n)
 
 	store := []interface{}{}
@@ -639,23 +726,29 @@ func (txs *TxStore) ReadFrom(r io.Reader) (int64, error) {
 		read += n
 
 		var tx io.ReaderFrom
+		// Read tx.
 		switch header {
 		case recvTxHeader:
-			tx = new(RecvTx)
+			t := new(RecvTx)
+			n, err = t.ReadFromVersion(vers, r)
+			if err != nil {
+				return read + n, err
+			}
+			read += n
+			tx = t
 
 		case sendTxHeader:
-			tx = new(SendTx)
+			t := new(SendTx)
+			n, err = t.ReadFromVersion(vers, r)
+			if err != nil {
+				return read + n, err
+			}
+			read += n
+			tx = t
 
 		default:
 			return n, fmt.Errorf("unknown Tx header")
 		}
-
-		// Read tx
-		n, err = tx.ReadFrom(r)
-		if err != nil {
-			return read + n, err
-		}
-		read += n
 
 		store = append(store, tx)
 	}
@@ -671,7 +764,7 @@ func (txs *TxStore) WriteTo(w io.Writer) (int64, error) {
 
 	// Write file version.  This is currently not used.
 	versionBytes := make([]byte, 4) // bytes for a uint32
-	binary.LittleEndian.PutUint32(versionBytes, utxoFileVersion)
+	binary.LittleEndian.PutUint32(versionBytes, utxoVersCurrent)
 	n, err := w.Write(versionBytes)
 	if err != nil {
 		return int64(n), err
@@ -706,6 +799,41 @@ func (txs *TxStore) WriteTo(w io.Writer) (int64, error) {
 		written += n
 	}
 	return written, nil
+}
+
+// InsertRecvTx inserts a RecvTx, checking for duplicates, and updating
+// previous entries with the latest block information in tx.
+func (txs *TxStore) InsertRecvTx(tx *RecvTx) {
+	s := *txs
+	defer func() {
+		*txs = s
+	}()
+
+	// First, iterate through all stored tx history.  If a received tx
+	// matches the one being added (equal txid and txout idx), update
+	// it with the new block information.
+	for i := range s {
+		recvTx, ok := s[i].(*RecvTx)
+		if !ok {
+			// Can only check for equality if the types match.
+			continue
+		}
+
+		// Found an identical received tx.
+		if bytes.Equal(recvTx.TxID[:], tx.TxID[:]) &&
+			recvTx.TxOutIdx == tx.TxOutIdx {
+
+			// Fill relevant block information.
+			copy(recvTx.BlockHash[:], tx.BlockHash[:])
+			recvTx.BlockHeight = tx.BlockHeight
+			recvTx.BlockIndex = tx.BlockIndex
+			recvTx.BlockTime = tx.BlockTime
+			return
+		}
+	}
+
+	// No received tx entries with the same outpoint.  Append to the end.
+	s = append(s, tx)
 }
 
 // Rollback removes all txs from and after the block specified by a
@@ -755,10 +883,47 @@ func (txs *TxStore) Rollback(height int32, hash *btcwire.ShaHash) (modified bool
 	return
 }
 
+func (tx *RecvTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error) {
+	if vers >= txVersCurrent {
+		// Use current version.
+		return tx.ReadFrom(r)
+	}
+
+	// Old file version did not save the txout index.
+
+	datas := []interface{}{
+		&tx.TxID,
+		// tx index not read.
+		&tx.TimeReceived,
+		&tx.BlockHeight,
+		&tx.BlockHash,
+		&tx.BlockIndex,
+		&tx.BlockTime,
+		&tx.Amount,
+		&tx.ReceiverHash,
+	}
+	var read int64
+	for _, data := range datas {
+		switch e := data.(type) {
+		case io.ReaderFrom:
+			read, err = e.ReadFrom(r)
+		default:
+			read, err = binaryRead(r, binary.LittleEndian, data)
+		}
+
+		if err != nil {
+			return n + read, err
+		}
+		n += read
+	}
+	return n, nil
+}
+
 // ReadFrom satisifies the io.ReaderFrom interface.  A RecTx is read
 // in from r with the format:
 //
 //  TxID (32 bytes)
+//  TxOutIdx (4 bytes, little endian)
 //  TimeReceived (8 bytes, little endian)
 //  BlockHeight (4 bytes, little endian)
 //  BlockHash (32 bytes)
@@ -769,6 +934,7 @@ func (txs *TxStore) Rollback(height int32, hash *btcwire.ShaHash) (modified bool
 func (tx *RecvTx) ReadFrom(r io.Reader) (n int64, err error) {
 	datas := []interface{}{
 		&tx.TxID,
+		&tx.TxOutIdx,
 		&tx.TimeReceived,
 		&tx.BlockHeight,
 		&tx.BlockHash,
@@ -857,23 +1023,14 @@ func (tx *RecvTx) TxInfo(account string, curheight int32,
 		txInfo["blockindex"] = tx.BlockIndex
 		txInfo["blocktime"] = tx.BlockTime
 		txInfo["confirmations"] = curheight - tx.BlockHeight + 1
+	} else {
+		txInfo["confirmations"] = 0
 	}
 
 	return txInfo
 }
 
-// ReadFrom satisifies the io.WriterTo interface.  A SendTx is read
-// from r with the format:
-//
-//  TxID (32 bytes)
-//  Time (8 bytes, little endian)
-//  BlockHeight (4 bytes, little endian)
-//  BlockHash (32 bytes)
-//  BlockIndex (4 bytes, little endian)
-//  BlockTime (8 bytes, little endian)
-//  Fee (8 bytes, little endian)
-//  Receivers (varies)
-func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
+func (tx *SendTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error) {
 	var read int64
 
 	datas := []interface{}{
@@ -901,6 +1058,21 @@ func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 
 	return n, nil
+}
+
+// ReadFrom satisifies the io.WriterTo interface.  A SendTx is read
+// from r with the format:
+//
+//  TxID (32 bytes)
+//  Time (8 bytes, little endian)
+//  BlockHeight (4 bytes, little endian)
+//  BlockHash (32 bytes)
+//  BlockIndex (4 bytes, little endian)
+//  BlockTime (8 bytes, little endian)
+//  Fee (8 bytes, little endian)
+//  Receivers (varies)
+func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
+	return tx.ReadFromVersion(txVersCurrent, r)
 }
 
 // WriteTo satisifies the io.WriterTo interface.  A SendTx is written to
