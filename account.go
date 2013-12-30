@@ -224,6 +224,39 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 	return txInfoList, nil
 }
 
+// ListAddressTransactions returns a slice of maps with details about a
+// recorded transactions to or from any address belonging to a set.  This is
+// intended to be used for listaddresstransactions RPC replies.
+func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
+	[]map[string]interface{}, error) {
+
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	var txInfoList []map[string]interface{}
+	a.mtx.RLock()
+	a.TxStore.RLock()
+
+	for i := range a.TxStore.s {
+		rtx, ok := a.TxStore.s[i].(*tx.RecvTx)
+		if !ok {
+			continue
+		}
+		if _, ok := pkHashes[string(rtx.ReceiverHash[:])]; ok {
+			info := rtx.TxInfo(a.name, bs.Height, a.Net())
+			txInfoList = append(txInfoList, info)
+		}
+	}
+	a.mtx.RUnlock()
+	a.TxStore.RUnlock()
+
+	return txInfoList, nil
+}
+
 // ListAllTransactions returns a slice of maps with details about a recorded
 // transaction.  This is intended to be used for listalltransactions RPC
 // replies.

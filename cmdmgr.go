@@ -61,10 +61,11 @@ var rpcHandlers = map[string]cmdHandler{
 
 // Extensions exclusive to websocket connections.
 var wsHandlers = map[string]cmdHandler{
-	"getaddressbalance":   GetAddressBalance,
-	"getbalances":         GetBalances,
-	"listalltransactions": ListAllTransactions,
-	"walletislocked":      WalletIsLocked,
+	"getaddressbalance":       GetAddressBalance,
+	"getbalances":             GetBalances,
+	"listaddresstransactions": ListAddressTransactions,
+	"listalltransactions":     ListAllTransactions,
+	"walletislocked":          WalletIsLocked,
 }
 
 // ProcessRequest checks the requests sent from a frontend.  If the
@@ -514,7 +515,66 @@ func ListTransactions(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 }
 
-// ListAllTransactions replies to a listtransactions request by returning
+// ListAddressTransactions replies to a listaddresstransactions request by
+// returning an array of JSON objects with details of spent and received
+// wallet transactions.  The form of the reply is identical to
+// listtransactions, but the array elements are limited to transaction
+// details which are about the addresess included in the request.
+func ListAddressTransactions(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcws.ListAddressTransactionsCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
+		return
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	// Parse hash160s out of addresses.
+	pkHashMap := make(map[string]struct{})
+	for _, addr := range cmd.Addresses {
+		pkHash, net, err := btcutil.DecodeAddress(addr)
+		if err != nil || net != cfg.Net() {
+			e := &btcjson.Error{
+				Code:    btcjson.ErrInvalidParams.Code,
+				Message: "invalid address",
+			}
+			ReplyError(frontend, cmd.Id(), e)
+			return
+		}
+		pkHashMap[string(pkHash)] = struct{}{}
+	}
+
+	txList, err := a.ListAddressTransactions(pkHashMap)
+	if err != nil {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+	ReplySuccess(frontend, cmd.Id(), txList)
+}
+
+// ListAllTransactions replies to a listalltransactions request by returning
 // an array of JSON objects with details of sent and recevied wallet
 // transactions.  This is similar to ListTransactions, except it takes
 // only a single optional argument for the account name and replies with
