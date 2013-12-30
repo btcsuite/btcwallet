@@ -97,6 +97,7 @@ var rpcHandlers = map[string]cmdHandler{
 var wsHandlers = map[string]cmdHandler{
 	"getaddressbalance":       GetAddressBalance,
 	"getbalances":             GetBalances,
+	"getunconfirmedbalance":   GetUnconfirmedBalance,
 	"listaddresstransactions": ListAddressTransactions,
 	"listalltransactions":     ListAllTransactions,
 	"walletislocked":          WalletIsLocked,
@@ -377,6 +378,41 @@ func GetAddressBalance(frontend chan []byte, icmd btcjson.Cmd) {
 
 	bal := a.CalculateAddressBalance(pkhash, int(cmd.Minconf))
 	ReplySuccess(frontend, cmd.Id(), bal)
+}
+
+// GetUnconfirmedBalance replies to a getunconfirmedbalance extension request
+// by replying with the current unconfirmed balance of an account.
+func GetUnconfirmedBalance(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcws.GetUnconfirmedBalanceCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Get the account included in the request.
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
+		return
+
+	default:
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	confirmed := a.CalculateBalance(1)
+	unconfirmed := a.CalculateBalance(0) - confirmed
+	ReplySuccess(frontend, cmd.Id(), unconfirmed)
 }
 
 // ImportPrivKey replies to an importprivkey request by parsing
