@@ -43,6 +43,7 @@ type cmdHandler func(chan []byte, btcjson.Cmd)
 var rpcHandlers = map[string]cmdHandler{
 	// Standard bitcoind methods (implemented)
 	"dumpprivkey":           DumpPrivKey,
+	"getaccount":            GetAccount,
 	"getaddressesbyaccount": GetAddressesByAccount,
 	"getbalance":            GetBalance,
 	"getnewaddress":         GetNewAddress,
@@ -60,7 +61,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"backupwallet":           Unimplemented,
 	"createmultisig":         Unimplemented,
 	"dumpwallet":             Unimplemented,
-	"getaccount":             Unimplemented,
 	"getaccountaddress":      Unimplemented,
 	"getrawchangeaddress":    Unimplemented,
 	"getreceivedbyaccount":   Unimplemented,
@@ -336,6 +336,37 @@ func GetBalance(frontend chan []byte, icmd btcjson.Cmd) {
 // the frontend of all balances for each opened account.
 func GetBalances(frontend chan []byte, cmd btcjson.Cmd) {
 	NotifyBalances(frontend)
+}
+
+// GetAccount replies to a getaccount request by replying with the
+// account name associated with a single address.
+func GetAccount(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.GetAccountCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Is address valid?
+	_, net, err := btcutil.DecodeAddress(cmd.Address)
+	if err != nil || net != cfg.Net() {
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
+		return
+	}
+
+	// Look up account which holds this address.
+	aname, err := LookupAccountByAddress(cmd.Address)
+	if err == ErrNotFound {
+		e := &btcjson.Error{
+			Code:    btcjson.ErrInvalidAddressOrKey.Code,
+			Message: "Address not found in wallet",
+		}
+		ReplyError(frontend, cmd.Id(), e)
+		return
+	}
+
+	ReplySuccess(frontend, cmd.Id(), aname)
 }
 
 // GetAddressBalance replies to a getaddressbalance extension request
