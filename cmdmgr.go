@@ -41,7 +41,7 @@ var (
 type cmdHandler func(chan []byte, btcjson.Cmd)
 
 var rpcHandlers = map[string]cmdHandler{
-	// Standard bitcoind methods
+	// Standard bitcoind methods (implemented)
 	"dumpprivkey":           DumpPrivKey,
 	"getaddressesbyaccount": GetAddressesByAccount,
 	"getbalance":            GetBalance,
@@ -54,6 +54,40 @@ var rpcHandlers = map[string]cmdHandler{
 	"settxfee":              SetTxFee,
 	"walletlock":            WalletLock,
 	"walletpassphrase":      WalletPassphrase,
+
+	// Standard bitcoind methods (currently unimplemented)
+	"addmultisigaddress":     Unimplemented,
+	"backupwallet":           Unimplemented,
+	"createmultisig":         Unimplemented,
+	"dumpwallet":             Unimplemented,
+	"getaccount":             Unimplemented,
+	"getaccountaddress":      Unimplemented,
+	"getrawchangeaddress":    Unimplemented,
+	"getreceivedbyaccount":   Unimplemented,
+	"getreceivedbyaddress":   Unimplemented,
+	"gettransaction":         Unimplemented,
+	"gettxout":               Unimplemented,
+	"gettxoutsetinfo":        Unimplemented,
+	"importwallet":           Unimplemented,
+	"keypoolrefill":          Unimplemented,
+	"listaddressgroupings":   Unimplemented,
+	"listlockunspent":        Unimplemented,
+	"listreceivedbyaccount":  Unimplemented,
+	"listreceivedbyaddress":  Unimplemented,
+	"listsinceblock":         Unimplemented,
+	"listunspent":            Unimplemented,
+	"lockunspent":            Unimplemented,
+	"move":                   Unimplemented,
+	"sendtoaddress":          Unimplemented,
+	"setaccount":             Unimplemented,
+	"signmessage":            Unimplemented,
+	"signrawtransaction":     Unimplemented,
+	"validateaddress":        Unimplemented,
+	"verifymessage":          Unimplemented,
+	"walletpassphrasechange": Unimplemented,
+
+	// Standard bitcoind methods which won't be implemented by btcwallet.
+	"encryptwallet": Unsupported,
 
 	// Extensions not exclusive to websocket connections.
 	"createencryptedwallet": CreateEncryptedWallet,
@@ -169,6 +203,22 @@ func ReplySuccess(frontend chan []byte, id interface{}, result interface{}) {
 	if mr, err := json.Marshal(r); err == nil {
 		frontend <- mr
 	}
+}
+
+// Unimplemented responds to an unimplemented RPC request with the
+// appropiate error.
+func Unimplemented(frontend chan []byte, icmd btcjson.Cmd) {
+	ReplyError(frontend, icmd.Id(), &btcjson.ErrUnimplemented)
+}
+
+// Unsupported responds to an standard bitcoind RPC request which is
+// unsupported by btcwallet due to design differences.
+func Unsupported(frontend chan []byte, icmd btcjson.Cmd) {
+	e := &btcjson.Error{
+		Code:    -1,
+		Message: "Command unsupported by btcwallet",
+	}
+	ReplyError(frontend, icmd.Id(), e)
 }
 
 // DumpPrivKey replies to a dumpprivkey request with the private
