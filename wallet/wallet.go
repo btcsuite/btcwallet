@@ -229,13 +229,6 @@ func ChainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid pubkey length %d", len(pubkey))
 	}
 
-	// This is a perfect example of YOLO crypto.  Armory claims this XORing
-	// with the SHA256 hash of the pubkey is done to add extra entropy (why
-	// you'd want to add entropy to a deterministic function, I don't know),
-	// even though the pubkey is generated directly from the privkey.  In
-	// terms of security or privacy, this is a complete waste of CPU cycles,
-	// but we do the same because we want to keep compatibility with
-	// Armory's chained address generation.
 	xorbytes := make([]byte, 32)
 	chainMod := calcHash256(pubkey)
 	for i := range xorbytes {
