@@ -130,6 +130,31 @@ func (a *Account) Rollback(height int32, hash *btcwire.ShaHash) {
 	}
 }
 
+// AddressUsed returns whether there are any recorded transactions spending to
+// a given address.  Assumming correct TxStore usage, this will return true iff
+// there are any transactions with outputs to this address in the blockchain or
+// the btcd mempool.
+func (a *Account) AddressUsed(pkHash []byte) bool {
+	// This can be optimized by recording this data as it is read when
+	// opening an account, and keeping it up to date each time a new
+	// received tx arrives.
+
+	a.TxStore.RLock()
+	defer a.TxStore.RUnlock()
+
+	for i := range a.TxStore.s {
+		rtx, ok := a.TxStore.s[i].(*tx.RecvTx)
+		if !ok {
+			continue
+		}
+
+		if bytes.Equal(rtx.ReceiverHash, pkHash) {
+			return true
+		}
+	}
+	return false
+}
+
 // CalculateBalance sums the amounts of all unspent transaction
 // outputs to addresses of a wallet and returns the balance as a
 // float64.
@@ -188,6 +213,28 @@ func (a *Account) CalculateAddressBalance(pubkeyHash []byte, confirms int) float
 	}
 	a.UtxoStore.RUnlock()
 	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
+}
+
+// CurrentAddress gets the most recently requested Bitcoin payment address
+// from an account.  If the address has already been used (there is at least
+// one transaction spending to it in the blockchain or btcd mempool), the next
+// chained address is returned.
+func (a *Account) CurrentAddress() (string, error) {
+	a.mtx.RLock()
+	addr, err := a.Wallet.LastChainedAddress()
+	a.mtx.RUnlock()
+
+	if err != nil {
+		return "", err
+	}
+
+	// Get next chained address if the last one has already been used.
+	pkHash, _, _ := btcutil.DecodeAddress(addr)
+	if a.AddressUsed(pkHash) {
+		addr, err = a.NewAddress()
+	}
+
+	return addr, err
 }
 
 // ListTransactions returns a slice of maps with details about a recorded

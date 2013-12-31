@@ -44,6 +44,7 @@ var rpcHandlers = map[string]cmdHandler{
 	// Standard bitcoind methods (implemented)
 	"dumpprivkey":           DumpPrivKey,
 	"getaccount":            GetAccount,
+	"getaccountaddress":     GetAccountAddress,
 	"getaddressesbyaccount": GetAddressesByAccount,
 	"getbalance":            GetBalance,
 	"getnewaddress":         GetNewAddress,
@@ -61,7 +62,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"backupwallet":           Unimplemented,
 	"createmultisig":         Unimplemented,
 	"dumpwallet":             Unimplemented,
-	"getaccountaddress":      Unimplemented,
 	"getrawchangeaddress":    Unimplemented,
 	"getreceivedbyaccount":   Unimplemented,
 	"getreceivedbyaddress":   Unimplemented,
@@ -367,6 +367,54 @@ func GetAccount(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	ReplySuccess(frontend, cmd.Id(), aname)
+}
+
+// GetAccountAddress replies to a getaccountaddress request with the most
+// recently-created chained address that has not yet been used (does not yet
+// appear in the blockchain, or any tx that has arrived in the btcd mempool).
+// If the most recently-requested address has been used, a new address (the
+// next chained address in the keypool) is used.  This can fail if the keypool
+// runs out (and will return btcjson.ErrWalletKeypoolRanOut if that happens).
+func GetAccountAddress(frontend chan []byte, icmd btcjson.Cmd) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.GetAccountAddressCmd)
+	if !ok {
+		ReplyError(frontend, icmd.Id(), &btcjson.ErrInternal)
+		return
+	}
+
+	// Lookup account for this request.
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		ReplyError(frontend, cmd.Id(),
+			&btcjson.ErrWalletInvalidAccountName)
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+	}
+
+	switch addr, err := a.CurrentAddress(); err {
+	case nil:
+		ReplySuccess(frontend, cmd.Id(), addr)
+
+	case wallet.ErrWalletLocked:
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletKeypoolRanOut)
+
+	default: // all other non-nil errors
+		e := &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		ReplyError(frontend, cmd.Id(), e)
+	}
 }
 
 // GetAddressBalance replies to a getaddressbalance extension request

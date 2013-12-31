@@ -851,6 +851,26 @@ func (w *Wallet) NextChainedAddress(bs *BlockStamp) (string, error) {
 	return addr.paymentAddress(w.net)
 }
 
+// LastChainedAddress returns the most recently requested chained
+// address from calling NextChainedAddress, or the root address if
+// no chained addresses have been requested.
+func (w *Wallet) LastChainedAddress() (string, error) {
+	// Lookup pubkey hash for last used chained address.
+	pkHash, ok := w.chainIdxMap[w.highestUsed]
+	if !ok {
+		return "", errors.New("chain index references unknown address")
+	}
+
+	// Lookup address with this pubkey hash.
+	addr, ok := w.addrMap[pkHash]
+	if !ok {
+		return "", errors.New("cannot find address by pubkey hash")
+	}
+
+	// Create and return payment address from serialized pubkey.
+	return addr.paymentAddress(w.net)
+}
+
 // extendKeypool grows the keypool by n addresses.
 func (w *Wallet) extendKeypool(n uint, aeskey []byte, bs *BlockStamp) error {
 	// Get last chained address.  New chained addresses will be
