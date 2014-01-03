@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Conformal Systems LLC <info@conformal.com>
+ * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,12 +18,10 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
-	"github.com/conformal/btcws"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -71,83 +69,25 @@ func GetCurBlock() (bs wallet.BlockStamp, err error) {
 		return bs, nil
 	}
 
-	// This is a hack and may result in races, but we need to make
-	// sure that btcd is connected and sending a message will succeed,
-	// or this will block forever. A better solution is to return an
-	// error to the reply handler immediately if btcd is disconnected.
-	if !btcdConnected.b {
+	bb, _ := GetBestBlock(CurrentRPCConn())
+	if bb == nil {
 		return wallet.BlockStamp{
 			Height: int32(btcutil.BlockHeightUnknown),
 		}, errors.New("current block unavailable")
 	}
 
-	n := <-NewJSONID
-	cmd := btcws.NewGetBestBlockCmd(fmt.Sprintf("btcwallet(%v)", n))
-	mcmd, err := cmd.MarshalJSON()
+	hash, err := btcwire.NewShaHashFromStr(bb.Hash)
 	if err != nil {
 		return wallet.BlockStamp{
 			Height: int32(btcutil.BlockHeightUnknown),
-		}, errors.New("cannot ask for best block")
-	}
-
-	c := make(chan *struct {
-		hash   *btcwire.ShaHash
-		height int32
-	})
-
-	replyHandlers.Lock()
-	replyHandlers.m[n] = func(result interface{}, e *btcjson.Error) bool {
-		if e != nil {
-			c <- nil
-			return true
-		}
-		m, ok := result.(map[string]interface{})
-		if !ok {
-			c <- nil
-			return true
-		}
-		hashBE, ok := m["hash"].(string)
-		if !ok {
-			c <- nil
-			return true
-		}
-		hash, err := btcwire.NewShaHashFromStr(hashBE)
-		if err != nil {
-			c <- nil
-			return true
-		}
-		fheight, ok := m["height"].(float64)
-		if !ok {
-			c <- nil
-			return true
-		}
-		c <- &struct {
-			hash   *btcwire.ShaHash
-			height int32
-		}{
-			hash:   hash,
-			height: int32(fheight),
-		}
-		return true
-	}
-	replyHandlers.Unlock()
-
-	// send message
-	btcdMsgs <- mcmd
-
-	// Block until reply is ready.
-	reply, ok := <-c
-	if !ok || reply == nil {
-		return wallet.BlockStamp{
-			Height: int32(btcutil.BlockHeightUnknown),
-		}, errors.New("current block unavailable")
+		}, err
 	}
 
 	curBlock.Lock()
-	if reply.height > curBlock.BlockStamp.Height {
+	if bb.Height > curBlock.BlockStamp.Height {
 		bs = wallet.BlockStamp{
-			Height: reply.height,
-			Hash:   *reply.hash,
+			Height: bb.Height,
+			Hash:   *hash,
 		}
 		curBlock.BlockStamp = bs
 	}
@@ -252,35 +192,76 @@ func main() {
 		NotifyBalanceSyncerChans.remove,
 		NotifyBalanceSyncerChans.access)
 
-	for {
-		replies := make(chan error)
-		done := make(chan int)
-		go func() {
-			BtcdConnect(cafile, replies)
-			close(done)
-		}()
-	selectLoop:
+	updateBtcd := make(chan *BtcdRPCConn)
+	go func() {
+		// Create an RPC connection and close the closed channel.
+		//
+		// It might be a better idea to create a new concrete type
+		// just for an always disconnected RPC connection and begin
+		// with that.
+		btcd := NewBtcdRPCConn(nil)
+		close(btcd.closed)
+
+		// Maintain the current btcd connection.  After reconnects,
+		// the current connection should be updated.
 		for {
 			select {
-			case <-done:
-				break selectLoop
-			case err := <-replies:
-				switch err {
-				case ErrConnRefused:
-					btcdConnected.c <- false
-					log.Info("btcd connection refused, retying in 5 seconds")
-					time.Sleep(5 * time.Second)
-				case ErrConnLost:
-					btcdConnected.c <- false
-					log.Info("btcd connection lost, retrying in 5 seconds")
-					time.Sleep(5 * time.Second)
-				case nil:
-					btcdConnected.c <- true
-					log.Info("Established connection to btcd.")
-				default:
-					log.Infof("Unhandled error: %v", err)
-				}
+			case conn := <-updateBtcd:
+				btcd = conn
+
+			case access := <-accessRPC:
+				access.rpc <- btcd
 			}
 		}
+	}()
+
+	for {
+		btcd, err := BtcdConnect(cafile)
+		if err != nil {
+			log.Info("Retrying btcd connection in 5 seconds")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		updateBtcd <- btcd
+
+		NotifyBtcdConnection(frontendNotificationMaster)
+		log.Info("Established connection to btcd")
+
+		// Perform handshake.
+		if err := Handshake(btcd); err != nil {
+			var message string
+			if jsonErr, ok := err.(*btcjson.Error); ok {
+				message = jsonErr.Message
+			} else {
+				message = err.Error()
+			}
+			log.Errorf("Cannot complete handshake: %v", message)
+			log.Info("Retrying btcd connection in 5 seconds")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Block goroutine until the connection is lost.
+		<-btcd.closed
+		NotifyBtcdConnection(frontendNotificationMaster)
+		log.Info("Lost btcd connection")
 	}
+}
+
+var accessRPC = make(chan *AccessCurrentRPCConn)
+
+// AccessCurrentRPCConn is used to access the current RPC connection
+// from the goroutine managing btcd-side RPC connections.
+type AccessCurrentRPCConn struct {
+	rpc chan RPCConn
+}
+
+// CurrentRPCConn returns the most recently-connected btcd-side
+// RPC connection.
+func CurrentRPCConn() RPCConn {
+	access := &AccessCurrentRPCConn{
+		rpc: make(chan RPCConn),
+	}
+	accessRPC <- access
+	return <-access.rpc
 }

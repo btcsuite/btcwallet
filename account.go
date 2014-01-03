@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Conformal Systems LLC <info@conformal.com>
+ * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,15 +20,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
-	"github.com/conformal/btcws"
 	"path/filepath"
 	"sync"
-	"time"
 )
 
 // ErrNotFound describes an error where a map lookup failed due to a
@@ -70,13 +67,11 @@ func LookupAccountByAddress(address string) (string, error) {
 // to prevent against incorrect multiple access.
 type Account struct {
 	*wallet.Wallet
-	mtx                 sync.RWMutex
-	name                string
-	dirty               bool
-	fullRescan          bool
-	NewBlockTxJSONID    uint64
-	SpentOutpointJSONID uint64
-	UtxoStore           struct {
+	mtx        sync.RWMutex
+	name       string
+	dirty      bool
+	fullRescan bool
+	UtxoStore  struct {
 		sync.RWMutex
 		dirty bool
 		s     tx.UtxoStore
@@ -399,7 +394,7 @@ func (a *Account) ImportPrivKey(wif string, rescan bool) error {
 			addr: struct{}{},
 		}
 
-		a.RescanAddresses(bs.Height, addrs)
+		Rescan(CurrentRPCConn(), bs.Height, addrs)
 	}
 	return nil
 }
@@ -447,32 +442,26 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 }
 
 // Track requests btcd to send notifications of new transactions for
-// each address stored in a wallet and sets up a new reply handler for
-// these notifications.
+// each address stored in a wallet.
 func (a *Account) Track() {
-	n := <-NewJSONID
-	a.mtx.Lock()
-	a.NewBlockTxJSONID = n
-	a.mtx.Unlock()
-
-	replyHandlers.Lock()
-	replyHandlers.m[n] = a.newBlockTxOutHandler
-	replyHandlers.Unlock()
-	for _, addr := range a.ActiveAddresses() {
-		a.ReqNewTxsForAddress(addr.Address)
+	// Request notifications for transactions sending to all wallet
+	// addresses.
+	addrs := a.ActiveAddresses()
+	addrstrs := make([]string, len(addrs))
+	i := 0
+	for addr := range addrs {
+		addrstrs[i] = addr.EncodeAddress()
+		i++
 	}
 
-	n = <-NewJSONID
-	a.mtx.Lock()
-	a.SpentOutpointJSONID = n
-	a.mtx.Unlock()
+	err := NotifyNewTXs(CurrentRPCConn(), addrstrs)
+	if err != nil {
+		log.Error("Unable to request transaction updates for address.")
+	}
 
-	replyHandlers.Lock()
-	replyHandlers.m[n] = a.spentUtxoHandler
-	replyHandlers.Unlock()
 	a.UtxoStore.RLock()
 	for _, utxo := range a.UtxoStore.s {
-		a.ReqSpentUtxoNtfn(utxo)
+		ReqSpentUtxoNtfn(utxo)
 	}
 	a.UtxoStore.RUnlock()
 }
@@ -507,58 +496,7 @@ func (a *Account) RescanActiveAddresses() {
 	}
 
 	// Rescan active addresses starting at the determined block height.
-	a.RescanAddresses(beginBlock, a.ActivePaymentAddresses())
-}
-
-// RescanAddresses requests btcd to rescan a set of addresses.  This
-// is needed when, for example, importing private key(s), where btcwallet
-// is synced with btcd for all but several address.
-func (a *Account) RescanAddresses(beginBlock int32, addrs map[string]struct{}) {
-	n := <-NewJSONID
-	cmd, err := btcws.NewRescanCmd(fmt.Sprintf("btcwallet(%v)", n),
-		beginBlock, addrs)
-	if err != nil {
-		log.Errorf("cannot create rescan request: %v", err)
-		return
-	}
-	mcmd, err := cmd.MarshalJSON()
-	if err != nil {
-		log.Errorf("cannot create rescan request: %v", err)
-		return
-	}
-
-	replyHandlers.Lock()
-	replyHandlers.m[n] = func(result interface{}, e *btcjson.Error) bool {
-		// Rescan is compatible with new txs from connected block
-		// notifications, so use that handler.
-		_ = a.newBlockTxOutHandler(result, e)
-
-		if result != nil {
-			// Notify frontends of new account balance.
-			confirmed := a.CalculateBalance(1)
-			unconfirmed := a.CalculateBalance(0) - confirmed
-			NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
-			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
-
-			return false
-		}
-		if bs, err := GetCurBlock(); err == nil {
-			a.mtx.Lock()
-			a.Wallet.SetSyncedWith(&bs)
-			a.dirty = true
-			a.mtx.Unlock()
-			if err = a.writeDirtyToDisk(); err != nil {
-				log.Errorf("cannot sync dirty wallet: %v",
-					err)
-			}
-		}
-		// If result is nil, the rescan has completed.  Returning
-		// true removes this handler.
-		return true
-	}
-	replyHandlers.Unlock()
-
-	btcdMsgs <- mcmd
+	Rescan(CurrentRPCConn(), beginBlock, a.ActivePaymentAddresses())
 }
 
 // SortedActivePaymentAddresses returns a slice of all active payment
@@ -638,255 +576,19 @@ func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
 
 	log.Debugf("Requesting notifications of TXs sending to address %v", apkh)
 
-	a.mtx.RLock()
-	n := a.NewBlockTxJSONID
-	a.mtx.RUnlock()
-
-	cmd := btcws.NewNotifyNewTXsCmd(fmt.Sprintf("btcwallet(%d)", n),
-		[]string{apkh.EncodeAddress()})
-	mcmd, err := cmd.MarshalJSON()
+	err := NotifyNewTXs(CurrentRPCConn(), []string{apkh.EncodeAddress()})
 	if err != nil {
-		log.Errorf("cannot request transaction notifications: %v", err)
+		log.Error("Unable to request transaction updates for address.")
 	}
-
-	btcdMsgs <- mcmd
 }
 
 // ReqSpentUtxoNtfn sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func (a *Account) ReqSpentUtxoNtfn(u *tx.Utxo) {
+func ReqSpentUtxoNtfn(u *tx.Utxo) {
 	log.Debugf("Requesting spent UTXO notifications for Outpoint hash %s index %d",
 		u.Out.Hash, u.Out.Index)
 
-	a.mtx.RLock()
-	n := a.SpentOutpointJSONID
-	a.mtx.RUnlock()
-
-	cmd := btcws.NewNotifySpentCmd(fmt.Sprintf("btcwallet(%d)", n),
-		(*btcwire.OutPoint)(&u.Out))
-	mcmd, err := cmd.MarshalJSON()
-	if err != nil {
-		log.Errorf("cannot create spent request: %v", err)
-		return
-	}
-
-	btcdMsgs <- mcmd
-}
-
-// spentUtxoHandler is the handler function for btcd spent UTXO notifications
-// resulting from transactions in newly-attached blocks.
-func (a *Account) spentUtxoHandler(result interface{}, e *btcjson.Error) bool {
-	if e != nil {
-		log.Errorf("Spent UTXO Handler: Error %d received from btcd: %s",
-			e.Code, e.Message)
-		return false
-	}
-	v, ok := result.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	txHashBE, ok := v["txhash"].(string)
-	if !ok {
-		log.Error("Spent UTXO Handler: Unspecified transaction hash.")
-		return false
-	}
-	txHash, err := btcwire.NewShaHashFromStr(txHashBE)
-	if err != nil {
-		log.Errorf("Spent UTXO Handler: Bad transaction hash: %s", err)
-		return false
-	}
-	index, ok := v["index"].(float64)
-	if !ok {
-		log.Error("Spent UTXO Handler: Unspecified index.")
-	}
-
-	_, _ = txHash, index
-
-	// Never remove this handler.
-	return false
-}
-
-// newBlockTxOutHandler is the handler function for btcd transaction
-// notifications resulting from newly-attached blocks.
-func (a *Account) newBlockTxOutHandler(result interface{}, e *btcjson.Error) bool {
-	if e != nil {
-		log.Errorf("Tx Handler: Error %d received from btcd: %s",
-			e.Code, e.Message)
-		return false
-	}
-
-	v, ok := result.(map[string]interface{})
-	if !ok {
-		// The first result sent from btcd is nil.  This could be used to
-		// indicate that the request for notifications succeeded.
-		if result != nil {
-			log.Errorf("Tx Handler: Unexpected result type %T.", result)
-		}
-		return false
-	}
-	receiverStr, ok := v["receiver"].(string)
-	if !ok {
-		log.Error("Tx Handler: Unspecified receiver.")
-		return false
-	}
-	receiver, err := btcutil.DecodeAddr(receiverStr)
-	if err != nil {
-		log.Errorf("Tx Handler: receiver address can not be decoded: %v", err)
-		return false
-	}
-	height, ok := v["height"].(float64)
-	if !ok {
-		log.Error("Tx Handler: Unspecified height.")
-		return false
-	}
-	blockHashBE, ok := v["blockhash"].(string)
-	if !ok {
-		log.Error("Tx Handler: Unspecified block hash.")
-		return false
-	}
-	blockHash, err := btcwire.NewShaHashFromStr(blockHashBE)
-	if err != nil {
-		log.Errorf("Tx Handler: Block hash string cannot be parsed: %v", err)
-		return false
-	}
-	fblockIndex, ok := v["blockindex"].(float64)
-	if !ok {
-		log.Error("Tx Handler: Unspecified block index.")
-		return false
-	}
-	blockIndex := int32(fblockIndex)
-	fblockTime, ok := v["blocktime"].(float64)
-	if !ok {
-		log.Error("Tx Handler: Unspecified block time.")
-		return false
-	}
-	blockTime := int64(fblockTime)
-	txhashBE, ok := v["txid"].(string)
-	if !ok {
-		log.Error("Tx Handler: Unspecified transaction hash.")
-		return false
-	}
-	txID, err := btcwire.NewShaHashFromStr(txhashBE)
-	if err != nil {
-		log.Errorf("Tx Handler: Tx hash string cannot be parsed: %v", err)
-		return false
-	}
-	ftxOutIndex, ok := v["txoutindex"].(float64)
-	if !ok {
-		log.Error("Tx Handler: Unspecified transaction output index.")
-		return false
-	}
-	txOutIndex := uint32(ftxOutIndex)
-	amt, ok := v["amount"].(float64)
-	if !ok {
-		log.Error("Tx Handler: Unspecified amount.")
-		return false
-	}
-	pkscript58, ok := v["pkscript"].(string)
-	if !ok {
-		log.Error("Tx Handler: Unspecified pubkey script.")
-		return false
-	}
-	pkscript := btcutil.Base58Decode(pkscript58)
-	spent := false
-	if tspent, ok := v["spent"].(bool); ok {
-		spent = tspent
-	}
-
-	if int32(height) != -1 {
-		worker := NotifyBalanceWorker{
-			block: *blockHash,
-			wg:    make(chan *sync.WaitGroup),
-		}
-		NotifyBalanceSyncerChans.add <- worker
-		wg := <-worker.wg
-		defer func() {
-			wg.Done()
-		}()
-	}
-
-	// Create RecvTx to add to tx history.
-	t := &tx.RecvTx{
-		TxID:         *txID,
-		TxOutIdx:     txOutIndex,
-		TimeReceived: time.Now().Unix(),
-		BlockHeight:  int32(height),
-		BlockHash:    *blockHash,
-		BlockIndex:   blockIndex,
-		BlockTime:    blockTime,
-		Amount:       int64(amt),
-		ReceiverHash: receiver.ScriptAddress(),
-	}
-
-	// For transactions originating from this wallet, the sent tx history should
-	// be recorded before the received history.  If wallet created this tx, wait
-	// for the sent history to finish being recorded before continuing.
-	req := SendTxHistSyncRequest{
-		txid:     *txID,
-		response: make(chan SendTxHistSyncResponse),
-	}
-	SendTxHistSyncChans.access <- req
-	resp := <-req.response
-	if resp.ok {
-		// Wait until send history has been recorded.
-		<-resp.c
-		SendTxHistSyncChans.remove <- *txID
-	}
-
-	// Actually record the tx history.
-	a.TxStore.Lock()
-	a.TxStore.s.InsertRecvTx(t)
-	a.TxStore.dirty = true
-	a.TxStore.Unlock()
-
-	// Notify frontends of tx.  If the tx is unconfirmed, it is always
-	// notified and the outpoint is marked as notified.  If the outpoint
-	// has already been notified and is now in a block, a txmined notifiction
-	// should be sent once to let frontends that all previous send/recvs
-	// for this unconfirmed tx are now confirmed.
-	recvTxOP := btcwire.NewOutPoint(txID, txOutIndex)
-	previouslyNotifiedReq := NotifiedRecvTxRequest{
-		op:       *recvTxOP,
-		response: make(chan NotifiedRecvTxResponse),
-	}
-	NotifiedRecvTxChans.access <- previouslyNotifiedReq
-	if <-previouslyNotifiedReq.response {
-		NotifyMinedTx <- t
-		NotifiedRecvTxChans.remove <- *recvTxOP
-	} else {
-		// Notify frontends of new recv tx and mark as notified.
-		NotifiedRecvTxChans.add <- *recvTxOP
-		NotifyNewTxDetails(frontendNotificationMaster, a.Name(), t.TxInfo(a.Name(),
-			int32(height), a.Wallet.Net()))
-	}
-
-	if !spent {
-		u := &tx.Utxo{
-			Amt:       uint64(amt),
-			Height:    int32(height),
-			Subscript: pkscript,
-		}
-		copy(u.Out.Hash[:], txID[:])
-		u.Out.Index = uint32(txOutIndex)
-		copy(u.AddrHash[:], receiver.ScriptAddress())
-		copy(u.BlockHash[:], blockHash[:])
-		a.UtxoStore.Lock()
-		a.UtxoStore.s.Insert(u)
-		a.UtxoStore.dirty = true
-		a.UtxoStore.Unlock()
-
-		// If this notification came from mempool, notify frontends of
-		// the new unconfirmed balance immediately.  Otherwise, wait until
-		// the blockconnected notifiation is processed.
-		if u.Height == -1 {
-			bal := a.CalculateBalance(0) - a.CalculateBalance(1)
-			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster,
-				a.name, bal)
-		}
-	}
-
-	// Never remove this handler.
-	return false
+	NotifySpent(CurrentRPCConn(), (*btcwire.OutPoint)(&u.Out))
 }
 
 // accountdir returns the directory containing an account's wallet, utxo,

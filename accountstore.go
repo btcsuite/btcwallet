@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Conformal Systems LLC <info@conformal.com>
+ * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -41,7 +41,7 @@ var accountstore = NewAccountStore()
 // key.  A RWMutex is used to protect against incorrect concurrent
 // access.
 type AccountStore struct {
-	sync.Mutex
+	sync.RWMutex
 	accounts map[string]*Account
 }
 
@@ -55,8 +55,8 @@ func NewAccountStore() *AccountStore {
 // Account returns the account specified by name, or ErrAcctNotExist
 // as an error if the account is not found.
 func (store *AccountStore) Account(name string) (*Account, error) {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	account, ok := store.accounts[name]
 	if !ok {
@@ -70,8 +70,8 @@ func (store *AccountStore) Rollback(height int32, hash *btcwire.ShaHash) {
 	log.Debugf("Rolling back tx history since block height %v hash %v",
 		height, hash)
 
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	for _, account := range store.accounts {
 		account.Rollback(height, hash)
@@ -83,8 +83,8 @@ func (store *AccountStore) Rollback(height int32, hash *btcwire.ShaHash) {
 // block, including changed balances.  Each account is then set to be synced
 // with the latest block.
 func (store *AccountStore) BlockNotify(bs *wallet.BlockStamp) {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	for _, a := range store.accounts {
 		// The UTXO store will be dirty if it was modified
@@ -129,8 +129,8 @@ func (store *AccountStore) RecordMinedTx(txid *btcwire.ShaHash,
 	blkhash *btcwire.ShaHash, blkheight int32, blkindex int,
 	blktime int64) error {
 
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	for _, account := range store.accounts {
 		account.TxStore.Lock()
@@ -175,10 +175,9 @@ func (store *AccountStore) CalculateBalance(account string,
 // CreateEncryptedWallet creates a new account with a wallet file
 // encrypted with passphrase.
 func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase []byte) error {
-	store.Lock()
-	defer store.Unlock()
-
+	store.RLock()
 	_, ok := store.accounts[name]
+	store.RUnlock()
 	if ok {
 		return ErrAcctExists
 	}
@@ -198,16 +197,17 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 	// Create new account with the wallet.  A new JSON ID is set for
 	// transaction notifications.
 	account := &Account{
-		Wallet:           wlt,
-		name:             name,
-		dirty:            true,
-		NewBlockTxJSONID: <-NewJSONID,
+		Wallet: wlt,
+		name:   name,
+		dirty:  true,
 	}
 
 	// Save the account in the global account map.  The mutex is
 	// already held at this point, and will be unlocked when this
 	// func returns.
+	store.Lock()
 	store.accounts[name] = account
+	store.Unlock()
 
 	// Begin tracking account against a connected btcd.
 	//
@@ -226,8 +226,8 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 // DumpKeys returns all WIF-encoded private keys associated with all
 // accounts. All wallets must be unlocked for this operation to succeed.
 func (store *AccountStore) DumpKeys() ([]string, error) {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	var keys []string
 	for _, a := range store.accounts {
@@ -249,8 +249,8 @@ func (store *AccountStore) DumpKeys() ([]string, error) {
 // DumpWIFPrivateKey searches through all accounts for the bitcoin
 // payment address addr and returns the WIF-encdoded private key.
 func (store *AccountStore) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	for _, a := range store.accounts {
 		switch wif, err := a.DumpWIFPrivateKey(addr); err {
@@ -272,8 +272,8 @@ func (store *AccountStore) DumpWIFPrivateKey(addr btcutil.Address) (string, erro
 // NotifyBalances notifies a wallet frontend of all confirmed and unconfirmed
 // account balances.
 func (store *AccountStore) NotifyBalances(frontend chan []byte) {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	for _, account := range store.accounts {
 		balance := account.CalculateBalance(1)
@@ -286,8 +286,8 @@ func (store *AccountStore) NotifyBalances(frontend chan []byte) {
 // ListAccounts returns a map of account names to their current account
 // balances.  The balances are calculated using minconf confirmations.
 func (store *AccountStore) ListAccounts(minconf int) map[string]float64 {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	// Create and fill a map of account names and their balances.
 	pairs := make(map[string]float64)
@@ -303,8 +303,8 @@ func (store *AccountStore) ListAccounts(minconf int) map[string]float64 {
 // TODO(jrick): batch addresses for all accounts together so multiple
 // rescan commands can be avoided.
 func (store *AccountStore) RescanActiveAddresses() {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	for _, account := range store.accounts {
 		account.RescanActiveAddresses()
@@ -314,8 +314,8 @@ func (store *AccountStore) RescanActiveAddresses() {
 // Track begins tracking all addresses in all accounts for updates from
 // btcd.
 func (store *AccountStore) Track() {
-	store.Lock()
-	defer store.Unlock()
+	store.RLock()
+	defer store.RUnlock()
 
 	for _, account := range store.accounts {
 		account.Track()
@@ -329,9 +329,6 @@ func (store *AccountStore) Track() {
 // Wallets opened from this function are not set to track against a
 // btcd connection.
 func (store *AccountStore) OpenAccount(name string, cfg *config) error {
-	store.Lock()
-	defer store.Unlock()
-
 	wlt := new(wallet.Wallet)
 
 	a := &Account{
@@ -401,6 +398,7 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 		}
 	}
 
+	store.Lock()
 	switch finalErr {
 	case ErrNoTxs:
 		// Do nothing special for now.  This will be implemented when
@@ -419,6 +417,7 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 	default:
 		log.Warnf("cannot open wallet: %v", err)
 	}
+	store.Unlock()
 
 	// Mark all active payment addresses as belonging to this account.
 	for addr := range a.ActivePaymentAddresses() {
