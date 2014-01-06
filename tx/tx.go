@@ -1004,9 +1004,10 @@ func (tx *RecvTx) WriteTo(w io.Writer) (n int64, err error) {
 func (tx *RecvTx) TxInfo(account string, curheight int32,
 	net btcwire.BitcoinNet) map[string]interface{} {
 
-	address, err := btcutil.EncodeAddress(tx.ReceiverHash, net)
-	if err != nil {
-		address = "Unknown"
+	address := "Unknown"
+	addr, err := btcutil.NewAddressPubKeyHash(tx.ReceiverHash, net)
+	if err == nil {
+		address = addr.String()
 	}
 
 	txInfo := map[string]interface{}{
@@ -1137,10 +1138,10 @@ func (tx *SendTx) TxInfo(account string, curheight int32,
 	blockHashStr := blockHash.String()
 
 	for i, pair := range tx.Receivers {
-		// EncodeAddress cannot error with these inputs.
-		address, err := btcutil.EncodeAddress(pair.PubkeyHash, net)
-		if err != nil {
-			address = "Unknown"
+		address := "Unknown"
+		addr, err := btcutil.NewAddressPubKeyHash(pair.PubkeyHash, net)
+		if err == nil {
+			address = addr.String()
 		}
 		info := map[string]interface{}{
 			"account":       account,

@@ -71,7 +71,7 @@ type CreatedTx struct {
 	outputs    []tx.Pair
 	btcspent   int64
 	fee        int64
-	changeAddr string
+	changeAddr *btcutil.AddressPubKeyHash
 	changeUtxo *tx.Utxo
 }
 
@@ -181,14 +181,14 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 	outputs := make([]tx.Pair, 0, len(pairs)+1)
 
 	// Add outputs to new tx.
-	for addr, amt := range pairs {
-		addr160, _, err := btcutil.DecodeAddress(addr)
+	for addrStr, amt := range pairs {
+		addr, err := btcutil.DecodeAddr(addrStr)
 		if err != nil {
 			return nil, fmt.Errorf("cannot decode address: %s", err)
 		}
 
-		// Spend amt to addr160
-		pkScript, err := btcscript.PayToPubKeyHashScript(addr160)
+		// Add output to spend amt to addr.
+		pkScript, err := btcscript.PayToAddrScript(addr)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create txout script: %s", err)
 		}
@@ -198,7 +198,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		// Create amount, address pair and add to outputs.
 		out := tx.Pair{
 			Amount:     amt,
-			PubkeyHash: addr160,
+			PubkeyHash: addr.ScriptAddress(),
 		}
 		outputs = append(outputs, out)
 	}
@@ -216,8 +216,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 
 	// These are nil/zeroed until a change address is needed, and reused
 	// again in case a change utxo has already been chosen.
-	var changeAddrHash []byte
-	var changeAddr string
+	var changeAddr *btcutil.AddressPubKeyHash
 
 	var btcspent int64
 	var selectedInputs []*tx.Utxo
@@ -245,23 +244,18 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 			// Create a new address to spend leftover outputs to.
 
 			// Get a new change address if one has not already been found.
-			if changeAddrHash == nil {
+			if changeAddr == nil {
 				changeAddr, err = a.NextChainedAddress(&bs)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get next address: %s", err)
 				}
 
 				// Mark change address as belonging to this account.
-				MarkAddressForAccount(changeAddr, a.Name())
-
-				changeAddrHash, _, err = btcutil.DecodeAddress(changeAddr)
-				if err != nil {
-					return nil, fmt.Errorf("cannot decode new address: %s", err)
-				}
+				MarkAddressForAccount(changeAddr.EncodeAddress(), a.Name())
 			}
 
 			// Spend change.
-			pkScript, err := btcscript.PayToPubKeyHashScript(changeAddrHash)
+			pkScript, err := btcscript.PayToAddrScript(changeAddr)
 			if err != nil {
 				return nil, fmt.Errorf("cannot create txout script: %s", err)
 			}
@@ -278,7 +272,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 				Height:    -1,
 				Subscript: pkScript,
 			}
-			copy(changeUtxo.AddrHash[:], changeAddrHash)
+			copy(changeUtxo.AddrHash[:], changeAddr.ScriptAddress())
 		}
 
 		// Selected unspent outputs become new transaction's inputs.
@@ -286,18 +280,17 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 			msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&ip.Out), nil))
 		}
 		for i, ip := range inputs {
-			addrstr, err := btcutil.EncodeAddress(ip.AddrHash[:],
+			// Error is ignored as the length and network checks can never fail
+			// for these inputs.
+			addr, _ := btcutil.NewAddressPubKeyHash(ip.AddrHash[:],
 				a.Wallet.Net())
-			if err != nil {
-				return nil, err
-			}
-			privkey, err := a.AddressKey(addrstr)
+			privkey, err := a.AddressKey(addr)
 			if err == wallet.ErrWalletLocked {
 				return nil, wallet.ErrWalletLocked
 			} else if err != nil {
 				return nil, fmt.Errorf("cannot get address key: %v", err)
 			}
-			ai, err := a.AddressInfo(addrstr)
+			ai, err := a.AddressInfo(addr)
 			if err != nil {
 				return nil, fmt.Errorf("cannot get address info: %v", err)
 			}
@@ -326,7 +319,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 				// Add change to outputs.
 				out := tx.Pair{
 					Amount:     int64(change),
-					PubkeyHash: changeAddrHash,
+					PubkeyHash: changeAddr.ScriptAddress(),
 					Change:     true,
 				}
 				outputs = append(outputs, out)

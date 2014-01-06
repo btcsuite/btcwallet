@@ -32,7 +32,7 @@ import (
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
-	"hash"
+	"github.com/davecgh/go-spew/spew"
 	"io"
 	"math/big"
 	"sync"
@@ -111,27 +111,6 @@ func binaryWrite(w io.Writer, order binary.ByteOrder, data interface{}) (n int64
 	return int64(written), err
 }
 
-// Calculate the hash of hasher over buf.
-func calcHash(buf []byte, hasher hash.Hash) []byte {
-	hasher.Write(buf)
-	return hasher.Sum(nil)
-}
-
-// calculate hash160 which is ripemd160(sha256(data))
-func calcHash160(buf []byte) []byte {
-	return calcHash(calcHash(buf, sha256.New()), ripemd160.New())
-}
-
-// calculate hash256 which is sha256(sha256(data))
-func calcHash256(buf []byte) []byte {
-	return calcHash(calcHash(buf, sha256.New()), sha256.New())
-}
-
-// calculate sha512(data)
-func calcSha512(buf []byte) []byte {
-	return calcHash(buf, sha512.New())
-}
-
 // pubkeyFromPrivkey creates an encoded pubkey based on a
 // 32-byte privkey.  The returned pubkey is 33 bytes if compressed,
 // or 65 bytes if uncompressed.
@@ -154,11 +133,11 @@ func keyOneIter(passphrase, salt []byte, memReqts uint64) []byte {
 	lutbl := make([]byte, memReqts)
 
 	// Seed for lookup table
-	seed := calcSha512(saltedpass)
-	copy(lutbl[:sha512.Size], seed)
+	seed := sha512.Sum512(saltedpass)
+	copy(lutbl[:sha512.Size], seed[:])
 
 	for nByte := 0; nByte < (int(memReqts) - sha512.Size); nByte += sha512.Size {
-		hash := calcSha512(lutbl[nByte : nByte+sha512.Size])
+		hash := sha512.Sum512(lutbl[nByte : nByte+sha512.Size])
 		copy(lutbl[nByte+sha512.Size:nByte+2*sha512.Size], hash[:])
 	}
 
@@ -180,7 +159,7 @@ func keyOneIter(passphrase, salt []byte, memReqts uint64) []byte {
 		}
 
 		// Save new hash to x
-		hash := calcSha512(x)
+		hash := sha512.Sum512(x)
 		copy(x, hash[:])
 	}
 
@@ -230,7 +209,7 @@ func ChainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 	}
 
 	xorbytes := make([]byte, 32)
-	chainMod := calcHash256(pubkey)
+	chainMod := sha256.Sum256(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
@@ -450,7 +429,6 @@ func (v *varEntries) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 }
 
-type addressHashKey string
 type transactionHashKey string
 type comment []byte
 
@@ -472,8 +450,8 @@ type Wallet struct {
 	// root address and the appended entries.
 	recent recentBlocks
 
-	addrMap        map[addressHashKey]*btcAddress
-	addrCommentMap map[addressHashKey]comment
+	addrMap        map[btcutil.AddressPubKeyHash]*btcAddress
+	addrCommentMap map[btcutil.AddressPubKeyHash]comment
 	txCommentMap   map[transactionHashKey]comment
 
 	// These are not serialized.
@@ -481,7 +459,7 @@ type Wallet struct {
 		sync.Mutex
 		key []byte
 	}
-	chainIdxMap   map[int64]addressHashKey
+	chainIdxMap   map[int64]*btcutil.AddressPubKeyHash
 	importedAddrs []*btcAddress
 	lastChainIdx  int64
 }
@@ -490,15 +468,18 @@ type Wallet struct {
 // desc's binary representation must not exceed 32 and 256 bytes,
 // respectively.  All address private keys are encrypted with passphrase.
 // The wallet is returned unlocked.
-func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
-	createdAt *BlockStamp) (*Wallet, error) {
-
+func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, createdAt *BlockStamp) (*Wallet, error) {
 	// Check sizes of inputs.
 	if len([]byte(name)) > 32 {
 		return nil, errors.New("name exceeds 32 byte maximum size")
 	}
 	if len([]byte(desc)) > 256 {
 		return nil, errors.New("desc exceeds 256 byte maximum size")
+	}
+
+	// Check for a valid network.
+	if !(net == btcwire.MainNet || net == btcwire.TestNet3) {
+		return nil, errors.New("wallets must use mainnet or testnet3")
 	}
 
 	// Randomly-generate rootkey and chaincode.
@@ -550,18 +531,18 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 				&createdAt.Hash,
 			},
 		},
-		addrMap:        make(map[addressHashKey]*btcAddress),
-		addrCommentMap: make(map[addressHashKey]comment),
+		addrMap:        make(map[btcutil.AddressPubKeyHash]*btcAddress),
+		addrCommentMap: make(map[btcutil.AddressPubKeyHash]comment),
 		txCommentMap:   make(map[transactionHashKey]comment),
-		chainIdxMap:    make(map[int64]addressHashKey),
+		chainIdxMap:    make(map[int64]*btcutil.AddressPubKeyHash),
 		lastChainIdx:   rootKeyChainIdx,
 	}
 	copy(w.name[:], []byte(name))
 	copy(w.desc[:], []byte(desc))
 
 	// Add root address to maps.
-	w.addrMap[addressHashKey(w.keyGenerator.pubKeyHash[:])] = &w.keyGenerator
-	w.chainIdxMap[rootKeyChainIdx] = addressHashKey(w.keyGenerator.pubKeyHash[:])
+	w.addrMap[*w.keyGenerator.address(net)] = &w.keyGenerator
+	w.chainIdxMap[rootKeyChainIdx] = w.keyGenerator.address(net)
 
 	// Fill keypool.
 	if err := w.extendKeypool(nKeypoolIncrement, aeskey, createdAt); err != nil {
@@ -589,9 +570,9 @@ func (w *Wallet) Name() string {
 func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	var read int64
 
-	w.addrMap = make(map[addressHashKey]*btcAddress)
-	w.addrCommentMap = make(map[addressHashKey]comment)
-	w.chainIdxMap = make(map[int64]addressHashKey)
+	w.addrMap = make(map[btcutil.AddressPubKeyHash]*btcAddress)
+	w.addrCommentMap = make(map[btcutil.AddressPubKeyHash]comment)
+	w.chainIdxMap = make(map[int64]*btcutil.AddressPubKeyHash)
 	w.txCommentMap = make(map[transactionHashKey]comment)
 
 	var id [8]byte
@@ -640,29 +621,29 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 
 	// Add root address to address map.
-	rootAddrKey := addressHashKey(w.keyGenerator.pubKeyHash[:])
-	w.addrMap[rootAddrKey] = &w.keyGenerator
-	w.chainIdxMap[rootKeyChainIdx] = rootAddrKey
+	rootAddr := w.keyGenerator.address(w.net)
+	w.addrMap[*rootAddr] = &w.keyGenerator
+	w.chainIdxMap[rootKeyChainIdx] = rootAddr
 
 	// Fill unserializied fields.
 	wts := ([]io.WriterTo)(appendedEntries)
 	for _, wt := range wts {
 		switch e := wt.(type) {
 		case *addrEntry:
-			addrKey := addressHashKey(e.pubKeyHash160[:])
-			w.addrMap[addrKey] = &e.addr
+			addr := e.addr.address(w.net)
+			w.addrMap[*addr] = &e.addr
 			if e.addr.chainIndex == importedKeyChainIdx {
 				w.importedAddrs = append(w.importedAddrs, &e.addr)
 			} else {
-				w.chainIdxMap[e.addr.chainIndex] = addrKey
+				w.chainIdxMap[e.addr.chainIndex] = addr
 				if w.lastChainIdx < e.addr.chainIndex {
 					w.lastChainIdx = e.addr.chainIndex
 				}
 			}
 
 		case *addrCommentEntry:
-			addrKey := addressHashKey(e.pubKeyHash160[:])
-			w.addrCommentMap[addrKey] = comment(e.comment)
+			addr := e.address(w.net)
+			w.addrCommentMap[*addr] = comment(e.comment)
 
 		case *txCommentEntry:
 			txKey := transactionHashKey(e.txHash[:])
@@ -682,26 +663,26 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 	var wts []io.WriterTo
 	var chainedAddrs = make([]io.WriterTo, len(w.chainIdxMap)-1)
 	var importedAddrs []io.WriterTo
-	for hash, addr := range w.addrMap {
+	for addr, btcAddr := range w.addrMap {
 		e := &addrEntry{
-			addr: *addr,
+			addr: *btcAddr,
 		}
-		copy(e.pubKeyHash160[:], []byte(hash))
-		if addr.chainIndex >= 0 {
+		copy(e.pubKeyHash160[:], addr.ScriptAddress())
+		if btcAddr.chainIndex >= 0 {
 			// Chained addresses are sorted.  This is
 			// kind of nice but probably isn't necessary.
-			chainedAddrs[addr.chainIndex] = e
-		} else if addr.chainIndex == importedKeyChainIdx {
+			chainedAddrs[btcAddr.chainIndex] = e
+		} else if btcAddr.chainIndex == importedKeyChainIdx {
 			// No order for imported addresses.
 			importedAddrs = append(importedAddrs, e)
 		}
 	}
 	wts = append(chainedAddrs, importedAddrs...)
-	for hash, comment := range w.addrCommentMap {
+	for addr, comment := range w.addrCommentMap {
 		e := &addrCommentEntry{
 			comment: []byte(comment),
 		}
-		copy(e.pubKeyHash160[:], []byte(hash))
+		copy(e.pubKeyHash160[:], addr.ScriptAddress())
 		wts = append(wts, e)
 	}
 	for hash, comment := range w.txCommentMap {
@@ -814,7 +795,7 @@ func (w *Wallet) Version() (string, int) {
 
 // NextChainedAddress attempts to get the next chained address,
 // refilling the keypool if necessary.
-func (w *Wallet) NextChainedAddress(bs *BlockStamp) (string, error) {
+func (w *Wallet) NextChainedAddress(bs *BlockStamp) (*btcutil.AddressPubKeyHash, error) {
 	// Attempt to get address hash of next chained address.
 	next160, ok := w.chainIdxMap[w.highestUsed+1]
 	if !ok {
@@ -823,61 +804,50 @@ func (w *Wallet) NextChainedAddress(bs *BlockStamp) (string, error) {
 		w.secret.Lock()
 		if len(w.secret.key) != 32 {
 			w.secret.Unlock()
-			return "", ErrWalletLocked
+			return nil, ErrWalletLocked
 		}
 		copy(aeskey, w.secret.key)
 		w.secret.Unlock()
 
 		err := w.extendKeypool(nKeypoolIncrement, aeskey, bs)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
 		next160, ok = w.chainIdxMap[w.highestUsed+1]
 		if !ok {
-			return "", errors.New("chain index map inproperly updated")
+			return nil, errors.New("chain index map inproperly updated")
 		}
 	}
 
 	// Look up address.
-	addr, ok := w.addrMap[next160]
+	addr, ok := w.addrMap[*next160]
 	if !ok {
-		return "", errors.New("cannot find generated address")
+		return nil, errors.New("cannot find generated address")
 	}
 
 	w.highestUsed++
 
 	// Create and return payment address for address hash.
-	return addr.paymentAddress(w.net)
+	return addr.address(w.net), nil
 }
 
 // LastChainedAddress returns the most recently requested chained
 // address from calling NextChainedAddress, or the root address if
 // no chained addresses have been requested.
-func (w *Wallet) LastChainedAddress() (string, error) {
-	// Lookup pubkey hash for last used chained address.
-	pkHash, ok := w.chainIdxMap[w.highestUsed]
-	if !ok {
-		return "", errors.New("chain index references unknown address")
-	}
-
-	// Lookup address with this pubkey hash.
-	addr, ok := w.addrMap[pkHash]
-	if !ok {
-		return "", errors.New("cannot find address by pubkey hash")
-	}
-
-	// Create and return payment address from serialized pubkey.
-	return addr.paymentAddress(w.net)
+func (w *Wallet) LastChainedAddress() btcutil.Address {
+	return w.chainIdxMap[w.highestUsed]
 }
 
 // extendKeypool grows the keypool by n addresses.
 func (w *Wallet) extendKeypool(n uint, aeskey []byte, bs *BlockStamp) error {
 	// Get last chained address.  New chained addresses will be
 	// chained off of this address's chaincode and private key.
-	addrKey := w.chainIdxMap[w.lastChainIdx]
-	addr, ok := w.addrMap[addrKey]
+	a := w.chainIdxMap[w.lastChainIdx]
+	addr, ok := w.addrMap[*a]
 	if !ok {
+		spew.Dump(a)
+		spew.Dump(w.addrMap)
 		return errors.New("expected last chained address not found")
 	}
 	privkey, err := addr.unlock(aeskey)
@@ -903,10 +873,10 @@ func (w *Wallet) extendKeypool(n uint, aeskey []byte, bs *BlockStamp) error {
 		if err = newaddr.encrypt(aeskey); err != nil {
 			return err
 		}
-		addrKey := addressHashKey(newaddr.pubKeyHash[:])
-		w.addrMap[addrKey] = newaddr
+		a := newaddr.address(w.net)
+		w.addrMap[*a] = newaddr
 		newaddr.chainIndex = addr.chainIndex + 1
-		w.chainIdxMap[newaddr.chainIndex] = addrKey
+		w.chainIdxMap[newaddr.chainIndex] = a
 		w.lastChainIdx++
 		// armory does this.. but all the chaincodes are equal so why
 		// not use the root's?
@@ -917,40 +887,22 @@ func (w *Wallet) extendKeypool(n uint, aeskey []byte, bs *BlockStamp) error {
 	return nil
 }
 
-// addrHashForAddress decodes and returns the address hash for a
-// payment address string, performing some basic sanity checking that it
-// matches the Bitcoin network used by the wallet.
-func (w *Wallet) addrHashForAddress(addr string) ([]byte, error) {
-	addr160, net, err := btcutil.DecodeAddress(addr)
-	if err != nil {
-		return nil, err
-	}
-
-	// Return error if address is for the wrong Bitcoin network.
-	switch {
-	case net == btcutil.MainNetAddr && w.net != btcwire.MainNet:
-		fallthrough
-	case net == btcutil.TestNetAddr && w.net != btcwire.TestNet:
-		return nil, ErrNetworkMismatch
-	}
-
-	return addr160, nil
-}
-
 // AddressKey returns the private key for a payment address stored
 // in a wallet.  This can fail if the payment address is for a different
 // Bitcoin network than what this wallet uses, the address is not
 // contained in the wallet, the address does not include a public and
 // private key, or if the wallet is locked.
-func (w *Wallet) AddressKey(addr string) (key *ecdsa.PrivateKey, err error) {
-	// Get address hash for payment address string.
-	addr160, err := w.addrHashForAddress(addr)
-	if err != nil {
-		return nil, err
+func (w *Wallet) AddressKey(a btcutil.Address) (key *ecdsa.PrivateKey, err error) {
+	// Currently, only P2PKH addresses are supported.  This should
+	// be extended to a switch-case statement when support for other
+	// addresses are added.
+	addr, ok := a.(*btcutil.AddressPubKeyHash)
+	if !ok {
+		return nil, errors.New("unsupported address")
 	}
 
 	// Lookup address from map.
-	btcaddr, ok := w.addrMap[addressHashKey(addr160)]
+	btcaddr, ok := w.addrMap[*addr]
 	if !ok {
 		return nil, ErrAddressNotFound
 	}
@@ -996,17 +948,19 @@ func (w *Wallet) AddressKey(addr string) (key *ecdsa.PrivateKey, err error) {
 }
 
 // AddressInfo returns an AddressInfo structure for an address in a wallet.
-func (w *Wallet) AddressInfo(addr string) (*AddressInfo, error) {
-	// Get address hash for addr.
-	addr160, err := w.addrHashForAddress(addr)
-	if err != nil {
-		return nil, err
+func (w *Wallet) AddressInfo(a btcutil.Address) (*AddressInfo, error) {
+	// Currently, only P2PKH addresses are supported.  This should
+	// be extended to a switch-case statement when support for other
+	// addresses are added.
+	addr, ok := a.(*btcutil.AddressPubKeyHash)
+	if !ok {
+		return nil, errors.New("unsupported address")
 	}
 
 	// Look up address by address hash.
-	btcaddr, ok := w.addrMap[addressHashKey(addr160)]
+	btcaddr, ok := w.addrMap[*addr]
 	if !ok {
-		return nil, errors.New("address not in wallet")
+		return nil, ErrAddressNotFound
 	}
 
 	return btcaddr.info(w.net)
@@ -1116,11 +1070,8 @@ func (w *Wallet) SetBetterEarliestBlockHeight(height int32) {
 // ImportPrivateKey creates a new encrypted btcAddress with a
 // user-provided private key and adds it to the wallet.  If the
 // import is successful, the payment address string is returned.
-func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool,
-	bs *BlockStamp) (string, error) {
-
-	// The wallet's secret will be zeroed on lock, so make a local
-	// copy.
+func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStamp) (string, error) {
+	// The wallet's secret will be zeroed on lock, so make a local copy.
 	w.secret.Lock()
 	if len(w.secret.key) != 32 {
 		w.secret.Unlock()
@@ -1131,32 +1082,28 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool,
 	w.secret.Unlock()
 
 	// Create new address with this private key.
-	addr, err := newBtcAddress(privkey, nil, bs, compressed)
+	btcaddr, err := newBtcAddress(privkey, nil, bs, compressed)
 	if err != nil {
 		return "", err
 	}
-	addr.chainIndex = importedKeyChainIdx
+	btcaddr.chainIndex = importedKeyChainIdx
 
 	// Encrypt imported address with the derived AES key.
-	if err = addr.encrypt(localSecret); err != nil {
-		return "", err
-	}
-
-	// Create payment address string.  If this fails, return an error
-	// before adding the address to the wallet.
-	addr160 := addr.pubKeyHash[:]
-	addrstr, err := btcutil.EncodeAddress(addr160, w.Net())
-	if err != nil {
+	if err = btcaddr.encrypt(localSecret); err != nil {
 		return "", err
 	}
 
 	// Add address to wallet's bookkeeping structures.  Adding to
 	// the map will result in the imported address being serialized
 	// on the next WriteTo call.
-	w.addrMap[addressHashKey(addr160)] = addr
-	w.importedAddrs = append(w.importedAddrs, addr)
+	w.addrMap[*btcaddr.address(w.net)] = btcaddr
+	w.importedAddrs = append(w.importedAddrs, btcaddr)
 
-	return addrstr, nil
+	// Create and return encoded payment address string.  Error is
+	// ignored as the length of the pubkey hash and net will always
+	// be valid.
+	addr, _ := btcutil.NewAddressPubKeyHash(btcaddr.pubKeyHash[:], w.Net())
+	return addr.String(), nil
 }
 
 // CreateDate returns the Unix time of the wallet creation time.  This
@@ -1169,7 +1116,7 @@ func (w *Wallet) CreateDate() int64 {
 // AddressInfo holds information regarding an address needed to manage
 // a complete wallet.
 type AddressInfo struct {
-	Address    string
+	btcutil.Address
 	AddrHash   string
 	Compressed bool
 	FirstBlock int32
@@ -1185,12 +1132,8 @@ func (w *Wallet) SortedActiveAddresses() []*AddressInfo {
 	addrs := make([]*AddressInfo, 0,
 		w.highestUsed+int64(len(w.importedAddrs))+1)
 	for i := int64(rootKeyChainIdx); i <= w.highestUsed; i++ {
-		addr160, ok := w.chainIdxMap[i]
-		if !ok {
-			return addrs
-		}
-		addr := w.addrMap[addr160]
-		info, err := addr.info(w.Net())
+		a := w.chainIdxMap[i]
+		info, err := w.addrMap[*a].info(w.Net())
 		if err == nil {
 			addrs = append(addrs, info)
 		}
@@ -1207,15 +1150,11 @@ func (w *Wallet) SortedActiveAddresses() []*AddressInfo {
 // ActiveAddresses returns a map between active payment addresses
 // and their full info.  These do not include unused addresses in the
 // key pool.  If addresses must be sorted, use SortedActiveAddresses.
-func (w *Wallet) ActiveAddresses() map[string]*AddressInfo {
-	addrs := make(map[string]*AddressInfo)
+func (w *Wallet) ActiveAddresses() map[btcutil.Address]*AddressInfo {
+	addrs := make(map[btcutil.Address]*AddressInfo)
 	for i := int64(rootKeyChainIdx); i <= w.highestUsed; i++ {
-		addr160, ok := w.chainIdxMap[i]
-		if !ok {
-			return addrs
-		}
-		addr := w.addrMap[addr160]
-		info, err := addr.info(w.Net())
+		a := w.chainIdxMap[i]
+		info, err := w.addrMap[*a].info(w.Net())
 		if err == nil {
 			addrs[info.Address] = info
 		}
@@ -1676,7 +1615,7 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp, compressed bool) (addr *b
 	addr.privKeyCT.key = privkey
 	copy(addr.initVector[:], iv)
 	addr.pubKey = pubkeyFromPrivkey(privkey, compressed)
-	copy(addr.pubKeyHash[:], calcHash160(addr.pubKey))
+	copy(addr.pubKeyHash[:], btcutil.Hash160(addr.pubKey))
 
 	return addr, nil
 }
@@ -1932,19 +1871,18 @@ func (a *btcAddress) changeEncryptionKey(oldkey, newkey []byte) error {
 	return errors.New("unimplemented")
 }
 
-// paymentAddress returns a human readable payment address string for
-// an address.
-func (a *btcAddress) paymentAddress(net btcwire.BitcoinNet) (string, error) {
-	return btcutil.EncodeAddress(a.pubKeyHash[:], net)
+// address returns a btcutil.AddressPubKeyHash for a btcAddress.
+func (a *btcAddress) address(net btcwire.BitcoinNet) *btcutil.AddressPubKeyHash {
+	// error is not returned because the hash will always be 20
+	// bytes, and net is assumed to be valid.
+	addr, _ := btcutil.NewAddressPubKeyHash(a.pubKeyHash[:], net)
+	return addr
 }
 
 // info returns information about a btcAddress stored in a AddressInfo
 // struct.
 func (a *btcAddress) info(net btcwire.BitcoinNet) (*AddressInfo, error) {
-	address, err := a.paymentAddress(net)
-	if err != nil {
-		return nil, err
-	}
+	address := a.address(net)
 
 	return &AddressInfo{
 		Address:    address,
@@ -2122,6 +2060,13 @@ func (e *addrEntry) ReadFrom(r io.Reader) (n int64, err error) {
 type addrCommentEntry struct {
 	pubKeyHash160 [ripemd160.Size]byte
 	comment       []byte
+}
+
+func (e *addrCommentEntry) address(net btcwire.BitcoinNet) *btcutil.AddressPubKeyHash {
+	// error is not returned because the hash will always be 20
+	// bytes, and net is assumed to be valid.
+	addr, _ := btcutil.NewAddressPubKeyHash(e.pubKeyHash160[:], net)
+	return addr
 }
 
 func (e *addrCommentEntry) WriteTo(w io.Writer) (n int64, err error) {

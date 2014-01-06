@@ -90,6 +90,7 @@ func TestWalletCreationSerialization(t *testing.T) {
 		[]byte("banana"), btcwire.MainNet, createdAt)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
+		return
 	}
 
 	file, err := os.Create("newwallet.bin")

@@ -233,7 +233,13 @@ func DumpPrivKey(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	switch key, err := accountstore.DumpWIFPrivateKey(cmd.Address); err {
+	addr, err := btcutil.DecodeAddr(cmd.Address)
+	if err != nil {
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
+		return
+	}
+
+	switch key, err := accountstore.DumpWIFPrivateKey(addr); err {
 	case nil:
 		// Key was found.
 		ReplySuccess(frontend, cmd.Id(), key)
@@ -349,8 +355,24 @@ func GetAccount(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Is address valid?
-	_, net, err := btcutil.DecodeAddress(cmd.Address)
-	if err != nil || net != cfg.Net() {
+	addr, err := btcutil.DecodeAddr(cmd.Address)
+	if err != nil {
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
+		return
+	}
+	var net btcwire.BitcoinNet
+	switch a := addr.(type) {
+	case *btcutil.AddressPubKeyHash:
+		net = a.Net()
+
+	case *btcutil.AddressScriptHash:
+		net = a.Net()
+
+	default:
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
+		return
+	}
+	if net != cfg.Net() {
 		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
 		return
 	}
@@ -429,8 +451,13 @@ func GetAddressBalance(frontend chan []byte, icmd btcjson.Cmd) {
 	}
 
 	// Is address valid?
-	pkhash, net, err := btcutil.DecodeAddress(cmd.Address)
-	if err != nil || net != cfg.Net() {
+	addr, err := btcutil.DecodeAddr(cmd.Address)
+	if err != nil {
+		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
+		return
+	}
+	apkh, ok := addr.(*btcutil.AddressPubKeyHash)
+	if !ok || apkh.Net() != cfg.Net() {
 		ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
 		return
 	}
@@ -455,7 +482,7 @@ func GetAddressBalance(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	bal := a.CalculateAddressBalance(pkhash, int(cmd.Minconf))
+	bal := a.CalculateAddressBalance(apkh, int(cmd.Minconf))
 	ReplySuccess(frontend, cmd.Id(), bal)
 }
 
@@ -712,19 +739,20 @@ func ListAddressTransactions(frontend chan []byte, icmd btcjson.Cmd) {
 		return
 	}
 
-	// Parse hash160s out of addresses.
+	// Decode addresses.
 	pkHashMap := make(map[string]struct{})
-	for _, addr := range cmd.Addresses {
-		pkHash, net, err := btcutil.DecodeAddress(addr)
-		if err != nil || net != cfg.Net() {
-			e := &btcjson.Error{
-				Code:    btcjson.ErrInvalidParams.Code,
-				Message: "invalid address",
-			}
-			ReplyError(frontend, cmd.Id(), e)
+	for _, addrStr := range cmd.Addresses {
+		addr, err := btcutil.DecodeAddr(addrStr)
+		if err != nil {
+			ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
 			return
 		}
-		pkHashMap[string(pkHash)] = struct{}{}
+		apkh, ok := addr.(*btcutil.AddressPubKeyHash)
+		if !ok || apkh.Net() != cfg.Net() {
+			ReplyError(frontend, cmd.Id(), &btcjson.ErrInvalidAddressOrKey)
+			return
+		}
+		pkHashMap[string(addr.ScriptAddress())] = struct{}{}
 	}
 
 	txList, err := a.ListAddressTransactions(pkHashMap)
@@ -863,7 +891,7 @@ func SendFrom(frontend chan []byte, icmd btcjson.Cmd) {
 
 	// If a change address was added, mark wallet as dirty, sync to disk,
 	// and request updates for change address.
-	if len(createdTx.changeAddr) != 0 {
+	if createdTx.changeAddr != nil {
 		a.dirty = true
 		if err := a.writeDirtyToDisk(); err != nil {
 			log.Errorf("cannot write dirty wallet: %v", err)
@@ -955,7 +983,7 @@ func SendMany(frontend chan []byte, icmd btcjson.Cmd) {
 
 	// If a change address was added, mark wallet as dirty, sync to disk,
 	// and request updates for change address.
-	if len(createdTx.changeAddr) != 0 {
+	if createdTx.changeAddr != nil {
 		a.dirty = true
 		if err := a.writeDirtyToDisk(); err != nil {
 			log.Errorf("cannot write dirty wallet: %v", err)

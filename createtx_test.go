@@ -89,18 +89,13 @@ func TestFakeTxs(t *testing.T) {
 		t.Errorf("Cannot get next address: %s", err)
 		return
 	}
-	addr160, _, err := btcutil.DecodeAddress(addr)
-	if err != nil {
-		t.Errorf("Cannot decode address: %s", err)
-		return
-	}
-	copy(utxo.AddrHash[:], addr160)
+	copy(utxo.AddrHash[:], addr.ScriptAddress())
 	ophash := (btcwire.ShaHash)([...]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
 		12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
 		28, 29, 30, 31, 32})
 	out := btcwire.NewOutPoint(&ophash, 0)
 	utxo.Out = tx.OutPoint(*out)
-	ss, err := btcscript.PayToPubKeyHashScript(addr160)
+	ss, err := btcscript.PayToAddrScript(addr)
 	if err != nil {
 		t.Errorf("Could not create utxo PkScript: %s", err)
 		return

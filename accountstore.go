@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
@@ -247,7 +248,7 @@ func (store *AccountStore) DumpKeys() ([]string, error) {
 
 // DumpWIFPrivateKey searches through all accounts for the bitcoin
 // payment address addr and returns the WIF-encdoded private key.
-func (store *AccountStore) DumpWIFPrivateKey(addr string) (string, error) {
+func (store *AccountStore) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 	store.Lock()
 	defer store.Unlock()
 
