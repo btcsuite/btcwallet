@@ -51,24 +51,29 @@ type ReaderFromVersion interface {
 	io.WriterTo
 }
 
-// Various versions.
-var (
-	// First file version used.
-	utxoVersFirst uint32 = 0
-	txVersFirst   uint32 = 0
+// Various UTXO file versions.
+const (
+	utxoVersFirst uint32 = iota
+)
+
+// Various Tx file versions.
+const (
+	txVersFirst uint32 = iota
 
 	// txVersRecvTxIndex is the version where the txout index
 	// was added to the RecvTx struct.
-	txVersRecvTxIndex uint32 = 1
+	txVersRecvTxIndex
 
 	// txVersMarkSentChange is the version where serialized SentTx
 	// added a flags field, used for marking a sent transaction
 	// as change.
-	txVersMarkSentChange uint32 = 2
+	txVersMarkSentChange
+)
 
-	// Current versions
+// Current versions.
+const (
 	utxoVersCurrent = utxoVersFirst
-	txVersCurrent   = txVersRecvTxIndex
+	txVersCurrent   = txVersMarkSentChange
 )
 
 // UtxoStore is a type used for holding all Utxo structures for all
@@ -339,6 +344,18 @@ func (p *Pair) WriteTo(w io.Writer) (int64, error) {
 	amountBytes := make([]byte, 8) // raw bytes for a uint64
 	binary.LittleEndian.PutUint64(amountBytes, uint64(p.Amount))
 	nw, err := w.Write(amountBytes)
+	if err != nil {
+		return written + int64(nw), err
+	}
+	written += int64(nw)
+
+	// Set and write flags.
+	flags := byte(0)
+	if p.Change {
+		flags |= 1 << 0
+	}
+	flagBytes := []byte{flags}
+	nw, err = w.Write(flagBytes)
 	if err != nil {
 		return written + int64(nw), err
 	}
@@ -699,7 +716,7 @@ func (s *PkScript) WriteTo(w io.Writer) (n int64, err error) {
 func (txs *TxStore) ReadFrom(r io.Reader) (int64, error) {
 	var read int64
 
-	// Read the file version.  This is currently not used.
+	// Read the file version.
 	versionBytes := make([]byte, 4) // bytes for a uint32
 	n, err := r.Read(versionBytes)
 	if err != nil {
@@ -762,9 +779,9 @@ func (txs *TxStore) ReadFrom(r io.Reader) (int64, error) {
 func (txs *TxStore) WriteTo(w io.Writer) (int64, error) {
 	var written int64
 
-	// Write file version.  This is currently not used.
+	// Write file version.
 	versionBytes := make([]byte, 4) // bytes for a uint32
-	binary.LittleEndian.PutUint32(versionBytes, utxoVersCurrent)
+	binary.LittleEndian.PutUint32(versionBytes, txVersCurrent)
 	n, err := w.Write(versionBytes)
 	if err != nil {
 		return int64(n), err
@@ -773,30 +790,32 @@ func (txs *TxStore) WriteTo(w io.Writer) (int64, error) {
 
 	store := ([]interface{})(*txs)
 	for _, tx := range store {
+		// Write header for tx.
+		var header byte
 		switch tx.(type) {
 		case *RecvTx:
-			n, err := binaryWrite(w, binary.LittleEndian, recvTxHeader)
-			if err != nil {
-				return written + n, err
-			}
-			written += n
+			header = recvTxHeader
 
 		case *SendTx:
-			n, err := binaryWrite(w, binary.LittleEndian, sendTxHeader)
-			if err != nil {
-				return written + n, err
-			}
-			written += n
+			header = sendTxHeader
 
 		default:
 			return written, fmt.Errorf("unknown type in TxStore")
 		}
-		wt := tx.(io.WriterTo)
-		n, err := wt.WriteTo(w)
+		headerBytes := []byte{header}
+		n, err := w.Write(headerBytes)
 		if err != nil {
-			return written + n, err
+			return written + int64(n), err
 		}
-		written += n
+		written += int64(n)
+
+		// Write tx.
+		wt := tx.(io.WriterTo)
+		n64, err := wt.WriteTo(w)
+		if err != nil {
+			return written + n64, err
+		}
+		written += n64
 	}
 	return written, nil
 }
@@ -964,6 +983,7 @@ func (tx *RecvTx) ReadFrom(r io.Reader) (n int64, err error) {
 // w in the format:
 //
 //  TxID (32 bytes)
+//  TxOutIdx (4 bytes, little endian)
 //  TimeReceived (8 bytes, little endian)
 //  BlockHeight (4 bytes, little endian)
 //  BlockHash (32 bytes)
@@ -974,6 +994,7 @@ func (tx *RecvTx) ReadFrom(r io.Reader) (n int64, err error) {
 func (tx *RecvTx) WriteTo(w io.Writer) (n int64, err error) {
 	datas := []interface{}{
 		&tx.TxID,
+		&tx.TxOutIdx,
 		&tx.TimeReceived,
 		&tx.BlockHeight,
 		&tx.BlockHash,
@@ -1046,8 +1067,12 @@ func (tx *SendTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error)
 	}
 	for _, data := range datas {
 		switch e := data.(type) {
+		case ReaderFromVersion:
+			read, err = e.ReadFromVersion(vers, r)
+
 		case io.ReaderFrom:
 			read, err = e.ReadFrom(r)
+
 		default:
 			read, err = binaryRead(r, binary.LittleEndian, data)
 		}

@@ -33,6 +33,7 @@ var (
 			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
 			30, 31,
 		},
+		TxOutIdx: 0,
 		BlockHash: [btcwire.HashSize]byte{
 			0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 			16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
@@ -203,7 +204,7 @@ func TestRecvTxWriteRead(t *testing.T) {
 	tx := new(RecvTx)
 	n, err = tx.ReadFrom(bytes.NewBuffer(txBytes))
 	if err != nil {
-		t.Error(err)
+		t.Errorf("Read %v bytes before erroring with: %v", n, err)
 		return
 	}
 
@@ -237,7 +238,7 @@ func TestSendTxWriteRead(t *testing.T) {
 	tx := new(SendTx)
 	n2, err := tx.ReadFrom(bytes.NewBuffer(txBytes))
 	if err != nil {
-		t.Error(err)
+		t.Errorf("Read %v bytes before erroring with: %v", n2, err)
 		return
 	}
 	if n1 != n2 {
@@ -279,7 +280,7 @@ func TestTxStoreWriteRead(t *testing.T) {
 	txs := TxStore{}
 	n2, err := txs.ReadFrom(bytes.NewBuffer(txsBytes))
 	if err != nil {
-		t.Error(err)
+		t.Errorf("Read %v bytes before erroring with: %v", n2, err)
 		return
 	}
 	if n1 != n2 {
