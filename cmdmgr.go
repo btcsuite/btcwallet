@@ -425,7 +425,7 @@ func GetAccountAddress(frontend chan []byte, icmd btcjson.Cmd) {
 
 	switch addr, err := a.CurrentAddress(); err {
 	case nil:
-		ReplySuccess(frontend, cmd.Id(), addr)
+		ReplySuccess(frontend, cmd.Id(), addr.EncodeAddress())
 
 	case wallet.ErrWalletLocked:
 		ReplyError(frontend, cmd.Id(), &btcjson.ErrWalletKeypoolRanOut)
