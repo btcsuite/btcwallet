@@ -622,7 +622,7 @@ func GetNewAddress(frontend chan []byte, icmd btcjson.Cmd) {
 	switch err {
 	case nil:
 		// Reply with the new payment address string.
-		ReplySuccess(frontend, cmd.Id(), addr)
+		ReplySuccess(frontend, cmd.Id(), addr.EncodeAddress())
 
 	case wallet.ErrWalletLocked:
 		// The wallet is locked error may be sent if the keypool needs
