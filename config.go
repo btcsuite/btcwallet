@@ -49,7 +49,7 @@ type config struct {
 	Connect      string   `short:"c" long:"connect" description:"Server and port of btcd instance to connect to (default localhost:18334, mainnet: localhost:8334)"`
 	DebugLevel   string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
-	SvrListeners []string `long:"listen" description:"Listen for RPC/websocket connections on this interface/port (default no listening.  default port: 18332, mainnet: 8332)"`
+	SvrListeners []string `long:"listen" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332)"`
 	DataDir      string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
 	Username     string   `short:"u" long:"username" description:"Username for btcd authorization"`
 	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for btcd authorization"`
