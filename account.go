@@ -395,6 +395,7 @@ func (a *Account) ImportPrivKey(wif string, rescan bool) error {
 		}
 
 		Rescan(CurrentRPCConn(), bs.Height, addrs)
+		a.writeDirtyToDisk()
 	}
 	return nil
 }
@@ -497,6 +498,7 @@ func (a *Account) RescanActiveAddresses() {
 
 	// Rescan active addresses starting at the determined block height.
 	Rescan(CurrentRPCConn(), beginBlock, a.ActivePaymentAddresses())
+	a.writeDirtyToDisk()
 }
 
 // SortedActivePaymentAddresses returns a slice of all active payment
