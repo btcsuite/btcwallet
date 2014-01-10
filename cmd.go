@@ -123,7 +123,6 @@ func main() {
 
 	tcfg, _, err := loadConfig()
 	if err != nil {
-		log.Error(err)
 		os.Exit(1)
 	}
 	cfg = tcfg
