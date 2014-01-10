@@ -581,7 +581,9 @@ func Handshake(rpc RPCConn) error {
 	// track recently-seen blocks.
 	a, err := accountstore.Account("")
 	if err != nil {
-		return err
+		// No account yet is not a handshake error, but means our
+		// handshake is done.
+		return nil
 	}
 
 	// TODO(jrick): if height is less than the earliest-saved block
