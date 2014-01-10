@@ -35,8 +35,10 @@ const (
 )
 
 var (
+	btcdHomeDir        = btcutil.AppDataDir("btcd", false)
 	btcwalletHomeDir   = btcutil.AppDataDir("btcwallet", false)
 	defaultCAFile      = filepath.Join(btcwalletHomeDir, defaultCAFilename)
+	btcdHomedirCAFile  = filepath.Join(btcdHomeDir, "rpc.cert")
 	defaultConfigFile  = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
 	defaultDataDir     = btcwalletHomeDir
 	defaultRPCKeyFile  = filepath.Join(btcwalletHomeDir, "rpc.key")
@@ -136,7 +138,6 @@ func loadConfig() (*config, []string, error) {
 	// Default config.
 	cfg := config{
 		DebugLevel: defaultLogLevel,
-		CAFile:     defaultCAFile,
 		ConfigFile: defaultConfigFile,
 		DataDir:    defaultDataDir,
 		RPCKey:     defaultRPCKeyFile,
@@ -217,6 +218,32 @@ func loadConfig() (*config, []string, error) {
 
 	// Add default port to connect flag if missing.
 	cfg.Connect = normalizeAddress(cfg.Connect, activeNetParams.btcdPort)
+
+	// If CAFile is unset, choose either the copy or local btcd cert.
+	if cfg.CAFile == "" {
+		cfg.CAFile = defaultCAFile
+
+		// If the CA copy does not exist, check if we're connecting to
+		// a local btcd and switch to its RPC cert if it exists.
+		if !fileExists(cfg.CAFile) {
+			host, _, err := net.SplitHostPort(cfg.Connect)
+			if err != nil {
+				return nil, nil, err
+			}
+			switch host {
+			case "localhost":
+				fallthrough
+
+			case "127.0.0.1":
+				fallthrough
+
+			case "::1":
+				if fileExists(btcdHomedirCAFile) {
+					cfg.CAFile = btcdHomedirCAFile
+				}
+			}
+		}
+	}
 
 	if len(cfg.SvrListeners) == 0 {
 		addrs, err := net.LookupHost("localhost")
