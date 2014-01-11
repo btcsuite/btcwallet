@@ -122,8 +122,9 @@ JSON (un)marshaling these requests and notifications.
 ## TODO
 
 - Full RPC compatibility with bitcoind, including mining support
-- RPC Documentation (both bitcoind commands and btcwallet extensions available
+- RPC documentation (both bitcoind commands and btcwallet extensions available
   for websocket connections)
+- P2SH and multisig functionality
 - Improved test coverage
 
 ## GPG Verification Key
