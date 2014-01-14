@@ -120,7 +120,7 @@ func newServer(listenAddrs []string) (*server, error) {
 	// Check for existence of cert file and key file
 	if !fileExists(cfg.RPCKey) && !fileExists(cfg.RPCCert) {
 		// if both files do not exist, we generate them.
-		err := genCertPair(cfg.RPCKey, cfg.RPCCert)
+		err := genCertPair(cfg.RPCCert, cfg.RPCKey)
 		if err != nil {
 			return nil, err
 		}
