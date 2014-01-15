@@ -207,7 +207,7 @@ func ChainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 	}
 
 	xorbytes := make([]byte, 32)
-	chainMod := sha256.Sum256(pubkey)
+	chainMod := btcwire.DoubleSha256(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
