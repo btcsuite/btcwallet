@@ -1,2 +1,81 @@
+============================================================================
+User visible changes for btcwallet
+  A wallet daemon for btcd, written in Go
+============================================================================
+
+Changes in 0.2.0 (Thu Jan 09 2014)
+  - Enable mainnet support (disabled by default, use --mainnet to enable)
+
+  - Don't hardcode localhost btcd connections.  Instead, add a --connect
+    option to specify the hostname or address and port of a local or
+    remote btcd instance
+    (https://github.com/conformal/btcwallet/issues/1)
+
+  - Remove --serverport port and replace with --listen.  This option works
+    just like btcd's --rpclisten  and allows to specify the interfaces to
+    listen for RPC connections
+
+  - Require TLS and Basic HTTP authentication before wallet can be
+    controlled over RPC
+
+  - Refill keypool if wallet is unlocked and keypool is emptied
+
+  - Detect and rollback saved tx/utxo info after btcd performs blockchain
+    reorganizations while btcwallet was disconnected
+
+  - Add support for the following standard bitcoin JSON-RPC calls:
+    - dumpprivkey (https://github.com/conformal/btcwallet/issues/9)
+    - getaccount
+    - getaccountaddress
+    - importprivkey (https://github.com/conformal/btcwallet/issues/2)
+    - listtransactions (https://github.com/conformal/btcwallet/issues/12)
+
+  - Add several extension RPC calls for websocket connections:
+    - getaddressbalance: get the balance associated with a single address
+    - getunconfirmedbalance: get total balance for unconfirmed transactions
+    - listaddresstransactions: list transactions for a single address
+      (https://github.com/conformal/btcwallet/issues/27)
+    - listalltransactions: lists all transactions without specifying a range
+
+  - Make RPC extensions available only to websocket connections, with the
+    exception of createencryptedwallet
+
+  - Add dummy handlers for unimplemented wallet RPC calls
+    (https://github.com/conformal/btcwallet/issues/29)
+
+  - Add socks5/tor proxy support
+
+  - Calculate and add minimum transaction fee to created transactions
+
+  - Use OS-specific rename calls to provide atomic file renames which
+    can replace a currently-existing file
+    (https://github.com/conformal/btcwallet/issues/20)
+
+  - Move account files to a single directory per bitcoin network to
+    prevent a future scaling issue
+    (https://github.com/conformal/btcwallet/issues/16)
+
+  - Fix several data races and mutex mishandling
+
+  - Fix a bug where the RPC server hung on requests requiring btcd
+    when a btcd connection was never established
+
+  - Fix a bug where creating account files did not create all necessary
+    directories (https://github.com/conformal/btcwallet/issues/15)
+
+  - Fix a bug where '~' did not expand to a home or user directory
+    (https://github.com/conformal/btcwallet/issues/17)
+
+  - Fix a bug where returning account names as strings did not remove
+    trailing ending 0s
+
+  - Fix a bug where help usage was displayed twice using the -h or --help
+    flag
+
+  - Fix sample listening address in sample configuration file
+
+  - Update sample configuration file with all available options with
+    descriptions and defaults for each
+
 Initial Release 0.1.0 (Wed Nov 13 2013)
   - Initial release
