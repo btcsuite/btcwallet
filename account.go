@@ -419,7 +419,7 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 
 	// Attempt to import private key into wallet.
 	a.mtx.Lock()
-	addr, err := a.ImportPrivateKey(privkey, compressed, bs)
+	addr, err := a.Wallet.ImportPrivateKey(privkey, compressed, bs)
 	if err != nil {
 		a.mtx.Unlock()
 		return "", err
