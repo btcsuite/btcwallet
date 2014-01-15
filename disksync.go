@@ -19,6 +19,7 @@ package main
 import (
 	"fmt"
 	"github.com/conformal/btcwire"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -135,19 +136,21 @@ func (a *Account) writeDirtyToDisk() error {
 	dirty := a.TxStore.dirty
 	a.UtxoStore.RUnlock()
 	if dirty {
-		a.UtxoStore.Lock()
-		defer a.UtxoStore.Unlock()
-		tmpfilepath := utxofilepath + "-" + timeStr
-		tmpfile, err := os.Create(tmpfilepath)
+		netdir, filename := filepath.Split(utxofilepath)
+		tmpfile, err := ioutil.TempFile(netdir, filename)
 		if err != nil {
 			return err
 		}
+
+		a.UtxoStore.Lock()
+		defer a.UtxoStore.Unlock()
+
 		if _, err = a.UtxoStore.s.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
 
-		if err = Rename(tmpfilepath, utxofilepath); err != nil {
+		if err = Rename(tmpfile.Name(), utxofilepath); err != nil {
 			return err
 		}
 
@@ -159,19 +162,21 @@ func (a *Account) writeDirtyToDisk() error {
 	dirty = a.TxStore.dirty
 	a.TxStore.RUnlock()
 	if dirty {
-		a.TxStore.Lock()
-		defer a.TxStore.Unlock()
-		tmpfilepath := txfilepath + "-" + timeStr
-		tmpfile, err := os.Create(tmpfilepath)
+		netdir, filename := filepath.Split(txfilepath)
+		tmpfile, err := ioutil.TempFile(netdir, filename)
 		if err != nil {
 			return err
 		}
+
+		a.TxStore.Lock()
+		defer a.TxStore.Unlock()
+
 		if _, err = a.TxStore.s.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
 
-		if err = Rename(tmpfilepath, txfilepath); err != nil {
+		if err = Rename(tmpfile.Name(), txfilepath); err != nil {
 			return err
 		}
 
@@ -183,19 +188,21 @@ func (a *Account) writeDirtyToDisk() error {
 	dirty = a.dirty
 	a.mtx.RUnlock()
 	if dirty {
-		a.mtx.Lock()
-		defer a.mtx.Unlock()
-		tmpfilepath := wfilepath + "-" + timeStr
-		tmpfile, err := os.Create(tmpfilepath)
+		netdir, filename := filepath.Split(wfilepath)
+		tmpfile, err := ioutil.TempFile(netdir, filename)
 		if err != nil {
 			return err
 		}
+
+		a.mtx.Lock()
+		defer a.mtx.Unlock()
+
 		if _, err = a.WriteTo(tmpfile); err != nil {
 			return err
 		}
 		tmpfile.Close()
 
-		if err = Rename(tmpfilepath, wfilepath); err != nil {
+		if err = Rename(tmpfile.Name(), wfilepath); err != nil {
 			return err
 		}
 
