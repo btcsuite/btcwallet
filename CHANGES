@@ -3,6 +3,10 @@ User visible changes for btcwallet
   A wallet daemon for btcd, written in Go
 ============================================================================
 
+Changes in 0.2.1 (Thu Jan 10 2014)
+  - Fix a mutex isssue which caused btcwallet to lockup on all
+    RPC requests needing to read or write an account
+
 Changes in 0.2.0 (Thu Jan 09 2014)
   - Enable mainnet support (disabled by default, use --mainnet to enable)
 
