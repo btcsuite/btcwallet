@@ -87,7 +87,7 @@ func TestBtcAddressSerializer(t *testing.T) {
 func TestWalletCreationSerialization(t *testing.T) {
 	createdAt := &BlockStamp{}
 	w1, err := NewWallet("banana wallet", "A wallet for testing.",
-		[]byte("banana"), btcwire.MainNet, createdAt)
+		[]byte("banana"), btcwire.MainNet, createdAt, 100)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 		return
