@@ -29,7 +29,7 @@ to btcwallet.
 
 This project is currently under active development is not production
 ready yet.  Support for creating and using wallets the main Bitcoin
-netowrk is currently disabled by default.
+network is currently disabled by default.
 
 ## Installation
 
@@ -44,7 +44,8 @@ https://opensource.conformal.com/packages/windows/btcdsuite/
 - Install Go according to the installation instructions here:
   http://golang.org/doc/install
 
-- Run the following commands to obtain and install btcwallet andall dependencies:
+- Run the following commands to obtain and install btcwallet and all
+  dependencies:
 ```bash
 $ go get -u -v github.com/conformal/btcd/...
 $ go get -u -v github.com/conformal/btcwallet/...
