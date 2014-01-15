@@ -473,10 +473,8 @@ func (a *Account) Track() {
 // it would have missed notifications as blocks are attached to the
 // main chain.
 func (a *Account) RescanActiveAddresses() {
-	a.mtx.RLock()
-	defer a.mtx.RUnlock()
-
 	// Determine the block to begin the rescan from.
+	a.mtx.RLock()
 	beginBlock := int32(0)
 	if a.fullRescan {
 		// Need to perform a complete rescan since the wallet creation
@@ -498,6 +496,7 @@ func (a *Account) RescanActiveAddresses() {
 
 	// Rescan active addresses starting at the determined block height.
 	Rescan(CurrentRPCConn(), beginBlock, a.ActivePaymentAddresses())
+	a.mtx.RUnlock()
 	a.writeDirtyToDisk()
 }
 
