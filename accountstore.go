@@ -189,7 +189,7 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 	}
 
 	// Create new wallet in memory.
-	wlt, err := wallet.NewWallet(name, desc, passphrase, cfg.Net(), &bs)
+	wlt, err := wallet.NewWallet(name, desc, passphrase, cfg.Net(), &bs, cfg.KeypoolSize)
 	if err != nil {
 		return err
 	}

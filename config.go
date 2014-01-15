@@ -32,6 +32,7 @@ const (
 	defaultConfigFilename = "btcwallet.conf"
 	defaultBtcNet         = btcwire.TestNet3
 	defaultLogLevel       = "info"
+	defaultKeypoolSize    = 100
 )
 
 var (
@@ -58,6 +59,7 @@ type config struct {
 	RPCCert      string   `long:"rpccert" description:"File containing the certificate file"`
 	RPCKey       string   `long:"rpckey" description:"File containing the certificate key"`
 	MainNet      bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
+	KeypoolSize  uint     `short:"k" long:"keypoolsize" description:"Maximum number of addresses in keypool"`
 	Proxy        string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
 	ProxyUser    string   `long:"proxyuser" description:"Username for proxy server"`
 	ProxyPass    string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
@@ -137,11 +139,12 @@ func normalizeAddress(addr, defaultPort string) string {
 func loadConfig() (*config, []string, error) {
 	// Default config.
 	cfg := config{
-		DebugLevel: defaultLogLevel,
-		ConfigFile: defaultConfigFile,
-		DataDir:    defaultDataDir,
-		RPCKey:     defaultRPCKeyFile,
-		RPCCert:    defaultRPCCertFile,
+		DebugLevel:  defaultLogLevel,
+		ConfigFile:  defaultConfigFile,
+		DataDir:     defaultDataDir,
+		RPCKey:      defaultRPCKeyFile,
+		RPCCert:     defaultRPCCertFile,
+		KeypoolSize: defaultKeypoolSize,
 	}
 
 	// A config file in the current directory takes precedence.

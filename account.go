@@ -548,7 +548,7 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	}
 
 	// Get next address from wallet.
-	addr, err := a.NextChainedAddress(&bs)
+	addr, err := a.NextChainedAddress(&bs, cfg.KeypoolSize)
 	if err != nil {
 		a.mtx.Unlock()
 		return nil, err

@@ -46,9 +46,6 @@ const (
 	// Maximum length in bytes of a comment that can have a size represented
 	// as a uint16.
 	maxCommentLen = (1 << 16) - 1
-
-	// Number of addresses to extend keypool by.
-	nKeypoolIncrement = 100
 )
 
 const (
@@ -455,7 +452,7 @@ type Wallet struct {
 	addrCommentMap map[btcutil.AddressPubKeyHash]comment
 	txCommentMap   map[transactionHashKey]comment
 
-	// These are not serialized.
+	// The rest of the fields in this struct are not serialized.
 	secret struct {
 		sync.Mutex
 		key []byte
@@ -469,7 +466,9 @@ type Wallet struct {
 // desc's binary representation must not exceed 32 and 256 bytes,
 // respectively.  All address private keys are encrypted with passphrase.
 // The wallet is returned unlocked.
-func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, createdAt *BlockStamp) (*Wallet, error) {
+func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
+	createdAt *BlockStamp, keypoolSize uint) (*Wallet, error) {
+
 	// Check sizes of inputs.
 	if len([]byte(name)) > 32 {
 		return nil, errors.New("name exceeds 32 byte maximum size")
@@ -546,7 +545,7 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet, cre
 	w.chainIdxMap[rootKeyChainIdx] = w.keyGenerator.address(net)
 
 	// Fill keypool.
-	if err := w.extendKeypool(nKeypoolIncrement, aeskey, createdAt); err != nil {
+	if err := w.extendKeypool(keypoolSize, aeskey, createdAt); err != nil {
 		return nil, err
 	}
 
@@ -796,7 +795,9 @@ func (w *Wallet) Version() (string, int) {
 
 // NextChainedAddress attempts to get the next chained address,
 // refilling the keypool if necessary.
-func (w *Wallet) NextChainedAddress(bs *BlockStamp) (*btcutil.AddressPubKeyHash, error) {
+func (w *Wallet) NextChainedAddress(bs *BlockStamp,
+	keypoolSize uint) (*btcutil.AddressPubKeyHash, error) {
+
 	// Attempt to get address hash of next chained address.
 	next160, ok := w.chainIdxMap[w.highestUsed+1]
 	if !ok {
@@ -810,7 +811,7 @@ func (w *Wallet) NextChainedAddress(bs *BlockStamp) (*btcutil.AddressPubKeyHash,
 		copy(aeskey, w.secret.key)
 		w.secret.Unlock()
 
-		err := w.extendKeypool(nKeypoolIncrement, aeskey, bs)
+		err := w.extendKeypool(keypoolSize, aeskey, bs)
 		if err != nil {
 			return nil, err
 		}
