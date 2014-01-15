@@ -462,6 +462,10 @@ func ImportPrivKey(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		// If the import was successful, reply with nil.
 		return nil, nil
 
+	case wallet.ErrDuplicate:
+		// Do not return duplicate key errors to the client.
+		return nil, nil
+
 	case wallet.ErrWalletLocked:
 		return nil, &btcjson.ErrWalletUnlockNeeded
 

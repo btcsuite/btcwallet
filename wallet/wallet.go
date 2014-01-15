@@ -60,6 +60,7 @@ const (
 var (
 	ErrAddressNotFound    = errors.New("address not found")
 	ErrChecksumMismatch   = errors.New("checksum mismatch")
+	ErrDuplicate          = errors.New("duplicate key or address")
 	ErrMalformedEntry     = errors.New("malformed entry")
 	ErrNetworkMismatch    = errors.New("network mismatch")
 	ErrWalletDoesNotExist = errors.New("non-existant wallet")
@@ -1071,6 +1072,18 @@ func (w *Wallet) SetBetterEarliestBlockHeight(height int32) {
 // user-provided private key and adds it to the wallet.  If the
 // import is successful, the payment address string is returned.
 func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStamp) (string, error) {
+	// First, must check that the key being imported will not result
+	// in a duplicate address.
+	pkh := btcutil.Hash160(pubkeyFromPrivkey(privkey, compressed))
+	// Will always be valid inputs so omit error check.
+	apkh, err := btcutil.NewAddressPubKeyHash(pkh, w.Net())
+	if err != nil {
+		return "", err
+	}
+	if _, ok := w.addrMap[*apkh]; ok {
+		return "", ErrDuplicate
+	}
+
 	// The wallet's secret will be zeroed on lock, so make a local copy.
 	w.secret.Lock()
 	if len(w.secret.key) != 32 {
