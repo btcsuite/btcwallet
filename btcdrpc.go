@@ -205,7 +205,7 @@ func (btcd *BtcdRPCConn) Start() {
 		for {
 			var m []byte
 			if err := websocket.Message.Receive(btcd.ws, &m); err != nil {
-				log.Debugf("Cannot recevie btcd message: %v", err)
+				log.Debugf("Cannot receive btcd message: %v", err)
 				close(done)
 				return
 			}
