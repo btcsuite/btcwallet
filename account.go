@@ -390,12 +390,16 @@ func (a *Account) ImportPrivKey(wif string, rescan bool) error {
 	}
 
 	if rescan {
-		addrs := map[string]struct{}{
-			addr: struct{}{},
-		}
+		// Do not wait for rescan to finish before returning to the
+		// caller.
+		go func() {
+			addrs := map[string]struct{}{
+				addr: struct{}{},
+			}
 
-		Rescan(CurrentRPCConn(), bs.Height, addrs)
-		a.writeDirtyToDisk()
+			Rescan(CurrentRPCConn(), bs.Height, addrs)
+			a.writeDirtyToDisk()
+		}()
 	}
 	return nil
 }
