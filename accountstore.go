@@ -201,6 +201,8 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 		name:   name,
 		dirty:  true,
 	}
+	account.UtxoStore.dirty = true
+	account.TxStore.dirty = true
 
 	// Save the account in the global account map.  The mutex is
 	// already held at this point, and will be unlocked when this
