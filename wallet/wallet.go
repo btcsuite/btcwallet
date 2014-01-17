@@ -885,6 +885,9 @@ func (w *Wallet) extendKeypool(n uint, bs *BlockStamp) error {
 	if !ok {
 		return errors.New("expected last chained address not found")
 	}
+	if len(w.secret) != 32 {
+		return ErrWalletLocked
+	}
 	privkey, err := addr.unlock(w.secret)
 	if err != nil {
 		return err
@@ -971,6 +974,9 @@ func (w *Wallet) createMissingPrivateKeys() error {
 		return errors.New("missing previous chained address")
 	}
 	prevAddr := w.addrMap[*apkh]
+	if len(w.secret) != 32 {
+		return ErrWalletLocked
+	}
 	prevPrivKey, err := prevAddr.unlock(w.secret)
 	if err != nil {
 		return err
