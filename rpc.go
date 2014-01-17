@@ -113,6 +113,14 @@ func GetCurrentNet(rpc RPCConn) (btcwire.BitcoinNet, *btcjson.Error) {
 	return btcwire.BitcoinNet(uint32(response.Result.(float64))), nil
 }
 
+// NotifyBlocks requests blockconnected and blockdisconnected notifications.
+func NotifyBlocks(rpc RPCConn) *btcjson.Error {
+	cmd := btcws.NewNotifyBlocksCmd(<-NewJSONID)
+	request := NewRPCRequest(cmd, nil)
+	response := <-rpc.SendRequest(request)
+	return response.Err
+}
+
 // NotifyNewTXs requests notifications for new transactions that spend
 // to any of the addresses in addrs.
 func NotifyNewTXs(rpc RPCConn, addrs []string) *btcjson.Error {

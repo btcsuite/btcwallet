@@ -507,6 +507,9 @@ func Handshake(rpc RPCConn) error {
 		return errors.New("btcd and btcwallet running on different Bitcoin networks")
 	}
 
+	// Request notifications for connected and disconnected blocks.
+	NotifyBlocks(rpc)
+
 	// Get current best block.  If this is before than the oldest
 	// saved block hash, assume that this btcd instance is not yet
 	// synced up to a previous btcd that was last used with this
