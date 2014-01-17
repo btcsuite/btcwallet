@@ -124,7 +124,7 @@ func (btcd *BtcdRPCConn) send(rpcrequest *RPCRequest) error {
 
 type receivedResponse struct {
 	id    uint64
-	raw   []byte
+	raw   string
 	reply *btcjson.Reply
 }
 
@@ -176,7 +176,7 @@ func (btcd *BtcdRPCConn) Start() {
 				r := &btcjson.Reply{
 					Result: rpcrequest.result,
 				}
-				json.Unmarshal(recvResponse.raw, &r)
+				json.Unmarshal([]byte(recvResponse.raw), &r)
 				response := &RPCResponse{
 					Result: r.Result,
 					Err:    r.Error,
@@ -203,7 +203,7 @@ func (btcd *BtcdRPCConn) Start() {
 		// must faster as unnecessary unmarshal attempts could be avoided.
 
 		for {
-			var m []byte
+			var m string
 			if err := websocket.Message.Receive(btcd.ws, &m); err != nil {
 				log.Debugf("Cannot receive btcd message: %v", err)
 				close(done)
@@ -214,8 +214,7 @@ func (btcd *BtcdRPCConn) Start() {
 			n, err := unmarshalNotification(m)
 			if err == nil {
 				// Make a copy of the marshaled notification.
-				mcopy := make([]byte, len(m))
-				copy(mcopy, m)
+				mcopy := m
 
 				// Begin processing the notification.
 				go processNotification(n, mcopy)
@@ -237,9 +236,9 @@ func (btcd *BtcdRPCConn) Start() {
 
 // unmarshalResponse attempts to unmarshal a marshaled JSON-RPC
 // response.
-func unmarshalResponse(b []byte) (*receivedResponse, error) {
+func unmarshalResponse(s string) (*receivedResponse, error) {
 	var r btcjson.Reply
-	if err := json.Unmarshal(b, &r); err != nil {
+	if err := json.Unmarshal([]byte(s), &r); err != nil {
 		return nil, err
 	}
 
@@ -253,7 +252,7 @@ func unmarshalResponse(b []byte) (*receivedResponse, error) {
 	}
 	response := &receivedResponse{
 		id:    uint64(fid),
-		raw:   b,
+		raw:   s,
 		reply: &r,
 	}
 	return response, nil
@@ -261,8 +260,8 @@ func unmarshalResponse(b []byte) (*receivedResponse, error) {
 
 // unmarshalNotification attempts to unmarshal a marshaled JSON-RPC
 // notification (Request with a nil or no ID).
-func unmarshalNotification(b []byte) (btcjson.Cmd, error) {
-	req, err := btcjson.ParseMarshaledCmd(b)
+func unmarshalNotification(s string) (btcjson.Cmd, error) {
+	req, err := btcjson.ParseMarshaledCmd([]byte(s))
 	if err != nil {
 		return nil, err
 	}
@@ -275,18 +274,18 @@ func unmarshalNotification(b []byte) (btcjson.Cmd, error) {
 }
 
 // processNotification checks for a handler for a notification, and sends
-func processNotification(n btcjson.Cmd, b []byte) {
+func processNotification(n btcjson.Cmd, s string) {
 	// Message is a btcd notification.  Check the method and dispatch
 	// correct handler, or if no handler, pass up to each wallet.
 	if ntfnHandler, ok := notificationHandlers[n.Method()]; ok {
 		log.Debugf("Running notification handler for method %v",
 			n.Method())
-		ntfnHandler(n, b)
+		ntfnHandler(n, []byte(s))
 	} else {
 		// No handler; send to all wallets.
 		log.Debugf("Sending notification with method %v to all wallets",
 			n.Method())
-		frontendNotificationMaster <- b
+		frontendNotificationMaster <- []byte(s)
 	}
 }
 
