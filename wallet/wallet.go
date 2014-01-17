@@ -1294,52 +1294,6 @@ func (w *Wallet) ActiveAddresses() map[btcutil.Address]*AddressInfo {
 	return addrs
 }
 
-/*
-// unlockAddress decrypts and stores a pointer to an address's private
-// key, failing if the address is not encrypted, or the provided key is
-// incorrect.  If the requested address's private key has not yet been
-// saved, the previous chained address is looked up and the private key
-// is saved and encrypted.  The returned clear text private key will always
-// be a copy that may be safely used by the caller without worrying about it
-// being zeroed during an address lock.
-func (w *Wallet) unlockAddress(a *btcAddress, key []byte) (privKeyCT []byte, err error) {
-	if !a.flags.encrypted {
-		return nil, errors.New("unable to unlock unencrypted address")
-	}
-
-	if a.flags.createPrivKeyNextUnlock {
-		// Look up previous chained address and unlock its private key.
-		prevAPKH, ok := w.chainIdxMap[a.chainIndex-1]
-		if !ok {
-			return nil, errors.New("cannot determine previous address to create privkey")
-		}
-		prevAddr := w.addrMap[*prevAPKH]
-		prevPrivKey, err := w.unlockAddress(prevAddr, key)
-		if err != nil {
-			return nil, err
-		}
-
-		// Generate this address's private key.
-		privkey, err := ChainedPrivKey(prevPrivKey, prevAddr.pubKey,
-			prevAddr.chaincode[:])
-		if err != nil {
-			return nil, err
-		}
-		a.privKeyCT = privkey
-
-		// Encrypt clear text private key.
-		if err := a.encrypt(key); err != nil {
-			return nil, err
-		}
-
-		a.flags.hasPrivKey = true
-		a.flags.createPrivKeyNextUnlock = false
-	}
-
-	return a.unlock(key)
-}
-*/
-
 type walletFlags struct {
 	useEncryption bool
 	watchingOnly  bool
