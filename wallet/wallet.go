@@ -827,11 +827,6 @@ func (w *Wallet) IsLocked() bool {
 	return len(w.secret) != 32
 }
 
-// Version returns a wallet's version as a string and int.
-func (w *Wallet) Version() (string, int) {
-	return "", 0
-}
-
 // NextChainedAddress attempts to get the next chained address.
 // If there are addresses available in the keypool, the next address
 // is used.  If not and the wallet is unlocked, the keypool is extended.
