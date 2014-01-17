@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"encoding/hex"
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcwire"
 	"github.com/davecgh/go-spew/spew"
@@ -302,5 +303,162 @@ func TestChaining(t *testing.T) {
 				test.name)
 			return
 		}
+	}
+}
+
+func TestWalletPubkeyChaining(t *testing.T) {
+	// Set a reasonable keypool size that isn't too big nor too small for testing.
+	const keypoolSize = 5
+
+	w, err := NewWallet("banana wallet", "A wallet for testing.",
+		[]byte("banana"), btcwire.MainNet, &BlockStamp{}, keypoolSize)
+	if err != nil {
+		t.Error("Error creating new wallet: " + err.Error())
+		return
+	}
+	if !w.IsLocked() {
+		t.Error("New wallet is not locked.")
+	}
+
+	// Wallet should have a total of 6 addresses, one for the root, plus 5 in
+	// the keypool with their private keys set.  Ask for as many new addresses
+	// as needed to deplete the pool.
+	for i := 0; i < keypoolSize; i++ {
+		_, err := w.NextChainedAddress(&BlockStamp{}, keypoolSize)
+		if err != nil {
+			t.Errorf("Error getting next address from keypool: %v", err)
+			return
+		}
+	}
+
+	// Get next chained address after depleting the keypool.  This will extend
+	// the chain based on the last pubkey, not privkey.
+	addrWithoutPrivkey, err := w.NextChainedAddress(&BlockStamp{}, keypoolSize)
+	if err != nil {
+		t.Errorf("Failed to extend address chain from pubkey: %v", err)
+		return
+	}
+
+	// Lookup address info.  This should succeed even without the private
+	// key available.
+	info, err := w.AddressInfo(addrWithoutPrivkey)
+	if err != nil {
+		t.Errorf("Failed to get info about address without private key: %v", err)
+		return
+	}
+	// sanity checks
+	if !info.Compressed {
+		t.Errorf("Pubkey should be compressed.")
+		return
+	}
+	if info.Imported {
+		t.Errorf("Should not be marked as imported.")
+		return
+	}
+
+	// Try to lookup it's private key.  This should fail.
+	_, err = w.AddressKey(addrWithoutPrivkey)
+	if err == nil {
+		t.Errorf("Incorrectly returned nil error for looking up private key for address without one saved.")
+		return
+	}
+
+	// Deserialize w and serialize into a new wallet.  The rest of the checks
+	// in this test test against both a fresh, as well as an "opened and closed"
+	// wallet with the missing private key.
+	serializedWallet := new(bytes.Buffer)
+	_, err = w.WriteTo(serializedWallet)
+	if err != nil {
+		t.Errorf("Error writing wallet with missing private key: %v", err)
+		return
+	}
+	w2 := new(Wallet)
+	_, err = w2.ReadFrom(serializedWallet)
+	if err != nil {
+		t.Errorf("Error reading wallet with missing private key: %v", err)
+		return
+	}
+
+	// Unlock wallet.  This should trigger creating the private key for
+	// the address.
+	if err = w.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Can't unlock original wallet: %v", err)
+		return
+	}
+	if err = w2.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Can't unlock re-read wallet: %v", err)
+		return
+	}
+
+	// Same address, better variable name.
+	addrWithPrivKey := addrWithoutPrivkey
+
+	// Try a private key lookup again.  The private key should now be available.
+	key1, err := w.AddressKey(addrWithPrivKey)
+	if err != nil {
+		t.Errorf("Private key for original wallet was not created! %v", err)
+		return
+	}
+	key2, err := w2.AddressKey(addrWithPrivKey)
+	if err != nil {
+		t.Errorf("Private key for re-read wallet was not created! %v", err)
+		return
+	}
+
+	// Keys returned by both wallets must match.
+	if !reflect.DeepEqual(key1, key2) {
+		t.Errorf("Private keys for address originally created without one mismtach between original and re-read wallet.")
+		return
+	}
+
+	// Sign some data with the private key, then verify signature with the pubkey.
+	hash := []byte("hash to sign")
+	r, s, err := ecdsa.Sign(rand.Reader, key1, hash)
+	if err != nil {
+		t.Errorf("Unable to sign hash with the created private key: %v", err)
+		return
+	}
+	pubKeyStr, _ := hex.DecodeString(info.Pubkey)
+	pubKey, err := btcec.ParsePubKey(pubKeyStr, btcec.S256())
+	ok := ecdsa.Verify(pubKey, hash, r, s)
+	if !ok {
+		t.Errorf("ECDSA verification failed; address's pubkey mismatches the privkey.")
+		return
+	}
+
+	// Test that normal keypool extension and address creation continues to
+	// work.  With the wallet still unlocked, create a new address.  This
+	// will cause the keypool to refill and return the first address from the
+	// keypool.
+	nextAddr, err := w.NextChainedAddress(&BlockStamp{}, keypoolSize)
+	if err != nil {
+		t.Errorf("Unable to create next address or refill keypool after finding the privkey: %v", err)
+		return
+	}
+
+	nextInfo, err := w.AddressInfo(nextAddr)
+	if err != nil {
+		t.Errorf("Couldn't get info about the next address in the chain: %v", err)
+		return
+	}
+	nextKey, err := w.AddressKey(nextAddr)
+	if err != nil {
+		t.Errorf("Couldn't get private key for the next address in the chain: %v", err)
+		return
+	}
+
+	// Do an ECDSA signature check here as well, this time for the next
+	// address after the one made without the private key.
+	r, s, err = ecdsa.Sign(rand.Reader, nextKey, hash)
+	if err != nil {
+		t.Errorf("Unable to sign hash with the created private key: %v", err)
+		return
+	}
+	pubKeyStr, _ = hex.DecodeString(nextInfo.Pubkey)
+	pubKey, err = btcec.ParsePubKey(pubKeyStr, btcec.S256())
+	ok = ecdsa.Verify(pubKey, hash, r, s)
+	if !ok {
+		t.Errorf("ECDSA verification failed; next address's keypair does not match.")
+		return
 	}
 }
