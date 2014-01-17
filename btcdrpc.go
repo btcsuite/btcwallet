@@ -213,11 +213,8 @@ func (btcd *BtcdRPCConn) Start() {
 			// Try notifications (requests with nil ids) first.
 			n, err := unmarshalNotification(m)
 			if err == nil {
-				// Make a copy of the marshaled notification.
-				mcopy := m
-
 				// Begin processing the notification.
-				go processNotification(n, mcopy)
+				go processNotification(n, m)
 				continue
 			}
 
