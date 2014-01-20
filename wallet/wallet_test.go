@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"github.com/conformal/btcec"
+	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 	"github.com/davecgh/go-spew/spew"
 	"math/big"
@@ -459,6 +460,164 @@ func TestWalletPubkeyChaining(t *testing.T) {
 	ok = ecdsa.Verify(pubKey, hash, r, s)
 	if !ok {
 		t.Errorf("ECDSA verification failed; next address's keypair does not match.")
+		return
+	}
+}
+
+func TestWatchingWalletExport(t *testing.T) {
+	const keypoolSize = 10
+	createdAt := &BlockStamp{}
+	w, err := NewWallet("banana wallet", "A wallet for testing.",
+		[]byte("banana"), btcwire.MainNet, createdAt, keypoolSize)
+	if err != nil {
+		t.Error("Error creating new wallet: " + err.Error())
+		return
+	}
+
+	// Maintain a set of the active addresses in the wallet.
+	activeAddrs := make(map[btcutil.AddressPubKeyHash]struct{})
+
+	// Add root address.
+	activeAddrs[*w.LastChainedAddress()] = struct{}{}
+
+	// Get as many new active addresses as necessary to deplete the keypool.
+	// This is done as we will want to test that new addresses created by
+	// the watching wallet do not pull from previous public keys in the
+	// original keypool.
+	for i := 0; i < keypoolSize; i++ {
+		apkh, err := w.NextChainedAddress(createdAt, keypoolSize)
+		if err != nil {
+			t.Errorf("unable to get next address: %v", err)
+			return
+		}
+		activeAddrs[*apkh] = struct{}{}
+	}
+
+	// Create watching wallet from w.
+	ww, err := w.ExportWatchingWallet()
+	if err != nil {
+		t.Errorf("Could not create watching wallet: %v", err)
+		return
+	}
+
+	// Verify correctness of wallet flags.
+	if ww.flags.useEncryption {
+		t.Errorf("Watching wallet marked as using encryption (but nothing to encrypt).")
+		return
+	}
+	if !ww.flags.watchingOnly {
+		t.Errorf("Wallet should be watching-only but is not marked so.")
+		return
+	}
+
+	// Verify that all flags are set as expected.
+	if ww.keyGenerator.flags.encrypted {
+		t.Errorf("Watching root address should not be encrypted (nothing to encrypt)")
+		return
+	}
+	if ww.keyGenerator.flags.hasPrivKey {
+		t.Errorf("Watching root address marked as having a private key.")
+		return
+	}
+	if !ww.keyGenerator.flags.hasPubKey {
+		t.Errorf("Watching root address marked as missing a public key.")
+		return
+	}
+	if ww.keyGenerator.flags.createPrivKeyNextUnlock {
+		t.Errorf("Watching root address marked as needing a private key to be generated later.")
+		return
+	}
+	for apkh, addr := range ww.addrMap {
+		if addr.flags.encrypted {
+			t.Errorf("Chained address should not be encrypted (nothing to encrypt)")
+			return
+		}
+		if ww.keyGenerator.flags.hasPrivKey {
+			t.Errorf("Chained address marked as having a private key.")
+			return
+		}
+		if !ww.keyGenerator.flags.hasPubKey {
+			t.Errorf("Chained address marked as missing a public key.")
+			return
+		}
+		if ww.keyGenerator.flags.createPrivKeyNextUnlock {
+			t.Errorf("Chained address marked as needing a private key to be generated later.")
+			return
+		}
+
+		if _, ok := activeAddrs[apkh]; !ok {
+			t.Errorf("Address from watching wallet not found in original wallet.")
+			return
+		}
+		delete(activeAddrs, apkh)
+	}
+	if len(activeAddrs) != 0 {
+		t.Errorf("%v address(es) were not exported to watching wallet.", len(activeAddrs))
+		return
+	}
+
+	// Check that the new addresses created by each wallet match.  The
+	// original wallet is unlocked so the keypool is refilled and chained
+	// addresses use the previous' privkey, not pubkey.
+	if err := w.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Unlocking original wallet failed: %v", err)
+	}
+	for i := 0; i < keypoolSize; i++ {
+		addr, err := w.NextChainedAddress(createdAt, keypoolSize)
+		if err != nil {
+			t.Errorf("Cannot get next chained address for original wallet: %v", err)
+			return
+		}
+		waddr, err := ww.NextChainedAddress(createdAt, keypoolSize)
+		if err != nil {
+			t.Errorf("Cannot get next chained address for watching wallet: %v", err)
+			return
+		}
+		if addr.String() != waddr.String() {
+			t.Errorf("Next addresses for each wallet do not match eachother.")
+			return
+		}
+	}
+
+	// Test (de)serialization of watching wallet.
+	buf := new(bytes.Buffer)
+	_, err = ww.WriteTo(buf)
+	if err != nil {
+		t.Errorf("Cannot write watching wallet: %v", err)
+		return
+	}
+	ww2 := new(Wallet)
+	_, err = ww2.ReadFrom(buf)
+	if err != nil {
+		t.Errorf("Cannot read watching wallet: %v", err)
+		return
+	}
+
+	// Check that (de)serialized watching wallet matches the exported wallet.
+	if !reflect.DeepEqual(ww, ww2) {
+		t.Error("Exported and read-in watching wallets do not match.")
+		return
+	}
+
+	// Verify that nonsensical functions fail with correct error.
+	if err := ww.Lock(); err != ErrWalletIsWatchingOnly {
+		t.Errorf("Nonsensical func Lock returned no or incorrect error: %v", err)
+		return
+	}
+	if err := ww.Unlock([]byte("banana")); err != ErrWalletIsWatchingOnly {
+		t.Errorf("Nonsensical func Unlock returned no or incorrect error: %v", err)
+		return
+	}
+	if _, err := ww.AddressKey(w.keyGenerator.address(ww.net)); err != ErrWalletIsWatchingOnly {
+		t.Errorf("Nonsensical func AddressKey returned no or incorrect error: %v", err)
+		return
+	}
+	if _, err := ww.ExportWatchingWallet(); err != ErrWalletIsWatchingOnly {
+		t.Errorf("Nonsensical func ExportWatchingWallet returned no or incorrect error: %v", err)
+		return
+	}
+	if _, err := ww.ImportPrivateKey(make([]byte, 32), true, createdAt); err != ErrWalletIsWatchingOnly {
+		t.Errorf("Nonsensical func ImportPrivateKey returned no or incorrect error: %v", err)
 		return
 	}
 }

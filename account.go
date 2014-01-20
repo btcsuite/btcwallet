@@ -424,6 +424,7 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 		a.mtx.Unlock()
 		return "", err
 	}
+	addrStr := addr.String()
 
 	// Immediately write dirty wallet to disk.
 	//
@@ -438,12 +439,12 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 	}
 
 	// Associate the imported address with this account.
-	MarkAddressForAccount(addr, a.Name())
+	MarkAddressForAccount(addrStr, a.Name())
 
-	log.Infof("Imported payment address %v", addr)
+	log.Infof("Imported payment address %v", addrStr)
 
 	// Return the payment address string of the imported private key.
-	return addr, nil
+	return addrStr, nil
 }
 
 // Track requests btcd to send notifications of new transactions for

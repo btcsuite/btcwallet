@@ -53,13 +53,14 @@ const (
 
 // Possible errors when dealing with wallets.
 var (
-	ErrAddressNotFound    = errors.New("address not found")
-	ErrChecksumMismatch   = errors.New("checksum mismatch")
-	ErrDuplicate          = errors.New("duplicate key or address")
-	ErrMalformedEntry     = errors.New("malformed entry")
-	ErrNetworkMismatch    = errors.New("network mismatch")
-	ErrWalletDoesNotExist = errors.New("non-existant wallet")
-	ErrWalletLocked       = errors.New("wallet is locked")
+	ErrAddressNotFound      = errors.New("address not found")
+	ErrChecksumMismatch     = errors.New("checksum mismatch")
+	ErrDuplicate            = errors.New("duplicate key or address")
+	ErrMalformedEntry       = errors.New("malformed entry")
+	ErrNetworkMismatch      = errors.New("network mismatch")
+	ErrWalletDoesNotExist   = errors.New("non-existant wallet")
+	ErrWalletIsWatchingOnly = errors.New("wallet is watching-only")
+	ErrWalletLocked         = errors.New("wallet is locked")
 )
 
 var (
@@ -681,7 +682,10 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 			// If the private keys have not ben created yet, mark the
 			// earliest so all can be created on next wallet unlock.
 			if e.addr.flags.createPrivKeyNextUnlock {
-				if w.missingKeysStart < e.addr.chainIndex {
+				switch {
+				case w.missingKeysStart == 0:
+					fallthrough
+				case e.addr.chainIndex < w.missingKeysStart:
 					w.missingKeysStart = e.addr.chainIndex
 				}
 			}
@@ -781,6 +785,10 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 // addresses created while the wallet was locked without private
 // keys are created at this time.
 func (w *Wallet) Unlock(passphrase []byte) error {
+	if w.flags.watchingOnly {
+		return ErrWalletIsWatchingOnly
+	}
+
 	// Derive key from KDF parameters and passphrase.
 	key := Key(passphrase, &w.kdfParams)
 
@@ -798,6 +806,10 @@ func (w *Wallet) Unlock(passphrase []byte) error {
 // Lock performs a best try effort to remove and zero all secret keys
 // associated with the wallet.
 func (w *Wallet) Lock() (err error) {
+	if w.flags.watchingOnly {
+		return ErrWalletIsWatchingOnly
+	}
+
 	// Remove clear text passphrase from wallet.
 	if len(w.secret) != 32 {
 		err = ErrWalletLocked
@@ -872,7 +884,7 @@ func (w *Wallet) NextChainedAddress(bs *BlockStamp,
 // LastChainedAddress returns the most recently requested chained
 // address from calling NextChainedAddress, or the root address if
 // no chained addresses have been requested.
-func (w *Wallet) LastChainedAddress() btcutil.Address {
+func (w *Wallet) LastChainedAddress() *btcutil.AddressPubKeyHash {
 	return w.chainIdxMap[w.highestUsed]
 }
 
@@ -1018,6 +1030,11 @@ func (w *Wallet) createMissingPrivateKeys() error {
 // contained in the wallet, the address does not include a public and
 // private key, or if the wallet is locked.
 func (w *Wallet) AddressKey(a btcutil.Address) (key *ecdsa.PrivateKey, err error) {
+	// Watching-only wallets do not contain private keys.
+	if w.flags.watchingOnly {
+		return nil, ErrWalletIsWatchingOnly
+	}
+
 	// Currently, only P2PKH addresses are supported.  This should
 	// be extended to a switch-case statement when support for other
 	// addresses are added.
@@ -1187,36 +1204,39 @@ func (w *Wallet) SetBetterEarliestBlockHeight(height int32) {
 }
 
 // ImportPrivateKey creates a new encrypted btcAddress with a
-// user-provided private key and adds it to the wallet.  If the
-// import is successful, the payment address string is returned.
-func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStamp) (string, error) {
+// user-provided private key and adds it to the wallet.
+func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStamp) (*btcutil.AddressPubKeyHash, error) {
+	if w.flags.watchingOnly {
+		return nil, ErrWalletIsWatchingOnly
+	}
+
 	// First, must check that the key being imported will not result
 	// in a duplicate address.
 	pkh := btcutil.Hash160(pubkeyFromPrivkey(privkey, compressed))
 	// Will always be valid inputs so omit error check.
 	apkh, err := btcutil.NewAddressPubKeyHash(pkh, w.Net())
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if _, ok := w.addrMap[*apkh]; ok {
-		return "", ErrDuplicate
+		return nil, ErrDuplicate
 	}
 
 	// The wallet must be unlocked to encrypt the imported private key.
 	if len(w.secret) != 32 {
-		return "", ErrWalletLocked
+		return nil, ErrWalletLocked
 	}
 
 	// Create new address with this private key.
 	btcaddr, err := newBtcAddress(privkey, nil, bs, compressed)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	btcaddr.chainIndex = importedKeyChainIdx
 
 	// Encrypt imported address with the derived AES key.
 	if err = btcaddr.encrypt(w.secret); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// Add address to wallet's bookkeeping structures.  Adding to
@@ -1225,11 +1245,8 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStam
 	w.addrMap[*btcaddr.address(w.net)] = btcaddr
 	w.importedAddrs = append(w.importedAddrs, btcaddr)
 
-	// Create and return encoded payment address string.  Error is
-	// ignored as the length of the pubkey hash and net will always
-	// be valid.
-	addr, _ := btcutil.NewAddressPubKeyHash(btcaddr.pubKeyHash[:], w.Net())
-	return addr.String(), nil
+	// Create and return address.
+	return btcutil.NewAddressPubKeyHash(btcaddr.pubKeyHash[:], w.Net())
 }
 
 // CreateDate returns the Unix time of the wallet creation time.  This
@@ -1237,6 +1254,71 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStam
 // set a better minimum block height of where to being rescans.
 func (w *Wallet) CreateDate() int64 {
 	return w.createDate
+}
+
+// ExportWatchingWallet creates and returns a new wallet with the same
+// addresses in w, but as a watching-only wallet without any private keys.
+// New addresses created by the watching wallet will match the new addresses
+// created the original wallet (thanks to public key address chaining), but
+// will be missing the associated private keys.
+func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
+	// Don't continue if wallet is already a watching-only wallet.
+	if w.flags.watchingOnly {
+		return nil, ErrWalletIsWatchingOnly
+	}
+
+	// Copy members of w into a new wallet, but mark as watching-only and
+	// do not include any private keys.
+	ww := &Wallet{
+		net: w.net,
+		flags: walletFlags{
+			useEncryption: false,
+			watchingOnly:  true,
+		},
+		uniqID:       w.uniqID,
+		name:         w.name,
+		desc:         w.desc,
+		createDate:   w.createDate,
+		highestUsed:  w.highestUsed,
+		keyGenerator: *w.keyGenerator.watchingCopy(),
+		recent: recentBlocks{
+			lastHeight: w.recent.lastHeight,
+		},
+
+		addrMap:        make(map[btcutil.AddressPubKeyHash]*btcAddress),
+		addrCommentMap: make(map[btcutil.AddressPubKeyHash]comment),
+		txCommentMap:   make(map[transactionHashKey]comment),
+
+		chainIdxMap:  make(map[int64]*btcutil.AddressPubKeyHash),
+		lastChainIdx: w.lastChainIdx,
+	}
+
+	if len(w.recent.hashes) != 0 {
+		ww.recent.hashes = make([]*btcwire.ShaHash, 0, len(w.recent.hashes))
+		for _, hash := range w.recent.hashes {
+			var hashCpy btcwire.ShaHash
+			copy(hashCpy[:], hash[:])
+			ww.recent.hashes = append(ww.recent.hashes, &hashCpy)
+		}
+	}
+	for apkh, addr := range w.addrMap {
+		apkhCopy := apkh
+		ww.chainIdxMap[addr.chainIndex] = &apkhCopy
+		ww.addrMap[apkhCopy] = addr.watchingCopy()
+	}
+	for apkh, cmt := range w.addrCommentMap {
+		cmtCopy := make(comment, len(cmt))
+		copy(cmtCopy, cmt)
+		ww.addrCommentMap[apkh] = cmtCopy
+	}
+	if len(w.importedAddrs) != 0 {
+		ww.importedAddrs = make([]*btcAddress, 0, len(w.importedAddrs))
+		for _, addr := range w.importedAddrs {
+			ww.importedAddrs = append(ww.importedAddrs, addr.watchingCopy())
+		}
+	}
+
+	return ww, nil
 }
 
 // AddressInfo holds information regarding an address needed to manage
@@ -1299,30 +1381,36 @@ type walletFlags struct {
 	watchingOnly  bool
 }
 
-func (wf *walletFlags) ReadFrom(r io.Reader) (n int64, err error) {
-	raw := make([]byte, 8)
-	n, err = binaryRead(r, binary.LittleEndian, raw)
-	wf.useEncryption = raw[0] != 0
-	wf.watchingOnly = raw[1] != 0
-	return n, err
+func (wf *walletFlags) ReadFrom(r io.Reader) (int64, error) {
+	var b [8]byte
+	n, err := r.Read(b[:])
+	if err != nil {
+		return int64(n), err
+	}
+
+	wf.useEncryption = b[0]&(1<<0) != 0
+	wf.watchingOnly = b[0]&(1<<1) != 0
+
+	return int64(n), nil
 }
 
-func (wf *walletFlags) WriteTo(w io.Writer) (n int64, err error) {
-	raw := make([]byte, 8)
+func (wf *walletFlags) WriteTo(w io.Writer) (int64, error) {
+	var b [8]byte
 	if wf.useEncryption {
-		raw[0] = 1
+		b[0] |= 1 << 0
 	}
 	if wf.watchingOnly {
-		raw[1] = 1
+		b[0] |= 1 << 1
 	}
-	return binaryWrite(w, binary.LittleEndian, raw)
+	n, err := w.Write(b[:])
+	return int64(n), err
 }
 
 type addrFlags struct {
 	hasPrivKey              bool
 	hasPubKey               bool
 	encrypted               bool
-	createPrivKeyNextUnlock bool // unimplemented in btcwallet
+	createPrivKeyNextUnlock bool
 	compressed              bool
 }
 
@@ -1640,7 +1728,7 @@ type btcAddress struct {
 	flags      addrFlags
 	chaincode  [32]byte
 	chainIndex int64
-	chainDepth int64 // currently unused (will use when extending a locked wallet)
+	chainDepth int64 // unused
 	initVector [16]byte
 	privKey    [32]byte
 	pubKey     publicKey
@@ -2051,6 +2139,30 @@ func (a *btcAddress) info(net btcwire.BitcoinNet) (*AddressInfo, error) {
 		Imported:   a.chainIndex == importedKeyChainIdx,
 		Pubkey:     hex.EncodeToString(a.pubKey),
 	}, nil
+}
+
+// watchingCopy creates a copy of an address without a private key.
+// This is used to fill a watching a wallet with addresses from a
+// normal wallet.
+func (a *btcAddress) watchingCopy() *btcAddress {
+	return &btcAddress{
+		pubKeyHash: a.pubKeyHash,
+		flags: addrFlags{
+			hasPrivKey:              false,
+			hasPubKey:               a.flags.hasPubKey,
+			encrypted:               false,
+			createPrivKeyNextUnlock: false,
+			compressed:              a.flags.compressed,
+		},
+		chaincode:  a.chaincode,
+		chainIndex: a.chainIndex,
+		chainDepth: a.chainDepth,
+		pubKey:     a.pubKey,
+		firstSeen:  a.firstSeen,
+		lastSeen:   a.lastSeen,
+		firstBlock: a.firstBlock,
+		lastBlock:  a.lastBlock,
+	}
 }
 
 func walletHash(b []byte) uint32 {
