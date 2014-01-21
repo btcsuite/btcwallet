@@ -1376,6 +1376,33 @@ func (w *Wallet) ActiveAddresses() map[btcutil.Address]*AddressInfo {
 	return addrs
 }
 
+// ExtendActiveAddresses gets or creates the next n addresses from the
+// address chain and marks each as active.  This is used to recover
+// deterministic (not imported) addresses from a wallet backup, or to
+// keep the active addresses in sync between an encrypted wallet with
+// private keys and an exported watching wallet without.
+//
+// A slice is returned with the btcutil.Address of each new address.
+// The blockchain must be rescanned for these addresses.
+func (w *Wallet) ExtendActiveAddresses(n int, keypoolSize uint) ([]btcutil.Address, error) {
+	if n <= 0 {
+		return nil, errors.New("n is not positive")
+	}
+
+	last := w.addrMap[*w.chainIdxMap[w.highestUsed]]
+	bs := &BlockStamp{Height: last.firstBlock}
+
+	addrs := make([]btcutil.Address, 0, n)
+	for i := 0; i < n; i++ {
+		addr, err := w.NextChainedAddress(bs, keypoolSize)
+		if err != nil {
+			return nil, err
+		}
+		addrs = append(addrs, addr)
+	}
+	return addrs, nil
+}
+
 type walletFlags struct {
 	useEncryption bool
 	watchingOnly  bool

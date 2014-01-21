@@ -579,6 +579,52 @@ func TestWatchingWalletExport(t *testing.T) {
 		}
 	}
 
+	// Test that ExtendActiveAddresses for the watching wallet match
+	// manually requested addresses of the original wallet.
+	newAddrs := make([]btcutil.Address, 0, keypoolSize)
+	for i := 0; i < keypoolSize; i++ {
+		addr, err := w.NextChainedAddress(createdAt, keypoolSize)
+		if err != nil {
+			t.Errorf("Cannot get next chained address for original wallet: %v", err)
+			return
+		}
+		newAddrs = append(newAddrs, addr)
+	}
+	newWWAddrs, err := ww.ExtendActiveAddresses(keypoolSize, keypoolSize)
+	if err != nil {
+		t.Errorf("Cannot extend active addresses for watching wallet: %v", err)
+		return
+	}
+	for i := range newAddrs {
+		if newAddrs[i].EncodeAddress() != newWWAddrs[i].EncodeAddress() {
+			t.Errorf("Extended active addresses do not match manually requested addresses.")
+			return
+		}
+	}
+
+	// Test ExtendActiveAddresses for the original wallet after manually
+	// requesting addresses for the watching wallet.
+	newWWAddrs = make([]btcutil.Address, 0, keypoolSize)
+	for i := 0; i < keypoolSize; i++ {
+		addr, err := ww.NextChainedAddress(createdAt, keypoolSize)
+		if err != nil {
+			t.Errorf("Cannot get next chained address for watching wallet: %v", err)
+			return
+		}
+		newWWAddrs = append(newWWAddrs, addr)
+	}
+	newAddrs, err = w.ExtendActiveAddresses(keypoolSize, keypoolSize)
+	if err != nil {
+		t.Errorf("Cannot extend active addresses for original wallet: %v", err)
+		return
+	}
+	for i := range newAddrs {
+		if newAddrs[i].EncodeAddress() != newWWAddrs[i].EncodeAddress() {
+			t.Errorf("Extended active addresses do not match manually requested addresses.")
+			return
+		}
+	}
+
 	// Test (de)serialization of watching wallet.
 	buf := new(bytes.Buffer)
 	_, err = ww.WriteTo(buf)
