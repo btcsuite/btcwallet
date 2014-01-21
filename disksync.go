@@ -206,3 +206,52 @@ func (a *Account) writeDirtyToDisk() error {
 
 	return nil
 }
+
+// WriteExport writes an account to a special export directory named
+// by dirName.  Any previous files are overwritten.
+func (a *Account) WriteExport(dirName string) error {
+	exportPath := filepath.Join(networkDir(cfg.Net()), dirName)
+	if err := checkCreateDir(exportPath); err != nil {
+		return err
+	}
+
+	aname := a.Name()
+	wfilepath := accountFilename("wallet.bin", aname, exportPath)
+	txfilepath := accountFilename("tx.bin", aname, exportPath)
+	utxofilepath := accountFilename("utxo.bin", aname, exportPath)
+
+	a.UtxoStore.RLock()
+	defer a.UtxoStore.RUnlock()
+	utxofile, err := os.Create(utxofilepath)
+	if err != nil {
+		return err
+	}
+	defer utxofile.Close()
+	if _, err := a.UtxoStore.s.WriteTo(utxofile); err != nil {
+		return err
+	}
+
+	a.TxStore.RLock()
+	defer a.TxStore.RUnlock()
+	txfile, err := os.Create(txfilepath)
+	if err != nil {
+		return err
+	}
+	defer txfile.Close()
+	if _, err := a.TxStore.s.WriteTo(txfile); err != nil {
+		return err
+	}
+
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
+	wfile, err := os.Create(wfilepath)
+	if err != nil {
+		return err
+	}
+	defer wfile.Close()
+	if _, err := a.Wallet.WriteTo(wfile); err != nil {
+		return err
+	}
+
+	return nil
+}

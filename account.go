@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/conformal/btcutil"
@@ -433,6 +434,58 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 	return addrStr, nil
 }
 
+// ExportWatchingWallet returns a new account with a watching wallet
+// exported by this a's wallet.  Both wallets share the same tx and utxo
+// stores, so locking one will lock the other as well.  The returned account
+// should be exported quickly, either to file or to an rpc caller, and then
+// dropped from scope.
+func (a *Account) ExportWatchingWallet() (*Account, error) {
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
+
+	ww, err := a.Wallet.ExportWatchingWallet()
+	if err != nil {
+		return nil, err
+	}
+
+	wa := *a
+	wa.Wallet = ww
+	return &wa, nil
+}
+
+// exportBase64 exports an account's serialized wallet, tx, and utxo
+// stores as base64-encoded values in a map.
+func (a *Account) exportBase64() (map[string]string, error) {
+	buf := &bytes.Buffer{}
+	m := make(map[string]string)
+
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
+	if _, err := a.Wallet.WriteTo(buf); err != nil {
+		return nil, err
+	}
+	m["wallet"] = base64.StdEncoding.EncodeToString(buf.Bytes())
+	buf.Reset()
+
+	a.TxStore.RLock()
+	defer a.TxStore.RUnlock()
+	if _, err := a.TxStore.s.WriteTo(buf); err != nil {
+		return nil, err
+	}
+	m["tx"] = base64.StdEncoding.EncodeToString(buf.Bytes())
+	buf.Reset()
+
+	a.UtxoStore.RLock()
+	defer a.UtxoStore.RUnlock()
+	if _, err := a.UtxoStore.s.WriteTo(buf); err != nil {
+		return nil, err
+	}
+	m["utxo"] = base64.StdEncoding.EncodeToString(buf.Bytes())
+	buf.Reset()
+
+	return m, nil
+}
+
 // Track requests btcd to send notifications of new transactions for
 // each address stored in a wallet.
 func (a *Account) Track() {
@@ -555,6 +608,41 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	a.ReqNewTxsForAddress(addr)
 
 	return addr, nil
+}
+
+// RecoverAddresses recovers the next n chained addresses of a wallet.
+func (a *Account) RecoverAddresses(n int) error {
+	a.mtx.Lock()
+
+	// Get info on the last chained address.  The rescan starts at the
+	// earliest block height the last chained address might appear at.
+	last := a.Wallet.LastChainedAddress()
+	lastInfo, err := a.Wallet.AddressInfo(last)
+	if err != nil {
+		a.mtx.Unlock()
+		return err
+	}
+
+	addrs, err := a.Wallet.ExtendActiveAddresses(n, cfg.KeypoolSize)
+	a.mtx.Unlock()
+	if err != nil {
+		return err
+	}
+
+	// Run a goroutine to rescan blockchain for recovered addresses.
+	m := make(map[string]struct{})
+	for i := range addrs {
+		m[addrs[i].EncodeAddress()] = struct{}{}
+	}
+	go func(addrs map[string]struct{}) {
+		jsonErr := Rescan(CurrentRPCConn(), lastInfo.FirstBlock, addrs)
+		if jsonErr != nil {
+			log.Errorf("Rescanning for recovered addresses failed: %v",
+				jsonErr.Message)
+		}
+	}(m)
+
+	return nil
 }
 
 // ReqNewTxsForAddress sends a message to btcd to request tx updates

@@ -87,10 +87,12 @@ var rpcHandlers = map[string]cmdHandler{
 
 // Extensions exclusive to websocket connections.
 var wsHandlers = map[string]cmdHandler{
+	"exportwatchingwallet":    ExportWatchingWallet,
 	"getaddressbalance":       GetAddressBalance,
 	"getunconfirmedbalance":   GetUnconfirmedBalance,
 	"listaddresstransactions": ListAddressTransactions,
 	"listalltransactions":     ListAllTransactions,
+	"recoveraddresses":        RecoverAddresses,
 	"walletislocked":          WalletIsLocked,
 }
 
@@ -222,6 +224,68 @@ func DumpWallet(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 		return nil, &e
 	}
+}
+
+// ExportWatchingWallet handles an exportwatchingwallet request by exporting
+// the current account wallet as a watching wallet (with no private keys), and
+// either writing the exported wallet to disk, or base64-encoding serialized
+// account files and sending them back in the response.
+func ExportWatchingWallet(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcws.ExportWatchingWalletCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		return nil, &btcjson.ErrWalletInvalidAccountName
+
+	default: // all other non-nil errors
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	wa, err := a.ExportWatchingWallet()
+	if err != nil {
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	if cmd.Download {
+		switch m, err := wa.exportBase64(); err {
+		case nil:
+			return m, nil
+
+		default:
+			e := btcjson.Error{
+				Code:    btcjson.ErrWallet.Code,
+				Message: err.Error(),
+			}
+			return nil, &e
+		}
+	}
+
+	// Create export directory, write files there.
+	if err = wa.WriteExport("watchingwallet"); err != nil {
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	return nil, nil
 }
 
 // GetAddressesByAccount handles a getaddressesbyaccount request by returning
@@ -1079,6 +1143,39 @@ func CreateEncryptedWallet(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	default: // all other non-nil errors
 		return nil, &btcjson.ErrInternal
 	}
+}
+
+func RecoverAddresses(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcws.RecoverAddressesCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	a, err := accountstore.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrAcctNotExist:
+		return nil, &btcjson.ErrWalletInvalidAccountName
+
+	default: // all other non-nil errors
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	if err := a.RecoverAddresses(cmd.N); err != nil {
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	return nil, nil
 }
 
 // WalletIsLocked handles the walletislocked extension request by
