@@ -1303,7 +1303,9 @@ func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
 	}
 	for apkh, addr := range w.addrMap {
 		apkhCopy := apkh
-		ww.chainIdxMap[addr.chainIndex] = &apkhCopy
+		if addr.chainIndex != importedKeyChainIdx {
+			ww.chainIdxMap[addr.chainIndex] = &apkhCopy
+		}
 		ww.addrMap[apkhCopy] = addr.watchingCopy()
 	}
 	for apkh, cmt := range w.addrCommentMap {
