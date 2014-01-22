@@ -39,6 +39,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"getbalance":            GetBalance,
 	"getnewaddress":         GetNewAddress,
 	"importprivkey":         ImportPrivKey,
+	"keypoolrefill":         KeypoolRefill,
 	"listaccounts":          ListAccounts,
 	"listtransactions":      ListTransactions,
 	"sendfrom":              SendFrom,
@@ -61,7 +62,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"gettxoutsetinfo":        Unimplemented,
 	"getwork":                Unimplemented,
 	"importwallet":           Unimplemented,
-	"keypoolrefill":          Unimplemented,
 	"listaddressgroupings":   Unimplemented,
 	"listlockunspent":        Unimplemented,
 	"listreceivedbyaccount":  Unimplemented,
@@ -478,6 +478,12 @@ func ImportPrivKey(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 		return nil, &e
 	}
+}
+
+// KeypoolRefill handles the keypoolrefill command. Since we handle the keypool
+// automatically this does nothing since refilling is never manually required.
+func KeypoolRefill(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	return nil, nil
 }
 
 // NotifyBalances notifies an attached frontend of the current confirmed
