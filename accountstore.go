@@ -204,6 +204,11 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 	account.UtxoStore.dirty = true
 	account.TxStore.dirty = true
 
+	// Mark all active payment addresses as belonging to this account.
+	for addr := range account.ActivePaymentAddresses() {
+		MarkAddressForAccount(addr, name)
+	}
+
 	// Save the account in the global account map.  The mutex is
 	// already held at this point, and will be unlocked when this
 	// func returns.
@@ -218,8 +223,7 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 
 	// Write new wallet to disk.
 	if err := account.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
-		return nil
+		return err
 	}
 
 	return nil
