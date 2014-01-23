@@ -112,11 +112,8 @@ func (store *AccountStore) BlockNotify(bs *wallet.BlockStamp) {
 		// next scheduled disk sync.
 		a.mtx.Lock()
 		a.Wallet.SetSyncedWith(bs)
-		a.dirty = true
+		a.MarkDirtyWallet()
 		a.mtx.Unlock()
-		dirtyAccounts.Lock()
-		dirtyAccounts.m[a] = true
-		dirtyAccounts.Unlock()
 	}
 }
 
@@ -146,7 +143,7 @@ func (store *AccountStore) RecordMinedTx(txid *btcwire.ShaHash,
 					sendtx.BlockHeight = blkheight
 					sendtx.BlockIndex = int32(blkindex)
 					sendtx.BlockTime = blktime
-					account.TxStore.dirty = true
+					account.MarkDirtyTxStore()
 					account.TxStore.Unlock()
 					return nil
 				}

@@ -368,7 +368,7 @@ func NtfnProcessedTx(n btcjson.Cmd, marshaled []byte) {
 	// Record the tx history.
 	a.TxStore.Lock()
 	a.TxStore.s.InsertRecvTx(t)
-	a.TxStore.dirty = true
+	a.MarkDirtyTxStore()
 	a.TxStore.Unlock()
 
 	// Notify frontends of tx.  If the tx is unconfirmed, it is always
@@ -404,7 +404,7 @@ func NtfnProcessedTx(n btcjson.Cmd, marshaled []byte) {
 		copy(u.BlockHash[:], blockHash[:])
 		a.UtxoStore.Lock()
 		a.UtxoStore.s.Insert(u)
-		a.UtxoStore.dirty = true
+		a.MarkDirtyUtxoStore()
 		a.UtxoStore.Unlock()
 
 		// If this notification came from mempool, notify frontends of

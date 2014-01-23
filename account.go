@@ -84,6 +84,39 @@ type Account struct {
 	}
 }
 
+// MarkDirtyWallet marks an account's wallet as dirty, and adds the
+// account to the list of dirty accounts to be schedule to be synced to
+// disk.  It is a runtime error to call this without holding the wallet
+// writer lock.
+func (a *Account) MarkDirtyWallet() {
+	a.dirty = true
+	dirtyAccounts.Lock()
+	dirtyAccounts.m[a] = true
+	dirtyAccounts.Unlock()
+}
+
+// MarkDirtyUtxoStore marks an account's utxo store as dirty, and adds
+// the account to the list of dirty accounts to be schedule to be synced to
+// disk.  It is a runtime error to call this without holding the utxo store
+// writer lock.
+func (a *Account) MarkDirtyUtxoStore() {
+	a.UtxoStore.dirty = true
+	dirtyAccounts.Lock()
+	dirtyAccounts.m[a] = true
+	dirtyAccounts.Unlock()
+}
+
+// MarkDirtyTxStore marks an account's tx store as dirty, and adds the
+// account to the list of dirty accounts to be schedule to be synced to
+// disk.  It is a runtime error to call this without holding the tx store
+// writer lock.
+func (a *Account) MarkDirtyTxStore() {
+	a.TxStore.dirty = true
+	dirtyAccounts.Lock()
+	dirtyAccounts.m[a] = true
+	dirtyAccounts.Unlock()
+}
+
 // Lock locks the underlying wallet for an account.
 func (a *Account) Lock() error {
 	a.mtx.Lock()
