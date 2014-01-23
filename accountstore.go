@@ -325,6 +325,17 @@ func (store *AccountStore) Track() {
 	}
 }
 
+// WalletOpenError is a special error type so problems opening wallet
+// files can be differentiated (by a type assertion) from other errors.
+type WalletOpenError struct {
+	Err string
+}
+
+// Error satisifies the builtin error interface.
+func (e *WalletOpenError) Error() string {
+	return e.Err
+}
+
 // OpenAccount opens an account described by account in the data
 // directory specified by cfg.  If the wallet does not exist, ErrNoWallet
 // is returned as an error.
@@ -356,12 +367,14 @@ func (store *AccountStore) OpenAccount(name string, cfg *config) error {
 			// Must create and save wallet first.
 			return ErrNoWallet
 		}
-		return fmt.Errorf("cannot open wallet file: %s", err)
+		msg := fmt.Sprintf("cannot open wallet file: %s", err)
+		return &WalletOpenError{msg}
 	}
 	defer wfile.Close()
 
 	if _, err = wlt.ReadFrom(wfile); err != nil {
-		return fmt.Errorf("cannot read wallet: %s", err)
+		msg := fmt.Sprintf("cannot read wallet: %s", err)
+		return &WalletOpenError{msg}
 	}
 
 	// Read tx file.  If this fails, return a ErrNoTxs error and let

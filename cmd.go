@@ -27,6 +27,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,7 +35,9 @@ import (
 var (
 	// ErrNoWallet describes an error where a wallet does not exist and
 	// must be created first.
-	ErrNoWallet = errors.New("wallet file does not exist")
+	ErrNoWallet = &WalletOpenError{
+		Err: "wallet file does not exist",
+	}
 
 	// ErrNoUtxos describes an error where the wallet file was successfully
 	// read, but the UTXO file was not.  To properly handle this error,
@@ -146,12 +149,8 @@ func main() {
 	// Check and update any old file locations.
 	updateOldFileLocations()
 
-	// Open default account.
-	// TODO(jrick): open all available accounts.
-	err = accountstore.OpenAccount("", cfg)
-	if err != nil {
-		log.Warnf("cannot open default account: %v", err)
-	}
+	// Open all account saved to disk.
+	OpenAccounts()
 
 	// Read CA file to verify a btcd TLS connection.
 	cafile, err := ioutil.ReadFile(cfg.CAFile)
@@ -244,6 +243,62 @@ func main() {
 		<-btcd.closed
 		NotifyBtcdConnection(frontendNotificationMaster)
 		log.Info("Lost btcd connection")
+	}
+}
+
+// OpenAccounts attempts to open all saved accounts.
+func OpenAccounts() {
+	// The default account must exist, or btcwallet acts as if no
+	// wallets/accounts have been created yet.
+	if err := accountstore.OpenAccount("", cfg); err != nil {
+		switch err.(type) {
+		case *WalletOpenError:
+			log.Errorf("Default account wallet file unreadable: %v", err)
+			return
+
+		default:
+			log.Warnf("Non-critical problem opening an account file: %v", err)
+		}
+	}
+
+	// Read all filenames in the account directory, and look for any
+	// filenames matching '*-wallet.bin'.  These are wallets for
+	// additional saved accounts.
+	accountDir, err := os.Open(networkDir(cfg.Net()))
+	if err != nil {
+		// Can't continue.
+		log.Errorf("Unable to open account directory: %v", err)
+		return
+	}
+	defer accountDir.Close()
+	fileNames, err := accountDir.Readdirnames(0)
+	if err != nil {
+		// fileNames might be partially set, so log an error and
+		// at least try to open some accounts.
+		log.Errorf("Unable to read all account files: %v", err)
+	}
+	var accounts []string
+	for _, file := range fileNames {
+		if strings.HasSuffix(file, "-wallet.bin") {
+			name := strings.TrimSuffix(file, "-wallet.bin")
+			accounts = append(accounts, name)
+		}
+	}
+
+	// Open all additional accounts.
+	for _, a := range accounts {
+		// Log txstore/utxostore errors as these will be recovered
+		// from with a rescan, but wallet errors must be returned
+		// to the caller.
+		if err := accountstore.OpenAccount(a, cfg); err != nil {
+			switch err.(type) {
+			case *WalletOpenError:
+				log.Errorf("Error opening account's wallet: %v", err)
+
+			default:
+				log.Warnf("Non-critical error opening an account file: %v", err)
+			}
+		}
 	}
 }
 
