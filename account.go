@@ -247,15 +247,8 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 	lastLookupIdx := len(a.TxStore.s) - count
 	// Search in reverse order: lookup most recently-added first.
 	for i := len(a.TxStore.s) - 1; i >= from && i >= lastLookupIdx; i-- {
-		switch e := a.TxStore.s[i].(type) {
-		case *tx.SendTx:
-			infos := e.TxInfo(a.name, bs.Height, a.Net())
-			txInfoList = append(txInfoList, infos...)
-
-		case *tx.RecvTx:
-			info := e.TxInfo(a.name, bs.Height, a.Net())
-			txInfoList = append(txInfoList, info)
-		}
+		txInfoList = append(txInfoList,
+			a.TxStore.s[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
 	a.mtx.RUnlock()
 	a.TxStore.RUnlock()
@@ -287,7 +280,7 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 		}
 		if _, ok := pkHashes[string(rtx.ReceiverHash[:])]; ok {
 			info := rtx.TxInfo(a.name, bs.Height, a.Net())
-			txInfoList = append(txInfoList, info)
+			txInfoList = append(txInfoList, info...)
 		}
 	}
 	a.mtx.RUnlock()
@@ -313,15 +306,8 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 
 	// Search in reverse order: lookup most recently-added first.
 	for i := len(a.TxStore.s) - 1; i >= 0; i-- {
-		switch e := a.TxStore.s[i].(type) {
-		case *tx.SendTx:
-			infos := e.TxInfo(a.name, bs.Height, a.Net())
-			txInfoList = append(txInfoList, infos...)
-
-		case *tx.RecvTx:
-			info := e.TxInfo(a.name, bs.Height, a.Net())
-			txInfoList = append(txInfoList, info)
-		}
+		txInfoList = append(txInfoList,
+			a.TxStore.s[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
 	a.mtx.RUnlock()
 	a.TxStore.RUnlock()

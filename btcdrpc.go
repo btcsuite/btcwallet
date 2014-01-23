@@ -389,7 +389,7 @@ func NtfnProcessedTx(n btcjson.Cmd, marshaled []byte) {
 		// Notify frontends of new recv tx and mark as notified.
 		NotifiedRecvTxChans.add <- *recvTxOP
 		NotifyNewTxDetails(frontendNotificationMaster, a.Name(), t.TxInfo(a.Name(),
-			ptn.BlockHeight, a.Wallet.Net()))
+			ptn.BlockHeight, a.Wallet.Net())[0])
 	}
 
 	if !ptn.Spent {

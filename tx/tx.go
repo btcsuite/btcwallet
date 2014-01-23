@@ -102,8 +102,15 @@ type OutPoint btcwire.OutPoint
 // of variable length.
 type PkScript []byte
 
+// Tx is a generic type that can be used in place of either of the tx types in
+// a TxStore.
+type Tx interface {
+	io.WriterTo
+	ReadFromVersion(uint32, io.Reader) (int64, error)
+	TxInfo(string, int32, btcwire.BitcoinNet) []map[string]interface{}
+}
 // TxStore is a slice holding RecvTx and SendTx pointers.
-type TxStore []interface{}
+type TxStore []Tx
 
 const (
 	addressUnknown byte = iota
@@ -725,7 +732,7 @@ func (txs *TxStore) ReadFrom(r io.Reader) (int64, error) {
 	vers := binary.LittleEndian.Uint32(versionBytes)
 	read += int64(n)
 
-	store := []interface{}{}
+	store := []Tx{}
 	defer func() {
 		*txs = store
 	}()
@@ -742,7 +749,7 @@ func (txs *TxStore) ReadFrom(r io.Reader) (int64, error) {
 		}
 		read += n
 
-		var tx io.ReaderFrom
+		var tx Tx
 		// Read tx.
 		switch header {
 		case recvTxHeader:
@@ -788,7 +795,7 @@ func (txs *TxStore) WriteTo(w io.Writer) (int64, error) {
 	}
 	written = int64(n)
 
-	store := ([]interface{})(*txs)
+	store := ([]Tx)(*txs)
 	for _, tx := range store {
 		// Write header for tx.
 		var header byte
@@ -861,7 +868,7 @@ func (txs *TxStore) InsertRecvTx(tx *RecvTx) {
 // Correct results rely on txs being sorted by block height in
 // increasing order.
 func (txs *TxStore) Rollback(height int32, hash *btcwire.ShaHash) (modified bool) {
-	s := ([]interface{})(*txs)
+	s := ([]Tx)(*txs)
 
 	// endlen specifies the final length of the rolled-back TxStore.
 	// Past endlen, array elements are nilled.  We do this instead of
@@ -1023,7 +1030,7 @@ func (tx *RecvTx) WriteTo(w io.Writer) (n int64, err error) {
 // TxInfo returns a slice of maps that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
 func (tx *RecvTx) TxInfo(account string, curheight int32,
-	net btcwire.BitcoinNet) map[string]interface{} {
+	net btcwire.BitcoinNet) []map[string]interface{} {
 
 	address := "Unknown"
 	addr, err := btcutil.NewAddressPubKeyHash(tx.ReceiverHash, net)
@@ -1049,7 +1056,7 @@ func (tx *RecvTx) TxInfo(account string, curheight int32,
 		txInfo["confirmations"] = 0
 	}
 
-	return txInfo
+	return []map[string]interface{}{txInfo}
 }
 
 func (tx *SendTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error) {
