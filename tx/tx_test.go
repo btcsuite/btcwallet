@@ -266,7 +266,7 @@ func TestSendTxWriteRead(t *testing.T) {
 }
 
 func TestTxStoreWriteRead(t *testing.T) {
-	s := []interface{}{recvtx, sendtx}
+	s := []Tx{recvtx, sendtx}
 	store := TxStore(s)
 
 	bufWriter := &bytes.Buffer{}
