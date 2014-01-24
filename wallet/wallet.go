@@ -487,6 +487,7 @@ type Wallet struct {
 	txCommentMap   map[transactionHashKey]comment
 
 	// The rest of the fields in this struct are not serialized.
+	passphrase       []byte
 	secret           []byte
 	chainIdxMap      map[int64]*btcutil.AddressPubKeyHash
 	importedAddrs    []*btcAddress
@@ -797,7 +798,8 @@ func (w *Wallet) Unlock(passphrase []byte) error {
 		return err
 	}
 
-	// If unlock was successful, save the secret key.
+	// If unlock was successful, save the passphrase and aes key.
+	w.passphrase = passphrase
 	w.secret = key
 
 	return w.createMissingPrivateKeys()
@@ -814,6 +816,8 @@ func (w *Wallet) Lock() (err error) {
 	if len(w.secret) != 32 {
 		err = ErrWalletLocked
 	} else {
+		zero(w.passphrase)
+		w.passphrase = nil
 		zero(w.secret)
 		w.secret = nil
 	}
@@ -825,6 +829,20 @@ func (w *Wallet) Lock() (err error) {
 	}
 
 	return err
+}
+
+// Passphrase returns the passphrase for an unlocked wallet, or
+// ErrWalletLocked if the wallet is locked.  This should only
+// be used for creating wallets for new accounts with the same
+// passphrase as other btcwallet account wallets.
+//
+// The returned byte slice points to internal wallet memory and
+// will be zeroed when the wallet is locked.
+func (w *Wallet) Passphrase() ([]byte, error) {
+	if len(w.passphrase) != 0 {
+		return w.passphrase, nil
+	}
+	return nil, ErrWalletLocked
 }
 
 func zero(b []byte) {
