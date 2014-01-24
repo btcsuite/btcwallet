@@ -1123,8 +1123,7 @@ func CreateEncryptedWallet(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	err := accountstore.CreateEncryptedWallet(cmd.Account, cmd.Description,
-		[]byte(cmd.Passphrase))
+	err := accountstore.CreateEncryptedWallet("", "", []byte(cmd.Passphrase))
 	switch err {
 	case nil:
 		// A nil reply is sent upon successful wallet creation.
