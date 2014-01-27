@@ -68,7 +68,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"listaddressgroupings":  Unimplemented,
 	"listlockunspent":       Unimplemented,
 	"listreceivedbyaccount": Unimplemented,
-	"listsinceblock":        Unimplemented,
 	"listreceivedbyaddress": Unimplemented,
 	"listunspent":           Unimplemented,
 	"lockunspent":           Unimplemented,
