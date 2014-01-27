@@ -857,6 +857,7 @@ func SendFrom(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	var txid string
 	request := NewRPCRequest(sendtx, txid)
 	response := <-CurrentRPCConn().SendRequest(request)
+	txid = response.Result.(string)
 
 	if response.Err != nil {
 		SendTxHistSyncChans.remove <- createdTx.txid
