@@ -32,51 +32,51 @@ type cmdHandler func(btcjson.Cmd) (interface{}, *btcjson.Error)
 
 var rpcHandlers = map[string]cmdHandler{
 	// Standard bitcoind methods (implemented)
-	"dumpprivkey":           DumpPrivKey,
-	"getaccount":            GetAccount,
-	"getaccountaddress":     GetAccountAddress,
-	"getaddressesbyaccount": GetAddressesByAccount,
-	"getbalance":            GetBalance,
-	"getnewaddress":         GetNewAddress,
-	"importprivkey":         ImportPrivKey,
-	"keypoolrefill":         KeypoolRefill,
-	"listaccounts":          ListAccounts,
-	"listtransactions":      ListTransactions,
-	"sendfrom":              SendFrom,
-	"sendmany":              SendMany,
-	"settxfee":              SetTxFee,
-	"walletlock":            WalletLock,
-	"walletpassphrase":      WalletPassphrase,
+	"dumpprivkey":            DumpPrivKey,
+	"getaccount":             GetAccount,
+	"getaccountaddress":      GetAccountAddress,
+	"getaddressesbyaccount":  GetAddressesByAccount,
+	"getbalance":             GetBalance,
+	"getnewaddress":          GetNewAddress,
+	"importprivkey":          ImportPrivKey,
+	"keypoolrefill":          KeypoolRefill,
+	"listaccounts":           ListAccounts,
+	"listtransactions":       ListTransactions,
+	"sendfrom":               SendFrom,
+	"sendmany":               SendMany,
+	"settxfee":               SetTxFee,
+	"walletlock":             WalletLock,
+	"walletpassphrase":       WalletPassphrase,
+	"walletpassphrasechange": WalletPassphraseChange,
 
 	// Standard bitcoind methods (currently unimplemented)
-	"addmultisigaddress":     Unimplemented,
-	"backupwallet":           Unimplemented,
-	"createmultisig":         Unimplemented,
-	"dumpwallet":             Unimplemented,
-	"getblocktemplate":       Unimplemented,
-	"getrawchangeaddress":    Unimplemented,
-	"getreceivedbyaccount":   Unimplemented,
-	"getreceivedbyaddress":   Unimplemented,
-	"gettransaction":         Unimplemented,
-	"gettxout":               Unimplemented,
-	"gettxoutsetinfo":        Unimplemented,
-	"getwork":                Unimplemented,
-	"importwallet":           Unimplemented,
-	"listaddressgroupings":   Unimplemented,
-	"listlockunspent":        Unimplemented,
-	"listreceivedbyaccount":  Unimplemented,
-	"listsinceblock":         Unimplemented,
-	"listreceivedbyaddress":  Unimplemented,
-	"listunspent":            Unimplemented,
-	"lockunspent":            Unimplemented,
-	"move":                   Unimplemented,
-	"sendtoaddress":          Unimplemented,
-	"setaccount":             Unimplemented,
-	"signmessage":            Unimplemented,
-	"signrawtransaction":     Unimplemented,
-	"validateaddress":        Unimplemented,
-	"verifymessage":          Unimplemented,
-	"walletpassphrasechange": Unimplemented,
+	"addmultisigaddress":    Unimplemented,
+	"backupwallet":          Unimplemented,
+	"createmultisig":        Unimplemented,
+	"dumpwallet":            Unimplemented,
+	"getblocktemplate":      Unimplemented,
+	"getrawchangeaddress":   Unimplemented,
+	"getreceivedbyaccount":  Unimplemented,
+	"getreceivedbyaddress":  Unimplemented,
+	"gettransaction":        Unimplemented,
+	"gettxout":              Unimplemented,
+	"gettxoutsetinfo":       Unimplemented,
+	"getwork":               Unimplemented,
+	"importwallet":          Unimplemented,
+	"listaddressgroupings":  Unimplemented,
+	"listlockunspent":       Unimplemented,
+	"listreceivedbyaccount": Unimplemented,
+	"listsinceblock":        Unimplemented,
+	"listreceivedbyaddress": Unimplemented,
+	"listunspent":           Unimplemented,
+	"lockunspent":           Unimplemented,
+	"move":                  Unimplemented,
+	"sendtoaddress":         Unimplemented,
+	"setaccount":            Unimplemented,
+	"signmessage":           Unimplemented,
+	"signrawtransaction":    Unimplemented,
+	"validateaddress":       Unimplemented,
+	"verifymessage":         Unimplemented,
 
 	// Standard bitcoind methods which won't be implemented by btcwallet.
 	"encryptwallet": Unsupported,
@@ -1277,7 +1277,7 @@ func WalletPassphrase(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	switch err := a.Unlock([]byte(cmd.Passphrase), cmd.Timeout); err {
+	switch err := a.Unlock([]byte(cmd.Passphrase)); err {
 	case nil:
 		go func(timeout int64) {
 			time.Sleep(time.Second * time.Duration(timeout))
@@ -1290,6 +1290,37 @@ func WalletPassphrase(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	default: // all other non-nil errors
 		return nil, &btcjson.ErrWalletPassphraseIncorrect
+	}
+}
+
+// WalletPassphraseChange responds to the walletpassphrasechange request
+// by unlocking all accounts with the provided old passphrase, and
+// re-encrypting each private key with an AES key derived from the new
+// passphrase.
+//
+// If the old passphrase is correct and the passphrase is changed, all
+// wallets will be immediately locked.
+func WalletPassphraseChange(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.WalletPassphraseChangeCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	err := accountstore.ChangePassphrase([]byte(cmd.OldPassphrase),
+		[]byte(cmd.NewPassphrase))
+	switch err {
+	case nil:
+		return nil, nil
+
+	case wallet.ErrWrongPassphrase:
+		return nil, &btcjson.ErrWalletPassphraseIncorrect
+
+	default: // all other non-nil errors
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
 	}
 }
 

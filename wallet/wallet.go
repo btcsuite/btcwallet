@@ -61,6 +61,7 @@ var (
 	ErrWalletDoesNotExist   = errors.New("non-existant wallet")
 	ErrWalletIsWatchingOnly = errors.New("wallet is watching-only")
 	ErrWalletLocked         = errors.New("wallet is locked")
+	ErrWrongPassphrase      = errors.New("wrong passphrase")
 )
 
 var (
@@ -843,6 +844,37 @@ func (w *Wallet) Passphrase() ([]byte, error) {
 		return w.passphrase, nil
 	}
 	return nil, ErrWalletLocked
+}
+
+// ChangePassphrase creates a new AES key from a new passphrase and
+// re-encrypts all encrypted private keys with the new key.
+func (w *Wallet) ChangePassphrase(new []byte) error {
+	if w.flags.watchingOnly {
+		return ErrWalletIsWatchingOnly
+	}
+
+	if len(w.secret) != 32 {
+		return ErrWalletLocked
+	}
+
+	oldkey := w.secret
+	newkey := Key(new, &w.kdfParams)
+
+	for _, a := range w.addrMap {
+		if err := a.changeEncryptionKey(oldkey, newkey); err != nil {
+			return err
+		}
+	}
+
+	// zero old secrets.
+	zero(w.passphrase)
+	zero(w.secret)
+
+	// Save new secrets.
+	w.passphrase = new
+	w.secret = newkey
+
+	return nil
 }
 
 func zero(b []byte) {
@@ -2151,7 +2183,7 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 	}
 	x, y := btcec.S256().ScalarBaseMult(privkey)
 	if x.Cmp(pubKey.X) != 0 || y.Cmp(pubKey.Y) != 0 {
-		return nil, errors.New("decryption failed")
+		return nil, ErrWrongPassphrase
 	}
 
 	privkeyCopy := make([]byte, 32)
@@ -2160,9 +2192,36 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 	return privkeyCopy, nil
 }
 
-// TODO(jrick)
+// changeEncryptionKey re-encrypts the private keys for an address
+// with a new AES encryption key.  oldkey must be the old AES encryption key
+// and is used to decrypt the private key.
 func (a *btcAddress) changeEncryptionKey(oldkey, newkey []byte) error {
-	return errors.New("unimplemented")
+	// Address must have a private key and be encrypted to continue.
+	if !a.flags.hasPrivKey {
+		return errors.New("no private key")
+	}
+	if !a.flags.encrypted {
+		return errors.New("address is not encrypted")
+	}
+
+	privKeyCT, err := a.unlock(oldkey)
+	if err != nil {
+		return err
+	}
+
+	aesBlockEncrypter, err := aes.NewCipher(newkey)
+	if err != nil {
+		return err
+	}
+	newIV := make([]byte, len(a.initVector))
+	if _, err := rand.Read(newIV); err != nil {
+		return err
+	}
+	copy(a.initVector[:], newIV)
+	aesEncrypter := cipher.NewCFBEncrypter(aesBlockEncrypter, a.initVector[:])
+	aesEncrypter.XORKeyStream(a.privKey[:], privKeyCT)
+
+	return nil
 }
 
 // address returns a btcutil.AddressPubKeyHash for a btcAddress.

@@ -109,6 +109,7 @@ type Tx interface {
 	ReadFromVersion(uint32, io.Reader) (int64, error)
 	TxInfo(string, int32, btcwire.BitcoinNet) []map[string]interface{}
 }
+
 // TxStore is a slice holding RecvTx and SendTx pointers.
 type TxStore []Tx
 

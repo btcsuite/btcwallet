@@ -36,8 +36,8 @@ var (
 	}
 )
 
-// networkDir returns the base directory name for the bitcoin network
-// net.
+// networkDir returns the directory name of a network directory to hold account
+// files.
 func networkDir(net btcwire.BitcoinNet) string {
 	var netname string
 	if net == btcwire.MainNet {
@@ -46,6 +46,11 @@ func networkDir(net btcwire.BitcoinNet) string {
 		netname = "testnet"
 	}
 	return filepath.Join(cfg.DataDir, netname)
+}
+
+// tmpNetworkDir returns the temporary directory name for a given network.
+func tmpNetworkDir(net btcwire.BitcoinNet) string {
+	return networkDir(net) + "_tmp"
 }
 
 // checkCreateDir checks that the path exists and is a directory.
@@ -107,6 +112,82 @@ func DirtyAccountSyncer() {
 			dirtyAccounts.Unlock()
 		}
 	}
+}
+
+// freshDir creates a new directory specified by path if it does not
+// exist.  If the directory already exists, all files contained in the
+// directory are removed.
+func freshDir(path string) error {
+	if err := checkCreateDir(path); err != nil {
+		return err
+	}
+
+	// Remove all files in the directory.
+	fd, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+	names, err := fd.Readdirnames(0)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := os.RemoveAll(name); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeAllToFreshDir writes all account files to the specified directory.
+// If dir already exists, any old files are removed.  If dir does not
+// exist, it is created.
+//
+// It is a runtime error to call this function while not holding each
+// wallet, tx store, and utxo store writer lock.
+func (a *Account) writeAllToFreshDir(dir string) error {
+	if err := freshDir(dir); err != nil {
+		return err
+	}
+
+	wfilepath := accountFilename("wallet.bin", a.name, dir)
+	txfilepath := accountFilename("tx.bin", a.name, dir)
+	utxofilepath := accountFilename("utxo.bin", a.name, dir)
+
+	wfile, err := os.Create(wfilepath)
+	if err != nil {
+		return err
+	}
+	defer wfile.Close()
+	txfile, err := os.Create(txfilepath)
+	if err != nil {
+		return err
+	}
+	defer txfile.Close()
+	utxofile, err := os.Create(utxofilepath)
+	if err != nil {
+		return err
+	}
+	defer utxofile.Close()
+
+	if _, err := a.Wallet.WriteTo(wfile); err != nil {
+		return err
+	}
+	a.dirty = false
+
+	if _, err := a.TxStore.s.WriteTo(txfile); err != nil {
+		return err
+	}
+	a.TxStore.dirty = false
+
+	if _, err := a.UtxoStore.s.WriteTo(utxofile); err != nil {
+		return err
+	}
+	a.UtxoStore.dirty = false
+
+	return nil
 }
 
 // writeDirtyToDisk checks for the dirty flag on an account's wallet,

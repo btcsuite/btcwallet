@@ -226,6 +226,75 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 	return nil
 }
 
+// ChangePassphrase unlocks all account wallets with the old
+// passphrase, and re-encrypts each using the new passphrase.
+func (store *AccountStore) ChangePassphrase(old, new []byte) error {
+	store.RLock()
+	defer store.RUnlock()
+
+	// Check that each account can be unlocked with the old passphrase.
+	// Each's account's wallet mutex is unlocked with a defer so they
+	// will be held for the duration of this function.  This prevents
+	// a wallet from being locked after some timeout after a RPC call
+	// to walletpassphrase.
+	for _, a := range store.accounts {
+		a.mtx.Lock()
+		defer a.mtx.Unlock()
+
+		if locked := a.Wallet.IsLocked(); !locked {
+			if err := a.Wallet.Lock(); err != nil {
+				return err
+			}
+		}
+
+		if err := a.Wallet.Unlock(old); err != nil {
+			return err
+		}
+		defer a.Wallet.Lock()
+	}
+
+	// Change passphrase for each unlocked wallet.
+	for _, a := range store.accounts {
+		if err := a.Wallet.ChangePassphrase(new); err != nil {
+			return err
+		}
+		a.dirty = true
+	}
+
+	// Immediately write out to disk. Create a new temporary network
+	// directory to write to, write all account files there, then move
+	// to the real network directory.  This provides an safe
+	// replacement of all account files and ensures that all wallets
+	// are using either the old or new passphrase, but never two wallets
+	// with different passphrases.
+	netDir := networkDir(cfg.Net())
+	tmpNetDir := tmpNetworkDir(cfg.Net())
+	for _, a := range store.accounts {
+		// Writer locks must be held for the tx and utxo stores as well,
+		// to unset the dirty flag.
+		a.UtxoStore.Lock()
+		defer a.UtxoStore.Unlock()
+		a.TxStore.Lock()
+		defer a.TxStore.Unlock()
+
+		if err := a.writeAllToFreshDir(tmpNetDir); err != nil {
+			return err
+		}
+	}
+
+	// This is technically NOT an atomic operation, but at startup, if the
+	// network directory is missing but the temporary network directory
+	// exists, the temporary is moved before accounts are opened.
+	if err := os.RemoveAll(netDir); err != nil {
+		return err
+	}
+	if err := Rename(tmpNetDir, netDir); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // DumpKeys returns all WIF-encoded private keys associated with all
 // accounts. All wallets must be unlocked for this operation to succeed.
 func (store *AccountStore) DumpKeys() ([]string, error) {

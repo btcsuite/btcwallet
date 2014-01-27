@@ -75,6 +75,22 @@ func updateOldFileLocations() {
 		os.Exit(1)
 	}
 
+	acctsExist := false
+	for i := range fi {
+		// Ignore non-directories.
+		if !fi[i].IsDir() {
+			continue
+		}
+
+		if strings.HasPrefix(fi[i].Name(), "btcwallet") {
+			acctsExist = true
+			break
+		}
+	}
+	if !acctsExist {
+		return
+	}
+
 	// Create testnet directory, if it doesn't already exist.
 	netdir := filepath.Join(cfg.DataDir, "testnet")
 	if err := checkCreateDir(netdir); err != nil {

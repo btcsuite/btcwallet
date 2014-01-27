@@ -248,6 +248,21 @@ func main() {
 
 // OpenAccounts attempts to open all saved accounts.
 func OpenAccounts() {
+	// If the network (account) directory is missing, but the temporary
+	// directory exists, move it.  This is unlikely to happen, but possible,
+	// if writing out every account file at once to a tmp directory (as is
+	// done for changing a wallet passphrase) and btcwallet closes after
+	// removing the network directory but before renaming the temporary
+	// directory.
+	netDir := networkDir(cfg.Net())
+	tmpNetDir := tmpNetworkDir(cfg.Net())
+	if !fileExists(netDir) && fileExists(tmpNetDir) {
+		if err := Rename(tmpNetDir, netDir); err != nil {
+			log.Errorf("Cannot move temporary network dir: %v", err)
+			return
+		}
+	}
+
 	// The default account must exist, or btcwallet acts as if no
 	// wallets/accounts have been created yet.
 	if err := accountstore.OpenAccount("", cfg); err != nil {
@@ -264,7 +279,7 @@ func OpenAccounts() {
 	// Read all filenames in the account directory, and look for any
 	// filenames matching '*-wallet.bin'.  These are wallets for
 	// additional saved accounts.
-	accountDir, err := os.Open(networkDir(cfg.Net()))
+	accountDir, err := os.Open(netDir)
 	if err != nil {
 		// Can't continue.
 		log.Errorf("Unable to open account directory: %v", err)

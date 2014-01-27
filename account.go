@@ -130,7 +130,7 @@ func (a *Account) Lock() error {
 }
 
 // Unlock unlocks the underlying wallet for an account.
-func (a *Account) Unlock(passphrase []byte, timeout int64) error {
+func (a *Account) Unlock(passphrase []byte) error {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 

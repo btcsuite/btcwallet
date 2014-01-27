@@ -667,3 +667,78 @@ func TestWatchingWalletExport(t *testing.T) {
 		return
 	}
 }
+
+func TestChangePassphrase(t *testing.T) {
+	const keypoolSize = 10
+	createdAt := &BlockStamp{}
+	w, err := NewWallet("banana wallet", "A wallet for testing.",
+		[]byte("banana"), btcwire.MainNet, createdAt, keypoolSize)
+	if err != nil {
+		t.Error("Error creating new wallet: " + err.Error())
+		return
+	}
+
+	// Changing the passphrase with a locked wallet must fail with ErrWalletLocked.
+	if err := w.ChangePassphrase([]byte("potato")); err != ErrWalletLocked {
+		t.Errorf("Changing passphrase on a locked wallet did not fail correctly: %v", err)
+		return
+	}
+
+	// Unlock wallet so the passphrase can be changed.
+	if err := w.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Cannot unlock: %v", err)
+		return
+	}
+
+	// Get root address and its private key.  This is compared to the private
+	// key post passphrase change.
+	rootAddr := w.LastChainedAddress()
+	rootPrivKey, err := w.AddressKey(rootAddr)
+	if err != nil {
+		t.Errorf("Cannot get root address' private key: %v", err)
+		return
+	}
+
+	// Change passphrase.
+	if err := w.ChangePassphrase([]byte("potato")); err != nil {
+		t.Errorf("Changing passhprase failed: %v", err)
+		return
+	}
+
+	// Wallet should still be unlocked.
+	if w.IsLocked() {
+		t.Errorf("Wallet should be unlocked after passphrase change.")
+		return
+	}
+
+	// Lock it.
+	if err := w.Lock(); err != nil {
+		t.Errorf("Cannot lock wallet after passphrase change: %v", err)
+		return
+	}
+
+	// Unlock with old passphrase.  This must fail with ErrWrongPassphrase.
+	if err := w.Unlock([]byte("banana")); err != ErrWrongPassphrase {
+		t.Errorf("Unlocking with old passphrases did not fail correctly: %v", err)
+		return
+	}
+
+	// Unlock with new passphrase.  This must succeed.
+	if err := w.Unlock([]byte("potato")); err != nil {
+		t.Errorf("Unlocking with new passphrase failed: %v", err)
+		return
+	}
+
+	// Get root address' private key again.
+	rootPrivKey2, err := w.AddressKey(rootAddr)
+	if err != nil {
+		t.Errorf("Cannot get root address' private key after passphrase change: %v", err)
+		return
+	}
+
+	// Private keys must match.
+	if !reflect.DeepEqual(rootPrivKey, rootPrivKey2) {
+		t.Errorf("Private keys before and after unlock differ.")
+		return
+	}
+}
