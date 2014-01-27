@@ -295,6 +295,42 @@ func (store *AccountStore) ChangePassphrase(old, new []byte) error {
 	return nil
 }
 
+// LockWallets locks all account's wallets in the store.
+func (store *AccountStore) LockWallets() error {
+	store.RLock()
+	defer store.RUnlock()
+
+	for _, a := range store.accounts {
+		if err := a.Lock(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// UnlockWallets unlocks all account's wallets in the store with the provided
+// passphrase.  If any wallet unlocks fail, all successfully unlocked wallets
+// are locked again.
+func (store *AccountStore) UnlockWallets(passphrase string) error {
+	store.RLock()
+	defer store.RUnlock()
+
+	unlockedAccts := make([]*Account, 0, len(store.accounts))
+	for _, a := range store.accounts {
+		if err := a.Unlock([]byte(passphrase)); err != nil {
+			for _, ua := range unlockedAccts {
+				ua.Lock()
+			}
+			return fmt.Errorf("cannot unlock account %v: %v",
+				a.name, err)
+		}
+		unlockedAccts = append(unlockedAccts, a)
+	}
+
+	return nil
+}
+
 // DumpKeys returns all WIF-encoded private keys associated with all
 // accounts. All wallets must be unlocked for this operation to succeed.
 func (store *AccountStore) DumpKeys() ([]string, error) {

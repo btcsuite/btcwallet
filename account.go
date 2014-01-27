@@ -122,11 +122,18 @@ func (a *Account) Lock() error {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 
-	err := a.Wallet.Lock()
-	if err == nil {
+	switch err := a.Wallet.Lock(); err {
+	case nil:
 		NotifyWalletLockStateChange(a.Name(), true)
+		return nil
+
+	case wallet.ErrWalletLocked:
+		// Do not pass wallet already locked errors to the caller.
+		return nil
+
+	default:
+		return err
 	}
-	return err
 }
 
 // Unlock unlocks the underlying wallet for an account.
@@ -134,11 +141,12 @@ func (a *Account) Unlock(passphrase []byte) error {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 
-	err := a.Wallet.Unlock(passphrase)
-	if err == nil {
-		NotifyWalletLockStateChange(a.Name(), false)
+	if err := a.Wallet.Unlock(passphrase); err != nil {
+		return err
 	}
-	return a.Wallet.Unlock(passphrase)
+
+	NotifyWalletLockStateChange(a.Name(), false)
+	return nil
 }
 
 // Rollback reverts each stored Account to a state before the block

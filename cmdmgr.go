@@ -1213,26 +1213,11 @@ func WalletIsLocked(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	return locked, nil
 }
 
-// WalletLock handles a walletlock request by locking the wallet,
-// returning an error if the wallet is already locked.
-//
-// TODO(jrick): figure out how multiple wallets/accounts will work
-// with this.  Lock all the wallets, like if all accounts are locked
-// for one bitcoind wallet?
+// WalletLock handles a walletlock request by locking the all account
+// wallets, returning an error if any wallet is not encrypted (for example,
+// a watching-only wallet).
 func WalletLock(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
-	a, err := accountstore.Account("")
-	switch err {
-	case nil:
-		break
-
-	case ErrAcctNotExist:
-		e := btcjson.Error{
-			Code:    btcjson.ErrWallet.Code,
-			Message: "default account does not exist",
-		}
-		return nil, &e
-
-	default: // all other non-nil errors
+	if err := accountstore.LockWallets(); err != nil {
 		e := btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
 			Message: err.Error(),
@@ -1240,17 +1225,12 @@ func WalletLock(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	if err := a.Lock(); err != nil {
-		return nil, &btcjson.ErrWalletWrongEncState
-	}
 	return nil, nil
 }
 
 // WalletPassphrase responds to the walletpassphrase request by unlocking
 // the wallet.  The decryption key is saved in the wallet until timeout
 // seconds expires, after which the wallet is locked.
-//
-// TODO(jrick): figure out how to do this for non-default accounts.
 func WalletPassphrase(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Type assert icmd to access parameters.
 	cmd, ok := icmd.(*btcjson.WalletPassphraseCmd)
@@ -1258,19 +1238,7 @@ func WalletPassphrase(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	a, err := accountstore.Account("")
-	switch err {
-	case nil:
-		break
-
-	case ErrAcctNotExist:
-		e := btcjson.Error{
-			Code:    btcjson.ErrWallet.Code,
-			Message: "default account does not exist",
-		}
-		return nil, &e
-
-	default: // all other non-nil errors
+	if err := accountstore.UnlockWallets(cmd.Passphrase); err != nil {
 		e := btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
 			Message: err.Error(),
@@ -1278,20 +1246,12 @@ func WalletPassphrase(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	switch err := a.Unlock([]byte(cmd.Passphrase)); err {
-	case nil:
-		go func(timeout int64) {
-			time.Sleep(time.Second * time.Duration(timeout))
-			_ = a.Lock()
-		}(cmd.Timeout)
-		return nil, nil
+	go func(timeout int64) {
+		time.Sleep(time.Second * time.Duration(timeout))
+		_ = accountstore.LockWallets()
+	}(cmd.Timeout)
 
-	case ErrAcctNotExist:
-		return nil, &btcjson.ErrWalletInvalidAccountName
-
-	default: // all other non-nil errors
-		return nil, &btcjson.ErrWalletPassphraseIncorrect
-	}
+	return nil, nil
 }
 
 // WalletPassphraseChange responds to the walletpassphrasechange request
