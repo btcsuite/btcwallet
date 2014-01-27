@@ -55,6 +55,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"createmultisig":        Unimplemented,
 	"dumpwallet":            Unimplemented,
 	"getblocktemplate":      Unimplemented,
+	"getinfo":               Unimplemented,
 	"getrawchangeaddress":   Unimplemented,
 	"getreceivedbyaccount":  Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
