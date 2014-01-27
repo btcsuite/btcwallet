@@ -405,6 +405,25 @@ func (store *AccountStore) ListAccounts(minconf int) map[string]float64 {
 	return pairs
 }
 
+// ListSinceBlock returns a slice of maps of strings to interface containing
+// structures defining all transactions in the wallets since the given block.
+// To be used for the listsinceblock command.
+func (store *AccountStore) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]map[string]interface{}, error) {
+	store.RLock()
+	defer store.RUnlock()
+
+	// Create and fill a map of account names and their balances.
+	txInfoList := []map[string]interface{}{}
+	for _, a := range store.accounts {
+		txTmp, err := a.ListSinceBlock(since, curBlockHeight, minconf)
+		if err != nil {
+			return nil, err
+		}
+		txInfoList = append(txInfoList, txTmp...)
+	}
+	return txInfoList, nil
+}
+
 // RescanActiveAddresses begins a rescan for all active addresses for
 // each account.
 //

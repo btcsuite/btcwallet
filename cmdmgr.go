@@ -41,6 +41,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
+	"listsinceblock":         ListSinceBlock,
 	"listtransactions":       ListTransactions,
 	"sendfrom":               SendFrom,
 	"sendmany":               SendMany,
@@ -627,6 +628,69 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	// Return the map.  This will be marshaled into a JSON object.
 	return accountstore.ListAccounts(cmd.MinConf), nil
+}
+
+// ListSinceBlock handles a listsinceblock request by returning an array of maps
+// with details of sent and received wallet transactions since the given block.
+func ListSinceBlock(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.ListSinceBlockCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	height := int32(-1)
+	if cmd.BlockHash != "" {
+		br, err := GetBlock(CurrentRPCConn(), cmd.BlockHash)
+		if err != nil {
+			return nil, err
+		}
+		height = int32(br.Height)
+	}
+
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	// For the result we need the block hash for the last block counted
+	// in the blockchain due to confirmations. We send this off now so that
+	// it can arrive asynchronously while we figure out the rest.
+	gbh, err := btcjson.NewGetBlockHashCmd(<-NewJSONID,
+		int64(bs.Height)+1-int64(cmd.TargetConfirmations))
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	bhChan := CurrentRPCConn().SendRequest(NewRPCRequest(gbh, new(string)))
+
+	txInfoList, err := accountstore.ListSinceBlock(height, bs.Height,
+		cmd.TargetConfirmations)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	// Done with work, get the response.
+	response := <-bhChan
+	if response.Err != nil {
+		return nil, response.Err
+	}
+
+	hash := response.Result.(*string)
+
+	res := make(map[string]interface{})
+	res["transactions"] = txInfoList
+	res["lastblock"] = *hash
+
+	return res, nil
 }
 
 // ListTransactions handles a listtransactions request by returning an

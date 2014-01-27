@@ -108,6 +108,7 @@ type Tx interface {
 	io.WriterTo
 	ReadFromVersion(uint32, io.Reader) (int64, error)
 	TxInfo(string, int32, btcwire.BitcoinNet) []map[string]interface{}
+	Height() int32
 }
 
 // TxStore is a slice holding RecvTx and SendTx pointers.
@@ -1060,6 +1061,12 @@ func (tx *RecvTx) TxInfo(account string, curheight int32,
 	return []map[string]interface{}{txInfo}
 }
 
+// Height returns the current blockheight of the transaction, implementing the
+// Tx interface.
+func (tx *RecvTx) Height() int32 {
+	return tx.BlockHeight
+}
+
 func (tx *SendTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error) {
 	var read int64
 
@@ -1196,4 +1203,10 @@ func (tx *SendTx) TxInfo(account string, curheight int32,
 	}
 
 	return reply
+}
+
+// Height returns the current blockheight of the transaction, implementing the
+// Tx interface.
+func (tx *SendTx) Height() int32 {
+	return tx.BlockHeight
 }

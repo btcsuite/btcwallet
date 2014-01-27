@@ -271,6 +271,30 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 	return addr, nil
 }
 
+// ListSinceBlock returns a slice of maps with details about transactions since
+// the given block. If the block is -1 then all transactions are included.
+// transaction.  This is intended to be used for listsinceblock RPC
+// replies.
+func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]map[string]interface{}, error) {
+	var txInfoList []map[string]interface{}
+	a.mtx.RLock()
+	defer a.mtx.RUnlock()
+	a.TxStore.RLock()
+	defer a.TxStore.RUnlock()
+
+	for _, tx := range a.TxStore.s {
+		// check block number.
+		if since != -1 && tx.Height() <= since {
+			continue
+		}
+
+		txInfoList = append(txInfoList,
+			tx.TxInfo(a.name, curBlockHeight, a.Net())...)
+	}
+
+	return txInfoList, nil
+}
+
 // ListTransactions returns a slice of maps with details about a recorded
 // transaction.  This is intended to be used for listtransactions RPC
 // replies.

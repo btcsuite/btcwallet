@@ -83,7 +83,7 @@ func (btcd *BtcdRPCConn) SendRequest(request *RPCRequest) chan *RPCResponse {
 	default:
 		addRequest := &AddRPCRequest{
 			Request:      request,
-			ResponseChan: make(chan chan *RPCResponse),
+			ResponseChan: make(chan chan *RPCResponse, 1),
 		}
 		btcd.addRequest <- addRequest
 		return <-addRequest.ResponseChan
