@@ -33,6 +33,7 @@ const (
 	defaultBtcNet         = btcwire.TestNet3
 	defaultLogLevel       = "info"
 	defaultKeypoolSize    = 100
+	defaultAllowFree      = true
 )
 
 var (
@@ -60,6 +61,7 @@ type config struct {
 	RPCKey       string   `long:"rpckey" description:"File containing the certificate key"`
 	MainNet      bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
 	KeypoolSize  uint     `short:"k" long:"keypoolsize" description:"Maximum number of addresses in keypool"`
+	AllowFree    bool     `long:"allowfree" description:"Whether transactions with high enough priority may be made without any fee"`
 	Proxy        string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
 	ProxyUser    string   `long:"proxyuser" description:"Username for proxy server"`
 	ProxyPass    string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
@@ -145,6 +147,7 @@ func loadConfig() (*config, []string, error) {
 		RPCKey:      defaultRPCKeyFile,
 		RPCCert:     defaultRPCCertFile,
 		KeypoolSize: defaultKeypoolSize,
+		AllowFree:   defaultAllowFree,
 	}
 
 	// A config file in the current directory takes precedence.
