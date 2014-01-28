@@ -209,7 +209,7 @@ func (a *Account) writeDirtyToDisk() error {
 
 	// UTXOs
 	a.UtxoStore.RLock()
-	dirty := a.TxStore.dirty
+	dirty := a.UtxoStore.dirty
 	a.UtxoStore.RUnlock()
 	if dirty {
 		netdir, filename := filepath.Split(utxofilepath)
