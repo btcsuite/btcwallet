@@ -307,36 +307,39 @@ func (a *Account) WriteExport(dirName string) error {
 	txfilepath := accountFilename("tx.bin", aname, exportPath)
 	utxofilepath := accountFilename("utxo.bin", aname, exportPath)
 
-	a.UtxoStore.RLock()
-	defer a.UtxoStore.RUnlock()
 	utxofile, err := os.Create(utxofilepath)
 	if err != nil {
 		return err
 	}
 	defer utxofile.Close()
-	if _, err := a.UtxoStore.s.WriteTo(utxofile); err != nil {
+	a.UtxoStore.RLock()
+	_, err = a.UtxoStore.s.WriteTo(utxofile)
+	a.UtxoStore.RUnlock()
+	if err != nil {
 		return err
 	}
 
-	a.TxStore.RLock()
-	defer a.TxStore.RUnlock()
 	txfile, err := os.Create(txfilepath)
 	if err != nil {
 		return err
 	}
 	defer txfile.Close()
-	if _, err := a.TxStore.s.WriteTo(txfile); err != nil {
+	a.TxStore.RLock()
+	_, err = a.TxStore.s.WriteTo(txfile)
+	a.TxStore.RUnlock()
+	if err != nil {
 		return err
 	}
 
-	a.mtx.RLock()
-	defer a.mtx.RUnlock()
 	wfile, err := os.Create(wfilepath)
 	if err != nil {
 		return err
 	}
 	defer wfile.Close()
-	if _, err := a.Wallet.WriteTo(wfile); err != nil {
+	a.mtx.RLock()
+	_, err = a.Wallet.WriteTo(wfile)
+	a.mtx.RUnlock()
+	if err != nil {
 		return err
 	}
 
