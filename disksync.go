@@ -217,20 +217,22 @@ func (a *Account) writeDirtyToDisk() error {
 		if err != nil {
 			return err
 		}
+		defer tmpfile.Close()
 
-		a.UtxoStore.Lock()
-		defer a.UtxoStore.Unlock()
-
-		if _, err = a.UtxoStore.s.WriteTo(tmpfile); err != nil {
+		a.UtxoStore.RLock()
+		_, err = a.UtxoStore.s.WriteTo(tmpfile)
+		a.UtxoStore.RUnlock()
+		if err != nil {
 			return err
 		}
-		tmpfile.Close()
 
 		if err = Rename(tmpfile.Name(), utxofilepath); err != nil {
 			return err
 		}
 
+		a.UtxoStore.Lock()
 		a.UtxoStore.dirty = false
+		a.UtxoStore.Unlock()
 	}
 
 	// Transactions
@@ -243,20 +245,22 @@ func (a *Account) writeDirtyToDisk() error {
 		if err != nil {
 			return err
 		}
+		defer tmpfile.Close()
 
-		a.TxStore.Lock()
-		defer a.TxStore.Unlock()
-
-		if _, err = a.TxStore.s.WriteTo(tmpfile); err != nil {
+		a.TxStore.RLock()
+		_, err = a.TxStore.s.WriteTo(tmpfile)
+		a.TxStore.RUnlock()
+		if err != nil {
 			return err
 		}
-		tmpfile.Close()
 
 		if err = Rename(tmpfile.Name(), txfilepath); err != nil {
 			return err
 		}
 
+		a.TxStore.Lock()
 		a.TxStore.dirty = false
+		a.TxStore.Unlock()
 	}
 
 	// Wallet
@@ -269,20 +273,22 @@ func (a *Account) writeDirtyToDisk() error {
 		if err != nil {
 			return err
 		}
+		defer tmpfile.Close()
 
-		a.mtx.Lock()
-		defer a.mtx.Unlock()
-
-		if _, err = a.WriteTo(tmpfile); err != nil {
+		a.mtx.RLock()
+		_, err = a.Wallet.WriteTo(tmpfile)
+		a.mtx.RUnlock()
+		if err != nil {
 			return err
 		}
-		tmpfile.Close()
 
 		if err = Rename(tmpfile.Name(), wfilepath); err != nil {
 			return err
 		}
 
+		a.mtx.Lock()
 		a.dirty = false
+		a.mtx.Unlock()
 	}
 
 	return nil
