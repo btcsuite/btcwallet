@@ -487,9 +487,7 @@ func NtfnBlockDisconnected(n btcjson.Cmd, marshaled []byte) {
 	}
 
 	// Rollback Utxo and Tx data stores.
-	go func() {
-		accountstore.Rollback(bdn.Height, hash)
-	}()
+	accountstore.Rollback(bdn.Height, hash)
 
 	// Pass notification to frontends too.
 	frontendNotificationMaster <- marshaled
