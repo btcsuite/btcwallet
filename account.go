@@ -277,8 +277,6 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 // replies.
 func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]map[string]interface{}, error) {
 	var txInfoList []map[string]interface{}
-	a.mtx.RLock()
-	defer a.mtx.RUnlock()
 	a.TxStore.RLock()
 	defer a.TxStore.RUnlock()
 
@@ -307,7 +305,6 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 	}
 
 	var txInfoList []map[string]interface{}
-	a.mtx.RLock()
 	a.TxStore.RLock()
 
 	lastLookupIdx := len(a.TxStore.s) - count
@@ -316,7 +313,6 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 		txInfoList = append(txInfoList,
 			a.TxStore.s[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
-	a.mtx.RUnlock()
 	a.TxStore.RUnlock()
 
 	return txInfoList, nil
@@ -336,7 +332,6 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 	}
 
 	var txInfoList []map[string]interface{}
-	a.mtx.RLock()
 	a.TxStore.RLock()
 
 	for i := range a.TxStore.s {
@@ -349,7 +344,6 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 			txInfoList = append(txInfoList, info...)
 		}
 	}
-	a.mtx.RUnlock()
 	a.TxStore.RUnlock()
 
 	return txInfoList, nil
@@ -367,7 +361,6 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 	}
 
 	var txInfoList []map[string]interface{}
-	a.mtx.RLock()
 	a.TxStore.RLock()
 
 	// Search in reverse order: lookup most recently-added first.
@@ -375,7 +368,6 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 		txInfoList = append(txInfoList,
 			a.TxStore.s[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
-	a.mtx.RUnlock()
 	a.TxStore.RUnlock()
 
 	return txInfoList, nil
@@ -390,13 +382,13 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 	// Iterate over each active address, appending the private
 	// key to privkeys.
 	var privkeys []string
-	for addr, info := range a.ActiveAddresses() {
-		key, err := a.AddressKey(addr)
+	for addr, info := range a.Wallet.ActiveAddresses() {
+		key, err := a.Wallet.AddressKey(addr)
 		if err != nil {
 			return nil, err
 		}
 		encKey, err := btcutil.EncodePrivateKey(key.D.Bytes(),
-			a.Net(), info.Compressed)
+			a.Wallet.Net(), info.Compressed)
 		if err != nil {
 			return nil, err
 		}
@@ -413,14 +405,14 @@ func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 	defer a.mtx.RUnlock()
 
 	// Get private key from wallet if it exists.
-	key, err := a.AddressKey(addr)
+	key, err := a.Wallet.AddressKey(addr)
 	if err != nil {
 		return "", err
 	}
 
 	// Get address info.  This is needed to determine whether
 	// the pubkey is compressed or not.
-	info, err := a.AddressInfo(addr)
+	info, err := a.Wallet.AddressInfo(addr)
 	if err != nil {
 		return "", err
 	}
@@ -506,9 +498,8 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 // dropped from scope.
 func (a *Account) ExportWatchingWallet() (*Account, error) {
 	a.mtx.RLock()
-	defer a.mtx.RUnlock()
-
 	ww, err := a.Wallet.ExportWatchingWallet()
+	a.mtx.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -525,24 +516,27 @@ func (a *Account) exportBase64() (map[string]string, error) {
 	m := make(map[string]string)
 
 	a.mtx.RLock()
-	defer a.mtx.RUnlock()
-	if _, err := a.Wallet.WriteTo(buf); err != nil {
+	_, err := a.Wallet.WriteTo(buf)
+	a.mtx.RUnlock()
+	if err != nil {
 		return nil, err
 	}
 	m["wallet"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
 	a.TxStore.RLock()
-	defer a.TxStore.RUnlock()
-	if _, err := a.TxStore.s.WriteTo(buf); err != nil {
+	_, err = a.TxStore.s.WriteTo(buf)
+	a.TxStore.RUnlock()
+	if err != nil {
 		return nil, err
 	}
 	m["tx"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
 	a.UtxoStore.RLock()
-	defer a.UtxoStore.RUnlock()
-	if _, err := a.UtxoStore.s.WriteTo(buf); err != nil {
+	_, err = a.UtxoStore.s.WriteTo(buf)
+	a.UtxoStore.RUnlock()
+	if err != nil {
 		return nil, err
 	}
 	m["utxo"] = base64.StdEncoding.EncodeToString(buf.Bytes())
@@ -613,11 +607,10 @@ func (a *Account) RescanActiveAddresses() {
 // addresses in an account.
 func (a *Account) SortedActivePaymentAddresses() []string {
 	a.mtx.RLock()
-	defer a.mtx.RUnlock()
+	infos := a.Wallet.SortedActiveAddresses()
+	a.mtx.RUnlock()
 
-	infos := a.SortedActiveAddresses()
 	addrs := make([]string, len(infos))
-
 	for i, info := range infos {
 		addrs[i] = info.Address.EncodeAddress()
 	}
@@ -629,11 +622,10 @@ func (a *Account) SortedActivePaymentAddresses() []string {
 // in an account.
 func (a *Account) ActivePaymentAddresses() map[string]struct{} {
 	a.mtx.RLock()
-	defer a.mtx.RUnlock()
-
 	infos := a.ActiveAddresses()
-	addrs := make(map[string]struct{}, len(infos))
+	a.mtx.RUnlock()
 
+	addrs := make(map[string]struct{}, len(infos))
 	for _, info := range infos {
 		addrs[info.Address.EncodeAddress()] = struct{}{}
 	}
@@ -643,17 +635,16 @@ func (a *Account) ActivePaymentAddresses() map[string]struct{} {
 
 // NewAddress returns a new payment address for an account.
 func (a *Account) NewAddress() (btcutil.Address, error) {
-	a.mtx.Lock()
-
 	// Get current block's height and hash.
 	bs, err := GetCurBlock()
 	if err != nil {
-		a.mtx.Unlock()
 		return nil, err
 	}
 
+	a.mtx.Lock()
+
 	// Get next address from wallet.
-	addr, err := a.NextChainedAddress(&bs, cfg.KeypoolSize)
+	addr, err := a.Wallet.NextChainedAddress(&bs, cfg.KeypoolSize)
 	if err != nil {
 		a.mtx.Unlock()
 		return nil, err
@@ -677,17 +668,17 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 
 // RecoverAddresses recovers the next n chained addresses of a wallet.
 func (a *Account) RecoverAddresses(n int) error {
-	a.mtx.Lock()
-
 	// Get info on the last chained address.  The rescan starts at the
 	// earliest block height the last chained address might appear at.
+	a.mtx.RLock()
 	last := a.Wallet.LastChainedAddress()
 	lastInfo, err := a.Wallet.AddressInfo(last)
+	a.mtx.RUnlock()
 	if err != nil {
-		a.mtx.Unlock()
 		return err
 	}
 
+	a.mtx.Lock()
 	addrs, err := a.Wallet.ExtendActiveAddresses(n, cfg.KeypoolSize)
 	a.mtx.Unlock()
 	if err != nil {
