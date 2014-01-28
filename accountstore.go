@@ -130,7 +130,9 @@ func (store *AccountStore) RecordMinedTx(txid *btcwire.ShaHash,
 	defer store.RUnlock()
 
 	for _, account := range store.accounts {
-		account.TxStore.Lock()
+		// The tx stores will be searched through while holding the
+		// reader lock, and the writer will only be grabbed if necessary.
+		account.TxStore.RLock()
 
 		// Search in reverse order.  Since more recently-created
 		// transactions are appended to the end of the store, it's
@@ -139,18 +141,25 @@ func (store *AccountStore) RecordMinedTx(txid *btcwire.ShaHash,
 			sendtx, ok := account.TxStore.s[i].(*tx.SendTx)
 			if ok {
 				if bytes.Equal(txid.Bytes(), sendtx.TxID[:]) {
+					// Unlock the held reader lock and wait for
+					// the writer lock.
+					account.TxStore.RUnlock()
+					account.TxStore.Lock()
+
 					copy(sendtx.BlockHash[:], blkhash.Bytes())
 					sendtx.BlockHeight = blkheight
 					sendtx.BlockIndex = int32(blkindex)
 					sendtx.BlockTime = blktime
 					account.MarkDirtyTxStore()
+
+					// Release writer lock and return.
 					account.TxStore.Unlock()
 					return nil
 				}
 			}
 		}
 
-		account.TxStore.Unlock()
+		account.TxStore.RUnlock()
 	}
 
 	return errors.New("txid does not match any recorded sent transaction")
