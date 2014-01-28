@@ -305,7 +305,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		}
 
 		noFeeAllowed := false
-		if cfg.AllowFree {
+		if !cfg.DisallowFree {
 			noFeeAllowed = allowFree(bs.Height, inputs, msgtx.SerializeSize())
 		}
 		if minFee := minimumFee(msgtx, noFeeAllowed); fee < minFee {
