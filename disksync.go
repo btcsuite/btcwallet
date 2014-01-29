@@ -329,7 +329,6 @@ func (a *Account) ExportToDirectory(dirBaseName string) error {
 	if err := checkCreateDir(dir); err != nil {
 		return err
 	}
-	fmt.Println("exporting to %v", dir)
 
 	err := make(chan error)
 	er := &exportRequest{
