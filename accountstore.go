@@ -86,34 +86,24 @@ func (store *AccountStore) BlockNotify(bs *wallet.BlockStamp) {
 	store.RLock()
 	defer store.RUnlock()
 
-	for _, a := range store.accounts {
-		// The UTXO store will be dirty if it was modified
-		// from a tx notification.
-		if a.UtxoStore.dirty {
-			// Notify all frontends of account's new unconfirmed
-			// and confirmed balance.
-			confirmed := a.CalculateBalance(1)
-			unconfirmed := a.CalculateBalance(0) - confirmed
-			NotifyWalletBalance(frontendNotificationMaster,
-				a.name, confirmed)
-			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster,
-				a.name, unconfirmed)
-		}
+	for name, a := range store.accounts {
+		// TODO: need a flag or check that the utxo store was actually
+		// modified, or this will notify even if there are no balance
+		// changes, or sending these notifications as the utxos are added.
+		confirmed := a.CalculateBalance(1)
+		unconfirmed := a.CalculateBalance(0) - confirmed
+		NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
+		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name,
+			unconfirmed)
 
-		// The account is intentionaly not immediately synced to disk.
-		// If btcd is performing an IBD, writing the wallet file for
-		// each newly-connected block would result in too many
-		// unnecessary disk writes.  The UTXO and transaction stores
-		// could be written, but in the case of btcwallet closing
-		// before writing the dirty wallet, both would have to be
-		// pruned anyways.
-		//
-		// Instead, the wallet is queued to be written to disk at the
-		// next scheduled disk sync.
-		a.mtx.Lock()
-		a.Wallet.SetSyncedWith(bs)
-		a.MarkDirtyWallet()
-		a.mtx.Unlock()
+		// If this is the default account, update the block all accounts
+		// are synced with, and schedule a wallet write.
+		if name == "" {
+			a.mtx.Lock()
+			a.Wallet.SetSyncedWith(bs)
+			a.mtx.Unlock()
+			a.ScheduleWalletWrite()
+		}
 	}
 }
 
@@ -121,7 +111,7 @@ func (store *AccountStore) BlockNotify(bs *wallet.BlockStamp) {
 // sent transaction with the same txid as from a txmined notification.  If
 // the transaction IDs match, the record in the TxStore is updated with
 // the full information about the newly-mined tx, and the TxStore is
-// marked as dirty.
+// scheduled to be written to disk..
 func (store *AccountStore) RecordMinedTx(txid *btcwire.ShaHash,
 	blkhash *btcwire.ShaHash, blkheight int32, blkindex int,
 	blktime int64) error {
@@ -141,19 +131,17 @@ func (store *AccountStore) RecordMinedTx(txid *btcwire.ShaHash,
 			sendtx, ok := account.TxStore.s[i].(*tx.SendTx)
 			if ok {
 				if bytes.Equal(txid.Bytes(), sendtx.TxID[:]) {
-					// Unlock the held reader lock and wait for
-					// the writer lock.
 					account.TxStore.RUnlock()
-					account.TxStore.Lock()
 
+					account.TxStore.Lock()
 					copy(sendtx.BlockHash[:], blkhash.Bytes())
 					sendtx.BlockHeight = blkheight
 					sendtx.BlockIndex = int32(blkindex)
 					sendtx.BlockTime = blktime
-					account.MarkDirtyTxStore()
-
-					// Release writer lock and return.
 					account.TxStore.Unlock()
+
+					account.ScheduleTxStoreWrite()
+
 					return nil
 				}
 			}
@@ -205,10 +193,10 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 	account := &Account{
 		Wallet: wlt,
 		name:   name,
-		dirty:  true,
 	}
-	account.UtxoStore.dirty = true
-	account.TxStore.dirty = true
+	account.ScheduleWalletWrite()
+	account.ScheduleTxStoreWrite()
+	account.ScheduleUtxoStoreWrite()
 
 	// Mark all active payment addresses as belonging to this account.
 	for addr := range account.ActivePaymentAddresses() {
@@ -227,8 +215,8 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 	// TODO(jrick): this should *only* happen if btcd is connected.
 	account.Track()
 
-	// Write new wallet to disk.
-	if err := account.writeDirtyToDisk(); err != nil {
+	// Ensure that the account is written out to disk.
+	if err := account.WriteScheduledToDisk(); err != nil {
 		return err
 	}
 
@@ -237,15 +225,30 @@ func (store *AccountStore) CreateEncryptedWallet(name, desc string, passphrase [
 
 // ChangePassphrase unlocks all account wallets with the old
 // passphrase, and re-encrypts each using the new passphrase.
+//
+// TODO(jrick): this is a perfect example of how awful the account
+// locking is.  It must be replaced.
 func (store *AccountStore) ChangePassphrase(old, new []byte) error {
-	store.RLock()
-	defer store.RUnlock()
+	// Due to the undefined order of ranging over the accountstore
+	// map and how all account wallet writer locks are grabbed
+	// simultaneously and unlocked with a defer, this function is
+	// unsafe to call simulateously with other accountstore functions,
+	// even though the store itself is not modified.
+	store.Lock()
+	defer store.Unlock()
 
+	if err := store.changePassphrase(old, new); err != nil {
+		return err
+	}
+
+	// Immediately write out to disk.
+	return store.WriteAllToDisk()
+}
+
+// changePassphrase changes all passphrases for all accounts without grabbing
+// any accountstore locks.
+func (store *AccountStore) changePassphrase(old, new []byte) error {
 	// Check that each account can be unlocked with the old passphrase.
-	// Each's account's wallet mutex is unlocked with a defer so they
-	// will be held for the duration of this function.  This prevents
-	// a wallet from being locked after some timeout after a RPC call
-	// to walletpassphrase.
 	for _, a := range store.accounts {
 		a.mtx.Lock()
 		defer a.mtx.Unlock()
@@ -267,38 +270,6 @@ func (store *AccountStore) ChangePassphrase(old, new []byte) error {
 		if err := a.Wallet.ChangePassphrase(new); err != nil {
 			return err
 		}
-		a.dirty = true
-	}
-
-	// Immediately write out to disk. Create a new temporary network
-	// directory to write to, write all account files there, then move
-	// to the real network directory.  This provides an safe
-	// replacement of all account files and ensures that all wallets
-	// are using either the old or new passphrase, but never two wallets
-	// with different passphrases.
-	netDir := networkDir(cfg.Net())
-	tmpNetDir := tmpNetworkDir(cfg.Net())
-	for _, a := range store.accounts {
-		// Writer locks must be held for the tx and utxo stores as well,
-		// to unset the dirty flag.
-		a.UtxoStore.Lock()
-		defer a.UtxoStore.Unlock()
-		a.TxStore.Lock()
-		defer a.TxStore.Unlock()
-
-		if err := a.writeAllToFreshDir(tmpNetDir); err != nil {
-			return err
-		}
-	}
-
-	// This is technically NOT an atomic operation, but at startup, if the
-	// network directory is missing but the temporary network directory
-	// exists, the temporary is moved before accounts are opened.
-	if err := os.RemoveAll(netDir); err != nil {
-		return err
-	}
-	if err := Rename(tmpNetDir, netDir); err != nil {
-		return err
 	}
 
 	return nil

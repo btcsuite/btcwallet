@@ -278,7 +278,7 @@ func ExportWatchingWallet(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// Create export directory, write files there.
-	if err = wa.WriteExport("watchingwallet"); err != nil {
+	if err = wa.ExportToDirectory("watchingwallet"); err != nil {
 		e := btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
 			Message: err.Error(),
@@ -942,12 +942,16 @@ func SendFrom(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// wait until all send history has been written.
 	SendTxHistSyncChans.add <- createdTx.txid
 
-	// If a change address was added, mark wallet as dirty, sync to disk,
-	// and request updates for change address.
+	// If a change address was added, sync wallet to disk and request
+	// transaction notifications to the change address.
 	if createdTx.changeAddr != nil {
-		a.dirty = true
-		if err := a.writeDirtyToDisk(); err != nil {
-			log.Errorf("cannot write dirty wallet: %v", err)
+		a.ScheduleWalletWrite()
+		if err := a.WriteScheduledToDisk(); err != nil {
+			e := btcjson.Error{
+				Code:    btcjson.ErrWallet.Code,
+				Message: "Cannot write account: " + err.Error(),
+			}
+			return nil, &e
 		}
 		a.ReqNewTxsForAddress(createdTx.changeAddr)
 	}
@@ -1021,12 +1025,16 @@ func SendMany(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// wait until all send history has been written.
 	SendTxHistSyncChans.add <- createdTx.txid
 
-	// If a change address was added, mark wallet as dirty, sync to disk,
-	// and request updates for change address.
+	// If a change address was added, sync wallet to disk and request
+	// transaction notifications to the change address.
 	if createdTx.changeAddr != nil {
-		a.dirty = true
-		if err := a.writeDirtyToDisk(); err != nil {
-			log.Errorf("cannot write dirty wallet: %v", err)
+		a.ScheduleWalletWrite()
+		if err := a.WriteScheduledToDisk(); err != nil {
+			e := btcjson.Error{
+				Code:    btcjson.ErrWallet.Code,
+				Message: "Cannot write account: " + err.Error(),
+			}
+			return nil, &e
 		}
 		a.ReqNewTxsForAddress(createdTx.changeAddr)
 	}
@@ -1122,8 +1130,8 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 	}
 	a.TxStore.Lock()
 	a.TxStore.s = append(a.TxStore.s, sendtx)
-	a.TxStore.dirty = true
 	a.TxStore.Unlock()
+	a.ScheduleTxStoreWrite()
 
 	// Notify frontends of new SendTx.
 	bs, err := GetCurBlock()
@@ -1140,12 +1148,14 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 	// Remove previous unspent outputs now spent by the tx.
 	a.UtxoStore.Lock()
 	modified := a.UtxoStore.s.Remove(txInfo.inputs)
-	a.UtxoStore.dirty = a.UtxoStore.dirty || modified
 	a.UtxoStore.Unlock()
+	if modified {
+		a.ScheduleUtxoStoreWrite()
+	}
 
 	// Disk sync tx and utxo stores.
-	if err := a.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
+	if err := a.WriteScheduledToDisk(); err != nil {
+		log.Errorf("cannot write account: %v", err)
 	}
 
 	// Notify all frontends of account's new unconfirmed and

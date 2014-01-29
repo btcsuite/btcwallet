@@ -70,51 +70,15 @@ type Account struct {
 	*wallet.Wallet
 	mtx        sync.RWMutex
 	name       string
-	dirty      bool
 	fullRescan bool
 	UtxoStore  struct {
 		sync.RWMutex
-		dirty bool
-		s     tx.UtxoStore
+		s tx.UtxoStore
 	}
 	TxStore struct {
 		sync.RWMutex
-		dirty bool
-		s     tx.TxStore
+		s tx.TxStore
 	}
-}
-
-// MarkDirtyWallet marks an account's wallet as dirty, and adds the
-// account to the list of dirty accounts to be schedule to be synced to
-// disk.  It is a runtime error to call this without holding the wallet
-// writer lock.
-func (a *Account) MarkDirtyWallet() {
-	a.dirty = true
-	dirtyAccounts.Lock()
-	dirtyAccounts.m[a] = true
-	dirtyAccounts.Unlock()
-}
-
-// MarkDirtyUtxoStore marks an account's utxo store as dirty, and adds
-// the account to the list of dirty accounts to be schedule to be synced to
-// disk.  It is a runtime error to call this without holding the utxo store
-// writer lock.
-func (a *Account) MarkDirtyUtxoStore() {
-	a.UtxoStore.dirty = true
-	dirtyAccounts.Lock()
-	dirtyAccounts.m[a] = true
-	dirtyAccounts.Unlock()
-}
-
-// MarkDirtyTxStore marks an account's tx store as dirty, and adds the
-// account to the list of dirty accounts to be schedule to be synced to
-// disk.  It is a runtime error to call this without holding the tx store
-// writer lock.
-func (a *Account) MarkDirtyTxStore() {
-	a.TxStore.dirty = true
-	dirtyAccounts.Lock()
-	dirtyAccounts.m[a] = true
-	dirtyAccounts.Unlock()
 }
 
 // Lock locks the underlying wallet for an account.
@@ -155,15 +119,17 @@ func (a *Account) Unlock(passphrase []byte) error {
 // that occured on a chain no longer considered to be the main chain.
 func (a *Account) Rollback(height int32, hash *btcwire.ShaHash) {
 	a.UtxoStore.Lock()
-	a.UtxoStore.dirty = a.UtxoStore.dirty || a.UtxoStore.s.Rollback(height, hash)
+	modified := a.UtxoStore.s.Rollback(height, hash)
 	a.UtxoStore.Unlock()
+	if modified {
+		a.ScheduleUtxoStoreWrite()
+	}
 
 	a.TxStore.Lock()
-	a.TxStore.dirty = a.TxStore.dirty || a.TxStore.s.Rollback(height, hash)
+	modified = a.TxStore.s.Rollback(height, hash)
 	a.TxStore.Unlock()
-
-	if err := a.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
+	if modified {
+		a.ScheduleTxStoreWrite()
 	}
 }
 
@@ -442,7 +408,7 @@ func (a *Account) ImportPrivKey(wif string, rescan bool) error {
 			}
 
 			Rescan(CurrentRPCConn(), bs.Height, addrs)
-			a.writeDirtyToDisk()
+			a.WriteScheduledToDisk()
 		}()
 	}
 	return nil
@@ -464,22 +430,16 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 	// Attempt to import private key into wallet.
 	a.mtx.Lock()
 	addr, err := a.Wallet.ImportPrivateKey(privkey, compressed, bs)
+	a.mtx.Unlock()
 	if err != nil {
-		a.mtx.Unlock()
 		return "", err
 	}
 	addrStr := addr.String()
 
-	// Immediately write dirty wallet to disk.
-	//
-	// TODO(jrick): change writeDirtyToDisk to not grab the writer lock.
-	// Don't want to let another goroutine waiting on the mutex to grab
-	// the mutex before it is written to disk.
-	a.dirty = true
-	a.mtx.Unlock()
-	if err := a.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot write dirty wallet: %v", err)
-		return "", fmt.Errorf("import failed: cannot write wallet: %v", err)
+	// Immediately write wallet to disk.
+	a.ScheduleWalletWrite()
+	if err := a.WriteScheduledToDisk(); err != nil {
+		return "", fmt.Errorf("cannot write account: %v", err)
 	}
 
 	// Associate the imported address with this account.
@@ -600,7 +560,7 @@ func (a *Account) RescanActiveAddresses() {
 
 	// Rescan active addresses starting at the determined block height.
 	Rescan(CurrentRPCConn(), beginBlock, a.ActivePaymentAddresses())
-	a.writeDirtyToDisk()
+	a.WriteScheduledToDisk()
 }
 
 // SortedActivePaymentAddresses returns a slice of all active payment
@@ -641,20 +601,18 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 		return nil, err
 	}
 
-	a.mtx.Lock()
-
 	// Get next address from wallet.
+	a.mtx.Lock()
 	addr, err := a.Wallet.NextChainedAddress(&bs, cfg.KeypoolSize)
+	a.mtx.Unlock()
 	if err != nil {
-		a.mtx.Unlock()
 		return nil, err
 	}
 
 	// Immediately write updated wallet to disk.
-	a.dirty = true
-	a.mtx.Unlock()
-	if err = a.writeDirtyToDisk(); err != nil {
-		log.Errorf("cannot sync dirty wallet: %v", err)
+	a.ScheduleWalletWrite()
+	if err := a.WriteScheduledToDisk(); err != nil {
+		return nil, fmt.Errorf("account write failed: %v", err)
 	}
 
 	// Mark this new address as belonging to this account.

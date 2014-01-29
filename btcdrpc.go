@@ -368,8 +368,8 @@ func NtfnProcessedTx(n btcjson.Cmd, marshaled []byte) {
 	// Record the tx history.
 	a.TxStore.Lock()
 	a.TxStore.s.InsertRecvTx(t)
-	a.MarkDirtyTxStore()
 	a.TxStore.Unlock()
+	a.ScheduleTxStoreWrite()
 
 	// Notify frontends of tx.  If the tx is unconfirmed, it is always
 	// notified and the outpoint is marked as notified.  If the outpoint
@@ -404,8 +404,8 @@ func NtfnProcessedTx(n btcjson.Cmd, marshaled []byte) {
 		copy(u.BlockHash[:], blockHash[:])
 		a.UtxoStore.Lock()
 		a.UtxoStore.s.Insert(u)
-		a.MarkDirtyUtxoStore()
 		a.UtxoStore.Unlock()
+		a.ScheduleUtxoStoreWrite()
 
 		// If this notification came from mempool, notify frontends of
 		// the new unconfirmed balance immediately.  Otherwise, wait until

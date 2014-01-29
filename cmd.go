@@ -160,7 +160,7 @@ func main() {
 	}
 
 	// Start account disk syncer goroutine.
-	go DirtyAccountSyncer()
+	go AccountDiskSyncer()
 
 	go func() {
 		s, err := newServer(cfg.SvrListeners)
