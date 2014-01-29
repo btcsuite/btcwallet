@@ -37,6 +37,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"getaccountaddress":      GetAccountAddress,
 	"getaddressesbyaccount":  GetAddressesByAccount,
 	"getbalance":             GetBalance,
+	"getinfo":                GetInfo,
 	"getnewaddress":          GetNewAddress,
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
@@ -56,7 +57,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"createmultisig":        Unimplemented,
 	"dumpwallet":            Unimplemented,
 	"getblocktemplate":      Unimplemented,
-	"getinfo":               Unimplemented,
 	"getrawchangeaddress":   Unimplemented,
 	"getreceivedbyaccount":  Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
@@ -333,6 +333,44 @@ func GetBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	// Return calculated balance.
 	return balance, nil
+}
+
+// GetInfo handles a getinfo request by returning the a structure containing
+// information about the current state of btcwallet.
+// exist.
+func GetInfo(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+
+	// Call down to btcd for all of the information in this command known
+	// by them.  This call can not realistically ever fail.
+	gicmd, _ := btcjson.NewGetInfoCmd(<-NewJSONID)
+	response := <-(CurrentRPCConn().SendRequest(NewRPCRequest(gicmd,
+		make(map[string]interface{}))))
+	if response.Err != nil {
+		return nil, response.Err
+	}
+	ret := response.Result.(map[string]interface{})
+
+	balance := float64(0.0)
+	accounts := accountstore.ListAccounts(1)
+	for _, v := range accounts {
+		balance += v
+	}
+	ret["walletversion"] = wallet.VersCurrent.Uint32()
+	ret["balance"] = balance
+	// Keypool times are not tracked. set to current time.
+	ret["keypoololdest"] = time.Now().Unix()
+	ret["keypoolsize"] = cfg.KeypoolSize
+	TxFeeIncrement.Lock()
+	ret["paytxfee"] = TxFeeIncrement.i
+	TxFeeIncrement.Unlock()
+	/*
+	 * We don't set the following since they don't make much sense in the
+	 * wallet architecture:
+	 * ret["unlocked_until"]
+	 * ret["errors"]
+	 */
+
+	return ret, nil
 }
 
 // GetAccount handles a getaccount request by returning the account name
