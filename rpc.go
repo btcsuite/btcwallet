@@ -14,149 +14,104 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-// This file implements the RPC connection interface and functions to
-// communicate with a bitcoin RPC server.
-
 package main
 
 import (
 	"github.com/conformal/btcjson"
-	"github.com/conformal/btcwire"
-	"github.com/conformal/btcws"
 )
 
-// RPCRequest is a type responsible for handling RPC requests and providing
-// a method to access the response.
-type RPCRequest struct {
-	request  btcjson.Cmd
-	result   interface{}
-	response chan *RPCResponse
+// RPCResponse is an interface type covering both server
+// (frontend <-> btcwallet) and client (btcwallet <-> btcd) responses.
+type RPCResponse interface {
+	Result() interface{}
+	Error() *btcjson.Error
 }
 
-// NewRPCRequest creates a new RPCRequest from a btcjson.Cmd.  request may be
-// nil to create a new var for the result (with types determined by the
-// unmarshaling rules described in the json package), or set to a var with
-// an expected type (i.e. *btcjson.BlockResult) to directly unmarshal the
-// response's result into a convenient type.
-func NewRPCRequest(request btcjson.Cmd, result interface{}) *RPCRequest {
-	return &RPCRequest{
+// ClientRequest is a type holding a bitcoin client's request and
+// a channel to send the response.
+type ClientRequest struct {
+	ws       bool
+	request  btcjson.Cmd
+	response chan RPCResponse
+}
+
+// NewClientRequest creates a new ClientRequest from a btcjson.Cmd.
+func NewClientRequest(request btcjson.Cmd, ws bool) *ClientRequest {
+	return &ClientRequest{
+		ws:       ws,
 		request:  request,
-		result:   result,
-		response: make(chan *RPCResponse),
+		response: make(chan RPCResponse),
 	}
 }
 
-// RPCResponse holds a response's result and error returned from sending a
-// RPCRequest.
-type RPCResponse struct {
+// Handle sends a client request to the RPC gateway for processing,
+// and returns the result when handling is finished.
+func (r *ClientRequest) Handle() (interface{}, *btcjson.Error) {
+	clientRequests <- r
+	resp := <-r.response
+	return resp.Result(), resp.Error()
+}
+
+// ClientResponse holds a result and error returned from handling a
+// client's request.
+type ClientResponse struct {
+	result interface{}
+	err    *btcjson.Error
+}
+
+// Result returns the result of a response to a client.
+func (r *ClientResponse) Result() interface{} {
+	return r.result
+}
+
+// Error returns the error of a response to a client, or nil if
+// there is no error.
+func (r *ClientResponse) Error() *btcjson.Error {
+	return r.err
+}
+
+// ServerRequest is a type responsible for handling requests to a bitcoin
+// server and providing a method to access the response.
+type ServerRequest struct {
+	request  btcjson.Cmd
+	result   interface{}
+	response chan RPCResponse
+}
+
+// NewServerRequest creates a new ServerRequest from a btcjson.Cmd.  request
+// may be nil to create a new var for the result (with types determined by
+// the unmarshaling rules described in the json package), or set to a var
+// with an expected type (i.e. *btcjson.BlockResult) to directly unmarshal
+// the response's result into a convenient type.
+func NewServerRequest(request btcjson.Cmd, result interface{}) *ServerRequest {
+	return &ServerRequest{
+		request:  request,
+		result:   result,
+		response: make(chan RPCResponse, 1),
+	}
+}
+
+// ServerResponse holds a response's result and error returned from sending a
+// ServerRequest.
+type ServerResponse struct {
 	// Result will be set to a concrete type (i.e. *btcjson.BlockResult)
 	// and may be type asserted to that type if a non-nil result was used
-	// to create the originating RPCRequest.  Otherwise, Result will be
+	// to create the originating ServerRequest.  Otherwise, Result will be
 	// set to new memory allocated by json.Unmarshal, and the type rules
 	// for unmarshaling described in the json package should be followed
 	// when type asserting Result.
-	Result interface{}
+	result interface{}
 
 	// Err points to an unmarshaled error, or nil if result is valid.
-	Err *btcjson.Error
+	err *btcjson.Error
 }
 
-// RPCConn is an interface representing a client connection to a bitcoin RPC
-// server.
-type RPCConn interface {
-	// SendRequest sends a bitcoin RPC request, returning a channel to
-	// read the reply.  A channel is used so both synchronous and
-	// asynchronous RPC can be supported.
-	SendRequest(request *RPCRequest) chan *RPCResponse
+// Result returns the result of a server's RPC response.
+func (r *ServerResponse) Result() interface{} {
+	return r.result
 }
 
-// GetBestBlockResult holds the result of a getbestblock response.
-//
-// TODO(jrick): shove this in btcws.
-type GetBestBlockResult struct {
-	Hash   string `json:"hash"`
-	Height int32  `json:"height"`
-}
-
-// GetBestBlock gets both the block height and hash of the best block
-// in the main chain.
-func GetBestBlock(rpc RPCConn) (*GetBestBlockResult, *btcjson.Error) {
-	cmd := btcws.NewGetBestBlockCmd(<-NewJSONID)
-	request := NewRPCRequest(cmd, new(GetBestBlockResult))
-	response := <-rpc.SendRequest(request)
-	if response.Err != nil {
-		return nil, response.Err
-	}
-	return response.Result.(*GetBestBlockResult), nil
-}
-
-// GetBlock requests details about a block with the given hash.
-func GetBlock(rpc RPCConn, blockHash string) (*btcjson.BlockResult, *btcjson.Error) {
-	// NewGetBlockCmd cannot fail with no optargs, so omit the check.
-	cmd, _ := btcjson.NewGetBlockCmd(<-NewJSONID, blockHash)
-	request := NewRPCRequest(cmd, new(btcjson.BlockResult))
-	response := <-rpc.SendRequest(request)
-	if response.Err != nil {
-		return nil, response.Err
-	}
-	return response.Result.(*btcjson.BlockResult), nil
-}
-
-// GetCurrentNet requests the network a bitcoin RPC server is running on.
-func GetCurrentNet(rpc RPCConn) (btcwire.BitcoinNet, *btcjson.Error) {
-	cmd := btcws.NewGetCurrentNetCmd(<-NewJSONID)
-	request := NewRPCRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	if response.Err != nil {
-		return 0, response.Err
-	}
-	return btcwire.BitcoinNet(uint32(response.Result.(float64))), nil
-}
-
-// NotifyBlocks requests blockconnected and blockdisconnected notifications.
-func NotifyBlocks(rpc RPCConn) *btcjson.Error {
-	cmd := btcws.NewNotifyBlocksCmd(<-NewJSONID)
-	request := NewRPCRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Err
-}
-
-// NotifyNewTXs requests notifications for new transactions that spend
-// to any of the addresses in addrs.
-func NotifyNewTXs(rpc RPCConn, addrs []string) *btcjson.Error {
-	cmd := btcws.NewNotifyNewTXsCmd(<-NewJSONID, addrs)
-	request := NewRPCRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Err
-}
-
-// NotifySpent requests notifications for when a transaction is processed which
-// spends op.
-func NotifySpent(rpc RPCConn, op *btcwire.OutPoint) *btcjson.Error {
-	cmd := btcws.NewNotifySpentCmd(<-NewJSONID, op)
-	request := NewRPCRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Err
-}
-
-// Rescan requests a blockchain rescan for transactions to any number of
-// addresses and notifications to inform wallet about such transactions.
-func Rescan(rpc RPCConn, beginBlock int32, addrs map[string]struct{}) *btcjson.Error {
-	// NewRescanCmd cannot fail with no optargs, so omit the check.
-	cmd, _ := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs)
-	request := NewRPCRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Err
-}
-
-// SendRawTransaction sends a hex-encoded transaction for relay.
-func SendRawTransaction(rpc RPCConn, hextx string) (txid string, error *btcjson.Error) {
-	// NewSendRawTransactionCmd cannot fail, so omit the check.
-	cmd, _ := btcjson.NewSendRawTransactionCmd(<-NewJSONID, hextx)
-	request := NewRPCRequest(cmd, new(string))
-	response := <-rpc.SendRequest(request)
-	if response.Err != nil {
-		return "", response.Err
-	}
-	return *response.Result.(*string), nil
+// Result returns the error of a server's RPC response.
+func (r *ServerResponse) Error() *btcjson.Error {
+	return r.err
 }

@@ -19,7 +19,6 @@ package main
 import (
 	"code.google.com/p/go.net/websocket"
 	"crypto/sha256"
-	_ "crypto/sha512" // for cert generation
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -158,7 +157,7 @@ func newServer(listenAddrs []string) (*server, error) {
 		listeners = append(listeners, listener)
 	}
 	if len(listeners) == 0 {
-		return nil, errors.New("RPCS: No valid listen address")
+		return nil, errors.New("no valid listen address")
 	}
 
 	s.listeners = listeners
@@ -201,25 +200,64 @@ func genCertPair(certFile, keyFile string) error {
 	return nil
 }
 
-// handleRPCRequest processes a JSON-RPC request from a frontend.
-func (s *server) handleRPCRequest(w http.ResponseWriter, r *http.Request) {
+// ParseRequest parses a command or notification out of a JSON-RPC request,
+// returning any errors as a JSON-RPC error.
+func ParseRequest(msg []byte) (btcjson.Cmd, *btcjson.Error) {
+	cmd, err := btcjson.ParseMarshaledCmd(msg)
+	if err != nil || cmd.Id() == nil {
+		return cmd, &btcjson.ErrInvalidRequest
+	}
+	return cmd, nil
+}
+
+// ReplyToFrontend responds to a marshaled JSON-RPC request with a
+// marshaled JSON-RPC response for both standard and extension
+// (websocket) clients.
+func ReplyToFrontend(msg []byte, ws bool) []byte {
+	cmd, jsonErr := ParseRequest(msg)
+	var id interface{}
+	if cmd != nil {
+		id = cmd.Id()
+	}
+	if jsonErr != nil {
+		response := btcjson.Reply{
+			Id:    &id,
+			Error: jsonErr,
+		}
+		mresponse, _ := json.Marshal(response)
+		return mresponse
+	}
+
+	cReq := NewClientRequest(cmd, ws)
+	result, jsonErr := cReq.Handle()
+
+	response := btcjson.Reply{
+		Id:     &id,
+		Result: result,
+		Error:  jsonErr,
+	}
+	mresponse, err := json.Marshal(response)
+	if err != nil {
+		log.Errorf("Cannot marhal response: %v", err)
+		response = btcjson.Reply{
+			Id:    &id,
+			Error: &btcjson.ErrInternal,
+		}
+		mresponse, _ = json.Marshal(&response)
+	}
+
+	return mresponse
+}
+
+// ServeRPCRequest processes and replies to a JSON-RPC client request.
+func (s *server) ServeRPCRequest(w http.ResponseWriter, r *http.Request) {
 	body, err := btcjson.GetRaw(r.Body)
 	if err != nil {
 		log.Errorf("RPCS: Error getting JSON message: %v", err)
 	}
 
-	response := ProcessFrontendRequest(body, false)
-	mresponse, err := json.Marshal(response)
-	if err != nil {
-		id := response.Id
-		response = &btcjson.Reply{
-			Id:    id,
-			Error: &btcjson.ErrInternal,
-		}
-		mresponse, _ = json.Marshal(response)
-	}
-
-	if _, err := w.Write(mresponse); err != nil {
+	resp := ReplyToFrontend(body, false)
+	if _, err := w.Write(resp); err != nil {
 		log.Warnf("RPCS: could not respond to RPC request: %v", err)
 	}
 }
@@ -234,18 +272,19 @@ func frontendListenerDuplicator() {
 	frontendListeners := make(map[chan []byte]bool)
 
 	// Don't want to add or delete a wallet listener while iterating
-	// through each to propigate to every attached wallet.  Use a mutex to
-	// prevent this.
-	var mtx sync.Mutex
+	// through each to propigate to every attached wallet.  Use a binary
+	// semaphore to prevent this.
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
 
 	// Check for listener channels to add or remove from set.
 	go func() {
 		for {
 			select {
 			case c := <-addFrontendListener:
-				mtx.Lock()
+				<-sem
 				frontendListeners[c] = true
-				mtx.Unlock()
+				sem <- struct{}{}
 
 				NotifyBtcdConnection(c)
 				bs, err := GetCurBlock()
@@ -255,9 +294,9 @@ func frontendListenerDuplicator() {
 				}
 
 			case c := <-deleteFrontendListener:
-				mtx.Lock()
+				<-sem
 				delete(frontendListeners, c)
-				mtx.Unlock()
+				sem <- struct{}{}
 			}
 		}
 	}()
@@ -267,18 +306,18 @@ func frontendListenerDuplicator() {
 	for {
 		ntfn := <-frontendNotificationMaster
 
-		mtx.Lock()
+		<-sem
 		for c := range frontendListeners {
 			c <- ntfn
 		}
-		mtx.Unlock()
+		sem <- struct{}{}
 	}
 }
 
 // NotifyBtcdConnection notifies a frontend of the current connection
 // status of btcwallet to btcd.
 func NotifyBtcdConnection(reply chan []byte) {
-	if btcd, ok := CurrentRPCConn().(*BtcdRPCConn); ok {
+	if btcd, ok := CurrentServerConn().(*BtcdRPCConn); ok {
 		ntfn := btcws.NewBtcdConnectedNtfn(btcd.Connected())
 		mntfn, _ := ntfn.MarshalJSON()
 		reply <- mntfn
@@ -286,12 +325,10 @@ func NotifyBtcdConnection(reply chan []byte) {
 
 }
 
-// frontendSendRecv is the handler function for websocket connections from
-// a btcwallet instance.  It reads requests and sends responses to a
-// frontend, as well as notififying wallets of chain updates.  There can
-// possibly be many of these running, one for each currently connected
-// frontend.
-func frontendSendRecv(ws *websocket.Conn) {
+// WSSendRecv is the handler for websocket client connections.  It loops
+// forever (until disconnected), reading JSON-RPC requests and sending
+// sending responses and notifications.
+func WSSendRecv(ws *websocket.Conn) {
 	// Add frontend notification channel to set so this handler receives
 	// updates.
 	frontendNotification := make(chan []byte)
@@ -324,11 +361,10 @@ func frontendSendRecv(ws *websocket.Conn) {
 				return
 			}
 			// Handle request here.
-			go func() {
-				reply := ProcessFrontendRequest(m, true)
-				mreply, _ := json.Marshal(reply)
-				frontendNotification <- mreply
-			}()
+			go func(m []byte) {
+				resp := ReplyToFrontend(m, true)
+				frontendNotification <- resp
+			}(m)
 
 		case ntfn, _ := <-frontendNotification:
 			if err := websocket.Message.Send(ws, ntfn); err != nil {
@@ -370,14 +406,14 @@ func (s *server) Start() {
 			http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
 			return
 		}
-		s.handleRPCRequest(w, r)
+		s.ServeRPCRequest(w, r)
 	})
 	serveMux.HandleFunc("/frontend", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.checkAuth(r); err != nil {
 			http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
 			return
 		}
-		websocket.Handler(frontendSendRecv).ServeHTTP(w, r)
+		websocket.Handler(WSSendRecv).ServeHTTP(w, r)
 	})
 	for _, listener := range s.listeners {
 		s.wg.Add(1)
@@ -480,7 +516,7 @@ func BtcdConnect(certificates []byte) (*BtcdRPCConn, error) {
 func resendUnminedTxs() {
 	for _, createdTx := range UnminedTxs.m {
 		hextx := hex.EncodeToString(createdTx.rawTx)
-		if txid, err := SendRawTransaction(CurrentRPCConn(), hextx); err != nil {
+		if txid, err := SendRawTransaction(CurrentServerConn(), hextx); err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
 		} else {
@@ -498,7 +534,7 @@ func resendUnminedTxs() {
 // TODO(jrick): Track and Rescan commands should be replaced with a
 // single TrackSince function (or similar) which requests address
 // notifications and performs the rescan since some block height.
-func Handshake(rpc RPCConn) error {
+func Handshake(rpc ServerConn) error {
 	net, jsonErr := GetCurrentNet(rpc)
 	if jsonErr != nil {
 		return jsonErr
@@ -523,7 +559,7 @@ func Handshake(rpc RPCConn) error {
 
 	// Get default account.  Only the default account is used to
 	// track recently-seen blocks.
-	a, err := accountstore.Account("")
+	a, err := AcctMgr.Account("")
 	if err != nil {
 		// No account yet is not a handshake error, but means our
 		// handshake is done.
@@ -555,7 +591,7 @@ func Handshake(rpc RPCConn) error {
 		// try to write new tx and utxo files on each rollback.
 		if it.Next() {
 			bs := it.BlockStamp()
-			accountstore.Rollback(bs.Height, &bs.Hash)
+			AcctMgr.Rollback(bs.Height, &bs.Hash)
 		}
 
 		// Set default account to be marked in sync with the current
@@ -563,8 +599,8 @@ func Handshake(rpc RPCConn) error {
 		a.Wallet.SetSyncedWith(bs)
 
 		// Begin tracking wallets against this btcd instance.
-		accountstore.Track()
-		accountstore.RescanActiveAddresses()
+		AcctMgr.Track()
+		AcctMgr.RescanActiveAddresses()
 
 		// (Re)send any unmined transactions to btcd in case of a btcd restart.
 		resendUnminedTxs()
@@ -581,8 +617,8 @@ func Handshake(rpc RPCConn) error {
 	// and start a new rescan since the earliest block wallet must know
 	// about.
 	a.fullRescan = true
-	accountstore.Track()
-	accountstore.RescanActiveAddresses()
+	AcctMgr.Track()
+	AcctMgr.RescanActiveAddresses()
 	resendUnminedTxs()
 	return nil
 }

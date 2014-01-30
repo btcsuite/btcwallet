@@ -18,8 +18,10 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"io/ioutil"
@@ -72,7 +74,7 @@ func GetCurBlock() (bs wallet.BlockStamp, err error) {
 		return bs, nil
 	}
 
-	bb, _ := GetBestBlock(CurrentRPCConn())
+	bb, _ := GetBestBlock(CurrentServerConn())
 	if bb == nil {
 		return wallet.BlockStamp{
 			Height: int32(btcutil.BlockHeightUnknown),
@@ -149,6 +151,8 @@ func main() {
 	// Check and update any old file locations.
 	updateOldFileLocations()
 
+	go AcctMgr.Start()
+
 	// Open all account saved to disk.
 	OpenAccounts()
 
@@ -158,9 +162,6 @@ func main() {
 		log.Errorf("cannot open CA file: %v", err)
 		os.Exit(1)
 	}
-
-	// Start account disk syncer goroutine.
-	go AccountDiskSyncer()
 
 	go func() {
 		s, err := newServer(cfg.SvrListeners)
@@ -176,6 +177,10 @@ func main() {
 
 	// Begin generating new IDs for JSON calls.
 	go JSONIDGenerator(NewJSONID)
+
+	// Begin RPC server goroutines.
+	go RPCGateway()
+	go WalletRequestProcessor()
 
 	// Begin maintanence goroutines.
 	go SendBeforeReceiveHistorySync(SendTxHistSyncChans.add,
@@ -207,8 +212,8 @@ func main() {
 			case conn := <-updateBtcd:
 				btcd = conn
 
-			case access := <-accessRPC:
-				access.rpc <- btcd
+			case access := <-accessServer:
+				access.server <- btcd
 			}
 		}
 	}()
@@ -246,6 +251,99 @@ func main() {
 	}
 }
 
+// WalletOpenError is a special error type so problems opening wallet
+// files can be differentiated (by a type assertion) from other errors.
+type WalletOpenError struct {
+	Err string
+}
+
+// Error satisifies the builtin error interface.
+func (e *WalletOpenError) Error() string {
+	return e.Err
+}
+
+// OpenSavedAccount opens a named account from disk.  If the wallet does not
+// exist, ErrNoWallet is returned as an error.
+func OpenSavedAccount(name string, cfg *config) (*Account, error) {
+	netdir := networkDir(cfg.Net())
+	if err := checkCreateDir(netdir); err != nil {
+		return nil, err
+	}
+
+	wlt := new(wallet.Wallet)
+	a := &Account{
+		Wallet: wlt,
+		name:   name,
+	}
+
+	wfilepath := accountFilename("wallet.bin", name, netdir)
+	utxofilepath := accountFilename("utxo.bin", name, netdir)
+	txfilepath := accountFilename("tx.bin", name, netdir)
+	var wfile, utxofile, txfile *os.File
+
+	// Read wallet file.
+	wfile, err := os.Open(wfilepath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Must create and save wallet first.
+			return nil, ErrNoWallet
+		}
+		msg := fmt.Sprintf("cannot open wallet file: %s", err)
+		return nil, &WalletOpenError{msg}
+	}
+	defer wfile.Close()
+
+	if _, err = wlt.ReadFrom(wfile); err != nil {
+		msg := fmt.Sprintf("cannot read wallet: %s", err)
+		return nil, &WalletOpenError{msg}
+	}
+
+	// Read tx file.  If this fails, return a ErrNoTxs error and let
+	// the caller decide if a rescan is necessary.
+	var finalErr error
+	if txfile, err = os.Open(txfilepath); err != nil {
+		log.Errorf("cannot open tx file: %s", err)
+		// This is not a error we should immediately return with,
+		// but other errors can be more important, so only return
+		// this if none of the others are hit.
+		finalErr = ErrNoTxs
+	} else {
+		defer txfile.Close()
+		var txs tx.TxStore
+		if _, err = txs.ReadFrom(txfile); err != nil {
+			log.Errorf("cannot read tx file: %s", err)
+			finalErr = ErrNoTxs
+		} else {
+			a.TxStore = txs
+		}
+	}
+
+	// Read utxo file.  If this fails, return a ErrNoUtxos error so a
+	// rescan can be done since the wallet creation block.
+	var utxos tx.UtxoStore
+	utxofile, err = os.Open(utxofilepath)
+	if err != nil {
+		log.Errorf("cannot open utxo file: %s", err)
+		finalErr = ErrNoUtxos
+		a.fullRescan = true
+	} else {
+		defer utxofile.Close()
+		if _, err = utxos.ReadFrom(utxofile); err != nil {
+			log.Errorf("cannot read utxo file: %s", err)
+			finalErr = ErrNoUtxos
+		} else {
+			a.UtxoStore = utxos
+		}
+	}
+
+	// Mark all active payment addresses as belonging to this account.
+	for addr := range a.ActivePaymentAddresses() {
+		MarkAddressForAccount(addr, name)
+	}
+
+	return a, finalErr
+}
+
 // OpenAccounts attempts to open all saved accounts.
 func OpenAccounts() {
 	// If the network (account) directory is missing, but the temporary
@@ -265,7 +363,8 @@ func OpenAccounts() {
 
 	// The default account must exist, or btcwallet acts as if no
 	// wallets/accounts have been created yet.
-	if err := accountstore.OpenAccount("", cfg); err != nil {
+	a, err := OpenSavedAccount("", cfg)
+	if err != nil {
 		switch err.(type) {
 		case *WalletOpenError:
 			log.Errorf("Default account wallet file unreadable: %v", err)
@@ -275,6 +374,7 @@ func OpenAccounts() {
 			log.Warnf("Non-critical problem opening an account file: %v", err)
 		}
 	}
+	AcctMgr.AddAccount(a)
 
 	// Read all filenames in the account directory, and look for any
 	// filenames matching '*-wallet.bin'.  These are wallets for
@@ -305,7 +405,8 @@ func OpenAccounts() {
 		// Log txstore/utxostore errors as these will be recovered
 		// from with a rescan, but wallet errors must be returned
 		// to the caller.
-		if err := accountstore.OpenAccount(a, cfg); err != nil {
+		a, err := OpenSavedAccount(a, cfg)
+		if err != nil {
 			switch err.(type) {
 			case *WalletOpenError:
 				log.Errorf("Error opening account's wallet: %v", err)
@@ -313,24 +414,26 @@ func OpenAccounts() {
 			default:
 				log.Warnf("Non-critical error opening an account file: %v", err)
 			}
+		} else {
+			AcctMgr.AddAccount(a)
 		}
 	}
 }
 
-var accessRPC = make(chan *AccessCurrentRPCConn)
+var accessServer = make(chan *AccessCurrentServerConn)
 
-// AccessCurrentRPCConn is used to access the current RPC connection
+// AccessCurrentServerConn is used to access the current RPC connection
 // from the goroutine managing btcd-side RPC connections.
-type AccessCurrentRPCConn struct {
-	rpc chan RPCConn
+type AccessCurrentServerConn struct {
+	server chan ServerConn
 }
 
-// CurrentRPCConn returns the most recently-connected btcd-side
+// CurrentServerConn returns the most recently-connected btcd-side
 // RPC connection.
-func CurrentRPCConn() RPCConn {
-	access := &AccessCurrentRPCConn{
-		rpc: make(chan RPCConn),
+func CurrentServerConn() ServerConn {
+	access := &AccessCurrentServerConn{
+		server: make(chan ServerConn),
 	}
-	accessRPC <- access
-	return <-access.rpc
+	accessServer <- access
+	return <-access.server
 }

@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
@@ -29,12 +28,10 @@ import (
 	"sync"
 )
 
-// ErrNotFound describes an error where a map lookup failed due to a
-// key not being in the map.
-var ErrNotFound = errors.New("not found")
-
 // addressAccountMap holds a map of addresses to names of the
 // accounts that hold each address.
+//
+// TODO: move this to AccountManager
 var addressAccountMap = struct {
 	sync.RWMutex
 	m map[string]string
@@ -64,28 +61,18 @@ func LookupAccountByAddress(address string) (string, error) {
 
 // Account is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style wallet (to store
-// addresses and keys), and tx and utxo data stores, along with locks
-// to prevent against incorrect multiple access.
+// addresses and keys), and tx and utxo stores, and a mutex to prevent
+// incorrect multiple access.
 type Account struct {
-	*wallet.Wallet
-	mtx        sync.RWMutex
 	name       string
 	fullRescan bool
-	UtxoStore  struct {
-		sync.RWMutex
-		s tx.UtxoStore
-	}
-	TxStore struct {
-		sync.RWMutex
-		s tx.TxStore
-	}
+	*wallet.Wallet
+	tx.UtxoStore
+	tx.TxStore
 }
 
 // Lock locks the underlying wallet for an account.
 func (a *Account) Lock() error {
-	a.mtx.Lock()
-	defer a.mtx.Unlock()
-
 	switch err := a.Wallet.Lock(); err {
 	case nil:
 		NotifyWalletLockStateChange(a.Name(), true)
@@ -102,35 +89,12 @@ func (a *Account) Lock() error {
 
 // Unlock unlocks the underlying wallet for an account.
 func (a *Account) Unlock(passphrase []byte) error {
-	a.mtx.Lock()
-	defer a.mtx.Unlock()
-
 	if err := a.Wallet.Unlock(passphrase); err != nil {
 		return err
 	}
 
 	NotifyWalletLockStateChange(a.Name(), false)
 	return nil
-}
-
-// Rollback reverts each stored Account to a state before the block
-// with the passed chainheight and block hash was connected to the main
-// chain.  This is used to remove transactions and utxos for each wallet
-// that occured on a chain no longer considered to be the main chain.
-func (a *Account) Rollback(height int32, hash *btcwire.ShaHash) {
-	a.UtxoStore.Lock()
-	modified := a.UtxoStore.s.Rollback(height, hash)
-	a.UtxoStore.Unlock()
-	if modified {
-		a.ScheduleUtxoStoreWrite()
-	}
-
-	a.TxStore.Lock()
-	modified = a.TxStore.s.Rollback(height, hash)
-	a.TxStore.Unlock()
-	if modified {
-		a.ScheduleTxStoreWrite()
-	}
 }
 
 // AddressUsed returns whether there are any recorded transactions spending to
@@ -142,13 +106,10 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 	// opening an account, and keeping it up to date each time a new
 	// received tx arrives.
 
-	a.TxStore.RLock()
-	defer a.TxStore.RUnlock()
-
 	pkHash := addr.ScriptAddress()
 
-	for i := range a.TxStore.s {
-		rtx, ok := a.TxStore.s[i].(*tx.RecvTx)
+	for i := range a.TxStore {
+		rtx, ok := a.TxStore[i].(*tx.RecvTx)
 		if !ok {
 			continue
 		}
@@ -170,22 +131,19 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
 func (a *Account) CalculateBalance(confirms int) float64 {
-	var bal uint64 // Measured in satoshi
-
 	bs, err := GetCurBlock()
 	if bs.Height == int32(btcutil.BlockHeightUnknown) || err != nil {
 		return 0.
 	}
 
-	a.UtxoStore.RLock()
-	for _, u := range a.UtxoStore.s {
+	var bal uint64 // Measured in satoshi
+	for _, u := range a.UtxoStore {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
 		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
 			bal += u.Amt
 		}
 	}
-	a.UtxoStore.RUnlock()
 	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
 }
 
@@ -199,15 +157,13 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
 func (a *Account) CalculateAddressBalance(addr *btcutil.AddressPubKeyHash, confirms int) float64 {
-	var bal uint64 // Measured in satoshi
-
 	bs, err := GetCurBlock()
 	if bs.Height == int32(btcutil.BlockHeightUnknown) || err != nil {
 		return 0.
 	}
 
-	a.UtxoStore.RLock()
-	for _, u := range a.UtxoStore.s {
+	var bal uint64 // Measured in satoshi
+	for _, u := range a.UtxoStore {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
 		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
@@ -216,7 +172,6 @@ func (a *Account) CalculateAddressBalance(addr *btcutil.AddressPubKeyHash, confi
 			}
 		}
 	}
-	a.UtxoStore.RUnlock()
 	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
 }
 
@@ -225,9 +180,7 @@ func (a *Account) CalculateAddressBalance(addr *btcutil.AddressPubKeyHash, confi
 // one transaction spending to it in the blockchain or btcd mempool), the next
 // chained address is returned.
 func (a *Account) CurrentAddress() (btcutil.Address, error) {
-	a.mtx.RLock()
 	addr := a.Wallet.LastChainedAddress()
-	a.mtx.RUnlock()
 
 	// Get next chained address if the last one has already been used.
 	if a.AddressUsed(addr) {
@@ -243,10 +196,7 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 // replies.
 func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]map[string]interface{}, error) {
 	var txInfoList []map[string]interface{}
-	a.TxStore.RLock()
-	defer a.TxStore.RUnlock()
-
-	for _, tx := range a.TxStore.s {
+	for _, tx := range a.TxStore {
 		// check block number.
 		if since != -1 && tx.Height() <= since {
 			continue
@@ -271,15 +221,13 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 	}
 
 	var txInfoList []map[string]interface{}
-	a.TxStore.RLock()
 
-	lastLookupIdx := len(a.TxStore.s) - count
+	lastLookupIdx := len(a.TxStore) - count
 	// Search in reverse order: lookup most recently-added first.
-	for i := len(a.TxStore.s) - 1; i >= from && i >= lastLookupIdx; i-- {
+	for i := len(a.TxStore) - 1; i >= from && i >= lastLookupIdx; i-- {
 		txInfoList = append(txInfoList,
-			a.TxStore.s[i].TxInfo(a.name, bs.Height, a.Net())...)
+			a.TxStore[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
-	a.TxStore.RUnlock()
 
 	return txInfoList, nil
 }
@@ -298,10 +246,8 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 	}
 
 	var txInfoList []map[string]interface{}
-	a.TxStore.RLock()
-
-	for i := range a.TxStore.s {
-		rtx, ok := a.TxStore.s[i].(*tx.RecvTx)
+	for i := range a.TxStore {
+		rtx, ok := a.TxStore[i].(*tx.RecvTx)
 		if !ok {
 			continue
 		}
@@ -310,7 +256,6 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 			txInfoList = append(txInfoList, info...)
 		}
 	}
-	a.TxStore.RUnlock()
 
 	return txInfoList, nil
 }
@@ -326,15 +271,12 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 		return nil, err
 	}
 
-	var txInfoList []map[string]interface{}
-	a.TxStore.RLock()
-
 	// Search in reverse order: lookup most recently-added first.
-	for i := len(a.TxStore.s) - 1; i >= 0; i-- {
+	var txInfoList []map[string]interface{}
+	for i := len(a.TxStore) - 1; i >= 0; i-- {
 		txInfoList = append(txInfoList,
-			a.TxStore.s[i].TxInfo(a.name, bs.Height, a.Net())...)
+			a.TxStore[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
-	a.TxStore.RUnlock()
 
 	return txInfoList, nil
 }
@@ -342,9 +284,6 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
 // private keys in a wallet.
 func (a *Account) DumpPrivKeys() ([]string, error) {
-	a.mtx.RLock()
-	defer a.mtx.RUnlock()
-
 	// Iterate over each active address, appending the private
 	// key to privkeys.
 	var privkeys []string
@@ -367,9 +306,6 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 // DumpWIFPrivateKey returns the WIF encoded private key for a
 // single wallet address.
 func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
-	a.mtx.RLock()
-	defer a.mtx.RUnlock()
-
 	// Get private key from wallet if it exists.
 	key, err := a.Wallet.AddressKey(addr)
 	if err != nil {
@@ -387,58 +323,19 @@ func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 	return btcutil.EncodePrivateKey(key.D.Bytes(), a.Net(), info.Compressed)
 }
 
-// ImportPrivKey imports a WIF-encoded private key into an account's wallet.
-// This function is not recommended, as it gives no hints as to when the
-// address first appeared (not just in the blockchain, but since the address
-// was first generated, or made public), and will cause all future rescans to
-// start from the genesis block.
-func (a *Account) ImportPrivKey(wif string, rescan bool) error {
-	bs := &wallet.BlockStamp{}
-	addr, err := a.ImportWIFPrivateKey(wif, bs)
-	if err != nil {
-		return err
-	}
-
-	if rescan {
-		// Do not wait for rescan to finish before returning to the
-		// caller.
-		go func() {
-			addrs := map[string]struct{}{
-				addr: struct{}{},
-			}
-
-			Rescan(CurrentRPCConn(), bs.Height, addrs)
-			a.WriteScheduledToDisk()
-		}()
-	}
-	return nil
-}
-
-// ImportWIFPrivateKey takes a WIF-encoded private key and adds it to the
-// wallet.  If the import is successful, the payment address string is
-// returned.
-func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string, error) {
-	// Decode WIF private key and perform sanity checking.
-	privkey, net, compressed, err := btcutil.DecodePrivateKey(wif)
-	if err != nil {
-		return "", err
-	}
-	if net != a.Net() {
-		return "", errors.New("wrong network")
-	}
-
+// ImportPrivateKey imports a private key to the account's wallet and
+// writes the new wallet to disk.
+func (a *Account) ImportPrivateKey(pk []byte, compressed bool, bs *wallet.BlockStamp) (string, error) {
 	// Attempt to import private key into wallet.
-	a.mtx.Lock()
-	addr, err := a.Wallet.ImportPrivateKey(privkey, compressed, bs)
-	a.mtx.Unlock()
+	addr, err := a.Wallet.ImportPrivateKey(pk, compressed, bs)
 	if err != nil {
 		return "", err
 	}
 	addrStr := addr.String()
 
 	// Immediately write wallet to disk.
-	a.ScheduleWalletWrite()
-	if err := a.WriteScheduledToDisk(); err != nil {
+	AcctMgr.ds.ScheduleWalletWrite(a)
+	if err := AcctMgr.ds.FlushAccount(a); err != nil {
 		return "", fmt.Errorf("cannot write account: %v", err)
 	}
 
@@ -451,15 +348,24 @@ func (a *Account) ImportWIFPrivateKey(wif string, bs *wallet.BlockStamp) (string
 	return addrStr, nil
 }
 
+// ExportToDirectory writes an account to a special export directory.  Any
+// previous files are overwritten.
+func (a *Account) ExportToDirectory(dirBaseName string) error {
+	dir := filepath.Join(networkDir(cfg.Net()), dirBaseName)
+	if err := checkCreateDir(dir); err != nil {
+		return err
+	}
+
+	return AcctMgr.ds.ExportAccount(a, dir)
+}
+
 // ExportWatchingWallet returns a new account with a watching wallet
 // exported by this a's wallet.  Both wallets share the same tx and utxo
 // stores, so locking one will lock the other as well.  The returned account
 // should be exported quickly, either to file or to an rpc caller, and then
 // dropped from scope.
 func (a *Account) ExportWatchingWallet() (*Account, error) {
-	a.mtx.RLock()
 	ww, err := a.Wallet.ExportWatchingWallet()
-	a.mtx.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -475,27 +381,20 @@ func (a *Account) exportBase64() (map[string]string, error) {
 	buf := &bytes.Buffer{}
 	m := make(map[string]string)
 
-	a.mtx.RLock()
 	_, err := a.Wallet.WriteTo(buf)
-	a.mtx.RUnlock()
 	if err != nil {
 		return nil, err
 	}
 	m["wallet"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
-	a.TxStore.RLock()
-	_, err = a.TxStore.s.WriteTo(buf)
-	a.TxStore.RUnlock()
-	if err != nil {
+	if _, err = a.TxStore.WriteTo(buf); err != nil {
 		return nil, err
 	}
 	m["tx"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
-	a.UtxoStore.RLock()
-	_, err = a.UtxoStore.s.WriteTo(buf)
-	a.UtxoStore.RUnlock()
+	_, err = a.UtxoStore.WriteTo(buf)
 	if err != nil {
 		return nil, err
 	}
@@ -518,16 +417,14 @@ func (a *Account) Track() {
 		i++
 	}
 
-	err := NotifyNewTXs(CurrentRPCConn(), addrstrs)
+	err := NotifyNewTXs(CurrentServerConn(), addrstrs)
 	if err != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}
 
-	a.UtxoStore.RLock()
-	for _, utxo := range a.UtxoStore.s {
+	for _, utxo := range a.UtxoStore {
 		ReqSpentUtxoNtfn(utxo)
 	}
-	a.UtxoStore.RUnlock()
 }
 
 // RescanActiveAddresses requests btcd to rescan the blockchain for new
@@ -538,7 +435,6 @@ func (a *Account) Track() {
 func (a *Account) RescanActiveAddresses() {
 	// Determine the block to begin the rescan from.
 	beginBlock := int32(0)
-	a.mtx.RLock()
 	if a.fullRescan {
 		// Need to perform a complete rescan since the wallet creation
 		// block.
@@ -556,19 +452,16 @@ func (a *Account) RescanActiveAddresses() {
 		// If we're synced with block x, must scan the blocks x+1 to best block.
 		beginBlock = bs.Height + 1
 	}
-	a.mtx.RUnlock()
 
 	// Rescan active addresses starting at the determined block height.
-	Rescan(CurrentRPCConn(), beginBlock, a.ActivePaymentAddresses())
-	a.WriteScheduledToDisk()
+	Rescan(CurrentServerConn(), beginBlock, a.ActivePaymentAddresses())
+	AcctMgr.ds.FlushAccount(a)
 }
 
 // SortedActivePaymentAddresses returns a slice of all active payment
 // addresses in an account.
 func (a *Account) SortedActivePaymentAddresses() []string {
-	a.mtx.RLock()
 	infos := a.Wallet.SortedActiveAddresses()
-	a.mtx.RUnlock()
 
 	addrs := make([]string, len(infos))
 	for i, info := range infos {
@@ -581,9 +474,7 @@ func (a *Account) SortedActivePaymentAddresses() []string {
 // ActivePaymentAddresses returns a set of all active pubkey hashes
 // in an account.
 func (a *Account) ActivePaymentAddresses() map[string]struct{} {
-	a.mtx.RLock()
 	infos := a.ActiveAddresses()
-	a.mtx.RUnlock()
 
 	addrs := make(map[string]struct{}, len(infos))
 	for _, info := range infos {
@@ -602,16 +493,14 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	}
 
 	// Get next address from wallet.
-	a.mtx.Lock()
 	addr, err := a.Wallet.NextChainedAddress(&bs, cfg.KeypoolSize)
-	a.mtx.Unlock()
 	if err != nil {
 		return nil, err
 	}
 
 	// Immediately write updated wallet to disk.
-	a.ScheduleWalletWrite()
-	if err := a.WriteScheduledToDisk(); err != nil {
+	AcctMgr.ds.ScheduleWalletWrite(a)
+	if err := AcctMgr.ds.FlushAccount(a); err != nil {
 		return nil, fmt.Errorf("account write failed: %v", err)
 	}
 
@@ -628,17 +517,13 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 func (a *Account) RecoverAddresses(n int) error {
 	// Get info on the last chained address.  The rescan starts at the
 	// earliest block height the last chained address might appear at.
-	a.mtx.RLock()
 	last := a.Wallet.LastChainedAddress()
 	lastInfo, err := a.Wallet.AddressInfo(last)
-	a.mtx.RUnlock()
 	if err != nil {
 		return err
 	}
 
-	a.mtx.Lock()
 	addrs, err := a.Wallet.ExtendActiveAddresses(n, cfg.KeypoolSize)
-	a.mtx.Unlock()
 	if err != nil {
 		return err
 	}
@@ -649,7 +534,7 @@ func (a *Account) RecoverAddresses(n int) error {
 		m[addrs[i].EncodeAddress()] = struct{}{}
 	}
 	go func(addrs map[string]struct{}) {
-		jsonErr := Rescan(CurrentRPCConn(), lastInfo.FirstBlock, addrs)
+		jsonErr := Rescan(CurrentServerConn(), lastInfo.FirstBlock, addrs)
 		if jsonErr != nil {
 			log.Errorf("Rescanning for recovered addresses failed: %v",
 				jsonErr.Message)
@@ -670,7 +555,7 @@ func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
 
 	log.Debugf("Requesting notifications of TXs sending to address %v", apkh)
 
-	err := NotifyNewTXs(CurrentRPCConn(), []string{apkh.EncodeAddress()})
+	err := NotifyNewTXs(CurrentServerConn(), []string{apkh.EncodeAddress()})
 	if err != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}
@@ -682,7 +567,7 @@ func ReqSpentUtxoNtfn(u *tx.Utxo) {
 	log.Debugf("Requesting spent UTXO notifications for Outpoint hash %s index %d",
 		u.Out.Hash, u.Out.Index)
 
-	NotifySpent(CurrentRPCConn(), (*btcwire.OutPoint)(&u.Out))
+	NotifySpent(CurrentServerConn(), (*btcwire.OutPoint)(&u.Out))
 }
 
 // accountdir returns the directory containing an account's wallet, utxo,

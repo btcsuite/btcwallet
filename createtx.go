@@ -158,11 +158,6 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 // block hash) Utxo.  ErrInsufficientFunds is returned if there are not
 // enough eligible unspent outputs to create the transaction.
 func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, error) {
-	// Recorded unspent transactions should not be modified until this
-	// finishes.
-	a.UtxoStore.RLock()
-	defer a.UtxoStore.RUnlock()
-
 	// Create a new transaction which will include all input scripts.
 	msgtx := btcwire.NewMsgTx()
 
@@ -224,13 +219,13 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 
 	// Get the number of satoshis to increment fee by when searching for
 	// the minimum tx fee needed.
-	var fee int64 = 0
+	fee := int64(0)
 	for {
 		msgtx = txNoInputs.Copy()
 
 		// Select unspent outputs to be used in transaction based on the amount
 		// neededing to sent, and the current fee estimation.
-		inputs, btcin, err := selectInputs(a.UtxoStore.s, uint64(amt+fee),
+		inputs, btcin, err := selectInputs(a.UtxoStore, uint64(amt+fee),
 			minconf)
 		if err != nil {
 			return nil, err

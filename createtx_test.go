@@ -109,7 +109,7 @@ func TestFakeTxs(t *testing.T) {
 	utxo.Subscript = tx.PkScript(ss)
 	utxo.Amt = 1000000
 	utxo.Height = 12345
-	a.UtxoStore.s = append(a.UtxoStore.s, utxo)
+	a.UtxoStore = append(a.UtxoStore, utxo)
 
 	// Fake our current block height so btcd doesn't need to be queried.
 	curBlock.BlockStamp.Height = 12346
