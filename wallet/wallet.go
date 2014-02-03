@@ -471,7 +471,6 @@ type comment []byte
 type Wallet struct {
 	net          btcwire.BitcoinNet
 	flags        walletFlags
-	uniqID       [6]byte
 	createDate   int64
 	name         [32]byte
 	desc         [256]byte
@@ -548,8 +547,6 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 
 	// Create and fill wallet.
 	w := &Wallet{
-		// TODO(jrick): not sure we will need uniqID, but would be good for
-		// compat with armory.
 		net: net,
 		flags: walletFlags{
 			useEncryption: true,
@@ -627,7 +624,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 		&vers,
 		&w.net,
 		&w.flags,
-		&w.uniqID,
+		make([]byte, 6), // Bytes for Armory unique ID
 		&w.createDate,
 		&w.name,
 		&w.desc,
@@ -753,7 +750,7 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 		&VersCurrent,
 		&w.net,
 		&w.flags,
-		&w.uniqID,
+		make([]byte, 6),  // Bytes for Armory unique ID
 		&w.createDate,
 		&w.name,
 		&w.desc,
@@ -1344,7 +1341,6 @@ func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
 			useEncryption: false,
 			watchingOnly:  true,
 		},
-		uniqID:       w.uniqID,
 		name:         w.name,
 		desc:         w.desc,
 		createDate:   w.createDate,
