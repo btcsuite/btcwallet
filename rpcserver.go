@@ -76,6 +76,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"setaccount":            Unimplemented,
 	"signmessage":           Unimplemented,
 	"signrawtransaction":    Unimplemented,
+	"stop":                  Unimplemented,
 	"validateaddress":       Unimplemented,
 	"verifymessage":         Unimplemented,
 
