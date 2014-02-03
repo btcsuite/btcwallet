@@ -894,9 +894,29 @@ func (w *Wallet) IsLocked() bool {
 // is used.  If not and the wallet is unlocked, the keypool is extended.
 // If locked, a new address's pubkey is chained off the last pubkey
 // and added to the wallet.
-func (w *Wallet) NextChainedAddress(bs *BlockStamp,
-	keypoolSize uint) (*btcutil.AddressPubKeyHash, error) {
+func (w *Wallet) NextChainedAddress(bs *BlockStamp, keypoolSize uint) (*btcutil.AddressPubKeyHash, error) {
+	addr, err := w.nextChainedAddress(bs, keypoolSize)
+	if err != nil {
+		return nil, err
+	}
 
+	// Create and return payment address for address hash.
+	return addr.address(w.net), nil
+}
+
+func (w *Wallet) ChangeAddress(bs *BlockStamp, keypoolSize uint) (*btcutil.AddressPubKeyHash, error) {
+	addr, err := w.nextChainedAddress(bs, keypoolSize)
+	if err != nil {
+		return nil, err
+	}
+
+	addr.flags.change = true
+
+	// Create and return payment address for address hash.
+	return addr.address(w.net), nil
+}
+
+func (w *Wallet) nextChainedAddress(bs *BlockStamp, keypoolSize uint) (*btcAddress, error) {
 	// Attempt to get address hash of next chained address.
 	nextAPKH, ok := w.chainIdxMap[w.highestUsed+1]
 	if !ok {
@@ -927,8 +947,7 @@ func (w *Wallet) NextChainedAddress(bs *BlockStamp,
 
 	w.highestUsed++
 
-	// Create and return payment address for address hash.
-	return addr.address(w.net), nil
+	return addr, nil
 }
 
 // LastChainedAddress returns the most recently requested chained
@@ -1382,6 +1401,7 @@ type AddressInfo struct {
 	FirstBlock int32
 	Imported   bool
 	Pubkey     string
+	Change     bool
 }
 
 // SortedActiveAddresses returns all wallet addresses that have been
@@ -1491,6 +1511,7 @@ type addrFlags struct {
 	encrypted               bool
 	createPrivKeyNextUnlock bool
 	compressed              bool
+	change                  bool
 }
 
 func (af *addrFlags) ReadFrom(r io.Reader) (int64, error) {
@@ -1505,6 +1526,7 @@ func (af *addrFlags) ReadFrom(r io.Reader) (int64, error) {
 	af.encrypted = b[0]&(1<<2) != 0
 	af.createPrivKeyNextUnlock = b[0]&(1<<3) != 0
 	af.compressed = b[0]&(1<<4) != 0
+	af.change = b[0]&(1<<5) != 0
 
 	// Currently (at least until watching-only wallets are implemented)
 	// btcwallet shall refuse to open any unencrypted addresses.  This
@@ -1538,6 +1560,9 @@ func (af *addrFlags) WriteTo(w io.Writer) (int64, error) {
 	}
 	if af.compressed {
 		b[0] |= 1 << 4
+	}
+	if af.change {
+		b[0] |= 1 << 5
 	}
 
 	n, err := w.Write(b[:])
@@ -1896,9 +1921,10 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp, compressed bool) (addr *b
 		flags: addrFlags{
 			hasPrivKey:              true,
 			hasPubKey:               true,
+			encrypted:               false, // will be, but isn't yet.
 			createPrivKeyNextUnlock: false,
 			compressed:              compressed,
-			encrypted:               false, // will be, but isn't yet.
+			change:                  false,
 		},
 		firstSeen:  time.Now().Unix(),
 		firstBlock: bs.Height,
@@ -1940,9 +1966,10 @@ func newBtcAddressWithoutPrivkey(pubkey, iv []byte, bs *BlockStamp) (addr *btcAd
 		flags: addrFlags{
 			hasPrivKey:              false,
 			hasPubKey:               true,
+			encrypted:               false,
 			createPrivKeyNextUnlock: true,
 			compressed:              compressed,
-			encrypted:               false,
+			change:                  false,
 		},
 		firstSeen:  time.Now().Unix(),
 		firstBlock: bs.Height,
@@ -2244,6 +2271,7 @@ func (a *btcAddress) info(net btcwire.BitcoinNet) (*AddressInfo, error) {
 		FirstBlock: a.firstBlock,
 		Imported:   a.chainIndex == importedKeyChainIdx,
 		Pubkey:     hex.EncodeToString(a.pubKey),
+		Change:     a.flags.change,
 	}, nil
 }
 
@@ -2259,6 +2287,7 @@ func (a *btcAddress) watchingCopy() *btcAddress {
 			encrypted:               false,
 			createPrivKeyNextUnlock: false,
 			compressed:              a.flags.compressed,
+			change:                  a.flags.change,
 		},
 		chaincode:  a.chaincode,
 		chainIndex: a.chainIndex,

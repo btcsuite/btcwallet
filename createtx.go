@@ -240,7 +240,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 
 			// Get a new change address if one has not already been found.
 			if changeAddr == nil {
-				changeAddr, err = a.NextChainedAddress(&bs, cfg.KeypoolSize)
+				changeAddr, err = a.ChangeAddress(&bs, cfg.KeypoolSize)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get next address: %s", err)
 				}
