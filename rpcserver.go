@@ -39,6 +39,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"getbalance":             GetBalance,
 	"getinfo":                GetInfo,
 	"getnewaddress":          GetNewAddress,
+	"getrawchangeaddress":    GetRawChangeAddress,
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
@@ -57,7 +58,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"createmultisig":        Unimplemented,
 	"dumpwallet":            Unimplemented,
 	"getblocktemplate":      Unimplemented,
-	"getrawchangeaddress":   Unimplemented,
 	"getreceivedbyaccount":  Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
 	"gettransaction":        Unimplemented,
@@ -693,17 +693,36 @@ func GetNewAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	addr, err := a.NewAddress()
+	if err != nil {
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	// Return the new payment address string.
+	return addr.EncodeAddress(), nil
+}
+
+// GetRawChangeAddress handles a getrawchangeaddress request by creating
+// and returning a new change address for an account.
+//
+// Note: bitcoind allows specifying the account as an optional parameter,
+// but ignores the parameter.
+func GetRawChangeAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.GetRawChangeAddressCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	a, err := AcctMgr.Account(cmd.Account)
 	switch err {
 	case nil:
-		// Return the new payment address string.
-		return addr.EncodeAddress(), nil
+		break
 
-	case wallet.ErrWalletLocked:
-		// The wallet is locked error may be sent if the keypool needs
-		// to be refilled, but the wallet is currently in a locked
-		// state.  Notify the frontend that an unlock is needed to
-		// refill the keypool.
-		return nil, &btcjson.ErrWalletKeypoolRanOut
+	case ErrNotFound:
+		return nil, &btcjson.ErrWalletInvalidAccountName
 
 	default: // all other non-nil errors
 		e := btcjson.Error{
@@ -712,6 +731,18 @@ func GetNewAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 		return nil, &e
 	}
+
+	addr, err := a.NewChangeAddress()
+	if err != nil {
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	// Return the new payment address string.
+	return addr.EncodeAddress(), nil
 }
 
 // ListAccounts handles a listaccounts request by returning a map of account

@@ -513,6 +513,35 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	return addr, nil
 }
 
+// NewChangeAddress returns a new change address for an account.
+func (a *Account) NewChangeAddress() (btcutil.Address, error) {
+	// Get current block's height and hash.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Get next chained change address from wallet.
+	addr, err := a.Wallet.ChangeAddress(&bs, cfg.KeypoolSize)
+	if err != nil {
+		return nil, err
+	}
+
+	// Immediately write updated wallet to disk.
+	AcctMgr.ds.ScheduleWalletWrite(a)
+	if err := AcctMgr.ds.FlushAccount(a); err != nil {
+		return nil, fmt.Errorf("account write failed: %v", err)
+	}
+
+	// Mark this new address as belonging to this account.
+	MarkAddressForAccount(addr.EncodeAddress(), a.Name())
+
+	// Request updates from btcd for new transactions sent to this address.
+	a.ReqNewTxsForAddress(addr)
+
+	return addr, nil
+}
+
 // RecoverAddresses recovers the next n chained addresses of a wallet.
 func (a *Account) RecoverAddresses(n int) error {
 	// Get info on the last chained address.  The rescan starts at the
