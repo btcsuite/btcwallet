@@ -119,9 +119,7 @@ func (am *AccountManager) Start() {
 			}
 
 		case <-timer.C:
-			if err := am.ds.FlushScheduled(); err != nil {
-				log.Errorf("Cannot write account: %v", err)
-			}
+			am.ds.FlushScheduled()
 			timer = time.NewTimer(wait)
 		}
 	}

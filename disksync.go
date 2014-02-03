@@ -173,10 +173,6 @@ func (s *syncSchedule) flush() error {
 	return nil
 }
 
-type flushScheduledRequest struct {
-	err chan error
-}
-
 type flushAccountRequest struct {
 	a   *Account
 	err chan error
@@ -196,7 +192,7 @@ type exportRequest struct {
 // DiskSyncer manages all disk write operations for a collection of accounts.
 type DiskSyncer struct {
 	// Flush scheduled account writes.
-	flushScheduled chan *flushScheduledRequest
+	flushScheduled chan struct{}
 	flushAccount   chan *flushAccountRequest
 
 	// Schedule file writes for an account.
@@ -218,7 +214,7 @@ type DiskSyncer struct {
 // NewDiskSyncer creates a new DiskSyncer.
 func NewDiskSyncer(am *AccountManager) *DiskSyncer {
 	return &DiskSyncer{
-		flushScheduled:    make(chan *flushScheduledRequest),
+		flushScheduled:    make(chan struct{}),
 		flushAccount:      make(chan *flushAccountRequest),
 		scheduleWallet:    make(chan *Account),
 		scheduleTxStore:   make(chan *Account),
@@ -244,8 +240,13 @@ func (ds *DiskSyncer) Start() {
 	schedule := newSyncSchedule(netdir)
 	for {
 		select {
-		case fr := <-ds.flushScheduled:
-			fr.err <- schedule.flush()
+		case <-ds.flushScheduled:
+			ds.am.Grab()
+			err := schedule.flush()
+			ds.am.Release()
+			if err != nil {
+				log.Errorf("Cannot write accounts: %v", err)
+			}
 
 		case fr := <-ds.flushAccount:
 			fr.err <- schedule.flushAccount(fr.a)
@@ -277,12 +278,8 @@ func (ds *DiskSyncer) Start() {
 }
 
 // FlushScheduled writes all scheduled account files to disk.
-func (ds *DiskSyncer) FlushScheduled() error {
-	ds.am.Grab()
-	err := make(chan error)
-	ds.flushScheduled <- &flushScheduledRequest{err}
-	ds.am.Release()
-	return <-err
+func (ds *DiskSyncer) FlushScheduled() {
+	ds.flushScheduled <- struct{}{}
 }
 
 // FlushAccount writes all scheduled account files to disk for a single
