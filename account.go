@@ -598,20 +598,3 @@ func ReqSpentUtxoNtfn(u *tx.Utxo) {
 
 	NotifySpent(CurrentServerConn(), (*btcwire.OutPoint)(&u.Out))
 }
-
-// accountdir returns the directory containing an account's wallet, utxo,
-// and tx files.
-//
-// This function is deprecated and should only be used when looking up
-// old (before version 0.1.1) account directories so they may be updated
-// to the new directory structure.
-func accountdir(name string, cfg *config) string {
-	var adir string
-	if name == "" { // default account
-		adir = "btcwallet"
-	} else {
-		adir = fmt.Sprintf("btcwallet-%s", name)
-	}
-
-	return filepath.Join(cfg.DataDir, adir)
-}
