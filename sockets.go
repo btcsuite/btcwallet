@@ -450,7 +450,7 @@ func (s *server) checkAuth(r *http.Request) error {
 
 // BtcdWS opens a websocket connection to a btcd instance.
 func BtcdWS(certificates []byte) (*websocket.Conn, error) {
-	url := fmt.Sprintf("wss://%s/wallet", cfg.Connect)
+	url := fmt.Sprintf("wss://%s/ws", cfg.Connect)
 	config, err := websocket.NewConfig(url, "https://localhost/")
 	if err != nil {
 		return nil, err
