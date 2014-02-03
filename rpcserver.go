@@ -40,6 +40,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"getinfo":                GetInfo,
 	"getnewaddress":          GetNewAddress,
 	"getrawchangeaddress":    GetRawChangeAddress,
+	"getreceivedbyaccount":   GetReceivedByAccount,
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
@@ -58,7 +59,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"createmultisig":        Unimplemented,
 	"dumpwallet":            Unimplemented,
 	"getblocktemplate":      Unimplemented,
-	"getreceivedbyaccount":  Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
 	"gettransaction":        Unimplemented,
 	"gettxout":              Unimplemented,
@@ -743,6 +743,42 @@ func GetRawChangeAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	// Return the new payment address string.
 	return addr.EncodeAddress(), nil
+}
+
+// GetReceivedByAccount handles a getreceivedbyaccount request by returning
+// the total amount received by addresses of an account.
+func GetReceivedByAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.GetReceivedByAccountCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	a, err := AcctMgr.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrNotFound:
+		return nil, &btcjson.ErrWalletInvalidAccountName
+
+	default: // all other non-nil errors
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	amt, err := a.TotalReceived(cmd.MinConf)
+	if err != nil {
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	return amt, nil
 }
 
 // ListAccounts handles a listaccounts request by returning a map of account

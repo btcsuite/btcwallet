@@ -140,7 +140,7 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 	for _, u := range a.UtxoStore {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
-		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
+		if confirmed(confirms, u.Height, bs.Height) {
 			bal += u.Amt
 		}
 	}
@@ -166,7 +166,7 @@ func (a *Account) CalculateAddressBalance(addr *btcutil.AddressPubKeyHash, confi
 	for _, u := range a.UtxoStore {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
-		if confirms == 0 || (u.Height != -1 && int(bs.Height-u.Height+1) >= confirms) {
+		if confirmed(confirms, u.Height, bs.Height) {
 			if bytes.Equal(addr.ScriptAddress(), u.AddrHash[:]) {
 				bal += u.Amt
 			}
@@ -597,4 +597,54 @@ func ReqSpentUtxoNtfn(u *tx.Utxo) {
 		u.Out.Hash, u.Out.Index)
 
 	NotifySpent(CurrentServerConn(), (*btcwire.OutPoint)(&u.Out))
+}
+
+// TotalReceived iterates through an account's transaction history, returning the
+// total amount of bitcoins received for any account address.  Amounts received
+// through multisig transactions are ignored.
+func (a *Account) TotalReceived(confirms int) (float64, error) {
+	bs, err := GetCurBlock()
+	if err != nil {
+		return 0, err
+	}
+
+	var totalSatoshis int64
+	for _, e := range a.TxStore {
+		recvtx, ok := e.(*tx.RecvTx)
+		if !ok {
+			continue
+		}
+
+		// Ignore change.
+		addr, err := btcutil.NewAddressPubKeyHash(recvtx.ReceiverHash, cfg.Net())
+		if err != nil {
+			continue
+		}
+		info, err := a.Wallet.AddressInfo(addr)
+		if err != nil {
+			continue
+		}
+		if info.Change {
+			continue
+		}
+
+		// Tally if the appropiate number of block confirmations have passed.
+		if confirmed(confirms, recvtx.Height(), bs.Height) {
+			totalSatoshis += recvtx.Amount
+		}
+	}
+
+	return float64(totalSatoshis) / float64(btcutil.SatoshiPerBitcoin), nil
+}
+
+// confirmed checks whether a transaction at height txHeight has met
+// minconf confirmations for a blockchain at height curHeight.
+func confirmed(minconf int, txHeight, curHeight int32) bool {
+	if minconf == 0 {
+		return true
+	}
+	if txHeight != -1 && int(curHeight-txHeight+1) >= minconf {
+		return true
+	}
+	return false
 }
