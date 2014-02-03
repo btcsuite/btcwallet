@@ -41,6 +41,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"getnewaddress":          GetNewAddress,
 	"getrawchangeaddress":    GetRawChangeAddress,
 	"getreceivedbyaccount":   GetReceivedByAccount,
+	"gettransaction":         GetTransaction,
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
@@ -60,7 +61,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"dumpwallet":            Unimplemented,
 	"getblocktemplate":      Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
-	"gettransaction":        Unimplemented,
 	"gettxout":              Unimplemented,
 	"gettxoutsetinfo":       Unimplemented,
 	"getwork":               Unimplemented,
@@ -780,6 +780,88 @@ func GetReceivedByAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	return amt, nil
+}
+
+func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.GetTransactionCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	accumulatedTxen := AcctMgr.GetTransaction(cmd.Txid) 
+	if len(accumulatedTxen) == 0 {
+		return nil, &btcjson.ErrNoTxInfo
+	}
+
+	details := []map[string]interface{}{}
+	totalAmount := int64(0)
+	for _, e := range accumulatedTxen {
+		switch t := e.Tx.(type) {
+		case *tx.SendTx:
+			var amount int64
+			for i := range t.Receivers {
+				if t.Receivers[i].Change {
+					continue
+				}
+				amount += t.Receivers[i].Amount
+			}
+			totalAmount -= amount
+			details = append(details, map[string]interface{}{
+				"account":  e.Account,
+				"category": "send",
+				// negative since it is a send
+				"amount": -amount,
+				"fee":    t.Fee,
+			})
+		case *tx.RecvTx:
+			totalAmount += t.Amount
+			details = append(details, map[string]interface{}{
+				"account": e.Account,
+				// TODO(oga) We don't mine for now so there
+				// won't be any special coinbase types. If the
+				// tx is a coinbase then we should handle it
+				// specially with the category depending on
+				// whether it is an orphan or in the blockchain.
+				"category": "receive",
+				"amount":   t.Amount,
+				"address": hex.EncodeToString(t.ReceiverHash),
+			})
+		}
+	}
+
+	// Generic information should be the same, so just use the first one.
+	first := accumulatedTxen[0]
+	ret := map[string]interface{}{
+		// "amount"
+		// "confirmations
+		"amount": totalAmount,
+
+		"txid": first.Tx.GetTxID().String(),
+		// TODO(oga) technically we have different time and
+		// timereceived depending on if a transaction was send or
+		// receive. We ideally should provide the correct numbers for
+		// both. Right now they will always be the same
+		"time":         first.Tx.GetTime(),
+		"timereceived": first.Tx.GetTime(),
+		"details":      details,
+	}
+	if first.Tx.GetBlockHeight() != -1 {
+		ret["blockindex"] = first.Tx.GetBlockHeight()
+		ret["blockhash"] = first.Tx.GetBlockHash().String()
+		ret["blocktime"] = first.Tx.GetBlockTime()
+		bs, err := GetCurBlock()
+		if err != nil {
+			return nil, &btcjson.Error{
+				Code:    btcjson.ErrWallet.Code,
+				Message: err.Error(),
+			}
+		}
+		ret["confirmations"] = bs.Height - first.Tx.GetBlockHeight() + 1
+	}
+	// TODO(oga) if the tx is a coinbase we should set "generated" to true.
+	// Since we do not mine this currently is never the case.
+	return ret, nil
 }
 
 // ListAccounts handles a listaccounts request by returning a map of account

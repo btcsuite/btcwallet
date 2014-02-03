@@ -198,7 +198,7 @@ func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]ma
 	var txInfoList []map[string]interface{}
 	for _, tx := range a.TxStore {
 		// check block number.
-		if since != -1 && tx.Height() <= since {
+		if since != -1 && tx.GetBlockHeight() <= since {
 			continue
 		}
 
@@ -629,7 +629,7 @@ func (a *Account) TotalReceived(confirms int) (float64, error) {
 		}
 
 		// Tally if the appropiate number of block confirmations have passed.
-		if confirmed(confirms, recvtx.Height(), bs.Height) {
+		if confirmed(confirms, recvtx.GetBlockHeight(), bs.Height) {
 			totalSatoshis += recvtx.Amount
 		}
 	}

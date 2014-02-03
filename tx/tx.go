@@ -108,7 +108,12 @@ type Tx interface {
 	io.WriterTo
 	ReadFromVersion(uint32, io.Reader) (int64, error)
 	TxInfo(string, int32, btcwire.BitcoinNet) []map[string]interface{}
-	Height() int32
+	GetBlockHeight() int32
+	GetBlockHash() *btcwire.ShaHash
+	GetBlockTime() int64
+	GetTime() int64
+	GetTxID() *btcwire.ShaHash
+	Copy() Tx
 }
 
 // TxStore is a slice holding RecvTx and SendTx pointers.
@@ -1061,10 +1066,41 @@ func (tx *RecvTx) TxInfo(account string, curheight int32,
 	return []map[string]interface{}{txInfo}
 }
 
-// Height returns the current blockheight of the transaction, implementing the
-// Tx interface.
-func (tx *RecvTx) Height() int32 {
+// GetBlockHeight returns the current blockheight of the transaction,
+// implementing the Tx interface.
+func (tx *RecvTx) GetBlockHeight() int32 {
 	return tx.BlockHeight
+}
+
+// GetBlockHash return the current blockhash of thet transaction, implementing
+// the Tx interface.
+func (tx *RecvTx) GetBlockHash() *btcwire.ShaHash {
+	return &tx.BlockHash
+}
+
+// GetBlockTime returns the current block time of the transaction, implementing
+// the Tx interface.
+func (tx *RecvTx) GetBlockTime() int64 {
+	return tx.BlockTime
+}
+
+// GetTime returns the current ID of the transaction, implementing the Tx
+// interface.
+func (tx *RecvTx) GetTime() int64 {
+	return tx.TimeReceived
+}
+
+// GetTxID returns the current ID of the transaction, implementing the Tx
+// interface.
+func (tx *RecvTx) GetTxID() *btcwire.ShaHash {
+	return &tx.TxID
+}
+
+// Copy returns a deep copy of the structure, implementing the Tx interface..
+func (tx *RecvTx) Copy() Tx {
+	copyTx := *tx
+
+	return &copyTx
 }
 
 func (tx *SendTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error) {
@@ -1205,8 +1241,39 @@ func (tx *SendTx) TxInfo(account string, curheight int32,
 	return reply
 }
 
-// Height returns the current blockheight of the transaction, implementing the
-// Tx interface.
-func (tx *SendTx) Height() int32 {
+// GetBlockHeight returns the current blockheight of the transaction,
+// implementing the Tx interface.
+func (tx *SendTx) GetBlockHeight() int32 {
 	return tx.BlockHeight
+}
+
+// GetBlockHash return the current blockhash of thet transaction, implementing
+// the Tx interface.
+func (tx *SendTx) GetBlockHash() *btcwire.ShaHash {
+	return &tx.BlockHash
+}
+
+// GetBlockTime returns the current block time of the transaction, implementing
+// the Tx interface.
+func (tx *SendTx) GetBlockTime() int64 {
+	return tx.BlockTime
+}
+
+// GetTime returns the current ID of the transaction, implementing the Tx
+// interface.
+func (tx *SendTx) GetTime() int64 {
+	return tx.Time
+}
+
+// GetTxID returns the current ID of the transaction, implementing the Tx
+// interface.
+func (tx *SendTx) GetTxID() *btcwire.ShaHash {
+	return &tx.TxID
+}
+
+// Copy returns a deep copy of the structure, implementing the Tx interface..
+func (tx *SendTx) Copy() Tx {
+	copyTx := *tx
+
+	return &copyTx
 }

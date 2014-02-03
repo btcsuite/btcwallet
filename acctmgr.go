@@ -472,6 +472,35 @@ func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32, minconf in
 	return txInfoList, nil
 }
 
+// accountTx represents an account/transaction pair to be used by
+// GetTransaction().
+type accountTx struct {
+	Account string
+	Tx	tx.Tx
+}
+
+// GetTransaction returns an array of accountTx to fully represent the effect of
+// a transaction on locally known wallets. If we know nothing about a
+// transaction an empty array will be returned.
+func (am *AccountManager) GetTransaction(txid string) []accountTx {
+	accumulatedTxen := []accountTx{}
+
+	for _, a := range am.AllAccounts() {
+		for _, t := range a.TxStore {
+			if t.GetTxID().String() != txid {
+				continue
+			}
+			accumulatedTxen = append(accumulatedTxen,
+				accountTx{
+					Account: a.name,
+					Tx:      t.Copy(),
+				})
+		}
+	}
+
+	return accumulatedTxen
+}
+
 // RescanActiveAddresses begins a rescan for all active addresses for
 // each account.
 //
