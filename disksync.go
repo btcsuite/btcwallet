@@ -214,7 +214,7 @@ type DiskSyncer struct {
 // NewDiskSyncer creates a new DiskSyncer.
 func NewDiskSyncer(am *AccountManager) *DiskSyncer {
 	return &DiskSyncer{
-		flushScheduled:    make(chan struct{}),
+		flushScheduled:    make(chan struct{}, 1),
 		flushAccount:      make(chan *flushAccountRequest),
 		scheduleWallet:    make(chan *Account),
 		scheduleTxStore:   make(chan *Account),
@@ -279,7 +279,13 @@ func (ds *DiskSyncer) Start() {
 
 // FlushScheduled writes all scheduled account files to disk.
 func (ds *DiskSyncer) FlushScheduled() {
-	ds.flushScheduled <- struct{}{}
+	// Schedule a flush if one is not already waiting.  This channel
+	// is buffered so if a request is already waiting, a duplicate
+	// can be safely dropped.
+	select {
+	case ds.flushScheduled <- struct{}{}:
+	default:
+	}
 }
 
 // FlushAccount writes all scheduled account files to disk for a single
