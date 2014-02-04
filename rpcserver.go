@@ -789,7 +789,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	accumulatedTxen := AcctMgr.GetTransaction(cmd.Txid) 
+	accumulatedTxen := AcctMgr.GetTransaction(cmd.Txid)
 	if len(accumulatedTxen) == 0 {
 		return nil, &btcjson.ErrNoTxInfo
 	}
@@ -825,7 +825,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				// whether it is an orphan or in the blockchain.
 				"category": "receive",
 				"amount":   t.Amount,
-				"address": hex.EncodeToString(t.ReceiverHash),
+				"address":  hex.EncodeToString(t.ReceiverHash),
 			})
 		}
 	}
@@ -1152,7 +1152,6 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
 
 	return handleSendRawTxReply(icmd, txid, a, createdTx)
 }
-
 
 // SendFrom handles a sendfrom RPC request by creating a new transaction
 // spending unspent transaction outputs for a wallet to another payment

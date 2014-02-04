@@ -25,7 +25,6 @@ import (
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
-	"time"
 )
 
 // Errors relating to accounts.
@@ -81,8 +80,6 @@ func (am *AccountManager) Start() {
 	l := list.New()
 	m := make(map[string]*Account)
 
-	wait := 10 * time.Second
-	timer := time.NewTimer(wait)
 	for {
 		select {
 		case access := <-am.accessAccount:
@@ -117,20 +114,18 @@ func (am *AccountManager) Start() {
 					}
 				}
 			}
-
-		case <-timer.C:
-			am.ds.FlushScheduled()
-			timer = time.NewTimer(wait)
 		}
 	}
 }
 
-// Grab grabs the account manager's binary semaphore.
+// Grab grabs the account manager's binary semaphore.  A custom semaphore
+// is used instead of a sync.Mutex so the account manager's disk syncer
+// can grab the semaphore from a select statement.
 func (am *AccountManager) Grab() {
 	<-am.bsem
 }
 
-// Release releases the account manager's binary semaphore.
+// Release releases exclusive ownership of the AccountManager.
 func (am *AccountManager) Release() {
 	am.bsem <- struct{}{}
 }
@@ -476,7 +471,7 @@ func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32, minconf in
 // GetTransaction().
 type accountTx struct {
 	Account string
-	Tx	tx.Tx
+	Tx      tx.Tx
 }
 
 // GetTransaction returns an array of accountTx to fully represent the effect of

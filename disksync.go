@@ -22,6 +22,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // networkDir returns the directory name of a network directory to hold account
@@ -192,8 +193,7 @@ type exportRequest struct {
 // DiskSyncer manages all disk write operations for a collection of accounts.
 type DiskSyncer struct {
 	// Flush scheduled account writes.
-	flushScheduled chan struct{}
-	flushAccount   chan *flushAccountRequest
+	flushAccount chan *flushAccountRequest
 
 	// Schedule file writes for an account.
 	scheduleWallet    chan *Account
@@ -214,7 +214,6 @@ type DiskSyncer struct {
 // NewDiskSyncer creates a new DiskSyncer.
 func NewDiskSyncer(am *AccountManager) *DiskSyncer {
 	return &DiskSyncer{
-		flushScheduled:    make(chan struct{}, 1),
 		flushAccount:      make(chan *flushAccountRequest),
 		scheduleWallet:    make(chan *Account),
 		scheduleTxStore:   make(chan *Account),
@@ -237,28 +236,52 @@ func (ds *DiskSyncer) Start() {
 	}
 	tmpnetdir := tmpNetworkDir(cfg.Net())
 
+	const wait = 10 * time.Second
+	var timer <-chan time.Time
+
+	var sem chan struct{}
 	schedule := newSyncSchedule(netdir)
 	for {
 		select {
-		case <-ds.flushScheduled:
-			ds.am.Grab()
+		case <-sem: // Now have exclusive access of the account manager
 			err := schedule.flush()
-			ds.am.Release()
 			if err != nil {
 				log.Errorf("Cannot write accounts: %v", err)
 			}
+
+			timer = nil
+
+			// Account manager passed ownership of the semaphore;
+			// Do not grab semaphore again until another flush is needed.
+			sem = nil
+
+			// Release semaphore.
+			ds.am.bsem <- struct{}{}
+
+		case <-timer:
+			// Grab AccountManager semaphore when ready so flush can occur.
+			sem = ds.am.bsem
 
 		case fr := <-ds.flushAccount:
 			fr.err <- schedule.flushAccount(fr.a)
 
 		case a := <-ds.scheduleWallet:
 			schedule.wallets[a] = struct{}{}
+			if timer == nil {
+				timer = time.After(wait)
+			}
 
 		case a := <-ds.scheduleTxStore:
 			schedule.txs[a] = struct{}{}
+			if timer == nil {
+				timer = time.After(wait)
+			}
 
 		case a := <-ds.scheduleUtxoStore:
 			schedule.utxos[a] = struct{}{}
+			if timer == nil {
+				timer = time.After(wait)
+			}
 
 		case sr := <-ds.writeBatch:
 			err := batchWriteAccounts(sr.a, tmpnetdir, netdir)
@@ -266,6 +289,7 @@ func (ds *DiskSyncer) Start() {
 				// All accounts have been synced, old schedule
 				// can be discarded.
 				schedule = newSyncSchedule(netdir)
+				timer = nil
 			}
 			sr.err <- err
 
@@ -274,17 +298,6 @@ func (ds *DiskSyncer) Start() {
 			dir := er.dir
 			er.err <- a.writeAll(dir)
 		}
-	}
-}
-
-// FlushScheduled writes all scheduled account files to disk.
-func (ds *DiskSyncer) FlushScheduled() {
-	// Schedule a flush if one is not already waiting.  This channel
-	// is buffered so if a request is already waiting, a duplicate
-	// can be safely dropped.
-	select {
-	case ds.flushScheduled <- struct{}{}:
-	default:
 	}
 }
 
