@@ -126,7 +126,7 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 		// to a change address, resulting in a UTXO not yet mined in a block.
 		// For now, disallow creating transactions until these UTXOs are mined
 		// into a block and show up as part of the balance.
-		if utxo.Height != -1 && int(bs.Height-utxo.Height) >= minconf {
+		if confirmed(minconf, utxo.Height, bs.Height) {
 			eligible = append(eligible, utxo)
 		}
 	}
