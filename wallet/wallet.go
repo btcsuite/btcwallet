@@ -54,6 +54,7 @@ const (
 // Possible errors when dealing with wallets.
 var (
 	ErrAddressNotFound      = errors.New("address not found")
+	ErrAlreadyEncrypted     = errors.New("private key is already encrypted")
 	ErrChecksumMismatch     = errors.New("checksum mismatch")
 	ErrDuplicate            = errors.New("duplicate key or address")
 	ErrMalformedEntry       = errors.New("malformed entry")
@@ -384,8 +385,18 @@ var (
 	// the 20 most recently seen block hashes.
 	Vers20LastBlocks = version{1, 36, 0, 0}
 
+	// VersUnsetNeedsPrivkeyFlag is the bugfix version where the
+	// createPrivKeyNextUnlock address flag is correctly unset
+	// after creating and encrypting its private key after unlock.
+	// Otherwise, re-creating private keys will occur too early
+	// in the address chain and fail due to encrypting an already
+	// encrypted address.  Wallet versions at or before this
+	// version include a special case to allow the duplicate
+	// encrypt.
+	VersUnsetNeedsPrivkeyFlag = version{1, 36, 1, 0}
+
 	// VersCurrent is the current wallet file version.
-	VersCurrent = Vers20LastBlocks
+	VersCurrent = VersUnsetNeedsPrivkeyFlag
 )
 
 type varEntries []io.WriterTo
@@ -469,6 +480,7 @@ type comment []byte
 // the io.ReaderFrom and io.WriterTo interfaces to read from and
 // write to any type of byte streams, including files.
 type Wallet struct {
+	vers         version
 	net          btcwire.BitcoinNet
 	flags        walletFlags
 	createDate   int64
@@ -547,7 +559,8 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 
 	// Create and fill wallet.
 	w := &Wallet{
-		net: net,
+		vers: VersCurrent,
+		net:  net,
 		flags: walletFlags{
 			useEncryption: true,
 			watchingOnly:  false,
@@ -613,7 +626,6 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	w.txCommentMap = make(map[transactionHashKey]comment)
 
 	var id [8]byte
-	var vers version
 	var appendedEntries varEntries
 
 	// Iterate through each entry needing to be read.  If data
@@ -621,7 +633,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	// data is a pointer to a fixed sized value.
 	datas := []interface{}{
 		&id,
-		&vers,
+		&w.vers,
 		&w.net,
 		&w.flags,
 		make([]byte, 6), // Bytes for Armory unique ID
@@ -639,7 +651,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 		var err error
 		switch d := data.(type) {
 		case ReaderFromVersion:
-			read, err = d.ReadFromVersion(vers, r)
+			read, err = d.ReadFromVersion(w.vers, r)
 
 		case io.ReaderFrom:
 			read, err = d.ReadFrom(r)
@@ -750,7 +762,7 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 		&VersCurrent,
 		&w.net,
 		&w.flags,
-		make([]byte, 6),  // Bytes for Armory unique ID
+		make([]byte, 6), // Bytes for Armory unique ID
 		&w.createDate,
 		&w.name,
 		&w.desc,
@@ -1078,8 +1090,12 @@ func (w *Wallet) createMissingPrivateKeys() error {
 		addr := w.addrMap[*apkh]
 		addr.privKeyCT = ithPrivKey
 		if err := addr.encrypt(w.secret); err != nil {
-			return err
+			// Avoid bug: see comment for VersUnsetNeedsPrivkeyFlag.
+			if err != ErrAlreadyEncrypted || !w.vers.LT(VersUnsetNeedsPrivkeyFlag) {
+				return err
+			}
 		}
+		addr.flags.createPrivKeyNextUnlock = false
 
 		// Set previous address and private key for next iteration.
 		prevAddr = addr
@@ -1336,7 +1352,8 @@ func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
 	// Copy members of w into a new wallet, but mark as watching-only and
 	// do not include any private keys.
 	ww := &Wallet{
-		net: w.net,
+		vers: w.vers,
+		net:  w.net,
 		flags: walletFlags{
 			useEncryption: false,
 			watchingOnly:  true,
@@ -2140,7 +2157,7 @@ func (a *btcAddress) WriteTo(w io.Writer) (n int64, err error) {
 // not 32 bytes.  If successful, the encryption flag is set.
 func (a *btcAddress) encrypt(key []byte) error {
 	if a.flags.encrypted {
-		return errors.New("address already encrypted")
+		return ErrAlreadyEncrypted
 	}
 	if len(a.privKeyCT) != 32 {
 		return errors.New("invalid clear text private key")

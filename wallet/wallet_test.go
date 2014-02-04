@@ -462,6 +462,17 @@ func TestWalletPubkeyChaining(t *testing.T) {
 		t.Errorf("ECDSA verification failed; next address's keypair does not match.")
 		return
 	}
+
+	// Check that the serialized wallet correctly unmarked the 'needs private
+	// keys later' flag.
+	buf := new(bytes.Buffer)
+	w2.WriteTo(buf)
+	w2.ReadFrom(buf)
+	err = w2.Unlock([]byte("banana"))
+	if err != nil {
+		t.Errorf("Unlock after serialize/deserialize failed: %v", err)
+		return
+	}
 }
 
 func TestWatchingWalletExport(t *testing.T) {
