@@ -49,6 +49,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"listtransactions":       ListTransactions,
 	"sendfrom":               SendFrom,
 	"sendmany":               SendMany,
+	"sendtoaddress":          SendToAddress,
 	"settxfee":               SetTxFee,
 	"walletlock":             WalletLock,
 	"walletpassphrase":       WalletPassphrase,
@@ -72,7 +73,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"listunspent":           Unimplemented,
 	"lockunspent":           Unimplemented,
 	"move":                  Unimplemented,
-	"sendtoaddress":         Unimplemented,
 	"setaccount":            Unimplemented,
 	"signmessage":           Unimplemented,
 	"signrawtransaction":    Unimplemented,
@@ -1088,130 +1088,19 @@ func ListAllTransactions(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 }
 
-// SendFrom handles a sendfrom RPC request by creating a new transaction
-// spending unspent transaction outputs for a wallet to another payment
-// address.  Leftover inputs not sent to the payment address or a fee for
-// the miner are sent back to a new address in the wallet.  Upon success,
-// the TxID for the created transaction is returned.
-func SendFrom(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
-	// Type assert icmd to access parameters.
-	cmd, ok := icmd.(*btcjson.SendFromCmd)
-	if !ok {
-		return nil, &btcjson.ErrInternal
-	}
-
-	// Check that signed integer parameters are positive.
-	if cmd.Amount < 0 {
-		e := btcjson.Error{
-			Code:    btcjson.ErrInvalidParameter.Code,
-			Message: "amount must be positive",
-		}
-		return nil, &e
-	}
-	if cmd.MinConf < 0 {
-		e := btcjson.Error{
-			Code:    btcjson.ErrInvalidParameter.Code,
-			Message: "minconf must be positive",
-		}
-		return nil, &e
-	}
-
+// sendPairs is a helper routine to reduce duplicated code when creating and
+// sending payment transactions.
+func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
+	minconf int) (interface{}, *btcjson.Error) {
 	// Check that the account specified in the request exists.
-	a, err := AcctMgr.Account(cmd.FromAccount)
-	if err != nil {
-		return nil, &btcjson.ErrWalletInvalidAccountName
-	}
-
-	// Create map of address and amount pairs.
-	pairs := map[string]int64{
-		cmd.ToAddress: cmd.Amount,
-	}
-
-	// Create transaction, replying with an error if the creation
-	// was not successful.
-	createdTx, err := a.txToPairs(pairs, cmd.MinConf)
-	switch {
-	case err == ErrNonPositiveAmount:
-		e := btcjson.Error{
-			Code:    btcjson.ErrInvalidParameter.Code,
-			Message: "amount must be positive",
-		}
-		return nil, &e
-
-	case err == wallet.ErrWalletLocked:
-		return nil, &btcjson.ErrWalletUnlockNeeded
-
-	case err != nil:
-		e := btcjson.Error{
-			Code:    btcjson.ErrInternal.Code,
-			Message: err.Error(),
-		}
-		return nil, &e
-	}
-
-	// Mark txid as having send history so handlers adding receive history
-	// wait until all send history has been written.
-	SendTxHistSyncChans.add <- createdTx.txid
-
-	// If a change address was added, sync wallet to disk and request
-	// transaction notifications to the change address.
-	if createdTx.changeAddr != nil {
-		AcctMgr.ds.ScheduleWalletWrite(a)
-		if err := AcctMgr.ds.FlushAccount(a); err != nil {
-			e := btcjson.Error{
-				Code:    btcjson.ErrWallet.Code,
-				Message: "Cannot write account: " + err.Error(),
-			}
-			return nil, &e
-		}
-		a.ReqNewTxsForAddress(createdTx.changeAddr)
-	}
-
-	hextx := hex.EncodeToString(createdTx.rawTx)
-	// NewSendRawTransactionCmd will never fail so don't check error.
-	sendtx, _ := btcjson.NewSendRawTransactionCmd(<-NewJSONID, hextx)
-	request := NewServerRequest(sendtx, new(string))
-	response := <-CurrentServerConn().SendRequest(request)
-	txid := *response.Result().(*string)
-
-	if response.Error() != nil {
-		SendTxHistSyncChans.remove <- createdTx.txid
-		return nil, response.Error()
-	}
-
-	return handleSendRawTxReply(cmd, txid, a, createdTx)
-}
-
-// SendMany handles a sendmany RPC request by creating a new transaction
-// spending unspent transaction outputs for a wallet to any number of
-// payment addresses.  Leftover inputs not sent to the payment address
-// or a fee for the miner are sent back to a new address in the wallet.
-// Upon success, the TxID for the created transaction is returned.
-func SendMany(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
-	// Type assert icmd to access parameters.
-	cmd, ok := icmd.(*btcjson.SendManyCmd)
-	if !ok {
-		return nil, &btcjson.ErrInternal
-	}
-
-	// Check that minconf is positive.
-	if cmd.MinConf < 0 {
-		e := btcjson.Error{
-			Code:    btcjson.ErrInvalidParameter.Code,
-			Message: "minconf must be positive",
-		}
-		return nil, &e
-	}
-
-	// Check that the account specified in the request exists.
-	a, err := AcctMgr.Account(cmd.FromAccount)
+	a, err := AcctMgr.Account(account)
 	if err != nil {
 		return nil, &btcjson.ErrWalletInvalidAccountName
 	}
 
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := a.txToPairs(cmd.Amounts, cmd.MinConf)
+	createdTx, err := a.txToPairs(amounts, minconf)
 	switch {
 	case err == ErrNonPositiveAmount:
 		e := btcjson.Error{
@@ -1261,7 +1150,96 @@ func SendMany(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, response.Error()
 	}
 
-	return handleSendRawTxReply(cmd, txid, a, createdTx)
+	return handleSendRawTxReply(icmd, txid, a, createdTx)
+}
+
+
+// SendFrom handles a sendfrom RPC request by creating a new transaction
+// spending unspent transaction outputs for a wallet to another payment
+// address.  Leftover inputs not sent to the payment address or a fee for
+// the miner are sent back to a new address in the wallet.  Upon success,
+// the TxID for the created transaction is returned.
+func SendFrom(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.SendFromCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	// Check that signed integer parameters are positive.
+	if cmd.Amount < 0 {
+		e := btcjson.Error{
+			Code:    btcjson.ErrInvalidParameter.Code,
+			Message: "amount must be positive",
+		}
+		return nil, &e
+	}
+	if cmd.MinConf < 0 {
+		e := btcjson.Error{
+			Code:    btcjson.ErrInvalidParameter.Code,
+			Message: "minconf must be positive",
+		}
+		return nil, &e
+	}
+	// Create map of address and amount pairs.
+	pairs := map[string]int64{
+		cmd.ToAddress: cmd.Amount,
+	}
+
+	return sendPairs(cmd, cmd.FromAccount, pairs, cmd.MinConf)
+}
+
+// SendMany handles a sendmany RPC request by creating a new transaction
+// spending unspent transaction outputs for a wallet to any number of
+// payment addresses.  Leftover inputs not sent to the payment address
+// or a fee for the miner are sent back to a new address in the wallet.
+// Upon success, the TxID for the created transaction is returned.
+func SendMany(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.SendManyCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	// Check that minconf is positive.
+	if cmd.MinConf < 0 {
+		e := btcjson.Error{
+			Code:    btcjson.ErrInvalidParameter.Code,
+			Message: "minconf must be positive",
+		}
+		return nil, &e
+	}
+
+	return sendPairs(cmd, cmd.FromAccount, cmd.Amounts, cmd.MinConf)
+}
+
+// SendToAddress handles a sendtoaddress RPC request by creating a new
+// transaction spending unspent transaction outputs for a wallet to another
+// payment address.  Leftover inputs not sent to the payment address or a fee
+// for the miner are sent back to a new address in the wallet.  Upon success,
+// the TxID for the created transaction is returned.
+func SendToAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.SendToAddressCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	// Check that signed integer parameters are positive.
+	if cmd.Amount < 0 {
+		e := btcjson.Error{
+			Code:    btcjson.ErrInvalidParameter.Code,
+			Message: "amount must be positive",
+		}
+		return nil, &e
+	}
+
+	// Mock up map of address and amount pairs.
+	pairs := map[string]int64{
+		cmd.Address: cmd.Amount,
+	}
+
+	return sendPairs(cmd, "", pairs, 1)
 }
 
 // Channels to manage SendBeforeReceiveHistorySync.
@@ -1394,6 +1372,9 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 
 	case *btcjson.SendManyCmd:
 		_ = cmd.Comment
+	case *btcjson.SendToAddressCmd:
+		_ = cmd.Comment
+		_ = cmd.CommentTo
 	}
 
 	log.Infof("Successfully sent transaction %v", txIDStr)
