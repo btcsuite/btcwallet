@@ -377,13 +377,15 @@ func (a *Account) writeWallet(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer tmpfile.Close()
 
 	if _, err = a.Wallet.WriteTo(tmpfile); err != nil {
 		return err
 	}
 
-	if err = Rename(tmpfile.Name(), wfilepath); err != nil {
+	tmppath := tmpfile.Name()
+	tmpfile.Close()
+
+	if err = Rename(tmppath, wfilepath); err != nil {
 		return err
 	}
 
@@ -397,13 +399,15 @@ func (a *Account) writeTxStore(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer tmpfile.Close()
 
 	if _, err = a.TxStore.WriteTo(tmpfile); err != nil {
 		return err
 	}
 
-	if err = Rename(tmpfile.Name(), txfilepath); err != nil {
+	tmppath := tmpfile.Name()
+	tmpfile.Close()
+
+	if err = Rename(tmppath, txfilepath); err != nil {
 		return err
 	}
 
@@ -417,13 +421,15 @@ func (a *Account) writeUtxoStore(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer tmpfile.Close()
 
 	if _, err = a.UtxoStore.WriteTo(tmpfile); err != nil {
 		return err
 	}
 
-	if err = Rename(tmpfile.Name(), utxofilepath); err != nil {
+	tmppath := tmpfile.Name()
+	tmpfile.Close()
+
+	if err = Rename(tmppath, utxofilepath); err != nil {
 		return err
 	}
 
