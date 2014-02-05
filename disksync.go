@@ -238,7 +238,6 @@ func (ds *DiskSyncer) Start() {
 
 	const wait = 10 * time.Second
 	var timer <-chan time.Time
-
 	var sem chan struct{}
 	schedule := newSyncSchedule(netdir)
 	for {
@@ -251,7 +250,6 @@ func (ds *DiskSyncer) Start() {
 
 			timer = nil
 
-			// Account manager passed ownership of the semaphore;
 			// Do not grab semaphore again until another flush is needed.
 			sem = nil
 
