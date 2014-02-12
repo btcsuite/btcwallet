@@ -17,7 +17,9 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/hex"
+	"github.com/conformal/btcec"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
@@ -51,6 +53,8 @@ var rpcHandlers = map[string]cmdHandler{
 	"sendmany":               SendMany,
 	"sendtoaddress":          SendToAddress,
 	"settxfee":               SetTxFee,
+	"signmessage":            SignMessage,
+	"verifymessage":          VerifyMessage,
 	"walletlock":             WalletLock,
 	"walletpassphrase":       WalletPassphrase,
 	"walletpassphrasechange": WalletPassphraseChange,
@@ -74,11 +78,9 @@ var rpcHandlers = map[string]cmdHandler{
 	"lockunspent":           Unimplemented,
 	"move":                  Unimplemented,
 	"setaccount":            Unimplemented,
-	"signmessage":           Unimplemented,
 	"signrawtransaction":    Unimplemented,
 	"stop":                  Unimplemented,
 	"validateaddress":       Unimplemented,
-	"verifymessage":         Unimplemented,
 
 	// Standard bitcoind methods which won't be implemented by btcwallet.
 	"encryptwallet": Unsupported,
@@ -1406,6 +1408,64 @@ func SetTxFee(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	return true, nil
 }
 
+// SignMessage signs the given message with the private key for the given
+// address
+func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	// Type assert icmd to access parameters.
+	cmd, ok := icmd.(*btcjson.SignMessageCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	acctStr, err := LookupAccountByAddress(cmd.Address)
+	if err != nil {
+		return nil, &btcjson.ErrInvalidAddressOrKey
+	}
+
+	// look up address.
+	a, err := AcctMgr.Account(acctStr)
+	if err != nil {
+		return nil, &btcjson.ErrWalletInvalidAccountName
+	}
+
+	// This really should work when the above found something valid.
+	addr, err := btcutil.DecodeAddr(cmd.Address)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	privkey, err := a.AddressKey(addr)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	ainfo, err := a.AddressInfo(addr)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	fullmsg := "Bitcoin Signed Message:\n" + cmd.Message
+	sigbytes, err := btcec.SignCompact(btcec.S256(), privkey,
+		btcwire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	return base64.StdEncoding.EncodeToString(sigbytes), nil
+}
+
 // CreateEncryptedWallet creates a new account with an encrypted
 // wallet.  If an account with the same name as the requested account
 // name already exists, an invalid account name error is returned to
@@ -1469,6 +1529,76 @@ func RecoverAddresses(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	return nil, nil
+}
+
+// VerifyMessage handles the verifymessage command by verifying the provided
+// compact signature for the given address and message.
+func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.VerifyMessageCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	// First check we know about the address and get the keys.
+	acctStr, err := LookupAccountByAddress(cmd.Address)
+	if err != nil {
+		return nil, &btcjson.ErrInvalidAddressOrKey
+	}
+
+	a, err := AcctMgr.Account(acctStr)
+	if err != nil {
+		return nil, &btcjson.ErrWalletInvalidAccountName
+	}
+
+	// This really should work when the above found something valid.
+	addr, err := btcutil.DecodeAddr(cmd.Address)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	privkey, err := a.AddressKey(addr)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	ainfo, err := a.AddressInfo(addr)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	// decode base64 signature
+	sig, err :=  base64.StdEncoding.DecodeString(cmd.Signature)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	// Validate the signature - this just shows that it was valid at all.
+	// we will compare it with the key next.
+	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
+		btcwire.DoubleSha256([]byte("Bitcoin Signed Message:\n" +
+		cmd.Message)))
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	// Return boolean if keys match.
+	return (pk.X.Cmp(privkey.X) == 0 && pk.Y.Cmp(privkey.Y) == 0 &&
+		ainfo.Compressed == wasCompressed), nil
 }
 
 // WalletIsLocked handles the walletislocked extension request by
