@@ -49,6 +49,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"listaccounts":           ListAccounts,
 	"listsinceblock":         ListSinceBlock,
 	"listtransactions":       ListTransactions,
+	"listunspent":            ListUnspent,
 	"sendfrom":               SendFrom,
 	"sendmany":               SendMany,
 	"sendtoaddress":          SendToAddress,
@@ -74,7 +75,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"listlockunspent":       Unimplemented,
 	"listreceivedbyaccount": Unimplemented,
 	"listreceivedbyaddress": Unimplemented,
-	"listunspent":           Unimplemented,
 	"lockunspent":           Unimplemented,
 	"move":                  Unimplemented,
 	"setaccount":            Unimplemented,
@@ -1088,6 +1088,40 @@ func ListAllTransactions(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 		return nil, &e
 	}
+}
+
+// ListUnspent handles the listunspent command.
+func ListUnspent(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.ListUnspentCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+	addresses := make(map[string]bool)
+	if len(cmd.Addresses) != 0 {
+		// confirm that all of them are good:
+		for _, as := range cmd.Addresses {
+			a, err := btcutil.DecodeAddr(as)
+			if err != nil {
+				return nil, &btcjson.ErrInvalidAddressOrKey
+			}
+
+			if _, ok := addresses[a.EncodeAddress()]; ok {
+				// duplicate
+				return nil, &btcjson.ErrInvalidParameter
+			}
+			addresses[a.EncodeAddress()] = true
+		}
+	}
+
+	results, err := AcctMgr.ListUnspent(cmd.MinConf, cmd.MaxConf, addresses)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	return results, nil
 }
 
 // sendPairs is a helper routine to reduce duplicated code when creating and

@@ -496,6 +496,68 @@ func (am *AccountManager) GetTransaction(txid string) []accountTx {
 	return accumulatedTxen
 }
 
+// ListUnspent returns an array of objects representing the unspent
+// wallet transactions fitting the given criteria. The confirmations will be
+// more then minconf, less than maxconf and if addresses is populated only the
+// addresses contained within it will be considered.
+// a transaction on locally known wallets. If we know nothing about a
+// transaction an empty array will be returned.
+func (am *AccountManager) ListUnspent(minconf, maxconf int,
+	addresses map[string]bool) ([]map[string]interface{}, error) {
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	replies := []map[string]interface{}{}
+	for _, a := range am.AllAccounts() {
+		for _, u := range a.UtxoStore {
+			confirmations := 0
+			if u.Height != -1 {
+				confirmations = int(bs.Height - u.Height + 1)
+			}
+			if minconf != 0 && (u.Height == -1 ||
+				confirmations < minconf) {
+				continue
+			}
+			// check maxconf - doesn't apply if not confirmed.
+			if u.Height != -1 && confirmations > maxconf {
+				continue
+			}
+
+			addr, err := btcutil.NewAddressPubKeyHash(u.AddrHash[:],
+				cfg.Net())
+			if err != nil {
+				continue
+			}
+
+			// if we hve addresses, limit to that list.
+			if len(addresses) > 0 {
+				if _, ok := addresses[addr.EncodeAddress()]; !ok {
+					continue
+				}
+			}
+			entry := map[string]interface{}{
+				// check minconf/maxconf
+				"txid":          u.Out.Hash.String(),
+				"vout":          u.Out.Index,
+				"address":       addr.EncodeAddress(),
+				"account":       a.name,
+				"scriptPubKey":  u.Subscript,
+				"amount":        float64(u.Amt) / float64(btcutil.SatoshiPerBitcoin),
+				"confirmations": confirmations,
+				// TODO(oga) if the object is
+				// pay-to-script-hash we need to add the
+				// redeemscript.
+			}
+
+			replies = append(replies, entry)
+		}
+
+	}
+	return replies, nil
+}
+
 // RescanActiveAddresses begins a rescan for all active addresses for
 // each account.
 //
