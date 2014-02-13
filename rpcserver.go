@@ -1576,7 +1576,7 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// decode base64 signature
-	sig, err :=  base64.StdEncoding.DecodeString(cmd.Signature)
+	sig, err := base64.StdEncoding.DecodeString(cmd.Signature)
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
@@ -1587,8 +1587,8 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Validate the signature - this just shows that it was valid at all.
 	// we will compare it with the key next.
 	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
-		btcwire.DoubleSha256([]byte("Bitcoin Signed Message:\n" +
-		cmd.Message)))
+		btcwire.DoubleSha256([]byte("Bitcoin Signed Message:\n"+
+			cmd.Message)))
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
