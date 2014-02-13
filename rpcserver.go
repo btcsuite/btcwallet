@@ -55,6 +55,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"sendtoaddress":          SendToAddress,
 	"settxfee":               SetTxFee,
 	"signmessage":            SignMessage,
+	"validateaddress":        ValidateAddress,
 	"verifymessage":          VerifyMessage,
 	"walletlock":             WalletLock,
 	"walletpassphrase":       WalletPassphrase,
@@ -80,7 +81,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"setaccount":            Unimplemented,
 	"signrawtransaction":    Unimplemented,
 	"stop":                  Unimplemented,
-	"validateaddress":       Unimplemented,
 
 	// Standard bitcoind methods which won't be implemented by btcwallet.
 	"encryptwallet": Unsupported,
@@ -1563,6 +1563,51 @@ func RecoverAddresses(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	return nil, nil
+}
+
+// ValidateAddress handles the validateaddress command.
+func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.ValidateAddressCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	addr, err := btcutil.DecodeAddr(cmd.Address)
+	if err != nil {
+		return map[string]interface{}{
+			"isvalid": false,
+		}, nil
+	}
+
+	_, scriptHash := addr.(*btcutil.AddressScriptHash)
+
+	result := map[string]interface{}{
+		"address":  addr.EncodeAddress(),
+		"isvalid":  true,
+		"isscript": scriptHash,
+	}
+	account, err := LookupAccountByAddress(addr.EncodeAddress())
+	if err == nil {
+		// we ignore these errors because if this call passes this can't
+		// realistically fail.
+		a, _ := AcctMgr.Account(account)
+		ainfo, _ := a.AddressInfo(addr)
+
+		result["ismine"] = true
+		result["account"] = account
+
+		// TODO(oga) when we handle different types of addresses then
+		// we will need to check here and only provide the script,
+		// hexsript and list of addresses.
+		// if scripthash, the pubkey if pubkey/pubkeyhash, etc.
+		// for now we only support p2pkh so is irrelavent
+		result["compressed"] = ainfo.Compressed
+		result["pubkey"] = ainfo.Pubkey
+	} else {
+		result["ismine"] = false
+	}
+
+	return result, nil
 }
 
 // VerifyMessage handles the verifymessage command by verifying the provided
