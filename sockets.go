@@ -302,17 +302,21 @@ func NotifyBtcdConnection(reply chan []byte) {
 // forever (until disconnected), reading JSON-RPC requests and sending
 // sending responses and notifications.
 func WSSendRecv(ws *websocket.Conn) {
-	// Add frontend notification channel to set so this handler receives
-	// updates.
+	// Add client context so notifications duplicated to each
+	// client are received by this client.
 	cc := clientContext{
-		send:         make(chan []byte),
+		send:         make(chan []byte, 1), // buffer size is number of initial notifications
 		disconnected: make(chan struct{}),
 	}
+	NotifyBtcdConnection(cc.send) // TODO(jrick): clients should explicitly request this.
 	addClient <- cc
 	defer close(cc.disconnected)
 
-	// jsonMsgs receives JSON messages from the currently connected frontend.
-	jsonMsgs := make(chan []byte)
+	// received passes all received messages from the currently connected
+	// frontend to the for-select loop.  It is closed when reading a
+	// message from the websocket connection fails (presumably due to
+	// a disconnected client).
+	received := make(chan []byte)
 
 	// Receive messages from websocket and send across jsonMsgs until
 	// connection is lost
@@ -320,18 +324,18 @@ func WSSendRecv(ws *websocket.Conn) {
 		for {
 			var m []byte
 			if err := websocket.Message.Receive(ws, &m); err != nil {
-				close(jsonMsgs)
+				close(received)
 				return
 			}
-			jsonMsgs <- m
+			received <- m
 		}
 	}()
 
 	for {
 		select {
-		case m, ok := <-jsonMsgs:
+		case m, ok := <-received:
 			if !ok {
-				// frontend disconnected.
+				// client disconnected.
 				return
 			}
 			// Handle request here.
