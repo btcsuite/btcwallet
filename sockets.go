@@ -52,13 +52,10 @@ var (
 	ErrConnLost = errors.New("connection lost")
 
 	// Adds a frontend listener channel
-	addFrontendListener = make(chan (chan []byte))
-
-	// Removes a frontend listener channel
-	deleteFrontendListener = make(chan (chan []byte))
+	addClient = make(chan clientContext)
 
 	// Messages sent to this channel are sent to each connected frontend.
-	frontendNotificationMaster = make(chan []byte, 100)
+	allClients = make(chan []byte, 100)
 )
 
 // server holds the items the RPC server may need to access (auth,
@@ -67,6 +64,11 @@ type server struct {
 	wg        sync.WaitGroup
 	listeners []net.Listener
 	authsha   [sha256.Size]byte
+}
+
+type clientContext struct {
+	send         chan []byte
+	disconnected chan struct{} // closed on disconnect
 }
 
 // parseListeners splits the list of listen addresses passed in addrs into
@@ -262,55 +264,26 @@ func (s *server) ServeRPCRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// frontendListenerDuplicator listens for new wallet listener channels
-// and duplicates messages sent to frontendNotificationMaster to all
-// connected listeners.
-func frontendListenerDuplicator() {
-	// frontendListeners is a map holding each currently connected frontend
-	// listener as the key.  The value is ignored, as this is only used as
-	// a set.
-	frontendListeners := make(map[chan []byte]bool)
+// clientResponseDuplicator listens for new wallet listener channels
+// and duplicates messages sent to allClients to all connected clients.
+func clientResponseDuplicator() {
+	clients := make(map[clientContext]struct{})
 
-	// Don't want to add or delete a wallet listener while iterating
-	// through each to propigate to every attached wallet.  Use a binary
-	// semaphore to prevent this.
-	sem := make(chan struct{}, 1)
-	sem <- struct{}{}
+	for {
+		select {
+		case cc := <-addClient:
+			clients[cc] = struct{}{}
 
-	// Check for listener channels to add or remove from set.
-	go func() {
-		for {
-			select {
-			case c := <-addFrontendListener:
-				<-sem
-				frontendListeners[c] = true
-				sem <- struct{}{}
-
-				NotifyBtcdConnection(c)
-				bs, err := GetCurBlock()
-				if err == nil {
-					NotifyNewBlockChainHeight(c, bs)
-					NotifyBalances(c)
+		case n := <-allClients:
+			for cc := range clients {
+				select {
+				case <-cc.disconnected:
+					delete(clients, cc)
+				default:
+					cc.send <- n
 				}
-
-			case c := <-deleteFrontendListener:
-				<-sem
-				delete(frontendListeners, c)
-				sem <- struct{}{}
 			}
 		}
-	}()
-
-	// Duplicate all messages sent across frontendNotificationMaster, as
-	// well as internal btcwallet notifications, to each listening wallet.
-	for {
-		ntfn := <-frontendNotificationMaster
-
-		<-sem
-		for c := range frontendListeners {
-			c <- ntfn
-		}
-		sem <- struct{}{}
 	}
 }
 
@@ -331,11 +304,12 @@ func NotifyBtcdConnection(reply chan []byte) {
 func WSSendRecv(ws *websocket.Conn) {
 	// Add frontend notification channel to set so this handler receives
 	// updates.
-	frontendNotification := make(chan []byte)
-	addFrontendListener <- frontendNotification
-	defer func() {
-		deleteFrontendListener <- frontendNotification
-	}()
+	cc := clientContext{
+		send:         make(chan []byte),
+		disconnected: make(chan struct{}),
+	}
+	addClient <- cc
+	defer close(cc.disconnected)
 
 	// jsonMsgs receives JSON messages from the currently connected frontend.
 	jsonMsgs := make(chan []byte)
@@ -363,11 +337,15 @@ func WSSendRecv(ws *websocket.Conn) {
 			// Handle request here.
 			go func(m []byte) {
 				resp := ReplyToFrontend(m, true)
-				frontendNotification <- resp
+
+				select {
+				case cc.send <- resp:
+				case <-cc.disconnected:
+				}
 			}(m)
 
-		case ntfn, _ := <-frontendNotification:
-			if err := websocket.Message.Send(ws, ntfn); err != nil {
+		case m := <-cc.send:
+			if err := websocket.Message.Send(ws, m); err != nil {
 				// Frontend disconnected.
 				return
 			}
@@ -395,7 +373,7 @@ func (s *server) Start() {
 	// requests for each channel in the set.
 	//
 	// Use a sync.Once to insure no extra duplicators run.
-	go duplicateOnce.Do(frontendListenerDuplicator)
+	go duplicateOnce.Do(clientResponseDuplicator)
 
 	log.Trace("Starting RPC server")
 
@@ -554,8 +532,8 @@ func Handshake(rpc ServerConn) error {
 	if err != nil {
 		return fmt.Errorf("cannot get best block: %v", err)
 	}
-	NotifyNewBlockChainHeight(frontendNotificationMaster, bs)
-	NotifyBalances(frontendNotificationMaster)
+	NotifyNewBlockChainHeight(allClients, bs)
+	NotifyBalances(allClients)
 
 	// Get default account.  Only the default account is used to
 	// track recently-seen blocks.

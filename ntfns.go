@@ -129,7 +129,7 @@ func NtfnProcessedTx(n btcjson.Cmd) {
 	} else {
 		// Notify frontends of new recv tx and mark as notified.
 		NotifiedRecvTxChans.add <- *recvTxOP
-		NotifyNewTxDetails(frontendNotificationMaster, a.Name(), t.TxInfo(a.Name(),
+		NotifyNewTxDetails(allClients, a.Name(), t.TxInfo(a.Name(),
 			ptn.BlockHeight, a.Wallet.Net())[0])
 	}
 
@@ -151,16 +151,15 @@ func NtfnProcessedTx(n btcjson.Cmd) {
 		// the blockconnected notifiation is processed.
 		if u.Height == -1 {
 			bal := a.CalculateBalance(0) - a.CalculateBalance(1)
-			NotifyWalletBalanceUnconfirmed(frontendNotificationMaster,
-				a.name, bal)
+			NotifyWalletBalanceUnconfirmed(allClients, a.name, bal)
 		}
 	}
 
 	// Notify frontends of new account balance.
 	confirmed := a.CalculateBalance(1)
 	unconfirmed := a.CalculateBalance(0) - confirmed
-	NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
-	NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
+	NotifyWalletBalance(allClients, a.name, confirmed)
+	NotifyWalletBalanceUnconfirmed(allClients, a.name, unconfirmed)
 }
 
 // NtfnBlockConnected handles btcd notifications resulting from newly
@@ -208,7 +207,7 @@ func NtfnBlockConnected(n btcjson.Cmd) {
 
 	// Pass notification to frontends too.
 	marshaled, _ := n.MarshalJSON()
-	frontendNotificationMaster <- marshaled
+	allClients <- marshaled
 }
 
 // NtfnBlockDisconnected handles btcd notifications resulting from
@@ -231,7 +230,7 @@ func NtfnBlockDisconnected(n btcjson.Cmd) {
 
 	// Pass notification to frontends too.
 	marshaled, _ := n.MarshalJSON()
-	frontendNotificationMaster <- marshaled
+	allClients <- marshaled
 }
 
 // NtfnTxMined handles btcd notifications resulting from newly

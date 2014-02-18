@@ -1357,7 +1357,7 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 	bs, err := GetCurBlock()
 	if err == nil {
 		for _, details := range sendtx.TxInfo(a.Name(), bs.Height, a.Net()) {
-			NotifyNewTxDetails(frontendNotificationMaster, a.Name(),
+			NotifyNewTxDetails(allClients, a.Name(),
 				details)
 		}
 	}
@@ -1379,8 +1379,8 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 	// confirmed balance.
 	confirmed := a.CalculateBalance(1)
 	unconfirmed := a.CalculateBalance(0) - confirmed
-	NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
-	NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name, unconfirmed)
+	NotifyWalletBalance(allClients, a.name, confirmed)
+	NotifyWalletBalanceUnconfirmed(allClients, a.name, unconfirmed)
 
 	// btcd cannot be trusted to successfully relay the tx to the
 	// Bitcoin network.  Even if this succeeds, the rawtx must be
@@ -1796,7 +1796,7 @@ type AccountNtfn struct {
 func NotifyWalletLockStateChange(account string, locked bool) {
 	ntfn := btcws.NewWalletLockStateNtfn(account, locked)
 	mntfn, _ := ntfn.MarshalJSON()
-	frontendNotificationMaster <- mntfn
+	allClients <- mntfn
 }
 
 // NotifyWalletBalance sends a confirmed account balance notification
@@ -1892,7 +1892,7 @@ func NotifyMinedTxSender(in chan *tx.RecvTx) {
 				recv.BlockHash.String(), recv.BlockHeight,
 				recv.BlockTime, int(recv.BlockIndex))
 			mntfn, _ := ntfn.MarshalJSON()
-			frontendNotificationMaster <- mntfn
+			allClients <- mntfn
 
 			// Mark as sent.
 			m[recv.TxID] = struct{}{}

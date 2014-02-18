@@ -227,7 +227,7 @@ func main() {
 		}
 		updateBtcd <- btcd
 
-		NotifyBtcdConnection(frontendNotificationMaster)
+		NotifyBtcdConnection(allClients)
 		log.Info("Established connection to btcd")
 
 		// Perform handshake.
@@ -246,7 +246,7 @@ func main() {
 
 		// Block goroutine until the connection is lost.
 		<-btcd.closed
-		NotifyBtcdConnection(frontendNotificationMaster)
+		NotifyBtcdConnection(allClients)
 		log.Info("Lost btcd connection")
 	}
 }

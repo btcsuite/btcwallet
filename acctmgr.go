@@ -229,8 +229,8 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 		// changes, or sending these notifications as the utxos are added.
 		confirmed := a.CalculateBalance(1)
 		unconfirmed := a.CalculateBalance(0) - confirmed
-		NotifyWalletBalance(frontendNotificationMaster, a.name, confirmed)
-		NotifyWalletBalanceUnconfirmed(frontendNotificationMaster, a.name,
+		NotifyWalletBalance(allClients, a.name, confirmed)
+		NotifyWalletBalanceUnconfirmed(allClients, a.name,
 			unconfirmed)
 
 		// If this is the default account, update the block all accounts
