@@ -330,6 +330,8 @@ func WSSendRecv(ws *websocket.Conn) {
 		}
 	}()
 
+	const deadline time.Duration = 2 * time.Second
+
 	for {
 		select {
 		case m, ok := <-received:
@@ -348,7 +350,12 @@ func WSSendRecv(ws *websocket.Conn) {
 			}(m)
 
 		case m := <-cc.send:
-			if err := websocket.Message.Send(ws, m); err != nil {
+			err := ws.SetWriteDeadline(time.Now().Add(deadline))
+			if err != nil {
+				return
+			}
+			err = websocket.Message.Send(ws, m)
+			if err != nil {
 				// Frontend disconnected.
 				return
 			}
