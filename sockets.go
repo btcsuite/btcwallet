@@ -279,8 +279,7 @@ func clientResponseDuplicator() {
 				select {
 				case <-cc.disconnected:
 					delete(clients, cc)
-				default:
-					cc.send <- n
+				case cc.send <- n:
 				}
 			}
 		}
