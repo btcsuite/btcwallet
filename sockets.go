@@ -23,7 +23,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -377,10 +376,9 @@ var duplicateOnce sync.Once
 // Start starts a HTTP server to provide standard RPC and extension
 // websocket connections for any number of btcwallet frontends.
 func (s *server) Start() {
-	// We'll need to duplicate replies to frontends to each frontend.
-	// Replies are sent to frontendReplyMaster, and duplicated to each valid
-	// channel in frontendReplySet.  This runs a goroutine to duplicate
-	// requests for each channel in the set.
+	// A duplicator for notifications intended for all clients runs
+	// in another goroutines.  Any such notifications are sent to
+	// the allClients channel and then sent to each connected client.
 	//
 	// Use a sync.Once to insure no extra duplicators run.
 	go duplicateOnce.Do(clientResponseDuplicator)
@@ -499,20 +497,6 @@ func BtcdConnect(certificates []byte) (*BtcdRPCConn, error) {
 	return rpc, nil
 }
 
-// resendUnminedTxs resends any transactions in the unmined transaction
-// pool to btcd using the 'sendrawtransaction' RPC command.
-func resendUnminedTxs() {
-	for _, createdTx := range UnminedTxs.m {
-		hextx := hex.EncodeToString(createdTx.rawTx)
-		if txid, err := SendRawTransaction(CurrentServerConn(), hextx); err != nil {
-			// TODO(jrick): Check error for if this tx is a double spend,
-			// remove it if so.
-		} else {
-			log.Debugf("Resent unmined transaction %v", txid)
-		}
-	}
-}
-
 // Handshake first checks that the websocket connection between btcwallet and
 // btcd is valid, that is, that there are no mismatching settings between
 // the two processes (such as running on different Bitcoin networks).  If the
@@ -591,7 +575,7 @@ func Handshake(rpc ServerConn) error {
 		AcctMgr.RescanActiveAddresses()
 
 		// (Re)send any unmined transactions to btcd in case of a btcd restart.
-		resendUnminedTxs()
+		AcctMgr.ResendUnminedTxs()
 
 		// Get current blockchain height and best block hash.
 		return nil
@@ -607,6 +591,6 @@ func Handshake(rpc ServerConn) error {
 	a.fullRescan = true
 	AcctMgr.Track()
 	AcctMgr.RescanActiveAddresses()
-	resendUnminedTxs()
+	AcctMgr.ResendUnminedTxs()
 	return nil
 }

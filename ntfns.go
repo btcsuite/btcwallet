@@ -21,6 +21,7 @@ package main
 import (
 	"encoding/hex"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
@@ -30,75 +31,73 @@ import (
 	"time"
 )
 
+func parseBlock(block *btcws.BlockDetails) (*tx.BlockDetails, error) {
+	if block == nil {
+		return nil, nil
+	}
+	blksha, err := btcwire.NewShaHashFromStr(block.Hash)
+	if err != nil {
+		return nil, err
+	}
+	return &tx.BlockDetails{
+		Height: block.Height,
+		Hash:   *blksha,
+		Index:  int32(block.Index),
+		Time:   time.Unix(block.Time, 0),
+	}, nil
+}
+
 type notificationHandler func(btcjson.Cmd)
 
 var notificationHandlers = map[string]notificationHandler{
 	btcws.BlockConnectedNtfnMethod:    NtfnBlockConnected,
 	btcws.BlockDisconnectedNtfnMethod: NtfnBlockDisconnected,
-	btcws.ProcessedTxNtfnMethod:       NtfnProcessedTx,
-	btcws.TxMinedNtfnMethod:           NtfnTxMined,
-	btcws.TxSpentNtfnMethod:           NtfnTxSpent,
+	btcws.RecvTxNtfnMethod:            NtfnRecvTx,
+	btcws.RedeemingTxNtfnMethod:       NtfnRedeemingTx,
 }
 
-// NtfnProcessedTx handles the btcws.ProcessedTxNtfn notification.
-func NtfnProcessedTx(n btcjson.Cmd) {
-	ptn, ok := n.(*btcws.ProcessedTxNtfn)
+// NtfnRecvTx handles the btcws.RecvTxNtfn notification.
+func NtfnRecvTx(n btcjson.Cmd) {
+	rtx, ok := n.(*btcws.RecvTxNtfn)
 	if !ok {
 		log.Errorf("%v handler: unexpected type", n.Method())
 		return
 	}
 
-	// Create useful types from the JSON strings.
-	receiver, err := btcutil.DecodeAddr(ptn.Receiver)
+	bs, err := GetCurBlock()
 	if err != nil {
-		log.Errorf("%v handler: error parsing receiver: %v", n.Method(), err)
-		return
-	}
-	txID, err := btcwire.NewShaHashFromStr(ptn.TxID)
-	if err != nil {
-		log.Errorf("%v handler: error parsing txid: %v", n.Method(), err)
-		return
-	}
-	blockHash, err := btcwire.NewShaHashFromStr(ptn.BlockHash)
-	if err != nil {
-		log.Errorf("%v handler: error parsing block hash: %v", n.Method(), err)
-		return
-	}
-	pkscript, err := hex.DecodeString(ptn.PkScript)
-	if err != nil {
-		log.Errorf("%v handler: error parsing pkscript: %v", n.Method(), err)
+		log.Errorf("%v handler: cannot get current block: %v", n.Method(), err)
 		return
 	}
 
-	// Lookup account for address in result.
-	aname, err := LookupAccountByAddress(ptn.Receiver)
-	if err == ErrNotFound {
-		log.Warnf("Received rescan result for unknown address %v", ptn.Receiver)
+	rawTx, err := hex.DecodeString(rtx.HexTx)
+	if err != nil {
+		log.Errorf("%v handler: bad hexstring: err", n.Method(), err)
 		return
 	}
-	a, err := AcctMgr.Account(aname)
-	if err == ErrNotFound {
-		log.Errorf("Missing account for rescaned address %v", ptn.Receiver)
+	tx_, err := btcutil.NewTxFromBytes(rawTx)
+	if err != nil {
+		log.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
+		return
 	}
 
-	// Create RecvTx to add to tx history.
-	t := &tx.RecvTx{
-		TxID:         *txID,
-		TxOutIdx:     ptn.TxOutIndex,
-		TimeReceived: time.Now().Unix(),
-		BlockHeight:  ptn.BlockHeight,
-		BlockHash:    *blockHash,
-		BlockIndex:   int32(ptn.BlockIndex),
-		BlockTime:    ptn.BlockTime,
-		Amount:       ptn.Amount,
-		ReceiverHash: receiver.ScriptAddress(),
+	var block *tx.BlockDetails
+	if rtx.Block != nil {
+		block, err = parseBlock(rtx.Block)
+		if err != nil {
+			log.Errorf("%v handler: bad block: %v", n.Method(), err)
+			return
+		}
 	}
 
 	// For transactions originating from this wallet, the sent tx history should
 	// be recorded before the received history.  If wallet created this tx, wait
 	// for the sent history to finish being recorded before continuing.
+	//
+	// TODO(jrick) this is wrong due to tx malleability.  Cannot safely use the
+	// txsha as an identifier.
 	req := SendTxHistSyncRequest{
-		txid:     *txID,
+		txsha:    *tx_.Sha(),
 		response: make(chan SendTxHistSyncResponse),
 	}
 	SendTxHistSyncChans.access <- req
@@ -106,60 +105,64 @@ func NtfnProcessedTx(n btcjson.Cmd) {
 	if resp.ok {
 		// Wait until send history has been recorded.
 		<-resp.c
-		SendTxHistSyncChans.remove <- *txID
+		SendTxHistSyncChans.remove <- *tx_.Sha()
 	}
 
-	// Record the tx history.
-	a.TxStore.InsertRecvTx(t)
-	AcctMgr.ds.ScheduleTxStoreWrite(a)
-	// Notify frontends of tx.  If the tx is unconfirmed, it is always
-	// notified and the outpoint is marked as notified.  If the outpoint
-	// has already been notified and is now in a block, a txmined notifiction
-	// should be sent once to let frontends that all previous send/recvs
-	// for this unconfirmed tx are now confirmed.
-	recvTxOP := btcwire.NewOutPoint(txID, ptn.TxOutIndex)
-	previouslyNotifiedReq := NotifiedRecvTxRequest{
-		op:       *recvTxOP,
-		response: make(chan NotifiedRecvTxResponse),
-	}
-	NotifiedRecvTxChans.access <- previouslyNotifiedReq
-	if <-previouslyNotifiedReq.response {
-		NotifyMinedTx <- t
-		NotifiedRecvTxChans.remove <- *recvTxOP
-	} else {
-		// Notify frontends of new recv tx and mark as notified.
-		NotifiedRecvTxChans.add <- *recvTxOP
-		NotifyNewTxDetails(allClients, a.Name(), t.TxInfo(a.Name(),
-			ptn.BlockHeight, a.Wallet.Net())[0])
-	}
+	// For every output, find all accounts handling that output address (if any)
+	// and record the received txout.
+	for outIdx, txout := range tx_.MsgTx().TxOut {
+		var accounts []*Account
+		var received time.Time
+		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, cfg.Net())
+		for _, addr := range addrs {
+			aname, err := LookupAccountByAddress(addr.EncodeAddress())
+			if err == ErrNotFound {
+				continue
+			}
+			// This cannot reasonably fail if the above succeeded.
+			a, _ := AcctMgr.Account(aname)
+			accounts = append(accounts, a)
 
-	if !ptn.Spent {
-		u := &tx.Utxo{
-			Amt:       uint64(ptn.Amount),
-			Height:    ptn.BlockHeight,
-			Subscript: pkscript,
+			if block != nil {
+				received = block.Time
+			} else {
+				received = time.Now()
+			}
 		}
-		copy(u.Out.Hash[:], txID[:])
-		u.Out.Index = uint32(ptn.TxOutIndex)
-		copy(u.AddrHash[:], receiver.ScriptAddress())
-		copy(u.BlockHash[:], blockHash[:])
-		a.UtxoStore.Insert(u)
-		AcctMgr.ds.ScheduleUtxoStoreWrite(a)
 
-		// If this notification came from mempool, notify frontends of
-		// the new unconfirmed balance immediately.  Otherwise, wait until
-		// the blockconnected notifiation is processed.
-		if u.Height == -1 {
-			bal := a.CalculateBalance(0) - a.CalculateBalance(1)
-			NotifyWalletBalanceUnconfirmed(allClients, a.name, bal)
+		for _, a := range accounts {
+			record := a.TxStore.InsertRecvTxOut(tx_, uint32(outIdx), false, received, block)
+			AcctMgr.ds.ScheduleTxStoreWrite(a)
+
+			// Notify frontends of tx.  If the tx is unconfirmed, it is always
+			// notified and the outpoint is marked as notified.  If the outpoint
+			// has already been notified and is now in a block, a txmined notifiction
+			// should be sent once to let frontends that all previous send/recvs
+			// for this unconfirmed tx are now confirmed.
+			recvTxOP := btcwire.NewOutPoint(tx_.Sha(), uint32(outIdx))
+			previouslyNotifiedReq := NotifiedRecvTxRequest{
+				op:       *recvTxOP,
+				response: make(chan NotifiedRecvTxResponse),
+			}
+			NotifiedRecvTxChans.access <- previouslyNotifiedReq
+			if <-previouslyNotifiedReq.response {
+				NotifiedRecvTxChans.remove <- *recvTxOP
+			} else {
+				// Notify frontends of new recv tx and mark as notified.
+				NotifiedRecvTxChans.add <- *recvTxOP
+
+				// need access to the RecvTxOut to get the json info object
+				NotifyNewTxDetails(allClients, a.Name(),
+					record.TxInfo(a.Name(), bs.Height, a.Wallet.Net())[0])
+			}
+
+			// Notify frontends of new account balance.
+			confirmed := a.CalculateBalance(1)
+			unconfirmed := a.CalculateBalance(0) - confirmed
+			NotifyWalletBalance(allClients, a.name, confirmed)
+			NotifyWalletBalanceUnconfirmed(allClients, a.name, unconfirmed)
 		}
 	}
-
-	// Notify frontends of new account balance.
-	confirmed := a.CalculateBalance(1)
-	unconfirmed := a.CalculateBalance(0) - confirmed
-	NotifyWalletBalance(allClients, a.name, confirmed)
-	NotifyWalletBalanceUnconfirmed(allClients, a.name, unconfirmed)
 }
 
 // NtfnBlockConnected handles btcd notifications resulting from newly
@@ -233,42 +236,30 @@ func NtfnBlockDisconnected(n btcjson.Cmd) {
 	allClients <- marshaled
 }
 
-// NtfnTxMined handles btcd notifications resulting from newly
-// mined transactions that originated from this wallet.
-func NtfnTxMined(n btcjson.Cmd) {
-	tmn, ok := n.(*btcws.TxMinedNtfn)
+// NtfnRedeemingTx handles btcd redeemingtx notifications resulting from a
+// transaction spending a watched outpoint.
+func NtfnRedeemingTx(n btcjson.Cmd) {
+	cn, ok := n.(*btcws.RedeemingTxNtfn)
 	if !ok {
 		log.Errorf("%v handler: unexpected type", n.Method())
 		return
 	}
 
-	txid, err := btcwire.NewShaHashFromStr(tmn.TxID)
+	rawTx, err := hex.DecodeString(cn.HexTx)
 	if err != nil {
-		log.Errorf("%v handler: invalid hash string", n.Method())
+		log.Errorf("%v handler: bad hexstring: err", n.Method(), err)
 		return
 	}
-	blockhash, err := btcwire.NewShaHashFromStr(tmn.BlockHash)
+	tx_, err := btcutil.NewTxFromBytes(rawTx)
 	if err != nil {
-		log.Errorf("%v handler: invalid block hash string", n.Method())
-		return
-	}
-
-	err = AcctMgr.RecordMinedTx(txid, blockhash,
-		tmn.BlockHeight, tmn.Index, tmn.BlockTime)
-	if err != nil {
-		log.Errorf("%v handler: %v", n.Method(), err)
+		log.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
 		return
 	}
 
-	// Remove mined transaction from pool.
-	UnminedTxs.Lock()
-	delete(UnminedTxs.m, TXID(*txid))
-	UnminedTxs.Unlock()
-}
-
-// NtfnTxSpent handles btcd txspent notifications resulting from a block
-// transaction being processed that spents a wallet UTXO.
-func NtfnTxSpent(n btcjson.Cmd) {
-	// TODO(jrick): This might actually be useless and maybe it shouldn't
-	// be implemented.
+	block, err := parseBlock(cn.Block)
+	if err != nil {
+		log.Errorf("%v handler: bad block: %v", n.Method(), err)
+		return
+	}
+	AcctMgr.RecordSpendingTx(tx_, block)
 }

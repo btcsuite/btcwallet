@@ -17,10 +17,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
@@ -791,33 +793,29 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	accumulatedTxen := AcctMgr.GetTransaction(cmd.Txid)
+	txsha, err := btcwire.NewShaHashFromStr(cmd.Txid)
+	if err != nil {
+		return nil, &btcjson.ErrDecodeHexString
+	}
+
+	accumulatedTxen := AcctMgr.GetTransaction(txsha)
 	if len(accumulatedTxen) == 0 {
 		return nil, &btcjson.ErrNoTxInfo
 	}
 
-	details := []map[string]interface{}{}
-	totalAmount := int64(0)
+	var sr *tx.SignedTx
+	var srAccount string
+	var amountReceived int64
+	var details []map[string]interface{}
 	for _, e := range accumulatedTxen {
-		switch t := e.Tx.(type) {
-		case *tx.SendTx:
-			var amount int64
-			for i := range t.Receivers {
-				if t.Receivers[i].Change {
-					continue
-				}
-				amount += t.Receivers[i].Amount
+		switch record := e.Tx.(type) {
+		case *tx.RecvTxOut:
+			if record.Change() {
+				continue
 			}
-			totalAmount -= amount
-			details = append(details, map[string]interface{}{
-				"account":  e.Account,
-				"category": "send",
-				// negative since it is a send
-				"amount": -amount,
-				"fee":    t.Fee,
-			})
-		case *tx.RecvTx:
-			totalAmount += t.Amount
+
+			amountReceived += record.Value()
+			_, addrs, _, _ := record.Addresses(cfg.Net())
 			details = append(details, map[string]interface{}{
 				"account": e.Account,
 				// TODO(oga) We don't mine for now so there
@@ -826,10 +824,30 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				// specially with the category depending on
 				// whether it is an orphan or in the blockchain.
 				"category": "receive",
-				"amount":   t.Amount,
-				"address":  hex.EncodeToString(t.ReceiverHash),
+				"amount":   float64(record.Value()) / float64(btcutil.SatoshiPerBitcoin),
+				"address":  addrs[0].EncodeAddress(),
 			})
+
+		case *tx.SignedTx:
+			// there should only be a single SignedTx record, if any.
+			// If found, it will be added to the beginning.
+			sr = record
+			srAccount = e.Account
 		}
+	}
+
+	totalAmount := amountReceived
+	if sr != nil {
+		totalAmount -= sr.TotalSent()
+		info := map[string]interface{}{
+			"account":  srAccount,
+			"category": "send",
+			// negative since it is a send
+			"amount": -(sr.TotalSent() - amountReceived),
+			"fee":    sr.Fee(),
+		}
+		// Add sent information to front.
+		details = append([]map[string]interface{}{info}, details...)
 	}
 
 	// Generic information should be the same, so just use the first one.
@@ -839,19 +857,19 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		// "confirmations
 		"amount": totalAmount,
 
-		"txid": first.Tx.GetTxID().String(),
+		"txid": first.Tx.TxSha().String(),
 		// TODO(oga) technically we have different time and
 		// timereceived depending on if a transaction was send or
 		// receive. We ideally should provide the correct numbers for
 		// both. Right now they will always be the same
-		"time":         first.Tx.GetTime(),
-		"timereceived": first.Tx.GetTime(),
+		"time":         first.Tx.Time().Unix(),
+		"timereceived": first.Tx.Time().Unix(),
 		"details":      details,
 	}
-	if first.Tx.GetBlockHeight() != -1 {
-		ret["blockindex"] = first.Tx.GetBlockHeight()
-		ret["blockhash"] = first.Tx.GetBlockHash().String()
-		ret["blocktime"] = first.Tx.GetBlockTime()
+	if details := first.Tx.Block(); details != nil {
+		ret["blockindex"] = float64(details.Height)
+		ret["blockhash"] = details.Hash.String()
+		ret["blocktime"] = details.Time.Unix()
 		bs, err := GetCurBlock()
 		if err != nil {
 			return nil, &btcjson.Error{
@@ -859,7 +877,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				Message: err.Error(),
 			}
 		}
-		ret["confirmations"] = bs.Height - first.Tx.GetBlockHeight() + 1
+		ret["confirmations"] = bs.Height - details.Height + 1
 	}
 	// TODO(oga) if the tx is a coinbase we should set "generated" to true.
 	// Since we do not mine this currently is never the case.
@@ -1158,11 +1176,14 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
 
 	// Mark txid as having send history so handlers adding receive history
 	// wait until all send history has been written.
-	SendTxHistSyncChans.add <- createdTx.txid
+	SendTxHistSyncChans.add <- *createdTx.tx.Sha()
 
 	// If a change address was added, sync wallet to disk and request
 	// transaction notifications to the change address.
-	if createdTx.changeAddr != nil {
+	if createdTx.haschange {
+		script := createdTx.tx.MsgTx().TxOut[createdTx.changeIdx].PkScript
+		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(script, cfg.Net())
+
 		AcctMgr.ds.ScheduleWalletWrite(a)
 		if err := AcctMgr.ds.FlushAccount(a); err != nil {
 			e := btcjson.Error{
@@ -1171,22 +1192,19 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
 			}
 			return nil, &e
 		}
-		a.ReqNewTxsForAddress(createdTx.changeAddr)
+		a.ReqNewTxsForAddress(addrs[0])
 	}
 
-	hextx := hex.EncodeToString(createdTx.rawTx)
-	// NewSendRawTransactionCmd will never fail so don't check error.
-	sendtx, _ := btcjson.NewSendRawTransactionCmd(<-NewJSONID, hextx)
-	request := NewServerRequest(sendtx, new(string))
-	response := <-CurrentServerConn().SendRequest(request)
-	txid := *response.Result().(*string)
-
-	if response.Error() != nil {
-		SendTxHistSyncChans.remove <- createdTx.txid
-		return nil, response.Error()
+	serializedTx := new(bytes.Buffer)
+	createdTx.tx.MsgTx().Serialize(serializedTx)
+	hextx := hex.EncodeToString(serializedTx.Bytes())
+	txSha, jsonErr := SendRawTransaction(CurrentServerConn(), hextx)
+	if jsonErr != nil {
+		SendTxHistSyncChans.remove <- *createdTx.tx.Sha()
+		return nil, jsonErr
 	}
 
-	return handleSendRawTxReply(icmd, txid, a, createdTx)
+	return handleSendRawTxReply(icmd, txSha, a, createdTx)
 }
 
 // SendFrom handles a sendfrom RPC request by creating a new transaction
@@ -1291,7 +1309,7 @@ var SendTxHistSyncChans = struct {
 // SendTxHistSyncRequest requests a SendTxHistSyncResponse from
 // SendBeforeReceiveHistorySync.
 type SendTxHistSyncRequest struct {
-	txid     btcwire.ShaHash
+	txsha    btcwire.ShaHash
 	response chan SendTxHistSyncResponse
 }
 
@@ -1302,8 +1320,8 @@ type SendTxHistSyncResponse struct {
 }
 
 // SendBeforeReceiveHistorySync manages a set of transaction hashes
-// created by this wallet.  For each newly added txid, a channel is
-// created.  Once the send history has been recorded, the txid should
+// created by this wallet.  For each newly added txsha, a channel is
+// created.  Once the send history has been recorded, the txsha should
 // be messaged across done, causing the internal channel to be closed.
 // Before receive history is recorded, access should be used to check
 // if there are or were any goroutines writing send history, and if
@@ -1314,61 +1332,43 @@ func SendBeforeReceiveHistorySync(add, done, remove chan btcwire.ShaHash,
 	m := make(map[btcwire.ShaHash]chan struct{})
 	for {
 		select {
-		case txid := <-add:
-			m[txid] = make(chan struct{})
+		case txsha := <-add:
+			m[txsha] = make(chan struct{})
 
-		case txid := <-remove:
-			delete(m, txid)
+		case txsha := <-remove:
+			delete(m, txsha)
 
-		case txid := <-done:
-			if c, ok := m[txid]; ok {
+		case txsha := <-done:
+			if c, ok := m[txsha]; ok {
 				close(c)
 			}
 
 		case req := <-access:
-			c, ok := m[req.txid]
+			c, ok := m[req.txsha]
 			req.response <- SendTxHistSyncResponse{c: c, ok: ok}
 		}
 	}
 }
 
 func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *CreatedTx) (interface{}, *btcjson.Error) {
-	txID, err := btcwire.NewShaHashFromStr(txIDStr)
-	if err != nil {
-		e := btcjson.Error{
-			Code:    btcjson.ErrInternal.Code,
-			Message: "Invalid hash string from btcd reply",
-		}
-		return nil, &e
-	}
-
 	// Add to transaction store.
-	sendtx := &tx.SendTx{
-		TxID:        *txID,
-		Time:        txInfo.time.Unix(),
-		BlockHeight: -1,
-		Fee:         txInfo.fee,
-		Receivers:   txInfo.outputs,
-	}
-	a.TxStore = append(a.TxStore, sendtx)
+	stx := a.TxStore.InsertSignedTx(txInfo.tx, nil)
 	AcctMgr.ds.ScheduleTxStoreWrite(a)
 
 	// Notify frontends of new SendTx.
 	bs, err := GetCurBlock()
 	if err == nil {
-		for _, details := range sendtx.TxInfo(a.Name(), bs.Height, a.Net()) {
-			NotifyNewTxDetails(allClients, a.Name(),
-				details)
+		for _, details := range stx.TxInfo(a.Name(), bs.Height, a.Net()) {
+			NotifyNewTxDetails(allClients, a.Name(), details)
 		}
 	}
 
 	// Signal that received notifiations are ok to add now.
-	SendTxHistSyncChans.done <- txInfo.txid
+	SendTxHistSyncChans.done <- *txInfo.tx.Sha()
 
-	// Remove previous unspent outputs now spent by the tx.
-	if a.UtxoStore.Remove(txInfo.inputs) {
-		AcctMgr.ds.ScheduleUtxoStoreWrite(a)
-	}
+	// Add spending transaction to the store if it does not already exist,
+	// marking all spent previous outputs.
+	//a.TxStore.MarkSpendingTx(txInfo.tx, nil)
 
 	// Disk sync tx and utxo stores.
 	if err := AcctMgr.ds.FlushAccount(a); err != nil {
@@ -1381,18 +1381,6 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 	unconfirmed := a.CalculateBalance(0) - confirmed
 	NotifyWalletBalance(allClients, a.name, confirmed)
 	NotifyWalletBalanceUnconfirmed(allClients, a.name, unconfirmed)
-
-	// btcd cannot be trusted to successfully relay the tx to the
-	// Bitcoin network.  Even if this succeeds, the rawtx must be
-	// saved and checked for an appearence in a later block. btcd
-	// will make a best try effort, but ultimately it's btcwallet's
-	// responsibility.
-	//
-	// Add hex string of raw tx to sent tx pool.  If btcd disconnects
-	// and is reconnected, these txs are resent.
-	UnminedTxs.Lock()
-	UnminedTxs.m[TXID(*txID)] = txInfo
-	UnminedTxs.Unlock()
 
 	// The comments to be saved differ based on the underlying type
 	// of the cmd, so switch on the type to check whether it is a
@@ -1868,34 +1856,6 @@ func StoreNotifiedMempoolRecvTxs(add, remove chan btcwire.OutPoint,
 		case req := <-access:
 			_, ok := m[req.op]
 			req.response <- NotifiedRecvTxResponse(ok)
-		}
-	}
-}
-
-// Channel to send received transactions that were previously
-// notified to frontends by the mempool.  A TxMined notification
-// is sent to all connected frontends detailing the block information
-// about the now confirmed transaction.
-var NotifyMinedTx = make(chan *tx.RecvTx)
-
-// NotifyMinedTxSender reads received transactions from in, notifying
-// frontends that the tx has now been confirmed in a block.  Duplicates
-// are filtered out.
-func NotifyMinedTxSender(in chan *tx.RecvTx) {
-	// Create a map to hold a set of already notified
-	// txids.  Do not send duplicates.
-	m := make(map[btcwire.ShaHash]struct{})
-
-	for recv := range in {
-		if _, ok := m[recv.TxID]; !ok {
-			ntfn := btcws.NewTxMinedNtfn(recv.TxID.String(),
-				recv.BlockHash.String(), recv.BlockHeight,
-				recv.BlockTime, int(recv.BlockIndex))
-			mntfn, _ := ntfn.MarshalJSON()
-			allClients <- mntfn
-
-			// Mark as sent.
-			m[recv.TxID] = struct{}{}
 		}
 	}
 }

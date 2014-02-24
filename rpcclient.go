@@ -21,9 +21,11 @@ package main
 
 import (
 	"code.google.com/p/go.net/websocket"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
 )
@@ -360,4 +362,40 @@ func SendRawTransaction(rpc ServerConn, hextx string) (txid string, error *btcjs
 		return "", response.Error()
 	}
 	return *response.Result().(*string), nil
+}
+
+// GetRawTransaction sends the non-verbose version of a getrawtransaction
+// request to receive the serialized transaction referenced by txsha.  If
+// successful, the transaction is decoded and returned as a btcutil.Tx.
+func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, *btcjson.Error) {
+	// NewGetRawTransactionCmd cannot fail with no optargs.
+	cmd, _ := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String())
+	request := NewServerRequest(cmd, new(string))
+	response := <-rpc.SendRequest(request)
+	if response.Error() != nil {
+		return nil, response.Error()
+	}
+	hextx := *response.Result().(*string)
+	serializedTx, err := hex.DecodeString(hextx)
+	if err != nil {
+		return nil, &btcjson.ErrDecodeHexString
+	}
+	utx, err := btcutil.NewTxFromBytes(serializedTx)
+	if err != nil {
+		return nil, &btcjson.ErrDeserialization
+	}
+	return utx, nil
+}
+
+// VerboseGetRawTransaction sends the verbose version of a getrawtransaction
+// request to receive details about a transaction.
+func VerboseGetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcjson.TxRawResult, *btcjson.Error) {
+	// NewGetRawTransactionCmd cannot fail with a single optarg.
+	cmd, _ := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String(), 1)
+	request := NewServerRequest(cmd, new(btcjson.TxRawResult))
+	response := <-rpc.SendRequest(request)
+	if response.Error() != nil {
+		return nil, response.Error()
+	}
+	return response.Result().(*btcjson.TxRawResult), nil
 }

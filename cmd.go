@@ -41,11 +41,6 @@ var (
 		Err: "wallet file does not exist",
 	}
 
-	// ErrNoUtxos describes an error where the wallet file was successfully
-	// read, but the UTXO file was not.  To properly handle this error,
-	// a rescan should be done since the wallet creation block.
-	ErrNoUtxos = errors.New("utxo file cannot be read")
-
 	// ErrNoTxs describes an error where the wallet and UTXO files were
 	// successfully read, but the TX history file was not.  It is up to
 	// the caller whether this necessitates a rescan or not.
@@ -190,7 +185,6 @@ func main() {
 	go StoreNotifiedMempoolRecvTxs(NotifiedRecvTxChans.add,
 		NotifiedRecvTxChans.remove,
 		NotifiedRecvTxChans.access)
-	go NotifyMinedTxSender(NotifyMinedTx)
 	go NotifyBalanceSyncer(NotifyBalanceSyncerChans.add,
 		NotifyBalanceSyncerChans.remove,
 		NotifyBalanceSyncerChans.access)
@@ -271,15 +265,16 @@ func OpenSavedAccount(name string, cfg *config) (*Account, error) {
 	}
 
 	wlt := new(wallet.Wallet)
+	txs := tx.NewStore()
 	a := &Account{
-		Wallet: wlt,
-		name:   name,
+		name:    name,
+		Wallet:  wlt,
+		TxStore: txs,
 	}
 
 	wfilepath := accountFilename("wallet.bin", name, netdir)
-	utxofilepath := accountFilename("utxo.bin", name, netdir)
 	txfilepath := accountFilename("tx.bin", name, netdir)
-	var wfile, utxofile, txfile *os.File
+	var wfile, txfile *os.File
 
 	// Read wallet file.
 	wfile, err := os.Open(wfilepath)
@@ -309,30 +304,10 @@ func OpenSavedAccount(name string, cfg *config) (*Account, error) {
 		finalErr = ErrNoTxs
 	} else {
 		defer txfile.Close()
-		var txs tx.TxStore
 		if _, err = txs.ReadFrom(txfile); err != nil {
 			log.Errorf("cannot read tx file: %s", err)
+			a.fullRescan = true
 			finalErr = ErrNoTxs
-		} else {
-			a.TxStore = txs
-		}
-	}
-
-	// Read utxo file.  If this fails, return a ErrNoUtxos error so a
-	// rescan can be done since the wallet creation block.
-	var utxos tx.UtxoStore
-	utxofile, err = os.Open(utxofilepath)
-	if err != nil {
-		log.Errorf("cannot open utxo file: %s", err)
-		finalErr = ErrNoUtxos
-		a.fullRescan = true
-	} else {
-		defer utxofile.Close()
-		if _, err = utxos.ReadFrom(utxofile); err != nil {
-			log.Errorf("cannot read utxo file: %s", err)
-			finalErr = ErrNoUtxos
-		} else {
-			a.UtxoStore = utxos
 		}
 	}
 

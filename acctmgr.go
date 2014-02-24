@@ -17,7 +17,6 @@
 package main
 
 import (
-	"bytes"
 	"container/list"
 	"errors"
 	"fmt"
@@ -187,7 +186,6 @@ func (am *AccountManager) RegisterNewAccount(a *Account) error {
 	// Ensure that the new account is written out to disk.
 	am.ds.ScheduleWalletWrite(a)
 	am.ds.ScheduleTxStoreWrite(a)
-	am.ds.ScheduleUtxoStoreWrite(a)
 	if err := am.ds.FlushAccount(a); err != nil {
 		am.RemoveAccount(a)
 		return err
@@ -198,17 +196,11 @@ func (am *AccountManager) RegisterNewAccount(a *Account) error {
 // Rollback rolls back each managed Account to the state before the block
 // specified by height and hash was connected to the main chain.
 func (am *AccountManager) Rollback(height int32, hash *btcwire.ShaHash) {
-	log.Debugf("Rolling back tx history since block height %v hash %v",
-		height, hash)
+	log.Debugf("Rolling back tx history since block height %v", height)
 
 	for _, a := range am.AllAccounts() {
-		if a.UtxoStore.Rollback(height, hash) {
-			am.ds.ScheduleUtxoStoreWrite(a)
-		}
-
-		if a.TxStore.Rollback(height, hash) {
-			am.ds.ScheduleTxStoreWrite(a)
-		}
+		a.TxStore.Rollback(height)
+		am.ds.ScheduleTxStoreWrite(a)
 	}
 }
 
@@ -247,32 +239,15 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 // the transaction IDs match, the record in the TxStore is updated with
 // the full information about the newly-mined tx, and the TxStore is
 // scheduled to be written to disk..
-func (am *AccountManager) RecordMinedTx(txid *btcwire.ShaHash,
-	blkhash *btcwire.ShaHash, blkheight int32, blkindex int,
-	blktime int64) error {
-
+func (am *AccountManager) RecordSpendingTx(tx_ *btcutil.Tx, block *tx.BlockDetails) {
 	for _, a := range am.AllAccounts() {
-		// Search in reverse order.  Since more recently-created
-		// transactions are appended to the end of the store, it's
-		// more likely to find it when searching from the end.
-		for i := len(a.TxStore) - 1; i >= 0; i-- {
-			sendtx, ok := a.TxStore[i].(*tx.SendTx)
-			if ok {
-				if bytes.Equal(txid.Bytes(), sendtx.TxID[:]) {
-					copy(sendtx.BlockHash[:], blkhash.Bytes())
-					sendtx.BlockHeight = blkheight
-					sendtx.BlockIndex = int32(blkindex)
-					sendtx.BlockTime = blktime
-
-					am.ds.ScheduleTxStoreWrite(a)
-
-					return nil
-				}
-			}
-		}
+		// TODO(jrick) this is WRONG -- should not be adding it
+		// for each account.  Fix before multiple account support
+		// actually works.  Maybe a single txstore for all accounts
+		// isn't a half bad idea.
+		a.TxStore.InsertSignedTx(tx_, block)
+		am.ds.ScheduleTxStoreWrite(a)
 	}
-
-	return errors.New("txid does not match any recorded sent transaction")
 }
 
 // CalculateBalance returns the balance, calculated using minconf block
@@ -468,28 +443,29 @@ func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32, minconf in
 }
 
 // accountTx represents an account/transaction pair to be used by
-// GetTransaction().
+// GetTransaction.
 type accountTx struct {
 	Account string
-	Tx      tx.Tx
+	Tx      tx.Record
 }
 
 // GetTransaction returns an array of accountTx to fully represent the effect of
 // a transaction on locally known wallets. If we know nothing about a
 // transaction an empty array will be returned.
-func (am *AccountManager) GetTransaction(txid string) []accountTx {
+func (am *AccountManager) GetTransaction(txsha *btcwire.ShaHash) []accountTx {
 	accumulatedTxen := []accountTx{}
 
 	for _, a := range am.AllAccounts() {
-		for _, t := range a.TxStore {
-			if t.GetTxID().String() != txid {
+		for _, record := range a.TxStore.SortedRecords() {
+			if *record.TxSha() != *txsha {
 				continue
 			}
-			accumulatedTxen = append(accumulatedTxen,
-				accountTx{
-					Account: a.name,
-					Tx:      t.Copy(),
-				})
+
+			atx := accountTx{
+				Account: a.name,
+				Tx:      record,
+			}
+			accumulatedTxen = append(accumulatedTxen, atx)
 		}
 	}
 
@@ -509,53 +485,15 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 		return nil, err
 	}
 
-	replies := []map[string]interface{}{}
+	infos := []map[string]interface{}{}
 	for _, a := range am.AllAccounts() {
-		for _, u := range a.UtxoStore {
-			confirmations := 0
-			if u.Height != -1 {
-				confirmations = int(bs.Height - u.Height + 1)
-			}
-			if minconf != 0 && (u.Height == -1 ||
-				confirmations < minconf) {
-				continue
-			}
-			// check maxconf - doesn't apply if not confirmed.
-			if u.Height != -1 && confirmations > maxconf {
-				continue
-			}
-
-			addr, err := btcutil.NewAddressPubKeyHash(u.AddrHash[:],
-				cfg.Net())
-			if err != nil {
-				continue
-			}
-
-			// if we hve addresses, limit to that list.
-			if len(addresses) > 0 {
-				if _, ok := addresses[addr.EncodeAddress()]; !ok {
-					continue
-				}
-			}
-			entry := map[string]interface{}{
-				// check minconf/maxconf
-				"txid":          u.Out.Hash.String(),
-				"vout":          u.Out.Index,
-				"address":       addr.EncodeAddress(),
-				"account":       a.name,
-				"scriptPubKey":  u.Subscript,
-				"amount":        float64(u.Amt) / float64(btcutil.SatoshiPerBitcoin),
-				"confirmations": confirmations,
-				// TODO(oga) if the object is
-				// pay-to-script-hash we need to add the
-				// redeemscript.
-			}
-
-			replies = append(replies, entry)
+		for _, record := range a.TxStore.UnspentOutputs() {
+			info := record.TxInfo(a.name, bs.Height, cfg.Net())[0]
+			infos = append(infos, info)
 		}
 
 	}
-	return replies, nil
+	return infos, nil
 }
 
 // RescanActiveAddresses begins a rescan for all active addresses for
@@ -566,6 +504,12 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 func (am *AccountManager) RescanActiveAddresses() {
 	for _, account := range am.AllAccounts() {
 		account.RescanActiveAddresses()
+	}
+}
+
+func (am *AccountManager) ResendUnminedTxs() {
+	for _, account := range am.AllAccounts() {
+		account.ResendUnminedTxs()
 	}
 }
 

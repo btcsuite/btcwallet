@@ -19,11 +19,12 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
-	"github.com/conformal/btcwire"
 	"path/filepath"
 	"sync"
 )
@@ -67,8 +68,7 @@ type Account struct {
 	name       string
 	fullRescan bool
 	*wallet.Wallet
-	tx.UtxoStore
-	tx.TxStore
+	TxStore *tx.Store
 }
 
 // Lock locks the underlying wallet for an account.
@@ -102,19 +102,31 @@ func (a *Account) Unlock(passphrase []byte) error {
 // there are any transactions with outputs to this address in the blockchain or
 // the btcd mempool.
 func (a *Account) AddressUsed(addr btcutil.Address) bool {
-	// This can be optimized by recording this data as it is read when
-	// opening an account, and keeping it up to date each time a new
-	// received tx arrives.
+	// This not only can be optimized by recording this data as it is
+	// read when opening an account, and keeping it up to date each time a
+	// new received tx arrives, but it probably should in case an address is
+	// used in a tx (made public) but the tx is eventually removed from the
+	// store (consider a chain reorg).
 
 	pkHash := addr.ScriptAddress()
 
-	for i := range a.TxStore {
-		rtx, ok := a.TxStore[i].(*tx.RecvTx)
+	for _, record := range a.TxStore.SortedRecords() {
+		txout, ok := record.(*tx.RecvTxOut)
 		if !ok {
 			continue
 		}
 
-		if bytes.Equal(rtx.ReceiverHash, pkHash) {
+		// Extract address from pkScript.  We currently only care
+		// about P2PKH addresses.
+		sc, addrs, _, err := txout.Addresses(cfg.Net())
+		switch {
+		case err != nil:
+			continue
+		case sc != btcscript.PubKeyHashTy:
+			continue
+		}
+
+		if bytes.Equal(addrs[0].ScriptAddress(), pkHash) {
 			return true
 		}
 	}
@@ -136,14 +148,7 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 		return 0.
 	}
 
-	var bal uint64 // Measured in satoshi
-	for _, u := range a.UtxoStore {
-		// Utxos not yet in blocks (height -1) should only be
-		// added if confirmations is 0.
-		if confirmed(confirms, u.Height, bs.Height) {
-			bal += u.Amt
-		}
-	}
+	bal := a.TxStore.Balance(confirms, bs.Height)
 	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
 }
 
@@ -162,13 +167,21 @@ func (a *Account) CalculateAddressBalance(addr *btcutil.AddressPubKeyHash, confi
 		return 0.
 	}
 
-	var bal uint64 // Measured in satoshi
-	for _, u := range a.UtxoStore {
+	var bal int64 // Measured in satoshi
+	for _, txout := range a.TxStore.UnspentOutputs() {
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
-		if confirmed(confirms, u.Height, bs.Height) {
-			if bytes.Equal(addr.ScriptAddress(), u.AddrHash[:]) {
-				bal += u.Amt
+		if confirmed(confirms, txout.Height(), bs.Height) {
+			_, addrs, _, _ := txout.Addresses(cfg.Net())
+			if len(addrs) != 1 {
+				continue
+			}
+			apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
+			if !ok {
+				continue
+			}
+			if *addr == *apkh {
+				bal += txout.Value()
 			}
 		}
 	}
@@ -196,14 +209,14 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 // replies.
 func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]map[string]interface{}, error) {
 	var txInfoList []map[string]interface{}
-	for _, tx := range a.TxStore {
+	for _, txRecord := range a.TxStore.SortedRecords() {
 		// check block number.
-		if since != -1 && tx.GetBlockHeight() <= since {
+		if since != -1 && txRecord.Height() <= since {
 			continue
 		}
 
 		txInfoList = append(txInfoList,
-			tx.TxInfo(a.name, curBlockHeight, a.Net())...)
+			txRecord.TxInfo(a.name, curBlockHeight, a.Net())...)
 	}
 
 	return txInfoList, nil
@@ -222,11 +235,12 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 
 	var txInfoList []map[string]interface{}
 
-	lastLookupIdx := len(a.TxStore) - count
+	records := a.TxStore.SortedRecords()
+	lastLookupIdx := len(records) - count
 	// Search in reverse order: lookup most recently-added first.
-	for i := len(a.TxStore) - 1; i >= from && i >= lastLookupIdx; i-- {
+	for i := len(records) - 1; i >= from && i >= lastLookupIdx; i-- {
 		txInfoList = append(txInfoList,
-			a.TxStore[i].TxInfo(a.name, bs.Height, a.Net())...)
+			records[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
 
 	return txInfoList, nil
@@ -246,13 +260,22 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 	}
 
 	var txInfoList []map[string]interface{}
-	for i := range a.TxStore {
-		rtx, ok := a.TxStore[i].(*tx.RecvTx)
+	for _, txRecord := range a.TxStore.SortedRecords() {
+		txout, ok := txRecord.(*tx.RecvTxOut)
 		if !ok {
 			continue
 		}
-		if _, ok := pkHashes[string(rtx.ReceiverHash[:])]; ok {
-			info := rtx.TxInfo(a.name, bs.Height, a.Net())
+		_, addrs, _, _ := txout.Addresses(cfg.Net())
+		if len(addrs) != 1 {
+			continue
+		}
+		apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
+		if !ok {
+			continue
+		}
+
+		if _, ok := pkHashes[string(apkh.ScriptAddress())]; ok {
+			info := txout.TxInfo(a.name, bs.Height, a.Net())
 			txInfoList = append(txInfoList, info...)
 		}
 	}
@@ -272,10 +295,11 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 	}
 
 	// Search in reverse order: lookup most recently-added first.
+	records := a.TxStore.SortedRecords()
 	var txInfoList []map[string]interface{}
-	for i := len(a.TxStore) - 1; i >= 0; i-- {
-		txInfoList = append(txInfoList,
-			a.TxStore[i].TxInfo(a.name, bs.Height, a.Net())...)
+	for i := len(records) - 1; i >= 0; i-- {
+		info := records[i].TxInfo(a.name, bs.Height, a.Net())
+		txInfoList = append(txInfoList, info...)
 	}
 
 	return txInfoList, nil
@@ -394,13 +418,6 @@ func (a *Account) exportBase64() (map[string]string, error) {
 	m["tx"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
-	_, err = a.UtxoStore.WriteTo(buf)
-	if err != nil {
-		return nil, err
-	}
-	m["utxo"] = base64.StdEncoding.EncodeToString(buf.Bytes())
-	buf.Reset()
-
 	return m, nil
 }
 
@@ -422,8 +439,8 @@ func (a *Account) Track() {
 		log.Error("Unable to request transaction updates for address.")
 	}
 
-	for _, utxo := range a.UtxoStore {
-		ReqSpentUtxoNtfn(utxo)
+	for _, txout := range a.TxStore.UnspentOutputs() {
+		ReqSpentUtxoNtfn(txout)
 	}
 }
 
@@ -456,6 +473,23 @@ func (a *Account) RescanActiveAddresses() {
 	// Rescan active addresses starting at the determined block height.
 	Rescan(CurrentServerConn(), beginBlock, a.ActivePaymentAddresses())
 	AcctMgr.ds.FlushAccount(a)
+}
+
+func (a *Account) ResendUnminedTxs() {
+	txs := a.TxStore.UnminedSignedTxs()
+	txbuf := new(bytes.Buffer)
+	for _, tx_ := range txs {
+		tx_.MsgTx().Serialize(txbuf)
+		hextx := hex.EncodeToString(txbuf.Bytes())
+		txsha, err := SendRawTransaction(CurrentServerConn(), hextx)
+		if err != nil {
+			// TODO(jrick): Check error for if this tx is a double spend,
+			// remove it if so.
+		} else {
+			log.Debugf("Resent unmined transaction %v", txsha)
+		}
+		txbuf.Reset()
+	}
 }
 
 // SortedActivePaymentAddresses returns a slice of all active payment
@@ -592,11 +626,12 @@ func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
 
 // ReqSpentUtxoNtfn sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func ReqSpentUtxoNtfn(u *tx.Utxo) {
+func ReqSpentUtxoNtfn(t *tx.RecvTxOut) {
+	op := t.OutPoint()
 	log.Debugf("Requesting spent UTXO notifications for Outpoint hash %s index %d",
-		u.Out.Hash, u.Out.Index)
+		op.Hash, op.Index)
 
-	NotifySpent(CurrentServerConn(), (*btcwire.OutPoint)(&u.Out))
+	NotifySpent(CurrentServerConn(), op)
 }
 
 // TotalReceived iterates through an account's transaction history, returning the
@@ -609,28 +644,20 @@ func (a *Account) TotalReceived(confirms int) (float64, error) {
 	}
 
 	var totalSatoshis int64
-	for _, e := range a.TxStore {
-		recvtx, ok := e.(*tx.RecvTx)
+	for _, record := range a.TxStore.SortedRecords() {
+		txout, ok := record.(*tx.RecvTxOut)
 		if !ok {
 			continue
 		}
 
 		// Ignore change.
-		addr, err := btcutil.NewAddressPubKeyHash(recvtx.ReceiverHash, cfg.Net())
-		if err != nil {
-			continue
-		}
-		info, err := a.Wallet.AddressInfo(addr)
-		if err != nil {
-			continue
-		}
-		if info.Change {
+		if txout.Change() {
 			continue
 		}
 
 		// Tally if the appropiate number of block confirmations have passed.
-		if confirmed(confirms, recvtx.GetBlockHeight(), bs.Height) {
-			totalSatoshis += recvtx.Amount
+		if confirmed(confirms, txout.Height(), bs.Height) {
+			totalSatoshis += txout.Value()
 		}
 	}
 

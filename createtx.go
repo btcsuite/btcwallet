@@ -60,45 +60,23 @@ var TxFeeIncrement = struct {
 	i: minTxFee,
 }
 
-// CreatedTx is a type holding information regarding a newly-created
-// transaction, including the raw bytes, inputs, and an address and UTXO
-// for change (if any).
 type CreatedTx struct {
-	rawTx      []byte
-	txid       btcwire.ShaHash
-	time       time.Time
-	inputs     []*tx.Utxo
-	outputs    []tx.Pair
-	btcspent   int64
-	fee        int64
-	changeAddr *btcutil.AddressPubKeyHash
-	changeUtxo *tx.Utxo
-}
-
-// TXID is a transaction hash identifying a transaction.
-type TXID btcwire.ShaHash
-
-// UnminedTXs holds a map of transaction IDs as keys mapping to a
-// CreatedTx structure.  If sending a raw transaction succeeds, the
-// tx is added to this map and checked again after each new block.
-// If the new block contains a tx, it is removed from this map.
-var UnminedTxs = struct {
-	sync.Mutex
-	m map[TXID]*CreatedTx
-}{
-	m: make(map[TXID]*CreatedTx),
+	tx        *btcutil.Tx
+	time      time.Time
+	haschange bool
+	changeIdx uint32
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
 // sort a slice of Utxos by their amount.
-type ByAmount []*tx.Utxo
+type ByAmount []*tx.RecvTxOut
 
 func (u ByAmount) Len() int {
 	return len(u)
 }
 
 func (u ByAmount) Less(i, j int) bool {
-	return u[i].Amt < u[j].Amt
+	return u[i].Value() < u[j].Value()
 }
 
 func (u ByAmount) Swap(i, j int) {
@@ -111,7 +89,9 @@ func (u ByAmount) Swap(i, j int) {
 // is the total number of satoshis which would be spent by the combination
 // of all selected previous outputs.  err will equal ErrInsufficientFunds if there
 // are not enough unspent outputs to spend amt.
-func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, btcout uint64, err error) {
+func selectInputs(utxos []*tx.RecvTxOut, amt int64,
+	minconf int) (selected []*tx.RecvTxOut, btcout int64, err error) {
+
 	bs, err := GetCurBlock()
 	if err != nil {
 		return nil, 0, err
@@ -120,13 +100,14 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 	// Create list of eligible unspent previous outputs to use as tx
 	// inputs, and sort by the amount in reverse order so a minimum number
 	// of inputs is needed.
-	eligible := make([]*tx.Utxo, 0, len(s))
-	for _, utxo := range s {
-		// TODO(jrick): if Height is -1, the UTXO is the result of spending
-		// to a change address, resulting in a UTXO not yet mined in a block.
-		// For now, disallow creating transactions until these UTXOs are mined
-		// into a block and show up as part of the balance.
-		if confirmed(minconf, utxo.Height, bs.Height) {
+	eligible := make([]*tx.RecvTxOut, 0, len(utxos))
+	for _, utxo := range utxos {
+		if confirmed(minconf, utxo.Height(), bs.Height) {
+			// Coinbase transactions must have 100 confirmations before
+			// they may be spent.
+			if utxo.IsCoinbase() && bs.Height-utxo.Height()+1 < 100 {
+				continue
+			}
 			eligible = append(eligible, utxo)
 		}
 	}
@@ -135,17 +116,18 @@ func selectInputs(s tx.UtxoStore, amt uint64, minconf int) (inputs []*tx.Utxo, b
 	// Iterate throguh eligible transactions, appending to outputs and
 	// increasing btcout.  This is finished when btcout is greater than the
 	// requested amt to spend.
-	for _, u := range eligible {
-		inputs = append(inputs, u)
-		if btcout += u.Amt; btcout >= amt {
-			return inputs, btcout, nil
+	for _, e := range eligible {
+		selected = append(selected, e)
+		btcout += e.Value()
+		if btcout >= amt {
+			return selected, btcout, nil
 		}
 	}
 	if btcout < amt {
 		return nil, 0, ErrInsufficientFunds
 	}
 
-	return inputs, btcout, nil
+	return selected, btcout, nil
 }
 
 // txToPairs creates a raw transaction sending the amounts for each
@@ -171,10 +153,6 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		amt += v
 	}
 
-	// outputs is a tx.Pair slice representing each output that is created
-	// by the transaction.
-	outputs := make([]tx.Pair, 0, len(pairs)+1)
-
 	// Add outputs to new tx.
 	for addrStr, amt := range pairs {
 		addr, err := btcutil.DecodeAddr(addrStr)
@@ -189,13 +167,6 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		}
 		txout := btcwire.NewTxOut(int64(amt), pkScript)
 		msgtx.AddTxOut(txout)
-
-		// Create amount, address pair and add to outputs.
-		out := tx.Pair{
-			Amount:     amt,
-			PubkeyHash: addr.ScriptAddress(),
-		}
-		outputs = append(outputs, out)
 	}
 
 	// Get current block's height and hash.
@@ -213,9 +184,9 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 	// again in case a change utxo has already been chosen.
 	var changeAddr *btcutil.AddressPubKeyHash
 
-	var btcspent int64
-	var selectedInputs []*tx.Utxo
-	var finalChangeUtxo *tx.Utxo
+	var selectedInputs []*tx.RecvTxOut
+	hasChange := false
+	changeIndex := uint32(0)
 
 	// Get the number of satoshis to increment fee by when searching for
 	// the minimum tx fee needed.
@@ -225,18 +196,20 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 
 		// Select unspent outputs to be used in transaction based on the amount
 		// neededing to sent, and the current fee estimation.
-		inputs, btcin, err := selectInputs(a.UtxoStore, uint64(amt+fee),
-			minconf)
+		inputs, btcin, err := selectInputs(a.TxStore.UnspentOutputs(),
+			amt+fee, minconf)
 		if err != nil {
 			return nil, err
 		}
 
 		// Check if there are leftover unspent outputs, and return coins back to
 		// a new address we own.
-		var changeUtxo *tx.Utxo
-		change := btcin - uint64(amt+fee)
+		change := btcin - amt - fee
 		if change > 0 {
-			// Create a new address to spend leftover outputs to.
+			hasChange = true
+			// TODO: this needs to be randomly inserted into the
+			// tx, or else this is a privacy risk
+			changeIndex = 0
 
 			// Get a new change address if one has not already been found.
 			if changeAddr == nil {
@@ -255,43 +228,35 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 				return nil, fmt.Errorf("cannot create txout script: %s", err)
 			}
 			msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
-
-			changeUtxo = &tx.Utxo{
-				Amt: change,
-				Out: tx.OutPoint{
-					// Hash is unset (zeroed) here and must be filled in
-					// with the transaction hash of the complete
-					// transaction.
-					Index: uint32(len(pairs)),
-				},
-				Height:    -1,
-				Subscript: pkScript,
-			}
-			copy(changeUtxo.AddrHash[:], changeAddr.ScriptAddress())
 		}
 
 		// Selected unspent outputs become new transaction's inputs.
 		for _, ip := range inputs {
-			msgtx.AddTxIn(btcwire.NewTxIn((*btcwire.OutPoint)(&ip.Out), nil))
+			msgtx.AddTxIn(btcwire.NewTxIn(ip.OutPoint(), nil))
 		}
-		for i, ip := range inputs {
-			// Error is ignored as the length and network checks can never fail
-			// for these inputs.
-			addr, _ := btcutil.NewAddressPubKeyHash(ip.AddrHash[:],
-				a.Wallet.Net())
-			privkey, err := a.AddressKey(addr)
+		for i, input := range inputs {
+			_, addrs, _, _ := input.Addresses(cfg.Net())
+			if len(addrs) != 1 {
+				continue
+			}
+			apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
+			if !ok {
+				continue // don't handle inputs to this yes
+			}
+
+			privkey, err := a.AddressKey(apkh)
 			if err == wallet.ErrWalletLocked {
 				return nil, wallet.ErrWalletLocked
 			} else if err != nil {
 				return nil, fmt.Errorf("cannot get address key: %v", err)
 			}
-			ai, err := a.AddressInfo(addr)
+			ai, err := a.AddressInfo(apkh)
 			if err != nil {
 				return nil, fmt.Errorf("cannot get address info: %v", err)
 			}
 
 			sigscript, err := btcscript.SignatureScript(msgtx, i,
-				ip.Subscript, btcscript.SigHashAll, privkey,
+				input.PkScript(), btcscript.SigHashAll, privkey,
 				ai.Compressed)
 			if err != nil {
 				return nil, fmt.Errorf("cannot create sigscript: %s", err)
@@ -306,29 +271,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		if minFee := minimumFee(msgtx, noFeeAllowed); fee < minFee {
 			fee = minFee
 		} else {
-			// Fill Tx hash of change outpoint with transaction hash.
-			if changeUtxo != nil {
-				txHash, err := msgtx.TxSha()
-				if err != nil {
-					return nil, fmt.Errorf("cannot create transaction hash: %s", err)
-				}
-				copy(changeUtxo.Out.Hash[:], txHash[:])
-
-				// Add change to outputs.
-				out := tx.Pair{
-					Amount:     int64(change),
-					PubkeyHash: changeAddr.ScriptAddress(),
-					Change:     true,
-				}
-				outputs = append(outputs, out)
-
-				finalChangeUtxo = changeUtxo
-			}
-
 			selectedInputs = inputs
-
-			btcspent = int64(btcin)
-
 			break
 		}
 	}
@@ -341,7 +284,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 	}
 	for i, txin := range msgtx.TxIn {
 		engine, err := btcscript.NewScript(txin.SignatureScript,
-			selectedInputs[i].Subscript, i, msgtx, flags)
+			selectedInputs[i].PkScript(), i, msgtx, flags)
 		if err != nil {
 			return nil, fmt.Errorf("cannot create script engine: %s", err)
 		}
@@ -350,23 +293,13 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		}
 	}
 
-	txid, err := msgtx.TxSha()
-	if err != nil {
-		return nil, fmt.Errorf("cannot create txid for created tx: %v", err)
-	}
-
 	buf := new(bytes.Buffer)
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
 	info := &CreatedTx{
-		rawTx:      buf.Bytes(),
-		txid:       txid,
-		time:       time.Now(),
-		inputs:     selectedInputs,
-		outputs:    outputs,
-		btcspent:   btcspent,
-		fee:        fee,
-		changeAddr: changeAddr,
-		changeUtxo: finalChangeUtxo,
+		tx:        btcutil.NewTx(msgtx),
+		time:      time.Now(),
+		haschange: hasChange,
+		changeIdx: changeIndex,
 	}
 	return info, nil
 }
@@ -406,14 +339,14 @@ func minimumFee(tx *btcwire.MsgTx, allowFree bool) int64 {
 // allowFree calculates the transaction priority and checks that the
 // priority reaches a certain threshhold.  If the threshhold is
 // reached, a free transaction fee is allowed.
-func allowFree(curHeight int32, inputs []*tx.Utxo, txSize int) bool {
+func allowFree(curHeight int32, txouts []*tx.RecvTxOut, txSize int) bool {
 	const blocksPerDayEstimate = 144
 	const txSizeEstimate = 250
 
 	var weightedSum int64
-	for _, utxo := range inputs {
-		depth := chainDepth(utxo.Height, curHeight)
-		weightedSum += int64(utxo.Amt) * int64(depth)
+	for _, txout := range txouts {
+		depth := chainDepth(txout.Height(), curHeight)
+		weightedSum += txout.Value() * int64(depth)
 	}
 	priority := float64(weightedSum) / float64(txSize)
 	return priority > float64(btcutil.SatoshiPerBitcoin)*blocksPerDayEstimate/txSizeEstimate

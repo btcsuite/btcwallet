@@ -18,13 +18,15 @@ package tx
 
 import (
 	"bytes"
-	"code.google.com/p/go.crypto/ripemd160"
+	"container/list"
 	"encoding/binary"
 	"errors"
-	"fmt"
+	"io"
+	"time"
+
+	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
-	"io"
 )
 
 var (
@@ -35,1205 +37,912 @@ var (
 	// ErrBadLength represents an error when writing a slice
 	// where the length does not match the expected.
 	ErrBadLength = errors.New("bad length")
+
+	// ErrUnsupportedVersion represents an error where a serialized
+	// object is marked with a version that is no longer supported
+	// during deserialization.
+	ErrUnsupportedVersion = errors.New("version no longer supported")
 )
 
-// Byte headers prepending received and sent serialized transactions.
-const (
-	recvTxHeader byte = iota
-	sendTxHeader
-)
-
-// ReaderFromVersion is an io.ReaderFrom and io.WriterTo that
-// can specify any particular wallet file format for reading
-// depending on the wallet file version.
-type ReaderFromVersion interface {
-	ReadFromVersion(uint32, io.Reader) (int64, error)
-	io.WriterTo
+// Record is a common interface shared by SignedTx and RecvTxOut transaction
+// store records.
+type Record interface {
+	Block() *BlockDetails
+	Height() int32
+	Time() time.Time
+	Tx() *btcutil.Tx
+	TxSha() *btcwire.ShaHash
+	TxInfo(string, int32, btcwire.BitcoinNet) []map[string]interface{}
 }
 
-// Various UTXO file versions.
-const (
-	utxoVersFirst uint32 = iota
-)
+type txRecord interface {
+	Block() *BlockDetails
+	Height() int32
+	Time() time.Time
+	TxSha() *btcwire.ShaHash
+	record(store *Store) Record
+	blockTx() blockTx
+	setBlock(*BlockDetails)
+	readFrom(io.Reader) (int64, error)
+	writeTo(io.Writer) (int64, error)
+}
 
-// Various Tx file versions.
-const (
-	txVersFirst uint32 = iota
+func sortedInsert(l *list.List, tx txRecord) {
+	for e := l.Back(); e != nil; e = e.Prev() {
+		v := e.Value.(txRecord)
+		if !v.Time().After(tx.Time()) { // equal or before
+			l.InsertAfter(tx, e)
+			return
+		}
+	}
 
-	// txVersRecvTxIndex is the version where the txout index
+	// No list elements, or all previous elements come after the date of tx.
+	l.PushFront(tx)
+}
+
+type blockTx struct {
+	txSha  btcwire.ShaHash
+	height int32
+}
+
+func (btx *blockTx) readFrom(r io.Reader) (int64, error) {
+	// Read txsha
+	n, err := io.ReadFull(r, btx.txSha[:])
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Read height
+	heightBytes := make([]byte, 4)
+	n, err = io.ReadFull(r, heightBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	btx.height = int32(binary.LittleEndian.Uint32(heightBytes))
+
+	return n64, nil
+}
+
+func (btx *blockTx) writeTo(w io.Writer) (int64, error) {
+	// Write txsha
+	n, err := w.Write(btx.txSha[:])
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write height
+	heightBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(heightBytes, uint32(btx.height))
+	n, err = w.Write(heightBytes)
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	return n64, nil
+}
+
+type blockOutPoint struct {
+	op     btcwire.OutPoint
+	height int32
+}
+
+// Store implements a transaction store for storing and managing wallet
+// transactions.
+type Store struct {
+	txs     map[blockTx]*btcutil.Tx // all backing transactions referenced by records
+	sorted  *list.List              // ordered (by date) list of all wallet tx records
+	signed  map[blockTx]*signedTx
+	recv    map[blockOutPoint]*recvTxOut
+	unspent map[btcwire.OutPoint]*recvTxOut
+}
+
+// NewStore allocates and initializes a new transaction store.
+func NewStore() *Store {
+	store := Store{
+		txs:     make(map[blockTx]*btcutil.Tx),
+		sorted:  list.New(),
+		signed:  make(map[blockTx]*signedTx),
+		recv:    make(map[blockOutPoint]*recvTxOut),
+		unspent: make(map[btcwire.OutPoint]*recvTxOut),
+	}
+	return &store
+}
+
+// All Store versions (both old and current).
+const (
+	versFirst uint32 = iota
+
+	// versRecvTxIndex is the version where the txout index
 	// was added to the RecvTx struct.
-	txVersRecvTxIndex
+	versRecvTxIndex
 
-	// txVersMarkSentChange is the version where serialized SentTx
+	// versMarkSentChange is the version where serialized SentTx
 	// added a flags field, used for marking a sent transaction
 	// as change.
-	txVersMarkSentChange
+	versMarkSentChange
+
+	// versCombined is the version where the old utxo and tx stores
+	// were combined into a single data structure.
+	versCombined
+
+	// versCurrent is the current tx file version.
+	versCurrent = versCombined
 )
 
-// Current versions.
+// Serializing a Store results in writing three basic groups of
+// data: backing txs (which are needed for the other two groups),
+// received transaction outputs (both spent and unspent), and
+// signed (or sent) transactions which spend previous outputs.
+// These are the byte headers prepending each type.
 const (
-	utxoVersCurrent = utxoVersFirst
-	txVersCurrent   = txVersMarkSentChange
+	backingTxHeader byte = iota
+	recvTxOutHeader
+	signedTxHeader
 )
 
-// UtxoStore is a type used for holding all Utxo structures for all
-// addresses in a wallet.
-type UtxoStore []*Utxo
-
-// Utxo is a type storing information about a single unspent
-// transaction output.
-type Utxo struct {
-	AddrHash  [ripemd160.Size]byte
-	Out       OutPoint
-	Subscript PkScript
-	Amt       uint64 // Measured in Satoshis
-
-	// Height is -1 if Utxo has not yet appeared in a block.
-	Height int32
-
-	// BlockHash is zeroed if Utxo has not yet appeared in a block.
-	BlockHash btcwire.ShaHash
-}
-
-// OutPoint is a btcwire.OutPoint with custom methods for serialization.
-type OutPoint btcwire.OutPoint
-
-// PkScript is a custom type with methods to serialize pubkey scripts
-// of variable length.
-type PkScript []byte
-
-// Tx is a generic type that can be used in place of either of the tx types in
-// a TxStore.
-type Tx interface {
-	io.WriterTo
-	ReadFromVersion(uint32, io.Reader) (int64, error)
-	TxInfo(string, int32, btcwire.BitcoinNet) []map[string]interface{}
-	GetBlockHeight() int32
-	GetBlockHash() *btcwire.ShaHash
-	GetBlockTime() int64
-	GetTime() int64
-	GetTxID() *btcwire.ShaHash
-	Copy() Tx
-}
-
-// TxStore is a slice holding RecvTx and SendTx pointers.
-type TxStore []Tx
-
-const (
-	addressUnknown byte = iota
-	addressKnown
-)
-
-// pubkeyHash is a slice holding 20 bytes (for a known pubkey hash
-// of a Bitcoin address), or nil (for an unknown address).
-type pubkeyHash []byte
-
-// Enforce that pubkeyHash satisifies the io.ReaderFrom and
-// io.WriterTo interfaces.
-var pubkeyHashVar = pubkeyHash([]byte{})
-var _ io.ReaderFrom = &pubkeyHashVar
-var _ io.WriterTo = &pubkeyHashVar
-
-// ReadFrom satisifies the io.ReaderFrom interface.
-func (p *pubkeyHash) ReadFrom(r io.Reader) (int64, error) {
-	var read int64
-
-	// Read header byte.
-	header := make([]byte, 1)
-	n, err := r.Read(header)
+// ReadFrom satisifies the io.ReaderFrom interface by deserializing a
+// transaction from an io.Reader.
+func (s *Store) ReadFrom(r io.Reader) (int64, error) {
+	// Read current file version.
+	uint32Bytes := make([]byte, 4)
+	n, err := io.ReadFull(r, uint32Bytes)
+	n64 := int64(n)
 	if err != nil {
-		return int64(n), err
+		return n64, err
 	}
-	read += int64(n)
+	vers := binary.LittleEndian.Uint32(uint32Bytes)
 
-	switch header[0] {
-	case addressUnknown:
-		*p = nil
-		return read, nil
+	// Reading files with versions before versCombined is unsupported.
+	if vers < versCombined {
+		return n64, ErrUnsupportedVersion
+	}
 
-	case addressKnown:
-		addrHash := make([]byte, ripemd160.Size)
-		n, err := binaryRead(r, binary.LittleEndian, &addrHash)
-		if err != nil {
-			return read + int64(n), err
+	// Reset store.
+	s.txs = make(map[blockTx]*btcutil.Tx)
+	s.sorted = list.New()
+	s.signed = make(map[blockTx]*signedTx)
+	s.recv = make(map[blockOutPoint]*recvTxOut)
+	s.unspent = make(map[btcwire.OutPoint]*recvTxOut)
+
+	// Read backing transactions and records.
+	for {
+		// Read byte header.  If this errors with io.EOF, we're done.
+		header := make([]byte, 1)
+		n, err = io.ReadFull(r, header)
+		n64 += int64(n)
+		if err == io.EOF {
+			return n64, nil
 		}
-		read += int64(n)
-		*p = addrHash
-		return read, nil
 
-	default:
-		return read, ErrInvalidFormat
-	}
-}
+		switch header[0] {
+		case backingTxHeader:
+			// Read block height.
+			n, err = io.ReadFull(r, uint32Bytes)
+			n64 += int64(n)
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			if err != nil {
+				return n64, err
+			}
+			height := int32(binary.LittleEndian.Uint32(uint32Bytes))
 
-// WriteTo satisifies the io.WriterTo interface.
-func (p *pubkeyHash) WriteTo(w io.Writer) (int64, error) {
-	var written int64
+			// Read serialized transaction.
+			tx := new(msgTx)
+			txN, err := tx.readFrom(r)
+			n64 += txN
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			if err != nil {
+				return n64, err
+			}
 
-	switch {
-	case *p == nil:
-		n, err := w.Write([]byte{addressUnknown})
-		return int64(n), err
+			// Add backing tx to store.
+			utx := btcutil.NewTx((*btcwire.MsgTx)(tx))
+			s.txs[blockTx{*utx.Sha(), height}] = utx
 
-	case len(*p) == ripemd160.Size:
-		// Write header.
-		n, err := w.Write([]byte{addressKnown})
-		if err != nil {
-			return int64(n), err
+		case recvTxOutHeader:
+			// Read received transaction output record.
+			rtx := new(recvTxOut)
+			txN, err := rtx.readFrom(r)
+			n64 += txN
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			if err != nil {
+				return n64, err
+			}
+
+			// It is an error for the backing transaction to have
+			// not already been read.
+			if _, ok := s.txs[rtx.blockTx()]; !ok {
+				return n64, errors.New("missing backing transaction")
+			}
+
+			// Add entries to store.
+			s.sorted.PushBack(rtx)
+			k := blockOutPoint{rtx.outpoint, rtx.Height()}
+			s.recv[k] = rtx
+			if !rtx.Spent() {
+				s.unspent[rtx.outpoint] = rtx
+			}
+
+		case signedTxHeader:
+			// Read signed (sent) transaction record.
+			stx := new(signedTx)
+			txN, err := stx.readFrom(r)
+			n64 += txN
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			if err != nil {
+				return n64, err
+			}
+
+			// It is an error for the backing transaction to have
+			// not already been read.
+			if _, ok := s.txs[stx.blockTx()]; !ok {
+				return n64, errors.New("missing backing transaction")
+			}
+
+			// Add entries to store.
+			s.sorted.PushBack(stx)
+			s.signed[stx.blockTx()] = stx
+
+		default:
+			return n64, errors.New("bad magic byte")
 		}
-		written += int64(n)
+	}
 
-		// Write hash160.
-		n, err = w.Write(*p)
+	return n64, nil
+}
+
+// WriteTo satisifies the io.WriterTo interface by serializing a transaction
+// store to an io.Writer.
+func (s *Store) WriteTo(w io.Writer) (int64, error) {
+	// Write current file version.
+	uint32Bytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(uint32Bytes, versCurrent)
+	n, err := w.Write(uint32Bytes)
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write all backing transactions.
+	for btx, tx := range s.txs {
+		// Write backing tx header.
+		n, err = w.Write([]byte{backingTxHeader})
+		n64 += int64(n)
 		if err != nil {
-			return written + int64(n), err
+			return n64, err
 		}
-		written += int64(n)
-		return written, err
 
-	default: // bad!
-		return 0, ErrBadLength
-	}
-}
-
-// RecvTx is a type storing information about a transaction that was
-// received by an address in a wallet.
-type RecvTx struct {
-	TxID         btcwire.ShaHash
-	TxOutIdx     uint32
-	TimeReceived int64
-	BlockHeight  int32
-	BlockHash    btcwire.ShaHash
-	BlockIndex   int32
-	BlockTime    int64
-	Amount       int64 // Measured in Satoshis
-	ReceiverHash pubkeyHash
-}
-
-// Pairs is a Pair slice with custom serialization and unserialization
-// functions.
-type Pairs []Pair
-
-// Enforce that Pairs satisifies the io.ReaderFrom and io.WriterTo
-// interfaces.
-var pairsVar = Pairs([]Pair{})
-var _ io.ReaderFrom = &pairsVar
-var _ io.WriterTo = &pairsVar
-
-func (p *Pairs) ReadFromVersion(vers uint32, r io.Reader) (int64, error) {
-	var read int64
-
-	nPairsBytes := make([]byte, 4) // Raw bytes for a uint32.
-	n, err := r.Read(nPairsBytes)
-	if err != nil {
-		return int64(n), err
-	}
-	read += int64(n)
-	nPairs := binary.LittleEndian.Uint32(nPairsBytes)
-	s := make([]Pair, nPairs)
-
-	for i := range s {
-		n, err := s[i].ReadFromVersion(vers, r)
+		// Write block height.
+		binary.LittleEndian.PutUint32(uint32Bytes, uint32(btx.height))
+		n, err = w.Write(uint32Bytes)
+		n64 += int64(n)
 		if err != nil {
-			return read + n, err
+			return n64, err
 		}
-		read += n
-	}
 
-	*p = s
-	return read, nil
-}
-
-func (p *Pairs) ReadFrom(r io.Reader) (int64, error) {
-	return p.ReadFromVersion(txVersCurrent, r)
-}
-
-// WriteTo writes a Pair slice to w.  Part of the io.WriterTo interface.
-func (p *Pairs) WriteTo(w io.Writer) (int64, error) {
-	var written int64
-
-	nPairs := uint32(len(*p))
-	nPairsBytes := make([]byte, 4) // Raw bytes for a uint32
-	binary.LittleEndian.PutUint32(nPairsBytes, nPairs)
-	n, err := w.Write(nPairsBytes)
-	if err != nil {
-		return int64(n), err
-	}
-	written += int64(n)
-
-	s := *p
-	for i := range s {
-		n, err := s[i].WriteTo(w)
+		// Write serialized transaction
+		txN, err := (*msgTx)(tx.MsgTx()).writeTo(w)
+		n64 += txN
 		if err != nil {
-			return written + n, err
+			return n64, err
 		}
-		written += n
 	}
 
-	return written, nil
+	// Write each record.  The byte header is dependant on the
+	// underlying type.
+	for e := s.sorted.Front(); e != nil; e = e.Next() {
+		v := e.Value.(txRecord)
+		switch v.(type) {
+		case *recvTxOut:
+			n, err = w.Write([]byte{recvTxOutHeader})
+		case *signedTx:
+			n, err = w.Write([]byte{signedTxHeader})
+		}
+		n64 += int64(n)
+		if err != nil {
+			return n64, err
+		}
+
+		recordN, err := v.writeTo(w)
+		n64 += recordN
+		if err != nil {
+			return n64, err
+		}
+	}
+
+	return n64, nil
 }
 
-// Pair represents an amount paid to a single pubkey hash.  Pair includes
-// custom serialization and unserialization functions by implementing the
-// io.ReaderFromt and io.WriterTo interfaces.
-type Pair struct {
-	PubkeyHash pubkeyHash
-	Amount     int64 // Measured in Satoshis
-	Change     bool
+// InsertSignedTx inserts a signed-by-wallet transaction record into the
+// store, returning the record.  Duplicates and double spend correction is
+// handled automatically.  Transactions may be added without block details,
+// and later added again with block details once the tx has been mined.
+func (s *Store) InsertSignedTx(tx *btcutil.Tx, block *BlockDetails) *SignedTx {
+	var created time.Time
+	if block == nil {
+		created = time.Now()
+	} else {
+		created = block.Time
+	}
+
+	// Partially create the signedTx.  Everything is set except the
+	// total btc input, which is set below.
+	st := &signedTx{
+		txSha:       *tx.Sha(),
+		timeCreated: created,
+		block:       block,
+	}
+
+	s.insertTx(tx, st)
+	return st.record(s).(*SignedTx)
 }
 
-// Enforce that Pair satisifies the io.ReaderFrom and io.WriterTo
-// interfaces.
-var _ io.ReaderFrom = &Pair{}
-var _ io.WriterTo = &Pair{}
+// Rollback removes block details for all transactions at or beyond a
+// removed block at a given blockchain height.  Any updated
+// transactions are considered unmined.  Now-invalid transactions are
+// removed as new transactions creating double spends in the new better
+// chain are added to the store.
+func (s *Store) Rollback(height int32) {
+	for e := s.sorted.Front(); e != nil; e = e.Next() {
+		tx := e.Value.(txRecord)
+		if details := tx.Block(); details != nil {
+			txSha := tx.TxSha()
+			oldKey := blockTx{*txSha, details.Height}
+			if details.Height >= height {
+				tx.setBlock(nil)
 
-func (p *Pair) ReadFromVersion(vers uint32, r io.Reader) (int64, error) {
-	if vers >= txVersMarkSentChange {
-		// Use latest version
-		return p.ReadFrom(r)
+				switch v := tx.(type) {
+				case *signedTx:
+					k := oldKey
+					delete(s.signed, k)
+					k.height = -1
+					s.signed[k] = v
+
+				case *recvTxOut:
+					k := blockOutPoint{v.outpoint, details.Height}
+					delete(s.recv, k)
+					k.height = -1
+					s.recv[k] = v
+				}
+
+				if utx, ok := s.txs[oldKey]; ok {
+					k := oldKey
+					delete(s.txs, k)
+					k.height = -1
+					s.txs[k] = utx
+				}
+			}
+		}
 	}
-
-	// Old version did not read flags.
-	var read int64
-
-	n, err := p.PubkeyHash.ReadFrom(r)
-	if err != nil {
-		return n, err
-	}
-	read += n
-
-	amountBytes := make([]byte, 8) // raw bytes for a uint64
-	nr, err := r.Read(amountBytes)
-	if err != nil {
-		return read + int64(nr), err
-	}
-	read += int64(nr)
-	p.Amount = int64(binary.LittleEndian.Uint64(amountBytes))
-
-	return read, nil
 }
 
-// ReadFrom reads a serialized Pair from r.  Part of the io.ReaderFrom
-// interface.
-func (p *Pair) ReadFrom(r io.Reader) (int64, error) {
-	var read int64
-
-	n, err := p.PubkeyHash.ReadFrom(r)
-	if err != nil {
-		return n, err
+// UnminedSignedTxs returns the underlying transactions for all
+// signed-by-wallet transactions which are not known to have been
+// mined in a block.
+func (s *Store) UnminedSignedTxs() []*btcutil.Tx {
+	unmined := make([]*btcutil.Tx, 0, len(s.signed))
+	for _, stx := range s.signed {
+		if stx.block == nil {
+			unmined = append(unmined, s.txs[stx.blockTx()])
+		}
 	}
-	read += n
-
-	amountBytes := make([]byte, 8) // raw bytes for a uint64
-	nr, err := r.Read(amountBytes)
-	if err != nil {
-		return read + int64(nr), err
-	}
-	read += int64(nr)
-	p.Amount = int64(binary.LittleEndian.Uint64(amountBytes))
-
-	// Read flags.
-	flags := make([]byte, 1) // raw bytes for 1 byte of flags
-	nr, err = r.Read(flags)
-	if err != nil {
-		return read + int64(nr), err
-	}
-	read += int64(nr)
-	p.Change = flags[0]&1<<0 == 1<<0
-
-	return read, nil
+	return unmined
 }
 
-// WriteTo serializes a Pair, writing it to w.  Part of the
-// io.WriterTo interface.
-func (p *Pair) WriteTo(w io.Writer) (int64, error) {
-	var written int64
+// InsertRecvTxOut inserts a received transaction output record into the store,
+// returning the record.  Duplicates and double spend correction is handled
+// automatically.  Outputs may be added with block=nil, and then added again
+// with non-nil BlockDetails to update the record and all other records
+// using the transaction with the block.
+func (s *Store) InsertRecvTxOut(tx *btcutil.Tx, outIdx uint32,
+	change bool, received time.Time, block *BlockDetails) *RecvTxOut {
 
-	n, err := p.PubkeyHash.WriteTo(w)
-	if err != nil {
-		return n, err
+	rt := &recvTxOut{
+		outpoint: *btcwire.NewOutPoint(tx.Sha(), outIdx),
+		change:   change,
+		received: received,
+		block:    block,
 	}
-	written += n
+	s.insertTx(tx, rt)
+	return rt.record(s).(*RecvTxOut)
+}
 
-	amountBytes := make([]byte, 8) // raw bytes for a uint64
-	binary.LittleEndian.PutUint64(amountBytes, uint64(p.Amount))
-	nw, err := w.Write(amountBytes)
-	if err != nil {
-		return written + int64(nw), err
+func (s *Store) insertTx(utx *btcutil.Tx, record txRecord) {
+	if ds := s.findDoubleSpend(utx); ds != nil {
+		switch {
+		case ds.txSha == *utx.Sha(): // identical tx
+			if ds.height != record.Height() {
+				s.setTxBlock(utx.Sha(), record.Block())
+				return
+			}
+
+		default:
+			// Double-spend or mutation.  Both are handled the same
+			// (remove any now-invalid entries), and then insert the
+			// new record.
+			s.removeDoubleSpends(ds)
+		}
 	}
-	written += int64(nw)
 
-	// Set and write flags.
-	flags := byte(0)
-	if p.Change {
+	s.insertUniqueTx(utx, record)
+}
+
+func (s *Store) insertUniqueTx(utx *btcutil.Tx, record txRecord) {
+	k := blockTx{*utx.Sha(), record.Height()}
+	s.txs[k] = utx
+
+	switch e := record.(type) {
+	case *signedTx:
+		if _, ok := s.signed[k]; ok {
+			// Avoid adding a duplicate.
+			return
+		}
+
+		// All the inputs should be currently unspent.  Tally the total
+		// input from each, and mark as spent.
+		for _, txin := range utx.MsgTx().TxIn {
+			op := txin.PreviousOutpoint
+			if rt, ok := s.unspent[op]; ok {
+				tx := s.txs[rt.blockTx()]
+				e.totalIn += tx.MsgTx().TxOut[op.Index].Value
+				rt.spentBy = &k
+				delete(s.unspent, txin.PreviousOutpoint)
+			}
+		}
+		s.signed[k] = e
+
+	case *recvTxOut:
+		blockOP := blockOutPoint{e.outpoint, record.Height()}
+		if _, ok := s.recv[blockOP]; ok {
+			// Avoid adding a duplicate.
+			return
+		}
+
+		s.recv[blockOP] = e
+		s.unspent[e.outpoint] = e // all recv'd txouts are added unspent
+	}
+
+	sortedInsert(s.sorted, record)
+}
+
+// doubleSpend checks all inputs between transaction a and b, returning true
+// if any two inputs share the same previous outpoint.
+func doubleSpend(a, b *btcwire.MsgTx) bool {
+	ain := make(map[btcwire.OutPoint]struct{})
+	for i := range a.TxIn {
+		ain[a.TxIn[i].PreviousOutpoint] = struct{}{}
+	}
+	for i := range b.TxIn {
+		if _, ok := ain[b.TxIn[i].PreviousOutpoint]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) findDoubleSpend(tx *btcutil.Tx) *blockTx {
+	// This MUST seach the ordered record list in in reverse order to
+	// find the double spends of the most recent matching outpoint, as
+	// spending the same outpoint is legal provided a previous transaction
+	// output with an equivalent transaction sha is fully spent.
+	for e := s.sorted.Back(); e != nil; e = e.Prev() {
+		record := e.Value.(txRecord)
+		storeTx := record.record(s).Tx()
+		if doubleSpend(tx.MsgTx(), storeTx.MsgTx()) {
+			btx := record.blockTx()
+			return &btx
+		}
+	}
+	return nil
+}
+
+func (s *Store) removeDoubleSpendsFromMaps(oldKey *blockTx, removed map[blockTx]struct{}) {
+	// Lookup old backing tx.
+	tx := s.txs[*oldKey]
+
+	// Lookup a signed tx record.  If found, remove it and mark the map
+	// removal.
+	if _, ok := s.signed[*oldKey]; ok {
+		delete(s.signed, *oldKey)
+		removed[*oldKey] = struct{}{}
+	}
+
+	// For each old txout, if a received txout record exists, remove it.
+	// If the txout has been spent, the spending tx is invalid as well, so
+	// all entries for it are removed as well.
+	for i := range tx.MsgTx().TxOut {
+		blockOP := blockOutPoint{
+			op:     *btcwire.NewOutPoint(&oldKey.txSha, uint32(i)),
+			height: oldKey.height,
+		}
+		if rtx, ok := s.recv[blockOP]; ok {
+			delete(s.recv, blockOP)
+			delete(s.unspent, blockOP.op)
+			removed[*oldKey] = struct{}{}
+
+			if rtx.spentBy != nil {
+				s.removeDoubleSpendsFromMaps(rtx.spentBy, removed)
+			}
+		}
+	}
+
+	// Remove old backing tx.
+	delete(s.txs, *oldKey)
+}
+
+func (s *Store) removeDoubleSpends(oldKey *blockTx) {
+	// Keep a set of block transactions for all removed entries.  This is
+	// used to remove all dead records from the sorted linked list.
+	removed := make(map[blockTx]struct{})
+
+	// Remove entries from store maps.
+	s.removeDoubleSpendsFromMaps(oldKey, removed)
+
+	// Remove any record with a matching block transaction from the sorted
+	// record linked list.
+	var enext *list.Element
+	for e := s.sorted.Front(); e != nil; e = enext {
+		enext = e.Next()
+		record := e.Value.(txRecord)
+		if _, ok := removed[record.blockTx()]; ok {
+			s.sorted.Remove(e)
+		}
+	}
+}
+
+func (s *Store) setTxBlock(txSha *btcwire.ShaHash, block *BlockDetails) {
+	if block == nil {
+		// Nothing to update.
+		return
+	}
+
+	// Lookup unmined backing tx.
+	prevKey := blockTx{*txSha, -1}
+	tx := s.txs[prevKey]
+
+	// Lookup a signed tx record.  If found, modify the record to
+	// set the block and update the store key.
+	if stx, ok := s.signed[prevKey]; ok {
+		stx.setBlock(block)
+		delete(s.signed, prevKey)
+		s.signed[stx.blockTx()] = stx
+	}
+
+	// For each txout, if a recveived txout record exists, modify
+	// the record to set the block and update the store key.
+	for txOutIndex := range tx.MsgTx().TxOut {
+		op := btcwire.NewOutPoint(txSha, uint32(txOutIndex))
+		prevKey := blockOutPoint{*op, -1}
+		if rtx, ok := s.recv[prevKey]; ok {
+			rtx.setBlock(block)
+			delete(s.recv, prevKey)
+			newKey := blockOutPoint{*op, rtx.Height()}
+			s.recv[newKey] = rtx
+		}
+	}
+
+	// Switch out keys for the backing tx map.
+	delete(s.txs, prevKey)
+	newKey := blockTx{*txSha, block.Height}
+	s.txs[newKey] = tx
+}
+
+// UnspentOutputs returns all unspent received transaction outputs.
+// The order is undefined.
+func (s *Store) UnspentOutputs() []*RecvTxOut {
+	unspent := make([]*RecvTxOut, 0, len(s.unspent))
+	for _, record := range s.unspent {
+		unspent = append(unspent, record.record(s).(*RecvTxOut))
+	}
+	return unspent
+}
+
+// confirmed checks whether a transaction at height txHeight has met
+// minConf confirmations for a blockchain at height chainHeight.
+func confirmed(minConf int, txHeight, chainHeight int32) bool {
+	if minConf == 0 {
+		return true
+	}
+	if txHeight != -1 && int(chainHeight-txHeight+1) >= minConf {
+		return true
+	}
+	return false
+}
+
+// Balance returns a wallet balance (total value of all unspent
+// transaction outputs) given a minimum of minConf confirmations,
+// calculated at a current chain height of curHeight.  The balance is
+// returned in units of satoshis.
+func (s *Store) Balance(minConf int, chainHeight int32) int64 {
+	bal := int64(0)
+	for _, rt := range s.unspent {
+		if confirmed(minConf, rt.Height(), chainHeight) {
+			tx := s.txs[rt.blockTx()]
+			msgTx := tx.MsgTx()
+			txOut := msgTx.TxOut[rt.outpoint.Index]
+			bal += txOut.Value
+		}
+	}
+	return bal
+}
+
+// SortedRecords returns a chronologically-ordered slice of Records.
+func (s *Store) SortedRecords() []Record {
+	records := make([]Record, 0, s.sorted.Len())
+	for e := s.sorted.Front(); e != nil; e = e.Next() {
+		record := e.Value.(txRecord)
+		records = append(records, record.record(s))
+	}
+	return records
+}
+
+type msgTx btcwire.MsgTx
+
+func (tx *msgTx) readFrom(r io.Reader) (int64, error) {
+	// Read from a TeeReader to return the number of read bytes.
+	buf := new(bytes.Buffer)
+	tr := io.TeeReader(r, buf)
+	if err := (*btcwire.MsgTx)(tx).Deserialize(tr); err != nil {
+		if buf.Len() != 0 && err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		return int64(buf.Len()), err
+	}
+
+	return int64((*btcwire.MsgTx)(tx).SerializeSize()), nil
+}
+
+func (tx *msgTx) writeTo(w io.Writer) (int64, error) {
+	// Write to a buffer and then copy to w so the total number
+	// of bytes written can be returned to the caller.  Writing
+	// to a bytes.Buffer never fails except for OOM, so omit the
+	// serialization error check.
+	buf := new(bytes.Buffer)
+	(*btcwire.MsgTx)(tx).Serialize(buf)
+	return io.Copy(w, buf)
+}
+
+type signedTx struct {
+	txSha       btcwire.ShaHash
+	timeCreated time.Time
+	totalIn     int64
+	block       *BlockDetails // nil if unmined
+}
+
+func (st *signedTx) blockTx() blockTx {
+	return blockTx{st.txSha, st.Height()}
+}
+
+func (st *signedTx) readFrom(r io.Reader) (int64, error) {
+	// Fill in calculated fields with serialized data on success.
+	var err error
+	defer func() {
+		if err != nil {
+			return
+		}
+	}()
+
+	// Read txSha
+	n, err := io.ReadFull(r, st.txSha[:])
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Read creation time
+	timeBytes := make([]byte, 8)
+	n, err = io.ReadFull(r, timeBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	st.timeCreated = time.Unix(int64(binary.LittleEndian.Uint64(timeBytes)), 0)
+
+	// Read total BTC in
+	totalInBytes := make([]byte, 8)
+	n, err = io.ReadFull(r, totalInBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	st.totalIn = int64(binary.LittleEndian.Uint64(totalInBytes))
+
+	// Read flags
+	flagByte := make([]byte, 1)
+	n, err = io.ReadFull(r, flagByte)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	flags := flagByte[0]
+
+	// Read block details if specified in flags
+	if flags&(1<<0) != 0 {
+		st.block = new(BlockDetails)
+		n, err := st.block.readFrom(r)
+		n64 += n
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return n64, err
+		}
+	} else {
+		st.block = nil
+	}
+
+	return n64, nil
+}
+
+func (st *signedTx) writeTo(w io.Writer) (int64, error) {
+	// Write txSha
+	n, err := w.Write(st.txSha[:])
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write creation time
+	timeBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(timeBytes, uint64(st.timeCreated.Unix()))
+	n, err = w.Write(timeBytes)
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write total BTC in
+	totalInBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(totalInBytes, uint64(st.totalIn))
+	n, err = w.Write(totalInBytes)
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Create and write flags
+	var flags byte
+	if st.block != nil {
 		flags |= 1 << 0
 	}
-	flagBytes := []byte{flags}
-	nw, err = w.Write(flagBytes)
+	n, err = w.Write([]byte{flags})
+	n64 += int64(n)
 	if err != nil {
-		return written + int64(nw), err
-	}
-	written += int64(nw)
-
-	return written, nil
-}
-
-// SendTx is a type storing information about a transaction that was
-// sent by an address in a wallet.
-type SendTx struct {
-	TxID        btcwire.ShaHash
-	Time        int64
-	BlockHeight int32
-	BlockHash   btcwire.ShaHash
-	BlockIndex  int32
-	BlockTime   int64
-	Fee         int64 // Measured in Satoshis
-	Receivers   Pairs
-}
-
-// We want to use binaryRead and binaryWrite instead of binary.Read
-// and binary.Write because those from the binary package do not return
-// the number of bytes actually written or read.  We need to return
-// this value to correctly support the io.ReaderFrom and io.WriterTo
-// interfaces.
-func binaryRead(r io.Reader, order binary.ByteOrder, data interface{}) (n int64, err error) {
-	var read int
-	buf := make([]byte, binary.Size(data))
-	if read, err = r.Read(buf); err != nil {
-		return int64(read), err
-	}
-	if read < binary.Size(data) {
-		return int64(read), io.EOF
-	}
-	return int64(read), binary.Read(bytes.NewBuffer(buf), order, data)
-}
-
-// See comment for binaryRead().
-func binaryWrite(w io.Writer, order binary.ByteOrder, data interface{}) (n int64, err error) {
-	var buf bytes.Buffer
-	if err = binary.Write(&buf, order, data); err != nil {
-		return 0, err
+		return n64, err
 	}
 
-	written, err := w.Write(buf.Bytes())
-	return int64(written), err
-}
-
-// ReadFrom satisifies the io.ReaderFrom interface.  Utxo structs are
-// read in from r until an io.EOF is reached.  If an io.EOF is reached
-// before a Utxo is finished being read, err will be non-nil.
-func (u *UtxoStore) ReadFrom(r io.Reader) (int64, error) {
-	var read int64
-
-	// Read the file version.  This is currently not used.
-	versionBytes := make([]byte, 4) // bytes for a uint32
-	n, err := r.Read(versionBytes)
-	if err != nil {
-		return int64(n), err
-	}
-	read = int64(n)
-
-	for {
-		// Read Utxo
-		utxo := new(Utxo)
-		n, err := utxo.ReadFrom(r)
+	// Write block details if set
+	if st.block != nil {
+		n, err := st.block.writeTo(w)
+		n64 += n
 		if err != nil {
-			if n == 0 && err == io.EOF {
-				err = nil
-			}
-			return read + n, err
+			return n64, err
 		}
-		read += n
-		*u = append(*u, utxo)
 	}
+
+	return n64, nil
 }
 
-// WriteTo satisifies the io.WriterTo interface.  Each Utxo is written
-// to w, prepended by a single byte header to distinguish between
-// confirmed and unconfirmed outputs.
-func (u *UtxoStore) WriteTo(w io.Writer) (int64, error) {
-	var written int64
-
-	// Write file version.  This is currently not used.
-	versionBytes := make([]byte, 4) // bytes for a uint32
-	binary.LittleEndian.PutUint32(versionBytes, utxoVersCurrent)
-	n, err := w.Write(versionBytes)
-	if err != nil {
-		return int64(n), err
-	}
-	written = int64(n)
-
-	// Write each utxo in the store.
-	for _, utxo := range *u {
-		// Write Utxo
-		n, err := utxo.WriteTo(w)
-		if err != nil {
-			return written + n, err
-		}
-		written += n
-	}
-
-	return written, nil
+func (st *signedTx) TxSha() *btcwire.ShaHash {
+	return &st.txSha
 }
 
-// Insert inserts an Utxo into the store.
-func (u *UtxoStore) Insert(utxo *Utxo) {
-	s := *u
-	defer func() {
-		*u = s
-	}()
-
-	// First, iterate through all stored utxos.  If an unconfirmed utxo
-	// (not present in a block) has the same outpoint as this utxo,
-	// update the block height and hash.
-	for i := range s {
-		if bytes.Equal(s[i].Out.Hash[:], utxo.Out.Hash[:]) && s[i].Out.Index == utxo.Out.Index {
-			// Fill relevant block information.
-			copy(s[i].BlockHash[:], utxo.BlockHash[:])
-			s[i].Height = utxo.Height
-			return
-		}
-	}
-
-	// After iterating through all UTXOs, it was not a duplicate or
-	// change UTXO appearing in a block.  Append a new Utxo to the end.
-	s = append(s, utxo)
+func (st *signedTx) Time() time.Time {
+	return st.timeCreated
 }
 
-// Rollback removes all utxos from and after the block specified
-// by a block height and hash.
-//
-// Correct results rely on u being sorted by block height in
-// increasing order.
-func (u *UtxoStore) Rollback(height int32, hash *btcwire.ShaHash) (modified bool) {
-	s := *u
-
-	// endlen specifies the final length of the rolled-back UtxoStore.
-	// Past endlen, array elements are nilled.  We do this instead of
-	// just reslicing with a shorter length to avoid leaving elements
-	// in the underlying array so they can be garbage collected.
-	endlen := len(s)
-	defer func() {
-		modified = endlen != len(s)
-		for i := endlen; i < len(s); i++ {
-			s[i] = nil
-		}
-		*u = s[:endlen]
-		return
-	}()
-
-	for i := len(s) - 1; i >= 0; i-- {
-		if height > s[i].Height {
-			break
-		}
-		if height == s[i].Height && *hash == s[i].BlockHash {
-			endlen = i
-		}
-	}
-	return
+func (st *signedTx) setBlock(details *BlockDetails) {
+	st.block = details
 }
 
-// Remove removes all utxos from toRemove from a UtxoStore.  The order
-// of utxos in the resulting UtxoStore is unspecified.
-func (u *UtxoStore) Remove(toRemove []*Utxo) (modified bool) {
-	s := *u
-
-	m := make(map[*Utxo]bool)
-	for _, utxo := range s {
-		m[utxo] = true
-	}
-
-	for _, candidate := range toRemove {
-		if _, ok := m[candidate]; ok {
-			modified = true
-		}
-		delete(m, candidate)
-	}
-
-	if !modified {
-		return
-	}
-
-	s = make([]*Utxo, len(m))
-	i := 0
-	for utxo := range m {
-		s[i] = utxo
-		i++
-	}
-
-	*u = s
-	return
+func (st *signedTx) Block() *BlockDetails {
+	return st.block
 }
 
-// ReadFrom satisifies the io.ReaderFrom interface.  A Utxo is read
-// from r with the format:
-//
-//  AddrHash (20 bytes)
-//  Out (36 bytes)
-//  Subscript (varies)
-//  Amt (8 bytes, little endian)
-//  Height (4 bytes, little endian)
-//  BlockHash (32 bytes)
-func (u *Utxo) ReadFrom(r io.Reader) (n int64, err error) {
-	datas := []interface{}{
-		&u.AddrHash,
-		&u.Out,
-		&u.Subscript,
-		&u.Amt,
-		&u.Height,
-		&u.BlockHash,
+// Height returns the blockchain height of the transaction.  If the
+// transaction is unmined, this returns -1.
+func (st *signedTx) Height() int32 {
+	height := int32(-1)
+	if st.block != nil {
+		height = st.block.Height
 	}
-	var read int64
-	for _, data := range datas {
-		if rf, ok := data.(io.ReaderFrom); ok {
-			read, err = rf.ReadFrom(r)
-		} else {
-			read, err = binaryRead(r, binary.LittleEndian, data)
-		}
-		if err != nil {
-			return n + read, err
-		}
-		n += read
-	}
-	return n, nil
+	return height
 }
 
-// WriteTo satisifies the io.WriterTo interface.  A Utxo is written to
-// w in the format:
-//
-//  AddrHash (20 bytes)
-//  Out (36 bytes)
-//  Subscript (varies)
-//  Amt (8 bytes, little endian)
-//  Height (4 bytes, little endian)
-//  BlockHash (32 bytes)
-func (u *Utxo) WriteTo(w io.Writer) (n int64, err error) {
-	datas := []interface{}{
-		&u.AddrHash,
-		&u.Out,
-		&u.Subscript,
-		&u.Amt,
-		&u.Height,
-		&u.BlockHash,
-	}
-	var written int64
-	for _, data := range datas {
-		if wt, ok := data.(io.WriterTo); ok {
-			written, err = wt.WriteTo(w)
-		} else {
-			written, err = binaryWrite(w, binary.LittleEndian, data)
-		}
-		if err != nil {
-			return n + written, err
-		}
-		n += written
-	}
-	return n, nil
+// TotalSent returns the total number of satoshis spent by all transaction
+// inputs.
+func (st *signedTx) TotalSent() int64 {
+	return st.totalIn
 }
 
-// ReadFrom satisifies the io.ReaderFrom interface.  An OutPoint is read
-// from r with the format:
-//
-//  [Hash (32 bytes), Index (4 bytes)]
-//
-// Each field is read little endian.
-func (o *OutPoint) ReadFrom(r io.Reader) (n int64, err error) {
-	datas := []interface{}{
-		&o.Hash,
-		&o.Index,
+func (st *signedTx) record(s *Store) Record {
+	tx := s.txs[st.blockTx()]
+
+	totalOut := int64(0)
+	for _, txOut := range tx.MsgTx().TxOut {
+		totalOut += txOut.Value
 	}
-	var read int64
-	for _, data := range datas {
-		read, err = binaryRead(r, binary.LittleEndian, data)
-		if err != nil {
-			return n + read, err
-		}
-		n += read
+
+	record := &SignedTx{
+		signedTx: *st,
+		tx:       tx,
+		fee:      st.totalIn - totalOut,
 	}
-	return n, nil
+	return record
 }
 
-// WriteTo satisifies the io.WriterTo interface.  An OutPoint is written
-// to w in the format:
-//
-//  [Hash (32 bytes), Index (4 bytes)]
-//
-// Each field is written little endian.
-func (o *OutPoint) WriteTo(w io.Writer) (n int64, err error) {
-	datas := []interface{}{
-		&o.Hash,
-		&o.Index,
-	}
-	var written int64
-	for _, data := range datas {
-		written, err = binaryWrite(w, binary.LittleEndian, data)
-		if err != nil {
-			return n + written, err
-		}
-		n += written
-	}
-	return n, nil
+// SignedTx is a type representing a transaction partially or fully signed
+// by wallet keys.
+type SignedTx struct {
+	signedTx
+	tx  *btcutil.Tx
+	fee int64
 }
 
-// ReadFrom satisifies the io.ReaderFrom interface.  A PkScript is read
-// from r with the format:
-//
-//  Length (4 byte, little endian)
-//  ScriptBytes (Length bytes)
-func (s *PkScript) ReadFrom(r io.Reader) (n int64, err error) {
-	var scriptlen uint32
-	var read int64
-	read, err = binaryRead(r, binary.LittleEndian, &scriptlen)
-	if err != nil {
-		return n + read, err
-	}
-	n += read
-
-	scriptbuf := new(bytes.Buffer)
-	read, err = scriptbuf.ReadFrom(io.LimitReader(r, int64(scriptlen)))
-	if err != nil {
-		return n + read, err
-	}
-	n += read
-	*s = scriptbuf.Bytes()
-
-	return n, nil
+// Fee returns the fee (total inputs - total outputs) of the transaction.
+func (st *SignedTx) Fee() int64 {
+	return st.fee
 }
 
-// WriteTo satisifies the io.WriterTo interface.  A PkScript is written
-// to w in the format:
-//
-//  Length (4 byte, little endian)
-//  ScriptBytes (Length bytes)
-func (s *PkScript) WriteTo(w io.Writer) (n int64, err error) {
-	var written int64
-	written, err = binaryWrite(w, binary.LittleEndian, uint32(len(*s)))
-	if err != nil {
-		return n + written, nil
-	}
-	n += written
-
-	written, err = bytes.NewBuffer(*s).WriteTo(w)
-	if err != nil {
-		return n + written, nil
-	}
-	n += written
-
-	return n, nil
-}
-
-// ReadFrom satisifies the io.ReaderFrom interface.  A TxStore is read
-// in from r with the format:
-//
-//  Version (4 bytes, little endian)
-//  [(TxHeader (1 byte), Tx (varies in size))...]
-func (txs *TxStore) ReadFrom(r io.Reader) (int64, error) {
-	var read int64
-
-	// Read the file version.
-	versionBytes := make([]byte, 4) // bytes for a uint32
-	n, err := r.Read(versionBytes)
-	if err != nil {
-		return int64(n), err
-	}
-	vers := binary.LittleEndian.Uint32(versionBytes)
-	read += int64(n)
-
-	store := []Tx{}
-	defer func() {
-		*txs = store
-	}()
-	for {
-		// Read header
-		var header byte
-		n, err := binaryRead(r, binary.LittleEndian, &header)
-		if err != nil {
-			// io.EOF is not an error here.
-			if err == io.EOF {
-				err = nil
-			}
-			return read + n, err
-		}
-		read += n
-
-		var tx Tx
-		// Read tx.
-		switch header {
-		case recvTxHeader:
-			t := new(RecvTx)
-			n, err = t.ReadFromVersion(vers, r)
-			if err != nil {
-				return read + n, err
-			}
-			read += n
-			tx = t
-
-		case sendTxHeader:
-			t := new(SendTx)
-			n, err = t.ReadFromVersion(vers, r)
-			if err != nil {
-				return read + n, err
-			}
-			read += n
-			tx = t
-
-		default:
-			return n, fmt.Errorf("unknown Tx header")
-		}
-
-		store = append(store, tx)
-	}
-}
-
-// WriteTo satisifies the io.WriterTo interface.  A TxStore is written
-// to w in the format:
-//
-//  Version (4 bytes, little endian)
-//  [(TxHeader (1 byte), Tx (varies in size))...]
-func (txs *TxStore) WriteTo(w io.Writer) (int64, error) {
-	var written int64
-
-	// Write file version.
-	versionBytes := make([]byte, 4) // bytes for a uint32
-	binary.LittleEndian.PutUint32(versionBytes, txVersCurrent)
-	n, err := w.Write(versionBytes)
-	if err != nil {
-		return int64(n), err
-	}
-	written = int64(n)
-
-	store := ([]Tx)(*txs)
-	for _, tx := range store {
-		// Write header for tx.
-		var header byte
-		switch tx.(type) {
-		case *RecvTx:
-			header = recvTxHeader
-
-		case *SendTx:
-			header = sendTxHeader
-
-		default:
-			return written, fmt.Errorf("unknown type in TxStore")
-		}
-		headerBytes := []byte{header}
-		n, err := w.Write(headerBytes)
-		if err != nil {
-			return written + int64(n), err
-		}
-		written += int64(n)
-
-		// Write tx.
-		wt := tx.(io.WriterTo)
-		n64, err := wt.WriteTo(w)
-		if err != nil {
-			return written + n64, err
-		}
-		written += n64
-	}
-	return written, nil
-}
-
-// InsertRecvTx inserts a RecvTx, checking for duplicates, and updating
-// previous entries with the latest block information in tx.
-func (txs *TxStore) InsertRecvTx(tx *RecvTx) {
-	s := *txs
-	defer func() {
-		*txs = s
-	}()
-
-	// First, iterate through all stored tx history.  If a received tx
-	// matches the one being added (equal txid and txout idx), update
-	// it with the new block information.
-	for i := range s {
-		recvTx, ok := s[i].(*RecvTx)
-		if !ok {
-			// Can only check for equality if the types match.
-			continue
-		}
-
-		// Found an identical received tx.
-		if bytes.Equal(recvTx.TxID[:], tx.TxID[:]) &&
-			recvTx.TxOutIdx == tx.TxOutIdx {
-
-			// Fill relevant block information.
-			copy(recvTx.BlockHash[:], tx.BlockHash[:])
-			recvTx.BlockHeight = tx.BlockHeight
-			recvTx.BlockIndex = tx.BlockIndex
-			recvTx.BlockTime = tx.BlockTime
-			return
-		}
-	}
-
-	// No received tx entries with the same outpoint.  Append to the end.
-	s = append(s, tx)
-}
-
-// Rollback removes all txs from and after the block specified by a
-// block height and hash.
-//
-// Correct results rely on txs being sorted by block height in
-// increasing order.
-func (txs *TxStore) Rollback(height int32, hash *btcwire.ShaHash) (modified bool) {
-	s := ([]Tx)(*txs)
-
-	// endlen specifies the final length of the rolled-back TxStore.
-	// Past endlen, array elements are nilled.  We do this instead of
-	// just reslicing with a shorter length to avoid leaving elements
-	// in the underlying array so they can be garbage collected.
-	endlen := len(s)
-	defer func() {
-		modified = endlen != len(s)
-		for i := endlen; i < len(s); i++ {
-			s[i] = nil
-		}
-		*txs = s[:endlen]
-		return
-	}()
-
-	for i := len(s) - 1; i >= 0; i-- {
-		var txBlockHeight int32
-		var txBlockHash *btcwire.ShaHash
-		switch tx := s[i].(type) {
-		case *RecvTx:
-			if height > tx.BlockHeight {
-				break
-			}
-			txBlockHeight = tx.BlockHeight
-			txBlockHash = &tx.BlockHash
-
-		case *SendTx:
-			if height > tx.BlockHeight {
-				break
-			}
-			txBlockHeight = tx.BlockHeight
-			txBlockHash = &tx.BlockHash
-		}
-		if height == txBlockHeight && *hash == *txBlockHash {
-			endlen = i
-		}
-	}
-	return
-}
-
-func (tx *RecvTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error) {
-	if vers >= txVersCurrent {
-		// Use current version.
-		return tx.ReadFrom(r)
-	}
-
-	// Old file version did not save the txout index.
-
-	datas := []interface{}{
-		&tx.TxID,
-		// tx index not read.
-		&tx.TimeReceived,
-		&tx.BlockHeight,
-		&tx.BlockHash,
-		&tx.BlockIndex,
-		&tx.BlockTime,
-		&tx.Amount,
-		&tx.ReceiverHash,
-	}
-	var read int64
-	for _, data := range datas {
-		switch e := data.(type) {
-		case io.ReaderFrom:
-			read, err = e.ReadFrom(r)
-		default:
-			read, err = binaryRead(r, binary.LittleEndian, data)
-		}
-
-		if err != nil {
-			return n + read, err
-		}
-		n += read
-	}
-	return n, nil
-}
-
-// ReadFrom satisifies the io.ReaderFrom interface.  A RecTx is read
-// in from r with the format:
-//
-//  TxID (32 bytes)
-//  TxOutIdx (4 bytes, little endian)
-//  TimeReceived (8 bytes, little endian)
-//  BlockHeight (4 bytes, little endian)
-//  BlockHash (32 bytes)
-//  BlockIndex (4 bytes, little endian)
-//  BlockTime (8 bytes, little endian)
-//  Amt (8 bytes, little endian)
-//  ReceiverAddr (varies)
-func (tx *RecvTx) ReadFrom(r io.Reader) (n int64, err error) {
-	datas := []interface{}{
-		&tx.TxID,
-		&tx.TxOutIdx,
-		&tx.TimeReceived,
-		&tx.BlockHeight,
-		&tx.BlockHash,
-		&tx.BlockIndex,
-		&tx.BlockTime,
-		&tx.Amount,
-		&tx.ReceiverHash,
-	}
-	var read int64
-	for _, data := range datas {
-		switch e := data.(type) {
-		case io.ReaderFrom:
-			read, err = e.ReadFrom(r)
-		default:
-			read, err = binaryRead(r, binary.LittleEndian, data)
-		}
-
-		if err != nil {
-			return n + read, err
-		}
-		n += read
-	}
-	return n, nil
-}
-
-// WriteTo satisifies the io.WriterTo interface.  A RecvTx is written to
-// w in the format:
-//
-//  TxID (32 bytes)
-//  TxOutIdx (4 bytes, little endian)
-//  TimeReceived (8 bytes, little endian)
-//  BlockHeight (4 bytes, little endian)
-//  BlockHash (32 bytes)
-//  BlockIndex (4 bytes, little endian)
-//  BlockTime (8 bytes, little endian)
-//  Amt (8 bytes, little endian)
-//  ReceiverAddr (varies)
-func (tx *RecvTx) WriteTo(w io.Writer) (n int64, err error) {
-	datas := []interface{}{
-		&tx.TxID,
-		&tx.TxOutIdx,
-		&tx.TimeReceived,
-		&tx.BlockHeight,
-		&tx.BlockHash,
-		&tx.BlockIndex,
-		&tx.BlockTime,
-		&tx.Amount,
-		&tx.ReceiverHash,
-	}
-	var written int64
-	for _, data := range datas {
-		switch e := data.(type) {
-		case io.WriterTo:
-			written, err = e.WriteTo(w)
-		default:
-			written, err = binaryWrite(w, binary.LittleEndian, data)
-		}
-
-		if err != nil {
-			return n + written, err
-		}
-		n += written
-	}
-	return n, nil
+// Tx returns the underlying transaction managed by the store.
+func (st *SignedTx) Tx() *btcutil.Tx {
+	return st.tx
 }
 
 // TxInfo returns a slice of maps that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
-func (tx *RecvTx) TxInfo(account string, curheight int32,
-	net btcwire.BitcoinNet) []map[string]interface{} {
-
-	address := "Unknown"
-	addr, err := btcutil.NewAddressPubKeyHash(tx.ReceiverHash, net)
-	if err == nil {
-		address = addr.String()
-	}
-
-	txInfo := map[string]interface{}{
-		"category":     "receive",
-		"account":      account,
-		"address":      address,
-		"amount":       float64(tx.Amount) / float64(btcutil.SatoshiPerBitcoin),
-		"txid":         tx.TxID.String(),
-		"timereceived": tx.TimeReceived,
-	}
-
-	if tx.BlockHeight != -1 {
-		txInfo["blockhash"] = tx.BlockHash.String()
-		txInfo["blockindex"] = tx.BlockIndex
-		txInfo["blocktime"] = tx.BlockTime
-		txInfo["confirmations"] = curheight - tx.BlockHeight + 1
-	} else {
-		txInfo["confirmations"] = 0
-	}
-
-	return []map[string]interface{}{txInfo}
-}
-
-// GetBlockHeight returns the current blockheight of the transaction,
-// implementing the Tx interface.
-func (tx *RecvTx) GetBlockHeight() int32 {
-	return tx.BlockHeight
-}
-
-// GetBlockHash return the current blockhash of thet transaction, implementing
-// the Tx interface.
-func (tx *RecvTx) GetBlockHash() *btcwire.ShaHash {
-	return &tx.BlockHash
-}
-
-// GetBlockTime returns the current block time of the transaction, implementing
-// the Tx interface.
-func (tx *RecvTx) GetBlockTime() int64 {
-	return tx.BlockTime
-}
-
-// GetTime returns the current ID of the transaction, implementing the Tx
-// interface.
-func (tx *RecvTx) GetTime() int64 {
-	return tx.TimeReceived
-}
-
-// GetTxID returns the current ID of the transaction, implementing the Tx
-// interface.
-func (tx *RecvTx) GetTxID() *btcwire.ShaHash {
-	return &tx.TxID
-}
-
-// Copy returns a deep copy of the structure, implementing the Tx interface..
-func (tx *RecvTx) Copy() Tx {
-	copyTx := *tx
-
-	return &copyTx
-}
-
-func (tx *SendTx) ReadFromVersion(vers uint32, r io.Reader) (n int64, err error) {
-	var read int64
-
-	datas := []interface{}{
-		&tx.TxID,
-		&tx.Time,
-		&tx.BlockHeight,
-		&tx.BlockHash,
-		&tx.BlockIndex,
-		&tx.BlockTime,
-		&tx.Fee,
-		&tx.Receivers,
-	}
-	for _, data := range datas {
-		switch e := data.(type) {
-		case ReaderFromVersion:
-			read, err = e.ReadFromVersion(vers, r)
-
-		case io.ReaderFrom:
-			read, err = e.ReadFrom(r)
-
-		default:
-			read, err = binaryRead(r, binary.LittleEndian, data)
-		}
-
-		if err != nil {
-			return n + read, err
-		}
-		n += read
-	}
-
-	return n, nil
-}
-
-// ReadFrom satisifies the io.WriterTo interface.  A SendTx is read
-// from r with the format:
-//
-//  TxID (32 bytes)
-//  Time (8 bytes, little endian)
-//  BlockHeight (4 bytes, little endian)
-//  BlockHash (32 bytes)
-//  BlockIndex (4 bytes, little endian)
-//  BlockTime (8 bytes, little endian)
-//  Fee (8 bytes, little endian)
-//  Receivers (varies)
-func (tx *SendTx) ReadFrom(r io.Reader) (n int64, err error) {
-	return tx.ReadFromVersion(txVersCurrent, r)
-}
-
-// WriteTo satisifies the io.WriterTo interface.  A SendTx is written to
-// w in the format:
-//
-//  TxID (32 bytes)
-//  Time (8 bytes, little endian)
-//  BlockHeight (4 bytes, little endian)
-//  BlockHash (32 bytes)
-//  BlockIndex (4 bytes, little endian)
-//  BlockTime (8 bytes, little endian)
-//  Fee (8 bytes, little endian)
-//  Receivers (varies)
-func (tx *SendTx) WriteTo(w io.Writer) (n int64, err error) {
-	var written int64
-
-	datas := []interface{}{
-		&tx.TxID,
-		&tx.Time,
-		&tx.BlockHeight,
-		&tx.BlockHash,
-		&tx.BlockIndex,
-		&tx.BlockTime,
-		&tx.Fee,
-		&tx.Receivers,
-	}
-	for _, data := range datas {
-		switch e := data.(type) {
-		case io.WriterTo:
-			written, err = e.WriteTo(w)
-		default:
-			written, err = binaryWrite(w, binary.LittleEndian, data)
-		}
-
-		if err != nil {
-			return n + written, err
-		}
-		n += written
-	}
-
-	return n, nil
-}
-
-// TxInfo returns a slice of maps that may be marshaled as a JSON array
-// of JSON objects for a listtransactions RPC reply.
-func (tx *SendTx) TxInfo(account string, curheight int32,
-	net btcwire.BitcoinNet) []map[string]interface{} {
-
-	reply := make([]map[string]interface{}, len(tx.Receivers))
+func (st *SignedTx) TxInfo(account string, chainHeight int32, net btcwire.BitcoinNet) []map[string]interface{} {
+	reply := make([]map[string]interface{}, len(st.tx.MsgTx().TxOut))
 
 	var confirmations int32
-	if tx.BlockHeight != -1 {
-		confirmations = curheight - tx.BlockHeight + 1
+	if st.block != nil {
+		confirmations = chainHeight - st.block.Height + 1
 	}
 
-	// error is ignored since the length will always be correct.
-	txID, _ := btcwire.NewShaHash(tx.TxID[:])
-	txIDStr := txID.String()
-
-	// error is ignored since the length will always be correct.
-	blockHash, _ := btcwire.NewShaHash(tx.BlockHash[:])
-	blockHashStr := blockHash.String()
-
-	for i, pair := range tx.Receivers {
+	for i, txout := range st.tx.MsgTx().TxOut {
 		address := "Unknown"
-		addr, err := btcutil.NewAddressPubKeyHash(pair.PubkeyHash, net)
-		if err == nil {
-			address = addr.String()
+		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, net)
+		if len(addrs) == 1 {
+			address = addrs[0].EncodeAddress()
 		}
 		info := map[string]interface{}{
 			"account":       account,
 			"address":       address,
 			"category":      "send",
-			"amount":        float64(-pair.Amount) / float64(btcutil.SatoshiPerBitcoin),
-			"fee":           float64(tx.Fee) / float64(btcutil.SatoshiPerBitcoin),
-			"confirmations": confirmations,
-			"txid":          txIDStr,
-			"time":          tx.Time,
-			"timereceived":  tx.Time,
+			"amount":        float64(-txout.Value) / float64(btcutil.SatoshiPerBitcoin),
+			"fee":           float64(st.Fee()) / float64(btcutil.SatoshiPerBitcoin),
+			"confirmations": float64(confirmations),
+			"txid":          st.txSha.String(),
+			"time":          float64(st.timeCreated.Unix()),
+			"timereceived":  float64(st.timeCreated.Unix()),
 		}
-		if tx.BlockHeight != -1 {
-			info["blockhash"] = blockHashStr
-			info["blockindex"] = tx.BlockIndex
-			info["blocktime"] = tx.BlockTime
+		if st.block != nil {
+			info["blockhash"] = st.block.Hash.String()
+			info["blockindex"] = float64(st.block.Index)
+			info["blocktime"] = float64(st.block.Time.Unix())
 		}
 		reply[i] = info
 	}
@@ -1241,39 +950,405 @@ func (tx *SendTx) TxInfo(account string, curheight int32,
 	return reply
 }
 
-// GetBlockHeight returns the current blockheight of the transaction,
-// implementing the Tx interface.
-func (tx *SendTx) GetBlockHeight() int32 {
-	return tx.BlockHeight
+// BlockDetails holds details about a transaction contained in a block.
+type BlockDetails struct {
+	Height int32
+	Hash   btcwire.ShaHash
+	Index  int32
+	Time   time.Time
 }
 
-// GetBlockHash return the current blockhash of thet transaction, implementing
-// the Tx interface.
-func (tx *SendTx) GetBlockHash() *btcwire.ShaHash {
-	return &tx.BlockHash
+func (block *BlockDetails) readFrom(r io.Reader) (int64, error) {
+	// Read height
+	heightBytes := make([]byte, 4)
+	n, err := io.ReadFull(r, heightBytes)
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+	block.Height = int32(binary.LittleEndian.Uint32(heightBytes))
+
+	// Read hash
+	n, err = io.ReadFull(r, block.Hash[:])
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+
+	// Read index
+	indexBytes := make([]byte, 4)
+	n, err = io.ReadFull(r, indexBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	block.Index = int32(binary.LittleEndian.Uint32(indexBytes))
+
+	// Read unix time
+	timeBytes := make([]byte, 8)
+	n, err = io.ReadFull(r, timeBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	block.Time = time.Unix(int64(binary.LittleEndian.Uint64(timeBytes)), 0)
+
+	return n64, err
 }
 
-// GetBlockTime returns the current block time of the transaction, implementing
-// the Tx interface.
-func (tx *SendTx) GetBlockTime() int64 {
-	return tx.BlockTime
+func (block *BlockDetails) writeTo(w io.Writer) (int64, error) {
+	// Write height
+	heightBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(heightBytes, uint32(block.Height))
+	n, err := w.Write(heightBytes)
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write hash
+	n, err = w.Write(block.Hash[:])
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write index
+	indexBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(indexBytes, uint32(block.Index))
+	n, err = w.Write(indexBytes)
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write unix time
+	timeBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(timeBytes, uint64(block.Time.Unix()))
+	n, err = w.Write(timeBytes)
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	return n64, nil
 }
 
-// GetTime returns the current ID of the transaction, implementing the Tx
-// interface.
-func (tx *SendTx) GetTime() int64 {
-	return tx.Time
+type recvTxOut struct {
+	outpoint btcwire.OutPoint
+	change   bool
+	locked   bool
+	received time.Time
+	block    *BlockDetails // nil if unmined
+	spentBy  *blockTx      // nil if unspent
 }
 
-// GetTxID returns the current ID of the transaction, implementing the Tx
-// interface.
-func (tx *SendTx) GetTxID() *btcwire.ShaHash {
-	return &tx.TxID
+func (rt *recvTxOut) blockTx() blockTx {
+	return blockTx{rt.outpoint.Hash, rt.Height()}
 }
 
-// Copy returns a deep copy of the structure, implementing the Tx interface..
-func (tx *SendTx) Copy() Tx {
-	copyTx := *tx
+func (rt *recvTxOut) readFrom(r io.Reader) (int64, error) {
+	// Read outpoint (Sha, index)
+	n, err := io.ReadFull(r, rt.outpoint.Hash[:])
+	n64 := int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	indexBytes := make([]byte, 4)
+	n, err = io.ReadFull(r, indexBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	rt.outpoint.Index = binary.LittleEndian.Uint32(indexBytes)
 
-	return &copyTx
+	// Read time received
+	timeReceivedBytes := make([]byte, 8)
+	n, err = io.ReadFull(r, timeReceivedBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	rt.received = time.Unix(int64(binary.LittleEndian.Uint64(timeReceivedBytes)), 0)
+
+	// Create and read flags (change, is spent, block set)
+	flagBytes := make([]byte, 1)
+	n, err = io.ReadFull(r, flagBytes)
+	n64 += int64(n)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	if err != nil {
+		return n64, err
+	}
+	flags := flagBytes[0]
+
+	// Set change based on flags
+	rt.change = flags&(1<<0) != 0
+	rt.locked = flags&(1<<1) != 0
+
+	// Read block details if specified in flags
+	if flags&(1<<2) != 0 {
+		rt.block = new(BlockDetails)
+		n, err := rt.block.readFrom(r)
+		n64 += n
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return n64, err
+		}
+	} else {
+		rt.block = nil
+	}
+
+	// Read spent by data if specified in flags
+	if flags&(1<<3) != 0 {
+		rt.spentBy = new(blockTx)
+		n, err := rt.spentBy.readFrom(r)
+		n64 += n
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return n64, err
+		}
+	} else {
+		rt.spentBy = nil
+	}
+
+	return n64, nil
+}
+
+func (rt *recvTxOut) writeTo(w io.Writer) (int64, error) {
+	// Write outpoint (Sha, index)
+	n, err := w.Write(rt.outpoint.Hash[:])
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+	indexBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(indexBytes, rt.outpoint.Index)
+	n, err = w.Write(indexBytes)
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write time received
+	timeReceivedBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(timeReceivedBytes, uint64(rt.received.Unix()))
+	n, err = w.Write(timeReceivedBytes)
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Create and write flags (change, is spent, block set)
+	var flags byte
+	if rt.change {
+		flags |= 1 << 0
+	}
+	if rt.locked {
+		flags |= 1 << 1
+	}
+	if rt.block != nil {
+		flags |= 1 << 2
+	}
+	if rt.spentBy != nil {
+		flags |= 1 << 3
+	}
+	n, err = w.Write([]byte{flags})
+	n64 += int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	// Write block details if set
+	if rt.block != nil {
+		n, err := rt.block.writeTo(w)
+		n64 += n
+		if err != nil {
+			return n64, err
+		}
+	}
+
+	// Write spent by data if set (Sha, block height)
+	if rt.spentBy != nil {
+		n, err := rt.spentBy.writeTo(w)
+		n64 += n
+		if err != nil {
+			return n64, err
+		}
+	}
+
+	return n64, nil
+}
+
+// TxSha returns the sha of the transaction containing this output.
+func (rt *recvTxOut) TxSha() *btcwire.ShaHash {
+	return &rt.outpoint.Hash
+}
+
+// OutPoint returns the outpoint to be included when creating transaction
+// inputs referencing this output.
+func (rt *recvTxOut) OutPoint() *btcwire.OutPoint {
+	return &rt.outpoint
+}
+
+// Time returns the time the transaction containing this output was received.
+func (rt *recvTxOut) Time() time.Time {
+	return rt.received
+}
+
+// Change returns whether the received output was created for a change address.
+func (rt *recvTxOut) Change() bool {
+	return rt.change
+}
+
+// Spent returns whether the transaction output has been spent by a later
+// transaction.
+func (rt *recvTxOut) Spent() bool {
+	return rt.spentBy != nil
+}
+
+// SpentBy returns the tx sha and blockchain height of the transaction
+// spending an output.
+func (rt *recvTxOut) SpentBy() (txSha *btcwire.ShaHash, height int32) {
+	if rt.spentBy == nil {
+		return nil, 0
+	}
+	return &rt.spentBy.txSha, rt.spentBy.height
+}
+
+// Locked returns the current lock state of an unspent transaction output.
+func (rt *recvTxOut) Locked() bool {
+	return rt.locked
+}
+
+// SetLocked locks or unlocks an unspent transaction output.
+func (rt *recvTxOut) SetLocked(locked bool) {
+	rt.locked = locked
+}
+
+// Block returns details of the block containing this transaction, or nil
+// if the tx is unmined.
+func (rt *recvTxOut) Block() *BlockDetails {
+	return rt.block
+}
+
+// Height returns the blockchain height of the transaction containing
+// this output.  If the transaction is unmined, this returns -1.
+func (rt *recvTxOut) Height() int32 {
+	height := int32(-1)
+	if rt.block != nil {
+		height = rt.block.Height
+	}
+	return height
+}
+
+func (rt *recvTxOut) setBlock(details *BlockDetails) {
+	rt.block = details
+}
+
+func (rt *recvTxOut) record(s *Store) Record {
+	record := &RecvTxOut{
+		recvTxOut: *rt,
+		tx:        s.txs[rt.blockTx()],
+	}
+	return record
+}
+
+// RecvTxOut is a type additional information for transaction outputs which
+// are spendable by a wallet.
+type RecvTxOut struct {
+	recvTxOut
+	tx *btcutil.Tx
+}
+
+// Addresses parses the pubkey script, extracting all addresses for a
+// standard script.
+func (rt *RecvTxOut) Addresses(net btcwire.BitcoinNet) (btcscript.ScriptClass,
+	[]btcutil.Address, int, error) {
+
+	tx := rt.tx.MsgTx()
+	return btcscript.ExtractPkScriptAddrs(tx.TxOut[rt.outpoint.Index].PkScript, net)
+}
+
+// IsCoinbase returns whether the received transaction output is an output
+// a coinbase transaction.
+func (rt *RecvTxOut) IsCoinbase() bool {
+	if rt.recvTxOut.block != nil {
+		return false
+	}
+	return rt.recvTxOut.block.Index == 0
+}
+
+// PkScript returns the pubkey script of the output.
+func (rt *RecvTxOut) PkScript() []byte {
+	tx := rt.tx.MsgTx()
+	return tx.TxOut[rt.outpoint.Index].PkScript
+}
+
+// Value returns the number of satoshis sent by the output.
+func (rt *RecvTxOut) Value() int64 {
+	tx := rt.tx.MsgTx()
+	return tx.TxOut[rt.outpoint.Index].Value
+}
+
+// Tx returns the transaction which contains this output.
+func (rt *RecvTxOut) Tx() *btcutil.Tx {
+	return rt.tx
+}
+
+// TxInfo returns a slice of maps that may be marshaled as a JSON array
+// of JSON objects for a listtransactions RPC reply.
+func (rt *RecvTxOut) TxInfo(account string, chainHeight int32, net btcwire.BitcoinNet) []map[string]interface{} {
+	tx := rt.tx.MsgTx()
+	outidx := rt.outpoint.Index
+	txout := tx.TxOut[outidx]
+
+	address := "Unknown"
+	_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, net)
+	if len(addrs) == 1 {
+		address = addrs[0].EncodeAddress()
+	}
+
+	txInfo := map[string]interface{}{
+		"account":      account,
+		"category":     "receive",
+		"address":      address,
+		"amount":       float64(txout.Value) / float64(btcutil.SatoshiPerBitcoin),
+		"txid":         rt.outpoint.Hash.String(),
+		"timereceived": float64(rt.received.Unix()),
+	}
+
+	if rt.block != nil {
+		txInfo["blockhash"] = rt.block.Hash.String()
+		txInfo["blockindex"] = float64(rt.block.Index)
+		txInfo["blocktime"] = float64(rt.block.Time.Unix())
+		txInfo["confirmations"] = float64(chainHeight - rt.block.Height + 1)
+	} else {
+		txInfo["confirmations"] = float64(0)
+	}
+
+	return []map[string]interface{}{txInfo}
 }

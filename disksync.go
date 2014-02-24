@@ -91,8 +91,8 @@ func checkCreateDir(path string) error {
 }
 
 // accountFilename returns the filepath of an account file given the
-// filename suffix ("wallet.bin", "tx.bin", or "utxo.bin"), account
-// name and the network directory holding the file.
+// filename suffix ("wallet.bin", or "tx.bin"), account name and the
+// network directory holding the file.
 func accountFilename(suffix, account, netdir string) string {
 	if account == "" {
 		// default account
@@ -109,7 +109,6 @@ type syncSchedule struct {
 	dir     string
 	wallets map[*Account]struct{}
 	txs     map[*Account]struct{}
-	utxos   map[*Account]struct{}
 }
 
 func newSyncSchedule(dir string) *syncSchedule {
@@ -117,7 +116,6 @@ func newSyncSchedule(dir string) *syncSchedule {
 		dir:     dir,
 		wallets: make(map[*Account]struct{}),
 		txs:     make(map[*Account]struct{}),
-		utxos:   make(map[*Account]struct{}),
 	}
 	return s
 }
@@ -125,12 +123,6 @@ func newSyncSchedule(dir string) *syncSchedule {
 // flushAccount writes all scheduled account files to disk for
 // a single account and removes them from the schedule.
 func (s *syncSchedule) flushAccount(a *Account) error {
-	if _, ok := s.utxos[a]; ok {
-		if err := a.writeUtxoStore(s.dir); err != nil {
-			return err
-		}
-		delete(s.utxos, a)
-	}
 	if _, ok := s.txs[a]; ok {
 		if err := a.writeTxStore(s.dir); err != nil {
 			return err
@@ -150,13 +142,6 @@ func (s *syncSchedule) flushAccount(a *Account) error {
 // flush writes all scheduled account files and removes each
 // from the schedule.
 func (s *syncSchedule) flush() error {
-	for a := range s.utxos {
-		if err := a.writeUtxoStore(s.dir); err != nil {
-			return err
-		}
-		delete(s.utxos, a)
-	}
-
 	for a := range s.txs {
 		if err := a.writeTxStore(s.dir); err != nil {
 			return err
@@ -196,9 +181,8 @@ type DiskSyncer struct {
 	flushAccount chan *flushAccountRequest
 
 	// Schedule file writes for an account.
-	scheduleWallet    chan *Account
-	scheduleTxStore   chan *Account
-	scheduleUtxoStore chan *Account
+	scheduleWallet  chan *Account
+	scheduleTxStore chan *Account
 
 	// Write a collection of accounts all at once.
 	writeBatch chan *writeBatchRequest
@@ -214,13 +198,12 @@ type DiskSyncer struct {
 // NewDiskSyncer creates a new DiskSyncer.
 func NewDiskSyncer(am *AccountManager) *DiskSyncer {
 	return &DiskSyncer{
-		flushAccount:      make(chan *flushAccountRequest),
-		scheduleWallet:    make(chan *Account),
-		scheduleTxStore:   make(chan *Account),
-		scheduleUtxoStore: make(chan *Account),
-		writeBatch:        make(chan *writeBatchRequest),
-		exportAccount:     make(chan *exportRequest),
-		am:                am,
+		flushAccount:    make(chan *flushAccountRequest),
+		scheduleWallet:  make(chan *Account),
+		scheduleTxStore: make(chan *Account),
+		writeBatch:      make(chan *writeBatchRequest),
+		exportAccount:   make(chan *exportRequest),
+		am:              am,
 	}
 }
 
@@ -275,12 +258,6 @@ func (ds *DiskSyncer) Start() {
 				timer = time.After(wait)
 			}
 
-		case a := <-ds.scheduleUtxoStore:
-			schedule.utxos[a] = struct{}{}
-			if timer == nil {
-				timer = time.After(wait)
-			}
-
 		case sr := <-ds.writeBatch:
 			err := batchWriteAccounts(sr.a, tmpnetdir, netdir)
 			if err == nil {
@@ -316,12 +293,6 @@ func (ds *DiskSyncer) ScheduleWalletWrite(a *Account) {
 // written to disk.
 func (ds *DiskSyncer) ScheduleTxStoreWrite(a *Account) {
 	ds.scheduleTxStore <- a
-}
-
-// ScheduleUtxoStoreWrite schedules an account's utxo store to be written
-// to disk.
-func (ds *DiskSyncer) ScheduleUtxoStoreWrite(a *Account) {
-	ds.scheduleUtxoStore <- a
 }
 
 // WriteBatch safely replaces all account files in the network directory
@@ -369,9 +340,6 @@ func batchWriteAccounts(accts []*Account, tmpdir, netdir string) error {
 }
 
 func (a *Account) writeAll(dir string) error {
-	if err := a.writeUtxoStore(dir); err != nil {
-		return err
-	}
 	if err := a.writeTxStore(dir); err != nil {
 		return err
 	}
@@ -419,28 +387,6 @@ func (a *Account) writeTxStore(dir string) error {
 	tmpfile.Close()
 
 	if err = Rename(tmppath, txfilepath); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (a *Account) writeUtxoStore(dir string) error {
-	utxofilepath := accountFilename("utxo.bin", a.name, dir)
-	_, filename := filepath.Split(utxofilepath)
-	tmpfile, err := ioutil.TempFile(dir, filename)
-	if err != nil {
-		return err
-	}
-
-	if _, err = a.UtxoStore.WriteTo(tmpfile); err != nil {
-		return err
-	}
-
-	tmppath := tmpfile.Name()
-	tmpfile.Close()
-
-	if err = Rename(tmppath, utxofilepath); err != nil {
 		return err
 	}
 
