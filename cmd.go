@@ -302,6 +302,7 @@ func OpenSavedAccount(name string, cfg *config) (*Account, error) {
 		// but other errors can be more important, so only return
 		// this if none of the others are hit.
 		finalErr = ErrNoTxs
+		a.fullRescan = true
 	} else {
 		defer txfile.Close()
 		if _, err = txs.ReadFrom(txfile); err != nil {
