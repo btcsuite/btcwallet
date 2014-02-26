@@ -285,7 +285,8 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 	// manager.  Registering will fail if the new account can not be
 	// written immediately to disk.
 	a := &Account{
-		Wallet: wlt,
+		Wallet:  wlt,
+		TxStore: tx.NewStore(),
 	}
 	if err := am.RegisterNewAccount(a); err != nil {
 		return err

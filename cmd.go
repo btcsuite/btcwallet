@@ -261,7 +261,9 @@ func (e *WalletOpenError) Error() string {
 func OpenSavedAccount(name string, cfg *config) (*Account, error) {
 	netdir := networkDir(cfg.Net())
 	if err := checkCreateDir(netdir); err != nil {
-		return nil, err
+		return nil, &WalletOpenError{
+			Err: err.Error(),
+		}
 	}
 
 	wlt := new(wallet.Wallet)
