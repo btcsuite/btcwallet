@@ -450,18 +450,7 @@ func GetAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
-	var net btcwire.BitcoinNet
-	switch a := addr.(type) {
-	case *btcutil.AddressPubKeyHash:
-		net = a.Net()
-
-	case *btcutil.AddressScriptHash:
-		net = a.Net()
-
-	default:
-		return nil, &btcjson.ErrInvalidAddressOrKey
-	}
-	if net != cfg.Net() {
+	if !addr.IsForNet(cfg.Net()) {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
@@ -540,7 +529,7 @@ func GetAddressBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 	apkh, ok := addr.(*btcutil.AddressPubKeyHash)
-	if !ok || apkh.Net() != cfg.Net() {
+	if !ok || !apkh.IsForNet(cfg.Net()) {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
@@ -1043,7 +1032,7 @@ func ListAddressTransactions(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			return nil, &btcjson.ErrInvalidAddressOrKey
 		}
 		apkh, ok := addr.(*btcutil.AddressPubKeyHash)
-		if !ok || apkh.Net() != cfg.Net() {
+		if !ok || !apkh.IsForNet(cfg.Net()) {
 			return nil, &btcjson.ErrInvalidAddressOrKey
 		}
 		pkHashMap[string(addr.ScriptAddress())] = struct{}{}
