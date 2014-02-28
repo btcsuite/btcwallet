@@ -43,6 +43,7 @@ type AccountManager struct {
 	// binary semaphore channel to prevent incorrect access.
 	bsem chan struct{}
 
+	openAccounts  chan struct{}
 	accessAccount chan *accessAccountRequest
 	accessAll     chan *accessAllRequest
 	add           chan *Account
@@ -55,6 +56,7 @@ type AccountManager struct {
 func NewAccountManager() *AccountManager {
 	am := &AccountManager{
 		bsem:          make(chan struct{}, 1),
+		openAccounts:  make(chan struct{}, 1),
 		accessAccount: make(chan *accessAccountRequest),
 		accessAll:     make(chan *accessAllRequest),
 		add:           make(chan *Account),
@@ -81,6 +83,20 @@ func (am *AccountManager) Start() {
 
 	for {
 		select {
+		case <-am.openAccounts:
+			// Write all old accounts before proceeding.
+			for e := l.Front(); e != nil; e = e.Next() {
+				a := e.Value.(*Account)
+				am.ds.FlushAccount(a)
+			}
+
+			m = OpenAccounts()
+
+			l.Init()
+			for _, a := range m {
+				l.PushBack(a)
+			}
+
 		case access := <-am.accessAccount:
 			a, ok := m[access.name]
 			access.resp <- &accessAccountResponse{
@@ -127,6 +143,10 @@ func (am *AccountManager) Grab() {
 // Release releases exclusive ownership of the AccountManager.
 func (am *AccountManager) Release() {
 	am.bsem <- struct{}{}
+}
+
+func (am *AccountManager) OpenAccounts() {
+	am.openAccounts <- struct{}{}
 }
 
 type accessAccountRequest struct {
@@ -196,19 +216,12 @@ func (am *AccountManager) RegisterNewAccount(a *Account) error {
 // Rollback rolls back each managed Account to the state before the block
 // specified by height and hash was connected to the main chain.
 func (am *AccountManager) Rollback(height int32, hash *btcwire.ShaHash) {
-	log.Debugf("Rolling back tx history since block height %v", height)
+	log.Infof("Rolling back tx history since block height %v", height)
 
 	for _, a := range am.AllAccounts() {
 		a.TxStore.Rollback(height)
 		am.ds.ScheduleTxStoreWrite(a)
 	}
-}
-
-// Rollback reverts each stored Account to a state before the block
-// with the passed chainheight and block hash was connected to the main
-// chain.  This is used to remove transactions and utxos for each wallet
-// that occured on a chain no longer considered to be the main chain.
-func (a *Account) Rollback(height int32, hash *btcwire.ShaHash) {
 }
 
 // BlockNotify notifies all frontends of any changes from the new block,

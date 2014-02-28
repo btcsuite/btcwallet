@@ -110,6 +110,15 @@ func (btcd *BtcdRPCConn) Connected() bool {
 	}
 }
 
+// Close forces closing the current btcd connection.
+func (btcd *BtcdRPCConn) Close() {
+	select {
+	case <-btcd.closed:
+	default:
+		close(btcd.closed)
+	}
+}
+
 // AddRPCRequest is used to add an RPCRequest to the pool of requests
 // being manaaged by a btcd RPC connection.
 type AddRPCRequest struct {

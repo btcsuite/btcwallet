@@ -207,8 +207,31 @@ func WalletRequestProcessor() {
 		case n := <-handleNtfn:
 			if f, ok := notificationHandlers[n.Method()]; ok {
 				AcctMgr.Grab()
-				f(n)
+				err := f(n)
 				AcctMgr.Release()
+				switch err {
+				case nil:
+					// ignore
+
+				case tx.ErrInconsistantStore:
+					// Likely due to a mis-ordered btcd notification.
+					// To recover, close server connection and reopen
+					// all accounts from their last good state saved
+					// to disk.  This will trigger the handshake on
+					// next connect, and a rescan of one or two blocks
+					// to catch up rather than throwing away all tx
+					// history and rescanning everything.
+					s := CurrentServerConn()
+					if btcd, ok := s.(*BtcdRPCConn); ok {
+						AcctMgr.Grab()
+						btcd.Close()
+						AcctMgr.OpenAccounts()
+						AcctMgr.Release()
+					}
+
+				default: // other non-nil
+					log.Warn(err)
+				}
 			}
 		}
 	}
@@ -1341,7 +1364,11 @@ func SendBeforeReceiveHistorySync(add, done, remove chan btcwire.ShaHash,
 
 func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *CreatedTx) (interface{}, *btcjson.Error) {
 	// Add to transaction store.
-	stx := a.TxStore.InsertSignedTx(txInfo.tx, nil)
+	stx, err := a.TxStore.InsertSignedTx(txInfo.tx, nil)
+	if err != nil {
+		log.Warnf("Error adding sent tx history: %v", err)
+		return nil, &btcjson.ErrInternal
+	}
 	AcctMgr.ds.ScheduleTxStoreWrite(a)
 
 	// Notify frontends of new SendTx.

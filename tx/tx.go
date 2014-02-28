@@ -42,6 +42,10 @@ var (
 	// object is marked with a version that is no longer supported
 	// during deserialization.
 	ErrUnsupportedVersion = errors.New("version no longer supported")
+
+	// ErrInconsistantStore represents an error for when an inconsistancy
+	// is detected during inserting or returning transaction records.
+	ErrInconsistantStore = errors.New("inconsistant transaction store")
 )
 
 // Record is a common interface shared by SignedTx and RecvTxOut transaction
@@ -264,7 +268,7 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 			// It is an error for the backing transaction to have
 			// not already been read.
 			if _, ok := s.txs[rtx.blockTx()]; !ok {
-				return n64, errors.New("missing backing transaction")
+				return n64, ErrInconsistantStore
 			}
 
 			// Add entries to store.
@@ -290,7 +294,7 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 			// It is an error for the backing transaction to have
 			// not already been read.
 			if _, ok := s.txs[stx.blockTx()]; !ok {
-				return n64, errors.New("missing backing transaction")
+				return n64, ErrInconsistantStore
 			}
 
 			// Add entries to store.
@@ -371,7 +375,7 @@ func (s *Store) WriteTo(w io.Writer) (int64, error) {
 // store, returning the record.  Duplicates and double spend correction is
 // handled automatically.  Transactions may be added without block details,
 // and later added again with block details once the tx has been mined.
-func (s *Store) InsertSignedTx(tx *btcutil.Tx, block *BlockDetails) *SignedTx {
+func (s *Store) InsertSignedTx(tx *btcutil.Tx, block *BlockDetails) (*SignedTx, error) {
 	var created time.Time
 	if block == nil {
 		created = time.Now()
@@ -387,8 +391,11 @@ func (s *Store) InsertSignedTx(tx *btcutil.Tx, block *BlockDetails) *SignedTx {
 		block:       block,
 	}
 
-	s.insertTx(tx, st)
-	return st.record(s).(*SignedTx)
+	err := s.insertTx(tx, st)
+	if err != nil {
+		return nil, ErrInconsistantStore
+	}
+	return st.record(s).(*SignedTx), nil
 }
 
 // Rollback removes block details for all transactions at or beyond a
@@ -398,33 +405,36 @@ func (s *Store) InsertSignedTx(tx *btcutil.Tx, block *BlockDetails) *SignedTx {
 // chain are added to the store.
 func (s *Store) Rollback(height int32) {
 	for e := s.sorted.Front(); e != nil; e = e.Next() {
-		tx := e.Value.(txRecord)
-		if details := tx.Block(); details != nil {
-			txSha := tx.TxSha()
-			oldKey := blockTx{*txSha, details.Height}
-			if details.Height >= height {
-				tx.setBlock(nil)
+		record := e.Value.(txRecord)
+		block := record.Block()
+		if block == nil {
+			// Unmined, no block details to remove.
+			continue
+		}
+		txSha := record.TxSha()
+		if block.Height >= height {
+			oldKey := blockTx{*txSha, block.Height}
+			record.setBlock(nil)
 
-				switch v := tx.(type) {
-				case *signedTx:
-					k := oldKey
-					delete(s.signed, k)
-					k.height = -1
-					s.signed[k] = v
+			switch v := record.(type) {
+			case *signedTx:
+				k := oldKey
+				delete(s.signed, k)
+				k.height = -1
+				s.signed[k] = v
 
-				case *recvTxOut:
-					k := blockOutPoint{v.outpoint, details.Height}
-					delete(s.recv, k)
-					k.height = -1
-					s.recv[k] = v
-				}
+			case *recvTxOut:
+				k := blockOutPoint{v.outpoint, block.Height}
+				delete(s.recv, k)
+				k.height = -1
+				s.recv[k] = v
+			}
 
-				if utx, ok := s.txs[oldKey]; ok {
-					k := oldKey
-					delete(s.txs, k)
-					k.height = -1
-					s.txs[k] = utx
-				}
+			if utx, ok := s.txs[oldKey]; ok {
+				k := oldKey
+				delete(s.txs, k)
+				k.height = -1
+				s.txs[k] = utx
 			}
 		}
 	}
@@ -449,7 +459,7 @@ func (s *Store) UnminedSignedTxs() []*btcutil.Tx {
 // with non-nil BlockDetails to update the record and all other records
 // using the transaction with the block.
 func (s *Store) InsertRecvTxOut(tx *btcutil.Tx, outIdx uint32,
-	change bool, received time.Time, block *BlockDetails) *RecvTxOut {
+	change bool, received time.Time, block *BlockDetails) (*RecvTxOut, error) {
 
 	rt := &recvTxOut{
 		outpoint: *btcwire.NewOutPoint(tx.Sha(), outIdx),
@@ -457,17 +467,27 @@ func (s *Store) InsertRecvTxOut(tx *btcutil.Tx, outIdx uint32,
 		received: received,
 		block:    block,
 	}
-	s.insertTx(tx, rt)
-	return rt.record(s).(*RecvTxOut)
+	err := s.insertTx(tx, rt)
+	if err != nil {
+		return nil, err
+	}
+	return rt.record(s).(*RecvTxOut), nil
 }
 
-func (s *Store) insertTx(utx *btcutil.Tx, record txRecord) {
+func (s *Store) insertTx(utx *btcutil.Tx, record txRecord) error {
 	if ds := s.findDoubleSpend(utx); ds != nil {
 		switch {
 		case ds.txSha == *utx.Sha(): // identical tx
 			if ds.height != record.Height() {
-				s.setTxBlock(utx.Sha(), record.Block())
-				return
+				// Detect insert inconsistancies.  If matching
+				// tx was found, but this record's block is unset,
+				// a rollback was missed.
+				block := record.Block()
+				if block == nil {
+					return ErrInconsistantStore
+				}
+				s.setTxBlock(utx.Sha(), block)
+				return nil
 			}
 
 		default:
@@ -479,6 +499,7 @@ func (s *Store) insertTx(utx *btcutil.Tx, record txRecord) {
 	}
 
 	s.insertUniqueTx(utx, record)
+	return nil
 }
 
 func (s *Store) insertUniqueTx(utx *btcutil.Tx, record txRecord) {
@@ -605,11 +626,6 @@ func (s *Store) removeDoubleSpends(oldKey *blockTx) {
 }
 
 func (s *Store) setTxBlock(txSha *btcwire.ShaHash, block *BlockDetails) {
-	if block == nil {
-		// Nothing to update.
-		return
-	}
-
 	// Lookup unmined backing tx.
 	prevKey := blockTx{*txSha, -1}
 	tx := s.txs[prevKey]

@@ -146,10 +146,9 @@ func main() {
 	// Check and update any old file locations.
 	updateOldFileLocations()
 
+	// Start account manager and open accounts.
 	go AcctMgr.Start()
-
-	// Open all account saved to disk.
-	OpenAccounts()
+	AcctMgr.OpenAccounts()
 
 	// Read CA file to verify a btcd TLS connection.
 	cafile, err := ioutil.ReadFile(cfg.CAFile)
@@ -323,7 +322,7 @@ func OpenSavedAccount(name string, cfg *config) (*Account, error) {
 }
 
 // OpenAccounts attempts to open all saved accounts.
-func OpenAccounts() {
+func OpenAccounts() map[string]*Account {
 	// If the network (account) directory is missing, but the temporary
 	// directory exists, move it.  This is unlikely to happen, but possible,
 	// if writing out every account file at once to a tmp directory (as is
@@ -335,7 +334,7 @@ func OpenAccounts() {
 	if !fileExists(netDir) && fileExists(tmpNetDir) {
 		if err := Rename(tmpNetDir, netDir); err != nil {
 			log.Errorf("Cannot move temporary network dir: %v", err)
-			return
+			return nil
 		}
 	}
 
@@ -346,13 +345,15 @@ func OpenAccounts() {
 		switch err.(type) {
 		case *WalletOpenError:
 			log.Errorf("Default account wallet file unreadable: %v", err)
-			return
+			return nil
 
 		default:
 			log.Warnf("Non-critical problem opening an account file: %v", err)
 		}
 	}
-	AcctMgr.AddAccount(a)
+	accounts := map[string]*Account{
+		"": a,
+	}
 
 	// Read all filenames in the account directory, and look for any
 	// filenames matching '*-wallet.bin'.  These are wallets for
@@ -361,7 +362,7 @@ func OpenAccounts() {
 	if err != nil {
 		// Can't continue.
 		log.Errorf("Unable to open account directory: %v", err)
-		return
+		return nil
 	}
 	defer accountDir.Close()
 	fileNames, err := accountDir.Readdirnames(0)
@@ -370,20 +371,20 @@ func OpenAccounts() {
 		// at least try to open some accounts.
 		log.Errorf("Unable to read all account files: %v", err)
 	}
-	var accounts []string
+	var accountNames []string
 	for _, file := range fileNames {
 		if strings.HasSuffix(file, "-wallet.bin") {
 			name := strings.TrimSuffix(file, "-wallet.bin")
-			accounts = append(accounts, name)
+			accountNames = append(accountNames, name)
 		}
 	}
 
 	// Open all additional accounts.
-	for _, a := range accounts {
+	for _, acctName := range accountNames {
 		// Log txstore/utxostore errors as these will be recovered
 		// from with a rescan, but wallet errors must be returned
 		// to the caller.
-		a, err := OpenSavedAccount(a, cfg)
+		a, err := OpenSavedAccount(acctName, cfg)
 		if err != nil {
 			switch err.(type) {
 			case *WalletOpenError:
@@ -393,9 +394,10 @@ func OpenAccounts() {
 				log.Warnf("Non-critical error opening an account file: %v", err)
 			}
 		} else {
-			AcctMgr.AddAccount(a)
+			accounts[acctName] = a
 		}
 	}
+	return accounts
 }
 
 var accessServer = make(chan *AccessCurrentServerConn)

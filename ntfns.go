@@ -20,6 +20,10 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
+	"sync"
+	"time"
+
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
@@ -27,8 +31,6 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
-	"sync"
-	"time"
 )
 
 func parseBlock(block *btcws.BlockDetails) (*tx.BlockDetails, error) {
@@ -47,7 +49,7 @@ func parseBlock(block *btcws.BlockDetails) (*tx.BlockDetails, error) {
 	}, nil
 }
 
-type notificationHandler func(btcjson.Cmd)
+type notificationHandler func(btcjson.Cmd) error
 
 var notificationHandlers = map[string]notificationHandler{
 	btcws.BlockConnectedNtfnMethod:    NtfnBlockConnected,
@@ -57,36 +59,31 @@ var notificationHandlers = map[string]notificationHandler{
 }
 
 // NtfnRecvTx handles the btcws.RecvTxNtfn notification.
-func NtfnRecvTx(n btcjson.Cmd) {
+func NtfnRecvTx(n btcjson.Cmd) error {
 	rtx, ok := n.(*btcws.RecvTxNtfn)
 	if !ok {
-		log.Errorf("%v handler: unexpected type", n.Method())
-		return
+		return fmt.Errorf("%v handler: unexpected type", n.Method())
 	}
 
 	bs, err := GetCurBlock()
 	if err != nil {
-		log.Errorf("%v handler: cannot get current block: %v", n.Method(), err)
-		return
+		return fmt.Errorf("%v handler: cannot get current block: %v", n.Method(), err)
 	}
 
 	rawTx, err := hex.DecodeString(rtx.HexTx)
 	if err != nil {
-		log.Errorf("%v handler: bad hexstring: err", n.Method(), err)
-		return
+		return fmt.Errorf("%v handler: bad hexstring: err", n.Method(), err)
 	}
 	tx_, err := btcutil.NewTxFromBytes(rawTx)
 	if err != nil {
-		log.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
-		return
+		return fmt.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
 	}
 
 	var block *tx.BlockDetails
 	if rtx.Block != nil {
 		block, err = parseBlock(rtx.Block)
 		if err != nil {
-			log.Errorf("%v handler: bad block: %v", n.Method(), err)
-			return
+			return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
 		}
 	}
 
@@ -131,7 +128,10 @@ func NtfnRecvTx(n btcjson.Cmd) {
 		}
 
 		for _, a := range accounts {
-			record := a.TxStore.InsertRecvTxOut(tx_, uint32(outIdx), false, received, block)
+			record, err := a.TxStore.InsertRecvTxOut(tx_, uint32(outIdx), false, received, block)
+			if err != nil {
+				return err
+			}
 			AcctMgr.ds.ScheduleTxStoreWrite(a)
 
 			// Notify frontends of tx.  If the tx is unconfirmed, it is always
@@ -163,6 +163,8 @@ func NtfnRecvTx(n btcjson.Cmd) {
 			NotifyWalletBalanceUnconfirmed(allClients, a.name, unconfirmed)
 		}
 	}
+
+	return nil
 }
 
 // NtfnBlockConnected handles btcd notifications resulting from newly
@@ -172,16 +174,14 @@ func NtfnRecvTx(n btcjson.Cmd) {
 // to mark wallet files with a possibly-better earliest block height,
 // and will greatly reduce rescan times for wallets created with an
 // out of sync btcd.
-func NtfnBlockConnected(n btcjson.Cmd) {
+func NtfnBlockConnected(n btcjson.Cmd) error {
 	bcn, ok := n.(*btcws.BlockConnectedNtfn)
 	if !ok {
-		log.Errorf("%v handler: unexpected type", n.Method())
-		return
+		return fmt.Errorf("%v handler: unexpected type", n.Method())
 	}
 	hash, err := btcwire.NewShaHashFromStr(bcn.Hash)
 	if err != nil {
-		log.Errorf("%v handler: invalid hash string", n.Method())
-		return
+		return fmt.Errorf("%v handler: invalid hash string", n.Method())
 	}
 
 	// Update the blockstamp for the newly-connected block.
@@ -211,21 +211,21 @@ func NtfnBlockConnected(n btcjson.Cmd) {
 	// Pass notification to frontends too.
 	marshaled, _ := n.MarshalJSON()
 	allClients <- marshaled
+
+	return nil
 }
 
 // NtfnBlockDisconnected handles btcd notifications resulting from
 // blocks disconnected from the main chain in the event of a chain
 // switch and notifies frontends of the new blockchain height.
-func NtfnBlockDisconnected(n btcjson.Cmd) {
+func NtfnBlockDisconnected(n btcjson.Cmd) error {
 	bdn, ok := n.(*btcws.BlockDisconnectedNtfn)
 	if !ok {
-		log.Errorf("%v handler: unexpected type", n.Method())
-		return
+		return fmt.Errorf("%v handler: unexpected type", n.Method())
 	}
 	hash, err := btcwire.NewShaHashFromStr(bdn.Hash)
 	if err != nil {
-		log.Errorf("%v handler: invalid hash string", n.Method())
-		return
+		return fmt.Errorf("%v handler: invalid hash string", n.Method())
 	}
 
 	// Rollback Utxo and Tx data stores.
@@ -234,32 +234,32 @@ func NtfnBlockDisconnected(n btcjson.Cmd) {
 	// Pass notification to frontends too.
 	marshaled, _ := n.MarshalJSON()
 	allClients <- marshaled
+
+	return nil
 }
 
 // NtfnRedeemingTx handles btcd redeemingtx notifications resulting from a
 // transaction spending a watched outpoint.
-func NtfnRedeemingTx(n btcjson.Cmd) {
+func NtfnRedeemingTx(n btcjson.Cmd) error {
 	cn, ok := n.(*btcws.RedeemingTxNtfn)
 	if !ok {
-		log.Errorf("%v handler: unexpected type", n.Method())
-		return
+		return fmt.Errorf("%v handler: unexpected type", n.Method())
 	}
 
 	rawTx, err := hex.DecodeString(cn.HexTx)
 	if err != nil {
-		log.Errorf("%v handler: bad hexstring: err", n.Method(), err)
-		return
+		return fmt.Errorf("%v handler: bad hexstring: err", n.Method(), err)
 	}
 	tx_, err := btcutil.NewTxFromBytes(rawTx)
 	if err != nil {
-		log.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
-		return
+		return fmt.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
 	}
 
 	block, err := parseBlock(cn.Block)
 	if err != nil {
-		log.Errorf("%v handler: bad block: %v", n.Method(), err)
-		return
+		return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
 	}
 	AcctMgr.RecordSpendingTx(tx_, block)
+
+	return nil
 }
