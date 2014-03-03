@@ -254,10 +254,9 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 // scheduled to be written to disk..
 func (am *AccountManager) RecordSpendingTx(tx_ *btcutil.Tx, block *tx.BlockDetails) {
 	for _, a := range am.AllAccounts() {
-		// TODO(jrick) this is WRONG -- should not be adding it
-		// for each account.  Fix before multiple account support
-		// actually works.  Maybe a single txstore for all accounts
-		// isn't a half bad idea.
+		// TODO(jrick): This needs to iterate through each txout's
+		// addresses and find whether this account's keystore contains
+		// the any of the addresses this tx sends to.
 		a.TxStore.InsertSignedTx(tx_, block)
 		am.ds.ScheduleTxStoreWrite(a)
 	}
