@@ -834,8 +834,7 @@ func (w *Wallet) Lock() (err error) {
 
 	// Remove clear text private keys from all address entries.
 	for _, addr := range w.addrMap {
-		zero(addr.privKeyCT)
-		addr.privKeyCT = nil
+		_ = addr.lock()
 	}
 
 	return err
