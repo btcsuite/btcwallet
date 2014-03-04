@@ -256,7 +256,7 @@ func (am *AccountManager) RecordSpendingTx(tx_ *btcutil.Tx, block *tx.BlockDetai
 	for _, a := range am.AllAccounts() {
 		// TODO(jrick): This needs to iterate through each txout's
 		// addresses and find whether this account's keystore contains
-		// the any of the addresses this tx sends to.
+		// any of the addresses this tx sends to.
 		a.TxStore.InsertSignedTx(tx_, block)
 		am.ds.ScheduleTxStoreWrite(a)
 	}
