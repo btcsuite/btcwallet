@@ -21,7 +21,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
@@ -118,16 +117,15 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 
 		// Extract address from pkScript.  We currently only care
 		// about P2PKH addresses.
-		sc, addrs, _, err := txout.Addresses(cfg.Net())
-		switch {
-		case err != nil:
-			continue
-		case sc != btcscript.PubKeyHashTy:
+		_, addrs, _, err := txout.Addresses(cfg.Net())
+		if err != nil {
 			continue
 		}
 
-		if bytes.Equal(addrs[0].ScriptAddress(), pkHash) {
-			return true
+		for _, a := range addrs {
+			if bytes.Equal(a.ScriptAddress(), pkHash) {
+				return true
+			}
 		}
 	}
 	return false
