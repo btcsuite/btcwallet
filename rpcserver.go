@@ -1493,7 +1493,7 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	fullmsg := "Bitcoin Signed Message:\n" + cmd.Message
 	sigbytes, err := btcec.SignCompact(btcec.S256(), privkey,
-		btcwire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed)
+		btcwire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed())
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
@@ -1600,13 +1600,18 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		result["ismine"] = true
 		result["account"] = account
 
+		switch info := ainfo.(type) {
+		case *wallet.AddressPubKeyInfo:
+			result["compressed"] = info.Compressed()
+			result["pubkey"] = info.Pubkey
+		default:
+		}
+
 		// TODO(oga) when we handle different types of addresses then
 		// we will need to check here and only provide the script,
 		// hexsript and list of addresses.
 		// if scripthash, the pubkey if pubkey/pubkeyhash, etc.
 		// for now we only support p2pkh so is irrelavent
-		result["compressed"] = ainfo.Compressed
-		result["pubkey"] = ainfo.Pubkey
 	} else {
 		result["ismine"] = false
 	}
@@ -1681,7 +1686,7 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	// Return boolean if keys match.
 	return (pk.X.Cmp(privkey.X) == 0 && pk.Y.Cmp(privkey.Y) == 0 &&
-		ainfo.Compressed == wasCompressed), nil
+		ainfo.Compressed() == wasCompressed), nil
 }
 
 // WalletIsLocked handles the walletislocked extension request by

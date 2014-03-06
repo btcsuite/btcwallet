@@ -1165,7 +1165,7 @@ func (w *Wallet) AddressKey(a btcutil.Address) (key *ecdsa.PrivateKey, err error
 }
 
 // AddressInfo returns an AddressInfo structure for an address in a wallet.
-func (w *Wallet) AddressInfo(a btcutil.Address) (*AddressInfo, error) {
+func (w *Wallet) AddressInfo(a btcutil.Address) (AddressInfo, error) {
 	// Currently, only P2PKH addresses are supported.  This should
 	// be extended to a switch-case statement when support for other
 	// addresses are added.
@@ -1404,24 +1404,77 @@ func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
 	return ww, nil
 }
 
-// AddressInfo holds information regarding an address needed to manage
-// a complete wallet.
-type AddressInfo struct {
-	btcutil.Address
-	AddrHash   string
-	Compressed bool
-	FirstBlock int32
-	Imported   bool
+// AddressInfo is an interface that provides acces to information regarding an
+// address managed by a wallet. Concrete implementations of this type may
+// provide further fields to provide information specific to that type of
+// address.
+type AddressInfo interface {
+	// Address returns a btcutil.Address for the backing address.
+	Address() btcutil.Address
+	// FirstBlock returns the first block an address could be in.
+	FirstBlock() int32
+	// Compressed returns true if the backing address was imported instead
+	// of being part of an address chain.
+	Imported() bool
+	// Compressed returns true if the backing address was created for a
+	// change output of a transaction.
+	Change() bool
+	// Compressed returns true if the backing address is compressed.
+	Compressed() bool
+}
+
+// AddressPubKeyInfo implements AddressInfo and additionally provides the
+// pubkey for a pubkey-based address.
+type AddressPubKeyInfo struct {
+	address    btcutil.Address
+	addrHash   string
+	compressed bool
+	firstBlock int32
+	imported   bool
 	Pubkey     string
-	Change     bool
+	change     bool
+}
+
+// Address returns the pub key address, implementing AddressInfo.
+func (ai *AddressPubKeyInfo) Address() btcutil.Address {
+	return ai.address
+}
+
+// AddrHash returns the pub key hash, implementing AddressInfo.
+func (ai *AddressPubKeyInfo) AddrHash() string {
+	return ai.addrHash
+}
+
+// FirstBlock returns the first block the address is seen in, implementing
+// AddressInfo.
+func (ai *AddressPubKeyInfo) FirstBlock() int32 {
+	return ai.firstBlock
+}
+
+// Imported returns the pub if the address was imported, or a chained address,
+// implementing AddressInfo.
+func (ai *AddressPubKeyInfo) Imported() bool {
+	return ai.imported
+}
+
+// AddrHash returns true if the address was created as a change address,
+// implementing AddressInfo.
+func (ai *AddressPubKeyInfo) Change() bool {
+	return ai.change
+}
+
+// AddrHash returns true if the address backing key is compressed,
+// implementing AddressInfo.
+func (ai *AddressPubKeyInfo) Compressed() bool {
+	return ai.compressed
 }
 
 // SortedActiveAddresses returns all wallet addresses that have been
 // requested to be generated.  These do not include unused addresses in
 // the key pool.  Use this when ordered addresses are needed.  Otherwise,
 // ActiveAddresses is preferred.
-func (w *Wallet) SortedActiveAddresses() []*AddressInfo {
-	addrs := make([]*AddressInfo, 0,
+func (w *Wallet) SortedActiveAddresses() []AddressInfo {
+	addrs := make([]AddressInfo, 0,
 		w.highestUsed+int64(len(w.importedAddrs))+1)
 	for i := int64(rootKeyChainIdx); i <= w.highestUsed; i++ {
 		a := w.chainIdxMap[i]
@@ -1442,19 +1495,19 @@ func (w *Wallet) SortedActiveAddresses() []*AddressInfo {
 // ActiveAddresses returns a map between active payment addresses
 // and their full info.  These do not include unused addresses in the
 // key pool.  If addresses must be sorted, use SortedActiveAddresses.
-func (w *Wallet) ActiveAddresses() map[btcutil.Address]*AddressInfo {
-	addrs := make(map[btcutil.Address]*AddressInfo)
+func (w *Wallet) ActiveAddresses() map[btcutil.Address]AddressInfo {
+	addrs := make(map[btcutil.Address]AddressInfo)
 	for i := int64(rootKeyChainIdx); i <= w.highestUsed; i++ {
 		a := w.chainIdxMap[i]
 		info, err := w.addrMap[*a].info(w.Net())
 		if err == nil {
-			addrs[info.Address] = info
+			addrs[info.Address()] = info
 		}
 	}
 	for _, addr := range w.importedAddrs {
 		info, err := addr.info(w.Net())
 		if err == nil {
-			addrs[info.Address] = info
+			addrs[info.Address()] = info
 		}
 	}
 	return addrs
@@ -2273,17 +2326,17 @@ func (a *btcAddress) address(net btcwire.BitcoinNet) *btcutil.AddressPubKeyHash 
 
 // info returns information about a btcAddress stored in a AddressInfo
 // struct.
-func (a *btcAddress) info(net btcwire.BitcoinNet) (*AddressInfo, error) {
+func (a *btcAddress) info(net btcwire.BitcoinNet) (AddressInfo, error) {
 	address := a.address(net)
 
-	return &AddressInfo{
-		Address:    address,
-		AddrHash:   string(a.pubKeyHash[:]),
-		Compressed: a.flags.compressed,
-		FirstBlock: a.firstBlock,
-		Imported:   a.chainIndex == importedKeyChainIdx,
+	return &AddressPubKeyInfo{
+		address:    address,
+		addrHash:   string(a.pubKeyHash[:]),
+		compressed: a.flags.compressed,
+		firstBlock: a.firstBlock,
+		imported:   a.chainIndex == importedKeyChainIdx,
 		Pubkey:     hex.EncodeToString(a.pubKey),
-		Change:     a.flags.change,
+		change:     a.flags.change,
 	}, nil
 }
 

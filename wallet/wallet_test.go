@@ -347,12 +347,14 @@ func TestWalletPubkeyChaining(t *testing.T) {
 		t.Errorf("Failed to get info about address without private key: %v", err)
 		return
 	}
+
+	pkinfo := info.(*AddressPubKeyInfo)
 	// sanity checks
-	if !info.Compressed {
+	if !info.Compressed() {
 		t.Errorf("Pubkey should be compressed.")
 		return
 	}
-	if info.Imported {
+	if info.Imported() {
 		t.Errorf("Should not be marked as imported.")
 		return
 	}
@@ -419,7 +421,7 @@ func TestWalletPubkeyChaining(t *testing.T) {
 		t.Errorf("Unable to sign hash with the created private key: %v", err)
 		return
 	}
-	pubKeyStr, _ := hex.DecodeString(info.Pubkey)
+	pubKeyStr, _ := hex.DecodeString(pkinfo.Pubkey)
 	pubKey, err := btcec.ParsePubKey(pubKeyStr, btcec.S256())
 	ok := ecdsa.Verify(pubKey, hash, r, s)
 	if !ok {
@@ -442,6 +444,7 @@ func TestWalletPubkeyChaining(t *testing.T) {
 		t.Errorf("Couldn't get info about the next address in the chain: %v", err)
 		return
 	}
+	nextPkInfo := nextInfo.(*AddressPubKeyInfo)
 	nextKey, err := w.AddressKey(nextAddr)
 	if err != nil {
 		t.Errorf("Couldn't get private key for the next address in the chain: %v", err)
@@ -455,7 +458,7 @@ func TestWalletPubkeyChaining(t *testing.T) {
 		t.Errorf("Unable to sign hash with the created private key: %v", err)
 		return
 	}
-	pubKeyStr, _ = hex.DecodeString(nextInfo.Pubkey)
+	pubKeyStr, _ = hex.DecodeString(nextPkInfo.Pubkey)
 	pubKey, err = btcec.ParsePubKey(pubKeyStr, btcec.S256())
 	ok = ecdsa.Verify(pubKey, hash, r, s)
 	if !ok {

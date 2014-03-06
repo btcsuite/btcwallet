@@ -315,7 +315,7 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 			return nil, err
 		}
 		encKey, err := btcutil.EncodePrivateKey(key.D.Bytes(),
-			a.Wallet.Net(), info.Compressed)
+			a.Wallet.Net(), info.Compressed())
 		if err != nil {
 			return nil, err
 		}
@@ -342,7 +342,8 @@ func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 	}
 
 	// Return WIF-encoding of the private key.
-	return btcutil.EncodePrivateKey(key.D.Bytes(), a.Net(), info.Compressed)
+	return btcutil.EncodePrivateKey(key.D.Bytes(), a.Net(),
+		info.Compressed())
 }
 
 // ImportPrivateKey imports a private key to the account's wallet and
@@ -497,7 +498,7 @@ func (a *Account) SortedActivePaymentAddresses() []string {
 
 	addrs := make([]string, len(infos))
 	for i, info := range infos {
-		addrs[i] = info.Address.EncodeAddress()
+		addrs[i] = info.Address().EncodeAddress()
 	}
 
 	return addrs
@@ -510,7 +511,7 @@ func (a *Account) ActivePaymentAddresses() map[string]struct{} {
 
 	addrs := make(map[string]struct{}, len(infos))
 	for _, info := range infos {
-		addrs[info.Address.EncodeAddress()] = struct{}{}
+		addrs[info.Address().EncodeAddress()] = struct{}{}
 	}
 
 	return addrs
@@ -595,7 +596,7 @@ func (a *Account) RecoverAddresses(n int) error {
 		m[addrs[i].EncodeAddress()] = struct{}{}
 	}
 	go func(addrs map[string]struct{}) {
-		jsonErr := Rescan(CurrentServerConn(), lastInfo.FirstBlock, addrs)
+		jsonErr := Rescan(CurrentServerConn(), lastInfo.FirstBlock(), addrs)
 		if jsonErr != nil {
 			log.Errorf("Rescanning for recovered addresses failed: %v",
 				jsonErr.Message)

@@ -257,7 +257,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 
 			sigscript, err := btcscript.SignatureScript(msgtx, i,
 				input.PkScript(), btcscript.SigHashAll, privkey,
-				ai.Compressed)
+				ai.Compressed())
 			if err != nil {
 				return nil, fmt.Errorf("cannot create sigscript: %s", err)
 			}
