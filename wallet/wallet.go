@@ -690,7 +690,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 				}
 			}
 
-			// If the private keys have not ben created yet, mark the
+			// If the private keys have not been created yet, mark the
 			// earliest so all can be created on next wallet unlock.
 			if e.addr.flags.createPrivKeyNextUnlock {
 				switch {
