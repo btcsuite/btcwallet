@@ -688,6 +688,80 @@ func TestWatchingWalletExport(t *testing.T) {
 	}
 }
 
+func TestImportPrivateKey(t *testing.T) {
+	const keypoolSize = 10
+	createdAt := &BlockStamp{}
+	w, err := NewWallet("banana wallet", "A wallet for testing.",
+		[]byte("banana"), btcwire.MainNet, createdAt, keypoolSize)
+	if err != nil {
+		t.Error("Error creating new wallet: " + err.Error())
+		return
+	}
+
+	if err = w.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Can't unlock original wallet: %v", err)
+		return
+	}
+
+	pk, err := ecdsa.GenerateKey(btcec.S256(), rand.Reader)
+	if err != nil {
+		t.Error("Error generating private key: " + err.Error())
+		return
+	}
+
+	// import priv key
+	stamp := &BlockStamp{}
+	address, err := w.ImportPrivateKey(pk.D.Bytes(), false, stamp)
+	if err != nil {
+		t.Error("importing private key: " + err.Error())
+		return
+	}
+
+	// lookup address
+	pk2, err := w.AddressKey(address)
+	if err != nil {
+		t.Error("error looking up key: " + err.Error())
+	}
+
+	if !reflect.DeepEqual(pk, pk2) {
+		t.Error("original and looked-up private keys do not match.")
+		return
+	}
+
+	// serialise and deseralise and check still there.
+
+	// Test (de)serialization of wallet.
+	buf := new(bytes.Buffer)
+	_, err = w.WriteTo(buf)
+	if err != nil {
+		t.Errorf("Cannot write wallet: %v", err)
+		return
+	}
+	w2 := new(Wallet)
+	_, err = w2.ReadFrom(buf)
+	if err != nil {
+		t.Errorf("Cannot read wallet: %v", err)
+		return
+	}
+
+	if err = w2.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Can't unlock deserialised wallet: %v", err)
+		return
+	}
+
+	// lookup address
+	pk2, err = w2.AddressKey(address)
+	if err != nil {
+		t.Error("error looking up key in deserialized wallet: " + err.Error())
+	}
+
+	if !reflect.DeepEqual(pk, pk2) {
+		t.Error("original and deserialized private keys do not match.")
+		return
+	}
+
+}
+
 func TestChangePassphrase(t *testing.T) {
 	const keypoolSize = 10
 	createdAt := &BlockStamp{}
