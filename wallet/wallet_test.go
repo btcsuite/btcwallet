@@ -489,10 +489,10 @@ func TestWatchingWalletExport(t *testing.T) {
 	}
 
 	// Maintain a set of the active addresses in the wallet.
-	activeAddrs := make(map[btcutil.AddressPubKeyHash]struct{})
+	activeAddrs := make(map[addressKey]struct{})
 
 	// Add root address.
-	activeAddrs[*w.LastChainedAddress()] = struct{}{}
+	activeAddrs[getAddressKey(w.LastChainedAddress())] = struct{}{}
 
 	// Get as many new active addresses as necessary to deplete the keypool.
 	// This is done as we will want to test that new addresses created by
@@ -504,7 +504,7 @@ func TestWatchingWalletExport(t *testing.T) {
 			t.Errorf("unable to get next address: %v", err)
 			return
 		}
-		activeAddrs[*apkh] = struct{}{}
+		activeAddrs[getAddressKey(apkh)] = struct{}{}
 	}
 
 	// Create watching wallet from w.
@@ -541,21 +541,27 @@ func TestWatchingWalletExport(t *testing.T) {
 		t.Errorf("Watching root address marked as needing a private key to be generated later.")
 		return
 	}
-	for apkh, addr := range ww.addrMap {
-		if addr.flags.encrypted {
-			t.Errorf("Chained address should not be encrypted (nothing to encrypt)")
-			return
-		}
-		if ww.keyGenerator.flags.hasPrivKey {
-			t.Errorf("Chained address marked as having a private key.")
-			return
-		}
-		if !ww.keyGenerator.flags.hasPubKey {
-			t.Errorf("Chained address marked as missing a public key.")
-			return
-		}
-		if ww.keyGenerator.flags.createPrivKeyNextUnlock {
-			t.Errorf("Chained address marked as needing a private key to be generated later.")
+	for apkh, waddr := range ww.addrMap {
+		switch addr := waddr.(type) {
+		case *btcAddress:
+			if addr.flags.encrypted {
+				t.Errorf("Chained address should not be encrypted (nothing to encrypt)")
+				return
+			}
+			if addr.flags.hasPrivKey {
+				t.Errorf("Chained address marked as having a private key.")
+				return
+			}
+			if !addr.flags.hasPubKey {
+				t.Errorf("Chained address marked as missing a public key.")
+				return
+			}
+			if addr.flags.createPrivKeyNextUnlock {
+				t.Errorf("Chained address marked as needing a private key to be generated later.")
+				return
+			}
+		default:
+			t.Errorf("Chained address unknown type!")
 			return
 		}
 
@@ -587,7 +593,7 @@ func TestWatchingWalletExport(t *testing.T) {
 			t.Errorf("Cannot get next chained address for watching wallet: %v", err)
 			return
 		}
-		if addr.String() != waddr.String() {
+		if addr.EncodeAddress() != waddr.EncodeAddress() {
 			t.Errorf("Next addresses for each wallet do not match eachother.")
 			return
 		}
