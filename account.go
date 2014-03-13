@@ -310,6 +310,11 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 	// key to privkeys.
 	var privkeys []string
 	for addr, info := range a.Wallet.ActiveAddresses() {
+		// No keys to export for scripts.
+		if _, isScript := addr.(*btcutil.AddressScriptHash); isScript {
+			continue
+		}
+
 		key, err := a.Wallet.AddressKey(addr)
 		if err != nil {
 			return nil, err

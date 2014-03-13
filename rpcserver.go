@@ -1583,12 +1583,13 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}, nil
 	}
 
-	_, scriptHash := addr.(*btcutil.AddressScriptHash)
-
 	result := map[string]interface{}{
-		"address":  addr.EncodeAddress(),
-		"isvalid":  true,
-		"isscript": scriptHash,
+		"address": addr.EncodeAddress(),
+		"isvalid": true,
+		// We could put whether or not the address is a script here,
+		// by checking the type of "addr", however, the reference
+		// implementation only puts that information if the script is
+		// "ismine", and we follow that behaviour.
 	}
 	account, err := LookupAccountByAddress(addr.EncodeAddress())
 	if err == nil {
@@ -1604,14 +1605,28 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		case *wallet.AddressPubKeyInfo:
 			result["compressed"] = info.Compressed()
 			result["pubkey"] = info.Pubkey
-		default:
-		}
 
-		// TODO(oga) when we handle different types of addresses then
-		// we will need to check here and only provide the script,
-		// hexsript and list of addresses.
-		// if scripthash, the pubkey if pubkey/pubkeyhash, etc.
-		// for now we only support p2pkh so is irrelavent
+		case *wallet.AddressScriptInfo:
+			result["isscript"] = true
+			addrStrings := make([]string,
+				len(info.Addresses))
+			for i, a := range info.Addresses {
+				addrStrings[i] = a.EncodeAddress()
+			}
+			result["addresses"] = addrStrings
+			result["hex"] = info.Script
+
+			class := info.ScriptClass
+			// script type
+			result["script"] = class.String()
+			if class == btcscript.MultiSigTy {
+				result["sigsrequired"] =
+					info.RequiredSigs
+			}
+
+		default:
+			/* This space intentionally left blank */
+		}
 	} else {
 		result["ismine"] = false
 	}

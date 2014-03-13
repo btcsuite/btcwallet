@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/conformal/btcec"
+	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 	"io"
@@ -79,6 +80,7 @@ const (
 	addrCommentHeader entryHeader = 1 << iota
 	txCommentHeader
 	deletedHeader
+	scriptHeader
 	addrHeader entryHeader = 0
 )
 
@@ -443,6 +445,13 @@ func (v *varEntries) ReadFrom(r io.Reader) (n int64, err error) {
 			}
 			n += read
 			wt = &entry
+		case scriptHeader:
+			var entry scriptEntry
+			if read, err = entry.ReadFrom(r); err != nil {
+				return n + read, err
+			}
+			n += read
+			wt = &entry
 		case addrCommentHeader:
 			var entry addrCommentEntry
 			if read, err = entry.ReadFrom(r); err != nil {
@@ -473,8 +482,10 @@ func (v *varEntries) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 }
 
+// Stringified byte slices for use as map lookup keys.
 type addressKey string
 type transactionHashKey string
+
 type comment []byte
 
 func getAddressKey(addr btcutil.Address) addressKey {
@@ -707,6 +718,12 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 				}
 			}
 
+		case *scriptEntry:
+			addr := e.script.address(w.net)
+			w.addrMap[getAddressKey(addr)] = &e.script
+			// script are always imported.
+			w.importedAddrs = append(w.importedAddrs, &e.script)
+
 		case *addrCommentEntry:
 			addr := e.address(w.net)
 			w.addrCommentMap[getAddressKey(addr)] =
@@ -745,6 +762,14 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 				// kind of nice but probably isn't necessary.
 				chainedAddrs[btcAddr.chainIndex] = e
 			}
+
+		case *scriptAddress:
+			e := &scriptEntry{
+				script: *btcAddr,
+			}
+			copy(e.scriptHash160[:], btcAddr.scriptHash[:])
+			// scripts are always imported
+			importedAddrs = append(importedAddrs, e)
 		}
 	}
 	wts = append(chainedAddrs, importedAddrs...)
@@ -752,7 +777,7 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 		e := &addrCommentEntry{
 			comment: []byte(comment),
 		}
-		// addresskey is the address hash as a string, we can cast it
+		// addresskey is the pubkey hash as a string, we can cast it
 		// safely (though a little distasteful).
 		copy(e.pubKeyHash160[:], []byte(addr))
 		wts = append(wts, e)
@@ -1202,22 +1227,15 @@ func (w *Wallet) AddressKey(a btcutil.Address) (key *ecdsa.PrivateKey, err error
 			D:         new(big.Int).SetBytes(privKeyCT),
 		}, nil
 	default:
+		// Currently only other type is script, they have no keys.
 		return nil, errors.New("unsupported address type")
 	}
 }
 
 // AddressInfo returns an AddressInfo structure for an address in a wallet.
 func (w *Wallet) AddressInfo(a btcutil.Address) (AddressInfo, error) {
-	// Currently, only P2PKH addresses are supported.  This should
-	// be extended to a switch-case statement when support for other
-	// addresses are added.
-	addr, ok := a.(*btcutil.AddressPubKeyHash)
-	if !ok {
-		return nil, errors.New("unsupported address")
-	}
-
 	// Look up address by address hash.
-	btcaddr, ok := w.addrMap[getAddressKey(addr)]
+	btcaddr, ok := w.addrMap[getAddressKey(a)]
 	if !ok {
 		return nil, ErrAddressNotFound
 	}
@@ -1364,6 +1382,34 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStam
 	// on the next WriteTo call.
 	w.addrMap[getAddressKey(addr)] = btcaddr
 	w.importedAddrs = append(w.importedAddrs, btcaddr)
+
+	// Create and return address.
+	return addr, nil
+}
+
+// ImportScript creates a new scriptAddress with a user-provided script
+// and adds it to the wallet.
+func (w *Wallet) ImportScript(script []byte, bs *BlockStamp) (btcutil.Address, error) {
+	if w.flags.watchingOnly {
+		return nil, ErrWalletIsWatchingOnly
+	}
+
+	if _, ok := w.addrMap[addressKey(btcutil.Hash160(script))]; ok {
+		return nil, ErrDuplicate
+	}
+
+	// Create new address with this private key.
+	scriptaddr, err := newScriptAddress(script, bs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add address to wallet's bookkeeping structures.  Adding to
+	// the map will result in the imported address being serialized
+	// on the next WriteTo call.
+	addr := scriptaddr.address(w.Net())
+	w.addrMap[getAddressKey(addr)] = scriptaddr
+	w.importedAddrs = append(w.importedAddrs, scriptaddr)
 
 	// Create and return address.
 	return addr, nil
@@ -2435,6 +2481,346 @@ func (a *btcAddress) imported() bool {
 	return a.chainIndex == importedKeyChainIdx
 }
 
+// note that there is no encrypted bit here since if we had a script encrypted
+// and then used it on the blockchain this provides a simple known plaintext in
+// the wallet file. It was determined that the script in a p2sh transaction is
+// not a secret and any sane situation would also require a signature (which
+// does have a secret).
+type scriptFlags struct {
+	hasScript bool
+	change    bool
+}
+
+// ReadFrom implements the io.ReaderFrom interface by reading from r into sf.
+func (sf *scriptFlags) ReadFrom(r io.Reader) (int64, error) {
+	var b [8]byte
+	n, err := r.Read(b[:])
+	if err != nil {
+		return int64(n), err
+	}
+
+	// We match bits from addrFlags for similar fields. hence hasScript uses
+	// the same bit as hasPubKey and the change bit is the same for both.
+	sf.hasScript = b[0]&(1<<1) != 0
+	sf.change = b[0]&(1<<5) != 0
+
+	return int64(n), nil
+}
+
+// WriteTo implements the io.WriteTo interface by writing sf into w.
+func (sf *scriptFlags) WriteTo(w io.Writer) (int64, error) {
+	var b [8]byte
+	if sf.hasScript {
+		b[0] |= 1 << 1
+	}
+	if sf.change {
+		b[0] |= 1 << 5
+	}
+
+	n, err := w.Write(b[:])
+	return int64(n), err
+}
+
+// p2SHScript represents the variable length script entry in a wallet.
+type p2SHScript []byte
+
+// ReadFrom implements the ReaderFrom interface by reading the P2SH script from
+// r in the format <4 bytes little endian length><script bytes>
+func (a *p2SHScript) ReadFrom(r io.Reader) (n int64, err error) {
+	//read length
+	lenBytes := make([]byte, 4)
+
+	read, err := r.Read(lenBytes)
+	n += int64(read)
+	if err != nil {
+		return n, err
+	}
+
+	length := binary.LittleEndian.Uint32(lenBytes)
+
+	script := make([]byte, length)
+
+	read, err = r.Read(script)
+	n += int64(read)
+	if err != nil {
+		return n, err
+	}
+
+	*a = script
+
+	return n, nil
+}
+
+// WriteTo implements the WriterTo interface by writing the P2SH script to w in
+// the format <4 bytes little endian length><script bytes>
+func (a *p2SHScript) WriteTo(w io.Writer) (n int64, err error) {
+	// Prepare and write 32-bit little-endian length header
+	lenBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(lenBytes, uint32(len(*a)))
+
+	written, err := w.Write(lenBytes)
+	n += int64(written)
+	if err != nil {
+		return n, err
+	}
+
+	// Now write the bytes themselves.
+	written, err = w.Write(*a)
+
+	return n + int64(written), err
+}
+
+type scriptAddress struct {
+	scriptHash [ripemd160.Size]byte
+	flags      scriptFlags
+	script     p2SHScript // variable length
+	firstSeen  int64
+	lastSeen   int64
+	firstBlock int32
+	lastBlock  int32
+}
+
+// newScriptAddress initializes and returns a new P2SH address.
+// iv must be 16 bytes, or nil (in which case it is randomly generated).
+func newScriptAddress(script []byte, bs *BlockStamp) (addr *scriptAddress, err error) {
+	addr = &scriptAddress{
+		flags: scriptFlags{
+			hasScript: true,
+			change:    false,
+		},
+		script:     script,
+		firstSeen:  time.Now().Unix(),
+		firstBlock: bs.Height,
+	}
+	copy(addr.scriptHash[:], btcutil.Hash160(addr.script[:]))
+
+	return addr, nil
+}
+
+// ReadFrom reads an script address from an io.Reader.
+func (a *scriptAddress) ReadFrom(r io.Reader) (n int64, err error) {
+	var read int64
+
+	// Checksums
+	var chkScriptHash uint32
+	var chkScript uint32
+
+	// Read serialized wallet into addr fields and checksums.
+	datas := []interface{}{
+		&a.scriptHash,
+		&chkScriptHash,
+		make([]byte, 4), // version
+		&a.flags,
+		&a.script,
+		&chkScript,
+		&a.firstSeen,
+		&a.lastSeen,
+		&a.firstBlock,
+		&a.lastBlock,
+	}
+	for _, data := range datas {
+		if rf, ok := data.(io.ReaderFrom); ok {
+			read, err = rf.ReadFrom(r)
+		} else {
+			read, err = binaryRead(r, binary.LittleEndian, data)
+		}
+		if err != nil {
+			return n + read, err
+		}
+		n += read
+	}
+
+	// Verify checksums, correct errors where possible.
+	checks := []struct {
+		data []byte
+		chk  uint32
+	}{
+		{a.scriptHash[:], chkScriptHash},
+		{a.script, chkScript},
+	}
+	for i := range checks {
+		if err = verifyAndFix(checks[i].data, checks[i].chk); err != nil {
+			return n, err
+		}
+	}
+
+	return n, nil
+}
+
+// WriteTo implements io.WriterTo by writing the scriptAddress to w.
+func (a *scriptAddress) WriteTo(w io.Writer) (n int64, err error) {
+	var written int64
+
+	datas := []interface{}{
+		&a.scriptHash,
+		walletHash(a.scriptHash[:]),
+		make([]byte, 4), //version
+		&a.flags,
+		&a.script,
+		walletHash(a.script),
+		&a.firstSeen,
+		&a.lastSeen,
+		&a.firstBlock,
+		&a.lastBlock,
+	}
+	for _, data := range datas {
+		if wt, ok := data.(io.WriterTo); ok {
+			written, err = wt.WriteTo(w)
+		} else {
+			written, err = binaryWrite(w, binary.LittleEndian, data)
+		}
+		if err != nil {
+			return n + written, err
+		}
+		n += written
+	}
+	return n, nil
+}
+
+// verifyKeypairs always fails since there is no keypair for a scriptAddress
+func (a *scriptAddress) verifyKeypairs() error {
+	return errors.New("keypairs are always bad for script")
+}
+
+// encrypt attempts to encrypt an address's clear text script key,
+// failing if the address is already encrypted or if the private key is
+// not 32 bytes.  If successful, the encryption flag is set.
+func (a *scriptAddress) encrypt(key []byte) error {
+	return errors.New("unable to encrypt script")
+}
+
+// lock removes the reference this address holds to its clear text
+// private key.  This function fails if the address is not encrypted.
+func (a *scriptAddress) lock() error {
+	// nothing to encrypt
+	return errors.New("unable to lock unencrypted script")
+}
+
+// unlock decrypts and stores a pointer to an address's private key,
+// failing if the address is not encrypted, or the provided key is
+// incorrect.  The returned clear text private key will always be a copy
+// that may be safely used by the caller without worrying about it being
+// zeroed during an address lock.
+func (a *scriptAddress) unlock(key []byte) (privKeyCT []byte, err error) {
+	return nil, errors.New("unable to unlock unencrypted script")
+}
+
+// changeEncryptionKey re-encrypts the private keys for an address
+// with a new AES encryption key.  oldkey must be the old AES encryption key
+// and is used to decrypt the private key.
+func (a *scriptAddress) changeEncryptionKey(oldkey, newkey []byte) error {
+	return errors.New("script address tried to change encryption key")
+}
+
+// address returns a btcutil.AddressScriptHash for a btcAddress.
+func (a *scriptAddress) address(net btcwire.BitcoinNet) btcutil.Address {
+	// error is not returned because the hash will always be 20
+	// bytes, and net is assumed to be valid.
+	addr, _ := btcutil.NewAddressScriptHashFromHash(a.scriptHash[:], net)
+	return addr
+}
+
+// AddressScriptInfo implements the AddressInfo interface for a
+// pay-to-script-hash address. Additionally it has information about the script.
+type AddressScriptInfo struct {
+	address      btcutil.Address
+	scriptHash   string
+	firstBlock   int32
+	imported     bool
+	change       bool
+	Script       []byte
+	ScriptClass  btcscript.ScriptClass
+	Addresses    []btcutil.Address
+	RequiredSigs int
+}
+
+// Address returns the script address, implementing AddressInfo.
+func (ai *AddressScriptInfo) Address() btcutil.Address {
+	return ai.address
+}
+
+// AddrHash returns the script hash, implementing AddressInfo.
+func (ai *AddressScriptInfo) AddrHash() string {
+	return ai.scriptHash
+}
+
+// FirstBlock returns the first block the address is seen in, implementing
+// AddressInfo.
+func (ai *AddressScriptInfo) FirstBlock() int32 {
+	return ai.firstBlock
+}
+
+// Imported returns the pub if the address was imported, or a chained address,
+// implementing AddressInfo.
+func (ai *AddressScriptInfo) Imported() bool {
+	return ai.imported
+}
+
+// Change returns true if the address was created as a change address,
+// implementing AddressInfo.
+func (ai *AddressScriptInfo) Change() bool {
+	return ai.change
+}
+
+// Compressed returns false since script addresses are never compressed,
+// implementing AddressInfo.
+func (ai *AddressScriptInfo) Compressed() bool {
+	return false
+}
+
+// info returns information about a btcAddress stored in a AddressInfo
+// struct.
+func (a *scriptAddress) info(net btcwire.BitcoinNet) (AddressInfo, error) {
+	class, addresses, reqSigs, err :=
+		btcscript.ExtractPkScriptAddrs(a.script, net)
+	if err != nil {
+		return nil, err
+	}
+	script := make([]byte, len(a.script))
+	copy(script, a.script)
+
+	address := a.address(net)
+	return &AddressScriptInfo{
+		address:      address,
+		scriptHash:   string(a.scriptHash[:]),
+		firstBlock:   a.firstBlock,
+		imported:     true,
+		change:       a.flags.change,
+		Script:       script,
+		ScriptClass:  class,
+		Addresses:    addresses,
+		RequiredSigs: reqSigs,
+	}, nil
+}
+
+// watchingCopy creates a copy of an address without a private key.
+// This is used to fill a watching a wallet with addresses from a
+// normal wallet.
+func (a *scriptAddress) watchingCopy() walletAddress {
+	// just deep copy the whole thing.
+	return &scriptAddress{
+		scriptHash: a.scriptHash,
+		flags: scriptFlags{
+			change: a.flags.change,
+		},
+		script:     a.script,
+		firstSeen:  a.firstSeen,
+		lastSeen:   a.lastSeen,
+		firstBlock: a.firstBlock,
+		lastBlock:  a.lastBlock,
+	}
+}
+
+// FirstBlockHeight returns the first blockheight the address is known at.
+func (a *scriptAddress) FirstBlockHeight() int32 {
+	return a.firstBlock
+}
+
+// imported returns true because script addresses are always imported.
+func (a *scriptAddress) imported() bool {
+	return true
+}
+
 func walletHash(b []byte) uint32 {
 	sum := btcwire.DoubleSha256(b)
 	return binary.LittleEndian.Uint32(sum)
@@ -2595,6 +2981,47 @@ func (e *addrEntry) ReadFrom(r io.Reader) (n int64, err error) {
 	n += read
 
 	read, err = e.addr.ReadFrom(r)
+	return n + read, err
+}
+
+// scriptEntry is the entry type for a P2SH script.
+type scriptEntry struct {
+	scriptHash160 [ripemd160.Size]byte
+	script        scriptAddress
+}
+
+// WriteTo implements io.WriterTo by writing the entry to w.
+func (e *scriptEntry) WriteTo(w io.Writer) (n int64, err error) {
+	var written int64
+
+	// Write header
+	if written, err = binaryWrite(w, binary.LittleEndian, scriptHeader); err != nil {
+		return n + written, err
+	}
+	n += written
+
+	// Write hash
+	if written, err = binaryWrite(w, binary.LittleEndian, &e.scriptHash160); err != nil {
+		return n + written, err
+	}
+	n += written
+
+	// Write btcAddress
+	written, err = e.script.WriteTo(w)
+	n += written
+	return n, err
+}
+
+// ReadFrom implements io.ReaderFrom by reading the entry from e.
+func (e *scriptEntry) ReadFrom(r io.Reader) (n int64, err error) {
+	var read int64
+
+	if read, err = binaryRead(r, binary.LittleEndian, &e.scriptHash160); err != nil {
+		return n + read, err
+	}
+	n += read
+
+	read, err = e.script.ReadFrom(r)
 	return n + read, err
 }
 

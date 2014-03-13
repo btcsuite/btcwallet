@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"github.com/conformal/btcec"
+	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 	"github.com/davecgh/go-spew/spew"
@@ -81,6 +82,41 @@ func TestBtcAddressSerializer(t *testing.T) {
 	}
 
 	if _, err = readAddr.unlock(key); err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	if !reflect.DeepEqual(addr, &readAddr) {
+		t.Error("Original and read btcAddress differ.")
+	}
+}
+
+func TestScriptAddressSerializer(t *testing.T) {
+	script := []byte{btcscript.OP_TRUE, btcscript.OP_DUP,
+		btcscript.OP_DROP}
+	addr, err := newScriptAddress(script, &BlockStamp{})
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	file, err := os.Create("btcaddress.bin")
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+	defer file.Close()
+
+	if _, err := addr.WriteTo(file); err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	file.Seek(0, 0)
+
+	var readAddr scriptAddress
+	_, err = readAddr.ReadFrom(file)
+	if err != nil {
 		t.Error(err.Error())
 		return
 	}
@@ -560,6 +596,9 @@ func TestWatchingWalletExport(t *testing.T) {
 				t.Errorf("Chained address marked as needing a private key to be generated later.")
 				return
 			}
+		case *scriptAddress:
+			t.Errorf("Chained address was a script!")
+			return
 		default:
 			t.Errorf("Chained address unknown type!")
 			return
@@ -757,6 +796,126 @@ func TestImportPrivateKey(t *testing.T) {
 
 	if !reflect.DeepEqual(pk, pk2) {
 		t.Error("original and deserialized private keys do not match.")
+		return
+	}
+
+}
+
+func TestImportScript(t *testing.T) {
+	const keypoolSize = 10
+	createdAt := &BlockStamp{}
+	w, err := NewWallet("banana wallet", "A wallet for testing.",
+		[]byte("banana"), btcwire.MainNet, createdAt, keypoolSize)
+	if err != nil {
+		t.Error("Error creating new wallet: " + err.Error())
+		return
+	}
+
+	if err = w.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Can't unlock original wallet: %v", err)
+		return
+	}
+
+	script := []byte{btcscript.OP_TRUE, btcscript.OP_DUP,
+		btcscript.OP_DROP}
+	stamp := &BlockStamp{}
+	address, err := w.ImportScript(script, stamp)
+	if err != nil {
+		t.Error("error importing script: " + err.Error())
+		return
+	}
+
+	// lookup address
+	ainfo, err := w.AddressInfo(address)
+	if err != nil {
+		t.Error("error looking up script: " + err.Error())
+	}
+
+	sinfo, ok := ainfo.(*AddressScriptInfo)
+	if !ok {
+		t.Error("address info found isn't a script")
+		return
+	}
+
+	if !bytes.Equal(script, sinfo.Script) {
+		t.Error("original and looked-up script do not match.")
+		return
+	}
+
+	if sinfo.ScriptClass != btcscript.NonStandardTy {
+		t.Error("script type incorrect.")
+		return
+	}
+
+	if sinfo.RequiredSigs != 0 {
+		t.Error("required sigs funny number")
+		return
+	}
+
+	if len(sinfo.Addresses) != 0 {
+		t.Error("addresses in bogus script.")
+		return
+	}
+
+	if sinfo.Address().EncodeAddress() != address.EncodeAddress() {
+		t.Error("script address doesn't match entry.")
+		return
+	}
+
+	if string(sinfo.Address().ScriptAddress()) != sinfo.AddrHash() {
+		t.Error("script hash doesn't match address.")
+		return
+	}
+
+	if sinfo.FirstBlock() != 0 {
+		t.Error("funny first block")
+		return
+	}
+
+	if !sinfo.Imported() {
+		t.Error("imported script info not imported.")
+		return
+	}
+
+	if sinfo.Change() {
+		t.Error("imported script is change.")
+		return
+	}
+
+	if sinfo.Compressed() {
+		t.Error("imported script is compressed.")
+		return
+	}
+
+	// serialise and deseralise and check still there.
+
+	// Test (de)serialization of wallet.
+	buf := new(bytes.Buffer)
+	_, err = w.WriteTo(buf)
+	if err != nil {
+		t.Errorf("Cannot write wallet: %v", err)
+		return
+	}
+	w2 := new(Wallet)
+	_, err = w2.ReadFrom(buf)
+	if err != nil {
+		t.Errorf("Cannot read wallet: %v", err)
+		return
+	}
+
+	if err = w2.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Can't unlock deserialised wallet: %v", err)
+		return
+	}
+
+	// lookup address
+	ainfo2, err := w2.AddressInfo(address)
+	if err != nil {
+		t.Error("error looking up info in deserialized wallet: " + err.Error())
+	}
+
+	if !reflect.DeepEqual(ainfo, ainfo2) {
+		t.Error("original and deserialized scriptinfo do not match.")
 		return
 	}
 
