@@ -323,6 +323,8 @@ func OpenSavedAccount(name string, cfg *config) (*Account, error) {
 
 // OpenAccounts attempts to open all saved accounts.
 func OpenAccounts() map[string]*Account {
+	accounts := make(map[string]*Account)
+
 	// If the network (account) directory is missing, but the temporary
 	// directory exists, move it.  This is unlikely to happen, but possible,
 	// if writing out every account file at once to a tmp directory (as is
@@ -334,7 +336,7 @@ func OpenAccounts() map[string]*Account {
 	if !fileExists(netDir) && fileExists(tmpNetDir) {
 		if err := Rename(tmpNetDir, netDir); err != nil {
 			log.Errorf("Cannot move temporary network dir: %v", err)
-			return nil
+			return accounts
 		}
 	}
 
@@ -345,15 +347,14 @@ func OpenAccounts() map[string]*Account {
 		switch err.(type) {
 		case *WalletOpenError:
 			log.Errorf("Default account wallet file unreadable: %v", err)
-			return nil
+			return accounts
 
 		default:
 			log.Warnf("Non-critical problem opening an account file: %v", err)
 		}
 	}
-	accounts := map[string]*Account{
-		"": a,
-	}
+
+	accounts[""] = a
 
 	// Read all filenames in the account directory, and look for any
 	// filenames matching '*-wallet.bin'.  These are wallets for
@@ -362,7 +363,7 @@ func OpenAccounts() map[string]*Account {
 	if err != nil {
 		// Can't continue.
 		log.Errorf("Unable to open account directory: %v", err)
-		return nil
+		return accounts
 	}
 	defer accountDir.Close()
 	fileNames, err := accountDir.Readdirnames(0)
