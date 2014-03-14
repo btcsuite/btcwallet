@@ -115,8 +115,7 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 			continue
 		}
 
-		// Extract address from pkScript.  We currently only care
-		// about P2PKH addresses.
+		// Extract addresses from this output's pkScript.
 		_, addrs, _, err := txout.Addresses(cfg.Net())
 		if err != nil {
 			continue
