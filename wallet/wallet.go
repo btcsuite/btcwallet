@@ -871,7 +871,9 @@ func (w *Wallet) Lock() (err error) {
 
 	// Remove clear text private keys from all address entries.
 	for _, addr := range w.addrMap {
-		_ = addr.lock()
+		if baddr, ok :=  addr.(*btcAddress); ok {
+			_ = baddr.lock()
+		}
 	}
 
 	return err
@@ -1022,17 +1024,19 @@ func (w *Wallet) extendKeypool(n uint, bs *BlockStamp) error {
 	if !ok {
 		return errors.New("expected last chained address not found")
 	}
+
 	if len(w.secret) != 32 {
 		return ErrWalletLocked
-	}
-	privkey, err := waddr.unlock(w.secret)
-	if err != nil {
-		return err
 	}
 
 	addr, ok := waddr.(*btcAddress)
 	if !ok {
 		return errors.New("found non-pubkey chained address")
+	}
+
+	privkey, err := addr.unlock(w.secret)
+	if err != nil {
+		return err
 	}
 	cc := addr.chaincode[:]
 
@@ -1321,7 +1325,7 @@ func (w *Wallet) EarliestBlockHeight() int32 {
 	// Imported keys will be the only ones that may have an earlier
 	// blockchain height.  Check each and set the returned height
 	for _, addr := range w.importedAddrs {
-		aheight := addr.FirstBlockHeight()
+		aheight := addr.firstBlockHeight()
 		if aheight < height {
 			height = aheight
 
@@ -1458,6 +1462,7 @@ func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
 		addrCommentMap: make(map[addressKey]comment),
 		txCommentMap:   make(map[transactionHashKey]comment),
 
+		// todo oga make me a list
 		chainIdxMap:  make(map[int64]btcutil.Address),
 		lastChainIdx: w.lastChainIdx,
 	}
@@ -1620,7 +1625,7 @@ func (w *Wallet) ExtendActiveAddresses(n int, keypoolSize uint) ([]btcutil.Addre
 	}
 
 	last := w.addrMap[getAddressKey(w.chainIdxMap[w.highestUsed])]
-	bs := &BlockStamp{Height: last.FirstBlockHeight()}
+	bs := &BlockStamp{Height: last.firstBlockHeight()}
 
 	addrs := make([]btcutil.Address, 0, n)
 	for i := 0; i < n; i++ {
@@ -1988,15 +1993,10 @@ func (u *unusedSpace) WriteTo(w io.Writer) (int64, error) {
 type walletAddress interface {
 	io.ReaderFrom
 	io.WriterTo
-	encrypt(key []byte) error
-	lock() error
-	unlock(key []byte) (privKeyCT []byte, err error)
-	changeEncryptionKey(oldkey, newkey []byte) error
-	verifyKeypairs() error
 	address(net btcwire.BitcoinNet) btcutil.Address
 	info(net btcwire.BitcoinNet) (AddressInfo, error)
 	watchingCopy() walletAddress
-	FirstBlockHeight() int32
+	firstBlockHeight() int32
 	imported() bool
 }
 
@@ -2473,7 +2473,7 @@ func (a *btcAddress) watchingCopy() walletAddress {
 	}
 }
 
-func (a *btcAddress) FirstBlockHeight() int32 {
+func (a *btcAddress) firstBlockHeight() int32 {
 	return a.firstBlock
 }
 
@@ -2677,41 +2677,6 @@ func (a *scriptAddress) WriteTo(w io.Writer) (n int64, err error) {
 	return n, nil
 }
 
-// verifyKeypairs always fails since there is no keypair for a scriptAddress
-func (a *scriptAddress) verifyKeypairs() error {
-	return errors.New("keypairs are always bad for script")
-}
-
-// encrypt attempts to encrypt an address's clear text script key,
-// failing if the address is already encrypted or if the private key is
-// not 32 bytes.  If successful, the encryption flag is set.
-func (a *scriptAddress) encrypt(key []byte) error {
-	return errors.New("unable to encrypt script")
-}
-
-// lock removes the reference this address holds to its clear text
-// private key.  This function fails if the address is not encrypted.
-func (a *scriptAddress) lock() error {
-	// nothing to encrypt
-	return errors.New("unable to lock unencrypted script")
-}
-
-// unlock decrypts and stores a pointer to an address's private key,
-// failing if the address is not encrypted, or the provided key is
-// incorrect.  The returned clear text private key will always be a copy
-// that may be safely used by the caller without worrying about it being
-// zeroed during an address lock.
-func (a *scriptAddress) unlock(key []byte) (privKeyCT []byte, err error) {
-	return nil, errors.New("unable to unlock unencrypted script")
-}
-
-// changeEncryptionKey re-encrypts the private keys for an address
-// with a new AES encryption key.  oldkey must be the old AES encryption key
-// and is used to decrypt the private key.
-func (a *scriptAddress) changeEncryptionKey(oldkey, newkey []byte) error {
-	return errors.New("script address tried to change encryption key")
-}
-
 // address returns a btcutil.AddressScriptHash for a btcAddress.
 func (a *scriptAddress) address(net btcwire.BitcoinNet) btcutil.Address {
 	// error is not returned because the hash will always be 20
@@ -2811,8 +2776,8 @@ func (a *scriptAddress) watchingCopy() walletAddress {
 	}
 }
 
-// FirstBlockHeight returns the first blockheight the address is known at.
-func (a *scriptAddress) FirstBlockHeight() int32 {
+// firstBlockHeight returns the first blockheight the address is known at.
+func (a *scriptAddress) firstBlockHeight() int32 {
 	return a.firstBlock
 }
 
