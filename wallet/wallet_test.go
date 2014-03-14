@@ -27,7 +27,6 @@ import (
 	"github.com/conformal/btcwire"
 	"github.com/davecgh/go-spew/spew"
 	"math/big"
-	"os"
 	"reflect"
 	"testing"
 )
@@ -60,22 +59,15 @@ func TestBtcAddressSerializer(t *testing.T) {
 		return
 	}
 
-	file, err := os.Create("btcaddress.bin")
-	if err != nil {
+	buf := new(bytes.Buffer)
+
+	if _, err := addr.WriteTo(buf); err != nil {
 		t.Error(err.Error())
 		return
 	}
-	defer file.Close()
-
-	if _, err := addr.WriteTo(file); err != nil {
-		t.Error(err.Error())
-		return
-	}
-
-	file.Seek(0, 0)
 
 	var readAddr btcAddress
-	_, err = readAddr.ReadFrom(file)
+	_, err = readAddr.ReadFrom(buf)
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -100,22 +92,15 @@ func TestScriptAddressSerializer(t *testing.T) {
 		return
 	}
 
-	file, err := os.Create("btcaddress.bin")
-	if err != nil {
+	buf := new(bytes.Buffer)
+
+	if _, err := addr.WriteTo(buf); err != nil {
 		t.Error(err.Error())
 		return
 	}
-	defer file.Close()
-
-	if _, err := addr.WriteTo(file); err != nil {
-		t.Error(err.Error())
-		return
-	}
-
-	file.Seek(0, 0)
 
 	var readAddr scriptAddress
-	_, err = readAddr.ReadFrom(file)
+	_, err = readAddr.ReadFrom(buf)
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -135,22 +120,15 @@ func TestWalletCreationSerialization(t *testing.T) {
 		return
 	}
 
-	file, err := os.Create("newwallet.bin")
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-	defer file.Close()
+	buf := new(bytes.Buffer)
 
-	if _, err := w1.WriteTo(file); err != nil {
+	if _, err := w1.WriteTo(buf); err != nil {
 		t.Error("Error writing new wallet: " + err.Error())
 		return
 	}
 
-	file.Seek(0, 0)
-
 	w2 := new(Wallet)
-	_, err = w2.ReadFrom(file)
+	_, err = w2.ReadFrom(buf)
 	if err != nil {
 		t.Error("Error reading newly written wallet: " + err.Error())
 		return
