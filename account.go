@@ -507,7 +507,7 @@ func (a *Account) RescanActiveAddresses() {
 		height = a.SyncHeight()
 	}
 
-	log.Info("Beginning rescan (height %d) for account '%v'",
+	log.Infof("Beginning rescan (height %d) for account '%v'",
 		height, a.name)
 
 	// Rescan active addresses starting at the determined block height.
