@@ -322,6 +322,7 @@ func WSSendRecv(ws *websocket.Conn) {
 		for {
 			var m []byte
 			if err := websocket.Message.Receive(ws, &m); err != nil {
+				log.Infof("Cannot receive client websocket message: %v", err)
 				close(received)
 				return
 			}
@@ -351,11 +352,12 @@ func WSSendRecv(ws *websocket.Conn) {
 		case m := <-cc.send:
 			err := ws.SetWriteDeadline(time.Now().Add(deadline))
 			if err != nil {
+				log.Errorf("Cannot set write deadline: %v", err)
 				return
 			}
 			err = websocket.Message.Send(ws, m)
 			if err != nil {
-				// Frontend disconnected.
+				log.Infof("Cannot complete client websocket send: %v", err)
 				return
 			}
 		}
