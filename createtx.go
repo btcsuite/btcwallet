@@ -182,7 +182,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 
 	// These are nil/zeroed until a change address is needed, and reused
 	// again in case a change utxo has already been chosen.
-	var changeAddr *btcutil.AddressPubKeyHash
+	var changeAddr btcutil.Address
 
 	var selectedInputs []*tx.RecvTxOut
 	hasChange := false

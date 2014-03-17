@@ -358,7 +358,7 @@ func (a *Account) ImportPrivateKey(pk []byte, compressed bool, bs *wallet.BlockS
 	if err != nil {
 		return "", err
 	}
-	addrStr := addr.String()
+	addrStr := addr.EncodeAddress()
 
 	// Immediately write wallet to disk.
 	AcctMgr.ds.ScheduleWalletWrite(a)
