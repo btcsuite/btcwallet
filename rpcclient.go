@@ -158,13 +158,20 @@ func (btcd *BtcdRPCConn) Start() {
 
 				if err := btcd.send(rpcrequest); err != nil {
 					// Connection lost.
+					log.Infof("Cannot complete btcd websocket send: %v",
+						err)
 					btcd.ws.Close()
 					close(done)
 				}
 
 				addrequest.ResponseChan <- rpcrequest.response
 
-			case recvResponse := <-responses:
+			case recvResponse, ok := <-responses:
+				if !ok {
+					responses = nil
+					close(done)
+					break
+				}
 				rpcrequest, ok := m[recvResponse.id]
 				if !ok {
 					log.Warnf("Received unexpected btcd response")
@@ -197,10 +204,10 @@ func (btcd *BtcdRPCConn) Start() {
 				rpcrequest.response <- response
 
 			case <-done:
+				response := &ServerResponse{
+					err: &ErrBtcdDisconnected,
+				}
 				for _, request := range m {
-					response := &ServerResponse{
-						err: &ErrBtcdDisconnected,
-					}
 					request.response <- response
 				}
 				return
@@ -218,8 +225,10 @@ func (btcd *BtcdRPCConn) Start() {
 		for {
 			var m string
 			if err := websocket.Message.Receive(btcd.ws, &m); err != nil {
-				log.Debugf("Cannot receive btcd message: %v", err)
-				close(done)
+				log.Infof("Cannot receive btcd websocket message: %v",
+					err)
+				btcd.ws.Close()
+				close(responses)
 				return
 			}
 
