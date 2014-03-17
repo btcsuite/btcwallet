@@ -871,7 +871,7 @@ func (w *Wallet) Lock() (err error) {
 
 	// Remove clear text private keys from all address entries.
 	for _, addr := range w.addrMap {
-		if baddr, ok :=  addr.(*btcAddress); ok {
+		if baddr, ok := addr.(*btcAddress); ok {
 			_ = baddr.lock()
 		}
 	}
@@ -1252,8 +1252,31 @@ func (w *Wallet) Net() btcwire.BitcoinNet {
 	return w.net
 }
 
-// SetSyncedWith marks the wallet to be in sync with the block
-// described by height and hash.
+// MarkAddressSynced marks an unsynced (likely imported) address as
+// being fully in sync with the rest of wallet.
+func (w *Wallet) MarkAddressSynced(a btcutil.Address) error {
+	wa, ok := w.addrMap[getAddressKey(a)]
+	if !ok {
+		return ErrAddressNotFound
+	}
+	wa.markSynced()
+	return nil
+}
+
+// MarkAllSynced marks all unsynced (likely imported) wallet addresses
+// as being fully in sync with marked recently-seen blocks (marked
+// using SetSyncedWith).
+func (w *Wallet) MarkAllSynced() {
+	for _, wa := range w.addrMap {
+		wa.markSynced()
+	}
+}
+
+// SetSyncedWith marks already synced addresses in the wallet to be in
+// sync with the recently-seen block described by the blockstamp.
+// Unsynced addresses are unaffected by this method and must be marked
+// as in sync with MarkAddressSynced or MarkAllSynced to be considered
+// in sync with bs.
 func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
 	// Check if we're trying to rollback the last seen history.
 	// If so, and this bs is already saved, remove anything
@@ -1289,21 +1312,29 @@ func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
 	}
 }
 
-// SyncedWith returns the height and hash of the block the wallet is
-// currently marked to be in sync with.
-func (w *Wallet) SyncedWith() *BlockStamp {
-	nHashes := len(w.recent.hashes)
-	if nHashes == 0 || w.recent.lastHeight == -1 {
-		return &BlockStamp{
-			Height: -1,
+// SyncHeight returns the sync height of a wallet, or the earliest
+// block height of any unsynced imported address if there are any
+// addresses marked as unsynced, whichever is smaller.  This is the
+// height that rescans on an entire wallet should begin at to fully
+// sync all wallet addresses.
+func (w *Wallet) SyncHeight() (height int32) {
+	if len(w.recent.hashes) == 0 {
+		return 0
+	}
+	height = w.recent.lastHeight
+
+	for _, a := range w.addrMap {
+		if a.unsynced() && a.firstBlockHeight() < height {
+			height = a.firstBlockHeight()
+
+			// Can't go lower than 0.
+			if height == 0 {
+				break
+			}
 		}
 	}
 
-	lastSha := w.recent.hashes[nHashes-1]
-	return &BlockStamp{
-		Height: w.recent.lastHeight,
-		Hash:   *lastSha,
-	}
+	return height
 }
 
 // NewIterateRecentBlocks returns an iterator for recently-seen blocks.
@@ -1375,6 +1406,12 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStam
 	}
 	btcaddr.chainIndex = importedKeyChainIdx
 
+	// Mark as unsynced if import height is below currently-synced
+	// height.
+	if len(w.recent.hashes) != 0 && bs.Height < w.recent.lastHeight {
+		btcaddr.flags.unsynced = true
+	}
+
 	// Encrypt imported address with the derived AES key.
 	if err = btcaddr.encrypt(w.secret); err != nil {
 		return nil, err
@@ -1406,6 +1443,12 @@ func (w *Wallet) ImportScript(script []byte, bs *BlockStamp) (btcutil.Address, e
 	scriptaddr, err := newScriptAddress(script, bs)
 	if err != nil {
 		return nil, err
+	}
+
+	// Mark as unsynced if import height is below currently-synced
+	// height.
+	if len(w.recent.hashes) != 0 && bs.Height < w.recent.lastHeight {
+		scriptaddr.flags.unsynced = true
 	}
 
 	// Add address to wallet's bookkeeping structures.  Adding to
@@ -1675,6 +1718,7 @@ type addrFlags struct {
 	createPrivKeyNextUnlock bool
 	compressed              bool
 	change                  bool
+	unsynced                bool
 }
 
 func (af *addrFlags) ReadFrom(r io.Reader) (int64, error) {
@@ -1690,6 +1734,7 @@ func (af *addrFlags) ReadFrom(r io.Reader) (int64, error) {
 	af.createPrivKeyNextUnlock = b[0]&(1<<3) != 0
 	af.compressed = b[0]&(1<<4) != 0
 	af.change = b[0]&(1<<5) != 0
+	af.unsynced = b[0]&(1<<6) != 0
 
 	// Currently (at least until watching-only wallets are implemented)
 	// btcwallet shall refuse to open any unencrypted addresses.  This
@@ -1726,6 +1771,9 @@ func (af *addrFlags) WriteTo(w io.Writer) (int64, error) {
 	}
 	if af.change {
 		b[0] |= 1 << 5
+	}
+	if af.unsynced {
+		b[0] |= 1 << 6
 	}
 
 	n, err := w.Write(b[:])
@@ -1998,6 +2046,8 @@ type walletAddress interface {
 	watchingCopy() walletAddress
 	firstBlockHeight() int32
 	imported() bool
+	unsynced() bool
+	markSynced()
 }
 
 type btcAddress struct {
@@ -2098,6 +2148,7 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp, compressed bool) (addr *b
 			createPrivKeyNextUnlock: false,
 			compressed:              compressed,
 			change:                  false,
+			unsynced:                false,
 		},
 		firstSeen:  time.Now().Unix(),
 		firstBlock: bs.Height,
@@ -2143,6 +2194,7 @@ func newBtcAddressWithoutPrivkey(pubkey, iv []byte, bs *BlockStamp) (addr *btcAd
 			createPrivKeyNextUnlock: true,
 			compressed:              compressed,
 			change:                  false,
+			unsynced:                false,
 		},
 		firstSeen:  time.Now().Unix(),
 		firstBlock: bs.Height,
@@ -2461,6 +2513,7 @@ func (a *btcAddress) watchingCopy() walletAddress {
 			createPrivKeyNextUnlock: false,
 			compressed:              a.flags.compressed,
 			change:                  a.flags.change,
+			unsynced:                a.flags.unsynced,
 		},
 		chaincode:  a.chaincode,
 		chainIndex: a.chainIndex,
@@ -2481,6 +2534,14 @@ func (a *btcAddress) imported() bool {
 	return a.chainIndex == importedKeyChainIdx
 }
 
+func (a *btcAddress) unsynced() bool {
+	return a.flags.unsynced
+}
+
+func (a *btcAddress) markSynced() {
+	a.flags.unsynced = false
+}
+
 // note that there is no encrypted bit here since if we had a script encrypted
 // and then used it on the blockchain this provides a simple known plaintext in
 // the wallet file. It was determined that the script in a p2sh transaction is
@@ -2489,6 +2550,7 @@ func (a *btcAddress) imported() bool {
 type scriptFlags struct {
 	hasScript bool
 	change    bool
+	unsynced  bool
 }
 
 // ReadFrom implements the io.ReaderFrom interface by reading from r into sf.
@@ -2503,6 +2565,7 @@ func (sf *scriptFlags) ReadFrom(r io.Reader) (int64, error) {
 	// the same bit as hasPubKey and the change bit is the same for both.
 	sf.hasScript = b[0]&(1<<1) != 0
 	sf.change = b[0]&(1<<5) != 0
+	sf.unsynced = b[0]&(1<<6) != 0
 
 	return int64(n), nil
 }
@@ -2515,6 +2578,9 @@ func (sf *scriptFlags) WriteTo(w io.Writer) (int64, error) {
 	}
 	if sf.change {
 		b[0] |= 1 << 5
+	}
+	if sf.unsynced {
+		b[0] |= 1 << 6
 	}
 
 	n, err := w.Write(b[:])
@@ -2784,6 +2850,14 @@ func (a *scriptAddress) firstBlockHeight() int32 {
 // imported returns true because script addresses are always imported.
 func (a *scriptAddress) imported() bool {
 	return true
+}
+
+func (a *scriptAddress) unsynced() bool {
+	return a.flags.unsynced
+}
+
+func (a *scriptAddress) markSynced() {
+	a.flags.unsynced = false
 }
 
 func walletHash(b []byte) uint32 {

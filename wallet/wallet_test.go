@@ -707,7 +707,8 @@ func TestWatchingWalletExport(t *testing.T) {
 
 func TestImportPrivateKey(t *testing.T) {
 	const keypoolSize = 10
-	createdAt := &BlockStamp{}
+	createHeight := int32(100)
+	createdAt := &BlockStamp{Height: createHeight}
 	w, err := NewWallet("banana wallet", "A wallet for testing.",
 		[]byte("banana"), btcwire.MainNet, createdAt, keypoolSize)
 	if err != nil {
@@ -726,9 +727,21 @@ func TestImportPrivateKey(t *testing.T) {
 		return
 	}
 
+	// verify that the entire wallet's sync height matches the
+	// expected createHeight.
+	if h := w.EarliestBlockHeight(); h != createHeight {
+		t.Error("Initial earliest height %v does not match expected %v.", h, createHeight)
+		return
+	}
+	if h := w.SyncHeight(); h != createHeight {
+		t.Error("Initial sync height %v does not match expected %v.", h, createHeight)
+		return
+	}
+
 	// import priv key
-	stamp := &BlockStamp{}
-	address, err := w.ImportPrivateKey(pk.D.Bytes(), false, stamp)
+	importHeight := int32(50)
+	importedAt := &BlockStamp{Height: importHeight}
+	address, err := w.ImportPrivateKey(pk.D.Bytes(), false, importedAt)
 	if err != nil {
 		t.Error("importing private key: " + err.Error())
 		return
@@ -745,6 +758,17 @@ func TestImportPrivateKey(t *testing.T) {
 		return
 	}
 
+	// verify that the earliest block and sync heights now match the
+	// (smaller) import height.
+	if h := w.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After import earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w.SyncHeight(); h != importHeight {
+		t.Errorf("After import sync height %v does not match expected %v.", h, importHeight)
+		return
+	}
+
 	// serialise and deseralise and check still there.
 
 	// Test (de)serialization of wallet.
@@ -758,6 +782,34 @@ func TestImportPrivateKey(t *testing.T) {
 	_, err = w2.ReadFrom(buf)
 	if err != nil {
 		t.Errorf("Cannot read wallet: %v", err)
+		return
+	}
+
+	// Verify that the earliest and sync height match expected after the reserialization.
+	if h := w2.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After reserialization earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w2.SyncHeight(); h != importHeight {
+		t.Errorf("After reserialization sync height %v does not match expected %v.", h, importHeight)
+		return
+	}
+
+	if err := w2.MarkAddressSynced(address); err != nil {
+		t.Errorf("Cannot mark address synced: %v", err)
+		return
+	}
+
+	// Mark imported address as synced with the recently-seen blocks, and verify
+	// that the sync height now equals the most recent block (the one at wallet
+	// creation).
+	w2.MarkAddressSynced(address)
+	if h := w2.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After address sync, earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w2.SyncHeight(); h != createHeight {
+		t.Errorf("After address sync, sync height %v does not match expected %v.", h, createHeight)
 		return
 	}
 
@@ -781,7 +833,8 @@ func TestImportPrivateKey(t *testing.T) {
 
 func TestImportScript(t *testing.T) {
 	const keypoolSize = 10
-	createdAt := &BlockStamp{}
+	createHeight := int32(100)
+	createdAt := &BlockStamp{Height: createHeight}
 	w, err := NewWallet("banana wallet", "A wallet for testing.",
 		[]byte("banana"), btcwire.MainNet, createdAt, keypoolSize)
 	if err != nil {
@@ -794,9 +847,21 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
+	// verify that the entire wallet's sync height matches the
+	// expected createHeight.
+	if h := w.EarliestBlockHeight(); h != createHeight {
+		t.Error("Initial earliest height %v does not match expected %v.", h, createHeight)
+		return
+	}
+	if h := w.SyncHeight(); h != createHeight {
+		t.Error("Initial sync height %v does not match expected %v.", h, createHeight)
+		return
+	}
+
 	script := []byte{btcscript.OP_TRUE, btcscript.OP_DUP,
 		btcscript.OP_DROP}
-	stamp := &BlockStamp{}
+	importHeight := int32(50)
+	stamp := &BlockStamp{Height: importHeight}
 	address, err := w.ImportScript(script, stamp)
 	if err != nil {
 		t.Error("error importing script: " + err.Error())
@@ -845,7 +910,7 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	if sinfo.FirstBlock() != 0 {
+	if sinfo.FirstBlock() != importHeight {
 		t.Error("funny first block")
 		return
 	}
@@ -865,6 +930,17 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
+	// verify that the earliest block and sync heights now match the
+	// (smaller) import height.
+	if h := w.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After import earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w.SyncHeight(); h != importHeight {
+		t.Errorf("After import sync height %v does not match expected %v.", h, importHeight)
+		return
+	}
+
 	// serialise and deseralise and check still there.
 
 	// Test (de)serialization of wallet.
@@ -878,6 +954,34 @@ func TestImportScript(t *testing.T) {
 	_, err = w2.ReadFrom(buf)
 	if err != nil {
 		t.Errorf("Cannot read wallet: %v", err)
+		return
+	}
+
+	// Verify that the earliest and sync height match expected after the reserialization.
+	if h := w2.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After reserialization earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w2.SyncHeight(); h != importHeight {
+		t.Errorf("After reserialization sync height %v does not match expected %v.", h, importHeight)
+		return
+	}
+
+	if err := w2.MarkAddressSynced(address); err != nil {
+		t.Errorf("Cannot mark address synced: %v", err)
+		return
+	}
+
+	// Mark imported address as synced with the recently-seen blocks, and verify
+	// that the sync height now equals the most recent block (the one at wallet
+	// creation).
+	w2.MarkAddressSynced(address)
+	if h := w2.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After address sync, earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w2.SyncHeight(); h != createHeight {
+		t.Errorf("After address sync, sync height %v does not match expected %v.", h, createHeight)
 		return
 	}
 

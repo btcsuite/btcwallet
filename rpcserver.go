@@ -643,7 +643,7 @@ func ImportPrivKey(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	// Import the private key, handling any errors.
 	bs := &wallet.BlockStamp{}
-	switch _, err := a.ImportPrivateKey(pk, compressed, bs); err {
+	switch _, err := a.ImportPrivateKey(pk, compressed, bs, cmd.Rescan); err {
 	case nil:
 		// If the import was successful, reply with nil.
 		return nil, nil

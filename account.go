@@ -352,7 +352,9 @@ func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 
 // ImportPrivateKey imports a private key to the account's wallet and
 // writes the new wallet to disk.
-func (a *Account) ImportPrivateKey(pk []byte, compressed bool, bs *wallet.BlockStamp) (string, error) {
+func (a *Account) ImportPrivateKey(pk []byte, compressed bool,
+	bs *wallet.BlockStamp, rescan bool) (string, error) {
+
 	// Attempt to import private key into wallet.
 	addr, err := a.Wallet.ImportPrivateKey(pk, compressed, bs)
 	if err != nil {
@@ -364,6 +366,46 @@ func (a *Account) ImportPrivateKey(pk []byte, compressed bool, bs *wallet.BlockS
 	AcctMgr.ds.ScheduleWalletWrite(a)
 	if err := AcctMgr.ds.FlushAccount(a); err != nil {
 		return "", fmt.Errorf("cannot write account: %v", err)
+	}
+
+	// Rescan blockchain for transactions with txout scripts paying to the
+	// imported address.
+	//
+	// TODO(jrick): As btcd only allows a single rescan per websocket client
+	// to run at any given time, a separate goroutine should run for
+	// exclusively handling rescan events.
+	if rescan {
+		go func(addr btcutil.Address, aname string) {
+			addrStr := addr.EncodeAddress()
+			log.Infof("Beginning rescan (height %d) for address %s",
+				bs.Height, addrStr)
+
+			rescanAddrs := map[string]struct{}{
+				addrStr: struct{}{},
+			}
+			jsonErr := Rescan(CurrentServerConn(), bs.Height,
+				rescanAddrs)
+			if jsonErr != nil {
+				log.Errorf("Rescan for imported address %s failed: %v",
+					addrStr, jsonErr.Message)
+				return
+			}
+
+			AcctMgr.Grab()
+			defer AcctMgr.Release()
+			a, err := AcctMgr.Account(aname)
+			if err != nil {
+				log.Errorf("Account for imported address %s missing: %v",
+					addrStr, err)
+				return
+			}
+			if err := a.MarkAddressSynced(addr); err != nil {
+				log.Errorf("Unable to mark rescanned address as synced: %v", err)
+				return
+			}
+			AcctMgr.ds.FlushAccount(a)
+			log.Infof("Finished rescan for imported address %s", addrStr)
+		}(addr, a.name)
 	}
 
 	// Associate the imported address with this account.
@@ -454,28 +496,26 @@ func (a *Account) Track() {
 // main chain.
 func (a *Account) RescanActiveAddresses() {
 	// Determine the block to begin the rescan from.
-	beginBlock := int32(0)
+	height := int32(0)
 	if a.fullRescan {
 		// Need to perform a complete rescan since the wallet creation
 		// block.
-		beginBlock = a.EarliestBlockHeight()
-		log.Debugf("Rescanning account '%v' for new transactions since block height %v",
-			a.name, beginBlock)
+		height = a.EarliestBlockHeight()
 	} else {
 		// The last synced block height should be used the starting
 		// point for block rescanning.  Grab the block stamp here.
-		bs := a.SyncedWith()
-
-		log.Debugf("Rescanning account '%v' for new transactions after block height %v hash %v",
-			a.name, bs.Height, bs.Hash)
-
-		// If we're synced with block x, must scan the blocks x+1 to best block.
-		beginBlock = bs.Height + 1
+		height = a.SyncHeight()
 	}
 
+	log.Info("Beginning rescan (height %d) for account '%v'",
+		height, a.name)
+
 	// Rescan active addresses starting at the determined block height.
-	Rescan(CurrentServerConn(), beginBlock, a.ActivePaymentAddresses())
+	Rescan(CurrentServerConn(), height, a.ActivePaymentAddresses())
+	a.MarkAllSynced()
 	AcctMgr.ds.FlushAccount(a)
+
+	log.Info("Finished rescan for account '%v'", a.name)
 }
 
 func (a *Account) ResendUnminedTxs() {

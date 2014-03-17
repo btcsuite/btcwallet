@@ -72,7 +72,7 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 
 	rawTx, err := hex.DecodeString(rtx.HexTx)
 	if err != nil {
-		return fmt.Errorf("%v handler: bad hexstring: err", n.Method(), err)
+		return fmt.Errorf("%v handler: bad hexstring: %v", n.Method(), err)
 	}
 	tx_, err := btcutil.NewTxFromBytes(rawTx)
 	if err != nil {
@@ -248,7 +248,7 @@ func NtfnRedeemingTx(n btcjson.Cmd) error {
 
 	rawTx, err := hex.DecodeString(cn.HexTx)
 	if err != nil {
-		return fmt.Errorf("%v handler: bad hexstring: err", n.Method(), err)
+		return fmt.Errorf("%v handler: bad hexstring: %v", n.Method(), err)
 	}
 	tx_, err := btcutil.NewTxFromBytes(rawTx)
 	if err != nil {
