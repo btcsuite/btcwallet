@@ -515,7 +515,7 @@ func (a *Account) RescanActiveAddresses() {
 	a.MarkAllSynced()
 	AcctMgr.ds.FlushAccount(a)
 
-	log.Info("Finished rescan for account '%v'", a.name)
+	log.Infof("Finished rescan for account '%v'", a.name)
 }
 
 func (a *Account) ResendUnminedTxs() {
