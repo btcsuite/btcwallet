@@ -1307,7 +1307,7 @@ func (rt *RecvTxOut) Addresses(net btcwire.BitcoinNet) (btcscript.ScriptClass,
 // IsCoinbase returns whether the received transaction output is an output
 // a coinbase transaction.
 func (rt *RecvTxOut) IsCoinbase() bool {
-	if rt.recvTxOut.block != nil {
+	if rt.recvTxOut.block == nil {
 		return false
 	}
 	return rt.recvTxOut.block.Index == 0
