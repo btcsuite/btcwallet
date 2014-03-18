@@ -203,7 +203,7 @@ func TestTxStore(t *testing.T) {
 		{
 			name: "insert unconfirmed signed tx",
 			f: func(s *Store) (*Store, error) {
-				r, err := s.InsertSignedTx(TstSpendingTx, nil)
+				r, err := s.InsertSignedTx(TstSpendingTx, time.Now(), nil)
 				if err != nil {
 					return nil, err
 				}
@@ -221,7 +221,7 @@ func TestTxStore(t *testing.T) {
 		{
 			name: "insert unconfirmed signed tx again",
 			f: func(s *Store) (*Store, error) {
-				r, err := s.InsertSignedTx(TstSpendingTx, nil)
+				r, err := s.InsertSignedTx(TstSpendingTx, time.Now(), nil)
 				if err != nil {
 					return nil, err
 				}
@@ -280,7 +280,7 @@ func TestTxStore(t *testing.T) {
 		{
 			name: "confirmed signed tx",
 			f: func(s *Store) (*Store, error) {
-				r, err := s.InsertSignedTx(TstSpendingTx, TstSignedTxBlockDetails)
+				r, err := s.InsertSignedTx(TstSpendingTx, TstSignedTxBlockDetails.Time, TstSignedTxBlockDetails)
 				if err != nil {
 					return nil, err
 				}
