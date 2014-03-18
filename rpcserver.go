@@ -214,6 +214,7 @@ func WalletRequestProcessor() {
 					// ignore
 
 				case tx.ErrInconsistantStore:
+					log.Warn("Detected inconsistant TxStore.  Reconnecting...")
 					// Likely due to a mis-ordered btcd notification.
 					// To recover, close server connection and reopen
 					// all accounts from their last good state saved
