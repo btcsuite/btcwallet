@@ -28,6 +28,7 @@ import (
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
+	"io"
 )
 
 // ServerConn is an interface representing a client connection to a bitcoin RPC
@@ -225,8 +226,11 @@ func (btcd *BtcdRPCConn) Start() {
 		for {
 			var m string
 			if err := websocket.Message.Receive(btcd.ws, &m); err != nil {
-				log.Infof("Cannot receive btcd websocket message: %v",
-					err)
+				// Log warning if btcd did not disconnect.
+				if err != io.EOF {
+					log.Infof("Cannot receive btcd websocket message: %v",
+						err)
+				}
 				btcd.ws.Close()
 				close(responses)
 				return

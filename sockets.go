@@ -31,6 +31,7 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcws"
 	"github.com/conformal/go-socks"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -322,7 +323,11 @@ func WSSendRecv(ws *websocket.Conn) {
 		for {
 			var m []byte
 			if err := websocket.Message.Receive(ws, &m); err != nil {
-				log.Infof("Cannot receive client websocket message: %v", err)
+				// Log warning if the client did not disconnect.
+				if err != io.EOF {
+					log.Warnf("Cannot receive client websocket message: %v",
+						err)
+				}
 				close(received)
 				return
 			}
