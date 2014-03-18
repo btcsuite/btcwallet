@@ -1365,7 +1365,7 @@ func SendBeforeReceiveHistorySync(add, done, remove chan btcwire.ShaHash,
 
 func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *CreatedTx) (interface{}, *btcjson.Error) {
 	// Add to transaction store.
-	stx, err := a.TxStore.InsertSignedTx(txInfo.tx, nil)
+	stx, err := a.TxStore.InsertSignedTx(txInfo.tx, time.Now(), nil)
 	if err != nil {
 		log.Warnf("Error adding sent tx history: %v", err)
 		return nil, &btcjson.ErrInternal

@@ -24,6 +24,7 @@ import (
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
+	"time"
 )
 
 // Errors relating to accounts.
@@ -253,11 +254,19 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 // the full information about the newly-mined tx, and the TxStore is
 // scheduled to be written to disk..
 func (am *AccountManager) RecordSpendingTx(tx_ *btcutil.Tx, block *tx.BlockDetails) {
+	now := time.Now()
+	var created time.Time
+	if block != nil && now.After(block.Time) {
+		created = block.Time
+	} else {
+		created = now
+	}
+
 	for _, a := range am.AllAccounts() {
 		// TODO(jrick): This needs to iterate through each txout's
 		// addresses and find whether this account's keystore contains
 		// any of the addresses this tx sends to.
-		a.TxStore.InsertSignedTx(tx_, block)
+		a.TxStore.InsertSignedTx(tx_, created, block)
 		am.ds.ScheduleTxStoreWrite(a)
 	}
 }

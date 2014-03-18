@@ -105,11 +105,18 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 		SendTxHistSyncChans.remove <- *tx_.Sha()
 	}
 
+	now := time.Now()
+	var received time.Time
+	if block != nil && now.After(block.Time) {
+		received = block.Time
+	} else {
+		received = now
+	}
+
 	// For every output, find all accounts handling that output address (if any)
 	// and record the received txout.
 	for outIdx, txout := range tx_.MsgTx().TxOut {
 		var accounts []*Account
-		var received time.Time
 		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, cfg.Net())
 		for _, addr := range addrs {
 			aname, err := LookupAccountByAddress(addr.EncodeAddress())
@@ -119,12 +126,6 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 			// This cannot reasonably fail if the above succeeded.
 			a, _ := AcctMgr.Account(aname)
 			accounts = append(accounts, a)
-
-			if block != nil {
-				received = block.Time
-			} else {
-				received = time.Now()
-			}
 		}
 
 		for _, a := range accounts {

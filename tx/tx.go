@@ -375,20 +375,15 @@ func (s *Store) WriteTo(w io.Writer) (int64, error) {
 // store, returning the record.  Duplicates and double spend correction is
 // handled automatically.  Transactions may be added without block details,
 // and later added again with block details once the tx has been mined.
-func (s *Store) InsertSignedTx(tx *btcutil.Tx, block *BlockDetails) (*SignedTx, error) {
-	var created time.Time
-	if block == nil {
-		created = time.Now()
-	} else {
-		created = block.Time
-	}
+func (s *Store) InsertSignedTx(tx *btcutil.Tx, created time.Time,
+	block *BlockDetails) (*SignedTx, error) {
 
 	// Partially create the signedTx.  Everything is set except the
 	// total btc input, which is set below.
 	st := &signedTx{
-		txSha:       *tx.Sha(),
-		timeCreated: created,
-		block:       block,
+		txSha:   *tx.Sha(),
+		created: created,
+		block:   block,
 	}
 
 	err := s.insertTx(tx, st)
@@ -733,10 +728,10 @@ func (tx *msgTx) writeTo(w io.Writer) (int64, error) {
 }
 
 type signedTx struct {
-	txSha       btcwire.ShaHash
-	timeCreated time.Time
-	totalIn     int64
-	block       *BlockDetails // nil if unmined
+	txSha   btcwire.ShaHash
+	created time.Time
+	totalIn int64
+	block   *BlockDetails // nil if unmined
 }
 
 func (st *signedTx) blockTx() blockTx {
@@ -769,7 +764,7 @@ func (st *signedTx) readFrom(r io.Reader) (int64, error) {
 	if err != nil {
 		return n64, err
 	}
-	st.timeCreated = time.Unix(int64(binary.LittleEndian.Uint64(timeBytes)), 0)
+	st.created = time.Unix(int64(binary.LittleEndian.Uint64(timeBytes)), 0)
 
 	// Read total BTC in
 	totalInBytes := make([]byte, 8)
@@ -823,7 +818,7 @@ func (st *signedTx) writeTo(w io.Writer) (int64, error) {
 
 	// Write creation time
 	timeBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(timeBytes, uint64(st.timeCreated.Unix()))
+	binary.LittleEndian.PutUint64(timeBytes, uint64(st.created.Unix()))
 	n, err = w.Write(timeBytes)
 	n64 += int64(n)
 	if err != nil {
@@ -867,7 +862,7 @@ func (st *signedTx) TxSha() *btcwire.ShaHash {
 }
 
 func (st *signedTx) Time() time.Time {
-	return st.timeCreated
+	return st.created
 }
 
 func (st *signedTx) setBlock(details *BlockDetails) {
@@ -952,8 +947,8 @@ func (st *SignedTx) TxInfo(account string, chainHeight int32, net btcwire.Bitcoi
 			"fee":           float64(st.Fee()) / float64(btcutil.SatoshiPerBitcoin),
 			"confirmations": float64(confirmations),
 			"txid":          st.txSha.String(),
-			"time":          float64(st.timeCreated.Unix()),
-			"timereceived":  float64(st.timeCreated.Unix()),
+			"time":          float64(st.created.Unix()),
+			"timereceived":  float64(st.created.Unix()),
 		}
 		if st.block != nil {
 			info["blockhash"] = st.block.Hash.String()
