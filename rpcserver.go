@@ -264,7 +264,7 @@ func DumpPrivKey(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	addr, err := btcutil.DecodeAddr(cmd.Address)
+	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
@@ -470,7 +470,7 @@ func GetAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// Is address valid?
-	addr, err := btcutil.DecodeAddr(cmd.Address)
+	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
@@ -548,7 +548,7 @@ func GetAddressBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// Is address valid?
-	addr, err := btcutil.DecodeAddr(cmd.Address)
+	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
@@ -1051,7 +1051,7 @@ func ListAddressTransactions(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Decode addresses.
 	pkHashMap := make(map[string]struct{})
 	for _, addrStr := range cmd.Addresses {
-		addr, err := btcutil.DecodeAddr(addrStr)
+		addr, err := btcutil.DecodeAddress(addrStr, cfg.Net())
 		if err != nil {
 			return nil, &btcjson.ErrInvalidAddressOrKey
 		}
@@ -1131,7 +1131,7 @@ func ListUnspent(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	if len(cmd.Addresses) != 0 {
 		// confirm that all of them are good:
 		for _, as := range cmd.Addresses {
-			a, err := btcutil.DecodeAddr(as)
+			a, err := btcutil.DecodeAddress(as, cfg.Net())
 			if err != nil {
 				return nil, &btcjson.ErrInvalidAddressOrKey
 			}
@@ -1468,7 +1468,7 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// This really should work when the above found something valid.
-	addr, err := btcutil.DecodeAddr(cmd.Address)
+	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
@@ -1577,7 +1577,7 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	addr, err := btcutil.DecodeAddr(cmd.Address)
+	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return map[string]interface{}{
 			"isvalid": false,
@@ -1655,7 +1655,7 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// This really should work when the above found something valid.
-	addr, err := btcutil.DecodeAddr(cmd.Address)
+	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
