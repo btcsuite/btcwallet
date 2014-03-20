@@ -860,7 +860,7 @@ func (w *Wallet) Lock() (err error) {
 	}
 
 	// Remove clear text passphrase from wallet.
-	if len(w.secret) != 32 {
+	if w.IsLocked() {
 		err = ErrWalletLocked
 	} else {
 		zero(w.passphrase)
@@ -900,7 +900,7 @@ func (w *Wallet) ChangePassphrase(new []byte) error {
 		return ErrWalletIsWatchingOnly
 	}
 
-	if len(w.secret) != 32 {
+	if w.IsLocked() {
 		return ErrWalletLocked
 	}
 
@@ -974,13 +974,13 @@ func (w *Wallet) nextChainedAddress(bs *BlockStamp, keypoolSize uint) (*btcAddre
 	nextAPKH, ok := w.chainIdxMap[w.highestUsed+1]
 	if !ok {
 		// Extending the keypool requires an unlocked wallet.
-		if len(w.secret) == 32 {
-			// Key is available, extend keypool.
-			if err := w.extendKeypool(keypoolSize, bs); err != nil {
+		if w.IsLocked() {
+			if err := w.extendLockedWallet(bs); err != nil {
 				return nil, err
 			}
 		} else {
-			if err := w.extendLockedWallet(bs); err != nil {
+			// Key is available, extend keypool.
+			if err := w.extendKeypool(keypoolSize, bs); err != nil {
 				return nil, err
 			}
 		}
@@ -1025,7 +1025,7 @@ func (w *Wallet) extendKeypool(n uint, bs *BlockStamp) error {
 		return errors.New("expected last chained address not found")
 	}
 
-	if len(w.secret) != 32 {
+	if w.IsLocked() {
 		return ErrWalletLocked
 	}
 
@@ -1126,7 +1126,7 @@ func (w *Wallet) createMissingPrivateKeys() error {
 		return errors.New("missing previous chained address")
 	}
 	prevWAddr := w.addrMap[getAddressKey(apkh)]
-	if len(w.secret) != 32 {
+	if w.IsLocked() {
 		return ErrWalletLocked
 	}
 
@@ -1214,7 +1214,7 @@ func (w *Wallet) AddressKey(a btcutil.Address) (key *ecdsa.PrivateKey, err error
 		}
 
 		// Wallet must be unlocked to decrypt the private key.
-		if len(w.secret) != 32 {
+		if w.IsLocked() {
 			return nil, ErrWalletLocked
 		}
 
@@ -1395,7 +1395,7 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStam
 	}
 
 	// The wallet must be unlocked to encrypt the imported private key.
-	if len(w.secret) != 32 {
+	if w.IsLocked() {
 		return nil, ErrWalletLocked
 	}
 
