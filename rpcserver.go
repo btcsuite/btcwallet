@@ -1770,7 +1770,9 @@ func WalletPassphrase(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	go func(timeout int64) {
 		time.Sleep(time.Second * time.Duration(timeout))
+		AcctMgr.Grab()
 		_ = AcctMgr.LockWallets()
+		AcctMgr.Release()
 	}(cmd.Timeout)
 
 	return nil, nil
