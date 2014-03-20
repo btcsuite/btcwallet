@@ -140,6 +140,11 @@ func selectInputs(utxos []*tx.RecvTxOut, amt int64,
 // block hash) Utxo.  ErrInsufficientFunds is returned if there are not
 // enough eligible unspent outputs to create the transaction.
 func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, error) {
+	// Wallet must be unlocked to compose transaction.
+	if a.IsLocked() {
+		return nil, wallet.ErrWalletLocked
+	}
+
 	// Create a new transaction which will include all input scripts.
 	msgtx := btcwire.NewMsgTx()
 
