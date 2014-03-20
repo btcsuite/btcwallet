@@ -451,7 +451,9 @@ func (s *server) WSSendRecv(ws *websocket.Conn, authenticated bool) {
 	go stringQueue(recvQueueIn, recvQueueOut, cc.quit)
 
 	badAuth := make(chan struct{})
+	sendResp := make(chan []byte)
 	go func() {
+	out:
 		for m := range recvQueueOut {
 			resp, err := s.ReplyToFrontend([]byte(m), true, authenticated)
 			if err == ErrBadAuth {
@@ -459,24 +461,28 @@ func (s *server) WSSendRecv(ws *websocket.Conn, authenticated bool) {
 				case badAuth <- struct{}{}:
 				case <-cc.quit:
 				}
-				return
+				break out
 			}
 
 			// Authentication passed.
 			authenticated = true
 
 			select {
-			case cc.send <- resp:
+			case sendResp <- resp:
 			case <-cc.quit:
+				break out
 			}
 		}
-		close(cc.send)
+		close(sendResp)
 	}()
 
 	const deadline time.Duration = 2 * time.Second
 
 out:
 	for {
+		var m []byte
+		var ok bool
+
 		select {
 		case <-badAuth:
 			// Bad auth. Disconnect.
@@ -484,22 +490,23 @@ out:
 			ws.Close()
 			break out
 
-		case m, ok := <-cc.send:
+		case m = <-cc.send: // sends from external writers.  never closes.
+		case m, ok = <-sendResp:
 			if !ok {
 				// Nothing left to send.  Return so the handler exits.
 				break out
 			}
+		}
 
-			err := ws.SetWriteDeadline(time.Now().Add(deadline))
-			if err != nil {
-				log.Errorf("Cannot set write deadline: %v", err)
-				break out
-			}
-			err = websocket.Message.Send(ws, string(m))
-			if err != nil {
-				log.Infof("Cannot complete client websocket send: %v", err)
-				break out
-			}
+		err := ws.SetWriteDeadline(time.Now().Add(deadline))
+		if err != nil {
+			log.Errorf("Cannot set write deadline: %v", err)
+			break out
+		}
+		err = websocket.Message.Send(ws, string(m))
+		if err != nil {
+			log.Infof("Cannot complete client websocket send: %v", err)
+			break out
 		}
 	}
 	close(sendQuit)
