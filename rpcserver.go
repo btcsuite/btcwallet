@@ -36,6 +36,8 @@ type cmdHandler func(btcjson.Cmd) (interface{}, *btcjson.Error)
 
 var rpcHandlers = map[string]cmdHandler{
 	// Standard bitcoind methods (implemented)
+	"addmultisigaddress":     AddMultiSigAddress,
+	"createmultisig":         CreateMultiSig,
 	"dumpprivkey":            DumpPrivKey,
 	"getaccount":             GetAccount,
 	"getaccountaddress":      GetAccountAddress,
@@ -64,9 +66,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"walletpassphrasechange": WalletPassphraseChange,
 
 	// Standard bitcoind methods (currently unimplemented)
-	"addmultisigaddress":    Unimplemented,
 	"backupwallet":          Unimplemented,
-	"createmultisig":        Unimplemented,
 	"dumpwallet":            Unimplemented,
 	"getblocktemplate":      Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
@@ -250,6 +250,149 @@ func Unsupported(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		Message: "Request unsupported by btcwallet",
 	}
 	return nil, &e
+}
+
+// makeMultiSigScript is a heper function to combine common logic for
+// AddMultiSig and CreateMultiSig.
+// all error codes are rpc parse error here to match bitcoind which just throws
+// a runtime exception. *sigh*.
+func makeMultiSigScript(keys []string, nRequired int) ([]byte, *btcjson.Error) {
+	keysesPrecious := make([]*btcutil.AddressPubKey, len(keys))
+
+	// The address list will made up either of addreseses (pubkey hash), for
+	// which we need to look up the keys in wallet, straight pubkeys, or a
+	// mixture of the two.
+	for i, a := range keys {
+		// try to parse as pubkey address
+		a, err := btcutil.DecodeAddress(a, cfg.Net())
+		if err != nil {
+			return nil, &btcjson.Error{
+				Code:    btcjson.ErrParse.Code,
+				Message: err.Error(),
+			}
+		}
+
+		switch addr := a.(type) {
+		case *btcutil.AddressPubKey:
+			keysesPrecious[i] = addr
+		case *btcutil.AddressPubKeyHash:
+			actname, err :=
+				LookupAccountByAddress(addr.EncodeAddress())
+			if err != nil {
+				return nil, &btcjson.Error{
+					Code:    btcjson.ErrParse.Code,
+					Message: err.Error(),
+				}
+			}
+			act, err := AcctMgr.Account(actname)
+			if err != nil {
+				return nil, &btcjson.Error{
+					Code:    btcjson.ErrParse.Code,
+					Message: err.Error(),
+				}
+			}
+
+			ainfo, err := act.AddressInfo(addr)
+			if err != nil {
+				return nil, &btcjson.Error{
+					Code:    btcjson.ErrParse.Code,
+					Message: err.Error(),
+				}
+			}
+			apkinfo := ainfo.(*wallet.AddressPubKeyInfo)
+
+			// This will be an addresspubkey
+			a, err := btcutil.DecodeAddress(apkinfo.Pubkey,
+				cfg.Net())
+			if err != nil {
+				return nil, &btcjson.Error{
+					Code:    btcjson.ErrParse.Code,
+					Message: err.Error(),
+				}
+			}
+
+			apk := a.(*btcutil.AddressPubKey)
+			keysesPrecious[i] = apk
+		default:
+			return nil, &btcjson.Error{
+				Code:    btcjson.ErrParse.Code,
+				Message: "key is not a pubkey or pubkey hash address",
+			}
+		}
+	}
+
+	script, err := btcscript.MultiSigScript(keysesPrecious, nRequired)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrParse.Code,
+			Message: err.Error(),
+		}
+	}
+
+	return script, nil
+}
+
+// AddMultiSigAddress handles an addmultisigaddress request by adding a
+// multisig address to the given wallet.
+func AddMultiSigAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.AddMultisigAddressCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	acct, err := AcctMgr.Account(cmd.Account)
+	switch err {
+	case nil:
+		break
+
+	case ErrNotFound:
+		return nil, &btcjson.ErrWalletInvalidAccountName
+
+	default:
+		e := btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+		return nil, &e
+	}
+
+	script, jsonerr := makeMultiSigScript(cmd.Keys, cmd.NRequired)
+	if jsonerr != nil {
+		return nil, jsonerr
+	}
+
+	// TODO(oga) blockstamp current block?
+	address, err := acct.ImportScript(script, &wallet.BlockStamp{})
+
+	return address.EncodeAddress(), nil
+}
+
+// CreateMultiSig handles an createmultisig request by returning a
+// multisig address for the given inputs.
+func CreateMultiSig(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
+	cmd, ok := icmd.(*btcjson.CreateMultisigCmd)
+	if !ok {
+		return nil, &btcjson.ErrInternal
+	}
+
+	script, jsonerr := makeMultiSigScript(cmd.Keys, cmd.NRequired)
+	if jsonerr != nil {
+		return nil, jsonerr
+	}
+
+	address, err := btcutil.NewAddressScriptHash(script, cfg.Net())
+	if err != nil {
+		// above is a valid script, shouldn't happen.
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
+	}
+
+	return map[string]interface{}{
+		"address":      address.EncodeAddress(),
+		"redeemScript": script,
+	}, nil
 }
 
 // DumpPrivKey handles a dumpprivkey request with the private key
