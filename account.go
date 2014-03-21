@@ -302,6 +302,17 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 	return txInfoList, nil
 }
 
+func pad(size int, b []byte) []byte {
+	// Prevent a possible panic if the input exceeds the expected size.
+	if len(b) > size {
+		size = len(b)
+	}
+
+	p := make([]byte, size)
+	copy(p[size-len(b):], b)
+	return p
+}
+
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
 // private keys in a wallet.
 func (a *Account) DumpPrivKeys() ([]string, error) {
@@ -318,7 +329,7 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		encKey, err := btcutil.EncodePrivateKey(key.D.Bytes(),
+		encKey, err := btcutil.EncodePrivateKey(pad(32, key.D.Bytes()),
 			a.Wallet.Net(), info.Compressed())
 		if err != nil {
 			return nil, err
@@ -346,7 +357,7 @@ func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 	}
 
 	// Return WIF-encoding of the private key.
-	return btcutil.EncodePrivateKey(key.D.Bytes(), a.Net(),
+	return btcutil.EncodePrivateKey(pad(32, key.D.Bytes()), a.Net(),
 		info.Compressed())
 }
 
