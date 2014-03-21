@@ -366,9 +366,11 @@ func NotifySpent(rpc ServerConn, op *btcwire.OutPoint) *btcjson.Error {
 
 // Rescan requests a blockchain rescan for transactions to any number of
 // addresses and notifications to inform wallet about such transactions.
-func Rescan(rpc ServerConn, beginBlock int32, addrs map[string]struct{}) *btcjson.Error {
+func Rescan(rpc ServerConn, beginBlock int32, addrs []string,
+	outpoints []*btcwire.OutPoint) *btcjson.Error {
+
 	// NewRescanCmd cannot fail with no optargs, so omit the check.
-	cmd, _ := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs)
+	cmd, _ := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs, outpoints)
 	request := NewServerRequest(cmd, nil)
 	response := <-rpc.SendRequest(request)
 	return response.Error()

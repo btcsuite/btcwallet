@@ -24,6 +24,7 @@ import (
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
+	"github.com/conformal/btcwire"
 	"path/filepath"
 	"sync"
 )
@@ -391,11 +392,8 @@ func (a *Account) ImportPrivateKey(pk []byte, compressed bool,
 			log.Infof("Beginning rescan (height %d) for address %s",
 				bs.Height, addrStr)
 
-			rescanAddrs := map[string]struct{}{
-				addrStr: struct{}{},
-			}
 			jsonErr := Rescan(CurrentServerConn(), bs.Height,
-				rescanAddrs)
+				[]string{addrStr}, nil)
 			if jsonErr != nil {
 				log.Errorf("Rescan for imported address %s failed: %v",
 					addrStr, jsonErr.Message)
@@ -522,7 +520,17 @@ func (a *Account) RescanActiveAddresses() {
 		height, a.name)
 
 	// Rescan active addresses starting at the determined block height.
-	Rescan(CurrentServerConn(), height, a.ActivePaymentAddresses())
+	addrs := a.SortedActiveAddresses()
+	addrStrs := make([]string, 0, len(addrs))
+	for i := range addrs {
+		addrStrs = append(addrStrs, addrs[i].Address().EncodeAddress())
+	}
+	unspentRecvTxOuts := a.TxStore.UnspentOutputs()
+	unspentOutPoints := make([]*btcwire.OutPoint, 0, len(unspentRecvTxOuts))
+	for _, record := range unspentRecvTxOuts {
+		unspentOutPoints = append(unspentOutPoints, record.OutPoint())
+	}
+	Rescan(CurrentServerConn(), height, addrStrs, unspentOutPoints)
 	a.MarkAllSynced()
 	AcctMgr.ds.FlushAccount(a)
 
@@ -644,19 +652,20 @@ func (a *Account) RecoverAddresses(n int) error {
 	if err != nil {
 		return err
 	}
+	addrStrs := make([]string, 0, len(addrs))
+	for i := range addrs {
+		addrStrs = append(addrStrs, addrs[i].EncodeAddress())
+	}
 
 	// Run a goroutine to rescan blockchain for recovered addresses.
-	m := make(map[string]struct{})
-	for i := range addrs {
-		m[addrs[i].EncodeAddress()] = struct{}{}
-	}
-	go func(addrs map[string]struct{}) {
-		jsonErr := Rescan(CurrentServerConn(), lastInfo.FirstBlock(), addrs)
+	go func(addrs []string) {
+		jsonErr := Rescan(CurrentServerConn(), lastInfo.FirstBlock(),
+			addrs, nil)
 		if jsonErr != nil {
 			log.Errorf("Rescanning for recovered addresses failed: %v",
 				jsonErr.Message)
 		}
-	}(m)
+	}(addrStrs)
 
 	return nil
 }
