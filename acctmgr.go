@@ -49,8 +49,10 @@ type AccountManager struct {
 	accessAll     chan *accessAllRequest
 	add           chan *Account
 	remove        chan *Account
+	rescanMsgs    chan RescanMsg
 
-	ds *DiskSyncer // might move to inside Start
+	ds *DiskSyncer
+	rm *RescanManager
 }
 
 // NewAccountManager returns a new AccountManager.
@@ -62,22 +64,29 @@ func NewAccountManager() *AccountManager {
 		accessAll:     make(chan *accessAllRequest),
 		add:           make(chan *Account),
 		remove:        make(chan *Account),
+		rescanMsgs:    make(chan RescanMsg, 1),
 	}
 	am.ds = NewDiskSyncer(am)
+	am.rm = NewRescanManager(am.rescanMsgs)
 	return am
 }
 
-// Start maintains accounts and structures for quick lookups for account
-// information.  Access to these structures must be done through with the
-// channels in the AccountManger struct fields.  This function never returns
-// and should be called as a new goroutine.
+// Start starts the goroutines required to run the AccountManager.
 func (am *AccountManager) Start() {
 	// Ready the semaphore - can't grab unless the manager has started.
 	am.bsem <- struct{}{}
 
-	// Start the account manager's disk syncer.
+	go am.accountHandler()
+	go am.rescanListener()
 	go am.ds.Start()
+	go am.rm.Start()
+}
 
+// accountHandler maintains accounts and structures for quick lookups for
+// account information.  Access to these structures must be done through
+// with the channels in the AccountManger struct fields.  This function
+// never returns and should be called as a new goroutine.
+func (am *AccountManager) accountHandler() {
 	// List and map of all accounts.
 	l := list.New()
 	m := make(map[string]*Account)
@@ -131,6 +140,50 @@ func (am *AccountManager) Start() {
 				}
 			}
 		}
+	}
+}
+
+// rescanListener listens for messages from the rescan manager and marks
+// accounts and addresses as synced.
+func (am *AccountManager) rescanListener() {
+	for msg := range am.rescanMsgs {
+		AcctMgr.Grab()
+		switch e := msg.(type) {
+		case *RescanStartedMsg:
+			// Log the newly-started rescan.
+			n := 0
+			for _, addrs := range e.Addresses {
+				n += len(addrs)
+			}
+			noun := pickNoun(n, "address", "addresses")
+			log.Infof("Started rescan at height %d for %d %s", e.StartHeight, n, noun)
+
+		case *RescanProgressMsg:
+			// TODO: mark addresses as partially synced.
+
+		case *RescanFinishedMsg:
+			if e.Error != nil {
+				log.Errorf("Rescan failed: %v", e.Error.Message)
+				break
+			}
+
+			n := 0
+			for acct, addrs := range e.Addresses {
+				for i := range addrs {
+					n++
+					err := acct.MarkAddressSynced(addrs[i])
+					if err != nil {
+						log.Errorf("Error marking address synced: %v", err)
+						continue
+					}
+				}
+				AcctMgr.ds.FlushAccount(acct)
+			}
+
+			noun := pickNoun(n, "address", "addresses")
+			log.Infof("Finished rescan for %d %s", n, noun)
+		}
+		AcctMgr.Release()
 	}
 }
 
@@ -520,18 +573,28 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 
 // RescanActiveAddresses begins a rescan for all active addresses for
 // each account.
-//
-// TODO(jrick): batch addresses for all accounts together so multiple
-// rescan commands can be avoided.
 func (am *AccountManager) RescanActiveAddresses() {
-	for _, account := range am.AllAccounts() {
-		account.RescanActiveAddresses()
+	var job *RescanJob
+	for _, a := range am.AllAccounts() {
+		acctJob := a.RescanActiveJob()
+		if job == nil {
+			job = acctJob
+		} else {
+			job.Merge(acctJob)
+		}
 	}
+	if job == nil {
+		return
+	}
+
+	// Submit merged job and block until rescan completes.
+	jobFinished := am.rm.SubmitJob(job)
+	<-jobFinished
 }
 
 func (am *AccountManager) ResendUnminedTxs() {
-	for _, account := range am.AllAccounts() {
-		account.ResendUnminedTxs()
+	for _, a := range am.AllAccounts() {
+		a.ResendUnminedTxs()
 	}
 }
 

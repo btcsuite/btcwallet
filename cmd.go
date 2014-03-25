@@ -147,7 +147,7 @@ func main() {
 	updateOldFileLocations()
 
 	// Start account manager and open accounts.
-	go AcctMgr.Start()
+	AcctMgr.Start()
 	AcctMgr.OpenAccounts()
 
 	// Read CA file to verify a btcd TLS connection.

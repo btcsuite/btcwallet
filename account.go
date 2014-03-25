@@ -372,7 +372,6 @@ func (a *Account) ImportPrivateKey(pk []byte, compressed bool,
 	if err != nil {
 		return "", err
 	}
-	addrStr := addr.EncodeAddress()
 
 	// Immediately write wallet to disk.
 	AcctMgr.ds.ScheduleWalletWrite(a)
@@ -380,41 +379,25 @@ func (a *Account) ImportPrivateKey(pk []byte, compressed bool,
 		return "", fmt.Errorf("cannot write account: %v", err)
 	}
 
+	addrStr := addr.EncodeAddress()
+
 	// Rescan blockchain for transactions with txout scripts paying to the
 	// imported address.
-	//
-	// TODO(jrick): As btcd only allows a single rescan per websocket client
-	// to run at any given time, a separate goroutine should run for
-	// exclusively handling rescan events.
 	if rescan {
-		go func(addr btcutil.Address, aname string) {
-			addrStr := addr.EncodeAddress()
-			log.Infof("Beginning rescan (height %d) for address %s",
-				bs.Height, addrStr)
+		addrs := []btcutil.Address{addr}
+		job := &RescanJob{
+			Addresses:   map[*Account][]btcutil.Address{a: addrs},
+			OutPoints:   nil,
+			StartHeight: 0,
+		}
 
-			jsonErr := Rescan(CurrentServerConn(), bs.Height,
-				[]string{addrStr}, nil)
-			if jsonErr != nil {
-				log.Errorf("Rescan for imported address %s failed: %v",
-					addrStr, jsonErr.Message)
-				return
-			}
-
-			AcctMgr.Grab()
-			defer AcctMgr.Release()
-			a, err := AcctMgr.Account(aname)
-			if err != nil {
-				log.Errorf("Account for imported address %s missing: %v",
-					addrStr, err)
-				return
-			}
-			if err := a.MarkAddressSynced(addr); err != nil {
-				log.Errorf("Unable to mark rescanned address as synced: %v", err)
-				return
-			}
-			AcctMgr.ds.FlushAccount(a)
-			log.Infof("Finished rescan for imported address %s", addrStr)
-		}(addr, a.name)
+		// Submit rescan job and log when the import has completed.
+		// Do not block on finishing the rescan.
+		doneChan := AcctMgr.rm.SubmitJob(job)
+		go func() {
+			<-doneChan
+			log.Infof("Finished import for address %s", addrStr)
+		}()
 	}
 
 	// Associate the imported address with this account.
@@ -498,13 +481,13 @@ func (a *Account) Track() {
 	}
 }
 
-// RescanActiveAddresses requests btcd to rescan the blockchain for new
-// transactions to all active wallet addresses.  This is needed for
-// catching btcwallet up to a long-running btcd process, as otherwise
-// it would have missed notifications as blocks are attached to the
-// main chain.
-func (a *Account) RescanActiveAddresses() {
-	// Determine the block to begin the rescan from.
+// RescanActiveJob creates a RescanJob for all active addresses in the
+// account.  This is needed for catching btcwallet up to a long-running
+// btcd process, as otherwise it would have missed notifications as
+// blocks are attached to the main chain.
+func (a *Account) RescanActiveJob() *RescanJob {
+	// Determine the block necesary to start the rescan for all active
+	// addresses.
 	height := int32(0)
 	if a.fullRescan {
 		// Need to perform a complete rescan since the wallet creation
@@ -516,25 +499,23 @@ func (a *Account) RescanActiveAddresses() {
 		height = a.SyncHeight()
 	}
 
-	log.Infof("Beginning rescan (height %d) for account '%v'",
-		height, a.name)
-
-	// Rescan active addresses starting at the determined block height.
-	addrs := a.SortedActiveAddresses()
-	addrStrs := make([]string, 0, len(addrs))
-	for i := range addrs {
-		addrStrs = append(addrStrs, addrs[i].Address().EncodeAddress())
+	actives := a.SortedActiveAddresses()
+	addrs := make([]btcutil.Address, 0, len(actives))
+	for i := range actives {
+		addrs = append(addrs, actives[i].Address())
 	}
-	unspentRecvTxOuts := a.TxStore.UnspentOutputs()
-	unspentOutPoints := make([]*btcwire.OutPoint, 0, len(unspentRecvTxOuts))
-	for _, record := range unspentRecvTxOuts {
-		unspentOutPoints = append(unspentOutPoints, record.OutPoint())
-	}
-	Rescan(CurrentServerConn(), height, addrStrs, unspentOutPoints)
-	a.MarkAllSynced()
-	AcctMgr.ds.FlushAccount(a)
 
-	log.Infof("Finished rescan for account '%v'", a.name)
+	unspents := a.TxStore.UnspentOutputs()
+	outpoints := make([]*btcwire.OutPoint, 0, len(unspents))
+	for i := range unspents {
+		outpoints = append(outpoints, unspents[i].OutPoint())
+	}
+
+	return &RescanJob{
+		Addresses:   map[*Account][]btcutil.Address{a: addrs},
+		OutPoints:   outpoints,
+		StartHeight: height,
+	}
 }
 
 func (a *Account) ResendUnminedTxs() {

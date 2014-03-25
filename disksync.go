@@ -207,12 +207,17 @@ func NewDiskSyncer(am *AccountManager) *DiskSyncer {
 	}
 }
 
-// Start starts the disk syncer.  It manages a set of "dirty" account files
+// Start starts the goroutines required to run the DiskSyncer.
+func (ds *DiskSyncer) Start() {
+	go ds.handler()
+}
+
+// handler runs the disk syncer.  It manages a set of "dirty" account files
 // which must be written to disk, and synchronizes all writes in a single
 // goroutine.  Periodic flush operations may be signaled by an AccountManager.
 //
 // This never returns and is should be called from a new goroutine.
-func (ds *DiskSyncer) Start() {
+func (ds *DiskSyncer) handler() {
 	netdir := networkDir(cfg.Net())
 	if err := checkCreateDir(netdir); err != nil {
 		log.Errorf("Unable to create or write to account directory: %v", err)
