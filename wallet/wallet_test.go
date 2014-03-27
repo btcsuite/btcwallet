@@ -795,31 +795,81 @@ func TestImportPrivateKey(t *testing.T) {
 		return
 	}
 
-	if err := w2.MarkAddressSynced(address); err != nil {
+	// Mark imported address as partially synced with a block somewhere inbetween
+	// the import height and the chain height.
+	partialHeight := (createHeight-importHeight)/2 + importHeight
+	if err := w2.SetSyncStatus(address, PartialSync(partialHeight)); err != nil {
+		t.Errorf("Cannot mark address partially synced: %v", err)
+		return
+	}
+	if h := w2.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After address partial sync, earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w2.SyncHeight(); h != partialHeight {
+		t.Errorf("After address partial sync, sync height %v does not match expected %v.", h, partialHeight)
+		return
+	}
+
+	// Test serialization with the partial sync.
+	buf.Reset()
+	_, err = w2.WriteTo(buf)
+	if err != nil {
+		t.Errorf("Cannot write wallet: %v", err)
+		return
+	}
+	w3 := new(Wallet)
+	_, err = w3.ReadFrom(buf)
+	if err != nil {
+		t.Errorf("Cannot read wallet: %v", err)
+		return
+	}
+
+	// Test correct partial height after serialization.
+	if h := w3.SyncHeight(); h != partialHeight {
+		t.Errorf("After address partial sync and reserialization, sync height %v does not match expected %v.",
+			h, partialHeight)
+		return
+	}
+
+	// Mark imported address as not synced at all, and verify sync height is now
+	// the import height.
+	if err := w3.SetSyncStatus(address, Unsynced(0)); err != nil {
 		t.Errorf("Cannot mark address synced: %v", err)
+		return
+	}
+	if h := w3.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After address unsync, earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w3.SyncHeight(); h != importHeight {
+		t.Errorf("After address unsync, sync height %v does not match expected %v.", h, importHeight)
 		return
 	}
 
 	// Mark imported address as synced with the recently-seen blocks, and verify
 	// that the sync height now equals the most recent block (the one at wallet
 	// creation).
-	w2.MarkAddressSynced(address)
-	if h := w2.EarliestBlockHeight(); h != importHeight {
+	if err := w3.SetSyncStatus(address, FullSync{}); err != nil {
+		t.Errorf("Cannot mark address synced: %v", err)
+		return
+	}
+	if h := w3.EarliestBlockHeight(); h != importHeight {
 		t.Errorf("After address sync, earliest height %v does not match expected %v.", h, importHeight)
 		return
 	}
-	if h := w2.SyncHeight(); h != createHeight {
+	if h := w3.SyncHeight(); h != createHeight {
 		t.Errorf("After address sync, sync height %v does not match expected %v.", h, createHeight)
 		return
 	}
 
-	if err = w2.Unlock([]byte("banana")); err != nil {
+	if err = w3.Unlock([]byte("banana")); err != nil {
 		t.Errorf("Can't unlock deserialised wallet: %v", err)
 		return
 	}
 
 	// lookup address
-	pk2, err = w2.AddressKey(address)
+	pk2, err = w3.AddressKey(address)
 	if err != nil {
 		t.Error("error looking up key in deserialized wallet: " + err.Error())
 	}
@@ -967,29 +1017,6 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	if err := w2.MarkAddressSynced(address); err != nil {
-		t.Errorf("Cannot mark address synced: %v", err)
-		return
-	}
-
-	// Mark imported address as synced with the recently-seen blocks, and verify
-	// that the sync height now equals the most recent block (the one at wallet
-	// creation).
-	w2.MarkAddressSynced(address)
-	if h := w2.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After address sync, earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
-	if h := w2.SyncHeight(); h != createHeight {
-		t.Errorf("After address sync, sync height %v does not match expected %v.", h, createHeight)
-		return
-	}
-
-	if err = w2.Unlock([]byte("banana")); err != nil {
-		t.Errorf("Can't unlock deserialised wallet: %v", err)
-		return
-	}
-
 	// lookup address
 	ainfo2, err := w2.AddressInfo(address)
 	if err != nil {
@@ -998,9 +1025,83 @@ func TestImportScript(t *testing.T) {
 
 	if !reflect.DeepEqual(ainfo, ainfo2) {
 		t.Error("original and deserialized scriptinfo do not match.")
+		spew.Dump(ainfo)
+		spew.Dump(ainfo2)
 		return
 	}
 
+	// Mark imported address as partially synced with a block somewhere inbetween
+	// the import height and the chain height.
+	partialHeight := (createHeight-importHeight)/2 + importHeight
+	if err := w2.SetSyncStatus(address, PartialSync(partialHeight)); err != nil {
+		t.Errorf("Cannot mark address partially synced: %v", err)
+		return
+	}
+	if h := w2.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After address partial sync, earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w2.SyncHeight(); h != partialHeight {
+		t.Errorf("After address partial sync, sync height %v does not match expected %v.", h, partialHeight)
+		return
+	}
+
+	// Test serialization with the partial sync.
+	buf.Reset()
+	_, err = w2.WriteTo(buf)
+	if err != nil {
+		t.Errorf("Cannot write wallet: %v", err)
+		return
+	}
+	w3 := new(Wallet)
+	_, err = w3.ReadFrom(buf)
+	if err != nil {
+		t.Errorf("Cannot read wallet: %v", err)
+		return
+	}
+
+	// Test correct partial height after serialization.
+	if h := w3.SyncHeight(); h != partialHeight {
+		t.Errorf("After address partial sync and reserialization, sync height %v does not match expected %v.",
+			h, partialHeight)
+		return
+	}
+
+	// Mark imported address as not synced at all, and verify sync height is now
+	// the import height.
+	if err := w3.SetSyncStatus(address, Unsynced(0)); err != nil {
+		t.Errorf("Cannot mark address synced: %v", err)
+		return
+	}
+	if h := w3.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After address unsync, earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w3.SyncHeight(); h != importHeight {
+		t.Errorf("After address unsync, sync height %v does not match expected %v.", h, importHeight)
+		return
+	}
+
+	// Mark imported address as synced with the recently-seen blocks, and verify
+	// that the sync height now equals the most recent block (the one at wallet
+	// creation).
+	if err := w3.SetSyncStatus(address, FullSync{}); err != nil {
+		t.Errorf("Cannot mark address synced: %v", err)
+		return
+	}
+	if h := w3.EarliestBlockHeight(); h != importHeight {
+		t.Errorf("After address sync, earliest height %v does not match expected %v.", h, importHeight)
+		return
+	}
+	if h := w3.SyncHeight(); h != createHeight {
+		t.Errorf("After address sync, sync height %v does not match expected %v.", h, createHeight)
+		return
+	}
+
+	if err = w3.Unlock([]byte("banana")); err != nil {
+		t.Errorf("Can't unlock deserialised wallet: %v", err)
+		return
+	}
 }
 
 func TestChangePassphrase(t *testing.T) {

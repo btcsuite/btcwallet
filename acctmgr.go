@@ -171,7 +171,7 @@ func (am *AccountManager) rescanListener() {
 			for acct, addrs := range e.Addresses {
 				for i := range addrs {
 					n++
-					err := acct.MarkAddressSynced(addrs[i])
+					err := acct.SetSyncStatus(addrs[i], wallet.FullSync{})
 					if err != nil {
 						log.Errorf("Error marking address synced: %v", err)
 						continue

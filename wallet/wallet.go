@@ -1252,24 +1252,18 @@ func (w *Wallet) Net() btcwire.BitcoinNet {
 	return w.net
 }
 
-// MarkAddressSynced marks an unsynced (likely imported) address as
-// being fully in sync with the rest of wallet.
-func (w *Wallet) MarkAddressSynced(a btcutil.Address) error {
+// SetSyncStatus sets the sync status for a single wallet address.  This
+// may error if the address is not found in the wallet.
+//
+// When marking an address as unsynced, only the type Unsynced matters.
+// The value is ignored.
+func (w *Wallet) SetSyncStatus(a btcutil.Address, s SyncStatus) error {
 	wa, ok := w.addrMap[getAddressKey(a)]
 	if !ok {
 		return ErrAddressNotFound
 	}
-	wa.markSynced()
+	wa.setSyncStatus(s)
 	return nil
-}
-
-// MarkAllSynced marks all unsynced (likely imported) wallet addresses
-// as being fully in sync with marked recently-seen blocks (marked
-// using SetSyncedWith).
-func (w *Wallet) MarkAllSynced() {
-	for _, wa := range w.addrMap {
-		wa.markSynced()
-	}
 }
 
 // SetSyncedWith marks already synced addresses in the wallet to be in
@@ -1324,8 +1318,17 @@ func (w *Wallet) SyncHeight() (height int32) {
 	height = w.recent.lastHeight
 
 	for _, a := range w.addrMap {
-		if a.unsynced() && a.firstBlockHeight() < height {
-			height = a.firstBlockHeight()
+		var syncHeight int32
+		switch e := a.syncStatus().(type) {
+		case Unsynced:
+			syncHeight = int32(e)
+		case PartialSync:
+			syncHeight = int32(e)
+		case FullSync:
+			continue
+		}
+		if syncHeight < height {
+			height = syncHeight
 
 			// Can't go lower than 0.
 			if height == 0 {
@@ -1545,6 +1548,33 @@ func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
 	return ww, nil
 }
 
+// SyncStatus is the interface type for all sync variants.
+type SyncStatus interface {
+	ImplementsSyncStatus()
+}
+
+// Unsynced is a type representing an unsynced address.  When this is
+// returned by a wallet method, the value is the recorded first seen
+// block height.
+type Unsynced int32
+
+// ImplementsSyncStatus is implemented to make Unsynced a SyncStatus.
+func (u Unsynced) ImplementsSyncStatus() {}
+
+// PartialSync is a type representing a partially synced address (for
+// example, due to the result of a partially-completed rescan).
+type PartialSync int32
+
+// ImplementsSyncStatus is implemented to make PartialSync a SyncStatus.
+func (p PartialSync) ImplementsSyncStatus() {}
+
+// FullSync is a type representing an address that is in sync with the
+// recently seen blocks.
+type FullSync struct{}
+
+// ImplementsSyncStatus is implemented to make FullSync a SyncStatus.
+func (f FullSync) ImplementsSyncStatus() {}
+
 // AddressInfo is an interface that provides acces to information regarding an
 // address managed by a wallet. Concrete implementations of this type may
 // provide further fields to provide information specific to that type of
@@ -1562,6 +1592,8 @@ type AddressInfo interface {
 	Change() bool
 	// Compressed returns true if the backing address is compressed.
 	Compressed() bool
+	// SyncStatus returns the current synced state of an address.
+	SyncStatus() SyncStatus
 }
 
 // AddressPubKeyInfo implements AddressInfo and additionally provides the
@@ -1574,6 +1606,7 @@ type AddressPubKeyInfo struct {
 	imported   bool
 	Pubkey     string
 	change     bool
+	sync       SyncStatus
 }
 
 // Address returns the pub key address, implementing AddressInfo.
@@ -1608,6 +1641,13 @@ func (ai *AddressPubKeyInfo) Change() bool {
 // implementing AddressInfo.
 func (ai *AddressPubKeyInfo) Compressed() bool {
 	return ai.compressed
+}
+
+// SyncStatus returns a SyncStatus type for how the address is currently
+// synced.  For an Unsynced type, the value is the recorded first seen
+// block height of the address.
+func (ai *AddressPubKeyInfo) SyncStatus() SyncStatus {
+	return ai.sync
 }
 
 // SortedActiveAddresses returns all wallet addresses that have been
@@ -1719,6 +1759,7 @@ type addrFlags struct {
 	compressed              bool
 	change                  bool
 	unsynced                bool
+	partialSync             bool
 }
 
 func (af *addrFlags) ReadFrom(r io.Reader) (int64, error) {
@@ -1735,6 +1776,7 @@ func (af *addrFlags) ReadFrom(r io.Reader) (int64, error) {
 	af.compressed = b[0]&(1<<4) != 0
 	af.change = b[0]&(1<<5) != 0
 	af.unsynced = b[0]&(1<<6) != 0
+	af.partialSync = b[0]&(1<<7) != 0
 
 	// Currently (at least until watching-only wallets are implemented)
 	// btcwallet shall refuse to open any unencrypted addresses.  This
@@ -1774,6 +1816,9 @@ func (af *addrFlags) WriteTo(w io.Writer) (int64, error) {
 	}
 	if af.unsynced {
 		b[0] |= 1 << 6
+	}
+	if af.partialSync {
+		b[0] |= 1 << 7
 	}
 
 	n, err := w.Write(b[:])
@@ -2046,24 +2091,24 @@ type walletAddress interface {
 	watchingCopy() walletAddress
 	firstBlockHeight() int32
 	imported() bool
-	unsynced() bool
-	markSynced()
+	syncStatus() SyncStatus
+	setSyncStatus(SyncStatus)
 }
 
 type btcAddress struct {
-	pubKeyHash [ripemd160.Size]byte
-	flags      addrFlags
-	chaincode  [32]byte
-	chainIndex int64
-	chainDepth int64 // unused
-	initVector [16]byte
-	privKey    [32]byte
-	pubKey     publicKey
-	firstSeen  int64
-	lastSeen   int64
-	firstBlock int32
-	lastBlock  int32
-	privKeyCT  []byte // non-nil if unlocked.
+	pubKeyHash        [ripemd160.Size]byte
+	flags             addrFlags
+	chaincode         [32]byte
+	chainIndex        int64
+	chainDepth        int64 // unused
+	initVector        [16]byte
+	privKey           [32]byte
+	pubKey            publicKey
+	firstSeen         int64
+	lastSeen          int64
+	firstBlock        int32
+	partialSyncHeight int32  // This is reappropriated from armory's `lastBlock` field.
+	privKeyCT         []byte // non-nil if unlocked.
 }
 
 const (
@@ -2149,6 +2194,7 @@ func newBtcAddress(privkey, iv []byte, bs *BlockStamp, compressed bool) (addr *b
 			compressed:              compressed,
 			change:                  false,
 			unsynced:                false,
+			partialSync:             false,
 		},
 		firstSeen:  time.Now().Unix(),
 		firstBlock: bs.Height,
@@ -2293,7 +2339,7 @@ func (a *btcAddress) ReadFrom(r io.Reader) (n int64, err error) {
 		&a.firstSeen,
 		&a.lastSeen,
 		&a.firstBlock,
-		&a.lastBlock,
+		&a.partialSyncHeight,
 	}
 	for _, data := range datas {
 		if rf, ok := data.(io.ReaderFrom); ok {
@@ -2348,7 +2394,7 @@ func (a *btcAddress) WriteTo(w io.Writer) (n int64, err error) {
 		&a.firstSeen,
 		&a.lastSeen,
 		&a.firstBlock,
-		&a.lastBlock,
+		&a.partialSyncHeight,
 	}
 	for _, data := range datas {
 		if wt, ok := data.(io.WriterTo); ok {
@@ -2497,6 +2543,7 @@ func (a *btcAddress) info(net btcwire.BitcoinNet) (AddressInfo, error) {
 		imported:   a.imported(),
 		Pubkey:     hex.EncodeToString(a.pubKey),
 		change:     a.flags.change,
+		sync:       a.syncStatus(),
 	}, nil
 }
 
@@ -2515,14 +2562,14 @@ func (a *btcAddress) watchingCopy() walletAddress {
 			change:                  a.flags.change,
 			unsynced:                a.flags.unsynced,
 		},
-		chaincode:  a.chaincode,
-		chainIndex: a.chainIndex,
-		chainDepth: a.chainDepth,
-		pubKey:     a.pubKey,
-		firstSeen:  a.firstSeen,
-		lastSeen:   a.lastSeen,
-		firstBlock: a.firstBlock,
-		lastBlock:  a.lastBlock,
+		chaincode:         a.chaincode,
+		chainIndex:        a.chainIndex,
+		chainDepth:        a.chainDepth,
+		pubKey:            a.pubKey,
+		firstSeen:         a.firstSeen,
+		lastSeen:          a.lastSeen,
+		firstBlock:        a.firstBlock,
+		partialSyncHeight: a.partialSyncHeight,
 	}
 }
 
@@ -2534,12 +2581,36 @@ func (a *btcAddress) imported() bool {
 	return a.chainIndex == importedKeyChainIdx
 }
 
-func (a *btcAddress) unsynced() bool {
-	return a.flags.unsynced
+func (a *btcAddress) syncStatus() SyncStatus {
+	switch {
+	case a.flags.unsynced && !a.flags.partialSync:
+		return Unsynced(a.firstBlock)
+	case a.flags.unsynced && a.flags.partialSync:
+		return PartialSync(a.partialSyncHeight)
+	default:
+		return FullSync{}
+	}
 }
 
-func (a *btcAddress) markSynced() {
-	a.flags.unsynced = false
+// setSyncStatus sets the address flags and possibly the partial sync height
+// depending on the type of s.
+func (a *btcAddress) setSyncStatus(s SyncStatus) {
+	switch e := s.(type) {
+	case Unsynced:
+		a.flags.unsynced = true
+		a.flags.partialSync = false
+		a.partialSyncHeight = 0
+
+	case PartialSync:
+		a.flags.unsynced = true
+		a.flags.partialSync = true
+		a.partialSyncHeight = int32(e)
+
+	case FullSync:
+		a.flags.unsynced = false
+		a.flags.partialSync = false
+		a.partialSyncHeight = 0
+	}
 }
 
 // note that there is no encrypted bit here since if we had a script encrypted
@@ -2548,9 +2619,10 @@ func (a *btcAddress) markSynced() {
 // not a secret and any sane situation would also require a signature (which
 // does have a secret).
 type scriptFlags struct {
-	hasScript bool
-	change    bool
-	unsynced  bool
+	hasScript   bool
+	change      bool
+	unsynced    bool
+	partialSync bool
 }
 
 // ReadFrom implements the io.ReaderFrom interface by reading from r into sf.
@@ -2566,6 +2638,7 @@ func (sf *scriptFlags) ReadFrom(r io.Reader) (int64, error) {
 	sf.hasScript = b[0]&(1<<1) != 0
 	sf.change = b[0]&(1<<5) != 0
 	sf.unsynced = b[0]&(1<<6) != 0
+	sf.partialSync = b[0]&(1<<7) != 0
 
 	return int64(n), nil
 }
@@ -2581,6 +2654,9 @@ func (sf *scriptFlags) WriteTo(w io.Writer) (int64, error) {
 	}
 	if sf.unsynced {
 		b[0] |= 1 << 6
+	}
+	if sf.partialSync {
+		b[0] |= 1 << 7
 	}
 
 	n, err := w.Write(b[:])
@@ -2637,13 +2713,13 @@ func (a *p2SHScript) WriteTo(w io.Writer) (n int64, err error) {
 }
 
 type scriptAddress struct {
-	scriptHash [ripemd160.Size]byte
-	flags      scriptFlags
-	script     p2SHScript // variable length
-	firstSeen  int64
-	lastSeen   int64
-	firstBlock int32
-	lastBlock  int32
+	scriptHash        [ripemd160.Size]byte
+	flags             scriptFlags
+	script            p2SHScript // variable length
+	firstSeen         int64
+	lastSeen          int64
+	firstBlock        int32
+	partialSyncHeight int32
 }
 
 // newScriptAddress initializes and returns a new P2SH address.
@@ -2682,7 +2758,7 @@ func (a *scriptAddress) ReadFrom(r io.Reader) (n int64, err error) {
 		&a.firstSeen,
 		&a.lastSeen,
 		&a.firstBlock,
-		&a.lastBlock,
+		&a.partialSyncHeight,
 	}
 	for _, data := range datas {
 		if rf, ok := data.(io.ReaderFrom); ok {
@@ -2727,7 +2803,7 @@ func (a *scriptAddress) WriteTo(w io.Writer) (n int64, err error) {
 		&a.firstSeen,
 		&a.lastSeen,
 		&a.firstBlock,
-		&a.lastBlock,
+		&a.partialSyncHeight,
 	}
 	for _, data := range datas {
 		if wt, ok := data.(io.WriterTo); ok {
@@ -2763,6 +2839,7 @@ type AddressScriptInfo struct {
 	ScriptClass  btcscript.ScriptClass
 	Addresses    []btcutil.Address
 	RequiredSigs int
+	sync         SyncStatus
 }
 
 // Address returns the script address, implementing AddressInfo.
@@ -2799,6 +2876,13 @@ func (ai *AddressScriptInfo) Compressed() bool {
 	return false
 }
 
+// SyncStatus returns a SyncStatus type for how the address is currently
+// synced.  For an Unsynced type, the value is the recorded first seen
+// block height of the address.
+func (ai *AddressScriptInfo) SyncStatus() SyncStatus {
+	return ai.sync
+}
+
 // info returns information about a btcAddress stored in a AddressInfo
 // struct.
 func (a *scriptAddress) info(net btcwire.BitcoinNet) (AddressInfo, error) {
@@ -2821,6 +2905,7 @@ func (a *scriptAddress) info(net btcwire.BitcoinNet) (AddressInfo, error) {
 		ScriptClass:  class,
 		Addresses:    addresses,
 		RequiredSigs: reqSigs,
+		sync:         a.syncStatus(),
 	}, nil
 }
 
@@ -2832,13 +2917,14 @@ func (a *scriptAddress) watchingCopy() walletAddress {
 	return &scriptAddress{
 		scriptHash: a.scriptHash,
 		flags: scriptFlags{
-			change: a.flags.change,
+			change:   a.flags.change,
+			unsynced: a.flags.unsynced,
 		},
-		script:     a.script,
-		firstSeen:  a.firstSeen,
-		lastSeen:   a.lastSeen,
-		firstBlock: a.firstBlock,
-		lastBlock:  a.lastBlock,
+		script:            a.script,
+		firstSeen:         a.firstSeen,
+		lastSeen:          a.lastSeen,
+		firstBlock:        a.firstBlock,
+		partialSyncHeight: a.partialSyncHeight,
 	}
 }
 
@@ -2852,12 +2938,36 @@ func (a *scriptAddress) imported() bool {
 	return true
 }
 
-func (a *scriptAddress) unsynced() bool {
-	return a.flags.unsynced
+func (a *scriptAddress) syncStatus() SyncStatus {
+	switch {
+	case a.flags.unsynced && !a.flags.partialSync:
+		return Unsynced(a.firstBlock)
+	case a.flags.unsynced && a.flags.partialSync:
+		return PartialSync(a.partialSyncHeight)
+	default:
+		return FullSync{}
+	}
 }
 
-func (a *scriptAddress) markSynced() {
-	a.flags.unsynced = false
+// setSyncStatus sets the address flags and possibly the partial sync height
+// depending on the type of s.
+func (a *scriptAddress) setSyncStatus(s SyncStatus) {
+	switch e := s.(type) {
+	case Unsynced:
+		a.flags.unsynced = true
+		a.flags.partialSync = false
+		a.partialSyncHeight = 0
+
+	case PartialSync:
+		a.flags.unsynced = true
+		a.flags.partialSync = true
+		a.partialSyncHeight = int32(e)
+
+	case FullSync:
+		a.flags.unsynced = false
+		a.flags.partialSync = false
+		a.partialSyncHeight = 0
+	}
 }
 
 func walletHash(b []byte) uint32 {
