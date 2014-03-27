@@ -200,7 +200,7 @@ func (m *RescanManager) jobHandler() {
 
 				if !curBatch.empty() {
 					job := curBatch.job()
-					m.sendJob <- curBatch.job()
+					m.sendJob <- job
 					if m.msgs != nil {
 						m.msgs <- (*RescanStartedMsg)(job)
 					}
