@@ -115,7 +115,7 @@ func (b *rescanBatch) empty() bool {
 }
 
 func (b *rescanBatch) job() *RescanJob {
-	// Create slice of outpoint points from the batch's set.
+	// Create slice of outpoints from the batch's set.
 	outpoints := make([]*btcwire.OutPoint, 0, len(b.outpoints))
 	for outpoint := range b.outpoints {
 		opCopy := outpoint
