@@ -159,7 +159,22 @@ func (am *AccountManager) rescanListener() {
 			log.Infof("Started rescan at height %d for %d %s", e.StartHeight, n, noun)
 
 		case *RescanProgressMsg:
-			// TODO: mark addresses as partially synced.
+			for acct, addrs := range e.Addresses {
+				for i := range addrs {
+					err := acct.SetSyncStatus(addrs[i], wallet.PartialSync(e.Height))
+					if err != nil {
+						log.Errorf("Error marking address partially synced: %v", err)
+						continue
+					}
+				}
+				am.ds.ScheduleWalletWrite(acct)
+				err := am.ds.FlushAccount(acct)
+				if err != nil {
+					log.Errorf("Could not write rescan progress: %v", err)
+				}
+			}
+
+			log.Infof("Rescanned through block height %d", e.Height)
 
 		case *RescanFinishedMsg:
 			if e.Error != nil {
@@ -169,15 +184,19 @@ func (am *AccountManager) rescanListener() {
 
 			n := 0
 			for acct, addrs := range e.Addresses {
+				n += len(addrs)
 				for i := range addrs {
-					n++
 					err := acct.SetSyncStatus(addrs[i], wallet.FullSync{})
 					if err != nil {
 						log.Errorf("Error marking address synced: %v", err)
 						continue
 					}
 				}
-				AcctMgr.ds.FlushAccount(acct)
+				am.ds.ScheduleWalletWrite(acct)
+				err := am.ds.FlushAccount(acct)
+				if err != nil {
+					log.Errorf("Could not write rescan progress: %v", err)
+				}
 			}
 
 			noun := pickNoun(n, "address", "addresses")

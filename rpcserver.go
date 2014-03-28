@@ -218,7 +218,7 @@ func WalletRequestProcessor() {
 				// notifications.  Restart the connection
 				// to reload accounts files from their last
 				// known good state.
-				log.Warn("Reconnecting to recover from "+
+				log.Warn("Reconnecting to recover from " +
 					"out-of-order btcd notification")
 				s := CurrentServerConn()
 				if btcd, ok := s.(*BtcdRPCConn); ok {

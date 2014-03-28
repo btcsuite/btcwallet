@@ -56,6 +56,7 @@ var notificationHandlers = map[string]notificationHandler{
 	btcws.BlockDisconnectedNtfnMethod: NtfnBlockDisconnected,
 	btcws.RecvTxNtfnMethod:            NtfnRecvTx,
 	btcws.RedeemingTxNtfnMethod:       NtfnRedeemingTx,
+	btcws.RescanProgressNtfnMethod:    NtfnRescanProgress,
 }
 
 // NtfnRecvTx handles the btcws.RecvTxNtfn notification.
@@ -261,6 +262,21 @@ func NtfnRedeemingTx(n btcjson.Cmd) error {
 		return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
 	}
 	AcctMgr.RecordSpendingTx(tx_, block)
+
+	return nil
+}
+
+// NtfnRescanProgress handles btcd rescanprogress notifications resulting
+// from a partially completed rescan.
+func NtfnRescanProgress(n btcjson.Cmd) error {
+	cn, ok := n.(*btcws.RescanProgressNtfn)
+	if !ok {
+		return fmt.Errorf("%v handler: unexpected type", n.Method())
+	}
+
+	// Notify the rescan manager of the completed partial progress for
+	// the current rescan.
+	AcctMgr.rm.MarkProgress(cn.LastProcessed)
 
 	return nil
 }
