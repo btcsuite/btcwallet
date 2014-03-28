@@ -180,59 +180,57 @@ var (
 )
 
 // WalletRequestProcessor processes client requests and btcd notifications.
-// Notifications are preferred over client requests.
 func WalletRequestProcessor() {
 	for {
 		select {
 		case r := <-requestQueue:
-			var result interface{}
-			var jsonErr *btcjson.Error
-			if f, ok := rpcHandlers[r.request.Method()]; ok {
-				AcctMgr.Grab()
-				result, jsonErr = f(r.request)
-				AcctMgr.Release()
-			} else if f, ok := wsHandlers[r.request.Method()]; r.ws && ok {
-				AcctMgr.Grab()
-				result, jsonErr = f(r.request)
-				AcctMgr.Release()
-			} else {
-				result, jsonErr = Unimplemented(r.request)
+			method := r.request.Method()
+			f, ok := rpcHandlers[method]
+			if !ok && r.ws {
+				f, ok = wsHandlers[method]
 			}
-			resp := &ClientResponse{
+			if !ok {
+				f = Unimplemented
+			}
+
+			AcctMgr.Grab()
+			result, jsonErr := f(r.request)
+			AcctMgr.Release()
+
+			r.response <- &ClientResponse{
 				result: result,
 				err:    jsonErr,
 			}
-			r.response <- resp
 
 		case n := <-handleNtfn:
-			if f, ok := notificationHandlers[n.Method()]; ok {
-				AcctMgr.Grab()
-				err := f(n)
-				AcctMgr.Release()
-				switch err {
-				case nil:
-					// ignore
+			f, ok := notificationHandlers[n.Method()]
+			if !ok {
+				// Ignore unhandled notifications.
+				continue
+			}
 
-				case tx.ErrInconsistantStore:
-					log.Warn("Detected inconsistant TxStore.  Reconnecting...")
-					// Likely due to a mis-ordered btcd notification.
-					// To recover, close server connection and reopen
-					// all accounts from their last good state saved
-					// to disk.  This will trigger the handshake on
-					// next connect, and a rescan of one or two blocks
-					// to catch up rather than throwing away all tx
-					// history and rescanning everything.
-					s := CurrentServerConn()
-					if btcd, ok := s.(*BtcdRPCConn); ok {
-						AcctMgr.Grab()
-						btcd.Close()
-						AcctMgr.OpenAccounts()
-						AcctMgr.Release()
-					}
-
-				default: // other non-nil
-					log.Warn(err)
+			AcctMgr.Grab()
+			err := f(n)
+			AcctMgr.Release()
+			switch err {
+			case tx.ErrInconsistantStore:
+				// Assume this is a broken btcd reordered
+				// notifications.  Restart the connection
+				// to reload accounts files from their last
+				// known good state.
+				log.Warn("Reconnecting to recover from "+
+					"out-of-order btcd notification")
+				s := CurrentServerConn()
+				if btcd, ok := s.(*BtcdRPCConn); ok {
+					AcctMgr.Grab()
+					btcd.Close()
+					AcctMgr.OpenAccounts()
+					AcctMgr.Release()
 				}
+
+			case nil: // ignore
+			default:
+				log.Warn(err)
 			}
 		}
 	}
