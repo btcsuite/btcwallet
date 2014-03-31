@@ -18,6 +18,7 @@ package main
 
 import (
 	"container/list"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/conformal/btcutil"
@@ -574,19 +575,55 @@ func (am *AccountManager) GetTransaction(txsha *btcwire.ShaHash) []accountTx {
 // transaction an empty array will be returned.
 func (am *AccountManager) ListUnspent(minconf, maxconf int,
 	addresses map[string]bool) ([]map[string]interface{}, error) {
+
 	bs, err := GetCurBlock()
 	if err != nil {
 		return nil, err
 	}
 
+	filter := len(addresses) != 0
+
 	infos := []map[string]interface{}{}
 	for _, a := range am.AllAccounts() {
-		for _, record := range a.TxStore.UnspentOutputs() {
-			info := record.TxInfo(a.name, bs.Height, cfg.Net())[0]
+		for _, rtx := range a.TxStore.UnspentOutputs() {
+			confs := confirms(rtx.Height(), bs.Height)
+			switch {
+			case int(confs) < minconf, int(confs) > maxconf:
+				continue
+			}
+
+			_, addrs, _, _ := rtx.Addresses(cfg.Net())
+			if filter {
+				for _, addr := range addrs {
+					_, ok := addresses[addr.EncodeAddress()]
+					if ok {
+						goto include
+					}
+				}
+				continue
+			}
+		include:
+			outpoint := rtx.OutPoint()
+			info := map[string]interface{}{
+				"txid":          outpoint.Hash.String(),
+				"vout":          float64(outpoint.Index),
+				"account":       a.Name(),
+				"scriptPubKey":  hex.EncodeToString(rtx.PkScript()),
+				"amount":        float64(rtx.Value()) / 1e8,
+				"confirmations": float64(confs),
+			}
+
+			// BUG: this should be a JSON array so that all
+			// addresses can be included, or removed (and the
+			// caller extracts addresses from the pkScript).
+			if len(addrs) > 0 {
+				info["address"] = addrs[0].EncodeAddress()
+			}
+
 			infos = append(infos, info)
 		}
-
 	}
+
 	return infos, nil
 }
 

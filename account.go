@@ -711,11 +711,17 @@ func (a *Account) TotalReceived(confirms int) (float64, error) {
 // confirmed checks whether a transaction at height txHeight has met
 // minconf confirmations for a blockchain at height curHeight.
 func confirmed(minconf int, txHeight, curHeight int32) bool {
-	if minconf == 0 {
-		return true
+	return confirms(txHeight, curHeight) >= int32(minconf)
+}
+
+// confirms returns the number of confirmations for a transaction in a
+// block at height txHeight (or -1 for an unconfirmed tx) given the chain
+// height curHeight.
+func confirms(txHeight, curHeight int32) int32 {
+	switch {
+	case txHeight == -1, txHeight > curHeight:
+		return 0
+	default:
+		return curHeight - txHeight + 1
 	}
-	if txHeight != -1 && int(curHeight-txHeight+1) >= minconf {
-		return true
-	}
-	return false
 }
