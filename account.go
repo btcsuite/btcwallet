@@ -26,38 +26,10 @@ import (
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"path/filepath"
-	"sync"
 )
-
-// addressAccountMap holds a map of addresses to names of the
-// accounts that hold each address.
-//
-// TODO: move this to AccountManager
-var addressAccountMap = struct {
-	sync.RWMutex
-	m map[string]string
-}{
-	m: make(map[string]string),
-}
 
 // MarkAddressForAccount marks an address as belonging to an account.
 func MarkAddressForAccount(address, account string) {
-	addressAccountMap.Lock()
-	addressAccountMap.m[address] = account
-	addressAccountMap.Unlock()
-}
-
-// LookupAccountByAddress returns the account name for address.  error
-// will be set to ErrNotFound if the address has not been marked as
-// associated with any account.
-func LookupAccountByAddress(address string) (string, error) {
-	addressAccountMap.RLock()
-	defer addressAccountMap.RUnlock()
-	account, ok := addressAccountMap.m[address]
-	if !ok {
-		return "", ErrNotFound
-	}
-	return account, nil
 }
 
 // Account is a structure containing all the components for a
@@ -159,7 +131,7 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 // a UTXO must be in a block.  If confirmations is 1 or greater,
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
-func (a *Account) CalculateAddressBalance(addr *btcutil.AddressPubKeyHash, confirms int) float64 {
+func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) float64 {
 	bs, err := GetCurBlock()
 	if bs.Height == int32(btcutil.BlockHeightUnknown) || err != nil {
 		return 0.
@@ -174,11 +146,7 @@ func (a *Account) CalculateAddressBalance(addr *btcutil.AddressPubKeyHash, confi
 			if len(addrs) != 1 {
 				continue
 			}
-			apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
-			if !ok {
-				continue
-			}
-			if *addr == *apkh {
+			if addrs[0].EncodeAddress() == addr.EncodeAddress() {
 				bal += txout.Value()
 			}
 		}
@@ -401,9 +369,9 @@ func (a *Account) ImportPrivateKey(pk []byte, compressed bool,
 	}
 
 	// Associate the imported address with this account.
-	MarkAddressForAccount(addrStr, a.Name())
+	AcctMgr.MarkAddressForAccount(addr, a)
 
-	log.Infof("Imported payment address %v", addrStr)
+	log.Infof("Imported payment address %s", addrStr)
 
 	// Return the payment address string of the imported private key.
 	return addrStr, nil
@@ -582,7 +550,7 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	}
 
 	// Mark this new address as belonging to this account.
-	MarkAddressForAccount(addr.EncodeAddress(), a.Name())
+	AcctMgr.MarkAddressForAccount(addr, a)
 
 	// Request updates from btcd for new transactions sent to this address.
 	a.ReqNewTxsForAddress(addr)
@@ -611,7 +579,7 @@ func (a *Account) NewChangeAddress() (btcutil.Address, error) {
 	}
 
 	// Mark this new address as belonging to this account.
-	MarkAddressForAccount(addr.EncodeAddress(), a.Name())
+	AcctMgr.MarkAddressForAccount(addr, a)
 
 	// Request updates from btcd for new transactions sent to this address.
 	a.ReqNewTxsForAddress(addr)

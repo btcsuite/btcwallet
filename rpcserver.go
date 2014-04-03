@@ -276,15 +276,7 @@ func makeMultiSigScript(keys []string, nRequired int) ([]byte, *btcjson.Error) {
 		case *btcutil.AddressPubKey:
 			keysesPrecious[i] = addr
 		case *btcutil.AddressPubKeyHash:
-			actname, err :=
-				LookupAccountByAddress(addr.EncodeAddress())
-			if err != nil {
-				return nil, &btcjson.Error{
-					Code:    btcjson.ErrParse.Code,
-					Message: err.Error(),
-				}
-			}
-			act, err := AcctMgr.Account(actname)
+			act, err := AcctMgr.AccountByAddress(addr)
 			if err != nil {
 				return nil, &btcjson.Error{
 					Code:    btcjson.ErrParse.Code,
@@ -620,7 +612,7 @@ func GetAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// Look up account which holds this address.
-	aname, err := LookupAccountByAddress(cmd.Address)
+	acct, err := AcctMgr.AccountByAddress(addr)
 	if err == ErrNotFound {
 		e := btcjson.Error{
 			Code:    btcjson.ErrInvalidAddressOrKey.Code,
@@ -629,7 +621,7 @@ func GetAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	return aname, nil
+	return acct.Name(), nil
 }
 
 // GetAccountAddress handles a getaccountaddress by returning the most
@@ -693,14 +685,12 @@ func GetAddressBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
-	apkh, ok := addr.(*btcutil.AddressPubKeyHash)
-	if !ok || !apkh.IsForNet(cfg.Net()) {
-		return nil, &btcjson.ErrInvalidAddressOrKey
-	}
 
-	// Look up account which holds this address.
-	aname, err := LookupAccountByAddress(cmd.Address)
-	if err == ErrNotFound {
+	// Get the account which holds the address in the request.
+	// This should not fail, so if it does, return an internal
+	// error to the frontend.
+	a, err := AcctMgr.AccountByAddress(addr)
+	if err != nil {
 		e := btcjson.Error{
 			Code:    btcjson.ErrInvalidAddressOrKey.Code,
 			Message: "Address not found in wallet",
@@ -708,15 +698,7 @@ func GetAddressBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	// Get the account which holds the address in the request.
-	// This should not fail, so if it does, return an internal
-	// error to the frontend.
-	a, err := AcctMgr.Account(aname)
-	if err != nil {
-		return nil, &btcjson.ErrInternal
-	}
-
-	bal := a.CalculateAddressBalance(apkh, int(cmd.Minconf))
+	bal := a.CalculateAddressBalance(addr, int(cmd.Minconf))
 	return bal, nil
 }
 
@@ -1597,24 +1579,17 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	acctStr, err := LookupAccountByAddress(cmd.Address)
-	if err != nil {
-		return nil, &btcjson.ErrInvalidAddressOrKey
-	}
-
-	// look up address.
-	a, err := AcctMgr.Account(acctStr)
-	if err != nil {
-		return nil, &btcjson.ErrWalletInvalidAccountName
-	}
-
-	// This really should work when the above found something valid.
 	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return nil, &btcjson.Error{
-			Code:    btcjson.ErrWallet.Code,
+			Code:    btcjson.ErrParse.Code,
 			Message: err.Error(),
 		}
+	}
+
+	a, err := AcctMgr.AccountByAddress(addr)
+	if err != nil {
+		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
 	privkey, err := a.AddressKey(addr)
@@ -1733,12 +1708,11 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		// implementation only puts that information if the script is
 		// "ismine", and we follow that behaviour.
 	}
-	account, err := LookupAccountByAddress(addr.EncodeAddress())
+	account, err := AcctMgr.AccountByAddress(addr)
 	if err == nil {
 		// we ignore these errors because if this call passes this can't
 		// realistically fail.
-		a, _ := AcctMgr.Account(account)
-		ainfo, _ := a.AddressInfo(addr)
+		ainfo, _ := account.AddressInfo(addr)
 
 		result["ismine"] = true
 		result["account"] = account
@@ -1784,24 +1758,18 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	// First check we know about the address and get the keys.
-	acctStr, err := LookupAccountByAddress(cmd.Address)
-	if err != nil {
-		return nil, &btcjson.ErrInvalidAddressOrKey
-	}
-
-	a, err := AcctMgr.Account(acctStr)
-	if err != nil {
-		return nil, &btcjson.ErrWalletInvalidAccountName
-	}
-
-	// This really should work when the above found something valid.
 	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
 		return nil, &btcjson.Error{
-			Code:    btcjson.ErrWallet.Code,
+			Code:    btcjson.ErrParse.Code,
 			Message: err.Error(),
 		}
+	}
+
+	// First check we know about the address and get the keys.
+	a, err := AcctMgr.AccountByAddress(addr)
+	if err != nil {
+		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
 	privkey, err := a.AddressKey(addr)

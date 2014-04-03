@@ -120,12 +120,10 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 		var accounts []*Account
 		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, cfg.Net())
 		for _, addr := range addrs {
-			aname, err := LookupAccountByAddress(addr.EncodeAddress())
-			if err == ErrNotFound {
+			a, err := AcctMgr.AccountByAddress(addr)
+			if err != nil {
 				continue
 			}
-			// This cannot reasonably fail if the above succeeded.
-			a, _ := AcctMgr.Account(aname)
 			accounts = append(accounts, a)
 		}
 

@@ -17,7 +17,6 @@
 package main
 
 import (
-	"container/list"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -25,6 +24,8 @@ import (
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -38,19 +39,43 @@ var (
 // AcctMgr is the global account manager for all opened accounts.
 var AcctMgr = NewAccountManager()
 
+type openAccountsCmd struct{}
+
+type accessAccountRequest struct {
+	name string
+	resp chan *Account
+}
+
+type accessAllRequest struct {
+	resp chan []*Account
+}
+
+type accessAccountByAddressRequest struct {
+	address string
+	resp    chan *Account
+}
+
+type markAddressForAccountCmd struct {
+	address string
+	account *Account
+}
+
+type addAccountCmd struct {
+	a *Account
+}
+
+type removeAccountCmd struct {
+	a *Account
+}
+
 // AccountManager manages a collection of accounts.
 type AccountManager struct {
 	// The accounts accessed through the account manager are not safe for
 	// concurrent access.  The account manager therefore contains a
 	// binary semaphore channel to prevent incorrect access.
-	bsem chan struct{}
-
-	openAccounts  chan struct{}
-	accessAccount chan *accessAccountRequest
-	accessAll     chan *accessAllRequest
-	add           chan *Account
-	remove        chan *Account
-	rescanMsgs    chan RescanMsg
+	bsem       chan struct{}
+	cmdChan    chan interface{}
+	rescanMsgs chan RescanMsg
 
 	ds *DiskSyncer
 	rm *RescanManager
@@ -59,13 +84,9 @@ type AccountManager struct {
 // NewAccountManager returns a new AccountManager.
 func NewAccountManager() *AccountManager {
 	am := &AccountManager{
-		bsem:          make(chan struct{}, 1),
-		openAccounts:  make(chan struct{}, 1),
-		accessAccount: make(chan *accessAccountRequest),
-		accessAll:     make(chan *accessAllRequest),
-		add:           make(chan *Account),
-		remove:        make(chan *Account),
-		rescanMsgs:    make(chan RescanMsg, 1),
+		bsem:       make(chan struct{}, 1),
+		cmdChan:    make(chan interface{}),
+		rescanMsgs: make(chan RescanMsg, 1),
 	}
 	am.ds = NewDiskSyncer(am)
 	am.rm = NewRescanManager(am.rescanMsgs)
@@ -83,63 +104,263 @@ func (am *AccountManager) Start() {
 	go am.rm.Start()
 }
 
-// accountHandler maintains accounts and structures for quick lookups for
-// account information.  Access to these structures must be done through
-// with the channels in the AccountManger struct fields.  This function
-// never returns and should be called as a new goroutine.
-func (am *AccountManager) accountHandler() {
-	// List and map of all accounts.
-	l := list.New()
-	m := make(map[string]*Account)
+// accountData is a helper structure to let us centralise logic for adding
+// and removing accounts.
+type accountData struct {
+	// maps name to account struct. We could keep a list here for iteration
+	// but iteration over the small amounts we have is likely not worth
+	// the extra complexity.
+	nameToAccount    map[string]*Account
+	addressToAccount map[string]*Account
+}
 
-	for {
-		select {
-		case <-am.openAccounts:
+func newAccountData() *accountData {
+	return &accountData{
+		nameToAccount:    make(map[string]*Account),
+		addressToAccount: make(map[string]*Account),
+	}
+}
+
+func (ad *accountData) addAccount(a *Account) {
+	if _, ok := ad.nameToAccount[a.name]; ok {
+		return
+	}
+	ad.nameToAccount[a.name] = a
+	for addr := range a.ActivePaymentAddresses() {
+		ad.addressToAccount[addr] = a
+	}
+}
+
+func (ad *accountData) removeAccount(a *Account) {
+	a, ok := ad.nameToAccount[a.name]
+	if !ok {
+		return
+	}
+
+	delete(ad.nameToAccount, a.name)
+	for addr := range a.ActivePaymentAddresses() {
+		delete(ad.addressToAccount, addr)
+	}
+}
+
+// walletOpenError is a special error type so problems opening wallet
+// files can be differentiated (by a type assertion) from other errors.
+type walletOpenError struct {
+	Err string
+}
+
+// Error satisifies the builtin error interface.
+func (e *walletOpenError) Error() string {
+	return e.Err
+}
+
+var (
+	// errNoWallet describes an error where a wallet does not exist and
+	// must be created first.
+	errNoWallet = &walletOpenError{
+		Err: "wallet file does not exist",
+	}
+
+	// errNoTxs describes an error where the wallet and UTXO files were
+	// successfully read, but the TX history file was not.  It is up to
+	// the caller whether this necessitates a rescan or not.
+	errNoTxs = errors.New("tx file cannot be read")
+)
+
+// openSavedAccount opens a named account from disk.  If the wallet does not
+// exist, errNoWallet is returned as an error.
+func openSavedAccount(name string, cfg *config) (*Account, error) {
+	netdir := networkDir(cfg.Net())
+	if err := checkCreateDir(netdir); err != nil {
+		return nil, &walletOpenError{
+			Err: err.Error(),
+		}
+	}
+
+	wlt := new(wallet.Wallet)
+	txs := tx.NewStore()
+	a := &Account{
+		name:    name,
+		Wallet:  wlt,
+		TxStore: txs,
+	}
+
+	wfilepath := accountFilename("wallet.bin", name, netdir)
+	txfilepath := accountFilename("tx.bin", name, netdir)
+	var wfile, txfile *os.File
+
+	// Read wallet file.
+	wfile, err := os.Open(wfilepath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Must create and save wallet first.
+			return nil, errNoWallet
+		}
+		msg := fmt.Sprintf("cannot open wallet file: %s", err)
+		return nil, &walletOpenError{msg}
+	}
+	defer wfile.Close()
+
+	if _, err = wlt.ReadFrom(wfile); err != nil {
+		msg := fmt.Sprintf("cannot read wallet: %s", err)
+		return nil, &walletOpenError{msg}
+	}
+
+	// Read tx file.  If this fails, return a errNoTxs error and let
+	// the caller decide if a rescan is necessary.
+	var finalErr error
+	if txfile, err = os.Open(txfilepath); err != nil {
+		log.Errorf("cannot open tx file: %s", err)
+		// This is not a error we should immediately return with,
+		// but other errors can be more important, so only return
+		// this if none of the others are hit.
+		finalErr = errNoTxs
+		a.fullRescan = true
+	} else {
+		defer txfile.Close()
+		if _, err = txs.ReadFrom(txfile); err != nil {
+			log.Errorf("cannot read tx file: %s", err)
+			a.fullRescan = true
+			finalErr = errNoTxs
+		}
+	}
+
+	// Mark all active payment addresses as belonging to this account.
+	for addr := range a.ActivePaymentAddresses() {
+		MarkAddressForAccount(addr, name)
+	}
+
+	return a, finalErr
+}
+
+// openAccounts attempts to open all saved accounts.
+func openAccounts() *accountData {
+	ad := newAccountData()
+
+	// If the network (account) directory is missing, but the temporary
+	// directory exists, move it.  This is unlikely to happen, but possible,
+	// if writing out every account file at once to a tmp directory (as is
+	// done for changing a wallet passphrase) and btcwallet closes after
+	// removing the network directory but before renaming the temporary
+	// directory.
+	netDir := networkDir(cfg.Net())
+	tmpNetDir := tmpNetworkDir(cfg.Net())
+	if !fileExists(netDir) && fileExists(tmpNetDir) {
+		if err := Rename(tmpNetDir, netDir); err != nil {
+			log.Errorf("Cannot move temporary network dir: %v", err)
+			return ad
+		}
+	}
+
+	// The default account must exist, or btcwallet acts as if no
+	// wallets/accounts have been created yet.
+	a, err := openSavedAccount("", cfg)
+	if err != nil {
+		switch err.(type) {
+		case *walletOpenError:
+			log.Errorf("Default account wallet file unreadable: %v", err)
+			return ad
+
+		default:
+			log.Warnf("Non-critical problem opening an account file: %v", err)
+		}
+	}
+
+	ad.addAccount(a)
+
+	// Read all filenames in the account directory, and look for any
+	// filenames matching '*-wallet.bin'.  These are wallets for
+	// additional saved accounts.
+	accountDir, err := os.Open(netDir)
+	if err != nil {
+		// Can't continue.
+		log.Errorf("Unable to open account directory: %v", err)
+		return ad
+	}
+	defer accountDir.Close()
+	fileNames, err := accountDir.Readdirnames(0)
+	if err != nil {
+		// fileNames might be partially set, so log an error and
+		// at least try to open some accounts.
+		log.Errorf("Unable to read all account files: %v", err)
+	}
+	var accountNames []string
+	for _, file := range fileNames {
+		if strings.HasSuffix(file, "-wallet.bin") {
+			name := strings.TrimSuffix(file, "-wallet.bin")
+			accountNames = append(accountNames, name)
+		}
+	}
+
+	// Open all additional accounts.
+	for _, acctName := range accountNames {
+		// Log txstore/utxostore errors as these will be recovered
+		// from with a rescan, but wallet errors must be returned
+		// to the caller.
+		a, err := openSavedAccount(acctName, cfg)
+		if err != nil {
+			switch err.(type) {
+			case *walletOpenError:
+				log.Errorf("Error opening account's wallet: %v", err)
+
+			default:
+				log.Warnf("Non-critical error opening an account file: %v", err)
+			}
+		} else {
+			ad.addAccount(a)
+		}
+	}
+	return ad
+}
+
+// accountHandler maintains accounts and structures for quick lookups for
+// account information.  Access to these structures must be requested via
+// cmdChan. cmdChan is a single channel for multiple command types since there
+// is ordering inherent in the commands and ordering between multipl goroutine
+// reads via select{} is very much undefined. This function never returns and
+// should be called as a new goroutine.
+func (am *AccountManager) accountHandler() {
+	ad := openAccounts()
+
+	for c := range am.cmdChan {
+		switch cmd := c.(type) {
+		case *openAccountsCmd:
 			// Write all old accounts before proceeding.
-			for e := l.Front(); e != nil; e = e.Next() {
-				a := e.Value.(*Account)
+			for _, a := range ad.nameToAccount {
 				am.ds.FlushAccount(a)
 			}
 
-			m = OpenAccounts()
-
-			l.Init()
-			for _, a := range m {
-				l.PushBack(a)
+			ad = openAccounts()
+		case *accessAccountRequest:
+			a, ok := ad.nameToAccount[cmd.name]
+			if !ok {
+				a = nil
 			}
+			cmd.resp <- a
 
-		case access := <-am.accessAccount:
-			a, ok := m[access.name]
-			access.resp <- &accessAccountResponse{
-				a:  a,
-				ok: ok,
+		case *accessAccountByAddressRequest:
+			a, ok := ad.addressToAccount[cmd.address]
+			if !ok {
+				a = nil
 			}
+			cmd.resp <- a
 
-		case access := <-am.accessAll:
-			s := make([]*Account, 0, l.Len())
-			for e := l.Front(); e != nil; e = e.Next() {
-				s = append(s, e.Value.(*Account))
+		case *accessAllRequest:
+			s := make([]*Account, 0, len(ad.nameToAccount))
+			for _, a := range ad.nameToAccount {
+				s = append(s, a)
 			}
-			access.resp <- s
+			cmd.resp <- s
 
-		case a := <-am.add:
-			if _, ok := m[a.name]; ok {
-				break
-			}
-			m[a.name] = a
-			l.PushBack(a)
+		case *addAccountCmd:
+			ad.addAccount(cmd.a)
+		case *removeAccountCmd:
+			ad.removeAccount(cmd.a)
 
-		case a := <-am.remove:
-			if _, ok := m[a.name]; ok {
-				delete(m, a.name)
-				for e := l.Front(); e != nil; e = e.Next() {
-					v := e.Value.(*Account)
-					if v == a {
-						l.Remove(e)
-						break
-					}
-				}
-			}
+		case *markAddressForAccountCmd:
+			// TODO(oga) make sure we own account
+			ad.addressToAccount[cmd.address] = cmd.account
+
 		}
 	}
 }
@@ -219,57 +440,77 @@ func (am *AccountManager) Release() {
 	am.bsem <- struct{}{}
 }
 
+// OpenAccounts triggers the manager to reopen all known accounts.
 func (am *AccountManager) OpenAccounts() {
-	am.openAccounts <- struct{}{}
-}
-
-type accessAccountRequest struct {
-	name string
-	resp chan *accessAccountResponse
-}
-
-type accessAccountResponse struct {
-	a  *Account
-	ok bool
+	am.cmdChan <- &openAccountsCmd{}
 }
 
 // Account returns the account specified by name, or ErrNotFound
 // as an error if the account is not found.
 func (am *AccountManager) Account(name string) (*Account, error) {
-	req := &accessAccountRequest{
+	respChan := make(chan *Account)
+	am.cmdChan <- &accessAccountRequest{
 		name: name,
-		resp: make(chan *accessAccountResponse),
+		resp: respChan,
 	}
-	am.accessAccount <- req
-	resp := <-req.resp
-	if !resp.ok {
+	resp := <-respChan
+	if resp == nil {
 		return nil, ErrNotFound
 	}
-	return resp.a, nil
+	return resp, nil
 }
 
-type accessAllRequest struct {
-	resp chan []*Account
+// AccountByAddress returns the account specified by address, or
+// ErrNotFound as an error if the account is not found.
+func (am *AccountManager) AccountByAddress(addr btcutil.Address) (*Account,
+	error) {
+	respChan := make(chan *Account)
+	am.cmdChan <- &accessAccountByAddressRequest{
+		address: addr.EncodeAddress(),
+		resp:    respChan,
+	}
+	resp := <-respChan
+	if resp == nil {
+		return nil, ErrNotFound
+	}
+	return resp, nil
+}
+
+// MarkAddressForAccount labels the given account as containing the provided
+// address.
+func (am *AccountManager) MarkAddressForAccount(address btcutil.Address,
+	account *Account) {
+	// TODO(oga) really this entire dance should be carried out implicitly
+	// instead of requiring explicit messaging from the account to the
+	// manager.
+	am.cmdChan <- &markAddressForAccountCmd{
+		address: address.EncodeAddress(),
+		account: account,
+	}
 }
 
 // AllAccounts returns a slice of all managed accounts.
 func (am *AccountManager) AllAccounts() []*Account {
-	req := &accessAllRequest{
-		resp: make(chan []*Account),
+	respChan := make(chan []*Account)
+	am.cmdChan <- &accessAllRequest{
+		resp: respChan,
 	}
-	am.accessAll <- req
-	return <-req.resp
+	return <-respChan
 }
 
 // AddAccount adds an account to the collection managed by an AccountManager.
 func (am *AccountManager) AddAccount(a *Account) {
-	am.add <- a
+	am.cmdChan <- &addAccountCmd{
+		a: a,
+	}
 }
 
 // RemoveAccount removes an account to the collection managed by an
 // AccountManager.
 func (am *AccountManager) RemoveAccount(a *Account) {
-	am.remove <- a
+	am.cmdChan <- &removeAccountCmd{
+		a: a,
+	}
 }
 
 // RegisterNewAccount adds a new memory account to the account manager,
@@ -384,13 +625,6 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 	}
 	if err := am.RegisterNewAccount(a); err != nil {
 		return err
-	}
-
-	// Mark all active payment addresses as belonging to this account.
-	//
-	// TODO(jrick) move this to the account manager
-	for addr := range a.ActivePaymentAddresses() {
-		MarkAddressForAccount(addr, "")
 	}
 
 	// Begin tracking account against a connected btcd.
