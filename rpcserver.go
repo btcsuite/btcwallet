@@ -1693,58 +1693,53 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
+	result := btcjson.ValidateAddressResult{}
 	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
 	if err != nil {
-		return map[string]interface{}{
-			"isvalid": false,
-		}, nil
+		return result, nil
 	}
 
-	result := map[string]interface{}{
-		"address": addr.EncodeAddress(),
-		"isvalid": true,
-		// We could put whether or not the address is a script here,
-		// by checking the type of "addr", however, the reference
-		// implementation only puts that information if the script is
-		// "ismine", and we follow that behaviour.
-	}
+	// We could put whether or not the address is a script here,
+	// by checking the type of "addr", however, the reference
+	// implementation only puts that information if the script is
+	// "ismine", and we follow that behaviour.
+	result.Address = addr.EncodeAddress()
+	result.IsValid = true
+
 	account, err := AcctMgr.AccountByAddress(addr)
 	if err == nil {
 		// we ignore these errors because if this call passes this can't
 		// realistically fail.
 		ainfo, _ := account.AddressInfo(addr)
 
-		result["ismine"] = true
-		result["account"] = account
+		result.IsMine = true
+		result.Account = account.name
 
 		switch info := ainfo.(type) {
 		case *wallet.AddressPubKeyInfo:
-			result["compressed"] = info.Compressed()
-			result["pubkey"] = info.Pubkey
+			result.IsCompressed = info.Compressed()
+			result.PubKey = info.Pubkey
 
 		case *wallet.AddressScriptInfo:
-			result["isscript"] = true
+			result.IsScript = true
 			addrStrings := make([]string,
 				len(info.Addresses))
 			for i, a := range info.Addresses {
 				addrStrings[i] = a.EncodeAddress()
 			}
-			result["addresses"] = addrStrings
-			result["hex"] = info.Script
+			result.Addresses = addrStrings
+			result.Hex = hex.EncodeToString(info.Script)
 
 			class := info.ScriptClass
 			// script type
-			result["script"] = class.String()
+			result.Script = class.String()
 			if class == btcscript.MultiSigTy {
-				result["sigsrequired"] =
-					info.RequiredSigs
+				result.SigsRequired = info.RequiredSigs
 			}
 
 		default:
 			/* This space intentionally left blank */
 		}
-	} else {
-		result["ismine"] = false
 	}
 
 	return result, nil
