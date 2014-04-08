@@ -1316,10 +1316,7 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
 
 	// If a change address was added, sync wallet to disk and request
 	// transaction notifications to the change address.
-	if createdTx.haschange {
-		script := createdTx.tx.MsgTx().TxOut[createdTx.changeIdx].PkScript
-		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(script, cfg.Net())
-
+	if createdTx.changeAddr != nil {
 		AcctMgr.ds.ScheduleWalletWrite(a)
 		if err := AcctMgr.ds.FlushAccount(a); err != nil {
 			e := btcjson.Error{
@@ -1328,7 +1325,7 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
 			}
 			return nil, &e
 		}
-		a.ReqNewTxsForAddress(addrs[0])
+		a.ReqNewTxsForAddress(createdTx.changeAddr)
 	}
 
 	serializedTx := new(bytes.Buffer)

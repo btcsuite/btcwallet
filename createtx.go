@@ -61,10 +61,9 @@ var TxFeeIncrement = struct {
 }
 
 type CreatedTx struct {
-	tx        *btcutil.Tx
-	time      time.Time
-	haschange bool
-	changeIdx uint32
+	tx         *btcutil.Tx
+	time       time.Time
+	changeAddr btcutil.Address
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
@@ -185,13 +184,10 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 	// a higher fee if not enough was originally chosen.
 	txNoInputs := msgtx.Copy()
 
+	var selectedInputs []*tx.RecvTxOut
 	// These are nil/zeroed until a change address is needed, and reused
 	// again in case a change utxo has already been chosen.
 	var changeAddr btcutil.Address
-
-	var selectedInputs []*tx.RecvTxOut
-	hasChange := false
-	changeIndex := uint32(0)
 
 	// Get the number of satoshis to increment fee by when searching for
 	// the minimum tx fee needed.
@@ -209,13 +205,11 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 
 		// Check if there are leftover unspent outputs, and return coins back to
 		// a new address we own.
+		//
+		// TODO: change needs to be inserted into a random txout index, or else
+		// this is a privacy risk.
 		change := btcin - amt - fee
 		if change > 0 {
-			hasChange = true
-			// TODO: this needs to be randomly inserted into the
-			// tx, or else this is a privacy risk
-			changeIndex = 0
-
 			// Get a new change address if one has not already been found.
 			if changeAddr == nil {
 				changeAddr, err = a.ChangeAddress(&bs, cfg.KeypoolSize)
@@ -301,10 +295,9 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 	buf := new(bytes.Buffer)
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
 	info := &CreatedTx{
-		tx:        btcutil.NewTx(msgtx),
-		time:      time.Now(),
-		haschange: hasChange,
-		changeIdx: changeIndex,
+		tx:         btcutil.NewTx(msgtx),
+		time:       time.Now(),
+		changeAddr: changeAddr,
 	}
 	return info, nil
 }
