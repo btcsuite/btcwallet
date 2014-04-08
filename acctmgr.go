@@ -225,11 +225,6 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 		}
 	}
 
-	// Mark all active payment addresses as belonging to this account.
-	for addr := range a.ActivePaymentAddresses() {
-		MarkAddressForAccount(addr, name)
-	}
-
 	return a, finalErr
 }
 

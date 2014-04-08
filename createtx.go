@@ -218,7 +218,7 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 				}
 
 				// Mark change address as belonging to this account.
-				MarkAddressForAccount(changeAddr.EncodeAddress(), a.Name())
+				AcctMgr.MarkAddressForAccount(changeAddr, a)
 			}
 
 			// Spend change.

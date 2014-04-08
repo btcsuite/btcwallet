@@ -28,10 +28,6 @@ import (
 	"path/filepath"
 )
 
-// MarkAddressForAccount marks an address as belonging to an account.
-func MarkAddressForAccount(address, account string) {
-}
-
 // Account is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style wallet (to store
 // addresses and keys), and tx and utxo stores, and a mutex to prevent
