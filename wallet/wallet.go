@@ -59,20 +59,13 @@ var (
 	ErrChecksumMismatch     = errors.New("checksum mismatch")
 	ErrDuplicate            = errors.New("duplicate key or address")
 	ErrMalformedEntry       = errors.New("malformed entry")
-	ErrNetworkMismatch      = errors.New("network mismatch")
-	ErrWalletDoesNotExist   = errors.New("non-existant wallet")
 	ErrWalletIsWatchingOnly = errors.New("wallet is watching-only")
 	ErrWalletLocked         = errors.New("wallet is locked")
 	ErrWrongPassphrase      = errors.New("wrong passphrase")
 )
 
-var (
-	// '\xbaWALLET\x00'
-	fileID = [8]byte{0xba, 0x57, 0x41, 0x4c, 0x4c, 0x45, 0x54, 0x00}
-
-	mainnetMagicBytes = [4]byte{0xf9, 0xbe, 0xb4, 0xd9}
-	testnetMagicBytes = [4]byte{0x0b, 0x11, 0x09, 0x07}
-)
+// '\xbaWALLET\x00'
+var fileID = [8]byte{0xba, 0x57, 0x41, 0x4c, 0x4c, 0x45, 0x54, 0x00}
 
 type entryHeader byte
 
