@@ -243,15 +243,18 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 				continue // don't handle inputs to this yes
 			}
 
-			privkey, err := a.AddressKey(apkh)
+			ai, err := a.Address(apkh)
+			if err != nil {
+				return nil, fmt.Errorf("cannot get address info: %v", err)
+			}
+
+			pka := ai.(wallet.PubKeyAddress)
+
+			privkey, err := pka.PrivKey()
 			if err == wallet.ErrWalletLocked {
 				return nil, wallet.ErrWalletLocked
 			} else if err != nil {
 				return nil, fmt.Errorf("cannot get address key: %v", err)
-			}
-			ai, err := a.AddressInfo(apkh)
-			if err != nil {
-				return nil, fmt.Errorf("cannot get address info: %v", err)
 			}
 
 			sigscript, err := btcscript.SignatureScript(msgtx, i,

@@ -267,36 +267,23 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 	return txInfoList, nil
 }
 
-func pad(size int, b []byte) []byte {
-	// Prevent a possible panic if the input exceeds the expected size.
-	if len(b) > size {
-		size = len(b)
-	}
-
-	p := make([]byte, size)
-	copy(p[size-len(b):], b)
-	return p
-}
-
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
 // private keys in a wallet.
 func (a *Account) DumpPrivKeys() ([]string, error) {
 	// Iterate over each active address, appending the private
 	// key to privkeys.
 	var privkeys []string
-	for addr, info := range a.Wallet.ActiveAddresses() {
-		// No keys to export for scripts.
-		if _, isScript := addr.(*btcutil.AddressScriptHash); isScript {
+	for _, info := range a.Wallet.ActiveAddresses() {
+		// Only those addresses with keys needed.
+		pka, ok := info.(wallet.PubKeyAddress)
+		if !ok {
 			continue
 		}
-
-		key, err := a.Wallet.AddressKey(addr)
+		encKey, err := pka.ExportPrivKey()
 		if err != nil {
-			return nil, err
-		}
-		encKey, err := btcutil.EncodePrivateKey(pad(32, key.D.Bytes()),
-			a.Wallet.Net(), info.Compressed())
-		if err != nil {
+			// It would be nice to zero out the array here. However,
+			// since strings in go are immutable, and we have no
+			// control over the caller I don't think we can. :(
 			return nil, err
 		}
 		privkeys = append(privkeys, encKey)
@@ -309,21 +296,17 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 // single wallet address.
 func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 	// Get private key from wallet if it exists.
-	key, err := a.Wallet.AddressKey(addr)
+	address, err := a.Wallet.Address(addr)
 	if err != nil {
 		return "", err
 	}
 
-	// Get address info.  This is needed to determine whether
-	// the pubkey is compressed or not.
-	info, err := a.Wallet.AddressInfo(addr)
-	if err != nil {
-		return "", err
+	pka, ok := address.(wallet.PubKeyAddress)
+	if !ok {
+		return "", fmt.Errorf("address %s is not a key type", addr)
 	}
 
-	// Return WIF-encoding of the private key.
-	return btcutil.EncodePrivateKey(pad(32, key.D.Bytes()), a.Net(),
-		info.Compressed())
+	return pka.ExportPrivKey()
 }
 
 // ImportPrivateKey imports a private key to the account's wallet and
@@ -588,7 +571,7 @@ func (a *Account) RecoverAddresses(n int) error {
 	// Get info on the last chained address.  The rescan starts at the
 	// earliest block height the last chained address might appear at.
 	last := a.Wallet.LastChainedAddress()
-	lastInfo, err := a.Wallet.AddressInfo(last)
+	lastInfo, err := a.Wallet.Address(last)
 	if err != nil {
 		return err
 	}

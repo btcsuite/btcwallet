@@ -294,17 +294,17 @@ func makeMultiSigScript(keys []string, nRequired int) ([]byte, *btcjson.Error) {
 				}
 			}
 
-			ainfo, err := act.AddressInfo(addr)
+			ainfo, err := act.Address(addr)
 			if err != nil {
 				return nil, &btcjson.Error{
 					Code:    btcjson.ErrParse.Code,
 					Message: err.Error(),
 				}
 			}
-			apkinfo := ainfo.(*wallet.AddressPubKeyInfo)
+			apkinfo := ainfo.(wallet.PubKeyAddress)
 
 			// This will be an addresspubkey
-			a, err := btcutil.DecodeAddress(apkinfo.Pubkey,
+			a, err := btcutil.DecodeAddress(apkinfo.ExportPubKey(),
 				cfg.Net())
 			if err != nil {
 				return nil, &btcjson.Error{
@@ -1595,7 +1595,7 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
-	privkey, err := a.AddressKey(addr)
+	ainfo, err := a.Address(addr)
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
@@ -1603,7 +1603,8 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 	}
 
-	ainfo, err := a.AddressInfo(addr)
+	pka := ainfo.(wallet.PubKeyAddress)
+	privkey, err := pka.PrivKey()
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
@@ -1713,35 +1714,31 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	if err == nil {
 		// we ignore these errors because if this call passes this can't
 		// realistically fail.
-		ainfo, _ := account.AddressInfo(addr)
+		ainfo, _ := account.Address(addr)
 
 		result.IsMine = true
 		result.Account = account.name
 
-		switch info := ainfo.(type) {
-		case *wallet.AddressPubKeyInfo:
-			result.IsCompressed = info.Compressed()
-			result.PubKey = info.Pubkey
+		if pka, ok := ainfo.(wallet.PubKeyAddress); ok {
+			result.IsCompressed = pka.Compressed()
+			result.PubKey = pka.ExportPubKey()
 
-		case *wallet.AddressScriptInfo:
+		} else if sa, ok := ainfo.(wallet.ScriptAddress); ok {
 			result.IsScript = true
-			addrStrings := make([]string,
-				len(info.Addresses))
-			for i, a := range info.Addresses {
+			addresses := sa.Addresses()
+			addrStrings := make([]string, len(addresses))
+			for i, a := range addresses {
 				addrStrings[i] = a.EncodeAddress()
 			}
 			result.Addresses = addrStrings
-			result.Hex = hex.EncodeToString(info.Script)
+			result.Hex = hex.EncodeToString(sa.Script())
 
-			class := info.ScriptClass
+			class := sa.ScriptClass()
 			// script type
 			result.Script = class.String()
 			if class == btcscript.MultiSigTy {
-				result.SigsRequired = info.RequiredSigs
+				result.SigsRequired = sa.RequiredSigs()
 			}
-
-		default:
-			/* This space intentionally left blank */
 		}
 	}
 
@@ -1770,7 +1767,7 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
-	privkey, err := a.AddressKey(addr)
+	ainfo, err := a.Address(addr)
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
@@ -1778,7 +1775,8 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 	}
 
-	ainfo, err := a.AddressInfo(addr)
+	pka := ainfo.(wallet.PubKeyAddress)
+	privkey, err := pka.PrivKey()
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrWallet.Code,
