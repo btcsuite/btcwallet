@@ -29,6 +29,11 @@ type RawRPCResponse struct {
 	Error  *json.RawMessage `json:"error"`
 }
 
+// FinishUnmarshal unmarshals the result and error of a raw RPC response.
+// If v is non-nil, the result is unmarshaled into the variable pointed
+// to by the interface rather than using the rules in the encoding/json
+// package to allocate a new variable for the result.  The final result
+// and JSON-RPC error is returned.
 func (r *RawRPCResponse) FinishUnmarshal(v interface{}) (interface{}, *btcjson.Error) {
 	// JSON-RPC spec makes this handling easier-ish because both result and
 	// error cannot be non-nil.
