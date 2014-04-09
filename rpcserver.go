@@ -1503,10 +1503,6 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 	// Signal that received notifiations are ok to add now.
 	SendTxHistSyncChans.done <- *txInfo.tx.Sha()
 
-	// Add spending transaction to the store if it does not already exist,
-	// marking all spent previous outputs.
-	//a.TxStore.MarkSpendingTx(txInfo.tx, nil)
-
 	// Disk sync tx and utxo stores.
 	if err := AcctMgr.ds.FlushAccount(a); err != nil {
 		log.Errorf("cannot write account: %v", err)
