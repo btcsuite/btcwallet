@@ -1949,9 +1949,9 @@ func NotifyWalletBalanceUnconfirmed(frontend chan []byte, account string, balanc
 
 // NotifyNewTxDetails sends details of a new transaction to a frontend.
 func NotifyNewTxDetails(frontend chan []byte, account string,
-	details map[string]interface{}) {
+	details btcjson.ListTransactionsResult) {
 
-	ntfn := btcws.NewTxNtfn(account, details)
+	ntfn := btcws.NewTxNtfn(account, &details)
 	mntfn, _ := ntfn.MarshalJSON()
 	frontend <- mntfn
 }

@@ -24,6 +24,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
@@ -56,7 +57,7 @@ type Record interface {
 	Time() time.Time
 	Tx() *btcutil.Tx
 	TxSha() *btcwire.ShaHash
-	TxInfo(string, int32, btcwire.BitcoinNet) []map[string]interface{}
+	TxInfo(string, int32, btcwire.BitcoinNet) []btcjson.ListTransactionsResult
 }
 
 type txRecord interface {
@@ -923,10 +924,10 @@ func (st *SignedTx) Tx() *btcutil.Tx {
 	return st.tx
 }
 
-// TxInfo returns a slice of maps that may be marshaled as a JSON array
+// TxInfo returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
-func (st *SignedTx) TxInfo(account string, chainHeight int32, net btcwire.BitcoinNet) []map[string]interface{} {
-	reply := make([]map[string]interface{}, len(st.tx.MsgTx().TxOut))
+func (st *SignedTx) TxInfo(account string, chainHeight int32, net btcwire.BitcoinNet) []btcjson.ListTransactionsResult {
+	reply := make([]btcjson.ListTransactionsResult, len(st.tx.MsgTx().TxOut))
 
 	var confirmations int32
 	if st.block != nil {
@@ -939,21 +940,22 @@ func (st *SignedTx) TxInfo(account string, chainHeight int32, net btcwire.Bitcoi
 		if len(addrs) == 1 {
 			address = addrs[0].EncodeAddress()
 		}
-		info := map[string]interface{}{
-			"account":       account,
-			"address":       address,
-			"category":      "send",
-			"amount":        float64(-txout.Value) / float64(btcutil.SatoshiPerBitcoin),
-			"fee":           float64(st.Fee()) / float64(btcutil.SatoshiPerBitcoin),
-			"confirmations": float64(confirmations),
-			"txid":          st.txSha.String(),
-			"time":          float64(st.created.Unix()),
-			"timereceived":  float64(st.created.Unix()),
+
+		info := btcjson.ListTransactionsResult{
+			Account:       account,
+			Address:       address,
+			Category:      "send",
+			Amount:        float64(-txout.Value) / float64(btcutil.SatoshiPerBitcoin),
+			Fee:           float64(st.Fee()) / float64(btcutil.SatoshiPerBitcoin),
+			Confirmations: int64(confirmations),
+			TxID:          st.txSha.String(),
+			Time:          st.created.Unix(),
+			TimeReceived:  st.created.Unix(),
 		}
 		if st.block != nil {
-			info["blockhash"] = st.block.Hash.String()
-			info["blockindex"] = float64(st.block.Index)
-			info["blocktime"] = float64(st.block.Time.Unix())
+			info.BlockHash = st.block.Hash.String()
+			info.BlockIndex = int64(st.block.Index)
+			info.BlockTime = st.block.Time.Unix()
 		}
 		reply[i] = info
 	}
@@ -1330,9 +1332,9 @@ func (rt *RecvTxOut) Tx() *btcutil.Tx {
 	return rt.tx
 }
 
-// TxInfo returns a slice of maps that may be marshaled as a JSON array
+// TxInfo returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
-func (rt *RecvTxOut) TxInfo(account string, chainHeight int32, net btcwire.BitcoinNet) []map[string]interface{} {
+func (rt *RecvTxOut) TxInfo(account string, chainHeight int32, net btcwire.BitcoinNet) []btcjson.ListTransactionsResult {
 	tx := rt.tx.MsgTx()
 	outidx := rt.outpoint.Index
 	txout := tx.TxOut[outidx]
@@ -1343,23 +1345,22 @@ func (rt *RecvTxOut) TxInfo(account string, chainHeight int32, net btcwire.Bitco
 		address = addrs[0].EncodeAddress()
 	}
 
-	txInfo := map[string]interface{}{
-		"account":      account,
-		"category":     "receive",
-		"address":      address,
-		"amount":       float64(txout.Value) / float64(btcutil.SatoshiPerBitcoin),
-		"txid":         rt.outpoint.Hash.String(),
-		"timereceived": float64(rt.received.Unix()),
+	result := btcjson.ListTransactionsResult{
+		Account:      account,
+		Category:     "receive",
+		Address:      address,
+		Amount:       float64(txout.Value) / float64(btcutil.SatoshiPerBitcoin),
+		TxID:         rt.outpoint.Hash.String(),
+		TimeReceived: rt.received.Unix(),
 	}
-
 	if rt.block != nil {
-		txInfo["blockhash"] = rt.block.Hash.String()
-		txInfo["blockindex"] = float64(rt.block.Index)
-		txInfo["blocktime"] = float64(rt.block.Time.Unix())
-		txInfo["confirmations"] = float64(chainHeight - rt.block.Height + 1)
+		result.BlockHash = rt.block.Hash.String()
+		result.BlockIndex = int64(rt.block.Index)
+		result.BlockTime = rt.block.Time.Unix()
+		result.Confirmations = int64(chainHeight - rt.block.Height + 1)
 	} else {
-		txInfo["confirmations"] = float64(0)
+		result.Confirmations = 0
 	}
 
-	return []map[string]interface{}{txInfo}
+	return []btcjson.ListTransactionsResult{result}
 }

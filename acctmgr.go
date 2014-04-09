@@ -741,20 +741,20 @@ func (am *AccountManager) ListAccounts(minconf int) map[string]float64 {
 	return pairs
 }
 
-// ListSinceBlock returns a slice of maps of strings to interface containing
-// structures defining all transactions in the wallets since the given block.
+// ListSinceBlock returns a slice of objects representing all transactions in
+// the wallets since the given block.
 // To be used for the listsinceblock command.
-func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]map[string]interface{}, error) {
+func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]btcjson.ListTransactionsResult, error) {
 	// Create and fill a map of account names and their balances.
-	txInfoList := []map[string]interface{}{}
+	var txList []btcjson.ListTransactionsResult
 	for _, a := range am.AllAccounts() {
 		txTmp, err := a.ListSinceBlock(since, curBlockHeight, minconf)
 		if err != nil {
 			return nil, err
 		}
-		txInfoList = append(txInfoList, txTmp...)
+		txList = append(txList, txTmp...)
 	}
-	return txInfoList, nil
+	return txList, nil
 }
 
 // accountTx represents an account/transaction pair to be used by
@@ -787,15 +787,13 @@ func (am *AccountManager) GetTransaction(txsha *btcwire.ShaHash) []accountTx {
 	return accumulatedTxen
 }
 
-// ListUnspent returns an array of objects representing the unspent
-// wallet transactions fitting the given criteria. The confirmations will be
-// more then minconf, less than maxconf and if addresses is populated only the
-// addresses contained within it will be considered.
-// a transaction on locally known wallets. If we know nothing about a
+// ListUnspent returns a slice of objects representing the unspent wallet
+// transactions fitting the given criteria. The confirmations will be more than
+// minconf, less than maxconf and if addresses is populated only the addresses
+// contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
 func (am *AccountManager) ListUnspent(minconf, maxconf int,
 	addresses map[string]bool) ([]*btcjson.ListUnSpentResult, error) {
-
 	bs, err := GetCurBlock()
 	if err != nil {
 		return nil, err

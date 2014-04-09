@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
@@ -165,29 +166,28 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 	return addr, nil
 }
 
-// ListSinceBlock returns a slice of maps with details about transactions since
-// the given block. If the block is -1 then all transactions are included.
-// transaction.  This is intended to be used for listsinceblock RPC
-// replies.
-func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]map[string]interface{}, error) {
-	var txInfoList []map[string]interface{}
+// ListSinceBlock returns a slice of objects with details about transactions
+// since the given block. If the block is -1 then all transactions are included.
+// This is intended to be used for listsinceblock RPC replies.
+func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]btcjson.ListTransactionsResult, error) {
+	var txList []btcjson.ListTransactionsResult
 	for _, txRecord := range a.TxStore.SortedRecords() {
 		// check block number.
 		if since != -1 && txRecord.Height() <= since {
 			continue
 		}
 
-		txInfoList = append(txInfoList,
+		txList = append(txList,
 			txRecord.TxInfo(a.name, curBlockHeight, a.Net())...)
 	}
 
-	return txInfoList, nil
+	return txList, nil
 }
 
-// ListTransactions returns a slice of maps with details about a recorded
+// ListTransactions returns a slice of objects with details about a recorded
 // transaction.  This is intended to be used for listtransactions RPC
 // replies.
-func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, error) {
+func (a *Account) ListTransactions(from, count int) ([]btcjson.ListTransactionsResult, error) {
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
 	bs, err := GetCurBlock()
@@ -195,24 +195,24 @@ func (a *Account) ListTransactions(from, count int) ([]map[string]interface{}, e
 		return nil, err
 	}
 
-	var txInfoList []map[string]interface{}
+	var txList []btcjson.ListTransactionsResult
 
 	records := a.TxStore.SortedRecords()
 	lastLookupIdx := len(records) - count
 	// Search in reverse order: lookup most recently-added first.
 	for i := len(records) - 1; i >= from && i >= lastLookupIdx; i-- {
-		txInfoList = append(txInfoList,
+		txList = append(txList,
 			records[i].TxInfo(a.name, bs.Height, a.Net())...)
 	}
 
-	return txInfoList, nil
+	return txList, nil
 }
 
-// ListAddressTransactions returns a slice of maps with details about a
+// ListAddressTransactions returns a slice of objects with details about
 // recorded transactions to or from any address belonging to a set.  This is
 // intended to be used for listaddresstransactions RPC replies.
 func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
-	[]map[string]interface{}, error) {
+	[]btcjson.ListTransactionsResult, error) {
 
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
@@ -221,7 +221,7 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 		return nil, err
 	}
 
-	var txInfoList []map[string]interface{}
+	var txList []btcjson.ListTransactionsResult
 	for _, txRecord := range a.TxStore.SortedRecords() {
 		txout, ok := txRecord.(*tx.RecvTxOut)
 		if !ok {
@@ -238,17 +238,17 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 
 		if _, ok := pkHashes[string(apkh.ScriptAddress())]; ok {
 			info := txout.TxInfo(a.name, bs.Height, a.Net())
-			txInfoList = append(txInfoList, info...)
+			txList = append(txList, info...)
 		}
 	}
 
-	return txInfoList, nil
+	return txList, nil
 }
 
-// ListAllTransactions returns a slice of maps with details about a recorded
+// ListAllTransactions returns a slice of objects with details about a recorded
 // transaction.  This is intended to be used for listalltransactions RPC
 // replies.
-func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
+func (a *Account) ListAllTransactions() ([]btcjson.ListTransactionsResult, error) {
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
 	bs, err := GetCurBlock()
@@ -258,13 +258,13 @@ func (a *Account) ListAllTransactions() ([]map[string]interface{}, error) {
 
 	// Search in reverse order: lookup most recently-added first.
 	records := a.TxStore.SortedRecords()
-	var txInfoList []map[string]interface{}
+	var txList []btcjson.ListTransactionsResult
 	for i := len(records) - 1; i >= 0; i-- {
 		info := records[i].TxInfo(a.name, bs.Height, a.Net())
-		txInfoList = append(txInfoList, info...)
+		txList = append(txList, info...)
 	}
 
-	return txInfoList, nil
+	return txList, nil
 }
 
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
