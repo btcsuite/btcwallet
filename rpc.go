@@ -17,14 +17,41 @@
 package main
 
 import (
+	"encoding/json"
 	"github.com/conformal/btcjson"
 )
 
-// RPCResponse is an interface type covering both server
-// (frontend <-> btcwallet) and client (btcwallet <-> btcd) responses.
-type RPCResponse interface {
-	Result() interface{}
-	Error() *btcjson.Error
+// RawRPCResponse is a response to a JSON-RPC request with delayed
+// unmarshaling.
+type RawRPCResponse struct {
+	Id     *uint64
+	Result *json.RawMessage `json:"result"`
+	Error  *json.RawMessage `json:"error"`
+}
+
+func (r *RawRPCResponse) FinishUnmarshal(v interface{}) (interface{}, *btcjson.Error) {
+	// JSON-RPC spec makes this handling easier-ish because both result and
+	// error cannot be non-nil.
+	var jsonErr *btcjson.Error
+	if r.Error != nil {
+		if err := json.Unmarshal([]byte(*r.Error), &jsonErr); err != nil {
+			return nil, &btcjson.Error{
+				Code:    btcjson.ErrParse.Code,
+				Message: err.Error(),
+			}
+		}
+		return nil, jsonErr
+	}
+	if r.Result != nil {
+		if err := json.Unmarshal([]byte(*r.Result), &v); err != nil {
+			return nil, &btcjson.Error{
+				Code:    btcjson.ErrParse.Code,
+				Message: err.Error(),
+			}
+		}
+		return v, nil
+	}
+	return nil, nil
 }
 
 // ClientRequest is a type holding a bitcoin client's request and
@@ -32,7 +59,7 @@ type RPCResponse interface {
 type ClientRequest struct {
 	ws       bool
 	request  btcjson.Cmd
-	response chan RPCResponse
+	response chan RawRPCResponse
 }
 
 // NewClientRequest creates a new ClientRequest from a btcjson.Cmd.
@@ -40,78 +67,28 @@ func NewClientRequest(request btcjson.Cmd, ws bool) *ClientRequest {
 	return &ClientRequest{
 		ws:       ws,
 		request:  request,
-		response: make(chan RPCResponse),
+		response: make(chan RawRPCResponse),
 	}
 }
 
 // Handle sends a client request to the RPC gateway for processing,
 // and returns the result when handling is finished.
-func (r *ClientRequest) Handle() (interface{}, *btcjson.Error) {
+func (r *ClientRequest) Handle() RawRPCResponse {
 	clientRequests <- r
-	resp := <-r.response
-	return resp.Result(), resp.Error()
-}
-
-// ClientResponse holds a result and error returned from handling a
-// client's request.
-type ClientResponse struct {
-	result interface{}
-	err    *btcjson.Error
-}
-
-// Result returns the result of a response to a client.
-func (r *ClientResponse) Result() interface{} {
-	return r.result
-}
-
-// Error returns the error of a response to a client, or nil if
-// there is no error.
-func (r *ClientResponse) Error() *btcjson.Error {
-	return r.err
+	return <-r.response
 }
 
 // ServerRequest is a type responsible for handling requests to a bitcoin
 // server and providing a method to access the response.
 type ServerRequest struct {
 	request  btcjson.Cmd
-	result   interface{}
-	response chan RPCResponse
+	response chan RawRPCResponse
 }
 
-// NewServerRequest creates a new ServerRequest from a btcjson.Cmd.  request
-// may be nil to create a new var for the result (with types determined by
-// the unmarshaling rules described in the json package), or set to a var
-// with an expected type (i.e. *btcjson.BlockResult) to directly unmarshal
-// the response's result into a convenient type.
-func NewServerRequest(request btcjson.Cmd, result interface{}) *ServerRequest {
+// NewServerRequest creates a new ServerRequest from a btcjson.Cmd.
+func NewServerRequest(request btcjson.Cmd) *ServerRequest {
 	return &ServerRequest{
 		request:  request,
-		result:   result,
-		response: make(chan RPCResponse, 1),
+		response: make(chan RawRPCResponse, 1),
 	}
-}
-
-// ServerResponse holds a response's result and error returned from sending a
-// ServerRequest.
-type ServerResponse struct {
-	// Result will be set to a concrete type (i.e. *btcjson.BlockResult)
-	// and may be type asserted to that type if a non-nil result was used
-	// to create the originating ServerRequest.  Otherwise, Result will be
-	// set to new memory allocated by json.Unmarshal, and the type rules
-	// for unmarshaling described in the json package should be followed
-	// when type asserting Result.
-	result interface{}
-
-	// Err points to an unmarshaled error, or nil if result is valid.
-	err *btcjson.Error
-}
-
-// Result returns the result of a server's RPC response.
-func (r *ServerResponse) Result() interface{} {
-	return r.result
-}
-
-// Result returns the error of a server's RPC response.
-func (r *ServerResponse) Error() *btcjson.Error {
-	return r.err
 }

@@ -263,17 +263,23 @@ func (s *server) ReplyToFrontend(msg []byte, ws, authenticated bool) ([]byte, er
 	}
 
 	cReq := NewClientRequest(cmd, ws)
-	result, jsonErr := cReq.Handle()
+	rawResp := cReq.Handle()
 
-	response := btcjson.Reply{
-		Id:     &id,
-		Result: result,
-		Error:  jsonErr,
+	response := struct {
+		Jsonrpc string           `json:"jsonrpc"`
+		Id      interface{}      `json:"id"`
+		Result  *json.RawMessage `json:"result"`
+		Error   *json.RawMessage `json:"error"`
+	}{
+		Jsonrpc: "1.0",
+		Id:      id,
+		Result:  rawResp.Result,
+		Error:   rawResp.Error,
 	}
 	mresponse, err := json.Marshal(response)
 	if err != nil {
 		log.Errorf("Cannot marhal response: %v", err)
-		response = btcjson.Reply{
+		response := btcjson.Reply{
 			Id:    &id,
 			Error: &btcjson.ErrInternal,
 		}

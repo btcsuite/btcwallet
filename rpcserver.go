@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
@@ -118,6 +119,9 @@ var ErrServerBusy = btcjson.Error{
 	Message: "Server busy",
 }
 
+// ErrServerBusyRaw is the raw JSON encoding of ErrServerBusy.
+var ErrServerBusyRaw = json.RawMessage(`{"code":-32000,"message":"Server busy"}`)
+
 // RPCGateway is the common entry point for all client RPC requests and
 // server notifications.  If a request needs to be handled by btcwallet,
 // it is sent to WalletRequestProcessor's request queue, or dropped if the
@@ -149,16 +153,15 @@ func RPCGateway() {
 				case requestQueue <- r:
 				default:
 					// Server busy with too many requests.
-					resp := ClientResponse{
-						err: &ErrServerBusy,
+					resp := RawRPCResponse{
+						Error: &ErrServerBusyRaw,
 					}
-					r.response <- &resp
+					r.response <- resp
 				}
 			} else {
 				r.request.SetId(<-NewJSONID)
 				request := &ServerRequest{
 					request:  r.request,
-					result:   nil,
 					response: r.response,
 				}
 				CurrentServerConn().SendRequest(request)
@@ -197,9 +200,16 @@ func WalletRequestProcessor() {
 			result, jsonErr := f(r.request)
 			AcctMgr.Release()
 
-			r.response <- &ClientResponse{
-				result: result,
-				err:    jsonErr,
+			if jsonErr != nil {
+				b, _ := json.Marshal(jsonErr)
+				r.response <- RawRPCResponse{
+					Error: (*json.RawMessage)(&b),
+				}
+			} else {
+				b, _ := json.Marshal(result)
+				r.response <- RawRPCResponse{
+					Result: (*json.RawMessage)(&b),
+				}
 			}
 
 		case n := <-handleNtfn:
@@ -563,34 +573,35 @@ func GetInfo(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Call down to btcd for all of the information in this command known
 	// by them.  This call can not realistically ever fail.
 	gicmd, _ := btcjson.NewGetInfoCmd(<-NewJSONID)
-	req := NewServerRequest(gicmd, make(map[string]interface{}))
-	response := <-CurrentServerConn().SendRequest(req)
-	if response.Error() != nil {
-		return nil, response.Error()
+	response := <-CurrentServerConn().SendRequest(NewServerRequest(gicmd))
+
+	var info btcjson.InfoResult
+	_, jsonErr := response.FinishUnmarshal(&info)
+	if jsonErr != nil {
+		return nil, jsonErr
 	}
-	ret := response.Result().(map[string]interface{})
 
 	balance := float64(0.0)
 	accounts := AcctMgr.ListAccounts(1)
 	for _, v := range accounts {
 		balance += v
 	}
-	ret["walletversion"] = wallet.VersCurrent.Uint32()
-	ret["balance"] = balance
+	info.WalletVersion = int(wallet.VersCurrent.Uint32())
+	info.Balance = balance
 	// Keypool times are not tracked. set to current time.
-	ret["keypoololdest"] = time.Now().Unix()
-	ret["keypoolsize"] = cfg.KeypoolSize
+	info.KeypoolOldest = time.Now().Unix()
+	info.KeypoolSize = int(cfg.KeypoolSize)
 	TxFeeIncrement.Lock()
-	ret["paytxfee"] = TxFeeIncrement.i
+	info.PaytxFee = float64(TxFeeIncrement.i) / float64(btcutil.SatoshiPerBitcoin)
 	TxFeeIncrement.Unlock()
 	/*
 	 * We don't set the following since they don't make much sense in the
 	 * wallet architecture:
-	 * ret["unlocked_until"]
-	 * ret["errors"]
+	 *  - unlocked_until
+	 *  - errors
 	 */
 
-	return ret, nil
+	return info, nil
 }
 
 // GetAccount handles a getaccount request by returning the account name
@@ -1070,8 +1081,7 @@ func ListSinceBlock(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 	}
 
-	req := NewServerRequest(gbh, new(string))
-	bhChan := CurrentServerConn().SendRequest(req)
+	bhChan := CurrentServerConn().SendRequest(NewServerRequest(gbh))
 
 	txInfoList, err := AcctMgr.ListSinceBlock(height, bs.Height,
 		cmd.TargetConfirmations)
@@ -1084,15 +1094,15 @@ func ListSinceBlock(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	// Done with work, get the response.
 	response := <-bhChan
-	if response.Error() != nil {
-		return nil, response.Error()
+	var hash string
+	_, jsonErr := response.FinishUnmarshal(&hash)
+	if jsonErr != nil {
+		return nil, jsonErr
 	}
-
-	hash := response.Result().(*string)
 
 	res := make(map[string]interface{})
 	res["transactions"] = txInfoList
-	res["lastblock"] = *hash
+	res["lastblock"] = hash
 
 	return res, nil
 }

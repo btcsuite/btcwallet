@@ -37,7 +37,7 @@ type ServerConn interface {
 	// SendRequest sends a bitcoin RPC request, returning a channel to
 	// read the reply.  A channel is used so both synchronous and
 	// asynchronous RPC can be supported.
-	SendRequest(request *ServerRequest) chan RPCResponse
+	SendRequest(request *ServerRequest) chan RawRPCResponse
 }
 
 // ErrBtcdDisconnected describes an error where an operation cannot
@@ -47,6 +47,9 @@ var ErrBtcdDisconnected = btcjson.Error{
 	Code:    -1,
 	Message: "btcd disconnected",
 }
+
+// ErrBtcdDisconnectedRaw is the raw JSON encoding of ErrBtcdDisconnected.
+var ErrBtcdDisconnectedRaw = json.RawMessage(`{"code":-1,"message":"btcd disconnected"}`)
 
 // BtcdRPCConn is a type managing a client connection to a btcd RPC server
 // over websockets.
@@ -72,23 +75,20 @@ func NewBtcdRPCConn(ws *websocket.Conn) *BtcdRPCConn {
 
 // SendRequest sends an RPC request and returns a channel to read the response's
 // result and error.  Part of the RPCConn interface.
-func (btcd *BtcdRPCConn) SendRequest(request *ServerRequest) chan RPCResponse {
+func (btcd *BtcdRPCConn) SendRequest(request *ServerRequest) chan RawRPCResponse {
 	select {
 	case <-btcd.closed:
 		// The connection has closed, so instead of adding and sending
 		// a request, return a channel that just replies with the
 		// error for a disconnected btcd.
-		responseChan := make(chan RPCResponse, 1)
-		response := &ServerResponse{
-			err: &ErrBtcdDisconnected,
-		}
-		responseChan <- response
+		responseChan := make(chan RawRPCResponse, 1)
+		responseChan <- RawRPCResponse{Error: &ErrBtcdDisconnectedRaw}
 		return responseChan
 
 	default:
 		addRequest := &AddRPCRequest{
 			Request:      request,
-			ResponseChan: make(chan chan RPCResponse, 1),
+			ResponseChan: make(chan chan RawRPCResponse, 1),
 		}
 		btcd.addRequest <- addRequest
 		return <-addRequest.ResponseChan
@@ -124,7 +124,7 @@ func (btcd *BtcdRPCConn) Close() {
 // being manaaged by a btcd RPC connection.
 type AddRPCRequest struct {
 	Request      *ServerRequest
-	ResponseChan chan chan RPCResponse
+	ResponseChan chan chan RawRPCResponse
 }
 
 // send performs the actual send of the marshaled request over the btcd
@@ -136,17 +136,11 @@ func (btcd *BtcdRPCConn) send(rpcrequest *ServerRequest) error {
 	return websocket.Message.Send(btcd.ws, mrequest)
 }
 
-type receivedResponse struct {
-	id    uint64
-	raw   string
-	reply *btcjson.Reply
-}
-
 // Start starts the goroutines required to send RPC requests and listen for
 // replies.
 func (btcd *BtcdRPCConn) Start() {
 	done := btcd.closed
-	responses := make(chan *receivedResponse)
+	responses := make(chan RawRPCResponse)
 
 	// Maintain a map of JSON IDs to RPCRequests currently being waited on.
 	go func() {
@@ -167,49 +161,61 @@ func (btcd *BtcdRPCConn) Start() {
 
 				addrequest.ResponseChan <- rpcrequest.response
 
-			case recvResponse, ok := <-responses:
+			case rawResponse, ok := <-responses:
 				if !ok {
 					responses = nil
 					close(done)
 					break
 				}
-				rpcrequest, ok := m[recvResponse.id]
+				rpcrequest, ok := m[*rawResponse.Id]
 				if !ok {
 					log.Warnf("Received unexpected btcd response")
 					continue
 				}
-				delete(m, recvResponse.id)
+				delete(m, *rawResponse.Id)
 
-				// If no result var was set, create and send
-				// send the response unmarshaled by the json
-				// package.
-				if rpcrequest.result == nil {
+				rpcrequest.response <- rawResponse
+
+				/*
+					//rpcrequest.result
+					var jsonErr *btcjson.Error
+					if rawResponse.result != nil {
+					}
+					err := json.Unmarshal([]byte(*rawResponse.result), &result)
+					err := json.Unmarshal([]byte(*rawResponse.error), &error)
+
+					rawResult := recvResponse
+					rawError := recvResponse
 					response := &ServerResponse{
-						result: recvResponse.reply.Result,
-						err:    recvResponse.reply.Error,
+						result: r.Result,
+						err:    jsonErr
 					}
 					rpcrequest.response <- response
-					continue
-				}
+				*/
 
-				// A return var was set, so unmarshal again
-				// into the var before sending the response.
-				r := &btcjson.Reply{
-					Result: rpcrequest.result,
-				}
-				json.Unmarshal([]byte(recvResponse.raw), &r)
-				response := &ServerResponse{
-					result: r.Result,
-					err:    r.Error,
-				}
-				rpcrequest.response <- response
+				/*
+					// If no result var was set, create and send
+					// send the response unmarshaled by the json
+					// package.
+
+
+					if rpcrequest.result == nil {
+						response := &ServerResponse{
+							result: recvResponse.reply.Result,
+							err:    recvResponse.reply.Error,
+						}
+						rpcrequest.response <- response
+						continue
+					}
+
+					// A return var was set, so unmarshal again
+					// into the var before sending the response.
+				*/
 
 			case <-done:
-				response := &ServerResponse{
-					err: &ErrBtcdDisconnected,
-				}
+				resp := RawRPCResponse{Error: &ErrBtcdDisconnectedRaw}
 				for _, request := range m {
-					request.response <- response
+					request.response <- resp
 				}
 				return
 			}
@@ -256,28 +262,18 @@ func (btcd *BtcdRPCConn) Start() {
 	}()
 }
 
-// unmarshalResponse attempts to unmarshal a marshaled JSON-RPC
-// response.
-func unmarshalResponse(s string) (*receivedResponse, error) {
-	var r btcjson.Reply
+// unmarshalResponse attempts to unmarshal a marshaled JSON-RPC response.
+func unmarshalResponse(s string) (RawRPCResponse, error) {
+	var r RawRPCResponse
 	if err := json.Unmarshal([]byte(s), &r); err != nil {
-		return nil, err
+		return r, err
 	}
 
 	// Check for a valid ID.
 	if r.Id == nil {
-		return nil, errors.New("id is nil")
+		return r, errors.New("id is null")
 	}
-	fid, ok := (*r.Id).(float64)
-	if !ok {
-		return nil, errors.New("id is not a number")
-	}
-	response := &receivedResponse{
-		id:    uint64(fid),
-		raw:   s,
-		reply: &r,
-	}
-	return response, nil
+	return r, nil
 }
 
 // unmarshalNotification attempts to unmarshal a marshaled JSON-RPC
@@ -307,61 +303,67 @@ type GetBestBlockResult struct {
 // in the main chain.
 func GetBestBlock(rpc ServerConn) (*GetBestBlockResult, *btcjson.Error) {
 	cmd := btcws.NewGetBestBlockCmd(<-NewJSONID)
-	request := NewServerRequest(cmd, new(GetBestBlockResult))
-	response := <-rpc.SendRequest(request)
-	if response.Error() != nil {
-		return nil, response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+
+	var resultData GetBestBlockResult
+	_, jsonErr := response.FinishUnmarshal(&resultData)
+	if jsonErr != nil {
+		return nil, jsonErr
 	}
-	return response.Result().(*GetBestBlockResult), nil
+	return &resultData, nil
 }
 
 // GetBlock requests details about a block with the given hash.
 func GetBlock(rpc ServerConn, blockHash string) (*btcjson.BlockResult, *btcjson.Error) {
 	// NewGetBlockCmd cannot fail with no optargs, so omit the check.
 	cmd, _ := btcjson.NewGetBlockCmd(<-NewJSONID, blockHash)
-	request := NewServerRequest(cmd, new(btcjson.BlockResult))
-	response := <-rpc.SendRequest(request)
-	if response.Error() != nil {
-		return nil, response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+
+	var resultData btcjson.BlockResult
+	_, jsonErr := response.FinishUnmarshal(&resultData)
+	if jsonErr != nil {
+		return nil, jsonErr
 	}
-	return response.Result().(*btcjson.BlockResult), nil
+	return &resultData, nil
 }
 
 // GetCurrentNet requests the network a bitcoin RPC server is running on.
 func GetCurrentNet(rpc ServerConn) (btcwire.BitcoinNet, *btcjson.Error) {
 	cmd := btcws.NewGetCurrentNetCmd(<-NewJSONID)
-	request := NewServerRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	if response.Error() != nil {
-		return 0, response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+
+	var resultData uint32
+	_, jsonErr := response.FinishUnmarshal(&resultData)
+	if jsonErr != nil {
+		return 0, jsonErr
 	}
-	return btcwire.BitcoinNet(uint32(response.Result().(float64))), nil
+	return btcwire.BitcoinNet(resultData), nil
 }
 
 // NotifyBlocks requests blockconnected and blockdisconnected notifications.
 func NotifyBlocks(rpc ServerConn) *btcjson.Error {
 	cmd := btcws.NewNotifyBlocksCmd(<-NewJSONID)
-	request := NewServerRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+	_, jsonErr := response.FinishUnmarshal(nil)
+	return jsonErr
 }
 
 // NotifyNewTXs requests notifications for new transactions that spend
 // to any of the addresses in addrs.
 func NotifyNewTXs(rpc ServerConn, addrs []string) *btcjson.Error {
 	cmd := btcws.NewNotifyNewTXsCmd(<-NewJSONID, addrs)
-	request := NewServerRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+	_, jsonErr := response.FinishUnmarshal(nil)
+	return jsonErr
 }
 
 // NotifySpent requests notifications for when a transaction is processed which
 // spends op.
 func NotifySpent(rpc ServerConn, op *btcwire.OutPoint) *btcjson.Error {
 	cmd := btcws.NewNotifySpentCmd(<-NewJSONID, op)
-	request := NewServerRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+	_, jsonErr := response.FinishUnmarshal(nil)
+	return jsonErr
 }
 
 // Rescan requests a blockchain rescan for transactions to any number of
@@ -371,21 +373,23 @@ func Rescan(rpc ServerConn, beginBlock int32, addrs []string,
 
 	// NewRescanCmd cannot fail with no optargs, so omit the check.
 	cmd, _ := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs, outpoints)
-	request := NewServerRequest(cmd, nil)
-	response := <-rpc.SendRequest(request)
-	return response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+	_, jsonErr := response.FinishUnmarshal(nil)
+	return jsonErr
 }
 
 // SendRawTransaction sends a hex-encoded transaction for relay.
 func SendRawTransaction(rpc ServerConn, hextx string) (txid string, error *btcjson.Error) {
 	// NewSendRawTransactionCmd cannot fail, so omit the check.
 	cmd, _ := btcjson.NewSendRawTransactionCmd(<-NewJSONID, hextx)
-	request := NewServerRequest(cmd, new(string))
-	response := <-rpc.SendRequest(request)
-	if response.Error() != nil {
-		return "", response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+
+	var resultData string
+	_, jsonErr := response.FinishUnmarshal(&resultData)
+	if jsonErr != nil {
+		return "", jsonErr
 	}
-	return *response.Result().(*string), nil
+	return resultData, nil
 }
 
 // GetRawTransaction sends the non-verbose version of a getrawtransaction
@@ -394,13 +398,14 @@ func SendRawTransaction(rpc ServerConn, hextx string) (txid string, error *btcjs
 func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, *btcjson.Error) {
 	// NewGetRawTransactionCmd cannot fail with no optargs.
 	cmd, _ := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String())
-	request := NewServerRequest(cmd, new(string))
-	response := <-rpc.SendRequest(request)
-	if response.Error() != nil {
-		return nil, response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+
+	var resultData string
+	_, jsonErr := response.FinishUnmarshal(&resultData)
+	if jsonErr != nil {
+		return nil, jsonErr
 	}
-	hextx := *response.Result().(*string)
-	serializedTx, err := hex.DecodeString(hextx)
+	serializedTx, err := hex.DecodeString(resultData)
 	if err != nil {
 		return nil, &btcjson.ErrDecodeHexString
 	}
@@ -416,10 +421,12 @@ func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, *bt
 func VerboseGetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcjson.TxRawResult, *btcjson.Error) {
 	// NewGetRawTransactionCmd cannot fail with a single optarg.
 	cmd, _ := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String(), 1)
-	request := NewServerRequest(cmd, new(btcjson.TxRawResult))
-	response := <-rpc.SendRequest(request)
-	if response.Error() != nil {
-		return nil, response.Error()
+	response := <-rpc.SendRequest(NewServerRequest(cmd))
+
+	var resultData btcjson.TxRawResult
+	_, jsonErr := response.FinishUnmarshal(&resultData)
+	if jsonErr != nil {
+		return nil, jsonErr
 	}
-	return response.Result().(*btcjson.TxRawResult), nil
+	return &resultData, nil
 }
