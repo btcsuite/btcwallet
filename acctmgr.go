@@ -712,21 +712,11 @@ func (am *AccountManager) DumpKeys() ([]string, error) {
 // DumpWIFPrivateKey searches through all accounts for the bitcoin
 // payment address addr and returns the WIF-encdoded private key.
 func (am *AccountManager) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
-	for _, a := range am.AllAccounts() {
-		switch wif, err := a.DumpWIFPrivateKey(addr); err {
-		case wallet.ErrAddressNotFound:
-			// Move on to the next account.
-			continue
-
-		case nil:
-			return wif, nil
-
-		default: // all other non-nil errors
-			return "", err
-		}
+	a, err := am.AccountByAddress(addr)
+	if err != nil {
+		return "", err
 	}
-
-	return "", errors.New("address does not refer to a key")
+	return a.DumpWIFPrivateKey(addr)
 }
 
 // NotifyBalances notifies a wallet frontend of all confirmed and unconfirmed
