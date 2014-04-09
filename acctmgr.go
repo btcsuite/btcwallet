@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
 	"github.com/conformal/btcwallet/wallet"
@@ -803,7 +804,7 @@ func (am *AccountManager) GetTransaction(txsha *btcwire.ShaHash) []accountTx {
 // a transaction on locally known wallets. If we know nothing about a
 // transaction an empty array will be returned.
 func (am *AccountManager) ListUnspent(minconf, maxconf int,
-	addresses map[string]bool) ([]map[string]interface{}, error) {
+	addresses map[string]bool) ([]*btcjson.ListUnSpentResult, error) {
 
 	bs, err := GetCurBlock()
 	if err != nil {
@@ -812,7 +813,7 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 
 	filter := len(addresses) != 0
 
-	infos := []map[string]interface{}{}
+	var results []*btcjson.ListUnSpentResult
 	for _, a := range am.AllAccounts() {
 		for _, rtx := range a.TxStore.UnspentOutputs() {
 			confs := confirms(rtx.Height(), bs.Height)
@@ -833,27 +834,27 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 			}
 		include:
 			outpoint := rtx.OutPoint()
-			info := map[string]interface{}{
-				"txid":          outpoint.Hash.String(),
-				"vout":          float64(outpoint.Index),
-				"account":       a.Name(),
-				"scriptPubKey":  hex.EncodeToString(rtx.PkScript()),
-				"amount":        float64(rtx.Value()) / 1e8,
-				"confirmations": float64(confs),
+			result := &btcjson.ListUnSpentResult{
+				TxId:          outpoint.Hash.String(),
+				Vout:          float64(outpoint.Index),
+				Account:       a.Name(),
+				ScriptPubKey:  hex.EncodeToString(rtx.PkScript()),
+				Amount:        float64(rtx.Value()) / 1e8,
+				Confirmations: float64(confs),
 			}
 
 			// BUG: this should be a JSON array so that all
 			// addresses can be included, or removed (and the
 			// caller extracts addresses from the pkScript).
 			if len(addrs) > 0 {
-				info["address"] = addrs[0].EncodeAddress()
+				result.Address = addrs[0].EncodeAddress()
 			}
 
-			infos = append(infos, info)
+			results = append(results, result)
 		}
 	}
 
-	return infos, nil
+	return results, nil
 }
 
 // RescanActiveAddresses begins a rescan for all active addresses for
