@@ -391,9 +391,9 @@ func CreateMultiSig(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 	}
 
-	return map[string]interface{}{
-		"address":      address.EncodeAddress(),
-		"redeemScript": script,
+	return btcjson.CreateMultiSigResult{
+		Address:      address.EncodeAddress(),
+		RedeemScript: hex.EncodeToString(script),
 	}, nil
 }
 
