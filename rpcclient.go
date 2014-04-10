@@ -291,21 +291,13 @@ func unmarshalNotification(s string) (btcjson.Cmd, error) {
 	return req, nil
 }
 
-// GetBestBlockResult holds the result of a getbestblock response.
-//
-// TODO(jrick): shove this in btcws.
-type GetBestBlockResult struct {
-	Hash   string `json:"hash"`
-	Height int32  `json:"height"`
-}
-
 // GetBestBlock gets both the block height and hash of the best block
 // in the main chain.
-func GetBestBlock(rpc ServerConn) (*GetBestBlockResult, *btcjson.Error) {
+func GetBestBlock(rpc ServerConn) (*btcws.GetBestBlockResult, *btcjson.Error) {
 	cmd := btcws.NewGetBestBlockCmd(<-NewJSONID)
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 
-	var resultData GetBestBlockResult
+	var resultData btcws.GetBestBlockResult
 	_, jsonErr := response.FinishUnmarshal(&resultData)
 	if jsonErr != nil {
 		return nil, jsonErr
