@@ -953,7 +953,12 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	var sr *tx.SignedTx
 	var srAccount string
 	var amountReceived int64
-	var details []map[string]interface{}
+
+	ret := btcjson.GetTransactionResult{
+		Details:         make([]btcjson.GetTransactionDetailsResult, 0),
+		WalletConflicts: make([]string, 0),
+	}
+	details := make([]btcjson.GetTransactionDetailsResult, 0)
 	for _, e := range accumulatedTxen {
 		switch record := e.Tx.(type) {
 		case *tx.RecvTxOut:
@@ -963,18 +968,22 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 			amountReceived += record.Value()
 			_, addrs, _, _ := record.Addresses(cfg.Net())
-			details = append(details, map[string]interface{}{
-				"account": e.Account,
+
+			var addr string
+			if len(addrs) == 1 {
+				addr = addrs[0].EncodeAddress()
+			}
+			details = append(details, btcjson.GetTransactionDetailsResult{
+				Account: e.Account,
 				// TODO(oga) We don't mine for now so there
 				// won't be any special coinbase types. If the
 				// tx is a coinbase then we should handle it
 				// specially with the category depending on
 				// whether it is an orphan or in the blockchain.
-				"category": "receive",
-				"amount":   float64(record.Value()) / float64(btcutil.SatoshiPerBitcoin),
-				"address":  addrs[0].EncodeAddress(),
+				Category: "receive",
+				Amount:   float64(record.Value()) / float64(btcutil.SatoshiPerBitcoin),
+				Address:  addr,
 			})
-
 		case *tx.SignedTx:
 			// there should only be a single SignedTx record, if any.
 			// If found, it will be added to the beginning.
@@ -986,37 +995,49 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	totalAmount := amountReceived
 	if sr != nil {
 		totalAmount -= sr.TotalSent()
-		info := map[string]interface{}{
-			"account":  srAccount,
-			"category": "send",
+		info := btcjson.GetTransactionDetailsResult{
+			Account:  srAccount,
+			Category: "send",
 			// negative since it is a send
-			"amount": -(sr.TotalSent() - amountReceived),
-			"fee":    sr.Fee(),
+			Amount: float64(-(sr.TotalSent() - amountReceived)) / float64(btcutil.SatoshiPerBitcoin),
+			Fee:    float64(sr.Fee()) / float64(btcutil.SatoshiPerBitcoin),
 		}
+		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(sr.Tx().MsgTx().TxOut[0].PkScript, cfg.Net())
+		if len(addrs) == 1 {
+			info.Address = addrs[0].EncodeAddress()
+		}
+		ret.Fee += info.Fee
 		// Add sent information to front.
-		details = append([]map[string]interface{}{info}, details...)
+		ret.Details = append(ret.Details, info)
+
 	}
+	ret.Details = append(ret.Details, details...)
 
 	// Generic information should be the same, so just use the first one.
 	first := accumulatedTxen[0]
-	ret := map[string]interface{}{
-		// "amount"
-		// "confirmations
-		"amount": totalAmount,
+	ret.Amount = float64(totalAmount) / float64(btcutil.SatoshiPerBitcoin)
+	ret.TxID = first.Tx.TxSha().String()
 
-		"txid": first.Tx.TxSha().String(),
-		// TODO(oga) technically we have different time and
-		// timereceived depending on if a transaction was send or
-		// receive. We ideally should provide the correct numbers for
-		// both. Right now they will always be the same
-		"time":         first.Tx.Time().Unix(),
-		"timereceived": first.Tx.Time().Unix(),
-		"details":      details,
+	buf := bytes.NewBuffer(make([]byte, 0, first.Tx.Tx().MsgTx().SerializeSize()))
+	err = first.Tx.Tx().MsgTx().Serialize(buf)
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
 	}
+	ret.Hex = hex.EncodeToString(buf.Bytes())
+
+	// TODO(oga) technically we have different time and
+	// timereceived depending on if a transaction was send or
+	// receive. We ideally should provide the correct numbers for
+	// both. Right now they will always be the same
+	ret.Time = first.Tx.Time().Unix()
+	ret.TimeReceived = first.Tx.Time().Unix()
 	if details := first.Tx.Block(); details != nil {
-		ret["blockindex"] = float64(details.Height)
-		ret["blockhash"] = details.Hash.String()
-		ret["blocktime"] = details.Time.Unix()
+		ret.BlockIndex = int64(details.Index)
+		ret.BlockHash = details.Hash.String()
+		ret.BlockTime = details.Time.Unix()
 		bs, err := GetCurBlock()
 		if err != nil {
 			return nil, &btcjson.Error{
@@ -1024,7 +1045,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				Message: err.Error(),
 			}
 		}
-		ret["confirmations"] = bs.Height - details.Height + 1
+		ret.Confirmations = int64(bs.Height - details.Height + 1)
 	}
 	// TODO(oga) if the tx is a coinbase we should set "generated" to true.
 	// Since we do not mine this currently is never the case.
