@@ -756,7 +756,7 @@ func TestImportPrivateKey(t *testing.T) {
 	// import priv key
 	importHeight := int32(50)
 	importedAt := &BlockStamp{Height: importHeight}
-	address, err := w.ImportPrivateKey(pk.D.Bytes(), false, importedAt)
+	address, err := w.ImportPrivateKey(pad(32, pk.D.Bytes()), false, importedAt)
 	if err != nil {
 		t.Error("importing private key: " + err.Error())
 		return
