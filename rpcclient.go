@@ -351,7 +351,8 @@ func NotifyNewTXs(rpc ServerConn, addrs []string) *btcjson.Error {
 
 // NotifySpent requests notifications for when a transaction is processed which
 // spends op.
-func NotifySpent(rpc ServerConn, op *btcwire.OutPoint) *btcjson.Error {
+func NotifySpent(rpc ServerConn, outpoint *btcwire.OutPoint) *btcjson.Error {
+	op := btcws.NewOutPointFromWire(outpoint)
 	cmd := btcws.NewNotifySpentCmd(<-NewJSONID, op)
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 	_, jsonErr := response.FinishUnmarshal(nil)
@@ -364,7 +365,11 @@ func Rescan(rpc ServerConn, beginBlock int32, addrs []string,
 	outpoints []*btcwire.OutPoint) *btcjson.Error {
 
 	// NewRescanCmd cannot fail with no optargs, so omit the check.
-	cmd, _ := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs, outpoints)
+	ops := make([]btcws.OutPoint, len(outpoints))
+	for i := range outpoints {
+		ops[i] = *btcws.NewOutPointFromWire(outpoints[i])
+	}
+	cmd, _ := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs, ops)
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 	_, jsonErr := response.FinishUnmarshal(nil)
 	return jsonErr
