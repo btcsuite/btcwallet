@@ -935,22 +935,23 @@ func (st *SignedTx) TxInfo(account string, chainHeight int32, net btcwire.Bitcoi
 	}
 
 	for i, txout := range st.tx.MsgTx().TxOut {
-		address := "Unknown"
+		var address string
 		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, net)
 		if len(addrs) == 1 {
 			address = addrs[0].EncodeAddress()
 		}
 
 		info := btcjson.ListTransactionsResult{
-			Account:       account,
-			Address:       address,
-			Category:      "send",
-			Amount:        float64(-txout.Value) / float64(btcutil.SatoshiPerBitcoin),
-			Fee:           float64(st.Fee()) / float64(btcutil.SatoshiPerBitcoin),
-			Confirmations: int64(confirmations),
-			TxID:          st.txSha.String(),
-			Time:          st.created.Unix(),
-			TimeReceived:  st.created.Unix(),
+			Account:         account,
+			Address:         address,
+			Category:        "send",
+			Amount:          float64(-txout.Value) / float64(btcutil.SatoshiPerBitcoin),
+			Fee:             float64(st.Fee()) / float64(btcutil.SatoshiPerBitcoin),
+			Confirmations:   int64(confirmations),
+			TxID:            st.txSha.String(),
+			Time:            st.created.Unix(),
+			TimeReceived:    st.created.Unix(),
+			WalletConflicts: []string{},
 		}
 		if st.block != nil {
 			info.BlockHash = st.block.Hash.String()
@@ -1339,19 +1340,21 @@ func (rt *RecvTxOut) TxInfo(account string, chainHeight int32, net btcwire.Bitco
 	outidx := rt.outpoint.Index
 	txout := tx.TxOut[outidx]
 
-	address := "Unknown"
+	var address string
 	_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, net)
 	if len(addrs) == 1 {
 		address = addrs[0].EncodeAddress()
 	}
 
 	result := btcjson.ListTransactionsResult{
-		Account:      account,
-		Category:     "receive",
-		Address:      address,
-		Amount:       float64(txout.Value) / float64(btcutil.SatoshiPerBitcoin),
-		TxID:         rt.outpoint.Hash.String(),
-		TimeReceived: rt.received.Unix(),
+		Account:         account,
+		Category:        "receive",
+		Address:         address,
+		Amount:          float64(txout.Value) / float64(btcutil.SatoshiPerBitcoin),
+		TxID:            rt.outpoint.Hash.String(),
+		Time:            rt.received.Unix(),
+		TimeReceived:    rt.received.Unix(),
+		WalletConflicts: []string{},
 	}
 	if rt.block != nil {
 		result.BlockHash = rt.block.Hash.String()
