@@ -958,7 +958,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		Details:         []btcjson.GetTransactionDetailsResult{},
 		WalletConflicts: []string{},
 	}
-	details := make([]btcjson.GetTransactionDetailsResult, 0)
+	details := []btcjson.GetTransactionDetailsResult{}
 	for _, e := range accumulatedTxen {
 		switch record := e.Tx.(type) {
 		case *tx.RecvTxOut:

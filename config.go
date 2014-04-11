@@ -85,7 +85,7 @@ func cleanAndExpandPath(path string) string {
 // removeDuplicateAddresses returns a new slice with all duplicate entries in
 // addrs removed.
 func removeDuplicateAddresses(addrs []string) []string {
-	result := make([]string, 0)
+	result := []string{}
 	seen := map[string]bool{}
 	for _, val := range addrs {
 		if _, ok := seen[val]; !ok {
