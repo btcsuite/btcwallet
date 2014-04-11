@@ -2492,7 +2492,7 @@ func (a *btcAddress) ExportPubKey() string {
 	return hex.EncodeToString(a.pubKeyBytes())
 }
 
-// PrivKey implements PubKeyAddress by returning the private key, or an error 
+// PrivKey implements PubKeyAddress by returning the private key, or an error
 // if th wallet is locked, watching only or the private key is missing.
 func (a *btcAddress) PrivKey() (*ecdsa.PrivateKey, error) {
 	if a.wallet.flags.watchingOnly {

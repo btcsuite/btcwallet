@@ -33,10 +33,10 @@ type allowFreeTest struct {
 }
 
 var allowFreeTests = []allowFreeTest{
-	allowFreeTest{
+	{
 		name: "priority < 57,600,000",
 		inputs: []*tx.Utxo{
-			&tx.Utxo{
+			{
 				Amt:    uint64(btcutil.SatoshiPerBitcoin),
 				Height: 0,
 			},
@@ -45,10 +45,10 @@ var allowFreeTests = []allowFreeTest{
 		txSize:    250,
 		free:      false,
 	},
-	allowFreeTest{
+	{
 		name: "priority == 57,600,000",
 		inputs: []*tx.Utxo{
-			&tx.Utxo{
+			{
 				Amt:    uint64(btcutil.SatoshiPerBitcoin),
 				Height: 0,
 			},
@@ -57,10 +57,10 @@ var allowFreeTests = []allowFreeTest{
 		txSize:    250,
 		free:      false,
 	},
-	allowFreeTest{
+	{
 		name: "priority > 57,600,000",
 		inputs: []*tx.Utxo{
-			&tx.Utxo{
+			{
 				Amt:    uint64(btcutil.SatoshiPerBitcoin),
 				Height: 0,
 			},

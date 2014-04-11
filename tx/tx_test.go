@@ -112,7 +112,7 @@ func TestTxStore(t *testing.T) {
 			bal: 0,
 			unc: TstRecvTx.MsgTx().TxOut[0].Value,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): struct{}{},
+				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
@@ -130,7 +130,7 @@ func TestTxStore(t *testing.T) {
 			bal: 0,
 			unc: TstRecvTx.MsgTx().TxOut[0].Value,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): struct{}{},
+				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
@@ -148,7 +148,7 @@ func TestTxStore(t *testing.T) {
 			bal: TstRecvTx.MsgTx().TxOut[0].Value,
 			unc: 0,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): struct{}{},
+				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
@@ -166,7 +166,7 @@ func TestTxStore(t *testing.T) {
 			bal: TstRecvTx.MsgTx().TxOut[0].Value,
 			unc: 0,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): struct{}{},
+				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
@@ -196,7 +196,7 @@ func TestTxStore(t *testing.T) {
 			bal: TstDoubleSpendTx.MsgTx().TxOut[0].Value,
 			unc: 0,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstDoubleSpendTx.Sha(), 0): struct{}{},
+				*btcwire.NewOutPoint(TstDoubleSpendTx.Sha(), 0): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
@@ -215,7 +215,7 @@ func TestTxStore(t *testing.T) {
 			unc:      0,
 			unspents: map[btcwire.OutPoint]struct{}{},
 			unmined: map[btcwire.ShaHash]struct{}{
-				*TstSpendingTx.Sha(): struct{}{},
+				*TstSpendingTx.Sha(): {},
 			},
 		},
 		{
@@ -233,7 +233,7 @@ func TestTxStore(t *testing.T) {
 			unc:      0,
 			unspents: map[btcwire.OutPoint]struct{}{},
 			unmined: map[btcwire.ShaHash]struct{}{
-				*TstSpendingTx.Sha(): struct{}{},
+				*TstSpendingTx.Sha(): {},
 			},
 		},
 		{
@@ -250,10 +250,10 @@ func TestTxStore(t *testing.T) {
 			bal: 0,
 			unc: TstSpendingTx.MsgTx().TxOut[0].Value,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): struct{}{},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{
-				*TstSpendingTx.Sha(): struct{}{},
+				*TstSpendingTx.Sha(): {},
 			},
 		},
 		{
@@ -270,11 +270,11 @@ func TestTxStore(t *testing.T) {
 			bal: 0,
 			unc: TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): struct{}{},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): struct{}{},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{
-				*TstSpendingTx.Sha(): struct{}{},
+				*TstSpendingTx.Sha(): {},
 			},
 		},
 		{
@@ -291,8 +291,8 @@ func TestTxStore(t *testing.T) {
 			bal: TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value,
 			unc: 0,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): struct{}{},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): struct{}{},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
@@ -306,8 +306,8 @@ func TestTxStore(t *testing.T) {
 			bal: TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value,
 			unc: 0,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): struct{}{},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): struct{}{},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
@@ -321,11 +321,11 @@ func TestTxStore(t *testing.T) {
 			bal: 0,
 			unc: TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): struct{}{},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): struct{}{},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{
-				*TstSpendingTx.Sha(): struct{}{},
+				*TstSpendingTx.Sha(): {},
 			},
 		},
 		{
@@ -338,11 +338,11 @@ func TestTxStore(t *testing.T) {
 			bal: 0,
 			unc: TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): struct{}{},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): struct{}{},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{
-				*TstSpendingTx.Sha(): struct{}{},
+				*TstSpendingTx.Sha(): {},
 			},
 		},
 		{
@@ -359,7 +359,7 @@ func TestTxStore(t *testing.T) {
 			bal: TstRecvTx.MsgTx().TxOut[0].Value,
 			unc: 0,
 			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): struct{}{},
+				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
 			unmined: map[btcwire.ShaHash]struct{}{},
 		},
