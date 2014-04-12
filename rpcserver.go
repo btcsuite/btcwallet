@@ -1121,9 +1121,10 @@ func ListSinceBlock(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, jsonErr
 	}
 
-	res := make(map[string]interface{})
-	res["transactions"] = txInfoList
-	res["lastblock"] = hash
+	res := btcjson.ListSinceBlockResult{
+		Transactions: txInfoList,
+		LastBlock:    hash,
+	}
 
 	return res, nil
 }
