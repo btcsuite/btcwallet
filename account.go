@@ -172,8 +172,15 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]btcjson.ListTransactionsResult, error) {
 	var txList []btcjson.ListTransactionsResult
 	for _, txRecord := range a.TxStore.SortedRecords() {
-		// check block number.
+		// Transaction records must only be considered if they occur
+		// after the block height since.
 		if since != -1 && txRecord.Height() <= since {
+			continue
+		}
+
+		// Transactions that have not met minconf confirmations are to
+		// be ignored.
+		if !confirmed(minconf, txRecord.Height(), curBlockHeight) {
 			continue
 		}
 
