@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/conformal/btcchain"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/tx"
@@ -102,10 +103,13 @@ func selectInputs(utxos []*tx.RecvTxOut, amt int64,
 	eligible := make([]*tx.RecvTxOut, 0, len(utxos))
 	for _, utxo := range utxos {
 		if confirmed(minconf, utxo.Height(), bs.Height) {
-			// Coinbase transactions must have 100 confirmations before
-			// they may be spent.
-			if utxo.IsCoinbase() && confirms(utxo.Height(), bs.Height) < 100 {
-				continue
+			// Coinbase transactions must have have reached maturity
+			// before their outputs may be spent.
+			if utxo.IsCoinbase() {
+				confs := confirms(utxo.Height(), bs.Height)
+				if confs < btcchain.CoinbaseMaturity {
+					continue
+				}
 			}
 			eligible = append(eligible, utxo)
 		}
