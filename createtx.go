@@ -104,7 +104,7 @@ func selectInputs(utxos []*tx.RecvTxOut, amt int64,
 		if confirmed(minconf, utxo.Height(), bs.Height) {
 			// Coinbase transactions must have 100 confirmations before
 			// they may be spent.
-			if utxo.IsCoinbase() && bs.Height-utxo.Height()+1 < 100 {
+			if utxo.IsCoinbase() && confirms(utxo.Height(), bs.Height) < 100 {
 				continue
 			}
 			eligible = append(eligible, utxo)
