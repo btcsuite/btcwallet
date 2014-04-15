@@ -425,7 +425,7 @@ func (a *Account) Track() {
 		i++
 	}
 
-	err := NotifyNewTXs(CurrentServerConn(), addrstrs)
+	err := NotifyReceived(CurrentServerConn(), addrstrs)
 	if err != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}
@@ -616,7 +616,7 @@ func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
 
 	log.Debugf("Requesting notifications of TXs sending to address %v", apkh)
 
-	err := NotifyNewTXs(CurrentServerConn(), []string{apkh.EncodeAddress()})
+	err := NotifyReceived(CurrentServerConn(), []string{apkh.EncodeAddress()})
 	if err != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}

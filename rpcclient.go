@@ -340,10 +340,10 @@ func NotifyBlocks(rpc ServerConn) *btcjson.Error {
 	return jsonErr
 }
 
-// NotifyNewTXs requests notifications for new transactions that spend
+// NotifyReceived requests notifications for new transactions that spend
 // to any of the addresses in addrs.
-func NotifyNewTXs(rpc ServerConn, addrs []string) *btcjson.Error {
-	cmd := btcws.NewNotifyNewTXsCmd(<-NewJSONID, addrs)
+func NotifyReceived(rpc ServerConn, addrs []string) *btcjson.Error {
+	cmd := btcws.NewNotifyReceivedCmd(<-NewJSONID, addrs)
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 	_, jsonErr := response.FinishUnmarshal(nil)
 	return jsonErr
