@@ -139,6 +139,8 @@ func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) fl
 		// Utxos not yet in blocks (height -1) should only be
 		// added if confirmations is 0.
 		if confirmed(confirms, txout.Height(), bs.Height) {
+			// We only care about the case where len(addrs) == 1, and err
+			// will never be non-nil in that case
 			_, addrs, _, _ := txout.Addresses(cfg.Net())
 			if len(addrs) != 1 {
 				continue
@@ -234,6 +236,8 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 		if !ok {
 			continue
 		}
+		// We only care about the case where len(addrs) == 1, and err
+		// will never be non-nil in that case
 		_, addrs, _, _ := txout.Addresses(cfg.Net())
 		if len(addrs) != 1 {
 			continue

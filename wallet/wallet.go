@@ -85,11 +85,8 @@ const (
 func binaryRead(r io.Reader, order binary.ByteOrder, data interface{}) (n int64, err error) {
 	var read int
 	buf := make([]byte, binary.Size(data))
-	if read, err = r.Read(buf); err != nil {
+	if read, err = io.ReadFull(r, buf); err != nil {
 		return int64(read), err
-	}
-	if read < binary.Size(data) {
-		return int64(read), io.EOF
 	}
 	return int64(read), binary.Read(bytes.NewBuffer(buf), order, data)
 }
@@ -287,8 +284,8 @@ func (v version) Uint32() uint32 {
 
 func (v *version) ReadFrom(r io.Reader) (int64, error) {
 	// Read 4 bytes for the version.
-	versBytes := make([]byte, 4)
-	n, err := r.Read(versBytes)
+	var versBytes [4]byte
+	n, err := io.ReadFull(r, versBytes[:])
 	if err != nil {
 		return int64(n), err
 	}
@@ -727,7 +724,10 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 			w.importedAddrs = append(w.importedAddrs, &e.script)
 
 		case *addrCommentEntry:
-			addr := e.address(w.net)
+			addr, err := e.address(w.net)
+			if err != nil {
+				return 0, err
+			}
 			w.addrCommentMap[getAddressKey(addr)] =
 				comment(e.comment)
 
@@ -1238,16 +1238,16 @@ func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
 	}
 
 	w.recent.lastHeight = bs.Height
-	blockSha := new(btcwire.ShaHash)
-	copy(blockSha[:], bs.Hash[:])
+
+	blockSha := bs.Hash
 	if len(w.recent.hashes) == 20 {
 		// Make room for the most recent hash.
 		copy(w.recent.hashes, w.recent.hashes[1:])
 
 		// Set new block in the last position.
-		w.recent.hashes[19] = blockSha
+		w.recent.hashes[19] = &blockSha
 	} else {
-		w.recent.hashes = append(w.recent.hashes, blockSha)
+		w.recent.hashes = append(w.recent.hashes, &blockSha)
 	}
 }
 
@@ -1459,8 +1459,7 @@ func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
 	if len(w.recent.hashes) != 0 {
 		ww.recent.hashes = make([]*btcwire.ShaHash, 0, len(w.recent.hashes))
 		for _, hash := range w.recent.hashes {
-			var hashCpy btcwire.ShaHash
-			copy(hashCpy[:], hash[:])
+			hashCpy := *hash
 			ww.recent.hashes = append(ww.recent.hashes, &hashCpy)
 		}
 	}
@@ -1611,7 +1610,7 @@ type walletFlags struct {
 
 func (wf *walletFlags) ReadFrom(r io.Reader) (int64, error) {
 	var b [8]byte
-	n, err := r.Read(b[:])
+	n, err := io.ReadFull(r, b[:])
 	if err != nil {
 		return int64(n), err
 	}
@@ -1647,7 +1646,7 @@ type addrFlags struct {
 
 func (af *addrFlags) ReadFrom(r io.Reader) (int64, error) {
 	var b [8]byte
-	n, err := r.Read(b[:])
+	n, err := io.ReadFull(r, b[:])
 	if err != nil {
 		return int64(n), err
 	}
@@ -1731,16 +1730,15 @@ func (rb *recentBlocks) ReadFromVersion(v version, r io.Reader) (int64, error) {
 	// block height and hash, not the last 20.
 
 	var read int64
-	var syncedBlockHash btcwire.ShaHash
 
 	// Read height.
-	heightBytes := make([]byte, 4) // 4 bytes for a int32
-	n, err := r.Read(heightBytes)
-	if err != nil {
-		return read + int64(n), err
-	}
+	var heightBytes [4]byte // 4 bytes for a int32
+	n, err := io.ReadFull(r, heightBytes[:])
 	read += int64(n)
-	rb.lastHeight = int32(binary.LittleEndian.Uint32(heightBytes))
+	if err != nil {
+		return read, err
+	}
+	rb.lastHeight = int32(binary.LittleEndian.Uint32(heightBytes[:]))
 
 	// If height is -1, the last synced block is unknown, so don't try
 	// to read a block hash.
@@ -1750,11 +1748,12 @@ func (rb *recentBlocks) ReadFromVersion(v version, r io.Reader) (int64, error) {
 	}
 
 	// Read block hash.
-	n, err = r.Read(syncedBlockHash[:])
-	if err != nil {
-		return read + int64(n), err
-	}
+	var syncedBlockHash btcwire.ShaHash
+	n, err = io.ReadFull(r, syncedBlockHash[:])
 	read += int64(n)
+	if err != nil {
+		return read, err
+	}
 
 	rb.hashes = []*btcwire.ShaHash{
 		&syncedBlockHash,
@@ -1767,13 +1766,13 @@ func (rb *recentBlocks) ReadFrom(r io.Reader) (int64, error) {
 	var read int64
 
 	// Read number of saved blocks.  This should not exceed 20.
-	nBlockBytes := make([]byte, 4) // 4 bytes for a uint32
-	n, err := r.Read(nBlockBytes)
-	if err != nil {
-		return read + int64(n), err
-	}
+	var nBlockBytes [4]byte // 4 bytes for a uint32
+	n, err := io.ReadFull(r, nBlockBytes[:])
 	read += int64(n)
-	nBlocks := binary.LittleEndian.Uint32(nBlockBytes)
+	if err != nil {
+		return read, err
+	}
+	nBlocks := binary.LittleEndian.Uint32(nBlockBytes[:])
 	if nBlocks > 20 {
 		return read, errors.New("number of last seen blocks exceeds maximum of 20")
 	}
@@ -1786,13 +1785,13 @@ func (rb *recentBlocks) ReadFrom(r io.Reader) (int64, error) {
 	}
 
 	// Read most recently seen block height.
-	heightBytes := make([]byte, 4) // 4 bytes for a int32
-	n, err = r.Read(heightBytes)
-	if err != nil {
-		return read + int64(n), err
-	}
+	var heightBytes [4]byte // 4 bytes for a int32
+	n, err = io.ReadFull(r, heightBytes[:])
 	read += int64(n)
-	height := int32(binary.LittleEndian.Uint32(heightBytes))
+	if err != nil {
+		return read, err
+	}
+	height := int32(binary.LittleEndian.Uint32(heightBytes[:]))
 
 	// height should not be -1 (or any other negative number)
 	// since at this point we should be reading in at least one
@@ -1809,13 +1808,13 @@ func (rb *recentBlocks) ReadFrom(r io.Reader) (int64, error) {
 	// that here.
 	rb.hashes = make([]*btcwire.ShaHash, 0, nBlocks)
 	for i := uint32(0); i < nBlocks; i++ {
-		blockSha := new(btcwire.ShaHash)
-		n, err := r.Read(blockSha[:])
-		if err != nil {
-			return read + int64(n), err
-		}
+		var blockSha btcwire.ShaHash
+		n, err := io.ReadFull(r, blockSha[:])
 		read += int64(n)
-		rb.hashes = append(rb.hashes, blockSha)
+		if err != nil {
+			return read, err
+		}
+		rb.hashes = append(rb.hashes, &blockSha)
 	}
 
 	return read, nil
@@ -1835,35 +1834,34 @@ func (rb *recentBlocks) WriteTo(w io.Writer) (int64, error) {
 	if nBlocks == 0 && rb.lastHeight != -1 {
 		return written, errors.New("no block hashes available, but height is not -1")
 	}
-	nBlockBytes := make([]byte, 4) // 4 bytes for a uint32
-	binary.LittleEndian.PutUint32(nBlockBytes, nBlocks)
-	n, err := w.Write(nBlockBytes)
-	if err != nil {
-		return written + int64(n), err
-	}
+	var nBlockBytes [4]byte // 4 bytes for a uint32
+	binary.LittleEndian.PutUint32(nBlockBytes[:], nBlocks)
+	n, err := w.Write(nBlockBytes[:])
 	written += int64(n)
-
+	if err != nil {
+		return written, err
+	}
 	// If number of blocks is 0, our work here is done.
 	if nBlocks == 0 {
 		return written, nil
 	}
 
 	// Write most recently seen block height.
-	heightBytes := make([]byte, 4) // 4 bytes for a int32
-	binary.LittleEndian.PutUint32(heightBytes, uint32(rb.lastHeight))
-	n, err = w.Write(heightBytes)
-	if err != nil {
-		return written + int64(n), err
-	}
+	var heightBytes [4]byte // 4 bytes for a int32
+	binary.LittleEndian.PutUint32(heightBytes[:], uint32(rb.lastHeight))
+	n, err = w.Write(heightBytes[:])
 	written += int64(n)
+	if err != nil {
+		return written, err
+	}
 
 	// Write block hashes.
 	for _, hash := range rb.hashes {
 		n, err := w.Write(hash[:])
-		if err != nil {
-			return written + int64(n), err
-		}
 		written += int64(n)
+		if err != nil {
+			return written, err
+		}
 	}
 
 	return written, nil
@@ -1942,7 +1940,7 @@ func (u *unusedSpace) ReadFromVersion(v version, r io.Reader) (int64, error) {
 
 	// Read rest of actually unused bytes.
 	unused := make([]byte, u.nBytes-int(read))
-	n, err := r.Read(unused)
+	n, err := io.ReadFull(r, unused)
 	return read + int64(n), err
 }
 
@@ -2597,7 +2595,7 @@ type scriptFlags struct {
 // ReadFrom implements the io.ReaderFrom interface by reading from r into sf.
 func (sf *scriptFlags) ReadFrom(r io.Reader) (int64, error) {
 	var b [8]byte
-	n, err := r.Read(b[:])
+	n, err := io.ReadFull(r, b[:])
 	if err != nil {
 		return int64(n), err
 	}
@@ -2639,19 +2637,19 @@ type p2SHScript []byte
 // r in the format <4 bytes little endian length><script bytes>
 func (a *p2SHScript) ReadFrom(r io.Reader) (n int64, err error) {
 	//read length
-	lenBytes := make([]byte, 4)
+	var lenBytes [4]byte
 
-	read, err := r.Read(lenBytes)
+	read, err := io.ReadFull(r, lenBytes[:])
 	n += int64(read)
 	if err != nil {
 		return n, err
 	}
 
-	length := binary.LittleEndian.Uint32(lenBytes)
+	length := binary.LittleEndian.Uint32(lenBytes[:])
 
 	script := make([]byte, length)
 
-	read, err = r.Read(script)
+	read, err = io.ReadFull(r, script)
 	n += int64(read)
 	if err != nil {
 		return n, err
@@ -2666,10 +2664,10 @@ func (a *p2SHScript) ReadFrom(r io.Reader) (n int64, err error) {
 // the format <4 bytes little endian length><script bytes>
 func (a *p2SHScript) WriteTo(w io.Writer) (n int64, err error) {
 	// Prepare and write 32-bit little-endian length header
-	lenBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(lenBytes, uint32(len(*a)))
+	var lenBytes [4]byte
+	binary.LittleEndian.PutUint32(lenBytes[:], uint32(len(*a)))
 
-	written, err := w.Write(lenBytes)
+	written, err := w.Write(lenBytes[:])
 	n += int64(written)
 	if err != nil {
 		return n, err
@@ -3169,11 +3167,12 @@ type addrCommentEntry struct {
 	comment       []byte
 }
 
-func (e *addrCommentEntry) address(net btcwire.BitcoinNet) *btcutil.AddressPubKeyHash {
-	// error is not returned because the hash will always be 20
-	// bytes, and net is assumed to be valid.
-	addr, _ := btcutil.NewAddressPubKeyHash(e.pubKeyHash160[:], net)
-	return addr
+func (e *addrCommentEntry) address(net btcwire.BitcoinNet) (*btcutil.AddressPubKeyHash, error) {
+	addr, err := btcutil.NewAddressPubKeyHash(e.pubKeyHash160[:], net)
+	if err != nil {
+		return nil, err
+	}
+	return addr, nil
 }
 
 func (e *addrCommentEntry) WriteTo(w io.Writer) (n int64, err error) {
@@ -3286,11 +3285,9 @@ func (e *deletedEntry) ReadFrom(r io.Reader) (n int64, err error) {
 	n += read
 
 	unused := make([]byte, ulen)
-	nRead, err := r.Read(unused)
-	if err == io.EOF {
-		return n + int64(nRead), nil
-	}
-	return n + int64(nRead), err
+	nRead, err := io.ReadFull(r, unused)
+	n += int64(nRead)
+	return n, err
 }
 
 // BlockStamp defines a block (by height and a unique hash) and is

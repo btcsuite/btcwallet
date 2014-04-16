@@ -299,7 +299,8 @@ func (a *Account) txToPairs(pairs map[string]int64, minconf int) (*CreatedTx, er
 		}
 	}
 
-	buf := new(bytes.Buffer)
+	buf := bytes.NewBuffer(nil)
+	buf.Grow(msgtx.SerializeSize())
 	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
 	info := &CreatedTx{
 		tx:         btcutil.NewTx(msgtx),

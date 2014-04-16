@@ -709,8 +709,7 @@ func GetAddressBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	bal := a.CalculateAddressBalance(addr, int(cmd.Minconf))
-	return bal, nil
+	return a.CalculateAddressBalance(addr, int(cmd.Minconf)), nil
 }
 
 // GetUnconfirmedBalance handles a getunconfirmedbalance extension request
@@ -1018,7 +1017,8 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	ret.Amount = float64(totalAmount) / float64(btcutil.SatoshiPerBitcoin)
 	ret.TxID = first.Tx.TxSha().String()
 
-	buf := bytes.NewBuffer(make([]byte, 0, first.Tx.Tx().MsgTx().SerializeSize()))
+	buf := bytes.NewBuffer(nil)
+	buf.Grow(first.Tx.Tx().MsgTx().SerializeSize())
 	err = first.Tx.Tx().MsgTx().Serialize(buf)
 	if err != nil {
 		return nil, &btcjson.Error{
@@ -1360,7 +1360,8 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
 		a.ReqNewTxsForAddress(createdTx.changeAddr)
 	}
 
-	serializedTx := new(bytes.Buffer)
+	serializedTx := bytes.NewBuffer(nil)
+	serializedTx.Grow(createdTx.tx.MsgTx().SerializeSize())
 	createdTx.tx.MsgTx().Serialize(serializedTx)
 	hextx := hex.EncodeToString(serializedTx.Bytes())
 	txSha, jsonErr := SendRawTransaction(CurrentServerConn(), hextx)
