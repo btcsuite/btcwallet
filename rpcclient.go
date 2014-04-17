@@ -392,13 +392,22 @@ func SendRawTransaction(rpc ServerConn, hextx string) (txid string, error *btcjs
 	return resultData, nil
 }
 
-// GetRawTransaction sends the non-verbose version of a getrawtransaction
-// request to receive the serialized transaction referenced by txsha.  If
-// successful, the transaction is decoded and returned as a btcutil.Tx.
-func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, *btcjson.Error) {
+// GetRawTransaction returns a future representing a pending GetRawTransaction
+// command for txsha.. When the result of the request is required it may be
+// collected with GetRawTRansactionAsyncResult.
+func GetRawTransactionAsync(rpc ServerConn, txsha *btcwire.ShaHash) chan RawRPCResponse {
 	// NewGetRawTransactionCmd cannot fail with no optargs.
 	cmd, _ := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String())
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
+
+	return rpc.SendRequest(NewServerRequest(cmd))
+}
+
+// GetRawTransactionAsyncResult waits for the pending command in request -
+// the reqsult of a previous GetRawTransactionAsync() call - and returns either
+// the requested transaction, or an error.
+func GetRawTransactionAsyncResult(request chan RawRPCResponse) (*btcutil.Tx,
+	*btcjson.Error) {
+	response := <-request
 
 	var resultData string
 	_, jsonErr := response.FinishUnmarshal(&resultData)
@@ -414,6 +423,14 @@ func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, *bt
 		return nil, &btcjson.ErrDeserialization
 	}
 	return utx, nil
+}
+
+// GetRawTransaction sends the non-verbose version of a getrawtransaction
+// request to receive the serialized transaction referenced by txsha.  If
+// successful, the transaction is decoded and returned as a btcutil.Tx.
+func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, *btcjson.Error) {
+	resp := GetRawTransactionAsync(rpc, txsha)
+	return GetRawTransactionAsyncResult(resp)
 }
 
 // VerboseGetRawTransaction sends the verbose version of a getrawtransaction
