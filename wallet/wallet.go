@@ -106,17 +106,12 @@ func binaryWrite(w io.Writer, order binary.ByteOrder, data interface{}) (n int64
 // 32-byte privkey.  The returned pubkey is 33 bytes if compressed,
 // or 65 bytes if uncompressed.
 func pubkeyFromPrivkey(privkey []byte, compress bool) (pubkey []byte) {
-	x, y := btcec.S256().ScalarBaseMult(privkey)
-	pub := &btcec.PublicKey{
-		Curve: btcec.S256(),
-		X:     x,
-		Y:     y,
-	}
+	_, pk := btcec.PrivKeyFromBytes(btcec.S256(), privkey)
 
 	if compress {
-		return pub.SerializeCompressed()
+		return pk.SerializeCompressed()
 	}
-	return pub.SerializeUncompressed()
+	return pk.SerializeUncompressed()
 }
 
 func keyOneIter(passphrase, salt []byte, memReqts uint64) []byte {
