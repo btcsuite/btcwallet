@@ -484,6 +484,17 @@ func (am *AccountManager) MarkAddressForAccount(address btcutil.Address,
 	}
 }
 
+// Address looks up an address if it is known to wallet at all.
+func (am *AccountManager) Address(addr btcutil.Address) (wallet.WalletAddress,
+	error) {
+	a, err := am.AccountByAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return a.Address(addr)
+}
+
 // AllAccounts returns a slice of all managed accounts.
 func (am *AccountManager) AllAccounts() []*Account {
 	respChan := make(chan []*Account)

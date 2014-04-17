@@ -286,7 +286,7 @@ func makeMultiSigScript(keys []string, nRequired int) ([]byte, *btcjson.Error) {
 		case *btcutil.AddressPubKey:
 			keysesPrecious[i] = addr
 		case *btcutil.AddressPubKeyHash:
-			act, err := AcctMgr.AccountByAddress(addr)
+			ainfo, err := AcctMgr.Address(addr)
 			if err != nil {
 				return nil, &btcjson.Error{
 					Code:    btcjson.ErrParse.Code,
@@ -294,13 +294,6 @@ func makeMultiSigScript(keys []string, nRequired int) ([]byte, *btcjson.Error) {
 				}
 			}
 
-			ainfo, err := act.Address(addr)
-			if err != nil {
-				return nil, &btcjson.Error{
-					Code:    btcjson.ErrParse.Code,
-					Message: err.Error(),
-				}
-			}
 			apkinfo := ainfo.(wallet.PubKeyAddress)
 
 			// This will be an addresspubkey
@@ -1641,17 +1634,9 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		}
 	}
 
-	a, err := AcctMgr.AccountByAddress(addr)
+	ainfo, err := AcctMgr.Address(addr)
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
-	}
-
-	ainfo, err := a.Address(addr)
-	if err != nil {
-		return nil, &btcjson.Error{
-			Code:    btcjson.ErrWallet.Code,
-			Message: err.Error(),
-		}
 	}
 
 	pka := ainfo.(wallet.PubKeyAddress)
@@ -1761,8 +1746,9 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	result.Address = addr.EncodeAddress()
 	result.IsValid = true
 
-	account, err := AcctMgr.AccountByAddress(addr)
-	if err == nil {
+	// We can't use AcctMgr.Address() here since we also need the account
+	// name.
+	if account, err := AcctMgr.AccountByAddress(addr); err == nil {
 		// we ignore these errors because if this call passes this can't
 		// realistically fail.
 		ainfo, _ := account.Address(addr)
@@ -1813,17 +1799,9 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// First check we know about the address and get the keys.
-	a, err := AcctMgr.AccountByAddress(addr)
+	ainfo, err := AcctMgr.Address(addr)
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
-	}
-
-	ainfo, err := a.Address(addr)
-	if err != nil {
-		return nil, &btcjson.Error{
-			Code:    btcjson.ErrWallet.Code,
-			Message: err.Error(),
-		}
 	}
 
 	pka := ainfo.(wallet.PubKeyAddress)
