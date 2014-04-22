@@ -402,7 +402,7 @@ out:
 // WSSendRecv is the handler for websocket client connections.  It loops
 // forever (until disconnected), reading JSON-RPC requests and sending
 // sending responses and notifications.
-func (s *server) WSSendRecv(ws *websocket.Conn, authenticated bool) {
+func (s *server) WSSendRecv(ws *websocket.Conn, remoteAddr string, authenticated bool) {
 	// Add client context so notifications duplicated to each
 	// client are received by this client.
 	recvQuit := make(chan struct{})
@@ -416,8 +416,11 @@ func (s *server) WSSendRecv(ws *websocket.Conn, authenticated bool) {
 		case <-recvQuit:
 		case <-sendQuit:
 		}
+		log.Infof("Disconnected websocket client %s", remoteAddr)
 		close(cc.quit)
 	}()
+	log.Infof("New websocket client %s", remoteAddr)
+
 	NotifyBtcdConnection(cc.send) // TODO(jrick): clients should explicitly request this.
 	addClient <- cc
 
@@ -438,10 +441,9 @@ func (s *server) WSSendRecv(ws *websocket.Conn, authenticated bool) {
 					// Do not log error.
 
 				default:
-					// Log warning if the client did not disconnect.
 					if err != io.EOF {
-						log.Warnf("Cannot receive client websocket message: %v",
-							err)
+						log.Warnf("Websocket receive failed from client %s: %v",
+							remoteAddr, err)
 					}
 				}
 				close(recvQueueIn)
@@ -492,8 +494,7 @@ out:
 		select {
 		case <-badAuth:
 			// Bad auth. Disconnect.
-			log.Warnf("Disconnecting improperly authorized websocket client")
-			ws.Close()
+			log.Warnf("Disconnecting unauthorized websocket client %s", remoteAddr)
 			break out
 
 		case m = <-cc.send: // sends from external writers.  never closes.
@@ -502,20 +503,23 @@ out:
 				// Nothing left to send.  Return so the handler exits.
 				break out
 			}
+		case <-cc.quit:
+			break out
 		}
 
 		err := ws.SetWriteDeadline(time.Now().Add(deadline))
 		if err != nil {
-			log.Errorf("Cannot set write deadline: %v", err)
+			log.Errorf("Cannot set write deadline on client %s: %v", remoteAddr, err)
 			break out
 		}
 		err = websocket.Message.Send(ws, string(m))
 		if err != nil {
-			log.Infof("Cannot complete client websocket send: %v", err)
+			log.Warnf("Websocket send failed to client %s: %v", remoteAddr, err)
 			break out
 		}
 	}
 	close(sendQuit)
+	log.Tracef("Leaving function WSSendRecv")
 }
 
 // NotifyNewBlockChainHeight notifies all frontends of a new
@@ -562,7 +566,7 @@ func (s *server) Start() {
 		// client if the origin is unset.
 		wsServer := websocket.Server{
 			Handler: websocket.Handler(func(ws *websocket.Conn) {
-				s.WSSendRecv(ws, authenticated)
+				s.WSSendRecv(ws, r.RemoteAddr, authenticated)
 			}),
 		}
 		wsServer.ServeHTTP(w, r)
