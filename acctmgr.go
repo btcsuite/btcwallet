@@ -27,7 +27,6 @@ import (
 	"github.com/conformal/btcwire"
 	"os"
 	"strings"
-	"time"
 )
 
 // Errors relating to accounts.
@@ -563,22 +562,22 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 // the transaction IDs match, the record in the TxStore is updated with
 // the full information about the newly-mined tx, and the TxStore is
 // scheduled to be written to disk..
-func (am *AccountManager) RecordSpendingTx(tx_ *btcutil.Tx, block *tx.BlockDetails) {
-	now := time.Now()
-	var created time.Time
-	if block != nil && now.After(block.Time) {
-		created = block.Time
-	} else {
-		created = now
-	}
-
+func (am *AccountManager) RecordSpendingTx(tx_ *btcutil.Tx, block *tx.Block) error {
 	for _, a := range am.AllAccounts() {
 		// TODO(jrick): This needs to iterate through each txout's
 		// addresses and find whether this account's keystore contains
 		// any of the addresses this tx sends to.
-		a.TxStore.InsertSignedTx(tx_, created, block)
+		txr, err := a.TxStore.InsertTx(tx_, block)
+		if err != nil {
+			return err
+		}
+		// When received as a notification, we don't know what the inputs are.
+		if _, err := txr.AddDebits(nil); err != nil {
+			return err
+		}
 		am.ds.ScheduleTxStoreWrite(a)
 	}
+	return nil
 }
 
 // CalculateBalance returns the balance, calculated using minconf block
@@ -744,7 +743,9 @@ func (am *AccountManager) ListAccounts(minconf int) map[string]float64 {
 // ListSinceBlock returns a slice of objects representing all transactions in
 // the wallets since the given block.
 // To be used for the listsinceblock command.
-func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]btcjson.ListTransactionsResult, error) {
+func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32,
+	minconf int) ([]btcjson.ListTransactionsResult, error) {
+
 	// Create and fill a map of account names and their balances.
 	var txList []btcjson.ListTransactionsResult
 	for _, a := range am.AllAccounts() {
@@ -761,18 +762,18 @@ func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32, minconf in
 // GetTransaction.
 type accountTx struct {
 	Account string
-	Tx      tx.Record
+	Tx      *tx.TxRecord
 }
 
 // GetTransaction returns an array of accountTx to fully represent the effect of
 // a transaction on locally known wallets. If we know nothing about a
 // transaction an empty array will be returned.
-func (am *AccountManager) GetTransaction(txsha *btcwire.ShaHash) []accountTx {
+func (am *AccountManager) GetTransaction(txSha *btcwire.ShaHash) []accountTx {
 	accumulatedTxen := []accountTx{}
 
 	for _, a := range am.AllAccounts() {
-		for _, record := range a.TxStore.SortedRecords() {
-			if *record.TxSha() != *txsha {
+		for _, record := range a.TxStore.Records() {
+			if *record.Tx().Sha() != *txSha {
 				continue
 			}
 
@@ -794,6 +795,7 @@ func (am *AccountManager) GetTransaction(txsha *btcwire.ShaHash) []accountTx {
 // transaction an empty array will be returned.
 func (am *AccountManager) ListUnspent(minconf, maxconf int,
 	addresses map[string]bool) ([]*btcjson.ListUnSpentResult, error) {
+
 	bs, err := GetCurBlock()
 	if err != nil {
 		return nil, err
@@ -803,14 +805,18 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 
 	var results []*btcjson.ListUnSpentResult
 	for _, a := range am.AllAccounts() {
-		for _, rtx := range a.TxStore.UnspentOutputs() {
-			confs := confirms(rtx.Height(), bs.Height)
+		unspent, err := a.TxStore.UnspentOutputs()
+		if err != nil {
+			return nil, err
+		}
+		for _, credit := range unspent {
+			confs := confirms(credit.BlockHeight, bs.Height)
 			switch {
 			case int(confs) < minconf, int(confs) > maxconf:
 				continue
 			}
 
-			_, addrs, _, _ := rtx.Addresses(cfg.Net())
+			_, addrs, _, _ := credit.Addresses(cfg.Net())
 			if filter {
 				for _, addr := range addrs {
 					_, ok := addresses[addr.EncodeAddress()]
@@ -821,13 +827,12 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 				continue
 			}
 		include:
-			outpoint := rtx.OutPoint()
 			result := &btcjson.ListUnSpentResult{
-				TxId:          outpoint.Hash.String(),
-				Vout:          float64(outpoint.Index),
+				TxId:          credit.Tx().Sha().String(),
+				Vout:          float64(credit.OutputIndex),
 				Account:       a.Name(),
-				ScriptPubKey:  hex.EncodeToString(rtx.PkScript()),
-				Amount:        float64(rtx.Value()) / 1e8,
+				ScriptPubKey:  hex.EncodeToString(credit.TxOut().PkScript),
+				Amount:        credit.Amount().ToUnit(btcutil.AmountBTC),
 				Confirmations: float64(confs),
 			}
 
@@ -847,23 +852,26 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 
 // RescanActiveAddresses begins a rescan for all active addresses for
 // each account.
-func (am *AccountManager) RescanActiveAddresses() {
+func (am *AccountManager) RescanActiveAddresses() error {
 	var job *RescanJob
 	for _, a := range am.AllAccounts() {
-		acctJob := a.RescanActiveJob()
+		acctJob, err := a.RescanActiveJob()
+		if err != nil {
+			return err
+		}
 		if job == nil {
 			job = acctJob
 		} else {
 			job.Merge(acctJob)
 		}
 	}
-	if job == nil {
-		return
+	if job != nil {
+		// Submit merged job and block until rescan completes.
+		jobFinished := am.rm.SubmitJob(job)
+		<-jobFinished
 	}
 
-	// Submit merged job and block until rescan completes.
-	jobFinished := am.rm.SubmitJob(job)
-	<-jobFinished
+	return nil
 }
 
 func (am *AccountManager) ResendUnminedTxs() {

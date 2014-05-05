@@ -740,8 +740,8 @@ func Handshake(rpc ServerConn) error {
 		log.Debugf("Checking for previous saved block with height %v hash %v",
 			bs.Height, bs.Hash)
 
-		_, err := GetBlock(rpc, bs.Hash.String())
-		if err != nil {
+		_, jsonErr := GetBlock(rpc, bs.Hash.String())
+		if jsonErr != nil {
 			continue
 		}
 
@@ -763,7 +763,14 @@ func Handshake(rpc ServerConn) error {
 
 		// Begin tracking wallets against this btcd instance.
 		AcctMgr.Track()
-		AcctMgr.RescanActiveAddresses()
+		if err := AcctMgr.RescanActiveAddresses(); err != nil {
+			return err
+		}
+		// TODO: Only begin tracking new unspent outputs as a result
+		// of the rescan.  This is also pretty racy, as a new block
+		// could arrive between rescan and by the time the new outpoint
+		// is added to btcd's websocket's unspent output set.
+		AcctMgr.Track()
 
 		// (Re)send any unmined transactions to btcd in case of a btcd restart.
 		AcctMgr.ResendUnminedTxs()
@@ -782,6 +789,9 @@ func Handshake(rpc ServerConn) error {
 	a.fullRescan = true
 	AcctMgr.Track()
 	AcctMgr.RescanActiveAddresses()
+	// TODO: only begin tracking new unspent outputs as a result of the
+	// rescan.  This is also racy (see comment for second Track above).
+	AcctMgr.Track()
 	AcctMgr.ResendUnminedTxs()
 	return nil
 }

@@ -33,20 +33,20 @@ import (
 	"github.com/conformal/btcws"
 )
 
-func parseBlock(block *btcws.BlockDetails) (*tx.BlockDetails, error) {
+func parseBlock(block *btcws.BlockDetails) (*tx.Block, int, error) {
 	if block == nil {
-		return nil, nil
+		return nil, btcutil.TxIndexUnknown, nil
 	}
 	blksha, err := btcwire.NewShaHashFromStr(block.Hash)
 	if err != nil {
-		return nil, err
+		return nil, btcutil.TxIndexUnknown, err
 	}
-	return &tx.BlockDetails{
+	b := &tx.Block{
 		Height: block.Height,
 		Hash:   *blksha,
-		Index:  int32(block.Index),
 		Time:   time.Unix(block.Time, 0),
-	}, nil
+	}
+	return b, block.Index, nil
 }
 
 type notificationHandler func(btcjson.Cmd) error
@@ -80,13 +80,11 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 		return fmt.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
 	}
 
-	var block *tx.BlockDetails
-	if rtx.Block != nil {
-		block, err = parseBlock(rtx.Block)
-		if err != nil {
-			return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
-		}
+	block, txIdx, err := parseBlock(rtx.Block)
+	if err != nil {
+		return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
 	}
+	tx_.SetIndex(txIdx)
 
 	// For transactions originating from this wallet, the sent tx history should
 	// be recorded before the received history.  If wallet created this tx, wait
@@ -106,14 +104,6 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 		SendTxHistSyncChans.remove <- *tx_.Sha()
 	}
 
-	now := time.Now()
-	var received time.Time
-	if block != nil && now.After(block.Time) {
-		received = block.Time
-	} else {
-		received = now
-	}
-
 	// For every output, find all accounts handling that output address (if any)
 	// and record the received txout.
 	for outIdx, txout := range tx_.MsgTx().TxOut {
@@ -128,7 +118,11 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 		}
 
 		for _, a := range accounts {
-			record, err := a.TxStore.InsertRecvTxOut(tx_, uint32(outIdx), false, received, block)
+			txr, err := a.TxStore.InsertTx(tx_, block)
+			if err != nil {
+				return err
+			}
+			cred, err := txr.AddCredit(uint32(outIdx), false)
 			if err != nil {
 				return err
 			}
@@ -139,21 +133,23 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 			// has already been notified and is now in a block, a txmined notifiction
 			// should be sent once to let frontends that all previous send/recvs
 			// for this unconfirmed tx are now confirmed.
-			recvTxOP := btcwire.NewOutPoint(tx_.Sha(), uint32(outIdx))
+			op := *cred.OutPoint()
 			previouslyNotifiedReq := NotifiedRecvTxRequest{
-				op:       *recvTxOP,
+				op:       op,
 				response: make(chan NotifiedRecvTxResponse),
 			}
 			NotifiedRecvTxChans.access <- previouslyNotifiedReq
 			if <-previouslyNotifiedReq.response {
-				NotifiedRecvTxChans.remove <- *recvTxOP
+				NotifiedRecvTxChans.remove <- op
 			} else {
 				// Notify frontends of new recv tx and mark as notified.
-				NotifiedRecvTxChans.add <- *recvTxOP
+				NotifiedRecvTxChans.add <- op
 
-				// need access to the RecvTxOut to get the json info object
-				NotifyNewTxDetails(allClients, a.Name(),
-					record.TxInfo(a.Name(), bs.Height, a.Wallet.Net())[0])
+				ltr, err := cred.ToJSON(a.Name(), bs.Height, a.Wallet.Net())
+				if err != nil {
+					return err
+				}
+				NotifyNewTxDetails(allClients, a.Name(), ltr)
 			}
 
 			// Notify frontends of new account balance.
@@ -255,13 +251,12 @@ func NtfnRedeemingTx(n btcjson.Cmd) error {
 		return fmt.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
 	}
 
-	block, err := parseBlock(cn.Block)
+	block, txIdx, err := parseBlock(cn.Block)
 	if err != nil {
 		return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
 	}
-	AcctMgr.RecordSpendingTx(tx_, block)
-
-	return nil
+	tx_.SetIndex(txIdx)
+	return AcctMgr.RecordSpendingTx(tx_, block)
 }
 
 // NtfnRescanProgress handles btcd rescanprogress notifications resulting

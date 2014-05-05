@@ -223,7 +223,7 @@ func WalletRequestProcessor() {
 			err := f(n)
 			AcctMgr.Release()
 			switch err {
-			case tx.ErrInconsistantStore:
+			case tx.ErrInconsistentStore:
 				// Assume this is a broken btcd reordered
 				// notifications.  Restart the connection
 				// to reload accounts files from their last
@@ -949,9 +949,9 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrNoTxInfo
 	}
 
-	var sr *tx.SignedTx
-	var srAccount string
-	var amountReceived int64
+	received := btcutil.Amount(0)
+	var debitTx *tx.TxRecord
+	var debitAccount string
 
 	ret := btcjson.GetTransactionResult{
 		Details:         []btcjson.GetTransactionDetailsResult{},
@@ -959,19 +959,20 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 	details := []btcjson.GetTransactionDetailsResult{}
 	for _, e := range accumulatedTxen {
-		switch record := e.Tx.(type) {
-		case *tx.RecvTxOut:
-			if record.Change() {
+		for _, cred := range e.Tx.Credits() {
+			// Change is ignored.
+			if cred.Change() {
 				continue
 			}
 
-			amountReceived += record.Value()
-			_, addrs, _, _ := record.Addresses(cfg.Net())
+			received += cred.Amount()
 
 			var addr string
+			_, addrs, _, _ := cred.Addresses(cfg.Net())
 			if len(addrs) == 1 {
 				addr = addrs[0].EncodeAddress()
 			}
+
 			details = append(details, btcjson.GetTransactionDetailsResult{
 				Account: e.Account,
 				// TODO(oga) We don't mine for now so there
@@ -980,28 +981,31 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				// specially with the category depending on
 				// whether it is an orphan or in the blockchain.
 				Category: "receive",
-				Amount:   float64(record.Value()) / float64(btcutil.SatoshiPerBitcoin),
+				Amount:   cred.Amount().ToUnit(btcutil.AmountBTC),
 				Address:  addr,
 			})
-		case *tx.SignedTx:
-			// there should only be a single SignedTx record, if any.
-			// If found, it will be added to the beginning.
-			sr = record
-			srAccount = e.Account
+		}
+
+		if e.Tx.Debits() != nil {
+			// There should only be a single debits record for any
+			// of the account's transaction records.
+			debitTx = e.Tx
+			debitAccount = e.Account
 		}
 	}
 
-	totalAmount := amountReceived
-	if sr != nil {
-		totalAmount -= sr.TotalSent()
+	totalAmount := received
+	if debitTx != nil {
+		debits := debitTx.Debits()
+		totalAmount -= debits.InputAmount()
 		info := btcjson.GetTransactionDetailsResult{
-			Account:  srAccount,
+			Account:  debitAccount,
 			Category: "send",
 			// negative since it is a send
-			Amount: float64(-(sr.TotalSent() - amountReceived)) / float64(btcutil.SatoshiPerBitcoin),
-			Fee:    float64(sr.Fee()) / float64(btcutil.SatoshiPerBitcoin),
+			Amount: (-debits.OutputAmount(true)).ToUnit(btcutil.AmountBTC),
+			Fee:    debits.Fee().ToUnit(btcutil.AmountBTC),
 		}
-		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(sr.Tx().MsgTx().TxOut[0].PkScript, cfg.Net())
+		_, addrs, _, _ := debitTx.Credits()[0].Addresses(cfg.Net())
 		if len(addrs) == 1 {
 			info.Address = addrs[0].EncodeAddress()
 		}
@@ -1012,10 +1016,11 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 	ret.Details = append(ret.Details, details...)
 
+	ret.Amount = totalAmount.ToUnit(btcutil.AmountBTC)
+
 	// Generic information should be the same, so just use the first one.
 	first := accumulatedTxen[0]
-	ret.Amount = float64(totalAmount) / float64(btcutil.SatoshiPerBitcoin)
-	ret.TxID = first.Tx.TxSha().String()
+	ret.TxID = first.Tx.Tx().Sha().String()
 
 	buf := bytes.NewBuffer(nil)
 	buf.Grow(first.Tx.Tx().MsgTx().SerializeSize())
@@ -1032,12 +1037,16 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// timereceived depending on if a transaction was send or
 	// receive. We ideally should provide the correct numbers for
 	// both. Right now they will always be the same
-	ret.Time = first.Tx.Time().Unix()
-	ret.TimeReceived = first.Tx.Time().Unix()
-	if details := first.Tx.Block(); details != nil {
-		ret.BlockIndex = int64(details.Index)
-		ret.BlockHash = details.Hash.String()
-		ret.BlockTime = details.Time.Unix()
+	ret.Time = first.Tx.Received().Unix()
+	ret.TimeReceived = first.Tx.Received().Unix()
+	if txr := first.Tx; txr.BlockHeight != -1 {
+		txBlock, err := txr.Block()
+		if err != nil {
+			return nil, &btcjson.Error{
+				Code:    btcjson.ErrWallet.Code,
+				Message: err.Error(),
+			}
+		}
 		bs, err := GetCurBlock()
 		if err != nil {
 			return nil, &btcjson.Error{
@@ -1045,7 +1054,10 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				Message: err.Error(),
 			}
 		}
-		ret.Confirmations = int64(bs.Height - details.Height + 1)
+		ret.BlockIndex = int64(first.Tx.Tx().Index())
+		ret.BlockHash = txBlock.Hash.String()
+		ret.BlockTime = txBlock.Time.Unix()
+		ret.Confirmations = int64(confirms(txr.BlockHeight, bs.Height))
 	}
 	// TODO(oga) if the tx is a coinbase we should set "generated" to true.
 	// Since we do not mine this currently is never the case.
@@ -1312,7 +1324,7 @@ func ListUnspent(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 // sendPairs is a helper routine to reduce duplicated code when creating and
 // sending payment transactions.
-func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]int64,
+func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amount,
 	minconf int) (interface{}, *btcjson.Error) {
 	// Check that the account specified in the request exists.
 	a, err := AcctMgr.Account(account)
@@ -1401,8 +1413,8 @@ func SendFrom(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 	// Create map of address and amount pairs.
-	pairs := map[string]int64{
-		cmd.ToAddress: cmd.Amount,
+	pairs := map[string]btcutil.Amount{
+		cmd.ToAddress: btcutil.Amount(cmd.Amount),
 	}
 
 	return sendPairs(cmd, cmd.FromAccount, pairs, cmd.MinConf)
@@ -1429,7 +1441,13 @@ func SendMany(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	return sendPairs(cmd, cmd.FromAccount, cmd.Amounts, cmd.MinConf)
+	// Recreate address/amount pairs, using btcutil.Amount.
+	pairs := make(map[string]btcutil.Amount, len(cmd.Amounts))
+	for k, v := range cmd.Amounts {
+		pairs[k] = btcutil.Amount(v)
+	}
+
+	return sendPairs(cmd, cmd.FromAccount, pairs, cmd.MinConf)
 }
 
 // SendToAddress handles a sendtoaddress RPC request by creating a new
@@ -1454,8 +1472,8 @@ func SendToAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// Mock up map of address and amount pairs.
-	pairs := map[string]int64{
-		cmd.Address: cmd.Amount,
+	pairs := map[string]btcutil.Amount{
+		cmd.Address: btcutil.Amount(cmd.Amount),
 	}
 
 	return sendPairs(cmd, "", pairs, 1)
@@ -1518,7 +1536,12 @@ func SendBeforeReceiveHistorySync(add, done, remove chan btcwire.ShaHash,
 
 func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *CreatedTx) (interface{}, *btcjson.Error) {
 	// Add to transaction store.
-	stx, err := a.TxStore.InsertSignedTx(txInfo.tx, time.Now(), nil)
+	txr, err := a.TxStore.InsertTx(txInfo.tx, nil)
+	if err != nil {
+		log.Warnf("Error adding sent tx history: %v", err)
+		return nil, &btcjson.ErrInternal
+	}
+	debits, err := txr.AddDebits(txInfo.inputs)
 	if err != nil {
 		log.Warnf("Error adding sent tx history: %v", err)
 		return nil, &btcjson.ErrInternal
@@ -1528,7 +1551,12 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txIDStr string, a *Account, txInfo *
 	// Notify frontends of new SendTx.
 	bs, err := GetCurBlock()
 	if err == nil {
-		for _, details := range stx.TxInfo(a.Name(), bs.Height, a.Net()) {
+		ltr, err := debits.ToJSON(a.Name(), bs.Height, a.Net())
+		if err != nil {
+			log.Warnf("Error adding sent tx history: %v", err)
+			return nil, &btcjson.ErrInternal
+		}
+		for _, details := range ltr {
 			NotifyNewTxDetails(allClients, a.Name(), details)
 		}
 	}
@@ -1589,7 +1617,7 @@ func SetTxFee(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 
 	// Set global tx fee.
 	TxFeeIncrement.Lock()
-	TxFeeIncrement.i = cmd.Amount
+	TxFeeIncrement.i = btcutil.Amount(cmd.Amount)
 	TxFeeIncrement.Unlock()
 
 	// A boolean true result is returned upon success.

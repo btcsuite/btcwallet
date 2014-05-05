@@ -79,21 +79,19 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 
 	pkHash := addr.ScriptAddress()
 
-	for _, record := range a.TxStore.SortedRecords() {
-		txout, ok := record.(*tx.RecvTxOut)
-		if !ok {
-			continue
-		}
+	for _, r := range a.TxStore.Records() {
+		credits := r.Credits()
+		for _, c := range credits {
+			// Extract addresses from this output's pkScript.
+			_, addrs, _, err := c.Addresses(cfg.Net())
+			if err != nil {
+				continue
+			}
 
-		// Extract addresses from this output's pkScript.
-		_, addrs, _, err := txout.Addresses(cfg.Net())
-		if err != nil {
-			continue
-		}
-
-		for _, a := range addrs {
-			if bytes.Equal(a.ScriptAddress(), pkHash) {
-				return true
+			for _, a := range addrs {
+				if bytes.Equal(a.ScriptAddress(), pkHash) {
+					return true
+				}
 			}
 		}
 	}
@@ -115,8 +113,12 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 		return 0.
 	}
 
-	bal := a.TxStore.Balance(confirms, bs.Height)
-	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
+	bal, err := a.TxStore.Balance(confirms, bs.Height)
+	if err != nil {
+		log.Errorf("Cannot calculate balance: %v", err)
+		return 0
+	}
+	return bal.ToUnit(btcutil.AmountBTC)
 }
 
 // CalculateAddressBalance sums the amounts of all unspent transaction
@@ -134,23 +136,25 @@ func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) fl
 		return 0.
 	}
 
-	var bal int64 // Measured in satoshi
-	for _, txout := range a.TxStore.UnspentOutputs() {
-		// Utxos not yet in blocks (height -1) should only be
-		// added if confirmations is 0.
-		if confirmed(confirms, txout.Height(), bs.Height) {
+	var bal btcutil.Amount
+	unspent, err := a.TxStore.UnspentOutputs()
+	if err != nil {
+		return 0.
+	}
+	for _, credit := range unspent {
+		if confirmed(confirms, credit.BlockHeight, bs.Height) {
 			// We only care about the case where len(addrs) == 1, and err
 			// will never be non-nil in that case
-			_, addrs, _, _ := txout.Addresses(cfg.Net())
+			_, addrs, _, _ := credit.Addresses(cfg.Net())
 			if len(addrs) != 1 {
 				continue
 			}
 			if addrs[0].EncodeAddress() == addr.EncodeAddress() {
-				bal += txout.Value()
+				bal += credit.Amount()
 			}
 		}
 	}
-	return float64(bal) / float64(btcutil.SatoshiPerBitcoin)
+	return bal.ToUnit(btcutil.AmountBTC)
 }
 
 // CurrentAddress gets the most recently requested Bitcoin payment address
@@ -171,23 +175,28 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 // ListSinceBlock returns a slice of objects with details about transactions
 // since the given block. If the block is -1 then all transactions are included.
 // This is intended to be used for listsinceblock RPC replies.
-func (a *Account) ListSinceBlock(since, curBlockHeight int32, minconf int) ([]btcjson.ListTransactionsResult, error) {
+func (a *Account) ListSinceBlock(since, curBlockHeight int32,
+	minconf int) ([]btcjson.ListTransactionsResult, error) {
+
 	var txList []btcjson.ListTransactionsResult
-	for _, txRecord := range a.TxStore.SortedRecords() {
+	for _, txRecord := range a.TxStore.Records() {
 		// Transaction records must only be considered if they occur
 		// after the block height since.
-		if since != -1 && txRecord.Height() <= since {
+		if since != -1 && txRecord.BlockHeight <= since {
 			continue
 		}
 
 		// Transactions that have not met minconf confirmations are to
 		// be ignored.
-		if !confirmed(minconf, txRecord.Height(), curBlockHeight) {
+		if !confirmed(minconf, txRecord.BlockHeight, curBlockHeight) {
 			continue
 		}
 
-		txList = append(txList,
-			txRecord.TxInfo(a.name, curBlockHeight, a.Net())...)
+		jsonResults, err := txRecord.ToJSON(a.name, curBlockHeight, a.Net())
+		if err != nil {
+			return nil, err
+		}
+		txList = append(txList, jsonResults...)
 	}
 
 	return txList, nil
@@ -206,12 +215,15 @@ func (a *Account) ListTransactions(from, count int) ([]btcjson.ListTransactionsR
 
 	var txList []btcjson.ListTransactionsResult
 
-	records := a.TxStore.SortedRecords()
+	records := a.TxStore.Records()
 	lastLookupIdx := len(records) - count
 	// Search in reverse order: lookup most recently-added first.
 	for i := len(records) - 1; i >= from && i >= lastLookupIdx; i-- {
-		txList = append(txList,
-			records[i].TxInfo(a.name, bs.Height, a.Net())...)
+		jsonResults, err := records[i].ToJSON(a.name, bs.Height, a.Net())
+		if err != nil {
+			return nil, err
+		}
+		txList = append(txList, jsonResults...)
 	}
 
 	return txList, nil
@@ -231,25 +243,27 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 	}
 
 	var txList []btcjson.ListTransactionsResult
-	for _, txRecord := range a.TxStore.SortedRecords() {
-		txout, ok := txRecord.(*tx.RecvTxOut)
-		if !ok {
-			continue
-		}
-		// We only care about the case where len(addrs) == 1, and err
-		// will never be non-nil in that case
-		_, addrs, _, _ := txout.Addresses(cfg.Net())
-		if len(addrs) != 1 {
-			continue
-		}
-		apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
-		if !ok {
-			continue
-		}
+	for _, r := range a.TxStore.Records() {
+		for _, c := range r.Credits() {
+			// We only care about the case where len(addrs) == 1,
+			// and err will never be non-nil in that case.
+			_, addrs, _, _ := c.Addresses(cfg.Net())
+			if len(addrs) != 1 {
+				continue
+			}
+			apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
+			if !ok {
+				continue
+			}
 
-		if _, ok := pkHashes[string(apkh.ScriptAddress())]; ok {
-			info := txout.TxInfo(a.name, bs.Height, a.Net())
-			txList = append(txList, info...)
+			if _, ok := pkHashes[string(apkh.ScriptAddress())]; !ok {
+				continue
+			}
+			jsonResult, err := c.ToJSON(a.name, bs.Height, a.Net())
+			if err != nil {
+				return nil, err
+			}
+			txList = append(txList, jsonResult)
 		}
 	}
 
@@ -268,11 +282,14 @@ func (a *Account) ListAllTransactions() ([]btcjson.ListTransactionsResult, error
 	}
 
 	// Search in reverse order: lookup most recently-added first.
-	records := a.TxStore.SortedRecords()
+	records := a.TxStore.Records()
 	var txList []btcjson.ListTransactionsResult
 	for i := len(records) - 1; i >= 0; i-- {
-		info := records[i].TxInfo(a.name, bs.Height, a.Net())
-		txList = append(txList, info...)
+		jsonResults, err := records[i].ToJSON(a.name, bs.Height, a.Net())
+		if err != nil {
+			return nil, err
+		}
+		txList = append(txList, jsonResults...)
 	}
 
 	return txList, nil
@@ -429,12 +446,16 @@ func (a *Account) Track() {
 		i++
 	}
 
-	err := NotifyReceived(CurrentServerConn(), addrstrs)
-	if err != nil {
+	jsonErr := NotifyReceived(CurrentServerConn(), addrstrs)
+	if jsonErr != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}
 
-	for _, txout := range a.TxStore.UnspentOutputs() {
+	unspent, err := a.TxStore.UnspentOutputs()
+	if err != nil {
+		log.Errorf("Unable to access unspent outputs: %v", err)
+	}
+	for _, txout := range unspent {
 		ReqSpentUtxoNtfn(txout)
 	}
 }
@@ -443,7 +464,7 @@ func (a *Account) Track() {
 // account.  This is needed for catching btcwallet up to a long-running
 // btcd process, as otherwise it would have missed notifications as
 // blocks are attached to the main chain.
-func (a *Account) RescanActiveJob() *RescanJob {
+func (a *Account) RescanActiveJob() (*RescanJob, error) {
 	// Determine the block necesary to start the rescan for all active
 	// addresses.
 	height := int32(0)
@@ -463,21 +484,25 @@ func (a *Account) RescanActiveJob() *RescanJob {
 		addrs = append(addrs, actives[i].Address())
 	}
 
-	unspents := a.TxStore.UnspentOutputs()
+	unspents, err := a.TxStore.UnspentOutputs()
+	if err != nil {
+		return nil, err
+	}
 	outpoints := make([]*btcwire.OutPoint, 0, len(unspents))
-	for i := range unspents {
-		outpoints = append(outpoints, unspents[i].OutPoint())
+	for _, c := range unspents {
+		outpoints = append(outpoints, c.OutPoint())
 	}
 
-	return &RescanJob{
+	job := &RescanJob{
 		Addresses:   map[*Account][]btcutil.Address{a: addrs},
 		OutPoints:   outpoints,
 		StartHeight: height,
 	}
+	return job, nil
 }
 
 func (a *Account) ResendUnminedTxs() {
-	txs := a.TxStore.UnminedSignedTxs()
+	txs := a.TxStore.UnminedDebitTxs()
 	txbuf := new(bytes.Buffer)
 	for _, tx_ := range txs {
 		tx_.MsgTx().Serialize(txbuf)
@@ -628,8 +653,8 @@ func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
 
 // ReqSpentUtxoNtfn sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func ReqSpentUtxoNtfn(t *tx.RecvTxOut) {
-	op := t.OutPoint()
+func ReqSpentUtxoNtfn(c *tx.Credit) {
+	op := c.OutPoint()
 	log.Debugf("Requesting spent UTXO notifications for Outpoint hash %s index %d",
 		op.Hash, op.Index)
 
@@ -645,25 +670,22 @@ func (a *Account) TotalReceived(confirms int) (float64, error) {
 		return 0, err
 	}
 
-	var totalSatoshis int64
-	for _, record := range a.TxStore.SortedRecords() {
-		txout, ok := record.(*tx.RecvTxOut)
-		if !ok {
-			continue
-		}
+	var amount btcutil.Amount
+	for _, r := range a.TxStore.Records() {
+		for _, c := range r.Credits() {
+			// Ignore change.
+			if c.Change() {
+				continue
+			}
 
-		// Ignore change.
-		if txout.Change() {
-			continue
-		}
-
-		// Tally if the appropiate number of block confirmations have passed.
-		if confirmed(confirms, txout.Height(), bs.Height) {
-			totalSatoshis += txout.Value()
+			// Tally if the appropiate number of block confirmations have passed.
+			if confirmed(confirms, c.BlockHeight, bs.Height) {
+				amount += c.Amount()
+			}
 		}
 	}
 
-	return float64(totalSatoshis) / float64(btcutil.SatoshiPerBitcoin), nil
+	return amount.ToUnit(btcutil.AmountBTC), nil
 }
 
 // confirmed checks whether a transaction at height txHeight has met
