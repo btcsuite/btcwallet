@@ -655,7 +655,7 @@ func ReqSpentUtxoNtfns(credits []*tx.Credit) {
 	ops := make([]*btcwire.OutPoint, 0, len(credits))
 	for _, c := range credits {
 		op := c.OutPoint()
-		log.Debugf("Requesting spent UTXO notifications for Outpoint " +
+		log.Debugf("Requesting spent UTXO notifications for Outpoint "+
 			"hash %s index %d", op.Hash, op.Index)
 		ops = append(ops, op)
 	}
