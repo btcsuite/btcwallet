@@ -455,9 +455,7 @@ func (a *Account) Track() {
 	if err != nil {
 		log.Errorf("Unable to access unspent outputs: %v", err)
 	}
-	for _, txout := range unspent {
-		ReqSpentUtxoNtfn(txout)
-	}
+	ReqSpentUtxoNtfns(unspent)
 }
 
 // RescanActiveJob creates a RescanJob for all active addresses in the
@@ -651,14 +649,18 @@ func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
 	}
 }
 
-// ReqSpentUtxoNtfn sends a message to btcd to request updates for when
+// ReqSpentUtxoNtfns sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func ReqSpentUtxoNtfn(c *tx.Credit) {
-	op := c.OutPoint()
-	log.Debugf("Requesting spent UTXO notifications for Outpoint hash %s index %d",
-		op.Hash, op.Index)
+func ReqSpentUtxoNtfns(credits []*tx.Credit) {
+	ops := make([]*btcwire.OutPoint, 0, len(credits))
+	for _, c := range credits {
+		op := c.OutPoint()
+		log.Debugf("Requesting spent UTXO notifications for Outpoint " +
+			"hash %s index %d", op.Hash, op.Index)
+		ops = append(ops, op)
+	}
 
-	NotifySpent(CurrentServerConn(), op)
+	NotifySpent(CurrentServerConn(), ops)
 }
 
 // TotalReceived iterates through an account's transaction history, returning the

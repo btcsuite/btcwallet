@@ -351,9 +351,12 @@ func NotifyReceived(rpc ServerConn, addrs []string) *btcjson.Error {
 
 // NotifySpent requests notifications for when a transaction is processed which
 // spends op.
-func NotifySpent(rpc ServerConn, outpoint *btcwire.OutPoint) *btcjson.Error {
-	op := btcws.NewOutPointFromWire(outpoint)
-	cmd := btcws.NewNotifySpentCmd(<-NewJSONID, op)
+func NotifySpent(rpc ServerConn, outpoints []*btcwire.OutPoint) *btcjson.Error {
+	ops := make([]btcws.OutPoint, 0, len(outpoints))
+	for _, op := range outpoints {
+		ops = append(ops, *btcws.NewOutPointFromWire(op))
+	}
+	cmd := btcws.NewNotifySpentCmd(<-NewJSONID, ops)
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 	_, jsonErr := response.FinishUnmarshal(nil)
 	return jsonErr
