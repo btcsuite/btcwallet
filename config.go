@@ -50,7 +50,7 @@ var (
 type config struct {
 	ShowVersion  bool     `short:"V" long:"version" description:"Display version information and exit"`
 	CAFile       string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
-	Connect      string   `short:"c" long:"connect" description:"Server and port of btcd instance to connect to (default localhost:18334, mainnet: localhost:8334)"`
+	RPCConnect   string   `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334)"`
 	DebugLevel   string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
 	SvrListeners []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332)"`
@@ -218,12 +218,13 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
-	if cfg.Connect == "" {
-		cfg.Connect = activeNetParams.connect
+	if cfg.RPCConnect == "" {
+		cfg.RPCConnect = activeNetParams.connect
 	}
 
 	// Add default port to connect flag if missing.
-	cfg.Connect = normalizeAddress(cfg.Connect, activeNetParams.btcdPort)
+	cfg.RPCConnect = normalizeAddress(cfg.RPCConnect,
+		activeNetParams.btcdPort)
 
 	// If CAFile is unset, choose either the copy or local btcd cert.
 	if cfg.CAFile == "" {
@@ -232,7 +233,7 @@ func loadConfig() (*config, []string, error) {
 		// If the CA copy does not exist, check if we're connecting to
 		// a local btcd and switch to its RPC cert if it exists.
 		if !fileExists(cfg.CAFile) {
-			host, _, err := net.SplitHostPort(cfg.Connect)
+			host, _, err := net.SplitHostPort(cfg.RPCConnect)
 			if err != nil {
 				return nil, nil, err
 			}

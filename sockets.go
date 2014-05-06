@@ -627,7 +627,7 @@ func (s *server) checkAuth(r *http.Request) error {
 
 // BtcdWS opens a websocket connection to a btcd instance.
 func BtcdWS(certificates []byte) (*websocket.Conn, error) {
-	url := fmt.Sprintf("wss://%s/ws", cfg.Connect)
+	url := fmt.Sprintf("wss://%s/ws", cfg.RPCConnect)
 	config, err := websocket.NewConfig(url, "https://localhost/")
 	if err != nil {
 		return nil, err
@@ -655,7 +655,7 @@ func BtcdWS(certificates []byte) (*websocket.Conn, error) {
 			Username: cfg.ProxyUser,
 			Password: cfg.ProxyPass,
 		}
-		conn, err := proxy.Dial("tcp", cfg.Connect)
+		conn, err := proxy.Dial("tcp", cfg.RPCConnect)
 		if err != nil {
 			return nil, err
 		}
