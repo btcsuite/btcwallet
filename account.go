@@ -142,7 +142,7 @@ func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) fl
 		return 0.
 	}
 	for _, credit := range unspent {
-		if confirmed(confirms, credit.BlockHeight, bs.Height) {
+		if credit.Confirmed(confirms, bs.Height) {
 			// We only care about the case where len(addrs) == 1, and err
 			// will never be non-nil in that case
 			_, addrs, _, _ := credit.Addresses(cfg.Net())
@@ -188,7 +188,7 @@ func (a *Account) ListSinceBlock(since, curBlockHeight int32,
 
 		// Transactions that have not met minconf confirmations are to
 		// be ignored.
-		if !confirmed(minconf, txRecord.BlockHeight, curBlockHeight) {
+		if !txRecord.Confirmed(minconf, curBlockHeight) {
 			continue
 		}
 
@@ -681,29 +681,11 @@ func (a *Account) TotalReceived(confirms int) (float64, error) {
 			}
 
 			// Tally if the appropiate number of block confirmations have passed.
-			if confirmed(confirms, c.BlockHeight, bs.Height) {
+			if c.Confirmed(confirms, bs.Height) {
 				amount += c.Amount()
 			}
 		}
 	}
 
 	return amount.ToUnit(btcutil.AmountBTC), nil
-}
-
-// confirmed checks whether a transaction at height txHeight has met
-// minconf confirmations for a blockchain at height curHeight.
-func confirmed(minconf int, txHeight, curHeight int32) bool {
-	return confirms(txHeight, curHeight) >= int32(minconf)
-}
-
-// confirms returns the number of confirmations for a transaction in a
-// block at height txHeight (or -1 for an unconfirmed tx) given the chain
-// height curHeight.
-func confirms(txHeight, curHeight int32) int32 {
-	switch {
-	case txHeight == -1, txHeight > curHeight:
-		return 0
-	default:
-		return curHeight - txHeight + 1
-	}
 }

@@ -810,9 +810,8 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 			return nil, err
 		}
 		for _, credit := range unspent {
-			confs := confirms(credit.BlockHeight, bs.Height)
-			switch {
-			case int(confs) < minconf, int(confs) > maxconf:
+			confs := credit.Confirmations(bs.Height)
+			if int(confs) < minconf || int(confs) > maxconf {
 				continue
 			}
 

@@ -1057,7 +1057,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		ret.BlockIndex = int64(first.Tx.Tx().Index())
 		ret.BlockHash = txBlock.Hash.String()
 		ret.BlockTime = txBlock.Time.Unix()
-		ret.Confirmations = int64(confirms(txr.BlockHeight, bs.Height))
+		ret.Confirmations = int64(txr.Confirmations(bs.Height))
 	}
 	// TODO(oga) if the tx is a coinbase we should set "generated" to true.
 	// Since we do not mine this currently is never the case.

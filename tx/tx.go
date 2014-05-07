@@ -1297,6 +1297,18 @@ func (c *Credit) Change() bool {
 	return c.txRecord.credits[c.OutputIndex].change
 }
 
+// Confirmed returns whether a transaction has reached some target number of
+// confirmations, given the current best chain height.
+func (t *TxRecord) Confirmed(target int, chainHeight int32) bool {
+	return confirmed(target, t.BlockHeight, chainHeight)
+}
+
+// Confirmations returns the total number of confirmations a transaction has
+// reached, given the current best chain height.
+func (t *TxRecord) Confirmations(chainHeight int32) int32 {
+	return confirms(t.BlockHeight, chainHeight)
+}
+
 // IsCoinbase returns whether the transaction is a coinbase.
 func (t *TxRecord) IsCoinbase() bool {
 	return t.BlockHeight != -1 && t.BlockIndex == 0

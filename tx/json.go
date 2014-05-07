@@ -17,6 +17,7 @@
 package tx
 
 import (
+	"github.com/conformal/btcchain"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
@@ -81,7 +82,7 @@ func (d *Debits) ToJSON(account string, chainHeight int32,
 			result.BlockHash = b.Hash.String()
 			result.BlockIndex = int64(d.Tx().Index())
 			result.BlockTime = b.Time.Unix()
-			result.Confirmations = int64(confirms(b.Height, chainHeight))
+			result.Confirmations = int64(d.Confirmations(chainHeight))
 		}
 		reply = append(reply, result)
 	}
@@ -103,9 +104,21 @@ func (c *Credit) ToJSON(account string, chainHeight int32,
 		address = addrs[0].EncodeAddress()
 	}
 
+	var category string
+	switch {
+	case c.IsCoinbase():
+		if c.Confirmed(btcchain.CoinbaseMaturity, chainHeight) {
+			category = "generate"
+		} else {
+			category = "immature"
+		}
+	default:
+		category = "receive"
+	}
+
 	result := btcjson.ListTransactionsResult{
 		Account:         account,
-		Category:        "receive",
+		Category:        category,
 		Address:         address,
 		Amount:          btcutil.Amount(txout.Value).ToUnit(btcutil.AmountBTC),
 		TxID:            c.Tx().Sha().String(),
@@ -122,7 +135,7 @@ func (c *Credit) ToJSON(account string, chainHeight int32,
 		result.BlockHash = b.Hash.String()
 		result.BlockIndex = int64(c.Tx().Index())
 		result.BlockTime = b.Time.Unix()
-		result.Confirmations = int64(confirms(b.Height, chainHeight))
+		result.Confirmations = int64(c.Confirmations(chainHeight))
 	}
 
 	return result, nil

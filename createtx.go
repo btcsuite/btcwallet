@@ -89,7 +89,7 @@ func (u ByAmount) Swap(i, j int) {
 // is the total number of satoshis which would be spent by the combination
 // of all selected previous outputs.  err will equal ErrInsufficientFunds if there
 // are not enough unspent outputs to spend amt.
-func selectInputs(utxos []*tx.Credit, amt btcutil.Amount,
+func selectInputs(credits []*tx.Credit, amt btcutil.Amount,
 	minconf int) (selected []*tx.Credit, out btcutil.Amount, err error) {
 
 	bs, err := GetCurBlock()
@@ -100,18 +100,18 @@ func selectInputs(utxos []*tx.Credit, amt btcutil.Amount,
 	// Create list of eligible unspent previous outputs to use as tx
 	// inputs, and sort by the amount in reverse order so a minimum number
 	// of inputs is needed.
-	eligible := make([]*tx.Credit, 0, len(utxos))
-	for _, utxo := range utxos {
-		if confirmed(minconf, utxo.BlockHeight, bs.Height) {
+	eligible := make([]*tx.Credit, 0, len(credits))
+	for _, c := range credits {
+		if c.Confirmed(minconf, bs.Height) {
 			// Coinbase transactions must have have reached maturity
 			// before their outputs may be spent.
-			if utxo.IsCoinbase() {
-				confs := confirms(utxo.BlockHeight, bs.Height)
-				if confs < btcchain.CoinbaseMaturity {
+			if c.IsCoinbase() {
+				target := btcchain.CoinbaseMaturity
+				if !c.Confirmed(target, bs.Height) {
 					continue
 				}
 			}
-			eligible = append(eligible, utxo)
+			eligible = append(eligible, c)
 		}
 	}
 	sort.Sort(sort.Reverse(ByAmount(eligible)))
