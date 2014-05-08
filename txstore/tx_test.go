@@ -12,7 +12,7 @@
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-package tx_test
+package txstore_test
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/conformal/btcutil"
-	. "github.com/conformal/btcwallet/tx"
+	. "github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwire"
 )
 
@@ -87,7 +87,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		{
 			name: "new store",
 			f: func(_ *Store) (*Store, error) {
-				return NewStore(), nil
+				return New(), nil
 			},
 			bal:      0,
 			unc:      0,
@@ -547,7 +547,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 }
 
 func TestFindingSpentCredits(t *testing.T) {
-	s := NewStore()
+	s := New()
 
 	// Insert transaction and credit which will be spent.
 	r, err := s.InsertTx(TstRecvTx, TstRecvTxBlockDetails)

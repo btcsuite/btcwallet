@@ -23,7 +23,7 @@ import (
 	"github.com/conformal/btcchain"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/tx"
+	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"sort"
@@ -63,13 +63,13 @@ var TxFeeIncrement = struct {
 
 type CreatedTx struct {
 	tx         *btcutil.Tx
-	inputs     []*tx.Credit
+	inputs     []*txstore.Credit
 	changeAddr btcutil.Address
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
 // sort a slice of Utxos by their amount.
-type ByAmount []*tx.Credit
+type ByAmount []*txstore.Credit
 
 func (u ByAmount) Len() int {
 	return len(u)
@@ -89,8 +89,8 @@ func (u ByAmount) Swap(i, j int) {
 // is the total number of satoshis which would be spent by the combination
 // of all selected previous outputs.  err will equal ErrInsufficientFunds if there
 // are not enough unspent outputs to spend amt.
-func selectInputs(credits []*tx.Credit, amt btcutil.Amount,
-	minconf int) (selected []*tx.Credit, out btcutil.Amount, err error) {
+func selectInputs(credits []*txstore.Credit, amt btcutil.Amount,
+	minconf int) (selected []*txstore.Credit, out btcutil.Amount, err error) {
 
 	bs, err := GetCurBlock()
 	if err != nil {
@@ -100,7 +100,7 @@ func selectInputs(credits []*tx.Credit, amt btcutil.Amount,
 	// Create list of eligible unspent previous outputs to use as tx
 	// inputs, and sort by the amount in reverse order so a minimum number
 	// of inputs is needed.
-	eligible := make([]*tx.Credit, 0, len(credits))
+	eligible := make([]*txstore.Credit, 0, len(credits))
 	for _, c := range credits {
 		if c.Confirmed(minconf, bs.Height) {
 			// Coinbase transactions must have have reached maturity
@@ -195,7 +195,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 		return nil, err
 	}
 
-	var selectedInputs []*tx.Credit
+	var selectedInputs []*txstore.Credit
 	// These are nil/zeroed until a change address is needed, and reused
 	// again in case a change utxo has already been chosen.
 	var changeAddr btcutil.Address
@@ -352,7 +352,7 @@ func minimumFee(tx *btcwire.MsgTx, allowFree bool) btcutil.Amount {
 // allowFree calculates the transaction priority and checks that the
 // priority reaches a certain threshhold.  If the threshhold is
 // reached, a free transaction fee is allowed.
-func allowFree(curHeight int32, txouts []*tx.Credit, txSize int) bool {
+func allowFree(curHeight int32, txouts []*txstore.Credit, txSize int) bool {
 	const blocksPerDayEstimate = 144
 	const txSizeEstimate = 250
 

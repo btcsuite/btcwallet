@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package tx
+package txstore
 
 import (
 	"bytes"
@@ -76,7 +76,7 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 	}
 
 	// Reset store.
-	*s = *NewStore()
+	*s = *New()
 
 	// Read block structures.  Begin by reading the total number of block
 	// structures to be read, and then iterate that many times to read

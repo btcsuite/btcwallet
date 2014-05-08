@@ -28,7 +28,7 @@ import (
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/tx"
+	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
@@ -226,7 +226,7 @@ func WalletRequestProcessor() {
 			err := f(n)
 			AcctMgr.Release()
 			switch err {
-			case tx.ErrInconsistentStore:
+			case txstore.ErrInconsistentStore:
 				// Assume this is a broken btcd reordered
 				// notifications.  Restart the connection
 				// to reload accounts files from their last
@@ -952,7 +952,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	received := btcutil.Amount(0)
-	var debitTx *tx.TxRecord
+	var debitTx *txstore.TxRecord
 	var debitAccount string
 
 	ret := btcjson.GetTransactionResult{

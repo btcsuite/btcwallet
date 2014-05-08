@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/tx"
+	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"path/filepath"
@@ -37,7 +37,7 @@ type Account struct {
 	name       string
 	fullRescan bool
 	*wallet.Wallet
-	TxStore *tx.Store
+	TxStore *txstore.Store
 }
 
 // Lock locks the underlying wallet for an account.
@@ -502,8 +502,8 @@ func (a *Account) RescanActiveJob() (*RescanJob, error) {
 func (a *Account) ResendUnminedTxs() {
 	txs := a.TxStore.UnminedDebitTxs()
 	txbuf := new(bytes.Buffer)
-	for _, tx_ := range txs {
-		tx_.MsgTx().Serialize(txbuf)
+	for _, tx := range txs {
+		tx.MsgTx().Serialize(txbuf)
 		hextx := hex.EncodeToString(txbuf.Bytes())
 		txsha, err := SendRawTransaction(CurrentServerConn(), hextx)
 		if err != nil {
@@ -651,7 +651,7 @@ func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
 
 // ReqSpentUtxoNtfns sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func ReqSpentUtxoNtfns(credits []*tx.Credit) {
+func ReqSpentUtxoNtfns(credits []*txstore.Credit) {
 	ops := make([]*btcwire.OutPoint, 0, len(credits))
 	for _, c := range credits {
 		op := c.OutPoint()

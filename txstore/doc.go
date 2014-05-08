@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-// Package tx provides an implementation of a transaction store for a
+// Package txstore provides an implementation of a transaction store for a
 // bitcoin wallet.  Its primary purpose is to save transactions with
 // outputs spendable with wallet keys and transactions that are signed by
 // wallet keys in memory, handle spend tracking for newly-inserted
@@ -61,11 +61,11 @@
 // Example use:
 //
 //	// Create a new transaction store to hold two transactions.
-//	s := tx.NewStore()
+//	s := txstore.New()
 //
 //	// Insert a transaction belonging to some imaginary block at
 //	// height 123.
-//	b123 := &tx.Block{Height: 123, Time: time.Now()}
+//	b123 := &txstore.Block{Height: 123, Time: time.Now()}
 //	r1, err := s.InsertTx(txA, b123)
 //	if err != nil {
 //		// handle error
@@ -83,14 +83,14 @@
 //
 //	// Insert a second transaction at some imaginary block height
 //	// 321.
-//	b321 := &tx.Block{Height: 321, Time: time.Now()}
+//	b321 := &txstore.Block{Height: 321, Time: time.Now()}
 //	r2, err := s.InsertTx(txB, b321)
 //	if err != nil {
 //		// handle error
 //	}
 //
 //	// Mark r2 as debiting from record 1's 0th credit.
-//	d2, err := r2.AddDebits([]*tx.Credit{c1o0})
+//	d2, err := r2.AddDebits([]*txstore.Credit{c1o0})
 //	if err != nil {
 //		// handle error
 //	}
@@ -99,4 +99,4 @@
 //	fmt.Println(c1o0.Spent())      // Prints "true"
 //	fmt.Println(s.Balance(1, 321)) // Prints "0 BTC"
 //	fmt.Println(d2.InputAmount())  // Prints amount of txA output 0.
-package tx
+package txstore

@@ -27,13 +27,13 @@ import (
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/tx"
+	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
 )
 
-func parseBlock(block *btcws.BlockDetails) (*tx.Block, int, error) {
+func parseBlock(block *btcws.BlockDetails) (*txstore.Block, int, error) {
 	if block == nil {
 		return nil, btcutil.TxIndexUnknown, nil
 	}
@@ -41,7 +41,7 @@ func parseBlock(block *btcws.BlockDetails) (*tx.Block, int, error) {
 	if err != nil {
 		return nil, btcutil.TxIndexUnknown, err
 	}
-	b := &tx.Block{
+	b := &txstore.Block{
 		Height: block.Height,
 		Hash:   *blksha,
 		Time:   time.Unix(block.Time, 0),
@@ -75,7 +75,7 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("%v handler: bad hexstring: %v", n.Method(), err)
 	}
-	tx_, err := btcutil.NewTxFromBytes(rawTx)
+	tx, err := btcutil.NewTxFromBytes(rawTx)
 	if err != nil {
 		return fmt.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
 	}
@@ -84,7 +84,7 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
 	}
-	tx_.SetIndex(txIdx)
+	tx.SetIndex(txIdx)
 
 	// For transactions originating from this wallet, the sent tx history should
 	// be recorded before the received history.  If wallet created this tx, wait
@@ -93,7 +93,7 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 	// TODO(jrick) this is wrong due to tx malleability.  Cannot safely use the
 	// txsha as an identifier.
 	req := SendTxHistSyncRequest{
-		txsha:    *tx_.Sha(),
+		txsha:    *tx.Sha(),
 		response: make(chan SendTxHistSyncResponse),
 	}
 	SendTxHistSyncChans.access <- req
@@ -101,12 +101,12 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 	if resp.ok {
 		// Wait until send history has been recorded.
 		<-resp.c
-		SendTxHistSyncChans.remove <- *tx_.Sha()
+		SendTxHistSyncChans.remove <- *tx.Sha()
 	}
 
 	// For every output, find all accounts handling that output address (if any)
 	// and record the received txout.
-	for outIdx, txout := range tx_.MsgTx().TxOut {
+	for outIdx, txout := range tx.MsgTx().TxOut {
 		var accounts []*Account
 		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, cfg.Net())
 		for _, addr := range addrs {
@@ -118,7 +118,7 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 		}
 
 		for _, a := range accounts {
-			txr, err := a.TxStore.InsertTx(tx_, block)
+			txr, err := a.TxStore.InsertTx(tx, block)
 			if err != nil {
 				return err
 			}
@@ -246,7 +246,7 @@ func NtfnRedeemingTx(n btcjson.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("%v handler: bad hexstring: %v", n.Method(), err)
 	}
-	tx_, err := btcutil.NewTxFromBytes(rawTx)
+	tx, err := btcutil.NewTxFromBytes(rawTx)
 	if err != nil {
 		return fmt.Errorf("%v handler: bad transaction bytes: %v", n.Method(), err)
 	}
@@ -255,8 +255,8 @@ func NtfnRedeemingTx(n btcjson.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("%v handler: bad block: %v", n.Method(), err)
 	}
-	tx_.SetIndex(txIdx)
-	return AcctMgr.RecordSpendingTx(tx_, block)
+	tx.SetIndex(txIdx)
+	return AcctMgr.RecordSpendingTx(tx, block)
 }
 
 // NtfnRescanProgress handles btcd rescanprogress notifications resulting

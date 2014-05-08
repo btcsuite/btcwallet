@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package tx
+package txstore
 
 import (
 	"github.com/conformal/btcchain"

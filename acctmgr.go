@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/tx"
+	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"os"
@@ -178,7 +178,7 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 	}
 
 	wlt := new(wallet.Wallet)
-	txs := tx.NewStore()
+	txs := txstore.New()
 	a := &Account{
 		name:    name,
 		Wallet:  wlt,
@@ -573,12 +573,12 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 // the transaction IDs match, the record in the TxStore is updated with
 // the full information about the newly-mined tx, and the TxStore is
 // scheduled to be written to disk..
-func (am *AccountManager) RecordSpendingTx(tx_ *btcutil.Tx, block *tx.Block) error {
+func (am *AccountManager) RecordSpendingTx(tx *btcutil.Tx, block *txstore.Block) error {
 	for _, a := range am.AllAccounts() {
 		// TODO(jrick): This needs to iterate through each txout's
 		// addresses and find whether this account's keystore contains
 		// any of the addresses this tx sends to.
-		txr, err := a.TxStore.InsertTx(tx_, block)
+		txr, err := a.TxStore.InsertTx(tx, block)
 		if err != nil {
 			return err
 		}
@@ -627,7 +627,7 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 	// written immediately to disk.
 	a := &Account{
 		Wallet:  wlt,
-		TxStore: tx.NewStore(),
+		TxStore: txstore.New(),
 	}
 	if err := am.RegisterNewAccount(a); err != nil {
 		return err
@@ -773,7 +773,7 @@ func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32,
 // GetTransaction.
 type accountTx struct {
 	Account string
-	Tx      *tx.TxRecord
+	Tx      *txstore.TxRecord
 }
 
 // GetTransaction returns an array of accountTx to fully represent the effect of

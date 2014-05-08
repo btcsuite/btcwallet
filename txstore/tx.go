@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package tx
+package txstore
 
 import (
 	"errors"
@@ -259,8 +259,8 @@ type credit struct {
 	spentBy *BlockTxKey // nil if unspent
 }
 
-// NewStore allocates and initializes a new transaction store.
-func NewStore() *Store {
+// New allocates and initializes a new transaction store.
+func New() *Store {
 	return &Store{
 		blockIndexes: map[int32]uint32{},
 		unspent:      map[int32]struct{}{},
