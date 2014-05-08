@@ -136,8 +136,9 @@ type Debits struct {
 	*TxRecord
 }
 
-// Credit is the type representing a transaction output which is spendable
-// by wallet.
+// Credit is the type representing a transaction output which was spent or
+// is still spendably by wallet.  A UTXO is an unspent Credit, but not all
+// Credits are UTXOs.
 type Credit struct {
 	*TxRecord
 	OutputIndex uint32
