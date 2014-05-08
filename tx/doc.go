@@ -49,7 +49,7 @@
 // needing to iterate over every unspent credit.
 //
 // Finally, this package records transaction insertion history (such as
-// the date a transaction was first received0 and is able to create the
+// the date a transaction was first received) and is able to create the
 // JSON reply structure for RPC calls such as listtransactions for any
 // saved transaction.
 //
