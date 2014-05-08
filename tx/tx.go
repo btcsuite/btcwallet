@@ -1262,16 +1262,13 @@ func (d *Debits) InputAmount() btcutil.Amount {
 func (t *TxRecord) OutputAmount(ignoreChange bool) btcutil.Amount {
 	a := btcutil.Amount(0)
 	for i, txOut := range t.Tx().MsgTx().TxOut {
-		switch {
-		case !ignoreChange:
-			fallthrough
-		case len(t.credits) <= i:
-			fallthrough
-		case t.credits[i] == nil:
-			fallthrough
-		case !t.credits[i].change:
-			a += btcutil.Amount(txOut.Value)
+		if ignoreChange {
+			switch cs := t.credits; {
+			case i < len(cs) && cs[i] != nil && cs[i].change:
+				continue
+			}
 		}
+		a += btcutil.Amount(txOut.Value)
 	}
 	return a
 }
