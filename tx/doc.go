@@ -83,7 +83,7 @@
 //
 //	// Insert a second transaction at some imaginary block height
 //	// 321.
-//	b321 := &tx.Height: 321, Time: time.Now()}
+//	b321 := &tx.Block{Height: 321, Time: time.Now()}
 //	r2, err := s.InsertTx(txB, b321)
 //	if err != nil {
 //		// handle error
