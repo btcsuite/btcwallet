@@ -137,7 +137,7 @@ type Debits struct {
 }
 
 // Credit is the type representing a transaction output which was spent or
-// is still spendably by wallet.  A UTXO is an unspent Credit, but not all
+// is still spendable by wallet.  A UTXO is an unspent Credit, but not all
 // Credits are UTXOs.
 type Credit struct {
 	*TxRecord
