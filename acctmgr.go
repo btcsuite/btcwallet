@@ -805,7 +805,7 @@ func (am *AccountManager) GetTransaction(txSha *btcwire.ShaHash) []accountTx {
 // contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
 func (am *AccountManager) ListUnspent(minconf, maxconf int,
-	addresses map[string]bool) ([]*btcjson.ListUnSpentResult, error) {
+	addresses map[string]bool) ([]*btcjson.ListUnspentResult, error) {
 
 	bs, err := GetCurBlock()
 	if err != nil {
@@ -814,7 +814,7 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 
 	filter := len(addresses) != 0
 
-	var results []*btcjson.ListUnSpentResult
+	var results []*btcjson.ListUnspentResult
 	for _, a := range am.AllAccounts() {
 		unspent, err := a.TxStore.UnspentOutputs()
 		if err != nil {
@@ -837,13 +837,13 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 				continue
 			}
 		include:
-			result := &btcjson.ListUnSpentResult{
+			result := &btcjson.ListUnspentResult{
 				TxId:          credit.Tx().Sha().String(),
-				Vout:          float64(credit.OutputIndex),
+				Vout:          credit.OutputIndex,
 				Account:       a.Name(),
 				ScriptPubKey:  hex.EncodeToString(credit.TxOut().PkScript),
 				Amount:        credit.Amount().ToUnit(btcutil.AmountBTC),
-				Confirmations: float64(confs),
+				Confirmations: int64(confs),
 			}
 
 			// BUG: this should be a JSON array so that all
