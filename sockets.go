@@ -642,7 +642,7 @@ func BtcdWS(certificates []byte) (*websocket.Conn, error) {
 	}
 
 	// btcd requires basic authorization, so set the Authorization header.
-	login := cfg.Username + ":" + cfg.Password
+	login := cfg.BtcdUsername + ":" + cfg.BtcdPassword
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	config.Header.Add("Authorization", auth)
 

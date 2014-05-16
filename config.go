@@ -55,8 +55,10 @@ type config struct {
 	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
 	SvrListeners []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332)"`
 	DataDir      string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
-	Username     string   `short:"u" long:"username" description:"Username for btcd authorization"`
-	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for btcd authorization"`
+	Username     string   `short:"u" long:"username" description:"Username for client and btcd authorization"`
+	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for client and btcd authorization"`
+	BtcdUsername string   `long:"btcdusername" description:"Alternative username for btcd authorization"`
+	BtcdPassword string   `long:"btcdpassword" default-mask:"-" description:"Alternative password for btcd authorization"`
 	RPCCert      string   `long:"rpccert" description:"File containing the certificate file"`
 	RPCKey       string   `long:"rpckey" description:"File containing the certificate key"`
 	MainNet      bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
@@ -271,6 +273,17 @@ func loadConfig() (*config, []string, error) {
 
 	// Expand environment variable and leading ~ for filepaths.
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
+
+	// If the btcd username or password are unset, use the same auth as for
+	// the client.  The two settings were previously shared for btcd and
+	// client auth, so this avoids breaking backwards compatibility while
+	// allowing users to use different auth settings for btcd and wallet.
+	if cfg.BtcdUsername == "" {
+		cfg.BtcdUsername = cfg.Username
+	}
+	if cfg.BtcdPassword == "" {
+		cfg.BtcdPassword = cfg.Password
+	}
 
 	return &cfg, remainingArgs, nil
 }
