@@ -3163,11 +3163,7 @@ type addrCommentEntry struct {
 }
 
 func (e *addrCommentEntry) address(net btcwire.BitcoinNet) (*btcutil.AddressPubKeyHash, error) {
-	addr, err := btcutil.NewAddressPubKeyHash(e.pubKeyHash160[:], net)
-	if err != nil {
-		return nil, err
-	}
-	return addr, nil
+	return btcutil.NewAddressPubKeyHash(e.pubKeyHash160[:], net)
 }
 
 func (e *addrCommentEntry) WriteTo(w io.Writer) (n int64, err error) {
