@@ -1902,7 +1902,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				}
 			}
 			keys[addr.EncodeAddress()] = keyInfo{
-				key:        privk,
+				key:        privk.ToECDSA(),
 				compressed: compressed,
 			}
 		}
