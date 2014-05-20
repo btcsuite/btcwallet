@@ -187,8 +187,11 @@ func ChainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid chaincode length %d (must be 32)",
 			len(chaincode))
 	}
-	if !(len(pubkey) == 65 || len(pubkey) == 33) {
-		return nil, fmt.Errorf("invalid pubkey length %d", len(pubkey))
+	switch n := len(pubkey); n {
+	case btcec.PubKeyBytesLenUncompressed, btcec.PubKeyBytesLenCompressed:
+		// Correct length
+	default:
+		return nil, fmt.Errorf("invalid pubkey length %d", n)
 	}
 
 	xorbytes := make([]byte, 32)
@@ -208,8 +211,15 @@ func ChainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 // previous public key and chaincode.  pubkey must be 33 or 65 bytes, and
 // chaincode must be 32 bytes long.
 func ChainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
-	if !(len(pubkey) == 65 || len(pubkey) == 33) {
-		return nil, fmt.Errorf("invalid pubkey length %v", len(pubkey))
+	var compressed bool
+	switch n := len(pubkey); n {
+	case btcec.PubKeyBytesLenUncompressed:
+		compressed = false
+	case btcec.PubKeyBytesLenCompressed:
+		compressed = true
+	default:
+		// Incorrect serialized pubkey length
+		return nil, fmt.Errorf("invalid pubkey length %d", n)
 	}
 	if len(chaincode) != 32 {
 		return nil, fmt.Errorf("invalid chaincode length %d (must be 32)",
@@ -236,10 +246,10 @@ func ChainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 		Y:     newY,
 	}
 
-	if len(pubkey) == 65 {
-		return newPk.SerializeUncompressed(), nil
+	if compressed {
+		return newPk.SerializeCompressed(), nil
 	}
-	return newPk.SerializeCompressed(), nil
+	return newPk.SerializeUncompressed(), nil
 }
 
 type version struct {
@@ -2088,15 +2098,13 @@ func newBtcAddress(wallet *Wallet, privkey, iv []byte, bs *BlockStamp, compresse
 // randomly generated).
 func newBtcAddressWithoutPrivkey(wallet *Wallet, pubkey, iv []byte, bs *BlockStamp) (addr *btcAddress, err error) {
 	var compressed bool
-	switch len(pubkey) {
-	case 33:
+	switch n := len(pubkey); n {
+	case btcec.PubKeyBytesLenCompressed:
 		compressed = true
-
-	case 65:
+	case btcec.PubKeyBytesLenUncompressed:
 		compressed = false
-
 	default:
-		return nil, errors.New("incorrect pubkey length")
+		return nil, fmt.Errorf("invalid pubkey length %d", n)
 	}
 	if len(iv) == 0 {
 		iv = make([]byte, 16)
