@@ -714,7 +714,12 @@ func TestWatchingWalletExport(t *testing.T) {
 		t.Errorf("Nonsensical func ExportWatchingWallet returned no or incorrect error: %v", err)
 		return
 	}
-	if _, err := ww.ImportPrivateKey(make([]byte, 32), true, createdAt); err != ErrWalletIsWatchingOnly {
+	pk, _ := btcec.PrivKeyFromBytes(btcec.S256(), make([]byte, 32))
+	wif, err := btcutil.NewWIF(pk, btcwire.MainNet, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ww.ImportPrivateKey(wif, createdAt); err != ErrWalletIsWatchingOnly {
 		t.Errorf("Nonsensical func ImportPrivateKey returned no or incorrect error: %v", err)
 		return
 	}
@@ -754,9 +759,13 @@ func TestImportPrivateKey(t *testing.T) {
 	}
 
 	// import priv key
+	wif, err := btcutil.NewWIF((*btcec.PrivateKey)(pk), btcwire.MainNet, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	importHeight := int32(50)
 	importedAt := &BlockStamp{Height: importHeight}
-	address, err := w.ImportPrivateKey(pad(32, pk.D.Bytes()), false, importedAt)
+	address, err := w.ImportPrivateKey(wif, importedAt)
 	if err != nil {
 		t.Error("importing private key: " + err.Error())
 		return

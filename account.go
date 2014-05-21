@@ -307,14 +307,14 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 		if !ok {
 			continue
 		}
-		encKey, err := pka.ExportPrivKey()
+		wif, err := pka.ExportPrivKey()
 		if err != nil {
 			// It would be nice to zero out the array here. However,
 			// since strings in go are immutable, and we have no
 			// control over the caller I don't think we can. :(
 			return nil, err
 		}
-		privkeys = append(privkeys, encKey)
+		privkeys = append(privkeys, wif.String())
 	}
 
 	return privkeys, nil
@@ -334,16 +334,20 @@ func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 		return "", fmt.Errorf("address %s is not a key type", addr)
 	}
 
-	return pka.ExportPrivKey()
+	wif, err := pka.ExportPrivKey()
+	if err != nil {
+		return "", err
+	}
+	return wif.String(), nil
 }
 
 // ImportPrivateKey imports a private key to the account's wallet and
 // writes the new wallet to disk.
-func (a *Account) ImportPrivateKey(pk []byte, compressed bool,
-	bs *wallet.BlockStamp, rescan bool) (string, error) {
+func (a *Account) ImportPrivateKey(wif *btcutil.WIF, bs *wallet.BlockStamp,
+	rescan bool) (string, error) {
 
 	// Attempt to import private key into wallet.
-	addr, err := a.Wallet.ImportPrivateKey(pk, compressed, bs)
+	addr, err := a.Wallet.ImportPrivateKey(wif, bs)
 	if err != nil {
 		return "", err
 	}

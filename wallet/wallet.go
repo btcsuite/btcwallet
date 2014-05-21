@@ -1333,16 +1333,17 @@ func (w *Wallet) SetBetterEarliestBlockHeight(height int32) {
 	}
 }
 
-// ImportPrivateKey creates a new encrypted btcAddress with a
-// user-provided private key and adds it to the wallet.
-func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStamp) (btcutil.Address, error) {
+// ImportPrivateKey imports a WIF private key into the keystore.  The imported
+// address is created using either a compressed or uncompressed serialized
+// public key, depending on the CompressPubKey bool of the WIF.
+func (w *Wallet) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (btcutil.Address, error) {
 	if w.flags.watchingOnly {
 		return nil, ErrWalletIsWatchingOnly
 	}
 
 	// First, must check that the key being imported will not result
 	// in a duplicate address.
-	pkh := btcutil.Hash160(pubkeyFromPrivkey(privkey, compressed))
+	pkh := btcutil.Hash160(wif.SerializePubKey())
 	if _, ok := w.addrMap[addressKey(pkh)]; ok {
 		return nil, ErrDuplicate
 	}
@@ -1353,7 +1354,8 @@ func (w *Wallet) ImportPrivateKey(privkey []byte, compressed bool, bs *BlockStam
 	}
 
 	// Create new address with this private key.
-	btcaddr, err := newBtcAddress(w, privkey, nil, bs, compressed)
+	privKey := wif.PrivKey.Serialize()
+	btcaddr, err := newBtcAddress(w, privKey, nil, bs, wif.CompressPubKey)
 	if err != nil {
 		return nil, err
 	}
@@ -2067,8 +2069,8 @@ type PubKeyAddress interface {
 	// It can fail if the wallet is watching only, the wallet is locked,
 	// or the address doesn't have any keys.
 	PrivKey() (*ecdsa.PrivateKey, error)
-	// ExportPrivKey exports the private key in WIF format as a string.
-	ExportPrivKey() (string, error)
+	// ExportPrivKey exports the WIF private key.
+	ExportPrivKey() (*btcutil.WIF, error)
 }
 
 // newBtcAddress initializes and returns a new address.  privkey must
@@ -2523,16 +2525,14 @@ func (a *btcAddress) PrivKey() (*ecdsa.PrivateKey, error) {
 	}, nil
 }
 
-// ExportPrivKey exports the private key in WIF format as a string. Implementing
-// PubKeyAddress.
-func (a *btcAddress) ExportPrivKey() (string, error) {
+// ExportPrivKey exports the private key as a WIF for encoding as a string
+// in the Wallet Import Formt.
+func (a *btcAddress) ExportPrivKey() (*btcutil.WIF, error) {
 	pk, err := a.PrivKey()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	return btcutil.EncodePrivateKey(pad(32, pk.D.Bytes()),
-		a.wallet.Net(), a.Compressed())
+	return btcutil.NewWIF((*btcec.PrivateKey)(pk), a.wallet.Net(), a.Compressed())
 }
 
 // watchingCopy creates a copy of an address without a private key.

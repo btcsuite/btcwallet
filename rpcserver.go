@@ -772,14 +772,14 @@ func ImportPrivKey(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &e
 	}
 
-	pk, net, compressed, err := btcutil.DecodePrivateKey(cmd.PrivKey)
-	if err != nil || net != a.Net() {
+	wif, err := btcutil.DecodeWIF(cmd.PrivKey)
+	if err != nil || !wif.IsForNet(a.Net()) {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
 	// Import the private key, handling any errors.
 	bs := &wallet.BlockStamp{}
-	switch _, err := a.ImportPrivateKey(pk, compressed, bs, cmd.Rescan); err {
+	switch _, err := a.ImportPrivateKey(wif, bs, cmd.Rescan); err {
 	case nil:
 		// If the import was successful, reply with nil.
 		return nil, nil
@@ -1742,12 +1742,6 @@ type pendingTx struct {
 	inputs []uint32 // list of inputs that care about this tx.
 }
 
-// keyInfo is used to store provided keys in SignRawTransaction.
-type keyInfo struct {
-	key        *ecdsa.PrivateKey
-	compressed bool
-}
-
 // SignRawTransaction handles the signrawtransaction command.
 func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	cmd, ok := icmd.(*btcjson.SignRawTransactionCmd)
@@ -1854,13 +1848,12 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Parse list of private keys, if present. If there are any keys here
 	// they are the keys that we may use for signing. If empty we will
 	// use any keys known to us already.
-	var keys map[string]keyInfo
+	var keys map[string]*btcutil.WIF
 	if len(cmd.PrivKeys) != 0 {
-		keys = make(map[string]keyInfo)
+		keys = make(map[string]*btcutil.WIF)
 
 		for _, key := range cmd.PrivKeys {
-			key, net, compressed, err :=
-				btcutil.DecodePrivateKey(key)
+			wif, err := btcutil.DecodeWIF(key)
 			if err != nil {
 				return nil, &btcjson.Error{
 					Code:    btcjson.ErrDeserialization.Code,
@@ -1868,7 +1861,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				}
 			}
 
-			if net != cfg.Net() {
+			if !wif.IsForNet(cfg.Net()) {
 				return nil, &btcjson.Error{
 					Code: btcjson.ErrDeserialization.Code,
 					Message: "key network doesn't match " +
@@ -1876,35 +1869,15 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				}
 			}
 
-			privk, pubk := btcec.PrivKeyFromBytes(btcec.S256(),
-				key)
-
-			var addr btcutil.Address
-			if compressed {
-				pkc := pubk.SerializeCompressed()
-				addr, err = btcutil.NewAddressPubKey(pkc,
-					cfg.Net())
-				if err != nil {
-					return nil, &btcjson.Error{
-						Code:    btcjson.ErrDeserialization.Code,
-						Message: err.Error(),
-					}
-				}
-			} else {
-				pku := pubk.SerializeUncompressed()
-				addr, err = btcutil.NewAddressPubKey(pku,
-					cfg.Net())
-				if err != nil {
-					return nil, &btcjson.Error{
-						Code:    btcjson.ErrDeserialization.Code,
-						Message: err.Error(),
-					}
+			addr, err := btcutil.NewAddressPubKey(wif.SerializePubKey(),
+				cfg.Net())
+			if err != nil {
+				return nil, &btcjson.Error{
+					Code:    btcjson.ErrDeserialization.Code,
+					Message: err.Error(),
 				}
 			}
-			keys[addr.EncodeAddress()] = keyInfo{
-				key:        privk.ToECDSA(),
-				compressed: compressed,
-			}
+			keys[addr.EncodeAddress()] = wif
 		}
 	}
 
@@ -1984,12 +1957,12 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		getKey := btcscript.KeyClosure(func(addr btcutil.Address) (
 			*ecdsa.PrivateKey, bool, error) {
 			if len(keys) != 0 {
-				info, ok := keys[addr.EncodeAddress()]
+				wif, ok := keys[addr.EncodeAddress()]
 				if !ok {
 					return nil, false,
 						errors.New("no key for address")
 				}
-				return info.key, info.compressed, nil
+				return wif.PrivKey.ToECDSA(), wif.CompressPubKey, nil
 			}
 			address, err := AcctMgr.Address(addr)
 			if err != nil {
