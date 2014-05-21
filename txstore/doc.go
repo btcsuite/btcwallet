@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>   
+ * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above  
+ * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
- *                      
+ *
  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF 
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
  * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
@@ -22,14 +22,14 @@
 // transaction output, and finally to provide a means to serialize the
 // entire data structure to an io.Writer and deserialize from an io.Reader
 // (both of which are usually an os.File).
-//               
+//
 // Transaction outputs which are spendable by wallet keys are called
 // credits (because they credit to a wallet's total spendable balance)
 // and are modeled using the Credit structure.  Transaction inputs which
 // spend previously-inserted credits are called debits (because they debit
 // from the wallet's spendable balance) and are modeled using the Debit
 // structure.
-//                      
+//
 // Besides just saving transactions, bidirectional spend tracking is also
 // performed on each credit and debit.  Unlike packages such as btcdb,
 // which only mark whether a transaction output is spent or unspent, this
