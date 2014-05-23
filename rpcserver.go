@@ -277,7 +277,7 @@ func makeMultiSigScript(keys []string, nRequired int) ([]byte, *btcjson.Error) {
 	// mixture of the two.
 	for i, a := range keys {
 		// try to parse as pubkey address
-		a, err := btcutil.DecodeAddress(a, cfg.Net())
+		a, err := btcutil.DecodeAddress(a, activeNet.Net)
 		if err != nil {
 			return nil, &btcjson.Error{
 				Code:    btcjson.ErrParse.Code,
@@ -301,7 +301,7 @@ func makeMultiSigScript(keys []string, nRequired int) ([]byte, *btcjson.Error) {
 
 			// This will be an addresspubkey
 			a, err := btcutil.DecodeAddress(apkinfo.ExportPubKey(),
-				cfg.Net())
+				activeNet.Net)
 			if err != nil {
 				return nil, &btcjson.Error{
 					Code:    btcjson.ErrParse.Code,
@@ -384,7 +384,7 @@ func CreateMultiSig(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, jsonerr
 	}
 
-	address, err := btcutil.NewAddressScriptHash(script, cfg.Net())
+	address, err := btcutil.NewAddressScriptHash(script, activeNet.Net)
 	if err != nil {
 		// above is a valid script, shouldn't happen.
 		return nil, &btcjson.Error{
@@ -409,7 +409,7 @@ func DumpPrivKey(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Net)
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
@@ -616,11 +616,11 @@ func GetAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// Is address valid?
-	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Net)
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
-	if !addr.IsForNet(cfg.Net()) {
+	if !addr.IsForNet(activeNet.Net) {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
 
@@ -694,7 +694,7 @@ func GetAddressBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	// Is address valid?
-	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Net)
 	if err != nil {
 		return nil, &btcjson.ErrInvalidAddressOrKey
 	}
@@ -970,7 +970,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			received += cred.Amount()
 
 			var addr string
-			_, addrs, _, _ := cred.Addresses(cfg.Net())
+			_, addrs, _, _ := cred.Addresses(activeNet.Params)
 			if len(addrs) == 1 {
 				addr = addrs[0].EncodeAddress()
 			}
@@ -1007,7 +1007,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			Amount: (-debits.OutputAmount(true)).ToUnit(btcutil.AmountBTC),
 			Fee:    debits.Fee().ToUnit(btcutil.AmountBTC),
 		}
-		_, addrs, _, _ := debitTx.Credits()[0].Addresses(cfg.Net())
+		_, addrs, _, _ := debitTx.Credits()[0].Addresses(activeNet.Params)
 		if len(addrs) == 1 {
 			info.Address = addrs[0].EncodeAddress()
 		}
@@ -1220,12 +1220,12 @@ func ListAddressTransactions(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Decode addresses.
 	pkHashMap := make(map[string]struct{})
 	for _, addrStr := range cmd.Addresses {
-		addr, err := btcutil.DecodeAddress(addrStr, cfg.Net())
+		addr, err := btcutil.DecodeAddress(addrStr, activeNet.Net)
 		if err != nil {
 			return nil, &btcjson.ErrInvalidAddressOrKey
 		}
 		apkh, ok := addr.(*btcutil.AddressPubKeyHash)
-		if !ok || !apkh.IsForNet(cfg.Net()) {
+		if !ok || !apkh.IsForNet(activeNet.Net) {
 			return nil, &btcjson.ErrInvalidAddressOrKey
 		}
 		pkHashMap[string(addr.ScriptAddress())] = struct{}{}
@@ -1300,7 +1300,7 @@ func ListUnspent(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	if len(cmd.Addresses) != 0 {
 		// confirm that all of them are good:
 		for _, as := range cmd.Addresses {
-			a, err := btcutil.DecodeAddress(as, cfg.Net())
+			a, err := btcutil.DecodeAddress(as, activeNet.Net)
 			if err != nil {
 				return nil, &btcjson.ErrInvalidAddressOrKey
 			}
@@ -1635,7 +1635,7 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Net)
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrParse.Code,
@@ -1800,7 +1800,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			}
 
 			addr, err := btcutil.NewAddressScriptHash(redeemScript,
-				cfg.Net())
+				activeNet.Net)
 			if err != nil {
 				return nil, &btcjson.Error{
 					Code:    btcjson.ErrDeserialization.Code,
@@ -1861,7 +1861,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				}
 			}
 
-			if !wif.IsForNet(cfg.Net()) {
+			if !wif.IsForNet(activeNet.Net) {
 				return nil, &btcjson.Error{
 					Code: btcjson.ErrDeserialization.Code,
 					Message: "key network doesn't match " +
@@ -1870,7 +1870,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			}
 
 			addr, err := btcutil.NewAddressPubKey(wif.SerializePubKey(),
-				cfg.Net())
+				activeNet.Net)
 			if err != nil {
 				return nil, &btcjson.Error{
 					Code:    btcjson.ErrDeserialization.Code,
@@ -2017,7 +2017,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		if (hashType&btcscript.SigHashSingle) == 0 ||
 			i < len(msgTx.TxOut) {
 
-			script, err := btcscript.SignTxOutput(cfg.Net(),
+			script, err := btcscript.SignTxOutput(activeNet.Net,
 				msgTx, i, input, byte(hashType), getKey,
 				getScript, txIn.SignatureScript)
 			// Failure to sign isn't an error, it just means that
@@ -2060,7 +2060,7 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	}
 
 	result := btcjson.ValidateAddressResult{}
-	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Net)
 	if err != nil {
 		return result, nil
 	}
@@ -2116,7 +2116,7 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	addr, err := btcutil.DecodeAddress(cmd.Address, cfg.Net())
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Net)
 	if err != nil {
 		return nil, &btcjson.Error{
 			Code:    btcjson.ErrParse.Code,

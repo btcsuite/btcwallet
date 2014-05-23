@@ -702,7 +702,7 @@ func Handshake(rpc ServerConn) error {
 	if jsonErr != nil {
 		return jsonErr
 	}
-	if net != cfg.Net() {
+	if net != activeNet.Net {
 		return errors.New("btcd and btcwallet running on different Bitcoin networks")
 	}
 

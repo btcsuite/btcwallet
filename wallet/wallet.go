@@ -18,7 +18,6 @@ package wallet
 
 import (
 	"bytes"
-	"code.google.com/p/go.crypto/ripemd160"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -29,13 +28,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/conformal/btcec"
-	"github.com/conformal/btcscript"
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwire"
 	"io"
 	"math/big"
 	"time"
+
+	"code.google.com/p/go.crypto/ripemd160"
+
+	"github.com/conformal/btcec"
+	"github.com/conformal/btcnet"
+	"github.com/conformal/btcscript"
+	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwire"
 )
 
 const (
@@ -527,7 +530,7 @@ type Wallet struct {
 // desc's binary representation must not exceed 32 and 256 bytes,
 // respectively.  All address private keys are encrypted with passphrase.
 // The wallet is returned locked.
-func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
+func NewWallet(name, desc string, passphrase []byte, net *btcnet.Params,
 	createdAt *BlockStamp, keypoolSize uint) (*Wallet, error) {
 
 	// Check sizes of inputs.
@@ -536,11 +539,6 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 	}
 	if len([]byte(desc)) > 256 {
 		return nil, errors.New("desc exceeds 256 byte maximum size")
-	}
-
-	// Check for a valid network.
-	if !(net == btcwire.MainNet || net == btcwire.TestNet3) {
-		return nil, errors.New("wallets must use mainnet or testnet3")
 	}
 
 	// Randomly-generate rootkey and chaincode.
@@ -562,7 +560,7 @@ func NewWallet(name, desc string, passphrase []byte, net btcwire.BitcoinNet,
 	// Create and fill wallet.
 	w := &Wallet{
 		vers: VersCurrent,
-		net:  net,
+		net:  net.Net,
 		flags: walletFlags{
 			useEncryption: true,
 			watchingOnly:  false,

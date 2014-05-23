@@ -20,24 +20,21 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
+	"sync"
+	"time"
+
 	"github.com/conformal/btcchain"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
-	"sort"
-	"sync"
-	"time"
 )
 
 // ErrInsufficientFunds represents an error where there are not enough
 // funds from unspent tx outputs for a wallet to create a transaction.
 var ErrInsufficientFunds = errors.New("insufficient funds")
-
-// ErrUnknownBitcoinNet represents an error where the parsed or
-// requested bitcoin network is invalid (neither mainnet nor testnet).
-var ErrUnknownBitcoinNet = errors.New("unknown bitcoin network")
 
 // ErrNonPositiveAmount represents an error where a bitcoin amount is
 // not positive (either negative, or zero).
@@ -71,17 +68,9 @@ type CreatedTx struct {
 // sort a slice of Utxos by their amount.
 type ByAmount []*txstore.Credit
 
-func (u ByAmount) Len() int {
-	return len(u)
-}
-
-func (u ByAmount) Less(i, j int) bool {
-	return u[i].Amount() < u[j].Amount()
-}
-
-func (u ByAmount) Swap(i, j int) {
-	u[i], u[j] = u[j], u[i]
-}
+func (u ByAmount) Len() int           { return len(u) }
+func (u ByAmount) Less(i, j int) bool { return u[i].Amount() < u[j].Amount() }
+func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 
 // selectInputs selects the minimum number possible of unspent
 // outputs to use to create a new transaction that spends amt satoshis.
@@ -165,7 +154,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 
 	// Add outputs to new tx.
 	for addrStr, amt := range pairs {
-		addr, err := btcutil.DecodeAddress(addrStr, cfg.Net())
+		addr, err := btcutil.DecodeAddress(addrStr, activeNet.Net)
 		if err != nil {
 			return nil, fmt.Errorf("cannot decode address: %s", err)
 		}
@@ -244,7 +233,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 			msgtx.AddTxIn(btcwire.NewTxIn(ip.OutPoint(), nil))
 		}
 		for i, input := range inputs {
-			_, addrs, _, _ := input.Addresses(cfg.Net())
+			_, addrs, _, _ := input.Addresses(activeNet.Params)
 			if len(addrs) != 1 {
 				continue
 			}

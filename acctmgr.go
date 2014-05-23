@@ -170,7 +170,7 @@ var (
 // openSavedAccount opens a named account from disk.  If the wallet does not
 // exist, errNoWallet is returned as an error.
 func openSavedAccount(name string, cfg *config) (*Account, error) {
-	netdir := networkDir(cfg.Net())
+	netdir := networkDir(activeNet.Params)
 	if err := checkCreateDir(netdir); err != nil {
 		return nil, &walletOpenError{
 			Err: err.Error(),
@@ -238,8 +238,8 @@ func openAccounts() *accountData {
 	// done for changing a wallet passphrase) and btcwallet closes after
 	// removing the network directory but before renaming the temporary
 	// directory.
-	netDir := networkDir(cfg.Net())
-	tmpNetDir := tmpNetworkDir(cfg.Net())
+	netDir := networkDir(activeNet.Params)
+	tmpNetDir := tmpNetworkDir(activeNet.Params)
 	if !fileExists(netDir) && fileExists(tmpNetDir) {
 		if err := Rename(tmpNetDir, netDir); err != nil {
 			log.Errorf("Cannot move temporary network dir: %v", err)
@@ -617,7 +617,7 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 
 	// Create new wallet in memory.
 	wlt, err := wallet.NewWallet("", "Default acccount", passphrase,
-		cfg.Net(), &bs, cfg.KeypoolSize)
+		activeNet.Params, &bs, cfg.KeypoolSize)
 	if err != nil {
 		return err
 	}
@@ -826,7 +826,7 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 				continue
 			}
 
-			_, addrs, _, _ := credit.Addresses(cfg.Net())
+			_, addrs, _, _ := credit.Addresses(activeNet.Params)
 			if filter {
 				for _, addr := range addrs {
 					_, ok := addresses[addr.EncodeAddress()]

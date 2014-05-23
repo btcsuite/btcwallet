@@ -83,7 +83,7 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 		credits := r.Credits()
 		for _, c := range credits {
 			// Extract addresses from this output's pkScript.
-			_, addrs, _, err := c.Addresses(cfg.Net())
+			_, addrs, _, err := c.Addresses(activeNet.Params)
 			if err != nil {
 				continue
 			}
@@ -145,7 +145,7 @@ func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) fl
 		if credit.Confirmed(confirms, bs.Height) {
 			// We only care about the case where len(addrs) == 1, and err
 			// will never be non-nil in that case
-			_, addrs, _, _ := credit.Addresses(cfg.Net())
+			_, addrs, _, _ := credit.Addresses(activeNet.Params)
 			if len(addrs) != 1 {
 				continue
 			}
@@ -247,7 +247,7 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 		for _, c := range r.Credits() {
 			// We only care about the case where len(addrs) == 1,
 			// and err will never be non-nil in that case.
-			_, addrs, _, _ := c.Addresses(cfg.Net())
+			_, addrs, _, _ := c.Addresses(activeNet.Params)
 			if len(addrs) != 1 {
 				continue
 			}
@@ -391,7 +391,7 @@ func (a *Account) ImportPrivateKey(wif *btcutil.WIF, bs *wallet.BlockStamp,
 // ExportToDirectory writes an account to a special export directory.  Any
 // previous files are overwritten.
 func (a *Account) ExportToDirectory(dirBaseName string) error {
-	dir := filepath.Join(networkDir(cfg.Net()), dirBaseName)
+	dir := filepath.Join(networkDir(activeNet.Params), dirBaseName)
 	if err := checkCreateDir(dir); err != nil {
 		return err
 	}

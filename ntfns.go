@@ -108,7 +108,7 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 	// and record the received txout.
 	for outIdx, txout := range tx.MsgTx().TxOut {
 		var accounts []*Account
-		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, cfg.Net())
+		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, activeNet.Net)
 		for _, addr := range addrs {
 			a, err := AcctMgr.AccountByAddress(addr)
 			if err != nil {

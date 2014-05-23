@@ -18,27 +18,34 @@ package main
 
 import (
 	"fmt"
-	"github.com/conformal/btcwire"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/conformal/btcnet"
+	"github.com/conformal/btcwire"
 )
 
 // networkDir returns the directory name of a network directory to hold account
 // files.
-func networkDir(net btcwire.BitcoinNet) string {
-	var netname string
-	if net == btcwire.MainNet {
-		netname = "mainnet"
-	} else {
+func networkDir(net *btcnet.Params) string {
+	netname := net.Name
+
+	// For now, we must always name the testnet data directory as "testnet"
+	// and not "testnet3" or any other version, as the btcnet testnet3
+	// paramaters will likely be switched to being named "testnet3" in the
+	// future.  This is done to future proof that change, and an upgrade
+	// plan to move the testnet3 data directory can be worked out later.
+	if net.Net == btcwire.TestNet3 {
 		netname = "testnet"
 	}
+
 	return filepath.Join(cfg.DataDir, netname)
 }
 
 // tmpNetworkDir returns the temporary directory name for a given network.
-func tmpNetworkDir(net btcwire.BitcoinNet) string {
+func tmpNetworkDir(net *btcnet.Params) string {
 	return networkDir(net) + "_tmp"
 }
 
@@ -218,11 +225,11 @@ func (ds *DiskSyncer) Start() {
 //
 // This never returns and is should be called from a new goroutine.
 func (ds *DiskSyncer) handler() {
-	netdir := networkDir(cfg.Net())
+	netdir := networkDir(activeNet.Params)
 	if err := checkCreateDir(netdir); err != nil {
 		log.Errorf("Unable to create or write to account directory: %v", err)
 	}
-	tmpnetdir := tmpNetworkDir(cfg.Net())
+	tmpnetdir := tmpNetworkDir(activeNet.Params)
 
 	const wait = 10 * time.Second
 	var timer <-chan time.Time

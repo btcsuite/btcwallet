@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/conformal/btcchain"
+	"github.com/conformal/btcnet"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
@@ -1282,12 +1283,12 @@ func (d *Debits) Fee() btcutil.Amount {
 
 // Addresses parses the pubkey script, extracting all addresses for a
 // standard script.
-func (c *Credit) Addresses(net btcwire.BitcoinNet) (btcscript.ScriptClass,
+func (c *Credit) Addresses(net *btcnet.Params) (btcscript.ScriptClass,
 	[]btcutil.Address, int, error) {
 
 	msgTx := c.Tx().MsgTx()
 	pkScript := msgTx.TxOut[c.OutputIndex].PkScript
-	return btcscript.ExtractPkScriptAddrs(pkScript, net)
+	return btcscript.ExtractPkScriptAddrs(pkScript, net.Net)
 }
 
 // Change returns whether the credit is the result of a change output.

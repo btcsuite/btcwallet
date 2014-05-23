@@ -208,7 +208,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Choose the active network params based on the mainnet net flag.
 	if cfg.MainNet {
-		activeNetParams = netParams(btcwire.MainNet)
+		activeNet = &mainNetParams
 	}
 
 	// Validate debug log level
@@ -221,12 +221,11 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	if cfg.RPCConnect == "" {
-		cfg.RPCConnect = activeNetParams.connect
+		cfg.RPCConnect = activeNet.connect
 	}
 
 	// Add default port to connect flag if missing.
-	cfg.RPCConnect = normalizeAddress(cfg.RPCConnect,
-		activeNetParams.btcdPort)
+	cfg.RPCConnect = normalizeAddress(cfg.RPCConnect, activeNet.btcdPort)
 
 	// If CAFile is unset, choose either the copy or local btcd cert.
 	if cfg.CAFile == "" {
@@ -261,7 +260,7 @@ func loadConfig() (*config, []string, error) {
 		}
 		cfg.SvrListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
-			addr = net.JoinHostPort(addr, activeNetParams.svrPort)
+			addr = net.JoinHostPort(addr, activeNet.svrPort)
 			cfg.SvrListeners = append(cfg.SvrListeners, addr)
 		}
 	}
@@ -269,7 +268,7 @@ func loadConfig() (*config, []string, error) {
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
 	cfg.SvrListeners = normalizeAddresses(cfg.SvrListeners,
-		activeNetParams.svrPort)
+		activeNet.svrPort)
 
 	// Expand environment variable and leading ~ for filepaths.
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
@@ -286,13 +285,6 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	return &cfg, remainingArgs, nil
-}
-
-func (c *config) Net() btcwire.BitcoinNet {
-	if cfg.MainNet {
-		return btcwire.MainNet
-	}
-	return btcwire.TestNet3
 }
 
 // validLogLevel returns whether or not logLevel is a valid debug log level.
