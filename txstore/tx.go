@@ -1109,6 +1109,113 @@ func (s *Store) UnspentOutputs() ([]*Credit, error) {
 	return unspent, nil
 }
 
+// unspentTx is a type defined here so it can be sorted with the sort
+// package.  It is used to provide a sorted range over all transactions
+// in a block with unspent outputs.
+type unspentTx struct {
+	blockIndex int
+	sliceIndex uint32
+}
+
+type unspentTxs []unspentTx
+
+func (u unspentTxs) Len() int           { return len(u) }
+func (u unspentTxs) Less(i, j int) bool { return u[i].blockIndex < u[j].blockIndex }
+func (u unspentTxs) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
+
+type int32Slice []int32
+
+func (s int32Slice) Len() int           { return len(s) }
+func (s int32Slice) Less(i, j int) bool { return s[i] < s[j] }
+func (s int32Slice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+type txRecordSlice []*txRecord
+
+func (s txRecordSlice) Len() int           { return len(s) }
+func (s txRecordSlice) Less(i, j int) bool { return s[i].received.Before(s[j].received) }
+func (s txRecordSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+type creditSlice []*Credit
+
+func (s creditSlice) Len() int           { return len(s) }
+func (s creditSlice) Less(i, j int) bool { return s[i].received.Before(s[j].received) }
+func (s creditSlice) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+// SortedUnspentOutputs returns all unspent recevied transaction outputs.
+// The order is first unmined transactions (sorted by receive date), then
+// mined transactions in increasing number of confirmations.  Transactions
+// in the same block (same number of confirmations) are sorted by block
+// index in increasing order.  Credits (outputs) from the same transaction
+// are sorted by output index in increasing order.
+func (s *Store) SortedUnspentOutputs() ([]*Credit, error) {
+	// The cap isn't the actual max this slice can grow to, but should help
+	// by avoid some realloations after each append.
+	unspent := make([]*Credit, 0, len(s.unspent)+len(s.unconfirmed.txs))
+
+	// Create slice of unspent unconfirmed transactions sorted by receive
+	// date (newest to oldest).
+	unconfirmedTxs := make(txRecordSlice, 0, len(s.unconfirmed.txs))
+	for _, r := range s.unconfirmed.txs {
+		unconfirmedTxs = append(unconfirmedTxs, r)
+	}
+	sort.Sort(sort.Reverse(unconfirmedTxs))
+	// For each sorted unconfirmed tx, append its unspent credits.
+	for _, r := range unconfirmedTxs {
+		for outputIndex, credit := range r.credits {
+			if credit == nil || credit.spentBy != nil {
+				continue
+			}
+			key := BlockTxKey{BlockHeight: -1}
+			txRecord := &TxRecord{key, r, s}
+			c := &Credit{txRecord, uint32(outputIndex)}
+			unspent = append(unspent, c)
+		}
+	}
+
+	// Create slice of sorted block heights of blocks (decreasing order)
+	// that contain unspent txouts.
+	blockHeights := make([]int32, 0, len(s.unspent))
+	for height := range s.unspent {
+		blockHeights = append(blockHeights, height)
+	}
+	sort.Sort(sort.Reverse(int32Slice(blockHeights)))
+
+	for _, height := range blockHeights {
+		b, err := s.lookupBlock(height)
+		if err != nil {
+			return nil, err
+		}
+
+		// Create slice of sorted transaction indexes for txs with
+		// unspent outputs.
+		unspents := make([]unspentTx, 0, len(b.unspent))
+		for blockIndex, index := range b.unspent {
+			u := unspentTx{blockIndex, index}
+			unspents = append(unspents, u)
+		}
+		sort.Sort(unspentTxs(unspents))
+
+		// Iterate through each transaction from this block.
+		for _, unspentTx := range unspents {
+			r := b.txs[unspentTx.sliceIndex]
+
+			// Credits are alredy sorted, with non-credit outputs
+			// nilled, so no need to create a new sorted slice.
+			for outputIndex, credit := range r.credits {
+				if credit == nil || credit.spentBy != nil {
+					continue
+				}
+				key := BlockTxKey{unspentTx.blockIndex, b.Height}
+				txRecord := &TxRecord{key, r, s}
+				c := &Credit{txRecord, uint32(outputIndex)}
+				unspent = append(unspent, c)
+			}
+		}
+	}
+
+	return unspent, nil
+}
+
 // confirmed checks whether a transaction at height txHeight has met
 // minconf confirmations for a blockchain at height curHeight.
 func confirmed(minconf int, txHeight, curHeight int32) bool {

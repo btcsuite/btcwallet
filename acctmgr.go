@@ -816,10 +816,11 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 
 	var results []*btcjson.ListUnspentResult
 	for _, a := range am.AllAccounts() {
-		unspent, err := a.TxStore.UnspentOutputs()
+		unspent, err := a.TxStore.SortedUnspentOutputs()
 		if err != nil {
 			return nil, err
 		}
+
 		for _, credit := range unspent {
 			confs := credit.Confirmations(bs.Height)
 			if int(confs) < minconf || int(confs) > maxconf {
