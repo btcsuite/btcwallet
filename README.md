@@ -120,13 +120,10 @@ JSON-RPC notifications (currently undocumented).  The btcd packages
 `btcjson` and `btcws` provide types and functions for creating and
 JSON (un)marshaling these requests and notifications.
 
-## TODO
+## Issue Tracker
 
-- Full RPC compatibility with bitcoind, including mining support
-- RPC documentation (both bitcoind commands and btcwallet extensions available
-  for websocket connections)
-- P2SH and multisig functionality
-- Improved test coverage
+The [integrated github issue tracker](https://github.com/conformal/btcwallet/issues)
+is used for this project.
 
 ## GPG Verification Key
 
