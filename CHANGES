@@ -3,6 +3,80 @@ User visible changes for btcwallet
   A wallet daemon for btcd, written in Go
 ============================================================================
 
+Changes in 0.4.0 (Sun May 25 2014)
+  - Implement the following standard bitcoin server RPC requests:
+    - signmessage (https://github.com/conformal/btcwallet/issues/58)
+    - verifymessage (https://github.com/conformal/btcwallet/issues/61)
+    - listunspent (https://github.com/conformal/btcwallet/issues/54)
+    - validateaddress (https://github.com/conformal/btcwallet/issues/60)
+    - addressmultisig (https://github.com/conformal/btcwallet/issues/37)
+    - createmultisig (https://github.com/conformal/btcwallet/issues/37)
+    - signrawtransaction (https://github.com/conformal/btcwallet/issues/59)
+
+  - Add authenticate extension RPC request to authenticate a websocket
+    session without requiring the use of the HTTP Authorization header
+
+  - Add btcdusername and btcdpassword options to allow separate
+    authentication credentials from wallet clients when authenticating to a
+    btcd websocket RPC server
+
+  - Fix RPC response passthrough: JSON unmarshaling and marshaling is now
+    delayed until necessary and JSON result objects from btcd are sent to
+    clients directly without an extra decode+encode that may change the
+    representation of large integer values
+
+  - Fix several websocket client connection issues:
+    - Disconnect clients are cleanly removed without hanging on any final
+      sends
+    - Set deadline for websocket client sends to prevent hanging on
+      misbehaving clients or clients with a bad connection
+
+  - Fix return result for dumprivkey by always padding the private key bytes
+    to a length of 32
+
+  - Fix rescan for transaction history for imported addresses
+    (https://github.com/conformal/btcwallet/issues/74)
+
+  - Fix listsinceblock request handler to consider the minimum confirmation
+    parameter (https://github.com/conformal/btcwallet/issues/80)
+
+  - Fix several RPC handlers which require an unlocked wallet to check
+    for an unlocked wallet before continuing
+    (https://github.com/conformal/btcwallet/issues/65)
+
+  - Fix handling for block rewards (coinbase transactions):
+    - Update listtransactions results to use "generate" category for
+      coinbase outputs
+    - Prevent inclusion of immature coinbase outputs for newly created
+      transactions
+
+  - Rewrite the transaction store to handle several issues regarding
+    transation malleability and performance issues
+    - The new transaction store is written to disk in a different format
+      then before, and upgrades will require a rescan to rebuild the
+      transaction history
+
+  - Improve rescan:
+    - Begin rescan with known UTXO set at start height
+    - Serialize executation of all rescan requests
+    - Merge waiting rescan jobs so all jobs can be handled with a single
+      rescan
+    - Support parially synced addresses in the keystore and incrementally
+      mark rescan progress.  If a rescan is unable to continue (wallet 
+      closes, btcd disconnects, etc.) a new rescan can start at the last
+      synced chain height
+
+  - Notify (with an unsolicited notification) websocket clients of btcd
+    connection state
+
+  - Improve logging:
+    - Log reason for disconnecting a websocket client
+
+  - Updates for btcd websocket API changes
+
+  - Stability fixes, internal API changes, general code cleanup, and comment
+    corrections
+
 Changes in 0.3.0 (Mon Feb 10 2014)
   - Use correct hash algorithm for chained addresses (fixes a bug where
     address chaining was still deterministic, but forked from Armory and
