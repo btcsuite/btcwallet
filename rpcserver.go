@@ -2014,8 +2014,8 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		// SigHashSingle inputs can only be signed if there's a
 		// corresponding output. However this could be already signed,
 		// so we always verify the output.
-		if (hashType&btcscript.SigHashSingle) == 0 ||
-			i < len(msgTx.TxOut) {
+		if (hashType&btcscript.SigHashSingle) !=
+			btcscript.SigHashSingle || i < len(msgTx.TxOut) {
 
 			script, err := btcscript.SignTxOutput(activeNet.Net,
 				msgTx, i, input, byte(hashType), getKey,
