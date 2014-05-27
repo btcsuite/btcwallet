@@ -485,6 +485,45 @@ func (v *varEntries) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 }
 
+// Wallet uses a custom network parameters type so it can be an io.ReaderFrom.
+// Due to the way and order that wallets are currently serialized and how
+// address reading requires the wallet's network parameters, setting and
+// erroring on unknown wallet networks must happen on the read itself and not
+// after the fact.  This is admitidly a hack, but with a bip32 keystore on the
+// horizon I'm not too motivated to clean this up.
+type netParams btcnet.Params
+
+func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
+	var buf [4]byte
+	uint32Bytes := buf[:4]
+
+	n, err := io.ReadFull(r, uint32Bytes)
+	n64 := int64(n)
+	if err != nil {
+		return n64, err
+	}
+
+	switch btcwire.BitcoinNet(binary.LittleEndian.Uint32(uint32Bytes)) {
+	case btcwire.MainNet:
+		*net = *(*netParams)(&btcnet.MainNetParams)
+	case btcwire.TestNet3:
+		*net = *(*netParams)(&btcnet.TestNet3Params)
+	default:
+		return n64, errors.New("unknown network")
+	}
+	return n64, nil
+}
+
+func (net *netParams) WriteTo(w io.Writer) (int64, error) {
+	var buf [4]byte
+	uint32Bytes := buf[:4]
+
+	binary.LittleEndian.PutUint32(uint32Bytes, uint32(net.Net))
+	n, err := w.Write(uint32Bytes)
+	n64 := int64(n)
+	return n64, err
+}
+
 // Stringified byte slices for use as map lookup keys.
 type addressKey string
 type transactionHashKey string
@@ -500,7 +539,7 @@ func getAddressKey(addr btcutil.Address) addressKey {
 // write to any type of byte streams, including files.
 type Wallet struct {
 	vers         version
-	net          btcwire.BitcoinNet
+	net          *netParams
 	flags        walletFlags
 	createDate   int64
 	name         [32]byte
@@ -560,7 +599,7 @@ func NewWallet(name, desc string, passphrase []byte, net *btcnet.Params,
 	// Create and fill wallet.
 	w := &Wallet{
 		vers: VersCurrent,
-		net:  net.Net,
+		net:  (*netParams)(net),
 		flags: walletFlags{
 			useEncryption: true,
 			watchingOnly:  false,
@@ -638,6 +677,7 @@ func (w *Wallet) Name() string {
 func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	var read int64
 
+	w.net = &netParams{}
 	w.addrMap = make(map[addressKey]walletAddress)
 	w.addrCommentMap = make(map[addressKey]comment)
 	w.chainIdxMap = make(map[int64]btcutil.Address)
@@ -653,7 +693,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 	datas := []interface{}{
 		&id,
 		&w.vers,
-		&w.net,
+		w.net,
 		&w.flags,
 		make([]byte, 6), // Bytes for Armory unique ID
 		&w.createDate,
@@ -727,7 +767,7 @@ func (w *Wallet) ReadFrom(r io.Reader) (n int64, err error) {
 			w.importedAddrs = append(w.importedAddrs, &e.script)
 
 		case *addrCommentEntry:
-			addr, err := e.address(w.net)
+			addr, err := e.address(w.Net())
 			if err != nil {
 				return 0, err
 			}
@@ -802,7 +842,7 @@ func (w *Wallet) WriteTo(wtr io.Writer) (n int64, err error) {
 	datas := []interface{}{
 		&fileID,
 		&VersCurrent,
-		&w.net,
+		w.net,
 		&w.flags,
 		make([]byte, 6), // Bytes for Armory unique ID
 		&w.createDate,
@@ -1195,9 +1235,9 @@ func (w *Wallet) Address(a btcutil.Address) (WalletAddress, error) {
 	return btcaddr, nil
 }
 
-// Net returns the bitcoin network identifier for this wallet.
-func (w *Wallet) Net() btcwire.BitcoinNet {
-	return w.net
+// Net returns the bitcoin network parameters for this wallet.
+func (w *Wallet) Net() *btcnet.Params {
+	return (*btcnet.Params)(w.net)
 }
 
 // SetSyncStatus sets the sync status for a single wallet address.  This
@@ -2530,7 +2570,15 @@ func (a *btcAddress) ExportPrivKey() (*btcutil.WIF, error) {
 	if err != nil {
 		return nil, err
 	}
-	return btcutil.NewWIF((*btcec.PrivateKey)(pk), a.wallet.Net(), a.Compressed())
+	// NewWIF only errors if the network is nil.  In this case, panic,
+	// as our program's assumptions are so broken that this needs to be
+	// caught immediately, and a stack trace here is more useful than
+	// elsewhere.
+	wif, err := btcutil.NewWIF((*btcec.PrivateKey)(pk), a.wallet.Net(), a.Compressed())
+	if err != nil {
+		panic(err)
+	}
+	return wif, nil
 }
 
 // watchingCopy creates a copy of an address without a private key.
@@ -3168,7 +3216,7 @@ type addrCommentEntry struct {
 	comment       []byte
 }
 
-func (e *addrCommentEntry) address(net btcwire.BitcoinNet) (*btcutil.AddressPubKeyHash, error) {
+func (e *addrCommentEntry) address(net *btcnet.Params) (*btcutil.AddressPubKeyHash, error) {
 	return btcutil.NewAddressPubKeyHash(e.pubKeyHash160[:], net)
 }
 

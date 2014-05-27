@@ -19,15 +19,15 @@ package txstore
 import (
 	"github.com/conformal/btcchain"
 	"github.com/conformal/btcjson"
+	"github.com/conformal/btcnet"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwire"
 )
 
 // ToJSON returns a slice of btcjson listtransaction result types for all credits
 // and debits of this transaction.
 func (t *TxRecord) ToJSON(account string, chainHeight int32,
-	net btcwire.BitcoinNet) ([]btcjson.ListTransactionsResult, error) {
+	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
 
 	var results []btcjson.ListTransactionsResult
 	if d := t.Debits(); d != nil {
@@ -50,7 +50,7 @@ func (t *TxRecord) ToJSON(account string, chainHeight int32,
 // ToJSON returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
 func (d *Debits) ToJSON(account string, chainHeight int32,
-	net btcwire.BitcoinNet) ([]btcjson.ListTransactionsResult, error) {
+	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
 
 	msgTx := d.Tx().MsgTx()
 	reply := make([]btcjson.ListTransactionsResult, 0, len(msgTx.TxOut))
@@ -93,7 +93,7 @@ func (d *Debits) ToJSON(account string, chainHeight int32,
 // ToJSON returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
 func (c *Credit) ToJSON(account string, chainHeight int32,
-	net btcwire.BitcoinNet) (btcjson.ListTransactionsResult, error) {
+	net *btcnet.Params) (btcjson.ListTransactionsResult, error) {
 
 	msgTx := c.Tx().MsgTx()
 	txout := msgTx.TxOut[c.OutputIndex]

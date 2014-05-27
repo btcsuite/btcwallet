@@ -154,7 +154,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 
 	// Add outputs to new tx.
 	for addrStr, amt := range pairs {
-		addr, err := btcutil.DecodeAddress(addrStr, activeNet.Net)
+		addr, err := btcutil.DecodeAddress(addrStr, activeNet.Params)
 		if err != nil {
 			return nil, fmt.Errorf("cannot decode address: %s", err)
 		}

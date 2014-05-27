@@ -1395,7 +1395,7 @@ func (c *Credit) Addresses(net *btcnet.Params) (btcscript.ScriptClass,
 
 	msgTx := c.Tx().MsgTx()
 	pkScript := msgTx.TxOut[c.OutputIndex].PkScript
-	return btcscript.ExtractPkScriptAddrs(pkScript, net.Net)
+	return btcscript.ExtractPkScriptAddrs(pkScript, net)
 }
 
 // Change returns whether the credit is the result of a change output.

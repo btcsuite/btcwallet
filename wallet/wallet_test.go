@@ -32,10 +32,10 @@ import (
 	"github.com/davecgh/go-spew/spew"
 )
 
-var netParams = &btcnet.MainNetParams
+var tstNetParams = &btcnet.MainNetParams
 
 func TestBtcAddressSerializer(t *testing.T) {
-	fakeWallet := &Wallet{net: netParams.Net}
+	fakeWallet := &Wallet{net: (*netParams)(tstNetParams)}
 	kdfp := &kdfParameters{
 		mem:   1024,
 		nIter: 5,
@@ -88,7 +88,7 @@ func TestBtcAddressSerializer(t *testing.T) {
 }
 
 func TestScriptAddressSerializer(t *testing.T) {
-	fakeWallet := &Wallet{net: netParams.Net}
+	fakeWallet := &Wallet{net: (*netParams)(tstNetParams)}
 	script := []byte{btcscript.OP_TRUE, btcscript.OP_DUP,
 		btcscript.OP_DROP}
 	addr, err := newScriptAddress(fakeWallet, script, &BlockStamp{})
@@ -120,7 +120,7 @@ func TestScriptAddressSerializer(t *testing.T) {
 func TestWalletCreationSerialization(t *testing.T) {
 	createdAt := &BlockStamp{}
 	w1, err := NewWallet("banana wallet", "A wallet for testing.",
-		[]byte("banana"), netParams, createdAt, 100)
+		[]byte("banana"), tstNetParams, createdAt, 100)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 		return
@@ -332,7 +332,7 @@ func TestWalletPubkeyChaining(t *testing.T) {
 	const keypoolSize = 5
 
 	w, err := NewWallet("banana wallet", "A wallet for testing.",
-		[]byte("banana"), netParams, &BlockStamp{}, keypoolSize)
+		[]byte("banana"), tstNetParams, &BlockStamp{}, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 		return
@@ -508,7 +508,7 @@ func TestWatchingWalletExport(t *testing.T) {
 	const keypoolSize = 10
 	createdAt := &BlockStamp{}
 	w, err := NewWallet("banana wallet", "A wallet for testing.",
-		[]byte("banana"), netParams, createdAt, keypoolSize)
+		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 		return
@@ -717,10 +717,7 @@ func TestWatchingWalletExport(t *testing.T) {
 		return
 	}
 	pk, _ := btcec.PrivKeyFromBytes(btcec.S256(), make([]byte, 32))
-	wif, err := btcutil.NewWIF(pk, netParams.Net, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wif := btcutil.NewWIF(pk, tstNetParams, true)
 	if _, err := ww.ImportPrivateKey(wif, createdAt); err != ErrWalletIsWatchingOnly {
 		t.Errorf("Nonsensical func ImportPrivateKey returned no or incorrect error: %v", err)
 		return
@@ -732,7 +729,7 @@ func TestImportPrivateKey(t *testing.T) {
 	createHeight := int32(100)
 	createdAt := &BlockStamp{Height: createHeight}
 	w, err := NewWallet("banana wallet", "A wallet for testing.",
-		[]byte("banana"), netParams, createdAt, keypoolSize)
+		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 		return
@@ -761,10 +758,7 @@ func TestImportPrivateKey(t *testing.T) {
 	}
 
 	// import priv key
-	wif, err := btcutil.NewWIF((*btcec.PrivateKey)(pk), netParams.Net, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wif := btcutil.NewWIF((*btcec.PrivateKey)(pk), tstNetParams, false)
 	importHeight := int32(50)
 	importedAt := &BlockStamp{Height: importHeight}
 	address, err := w.ImportPrivateKey(wif, importedAt)
@@ -927,7 +921,7 @@ func TestImportScript(t *testing.T) {
 	createHeight := int32(100)
 	createdAt := &BlockStamp{Height: createHeight}
 	w, err := NewWallet("banana wallet", "A wallet for testing.",
-		[]byte("banana"), netParams, createdAt, keypoolSize)
+		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 		return
@@ -1198,7 +1192,7 @@ func TestChangePassphrase(t *testing.T) {
 	const keypoolSize = 10
 	createdAt := &BlockStamp{}
 	w, err := NewWallet("banana wallet", "A wallet for testing.",
-		[]byte("banana"), netParams, createdAt, keypoolSize)
+		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
 		return
