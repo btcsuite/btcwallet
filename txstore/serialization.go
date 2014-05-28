@@ -758,12 +758,14 @@ func (tx *msgTx) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (tx *msgTx) WriteTo(w io.Writer) (int64, error) {
-	// Write to a buffer and then copy to w so the total number
-	// of bytes written can be returned to the caller.  Writing
-	// to a bytes.Buffer never fails except for OOM, so omit the
-	// serialization error check.
+	// Write to a buffer and then copy to w so the total number of bytes
+	// written can be returned to the caller.  Writing to a to a
+	// bytes.Buffer never fails except for OOM panics, so check and panic 
+	// on any unexpected non-nil returned errors.
 	buf := new(bytes.Buffer)
-	_ = (*btcwire.MsgTx)(tx).Serialize(buf)
+	if err := (*btcwire.MsgTx)(tx).Serialize(buf); err != nil {
+		panic(err)
+	}
 	return io.Copy(w, buf)
 }
 

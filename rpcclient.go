@@ -131,8 +131,14 @@ type AddRPCRequest struct {
 // websocket connection.
 func (btcd *BtcdRPCConn) send(rpcrequest *ServerRequest) error {
 	// btcjson.Cmds define their own MarshalJSON which returns an error
-	// to satisify the json.Marshaler interface, but will never error.
-	mrequest, _ := rpcrequest.request.MarshalJSON()
+	// to satisify the json.Marshaler interface, but should never error.
+	// If an error does occur, it is due to a struct containing a type
+	// that is not marshalable, so panic here rather than silently
+	// ignoring it.
+	mrequest, err := rpcrequest.request.MarshalJSON()
+	if err != nil {
+		panic(err)
+	}
 	return websocket.Message.Send(btcd.ws, mrequest)
 }
 
@@ -155,7 +161,10 @@ func (btcd *BtcdRPCConn) Start() {
 					// Connection lost.
 					log.Infof("Cannot complete btcd websocket send: %v",
 						err)
-					btcd.ws.Close()
+					if err := btcd.ws.Close(); err != nil {
+						log.Warnf("Cannot close btcd "+
+							"websocket connection: %v", err)
+					}
 					close(done)
 				}
 
@@ -175,42 +184,6 @@ func (btcd *BtcdRPCConn) Start() {
 				delete(m, *rawResponse.Id)
 
 				rpcrequest.response <- rawResponse
-
-				/*
-					//rpcrequest.result
-					var jsonErr *btcjson.Error
-					if rawResponse.result != nil {
-					}
-					err := json.Unmarshal([]byte(*rawResponse.result), &result)
-					err := json.Unmarshal([]byte(*rawResponse.error), &error)
-
-					rawResult := recvResponse
-					rawError := recvResponse
-					response := &ServerResponse{
-						result: r.Result,
-						err:    jsonErr
-					}
-					rpcrequest.response <- response
-				*/
-
-				/*
-					// If no result var was set, create and send
-					// send the response unmarshaled by the json
-					// package.
-
-
-					if rpcrequest.result == nil {
-						response := &ServerResponse{
-							result: recvResponse.reply.Result,
-							err:    recvResponse.reply.Error,
-						}
-						rpcrequest.response <- response
-						continue
-					}
-
-					// A return var was set, so unmarshal again
-					// into the var before sending the response.
-				*/
 
 			case <-done:
 				resp := RawRPCResponse{Error: &ErrBtcdDisconnectedRaw}
@@ -237,7 +210,10 @@ func (btcd *BtcdRPCConn) Start() {
 					log.Infof("Cannot receive btcd websocket message: %v",
 						err)
 				}
-				btcd.ws.Close()
+				if err := btcd.ws.Close(); err != nil {
+					log.Warnf("Cannot close btcd "+
+						"websocket connection: %v", err)
+				}
 				close(responses)
 				return
 			}
@@ -307,8 +283,12 @@ func GetBestBlock(rpc ServerConn) (*btcws.GetBestBlockResult, *btcjson.Error) {
 
 // GetBlock requests details about a block with the given hash.
 func GetBlock(rpc ServerConn, blockHash string) (*btcjson.BlockResult, *btcjson.Error) {
-	// NewGetBlockCmd cannot fail with no optargs, so omit the check.
-	cmd, _ := btcjson.NewGetBlockCmd(<-NewJSONID, blockHash)
+	// NewGetBlockCmd should never fail with no optargs.  If this does fail,
+	// panic now rather than later.
+	cmd, err := btcjson.NewGetBlockCmd(<-NewJSONID, blockHash)
+	if err != nil {
+		panic(err)
+	}
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 
 	var resultData btcjson.BlockResult
@@ -367,12 +347,16 @@ func NotifySpent(rpc ServerConn, outpoints []*btcwire.OutPoint) *btcjson.Error {
 func Rescan(rpc ServerConn, beginBlock int32, addrs []string,
 	outpoints []*btcwire.OutPoint) *btcjson.Error {
 
-	// NewRescanCmd cannot fail with no optargs, so omit the check.
 	ops := make([]btcws.OutPoint, len(outpoints))
 	for i := range outpoints {
 		ops[i] = *btcws.NewOutPointFromWire(outpoints[i])
 	}
-	cmd, _ := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs, ops)
+	// NewRescanCmd should never fail with no optargs.  If this does fail,
+	// panic now rather than later.
+	cmd, err := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs, ops)
+	if err != nil {
+		panic(err)
+	}
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 	_, jsonErr := response.FinishUnmarshal(nil)
 	return jsonErr
@@ -380,8 +364,12 @@ func Rescan(rpc ServerConn, beginBlock int32, addrs []string,
 
 // SendRawTransaction sends a hex-encoded transaction for relay.
 func SendRawTransaction(rpc ServerConn, hextx string) (txid string, error *btcjson.Error) {
-	// NewSendRawTransactionCmd cannot fail, so omit the check.
-	cmd, _ := btcjson.NewSendRawTransactionCmd(<-NewJSONID, hextx)
+	// NewSendRawTransactionCmd should never fail.  In the exceptional case
+	// where it does, panic here rather than later.
+	cmd, err := btcjson.NewSendRawTransactionCmd(<-NewJSONID, hextx)
+	if err != nil {
+		panic(err)
+	}
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 
 	var resultData string
@@ -396,9 +384,12 @@ func SendRawTransaction(rpc ServerConn, hextx string) (txid string, error *btcjs
 // command for txsha.. When the result of the request is required it may be
 // collected with GetRawTRansactionAsyncResult.
 func GetRawTransactionAsync(rpc ServerConn, txsha *btcwire.ShaHash) chan RawRPCResponse {
-	// NewGetRawTransactionCmd cannot fail with no optargs.
-	cmd, _ := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String())
-
+	// NewGetRawTransactionCmd should never fail with no optargs.  If this
+	// does fail, panic now rather than later.
+	cmd, err := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String())
+	if err != nil {
+		panic(err)
+	}
 	return rpc.SendRequest(NewServerRequest(cmd))
 }
 
@@ -436,8 +427,12 @@ func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, *bt
 // VerboseGetRawTransaction sends the verbose version of a getrawtransaction
 // request to receive details about a transaction.
 func VerboseGetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcjson.TxRawResult, *btcjson.Error) {
-	// NewGetRawTransactionCmd cannot fail with a single optarg.
-	cmd, _ := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String(), 1)
+	// NewGetRawTransactionCmd should never fail with a single optarg.  If
+	// it does, panic now rather than later.
+	cmd, err := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String(), 1)
+	if err != nil {
+		panic(err)
+	}
 	response := <-rpc.SendRequest(NewServerRequest(cmd))
 
 	var resultData btcjson.TxRawResult

@@ -17,7 +17,6 @@
 package main
 
 import (
-	"errors"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/wallet"
@@ -47,19 +46,19 @@ var (
 // GetCurBlock returns the blockchain height and SHA hash of the most
 // recently seen block.  If no blocks have been seen since btcd has
 // connected, btcd is queried for the current block height and hash.
-func GetCurBlock() (bs wallet.BlockStamp, err error) {
+func GetCurBlock() (wallet.BlockStamp, error) {
 	curBlock.RLock()
-	bs = curBlock.BlockStamp
+	bs := curBlock.BlockStamp
 	curBlock.RUnlock()
 	if bs.Height != int32(btcutil.BlockHeightUnknown) {
 		return bs, nil
 	}
 
-	bb, _ := GetBestBlock(CurrentServerConn())
-	if bb == nil {
+	bb, jsonErr := GetBestBlock(CurrentServerConn())
+	if jsonErr != nil {
 		return wallet.BlockStamp{
 			Height: int32(btcutil.BlockHeightUnknown),
-		}, errors.New("current block unavailable")
+		}, jsonErr
 	}
 
 	hash, err := btcwire.NewShaHashFromStr(bb.Hash)

@@ -233,6 +233,8 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 			msgtx.AddTxIn(btcwire.NewTxIn(ip.OutPoint(), nil))
 		}
 		for i, input := range inputs {
+			// Errors don't matter here, as we only consider the
+			// case where len(addrs) == 1.
 			_, addrs, _, _ := input.Addresses(activeNet.Params)
 			if len(addrs) != 1 {
 				continue
@@ -296,7 +298,11 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 
 	buf := bytes.NewBuffer(nil)
 	buf.Grow(msgtx.SerializeSize())
-	msgtx.BtcEncode(buf, btcwire.ProtocolVersion)
+	if err := msgtx.BtcEncode(buf, btcwire.ProtocolVersion); err != nil {
+		// Hitting OOM by growing or writing to a bytes.Buffer already
+		// panics, and all returned errors are unexpected.
+		panic(err)
+	}
 	info := &CreatedTx{
 		tx:         btcutil.NewTx(msgtx),
 		inputs:     selectedInputs,

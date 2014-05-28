@@ -62,7 +62,11 @@ func freshDir(path string) error {
 	if err != nil {
 		return err
 	}
-	defer fd.Close()
+	defer func() {
+		if err := fd.Close(); err != nil {
+			log.Warnf("Cannot close directory: %v", err)
+		}
+	}()
 	names, err := fd.Readdirnames(0)
 	if err != nil {
 		return err
@@ -374,13 +378,11 @@ func (a *Account) writeWallet(dir string) error {
 	}
 
 	tmppath := tmpfile.Name()
-	tmpfile.Close()
-
-	if err = Rename(tmppath, wfilepath); err != nil {
-		return err
+	if err := tmpfile.Close(); err != nil {
+		log.Warnf("Cannot close temporary wallet file: %v", err)
 	}
 
-	return nil
+	return Rename(tmppath, wfilepath)
 }
 
 func (a *Account) writeTxStore(dir string) error {
@@ -396,11 +398,9 @@ func (a *Account) writeTxStore(dir string) error {
 	}
 
 	tmppath := tmpfile.Name()
-	tmpfile.Close()
-
-	if err = Rename(tmppath, txfilepath); err != nil {
-		return err
+	if err := tmpfile.Close(); err != nil {
+		log.Warnf("Cannot close temporary txstore file: %v", err)
 	}
 
-	return nil
+	return Rename(tmppath, txfilepath)
 }

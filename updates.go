@@ -61,12 +61,21 @@ func updateOldFileLocations() {
 	//
 	// Previous account files are placed in the testnet directory
 	// as 0.1.0 and earlier only ran on testnet.
+	//
+	// UTXOs and transaction history are intentionally not moved over, as
+	// the UTXO file is no longer used (it was combined with txstore), and
+	// the tx history is now written in an incompatible format and would
+	// be ignored on first read.
 
 	datafi, err := os.Open(cfg.DataDir)
 	if err != nil {
 		return
 	}
-	defer datafi.Close()
+	defer func() {
+		if err := datafi.Close(); err != nil {
+			log.Warnf("Cannot close data directory: %v", err)
+		}
+	}()
 
 	// Get info on all files in the data directory.
 	fi, err := datafi.Readdir(0)
@@ -131,30 +140,10 @@ func updateOldFileLocations() {
 			}
 		}
 
-		// Move old tx.bin, if any.
-		old = filepath.Join(cfg.DataDir, fi[i].Name(), "tx.bin")
-		if fileExists(old) {
-			new := accountFilename("tx.bin", account, netdir)
-			if err := Rename(old, new); err != nil {
-				log.Errorf("Cannot move old %v for account %v to new location: %v",
-					"tx.bin", account, err)
-				os.Exit(1)
-			}
-		}
-
-		// Move old utxo.bin, if any.
-		old = filepath.Join(cfg.DataDir, fi[i].Name(), "utxo.bin")
-		if fileExists(old) {
-			new := accountFilename("utxo.bin", account, netdir)
-			if err := Rename(old, new); err != nil {
-				log.Errorf("Cannot move old %v for account %v to new location: %v",
-					"utxo.bin", account, err)
-				os.Exit(1)
-			}
-		}
-
 		// Cleanup old account directory.
-		os.RemoveAll(filepath.Join(cfg.DataDir, fi[i].Name()))
+		if err := os.RemoveAll(filepath.Join(cfg.DataDir, fi[i].Name())); err != nil {
+			log.Warnf("Could not remove pre 0.1.1 account directory: %v", err)
+		}
 	}
 }
 

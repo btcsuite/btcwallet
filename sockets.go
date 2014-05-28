@@ -202,11 +202,13 @@ func genCertPair(certFile, keyFile string) error {
 		return err
 	}
 	if err = ioutil.WriteFile(keyFile, key, 0600); err != nil {
-		os.Remove(certFile)
+		if rmErr := os.Remove(certFile); rmErr != nil {
+			log.Warnf("Cannot remove written certificates: %v", rmErr)
+		}
 		return err
 	}
 
-	log.Infof("Done generating TLS certificates")
+	log.Info("Done generating TLS certificates")
 	return nil
 }
 
@@ -262,7 +264,14 @@ func (s *server) ReplyToFrontend(msg []byte, ws, authenticated bool) ([]byte, er
 			Id:    &id,
 			Error: jsonErr,
 		}
-		mresponse, _ := json.Marshal(response)
+		mresponse, err := json.Marshal(response)
+		// We expect the marshal to succeed.  If it doesn't, it
+		// indicates that either jsonErr (which is created by us) or
+		// the id itself (which was successfully unmashaled) are of
+		// some non-marshalable type.
+		if err != nil {
+			panic(err)
+		}
 		return mresponse, nil
 	}
 
@@ -282,12 +291,18 @@ func (s *server) ReplyToFrontend(msg []byte, ws, authenticated bool) ([]byte, er
 	}
 	mresponse, err := json.Marshal(response)
 	if err != nil {
-		log.Errorf("Cannot marhal response: %v", err)
+		log.Errorf("Cannot marshal response: %v", err)
 		response := btcjson.Reply{
 			Id:    &id,
 			Error: &btcjson.ErrInternal,
 		}
-		mresponse, _ = json.Marshal(&response)
+		mresponse, err = json.Marshal(&response)
+		// We expect this marshal to succeed.  If it doesn't, btcjson
+		// returned an id with an non-marshalable type or ErrInternal
+		// is just plain wrong.
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	return mresponse, nil
@@ -337,10 +352,13 @@ func clientResponseDuplicator() {
 func NotifyBtcdConnection(reply chan []byte) {
 	if btcd, ok := CurrentServerConn().(*BtcdRPCConn); ok {
 		ntfn := btcws.NewBtcdConnectedNtfn(btcd.Connected())
-		mntfn, _ := ntfn.MarshalJSON()
+		mntfn, err := ntfn.MarshalJSON()
+		// btcws notifications must always marshal without error.
+		if err != nil {
+			panic(err)
+		}
 		reply <- mntfn
 	}
-
 }
 
 // stringQueue manages a queue of strings, reading from in and sending
@@ -409,7 +427,9 @@ out:
 func (s *server) WSSendRecv(ws *websocket.Conn, remoteAddr string, authenticated bool) {
 	// Clear the read deadline set before the websocket hijacked
 	// the connection.
-	ws.SetReadDeadline(time.Time{})
+	if err := ws.SetReadDeadline(time.Time{}); err != nil {
+		log.Warnf("Cannot remove read deadline: %v", err)
+	}
 
 	// Add client context so notifications duplicated to each
 	// client are received by this client.
@@ -535,7 +555,11 @@ out:
 // btcd, so this can probably be removed.
 func NotifyNewBlockChainHeight(reply chan []byte, bs wallet.BlockStamp) {
 	ntfn := btcws.NewBlockConnectedNtfn(bs.Hash.String(), bs.Height)
-	mntfn, _ := ntfn.MarshalJSON()
+	mntfn, err := ntfn.MarshalJSON()
+	// btcws notifications must always marshal without error.
+	if err != nil {
+		panic(err)
+	}
 	reply <- mntfn
 }
 
@@ -598,7 +622,10 @@ func (s *server) Start() {
 		s.wg.Add(1)
 		go func(listener net.Listener) {
 			log.Infof("RPCS: RPC server listening on %s", listener.Addr())
-			httpServer.Serve(listener)
+			if err := httpServer.Serve(listener); err != nil {
+				log.Errorf("Listener for %s exited with error: %v",
+					listener.Addr(), err)
+			}
 			log.Tracef("RPCS: RPC listener done for %s", listener.Addr())
 			s.wg.Done()
 		}(listener)
@@ -754,7 +781,10 @@ func Handshake(rpc ServerConn) error {
 		// try to write new tx and utxo files on each rollback.
 		if it.Next() {
 			bs := it.BlockStamp()
-			AcctMgr.Rollback(bs.Height, &bs.Hash)
+			err := AcctMgr.Rollback(bs.Height, &bs.Hash)
+			if err != nil {
+				return err
+			}
 		}
 
 		// Set default account to be marked in sync with the current
@@ -788,7 +818,9 @@ func Handshake(rpc ServerConn) error {
 	// about.
 	a.fullRescan = true
 	AcctMgr.Track()
-	AcctMgr.RescanActiveAddresses()
+	if err := AcctMgr.RescanActiveAddresses(); err != nil {
+		return err
+	}
 	// TODO: only begin tracking new unspent outputs as a result of the
 	// rescan.  This is also racy (see comment for second Track above).
 	AcctMgr.Track()

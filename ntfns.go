@@ -108,6 +108,8 @@ func NtfnRecvTx(n btcjson.Cmd) error {
 	// and record the received txout.
 	for outIdx, txout := range tx.MsgTx().TxOut {
 		var accounts []*Account
+		// Errors don't matter here.  If addrs is nil, the range below
+		// does nothing.
 		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript,
 			activeNet.Params)
 		for _, addr := range addrs {
@@ -206,7 +208,11 @@ func NtfnBlockConnected(n btcjson.Cmd) error {
 	AcctMgr.BlockNotify(bs)
 
 	// Pass notification to frontends too.
-	marshaled, _ := n.MarshalJSON()
+	marshaled, err := n.MarshalJSON()
+	// The parsed notification is expected to be marshalable.
+	if err != nil {
+		panic(err)
+	}
 	allClients <- marshaled
 
 	return nil
@@ -226,10 +232,18 @@ func NtfnBlockDisconnected(n btcjson.Cmd) error {
 	}
 
 	// Rollback Utxo and Tx data stores.
-	AcctMgr.Rollback(bdn.Height, hash)
+	if err = AcctMgr.Rollback(bdn.Height, hash); err != nil {
+		return err
+	}
 
 	// Pass notification to frontends too.
-	marshaled, _ := n.MarshalJSON()
+	marshaled, err := n.MarshalJSON()
+	// A btcws.BlockDisconnectedNtfn is expected to marshal without error.
+	// If it does, it indicates that one of its struct fields is of a
+	// non-marshalable type.
+	if err != nil {
+		panic(err)
+	}
 	allClients <- marshaled
 
 	return nil

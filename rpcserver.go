@@ -204,12 +204,25 @@ func WalletRequestProcessor() {
 			AcctMgr.Release()
 
 			if jsonErr != nil {
-				b, _ := json.Marshal(jsonErr)
+				b, err := json.Marshal(jsonErr)
+				// Marshal should only fail if jsonErr contains
+				// vars of an non-mashalable type, which would
+				// indicate a source code issue with btcjson.
+				if err != nil {
+					panic(err)
+				}
 				r.response <- RawRPCResponse{
 					Error: (*json.RawMessage)(&b),
 				}
 			} else {
-				b, _ := json.Marshal(result)
+				b, err := json.Marshal(result)
+				// Marshal should only fail if result contains
+				// vars of an unmashalable type.  This may
+				// indicate an bug with the calle RPC handler,
+				// and should be logged.
+				if err != nil {
+					log.Errorf("Cannot marshal result: %v", err)
+				}
 				r.response <- RawRPCResponse{
 					Result: (*json.RawMessage)(&b),
 				}
@@ -573,8 +586,11 @@ func GetBalance(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 // exist.
 func GetInfo(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Call down to btcd for all of the information in this command known
-	// by them.  This call can not realistically ever fail.
-	gicmd, _ := btcjson.NewGetInfoCmd(<-NewJSONID)
+	// by them.  This call is expected to always succeed.
+	gicmd, err := btcjson.NewGetInfoCmd(<-NewJSONID)
+	if err != nil {
+		panic(err)
+	}
 	response := <-CurrentServerConn().SendRequest(NewServerRequest(gicmd))
 
 	var info btcjson.InfoResult
@@ -970,6 +986,8 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			received += cred.Amount()
 
 			var addr string
+			// Errors don't matter here, as we only consider the
+			// case where len(addrs) == 1.
 			_, addrs, _, _ := cred.Addresses(activeNet.Params)
 			if len(addrs) == 1 {
 				addr = addrs[0].EncodeAddress()
@@ -1007,6 +1025,8 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			Amount: (-debits.OutputAmount(true)).ToUnit(btcutil.AmountBTC),
 			Fee:    debits.Fee().ToUnit(btcutil.AmountBTC),
 		}
+		// Errors don't matter here, as we only consider the
+		// case where len(addrs) == 1.
 		_, addrs, _, _ := debitTx.Credits()[0].Addresses(activeNet.Params)
 		if len(addrs) == 1 {
 			info.Address = addrs[0].EncodeAddress()
@@ -1376,7 +1396,11 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amou
 
 	serializedTx := bytes.NewBuffer(nil)
 	serializedTx.Grow(createdTx.tx.MsgTx().SerializeSize())
-	createdTx.tx.MsgTx().Serialize(serializedTx)
+	if err := createdTx.tx.MsgTx().Serialize(serializedTx); err != nil {
+		// Hitting OOM writing to a bytes.Buffer already panics, and
+		// all other errors are unexpected.
+		panic(err)
+	}
 	hextx := hex.EncodeToString(serializedTx.Bytes())
 	txSha, jsonErr := SendRawTransaction(CurrentServerConn(), hextx)
 	if jsonErr != nil {
@@ -2042,9 +2066,11 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	buf := bytes.NewBuffer(nil)
 	buf.Grow(msgTx.SerializeSize())
 
-	// Buffer is the right size, this should never fail so no need to
-	// come up with some synthetic error code for it.
-	_ = msgTx.Serialize(buf)
+	// All returned errors (not OOM, which panics) encounted during
+	// bytes.Buffer writes are unexpected.
+	if err = msgTx.Serialize(buf); err != nil {
+		panic(err)
+	}
 
 	return btcjson.SignRawTransactionResult{
 		Hex:      hex.EncodeToString(buf.Bytes()),
@@ -2075,9 +2101,12 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// We can't use AcctMgr.Address() here since we also need the account
 	// name.
 	if account, err := AcctMgr.AccountByAddress(addr); err == nil {
-		// we ignore these errors because if this call passes this can't
-		// realistically fail.
-		ainfo, _ := account.Address(addr)
+		// The address must be handled by this account, so we expect
+		// this call to succeed without error.
+		ainfo, err := account.Address(addr)
+		if err != nil {
+			panic(err)
+		}
 
 		result.IsMine = true
 		result.Account = account.name
@@ -2231,8 +2260,11 @@ func WalletPassphrase(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	go func(timeout int64) {
 		time.Sleep(time.Second * time.Duration(timeout))
 		AcctMgr.Grab()
-		_ = AcctMgr.LockWallets()
-		AcctMgr.Release()
+		defer AcctMgr.Release()
+		err := AcctMgr.LockWallets()
+		if err != nil {
+			log.Warnf("Cannot lock account wallets: %v", err)
+		}
 	}(cmd.Timeout)
 
 	return nil, nil
@@ -2282,7 +2314,12 @@ type AccountNtfn struct {
 // that the wallet has just been locked or unlocked.
 func NotifyWalletLockStateChange(account string, locked bool) {
 	ntfn := btcws.NewWalletLockStateNtfn(account, locked)
-	mntfn, _ := ntfn.MarshalJSON()
+	mntfn, err := ntfn.MarshalJSON()
+	// If the marshal failed, it indicates that the btcws notification
+	// struct contains a field with a type that is not marshalable.
+	if err != nil {
+		panic(err)
+	}
 	allClients <- mntfn
 }
 
@@ -2290,7 +2327,12 @@ func NotifyWalletLockStateChange(account string, locked bool) {
 // to a frontend.
 func NotifyWalletBalance(frontend chan []byte, account string, balance float64) {
 	ntfn := btcws.NewAccountBalanceNtfn(account, balance, true)
-	mntfn, _ := ntfn.MarshalJSON()
+	mntfn, err := ntfn.MarshalJSON()
+	// If the marshal failed, it indicates that the btcws notification
+	// struct contains a field with a type that is not marshalable.
+	if err != nil {
+		panic(err)
+	}
 	frontend <- mntfn
 }
 
@@ -2298,7 +2340,12 @@ func NotifyWalletBalance(frontend chan []byte, account string, balance float64) 
 // notification to a frontend.
 func NotifyWalletBalanceUnconfirmed(frontend chan []byte, account string, balance float64) {
 	ntfn := btcws.NewAccountBalanceNtfn(account, balance, false)
-	mntfn, _ := ntfn.MarshalJSON()
+	mntfn, err := ntfn.MarshalJSON()
+	// If the marshal failed, it indicates that the btcws notification
+	// struct contains a field with a type that is not marshalable.
+	if err != nil {
+		panic(err)
+	}
 	frontend <- mntfn
 }
 
@@ -2307,7 +2354,12 @@ func NotifyNewTxDetails(frontend chan []byte, account string,
 	details btcjson.ListTransactionsResult) {
 
 	ntfn := btcws.NewTxNtfn(account, &details)
-	mntfn, _ := ntfn.MarshalJSON()
+	mntfn, err := ntfn.MarshalJSON()
+	// If the marshal failed, it indicates that the btcws notification
+	// struct contains a field with a type that is not marshalable.
+	if err != nil {
+		panic(err)
+	}
 	frontend <- mntfn
 }
 

@@ -77,7 +77,12 @@ func normalizeVerString(str string) string {
 	var result bytes.Buffer
 	for _, r := range str {
 		if strings.ContainsRune(semanticAlphabet, r) {
-			result.WriteRune(r)
+			_, err := result.WriteRune(r)
+			// Writing to a bytes.Buffer panics on OOM, and all
+			// errors are unexpected.
+			if err != nil {
+				panic(err)
+			}
 		}
 	}
 	return result.String()

@@ -187,7 +187,6 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 
 	wfilepath := accountFilename("wallet.bin", name, netdir)
 	txfilepath := accountFilename("tx.bin", name, netdir)
-	var wfile, txfile *os.File
 
 	// Read wallet file.
 	wfile, err := os.Open(wfilepath)
@@ -199,7 +198,11 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 		msg := fmt.Sprintf("cannot open wallet file: %s", err)
 		return nil, &walletOpenError{msg}
 	}
-	defer wfile.Close()
+	defer func() {
+		if err := wfile.Close(); err != nil {
+			log.Warnf("Cannot close wallet file: %v", err)
+		}
+	}()
 
 	if _, err = wlt.ReadFrom(wfile); err != nil {
 		msg := fmt.Sprintf("cannot read wallet: %s", err)
@@ -209,20 +212,21 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 	// Read tx file.  If this fails, return a errNoTxs error and let
 	// the caller decide if a rescan is necessary.
 	var finalErr error
-	if txfile, err = os.Open(txfilepath); err != nil {
+	txfile, err := os.Open(txfilepath)
+	if err != nil {
 		log.Errorf("cannot open tx file: %s", err)
-		// This is not a error we should immediately return with,
-		// but other errors can be more important, so only return
-		// this if none of the others are hit.
-		finalErr = errNoTxs
 		a.fullRescan = true
-	} else {
-		defer txfile.Close()
-		if _, err = txs.ReadFrom(txfile); err != nil {
-			log.Errorf("cannot read tx file: %s", err)
-			a.fullRescan = true
-			finalErr = errNoTxs
+		return a, errNoTxs
+	}
+	defer func() {
+		if err := txfile.Close(); err != nil {
+			log.Warnf("Cannot close txstore file: %v", err)
 		}
+	}()
+	if _, err = txs.ReadFrom(txfile); err != nil {
+		log.Errorf("cannot read tx file: %s", err)
+		a.fullRescan = true
+		finalErr = errNoTxs
 	}
 
 	return a, finalErr
@@ -272,7 +276,11 @@ func openAccounts() *accountData {
 		log.Errorf("Unable to open account directory: %v", err)
 		return ad
 	}
-	defer accountDir.Close()
+	defer func() {
+		if err := accountDir.Close(); err != nil {
+			log.Warnf("Cannot close account directory")
+		}
+	}()
 	fileNames, err := accountDir.Readdirnames(0)
 	if err != nil {
 		// fileNames might be partially set, so log an error and
@@ -322,7 +330,10 @@ func (am *AccountManager) accountHandler() {
 		case *openAccountsCmd:
 			// Write all old accounts before proceeding.
 			for _, a := range ad.nameToAccount {
-				am.ds.FlushAccount(a)
+				if err := am.ds.FlushAccount(a); err != nil {
+					log.Errorf("Cannot write previously "+
+						"scheduled account file: %v", err)
+				}
 			}
 
 			ad = openAccounts()
@@ -355,7 +366,6 @@ func (am *AccountManager) accountHandler() {
 		case *markAddressForAccountCmd:
 			// TODO(oga) make sure we own account
 			ad.addressToAccount[cmd.address] = cmd.account
-
 		}
 	}
 }
@@ -536,13 +546,16 @@ func (am *AccountManager) RegisterNewAccount(a *Account) error {
 
 // Rollback rolls back each managed Account to the state before the block
 // specified by height and hash was connected to the main chain.
-func (am *AccountManager) Rollback(height int32, hash *btcwire.ShaHash) {
+func (am *AccountManager) Rollback(height int32, hash *btcwire.ShaHash) error {
 	log.Infof("Rolling back tx history since block height %v", height)
 
 	for _, a := range am.AllAccounts() {
-		a.TxStore.Rollback(height)
+		if err := a.TxStore.Rollback(height); err != nil {
+			return err
+		}
 		am.ds.ScheduleTxStoreWrite(a)
 	}
+	return nil
 }
 
 // BlockNotify notifies all frontends of any changes from the new block,
@@ -645,7 +658,7 @@ func (am *AccountManager) ChangePassphrase(old, new []byte) error {
 	accts := am.AllAccounts()
 
 	for _, a := range accts {
-		if locked := a.Wallet.IsLocked(); !locked {
+		if !a.IsLocked() {
 			if err := a.Wallet.Lock(); err != nil {
 				return err
 			}
@@ -654,7 +667,11 @@ func (am *AccountManager) ChangePassphrase(old, new []byte) error {
 		if err := a.Wallet.Unlock(old); err != nil {
 			return err
 		}
-		defer a.Wallet.Lock()
+		defer func() {
+			if err := a.Lock(); err != nil {
+				log.Warnf("Cannot lock account: %v", err)
+			}
+		}()
 	}
 
 	// Change passphrase for each unlocked wallet.
@@ -681,22 +698,32 @@ func (am *AccountManager) LockWallets() error {
 
 // UnlockWallets unlocks all managed account's wallets.  If any wallet unlocks
 // fail, all successfully unlocked wallets are locked again.
-func (am *AccountManager) UnlockWallets(passphrase string) error {
+func (am *AccountManager) UnlockWallets(passphrase string) (err error) {
 	accts := am.AllAccounts()
+
 	unlockedAccts := make([]*Account, 0, len(accts))
+	defer func() {
+		// Lock all account wallets unlocked during this call
+		// if any of the unlocks failed.
+		if err != nil {
+			for _, ua := range unlockedAccts {
+				if err := ua.Lock(); err != nil {
+					log.Warnf("Cannot lock account '%s': %v",
+						ua.name, err)
+				}
+			}
+		}
+	}()
 
 	for _, a := range accts {
-		if err := a.Unlock([]byte(passphrase)); err != nil {
-			for _, ua := range unlockedAccts {
-				ua.Lock()
-			}
-			return fmt.Errorf("cannot unlock account %v: %v",
-				a.name, err)
+		if uErr := a.Unlock([]byte(passphrase)); uErr != nil {
+			err = fmt.Errorf("cannot unlock account %v: %v",
+				a.name, uErr)
+			return
 		}
 		unlockedAccts = append(unlockedAccts, a)
 	}
-
-	return nil
+	return
 }
 
 // DumpKeys returns all WIF-encoded private keys associated with all

@@ -82,12 +82,9 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 	for _, r := range a.TxStore.Records() {
 		credits := r.Credits()
 		for _, c := range credits {
-			// Extract addresses from this output's pkScript.
-			_, addrs, _, err := c.Addresses(activeNet.Params)
-			if err != nil {
-				continue
-			}
-
+			// Errors don't matter here.  If addrs is nil, the
+			// range below does nothing.
+			_, addrs, _, _ := c.Addresses(activeNet.Params)
 			for _, a := range addrs {
 				if bytes.Equal(a.ScriptAddress(), pkHash) {
 					return true
@@ -503,16 +500,25 @@ func (a *Account) RescanActiveJob() (*RescanJob, error) {
 	return job, nil
 }
 
+// ResendUnminedTxs iterates through all transactions that spend from wallet
+// credits that are not known to have been mined into a block, and attempts
+// to send each to the chain server for relay.
 func (a *Account) ResendUnminedTxs() {
 	txs := a.TxStore.UnminedDebitTxs()
 	txbuf := new(bytes.Buffer)
 	for _, tx := range txs {
-		tx.MsgTx().Serialize(txbuf)
+		if err := tx.MsgTx().Serialize(txbuf); err != nil {
+			// Writing to a bytes.Buffer panics for OOM, and should
+			// not return any other errors.
+			panic(err)
+		}
 		hextx := hex.EncodeToString(txbuf.Bytes())
 		txsha, err := SendRawTransaction(CurrentServerConn(), hextx)
 		if err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
+			log.Warnf("Could not resend transaction %v: %v",
+				txsha, err)
 		} else {
 			log.Debugf("Resent unmined transaction %v", txsha)
 		}
