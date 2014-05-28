@@ -39,7 +39,6 @@ const (
 var (
 	btcdHomeDir        = btcutil.AppDataDir("btcd", false)
 	btcwalletHomeDir   = btcutil.AppDataDir("btcwallet", false)
-	defaultCAFile      = filepath.Join(btcwalletHomeDir, defaultCAFilename)
 	btcdHomedirCAFile  = filepath.Join(btcdHomeDir, "rpc.cert")
 	defaultConfigFile  = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
 	defaultDataDir     = btcwalletHomeDir
@@ -206,6 +205,18 @@ func loadConfig() (*config, []string, error) {
 		log.Warnf("%v", configFileError)
 	}
 
+	// If an alternate data directory was specified, and paths with defaults
+	// relative to the data dir are unchanged, modify each path to be
+	// relative to the new data dir.
+	if cfg.DataDir != defaultDataDir {
+		if cfg.RPCKey == defaultRPCKeyFile {
+			cfg.RPCKey = filepath.Join(cfg.DataDir, "rpc.key")
+		}
+		if cfg.RPCCert == defaultRPCCertFile {
+			cfg.RPCCert = filepath.Join(cfg.DataDir, "rpc.cert")
+		}
+	}
+
 	// Choose the active network params based on the mainnet net flag.
 	if cfg.MainNet {
 		activeNet = &mainNetParams
@@ -229,7 +240,7 @@ func loadConfig() (*config, []string, error) {
 
 	// If CAFile is unset, choose either the copy or local btcd cert.
 	if cfg.CAFile == "" {
-		cfg.CAFile = defaultCAFile
+		cfg.CAFile = filepath.Join(cfg.DataDir, defaultCAFilename)
 
 		// If the CA copy does not exist, check if we're connecting to
 		// a local btcd and switch to its RPC cert if it exists.
