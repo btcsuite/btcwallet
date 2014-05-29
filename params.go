@@ -55,5 +55,5 @@ var simNetParams = params{
 	Params:   &btcnet.SimNetParams,
 	connect:  "localhost:18556",
 	btcdPort: "18556",
-	svrPort:  "18555",
+	svrPort:  "18554",
 }

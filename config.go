@@ -52,7 +52,7 @@ type config struct {
 	RPCConnect   string   `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334, simnet: localhost:18556)"`
 	DebugLevel   string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
-	SvrListeners []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18555)"`
+	SvrListeners []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
 	DataDir      string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
 	Username     string   `short:"u" long:"username" description:"Username for client and btcd authorization"`
 	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for client and btcd authorization"`
