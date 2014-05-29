@@ -48,3 +48,12 @@ var testNet3Params = params{
 	btcdPort: "18334",
 	svrPort:  "18332",
 }
+
+// simNetParams contains parameters specific to the simulation test network
+// (btcwire.SimNet).
+var simNetParams = params{
+	Params:   &btcnet.SimNetParams,
+	connect:  "localhost:18556",
+	btcdPort: "18556",
+	svrPort:  "18555",
+}
