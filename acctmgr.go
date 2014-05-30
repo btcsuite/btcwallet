@@ -716,11 +716,11 @@ func (am *AccountManager) ChangePassphrase(old, new []byte) error {
 		if err := a.Wallet.Unlock(old); err != nil {
 			return err
 		}
-		defer func() {
+		defer func(a *Account) {
 			if err := a.Lock(); err != nil {
 				log.Warnf("Cannot lock account: %v", err)
 			}
-		}()
+		}(a)
 	}
 
 	// Change passphrase for each unlocked wallet.
