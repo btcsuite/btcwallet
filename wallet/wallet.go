@@ -508,6 +508,8 @@ func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
 		*net = *(*netParams)(&btcnet.MainNetParams)
 	case btcwire.TestNet3:
 		*net = *(*netParams)(&btcnet.TestNet3Params)
+	case btcwire.SimNet:
+		*net = *(*netParams)(&btcnet.SimNetParams)
 	default:
 		return n64, errors.New("unknown network")
 	}
