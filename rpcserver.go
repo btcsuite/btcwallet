@@ -1721,7 +1721,10 @@ func CreateEncryptedWallet(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &ErrBtcdDisconnected
 
 	default: // all other non-nil errors
-		return nil, &btcjson.ErrInternal
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
 	}
 }
 
