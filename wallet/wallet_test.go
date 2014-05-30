@@ -752,7 +752,7 @@ func TestImportPrivateKey(t *testing.T) {
 	// verify that the entire wallet's sync height matches the
 	// expected createHeight.
 	if h := w.SyncHeight(); h != createHeight {
-		t.Error("Initial sync height %v does not match expected %v.", h, createHeight)
+		t.Errorf("Initial sync height %v does not match expected %v.", h, createHeight)
 		return
 	}
 
@@ -916,7 +916,7 @@ func TestImportScript(t *testing.T) {
 	// verify that the entire wallet's sync height matches the
 	// expected createHeight.
 	if h := w.SyncHeight(); h != createHeight {
-		t.Error("Initial sync height %v does not match expected %v.", h, createHeight)
+		t.Errorf("Initial sync height %v does not match expected %v.", h, createHeight)
 		return
 	}
 
