@@ -751,10 +751,6 @@ func TestImportPrivateKey(t *testing.T) {
 
 	// verify that the entire wallet's sync height matches the
 	// expected createHeight.
-	if h := w.EarliestBlockHeight(); h != createHeight {
-		t.Error("Initial earliest height %v does not match expected %v.", h, createHeight)
-		return
-	}
 	if h := w.SyncHeight(); h != createHeight {
 		t.Error("Initial sync height %v does not match expected %v.", h, createHeight)
 		return
@@ -791,12 +787,7 @@ func TestImportPrivateKey(t *testing.T) {
 		return
 	}
 
-	// verify that the earliest block and sync heights now match the
-	// (smaller) import height.
-	if h := w.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After import earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
+	// verify that the sync height now match the (smaller) import height.
 	if h := w.SyncHeight(); h != importHeight {
 		t.Errorf("After import sync height %v does not match expected %v.", h, importHeight)
 		return
@@ -818,11 +809,7 @@ func TestImportPrivateKey(t *testing.T) {
 		return
 	}
 
-	// Verify that the earliest and sync height match expected after the reserialization.
-	if h := w2.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After reserialization earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
+	// Verify that the  sync height match expected after the reserialization.
 	if h := w2.SyncHeight(); h != importHeight {
 		t.Errorf("After reserialization sync height %v does not match expected %v.", h, importHeight)
 		return
@@ -833,10 +820,6 @@ func TestImportPrivateKey(t *testing.T) {
 	partialHeight := (createHeight-importHeight)/2 + importHeight
 	if err := w2.SetSyncStatus(address, PartialSync(partialHeight)); err != nil {
 		t.Errorf("Cannot mark address partially synced: %v", err)
-		return
-	}
-	if h := w2.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After address partial sync, earliest height %v does not match expected %v.", h, importHeight)
 		return
 	}
 	if h := w2.SyncHeight(); h != partialHeight {
@@ -871,10 +854,6 @@ func TestImportPrivateKey(t *testing.T) {
 		t.Errorf("Cannot mark address synced: %v", err)
 		return
 	}
-	if h := w3.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After address unsync, earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
 	if h := w3.SyncHeight(); h != importHeight {
 		t.Errorf("After address unsync, sync height %v does not match expected %v.", h, importHeight)
 		return
@@ -885,10 +864,6 @@ func TestImportPrivateKey(t *testing.T) {
 	// creation).
 	if err := w3.SetSyncStatus(address, FullSync{}); err != nil {
 		t.Errorf("Cannot mark address synced: %v", err)
-		return
-	}
-	if h := w3.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After address sync, earliest height %v does not match expected %v.", h, importHeight)
 		return
 	}
 	if h := w3.SyncHeight(); h != createHeight {
@@ -940,10 +915,6 @@ func TestImportScript(t *testing.T) {
 
 	// verify that the entire wallet's sync height matches the
 	// expected createHeight.
-	if h := w.EarliestBlockHeight(); h != createHeight {
-		t.Error("Initial earliest height %v does not match expected %v.", h, createHeight)
-		return
-	}
 	if h := w.SyncHeight(); h != createHeight {
 		t.Error("Initial sync height %v does not match expected %v.", h, createHeight)
 		return
@@ -1017,12 +988,7 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	// verify that the earliest block and sync heights now match the
-	// (smaller) import height.
-	if h := w.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After import earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
+	// verify that the sync height now match the (smaller) import height.
 	if h := w.SyncHeight(); h != importHeight {
 		t.Errorf("After import sync height %v does not match expected %v.", h, importHeight)
 		return
@@ -1044,11 +1010,7 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	// Verify that the earliest and sync height match expected after the reserialization.
-	if h := w2.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After reserialization earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
+	// Verify that the sync height matches expected after the reserialization.
 	if h := w2.SyncHeight(); h != importHeight {
 		t.Errorf("After reserialization sync height %v does not match expected %v.", h, importHeight)
 		return
@@ -1127,10 +1089,6 @@ func TestImportScript(t *testing.T) {
 		t.Errorf("Cannot mark address partially synced: %v", err)
 		return
 	}
-	if h := w2.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After address partial sync, earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
 	if h := w2.SyncHeight(); h != partialHeight {
 		t.Errorf("After address partial sync, sync height %v does not match expected %v.", h, partialHeight)
 		return
@@ -1163,10 +1121,6 @@ func TestImportScript(t *testing.T) {
 		t.Errorf("Cannot mark address synced: %v", err)
 		return
 	}
-	if h := w3.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After address unsync, earliest height %v does not match expected %v.", h, importHeight)
-		return
-	}
 	if h := w3.SyncHeight(); h != importHeight {
 		t.Errorf("After address unsync, sync height %v does not match expected %v.", h, importHeight)
 		return
@@ -1177,10 +1131,6 @@ func TestImportScript(t *testing.T) {
 	// creation).
 	if err := w3.SetSyncStatus(address, FullSync{}); err != nil {
 		t.Errorf("Cannot mark address synced: %v", err)
-		return
-	}
-	if h := w3.EarliestBlockHeight(); h != importHeight {
-		t.Errorf("After address sync, earliest height %v does not match expected %v.", h, importHeight)
 		return
 	}
 	if h := w3.SyncHeight(); h != createHeight {

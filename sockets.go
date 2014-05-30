@@ -809,14 +809,8 @@ func Handshake(rpc ServerConn) error {
 		return nil
 	}
 
-	log.Warnf("None of the previous saved blocks in btcd chain.  Must perform full rescan.")
-
 	// Iterator was invalid (wallet has never been synced) or there was a
-	// huge chain fork + reorg (more than 20 blocks).  Since we don't know
-	// what block (if any) this wallet is synced to, roll back everything
-	// and start a new rescan since the earliest block wallet must know
-	// about.
-	a.fullRescan = true
+	// huge chain fork + reorg (more than 20 blocks).
 	AcctMgr.Track()
 	if err := AcctMgr.RescanActiveAddresses(); err != nil {
 		return err

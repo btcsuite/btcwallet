@@ -1259,7 +1259,16 @@ func (w *Wallet) SetSyncStatus(a btcutil.Address, s SyncStatus) error {
 // Unsynced addresses are unaffected by this method and must be marked
 // as in sync with MarkAddressSynced or MarkAllSynced to be considered
 // in sync with bs.
+//
+// If bs is nil, the entire wallet is marked unsynced.
 func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
+	if bs == nil {
+		w.recent.hashes = w.recent.hashes[:0]
+		w.recent.lastHeight = w.keyGenerator.firstBlock
+		w.keyGenerator.setSyncStatus(Unsynced(w.keyGenerator.firstBlock))
+		return
+	}
+
 	// Check if we're trying to rollback the last seen history.
 	// If so, and this bs is already saved, remove anything
 	// after and return.  Otherwire, remove previous hashes.
@@ -1299,12 +1308,8 @@ func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
 // addresses marked as unsynced, whichever is smaller.  This is the
 // height that rescans on an entire wallet should begin at to fully
 // sync all wallet addresses.
-func (w *Wallet) SyncHeight() (height int32) {
-	if len(w.recent.hashes) == 0 {
-		return 0
-	}
-	height = w.recent.lastHeight
-
+func (w *Wallet) SyncHeight() int32 {
+	height := w.recent.lastHeight
 	for _, a := range w.addrMap {
 		var syncHeight int32
 		switch e := a.SyncStatus().(type) {
@@ -1324,7 +1329,6 @@ func (w *Wallet) SyncHeight() (height int32) {
 			}
 		}
 	}
-
 	return height
 }
 
@@ -1333,42 +1337,6 @@ func (w *Wallet) SyncHeight() (height int32) {
 // be used to access earlier blocks.
 func (w *Wallet) NewIterateRecentBlocks() RecentBlockIterator {
 	return w.recent.NewIterator()
-}
-
-// EarliestBlockHeight returns the height of the blockchain for when any
-// wallet address first appeared.  This will usually be the block height
-// at the time of wallet creation, unless a private key with an earlier
-// block height was imported into the wallet. This is needed when
-// performing a full rescan to prevent unnecessary rescanning before
-// wallet addresses first appeared.
-func (w *Wallet) EarliestBlockHeight() int32 {
-	height := w.keyGenerator.firstBlock
-
-	// Imported keys will be the only ones that may have an earlier
-	// blockchain height.  Check each and set the returned height
-	for _, addr := range w.importedAddrs {
-		aheight := addr.FirstBlock()
-		if aheight < height {
-			height = aheight
-
-			// Can't go any lower than 0.
-			if height == 0 {
-				break
-			}
-		}
-	}
-
-	return height
-}
-
-// SetBetterEarliestBlockHeight sets a better earliest block height.
-// At wallet creation time, a earliest block is guessed, but this
-// could be incorrect if btcd is out of sync.  This function can be
-// used to correct a previous guess with a better value.
-func (w *Wallet) SetBetterEarliestBlockHeight(height int32) {
-	if height > w.keyGenerator.firstBlock {
-		w.keyGenerator.firstBlock = height
-	}
 }
 
 // ImportPrivateKey imports a WIF private key into the keystore.  The imported
@@ -1822,13 +1790,6 @@ func (rb *recentBlocks) ReadFrom(r io.Reader) (int64, error) {
 		return read, errors.New("number of last seen blocks exceeds maximum of 20")
 	}
 
-	// If number of blocks is 0, our work here is done.
-	if nBlocks == 0 {
-		rb.lastHeight = -1
-		rb.hashes = nil
-		return read, nil
-	}
-
 	// Read most recently seen block height.
 	var heightBytes [4]byte // 4 bytes for a int32
 	n, err = io.ReadFull(r, heightBytes[:])
@@ -1876,19 +1837,12 @@ func (rb *recentBlocks) WriteTo(w io.Writer) (int64, error) {
 	if nBlocks != 0 && rb.lastHeight < 0 {
 		return written, errors.New("number of block hashes is positive, but height is negative")
 	}
-	if nBlocks == 0 && rb.lastHeight != -1 {
-		return written, errors.New("no block hashes available, but height is not -1")
-	}
 	var nBlockBytes [4]byte // 4 bytes for a uint32
 	binary.LittleEndian.PutUint32(nBlockBytes[:], nBlocks)
 	n, err := w.Write(nBlockBytes[:])
 	written += int64(n)
 	if err != nil {
 		return written, err
-	}
-	// If number of blocks is 0, our work here is done.
-	if nBlocks == 0 {
-		return written, nil
 	}
 
 	// Write most recently seen block height.
@@ -1921,7 +1875,7 @@ type RecentBlockIterator interface {
 }
 
 func (rb *recentBlocks) NewIterator() RecentBlockIterator {
-	if rb.lastHeight == -1 {
+	if rb.lastHeight == -1 || len(rb.hashes) == 0 {
 		return nil
 	}
 	return &blockIterator{

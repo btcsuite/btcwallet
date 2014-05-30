@@ -25,6 +25,7 @@ import (
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
+	"io/ioutil"
 	"os"
 	"strings"
 )
@@ -198,38 +199,86 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 		msg := fmt.Sprintf("cannot open wallet file: %s", err)
 		return nil, &walletOpenError{msg}
 	}
-	defer func() {
+	closeWallet := func() {
 		if err := wfile.Close(); err != nil {
 			log.Warnf("Cannot close wallet file: %v", err)
 		}
-	}()
-
+	}
 	if _, err = wlt.ReadFrom(wfile); err != nil {
 		msg := fmt.Sprintf("cannot read wallet: %s", err)
+		closeWallet()
 		return nil, &walletOpenError{msg}
 	}
 
 	// Read tx file.  If this fails, return a errNoTxs error and let
 	// the caller decide if a rescan is necessary.
-	var finalErr error
 	txfile, err := os.Open(txfilepath)
 	if err != nil {
-		log.Errorf("cannot open tx file: %s", err)
-		a.fullRescan = true
+		log.Errorf("Cannot open tx file: %s", err)
+
+		// Mark wallet as unsynced and write back to disk..  Later calls
+		// to SyncHeight will use the wallet creation height, or possibly
+		// an earlier height for imported keys.
+		a.SetSyncedWith(nil)
+		closeWallet()
+		tmpwallet, err := ioutil.TempFile(netdir, "wallet.bin")
+		if err != nil {
+			log.Errorf("Cannot create temporary wallet: %v", err)
+			return a, errNoTxs
+		}
+		if _, err := wlt.WriteTo(tmpwallet); err != nil {
+			log.Warnf("Cannot write back unsynced wallet: %v", err)
+			return a, errNoTxs
+		}
+		tmpwalletpath := tmpwallet.Name()
+		if err := tmpwallet.Close(); err != nil {
+			log.Warnf("Cannot close temporary wallet file: %v", err)
+			return a, errNoTxs
+		}
+		if err := Rename(tmpwalletpath, wfilepath); err != nil {
+			log.Warnf("Cannot move temporary wallet file: %v", err)
+			return a, errNoTxs
+		}
+
+		// Create and write empty txstore, if it doesn't exist.
+		if !fileExists(txfilepath) {
+			txfile, err = os.Create(txfilepath)
+			if err != nil {
+				log.Warnf("Cannot create new new txstore file: %v", err)
+				return a, errNoTxs
+			}
+			defer func() {
+				if err := txfile.Close(); err != nil {
+					log.Warnf("Cannot close txstore file: %v", err)
+				}
+			}()
+			if _, err := txs.WriteTo(txfile); err != nil {
+				log.Warnf("Cannot write new txstore file: %v", err)
+			}
+		}
 		return a, errNoTxs
 	}
+	defer closeWallet()
 	defer func() {
 		if err := txfile.Close(); err != nil {
 			log.Warnf("Cannot close txstore file: %v", err)
 		}
 	}()
 	if _, err = txs.ReadFrom(txfile); err != nil {
-		log.Errorf("cannot read tx file: %s", err)
-		a.fullRescan = true
-		finalErr = errNoTxs
+		log.Errorf("Cannot read tx file: %s", err)
+
+		// Mark wallet as unsynced.  Later calls to SyncHeight will use the
+		// wallet creation height, or possibly an earlier height for
+		// imported keys.
+		a.SetSyncedWith(nil)
+
+		if _, err := txs.WriteTo(txfile); err != nil {
+			log.Warnf("Cannot write new txstore file: %v", err)
+		}
+		return a, errNoTxs
 	}
 
-	return a, finalErr
+	return a, nil
 }
 
 // openAccounts attempts to open all saved accounts.
@@ -394,7 +443,6 @@ func (am *AccountManager) rescanListener() {
 						continue
 					}
 				}
-				acct.fullRescan = false
 				am.ds.ScheduleWalletWrite(acct)
 				err := am.ds.FlushAccount(acct)
 				if err != nil {
@@ -420,7 +468,6 @@ func (am *AccountManager) rescanListener() {
 						continue
 					}
 				}
-				acct.fullRescan = false
 				am.ds.ScheduleWalletWrite(acct)
 				err := am.ds.FlushAccount(acct)
 				if err != nil {

@@ -34,8 +34,7 @@ import (
 // addresses and keys), and tx and utxo stores, and a mutex to prevent
 // incorrect multiple access.
 type Account struct {
-	name       string
-	fullRescan bool
+	name string
 	*wallet.Wallet
 	TxStore *txstore.Store
 }
@@ -466,16 +465,7 @@ func (a *Account) Track() {
 func (a *Account) RescanActiveJob() (*RescanJob, error) {
 	// Determine the block necesary to start the rescan for all active
 	// addresses.
-	height := int32(0)
-	if a.fullRescan {
-		// Need to perform a complete rescan since the wallet creation
-		// block.
-		height = a.EarliestBlockHeight()
-	} else {
-		// The last synced block height should be used the starting
-		// point for block rescanning.  Grab the block stamp here.
-		height = a.SyncHeight()
-	}
+	height := a.SyncHeight()
 
 	actives := a.SortedActiveAddresses()
 	addrs := make([]btcutil.Address, 0, len(actives))
