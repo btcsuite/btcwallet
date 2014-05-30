@@ -394,6 +394,7 @@ func (am *AccountManager) rescanListener() {
 						continue
 					}
 				}
+				acct.fullRescan = false
 				am.ds.ScheduleWalletWrite(acct)
 				err := am.ds.FlushAccount(acct)
 				if err != nil {
