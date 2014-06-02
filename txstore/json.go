@@ -24,7 +24,7 @@ import (
 	"github.com/conformal/btcutil"
 )
 
-// ToJSON returns a slice of btcjson listtransaction result types for all credits
+// ToJSON returns a slice of btcjson listtransactions result types for all credits
 // and debits of this transaction.
 func (t *TxRecord) ToJSON(account string, chainHeight int32,
 	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
@@ -90,6 +90,46 @@ func (d *Debits) ToJSON(account string, chainHeight int32,
 	return reply, nil
 }
 
+// CreditCategory describes the type of wallet transaction output.  The category
+// of "sent transactions" (debits) is always "send", and is not expressed by
+// this type.
+type CreditCategory int
+
+// These constants define the possible credit categories.
+const (
+	CreditReceive CreditCategory = iota
+	CreditGenerate
+	CreditImmature
+)
+
+// Category returns the category of the credit.  The passed block chain height is
+// used to distinguish immature from mature coinbase outputs.
+func (c *Credit) Category(chainHeight int32) CreditCategory {
+	if c.IsCoinbase() {
+		if c.Confirmed(btcchain.CoinbaseMaturity, chainHeight) {
+			return CreditGenerate
+		}
+		return CreditImmature
+	}
+	return CreditReceive
+}
+
+// String returns the category as a string.  This string may be used as the
+// JSON string for categories as part of listtransactions and gettransaction
+// RPC responses.
+func (c CreditCategory) String() string {
+	switch c {
+	case CreditReceive:
+		return "receive"
+	case CreditGenerate:
+		return "generate"
+	case CreditImmature:
+		return "immature"
+	default:
+		return "unknown"
+	}
+}
+
 // ToJSON returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
 func (c *Credit) ToJSON(account string, chainHeight int32,
@@ -104,21 +144,9 @@ func (c *Credit) ToJSON(account string, chainHeight int32,
 		address = addrs[0].EncodeAddress()
 	}
 
-	var category string
-	switch {
-	case c.IsCoinbase():
-		if c.Confirmed(btcchain.CoinbaseMaturity, chainHeight) {
-			category = "generate"
-		} else {
-			category = "immature"
-		}
-	default:
-		category = "receive"
-	}
-
 	result := btcjson.ListTransactionsResult{
 		Account:         account,
-		Category:        category,
+		Category:        c.Category(chainHeight).String(),
 		Address:         address,
 		Amount:          btcutil.Amount(txout.Value).ToUnit(btcutil.AmountBTC),
 		TxID:            c.Tx().Sha().String(),

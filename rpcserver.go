@@ -950,6 +950,8 @@ func GetReceivedByAccount(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	return amt, nil
 }
 
+// GetTransaction handles a gettransaction request by returning details about
+// a single transaction saved by wallet.
 func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 	// Type assert icmd to access parameters.
 	cmd, ok := icmd.(*btcjson.GetTransactionCmd)
@@ -957,19 +959,28 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		return nil, &btcjson.ErrInternal
 	}
 
-	txsha, err := btcwire.NewShaHashFromStr(cmd.Txid)
+	txSha, err := btcwire.NewShaHashFromStr(cmd.Txid)
 	if err != nil {
 		return nil, &btcjson.ErrDecodeHexString
 	}
 
-	accumulatedTxen := AcctMgr.GetTransaction(txsha)
+	accumulatedTxen := AcctMgr.GetTransaction(txSha)
 	if len(accumulatedTxen) == 0 {
 		return nil, &btcjson.ErrNoTxInfo
+	}
+
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, &btcjson.Error{
+			Code:    btcjson.ErrWallet.Code,
+			Message: err.Error(),
+		}
 	}
 
 	received := btcutil.Amount(0)
 	var debitTx *txstore.TxRecord
 	var debitAccount string
+	var targetAddr string
 
 	ret := btcjson.GetTransactionResult{
 		Details:         []btcjson.GetTransactionDetailsResult{},
@@ -991,16 +1002,16 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 			_, addrs, _, _ := cred.Addresses(activeNet.Params)
 			if len(addrs) == 1 {
 				addr = addrs[0].EncodeAddress()
+				// The first non-change output address is considered the
+				// target for sent transactions.
+				if targetAddr == "" {
+					targetAddr = addr
+				}
 			}
 
 			details = append(details, btcjson.GetTransactionDetailsResult{
-				Account: e.Account,
-				// TODO(oga) We don't mine for now so there
-				// won't be any special coinbase types. If the
-				// tx is a coinbase then we should handle it
-				// specially with the category depending on
-				// whether it is an orphan or in the blockchain.
-				Category: "receive",
+				Account:  e.Account,
+				Category: cred.Category(bs.Height).String(),
 				Amount:   cred.Amount().ToUnit(btcutil.AmountBTC),
 				Address:  addr,
 			})
@@ -1020,16 +1031,11 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 		totalAmount -= debits.InputAmount()
 		info := btcjson.GetTransactionDetailsResult{
 			Account:  debitAccount,
+			Address:  targetAddr,
 			Category: "send",
 			// negative since it is a send
 			Amount: (-debits.OutputAmount(true)).ToUnit(btcutil.AmountBTC),
 			Fee:    debits.Fee().ToUnit(btcutil.AmountBTC),
-		}
-		// Errors don't matter here, as we only consider the
-		// case where len(addrs) == 1.
-		_, addrs, _, _ := debitTx.Credits()[0].Addresses(activeNet.Params)
-		if len(addrs) == 1 {
-			info.Address = addrs[0].EncodeAddress()
 		}
 		ret.Fee += info.Fee
 		// Add sent information to front.
@@ -1069,13 +1075,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, *btcjson.Error) {
 				Message: err.Error(),
 			}
 		}
-		bs, err := GetCurBlock()
-		if err != nil {
-			return nil, &btcjson.Error{
-				Code:    btcjson.ErrWallet.Code,
-				Message: err.Error(),
-			}
-		}
+
 		ret.BlockIndex = int64(first.Tx.Tx().Index())
 		ret.BlockHash = txBlock.Hash.String()
 		ret.BlockTime = txBlock.Time.Unix()
