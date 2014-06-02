@@ -228,7 +228,7 @@ func loadConfig() (*config, []string, error) {
 	}
 	if numNets > 1 {
 		str := "%s: The mainnet and simnet params can't be used " +
-			"togther -- choose one"
+			"together -- choose one"
 		err := fmt.Errorf(str, "loadConfig")
 		fmt.Fprintln(os.Stderr, err)
 		parser.WriteHelp(os.Stderr)
