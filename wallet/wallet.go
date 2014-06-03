@@ -1311,7 +1311,13 @@ func (w *Wallet) SetSyncedWith(bs *BlockStamp) {
 // height that rescans on an entire wallet should begin at to fully
 // sync all wallet addresses.
 func (w *Wallet) SyncHeight() int32 {
-	height := w.recent.lastHeight
+	var height int32
+	switch h, ok := w.keyGenerator.SyncStatus().(PartialSync); {
+	case ok && int32(h) > w.recent.lastHeight:
+		height = int32(h)
+	default:
+		height = w.recent.lastHeight
+	}
 	for _, a := range w.addrMap {
 		var syncHeight int32
 		switch e := a.SyncStatus().(type) {
