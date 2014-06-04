@@ -17,7 +17,6 @@
 package main
 
 import (
-	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 )
@@ -51,7 +50,7 @@ func (r *RescanProgressMsg) ImplementsRescanMsg() {}
 // possibly-finished rescan, or an error if the rescan failed.
 type RescanFinishedMsg struct {
 	Addresses map[*Account][]btcutil.Address
-	Error     *btcjson.Error
+	Error     error
 }
 
 // ImplementsRescanMsg is implemented to satisify the RescanMsg
@@ -143,7 +142,7 @@ func (b *rescanBatch) merge(job *RescanJob) {
 
 // Status types for the handler.
 type rescanProgress int32
-type rescanFinished *btcjson.Error
+type rescanFinished error
 
 // jobHandler runs the RescanManager's for-select loop to manage rescan jobs
 // and dispatch requests.
@@ -191,7 +190,7 @@ func (m *RescanManager) jobHandler() {
 				if m.msgs != nil {
 					m.msgs <- &RescanFinishedMsg{
 						Addresses: curBatch.addrs,
-						Error:     (*btcjson.Error)(s),
+						Error:     error(s),
 					}
 				}
 				curBatch.done()
@@ -223,8 +222,8 @@ func (m *RescanManager) rpcHandler() {
 		}
 
 		c := CurrentServerConn()
-		jsonErr := Rescan(c, job.StartHeight, addrStrs, job.OutPoints)
-		m.status <- rescanFinished(jsonErr)
+		err := Rescan(c, job.StartHeight, addrStrs, job.OutPoints)
+		m.status <- rescanFinished(err)
 	}
 }
 

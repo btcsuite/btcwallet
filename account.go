@@ -439,21 +439,19 @@ func (a *Account) Track() {
 	// Request notifications for transactions sending to all wallet
 	// addresses.
 	addrs := a.ActiveAddresses()
-	addrstrs := make([]string, len(addrs))
-	i := 0
+	addrstrs := make([]string, 0, len(addrs))
 	for addr := range addrs {
-		addrstrs[i] = addr.EncodeAddress()
-		i++
+		addrstrs = append(addrstrs, addr.EncodeAddress())
 	}
 
-	jsonErr := NotifyReceived(CurrentServerConn(), addrstrs)
-	if jsonErr != nil {
+	if err := NotifyReceived(CurrentServerConn(), addrstrs); err != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}
 
 	unspent, err := a.TxStore.UnspentOutputs()
 	if err != nil {
 		log.Errorf("Unable to access unspent outputs: %v", err)
+		return
 	}
 	ReqSpentUtxoNtfns(unspent)
 }
@@ -621,11 +619,11 @@ func (a *Account) RecoverAddresses(n int) error {
 
 	// Run a goroutine to rescan blockchain for recovered addresses.
 	go func(addrs []string) {
-		jsonErr := Rescan(CurrentServerConn(), lastInfo.FirstBlock(),
+		err := Rescan(CurrentServerConn(), lastInfo.FirstBlock(),
 			addrs, nil)
-		if jsonErr != nil {
-			log.Errorf("Rescanning for recovered addresses failed: %v",
-				jsonErr.Message)
+		if err != nil {
+			log.Errorf("Rescanning for recovered addresses "+
+				"failed: %v", err)
 		}
 	}(addrStrs)
 
@@ -660,7 +658,10 @@ func ReqSpentUtxoNtfns(credits []*txstore.Credit) {
 		ops = append(ops, op)
 	}
 
-	NotifySpent(CurrentServerConn(), ops)
+	if err := NotifySpent(CurrentServerConn(), ops); err != nil {
+		log.Errorf("Cannot request notifications for spent outputs: %v",
+			err)
+	}
 }
 
 // TotalReceived iterates through an account's transaction history, returning the

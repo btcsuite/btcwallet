@@ -212,23 +212,13 @@ func genCertPair(certFile, keyFile string) error {
 	return nil
 }
 
-// ParseRequest parses a command or notification out of a JSON-RPC request,
-// returning any errors as a JSON-RPC error.
-func ParseRequest(msg []byte) (btcjson.Cmd, *btcjson.Error) {
-	cmd, err := btcjson.ParseMarshaledCmd(msg)
-	if err != nil || cmd.Id() == nil {
-		return cmd, &btcjson.ErrInvalidRequest
-	}
-	return cmd, nil
-}
-
 // ReplyToFrontend responds to a marshaled JSON-RPC request with a
 // marshaled JSON-RPC response for both standard and extension
 // (websocket) clients.  The returned error is ErrBadAuth if a
 // missing, incorrect, or duplicate authentication request is
 // received.
 func (s *server) ReplyToFrontend(msg []byte, ws, authenticated bool) ([]byte, error) {
-	cmd, jsonErr := ParseRequest(msg)
+	cmd, parseErr := btcjson.ParseMarshaledCmd(msg)
 	var id interface{}
 	if cmd != nil {
 		id = cmd.Id()
@@ -259,10 +249,10 @@ func (s *server) ReplyToFrontend(msg []byte, ws, authenticated bool) ([]byte, er
 		return nil, nil
 	}
 
-	if jsonErr != nil {
+	if parseErr != nil {
 		response := btcjson.Reply{
 			Id:    &id,
-			Error: jsonErr,
+			Error: &btcjson.ErrInvalidRequest,
 		}
 		mresponse, err := json.Marshal(response)
 		// We expect the marshal to succeed.  If it doesn't, it
@@ -725,16 +715,18 @@ func BtcdConnect(certificates []byte) (*BtcdRPCConn, error) {
 // single TrackSince function (or similar) which requests address
 // notifications and performs the rescan since some block height.
 func Handshake(rpc ServerConn) error {
-	net, jsonErr := GetCurrentNet(rpc)
-	if jsonErr != nil {
-		return jsonErr
+	net, err := GetCurrentNet(rpc)
+	if err != nil {
+		return err
 	}
 	if net != activeNet.Net {
 		return errors.New("btcd and btcwallet running on different Bitcoin networks")
 	}
 
 	// Request notifications for connected and disconnected blocks.
-	NotifyBlocks(rpc)
+	if err := NotifyBlocks(rpc); err != nil {
+		return err
+	}
 
 	// Get current best block.  If this is before than the oldest
 	// saved block hash, assume that this btcd instance is not yet
@@ -767,8 +759,7 @@ func Handshake(rpc ServerConn) error {
 		log.Debugf("Checking for previous saved block with height %v hash %v",
 			bs.Height, bs.Hash)
 
-		_, jsonErr := GetBlock(rpc, bs.Hash.String())
-		if jsonErr != nil {
+		if _, err := GetBlock(rpc, bs.Hash.String()); err != nil {
 			continue
 		}
 

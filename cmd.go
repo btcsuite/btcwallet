@@ -54,11 +54,12 @@ func GetCurBlock() (wallet.BlockStamp, error) {
 		return bs, nil
 	}
 
-	bb, jsonErr := GetBestBlock(CurrentServerConn())
-	if jsonErr != nil {
-		return wallet.BlockStamp{
+	bb, err := GetBestBlock(CurrentServerConn())
+	if err != nil {
+		unknown := wallet.BlockStamp{
 			Height: int32(btcutil.BlockHeightUnknown),
-		}, jsonErr
+		}
+		return unknown, err
 	}
 
 	hash, err := btcwire.NewShaHashFromStr(bb.Hash)
@@ -210,7 +211,7 @@ func main() {
 		// Perform handshake.
 		if err := Handshake(btcd); err != nil {
 			var message string
-			if jsonErr, ok := err.(*btcjson.Error); ok {
+			if jsonErr, ok := err.(btcjson.Error); ok {
 				message = jsonErr.Message
 			} else {
 				message = err.Error()

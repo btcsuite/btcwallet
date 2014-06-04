@@ -34,13 +34,15 @@ type RawRPCResponse struct {
 // to by the interface rather than using the rules in the encoding/json
 // package to allocate a new variable for the result.  The final result
 // and JSON-RPC error is returned.
-func (r *RawRPCResponse) FinishUnmarshal(v interface{}) (interface{}, *btcjson.Error) {
+//
+// If the returned error is non-nil, it will be a btcjson.Error.
+func (r *RawRPCResponse) FinishUnmarshal(v interface{}) (interface{}, error) {
 	// JSON-RPC spec makes this handling easier-ish because both result and
 	// error cannot be non-nil.
-	var jsonErr *btcjson.Error
 	if r.Error != nil {
+		var jsonErr btcjson.Error
 		if err := json.Unmarshal([]byte(*r.Error), &jsonErr); err != nil {
-			return nil, &btcjson.Error{
+			return nil, btcjson.Error{
 				Code:    btcjson.ErrParse.Code,
 				Message: err.Error(),
 			}
@@ -49,7 +51,7 @@ func (r *RawRPCResponse) FinishUnmarshal(v interface{}) (interface{}, *btcjson.E
 	}
 	if r.Result != nil {
 		if err := json.Unmarshal([]byte(*r.Result), &v); err != nil {
-			return nil, &btcjson.Error{
+			return nil, btcjson.Error{
 				Code:    btcjson.ErrParse.Code,
 				Message: err.Error(),
 			}

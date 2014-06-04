@@ -473,7 +473,7 @@ func (am *AccountManager) rescanListener() {
 
 		case *RescanFinishedMsg:
 			if e.Error != nil {
-				log.Errorf("Rescan failed: %v", e.Error.Message)
+				log.Errorf("Rescan failed: %v", e.Error)
 				break
 			}
 
