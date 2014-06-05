@@ -96,7 +96,7 @@ func binaryRead(r io.Reader, order binary.ByteOrder, data interface{}) (n int64,
 
 // See comment for binaryRead().
 func binaryWrite(w io.Writer, order binary.ByteOrder, data interface{}) (n int64, err error) {
-	var buf bytes.Buffer
+	buf := bytes.Buffer{}
 	if err = binary.Write(&buf, order, data); err != nil {
 		return 0, err
 	}

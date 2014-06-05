@@ -414,17 +414,17 @@ func (a *Account) ExportWatchingWallet() (*Account, error) {
 // exportBase64 exports an account's serialized wallet, tx, and utxo
 // stores as base64-encoded values in a map.
 func (a *Account) exportBase64() (map[string]string, error) {
-	buf := &bytes.Buffer{}
+	buf := bytes.Buffer{}
 	m := make(map[string]string)
 
-	_, err := a.Wallet.WriteTo(buf)
+	_, err := a.Wallet.WriteTo(&buf)
 	if err != nil {
 		return nil, err
 	}
 	m["wallet"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
-	if _, err = a.TxStore.WriteTo(buf); err != nil {
+	if _, err = a.TxStore.WriteTo(&buf); err != nil {
 		return nil, err
 	}
 	m["tx"] = base64.StdEncoding.EncodeToString(buf.Bytes())
@@ -493,14 +493,14 @@ func (a *Account) RescanActiveJob() (*RescanJob, error) {
 // to send each to the chain server for relay.
 func (a *Account) ResendUnminedTxs() {
 	txs := a.TxStore.UnminedDebitTxs()
-	txbuf := new(bytes.Buffer)
+	txBuf := bytes.Buffer{}
 	for _, tx := range txs {
-		if err := tx.MsgTx().Serialize(txbuf); err != nil {
+		if err := tx.MsgTx().Serialize(&txBuf); err != nil {
 			// Writing to a bytes.Buffer panics for OOM, and should
 			// not return any other errors.
 			panic(err)
 		}
-		hextx := hex.EncodeToString(txbuf.Bytes())
+		hextx := hex.EncodeToString(txBuf.Bytes())
 		txsha, err := SendRawTransaction(CurrentServerConn(), hextx)
 		if err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
@@ -510,7 +510,7 @@ func (a *Account) ResendUnminedTxs() {
 		} else {
 			log.Debugf("Resent unmined transaction %v", txsha)
 		}
-		txbuf.Reset()
+		txBuf.Reset()
 	}
 }
 

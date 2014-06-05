@@ -1170,9 +1170,9 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amou
 		a.ReqNewTxsForAddress(createdTx.changeAddr)
 	}
 
-	serializedTx := bytes.NewBuffer(nil)
+	serializedTx := bytes.Buffer{}
 	serializedTx.Grow(createdTx.tx.MsgTx().SerializeSize())
-	if err := createdTx.tx.MsgTx().Serialize(serializedTx); err != nil {
+	if err := createdTx.tx.MsgTx().Serialize(&serializedTx); err != nil {
 		// Hitting OOM writing to a bytes.Buffer already panics, and
 		// all other errors are unexpected.
 		panic(err)

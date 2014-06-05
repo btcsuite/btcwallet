@@ -74,7 +74,7 @@ func version() string {
 // version and build metadata strings.  In particular they MUST only contain
 // characters in semanticAlphabet.
 func normalizeVerString(str string) string {
-	var result bytes.Buffer
+	result := bytes.Buffer{}
 	for _, r := range str {
 		if strings.ContainsRune(semanticAlphabet, r) {
 			_, err := result.WriteRune(r)

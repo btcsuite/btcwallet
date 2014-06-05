@@ -745,8 +745,8 @@ type msgTx btcwire.MsgTx
 
 func (tx *msgTx) ReadFrom(r io.Reader) (int64, error) {
 	// Read from a TeeReader to return the number of read bytes.
-	buf := new(bytes.Buffer)
-	tr := io.TeeReader(r, buf)
+	buf := bytes.Buffer{}
+	tr := io.TeeReader(r, &buf)
 	if err := (*btcwire.MsgTx)(tx).Deserialize(tr); err != nil {
 		if buf.Len() != 0 && err == io.EOF {
 			err = io.ErrUnexpectedEOF
@@ -762,11 +762,11 @@ func (tx *msgTx) WriteTo(w io.Writer) (int64, error) {
 	// written can be returned to the caller.  Writing to a to a
 	// bytes.Buffer never fails except for OOM panics, so check and panic
 	// on any unexpected non-nil returned errors.
-	buf := new(bytes.Buffer)
-	if err := (*btcwire.MsgTx)(tx).Serialize(buf); err != nil {
+	buf := bytes.Buffer{}
+	if err := (*btcwire.MsgTx)(tx).Serialize(&buf); err != nil {
 		panic(err)
 	}
-	return io.Copy(w, buf)
+	return io.Copy(w, &buf)
 }
 
 // ReadFrom reads a mined transaction output lookup key from r.  The total

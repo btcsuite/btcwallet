@@ -296,9 +296,9 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 		}
 	}
 
-	buf := bytes.NewBuffer(nil)
+	buf := bytes.Buffer{}
 	buf.Grow(msgtx.SerializeSize())
-	if err := msgtx.BtcEncode(buf, btcwire.ProtocolVersion); err != nil {
+	if err := msgtx.BtcEncode(&buf, btcwire.ProtocolVersion); err != nil {
 		// Hitting OOM by growing or writing to a bytes.Buffer already
 		// panics, and all returned errors are unexpected.
 		panic(err)
