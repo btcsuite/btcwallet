@@ -104,6 +104,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
+	"listreceivedbyaddress":  ListReceivedByAddress,
 	"listsinceblock":         ListSinceBlock,
 	"listtransactions":       ListTransactions,
 	"listunspent":            ListUnspent,
@@ -131,7 +132,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"listaddressgroupings":  Unimplemented,
 	"listlockunspent":       Unimplemented,
 	"listreceivedbyaccount": Unimplemented,
-	"listreceivedbyaddress": Unimplemented,
 	"lockunspent":           Unimplemented,
 	"move":                  Unimplemented,
 	"setaccount":            Unimplemented,
@@ -970,6 +970,54 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 
 	// Return the map.  This will be marshaled into a JSON object.
 	return AcctMgr.ListAccounts(cmd.MinConf), nil
+}
+
+// ListReceivedByAddress handles a listreceivedbyaddress request by returning
+// an array of objects containing:
+//  "address" : receiving address
+//  "account" : the account of the receiving address
+//  "amount" : total amount received by the address
+//  "confirmations" : number of confirmations of the most recent transaction
+//  included
+func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
+	//	AcctMgr.Grab()
+	//	cmd, ok := icmd.(*btcjson.ListAccountsCmd)
+	//	if !ok {
+	//		return nil, btcjson.ErrInternal
+	//	}
+	// TODO: get the param values
+	type CmapVal struct {
+		account       string
+		amount        float64
+		confirmations uint64
+	}
+	cmap := make(map[string]CmapVal)
+	for _, account := range AcctMgr.AllAccounts() {
+		if includeempty {
+			// TODO: create a cmap entry for each address if not there
+			addresses := account.SortedActivePaymentAddresses()
+		}
+		for _, record := range account.TxStore.Records() {
+			for _, credit := range record.Credits() {
+				// TODO: get the chainHeight
+				chainHeight := 0
+				// TODO: get the address, see credit.Addresses in tx.go#1393
+				// TODO: if the address exists, if the account is not the same
+				// throw an error, otherwise sum the amount and take the lower
+				// confirmation.
+				// TODO: use minconf to filter transactions
+				cmap["addr"] = CmapVal{
+					account:       account.name,
+					amount:        credit.Amount(),
+					confirmations: credit.Confirmations(chainHeight),
+				}
+			}
+		}
+	}
+	// TODO: compute the final output, using includeempty
+	//	ret := []*btcjson.ListReceivedByAddressResult
+	//	AcctMgr.Release()
+	return credits, nil
 }
 
 // ListSinceBlock handles a listsinceblock request by returning an array of maps
