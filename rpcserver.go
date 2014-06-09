@@ -985,21 +985,21 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 	}
 	// Map keyed by address holds intermediate values.
 	type CmapVal struct {
-		account       *Account
+		account       Account
 		amount        btcutil.Amount
 		confirmations int32
 	}
 	cmap := make(map[string]CmapVal)
 	for _, account := range AcctMgr.AllAccounts() {
-		//		if cmd.IncludeEmpty {
-		// Create a cmap entry for each address if not there.
-		for _, address := range account.SortedActivePaymentAddresses() {
-			_, ok := cmap[address]
-			if !ok {
-				cmap[address] = CmapVal{}
+		if cmd.IncludeEmpty {
+			// Create a cmap entry for each address in the wallet if not there.
+			for _, address := range account.SortedActivePaymentAddresses() {
+				_, ok := cmap[address]
+				if !ok {
+					cmap[address] = CmapVal{account: *account, confirmations: 1e6}
+				}
 			}
 		}
-		//		}
 		for _, record := range account.TxStore.Records() {
 			for _, credit := range record.Credits() {
 				_, addresses, _, err := credit.Addresses(activeNet.Params)
@@ -1007,33 +1007,36 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 					return nil, err
 				}
 				for _, address := range addresses {
+
+					bs, err := GetCurBlock()
+					if err != nil {
+						return nil, err
+					}
+					confirmations := credit.Confirmations(bs.Height)
+					log.Debugf("confirmations: %v", confirmations)
+					if cmd.MinConf != 0 && confirmations < int32(cmd.MinConf) {
+						continue
+					}
+
 					enc_addr := address.EncodeAddress()
+					log.Debugf("--- address: %v - amount: %v", enc_addr, credit.Amount())
 					cm, ok := cmap[enc_addr]
 					if ok {
 						// Address already present, check account consistency.
-						if cm.account != account {
+						if cm.account != *account {
 							// TODO: choose a better error
 							return nil, fmt.Errorf("Internal inconsistency")
 						}
 					} else {
-						bs, err := GetCurBlock()
-						if err != nil {
-							return nil, err
-						}
-						confirmations := credit.Confirmations(bs.Height)
-						if cmd.MinConf != 0 && confirmations < int32(cmd.MinConf) {
-							continue
-						}
-						if cm.confirmations < confirmations {
-							confirmations = cm.confirmations
-						}
-						amount := cm.amount + credit.Amount()
-						cmap[enc_addr] = CmapVal{
-							account:       account,
-							amount:        amount,
-							confirmations: confirmations,
-						}
+						cmap[enc_addr] = CmapVal{account: *account, confirmations: 1e6}
+						cm = cmap[enc_addr]
 					}
+					if confirmations < cm.confirmations {
+						cm.confirmations = confirmations
+					}
+					cm.amount += credit.Amount()
+					cmap[enc_addr] = cm
+					log.Debugf("cm: %v", cm)
 				}
 			}
 		}
@@ -1044,7 +1047,7 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 		allRet = append(allRet, &btcjson.ListReceivedByAddressResult{
 			Address:       address,
 			Account:       cm.account.name,
-			Amount:        cm.amount.ToUnit(btcutil.AmountSatoshi),
+			Amount:        cm.amount.ToUnit(btcutil.AmountBTC),
 			Confirmations: uint64(cm.confirmations),
 		})
 	}
