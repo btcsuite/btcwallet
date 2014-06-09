@@ -974,50 +974,81 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 
 // ListReceivedByAddress handles a listreceivedbyaddress request by returning
 // an array of objects containing:
-//  "address" : receiving address
-//  "account" : the account of the receiving address
-//  "amount" : total amount received by the address
-//  "confirmations" : number of confirmations of the most recent transaction
-//  included
+//  "address": receiving address
+//  "account": the account of the receiving address
+//  "amount": total amount received by the address
+//  "confirmations": number of confirmations of the most recent transaction
 func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
-	//	AcctMgr.Grab()
-	//	cmd, ok := icmd.(*btcjson.ListAccountsCmd)
-	//	if !ok {
-	//		return nil, btcjson.ErrInternal
-	//	}
-	// TODO: get the param values
+	cmd, ok := icmd.(*btcjson.ListReceivedByAddressCmd)
+	if !ok {
+		return nil, btcjson.ErrInternal
+	}
+	// Map keyed by address holds intermediate values.
 	type CmapVal struct {
-		account       string
-		amount        float64
-		confirmations uint64
+		account       *Account
+		amount        btcutil.Amount
+		confirmations int32
 	}
 	cmap := make(map[string]CmapVal)
 	for _, account := range AcctMgr.AllAccounts() {
-		if includeempty {
-			// TODO: create a cmap entry for each address if not there
-			addresses := account.SortedActivePaymentAddresses()
+		//		if cmd.IncludeEmpty {
+		// Create a cmap entry for each address if not there.
+		for _, address := range account.SortedActivePaymentAddresses() {
+			_, ok := cmap[address]
+			if !ok {
+				cmap[address] = CmapVal{}
+			}
 		}
+		//		}
 		for _, record := range account.TxStore.Records() {
 			for _, credit := range record.Credits() {
-				// TODO: get the chainHeight
-				chainHeight := 0
-				// TODO: get the address, see credit.Addresses in tx.go#1393
-				// TODO: if the address exists, if the account is not the same
-				// throw an error, otherwise sum the amount and take the lower
-				// confirmation.
-				// TODO: use minconf to filter transactions
-				cmap["addr"] = CmapVal{
-					account:       account.name,
-					amount:        credit.Amount(),
-					confirmations: credit.Confirmations(chainHeight),
+				_, addresses, _, err := credit.Addresses(activeNet.Params)
+				if err != nil {
+					return nil, err
+				}
+				for _, address := range addresses {
+					enc_addr := address.EncodeAddress()
+					cm, ok := cmap[enc_addr]
+					if ok {
+						// Address already present, check account consistency.
+						if cm.account != account {
+							// TODO: choose a better error
+							return nil, fmt.Errorf("Internal inconsistency")
+						}
+					} else {
+						bs, err := GetCurBlock()
+						if err != nil {
+							return nil, err
+						}
+						confirmations := credit.Confirmations(bs.Height)
+						if cmd.MinConf != 0 && confirmations < int32(cmd.MinConf) {
+							continue
+						}
+						if cm.confirmations < confirmations {
+							confirmations = cm.confirmations
+						}
+						amount := cm.amount + credit.Amount()
+						cmap[enc_addr] = CmapVal{
+							account:       account,
+							amount:        amount,
+							confirmations: confirmations,
+						}
+					}
 				}
 			}
 		}
 	}
 	// TODO: compute the final output, using includeempty
-	//	ret := []*btcjson.ListReceivedByAddressResult
-	//	AcctMgr.Release()
-	return credits, nil
+	allRet := []*btcjson.ListReceivedByAddressResult{}
+	for address, cm := range cmap {
+		allRet = append(allRet, &btcjson.ListReceivedByAddressResult{
+			Address:       address,
+			Account:       cm.account.name,
+			Amount:        cm.amount.ToUnit(btcutil.AmountSatoshi),
+			Confirmations: uint64(cm.confirmations),
+		})
+	}
+	return allRet, nil
 }
 
 // ListSinceBlock handles a listsinceblock request by returning an array of maps
