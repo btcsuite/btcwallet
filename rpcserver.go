@@ -991,7 +991,7 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 	// Intermediate data for each address.
 	type AddrData struct {
 		// Associated account.
-		account Account
+		account *Account
 		// Total amount received.
 		amount btcutil.Amount
 		// Number of confirmations of the last transaction.
@@ -999,70 +999,68 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 	}
 	// Intermediate data for all addresses.
 	allAddrData := make(map[string]AddrData)
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
 	for _, account := range AcctMgr.AllAccounts() {
 		if cmd.IncludeEmpty {
 			// Create an AddrData entry for each active address in the account.
 			// Otherwise we'll just get addresses from transactions later.
 			for _, address := range account.SortedActivePaymentAddresses() {
-				_, ok := allAddrData[address]
-				if !ok {
-					allAddrData[address] = AddrData{
-						account:       *account,
-						amount:        btcutil.Amount(0),
-						confirmations: 0,
-					}
-				}
+				// There might be duplicates, just overwrite them.
+				allAddrData[address] = AddrData{account: account}
 			}
 		}
 		for _, record := range account.TxStore.Records() {
 			for _, credit := range record.Credits() {
-				bs, err := GetCurBlock()
-				if err != nil {
-					return nil, err
-				}
 				confirmations := credit.Confirmations(bs.Height)
-				if cmd.MinConf > 0 && confirmations < int32(cmd.MinConf) {
+				if !credit.Confirmed(cmd.MinConf, bs.Height) {
 					// Not enough confirmations, skip the current block.
 					continue
 				}
 				_, addresses, _, err := credit.Addresses(activeNet.Params)
 				if err != nil {
-					return nil, err
+					// Unusable address, skip it.
+					continue
 				}
 				for _, address := range addresses {
-					enc_addr := address.EncodeAddress()
-					addrData, ok := allAddrData[enc_addr]
+					addrStr := address.EncodeAddress()
+					addrData, ok := allAddrData[addrStr]
 					if ok {
 						// Address already present, check account consistency.
-						if addrData.account != *account {
+						if addrData.account != account {
 							return nil, fmt.Errorf(
 								"Address %v in both account %v and account %v",
-								enc_addr, addrData.account.name, account.name)
+								addrStr, addrData.account.name, account.name)
 						}
 						addrData.amount += credit.Amount()
 						// Always overwrite confirmations with newer ones.
 						addrData.confirmations = confirmations
 					} else {
 						addrData = AddrData{
-							account:       *account,
+							account:       account,
 							amount:        credit.Amount(),
 							confirmations: confirmations,
 						}
 					}
-					allAddrData[enc_addr] = addrData
+					allAddrData[addrStr] = addrData
 				}
 			}
 		}
 	}
 	// Massage address data into output format.
-	ret := []btcjson.ListReceivedByAddressResult{}
+	numAddresses := len(allAddrData)
+	ret := make([]btcjson.ListReceivedByAddressResult, numAddresses, numAddresses)
+	idx := 0
 	for address, addrData := range allAddrData {
-		ret = append(ret, btcjson.ListReceivedByAddressResult{
+		ret[idx] = btcjson.ListReceivedByAddressResult{
 			Account:       addrData.account.name,
 			Address:       address,
 			Amount:        addrData.amount.ToUnit(btcutil.AmountBTC),
 			Confirmations: uint64(addrData.confirmations),
-		})
+		}
+		idx += 1
 	}
 	return ret, nil
 }
