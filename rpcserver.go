@@ -973,82 +973,98 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 }
 
 // ListReceivedByAddress handles a listreceivedbyaddress request by returning
-// an array of objects containing:
-//  "address": receiving address
-//  "account": the account of the receiving address
-//  "amount": total amount received by the address
-//  "confirmations": number of confirmations of the most recent transaction
+// a slice of objects, each one containing:
+//  "account": the account of the receiving address;
+//  "address": the receiving address;
+//  "amount": total amount received by the address;
+//  "confirmations": number of confirmations of the most recent transaction.
+// It takes two parameters:
+//  "minconf": minimum number of confirmations to consider a transaction -
+//             default: zero;
+//  "includeempty": whether or not to include addresses that have no transactions -
+//                  default: false.
 func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 	cmd, ok := icmd.(*btcjson.ListReceivedByAddressCmd)
 	if !ok {
 		return nil, btcjson.ErrInternal
 	}
-	// Map keyed by address holds intermediate values.
-	type CmapVal struct {
-		account       Account
-		amount        btcutil.Amount
+	// Intermediate data for each address.
+	type AddrData struct {
+		// Associated account.
+		account Account
+		// Total amount received.
+		amount btcutil.Amount
+		// Number of confirmations of the last transaction.
 		confirmations int32
 	}
-	cmap := make(map[string]CmapVal)
+	// Intermediate data for all addresses.
+	allAddrData := make(map[string]AddrData)
 	for _, account := range AcctMgr.AllAccounts() {
 		if cmd.IncludeEmpty {
-			// Create a cmap entry for each address in the wallet if not there.
+			// Create an AddrData entry for each address known to the wallet.
+			// Otherwise we'll just get addresses from transactions later.
 			for _, address := range account.SortedActivePaymentAddresses() {
-				_, ok := cmap[address]
+				_, ok := allAddrData[address]
 				if !ok {
-					cmap[address] = CmapVal{account: *account, confirmations: 1e6}
+					allAddrData[address] = AddrData{
+						account:       *account,
+						amount:        btcutil.Amount(0),
+						confirmations: 0,
+					}
 				}
 			}
 		}
 		for _, record := range account.TxStore.Records() {
 			for _, credit := range record.Credits() {
+				bs, err := GetCurBlock()
+				if err != nil {
+					return nil, err
+				}
+				confirmations := credit.Confirmations(bs.Height)
+				log.Debugf("confirmations: %v", confirmations)
+				if cmd.MinConf > 0 && confirmations < int32(cmd.MinConf) {
+					// Not enough confirmations, skip the current block.
+					continue
+				}
 				_, addresses, _, err := credit.Addresses(activeNet.Params)
 				if err != nil {
 					return nil, err
 				}
 				for _, address := range addresses {
-
-					bs, err := GetCurBlock()
-					if err != nil {
-						return nil, err
-					}
-					confirmations := credit.Confirmations(bs.Height)
-					log.Debugf("confirmations: %v", confirmations)
-					if cmd.MinConf != 0 && confirmations < int32(cmd.MinConf) {
-						continue
-					}
-
 					enc_addr := address.EncodeAddress()
-					log.Debugf("--- address: %v - amount: %v", enc_addr, credit.Amount())
-					cm, ok := cmap[enc_addr]
+					log.Debugf("amount for address %v: %v", enc_addr, credit.Amount())
+					addrData, ok := allAddrData[enc_addr]
 					if ok {
 						// Address already present, check account consistency.
-						if cm.account != *account {
-							// TODO: choose a better error
-							return nil, fmt.Errorf("Internal inconsistency")
+						if addrData.account != *account {
+							return nil, fmt.Errorf(
+								"Address %v in both account %v and account %v",
+								enc_addr, addrData.account.name, account.name)
 						}
+						addrData.amount += credit.Amount()
+						// Always overwrite confirmations with the newer ones.
+						addrData.confirmations = confirmations
+						log.Debugf("addrData for %v: %v", enc_addr, addrData)
 					} else {
-						cmap[enc_addr] = CmapVal{account: *account, confirmations: 1e6}
-						cm = cmap[enc_addr]
+						allAddrData[enc_addr] = AddrData{
+							account:       *account,
+							amount:        credit.Amount(),
+							confirmations: confirmations,
+						}
+						log.Debugf("new addrData for %v: %v", enc_addr, allAddrData[enc_addr])
 					}
-					if confirmations < cm.confirmations {
-						cm.confirmations = confirmations
-					}
-					cm.amount += credit.Amount()
-					cmap[enc_addr] = cm
-					log.Debugf("cm: %v", cm)
 				}
 			}
 		}
 	}
-	// TODO: compute the final output, using includeempty
-	allRet := []*btcjson.ListReceivedByAddressResult{}
-	for address, cm := range cmap {
-		allRet = append(allRet, &btcjson.ListReceivedByAddressResult{
+	// Massage address data into output format.
+	allRet := []btcjson.ListReceivedByAddressResult{}
+	for address, addrData := range allAddrData {
+		allRet = append(allRet, btcjson.ListReceivedByAddressResult{
+			Account:       addrData.account.name,
 			Address:       address,
-			Account:       cm.account.name,
-			Amount:        cm.amount.ToUnit(btcutil.AmountBTC),
-			Confirmations: uint64(cm.confirmations),
+			Amount:        addrData.amount.ToUnit(btcutil.AmountBTC),
+			Confirmations: uint64(addrData.confirmations),
 		})
 	}
 	return allRet, nil
