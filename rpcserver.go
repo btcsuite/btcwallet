@@ -980,7 +980,7 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 //  "confirmations": number of confirmations of the most recent transaction.
 // It takes two parameters:
 //  "minconf": minimum number of confirmations to consider a transaction -
-//             default: zero;
+//             default: one;
 //  "includeempty": whether or not to include addresses that have no transactions -
 //                  default: false.
 func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
@@ -1001,7 +1001,7 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 	allAddrData := make(map[string]AddrData)
 	for _, account := range AcctMgr.AllAccounts() {
 		if cmd.IncludeEmpty {
-			// Create an AddrData entry for each address known to the wallet.
+			// Create an AddrData entry for each active address in the account.
 			// Otherwise we'll just get addresses from transactions later.
 			for _, address := range account.SortedActivePaymentAddresses() {
 				_, ok := allAddrData[address]
@@ -1021,7 +1021,6 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 					return nil, err
 				}
 				confirmations := credit.Confirmations(bs.Height)
-				log.Debugf("confirmations: %v", confirmations)
 				if cmd.MinConf > 0 && confirmations < int32(cmd.MinConf) {
 					// Not enough confirmations, skip the current block.
 					continue
@@ -1032,7 +1031,6 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 				}
 				for _, address := range addresses {
 					enc_addr := address.EncodeAddress()
-					log.Debugf("amount for address %v: %v", enc_addr, credit.Amount())
 					addrData, ok := allAddrData[enc_addr]
 					if ok {
 						// Address already present, check account consistency.
@@ -1042,32 +1040,31 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 								enc_addr, addrData.account.name, account.name)
 						}
 						addrData.amount += credit.Amount()
-						// Always overwrite confirmations with the newer ones.
+						// Always overwrite confirmations with newer ones.
 						addrData.confirmations = confirmations
-						log.Debugf("addrData for %v: %v", enc_addr, addrData)
 					} else {
-						allAddrData[enc_addr] = AddrData{
+						addrData = AddrData{
 							account:       *account,
 							amount:        credit.Amount(),
 							confirmations: confirmations,
 						}
-						log.Debugf("new addrData for %v: %v", enc_addr, allAddrData[enc_addr])
 					}
+					allAddrData[enc_addr] = addrData
 				}
 			}
 		}
 	}
 	// Massage address data into output format.
-	allRet := []btcjson.ListReceivedByAddressResult{}
+	ret := []btcjson.ListReceivedByAddressResult{}
 	for address, addrData := range allAddrData {
-		allRet = append(allRet, btcjson.ListReceivedByAddressResult{
+		ret = append(ret, btcjson.ListReceivedByAddressResult{
 			Account:       addrData.account.name,
 			Address:       address,
 			Amount:        addrData.amount.ToUnit(btcutil.AmountBTC),
 			Confirmations: uint64(addrData.confirmations),
 		})
 	}
-	return allRet, nil
+	return ret, nil
 }
 
 // ListSinceBlock handles a listsinceblock request by returning an array of maps
