@@ -104,6 +104,7 @@ var rpcHandlers = map[string]cmdHandler{
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
+	"listreceivedbyaddress":  ListReceivedByAddress,
 	"listsinceblock":         ListSinceBlock,
 	"listtransactions":       ListTransactions,
 	"listunspent":            ListUnspent,
@@ -131,7 +132,6 @@ var rpcHandlers = map[string]cmdHandler{
 	"listaddressgroupings":  Unimplemented,
 	"listlockunspent":       Unimplemented,
 	"listreceivedbyaccount": Unimplemented,
-	"listreceivedbyaddress": Unimplemented,
 	"lockunspent":           Unimplemented,
 	"move":                  Unimplemented,
 	"setaccount":            Unimplemented,
@@ -970,6 +970,99 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 
 	// Return the map.  This will be marshaled into a JSON object.
 	return AcctMgr.ListAccounts(cmd.MinConf), nil
+}
+
+// ListReceivedByAddress handles a listreceivedbyaddress request by returning
+// a slice of objects, each one containing:
+//  "account": the account of the receiving address;
+//  "address": the receiving address;
+//  "amount": total amount received by the address;
+//  "confirmations": number of confirmations of the most recent transaction.
+// It takes two parameters:
+//  "minconf": minimum number of confirmations to consider a transaction -
+//             default: one;
+//  "includeempty": whether or not to include addresses that have no transactions -
+//                  default: false.
+func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
+	cmd, ok := icmd.(*btcjson.ListReceivedByAddressCmd)
+	if !ok {
+		return nil, btcjson.ErrInternal
+	}
+	// Intermediate data for each address.
+	type AddrData struct {
+		// Associated account.
+		account *Account
+		// Total amount received.
+		amount btcutil.Amount
+		// Number of confirmations of the last transaction.
+		confirmations int32
+	}
+	// Intermediate data for all addresses.
+	allAddrData := make(map[string]AddrData)
+	bs, err := GetCurBlock()
+	if err != nil {
+		return nil, err
+	}
+	for _, account := range AcctMgr.AllAccounts() {
+		if cmd.IncludeEmpty {
+			// Create an AddrData entry for each active address in the account.
+			// Otherwise we'll just get addresses from transactions later.
+			for _, address := range account.SortedActivePaymentAddresses() {
+				// There might be duplicates, just overwrite them.
+				allAddrData[address] = AddrData{account: account}
+			}
+		}
+		for _, record := range account.TxStore.Records() {
+			for _, credit := range record.Credits() {
+				confirmations := credit.Confirmations(bs.Height)
+				if !credit.Confirmed(cmd.MinConf, bs.Height) {
+					// Not enough confirmations, skip the current block.
+					continue
+				}
+				_, addresses, _, err := credit.Addresses(activeNet.Params)
+				if err != nil {
+					// Unusable address, skip it.
+					continue
+				}
+				for _, address := range addresses {
+					addrStr := address.EncodeAddress()
+					addrData, ok := allAddrData[addrStr]
+					if ok {
+						// Address already present, check account consistency.
+						if addrData.account != account {
+							return nil, fmt.Errorf(
+								"Address %v in both account %v and account %v",
+								addrStr, addrData.account.name, account.name)
+						}
+						addrData.amount += credit.Amount()
+						// Always overwrite confirmations with newer ones.
+						addrData.confirmations = confirmations
+					} else {
+						addrData = AddrData{
+							account:       account,
+							amount:        credit.Amount(),
+							confirmations: confirmations,
+						}
+					}
+					allAddrData[addrStr] = addrData
+				}
+			}
+		}
+	}
+	// Massage address data into output format.
+	numAddresses := len(allAddrData)
+	ret := make([]btcjson.ListReceivedByAddressResult, numAddresses, numAddresses)
+	idx := 0
+	for address, addrData := range allAddrData {
+		ret[idx] = btcjson.ListReceivedByAddressResult{
+			Account:       addrData.account.name,
+			Address:       address,
+			Amount:        addrData.amount.ToUnit(btcutil.AmountBTC),
+			Confirmations: uint64(addrData.confirmations),
+		}
+		idx += 1
+	}
+	return ret, nil
 }
 
 // ListSinceBlock handles a listsinceblock request by returning an array of maps
