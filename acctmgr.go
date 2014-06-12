@@ -800,7 +800,7 @@ func (am *AccountManager) UnlockWallets(passphrase string) (err error) {
 // DumpKeys returns all WIF-encoded private keys associated with all
 // accounts. All wallets must be unlocked for this operation to succeed.
 func (am *AccountManager) DumpKeys() ([]string, error) {
-	var keys []string
+	keys := []string{}
 	for _, a := range am.AllAccounts() {
 		switch walletKeys, err := a.DumpPrivKeys(); err {
 		case wallet.ErrWalletLocked:
@@ -845,7 +845,7 @@ func (am *AccountManager) ListSinceBlock(since, curBlockHeight int32,
 	minconf int) ([]btcjson.ListTransactionsResult, error) {
 
 	// Create and fill a map of account names and their balances.
-	var txList []btcjson.ListTransactionsResult
+	txList := []btcjson.ListTransactionsResult{}
 	for _, a := range am.AllAccounts() {
 		txTmp, err := a.ListSinceBlock(since, curBlockHeight, minconf)
 		if err != nil {
@@ -901,7 +901,7 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 
 	filter := len(addresses) != 0
 
-	var results []*btcjson.ListUnspentResult
+	results := []*btcjson.ListUnspentResult{}
 	for _, a := range am.AllAccounts() {
 		unspent, err := a.TxStore.SortedUnspentOutputs()
 		if err != nil {

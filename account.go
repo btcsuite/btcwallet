@@ -173,7 +173,7 @@ func (a *Account) CurrentAddress() (btcutil.Address, error) {
 func (a *Account) ListSinceBlock(since, curBlockHeight int32,
 	minconf int) ([]btcjson.ListTransactionsResult, error) {
 
-	var txList []btcjson.ListTransactionsResult
+	txList := []btcjson.ListTransactionsResult{}
 	for _, txRecord := range a.TxStore.Records() {
 		// Transaction records must only be considered if they occur
 		// after the block height since.
@@ -208,7 +208,7 @@ func (a *Account) ListTransactions(from, count int) ([]btcjson.ListTransactionsR
 		return nil, err
 	}
 
-	var txList []btcjson.ListTransactionsResult
+	txList := []btcjson.ListTransactionsResult{}
 
 	records := a.TxStore.Records()
 	lastLookupIdx := len(records) - count
@@ -237,7 +237,7 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 		return nil, err
 	}
 
-	var txList []btcjson.ListTransactionsResult
+	txList := []btcjson.ListTransactionsResult{}
 	for _, r := range a.TxStore.Records() {
 		for _, c := range r.Credits() {
 			// We only care about the case where len(addrs) == 1,
@@ -278,7 +278,7 @@ func (a *Account) ListAllTransactions() ([]btcjson.ListTransactionsResult, error
 
 	// Search in reverse order: lookup most recently-added first.
 	records := a.TxStore.Records()
-	var txList []btcjson.ListTransactionsResult
+	txList := []btcjson.ListTransactionsResult{}
 	for i := len(records) - 1; i >= 0; i-- {
 		jsonResults, err := records[i].ToJSON(a.name, bs.Height, a.Net())
 		if err != nil {
@@ -295,7 +295,7 @@ func (a *Account) ListAllTransactions() ([]btcjson.ListTransactionsResult, error
 func (a *Account) DumpPrivKeys() ([]string, error) {
 	// Iterate over each active address, appending the private
 	// key to privkeys.
-	var privkeys []string
+	privkeys := []string{}
 	for _, info := range a.Wallet.ActiveAddresses() {
 		// Only those addresses with keys needed.
 		pka, ok := info.(wallet.PubKeyAddress)
