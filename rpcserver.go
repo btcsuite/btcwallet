@@ -320,7 +320,7 @@ func (s *rpcServer) Start() {
 		}
 		s.PostClientRPC(w, r)
 	})
-	serveMux.HandleFunc("/frontend", func(w http.ResponseWriter, r *http.Request) {
+	serveMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		authenticated := false
 		switch s.checkAuthHeader(r) {
 		case nil:
@@ -1350,7 +1350,7 @@ func KeypoolRefill(icmd btcjson.Cmd) (interface{}, error) {
 	return nil, nil
 }
 
-// NotifyNewBlockChainHeight notifies all frontends of a new
+// NotifyNewBlockChainHeight notifies all websocket clients of a new
 // blockchain height.  This sends the same notification as
 // btcd, so this can probably be removed.
 func (s *rpcServer) NotifyNewBlockChainHeight(bs *wallet.BlockStamp) {
@@ -1363,8 +1363,8 @@ func (s *rpcServer) NotifyNewBlockChainHeight(bs *wallet.BlockStamp) {
 	s.broadcasts <- mntfn
 }
 
-// NotifyBalances notifies an attached frontend of the current confirmed
-// and unconfirmed account balances.
+// NotifyBalances notifies an attached websocket clients of the current
+// confirmed and unconfirmed account balances.
 //
 // TODO(jrick): Switch this to return a single JSON object
 // (map[string]interface{}) of all accounts and their balances, instead of
@@ -2060,7 +2060,7 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txSha *btcwire.ShaHash, a *Account, 
 	}
 	AcctMgr.ds.ScheduleTxStoreWrite(a)
 
-	// Notify frontends of new SendTx.
+	// Notify websocket clients of the transaction.
 	bs, err := GetCurBlock()
 	if err == nil {
 		ltr, err := debits.ToJSON(a.Name(), bs.Height, a.Net())
@@ -2082,7 +2082,7 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txSha *btcwire.ShaHash, a *Account, 
 		return err
 	}
 
-	// Notify all frontends of account's new unconfirmed and
+	// Notify websocket clients of account's new unconfirmed and
 	// confirmed balance.
 	confirmed := a.CalculateBalance(1)
 	unconfirmed := a.CalculateBalance(0) - confirmed
@@ -2693,15 +2693,15 @@ func WalletPassphraseChange(icmd btcjson.Cmd) (interface{}, error) {
 }
 
 // AccountNtfn is a struct for marshalling any generic notification
-// about a account for a wallet frontend.
+// about a account for a websocket client.
 //
-// TODO(jrick): move to btcjson so it can be shared with frontends?
+// TODO(jrick): move to btcjson so it can be shared with clients?
 type AccountNtfn struct {
 	Account      string      `json:"account"`
 	Notification interface{} `json:"notification"`
 }
 
-// NotifyWalletLockStateChange sends a notification to all frontends
+// NotifyWalletLockStateChange sends a notification to all websocket clients
 // that the wallet has just been locked or unlocked.
 func (s *rpcServer) NotifyWalletLockStateChange(account string, locked bool) {
 	ntfn := btcws.NewWalletLockStateNtfn(account, locked)
@@ -2715,7 +2715,7 @@ func (s *rpcServer) NotifyWalletLockStateChange(account string, locked bool) {
 }
 
 // NotifyWalletBalance sends a confirmed account balance notification
-// to a frontend.
+// to all websocket clients.
 func (s *rpcServer) NotifyWalletBalance(account string, balance float64) {
 	ntfn := btcws.NewAccountBalanceNtfn(account, balance, true)
 	mntfn, err := ntfn.MarshalJSON()
@@ -2728,7 +2728,7 @@ func (s *rpcServer) NotifyWalletBalance(account string, balance float64) {
 }
 
 // NotifyWalletBalanceUnconfirmed sends a confirmed account balance
-// notification to a frontend.
+// notification to all websocket clients.
 func (s *rpcServer) NotifyWalletBalanceUnconfirmed(account string, balance float64) {
 	ntfn := btcws.NewAccountBalanceNtfn(account, balance, false)
 	mntfn, err := ntfn.MarshalJSON()
@@ -2740,7 +2740,8 @@ func (s *rpcServer) NotifyWalletBalanceUnconfirmed(account string, balance float
 	s.broadcasts <- mntfn
 }
 
-// NotifyNewTxDetails sends details of a new transaction to a frontend.
+// NotifyNewTxDetails sends details of a new transaction to all websocket
+// clients.
 func (s *rpcServer) NotifyNewTxDetails(account string, details btcjson.ListTransactionsResult) {
 	ntfn := btcws.NewTxNtfn(account, &details)
 	mntfn, err := ntfn.MarshalJSON()
@@ -2777,7 +2778,7 @@ var NotifiedRecvTxChans = struct {
 
 // StoreNotifiedMempoolRecvTxs maintains a set of previously-sent
 // received transaction notifications originating from the btcd
-// mempool. This is used to prevent duplicate frontend transaction
+// mempool. This is used to prevent duplicate client transaction
 // notifications once a mempool tx is mined into a block.
 func StoreNotifiedMempoolRecvTxs(add, remove chan btcwire.OutPoint,
 	access chan NotifiedRecvTxRequest) {
@@ -2831,7 +2832,8 @@ type NotifyBalanceRequest struct {
 
 // NotifyBalanceSyncer maintains a map of block hashes to WaitGroups
 // for worker goroutines that must finish before it is safe to notify
-// frontends of a new balance in the blockconnected notification handler.
+// websocket clientss of a new balance in the blockconnected notification
+// handler.
 func NotifyBalanceSyncer(add chan NotifyBalanceWorker,
 	remove chan btcwire.ShaHash,
 	access chan NotifyBalanceRequest) {

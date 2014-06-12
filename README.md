@@ -6,7 +6,7 @@ btcwallet
 
 btcwallet is a daemon handling bitcoin wallet functionality for a
 single user.  It acts as both an RPC client to btcd and an RPC server
-for wallet frontends and legacy RPC applications.
+for wallet clients and legacy RPC applications.
 
 The wallet file format is based on
 [Armory](https://github.com/etotheipi/BitcoinArmory) and provides a
@@ -14,7 +14,7 @@ deterministic wallet where all future generated private keys can be
 recovered from a previous wallet backup.  Unencrypted wallets are
 unsupported and are never written to disk.  This design decision has
 the consequence of generating new wallets on the fly impossible: a
-frontend is required to provide a wallet encryption passphrase.
+client is required to provide a wallet encryption passphrase.
 
 btcwallet is not an SPV client and requires connecting to a local or
 remote btcd instance for asynchronous blockchain queries and
@@ -24,7 +24,7 @@ can be found [here](https://github.com/conformal/btcd).
 As a daemon, btcwallet provides no user interface and an additional
 graphical or command line client is required for normal, personal
 wallet usage.  Conformal has written
-[btcgui](https://github.com/conformal/btcgui) as a graphical frontend
+[btcgui](https://github.com/conformal/btcgui) as a graphical client
 to btcwallet.
 
 This project is currently under active development is not production
@@ -108,12 +108,12 @@ $ $EDITOR ~/.btcd/btcd.conf
 $ $EDITOR ~/.btcwallet/btcwallet.conf
 ```
 
-## Frontend Usage
+## Client Usage
 
-Frontends wishing to use btcwallet must connect to the path
-`/frontend` over a websocket connection.  Messages sent to btcwallet
-over this websocket are expected to follow the standard Bitcoin JSON
-API (partially documented
+Clients wishing to use btcwallet must connect to the `ws` endpoint
+over a websocket connection.  Messages sent to btcwallet over this
+websocket are expected to follow the standard Bitcoin JSON API
+(partially documented
 [here](https://en.bitcoin.it/wiki/Original_Bitcoin_client/API_Calls_list)).
 Websocket connections also enable additional API extensions and
 JSON-RPC notifications (currently undocumented).  The btcd packages

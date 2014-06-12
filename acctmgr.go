@@ -630,7 +630,7 @@ func (am *AccountManager) Rollback(height int32, hash *btcwire.ShaHash) error {
 	return nil
 }
 
-// BlockNotify notifies all frontends of any changes from the new block,
+// BlockNotify notifies all wallet clients of any changes from the new block,
 // including changed balances.  Each account is then set to be synced
 // with the latest block.
 func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {

@@ -135,7 +135,7 @@ func (n blockConnected) handleNotification() error {
 	}
 	AcctMgr.BlockNotify(bs)
 
-	// Pass notification to frontends too.
+	// Pass notification to wallet clients too.
 	if server != nil {
 		// TODO: marshaling should be perfomred by the server, and
 		// sent only to client that have requested the notification.
@@ -163,7 +163,7 @@ func (n blockDisconnected) handleNotification() error {
 		return err
 	}
 
-	// Pass notification to frontends too.
+	// Pass notification to wallet clients too.
 	if server != nil {
 		// TODO: marshaling should be perfomred by the server, and
 		// sent only to client that have requested the notification.
@@ -260,10 +260,10 @@ func (n recvTx) handleNotification() error {
 			}
 			AcctMgr.ds.ScheduleTxStoreWrite(a)
 
-			// Notify frontends of tx.  If the tx is unconfirmed, it is always
+			// Notify wallet clients of tx.  If the tx is unconfirmed, it is always
 			// notified and the outpoint is marked as notified.  If the outpoint
 			// has already been notified and is now in a block, a txmined notifiction
-			// should be sent once to let frontends that all previous send/recvs
+			// should be sent once to let wallet clients that all previous send/recvs
 			// for this unconfirmed tx are now confirmed.
 			op := *cred.OutPoint()
 			previouslyNotifiedReq := NotifiedRecvTxRequest{
@@ -274,7 +274,7 @@ func (n recvTx) handleNotification() error {
 			if <-previouslyNotifiedReq.response {
 				NotifiedRecvTxChans.remove <- op
 			} else {
-				// Notify frontends of new recv tx and mark as notified.
+				// Notify clients of new recv tx and mark as notified.
 				NotifiedRecvTxChans.add <- op
 
 				ltr, err := cred.ToJSON(a.Name(), bs.Height, a.Wallet.Net())
@@ -284,7 +284,7 @@ func (n recvTx) handleNotification() error {
 				server.NotifyNewTxDetails(a.Name(), ltr)
 			}
 
-			// Notify frontends of new account balance.
+			// Notify clients of new account balance.
 			confirmed := a.CalculateBalance(1)
 			unconfirmed := a.CalculateBalance(0) - confirmed
 			server.NotifyWalletBalance(a.name, confirmed)

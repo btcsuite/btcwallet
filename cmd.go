@@ -178,8 +178,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start HTTP server to listen and send messages to frontend and btcd
-	// backend.  Try reconnection if connection failed.
+	// Start HTTP server to serve wallet client connections.
 	server.Start()
 
 	// Begin maintanence goroutines.
@@ -194,6 +193,8 @@ func main() {
 		NotifyBalanceSyncerChans.remove,
 		NotifyBalanceSyncerChans.access)
 
+	// Start client connection to a btcd chain server.  Attempt
+	// reconnections if the client could not be successfully connected.
 	clientChan := make(chan *rpcClient)
 	go clientAccess(clientChan)
 	clientConnect(certs, clientChan)
