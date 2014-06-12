@@ -17,10 +17,7 @@
 package main
 
 import (
-	"github.com/conformal/btcjson"
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/wallet"
-	"github.com/conformal/btcwire"
+	"errors"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -28,10 +25,15 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/wallet"
+	"github.com/conformal/btcwire"
 )
 
 var (
-	cfg *config
+	cfg    *config
+	server *rpcServer
 
 	curBlock = struct {
 		sync.RWMutex
@@ -54,7 +56,12 @@ func GetCurBlock() (wallet.BlockStamp, error) {
 		return bs, nil
 	}
 
-	bb, err := GetBestBlock(CurrentServerConn())
+	var bbHash *btcwire.ShaHash
+	var bbHeight int32
+	client, err := accessClient()
+	if err == nil {
+		bbHash, bbHeight, err = client.GetBestBlock()
+	}
 	if err != nil {
 		unknown := wallet.BlockStamp{
 			Height: int32(btcutil.BlockHeightUnknown),
@@ -62,18 +69,11 @@ func GetCurBlock() (wallet.BlockStamp, error) {
 		return unknown, err
 	}
 
-	hash, err := btcwire.NewShaHashFromStr(bb.Hash)
-	if err != nil {
-		return wallet.BlockStamp{
-			Height: int32(btcutil.BlockHeightUnknown),
-		}, err
-	}
-
 	curBlock.Lock()
-	if bb.Height > curBlock.BlockStamp.Height {
+	if bbHeight > curBlock.BlockStamp.Height {
 		bs = wallet.BlockStamp{
-			Height: bb.Height,
-			Hash:   *hash,
+			Height: bbHeight,
+			Hash:   *bbHash,
 		}
 		curBlock.BlockStamp = bs
 	}
@@ -81,19 +81,49 @@ func GetCurBlock() (wallet.BlockStamp, error) {
 	return bs, nil
 }
 
-// NewJSONID is used to receive the next unique JSON ID for btcd
-// requests, starting from zero and incrementing by one after each
-// read.
-var NewJSONID = make(chan uint64)
+var clientAccessChan = make(chan *rpcClient)
 
-// JSONIDGenerator sends incremental integers across a channel.  This
-// is meant to provide a unique value for the JSON ID field for btcd
-// messages.
-func JSONIDGenerator(c chan uint64) {
-	var n uint64
+func clientAccess(newClient <-chan *rpcClient) {
+	var client *rpcClient
 	for {
-		c <- n
-		n++
+		select {
+		case c := <-newClient:
+			client = c
+		case clientAccessChan <- client:
+		}
+	}
+}
+
+func accessClient() (*rpcClient, error) {
+	c := <-clientAccessChan
+	if c == nil {
+		return nil, errors.New("chain server disconnected")
+	}
+	return c, nil
+}
+
+func clientConnect(certs []byte, newClient chan<- *rpcClient) {
+	const initialWait = 5 * time.Second
+	wait := initialWait
+	for {
+		client, err := newRPCClient(certs)
+		if err != nil {
+			log.Warnf("Unable to open chain server client "+
+				"connection: %v", err)
+			time.Sleep(wait)
+			wait <<= 1
+			if wait > time.Minute {
+				wait = time.Minute
+			}
+			continue
+		}
+
+		wait = initialWait
+
+		client.Start()
+		newClient <- client
+
+		client.WaitForShutdown()
 	}
 }
 
@@ -129,37 +159,28 @@ func main() {
 		}()
 	}
 
+	// Read CA file to verify a btcd TLS connection.
+	certs, err := ioutil.ReadFile(cfg.CAFile)
+	if err != nil {
+		log.Errorf("cannot open CA file: %v", err)
+		os.Exit(1)
+	}
+
 	// Check and update any old file locations.
 	updateOldFileLocations()
 
 	// Start account manager and open accounts.
 	AcctMgr.Start()
 
-	// Read CA file to verify a btcd TLS connection.
-	cafile, err := ioutil.ReadFile(cfg.CAFile)
+	server, err = newRPCServer(cfg.SvrListeners)
 	if err != nil {
-		log.Errorf("cannot open CA file: %v", err)
+		log.Errorf("Unable to create HTTP server: %v", err)
 		os.Exit(1)
 	}
 
-	go func() {
-		s, err := newServer(cfg.SvrListeners)
-		if err != nil {
-			log.Errorf("Unable to create HTTP server: %v", err)
-			os.Exit(1)
-		}
-
-		// Start HTTP server to listen and send messages to frontend and btcd
-		// backend.  Try reconnection if connection failed.
-		s.Start()
-	}()
-
-	// Begin generating new IDs for JSON calls.
-	go JSONIDGenerator(NewJSONID)
-
-	// Begin RPC server goroutines.
-	go RPCGateway()
-	go WalletRequestProcessor()
+	// Start HTTP server to listen and send messages to frontend and btcd
+	// backend.  Try reconnection if connection failed.
+	server.Start()
 
 	// Begin maintanence goroutines.
 	go SendBeforeReceiveHistorySync(SendTxHistSyncChans.add,
@@ -173,76 +194,7 @@ func main() {
 		NotifyBalanceSyncerChans.remove,
 		NotifyBalanceSyncerChans.access)
 
-	updateBtcd := make(chan *BtcdRPCConn)
-	go func() {
-		// Create an RPC connection and close the closed channel.
-		//
-		// It might be a better idea to create a new concrete type
-		// just for an always disconnected RPC connection and begin
-		// with that.
-		btcd := NewBtcdRPCConn(nil)
-		close(btcd.closed)
-
-		// Maintain the current btcd connection.  After reconnects,
-		// the current connection should be updated.
-		for {
-			select {
-			case conn := <-updateBtcd:
-				btcd = conn
-
-			case access := <-accessServer:
-				access.server <- btcd
-			}
-		}
-	}()
-
-	for {
-		btcd, err := BtcdConnect(cafile)
-		if err != nil {
-			log.Info("Retrying btcd connection in 5 seconds")
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		updateBtcd <- btcd
-
-		NotifyBtcdConnection(allClients)
-		log.Info("Established connection to btcd")
-
-		// Perform handshake.
-		if err := Handshake(btcd); err != nil {
-			var message string
-			if jsonErr, ok := err.(btcjson.Error); ok {
-				message = jsonErr.Message
-			} else {
-				message = err.Error()
-			}
-			log.Errorf("Cannot complete handshake: %v", message)
-			log.Info("Retrying btcd connection in 5 seconds")
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Block goroutine until the connection is lost.
-		<-btcd.closed
-		NotifyBtcdConnection(allClients)
-		log.Info("Lost btcd connection")
-	}
-}
-
-var accessServer = make(chan *AccessCurrentServerConn)
-
-// AccessCurrentServerConn is used to access the current RPC connection
-// from the goroutine managing btcd-side RPC connections.
-type AccessCurrentServerConn struct {
-	server chan ServerConn
-}
-
-// CurrentServerConn returns the most recently-connected btcd-side
-// RPC connection.
-func CurrentServerConn() ServerConn {
-	access := &AccessCurrentServerConn{
-		server: make(chan ServerConn),
-	}
-	accessServer <- access
-	return <-access.server
+	clientChan := make(chan *rpcClient)
+	go clientAccess(clientChan)
+	clientConnect(certs, clientChan)
 }

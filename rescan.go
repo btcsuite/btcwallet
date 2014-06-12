@@ -140,9 +140,9 @@ func (b *rescanBatch) merge(job *RescanJob) {
 	}
 }
 
-// Status types for the handler.
-type rescanProgress int32
-type rescanFinished error
+type rescanFinished struct {
+	error
+}
 
 // jobHandler runs the RescanManager's for-select loop to manage rescan jobs
 // and dispatch requests.
@@ -190,7 +190,7 @@ func (m *RescanManager) jobHandler() {
 				if m.msgs != nil {
 					m.msgs <- &RescanFinishedMsg{
 						Addresses: curBatch.addrs,
-						Error:     error(s),
+						Error:     s.error,
 					}
 				}
 				curBatch.done()
@@ -204,6 +204,10 @@ func (m *RescanManager) jobHandler() {
 						m.msgs <- (*RescanStartedMsg)(job)
 					}
 				}
+
+			default:
+				// Unexpected status message
+				panic(s)
 			}
 		}
 	}
@@ -214,16 +218,17 @@ func (m *RescanManager) jobHandler() {
 // The jobHandler is notified when the processing the rescan finishes.
 func (m *RescanManager) rpcHandler() {
 	for job := range m.sendJob {
-		var addrStrs []string
-		for _, addrs := range job.Addresses {
-			for i := range addrs {
-				addrStrs = append(addrStrs, addrs[i].EncodeAddress())
-			}
+		var addrs []btcutil.Address
+		for _, accountAddrs := range job.Addresses {
+			addrs = append(addrs, accountAddrs...)
 		}
-
-		c := CurrentServerConn()
-		err := Rescan(c, job.StartHeight, addrStrs, job.OutPoints)
-		m.status <- rescanFinished(err)
+		client, err := accessClient()
+		if err != nil {
+			m.status <- rescanFinished{err}
+			return
+		}
+		err = client.Rescan(job.StartHeight, addrs, job.OutPoints)
+		m.status <- rescanFinished{err}
 	}
 }
 
@@ -260,6 +265,6 @@ func (m *RescanManager) SubmitJob(job *RescanJob) <-chan struct{} {
 
 // MarkProgress messages the RescanManager with the height of the block
 // last processed by a running rescan.
-func (m *RescanManager) MarkProgress(height int32) {
-	m.status <- rescanProgress(height)
+func (m *RescanManager) MarkProgress(height rescanProgress) {
+	m.status <- height
 }

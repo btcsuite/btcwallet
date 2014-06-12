@@ -496,6 +496,10 @@ func (am *AccountManager) rescanListener() {
 
 			noun := pickNoun(n, "address", "addresses")
 			log.Infof("Finished rescan for %d %s", n, noun)
+
+		default:
+			// Unexpected rescan message type.
+			panic(e)
 		}
 		AcctMgr.Release()
 	}
@@ -636,9 +640,8 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 		// changes, or sending these notifications as the utxos are added.
 		confirmed := a.CalculateBalance(1)
 		unconfirmed := a.CalculateBalance(0) - confirmed
-		NotifyWalletBalance(allClients, a.name, confirmed)
-		NotifyWalletBalanceUnconfirmed(allClients, a.name,
-			unconfirmed)
+		server.NotifyWalletBalance(a.name, confirmed)
+		server.NotifyWalletBalanceUnconfirmed(a.name, unconfirmed)
 
 		// If this is the default account, update the block all accounts
 		// are synced with, and schedule a wallet write.
@@ -822,17 +825,6 @@ func (am *AccountManager) DumpWIFPrivateKey(addr btcutil.Address) (string, error
 		return "", err
 	}
 	return a.DumpWIFPrivateKey(addr)
-}
-
-// NotifyBalances notifies a wallet frontend of all confirmed and unconfirmed
-// account balances.
-func (am *AccountManager) NotifyBalances(frontend chan []byte) {
-	for _, a := range am.AllAccounts() {
-		balance := a.CalculateBalance(1)
-		unconfirmed := a.CalculateBalance(0) - balance
-		NotifyWalletBalance(frontend, a.name, balance)
-		NotifyWalletBalanceUnconfirmed(frontend, a.name, unconfirmed)
-	}
 }
 
 // ListAccounts returns a map of account names to their current account

@@ -14,405 +14,490 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-// This file implements the websocket client connection to a bitcoin RPC
-// server.
-
 package main
 
 import (
-	"code.google.com/p/go.net/websocket"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"github.com/conformal/btcjson"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/conformal/btcrpcclient"
+	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/txstore"
+	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
-	"io"
 )
 
-// ServerConn is an interface representing a client connection to a bitcoin RPC
-// server.
-type ServerConn interface {
-	// SendRequest sends a bitcoin RPC request, returning a channel to
-	// read the reply.  A channel is used so both synchronous and
-	// asynchronous RPC can be supported.
-	SendRequest(request *ServerRequest) chan RawRPCResponse
+// InvalidNotificationError describes an error due to an invalid chain server
+// notification and should be warned by wallet, but does not indicate an
+// problem with the current wallet state.
+type InvalidNotificationError struct {
+	error
 }
 
-// ErrBtcdDisconnected describes an error where an operation cannot
-// successfully complete due to btcwallet not being connected to
-// btcd.
-var ErrBtcdDisconnected = btcjson.Error{
-	Code:    -1,
-	Message: "btcd disconnected",
+var (
+	// MismatchingNetworks represents an error where a client connection
+	// to btcd cannot succeed due to btcwallet and btcd operating on
+	// different bitcoin networks.
+	ErrMismatchedNets = errors.New("mismatched networks")
+)
+
+const (
+	// maxConcurrentClientRequests is the maximum number of
+	// unhandled/running requests that the server will run for a websocket
+	// client at a time.  Beyond this limit, additional request reads will
+	// block until a running request handler finishes.  This limit exists to
+	// prevent a single connection from causing a denial of service attack
+	// with an unnecessarily large number of requests.
+	maxConcurrentClientRequests = 20
+
+	// maxUnhandledNotifications is the maximum number of still marshaled
+	// and unhandled notifications.  If this limit is reached, the
+	// btcrpcclient client notification handlers will begin blocking until
+	// an unhandled notification is processed.
+	maxUnhandledNotifications = 50
+)
+
+type notificationChan chan notification
+
+type blockSummary struct {
+	hash   *btcwire.ShaHash
+	height int32
 }
 
-// ErrBtcdDisconnectedRaw is the raw JSON encoding of ErrBtcdDisconnected.
-var ErrBtcdDisconnectedRaw = json.RawMessage(`{"code":-1,"message":"btcd disconnected"}`)
-
-// BtcdRPCConn is a type managing a client connection to a btcd RPC server
-// over websockets.
-type BtcdRPCConn struct {
-	ws         *websocket.Conn
-	addRequest chan *AddRPCRequest
-	closed     chan struct{}
+type acceptedTx struct {
+	tx    *btcutil.Tx
+	block *btcws.BlockDetails // nil if unmined
 }
 
-// Ensure that BtcdRPCConn can be used as an RPCConn.
-var _ ServerConn = &BtcdRPCConn{}
-
-// NewBtcdRPCConn creates a new RPC connection from a btcd websocket
-// connection to btcd.
-func NewBtcdRPCConn(ws *websocket.Conn) *BtcdRPCConn {
-	conn := &BtcdRPCConn{
-		ws:         ws,
-		addRequest: make(chan *AddRPCRequest),
-		closed:     make(chan struct{}),
+// Notification types.  These are defined here and processed from from reading
+// a notificationChan to avoid handling these notifications directly in
+// btcrpcclient callbacks, which isn't very go-like and doesn't allow
+// blocking client calls.
+type (
+	// Container type for any notification.
+	notification interface {
+		handleNotification() error
 	}
-	return conn
+
+	blockConnected    blockSummary
+	blockDisconnected blockSummary
+	recvTx            acceptedTx
+	redeemingTx       acceptedTx
+	rescanProgress    int32
+)
+
+func (c notificationChan) onBlockConnected(hash *btcwire.ShaHash, height int32) {
+	c <- (blockConnected)(blockSummary{hash, height})
 }
 
-// SendRequest sends an RPC request and returns a channel to read the response's
-// result and error.  Part of the RPCConn interface.
-func (btcd *BtcdRPCConn) SendRequest(request *ServerRequest) chan RawRPCResponse {
-	select {
-	case <-btcd.closed:
-		// The connection has closed, so instead of adding and sending
-		// a request, return a channel that just replies with the
-		// error for a disconnected btcd.
-		responseChan := make(chan RawRPCResponse, 1)
-		responseChan <- RawRPCResponse{Error: &ErrBtcdDisconnectedRaw}
-		return responseChan
+func (c notificationChan) onBlockDisconnected(hash *btcwire.ShaHash, height int32) {
+	c <- (blockDisconnected)(blockSummary{hash, height})
+}
 
-	default:
-		addRequest := &AddRPCRequest{
-			Request:      request,
-			ResponseChan: make(chan chan RawRPCResponse, 1),
+func (c notificationChan) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
+	c <- recvTx{tx, block}
+}
+
+func (c notificationChan) onRedeemingTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
+	c <- redeemingTx{tx, block}
+}
+
+func (c notificationChan) onRescanProgress(height int32) {
+	c <- rescanProgress(height)
+}
+
+func (n blockConnected) handleNotification() error {
+	// Update the blockstamp for the newly-connected block.
+	bs := &wallet.BlockStamp{
+		Height: n.height,
+		Hash:   *n.hash,
+	}
+	curBlock.Lock()
+	curBlock.BlockStamp = *bs
+	curBlock.Unlock()
+
+	// btcd notifies btcwallet about transactions first, and then sends
+	// the new block notification.  New balance notifications for txs
+	// in blocks are therefore sent here after all tx notifications
+	// have arrived and finished being processed by the handlers.
+	workers := NotifyBalanceRequest{
+		block: *n.hash,
+		wg:    make(chan *sync.WaitGroup),
+	}
+	NotifyBalanceSyncerChans.access <- workers
+	if wg := <-workers.wg; wg != nil {
+		wg.Wait()
+		NotifyBalanceSyncerChans.remove <- *n.hash
+	}
+	AcctMgr.BlockNotify(bs)
+
+	// Pass notification to frontends too.
+	if server != nil {
+		// TODO: marshaling should be perfomred by the server, and
+		// sent only to client that have requested the notification.
+		marshaled, err := n.MarshalJSON()
+		// The parsed notification is expected to be marshalable.
+		if err != nil {
+			panic(err)
 		}
-		btcd.addRequest <- addRequest
-		return <-addRequest.ResponseChan
+		server.broadcasts <- marshaled
 	}
+
+	return nil
 }
 
-// Connected returns whether the connection remains established to the RPC
-// server.
+// MarshalJSON creates the JSON encoding of the chain notification to pass
+// to any connected wallet clients.  This should never error.
+func (n blockConnected) MarshalJSON() ([]byte, error) {
+	nn := btcws.NewBlockConnectedNtfn(n.hash.String(), n.height)
+	return nn.MarshalJSON()
+}
+
+func (n blockDisconnected) handleNotification() error {
+	// Rollback Utxo and Tx data stores.
+	if err := AcctMgr.Rollback(n.height, n.hash); err != nil {
+		return err
+	}
+
+	// Pass notification to frontends too.
+	if server != nil {
+		// TODO: marshaling should be perfomred by the server, and
+		// sent only to client that have requested the notification.
+		marshaled, err := n.MarshalJSON()
+		// A btcws.BlockDisconnectedNtfn is expected to marshal without error.
+		// If it does, it indicates that one of its struct fields is of a
+		// non-marshalable type.
+		if err != nil {
+			panic(err)
+		}
+		server.broadcasts <- marshaled
+	}
+
+	return nil
+}
+
+// MarshalJSON creates the JSON encoding of the chain notification to pass
+// to any connected wallet clients.  This should never error.
+func (n blockDisconnected) MarshalJSON() ([]byte, error) {
+	nn := btcws.NewBlockDisconnectedNtfn(n.hash.String(), n.height)
+	return nn.MarshalJSON()
+}
+
+func parseBlock(block *btcws.BlockDetails) (*txstore.Block, int, error) {
+	if block == nil {
+		return nil, btcutil.TxIndexUnknown, nil
+	}
+	blksha, err := btcwire.NewShaHashFromStr(block.Hash)
+	if err != nil {
+		return nil, btcutil.TxIndexUnknown, err
+	}
+	b := &txstore.Block{
+		Height: block.Height,
+		Hash:   *blksha,
+		Time:   time.Unix(block.Time, 0),
+	}
+	return b, block.Index, nil
+}
+
+func (n recvTx) handleNotification() error {
+	block, txIdx, err := parseBlock(n.block)
+	if err != nil {
+		return InvalidNotificationError{err}
+	}
+	n.tx.SetIndex(txIdx)
+
+	bs, err := GetCurBlock()
+	if err != nil {
+		return fmt.Errorf("cannot get current block: %v", err)
+	}
+
+	// For transactions originating from this wallet, the sent tx history should
+	// be recorded before the received history.  If wallet created this tx, wait
+	// for the sent history to finish being recorded before continuing.
+	//
+	// TODO(jrick) this is wrong due to tx malleability.  Cannot safely use the
+	// txsha as an identifier.
+	req := SendTxHistSyncRequest{
+		txsha:    *n.tx.Sha(),
+		response: make(chan SendTxHistSyncResponse),
+	}
+	SendTxHistSyncChans.access <- req
+	resp := <-req.response
+	if resp.ok {
+		// Wait until send history has been recorded.
+		<-resp.c
+		SendTxHistSyncChans.remove <- *n.tx.Sha()
+	}
+
+	// For every output, find all accounts handling that output address (if any)
+	// and record the received txout.
+	for outIdx, txout := range n.tx.MsgTx().TxOut {
+		var accounts []*Account
+		// Errors don't matter here.  If addrs is nil, the range below
+		// does nothing.
+		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript,
+			activeNet.Params)
+		for _, addr := range addrs {
+			a, err := AcctMgr.AccountByAddress(addr)
+			if err != nil {
+				continue
+			}
+			accounts = append(accounts, a)
+		}
+
+		for _, a := range accounts {
+			txr, err := a.TxStore.InsertTx(n.tx, block)
+			if err != nil {
+				return err
+			}
+			cred, err := txr.AddCredit(uint32(outIdx), false)
+			if err != nil {
+				return err
+			}
+			AcctMgr.ds.ScheduleTxStoreWrite(a)
+
+			// Notify frontends of tx.  If the tx is unconfirmed, it is always
+			// notified and the outpoint is marked as notified.  If the outpoint
+			// has already been notified and is now in a block, a txmined notifiction
+			// should be sent once to let frontends that all previous send/recvs
+			// for this unconfirmed tx are now confirmed.
+			op := *cred.OutPoint()
+			previouslyNotifiedReq := NotifiedRecvTxRequest{
+				op:       op,
+				response: make(chan NotifiedRecvTxResponse),
+			}
+			NotifiedRecvTxChans.access <- previouslyNotifiedReq
+			if <-previouslyNotifiedReq.response {
+				NotifiedRecvTxChans.remove <- op
+			} else {
+				// Notify frontends of new recv tx and mark as notified.
+				NotifiedRecvTxChans.add <- op
+
+				ltr, err := cred.ToJSON(a.Name(), bs.Height, a.Wallet.Net())
+				if err != nil {
+					return err
+				}
+				server.NotifyNewTxDetails(a.Name(), ltr)
+			}
+
+			// Notify frontends of new account balance.
+			confirmed := a.CalculateBalance(1)
+			unconfirmed := a.CalculateBalance(0) - confirmed
+			server.NotifyWalletBalance(a.name, confirmed)
+			server.NotifyWalletBalanceUnconfirmed(a.name, unconfirmed)
+		}
+	}
+
+	return nil
+}
+
+func (n redeemingTx) handleNotification() error {
+	block, txIdx, err := parseBlock(n.block)
+	if err != nil {
+		return InvalidNotificationError{err}
+	}
+	n.tx.SetIndex(txIdx)
+	return AcctMgr.RecordSpendingTx(n.tx, block)
+}
+
+func (n rescanProgress) handleNotification() error {
+	AcctMgr.rm.MarkProgress(n)
+	return nil
+}
+
+type rpcClient struct {
+	*btcrpcclient.Client // client to btcd
+	chainNotifications   notificationChan
+	wg                   sync.WaitGroup
+}
+
+func newRPCClient(certs []byte) (*rpcClient, error) {
+	ntfns := make(notificationChan, maxUnhandledNotifications)
+	client := rpcClient{
+		chainNotifications: ntfns,
+	}
+	initializedClient := make(chan struct{})
+	ntfnCallbacks := btcrpcclient.NotificationHandlers{
+		OnClientConnected: func() {
+			log.Info("Established connection to btcd")
+			<-initializedClient
+
+			// nil client to broadcast to all connected clients
+			server.NotifyConnectionStatus(nil)
+
+			err := client.Handshake()
+			if err != nil {
+				log.Errorf("Cannot complete handshake: %v", err)
+				client.Stop()
+			}
+		},
+		OnBlockConnected:    ntfns.onBlockConnected,
+		OnBlockDisconnected: ntfns.onBlockDisconnected,
+		OnRecvTx:            ntfns.onRecvTx,
+		OnRedeemingTx:       ntfns.onRedeemingTx,
+		OnRescanProgress:    ntfns.onRescanProgress,
+	}
+	conf := btcrpcclient.ConnConfig{
+		Host:         cfg.RPCConnect,
+		Endpoint:     "ws",
+		User:         cfg.BtcdUsername,
+		Pass:         cfg.BtcdPassword,
+		Certificates: certs,
+	}
+	c, err := btcrpcclient.New(&conf, &ntfnCallbacks)
+	if err != nil {
+		return nil, err
+	}
+	client.Client = c
+	close(initializedClient)
+	return &client, nil
+}
+
+func (c *rpcClient) Start() {
+	c.wg.Add(1)
+	go c.handleNotifications()
+}
+
+func (c *rpcClient) Stop() {
+	if !c.Client.Disconnected() {
+		log.Warn("Disconnecting chain server client connection")
+		c.Client.Shutdown()
+	}
+	close(c.chainNotifications)
+}
+
+func (c *rpcClient) WaitForShutdown() {
+	c.Client.WaitForShutdown()
+	c.wg.Wait()
+}
+
+func (c *rpcClient) handleNotifications() {
+	for n := range c.chainNotifications {
+		AcctMgr.Grab()
+		err := n.handleNotification()
+		if err != nil {
+			switch e := err.(type) {
+			case InvalidNotificationError:
+				log.Warnf("Ignoring invalid notification: %v", e)
+			default:
+				log.Errorf("Cannot handle notification: %v", e)
+			}
+		}
+		AcctMgr.Release()
+	}
+	c.wg.Done()
+}
+
+// Handshake first checks that the websocket connection between btcwallet and
+// btcd is valid, that is, that there are no mismatching settings between
+// the two processes (such as running on different Bitcoin networks).  If the
+// sanity checks pass, all wallets are set to be tracked against chain
+// notifications from this btcd connection.
 //
-// This function probably should be removed, as any checks for confirming
-// the connection are no longer valid after the check and may result in
-// races.
-func (btcd *BtcdRPCConn) Connected() bool {
-	select {
-	case <-btcd.closed:
-		return false
-
-	default:
-		return true
-	}
-}
-
-// Close forces closing the current btcd connection.
-func (btcd *BtcdRPCConn) Close() {
-	select {
-	case <-btcd.closed:
-	default:
-		close(btcd.closed)
-	}
-}
-
-// AddRPCRequest is used to add an RPCRequest to the pool of requests
-// being manaaged by a btcd RPC connection.
-type AddRPCRequest struct {
-	Request      *ServerRequest
-	ResponseChan chan chan RawRPCResponse
-}
-
-// send performs the actual send of the marshaled request over the btcd
-// websocket connection.
-func (btcd *BtcdRPCConn) send(rpcrequest *ServerRequest) error {
-	// btcjson.Cmds define their own MarshalJSON which returns an error
-	// to satisify the json.Marshaler interface, but should never error.
-	// If an error does occur, it is due to a struct containing a type
-	// that is not marshalable, so panic here rather than silently
-	// ignoring it.
-	mrequest, err := rpcrequest.request.MarshalJSON()
+// TODO(jrick): Track and Rescan commands should be replaced with a
+// single TrackSince function (or similar) which requests address
+// notifications and performs the rescan since some block height.
+func (c *rpcClient) Handshake() error {
+	net, err := c.GetCurrentNet()
 	if err != nil {
-		panic(err)
+		return err
 	}
-	return websocket.Message.Send(btcd.ws, mrequest)
-}
+	if net != activeNet.Net {
+		return ErrMismatchedNets
+	}
 
-// Start starts the goroutines required to send RPC requests and listen for
-// replies.
-func (btcd *BtcdRPCConn) Start() {
-	done := btcd.closed
-	responses := make(chan RawRPCResponse)
+	// Request notifications for connected and disconnected blocks.
+	if err := c.NotifyBlocks(); err != nil {
+		return err
+	}
 
-	// Maintain a map of JSON IDs to RPCRequests currently being waited on.
-	go func() {
-		m := make(map[uint64]*ServerRequest)
-		for {
-			select {
-			case addrequest := <-btcd.addRequest:
-				rpcrequest := addrequest.Request
-				m[rpcrequest.request.Id().(uint64)] = rpcrequest
+	// Get current best block.  If this is before than the oldest
+	// saved block hash, assume that this btcd instance is not yet
+	// synced up to a previous btcd that was last used with this
+	// wallet.
+	bs, err := GetCurBlock()
+	if err != nil {
+		return fmt.Errorf("cannot get best block: %v", err)
+	}
+	if server != nil {
+		server.NotifyNewBlockChainHeight(&bs)
+		server.NotifyBalances(nil)
+	}
 
-				if err := btcd.send(rpcrequest); err != nil {
-					// Connection lost.
-					log.Infof("Cannot complete btcd websocket send: %v",
-						err)
-					if err := btcd.ws.Close(); err != nil {
-						log.Warnf("Cannot close btcd "+
-							"websocket connection: %v", err)
-					}
-					close(done)
-				}
+	// Get default account.  Only the default account is used to
+	// track recently-seen blocks.
+	a, err := AcctMgr.Account("")
+	if err != nil {
+		// No account yet is not a handshake error, but means our
+		// handshake is done.
+		return nil
+	}
 
-				addrequest.ResponseChan <- rpcrequest.response
+	// TODO(jrick): if height is less than the earliest-saved block
+	// height, should probably wait for btcd to catch up.
 
-			case rawResponse, ok := <-responses:
-				if !ok {
-					responses = nil
-					close(done)
-					break
-				}
-				rpcrequest, ok := m[*rawResponse.Id]
-				if !ok {
-					log.Warnf("Received unexpected btcd response")
-					continue
-				}
-				delete(m, *rawResponse.Id)
+	// Check that there was not any reorgs done since last connection.
+	// If so, rollback and rescan to catch up.
+	it := a.Wallet.NewIterateRecentBlocks()
+	for cont := it != nil; cont; cont = it.Prev() {
+		bs := it.BlockStamp()
+		log.Debugf("Checking for previous saved block with height %v hash %v",
+			bs.Height, bs.Hash)
 
-				rpcrequest.response <- rawResponse
+		if _, err := c.GetBlock(&bs.Hash); err != nil {
+			continue
+		}
 
-			case <-done:
-				resp := RawRPCResponse{Error: &ErrBtcdDisconnectedRaw}
-				for _, request := range m {
-					request.response <- resp
-				}
-				return
+		log.Debug("Found matching block.")
+
+		// If we had to go back to any previous blocks (it.Next
+		// returns true), then rollback the next and all child blocks.
+		// This rollback is done here instead of in the blockMissing
+		// check above for each removed block because Rollback will
+		// try to write new tx and utxo files on each rollback.
+		if it.Next() {
+			bs := it.BlockStamp()
+			err := AcctMgr.Rollback(bs.Height, &bs.Hash)
+			if err != nil {
+				return err
 			}
 		}
-	}()
 
-	// Listen for replies/notifications from btcd, and decide how to handle them.
-	go func() {
-		// Idea: instead of reading btcd messages from just one websocket
-		// connection, maybe use two so the same connection isn't used
-		// for both notifications and responses?  Should make handling
-		// must faster as unnecessary unmarshal attempts could be avoided.
+		// Set default account to be marked in sync with the current
+		// blockstamp.  This invalidates the iterator.
+		a.Wallet.SetSyncedWith(bs)
 
-		for {
-			var m string
-			if err := websocket.Message.Receive(btcd.ws, &m); err != nil {
-				// Log warning if btcd did not disconnect.
-				if err != io.EOF {
-					log.Infof("Cannot receive btcd websocket message: %v",
-						err)
-				}
-				if err := btcd.ws.Close(); err != nil {
-					log.Warnf("Cannot close btcd "+
-						"websocket connection: %v", err)
-				}
-				close(responses)
-				return
-			}
-
-			// Try notifications (requests with nil ids) first.
-			n, err := unmarshalNotification(m)
-			if err == nil {
-				svrNtfns <- n
-				continue
-			}
-
-			// Must be a response.
-			r, err := unmarshalResponse(m)
-			if err == nil {
-				responses <- r
-				continue
-			}
-
-			// Not sure what was received but it isn't correct.
-			log.Warnf("Received invalid message from btcd")
+		// Begin tracking wallets against this btcd instance.
+		AcctMgr.Track()
+		if err := AcctMgr.RescanActiveAddresses(); err != nil {
+			return err
 		}
-	}()
-}
+		// TODO: Only begin tracking new unspent outputs as a result
+		// of the rescan.  This is also pretty racy, as a new block
+		// could arrive between rescan and by the time the new outpoint
+		// is added to btcd's websocket's unspent output set.
+		AcctMgr.Track()
 
-// unmarshalResponse attempts to unmarshal a marshaled JSON-RPC response.
-func unmarshalResponse(s string) (RawRPCResponse, error) {
-	var r RawRPCResponse
-	if err := json.Unmarshal([]byte(s), &r); err != nil {
-		return r, err
+		// (Re)send any unmined transactions to btcd in case of a btcd restart.
+		AcctMgr.ResendUnminedTxs()
+
+		// Get current blockchain height and best block hash.
+		return nil
 	}
 
-	// Check for a valid ID.
-	if r.Id == nil {
-		return r, errors.New("id is null")
+	// Iterator was invalid (wallet has never been synced) or there was a
+	// huge chain fork + reorg (more than 20 blocks).
+	AcctMgr.Track()
+	if err := AcctMgr.RescanActiveAddresses(); err != nil {
+		return err
 	}
-	return r, nil
-}
-
-// unmarshalNotification attempts to unmarshal a marshaled JSON-RPC
-// notification (Request with a nil or no ID).
-func unmarshalNotification(s string) (btcjson.Cmd, error) {
-	req, err := btcjson.ParseMarshaledCmd([]byte(s))
-	if err != nil {
-		return nil, err
-	}
-
-	if req.Id() != nil {
-		return nil, errors.New("id is non-nil")
-	}
-
-	return req, nil
-}
-
-// GetBestBlock gets both the block height and hash of the best block
-// in the main chain.
-func GetBestBlock(rpc ServerConn) (*btcws.GetBestBlockResult, error) {
-	cmd := btcws.NewGetBestBlockCmd(<-NewJSONID)
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-
-	var resultData btcws.GetBestBlockResult
-	if _, err := response.FinishUnmarshal(&resultData); err != nil {
-		return nil, err
-	}
-	return &resultData, nil
-}
-
-// GetBlock requests details about a block with the given hash.
-func GetBlock(rpc ServerConn, blockHash string) (*btcjson.BlockResult, error) {
-	// NewGetBlockCmd should never fail with no optargs.  If this does fail,
-	// panic now rather than later.
-	cmd, err := btcjson.NewGetBlockCmd(<-NewJSONID, blockHash)
-	if err != nil {
-		panic(err)
-	}
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-
-	var resultData btcjson.BlockResult
-	if _, err := response.FinishUnmarshal(&resultData); err != nil {
-		return nil, err
-	}
-	return &resultData, nil
-}
-
-// GetCurrentNet requests the network a bitcoin RPC server is running on.
-func GetCurrentNet(rpc ServerConn) (btcwire.BitcoinNet, error) {
-	cmd := btcws.NewGetCurrentNetCmd(<-NewJSONID)
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-
-	var resultData uint32
-	if _, err := response.FinishUnmarshal(&resultData); err != nil {
-		return 0, err
-	}
-	return btcwire.BitcoinNet(resultData), nil
-}
-
-// NotifyBlocks requests blockconnected and blockdisconnected notifications.
-func NotifyBlocks(rpc ServerConn) error {
-	cmd := btcws.NewNotifyBlocksCmd(<-NewJSONID)
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-	_, err := response.FinishUnmarshal(nil)
-	return err
-}
-
-// NotifyReceived requests notifications for new transactions that spend
-// to any of the addresses in addrs.
-func NotifyReceived(rpc ServerConn, addrs []string) error {
-	cmd := btcws.NewNotifyReceivedCmd(<-NewJSONID, addrs)
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-	_, err := response.FinishUnmarshal(nil)
-	return err
-}
-
-// NotifySpent requests notifications for when a transaction is processed which
-// spends op.
-func NotifySpent(rpc ServerConn, outpoints []*btcwire.OutPoint) error {
-	ops := make([]btcws.OutPoint, 0, len(outpoints))
-	for _, op := range outpoints {
-		ops = append(ops, *btcws.NewOutPointFromWire(op))
-	}
-	cmd := btcws.NewNotifySpentCmd(<-NewJSONID, ops)
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-	_, err := response.FinishUnmarshal(nil)
-	return err
-}
-
-// Rescan requests a blockchain rescan for transactions to any number of
-// addresses and notifications to inform wallet about such transactions.
-func Rescan(rpc ServerConn, beginBlock int32, addrs []string,
-	outpoints []*btcwire.OutPoint) error {
-
-	ops := make([]btcws.OutPoint, 0, len(outpoints))
-	for _, op := range outpoints {
-		ops = append(ops, *btcws.NewOutPointFromWire(op))
-	}
-	// NewRescanCmd should never fail with no optargs.  If this does fail,
-	// panic now rather than later.
-	cmd, err := btcws.NewRescanCmd(<-NewJSONID, beginBlock, addrs, ops)
-	if err != nil {
-		panic(err)
-	}
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-	_, err = response.FinishUnmarshal(nil)
-	return err
-}
-
-// SendRawTransaction sends a hex-encoded transaction for relay.
-func SendRawTransaction(rpc ServerConn, hextx string) (txid string, err error) {
-	// NewSendRawTransactionCmd should never fail.  In the exceptional case
-	// where it does, panic here rather than later.
-	cmd, err := btcjson.NewSendRawTransactionCmd(<-NewJSONID, hextx)
-	if err != nil {
-		panic(err)
-	}
-	response := <-rpc.SendRequest(NewServerRequest(cmd))
-
-	var resultData string
-	_, err = response.FinishUnmarshal(&resultData)
-	return resultData, err
-}
-
-// GetRawTransaction returns a future representing a pending GetRawTransaction
-// command for txsha.. When the result of the request is required it may be
-// collected with GetRawTRansactionAsyncResult.
-func GetRawTransactionAsync(rpc ServerConn, txsha *btcwire.ShaHash) chan RawRPCResponse {
-	// NewGetRawTransactionCmd should never fail with no optargs.  If this
-	// does fail, panic now rather than later.
-	cmd, err := btcjson.NewGetRawTransactionCmd(<-NewJSONID, txsha.String())
-	if err != nil {
-		panic(err)
-	}
-	return rpc.SendRequest(NewServerRequest(cmd))
-}
-
-// GetRawTransactionAsyncResult waits for the pending command in request -
-// the reqsult of a previous GetRawTransactionAsync() call - and returns either
-// the requested transaction, or an error.
-func GetRawTransactionAsyncResult(request chan RawRPCResponse) (*btcutil.Tx, error) {
-	response := <-request
-
-	var resultData string
-	_, err := response.FinishUnmarshal(&resultData)
-	if err != nil {
-		return nil, err
-	}
-	serializedTx, err := hex.DecodeString(resultData)
-	if err != nil {
-		return nil, btcjson.ErrDecodeHexString
-	}
-	utx, err := btcutil.NewTxFromBytes(serializedTx)
-	if err != nil {
-		return nil, btcjson.ErrDeserialization
-	}
-	return utx, nil
-}
-
-// GetRawTransaction sends the non-verbose version of a getrawtransaction
-// request to receive the serialized transaction referenced by txsha.  If
-// successful, the transaction is decoded and returned as a btcutil.Tx.
-func GetRawTransaction(rpc ServerConn, txsha *btcwire.ShaHash) (*btcutil.Tx, error) {
-	resp := GetRawTransactionAsync(rpc, txsha)
-	return GetRawTransactionAsyncResult(resp)
+	// TODO: only begin tracking new unspent outputs as a result of the
+	// rescan.  This is also racy (see comment for second Track above).
+	AcctMgr.Track()
+	AcctMgr.ResendUnminedTxs()
+	return nil
 }

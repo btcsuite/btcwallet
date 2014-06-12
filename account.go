@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
@@ -43,7 +42,7 @@ type Account struct {
 func (a *Account) Lock() error {
 	switch err := a.Wallet.Lock(); err {
 	case nil:
-		NotifyWalletLockStateChange(a.Name(), true)
+		server.NotifyWalletLockStateChange(a.Name(), true)
 		return nil
 
 	case wallet.ErrWalletLocked:
@@ -61,7 +60,7 @@ func (a *Account) Unlock(passphrase []byte) error {
 		return err
 	}
 
-	NotifyWalletLockStateChange(a.Name(), false)
+	server.NotifyWalletLockStateChange(a.Name(), false)
 	return nil
 }
 
@@ -436,15 +435,24 @@ func (a *Account) exportBase64() (map[string]string, error) {
 // Track requests btcd to send notifications of new transactions for
 // each address stored in a wallet.
 func (a *Account) Track() {
-	// Request notifications for transactions sending to all wallet
-	// addresses.
-	addrs := a.ActiveAddresses()
-	addrstrs := make([]string, 0, len(addrs))
-	for addr := range addrs {
-		addrstrs = append(addrstrs, addr.EncodeAddress())
+	client, err := accessClient()
+	if err != nil {
+		log.Errorf("No chain server client to track addresses.")
+		return
 	}
 
-	if err := NotifyReceived(CurrentServerConn(), addrstrs); err != nil {
+	// Request notifications for transactions sending to all wallet
+	// addresses.
+	//
+	// TODO: return as slice? (doesn't have to be ordered, or
+	// SortedActiveAddresses would be fine.)
+	addrMap := a.ActiveAddresses()
+	addrs := make([]btcutil.Address, 0, len(addrMap))
+	for addr := range addrMap {
+		addrs = append(addrs, addr)
+	}
+
+	if err := client.NotifyReceived(addrs); err != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}
 
@@ -492,25 +500,23 @@ func (a *Account) RescanActiveJob() (*RescanJob, error) {
 // credits that are not known to have been mined into a block, and attempts
 // to send each to the chain server for relay.
 func (a *Account) ResendUnminedTxs() {
+	client, err := accessClient()
+	if err != nil {
+		log.Errorf("No chain server client to resend txs.")
+		return
+	}
+
 	txs := a.TxStore.UnminedDebitTxs()
-	txBuf := bytes.Buffer{}
 	for _, tx := range txs {
-		if err := tx.MsgTx().Serialize(&txBuf); err != nil {
-			// Writing to a bytes.Buffer panics for OOM, and should
-			// not return any other errors.
-			panic(err)
-		}
-		hextx := hex.EncodeToString(txBuf.Bytes())
-		txsha, err := SendRawTransaction(CurrentServerConn(), hextx)
+		txsha, err := client.SendRawTransaction(tx.MsgTx(), false)
 		if err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
 			log.Warnf("Could not resend transaction %v: %v",
 				txsha, err)
-		} else {
-			log.Debugf("Resent unmined transaction %v", txsha)
+			continue
 		}
-		txBuf.Reset()
+		log.Debugf("Resent unmined transaction %v", txsha)
 	}
 }
 
@@ -564,7 +570,13 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	AcctMgr.MarkAddressForAccount(addr, a)
 
 	// Request updates from btcd for new transactions sent to this address.
-	a.ReqNewTxsForAddress(addr)
+	client, err := accessClient()
+	if err != nil {
+		return nil, err
+	}
+	if err := client.NotifyReceived([]btcutil.Address{addr}); err != nil {
+		return nil, err
+	}
 
 	return addr, nil
 }
@@ -593,7 +605,13 @@ func (a *Account) NewChangeAddress() (btcutil.Address, error) {
 	AcctMgr.MarkAddressForAccount(addr, a)
 
 	// Request updates from btcd for new transactions sent to this address.
-	a.ReqNewTxsForAddress(addr)
+	client, err := accessClient()
+	if err != nil {
+		return nil, err
+	}
+	if err := client.NotifyReceived([]btcutil.Address{addr}); err != nil {
+		return nil, err
+	}
 
 	return addr, nil
 }
@@ -612,39 +630,23 @@ func (a *Account) RecoverAddresses(n int) error {
 	if err != nil {
 		return err
 	}
-	addrStrs := make([]string, 0, len(addrs))
-	for i := range addrs {
-		addrStrs = append(addrStrs, addrs[i].EncodeAddress())
-	}
 
 	// Run a goroutine to rescan blockchain for recovered addresses.
-	go func(addrs []string) {
-		err := Rescan(CurrentServerConn(), lastInfo.FirstBlock(),
-			addrs, nil)
+	go func() {
+		client, err := accessClient()
+		if err != nil {
+			log.Errorf("Cannot access chain server client to " +
+				"rescan recovered addresses.")
+			return
+		}
+		err = client.Rescan(lastInfo.FirstBlock(), addrs, nil)
 		if err != nil {
 			log.Errorf("Rescanning for recovered addresses "+
 				"failed: %v", err)
 		}
-	}(addrStrs)
+	}()
 
 	return nil
-}
-
-// ReqNewTxsForAddress sends a message to btcd to request tx updates
-// for addr for each new block that is added to the blockchain.
-func (a *Account) ReqNewTxsForAddress(addr btcutil.Address) {
-	// Only support P2PKH addresses currently.
-	apkh, ok := addr.(*btcutil.AddressPubKeyHash)
-	if !ok {
-		return
-	}
-
-	log.Debugf("Requesting notifications of TXs sending to address %v", apkh)
-
-	err := NotifyReceived(CurrentServerConn(), []string{apkh.EncodeAddress()})
-	if err != nil {
-		log.Error("Unable to request transaction updates for address.")
-	}
 }
 
 // ReqSpentUtxoNtfns sends a message to btcd to request updates for when
@@ -658,7 +660,13 @@ func ReqSpentUtxoNtfns(credits []*txstore.Credit) {
 		ops = append(ops, op)
 	}
 
-	if err := NotifySpent(CurrentServerConn(), ops); err != nil {
+	client, err := accessClient()
+	if err != nil {
+		log.Errorf("Cannot access chain server client to " +
+			"request spent output notifications.")
+		return
+	}
+	if err := client.NotifySpent(ops); err != nil {
 		log.Errorf("Cannot request notifications for spent outputs: %v",
 			err)
 	}
