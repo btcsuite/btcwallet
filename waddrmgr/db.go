@@ -302,17 +302,17 @@ func putWatchingOnly(tx walletdb.Tx, watchingOnly bool) error {
 	}
 
 	if err := bucket.Put(watchingOnlyName, []byte{encoded}); err != nil {
-		str := "failed to store wathcing only flag"
+		str := "failed to store watching only flag"
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil
 }
 
-// accountKey returns the account key to use in the database for a given account
-// number.
-func accountKey(account uint32) []byte {
+// uint32ToBytes converts a 32 bit unsigned integer into a 4-byte slice in
+// little-endian order: 1 -> [1 0 0 0].
+func uint32ToBytes(number uint32) []byte {
 	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, account)
+	binary.LittleEndian.PutUint32(buf, number)
 	return buf
 }
 
@@ -404,7 +404,6 @@ func deserializeBIP0044AccountRow(accountID []byte, row *dbAccountRow) (*dbBIP00
 func serializeBIP0044AccountRow(encryptedPubKey,
 	encryptedPrivKey []byte, nextExternalIndex, nextInternalIndex uint32,
 	name string) []byte {
-
 	// The serialized BIP0044 account raw data format is:
 	//   <encpubkeylen><encpubkey><encprivkeylen><encprivkey><nextextidx>
 	//   <nextintidx><namelen><name>
@@ -438,7 +437,7 @@ func serializeBIP0044AccountRow(encryptedPubKey,
 func fetchAccountInfo(tx walletdb.Tx, account uint32) (interface{}, error) {
 	bucket := tx.RootBucket().Bucket(acctBucketName)
 
-	accountID := accountKey(account)
+	accountID := uint32ToBytes(account)
 	serializedRow := bucket.Get(accountID)
 	if serializedRow == nil {
 		str := fmt.Sprintf("account %d not found", account)
@@ -465,7 +464,7 @@ func putAccountRow(tx walletdb.Tx, account uint32, row *dbAccountRow) error {
 	bucket := tx.RootBucket().Bucket(acctBucketName)
 
 	// Write the serialized value keyed by the account number.
-	err := bucket.Put(accountKey(account), serializeAccountRow(row))
+	err := bucket.Put(uint32ToBytes(account), serializeAccountRow(row))
 	if err != nil {
 		str := fmt.Sprintf("failed to store account %d", account)
 		return managerError(ErrDatabase, str, err)
@@ -781,12 +780,13 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 
 	// Update the next index for the appropriate internal or external
 	// branch.
-	accountID := accountKey(account)
+	accountID := uint32ToBytes(account)
 	bucket := tx.RootBucket().Bucket(acctBucketName)
 	serializedAccount := bucket.Get(accountID)
 
 	// Deserialize the account row.
 	row, err := deserializeAccountRow(accountID, serializedAccount)
+
 	if err != nil {
 		return err
 	}
@@ -1228,7 +1228,7 @@ func upgradeManager(namespace walletdb.Namespace) error {
 			return managerError(ErrDatabase, str, err)
 		}
 
-		// Save the most recent manager version if it isn't already
+		// Save the most recent database version if it isn't already
 		// there, otherwise keep track of it for potential upgrades.
 		verBytes := mainBucket.Get(mgrVersionName)
 		if verBytes == nil {

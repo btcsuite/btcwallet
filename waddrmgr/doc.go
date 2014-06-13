@@ -117,7 +117,7 @@ Requesting Existing Addresses
 
 In addition to generating new addresses, access to old addresses is often
 required.  Most notably, to sign transactions in order to redeem them.  The
-Address function provides this capability and returns a ManagedAddress
+Address function provides this capability and returns a ManagedAddress.
 
 Importing Addresses
 

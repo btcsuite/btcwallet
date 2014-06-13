@@ -47,7 +47,7 @@ func TstRunWithReplacedNewSecretKey(callback func()) {
 	callback()
 }
 
-// TstCheckPublicPassphrase return true if the provided public passphrase is
+// TstCheckPublicPassphrase returns true if the provided public passphrase is
 // correct for the manager.
 func (m *Manager) TstCheckPublicPassphrase(pubPassphrase []byte) bool {
 	secretKey := snacl.SecretKey{Key: &snacl.CryptoKey{}}
