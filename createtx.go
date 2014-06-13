@@ -75,40 +75,17 @@ func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 
 // selectInputs selects the minimum number possible of unspent
 // outputs to use to create a new transaction that spends amt satoshis.
-// Previous outputs with less than minconf confirmations are ignored.  btcout
-// is the total number of satoshis which would be spent by the combination
-// of all selected previous outputs.  err will equal ErrInsufficientFunds if there
-// are not enough unspent outputs to spend amt.
-func selectInputs(credits []*txstore.Credit, amt btcutil.Amount,
+// btcout is the total number of satoshis which would be spent by the
+// combination of all selected previous outputs.  err will equal
+// ErrInsufficientFunds if there are not enough unspent outputs to spend amt
+// amt.
+func selectInputs(eligible []*txstore.Credit, amt btcutil.Amount,
 	minconf int) (selected []*txstore.Credit, out btcutil.Amount, err error) {
-
-	bs, err := GetCurBlock()
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// Create list of eligible unspent previous outputs to use as tx
-	// inputs, and sort by the amount in reverse order so a minimum number
-	// of inputs is needed.
-	eligible := make([]*txstore.Credit, 0, len(credits))
-	for _, c := range credits {
-		if c.Confirmed(minconf, bs.Height) {
-			// Coinbase transactions must have have reached maturity
-			// before their outputs may be spent.
-			if c.IsCoinbase() {
-				target := btcchain.CoinbaseMaturity
-				if !c.Confirmed(target, bs.Height) {
-					continue
-				}
-			}
-			eligible = append(eligible, c)
-		}
-	}
-	sort.Sort(sort.Reverse(ByAmount(eligible)))
 
 	// Iterate throguh eligible transactions, appending to outputs and
 	// increasing out.  This is finished when out is greater than the
 	// requested amt to spend.
+	selected = make([]*txstore.Credit, 0, len(eligible))
 	for _, e := range eligible {
 		selected = append(selected, e)
 		out += e.Amount()
@@ -184,6 +161,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	if err != nil {
 		return nil, err
 	}
+
 	// Filter out unspendable outputs, that is, remove those that (at this
 	// time) are not P2PKH outputs.  Other inputs must be manually included
 	// in transactions and sent (for example, using createrawtransaction,
@@ -192,12 +170,27 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	for i := range unspent {
 		switch btcscript.GetScriptClass(unspent[i].TxOut().PkScript) {
 		case btcscript.PubKeyHashTy:
+			if !unspent[i].Confirmed(minconf, bs.Height) {
+				continue
+			}
+			// Coinbase transactions must have have reached maturity
+			// before their outputs may be spent.
+			if unspent[i].IsCoinbase() {
+				target := btcchain.CoinbaseMaturity
+				if !unspent[i].Confirmed(target, bs.Height) {
+					continue
+				}
+			}
 			eligible = append(eligible, unspent[i])
 		}
 	}
 
+	// Sort eligible inputs, as selectInputs expects these to be sorted
+	// by amount in reverse order.
+	sort.Sort(sort.Reverse(ByAmount(eligible)))
+
 	var selectedInputs []*txstore.Credit
-	// These are nil/zeroed until a change address is needed, and reused
+	// changeAddr is nil/zeroed until a change address is needed, and reused
 	// again in case a change utxo has already been chosen.
 	var changeAddr btcutil.Address
 
