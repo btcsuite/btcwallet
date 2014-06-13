@@ -1322,10 +1322,10 @@ func (s *Store) Records() (records []*TxRecord) {
 
 	// Unconfirmed records are saved unsorted, and must be sorted by
 	// received date on the fly.
-	unconfirmed := make([]*TxRecord, len(s.unconfirmed.txs))
+	unconfirmed := make([]*TxRecord, 0, len(s.unconfirmed.txs))
 	for _, r := range s.unconfirmed.txs {
 		key := BlockTxKey{BlockHeight: -1}
-		unconfirmed = append(records, &TxRecord{key, r, s})
+		unconfirmed = append(unconfirmed, &TxRecord{key, r, s})
 	}
 	sort.Sort(byReceiveDate(unconfirmed))
 	records = append(records, unconfirmed...)
