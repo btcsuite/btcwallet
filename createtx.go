@@ -184,6 +184,17 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	if err != nil {
 		return nil, err
 	}
+	// Filter out unspendable outputs, that is, remove those that (at this
+	// time) are not P2PKH outputs.  Other inputs must be manually included
+	// in transactions and sent (for example, using createrawtransaction,
+	// signrawtransaction, and sendrawtransaction).
+	eligible := make([]*txstore.Credit, 0, len(unspent))
+	for i := range unspent {
+		switch btcscript.GetScriptClass(unspent[i].TxOut().PkScript) {
+		case btcscript.PubKeyHashTy:
+			eligible = append(eligible, unspent[i])
+		}
+	}
 
 	var selectedInputs []*txstore.Credit
 	// These are nil/zeroed until a change address is needed, and reused
@@ -196,9 +207,9 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	for {
 		msgtx = txNoInputs.Copy()
 
-		// Select unspent outputs to be used in transaction based on the amount
+		// Select eligible outputs to be used in transaction based on the amount
 		// neededing to sent, and the current fee estimation.
-		inputs, btcin, err := selectInputs(unspent, amt+fee, minconf)
+		inputs, btcin, err := selectInputs(eligible, amt+fee, minconf)
 		if err != nil {
 			return nil, err
 		}
