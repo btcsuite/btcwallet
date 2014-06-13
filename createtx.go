@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	badrand "math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -204,9 +205,6 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 
 		// Check if there are leftover unspent outputs, and return coins back to
 		// a new address we own.
-		//
-		// TODO: change needs to be inserted into a random txout index, or else
-		// this is a privacy risk.
 		change := btcin - amt - fee
 		if change > 0 {
 			// Get a new change address if one has not already been found.
@@ -226,6 +224,12 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 				return nil, fmt.Errorf("cannot create txout script: %s", err)
 			}
 			msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
+
+			// Randomize index of the change output.
+			rng := badrand.New(badrand.NewSource(time.Now().UnixNano()))
+			r := rng.Int31n(int32(len(msgtx.TxOut))) // random index
+			c := len(msgtx.TxOut) - 1                // change index
+			msgtx.TxOut[r], msgtx.TxOut[c] = msgtx.TxOut[c], msgtx.TxOut[r]
 		}
 
 		// Selected unspent outputs become new transaction's inputs.
