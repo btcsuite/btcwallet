@@ -508,15 +508,15 @@ func (a *Account) ResendUnminedTxs() {
 
 	txs := a.TxStore.UnminedDebitTxs()
 	for _, tx := range txs {
-		txsha, err := client.SendRawTransaction(tx.MsgTx(), false)
+		_, err := client.SendRawTransaction(tx.MsgTx(), false)
 		if err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
 			log.Warnf("Could not resend transaction %v: %v",
-				txsha, err)
+				tx.Sha(), err)
 			continue
 		}
-		log.Debugf("Resent unmined transaction %v", txsha)
+		log.Debugf("Resent unmined transaction %v", tx.Sha())
 	}
 }
 
