@@ -31,6 +31,8 @@ func zero(b []byte) {
 }
 
 const (
+	// Expose secretbox's Overhead const here for convenience.
+	Overhead  = secretbox.Overhead
 	KeySize   = 32
 	NonceSize = 24
 	DefaultN  = 16384 // 2^14

@@ -46,6 +46,22 @@ func TestErrorCodeStringer(t *testing.T) {
 		{waddrmgr.ErrTooManyAddresses, "ErrTooManyAddresses"},
 		{waddrmgr.ErrWrongPassphrase, "ErrWrongPassphrase"},
 		{waddrmgr.ErrWrongNet, "ErrWrongNet"},
+
+		// The following error codes are defined in pool_error.go.
+		{waddrmgr.ErrSeriesStorage, "ErrSeriesStorage"},
+		{waddrmgr.ErrSeriesNotExists, "ErrSeriesNotExists"},
+		{waddrmgr.ErrSeriesAlreadyExists, "ErrSeriesAlreadyExists"},
+		{waddrmgr.ErrSeriesAlreadyEmpowered, "ErrSeriesAlreadyEmpowered"},
+		{waddrmgr.ErrKeyIsPrivate, "ErrKeyIsPrivate"},
+		{waddrmgr.ErrKeyNeuter, "ErrKeyNeuter"},
+		{waddrmgr.ErrKeyMismatch, "ErrKeyMismatch"},
+		{waddrmgr.ErrKeysPrivatePublicMismatch, "ErrKeysPrivatePublicMismatch"},
+		{waddrmgr.ErrKeyDuplicate, "ErrKeyDuplicate"},
+		{waddrmgr.ErrTooFewPublicKeys, "ErrTooFewPublicKeys"},
+		{waddrmgr.ErrVotingPoolNotExists, "ErrVotingPoolNotExists"},
+		{waddrmgr.ErrScriptCreation, "ErrScriptCreation"},
+		{waddrmgr.ErrTooManyReqSignatures, "ErrTooManyReqSignatures"},
+
 		{0xffff, "Unknown ErrorCode (65535)"},
 	}
 	t.Logf("Running %d tests", len(tests))

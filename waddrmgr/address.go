@@ -125,7 +125,7 @@ type managedAddress struct {
 	privKeyMutex     sync.Mutex
 }
 
-// Enforce mangedAddress satisfies the ManagedPubKeyAddress interface.
+// Enforce managedAddress satisfies the ManagedPubKeyAddress interface.
 var _ ManagedPubKeyAddress = (*managedAddress)(nil)
 
 // unlock decrypts and stores a pointer to the associated private key.  It will
