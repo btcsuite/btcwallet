@@ -1884,10 +1884,6 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amou
 		}
 	}
 
-	// Mark txid as having send history so handlers adding receive history
-	// wait until all send history has been written.
-	SendTxHistSyncChans.add <- *createdTx.tx.Sha()
-
 	// If a change address was added, sync wallet to disk and request
 	// transaction notifications to the change address.
 	if createdTx.changeAddr != nil {
@@ -1903,10 +1899,8 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amou
 
 	txSha, err := client.SendRawTransaction(createdTx.tx.MsgTx(), false)
 	if err != nil {
-		SendTxHistSyncChans.remove <- *createdTx.tx.Sha()
 		return nil, err
 	}
-
 	if err := handleSendRawTxReply(icmd, txSha, a, createdTx); err != nil {
 		return nil, err
 	}
@@ -1991,61 +1985,6 @@ func SendToAddress(icmd btcjson.Cmd) (interface{}, error) {
 	return sendPairs(cmd, "", pairs, 1)
 }
 
-// Channels to manage SendBeforeReceiveHistorySync.
-var SendTxHistSyncChans = struct {
-	add, done, remove chan btcwire.ShaHash
-	access            chan SendTxHistSyncRequest
-}{
-	add:    make(chan btcwire.ShaHash),
-	remove: make(chan btcwire.ShaHash),
-	done:   make(chan btcwire.ShaHash),
-	access: make(chan SendTxHistSyncRequest),
-}
-
-// SendTxHistSyncRequest requests a SendTxHistSyncResponse from
-// SendBeforeReceiveHistorySync.
-type SendTxHistSyncRequest struct {
-	txsha    btcwire.ShaHash
-	response chan SendTxHistSyncResponse
-}
-
-// SendTxHistSyncResponse is the response
-type SendTxHistSyncResponse struct {
-	c  chan struct{}
-	ok bool
-}
-
-// SendBeforeReceiveHistorySync manages a set of transaction hashes
-// created by this wallet.  For each newly added txsha, a channel is
-// created.  Once the send history has been recorded, the txsha should
-// be messaged across done, causing the internal channel to be closed.
-// Before receive history is recorded, access should be used to check
-// if there are or were any goroutines writing send history, and if
-// so, wait until the channel is closed after a done message.
-func SendBeforeReceiveHistorySync(add, done, remove chan btcwire.ShaHash,
-	access chan SendTxHistSyncRequest) {
-
-	m := make(map[btcwire.ShaHash]chan struct{})
-	for {
-		select {
-		case txsha := <-add:
-			m[txsha] = make(chan struct{})
-
-		case txsha := <-remove:
-			delete(m, txsha)
-
-		case txsha := <-done:
-			if c, ok := m[txsha]; ok {
-				close(c)
-			}
-
-		case req := <-access:
-			c, ok := m[req.txsha]
-			req.response <- SendTxHistSyncResponse{c: c, ok: ok}
-		}
-	}
-}
-
 func handleSendRawTxReply(icmd btcjson.Cmd, txSha *btcwire.ShaHash, a *Account, txInfo *CreatedTx) error {
 	// Add to transaction store.
 	txr, err := a.TxStore.InsertTx(txInfo.tx, nil)
@@ -2072,9 +2011,6 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txSha *btcwire.ShaHash, a *Account, 
 			server.NotifyNewTxDetails(a.Name(), details)
 		}
 	}
-
-	// Signal that received notifiations are ok to add now.
-	SendTxHistSyncChans.done <- *txInfo.tx.Sha()
 
 	// Disk sync tx and utxo stores.
 	if err := AcctMgr.ds.FlushAccount(a); err != nil {

@@ -182,10 +182,6 @@ func main() {
 	server.Start()
 
 	// Begin maintanence goroutines.
-	go SendBeforeReceiveHistorySync(SendTxHistSyncChans.add,
-		SendTxHistSyncChans.done,
-		SendTxHistSyncChans.remove,
-		SendTxHistSyncChans.access)
 	go StoreNotifiedMempoolRecvTxs(NotifiedRecvTxChans.add,
 		NotifiedRecvTxChans.remove,
 		NotifiedRecvTxChans.access)

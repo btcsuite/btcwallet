@@ -227,24 +227,6 @@ func (n recvTx) handleNotification() error {
 		return fmt.Errorf("cannot get current block: %v", err)
 	}
 
-	// For transactions originating from this wallet, the sent tx history should
-	// be recorded before the received history.  If wallet created this tx, wait
-	// for the sent history to finish being recorded before continuing.
-	//
-	// TODO(jrick) this is wrong due to tx malleability.  Cannot safely use the
-	// txsha as an identifier.
-	req := SendTxHistSyncRequest{
-		txsha:    *n.tx.Sha(),
-		response: make(chan SendTxHistSyncResponse),
-	}
-	SendTxHistSyncChans.access <- req
-	resp := <-req.response
-	if resp.ok {
-		// Wait until send history has been recorded.
-		<-resp.c
-		SendTxHistSyncChans.remove <- *n.tx.Sha()
-	}
-
 	AcctMgr.Grab()
 	defer AcctMgr.Release()
 
