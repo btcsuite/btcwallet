@@ -949,9 +949,15 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 }
 
 // RescanActiveAddresses begins a rescan for all active addresses for
-// each account.
-func (am *AccountManager) RescanActiveAddresses() error {
+// each account.  If markBestBlock is non-nil, the block described by
+// the blockstamp is used to mark the synced-with height of the wallet
+// just before the rescan is submitted and started.  This allows the
+// caller to mark the progress that the rescan is expected to complete
+// through, if the account otherwise does not contain any recently
+// seen blocks.
+func (am *AccountManager) RescanActiveAddresses(markBestBlock *wallet.BlockStamp) error {
 	var job *RescanJob
+	var defaultAcct *Account
 	for _, a := range am.AllAccounts() {
 		acctJob, err := a.RescanActiveJob()
 		if err != nil {
@@ -962,8 +968,16 @@ func (am *AccountManager) RescanActiveAddresses() error {
 		} else {
 			job.Merge(acctJob)
 		}
+
+		if a.name == "" {
+			defaultAcct = a
+		}
 	}
 	if job != nil {
+		if markBestBlock != nil {
+			defaultAcct.SetSyncedWith(markBestBlock)
+		}
+
 		// Submit merged job and block until rescan completes.
 		jobFinished := am.rm.SubmitJob(job)
 		<-jobFinished

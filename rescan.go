@@ -140,10 +140,6 @@ func (b *rescanBatch) merge(job *RescanJob) {
 	}
 }
 
-type rescanFinished struct {
-	error
-}
-
 // jobHandler runs the RescanManager's for-select loop to manage rescan jobs
 // and dispatch requests.
 func (m *RescanManager) jobHandler() {
@@ -224,11 +220,13 @@ func (m *RescanManager) rpcHandler() {
 		}
 		client, err := accessClient()
 		if err != nil {
-			m.status <- rescanFinished{err}
+			m.MarkFinished(rescanFinished{err})
 			return
 		}
 		err = client.Rescan(job.StartHeight, addrs, job.OutPoints)
-		m.status <- rescanFinished{err}
+		if err != nil {
+			m.MarkFinished(rescanFinished{err})
+		}
 	}
 }
 
@@ -267,4 +265,10 @@ func (m *RescanManager) SubmitJob(job *RescanJob) <-chan struct{} {
 // last processed by a running rescan.
 func (m *RescanManager) MarkProgress(height rescanProgress) {
 	m.status <- height
+}
+
+// MarkFinished messages the RescanManager that the currently running rescan
+// finished, or errored prematurely.
+func (m *RescanManager) MarkFinished(finished rescanFinished) {
+	m.status <- finished
 }

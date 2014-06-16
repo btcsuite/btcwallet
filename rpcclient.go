@@ -61,8 +61,6 @@ const (
 	maxUnhandledNotifications = 50
 )
 
-type notificationChan chan notification
-
 type blockSummary struct {
 	hash   *btcwire.ShaHash
 	height int32
@@ -87,8 +85,13 @@ type (
 	blockDisconnected blockSummary
 	recvTx            acceptedTx
 	redeemingTx       acceptedTx
-	rescanProgress    int32
+	rescanFinished    struct {
+		error
+	}
+	rescanProgress int32
 )
+
+type notificationChan chan notification
 
 func (c notificationChan) onBlockConnected(hash *btcwire.ShaHash, height int32) {
 	c <- (blockConnected)(blockSummary{hash, height})
@@ -104,6 +107,10 @@ func (c notificationChan) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
 
 func (c notificationChan) onRedeemingTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
 	c <- redeemingTx{tx, block}
+}
+
+func (c notificationChan) onRescanFinished(height int32) {
+	c <- rescanFinished{error: nil}
 }
 
 func (c notificationChan) onRescanProgress(height int32) {
@@ -133,7 +140,9 @@ func (n blockConnected) handleNotification() error {
 		wg.Wait()
 		NotifyBalanceSyncerChans.remove <- *n.hash
 	}
+	AcctMgr.Grab()
 	AcctMgr.BlockNotify(bs)
+	AcctMgr.Release()
 
 	// Pass notification to wallet clients too.
 	if server != nil {
@@ -158,6 +167,9 @@ func (n blockConnected) MarshalJSON() ([]byte, error) {
 }
 
 func (n blockDisconnected) handleNotification() error {
+	AcctMgr.Grab()
+	defer AcctMgr.Release()
+
 	// Rollback Utxo and Tx data stores.
 	if err := AcctMgr.Rollback(n.height, n.hash); err != nil {
 		return err
@@ -233,6 +245,9 @@ func (n recvTx) handleNotification() error {
 		SendTxHistSyncChans.remove <- *n.tx.Sha()
 	}
 
+	AcctMgr.Grab()
+	defer AcctMgr.Release()
+
 	// For every output, find all accounts handling that output address (if any)
 	// and record the received txout.
 	for outIdx, txout := range n.tx.MsgTx().TxOut {
@@ -301,7 +316,16 @@ func (n redeemingTx) handleNotification() error {
 		return InvalidNotificationError{err}
 	}
 	n.tx.SetIndex(txIdx)
-	return AcctMgr.RecordSpendingTx(n.tx, block)
+
+	AcctMgr.Grab()
+	err = AcctMgr.RecordSpendingTx(n.tx, block)
+	AcctMgr.Release()
+	return err
+}
+
+func (n rescanFinished) handleNotification() error {
+	AcctMgr.rm.MarkFinished(n)
+	return nil
 }
 
 func (n rescanProgress) handleNotification() error {
@@ -339,6 +363,7 @@ func newRPCClient(certs []byte) (*rpcClient, error) {
 		OnBlockDisconnected: ntfns.onBlockDisconnected,
 		OnRecvTx:            ntfns.onRecvTx,
 		OnRedeemingTx:       ntfns.onRedeemingTx,
+		OnRescanFinished:    ntfns.onRescanFinished,
 		OnRescanProgress:    ntfns.onRescanProgress,
 	}
 	conf := btcrpcclient.ConnConfig{
@@ -377,7 +402,6 @@ func (c *rpcClient) WaitForShutdown() {
 
 func (c *rpcClient) handleNotifications() {
 	for n := range c.chainNotifications {
-		AcctMgr.Grab()
 		err := n.handleNotification()
 		if err != nil {
 			switch e := err.(type) {
@@ -387,7 +411,6 @@ func (c *rpcClient) handleNotifications() {
 				log.Errorf("Cannot handle notification: %v", e)
 			}
 		}
-		AcctMgr.Release()
 	}
 	c.wg.Done()
 }
@@ -473,7 +496,7 @@ func (c *rpcClient) Handshake() error {
 
 		// Begin tracking wallets against this btcd instance.
 		AcctMgr.Track()
-		if err := AcctMgr.RescanActiveAddresses(); err != nil {
+		if err := AcctMgr.RescanActiveAddresses(nil); err != nil {
 			return err
 		}
 		// TODO: Only begin tracking new unspent outputs as a result
@@ -492,7 +515,7 @@ func (c *rpcClient) Handshake() error {
 	// Iterator was invalid (wallet has never been synced) or there was a
 	// huge chain fork + reorg (more than 20 blocks).
 	AcctMgr.Track()
-	if err := AcctMgr.RescanActiveAddresses(); err != nil {
+	if err := AcctMgr.RescanActiveAddresses(&bs); err != nil {
 		return err
 	}
 	// TODO: only begin tracking new unspent outputs as a result of the
