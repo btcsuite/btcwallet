@@ -947,7 +947,7 @@ func (s *Store) Rollback(height int32) error {
 					}
 					op := btcwire.OutPoint{
 						Hash:  *rr.Tx().Sha(),
-						Index: uint32(prev.OutputIndex),
+						Index: prev.OutputIndex,
 					}
 					s.unconfirmed.spentBlockOutPointKeys[op] = *prev
 					s.unconfirmed.spentBlockOutPoints[*prev] = r

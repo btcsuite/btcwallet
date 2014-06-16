@@ -2211,7 +2211,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 		}
 		inputs[btcwire.OutPoint{
 			Hash:  *inputSha,
-			Index: uint32(rti.Vout),
+			Index: rti.Vout,
 		}] = script
 	}
 
