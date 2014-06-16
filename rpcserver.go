@@ -2790,9 +2790,7 @@ func StoreNotifiedMempoolRecvTxs(add, remove chan btcwire.OutPoint,
 			m[op] = struct{}{}
 
 		case op := <-remove:
-			if _, ok := m[op]; ok {
-				delete(m, op)
-			}
+			delete(m, op)
 
 		case req := <-access:
 			_, ok := m[req.op]
