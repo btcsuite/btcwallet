@@ -185,9 +185,6 @@ func main() {
 	go StoreNotifiedMempoolRecvTxs(NotifiedRecvTxChans.add,
 		NotifiedRecvTxChans.remove,
 		NotifiedRecvTxChans.access)
-	go NotifyBalanceSyncer(NotifyBalanceSyncerChans.add,
-		NotifyBalanceSyncerChans.remove,
-		NotifyBalanceSyncerChans.access)
 
 	// Start client connection to a btcd chain server.  Attempt
 	// reconnections if the client could not be successfully connected.

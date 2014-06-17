@@ -127,19 +127,6 @@ func (n blockConnected) handleNotification() error {
 	curBlock.BlockStamp = *bs
 	curBlock.Unlock()
 
-	// btcd notifies btcwallet about transactions first, and then sends
-	// the new block notification.  New balance notifications for txs
-	// in blocks are therefore sent here after all tx notifications
-	// have arrived and finished being processed by the handlers.
-	workers := NotifyBalanceRequest{
-		block: *n.hash,
-		wg:    make(chan *sync.WaitGroup),
-	}
-	NotifyBalanceSyncerChans.access <- workers
-	if wg := <-workers.wg; wg != nil {
-		wg.Wait()
-		NotifyBalanceSyncerChans.remove <- *n.hash
-	}
 	AcctMgr.Grab()
 	AcctMgr.BlockNotify(bs)
 	AcctMgr.Release()
