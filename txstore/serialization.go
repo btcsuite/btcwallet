@@ -447,12 +447,12 @@ func (t *txRecord) ReadFrom(r io.Reader) (int64, error) {
 
 		// For each expected output key, allocate and read the key,
 		// appending the result to the spends slice.  This slice is
-		// originally set to nil (*not* preallocated to spendsCount
+		// originally set empty (*not* preallocated to spendsCount
 		// size) to prevent accidentally allocating so much memory that
 		// the process dies.
-		var spends []*BlockOutputKey
+		var spends []BlockOutputKey
 		for i := uint32(0); i < spendsCount; i++ {
-			k := &BlockOutputKey{}
+			k := BlockOutputKey{}
 			tmpn64, err := k.ReadFrom(r)
 			n64 += tmpn64
 			if err != nil {

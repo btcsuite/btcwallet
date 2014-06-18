@@ -181,11 +181,6 @@ func main() {
 	// Start HTTP server to serve wallet client connections.
 	server.Start()
 
-	// Begin maintanence goroutines.
-	go StoreNotifiedMempoolRecvTxs(NotifiedRecvTxChans.add,
-		NotifiedRecvTxChans.remove,
-		NotifiedRecvTxChans.access)
-
 	// Start client connection to a btcd chain server.  Attempt
 	// reconnections if the client could not be successfully connected.
 	clientChan := make(chan *rpcClient)

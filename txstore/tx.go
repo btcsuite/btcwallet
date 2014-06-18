@@ -244,7 +244,7 @@ type txRecord struct {
 // transaction credits.
 type debits struct {
 	amount btcutil.Amount
-	spends []*BlockOutputKey
+	spends []BlockOutputKey
 }
 
 // credit describes a transaction output which was or is spendable by wallet.
@@ -404,37 +404,6 @@ func (u *unconfirmedStore) txRecordForInserts(tx *btcutil.Tx) *txRecord {
 	return r
 }
 
-func (r *txRecord) setDebitsSpends(spends []*BlockOutputKey, tx *btcutil.Tx) error {
-	if r.debits.spends != nil {
-		if *r.tx.Sha() == *tx.Sha() {
-			return ErrDuplicateInsert
-		}
-		return ErrInconsistentStore
-	}
-	r.debits.spends = spends
-	return nil
-}
-
-func (r *txRecord) setCredit(c *credit, index uint32, tx *btcutil.Tx) error {
-	if len(r.credits) <= int(index) {
-		r.credits = extendCredits(r.credits, index)
-	}
-	if r.credits[index] != nil {
-		if *r.tx.Sha() == *tx.Sha() {
-			return ErrDuplicateInsert
-		}
-		return ErrInconsistentStore
-	}
-
-	r.credits[index] = c
-	return nil
-}
-
-func extendCredits(c []*credit, index uint32) []*credit {
-	missing := make([]*credit, int(index+1)-len(c))
-	return append(c, missing...)
-}
-
 func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
 	delete(s.unconfirmed.txs, *r.Tx().Sha())
 
@@ -465,12 +434,9 @@ func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
 		if err != nil {
 			return err
 		}
-		if len(rr.credits) <= int(prev.OutputIndex) {
-			rr.credits = extendCredits(rr.credits, prev.OutputIndex)
-		}
 		rr.credits[prev.OutputIndex].spentBy = &key
 		// debits should already be non-nil
-		r.debits.spends = append(r.debits.spends, &prev)
+		r.debits.spends = append(r.debits.spends, prev)
 	}
 
 	// For each credit in r, if the credit is spent by another unconfirmed
@@ -483,20 +449,21 @@ func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
 	// If the credit is not spent, modify the store's unspent bookkeeping
 	// maps to include the credit and increment the amount deltas by the
 	// credit's value.
+	op := btcwire.OutPoint{Hash: *r.Tx().Sha()}
 	for i, credit := range r.credits {
 		if credit == nil {
 			continue
 		}
-		op := btcwire.NewOutPoint(r.Tx().Sha(), uint32(i))
-		outputKey := BlockOutputKey{key, uint32(i)}
-		if rr, ok := s.unconfirmed.spentUnconfirmed[*op]; ok {
-			delete(s.unconfirmed.spentUnconfirmed, *op)
-			s.unconfirmed.spentBlockOutPointKeys[*op] = outputKey
+		op.Index = uint32(i)
+		outputKey := BlockOutputKey{key, op.Index}
+		if rr, ok := s.unconfirmed.spentUnconfirmed[op]; ok {
+			delete(s.unconfirmed.spentUnconfirmed, op)
+			s.unconfirmed.spentBlockOutPointKeys[op] = outputKey
 			s.unconfirmed.spentBlockOutPoints[outputKey] = rr
 			credit.spentBy = &BlockTxKey{BlockHeight: -1}
 		} else if credit.spentBy == nil {
 			// Mark outpoint unspent.
-			s.unspent[*op] = key
+			s.unspent[op] = key
 
 			// Increment spendable amount delta as a result of
 			// moving this credit to this block.
@@ -541,10 +508,9 @@ func (s *Store) InsertTx(tx *btcutil.Tx, block *Block) (*TxRecord, error) {
 	// Simply create or return the transaction record if this transaction
 	// is unconfirmed.
 	if block == nil {
-		key := BlockTxKey{BlockHeight: -1}
 		r := s.unconfirmed.txRecordForInserts(tx)
 		r.received = received
-		return &TxRecord{key, r, s}, nil
+		return &TxRecord{BlockTxKey{BlockHeight: -1}, r, s}, nil
 	}
 
 	// Check if block records already exist for this tx.  If so,
@@ -641,24 +607,18 @@ func (t *TxRecord) AddDebits(spent []Credit) (Debits, error) {
 				t.s.unconfirmed.spentUnconfirmed[*op] = t.txRecord
 			default:
 				key := c.outputKey()
-				t.s.unconfirmed.spentBlockOutPointKeys[*op] = *key
-				t.s.unconfirmed.spentBlockOutPoints[*key] = t.txRecord
+				t.s.unconfirmed.spentBlockOutPointKeys[*op] = key
+				t.s.unconfirmed.spentBlockOutPoints[key] = t.txRecord
 			}
 		}
 
 	default:
 		if t.debits.spends == nil {
-			prevOutputKeys := make([]*BlockOutputKey, 0, len(spent))
-			for _, c := range spent {
-				prevOutputKeys = append(prevOutputKeys, c.outputKey())
+			prevOutputKeys := make([]BlockOutputKey, len(spent))
+			for i, c := range spent {
+				prevOutputKeys[i] = c.outputKey()
 			}
-			err := t.txRecord.setDebitsSpends(prevOutputKeys, t.tx)
-			if err != nil {
-				if err == ErrDuplicateInsert {
-					return Debits{t}, nil
-				}
-				return Debits{}, err
-			}
+			t.txRecord.debits.spends = prevOutputKeys
 		}
 	}
 	return Debits{t}, nil
@@ -728,10 +688,9 @@ func (s *Store) markOutputsSpent(spent []Credit, t *TxRecord) (btcutil.Amount, e
 			credit.spentBy = &t.BlockTxKey
 			delete(s.unspent, *op)
 			if t.BlockHeight == -1 { // unconfirmed
-				op := prev.OutPoint()
 				key := prev.outputKey()
-				s.unconfirmed.spentBlockOutPointKeys[*op] = *key
-				s.unconfirmed.spentBlockOutPoints[*key] = t.txRecord
+				s.unconfirmed.spentBlockOutPointKeys[*op] = key
+				s.unconfirmed.spentBlockOutPoints[key] = t.txRecord
 			}
 
 			// Increment total debited amount.
@@ -752,6 +711,23 @@ func (s *Store) markOutputsSpent(spent []Credit, t *TxRecord) (btcutil.Amount, e
 	return a, nil
 }
 
+func (r *txRecord) setCredit(index uint32, change bool, tx *btcutil.Tx) error {
+	if r.credits == nil {
+		r.credits = make([]*credit, 0, len(tx.MsgTx().TxOut))
+	}
+	for i := uint32(len(r.credits)); i <= index; i++ {
+		r.credits = append(r.credits, nil)
+	}
+	if r.credits[index] != nil {
+		if *r.tx.Sha() == *tx.Sha() {
+			return ErrDuplicateInsert
+		}
+		return ErrInconsistentStore
+	}
+	r.credits[index] = &credit{change: change}
+	return nil
+}
+
 // AddCredit marks the transaction record as containing a transaction output
 // spendable by wallet.  The output is added unspent, and is marked spent
 // when a new transaction spending the output is inserted into the store.
@@ -760,8 +736,7 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 		return Credit{}, errors.New("transaction output does not exist")
 	}
 
-	c := &credit{change: change}
-	if err := t.txRecord.setCredit(c, index, t.tx); err != nil {
+	if err := t.txRecord.setCredit(index, change, t.tx); err != nil {
 		if err == ErrDuplicateInsert {
 			return Credit{t, index}, nil
 		}
@@ -873,7 +848,7 @@ func (s *Store) Rollback(height int32) error {
 					current := BlockOutputKey{
 						BlockTxKey: BlockTxKey{BlockHeight: -1},
 					}
-					err = spender.swapDebits(&prev, &current)
+					err = spender.swapDebits(prev, current)
 					if err != nil {
 						return err
 					}
@@ -890,7 +865,7 @@ func (s *Store) Rollback(height int32) error {
 					if err != nil {
 						return err
 					}
-					c, err := rr.lookupBlockCredit(*prev)
+					c, err := rr.lookupBlockCredit(prev)
 					if err != nil {
 						return err
 					}
@@ -898,8 +873,8 @@ func (s *Store) Rollback(height int32) error {
 						Hash:  *rr.Tx().Sha(),
 						Index: prev.OutputIndex,
 					}
-					s.unconfirmed.spentBlockOutPointKeys[op] = *prev
-					s.unconfirmed.spentBlockOutPoints[*prev] = r
+					s.unconfirmed.spentBlockOutPointKeys[op] = prev
+					s.unconfirmed.spentBlockOutPoints[prev] = r
 					c.spentBy = &BlockTxKey{BlockHeight: -1}
 				}
 
@@ -913,18 +888,15 @@ func (s *Store) Rollback(height int32) error {
 	return nil
 }
 
-func (r *txRecord) swapDebits(previous, current *BlockOutputKey) error {
+func (r *txRecord) swapDebits(previous, current BlockOutputKey) error {
 	for i, outputKey := range r.debits.spends {
-		if outputKey == nil {
-			continue
-		}
-		if *outputKey == *previous {
+		if outputKey == previous {
 			r.debits.spends[i] = current
 			return nil
 		}
 	}
 
-	return MissingCreditError(*previous)
+	return MissingCreditError(previous)
 }
 
 // UnminedDebitTxs returns the underlying transactions for all wallet
@@ -1034,7 +1006,7 @@ func (s *Store) UnspentOutputs() ([]Credit, error) {
 	i := 0
 	for op, key := range s.unspent {
 		creditChans[i] = make(chan createdCredit)
-		go func(i int, opIndex uint32) {
+		go func(i int, key BlockTxKey, opIndex uint32) {
 			r, err := s.lookupBlockTx(key)
 			if err != nil {
 				creditChans[i] <- createdCredit{err: err}
@@ -1043,7 +1015,7 @@ func (s *Store) UnspentOutputs() ([]Credit, error) {
 			t := &TxRecord{key, r, s}
 			c := Credit{t, opIndex}
 			creditChans[i] <- createdCredit{credit: c}
-		}(i, op.Index)
+		}(i, key, op.Index)
 		i++
 	}
 
@@ -1276,6 +1248,15 @@ func (t *TxRecord) Credits() []Credit {
 	return credits
 }
 
+// HasCredit returns whether the transaction output at the passed index is
+// a wallet credit.
+func (t *TxRecord) HasCredit(i int) bool {
+	if len(t.credits) <= i {
+		return false
+	}
+	return t.credits[i] != nil
+}
+
 // InputAmount returns the total amount debited from previous credits.
 func (d Debits) InputAmount() btcutil.Amount {
 	return d.txRecord.debits.amount
@@ -1347,8 +1328,8 @@ func (c Credit) OutPoint() *btcwire.OutPoint {
 }
 
 // outputKey creates and returns the block lookup key for this credit.
-func (c Credit) outputKey() *BlockOutputKey {
-	return &BlockOutputKey{
+func (c Credit) outputKey() BlockOutputKey {
+	return BlockOutputKey{
 		BlockTxKey:  c.BlockTxKey,
 		OutputIndex: c.OutputIndex,
 	}

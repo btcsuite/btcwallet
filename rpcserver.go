@@ -1369,7 +1369,7 @@ func (s *rpcServer) NotifyNewBlockChainHeight(bs *wallet.BlockStamp) {
 // TODO(jrick): Switch this to return a single JSON object
 // (map[string]interface{}) of all accounts and their balances, instead of
 // separate notifications for each account.
-func (s *rpcServer) NotifyBalances(wsc *websocketClient) {
+func (s *rpcServer) NotifyBalances() {
 	for _, a := range AcctMgr.AllAccounts() {
 		balance := a.CalculateBalance(1)
 		unconfirmed := a.CalculateBalance(0) - balance
@@ -2686,50 +2686,4 @@ func (s *rpcServer) NotifyNewTxDetails(account string, details btcjson.ListTrans
 		panic(err)
 	}
 	s.broadcasts <- mntfn
-}
-
-// NotifiedRecvTxRequest is used to check whether the outpoint of
-// a received transaction has already been notified due to
-// arriving first in the btcd mempool.
-type NotifiedRecvTxRequest struct {
-	op       btcwire.OutPoint
-	response chan NotifiedRecvTxResponse
-}
-
-// NotifiedRecvTxResponse is the response of a NotifiedRecvTxRequest
-// request.
-type NotifiedRecvTxResponse bool
-
-// NotifiedRecvTxChans holds the channels to manage
-// StoreNotifiedMempoolTxs.
-var NotifiedRecvTxChans = struct {
-	add, remove chan btcwire.OutPoint
-	access      chan NotifiedRecvTxRequest
-}{
-	add:    make(chan btcwire.OutPoint),
-	remove: make(chan btcwire.OutPoint),
-	access: make(chan NotifiedRecvTxRequest),
-}
-
-// StoreNotifiedMempoolRecvTxs maintains a set of previously-sent
-// received transaction notifications originating from the btcd
-// mempool. This is used to prevent duplicate client transaction
-// notifications once a mempool tx is mined into a block.
-func StoreNotifiedMempoolRecvTxs(add, remove chan btcwire.OutPoint,
-	access chan NotifiedRecvTxRequest) {
-
-	m := make(map[btcwire.OutPoint]struct{})
-	for {
-		select {
-		case op := <-add:
-			m[op] = struct{}{}
-
-		case op := <-remove:
-			delete(m, op)
-
-		case req := <-access:
-			_, ok := m[req.op]
-			req.response <- NotifiedRecvTxResponse(ok)
-		}
-	}
 }

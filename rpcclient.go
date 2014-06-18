@@ -185,10 +185,12 @@ func (n recvTx) handleNotification() error {
 	AcctMgr.Grab()
 	defer AcctMgr.Release()
 
-	// For every output, find all accounts handling that output address (if any)
-	// and record the received txout.
-	for outIdx, txout := range n.tx.MsgTx().TxOut {
-		var accounts []*Account
+	// For every output, if it pays to a wallet address, insert the
+	// transaction into the store (possibly moving it from unconfirmed to
+	// confirmed), and add a credit record if one does not already exist.
+	var txr *txstore.TxRecord
+	txInserted := false
+	for i, txout := range n.tx.MsgTx().TxOut {
 		// Errors don't matter here.  If addrs is nil, the range below
 		// does nothing.
 		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript,
@@ -196,53 +198,37 @@ func (n recvTx) handleNotification() error {
 		for _, addr := range addrs {
 			a, err := AcctMgr.AccountByAddress(addr)
 			if err != nil {
-				continue
+				continue // try next address, if any
 			}
-			accounts = append(accounts, a)
-		}
 
-		for _, a := range accounts {
-			txr, err := a.TxStore.InsertTx(n.tx, block)
-			if err != nil {
-				return err
+			if !txInserted {
+				txr, err = a.TxStore.InsertTx(n.tx, block)
+				if err != nil {
+					return err
+				}
+				txInserted = true
 			}
-			cred, err := txr.AddCredit(uint32(outIdx), false)
+
+			// Insert and notify websocket clients of the credit if it is
+			// not a duplicate, otherwise, check the next txout if the
+			// credit has already been inserted.
+			if txr.HasCredit(i) {
+				break
+			}
+			cred, err := txr.AddCredit(uint32(i), false)
 			if err != nil {
 				return err
 			}
 			AcctMgr.ds.ScheduleTxStoreWrite(a)
-
-			// Notify wallet clients of tx.  If the tx is unconfirmed, it is always
-			// notified and the outpoint is marked as notified.  If the outpoint
-			// has already been notified and is now in a block, a txmined notifiction
-			// should be sent once to let wallet clients that all previous send/recvs
-			// for this unconfirmed tx are now confirmed.
-			op := *cred.OutPoint()
-			previouslyNotifiedReq := NotifiedRecvTxRequest{
-				op:       op,
-				response: make(chan NotifiedRecvTxResponse),
+			ltr, err := cred.ToJSON(a.Name(), bs.Height, a.Wallet.Net())
+			if err != nil {
+				return err
 			}
-			NotifiedRecvTxChans.access <- previouslyNotifiedReq
-			if <-previouslyNotifiedReq.response {
-				NotifiedRecvTxChans.remove <- op
-			} else {
-				// Notify clients of new recv tx and mark as notified.
-				NotifiedRecvTxChans.add <- op
-
-				ltr, err := cred.ToJSON(a.Name(), bs.Height, a.Wallet.Net())
-				if err != nil {
-					return err
-				}
-				server.NotifyNewTxDetails(a.Name(), ltr)
-			}
-
-			// Notify clients of new account balance.
-			confirmed := a.CalculateBalance(1)
-			unconfirmed := a.CalculateBalance(0) - confirmed
-			server.NotifyWalletBalance(a.name, confirmed)
-			server.NotifyWalletBalanceUnconfirmed(a.name, unconfirmed)
+			server.NotifyNewTxDetails(a.Name(), ltr)
+			break // check whether next txout is a wallet txout
 		}
 	}
+	server.NotifyBalances()
 
 	return nil
 }
@@ -462,7 +448,7 @@ func (c *rpcClient) Handshake() error {
 	}
 	if server != nil {
 		server.NotifyNewBlockChainHeight(&bs)
-		server.NotifyBalances(nil)
+		server.NotifyBalances()
 	}
 
 	// Get default account.  Only the default account is used to
