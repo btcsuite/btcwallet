@@ -95,7 +95,6 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 	for i := uint32(0); i < blockCount; i++ {
 		b := &blockTxCollection{
 			txIndexes: map[int]uint32{},
-			unspent:   map[int]uint32{},
 		}
 		tmpn64, err := b.ReadFrom(r)
 		n64 += tmpn64
@@ -108,12 +107,24 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 		s.blocks = append(s.blocks, b)
 		s.blockIndexes[b.Height] = i
 
-		// Recreate unspent map.  If any of the block's transactions
-		// contain unspent credits, mark the store's unspent map to
-		// reflect that this block contains transactions with unspent
-		// credits.
-		if len(b.unspent) != 0 {
-			s.unspent[b.Height] = struct{}{}
+		// Recreate store unspent map.
+		for blockIndex, i := range b.txIndexes {
+			tx := b.txs[i]
+			for outputIdx, cred := range tx.credits {
+				if cred == nil {
+					continue
+				}
+				if cred.spentBy == nil {
+					op := btcwire.OutPoint{
+						Hash:  *tx.tx.Sha(),
+						Index: uint32(outputIdx),
+					}
+					s.unspent[op] = BlockTxKey{
+						BlockIndex:  blockIndex,
+						BlockHeight: b.Height,
+					}
+				}
+			}
 		}
 	}
 
@@ -262,18 +273,6 @@ func (b *blockTxCollection) ReadFrom(r io.Reader) (int64, error) {
 		// block index of the underlying transaction to the slice index
 		// of the record.
 		b.txIndexes[t.tx.Index()] = i
-
-		// Recreate unspent map.  For each credit of this transaction,
-		// if any credit is unspent, mark it in unspent map.
-		for _, c := range t.credits {
-			if c == nil {
-				continue
-			}
-			if c.spentBy == nil {
-				b.unspent[t.tx.Index()] = i
-				break
-			}
-		}
 	}
 
 	return n64, nil
