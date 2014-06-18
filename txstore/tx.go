@@ -1047,16 +1047,13 @@ func (s *Store) UnspentOutputs() ([]Credit, error) {
 		i++
 	}
 
-	unspent := make([]Credit, 0, len(s.unspent))
-	for _, c := range creditChans {
-		cc, ok := <-c
-		if !ok {
-			continue
-		}
+	unspent := make([]Credit, len(s.unspent))
+	for i, c := range creditChans {
+		cc := <-c
 		if cc.err != nil {
 			return nil, cc.err
 		}
-		unspent = append(unspent, cc.credit)
+		unspent[i] = cc.credit
 	}
 
 	for _, r := range s.unconfirmed.txs {
