@@ -613,21 +613,21 @@ func (t *TxRecord) Block() (*Block, error) {
 // AddDebits marks a transaction record as having debited from all them transaction
 // credits in the spent slice.  If spent is nil, the previous debits will be found,
 // however this is an expensive lookup and should be avoided if possible.
-func (t *TxRecord) AddDebits(spent []*Credit) (*Debits, error) {
+func (t *TxRecord) AddDebits(spent []Credit) (Debits, error) {
 	if t.debits == nil {
 		// Find now-spent credits if no debits have been previously set
 		// and none were passed in by the caller.
 		if len(spent) == 0 {
 			foundSpent, err := t.s.findPreviousCredits(t.Tx())
 			if err != nil {
-				return nil, err
+				return Debits{}, err
 			}
 			spent = foundSpent
 		}
 
 		debitAmount, err := t.s.markOutputsSpent(spent, t)
 		if err != nil {
-			return nil, err
+			return Debits{}, err
 		}
 		t.debits = &debits{amount: debitAmount}
 	}
@@ -655,20 +655,20 @@ func (t *TxRecord) AddDebits(spent []*Credit) (*Debits, error) {
 			err := t.txRecord.setDebitsSpends(prevOutputKeys, t.tx)
 			if err != nil {
 				if err == ErrDuplicateInsert {
-					return &Debits{t}, nil
+					return Debits{t}, nil
 				}
-				return nil, err
+				return Debits{}, err
 			}
 		}
 	}
-	return &Debits{t}, nil
+	return Debits{t}, nil
 }
 
 // findPreviousCredits searches for all unspent credits that make up the inputs
 // for tx.
-func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]*Credit, error) {
+func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]Credit, error) {
 	type createdCredit struct {
-		credit *Credit
+		credit Credit
 		err    error
 	}
 
@@ -688,11 +688,11 @@ func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]*Credit, error) {
 				return
 			}
 			t := &TxRecord{key, r, s}
-			c := &Credit{t, op.Index}
+			c := Credit{t, op.Index}
 			creditChans[i] <- createdCredit{credit: c}
 		}(i, txIn.PreviousOutpoint)
 	}
-	spent := make([]*Credit, 0, len(inputs))
+	spent := make([]Credit, 0, len(inputs))
 	for _, c := range creditChans {
 		cc, ok := <-c
 		if !ok {
@@ -708,7 +708,7 @@ func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]*Credit, error) {
 
 // markOutputsSpent marks each previous credit spent by t as spent.  The total
 // input of all spent previous outputs is returned.
-func (s *Store) markOutputsSpent(spent []*Credit, t *TxRecord) (btcutil.Amount, error) {
+func (s *Store) markOutputsSpent(spent []Credit, t *TxRecord) (btcutil.Amount, error) {
 	var a btcutil.Amount
 	for _, prev := range spent {
 		op := prev.OutPoint()
@@ -755,17 +755,17 @@ func (s *Store) markOutputsSpent(spent []*Credit, t *TxRecord) (btcutil.Amount, 
 // AddCredit marks the transaction record as containing a transaction output
 // spendable by wallet.  The output is added unspent, and is marked spent
 // when a new transaction spending the output is inserted into the store.
-func (t *TxRecord) AddCredit(index uint32, change bool) (*Credit, error) {
+func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 	if len(t.tx.MsgTx().TxOut) <= int(index) {
-		return nil, errors.New("transaction output does not exist")
+		return Credit{}, errors.New("transaction output does not exist")
 	}
 
 	c := &credit{change: change}
 	if err := t.txRecord.setCredit(c, index, t.tx); err != nil {
 		if err == ErrDuplicateInsert {
-			return &Credit{t, index}, nil
+			return Credit{t, index}, nil
 		}
-		return nil, err
+		return Credit{}, err
 	}
 
 	switch t.BlockHeight {
@@ -773,7 +773,7 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (*Credit, error) {
 	default:
 		b, err := t.s.lookupBlock(t.BlockHeight)
 		if err != nil {
-			return nil, err
+			return Credit{}, err
 		}
 
 		// New outputs are added unspent.
@@ -787,7 +787,7 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (*Credit, error) {
 		}
 	}
 
-	return &Credit{t, index}, nil
+	return Credit{t, index}, nil
 }
 
 // Rollback removes all blocks at height onwards, moving any transactions within
@@ -1024,9 +1024,9 @@ func (s *Store) removeConflict(r *txRecord) error {
 
 // UnspentOutputs returns all unspent received transaction outputs.
 // The order is undefined.
-func (s *Store) UnspentOutputs() ([]*Credit, error) {
+func (s *Store) UnspentOutputs() ([]Credit, error) {
 	type createdCredit struct {
-		credit *Credit
+		credit Credit
 		err    error
 	}
 
@@ -1041,13 +1041,13 @@ func (s *Store) UnspentOutputs() ([]*Credit, error) {
 				return
 			}
 			t := &TxRecord{key, r, s}
-			c := &Credit{t, opIndex}
+			c := Credit{t, opIndex}
 			creditChans[i] <- createdCredit{credit: c}
 		}(i, op.Index)
 		i++
 	}
 
-	unspent := make([]*Credit, 0, len(s.unspent))
+	unspent := make([]Credit, 0, len(s.unspent))
 	for _, c := range creditChans {
 		cc, ok := <-c
 		if !ok {
@@ -1066,7 +1066,7 @@ func (s *Store) UnspentOutputs() ([]*Credit, error) {
 			}
 			key := BlockTxKey{BlockHeight: -1}
 			txRecord := &TxRecord{key, r, s}
-			c := &Credit{txRecord, uint32(outputIndex)}
+			c := Credit{txRecord, uint32(outputIndex)}
 			unspent = append(unspent, c)
 		}
 	}
@@ -1082,7 +1082,7 @@ type unspentTx struct {
 	sliceIndex uint32
 }
 
-type creditSlice []*Credit
+type creditSlice []Credit
 
 func (s creditSlice) Len() int {
 	return len(s)
@@ -1124,10 +1124,10 @@ func (s creditSlice) Swap(i, j int) {
 // in the same block (same number of confirmations) are sorted by block
 // index in increasing order.  Credits (outputs) from the same transaction
 // are sorted by output index in increasing order.
-func (s *Store) SortedUnspentOutputs() ([]*Credit, error) {
+func (s *Store) SortedUnspentOutputs() ([]Credit, error) {
 	unspent, err := s.UnspentOutputs()
 	if err != nil {
-		return []*Credit{}, err
+		return []Credit{}, err
 	}
 	sort.Sort(sort.Reverse(creditSlice(unspent)))
 	return unspent, nil
@@ -1258,29 +1258,29 @@ func (r byReceiveDate) Len() int           { return len(r) }
 func (r byReceiveDate) Less(i, j int) bool { return r[i].received.Before(r[j].received) }
 func (r byReceiveDate) Swap(i, j int)      { r[i], r[j] = r[j], r[i] }
 
-// Debits returns the debit record for the transaction, or nil if the
-// transaction does not debit from any previous transaction credits.
-func (t *TxRecord) Debits() *Debits {
+// Debits returns the debit record for the transaction, or a non-nil error if
+// the transaction does not debit from any previous transaction credits.
+func (t *TxRecord) Debits() (Debits, error) {
 	if t.debits == nil {
-		return nil
+		return Debits{}, errors.New("no debits")
 	}
-	return &Debits{t}
+	return Debits{t}, nil
 }
 
 // Credits returns all credit records for this transaction's outputs that are or
 // were spendable by wallet.
-func (t *TxRecord) Credits() []*Credit {
-	credits := make([]*Credit, 0, len(t.credits))
+func (t *TxRecord) Credits() []Credit {
+	credits := make([]Credit, 0, len(t.credits))
 	for i, c := range t.credits {
 		if c != nil {
-			credits = append(credits, &Credit{t, uint32(i)})
+			credits = append(credits, Credit{t, uint32(i)})
 		}
 	}
 	return credits
 }
 
 // InputAmount returns the total amount debited from previous credits.
-func (d *Debits) InputAmount() btcutil.Amount {
+func (d Debits) InputAmount() btcutil.Amount {
 	return d.txRecord.debits.amount
 }
 
@@ -1301,13 +1301,13 @@ func (t *TxRecord) OutputAmount(ignoreChange bool) btcutil.Amount {
 
 // Fee returns the difference between the debited amount and the total
 // transaction output.
-func (d *Debits) Fee() btcutil.Amount {
+func (d Debits) Fee() btcutil.Amount {
 	return d.InputAmount() - d.OutputAmount(false)
 }
 
 // Addresses parses the pubkey script, extracting all addresses for a
 // standard script.
-func (c *Credit) Addresses(net *btcnet.Params) (btcscript.ScriptClass,
+func (c Credit) Addresses(net *btcnet.Params) (btcscript.ScriptClass,
 	[]btcutil.Address, int, error) {
 
 	msgTx := c.Tx().MsgTx()
@@ -1316,7 +1316,7 @@ func (c *Credit) Addresses(net *btcnet.Params) (btcscript.ScriptClass,
 }
 
 // Change returns whether the credit is the result of a change output.
-func (c *Credit) Change() bool {
+func (c Credit) Change() bool {
 	return c.txRecord.credits[c.OutputIndex].change
 }
 
@@ -1338,19 +1338,19 @@ func (t *TxRecord) IsCoinbase() bool {
 }
 
 // Amount returns the amount credited to the account from a transaction output.
-func (c *Credit) Amount() btcutil.Amount {
+func (c Credit) Amount() btcutil.Amount {
 	msgTx := c.Tx().MsgTx()
 	return btcutil.Amount(msgTx.TxOut[c.OutputIndex].Value)
 }
 
 // OutPoint returns the outpoint needed to include in a transaction input
 // to spend this output.
-func (c *Credit) OutPoint() *btcwire.OutPoint {
+func (c Credit) OutPoint() *btcwire.OutPoint {
 	return btcwire.NewOutPoint(c.Tx().Sha(), c.OutputIndex)
 }
 
 // outputKey creates and returns the block lookup key for this credit.
-func (c *Credit) outputKey() *BlockOutputKey {
+func (c Credit) outputKey() *BlockOutputKey {
 	return &BlockOutputKey{
 		BlockTxKey:  c.BlockTxKey,
 		OutputIndex: c.OutputIndex,
@@ -1358,12 +1358,12 @@ func (c *Credit) outputKey() *BlockOutputKey {
 }
 
 // Spent returns whether the transaction output is currently spent or not.
-func (c *Credit) Spent() bool {
+func (c Credit) Spent() bool {
 	return c.txRecord.credits[c.OutputIndex].spentBy != nil
 }
 
 // TxOut returns the transaction output which this credit references.
-func (c *Credit) TxOut() *btcwire.TxOut {
+func (c Credit) TxOut() *btcwire.TxOut {
 	return c.Tx().MsgTx().TxOut[c.OutputIndex]
 }
 

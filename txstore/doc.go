@@ -90,7 +90,7 @@
 //	}
 //
 //	// Mark r2 as debiting from record 1's 0th credit.
-//	d2, err := r2.AddDebits([]*txstore.Credit{c1o0})
+//	d2, err := r2.AddDebits([]txstore.Credit{c1o0})
 //	if err != nil {
 //		// handle error
 //	}

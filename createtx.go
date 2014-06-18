@@ -61,13 +61,13 @@ var TxFeeIncrement = struct {
 
 type CreatedTx struct {
 	tx         *btcutil.Tx
-	inputs     []*txstore.Credit
+	inputs     []txstore.Credit
 	changeAddr btcutil.Address
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
 // sort a slice of Utxos by their amount.
-type ByAmount []*txstore.Credit
+type ByAmount []txstore.Credit
 
 func (u ByAmount) Len() int           { return len(u) }
 func (u ByAmount) Less(i, j int) bool { return u[i].Amount() < u[j].Amount() }
@@ -79,13 +79,13 @@ func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 // combination of all selected previous outputs.  err will equal
 // ErrInsufficientFunds if there are not enough unspent outputs to spend amt
 // amt.
-func selectInputs(eligible []*txstore.Credit, amt btcutil.Amount,
-	minconf int) (selected []*txstore.Credit, out btcutil.Amount, err error) {
+func selectInputs(eligible []txstore.Credit, amt btcutil.Amount,
+	minconf int) (selected []txstore.Credit, out btcutil.Amount, err error) {
 
 	// Iterate throguh eligible transactions, appending to outputs and
 	// increasing out.  This is finished when out is greater than the
 	// requested amt to spend.
-	selected = make([]*txstore.Credit, 0, len(eligible))
+	selected = make([]txstore.Credit, 0, len(eligible))
 	for _, e := range eligible {
 		selected = append(selected, e)
 		out += e.Amount()
@@ -166,7 +166,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	// time) are not P2PKH outputs.  Other inputs must be manually included
 	// in transactions and sent (for example, using createrawtransaction,
 	// signrawtransaction, and sendrawtransaction).
-	eligible := make([]*txstore.Credit, 0, len(unspent))
+	eligible := make([]txstore.Credit, 0, len(unspent))
 	for i := range unspent {
 		switch btcscript.GetScriptClass(unspent[i].TxOut().PkScript) {
 		case btcscript.PubKeyHashTy:
@@ -189,7 +189,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	// by amount in reverse order.
 	sort.Sort(sort.Reverse(ByAmount(eligible)))
 
-	var selectedInputs []*txstore.Credit
+	var selectedInputs []txstore.Credit
 	// changeAddr is nil/zeroed until a change address is needed, and reused
 	// again in case a change utxo has already been chosen.
 	var changeAddr btcutil.Address
@@ -355,7 +355,7 @@ func minimumFee(tx *btcwire.MsgTx, allowFree bool) btcutil.Amount {
 // allowFree calculates the transaction priority and checks that the
 // priority reaches a certain threshhold.  If the threshhold is
 // reached, a free transaction fee is allowed.
-func allowFree(curHeight int32, txouts []*txstore.Credit, txSize int) bool {
+func allowFree(curHeight int32, txouts []txstore.Credit, txSize int) bool {
 	const blocksPerDayEstimate = 144
 	const txSizeEstimate = 250
 

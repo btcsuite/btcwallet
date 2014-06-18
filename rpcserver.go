@@ -1477,7 +1477,7 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	received := btcutil.Amount(0)
-	var debitTx *txstore.TxRecord
+	var debits *txstore.Debits
 	var debitAccount string
 	var targetAddr string
 
@@ -1516,17 +1516,16 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, error) {
 			})
 		}
 
-		if e.Tx.Debits() != nil {
+		if d, err := e.Tx.Debits(); err == nil {
 			// There should only be a single debits record for any
 			// of the account's transaction records.
-			debitTx = e.Tx
+			debits = &d
 			debitAccount = e.Account
 		}
 	}
 
 	totalAmount := received
-	if debitTx != nil {
-		debits := debitTx.Debits()
+	if debits != nil {
 		totalAmount -= debits.InputAmount()
 		info := btcjson.GetTransactionDetailsResult{
 			Account:  debitAccount,

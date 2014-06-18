@@ -651,7 +651,7 @@ func (a *Account) RecoverAddresses(n int) error {
 
 // ReqSpentUtxoNtfns sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func ReqSpentUtxoNtfns(credits []*txstore.Credit) {
+func ReqSpentUtxoNtfns(credits []txstore.Credit) {
 	ops := make([]*btcwire.OutPoint, 0, len(credits))
 	for _, c := range credits {
 		op := c.OutPoint()

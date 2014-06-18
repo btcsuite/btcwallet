@@ -30,7 +30,7 @@ func (t *TxRecord) ToJSON(account string, chainHeight int32,
 	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
 
 	results := []btcjson.ListTransactionsResult{}
-	if d := t.Debits(); d != nil {
+	if d, err := t.Debits(); err == nil {
 		r, err := d.ToJSON(account, chainHeight, net)
 		if err != nil {
 			return nil, err
