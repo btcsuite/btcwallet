@@ -639,7 +639,26 @@ func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]Credit, error) {
 		go func(i int, op btcwire.OutPoint) {
 			key, ok := s.unspent[op]
 			if !ok {
-				close(creditChans[i])
+				// Does this input spend an unconfirmed output?
+				r, ok := s.unconfirmed.txs[op.Hash]
+				switch {
+				// Not an unconfirmed tx.
+				case !ok:
+					fallthrough
+				// Output isn't a credit.
+				case len(r.credits) <= int(op.Index):
+					fallthrough
+				// Output isn't a credit.
+				case r.credits[op.Index] == nil:
+					fallthrough
+				// Credit already spent.
+				case s.unconfirmed.spentUnconfirmed[op] != nil:
+					close(creditChans[i])
+					return
+				}
+				t := &TxRecord{BlockTxKey{BlockHeight: -1}, r, s}
+				c := Credit{t, op.Index}
+				creditChans[i] <- createdCredit{credit: c}
 				return
 			}
 			r, err := s.lookupBlockTx(key)
