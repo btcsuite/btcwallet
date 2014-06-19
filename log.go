@@ -18,13 +18,36 @@ package main
 
 import (
 	"fmt"
+	"github.com/conformal/btclog"
+	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/seelog"
 	"os"
 )
 
-var (
-	log = seelog.Disabled
+const (
+	// lockTimeThreshold is the number below which a lock time is
+	// interpreted to be a block number.  Since an average of one block
+	// is generated per 10 minutes, this allows blocks for about 9,512
+	// years.  However, if the field is interpreted as a timestamp, given
+	// the lock time is a uint32, the max is sometime around 2106.
+	lockTimeThreshold uint32 = 5e8 // Tue Nov 5 00:53:20 1985 UTC
 )
+
+// Loggers per subsytem.  Note that backendLog is a seelog logger that all of
+// the subsystem loggers route their messages to.  When adding new subsystems,
+// add a reference here, to the subsystemLoggers map, and the useLogger
+// function.
+var (
+	backendLog = seelog.Disabled
+	log        = btclog.Disabled
+	txstLog    = btclog.Disabled
+)
+
+// subsystemLoggers maps each subsystem identifier to its associated logger.
+var subsystemLoggers = map[string]btclog.Logger{
+	"BTCW": log,
+	"TXST": txstLog,
+}
 
 // logClosure is used to provide a closure over expensive logging operations
 // so don't have to be performed when the logging level doesn't warrant it.
@@ -42,22 +65,38 @@ func newLogClosure(c func() string) logClosure {
 	return logClosure(c)
 }
 
-// newLogger creates a new seelog logger using the provided logging level and
-// log message prefix.
-func newLogger(level string, prefix string) seelog.LoggerInterface {
-	//<seelog type="adaptive" mininterval="2000000" maxinterval="100000000"
-	//      critmsgcount="500" minlevel="%s">
+// useLogger updates the logger references for subsystemID to logger.  Invalid
+// subsystems are ignored.
+func useLogger(subsystemID string, logger btclog.Logger) {
+	if _, ok := subsystemLoggers[subsystemID]; !ok {
+		return
+	}
+	subsystemLoggers[subsystemID] = logger
 
-	fmtstring := `
-        <seelog type="sync" minlevel="%s">
+	switch subsystemID {
+	case "BTCW":
+		log = logger
+	case "TXST":
+		txstLog = logger
+		txstore.UseLogger(logger)
+	}
+}
+
+// initSeelogLogger initializes a new seelog logger that is used as the backend
+// for all logging subsytems.
+func initSeelogLogger(logFile string) {
+	config := `
+        <seelog type="adaptive" mininterval="2000000" maxinterval="100000000"
+                critmsgcount="500" minlevel="trace">
                 <outputs formatid="all">
-                        <console/>
+                        <console />
+                        <rollingfile type="size" filename="%s" maxsize="10485760" maxrolls="3" />
                 </outputs>
                 <formats>
-                        <format id="all" format="%%Time %%Date [%%LEV] %s: %%Msg%%n" />
+                        <format id="all" format="%%Time %%Date [%%LEV] %%Msg%%n" />
                 </formats>
         </seelog>`
-	config := fmt.Sprintf(fmtstring, level, prefix)
+	config = fmt.Sprintf(config, logFile)
 
 	logger, err := seelog.LoggerFromConfigAsString(config)
 	if err != nil {
@@ -65,37 +104,42 @@ func newLogger(level string, prefix string) seelog.LoggerInterface {
 		os.Exit(1)
 	}
 
-	return logger
+	backendLog = logger
 }
 
-// useLogger sets the btcd logger to the passed logger.
-func useLogger(logger seelog.LoggerInterface) {
-	log = logger
+// setLogLevel sets the logging level for provided subsystem.  Invalid
+// subsystems are ignored.  Uninitialized subsystems are dynamically created as
+// needed.
+func setLogLevel(subsystemID string, logLevel string) {
+	// Ignore invalid subsystems.
+	logger, ok := subsystemLoggers[subsystemID]
+	if !ok {
+		return
+	}
+
+	// Default to info if the log level is invalid.
+	level, ok := btclog.LogLevelFromString(logLevel)
+	if !ok {
+		level = btclog.InfoLvl
+	}
+
+	// Create new logger for the subsystem if needed.
+	if logger == btclog.Disabled {
+		logger = btclog.NewSubsystemLogger(backendLog, subsystemID+": ")
+		useLogger(subsystemID, logger)
+	}
+	logger.SetLevel(level)
 }
 
-// setLogLevel sets the log level for the logging system.  It initializes a
-// logger for each subsystem at the provided level.
-func setLogLevel(logLevel string) []seelog.LoggerInterface {
-	var loggers []seelog.LoggerInterface
-
-	// Define sub-systems.
-	subSystems := []struct {
-		level     string
-		prefix    string
-		useLogger func(seelog.LoggerInterface)
-	}{
-		{logLevel, "BTCW", useLogger},
+// setLogLevels sets the log level for all subsystem loggers to the passed
+// level.  It also dynamically creates the subsystem loggers as needed, so it
+// can be used to initialize the logging system.
+func setLogLevels(logLevel string) {
+	// Configure all sub-systems with the new logging level.  Dynamically
+	// create loggers as needed.
+	for subsystemID := range subsystemLoggers {
+		setLogLevel(subsystemID, logLevel)
 	}
-
-	// Configure all sub-systems with new loggers while keeping track of
-	// the created loggers to return so they can be flushed.
-	for _, s := range subSystems {
-		newLog := newLogger(s.level, s.prefix)
-		loggers = append(loggers, newLog)
-		s.useLogger(newLog)
-	}
-
-	return loggers
 }
 
 // pickNoun returns the singular or plural form of a noun depending

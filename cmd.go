@@ -128,25 +128,14 @@ func clientConnect(certs []byte, newClient chan<- *rpcClient) {
 }
 
 func main() {
-	// Initialize logging and setup deferred flushing to ensure all
-	// outstanding messages are written on shutdown
-	loggers := setLogLevel(defaultLogLevel)
-	defer func() {
-		for _, logger := range loggers {
-			logger.Flush()
-		}
-	}()
-
+	// Load configuration and parse command line.  This function also
+	// initializes logging and configures it accordingly.
 	tcfg, _, err := loadConfig()
 	if err != nil {
 		os.Exit(1)
 	}
 	cfg = tcfg
-
-	// Change the logging level if needed.
-	if cfg.DebugLevel != defaultLogLevel {
-		loggers = setLogLevel(cfg.DebugLevel)
-	}
+	defer backendLog.Flush()
 
 	if cfg.Profile != "" {
 		go func() {

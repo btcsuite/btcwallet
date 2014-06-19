@@ -362,6 +362,8 @@ func (c *blockTxCollection) txRecordForInserts(tx *btcutil.Tx) *txRecord {
 	if i, ok := c.txIndexes[tx.Index()]; ok {
 		return c.txs[i]
 	}
+
+	log.Infof("Inserting transaction %v from block %d", tx.Sha(), c.Height)
 	record := &txRecord{tx: tx}
 
 	// If this new transaction record cannot be appended to the end of the
@@ -395,6 +397,7 @@ func (s *Store) blockTxRecordForInserts(tx *btcutil.Tx, block *Block) *txRecord 
 func (u *unconfirmedStore) txRecordForInserts(tx *btcutil.Tx) *txRecord {
 	r, ok := u.txs[*tx.Sha()]
 	if !ok {
+		log.Infof("Inserting unconfirmed transaction %v", tx.Sha())
 		r = &txRecord{tx: tx}
 		u.txs[*tx.Sha()] = r
 		for _, input := range r.Tx().MsgTx().TxIn {
@@ -405,6 +408,9 @@ func (u *unconfirmedStore) txRecordForInserts(tx *btcutil.Tx) *txRecord {
 }
 
 func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
+	log.Infof("Marking unconfirmed transaction %v mined in block %d",
+		r.tx.Sha(), block.Height)
+
 	delete(s.unconfirmed.txs, *r.Tx().Sha())
 
 	// Find collection and insert records.  Error out if there are records
@@ -596,6 +602,10 @@ func (t *TxRecord) AddDebits(spent []Credit) (Debits, error) {
 			return Debits{}, err
 		}
 		t.debits = &debits{amount: debitAmount}
+
+		log.Debugf("Transaction %v spends %d previously-unspent "+
+			"%s totaling %v", t.tx.Sha(), len(spent),
+			pickNoun(len(spent), "output", "outputs"), debitAmount)
 	}
 
 	switch t.BlockHeight {
@@ -762,6 +772,10 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 		return Credit{}, err
 	}
 
+	txOutAmt := btcutil.Amount(t.tx.MsgTx().TxOut[index].Value)
+	log.Debugf("Marking transaction %v output %d (%v) spendable",
+		t.tx.Sha(), index, txOutAmt)
+
 	switch t.BlockHeight {
 	case -1: // unconfirmed
 	default:
@@ -773,11 +787,11 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 		// New outputs are added unspent.
 		op := btcwire.OutPoint{Hash: *t.tx.Sha(), Index: index}
 		t.s.unspent[op] = t.BlockTxKey
-		switch a := t.tx.MsgTx().TxOut[index].Value; t.tx.Index() {
+		switch t.tx.Index() {
 		case 0: // Coinbase
-			b.amountDeltas.Reward += btcutil.Amount(a)
+			b.amountDeltas.Reward += txOutAmt
 		default:
-			b.amountDeltas.Spendable += btcutil.Amount(a)
+			b.amountDeltas.Spendable += txOutAmt
 		}
 	}
 
@@ -939,6 +953,7 @@ func (s *Store) UnminedDebitTxs() []*btcutil.Tx {
 // removed transactions are set to unspent.
 func (s *Store) removeDoubleSpends(tx *btcutil.Tx) error {
 	if ds := s.unconfirmed.findDoubleSpend(tx); ds != nil {
+		log.Debugf("Removing double spending transaction %v", ds.tx.Sha())
 		return s.removeConflict(ds)
 	}
 	return nil
@@ -971,6 +986,8 @@ func (s *Store) removeConflict(r *txRecord) error {
 		if !ok {
 			return ErrInconsistentStore
 		}
+		log.Debugf("Transaction %v is part of a removed double spend "+
+			"chain -- removing as well", nextSpender.tx.Sha())
 		if err := s.removeConflict(nextSpender); err != nil {
 			return err
 		}
@@ -1010,6 +1027,7 @@ func (s *Store) removeConflict(r *txRecord) error {
 	for _, input := range r.Tx().MsgTx().TxIn {
 		delete(u.previousOutpoints, input.PreviousOutpoint)
 	}
+
 	return nil
 }
 

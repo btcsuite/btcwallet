@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -32,6 +33,8 @@ const (
 	defaultConfigFilename = "btcwallet.conf"
 	defaultBtcNet         = btcwire.TestNet3
 	defaultLogLevel       = "info"
+	defaultLogDirname     = "logs"
+	defaultLogFilename    = "btcwallet.log"
 	defaultKeypoolSize    = 100
 	defaultDisallowFree   = false
 )
@@ -44,6 +47,7 @@ var (
 	defaultDataDir     = btcwalletHomeDir
 	defaultRPCKeyFile  = filepath.Join(btcwalletHomeDir, "rpc.key")
 	defaultRPCCertFile = filepath.Join(btcwalletHomeDir, "rpc.cert")
+	defaultLogDir      = filepath.Join(btcwalletHomeDir, defaultLogDirname)
 )
 
 type config struct {
@@ -54,6 +58,7 @@ type config struct {
 	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
 	SvrListeners []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
 	DataDir      string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
+	LogDir       string   `"long:"logdir" description:"Directory to log output."`
 	Username     string   `short:"u" long:"username" description:"Username for client and btcd authorization"`
 	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for client and btcd authorization"`
 	BtcdUsername string   `long:"btcdusername" description:"Alternative username for btcd authorization"`
@@ -82,6 +87,90 @@ func cleanAndExpandPath(path string) string {
 	// NOTE: The os.ExpandEnv doesn't work with Windows-style %VARIABLE%,
 	// but they variables can still be expanded via POSIX-style $VARIABLE.
 	return filepath.Clean(os.ExpandEnv(path))
+}
+
+// validLogLevel returns whether or not logLevel is a valid debug log level.
+func validLogLevel(logLevel string) bool {
+	switch logLevel {
+	case "trace":
+		fallthrough
+	case "debug":
+		fallthrough
+	case "info":
+		fallthrough
+	case "warn":
+		fallthrough
+	case "error":
+		fallthrough
+	case "critical":
+		return true
+	}
+	return false
+}
+
+// supportedSubsystems returns a sorted slice of the supported subsystems for
+// logging purposes.
+func supportedSubsystems() []string {
+	// Convert the subsystemLoggers map keys to a slice.
+	subsystems := make([]string, 0, len(subsystemLoggers))
+	for subsysID := range subsystemLoggers {
+		subsystems = append(subsystems, subsysID)
+	}
+
+	// Sort the subsytems for stable display.
+	sort.Strings(subsystems)
+	return subsystems
+}
+
+// parseAndSetDebugLevels attempts to parse the specified debug level and set
+// the levels accordingly.  An appropriate error is returned if anything is
+// invalid.
+func parseAndSetDebugLevels(debugLevel string) error {
+	// When the specified string doesn't have any delimters, treat it as
+	// the log level for all subsystems.
+	if !strings.Contains(debugLevel, ",") && !strings.Contains(debugLevel, "=") {
+		// Validate debug log level.
+		if !validLogLevel(debugLevel) {
+			str := "The specified debug level [%v] is invalid"
+			return fmt.Errorf(str, debugLevel)
+		}
+
+		// Change the logging level for all subsystems.
+		setLogLevels(debugLevel)
+
+		return nil
+	}
+
+	// Split the specified string into subsystem/level pairs while detecting
+	// issues and update the log levels accordingly.
+	for _, logLevelPair := range strings.Split(debugLevel, ",") {
+		if !strings.Contains(logLevelPair, "=") {
+			str := "The specified debug level contains an invalid " +
+				"subsystem/level pair [%v]"
+			return fmt.Errorf(str, logLevelPair)
+		}
+
+		// Extract the specified subsystem and log level.
+		fields := strings.Split(logLevelPair, "=")
+		subsysID, logLevel := fields[0], fields[1]
+
+		// Validate subsystem.
+		if _, exists := subsystemLoggers[subsysID]; !exists {
+			str := "The specified subsystem [%v] is invalid -- " +
+				"supported subsytems %v"
+			return fmt.Errorf(str, subsysID, supportedSubsystems())
+		}
+
+		// Validate log level.
+		if !validLogLevel(logLevel) {
+			str := "The specified debug level [%v] is invalid"
+			return fmt.Errorf(str, logLevel)
+		}
+
+		setLogLevel(subsysID, logLevel)
+	}
+
+	return nil
 }
 
 // removeDuplicateAddresses returns a new slice with all duplicate entries in
@@ -146,6 +235,7 @@ func loadConfig() (*config, []string, error) {
 		DebugLevel:   defaultLogLevel,
 		ConfigFile:   defaultConfigFile,
 		DataDir:      defaultDataDir,
+		LogDir:       defaultLogDir,
 		RPCKey:       defaultRPCKeyFile,
 		RPCCert:      defaultRPCCertFile,
 		KeypoolSize:  defaultKeypoolSize,
@@ -243,10 +333,19 @@ func loadConfig() (*config, []string, error) {
 		activeNet = &simNetParams
 	}
 
-	// Validate debug log level
-	if !validLogLevel(cfg.DebugLevel) {
-		str := "%s: The specified debug level [%v] is invalid"
-		err := fmt.Errorf(str, "loadConfig", cfg.DebugLevel)
+	// Special show command to list supported subsystems and exit.
+	if cfg.DebugLevel == "show" {
+		fmt.Println("Supported subsystems", supportedSubsystems())
+		os.Exit(0)
+	}
+
+	// Initialize logging at the default logging level.
+	initSeelogLogger(filepath.Join(cfg.LogDir, defaultLogFilename))
+	setLogLevels(defaultLogLevel)
+
+	// Parse, validate, and set debug log level(s).
+	if err := parseAndSetDebugLevels(cfg.DebugLevel); err != nil {
+		err := fmt.Errorf("%s: %v", "loadConfig", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		parser.WriteHelp(os.Stderr)
 		return nil, nil, err
@@ -317,23 +416,4 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	return &cfg, remainingArgs, nil
-}
-
-// validLogLevel returns whether or not logLevel is a valid debug log level.
-func validLogLevel(logLevel string) bool {
-	switch logLevel {
-	case "trace":
-		fallthrough
-	case "debug":
-		fallthrough
-	case "info":
-		fallthrough
-	case "warn":
-		fallthrough
-	case "error":
-		fallthrough
-	case "critical":
-		return true
-	}
-	return false
 }
