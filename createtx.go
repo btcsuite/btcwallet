@@ -33,7 +33,7 @@ import (
 	"github.com/conformal/btcwire"
 )
 
-// InsufficientFundsError represents an error where there are not enough
+// InsufficientFunds represents an error where there are not enough
 // funds from unspent tx outputs for a wallet to create a transaction.
 // This may be caused by not enough inputs for all of the desired total
 // transaction output amount, or due to
