@@ -847,12 +847,10 @@ var rpcHandlers = map[string]requestHandler{
 	// Standard bitcoind methods (currently unimplemented)
 	"backupwallet":          Unimplemented,
 	"dumpwallet":            Unimplemented,
-	"getblocktemplate":      Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
 	"gettxout":              Unimplemented,
 	"gettxoutsetinfo":       Unimplemented,
 	"getwalletinfo":         Unimplemented,
-	"getwork":               Unimplemented,
 	"importwallet":          Unimplemented,
 	"listaddressgroupings":  Unimplemented,
 	"listlockunspent":       Unimplemented,
