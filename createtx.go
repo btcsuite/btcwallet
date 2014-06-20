@@ -33,9 +33,25 @@ import (
 	"github.com/conformal/btcwire"
 )
 
-// ErrInsufficientFunds represents an error where there are not enough
+// InsufficientFundsError represents an error where there are not enough
 // funds from unspent tx outputs for a wallet to create a transaction.
-var ErrInsufficientFunds = errors.New("insufficient funds")
+// This may be caused by not enough inputs for all of the desired total
+// transaction output amount, or due to
+type InsufficientFundsError struct {
+	in, out, fee btcutil.Amount
+}
+
+// Error satisifies the builtin error interface.
+func (e InsufficientFundsError) Error() string {
+	total := e.out + e.fee
+	if e.fee == 0 {
+		return fmt.Sprintf("insufficient funds: transaction requires "+
+			"%s input but only %v spendable", total, e.in)
+	}
+	return fmt.Sprintf("insufficient funds: transaction requires %s input "+
+		"(%v output + %v fee) but only %v spendable", total, e.out,
+		e.fee, e.in)
+}
 
 // ErrNonPositiveAmount represents an error where a bitcoin amount is
 // not positive (either negative, or zero).
@@ -79,7 +95,7 @@ func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 // combination of all selected previous outputs.  err will equal
 // ErrInsufficientFunds if there are not enough unspent outputs to spend amt
 // amt.
-func selectInputs(eligible []txstore.Credit, amt btcutil.Amount,
+func selectInputs(eligible []txstore.Credit, amt, fee btcutil.Amount,
 	minconf int) (selected []txstore.Credit, out btcutil.Amount, err error) {
 
 	// Iterate throguh eligible transactions, appending to outputs and
@@ -89,12 +105,12 @@ func selectInputs(eligible []txstore.Credit, amt btcutil.Amount,
 	for _, e := range eligible {
 		selected = append(selected, e)
 		out += e.Amount()
-		if out >= amt {
+		if out >= amt+fee {
 			return selected, out, nil
 		}
 	}
-	if out < amt {
-		return nil, 0, ErrInsufficientFunds
+	if out < amt+fee {
+		return nil, 0, InsufficientFundsError{out, amt, fee}
 	}
 
 	return selected, out, nil
@@ -202,7 +218,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 
 		// Select eligible outputs to be used in transaction based on the amount
 		// neededing to sent, and the current fee estimation.
-		inputs, btcin, err := selectInputs(eligible, amt+fee, minconf)
+		inputs, btcin, err := selectInputs(eligible, amt, fee, minconf)
 		if err != nil {
 			return nil, err
 		}
