@@ -37,12 +37,12 @@ import (
 // funds from unspent tx outputs for a wallet to create a transaction.
 // This may be caused by not enough inputs for all of the desired total
 // transaction output amount, or due to
-type InsufficientFundsError struct {
+type InsufficientFunds struct {
 	in, out, fee btcutil.Amount
 }
 
 // Error satisifies the builtin error interface.
-func (e InsufficientFundsError) Error() string {
+func (e InsufficientFunds) Error() string {
 	total := e.out + e.fee
 	if e.fee == 0 {
 		return fmt.Sprintf("insufficient funds: transaction requires "+
@@ -110,7 +110,7 @@ func selectInputs(eligible []txstore.Credit, amt, fee btcutil.Amount,
 		}
 	}
 	if out < amt+fee {
-		return nil, 0, InsufficientFundsError{out, amt, fee}
+		return nil, 0, InsufficientFunds{out, amt, fee}
 	}
 
 	return selected, out, nil
