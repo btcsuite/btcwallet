@@ -58,7 +58,7 @@ type config struct {
 	ConfigFile   string   `short:"C" long:"configfile" description:"Path to configuration file"`
 	SvrListeners []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
 	DataDir      string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
-	LogDir       string   `"long:"logdir" description:"Directory to log output."`
+	LogDir       string   `long:"logdir" description:"Directory to log output."`
 	Username     string   `short:"u" long:"username" description:"Username for client and btcd authorization"`
 	Password     string   `short:"P" long:"password" default-mask:"-" description:"Password for client and btcd authorization"`
 	BtcdUsername string   `long:"btcdusername" description:"Alternative username for btcd authorization"`
