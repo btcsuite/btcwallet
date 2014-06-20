@@ -619,8 +619,6 @@ func (am *AccountManager) RegisterNewAccount(a *Account) error {
 // Rollback rolls back each managed Account to the state before the block
 // specified by height and hash was connected to the main chain.
 func (am *AccountManager) Rollback(height int32, hash *btcwire.ShaHash) error {
-	log.Infof("Rolling back tx history since block height %v", height)
-
 	for _, a := range am.AllAccounts() {
 		if err := a.TxStore.Rollback(height); err != nil {
 			return err

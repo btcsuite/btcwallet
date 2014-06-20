@@ -808,6 +808,15 @@ func (s *Store) Rollback(height int32) error {
 	detached := s.blocks[i:]
 	s.blocks = s.blocks[:i]
 	for _, b := range detached {
+		movedTxs := len(b.txs)
+		// Don't include coinbase transaction with number of moved txs.
+		// There should always be at least one tx in a block collection,
+		// and if there is a coinbase, it would be at index 0.
+		if b.txs[0].tx.Index() == 0 {
+			movedTxs--
+		}
+		log.Infof("Rolling back block %d (%d transactions marked "+
+			"unconfirmed)", b.Height, movedTxs)
 		delete(s.blockIndexes, b.Block.Height)
 		for _, r := range b.txs {
 			oldTxIndex := r.Tx().Index()
