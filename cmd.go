@@ -102,37 +102,24 @@ func accessClient() (*rpcClient, error) {
 	return c, nil
 }
 
-func clientConnect(certs []byte, newClient chan<- *rpcClient) {
-	const initialWait = 5 * time.Second
-	wait := initialWait
-	for {
-		client, err := newRPCClient(certs)
-		if err != nil {
-			log.Warnf("Unable to open chain server client "+
-				"connection: %v", err)
-			time.Sleep(wait)
-			wait <<= 1
-			if wait > time.Minute {
-				wait = time.Minute
-			}
-			continue
-		}
-
-		wait = initialWait
-
-		client.Start()
-		newClient <- client
-
-		client.WaitForShutdown()
+func main() {
+	// Work around defer not working after os.Exit.
+	if err := walletMain(); err != nil {
+		os.Exit(1)
 	}
 }
 
-func main() {
+// walletMain is a work-around main function that is required since deferred
+// functions (such as log flushing) are not called with calls to os.Exit.
+// Instead, main runs this function and checks for a non-nil error, at which
+// point any defers have already run, and if the error is non-nil, the program
+// can be exited with an error exit status.
+func walletMain() error {
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.
 	tcfg, _, err := loadConfig()
 	if err != nil {
-		os.Exit(1)
+		return err
 	}
 	cfg = tcfg
 	defer backendLog.Flush()
@@ -152,11 +139,14 @@ func main() {
 	certs, err := ioutil.ReadFile(cfg.CAFile)
 	if err != nil {
 		log.Errorf("cannot open CA file: %v", err)
-		os.Exit(1)
+		return err
 	}
 
 	// Check and update any old file locations.
-	updateOldFileLocations()
+	err = updateOldFileLocations()
+	if err != nil {
+		return err
+	}
 
 	// Start account manager and open accounts.
 	AcctMgr.Start()
@@ -164,7 +154,7 @@ func main() {
 	server, err = newRPCServer(cfg.SvrListeners)
 	if err != nil {
 		log.Errorf("Unable to create HTTP server: %v", err)
-		os.Exit(1)
+		return err
 	}
 
 	// Start HTTP server to serve wallet client connections.
@@ -174,5 +164,26 @@ func main() {
 	// reconnections if the client could not be successfully connected.
 	clientChan := make(chan *rpcClient)
 	go clientAccess(clientChan)
-	clientConnect(certs, clientChan)
+	const initialWait = 5 * time.Second
+	wait := initialWait
+	for {
+		client, err := newRPCClient(certs)
+		if err != nil {
+			log.Warnf("Unable to open chain server client "+
+				"connection: %v", err)
+			time.Sleep(wait)
+			wait <<= 1
+			if wait > time.Minute {
+				wait = time.Minute
+			}
+			continue
+		}
+
+		wait = initialWait
+
+		client.Start()
+		clientChan <- client
+
+		client.WaitForShutdown()
+	}
 }

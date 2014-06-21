@@ -29,10 +29,7 @@ var ErrNotAccountDir = errors.New("directory is not an account directory")
 
 // updateOldFileLocations moves files for wallets, transactions, and
 // recorded unspent transaction outputs to more recent locations.
-//
-// If any errors are encounted during this function, the application is
-// closed.
-func updateOldFileLocations() {
+func updateOldFileLocations() error {
 	// Before version 0.1.1, accounts were saved with the following
 	// format:
 	//
@@ -69,7 +66,7 @@ func updateOldFileLocations() {
 
 	datafi, err := os.Open(cfg.DataDir)
 	if err != nil {
-		return
+		return nil
 	}
 	defer func() {
 		if err := datafi.Close(); err != nil {
@@ -81,7 +78,7 @@ func updateOldFileLocations() {
 	fi, err := datafi.Readdir(0)
 	if err != nil {
 		log.Errorf("Cannot read files in data directory: %v", err)
-		os.Exit(1)
+		return err
 	}
 
 	acctsExist := false
@@ -97,14 +94,14 @@ func updateOldFileLocations() {
 		}
 	}
 	if !acctsExist {
-		return
+		return nil
 	}
 
 	// Create testnet directory, if it doesn't already exist.
 	netdir := filepath.Join(cfg.DataDir, "testnet")
 	if err := checkCreateDir(netdir); err != nil {
 		log.Errorf("Cannot continue without a testnet directory: %v", err)
-		os.Exit(1)
+		return err
 	}
 
 	// Check all files in the datadir for old accounts to update.
@@ -124,7 +121,7 @@ func updateOldFileLocations() {
 
 		default: // all other non-nil errors
 			log.Errorf("Cannot open old account directory: %v", err)
-			os.Exit(1)
+			return err
 		}
 
 		log.Infof("Updating old file locations for account %v", account)
@@ -136,7 +133,7 @@ func updateOldFileLocations() {
 			if err := Rename(old, new); err != nil {
 				log.Errorf("Cannot move old %v for account %v to new location: %v",
 					"wallet.bin", account, err)
-				os.Exit(1)
+				return err
 			}
 		}
 
@@ -145,6 +142,8 @@ func updateOldFileLocations() {
 			log.Warnf("Could not remove pre 0.1.1 account directory: %v", err)
 		}
 	}
+
+	return nil
 }
 
 type oldAccountDir struct {
