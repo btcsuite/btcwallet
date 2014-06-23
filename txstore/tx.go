@@ -250,7 +250,6 @@ type debits struct {
 // credit describes a transaction output which was or is spendable by wallet.
 type credit struct {
 	change  bool
-	locked  bool
 	spentBy *BlockTxKey // nil if unspent
 }
 

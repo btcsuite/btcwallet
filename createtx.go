@@ -197,6 +197,12 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 					continue
 				}
 			}
+
+			// Locked unspent outputs are skipped.
+			if a.LockedOutpoint(*unspent[i].OutPoint()) {
+				continue
+			}
+
 			eligible = append(eligible, unspent[i])
 		}
 	}

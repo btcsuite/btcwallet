@@ -35,7 +35,8 @@ import (
 type Account struct {
 	name string
 	*wallet.Wallet
-	TxStore *txstore.Store
+	TxStore         *txstore.Store
+	lockedOutpoints map[btcwire.OutPoint]struct{}
 }
 
 // Lock locks the underlying wallet for an account.
@@ -430,6 +431,44 @@ func (a *Account) exportBase64() (map[string]string, error) {
 	buf.Reset()
 
 	return m, nil
+}
+
+// LockedOutpoint returns whether an outpoint has been marked as locked and
+// should not be used as an input for created transactions.
+func (a *Account) LockedOutpoint(op btcwire.OutPoint) bool {
+	_, locked := a.lockedOutpoints[op]
+	return locked
+}
+
+// LockOutpoint marks an outpoint as locked, that is, it should not be used as
+// an input for newly created transactions.
+func (a *Account) LockOutpoint(op btcwire.OutPoint) {
+	a.lockedOutpoints[op] = struct{}{}
+}
+
+// UnlockOutpoint marks an outpoint as unlocked, that is, it may be used as an
+// input for newly created transactions.
+func (a *Account) UnlockOutpoint(op btcwire.OutPoint) {
+	delete(a.lockedOutpoints, op)
+}
+
+// ResetLockedOutpoints resets the set of locked outpoints so all may be used
+// as inputs for new transactions.
+func (a *Account) ResetLockedOutpoints() {
+	a.lockedOutpoints = map[btcwire.OutPoint]struct{}{}
+}
+
+// LockedOutpoints returns a slice of currently locked outpoints.  This is
+// intended to be used by marshaling the result as a JSON array for
+// listlockunspent RPC results.
+func (a *Account) LockedOutpoints() []btcjson.TransactionInput {
+	locked := make([]btcjson.TransactionInput, len(a.lockedOutpoints))
+	i := 0
+	for op := range a.lockedOutpoints {
+		locked[i] = btcjson.TransactionInput{op.Hash.String(), op.Index}
+		i++
+	}
+	return locked
 }
 
 // Track requests btcd to send notifications of new transactions for

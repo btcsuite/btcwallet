@@ -566,7 +566,7 @@ func (t *txRecord) ReadFrom(r io.Reader) (int64, error) {
 				}
 			}
 
-			c := &credit{change, false, spentBy}
+			c := &credit{change, spentBy}
 			credits = append(credits, c)
 		}
 

@@ -728,6 +728,7 @@ func (s *rpcServer) PostClientRPC(w http.ResponseWriter, r *http.Request) {
 		id = cmd.Id()
 	}
 	if err != nil {
+		fmt.Printf("%s\n", rpcRequest)
 		_, err := w.Write(marshalError(idPointer(cmd.Id())))
 		if err != nil {
 			log.Warnf("Client sent invalid request but unable "+
@@ -828,10 +829,12 @@ var rpcHandlers = map[string]requestHandler{
 	"importprivkey":          ImportPrivKey,
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
+	"listlockunspent":        ListLockUnspent,
 	"listreceivedbyaddress":  ListReceivedByAddress,
 	"listsinceblock":         ListSinceBlock,
 	"listtransactions":       ListTransactions,
 	"listunspent":            ListUnspent,
+	"lockunspent":            LockUnspent,
 	"sendfrom":               SendFrom,
 	"sendmany":               SendMany,
 	"sendtoaddress":          SendToAddress,
@@ -853,9 +856,7 @@ var rpcHandlers = map[string]requestHandler{
 	"getwalletinfo":         Unimplemented,
 	"importwallet":          Unimplemented,
 	"listaddressgroupings":  Unimplemented,
-	"listlockunspent":       Unimplemented,
 	"listreceivedbyaccount": Unimplemented,
-	"lockunspent":           Unimplemented,
 	"move":                  Unimplemented,
 	"setaccount":            Unimplemented,
 	"stop":                  Unimplemented,
@@ -1589,6 +1590,20 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 	return AcctMgr.ListAccounts(cmd.MinConf), nil
 }
 
+// ListLockUnspent handles a listlockunspent request by returning an array of
+// all locked outpoints.
+func ListLockUnspent(icmd btcjson.Cmd) (interface{}, error) {
+	// Due to our poor account support, this assumes only the default
+	// account is available.  When the keystore and account heirarchies are
+	// reversed, the locked outpoints mapping will cover all accounts.
+	a, err := AcctMgr.Account("")
+	if err != nil {
+		return nil, err
+	}
+
+	return a.LockedOutpoints(), nil
+}
+
 // ListReceivedByAddress handles a listreceivedbyaddress request by returning
 // a slice of objects, each one containing:
 //  "account": the account of the receiving address;
@@ -1849,6 +1864,41 @@ func ListUnspent(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	return AcctMgr.ListUnspent(cmd.MinConf, cmd.MaxConf, addresses)
+}
+
+// LockUnspent handles the lockunspent command.
+func LockUnspent(icmd btcjson.Cmd) (interface{}, error) {
+	cmd, ok := icmd.(*btcjson.LockUnspentCmd)
+	if !ok {
+		return nil, btcjson.ErrInternal
+	}
+
+	// Due to our poor account support, this assumes only the default
+	// account is available.  When the keystore and account heirarchies are
+	// reversed, the locked outpoints mapping will cover all accounts.
+	a, err := AcctMgr.Account("")
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case cmd.Unlock && len(cmd.Transactions) == 0:
+		a.ResetLockedOutpoints()
+	default:
+		for _, input := range cmd.Transactions {
+			txSha, err := btcwire.NewShaHashFromStr(input.Txid)
+			if err != nil {
+				return nil, ParseError{err}
+			}
+			op := btcwire.OutPoint{Hash: *txSha, Index: input.Vout}
+			if cmd.Unlock {
+				a.UnlockOutpoint(op)
+			} else {
+				a.LockOutpoint(op)
+			}
+		}
+	}
+	return true, nil
 }
 
 // sendPairs is a helper routine to reduce duplicated code when creating and

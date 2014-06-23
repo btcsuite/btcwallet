@@ -89,7 +89,8 @@ func TestFakeTxs(t *testing.T) {
 		return
 	}
 	a := &Account{
-		Wallet: w,
+		Wallet:          w,
+		lockedOutpoints: map[btcwire.OutPoint]struct{}{},
 	}
 
 	w.Unlock([]byte("banana"))
