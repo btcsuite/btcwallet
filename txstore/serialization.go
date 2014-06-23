@@ -521,18 +521,19 @@ func (t *txRecord) ReadFrom(r io.Reader) (int64, error) {
 				return n64, err
 			}
 
-			// Read single byte that specifies whether this credit
-			// is locked.
+			// Read single byte.  This was previously used to
+			// specify whether an unspent credit was locked or not,
+			// but this was removed as lockedness is volatile and
+			// should not be saved.
+			//
+			// This space can be used for additional flags in the
+			// future.
 			n, err = io.ReadFull(r, singleByte)
 			n64 += int64(n)
 			if err != nil {
 				if err == io.EOF {
 					err = io.ErrUnexpectedEOF
 				}
-				return n64, err
-			}
-			locked, err := byteAsBool(singleByte[0])
-			if err != nil {
 				return n64, err
 			}
 
@@ -565,7 +566,7 @@ func (t *txRecord) ReadFrom(r io.Reader) (int64, error) {
 				}
 			}
 
-			c := &credit{change, locked, spentBy}
+			c := &credit{change, false, spentBy}
 			credits = append(credits, c)
 		}
 
@@ -678,24 +679,15 @@ func (t *txRecord) WriteTo(w io.Writer) (int64, error) {
 			}
 
 			// Write a single byte to specify whether this credit
-			// was added as change.
+			// was added as change, plus an extra empty byte which
+			// used to specify whether the credit was locked.  This
+			// extra byte is currently unused and may be used for
+			// other flags in the future.
 			changeByte := falseByte
 			if c.change {
 				changeByte = trueByte
 			}
-			n, err = w.Write([]byte{changeByte})
-			n64 += int64(n)
-			if err != nil {
-				return n64, err
-			}
-
-			// Write a single byte to specify whether this credit
-			// is locked.
-			lockByte := falseByte
-			if c.change {
-				lockByte = trueByte
-			}
-			n, err = w.Write([]byte{lockByte})
+			n, err = w.Write([]byte{changeByte, 0})
 			n64 += int64(n)
 			if err != nil {
 				return n64, err
