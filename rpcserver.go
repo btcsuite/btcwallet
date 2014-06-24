@@ -901,8 +901,6 @@ var rpcHandlers = map[string]requestHandler{
 	"backupwallet":          Unimplemented,
 	"dumpwallet":            Unimplemented,
 	"getreceivedbyaddress":  Unimplemented,
-	"gettxout":              Unimplemented,
-	"gettxoutsetinfo":       Unimplemented,
 	"getwalletinfo":         Unimplemented,
 	"importwallet":          Unimplemented,
 	"listaddressgroupings":  Unimplemented,
