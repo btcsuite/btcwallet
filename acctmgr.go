@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Errors relating to accounts.
@@ -36,6 +37,7 @@ var (
 	ErrAccountExists = errors.New("account already exists")
 	ErrWalletExists  = errors.New("wallet already exists")
 	ErrNotFound      = errors.New("not found")
+	ErrNoAccounts    = errors.New("no accounts")
 )
 
 // AcctMgr is the global account manager for all opened accounts.
@@ -70,6 +72,8 @@ type removeAccountCmd struct {
 	a *Account
 }
 
+type quitCmd struct{}
+
 // AccountManager manages a collection of accounts.
 type AccountManager struct {
 	// The accounts accessed through the account manager are not safe for
@@ -81,6 +85,9 @@ type AccountManager struct {
 
 	ds *DiskSyncer
 	rm *RescanManager
+
+	wg   sync.WaitGroup
+	quit chan struct{}
 }
 
 // NewAccountManager returns a new AccountManager.
@@ -89,6 +96,7 @@ func NewAccountManager() *AccountManager {
 		bsem:       make(chan struct{}, 1),
 		cmdChan:    make(chan interface{}),
 		rescanMsgs: make(chan RescanMsg, 1),
+		quit:       make(chan struct{}),
 	}
 	am.ds = NewDiskSyncer(am)
 	am.rm = NewRescanManager(am.rescanMsgs)
@@ -100,10 +108,27 @@ func (am *AccountManager) Start() {
 	// Ready the semaphore - can't grab unless the manager has started.
 	am.bsem <- struct{}{}
 
+	am.wg.Add(4)
 	go am.accountHandler()
 	go am.rescanListener()
 	go am.ds.Start()
 	go am.rm.Start()
+}
+
+// Stop shuts down the account manager by stoping all signaling all goroutines
+// started by Start to close.
+func (am *AccountManager) Stop() {
+	am.rm.Stop()
+	am.ds.Stop()
+	close(am.quit)
+}
+
+// WaitForShutdown blocks until all goroutines started by Start and stopped
+// with Stop have finished.
+func (am *AccountManager) WaitForShutdown() {
+	am.rm.WaitForShutdown()
+	am.ds.WaitForShutdown()
+	am.wg.Wait()
 }
 
 // accountData is a helper structure to let us centralise logic for adding
@@ -394,49 +419,57 @@ func openAccounts() *accountData {
 func (am *AccountManager) accountHandler() {
 	ad := openAccounts()
 
-	for c := range am.cmdChan {
-		switch cmd := c.(type) {
-		case *openAccountsCmd:
-			// Write all old accounts before proceeding.
-			for _, a := range ad.nameToAccount {
-				if err := am.ds.FlushAccount(a); err != nil {
-					log.Errorf("Cannot write previously "+
-						"scheduled account file: %v", err)
+out:
+	for {
+		select {
+		case c := <-am.cmdChan:
+			switch cmd := c.(type) {
+			case *openAccountsCmd:
+				// Write all old accounts before proceeding.
+				for _, a := range ad.nameToAccount {
+					if err := am.ds.FlushAccount(a); err != nil {
+						log.Errorf("Cannot write previously "+
+							"scheduled account file: %v", err)
+					}
 				}
+
+				ad = openAccounts()
+			case *accessAccountRequest:
+				a, ok := ad.nameToAccount[cmd.name]
+				if !ok {
+					a = nil
+				}
+				cmd.resp <- a
+
+			case *accessAccountByAddressRequest:
+				a, ok := ad.addressToAccount[cmd.address]
+				if !ok {
+					a = nil
+				}
+				cmd.resp <- a
+
+			case *accessAllRequest:
+				s := make([]*Account, 0, len(ad.nameToAccount))
+				for _, a := range ad.nameToAccount {
+					s = append(s, a)
+				}
+				cmd.resp <- s
+
+			case *addAccountCmd:
+				ad.addAccount(cmd.a)
+			case *removeAccountCmd:
+				ad.removeAccount(cmd.a)
+
+			case *markAddressForAccountCmd:
+				// TODO(oga) make sure we own account
+				ad.addressToAccount[cmd.address] = cmd.account
 			}
 
-			ad = openAccounts()
-		case *accessAccountRequest:
-			a, ok := ad.nameToAccount[cmd.name]
-			if !ok {
-				a = nil
-			}
-			cmd.resp <- a
-
-		case *accessAccountByAddressRequest:
-			a, ok := ad.addressToAccount[cmd.address]
-			if !ok {
-				a = nil
-			}
-			cmd.resp <- a
-
-		case *accessAllRequest:
-			s := make([]*Account, 0, len(ad.nameToAccount))
-			for _, a := range ad.nameToAccount {
-				s = append(s, a)
-			}
-			cmd.resp <- s
-
-		case *addAccountCmd:
-			ad.addAccount(cmd.a)
-		case *removeAccountCmd:
-			ad.removeAccount(cmd.a)
-
-		case *markAddressForAccountCmd:
-			// TODO(oga) make sure we own account
-			ad.addressToAccount[cmd.address] = cmd.account
+		case <-am.quit:
+			break out
 		}
 	}
+	am.wg.Done()
 }
 
 // rescanListener listens for messages from the rescan manager and marks
@@ -540,18 +573,22 @@ func (am *AccountManager) Account(name string) (*Account, error) {
 
 // AccountByAddress returns the account specified by address, or
 // ErrNotFound as an error if the account is not found.
-func (am *AccountManager) AccountByAddress(addr btcutil.Address) (*Account,
-	error) {
+func (am *AccountManager) AccountByAddress(addr btcutil.Address) (*Account, error) {
 	respChan := make(chan *Account)
-	am.cmdChan <- &accessAccountByAddressRequest{
+	req := accessAccountByAddressRequest{
 		address: addr.EncodeAddress(),
 		resp:    respChan,
 	}
-	resp := <-respChan
-	if resp == nil {
-		return nil, ErrNotFound
+	select {
+	case am.cmdChan <- &req:
+		resp := <-respChan
+		if resp == nil {
+			return nil, ErrNotFound
+		}
+		return resp, nil
+	case <-am.quit:
+		return nil, ErrNoAccounts
 	}
-	return resp, nil
 }
 
 // MarkAddressForAccount labels the given account as containing the provided
@@ -561,15 +598,18 @@ func (am *AccountManager) MarkAddressForAccount(address btcutil.Address,
 	// TODO(oga) really this entire dance should be carried out implicitly
 	// instead of requiring explicit messaging from the account to the
 	// manager.
-	am.cmdChan <- &markAddressForAccountCmd{
+	req := markAddressForAccountCmd{
 		address: address.EncodeAddress(),
 		account: account,
+	}
+	select {
+	case am.cmdChan <- &req:
+	case <-am.quit:
 	}
 }
 
 // Address looks up an address if it is known to wallet at all.
-func (am *AccountManager) Address(addr btcutil.Address) (wallet.WalletAddress,
-	error) {
+func (am *AccountManager) Address(addr btcutil.Address) (wallet.WalletAddress, error) {
 	a, err := am.AccountByAddress(addr)
 	if err != nil {
 		return nil, err
@@ -581,24 +621,37 @@ func (am *AccountManager) Address(addr btcutil.Address) (wallet.WalletAddress,
 // AllAccounts returns a slice of all managed accounts.
 func (am *AccountManager) AllAccounts() []*Account {
 	respChan := make(chan []*Account)
-	am.cmdChan <- &accessAllRequest{
+	req := accessAllRequest{
 		resp: respChan,
 	}
-	return <-respChan
+	select {
+	case am.cmdChan <- &req:
+		return <-respChan
+	case <-am.quit:
+		return nil
+	}
 }
 
 // AddAccount adds an account to the collection managed by an AccountManager.
 func (am *AccountManager) AddAccount(a *Account) {
-	am.cmdChan <- &addAccountCmd{
+	req := addAccountCmd{
 		a: a,
+	}
+	select {
+	case am.cmdChan <- &req:
+	case <-am.quit:
 	}
 }
 
 // RemoveAccount removes an account to the collection managed by an
 // AccountManager.
 func (am *AccountManager) RemoveAccount(a *Account) {
-	am.cmdChan <- &removeAccountCmd{
+	req := removeAccountCmd{
 		a: a,
+	}
+	select {
+	case am.cmdChan <- &req:
+	case <-am.quit:
 	}
 }
 

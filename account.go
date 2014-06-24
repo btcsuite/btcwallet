@@ -465,7 +465,10 @@ func (a *Account) LockedOutpoints() []btcjson.TransactionInput {
 	locked := make([]btcjson.TransactionInput, len(a.lockedOutpoints))
 	i := 0
 	for op := range a.lockedOutpoints {
-		locked[i] = btcjson.TransactionInput{op.Hash.String(), op.Index}
+		locked[i] = btcjson.TransactionInput{
+			Txid: op.Hash.String(),
+			Vout: op.Index,
+		}
 		i++
 	}
 	return locked

@@ -260,6 +260,7 @@ type rpcClient struct {
 	*btcrpcclient.Client // client to btcd
 	enqueueNotification  chan notification
 	dequeueNotification  chan notification
+	quit                 chan struct{}
 	wg                   sync.WaitGroup
 }
 
@@ -267,6 +268,7 @@ func newRPCClient(certs []byte) (*rpcClient, error) {
 	client := rpcClient{
 		enqueueNotification: make(chan notification),
 		dequeueNotification: make(chan notification),
+		quit:                make(chan struct{}),
 	}
 	initializedClient := make(chan struct{})
 	ntfnCallbacks := btcrpcclient.NotificationHandlers{
@@ -317,7 +319,13 @@ func (c *rpcClient) Stop() {
 		log.Warn("Disconnecting chain server client connection")
 		c.Client.Shutdown()
 	}
-	close(c.enqueueNotification)
+
+	select {
+	case <-c.quit:
+	default:
+		close(c.quit)
+		close(c.enqueueNotification)
+	}
 }
 
 func (c *rpcClient) WaitForShutdown() {

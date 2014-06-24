@@ -17,6 +17,8 @@
 package main
 
 import (
+	"sync"
+
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwire"
 )
@@ -68,6 +70,8 @@ type RescanManager struct {
 	status          chan interface{} // rescanProgress and rescanFinished
 	msgs            chan RescanMsg
 	jobCompleteChan chan chan struct{}
+	wg              sync.WaitGroup
+	quit            chan struct{}
 }
 
 // NewRescanManager creates a new RescanManger.  If msgChan is non-nil,
@@ -80,13 +84,23 @@ func NewRescanManager(msgChan chan RescanMsg) *RescanManager {
 		status:          make(chan interface{}, 1),
 		msgs:            msgChan,
 		jobCompleteChan: make(chan chan struct{}, 1),
+		quit:            make(chan struct{}),
 	}
 }
 
 // Start starts the goroutines to run the RescanManager.
 func (m *RescanManager) Start() {
+	m.wg.Add(2)
 	go m.jobHandler()
 	go m.rpcHandler()
+}
+
+func (m *RescanManager) Stop() {
+	close(m.quit)
+}
+
+func (m *RescanManager) WaitForShutdown() {
+	m.wg.Wait()
 }
 
 type rescanBatch struct {
@@ -146,6 +160,7 @@ func (m *RescanManager) jobHandler() {
 	curBatch := newRescanBatch()
 	nextBatch := newRescanBatch()
 
+out:
 	for {
 		select {
 		case job := <-m.addJob:
@@ -205,8 +220,16 @@ func (m *RescanManager) jobHandler() {
 				// Unexpected status message
 				panic(s)
 			}
+
+		case <-m.quit:
+			break out
 		}
 	}
+	close(m.sendJob)
+	if m.msgs != nil {
+		close(m.msgs)
+	}
+	m.wg.Done()
 }
 
 // rpcHandler reads jobs sent by the jobHandler and sends the rpc requests
@@ -228,6 +251,7 @@ func (m *RescanManager) rpcHandler() {
 			m.MarkFinished(rescanFinished{err})
 		}
 	}
+	m.wg.Done()
 }
 
 // RescanJob is a job to be processed by the RescanManager.  The job includes

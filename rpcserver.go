@@ -213,11 +213,13 @@ type rpcServer struct {
 
 	upgrader websocket.Upgrader
 
-	requests requestChan
+	requests chan handlerJob
 
 	addWSClient    chan *websocketClient
 	removeWSClient chan *websocketClient
 	broadcasts     chan []byte
+
+	quit chan struct{}
 }
 
 // newRPCServer creates a new server for serving RPC client connections, both
@@ -232,10 +234,11 @@ func newRPCServer(listenAddrs []string) (*rpcServer, error) {
 			// Allow all origins.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		requests:       make(requestChan),
+		requests:       make(chan handlerJob),
 		addWSClient:    make(chan *websocketClient),
 		removeWSClient: make(chan *websocketClient),
 		broadcasts:     make(chan []byte),
+		quit:           make(chan struct{}),
 	}
 
 	// Check for existence of cert file and key file
@@ -292,8 +295,9 @@ func (s *rpcServer) Start() {
 	// A duplicator for notifications intended for all clients runs
 	// in another goroutines.  Any such notifications are sent to
 	// the allClients channel and then sent to each connected client.
+	s.wg.Add(2)
 	go s.NotificationHandler()
-	go s.requests.handler()
+	go s.RequestHandler()
 
 	log.Trace("Starting RPC server")
 
@@ -349,14 +353,54 @@ func (s *rpcServer) Start() {
 		s.wg.Add(1)
 		go func(listener net.Listener) {
 			log.Infof("RPCS: RPC server listening on %s", listener.Addr())
-			if err := httpServer.Serve(listener); err != nil {
-				log.Errorf("Listener for %s exited with error: %v",
-					listener.Addr(), err)
-			}
+			_ = httpServer.Serve(listener)
 			log.Tracef("RPCS: RPC listener done for %s", listener.Addr())
 			s.wg.Done()
 		}(listener)
 	}
+}
+
+// Stop gracefully shuts down the rpc server by stopping and disconnecting all
+// clients, disconnecting the chain server connection, and closing the wallet's
+// account files.
+func (s *rpcServer) Stop() {
+	// If the server is changed to run more than one rpc handler at a time,
+	// to prevent a double channel close, this should be replaced with an
+	// atomic test-and-set.
+	select {
+	case <-s.quit:
+		log.Warnf("Server already shutting down")
+		return
+	default:
+	}
+
+	log.Warn("Server shutting down")
+
+	// Stop all the listeners.  There will not be any listeners if
+	// listening is disabled.
+	for _, listener := range s.listeners {
+		err := listener.Close()
+		if err != nil {
+			log.Errorf("Cannot close listener %s: %v",
+				listener.Addr(), err)
+		}
+	}
+
+	// Disconnect the connected chain server, if any.
+	client, err := accessClient()
+	if err == nil {
+		client.Stop()
+	}
+
+	// Stop the account manager and finish all pending account file writes.
+	AcctMgr.Stop()
+
+	// Signal the remaining goroutines to stop.
+	close(s.quit)
+}
+
+func (s *rpcServer) WaitForShutdown() {
+	s.wg.Wait()
 }
 
 // ErrNoAuth represents an error where authentication could not succeed
@@ -789,6 +833,7 @@ func (s *rpcServer) NotifyConnectionStatus(wsc *websocketClient) {
 }
 
 func (s *rpcServer) NotificationHandler() {
+out:
 	for {
 		select {
 		case c := <-s.addWSClient:
@@ -801,8 +846,11 @@ func (s *rpcServer) NotificationHandler() {
 					delete(s.wsClients, wsc)
 				}
 			}
+		case <-s.quit:
+			break out
 		}
 	}
+	s.wg.Done()
 }
 
 // requestHandler is a handler function to handle an unmarshaled and parsed
@@ -841,6 +889,7 @@ var rpcHandlers = map[string]requestHandler{
 	"settxfee":               SetTxFee,
 	"signmessage":            SignMessage,
 	"signrawtransaction":     SignRawTransaction,
+	"stop":                   Stop,
 	"validateaddress":        ValidateAddress,
 	"verifymessage":          VerifyMessage,
 	"walletlock":             WalletLock,
@@ -859,7 +908,6 @@ var rpcHandlers = map[string]requestHandler{
 	"listreceivedbyaccount": Unimplemented,
 	"move":                  Unimplemented,
 	"setaccount":            Unimplemented,
-	"stop":                  Unimplemented,
 
 	// Standard bitcoind methods which won't be implemented by btcwallet.
 	"encryptwallet": Unsupported,
@@ -901,36 +949,42 @@ type handlerJob struct {
 	response chan<- handlerResponse
 }
 
-type requestChan chan handlerJob
+// RequestHandler reads and processes client requests from the request channel.
+// Each request is run with exclusive access to the account manager.
+func (s *rpcServer) RequestHandler() {
+out:
+	for {
+		select {
+		case r := <-s.requests:
+			AcctMgr.Grab()
+			result, err := r.handler(r.request)
+			AcctMgr.Release()
 
-// handler reads and processes client requests from the channel.  Each
-// request is run with exclusive access to the account manager.
-func (c requestChan) handler() {
-	for r := range c {
-		AcctMgr.Grab()
-		result, err := r.handler(r.request)
-		AcctMgr.Release()
-
-		var jsonErr *btcjson.Error
-		if err != nil {
-			jsonErr = &btcjson.Error{Message: err.Error()}
-			switch e := err.(type) {
-			case btcjson.Error:
-				*jsonErr = e
-			case DeserializationError:
-				jsonErr.Code = btcjson.ErrDeserialization.Code
-			case InvalidParameterError:
-				jsonErr.Code = btcjson.ErrInvalidParameter.Code
-			case ParseError:
-				jsonErr.Code = btcjson.ErrParse.Code
-			case InvalidAddressOrKeyError:
-				jsonErr.Code = btcjson.ErrInvalidAddressOrKey.Code
-			default: // All other errors get the wallet error code.
-				jsonErr.Code = btcjson.ErrWallet.Code
+			var jsonErr *btcjson.Error
+			if err != nil {
+				jsonErr = &btcjson.Error{Message: err.Error()}
+				switch e := err.(type) {
+				case btcjson.Error:
+					*jsonErr = e
+				case DeserializationError:
+					jsonErr.Code = btcjson.ErrDeserialization.Code
+				case InvalidParameterError:
+					jsonErr.Code = btcjson.ErrInvalidParameter.Code
+				case ParseError:
+					jsonErr.Code = btcjson.ErrParse.Code
+				case InvalidAddressOrKeyError:
+					jsonErr.Code = btcjson.ErrInvalidAddressOrKey.Code
+				default: // All other errors get the wallet error code.
+					jsonErr.Code = btcjson.ErrWallet.Code
+				}
 			}
+			r.response <- handlerResponse{result, jsonErr}
+
+		case <-s.quit:
+			break out
 		}
-		r.response <- handlerResponse{result, jsonErr}
 	}
+	s.wg.Done()
 }
 
 // Unimplemented handles an unimplemented RPC request with the
@@ -2490,6 +2544,13 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 		Hex:      hex.EncodeToString(buf.Bytes()),
 		Complete: complete,
 	}, nil
+}
+
+// Stop handles the stop command by shutting down the process after the request
+// is handled.
+func Stop(icmd btcjson.Cmd) (interface{}, error) {
+	server.Stop()
+	return "btcwallet stopping.", nil
 }
 
 // ValidateAddress handles the validateaddress command.

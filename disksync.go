@@ -204,6 +204,9 @@ type DiskSyncer struct {
 	// Account manager for this DiskSyncer.  This is only
 	// needed to grab the account manager semaphore.
 	am *AccountManager
+
+	quit     chan struct{}
+	shutdown chan struct{}
 }
 
 // NewDiskSyncer creates a new DiskSyncer.
@@ -215,12 +218,22 @@ func NewDiskSyncer(am *AccountManager) *DiskSyncer {
 		writeBatch:      make(chan *writeBatchRequest),
 		exportAccount:   make(chan *exportRequest),
 		am:              am,
+		quit:            make(chan struct{}),
+		shutdown:        make(chan struct{}),
 	}
 }
 
 // Start starts the goroutines required to run the DiskSyncer.
 func (ds *DiskSyncer) Start() {
 	go ds.handler()
+}
+
+func (ds *DiskSyncer) Stop() {
+	close(ds.quit)
+}
+
+func (ds *DiskSyncer) WaitForShutdown() {
+	<-ds.shutdown
 }
 
 // handler runs the disk syncer.  It manages a set of "dirty" account files
@@ -239,6 +252,7 @@ func (ds *DiskSyncer) handler() {
 	var timer <-chan time.Time
 	var sem chan struct{}
 	schedule := newSyncSchedule(netdir)
+out:
 	for {
 		select {
 		case <-sem: // Now have exclusive access of the account manager
@@ -288,8 +302,16 @@ func (ds *DiskSyncer) handler() {
 			a := er.a
 			dir := er.dir
 			er.err <- a.writeAll(dir)
+
+		case <-ds.quit:
+			err := schedule.flush()
+			if err != nil {
+				log.Errorf("Cannot write accounts: %v", err)
+			}
+			break out
 		}
 	}
+	close(ds.shutdown)
 }
 
 // FlushAccount writes all scheduled account files to disk for a single

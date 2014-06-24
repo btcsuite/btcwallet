@@ -32,8 +32,9 @@ import (
 )
 
 var (
-	cfg    *config
-	server *rpcServer
+	cfg          *config
+	server       *rpcServer
+	shutdownChan = make(chan struct{})
 
 	curBlock = struct {
 		sync.RWMutex
@@ -102,6 +103,36 @@ func accessClient() (*rpcClient, error) {
 	return c, nil
 }
 
+func clientConnect(certs []byte, newClient chan<- *rpcClient) {
+	const initialWait = 5 * time.Second
+	wait := initialWait
+	for {
+		select {
+		case <-server.quit:
+			return
+		default:
+		}
+
+		client, err := newRPCClient(certs)
+		if err != nil {
+			log.Warnf("Unable to open chain server client "+
+				"connection: %v", err)
+			time.Sleep(wait)
+			wait <<= 1
+			if wait > time.Minute {
+				wait = time.Minute
+			}
+			continue
+		}
+
+		wait = initialWait
+		client.Start()
+		newClient <- client
+
+		client.WaitForShutdown()
+	}
+}
+
 func main() {
 	// Work around defer not working after os.Exit.
 	if err := walletMain(); err != nil {
@@ -160,30 +191,18 @@ func walletMain() error {
 	// Start HTTP server to serve wallet client connections.
 	server.Start()
 
+	// Shutdown the server if an interrupt signal is received.
+	addInterruptHandler(server.Stop)
+
 	// Start client connection to a btcd chain server.  Attempt
 	// reconnections if the client could not be successfully connected.
 	clientChan := make(chan *rpcClient)
 	go clientAccess(clientChan)
-	const initialWait = 5 * time.Second
-	wait := initialWait
-	for {
-		client, err := newRPCClient(certs)
-		if err != nil {
-			log.Warnf("Unable to open chain server client "+
-				"connection: %v", err)
-			time.Sleep(wait)
-			wait <<= 1
-			if wait > time.Minute {
-				wait = time.Minute
-			}
-			continue
-		}
+	go clientConnect(certs, clientChan)
 
-		wait = initialWait
-
-		client.Start()
-		clientChan <- client
-
-		client.WaitForShutdown()
-	}
+	// Wait for the server to shutdown either due to a stop RPC request
+	// or an interrupt.
+	server.WaitForShutdown()
+	log.Info("Shutdown complete")
+	return nil
 }
