@@ -108,9 +108,10 @@ func (am *AccountManager) Start() {
 	// Ready the semaphore - can't grab unless the manager has started.
 	am.bsem <- struct{}{}
 
-	am.wg.Add(4)
+	am.wg.Add(2)
 	go am.accountHandler()
 	go am.rescanListener()
+
 	go am.ds.Start()
 	go am.rm.Start()
 }
@@ -537,6 +538,7 @@ func (am *AccountManager) rescanListener() {
 		}
 		AcctMgr.Release()
 	}
+	am.wg.Done()
 }
 
 // Grab grabs the account manager's binary semaphore.  A custom semaphore

@@ -400,6 +400,7 @@ func (s *rpcServer) Stop() {
 }
 
 func (s *rpcServer) WaitForShutdown() {
+	AcctMgr.WaitForShutdown()
 	s.wg.Wait()
 }
 
