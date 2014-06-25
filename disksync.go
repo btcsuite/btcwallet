@@ -394,18 +394,19 @@ func (a *Account) writeWallet(dir string) error {
 	if err != nil {
 		return err
 	}
-
 	if _, err = a.Wallet.WriteTo(tmpfile); err != nil {
 		return err
 	}
 
+	tmppath := tmpfile.Name()
 	if err := tmpfile.Sync(); err != nil {
-		return err
+		log.Warnf("Failed to sync temporary wallet file %s: %v",
+			tmppath, err)
 	}
 
-	tmppath := tmpfile.Name()
 	if err := tmpfile.Close(); err != nil {
-		log.Warnf("Cannot close temporary wallet file: %v", err)
+		log.Warnf("Cannot close temporary wallet file %s: %v",
+			tmppath, err)
 	}
 
 	return Rename(tmppath, wfilepath)
@@ -423,13 +424,15 @@ func (a *Account) writeTxStore(dir string) error {
 		return err
 	}
 
+	tmppath := tmpfile.Name()
 	if err := tmpfile.Sync(); err != nil {
-		return err
+		log.Warnf("Failed to sync temporary txstore file %s: %v",
+			tmppath, err)
 	}
 
-	tmppath := tmpfile.Name()
 	if err := tmpfile.Close(); err != nil {
-		log.Warnf("Cannot close temporary txstore file: %v", err)
+		log.Warnf("Cannot close temporary txstore file %s: %v",
+			tmppath, err)
 	}
 
 	return Rename(tmppath, txfilepath)
