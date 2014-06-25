@@ -399,6 +399,10 @@ func (a *Account) writeWallet(dir string) error {
 		return err
 	}
 
+	if err := tmpfile.Sync(); err != nil {
+		return err
+	}
+
 	tmppath := tmpfile.Name()
 	if err := tmpfile.Close(); err != nil {
 		log.Warnf("Cannot close temporary wallet file: %v", err)
@@ -416,6 +420,10 @@ func (a *Account) writeTxStore(dir string) error {
 	}
 
 	if _, err = a.TxStore.WriteTo(tmpfile); err != nil {
+		return err
+	}
+
+	if err := tmpfile.Sync(); err != nil {
 		return err
 	}
 
