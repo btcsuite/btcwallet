@@ -315,10 +315,8 @@ func (c *rpcClient) Start() {
 }
 
 func (c *rpcClient) Stop() {
-	if !c.Client.Disconnected() {
-		log.Warn("Disconnecting chain server client connection")
-		c.Client.Shutdown()
-	}
+	log.Warn("Disconnecting chain server client connection")
+	c.Client.Shutdown()
 
 	select {
 	case <-c.quit:
