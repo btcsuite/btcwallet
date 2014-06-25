@@ -658,13 +658,23 @@ out:
 		// execution of all handlers from all connections (both
 		// websocket and HTTP POST), and runs the handler with exclusive
 		// access of the account manager.
+		var response handlerResponse
 		responseChan := make(chan handlerResponse)
-		s.requests <- handlerJob{
+		job := handlerJob{
 			request:  cmd,
 			handler:  r.handler,
 			response: responseChan,
 		}
-		response := <-responseChan
+		select {
+		case s.requests <- job:
+			select {
+			case response = <-responseChan:
+			case <-s.quit:
+				break out
+			}
+		case <-s.quit:
+			break out
+		}
 		resp := btcjson.Reply{
 			Id:     idPointer(id),
 			Result: response.result,
@@ -701,7 +711,10 @@ func (s *rpcServer) WebsocketClientSend(wsc *websocketClient) {
 	}
 	close(wsc.quit)
 	log.Infof("Disconnected websocket client %s", wsc.remoteAddr)
-	s.removeWSClient <- wsc
+	select {
+	case s.removeWSClient <- wsc:
+	case <-s.quit:
+	}
 	s.wg.Done()
 }
 
@@ -718,7 +731,11 @@ func (s *rpcServer) WebsocketClientRPC(wsc *websocketClient) {
 
 	// Add client context so notifications duplicated to each
 	// client are received by this client.
-	s.addWSClient <- wsc
+	select {
+	case s.addWSClient <- wsc:
+	case <-s.quit:
+		return
+	}
 
 	s.wg.Add(4)
 	go s.WebsocketClientRead(wsc)
@@ -787,13 +804,23 @@ func (s *rpcServer) PostClientRPC(w http.ResponseWriter, r *http.Request) {
 	// execution of all handlers from all connections (both
 	// websocket and HTTP POST), and runs the handler with exclusive
 	// access of the account manager.
+	var response handlerResponse
 	responseChan := make(chan handlerResponse)
-	s.requests <- handlerJob{
+	job := handlerJob{
 		request:  cmd,
 		handler:  f,
 		response: responseChan,
 	}
-	response := <-responseChan
+	select {
+	case s.requests <- job:
+		select {
+		case response = <-responseChan:
+		case <-s.quit:
+			return
+		}
+	case <-s.quit:
+		return
+	}
 	resp := btcjson.Reply{
 		Id:     idPointer(id),
 		Result: response.result,
@@ -825,7 +852,10 @@ func (s *rpcServer) NotifyConnectionStatus(wsc *websocketClient) {
 		panic(err)
 	}
 	if wsc == nil {
-		s.broadcasts <- mntfn
+		select {
+		case s.broadcasts <- mntfn:
+		case <-s.quit:
+		}
 	} else {
 		// Don't care whether the client disconnected at this
 		// point, so discard error.
@@ -1412,7 +1442,10 @@ func (s *rpcServer) NotifyNewBlockChainHeight(bs *wallet.BlockStamp) {
 	if err != nil {
 		panic(err)
 	}
-	s.broadcasts <- mntfn
+	select {
+	case s.broadcasts <- mntfn:
+	case <-s.quit:
+	}
 }
 
 // NotifyBalances notifies an attached websocket clients of the current
@@ -2754,7 +2787,10 @@ func (s *rpcServer) NotifyWalletLockStateChange(account string, locked bool) {
 	if err != nil {
 		panic(err)
 	}
-	s.broadcasts <- mntfn
+	select {
+	case s.broadcasts <- mntfn:
+	case <-s.quit:
+	}
 }
 
 // NotifyWalletBalance sends a confirmed account balance notification
@@ -2767,7 +2803,10 @@ func (s *rpcServer) NotifyWalletBalance(account string, balance float64) {
 	if err != nil {
 		panic(err)
 	}
-	s.broadcasts <- mntfn
+	select {
+	case s.broadcasts <- mntfn:
+	case <-s.quit:
+	}
 }
 
 // NotifyWalletBalanceUnconfirmed sends a confirmed account balance
@@ -2780,7 +2819,10 @@ func (s *rpcServer) NotifyWalletBalanceUnconfirmed(account string, balance float
 	if err != nil {
 		panic(err)
 	}
-	s.broadcasts <- mntfn
+	select {
+	case s.broadcasts <- mntfn:
+	case <-s.quit:
+	}
 }
 
 // NotifyNewTxDetails sends details of a new transaction to all websocket
@@ -2793,5 +2835,8 @@ func (s *rpcServer) NotifyNewTxDetails(account string, details btcjson.ListTrans
 	if err != nil {
 		panic(err)
 	}
-	s.broadcasts <- mntfn
+	select {
+	case s.broadcasts <- mntfn:
+	case <-s.quit:
+	}
 }
