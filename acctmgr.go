@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/conformal/btcchain"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/txstore"
@@ -967,6 +968,11 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 			confs := credit.Confirmations(bs.Height)
 			if int(confs) < minconf || int(confs) > maxconf {
 				continue
+			}
+			if credit.IsCoinbase() {
+				if !credit.Confirmed(btcchain.CoinbaseMaturity, bs.Height) {
+					continue
+				}
 			}
 
 			_, addrs, _, _ := credit.Addresses(activeNet.Params)
