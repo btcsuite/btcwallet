@@ -974,6 +974,9 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 					continue
 				}
 			}
+			if a.LockedOutpoint(*credit.OutPoint()) {
+				continue
+			}
 
 			_, addrs, _, _ := credit.Addresses(activeNet.Params)
 			if filter {
