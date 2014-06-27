@@ -790,7 +790,6 @@ func (s *rpcServer) PostClientRPC(w http.ResponseWriter, r *http.Request) {
 		id = cmd.Id()
 	}
 	if err != nil {
-		fmt.Printf("%s\n", rpcRequest)
 		_, err := w.Write(marshalError(idPointer(cmd.Id())))
 		if err != nil {
 			log.Warnf("Client sent invalid request but unable "+
