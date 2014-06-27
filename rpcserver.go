@@ -785,12 +785,12 @@ func (s *rpcServer) PostClientRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Parse the full request since it must be handled by wallet.
 	cmd, err := btcjson.ParseMarshaledCmd(rpcRequest)
-	var id interface{}
+	var idPtr *interface{}
 	if cmd != nil {
-		id = cmd.Id()
+		idPtr = idPointer(cmd.Id())
 	}
 	if err != nil {
-		_, err := w.Write(marshalError(idPointer(cmd.Id())))
+		_, err := w.Write(marshalError(idPtr))
 		if err != nil {
 			log.Warnf("Client sent invalid request but unable "+
 				"to respond with error: %v", err)
@@ -821,7 +821,7 @@ func (s *rpcServer) PostClientRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := btcjson.Reply{
-		Id:     idPointer(id),
+		Id:     idPtr,
 		Result: response.result,
 		Error:  response.jsonErr,
 	}
