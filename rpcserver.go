@@ -1263,11 +1263,11 @@ func GetInfo(icmd btcjson.Cmd) (interface{}, error) {
 	for _, v := range accounts {
 		balance += v
 	}
-	info.WalletVersion = int(wallet.VersCurrent.Uint32())
+	info.WalletVersion = int32(wallet.VersCurrent.Uint32())
 	info.Balance = balance
 	// Keypool times are not tracked. set to current time.
 	info.KeypoolOldest = time.Now().Unix()
-	info.KeypoolSize = int(cfg.KeypoolSize)
+	info.KeypoolSize = int32(cfg.KeypoolSize)
 	TxFeeIncrement.Lock()
 	info.PaytxFee = float64(TxFeeIncrement.i) / float64(btcutil.SatoshiPerBitcoin)
 	TxFeeIncrement.Unlock()
@@ -2636,7 +2636,7 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, error) {
 			// script type
 			result.Script = class.String()
 			if class == btcscript.MultiSigTy {
-				result.SigsRequired = sa.RequiredSigs()
+				result.SigsRequired = int32(sa.RequiredSigs())
 			}
 		}
 	}
