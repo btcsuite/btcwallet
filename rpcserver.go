@@ -1675,7 +1675,7 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 	return AcctMgr.ListAccounts(cmd.MinConf), nil
 }
 
-// ListLockUnspent handles a listlockunspent request by returning an array of
+// ListLockUnspent handles a listlockunspent request by returning an slice of
 // all locked outpoints.
 func ListLockUnspent(icmd btcjson.Cmd) (interface{}, error) {
 	// Due to our poor account support, this assumes only the default
@@ -2691,32 +2691,17 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, error) {
 
 // WalletIsLocked handles the walletislocked extension request by
 // returning the current lock state (false for unlocked, true for locked)
-// of an account.  An error is returned if the requested account does not
-// exist.
+// of an account.
 func WalletIsLocked(icmd btcjson.Cmd) (interface{}, error) {
-	// Type assert icmd to access parameters.
-	cmd, ok := icmd.(*btcws.WalletIsLockedCmd)
-	if !ok {
-		return nil, btcjson.ErrInternal
-	}
-
-	a, err := AcctMgr.Account(cmd.Account)
-	if err != nil {
-		if err == ErrNotFound {
-			return nil, btcjson.ErrWalletInvalidAccountName
-		}
-		return nil, err
-	}
-
-	return a.Wallet.IsLocked(), nil
+	return !<-AcctMgr.unlockedState, nil
 }
 
 // WalletLock handles a walletlock request by locking the all account
 // wallets, returning an error if any wallet is not encrypted (for example,
 // a watching-only wallet).
 func WalletLock(icmd btcjson.Cmd) (interface{}, error) {
-	err := AcctMgr.LockWallets()
-	return nil, err
+	AcctMgr.LockWallets()
+	return nil, nil
 }
 
 // WalletPassphrase responds to the walletpassphrase request by unlocking
@@ -2729,21 +2714,9 @@ func WalletPassphrase(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, btcjson.ErrInternal
 	}
 
-	if err := AcctMgr.UnlockWallets(cmd.Passphrase); err != nil {
-		return nil, err
-	}
-
-	go func(timeout int64) {
-		time.Sleep(time.Second * time.Duration(timeout))
-		AcctMgr.Grab()
-		defer AcctMgr.Release()
-		err := AcctMgr.LockWallets()
-		if err != nil {
-			log.Warnf("Cannot lock account wallets: %v", err)
-		}
-	}(cmd.Timeout)
-
-	return nil, nil
+	timeout := time.Second * time.Duration(cmd.Timeout)
+	err := AcctMgr.UnlockWallets([]byte(cmd.Passphrase), timeout)
+	return nil, err
 }
 
 // WalletPassphraseChange responds to the walletpassphrasechange request

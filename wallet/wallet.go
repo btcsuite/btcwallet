@@ -2367,14 +2367,6 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 		return nil, errors.New("unable to unlock unencrypted address")
 	}
 
-	// If secret is already saved, return a copy without performing a full
-	// unlock.
-	if len(a.privKeyCT) == 32 {
-		privKeyCT := make([]byte, 32)
-		copy(privKeyCT, a.privKeyCT)
-		return privKeyCT, nil
-	}
-
 	// Decrypt private key with AES key.
 	aesBlockDecrypter, err := aes.NewCipher(key)
 	if err != nil {
@@ -2383,6 +2375,16 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 	aesDecrypter := cipher.NewCFBDecrypter(aesBlockDecrypter, a.initVector[:])
 	privkey := make([]byte, 32)
 	aesDecrypter.XORKeyStream(privkey, a.privKey[:])
+
+	// If secret is already saved, simply compare the bytes.
+	if len(a.privKeyCT) == 32 {
+		if !bytes.Equal(a.privKeyCT, privkey) {
+			return nil, ErrWrongPassphrase
+		}
+		privKeyCT := make([]byte, 32)
+		copy(privKeyCT, a.privKeyCT)
+		return privKeyCT, nil
+	}
 
 	x, y := btcec.S256().ScalarBaseMult(privkey)
 	if x.Cmp(a.pubKey.X) != 0 || y.Cmp(a.pubKey.Y) != 0 {

@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Errors relating to accounts.
@@ -44,45 +45,56 @@ var (
 // AcctMgr is the global account manager for all opened accounts.
 var AcctMgr = NewAccountManager()
 
-type openAccountsCmd struct{}
+type (
+	openAccountsCmd struct{}
 
-type accessAccountRequest struct {
-	name string
-	resp chan *Account
+	accessAccountRequest struct {
+		name string
+		resp chan *Account
+	}
+
+	accessAllRequest struct {
+		resp chan []*Account
+	}
+
+	accessAccountByAddressRequest struct {
+		address string
+		resp    chan *Account
+	}
+
+	markAddressForAccountCmd struct {
+		address string
+		account *Account
+	}
+
+	addAccountCmd struct {
+		a *Account
+	}
+
+	removeAccountCmd struct {
+		a *Account
+	}
+
+	quitCmd struct{}
+)
+
+type unlockRequest struct {
+	passphrase []byte
+	timeout    time.Duration // Zero value prevents the timeout.
+	err        chan error
 }
-
-type accessAllRequest struct {
-	resp chan []*Account
-}
-
-type accessAccountByAddressRequest struct {
-	address string
-	resp    chan *Account
-}
-
-type markAddressForAccountCmd struct {
-	address string
-	account *Account
-}
-
-type addAccountCmd struct {
-	a *Account
-}
-
-type removeAccountCmd struct {
-	a *Account
-}
-
-type quitCmd struct{}
 
 // AccountManager manages a collection of accounts.
 type AccountManager struct {
 	// The accounts accessed through the account manager are not safe for
 	// concurrent access.  The account manager therefore contains a
 	// binary semaphore channel to prevent incorrect access.
-	bsem       chan struct{}
-	cmdChan    chan interface{}
-	rescanMsgs chan RescanMsg
+	bsem           chan struct{}
+	cmdChan        chan interface{}
+	rescanMsgs     chan RescanMsg
+	unlockRequests chan unlockRequest
+	lockRequests   chan struct{}
+	unlockedState  chan bool
 
 	ds *DiskSyncer
 	rm *RescanManager
@@ -94,10 +106,14 @@ type AccountManager struct {
 // NewAccountManager returns a new AccountManager.
 func NewAccountManager() *AccountManager {
 	am := &AccountManager{
-		bsem:       make(chan struct{}, 1),
-		cmdChan:    make(chan interface{}),
-		rescanMsgs: make(chan RescanMsg, 1),
-		quit:       make(chan struct{}),
+		bsem:           make(chan struct{}, 1),
+		cmdChan:        make(chan interface{}),
+		rescanMsgs:     make(chan RescanMsg, 1),
+		unlockRequests: make(chan unlockRequest),
+		lockRequests:   make(chan struct{}),
+		unlockedState:  make(chan bool),
+
+		quit: make(chan struct{}),
 	}
 	am.ds = NewDiskSyncer(am)
 	am.rm = NewRescanManager(am.rescanMsgs)
@@ -109,8 +125,9 @@ func (am *AccountManager) Start() {
 	// Ready the semaphore - can't grab unless the manager has started.
 	am.bsem <- struct{}{}
 
-	am.wg.Add(2)
+	am.wg.Add(3)
 	go am.accountHandler()
+	go am.keystoreLocker()
 	go am.rescanListener()
 
 	go am.ds.Start()
@@ -474,6 +491,53 @@ out:
 	am.wg.Done()
 }
 
+// keystoreLocker manages the lockedness state of all account keystores.
+func (am *AccountManager) keystoreLocker() {
+	unlocked := false
+	var timeout <-chan time.Time
+out:
+	for {
+		select {
+		case req := <-am.unlockRequests:
+			for _, a := range am.AllAccounts() {
+				if err := a.Unlock(req.passphrase); err != nil {
+					req.err <- err
+					continue out
+				}
+			}
+			unlocked = true
+			if req.timeout == 0 {
+				timeout = nil
+			} else {
+				timeout = time.After(req.timeout)
+			}
+			req.err <- nil
+			continue
+
+		case am.unlockedState <- unlocked:
+			continue
+
+		case <-am.quit:
+			break out
+
+		case <-am.lockRequests:
+		case <-timeout:
+		}
+
+		// Select statement fell through by an explicit lock or the
+		// timer expiring.  Lock the keystores here.
+		timeout = nil
+		for _, a := range am.AllAccounts() {
+			if err := a.Lock(); err != nil {
+				log.Errorf("Could not lock wallet for account '%s': %v",
+					a.name, err)
+			}
+		}
+		unlocked = false
+	}
+	am.wg.Done()
+}
+
 // rescanListener listens for messages from the rescan manager and marks
 // accounts and addresses as synced.
 func (am *AccountManager) rescanListener() {
@@ -782,75 +846,43 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 // ChangePassphrase unlocks all account wallets with the old
 // passphrase, and re-encrypts each using the new passphrase.
 func (am *AccountManager) ChangePassphrase(old, new []byte) error {
-	accts := am.AllAccounts()
-
-	for _, a := range accts {
-		if !a.IsLocked() {
-			if err := a.Wallet.Lock(); err != nil {
-				return err
-			}
-		}
-
-		if err := a.Wallet.Unlock(old); err != nil {
-			return err
-		}
-		defer func(a *Account) {
-			if err := a.Lock(); err != nil {
-				log.Warnf("Cannot lock account: %v", err)
-			}
-		}(a)
+	// Keystores must be unlocked to change their passphrase.
+	err := am.UnlockWallets(old, 0)
+	if err != nil {
+		return err
 	}
+
+	accts := am.AllAccounts()
 
 	// Change passphrase for each unlocked wallet.
 	for _, a := range accts {
-		if err := a.Wallet.ChangePassphrase(new); err != nil {
+		err = a.Wallet.ChangePassphrase(new)
+		if err != nil {
 			return err
 		}
 	}
+
+	am.LockWallets()
 
 	// Immediately write out to disk.
 	return am.ds.WriteBatch(accts)
 }
 
 // LockWallets locks all managed account wallets.
-func (am *AccountManager) LockWallets() error {
-	for _, a := range am.AllAccounts() {
-		if err := a.Lock(); err != nil {
-			return err
-		}
-	}
-
-	return nil
+func (am *AccountManager) LockWallets() {
+	am.lockRequests <- struct{}{}
 }
 
-// UnlockWallets unlocks all managed account's wallets.  If any wallet unlocks
-// fail, all successfully unlocked wallets are locked again.
-func (am *AccountManager) UnlockWallets(passphrase string) (err error) {
-	accts := am.AllAccounts()
-
-	unlockedAccts := make([]*Account, 0, len(accts))
-	defer func() {
-		// Lock all account wallets unlocked during this call
-		// if any of the unlocks failed.
-		if err != nil {
-			for _, ua := range unlockedAccts {
-				if err := ua.Lock(); err != nil {
-					log.Warnf("Cannot lock account '%s': %v",
-						ua.name, err)
-				}
-			}
-		}
-	}()
-
-	for _, a := range accts {
-		if uErr := a.Unlock([]byte(passphrase)); uErr != nil {
-			err = fmt.Errorf("cannot unlock account %v: %v",
-				a.name, uErr)
-			return
-		}
-		unlockedAccts = append(unlockedAccts, a)
+// UnlockWallets unlocks all managed account's wallets, locking them again after
+// the timeout expires, or resetting a previous timeout if one is still running.
+func (am *AccountManager) UnlockWallets(passphrase []byte, timeout time.Duration) error {
+	req := unlockRequest{
+		passphrase: passphrase,
+		timeout:    timeout,
+		err:        make(chan error, 1),
 	}
-	return
+	am.unlockRequests <- req
+	return <-req.err
 }
 
 // DumpKeys returns all WIF-encoded private keys associated with all
