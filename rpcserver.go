@@ -2295,7 +2295,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, btcjson.ErrInternal
 	}
 
-	serializedTx, err := hex.DecodeString(cmd.RawTx)
+	serializedTx, err := decodeHexStr(cmd.RawTx)
 	if err != nil {
 		return nil, btcjson.ErrDecodeHexString
 	}
@@ -2317,7 +2317,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 			return nil, DeserializationError{err}
 		}
 
-		script, err := hex.DecodeString(rti.ScriptPubKey)
+		script, err := decodeHexStr(rti.ScriptPubKey)
 		if err != nil {
 			return nil, DeserializationError{err}
 		}
@@ -2329,7 +2329,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 		// Empty strings are ok for this one and hex.DecodeString will
 		// DTRT.
 		if len(cmd.PrivKeys) != 0 {
-			redeemScript, err := hex.DecodeString(rti.RedeemScript)
+			redeemScript, err := decodeHexStr(rti.RedeemScript)
 			if err != nil {
 				return nil, DeserializationError{err}
 			}
@@ -2811,4 +2811,15 @@ func (s *rpcServer) NotifyNewTxDetails(account string, details btcjson.ListTrans
 	case s.broadcasts <- mntfn:
 	case <-s.quit:
 	}
+}
+
+// decodeHexStr decodes the hex encoding of a string, possibly prepending a
+// leading '0' character if there is an odd number of bytes in the hex string.
+// This is to prevent an error for an invalid hex string when using an odd
+// number of bytes when calling hex.Decode.
+func decodeHexStr(hexStr string) ([]byte, error) {
+	if len(hexStr)%2 != 0 {
+		hexStr = "0" + hexStr
+	}
+	return hex.DecodeString(hexStr)
 }
