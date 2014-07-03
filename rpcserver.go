@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/conformal/btcec"
@@ -206,10 +207,12 @@ func genCertPair(certFile, keyFile string) error {
 // rpcServer holds the items the RPC server may need to access (auth,
 // config, shutdown, etc.)
 type rpcServer struct {
-	wg        sync.WaitGroup
-	listeners []net.Listener
-	authsha   [sha256.Size]byte
-	wsClients map[*websocketClient]struct{}
+	wg            sync.WaitGroup
+	rpcMaxClients int64 // Maximum number of concurrent active RPC clients
+	wsMaxClients  int64 // Maximum number of concurrent active WS clients
+	listeners     []net.Listener
+	authsha       [sha256.Size]byte
+	wsClients     map[*websocketClient]struct{}
 
 	upgrader websocket.Upgrader
 
@@ -224,12 +227,14 @@ type rpcServer struct {
 
 // newRPCServer creates a new server for serving RPC client connections, both
 // HTTP POST and websocket.
-func newRPCServer(listenAddrs []string) (*rpcServer, error) {
+func newRPCServer(listenAddrs []string, rpcMaxClients, wsMaxClients int64) (*rpcServer, error) {
 	login := cfg.Username + ":" + cfg.Password
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	s := rpcServer{
-		authsha:   sha256.Sum256([]byte(auth)),
-		wsClients: map[*websocketClient]struct{}{},
+		authsha:       sha256.Sum256([]byte(auth)),
+		rpcMaxClients: rpcMaxClients,
+		wsMaxClients:  wsMaxClients,
+		wsClients:     map[*websocketClient]struct{}{},
 		upgrader: websocket.Upgrader{
 			// Allow all origins.
 			CheckOrigin: func(r *http.Request) bool { return true },
@@ -303,6 +308,7 @@ func (s *rpcServer) Start() {
 
 	serveMux := http.NewServeMux()
 	const rpcAuthTimeoutSeconds = 10
+
 	httpServer := &http.Server{
 		Handler: serveMux,
 
@@ -310,45 +316,50 @@ func (s *rpcServer) Start() {
 		// handshake within the allowed timeframe.
 		ReadTimeout: time.Second * rpcAuthTimeoutSeconds,
 	}
-	serveMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Connection", "close")
-		w.Header().Set("Content-Type", "application/json")
-		r.Close = true
 
-		// TODO: Limit number of active connections.
+	serveMux.Handle("/",
+		throttled(s.rpcMaxClients, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Connection", "close")
+			w.Header().Set("Content-Type", "application/json")
+			r.Close = true
 
-		if err := s.checkAuthHeader(r); err != nil {
-			log.Warnf("Unauthorized client connection attempt")
-			http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
-			return
-		}
-		s.PostClientRPC(w, r)
-	})
-	serveMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		authenticated := false
-		switch s.checkAuthHeader(r) {
-		case nil:
-			authenticated = true
-		case ErrNoAuth:
-			// nothing
-		default:
-			// If auth was supplied but incorrect, rather than simply
-			// being missing, immediately terminate the connection.
-			log.Warnf("Disconnecting improperly authorized " +
-				"websocket client")
-			http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
-			return
-		}
+			if err := s.checkAuthHeader(r); err != nil {
+				log.Warnf("Unauthorized client connection attempt")
+				http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
+				return
+			}
+			s.PostClientRPC(w, r)
+		})),
+	)
 
-		conn, err := s.upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Warnf("Cannot websocket upgrade client %s: %v",
-				r.RemoteAddr, err)
-			return
-		}
-		wsc := newWebsocketClient(conn, authenticated, r.RemoteAddr)
-		s.WebsocketClientRPC(wsc)
-	})
+	serveMux.Handle("/ws",
+		throttled(s.wsMaxClients, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authenticated := false
+			switch s.checkAuthHeader(r) {
+			case nil:
+				authenticated = true
+			case ErrNoAuth:
+				// nothing
+			default:
+				// If auth was supplied but incorrect, rather than simply
+				// being missing, immediately terminate the connection.
+				log.Warnf("Disconnecting improperly authorized " +
+					"websocket client")
+				http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
+				return
+			}
+
+			conn, err := s.upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				log.Warnf("Cannot websocket upgrade client %s: %v",
+					r.RemoteAddr, err)
+				return
+			}
+			wsc := newWebsocketClient(conn, authenticated, r.RemoteAddr)
+			s.WebsocketClientRPC(wsc)
+		})),
+	)
+
 	for _, listener := range s.listeners {
 		s.wg.Add(1)
 		go func(listener net.Listener) {
@@ -426,6 +437,25 @@ func (s *rpcServer) checkAuthHeader(r *http.Request) error {
 		return errors.New("bad auth")
 	}
 	return nil
+}
+
+// throttled wraps an http.Handler with throttling of concurrent active
+// clients by responding with an HTTP 429 when the threshold is crossed.
+func throttled(threshold int64, h http.Handler) http.Handler {
+	var active int64
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt64(&active, 1)
+		defer atomic.AddInt64(&active, -1)
+
+		if current-1 >= threshold {
+			log.Warn("Reached threshold of concurrent active clients")
+			http.Error(w, "429 Too Many Requests", 429)
+			return
+		}
+
+		h.ServeHTTP(w, r)
+	})
 }
 
 func (s *rpcServer) WebsocketClientRead(wsc *websocketClient) {
