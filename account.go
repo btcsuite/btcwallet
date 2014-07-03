@@ -20,12 +20,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"path/filepath"
+
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
-	"path/filepath"
 )
 
 // Account is a structure containing all the components for a

@@ -18,10 +18,11 @@ package main
 
 import (
 	"fmt"
+	"os"
+
 	"github.com/conformal/btclog"
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/seelog"
-	"os"
 )
 
 const (

@@ -20,18 +20,19 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/conformal/btcchain"
-	"github.com/conformal/btcjson"
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwallet/wallet"
-	"github.com/conformal/btcwire"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/conformal/btcchain"
+	"github.com/conformal/btcjson"
+	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/txstore"
+	"github.com/conformal/btcwallet/wallet"
+	"github.com/conformal/btcwire"
 )
 
 // Errors relating to accounts.
