@@ -455,7 +455,7 @@ func throttled(threshold int64, h http.Handler) http.Handler {
 		defer atomic.AddInt64(&active, -1)
 
 		if current-1 >= threshold {
-			log.Warn("Reached threshold of concurrent active clients")
+			log.Warnf("Reached threshold of %d concurrent active clients", threshold)
 			http.Error(w, "429 Too Many Requests", 429)
 			return
 		}
