@@ -27,10 +27,10 @@ import (
 func TestThrottle(t *testing.T) {
 	const threshold = 1
 
-	srv := httptest.NewServer(throttled(threshold,
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(throttledFn(threshold,
+		func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(20 * time.Millisecond)
-		})),
+		}),
 	)
 
 	codes := make(chan int, 2)

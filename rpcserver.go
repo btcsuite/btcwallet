@@ -318,7 +318,7 @@ func (s *rpcServer) Start() {
 	}
 
 	serveMux.Handle("/",
-		throttled(s.rpcMaxClients, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		throttledFn(s.rpcMaxClients, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Connection", "close")
 			w.Header().Set("Content-Type", "application/json")
 			r.Close = true
@@ -329,11 +329,11 @@ func (s *rpcServer) Start() {
 				return
 			}
 			s.PostClientRPC(w, r)
-		})),
+		}),
 	)
 
 	serveMux.Handle("/ws",
-		throttled(s.wsMaxClients, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		throttledFn(s.wsMaxClients, func(w http.ResponseWriter, r *http.Request) {
 			authenticated := false
 			switch s.checkAuthHeader(r) {
 			case nil:
@@ -357,7 +357,7 @@ func (s *rpcServer) Start() {
 			}
 			wsc := newWebsocketClient(conn, authenticated, r.RemoteAddr)
 			s.WebsocketClientRPC(wsc)
-		})),
+		}),
 	)
 
 	for _, listener := range s.listeners {
@@ -437,6 +437,12 @@ func (s *rpcServer) checkAuthHeader(r *http.Request) error {
 		return errors.New("bad auth")
 	}
 	return nil
+}
+
+// throttledFn wraps an http.HandlerFunc with throttling of concurrent active
+// clients by responding with an HTTP 429 when the threshold is crossed.
+func throttledFn(threshold int64, f http.HandlerFunc) http.Handler {
+	return throttled(threshold, f)
 }
 
 // throttled wraps an http.Handler with throttling of concurrent active
