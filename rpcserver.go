@@ -782,6 +782,8 @@ func (s *rpcServer) WebsocketClientRPC(wsc *websocketClient) {
 	// Send initial unsolicited notifications.
 	// TODO: these should be requested by the client first.
 	s.NotifyConnectionStatus(wsc)
+
+	<-wsc.quit
 }
 
 // maxRequestSize specifies the maximum number of bytes in the request body
