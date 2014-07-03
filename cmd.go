@@ -182,7 +182,11 @@ func walletMain() error {
 	// Start account manager and open accounts.
 	AcctMgr.Start()
 
-	server, err = newRPCServer(cfg.SvrListeners)
+	server, err = newRPCServer(
+		cfg.SvrListeners,
+		cfg.RPCMaxClients,
+		cfg.RPCMaxWebsockets,
+	)
 	if err != nil {
 		log.Errorf("Unable to create HTTP server: %v", err)
 		return err
