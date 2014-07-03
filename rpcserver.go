@@ -208,8 +208,8 @@ func genCertPair(certFile, keyFile string) error {
 // config, shutdown, etc.)
 type rpcServer struct {
 	wg            sync.WaitGroup
-	rpcMaxClients int64 // Maximum number of concurrent active RPC clients
-	wsMaxClients  int64 // Maximum number of concurrent active WS clients
+	maxClients    int64 // Maximum number of concurrent active RPC HTTP clients
+	maxWebsockets int64 // Maximum number of concurrent active RPC WS clients
 	listeners     []net.Listener
 	authsha       [sha256.Size]byte
 	wsClients     map[*websocketClient]struct{}
@@ -227,13 +227,13 @@ type rpcServer struct {
 
 // newRPCServer creates a new server for serving RPC client connections, both
 // HTTP POST and websocket.
-func newRPCServer(listenAddrs []string, rpcMaxClients, wsMaxClients int64) (*rpcServer, error) {
+func newRPCServer(listenAddrs []string, maxClients, maxWebsockets int64) (*rpcServer, error) {
 	login := cfg.Username + ":" + cfg.Password
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	s := rpcServer{
 		authsha:       sha256.Sum256([]byte(auth)),
-		rpcMaxClients: rpcMaxClients,
-		wsMaxClients:  wsMaxClients,
+		maxClients:    maxClients,
+		maxWebsockets: maxWebsockets,
 		wsClients:     map[*websocketClient]struct{}{},
 		upgrader: websocket.Upgrader{
 			// Allow all origins.
@@ -318,7 +318,7 @@ func (s *rpcServer) Start() {
 	}
 
 	serveMux.Handle("/",
-		throttledFn(s.rpcMaxClients, func(w http.ResponseWriter, r *http.Request) {
+		throttledFn(s.maxClients, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Connection", "close")
 			w.Header().Set("Content-Type", "application/json")
 			r.Close = true
@@ -333,7 +333,7 @@ func (s *rpcServer) Start() {
 	)
 
 	serveMux.Handle("/ws",
-		throttledFn(s.wsMaxClients, func(w http.ResponseWriter, r *http.Request) {
+		throttledFn(s.maxWebsockets, func(w http.ResponseWriter, r *http.Request) {
 			authenticated := false
 			switch s.checkAuthHeader(r) {
 			case nil:

@@ -185,7 +185,7 @@ func walletMain() error {
 	server, err = newRPCServer(
 		cfg.SvrListeners,
 		cfg.RPCMaxClients,
-		cfg.WSMaxClients,
+		cfg.RPCMaxWebsockets,
 	)
 	if err != nil {
 		log.Errorf("Unable to create HTTP server: %v", err)
