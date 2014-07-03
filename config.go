@@ -37,8 +37,8 @@ const (
 	defaultLogFilename      = "btcwallet.log"
 	defaultKeypoolSize      = 100
 	defaultDisallowFree     = false
-	defaultRPCMaxClients    = 50
-	defaultRPCMaxWebsockets = 50
+	defaultRPCMaxClients    = 10
+	defaultRPCMaxWebsockets = 25
 )
 
 var (
