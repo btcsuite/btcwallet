@@ -22,7 +22,7 @@ import (
 	"fmt"
 	badrand "math/rand"
 	"sort"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/conformal/btcchain"
@@ -68,12 +68,7 @@ const minTxFee = 10000
 // TxFeeIncrement represents the global transaction fee per KB of Tx
 // added to newly-created transactions and sent as a reward to the block
 // miner.  i is measured in satoshis.
-var TxFeeIncrement = struct {
-	sync.Mutex
-	i btcutil.Amount
-}{
-	i: minTxFee,
-}
+var TxFeeIncrement btcutil.Amount = minTxFee
 
 type CreatedTx struct {
 	tx         *btcutil.Tx
@@ -349,9 +344,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 // incrementing the fee for each kilobyte of transaction.
 func minimumFee(tx *btcwire.MsgTx, allowFree bool) btcutil.Amount {
 	txLen := tx.SerializeSize()
-	TxFeeIncrement.Lock()
-	incr := TxFeeIncrement.i
-	TxFeeIncrement.Unlock()
+	incr := btcutil.Amount(atomic.LoadInt64((*int64)(&TxFeeIncrement)))
 	fee := btcutil.Amount(int64(1+txLen/1000) * int64(incr))
 
 	if allowFree && txLen < 1000 {

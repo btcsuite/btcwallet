@@ -1315,9 +1315,8 @@ func GetInfo(icmd btcjson.Cmd) (interface{}, error) {
 	// Keypool times are not tracked. set to current time.
 	info.KeypoolOldest = time.Now().Unix()
 	info.KeypoolSize = int32(cfg.KeypoolSize)
-	TxFeeIncrement.Lock()
-	info.PaytxFee = float64(TxFeeIncrement.i) / float64(btcutil.SatoshiPerBitcoin)
-	TxFeeIncrement.Unlock()
+	info.PaytxFee = float64(atomic.LoadInt64((*int64)(&TxFeeIncrement))) /
+		float64(btcutil.SatoshiPerBitcoin)
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
 	//  - unlocked_until
@@ -2240,9 +2239,7 @@ func SetTxFee(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	// Set global tx fee.
-	TxFeeIncrement.Lock()
-	TxFeeIncrement.i = btcutil.Amount(cmd.Amount)
-	TxFeeIncrement.Unlock()
+	atomic.StoreInt64((*int64)(&TxFeeIncrement), int64(btcutil.Amount(cmd.Amount)))
 
 	// A boolean true result is returned upon success.
 	return true, nil
