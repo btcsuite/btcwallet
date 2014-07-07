@@ -38,6 +38,17 @@ type Account struct {
 	*wallet.Wallet
 	TxStore         *txstore.Store
 	lockedOutpoints map[btcwire.OutPoint]struct{}
+	FeeIncrement    btcutil.Amount
+}
+
+func newAccount(name string, w *wallet.Wallet, txs *txstore.Store) *Account {
+	return &Account{
+		name:            name,
+		Wallet:          w,
+		TxStore:         txs,
+		lockedOutpoints: map[btcwire.OutPoint]struct{}{},
+		FeeIncrement:    defaultFeeIncrement,
+	}
 }
 
 // Lock locks the underlying wallet for an account.

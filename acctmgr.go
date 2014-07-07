@@ -221,12 +221,7 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 
 	wlt := new(wallet.Wallet)
 	txs := txstore.New()
-	a := &Account{
-		name:            name,
-		Wallet:          wlt,
-		TxStore:         txs,
-		lockedOutpoints: map[btcwire.OutPoint]struct{}{},
-	}
+	a := newAccount(name, wlt, txs)
 
 	walletPath := accountFilename("wallet.bin", name, netdir)
 	txstorePath := accountFilename("tx.bin", name, netdir)
@@ -839,11 +834,7 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 	// Create new account and begin managing with the global account
 	// manager.  Registering will fail if the new account can not be
 	// written immediately to disk.
-	a := &Account{
-		Wallet:          wlt,
-		TxStore:         txstore.New(),
-		lockedOutpoints: map[btcwire.OutPoint]struct{}{},
-	}
+	a := newAccount("", wlt, txstore.New())
 	if err := am.RegisterNewAccount(a); err != nil {
 		return err
 	}

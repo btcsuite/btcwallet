@@ -1334,22 +1334,26 @@ func GetInfo(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, err
 	}
 
-	var balance btcutil.Amount
-	accounts, err := AcctMgr.ListAccounts(1)
-	if err != nil {
-		return nil, err
-	}
-	for _, v := range accounts {
-		balance += v
+	var balance, feeIncr btcutil.Amount
+	accounts := AcctMgr.AllAccounts()
+	for _, a := range accounts {
+		bal, err := a.CalculateBalance(1)
+		if err == nil {
+			balance += bal
+		}
+		// For now we assume all transactions can only be created
+		// with the default account (as this is the only account
+		// that's usable), so use it for the fee increment.
+		if a.name == "" {
+			feeIncr = a.FeeIncrement
+		}
 	}
 	info.WalletVersion = int32(wallet.VersCurrent.Uint32())
 	info.Balance = balance.ToUnit(btcutil.AmountBTC)
 	// Keypool times are not tracked. set to current time.
 	info.KeypoolOldest = time.Now().Unix()
 	info.KeypoolSize = int32(cfg.KeypoolSize)
-	TxFeeIncrement.Lock()
-	info.PaytxFee = float64(TxFeeIncrement.i) / btcutil.SatoshiPerBitcoin
-	TxFeeIncrement.Unlock()
+	info.PaytxFee = feeIncr.ToUnit(btcutil.AmountBTC)
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
 	//  - unlocked_until
@@ -2306,10 +2310,14 @@ func SetTxFee(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, ErrNeedPositiveAmount
 	}
 
-	// Set global tx fee.
-	TxFeeIncrement.Lock()
-	TxFeeIncrement.i = btcutil.Amount(cmd.Amount)
-	TxFeeIncrement.Unlock()
+	// Lookup default account (which realistically is the only account
+	// that transactions can be made with at the moment) and set its
+	// fee increment field.
+	a, err := AcctMgr.Account("")
+	if err != nil {
+		return nil, ErrNoAccounts
+	}
+	a.FeeIncrement = btcutil.Amount(cmd.Amount)
 
 	// A boolean true result is returned upon success.
 	return true, nil

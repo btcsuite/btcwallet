@@ -22,7 +22,6 @@ import (
 	"fmt"
 	badrand "math/rand"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/conformal/btcchain"
@@ -61,19 +60,9 @@ var ErrNonPositiveAmount = errors.New("amount is not positive")
 // negative.
 var ErrNegativeFee = errors.New("fee is negative")
 
-// minTxFee is the default minimum transation fee (0.0001 BTC,
+// defaultFeeIncrement is the default minimum transation fee (0.0001 BTC,
 // measured in satoshis) added to transactions requiring a fee.
-const minTxFee = 10000
-
-// TxFeeIncrement represents the global transaction fee per KB of Tx
-// added to newly-created transactions and sent as a reward to the block
-// miner.  i is measured in satoshis.
-var TxFeeIncrement = struct {
-	sync.Mutex
-	i btcutil.Amount
-}{
-	i: minTxFee,
-}
+const defaultFeeIncrement = 10000
 
 type CreatedTx struct {
 	tx         *btcutil.Tx
@@ -305,7 +294,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 		if !cfg.DisallowFree {
 			noFeeAllowed = allowFree(bs.Height, inputs, msgtx.SerializeSize())
 		}
-		if minFee := minimumFee(msgtx, noFeeAllowed); fee < minFee {
+		if minFee := minimumFee(a.FeeIncrement, msgtx, noFeeAllowed); fee < minFee {
 			fee = minFee
 		} else {
 			selectedInputs = inputs
@@ -351,11 +340,8 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 // and none of the outputs contain a value less than 1 bitcent.
 // Otherwise, the fee will be calculated using TxFeeIncrement,
 // incrementing the fee for each kilobyte of transaction.
-func minimumFee(tx *btcwire.MsgTx, allowFree bool) btcutil.Amount {
+func minimumFee(incr btcutil.Amount, tx *btcwire.MsgTx, allowFree bool) btcutil.Amount {
 	txLen := tx.SerializeSize()
-	TxFeeIncrement.Lock()
-	incr := TxFeeIncrement.i
-	TxFeeIncrement.Unlock()
 	fee := btcutil.Amount(int64(1+txLen/1000) * int64(incr))
 
 	if allowFree && txLen < 1000 {
