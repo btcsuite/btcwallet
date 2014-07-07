@@ -1140,6 +1140,12 @@ func AddMultiSigAddress(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, err
 	}
 
+	// Write wallet with imported multisig address to disk.
+	AcctMgr.ds.ScheduleWalletWrite(acct)
+	if err := AcctMgr.ds.FlushAccount(acct); err != nil {
+		return nil, fmt.Errorf("account write failed: %v", err)
+	}
+
 	// Associate the import address with this account.
 	AcctMgr.MarkAddressForAccount(address, acct)
 
