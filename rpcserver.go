@@ -1140,6 +1140,9 @@ func AddMultiSigAddress(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, err
 	}
 
+	// Associate the import address with this account.
+	AcctMgr.MarkAddressForAccount(address, acct)
+
 	return address.EncodeAddress(), nil
 }
 
