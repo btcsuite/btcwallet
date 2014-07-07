@@ -994,6 +994,23 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
+	// Check that it's included along with the active payment addresses.
+	found := false
+	for _, wa := range w.SortedActiveAddresses() {
+		if wa.Address() == address {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Imported script address was not returned with sorted active payment addresses.")
+		return
+	}
+	if _, ok := w.ActiveAddresses()[address]; !ok {
+		t.Errorf("Imported script address was not returned with unsorted active payment addresses.")
+		return
+	}
+
 	// serialise and deseralise and check still there.
 
 	// Test (de)serialization of wallet.
@@ -1079,6 +1096,25 @@ func TestImportScript(t *testing.T) {
 		t.Errorf("original and serailised scriptinfo requiredsigs "+
 			"don't match %d != %d", sinfo.RequiredSigs(),
 			sinfo2.RequiredSigs())
+		return
+	}
+
+	// Check that it's included along with the active payment addresses.
+	found = false
+	for _, wa := range w.SortedActiveAddresses() {
+		if wa.Address() == address {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("After reserialiation, imported script address was not returned with sorted " +
+			"active payment addresses.")
+		return
+	}
+	if _, ok := w.ActiveAddresses()[address]; !ok {
+		t.Errorf("After reserialiation, imported script address was not returned with unsorted " +
+			"active payment addresses.")
 		return
 	}
 
