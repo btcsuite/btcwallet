@@ -72,7 +72,7 @@ type acceptedTx struct {
 type (
 	// Container type for any notification.
 	notification interface {
-		handleNotification() error
+		handleNotification(*rpcClient) error
 	}
 
 	blockConnected    blockSummary
@@ -85,18 +85,18 @@ type (
 	rescanProgress int32
 )
 
-func (n blockConnected) handleNotification() error {
+func (n blockConnected) handleNotification(c *rpcClient) error {
 	// Update the blockstamp for the newly-connected block.
-	bs := &wallet.BlockStamp{
+	bs := wallet.BlockStamp{
 		Height: n.height,
 		Hash:   *n.hash,
 	}
-	curBlock.Lock()
-	curBlock.BlockStamp = *bs
-	curBlock.Unlock()
+	c.mtx.Lock()
+	c.blockStamp = bs
+	c.mtx.Unlock()
 
 	AcctMgr.Grab()
-	AcctMgr.BlockNotify(bs)
+	AcctMgr.BlockNotify(&bs)
 	AcctMgr.Release()
 
 	// Pass notification to wallet clients too.
@@ -121,7 +121,7 @@ func (n blockConnected) MarshalJSON() ([]byte, error) {
 	return nn.MarshalJSON()
 }
 
-func (n blockDisconnected) handleNotification() error {
+func (n blockDisconnected) handleNotification(c *rpcClient) error {
 	AcctMgr.Grab()
 	defer AcctMgr.Release()
 
@@ -170,14 +170,14 @@ func parseBlock(block *btcws.BlockDetails) (*txstore.Block, int, error) {
 	return b, block.Index, nil
 }
 
-func (n recvTx) handleNotification() error {
+func (n recvTx) handleNotification(c *rpcClient) error {
 	block, txIdx, err := parseBlock(n.block)
 	if err != nil {
 		return InvalidNotificationError{err}
 	}
 	n.tx.SetIndex(txIdx)
 
-	bs, err := GetCurBlock()
+	bs, err := c.BlockStamp()
 	if err != nil {
 		return fmt.Errorf("cannot get current block: %v", err)
 	}
@@ -233,7 +233,7 @@ func (n recvTx) handleNotification() error {
 	return nil
 }
 
-func (n redeemingTx) handleNotification() error {
+func (n redeemingTx) handleNotification(c *rpcClient) error {
 	block, txIdx, err := parseBlock(n.block)
 	if err != nil {
 		return InvalidNotificationError{err}
@@ -246,26 +246,34 @@ func (n redeemingTx) handleNotification() error {
 	return err
 }
 
-func (n rescanFinished) handleNotification() error {
+func (n rescanFinished) handleNotification(c *rpcClient) error {
 	AcctMgr.rm.MarkFinished(n)
 	return nil
 }
 
-func (n rescanProgress) handleNotification() error {
+func (n rescanProgress) handleNotification(c *rpcClient) error {
 	AcctMgr.rm.MarkProgress(n)
 	return nil
 }
 
 type rpcClient struct {
 	*btcrpcclient.Client // client to btcd
-	enqueueNotification  chan notification
-	dequeueNotification  chan notification
-	quit                 chan struct{}
-	wg                   sync.WaitGroup
+
+	mtx        sync.Mutex
+	blockStamp wallet.BlockStamp
+
+	enqueueNotification chan notification
+	dequeueNotification chan notification
+
+	quit chan struct{}
+	wg   sync.WaitGroup
 }
 
 func newRPCClient(certs []byte) (*rpcClient, error) {
 	client := rpcClient{
+		blockStamp: wallet.BlockStamp{
+			Height: int32(btcutil.BlockHeightUnknown),
+		},
 		enqueueNotification: make(chan notification),
 		dequeueNotification: make(chan notification),
 		quit:                make(chan struct{}),
@@ -408,7 +416,7 @@ out:
 
 func (c *rpcClient) handleNotifications() {
 	for n := range c.dequeueNotification {
-		err := n.handleNotification()
+		err := n.handleNotification(c)
 		if err != nil {
 			switch e := err.(type) {
 			case InvalidNotificationError:
@@ -419,6 +427,30 @@ func (c *rpcClient) handleNotifications() {
 		}
 	}
 	c.wg.Done()
+}
+
+// BlockStamp returns (as a blockstamp) the height and hash of the last seen
+// block from the RPC client.  If no blocks have been seen (the height is -1),
+// the chain server is queried for the block and the result is saved for future
+// calls, or an error is returned if the RPC is unsuccessful.
+func (c *rpcClient) BlockStamp() (wallet.BlockStamp, error) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	if c.blockStamp.Height != int32(btcutil.BlockHeightUnknown) {
+		return c.blockStamp, nil
+	}
+
+	hash, height, err := c.GetBestBlock()
+	if err != nil {
+		return wallet.BlockStamp{}, err
+	}
+	bs := wallet.BlockStamp{
+		Hash:   *hash,
+		Height: height,
+	}
+	c.blockStamp = bs
+	return bs, nil
 }
 
 // Handshake first checks that the websocket connection between btcwallet and
@@ -448,9 +480,9 @@ func (c *rpcClient) Handshake() error {
 	// saved block hash, assume that this btcd instance is not yet
 	// synced up to a previous btcd that was last used with this
 	// wallet.
-	bs, err := GetCurBlock()
+	bs, err := c.BlockStamp()
 	if err != nil {
-		return fmt.Errorf("cannot get best block: %v", err)
+		return err
 	}
 	if server != nil {
 		server.NotifyNewBlockChainHeight(&bs)

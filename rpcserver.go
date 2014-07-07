@@ -398,9 +398,9 @@ func (s *rpcServer) Stop() {
 	}
 
 	// Disconnect the connected chain server, if any.
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err == nil {
-		client.Stop()
+		rpcc.Stop()
 	}
 
 	// Stop the account manager and finish all pending account file writes.
@@ -535,9 +535,9 @@ func (s *rpcServer) postPassthrough(w http.ResponseWriter, request rawRequest) {
 // request's ID.
 func passthrough(request rawRequest) []byte {
 	var res json.RawMessage
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err == nil {
-		res, err = client.RawRequest(request.Method, request.Params)
+		res, err = rpcc.RawRequest(request.Method, request.Params)
 	}
 	var jsonErr *btcjson.Error
 	if err != nil {
@@ -878,9 +878,9 @@ func (s *rpcServer) PostClientRPC(w http.ResponseWriter, r *http.Request) {
 // current connection status of btcwallet to btcd.
 func (s *rpcServer) NotifyConnectionStatus(wsc *websocketClient) {
 	connected := false
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err == nil {
-		connected = !client.Disconnected()
+		connected = !rpcc.Disconnected()
 	}
 	ntfn := btcws.NewBtcdConnectedNtfn(connected)
 	mntfn, err := ntfn.MarshalJSON()
@@ -1287,7 +1287,7 @@ func GetBalance(icmd btcjson.Cmd) (interface{}, error) {
 	if err == ErrNotFound {
 		return nil, btcjson.ErrWalletInvalidAccountName
 	}
-	return balance, err
+	return balance.ToUnit(btcutil.AmountBTC), err
 }
 
 // GetInfo handles a getinfo request by returning the a structure containing
@@ -1296,22 +1296,25 @@ func GetBalance(icmd btcjson.Cmd) (interface{}, error) {
 func GetInfo(icmd btcjson.Cmd) (interface{}, error) {
 	// Call down to btcd for all of the information in this command known
 	// by them.
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err != nil {
 		return nil, err
 	}
-	info, err := client.GetInfo()
+	info, err := rpcc.GetInfo()
 	if err != nil {
 		return nil, err
 	}
 
-	balance := float64(0.0)
-	accounts := AcctMgr.ListAccounts(1)
+	var balance btcutil.Amount
+	accounts, err := AcctMgr.ListAccounts(1)
+	if err != nil {
+		return nil, err
+	}
 	for _, v := range accounts {
 		balance += v
 	}
 	info.WalletVersion = int32(wallet.VersCurrent.Uint32())
-	info.Balance = balance
+	info.Balance = balance.ToUnit(btcutil.AmountBTC)
 	// Keypool times are not tracked. set to current time.
 	info.KeypoolOldest = time.Now().Unix()
 	info.KeypoolSize = int32(cfg.KeypoolSize)
@@ -1406,7 +1409,8 @@ func GetAddressBalance(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, ErrAddressNotInWallet
 	}
 
-	return a.CalculateAddressBalance(addr, int(cmd.Minconf)), nil
+	bal, err := a.CalculateAddressBalance(addr, int(cmd.Minconf))
+	return bal.ToUnit(btcutil.AmountBTC), err
 }
 
 // GetUnconfirmedBalance handles a getunconfirmedbalance extension request
@@ -1427,7 +1431,16 @@ func GetUnconfirmedBalance(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, err
 	}
 
-	return a.CalculateBalance(0) - a.CalculateBalance(1), nil
+	unconfirmed, err := a.CalculateBalance(0)
+	if err != nil {
+		return nil, err
+	}
+	confirmed, err := a.CalculateBalance(1)
+	if err != nil {
+		return nil, err
+	}
+
+	return (unconfirmed - confirmed).ToUnit(btcutil.AmountBTC), nil
 }
 
 // ImportPrivKey handles an importprivkey request by parsing
@@ -1502,8 +1515,15 @@ func (s *rpcServer) NotifyNewBlockChainHeight(bs *wallet.BlockStamp) {
 // separate notifications for each account.
 func (s *rpcServer) NotifyBalances() {
 	for _, a := range AcctMgr.AllAccounts() {
-		balance := a.CalculateBalance(1)
-		unconfirmed := a.CalculateBalance(0) - balance
+		balance, err := a.CalculateBalance(1)
+		var unconfirmed btcutil.Amount
+		if err == nil {
+			unconfirmed, err = a.CalculateBalance(0)
+		}
+		if err != nil {
+			break
+		}
+		unconfirmed -= balance
 		s.NotifyWalletBalance(a.name, balance)
 		s.NotifyWalletBalanceUnconfirmed(a.name, unconfirmed)
 	}
@@ -1580,7 +1600,8 @@ func GetReceivedByAccount(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, err
 	}
 
-	return a.TotalReceived(cmd.MinConf)
+	bal, err := a.TotalReceived(cmd.MinConf)
+	return bal.ToUnit(btcutil.AmountBTC), err
 }
 
 // GetTransaction handles a gettransaction request by returning details about
@@ -1602,7 +1623,11 @@ func GetTransaction(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, btcjson.ErrNoTxInfo
 	}
 
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
+	if err != nil {
+		return nil, err
+	}
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -1719,7 +1744,7 @@ func ListAccounts(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	// Return the map.  This will be marshaled into a JSON object.
-	return AcctMgr.ListAccounts(cmd.MinConf), nil
+	return AcctMgr.ListAccounts(cmd.MinConf)
 }
 
 // ListLockUnspent handles a listlockunspent request by returning an slice of
@@ -1763,14 +1788,17 @@ func ListReceivedByAddress(icmd btcjson.Cmd) (interface{}, error) {
 		confirmations int32
 	}
 
-	// Intermediate data for all addresses.
-	allAddrData := make(map[string]AddrData)
-
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
+	if err != nil {
+		return nil, err
+	}
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
 
+	// Intermediate data for all addresses.
+	allAddrData := make(map[string]AddrData)
 	for _, account := range AcctMgr.AllAccounts() {
 		if cmd.IncludeEmpty {
 			// Create an AddrData entry for each active address in the account.
@@ -1842,7 +1870,7 @@ func ListSinceBlock(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, btcjson.ErrInternal
 	}
 
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err != nil {
 		return nil, err
 	}
@@ -1853,14 +1881,14 @@ func ListSinceBlock(icmd btcjson.Cmd) (interface{}, error) {
 		if err != nil {
 			return nil, DeserializationError{err}
 		}
-		block, err := client.GetBlock(hash)
+		block, err := rpcc.GetBlock(hash)
 		if err != nil {
 			return nil, err
 		}
 		height = int32(block.Height())
 	}
 
-	bs, err := GetCurBlock()
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -1868,7 +1896,7 @@ func ListSinceBlock(icmd btcjson.Cmd) (interface{}, error) {
 	// For the result we need the block hash for the last block counted
 	// in the blockchain due to confirmations. We send this off now so that
 	// it can arrive asynchronously while we figure out the rest.
-	gbh := client.GetBlockHashAsync(int64(bs.Height) + 1 - int64(cmd.TargetConfirmations))
+	gbh := rpcc.GetBlockHashAsync(int64(bs.Height) + 1 - int64(cmd.TargetConfirmations))
 	if err != nil {
 		return nil, err
 	}
@@ -2038,7 +2066,7 @@ func LockUnspent(icmd btcjson.Cmd) (interface{}, error) {
 func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amount,
 	minconf int) (interface{}, error) {
 
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err != nil {
 		return nil, err
 	}
@@ -2070,13 +2098,13 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amou
 		if err := AcctMgr.ds.FlushAccount(a); err != nil {
 			return nil, fmt.Errorf("Cannot write account: %v", err)
 		}
-		err := client.NotifyReceived([]btcutil.Address{createdTx.changeAddr})
+		err := rpcc.NotifyReceived([]btcutil.Address{createdTx.changeAddr})
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	txSha, err := client.SendRawTransaction(createdTx.tx.MsgTx(), false)
+	txSha, err := rpcc.SendRawTransaction(createdTx.tx.MsgTx(), false)
 	if err != nil {
 		return nil, err
 	}
@@ -2179,8 +2207,11 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txSha *btcwire.ShaHash, a *Account, 
 	AcctMgr.ds.ScheduleTxStoreWrite(a)
 
 	// Notify websocket clients of the transaction.
-	bs, err := GetCurBlock()
-	if err == nil {
+	rpcc, err := accessClient()
+	if err != nil {
+		return err
+	}
+	if bs, err := rpcc.BlockStamp(); err == nil {
 		ltr, err := debits.ToJSON(a.Name(), bs.Height, a.Net())
 		if err != nil {
 			log.Errorf("Error adding sent tx history: %v", err)
@@ -2199,8 +2230,15 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txSha *btcwire.ShaHash, a *Account, 
 
 	// Notify websocket clients of account's new unconfirmed and
 	// confirmed balance.
-	confirmed := a.CalculateBalance(1)
-	unconfirmed := a.CalculateBalance(0) - confirmed
+	confirmed, err := a.CalculateBalance(1)
+	var unconfirmed btcutil.Amount
+	if err == nil {
+		unconfirmed, err = a.CalculateBalance(0)
+	}
+	if err != nil {
+		return err
+	}
+	unconfirmed -= confirmed
 	server.NotifyWalletBalance(a.name, confirmed)
 	server.NotifyWalletBalanceUnconfirmed(a.name, unconfirmed)
 
@@ -2394,7 +2432,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 		}] = script
 	}
 
-	var client *rpcClient
+	var rpcc *rpcClient
 
 	// Now we go and look for any inputs that we were not provided by
 	// querying btcd with getrawtransaction. We queue up a bunch of async
@@ -2419,15 +2457,15 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 		}
 
 		// Never heard of this one before, request it.
-		if client == nil {
-			client, err = accessClient()
+		if rpcc == nil {
+			rpcc, err = accessClient()
 			if err != nil {
 				return nil, err
 			}
 		}
 		prevHash := &txIn.PreviousOutpoint.Hash
 		requested[txIn.PreviousOutpoint.Hash] = &pendingTx{
-			resp:   client.GetRawTransactionAsync(prevHash),
+			resp:   rpcc.GetRawTransactionAsync(prevHash),
 			inputs: []uint32{txIn.PreviousOutpoint.Index},
 		}
 	}
@@ -2814,8 +2852,9 @@ func (s *rpcServer) NotifyWalletLockStateChange(account string, locked bool) {
 
 // NotifyWalletBalance sends a confirmed account balance notification
 // to all websocket clients.
-func (s *rpcServer) NotifyWalletBalance(account string, balance float64) {
-	ntfn := btcws.NewAccountBalanceNtfn(account, balance, true)
+func (s *rpcServer) NotifyWalletBalance(account string, balance btcutil.Amount) {
+	fbal := balance.ToUnit(btcutil.AmountBTC)
+	ntfn := btcws.NewAccountBalanceNtfn(account, fbal, true)
 	mntfn, err := ntfn.MarshalJSON()
 	// If the marshal failed, it indicates that the btcws notification
 	// struct contains a field with a type that is not marshalable.
@@ -2830,8 +2869,9 @@ func (s *rpcServer) NotifyWalletBalance(account string, balance float64) {
 
 // NotifyWalletBalanceUnconfirmed sends a confirmed account balance
 // notification to all websocket clients.
-func (s *rpcServer) NotifyWalletBalanceUnconfirmed(account string, balance float64) {
-	ntfn := btcws.NewAccountBalanceNtfn(account, balance, false)
+func (s *rpcServer) NotifyWalletBalanceUnconfirmed(account string, balance btcutil.Amount) {
+	fbal := balance.ToUnit(btcutil.AmountBTC)
+	ntfn := btcws.NewAccountBalanceNtfn(account, fbal, false)
 	mntfn, err := ntfn.MarshalJSON()
 	// If the marshal failed, it indicates that the btcws notification
 	// struct contains a field with a type that is not marshalable.

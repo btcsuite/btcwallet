@@ -163,7 +163,11 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	}
 
 	// Get current block's height and hash.
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
+	if err != nil {
+		return nil, err
+	}
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return nil, err
 	}

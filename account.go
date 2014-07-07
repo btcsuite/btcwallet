@@ -104,18 +104,17 @@ func (a *Account) AddressUsed(addr btcutil.Address) bool {
 // a UTXO must be in a block.  If confirmations is 1 or greater,
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
-func (a *Account) CalculateBalance(confirms int) float64 {
-	bs, err := GetCurBlock()
-	if bs.Height == int32(btcutil.BlockHeightUnknown) || err != nil {
-		return 0.
+func (a *Account) CalculateBalance(confirms int) (btcutil.Amount, error) {
+	rpcc, err := accessClient()
+	if err != nil {
+		return 0, err
+	}
+	bs, err := rpcc.BlockStamp()
+	if err != nil {
+		return 0, err
 	}
 
-	bal, err := a.TxStore.Balance(confirms, bs.Height)
-	if err != nil {
-		log.Errorf("Cannot calculate balance: %v", err)
-		return 0
-	}
-	return bal.ToUnit(btcutil.AmountBTC)
+	return a.TxStore.Balance(confirms, bs.Height)
 }
 
 // CalculateAddressBalance sums the amounts of all unspent transaction
@@ -127,16 +126,20 @@ func (a *Account) CalculateBalance(confirms int) float64 {
 // a UTXO must be in a block.  If confirmations is 1 or greater,
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
-func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) float64 {
-	bs, err := GetCurBlock()
-	if bs.Height == int32(btcutil.BlockHeightUnknown) || err != nil {
-		return 0.
+func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) (btcutil.Amount, error) {
+	rpcc, err := accessClient()
+	if err != nil {
+		return 0, err
+	}
+	bs, err := rpcc.BlockStamp()
+	if err != nil {
+		return 0, err
 	}
 
 	var bal btcutil.Amount
 	unspent, err := a.TxStore.UnspentOutputs()
 	if err != nil {
-		return 0.
+		return 0, err
 	}
 	for _, credit := range unspent {
 		if credit.Confirmed(confirms, bs.Height) {
@@ -151,7 +154,7 @@ func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) fl
 			}
 		}
 	}
-	return bal.ToUnit(btcutil.AmountBTC)
+	return bal, nil
 }
 
 // CurrentAddress gets the most recently requested Bitcoin payment address
@@ -203,14 +206,18 @@ func (a *Account) ListSinceBlock(since, curBlockHeight int32,
 // transaction.  This is intended to be used for listtransactions RPC
 // replies.
 func (a *Account) ListTransactions(from, count int) ([]btcjson.ListTransactionsResult, error) {
+	txList := []btcjson.ListTransactionsResult{}
+
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
 	if err != nil {
-		return nil, err
+		return txList, err
 	}
-
-	txList := []btcjson.ListTransactionsResult{}
+	bs, err := rpcc.BlockStamp()
+	if err != nil {
+		return txList, err
+	}
 
 	records := a.TxStore.Records()
 	lastLookupIdx := len(records) - count
@@ -232,14 +239,19 @@ func (a *Account) ListTransactions(from, count int) ([]btcjson.ListTransactionsR
 func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 	[]btcjson.ListTransactionsResult, error) {
 
+	txList := []btcjson.ListTransactionsResult{}
+
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
 	if err != nil {
-		return nil, err
+		return txList, err
+	}
+	bs, err := rpcc.BlockStamp()
+	if err != nil {
+		return txList, err
 	}
 
-	txList := []btcjson.ListTransactionsResult{}
 	for _, r := range a.TxStore.Records() {
 		for _, c := range r.Credits() {
 			// We only care about the case where len(addrs) == 1,
@@ -271,16 +283,21 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 // transaction.  This is intended to be used for listalltransactions RPC
 // replies.
 func (a *Account) ListAllTransactions() ([]btcjson.ListTransactionsResult, error) {
+	txList := []btcjson.ListTransactionsResult{}
+
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
 	if err != nil {
-		return nil, err
+		return txList, err
+	}
+	bs, err := rpcc.BlockStamp()
+	if err != nil {
+		return txList, err
 	}
 
 	// Search in reverse order: lookup most recently-added first.
 	records := a.TxStore.Records()
-	txList := []btcjson.ListTransactionsResult{}
 	for i := len(records) - 1; i >= 0; i-- {
 		jsonResults, err := records[i].ToJSON(a.name, bs.Height, a.Net())
 		if err != nil {
@@ -478,7 +495,7 @@ func (a *Account) LockedOutpoints() []btcjson.TransactionInput {
 // Track requests btcd to send notifications of new transactions for
 // each address stored in a wallet.
 func (a *Account) Track() {
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err != nil {
 		log.Errorf("No chain server client to track addresses.")
 		return
@@ -495,7 +512,7 @@ func (a *Account) Track() {
 		addrs = append(addrs, addr)
 	}
 
-	if err := client.NotifyReceived(addrs); err != nil {
+	if err := rpcc.NotifyReceived(addrs); err != nil {
 		log.Error("Unable to request transaction updates for address.")
 	}
 
@@ -543,7 +560,7 @@ func (a *Account) RescanActiveJob() (*RescanJob, error) {
 // credits that are not known to have been mined into a block, and attempts
 // to send each to the chain server for relay.
 func (a *Account) ResendUnminedTxs() {
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err != nil {
 		log.Errorf("No chain server client to resend txs.")
 		return
@@ -551,7 +568,7 @@ func (a *Account) ResendUnminedTxs() {
 
 	txs := a.TxStore.UnminedDebitTxs()
 	for _, tx := range txs {
-		_, err := client.SendRawTransaction(tx.MsgTx(), false)
+		_, err := rpcc.SendRawTransaction(tx.MsgTx(), false)
 		if err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
@@ -592,7 +609,11 @@ func (a *Account) ActivePaymentAddresses() map[string]struct{} {
 // NewAddress returns a new payment address for an account.
 func (a *Account) NewAddress() (btcutil.Address, error) {
 	// Get current block's height and hash.
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
+	if err != nil {
+		return nil, err
+	}
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -613,11 +634,7 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	AcctMgr.MarkAddressForAccount(addr, a)
 
 	// Request updates from btcd for new transactions sent to this address.
-	client, err := accessClient()
-	if err != nil {
-		return nil, err
-	}
-	if err := client.NotifyReceived([]btcutil.Address{addr}); err != nil {
+	if err := rpcc.NotifyReceived([]btcutil.Address{addr}); err != nil {
 		return nil, err
 	}
 
@@ -627,7 +644,11 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 // NewChangeAddress returns a new change address for an account.
 func (a *Account) NewChangeAddress() (btcutil.Address, error) {
 	// Get current block's height and hash.
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
+	if err != nil {
+		return nil, err
+	}
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -648,11 +669,7 @@ func (a *Account) NewChangeAddress() (btcutil.Address, error) {
 	AcctMgr.MarkAddressForAccount(addr, a)
 
 	// Request updates from btcd for new transactions sent to this address.
-	client, err := accessClient()
-	if err != nil {
-		return nil, err
-	}
-	if err := client.NotifyReceived([]btcutil.Address{addr}); err != nil {
+	if err := rpcc.NotifyReceived([]btcutil.Address{addr}); err != nil {
 		return nil, err
 	}
 
@@ -676,13 +693,13 @@ func (a *Account) RecoverAddresses(n int) error {
 
 	// Run a goroutine to rescan blockchain for recovered addresses.
 	go func() {
-		client, err := accessClient()
+		rpcc, err := accessClient()
 		if err != nil {
 			log.Errorf("Cannot access chain server client to " +
 				"rescan recovered addresses.")
 			return
 		}
-		err = client.Rescan(lastInfo.FirstBlock(), addrs, nil)
+		err = rpcc.Rescan(lastInfo.FirstBlock(), addrs, nil)
 		if err != nil {
 			log.Errorf("Rescanning for recovered addresses "+
 				"failed: %v", err)
@@ -703,13 +720,13 @@ func ReqSpentUtxoNtfns(credits []txstore.Credit) {
 		ops = append(ops, op)
 	}
 
-	client, err := accessClient()
+	rpcc, err := accessClient()
 	if err != nil {
 		log.Errorf("Cannot access chain server client to " +
 			"request spent output notifications.")
 		return
 	}
-	if err := client.NotifySpent(ops); err != nil {
+	if err := rpcc.NotifySpent(ops); err != nil {
 		log.Errorf("Cannot request notifications for spent outputs: %v",
 			err)
 	}
@@ -718,8 +735,12 @@ func ReqSpentUtxoNtfns(credits []txstore.Credit) {
 // TotalReceived iterates through an account's transaction history, returning the
 // total amount of bitcoins received for any account address.  Amounts received
 // through multisig transactions are ignored.
-func (a *Account) TotalReceived(confirms int) (float64, error) {
-	bs, err := GetCurBlock()
+func (a *Account) TotalReceived(confirms int) (btcutil.Amount, error) {
+	rpcc, err := accessClient()
+	if err != nil {
+		return 0, err
+	}
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return 0, err
 	}
@@ -738,6 +759,5 @@ func (a *Account) TotalReceived(confirms int) (float64, error) {
 			}
 		}
 	}
-
-	return amount.ToUnit(btcutil.AmountBTC), nil
+	return amount, nil
 }

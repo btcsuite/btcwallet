@@ -758,10 +758,16 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 		// TODO: need a flag or check that the utxo store was actually
 		// modified, or this will notify even if there are no balance
 		// changes, or sending these notifications as the utxos are added.
-		confirmed := a.CalculateBalance(1)
-		unconfirmed := a.CalculateBalance(0) - confirmed
-		server.NotifyWalletBalance(a.name, confirmed)
-		server.NotifyWalletBalanceUnconfirmed(a.name, unconfirmed)
+		confirmed, err := a.CalculateBalance(1)
+		var unconfirmed btcutil.Amount
+		if err == nil {
+			unconfirmed, err = a.CalculateBalance(0)
+		}
+		if err == nil {
+			unconfirmed -= confirmed
+			server.NotifyWalletBalance(a.name, confirmed)
+			server.NotifyWalletBalanceUnconfirmed(a.name, unconfirmed)
+		}
 
 		// If this is the default account, update the block all accounts
 		// are synced with, and schedule a wallet write.
@@ -797,13 +803,13 @@ func (am *AccountManager) RecordSpendingTx(tx *btcutil.Tx, block *txstore.Block)
 
 // CalculateBalance returns the balance, calculated using minconf block
 // confirmations, of an account.
-func (am *AccountManager) CalculateBalance(account string, minconf int) (float64, error) {
+func (am *AccountManager) CalculateBalance(account string, minconf int) (btcutil.Amount, error) {
 	a, err := am.Account(account)
 	if err != nil {
 		return 0, err
 	}
 
-	return a.CalculateBalance(minconf), nil
+	return a.CalculateBalance(minconf)
 }
 
 // CreateEncryptedWallet creates a new default account with a wallet file
@@ -814,7 +820,11 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 	}
 
 	// Get current block's height and hash.
-	bs, err := GetCurBlock()
+	rpcc, err := accessClient()
+	if err != nil {
+		return err
+	}
+	bs, err := rpcc.BlockStamp()
 	if err != nil {
 		return err
 	}
@@ -918,13 +928,37 @@ func (am *AccountManager) DumpWIFPrivateKey(addr btcutil.Address) (string, error
 
 // ListAccounts returns a map of account names to their current account
 // balances.  The balances are calculated using minconf confirmations.
-func (am *AccountManager) ListAccounts(minconf int) map[string]float64 {
+func (am *AccountManager) ListAccounts(minconf int) (map[string]btcutil.Amount, error) {
 	// Create and fill a map of account names and their balances.
-	pairs := make(map[string]float64)
-	for _, a := range am.AllAccounts() {
-		pairs[a.name] = a.CalculateBalance(minconf)
+	accts := am.AllAccounts()
+	pairs := make(map[string]btcutil.Amount, len(accts))
+	for _, a := range accts {
+		bal, err := a.CalculateBalance(minconf)
+		if err != nil {
+			return nil, err
+		}
+		pairs[a.name] = bal
 	}
-	return pairs
+	return pairs, nil
+}
+
+// ListAccountsF64 returns a map of account names to their current account
+// balances.  The balances are calculated using minconf confirmations.
+//
+// The amounts are converted to float64 so this result may be marshaled
+// as a JSON object for the listaccounts RPC.
+func (am *AccountManager) ListAccountsF64(minconf int) (map[string]float64, error) {
+	// Create and fill a map of account names and their balances.
+	accts := am.AllAccounts()
+	pairs := make(map[string]float64, len(accts))
+	for _, a := range accts {
+		bal, err := a.CalculateBalance(minconf)
+		if err != nil {
+			return nil, err
+		}
+		pairs[a.name] = bal.ToUnit(btcutil.AmountBTC)
+	}
+	return pairs, nil
 }
 
 // ListSinceBlock returns a slice of objects representing all transactions in
@@ -983,14 +1017,19 @@ func (am *AccountManager) GetTransaction(txSha *btcwire.ShaHash) []accountTx {
 func (am *AccountManager) ListUnspent(minconf, maxconf int,
 	addresses map[string]bool) ([]*btcjson.ListUnspentResult, error) {
 
-	bs, err := GetCurBlock()
+	results := []*btcjson.ListUnspentResult{}
+
+	rpcc, err := accessClient()
 	if err != nil {
-		return nil, err
+		return results, err
+	}
+	bs, err := rpcc.BlockStamp()
+	if err != nil {
+		return results, err
 	}
 
 	filter := len(addresses) != 0
 
-	results := []*btcjson.ListUnspentResult{}
 	for _, a := range am.AllAccounts() {
 		unspent, err := a.TxStore.SortedUnspentOutputs()
 		if err != nil {

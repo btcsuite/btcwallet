@@ -23,66 +23,15 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"sync"
 	"time"
-
-	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/wallet"
-	"github.com/conformal/btcwire"
 )
 
 var (
-	cfg          *config
-	server       *rpcServer
-	shutdownChan = make(chan struct{})
-
-	curBlock = struct {
-		sync.RWMutex
-		wallet.BlockStamp
-	}{
-		BlockStamp: wallet.BlockStamp{
-			Height: int32(btcutil.BlockHeightUnknown),
-		},
-	}
+	cfg              *config
+	server           *rpcServer
+	shutdownChan     = make(chan struct{})
+	clientAccessChan = make(chan *rpcClient)
 )
-
-// GetCurBlock returns the blockchain height and SHA hash of the most
-// recently seen block.  If no blocks have been seen since btcd has
-// connected, btcd is queried for the current block height and hash.
-func GetCurBlock() (wallet.BlockStamp, error) {
-	curBlock.RLock()
-	bs := curBlock.BlockStamp
-	curBlock.RUnlock()
-	if bs.Height != int32(btcutil.BlockHeightUnknown) {
-		return bs, nil
-	}
-
-	var bbHash *btcwire.ShaHash
-	var bbHeight int32
-	client, err := accessClient()
-	if err == nil {
-		bbHash, bbHeight, err = client.GetBestBlock()
-	}
-	if err != nil {
-		unknown := wallet.BlockStamp{
-			Height: int32(btcutil.BlockHeightUnknown),
-		}
-		return unknown, err
-	}
-
-	curBlock.Lock()
-	if bbHeight > curBlock.BlockStamp.Height {
-		bs = wallet.BlockStamp{
-			Height: bbHeight,
-			Hash:   *bbHash,
-		}
-		curBlock.BlockStamp = bs
-	}
-	curBlock.Unlock()
-	return bs, nil
-}
-
-var clientAccessChan = make(chan *rpcClient)
 
 func clientAccess(newClient <-chan *rpcClient) {
 	var client *rpcClient
