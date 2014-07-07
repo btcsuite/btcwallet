@@ -1037,6 +1037,16 @@ type handlerJob struct {
 func (s *rpcServer) RequestHandler() {
 out:
 	for {
+		// when both s.quit and s.requests are ready, the control
+		// might flow into any of them; to prevent s.quit from being
+		// ignored in such a case, the select is preceded with
+		// another select which only waits on s.quit
+		// this gives s.quit another chance to signal a break
+		select {
+		case <-s.quit:
+			break out
+		default:
+		}
 		select {
 		case r := <-s.requests:
 			AcctMgr.Grab()
@@ -1061,7 +1071,11 @@ out:
 					jsonErr.Code = btcjson.ErrWallet.Code
 				}
 			}
-			r.response <- handlerResponse{result, jsonErr}
+			select {
+			case r.response <- handlerResponse{result, jsonErr}:
+			case <-s.quit:
+				break out
+			}
 
 		case <-s.quit:
 			break out
