@@ -38,7 +38,7 @@ var allowFreeTests = []allowFreeTest{
 		name: "priority < 57,600,000",
 		inputs: []*tx.Utxo{
 			{
-				Amt:    uint64(btcutil.SatoshiPerBitcoin),
+				Amt:    btcutil.SatoshiPerBitcoin,
 				Height: 0,
 			},
 		},
@@ -50,7 +50,7 @@ var allowFreeTests = []allowFreeTest{
 		name: "priority == 57,600,000",
 		inputs: []*tx.Utxo{
 			{
-				Amt:    uint64(btcutil.SatoshiPerBitcoin),
+				Amt:    btcutil.SatoshiPerBitcoin,
 				Height: 0,
 			},
 		},
@@ -62,7 +62,7 @@ var allowFreeTests = []allowFreeTest{
 		name: "priority > 57,600,000",
 		inputs: []*tx.Utxo{
 			{
-				Amt:    uint64(btcutil.SatoshiPerBitcoin),
+				Amt:    btcutil.SatoshiPerBitcoin,
 				Height: 0,
 			},
 		},

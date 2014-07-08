@@ -370,20 +370,20 @@ func minimumFee(tx *btcwire.MsgTx, allowFree bool) btcutil.Amount {
 		}
 	}
 
-	max := btcutil.Amount(btcutil.MaxSatoshi)
-	if fee < 0 || fee > max {
-		fee = max
+	if fee < 0 || fee > btcutil.MaxSatoshi {
+		fee = btcutil.MaxSatoshi
 	}
 
 	return fee
 }
 
 // allowFree calculates the transaction priority and checks that the
-// priority reaches a certain threshhold.  If the threshhold is
+// priority reaches a certain threshold.  If the threshhold is
 // reached, a free transaction fee is allowed.
 func allowFree(curHeight int32, txouts []txstore.Credit, txSize int) bool {
-	const blocksPerDayEstimate = 144
-	const txSizeEstimate = 250
+	const blocksPerDayEstimate = 144.0
+	const txSizeEstimate = 250.0
+	const threshold = btcutil.SatoshiPerBitcoin * blocksPerDayEstimate / txSizeEstimate
 
 	var weightedSum int64
 	for _, txout := range txouts {
@@ -391,7 +391,7 @@ func allowFree(curHeight int32, txouts []txstore.Credit, txSize int) bool {
 		weightedSum += int64(txout.Amount()) * int64(depth)
 	}
 	priority := float64(weightedSum) / float64(txSize)
-	return priority > float64(btcutil.SatoshiPerBitcoin)*blocksPerDayEstimate/txSizeEstimate
+	return priority > threshold
 }
 
 // chainDepth returns the chaindepth of a target given the current

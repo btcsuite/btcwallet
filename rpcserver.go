@@ -1348,7 +1348,7 @@ func GetInfo(icmd btcjson.Cmd) (interface{}, error) {
 	info.KeypoolOldest = time.Now().Unix()
 	info.KeypoolSize = int32(cfg.KeypoolSize)
 	TxFeeIncrement.Lock()
-	info.PaytxFee = float64(TxFeeIncrement.i) / float64(btcutil.SatoshiPerBitcoin)
+	info.PaytxFee = float64(TxFeeIncrement.i) / btcutil.SatoshiPerBitcoin
 	TxFeeIncrement.Unlock()
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
