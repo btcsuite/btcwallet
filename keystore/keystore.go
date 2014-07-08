@@ -2931,7 +2931,8 @@ func (sa *scriptAddress) SyncStatus() SyncStatus {
 // depending on the type of s.
 func (sa *scriptAddress) setSyncStatus(s SyncStatus) {
 	switch e := s.(type) {
-	case Unsynced: sa.flags.unsynced = true
+	case Unsynced:
+		sa.flags.unsynced = true
 		sa.flags.partialSync = false
 		sa.partialSyncHeight = 0
 
