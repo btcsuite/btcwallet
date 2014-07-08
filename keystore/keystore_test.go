@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package wallet
+package keystore
 
 import (
 	"bytes"
@@ -35,7 +35,7 @@ import (
 var tstNetParams = &btcnet.MainNetParams
 
 func TestBtcAddressSerializer(t *testing.T) {
-	fakeWallet := &Wallet{net: (*netParams)(tstNetParams)}
+	fakeWallet := &Store{net: (*netParams)(tstNetParams)}
 	kdfp := &kdfParameters{
 		mem:   1024,
 		nIter: 5,
@@ -70,7 +70,7 @@ func TestBtcAddressSerializer(t *testing.T) {
 	}
 
 	var readAddr btcAddress
-	readAddr.wallet = fakeWallet
+	readAddr.store = fakeWallet
 	_, err = readAddr.ReadFrom(buf)
 	if err != nil {
 		t.Error(err.Error())
@@ -88,7 +88,7 @@ func TestBtcAddressSerializer(t *testing.T) {
 }
 
 func TestScriptAddressSerializer(t *testing.T) {
-	fakeWallet := &Wallet{net: (*netParams)(tstNetParams)}
+	fakeWallet := &Store{net: (*netParams)(tstNetParams)}
 	script := []byte{btcscript.OP_TRUE, btcscript.OP_DUP,
 		btcscript.OP_DROP}
 	addr, err := newScriptAddress(fakeWallet, script, &BlockStamp{})
@@ -105,7 +105,7 @@ func TestScriptAddressSerializer(t *testing.T) {
 	}
 
 	var readAddr scriptAddress
-	readAddr.wallet = fakeWallet
+	readAddr.store = fakeWallet
 	_, err = readAddr.ReadFrom(buf)
 	if err != nil {
 		t.Error(err.Error())
@@ -119,7 +119,7 @@ func TestScriptAddressSerializer(t *testing.T) {
 
 func TestWalletCreationSerialization(t *testing.T) {
 	createdAt := &BlockStamp{}
-	w1, err := NewWallet("banana wallet", "A wallet for testing.",
+	w1, err := NewStore("banana wallet", "A wallet for testing.",
 		[]byte("banana"), tstNetParams, createdAt, 100)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
@@ -133,7 +133,7 @@ func TestWalletCreationSerialization(t *testing.T) {
 		return
 	}
 
-	w2 := new(Wallet)
+	w2 := new(Store)
 	_, err = w2.ReadFrom(buf)
 	if err != nil {
 		t.Error("Error reading newly written wallet: " + err.Error())
@@ -331,7 +331,7 @@ func TestWalletPubkeyChaining(t *testing.T) {
 	// Set a reasonable keypool size that isn't too big nor too small for testing.
 	const keypoolSize = 5
 
-	w, err := NewWallet("banana wallet", "A wallet for testing.",
+	w, err := NewStore("banana wallet", "A wallet for testing.",
 		[]byte("banana"), tstNetParams, &BlockStamp{}, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
@@ -397,7 +397,7 @@ func TestWalletPubkeyChaining(t *testing.T) {
 		t.Errorf("Error writing wallet with missing private key: %v", err)
 		return
 	}
-	w2 := new(Wallet)
+	w2 := new(Store)
 	_, err = w2.ReadFrom(serializedWallet)
 	if err != nil {
 		t.Errorf("Error reading wallet with missing private key: %v", err)
@@ -507,7 +507,7 @@ func TestWalletPubkeyChaining(t *testing.T) {
 func TestWatchingWalletExport(t *testing.T) {
 	const keypoolSize = 10
 	createdAt := &BlockStamp{}
-	w, err := NewWallet("banana wallet", "A wallet for testing.",
+	w, err := NewStore("banana wallet", "A wallet for testing.",
 		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
@@ -681,7 +681,7 @@ func TestWatchingWalletExport(t *testing.T) {
 		t.Errorf("Cannot write watching wallet: %v", err)
 		return
 	}
-	ww2 := new(Wallet)
+	ww2 := new(Store)
 	_, err = ww2.ReadFrom(buf)
 	if err != nil {
 		t.Errorf("Cannot read watching wallet: %v", err)
@@ -695,11 +695,11 @@ func TestWatchingWalletExport(t *testing.T) {
 	}
 
 	// Verify that nonsensical functions fail with correct error.
-	if err := ww.Lock(); err != ErrWalletIsWatchingOnly {
+	if err := ww.Lock(); err != ErrWatchingOnly {
 		t.Errorf("Nonsensical func Lock returned no or incorrect error: %v", err)
 		return
 	}
-	if err := ww.Unlock([]byte("banana")); err != ErrWalletIsWatchingOnly {
+	if err := ww.Unlock([]byte("banana")); err != ErrWatchingOnly {
 		t.Errorf("Nonsensical func Unlock returned no or incorrect error: %v", err)
 		return
 	}
@@ -708,11 +708,11 @@ func TestWatchingWalletExport(t *testing.T) {
 		t.Errorf("generator isnt' present in wallet")
 	}
 	gpk := generator.(PubKeyAddress)
-	if _, err := gpk.PrivKey(); err != ErrWalletIsWatchingOnly {
+	if _, err := gpk.PrivKey(); err != ErrWatchingOnly {
 		t.Errorf("Nonsensical func AddressKey returned no or incorrect error: %v", err)
 		return
 	}
-	if _, err := ww.ExportWatchingWallet(); err != ErrWalletIsWatchingOnly {
+	if _, err := ww.ExportWatchingWallet(); err != ErrWatchingOnly {
 		t.Errorf("Nonsensical func ExportWatchingWallet returned no or incorrect error: %v", err)
 		return
 	}
@@ -721,7 +721,7 @@ func TestWatchingWalletExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ww.ImportPrivateKey(wif, createdAt); err != ErrWalletIsWatchingOnly {
+	if _, err := ww.ImportPrivateKey(wif, createdAt); err != ErrWatchingOnly {
 		t.Errorf("Nonsensical func ImportPrivateKey returned no or incorrect error: %v", err)
 		return
 	}
@@ -731,7 +731,7 @@ func TestImportPrivateKey(t *testing.T) {
 	const keypoolSize = 10
 	createHeight := int32(100)
 	createdAt := &BlockStamp{Height: createHeight}
-	w, err := NewWallet("banana wallet", "A wallet for testing.",
+	w, err := NewStore("banana wallet", "A wallet for testing.",
 		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
@@ -802,7 +802,7 @@ func TestImportPrivateKey(t *testing.T) {
 		t.Errorf("Cannot write wallet: %v", err)
 		return
 	}
-	w2 := new(Wallet)
+	w2 := new(Store)
 	_, err = w2.ReadFrom(buf)
 	if err != nil {
 		t.Errorf("Cannot read wallet: %v", err)
@@ -834,7 +834,7 @@ func TestImportPrivateKey(t *testing.T) {
 		t.Errorf("Cannot write wallet: %v", err)
 		return
 	}
-	w3 := new(Wallet)
+	w3 := new(Store)
 	_, err = w3.ReadFrom(buf)
 	if err != nil {
 		t.Errorf("Cannot read wallet: %v", err)
@@ -901,7 +901,7 @@ func TestImportScript(t *testing.T) {
 	const keypoolSize = 10
 	createHeight := int32(100)
 	createdAt := &BlockStamp{Height: createHeight}
-	w, err := NewWallet("banana wallet", "A wallet for testing.",
+	w, err := NewStore("banana wallet", "A wallet for testing.",
 		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
@@ -1020,7 +1020,7 @@ func TestImportScript(t *testing.T) {
 		t.Errorf("Cannot write wallet: %v", err)
 		return
 	}
-	w2 := new(Wallet)
+	w2 := new(Store)
 	_, err = w2.ReadFrom(buf)
 	if err != nil {
 		t.Errorf("Cannot read wallet: %v", err)
@@ -1137,7 +1137,7 @@ func TestImportScript(t *testing.T) {
 		t.Errorf("Cannot write wallet: %v", err)
 		return
 	}
-	w3 := new(Wallet)
+	w3 := new(Store)
 	_, err = w3.ReadFrom(buf)
 	if err != nil {
 		t.Errorf("Cannot read wallet: %v", err)
@@ -1183,7 +1183,7 @@ func TestImportScript(t *testing.T) {
 func TestChangePassphrase(t *testing.T) {
 	const keypoolSize = 10
 	createdAt := &BlockStamp{}
-	w, err := NewWallet("banana wallet", "A wallet for testing.",
+	w, err := NewStore("banana wallet", "A wallet for testing.",
 		[]byte("banana"), tstNetParams, createdAt, keypoolSize)
 	if err != nil {
 		t.Error("Error creating new wallet: " + err.Error())
@@ -1191,7 +1191,7 @@ func TestChangePassphrase(t *testing.T) {
 	}
 
 	// Changing the passphrase with a locked wallet must fail with ErrWalletLocked.
-	if err := w.ChangePassphrase([]byte("potato")); err != ErrWalletLocked {
+	if err := w.ChangePassphrase([]byte("potato")); err != ErrLocked {
 		t.Errorf("Changing passphrase on a locked wallet did not fail correctly: %v", err)
 		return
 	}

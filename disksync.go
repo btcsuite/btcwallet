@@ -394,7 +394,7 @@ func (a *Account) writeWallet(dir string) error {
 	if err != nil {
 		return err
 	}
-	if _, err = a.Wallet.WriteTo(tmpfile); err != nil {
+	if _, err = a.KeyStore.WriteTo(tmpfile); err != nil {
 		return err
 	}
 

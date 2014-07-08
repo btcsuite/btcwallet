@@ -25,8 +25,8 @@ import (
 	"github.com/conformal/btcrpcclient"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
 )
@@ -87,7 +87,7 @@ type (
 
 func (n blockConnected) handleNotification(c *rpcClient) error {
 	// Update the blockstamp for the newly-connected block.
-	bs := wallet.BlockStamp{
+	bs := keystore.BlockStamp{
 		Height: n.height,
 		Hash:   *n.hash,
 	}
@@ -220,11 +220,12 @@ func (n recvTx) handleNotification(c *rpcClient) error {
 				return err
 			}
 			AcctMgr.ds.ScheduleTxStoreWrite(a)
-			ltr, err := cred.ToJSON(a.Name(), bs.Height, a.Wallet.Net())
+			ltr, err := cred.ToJSON(a.KeyStore.Name(), bs.Height,
+				a.KeyStore.Net())
 			if err != nil {
 				return err
 			}
-			server.NotifyNewTxDetails(a.Name(), ltr)
+			server.NotifyNewTxDetails(a.KeyStore.Name(), ltr)
 			break // check whether next txout is a wallet txout
 		}
 	}
@@ -260,7 +261,7 @@ type rpcClient struct {
 	*btcrpcclient.Client // client to btcd
 
 	mtx        sync.Mutex
-	blockStamp wallet.BlockStamp
+	blockStamp keystore.BlockStamp
 
 	enqueueNotification chan notification
 	dequeueNotification chan notification
@@ -271,7 +272,7 @@ type rpcClient struct {
 
 func newRPCClient(certs []byte) (*rpcClient, error) {
 	client := rpcClient{
-		blockStamp: wallet.BlockStamp{
+		blockStamp: keystore.BlockStamp{
 			Height: int32(btcutil.BlockHeightUnknown),
 		},
 		enqueueNotification: make(chan notification),
@@ -433,7 +434,7 @@ func (c *rpcClient) handleNotifications() {
 // block from the RPC client.  If no blocks have been seen (the height is -1),
 // the chain server is queried for the block and the result is saved for future
 // calls, or an error is returned if the RPC is unsuccessful.
-func (c *rpcClient) BlockStamp() (wallet.BlockStamp, error) {
+func (c *rpcClient) BlockStamp() (keystore.BlockStamp, error) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
@@ -443,9 +444,9 @@ func (c *rpcClient) BlockStamp() (wallet.BlockStamp, error) {
 
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
-		return wallet.BlockStamp{}, err
+		return keystore.BlockStamp{}, err
 	}
-	bs := wallet.BlockStamp{
+	bs := keystore.BlockStamp{
 		Hash:   *hash,
 		Height: height,
 	}
@@ -503,7 +504,7 @@ func (c *rpcClient) Handshake() error {
 
 	// Check that there was not any reorgs done since last connection.
 	// If so, rollback and rescan to catch up.
-	it := a.Wallet.NewIterateRecentBlocks()
+	it := a.KeyStore.NewIterateRecentBlocks()
 	for cont := it != nil; cont; cont = it.Prev() {
 		bs := it.BlockStamp()
 		log.Debugf("Checking for previous saved block with height %v hash %v",
@@ -530,7 +531,7 @@ func (c *rpcClient) Handshake() error {
 
 		// Set default account to be marked in sync with the current
 		// blockstamp.  This invalidates the iterator.
-		a.Wallet.SetSyncedWith(bs)
+		a.KeyStore.SetSyncedWith(bs)
 
 		// Begin tracking wallets against this btcd instance.
 		AcctMgr.Track()

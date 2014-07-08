@@ -24,8 +24,8 @@ import (
 
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 )
 
@@ -34,17 +34,17 @@ import (
 // addresses and keys), and tx and utxo stores, and a mutex to prevent
 // incorrect multiple access.
 type Account struct {
-	name string
-	*wallet.Wallet
+	name            string
+	KeyStore        *keystore.Store
 	TxStore         *txstore.Store
 	lockedOutpoints map[btcwire.OutPoint]struct{}
 	FeeIncrement    btcutil.Amount
 }
 
-func newAccount(name string, w *wallet.Wallet, txs *txstore.Store) *Account {
+func newAccount(name string, keys *keystore.Store, txs *txstore.Store) *Account {
 	return &Account{
 		name:            name,
-		Wallet:          w,
+		KeyStore:        keys,
 		TxStore:         txs,
 		lockedOutpoints: map[btcwire.OutPoint]struct{}{},
 		FeeIncrement:    defaultFeeIncrement,
@@ -53,12 +53,12 @@ func newAccount(name string, w *wallet.Wallet, txs *txstore.Store) *Account {
 
 // Lock locks the underlying wallet for an account.
 func (a *Account) Lock() error {
-	switch err := a.Wallet.Lock(); err {
+	switch err := a.KeyStore.Lock(); err {
 	case nil:
-		server.NotifyWalletLockStateChange(a.Name(), true)
+		server.NotifyWalletLockStateChange(a.KeyStore.Name(), true)
 		return nil
 
-	case wallet.ErrWalletLocked:
+	case keystore.ErrLocked:
 		// Do not pass wallet already locked errors to the caller.
 		return nil
 
@@ -69,11 +69,11 @@ func (a *Account) Lock() error {
 
 // Unlock unlocks the underlying wallet for an account.
 func (a *Account) Unlock(passphrase []byte) error {
-	if err := a.Wallet.Unlock(passphrase); err != nil {
+	if err := a.KeyStore.Unlock(passphrase); err != nil {
 		return err
 	}
 
-	server.NotifyWalletLockStateChange(a.Name(), false)
+	server.NotifyWalletLockStateChange(a.KeyStore.Name(), false)
 	return nil
 }
 
@@ -173,7 +173,7 @@ func (a *Account) CalculateAddressBalance(addr btcutil.Address, confirms int) (b
 // one transaction spending to it in the blockchain or btcd mempool), the next
 // chained address is returned.
 func (a *Account) CurrentAddress() (btcutil.Address, error) {
-	addr := a.Wallet.LastChainedAddress()
+	addr := a.KeyStore.LastChainedAddress()
 
 	// Get next chained address if the last one has already been used.
 	if a.AddressUsed(addr) {
@@ -203,7 +203,8 @@ func (a *Account) ListSinceBlock(since, curBlockHeight int32,
 			continue
 		}
 
-		jsonResults, err := txRecord.ToJSON(a.name, curBlockHeight, a.Net())
+		jsonResults, err := txRecord.ToJSON(a.name, curBlockHeight,
+			a.KeyStore.Net())
 		if err != nil {
 			return nil, err
 		}
@@ -234,7 +235,8 @@ func (a *Account) ListTransactions(from, count int) ([]btcjson.ListTransactionsR
 	lastLookupIdx := len(records) - count
 	// Search in reverse order: lookup most recently-added first.
 	for i := len(records) - 1; i >= from && i >= lastLookupIdx; i-- {
-		jsonResults, err := records[i].ToJSON(a.name, bs.Height, a.Net())
+		jsonResults, err := records[i].ToJSON(a.name, bs.Height,
+			a.KeyStore.Net())
 		if err != nil {
 			return nil, err
 		}
@@ -279,7 +281,8 @@ func (a *Account) ListAddressTransactions(pkHashes map[string]struct{}) (
 			if _, ok := pkHashes[string(apkh.ScriptAddress())]; !ok {
 				continue
 			}
-			jsonResult, err := c.ToJSON(a.name, bs.Height, a.Net())
+			jsonResult, err := c.ToJSON(a.name, bs.Height,
+				a.KeyStore.Net())
 			if err != nil {
 				return nil, err
 			}
@@ -310,7 +313,8 @@ func (a *Account) ListAllTransactions() ([]btcjson.ListTransactionsResult, error
 	// Search in reverse order: lookup most recently-added first.
 	records := a.TxStore.Records()
 	for i := len(records) - 1; i >= 0; i-- {
-		jsonResults, err := records[i].ToJSON(a.name, bs.Height, a.Net())
+		jsonResults, err := records[i].ToJSON(a.name, bs.Height,
+			a.KeyStore.Net())
 		if err != nil {
 			return nil, err
 		}
@@ -326,9 +330,9 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 	// Iterate over each active address, appending the private
 	// key to privkeys.
 	privkeys := []string{}
-	for _, info := range a.Wallet.ActiveAddresses() {
+	for _, info := range a.KeyStore.ActiveAddresses() {
 		// Only those addresses with keys needed.
-		pka, ok := info.(wallet.PubKeyAddress)
+		pka, ok := info.(keystore.PubKeyAddress)
 		if !ok {
 			continue
 		}
@@ -349,12 +353,12 @@ func (a *Account) DumpPrivKeys() ([]string, error) {
 // single wallet address.
 func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 	// Get private key from wallet if it exists.
-	address, err := a.Wallet.Address(addr)
+	address, err := a.KeyStore.Address(addr)
 	if err != nil {
 		return "", err
 	}
 
-	pka, ok := address.(wallet.PubKeyAddress)
+	pka, ok := address.(keystore.PubKeyAddress)
 	if !ok {
 		return "", fmt.Errorf("address %s is not a key type", addr)
 	}
@@ -368,11 +372,11 @@ func (a *Account) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 
 // ImportPrivateKey imports a private key to the account's wallet and
 // writes the new wallet to disk.
-func (a *Account) ImportPrivateKey(wif *btcutil.WIF, bs *wallet.BlockStamp,
+func (a *Account) ImportPrivateKey(wif *btcutil.WIF, bs *keystore.BlockStamp,
 	rescan bool) (string, error) {
 
 	// Attempt to import private key into wallet.
-	addr, err := a.Wallet.ImportPrivateKey(wif, bs)
+	addr, err := a.KeyStore.ImportPrivateKey(wif, bs)
 	if err != nil {
 		return "", err
 	}
@@ -430,13 +434,13 @@ func (a *Account) ExportToDirectory(dirBaseName string) error {
 // should be exported quickly, either to file or to an rpc caller, and then
 // dropped from scope.
 func (a *Account) ExportWatchingWallet() (*Account, error) {
-	ww, err := a.Wallet.ExportWatchingWallet()
+	ww, err := a.KeyStore.ExportWatchingWallet()
 	if err != nil {
 		return nil, err
 	}
 
 	wa := *a
-	wa.Wallet = ww
+	wa.KeyStore = ww
 	return &wa, nil
 }
 
@@ -446,7 +450,7 @@ func (a *Account) exportBase64() (map[string]string, error) {
 	buf := bytes.Buffer{}
 	m := make(map[string]string)
 
-	_, err := a.Wallet.WriteTo(&buf)
+	_, err := a.KeyStore.WriteTo(&buf)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +521,7 @@ func (a *Account) Track() {
 	//
 	// TODO: return as slice? (doesn't have to be ordered, or
 	// SortedActiveAddresses would be fine.)
-	addrMap := a.ActiveAddresses()
+	addrMap := a.KeyStore.ActiveAddresses()
 	addrs := make([]btcutil.Address, 0, len(addrMap))
 	for addr := range addrMap {
 		addrs = append(addrs, addr)
@@ -542,9 +546,9 @@ func (a *Account) Track() {
 func (a *Account) RescanActiveJob() (*RescanJob, error) {
 	// Determine the block necesary to start the rescan for all active
 	// addresses.
-	height := a.SyncHeight()
+	height := a.KeyStore.SyncHeight()
 
-	actives := a.SortedActiveAddresses()
+	actives := a.KeyStore.SortedActiveAddresses()
 	addrs := make([]btcutil.Address, 0, len(actives))
 	for i := range actives {
 		addrs = append(addrs, actives[i].Address())
@@ -594,7 +598,7 @@ func (a *Account) ResendUnminedTxs() {
 // SortedActivePaymentAddresses returns a slice of all active payment
 // addresses in an account.
 func (a *Account) SortedActivePaymentAddresses() []string {
-	infos := a.Wallet.SortedActiveAddresses()
+	infos := a.KeyStore.SortedActiveAddresses()
 
 	addrs := make([]string, len(infos))
 	for i, info := range infos {
@@ -607,7 +611,7 @@ func (a *Account) SortedActivePaymentAddresses() []string {
 // ActivePaymentAddresses returns a set of all active pubkey hashes
 // in an account.
 func (a *Account) ActivePaymentAddresses() map[string]struct{} {
-	infos := a.ActiveAddresses()
+	infos := a.KeyStore.ActiveAddresses()
 
 	addrs := make(map[string]struct{}, len(infos))
 	for _, info := range infos {
@@ -630,7 +634,7 @@ func (a *Account) NewAddress() (btcutil.Address, error) {
 	}
 
 	// Get next address from wallet.
-	addr, err := a.Wallet.NextChainedAddress(&bs, cfg.KeypoolSize)
+	addr, err := a.KeyStore.NextChainedAddress(&bs, cfg.KeypoolSize)
 	if err != nil {
 		return nil, err
 	}
@@ -665,7 +669,7 @@ func (a *Account) NewChangeAddress() (btcutil.Address, error) {
 	}
 
 	// Get next chained change address from wallet.
-	addr, err := a.Wallet.ChangeAddress(&bs, cfg.KeypoolSize)
+	addr, err := a.KeyStore.ChangeAddress(&bs, cfg.KeypoolSize)
 	if err != nil {
 		return nil, err
 	}
@@ -691,13 +695,13 @@ func (a *Account) NewChangeAddress() (btcutil.Address, error) {
 func (a *Account) RecoverAddresses(n int) error {
 	// Get info on the last chained address.  The rescan starts at the
 	// earliest block height the last chained address might appear at.
-	last := a.Wallet.LastChainedAddress()
-	lastInfo, err := a.Wallet.Address(last)
+	last := a.KeyStore.LastChainedAddress()
+	lastInfo, err := a.KeyStore.Address(last)
 	if err != nil {
 		return err
 	}
 
-	addrs, err := a.Wallet.ExtendActiveAddresses(n, cfg.KeypoolSize)
+	addrs, err := a.KeyStore.ExtendActiveAddresses(n, cfg.KeypoolSize)
 	if err != nil {
 		return err
 	}

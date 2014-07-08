@@ -43,8 +43,8 @@ import (
 	"github.com/conformal/btcrpcclient"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
 	"github.com/conformal/websocket"
@@ -1123,7 +1123,7 @@ func makeMultiSigScript(keys []string, nRequired int) ([]byte, error) {
 				return nil, err
 			}
 
-			apkinfo := ainfo.(wallet.PubKeyAddress)
+			apkinfo := ainfo.(keystore.PubKeyAddress)
 
 			// This will be an addresspubkey
 			a, err := btcutil.DecodeAddress(apkinfo.ExportPubKey(),
@@ -1164,7 +1164,8 @@ func AddMultiSigAddress(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	// TODO(oga) blockstamp current block?
-	address, err := acct.ImportScript(script, &wallet.BlockStamp{})
+	address, err := acct.KeyStore.ImportScript(script,
+		&keystore.BlockStamp{})
 	if err != nil {
 		return nil, err
 	}
@@ -1222,7 +1223,7 @@ func DumpPrivKey(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	key, err := AcctMgr.DumpWIFPrivateKey(addr)
-	if err == wallet.ErrWalletLocked {
+	if err == keystore.ErrLocked {
 		// Address was found, but the private key isn't
 		// accessible.
 		return nil, btcjson.ErrWalletUnlockNeeded
@@ -1241,7 +1242,7 @@ func DumpWallet(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	keys, err := AcctMgr.DumpKeys()
-	if err == wallet.ErrWalletLocked {
+	if err == keystore.ErrLocked {
 		// Address was found, but the private key isn't
 		// accessible.
 		return nil, btcjson.ErrWalletUnlockNeeded
@@ -1348,7 +1349,7 @@ func GetInfo(icmd btcjson.Cmd) (interface{}, error) {
 			feeIncr = a.FeeIncrement
 		}
 	}
-	info.WalletVersion = int32(wallet.VersCurrent.Uint32())
+	info.WalletVersion = int32(keystore.VersCurrent.Uint32())
 	info.Balance = balance.ToUnit(btcutil.AmountBTC)
 	// Keypool times are not tracked. set to current time.
 	info.KeypoolOldest = time.Now().Unix()
@@ -1385,7 +1386,7 @@ func GetAccount(icmd btcjson.Cmd) (interface{}, error) {
 		}
 		return nil, err
 	}
-	return acct.Name(), nil
+	return acct.KeyStore.Name(), nil
 }
 
 // GetAccountAddress handles a getaccountaddress by returning the most
@@ -1412,7 +1413,7 @@ func GetAccountAddress(icmd btcjson.Cmd) (interface{}, error) {
 
 	addr, err := a.CurrentAddress()
 	if err != nil {
-		if err == wallet.ErrWalletLocked {
+		if err == keystore.ErrLocked {
 			return nil, btcjson.ErrWalletKeypoolRanOut
 		}
 		return nil, err
@@ -1501,13 +1502,13 @@ func ImportPrivKey(icmd btcjson.Cmd) (interface{}, error) {
 	}
 
 	// Import the private key, handling any errors.
-	bs := wallet.BlockStamp{}
+	bs := keystore.BlockStamp{}
 	if _, err := a.ImportPrivateKey(wif, &bs, cmd.Rescan); err != nil {
 		switch err {
-		case wallet.ErrDuplicate:
+		case keystore.ErrDuplicate:
 			// Do not return duplicate key errors to the client.
 			return nil, nil
-		case wallet.ErrWalletLocked:
+		case keystore.ErrLocked:
 			return nil, btcjson.ErrWalletUnlockNeeded
 		default:
 			return nil, err
@@ -1527,7 +1528,7 @@ func KeypoolRefill(icmd btcjson.Cmd) (interface{}, error) {
 // NotifyNewBlockChainHeight notifies all websocket clients of a new
 // blockchain height.  This sends the same notification as
 // btcd, so this can probably be removed.
-func (s *rpcServer) NotifyNewBlockChainHeight(bs *wallet.BlockStamp) {
+func (s *rpcServer) NotifyNewBlockChainHeight(bs *keystore.BlockStamp) {
 	ntfn := btcws.NewBlockConnectedNtfn(bs.Hash.String(), bs.Height)
 	mntfn, err := ntfn.MarshalJSON()
 	// btcws notifications must always marshal without error.
@@ -2117,7 +2118,7 @@ func sendPairs(icmd btcjson.Cmd, account string, amounts map[string]btcutil.Amou
 		switch err {
 		case ErrNonPositiveAmount:
 			return nil, ErrNeedPositiveAmount
-		case wallet.ErrWalletLocked:
+		case keystore.ErrLocked:
 			return nil, btcjson.ErrWalletUnlockNeeded
 		default:
 			return nil, err
@@ -2245,13 +2246,14 @@ func handleSendRawTxReply(icmd btcjson.Cmd, txSha *btcwire.ShaHash, a *Account, 
 		return err
 	}
 	if bs, err := rpcc.BlockStamp(); err == nil {
-		ltr, err := debits.ToJSON(a.Name(), bs.Height, a.Net())
+		ltr, err := debits.ToJSON(a.KeyStore.Name(), bs.Height,
+			a.KeyStore.Net())
 		if err != nil {
 			log.Errorf("Error adding sent tx history: %v", err)
 			return btcjson.ErrInternal
 		}
 		for _, details := range ltr {
-			server.NotifyNewTxDetails(a.Name(), details)
+			server.NotifyNewTxDetails(a.KeyStore.Name(), details)
 		}
 	}
 
@@ -2342,7 +2344,7 @@ func SignMessage(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, btcjson.ErrInvalidAddressOrKey
 	}
 
-	pka := ainfo.(wallet.PubKeyAddress)
+	pka := ainfo.(keystore.PubKeyAddress)
 	privkey, err := pka.PrivKey()
 	if err != nil {
 		return nil, err
@@ -2614,7 +2616,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 				return nil, false, err
 			}
 
-			pka, ok := address.(wallet.PubKeyAddress)
+			pka, ok := address.(keystore.PubKeyAddress)
 			if !ok {
 				return nil, false, errors.New("address is not " +
 					"a pubkey address")
@@ -2644,7 +2646,7 @@ func SignRawTransaction(icmd btcjson.Cmd) (interface{}, error) {
 			if err != nil {
 				return nil, err
 			}
-			sa, ok := address.(wallet.ScriptAddress)
+			sa, ok := address.(keystore.ScriptAddress)
 			if !ok {
 				return nil, errors.New("address is not a script" +
 					" address")
@@ -2732,7 +2734,7 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, error) {
 	if account, err := AcctMgr.AccountByAddress(addr); err == nil {
 		// The address must be handled by this account, so we expect
 		// this call to succeed without error.
-		ainfo, err := account.Address(addr)
+		ainfo, err := account.KeyStore.Address(addr)
 		if err != nil {
 			panic(err)
 		}
@@ -2740,11 +2742,11 @@ func ValidateAddress(icmd btcjson.Cmd) (interface{}, error) {
 		result.IsMine = true
 		result.Account = account.name
 
-		if pka, ok := ainfo.(wallet.PubKeyAddress); ok {
+		if pka, ok := ainfo.(keystore.PubKeyAddress); ok {
 			result.IsCompressed = pka.Compressed()
 			result.PubKey = pka.ExportPubKey()
 
-		} else if sa, ok := ainfo.(wallet.ScriptAddress); ok {
+		} else if sa, ok := ainfo.(keystore.ScriptAddress); ok {
 			result.IsScript = true
 			addresses := sa.Addresses()
 			addrStrings := make([]string, len(addresses))
@@ -2785,7 +2787,7 @@ func VerifyMessage(icmd btcjson.Cmd) (interface{}, error) {
 		return nil, btcjson.ErrInvalidAddressOrKey
 	}
 
-	pka := ainfo.(wallet.PubKeyAddress)
+	pka := ainfo.(keystore.PubKeyAddress)
 	privkey, err := pka.PrivKey()
 	if err != nil {
 		return nil, err
@@ -2856,7 +2858,7 @@ func WalletPassphraseChange(icmd btcjson.Cmd) (interface{}, error) {
 
 	err := AcctMgr.ChangePassphrase([]byte(cmd.OldPassphrase),
 		[]byte(cmd.NewPassphrase))
-	if err == wallet.ErrWrongPassphrase {
+	if err == keystore.ErrWrongPassphrase {
 		return nil, btcjson.ErrWalletPassphraseIncorrect
 	}
 	return nil, err

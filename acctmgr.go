@@ -30,8 +30,8 @@ import (
 	"github.com/conformal/btcchain"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 )
 
@@ -219,9 +219,9 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 		}
 	}
 
-	wlt := new(wallet.Wallet)
+	keys := new(keystore.Store)
 	txs := txstore.New()
-	a := newAccount(name, wlt, txs)
+	a := newAccount(name, keys, txs)
 
 	walletPath := accountFilename("wallet.bin", name, netdir)
 	txstorePath := accountFilename("tx.bin", name, netdir)
@@ -236,7 +236,7 @@ func openSavedAccount(name string, cfg *config) (*Account, error) {
 		msg := fmt.Sprintf("cannot open wallet file: %s", err)
 		return nil, &walletOpenError{msg}
 	}
-	if _, err = wlt.ReadFrom(walletFi); err != nil {
+	if _, err = keys.ReadFrom(walletFi); err != nil {
 		if err := walletFi.Close(); err != nil {
 			log.Warnf("Cannot close wallet file: %v", err)
 		}
@@ -329,12 +329,12 @@ func writeUnsyncedWallet(a *Account, path string) error {
 	// to SyncHeight will use the wallet creation height, or possibly
 	// an earlier height for imported keys.
 	netdir, _ := filepath.Split(path)
-	a.SetSyncedWith(nil)
+	a.KeyStore.SetSyncedWith(nil)
 	tmpwallet, err := ioutil.TempFile(netdir, "wallet.bin")
 	if err != nil {
 		return fmt.Errorf("cannot create temporary wallet: %v", err)
 	}
-	if _, err := a.Wallet.WriteTo(tmpwallet); err != nil {
+	if _, err := a.KeyStore.WriteTo(tmpwallet); err != nil {
 		return fmt.Errorf("cannot write back unsynced wallet: %v", err)
 	}
 	tmpwalletpath := tmpwallet.Name()
@@ -552,7 +552,8 @@ func (am *AccountManager) rescanListener() {
 		case *RescanProgressMsg:
 			for acct, addrs := range e.Addresses {
 				for i := range addrs {
-					err := acct.SetSyncStatus(addrs[i], wallet.PartialSync(e.Height))
+					err := acct.KeyStore.SetSyncStatus(addrs[i],
+						keystore.PartialSync(e.Height))
 					if err != nil {
 						log.Errorf("Error marking address partially synced: %v", err)
 						continue
@@ -577,7 +578,8 @@ func (am *AccountManager) rescanListener() {
 			for acct, addrs := range e.Addresses {
 				n += len(addrs)
 				for i := range addrs {
-					err := acct.SetSyncStatus(addrs[i], wallet.FullSync{})
+					err := acct.KeyStore.SetSyncStatus(addrs[i],
+						keystore.FullSync{})
 					if err != nil {
 						log.Errorf("Error marking address synced: %v", err)
 						continue
@@ -672,13 +674,13 @@ func (am *AccountManager) MarkAddressForAccount(address btcutil.Address,
 }
 
 // Address looks up an address if it is known to wallet at all.
-func (am *AccountManager) Address(addr btcutil.Address) (wallet.WalletAddress, error) {
+func (am *AccountManager) Address(addr btcutil.Address) (keystore.WalletAddress, error) {
 	a, err := am.AccountByAddress(addr)
 	if err != nil {
 		return nil, err
 	}
 
-	return a.Address(addr)
+	return a.KeyStore.Address(addr)
 }
 
 // AllAccounts returns a slice of all managed accounts.
@@ -748,7 +750,7 @@ func (am *AccountManager) Rollback(height int32, hash *btcwire.ShaHash) error {
 // BlockNotify notifies all wallet clients of any changes from the new block,
 // including changed balances.  Each account is then set to be synced
 // with the latest block.
-func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
+func (am *AccountManager) BlockNotify(bs *keystore.BlockStamp) {
 	for _, a := range am.AllAccounts() {
 		// TODO: need a flag or check that the utxo store was actually
 		// modified, or this will notify even if there are no balance
@@ -766,8 +768,8 @@ func (am *AccountManager) BlockNotify(bs *wallet.BlockStamp) {
 
 		// If this is the default account, update the block all accounts
 		// are synced with, and schedule a wallet write.
-		if a.Name() == "" {
-			a.Wallet.SetSyncedWith(bs)
+		if a.KeyStore.Name() == "" {
+			a.KeyStore.SetSyncedWith(bs)
 			am.ds.ScheduleWalletWrite(a)
 		}
 	}
@@ -825,7 +827,7 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 	}
 
 	// Create new wallet in memory.
-	wlt, err := wallet.NewWallet("", "Default acccount", passphrase,
+	keys, err := keystore.NewStore("", "Default acccount", passphrase,
 		activeNet.Params, &bs, cfg.KeypoolSize)
 	if err != nil {
 		return err
@@ -834,7 +836,7 @@ func (am *AccountManager) CreateEncryptedWallet(passphrase []byte) error {
 	// Create new account and begin managing with the global account
 	// manager.  Registering will fail if the new account can not be
 	// written immediately to disk.
-	a := newAccount("", wlt, txstore.New())
+	a := newAccount("", keys, txstore.New())
 	if err := am.RegisterNewAccount(a); err != nil {
 		return err
 	}
@@ -858,7 +860,7 @@ func (am *AccountManager) ChangePassphrase(old, new []byte) error {
 
 	// Change passphrase for each unlocked wallet.
 	for _, a := range accts {
-		err = a.Wallet.ChangePassphrase(new)
+		err = a.KeyStore.ChangePassphrase(new)
 		if err != nil {
 			return err
 		}
@@ -893,7 +895,7 @@ func (am *AccountManager) DumpKeys() ([]string, error) {
 	keys := []string{}
 	for _, a := range am.AllAccounts() {
 		switch walletKeys, err := a.DumpPrivKeys(); err {
-		case wallet.ErrWalletLocked:
+		case keystore.ErrLocked:
 			return nil, err
 
 		case nil:
@@ -1055,7 +1057,7 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 			result := &btcjson.ListUnspentResult{
 				TxId:          credit.Tx().Sha().String(),
 				Vout:          credit.OutputIndex,
-				Account:       a.Name(),
+				Account:       a.KeyStore.Name(),
 				ScriptPubKey:  hex.EncodeToString(credit.TxOut().PkScript),
 				Amount:        credit.Amount().ToUnit(btcutil.AmountBTC),
 				Confirmations: int64(confs),
@@ -1082,7 +1084,7 @@ func (am *AccountManager) ListUnspent(minconf, maxconf int,
 // caller to mark the progress that the rescan is expected to complete
 // through, if the account otherwise does not contain any recently
 // seen blocks.
-func (am *AccountManager) RescanActiveAddresses(markBestBlock *wallet.BlockStamp) error {
+func (am *AccountManager) RescanActiveAddresses(markBestBlock *keystore.BlockStamp) error {
 	var job *RescanJob
 	var defaultAcct *Account
 	for _, a := range am.AllAccounts() {
@@ -1102,7 +1104,7 @@ func (am *AccountManager) RescanActiveAddresses(markBestBlock *wallet.BlockStamp
 	}
 	if job != nil {
 		if markBestBlock != nil {
-			defaultAcct.SetSyncedWith(markBestBlock)
+			defaultAcct.KeyStore.SetSyncedWith(markBestBlock)
 		}
 
 		// Submit merged job and block until rescan completes.

@@ -83,8 +83,8 @@ func TestAllowFree(t *testing.T) {
 
 func TestFakeTxs(t *testing.T) {
 	// First we need a wallet.
-	w, err := wallet.NewWallet("banana wallet", "", []byte("banana"),
-		btcwire.MainNet, &wallet.BlockStamp{}, 100)
+	w, err := keystore.NewStore("banana wallet", "", []byte("banana"),
+		btcwire.MainNet, &keystore.BlockStamp{}, 100)
 	if err != nil {
 		t.Errorf("Can not create encrypted wallet: %s", err)
 		return
@@ -101,7 +101,7 @@ func TestFakeTxs(t *testing.T) {
 	// This will pass validation because btcscript is unaware of invalid
 	// tx inputs, however, this example would fail in btcd.
 	utxo := &tx.Utxo{}
-	addr, err := w.NextChainedAddress(&wallet.BlockStamp{}, 100)
+	addr, err := w.NextChainedAddress(&keystore.BlockStamp{}, 100)
 	if err != nil {
 		t.Errorf("Cannot get next address: %s", err)
 		return

@@ -27,8 +27,8 @@ import (
 	"github.com/conformal/btcchain"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwallet/wallet"
 	"github.com/conformal/btcwire"
 )
 
@@ -118,8 +118,8 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	minconf int) (*CreatedTx, error) {
 
 	// Wallet must be unlocked to compose transaction.
-	if a.IsLocked() {
-		return nil, wallet.ErrWalletLocked
+	if a.KeyStore.IsLocked() {
+		return nil, keystore.ErrLocked
 	}
 
 	// Create a new transaction which will include all input scripts.
@@ -228,7 +228,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 		if change > 0 {
 			// Get a new change address if one has not already been found.
 			if changeAddr == nil {
-				changeAddr, err = a.ChangeAddress(&bs, cfg.KeypoolSize)
+				changeAddr, err = a.KeyStore.ChangeAddress(&bs, cfg.KeypoolSize)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get next address: %s", err)
 				}
@@ -267,16 +267,16 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 				continue // don't handle inputs to this yes
 			}
 
-			ai, err := a.Address(apkh)
+			ai, err := a.KeyStore.Address(apkh)
 			if err != nil {
 				return nil, fmt.Errorf("cannot get address info: %v", err)
 			}
 
-			pka := ai.(wallet.PubKeyAddress)
+			pka := ai.(keystore.PubKeyAddress)
 
 			privkey, err := pka.PrivKey()
-			if err == wallet.ErrWalletLocked {
-				return nil, wallet.ErrWalletLocked
+			if err == keystore.ErrLocked {
+				return nil, keystore.ErrLocked
 			} else if err != nil {
 				return nil, fmt.Errorf("cannot get address key: %v", err)
 			}
