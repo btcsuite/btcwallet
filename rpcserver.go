@@ -1053,6 +1053,8 @@ out:
 				switch e := err.(type) {
 				case btcjson.Error:
 					*jsonErr = e
+				case *btcjson.Error:
+					*jsonErr = *e
 				case DeserializationError:
 					jsonErr.Code = btcjson.ErrDeserialization.Code
 				case InvalidParameterError:
