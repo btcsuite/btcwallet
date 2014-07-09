@@ -36,7 +36,6 @@ const (
 	defaultLogLevel         = "info"
 	defaultLogDirname       = "logs"
 	defaultLogFilename      = "btcwallet.log"
-	defaultKeypoolSize      = 100
 	defaultDisallowFree     = false
 	defaultRPCMaxClients    = 10
 	defaultRPCMaxWebsockets = 25
@@ -72,7 +71,7 @@ type config struct {
 	RPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
 	MainNet          bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
 	SimNet           bool     `long:"simnet" description:"Use the simulation test network (default testnet3)"`
-	KeypoolSize      uint     `short:"k" long:"keypoolsize" description:"Maximum number of addresses in keypool"`
+	KeypoolSize      uint     `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
 	DisallowFree     bool     `long:"disallowfree" description:"Force transactions to always include a fee"`
 	Proxy            string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
 	ProxyUser        string   `long:"proxyuser" description:"Username for proxy server"`
@@ -243,7 +242,6 @@ func loadConfig() (*config, []string, error) {
 		LogDir:           defaultLogDir,
 		RPCKey:           defaultRPCKeyFile,
 		RPCCert:          defaultRPCCertFile,
-		KeypoolSize:      defaultKeypoolSize,
 		DisallowFree:     defaultDisallowFree,
 		RPCMaxClients:    defaultRPCMaxClients,
 		RPCMaxWebsockets: defaultRPCMaxWebsockets,

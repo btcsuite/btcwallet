@@ -22,11 +22,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/rename"
 	"github.com/conformal/btcwire"
 )
+
+// filename is the name of the file typically used to save a transaction
+// store on disk.
+const filename = "tx.bin"
 
 // All Store versions (both old and current).
 const (
@@ -59,6 +67,8 @@ var byteOrder = binary.LittleEndian
 // ReadFrom satisifies the io.ReaderFrom interface by deserializing a
 // transaction store from an io.Reader.
 func (s *Store) ReadFrom(r io.Reader) (int64, error) {
+	// Don't bother locking this.  The mutex gets overwritten anyways.
+
 	var buf [4]byte
 	uint32Bytes := buf[:4]
 
@@ -76,7 +86,7 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 	}
 
 	// Reset store.
-	*s = *New()
+	*s = *New(s.path)
 
 	// Read block structures.  Begin by reading the total number of block
 	// structures to be read, and then iterate that many times to read
@@ -144,6 +154,13 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 // WriteTo satisifies the io.WriterTo interface by serializing a transaction
 // store to an io.Writer.
 func (s *Store) WriteTo(w io.Writer) (int64, error) {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	return s.writeTo(w)
+}
+
+func (s *Store) writeTo(w io.Writer) (int64, error) {
 	var buf [4]byte
 	uint32Bytes := buf[:4]
 
@@ -1127,4 +1144,73 @@ func (u *unconfirmedStore) WriteTo(w io.Writer) (int64, error) {
 	// application use, this was deemed to be an acceptable tradeoff.
 
 	return n64, nil
+}
+
+// TODO: set this automatically.
+func (s *Store) MarkDirty() {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	s.dirty = true
+}
+
+func (s *Store) WriteIfDirty() error {
+	s.mtx.RLock()
+	if !s.dirty {
+		s.mtx.RUnlock()
+		return nil
+	}
+
+	// TempFile creates the file 0600, so no need to chmod it.
+	fi, err := ioutil.TempFile(s.dir, s.file)
+	if err != nil {
+		s.mtx.RUnlock()
+		return err
+	}
+	fiPath := fi.Name()
+
+	_, err = s.writeTo(fi)
+	if err != nil {
+		s.mtx.RUnlock()
+		fi.Close()
+		return err
+	}
+	err = fi.Sync()
+	if err != nil {
+		s.mtx.RUnlock()
+		fi.Close()
+		return err
+	}
+	fi.Close()
+
+	err = rename.Atomic(fiPath, s.path)
+	s.mtx.RUnlock()
+	if err == nil {
+		s.mtx.Lock()
+		s.dirty = false
+		s.mtx.Unlock()
+	}
+
+	return err
+}
+
+// OpenDir opens a new transaction store from the specified directory.
+// If the file does not exist, the error from the os package will be
+// returned, and can be checked with os.IsNotExist to differentiate missing
+// file errors from others (including deserialization).
+func OpenDir(dir string) (*Store, error) {
+	path := filepath.Join(dir, filename)
+	fi, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer fi.Close()
+	store := new(Store)
+	_, err = store.ReadFrom(fi)
+	if err != nil {
+		return nil, err
+	}
+	store.path = path
+	store.dir = dir
+	return store, nil
 }

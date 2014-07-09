@@ -26,22 +26,46 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-package main
+package rename
 
 import (
-	"os"
-	"path/filepath"
+	"syscall"
+	"unsafe"
 )
 
-// Rename provides an atomic file rename.  newpath is replaced if it
-// already exists.
-func Rename(oldpath, newpath string) error {
-	if _, err := os.Stat(newpath); err == nil {
-		if err := os.Remove(newpath); err != nil {
-			return err
+var (
+	modkernel32     = syscall.NewLazyDLL("kernel32.dll")
+	procMoveFileExW = modkernel32.NewProc("MoveFileExW")
+)
+
+const (
+	_MOVEFILE_REPLACE_EXISTING = 1
+)
+
+func moveFileEx(from *uint16, to *uint16, flags uint32) error {
+	r1, _, e1 := syscall.Syscall(procMoveFileExW.Addr(), 3,
+		uintptr(unsafe.Pointer(from)), uintptr(unsafe.Pointer(to)),
+		uintptr(flags))
+	if r1 == 0 {
+		if e1 != 0 {
+			return error(e1)
+		} else {
+			return syscall.EINVAL
 		}
 	}
+	return nil
+}
 
-	_, fname := filepath.Split(newpath)
-	return os.Rename(oldpath, fname)
+// Atomic provides an atomic file rename.  newpath is replaced if it
+// already exists.
+func Atomic(oldpath, newpath string) error {
+	from, err := syscall.UTF16PtrFromString(oldpath)
+	if err != nil {
+		return err
+	}
+	to, err := syscall.UTF16PtrFromString(newpath)
+	if err != nil {
+		return err
+	}
+	return moveFileEx(from, to, _MOVEFILE_REPLACE_EXISTING)
 }

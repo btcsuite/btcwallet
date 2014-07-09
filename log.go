@@ -21,6 +21,7 @@ import (
 	"os"
 
 	"github.com/conformal/btclog"
+	"github.com/conformal/btcwallet/chain"
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/seelog"
 )
@@ -42,12 +43,14 @@ var (
 	backendLog = seelog.Disabled
 	log        = btclog.Disabled
 	txstLog    = btclog.Disabled
+	chainLog   = btclog.Disabled
 )
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
 var subsystemLoggers = map[string]btclog.Logger{
 	"BTCW": log,
 	"TXST": txstLog,
+	"CHNS": chainLog,
 }
 
 // logClosure is used to provide a closure over expensive logging operations
@@ -80,6 +83,9 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	case "TXST":
 		txstLog = logger
 		txstore.UseLogger(logger)
+	case "CHNS":
+		chainLog = logger
+		chain.UseLogger(logger)
 	}
 }
 

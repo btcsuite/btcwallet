@@ -14,14 +14,14 @@
 
 // +build !windows,!plan9
 
-package main
+package rename
 
 import (
 	"os"
 )
 
-// Rename provides an atomic file rename.  newpath is replaced if it
+// Atomic provides an atomic file rename.  newpath is replaced if it
 // already exists.
-func Rename(oldpath, newpath string) error {
+func Atomic(oldpath, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }

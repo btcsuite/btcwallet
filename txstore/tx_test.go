@@ -88,7 +88,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		{
 			name: "new store",
 			f: func(_ *Store) (*Store, error) {
-				return New(), nil
+				return New("/tmp/tx.bin"), nil
 			},
 			bal:      0,
 			unc:      0,
@@ -249,7 +249,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		{
 			name: "insert unconfirmed debit",
 			f: func(s *Store) (*Store, error) {
-				prev, err := s.InsertTx(TstDoubleSpendTx, TstRecvTxBlockDetails)
+				_, err := s.InsertTx(TstDoubleSpendTx, TstRecvTxBlockDetails)
 				if err != nil {
 					return nil, err
 				}
@@ -259,7 +259,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.AddDebits(prev.Credits())
+				_, err = r.AddDebits()
 				if err != nil {
 					return nil, err
 				}
@@ -280,7 +280,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		{
 			name: "insert unconfirmed debit again",
 			f: func(s *Store) (*Store, error) {
-				prev, err := s.InsertTx(TstDoubleSpendTx, TstRecvTxBlockDetails)
+				_, err := s.InsertTx(TstDoubleSpendTx, TstRecvTxBlockDetails)
 				if err != nil {
 					return nil, err
 				}
@@ -290,7 +290,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.AddDebits(prev.Credits())
+				_, err = r.AddDebits()
 				if err != nil {
 					return nil, err
 				}
@@ -548,7 +548,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 }
 
 func TestFindingSpentCredits(t *testing.T) {
-	s := New()
+	s := New("/tmp/tx.bin")
 
 	// Insert transaction and credit which will be spent.
 	r, err := s.InsertTx(TstRecvTx, TstRecvTxBlockDetails)
@@ -570,7 +570,7 @@ func TestFindingSpentCredits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = r2.AddDebits(nil)
+	_, err = r2.AddDebits()
 	if err != nil {
 		t.Fatal(err)
 	}

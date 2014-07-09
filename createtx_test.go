@@ -89,7 +89,7 @@ func TestFakeTxs(t *testing.T) {
 		t.Errorf("Can not create encrypted wallet: %s", err)
 		return
 	}
-	a := &Account{
+	a := &Wallet{
 		Wallet:          w,
 		lockedOutpoints: map[btcwire.OutPoint]struct{}{},
 	}

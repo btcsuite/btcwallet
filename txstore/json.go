@@ -29,16 +29,19 @@ import (
 func (t *TxRecord) ToJSON(account string, chainHeight int32,
 	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
 
+	t.s.mtx.RLock()
+	defer t.s.mtx.RUnlock()
+
 	results := []btcjson.ListTransactionsResult{}
 	if d, err := t.Debits(); err == nil {
-		r, err := d.ToJSON(account, chainHeight, net)
+		r, err := d.toJSON(account, chainHeight, net)
 		if err != nil {
 			return nil, err
 		}
 		results = r
 	}
 	for _, c := range t.Credits() {
-		r, err := c.ToJSON(account, chainHeight, net)
+		r, err := c.toJSON(account, chainHeight, net)
 		if err != nil {
 			return nil, err
 		}
@@ -49,7 +52,16 @@ func (t *TxRecord) ToJSON(account string, chainHeight int32,
 
 // ToJSON returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
-func (d *Debits) ToJSON(account string, chainHeight int32,
+func (d Debits) ToJSON(account string, chainHeight int32,
+	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
+
+	d.s.mtx.RLock()
+	defer d.s.mtx.RUnlock()
+
+	return d.toJSON(account, chainHeight, net)
+}
+
+func (d Debits) toJSON(account string, chainHeight int32,
 	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
 
 	msgTx := d.Tx().MsgTx()
@@ -82,7 +94,7 @@ func (d *Debits) ToJSON(account string, chainHeight int32,
 			result.BlockHash = b.Hash.String()
 			result.BlockIndex = int64(d.Tx().Index())
 			result.BlockTime = b.Time.Unix()
-			result.Confirmations = int64(d.Confirmations(chainHeight))
+			result.Confirmations = int64(confirms(d.BlockHeight, chainHeight))
 		}
 		reply = append(reply, result)
 	}
@@ -102,11 +114,18 @@ const (
 	CreditImmature
 )
 
-// Category returns the category of the credit.  The passed block chain height is
+// category returns the category of the credit.  The passed block chain height is
 // used to distinguish immature from mature coinbase outputs.
 func (c *Credit) Category(chainHeight int32) CreditCategory {
-	if c.IsCoinbase() {
-		if c.Confirmed(btcchain.CoinbaseMaturity, chainHeight) {
+	c.s.mtx.RLock()
+	defer c.s.mtx.RUnlock()
+
+	return c.category(chainHeight)
+}
+
+func (c *Credit) category(chainHeight int32) CreditCategory {
+	if c.isCoinbase() {
+		if confirmed(btcchain.CoinbaseMaturity, c.BlockHeight, chainHeight) {
 			return CreditGenerate
 		}
 		return CreditImmature
@@ -132,7 +151,16 @@ func (c CreditCategory) String() string {
 
 // ToJSON returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
-func (c *Credit) ToJSON(account string, chainHeight int32,
+func (c Credit) ToJSON(account string, chainHeight int32,
+	net *btcnet.Params) (btcjson.ListTransactionsResult, error) {
+
+	c.s.mtx.RLock()
+	defer c.s.mtx.RUnlock()
+
+	return c.toJSON(account, chainHeight, net)
+}
+
+func (c Credit) toJSON(account string, chainHeight int32,
 	net *btcnet.Params) (btcjson.ListTransactionsResult, error) {
 
 	msgTx := c.Tx().MsgTx()
@@ -146,7 +174,7 @@ func (c *Credit) ToJSON(account string, chainHeight int32,
 
 	result := btcjson.ListTransactionsResult{
 		Account:         account,
-		Category:        c.Category(chainHeight).String(),
+		Category:        c.category(chainHeight).String(),
 		Address:         address,
 		Amount:          btcutil.Amount(txout.Value).ToUnit(btcutil.AmountBTC),
 		TxID:            c.Tx().Sha().String(),
@@ -163,7 +191,7 @@ func (c *Credit) ToJSON(account string, chainHeight int32,
 		result.BlockHash = b.Hash.String()
 		result.BlockIndex = int64(c.Tx().Index())
 		result.BlockTime = b.Time.Unix()
-		result.Confirmations = int64(c.Confirmations(chainHeight))
+		result.Confirmations = int64(confirms(c.BlockHeight, chainHeight))
 	}
 
 	return result, nil

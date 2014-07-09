@@ -17,282 +17,302 @@
 package main
 
 import (
-	"sync"
-
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/chain"
+	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwire"
 )
 
-// RescanMsg is the interface type for messages sent to the
-// RescanManager's message channel.
-type RescanMsg interface {
-	ImplementsRescanMsg()
-}
-
-// RescanStartedMsg reports the job being processed for a new
-// rescan.
-type RescanStartedMsg RescanJob
-
-// ImplementsRescanMsg is implemented to satisify the RescanMsg
-// interface.
-func (r *RescanStartedMsg) ImplementsRescanMsg() {}
-
-// RescanProgressMsg reports the current progress made by a rescan
-// for a set of account's addresses.
+// RescanProgressMsg reports the current progress made by a rescan for a
+// set of wallet addresses.
 type RescanProgressMsg struct {
-	Addresses map[*Account][]btcutil.Address
-	Height    int32
+	Addresses    []btcutil.Address
+	Notification *chain.RescanProgress
 }
 
-// ImplementsRescanMsg is implemented to satisify the RescanMsg
-// interface.
-func (r *RescanProgressMsg) ImplementsRescanMsg() {}
-
-// RescanFinishedMsg reports the set of account's addresses of a
-// possibly-finished rescan, or an error if the rescan failed.
+// RescanFinishedMsg reports the addresses that were rescanned when a
+// rescanfinished message was received rescanning a batch of addresses.
 type RescanFinishedMsg struct {
-	Addresses map[*Account][]btcutil.Address
-	Error     error
+	Addresses      []btcutil.Address
+	Notification   *chain.RescanFinished
+	WasInitialSync bool
 }
 
-// ImplementsRescanMsg is implemented to satisify the RescanMsg
-// interface.
-func (r *RescanFinishedMsg) ImplementsRescanMsg() {}
-
-// RescanManager manages a set of current and to be processed account's
-// addresses, batching waiting jobs together to minimize the total time
-// needed to rescan many separate jobs.  Rescan requests are processed
-// one at a time, and the next batch does not run until the current
-// has finished.
-type RescanManager struct {
-	addJob          chan *RescanJob
-	sendJob         chan *RescanJob
-	status          chan interface{} // rescanProgress and rescanFinished
-	msgs            chan RescanMsg
-	jobCompleteChan chan chan struct{}
-	wg              sync.WaitGroup
-	quit            chan struct{}
+// RescanJob is a job to be processed by the RescanManager.  The job includes
+// a set of wallet addresses, a starting height to begin the rescan, and
+// outpoints spendable by the addresses thought to be unspent.  After the
+// rescan completes, the error result of the rescan RPC is sent on the Err
+// channel.
+type RescanJob struct {
+	InitialSync bool
+	Addrs       []btcutil.Address
+	OutPoints   []*btcwire.OutPoint
+	BlockStamp  keystore.BlockStamp
+	err         chan error
 }
 
-// NewRescanManager creates a new RescanManger.  If msgChan is non-nil,
-// rescan messages are sent to the channel for additional processing by
-// the caller.
-func NewRescanManager(msgChan chan RescanMsg) *RescanManager {
-	return &RescanManager{
-		addJob:          make(chan *RescanJob, 1),
-		sendJob:         make(chan *RescanJob, 1),
-		status:          make(chan interface{}, 1),
-		msgs:            msgChan,
-		jobCompleteChan: make(chan chan struct{}, 1),
-		quit:            make(chan struct{}),
-	}
-}
-
-// Start starts the goroutines to run the RescanManager.
-func (m *RescanManager) Start() {
-	m.wg.Add(2)
-	go m.jobHandler()
-	go m.rpcHandler()
-}
-
-func (m *RescanManager) Stop() {
-	close(m.quit)
-}
-
-func (m *RescanManager) WaitForShutdown() {
-	m.wg.Wait()
-}
-
+// rescanBatch is a collection of one or more RescanJobs that were merged
+// together before a rescan is performed.
 type rescanBatch struct {
-	addrs     map[*Account][]btcutil.Address
-	outpoints map[btcwire.OutPoint]struct{}
-	height    int32
-	complete  chan struct{}
+	initialSync bool
+	addrs       []btcutil.Address
+	outpoints   []*btcwire.OutPoint
+	bs          keystore.BlockStamp
+	errChans    []chan error
 }
 
-func newRescanBatch() *rescanBatch {
+// SubmitRescan submits a RescanJob to the RescanManager.  A channel is
+// returned with the final error of the rescan.  The channel is buffered
+// and does not need to be read to prevent a deadlock.
+func (w *Wallet) SubmitRescan(job *RescanJob) <-chan error {
+	errChan := make(chan error, 1)
+	job.err = errChan
+	w.rescanAddJob <- job
+	return errChan
+}
+
+// batch creates the rescanBatch for a single rescan job.
+func (job *RescanJob) batch() *rescanBatch {
 	return &rescanBatch{
-		addrs:     map[*Account][]btcutil.Address{},
-		outpoints: map[btcwire.OutPoint]struct{}{},
-		height:    -1,
-		complete:  make(chan struct{}),
+		initialSync: job.InitialSync,
+		addrs:       job.Addrs,
+		outpoints:   job.OutPoints,
+		bs:          job.BlockStamp,
+		errChans:    []chan error{job.err},
 	}
 }
 
-func (b *rescanBatch) done() {
-	close(b.complete)
-}
-
-func (b *rescanBatch) empty() bool {
-	return len(b.addrs) == 0
-}
-
-func (b *rescanBatch) job() *RescanJob {
-	// Create slice of outpoints from the batch's set.
-	outpoints := make([]*btcwire.OutPoint, 0, len(b.outpoints))
-	for outpoint := range b.outpoints {
-		opCopy := outpoint
-		outpoints = append(outpoints, &opCopy)
-	}
-
-	return &RescanJob{
-		Addresses:   b.addrs,
-		OutPoints:   outpoints,
-		StartHeight: b.height,
-	}
-}
-
+// merge merges the work from k into j, setting the starting height to
+// the minimum of the two jobs.  This method does not check for
+// duplicate addresses or outpoints.
 func (b *rescanBatch) merge(job *RescanJob) {
-	for acct, addr := range job.Addresses {
-		b.addrs[acct] = append(b.addrs[acct], addr...)
+	if job.InitialSync {
+		b.initialSync = true
 	}
-	for _, op := range job.OutPoints {
-		b.outpoints[*op] = struct{}{}
+	b.addrs = append(b.addrs, job.Addrs...)
+	b.outpoints = append(b.outpoints, job.OutPoints...)
+	if job.BlockStamp.Height < b.bs.Height {
+		b.bs = job.BlockStamp
 	}
-	if b.height == -1 || job.StartHeight < b.height {
-		b.height = job.StartHeight
+	b.errChans = append(b.errChans, job.err)
+}
+
+// done iterates through all error channels, duplicating sending the error
+// to inform callers that the rescan finished (or could not complete due
+// to an error).
+func (b *rescanBatch) done(err error) {
+	for _, c := range b.errChans {
+		c <- err
 	}
 }
 
-// jobHandler runs the RescanManager's for-select loop to manage rescan jobs
-// and dispatch requests.
-func (m *RescanManager) jobHandler() {
-	curBatch := newRescanBatch()
-	nextBatch := newRescanBatch()
+// rescanBatchHandler handles incoming rescan request, serializing rescan
+// submissions, and possibly batching many waiting requests together so they
+// can be handled by a single rescan after the current one completes.
+func (w *Wallet) rescanBatchHandler() {
+	var curBatch, nextBatch *rescanBatch
 
 out:
 	for {
 		select {
-		case job := <-m.addJob:
-			if curBatch.empty() {
+		case job := <-w.rescanAddJob:
+			if curBatch == nil {
 				// Set current batch as this job and send
 				// request.
-				curBatch.merge(job)
-				m.sendJob <- job
-
-				// Send the channel that is closed when the
-				// current batch completes.
-				m.jobCompleteChan <- curBatch.complete
-
-				// Notify listener of a newly-started rescan.
-				if m.msgs != nil {
-					m.msgs <- (*RescanStartedMsg)(job)
-				}
+				curBatch = job.batch()
+				w.rescanBatch <- curBatch
 			} else {
-				// Add job to waiting batch.
-				nextBatch.merge(job)
-
-				// Send the channel that is closed when the
-				// waiting batch completes.
-				m.jobCompleteChan <- nextBatch.complete
+				// Create next batch if it doesn't exist, or
+				// merge the job.
+				if nextBatch == nil {
+					nextBatch = job.batch()
+				} else {
+					nextBatch.merge(job)
+				}
 			}
 
-		case status := <-m.status:
-			switch s := status.(type) {
-			case rescanProgress:
-				if m.msgs != nil {
-					m.msgs <- &RescanProgressMsg{
-						Addresses: curBatch.addrs,
-						Height:    int32(s),
-					}
+		case n := <-w.rescanNotifications:
+			switch n := n.(type) {
+			case *chain.RescanProgress:
+				w.rescanProgress <- &RescanProgressMsg{
+					Addresses:    curBatch.addrs,
+					Notification: n,
 				}
 
-			case rescanFinished:
-				if m.msgs != nil {
-					m.msgs <- &RescanFinishedMsg{
-						Addresses: curBatch.addrs,
-						Error:     s.error,
-					}
+			case *chain.RescanFinished:
+				if curBatch == nil {
+					log.Warnf("Received rescan finished " +
+						"notification but no rescan " +
+						"currently running")
+					continue
 				}
-				curBatch.done()
+				w.rescanFinished <- &RescanFinishedMsg{
+					Addresses:      curBatch.addrs,
+					Notification:   n,
+					WasInitialSync: curBatch.initialSync,
+				}
 
-				curBatch, nextBatch = nextBatch, newRescanBatch()
+				curBatch, nextBatch = nextBatch, nil
 
-				if !curBatch.empty() {
-					job := curBatch.job()
-					m.sendJob <- job
-					if m.msgs != nil {
-						m.msgs <- (*RescanStartedMsg)(job)
-					}
+				if curBatch != nil {
+					w.rescanBatch <- curBatch
 				}
 
 			default:
-				// Unexpected status message
-				panic(s)
+				// Unexpected message
+				panic(n)
 			}
 
-		case <-m.quit:
+		case <-w.quit:
 			break out
 		}
 	}
-	close(m.sendJob)
-	if m.msgs != nil {
-		close(m.msgs)
-	}
-	m.wg.Done()
+
+	close(w.rescanBatch)
+	w.wg.Done()
 }
 
-// rpcHandler reads jobs sent by the jobHandler and sends the rpc requests
-// to perform the rescan.  New jobs are not read until a rescan finishes.
-// The jobHandler is notified when the processing the rescan finishes.
-func (m *RescanManager) rpcHandler() {
-	for job := range m.sendJob {
-		var addrs []btcutil.Address
-		for _, accountAddrs := range job.Addresses {
-			addrs = append(addrs, accountAddrs...)
+// rescanProgressHandler handles notifications for paritally and fully completed
+// rescans by marking each rescanned address as partially or fully synced and
+// writing the keystore back to disk.
+func (w *Wallet) rescanProgressHandler() {
+out:
+	for {
+		// These can't be processed out of order since both chans are
+		// unbuffured and are sent from same context (the batch
+		// handler).
+		select {
+		case msg := <-w.rescanProgress:
+			n := msg.Notification
+			log.Infof("Rescanned through block %v (height %d)",
+				n.Hash, n.Height)
+
+			// TODO(jrick): save partial syncs should also include
+			// the block hash.
+			for _, addr := range msg.Addresses {
+				err := w.KeyStore.SetSyncStatus(addr,
+					keystore.PartialSync(n.Height))
+				if err != nil {
+					log.Errorf("Error marking address %v "+
+						"partially synced: %v", addr, err)
+				}
+			}
+			w.KeyStore.MarkDirty()
+			err := w.KeyStore.WriteIfDirty()
+			if err != nil {
+				log.Errorf("Could not write partial rescan "+
+					"progress to keystore: %v", err)
+			}
+
+		case msg := <-w.rescanFinished:
+			n := msg.Notification
+			addrs := msg.Addresses
+			noun := pickNoun(len(addrs), "address", "addresses")
+			if msg.WasInitialSync {
+				w.Track()
+				w.ResendUnminedTxs()
+
+				bs := keystore.BlockStamp{
+					Hash:   n.Hash,
+					Height: n.Height,
+				}
+				w.KeyStore.SetSyncedWith(&bs)
+				w.notifyConnectedBlock(bs)
+
+				// Mark wallet as synced to chain so connected
+				// and disconnected block notifications are
+				// processed.
+				close(w.chainSynced)
+			}
+			log.Infof("Finished rescan for %d %s (synced to block "+
+				"%s, height %d)", len(addrs), noun, n.Hash,
+				n.Height)
+
+			for _, addr := range addrs {
+				err := w.KeyStore.SetSyncStatus(addr,
+					keystore.FullSync{})
+				if err != nil {
+					log.Errorf("Error marking address %v "+
+						"fully synced: %v", addr, err)
+				}
+			}
+			w.KeyStore.MarkDirty()
+			err := w.KeyStore.WriteIfDirty()
+			if err != nil {
+				log.Errorf("Could not write finished rescan "+
+					"progress to keystore: %v", err)
+			}
+
+		case <-w.quit:
+			break out
 		}
-		client, err := accessClient()
+	}
+	w.wg.Done()
+}
+
+// rescanRPCHandler reads batch jobs sent by rescanBatchHandler and sends the
+// RPC requests to perform a rescan.  New jobs are not read until a rescan
+// finishes.
+func (w *Wallet) rescanRPCHandler() {
+	for batch := range w.rescanBatch {
+		// Log the newly-started rescan.
+		numAddrs := len(batch.addrs)
+		noun := pickNoun(numAddrs, "address", "addresses")
+		log.Infof("Started rescan from block %v (height %d) for %d %s",
+			batch.bs.Hash, batch.bs.Height, numAddrs, noun)
+
+		err := w.chainSvr.Rescan(batch.bs.Hash, batch.addrs,
+			batch.outpoints)
 		if err != nil {
-			m.MarkFinished(rescanFinished{err})
+			log.Errorf("Rescan for %d %s failed: %v", numAddrs,
+				noun, err)
+		}
+		batch.done(err)
+	}
+	w.wg.Done()
+}
+
+// RescanActiveAddresses begins a rescan for all active addresses of a
+// wallet.  This is intended to be used to sync a wallet back up to the
+// current best block in the main chain, and is considered an intial sync
+// rescan.
+func (w *Wallet) RescanActiveAddresses() (err error) {
+	// Determine the block necesary to start the rescan for all active
+	// addresses.
+	hash, height := w.KeyStore.SyncedTo()
+	if hash == nil {
+		// TODO: fix our "synced to block" handling (either in
+		// keystore or txstore, or elsewhere) so this *always*
+		// returns the block hash.  Looking it up by height is
+		// asking for problems.
+		hash, err = w.chainSvr.GetBlockHash(int64(height))
+		if err != nil {
 			return
 		}
-		err = client.Rescan(job.StartHeight, addrs, job.OutPoints)
-		if err != nil {
-			m.MarkFinished(rescanFinished{err})
-		}
 	}
-	m.wg.Done()
-}
 
-// RescanJob is a job to be processed by the RescanManager.  The job includes
-// a set of account's addresses, a starting height to begin the rescan, and
-// outpoints spendable by the addresses thought to be unspent.
-type RescanJob struct {
-	Addresses   map[*Account][]btcutil.Address
-	OutPoints   []*btcwire.OutPoint
-	StartHeight int32
-}
-
-// Merge merges the work from k into j, setting the starting height to
-// the minimum of the two jobs.  This method does not check for
-// duplicate addresses or outpoints.
-func (j *RescanJob) Merge(k *RescanJob) {
-	for acct, addrs := range k.Addresses {
-		j.Addresses[acct] = append(j.Addresses[acct], addrs...)
+	actives := w.KeyStore.SortedActiveAddresses()
+	addrs := make([]btcutil.Address, len(actives))
+	for i, addr := range actives {
+		addrs[i] = addr.Address()
 	}
-	for _, op := range k.OutPoints {
-		j.OutPoints = append(j.OutPoints, op)
+
+	unspents, err := w.TxStore.UnspentOutputs()
+	if err != nil {
+		return
 	}
-	if k.StartHeight < j.StartHeight {
-		j.StartHeight = k.StartHeight
+	outpoints := make([]*btcwire.OutPoint, len(unspents))
+	for i, output := range unspents {
+		outpoints[i] = output.OutPoint()
 	}
-}
 
-// SubmitJob submits a RescanJob to the RescanManager.  A channel is returned
-// that is closed once the rescan request for the job completes.
-func (m *RescanManager) SubmitJob(job *RescanJob) <-chan struct{} {
-	m.addJob <- job
-	return <-m.jobCompleteChan
-}
+	job := &RescanJob{
+		InitialSync: true,
+		Addrs:       addrs,
+		OutPoints:   outpoints,
+		BlockStamp:  keystore.BlockStamp{Hash: hash, Height: height},
+	}
 
-// MarkProgress messages the RescanManager with the height of the block
-// last processed by a running rescan.
-func (m *RescanManager) MarkProgress(height rescanProgress) {
-	m.status <- height
-}
-
-// MarkFinished messages the RescanManager that the currently running rescan
-// finished, or errored prematurely.
-func (m *RescanManager) MarkFinished(finished rescanFinished) {
-	m.status <- finished
+	// Submit merged job and block until rescan completes.
+	return <-w.SubmitRescan(job)
 }

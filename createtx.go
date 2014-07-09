@@ -65,9 +65,9 @@ var ErrNegativeFee = errors.New("fee is negative")
 const defaultFeeIncrement = 10000
 
 type CreatedTx struct {
-	tx         *btcutil.Tx
-	inputs     []txstore.Credit
-	changeAddr btcutil.Address
+	tx          *btcutil.Tx
+	changeAddr  btcutil.Address
+	changeIndex int // negative if no change
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
@@ -114,13 +114,17 @@ func selectInputs(eligible []txstore.Credit, amt, fee btcutil.Amount,
 // address, changeUtxo will point to a unconfirmed (height = -1, zeroed
 // block hash) Utxo.  ErrInsufficientFunds is returned if there are not
 // enough eligible unspent outputs to create the transaction.
-func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
+func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 	minconf int) (*CreatedTx, error) {
 
-	// Wallet must be unlocked to compose transaction.
-	if a.KeyStore.IsLocked() {
-		return nil, keystore.ErrLocked
+	// Key store must be unlocked to compose transaction.  Grab the
+	// unlock if possible (to prevent future unlocks), or return the
+	// error if the keystore is already locked.
+	heldUnlock, err := w.HoldUnlock()
+	if err != nil {
+		return nil, err
 	}
+	defer heldUnlock.Release()
 
 	// Create a new transaction which will include all input scripts.
 	msgtx := btcwire.NewMsgTx()
@@ -152,11 +156,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	}
 
 	// Get current block's height and hash.
-	rpcc, err := accessClient()
-	if err != nil {
-		return nil, err
-	}
-	bs, err := rpcc.BlockStamp()
+	bs, err := w.chainSvr.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	// a higher fee if not enough was originally chosen.
 	txNoInputs := msgtx.Copy()
 
-	unspent, err := a.TxStore.UnspentOutputs()
+	unspent, err := w.TxStore.UnspentOutputs()
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +192,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 			}
 
 			// Locked unspent outputs are skipped.
-			if a.LockedOutpoint(*unspent[i].OutPoint()) {
+			if w.LockedOutpoint(*unspent[i].OutPoint()) {
 				continue
 			}
 
@@ -208,12 +208,14 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 	// changeAddr is nil/zeroed until a change address is needed, and reused
 	// again in case a change utxo has already been chosen.
 	var changeAddr btcutil.Address
+	var changeIdx int
 
 	// Get the number of satoshis to increment fee by when searching for
 	// the minimum tx fee needed.
 	fee := btcutil.Amount(0)
 	for {
 		msgtx = txNoInputs.Copy()
+		changeIdx = -1
 
 		// Select eligible outputs to be used in transaction based on the amount
 		// neededing to sent, and the current fee estimation.
@@ -228,13 +230,16 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 		if change > 0 {
 			// Get a new change address if one has not already been found.
 			if changeAddr == nil {
-				changeAddr, err = a.KeyStore.ChangeAddress(&bs, cfg.KeypoolSize)
+				changeAddr, err = w.KeyStore.ChangeAddress(bs)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get next address: %s", err)
 				}
-
-				// Mark change address as belonging to this account.
-				AcctMgr.MarkAddressForAccount(changeAddr, a)
+				w.KeyStore.MarkDirty()
+				err = w.chainSvr.NotifyReceived([]btcutil.Address{changeAddr})
+				if err != nil {
+					return nil, fmt.Errorf("cannot request updates for "+
+						"change address: %v", err)
+				}
 			}
 
 			// Spend change.
@@ -249,6 +254,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 			r := rng.Int31n(int32(len(msgtx.TxOut))) // random index
 			c := len(msgtx.TxOut) - 1                // change index
 			msgtx.TxOut[r], msgtx.TxOut[c] = msgtx.TxOut[c], msgtx.TxOut[r]
+			changeIdx = int(r)
 		}
 
 		// Selected unspent outputs become new transaction's inputs.
@@ -264,10 +270,10 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 			}
 			apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
 			if !ok {
-				continue // don't handle inputs to this yes
+				continue // don't handle inputs to this yet
 			}
 
-			ai, err := a.KeyStore.Address(apkh)
+			ai, err := w.KeyStore.Address(apkh)
 			if err != nil {
 				return nil, fmt.Errorf("cannot get address info: %v", err)
 			}
@@ -275,10 +281,8 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 			pka := ai.(keystore.PubKeyAddress)
 
 			privkey, err := pka.PrivKey()
-			if err == keystore.ErrLocked {
-				return nil, keystore.ErrLocked
-			} else if err != nil {
-				return nil, fmt.Errorf("cannot get address key: %v", err)
+			if err != nil {
+				return nil, fmt.Errorf("cannot get private key: %v", err)
 			}
 
 			sigscript, err := btcscript.SignatureScript(msgtx, i,
@@ -294,7 +298,7 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 		if !cfg.DisallowFree {
 			noFeeAllowed = allowFree(bs.Height, inputs, msgtx.SerializeSize())
 		}
-		if minFee := minimumFee(a.FeeIncrement, msgtx, noFeeAllowed); fee < minFee {
+		if minFee := minimumFee(w.FeeIncrement, msgtx, noFeeAllowed); fee < minFee {
 			fee = minFee
 		} else {
 			selectedInputs = inputs
@@ -327,9 +331,9 @@ func (a *Account) txToPairs(pairs map[string]btcutil.Amount,
 		panic(err)
 	}
 	info := &CreatedTx{
-		tx:         btcutil.NewTx(msgtx),
-		inputs:     selectedInputs,
-		changeAddr: changeAddr,
+		tx:          btcutil.NewTx(msgtx),
+		changeAddr:  changeAddr,
+		changeIndex: changeIdx,
 	}
 	return info, nil
 }
