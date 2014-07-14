@@ -218,9 +218,10 @@ type rpcServer struct {
 
 	requests chan handlerJob
 
-	addWSClient    chan *websocketClient
-	removeWSClient chan *websocketClient
-	broadcasts     chan []byte
+	addWSClient             chan *websocketClient
+	removeWSClient          chan *websocketClient
+	broadcasts              chan []byte
+	notificationHandlerQuit chan struct{}
 
 	quit chan struct{}
 }
@@ -239,11 +240,12 @@ func newRPCServer(listenAddrs []string, maxClients, maxWebsockets int64) (*rpcSe
 			// Allow all origins.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		requests:       make(chan handlerJob),
-		addWSClient:    make(chan *websocketClient),
-		removeWSClient: make(chan *websocketClient),
-		broadcasts:     make(chan []byte),
-		quit:           make(chan struct{}),
+		requests:                make(chan handlerJob),
+		addWSClient:             make(chan *websocketClient),
+		removeWSClient:          make(chan *websocketClient),
+		broadcasts:              make(chan []byte),
+		notificationHandlerQuit: make(chan struct{}),
+		quit: make(chan struct{}),
 	}
 
 	// Check for existence of cert file and key file
@@ -742,6 +744,17 @@ out:
 			break out
 		}
 	}
+
+	// Remove websocket client from notification group, or if the server is
+	// shutting down, wait until the notification handler has finished
+	// running.  This is needed to ensure that no more notifications will be
+	// sent to the client's responses chan before it's closed below.
+	select {
+	case s.removeWSClient <- wsc:
+	case <-s.quit:
+		<-s.notificationHandlerQuit
+	}
+
 	close(wsc.responses)
 	s.wg.Done()
 }
@@ -939,6 +952,7 @@ out:
 			break out
 		}
 	}
+	close(s.notificationHandlerQuit)
 	s.wg.Done()
 }
 
