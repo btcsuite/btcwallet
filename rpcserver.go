@@ -120,10 +120,11 @@ var errDisconnected = errors.New("websocket client disconnected")
 
 func (c *websocketClient) send(b []byte) error {
 	select {
-	case c.responses <- b:
-		return nil
 	case <-c.quit:
 		return errDisconnected
+	default:
+		c.responses <- b
+		return nil
 	}
 }
 
