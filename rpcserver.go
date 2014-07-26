@@ -1199,6 +1199,8 @@ out:
 			if len(q) == 0 {
 				dequeue = nil
 				skipQueue = s.dequeueNotification
+			} else {
+				next = q[0]
 			}
 
 		case <-s.quit:
