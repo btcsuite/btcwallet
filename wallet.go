@@ -739,41 +739,6 @@ func (w *Wallet) CalculateBalance(confirms int) (btcutil.Amount, error) {
 	return w.TxStore.Balance(confirms, bs.Height)
 }
 
-// CalculateAddressBalance sums the amounts of all unspent transaction
-// outputs to a single address's pubkey hash and returns the balance.
-//
-// If confirmations is 0, all UTXOs, even those not present in a
-// block (height -1), will be used to get the balance.  Otherwise,
-// a UTXO must be in a block.  If confirmations is 1 or greater,
-// the balance will be calculated based on how many how many blocks
-// include a UTXO.
-func (w *Wallet) CalculateAddressBalance(addr btcutil.Address, confirms int) (btcutil.Amount, error) {
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return 0, err
-	}
-
-	var bal btcutil.Amount
-	unspent, err := w.TxStore.UnspentOutputs()
-	if err != nil {
-		return 0, err
-	}
-	for _, credit := range unspent {
-		if credit.Confirmed(confirms, bs.Height) {
-			// We only care about the case where len(addrs) == 1, and err
-			// will never be non-nil in that case
-			_, addrs, _, _ := credit.Addresses(activeNet.Params)
-			if len(addrs) != 1 {
-				continue
-			}
-			if addrs[0].EncodeAddress() == addr.EncodeAddress() {
-				bal += credit.Amount()
-			}
-		}
-	}
-	return bal, nil
-}
-
 // CurrentAddress gets the most recently requested Bitcoin payment address
 // from a wallet.  If the address has already been used (there is at least
 // one transaction spending to it in the blockchain or btcd mempool), the next

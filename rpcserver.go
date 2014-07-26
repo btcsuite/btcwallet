@@ -1316,7 +1316,6 @@ var rpcHandlers = map[string]requestHandler{
 
 	// Extensions to the reference client JSON-RPC API
 	"exportwatchingwallet": ExportWatchingWallet,
-	"getaddressbalance":    GetAddressBalance,
 	// This was an extension but the reference implementation added it as
 	// well, but with a different API (no account parameter).  It's listed
 	// here because it hasn't been update to use the reference
@@ -1703,32 +1702,6 @@ func GetAccountAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (int
 	}
 
 	return addr.EncodeAddress(), err
-}
-
-// GetAddressBalance handles a getaddressbalance extension request by
-// returning the current balance (sum of unspent transaction output amounts)
-// for a single address.
-func GetAddressBalance(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
-	cmd := icmd.(*btcws.GetAddressBalanceCmd)
-
-	// Is address valid?
-	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Params)
-	if err != nil {
-		return nil, btcjson.ErrInvalidAddressOrKey
-	}
-
-	// Check if address is managed by this wallet.
-	_, err = w.KeyStore.Address(addr)
-	if err != nil {
-		return nil, ErrAddressNotInWallet
-	}
-
-	bal, err := w.CalculateAddressBalance(addr, int(cmd.Minconf))
-	if err != nil {
-		return nil, err
-	}
-
-	return bal.ToUnit(btcutil.AmountBTC), nil
 }
 
 // GetUnconfirmedBalance handles a getunconfirmedbalance extension request
