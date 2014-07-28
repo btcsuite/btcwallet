@@ -97,7 +97,7 @@ func walletMain() error {
 			return
 		}
 		rpcc, err := chain.NewClient(activeNet.Params, cfg.RPCConnect,
-			cfg.Username, cfg.Password, certs)
+			cfg.BtcdUsername, cfg.BtcdPassword, certs)
 		if err != nil {
 			log.Errorf("Cannot create chain server RPC client: %v", err)
 			close(chainSvrChan)
