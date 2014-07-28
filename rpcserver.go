@@ -530,7 +530,7 @@ func (s *rpcServer) SetWallet(wallet *Wallet) {
 
 	// Make sure already connected websocket clients get a notification
 	// if the chain RPC client connection is set and connected.  This is
-	// run as a goroutine since it must aquire the handlerLock, which is
+	// run as a goroutine since it must acquire the handlerLock, which is
 	// locked here.
 	go s.notifyChainServerConnected(chainSvrConnected)
 }
@@ -558,7 +558,7 @@ func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
 
 	// Make sure already connected websocket clients get a notification
 	// if the chain RPC client connection is set and connected.  This is
-	// run as a goroutine since it must aquire the handlerLock, which is
+	// run as a goroutine since it must acquire the handlerLock, which is
 	// locked here.
 	go s.notifyChainServerConnected(!chainSvr.Disconnected())
 }
