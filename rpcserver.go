@@ -532,7 +532,7 @@ func (s *rpcServer) SetWallet(wallet *Wallet) {
 	// if the chain RPC client connection is set and connected.  This is
 	// run as a goroutine since it must acquire the handlerLock, which is
 	// locked here.
-	go s.notifyChainServerConnected(chainSvrConnected)
+	go wallet.notifyChainServerConnected(chainSvrConnected)
 }
 
 // SetChainServer sets the chain server client component needed to run a fully
@@ -554,13 +554,13 @@ func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
 		// With both the chain server and wallet set, all handlers are
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
-	}
 
-	// Make sure already connected websocket clients get a notification
-	// if the chain RPC client connection is set and connected.  This is
-	// run as a goroutine since it must acquire the handlerLock, which is
-	// locked here.
-	go s.notifyChainServerConnected(!chainSvr.Disconnected())
+		// Make sure already connected websocket clients get a
+		// notification if the chain RPC client connection is set and
+		// connected.  This is run as a goroutine since it must acquire
+		// the handlerLock, which is locked here.
+		go s.wallet.notifyChainServerConnected(!chainSvr.Disconnected())
+	}
 }
 
 // HandlerClosure creates a closure function for handling requests of the given
