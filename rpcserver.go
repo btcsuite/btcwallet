@@ -514,6 +514,7 @@ func (s *rpcServer) SetWallet(wallet *Wallet) {
 	s.wallet = wallet
 	s.registerWalletNtfns <- struct{}{}
 
+	chainSvrConnected := false
 	if s.chainSvr != nil {
 		// If the chain server rpc client is also set, there's no reason
 		// to keep the mutex around.  Make the locker simply execute
@@ -523,7 +524,15 @@ func (s *rpcServer) SetWallet(wallet *Wallet) {
 		// With both the wallet and chain server set, all handlers are
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
+
+		chainSvrConnected = !s.chainSvr.Disconnected()
 	}
+
+	// Make sure already connected websocket clients get a notification
+	// if the chain RPC client connection is set and connected.  This is
+	// run as a goroutine since it must aquire the handlerLock, which is
+	// locked here.
+	go s.notifyChainServerConnected(chainSvrConnected)
 }
 
 // SetChainServer sets the chain server client component needed to run a fully
@@ -546,6 +555,12 @@ func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
 	}
+
+	// Make sure already connected websocket clients get a notification
+	// if the chain RPC client connection is set and connected.  This is
+	// run as a goroutine since it must aquire the handlerLock, which is
+	// locked here.
+	go s.notifyChainServerConnected(!chainSvr.Disconnected())
 }
 
 // HandlerClosure creates a closure function for handling requests of the given

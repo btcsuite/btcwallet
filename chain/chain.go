@@ -54,9 +54,7 @@ func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte) (*C
 	}
 	initializedClient := make(chan struct{})
 	ntfnCallbacks := btcrpcclient.NotificationHandlers{
-		OnClientConnected: func() {
-			log.Info("Established connection to btcd")
-		},
+		OnClientConnected:   client.onClientConnect,
 		OnBlockConnected:    client.onBlockConnected,
 		OnBlockDisconnected: client.onBlockDisconnected,
 		OnRecvTx:            client.onRecvTx,
@@ -146,6 +144,7 @@ func (c *Client) BlockStamp() (*keystore.BlockStamp, error) {
 // btcrpcclient callbacks, which isn't very Go-like and doesn't allow
 // blocking client calls.
 type (
+	ClientConnected   struct{}
 	BlockConnected    keystore.BlockStamp
 	BlockDisconnected keystore.BlockStamp
 	RecvTx            struct {
@@ -185,6 +184,11 @@ func parseBlock(block *btcws.BlockDetails) (blk *txstore.Block, idx int, err err
 		Time:   time.Unix(block.Time, 0),
 	}
 	return blk, block.Index, nil
+}
+
+func (c *Client) onClientConnect() {
+	log.Info("Established websocket RPC connection to btcd")
+	c.enqueueNotification <- ClientConnected{}
 }
 
 func (c *Client) onBlockConnected(hash *btcwire.ShaHash, height int32) {
