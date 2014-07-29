@@ -1174,6 +1174,7 @@ func (s *rpcServer) drainNotifications() {
 		case <-s.minedDebits:
 		case <-s.confirmedBalance:
 		case <-s.unconfirmedBalance:
+		case <-s.registerWalletNtfns:
 		}
 	}
 }
