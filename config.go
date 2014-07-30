@@ -313,12 +313,15 @@ func loadConfig() (*config, []string, error) {
 		}
 	}
 
+	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
 	if cfg.MainNet {
+		activeNet = &mainNetParams
 		numNets++
 	}
 	if cfg.SimNet {
+		activeNet = &simNetParams
 		numNets++
 	}
 	if numNets > 1 {
@@ -330,13 +333,10 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
-	// Choose the active network params based on the selected network.
-	switch {
-	case cfg.MainNet:
-		activeNet = &mainNetParams
-	case cfg.SimNet:
-		activeNet = &simNetParams
-	}
+	// Append the network type to the log directory so it is "namespaced"
+	// per network.
+	cfg.LogDir = cleanAndExpandPath(cfg.LogDir)
+	cfg.LogDir = filepath.Join(cfg.LogDir, activeNet.Params.Name)
 
 	// Special show command to list supported subsystems and exit.
 	if cfg.DebugLevel == "show" {
