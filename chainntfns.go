@@ -28,8 +28,6 @@ func (w *Wallet) handleChainNotifications() {
 	for n := range w.chainSvr.Notifications() {
 		var err error
 		switch n := n.(type) {
-		case chain.ClientConnected:
-			w.notifyChainServerConnected(true)
 		case chain.BlockConnected:
 			w.connectBlock(keystore.BlockStamp(n))
 		case chain.BlockDisconnected:

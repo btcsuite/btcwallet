@@ -265,17 +265,18 @@ type rpcServer struct {
 
 	// Channels read from other components from which notifications are
 	// created.
-	connectedBlocks      <-chan keystore.BlockStamp
-	disconnectedBlocks   <-chan keystore.BlockStamp
-	newCredits           <-chan txstore.Credit
-	newDebits            <-chan txstore.Debits
-	minedCredits         <-chan txstore.Credit
-	minedDebits          <-chan txstore.Debits
-	keystoreLocked       <-chan bool
-	confirmedBalance     <-chan btcutil.Amount
-	unconfirmedBalance   <-chan btcutil.Amount
-	chainServerConnected <-chan bool
-	registerWalletNtfns  chan struct{}
+	connectedBlocks       <-chan keystore.BlockStamp
+	disconnectedBlocks    <-chan keystore.BlockStamp
+	newCredits            <-chan txstore.Credit
+	newDebits             <-chan txstore.Debits
+	minedCredits          <-chan txstore.Credit
+	minedDebits           <-chan txstore.Debits
+	keystoreLocked        <-chan bool
+	confirmedBalance      <-chan btcutil.Amount
+	unconfirmedBalance    <-chan btcutil.Amount
+	chainServerConnected  <-chan bool
+	registerWalletNtfns   chan struct{}
+	registerChainSvrNtfns chan struct{}
 
 	// enqueueNotification and dequeueNotification handle both sides of an
 	// infinitly growing queue for websocket client notifications.
@@ -310,6 +311,7 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 		registerWSC:             make(chan *websocketClient),
 		unregisterWSC:           make(chan *websocketClient),
 		registerWalletNtfns:     make(chan struct{}),
+		registerChainSvrNtfns:   make(chan struct{}),
 		enqueueNotification:     make(chan wsClientNotification),
 		dequeueNotification:     make(chan wsClientNotification),
 		notificationHandlerQuit: make(chan struct{}),
@@ -514,7 +516,6 @@ func (s *rpcServer) SetWallet(wallet *Wallet) {
 	s.wallet = wallet
 	s.registerWalletNtfns <- struct{}{}
 
-	chainSvrConnected := false
 	if s.chainSvr != nil {
 		// If the chain server rpc client is also set, there's no reason
 		// to keep the mutex around.  Make the locker simply execute
@@ -525,14 +526,10 @@ func (s *rpcServer) SetWallet(wallet *Wallet) {
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
 
-		chainSvrConnected = !s.chainSvr.Disconnected()
+		// Make sure already connected websocket clients get a notification
+		// if the chain RPC client connection is set and connected.
+		s.chainSvr.NotifyConnected()
 	}
-
-	// Make sure already connected websocket clients get a notification
-	// if the chain RPC client connection is set and connected.  This is
-	// run as a goroutine since it must acquire the handlerLock, which is
-	// locked here.
-	go wallet.notifyChainServerConnected(chainSvrConnected)
 }
 
 // SetChainServer sets the chain server client component needed to run a fully
@@ -545,6 +542,8 @@ func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
 	defer s.handlerLock.Unlock()
 
 	s.chainSvr = chainSvr
+	s.registerChainSvrNtfns <- struct{}{}
+
 	if s.wallet != nil {
 		// If the wallet had already been set, there's no reason to keep
 		// the mutex around.  Make the locker simply execute noops
@@ -554,12 +553,6 @@ func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
 		// With both the chain server and wallet set, all handlers are
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
-
-		// Make sure already connected websocket clients get a
-		// notification if the chain RPC client connection is set and
-		// connected.  This is run as a goroutine since it must acquire
-		// the handlerLock, which is locked here.
-		go s.wallet.notifyChainServerConnected(!chainSvr.Disconnected())
 	}
 }
 
@@ -877,8 +870,8 @@ func (s *rpcServer) WebsocketClientRPC(wsc *websocketClient) {
 
 	// TODO(jrick): this is crappy. kill it.
 	s.handlerLock.Lock()
-	if s.wallet != nil && s.chainSvr != nil {
-		s.wallet.notifyChainServerConnected(!s.chainSvr.Disconnected())
+	if s.chainSvr != nil {
+		s.chainSvr.NotifyConnected()
 	}
 	s.handlerLock.Unlock()
 
@@ -1137,12 +1130,6 @@ out:
 					"balance changes: %v", err)
 				continue
 			}
-			chainServerConnected, err := s.wallet.ListenChainServerConnected()
-			if err != nil {
-				log.Errorf("Could not register for chain server "+
-					"connection changes: %v", err)
-				continue
-			}
 			s.connectedBlocks = connectedBlocks
 			s.disconnectedBlocks = disconnectedBlocks
 			s.newCredits = newCredits
@@ -1152,7 +1139,24 @@ out:
 			s.keystoreLocked = keystoreLocked
 			s.confirmedBalance = confirmedBalance
 			s.unconfirmedBalance = unconfirmedBalance
+
+		case <-s.registerChainSvrNtfns:
+			chainServerConnected, err := s.chainSvr.ListenConnected()
+			if err != nil {
+				log.Errorf("Could not register for chain server "+
+					"connection changes: %v", err)
+				continue
+			}
 			s.chainServerConnected = chainServerConnected
+
+			// Make sure already connected websocket clients get a
+			// notification for the current client connection state.
+			//
+			// TODO(jrick): I am appalled by doing this but trying
+			// not to change how notifications work for the moment.
+			// A revamped notification API without this horror will
+			// be implemented soon.
+			go s.chainSvr.NotifyConnected()
 
 		case <-s.quit:
 			break out
@@ -1175,6 +1179,7 @@ func (s *rpcServer) drainNotifications() {
 		case <-s.confirmedBalance:
 		case <-s.unconfirmedBalance:
 		case <-s.registerWalletNtfns:
+		case <-s.registerChainSvrNtfns:
 		}
 	}
 }

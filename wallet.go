@@ -95,13 +95,12 @@ type Wallet struct {
 	// Notification channels so other components can listen in on wallet
 	// activity.  These are initialized as nil, and must be created by
 	// calling one of the Listen* methods.
-	connectedBlocks      chan keystore.BlockStamp
-	disconnectedBlocks   chan keystore.BlockStamp
-	lockStateChanges     chan bool // true when locked
-	confirmedBalance     chan btcutil.Amount
-	unconfirmedBalance   chan btcutil.Amount
-	chainServerConnected chan bool
-	notificationLock     sync.Locker
+	connectedBlocks    chan keystore.BlockStamp
+	disconnectedBlocks chan keystore.BlockStamp
+	lockStateChanges   chan bool // true when locked
+	confirmedBalance   chan btcutil.Amount
+	unconfirmedBalance chan btcutil.Amount
+	notificationLock   sync.Locker
 
 	wg   sync.WaitGroup
 	quit chan struct{}
@@ -148,8 +147,6 @@ func (w *Wallet) updateNotificationLock() {
 	case w.confirmedBalance == nil:
 		fallthrough
 	case w.unconfirmedBalance == nil:
-		fallthrough
-	case w.chainServerConnected == nil:
 		return
 	}
 	w.notificationLock = noopLocker{}
@@ -241,18 +238,6 @@ func (w *Wallet) ListenUnconfirmedBalance() (<-chan btcutil.Amount, error) {
 	return w.unconfirmedBalance, nil
 }
 
-func (w *Wallet) ListenChainServerConnected() (<-chan bool, error) {
-	w.notificationLock.Lock()
-	defer w.notificationLock.Unlock()
-
-	if w.chainServerConnected != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.chainServerConnected = make(chan bool)
-	w.updateNotificationLock()
-	return w.chainServerConnected, nil
-}
-
 func (w *Wallet) notifyConnectedBlock(block keystore.BlockStamp) {
 	w.notificationLock.Lock()
 	if w.connectedBlocks != nil {
@@ -289,14 +274,6 @@ func (w *Wallet) notifyUnconfirmedBalance(bal btcutil.Amount) {
 	w.notificationLock.Lock()
 	if w.unconfirmedBalance != nil {
 		w.unconfirmedBalance <- bal
-	}
-	w.notificationLock.Unlock()
-}
-
-func (w *Wallet) notifyChainServerConnected(connected bool) {
-	w.notificationLock.Lock()
-	if w.chainServerConnected != nil {
-		w.chainServerConnected <- connected
 	}
 	w.notificationLock.Unlock()
 }
@@ -375,8 +352,6 @@ func (w *Wallet) Start(chainServer *chain.Client) {
 
 	w.chainSvrLock.Lock()
 	defer w.chainSvrLock.Unlock()
-
-	w.notifyChainServerConnected(!chainServer.Disconnected())
 
 	w.chainSvr = chainServer
 	w.chainSvrLock = noopLocker{}
