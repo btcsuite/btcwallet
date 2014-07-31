@@ -2406,6 +2406,7 @@ func (s *rpcServer) handleCreateEncryptedWallet(request []byte) (interface{}, er
 	}
 
 	s.wallet = wallet
+	s.registerWalletNtfns <- struct{}{}
 	s.handlerLock = noopLocker{}
 	s.handlerLookup = lookupAnyHandler
 
