@@ -60,7 +60,6 @@ func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte) (*C
 		notificationLock:    new(sync.Mutex),
 		quit:                make(chan struct{}),
 	}
-	initializedClient := make(chan struct{})
 	ntfnCallbacks := btcrpcclient.NotificationHandlers{
 		OnClientConnected:   client.onClientConnect,
 		OnBlockConnected:    client.onBlockConnected,
@@ -83,7 +82,6 @@ func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte) (*C
 		return nil, err
 	}
 	client.Client = c
-	close(initializedClient)
 	return &client, nil
 }
 
