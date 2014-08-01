@@ -347,7 +347,7 @@ func (w *Wallet) addInputsToTx(msgtx *btcwire.MsgTx, outputs []txstore.Credit) e
 }
 
 func validateMsgTx(msgtx *btcwire.MsgTx, inputs []txstore.Credit) error {
-	flags := btcscript.ScriptCanonicalSignatures
+	flags := btcscript.ScriptCanonicalSignatures | btcscript.ScriptStrictMultiSig
 	bip16 := time.Now().After(btcscript.Bip16Activation)
 	if bip16 {
 		flags |= btcscript.ScriptBip16
