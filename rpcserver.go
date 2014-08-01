@@ -143,6 +143,7 @@ type websocketClient struct {
 	allRequests   chan []byte
 	responses     chan []byte
 	quit          chan struct{} // closed on disconnect
+	wg            sync.WaitGroup
 }
 
 func newWebsocketClient(c *websocket.Conn, authenticated bool, remoteAddr string) *websocketClient {
@@ -790,7 +791,7 @@ out:
 					break out
 				}
 				f := s.HandlerClosure(raw.Method)
-				s.wg.Add(1)
+				wsc.wg.Add(1)
 				go func(request []byte, raw *rawRequest) {
 					resp := f(request, raw)
 					mresp, err := json.Marshal(resp)
@@ -799,7 +800,7 @@ out:
 					}
 					_ = wsc.send(mresp)
 
-					s.wg.Done()
+					wsc.wg.Done()
 				}(request, &raw)
 			}
 
@@ -818,6 +819,9 @@ out:
 		<-s.notificationHandlerQuit
 	}
 
+	// allow client to disconnect after all handler goroutines are done
+	wsc.wg.Wait()
+	close(wsc.responses)
 	s.wg.Done()
 }
 
@@ -826,7 +830,11 @@ func (s *rpcServer) WebsocketClientSend(wsc *websocketClient) {
 out:
 	for {
 		select {
-		case response := <-wsc.responses:
+		case response, ok := <-wsc.responses:
+			if !ok {
+				// client disconnected
+				break out
+			}
 			err := wsc.conn.SetWriteDeadline(time.Now().Add(deadline))
 			if err != nil {
 				log.Warnf("Cannot set write deadline on "+
