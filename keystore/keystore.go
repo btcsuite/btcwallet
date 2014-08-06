@@ -706,6 +706,7 @@ func (s *Store) ReadFrom(r io.Reader) (n int64, err error) {
 	rootAddr := s.keyGenerator.Address()
 	s.addrMap[getAddressKey(rootAddr)] = &s.keyGenerator
 	s.chainIdxMap[rootKeyChainIdx] = rootAddr
+	s.lastChainIdx = rootKeyChainIdx
 
 	// Fill unserializied fields.
 	wts := appendedEntries.entries
