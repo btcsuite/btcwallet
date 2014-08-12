@@ -85,6 +85,9 @@ type Wallet struct {
 	rescanProgress      chan *RescanProgressMsg
 	rescanFinished      chan *RescanFinishedMsg
 
+	// Channel for transaction creation requests.
+	createTxRequests chan createTxRequest
+
 	// Channels for the keystore locker.
 	unlockRequests     chan unlockRequest
 	lockRequests       chan struct{}
@@ -121,6 +124,7 @@ func newWallet(keys *keystore.Store, txs *txstore.Store) *Wallet {
 		rescanNotifications: make(chan interface{}),
 		rescanProgress:      make(chan *RescanProgressMsg),
 		rescanFinished:      make(chan *RescanFinishedMsg),
+		createTxRequests:    make(chan createTxRequest),
 		unlockRequests:      make(chan unlockRequest),
 		lockRequests:        make(chan struct{}),
 		holdUnlockRequests:  make(chan chan HeldUnlock),
@@ -356,9 +360,10 @@ func (w *Wallet) Start(chainServer *chain.Client) {
 	w.chainSvr = chainServer
 	w.chainSvrLock = noopLocker{}
 
-	w.wg.Add(6)
+	w.wg.Add(7)
 	go w.diskWriter()
 	go w.handleChainNotifications()
+	go w.txCreator()
 	go w.keystoreLocker()
 	go w.rescanBatchHandler()
 	go w.rescanProgressHandler()
@@ -478,6 +483,56 @@ func (w *Wallet) syncWithChain() (err error) {
 	}
 
 	return w.RescanActiveAddresses()
+}
+
+type (
+	createTxRequest struct {
+		pairs   map[string]btcutil.Amount
+		minconf int
+		resp    chan createTxResponse
+	}
+	createTxResponse struct {
+		tx  *CreatedTx
+		err error
+	}
+)
+
+// txCreator is responsible for the input selection and creation of
+// transactions.  These functions are the responsibility of this method
+// (designed to be run as its own goroutine) since input selection must be
+// serialized, or else it is possible to create double spends by choosing the
+// same inputs for multiple transactions.  Along with input selection, this
+// method is also responsible for the signing of transactions, since we don't
+// want to end up in a situation where we run out of inputs as multiple
+// transactions are being created.  In this situation, it would then be possible
+// for both requests, rather than just one, to fail due to not enough available
+// inputs.
+func (w *Wallet) txCreator() {
+out:
+	for {
+		select {
+		case txr := <-w.createTxRequests:
+			tx, err := w.txToPairs(txr.pairs, txr.minconf)
+			txr.resp <- createTxResponse{tx, err}
+
+		case <-w.quit:
+			break out
+		}
+	}
+	w.wg.Done()
+}
+
+func (w *Wallet) CreateSimpleTx(pairs map[string]btcutil.Amount,
+	minconf int) (*CreatedTx, error) {
+
+	req := createTxRequest{
+		pairs:   pairs,
+		minconf: minconf,
+		resp:    make(chan createTxResponse),
+	}
+	w.createTxRequests <- req
+	resp := <-req.resp
+	return resp.tx, resp.err
 }
 
 type (

@@ -2217,7 +2217,7 @@ func sendPairs(w *Wallet, chainSvr *chain.Client, cmd btcjson.Cmd,
 
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := w.txToPairs(amounts, minconf)
+	createdTx, err := w.CreateSimpleTx(amounts, minconf)
 	if err != nil {
 		switch err {
 		case ErrNonPositiveAmount:
