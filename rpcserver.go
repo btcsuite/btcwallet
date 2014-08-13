@@ -1193,10 +1193,10 @@ func (s *rpcServer) drainNotifications() {
 	}
 }
 
-// notifiationQueue manages a queue of empty interfaces, reading from in and
-// sending the oldest unsent to out.  This handler stops when either of the
-// in or quit channels are closed, and closes out before returning, without
-// waiting to send any variables still remaining in the queue.
+// notificationQueue manages an infinitly-growing queue of notifications that
+// wallet websocket clients may be interested in.  It quits when the
+// enqueueNotifiation channel is closed, dropping any still pending
+// notifications.
 func (s *rpcServer) notificationQueue() {
 	var q []wsClientNotification
 	var dequeue chan<- wsClientNotification
@@ -1232,9 +1232,6 @@ out:
 			} else {
 				next = q[0]
 			}
-
-		case <-s.quit:
-			break out
 		}
 	}
 	close(s.dequeueNotification)
