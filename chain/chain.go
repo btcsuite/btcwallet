@@ -228,7 +228,7 @@ func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
 		blk, index, err = parseBlock(block)
 		if err != nil {
 			// Log and drop improper notification.
-			log.Errorf("recvtx notification bad block: %v", err)
+			log.Errorf("redeemingtx notification bad block: %v", err)
 			return
 		}
 	}
