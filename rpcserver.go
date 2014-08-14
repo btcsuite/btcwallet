@@ -658,6 +658,27 @@ type rawRequest struct {
 	Params []json.RawMessage `json:"params"`
 }
 
+// String returns a sanitized string for the request which may be safely
+// logged.  It is intended to strip private keys, passphrases, and any other
+// secrets from request parameters before they may be saved to a log file.
+//
+// This intentionally implements the fmt.Stringer interface to prevent
+// accidental leaking of secrets.
+func (r *rawRequest) String() string {
+	// These are considered unsafe to log, so sanitize parameters.
+	switch r.Method {
+	case "encryptwallet", "importprivkey", "importwallet",
+		"signrawtransaction", "walletpassphrase",
+		"walletpassphrasechange":
+
+		return fmt.Sprintf(`{"id":%v,"method":"%s","params":SANITIZED %d parameters}`,
+			r.ID, r.Method, len(r.Params))
+	}
+
+	return fmt.Sprintf(`{"id":%v,"method":"%s","params":%v}`, r.ID,
+		r.Method, r.Params)
+}
+
 // idPointer returns a pointer to the passed ID, or nil if the interface is nil.
 // Interface pointers are usually a red flag of doing something incorrectly,
 // but this is only implemented here to work around an oddity with btcjson,
@@ -796,7 +817,22 @@ out:
 					resp := f(request, raw)
 					mresp, err := json.Marshal(resp)
 					if err != nil {
-						panic(err)
+						// Completely unexpected error, but have seen
+						// it happen regardless.  Log the sanitized
+						// request and begin clean shutdown, panicing
+						// if shutdown takes too long.
+						log.Criticalf("Unexpected error marshaling "+
+							"response for request '%s': %v",
+							raw, err)
+						wsc.wg.Done()
+
+						s.Stop()
+						go func() {
+							time.Sleep(30 * time.Second)
+							panic("shutdown took too long")
+						}()
+
+						return
 					}
 					_ = wsc.send(mresp)
 
