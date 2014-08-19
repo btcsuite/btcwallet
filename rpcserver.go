@@ -761,8 +761,7 @@ out:
 				continue
 			}
 
-			switch raw.Method {
-			case "authenticate":
+			if raw.Method == "authenticate" {
 				if wsc.authenticated || s.invalidAuth(request) {
 					// Disconnect immediately.
 					break out
@@ -778,7 +777,15 @@ out:
 				if err != nil {
 					break out
 				}
+				continue
+			}
 
+			if !wsc.authenticated {
+				// Disconnect immediately.
+				break out
+			}
+
+			switch raw.Method {
 			case "createencryptedwallet":
 				result, err := s.handleCreateEncryptedWallet(request)
 				resp := makeResponse(raw.ID, result, err)
@@ -807,10 +814,6 @@ out:
 				}
 
 			default:
-				if !wsc.authenticated {
-					// Disconnect immediately.
-					break out
-				}
 				f := s.HandlerClosure(raw.Method)
 				wsc.wg.Add(1)
 				go func(request []byte, raw *rawRequest) {
