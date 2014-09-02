@@ -1350,6 +1350,41 @@ func (w *Wallet) TotalReceived(confirms int) (btcutil.Amount, error) {
 	return amount, nil
 }
 
+// TotalReceivedForAddr iterates through a wallet's transaction history,
+// returning the total amount of bitcoins received for a single wallet
+// address.
+func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, confirms int) (btcutil.Amount, error) {
+	bs, err := w.SyncedChainTip()
+	if err != nil {
+		return 0, err
+	}
+
+	addrStr := addr.EncodeAddress()
+	var amount btcutil.Amount
+	for _, r := range w.TxStore.Records() {
+		for _, c := range r.Credits() {
+			if !c.Confirmed(confirms, bs.Height) {
+				continue
+			}
+
+			_, addrs, _, err := c.Addresses(activeNet.Params)
+			// An error creating addresses from the output script only
+			// indicates a non-standard script, so ignore this credit.
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				if addrStr == a.EncodeAddress() {
+					amount += c.Amount()
+					break
+				}
+			}
+		}
+	}
+
+	return amount, nil
+}
+
 // TxRecord iterates through all transaction records saved in the store,
 // returning the first with an equivalent transaction hash.
 func (w *Wallet) TxRecord(txSha *btcwire.ShaHash) (r *txstore.TxRecord, ok bool) {
