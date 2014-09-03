@@ -1324,6 +1324,47 @@ func (w *Wallet) ReqSpentUtxoNtfns(credits []txstore.Credit) {
 	}
 }
 
+// ReceivedByAddress iterates through a wallet's transaction history, returning the
+// total amount of bitcoins received for a given wallet address.  Amounts received
+// through multisig transactions are ignored.
+func (w *Wallet) ReceivedByAddress(addr btcutil.Address, confirms int) (btcutil.Amount, error) {
+	var amount btcutil.Amount
+
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	bs, err := w.SyncedChainTip()
+	if err != nil {
+		return amount, err
+	}
+
+	for _, r := range w.TxStore.Records() {
+		for _, c := range r.Credits() {
+			// Ignore change.
+			if c.Change() {
+				continue
+			}
+
+			// We only care about the case where len(addrs) == 1,
+			// and err will never be non-nil in that case.
+			_, addrs, _, _ := c.Addresses(activeNet.Params)
+			if len(addrs) != 1 {
+				continue
+			}
+			if addr != addrs[0] {
+				continue
+			}
+
+			// Tally if the appropiate number of block confirmations have passed.
+			if c.Confirmed(confirms, bs.Height) {
+				amount += c.Amount()
+			}
+
+		}
+	}
+
+	return amount, nil
+}
+
 // TotalReceived iterates through a wallet's transaction history, returning the
 // total amount of bitcoins received for any wallet address.  Amounts received
 // through multisig transactions are ignored.
