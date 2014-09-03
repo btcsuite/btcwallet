@@ -1342,6 +1342,7 @@ var rpcHandlers = map[string]requestHandler{
 	"getinfo":                GetInfo,
 	"getnewaddress":          GetNewAddress,
 	"getrawchangeaddress":    GetRawChangeAddress,
+	"getreceivedbyaddress":   GetReceivedByAddress,
 	"getreceivedbyaccount":   GetReceivedByAccount,
 	"gettransaction":         GetTransaction,
 	"importprivkey":          ImportPrivKey,
@@ -1368,7 +1369,6 @@ var rpcHandlers = map[string]requestHandler{
 	// Reference implementation methods (still unimplemented)
 	"backupwallet":          Unimplemented,
 	"dumpwallet":            Unimplemented,
-	"getreceivedbyaddress":  Unimplemented,
 	"getwalletinfo":         Unimplemented,
 	"importwallet":          Unimplemented,
 	"listaddressgroupings":  Unimplemented,
@@ -1861,6 +1861,24 @@ func GetRawChangeAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (i
 
 	// Return the new payment address string.
 	return addr.EncodeAddress(), nil
+}
+
+// GetReceivedByAddress handles a getreceivedbyaddress request by returning
+// the total amount received by an address
+func GetReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
+	cmd := icmd.(*btcjson.GetReceivedByAddressCmd)
+
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Params)
+	if err != nil {
+		return nil, ParseError{err}
+	}
+
+	bal, err := w.ReceivedByAddress(addr, cmd.MinConf)
+	if err != nil {
+		return nil, err
+	}
+
+	return bal.ToUnit(btcutil.AmountBTC), nil
 }
 
 // GetReceivedByAccount handles a getreceivedbyaccount request by returning
