@@ -2043,6 +2043,8 @@ func ListReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 		amount btcutil.Amount
 		// Number of confirmations of the last transaction.
 		confirmations int32
+		// Hashes of transactions which include an output paying to the address
+		tx []string
 	}
 
 	bs, err := w.SyncedChainTip()
@@ -2085,6 +2087,7 @@ func ListReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 						confirmations: confirmations,
 					}
 				}
+				addrData.tx = append(addrData.tx, credit.Tx().Sha().String())
 				allAddrData[addrStr] = addrData
 			}
 		}
@@ -2100,6 +2103,7 @@ func ListReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 			Address:       address,
 			Amount:        addrData.amount.ToUnit(btcutil.AmountBTC),
 			Confirmations: uint64(addrData.confirmations),
+			Tx:            addrData.tx,
 		}
 		idx++
 	}
