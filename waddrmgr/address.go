@@ -25,7 +25,6 @@ import (
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcutil/hdkeychain"
-	"github.com/conformal/btcwallet/snacl"
 )
 
 // zero sets all bytes in the passed slice to zero.  This is used to
@@ -134,7 +133,7 @@ var _ ManagedPubKeyAddress = (*managedAddress)(nil)
 // The returned clear text private key will always be a copy that may be safely
 // used by the caller without worrying about it being zeroed during an address
 // lock.
-func (a *managedAddress) unlock(key *snacl.CryptoKey) ([]byte, error) {
+func (a *managedAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
 	// Protect concurrent access to clear text private key.
 	a.privKeyMutex.Lock()
 	defer a.privKeyMutex.Unlock()
@@ -389,7 +388,7 @@ var _ ManagedScriptAddress = (*scriptAddress)(nil)
 // invalid or the encrypted script is not available.  The returned clear text
 // script will always be a copy that may be safely used by the caller without
 // worrying about it being zeroed during an address lock.
-func (a *scriptAddress) unlock(key *snacl.CryptoKey) ([]byte, error) {
+func (a *scriptAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
 	// Protect concurrent access to clear text script.
 	a.scriptMutex.Lock()
 	defer a.scriptMutex.Unlock()

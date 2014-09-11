@@ -132,6 +132,45 @@ func defaultNewSecretKey(passphrase *[]byte) (*snacl.SecretKey, error) {
 // paths.
 var newSecretKey = defaultNewSecretKey
 
+// EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that our
+// tests can use dependency injection to force the behaviour they need.
+type EncryptorDecryptor interface {
+	Encrypt(in []byte) ([]byte, error)
+	Decrypt(in []byte) ([]byte, error)
+	Bytes() []byte
+	CopyBytes([]byte)
+	Zero()
+}
+
+// CryptoKey extends snacl.CryptoKey to implement EncryptorDecryptor.
+type CryptoKey struct {
+	snacl.CryptoKey
+}
+
+// Bytes returns a copy of this crypto key's byte slice.
+func (ck *CryptoKey) Bytes() []byte {
+	return ck.CryptoKey[:]
+}
+
+// CopyBytes copies the bytes from the given slice into this CryptoKey.
+func (ck *CryptoKey) CopyBytes(from []byte) {
+	copy(ck.CryptoKey[:], from)
+}
+
+// defaultNewCryptoKey returns a new CryptoKey.  See newCryptoKey.
+func defaultNewCryptoKey() (*CryptoKey, error) {
+	key, err := snacl.GenerateCryptoKey()
+	if err != nil {
+		return nil, err
+	}
+	return &CryptoKey{*key}, nil
+}
+
+// newCryptoKey is used as a way to replace the new CryptoKey generation
+// function used so tests can provide a version that fails for testing error
+// paths.
+var newCryptoKey = defaultNewCryptoKey
+
 // Manager represents a concurrency safe crypto currency address manager and
 // key store.
 type Manager struct {
@@ -165,20 +204,20 @@ type Manager struct {
 
 	// cryptoKeyPub is the key used to encrypt public extended keys and
 	// addresses.
-	cryptoKeyPub *snacl.CryptoKey
+	cryptoKeyPub EncryptorDecryptor
 
 	// cryptoKeyPriv is the key used to encrypt private data such as the
 	// master hierarchical deterministic extended key.
 	//
 	// This key will be zeroed when the address manager is locked.
 	cryptoKeyPrivEncrypted []byte
-	cryptoKeyPriv          *snacl.CryptoKey
+	cryptoKeyPriv          EncryptorDecryptor
 
 	// cryptoKeyScript is the key used to encrypt script data.
 	//
 	// This key will be zeroed when the address manager is locked.
 	cryptoKeyScriptEncrypted []byte
-	cryptoKeyScript          *snacl.CryptoKey
+	cryptoKeyScript          EncryptorDecryptor
 
 	// deriveOnUnlock is a list of private keys which needs to be derived
 	// on the next unlock.  This occurs when a public address is derived
@@ -683,7 +722,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 	} else {
 		// Re-encrypt the crypto public key using the new master public
 		// key.
-		encryptedPub, err := newMasterKey.Encrypt(m.cryptoKeyPub[:])
+		encryptedPub, err := newMasterKey.Encrypt(m.cryptoKeyPub.Bytes())
 		if err != nil {
 			str := "failed to encrypt crypto public key"
 			return managerError(ErrCrypto, str, err)
@@ -1077,7 +1116,7 @@ func (m *Manager) Unlock(passphrase []byte) error {
 		str := "failed to decrypt crypto private key"
 		return managerError(ErrCrypto, str, err)
 	}
-	copy(m.cryptoKeyPriv[:], decryptedKey)
+	m.cryptoKeyPriv.CopyBytes(decryptedKey)
 	zero(decryptedKey)
 
 	// Use the crypto private key to decrypt all of the account private
@@ -1406,7 +1445,7 @@ func (m *Manager) AllActiveAddresses() ([]btcutil.Address, error) {
 
 // newManager returns a new locked address manager with the given parameters.
 func newManager(db *managerDB, net *btcnet.Params, masterKeyPub *snacl.SecretKey,
-	masterKeyPriv *snacl.SecretKey, cryptoKeyPub *snacl.CryptoKey,
+	masterKeyPriv *snacl.SecretKey, cryptoKeyPub *CryptoKey,
 	cryptoKeyPrivEncrypted, cryptoKeyScriptEncrypted []byte,
 	syncInfo *syncState) *Manager {
 
@@ -1421,9 +1460,9 @@ func newManager(db *managerDB, net *btcnet.Params, masterKeyPub *snacl.SecretKey
 		masterKeyPriv:            masterKeyPriv,
 		cryptoKeyPub:             cryptoKeyPub,
 		cryptoKeyPrivEncrypted:   cryptoKeyPrivEncrypted,
-		cryptoKeyPriv:            &snacl.CryptoKey{},
+		cryptoKeyPriv:            &CryptoKey{},
 		cryptoKeyScriptEncrypted: cryptoKeyScriptEncrypted,
-		cryptoKeyScript:          &snacl.CryptoKey{},
+		cryptoKeyScript:          &CryptoKey{},
 	}
 }
 
@@ -1575,13 +1614,13 @@ func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params) (*Mana
 	}
 
 	// Use the master public key to decrypt the crypto public key.
-	var cryptoKeyPub snacl.CryptoKey
+	cryptoKeyPub := &CryptoKey{snacl.CryptoKey{}}
 	cryptoKeyPubCT, err := masterKeyPub.Decrypt(cryptoKeyPubEnc)
 	if err != nil {
 		str := "failed to decrypt crypto public key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-	copy(cryptoKeyPub[:], cryptoKeyPubCT)
+	cryptoKeyPub.CopyBytes(cryptoKeyPubCT)
 	zero(cryptoKeyPubCT)
 
 	// Create the sync state struct.
@@ -1590,7 +1629,7 @@ func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params) (*Mana
 	// Create new address manager with the given parameters.  Also, override
 	// the defaults for the additional fields which are not specified in the
 	// call to new with the values loaded from the database.
-	mgr := newManager(db, net, &masterKeyPub, &masterKeyPriv, &cryptoKeyPub,
+	mgr := newManager(db, net, &masterKeyPub, &masterKeyPriv, cryptoKeyPub,
 		cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo)
 	mgr.watchingOnly = watchingOnly
 	return mgr, nil
@@ -1704,34 +1743,34 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 	// Generate new crypto public, private, and script keys.  These keys are
 	// used to protect the actual public and private data such as addresses,
 	// extended keys, and scripts.
-	cryptoKeyPub, err := snacl.GenerateCryptoKey()
+	cryptoKeyPub, err := newCryptoKey()
 	if err != nil {
 		str := "failed to generate crypto public key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-	cryptoKeyPriv, err := snacl.GenerateCryptoKey()
+	cryptoKeyPriv, err := newCryptoKey()
 	if err != nil {
 		str := "failed to generate crypto private key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-	cryptoKeyScript, err := snacl.GenerateCryptoKey()
+	cryptoKeyScript, err := newCryptoKey()
 	if err != nil {
 		str := "failed to generate crypto script key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
 	// Encrypt the crypto keys with the associated master keys.
-	cryptoKeyPubEnc, err := masterKeyPub.Encrypt(cryptoKeyPub[:])
+	cryptoKeyPubEnc, err := masterKeyPub.Encrypt(cryptoKeyPub.Bytes())
 	if err != nil {
 		str := "failed to encrypt crypto public key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-	cryptoKeyPrivEnc, err := masterKeyPriv.Encrypt(cryptoKeyPriv[:])
+	cryptoKeyPrivEnc, err := masterKeyPriv.Encrypt(cryptoKeyPriv.Bytes())
 	if err != nil {
 		str := "failed to encrypt crypto private key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-	cryptoKeyScriptEnc, err := masterKeyPriv.Encrypt(cryptoKeyScript[:])
+	cryptoKeyScriptEnc, err := masterKeyPriv.Encrypt(cryptoKeyScript.Bytes())
 	if err != nil {
 		str := "failed to encrypt crypto script key"
 		return nil, managerError(ErrCrypto, str, err)
