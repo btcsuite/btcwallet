@@ -2521,13 +2521,13 @@ func (a *btcAddress) Imported() bool {
 	return a.chainIndex == importedKeyChainIdx
 }
 
-// AddrHash returns true if the address was created as a change address,
+// Change returns true if the address was created as a change address,
 // implementing AddressInfo.
 func (a *btcAddress) Change() bool {
 	return a.flags.change
 }
 
-// AddrHash returns true if the address backing key is compressed,
+// Compressed returns true if the address backing key is compressed,
 // implementing AddressInfo.
 func (a *btcAddress) Compressed() bool {
 	return a.flags.compressed
