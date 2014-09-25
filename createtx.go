@@ -17,7 +17,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	badrand "math/rand"
@@ -32,16 +31,54 @@ import (
 	"github.com/conformal/btcwire"
 )
 
-// InsufficientFunds represents an error where there are not enough
+const (
+	// All transactions have 4 bytes for version, 4 bytes of locktime,
+	// and 2 varints for the number of inputs and outputs.
+	txOverheadEstimate = 4 + 4 + 1 + 1
+
+	// A best case signature script to redeem a P2PKH output for a
+	// compressed pubkey has 70 bytes of the smallest possible DER signature
+	// (with no leading 0 bytes for R and S), 33 bytes of serialized pubkey,
+	// and data push opcodes for both, plus one byte for the hash type flag
+	// appended to the end of the signature.
+	sigScriptEstimate = 1 + 70 + 1 + 33 + 1
+
+	// A best case tx input serialization cost is 32 bytes of sha, 4 bytes
+	// of output index, 4 bytes of sequnce, and the estimated signature
+	// script size.
+	txInEstimate = 32 + 4 + 4 + sigScriptEstimate
+
+	// A P2PKH pkScript contains the following bytes:
+	//  - OP_DUP
+	//  - OP_HASH160
+	//  - OP_DATA_20 + 20 bytes of pubkey hash
+	//  - OP_EQUALVERIFY
+	//  - OP_CHECKSIG
+	pkScriptEstimate = 1 + 1 + 1 + 20 + 1 + 1
+
+	// A best case tx output serialization cost is 8 bytes of value, one
+	// byte of varint, and the pkScript size.
+	txOutEstimate = 8 + 1 + pkScriptEstimate
+)
+
+func estimateTxSize(numInputs, numOutputs int) int {
+	return txOverheadEstimate + txInEstimate*numInputs + txOutEstimate*numOutputs
+}
+
+func feeForSize(incr btcutil.Amount, sz int) btcutil.Amount {
+	return btcutil.Amount(1+sz/1000) * incr
+}
+
+// InsufficientFundsError represents an error where there are not enough
 // funds from unspent tx outputs for a wallet to create a transaction.
 // This may be caused by not enough inputs for all of the desired total
 // transaction output amount, or due to
-type InsufficientFunds struct {
+type InsufficientFundsError struct {
 	in, out, fee btcutil.Amount
 }
 
 // Error satisifies the builtin error interface.
-func (e InsufficientFunds) Error() string {
+func (e InsufficientFundsError) Error() string {
 	total := e.out + e.fee
 	if e.fee == 0 {
 		return fmt.Sprintf("insufficient funds: transaction requires "+
@@ -80,44 +117,14 @@ func (u ByAmount) Len() int           { return len(u) }
 func (u ByAmount) Less(i, j int) bool { return u[i].Amount() < u[j].Amount() }
 func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 
-// selectInputs selects the minimum number possible of unspent
-// outputs to use to create a new transaction that spends amt satoshis.
-// btcout is the total number of satoshis which would be spent by the
-// combination of all selected previous outputs.  err will equal
-// ErrInsufficientFunds if there are not enough unspent outputs to spend amt
-// amt.
-func selectInputs(eligible []txstore.Credit, amt, fee btcutil.Amount,
-	minconf int) (selected []txstore.Credit, out btcutil.Amount, err error) {
-
-	// Iterate throguh eligible transactions, appending to outputs and
-	// increasing out.  This is finished when out is greater than the
-	// requested amt to spend.
-	selected = make([]txstore.Credit, 0, len(eligible))
-	for _, e := range eligible {
-		selected = append(selected, e)
-		out += e.Amount()
-		if out >= amt+fee {
-			return selected, out, nil
-		}
-	}
-	if out < amt+fee {
-		return nil, 0, InsufficientFunds{out, amt, fee}
-	}
-
-	return selected, out, nil
-}
-
 // txToPairs creates a raw transaction sending the amounts for each
 // address/amount pair and fee to each address and the miner.  minconf
 // specifies the minimum number of confirmations required before an
 // unspent output is eligible for spending. Leftover input funds not sent
 // to addr or as a fee for the miner are sent to a newly generated
-// address. If change is needed to return funds back to an owned
-// address, changeUtxo will point to a unconfirmed (height = -1, zeroed
-// block hash) Utxo.  ErrInsufficientFunds is returned if there are not
-// enough eligible unspent outputs to create the transaction.
-func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
-	minconf int) (*CreatedTx, error) {
+// address. InsufficientFundsError is returned if there are not enough
+// eligible unspent outputs to create the transaction.
+func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*CreatedTx, error) {
 
 	// Key store must be unlocked to compose transaction.  Grab the
 	// unlock if possible (to prevent future unlocks), or return the
@@ -128,122 +135,135 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 	}
 	defer heldUnlock.Release()
 
-	// Create a new transaction which will include all input scripts.
-	msgtx := btcwire.NewMsgTx()
-
-	// Calculate minimum amount needed for inputs.
-	var amt btcutil.Amount
-	for _, v := range pairs {
-		// Error out if any amount is negative.
-		if v <= 0 {
-			return nil, ErrNonPositiveAmount
-		}
-		amt += v
-	}
-
-	if err = addOutputs(msgtx, pairs); err != nil {
-		return nil, err
-	}
-
 	// Get current block's height and hash.
 	bs, err := w.chainSvr.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
 
-	eligible, err := w.findEligibleOuptuts(minconf, bs)
+	eligible, err := w.findEligibleOutputs(minconf, bs)
 	if err != nil {
 		return nil, err
 	}
-	// Sort eligible inputs, as selectInputs expects these to be sorted
-	// by amount in reverse order.
-	sort.Sort(sort.Reverse(ByAmount(eligible)))
 
-	var selectedInputs []txstore.Credit
-	// changeAddr is nil/zeroed until a change address is needed, and reused
-	// again in case a change utxo has already been chosen.
-	var changeAddr btcutil.Address
-	var changeIdx int
+	return createTx(eligible, pairs, bs, w.FeeIncrement, w.KeyStore, w.changeAddress)
+}
 
-	// Make a copy of msgtx before any inputs are added.  This will be
-	// used as a starting point when trying a fee and starting over with
-	// a higher fee if not enough was originally chosen.
-	txNoInputs := msgtx.Copy()
+// createTx selects inputs (from the given slice of eligible utxos)
+// whose amount are sufficient to fulfil all the desired outputs plus
+// the mining fee. It then creates and returns a CreatedTx containing
+// the selected inputs and the given outputs, validating it (using
+// validateMsgTx) as well.
+func createTx(
+	eligible []txstore.Credit,
+	outputs map[string]btcutil.Amount,
+	bs *keystore.BlockStamp,
+	feeIncrement btcutil.Amount,
+	keys *keystore.Store,
+	changeAddress func(*keystore.BlockStamp) (btcutil.Address, error)) (
+	*CreatedTx, error) {
 
-	// Get the number of satoshis to increment fee by when searching for
-	// the minimum tx fee needed.
-	fee := btcutil.Amount(0)
-	for {
-		msgtx = txNoInputs.Copy()
-		changeIdx = -1
-
-		// Select eligible outputs to be used in transaction based on the amount
-		// needed to be sent, and the current fee estimation.
-		inputs, btcin, err := selectInputs(eligible, amt, fee, minconf)
-		if err != nil {
-			return nil, err
-		}
-
-		// Check if there are leftover unspent outputs, and return coins back to
-		// a new address we own.
-		change := btcin - amt - fee
-		if change > 0 {
-			// Get a new change address if one has not already been found.
-			if changeAddr == nil {
-				changeAddr, err = w.KeyStore.ChangeAddress(bs)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get next address: %s", err)
-				}
-				w.KeyStore.MarkDirty()
-				err = w.chainSvr.NotifyReceived([]btcutil.Address{changeAddr})
-				if err != nil {
-					return nil, fmt.Errorf("cannot request updates for "+
-						"change address: %v", err)
-				}
-			}
-
-			// Spend change.
-			pkScript, err := btcscript.PayToAddrScript(changeAddr)
-			if err != nil {
-				return nil, fmt.Errorf("cannot create txout script: %s", err)
-			}
-			msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
-
-			// Randomize index of the change output.
-			rng := badrand.New(badrand.NewSource(time.Now().UnixNano()))
-			r := rng.Int31n(int32(len(msgtx.TxOut))) // random index
-			c := len(msgtx.TxOut) - 1                // change index
-			msgtx.TxOut[r], msgtx.TxOut[c] = msgtx.TxOut[c], msgtx.TxOut[r]
-			changeIdx = int(r)
-		}
-
-		if err = w.addInputsToTx(msgtx, inputs); err != nil {
-			return nil, err
-		}
-
-		noFeeAllowed := false
-		if !cfg.DisallowFree {
-			noFeeAllowed = allowFree(bs.Height, inputs, msgtx.SerializeSize())
-		}
-		if minFee := minimumFee(w.FeeIncrement, msgtx, noFeeAllowed); fee < minFee {
-			fee = minFee
-		} else {
-			selectedInputs = inputs
-			break
-		}
-	}
-
-	if err = validateMsgTx(msgtx, selectedInputs); err != nil {
+	msgtx := btcwire.NewMsgTx()
+	minAmount, err := addOutputs(msgtx, outputs)
+	if err != nil {
 		return nil, err
 	}
 
-	buf := bytes.Buffer{}
-	buf.Grow(msgtx.SerializeSize())
-	if err := msgtx.BtcEncode(&buf, btcwire.ProtocolVersion); err != nil {
-		// Hitting OOM by growing or writing to a bytes.Buffer already
-		// panics, and all returned errors are unexpected.
-		panic(err)
+	// Sort eligible inputs so that we first pick the ones with highest
+	// amount, thus reducing number of inputs.
+	sort.Sort(sort.Reverse(ByAmount(eligible)))
+
+	// Start by adding enough inputs to cover for the total amount of all
+	// desired outputs.
+	var input txstore.Credit
+	var inputs []txstore.Credit
+	totalAdded := btcutil.Amount(0)
+	for totalAdded < minAmount {
+		if len(eligible) == 0 {
+			return nil, InsufficientFundsError{totalAdded, minAmount, 0}
+		}
+		input, eligible = eligible[0], eligible[1:]
+		inputs = append(inputs, input)
+		msgtx.AddTxIn(btcwire.NewTxIn(input.OutPoint(), nil))
+		totalAdded += input.Amount()
 	}
+
+	// Get an initial fee estimate based on the number of selected inputs
+	// and added outputs, with no change.
+	szEst := estimateTxSize(len(inputs), len(msgtx.TxOut))
+	feeEst := minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
+
+	// Now make sure the sum amount of all our inputs is enough for the
+	// sum amount of all outputs plus the fee. If necessary we add more,
+	// inputs, but in that case we also need to recalculate the fee.
+	for totalAdded < minAmount+feeEst {
+		if len(eligible) == 0 {
+			return nil, InsufficientFundsError{totalAdded, minAmount, feeEst}
+		}
+		input, eligible = eligible[0], eligible[1:]
+		inputs = append(inputs, input)
+		msgtx.AddTxIn(btcwire.NewTxIn(input.OutPoint(), nil))
+		szEst += txInEstimate
+		totalAdded += input.Amount()
+		feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
+	}
+
+	var changeAddr btcutil.Address
+	// changeIdx is -1 unless there's a change output.
+	changeIdx := -1
+
+	for {
+		change := totalAdded - minAmount - feeEst
+		if change > 0 {
+			if changeAddr == nil {
+				changeAddr, err = changeAddress(bs)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			changeIdx, err = addChange(msgtx, change, changeAddr)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		if err = signMsgTx(msgtx, inputs, keys); err != nil {
+			return nil, err
+		}
+
+		if feeForSize(feeIncrement, msgtx.SerializeSize()) <= feeEst {
+			// The required fee for this size is less than or equal to what
+			// we guessed, so we're done.
+			break
+		}
+
+		if change > 0 {
+			// Remove the change output since the next iteration will add
+			// it again (with a new amount) if necessary.
+			tmp := msgtx.TxOut[:changeIdx]
+			tmp = append(tmp, msgtx.TxOut[changeIdx+1:]...)
+			msgtx.TxOut = tmp
+		}
+
+		feeEst += feeIncrement
+		for totalAdded < minAmount+feeEst {
+			if len(eligible) == 0 {
+				return nil, InsufficientFundsError{totalAdded, minAmount, feeEst}
+			}
+			input, eligible = eligible[0], eligible[1:]
+			inputs = append(inputs, input)
+			msgtx.AddTxIn(btcwire.NewTxIn(input.OutPoint(), nil))
+			szEst += txInEstimate
+			totalAdded += input.Amount()
+			feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
+		}
+	}
+
+	if err := validateMsgTx(msgtx, inputs); err != nil {
+		return nil, err
+	}
+
 	info := &CreatedTx{
 		tx:          btcutil.NewTx(msgtx),
 		changeAddr:  changeAddr,
@@ -252,25 +272,66 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 	return info, nil
 }
 
-func addOutputs(msgtx *btcwire.MsgTx, pairs map[string]btcutil.Amount) error {
+// addChange adds a new output with the given amount and address, and
+// randomizes the index (and returns it) of the newly added output.
+func addChange(msgtx *btcwire.MsgTx, change btcutil.Amount, changeAddr btcutil.Address) (int, error) {
+	pkScript, err := btcscript.PayToAddrScript(changeAddr)
+	if err != nil {
+		return 0, fmt.Errorf("cannot create txout script: %s", err)
+	}
+	msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
+
+	// Randomize index of the change output.
+	rng := badrand.New(badrand.NewSource(time.Now().UnixNano()))
+	r := rng.Int31n(int32(len(msgtx.TxOut))) // random index
+	c := len(msgtx.TxOut) - 1                // change index
+	msgtx.TxOut[r], msgtx.TxOut[c] = msgtx.TxOut[c], msgtx.TxOut[r]
+	return int(r), nil
+}
+
+// changeAddress obtains a new btcutil.Address to be used as a change
+// transaction output. It will also mark the KeyStore as dirty and
+// tells chainSvr to watch that address.
+func (w *Wallet) changeAddress(bs *keystore.BlockStamp) (btcutil.Address, error) {
+	changeAddr, err := w.KeyStore.ChangeAddress(bs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get change address: %s", err)
+	}
+	w.KeyStore.MarkDirty()
+	err = w.chainSvr.NotifyReceived([]btcutil.Address{changeAddr})
+	if err != nil {
+		return nil, fmt.Errorf("cannot request updates for "+
+			"change address: %v", err)
+	}
+	return changeAddr, nil
+}
+
+// addOutputs adds the given address/amount pairs as outputs to msgtx,
+// returning their total amount.
+func addOutputs(msgtx *btcwire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amount, error) {
+	var minAmount btcutil.Amount
 	for addrStr, amt := range pairs {
+		if amt <= 0 {
+			return minAmount, ErrNonPositiveAmount
+		}
+		minAmount += amt
 		addr, err := btcutil.DecodeAddress(addrStr, activeNet.Params)
 		if err != nil {
-			return fmt.Errorf("cannot decode address: %s", err)
+			return minAmount, fmt.Errorf("cannot decode address: %s", err)
 		}
 
 		// Add output to spend amt to addr.
 		pkScript, err := btcscript.PayToAddrScript(addr)
 		if err != nil {
-			return fmt.Errorf("cannot create txout script: %s", err)
+			return minAmount, fmt.Errorf("cannot create txout script: %s", err)
 		}
 		txout := btcwire.NewTxOut(int64(amt), pkScript)
 		msgtx.AddTxOut(txout)
 	}
-	return nil
+	return minAmount, nil
 }
 
-func (w *Wallet) findEligibleOuptuts(minconf int, bs *keystore.BlockStamp) ([]txstore.Credit, error) {
+func (w *Wallet) findEligibleOutputs(minconf int, bs *keystore.BlockStamp) ([]txstore.Credit, error) {
 	unspent, err := w.TxStore.UnspentOutputs()
 	if err != nil {
 		return nil, err
@@ -306,13 +367,16 @@ func (w *Wallet) findEligibleOuptuts(minconf int, bs *keystore.BlockStamp) ([]tx
 	return eligible, nil
 }
 
-// For every unspent output given, add a new input to the given MsgTx. Only P2PKH outputs are
-// supported at this point.
-func (w *Wallet) addInputsToTx(msgtx *btcwire.MsgTx, outputs []txstore.Credit) error {
-	for _, ip := range outputs {
-		msgtx.AddTxIn(btcwire.NewTxIn(ip.OutPoint(), nil))
+// signMsgTx sets the SignatureScript for every item in msgtx.TxIn.
+// It must be called every time a msgtx is changed.
+// Only P2PKH outputs are supported at this point.
+func signMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit, store *keystore.Store) error {
+	if len(prevOutputs) != len(msgtx.TxIn) {
+		return fmt.Errorf(
+			"Number of prevOutputs (%d) does not match number of tx inputs (%d)",
+			len(prevOutputs), len(msgtx.TxIn))
 	}
-	for i, output := range outputs {
+	for i, output := range prevOutputs {
 		// Errors don't matter here, as we only consider the
 		// case where len(addrs) == 1.
 		_, addrs, _, _ := output.Addresses(activeNet.Params)
@@ -324,13 +388,12 @@ func (w *Wallet) addInputsToTx(msgtx *btcwire.MsgTx, outputs []txstore.Credit) e
 			return UnsupportedTransactionType
 		}
 
-		ai, err := w.KeyStore.Address(apkh)
+		ai, err := store.Address(apkh)
 		if err != nil {
 			return fmt.Errorf("cannot get address info: %v", err)
 		}
 
 		pka := ai.(keystore.PubKeyAddress)
-
 		privkey, err := pka.PrivKey()
 		if err != nil {
 			return fmt.Errorf("cannot get private key: %v", err)
@@ -343,10 +406,11 @@ func (w *Wallet) addInputsToTx(msgtx *btcwire.MsgTx, outputs []txstore.Credit) e
 		}
 		msgtx.TxIn[i].SignatureScript = sigscript
 	}
+
 	return nil
 }
 
-func validateMsgTx(msgtx *btcwire.MsgTx, inputs []txstore.Credit) error {
+func validateMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit) error {
 	flags := btcscript.ScriptCanonicalSignatures | btcscript.ScriptStrictMultiSig
 	bip16 := time.Now().After(btcscript.Bip16Activation)
 	if bip16 {
@@ -354,7 +418,7 @@ func validateMsgTx(msgtx *btcwire.MsgTx, inputs []txstore.Credit) error {
 	}
 	for i, txin := range msgtx.TxIn {
 		engine, err := btcscript.NewScript(
-			txin.SignatureScript, inputs[i].TxOut().PkScript, i, msgtx, flags)
+			txin.SignatureScript, prevOutputs[i].TxOut().PkScript, i, msgtx, flags)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
@@ -365,28 +429,31 @@ func validateMsgTx(msgtx *btcwire.MsgTx, inputs []txstore.Credit) error {
 	return nil
 }
 
-// minimumFee calculates the minimum fee required for a transaction.
-// If allowFree is true, a fee may be zero so long as the entire
-// transaction has a serialized length less than 1 kilobyte
-// and none of the outputs contain a value less than 1 bitcent.
-// Otherwise, the fee will be calculated using TxFeeIncrement,
-// incrementing the fee for each kilobyte of transaction.
-func minimumFee(incr btcutil.Amount, tx *btcwire.MsgTx, allowFree bool) btcutil.Amount {
-	txLen := tx.SerializeSize()
-	fee := btcutil.Amount(int64(1+txLen/1000) * int64(incr))
+// minimumFee estimates the minimum fee required for a transaction.
+// If cfg.DisallowFree is false, a fee may be zero so long as txLen
+// s less than 1 kilobyte and none of the outputs contain a value
+// less than 1 bitcent. Otherwise, the fee will be calculated using
+// incr, incrementing the fee for each kilobyte of transaction.
+func minimumFee(incr btcutil.Amount, txLen int, outputs []*btcwire.TxOut, prevOutputs []txstore.Credit, height int32) btcutil.Amount {
+	allowFree := false
+	if !cfg.DisallowFree {
+		allowFree = allowNoFeeTx(height, prevOutputs, txLen)
+	}
+	fee := feeForSize(incr, txLen)
 
 	if allowFree && txLen < 1000 {
 		fee = 0
 	}
 
 	if fee < incr {
-		for _, txOut := range tx.TxOut {
+		for _, txOut := range outputs {
 			if txOut.Value < btcutil.SatoshiPerBitcent {
 				return incr
 			}
 		}
 	}
 
+	// How can fee be smaller than 0 here?
 	if fee < 0 || fee > btcutil.MaxSatoshi {
 		fee = btcutil.MaxSatoshi
 	}
@@ -394,10 +461,10 @@ func minimumFee(incr btcutil.Amount, tx *btcwire.MsgTx, allowFree bool) btcutil.
 	return fee
 }
 
-// allowFree calculates the transaction priority and checks that the
+// allowNoFeeTx calculates the transaction priority and checks that the
 // priority reaches a certain threshold.  If the threshhold is
 // reached, a free transaction fee is allowed.
-func allowFree(curHeight int32, txouts []txstore.Credit, txSize int) bool {
+func allowNoFeeTx(curHeight int32, txouts []txstore.Credit, txSize int) bool {
 	const blocksPerDayEstimate = 144.0
 	const txSizeEstimate = 250.0
 	const threshold = btcutil.SatoshiPerBitcoin * blocksPerDayEstimate / txSizeEstimate
