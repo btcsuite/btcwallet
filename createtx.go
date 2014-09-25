@@ -128,23 +128,6 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 	}
 	defer heldUnlock.Release()
 
-	// Create a new transaction which will include all input scripts.
-	msgtx := btcwire.NewMsgTx()
-
-	// Calculate minimum amount needed for inputs.
-	var amt btcutil.Amount
-	for _, v := range pairs {
-		// Error out if any amount is negative.
-		if v <= 0 {
-			return nil, ErrNonPositiveAmount
-		}
-		amt += v
-	}
-
-	if err = addOutputs(msgtx, pairs); err != nil {
-		return nil, err
-	}
-
 	// Get current block's height and hash.
 	bs, err := w.chainSvr.BlockStamp()
 	if err != nil {
@@ -155,6 +138,29 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 	if err != nil {
 		return nil, err
 	}
+
+	return createTx(
+		eligible, pairs, bs, minconf, w.FeeIncrement, w.changeAddress, w.addInputsToTx)
+}
+
+func createTx(eligible []txstore.Credit, pairs map[string]btcutil.Amount,
+	bs *keystore.BlockStamp, minconf int, feeIncrement btcutil.Amount,
+	changeAddress func(*keystore.BlockStamp) (btcutil.Address, error),
+	addInputs func(*btcwire.MsgTx, []txstore.Credit) error) (*CreatedTx, error) {
+	msgtx := btcwire.NewMsgTx()
+
+	var minAmount btcutil.Amount
+	for _, v := range pairs {
+		if v <= 0 {
+			return nil, ErrNonPositiveAmount
+		}
+		minAmount += v
+	}
+
+	if err := addOutputs(msgtx, pairs); err != nil {
+		return nil, err
+	}
+
 	// Sort eligible inputs, as selectInputs expects these to be sorted
 	// by amount in reverse order.
 	sort.Sort(sort.Reverse(ByAmount(eligible)))
@@ -179,27 +185,21 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 
 		// Select eligible outputs to be used in transaction based on the amount
 		// needed to be sent, and the current fee estimation.
-		inputs, btcin, err := selectInputs(eligible, amt, fee, minconf)
+		inputs, btcin, err := selectInputs(eligible, minAmount, fee, minconf)
 		if err != nil {
 			return nil, err
 		}
 
 		// Check if there are leftover unspent outputs, and return coins back to
 		// a new address we own.
-		change := btcin - amt - fee
+		change := btcin - minAmount - fee
 		if change > 0 {
 			// Get a new change address if one has not already been found.
 			if changeAddr == nil {
-				changeAddr, err = w.KeyStore.ChangeAddress(bs)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get next address: %s", err)
-				}
-				w.KeyStore.MarkDirty()
-				err = w.chainSvr.NotifyReceived([]btcutil.Address{changeAddr})
-				if err != nil {
-					return nil, fmt.Errorf("cannot request updates for "+
-						"change address: %v", err)
-				}
+				changeAddr, err = changeAddress(bs)
+			}
+			if err != nil {
+				return nil, err
 			}
 
 			// Spend change.
@@ -217,7 +217,7 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 			changeIdx = int(r)
 		}
 
-		if err = w.addInputsToTx(msgtx, inputs); err != nil {
+		if err = addInputs(msgtx, inputs); err != nil {
 			return nil, err
 		}
 
@@ -225,7 +225,7 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 		if !cfg.DisallowFree {
 			noFeeAllowed = allowFree(bs.Height, inputs, msgtx.SerializeSize())
 		}
-		if minFee := minimumFee(w.FeeIncrement, msgtx, noFeeAllowed); fee < minFee {
+		if minFee := minimumFee(feeIncrement, msgtx, noFeeAllowed); fee < minFee {
 			fee = minFee
 		} else {
 			selectedInputs = inputs
@@ -233,7 +233,7 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 		}
 	}
 
-	if err = validateMsgTx(msgtx, selectedInputs); err != nil {
+	if err := validateMsgTx(msgtx, selectedInputs); err != nil {
 		return nil, err
 	}
 
@@ -250,6 +250,20 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount,
 		changeIndex: changeIdx,
 	}
 	return info, nil
+}
+
+func (w *Wallet) changeAddress(bs *keystore.BlockStamp) (btcutil.Address, error) {
+	changeAddr, err := w.KeyStore.ChangeAddress(bs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get next address: %s", err)
+	}
+	w.KeyStore.MarkDirty()
+	err = w.chainSvr.NotifyReceived([]btcutil.Address{changeAddr})
+	if err != nil {
+		return nil, fmt.Errorf("cannot request updates for "+
+			"change address: %v", err)
+	}
+	return changeAddr, nil
 }
 
 func addOutputs(msgtx *btcwire.MsgTx, pairs map[string]btcutil.Amount) error {
