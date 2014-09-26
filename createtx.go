@@ -200,9 +200,9 @@ func createTx(
 			// Get a new change address if one has not already been found.
 			if changeAddr == nil {
 				changeAddr, err = changeAddress(bs)
-			}
-			if err != nil {
-				return nil, err
+				if err != nil {
+					return nil, err
+				}
 			}
 
 			changeIdx, err = addChange(msgtx, change, changeAddr)
