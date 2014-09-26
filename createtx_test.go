@@ -44,7 +44,7 @@ func TestSelectInputs(t *testing.T) {
 
 	// The requested amount+fee is small enough so selectInputs() should return
 	// just the first item.
-	selected, amount, err := selectInputs(eligible, 1e4, 1, 1)
+	selected, amount, err := selectInputs(eligible, 1e4, 1)
 
 	if err != nil {
 		t.Fatal("Unexpected error: ", err)
@@ -64,7 +64,7 @@ func TestSelectInputs(t *testing.T) {
 func TestSelectInputsInsufficientFunds(t *testing.T) {
 	eligible := []txstore.Credit{newTxCredit(t, recvTx)}
 
-	_, _, err := selectInputs(eligible, 1e7, 1, 1)
+	_, _, err := selectInputs(eligible, 1e7, 1)
 
 	if err == nil {
 		t.Error("Expected InsufficientFunds, got no error")
@@ -78,10 +78,9 @@ func TestCreateTx(t *testing.T) {
 	outputs := map[string]btcutil.Amount{outAddr1.String(): 10, outAddr2.String(): 1}
 	eligible := []txstore.Credit{newTxCredit(t, recvTx)}
 	bs := &keystore.BlockStamp{Height: 11111}
-	minconf := 5
 
 	tx, err := createTx(
-		eligible, outputs, bs, minconf, defaultFeeIncrement, TstChangeAddress, TstAddInputs)
+		eligible, outputs, bs, defaultFeeIncrement, TstChangeAddress, TstAddInputs)
 
 	if err != nil {
 		t.Error(err)
@@ -96,8 +95,6 @@ func TestCreateTx(t *testing.T) {
 	}
 	expectedOutputs := map[btcutil.Address]int64{changeAddr: 9989989, outAddr2: 1, outAddr1: 10}
 	for addr, v := range expectedOutputs {
-		// XXX: I wish I didn't have to go through all this to check that msgTx.TxOut is what
-		// we expect, but I can't think of a better way.
 		pkScript, err := btcscript.PayToAddrScript(addr)
 		if err != nil {
 			t.Fatalf("Cannot create pkScript: %v", err)
