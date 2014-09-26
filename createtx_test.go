@@ -78,6 +78,9 @@ func TestCreateTx(t *testing.T) {
 	outputs := map[string]btcutil.Amount{outAddr1.String(): 10, outAddr2.String(): 1}
 	eligible := []txstore.Credit{newTxCredit(t, recvTx)}
 	bs := &keystore.BlockStamp{Height: 11111}
+	var TstChangeAddress = func(bs *keystore.BlockStamp) (btcutil.Address, error) {
+		return changeAddr, nil
+	}
 
 	tx, err := createTx(
 		eligible, outputs, bs, defaultFeeIncrement, TstChangeAddress, TstAddInputs)
@@ -93,6 +96,8 @@ func TestCreateTx(t *testing.T) {
 	if len(msgTx.TxOut) != 3 {
 		t.Errorf("Unexpected number of outputs; got %d, want 3", len(msgTx.TxOut))
 	}
+	// Check that the outputs in the tx are what we expect. It's a bit
+	// convoluted because the index of the change output is randomized.
 	expectedOutputs := map[btcutil.Address]int64{changeAddr: 9989989, outAddr2: 1, outAddr1: 10}
 	for addr, v := range expectedOutputs {
 		pkScript, err := btcscript.PayToAddrScript(addr)
@@ -123,10 +128,6 @@ func newTxCredit(t *testing.T, tx *btcutil.Tx) txstore.Credit {
 		t.Fatal(err)
 	}
 	return credit
-}
-
-func TstChangeAddress(bs *keystore.BlockStamp) (btcutil.Address, error) {
-	return changeAddr, nil
 }
 
 func TstAddInputs(msgtx *btcwire.MsgTx, inputs []txstore.Credit) error {
