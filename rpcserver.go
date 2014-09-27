@@ -2418,13 +2418,14 @@ func SignMessage(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface
 	}
 
 	pka := ainfo.(keystore.PubKeyAddress)
-	privkey, err := pka.PrivKey()
+	tmp, err := pka.PrivKey()
 	if err != nil {
 		return nil, err
 	}
+	privKey := (*btcec.PrivateKey)(tmp)
 
 	fullmsg := "Bitcoin Signed Message:\n" + cmd.Message
-	sigbytes, err := btcec.SignCompact(btcec.S256(), privkey,
+	sigbytes, err := btcec.SignCompact(btcec.S256(), privKey,
 		btcwire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed())
 	if err != nil {
 		return nil, err
