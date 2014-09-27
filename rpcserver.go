@@ -18,7 +18,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -2418,13 +2417,14 @@ func SignMessage(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface
 	}
 
 	pka := ainfo.(keystore.PubKeyAddress)
-	privkey, err := pka.PrivKey()
+	tmp, err := pka.PrivKey()
 	if err != nil {
 		return nil, err
 	}
+	privKey := (*btcec.PrivateKey)(tmp)
 
 	fullmsg := "Bitcoin Signed Message:\n" + cmd.Message
-	sigbytes, err := btcec.SignCompact(btcec.S256(), privkey,
+	sigbytes, err := btcec.SignCompact(btcec.S256(), privKey,
 		btcwire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed())
 	if err != nil {
 		return nil, err
@@ -2684,14 +2684,14 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 		// Set up our callbacks that we pass to btcscript so it can
 		// look up the appropriate keys and scripts by address.
 		getKey := btcscript.KeyClosure(func(addr btcutil.Address) (
-			*ecdsa.PrivateKey, bool, error) {
+			*btcec.PrivateKey, bool, error) {
 			if len(keys) != 0 {
 				wif, ok := keys[addr.EncodeAddress()]
 				if !ok {
 					return nil, false,
 						errors.New("no key for address")
 				}
-				return wif.PrivKey.ToECDSA(), wif.CompressPubKey, nil
+				return wif.PrivKey, wif.CompressPubKey, nil
 			}
 			address, err := w.KeyStore.Address(addr)
 			if err != nil {
