@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
@@ -2139,7 +2138,7 @@ type PubKeyAddress interface {
 	// PrivKey returns the private key for the address.
 	// It can fail if the key store is watching only, the key store is locked,
 	// or the address doesn't have any keys.
-	PrivKey() (*ecdsa.PrivateKey, error)
+	PrivKey() (*btcec.PrivateKey, error)
 	// ExportPrivKey exports the WIF private key.
 	ExportPrivKey() (*btcutil.WIF, error)
 }
@@ -2252,20 +2251,20 @@ func (a *btcAddress) verifyKeypairs() error {
 		return errors.New("private key unavailable")
 	}
 
-	privkey := &ecdsa.PrivateKey{
+	privKey := &btcec.PrivateKey{
 		PublicKey: *a.pubKey.ToECDSA(),
 		D:         new(big.Int).SetBytes(a.privKeyCT),
 	}
 
 	data := "String to sign."
-	r, s, err := ecdsa.Sign(rand.Reader, privkey, []byte(data))
+	sig, err := privKey.Sign([]byte(data))
 	if err != nil {
 		return err
 	}
 
-	ok := ecdsa.Verify(&privkey.PublicKey, []byte(data), r, s)
+	ok := sig.Verify([]byte(data), privKey.PubKey())
 	if !ok {
-		return errors.New("ecdsa verification failed")
+		return errors.New("pubkey verification failed")
 	}
 	return nil
 }
@@ -2568,7 +2567,7 @@ func (a *btcAddress) ExportPubKey() string {
 
 // PrivKey implements PubKeyAddress by returning the private key, or an error
 // if the key store is locked, watching only or the private key is missing.
-func (a *btcAddress) PrivKey() (*ecdsa.PrivateKey, error) {
+func (a *btcAddress) PrivKey() (*btcec.PrivateKey, error) {
 	if a.store.flags.watchingOnly {
 		return nil, ErrWatchingOnly
 	}
@@ -2590,7 +2589,7 @@ func (a *btcAddress) PrivKey() (*ecdsa.PrivateKey, error) {
 		return nil, err
 	}
 
-	return &ecdsa.PrivateKey{
+	return &btcec.PrivateKey{
 		PublicKey: *a.pubKey.ToECDSA(),
 		D:         new(big.Int).SetBytes(privKeyCT),
 	}, nil

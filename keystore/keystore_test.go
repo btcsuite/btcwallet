@@ -18,7 +18,6 @@ package keystore
 
 import (
 	"bytes"
-	"crypto/ecdsa"
 	"crypto/rand"
 	"math/big"
 	"reflect"
@@ -301,36 +300,36 @@ func TestChaining(t *testing.T) {
 			t.Errorf("%s: Unable to parse next compressed pubkey: %v", test.name, err)
 			return
 		}
-		privkeyUncompressed := &ecdsa.PrivateKey{
+		privkeyUncompressed := &btcec.PrivateKey{
 			PublicKey: *pubkeyUncompressed.ToECDSA(),
 			D:         new(big.Int).SetBytes(nextPrivUncompressed),
 		}
-		privkeyCompressed := &ecdsa.PrivateKey{
+		privkeyCompressed := &btcec.PrivateKey{
 			PublicKey: *pubkeyCompressed.ToECDSA(),
 			D:         new(big.Int).SetBytes(nextPrivCompressed),
 		}
 		data := "String to sign."
-		r, s, err := ecdsa.Sign(rand.Reader, privkeyUncompressed, []byte(data))
+		sig, err := privkeyUncompressed.Sign([]byte(data))
 		if err != nil {
 			t.Errorf("%s: Unable to sign data with next private key (chained from uncompressed pubkey): %v",
 				test.name, err)
 			return
 		}
-		ok := ecdsa.Verify(&privkeyUncompressed.PublicKey, []byte(data), r, s)
+		ok := sig.Verify([]byte(data), privkeyUncompressed.PubKey())
 		if !ok {
-			t.Errorf("%s: ecdsa verification failed for next keypair (chained from uncompressed pubkey).",
+			t.Errorf("%s: btcec signature verification failed for next keypair (chained from uncompressed pubkey).",
 				test.name)
 			return
 		}
-		r, s, err = ecdsa.Sign(rand.Reader, privkeyCompressed, []byte(data))
+		sig, err = privkeyCompressed.Sign([]byte(data))
 		if err != nil {
 			t.Errorf("%s: Unable to sign data with next private key (chained from compressed pubkey): %v",
 				test.name, err)
 			return
 		}
-		ok = ecdsa.Verify(&privkeyCompressed.PublicKey, []byte(data), r, s)
+		ok = sig.Verify([]byte(data), privkeyCompressed.PubKey())
 		if !ok {
-			t.Errorf("%s: ecdsa verification failed for next keypair (chained from compressed pubkey).",
+			t.Errorf("%s: btcec signature verification failed for next keypair (chained from compressed pubkey).",
 				test.name)
 			return
 		}
@@ -440,15 +439,15 @@ func TestWalletPubkeyChaining(t *testing.T) {
 
 	// Sign some data with the private key, then verify signature with the pubkey.
 	hash := []byte("hash to sign")
-	r, s, err := ecdsa.Sign(rand.Reader, key1, hash)
+	sig, err := key1.Sign(hash)
 	if err != nil {
 		t.Errorf("Unable to sign hash with the created private key: %v", err)
 		return
 	}
 	pubKey := pkinfo.PubKey()
-	ok := ecdsa.Verify(pubKey.ToECDSA(), hash, r, s)
+	ok := sig.Verify(hash, pubKey)
 	if !ok {
-		t.Errorf("ECDSA verification failed; address's pubkey mismatches the privkey.")
+		t.Errorf("btcec signature verification failed; address's pubkey mismatches the privkey.")
 		return
 	}
 
@@ -470,17 +469,17 @@ func TestWalletPubkeyChaining(t *testing.T) {
 		return
 	}
 
-	// Do an ECDSA signature check here as well, this time for the next
+	// Do a signature check here as well, this time for the next
 	// address after the one made without the private key.
-	r, s, err = ecdsa.Sign(rand.Reader, nextKey, hash)
+	sig, err = nextKey.Sign(hash)
 	if err != nil {
 		t.Errorf("Unable to sign hash with the created private key: %v", err)
 		return
 	}
 	pubKey = nextPkInfo.PubKey()
-	ok = ecdsa.Verify(pubKey.ToECDSA(), hash, r, s)
+	ok = sig.Verify(hash, pubKey)
 	if !ok {
-		t.Errorf("ECDSA verification failed; next address's keypair does not match.")
+		t.Errorf("btcec signature verification failed; next address's keypair does not match.")
 		return
 	}
 
@@ -703,7 +702,7 @@ func TestImportPrivateKey(t *testing.T) {
 		return
 	}
 
-	pk, err := ecdsa.GenerateKey(btcec.S256(), rand.Reader)
+	pk, err := btcec.NewPrivateKey(btcec.S256())
 	if err != nil {
 		t.Error("Error generating private key: " + err.Error())
 		return
