@@ -424,7 +424,7 @@ func (u *unconfirmedStore) txRecordForInserts(tx *btcutil.Tx) *txRecord {
 		r = &txRecord{tx: tx}
 		u.txs[*tx.Sha()] = r
 		for _, input := range r.Tx().MsgTx().TxIn {
-			u.previousOutpoints[input.PreviousOutpoint] = r
+			u.previousOutpoints[input.PreviousOutPoint] = r
 		}
 	}
 	return r
@@ -445,7 +445,7 @@ func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
 	b.txs = append(b.txs, r)
 
 	for _, input := range r.Tx().MsgTx().TxIn {
-		delete(s.unconfirmed.previousOutpoints, input.PreviousOutpoint)
+		delete(s.unconfirmed.previousOutpoints, input.PreviousOutPoint)
 
 		// For all mined transactions with credits spent by this
 		// transaction, remove them from the spentBlockOutPoints map
@@ -453,11 +453,11 @@ func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
 		// transaction which spending that credit), and update the
 		// credit's spent by tracking with the block key of the
 		// newly-mined transaction.
-		prev, ok := s.unconfirmed.spentBlockOutPointKeys[input.PreviousOutpoint]
+		prev, ok := s.unconfirmed.spentBlockOutPointKeys[input.PreviousOutPoint]
 		if !ok {
 			continue
 		}
-		delete(s.unconfirmed.spentBlockOutPointKeys, input.PreviousOutpoint)
+		delete(s.unconfirmed.spentBlockOutPointKeys, input.PreviousOutPoint)
 		delete(s.unconfirmed.spentBlockOutPoints, prev)
 		rr, err := s.lookupBlockTx(prev.BlockTxKey)
 		if err != nil {
@@ -699,7 +699,7 @@ func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]Credit, error) {
 			t := &TxRecord{key, r, s}
 			c := Credit{t, op.Index}
 			creditChans[i] <- createdCredit{credit: c}
-		}(i, txIn.PreviousOutpoint)
+		}(i, txIn.PreviousOutPoint)
 	}
 	spent := make([]Credit, 0, len(inputs))
 	for _, c := range creditChans {
@@ -866,7 +866,7 @@ func (s *Store) Rollback(height int32) error {
 			r.Tx().SetIndex(btcutil.TxIndexUnknown)
 			s.unconfirmed.txs[*r.Tx().Sha()] = r
 			for _, input := range r.Tx().MsgTx().TxIn {
-				op := input.PreviousOutpoint
+				op := input.PreviousOutPoint
 				s.unconfirmed.previousOutpoints[op] = r
 			}
 
@@ -1009,7 +1009,7 @@ func (s *Store) removeDoubleSpends(tx *btcutil.Tx) error {
 
 func (u *unconfirmedStore) findDoubleSpend(tx *btcutil.Tx) *txRecord {
 	for _, input := range tx.MsgTx().TxIn {
-		if r, ok := u.previousOutpoints[input.PreviousOutpoint]; ok {
+		if r, ok := u.previousOutpoints[input.PreviousOutPoint]; ok {
 			return r
 		}
 	}
@@ -1043,14 +1043,14 @@ func (s *Store) removeConflict(r *txRecord) error {
 
 	// If this tx spends any previous credits, set each unspent.
 	for _, input := range r.Tx().MsgTx().TxIn {
-		delete(u.previousOutpoints, input.PreviousOutpoint)
+		delete(u.previousOutpoints, input.PreviousOutPoint)
 
 		// For all mined transactions with credits spent by this
 		// conflicting transaction, remove from the bookkeeping maps
 		// and set each previous record's credit as unspent.
-		prevKey, ok := u.spentBlockOutPointKeys[input.PreviousOutpoint]
+		prevKey, ok := u.spentBlockOutPointKeys[input.PreviousOutPoint]
 		if ok {
-			delete(u.spentBlockOutPointKeys, input.PreviousOutpoint)
+			delete(u.spentBlockOutPointKeys, input.PreviousOutPoint)
 			delete(u.spentBlockOutPoints, prevKey)
 			prev, err := s.lookupBlockTx(prevKey.BlockTxKey)
 			if err != nil {
@@ -1066,14 +1066,14 @@ func (s *Store) removeConflict(r *txRecord) error {
 		//
 		// Spend tracking is only handled by these maps, so there is
 		// no need to modify the record and unset a spent-by pointer.
-		if _, ok := u.spentUnconfirmed[input.PreviousOutpoint]; ok {
-			delete(u.spentUnconfirmed, input.PreviousOutpoint)
+		if _, ok := u.spentUnconfirmed[input.PreviousOutPoint]; ok {
+			delete(u.spentUnconfirmed, input.PreviousOutPoint)
 		}
 	}
 
 	delete(u.txs, *r.Tx().Sha())
 	for _, input := range r.Tx().MsgTx().TxIn {
-		delete(u.previousOutpoints, input.PreviousOutpoint)
+		delete(u.previousOutpoints, input.PreviousOutPoint)
 	}
 
 	return nil

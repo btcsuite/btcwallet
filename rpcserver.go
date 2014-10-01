@@ -2568,7 +2568,7 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 	requested := make(map[btcwire.ShaHash]*pendingTx)
 	for _, txIn := range msgTx.TxIn {
 		// Did we get this txin from the arguments?
-		if _, ok := inputs[txIn.PreviousOutpoint]; ok {
+		if _, ok := inputs[txIn.PreviousOutPoint]; ok {
 			continue
 		}
 
@@ -2577,17 +2577,17 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 		// reference each outpoint once, since anything else is a double
 		// spend. We don't check this ourselves to save having to scan
 		// the array, it will fail later if so).
-		if ptx, ok := requested[txIn.PreviousOutpoint.Hash]; ok {
+		if ptx, ok := requested[txIn.PreviousOutPoint.Hash]; ok {
 			ptx.inputs = append(ptx.inputs,
-				txIn.PreviousOutpoint.Index)
+				txIn.PreviousOutPoint.Index)
 			continue
 		}
 
 		// Never heard of this one before, request it.
-		prevHash := &txIn.PreviousOutpoint.Hash
-		requested[txIn.PreviousOutpoint.Hash] = &pendingTx{
+		prevHash := &txIn.PreviousOutPoint.Hash
+		requested[txIn.PreviousOutPoint.Hash] = &pendingTx{
 			resp:   chainSvr.GetRawTransactionAsync(prevHash),
-			inputs: []uint32{txIn.PreviousOutpoint.Index},
+			inputs: []uint32{txIn.PreviousOutPoint.Index},
 		}
 	}
 
@@ -2672,13 +2672,13 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 	// reply.
 	complete := true
 	for i, txIn := range msgTx.TxIn {
-		input, ok := inputs[txIn.PreviousOutpoint]
+		input, ok := inputs[txIn.PreviousOutPoint]
 		if !ok {
 			// failure to find previous is actually an error since
 			// we failed above if we don't have all the inputs.
 			return nil, fmt.Errorf("%s:%d not found",
-				txIn.PreviousOutpoint.Hash,
-				txIn.PreviousOutpoint.Index)
+				txIn.PreviousOutPoint.Hash,
+				txIn.PreviousOutPoint.Index)
 		}
 
 		// Set up our callbacks that we pass to btcscript so it can

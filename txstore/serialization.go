@@ -1031,7 +1031,7 @@ func (u *unconfirmedStore) ReadFrom(r io.Reader) (int64, error) {
 	// itself.
 	for _, t := range u.txs {
 		for _, input := range t.tx.MsgTx().TxIn {
-			u.previousOutpoints[input.PreviousOutpoint] = t
+			u.previousOutpoints[input.PreviousOutPoint] = t
 		}
 	}
 
