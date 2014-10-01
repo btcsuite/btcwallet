@@ -380,7 +380,7 @@ func loadConfig() (*config, []string, error) {
 		}
 
 		// Perform the initial wallet creation wizard.
-		if err := createWallet(mgrPath, &cfg); err != nil {
+		if err := createWallet(&cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
 			return nil, nil, err
 		}

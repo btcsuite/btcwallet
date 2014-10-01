@@ -21,9 +21,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/conformal/btcec"
+	"github.com/conformal/btcutil"
 	"github.com/conformal/btcutil/hdkeychain"
+	"github.com/conformal/btcwallet/legacy/keystore"
 	"github.com/conformal/btcwallet/waddrmgr"
 )
 
@@ -77,7 +81,7 @@ func promptConsoleListBool(reader *bufio.Reader, prefix string, defaultEntry str
 // promptConsolePass prompts the user for a passphrase with the given prefix.
 // The function will ask the user to confirm the passphrase and will repeat
 // the prompts until they enter a matching response.
-func promptConsolePass(reader *bufio.Reader, prefix string) (string, error) {
+func promptConsolePass(reader *bufio.Reader, prefix string, confirm bool) (string, error) {
 	// Prompt the user until they enter a passphrase.
 	prompt := fmt.Sprintf("%s: ", prefix)
 	for {
@@ -89,6 +93,10 @@ func promptConsolePass(reader *bufio.Reader, prefix string) (string, error) {
 		pass = strings.TrimSpace(pass)
 		if pass == "" {
 			continue
+		}
+
+		if !confirm {
+			return pass, nil
 		}
 
 		fmt.Print("Confirm passphrase: ")
@@ -103,6 +111,47 @@ func promptConsolePass(reader *bufio.Reader, prefix string) (string, error) {
 		}
 
 		return pass, nil
+	}
+}
+
+// promptConsolePrivatePass prompts the user for a private passphrase with
+// varying behavior depending on whether the passed legacy keystore exists.
+// When it does, the user is prompted for the existing passphrase which is then
+// used to unlock it.  On the other hand, when the legacy keystore is nil, the
+// user is prompted for a new private passphrase.  All prompts are repeated
+// until the user enters a valid response.
+func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Store) (string, error) {
+	// When there is not an existing legacy wallet, simply prompt the user
+	// for a new private passphase and return it.
+	if legacyKeyStore == nil {
+		return promptConsolePass(reader, "Enter the private "+
+			"passphrase for your new wallet", true)
+	}
+
+	// At this point, there is an existing legacy wallet, so prompr the user
+	// for the existing private passphrase and ensure it properly unlocks
+	// the legacy wallet so all of the addresses can later be imported.
+	fmt.Println("You have an existing legacy wallet.  All addresses from " +
+		"your existing legacy wallet will be imported into the new " +
+		"wallet format.")
+	for {
+		privPass, err := promptConsolePass(reader, "Enter the private "+
+			"passphrase for your existing wallet", false)
+		if err != nil {
+			return "", err
+		}
+
+		// Keep prompting the user until the passphrase is correct.
+		if err := legacyKeyStore.Unlock([]byte(privPass)); err != nil {
+			if err == keystore.ErrWrongPassphrase {
+				fmt.Println(err)
+				continue
+			}
+
+			return "", err
+		}
+
+		return privPass, nil
 	}
 }
 
@@ -142,7 +191,7 @@ func promptConsolePublicPass(reader *bufio.Reader, privPass string, cfg *config)
 
 	for {
 		pubPass, err = promptConsolePass(reader, "Enter the public "+
-			"passphrase for your new wallet")
+			"passphrase for your new wallet", true)
 		if err != nil {
 			return "", err
 		}
@@ -237,14 +286,85 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 	}
 }
 
+// convertLegacyKeystore converts all of the addresses in the passed legacy
+// key store to the new waddrmgr.Manager format.  Both the legacy keystore and
+// the new manager must be unlocked.
+func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Manager) error {
+	netParams := legacyKeyStore.Net()
+	blockStamp := waddrmgr.BlockStamp{
+		Height: 0,
+		Hash:   *netParams.GenesisHash,
+	}
+	for _, walletAddr := range legacyKeyStore.ActiveAddresses() {
+		switch addr := walletAddr.(type) {
+		case keystore.PubKeyAddress:
+			privKey, err := addr.PrivKey()
+			if err != nil {
+				fmt.Printf("WARN: Failed to obtain private key "+
+					"for address %v: %v\n", addr.Address(),
+					err)
+				continue
+			}
+
+			wif, err := btcutil.NewWIF((*btcec.PrivateKey)(privKey),
+				netParams, addr.Compressed())
+			if err != nil {
+				fmt.Printf("WARN: Failed to create wallet "+
+					"import format for address %v: %v\n",
+					addr.Address(), err)
+				continue
+			}
+
+			_, err = manager.ImportPrivateKey(wif, &blockStamp)
+			if err != nil {
+				fmt.Printf("WARN: Failed to import private "+
+					"key for address %v: %v\n",
+					addr.Address(), err)
+				continue
+			}
+
+		case keystore.ScriptAddress:
+			_, err := manager.ImportScript(addr.Script(), &blockStamp)
+			if err != nil {
+				fmt.Printf("WARN: Failed to import "+
+					"pay-to-script-hash script for "+
+					"address %v: %v\n", addr.Address(), err)
+				continue
+			}
+
+		default:
+			fmt.Printf("WARN: Skipping unrecognized legacy "+
+				"keystore type: %T", addr)
+			continue
+		}
+	}
+
+	return nil
+}
+
 // createWallet prompts the user for information needed to generate a new wallet
 // and generates the wallet accordingly.  The new wallet will reside at the
 // provided path.
-func createWallet(mgrPath string, cfg *config) error {
-	// Start by prompting for the private passphrase.
+func createWallet(cfg *config) error {
+	// When there is a legacy keystore, open it now to ensure any errors
+	// don't end up exiting the process after the user has spent time
+	// entering a bunch of information.
+	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	keystorePath := filepath.Join(netDir, keystore.Filename)
+	var legacyKeyStore *keystore.Store
+	if fileExists(keystorePath) {
+		var err error
+		legacyKeyStore, err = keystore.OpenDir(netDir)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Start by prompting for the private passphrase.  When there is an
+	// existing keystore, the user will be promped for that passphrase,
+	// otherwise they will be prompted for a new one.
 	reader := bufio.NewReader(os.Stdin)
-	privPass, err := promptConsolePass(reader, "Enter the private passphrase "+
-		"for your new wallet")
+	privPass, err := promptConsolePrivatePass(reader, legacyKeyStore)
 	if err != nil {
 		return err
 	}
@@ -266,13 +386,36 @@ func createWallet(mgrPath string, cfg *config) error {
 	}
 
 	// Create the wallet.
+	mgrPath := filepath.Join(netDir, addrMgrName)
 	fmt.Println("Creating the wallet...")
-	wallet, err := waddrmgr.Create(mgrPath, seed, []byte(pubPass),
+	manager, err := waddrmgr.Create(mgrPath, seed, []byte(pubPass),
 		[]byte(privPass), activeNet.Params, nil)
 	if err != nil {
 		return err
 	}
-	wallet.Close()
+
+	// Import the addresses in the legacy keystore to the new wallet if
+	// any exist.
+	if legacyKeyStore != nil {
+		fmt.Println("Importing addresses from existing wallet...")
+		if err := manager.Unlock([]byte(privPass)); err != nil {
+			return err
+		}
+		if err := convertLegacyKeystore(legacyKeyStore, manager); err != nil {
+			return err
+		}
+
+		legacyKeyStore.Lock()
+		legacyKeyStore = nil
+
+		// Remove the legacy key store.
+		if err := os.Remove(keystorePath); err != nil {
+			fmt.Printf("WARN: Failed to remove legacy wallet "+
+				"from'%s'\n", keystorePath)
+		}
+	}
+
+	manager.Close()
 	fmt.Println("The wallet has been created successfully.")
 	return nil
 }
