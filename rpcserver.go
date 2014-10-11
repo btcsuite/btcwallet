@@ -2747,7 +2747,7 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 			btcscript.SigHashSingle || i < len(msgTx.TxOut) {
 
 			script, err := btcscript.SignTxOutput(activeNet.Params,
-				msgTx, i, input, byte(hashType), getKey,
+				msgTx, i, input, hashType, getKey,
 				getScript, txIn.SignatureScript)
 			// Failure to sign isn't an error, it just means that
 			// the tx isn't complete.
