@@ -1348,6 +1348,7 @@ var rpcHandlers = map[string]requestHandler{
 	"keypoolrefill":          KeypoolRefill,
 	"listaccounts":           ListAccounts,
 	"listlockunspent":        ListLockUnspent,
+	"listreceivedbyaccount":  ListReceivedByAccount,
 	"listreceivedbyaddress":  ListReceivedByAddress,
 	"listsinceblock":         ListSinceBlock,
 	"listtransactions":       ListTransactions,
@@ -1366,14 +1367,13 @@ var rpcHandlers = map[string]requestHandler{
 	"walletpassphrasechange": WalletPassphraseChange,
 
 	// Reference implementation methods (still unimplemented)
-	"backupwallet":          Unimplemented,
-	"dumpwallet":            Unimplemented,
-	"getwalletinfo":         Unimplemented,
-	"importwallet":          Unimplemented,
-	"listaddressgroupings":  Unimplemented,
-	"listreceivedbyaccount": Unimplemented,
-	"move":                  Unimplemented,
-	"setaccount":            Unimplemented,
+	"backupwallet":         Unimplemented,
+	"dumpwallet":           Unimplemented,
+	"getwalletinfo":        Unimplemented,
+	"importwallet":         Unimplemented,
+	"listaddressgroupings": Unimplemented,
+	"move":                 Unimplemented,
+	"setaccount":           Unimplemented,
 
 	// Reference methods which can't be implemented by btcwallet due to
 	// design decision differences
@@ -2021,6 +2021,53 @@ func ListAccounts(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interfac
 // all locked outpoints.
 func ListLockUnspent(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	return w.LockedOutpoints(), nil
+}
+
+// ListReceivedByAccount handles a listreceivedbyaccount request by returning
+// a slice of objects, each one containing:
+//  "account": the receiving account;
+//  "amount": total amount received by the account;
+//  "confirmations": number of confirmations of the most recent transaction.
+// It takes two parameters:
+//  "minconf": minimum number of confirmations to consider a transaction -
+//             default: one;
+//  "includeempty": whether or not to include addresses that have no transactions -
+//                  default: false.
+// Since btcwallet doesn't implement account support yet, only the default account ""
+// will be returned
+func ListReceivedByAccount(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
+	cmd := icmd.(*btcjson.ListReceivedByAccountCmd)
+
+	bs, err := w.SyncedChainTip()
+	if err != nil {
+		return nil, err
+	}
+
+	// Total amount received.
+	var amount btcutil.Amount
+
+	// Number of confirmations of the last transaction.
+	var confirmations int32
+
+	for _, record := range w.TxStore.Records() {
+		for _, credit := range record.Credits() {
+			if !credit.Confirmed(cmd.MinConf, bs.Height) {
+				// Not enough confirmations, skip the current block.
+				continue
+			}
+			amount += credit.Amount()
+			confirmations = credit.Confirmations(bs.Height)
+		}
+	}
+
+	ret := []btcjson.ListReceivedByAccountResult{
+		{
+			Account:       "",
+			Amount:        amount.ToUnit(btcutil.AmountBTC),
+			Confirmations: uint64(confirmations),
+		},
+	}
+	return ret, nil
 }
 
 // ListReceivedByAddress handles a listreceivedbyaddress request by returning
