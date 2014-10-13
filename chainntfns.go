@@ -20,7 +20,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/keystore"
+	"github.com/btcsuite/btcwallet/legacy/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
 )
 

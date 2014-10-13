@@ -31,7 +31,7 @@ import (
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/keystore"
+	"github.com/btcsuite/btcwallet/legacy/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwire"
 )
