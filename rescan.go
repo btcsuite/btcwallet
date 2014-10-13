@@ -20,7 +20,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/keystore"
+	"github.com/btcsuite/btcwallet/legacy/keystore"
 )
 
 // RescanProgressMsg reports the current progress made by a rescan for a
