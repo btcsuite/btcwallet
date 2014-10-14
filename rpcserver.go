@@ -1372,12 +1372,12 @@ var rpcHandlers = map[string]requestHandler{
 	"getwalletinfo":        Unimplemented,
 	"importwallet":         Unimplemented,
 	"listaddressgroupings": Unimplemented,
-	"move":                 Unimplemented,
-	"setaccount":           Unimplemented,
 
 	// Reference methods which can't be implemented by btcwallet due to
 	// design decision differences
 	"encryptwallet": Unsupported,
+	"move":          Unsupported,
+	"setaccount":    Unsupported,
 
 	// Extensions to the reference client JSON-RPC API
 	"exportwatchingwallet": ExportWatchingWallet,
