@@ -82,10 +82,6 @@ func walletMain() error {
 	// Shutdown the server if an interrupt signal is received.
 	addInterruptHandler(server.Stop)
 
-	// Create a channel to report unrecoverable errors during chain
-	// server connection
-	chainSvrErrors := make(chan error)
-
 	// Create channel so that the goroutine which opens the chain server
 	// connection can pass the conn to the goroutine which opens the wallet.
 	// Buffer the channel so sends are not blocked, since if the wallet is
@@ -93,22 +89,18 @@ func walletMain() error {
 	chainSvrChan := make(chan *chain.Client, 1)
 
 	go func() {
-		defer close(chainSvrErrors)
-
 		// Read CA certs and create the RPC client.
 		certs, err := ioutil.ReadFile(cfg.CAFile)
 		if err != nil {
-			log.Errorf("Cannot open CA file: %v", err)
-			close(chainSvrChan)
-			chainSvrErrors <- err
-			return
+			log.Warnf("Cannot open CA file: %v", err)
+			// If there's an error reading the CA file, continue
+			// with nil certs and without the client connection
+			certs = nil
 		}
 		rpcc, err := chain.NewClient(activeNet.Params, cfg.RPCConnect,
 			cfg.BtcdUsername, cfg.BtcdPassword, certs)
 		if err != nil {
 			log.Errorf("Cannot create chain server RPC client: %v", err)
-			close(chainSvrChan)
-			chainSvrErrors <- err
 			return
 		}
 		err = rpcc.Start()
@@ -154,29 +146,16 @@ func walletMain() error {
 
 		// Start wallet goroutines and handle RPC client notifications
 		// if the chain server connection was opened.
-		// If the chain server connection failed due to an unrecoverable error,
-		// doesn't matter that the wallet goroutines are not started since the
-		// entire program will exit on receiving chainSvrErrors
 		select {
-		case chainSvr, ok := <-chainSvrChan:
-			if ok {
-				// Start wallet goroutines only when the chain rpc client was created
-				w.Start(chainSvr)
-			}
+		case chainSvr := <-chainSvrChan:
+			w.Start(chainSvr)
 		case <-server.quit:
 		}
 	}()
 
-	// Check for unrecoverable errors during chain server connection, and return
-	// the error, if any.
-	err, ok := <-chainSvrErrors
-	if ok {
-		return err
-	}
-
 	// Check for unrecoverable errors during the wallet startup, and return
 	// the error, if any.
-	err, ok = <-walletOpenErrors
+	err, ok := <-walletOpenErrors
 	if ok {
 		return err
 	}
