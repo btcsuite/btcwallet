@@ -18,11 +18,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"code.google.com/p/go.crypto/ssh/terminal"
 
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcutil"
@@ -83,17 +86,18 @@ func promptConsoleListBool(reader *bufio.Reader, prefix string, defaultEntry str
 // promptConsolePass prompts the user for a passphrase with the given prefix.
 // The function will ask the user to confirm the passphrase and will repeat
 // the prompts until they enter a matching response.
-func promptConsolePass(reader *bufio.Reader, prefix string, confirm bool) (string, error) {
+func promptConsolePass(reader *bufio.Reader, prefix string, confirm bool) ([]byte, error) {
 	// Prompt the user until they enter a passphrase.
 	prompt := fmt.Sprintf("%s: ", prefix)
 	for {
 		fmt.Print(prompt)
-		pass, err := reader.ReadString('\n')
+		pass, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		pass = strings.TrimSpace(pass)
-		if pass == "" {
+		fmt.Print("\n")
+		pass = bytes.TrimSpace(pass)
+		if len(pass) == 0 {
 			continue
 		}
 
@@ -102,12 +106,13 @@ func promptConsolePass(reader *bufio.Reader, prefix string, confirm bool) (strin
 		}
 
 		fmt.Print("Confirm passphrase: ")
-		confirm, err := reader.ReadString('\n')
+		confirm, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		confirm = strings.TrimSpace(confirm)
-		if pass != confirm {
+		fmt.Print("\n")
+		confirm = bytes.TrimSpace(confirm)
+		if !bytes.Equal(pass, confirm) {
 			fmt.Println("The entered passphrases do not match")
 			continue
 		}
@@ -122,7 +127,7 @@ func promptConsolePass(reader *bufio.Reader, prefix string, confirm bool) (strin
 // used to unlock it.  On the other hand, when the legacy keystore is nil, the
 // user is prompted for a new private passphrase.  All prompts are repeated
 // until the user enters a valid response.
-func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Store) (string, error) {
+func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Store) ([]byte, error) {
 	// When there is not an existing legacy wallet, simply prompt the user
 	// for a new private passphase and return it.
 	if legacyKeyStore == nil {
@@ -140,7 +145,7 @@ func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Sto
 		privPass, err := promptConsolePass(reader, "Enter the private "+
 			"passphrase for your existing wallet", false)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
 		// Keep prompting the user until the passphrase is correct.
@@ -150,7 +155,7 @@ func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Sto
 				continue
 			}
 
-			return "", err
+			return nil, err
 		}
 
 		return privPass, nil
@@ -165,29 +170,30 @@ func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Sto
 // and prompt the user if they are sure they want to use the same passphrase for
 // both.  Finally, all prompts are repeated until the user enters a valid
 // response.
-func promptConsolePublicPass(reader *bufio.Reader, privPass string, cfg *config) (string, error) {
-	pubPass := defaultPubPassphrase
+func promptConsolePublicPass(reader *bufio.Reader, privPass []byte, cfg *config) ([]byte, error) {
+	pubPass := []byte(defaultPubPassphrase)
 	usePubPass, err := promptConsoleListBool(reader, "Do you want "+
 		"to add an additional layer of encryption for public "+
 		"data?", "no")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	if !usePubPass {
 		return pubPass, nil
 	}
 
-	if cfg.WalletPass != pubPass {
+	walletPass := []byte(cfg.WalletPass)
+	if !bytes.Equal(walletPass, pubPass) {
 		useExisting, err := promptConsoleListBool(reader, "Use the "+
 			"existing configured public passphrase for encryption "+
 			"of public data?", "no")
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
 		if useExisting {
-			return cfg.WalletPass, nil
+			return walletPass, nil
 		}
 	}
 
@@ -195,15 +201,15 @@ func promptConsolePublicPass(reader *bufio.Reader, privPass string, cfg *config)
 		pubPass, err = promptConsolePass(reader, "Enter the public "+
 			"passphrase for your new wallet", true)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
-		if pubPass == privPass {
+		if bytes.Equal(pubPass, privPass) {
 			useSamePass, err := promptConsoleListBool(reader,
 				"Are you sure want to use the same passphrase "+
 					"for public and private data?", "no")
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 
 			if useSamePass {
