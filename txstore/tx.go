@@ -723,16 +723,12 @@ func (s *Store) markOutputsSpent(spent []Credit, t *TxRecord) (btcutil.Amount, e
 		op := prev.outPoint()
 		switch prev.BlockHeight {
 		case -1: // unconfirmed
-			op := prev.outPoint()
-			switch prev.BlockHeight {
-			case -1: // unconfirmed
-				t.s.unconfirmed.spentUnconfirmed[*op] = t.txRecord
-			default:
-				key := prev.outputKey()
-				t.s.unconfirmed.spentBlockOutPointKeys[*op] = key
-				t.s.unconfirmed.spentBlockOutPoints[key] = t.txRecord
+			if t.BlockHeight != -1 {
+				// a confirmed tx cannot spend a previous output from an unconfirmed tx
+				return 0, ErrInconsistentStore
 			}
-
+			op := prev.outPoint()
+			s.unconfirmed.spentUnconfirmed[*op] = t.txRecord
 		default:
 			// Update spent info.
 			credit := prev.txRecord.credits[prev.OutputIndex]
@@ -1104,6 +1100,14 @@ func (s *Store) unspentOutputs() ([]Credit, error) {
 				creditChans[i] <- createdCredit{err: err}
 				return
 			}
+
+			opKey := BlockOutputKey{key, opIndex}
+			_, spent := s.unconfirmed.spentBlockOutPoints[opKey]
+			if spent {
+				close(creditChans[i])
+				return
+			}
+
 			t := &TxRecord{key, r, s}
 			c := Credit{t, opIndex}
 			creditChans[i] <- createdCredit{credit: c}
@@ -1111,13 +1115,16 @@ func (s *Store) unspentOutputs() ([]Credit, error) {
 		i++
 	}
 
-	unspent := make([]Credit, len(s.unspent))
-	for i, c := range creditChans {
-		cc := <-c
+	unspent := make([]Credit, 0, len(s.unspent))
+	for _, c := range creditChans {
+		cc, ok := <-c
+		if !ok {
+			continue
+		}
 		if cc.err != nil {
 			return nil, cc.err
 		}
-		unspent[i] = cc.credit
+		unspent = append(unspent, cc.credit)
 	}
 
 	for _, r := range s.unconfirmed.txs {
@@ -1128,7 +1135,11 @@ func (s *Store) unspentOutputs() ([]Credit, error) {
 			key := BlockTxKey{BlockHeight: -1}
 			txRecord := &TxRecord{key, r, s}
 			c := Credit{txRecord, uint32(outputIndex)}
-			unspent = append(unspent, c)
+			op := c.outPoint()
+			_, spent := s.unconfirmed.spentUnconfirmed[*op]
+			if !spent {
+				unspent = append(unspent, c)
+			}
 		}
 	}
 
