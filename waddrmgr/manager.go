@@ -174,6 +174,17 @@ func defaultNewCryptoKey() (EncryptorDecryptor, error) {
 	return &cryptoKey{*key}, nil
 }
 
+// CryptoKeyType is used to differentiate between different kinds of
+// crypto keys.
+type CryptoKeyType byte
+
+// Crypto key types.
+const (
+	CKTPrivate CryptoKeyType = iota
+	CKTScript
+	CKTPublic
+)
+
 // newCryptoKey is used as a way to replace the new crypto key generation
 // function used so tests can provide a version that fails for testing error
 // paths.
@@ -1452,6 +1463,71 @@ func (m *Manager) AllActiveAddresses() ([]btcutil.Address, error) {
 	}
 
 	return addrs, nil
+}
+
+// Encrypt in using the crypto key type specified by keyType.
+func (m *Manager) Encrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
+	// Encryption must be performed under the manager mutex since the
+	// keys are cleared when the manager is locked.
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	cryptoKey, err := m.selectCryptoKey(keyType)
+	if err != nil {
+		return nil, err
+	}
+
+	encrypted, err := cryptoKey.Encrypt(in)
+	if err != nil {
+		return nil, managerError(ErrCrypto, "failed to encrypt", err)
+	}
+	return encrypted, nil
+}
+
+// Decrypt in using the crypto key type specified by keyType.
+func (m *Manager) Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
+	// Decryption must be performed under the manager mutex since the
+	// keys are cleared when the manager is locked.
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	cryptoKey, err := m.selectCryptoKey(keyType)
+	if err != nil {
+		return nil, err
+	}
+
+	decrypted, err := cryptoKey.Decrypt(in)
+	if err != nil {
+		return nil, managerError(ErrCrypto, "failed to decrypt", err)
+	}
+	return decrypted, nil
+}
+
+// selectCryptoKey selects the appropriate crypto key based on the
+// keyType. If the keyType is invalid or the key requested requires
+// the manager to be unlocked, an error is returned.
+func (m *Manager) selectCryptoKey(keyType CryptoKeyType) (EncryptorDecryptor, error) {
+	if keyType == CKTPrivate || keyType == CKTScript {
+		// The manager must be unlocked to encrypt with the private keys.
+		if m.locked || m.watchingOnly {
+			return nil, managerError(ErrLocked, errLocked, nil)
+		}
+	}
+
+	var cryptoKey EncryptorDecryptor
+	switch keyType {
+	case CKTPrivate:
+		cryptoKey = m.cryptoKeyPriv
+	case CKTScript:
+		cryptoKey = m.cryptoKeyScript
+	case CKTPublic:
+		cryptoKey = m.cryptoKeyPub
+	default:
+		return nil, managerError(ErrInvalidKeyType, "invalid key type",
+			nil)
+	}
+
+	return cryptoKey, nil
 }
 
 // newManager returns a new locked address manager with the given parameters.

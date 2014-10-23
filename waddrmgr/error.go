@@ -70,6 +70,10 @@ const (
 	// error.
 	ErrCrypto
 
+	// ErrInvalidKeyType indicates an error where an invalid crypto
+	// key type has been selected.
+	ErrInvalidKeyType
+
 	// ErrNoExist indicates the specified database does not exist.
 	ErrNoExist
 
