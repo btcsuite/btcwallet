@@ -83,6 +83,12 @@ func testNamePrefix(tc *testContext) string {
 	return prefix + fmt.Sprintf("account #%d", tc.account)
 }
 
+var fastScrypt = &waddrmgr.Options{
+	ScryptN: 16,
+	ScryptR: 8,
+	ScryptP: 1,
+}
+
 // testManagedPubKeyAddress ensures the data returned by all exported functions
 // provided by the passed managed p ublic key address matches the corresponding
 // fields in the provided expected address.
@@ -1018,12 +1024,14 @@ func testChangePassphrase(tc *testContext) bool {
 	// generate a new secret key by replacing the generation function one
 	// that intentionally errors.
 	testName := "ChangePassphrase (public) with invalid new secret key"
-	waddrmgr.TstReplaceNewSecretKeyFunc()
-	err := tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false)
+
+	var err error
+	waddrmgr.TstRunWithReplacedNewSecretKey(func() {
+		err = tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false)
+	})
 	if !checkManagerError(tc.t, testName, err, waddrmgr.ErrCrypto) {
 		return false
 	}
-	waddrmgr.TstResetNewSecretKeyFunc()
 
 	// Attempt to change public passphrase with invalid old passphrase.
 	testName = "ChangePassphrase (public) with invalid old passphrase"
@@ -1159,7 +1167,7 @@ func testExportWatchingOnly(tc *testContext) bool {
 	mgr.Close()
 
 	// Open the watching-only manager and run all the tests again.
-	mgr, err = waddrmgr.Open(woMgrName, pubPassphrase, &btcnet.MainNetParams)
+	mgr, err = waddrmgr.Open(woMgrName, pubPassphrase, &btcnet.MainNetParams, fastScrypt)
 	if err != nil {
 		tc.t.Errorf("Open Watching-Only: unexpected error: %v", err)
 		return false
@@ -1431,14 +1439,15 @@ func TestManager(t *testing.T) {
 	// returned.
 	mgrName := "mgrtest.bin"
 	_ = os.Remove(mgrName)
-	_, err := waddrmgr.Open(mgrName, pubPassphrase, &btcnet.MainNetParams)
+	_, err := waddrmgr.Open(mgrName, pubPassphrase, &btcnet.MainNetParams,
+		fastScrypt)
 	if !checkManagerError(t, "Open non-existant", err, waddrmgr.ErrNoExist) {
 		return
 	}
 
 	// Create a new manager.
 	mgr, err := waddrmgr.Create(mgrName, seed, pubPassphrase, privPassphrase,
-		&btcnet.MainNetParams)
+		&btcnet.MainNetParams, fastScrypt)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
 		return
@@ -1450,7 +1459,7 @@ func TestManager(t *testing.T) {
 	// Attempt to create the manager again to ensure the expected error is
 	// returned.
 	_, err = waddrmgr.Create(mgrName, seed, pubPassphrase, privPassphrase,
-		&btcnet.MainNetParams)
+		&btcnet.MainNetParams, fastScrypt)
 	if !checkManagerError(t, "Create existing", err, waddrmgr.ErrAlreadyExists) {
 		mgr.Close()
 		return
@@ -1469,7 +1478,8 @@ func TestManager(t *testing.T) {
 
 	// Open the manager and run all the tests again in open mode which
 	// avoids reinserting new addresses like the create mode tests do.
-	mgr, err = waddrmgr.Open(mgrName, pubPassphrase, &btcnet.MainNetParams)
+	mgr, err = waddrmgr.Open(mgrName, pubPassphrase, &btcnet.MainNetParams,
+		fastScrypt)
 	if err != nil {
 		t.Errorf("Open: unexpected error: %v", err)
 		return
