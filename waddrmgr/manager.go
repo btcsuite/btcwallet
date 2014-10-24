@@ -76,14 +76,6 @@ const (
 	internalBranch uint32 = 1
 )
 
-var (
-	// scryptN, scryptR, and scryptP are the parameters used for scrypt
-	// password-based key derivation.
-	scryptN = 262144 // 2^18
-	scryptR = 8
-	scryptP = 1
-)
-
 // addrKey is used to uniquely identify an address even when those addresses
 // would end up being the same bitcoin address (as is the case for pay-to-pubkey
 // and pay-to-pubkey-hash style of addresses).
@@ -123,8 +115,9 @@ type unlockDeriveInfo struct {
 }
 
 // defaultNewSecretKey returns a new secret key.  See newSecretKey.
-func defaultNewSecretKey(passphrase *[]byte) (*snacl.SecretKey, error) {
-	return snacl.NewSecretKey(passphrase, scryptN, scryptR, scryptP)
+func defaultNewSecretKey(passphrase *[]byte, config *Options) (*snacl.SecretKey, error) {
+	return snacl.NewSecretKey(passphrase, config.ScryptN, config.ScryptR,
+		config.ScryptP)
 }
 
 // newSecretKey is used as a way to replace the new secret key generation
@@ -225,6 +218,9 @@ type Manager struct {
 	// the private extended key (hence nor the underlying private key) in
 	// order to encrypt it.
 	deriveOnUnlock []*unlockDeriveInfo
+
+	// config holds overridable options, such as scrypt parameters.
+	config *Options
 }
 
 // lock performs a best try effort to remove and zero all secret keys associated
@@ -650,7 +646,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 
 	// Generate a new master key from the passphrase which is used to secure
 	// the actual secret keys.
-	newMasterKey, err := newSecretKey(&newPassphrase)
+	newMasterKey, err := newSecretKey(&newPassphrase, m.config)
 	if err != nil {
 		str := "failed to create new master private key"
 		return managerError(ErrCrypto, str, err)
@@ -788,7 +784,7 @@ func (m *Manager) ExportWatchingOnly(newDbPath string, pubPassphrase []byte) (*M
 		return nil, err
 	}
 
-	return loadManager(watchingDb, pubPassphrase, m.net)
+	return loadManager(watchingDb, pubPassphrase, m.net, m.config)
 }
 
 // Export writes the manager database to the provided writer.
@@ -1447,7 +1443,7 @@ func (m *Manager) AllActiveAddresses() ([]btcutil.Address, error) {
 func newManager(db *managerDB, net *btcnet.Params, masterKeyPub *snacl.SecretKey,
 	masterKeyPriv *snacl.SecretKey, cryptoKeyPub EncryptorDecryptor,
 	cryptoKeyPrivEncrypted, cryptoKeyScriptEncrypted []byte,
-	syncInfo *syncState) *Manager {
+	syncInfo *syncState, config *Options) *Manager {
 
 	return &Manager{
 		db:                       db,
@@ -1463,6 +1459,7 @@ func newManager(db *managerDB, net *btcnet.Params, masterKeyPub *snacl.SecretKey
 		cryptoKeyPriv:            &cryptoKey{},
 		cryptoKeyScriptEncrypted: cryptoKeyScriptEncrypted,
 		cryptoKeyScript:          &cryptoKey{},
+		config:                   config,
 	}
 }
 
@@ -1543,7 +1540,7 @@ func checkBranchKeys(acctKey *hdkeychain.ExtendedKey) error {
 // loadManager returns a new address manager that results from loading it from
 // the passed opened database.  The public passphrase is required to decrypt the
 // public keys.
-func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params) (*Manager, error) {
+func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
 	// Perform all database lookups in a read-only view.
 	var watchingOnly bool
 	var masterKeyPubParams, masterKeyPrivParams []byte
@@ -1630,7 +1627,7 @@ func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params) (*Mana
 	// the defaults for the additional fields which are not specified in the
 	// call to new with the values loaded from the database.
 	mgr := newManager(db, net, &masterKeyPub, &masterKeyPriv, cryptoKeyPub,
-		cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo)
+		cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo, config)
 	mgr.watchingOnly = watchingOnly
 	return mgr, nil
 }
@@ -1640,9 +1637,12 @@ func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params) (*Mana
 // public information such as addresses.  This is important since access to
 // BIP0032 extended keys means it is possible to generate all future addresses.
 //
+// If a config structure is passed to the function, that configuration
+// will override the defaults.
+//
 // A ManagerError with an error code of ErrNoExist will be returned if the
 // passed database does not exist.
-func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params) (*Manager, error) {
+func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
 	// Return an error if the specified database does not exist.
 	if !fileExists(dbPath) {
 		str := "the specified address manager does not exist"
@@ -1654,7 +1654,27 @@ func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params) (*Manager, er
 		return nil, err
 	}
 
-	return loadManager(db, pubPassphrase, net)
+	if config == nil {
+		config = defaultConfig
+	}
+
+	return loadManager(db, pubPassphrase, net, config)
+}
+
+// Options is used to hold the optional parameters passed to Create or
+// Load.
+type Options struct {
+	ScryptN int
+	ScryptR int
+	ScryptP int
+}
+
+// defaultConfig is an instance of the Options struct initialized with
+// default configuration options.
+var defaultConfig = &Options{
+	ScryptN: 262144, // 2^18
+	ScryptR: 8,
+	ScryptP: 1,
 }
 
 // Create returns a new locked address manager at the given database path.  The
@@ -1669,9 +1689,12 @@ func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params) (*Manager, er
 // private passphrase is required to unlock the address manager in order to gain
 // access to any private keys and information.
 //
+// If a config structure is passed to the function, that configuration
+// will override the defaults.
+//
 // A ManagerError with an error code of ErrAlreadyExists will be returned if the
 // passed database already exists.
-func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcnet.Params) (*Manager, error) {
+func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
 	// Return an error if the specified database already exists.
 	if fileExists(dbPath) {
 		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
@@ -1680,6 +1703,10 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 	db, err := openOrCreateDB(dbPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if config == nil {
+		config = defaultConfig
 	}
 
 	// Generate the BIP0044 HD key structure to ensure the provided seed
@@ -1729,12 +1756,12 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 
 	// Generate new master keys.  These master keys are used to protect the
 	// crypto keys that will be generated next.
-	masterKeyPub, err := newSecretKey(&pubPassphrase)
+	masterKeyPub, err := newSecretKey(&pubPassphrase, config)
 	if err != nil {
 		str := "failed to master public key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-	masterKeyPriv, err := newSecretKey(&privPassphrase)
+	masterKeyPriv, err := newSecretKey(&privPassphrase, config)
 	if err != nil {
 		str := "failed to master private key"
 		return nil, managerError(ErrCrypto, str, err)
@@ -1856,5 +1883,5 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 	cryptoKeyPriv.Zero()
 	cryptoKeyScript.Zero()
 	return newManager(db, net, masterKeyPub, masterKeyPriv, cryptoKeyPub,
-		cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo), nil
+		cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo, config), nil
 }
