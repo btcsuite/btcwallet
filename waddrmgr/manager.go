@@ -76,14 +76,6 @@ const (
 	internalBranch uint32 = 1
 )
 
-var (
-	// scryptN, scryptR, and scryptP are the parameters used for scrypt
-	// password-based key derivation.
-	scryptN = 262144 // 2^18
-	scryptR = 8
-	scryptP = 1
-)
-
 // addrKey is used to uniquely identify an address even when those addresses
 // would end up being the same bitcoin address (as is the case for pay-to-pubkey
 // and pay-to-pubkey-hash style of addresses).
@@ -122,15 +114,18 @@ type unlockDeriveInfo struct {
 	index       uint32
 }
 
-// defaultNewSecretKey returns a new secret key.  See newSecretKey.
-func defaultNewSecretKey(passphrase *[]byte) (*snacl.SecretKey, error) {
-	return snacl.NewSecretKey(passphrase, scryptN, scryptR, scryptP)
+// genDefaultNewSecretKey returns a function that can create a new
+// secret key from a passphrase. See newSecretKey.
+func genDefaultNewSecretKey(scryptN, scryptR, scryptP int) func(passphrase *[]byte) (*snacl.SecretKey, error) {
+	return func(passphrase *[]byte) (*snacl.SecretKey, error) {
+		return snacl.NewSecretKey(passphrase, scryptN, scryptR, scryptP)
+	}
 }
 
 // newSecretKey is used as a way to replace the new secret key generation
 // function used so tests can provide a version that fails for testing error
 // paths.
-var newSecretKey = defaultNewSecretKey
+var newSecretKey func(passphrase *[]byte) (*snacl.SecretKey, error)
 
 // EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that our
 // tests can use dependency injection to force the behaviour they need.
@@ -1657,6 +1652,24 @@ func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params) (*Manager, er
 	return loadManager(db, pubPassphrase, net)
 }
 
+// options is a helper structure used to hold the optional parameters
+// in passed to the Create call.
+type options struct {
+	scryptN int
+	scryptR int
+	scryptP int
+}
+
+// Scrypt sets the scrypt parameters for the manager.
+func Scrypt(n, r, p int) func(*options) error {
+	return func(o *options) error {
+		o.scryptN = n
+		o.scryptR = r
+		o.scryptP = p
+		return nil
+	}
+}
+
 // Create returns a new locked address manager at the given database path.  The
 // seed must conform to the standards described in hdkeychain.NewMaster and will
 // be used to create the master root node from which all hierarchical
@@ -1669,9 +1682,13 @@ func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params) (*Manager, er
 // private passphrase is required to unlock the address manager in order to gain
 // access to any private keys and information.
 //
+// Create supports one optional configuration parameter for overriding
+// the scrypt parameters. Use Scrypt(n, r, p) function to generate the
+// parameter.
+//
 // A ManagerError with an error code of ErrAlreadyExists will be returned if the
 // passed database already exists.
-func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcnet.Params) (*Manager, error) {
+func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcnet.Params, config ...func(*options) error) (*Manager, error) {
 	// Return an error if the specified database already exists.
 	if fileExists(dbPath) {
 		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
@@ -1681,6 +1698,19 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 	if err != nil {
 		return nil, err
 	}
+
+	// Set default scrypt parameters and then overwrite if we were
+	// passed optional parameters
+	opts := &options{
+		scryptN: 262144, // 2^18
+		scryptR: 8,
+		scryptP: 1,
+	}
+	for _, f := range config {
+		f(opts)
+	}
+
+	newSecretKey = genDefaultNewSecretKey(opts.scryptN, opts.scryptR, opts.scryptP)
 
 	// Generate the BIP0044 HD key structure to ensure the provided seed
 	// can generate the required structure with no issues.

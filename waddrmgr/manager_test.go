@@ -1018,12 +1018,15 @@ func testChangePassphrase(tc *testContext) bool {
 	// generate a new secret key by replacing the generation function one
 	// that intentionally errors.
 	testName := "ChangePassphrase (public) with invalid new secret key"
-	waddrmgr.TstReplaceNewSecretKeyFunc()
-	err := tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false)
+
+	var err error
+
+	waddrmgr.TstRunWithReplacedCryptoKeyScript(func() {
+		err = tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false)
+	})
 	if !checkManagerError(tc.t, testName, err, waddrmgr.ErrCrypto) {
 		return false
 	}
-	waddrmgr.TstResetNewSecretKeyFunc()
 
 	// Attempt to change public passphrase with invalid old passphrase.
 	testName = "ChangePassphrase (public) with invalid old passphrase"
@@ -1438,7 +1441,7 @@ func TestManager(t *testing.T) {
 
 	// Create a new manager.
 	mgr, err := waddrmgr.Create(mgrName, seed, pubPassphrase, privPassphrase,
-		&btcnet.MainNetParams)
+		&btcnet.MainNetParams, waddrmgr.Scrypt(16, 8, 1))
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
 		return
