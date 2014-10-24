@@ -23,34 +23,24 @@ interface. The functions are only exported while the tests are being run.
 
 package waddrmgr
 
-import (
-	"github.com/conformal/btcwallet/snacl"
-)
+import "github.com/conformal/btcwallet/snacl"
 
 // TstMaxRecentHashes makes the unexported maxRecentHashes constant available
 // when tests are run.
 var TstMaxRecentHashes = maxRecentHashes
 
-// TstSetScryptParams allows the scrypt parameters to be set to much lower
-// values while the tests are running so they are faster.
-func TstSetScryptParams(n, r, p int) {
-	scryptN = n
-	scryptR = r
-	scryptP = p
-}
-
-// TstReplaceNewSecretKeyFunc replaces the new secret key generation function
-// with a version that intentionally fails.
-func TstReplaceNewSecretKeyFunc() {
+// Replace package newSecretKey function with the given one and calls
+// the callback function. Afterwards the original newSecretKey
+// function will be restored.
+func TstRunWithReplacedCryptoKeyScript(callback func()) {
+	orig := newSecretKey
+	defer func() {
+		newSecretKey = orig
+	}()
 	newSecretKey = func(passphrase *[]byte) (*snacl.SecretKey, error) {
 		return nil, snacl.ErrDecryptFailed
 	}
-}
-
-// TstResetNewSecretKeyFunc resets the new secret key generation function to the
-// original version.
-func TstResetNewSecretKeyFunc() {
-	newSecretKey = defaultNewSecretKey
+	callback()
 }
 
 // TstCheckPublicPassphrase return true if the provided public passphrase is
