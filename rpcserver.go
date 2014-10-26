@@ -2150,7 +2150,7 @@ func ListReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 			Address:       address,
 			Amount:        addrData.amount.ToUnit(btcutil.AmountBTC),
 			Confirmations: uint64(addrData.confirmations),
-			Tx:            addrData.tx,
+			TxIDs:         addrData.tx,
 		}
 		idx++
 	}
