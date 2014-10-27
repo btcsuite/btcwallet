@@ -209,7 +209,7 @@ func (w *Wallet) ListenDisconnectedBlocks() (<-chan waddrmgr.BlockStamp, error) 
 }
 
 // ListenDisconnectedBlocks returns a channel that passes the current lock state
-// of the wallet anytime the state is locked or unlocked.  The value is true for
+// of the wallet whenever the lock state is changed.  The value is true for
 // locked, and false for unlocked.  The channel must be read, or other wallet
 // methods will block.
 //
@@ -565,10 +565,12 @@ out:
 		// Select statement fell through by an explicit lock or the
 		// timer expiring.  Lock the manager here.
 		timeout = nil
-		if err := w.Manager.Lock(); err != nil {
+		err := w.Manager.Lock()
+		if err != nil {
 			log.Errorf("Could not lock wallet: %v", err)
+		} else {
+			w.notifyLockStateChange(true)
 		}
-		w.notifyLockStateChange(true)
 	}
 	w.wg.Done()
 }
@@ -1220,16 +1222,15 @@ func (w *Wallet) NewAddress() (btcutil.Address, error) {
 	}
 
 	// Request updates from btcd for new transactions sent to this address.
-	numAddrs := len(addrs)
-	utilAddrs := make([]btcutil.Address, numAddrs)
-	for i := 0; i < numAddrs; i++ {
-		utilAddrs[i] = addrs[i].Address()
+	utilAddrs := make([]btcutil.Address, len(addrs))
+	for i, addr := range addrs {
+		utilAddrs[i] = addr.Address()
 	}
 	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
 		return nil, err
 	}
 
-	return addrs[0].Address(), nil
+	return utilAddrs[0], nil
 }
 
 // NewChangeAddress returns a new change address for a wallet.
@@ -1243,15 +1244,15 @@ func (w *Wallet) NewChangeAddress() (btcutil.Address, error) {
 
 	// Request updates from btcd for new transactions sent to this address.
 	utilAddrs := make([]btcutil.Address, len(addrs))
-	for i := 0; i < len(addrs); i++ {
-		utilAddrs[i] = addrs[i].Address()
+	for i, addr := range addrs {
+		utilAddrs[i] = addr.Address()
 	}
 
 	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
 		return nil, err
 	}
 
-	return addrs[0].Address(), nil
+	return utilAddrs[0], nil
 }
 
 // ReqSpentUtxoNtfns sends a message to btcd to request updates for when

@@ -126,7 +126,7 @@ func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 // eligible unspent outputs to create the transaction.
 func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*CreatedTx, error) {
 
-	// Address manager store must be unlocked to compose transaction.  Grab
+	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
 	// error if already locked.
 	heldUnlock, err := w.HoldUnlock()

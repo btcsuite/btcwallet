@@ -130,7 +130,7 @@ func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Sto
 			"passphrase for your new wallet", true)
 	}
 
-	// At this point, there is an existing legacy wallet, so prompr the user
+	// At this point, there is an existing legacy wallet, so prompt the user
 	// for the existing private passphrase and ensure it properly unlocks
 	// the legacy wallet so all of the addresses can later be imported.
 	fmt.Println("You have an existing legacy wallet.  All addresses from " +
@@ -241,11 +241,11 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 
 		fmt.Println("Your wallet generation seed is:")
 		fmt.Printf("%x\n", seed)
-		fmt.Println("IMPORTANT: Keep the seed in a safe place as you " +
+		fmt.Println("IMPORTANT: Keep the seed in a safe place as you\n" +
 			"will NOT be able to restore your wallet without it.")
-		fmt.Println("Please keep in mind that anyone who has access " +
-			"to the seed can also restore your wallet thereby " +
-			"giving them access to all your funds, so it is " +
+		fmt.Println("Please keep in mind that anyone who has access\n" +
+			"to the seed can also restore your wallet thereby\n" +
+			"giving them access to all your funds, so it is\n" +
 			"imperative that you keep it in a secure location.")
 
 		for {
@@ -336,7 +336,7 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 
 		default:
 			fmt.Printf("WARN: Skipping unrecognized legacy "+
-				"keystore type: %T", addr)
+				"keystore type: %T\n", addr)
 			continue
 		}
 	}

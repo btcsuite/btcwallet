@@ -172,7 +172,7 @@ out:
 	w.wg.Done()
 }
 
-// rescanProgressHandler handles notifications for paritally and fully completed
+// rescanProgressHandler handles notifications for partially and fully completed
 // rescans by marking each rescanned address as partially or fully synced.
 func (w *Wallet) rescanProgressHandler() {
 out:
@@ -262,6 +262,12 @@ func (w *Wallet) RescanActiveAddresses() error {
 	addrs, err := w.Manager.AllActiveAddresses()
 	if err != nil {
 		return err
+	}
+
+	// in case there are no addresses, we can skip queuing the rescan job
+	if len(addrs) == 0 {
+		close(w.chainSynced)
+		return nil
 	}
 
 	unspents, err := w.TxStore.UnspentOutputs()
