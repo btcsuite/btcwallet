@@ -1168,7 +1168,7 @@ func testWatchingOnly(tc *testContext) bool {
 		tc.t.Errorf("%v", err)
 		return false
 	}
-	if err := mgr.ConvertToWatchingOnly(pubPassphrase); err != nil {
+	if err := mgr.ConvertToWatchingOnly(); err != nil {
 		tc.t.Errorf("%v", err)
 		return false
 	}
