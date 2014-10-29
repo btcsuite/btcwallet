@@ -24,8 +24,8 @@ import (
 	"github.com/conformal/btcnet"
 	"github.com/conformal/btcrpcclient"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
+	"github.com/conformal/btcwallet/waddrmgr"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
 )
@@ -36,7 +36,7 @@ type Client struct {
 
 	enqueueNotification chan interface{}
 	dequeueNotification chan interface{}
-	currentBlock        chan *keystore.BlockStamp
+	currentBlock        chan *waddrmgr.BlockStamp
 
 	// Notification channels regarding the state of the client.  These exist
 	// so other components can listen in on chain activity.  These are
@@ -56,7 +56,7 @@ func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte) (*C
 		netParams:           net,
 		enqueueNotification: make(chan interface{}),
 		dequeueNotification: make(chan interface{}),
-		currentBlock:        make(chan *keystore.BlockStamp),
+		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		notificationLock:    new(sync.Mutex),
 		quit:                make(chan struct{}),
 	}
@@ -136,7 +136,7 @@ func (c *Client) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
-func (c *Client) BlockStamp() (*keystore.BlockStamp, error) {
+func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
 	case bs := <-c.currentBlock:
 		return bs, nil
@@ -150,8 +150,8 @@ func (c *Client) BlockStamp() (*keystore.BlockStamp, error) {
 // btcrpcclient callbacks, which isn't very Go-like and doesn't allow
 // blocking client calls.
 type (
-	BlockConnected    keystore.BlockStamp
-	BlockDisconnected keystore.BlockStamp
+	BlockConnected    waddrmgr.BlockStamp
+	BlockDisconnected waddrmgr.BlockStamp
 	RecvTx            struct {
 		Tx    *btcutil.Tx    // Index is guaranteed to be set.
 		Block *txstore.Block // nil if unmined
@@ -197,11 +197,11 @@ func (c *Client) onClientConnect() {
 }
 
 func (c *Client) onBlockConnected(hash *btcwire.ShaHash, height int32) {
-	c.enqueueNotification <- BlockConnected{Hash: hash, Height: height}
+	c.enqueueNotification <- BlockConnected{Hash: *hash, Height: height}
 }
 
 func (c *Client) onBlockDisconnected(hash *btcwire.ShaHash, height int32) {
-	c.enqueueNotification <- BlockDisconnected{Hash: hash, Height: height}
+	c.enqueueNotification <- BlockDisconnected{Hash: *hash, Height: height}
 }
 
 func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
@@ -253,7 +253,7 @@ func (c *Client) handler() {
 		c.wg.Done()
 	}
 
-	bs := &keystore.BlockStamp{Hash: hash, Height: height}
+	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
 
 	// TODO: Rather than leaving this as an unbounded queue for all types of
 	// notifications, try dropping ones where a later enqueued notification
@@ -288,7 +288,7 @@ out:
 
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
-				bs = (*keystore.BlockStamp)(&n)
+				bs = (*waddrmgr.BlockStamp)(&n)
 			}
 
 			notifications[0] = nil

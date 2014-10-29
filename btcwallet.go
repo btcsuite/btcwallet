@@ -129,13 +129,13 @@ func walletMain() error {
 		w, err := openWallet()
 		if err != nil {
 			if os.IsNotExist(err) {
-				// If the keystore file is missing, notify the server
-				// that generating new wallets is ok.
+				// If the manager file is missing, notify the
+				// server that generating new wallets is ok.
 				server.SetWallet(nil)
 				return
 			} else {
-				// If the keystore file exists but another error was
-				// encountered, we cannot continue.
+				// If the manager file exists but another error
+				// was encountered, we cannot continue.
 				log.Errorf("Cannot load wallet files: %v", err)
 				walletOpenErrors <- err
 				return
