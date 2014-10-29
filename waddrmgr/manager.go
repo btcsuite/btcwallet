@@ -76,6 +76,21 @@ const (
 	internalBranch uint32 = 1
 )
 
+// Options is used to hold the optional parameters passed to Create or Load.
+type Options struct {
+	ScryptN int
+	ScryptR int
+	ScryptP int
+}
+
+// defaultConfig is an instance of the Options struct initialized with default
+// configuration options.
+var defaultConfig = &Options{
+	ScryptN: 262144, // 2^18
+	ScryptR: 8,
+	ScryptP: 1,
+}
+
 // addrKey is used to uniquely identify an address even when those addresses
 // would end up being the same bitcoin address (as is the case for pay-to-pubkey
 // and pay-to-pubkey-hash style of addresses).
@@ -1659,22 +1674,6 @@ func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params, config *Optio
 	}
 
 	return loadManager(db, pubPassphrase, net, config)
-}
-
-// Options is used to hold the optional parameters passed to Create or
-// Load.
-type Options struct {
-	ScryptN int
-	ScryptR int
-	ScryptP int
-}
-
-// defaultConfig is an instance of the Options struct initialized with
-// default configuration options.
-var defaultConfig = &Options{
-	ScryptN: 262144, // 2^18
-	ScryptR: 8,
-	ScryptP: 1,
 }
 
 // Create returns a new locked address manager at the given database path.  The
