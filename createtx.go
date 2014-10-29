@@ -27,8 +27,8 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/legacy/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
 const (
@@ -130,9 +130,9 @@ func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 // eligible unspent outputs to create the transaction.
 func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*CreatedTx, error) {
 
-	// Key store must be unlocked to compose transaction.  Grab the
-	// unlock if possible (to prevent future unlocks), or return the
-	// error if the keystore is already locked.
+	// Address manager must be unlocked to compose transaction.  Grab
+	// the unlock if possible (to prevent future unlocks), or return the
+	// error if already locked.
 	heldUnlock, err := w.HoldUnlock()
 	if err != nil {
 		return nil, err
@@ -150,7 +150,7 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*Creat
 		return nil, err
 	}
 
-	return createTx(eligible, pairs, bs, w.FeeIncrement, w.KeyStore, w.changeAddress)
+	return createTx(eligible, pairs, bs, w.FeeIncrement, w.Manager, w.changeAddress)
 }
 
 // createTx selects inputs (from the given slice of eligible utxos)
@@ -161,10 +161,10 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*Creat
 func createTx(
 	eligible []txstore.Credit,
 	outputs map[string]btcutil.Amount,
-	bs *keystore.BlockStamp,
+	bs *waddrmgr.BlockStamp,
 	feeIncrement btcutil.Amount,
-	keys *keystore.Store,
-	changeAddress func(*keystore.BlockStamp) (btcutil.Address, error)) (
+	mgr *waddrmgr.Manager,
+	changeAddress func(*waddrmgr.BlockStamp) (btcutil.Address, error)) (
 	*CreatedTx, error) {
 
 	msgtx := wire.NewMsgTx()
@@ -232,7 +232,7 @@ func createTx(
 			}
 		}
 
-		if err = signMsgTx(msgtx, inputs, keys); err != nil {
+		if err = signMsgTx(msgtx, inputs, mgr); err != nil {
 			return nil, err
 		}
 
@@ -296,12 +296,12 @@ func addChange(msgtx *wire.MsgTx, change btcutil.Amount, changeAddr btcutil.Addr
 // changeAddress obtains a new btcutil.Address to be used as a change
 // transaction output. It will also mark the KeyStore as dirty and
 // tells chainSvr to watch that address.
-func (w *Wallet) changeAddress(bs *keystore.BlockStamp) (btcutil.Address, error) {
-	changeAddr, err := w.KeyStore.ChangeAddress(bs)
+func (w *Wallet) changeAddress(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
+	changeAddrs, err := w.Manager.NextInternalAddresses(0, 1)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get change address: %s", err)
 	}
-	w.KeyStore.MarkDirty()
+	changeAddr := changeAddrs[0].Address()
 	err = w.chainSvr.NotifyReceived([]btcutil.Address{changeAddr})
 	if err != nil {
 		return nil, fmt.Errorf("cannot request updates for "+
@@ -335,7 +335,7 @@ func addOutputs(msgtx *wire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amo
 	return minAmount, nil
 }
 
-func (w *Wallet) findEligibleOutputs(minconf int, bs *keystore.BlockStamp) ([]txstore.Credit, error) {
+func (w *Wallet) findEligibleOutputs(minconf int, bs *waddrmgr.BlockStamp) ([]txstore.Credit, error) {
 	unspent, err := w.TxStore.UnspentOutputs()
 	if err != nil {
 		return nil, err
@@ -374,7 +374,7 @@ func (w *Wallet) findEligibleOutputs(minconf int, bs *keystore.BlockStamp) ([]tx
 // signMsgTx sets the SignatureScript for every item in msgtx.TxIn.
 // It must be called every time a msgtx is changed.
 // Only P2PKH outputs are supported at this point.
-func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, store *keystore.Store) error {
+func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Manager) error {
 	if len(prevOutputs) != len(msgtx.TxIn) {
 		return fmt.Errorf(
 			"Number of prevOutputs (%d) does not match number of tx inputs (%d)",
@@ -392,19 +392,20 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, store *keystore.
 			return ErrUnsupportedTransactionType
 		}
 
-		ai, err := store.Address(apkh)
+		ai, err := mgr.Address(apkh)
 		if err != nil {
 			return fmt.Errorf("cannot get address info: %v", err)
 		}
 
-		pka := ai.(keystore.PubKeyAddress)
+		pka := ai.(waddrmgr.ManagedPubKeyAddress)
 		privkey, err := pka.PrivKey()
 		if err != nil {
 			return fmt.Errorf("cannot get private key: %v", err)
 		}
 
-		sigscript, err := txscript.SignatureScript(
-			msgtx, i, output.TxOut().PkScript, txscript.SigHashAll, privkey, ai.Compressed())
+		sigscript, err := txscript.SignatureScript(msgtx, i,
+			output.TxOut().PkScript, txscript.SigHashAll, privkey,
+			ai.Compressed())
 		if err != nil {
 			return fmt.Errorf("cannot create sigscript: %s", err)
 		}
