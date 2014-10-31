@@ -180,8 +180,17 @@ type CryptoKeyType byte
 
 // Crypto key types.
 const (
+	// CKTPrivate specifies the key that is used for encryption of private
+	// key material such as derived extended private keys and imported
+	// private keys.
 	CKTPrivate CryptoKeyType = iota
+
+	// CKTScript specifies the key that is used for encryption of scripts.
 	CKTScript
+
+	// CKTPublic specifies the key that is used for encryption of public
+	// key material such as dervied extended public keys and imported public
+	// keys.
 	CKTPublic
 )
 
@@ -1465,6 +1474,35 @@ func (m *Manager) AllActiveAddresses() ([]btcutil.Address, error) {
 	return addrs, nil
 }
 
+// selectCryptoKey selects the appropriate crypto key based on the key type. An
+// error is returned when an invalid key type is specified or the requested key
+// requires the manager to be unlocked when it isn't.
+//
+// This function MUST be called with the manager lock held for reads.
+func (m *Manager) selectCryptoKey(keyType CryptoKeyType) (EncryptorDecryptor, error) {
+	if keyType == CKTPrivate || keyType == CKTScript {
+		// The manager must be unlocked to encrypt with the private keys.
+		if m.locked || m.watchingOnly {
+			return nil, managerError(ErrLocked, errLocked, nil)
+		}
+	}
+
+	var cryptoKey EncryptorDecryptor
+	switch keyType {
+	case CKTPrivate:
+		cryptoKey = m.cryptoKeyPriv
+	case CKTScript:
+		cryptoKey = m.cryptoKeyScript
+	case CKTPublic:
+		cryptoKey = m.cryptoKeyPub
+	default:
+		return nil, managerError(ErrInvalidKeyType, "invalid key type",
+			nil)
+	}
+
+	return cryptoKey, nil
+}
+
 // Encrypt in using the crypto key type specified by keyType.
 func (m *Manager) Encrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
 	// Encryption must be performed under the manager mutex since the
@@ -1501,33 +1539,6 @@ func (m *Manager) Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
 		return nil, managerError(ErrCrypto, "failed to decrypt", err)
 	}
 	return decrypted, nil
-}
-
-// selectCryptoKey selects the appropriate crypto key based on the
-// keyType. If the keyType is invalid or the key requested requires
-// the manager to be unlocked, an error is returned.
-func (m *Manager) selectCryptoKey(keyType CryptoKeyType) (EncryptorDecryptor, error) {
-	if keyType == CKTPrivate || keyType == CKTScript {
-		// The manager must be unlocked to encrypt with the private keys.
-		if m.locked || m.watchingOnly {
-			return nil, managerError(ErrLocked, errLocked, nil)
-		}
-	}
-
-	var cryptoKey EncryptorDecryptor
-	switch keyType {
-	case CKTPrivate:
-		cryptoKey = m.cryptoKeyPriv
-	case CKTScript:
-		cryptoKey = m.cryptoKeyScript
-	case CKTPublic:
-		cryptoKey = m.cryptoKeyPub
-	default:
-		return nil, managerError(ErrInvalidKeyType, "invalid key type",
-			nil)
-	}
-
-	return cryptoKey, nil
 }
 
 // newManager returns a new locked address manager with the given parameters.
