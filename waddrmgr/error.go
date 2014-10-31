@@ -130,6 +130,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrDatabase:          "ErrDatabase",
 	ErrKeyChain:          "ErrKeyChain",
 	ErrCrypto:            "ErrCrypto",
+	ErrInvalidKeyType:    "ErrInvalidKeyType",
 	ErrNoExist:           "ErrNoExist",
 	ErrAlreadyExists:     "ErrAlreadyExists",
 	ErrCoinTypeTooHigh:   "ErrCoinTypeTooHigh",

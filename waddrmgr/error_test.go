@@ -32,6 +32,7 @@ func TestErrorCodeStringer(t *testing.T) {
 		{waddrmgr.ErrDatabase, "ErrDatabase"},
 		{waddrmgr.ErrKeyChain, "ErrKeyChain"},
 		{waddrmgr.ErrCrypto, "ErrCrypto"},
+		{waddrmgr.ErrInvalidKeyType, "ErrInvalidKeyType"},
 		{waddrmgr.ErrNoExist, "ErrNoExist"},
 		{waddrmgr.ErrAlreadyExists, "ErrAlreadyExists"},
 		{waddrmgr.ErrCoinTypeTooHigh, "ErrCoinTypeTooHigh"},
