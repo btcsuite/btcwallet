@@ -18,8 +18,6 @@ package waddrmgr
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"sync"
 
 	"github.com/conformal/btcec"
@@ -27,6 +25,7 @@ import (
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcutil/hdkeychain"
 	"github.com/conformal/btcwallet/snacl"
+	"github.com/conformal/btcwallet/walletdb"
 	"github.com/conformal/btcwire"
 )
 
@@ -204,7 +203,7 @@ var newCryptoKey = defaultNewCryptoKey
 type Manager struct {
 	mtx sync.RWMutex
 
-	db           *managerDB
+	namespace    walletdb.Namespace
 	net          *btcnet.Params
 	addrs        map[addrKey]ManagedAddress
 	syncState    syncState
@@ -309,9 +308,9 @@ func (m *Manager) zeroSensitivePublicData() {
 	m.masterKeyPub.Zero()
 }
 
-// Close cleanly shuts down the underlying database and syncs all data.  It also
-// makes a best try effort to remove and zero all private key and sensitive
-// public key material associated with the address manager.
+// Close cleanly shuts down the manager.  It makes a best try effort to remove
+// and zero all private key and sensitive public key material associated with
+// the address manager from memory.
 func (m *Manager) Close() error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -323,10 +322,6 @@ func (m *Manager) Close() error {
 
 	// Attempt to clear sensitive public key material from memory too.
 	m.zeroSensitivePublicData()
-
-	if err := m.db.Close(); err != nil {
-		return err
-	}
 
 	m.closed = true
 	return nil
@@ -408,13 +403,13 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	// The account is either invalid or just wasn't cached, so attempt to
 	// load the information from the database.
 	var rowInterface interface{}
-	err := m.db.View(func(tx *managerTx) error {
+	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
-		rowInterface, err = tx.FetchAccountInfo(account)
+		rowInterface, err = fetchAccountInfo(tx, account)
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, maybeConvertDbError(err)
 	}
 
 	// Ensure the account type is a BIP0044 account.
@@ -596,13 +591,13 @@ func (m *Manager) rowInterfaceToManaged(rowInterface interface{}) (ManagedAddres
 func (m *Manager) loadAndCacheAddress(address btcutil.Address) (ManagedAddress, error) {
 	// Attempt to load the raw address information from the database.
 	var rowInterface interface{}
-	err := m.db.View(func(tx *managerTx) error {
+	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
-		rowInterface, err = tx.FetchAddress(address.ScriptAddress())
+		rowInterface, err = fetchAddress(tx, address.ScriptAddress())
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, maybeConvertDbError(err)
 	}
 
 	// Create a new managed address for the specific type of address based
@@ -732,16 +727,16 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 
 		// Save the new keys and params to the the db in a single
 		// transaction.
-		err = m.db.Update(func(tx *managerTx) error {
-			err := tx.PutCryptoKeys(nil, encPriv, encScript)
+		err = m.namespace.Update(func(tx walletdb.Tx) error {
+			err := putCryptoKeys(tx, nil, encPriv, encScript)
 			if err != nil {
 				return err
 			}
 
-			return tx.PutMasterKeyParams(nil, newKeyParams)
+			return putMasterKeyParams(tx, nil, newKeyParams)
 		})
 		if err != nil {
-			return err
+			return maybeConvertDbError(err)
 		}
 
 		// Now that the db has been successfully updated, clear the old
@@ -761,16 +756,16 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 
 		// Save the new keys and params to the the db in a single
 		// transaction.
-		err = m.db.Update(func(tx *managerTx) error {
-			err := tx.PutCryptoKeys(encryptedPub, nil, nil)
+		err = m.namespace.Update(func(tx walletdb.Tx) error {
+			err := putCryptoKeys(tx, encryptedPub, nil, nil)
 			if err != nil {
 				return err
 			}
 
-			return tx.PutMasterKeyParams(newKeyParams, nil)
+			return putMasterKeyParams(tx, newKeyParams, nil)
 		})
 		if err != nil {
-			return err
+			return maybeConvertDbError(err)
 		}
 
 		// Now that the db has been successfully updated, clear the old
@@ -782,53 +777,85 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 	return nil
 }
 
-// ExportWatchingOnly creates a new watching-only address manager backed by a
-// database at the provided path.  A watching-only address manager has all
-// private keys removed which means it is not possible to create transactions
-// which spend funds.
-func (m *Manager) ExportWatchingOnly(newDbPath string, pubPassphrase []byte) (*Manager, error) {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
+// ConvertToWatchingOnly converts the current address manager to a locked
+// watching-only address manager.
+//
+// WARNING: This function removes private keys from the existing address manager
+// which means they will no longer be available.  Typically the caller will make
+// a copy of the existing wallet database and modify the copy since otherwise it
+// would mean permanent loss of any imported private keys and scripts.
+//
+// Executing this function on a manager that is already watching-only will have
+// no effect.
+func (m *Manager) ConvertToWatchingOnly(pubPassphrase []byte) error {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
 
-	// Return an error if the specified database already exists.
-	if fileExists(newDbPath) {
-		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
-	}
-
-	// Copy the existing manager database to the provided path.
-	if err := m.db.CopyDB(newDbPath); err != nil {
-		return nil, err
-	}
-
-	// Open the copied database.
-	watchingDb, err := openOrCreateDB(newDbPath)
-	if err != nil {
-		return nil, err
+	// Exit now if the manager is already watching-only.
+	if m.watchingOnly {
+		return nil
 	}
 
 	// Remove all private key material and mark the new database as watching
 	// only.
-	err = watchingDb.Update(func(tx *managerTx) error {
-		if err := tx.DeletePrivateKeys(); err != nil {
+	err := m.namespace.Update(func(tx walletdb.Tx) error {
+		if err := deletePrivateKeys(tx); err != nil {
 			return err
 		}
 
-		return tx.PutWatchingOnly(true)
+		return putWatchingOnly(tx, true)
 	})
 	if err != nil {
-		return nil, err
+		return maybeConvertDbError(err)
 	}
 
-	return loadManager(watchingDb, pubPassphrase, m.net, m.config)
-}
+	// Lock the manager to remove all clear text private key material from
+	// memory if needed.
+	if !m.locked {
+		m.lock()
+	}
 
-// Export writes the manager database to the provided writer.
-func (m *Manager) Export(w io.Writer) error {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
+	// This section clears and removes the encrypted private key material
+	// that is ordinarily used to unlock the manager.  Since the the manager
+	// is being converted to watching-only, the encrypted private key
+	// material is no longer needed.
 
-	// Copy the existing manager database to the provided path.
-	return m.db.WriteTo(w)
+	// Clear and remove all of the encrypted acount private keys.
+	for _, acctInfo := range m.acctInfo {
+		zero(acctInfo.acctKeyEncrypted)
+		acctInfo.acctKeyEncrypted = nil
+	}
+
+	// Clear and remove encrypted private keys and encrypted scripts from
+	// all address entries.
+	for _, ma := range m.addrs {
+		switch addr := ma.(type) {
+		case *managedAddress:
+			zero(addr.privKeyEncrypted)
+			addr.privKeyEncrypted = nil
+		case *scriptAddress:
+			zero(addr.scriptEncrypted)
+			addr.scriptEncrypted = nil
+		}
+	}
+
+	// Clear and remove encrypted private and script crypto keys.
+	zero(m.cryptoKeyScriptEncrypted)
+	m.cryptoKeyScriptEncrypted = nil
+	m.cryptoKeyScript = nil
+	zero(m.cryptoKeyPrivEncrypted)
+	m.cryptoKeyPrivEncrypted = nil
+	m.cryptoKeyPriv = nil
+
+	// The master private key is derived from a passphrase when the manager
+	// is unlocked, so there is no encrypted version to zero.  However,
+	// it is no longer needed, so nil it.
+	m.masterKeyPriv = nil
+
+	// Mark the manager watching-only.
+	m.watchingOnly = true
+	return nil
+
 }
 
 // existsAddress returns whether or not the passed address is known to the
@@ -843,12 +870,12 @@ func (m *Manager) existsAddress(addressID []byte) (bool, error) {
 
 	// Check the database if not already found above.
 	var exists bool
-	err := m.db.View(func(tx *managerTx) error {
-		exists = tx.ExistsAddress(addressID)
+	err := m.namespace.View(func(tx walletdb.Tx) error {
+		exists = existsAddress(tx, addressID)
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return false, maybeConvertDbError(err)
 	}
 
 	return exists, nil
@@ -928,15 +955,15 @@ func (m *Manager) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (ManagedPub
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
-	err = m.db.Update(func(tx *managerTx) error {
-		err := tx.PutImportedAddress(pubKeyHash, ImportedAddrAccount,
+	err = m.namespace.Update(func(tx walletdb.Tx) error {
+		err := putImportedAddress(tx, pubKeyHash, ImportedAddrAccount,
 			ssNone, encryptedPubKey, encryptedPrivKey)
 		if err != nil {
 			return err
 		}
 
 		if updateStartBlock {
-			return tx.PutStartBlock(bs)
+			return putStartBlock(tx, bs)
 		}
 
 		return nil
@@ -1035,21 +1062,21 @@ func (m *Manager) ImportScript(script []byte, bs *BlockStamp) (ManagedScriptAddr
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
-	err = m.db.Update(func(tx *managerTx) error {
-		err := tx.PutScriptAddress(scriptHash, ImportedAddrAccount,
+	err = m.namespace.Update(func(tx walletdb.Tx) error {
+		err := putScriptAddress(tx, scriptHash, ImportedAddrAccount,
 			ssNone, encryptedHash, encryptedScript)
 		if err != nil {
 			return err
 		}
 
 		if updateStartBlock {
-			return tx.PutStartBlock(bs)
+			return putStartBlock(tx, bs)
 		}
 
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, maybeConvertDbError(err)
 	}
 
 	// Now that the database has been updated, update the start block in
@@ -1309,12 +1336,12 @@ func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bo
 
 	// Now that all addresses have been successfully generated, update the
 	// database in a single transaction.
-	err = m.db.Update(func(tx *managerTx) error {
+	err = m.namespace.Update(func(tx walletdb.Tx) error {
 		for _, info := range addressInfo {
 			ma := info.managedAddr
 			addressID := ma.Address().ScriptAddress()
-			err := tx.PutChainedAddress(addressID, account,
-				ssFull, info.branch, info.index)
+			err := putChainedAddress(tx, addressID, account, ssFull,
+				info.branch, info.index)
 			if err != nil {
 				return err
 			}
@@ -1323,7 +1350,7 @@ func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bo
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, maybeConvertDbError(err)
 	}
 
 	// Finally update the next address tracking and add the addresses to the
@@ -1450,13 +1477,13 @@ func (m *Manager) AllActiveAddresses() ([]btcutil.Address, error) {
 
 	// Load the raw address information from the database.
 	var rowInterfaces []interface{}
-	err := m.db.View(func(tx *managerTx) error {
+	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
-		rowInterfaces, err = tx.FetchAllAddresses()
+		rowInterfaces, err = fetchAllAddresses(tx)
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, maybeConvertDbError(err)
 	}
 
 	addrs := make([]btcutil.Address, 0, len(rowInterfaces))
@@ -1481,7 +1508,7 @@ func (m *Manager) AllActiveAddresses() ([]btcutil.Address, error) {
 // This function MUST be called with the manager lock held for reads.
 func (m *Manager) selectCryptoKey(keyType CryptoKeyType) (EncryptorDecryptor, error) {
 	if keyType == CKTPrivate || keyType == CKTScript {
-		// The manager must be unlocked to encrypt with the private keys.
+		// The manager must be unlocked to work with the private keys.
 		if m.locked || m.watchingOnly {
 			return nil, managerError(ErrLocked, errLocked, nil)
 		}
@@ -1542,13 +1569,14 @@ func (m *Manager) Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
 }
 
 // newManager returns a new locked address manager with the given parameters.
-func newManager(db *managerDB, net *btcnet.Params, masterKeyPub *snacl.SecretKey,
-	masterKeyPriv *snacl.SecretKey, cryptoKeyPub EncryptorDecryptor,
-	cryptoKeyPrivEncrypted, cryptoKeyScriptEncrypted []byte,
-	syncInfo *syncState, config *Options) *Manager {
+func newManager(namespace walletdb.Namespace, net *btcnet.Params,
+	masterKeyPub *snacl.SecretKey, masterKeyPriv *snacl.SecretKey,
+	cryptoKeyPub EncryptorDecryptor, cryptoKeyPrivEncrypted,
+	cryptoKeyScriptEncrypted []byte, syncInfo *syncState,
+	config *Options) *Manager {
 
 	return &Manager{
-		db:                       db,
+		namespace:                namespace,
 		net:                      net,
 		addrs:                    make(map[addrKey]ManagedAddress),
 		syncState:                *syncInfo,
@@ -1563,16 +1591,6 @@ func newManager(db *managerDB, net *btcnet.Params, masterKeyPub *snacl.SecretKey
 		cryptoKeyScript:          &cryptoKey{},
 		config:                   config,
 	}
-}
-
-// filesExists reports whether the named file or directory exists.
-func fileExists(name string) bool {
-	if _, err := os.Stat(name); err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-	}
-	return true
 }
 
 // deriveAccountKey derives the extended key for an account according to the
@@ -1642,7 +1660,7 @@ func checkBranchKeys(acctKey *hdkeychain.ExtendedKey) error {
 // loadManager returns a new address manager that results from loading it from
 // the passed opened database.  The public passphrase is required to decrypt the
 // public keys.
-func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
+func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
 	// Perform all database lookups in a read-only view.
 	var watchingOnly bool
 	var masterKeyPubParams, masterKeyPrivParams []byte
@@ -1650,43 +1668,43 @@ func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params, config
 	var syncedTo, startBlock *BlockStamp
 	var recentHeight int32
 	var recentHashes []btcwire.ShaHash
-	err := db.View(func(tx *managerTx) error {
+	err := namespace.View(func(tx walletdb.Tx) error {
 		// Load whether or not the manager is watching-only from the db.
 		var err error
-		watchingOnly, err = tx.FetchWatchingOnly()
+		watchingOnly, err = fetchWatchingOnly(tx)
 		if err != nil {
 			return err
 		}
 
 		// Load the master key params from the db.
 		masterKeyPubParams, masterKeyPrivParams, err =
-			tx.FetchMasterKeyParams()
+			fetchMasterKeyParams(tx)
 		if err != nil {
 			return err
 		}
 
 		// Load the crypto keys from the db.
 		cryptoKeyPubEnc, cryptoKeyPrivEnc, cryptoKeyScriptEnc, err =
-			tx.FetchCryptoKeys()
+			fetchCryptoKeys(tx)
 		if err != nil {
 			return err
 		}
 
 		// Load the sync state from the db.
-		syncedTo, err = tx.FetchSyncedTo()
+		syncedTo, err = fetchSyncedTo(tx)
 		if err != nil {
 			return err
 		}
-		startBlock, err = tx.FetchStartBlock()
+		startBlock, err = fetchStartBlock(tx)
 		if err != nil {
 			return err
 		}
 
-		recentHeight, recentHashes, err = tx.FetchRecentBlocks()
+		recentHeight, recentHashes, err = fetchRecentBlocks(tx)
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, maybeConvertDbError(err)
 	}
 
 	// When not a watching-only manager, set the master private key params,
@@ -1728,31 +1746,38 @@ func loadManager(db *managerDB, pubPassphrase []byte, net *btcnet.Params, config
 	// Create new address manager with the given parameters.  Also, override
 	// the defaults for the additional fields which are not specified in the
 	// call to new with the values loaded from the database.
-	mgr := newManager(db, net, &masterKeyPub, &masterKeyPriv, cryptoKeyPub,
-		cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo, config)
+	mgr := newManager(namespace, net, &masterKeyPub, &masterKeyPriv,
+		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
+		config)
 	mgr.watchingOnly = watchingOnly
 	return mgr, nil
 }
 
-// Open loads an existing address manager from the given database path.  The
-// public passphrase is required to decrypt the public keys used to protect the
-// public information such as addresses.  This is important since access to
-// BIP0032 extended keys means it is possible to generate all future addresses.
+// Open loads an existing address manager from the given namespace.  The public
+// passphrase is required to decrypt the public keys used to protect the public
+// information such as addresses.  This is important since access to BIP0032
+// extended keys means it is possible to generate all future addresses.
 //
 // If a config structure is passed to the function, that configuration
 // will override the defaults.
 //
 // A ManagerError with an error code of ErrNoExist will be returned if the
-// passed database does not exist.
-func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
-	// Return an error if the specified database does not exist.
-	if !fileExists(dbPath) {
+// passed manager does not exist in the specified namespace.
+func Open(namespace walletdb.Namespace, pubPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
+	// Return an error if the manager has NOT already been created in the
+	// given database namespace.
+	exists, err := managerExists(namespace)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
 		str := "the specified address manager does not exist"
 		return nil, managerError(ErrNoExist, str, nil)
 	}
 
-	db, err := openOrCreateDB(dbPath)
-	if err != nil {
+	// Upgrade the manager to the latest version as needed.  This includes
+	// the initial creation.
+	if err := upgradeManager(namespace); err != nil {
 		return nil, err
 	}
 
@@ -1760,10 +1785,10 @@ func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params, config *Optio
 		config = defaultConfig
 	}
 
-	return loadManager(db, pubPassphrase, net, config)
+	return loadManager(namespace, pubPassphrase, net, config)
 }
 
-// Create returns a new locked address manager at the given database path.  The
+// Create returns a new locked address manager in the given namespace.  The
 // seed must conform to the standards described in hdkeychain.NewMaster and will
 // be used to create the master root node from which all hierarchical
 // deterministic addresses are derived.  This allows all chained addresses in
@@ -1778,16 +1803,22 @@ func Open(dbPath string, pubPassphrase []byte, net *btcnet.Params, config *Optio
 // If a config structure is passed to the function, that configuration
 // will override the defaults.
 //
-// A ManagerError with an error code of ErrAlreadyExists will be returned if the
-// passed database already exists.
-func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
-	// Return an error if the specified database already exists.
-	if fileExists(dbPath) {
+// A ManagerError with an error code of ErrAlreadyExists will be returned the
+// address manager already exists in the specified namespace.
+func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []byte, net *btcnet.Params, config *Options) (*Manager, error) {
+	// Return an error if the manager has already been created in the given
+	// database namespace.
+	exists, err := managerExists(namespace)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
 		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
 	}
 
-	db, err := openOrCreateDB(dbPath)
-	if err != nil {
+	// Upgrade the manager to the latest version as needed.  This includes
+	// the initial creation.
+	if err := upgradeManager(namespace); err != nil {
 		return nil, err
 	}
 
@@ -1911,17 +1942,17 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 	syncInfo := newSyncState(createdAt, createdAt, recentHeight, recentHashes)
 
 	// Perform all database updates in a single transaction.
-	err = db.Update(func(tx *managerTx) error {
+	err = namespace.Update(func(tx walletdb.Tx) error {
 		// Save the master key params to the database.
 		pubParams := masterKeyPub.Marshal()
 		privParams := masterKeyPriv.Marshal()
-		err = tx.PutMasterKeyParams(pubParams, privParams)
+		err = putMasterKeyParams(tx, pubParams, privParams)
 		if err != nil {
 			return err
 		}
 
 		// Save the encrypted crypto keys to the database.
-		err = tx.PutCryptoKeys(cryptoKeyPubEnc, cryptoKeyPrivEnc,
+		err = putCryptoKeys(tx, cryptoKeyPubEnc, cryptoKeyPrivEnc,
 			cryptoKeyScriptEnc)
 		if err != nil {
 			return err
@@ -1929,38 +1960,38 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 
 		// Save the fact this is not a watching-only address manager to
 		// the database.
-		err = tx.PutWatchingOnly(false)
+		err = putWatchingOnly(tx, false)
 		if err != nil {
 			return err
 		}
 
 		// Save the initial synced to state.
-		err = tx.PutSyncedTo(&syncInfo.syncedTo)
+		err = putSyncedTo(tx, &syncInfo.syncedTo)
 		if err != nil {
 			return err
 		}
-		err = tx.PutStartBlock(&syncInfo.startBlock)
+		err = putStartBlock(tx, &syncInfo.startBlock)
 		if err != nil {
 			return err
 		}
 
 		// Save the initial recent blocks state.
-		err = tx.PutRecentBlocks(recentHeight, recentHashes)
+		err = putRecentBlocks(tx, recentHeight, recentHashes)
 		if err != nil {
 			return err
 		}
 
 		// Save the information for the default account to the database.
-		err = tx.PutAccountInfo(defaultAccountNum, acctPubEnc,
+		err = putAccountInfo(tx, defaultAccountNum, acctPubEnc,
 			acctPrivEnc, 0, 0, "")
 		if err != nil {
 			return err
 		}
 
-		return tx.PutNumAccounts(1)
+		return putNumAccounts(tx, 1)
 	})
 	if err != nil {
-		return nil, err
+		return nil, maybeConvertDbError(err)
 	}
 
 	// The new address manager is locked by default, so clear the master,
@@ -1968,6 +1999,7 @@ func Create(dbPath string, seed, pubPassphrase, privPassphrase []byte, net *btcn
 	masterKeyPriv.Zero()
 	cryptoKeyPriv.Zero()
 	cryptoKeyScript.Zero()
-	return newManager(db, net, masterKeyPub, masterKeyPriv, cryptoKeyPub,
-		cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo, config), nil
+	return newManager(namespace, net, masterKeyPub, masterKeyPriv,
+		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
+		config), nil
 }

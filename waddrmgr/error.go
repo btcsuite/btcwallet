@@ -74,10 +74,10 @@ const (
 	// key type has been selected.
 	ErrInvalidKeyType
 
-	// ErrNoExist indicates the specified database does not exist.
+	// ErrNoExist indicates the manager does not exist.
 	ErrNoExist
 
-	// ErrAlreadyExists indicates the specified database already exists.
+	// ErrAlreadyExists indicates the specified manager already exists.
 	ErrAlreadyExists
 
 	// ErrCoinTypeTooHigh indicates the coin type specified in the provided

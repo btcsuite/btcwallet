@@ -18,9 +18,15 @@ package waddrmgr_test
 
 import (
 	"encoding/hex"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/conformal/btcnet"
 	"github.com/conformal/btcwallet/waddrmgr"
+	"github.com/conformal/btcwallet/walletdb"
+	_ "github.com/conformal/btcwallet/walletdb/bdb"
 )
 
 var (
@@ -36,6 +42,14 @@ var (
 	privPassphrase  = []byte("81lUHXnOMZ@?XXd7O9xyDIWIbXX-lj")
 	pubPassphrase2  = []byte("-0NV4P~VSJBWbunw}%<Z]fuGpbN[ZI")
 	privPassphrase2 = []byte("~{<]08%6!-?2s<$(8$8:f(5[4/!/{Y")
+
+	// fastScrypt are parameters used throughout the tests to speed up the
+	// scrypt operations.
+	fastScrypt = &waddrmgr.Options{
+		ScryptN: 16,
+		ScryptR: 8,
+		ScryptP: 1,
+	}
 )
 
 // checkManagerError ensures the passed error is a ManagerError with an error
@@ -48,8 +62,8 @@ func checkManagerError(t *testing.T, testName string, gotErr error, wantErrCode 
 		return false
 	}
 	if merr.ErrorCode != wantErrCode {
-		t.Errorf("%s: unexpected error code - got %s, want %s",
-			testName, merr.ErrorCode, wantErrCode)
+		t.Errorf("%s: unexpected error code - got %s (%s), want %s",
+			testName, merr.ErrorCode, merr.Description, wantErrCode)
 		return false
 	}
 
@@ -64,4 +78,69 @@ func hexToBytes(origHex string) []byte {
 		panic(err)
 	}
 	return buf
+}
+
+// createDbNamespace creates a new wallet database at the provided path and
+// returns it along with the address manager namespace.
+func createDbNamespace(dbPath string) (walletdb.DB, walletdb.Namespace, error) {
+	db, err := walletdb.Create("bdb", dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	namespace, err := db.Namespace([]byte("waddrmgr"))
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+
+	return db, namespace, nil
+}
+
+// openDbNamespace opens wallet database at the provided path and returns it
+// along with the address manager namespace.
+func openDbNamespace(dbPath string) (walletdb.DB, walletdb.Namespace, error) {
+	db, err := walletdb.Open("bdb", dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	namespace, err := db.Namespace([]byte("waddrmgr"))
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+
+	return db, namespace, nil
+}
+
+// setupManager creates a new address manager and returns a teardown function
+// that should be invoked to ensure it is closed and removed upon completion.
+func setupManager(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
+	t.Parallel()
+
+	// Create a new manager in a temp directory.
+	dirName, err := ioutil.TempDir("", "mgrtest")
+	if err != nil {
+		t.Fatalf("Failed to create db temp dir: %v", err)
+	}
+	dbPath := filepath.Join(dirName, "mgrtest.db")
+	db, namespace, err := createDbNamespace(dbPath)
+	if err != nil {
+		_ = os.RemoveAll(dirName)
+		t.Fatalf("createDbNamespace: unexpected error: %v", err)
+	}
+	mgr, err = waddrmgr.Create(namespace, seed, pubPassphrase,
+		privPassphrase, &btcnet.MainNetParams, fastScrypt)
+	if err != nil {
+		db.Close()
+		_ = os.RemoveAll(dirName)
+		t.Fatalf("Failed to create Manager: %v", err)
+	}
+	tearDownFunc = func() {
+		mgr.Close()
+		db.Close()
+		_ = os.RemoveAll(dirName)
+	}
+	return tearDownFunc, mgr
 }

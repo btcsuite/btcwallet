@@ -20,18 +20,30 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"time"
 
-	"github.com/conformal/bolt"
+	"github.com/conformal/btcwallet/walletdb"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/fastsha256"
 )
 
 const (
-	// LatestDbVersion is the most recent database version.
-	LatestDbVersion = 1
+	// LatestMgrVersion is the most recent manager version.
+	LatestMgrVersion = 1
 )
+
+// maybeConvertDbError converts the passed error to a ManagerError with an
+// error code of ErrDatabase if it is not already a ManagerError.  This is
+// useful for potential errors returned from managed transaction an other parts
+// of the walletdb database.
+func maybeConvertDbError(err error) error {
+	// When the error is already a ManagerError, just return it.
+	if _, ok := err.(ManagerError); ok {
+		return err
+	}
+
+	return managerError(ErrDatabase, err.Error(), err)
+}
 
 // syncStatus represents a address synchronization status stored in the
 // database.
@@ -126,8 +138,8 @@ var (
 	syncBucketName        = []byte("sync")
 
 	// Db related key names (main bucket).
-	dbVersionName    = []byte("dbver")
-	dbCreateDateName = []byte("dbcreated")
+	mgrVersionName    = []byte("mgrver")
+	mgrCreateDateName = []byte("mgrcreated")
 
 	// Crypto related key names (main bucket).
 	masterPrivKeyName   = []byte("mpriv")
@@ -146,19 +158,12 @@ var (
 	acctNumAcctsName = []byte("numaccts")
 )
 
-// managerTx represents a database transaction on which all database reads and
-// writes occur.  Note that fetched bytes are only valid during the bolt
-// transaction, however they are safe to use after a manager transation has
-// been terminated.  This is why the code make copies of the data fetched from
-// bolt buckets.
-type managerTx bolt.Tx
-
-// FetchMasterKeyParams loads the master key parameters needed to derive them
+// fetchMasterKeyParams loads the master key parameters needed to derive them
 // (when given the correct user-supplied passphrase) from the database.  Either
 // returned value can be nil, but in practice only the private key params will
 // be nil for a watching-only database.
-func (mtx *managerTx) FetchMasterKeyParams() ([]byte, []byte, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(mainBucketName)
+func fetchMasterKeyParams(tx walletdb.Tx) ([]byte, []byte, error) {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
 
 	// Load the master public key parameters.  Required.
 	val := bucket.Get(masterPubKeyName)
@@ -181,11 +186,11 @@ func (mtx *managerTx) FetchMasterKeyParams() ([]byte, []byte, error) {
 	return pubParams, privParams, nil
 }
 
-// PutMasterKeyParams stores the master key parameters needed to derive them
+// putMasterKeyParams stores the master key parameters needed to derive them
 // to the database.  Either parameter can be nil in which case no value is
 // written for the parameter.
-func (mtx *managerTx) PutMasterKeyParams(pubParams, privParams []byte) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(mainBucketName)
+func putMasterKeyParams(tx walletdb.Tx, pubParams, privParams []byte) error {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
 
 	if privParams != nil {
 		err := bucket.Put(masterPrivKeyName, privParams)
@@ -206,12 +211,12 @@ func (mtx *managerTx) PutMasterKeyParams(pubParams, privParams []byte) error {
 	return nil
 }
 
-// FetchCryptoKeys loads the encrypted crypto keys which are in turn used to
+// fetchCryptoKeys loads the encrypted crypto keys which are in turn used to
 // protect the extended keys, imported keys, and scripts.  Any of the returned
 // values can be nil, but in practice only the crypto private and script keys
 // will be nil for a watching-only database.
-func (mtx *managerTx) FetchCryptoKeys() ([]byte, []byte, []byte, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(mainBucketName)
+func fetchCryptoKeys(tx walletdb.Tx) ([]byte, []byte, []byte, error) {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
 
 	// Load the crypto public key parameters.  Required.
 	val := bucket.Get(cryptoPubKeyName)
@@ -241,11 +246,11 @@ func (mtx *managerTx) FetchCryptoKeys() ([]byte, []byte, []byte, error) {
 	return pubKey, privKey, scriptKey, nil
 }
 
-// PutCryptoKeys stores the encrypted crypto keys which are in turn used to
+// putCryptoKeys stores the encrypted crypto keys which are in turn used to
 // protect the extended and imported keys.  Either parameter can be nil in which
 // case no value is written for the parameter.
-func (mtx *managerTx) PutCryptoKeys(pubKeyEncrypted, privKeyEncrypted, scriptKeyEncrypted []byte) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(mainBucketName)
+func putCryptoKeys(tx walletdb.Tx, pubKeyEncrypted, privKeyEncrypted, scriptKeyEncrypted []byte) error {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
 
 	if pubKeyEncrypted != nil {
 		err := bucket.Put(cryptoPubKeyName, pubKeyEncrypted)
@@ -274,9 +279,10 @@ func (mtx *managerTx) PutCryptoKeys(pubKeyEncrypted, privKeyEncrypted, scriptKey
 	return nil
 }
 
-// FetchWatchingOnly loads the watching-only flag from the database.
-func (mtx *managerTx) FetchWatchingOnly() (bool, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(mainBucketName)
+// fetchWatchingOnly loads the watching-only flag from the database.
+func fetchWatchingOnly(tx walletdb.Tx) (bool, error) {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
+
 	buf := bucket.Get(watchingOnlyName)
 	if len(buf) != 1 {
 		str := "malformed watching-only flag stored in database"
@@ -286,9 +292,10 @@ func (mtx *managerTx) FetchWatchingOnly() (bool, error) {
 	return buf[0] != 0, nil
 }
 
-// PutWatchingOnly stores the watching-only flag to the database.
-func (mtx *managerTx) PutWatchingOnly(watchingOnly bool) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(mainBucketName)
+// putWatchingOnly stores the watching-only flag to the database.
+func putWatchingOnly(tx walletdb.Tx, watchingOnly bool) error {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
+
 	var encoded byte
 	if watchingOnly {
 		encoded = 1
@@ -426,10 +433,10 @@ func serializeBIP0044AccountRow(encryptedPubKey,
 	return rawData
 }
 
-// FetchAccountInfo loads information about the passed account from the
+// fetchAccountInfo loads information about the passed account from the
 // database.
-func (mtx *managerTx) FetchAccountInfo(account uint32) (interface{}, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(acctBucketName)
+func fetchAccountInfo(tx walletdb.Tx, account uint32) (interface{}, error) {
+	bucket := tx.RootBucket().Bucket(acctBucketName)
 
 	accountID := accountKey(account)
 	serializedRow := bucket.Get(accountID)
@@ -454,8 +461,8 @@ func (mtx *managerTx) FetchAccountInfo(account uint32) (interface{}, error) {
 
 // putAccountRow stores the provided account information to the database.  This
 // is used a common base for storing the various account types.
-func (mtx *managerTx) putAccountRow(account uint32, row *dbAccountRow) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(acctBucketName)
+func putAccountRow(tx walletdb.Tx, account uint32, row *dbAccountRow) error {
+	bucket := tx.RootBucket().Bucket(acctBucketName)
 
 	// Write the serialized value keyed by the account number.
 	err := bucket.Put(accountKey(account), serializeAccountRow(row))
@@ -466,8 +473,8 @@ func (mtx *managerTx) putAccountRow(account uint32, row *dbAccountRow) error {
 	return nil
 }
 
-// PutAccountInfo stores the provided account information to the database.
-func (mtx *managerTx) PutAccountInfo(account uint32, encryptedPubKey,
+// putAccountInfo stores the provided account information to the database.
+func putAccountInfo(tx walletdb.Tx, account uint32, encryptedPubKey,
 	encryptedPrivKey []byte, nextExternalIndex, nextInternalIndex uint32,
 	name string) error {
 
@@ -478,13 +485,13 @@ func (mtx *managerTx) PutAccountInfo(account uint32, encryptedPubKey,
 		acctType: actBIP0044,
 		rawData:  rawData,
 	}
-	return mtx.putAccountRow(account, &acctRow)
+	return putAccountRow(tx, account, &acctRow)
 }
 
-// FetchNumAccounts loads the number of accounts that have been created from
+// fetchNumAccounts loads the number of accounts that have been created from
 // the database.
-func (mtx *managerTx) FetchNumAccounts() (uint32, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(acctBucketName)
+func fetchNumAccounts(tx walletdb.Tx) (uint32, error) {
+	bucket := tx.RootBucket().Bucket(acctBucketName)
 
 	val := bucket.Get(acctNumAcctsName)
 	if val == nil {
@@ -495,10 +502,10 @@ func (mtx *managerTx) FetchNumAccounts() (uint32, error) {
 	return binary.LittleEndian.Uint32(val), nil
 }
 
-// PutNumAccounts stores the number of accounts that have been created to the
+// putNumAccounts stores the number of accounts that have been created to the
 // database.
-func (mtx *managerTx) PutNumAccounts(numAccounts uint32) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(acctBucketName)
+func putNumAccounts(tx walletdb.Tx, numAccounts uint32) error {
+	bucket := tx.RootBucket().Bucket(acctBucketName)
 
 	var val [4]byte
 	binary.LittleEndian.PutUint32(val[:], numAccounts)
@@ -707,11 +714,11 @@ func serializeScriptAddress(encryptedHash, encryptedScript []byte) []byte {
 	return rawData
 }
 
-// FetchAddress loads address information for the provided address id from
+// fetchAddress loads address information for the provided address id from
 // the database.  The returned value is one of the address rows for the specific
 // address type.  The caller should use type assertions to ascertain the type.
-func (mtx *managerTx) FetchAddress(addressID []byte) (interface{}, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(addrBucketName)
+func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
+	bucket := tx.RootBucket().Bucket(addrBucketName)
 
 	addrHash := fastsha256.Sum256(addressID)
 	serializedRow := bucket.Get(addrHash[:])
@@ -740,8 +747,8 @@ func (mtx *managerTx) FetchAddress(addressID []byte) (interface{}, error) {
 
 // putAddress stores the provided address information to the database.  This
 // is used a common base for storing the various address types.
-func (mtx *managerTx) putAddress(addressID []byte, row *dbAddressRow) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(addrBucketName)
+func putAddress(tx walletdb.Tx, addressID []byte, row *dbAddressRow) error {
+	bucket := tx.RootBucket().Bucket(addrBucketName)
 
 	// Write the serialized value keyed by the hash of the address.  The
 	// additional hash is used to conceal the actual address while still
@@ -756,9 +763,9 @@ func (mtx *managerTx) putAddress(addressID []byte, row *dbAddressRow) error {
 	return nil
 }
 
-// PutChainedAddress stores the provided chained address information to the
+// putChainedAddress stores the provided chained address information to the
 // database.
-func (mtx *managerTx) PutChainedAddress(addressID []byte, account uint32,
+func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 	status syncStatus, branch, index uint32) error {
 
 	addrRow := dbAddressRow{
@@ -768,14 +775,14 @@ func (mtx *managerTx) PutChainedAddress(addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    serializeChainedAddress(branch, index),
 	}
-	if err := mtx.putAddress(addressID, &addrRow); err != nil {
+	if err := putAddress(tx, addressID, &addrRow); err != nil {
 		return err
 	}
 
 	// Update the next index for the appropriate internal or external
 	// branch.
 	accountID := accountKey(account)
-	bucket := (*bolt.Tx)(mtx).Bucket(acctBucketName)
+	bucket := tx.RootBucket().Bucket(acctBucketName)
 	serializedAccount := bucket.Get(accountID)
 
 	// Deserialize the account row.
@@ -811,9 +818,9 @@ func (mtx *managerTx) PutChainedAddress(addressID []byte, account uint32,
 	return nil
 }
 
-// PutImportedAddress stores the provided imported address information to the
+// putImportedAddress stores the provided imported address information to the
 // database.
-func (mtx *managerTx) PutImportedAddress(addressID []byte, account uint32,
+func putImportedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 	status syncStatus, encryptedPubKey, encryptedPrivKey []byte) error {
 
 	rawData := serializeImportedAddress(encryptedPubKey, encryptedPrivKey)
@@ -824,12 +831,12 @@ func (mtx *managerTx) PutImportedAddress(addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    rawData,
 	}
-	return mtx.putAddress(addressID, &addrRow)
+	return putAddress(tx, addressID, &addrRow)
 }
 
-// PutScriptAddress stores the provided script address information to the
+// putScriptAddress stores the provided script address information to the
 // database.
-func (mtx *managerTx) PutScriptAddress(addressID []byte, account uint32,
+func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
 	status syncStatus, encryptedHash, encryptedScript []byte) error {
 
 	rawData := serializeScriptAddress(encryptedHash, encryptedScript)
@@ -840,40 +847,39 @@ func (mtx *managerTx) PutScriptAddress(addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    rawData,
 	}
-	if err := mtx.putAddress(addressID, &addrRow); err != nil {
+	if err := putAddress(tx, addressID, &addrRow); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// ExistsAddress returns whether or not the address id exists in the database.
-func (mtx *managerTx) ExistsAddress(addressID []byte) bool {
-	bucket := (*bolt.Tx)(mtx).Bucket(addrBucketName)
+// existsAddress returns whether or not the address id exists in the database.
+func existsAddress(tx walletdb.Tx, addressID []byte) bool {
+	bucket := tx.RootBucket().Bucket(addrBucketName)
 
 	addrHash := fastsha256.Sum256(addressID)
 	return bucket.Get(addrHash[:]) != nil
 }
 
-// FetchAllAddresses loads information about all addresses from the database.
+// fetchAllAddresses loads information about all addresses from the database.
 // The returned value is a slice of address rows for each specific address type.
 // The caller should use type assertions to ascertain the types.
-func (mtx *managerTx) FetchAllAddresses() ([]interface{}, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(addrBucketName)
+func fetchAllAddresses(tx walletdb.Tx) ([]interface{}, error) {
+	bucket := tx.RootBucket().Bucket(addrBucketName)
 
 	var addrs []interface{}
-	cursor := bucket.Cursor()
-	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+	err := bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil {
-			continue
+			return nil
 		}
 
 		// Deserialize the address row first to determine the field
 		// values.
 		row, err := deserializeAddressRow(k, v)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		var addrRow interface{}
@@ -887,27 +893,31 @@ func (mtx *managerTx) FetchAllAddresses() ([]interface{}, error) {
 		default:
 			str := fmt.Sprintf("unsupported address type '%d'",
 				row.addrType)
-			return nil, managerError(ErrDatabase, str, nil)
+			return managerError(ErrDatabase, str, nil)
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		addrs = append(addrs, addrRow)
+		return nil
+	})
+	if err != nil {
+		return nil, maybeConvertDbError(err)
 	}
 
 	return addrs, nil
 }
 
-// DeletePrivateKeys removes all private key material from the database.
+// deletePrivateKeys removes all private key material from the database.
 //
 // NOTE: Care should be taken when calling this function.  It is primarily
 // intended for use in converting to a watching-only copy.  Removing the private
 // keys from the main database without also marking it watching-only will result
 // in an unusable database.  It will also make any imported scripts and private
 // keys unrecoverable unless there is a backup copy available.
-func (mtx *managerTx) DeletePrivateKeys() error {
-	bucket := (*bolt.Tx)(mtx).Bucket(mainBucketName)
+func deletePrivateKeys(tx walletdb.Tx) error {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
 
 	// Delete the master private key params and the crypto private and
 	// script keys.
@@ -925,12 +935,11 @@ func (mtx *managerTx) DeletePrivateKeys() error {
 	}
 
 	// Delete the account extended private key for all accounts.
-	bucket = (*bolt.Tx)(mtx).Bucket(acctBucketName)
-	cursor := bucket.Cursor()
-	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+	bucket = tx.RootBucket().Bucket(acctBucketName)
+	err := bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil || bytes.Equal(k, acctNumAcctsName) {
-			continue
+			return nil
 		}
 
 		// Deserialize the account row first to determine the type.
@@ -958,15 +967,19 @@ func (mtx *managerTx) DeletePrivateKeys() error {
 				return managerError(ErrDatabase, str, err)
 			}
 		}
+
+		return nil
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
 	}
 
 	// Delete the private key for all imported addresses.
-	bucket = (*bolt.Tx)(mtx).Bucket(addrBucketName)
-	cursor = bucket.Cursor()
-	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+	bucket = tx.RootBucket().Bucket(addrBucketName)
+	err = bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil {
-			continue
+			return nil
 		}
 
 		// Deserialize the address row first to determine the field
@@ -1009,15 +1022,20 @@ func (mtx *managerTx) DeletePrivateKeys() error {
 				return managerError(ErrDatabase, str, err)
 			}
 		}
+
+		return nil
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
 	}
 
 	return nil
 }
 
-// FetchSyncedTo loads the block stamp the manager is synced to from the
+// fetchSyncedTo loads the block stamp the manager is synced to from the
 // database.
-func (mtx *managerTx) FetchSyncedTo() (*BlockStamp, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(syncBucketName)
+func fetchSyncedTo(tx walletdb.Tx) (*BlockStamp, error) {
+	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized synced to format is:
 	//   <blockheight><blockhash>
@@ -1035,9 +1053,9 @@ func (mtx *managerTx) FetchSyncedTo() (*BlockStamp, error) {
 	return &bs, nil
 }
 
-// PutSyncedTo stores the provided synced to blockstamp to the database.
-func (mtx *managerTx) PutSyncedTo(bs *BlockStamp) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(syncBucketName)
+// putSyncedTo stores the provided synced to blockstamp to the database.
+func putSyncedTo(tx walletdb.Tx, bs *BlockStamp) error {
+	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized synced to format is:
 	//   <blockheight><blockhash>
@@ -1055,10 +1073,10 @@ func (mtx *managerTx) PutSyncedTo(bs *BlockStamp) error {
 	return nil
 }
 
-// FetchStartBlock loads the start block stamp for the manager from the
+// fetchStartBlock loads the start block stamp for the manager from the
 // database.
-func (mtx *managerTx) FetchStartBlock() (*BlockStamp, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(syncBucketName)
+func fetchStartBlock(tx walletdb.Tx) (*BlockStamp, error) {
+	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized start block format is:
 	//   <blockheight><blockhash>
@@ -1076,9 +1094,9 @@ func (mtx *managerTx) FetchStartBlock() (*BlockStamp, error) {
 	return &bs, nil
 }
 
-// PutStartBlock stores the provided start block stamp to the database.
-func (mtx *managerTx) PutStartBlock(bs *BlockStamp) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(syncBucketName)
+// putStartBlock stores the provided start block stamp to the database.
+func putStartBlock(tx walletdb.Tx, bs *BlockStamp) error {
+	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized start block format is:
 	//   <blockheight><blockhash>
@@ -1096,10 +1114,10 @@ func (mtx *managerTx) PutStartBlock(bs *BlockStamp) error {
 	return nil
 }
 
-// FetchRecentBlocks returns the height of the most recent block height and
+// fetchRecentBlocks returns the height of the most recent block height and
 // hashes of the most recent blocks.
-func (mtx *managerTx) FetchRecentBlocks() (int32, []btcwire.ShaHash, error) {
-	bucket := (*bolt.Tx)(mtx).Bucket(syncBucketName)
+func fetchRecentBlocks(tx walletdb.Tx) (int32, []btcwire.ShaHash, error) {
+	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:
 	//   <blockheight><numhashes><blockhashes>
@@ -1127,9 +1145,9 @@ func (mtx *managerTx) FetchRecentBlocks() (int32, []btcwire.ShaHash, error) {
 	return recentHeight, recentHashes, nil
 }
 
-// PutStartBlock stores the provided start block stamp to the database.
-func (mtx *managerTx) PutRecentBlocks(recentHeight int32, recentHashes []btcwire.ShaHash) error {
-	bucket := (*bolt.Tx)(mtx).Bucket(syncBucketName)
+// putRecentBlocks stores the provided start block stamp to the database.
+func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []btcwire.ShaHash) error {
+	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:
 	//   <blockheight><numhashes><blockhashes>
@@ -1154,166 +1172,71 @@ func (mtx *managerTx) PutRecentBlocks(recentHeight int32, recentHashes []btcwire
 	return nil
 }
 
-// managerDB provides transactional facilities to read and write the address
-// manager data to a bolt database.
-type managerDB struct {
-	db      *bolt.DB
-	version uint32
-	created time.Time
-}
-
-// Close releases all database resources.  All transactions must be closed
-// before closing the database.
-func (db *managerDB) Close() error {
-	if err := db.db.Close(); err != nil {
-		str := "failed to close database"
-		return managerError(ErrDatabase, str, err)
-	}
-
-	return nil
-}
-
-// View executes the passed function within the context of a managed read-only
-// transaction. Any error that is returned from the passed function is returned
-// from this function.
-func (db *managerDB) View(fn func(tx *managerTx) error) error {
-	err := db.db.View(func(tx *bolt.Tx) error {
-		return fn((*managerTx)(tx))
-	})
-	if err != nil {
-		// Ensure the returned error is a ManagerError.
-		if _, ok := err.(ManagerError); !ok {
-			str := "failed during database read transaction"
-			return managerError(ErrDatabase, str, err)
-		}
-		return err
-	}
-
-	return nil
-}
-
-// Update executes the passed function within the context of a read-write
-// managed transaction. The transaction is committed if no error is returned
-// from the function. On the other hand, the entire transaction is rolled back
-// if an error is returned.  Any error that is returned from the passed function
-// or returned from the commit is returned from this function.
-func (db *managerDB) Update(fn func(tx *managerTx) error) error {
-	err := db.db.Update(func(tx *bolt.Tx) error {
-		return fn((*managerTx)(tx))
-	})
-	if err != nil {
-		// Ensure the returned error is a ManagerError.
-		if _, ok := err.(ManagerError); !ok {
-			str := "failed during database write transaction"
-			return managerError(ErrDatabase, str, err)
-		}
-		return err
-	}
-
-	return nil
-}
-
-// CopyDB copies the entire database to the provided new database path.  A
-// reader transaction is maintained during the copy so it is safe to continue
-// using the database while a copy is in progress.
-func (db *managerDB) CopyDB(newDbPath string) error {
-	err := db.db.View(func(tx *bolt.Tx) error {
-		if err := tx.CopyFile(newDbPath, 0600); err != nil {
-			str := "failed to copy database"
-			return managerError(ErrDatabase, str, err)
-		}
-
+// managerExists returns whether or not the manager has already been created
+// in the given database namespace.
+func managerExists(namespace walletdb.Namespace) (bool, error) {
+	var exists bool
+	err := namespace.View(func(tx walletdb.Tx) error {
+		mainBucket := tx.RootBucket().Bucket(mainBucketName)
+		exists = mainBucket != nil
 		return nil
 	})
 	if err != nil {
-		// Ensure the returned error is a ManagerError.
-		if _, ok := err.(ManagerError); !ok {
-			str := "failed during database copy"
-			return managerError(ErrDatabase, str, err)
-		}
-		return err
+		str := fmt.Sprintf("failed to obtain database view: %v", err)
+		return false, managerError(ErrDatabase, str, err)
 	}
-
-	return nil
+	return exists, nil
 }
 
-// WriteTo writes the entire database to the provided writer.  A reader
-// transaction is maintained during the copy so it is safe to continue using the
-// database while a copy is in progress.
-func (db *managerDB) WriteTo(w io.Writer) error {
-	err := db.db.View(func(tx *bolt.Tx) error {
-		if err := tx.Copy(w); err != nil {
-			str := "failed to copy database"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		return nil
-	})
-	if err != nil {
-		// Ensure the returned error is a ManagerError.
-		if _, ok := err.(ManagerError); !ok {
-			str := "failed during database copy"
-			return managerError(ErrDatabase, str, err)
-		}
-		return err
-	}
-
-	return nil
-}
-
-// openOrCreateDB opens the database at the provided path or creates and
+// upgradeManager opens the manager using the specified namespace or creates and
 // initializes it if it does not already exist.  It also provides facilities to
-// upgrade the database to newer versions.
-func openOrCreateDB(dbPath string) (*managerDB, error) {
-	db, err := bolt.Open(dbPath, 0600, nil)
-	if err != nil {
-		str := "failed to open database"
-		return nil, managerError(ErrDatabase, str, err)
-	}
-
+// upgrade the data in the namespace to newer versions.
+func upgradeManager(namespace walletdb.Namespace) error {
 	// Initialize the buckets and main db fields as needed.
 	var version uint32
 	var createDate uint64
-	err = db.Update(func(tx *bolt.Tx) error {
-		mainBucket, err := tx.CreateBucketIfNotExists(mainBucketName)
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		rootBucket := tx.RootBucket()
+		mainBucket, err := rootBucket.CreateBucketIfNotExists(
+			mainBucketName)
 		if err != nil {
 			str := "failed to create main bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = tx.CreateBucketIfNotExists(addrBucketName)
+		_, err = rootBucket.CreateBucketIfNotExists(addrBucketName)
 		if err != nil {
 			str := "failed to create address bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = tx.CreateBucketIfNotExists(acctBucketName)
+		_, err = rootBucket.CreateBucketIfNotExists(acctBucketName)
 		if err != nil {
 			str := "failed to create account bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = tx.CreateBucketIfNotExists(addrAcctIdxBucketName)
+		_, err = rootBucket.CreateBucketIfNotExists(addrAcctIdxBucketName)
 		if err != nil {
 			str := "failed to create address index bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = tx.CreateBucketIfNotExists(syncBucketName)
+		_, err = rootBucket.CreateBucketIfNotExists(syncBucketName)
 		if err != nil {
 			str := "failed to create sync bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		// Save the most recent database version if it isn't already
+		// Save the most recent manager version if it isn't already
 		// there, otherwise keep track of it for potential upgrades.
-		verBytes := mainBucket.Get(dbVersionName)
+		verBytes := mainBucket.Get(mgrVersionName)
 		if verBytes == nil {
-			version = LatestDbVersion
+			version = LatestMgrVersion
 
 			var buf [4]byte
 			binary.LittleEndian.PutUint32(buf[:], version)
-			err := mainBucket.Put(dbVersionName, buf[:])
+			err := mainBucket.Put(mgrVersionName, buf[:])
 			if err != nil {
 				str := "failed to store latest database version"
 				return managerError(ErrDatabase, str, err)
@@ -1322,12 +1245,12 @@ func openOrCreateDB(dbPath string) (*managerDB, error) {
 			version = binary.LittleEndian.Uint32(verBytes)
 		}
 
-		createBytes := mainBucket.Get(dbCreateDateName)
+		createBytes := mainBucket.Get(mgrCreateDateName)
 		if createBytes == nil {
 			createDate = uint64(time.Now().Unix())
 			var buf [8]byte
 			binary.LittleEndian.PutUint64(buf[:], createDate)
-			err := mainBucket.Put(dbCreateDateName, buf[:])
+			err := mainBucket.Put(mgrCreateDateName, buf[:])
 			if err != nil {
 				str := "failed to store database creation time"
 				return managerError(ErrDatabase, str, err)
@@ -1340,17 +1263,13 @@ func openOrCreateDB(dbPath string) (*managerDB, error) {
 	})
 	if err != nil {
 		str := "failed to update database"
-		return nil, managerError(ErrDatabase, str, err)
+		return managerError(ErrDatabase, str, err)
 	}
 
-	// Upgrade the database as needed.
-	if version < LatestDbVersion {
+	// Upgrade the manager as needed.
+	if version < LatestMgrVersion {
 		// No upgrades yet.
 	}
 
-	return &managerDB{
-		db:      db,
-		version: version,
-		created: time.Unix(int64(createDate), 0),
-	}, nil
+	return nil
 }

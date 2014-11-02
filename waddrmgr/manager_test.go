@@ -19,7 +19,6 @@ package waddrmgr_test
 import (
 	"encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"testing"
@@ -27,6 +26,7 @@ import (
 	"github.com/conformal/btcnet"
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/waddrmgr"
+	"github.com/conformal/btcwallet/walletdb"
 	"github.com/conformal/btcwire"
 )
 
@@ -52,6 +52,7 @@ func newShaHash(hexStr string) *btcwire.ShaHash {
 // spent.
 type testContext struct {
 	t            *testing.T
+	db           walletdb.DB
 	manager      *waddrmgr.Manager
 	account      uint32
 	create       bool
@@ -82,12 +83,6 @@ func testNamePrefix(tc *testContext) string {
 	}
 
 	return prefix + fmt.Sprintf("account #%d", tc.account)
-}
-
-var fastScrypt = &waddrmgr.Options{
-	ScryptN: 16,
-	ScryptR: 8,
-	ScryptP: 1,
 }
 
 // testManagedPubKeyAddress ensures the data returned by all exported functions
@@ -1134,32 +1129,52 @@ func testManagerAPI(tc *testContext) {
 	testChangePassphrase(tc)
 }
 
-// testExportWatchingOnly tests various facets of a watching-only address
-// manager such as running the full set of API tests against a newly exported
-// copy as well as when it is opened.
-func testExportWatchingOnly(tc *testContext) bool {
-	// Export the manager as watching-only.
+// testWatchingOnly tests various facets of a watching-only address
+// manager such as running the full set of API tests against a newly converted
+// copy as well as when it is opened from an existing namespace.
+func testWatchingOnly(tc *testContext) bool {
+	// Make a copy of the current database so the copy can be converted to
+	// watching only.
 	woMgrName := "mgrtestwo.bin"
 	_ = os.Remove(woMgrName)
-	mgr, err := tc.manager.ExportWatchingOnly(woMgrName, pubPassphrase)
+	fi, err := os.OpenFile(woMgrName, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		tc.t.Errorf("ExportWatchingOnly: unexpected error: %v", err)
+		tc.t.Errorf("%v", err)
 		return false
 	}
+	if err := tc.db.Copy(fi); err != nil {
+		fi.Close()
+		tc.t.Errorf("%v", err)
+		return false
+	}
+	fi.Close()
 	defer os.Remove(woMgrName)
-	// NOTE: Not using deferred close here since part of the tests is
-	// explicitly closing the manager and then opening the existing one.
 
-	// Exporting to an existing manager should fail.
-	_, err = tc.manager.ExportWatchingOnly(woMgrName, pubPassphrase)
-	if !checkManagerError(tc.t, "Export watching-only", err, waddrmgr.ErrAlreadyExists) {
-		mgr.Close()
+	// Open the new database copy and get the address manager namespace.
+	db, namespace, err := openDbNamespace(woMgrName)
+	if err != nil {
+		tc.t.Errorf("openDbNamespace: unexpected error: %v", err)
+		return false
+	}
+	defer db.Close()
+
+	// Open the manager using the namespace and convert it to watching-only.
+	mgr, err := waddrmgr.Open(namespace, pubPassphrase,
+		&btcnet.MainNetParams, fastScrypt)
+	if err != nil {
+		tc.t.Errorf("%v", err)
+		return false
+	}
+	if err := mgr.ConvertToWatchingOnly(pubPassphrase); err != nil {
+		tc.t.Errorf("%v", err)
 		return false
 	}
 
-	// Run all of the manager API tests and close the manager.
+	// Run all of the manager API tests against the converted manager and
+	// close it.
 	testManagerAPI(&testContext{
 		t:            tc.t,
+		db:           db,
 		manager:      mgr,
 		account:      0,
 		create:       false,
@@ -1168,7 +1183,8 @@ func testExportWatchingOnly(tc *testContext) bool {
 	mgr.Close()
 
 	// Open the watching-only manager and run all the tests again.
-	mgr, err = waddrmgr.Open(woMgrName, pubPassphrase, &btcnet.MainNetParams, fastScrypt)
+	mgr, err = waddrmgr.Open(namespace, pubPassphrase, &btcnet.MainNetParams,
+		fastScrypt)
 	if err != nil {
 		tc.t.Errorf("Open Watching-Only: unexpected error: %v", err)
 		return false
@@ -1177,6 +1193,7 @@ func testExportWatchingOnly(tc *testContext) bool {
 
 	testManagerAPI(&testContext{
 		t:            tc.t,
+		db:           db,
 		manager:      mgr,
 		account:      0,
 		create:       false,
@@ -1436,31 +1453,39 @@ func testSync(tc *testContext) bool {
 // It makes use of a test context because the address manager is persistent and
 // much of the testing involves having specific state.
 func TestManager(t *testing.T) {
+	dbName := "mgrtest.bin"
+	_ = os.Remove(dbName)
+	db, mgrNamespace, err := createDbNamespace(dbName)
+	if err != nil {
+		t.Errorf("createDbNamespace: unexpected error: %v", err)
+		return
+	}
+	defer os.Remove(dbName)
+	defer db.Close()
+
 	// Open manager that does not exist to ensure the expected error is
 	// returned.
-	mgrName := "mgrtest.bin"
-	_ = os.Remove(mgrName)
-	_, err := waddrmgr.Open(mgrName, pubPassphrase, &btcnet.MainNetParams,
-		fastScrypt)
+	_, err = waddrmgr.Open(mgrNamespace, pubPassphrase,
+		&btcnet.MainNetParams, fastScrypt)
 	if !checkManagerError(t, "Open non-existant", err, waddrmgr.ErrNoExist) {
 		return
 	}
 
 	// Create a new manager.
-	mgr, err := waddrmgr.Create(mgrName, seed, pubPassphrase, privPassphrase,
-		&btcnet.MainNetParams, fastScrypt)
+	mgr, err := waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
+		privPassphrase, &btcnet.MainNetParams, fastScrypt)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
 		return
 	}
-	defer os.Remove(mgrName)
+
 	// NOTE: Not using deferred close here since part of the tests is
 	// explicitly closing the manager and then opening the existing one.
 
 	// Attempt to create the manager again to ensure the expected error is
 	// returned.
-	_, err = waddrmgr.Create(mgrName, seed, pubPassphrase, privPassphrase,
-		&btcnet.MainNetParams, fastScrypt)
+	_, err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
+		privPassphrase, &btcnet.MainNetParams, fastScrypt)
 	if !checkManagerError(t, "Create existing", err, waddrmgr.ErrAlreadyExists) {
 		mgr.Close()
 		return
@@ -1470,6 +1495,7 @@ func TestManager(t *testing.T) {
 	// manager after they've completed
 	testManagerAPI(&testContext{
 		t:            t,
+		db:           db,
 		manager:      mgr,
 		account:      0,
 		create:       true,
@@ -1479,8 +1505,8 @@ func TestManager(t *testing.T) {
 
 	// Open the manager and run all the tests again in open mode which
 	// avoids reinserting new addresses like the create mode tests do.
-	mgr, err = waddrmgr.Open(mgrName, pubPassphrase, &btcnet.MainNetParams,
-		fastScrypt)
+	mgr, err = waddrmgr.Open(mgrNamespace, pubPassphrase,
+		&btcnet.MainNetParams, fastScrypt)
 	if err != nil {
 		t.Errorf("Open: unexpected error: %v", err)
 		return
@@ -1489,6 +1515,7 @@ func TestManager(t *testing.T) {
 
 	tc := &testContext{
 		t:            t,
+		db:           db,
 		manager:      mgr,
 		account:      0,
 		create:       false,
@@ -1498,7 +1525,7 @@ func TestManager(t *testing.T) {
 
 	// Now that the address manager has been tested in both the newly
 	// created and opened modes, test a watching-only version.
-	testExportWatchingOnly(tc)
+	testWatchingOnly(tc)
 
 	// Ensure that the manager sync state functionality works as expected.
 	testSync(tc)
@@ -1508,31 +1535,6 @@ func TestManager(t *testing.T) {
 	if err := mgr.Unlock(privPassphrase); err != nil {
 		t.Errorf("Unlock: unexpected error: %v", err)
 	}
-}
-
-// setupManager creates a new address manager and returns a teardown function
-// that should be invoked to ensure it is closed and removed upon completion.
-func setupManager(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
-	t.Parallel()
-
-	// Create a new manager.
-	// We create the file and immediately delete it, as the waddrmgr
-	// needs to be doing the creating.
-	file, err := ioutil.TempDir("", "mgrtest")
-	if err != nil {
-		t.Fatalf("Failed to create db file: %v", err)
-	}
-	_ = os.Remove(file)
-	mgr, err = waddrmgr.Create(file, seed, pubPassphrase, privPassphrase,
-		&btcnet.MainNetParams, fastScrypt)
-	if err != nil {
-		t.Fatalf("Failed to create Manager: %v", err)
-	}
-	tearDownFunc = func() {
-		mgr.Close()
-		os.Remove(file)
-	}
-	return tearDownFunc, mgr
 }
 
 // TestEncryptDecryptErrors ensures that errors which occur while encrypting and

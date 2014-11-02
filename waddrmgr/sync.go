@@ -19,6 +19,7 @@ package waddrmgr
 import (
 	"sync"
 
+	"github.com/conformal/btcwallet/walletdb"
 	"github.com/conformal/btcwire"
 )
 
@@ -210,13 +211,13 @@ func (m *Manager) SetSyncedTo(bs *BlockStamp) error {
 	}
 
 	// Update the database.
-	err := m.db.Update(func(tx *managerTx) error {
-		err := tx.PutSyncedTo(bs)
+	err := m.namespace.Update(func(tx walletdb.Tx) error {
+		err := putSyncedTo(tx, bs)
 		if err != nil {
 			return err
 		}
 
-		return tx.PutRecentBlocks(recentHeight, recentHashes)
+		return putRecentBlocks(tx, recentHeight, recentHashes)
 	})
 	if err != nil {
 		return err
