@@ -23,7 +23,11 @@ interface. The functions are only exported while the tests are being run.
 
 package waddrmgr
 
-import "github.com/conformal/btcwallet/snacl"
+import (
+	"errors"
+
+	"github.com/conformal/btcwallet/snacl"
+)
 
 // TstMaxRecentHashes makes the unexported maxRecentHashes constant available
 // when tests are run.
@@ -50,4 +54,25 @@ func (m *Manager) TstCheckPublicPassphrase(pubPassphrase []byte) bool {
 	secretKey.Parameters = m.masterKeyPub.Parameters
 	err := secretKey.DeriveKey(&pubPassphrase)
 	return err == nil
+}
+
+type failingCryptoKey struct {
+	cryptoKey
+}
+
+func (c *failingCryptoKey) Encrypt(in []byte) ([]byte, error) {
+	return nil, errors.New("failed to encrypt")
+}
+
+func (c *failingCryptoKey) Decrypt(in []byte) ([]byte, error) {
+	return nil, errors.New("failed to decrypt")
+}
+
+func TstRunWithFailingCryptoKeyPriv(m *Manager, callback func()) {
+	orig := m.cryptoKeyPriv
+	defer func() {
+		m.cryptoKeyPriv = orig
+	}()
+	m.cryptoKeyPriv = &failingCryptoKey{}
+	callback()
 }
