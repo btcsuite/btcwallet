@@ -154,26 +154,6 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrTooManyAddresses:  "ErrTooManyAddresses",
 	ErrWrongPassphrase:   "ErrWrongPassphrase",
 	ErrWrongNet:          "ErrWrongNet",
-
-	// The following error codes are defined in pool_error.go.
-	ErrSeriesStorage:             "ErrSeriesStorage",
-	ErrSeriesVersion:             "ErrSeriesVersion",
-	ErrSeriesNotExists:           "ErrSeriesNotExists",
-	ErrSeriesAlreadyExists:       "ErrSeriesAlreadyExists",
-	ErrSeriesAlreadyEmpowered:    "ErrSeriesAlreadyEmpowered",
-	ErrKeyIsPrivate:              "ErrKeyIsPrivate",
-	ErrKeyIsPublic:               "ErrKeyIsPublic",
-	ErrKeyNeuter:                 "ErrKeyNeuter",
-	ErrKeyMismatch:               "ErrKeyMismatch",
-	ErrKeysPrivatePublicMismatch: "ErrKeysPrivatePublicMismatch",
-	ErrKeyDuplicate:              "ErrKeyDuplicate",
-	ErrTooFewPublicKeys:          "ErrTooFewPublicKeys",
-	ErrVotingPoolAlreadyExists:   "ErrVotingPoolAlreadyExists",
-	ErrVotingPoolNotExists:       "ErrVotingPoolNotExists",
-	ErrScriptCreation:            "ErrScriptCreation",
-	ErrTooManyReqSignatures:      "ErrTooManyReqSignatures",
-	ErrInvalidBranch:             "ErrInvalidBranch",
-	ErrInvalidValue:              "ErrInvalidValue",
 }
 
 // String returns the ErrorCode as a human-readable name.

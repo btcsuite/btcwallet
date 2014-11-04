@@ -628,7 +628,7 @@ func (t *TxRecord) AddDebits() (Debits, error) {
 	defer t.s.mtx.Unlock()
 
 	if t.debits == nil {
-		spent, err := t.s.findPreviousCredits(t.Tx())
+		spent, err := t.s.FindPreviousCredits(t.Tx())
 		if err != nil {
 			return Debits{}, err
 		}
@@ -654,9 +654,9 @@ func (t *TxRecord) AddDebits() (Debits, error) {
 	return d, nil
 }
 
-// findPreviousCredits searches for all unspent credits that make up the inputs
+// FindPreviousCredits searches for all unspent credits that make up the inputs
 // for tx.
-func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]Credit, error) {
+func (s *Store) FindPreviousCredits(tx *btcutil.Tx) ([]Credit, error) {
 	type createdCredit struct {
 		credit Credit
 		err    error

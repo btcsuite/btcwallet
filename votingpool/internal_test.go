@@ -17,10 +17,15 @@
 package votingpool
 
 import (
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
+
+var TstLastErr = lastErr
+
+const TstEligibleInputMinConfirmations = eligibleInputMinConfirmations
 
 // TstPutSeries transparently wraps the voting pool putSeries method.
 func (vp *Pool) TstPutSeries(version, seriesID, reqSigs uint32, inRawPubKeys []string) error {
@@ -31,7 +36,24 @@ var TstBranchOrder = branchOrder
 
 // TstExistsSeries checks whether a series is stored in the database.
 func (vp *Pool) TstExistsSeries(seriesID uint32) (bool, error) {
-	return vp.existsSeries(seriesID)
+	var exists bool
+	err := vp.namespace.View(
+		func(tx walletdb.Tx) error {
+			poolBucket := tx.RootBucket().Bucket(vp.ID)
+			if poolBucket == nil {
+				return nil
+			}
+			bucket := poolBucket.Bucket(seriesBucketName)
+			if bucket == nil {
+				return nil
+			}
+			exists = bucket.Get(uint32ToBytes(seriesID)) != nil
+			return nil
+		})
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // TstNamespace exposes the Pool's namespace as it's needed in some tests.
@@ -74,44 +96,7 @@ func (vp *Pool) TstDecryptExtendedKey(keyType waddrmgr.CryptoKeyType, encrypted 
 	return vp.decryptExtendedKey(keyType, encrypted)
 }
 
-// SeriesRow mimics dbSeriesRow defined in db.go .
-type SeriesRow struct {
-	Version           uint32
-	Active            bool
-	ReqSigs           uint32
-	PubKeysEncrypted  [][]byte
-	PrivKeysEncrypted [][]byte
+// TstGetMsgTx returns the withdrawal transaction with the given ntxid.
+func (s *WithdrawalStatus) TstGetMsgTx(ntxid Ntxid) *wire.MsgTx {
+	return s.transactions[ntxid].MsgTx
 }
-
-// SerializeSeries wraps serializeSeriesRow by passing it a freshly-built
-// dbSeriesRow.
-func SerializeSeries(version uint32, active bool, reqSigs uint32, pubKeys, privKeys [][]byte) ([]byte, error) {
-	row := &dbSeriesRow{
-		version:           version,
-		active:            active,
-		reqSigs:           reqSigs,
-		pubKeysEncrypted:  pubKeys,
-		privKeysEncrypted: privKeys,
-	}
-	return serializeSeriesRow(row)
-}
-
-// DeserializeSeries wraps deserializeSeriesRow and returns a freshly-built
-// SeriesRow.
-func DeserializeSeries(serializedSeries []byte) (*SeriesRow, error) {
-	row, err := deserializeSeriesRow(serializedSeries)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &SeriesRow{
-		Version:           row.version,
-		Active:            row.active,
-		ReqSigs:           row.reqSigs,
-		PubKeysEncrypted:  row.pubKeysEncrypted,
-		PrivKeysEncrypted: row.privKeysEncrypted,
-	}, nil
-}
-
-var TstValidateAndDecryptKeys = validateAndDecryptKeys
