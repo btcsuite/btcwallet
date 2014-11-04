@@ -25,22 +25,23 @@ import (
 	"strings"
 
 	"github.com/conformal/btcutil"
+	"github.com/conformal/btcwallet/legacy/keystore"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/go-flags"
 )
 
 const (
-	defaultCAFilename       = "btcd.cert"
-	defaultConfigFilename   = "btcwallet.conf"
-	defaultBtcNet           = btcwire.TestNet3
-	defaultLogLevel         = "info"
-	defaultLogDirname       = "logs"
-	defaultLogFilename      = "btcwallet.log"
-	defaultDisallowFree     = false
-	defaultRPCMaxClients    = 10
-	defaultRPCMaxWebsockets = 25
-	addrMgrName             = "addrmgr.bin"
-	addrMgrWatchingOnlyName = "addrmgrwo.bin"
+	defaultCAFilename        = "btcd.cert"
+	defaultConfigFilename    = "btcwallet.conf"
+	defaultBtcNet            = btcwire.TestNet3
+	defaultLogLevel          = "info"
+	defaultLogDirname        = "logs"
+	defaultLogFilename       = "btcwallet.log"
+	defaultDisallowFree      = false
+	defaultRPCMaxClients     = 10
+	defaultRPCMaxWebsockets  = 25
+	walletDbName             = "wallet.db"
+	walletDbWatchingOnlyName = "wowallet.db"
 )
 
 var (
@@ -244,7 +245,7 @@ func loadConfig() (*config, []string, error) {
 		ConfigFile:       defaultConfigFile,
 		DataDir:          defaultDataDir,
 		LogDir:           defaultLogDir,
-		WalletPass:       walletPubPassphrase,
+		WalletPass:       defaultPubPassphrase,
 		RPCKey:           defaultRPCKeyFile,
 		RPCCert:          defaultRPCCertFile,
 		DisallowFree:     defaultDisallowFree,
@@ -363,11 +364,11 @@ func loadConfig() (*config, []string, error) {
 
 	// Ensure the wallet exists or create it when the create flag is set.
 	netDir := networkDir(cfg.DataDir, activeNet.Params)
-	mgrPath := filepath.Join(netDir, addrMgrName)
+	dbPath := filepath.Join(netDir, walletDbName)
 	if cfg.Create {
 		// Error if the create flag is set and the wallet already
 		// exists.
-		if fileExists(mgrPath) {
+		if fileExists(dbPath) {
 			err := fmt.Errorf("The wallet already exists.")
 			fmt.Fprintln(os.Stderr, err)
 			return nil, nil, err
@@ -388,9 +389,16 @@ func loadConfig() (*config, []string, error) {
 		// Created successfully, so exit now with success.
 		os.Exit(0)
 
-	} else if !fileExists(mgrPath) {
-		err := fmt.Errorf("The wallet does not exist.  Run with the " +
-			"--create option to initialize and create it.")
+	} else if !fileExists(dbPath) {
+		var err error
+		keystorePath := filepath.Join(netDir, keystore.Filename)
+		if !fileExists(keystorePath) {
+			err = fmt.Errorf("The wallet does not exist.  Run with the " +
+				"--create option to initialize and create it.")
+		} else {
+			err = fmt.Errorf("The wallet is in legacy format.  Run with the " +
+				"--create option to import it.")
+		}
 		fmt.Fprintln(os.Stderr, err)
 		return nil, nil, err
 	}

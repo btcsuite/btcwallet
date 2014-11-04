@@ -29,6 +29,8 @@ import (
 	"github.com/conformal/btcutil/hdkeychain"
 	"github.com/conformal/btcwallet/legacy/keystore"
 	"github.com/conformal/btcwallet/waddrmgr"
+	"github.com/conformal/btcwallet/walletdb"
+	_ "github.com/conformal/btcwallet/walletdb/bdb"
 )
 
 // promptConsoleList prompts the user with the given prefix, list of valid
@@ -164,7 +166,7 @@ func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Sto
 // both.  Finally, all prompts are repeated until the user enters a valid
 // response.
 func promptConsolePublicPass(reader *bufio.Reader, privPass string, cfg *config) (string, error) {
-	pubPass := walletPubPassphrase
+	pubPass := defaultPubPassphrase
 	usePubPass, err := promptConsoleListBool(reader, "Do you want "+
 		"to add an additional layer of encryption for public "+
 		"data?", "no")
@@ -386,9 +388,21 @@ func createWallet(cfg *config) error {
 	}
 
 	// Create the wallet.
-	mgrPath := filepath.Join(netDir, addrMgrName)
+	dbPath := filepath.Join(netDir, walletDbName)
 	fmt.Println("Creating the wallet...")
-	manager, err := waddrmgr.Create(mgrPath, seed, []byte(pubPass),
+
+	// Create the wallet database backed by bolt db.
+	db, err := walletdb.Create("bdb", dbPath)
+	if err != nil {
+		return err
+	}
+
+	// Create the address manager.
+	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	manager, err := waddrmgr.Create(namespace, seed, []byte(pubPass),
 		[]byte(privPass), activeNet.Params, nil)
 	if err != nil {
 		return err

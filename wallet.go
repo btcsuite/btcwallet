@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -35,6 +36,7 @@ import (
 	"github.com/conformal/btcwallet/chain"
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/waddrmgr"
+	"github.com/conformal/btcwallet/walletdb"
 	"github.com/conformal/btcwire"
 )
 
@@ -46,11 +48,18 @@ var (
 	ErrNotSynced = errors.New("wallet is not synchronized with the chain server")
 )
 
-// walletPubPassphrase is the default public wallet passphrase which is
-// used when the user indicates they do not want additional protection
-// provided by having all public data in the wallet encrypted by a
-// passphrase only known to them.
-var walletPubPassphrase = "public"
+var (
+	// waddrmgrNamespaceKey is the namespace key for the waddrmgr package.
+	waddrmgrNamespaceKey = []byte("waddrmgr")
+)
+
+const (
+	// defaultPubPassphrase is the default public wallet passphrase which is
+	// used when the user indicates they do not want additional protection
+	// provided by having all public data in the wallet encrypted by a
+	// passphrase only known to them.
+	defaultPubPassphrase = "public"
+)
 
 // networkDir returns the directory name of a network directory to hold wallet
 // files.
@@ -74,6 +83,7 @@ func networkDir(dataDir string, net *btcnet.Params) string {
 // addresses and keys),
 type Wallet struct {
 	// Data stores
+	db      walletdb.DB
 	Manager *waddrmgr.Manager
 	TxStore *txstore.Store
 
@@ -1018,34 +1028,73 @@ func (w *Wallet) ImportPrivateKey(wif *btcutil.WIF, bs *waddrmgr.BlockStamp,
 	return addrStr, nil
 }
 
-// ExportWatchingWallet returns the watching-only copy of a wallet. Both wallets
-// share the same tx store, so locking one will lock the other as well.  The
-// returned wallet should be serialized and exported quickly, and then dropped
-// from scope.
-func (w *Wallet) ExportWatchingWallet() (*Wallet, error) {
+// ExportWatchingWallet returns a watching-only version of the wallet serialized
+// in a map.
+func (w *Wallet) ExportWatchingWallet() (map[string]string, error) {
 	tmpDir, err := ioutil.TempDir("", "btcwallet")
 	if err != nil {
 		return nil, err
 	}
+	defer os.RemoveAll(tmpDir)
 
-	mgrPath := filepath.Join(tmpDir, addrMgrWatchingOnlyName)
-	wo, err := w.Manager.ExportWatchingOnly(mgrPath, []byte(cfg.WalletPass))
+	// Create a new file and write a copy of the current database into it.
+	woDbPath := filepath.Join(tmpDir, walletDbWatchingOnlyName)
+	fi, err := os.OpenFile(woDbPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
+	if err := w.db.Copy(fi); err != nil {
+		fi.Close()
+		return nil, err
+	}
+	fi.Close()
+	defer os.Remove(woDbPath)
 
-	wa := *w
-	wa.Manager = wo
-	return &wa, nil
+	// Open the new database, get the address manager namespace, and open
+	// it.
+	woDb, err := walletdb.Open("bdb", woDbPath)
+	if err != nil {
+		_ = os.Remove(woDbPath)
+		return nil, err
+	}
+	defer woDb.Close()
+
+	namespace, err := woDb.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return nil, err
+	}
+	woMgr, err := waddrmgr.Open(namespace, []byte(cfg.WalletPass),
+		activeNet.Params, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer woMgr.Close()
+
+	// Convert the namespace to watching only if needed.
+	if err := woMgr.ConvertToWatchingOnly(); err != nil {
+		// Only return the error is it's not because it's already
+		// watching-only.  When it is already watching-only, the code
+		// just falls through to the export below.
+		if merr, ok := err.(waddrmgr.ManagerError); ok &&
+			merr.ErrorCode != waddrmgr.ErrWatchingOnly {
+			return nil, err
+		}
+	}
+
+	// Export the watching only wallet's serialized data.
+	woWallet := *w
+	woWallet.db = woDb
+	woWallet.Manager = woMgr
+	return woWallet.exportBase64()
 }
 
-// exportBase64 exports a wallet's serialized key, and tx stores as
+// exportBase64 exports a wallet's serialized database and tx store as
 // base64-encoded values in a map.
 func (w *Wallet) exportBase64() (map[string]string, error) {
 	var buf bytes.Buffer
 	m := make(map[string]string)
 
-	if err := w.Manager.Export(&buf); err != nil {
+	if err := w.db.Copy(&buf); err != nil {
 		return nil, err
 	}
 	m["wallet"] = base64.StdEncoding.EncodeToString(buf.Bytes())
@@ -1297,16 +1346,28 @@ func (w *Wallet) TxRecord(txSha *btcwire.ShaHash) (r *txstore.TxRecord, ok bool)
 // openWallet opens a wallet from disk.
 func openWallet() (*Wallet, error) {
 	netdir := networkDir(cfg.DataDir, activeNet.Params)
-	mgrPath := filepath.Join(netdir, addrMgrName)
+	dbPath := filepath.Join(netdir, walletDbName)
 
 	// Ensure that the network directory exists.
 	if err := checkCreateDir(netdir); err != nil {
 		return nil, err
 	}
 
+	// Open the database using the boltdb backend.
+	db, err := walletdb.Open("bdb", dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the namespace for the address manager.
+	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return nil, err
+	}
+
 	// Open address manager and transaction store.
 	var txs *txstore.Store
-	mgr, err := waddrmgr.Open(mgrPath, []byte(cfg.WalletPass),
+	mgr, err := waddrmgr.Open(namespace, []byte(cfg.WalletPass),
 		activeNet.Params, nil)
 	if err == nil {
 		txs, err = txstore.OpenDir(netdir)
@@ -1331,5 +1392,7 @@ func openWallet() (*Wallet, error) {
 	}
 
 	log.Infof("Opened wallet files") // TODO: log balance? last sync height?
-	return newWallet(mgr, txs), nil
+	wallet := newWallet(mgr, txs)
+	wallet.db = db
+	return wallet, nil
 }

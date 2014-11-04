@@ -1668,12 +1668,7 @@ func ExportWatchingWallet(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (
 		return nil, err
 	}
 
-	wa, err := w.ExportWatchingWallet()
-	if err != nil {
-		return nil, err
-	}
-
-	return wa.exportBase64()
+	return w.ExportWatchingWallet()
 }
 
 // GetAddressesByAccount handles a getaddressesbyaccount request by returning
@@ -1725,7 +1720,9 @@ func GetInfo(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, 
 		return nil, err
 	}
 
-	info.WalletVersion = int32(waddrmgr.LatestDbVersion)
+	// TODO(davec): This should probably have a database version as opposed
+	// to using the manager version.
+	info.WalletVersion = int32(waddrmgr.LatestMgrVersion)
 	info.Balance = bal.ToUnit(btcutil.AmountBTC)
 	// Keypool times are not tracked. set to current time.
 	info.KeypoolOldest = time.Now().Unix()

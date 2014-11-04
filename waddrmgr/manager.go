@@ -787,7 +787,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 //
 // Executing this function on a manager that is already watching-only will have
 // no effect.
-func (m *Manager) ConvertToWatchingOnly(pubPassphrase []byte) error {
+func (m *Manager) ConvertToWatchingOnly() error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 

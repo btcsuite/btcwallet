@@ -13,6 +13,8 @@ import (
 	"github.com/conformal/btcutil/hdkeychain"
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwallet/waddrmgr"
+	"github.com/conformal/btcwallet/walletdb"
+	_ "github.com/conformal/btcwallet/walletdb/bdb"
 	"github.com/conformal/btcwire"
 )
 
@@ -163,8 +165,17 @@ func checkOutputsMatch(t *testing.T, msgtx *btcwire.MsgTx, expected map[string]b
 
 // newManager creates a new waddrmgr and imports the given privKey into it.
 func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddrmgr.Manager {
-	dbPath := filepath.Join(os.TempDir(), "waddrmgr.bin")
+	dbPath := filepath.Join(os.TempDir(), "wallet.bin")
 	os.Remove(dbPath)
+	db, err := walletdb.Create("bdb", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	if err != nil {
@@ -173,8 +184,8 @@ func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddr
 
 	pubPassphrase := []byte("pub")
 	privPassphrase := []byte("priv")
-	mgr, err := waddrmgr.Create(dbPath, seed, pubPassphrase, privPassphrase,
-		activeNet.Params, fastScrypt)
+	mgr, err := waddrmgr.Create(namespace, seed, pubPassphrase,
+		privPassphrase, activeNet.Params, fastScrypt)
 	if err != nil {
 		t.Fatal(err)
 	}
