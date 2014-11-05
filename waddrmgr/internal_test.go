@@ -68,7 +68,7 @@ func (c *failingCryptoKey) Decrypt(in []byte) ([]byte, error) {
 	return nil, errors.New("failed to decrypt")
 }
 
-func TstRunWithReplacedCryptoKeyPriv(m *Manager, callback func()) {
+func TstRunWithFailingCryptoKeyPriv(m *Manager, callback func()) {
 	orig := m.cryptoKeyPriv
 	defer func() {
 		m.cryptoKeyPriv = orig

@@ -1565,12 +1565,14 @@ func TestEncryptDecryptErrors(t *testing.T) {
 		t.Fatal("Attempted to unlock the manager, but failed:", err)
 	}
 
-	waddrmgr.TstRunWithReplacedCryptoKeyPriv(mgr, func() {
+	// Make sure to cover the ErrCrypto error path in Encrypt.
+	waddrmgr.TstRunWithFailingCryptoKeyPriv(mgr, func() {
 		_, err = mgr.Encrypt(waddrmgr.CKTPrivate, []byte{})
 	})
 	checkManagerError(t, "failed encryption", err, waddrmgr.ErrCrypto)
 
-	waddrmgr.TstRunWithReplacedCryptoKeyPriv(mgr, func() {
+	// Make sure to cover the ErrCrypto error path in Decrypt.
+	waddrmgr.TstRunWithFailingCryptoKeyPriv(mgr, func() {
 		_, err = mgr.Decrypt(waddrmgr.CKTPrivate, []byte{})
 	})
 	checkManagerError(t, "failed decryption", err, waddrmgr.ErrCrypto)
