@@ -2894,25 +2894,6 @@ func VerifyMessage(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interfa
 		return nil, ParseError{err}
 	}
 
-	switch addr.(type) {
-	case *btcutil.AddressPubKeyHash: // ok
-	case *btcutil.AddressPubKey: // ok
-	default:
-		return nil, errors.New("address type not supported")
-	}
-
-	// First check we know about the address and get the keys.
-	ainfo, err := w.KeyStore.Address(addr)
-	if err != nil {
-		return nil, btcjson.ErrInvalidAddressOrKey
-	}
-
-	pka := ainfo.(keystore.PubKeyAddress)
-	privkey, err := pka.PrivKey()
-	if err != nil {
-		return nil, err
-	}
-
 	// decode base64 signature
 	sig, err := base64.StdEncoding.DecodeString(cmd.Signature)
 	if err != nil {
@@ -2928,9 +2909,21 @@ func VerifyMessage(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interfa
 		return nil, err
 	}
 
-	// Return boolean if keys match.
-	return (pk.X.Cmp(privkey.X) == 0 && pk.Y.Cmp(privkey.Y) == 0 &&
-		ainfo.Compressed() == wasCompressed), nil
+	var serializedPubKey []byte
+	if wasCompressed {
+		serializedPubKey = pk.SerializeCompressed()
+	} else {
+		serializedPubKey = pk.SerializeUncompressed()
+	}
+	// Verify that the signed-by address matches the given address
+	switch checkAddr := addr.(type) {
+	case *btcutil.AddressPubKeyHash: // ok
+		return bytes.Equal(btcutil.Hash160(serializedPubKey), checkAddr.Hash160()[:]), nil
+	case *btcutil.AddressPubKey: // ok
+		return string(serializedPubKey) == checkAddr.String(), nil
+	default:
+		return nil, errors.New("address type not supported")
+	}
 }
 
 // WalletIsLocked handles the walletislocked extension request by
