@@ -85,7 +85,8 @@ func ExampleDB_namespace() {
 	defer teardownFunc()
 
 	// Get or create a namespace in the database as needed.  This namespace
-	// is what
+	// is what is typically passed to specific sub-packages so they have
+	// their own area to work in without worrying about conflicting keys.
 	namespaceKey := []byte("walletsubpackage")
 	namespace, err := db.Namespace(namespaceKey)
 	if err != nil {
