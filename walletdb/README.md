@@ -63,7 +63,7 @@ $ go get github.com/conformal/btcwallet/walletdb
 ## Examples
 
 * [Basic Usage Example]
-  (http://godoc.org/github.com/conformal/btcwallet/walletdb#example--basicUsage)  
+  (http://godoc.org/github.com/conformal/btcwallet/walletdb#example-package--BasicUsage)  
   Demonstrates creating a new database, getting a namespace from it, and using a
   managed read-write transaction against the namespace to store and retrieve
   data.
