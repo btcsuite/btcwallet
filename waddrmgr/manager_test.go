@@ -1510,30 +1510,35 @@ func TestManager(t *testing.T) {
 	}
 }
 
-func setUp(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
+// setupManager creates a new address manager and returns a teardown function
+// that should be invoked to ensure it is closed and removed upon completion.
+func setupManager(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
 	t.Parallel()
+
 	// Create a new manager.
 	// We create the file and immediately delete it, as the waddrmgr
 	// needs to be doing the creating.
-	file, err := ioutil.TempDir("", "pool_test")
+	file, err := ioutil.TempDir("", "mgrtest")
 	if err != nil {
 		t.Fatalf("Failed to create db file: %v", err)
 	}
-	os.Remove(file)
+	_ = os.Remove(file)
 	mgr, err = waddrmgr.Create(file, seed, pubPassphrase, privPassphrase,
 		&btcnet.MainNetParams, fastScrypt)
 	if err != nil {
 		t.Fatalf("Failed to create Manager: %v", err)
 	}
 	tearDownFunc = func() {
-		os.Remove(file)
 		mgr.Close()
+		os.Remove(file)
 	}
 	return tearDownFunc, mgr
 }
 
+// TestEncryptDecryptErrors ensures that errors which occur while encrypting and
+// decrypting data return the expected errors.
 func TestEncryptDecryptErrors(t *testing.T) {
-	teardown, mgr := setUp(t)
+	teardown, mgr := setupManager(t)
 	defer teardown()
 
 	invalidKeyType := waddrmgr.CryptoKeyType(0xff)
@@ -1578,8 +1583,10 @@ func TestEncryptDecryptErrors(t *testing.T) {
 	checkManagerError(t, "failed decryption", err, waddrmgr.ErrCrypto)
 }
 
+// TestEncryptDecrypt ensures that encrypting and decrypting data with the
+// the various crypto key types works as expected.
 func TestEncryptDecrypt(t *testing.T) {
-	teardown, mgr := setUp(t)
+	teardown, mgr := setupManager(t)
 	defer teardown()
 
 	plainText := []byte("this is a plaintext")

@@ -56,18 +56,29 @@ func (m *Manager) TstCheckPublicPassphrase(pubPassphrase []byte) bool {
 	return err == nil
 }
 
+// failingCryptoKey is an implementation of the EncryptorDecryptor interface
+// with intentionally fails when attempting to encrypt or decrypt with it.
 type failingCryptoKey struct {
 	cryptoKey
 }
 
+// Encrypt intenionally returns a failure when invoked to test error paths.
+//
+// This is part of the EncryptorDecryptor interface implementation.
 func (c *failingCryptoKey) Encrypt(in []byte) ([]byte, error) {
 	return nil, errors.New("failed to encrypt")
 }
 
+// Decrypt intenionally returns a failure when invoked to test error paths.
+//
+// This is part of the EncryptorDecryptor interface implementation.
 func (c *failingCryptoKey) Decrypt(in []byte) ([]byte, error) {
 	return nil, errors.New("failed to decrypt")
 }
 
+// TstRunWithFailingCryptoKeyPriv runs the provided callback with the
+// private crypto key replaced with a version that fails to help test error
+// paths.
 func TstRunWithFailingCryptoKeyPriv(m *Manager, callback func()) {
 	orig := m.cryptoKeyPriv
 	defer func() {
