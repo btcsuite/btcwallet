@@ -19,7 +19,7 @@ package main
 import (
 	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/chain"
-	"github.com/conformal/btcwallet/keystore"
+	"github.com/conformal/btcwallet/waddrmgr"
 	"github.com/conformal/btcwire"
 )
 
@@ -47,7 +47,7 @@ type RescanJob struct {
 	InitialSync bool
 	Addrs       []btcutil.Address
 	OutPoints   []*btcwire.OutPoint
-	BlockStamp  keystore.BlockStamp
+	BlockStamp  waddrmgr.BlockStamp
 	err         chan error
 }
 
@@ -57,7 +57,7 @@ type rescanBatch struct {
 	initialSync bool
 	addrs       []btcutil.Address
 	outpoints   []*btcwire.OutPoint
-	bs          keystore.BlockStamp
+	bs          waddrmgr.BlockStamp
 	errChans    []chan error
 }
 
@@ -172,9 +172,8 @@ out:
 	w.wg.Done()
 }
 
-// rescanProgressHandler handles notifications for paritally and fully completed
-// rescans by marking each rescanned address as partially or fully synced and
-// writing the keystore back to disk.
+// rescanProgressHandler handles notifications for partially and fully completed
+// rescans by marking each rescanned address as partially or fully synced.
 func (w *Wallet) rescanProgressHandler() {
 out:
 	for {
@@ -187,21 +186,14 @@ out:
 			log.Infof("Rescanned through block %v (height %d)",
 				n.Hash, n.Height)
 
-			// TODO(jrick): save partial syncs should also include
-			// the block hash.
-			for _, addr := range msg.Addresses {
-				err := w.KeyStore.SetSyncStatus(addr,
-					keystore.PartialSync(n.Height))
-				if err != nil {
-					log.Errorf("Error marking address %v "+
-						"partially synced: %v", addr, err)
-				}
+			bs := waddrmgr.BlockStamp{
+				Hash:   *n.Hash,
+				Height: n.Height,
 			}
-			w.KeyStore.MarkDirty()
-			err := w.KeyStore.WriteIfDirty()
-			if err != nil {
-				log.Errorf("Could not write partial rescan "+
-					"progress to keystore: %v", err)
+			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+				log.Errorf("Failed to update address manager "+
+					"sync state for hash %v (height %d): %v",
+					n.Hash, n.Height, err)
 			}
 
 		case msg := <-w.rescanFinished:
@@ -212,11 +204,17 @@ out:
 				w.Track()
 				w.ResendUnminedTxs()
 
-				bs := keystore.BlockStamp{
-					Hash:   n.Hash,
+				bs := waddrmgr.BlockStamp{
+					Hash:   *n.Hash,
 					Height: n.Height,
 				}
-				w.KeyStore.SetSyncedWith(&bs)
+				err := w.Manager.SetSyncedTo(&bs)
+				if err != nil {
+					log.Errorf("Failed to update address "+
+						"manager sync state for hash "+
+						"%v (height %d): %v", n.Hash,
+						n.Height, err)
+				}
 				w.notifyConnectedBlock(bs)
 
 				// Mark wallet as synced to chain so connected
@@ -227,21 +225,6 @@ out:
 			log.Infof("Finished rescan for %d %s (synced to block "+
 				"%s, height %d)", len(addrs), noun, n.Hash,
 				n.Height)
-
-			for _, addr := range addrs {
-				err := w.KeyStore.SetSyncStatus(addr,
-					keystore.FullSync{})
-				if err != nil {
-					log.Errorf("Error marking address %v "+
-						"fully synced: %v", addr, err)
-				}
-			}
-			w.KeyStore.MarkDirty()
-			err := w.KeyStore.WriteIfDirty()
-			if err != nil {
-				log.Errorf("Could not write finished rescan "+
-					"progress to keystore: %v", err)
-			}
 
 		case <-w.quit:
 			break out
@@ -261,7 +244,7 @@ func (w *Wallet) rescanRPCHandler() {
 		log.Infof("Started rescan from block %v (height %d) for %d %s",
 			batch.bs.Hash, batch.bs.Height, numAddrs, noun)
 
-		err := w.chainSvr.Rescan(batch.bs.Hash, batch.addrs,
+		err := w.chainSvr.Rescan(&batch.bs.Hash, batch.addrs,
 			batch.outpoints)
 		if err != nil {
 			log.Errorf("Rescan for %d %s failed: %v", numAddrs,
@@ -272,34 +255,24 @@ func (w *Wallet) rescanRPCHandler() {
 	w.wg.Done()
 }
 
-// RescanActiveAddresses begins a rescan for all active addresses of a
-// wallet.  This is intended to be used to sync a wallet back up to the
-// current best block in the main chain, and is considered an intial sync
-// rescan.
-func (w *Wallet) RescanActiveAddresses() (err error) {
-	// Determine the block necesary to start the rescan for all active
-	// addresses.
-	hash, height := w.KeyStore.SyncedTo()
-	if hash == nil {
-		// TODO: fix our "synced to block" handling (either in
-		// keystore or txstore, or elsewhere) so this *always*
-		// returns the block hash.  Looking it up by height is
-		// asking for problems.
-		hash, err = w.chainSvr.GetBlockHash(int64(height))
-		if err != nil {
-			return
-		}
+// RescanActiveAddresses begins a rescan for all active addresses of a wallet.
+// This is intended to be used to sync a wallet back up to the current best
+// block in the main chain, and is considered an initial sync rescan.
+func (w *Wallet) RescanActiveAddresses() error {
+	addrs, err := w.Manager.AllActiveAddresses()
+	if err != nil {
+		return err
 	}
 
-	actives := w.KeyStore.SortedActiveAddresses()
-	addrs := make([]btcutil.Address, len(actives))
-	for i, addr := range actives {
-		addrs[i] = addr.Address()
+	// in case there are no addresses, we can skip queuing the rescan job
+	if len(addrs) == 0 {
+		close(w.chainSynced)
+		return nil
 	}
 
 	unspents, err := w.TxStore.UnspentOutputs()
 	if err != nil {
-		return
+		return err
 	}
 	outpoints := make([]*btcwire.OutPoint, len(unspents))
 	for i, output := range unspents {
@@ -310,7 +283,7 @@ func (w *Wallet) RescanActiveAddresses() (err error) {
 		InitialSync: true,
 		Addrs:       addrs,
 		OutPoints:   outpoints,
-		BlockStamp:  keystore.BlockStamp{Hash: hash, Height: height},
+		BlockStamp:  w.Manager.SyncedTo(),
 	}
 
 	// Submit merged job and block until rescan completes.

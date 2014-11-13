@@ -139,8 +139,8 @@ func defaultNewSecretKey(passphrase *[]byte, config *Options) (*snacl.SecretKey,
 // paths.
 var newSecretKey = defaultNewSecretKey
 
-// EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that our
-// tests can use dependency injection to force the behaviour they need.
+// EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that
+// our tests can use dependency injection to force the behaviour they need.
 type EncryptorDecryptor interface {
 	Encrypt(in []byte) ([]byte, error)
 	Decrypt(in []byte) ([]byte, error)
@@ -787,7 +787,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 //
 // Executing this function on a manager that is already watching-only will have
 // no effect.
-func (m *Manager) ConvertToWatchingOnly(pubPassphrase []byte) error {
+func (m *Manager) ConvertToWatchingOnly() error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
@@ -1113,6 +1113,14 @@ func (m *Manager) IsLocked() bool {
 	defer m.mtx.RUnlock()
 
 	return m.locked
+}
+
+// IsWatchingOnly returns whether or not the address manager is watching-only.
+func (m *Manager) IsWatchingOnly() bool {
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	return m.watchingOnly
 }
 
 // Lock performs a best try effort to remove and zero all secret keys associated

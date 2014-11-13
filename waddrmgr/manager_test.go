@@ -1165,7 +1165,7 @@ func testWatchingOnly(tc *testContext) bool {
 		tc.t.Errorf("%v", err)
 		return false
 	}
-	if err := mgr.ConvertToWatchingOnly(pubPassphrase); err != nil {
+	if err := mgr.ConvertToWatchingOnly(); err != nil {
 		tc.t.Errorf("%v", err)
 		return false
 	}
@@ -1453,6 +1453,8 @@ func testSync(tc *testContext) bool {
 // It makes use of a test context because the address manager is persistent and
 // much of the testing involves having specific state.
 func TestManager(t *testing.T) {
+	t.Parallel()
+
 	dbName := "mgrtest.bin"
 	_ = os.Remove(dbName)
 	db, mgrNamespace, err := createDbNamespace(dbName)

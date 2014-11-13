@@ -2,14 +2,19 @@ package main
 
 import (
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcutil"
-	"github.com/conformal/btcwallet/keystore"
+	"github.com/conformal/btcutil/hdkeychain"
 	"github.com/conformal/btcwallet/txstore"
+	"github.com/conformal/btcwallet/waddrmgr"
+	"github.com/conformal/btcwallet/walletdb"
+	_ "github.com/conformal/btcwallet/walletdb/bdb"
 	"github.com/conformal/btcwire"
 )
 
@@ -40,6 +45,14 @@ var (
 	outAddr2 = "12MzCDwodF9G1e7jfwLXfR164RNtx4BRVG"
 )
 
+// fastScrypt are options to passed to the wallet address manager to speed up
+// the scrypt derivations.
+var fastScrypt = &waddrmgr.Options{
+	ScryptN: 16,
+	ScryptR: 8,
+	ScryptP: 1,
+}
+
 func Test_addOutputs(t *testing.T) {
 	msgtx := btcwire.NewMsgTx()
 	pairs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1}
@@ -58,10 +71,10 @@ func Test_addOutputs(t *testing.T) {
 
 func TestCreateTx(t *testing.T) {
 	cfg = &config{DisallowFree: false}
-	bs := &keystore.BlockStamp{Height: 11111}
-	keys := newKeyStore(t, txInfo.privKeys, bs)
+	bs := &waddrmgr.BlockStamp{Height: 11111}
+	mgr := newManager(t, txInfo.privKeys, bs)
 	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
-	var tstChangeAddress = func(bs *keystore.BlockStamp) (btcutil.Address, error) {
+	var tstChangeAddress = func(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
 
@@ -69,7 +82,7 @@ func TestCreateTx(t *testing.T) {
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
 	// Now create a new TX sending 25e6 satoshis to the following addresses:
 	outputs := map[string]btcutil.Amount{outAddr1: 15e6, outAddr2: 10e6}
-	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, keys, tstChangeAddress)
+	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, tstChangeAddress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +123,9 @@ func TestCreateTxInsufficientFundsError(t *testing.T) {
 	cfg = &config{DisallowFree: false}
 	outputs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1e9}
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1})
-	bs := &keystore.BlockStamp{Height: 11111}
+	bs := &waddrmgr.BlockStamp{Height: 11111}
 	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
-	var tstChangeAddress = func(bs *keystore.BlockStamp) (btcutil.Address, error) {
+	var tstChangeAddress = func(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
 
@@ -150,28 +163,47 @@ func checkOutputsMatch(t *testing.T, msgtx *btcwire.MsgTx, expected map[string]b
 	}
 }
 
-// newKeyStore creates a new keystore and imports the given privKey into it.
-func newKeyStore(t *testing.T, privKeys []string, bs *keystore.BlockStamp) *keystore.Store {
-	passphrase := []byte{0, 1}
-	keys, err := keystore.New("/tmp/keys.bin", "Default acccount", passphrase,
-		activeNet.Params, bs)
+// newManager creates a new waddrmgr and imports the given privKey into it.
+func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddrmgr.Manager {
+	dbPath := filepath.Join(os.TempDir(), "wallet.bin")
+	os.Remove(dbPath)
+	db, err := walletdb.Create("bdb", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pubPassphrase := []byte("pub")
+	privPassphrase := []byte("priv")
+	mgr, err := waddrmgr.Create(namespace, seed, pubPassphrase,
+		privPassphrase, activeNet.Params, fastScrypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for _, key := range privKeys {
 		wif, err := btcutil.DecodeWIF(key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = keys.Unlock(passphrase); err != nil {
+		if err = mgr.Unlock(privPassphrase); err != nil {
 			t.Fatal(err)
 		}
-		_, err = keys.ImportPrivateKey(wif, bs)
+		_, err = mgr.ImportPrivateKey(wif, bs)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	return keys
+	return mgr
 }
 
 // eligibleInputsFromTx decodes the given txHex and returns the outputs with
