@@ -1115,6 +1115,14 @@ func (m *Manager) IsLocked() bool {
 	return m.locked
 }
 
+// IsWatchingOnly returns whether or not the address manager is watching-only.
+func (m *Manager) IsWatchingOnly() bool {
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	return m.watchingOnly
+}
+
 // Lock performs a best try effort to remove and zero all secret keys associated
 // with the address manager.
 //

@@ -2800,16 +2800,20 @@ func ValidateAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (inter
 		return nil, err
 	}
 
-	// The address lookup was successful which means there is further
-	// information about it available and it is "mine".
-	result.IsMine = true
 	result.Account = ""
+	result.IsWatchOnly = w.Manager.IsWatchingOnly()
 
 	switch ma := ainfo.(type) {
 	case waddrmgr.ManagedPubKeyAddress:
 		result.IsCompressed = ma.Compressed()
 		result.PubKey = ma.ExportPubKey()
 
+		// The address is "mine" if the associated private key is managed
+		// by the wallet and it's outputs are spendable
+		_, err := ma.PrivKey()
+		if err == nil {
+			result.IsMine = true
+		}
 	case waddrmgr.ManagedScriptAddress:
 		result.IsScript = true
 
