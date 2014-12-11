@@ -7,8 +7,8 @@ import (
 	"errors"
 	"io"
 
-	"code.google.com/p/go.crypto/nacl/secretbox"
-	"code.google.com/p/go.crypto/scrypt"
+	"golang.org/x/crypto/nacl/secretbox"
+	"golang.org/x/crypto/scrypt"
 
 	"github.com/conformal/fastsha256"
 )
