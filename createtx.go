@@ -128,7 +128,7 @@ func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 // to addr or as a fee for the miner are sent to a newly generated
 // address. InsufficientFundsError is returned if there are not enough
 // eligible unspent outputs to create the transaction.
-func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*CreatedTx, error) {
+func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, account uint32, minconf int) (*CreatedTx, error) {
 
 	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
@@ -145,12 +145,12 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*Creat
 		return nil, err
 	}
 
-	eligible, err := w.findEligibleOutputs(minconf, bs)
+	eligible, err := w.findEligibleOutputs(account, minconf, bs)
 	if err != nil {
 		return nil, err
 	}
 
-	return createTx(eligible, pairs, bs, w.FeeIncrement, w.Manager, w.changeAddress)
+	return createTx(eligible, pairs, bs, w.FeeIncrement, w.Manager, account, w.NewChangeAddress)
 }
 
 // createTx selects inputs (from the given slice of eligible utxos)
@@ -164,7 +164,8 @@ func createTx(
 	bs *waddrmgr.BlockStamp,
 	feeIncrement btcutil.Amount,
 	mgr *waddrmgr.Manager,
-	changeAddress func(*waddrmgr.BlockStamp) (btcutil.Address, error)) (
+	account uint32,
+	changeAddress func(account uint32) (btcutil.Address, error)) (
 	*CreatedTx, error) {
 
 	msgtx := wire.NewMsgTx()
@@ -220,7 +221,7 @@ func createTx(
 		change := totalAdded - minAmount - feeEst
 		if change > 0 {
 			if changeAddr == nil {
-				changeAddr, err = changeAddress(bs)
+				changeAddr, err = changeAddress(account)
 				if err != nil {
 					return nil, err
 				}
@@ -293,23 +294,6 @@ func addChange(msgtx *wire.MsgTx, change btcutil.Amount, changeAddr btcutil.Addr
 	return int(r), nil
 }
 
-// changeAddress obtains a new btcutil.Address to be used as a change
-// transaction output. It will also mark the KeyStore as dirty and
-// tells chainSvr to watch that address.
-func (w *Wallet) changeAddress(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
-	changeAddrs, err := w.Manager.NextInternalAddresses(0, 1)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get change address: %s", err)
-	}
-	changeAddr := changeAddrs[0].Address()
-	err = w.chainSvr.NotifyReceived([]btcutil.Address{changeAddr})
-	if err != nil {
-		return nil, fmt.Errorf("cannot request updates for "+
-			"change address: %v", err)
-	}
-	return changeAddr, nil
-}
-
 // addOutputs adds the given address/amount pairs as outputs to msgtx,
 // returning their total amount.
 func addOutputs(msgtx *wire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amount, error) {
@@ -335,7 +319,7 @@ func addOutputs(msgtx *wire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amo
 	return minAmount, nil
 }
 
-func (w *Wallet) findEligibleOutputs(minconf int, bs *waddrmgr.BlockStamp) ([]txstore.Credit, error) {
+func (w *Wallet) findEligibleOutputs(account uint32, minconf int, bs *waddrmgr.BlockStamp) ([]txstore.Credit, error) {
 	unspent, err := w.TxStore.UnspentOutputs()
 	if err != nil {
 		return nil, err
@@ -365,7 +349,13 @@ func (w *Wallet) findEligibleOutputs(minconf int, bs *waddrmgr.BlockStamp) ([]tx
 				continue
 			}
 
-			eligible = append(eligible, unspent[i])
+			creditAccount, err := w.CreditAccount(unspent[i])
+			if err != nil {
+				continue
+			}
+			if creditAccount == account {
+				eligible = append(eligible, unspent[i])
+			}
 		}
 	}
 	return eligible, nil

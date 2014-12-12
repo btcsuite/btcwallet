@@ -73,8 +73,9 @@ func TestCreateTx(t *testing.T) {
 	cfg = &config{DisallowFree: false}
 	bs := &waddrmgr.BlockStamp{Height: 11111}
 	mgr := newManager(t, txInfo.privKeys, bs)
+	account := uint32(0)
 	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
-	var tstChangeAddress = func(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
+	var tstChangeAddress = func(account uint32) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
 
@@ -82,7 +83,7 @@ func TestCreateTx(t *testing.T) {
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
 	// Now create a new TX sending 25e6 satoshis to the following addresses:
 	outputs := map[string]btcutil.Amount{outAddr1: 15e6, outAddr2: 10e6}
-	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, tstChangeAddress)
+	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, account, tstChangeAddress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,12 +125,13 @@ func TestCreateTxInsufficientFundsError(t *testing.T) {
 	outputs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1e9}
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1})
 	bs := &waddrmgr.BlockStamp{Height: 11111}
+	account := uint32(0)
 	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
-	var tstChangeAddress = func(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
+	var tstChangeAddress = func(account uint32) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
 
-	_, err := createTx(eligible, outputs, bs, defaultFeeIncrement, nil, tstChangeAddress)
+	_, err := createTx(eligible, outputs, bs, defaultFeeIncrement, nil, account, tstChangeAddress)
 
 	if err == nil {
 		t.Error("Expected InsufficientFundsError, got no error")

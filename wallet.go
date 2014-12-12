@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,10 +36,12 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
 
 // ErrNotSynced describes an error where an operation cannot complete
@@ -56,7 +60,59 @@ const (
 	// provided by having all public data in the wallet encrypted by a
 	// passphrase only known to them.
 	defaultPubPassphrase = "public"
+
+	// maxEmptyAccounts is the number of accounts to scan even if they have no
+	// transaction history. This is a deviation from BIP044 to make account
+	// creation more easier by allowing a limited number of empty accounts.
+	maxEmptyAccounts = 100
 )
+
+// promptSeed is used to prompt for the wallet seed which maybe required during
+// upgrades.
+func promptSeed() ([]byte, error) {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Enter existing wallet seed: ")
+		seedStr, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		seedStr = strings.TrimSpace(strings.ToLower(seedStr))
+
+		seed, err := hex.DecodeString(seedStr)
+		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
+			len(seed) > hdkeychain.MaxSeedBytes {
+
+			fmt.Printf("Invalid seed specified.  Must be a "+
+				"hexadecimal value that is at least %d bits and "+
+				"at most %d bits\n", hdkeychain.MinSeedBytes*8,
+				hdkeychain.MaxSeedBytes*8)
+			continue
+		}
+
+		return seed, nil
+	}
+}
+
+// promptPrivPassPhrase is used to prompt for the private passphrase which maybe
+// required during upgrades.
+func promptPrivPassPhrase() ([]byte, error) {
+	prompt := "Enter the private passphrase of your wallet: "
+	for {
+		fmt.Print(prompt)
+		pass, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+		if err != nil {
+			return nil, err
+		}
+		fmt.Print("\n")
+		pass = bytes.TrimSpace(pass)
+		if len(pass) == 0 {
+			continue
+		}
+
+		return pass, nil
+	}
+}
 
 // networkDir returns the directory name of a network directory to hold wallet
 // files.
@@ -169,6 +225,15 @@ func (w *Wallet) updateNotificationLock() {
 		return
 	}
 	w.notificationLock = noopLocker{}
+}
+
+// CreditAccount returns the first account that can be associated
+// with the given credit.
+// If no account is found, ErrAccountNotFound is returned.
+func (w *Wallet) CreditAccount(c txstore.Credit) (uint32, error) {
+	_, addrs, _, _ := c.Addresses(activeNet.Params)
+	addr := addrs[0]
+	return w.Manager.AddrAccount(addr)
 }
 
 // ListenConnectedBlocks returns a channel that passes all blocks that a wallet
@@ -470,6 +535,7 @@ func (w *Wallet) syncWithChain() error {
 
 type (
 	createTxRequest struct {
+		account uint32
 		pairs   map[string]btcutil.Amount
 		minconf int
 		resp    chan createTxResponse
@@ -495,7 +561,7 @@ out:
 	for {
 		select {
 		case txr := <-w.createTxRequests:
-			tx, err := w.txToPairs(txr.pairs, txr.minconf)
+			tx, err := w.txToPairs(txr.pairs, txr.account, txr.minconf)
 			txr.resp <- createTxResponse{tx, err}
 
 		case <-w.quit:
@@ -511,8 +577,11 @@ out:
 // automatically included, if necessary.  All transaction creation through
 // this function is serialized to prevent the creation of many transactions
 // which spend the same outputs.
-func (w *Wallet) CreateSimpleTx(pairs map[string]btcutil.Amount, minconf int) (*CreatedTx, error) {
+func (w *Wallet) CreateSimpleTx(account uint32, pairs map[string]btcutil.Amount,
+	minconf int) (*CreatedTx, error) {
+
 	req := createTxRequest{
+		account: account,
 		pairs:   pairs,
 		minconf: minconf,
 		resp:    make(chan createTxResponse),
@@ -722,6 +791,22 @@ func (w *Wallet) AddressUsed(addr waddrmgr.ManagedAddress) bool {
 	return addr.Used()
 }
 
+// AccountUsed returns whether there are any recorded transactions spending to
+// a given account. It returns true if atleast one address in the account was
+// used and false if no address in the account was used.
+func (w *Wallet) AccountUsed(account uint32) (bool, error) {
+	addrs, err := w.Manager.AllAccountAddresses(account)
+	if err != nil {
+		return false, err
+	}
+	for _, addr := range addrs {
+		if w.AddressUsed(addr) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // CalculateBalance sums the amounts of all unspent transaction
 // outputs to addresses of a wallet and returns the balance.
 //
@@ -735,19 +820,51 @@ func (w *Wallet) CalculateBalance(confirms int) (btcutil.Amount, error) {
 	return w.TxStore.Balance(confirms, blk.Height)
 }
 
+// CalculateAccountBalance sums the amounts of all unspent transaction
+// outputs to the given account of a wallet and returns the balance.
+func (w *Wallet) CalculateAccountBalance(account uint32, confirms int) (btcutil.Amount, error) {
+	var bal btcutil.Amount
+
+	// Get current block.  The block height used for calculating
+	// the number of tx confirmations.
+	blk := w.Manager.SyncedTo()
+
+	unspent, err := w.TxStore.UnspentOutputs()
+	if err != nil {
+		return 0, err
+	}
+	for _, c := range unspent {
+		if c.IsCoinbase() {
+			if !c.Confirmed(blockchain.CoinbaseMaturity, blk.Height) {
+				continue
+			}
+		}
+		if c.Confirmed(confirms, blk.Height) {
+			creditAccount, err := w.CreditAccount(c)
+			if err != nil {
+				continue
+			}
+			if creditAccount == account {
+				bal += c.Amount()
+			}
+		}
+	}
+	return bal, nil
+}
+
 // CurrentAddress gets the most recently requested Bitcoin payment address
 // from a wallet.  If the address has already been used (there is at least
 // one transaction spending to it in the blockchain or btcd mempool), the next
 // chained address is returned.
-func (w *Wallet) CurrentAddress() (btcutil.Address, error) {
-	addr, err := w.Manager.LastExternalAddress(0)
+func (w *Wallet) CurrentAddress(account uint32) (btcutil.Address, error) {
+	addr, err := w.Manager.LastExternalAddress(account)
 	if err != nil {
 		return nil, err
 	}
 
 	// Get next chained address if the last one has already been used.
 	if w.AddressUsed(addr) {
-		return w.NewAddress()
+		return w.NewAddress(account)
 	}
 
 	return addr.Address(), nil
@@ -773,7 +890,7 @@ func (w *Wallet) ListSinceBlock(since, curBlockHeight int32,
 			continue
 		}
 
-		jsonResults, err := txRecord.ToJSON("", curBlockHeight,
+		jsonResults, err := txRecord.ToJSON(waddrmgr.DefaultAccountName, curBlockHeight,
 			w.Manager.ChainParams())
 		if err != nil {
 			return nil, err
@@ -798,7 +915,7 @@ func (w *Wallet) ListTransactions(from, count int) ([]btcjson.ListTransactionsRe
 	lastLookupIdx := len(records) - count
 	// Search in reverse order: lookup most recently-added first.
 	for i := len(records) - 1; i >= from && i >= lastLookupIdx; i-- {
-		jsonResults, err := records[i].ToJSON("", blk.Height,
+		jsonResults, err := records[i].ToJSON(waddrmgr.DefaultAccountName, blk.Height,
 			w.Manager.ChainParams())
 		if err != nil {
 			return nil, err
@@ -837,7 +954,7 @@ func (w *Wallet) ListAddressTransactions(pkHashes map[string]struct{}) (
 			if _, ok := pkHashes[string(apkh.ScriptAddress())]; !ok {
 				continue
 			}
-			jsonResult, err := c.ToJSON("", blk.Height,
+			jsonResult, err := c.ToJSON(waddrmgr.DefaultAccountName, blk.Height,
 				w.Manager.ChainParams())
 			if err != nil {
 				return nil, err
@@ -862,7 +979,7 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 	// Search in reverse order: lookup most recently-added first.
 	records := w.TxStore.Records()
 	for i := len(records) - 1; i >= 0; i-- {
-		jsonResults, err := records[i].ToJSON("", blk.Height,
+		jsonResults, err := records[i].ToJSON(waddrmgr.DefaultAccountName, blk.Height,
 			w.Manager.ChainParams())
 		if err != nil {
 			return nil, err
@@ -906,6 +1023,15 @@ func (w *Wallet) ListUnspent(minconf, maxconf int,
 			continue
 		}
 
+		creditAccount, err := w.CreditAccount(credit)
+		if err != nil {
+			continue
+		}
+		accountName, err := w.Manager.AccountName(creditAccount)
+		if err != nil {
+			return nil, err
+		}
+
 		_, addrs, _, _ := credit.Addresses(activeNet.Params)
 		if filter {
 			for _, addr := range addrs {
@@ -920,9 +1046,9 @@ func (w *Wallet) ListUnspent(minconf, maxconf int,
 		result := &btcjson.ListUnspentResult{
 			TxId:          credit.Tx().Sha().String(),
 			Vout:          credit.OutputIndex,
-			Account:       "",
+			Account:       accountName,
 			ScriptPubKey:  hex.EncodeToString(credit.TxOut().PkScript),
-			Amount:        credit.Amount().ToUnit(btcutil.AmountBTC),
+			Amount:        credit.Amount().ToBTC(),
 			Confirmations: int64(confs),
 		}
 
@@ -1197,9 +1323,8 @@ func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
 }
 
 // NewAddress returns the next external chained address for a wallet.
-func (w *Wallet) NewAddress() (btcutil.Address, error) {
+func (w *Wallet) NewAddress(account uint32) (btcutil.Address, error) {
 	// Get next address from wallet.
-	account := uint32(0)
 	addrs, err := w.Manager.NextExternalAddresses(account, 1)
 	if err != nil {
 		return nil, err
@@ -1218,9 +1343,8 @@ func (w *Wallet) NewAddress() (btcutil.Address, error) {
 }
 
 // NewChangeAddress returns a new change address for a wallet.
-func (w *Wallet) NewChangeAddress() (btcutil.Address, error) {
-	// Get next chained change address from wallet for account 0.
-	account := uint32(0)
+func (w *Wallet) NewChangeAddress(account uint32) (btcutil.Address, error) {
+	// Get next chained change address from wallet for account.
 	addrs, err := w.Manager.NextInternalAddresses(account, 1)
 	if err != nil {
 		return nil, err
@@ -1239,27 +1363,35 @@ func (w *Wallet) NewChangeAddress() (btcutil.Address, error) {
 	return utilAddrs[0], nil
 }
 
-// TotalReceived iterates through a wallet's transaction history, returning the
-// total amount of bitcoins received for any wallet address.  Amounts received
-// through multisig transactions are ignored.
-func (w *Wallet) TotalReceived(confirms int) (btcutil.Amount, error) {
+// TotalReceivedForAccount iterates through a wallet's transaction history,
+// returning the total amount of bitcoins received for a single wallet
+// account.
+func (w *Wallet) TotalReceivedForAccount(account uint32, confirms int) (btcutil.Amount, uint64, error) {
 	blk := w.Manager.SyncedTo()
+
+	// Number of confirmations of the last transaction.
+	var confirmations uint64
 
 	var amount btcutil.Amount
 	for _, r := range w.TxStore.Records() {
 		for _, c := range r.Credits() {
-			// Ignore change.
-			if c.Change() {
+			if !c.Confirmed(confirms, blk.Height) {
+				// Not enough confirmations, skip the current block.
 				continue
 			}
-
-			// Tally if the appropiate number of block confirmations have passed.
-			if c.Confirmed(confirms, blk.Height) {
+			creditAccount, err := w.CreditAccount(c)
+			if err != nil {
+				continue
+			}
+			if creditAccount == account {
 				amount += c.Amount()
+				confirmations = uint64(c.Confirmations(blk.Height))
+				break
 			}
 		}
 	}
-	return amount, nil
+
+	return amount, confirmations, nil
 }
 
 // TotalReceivedForAddr iterates through a wallet's transaction history,
@@ -1329,8 +1461,12 @@ func openWallet() (*Wallet, error) {
 
 	// Open address manager and transaction store.
 	var txs *txstore.Store
+	config := &waddrmgr.Options{
+		ObtainSeed:        promptSeed,
+		ObtainPrivatePass: promptPrivPassPhrase,
+	}
 	mgr, err := waddrmgr.Open(namespace, []byte(cfg.WalletPass),
-		activeNet.Params, nil)
+		activeNet.Params, config)
 	if err == nil {
 		txs, err = txstore.OpenDir(netdir)
 	}
