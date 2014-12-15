@@ -333,6 +333,7 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 
 	tlsConfig := tls.Config{
 		Certificates: []tls.Certificate{keypair},
+		MinVersion:   tls.VersionTLS12,
 	}
 
 	ipv4ListenAddrs, ipv6ListenAddrs, err := parseListeners(listenAddrs)
