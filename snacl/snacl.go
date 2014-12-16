@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"runtime"
+	"runtime/debug"
 
 	"golang.org/x/crypto/nacl/secretbox"
 	"golang.org/x/crypto/scrypt"
@@ -129,7 +129,7 @@ func (sk *SecretKey) deriveKey(password *[]byte) error {
 	// example, if your scrypt parameters are such that you require 1GB and
 	// you call it twice in a row, without this you end up allocating 2GB
 	// since the first GB probably hasn't been released yet.
-	runtime.GC()
+	debug.FreeOSMemory()
 
 	return nil
 }
