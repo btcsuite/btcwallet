@@ -99,9 +99,9 @@ var ErrNonPositiveAmount = errors.New("amount is not positive")
 // negative.
 var ErrNegativeFee = errors.New("fee is negative")
 
-// defaultFeeIncrement is the default minimum transation fee (0.0001 BTC,
+// defaultFeeIncrement is the default minimum transation fee (0.00001 BTC,
 // measured in satoshis) added to transactions requiring a fee.
-const defaultFeeIncrement = 10000
+const defaultFeeIncrement = 1e3
 
 type CreatedTx struct {
 	tx          *btcutil.Tx
