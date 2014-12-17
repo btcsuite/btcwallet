@@ -358,7 +358,7 @@ func (s *Store) blockCollectionForInserts(block *Block) *blockTxCollection {
 				i--
 			}
 			detached := s.blocks[i:]
-			s.blocks = append(s.blocks[:i], b)
+			s.blocks = append(s.blocks[:i:i], b)
 			s.blockIndexes[b.Height] = i
 			for i, b := range detached {
 				newIndex := uint32(i + len(s.blocks))
@@ -399,7 +399,7 @@ func (c *blockTxCollection) txRecordForInserts(tx *btcutil.Tx) *txRecord {
 			i--
 		}
 		detached := c.txs[i:]
-		c.txs = append(c.txs[:i], record)
+		c.txs = append(c.txs[:i:i], record)
 		c.txIndexes[tx.Index()] = i
 		for i, r := range detached {
 			newIndex := uint32(i + len(c.txs))
