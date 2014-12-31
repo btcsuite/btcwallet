@@ -1057,13 +1057,8 @@ func (b blockDisconnected) notificationCmds(w *Wallet) []btcjson.Cmd {
 }
 
 func (c txCredit) notificationCmds(w *Wallet) []btcjson.Cmd {
-	bs, err := w.chainSvr.BlockStamp()
-	if err != nil {
-		log.Warnf("Dropping tx credit notification due to unknown "+
-			"chain height: %v", err)
-		return nil
-	}
-	ltr, err := txstore.Credit(c).ToJSON("", bs.Height, activeNet.Params)
+	blk := w.Manager.SyncedTo()
+	ltr, err := txstore.Credit(c).ToJSON("", blk.Height, activeNet.Params)
 	if err != nil {
 		log.Errorf("Cannot create notification for transaction "+
 			"credit: %v", err)
@@ -1074,13 +1069,8 @@ func (c txCredit) notificationCmds(w *Wallet) []btcjson.Cmd {
 }
 
 func (d txDebit) notificationCmds(w *Wallet) []btcjson.Cmd {
-	bs, err := w.chainSvr.BlockStamp()
-	if err != nil {
-		log.Warnf("Dropping tx debit notification due to unknown "+
-			"chain height: %v", err)
-		return nil
-	}
-	ltrs, err := txstore.Debits(d).ToJSON("", bs.Height, activeNet.Params)
+	blk := w.Manager.SyncedTo()
+	ltrs, err := txstore.Debits(d).ToJSON("", blk.Height, activeNet.Params)
 	if err != nil {
 		log.Errorf("Cannot create notification for transaction "+
 			"debits: %v", err)
@@ -1961,10 +1951,7 @@ func GetTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interf
 		return nil, btcjson.ErrNoTxInfo
 	}
 
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return nil, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	var txBuf bytes.Buffer
 	txBuf.Grow(record.Tx().MsgTx().SerializeSize())
@@ -1991,7 +1978,7 @@ func GetTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interf
 		ret.BlockIndex = int64(record.Tx().Index())
 		ret.BlockHash = txBlock.Hash.String()
 		ret.BlockTime = txBlock.Time.Unix()
-		ret.Confirmations = int64(record.Confirmations(bs.Height))
+		ret.Confirmations = int64(record.Confirmations(blk.Height))
 	}
 
 	credits := record.Credits()
@@ -2042,7 +2029,7 @@ func GetTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interf
 
 		ret.Details = append(ret.Details, btcjson.GetTransactionDetailsResult{
 			Account:  "",
-			Category: cred.Category(bs.Height).String(),
+			Category: cred.Category(blk.Height).String(),
 			Amount:   cred.Amount().ToUnit(btcutil.AmountBTC),
 			Address:  addr,
 		})
@@ -2087,10 +2074,7 @@ func ListLockUnspent(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (inter
 func ListReceivedByAccount(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListReceivedByAccountCmd)
 
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return nil, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	// Total amount received.
 	var amount btcutil.Amount
@@ -2100,12 +2084,12 @@ func ListReceivedByAccount(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 
 	for _, record := range w.TxStore.Records() {
 		for _, credit := range record.Credits() {
-			if !credit.Confirmed(cmd.MinConf, bs.Height) {
+			if !credit.Confirmed(cmd.MinConf, blk.Height) {
 				// Not enough confirmations, skip the current block.
 				continue
 			}
 			amount += credit.Amount()
-			confirmations = credit.Confirmations(bs.Height)
+			confirmations = credit.Confirmations(blk.Height)
 		}
 	}
 
@@ -2143,10 +2127,7 @@ func ListReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 		tx []string
 	}
 
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return nil, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	// Intermediate data for all addresses.
 	allAddrData := make(map[string]AddrData)
@@ -2164,8 +2145,8 @@ func ListReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 	}
 	for _, record := range w.TxStore.Records() {
 		for _, credit := range record.Credits() {
-			confirmations := credit.Confirmations(bs.Height)
-			if !credit.Confirmed(cmd.MinConf, bs.Height) {
+			confirmations := credit.Confirmations(blk.Height)
+			if !credit.Confirmed(cmd.MinConf, blk.Height) {
 				// Not enough confirmations, skip the current block.
 				continue
 			}
@@ -2228,20 +2209,14 @@ func ListSinceBlock(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interf
 		height = int32(block.Height())
 	}
 
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return nil, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	// For the result we need the block hash for the last block counted
 	// in the blockchain due to confirmations. We send this off now so that
 	// it can arrive asynchronously while we figure out the rest.
-	gbh := chainSvr.GetBlockHashAsync(int64(bs.Height) + 1 - int64(cmd.TargetConfirmations))
-	if err != nil {
-		return nil, err
-	}
+	gbh := chainSvr.GetBlockHashAsync(int64(blk.Height) + 1 - int64(cmd.TargetConfirmations))
 
-	txInfoList, err := w.ListSinceBlock(height, bs.Height,
+	txInfoList, err := w.ListSinceBlock(height, blk.Height,
 		cmd.TargetConfirmations)
 	if err != nil {
 		return nil, err
