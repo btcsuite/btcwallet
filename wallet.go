@@ -717,12 +717,8 @@ func (w *Wallet) AddressUsed(addr waddrmgr.ManagedAddress) bool {
 // the balance will be calculated based on how many how many blocks
 // include a UTXO.
 func (w *Wallet) CalculateBalance(confirms int) (btcutil.Amount, error) {
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return 0, err
-	}
-
-	return w.TxStore.Balance(confirms, bs.Height)
+	blk := w.Manager.SyncedTo()
+	return w.TxStore.Balance(confirms, blk.Height)
 }
 
 // CurrentAddress gets the most recently requested Bitcoin payment address
@@ -782,16 +778,13 @@ func (w *Wallet) ListTransactions(from, count int) ([]btcjson.ListTransactionsRe
 
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return txList, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	records := w.TxStore.Records()
 	lastLookupIdx := len(records) - count
 	// Search in reverse order: lookup most recently-added first.
 	for i := len(records) - 1; i >= from && i >= lastLookupIdx; i-- {
-		jsonResults, err := records[i].ToJSON("", bs.Height,
+		jsonResults, err := records[i].ToJSON("", blk.Height,
 			w.Manager.ChainParams())
 		if err != nil {
 			return nil, err
@@ -812,10 +805,7 @@ func (w *Wallet) ListAddressTransactions(pkHashes map[string]struct{}) (
 
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return txList, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	for _, r := range w.TxStore.Records() {
 		for _, c := range r.Credits() {
@@ -833,7 +823,7 @@ func (w *Wallet) ListAddressTransactions(pkHashes map[string]struct{}) (
 			if _, ok := pkHashes[string(apkh.ScriptAddress())]; !ok {
 				continue
 			}
-			jsonResult, err := c.ToJSON("", bs.Height,
+			jsonResult, err := c.ToJSON("", blk.Height,
 				w.Manager.ChainParams())
 			if err != nil {
 				return nil, err
@@ -853,15 +843,12 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return txList, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	// Search in reverse order: lookup most recently-added first.
 	records := w.TxStore.Records()
 	for i := len(records) - 1; i >= 0; i-- {
-		jsonResults, err := records[i].ToJSON("", bs.Height,
+		jsonResults, err := records[i].ToJSON("", blk.Height,
 			w.Manager.ChainParams())
 		if err != nil {
 			return nil, err
@@ -882,10 +869,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int,
 
 	results := []*btcjson.ListUnspentResult{}
 
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return results, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	filter := len(addresses) != 0
 
@@ -895,12 +879,12 @@ func (w *Wallet) ListUnspent(minconf, maxconf int,
 	}
 
 	for _, credit := range unspent {
-		confs := credit.Confirmations(bs.Height)
+		confs := credit.Confirmations(blk.Height)
 		if int(confs) < minconf || int(confs) > maxconf {
 			continue
 		}
 		if credit.IsCoinbase() {
-			if !credit.Confirmed(blockchain.CoinbaseMaturity, bs.Height) {
+			if !credit.Confirmed(blockchain.CoinbaseMaturity, blk.Height) {
 				continue
 			}
 		}
@@ -1245,10 +1229,7 @@ func (w *Wallet) NewChangeAddress() (btcutil.Address, error) {
 // total amount of bitcoins received for any wallet address.  Amounts received
 // through multisig transactions are ignored.
 func (w *Wallet) TotalReceived(confirms int) (btcutil.Amount, error) {
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return 0, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	var amount btcutil.Amount
 	for _, r := range w.TxStore.Records() {
@@ -1259,7 +1240,7 @@ func (w *Wallet) TotalReceived(confirms int) (btcutil.Amount, error) {
 			}
 
 			// Tally if the appropiate number of block confirmations have passed.
-			if c.Confirmed(confirms, bs.Height) {
+			if c.Confirmed(confirms, blk.Height) {
 				amount += c.Amount()
 			}
 		}
@@ -1271,16 +1252,13 @@ func (w *Wallet) TotalReceived(confirms int) (btcutil.Amount, error) {
 // returning the total amount of bitcoins received for a single wallet
 // address.
 func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, confirms int) (btcutil.Amount, error) {
-	bs, err := w.SyncedChainTip()
-	if err != nil {
-		return 0, err
-	}
+	blk := w.Manager.SyncedTo()
 
 	addrStr := addr.EncodeAddress()
 	var amount btcutil.Amount
 	for _, r := range w.TxStore.Records() {
 		for _, c := range r.Credits() {
-			if !c.Confirmed(confirms, bs.Height) {
+			if !c.Confirmed(confirms, blk.Height) {
 				continue
 			}
 
