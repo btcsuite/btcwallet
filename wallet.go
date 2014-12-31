@@ -425,7 +425,7 @@ func (w *Wallet) syncWithChain() (err error) {
 			w.Manager.SetSyncedTo(&bs)
 			err = w.TxStore.Rollback(bs.Height)
 			if err != nil {
-				return
+				return err
 			}
 			w.TxStore.MarkDirty()
 		}

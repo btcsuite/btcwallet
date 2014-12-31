@@ -1361,6 +1361,8 @@ var rpcHandlers = map[string]requestHandler{
 	"getaccountaddress":      GetAccountAddress,
 	"getaddressesbyaccount":  GetAddressesByAccount,
 	"getbalance":             GetBalance,
+	"getbestblockhash":       GetBestBlockHash,
+	"getblockcount":          GetBlockCount,
 	"getinfo":                GetInfo,
 	"getnewaddress":          GetNewAddress,
 	"getrawchangeaddress":    GetRawChangeAddress,
@@ -1404,6 +1406,7 @@ var rpcHandlers = map[string]requestHandler{
 
 	// Extensions to the reference client JSON-RPC API
 	"exportwatchingwallet": ExportWatchingWallet,
+	"getbestblock":         GetBestBlock,
 	// This was an extension but the reference implementation added it as
 	// well, but with a different API (no account parameter).  It's listed
 	// here because it hasn't been update to use the reference
@@ -1715,6 +1718,31 @@ func GetBalance(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{
 	}
 
 	return balance.ToUnit(btcutil.AmountBTC), nil
+}
+
+// GetBestBlock handles a getbestblock request by returning a JSON object
+// with the height and hash of the most recently processed block.
+func GetBestBlock(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
+	blk := w.Manager.SyncedTo()
+	result := &btcws.GetBestBlockResult{
+		Hash:   blk.Hash.String(),
+		Height: blk.Height,
+	}
+	return result, nil
+}
+
+// GetBestBlockHash handles a getbestblockhash request by returning the hash
+// of the most recently processed block.
+func GetBestBlockHash(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
+	blk := w.Manager.SyncedTo()
+	return blk.Hash.String(), nil
+}
+
+// GetBlockCount handles a getblockcount request by returning the chain height
+// of the most recently processed block.
+func GetBlockCount(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
+	blk := w.Manager.SyncedTo()
+	return blk.Height, nil
 }
 
 // GetInfo handles a getinfo request by returning the a structure containing
