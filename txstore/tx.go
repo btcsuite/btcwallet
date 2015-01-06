@@ -665,7 +665,7 @@ func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]Credit, error) {
 	inputs := tx.MsgTx().TxIn
 	creditChans := make([]chan createdCredit, len(inputs))
 	for i, txIn := range inputs {
-		creditChans[i] = make(chan createdCredit)
+		creditChans[i] = make(chan createdCredit, 1)
 		go func(i int, op btcwire.OutPoint) {
 			key, ok := s.unspent[op]
 			if !ok {
