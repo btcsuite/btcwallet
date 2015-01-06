@@ -1093,7 +1093,7 @@ func (s *Store) unspentOutputs() ([]Credit, error) {
 	creditChans := make([]chan createdCredit, len(s.unspent))
 	i := 0
 	for op, key := range s.unspent {
-		creditChans[i] = make(chan createdCredit)
+		creditChans[i] = make(chan createdCredit, 1)
 		go func(i int, key BlockTxKey, opIndex uint32) {
 			r, err := s.lookupBlockTx(key)
 			if err != nil {
