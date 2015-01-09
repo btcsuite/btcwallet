@@ -318,29 +318,41 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 		quit: make(chan struct{}),
 	}
 
-	// Check for existence of cert file and key file
-	if !fileExists(cfg.RPCKey) && !fileExists(cfg.RPCCert) {
-		// if both files do not exist, we generate them.
-		err := genCertPair(cfg.RPCCert, cfg.RPCKey)
+	// Setup TLS if not disabled.
+	listenFunc := net.Listen
+	if !cfg.DisableServerTLS {
+		// Check for existence of cert file and key file
+		if !fileExists(cfg.RPCKey) && !fileExists(cfg.RPCCert) {
+			// if both files do not exist, we generate them.
+			err := genCertPair(cfg.RPCCert, cfg.RPCKey)
+			if err != nil {
+				return nil, err
+			}
+		}
+		keypair, err := tls.LoadX509KeyPair(cfg.RPCCert, cfg.RPCKey)
 		if err != nil {
 			return nil, err
 		}
-	}
-	keypair, err := tls.LoadX509KeyPair(cfg.RPCCert, cfg.RPCKey)
-	if err != nil {
-		return nil, err
-	}
 
-	tlsConfig := tls.Config{
-		Certificates: []tls.Certificate{keypair},
-		MinVersion:   tls.VersionTLS12,
+		tlsConfig := tls.Config{
+			Certificates: []tls.Certificate{keypair},
+			MinVersion:   tls.VersionTLS12,
+		}
+
+		// Change the standard net.Listen function to the tls one.
+		listenFunc = func(net string, laddr string) (net.Listener, error) {
+			return tls.Listen(net, laddr, &tlsConfig)
+		}
 	}
 
 	ipv4ListenAddrs, ipv6ListenAddrs, err := parseListeners(listenAddrs)
+	if err != nil {
+		return nil, err
+	}
 	listeners := make([]net.Listener, 0,
 		len(ipv6ListenAddrs)+len(ipv4ListenAddrs))
 	for _, addr := range ipv4ListenAddrs {
-		listener, err := tls.Listen("tcp4", addr, &tlsConfig)
+		listener, err := listenFunc("tcp4", addr)
 		if err != nil {
 			log.Warnf("RPCS: Can't listen on %s: %v", addr,
 				err)
@@ -350,7 +362,7 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 	}
 
 	for _, addr := range ipv6ListenAddrs {
-		listener, err := tls.Listen("tcp6", addr, &tlsConfig)
+		listener, err := listenFunc("tcp6", addr)
 		if err != nil {
 			log.Warnf("RPCS: Can't listen on %s: %v", addr,
 				err)
