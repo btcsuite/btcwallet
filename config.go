@@ -70,6 +70,7 @@ type config struct {
 	RPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of RPC clients for standard connections"`
 	RPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
 	DisableServerTLS bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
+	DisableClientTLS bool     `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
 	MainNet          bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
 	SimNet           bool     `long:"simnet" description:"Use the simulation test network (default testnet3)"`
 	KeypoolSize      uint     `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
@@ -371,27 +372,32 @@ func loadConfig() (*config, []string, error) {
 		"127.0.0.1": struct{}{},
 		"::1":       struct{}{},
 	}
-	// If CAFile is unset, choose either the copy or local btcd cert.
-	if cfg.CAFile == "" {
-		cfg.CAFile = filepath.Join(cfg.DataDir, defaultCAFilename)
+	RPCHost, _, err := net.SplitHostPort(cfg.RPCConnect)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.DisableClientTLS {
+		if _, ok := localhostListeners[RPCHost]; !ok {
+			str := "%s: the --noclienttls option may not be used " +
+				"when connecting RPC to non localhost " +
+				"addresses: %s"
+			err := fmt.Errorf(str, funcName, cfg.RPCConnect)
+			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, usageMessage)
+			return nil, nil, err
+		}
+	} else {
+		// If CAFile is unset, choose either the copy or local btcd cert.
+		if cfg.CAFile == "" {
+			cfg.CAFile = filepath.Join(cfg.DataDir, defaultCAFilename)
 
-		// If the CA copy does not exist, check if we're connecting to
-		// a local btcd and switch to its RPC cert if it exists.
-		if !fileExists(cfg.CAFile) {
-			host, _, err := net.SplitHostPort(cfg.RPCConnect)
-			if err != nil {
-				return nil, nil, err
-			}
-			switch host {
-			case "localhost":
-				fallthrough
-
-			case "127.0.0.1":
-				fallthrough
-
-			case "::1":
-				if fileExists(btcdHomedirCAFile) {
-					cfg.CAFile = btcdHomedirCAFile
+			// If the CA copy does not exist, check if we're connecting to
+			// a local btcd and switch to its RPC cert if it exists.
+			if !fileExists(cfg.CAFile) {
+				if _, ok := localhostListeners[RPCHost]; ok {
+					if fileExists(btcdHomedirCAFile) {
+						cfg.CAFile = btcdHomedirCAFile
+					}
 				}
 			}
 		}

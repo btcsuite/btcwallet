@@ -90,15 +90,18 @@ func walletMain() error {
 
 	go func() {
 		// Read CA certs and create the RPC client.
-		certs, err := ioutil.ReadFile(cfg.CAFile)
-		if err != nil {
-			log.Warnf("Cannot open CA file: %v", err)
-			// If there's an error reading the CA file, continue
-			// with nil certs and without the client connection
-			certs = nil
+		var certs []byte
+		if !cfg.DisableClientTLS {
+			certs, err = ioutil.ReadFile(cfg.CAFile)
+			if err != nil {
+				log.Warnf("Cannot open CA file: %v", err)
+				// If there's an error reading the CA file, continue
+				// with nil certs and without the client connection
+				certs = nil
+			}
 		}
 		rpcc, err := chain.NewClient(activeNet.Params, cfg.RPCConnect,
-			cfg.BtcdUsername, cfg.BtcdPassword, certs)
+			cfg.BtcdUsername, cfg.BtcdPassword, certs, cfg.DisableClientTLS)
 		if err != nil {
 			log.Errorf("Cannot create chain server RPC client: %v", err)
 			return

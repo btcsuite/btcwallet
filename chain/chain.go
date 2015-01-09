@@ -51,7 +51,7 @@ type Client struct {
 	quitMtx sync.Mutex
 }
 
-func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte) (*Client, error) {
+func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte, disableTLS bool) (*Client, error) {
 	client := Client{
 		netParams:           net,
 		enqueueNotification: make(chan interface{}),
@@ -76,6 +76,7 @@ func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte) (*C
 		Pass:                pass,
 		Certificates:        certs,
 		DisableConnectOnNew: true,
+		DisableTLS:          disableTLS,
 	}
 	c, err := btcrpcclient.New(&conf, &ntfnCallbacks)
 	if err != nil {
