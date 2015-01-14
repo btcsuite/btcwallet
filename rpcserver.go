@@ -1697,7 +1697,12 @@ func GetAddressesByAccount(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 func GetBalance(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetBalanceCmd)
 
-	err := checkAccountName(*cmd.Account)
+	var account string
+	if cmd.Account != nil {
+		account = *cmd.Account
+	}
+
+	err := checkAccountName(account)
 	if err != nil {
 		return nil, err
 	}
@@ -2225,7 +2230,12 @@ func ListSinceBlock(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interf
 func ListTransactions(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListTransactionsCmd)
 
-	err := checkAccountName(*cmd.Account)
+	var account string
+	if cmd.Account != nil {
+		account = *cmd.Account
+	}
+
+	err := checkAccountName(account)
 	if err != nil {
 		return nil, err
 	}
