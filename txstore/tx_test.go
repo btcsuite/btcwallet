@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcutil"
 	"github.com/conformal/btcnet"
-	"github.com/conformal/btcutil"
 	. "github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwire"
 )

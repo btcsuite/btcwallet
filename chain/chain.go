@@ -21,9 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcutil"
 	"github.com/conformal/btcnet"
 	"github.com/conformal/btcrpcclient"
-	"github.com/conformal/btcutil"
 	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwire"

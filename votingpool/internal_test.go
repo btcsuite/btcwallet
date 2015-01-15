@@ -17,7 +17,7 @@
 package votingpool
 
 import (
-	"github.com/conformal/btcutil/hdkeychain"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/conformal/btcwallet/waddrmgr"
 	"github.com/conformal/btcwallet/walletdb"
 )

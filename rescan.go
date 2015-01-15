@@ -17,7 +17,7 @@
 package main
 
 import (
-	"github.com/conformal/btcutil"
+	"github.com/btcsuite/btcutil"
 	"github.com/conformal/btcwallet/chain"
 	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwire"

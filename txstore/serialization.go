@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/conformal/btcutil"
+	"github.com/btcsuite/btcutil"
 	"github.com/conformal/btcwallet/rename"
 	"github.com/conformal/btcwire"
 )
