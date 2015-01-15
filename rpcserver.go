@@ -2280,7 +2280,12 @@ func ListAddressTransactions(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd
 func ListAllTransactions(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	cmd := icmd.(*btcws.ListAllTransactionsCmd)
 
-	err := checkAccountName(cmd.Account)
+	var account string
+	if cmd.Account != nil {
+		account = *cmd.Account
+	}
+
+	err := checkAccountName(account)
 	if err != nil {
 		return nil, err
 	}
