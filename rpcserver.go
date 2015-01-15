@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/websocket"
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcrpcclient"
@@ -47,7 +48,6 @@ import (
 	"github.com/conformal/btcwallet/txstore"
 	"github.com/conformal/btcwire"
 	"github.com/conformal/btcws"
-	"github.com/conformal/websocket"
 )
 
 // Error types to simplify the reporting of specific categories of
