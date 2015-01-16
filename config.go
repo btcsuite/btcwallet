@@ -25,8 +25,8 @@ import (
 	"strings"
 
 	"github.com/btcsuite/btcutil"
+	flags "github.com/btcsuite/go-flags"
 	"github.com/conformal/btcwire"
-	"github.com/conformal/go-flags"
 )
 
 const (
