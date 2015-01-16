@@ -27,8 +27,8 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/conformal/btcnet"
 	"github.com/conformal/btcwallet/votingpool"
 	"github.com/conformal/btcwallet/waddrmgr"
 	"github.com/conformal/btcwallet/walletdb"

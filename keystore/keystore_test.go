@@ -23,10 +23,10 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
 	"github.com/conformal/btcec"
-	"github.com/conformal/btcnet"
 	"github.com/conformal/btcscript"
 
 	"github.com/davecgh/go-spew/spew"

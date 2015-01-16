@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/conformal/btcnet"
+	"github.com/btcsuite/btcnet"
 	"github.com/conformal/btcwallet/waddrmgr"
 	"github.com/conformal/btcwallet/walletdb"
 	_ "github.com/conformal/btcwallet/walletdb/bdb"
