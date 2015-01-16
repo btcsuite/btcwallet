@@ -37,11 +37,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/websocket"
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcjson"
-	"github.com/conformal/btcrpcclient"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcwallet/chain"
 	"github.com/conformal/btcwallet/keystore"
