@@ -22,9 +22,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/fastsha256"
 	"github.com/conformal/btcwallet/walletdb"
 	"github.com/conformal/btcwire"
-	"github.com/conformal/fastsha256"
 )
 
 const (
