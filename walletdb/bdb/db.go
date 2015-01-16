@@ -20,7 +20,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/conformal/bolt"
+	"github.com/btcsuite/bolt"
 	"github.com/conformal/btcwallet/walletdb"
 )
 
