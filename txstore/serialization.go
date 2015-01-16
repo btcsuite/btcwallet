@@ -28,8 +28,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwire"
 	"github.com/conformal/btcwallet/rename"
-	"github.com/conformal/btcwire"
 )
 
 // filename is the name of the file typically used to save a transaction

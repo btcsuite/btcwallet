@@ -22,11 +22,11 @@ import (
 
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwire"
 	"github.com/conformal/btcec"
 	"github.com/conformal/btcnet"
 	"github.com/conformal/btcwallet/snacl"
 	"github.com/conformal/btcwallet/walletdb"
-	"github.com/conformal/btcwire"
 )
 
 const (

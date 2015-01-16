@@ -13,9 +13,9 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwire"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcwallet/tx"
-	"github.com/conformal/btcwire"
 )
 
 func init() {

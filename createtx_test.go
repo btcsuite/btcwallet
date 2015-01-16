@@ -7,10 +7,10 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwire"
 	"github.com/conformal/btcscript"
 	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwire"
 )
 
 // This is a tx that transfers funds (0.371 BTC) to addresses of known privKeys.

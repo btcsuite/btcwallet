@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwire"
 	"github.com/conformal/btcnet"
 	. "github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcwire"
 )
 
 // Received transaction output for mainnet outpoint
