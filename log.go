@@ -22,7 +22,7 @@ import (
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
 )
 
@@ -82,7 +82,7 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 		log = logger
 	case "TXST":
 		txstLog = logger
-		txstore.UseLogger(logger)
+		wtxmgr.UseLogger(logger)
 	case "CHNS":
 		chainLog = logger
 		chain.UseLogger(logger)

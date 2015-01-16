@@ -20,8 +20,8 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 func (w *Wallet) handleChainNotifications() {
@@ -97,11 +97,11 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) {
 	w.notifyBalances(bs.Height - 1)
 }
 
-func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
+func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *wtxmgr.Block) error {
 	// For every output, if it pays to a wallet address, insert the
 	// transaction into the store (possibly moving it from unconfirmed to
 	// confirmed), and add a credit record if one does not already exist.
-	var txr *txstore.TxRecord
+	var txr *wtxmgr.TxRecord
 	txInserted := false
 	for txOutIdx, txOut := range tx.MsgTx().TxOut {
 		// Errors don't matter here.  If addrs is nil, the range below
@@ -123,9 +123,6 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 				if err != nil {
 					return err
 				}
-				// InsertTx may have moved a previous unmined
-				// tx, so mark the entire store as dirty.
-				w.TxStore.MarkDirty()
 				txInserted = true
 			}
 			if txr.HasCredit(txOutIdx) {
@@ -135,7 +132,6 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 			if err != nil {
 				return err
 			}
-			w.TxStore.MarkDirty()
 		}
 	}
 
@@ -149,7 +145,7 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 
 // addRedeemingTx inserts the notified spending transaction as a debit and
 // schedules the transaction store for a future file write.
-func (w *Wallet) addRedeemingTx(tx *btcutil.Tx, block *txstore.Block) error {
+func (w *Wallet) addRedeemingTx(tx *btcutil.Tx, block *wtxmgr.Block) error {
 	txr, err := w.TxStore.InsertTx(tx, block)
 	if err != nil {
 		return err
