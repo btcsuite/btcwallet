@@ -22,7 +22,7 @@ import (
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/txstore"
+	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/seelog"
 )
