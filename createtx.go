@@ -27,8 +27,8 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 const (
@@ -111,7 +111,7 @@ type CreatedTx struct {
 
 // ByAmount defines the methods needed to satisify sort.Interface to
 // sort a slice of Utxos by their amount.
-type ByAmount []txstore.Credit
+type ByAmount []wtxmgr.Credit
 
 func (u ByAmount) Len() int           { return len(u) }
 func (u ByAmount) Less(i, j int) bool { return u[i].Amount() < u[j].Amount() }
@@ -155,7 +155,7 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, minconf int) (*Creat
 // the selected inputs and the given outputs, validating it (using
 // validateMsgTx) as well.
 func createTx(
-	eligible []txstore.Credit,
+	eligible []wtxmgr.Credit,
 	outputs map[string]btcutil.Amount,
 	bs *waddrmgr.BlockStamp,
 	feeIncrement btcutil.Amount,
@@ -175,8 +175,8 @@ func createTx(
 
 	// Start by adding enough inputs to cover for the total amount of all
 	// desired outputs.
-	var input txstore.Credit
-	var inputs []txstore.Credit
+	var input wtxmgr.Credit
+	var inputs []wtxmgr.Credit
 	totalAdded := btcutil.Amount(0)
 	for totalAdded < minAmount {
 		if len(eligible) == 0 {
@@ -331,7 +331,7 @@ func addOutputs(msgtx *wire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amo
 	return minAmount, nil
 }
 
-func (w *Wallet) findEligibleOutputs(minconf int, bs *waddrmgr.BlockStamp) ([]txstore.Credit, error) {
+func (w *Wallet) findEligibleOutputs(minconf int, bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
 	unspent, err := w.TxStore.UnspentOutputs()
 	if err != nil {
 		return nil, err
@@ -340,7 +340,7 @@ func (w *Wallet) findEligibleOutputs(minconf int, bs *waddrmgr.BlockStamp) ([]tx
 	// time) are not P2PKH outputs.  Other inputs must be manually included
 	// in transactions and sent (for example, using createrawtransaction,
 	// signrawtransaction, and sendrawtransaction).
-	eligible := make([]txstore.Credit, 0, len(unspent))
+	eligible := make([]wtxmgr.Credit, 0, len(unspent))
 	for i := range unspent {
 		switch txscript.GetScriptClass(unspent[i].TxOut().PkScript) {
 		case txscript.PubKeyHashTy:
@@ -370,7 +370,7 @@ func (w *Wallet) findEligibleOutputs(minconf int, bs *waddrmgr.BlockStamp) ([]tx
 // signMsgTx sets the SignatureScript for every item in msgtx.TxIn.
 // It must be called every time a msgtx is changed.
 // Only P2PKH outputs are supported at this point.
-func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Manager) error {
+func signMsgTx(msgtx *wire.MsgTx, prevOutputs []wtxmgr.Credit, mgr *waddrmgr.Manager) error {
 	if len(prevOutputs) != len(msgtx.TxIn) {
 		return fmt.Errorf(
 			"Number of prevOutputs (%d) does not match number of tx inputs (%d)",
@@ -411,7 +411,7 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Ma
 	return nil
 }
 
-func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
+func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []wtxmgr.Credit) error {
 	flags := txscript.ScriptCanonicalSignatures | txscript.ScriptStrictMultiSig
 	bip16 := time.Now().After(txscript.Bip16Activation)
 	if bip16 {
@@ -435,7 +435,7 @@ func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
 // s less than 1 kilobyte and none of the outputs contain a value
 // less than 1 bitcent. Otherwise, the fee will be calculated using
 // incr, incrementing the fee for each kilobyte of transaction.
-func minimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutputs []txstore.Credit, height int32) btcutil.Amount {
+func minimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutputs []wtxmgr.Credit, height int32) btcutil.Amount {
 	allowFree := false
 	if !cfg.DisallowFree {
 		allowFree = allowNoFeeTx(height, prevOutputs, txLen)
@@ -465,7 +465,7 @@ func minimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutpu
 // allowNoFeeTx calculates the transaction priority and checks that the
 // priority reaches a certain threshold.  If the threshhold is
 // reached, a free transaction fee is allowed.
-func allowNoFeeTx(curHeight int32, txouts []txstore.Credit, txSize int) bool {
+func allowNoFeeTx(curHeight int32, txouts []wtxmgr.Credit, txSize int) bool {
 	const blocksPerDayEstimate = 144.0
 	const txSizeEstimate = 250.0
 	const threshold = btcutil.SatoshiPerBitcoin * blocksPerDayEstimate / txSizeEstimate

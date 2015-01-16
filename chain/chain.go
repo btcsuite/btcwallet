@@ -25,8 +25,8 @@ import (
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/btcws"
 )
 
@@ -154,12 +154,12 @@ type (
 	BlockConnected    waddrmgr.BlockStamp
 	BlockDisconnected waddrmgr.BlockStamp
 	RecvTx            struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
+		Tx    *btcutil.Tx   // Index is guaranteed to be set.
+		Block *wtxmgr.Block // nil if unmined
 	}
 	RedeemingTx struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
+		Tx    *btcutil.Tx   // Index is guaranteed to be set.
+		Block *wtxmgr.Block // nil if unmined
 	}
 	RescanProgress struct {
 		Hash   *wire.ShaHash
@@ -174,9 +174,9 @@ type (
 )
 
 // parseBlock parses a btcws definition of the block a tx is mined it to the
-// Block structure of the txstore package, and the block index.  This is done
+// Block structure of the wtxmgr package, and the block index.  This is done
 // here since btcrpcclient doesn't parse this nicely for us.
-func parseBlock(block *btcws.BlockDetails) (blk *txstore.Block, idx int, err error) {
+func parseBlock(block *btcws.BlockDetails) (blk *wtxmgr.Block, idx int, err error) {
 	if block == nil {
 		return nil, btcutil.TxIndexUnknown, nil
 	}
@@ -184,7 +184,7 @@ func parseBlock(block *btcws.BlockDetails) (blk *txstore.Block, idx int, err err
 	if err != nil {
 		return nil, btcutil.TxIndexUnknown, err
 	}
-	blk = &txstore.Block{
+	blk = &wtxmgr.Block{
 		Height: block.Height,
 		Hash:   *blksha,
 		Time:   time.Unix(block.Time, 0),
@@ -206,7 +206,7 @@ func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32) {
 }
 
 func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
-	var blk *txstore.Block
+	var blk *wtxmgr.Block
 	index := btcutil.TxIndexUnknown
 	if block != nil {
 		var err error
@@ -222,7 +222,7 @@ func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
 }
 
 func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
-	var blk *txstore.Block
+	var blk *wtxmgr.Block
 	index := btcutil.TxIndexUnknown
 	if block != nil {
 		var err error

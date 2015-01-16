@@ -35,9 +35,9 @@ import (
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -51,6 +51,8 @@ var (
 var (
 	// waddrmgrNamespaceKey is the namespace key for the waddrmgr package.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
+	// wtxmgrNamespaceKey is the namespace key for the wtxmgr package.
+	wtxmgrNamespaceKey = []byte("wtxmgr")
 )
 
 const (
@@ -85,7 +87,7 @@ type Wallet struct {
 	// Data stores
 	db      walletdb.DB
 	Manager *waddrmgr.Manager
-	TxStore *txstore.Store
+	TxStore *wtxmgr.Store
 
 	chainSvr     *chain.Client
 	chainSvrLock sync.Locker
@@ -129,7 +131,7 @@ type Wallet struct {
 
 // newWallet creates a new Wallet structure with the provided address manager
 // and transaction store.
-func newWallet(mgr *waddrmgr.Manager, txs *txstore.Store) *Wallet {
+func newWallet(mgr *waddrmgr.Manager, txs *wtxmgr.Store) *Wallet {
 	return &Wallet{
 		Manager:             mgr,
 		TxStore:             txs,
@@ -315,7 +317,6 @@ func (w *Wallet) Start(chainServer *chain.Client) {
 	w.chainSvrLock = noopLocker{}
 
 	w.wg.Add(7)
-	go w.diskWriter()
 	go w.handleChainNotifications()
 	go w.txCreator()
 	go w.walletLocker()
@@ -430,7 +431,6 @@ func (w *Wallet) syncWithChain() (err error) {
 			if err != nil {
 				return
 			}
-			w.TxStore.MarkDirty()
 		}
 
 		break
@@ -635,40 +635,6 @@ func (w *Wallet) ChangePassphrase(old, new []byte) error {
 		err: err,
 	}
 	return <-err
-}
-
-// diskWriter periodically (every 10 seconds) writes out the transaction store
-// to disk if it is marked dirty.
-func (w *Wallet) diskWriter() {
-	ticker := time.NewTicker(10 * time.Second)
-	var wg sync.WaitGroup
-	var done bool
-
-	for {
-		select {
-		case <-ticker.C:
-		case <-w.quit:
-			done = true
-		}
-
-		log.Trace("Writing txstore")
-
-		wg.Add(1)
-		go func() {
-			err := w.TxStore.WriteIfDirty()
-			if err != nil {
-				log.Errorf("Cannot write txstore: %v",
-					err)
-			}
-			wg.Done()
-		}()
-		wg.Wait()
-
-		if done {
-			break
-		}
-	}
-	w.wg.Done()
 }
 
 // AddressUsed returns whether there are any recorded transactions spending to
@@ -913,7 +879,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int,
 			Vout:          credit.OutputIndex,
 			Account:       "",
 			ScriptPubKey:  hex.EncodeToString(credit.TxOut().PkScript),
-			Amount:        credit.Amount().ToUnit(btcutil.AmountBTC),
+			Amount:        credit.Amount().ToBTC(),
 			Confirmations: int64(confs),
 		}
 
@@ -1102,9 +1068,7 @@ func (w *Wallet) exportBase64() (map[string]string, error) {
 	m["wallet"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
-	if _, err := w.TxStore.WriteTo(&buf); err != nil {
-		return nil, err
-	}
+	// TODO(tuxcanfly): serialize and write txstore to buf
 	m["tx"] = base64.StdEncoding.EncodeToString(buf.Bytes())
 	buf.Reset()
 
@@ -1161,7 +1125,7 @@ func (w *Wallet) Track() {
 	// TODO: return as slice? (doesn't have to be ordered)
 	addrs, err := w.Manager.AllActiveAddresses()
 	if err != nil {
-		log.Error("Unable to acquire list of active addresses: %v", err)
+		log.Errorf("Unable to acquire list of active addresses: %v", err)
 		return
 	}
 
@@ -1257,7 +1221,7 @@ func (w *Wallet) NewChangeAddress() (btcutil.Address, error) {
 
 // ReqSpentUtxoNtfns sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
-func (w *Wallet) ReqSpentUtxoNtfns(credits []txstore.Credit) {
+func (w *Wallet) ReqSpentUtxoNtfns(credits []wtxmgr.Credit) {
 	ops := make([]*wire.OutPoint, len(credits))
 	for i, c := range credits {
 		op := c.OutPoint()
@@ -1335,7 +1299,7 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, confirms int) (btcut
 
 // TxRecord iterates through all transaction records saved in the store,
 // returning the first with an equivalent transaction hash.
-func (w *Wallet) TxRecord(txSha *wire.ShaHash) (r *txstore.TxRecord, ok bool) {
+func (w *Wallet) TxRecord(txSha *wire.ShaHash) (r *wtxmgr.TxRecord, ok bool) {
 	for _, r = range w.TxStore.Records() {
 		if *r.Tx().Sha() == *txSha {
 			return r, true
@@ -1360,36 +1324,29 @@ func openWallet() (*Wallet, error) {
 		return nil, err
 	}
 
-	// Get the namespace for the address manager.
-	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	// Get the waddrmgrNamespace for the address manager.
+	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the wtxmgrNamespace for the address manager.
+	wtxmgrNamespace, err := db.Namespace(wtxmgrNamespaceKey)
 	if err != nil {
 		return nil, err
 	}
 
 	// Open address manager and transaction store.
-	var txs *txstore.Store
-	mgr, err := waddrmgr.Open(namespace, []byte(cfg.WalletPass),
+	var txs *wtxmgr.Store
+	mgr, err := waddrmgr.Open(waddrmgrNamespace, []byte(cfg.WalletPass),
 		activeNet.Params, nil)
-	if err == nil {
-		txs, err = txstore.OpenDir(netdir)
-	}
 	if err != nil {
-		// Special case: if the address manager was successfully read
-		// (mgr != nil) but the transaction store was not, create a
-		// new txstore and write it out to disk.  Write an unsynced
-		// manager back to disk so on future opens, the empty txstore
-		// is not considered fully synced.
-		if mgr == nil {
-			return nil, err
-		}
-
-		txs = txstore.New(netdir)
-		txs.MarkDirty()
-		err = txs.WriteIfDirty()
-		if err != nil {
-			return nil, err
-		}
-		mgr.SetSyncedTo(nil)
+		return nil, err
+	}
+	txs, err = wtxmgr.Open(wtxmgrNamespace,
+		activeNet.Params)
+	if err != nil {
+		return nil, err
 	}
 
 	log.Infof("Opened wallet files") // TODO: log balance? last sync height?

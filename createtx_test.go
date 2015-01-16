@@ -10,12 +10,13 @@ import (
 
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // This is a tx that transfers funds (0.371 BTC) to addresses of known privKeys.
@@ -52,6 +53,8 @@ var fastScrypt = &waddrmgr.Options{
 	ScryptR: 8,
 	ScryptP: 1,
 }
+
+var TstDbPath = "/tmp/testlegacywallet.db"
 
 func Test_addOutputs(t *testing.T) {
 	msgtx := wire.NewMsgTx()
@@ -206,9 +209,26 @@ func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddr
 	return mgr
 }
 
+func CreateTestStore() (*wtxmgr.Store, error) {
+	db, err := walletdb.Create("bdb", TstDbPath)
+	if err != nil {
+		return nil, err
+	}
+	wtxmgrNamespace, err := db.Namespace([]byte("testtxstore"))
+	if err != nil {
+		return nil, err
+	}
+	s, err := wtxmgr.Open(wtxmgrNamespace,
+		&btcnet.MainNetParams)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // eligibleInputsFromTx decodes the given txHex and returns the outputs with
 // the given indices as eligible inputs.
-func eligibleInputsFromTx(t *testing.T, txHex string, indices []uint32) []txstore.Credit {
+func eligibleInputsFromTx(t *testing.T, txHex string, indices []uint32) []wtxmgr.Credit {
 	serialized, err := hex.DecodeString(txHex)
 	if err != nil {
 		t.Fatal(err)
@@ -217,12 +237,16 @@ func eligibleInputsFromTx(t *testing.T, txHex string, indices []uint32) []txstor
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := txstore.New("/tmp/tx.bin")
+	s, err := CreateTestStore()
+	defer os.Remove(TstDbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r, err := s.InsertTx(tx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eligible := make([]txstore.Credit, len(indices))
+	eligible := make([]wtxmgr.Credit, len(indices))
 	for i, idx := range indices {
 		credit, err := r.AddCredit(idx, false)
 		if err != nil {

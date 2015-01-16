@@ -31,9 +31,11 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/legacy/keystore"
+	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // promptConsoleList prompts the user with the given prefix, list of valid
@@ -350,6 +352,42 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 	return nil
 }
 
+// convertLegacyTxStore imports transactions from the passed legacy tx store
+// and inserts them into the new wtxmgr store
+func convertLegacyTxStore(legacyTxStore *txstore.Store, store *wtxmgr.Store) error {
+	for _, r := range legacyTxStore.Records() {
+		var block *wtxmgr.Block
+		if r.BlockHeight != -1 {
+			b, err := r.Block()
+			if err != nil {
+				return err
+			}
+			block = &wtxmgr.Block{
+				Hash:   b.Hash,
+				Height: b.Height,
+				Time:   b.Time,
+			}
+		}
+		t, err := store.InsertTx(r.Tx(), block)
+		if err != nil {
+			return err
+		}
+		if _, err := r.Debits(); err == nil {
+			_, err = t.AddDebits()
+			if err != nil {
+				return err
+			}
+		}
+		for _, c := range r.Credits() {
+			_, err = t.AddCredit(c.OutputIndex, c.Change())
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // createWallet prompts the user for information needed to generate a new wallet
 // and generates the wallet accordingly.  The new wallet will reside at the
 // provided path.
@@ -404,11 +442,12 @@ func createWallet(cfg *config) error {
 	}
 
 	// Create the address manager.
-	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return err
 	}
-	manager, err := waddrmgr.Create(namespace, seed, []byte(pubPass),
+
+	manager, err := waddrmgr.Create(waddrmgrNamespace, seed, []byte(pubPass),
 		[]byte(privPass), activeNet.Params, nil)
 	if err != nil {
 		return err
@@ -432,6 +471,32 @@ func createWallet(cfg *config) error {
 		if err := os.Remove(keystorePath); err != nil {
 			fmt.Printf("WARN: Failed to remove legacy wallet "+
 				"from'%s'\n", keystorePath)
+		}
+	}
+
+	// Import transactions from the legacy txstore to the new store
+	txstorePath := filepath.Join(netDir, "tx.bin")
+	if fileExists(txstorePath) {
+		legacyTxStore, err := txstore.OpenDir(netDir)
+		if err != nil {
+			return err
+		}
+		wtxmgrNamespace, err := db.Namespace(wtxmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		txs, err := wtxmgr.Open(wtxmgrNamespace, activeNet.Params)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Importing transactions from existing wallet...")
+		if err := convertLegacyTxStore(legacyTxStore, txs); err != nil {
+			return err
+		}
+		// Remove the legacy txstore.
+		if err := os.Remove(txstorePath); err != nil {
+			fmt.Printf("WARN: Failed to remove legacy txstore "+
+				"from'%s'\n", txstorePath)
 		}
 	}
 
