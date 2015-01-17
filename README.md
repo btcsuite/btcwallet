@@ -24,7 +24,7 @@ can be found [here](https://github.com/conformal/btcd).
 As a daemon, btcwallet provides no user interface and an additional
 graphical or command line client is required for normal, personal
 wallet usage.  Conformal has written
-[btcgui](https://github.com/conformal/btcgui) as a graphical client
+[btcgui](https://github.com/btcsuite/btcgui) as a graphical client
 to btcwallet.
 
 This project is currently under active development is not production
