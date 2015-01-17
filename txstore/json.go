@@ -17,9 +17,9 @@
 package txstore
 
 import (
+	"github.com/btcsuite/btcchain"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
-	"github.com/conformal/btcchain"
 	"github.com/conformal/btcjson"
 	"github.com/conformal/btcscript"
 )

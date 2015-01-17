@@ -24,10 +24,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcchain"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
-	"github.com/conformal/btcchain"
 	"github.com/conformal/btcscript"
 )
 
