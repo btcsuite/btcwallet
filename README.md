@@ -19,7 +19,7 @@ client is required to provide a wallet encryption passphrase.
 btcwallet is not an SPV client and requires connecting to a local or
 remote btcd instance for asynchronous blockchain queries and
 notifications over websockets.  Full btcd installation instructions
-can be found [here](https://github.com/conformal/btcd).
+can be found [here](https://github.com/btcsuite/btcd).
 
 As a daemon, btcwallet provides no user interface and an additional
 graphical or command line client is required for normal, personal
@@ -47,7 +47,7 @@ https://opensource.conformal.com/packages/windows/btcdsuite/
 - Run the following commands to obtain and install btcwallet and all
   dependencies:
 ```bash
-$ go get -u -v github.com/conformal/btcd/...
+$ go get -u -v github.com/btcsuite/btcd/...
 $ go get -u -v github.com/btcsuite/btcwallet/...
 ```
 
@@ -68,7 +68,7 @@ https://opensource.conformal.com/packages/windows/btcdsuite/
 - Run the following commands to update btcwallet, all dependencies, and install it:
 
 ```bash
-$ go get -u -v github.com/conformal/btcd/...
+$ go get -u -v github.com/btcsuite/btcd/...
 $ go get -u -v github.com/btcsuite/btcwallet/...
 ```
 
@@ -102,7 +102,7 @@ copy the sample btcd and btcwallet configurations and update with your
 RPC username and password.
 
 ```bash
-$ cp $GOPATH/src/github.com/conformal/btcd/sample-btcd.conf ~/.btcd/btcd.conf
+$ cp $GOPATH/src/github.com/btcsuite/btcd/sample-btcd.conf ~/.btcd/btcd.conf
 $ cp $GOPATH/src/github.com/btcsuite/btcwallet/sample-btcwallet.conf ~/.btcwallet/btcwallet.conf
 $ $EDITOR ~/.btcd/btcd.conf
 $ $EDITOR ~/.btcwallet/btcwallet.conf
