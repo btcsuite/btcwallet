@@ -40,8 +40,8 @@ import (
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/rename"
 	"github.com/btcsuite/btcwire"
-	"github.com/conformal/btcwallet/rename"
 )
 
 const (

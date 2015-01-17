@@ -22,8 +22,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/conformal/btcwallet/walletdb"
-	_ "github.com/conformal/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
 
 // This example demonstrates creating a new database.
@@ -31,8 +31,8 @@ func ExampleCreate() {
 	// This example assumes the bdb (bolt db) driver is imported.
 	//
 	// import (
-	// 	"github.com/conformal/btcwallet/walletdb"
-	// 	_ "github.com/conformal/btcwallet/walletdb/bdb"
+	// 	"github.com/btcsuite/btcwallet/walletdb"
+	// 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	// )
 
 	// Create a database and schedule it to be closed and removed on exit.
@@ -108,8 +108,8 @@ func Example_basicUsage() {
 	// This example assumes the bdb (bolt db) driver is imported.
 	//
 	// import (
-	// 	"github.com/conformal/btcwallet/walletdb"
-	// 	_ "github.com/conformal/btcwallet/walletdb/bdb"
+	// 	"github.com/btcsuite/btcwallet/walletdb"
+	// 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	// )
 
 	// Create a database and schedule it to be closed and removed on exit.

@@ -22,8 +22,8 @@ import (
 
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
+	. "github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwire"
-	. "github.com/conformal/btcwallet/txstore"
 )
 
 // Received transaction output for mainnet outpoint

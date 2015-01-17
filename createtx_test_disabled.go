@@ -14,8 +14,8 @@ import (
 
 	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/tx"
 	"github.com/btcsuite/btcwire"
-	"github.com/conformal/btcwallet/tx"
 )
 
 func init() {

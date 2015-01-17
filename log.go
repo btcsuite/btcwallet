@@ -21,9 +21,9 @@ import (
 	"os"
 
 	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/seelog"
-	"github.com/conformal/btcwallet/chain"
-	"github.com/conformal/btcwallet/txstore"
 )
 
 const (

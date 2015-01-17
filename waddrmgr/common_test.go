@@ -24,9 +24,9 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcnet"
-	"github.com/conformal/btcwallet/waddrmgr"
-	"github.com/conformal/btcwallet/walletdb"
-	_ "github.com/conformal/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
 
 var (

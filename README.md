@@ -1,8 +1,8 @@
 btcwallet
 =========
 
-[![Build Status](https://travis-ci.org/conformal/btcwallet.png?branch=master)]
-(https://travis-ci.org/conformal/btcwallet)
+[![Build Status](https://travis-ci.org/btcsuite/btcwallet.png?branch=master)]
+(https://travis-ci.org/btcsuite/btcwallet)
 
 btcwallet is a daemon handling bitcoin wallet functionality for a
 single user.  It acts as both an RPC client to btcd and an RPC server
@@ -48,7 +48,7 @@ https://opensource.conformal.com/packages/windows/btcdsuite/
   dependencies:
 ```bash
 $ go get -u -v github.com/conformal/btcd/...
-$ go get -u -v github.com/conformal/btcwallet/...
+$ go get -u -v github.com/btcsuite/btcwallet/...
 ```
 
 - btcd and btcwallet will now be installed in either ```$GOROOT/bin``` or
@@ -69,7 +69,7 @@ https://opensource.conformal.com/packages/windows/btcdsuite/
 
 ```bash
 $ go get -u -v github.com/conformal/btcd/...
-$ go get -u -v github.com/conformal/btcwallet/...
+$ go get -u -v github.com/btcsuite/btcwallet/...
 ```
 
 ## Getting Started
@@ -103,7 +103,7 @@ RPC username and password.
 
 ```bash
 $ cp $GOPATH/src/github.com/conformal/btcd/sample-btcd.conf ~/.btcd/btcd.conf
-$ cp $GOPATH/src/github.com/conformal/btcwallet/sample-btcwallet.conf ~/.btcwallet/btcwallet.conf
+$ cp $GOPATH/src/github.com/btcsuite/btcwallet/sample-btcwallet.conf ~/.btcwallet/btcwallet.conf
 $ $EDITOR ~/.btcd/btcd.conf
 $ $EDITOR ~/.btcwallet/btcwallet.conf
 ```
@@ -122,7 +122,7 @@ JSON (un)marshaling these requests and notifications.
 
 ## Issue Tracker
 
-The [integrated github issue tracker](https://github.com/conformal/btcwallet/issues)
+The [integrated github issue tracker](https://github.com/btcsuite/btcwallet/issues)
 is used for this project.
 
 ## GPG Verification Key

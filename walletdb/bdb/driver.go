@@ -19,7 +19,7 @@ package bdb
 import (
 	"fmt"
 
-	"github.com/conformal/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 const (

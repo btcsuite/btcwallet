@@ -42,12 +42,12 @@ import (
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/keystore"
+	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwire"
 	"github.com/btcsuite/btcws"
 	"github.com/btcsuite/websocket"
-	"github.com/conformal/btcwallet/chain"
-	"github.com/conformal/btcwallet/keystore"
-	"github.com/conformal/btcwallet/txstore"
 )
 
 // Error types to simplify the reporting of specific categories of

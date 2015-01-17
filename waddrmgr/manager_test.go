@@ -25,9 +25,9 @@ import (
 
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwire"
-	"github.com/conformal/btcwallet/waddrmgr"
-	"github.com/conformal/btcwallet/walletdb"
 )
 
 // newShaHash converts the passed big-endian hex string into a btcwire.ShaHash.

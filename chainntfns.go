@@ -19,9 +19,9 @@ package main
 import (
 	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
-	"github.com/conformal/btcwallet/chain"
-	"github.com/conformal/btcwallet/keystore"
-	"github.com/conformal/btcwallet/txstore"
+	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/keystore"
+	"github.com/btcsuite/btcwallet/txstore"
 )
 
 func (w *Wallet) handleChainNotifications() {

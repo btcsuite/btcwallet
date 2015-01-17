@@ -21,7 +21,7 @@ import (
 	"os"
 
 	"github.com/btcsuite/bolt"
-	"github.com/conformal/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 // convertErr converts some bolt errors to the equivalent walletdb error.
