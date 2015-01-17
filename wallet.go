@@ -27,10 +27,10 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcchain"
+	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
-	"github.com/conformal/btcjson"
 	"github.com/conformal/btcwallet/chain"
 	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
