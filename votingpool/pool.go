@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/conformal/btcscript"
 	"github.com/conformal/btcwallet/waddrmgr"
 	"github.com/conformal/btcwallet/walletdb"
 )

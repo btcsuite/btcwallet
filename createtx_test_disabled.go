@@ -12,9 +12,9 @@ package main
 import (
 	"testing"
 
+	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
-	"github.com/conformal/btcscript"
 	"github.com/conformal/btcwallet/tx"
 )
 

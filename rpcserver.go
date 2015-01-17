@@ -39,11 +39,11 @@ import (
 
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcrpcclient"
+	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
 	"github.com/btcsuite/websocket"
 	"github.com/conformal/btcjson"
-	"github.com/conformal/btcscript"
 	"github.com/conformal/btcwallet/chain"
 	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"

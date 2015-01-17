@@ -26,9 +26,9 @@ import (
 
 	"github.com/btcsuite/btcchain"
 	"github.com/btcsuite/btcnet"
+	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
-	"github.com/conformal/btcscript"
 )
 
 var (
