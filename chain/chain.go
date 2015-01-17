@@ -25,9 +25,9 @@ import (
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
+	"github.com/btcsuite/btcws"
 	"github.com/conformal/btcwallet/keystore"
 	"github.com/conformal/btcwallet/txstore"
-	"github.com/conformal/btcws"
 )
 
 type Client struct {
