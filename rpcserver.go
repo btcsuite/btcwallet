@@ -343,6 +343,8 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 		listenFunc = func(net string, laddr string) (net.Listener, error) {
 			return tls.Listen(net, laddr, &tlsConfig)
 		}
+	} else {
+		log.Info("Server TLS is disabled")
 	}
 
 	ipv4ListenAddrs, ipv6ListenAddrs, err := parseListeners(listenAddrs)

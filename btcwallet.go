@@ -99,6 +99,8 @@ func walletMain() error {
 				// with nil certs and without the client connection
 				certs = nil
 			}
+		} else {
+			log.Info("Client TLS is disabled")
 		}
 		rpcc, err := chain.NewClient(activeNet.Params, cfg.RPCConnect,
 			cfg.BtcdUsername, cfg.BtcdPassword, certs, cfg.DisableClientTLS)
