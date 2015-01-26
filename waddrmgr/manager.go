@@ -349,7 +349,7 @@ func (m *Manager) Close() error {
 // The passed derivedKey is zeroed after the new address is created.
 //
 // This function MUST be called with the manager lock held for writes.
-func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32) (ManagedAddress, error) {
+func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32, used bool) (ManagedAddress, error) {
 	// Create a new managed address based on the public or private key
 	// depending on whether the passed key is private.  Also, zero the
 	// key after creating the managed address from it.
@@ -372,6 +372,7 @@ func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, bran
 	if branch == internalBranch {
 		ma.internal = true
 	}
+	ma.used = used
 
 	return ma, nil
 }
@@ -486,7 +487,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index)
+	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index, false)
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +502,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index)
+	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index, false)
 	if err != nil {
 		return nil, err
 	}
@@ -537,7 +538,7 @@ func (m *Manager) chainAddressRowToManaged(row *dbChainAddressRow) (ManagedAddre
 		return nil, err
 	}
 
-	return m.keyToManaged(addressKey, row.account, row.branch, row.index)
+	return m.keyToManaged(addressKey, row.account, row.branch, row.index, row.used)
 }
 
 // importedAddressRowToManaged returns a new managed address based on imported
@@ -564,6 +565,7 @@ func (m *Manager) importedAddressRowToManaged(row *dbImportedAddressRow) (Manage
 	}
 	ma.privKeyEncrypted = row.encryptedPrivKey
 	ma.imported = true
+	ma.used = row.used
 
 	return ma, nil
 }
@@ -578,7 +580,7 @@ func (m *Manager) scriptAddressRowToManaged(row *dbScriptAddressRow) (ManagedAdd
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
-	return newScriptAddress(m, row.account, scriptHash, row.encryptedScript)
+	return newScriptAddress(m, row.account, scriptHash, row.encryptedScript, row.used)
 }
 
 // rowInterfaceToManaged returns a new managed address based on the given
@@ -1126,7 +1128,7 @@ func (m *Manager) ImportScript(script []byte, bs *BlockStamp) (ManagedScriptAddr
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
 	scriptAddr, err := newScriptAddress(m, ImportedAddrAccount, scriptHash,
-		encryptedScript)
+		encryptedScript, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1287,6 +1289,19 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	saltedPassphrase := append(m.privPassphraseSalt[:], passphrase...)
 	m.hashedPrivPassphrase = sha512.Sum512(saltedPassphrase)
 	zero.Bytes(saltedPassphrase)
+	return nil
+}
+
+// MarkUsed updates the used flag for the provided address id.
+func (m *Manager) MarkUsed(addressID []byte) error {
+	err := m.namespace.Update(func(tx walletdb.Tx) error {
+		return markAddressUsed(tx, addressID)
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	// 'used' flag has become stale so remove key from cache
+	delete(m.addrs, addrKey(addressID))
 	return nil
 }
 

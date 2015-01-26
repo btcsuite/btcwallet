@@ -170,6 +170,9 @@ func (w *Wallet) addRedeemingTx(tx *btcutil.Tx, block *txstore.Block) error {
 	if _, err := txr.AddDebits(); err != nil {
 		return err
 	}
+	if err := w.markAddrsUsed(txr); err != nil {
+		return err
+	}
 
 	bs, err := w.chainSvr.BlockStamp()
 	if err == nil {

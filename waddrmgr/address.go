@@ -51,6 +51,9 @@ type ManagedAddress interface {
 
 	// Compressed returns true if the backing address is compressed.
 	Compressed() bool
+
+	// Used returns true if the backing address has been used in a transaction.
+	Used() bool
 }
 
 // ManagedPubKeyAddress extends ManagedAddress and additionally provides the
@@ -94,6 +97,7 @@ type managedAddress struct {
 	imported         bool
 	internal         bool
 	compressed       bool
+	used             bool
 	pubKey           *btcec.PublicKey
 	privKeyEncrypted []byte
 	privKeyCT        []byte // non-nil if unlocked
@@ -182,6 +186,13 @@ func (a *managedAddress) Internal() bool {
 // This is part of the ManagedAddress interface implementation.
 func (a *managedAddress) Compressed() bool {
 	return a.compressed
+}
+
+// Used returns true if the address has been used in a transaction.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *managedAddress) Used() bool {
+	return a.used
 }
 
 // PubKey returns the public key associated with the address.
@@ -354,6 +365,7 @@ type scriptAddress struct {
 	scriptEncrypted []byte
 	scriptCT        []byte
 	scriptMutex     sync.Mutex
+	used            bool
 }
 
 // Enforce scriptAddress satisfies the ManagedScriptAddress interface.
@@ -441,6 +453,13 @@ func (a *scriptAddress) Compressed() bool {
 	return false
 }
 
+// Used returns true if the address has been used in a transaction.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *scriptAddress) Used() bool {
+	return a.used
+}
+
 // Script returns the script associated with the address.
 //
 // This implements the ScriptAddress interface.
@@ -465,7 +484,7 @@ func (a *scriptAddress) Script() ([]byte, error) {
 }
 
 // newScriptAddress initializes and returns a new pay-to-script-hash address.
-func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []byte) (*scriptAddress, error) {
+func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []byte, used bool) (*scriptAddress, error) {
 	address, err := btcutil.NewAddressScriptHashFromHash(scriptHash,
 		m.chainParams)
 	if err != nil {
@@ -477,5 +496,6 @@ func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []
 		account:         account,
 		address:         address,
 		scriptEncrypted: scriptEncrypted,
+		used:            used,
 	}, nil
 }

@@ -29,7 +29,7 @@ import (
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 1
+	LatestMgrVersion = 2
 )
 
 var (
@@ -107,6 +107,7 @@ type dbAddressRow struct {
 	account    uint32
 	addTime    uint64
 	syncStatus syncStatus
+	used       bool
 	rawData    []byte // Varies based on address type field.
 }
 
@@ -162,6 +163,9 @@ var (
 
 	// Account related key names (account bucket).
 	acctNumAcctsName = []byte("numaccts")
+
+	// Used addresses (used bucket)
+	usedAddrBucketName = []byte("usedaddrs")
 )
 
 // uint32ToBytes converts a 32 bit unsigned integer into a 4-byte slice in
@@ -732,6 +736,17 @@ func serializeScriptAddress(encryptedHash, encryptedScript []byte) []byte {
 	return rawData
 }
 
+// fetchAddressUsed returns true if the provided address hash was flagged as used.
+func fetchAddressUsed(tx walletdb.Tx, addrHash [32]byte) bool {
+	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
+
+	val := bucket.Get(addrHash[:])
+	if val != nil {
+		return true
+	}
+	return false
+}
+
 // fetchAddress loads address information for the provided address id from
 // the database.  The returned value is one of the address rows for the specific
 // address type.  The caller should use type assertions to ascertain the type.
@@ -749,6 +764,7 @@ func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	row.used = fetchAddressUsed(tx, addrHash)
 
 	switch row.addrType {
 	case adtChain:
@@ -761,6 +777,23 @@ func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
 
 	str := fmt.Sprintf("unsupported address type '%d'", row.addrType)
 	return nil, managerError(ErrDatabase, str, nil)
+}
+
+// markAddressUsed flags the provided address id as used in the database.
+func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
+	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
+
+	addrHash := fastsha256.Sum256(addressID)
+	val := bucket.Get(addrHash[:])
+	if val != nil {
+		return nil
+	}
+	err := bucket.Put(addrHash[:], []byte{0})
+	if err != nil {
+		str := fmt.Sprintf("failed to mark address used %x", addressID)
+		return managerError(ErrDatabase, str, err)
+	}
+	return nil
 }
 
 // putAddress stores the provided address information to the database.  This
@@ -1243,6 +1276,13 @@ func createManagerNS(namespace walletdb.Namespace) error {
 			return managerError(ErrDatabase, str, err)
 		}
 
+		// usedAddrBucketName bucket was added after manager version 1 release
+		_, err = rootBucket.CreateBucket(usedAddrBucketName)
+		if err != nil {
+			str := "failed to create used addresses bucket"
+			return managerError(ErrDatabase, str, err)
+		}
+
 		if err := putManagerVersion(tx, latestMgrVersion); err != nil {
 			return err
 		}
@@ -1263,6 +1303,32 @@ func createManagerNS(namespace walletdb.Namespace) error {
 		return managerError(ErrDatabase, str, err)
 	}
 
+	return nil
+}
+
+// upgradeToVersion2 upgrades the database from version 1 to version 2
+// 'usedAddrBucketName' a bucket for storing addrs flagged as marked is
+// initialized and it will be updated on the next rescan.
+func upgradeToVersion2(namespace walletdb.Namespace) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		currentMgrVersion := uint32(2)
+		rootBucket := tx.RootBucket()
+
+		_, err := rootBucket.CreateBucket(usedAddrBucketName)
+		if err != nil {
+			str := "failed to create used addresses bucket"
+			return managerError(ErrDatabase, str, err)
+		}
+
+		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
 	return nil
 }
 
@@ -1311,6 +1377,16 @@ func upgradeManager(namespace walletdb.Namespace) error {
 	//	// The manager is now at version 3.
 	//	version = 3
 	// }
+
+	if version < 2 {
+		// Upgrade from version 1 to 2.
+		if err := upgradeToVersion2(namespace); err != nil {
+			return err
+		}
+
+		// The manager is now at version 2.
+		version = 2
+	}
 
 	// Ensure the manager is upraded to the latest version.  This check is
 	// to intentionally cause a failure if the manager version is updated

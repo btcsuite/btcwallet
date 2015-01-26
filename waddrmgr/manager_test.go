@@ -67,6 +67,7 @@ type expectedAddr struct {
 	addressHash []byte
 	internal    bool
 	compressed  bool
+	used        bool
 	imported    bool
 	pubKey      []byte
 	privKey     []byte
@@ -1016,6 +1017,43 @@ func testImportScript(tc *testContext) bool {
 	return true
 }
 
+// testMarkUsed ensures used addresses are flagged as such.
+func testMarkUsed(tc *testContext) bool {
+	expectedAddr1 := expectedAddr{
+		addressHash: hexToBytes("2ef94abb9ee8f785d087c3ec8d6ee467e92d0d0a"),
+		used:        true,
+	}
+	prefix := "MarkUsed"
+	chainParams := tc.manager.ChainParams()
+	addrHash := expectedAddr1.addressHash
+	addr, err := btcutil.NewAddressPubKeyHash(addrHash, chainParams)
+
+	if tc.create {
+		// Test that initially the address is not flagged as used
+		maddr, err := tc.manager.Address(addr)
+		if err != nil {
+			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
+		}
+		if maddr.Used() != false {
+			tc.t.Errorf("%v: unexpected used flag -- got "+
+				"%v, want %v", prefix, maddr.Used(), expectedAddr1.used)
+		}
+	}
+	err = tc.manager.MarkUsed(addrHash)
+	if err != nil {
+		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
+	}
+	maddr, err := tc.manager.Address(addr)
+	if err != nil {
+		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
+	}
+	if maddr.Used() != expectedAddr1.used {
+		tc.t.Errorf("%v: unexpected used flag -- got "+
+			"%v, want %v", prefix, maddr.Used(), expectedAddr1.used)
+	}
+	return true
+}
+
 // testChangePassphrase ensures changes both the public and privte passphrases
 // works as intended.
 func testChangePassphrase(tc *testContext) bool {
@@ -1129,6 +1167,7 @@ func testManagerAPI(tc *testContext) {
 	testInternalAddresses(tc)
 	testImportPrivateKey(tc)
 	testImportScript(tc)
+	testMarkUsed(tc)
 	testChangePassphrase(tc)
 }
 

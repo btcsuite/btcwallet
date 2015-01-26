@@ -257,6 +257,24 @@ func (w *Wallet) ListenUnconfirmedBalance() (<-chan btcutil.Amount, error) {
 	return w.unconfirmedBalance, nil
 }
 
+// markAddrsUsed marks the addresses credited by the given transaction
+// record as used.
+func (w *Wallet) markAddrsUsed(t *txstore.TxRecord) error {
+	for _, c := range t.Credits() {
+		// Errors don't matter here.  If addrs is nil, the
+		// range below does nothing.
+		_, addrs, _, _ := c.Addresses(activeNet.Params)
+		for _, addr := range addrs {
+			addressID := addr.ScriptAddress()
+			if err := w.Manager.MarkUsed(addressID); err != nil {
+				return err
+			}
+			log.Infof("Marked address used %s", addr.EncodeAddress())
+		}
+	}
+	return nil
+}
+
 func (w *Wallet) notifyConnectedBlock(block waddrmgr.BlockStamp) {
 	w.notificationLock.Lock()
 	if w.connectedBlocks != nil {
@@ -701,25 +719,7 @@ func (w *Wallet) diskWriter() {
 // there are any transactions with outputs to this address in the blockchain or
 // the btcd mempool.
 func (w *Wallet) AddressUsed(addr waddrmgr.ManagedAddress) bool {
-	// This not only can be optimized by recording this data as it is
-	// read when opening a wallet, and keeping it up to date each time a
-	// new received tx arrives, but it probably should in case an address is
-	// used in a tx (made public) but the tx is eventually removed from the
-	// store (consider a chain reorg).
-
-	for _, r := range w.TxStore.Records() {
-		for _, c := range r.Credits() {
-			// Errors don't matter here.  If addrs is nil, the
-			// range below does nothing.
-			_, addrs, _, _ := c.Addresses(activeNet.Params)
-			for _, a := range addrs {
-				if addr.Address().String() == a.String() {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return addr.Used()
 }
 
 // CalculateBalance sums the amounts of all unspent transaction
