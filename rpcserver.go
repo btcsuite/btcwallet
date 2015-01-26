@@ -2385,6 +2385,10 @@ func sendPairs(w *Wallet, chainSvr *chain.Client, cmd btcjson.Cmd,
 				"tx: %v", err)
 			return nil, btcjson.ErrInternal
 		}
+		if err := w.markAddrsUsed(txr); err != nil {
+			log.Errorf("Error marking addr used: %v", err)
+			return nil, btcjson.ErrInternal
+		}
 	}
 	w.TxStore.MarkDirty()
 

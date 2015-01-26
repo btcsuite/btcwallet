@@ -136,6 +136,9 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 				return err
 			}
 			w.TxStore.MarkDirty()
+			if err := w.markAddrsUsed(txr); err != nil {
+				return err
+			}
 		}
 	}
 

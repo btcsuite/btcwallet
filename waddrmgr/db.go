@@ -19,6 +19,7 @@ package waddrmgr
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
@@ -31,6 +32,22 @@ const (
 	// LatestMgrVersion is the most recent manager version.
 	LatestMgrVersion = 1
 )
+
+const (
+	falseByte byte = iota
+	trueByte
+)
+
+func byteAsBool(b byte) (bool, error) {
+	switch b {
+	case falseByte:
+		return false, nil
+	case trueByte:
+		return true, nil
+	default:
+		return false, errors.New("invalid byte representation of bool")
+	}
+}
 
 // maybeConvertDbError converts the passed error to a ManagerError with an
 // error code of ErrDatabase if it is not already a ManagerError.  This is
@@ -101,6 +118,7 @@ type dbAddressRow struct {
 	account    uint32
 	addTime    uint64
 	syncStatus syncStatus
+	used       bool
 	rawData    []byte // Varies based on address type field.
 }
 
@@ -526,14 +544,14 @@ func putNumAccounts(tx walletdb.Tx, numAccounts uint32) error {
 // the common parts.
 func deserializeAddressRow(addressID, serializedAddress []byte) (*dbAddressRow, error) {
 	// The serialized address format is:
-	//   <addrType><account><addedTime><syncStatus><rawdata>
+	//   <addrType><account><addedTime><syncStatus><used><rawdata>
 	//
 	// 1 byte addrType + 4 bytes account + 8 bytes addTime + 1 byte
-	// syncStatus + 4 bytes raw data length + raw data
+	// syncStatus + 1 byte used + 4 bytes raw data length + raw data
 
 	// Given the above, the length of the entry must be at a minimum
 	// the constant value sizes.
-	if len(serializedAddress) < 18 {
+	if len(serializedAddress) < 19 {
 		str := fmt.Sprintf("malformed serialized address for key %s",
 			addressID)
 		return nil, managerError(ErrDatabase, str, nil)
@@ -544,9 +562,16 @@ func deserializeAddressRow(addressID, serializedAddress []byte) (*dbAddressRow, 
 	row.account = binary.LittleEndian.Uint32(serializedAddress[1:5])
 	row.addTime = binary.LittleEndian.Uint64(serializedAddress[5:13])
 	row.syncStatus = syncStatus(serializedAddress[13])
-	rdlen := binary.LittleEndian.Uint32(serializedAddress[14:18])
+	used, err := byteAsBool(serializedAddress[14])
+	if err != nil {
+		str := fmt.Sprintf("malformed used address flag for key %s",
+			addressID)
+		return nil, managerError(ErrDatabase, str, err)
+	}
+	row.used = used
+	rdlen := binary.LittleEndian.Uint32(serializedAddress[15:19])
 	row.rawData = make([]byte, rdlen)
-	copy(row.rawData, serializedAddress[18:18+rdlen])
+	copy(row.rawData, serializedAddress[19:19+rdlen])
 
 	return &row, nil
 }
@@ -554,19 +579,23 @@ func deserializeAddressRow(addressID, serializedAddress []byte) (*dbAddressRow, 
 // serializeAddressRow returns the serialization of the passed address row.
 func serializeAddressRow(row *dbAddressRow) []byte {
 	// The serialized address format is:
-	//   <addrType><account><addedTime><syncStatus><commentlen><comment>
-	//   <rawdata>
+	//   <addrType><account><addedTime><syncStatus><used><rawdata>
 	//
 	// 1 byte addrType + 4 bytes account + 8 bytes addTime + 1 byte
-	// syncStatus + 4 bytes raw data length + raw data
+	// syncStatus + 1 byte used + 4 bytes raw data length + raw data
 	rdlen := len(row.rawData)
-	buf := make([]byte, 18+rdlen)
+	buf := make([]byte, 19+rdlen)
 	buf[0] = byte(row.addrType)
 	binary.LittleEndian.PutUint32(buf[1:5], row.account)
 	binary.LittleEndian.PutUint64(buf[5:13], row.addTime)
 	buf[13] = byte(row.syncStatus)
-	binary.LittleEndian.PutUint32(buf[14:18], uint32(rdlen))
-	copy(buf[18:18+rdlen], row.rawData)
+	if row.used {
+		buf[14] = trueByte
+	} else {
+		buf[14] = falseByte
+	}
+	binary.LittleEndian.PutUint32(buf[15:19], uint32(rdlen))
+	copy(buf[19:19+rdlen], row.rawData)
 	return buf
 }
 
@@ -742,6 +771,29 @@ func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
 
 	str := fmt.Sprintf("unsupported address type '%d'", row.addrType)
 	return nil, managerError(ErrDatabase, str, nil)
+}
+
+// updateAddressUsed updates the used flag for the provided address id in the
+// database.
+func updateAddressUsed(tx walletdb.Tx, addressID []byte) error {
+	bucket := tx.RootBucket().Bucket(addrBucketName)
+
+	addrHash := fastsha256.Sum256(addressID)
+	serializedRow := bucket.Get(addrHash[:])
+	if serializedRow == nil {
+		str := "address not found"
+		return managerError(ErrAddressNotFound, str, nil)
+	}
+
+	row, err := deserializeAddressRow(addressID, serializedRow)
+	if err != nil {
+		return err
+	}
+	row.used = true
+	if err := putAddress(tx, addressID, row); err != nil {
+		return err
+	}
+	return nil
 }
 
 // putAddress stores the provided address information to the database.  This
