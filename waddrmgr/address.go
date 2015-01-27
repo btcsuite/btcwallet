@@ -54,6 +54,9 @@ type ManagedAddress interface {
 
 	// Used returns true if the backing address has been used in a transaction.
 	Used() (bool, error)
+
+	// WatchingOnly returns true if the backing address is watching-only.
+	WatchingOnly() bool
 }
 
 // ManagedPubKeyAddress extends ManagedAddress and additionally provides the
@@ -62,11 +65,11 @@ type ManagedPubKeyAddress interface {
 	ManagedAddress
 
 	// PubKey returns the public key associated with the address.
-	PubKey() *btcec.PublicKey
+	PubKey() (*btcec.PublicKey, error)
 
 	// ExportPubKey returns the public key associated with the address
 	// serialized as a hex encoded string.
-	ExportPubKey() string
+	ExportPubKey() (string, error)
 
 	// PrivKey returns the private key for the address.  It can fail if the
 	// address manager is watching-only or locked, or the address does not
@@ -113,6 +116,10 @@ var _ ManagedPubKeyAddress = (*managedAddress)(nil)
 // used by the caller without worrying about it being zeroed during an address
 // lock.
 func (a *managedAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
+	if a.WatchingOnly() {
+		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
 	// Protect concurrent access to clear text private key.
 	a.privKeyMutex.Lock()
 	defer a.privKeyMutex.Unlock()
@@ -195,37 +202,56 @@ func (a *managedAddress) Used() (bool, error) {
 	return a.manager.fetchUsed(a.AddrHash())
 }
 
+// WatchingOnly returns true if the address is watching-only.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *managedAddress) WatchingOnly() bool {
+	return len(a.privKeyEncrypted) == 0
+}
+
 // PubKey returns the public key associated with the address.
 //
 // This is part of the ManagedPubKeyAddress interface implementation.
-func (a *managedAddress) PubKey() *btcec.PublicKey {
-	return a.pubKey
+func (a *managedAddress) PubKey() (*btcec.PublicKey, error) {
+	// Make sure public key is available for this address.
+	if a.pubKey == nil {
+		return nil, managerError(ErrNoPubKey, errNoPubKey, nil)
+	}
+
+	return a.pubKey, nil
 }
 
 // pubKeyBytes returns the serialized public key bytes for the managed address
 // based on whether or not the managed address is marked as compressed.
-func (a *managedAddress) pubKeyBytes() []byte {
-	if a.compressed {
-		return a.pubKey.SerializeCompressed()
+func (a *managedAddress) pubKeyBytes() ([]byte, error) {
+	pubKey, err := a.PubKey()
+	if err != nil {
+		return nil, err
 	}
-	return a.pubKey.SerializeUncompressed()
+	if a.compressed {
+		return pubKey.SerializeCompressed(), nil
+	}
+	return pubKey.SerializeUncompressed(), nil
 }
 
 // ExportPubKey returns the public key associated with the address
 // serialized as a hex encoded string.
 //
 // This is part of the ManagedPubKeyAddress interface implementation.
-func (a *managedAddress) ExportPubKey() string {
-	return hex.EncodeToString(a.pubKeyBytes())
+func (a *managedAddress) ExportPubKey() (string, error) {
+	pkBytes, err := a.pubKeyBytes()
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(pkBytes), nil
 }
 
 // PrivKey returns the private key for the address.  It can fail if the address
-// manager is watching-only or locked, or the address does not have any keys.
+// manager is locked or the address is watching-only or does not have any keys.
 //
 // This is part of the ManagedPubKeyAddress interface implementation.
 func (a *managedAddress) PrivKey() (*btcec.PrivateKey, error) {
-	// No private keys are available for a watching-only address manager.
-	if a.manager.watchingOnly {
+	if a.WatchingOnly() {
 		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -266,7 +292,7 @@ func (a *managedAddress) ExportPrivKey() (*btcutil.WIF, error) {
 // newManagedAddressWithoutPrivKey returns a new managed address based on the
 // passed account, public key, and whether or not the public key should be
 // compressed.
-func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.PublicKey, compressed bool) (*managedAddress, error) {
+func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.PublicKey, compressed, imported bool) (*managedAddress, error) {
 	// Create a pay-to-pubkey-hash address from the public key.
 	var pubKeyHash []byte
 	if compressed {
@@ -283,7 +309,7 @@ func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.P
 		manager:          m,
 		address:          address,
 		account:          account,
-		imported:         false,
+		imported:         imported,
 		internal:         false,
 		compressed:       compressed,
 		pubKey:           pubKey,
@@ -295,7 +321,7 @@ func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.P
 // newManagedAddress returns a new managed address based on the passed account,
 // private key, and whether or not the public key is compressed.  The managed
 // address will have access to the private and public keys.
-func newManagedAddress(m *Manager, account uint32, privKey *btcec.PrivateKey, compressed bool) (*managedAddress, error) {
+func newManagedAddress(m *Manager, account uint32, privKey *btcec.PrivateKey, compressed, imported bool) (*managedAddress, error) {
 	// Encrypt the private key.
 	//
 	// NOTE: The privKeyBytes here are set into the managed address which
@@ -311,7 +337,7 @@ func newManagedAddress(m *Manager, account uint32, privKey *btcec.PrivateKey, co
 	// and then add the private key to it.
 	ecPubKey := (*btcec.PublicKey)(&privKey.PublicKey)
 	managedAddr, err := newManagedAddressWithoutPrivKey(m, account,
-		ecPubKey, compressed)
+		ecPubKey, compressed, imported)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +362,7 @@ func newManagedAddressFromExtKey(m *Manager, account uint32, key *hdkeychain.Ext
 		}
 
 		// Ensure the temp private key big integer is cleared after use.
-		managedAddr, err = newManagedAddress(m, account, privKey, true)
+		managedAddr, err = newManagedAddress(m, account, privKey, true, false)
 		zero.BigInt(privKey.D)
 		if err != nil {
 			return nil, err
@@ -348,7 +374,7 @@ func newManagedAddressFromExtKey(m *Manager, account uint32, key *hdkeychain.Ext
 		}
 
 		managedAddr, err = newManagedAddressWithoutPrivKey(m, account,
-			pubKey, true)
+			pubKey, true, false)
 		if err != nil {
 			return nil, err
 		}
@@ -376,6 +402,10 @@ var _ ManagedScriptAddress = (*scriptAddress)(nil)
 // script will always be a copy that may be safely used by the caller without
 // worrying about it being zeroed during an address lock.
 func (a *scriptAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
+	if a.WatchingOnly() {
+		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
 	// Protect concurrent access to clear text script.
 	a.scriptMutex.Lock()
 	defer a.scriptMutex.Unlock()
@@ -460,12 +490,18 @@ func (a *scriptAddress) Used() (bool, error) {
 	return a.manager.fetchUsed(a.AddrHash())
 }
 
+// WatchingOnly returns true if the address is watching-only.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *scriptAddress) WatchingOnly() bool {
+	return len(a.scriptEncrypted) == 0
+}
+
 // Script returns the script associated with the address.
 //
 // This implements the ScriptAddress interface.
 func (a *scriptAddress) Script() ([]byte, error) {
-	// No script is available for a watching-only address manager.
-	if a.manager.watchingOnly {
+	if a.WatchingOnly() {
 		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -496,5 +532,20 @@ func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []
 		account:         account,
 		address:         address,
 		scriptEncrypted: scriptEncrypted,
+	}, nil
+}
+
+// newPKHashAddress returns a new address based on the passed account and
+// public key hash.
+func newPKHashAddress(m *Manager, account uint32, pkHash []byte) (*managedAddress, error) {
+	address, err := btcutil.NewAddressPubKeyHash(pkHash, m.ChainParams())
+	if err != nil {
+		return nil, err
+	}
+	return &managedAddress{
+		manager:  m,
+		address:  address,
+		account:  account,
+		imported: true,
 	}, nil
 }
