@@ -1402,6 +1402,8 @@ var rpcHandlers = map[string]requestHandler{
 	// here because it hasn't been update to use the reference
 	// implemenation's API.
 	"getunconfirmedbalance":   GetUnconfirmedBalance,
+	"importpubkey":            ImportPubKey,
+	"importaddress":           ImportAddress,
 	"listaddresstransactions": ListAddressTransactions,
 	"listalltransactions":     ListAllTransactions,
 	"walletislocked":          WalletIsLocked,
@@ -1829,6 +1831,51 @@ func GetUnconfirmedBalance(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 	}
 
 	return (unconfirmed - confirmed).ToUnit(btcutil.AmountBTC), nil
+}
+
+// ImportAddress handles an importaddress request by parsing
+// a encoded address and importing it as a watch-only address to the
+// imported address account.
+func ImportAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
+	cmd := icmd.(*btcjson.ImportAddressCmd)
+
+	addr, err := btcutil.DecodeAddress(cmd.Address, activeNet.Params)
+	if err != nil {
+		return nil, btcjson.ErrInvalidAddressOrKey
+	}
+
+	_, err = w.ImportAddress(addr, nil, cmd.Rescan)
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// ImportPubKey handles an importpubkey request by parsing
+// a raw public key and importing it as a watch-only address to the
+// imported address account.
+func ImportPubKey(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
+	cmd := icmd.(*btcjson.ImportPubKeyCmd)
+
+	// Import the public key, handling any errors.
+	pubKeyBytes, err := hex.DecodeString(cmd.PubKey)
+	if err != nil {
+		return nil, btcjson.ErrInvalidAddressOrKey
+	}
+	pubKey, err := btcec.ParsePubKey(pubKeyBytes, btcec.S256())
+	if err != nil {
+		return nil, btcjson.ErrInvalidAddressOrKey
+	}
+	_, err = w.ImportPubKey(pubKey, nil, cmd.Rescan)
+	switch {
+	case isManagerDuplicateError(err):
+		// Do not return duplicate key errors to the client.
+		return nil, nil
+	case isManagerLockedError(err):
+		return nil, btcjson.ErrWalletUnlockNeeded
+	}
+
+	return nil, err
 }
 
 // ImportPrivKey handles an importprivkey request by parsing
