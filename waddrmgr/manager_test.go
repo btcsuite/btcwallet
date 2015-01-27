@@ -17,6 +17,7 @@
 package waddrmgr_test
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -280,6 +281,11 @@ func testAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedAddress
 
 	case waddrmgr.ManagedScriptAddress:
 		if !testManagedScriptAddress(tc, prefix, addr, wantAddr) {
+			return false
+		}
+
+	case waddrmgr.ManagedAddress:
+		if !bytes.Equal(addr.AddrHash(), wantAddr.addressHash) {
 			return false
 		}
 	}
@@ -711,6 +717,141 @@ func testLocking(tc *testContext) bool {
 	return true
 }
 
+// testImportAddress tests that importing addresses works properly.  It
+// ensures they can be retrieved by Address after they have been imported and
+// the addresses give the expected values when the manager is locked and
+// unlocked.
+//
+// This function expects the manager is already locked when called and returns
+// with the manager locked.
+func testImportAddress(tc *testContext) bool {
+	tests := []struct {
+		name       string
+		in         string
+		blockstamp waddrmgr.BlockStamp
+		expected   expectedAddr
+	}{
+		{
+			name: "simple p2pkh address",
+			in:   "1BBep4Pj5ZvpVBVMM9XtTWLzEdbZGFNFyc",
+			expected: expectedAddr{
+				address:     "1BBep4Pj5ZvpVBVMM9XtTWLzEdbZGFNFyc",
+				addressHash: hexToBytes("6fb4fb14a4423010512aba9121aeaf23857d2409"),
+				internal:    false,
+				imported:    true,
+				compressed:  false,
+				pubKey:      nil,
+				privKey:     nil,
+			},
+		},
+	}
+
+	// The manager must be unlocked to import a address, however a
+	// watching-only manager can't be unlocked.
+	if !tc.watchingOnly {
+		if err := tc.manager.Unlock(privPassphrase); err != nil {
+			tc.t.Errorf("Unlock: unexpected error: %v", err)
+			return false
+		}
+		tc.unlocked = true
+	}
+
+	// Only import the addresses when in the create phase of testing.
+	net := tc.manager.ChainParams()
+	tc.account = waddrmgr.ImportedAddrAccount
+	prefix := testNamePrefix(tc) + " testImportAddress"
+	if tc.create {
+		for i, test := range tests {
+			test.expected.address = test.in
+			addr, err := btcutil.DecodeAddress(test.in, net)
+			if err != nil {
+				tc.t.Errorf("%s DecodeAddress #%d (%s): unexpected "+
+					"error: %v", prefix, i, test.name, err)
+				continue
+			}
+			maddr, err := tc.manager.ImportAddress(addr,
+				&test.blockstamp)
+			if err != nil {
+				tc.t.Errorf("%s ImportAddress #%d (%s): "+
+					"unexpected error: %v", prefix, i,
+					test.name, err)
+				continue
+			}
+			if !testAddress(tc, prefix+" ImportAddress", maddr,
+				&test.expected) {
+				continue
+			}
+		}
+	}
+
+	// Setup a closure to test the results since the same tests need to be
+	// repeated with the manager unlocked and locked.
+	testResults := func() bool {
+		failed := false
+		for i, test := range tests {
+			test.expected.address = test.in
+
+			// Use the Address API to retrieve each of the expected
+			// new addresses and ensure they're accurate.
+			utilAddr, err := btcutil.NewAddressPubKeyHash(
+				test.expected.addressHash, net)
+			if err != nil {
+				tc.t.Errorf("%s NewAddressPubKeyHash #%d (%s): "+
+					"unexpected error: %v", prefix, i,
+					test.name, err)
+				failed = true
+				continue
+			}
+			taPrefix := fmt.Sprintf("%s Address #%d (%s)", prefix,
+				i, test.name)
+			ma, err := tc.manager.Address(utilAddr)
+			if err != nil {
+				tc.t.Errorf("%s: unexpected error: %v", taPrefix,
+					err)
+				failed = true
+				continue
+			}
+			if !testAddress(tc, taPrefix, ma, &test.expected) {
+				failed = true
+				continue
+			}
+		}
+
+		return !failed
+	}
+
+	// The address manager could either be locked or unlocked here depending
+	// on whether or not it's a watching-only manager.  When it's unlocked,
+	// this will test both the public and private address data are accurate.
+	// When it's locked, it must be watching-only, so only the public
+	// address  information is tested and the private functions are checked
+	// to ensure they return the expected ErrWatchingOnly error.
+	if !testResults() {
+		return false
+	}
+
+	// Everything after this point involves locking the address manager and
+	// retesting the addresses with a locked manager.  However, for
+	// watching-only mode, this has already happened, so just exit now in
+	// that case.
+	if tc.watchingOnly {
+		return true
+	}
+
+	// Lock the manager and retest all of the addresses to ensure the
+	// private information returns the expected error.
+	if err := tc.manager.Lock(); err != nil {
+		tc.t.Errorf("Lock: unexpected error: %v", err)
+		return false
+	}
+	tc.unlocked = false
+	if !testResults() {
+		return false
+	}
+
+	return true
+}
+
 // testImportPrivateKey tests that importing private keys works properly.  It
 // ensures they can be retrieved by Address after they have been imported and
 // the addresses give the expected values when the manager is locked and
@@ -1129,6 +1270,7 @@ func testManagerAPI(tc *testContext) {
 	testInternalAddresses(tc)
 	testImportPrivateKey(tc)
 	testImportScript(tc)
+	testImportAddress(tc)
 	testChangePassphrase(tc)
 }
 

@@ -32,6 +32,7 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
@@ -996,6 +997,91 @@ func (w *Wallet) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 		return "", err
 	}
 	return wif.String(), nil
+}
+
+// ImportAddress imports a address to the wallet.
+func (w *Wallet) ImportAddress(addr btcutil.Address, bs *waddrmgr.BlockStamp,
+	rescan bool) (string, error) {
+
+	// The starting block for the key is the genesis block unless otherwise
+	// specified.
+	if bs == nil {
+		bs = &waddrmgr.BlockStamp{
+			Hash:   *activeNet.Params.GenesisHash,
+			Height: 0,
+		}
+	}
+
+	// Attempt to import address into wallet.
+	_, err := w.Manager.ImportAddress(addr, bs)
+	if err != nil {
+		return "", err
+	}
+
+	// Rescan blockchain for transactions with txout scripts paying to the
+	// imported address.
+	if rescan {
+		job := &RescanJob{
+			Addrs:      []btcutil.Address{addr},
+			OutPoints:  nil,
+			BlockStamp: *bs,
+		}
+
+		// Submit rescan job and log when the import has completed.
+		// Do not block on finishing the rescan.  The rescan success
+		// or failure is logged elsewhere, and the channel is not
+		// required to be read, so discard the return value.
+		_ = w.SubmitRescan(job)
+	}
+
+	addrStr := addr.EncodeAddress()
+	log.Infof("Imported payment address %s", addrStr)
+
+	// Return the payment address string of the imported address.
+	return addrStr, nil
+}
+
+// ImportPubKey imports a pubkey backed address to the wallet.
+func (w *Wallet) ImportPubKey(pubKey *btcec.PublicKey, bs *waddrmgr.BlockStamp,
+	rescan bool) (string, error) {
+
+	// The starting block for the key is the genesis block unless otherwise
+	// specified.
+	if bs == nil {
+		bs = &waddrmgr.BlockStamp{
+			Hash:   *activeNet.Params.GenesisHash,
+			Height: 0,
+		}
+	}
+
+	// Attempt to import address into wallet.
+	managedAddr, err := w.Manager.ImportPublicKey(pubKey, bs, true)
+	if err != nil {
+		return "", err
+	}
+	addr := managedAddr.Address()
+
+	// Rescan blockchain for transactions with txout scripts paying to the
+	// imported address.
+	if rescan {
+		job := &RescanJob{
+			Addrs:      []btcutil.Address{addr},
+			OutPoints:  nil,
+			BlockStamp: *bs,
+		}
+
+		// Submit rescan job and log when the import has completed.
+		// Do not block on finishing the rescan.  The rescan success
+		// or failure is logged elsewhere, and the channel is not
+		// required to be read, so discard the return value.
+		_ = w.SubmitRescan(job)
+	}
+
+	addrStr := addr.EncodeAddress()
+	log.Infof("Imported payment address %s", addrStr)
+
+	// Return the payment address string of the imported address.
+	return addrStr, nil
 }
 
 // ImportPrivateKey imports a private key to the wallet and writes the new
