@@ -150,11 +150,21 @@ var helpDescsEnUS = map[string]string{
 	"gettransactiondetailsresult-vout":              "The transaction output index",
 	"gettransactiondetailsresult-involveswatchonly": "Unset",
 
+	// ImportAddressCmd help.
+	"importaddress--synopsis": "Imports an address to the 'imported' account.",
+	"importaddress-address":   "The address",
+	"importaddress-rescan":    "Rescan the blockchain (since the genesis block) for outputs controlled by the imported address",
+
 	// ImportPrivKeyCmd help.
 	"importprivkey--synopsis": "Imports a WIF-encoded private key to the 'imported' account.",
 	"importprivkey-privkey":   "The WIF-encoded private key",
 	"importprivkey-label":     "Unused (must be unset or 'imported')",
 	"importprivkey-rescan":    "Rescan the blockchain (since the genesis block) for outputs controlled by the imported key",
+
+	// ImportPubKeyCmd help.
+	"importpubkey--synopsis": "Imports a raw public key to the 'imported' account.",
+	"importpubkey-pubkey":    "The raw public key. May be compressed or uncompressed.",
+	"importpubkey-rescan":    "Rescan the blockchain (since the genesis block) for outputs controlled by the imported key",
 
 	// KeypoolRefillCmd help.
 	"keypoolrefill--synopsis": "DEPRECATED -- This request does nothing since no keypool is maintained.",

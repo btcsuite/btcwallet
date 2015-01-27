@@ -1290,6 +1290,8 @@ var rpcHandlers = map[string]struct {
 	// here because it hasn't been update to use the reference
 	// implemenation's API.
 	"getunconfirmedbalance":   {handler: GetUnconfirmedBalance},
+	"importaddress":           {handler: ImportAddress},
+	"importpubkey":            {handler: ImportPubKey},
 	"listaddresstransactions": {handler: ListAddressTransactions},
 	"listalltransactions":     {handler: ListAllTransactions},
 	"renameaccount":           {handler: RenameAccount},
@@ -1461,8 +1463,12 @@ func makeMultiSigScript(w *wallet.Wallet, keys []string, nRequired int) ([]byte,
 
 			apkinfo := ainfo.(waddrmgr.ManagedPubKeyAddress)
 
+			pubKey, err := apkinfo.ExportPubKey()
+			if err != nil {
+				return nil, err
+			}
 			// This will be an addresspubkey
-			a, err := decodeAddress(apkinfo.ExportPubKey(),
+			a, err := decodeAddress(pubKey,
 				activeNet.Params)
 			if err != nil {
 				return nil, err
@@ -1766,6 +1772,41 @@ func GetUnconfirmedBalance(w *wallet.Wallet, chainSvr *chain.Client, icmd interf
 	}
 
 	return (unconfirmed - confirmed).ToBTC(), nil
+}
+
+// ImportAddress handles an importaddress request by parsing
+// a encoded address and importing it as a watch-only address to the
+// imported address account.
+func ImportAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
+	cmd := icmd.(*btcjson.ImportAddressCmd)
+
+	addr, err := decodeAddress(cmd.Address, activeNet.Params)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = w.ImportAddress(addr, nil, *cmd.Rescan)
+	return nil, err
+}
+
+// ImportPubKey handles an importpubkey request by parsing a public key and
+// adding it to the imported account.
+func ImportPubKey(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
+	cmd := icmd.(*btcjson.ImportPubKeyCmd)
+
+	pubKeyBytes, err := decodeHexStr(cmd.PubKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Import the public key, handling any errors.
+	pubKey, err := btcec.ParsePubKey(pubKeyBytes, btcec.S256())
+	if err != nil {
+		return nil, InvalidParameterError{err}
+	}
+	_, err = w.ImportPubKey(pubKey, nil,
+		len(pubKeyBytes) == btcec.PubKeyBytesLenCompressed, *cmd.Rescan)
+	return nil, err
 }
 
 // ImportPrivKey handles an importprivkey request by parsing
@@ -3081,8 +3122,13 @@ func ValidateAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{})
 
 	switch ma := ainfo.(type) {
 	case waddrmgr.ManagedPubKeyAddress:
+		// Make sure the public key is available, break out if it's not.
+		pubKey, err := ma.ExportPubKey()
+		if err != nil {
+			break
+		}
 		result.IsCompressed = ma.Compressed()
-		result.PubKey = ma.ExportPubKey()
+		result.PubKey = pubKey
 
 	case waddrmgr.ManagedScriptAddress:
 		result.IsScript = true

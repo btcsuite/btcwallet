@@ -45,6 +45,10 @@ var (
 	// errWatchingOnly is the common error description used for the
 	// ErrWatchingOnly error code.
 	errWatchingOnly = "address manager is watching-only"
+
+	// errNoPubKey is the common error description used for the
+	// ErrNoPubKey error code
+	errNoPubKey = "no public key associated with the address"
 )
 
 // ErrorCode identifies a kind of error.
@@ -103,8 +107,14 @@ const (
 	// a watching-only account manager.
 	ErrWatchingOnly
 
+	// ErrNoPubKey indicates that no public key is associated with the address.
+	ErrNoPubKey
+
 	// ErrInvalidAccount indicates that the requested account is not valid.
 	ErrInvalidAccount
+
+	// ErrInvalidAddress indicates that the given address is not valid.
+	ErrInvalidAddress
 
 	// ErrAddressNotFound indicates that the requested address is not known to
 	// the account manager.
@@ -150,7 +160,9 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrAccountNumTooHigh: "ErrAccountNumTooHigh",
 	ErrLocked:            "ErrLocked",
 	ErrWatchingOnly:      "ErrWatchingOnly",
+	ErrNoPubKey:          "ErrNoPubKey",
 	ErrInvalidAccount:    "ErrInvalidAccount",
+	ErrInvalidAddress:    "ErrInvalidAddress",
 	ErrAddressNotFound:   "ErrAddressNotFound",
 	ErrAccountNotFound:   "ErrAccountNotFound",
 	ErrDuplicateAddress:  "ErrDuplicateAddress",
