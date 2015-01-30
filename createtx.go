@@ -23,7 +23,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/btcsuite/btcchain"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/keystore"
@@ -350,7 +350,7 @@ func (w *Wallet) findEligibleOutputs(minconf int, bs *keystore.BlockStamp) ([]tx
 			// Coinbase transactions must have have reached maturity
 			// before their outputs may be spent.
 			if unspent[i].IsCoinbase() {
-				target := btcchain.CoinbaseMaturity
+				target := blockchain.CoinbaseMaturity
 				if !unspent[i].Confirmed(target, bs.Height) {
 					continue
 				}

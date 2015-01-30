@@ -17,7 +17,7 @@
 package txstore
 
 import (
-	"github.com/btcsuite/btcchain"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcnet"
@@ -125,7 +125,7 @@ func (c *Credit) Category(chainHeight int32) CreditCategory {
 
 func (c *Credit) category(chainHeight int32) CreditCategory {
 	if c.isCoinbase() {
-		if confirmed(btcchain.CoinbaseMaturity, c.BlockHeight, chainHeight) {
+		if confirmed(blockchain.CoinbaseMaturity, c.BlockHeight, chainHeight) {
 			return CreditGenerate
 		}
 		return CreditImmature

@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcchain"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
@@ -941,7 +941,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int,
 			continue
 		}
 		if credit.IsCoinbase() {
-			if !credit.Confirmed(btcchain.CoinbaseMaturity, bs.Height) {
+			if !credit.Confirmed(blockchain.CoinbaseMaturity, bs.Height) {
 				continue
 			}
 		}

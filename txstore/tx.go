@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcchain"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
@@ -1251,7 +1251,7 @@ func (s *Store) balance(minConf int, chainHeight int32) (btcutil.Amount, error) 
 	for _, b := range s.blocks {
 		if confirmed(b.Height) {
 			bal += b.amountDeltas.Spendable
-			if confirms(b.Height) >= btcchain.CoinbaseMaturity {
+			if confirms(b.Height) >= blockchain.CoinbaseMaturity {
 				bal += b.amountDeltas.Reward
 			}
 			continue
