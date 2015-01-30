@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/btcsuite/btcscript"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -521,7 +521,7 @@ func (vp *Pool) DepositScript(seriesID, branch, index uint32) ([]byte, error) {
 		}
 	}
 
-	script, err := btcscript.MultiSigScript(pks, int(series.reqSigs))
+	script, err := txscript.MultiSigScript(pks, int(series.reqSigs))
 	if err != nil {
 		str := fmt.Sprintf("error while making multisig script hash, %d", len(pks))
 		return nil, managerError(waddrmgr.ErrScriptCreation, str, err)

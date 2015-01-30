@@ -17,7 +17,7 @@
 package main
 
 import (
-	"github.com/btcsuite/btcscript"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/keystore"
@@ -99,7 +99,7 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 	for txOutIdx, txOut := range tx.MsgTx().TxOut {
 		// Errors don't matter here.  If addrs is nil, the range below
 		// does nothing.
-		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txOut.PkScript,
+		_, addrs, _, _ := txscript.ExtractPkScriptAddrs(txOut.PkScript,
 			activeNet.Params)
 		insert := false
 		for _, addr := range addrs {

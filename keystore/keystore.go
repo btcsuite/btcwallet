@@ -36,9 +36,9 @@ import (
 
 	"golang.org/x/crypto/ripemd160"
 
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcnet"
-	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/rename"
 	"github.com/btcsuite/btcwire"
@@ -2764,7 +2764,7 @@ func (a *p2SHScript) WriteTo(w io.Writer) (n int64, err error) {
 type scriptAddress struct {
 	store             *Store
 	address           btcutil.Address
-	class             btcscript.ScriptClass
+	class             txscript.ScriptClass
 	addresses         []btcutil.Address
 	reqSigs           int
 	flags             scriptFlags
@@ -2782,7 +2782,7 @@ type ScriptAddress interface {
 	// Returns the script associated with the address.
 	Script() []byte
 	// Returns the class of the script associated with the address.
-	ScriptClass() btcscript.ScriptClass
+	ScriptClass() txscript.ScriptClass
 	// Returns the addresses that are required to sign transactions from the
 	// script address.
 	Addresses() []btcutil.Address
@@ -2794,7 +2794,7 @@ type ScriptAddress interface {
 // iv must be 16 bytes, or nil (in which case it is randomly generated).
 func newScriptAddress(s *Store, script []byte, bs *BlockStamp) (addr *scriptAddress, err error) {
 	class, addresses, reqSigs, err :=
-		btcscript.ExtractPkScriptAddrs(script, s.netParams())
+		txscript.ExtractPkScriptAddrs(script, s.netParams())
 	if err != nil {
 		return nil, err
 	}
@@ -2885,7 +2885,7 @@ func (sa *scriptAddress) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 
 	class, addresses, reqSigs, err :=
-		btcscript.ExtractPkScriptAddrs(sa.script, sa.store.netParams())
+		txscript.ExtractPkScriptAddrs(sa.script, sa.store.netParams())
 	if err != nil {
 		return n, err
 	}
@@ -2972,7 +2972,7 @@ func (sa *scriptAddress) Addresses() []btcutil.Address {
 }
 
 // ScriptClass returns the type of script the address is.
-func (sa *scriptAddress) ScriptClass() btcscript.ScriptClass {
+func (sa *scriptAddress) ScriptClass() txscript.ScriptClass {
 	return sa.class
 }
 

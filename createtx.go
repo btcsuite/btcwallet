@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcchain"
-	"github.com/btcsuite/btcscript"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
@@ -275,7 +275,7 @@ func createTx(
 // addChange adds a new output with the given amount and address, and
 // randomizes the index (and returns it) of the newly added output.
 func addChange(msgtx *btcwire.MsgTx, change btcutil.Amount, changeAddr btcutil.Address) (int, error) {
-	pkScript, err := btcscript.PayToAddrScript(changeAddr)
+	pkScript, err := txscript.PayToAddrScript(changeAddr)
 	if err != nil {
 		return 0, fmt.Errorf("cannot create txout script: %s", err)
 	}
@@ -321,7 +321,7 @@ func addOutputs(msgtx *btcwire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.
 		}
 
 		// Add output to spend amt to addr.
-		pkScript, err := btcscript.PayToAddrScript(addr)
+		pkScript, err := txscript.PayToAddrScript(addr)
 		if err != nil {
 			return minAmount, fmt.Errorf("cannot create txout script: %s", err)
 		}
@@ -342,8 +342,8 @@ func (w *Wallet) findEligibleOutputs(minconf int, bs *keystore.BlockStamp) ([]tx
 	// signrawtransaction, and sendrawtransaction).
 	eligible := make([]txstore.Credit, 0, len(unspent))
 	for i := range unspent {
-		switch btcscript.GetScriptClass(unspent[i].TxOut().PkScript) {
-		case btcscript.PubKeyHashTy:
+		switch txscript.GetScriptClass(unspent[i].TxOut().PkScript) {
+		case txscript.PubKeyHashTy:
 			if !unspent[i].Confirmed(minconf, bs.Height) {
 				continue
 			}
@@ -399,8 +399,8 @@ func signMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit, store *keysto
 			return fmt.Errorf("cannot get private key: %v", err)
 		}
 
-		sigscript, err := btcscript.SignatureScript(
-			msgtx, i, output.TxOut().PkScript, btcscript.SigHashAll, privkey, ai.Compressed())
+		sigscript, err := txscript.SignatureScript(
+			msgtx, i, output.TxOut().PkScript, txscript.SigHashAll, privkey, ai.Compressed())
 		if err != nil {
 			return fmt.Errorf("cannot create sigscript: %s", err)
 		}
@@ -411,13 +411,13 @@ func signMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit, store *keysto
 }
 
 func validateMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit) error {
-	flags := btcscript.ScriptCanonicalSignatures | btcscript.ScriptStrictMultiSig
-	bip16 := time.Now().After(btcscript.Bip16Activation)
+	flags := txscript.ScriptCanonicalSignatures | txscript.ScriptStrictMultiSig
+	bip16 := time.Now().After(txscript.Bip16Activation)
 	if bip16 {
-		flags |= btcscript.ScriptBip16
+		flags |= txscript.ScriptBip16
 	}
 	for i, txin := range msgtx.TxIn {
-		engine, err := btcscript.NewScript(
+		engine, err := txscript.NewScript(
 			txin.SignatureScript, prevOutputs[i].TxOut().PkScript, i, msgtx, flags)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)

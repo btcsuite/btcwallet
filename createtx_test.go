@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/btcsuite/btcscript"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
@@ -133,7 +133,7 @@ func checkOutputsMatch(t *testing.T, msgtx *btcwire.MsgTx, expected map[string]b
 		if err != nil {
 			t.Fatalf("Cannot decode address: %v", err)
 		}
-		pkScript, err := btcscript.PayToAddrScript(addr)
+		pkScript, err := txscript.PayToAddrScript(addr)
 		if err != nil {
 			t.Fatalf("Cannot create pkScript: %v", err)
 		}

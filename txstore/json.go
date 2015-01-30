@@ -18,9 +18,9 @@ package txstore
 
 import (
 	"github.com/btcsuite/btcchain"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcnet"
-	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
 )
 
@@ -69,7 +69,7 @@ func (d Debits) toJSON(account string, chainHeight int32,
 
 	for _, txOut := range msgTx.TxOut {
 		address := ""
-		_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txOut.PkScript, net)
+		_, addrs, _, _ := txscript.ExtractPkScriptAddrs(txOut.PkScript, net)
 		if len(addrs) == 1 {
 			address = addrs[0].EncodeAddress()
 		}
@@ -167,7 +167,7 @@ func (c Credit) toJSON(account string, chainHeight int32,
 	txout := msgTx.TxOut[c.OutputIndex]
 
 	var address string
-	_, addrs, _, _ := btcscript.ExtractPkScriptAddrs(txout.PkScript, net)
+	_, addrs, _, _ := txscript.ExtractPkScriptAddrs(txout.PkScript, net)
 	if len(addrs) == 1 {
 		address = addrs[0].EncodeAddress()
 	}

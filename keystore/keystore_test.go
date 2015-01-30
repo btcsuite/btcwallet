@@ -23,9 +23,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcnet"
-	"github.com/btcsuite/btcscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwire"
 
@@ -98,8 +98,8 @@ func TestBtcAddressSerializer(t *testing.T) {
 
 func TestScriptAddressSerializer(t *testing.T) {
 	fakeWallet := &Store{net: (*netParams)(tstNetParams)}
-	script := []byte{btcscript.OP_TRUE, btcscript.OP_DUP,
-		btcscript.OP_DROP}
+	script := []byte{txscript.OP_TRUE, txscript.OP_DUP,
+		txscript.OP_DROP}
 	addr, err := newScriptAddress(fakeWallet, script, makeBS(0))
 	if err != nil {
 		t.Error(err.Error())
@@ -878,8 +878,8 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	script := []byte{btcscript.OP_TRUE, btcscript.OP_DUP,
-		btcscript.OP_DROP}
+	script := []byte{txscript.OP_TRUE, txscript.OP_DUP,
+		txscript.OP_DROP}
 	importHeight := int32(50)
 	stamp := makeBS(importHeight)
 	address, err := w.ImportScript(script, stamp)
@@ -901,7 +901,7 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	if sinfo.ScriptClass() != btcscript.NonStandardTy {
+	if sinfo.ScriptClass() != txscript.NonStandardTy {
 		t.Error("script type incorrect.")
 		return
 	}

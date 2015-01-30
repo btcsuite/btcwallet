@@ -12,7 +12,7 @@ package main
 import (
 	"testing"
 
-	"github.com/btcsuite/btcscript"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/tx"
 	"github.com/btcsuite/btcwire"
@@ -97,7 +97,7 @@ func TestFakeTxs(t *testing.T) {
 
 	// Create and add a fake Utxo so we have some funds to spend.
 	//
-	// This will pass validation because btcscript is unaware of invalid
+	// This will pass validation because txcscript is unaware of invalid
 	// tx inputs, however, this example would fail in btcd.
 	utxo := &tx.Utxo{}
 	addr, err := w.NextChainedAddress(&keystore.BlockStamp{}, 100)
@@ -111,7 +111,7 @@ func TestFakeTxs(t *testing.T) {
 		28, 29, 30, 31, 32})
 	out := btcwire.NewOutPoint(&ophash, 0)
 	utxo.Out = tx.OutPoint(*out)
-	ss, err := btcscript.PayToAddrScript(addr)
+	ss, err := txscript.PayToAddrScript(addr)
 	if err != nil {
 		t.Errorf("Could not create utxo PkScript: %s", err)
 		return
