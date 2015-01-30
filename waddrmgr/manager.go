@@ -17,6 +17,8 @@
 package waddrmgr
 
 import (
+	"crypto/rand"
+	"crypto/sha512"
 	"fmt"
 	"sync"
 
@@ -73,6 +75,10 @@ const (
 	// style hierarchical deterministic key derivation for the internal
 	// branch.
 	internalBranch uint32 = 1
+
+	// saltSize is the number of bytes of the salt used when hashing
+	// private passphrases.
+	saltSize = 32
 )
 
 // Options is used to hold the optional parameters passed to Create or Load.
@@ -255,6 +261,12 @@ type Manager struct {
 
 	// config holds overridable options, such as scrypt parameters.
 	config *Options
+
+	// privPassphraseSalt and hashedPrivPassphrase allow for the secure
+	// detection of a correct passphrase on manager unlock when the
+	// manager is already unlocked.  The hash is zeroed each lock.
+	privPassphraseSalt   [saltSize]byte
+	hashedPrivPassphrase [sha512.Size]byte
 }
 
 // lock performs a best try effort to remove and zero all secret keys associated
@@ -284,6 +296,9 @@ func (m *Manager) lock() {
 	m.cryptoKeyScript.Zero()
 	m.cryptoKeyPriv.Zero()
 	m.masterKeyPriv.Zero()
+
+	// Zero the hashed passphrase.
+	zero(m.hashedPrivPassphrase[:])
 
 	// NOTE: m.cryptoKeyPub is intentionally not cleared here as the address
 	// manager needs to be able to continue to read and decrypt public data
@@ -691,6 +706,15 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 		// fast, and it's less cyclomatic complexity to simply decrypt
 		// in either case.
 
+		// Create a new salt that will be used for hashing the new
+		// passphrase each unlock.
+		var passphraseSalt [saltSize]byte
+		_, err := rand.Read(passphraseSalt[:])
+		if err != nil {
+			str := "failed to read random source for passhprase salt"
+			return managerError(ErrCrypto, str, err)
+		}
+
 		// Re-encrypt the crypto private key using the new master
 		// private key.
 		decPriv, err := secretKey.Decrypt(m.cryptoKeyPrivEncrypted)
@@ -721,8 +745,16 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 
 		// When the manager is locked, ensure the new clear text master
 		// key is cleared from memory now that it is no longer needed.
+		// If unlocked, create the new passphrase hash with the new
+		// passphrase and salt.
+		var hashedPassphrase [sha512.Size]byte
 		if m.locked {
 			newMasterKey.Zero()
+		} else {
+			saltedPassphrase := append(passphraseSalt[:],
+				newPassphrase...)
+			hashedPassphrase = sha512.Sum512(saltedPassphrase)
+			zero(saltedPassphrase)
 		}
 
 		// Save the new keys and params to the the db in a single
@@ -745,6 +777,8 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 		copy(m.cryptoKeyScriptEncrypted[:], encScript)
 		m.masterKeyPriv.Zero() // Clear the old key.
 		m.masterKeyPriv = newMasterKey
+		m.privPassphraseSalt = passphraseSalt
+		m.hashedPrivPassphrase = hashedPassphrase
 	} else {
 		// Re-encrypt the crypto public key using the new master public
 		// key.
@@ -1155,6 +1189,21 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
+	// Avoid actually unlocking if the manager is already unlocked
+	// and the passphrases match.
+	if !m.locked {
+		saltedPassphrase := append(m.privPassphraseSalt[:],
+			passphrase...)
+		hashedPassphrase := sha512.Sum512(saltedPassphrase)
+		zero(saltedPassphrase)
+		if hashedPassphrase != m.hashedPrivPassphrase {
+			m.lock()
+			str := "invalid passphrase for master private key"
+			return managerError(ErrWrongPassphrase, str, nil)
+		}
+		return nil
+	}
+
 	// Derive the master private key using the provided passphrase.
 	if err := m.masterKeyPriv.DeriveKey(&passphrase); err != nil {
 		m.lock()
@@ -1233,6 +1282,9 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	}
 
 	m.locked = false
+	saltedPassphrase := append(m.privPassphraseSalt[:], passphrase...)
+	m.hashedPrivPassphrase = sha512.Sum512(saltedPassphrase)
+	zero(saltedPassphrase)
 	return nil
 }
 
@@ -1577,7 +1629,7 @@ func newManager(namespace walletdb.Namespace, net *btcnet.Params,
 	masterKeyPub *snacl.SecretKey, masterKeyPriv *snacl.SecretKey,
 	cryptoKeyPub EncryptorDecryptor, cryptoKeyPrivEncrypted,
 	cryptoKeyScriptEncrypted []byte, syncInfo *syncState,
-	config *Options) *Manager {
+	config *Options, privPassphraseSalt [saltSize]byte) *Manager {
 
 	return &Manager{
 		namespace:                namespace,
@@ -1594,6 +1646,7 @@ func newManager(namespace walletdb.Namespace, net *btcnet.Params,
 		cryptoKeyScriptEncrypted: cryptoKeyScriptEncrypted,
 		cryptoKeyScript:          &cryptoKey{},
 		config:                   config,
+		privPassphraseSalt:       privPassphraseSalt,
 	}
 }
 
@@ -1747,12 +1800,20 @@ func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, net *btcnet
 	// Create the sync state struct.
 	syncInfo := newSyncState(startBlock, syncedTo, recentHeight, recentHashes)
 
+	// Generate private passphrase salt.
+	var privPassphraseSalt [saltSize]byte
+	_, err = rand.Read(privPassphraseSalt[:])
+	if err != nil {
+		str := "failed to read random source for passphrase salt"
+		return nil, managerError(ErrCrypto, str, err)
+	}
+
 	// Create new address manager with the given parameters.  Also, override
 	// the defaults for the additional fields which are not specified in the
 	// call to new with the values loaded from the database.
 	mgr := newManager(namespace, net, &masterKeyPub, &masterKeyPriv,
 		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
-		config)
+		config, privPassphraseSalt)
 	mgr.watchingOnly = watchingOnly
 	return mgr, nil
 }
@@ -1888,6 +1949,16 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
+	// Generate the private  passphrase salt.  This is used when hashing
+	// passwords to detect whether an unlock can be avoided when the manager
+	// is already unlocked.
+	var privPassphraseSalt [saltSize]byte
+	_, err = rand.Read(privPassphraseSalt[:])
+	if err != nil {
+		str := "failed to read random source for passphrase salt"
+		return nil, managerError(ErrCrypto, str, err)
+	}
+
 	// Generate new crypto public, private, and script keys.  These keys are
 	// used to protect the actual public and private data such as addresses,
 	// extended keys, and scripts.
@@ -2005,5 +2076,5 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	cryptoKeyScript.Zero()
 	return newManager(namespace, net, masterKeyPub, masterKeyPriv,
 		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
-		config), nil
+		config, privPassphraseSalt), nil
 }
