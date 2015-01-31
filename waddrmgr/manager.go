@@ -1226,6 +1226,10 @@ func (m *Manager) Unlock(passphrase []byte) error {
 		}
 		info.managedAddr.privKeyEncrypted = privKeyEncrypted
 		info.managedAddr.privKeyCT = privKeyBytes
+
+		// Avoid re-deriving this key on subsequent unlocks.
+		m.deriveOnUnlock[0] = nil
+		m.deriveOnUnlock = m.deriveOnUnlock[1:]
 	}
 
 	m.locked = false
