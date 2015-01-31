@@ -527,7 +527,7 @@ out:
 			continue
 
 		case req := <-w.changePassphrase:
-			err := w.ChangePassphrase(req.old, req.new)
+			err := w.Manager.ChangePassphrase(req.old, req.new, true)
 			req.err <- err
 			continue
 
