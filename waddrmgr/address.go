@@ -19,38 +19,13 @@ package waddrmgr
 import (
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/zero"
 )
-
-// zero sets all bytes in the passed slice to zero.  This is used to
-// explicitly clear private key material from memory.
-func zero(b []byte) {
-	for i := range b {
-		b[i] ^= b[i]
-	}
-}
-
-// zeroBigInt sets all bytes in the passed big int to zero and then sets the
-// value to 0.  This differs from simply setting the value in that it
-// specifically clears the underlying bytes whereas simply setting the value
-// does not.  This is mostly useful to forcefully clear private keys.
-func zeroBigInt(x *big.Int) {
-	// NOTE: This could make use of .Xor, however this is safer since the
-	// specific implementation of Xor could technically change in such a way
-	// as the original bits aren't cleared.  This function would silenty
-	// fail in that case and it's best to avoid that possibility.
-	bits := x.Bits()
-	numBits := len(bits)
-	for i := 0; i < numBits; i++ {
-		bits[i] ^= bits[i]
-	}
-	x.SetInt64(0)
-}
 
 // ManagedAddress is an interface that provides acces to information regarding
 // an address managed by an address manager. Concrete implementations of this
@@ -159,7 +134,7 @@ func (a *managedAddress) lock() {
 	// Zero and nil the clear text private key associated with this
 	// address.
 	a.privKeyMutex.Lock()
-	zero(a.privKeyCT)
+	zero.Bytes(a.privKeyCT)
 	a.privKeyCT = nil
 	a.privKeyMutex.Unlock()
 }
@@ -260,7 +235,7 @@ func (a *managedAddress) PrivKey() (*btcec.PrivateKey, error) {
 	}
 
 	privKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), privKeyCopy)
-	zero(privKeyCopy)
+	zero.Bytes(privKeyCopy)
 	return privKey, nil
 }
 
@@ -351,7 +326,7 @@ func newManagedAddressFromExtKey(m *Manager, account uint32, key *hdkeychain.Ext
 
 		// Ensure the temp private key big integer is cleared after use.
 		managedAddr, err = newManagedAddress(m, account, privKey, true)
-		zeroBigInt(privKey.D)
+		zero.BigInt(privKey.D)
 		if err != nil {
 			return nil, err
 		}
@@ -413,7 +388,7 @@ func (a *scriptAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
 func (a *scriptAddress) lock() {
 	// Zero and nil the clear text script associated with this address.
 	a.scriptMutex.Lock()
-	zero(a.scriptCT)
+	zero.Bytes(a.scriptCT)
 	a.scriptCT = nil
 	a.scriptMutex.Unlock()
 }

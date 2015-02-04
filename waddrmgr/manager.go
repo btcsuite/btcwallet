@@ -27,6 +27,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -298,7 +299,7 @@ func (m *Manager) lock() {
 	m.masterKeyPriv.Zero()
 
 	// Zero the hashed passphrase.
-	zero(m.hashedPrivPassphrase[:])
+	zero.Bytea64(&m.hashedPrivPassphrase)
 
 	// NOTE: m.cryptoKeyPub is intentionally not cleared here as the address
 	// manager needs to be able to continue to read and decrypt public data
@@ -723,7 +724,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 			return managerError(ErrCrypto, str, err)
 		}
 		encPriv, err := newMasterKey.Encrypt(decPriv)
-		zero(decPriv)
+		zero.Bytes(decPriv)
 		if err != nil {
 			str := "failed to encrypt crypto private key"
 			return managerError(ErrCrypto, str, err)
@@ -737,7 +738,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 			return managerError(ErrCrypto, str, err)
 		}
 		encScript, err := newMasterKey.Encrypt(decScript)
-		zero(decScript)
+		zero.Bytes(decScript)
 		if err != nil {
 			str := "failed to encrypt crypto script key"
 			return managerError(ErrCrypto, str, err)
@@ -754,7 +755,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 			saltedPassphrase := append(passphraseSalt[:],
 				newPassphrase...)
 			hashedPassphrase = sha512.Sum512(saltedPassphrase)
-			zero(saltedPassphrase)
+			zero.Bytes(saltedPassphrase)
 		}
 
 		// Save the new keys and params to the the db in a single
@@ -856,7 +857,7 @@ func (m *Manager) ConvertToWatchingOnly() error {
 
 	// Clear and remove all of the encrypted acount private keys.
 	for _, acctInfo := range m.acctInfo {
-		zero(acctInfo.acctKeyEncrypted)
+		zero.Bytes(acctInfo.acctKeyEncrypted)
 		acctInfo.acctKeyEncrypted = nil
 	}
 
@@ -865,19 +866,19 @@ func (m *Manager) ConvertToWatchingOnly() error {
 	for _, ma := range m.addrs {
 		switch addr := ma.(type) {
 		case *managedAddress:
-			zero(addr.privKeyEncrypted)
+			zero.Bytes(addr.privKeyEncrypted)
 			addr.privKeyEncrypted = nil
 		case *scriptAddress:
-			zero(addr.scriptEncrypted)
+			zero.Bytes(addr.scriptEncrypted)
 			addr.scriptEncrypted = nil
 		}
 	}
 
 	// Clear and remove encrypted private and script crypto keys.
-	zero(m.cryptoKeyScriptEncrypted)
+	zero.Bytes(m.cryptoKeyScriptEncrypted)
 	m.cryptoKeyScriptEncrypted = nil
 	m.cryptoKeyScript = nil
-	zero(m.cryptoKeyPrivEncrypted)
+	zero.Bytes(m.cryptoKeyPrivEncrypted)
 	m.cryptoKeyPrivEncrypted = nil
 	m.cryptoKeyPriv = nil
 
@@ -976,7 +977,7 @@ func (m *Manager) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (ManagedPub
 	if !m.watchingOnly {
 		privKeyBytes := wif.PrivKey.Serialize()
 		encryptedPrivKey, err = m.cryptoKeyPriv.Encrypt(privKeyBytes)
-		zero(privKeyBytes)
+		zero.Bytes(privKeyBytes)
 		if err != nil {
 			str := fmt.Sprintf("failed to encrypt private key for %x",
 				serializedPubKey)
@@ -1196,7 +1197,7 @@ func (m *Manager) Unlock(passphrase []byte) error {
 		saltedPassphrase := append(m.privPassphraseSalt[:],
 			passphrase...)
 		hashedPassphrase := sha512.Sum512(saltedPassphrase)
-		zero(saltedPassphrase)
+		zero.Bytes(saltedPassphrase)
 		if hashedPassphrase != m.hashedPrivPassphrase {
 			m.lock()
 			str := "invalid passphrase for master private key"
@@ -1225,7 +1226,7 @@ func (m *Manager) Unlock(passphrase []byte) error {
 		return managerError(ErrCrypto, str, err)
 	}
 	m.cryptoKeyPriv.CopyBytes(decryptedKey)
-	zero(decryptedKey)
+	zero.Bytes(decryptedKey)
 
 	// Use the crypto private key to decrypt all of the account private
 	// extended keys.
@@ -1239,7 +1240,7 @@ func (m *Manager) Unlock(passphrase []byte) error {
 		}
 
 		acctKeyPriv, err := hdkeychain.NewKeyFromString(string(decrypted))
-		zero(decrypted)
+		zero.Bytes(decrypted)
 		if err != nil {
 			m.lock()
 			str := fmt.Sprintf("failed to regenerate account %d "+
@@ -1267,7 +1268,7 @@ func (m *Manager) Unlock(passphrase []byte) error {
 
 		privKeyBytes := privKey.Serialize()
 		privKeyEncrypted, err := m.cryptoKeyPriv.Encrypt(privKeyBytes)
-		zeroBigInt(privKey.D)
+		zero.BigInt(privKey.D)
 		if err != nil {
 			m.lock()
 			str := fmt.Sprintf("failed to encrypt private key for "+
@@ -1285,7 +1286,7 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	m.locked = false
 	saltedPassphrase := append(m.privPassphraseSalt[:], passphrase...)
 	m.hashedPrivPassphrase = sha512.Sum512(saltedPassphrase)
-	zero(saltedPassphrase)
+	zero.Bytes(saltedPassphrase)
 	return nil
 }
 
@@ -1796,7 +1797,7 @@ func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, chainParams
 		return nil, managerError(ErrCrypto, str, err)
 	}
 	cryptoKeyPub.CopyBytes(cryptoKeyPubCT)
-	zero(cryptoKeyPubCT)
+	zero.Bytes(cryptoKeyPubCT)
 
 	// Create the sync state struct.
 	syncInfo := newSyncState(startBlock, syncedTo, recentHeight, recentHashes)

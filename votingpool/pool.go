@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -326,7 +327,7 @@ func (vp *Pool) decryptExtendedKey(keyType waddrmgr.CryptoKeyType, encrypted []b
 		return nil, managerError(waddrmgr.ErrCrypto, str, err)
 	}
 	result, err := hdkeychain.NewKeyFromString(string(decrypted))
-	zero(decrypted)
+	zero.Bytes(decrypted)
 	if err != nil {
 		str := fmt.Sprintf("cannot get key from string %v", decrypted)
 		return nil, managerError(waddrmgr.ErrKeyChain, str, err)
@@ -607,16 +608,4 @@ func (s *SeriesData) IsEmpowered() bool {
 // XXX(lars): We should probably make our own votingpoolError function.
 func managerError(c waddrmgr.ErrorCode, desc string, err error) waddrmgr.ManagerError {
 	return waddrmgr.ManagerError{ErrorCode: c, Description: desc, Err: err}
-}
-
-// zero sets all bytes in the passed slice to zero.  This is used to
-// explicitly clear private key material from memory.
-//
-// XXX(lars) there exists currently around 4-5 other zero functions
-// with at least 3 different implementations. We should try to
-// consolidate these.
-func zero(b []byte) {
-	for i := range b {
-		b[i] ^= b[i]
-	}
 }
