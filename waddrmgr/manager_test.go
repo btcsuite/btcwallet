@@ -23,19 +23,19 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwire"
 )
 
-// newShaHash converts the passed big-endian hex string into a btcwire.ShaHash.
-// It only differs from the one available in btcwire in that it panics on an
+// newShaHash converts the passed big-endian hex string into a wire.ShaHash.
+// It only differs from the one available in wire in that it panics on an
 // error since it will only (and must only) be called with hard-coded, and
 // therefore known good, hashes.
-func newShaHash(hexStr string) *btcwire.ShaHash {
-	sha, err := btcwire.NewShaHashFromStr(hexStr)
+func newShaHash(hexStr string) *wire.ShaHash {
+	sha, err := wire.NewShaHashFromStr(hexStr)
 	if err != nil {
 		panic(err)
 	}
@@ -1207,7 +1207,7 @@ func testWatchingOnly(tc *testContext) bool {
 func testSync(tc *testContext) bool {
 	tests := []struct {
 		name string
-		hash *btcwire.ShaHash
+		hash *wire.ShaHash
 	}{
 		{
 			name: "Block 1",
@@ -1328,7 +1328,7 @@ func testSync(tc *testContext) bool {
 		iter := tc.manager.NewIterateRecentBlocks()
 		for cont := iter != nil; cont; cont = iter.Prev() {
 			wantHeight := int32(i) - int32(j) + 1
-			var wantHash *btcwire.ShaHash
+			var wantHash *wire.ShaHash
 			if wantHeight == 0 {
 				wantHash = btcnet.MainNetParams.GenesisHash
 			} else {

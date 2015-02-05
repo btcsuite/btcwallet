@@ -24,10 +24,10 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwire"
 
 	"github.com/davecgh/go-spew/spew"
 )
@@ -38,7 +38,7 @@ var tstNetParams = &btcnet.MainNetParams
 
 func makeBS(height int32) *BlockStamp {
 	return &BlockStamp{
-		Hash:   new(btcwire.ShaHash),
+		Hash:   new(wire.ShaHash),
 		Height: height,
 	}
 }

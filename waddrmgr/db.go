@@ -22,8 +22,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwire"
 	"github.com/btcsuite/fastsha256"
 )
 
@@ -1116,7 +1116,7 @@ func putStartBlock(tx walletdb.Tx, bs *BlockStamp) error {
 
 // fetchRecentBlocks returns the height of the most recent block height and
 // hashes of the most recent blocks.
-func fetchRecentBlocks(tx walletdb.Tx) (int32, []btcwire.ShaHash, error) {
+func fetchRecentBlocks(tx walletdb.Tx) (int32, []wire.ShaHash, error) {
 	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:
@@ -1135,7 +1135,7 @@ func fetchRecentBlocks(tx walletdb.Tx) (int32, []btcwire.ShaHash, error) {
 
 	recentHeight := int32(binary.LittleEndian.Uint32(buf[0:4]))
 	numHashes := binary.LittleEndian.Uint32(buf[4:8])
-	recentHashes := make([]btcwire.ShaHash, numHashes)
+	recentHashes := make([]wire.ShaHash, numHashes)
 	offset := 8
 	for i := uint32(0); i < numHashes; i++ {
 		copy(recentHashes[i][:], buf[offset:offset+32])
@@ -1146,7 +1146,7 @@ func fetchRecentBlocks(tx walletdb.Tx) (int32, []btcwire.ShaHash, error) {
 }
 
 // putRecentBlocks stores the provided start block stamp to the database.
-func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []btcwire.ShaHash) error {
+func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []wire.ShaHash) error {
 	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:

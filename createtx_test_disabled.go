@@ -13,9 +13,9 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/tx"
-	"github.com/btcsuite/btcwire"
 )
 
 func init() {
@@ -83,14 +83,14 @@ func TestAllowFree(t *testing.T) {
 func TestFakeTxs(t *testing.T) {
 	// First we need a wallet.
 	w, err := keystore.NewStore("banana wallet", "", []byte("banana"),
-		btcwire.MainNet, &keystore.BlockStamp{}, 100)
+		wire.MainNet, &keystore.BlockStamp{}, 100)
 	if err != nil {
 		t.Errorf("Can not create encrypted wallet: %s", err)
 		return
 	}
 	a := &Wallet{
 		Wallet:          w,
-		lockedOutpoints: map[btcwire.OutPoint]struct{}{},
+		lockedOutpoints: map[wire.OutPoint]struct{}{},
 	}
 
 	w.Unlock([]byte("banana"))
@@ -106,10 +106,10 @@ func TestFakeTxs(t *testing.T) {
 		return
 	}
 	copy(utxo.AddrHash[:], addr.ScriptAddress())
-	ophash := (btcwire.ShaHash)([...]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+	ophash := (wire.ShaHash)([...]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
 		12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
 		28, 29, 30, 31, 32})
-	out := btcwire.NewOutPoint(&ophash, 0)
+	out := wire.NewOutPoint(&ophash, 0)
 	utxo.Out = tx.OutPoint(*out)
 	ss, err := txscript.PayToAddrScript(addr)
 	if err != nil {

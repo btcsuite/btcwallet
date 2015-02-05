@@ -37,11 +37,11 @@ import (
 	"golang.org/x/crypto/ripemd160"
 
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/rename"
-	"github.com/btcsuite/btcwire"
 )
 
 const (
@@ -202,7 +202,7 @@ func chainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 	}
 
 	xorbytes := make([]byte, 32)
-	chainMod := btcwire.DoubleSha256(pubkey)
+	chainMod := wire.DoubleSha256(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
@@ -234,7 +234,7 @@ func chainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 	}
 
 	xorbytes := make([]byte, 32)
-	chainMod := btcwire.DoubleSha256(pubkey)
+	chainMod := wire.DoubleSha256(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
@@ -487,12 +487,12 @@ func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
 		return n64, err
 	}
 
-	switch btcwire.BitcoinNet(binary.LittleEndian.Uint32(uint32Bytes)) {
-	case btcwire.MainNet:
+	switch wire.BitcoinNet(binary.LittleEndian.Uint32(uint32Bytes)) {
+	case wire.MainNet:
 		*net = (netParams)(btcnet.MainNetParams)
-	case btcwire.TestNet3:
+	case wire.TestNet3:
 		*net = (netParams)(btcnet.TestNet3Params)
-	case btcwire.SimNet:
+	case wire.SimNet:
 		*net = (netParams)(btcnet.SimNetParams)
 	default:
 		return n64, errors.New("unknown network")
@@ -601,7 +601,7 @@ func New(dir string, desc string, passphrase []byte, net *btcnet.Params,
 		kdfParams:   *kdfp,
 		recent: recentBlocks{
 			lastHeight: createdAt.Height,
-			hashes: []*btcwire.ShaHash{
+			hashes: []*wire.ShaHash{
 				createdAt.Hash,
 			},
 		},
@@ -1354,7 +1354,7 @@ func (s *Store) SetSyncedWith(bs *BlockStamp) {
 // NOTE: If the hash of the synced block is not known, hash will be nil, and
 // must be obtained from elsewhere.   This must be explicitly checked before
 // dereferencing the pointer.
-func (s *Store) SyncedTo() (hash *btcwire.ShaHash, height int32) {
+func (s *Store) SyncedTo() (hash *wire.ShaHash, height int32) {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
 
@@ -1541,7 +1541,7 @@ func (s *Store) ExportWatchingWallet() (*Store, error) {
 	kgwc := s.keyGenerator.watchingCopy(ws)
 	ws.keyGenerator = *(kgwc.(*btcAddress))
 	if len(s.recent.hashes) != 0 {
-		ws.recent.hashes = make([]*btcwire.ShaHash, 0, len(s.recent.hashes))
+		ws.recent.hashes = make([]*wire.ShaHash, 0, len(s.recent.hashes))
 		for _, hash := range s.recent.hashes {
 			hashCpy := *hash
 			ws.recent.hashes = append(ws.recent.hashes, &hashCpy)
@@ -1796,7 +1796,7 @@ func (af *addrFlags) WriteTo(w io.Writer) (int64, error) {
 // recentBlocks holds at most the last 20 seen block hashes as well as
 // the block height of the most recently seen block.
 type recentBlocks struct {
-	hashes     []*btcwire.ShaHash
+	hashes     []*wire.ShaHash
 	lastHeight int32
 }
 
@@ -1828,14 +1828,14 @@ func (rb *recentBlocks) readFromVersion(v version, r io.Reader) (int64, error) {
 	}
 
 	// Read block hash.
-	var syncedBlockHash btcwire.ShaHash
+	var syncedBlockHash wire.ShaHash
 	n, err = io.ReadFull(r, syncedBlockHash[:])
 	read += int64(n)
 	if err != nil {
 		return read, err
 	}
 
-	rb.hashes = []*btcwire.ShaHash{
+	rb.hashes = []*wire.ShaHash{
 		&syncedBlockHash,
 	}
 
@@ -1879,9 +1879,9 @@ func (rb *recentBlocks) ReadFrom(r io.Reader) (int64, error) {
 	// Read nBlocks block hashes.  Hashes are expected to be in
 	// order of oldest to newest, but there's no way to check
 	// that here.
-	rb.hashes = make([]*btcwire.ShaHash, 0, nBlocks)
+	rb.hashes = make([]*wire.ShaHash, 0, nBlocks)
 	for i := uint32(0); i < nBlocks; i++ {
-		var blockSha btcwire.ShaHash
+		var blockSha wire.ShaHash
 		n, err := io.ReadFull(r, blockSha[:])
 		read += int64(n)
 		if err != nil {
@@ -3040,7 +3040,7 @@ func (sa *scriptAddress) watchingCopy(s *Store) walletAddress {
 }
 
 func walletHash(b []byte) uint32 {
-	sum := btcwire.DoubleSha256(b)
+	sum := wire.DoubleSha256(b)
 	return binary.LittleEndian.Uint32(sum)
 }
 
@@ -3247,6 +3247,6 @@ func (e *scriptEntry) ReadFrom(r io.Reader) (n int64, err error) {
 // used to mark a point in the blockchain that a key store element is
 // synced to.
 type BlockStamp struct {
-	Hash   *btcwire.ShaHash
+	Hash   *wire.ShaHash
 	Height int32
 }

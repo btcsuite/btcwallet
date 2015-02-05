@@ -27,13 +27,13 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
-	"github.com/btcsuite/btcwire"
 )
 
 var (
@@ -54,7 +54,7 @@ func networkDir(net *btcnet.Params) string {
 	// paramaters will likely be switched to being named "testnet3" in the
 	// future.  This is done to future proof that change, and an upgrade
 	// plan to move the testnet3 data directory can be worked out later.
-	if net.Net == btcwire.TestNet3 {
+	if net.Net == wire.TestNet3 {
 		netname = "testnet"
 	}
 
@@ -73,7 +73,7 @@ type Wallet struct {
 	chainSvrLock sync.Locker
 	chainSynced  chan struct{} // closed when synced
 
-	lockedOutpoints map[btcwire.OutPoint]struct{}
+	lockedOutpoints map[wire.OutPoint]struct{}
 	FeeIncrement    btcutil.Amount
 
 	// Channels for rescan processing.  Requests are added and merged with
@@ -117,7 +117,7 @@ func newWallet(keys *keystore.Store, txs *txstore.Store) *Wallet {
 		TxStore:             txs,
 		chainSvrLock:        new(sync.Mutex),
 		chainSynced:         make(chan struct{}),
-		lockedOutpoints:     map[btcwire.OutPoint]struct{}{},
+		lockedOutpoints:     map[wire.OutPoint]struct{}{},
 		FeeIncrement:        defaultFeeIncrement,
 		rescanAddJob:        make(chan *RescanJob),
 		rescanBatch:         make(chan *rescanBatch),
@@ -1110,27 +1110,27 @@ func (w *Wallet) exportBase64() (map[string]string, error) {
 
 // LockedOutpoint returns whether an outpoint has been marked as locked and
 // should not be used as an input for created transactions.
-func (w *Wallet) LockedOutpoint(op btcwire.OutPoint) bool {
+func (w *Wallet) LockedOutpoint(op wire.OutPoint) bool {
 	_, locked := w.lockedOutpoints[op]
 	return locked
 }
 
 // LockOutpoint marks an outpoint as locked, that is, it should not be used as
 // an input for newly created transactions.
-func (w *Wallet) LockOutpoint(op btcwire.OutPoint) {
+func (w *Wallet) LockOutpoint(op wire.OutPoint) {
 	w.lockedOutpoints[op] = struct{}{}
 }
 
 // UnlockOutpoint marks an outpoint as unlocked, that is, it may be used as an
 // input for newly created transactions.
-func (w *Wallet) UnlockOutpoint(op btcwire.OutPoint) {
+func (w *Wallet) UnlockOutpoint(op wire.OutPoint) {
 	delete(w.lockedOutpoints, op)
 }
 
 // ResetLockedOutpoints resets the set of locked outpoints so all may be used
 // as inputs for new transactions.
 func (w *Wallet) ResetLockedOutpoints() {
-	w.lockedOutpoints = map[btcwire.OutPoint]struct{}{}
+	w.lockedOutpoints = map[wire.OutPoint]struct{}{}
 }
 
 // LockedOutpoints returns a slice of currently locked outpoints.  This is
@@ -1310,7 +1310,7 @@ func (w *Wallet) RecoverAddresses(n int) error {
 // ReqSpentUtxoNtfns sends a message to btcd to request updates for when
 // a stored UTXO has been spent.
 func (w *Wallet) ReqSpentUtxoNtfns(credits []txstore.Credit) {
-	ops := make([]*btcwire.OutPoint, len(credits))
+	ops := make([]*wire.OutPoint, len(credits))
 	for i, c := range credits {
 		op := c.OutPoint()
 		log.Debugf("Requesting spent UTXO notifications for Outpoint "+
@@ -1387,7 +1387,7 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, confirms int) (btcut
 
 // TxRecord iterates through all transaction records saved in the store,
 // returning the first with an equivalent transaction hash.
-func (w *Wallet) TxRecord(txSha *btcwire.ShaHash) (r *txstore.TxRecord, ok bool) {
+func (w *Wallet) TxRecord(txSha *wire.ShaHash) (r *txstore.TxRecord, ok bool) {
 	for _, r = range w.TxStore.Records() {
 		if *r.Tx().Sha() == *txSha {
 			return r, true

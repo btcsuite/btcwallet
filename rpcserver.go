@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcrpcclient"
@@ -45,7 +46,6 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
-	"github.com/btcsuite/btcwire"
 	"github.com/btcsuite/btcws"
 	"github.com/btcsuite/websocket"
 )
@@ -1922,7 +1922,7 @@ func GetReceivedByAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (
 func GetTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetTransactionCmd)
 
-	txSha, err := btcwire.NewShaHashFromStr(cmd.Txid)
+	txSha, err := wire.NewShaHashFromStr(cmd.Txid)
 	if err != nil {
 		return nil, btcjson.ErrDecodeHexString
 	}
@@ -2184,7 +2184,7 @@ func ListSinceBlock(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interf
 
 	height := int32(-1)
 	if cmd.BlockHash != "" {
-		hash, err := btcwire.NewShaHashFromStr(cmd.BlockHash)
+		hash, err := wire.NewShaHashFromStr(cmd.BlockHash)
 		if err != nil {
 			return nil, DeserializationError{err}
 		}
@@ -2328,11 +2328,11 @@ func LockUnspent(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface
 		w.ResetLockedOutpoints()
 	default:
 		for _, input := range cmd.Transactions {
-			txSha, err := btcwire.NewShaHashFromStr(input.Txid)
+			txSha, err := wire.NewShaHashFromStr(input.Txid)
 			if err != nil {
 				return nil, ParseError{err}
 			}
-			op := btcwire.OutPoint{Hash: *txSha, Index: input.Vout}
+			op := wire.OutPoint{Hash: *txSha, Index: input.Vout}
 			if cmd.Unlock {
 				w.UnlockOutpoint(op)
 			} else {
@@ -2506,7 +2506,7 @@ func SignMessage(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface
 
 	fullmsg := "Bitcoin Signed Message:\n" + cmd.Message
 	sigbytes, err := btcec.SignCompact(btcec.S256(), privKey,
-		btcwire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed())
+		wire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed())
 	if err != nil {
 		return nil, err
 	}
@@ -2594,7 +2594,7 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 	if err != nil {
 		return nil, btcjson.ErrDecodeHexString
 	}
-	msgTx := btcwire.NewMsgTx()
+	msgTx := wire.NewMsgTx()
 	err = msgTx.Deserialize(bytes.NewBuffer(serializedTx))
 	if err != nil {
 		e := errors.New("TX decode failed")
@@ -2604,10 +2604,10 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 	// First we add the stuff we have been given.
 	// TODO(oga) really we probably should look these up with btcd anyway
 	// to make sure that they match the blockchain if present.
-	inputs := make(map[btcwire.OutPoint][]byte)
+	inputs := make(map[wire.OutPoint][]byte)
 	scripts := make(map[string][]byte)
 	for _, rti := range cmd.Inputs {
-		inputSha, err := btcwire.NewShaHashFromStr(rti.Txid)
+		inputSha, err := wire.NewShaHashFromStr(rti.Txid)
 		if err != nil {
 			return nil, DeserializationError{err}
 		}
@@ -2636,7 +2636,7 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 			}
 			scripts[addr.String()] = redeemScript
 		}
-		inputs[btcwire.OutPoint{
+		inputs[wire.OutPoint{
 			Hash:  *inputSha,
 			Index: rti.Vout,
 		}] = script
@@ -2646,7 +2646,7 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 	// querying btcd with getrawtransaction. We queue up a bunch of async
 	// requests and will wait for replies after we have checked the rest of
 	// the arguments.
-	requested := make(map[btcwire.ShaHash]*pendingTx)
+	requested := make(map[wire.ShaHash]*pendingTx)
 	for _, txIn := range msgTx.TxIn {
 		// Did we get this txin from the arguments?
 		if _, ok := inputs[txIn.PreviousOutPoint]; ok {
@@ -2740,7 +2740,7 @@ func SignRawTransaction(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 				return nil, InvalidParameterError{e}
 			}
 
-			inputs[btcwire.OutPoint{
+			inputs[wire.OutPoint{
 				Hash:  txid,
 				Index: input,
 			}] = tx.MsgTx().TxOut[input].PkScript
@@ -2933,7 +2933,7 @@ func VerifyMessage(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interfa
 	// Validate the signature - this just shows that it was valid at all.
 	// we will compare it with the key next.
 	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
-		btcwire.DoubleSha256([]byte("Bitcoin Signed Message:\n"+
+		wire.DoubleSha256([]byte("Bitcoin Signed Message:\n"+
 			cmd.Message)))
 	if err != nil {
 		return nil, err

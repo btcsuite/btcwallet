@@ -25,10 +25,10 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
-	"github.com/btcsuite/btcwire"
 )
 
 const (
@@ -163,7 +163,7 @@ func createTx(
 	changeAddress func(*keystore.BlockStamp) (btcutil.Address, error)) (
 	*CreatedTx, error) {
 
-	msgtx := btcwire.NewMsgTx()
+	msgtx := wire.NewMsgTx()
 	minAmount, err := addOutputs(msgtx, outputs)
 	if err != nil {
 		return nil, err
@@ -184,7 +184,7 @@ func createTx(
 		}
 		input, eligible = eligible[0], eligible[1:]
 		inputs = append(inputs, input)
-		msgtx.AddTxIn(btcwire.NewTxIn(input.OutPoint(), nil))
+		msgtx.AddTxIn(wire.NewTxIn(input.OutPoint(), nil))
 		totalAdded += input.Amount()
 	}
 
@@ -202,7 +202,7 @@ func createTx(
 		}
 		input, eligible = eligible[0], eligible[1:]
 		inputs = append(inputs, input)
-		msgtx.AddTxIn(btcwire.NewTxIn(input.OutPoint(), nil))
+		msgtx.AddTxIn(wire.NewTxIn(input.OutPoint(), nil))
 		szEst += txInEstimate
 		totalAdded += input.Amount()
 		feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
@@ -253,7 +253,7 @@ func createTx(
 			}
 			input, eligible = eligible[0], eligible[1:]
 			inputs = append(inputs, input)
-			msgtx.AddTxIn(btcwire.NewTxIn(input.OutPoint(), nil))
+			msgtx.AddTxIn(wire.NewTxIn(input.OutPoint(), nil))
 			szEst += txInEstimate
 			totalAdded += input.Amount()
 			feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
@@ -274,12 +274,12 @@ func createTx(
 
 // addChange adds a new output with the given amount and address, and
 // randomizes the index (and returns it) of the newly added output.
-func addChange(msgtx *btcwire.MsgTx, change btcutil.Amount, changeAddr btcutil.Address) (int, error) {
+func addChange(msgtx *wire.MsgTx, change btcutil.Amount, changeAddr btcutil.Address) (int, error) {
 	pkScript, err := txscript.PayToAddrScript(changeAddr)
 	if err != nil {
 		return 0, fmt.Errorf("cannot create txout script: %s", err)
 	}
-	msgtx.AddTxOut(btcwire.NewTxOut(int64(change), pkScript))
+	msgtx.AddTxOut(wire.NewTxOut(int64(change), pkScript))
 
 	// Randomize index of the change output.
 	rng := badrand.New(badrand.NewSource(time.Now().UnixNano()))
@@ -308,7 +308,7 @@ func (w *Wallet) changeAddress(bs *keystore.BlockStamp) (btcutil.Address, error)
 
 // addOutputs adds the given address/amount pairs as outputs to msgtx,
 // returning their total amount.
-func addOutputs(msgtx *btcwire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amount, error) {
+func addOutputs(msgtx *wire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amount, error) {
 	var minAmount btcutil.Amount
 	for addrStr, amt := range pairs {
 		if amt <= 0 {
@@ -325,7 +325,7 @@ func addOutputs(msgtx *btcwire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.
 		if err != nil {
 			return minAmount, fmt.Errorf("cannot create txout script: %s", err)
 		}
-		txout := btcwire.NewTxOut(int64(amt), pkScript)
+		txout := wire.NewTxOut(int64(amt), pkScript)
 		msgtx.AddTxOut(txout)
 	}
 	return minAmount, nil
@@ -370,7 +370,7 @@ func (w *Wallet) findEligibleOutputs(minconf int, bs *keystore.BlockStamp) ([]tx
 // signMsgTx sets the SignatureScript for every item in msgtx.TxIn.
 // It must be called every time a msgtx is changed.
 // Only P2PKH outputs are supported at this point.
-func signMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit, store *keystore.Store) error {
+func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, store *keystore.Store) error {
 	if len(prevOutputs) != len(msgtx.TxIn) {
 		return fmt.Errorf(
 			"Number of prevOutputs (%d) does not match number of tx inputs (%d)",
@@ -410,7 +410,7 @@ func signMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit, store *keysto
 	return nil
 }
 
-func validateMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit) error {
+func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
 	flags := txscript.ScriptCanonicalSignatures | txscript.ScriptStrictMultiSig
 	bip16 := time.Now().After(txscript.Bip16Activation)
 	if bip16 {
@@ -434,7 +434,7 @@ func validateMsgTx(msgtx *btcwire.MsgTx, prevOutputs []txstore.Credit) error {
 // s less than 1 kilobyte and none of the outputs contain a value
 // less than 1 bitcent. Otherwise, the fee will be calculated using
 // incr, incrementing the fee for each kilobyte of transaction.
-func minimumFee(incr btcutil.Amount, txLen int, outputs []*btcwire.TxOut, prevOutputs []txstore.Credit, height int32) btcutil.Amount {
+func minimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutputs []txstore.Credit, height int32) btcutil.Amount {
 	allowFree := false
 	if !cfg.DisallowFree {
 		allowFree = allowNoFeeTx(height, prevOutputs, txLen)

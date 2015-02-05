@@ -26,9 +26,9 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwire"
 )
 
 var (
@@ -128,7 +128,7 @@ type TxRecord struct {
 
 // Block holds details about a block that contains wallet transactions.
 type Block struct {
-	Hash   btcwire.ShaHash
+	Hash   wire.ShaHash
 	Time   time.Time
 	Height int32
 }
@@ -172,7 +172,7 @@ type Store struct {
 	blocks       []*blockTxCollection
 	blockIndexes map[int32]uint32
 
-	unspent map[btcwire.OutPoint]BlockTxKey
+	unspent map[wire.OutPoint]BlockTxKey
 
 	// unconfirmed holds a collection of wallet transactions that have not
 	// been mined into a block yet.
@@ -211,23 +211,23 @@ type blockTxCollection struct {
 type unconfirmedStore struct {
 	// txs contains all unconfirmed transactions, mapping from their
 	// transaction hash to the records.
-	txs map[btcwire.ShaHash]*txRecord
+	txs map[wire.ShaHash]*txRecord
 
 	// spentBlockOutPoints maps from spent outputs from mined transaction
 	// to the unconfirmed transaction which spends it.  An additional
 	// map is included to lookup the output key by its outpoint.
 	spentBlockOutPoints    map[BlockOutputKey]*txRecord
-	spentBlockOutPointKeys map[btcwire.OutPoint]BlockOutputKey
+	spentBlockOutPointKeys map[wire.OutPoint]BlockOutputKey
 
 	// spentUnconfirmed maps from an unconfirmed outpoint to the unconfirmed
 	// transaction which spends it.
-	spentUnconfirmed map[btcwire.OutPoint]*txRecord
+	spentUnconfirmed map[wire.OutPoint]*txRecord
 
 	// previousOutpoints maps all previous outputs to the transaction record
 	// of the unconfirmed transaction which spends it.  This is primarly
 	// designed to assist with double spend detection without iterating
 	// through each value of the txs map.
-	previousOutpoints map[btcwire.OutPoint]*txRecord
+	previousOutpoints map[wire.OutPoint]*txRecord
 }
 
 // BlockTxKey is a lookup key for a single mined transaction in the store.
@@ -280,13 +280,13 @@ func New(dir string) *Store {
 		dir:          dir,
 		file:         filename,
 		blockIndexes: map[int32]uint32{},
-		unspent:      map[btcwire.OutPoint]BlockTxKey{},
+		unspent:      map[wire.OutPoint]BlockTxKey{},
 		unconfirmed: unconfirmedStore{
-			txs:                    map[btcwire.ShaHash]*txRecord{},
+			txs:                    map[wire.ShaHash]*txRecord{},
 			spentBlockOutPoints:    map[BlockOutputKey]*txRecord{},
-			spentBlockOutPointKeys: map[btcwire.OutPoint]BlockOutputKey{},
-			spentUnconfirmed:       map[btcwire.OutPoint]*txRecord{},
-			previousOutpoints:      map[btcwire.OutPoint]*txRecord{},
+			spentBlockOutPointKeys: map[wire.OutPoint]BlockOutputKey{},
+			spentUnconfirmed:       map[wire.OutPoint]*txRecord{},
+			previousOutpoints:      map[wire.OutPoint]*txRecord{},
 		},
 		notificationLock: new(sync.Mutex),
 	}
@@ -482,7 +482,7 @@ func (s *Store) moveMinedTx(r *txRecord, block *Block) error {
 	// If the credit is not spent, modify the store's unspent bookkeeping
 	// maps to include the credit and increment the amount deltas by the
 	// credit's value.
-	op := btcwire.OutPoint{Hash: *r.Tx().Sha()}
+	op := wire.OutPoint{Hash: *r.Tx().Sha()}
 	for i, credit := range r.credits {
 		if credit == nil {
 			continue
@@ -666,7 +666,7 @@ func (s *Store) findPreviousCredits(tx *btcutil.Tx) ([]Credit, error) {
 	creditChans := make([]chan createdCredit, len(inputs))
 	for i, txIn := range inputs {
 		creditChans[i] = make(chan createdCredit, 1)
-		go func(i int, op btcwire.OutPoint) {
+		go func(i int, op wire.OutPoint) {
 			key, ok := s.unspent[op]
 			if !ok {
 				// Does this input spend an unconfirmed output?
@@ -812,7 +812,7 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 		}
 
 		// New outputs are added unspent.
-		op := btcwire.OutPoint{Hash: *t.tx.Sha(), Index: index}
+		op := wire.OutPoint{Hash: *t.tx.Sha(), Index: index}
 		t.s.unspent[op] = t.BlockTxKey
 		switch t.tx.Index() {
 		case 0: // Coinbase
@@ -875,7 +875,7 @@ func (s *Store) Rollback(height int32) error {
 					continue
 				}
 
-				op := btcwire.OutPoint{
+				op := wire.OutPoint{
 					Hash:  *r.Tx().Sha(),
 					Index: uint32(outIdx),
 				}
@@ -943,7 +943,7 @@ func (s *Store) Rollback(height int32) error {
 					if err != nil {
 						return err
 					}
-					op := btcwire.OutPoint{
+					op := wire.OutPoint{
 						Hash:  *rr.Tx().Sha(),
 						Index: prev.OutputIndex,
 					}
@@ -1025,7 +1025,7 @@ func (s *Store) removeConflict(r *txRecord) error {
 		if credit == nil || credit.spentBy == nil {
 			continue
 		}
-		op := btcwire.NewOutPoint(r.Tx().Sha(), uint32(i))
+		op := wire.NewOutPoint(r.Tx().Sha(), uint32(i))
 		nextSpender, ok := u.spentUnconfirmed[*op]
 		if !ok {
 			return ErrInconsistentStore
@@ -1484,15 +1484,15 @@ func (c Credit) amount() btcutil.Amount {
 
 // OutPoint returns the outpoint needed to include in a transaction input
 // to spend this output.
-func (c Credit) OutPoint() *btcwire.OutPoint {
+func (c Credit) OutPoint() *wire.OutPoint {
 	c.s.mtx.RLock()
 	defer c.s.mtx.RUnlock()
 
 	return c.outPoint()
 }
 
-func (c Credit) outPoint() *btcwire.OutPoint {
-	return btcwire.NewOutPoint(c.Tx().Sha(), c.OutputIndex)
+func (c Credit) outPoint() *wire.OutPoint {
+	return wire.NewOutPoint(c.Tx().Sha(), c.OutputIndex)
 }
 
 // outputKey creates and returns the block lookup key for this credit.
@@ -1512,7 +1512,7 @@ func (c Credit) Spent() bool {
 }
 
 // TxOut returns the transaction output which this credit references.
-func (c Credit) TxOut() *btcwire.TxOut {
+func (c Credit) TxOut() *wire.TxOut {
 	c.s.mtx.RLock()
 	defer c.s.mtx.RUnlock()
 

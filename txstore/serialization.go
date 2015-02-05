@@ -27,9 +27,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/rename"
-	"github.com/btcsuite/btcwire"
 )
 
 // filename is the name of the file typically used to save a transaction
@@ -125,7 +125,7 @@ func (s *Store) ReadFrom(r io.Reader) (int64, error) {
 					continue
 				}
 				if cred.spentBy == nil {
-					op := btcwire.OutPoint{
+					op := wire.OutPoint{
 						Hash:  *tx.tx.Sha(),
 						Index: uint32(outputIdx),
 					}
@@ -419,7 +419,7 @@ func (t *txRecord) ReadFrom(r io.Reader) (int64, error) {
 	}
 
 	// Create and save the btcutil.Tx of the read MsgTx and set its index.
-	tx := btcutil.NewTx((*btcwire.MsgTx)(msgTx))
+	tx := btcutil.NewTx((*wire.MsgTx)(msgTx))
 	tx.SetIndex(txIndex)
 	t.tx = tx
 
@@ -749,20 +749,20 @@ func (t *txRecord) WriteTo(w io.Writer) (int64, error) {
 	return n64, nil
 }
 
-type msgTx btcwire.MsgTx
+type msgTx wire.MsgTx
 
 func (tx *msgTx) ReadFrom(r io.Reader) (int64, error) {
 	// Read from a TeeReader to return the number of read bytes.
 	buf := bytes.Buffer{}
 	tr := io.TeeReader(r, &buf)
-	if err := (*btcwire.MsgTx)(tx).Deserialize(tr); err != nil {
+	if err := (*wire.MsgTx)(tx).Deserialize(tr); err != nil {
 		if buf.Len() != 0 && err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
 		return int64(buf.Len()), err
 	}
 
-	return int64((*btcwire.MsgTx)(tx).SerializeSize()), nil
+	return int64((*wire.MsgTx)(tx).SerializeSize()), nil
 }
 
 func (tx *msgTx) WriteTo(w io.Writer) (int64, error) {
@@ -771,7 +771,7 @@ func (tx *msgTx) WriteTo(w io.Writer) (int64, error) {
 	// bytes.Buffer never fails except for OOM panics, so check and panic
 	// on any unexpected non-nil returned errors.
 	buf := bytes.Buffer{}
-	if err := (*btcwire.MsgTx)(tx).Serialize(&buf); err != nil {
+	if err := (*wire.MsgTx)(tx).Serialize(&buf); err != nil {
 		panic(err)
 	}
 	return io.Copy(w, &buf)
@@ -920,7 +920,7 @@ func (u *unconfirmedStore) ReadFrom(r io.Reader) (int64, error) {
 	spentBlockOutPointCount := byteOrder.Uint32(uint32Bytes)
 	for i := uint32(0); i < spentBlockOutPointCount; i++ {
 		// Read outpoint hash and index (uint32).
-		op := btcwire.OutPoint{}
+		op := wire.OutPoint{}
 		n, err := io.ReadFull(r, op.Hash[:])
 		n64 += int64(n)
 		if err != nil {
@@ -953,7 +953,7 @@ func (u *unconfirmedStore) ReadFrom(r io.Reader) (int64, error) {
 
 		// Read transaction record hash and check that it was previously
 		// read into the txs map.  Use full record as the map value.
-		var txHash btcwire.ShaHash
+		var txHash wire.ShaHash
 		n, err = io.ReadFull(r, txHash[:])
 		n64 += int64(n)
 		if err != nil {
@@ -987,7 +987,7 @@ func (u *unconfirmedStore) ReadFrom(r io.Reader) (int64, error) {
 	spentUnconfirmedCount := byteOrder.Uint32(uint32Bytes)
 	for i := uint32(0); i < spentUnconfirmedCount; i++ {
 		// Read outpoint hash and index (uint32).
-		op := btcwire.OutPoint{}
+		op := wire.OutPoint{}
 		n, err := io.ReadFull(r, op.Hash[:])
 		n64 += int64(n)
 		if err != nil {
@@ -1008,7 +1008,7 @@ func (u *unconfirmedStore) ReadFrom(r io.Reader) (int64, error) {
 
 		// Read transaction record hash and check that it was previously
 		// read into the txs map.  Use full record as the map value.
-		var txHash btcwire.ShaHash
+		var txHash wire.ShaHash
 		n, err = io.ReadFull(r, txHash[:])
 		n64 += int64(n)
 		if err != nil {

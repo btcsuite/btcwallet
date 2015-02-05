@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	. "github.com/btcsuite/btcwallet/txstore"
-	"github.com/btcsuite/btcwire"
 )
 
 // Received transaction output for mainnet outpoint
@@ -31,7 +31,7 @@ import (
 var (
 	TstRecvSerializedTx, _          = hex.DecodeString("010000000114d9ff358894c486b4ae11c2a8cf7851b1df64c53d2e511278eff17c22fb7373000000008c493046022100995447baec31ee9f6d4ec0e05cb2a44f6b817a99d5f6de167d1c75354a946410022100c9ffc23b64d770b0e01e7ff4d25fbc2f1ca8091053078a247905c39fce3760b601410458b8e267add3c1e374cf40f1de02b59213a82e1d84c2b94096e22e2f09387009c96debe1d0bcb2356ffdcf65d2a83d4b34e72c62eccd8490dbf2110167783b2bffffffff0280969800000000001976a914479ed307831d0ac19ebc5f63de7d5f1a430ddb9d88ac38bfaa00000000001976a914dadf9e3484f28b385ddeaa6c575c0c0d18e9788a88ac00000000")
 	TstRecvTx, _                    = btcutil.NewTxFromBytes(TstRecvSerializedTx)
-	TstRecvTxSpendingTxBlockHash, _ = btcwire.NewShaHashFromStr("00000000000000017188b968a371bab95aa43522665353b646e41865abae02a4")
+	TstRecvTxSpendingTxBlockHash, _ = wire.NewShaHashFromStr("00000000000000017188b968a371bab95aa43522665353b646e41865abae02a4")
 	TstRecvAmt                      = int64(10000000)
 	TstRecvIndex                    = 684
 	TstRecvTxBlockDetails           = &Block{
@@ -46,7 +46,7 @@ var (
 	TstSpendingSerializedTx, _ = hex.DecodeString("0100000003ad3fba7ebd67c09baa9538898e10d6726dcb8eadb006be0c7388c8e46d69d361000000006b4830450220702c4fbde5532575fed44f8d6e8c3432a2a9bd8cff2f966c3a79b2245a7c88db02210095d6505a57e350720cb52b89a9b56243c15ddfcea0596aedc1ba55d9fb7d5aa0012103cccb5c48a699d3efcca6dae277fee6b82e0229ed754b742659c3acdfed2651f9ffffffffdbd36173f5610e34de5c00ed092174603761595d90190f790e79cda3e5b45bc2010000006b483045022000fa20735e5875e64d05bed43d81b867f3bd8745008d3ff4331ef1617eac7c44022100ad82261fc57faac67fc482a37b6bf18158da0971e300abf5fe2f9fd39e107f58012102d4e1caf3e022757512c204bf09ff56a9981df483aba3c74bb60d3612077c9206ffffffff65536c9d964b6f89b8ef17e83c6666641bc495cb27bab60052f76cd4556ccd0d040000006a473044022068e3886e0299ffa69a1c3ee40f8b6700f5f6d463a9cf9dbf22c055a131fc4abc02202b58957fe19ff1be7a84c458d08016c53fbddec7184ac5e633f2b282ae3420ae012103b4e411b81d32a69fb81178a8ea1abaa12f613336923ee920ffbb1b313af1f4d2ffffffff02ab233200000000001976a91418808b2fbd8d2c6d022aed5cd61f0ce6c0a4cbb688ac4741f011000000001976a914f081088a300c80ce36b717a9914ab5ec8a7d283988ac00000000")
 	TstSpendingTx, _           = btcutil.NewTxFromBytes(TstSpendingSerializedTx)
 	TstSpendingTxBlockHeight   = int32(279143)
-	TstSignedTxBlockHash, _    = btcwire.NewShaHashFromStr("00000000000000017188b968a371bab95aa43522665353b646e41865abae02a4")
+	TstSignedTxBlockHash, _    = wire.NewShaHashFromStr("00000000000000017188b968a371bab95aa43522665353b646e41865abae02a4")
 	TstSignedTxIndex           = 123
 	TstSignedTxBlockDetails    = &Block{
 		Height: TstSpendingTxBlockHeight,
@@ -68,11 +68,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 
 	// Create a "signed" (with invalid sigs) tx that spends output 0 of
 	// the double spend.
-	spendingTx := btcwire.NewMsgTx()
-	spendingTxIn := btcwire.NewTxIn(btcwire.NewOutPoint(TstDoubleSpendTx.Sha(), 0), []byte{0, 1, 2, 3, 4})
+	spendingTx := wire.NewMsgTx()
+	spendingTxIn := wire.NewTxIn(wire.NewOutPoint(TstDoubleSpendTx.Sha(), 0), []byte{0, 1, 2, 3, 4})
 	spendingTx.AddTxIn(spendingTxIn)
-	spendingTxOut1 := btcwire.NewTxOut(1e7, []byte{5, 6, 7, 8, 9})
-	spendingTxOut2 := btcwire.NewTxOut(9e7, []byte{10, 11, 12, 13, 14})
+	spendingTxOut1 := wire.NewTxOut(1e7, []byte{5, 6, 7, 8, 9})
+	spendingTxOut2 := wire.NewTxOut(9e7, []byte{10, 11, 12, 13, 14})
 	spendingTx.AddTxOut(spendingTxOut1)
 	spendingTx.AddTxOut(spendingTxOut2)
 	TstSpendingTx := btcutil.NewTx(spendingTx)
@@ -82,8 +82,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		name     string
 		f        func(*Store) (*Store, error)
 		bal, unc btcutil.Amount
-		unspents map[btcwire.OutPoint]struct{}
-		unmined  map[btcwire.ShaHash]struct{}
+		unspents map[wire.OutPoint]struct{}
+		unmined  map[wire.ShaHash]struct{}
 	}{
 		{
 			name: "new store",
@@ -92,8 +92,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal:      0,
 			unc:      0,
-			unspents: map[btcwire.OutPoint]struct{}{},
-			unmined:  map[btcwire.ShaHash]struct{}{},
+			unspents: map[wire.OutPoint]struct{}{},
+			unmined:  map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "txout insert",
@@ -117,10 +117,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: 0,
 			unc: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "insert duplicate unconfirmed",
@@ -143,10 +143,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: 0,
 			unc: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "confirmed txout insert",
@@ -170,10 +170,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unc: 0,
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "insert duplicate confirmed",
@@ -197,10 +197,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unc: 0,
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "rollback confirmed credit",
@@ -213,10 +213,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: 0,
 			unc: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "insert confirmed double spend",
@@ -241,10 +241,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: btcutil.Amount(TstDoubleSpendTx.MsgTx().TxOut[0].Value),
 			unc: 0,
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstDoubleSpendTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstDoubleSpendTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "insert unconfirmed debit",
@@ -272,8 +272,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal:      0,
 			unc:      0,
-			unspents: map[btcwire.OutPoint]struct{}{},
-			unmined: map[btcwire.ShaHash]struct{}{
+			unspents: map[wire.OutPoint]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -303,8 +303,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal:      0,
 			unc:      0,
-			unspents: map[btcwire.OutPoint]struct{}{},
-			unmined: map[btcwire.ShaHash]struct{}{
+			unspents: map[wire.OutPoint]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -329,10 +329,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: 0,
 			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value),
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{
+			unmined: map[wire.ShaHash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -357,11 +357,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: 0,
 			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{
+			unmined: map[wire.ShaHash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -382,11 +382,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unc: 0,
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "rollback after spending tx",
@@ -399,11 +399,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unc: 0,
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 		{
 			name: "rollback spending tx block",
@@ -416,11 +416,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: 0,
 			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{
+			unmined: map[wire.ShaHash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -435,11 +435,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: 0,
 			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
-				*btcwire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{
+			unmined: map[wire.ShaHash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -465,10 +465,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			},
 			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unc: 0,
-			unspents: map[btcwire.OutPoint]struct{}{
-				*btcwire.NewOutPoint(TstRecvTx.Sha(), 0): {},
+			unspents: map[wire.OutPoint]struct{}{
+				*wire.NewOutPoint(TstRecvTx.Sha(), 0): {},
 			},
-			unmined: map[btcwire.ShaHash]struct{}{},
+			unmined: map[wire.ShaHash]struct{}{},
 		},
 	}
 
@@ -586,7 +586,7 @@ func TestFindingSpentCredits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	op := btcwire.NewOutPoint(TstSpendingTx.Sha(), 0)
+	op := wire.NewOutPoint(TstSpendingTx.Sha(), 0)
 	if *unspents[0].OutPoint() != *op {
 		t.Fatal("unspent outpoint doesn't match expected")
 	}

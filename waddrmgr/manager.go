@@ -22,13 +22,13 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwire"
 )
 
 const (
@@ -1724,7 +1724,7 @@ func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, net *btcnet
 	var cryptoKeyPubEnc, cryptoKeyPrivEnc, cryptoKeyScriptEnc []byte
 	var syncedTo, startBlock *BlockStamp
 	var recentHeight int32
-	var recentHashes []btcwire.ShaHash
+	var recentHashes []wire.ShaHash
 	err := namespace.View(func(tx walletdb.Tx) error {
 		// Load whether or not the manager is watching-only from the db.
 		var err error
@@ -2012,7 +2012,7 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	createdAt := &BlockStamp{Hash: *net.GenesisHash, Height: 0}
 
 	// Create the initial sync state.
-	recentHashes := []btcwire.ShaHash{createdAt.Hash}
+	recentHashes := []wire.ShaHash{createdAt.Hash}
 	recentHeight := createdAt.Height
 	syncInfo := newSyncState(createdAt, createdAt, recentHeight, recentHashes)
 

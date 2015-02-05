@@ -24,15 +24,15 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwire"
 	flags "github.com/btcsuite/go-flags"
 )
 
 const (
 	defaultCAFilename       = "btcd.cert"
 	defaultConfigFilename   = "btcwallet.conf"
-	defaultBtcNet           = btcwire.TestNet3
+	defaultBtcNet           = wire.TestNet3
 	defaultLogLevel         = "info"
 	defaultLogDirname       = "logs"
 	defaultLogFilename      = "btcwallet.log"
