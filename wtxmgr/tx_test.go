@@ -12,18 +12,20 @@
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-package txstore_test
+package wtxmgr_test
 
 import (
-	"bytes"
 	"encoding/hex"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
-	. "github.com/btcsuite/btcwallet/txstore"
+	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	. "github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // Received transaction output for mainnet outpoint
@@ -53,7 +55,25 @@ var (
 		Hash:   *TstSignedTxBlockHash,
 		Time:   time.Unix(1389114091, 0),
 	}
+	TstDbPath = "/tmp/testwallet.db"
 )
+
+func CreateTestStore() (*Store, error) {
+	db, err := walletdb.Create("bdb", TstDbPath)
+	if err != nil {
+		return nil, err
+	}
+	wtxmgrNamespace, err := db.Namespace([]byte("testtxstore"))
+	if err != nil {
+		return nil, err
+	}
+	s, err := Open(wtxmgrNamespace,
+		&btcnet.MainNetParams)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
 
 func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 	// Create a double spend of the received blockchain transaction.
@@ -77,6 +97,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 	spendingTx.AddTxOut(spendingTxOut2)
 	TstSpendingTx := btcutil.NewTx(spendingTx)
 	var _ = TstSpendingTx
+	defer os.Remove(TstDbPath)
 
 	tests := []struct {
 		name     string
@@ -87,8 +108,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 	}{
 		{
 			name: "new store",
-			f: func(_ *Store) (*Store, error) {
-				return New("/tmp/tx.bin"), nil
+			f: func(s *Store) (*Store, error) {
+				return CreateTestStore()
 			},
 			bal:      0,
 			unc:      0,
@@ -526,29 +547,15 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			t.Errorf("%s: missing expected unmined signed tx(s)", test.name)
 		}
 
-		// Pass a re-serialized version of the store to each next test.
-		buf := new(bytes.Buffer)
-		nWritten, err := s.WriteTo(buf)
-		if err != nil {
-			t.Fatalf("%v: serialization failed: %v (wrote %v bytes)", test.name, err, nWritten)
-		}
-		if nWritten != int64(buf.Len()) {
-			t.Errorf("%v: wrote %v bytes but buffer has %v", test.name, nWritten, buf.Len())
-		}
-		nRead, err := s.ReadFrom(buf)
-		if err != nil {
-			t.Fatalf("%v: deserialization failed: %v (read %v bytes after writing %v)",
-				test.name, err, nRead, nWritten)
-		}
-		if nWritten != nRead {
-			t.Errorf("%v: number of bytes written (%v) does not match those read (%v)",
-				test.name, nWritten, nRead)
-		}
 	}
 }
 
 func TestFindingSpentCredits(t *testing.T) {
-	s := New("/tmp/tx.bin")
+	s, err := CreateTestStore()
+	defer os.Remove(TstDbPath)
+	if err != nil {
+		t.Fatalf("CreateTestStore: unexpected error: %v", err)
+	}
 
 	// Insert transaction and credit which will be spent.
 	r, err := s.InsertTx(TstRecvTx, TstRecvTxBlockDetails)

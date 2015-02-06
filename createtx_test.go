@@ -2,15 +2,21 @@ package main
 
 import (
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/keystore"
-	"github.com/btcsuite/btcwallet/txstore"
+	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // This is a tx that transfers funds (0.371 BTC) to addresses of known privKeys.
@@ -40,6 +46,16 @@ var (
 	outAddr2 = "12MzCDwodF9G1e7jfwLXfR164RNtx4BRVG"
 )
 
+// fastScrypt are options to passed to the wallet address manager to speed up
+// the scrypt derivations.
+var fastScrypt = &waddrmgr.Options{
+	ScryptN: 16,
+	ScryptR: 8,
+	ScryptP: 1,
+}
+
+var TstDbPath = "/tmp/testlegacywallet.db"
+
 func Test_addOutputs(t *testing.T) {
 	msgtx := wire.NewMsgTx()
 	pairs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1}
@@ -58,10 +74,10 @@ func Test_addOutputs(t *testing.T) {
 
 func TestCreateTx(t *testing.T) {
 	cfg = &config{DisallowFree: false}
-	bs := &keystore.BlockStamp{Height: 11111}
-	keys := newKeyStore(t, txInfo.privKeys, bs)
+	bs := &waddrmgr.BlockStamp{Height: 11111}
+	mgr := newManager(t, txInfo.privKeys, bs)
 	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
-	var tstChangeAddress = func(bs *keystore.BlockStamp) (btcutil.Address, error) {
+	var tstChangeAddress = func(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
 
@@ -69,7 +85,7 @@ func TestCreateTx(t *testing.T) {
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
 	// Now create a new TX sending 25e6 satoshis to the following addresses:
 	outputs := map[string]btcutil.Amount{outAddr1: 15e6, outAddr2: 10e6}
-	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, keys, tstChangeAddress)
+	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, tstChangeAddress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +126,9 @@ func TestCreateTxInsufficientFundsError(t *testing.T) {
 	cfg = &config{DisallowFree: false}
 	outputs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1e9}
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1})
-	bs := &keystore.BlockStamp{Height: 11111}
+	bs := &waddrmgr.BlockStamp{Height: 11111}
 	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
-	var tstChangeAddress = func(bs *keystore.BlockStamp) (btcutil.Address, error) {
+	var tstChangeAddress = func(bs *waddrmgr.BlockStamp) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
 
@@ -150,33 +166,69 @@ func checkOutputsMatch(t *testing.T, msgtx *wire.MsgTx, expected map[string]btcu
 	}
 }
 
-// newKeyStore creates a new keystore and imports the given privKey into it.
-func newKeyStore(t *testing.T, privKeys []string, bs *keystore.BlockStamp) *keystore.Store {
-	passphrase := []byte{0, 1}
-	keys, err := keystore.New("/tmp/keys.bin", "Default acccount", passphrase,
-		activeNet.Params, bs)
+// newManager creates a new waddrmgr and imports the given privKey into it.
+func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddrmgr.Manager {
+	dbPath := filepath.Join(os.TempDir(), "wallet.bin")
+	os.Remove(dbPath)
+	db, err := walletdb.Create("bdb", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pubPassphrase := []byte("pub")
+	privPassphrase := []byte("priv")
+	mgr, err := waddrmgr.Create(namespace, seed, pubPassphrase,
+		privPassphrase, activeNet.Params, fastScrypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for _, key := range privKeys {
 		wif, err := btcutil.DecodeWIF(key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = keys.Unlock(passphrase); err != nil {
+		if err = mgr.Unlock(privPassphrase); err != nil {
 			t.Fatal(err)
 		}
-		_, err = keys.ImportPrivateKey(wif, bs)
+		_, err = mgr.ImportPrivateKey(wif, bs)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	return keys
+	return mgr
+}
+
+func CreateTestStore() (*wtxmgr.Store, error) {
+	db, err := walletdb.Create("bdb", TstDbPath)
+	if err != nil {
+		return nil, err
+	}
+	wtxmgrNamespace, err := db.Namespace([]byte("testtxstore"))
+	if err != nil {
+		return nil, err
+	}
+	s, err := wtxmgr.Open(wtxmgrNamespace,
+		&btcnet.MainNetParams)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // eligibleInputsFromTx decodes the given txHex and returns the outputs with
 // the given indices as eligible inputs.
-func eligibleInputsFromTx(t *testing.T, txHex string, indices []uint32) []txstore.Credit {
+func eligibleInputsFromTx(t *testing.T, txHex string, indices []uint32) []wtxmgr.Credit {
 	serialized, err := hex.DecodeString(txHex)
 	if err != nil {
 		t.Fatal(err)
@@ -185,12 +237,16 @@ func eligibleInputsFromTx(t *testing.T, txHex string, indices []uint32) []txstor
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := txstore.New("/tmp/tx.bin")
+	s, err := CreateTestStore()
+	defer os.Remove(TstDbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r, err := s.InsertTx(tx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eligible := make([]txstore.Credit, len(indices))
+	eligible := make([]wtxmgr.Credit, len(indices))
 	for i, idx := range indices {
 		credit, err := r.AddCredit(idx, false)
 		if err != nil {

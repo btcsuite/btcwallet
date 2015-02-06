@@ -50,6 +50,9 @@ var (
 		ScryptR: 8,
 		ScryptP: 1,
 	}
+
+	// waddrmgrNamespaceKey is the namespace key for the waddrmgr package.
+	waddrmgrNamespaceKey = []byte("waddrmgrNamespace")
 )
 
 // checkManagerError ensures the passed error is a ManagerError with an error
@@ -88,7 +91,7 @@ func createDbNamespace(dbPath string) (walletdb.DB, walletdb.Namespace, error) {
 		return nil, nil, err
 	}
 
-	namespace, err := db.Namespace([]byte("waddrmgr"))
+	namespace, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		db.Close()
 		return nil, nil, err
@@ -105,7 +108,7 @@ func openDbNamespace(dbPath string) (walletdb.DB, walletdb.Namespace, error) {
 		return nil, nil, err
 	}
 
-	namespace, err := db.Namespace([]byte("waddrmgr"))
+	namespace, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		db.Close()
 		return nil, nil, err
