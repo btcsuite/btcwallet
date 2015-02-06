@@ -44,7 +44,7 @@ const (
 	// the underlying hierarchical deterministic key derivation.
 	MaxAddressesPerAccount = hdkeychain.HardenedKeyStart - 1
 
-	// importedAddrAccount is the account number to use for all imported
+	// ImportedAddrAccount is the account number to use for all imported
 	// addresses.  This is useful since normal accounts are derived from the
 	// root hierarchical deterministic key and imported addresses do not
 	// fit into that model.

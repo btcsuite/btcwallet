@@ -89,7 +89,9 @@ func (e InsufficientFundsError) Error() string {
 		e.fee, e.in)
 }
 
-var UnsupportedTransactionType = errors.New("Only P2PKH transactions are supported")
+// ErrUnsupportedTransactionType represents an error where a transaction
+// cannot be signed as the API only supports spending P2PKH outputs.
+var ErrUnsupportedTransactionType = errors.New("Only P2PKH transactions are supported")
 
 // ErrNonPositiveAmount represents an error where a bitcoin amount is
 // not positive (either negative, or zero).
@@ -103,6 +105,8 @@ var ErrNegativeFee = errors.New("fee is negative")
 // measured in satoshis) added to transactions requiring a fee.
 const defaultFeeIncrement = 1e3
 
+// CreatedTx holds the state of a newly-created transaction and the change
+// output (if one was added).
 type CreatedTx struct {
 	tx          *btcutil.Tx
 	changeAddr  btcutil.Address
@@ -385,7 +389,7 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, store *keystore.
 		}
 		apkh, ok := addrs[0].(*btcutil.AddressPubKeyHash)
 		if !ok {
-			return UnsupportedTransactionType
+			return ErrUnsupportedTransactionType
 		}
 
 		ai, err := store.Address(apkh)

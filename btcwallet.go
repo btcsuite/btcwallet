@@ -138,13 +138,12 @@ func walletMain() error {
 				// that generating new wallets is ok.
 				server.SetWallet(nil)
 				return
-			} else {
-				// If the keystore file exists but another error was
-				// encountered, we cannot continue.
-				log.Errorf("Cannot load wallet files: %v", err)
-				walletOpenErrors <- err
-				return
 			}
+			// If the keystore file exists but another error was
+			// encountered, we cannot continue.
+			log.Errorf("Cannot load wallet files: %v", err)
+			walletOpenErrors <- err
+			return
 		}
 
 		server.SetWallet(w)
