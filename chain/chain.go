@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/keystore"
@@ -32,7 +32,7 @@ import (
 
 type Client struct {
 	*btcrpcclient.Client
-	netParams *btcnet.Params
+	chainParams *chaincfg.Params
 
 	enqueueNotification chan interface{}
 	dequeueNotification chan interface{}
@@ -51,9 +51,9 @@ type Client struct {
 	quitMtx sync.Mutex
 }
 
-func NewClient(net *btcnet.Params, connect, user, pass string, certs []byte, disableTLS bool) (*Client, error) {
+func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte, disableTLS bool) (*Client, error) {
 	client := Client{
-		netParams:           net,
+		chainParams:         chainParams,
 		enqueueNotification: make(chan interface{}),
 		dequeueNotification: make(chan interface{}),
 		currentBlock:        make(chan *keystore.BlockStamp),
@@ -98,7 +98,7 @@ func (c *Client) Start() error {
 		c.Disconnect()
 		return err
 	}
-	if net != c.netParams.Net {
+	if net != c.chainParams.Net {
 		c.Disconnect()
 		return errors.New("mismatched networks")
 	}

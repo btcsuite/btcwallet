@@ -274,7 +274,7 @@ func (a *managedAddress) ExportPrivKey() (*btcutil.WIF, error) {
 		return nil, err
 	}
 
-	return btcutil.NewWIF(pk, a.manager.net, a.compressed)
+	return btcutil.NewWIF(pk, a.manager.chainParams, a.compressed)
 }
 
 // newManagedAddressWithoutPrivKey returns a new managed address based on the
@@ -288,7 +288,7 @@ func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.P
 	} else {
 		pubKeyHash = btcutil.Hash160(pubKey.SerializeUncompressed())
 	}
-	address, err := btcutil.NewAddressPubKeyHash(pubKeyHash, m.net)
+	address, err := btcutil.NewAddressPubKeyHash(pubKeyHash, m.chainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +491,8 @@ func (a *scriptAddress) Script() ([]byte, error) {
 
 // newScriptAddress initializes and returns a new pay-to-script-hash address.
 func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []byte) (*scriptAddress, error) {
-	address, err := btcutil.NewAddressScriptHashFromHash(scriptHash, m.net)
+	address, err := btcutil.NewAddressScriptHashFromHash(scriptHash,
+		m.chainParams)
 	if err != nil {
 		return nil, err
 	}

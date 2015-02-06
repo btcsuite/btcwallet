@@ -36,10 +36,10 @@ import (
 
 	"golang.org/x/crypto/ripemd160"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcec"
-	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/rename"
 )
@@ -475,7 +475,7 @@ func (v *varEntries) ReadFrom(r io.Reader) (n int64, err error) {
 // erroring on unknown key store networks must happen on the read itself and not
 // after the fact.  This is admitidly a hack, but with a bip32 keystore on the
 // horizon I'm not too motivated to clean this up.
-type netParams btcnet.Params
+type netParams chaincfg.Params
 
 func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
 	var buf [4]byte
@@ -489,11 +489,11 @@ func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
 
 	switch wire.BitcoinNet(binary.LittleEndian.Uint32(uint32Bytes)) {
 	case wire.MainNet:
-		*net = (netParams)(btcnet.MainNetParams)
+		*net = (netParams)(chaincfg.MainNetParams)
 	case wire.TestNet3:
-		*net = (netParams)(btcnet.TestNet3Params)
+		*net = (netParams)(chaincfg.TestNet3Params)
 	case wire.SimNet:
-		*net = (netParams)(btcnet.SimNetParams)
+		*net = (netParams)(chaincfg.SimNetParams)
 	default:
 		return n64, errors.New("unknown network")
 	}
@@ -560,7 +560,7 @@ type Store struct {
 // New creates and initializes a new Store.  name's and desc's byte length
 // must not exceed 32 and 256 bytes, respectively.  All address private keys
 // are encrypted with passphrase.  The key store is returned locked.
-func New(dir string, desc string, passphrase []byte, net *btcnet.Params,
+func New(dir string, desc string, passphrase []byte, net *chaincfg.Params,
 	createdAt *BlockStamp) (*Store, error) {
 
 	// Check sizes of inputs.
@@ -1268,15 +1268,15 @@ func (s *Store) Address(a btcutil.Address) (WalletAddress, error) {
 }
 
 // Net returns the bitcoin network parameters for this key store.
-func (s *Store) Net() *btcnet.Params {
+func (s *Store) Net() *chaincfg.Params {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
 
 	return s.netParams()
 }
 
-func (s *Store) netParams() *btcnet.Params {
-	return (*btcnet.Params)(s.net)
+func (s *Store) netParams() *chaincfg.Params {
+	return (*chaincfg.Params)(s.net)
 }
 
 // SetSyncStatus sets the sync status for a single key store address.  This

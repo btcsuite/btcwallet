@@ -23,10 +23,10 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcec"
-	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 
 	"github.com/davecgh/go-spew/spew"
@@ -34,7 +34,7 @@ import (
 
 const dummyDir = ""
 
-var tstNetParams = &btcnet.MainNetParams
+var tstNetParams = &chaincfg.MainNetParams
 
 func makeBS(height int32) *BlockStamp {
 	return &BlockStamp{

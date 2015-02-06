@@ -27,9 +27,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcjson"
-	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/keystore"
@@ -46,15 +46,15 @@ var (
 
 // networkDir returns the directory name of a network directory to hold wallet
 // files.
-func networkDir(net *btcnet.Params) string {
-	netname := net.Name
+func networkDir(chainParams *chaincfg.Params) string {
+	netname := chainParams.Name
 
 	// For now, we must always name the testnet data directory as "testnet"
-	// and not "testnet3" or any other version, as the btcnet testnet3
+	// and not "testnet3" or any other version, as the chaincfg testnet3
 	// paramaters will likely be switched to being named "testnet3" in the
 	// future.  This is done to future proof that change, and an upgrade
 	// plan to move the testnet3 data directory can be worked out later.
-	if net.Net == wire.TestNet3 {
+	if chainParams.Net == wire.TestNet3 {
 		netname = "testnet"
 	}
 

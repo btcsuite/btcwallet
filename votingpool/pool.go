@@ -480,7 +480,8 @@ func (vp *Pool) DepositScriptAddress(seriesID, branch, index uint32) (btcutil.Ad
 	}
 	scriptHash := btcutil.Hash160(script)
 
-	return btcutil.NewAddressScriptHashFromHash(scriptHash, vp.manager.Net())
+	return btcutil.NewAddressScriptHashFromHash(scriptHash,
+		vp.manager.ChainParams())
 }
 
 // DepositScript constructs and returns a multi-signature redemption script where
@@ -512,7 +513,8 @@ func (vp *Pool) DepositScript(seriesID, branch, index uint32) ([]byte, error) {
 			str := fmt.Sprintf("child #%d for this pubkey %d does not exist", index, i)
 			return nil, managerError(waddrmgr.ErrKeyChain, str, err)
 		}
-		pks[i], err = btcutil.NewAddressPubKey(pubkey.SerializeCompressed(), vp.manager.Net())
+		pks[i], err = btcutil.NewAddressPubKey(pubkey.SerializeCompressed(),
+			vp.manager.ChainParams())
 		if err != nil {
 			str := fmt.Sprintf(
 				"child #%d for this pubkey %d could not be converted to an address",

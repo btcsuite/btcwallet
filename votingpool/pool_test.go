@@ -27,7 +27,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/btcsuite/btcnet"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/votingpool"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -115,7 +115,7 @@ func setUp(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager, pool *voti
 		t.Fatalf("Failed to create addr manager DB namespace: %v", err)
 	}
 	mgr, err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase, privPassphrase,
-		&btcnet.MainNetParams, fastScrypt)
+		&chaincfg.MainNetParams, fastScrypt)
 	if err != nil {
 		t.Fatalf("Failed to create addr manager: %v", err)
 	}

@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 	. "github.com/btcsuite/btcwallet/txstore"
 )
@@ -109,7 +109,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				}
 				// Verify that we can create the JSON output without any
 				// errors.
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -135,7 +135,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -162,7 +162,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -189,7 +189,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -232,7 +232,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 
 				if err != nil {
 					return nil, err
@@ -264,7 +264,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -295,7 +295,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -321,7 +321,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -349,7 +349,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -374,7 +374,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}
@@ -457,7 +457,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
-				_, err = r.ToJSON("", 100, &btcnet.MainNetParams)
+				_, err = r.ToJSON("", 100, &chaincfg.MainNetParams)
 				if err != nil {
 					return nil, err
 				}

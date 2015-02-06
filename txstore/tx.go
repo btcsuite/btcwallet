@@ -25,9 +25,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 )
 
@@ -1420,7 +1420,7 @@ func (d Debits) Fee() btcutil.Amount {
 
 // Addresses parses the pubkey script, extracting all addresses for a
 // standard script.
-func (c Credit) Addresses(net *btcnet.Params) (txscript.ScriptClass,
+func (c Credit) Addresses(net *chaincfg.Params) (txscript.ScriptClass,
 	[]btcutil.Address, int, error) {
 
 	c.s.mtx.RLock()

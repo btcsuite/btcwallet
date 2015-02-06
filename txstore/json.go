@@ -18,16 +18,16 @@ package txstore
 
 import (
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcjson"
-	"github.com/btcsuite/btcnet"
 	"github.com/btcsuite/btcutil"
 )
 
 // ToJSON returns a slice of btcjson listtransactions result types for all credits
 // and debits of this transaction.
 func (t *TxRecord) ToJSON(account string, chainHeight int32,
-	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
+	net *chaincfg.Params) ([]btcjson.ListTransactionsResult, error) {
 
 	t.s.mtx.RLock()
 	defer t.s.mtx.RUnlock()
@@ -53,7 +53,7 @@ func (t *TxRecord) ToJSON(account string, chainHeight int32,
 // ToJSON returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
 func (d Debits) ToJSON(account string, chainHeight int32,
-	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
+	net *chaincfg.Params) ([]btcjson.ListTransactionsResult, error) {
 
 	d.s.mtx.RLock()
 	defer d.s.mtx.RUnlock()
@@ -62,7 +62,7 @@ func (d Debits) ToJSON(account string, chainHeight int32,
 }
 
 func (d Debits) toJSON(account string, chainHeight int32,
-	net *btcnet.Params) ([]btcjson.ListTransactionsResult, error) {
+	net *chaincfg.Params) ([]btcjson.ListTransactionsResult, error) {
 
 	msgTx := d.Tx().MsgTx()
 	reply := make([]btcjson.ListTransactionsResult, 0, len(msgTx.TxOut))
@@ -152,7 +152,7 @@ func (c CreditCategory) String() string {
 // ToJSON returns a slice of objects that may be marshaled as a JSON array
 // of JSON objects for a listtransactions RPC reply.
 func (c Credit) ToJSON(account string, chainHeight int32,
-	net *btcnet.Params) (btcjson.ListTransactionsResult, error) {
+	net *chaincfg.Params) (btcjson.ListTransactionsResult, error) {
 
 	c.s.mtx.RLock()
 	defer c.s.mtx.RUnlock()
@@ -161,7 +161,7 @@ func (c Credit) ToJSON(account string, chainHeight int32,
 }
 
 func (c Credit) toJSON(account string, chainHeight int32,
-	net *btcnet.Params) (btcjson.ListTransactionsResult, error) {
+	net *chaincfg.Params) (btcjson.ListTransactionsResult, error) {
 
 	msgTx := c.Tx().MsgTx()
 	txout := msgTx.TxOut[c.OutputIndex]
