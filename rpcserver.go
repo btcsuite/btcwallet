@@ -37,9 +37,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcjson"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
