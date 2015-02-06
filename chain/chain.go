@@ -30,6 +30,8 @@ import (
 	"github.com/btcsuite/btcws"
 )
 
+// Client represents a persistent client connection to a bitcoin RPC server
+// for information regarding the current best block chain.
 type Client struct {
 	*btcrpcclient.Client
 	chainParams *chaincfg.Params
@@ -51,6 +53,12 @@ type Client struct {
 	quitMtx sync.Mutex
 }
 
+// NewClient creates a client connection to the server described by the connect
+// string.  If disableTLS is false, the remote RPC certificate must be provided
+// in the certs slice.  The connection is not established immediately, but must
+// be done using the Start method.  If the remote server does not operate on
+// the same bitcoin network as described by the passed chain parameters, the
+// connection will be disconnected.
 func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte, disableTLS bool) (*Client, error) {
 	client := Client{
 		chainParams:         chainParams,
@@ -86,6 +94,11 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs [
 	return &client, nil
 }
 
+// Start attempts to establish a client connection with the remote server.
+// If successful, handler goroutines are started to process notifications
+// sent by the server.  After a limited number of connection attempts, this
+// function gives up, and therefore will not block forever waiting for the
+// connection to be established to a server that may not exist.
 func (c *Client) Start() error {
 	err := c.Connect(5) // attempt connection 5 tries at most
 	if err != nil {
@@ -112,6 +125,8 @@ func (c *Client) Start() error {
 	return nil
 }
 
+// Stop disconnects the client and signals the shutdown of all goroutines
+// started by Start.
 func (c *Client) Stop() {
 	c.quitMtx.Lock()
 	defer c.quitMtx.Unlock()
@@ -128,15 +143,67 @@ func (c *Client) Stop() {
 	}
 }
 
+// WaitForShutdown blocks until both the client has finished disconnecting
+// and all handlers have exited.
 func (c *Client) WaitForShutdown() {
 	c.Client.WaitForShutdown()
 	c.wg.Wait()
 }
 
+// Notification types.  These are defined here and processed from from reading
+// a notificationChan to avoid handling these notifications directly in
+// btcrpcclient callbacks, which isn't very Go-like and doesn't allow
+// blocking client calls.
+type (
+	// BlockConnected is a notification for a newly-attached block to the
+	// best chain.
+	BlockConnected waddrmgr.BlockStamp
+
+	// BlockDisconnected is a notifcation that the block described by the
+	// BlockStamp was reorganized out of the best chain.
+	BlockDisconnected waddrmgr.BlockStamp
+
+	// RecvTx is a notification for a transaction which pays to a wallet
+	// address.
+	RecvTx struct {
+		Tx    *btcutil.Tx    // Index is guaranteed to be set.
+		Block *txstore.Block // nil if unmined
+	}
+
+	// RedeemingTx is a notification for a transaction which spends an
+	// output controlled by the wallet.
+	RedeemingTx struct {
+		Tx    *btcutil.Tx    // Index is guaranteed to be set.
+		Block *txstore.Block // nil if unmined
+	}
+
+	// RescanProgress is a notification describing the current status
+	// of an in-progress rescan.
+	RescanProgress struct {
+		Hash   *wire.ShaHash
+		Height int32
+		Time   time.Time
+	}
+
+	// RescanFinished is a notification that a previous rescan request
+	// has finished.
+	RescanFinished struct {
+		Hash   *wire.ShaHash
+		Height int32
+		Time   time.Time
+	}
+)
+
+// Notifications returns a channel of parsed notifications sent by the remote
+// bitcoin RPC server.  This channel must be continually read or the process
+// may abort for running out memory, as unread notifications are queued for
+// later reads.
 func (c *Client) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
+// BlockStamp returns the latest block notified by the client, or an error
+// if the client has been shut down.
 func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
 	case bs := <-c.currentBlock:
@@ -145,33 +212,6 @@ func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
 		return nil, errors.New("disconnected")
 	}
 }
-
-// Notification types.  These are defined here and processed from from reading
-// a notificationChan to avoid handling these notifications directly in
-// btcrpcclient callbacks, which isn't very Go-like and doesn't allow
-// blocking client calls.
-type (
-	BlockConnected    waddrmgr.BlockStamp
-	BlockDisconnected waddrmgr.BlockStamp
-	RecvTx            struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
-	}
-	RedeemingTx struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
-	}
-	RescanProgress struct {
-		Hash   *wire.ShaHash
-		Height int32
-		Time   time.Time
-	}
-	RescanFinished struct {
-		Hash   *wire.ShaHash
-		Height int32
-		Time   time.Time
-	}
-)
 
 // parseBlock parses a btcws definition of the block a tx is mined it to the
 // Block structure of the txstore package, and the block index.  This is done

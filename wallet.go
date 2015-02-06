@@ -40,13 +40,10 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-var (
-	ErrNoWalletFiles = errors.New("no wallet files")
-
-	ErrWalletExists = errors.New("wallet already exists")
-
-	ErrNotSynced = errors.New("wallet is not synchronized with the chain server")
-)
+// ErrNotSynced describes an error where an operation cannot complete
+// due wallet being out of sync (and perhaps currently syncing with)
+// the remote chain server.
+var ErrNotSynced = errors.New("wallet is not synchronized with the chain server")
 
 var (
 	// waddrmgrNamespaceKey is the namespace key for the waddrmgr package.
@@ -208,10 +205,10 @@ func (w *Wallet) ListenDisconnectedBlocks() (<-chan waddrmgr.BlockStamp, error) 
 	return w.disconnectedBlocks, nil
 }
 
-// ListenDisconnectedBlocks returns a channel that passes the current lock state
-// of the wallet whenever the lock state is changed.  The value is true for
-// locked, and false for unlocked.  The channel must be read, or other wallet
-// methods will block.
+// ListenLockStatus returns a channel that passes the current lock state of
+// the wallet whenever the lock state is changed.  The value is true for locked,
+// and false for unlocked.  The channel must be read, or other wallet methods
+// will block.
 //
 // If this is called twice, ErrDuplicateListen is returned.
 func (w *Wallet) ListenLockStatus() (<-chan bool, error) {
@@ -383,7 +380,7 @@ func (w *Wallet) WaitForChainSync() {
 	<-w.chainSynced
 }
 
-// SynchedChainTip returns the hash and height of the block of the most
+// SyncedChainTip returns the hash and height of the block of the most
 // recently seen block in the main chain.  It returns errors if the
 // wallet has not yet been marked as synched with the chain.
 func (w *Wallet) SyncedChainTip() (*waddrmgr.BlockStamp, error) {
@@ -476,9 +473,13 @@ out:
 	w.wg.Done()
 }
 
-func (w *Wallet) CreateSimpleTx(pairs map[string]btcutil.Amount,
-	minconf int) (*CreatedTx, error) {
-
+// CreateSimpleTx creates a new signed transaction spending unspent P2PKH
+// outputs with at laest minconf confirmations spending to any number of
+// address/amount pairs.  Change and an appropiate transaction fee are
+// automatically included, if necessary.  All transaction creation through
+// this function is serialized to prevent the creation of many transactions
+// which spend the same outputs.
+func (w *Wallet) CreateSimpleTx(pairs map[string]btcutil.Amount, minconf int) (*CreatedTx, error) {
 	req := createTxRequest{
 		pairs:   pairs,
 		minconf: minconf,
@@ -501,6 +502,11 @@ type (
 		err      chan error
 	}
 
+	// HeldUnlock is a tool to prevent the wallet from automatically
+	// locking after some timeout before an operation which needed
+	// the unlocked wallet has finished.  Any aquired HeldUnlock
+	// *must* be released (preferably with a defer) or the wallet
+	// will forever remain unlocked.
 	HeldUnlock chan struct{}
 )
 
@@ -600,7 +606,12 @@ func (w *Wallet) Locked() bool {
 	return <-w.lockState
 }
 
-// HoldUnlock prevents the wallet from being locked,
+// HoldUnlock prevents the wallet from being locked.  The HeldUnlock object
+// *must* be released, or the wallet will forever remain unlocked.
+//
+// TODO: To prevent the above scenario, perhaps closures should be passed
+// to the walletLocker goroutine and disallow callers from explicitly
+// handling the locking mechanism.
 func (w *Wallet) HoldUnlock() (HeldUnlock, error) {
 	req := make(chan HeldUnlock)
 	w.holdUnlockRequests <- req

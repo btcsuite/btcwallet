@@ -589,18 +589,18 @@ func TestCannotReplaceEmpoweredSeries(t *testing.T) {
 	var seriesID uint32 = 1
 
 	if err := pool.CreateSeries(1, seriesID, 3, []string{pubKey0, pubKey1, pubKey2, pubKey3}); err != nil {
-		t.Fatalf("Failed to create series", err)
+		t.Fatalf("Failed to create series: %v", err)
 	}
 
 	// We need to unlock the manager in order to empower a series.
 	manager.Unlock(privPassphrase)
 
 	if err := pool.EmpowerSeries(seriesID, privKey1); err != nil {
-		t.Fatalf("Failed to empower series", err)
+		t.Fatalf("Failed to empower series: %v", err)
 	}
 
 	if err := pool.ReplaceSeries(1, seriesID, 2, []string{pubKey0, pubKey2, pubKey3}); err == nil {
-		t.Errorf("Replaced an empowered series. That should not be possible", err)
+		t.Errorf("Replaced an empowered series. That should not be possible: %v", err)
 	} else {
 		gotErr := err.(waddrmgr.ManagerError)
 		wantErrCode := waddrmgr.ErrorCode(waddrmgr.ErrSeriesAlreadyEmpowered)
@@ -693,13 +693,13 @@ func TestReplaceExistingSeries(t *testing.T) {
 		testID := data.testID
 
 		if err := pool.CreateSeries(data.orig.version, seriesID, data.orig.reqSigs, data.orig.pubKeys); err != nil {
-			t.Fatalf("Test #%d: failed to create series in replace series setup",
+			t.Fatalf("Test #%d: failed to create series in replace series setup: %v",
 				testID, err)
 		}
 
 		if err := pool.ReplaceSeries(data.replaceWith.version, seriesID,
 			data.replaceWith.reqSigs, data.replaceWith.pubKeys); err != nil {
-			t.Errorf("Test #%d: replaceSeries failed", testID, err)
+			t.Errorf("Test #%d: replaceSeries failed: %v", testID, err)
 		}
 
 		validateReplaceSeries(t, pool, testID, data.replaceWith)
@@ -959,7 +959,7 @@ func validateLoadAllSeries(t *testing.T, pool *votingpool.Pool, testID int, seri
 
 	sortedKeys := votingpool.CanonicalKeyOrder(seriesData.pubKeys)
 	if !reflect.DeepEqual(publicKeys, sortedKeys) {
-		t.Errorf("Test #%d, series #%d: public keys mismatch. Got %d, want %d",
+		t.Errorf("Test #%d, series #%d: public keys mismatch. Got %v, want %v",
 			testID, seriesData.id, sortedKeys, publicKeys)
 	}
 
@@ -973,7 +973,7 @@ func validateLoadAllSeries(t *testing.T, pool *votingpool.Pool, testID int, seri
 	foundPrivKeys = votingpool.CanonicalKeyOrder(foundPrivKeys)
 	privKeys := votingpool.CanonicalKeyOrder(seriesData.privKeys)
 	if !reflect.DeepEqual(privKeys, foundPrivKeys) {
-		t.Errorf("Test #%d, series #%d: private keys mismatch. Got %d, want %d",
+		t.Errorf("Test #%d, series #%d: private keys mismatch. Got %v, want %v",
 			testID, seriesData.id, foundPrivKeys, privKeys)
 	}
 }
@@ -1085,14 +1085,14 @@ func createTestPubKeys(t *testing.T, number, offset int) []*hdkeychain.ExtendedK
 	xpubRaw := "xpub661MyMwAqRbcFwdnYF5mvCBY54vaLdJf8c5ugJTp5p7PqF9J1USgBx12qYMnZ9yUiswV7smbQ1DSweMqu8wn7Jociz4PWkuJ6EPvoVEgMw7"
 	xpubKey, err := hdkeychain.NewKeyFromString(xpubRaw)
 	if err != nil {
-		t.Fatalf("Failed to generate new key", err)
+		t.Fatalf("Failed to generate new key: %v", err)
 	}
 
 	keys := make([]*hdkeychain.ExtendedKey, number)
 	for i := uint32(0); i < uint32(len(keys)); i++ {
 		chPubKey, err := xpubKey.Child(i + uint32(offset))
 		if err != nil {
-			t.Fatalf("Failed to generate child key", err)
+			t.Fatalf("Failed to generate child key: %v", err)
 		}
 		keys[i] = chPubKey
 	}
@@ -1303,7 +1303,7 @@ func TestSerialization(t *testing.T) {
 		}
 
 		if row.Active != test.active {
-			t.Errorf("Serialization #%d - active mismatch: got %d want %d",
+			t.Errorf("Serialization #%d - active mismatch: got %v want %v",
 				testNum, row.Active, test.active)
 		}
 

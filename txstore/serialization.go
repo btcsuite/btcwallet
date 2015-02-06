@@ -1146,7 +1146,9 @@ func (u *unconfirmedStore) WriteTo(w io.Writer) (int64, error) {
 	return n64, nil
 }
 
-// TODO: set this automatically.
+// MarkDirty marks that changes have been made to the transaction store.
+// This should be run after any modifications are performed to the store
+// or any of its records.
 func (s *Store) MarkDirty() {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -1154,6 +1156,8 @@ func (s *Store) MarkDirty() {
 	s.dirty = true
 }
 
+// WriteIfDirty writes the entire transaction store to permanent storage if
+// the dirty flag has been set (see MarkDirty).
 func (s *Store) WriteIfDirty() error {
 	s.mtx.RLock()
 	if !s.dirty {
