@@ -68,6 +68,15 @@ func walletMain() error {
 		}()
 	}
 
+	// Load the wallet database.  It must have been created with the
+	// --create option already or this will return an appropriate error.
+	wallet, err := openWallet()
+	if err != nil {
+		log.Errorf("%v", err)
+		return err
+	}
+	defer wallet.db.Close()
+
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client
 	// created below after each is created.
@@ -78,6 +87,7 @@ func walletMain() error {
 		return err
 	}
 	server.Start()
+	server.SetWallet(wallet)
 
 	// Shutdown the server if an interrupt signal is received.
 	addInterruptHandler(server.Stop)
@@ -121,48 +131,15 @@ func walletMain() error {
 		chainSvrChan <- rpcc
 	}()
 
-	// Create a channel to report unrecoverable errors during the loading of
-	// the wallet files.  These may include OS file handling errors or
-	// issues deserializing the wallet files, but does not include missing
-	// wallet files (as that must be handled by creating a new wallet).
-	walletOpenErrors := make(chan error)
-
 	go func() {
-		defer close(walletOpenErrors)
-
-		// Open wallet structures from disk.
-		w, err := openWallet()
-		if err != nil {
-			if os.IsNotExist(err) {
-				// If the keystore file is missing, notify the server
-				// that generating new wallets is ok.
-				server.SetWallet(nil)
-				return
-			}
-			// If the keystore file exists but another error was
-			// encountered, we cannot continue.
-			log.Errorf("Cannot load wallet files: %v", err)
-			walletOpenErrors <- err
-			return
-		}
-
-		server.SetWallet(w)
-
 		// Start wallet goroutines and handle RPC client notifications
 		// if the chain server connection was opened.
 		select {
 		case chainSvr := <-chainSvrChan:
-			w.Start(chainSvr)
+			wallet.Start(chainSvr)
 		case <-server.quit:
 		}
 	}()
-
-	// Check for unrecoverable errors during the wallet startup, and return
-	// the error, if any.
-	err, ok := <-walletOpenErrors
-	if ok {
-		return err
-	}
 
 	// Wait for the server to shutdown either due to a stop RPC request
 	// or an interrupt.

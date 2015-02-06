@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"runtime/debug"
 
 	"golang.org/x/crypto/nacl/secretbox"
 	"golang.org/x/crypto/scrypt"
@@ -121,6 +122,14 @@ func (sk *SecretKey) deriveKey(password *[]byte) error {
 	}
 	copy(sk.Key[:], key)
 	zero(key)
+
+	// I'm not a fan of forced garbage collections, but scrypt allocates a
+	// ton of memory and calling it back to back without a GC cycle in
+	// between means you end up needing twice the amount of memory.  For
+	// example, if your scrypt parameters are such that you require 1GB and
+	// you call it twice in a row, without this you end up allocating 2GB
+	// since the first GB probably hasn't been released yet.
+	debug.FreeOSMemory()
 
 	return nil
 }
