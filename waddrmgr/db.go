@@ -19,7 +19,6 @@ package waddrmgr
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"time"
 
@@ -76,16 +75,17 @@ const (
 	trueByte
 )
 
-// byteAsBool converts a byte to a bool.
-func byteAsBool(b byte) (bool, error) {
-	switch b {
-	case falseByte:
-		return false, nil
-	case trueByte:
-		return true, nil
-	default:
-		return false, errors.New("invalid byte representation of bool")
+// boolAsByte converts a bool to a byte.
+func boolAsByte(b bool) byte {
+	if b {
+		return trueByte
 	}
+	return falseByte
+}
+
+// byteAsBool converts a byte to a bool.
+func byteAsBool(b byte) bool {
+	return b != 0
 }
 
 // accountType represents a type of address stored in the database.
@@ -134,9 +134,9 @@ type dbChainAddressRow struct {
 
 // dbImportedP2PKHAddressRow houses additional information stored about an imported
 // P2PKH address in the database.
-type dbImportedP2PKHAddressRow struct {
+type dbImportedHash160AddressRow struct {
 	dbAddressRow
-	encryptedPKHash []byte
+	encryptedHash160 []byte
 }
 
 // dbImportedPubKeyAddressRow houses additional information stored about an imported
@@ -571,12 +571,7 @@ func deserializeAddressRow(addressID, serializedAddress []byte) (*dbAddressRow, 
 	row.account = binary.LittleEndian.Uint32(serializedAddress[1:5])
 	row.addTime = binary.LittleEndian.Uint64(serializedAddress[5:13])
 	row.syncStatus = syncStatus(serializedAddress[13])
-	watchingOnly, err := byteAsBool(serializedAddress[14])
-	if err != nil {
-		str := fmt.Sprintf("malformed watchingOnly boolean byte for key %s",
-			addressID)
-		return nil, managerError(ErrDatabase, str, err)
-	}
+	watchingOnly := byteAsBool(serializedAddress[14])
 	row.watchingOnly = watchingOnly
 	rdlen := binary.LittleEndian.Uint32(serializedAddress[15:19])
 	row.rawData = make([]byte, rdlen)
@@ -599,11 +594,7 @@ func serializeAddressRow(row *dbAddressRow) []byte {
 	binary.LittleEndian.PutUint32(buf[1:5], row.account)
 	binary.LittleEndian.PutUint64(buf[5:13], row.addTime)
 	buf[13] = byte(row.syncStatus)
-	if row.watchingOnly {
-		buf[14] = trueByte
-	} else {
-		buf[14] = falseByte
-	}
+	buf[14] = boolAsByte(row.watchingOnly)
 	binary.LittleEndian.PutUint32(buf[15:19], uint32(rdlen))
 	copy(buf[19:19+rdlen], row.rawData)
 	return buf
@@ -645,9 +636,9 @@ func serializeChainedAddress(branch, index uint32) []byte {
 	return rawData
 }
 
-// deserializeImportedP2PKHAddress deserializes the raw data from the passed address
-// row as an imported P2PKH address.
-func deserializeImportedP2PKHAddress(addressID []byte, row *dbAddressRow) (*dbImportedP2PKHAddressRow, error) {
+// deserializeImportedHash160AddressRow deserializes the raw data from the passed address
+// row as an imported hash 160 address.
+func deserializeImportedHash160AddressRow(addressID []byte, row *dbAddressRow) (*dbImportedHash160AddressRow, error) {
 	// The serialized imported address raw data format is:
 	//   <encpkhashlen><encpkhash>
 	//
@@ -661,35 +652,34 @@ func deserializeImportedP2PKHAddress(addressID []byte, row *dbAddressRow) (*dbIm
 		return nil, managerError(ErrDatabase, str, nil)
 	}
 
-	retRow := dbImportedP2PKHAddressRow{
+	retRow := dbImportedHash160AddressRow{
 		dbAddressRow: *row,
 	}
 
 	var offset uint32
 	pkHashLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
 	offset += 4
-	retRow.encryptedPKHash = make([]byte, pkHashLen)
-	copy(retRow.encryptedPKHash, row.rawData[offset:offset+pkHashLen])
-	offset += pkHashLen
+	retRow.encryptedHash160 = make([]byte, pkHashLen)
+	copy(retRow.encryptedHash160, row.rawData[offset:offset+pkHashLen])
 
 	return &retRow, nil
 }
 
-// serializeImportedP2PKHAddress returns the serialization of the raw data field for
-// an imported P2PKH address.
-func serializeImportedP2PKHAddress(encryptedPKHash []byte) []byte {
+// serializeImportedHash160AddressRow returns the serialization of the raw data field for
+// an imported hash 160 address.
+func serializeImportedHash160AddressRow(encryptedHash160 []byte) []byte {
 	// The serialized imported address raw data format is:
 	//   <encpkhashlen><encpkhash>
 	//
 	// 4 bytes encrypted pkhash len + encrypted pkhash +
 
-	pkHashLen := uint32(len(encryptedPKHash))
+	pkHashLen := uint32(len(encryptedHash160))
 	rawData := make([]byte, 8+pkHashLen)
 
 	var offset uint32
 	binary.LittleEndian.PutUint32(rawData[offset:offset+4], pkHashLen)
 	offset += 4
-	copy(rawData[offset:offset+pkHashLen], encryptedPKHash)
+	copy(rawData[offset:offset+pkHashLen], encryptedHash160)
 
 	return rawData
 }
@@ -726,7 +716,6 @@ func deserializeImportedPubKeyAddress(addressID []byte, row *dbAddressRow) (*dbI
 	offset += 4
 	retRow.encryptedPrivKey = make([]byte, privLen)
 	copy(retRow.encryptedPrivKey, row.rawData[offset:offset+privLen])
-	offset += privLen
 
 	return &retRow, nil
 }
@@ -752,7 +741,6 @@ func serializeImportedPubKeyAddress(encryptedPKHash, encryptedPubKey, encryptedP
 	binary.LittleEndian.PutUint32(rawData[offset:offset+4], privLen)
 	offset += 4
 	copy(rawData[offset:offset+privLen], encryptedPrivKey)
-	offset += privLen
 
 	return rawData
 }
@@ -834,7 +822,7 @@ func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
 		return deserializeChainedAddress(addressID, row)
 	case adtImport:
 		if row.watchingOnly {
-			return deserializeImportedP2PKHAddress(addressID, row)
+			return deserializeImportedHash160AddressRow(addressID, row)
 		} else {
 			return deserializeImportedPubKeyAddress(addressID, row)
 		}
@@ -941,9 +929,9 @@ func putImportedPubKeyAddress(tx walletdb.Tx, addressID []byte, account uint32,
 // putImportedP2PKHAddress stores the provided imported address information to the
 // database.
 func putImportedP2PKHAddress(tx walletdb.Tx, addressID []byte, account uint32,
-	status syncStatus, encryptedPKHash []byte) error {
+	status syncStatus, encryptedHash160 []byte) error {
 
-	rawData := serializeImportedP2PKHAddress(encryptedPKHash)
+	rawData := serializeImportedHash160AddressRow(encryptedHash160)
 	addrRow := dbAddressRow{
 		addrType:     adtImport,
 		account:      account,

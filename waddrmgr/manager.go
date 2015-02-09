@@ -541,18 +541,14 @@ func (m *Manager) chainAddressRowToManaged(row *dbChainAddressRow) (ManagedAddre
 
 // importedP2PKHAddressRowToManaged returns a new managed address based on imported
 // address data loaded from the database.
-func (m *Manager) importedP2PKHAddressRowToManaged(row *dbImportedP2PKHAddressRow) (ManagedAddress, error) {
+func (m *Manager) importedP2PKHAddressRowToManaged(row *dbImportedHash160AddressRow) (ManagedAddress, error) {
 	// Use the crypto public key to decrypt the imported pk hash.
-	pkHash, err := m.cryptoKeyPub.Decrypt(row.encryptedPKHash)
+	pkHash, err := m.cryptoKeyPub.Decrypt(row.encryptedHash160)
 	if err != nil {
 		str := "failed to decrypt pkhash for imported address"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-	ma, err := newAddress(m, row.account, pkHash)
-	if err != nil {
-		return nil, err
-	}
-	return ma, nil
+	return newAddress(m, row.account, pkHash)
 }
 
 // importedPubKeyAddressRowToManaged returns a new managed address based on imported
@@ -607,7 +603,7 @@ func (m *Manager) rowInterfaceToManaged(rowInterface interface{}) (ManagedAddres
 	case *dbImportedPubKeyAddressRow:
 		return m.importedPubKeyAddressRowToManaged(row)
 
-	case *dbImportedP2PKHAddressRow:
+	case *dbImportedHash160AddressRow:
 		return m.importedP2PKHAddressRowToManaged(row)
 
 	case *dbScriptAddressRow:
@@ -967,7 +963,7 @@ func (m *Manager) ImportAddress(addr btcutil.Address, bs *BlockStamp) (ManagedAd
 	updateStartBlock := bs.Height < m.syncState.startBlock.Height
 
 	// Encrypt public key hash.
-	encryptedPKHash, err := m.cryptoKeyPub.Encrypt(addressID)
+	encryptedHash160, err := m.cryptoKeyPub.Encrypt(addressID)
 	if err != nil {
 		str := fmt.Sprintf("failed to encrypt public key hash for %x",
 			addressID)
@@ -978,7 +974,7 @@ func (m *Manager) ImportAddress(addr btcutil.Address, bs *BlockStamp) (ManagedAd
 	// needed) in a single transaction.
 	err = m.namespace.Update(func(tx walletdb.Tx) error {
 		err := putImportedP2PKHAddress(tx, addressID, ImportedAddrAccount,
-			ssNone, encryptedPKHash)
+			ssNone, encryptedHash160)
 		if err != nil {
 			return err
 		}

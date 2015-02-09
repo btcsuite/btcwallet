@@ -110,9 +110,9 @@ type ManagedScriptAddress interface {
 	Script() ([]byte, error)
 }
 
-// baseAddress represents a address. It has only the most basic data common to
+// publicAddress represents a address. It has only the most basic data common to
 // both managed and un-managed addresses.
-type baseAddress struct {
+type publicAddress struct {
 	manager    *Manager
 	account    uint32
 	address    *btcutil.AddressPubKeyHash
@@ -124,7 +124,7 @@ type baseAddress struct {
 // managedAddress represents a public key address.  It also may or may not have
 // the private key associated with the public key.
 type managedAddress struct {
-	baseAddress
+	publicAddress
 	pubKey           *btcec.PublicKey
 	privKeyEncrypted []byte
 	privKeyCT        []byte // non-nil if unlocked
@@ -132,7 +132,7 @@ type managedAddress struct {
 }
 
 // Enforce baseAddress satisfies the ManagedAddress interface.
-var _ ManagedAddress = (*baseAddress)(nil)
+var _ ManagedAddress = (*publicAddress)(nil)
 
 // Enforce managedAddress satisfies the ManagedPubKeyAddress interface.
 var _ ManagedPubKeyAddress = (*managedAddress)(nil)
@@ -140,7 +140,7 @@ var _ ManagedPubKeyAddress = (*managedAddress)(nil)
 // Account returns the account number the address is associated with.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *baseAddress) Account() uint32 {
+func (a *publicAddress) Account() uint32 {
 	return a.account
 }
 
@@ -148,14 +148,14 @@ func (a *baseAddress) Account() uint32 {
 // This will be a pay-to-pubkey-hash address.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *baseAddress) Address() btcutil.Address {
+func (a *publicAddress) Address() btcutil.Address {
 	return a.address
 }
 
 // AddrHash returns the public key hash for the address.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *baseAddress) AddrHash() []byte {
+func (a *publicAddress) AddrHash() []byte {
 	return a.address.Hash160()[:]
 }
 
@@ -163,7 +163,7 @@ func (a *baseAddress) AddrHash() []byte {
 // address chain.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *baseAddress) Imported() bool {
+func (a *publicAddress) Imported() bool {
 	return a.imported
 }
 
@@ -171,14 +171,14 @@ func (a *baseAddress) Imported() bool {
 // change output of a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *baseAddress) Internal() bool {
+func (a *publicAddress) Internal() bool {
 	return a.internal
 }
 
 // Compressed returns true if the address is compressed.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *baseAddress) Compressed() bool {
+func (a *publicAddress) Compressed() bool {
 	return a.compressed
 }
 
@@ -288,12 +288,12 @@ func (a *managedAddress) ExportPrivKey() (*btcutil.WIF, error) {
 
 // newAddress returns a new address based on the passed account and address
 // pubkeyhash.
-func newAddress(m *Manager, account uint32, addressID []byte) (*baseAddress, error) {
+func newAddress(m *Manager, account uint32, addressID []byte) (*publicAddress, error) {
 	address, err := btcutil.NewAddressPubKeyHash(addressID, m.ChainParams())
 	if err != nil {
 		return nil, err
 	}
-	return &baseAddress{
+	return &publicAddress{
 		manager:  m,
 		address:  address,
 		account:  account,
@@ -318,7 +318,7 @@ func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.P
 	}
 
 	return &managedAddress{
-		baseAddress: baseAddress{
+		publicAddress: publicAddress{
 			manager:    m,
 			address:    address,
 			account:    account,
