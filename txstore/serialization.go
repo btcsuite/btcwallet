@@ -29,7 +29,7 @@ import (
 
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/rename"
+	"github.com/btcsuite/btcwallet/legacy/rename"
 )
 
 // filename is the name of the file typically used to save a transaction
