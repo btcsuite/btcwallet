@@ -38,10 +38,11 @@ tradeoff.  However, keep in mind that extended hd keys, as called out in BIP0032
 need to be handled more carefully than normal EC public keys because they can be
 used to generate all future addresses.  While this is part of what makes them
 attractive, it also means an attacker getting access to your extended public key
-for an account will allow them to know all addresses you will use and hence
-reduces privacy.  For this reason, it is highly recommended that you do not hard
-code a password which allows any attacker who gets a copy of your address
-manager database to access your effectively plain text extended public keys.
+for an account will allow them to know all derived addresses you will use and
+hence reduces privacy.  For this reason, it is highly recommended that you do
+not hard code a password which allows any attacker who gets a copy of your
+address manager database to access your effectively plain text extended public
+keys.
 
 Each master key in turn protects the three real encryption keys (called crypto
 keys) for public, private, and script data.  Some examples include payment
