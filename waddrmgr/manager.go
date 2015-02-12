@@ -145,8 +145,8 @@ func defaultNewSecretKey(passphrase *[]byte, config *Options) (*snacl.SecretKey,
 // paths.
 var newSecretKey = defaultNewSecretKey
 
-// EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that our
-// tests can use dependency injection to force the behaviour they need.
+// EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that
+// our tests can use dependency injection to force the behaviour they need.
 type EncryptorDecryptor interface {
 	Encrypt(in []byte) ([]byte, error)
 	Decrypt(in []byte) ([]byte, error)
@@ -348,11 +348,11 @@ func (m *Manager) Close() error {
 // The passed derivedKey is zeroed after the new address is created.
 //
 // This function MUST be called with the manager lock held for writes.
-func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32) (ManagedAddress, error) {
+func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32, used bool) (ManagedAddress, error) {
 	// Create a new managed address based on the public or private key
 	// depending on whether the passed key is private.  Also, zero the
 	// key after creating the managed address from it.
-	ma, err := newManagedAddressFromExtKey(m, account, derivedKey)
+	ma, err := newManagedAddressFromExtKey(m, account, derivedKey, used)
 	defer derivedKey.Zero()
 	if err != nil {
 		return nil, err
@@ -485,7 +485,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index)
+	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index, false)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +500,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index)
+	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index, false)
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +536,7 @@ func (m *Manager) chainAddressRowToManaged(row *dbChainAddressRow) (ManagedAddre
 		return nil, err
 	}
 
-	return m.keyToManaged(addressKey, row.account, row.branch, row.index)
+	return m.keyToManaged(addressKey, row.account, row.branch, row.index, row.used)
 }
 
 // importedAddressRowToManaged returns a new managed address based on imported
@@ -557,7 +557,7 @@ func (m *Manager) importedAddressRowToManaged(row *dbImportedAddressRow) (Manage
 
 	compressed := len(pubBytes) == btcec.PubKeyBytesLenCompressed
 	ma, err := newManagedAddressWithoutPrivKey(m, row.account, pubKey,
-		compressed)
+		compressed, row.used)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +577,7 @@ func (m *Manager) scriptAddressRowToManaged(row *dbScriptAddressRow) (ManagedAdd
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
-	return newScriptAddress(m, row.account, scriptHash, row.encryptedScript)
+	return newScriptAddress(m, row.account, scriptHash, row.encryptedScript, row.used)
 }
 
 // rowInterfaceToManaged returns a new managed address based on the given
@@ -821,7 +821,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 //
 // Executing this function on a manager that is already watching-only will have
 // no effect.
-func (m *Manager) ConvertToWatchingOnly(pubPassphrase []byte) error {
+func (m *Manager) ConvertToWatchingOnly() error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
@@ -1017,11 +1017,11 @@ func (m *Manager) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (ManagedPub
 	var managedAddr *managedAddress
 	if !m.watchingOnly {
 		managedAddr, err = newManagedAddress(m, ImportedAddrAccount,
-			wif.PrivKey, wif.CompressPubKey)
+			wif.PrivKey, wif.CompressPubKey, false)
 	} else {
 		pubKey := (*btcec.PublicKey)(&wif.PrivKey.PublicKey)
 		managedAddr, err = newManagedAddressWithoutPrivKey(m,
-			ImportedAddrAccount, pubKey, wif.CompressPubKey)
+			ImportedAddrAccount, pubKey, wif.CompressPubKey, false)
 	}
 	if err != nil {
 		return nil, err
@@ -1125,7 +1125,7 @@ func (m *Manager) ImportScript(script []byte, bs *BlockStamp) (ManagedScriptAddr
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
 	scriptAddr, err := newScriptAddress(m, ImportedAddrAccount, scriptHash,
-		encryptedScript)
+		encryptedScript, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1289,6 +1289,17 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	return nil
 }
 
+// MarkUsed updates the used flag for the provided address id.
+func (m *Manager) MarkUsed(addressID []byte) error {
+	err := m.namespace.View(func(tx walletdb.Tx) error {
+		return updateAddressUsed(tx, addressID)
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
+}
+
 // ChainParams returns the chain parameters for this address manager.
 func (m *Manager) ChainParams() *chaincfg.Params {
 	// NOTE: No need for mutex here since the net field does not change
@@ -1375,7 +1386,7 @@ func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bo
 		// Create a new managed address based on the public or private
 		// key depending on whether the generated key is private.  Also,
 		// zero the next key after creating the managed address from it.
-		managedAddr, err := newManagedAddressFromExtKey(m, account, nextKey)
+		managedAddr, err := newManagedAddressFromExtKey(m, account, nextKey, false)
 		nextKey.Zero()
 		if err != nil {
 			return nil, err

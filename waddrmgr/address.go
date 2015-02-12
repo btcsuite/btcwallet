@@ -76,6 +76,9 @@ type ManagedAddress interface {
 
 	// Compressed returns true if the backing address is compressed.
 	Compressed() bool
+
+	// Used returns true if the backing address has been used in a transaction.
+	Used() bool
 }
 
 // ManagedPubKeyAddress extends ManagedAddress and additionally provides the
@@ -119,6 +122,7 @@ type managedAddress struct {
 	imported         bool
 	internal         bool
 	compressed       bool
+	used             bool
 	pubKey           *btcec.PublicKey
 	privKeyEncrypted []byte
 	privKeyCT        []byte // non-nil if unlocked
@@ -209,6 +213,13 @@ func (a *managedAddress) Compressed() bool {
 	return a.compressed
 }
 
+// Used returns true if the address has been used in a transaction.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *managedAddress) Used() bool {
+	return a.used
+}
+
 // PubKey returns the public key associated with the address.
 //
 // This is part of the ManagedPubKeyAddress interface implementation.
@@ -280,7 +291,7 @@ func (a *managedAddress) ExportPrivKey() (*btcutil.WIF, error) {
 // newManagedAddressWithoutPrivKey returns a new managed address based on the
 // passed account, public key, and whether or not the public key should be
 // compressed.
-func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.PublicKey, compressed bool) (*managedAddress, error) {
+func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.PublicKey, compressed, used bool) (*managedAddress, error) {
 	// Create a pay-to-pubkey-hash address from the public key.
 	var pubKeyHash []byte
 	if compressed {
@@ -300,6 +311,7 @@ func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.P
 		imported:         false,
 		internal:         false,
 		compressed:       compressed,
+		used:             used,
 		pubKey:           pubKey,
 		privKeyEncrypted: nil,
 		privKeyCT:        nil,
@@ -309,7 +321,7 @@ func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.P
 // newManagedAddress returns a new managed address based on the passed account,
 // private key, and whether or not the public key is compressed.  The managed
 // address will have access to the private and public keys.
-func newManagedAddress(m *Manager, account uint32, privKey *btcec.PrivateKey, compressed bool) (*managedAddress, error) {
+func newManagedAddress(m *Manager, account uint32, privKey *btcec.PrivateKey, compressed, used bool) (*managedAddress, error) {
 	// Encrypt the private key.
 	//
 	// NOTE: The privKeyBytes here are set into the managed address which
@@ -325,7 +337,7 @@ func newManagedAddress(m *Manager, account uint32, privKey *btcec.PrivateKey, co
 	// and then add the private key to it.
 	ecPubKey := (*btcec.PublicKey)(&privKey.PublicKey)
 	managedAddr, err := newManagedAddressWithoutPrivKey(m, account,
-		ecPubKey, compressed)
+		ecPubKey, compressed, used)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +351,7 @@ func newManagedAddress(m *Manager, account uint32, privKey *btcec.PrivateKey, co
 // account and extended key.  The managed address will have access to the
 // private and public keys if the provided extended key is private, otherwise it
 // will only have access to the public key.
-func newManagedAddressFromExtKey(m *Manager, account uint32, key *hdkeychain.ExtendedKey) (*managedAddress, error) {
+func newManagedAddressFromExtKey(m *Manager, account uint32, key *hdkeychain.ExtendedKey, used bool) (*managedAddress, error) {
 	// Create a new managed address based on the public or private key
 	// depending on whether the generated key is private.
 	var managedAddr *managedAddress
@@ -350,7 +362,7 @@ func newManagedAddressFromExtKey(m *Manager, account uint32, key *hdkeychain.Ext
 		}
 
 		// Ensure the temp private key big integer is cleared after use.
-		managedAddr, err = newManagedAddress(m, account, privKey, true)
+		managedAddr, err = newManagedAddress(m, account, privKey, true, used)
 		zeroBigInt(privKey.D)
 		if err != nil {
 			return nil, err
@@ -362,7 +374,7 @@ func newManagedAddressFromExtKey(m *Manager, account uint32, key *hdkeychain.Ext
 		}
 
 		managedAddr, err = newManagedAddressWithoutPrivKey(m, account,
-			pubKey, true)
+			pubKey, true, used)
 		if err != nil {
 			return nil, err
 		}
@@ -379,6 +391,7 @@ type scriptAddress struct {
 	scriptEncrypted []byte
 	scriptCT        []byte
 	scriptMutex     sync.Mutex
+	used            bool
 }
 
 // Enforce scriptAddress satisfies the ManagedScriptAddress interface.
@@ -466,6 +479,13 @@ func (a *scriptAddress) Compressed() bool {
 	return false
 }
 
+// Used returns true if the address has been used in a transaction.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *scriptAddress) Used() bool {
+	return a.used
+}
+
 // Script returns the script associated with the address.
 //
 // This implements the ScriptAddress interface.
@@ -490,7 +510,7 @@ func (a *scriptAddress) Script() ([]byte, error) {
 }
 
 // newScriptAddress initializes and returns a new pay-to-script-hash address.
-func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []byte) (*scriptAddress, error) {
+func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []byte, used bool) (*scriptAddress, error) {
 	address, err := btcutil.NewAddressScriptHashFromHash(scriptHash,
 		m.chainParams)
 	if err != nil {
@@ -502,5 +522,6 @@ func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []
 		account:         account,
 		address:         address,
 		scriptEncrypted: scriptEncrypted,
+		used:            used,
 	}, nil
 }

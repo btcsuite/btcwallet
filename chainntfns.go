@@ -20,8 +20,8 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
 func (w *Wallet) handleChainNotifications() {
@@ -29,9 +29,9 @@ func (w *Wallet) handleChainNotifications() {
 		var err error
 		switch n := n.(type) {
 		case chain.BlockConnected:
-			w.connectBlock(keystore.BlockStamp(n))
+			w.connectBlock(waddrmgr.BlockStamp(n))
 		case chain.BlockDisconnected:
-			w.disconnectBlock(keystore.BlockStamp(n))
+			w.disconnectBlock(waddrmgr.BlockStamp(n))
 		case chain.RecvTx:
 			err = w.addReceivedTx(n.Tx, n.Block)
 		case chain.RedeemingTx:
@@ -53,13 +53,16 @@ func (w *Wallet) handleChainNotifications() {
 // connectBlock handles a chain server notification by marking a wallet
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
-func (w *Wallet) connectBlock(bs keystore.BlockStamp) {
+func (w *Wallet) connectBlock(bs waddrmgr.BlockStamp) {
 	if !w.ChainSynced() {
 		return
 	}
 
-	w.KeyStore.SetSyncedWith(&bs)
-	w.KeyStore.MarkDirty()
+	if err := w.Manager.SetSyncedTo(&bs); err != nil {
+		log.Errorf("failed to update address manager sync state in "+
+			"connect block for hash %v (height %d): %v", bs.Hash,
+			bs.Height, err)
+	}
 	w.notifyConnectedBlock(bs)
 
 	w.notifyBalances(bs.Height)
@@ -68,22 +71,26 @@ func (w *Wallet) connectBlock(bs keystore.BlockStamp) {
 // disconnectBlock handles a chain server reorganize by rolling back all
 // block history from the reorged block for a wallet in-sync with the chain
 // server.
-func (w *Wallet) disconnectBlock(bs keystore.BlockStamp) {
+func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) {
 	if !w.ChainSynced() {
 		return
 	}
 
-	// Disconnect the last seen block from the keystore if it
-	// matches the removed block.
-	iter := w.KeyStore.NewIterateRecentBlocks()
-	if iter != nil && *iter.BlockStamp().Hash == *bs.Hash {
+	// Disconnect the last seen block from the manager if it matches the
+	// removed block.
+	iter := w.Manager.NewIterateRecentBlocks()
+	if iter != nil && iter.BlockStamp().Hash == bs.Hash {
 		if iter.Prev() {
 			prev := iter.BlockStamp()
-			w.KeyStore.SetSyncedWith(&prev)
+			w.Manager.SetSyncedTo(&prev)
 		} else {
-			w.KeyStore.SetSyncedWith(nil)
+			// The reorg is farther back than the recently-seen list
+			// of blocks has recorded, so set it to unsynced which
+			// will in turn lead to a rescan from either the
+			// earliest blockstamp the addresses in the manager are
+			// known to have been created.
+			w.Manager.SetSyncedTo(nil)
 		}
-		w.KeyStore.MarkDirty()
 	}
 	w.notifyDisconnectedBlock(bs)
 
@@ -103,7 +110,7 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 			activeNet.Params)
 		insert := false
 		for _, addr := range addrs {
-			_, err := w.KeyStore.Address(addr)
+			_, err := w.Manager.Address(addr)
 			if err == nil {
 				insert = true
 				break
@@ -129,6 +136,9 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 				return err
 			}
 			w.TxStore.MarkDirty()
+			if err := w.markAddrsUsed(txr); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -150,7 +160,6 @@ func (w *Wallet) addRedeemingTx(tx *btcutil.Tx, block *txstore.Block) error {
 	if _, err := txr.AddDebits(); err != nil {
 		return err
 	}
-	w.KeyStore.MarkDirty()
 
 	bs, err := w.chainSvr.BlockStamp()
 	if err == nil {

@@ -67,6 +67,7 @@ type expectedAddr struct {
 	addressHash []byte
 	internal    bool
 	compressed  bool
+	used        bool
 	imported    bool
 	pubKey      []byte
 	privKey     []byte
@@ -272,6 +273,12 @@ func testAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedAddress
 		return false
 	}
 
+	if gotAddr.Used() != wantAddr.used {
+		tc.t.Errorf("%s Imported: unexpected used flag - got %v, "+
+			"want %v", prefix, gotAddr.Used(), wantAddr.used)
+		return false
+	}
+
 	switch addr := gotAddr.(type) {
 	case waddrmgr.ManagedPubKeyAddress:
 		if !testManagedPubKeyAddress(tc, prefix, addr, wantAddr) {
@@ -299,6 +306,7 @@ func testExternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("2b49ecd0cf72006173e6e95acf416b6735b5f889"),
 			internal:    false,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("02d8f88468c5a2e8e1815faf555f59cbd1979e3dbdf823f80c271b6fb70d2d519b"),
 			privKey:     hexToBytes("c27d6581b92785834b381fa697c4b0ffc4574b495743722e0acb7601b1b68b99"),
@@ -309,6 +317,7 @@ func testExternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("e6c59a1542138d1bf08f45cd18899557cf56b356"),
 			internal:    false,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("02b9c175b908624f8a8eaac227d0e8c77c0eec327b8c512ad1b8b7a4b5b676971f"),
 			privKey:     hexToBytes("18f3b191019e83878a81557abebb2afda199e31d22e150d8bf4df4561671be6c"),
@@ -319,6 +328,7 @@ func testExternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("0561e9373986965b647a57a09718e9c050215cfe"),
 			internal:    false,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("0329faddf1254d490d6add49e2b08cf52b561038c72baec0edb3cfacff71ff1021"),
 			privKey:     hexToBytes("ccb8f6305b73136b363644b647f6efc0fd27b6b7d9c11c7e560662ed38db7b34"),
@@ -329,6 +339,7 @@ func testExternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("1af950be02584ca230b7078cec0cfd38dd71b468"),
 			internal:    false,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("03d738324e2f0ce42e46975d7f8c7117c1670e3d7912b0291aea452add99674774"),
 			privKey:     hexToBytes("d6bc8ff768814fede2adcdb74826bd846924341b3862e3b6e31cdc084e992940"),
@@ -339,6 +350,7 @@ func testExternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("d578a267a7174c6ba7f76b0ab2397ce0ba0c5c3c"),
 			internal:    false,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("03a917acd5cd5b6f544b43f1921a35677e4d5320e5d2add2056039b4b44fdf905e"),
 			privKey:     hexToBytes("8563ade061110e03aee50695ffc5cb1c06c8310bde0a3674257c853c966968c0"),
@@ -465,6 +477,7 @@ func testInternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("2ef94abb9ee8f785d087c3ec8d6ee467e92d0d0a"),
 			internal:    true,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("020a1290b997c0a234a95213962e7edcb761c7360f0230f698a1a3e71c37047bb0"),
 			privKey:     hexToBytes("fe4f855fcf059ec6ddf7b25f63b19aa49c771d1fcb9850b68ae3d65e20657a60"),
@@ -475,6 +488,7 @@ func testInternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("d3c8ec46891f599bfeaa4c25918bfb3d46ea334c"),
 			internal:    true,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("03f79bbde32af42dde98195f011d95982602fcd0dab657fe4a1f49f9d5ada1e02d"),
 			privKey:     hexToBytes("bfef521317c65b018ae7e6d7ecc3aa700d5d0f7ea84d567be9270382d0b5e3e6"),
@@ -485,6 +499,7 @@ func testInternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("1a0ad2a04fde3b2afe068057591e1871c289c4b8"),
 			internal:    true,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("023ded84afe4fe91b52b45c3deb26fd263f749cbc27747dc964dae9e0739cbc579"),
 			privKey:     hexToBytes("f506dffd4494c24006df7a35f3291f7ca0297a1a431557a1339bfed6f48738ca"),
@@ -495,6 +510,7 @@ func testInternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("689b0249c628265215fd1de6142d5d5594eb8dc2"),
 			internal:    true,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("030f1e79f06824e10a259914ec310528bb2d5b8d6356341fe9dff55498591af6af"),
 			privKey:     hexToBytes("b3629de8ef6a275b4ffae41aa2bbbc2952eb92282ea6402435abbb010ecc1fb8"),
@@ -505,6 +521,7 @@ func testInternalAddresses(tc *testContext) bool {
 			addressHash: hexToBytes("c11dd8a3577978807a0453febedee2994a6144d4"),
 			internal:    true,
 			compressed:  true,
+			used:        false,
 			imported:    false,
 			pubKey:      hexToBytes("0317d7182e26b6ca3e0f3db531c474b9cab7a763a75eabff2e14ac92f62a793238"),
 			privKey:     hexToBytes("ca747a7ef815ea0dbe68655272cecbfbd65f2a109019a9ed28e0d3dcaffe05c3"),
@@ -734,6 +751,7 @@ func testImportPrivateKey(tc *testContext) bool {
 				internal:    false,
 				imported:    true,
 				compressed:  false,
+				used:        false,
 				pubKey: hexToBytes("04d0de0aaeaefad02b8bdc8a01a1b8b11c696bd3" +
 					"d66a2c5f10780d95b7df42645cd85228a6fb29940e858e7e558" +
 					"42ae2bd115d1ed7cc0e82d934e929c97648cb0a"),
@@ -750,6 +768,7 @@ func testImportPrivateKey(tc *testContext) bool {
 				internal:    false,
 				imported:    true,
 				compressed:  true,
+				used:        false,
 				pubKey:      hexToBytes("02d0de0aaeaefad02b8bdc8a01a1b8b11c696bd3d66a2c5f10780d95b7df42645c"),
 				privKey:     hexToBytes("0c28fca386c7a227600b2fe50b7cae11ec86d3bf1fbe471be89827e19d72aa1d"),
 				// privKeyWIF is set to the in field during tests
@@ -888,6 +907,7 @@ func testImportScript(tc *testContext) bool {
 				internal:    false,
 				imported:    true,
 				compressed:  false,
+				used:        false,
 				// script is set to the in field during tests.
 			},
 		},
@@ -909,6 +929,7 @@ func testImportScript(tc *testContext) bool {
 				internal:    false,
 				imported:    true,
 				compressed:  false,
+				used:        false,
 				// script is set to the in field during tests.
 			},
 		},
@@ -1168,7 +1189,7 @@ func testWatchingOnly(tc *testContext) bool {
 		tc.t.Errorf("%v", err)
 		return false
 	}
-	if err := mgr.ConvertToWatchingOnly(pubPassphrase); err != nil {
+	if err := mgr.ConvertToWatchingOnly(); err != nil {
 		tc.t.Errorf("%v", err)
 		return false
 	}
