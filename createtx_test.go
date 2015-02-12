@@ -220,10 +220,7 @@ func CreateTestStore() (*wtxmgr.Store, error) {
 	}
 	s, err := wtxmgr.Open(wtxmgrNamespace,
 		&chaincfg.MainNetParams)
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
+	return s, err
 }
 
 // eligibleInputsFromTx decodes the given txHex and returns the outputs with

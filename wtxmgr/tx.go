@@ -273,10 +273,7 @@ func (s *Store) lookupBlock(height int32) (*Block, error) {
 		block, err = fetchBlockByHeight(wtx, height)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return block, nil
+	return block, err
 }
 
 // deleteBlock deletes the block at the given height from the store.
@@ -295,10 +292,7 @@ func (s *Store) records(height int32) ([]*txRecord, error) {
 		records, err = fetchBlockTxRecords(wtx, height)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return records, nil
+	return records, err
 }
 
 // lookupBlockTx fetches the transaction record with the given block tx key
@@ -323,10 +317,7 @@ func (s *Store) lookupBlockTx(key BlockTxKey) (*txRecord, error) {
 		record, err = fetchTxRecord(wtx, txHash)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return record, nil
+	return record, err
 }
 
 // lookupBlockDebits returns the debits the given block tx key creates.
@@ -461,10 +452,7 @@ func (s *Store) blocks() ([]*Block, error) {
 		blocks, err = fetchAllBlocks(wtx)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return blocks, nil
+	return blocks, err
 }
 
 // sliceBlocks returns a slice of blocks with height greater than or equal to
@@ -476,10 +464,7 @@ func (s *Store) sliceBlocks(height int32) ([]*Block, error) {
 		blocks, err = fetchBlocks(wtx, height)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return blocks, nil
+	return blocks, err
 }
 
 func (s *Store) moveMinedTx(r *txRecord, block *Block) error {

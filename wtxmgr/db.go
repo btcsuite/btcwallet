@@ -58,7 +58,7 @@ var (
 	numUnconfirmedRecordsName  = []byte("numunconfirmedrecords")
 	numUnconfirmedSpendsName   = []byte("numunconfirmedspends")
 	numConfirmedSpendsName     = []byte("numconfirmedspends")
-	numSpentBlockOutPointsName = []byte("numconfirmedspends")
+	numSpentBlockOutPointsName = []byte("numspentblockoutpoints")
 	numBlockTxRecordsName      = []byte("numtxrecords")
 	numBlocksName              = []byte("numblocks")
 
@@ -100,13 +100,6 @@ func uint32ToBytes(number uint32) []byte {
 	return buf
 }
 
-// shaHashToBytes converts a wire.ShaHash into a 32-byte slice
-func shaHashToBytes(hash *wire.ShaHash) []byte {
-	buf := make([]byte, 32)
-	copy(buf[0:32], hash[:])
-	return buf
-}
-
 // outPointToBytes converts a wire.OutPoint into a 36-byte slice
 // It is serialized by the hash followed by the uint32 index
 func outPointToBytes(op *wire.OutPoint) []byte {
@@ -144,7 +137,8 @@ func deserializeOutPoint(serializedOutPoint []byte) (*wire.OutPoint, error) {
 	//
 	//   32 bytes hash length + 4 bytes index
 	if len(serializedOutPoint) < 36 {
-		str := fmt.Sprintf("malformed serialized outpoint")
+		str := fmt.Sprintf("malformed serialized outpoint for key %x",
+			serializedOutPoint)
 		return nil, txStoreError(ErrDatabase, str, nil)
 	}
 	row := new(wire.OutPoint)
@@ -219,9 +213,9 @@ func updateTxRecord(tx walletdb.Tx, t *txRecord) error {
 		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
-	err = bucket.Put(shaHashToBytes(t.tx.Sha()), serializedRow)
+	err = bucket.Put(t.tx.Sha()[:], serializedRow)
 	if err != nil {
-		str := fmt.Sprintf("failed to store txrecord '%s'", t.tx.Sha())
+		str := fmt.Sprintf("failed to update txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
 	return nil
@@ -239,8 +233,7 @@ func putTxRecord(tx walletdb.Tx, b *Block, t *txRecord) error {
 	if err != nil {
 		return err
 	}
-	n++
-	if err := putNumBlockTxRecords(tx, b.Height, n); err != nil {
+	if err := putNumBlockTxRecords(tx, b.Height, n+1); err != nil {
 		return err
 	}
 	return updateBlockTxIdx(tx, b, t.tx)
@@ -300,10 +293,6 @@ func fetchNumBlockTxRecords(tx walletdb.Tx, height int32) (uint32, error) {
 		return 0, nil
 	}
 	val := bucket.Get(numBlockTxRecordsName)
-	// Return 0 if the metadata is uninitialized
-	if val == nil {
-		return 0, nil
-	}
 	if val == nil {
 		str := fmt.Sprintf("meta key not found %s", numBlockTxRecordsName)
 		return 0, txStoreError(ErrDatabase, str, nil)
@@ -319,14 +308,13 @@ func fetchUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord,
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(txRecordsBucketName)
 
-	key := shaHashToBytes(hash)
-	val := bucket.Get(key)
+	val := bucket.Get(hash[:])
 	if val == nil {
 		str := "txrecord not found"
 		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
 	}
 
-	return deserializeTxRecordRow(key, val)
+	return deserializeTxRecordRow(hash[:], val)
 }
 
 // fetchAllUnconfirmedTxRecords retrieves all unconfirmed tx records from
@@ -337,7 +325,7 @@ func fetchAllUnconfirmedTxRecords(tx walletdb.Tx) ([]*txRecord, error) {
 
 	n, err := fetchMeta(tx, numUnconfirmedRecordsName)
 	if err != nil {
-		return []*txRecord{}, err
+		return nil, err
 	}
 	records := make([]*txRecord, n)
 
@@ -346,6 +334,11 @@ func fetchAllUnconfirmedTxRecords(tx walletdb.Tx) ([]*txRecord, error) {
 		// Skip buckets.
 		if v == nil {
 			return nil
+		}
+		// Handle index out of range due to invalid metadata
+		if i > len(records)-1 {
+			str := "inconsistent unconfirmed tx records data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
 		}
 		record, err := deserializeTxRecordRow(k, v)
 		if err != nil {
@@ -368,8 +361,7 @@ func putUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 	if err != nil {
 		return err
 	}
-	n++
-	if err := putMeta(tx, numUnconfirmedRecordsName, n); err != nil {
+	if err := putMeta(tx, numUnconfirmedRecordsName, n+1); err != nil {
 		str := fmt.Sprintf("failed to store meta key '%s'", numUnconfirmedRecordsName)
 		return txStoreError(ErrDatabase, str, err)
 	}
@@ -388,7 +380,7 @@ func updateUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
-	err = bucket.Put(shaHashToBytes(t.tx.Sha()), serializedRow)
+	err = bucket.Put(t.tx.Sha()[:], serializedRow)
 	if err != nil {
 		str := fmt.Sprintf("failed to store confirmed txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
@@ -401,7 +393,7 @@ func updateUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 func deleteUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(txRecordsBucketName)
-	if err := bucket.Delete(shaHashToBytes(hash)); err != nil {
+	if err := bucket.Delete(hash[:]); err != nil {
 		str := fmt.Sprintf("failed to delete tx record '%s'", hash)
 		return txStoreError(ErrDatabase, str, err)
 	}
@@ -409,11 +401,7 @@ func deleteUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) error {
 	if err != nil {
 		return err
 	}
-	n--
-	if err := putMeta(tx, numUnconfirmedRecordsName, n); err != nil {
-		return err
-	}
-	return nil
+	return putMeta(tx, numUnconfirmedRecordsName, n-1)
 }
 
 // deleteBlockOutPointSpender deletes a block output key from the
@@ -438,11 +426,7 @@ func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	if err != nil {
 		return err
 	}
-	n--
-	if err := putMeta(tx, numConfirmedSpendsName, n); err != nil {
-		return err
-	}
-	return nil
+	return putMeta(tx, numConfirmedSpendsName, n-1)
 }
 
 // setPrevOutPointSpender updates previous outpoints index in the
@@ -453,7 +437,7 @@ func setPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 		Bucket(prevOutPointIdxBucketName)
 
 	if err := bucket.Put(outPointToBytes(op),
-		shaHashToBytes(t.tx.Sha())); err != nil {
+		t.tx.Sha()[:]); err != nil {
 		str := fmt.Sprintf("failed to store previous outpoint '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
@@ -522,7 +506,7 @@ func setUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentUnconfirmedIdxBucketName)
 
-	err := bucket.Put(outPointToBytes(op), shaHashToBytes(t.tx.Sha()))
+	err := bucket.Put(outPointToBytes(op), t.tx.Sha()[:])
 	if err != nil {
 		str := fmt.Sprintf("failed to store spent unconfirmed tx '%s'",
 			t.tx.Sha())
@@ -532,11 +516,7 @@ func setUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	if err != nil {
 		return err
 	}
-	n++
-	if err := putMeta(tx, numUnconfirmedSpendsName, n); err != nil {
-		return err
-	}
-	return nil
+	return putMeta(tx, numUnconfirmedSpendsName, n+1)
 }
 
 // fetchUnconfirmedSpends retrieves all the spent unconfirmed tx records from
@@ -547,7 +527,7 @@ func fetchUnconfirmedSpends(tx walletdb.Tx) ([]*txRecord, error) {
 
 	numUnconfirmedSpends, err := fetchMeta(tx, numUnconfirmedSpendsName)
 	if err != nil {
-		return []*txRecord{}, err
+		return nil, err
 	}
 	records := make([]*txRecord, numUnconfirmedSpends)
 
@@ -556,6 +536,11 @@ func fetchUnconfirmedSpends(tx walletdb.Tx) ([]*txRecord, error) {
 		// Skip buckets.
 		if v == nil {
 			return nil
+		}
+		// Handle index out of range due to invalid metadata
+		if i > len(records)-1 {
+			str := "inconsistent unconfirmed spends data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
 		}
 
 		hash, err := wire.NewShaHash(v)
@@ -586,10 +571,7 @@ func deleteUnconfirmedOutPointSpender(tx walletdb.Tx,
 		str := fmt.Sprintf("failed to delete unconfirmed outpoint '%s'", op)
 		return txStoreError(ErrDatabase, str, err)
 	}
-	if err := putMeta(tx, numUnconfirmedSpendsName, -1); err != nil {
-		return err
-	}
-	return nil
+	return putMeta(tx, numUnconfirmedSpendsName, -1)
 }
 
 // fetchConfirmedSpends retrieves all the spent tx records from the
@@ -609,6 +591,11 @@ func fetchConfirmedSpends(tx walletdb.Tx) ([]*txRecord, error) {
 		// Skip buckets.
 		if v == nil {
 			return nil
+		}
+		// Handle index out of range due to invalid metadata
+		if i > len(records)-1 {
+			str := "inconsistent confirmed spends data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
 		}
 
 		hash, err := wire.NewShaHash(v)
@@ -647,6 +634,11 @@ func fetchAllSpentBlockOutPoints(tx walletdb.Tx) ([]*BlockOutputKey, error) {
 		if v == nil {
 			return nil
 		}
+		// Handle index out of range due to invalid metadata
+		if i > len(keys)-1 {
+			str := "inconsistent spent block outpoints data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
+		}
 
 		key, err := deserializeBlockOutputKeyRow(k, k)
 		if err != nil {
@@ -668,7 +660,7 @@ func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	key *BlockOutputKey, t *txRecord) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
-	err := bucket.Put(blockOutputKeyToBytes(key), shaHashToBytes(t.tx.Sha()))
+	err := bucket.Put(blockOutputKeyToBytes(key), t.tx.Sha()[:])
 	if err != nil {
 		str := fmt.Sprintf("failed to store spent block outpoint index '%s'",
 			t.tx.Sha())
@@ -687,11 +679,7 @@ func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	if err != nil {
 		return err
 	}
-	n++
-	if err := putMeta(tx, numConfirmedSpendsName, n); err != nil {
-		return err
-	}
-	return nil
+	return putMeta(tx, numConfirmedSpendsName, n+1)
 }
 
 // updateBlockTxIdx updates the block tx index for the given block and tx
@@ -703,7 +691,7 @@ func updateBlockTxIdx(tx walletdb.Tx, b *Block, t *btcutil.Tx) error {
 		return err
 	}
 
-	if err = bucket.Put(shaHashToBytes(t.Sha()), []byte{0}); err != nil {
+	if err = bucket.Put(t.Sha()[:], []byte{0}); err != nil {
 		str := fmt.Sprintf("failed to store block tx index key '%s'", t.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
@@ -720,7 +708,7 @@ func updateBlockTxIdx(tx walletdb.Tx, b *Block, t *btcutil.Tx) error {
 	blockTxKey.BlockIndex = t.Index()
 
 	if err = bucket.Put(blockTxKeyToBytes(blockTxKey),
-		shaHashToBytes(t.Sha())); err != nil {
+		t.Sha()[:]); err != nil {
 		str := fmt.Sprintf("failed to store block index key '%s'", t.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
@@ -754,11 +742,7 @@ func deleteBlock(tx walletdb.Tx, height int32) error {
 	if err != nil {
 		return err
 	}
-	n--
-	if err := putMeta(tx, numBlocksName, n); err != nil {
-		return err
-	}
-	return nil
+	return putMeta(tx, numBlocksName, n-1)
 }
 
 // fetchTxHashFromBlockTxKey retrieves the tx hash from the block tx key index
@@ -781,11 +765,7 @@ func fetchTxHashFromBlockTxKey(tx walletdb.Tx, key *BlockTxKey) (
 		return nil, txStoreError(ErrTxHashNotFound, str, nil)
 	}
 
-	hash, err := wire.NewShaHash(val)
-	if err != nil {
-		return nil, err
-	}
-	return hash, nil
+	return wire.NewShaHash(val)
 }
 
 // fetchTxRecord retrieves a tx record from the txrecords bucket with the given
@@ -793,14 +773,13 @@ func fetchTxHashFromBlockTxKey(tx walletdb.Tx, key *BlockTxKey) (
 func fetchTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
 	bucket := tx.RootBucket().Bucket(txRecordsBucketName)
 
-	key := shaHashToBytes(hash)
-	val := bucket.Get(key)
+	val := bucket.Get(hash[:])
 	if val == nil {
 		str := fmt.Sprintf("missing tx record for hash '%s'", hash.String())
 		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
 	}
 
-	return deserializeTxRecordRow(key, val)
+	return deserializeTxRecordRow(hash[:], val)
 }
 
 // fetchBlockTxRecords retrieves all tx records from the txrecords bucket
@@ -823,6 +802,12 @@ func fetchBlockTxRecords(tx walletdb.Tx, height int32) ([]*txRecord, error) {
 
 	i := 0
 	err = blockBucket.ForEach(func(k, v []byte) error {
+		// Handle index out of range due to invalid metadata
+		if i > len(records)-1 {
+			str := "inconsistent block tx records data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
+		}
+
 		serializedRow := bucket.Get(k)
 		row, err := deserializeTxRecordRow(k, serializedRow)
 		if err != nil {
@@ -844,8 +829,7 @@ func putBlock(tx walletdb.Tx, block *Block) error {
 	if err != nil {
 		return err
 	}
-	n++
-	if err := putMeta(tx, numBlocksName, n); err != nil {
+	if err := putMeta(tx, numBlocksName, n+1); err != nil {
 		return err
 	}
 	return updateBlock(tx, block)
@@ -962,6 +946,12 @@ func fetchAllBlocks(tx walletdb.Tx) ([]*Block, error) {
 		if v == nil {
 			return nil
 		}
+		// Handle index out of range due to invalid metadata
+		if i > len(blocks)-1 {
+			str := "inconsistent blocks data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
+		}
+
 		block, err := deserializeBlockRow(k, v)
 		if err != nil {
 			return err
