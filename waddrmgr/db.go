@@ -30,7 +30,7 @@ import (
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 1
+	LatestMgrVersion = 2
 )
 
 const (
@@ -1320,8 +1320,37 @@ func upgradeManager(namespace walletdb.Namespace) error {
 
 	// Upgrade the manager as needed.
 	if version < LatestMgrVersion {
-		// No upgrades yet.
+		// Upgrade addresses used flag
+		upgradeVersion1to2(namespace)
 	}
 
+	return nil
+}
+
+// upgradeVersion1to2 upgrades the database from version 1 to version 2
+// dbAddressRow field 'used', a flag for marking addresses used, is initialized
+// and it will be updated on the next rescan
+func upgradeVersion1to2(namespace walletdb.Namespace) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		bucket := tx.RootBucket().Bucket(addrBucketName)
+		return bucket.ForEach(func(k, v []byte) error {
+			// Skip buckets.
+			if v == nil {
+				return nil
+			}
+
+			row, err := deserializeAddressRow(k, v)
+			if err != nil {
+				return err
+			}
+			row.used = false
+			return putAddress(tx, k, row)
+		})
+
+	})
+	if err != nil {
+		str := "failed to upgrade version 1 to version 2"
+		return managerError(ErrDatabase, str, err)
+	}
 	return nil
 }
