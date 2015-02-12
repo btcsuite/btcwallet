@@ -30,7 +30,7 @@ import (
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 1
+	LatestMgrVersion = 2
 )
 
 const (
@@ -1320,8 +1320,72 @@ func upgradeManager(namespace walletdb.Namespace) error {
 
 	// Upgrade the manager as needed.
 	if version < LatestMgrVersion {
-		// No upgrades yet.
+		// Upgrade addresses used flag
+		upgradeVersion1to2(namespace)
 	}
 
+	return nil
+}
+
+// upgradeVersion1to2 upgrades the database from version 1 to version 2
+// dbAddressRow field 'used', a flag for marking addresses used, is initialized
+// and it will be updated on the next rescan
+func upgradeVersion1to2(namespace walletdb.Namespace) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		bucket := tx.RootBucket().Bucket(addrBucketName)
+		mainBucket := tx.RootBucket().Bucket(mainBucketName)
+		addrBucket := tx.RootBucket().Bucket(addrBucketName)
+		err := bucket.ForEach(func(k, v []byte) error {
+			// Skip buckets.
+			if v == nil {
+				return nil
+			}
+
+			serializedAddress := v
+			// deserialize version 1 address
+			if len(serializedAddress) < 18 {
+				str := fmt.Sprintf("malformed serialized address for key %s",
+					k)
+				return managerError(ErrDatabase, str, nil)
+			}
+
+			row := dbAddressRow{}
+			row.addrType = addressType(serializedAddress[0])
+			row.account = binary.LittleEndian.Uint32(serializedAddress[1:5])
+			row.addTime = binary.LittleEndian.Uint64(serializedAddress[5:13])
+			row.syncStatus = syncStatus(serializedAddress[13])
+			rdlen := binary.LittleEndian.Uint32(serializedAddress[14:18])
+			row.rawData = make([]byte, rdlen)
+			copy(row.rawData, serializedAddress[18:18+rdlen])
+
+			// initialize used flag and write version 2 address
+			row.used = false
+			err := addrBucket.Put(k, serializeAddressRow(&row))
+			if err != nil {
+				str := fmt.Sprintf("failed to store address %x", k)
+				return managerError(ErrDatabase, str, err)
+			}
+			return nil
+		})
+		if err != nil {
+			str := "failed to initialize address used flag"
+			return managerError(ErrDatabase, str, err)
+		}
+
+		var version uint32
+		var buf [4]byte
+		version = LatestMgrVersion
+		binary.LittleEndian.PutUint32(buf[:], version)
+		err = mainBucket.Put(mgrVersionName, buf[:])
+		if err != nil {
+			str := "failed to store latest database version"
+			return managerError(ErrDatabase, str, err)
+		}
+		return nil
+	})
+	if err != nil {
+		str := "failed to upgrade version 1 to version 2"
+		return managerError(ErrDatabase, str, err)
+	}
 	return nil
 }
