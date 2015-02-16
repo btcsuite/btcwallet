@@ -15,13 +15,12 @@
  */
 
 // Package wtxmgr provides an implementation of a transaction store for a
-// bitcoin wallet.  Its primary purpose is to save transactions with
-// outputs spendable with wallet keys and transactions that are signed by
-// wallet keys in memory, handle spend tracking for newly-inserted
-// transactions, report the spendable balance from each unspent
-// transaction output, and finally to provide a means to serialize the
-// entire data structure to an io.Writer and deserialize from an io.Reader
-// (both of which are usually an os.File).
+// bitcoin wallet.  Its primary purpose is to save transactions with outputs
+// spendable with wallet keys and transactions that are signed by wallet keys
+// in memory, handle spend tracking for newly-inserted transactions, and report
+// the spendable balance from each unspent transaction output. It uses walletdb
+// as the backend for storing the serialized transaction objects in buckets.
+//
 //
 // Transaction outputs which are spendable by wallet keys are called
 // credits (because they credit to a wallet's total spendable balance)
@@ -61,7 +60,8 @@
 // Example use:
 //
 //	// Create a new transaction store to hold two transactions.
-//	s := wtxmgr.New()
+//	s := txs, err = wtxmgr.Open("abc", chaincfg.TestNet3Params)
+
 //
 //	// Insert a transaction belonging to some imaginary block at
 //	// height 123.
