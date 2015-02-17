@@ -38,10 +38,11 @@ tradeoff.  However, keep in mind that extended hd keys, as called out in BIP0032
 need to be handled more carefully than normal EC public keys because they can be
 used to generate all future addresses.  While this is part of what makes them
 attractive, it also means an attacker getting access to your extended public key
-for an account will allow them to know all addresses you will use and hence
-reduces privacy.  For this reason, it is highly recommended that you do not hard
-code a password which allows any attacker who gets a copy of your address
-manager database to access your effectively plain text extended public keys.
+for an account will allow them to know all derived addresses you will use and
+hence reduces privacy.  For this reason, it is highly recommended that you do
+not hard code a password which allows any attacker who gets a copy of your
+address manager database to access your effectively plain text extended public
+keys.
 
 Each master key in turn protects the three real encryption keys (called crypto
 keys) for public, private, and script data.  Some examples include payment
@@ -73,18 +74,17 @@ for this purpose.
 Creating a New Address Manager
 
 A new address manager is created via the Create function.  This function accepts
-the path to a database file to create, passphrases, network, and perhaps most
-importantly, a cryptographically random seed which is used to generate the
-master node of the hierarchical deterministic keychain which allows all
-addresses and private keys to be recovered with only the seed.  The GenerateSeed
-function in the hdkeychain package can be used as a convenient way to create a
-random seed for use with this function.  The address manager is locked
-immediately upon being created.
+a wallet database namespace, passphrases, network, and perhaps most importantly,
+a cryptographically random seed which is used to generate the master node of the
+hierarchical deterministic keychain which allows all addresses and private keys
+to be recovered with only the seed.  The GenerateSeed function in the hdkeychain
+package can be used as a convenient way to create a random seed for use with
+this function.  The address manager is locked immediately upon being created.
 
 Opening an Existing Address Manager
 
 An existing address manager is opened via the Open function.  This function
-accepts the path to the existing database file, the public passphrase, and
+accepts an existing wallet database namespace, the public passphrase, and
 network.  The address manager is opened locked as expected since the open
 function does not take the private passphrase to unlock it.
 
@@ -150,11 +150,11 @@ apply to the associated network.
 
 Errors
 
-All errors returned from this package are of type waddrmgr.ManagerError.  This
-allows the caller to programmatically ascertain the specific reasons for failure
-by examining the ErrorCode field of the type asserted ManagerError.  For certain
-error codes, as documented the specific error codes, the underlying error will
-be contained in the Err field.
+All errors returned from this package are of type ManagerError.  This allows the
+caller to programmatically ascertain the specific reasons for failure by
+examining the ErrorCode field of the type asserted ManagerError.  For certain
+error codes, as documented by the specific error codes, the underlying error
+will be contained in the Err field.
 
 Bitcoin Improvement Proposals
 
