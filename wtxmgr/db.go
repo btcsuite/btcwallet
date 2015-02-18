@@ -53,6 +53,7 @@ var (
 	unspentBucketName     = []byte("unspent")
 	txRecordsBucketName   = []byte("txrecords")
 	unconfirmedBucketName = []byte("unconfirmed")
+	debitsBucketName      = []byte("debits")
 
 	metaBucketName             = []byte("meta")
 	numUnconfirmedRecordsName  = []byte("numunconfirmedrecords")
@@ -218,7 +219,85 @@ func updateTxRecord(tx walletdb.Tx, t *txRecord) error {
 		str := fmt.Sprintf("failed to update txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
+	if t.debits != nil {
+		if err := putDebits(tx, t.tx.Sha(), t.debits); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func serializeDebits(d *debits) []byte {
+	size := 8 + 4 + 12*len(d.spends)
+	buf := make([]byte, size)
+	offset := 0
+
+	// Write debited amount (int64).
+	byteOrder.PutUint64(buf[offset:offset+8], uint64(d.amount))
+	offset += 8
+
+	// Write number of outputs (as a uint32) this record debits
+	// from.
+	byteOrder.PutUint32(buf[offset:offset+4], uint32(len(d.spends)))
+	offset += 4
+
+	// Write each lookup key for a spent transaction output.
+	for _, k := range d.spends {
+		copy(buf[offset:offset+12], blockOutputKeyToBytes(&k))
+		offset += 12
+	}
+	return buf
+}
+
+func deserializeDebits(serializedRow []byte) (*debits, error) {
+	offset := 0
+	amount := btcutil.Amount(byteOrder.Uint64(serializedRow[offset : offset+8]))
+	offset += 8
+
+	// Read number of written outputs (as a uint32) this record
+	// debits from.
+	spendsCount := byteOrder.Uint32(serializedRow[offset : offset+4])
+	offset += 4
+
+	// For each expected output key, allocate and read the key,
+	// appending the result to the spends slice.  This slice is
+	// originally set empty (*not* preallocated to spendsCount
+	// size) to prevent accidentally allocating so much memory that
+	// the process dies.
+	spends := make([]BlockOutputKey, spendsCount)
+	for i := uint32(0); i < spendsCount; i++ {
+		k, err := deserializeBlockOutputKeyRow(nil,
+			serializedRow[offset:offset+12])
+		if err != nil {
+			return nil, err
+		}
+		offset += 12
+		spends[i] = *k
+	}
+
+	return &debits{amount, spends}, nil
+}
+
+func putDebits(tx walletdb.Tx, hash *wire.ShaHash, d *debits) error {
+	bucket := tx.RootBucket().Bucket(debitsBucketName)
+
+	serializedRow := serializeDebits(d)
+	err := bucket.Put(hash[:], serializedRow)
+	if err != nil {
+		str := fmt.Sprintf("failed to update debits '%s'", hash)
+		return txStoreError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func fetchDebits(tx walletdb.Tx, hash *wire.ShaHash) (*debits, error) {
+	bucket := tx.RootBucket().Bucket(debitsBucketName)
+
+	val := bucket.Get(hash[:])
+	if val == nil {
+		return nil, nil
+	}
+	return deserializeDebits(val)
 }
 
 // putTxRecord inserts a given tx record to the txrecords bucket
@@ -779,7 +858,16 @@ func fetchTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
 		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
 	}
 
-	return deserializeTxRecordRow(hash[:], val)
+	r, err := deserializeTxRecordRow(hash[:], val)
+	if err != nil {
+		return nil, err
+	}
+	debits, err := fetchDebits(tx, hash)
+	if err != nil {
+		return nil, err
+	}
+	r.debits = debits
+	return r, nil
 }
 
 // fetchBlockTxRecords retrieves all tx records from the txrecords bucket
@@ -1364,6 +1452,12 @@ func upgradeManager(namespace walletdb.Namespace) error {
 		_, err = rootBucket.CreateBucketIfNotExists(metaBucketName)
 		if err != nil {
 			str := "failed to create meta bucket"
+			return txStoreError(ErrDatabase, str, err)
+		}
+
+		_, err = rootBucket.CreateBucketIfNotExists(debitsBucketName)
+		if err != nil {
+			str := "failed to create debits bucket"
 			return txStoreError(ErrDatabase, str, err)
 		}
 
