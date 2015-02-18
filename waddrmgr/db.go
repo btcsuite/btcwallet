@@ -19,7 +19,6 @@ package waddrmgr
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"time"
 
@@ -38,15 +37,15 @@ const (
 	trueByte
 )
 
-func byteAsBool(b byte) (bool, error) {
-	switch b {
-	case falseByte:
-		return false, nil
-	case trueByte:
-		return true, nil
-	default:
-		return false, errors.New("invalid byte representation of bool")
+func byteAsBool(b byte) bool {
+	return b != 0
+}
+
+func boolAsByte(b bool) byte {
+	if b {
+		return trueByte
 	}
+	return falseByte
 }
 
 // maybeConvertDbError converts the passed error to a ManagerError with an
@@ -562,13 +561,7 @@ func deserializeAddressRow(addressID, serializedAddress []byte) (*dbAddressRow, 
 	row.account = binary.LittleEndian.Uint32(serializedAddress[1:5])
 	row.addTime = binary.LittleEndian.Uint64(serializedAddress[5:13])
 	row.syncStatus = syncStatus(serializedAddress[13])
-	used, err := byteAsBool(serializedAddress[14])
-	if err != nil {
-		str := fmt.Sprintf("malformed used address flag for key %s",
-			addressID)
-		return nil, managerError(ErrDatabase, str, err)
-	}
-	row.used = used
+	row.used = byteAsBool(serializedAddress[14])
 	rdlen := binary.LittleEndian.Uint32(serializedAddress[15:19])
 	row.rawData = make([]byte, rdlen)
 	copy(row.rawData, serializedAddress[19:19+rdlen])
@@ -589,11 +582,7 @@ func serializeAddressRow(row *dbAddressRow) []byte {
 	binary.LittleEndian.PutUint32(buf[1:5], row.account)
 	binary.LittleEndian.PutUint64(buf[5:13], row.addTime)
 	buf[13] = byte(row.syncStatus)
-	if row.used {
-		buf[14] = trueByte
-	} else {
-		buf[14] = falseByte
-	}
+	buf[14] = boolAsByte(row.used)
 	binary.LittleEndian.PutUint32(buf[15:19], uint32(rdlen))
 	copy(buf[19:19+rdlen], row.rawData)
 	return buf
