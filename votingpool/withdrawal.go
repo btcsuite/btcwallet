@@ -147,6 +147,23 @@ func (s outputStatus) String() string {
 	return strings[s]
 }
 
+func (tx *changeAwareTx) addSelfToStore(store *wtxmgr.Store) error {
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx, time.Now())
+	if err != nil {
+		return newError(ErrWithdrawalTxStorage, "error constructing TxRecord for storing", err)
+	}
+
+	if err := store.InsertTx(rec, nil); err != nil {
+		return newError(ErrWithdrawalTxStorage, "error adding tx to store", err)
+	}
+	if tx.changeIdx != -1 {
+		if err = store.AddCredit(rec, nil, uint32(tx.changeIdx), true); err != nil {
+			return newError(ErrWithdrawalTxStorage, "error adding tx credits to store", err)
+		}
+	}
+	return nil
+}
+
 // Outputs returns a map of outbailment IDs to WithdrawalOutputs for all outputs
 // requested in this withdrawal.
 func (s *WithdrawalStatus) Outputs() map[OutBailmentID]*WithdrawalOutput {
@@ -923,4 +940,13 @@ func nextChangeAddress(a ChangeAddress) (ChangeAddress, error) {
 	}
 	addr, err := a.pool.ChangeAddress(seriesID, index)
 	return *addr, err
+}
+
+func storeTransactions(store *wtxmgr.Store, transactions []*changeAwareTx) error {
+	for _, tx := range transactions {
+		if err := tx.addSelfToStore(store); err != nil {
+			return err
+		}
+	}
+	return nil
 }

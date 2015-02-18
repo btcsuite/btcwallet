@@ -28,6 +28,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // TestOutputSplittingNotEnoughInputs checks that an output will get split if we
@@ -970,6 +971,105 @@ func TestTxFeeEstimationForLargeTx(t *testing.T) {
 	if fee != wantFee {
 		t.Fatalf("Unexpected tx fee; got %v, want %v", fee, wantFee)
 	}
+}
+
+func TestStoreTransactionsWithoutChangeOutput(t *testing.T) {
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
+	defer tearDown()
+
+	wtx := createWithdrawalTxWithStoreCredits(t, store, pool, []int64{4e6}, []int64{3e6})
+	tx := &changeAwareTx{MsgTx: wtx.toMsgTx(), changeIdx: int32(-1)}
+	if err := storeTransactions(store, []*changeAwareTx{tx}); err != nil {
+		t.Fatal(err)
+	}
+
+	credits, err := store.UnspentOutputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credits) != 0 {
+		t.Fatalf("Unexpected number of credits in txstore; got %d, want 0", len(credits))
+	}
+}
+
+func TestStoreTransactionsWithChangeOutput(t *testing.T) {
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
+	defer tearDown()
+
+	wtx := createWithdrawalTxWithStoreCredits(t, store, pool, []int64{5e6}, []int64{1e6, 1e6})
+	wtx.changeOutput = wire.NewTxOut(int64(3e6), []byte{})
+	msgtx := wtx.toMsgTx()
+	tx := &changeAwareTx{MsgTx: msgtx, changeIdx: int32(len(msgtx.TxOut) - 1)}
+
+	if err := storeTransactions(store, []*changeAwareTx{tx}); err != nil {
+		t.Fatal(err)
+	}
+
+	sha := msgtx.TxSha()
+	txDetails, err := store.TxDetails(&sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if txDetails == nil {
+		t.Fatal("The new tx doesn't seem to have been stored")
+	}
+
+	storedTx := txDetails.TxRecord.MsgTx
+	outputTotal := int64(0)
+	for i, txOut := range storedTx.TxOut {
+		if int32(i) != tx.changeIdx {
+			outputTotal += txOut.Value
+		}
+	}
+	if outputTotal != int64(2e6) {
+		t.Fatalf("Unexpected output amount; got %v, want %v", outputTotal, int64(2e6))
+	}
+
+	inputTotal := btcutil.Amount(0)
+	for _, debit := range txDetails.Debits {
+		inputTotal += debit.Amount
+	}
+	if inputTotal != btcutil.Amount(5e6) {
+		t.Fatalf("Unexpected input amount; got %v, want %v", inputTotal, btcutil.Amount(5e6))
+	}
+
+	credits, err := store.UnspentOutputs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credits) != 1 {
+		t.Fatalf("Unexpected number of credits in txstore; got %d, want 1", len(credits))
+	}
+	changeOutpoint := wire.OutPoint{Hash: sha, Index: uint32(tx.changeIdx)}
+	if credits[0].OutPoint != changeOutpoint {
+		t.Fatalf("Credit's outpoint (%v) doesn't match the one from change output (%v)",
+			credits[0].OutPoint, changeOutpoint)
+	}
+}
+
+// createWithdrawalTxWithStoreCredits creates a new Credit in the given store
+// for each entry in inputAmounts, and uses them to construct a withdrawalTx
+// with one output for every entry in outputAmounts.
+func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool *Pool,
+	inputAmounts []int64, outputAmounts []int64) *withdrawalTx {
+	masters := []*hdkeychain.ExtendedKey{
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+	}
+	def := TstCreateSeriesDef(t, pool, 2, masters)
+	TstCreateSeries(t, pool, []TstSeriesDef{def})
+	net := pool.Manager().ChainParams()
+	tx := newWithdrawalTx()
+	for _, c := range TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, inputAmounts, store) {
+		tx.addInput(c)
+	}
+	for i, amount := range outputAmounts {
+		request := TstNewOutputRequest(
+			t, uint32(i), "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", btcutil.Amount(amount), net)
+		tx.addOutput(request)
+	}
+	return tx
 }
 
 // checkNonEmptySigsForPrivKeys checks that every signature list in txSigs has

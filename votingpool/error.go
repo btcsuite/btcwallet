@@ -147,6 +147,10 @@ const (
 	// invalid ID.
 	ErrSeriesIDInvalid
 
+	// ErrWithdrawalTxStorage indicates an error when storing withdrawal
+	// transactions.
+	ErrWithdrawalTxStorage
+
 	// lastErr is used for testing, making it possible to iterate over
 	// the error codes in order to check that they all have proper
 	// translations in errorCodeStrings.
@@ -187,6 +191,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrTxSigning:                 "ErrTxSigning",
 	ErrInvalidScriptHash:         "ErrInvalidScriptHash",
 	ErrWithdrawFromUnusedAddr:    "ErrWithdrawFromUnusedAddr",
+	ErrWithdrawalTxStorage:       "ErrWithdrawalTxStorage",
 }
 
 // String returns the ErrorCode as a human-readable name.

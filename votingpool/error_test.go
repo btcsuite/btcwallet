@@ -64,6 +64,7 @@ func TestErrorCodeStringer(t *testing.T) {
 		{vp.ErrTxSigning, "ErrTxSigning"},
 		{vp.ErrInvalidScriptHash, "ErrInvalidScriptHash"},
 		{vp.ErrWithdrawFromUnusedAddr, "ErrWithdrawFromUnusedAddr"},
+		{vp.ErrWithdrawalTxStorage, "ErrWithdrawalTxStorage"},
 		{0xffff, "Unknown ErrorCode (65535)"},
 	}
 
