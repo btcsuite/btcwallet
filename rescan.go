@@ -209,7 +209,6 @@ out:
 			addrs := msg.Addresses
 			noun := pickNoun(len(addrs), "address", "addresses")
 			if msg.WasInitialSync {
-				w.Track()
 				w.ResendUnminedTxs()
 
 				bs := keystore.BlockStamp{
