@@ -390,6 +390,18 @@ func (s *Store) updateBlock(b *Block) error {
 	return err
 }
 
+func (s *Store) putCredits(hash *wire.ShaHash, c []*credit) error {
+	return s.namespace.Update(func(wtx walletdb.Tx) error {
+		return putCredits(wtx, hash, c)
+	})
+}
+
+func (s *Store) putDebits(hash *wire.ShaHash, d *debits) error {
+	return s.namespace.Update(func(wtx walletdb.Tx) error {
+		return putDebits(wtx, hash, d)
+	})
+}
+
 // insertTxRecord inserts the given transaction record into the given block.
 func (s *Store) insertTxRecord(r *txRecord, block *Block) error {
 	log.Infof("Inserting transaction %v from block %d", r.tx.Sha(), block.Height)
@@ -414,17 +426,6 @@ func (s *Store) lookupTxRecord(hash *wire.ShaHash) (*txRecord,
 		return nil, maybeConvertDbError(err)
 	}
 	return record, nil
-}
-
-// updateTxRecord updates the given transaction record in the store.
-func (s *Store) updateTxRecord(r *txRecord) error {
-	if _, err := s.lookupTxRecord(r.tx.Sha()); err != nil {
-		return err
-	}
-	err := s.namespace.Update(func(wtx walletdb.Tx) error {
-		return updateTxRecord(wtx, r)
-	})
-	return err
 }
 
 // insertUnspent inserts the given unspent outpoint and it's corresponding
@@ -707,12 +708,16 @@ func (t *TxRecord) AddDebits() (Debits, error) {
 
 	switch t.BlockHeight {
 	case -1: // unconfirmed
-		if err := t.s.unconfirmed.updateTxRecord(t.txRecord); err != nil {
-			return Debits{}, err
+		if t.txRecord.debits != nil {
+			if err := t.s.unconfirmed.putDebits(t.tx.Sha(), t.debits); err != nil {
+				return Debits{}, err
+			}
 		}
 	default:
-		if err := t.s.updateTxRecord(t.txRecord); err != nil {
-			return Debits{}, err
+		if t.txRecord.debits != nil {
+			if err := t.s.putDebits(t.tx.Sha(), t.debits); err != nil {
+				return Debits{}, err
+			}
 		}
 	}
 
@@ -824,7 +829,7 @@ func (s *Store) markOutputsSpent(spent []Credit, t *TxRecord) (btcutil.Amount, e
 
 			// Increment total debited amount.
 			a += prev.amount()
-			if err := s.updateTxRecord(prev.txRecord); err != nil {
+			if err := s.putCredits(prev.tx.Sha(), prev.credits); err != nil {
 				return 0, err
 			}
 		}
@@ -888,8 +893,10 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 
 	switch t.BlockHeight {
 	case -1: // unconfirmed
-		if err := t.s.unconfirmed.updateTxRecord(t.txRecord); err != nil {
-			return Credit{}, err
+		if t.txRecord.credits != nil {
+			if err := t.s.unconfirmed.putCredits(t.tx.Sha(), t.credits); err != nil {
+				return Credit{}, err
+			}
 		}
 	default:
 		b, err := t.s.lookupBlock(t.BlockHeight)
@@ -911,8 +918,10 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 		if err := t.s.updateBlock(b); err != nil {
 			return Credit{}, err
 		}
-		if err := t.s.updateTxRecord(t.txRecord); err != nil {
-			return Credit{}, err
+		if t.txRecord.credits != nil {
+			if err := t.s.putCredits(t.tx.Sha(), t.credits); err != nil {
+				return Credit{}, err
+			}
 		}
 	}
 	c := Credit{t, index}
@@ -961,9 +970,6 @@ func (s *Store) Rollback(height int32) error {
 
 			r.Tx().SetIndex(btcutil.TxIndexUnknown)
 			if _, err := s.unconfirmed.insertTxRecord(r.Tx()); err != nil {
-				return err
-			}
-			if err := s.unconfirmed.updateTxRecord(r); err != nil {
 				return err
 			}
 

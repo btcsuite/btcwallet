@@ -203,36 +203,6 @@ func serializeBlockRow(row *Block) []byte {
 	return buf
 }
 
-// updateTxRecord updates a tx record in the txrecords bucket
-// It needs to be called when tx record details like credits,
-// debits etc change
-func updateTxRecord(tx walletdb.Tx, t *txRecord) error {
-	bucket := tx.RootBucket().Bucket(txRecordsBucketName)
-
-	// Write the serialized txrecord keyed by the tx hash.
-	serializedRow, err := serializeTxRecordRow(t)
-	if err != nil {
-		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
-		return txStoreError(ErrDatabase, str, err)
-	}
-	err = bucket.Put(t.tx.Sha()[:], serializedRow)
-	if err != nil {
-		str := fmt.Sprintf("failed to update txrecord '%s'", t.tx.Sha())
-		return txStoreError(ErrDatabase, str, err)
-	}
-	if t.debits != nil {
-		if err := putDebits(tx, t.tx.Sha(), t.debits); err != nil {
-			return err
-		}
-	}
-	if t.credits != nil {
-		if err := putCredits(tx, t.tx.Sha(), t.credits); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func serializeDebits(d *debits) []byte {
 	size := 8 + 4 + 12*len(d.spends)
 	buf := make([]byte, size)
@@ -399,7 +369,15 @@ func fetchCredits(tx walletdb.Tx, hash *wire.ShaHash) ([]*credit, error) {
 // It also updates the block tx indexes
 // It needs to be called when a new tx record is inserted
 func putTxRecord(tx walletdb.Tx, b *Block, t *txRecord) error {
-	if err := updateTxRecord(tx, t); err != nil {
+	bucket := tx.RootBucket().Bucket(txRecordsBucketName)
+	// Write the serialized txrecord keyed by the tx hash.
+	serializedRow, err := serializeTxRecordRow(t)
+	if err != nil {
+		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
+		return txStoreError(ErrDatabase, str, err)
+	}
+	err = bucket.Put(t.tx.Sha()[:], serializedRow)
+	if err != nil {
 		str := fmt.Sprintf("failed to update txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
@@ -582,11 +560,6 @@ func updateUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 	if err != nil {
 		str := fmt.Sprintf("failed to store confirmed txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
-	}
-	if t.debits != nil {
-		if err := putDebits(tx, t.tx.Sha(), t.debits); err != nil {
-			return err
-		}
 	}
 	if t.credits != nil {
 		if err := putCredits(tx, t.tx.Sha(), t.credits); err != nil {

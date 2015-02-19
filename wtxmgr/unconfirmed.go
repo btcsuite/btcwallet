@@ -44,6 +44,18 @@ func (u *unconfirmedStore) lookupTxRecord(hash *wire.ShaHash) (*txRecord,
 	return record, nil
 }
 
+func (u *unconfirmedStore) putCredits(hash *wire.ShaHash, c []*credit) error {
+	return u.namespace.Update(func(wtx walletdb.Tx) error {
+		return putCredits(wtx, hash, c)
+	})
+}
+
+func (u *unconfirmedStore) putDebits(hash *wire.ShaHash, d *debits) error {
+	return u.namespace.Update(func(wtx walletdb.Tx) error {
+		return putDebits(wtx, hash, d)
+	})
+}
+
 // insertTxRecord inserts the given unconfirmed transaction record into the
 // unconfirmed store.
 // It also marks the inputs, i.e. previous outpoints spent.
@@ -66,25 +78,6 @@ func (u *unconfirmedStore) insertTxRecord(tx *btcutil.Tx) (*txRecord, error) {
 		}
 	}
 	return r, nil
-}
-
-// updateTxRecord updates the given unconfirmed transaction record in the
-// unconfirmed store.
-// It also marks the inputs, i.e. previous outpoints spent.
-func (u *unconfirmedStore) updateTxRecord(r *txRecord) error {
-	err := u.namespace.Update(func(wtx walletdb.Tx) error {
-		return updateUnconfirmedTxRecord(wtx, r)
-	})
-	if err != nil {
-		return maybeConvertDbError(err)
-	}
-	for _, input := range r.Tx().MsgTx().TxIn {
-		if err := u.setPrevOutPointSpender(&input.PreviousOutPoint,
-			r); err != nil {
-			return maybeConvertDbError(err)
-		}
-	}
-	return nil
 }
 
 // deleteTxRecord deletes the unconfirmed transaction record with the given
