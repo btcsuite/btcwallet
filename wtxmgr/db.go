@@ -393,7 +393,16 @@ func fetchUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord,
 		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
 	}
 
-	return deserializeTxRecordRow(hash[:], val)
+	r, err := deserializeTxRecordRow(hash[:], val)
+	if err != nil {
+		return nil, err
+	}
+	debits, err := fetchDebits(tx, hash)
+	if err != nil {
+		return nil, err
+	}
+	r.debits = debits
+	return r, nil
 }
 
 // fetchAllUnconfirmedTxRecords retrieves all unconfirmed tx records from
@@ -423,6 +432,11 @@ func fetchAllUnconfirmedTxRecords(tx walletdb.Tx) ([]*txRecord, error) {
 		if err != nil {
 			return err
 		}
+		debits, err := fetchDebits(tx, record.tx.Sha())
+		if err != nil {
+			return err
+		}
+		record.debits = debits
 		records[i] = record
 		i++
 		return nil
@@ -463,6 +477,11 @@ func updateUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 	if err != nil {
 		str := fmt.Sprintf("failed to store confirmed txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
+	}
+	if t.debits != nil {
+		if err := putDebits(tx, t.tx.Sha(), t.debits); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -901,6 +920,11 @@ func fetchBlockTxRecords(tx walletdb.Tx, height int32) ([]*txRecord, error) {
 		if err != nil {
 			return err
 		}
+		debits, err := fetchDebits(tx, row.tx.Sha())
+		if err != nil {
+			return err
+		}
+		row.debits = debits
 		records[i] = row
 		i++
 		return nil
@@ -1111,46 +1135,6 @@ func deserializeTxRecordRow(k []byte, serializedTxRecord []byte) (*txRecord,
 	tx.SetIndex(txIndex)
 	txRecord.tx = tx
 
-	// Read identifier for existence of debits.
-	hasDebits, err := byteMarksValidPointer(serializedTxRecord[offset])
-	offset += 1
-	if err != nil {
-		return nil, err
-	}
-
-	// If debits have been set, read them.  Otherwise, set to nil.
-	if hasDebits {
-		// Read debited amount (int64).
-		amount := btcutil.Amount(
-			byteOrder.Uint64(serializedTxRecord[offset : offset+8]))
-		offset += 8
-
-		// Read number of written outputs (as a uint32) this record
-		// debits from.
-		spendsCount := byteOrder.Uint32(serializedTxRecord[offset : offset+4])
-		offset += 4
-
-		// For each expected output key, allocate and read the key,
-		// appending the result to the spends slice.  This slice is
-		// originally set empty (*not* preallocated to spendsCount
-		// size) to prevent accidentally allocating so much memory that
-		// the process dies.
-		spends := make([]BlockOutputKey, spendsCount)
-		for i := uint32(0); i < spendsCount; i++ {
-			k, err := deserializeBlockOutputKeyRow(k,
-				serializedTxRecord[offset:offset+12])
-			if err != nil {
-				return nil, err
-			}
-			offset += 12
-			spends[i] = *k
-		}
-
-		txRecord.debits = &debits{amount, spends}
-	} else {
-		txRecord.debits = nil
-	}
-
 	// Read number of pointers (as a uint32) written to be read into the
 	// credits slice (although some may be nil).
 	creditsCount := byteOrder.Uint32(serializedTxRecord[offset : offset+4])
@@ -1226,11 +1210,6 @@ func serializeTxRecordRow(row *txRecord) ([]byte, error) {
 	size := 4 + 8
 	// variable size
 	size += int(n)
-	if row.debits == nil {
-		size += 1
-	} else {
-		size += 1 + 8 + 4 + 12*len(row.debits.spends)
-	}
 	size += 4
 	for _, c := range row.credits {
 		if c == nil {
@@ -1261,33 +1240,6 @@ func serializeTxRecordRow(row *txRecord) ([]byte, error) {
 	}
 	copy(buf[12:12+n], b.Bytes())
 	offset := n + 12
-
-	// Write debit records, if any.  This begins with a single byte to
-	// identify whether the record contains any debits or not.
-	if row.debits == nil {
-		// Write identifier for nil debits.
-		buf[offset] = nilPointer
-		offset += 1
-	} else {
-		// Write identifier for valid debits.
-		buf[offset] = validPointer
-		offset += 1
-
-		// Write debited amount (int64).
-		byteOrder.PutUint64(buf[offset:offset+8], uint64(row.debits.amount))
-		offset += 8
-
-		// Write number of outputs (as a uint32) this record debits
-		// from.
-		byteOrder.PutUint32(buf[offset:offset+4], uint32(len(row.debits.spends)))
-		offset += 4
-
-		// Write each lookup key for a spent transaction output.
-		for _, k := range row.debits.spends {
-			copy(buf[offset:offset+12], blockOutputKeyToBytes(&k))
-			offset += 12
-		}
-	}
 
 	// Write number of pointers (as a uint32) in the credits slice (although
 	// some may be nil).  Then, for each element in the credits slice, write
