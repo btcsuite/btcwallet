@@ -21,13 +21,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/btcjson/btcws"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/keystore"
 	"github.com/btcsuite/btcwallet/txstore"
-	"github.com/btcsuite/btcws"
 )
 
 // Client represents a persistent client connection to a bitcoin RPC server
