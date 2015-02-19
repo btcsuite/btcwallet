@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
@@ -33,9 +34,8 @@ type RescanProgressMsg struct {
 // RescanFinishedMsg reports the addresses that were rescanned when a
 // rescanfinished message was received rescanning a batch of addresses.
 type RescanFinishedMsg struct {
-	Addresses      []btcutil.Address
-	Notification   *chain.RescanFinished
-	WasInitialSync bool
+	Addresses    []btcutil.Address
+	Notification *chain.RescanFinished
 }
 
 // RescanJob is a job to be processed by the RescanManager.  The job includes
@@ -147,9 +147,8 @@ out:
 					continue
 				}
 				w.rescanFinished <- &RescanFinishedMsg{
-					Addresses:      curBatch.addrs,
-					Notification:   n,
-					WasInitialSync: curBatch.initialSync,
+					Addresses:    curBatch.addrs,
+					Notification: n,
 				}
 
 				curBatch, nextBatch = nextBatch, nil
@@ -200,30 +199,25 @@ out:
 			n := msg.Notification
 			addrs := msg.Addresses
 			noun := pickNoun(len(addrs), "address", "addresses")
-			if msg.WasInitialSync {
-				w.ResendUnminedTxs()
-
-				bs := waddrmgr.BlockStamp{
-					Hash:   *n.Hash,
-					Height: n.Height,
-				}
-				err := w.Manager.SetSyncedTo(&bs)
-				if err != nil {
-					log.Errorf("Failed to update address "+
-						"manager sync state for hash "+
-						"%v (height %d): %v", n.Hash,
-						n.Height, err)
-				}
-				w.notifyConnectedBlock(bs)
-
-				// Mark wallet as synced to chain so connected
-				// and disconnected block notifications are
-				// processed.
-				close(w.chainSynced)
-			}
 			log.Infof("Finished rescan for %d %s (synced to block "+
 				"%s, height %d)", len(addrs), noun, n.Hash,
 				n.Height)
+			bs := waddrmgr.BlockStamp{n.Height, *n.Hash}
+			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+				log.Errorf("Failed to update address manager "+
+					"sync state for hash %v (height %d): %v",
+					n.Hash, n.Height, err)
+			}
+			w.SetChainSynced(true)
+
+			go w.ResendUnminedTxs()
+
+			// TODO(jrick): The current websocket API requires
+			// notifying the block the rescan synced through to
+			// every connected client.  This is code smell and
+			// should be removed or replaced with a more
+			// appropiate notification when the API is redone.
+			w.notifyConnectedBlock(bs)
 
 		case <-w.quit:
 			break out
@@ -254,27 +248,18 @@ func (w *Wallet) rescanRPCHandler() {
 	w.wg.Done()
 }
 
-// RescanActiveAddresses begins a rescan for all active addresses of a wallet.
-// This is intended to be used to sync a wallet back up to the current best
-// block in the main chain, and is considered an initial sync rescan.
-func (w *Wallet) RescanActiveAddresses() error {
-	addrs, err := w.Manager.AllActiveAddresses()
-	if err != nil {
-		return err
-	}
-
-	// in case there are no addresses, we can skip queuing the rescan job
-	if len(addrs) == 0 {
-		close(w.chainSynced)
+// Rescan begins a rescan for all active addresses and unspent outputs of
+// a wallet.  This is intended to be used to sync a wallet back up to the
+// current best block in the main chain, and is considered an initial sync
+// rescan.
+func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []txstore.Credit) error {
+	// Avoid rescan if there is no work to do.
+	if len(addrs) == 0 && len(unspent) == 0 {
 		return nil
 	}
 
-	unspents, err := w.TxStore.UnspentOutputs()
-	if err != nil {
-		return err
-	}
-	outpoints := make([]*wire.OutPoint, len(unspents))
-	for i, output := range unspents {
+	outpoints := make([]*wire.OutPoint, len(unspent))
+	for i, output := range unspent {
 		outpoints[i] = output.OutPoint()
 	}
 

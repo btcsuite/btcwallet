@@ -25,9 +25,22 @@ import (
 )
 
 func (w *Wallet) handleChainNotifications() {
+	sync := func(w *Wallet) {
+		// At the moment there is no recourse if the rescan fails for
+		// some reason, however, the wallet will not be marked synced
+		// and many methods will error early since the wallet is known
+		// to be out of date.
+		err := w.syncWithChain()
+		if err != nil && !w.ShuttingDown() {
+			log.Warnf("Unable to synchronize wallet to chain: %v", err)
+		}
+	}
+
 	for n := range w.chainSvr.Notifications() {
 		var err error
 		switch n := n.(type) {
+		case chain.ClientConnected:
+			go sync(w)
 		case chain.BlockConnected:
 			w.connectBlock(waddrmgr.BlockStamp(n))
 		case chain.BlockDisconnected:
@@ -59,7 +72,7 @@ func (w *Wallet) connectBlock(bs waddrmgr.BlockStamp) {
 	}
 
 	if err := w.Manager.SetSyncedTo(&bs); err != nil {
-		log.Errorf("failed to update address manager sync state in "+
+		log.Errorf("Failed to update address manager sync state in "+
 			"connect block for hash %v (height %d): %v", bs.Hash,
 			bs.Height, err)
 	}
