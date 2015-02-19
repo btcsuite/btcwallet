@@ -290,18 +290,17 @@ type rpcServer struct {
 
 	// Channels read from other components from which notifications are
 	// created.
-	connectedBlocks       <-chan waddrmgr.BlockStamp
-	disconnectedBlocks    <-chan waddrmgr.BlockStamp
-	newCredits            <-chan txstore.Credit
-	newDebits             <-chan txstore.Debits
-	minedCredits          <-chan txstore.Credit
-	minedDebits           <-chan txstore.Debits
-	managerLocked         <-chan bool
-	confirmedBalance      <-chan btcutil.Amount
-	unconfirmedBalance    <-chan btcutil.Amount
-	chainServerConnected  <-chan bool
-	registerWalletNtfns   chan struct{}
-	registerChainSvrNtfns chan struct{}
+	connectedBlocks    <-chan waddrmgr.BlockStamp
+	disconnectedBlocks <-chan waddrmgr.BlockStamp
+	newCredits         <-chan txstore.Credit
+	newDebits          <-chan txstore.Debits
+	minedCredits       <-chan txstore.Credit
+	minedDebits        <-chan txstore.Debits
+	managerLocked      <-chan bool
+	confirmedBalance   <-chan btcutil.Amount
+	unconfirmedBalance <-chan btcutil.Amount
+	//chainServerConnected  <-chan bool
+	registerWalletNtfns chan struct{}
 
 	// enqueueNotification and dequeueNotification handle both sides of an
 	// infinitly growing queue for websocket client notifications.
@@ -336,7 +335,6 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 		registerWSC:             make(chan *websocketClient),
 		unregisterWSC:           make(chan *websocketClient),
 		registerWalletNtfns:     make(chan struct{}),
-		registerChainSvrNtfns:   make(chan struct{}),
 		enqueueNotification:     make(chan wsClientNotification),
 		dequeueNotification:     make(chan wsClientNotification),
 		notificationHandlerQuit: make(chan struct{}),
@@ -565,10 +563,6 @@ func (s *rpcServer) SetWallet(wallet *Wallet) {
 		// With both the wallet and chain server set, all handlers are
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
-
-		// Make sure already connected websocket clients get a notification
-		// if the chain RPC client connection is set and connected.
-		s.chainSvr.NotifyConnected()
 	}
 }
 
@@ -582,7 +576,6 @@ func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
 	defer s.handlerLock.Unlock()
 
 	s.chainSvr = chainSvr
-	s.registerChainSvrNtfns <- struct{}{}
 
 	if s.wallet != nil {
 		// If the wallet had already been set, there's no reason to keep
@@ -941,13 +934,6 @@ func (s *rpcServer) WebsocketClientRPC(wsc *websocketClient) {
 		return
 	}
 
-	// TODO(jrick): this is crappy. kill it.
-	s.handlerLock.Lock()
-	if s.chainSvr != nil {
-		s.chainSvr.NotifyConnected()
-	}
-	s.handlerLock.Unlock()
-
 	// WebsocketClientRead is intentionally not run with the waitgroup
 	// so it is ignored during shutdown.  This is to prevent a hang during
 	// shutdown where the goroutine is blocked on a read of the
@@ -1127,8 +1113,6 @@ out:
 			s.enqueueNotification <- confirmedBalance(n)
 		case n := <-s.unconfirmedBalance:
 			s.enqueueNotification <- unconfirmedBalance(n)
-		case n := <-s.chainServerConnected:
-			s.enqueueNotification <- btcdConnected(n)
 
 		// Registration of all notifications is done by the handler so
 		// it doesn't require another rpcServer mutex.
@@ -1199,24 +1183,6 @@ out:
 			s.confirmedBalance = confirmedBalance
 			s.unconfirmedBalance = unconfirmedBalance
 
-		case <-s.registerChainSvrNtfns:
-			chainServerConnected, err := s.chainSvr.ListenConnected()
-			if err != nil {
-				log.Errorf("Could not register for chain server "+
-					"connection changes: %v", err)
-				continue
-			}
-			s.chainServerConnected = chainServerConnected
-
-			// Make sure already connected websocket clients get a
-			// notification for the current client connection state.
-			//
-			// TODO(jrick): I am appalled by doing this but trying
-			// not to change how notifications work for the moment.
-			// A revamped notification API without this horror will
-			// be implemented soon.
-			go s.chainSvr.NotifyConnected()
-
 		case <-s.quit:
 			break out
 		}
@@ -1237,9 +1203,7 @@ func (s *rpcServer) drainNotifications() {
 		case <-s.minedDebits:
 		case <-s.confirmedBalance:
 		case <-s.unconfirmedBalance:
-		case <-s.chainServerConnected:
 		case <-s.registerWalletNtfns:
-		case <-s.registerChainSvrNtfns:
 		}
 	}
 }

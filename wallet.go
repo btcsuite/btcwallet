@@ -84,9 +84,10 @@ type Wallet struct {
 	Manager *waddrmgr.Manager
 	TxStore *txstore.Store
 
-	chainSvr     *chain.Client
-	chainSvrLock sync.Locker
-	chainSynced  chan struct{} // closed when synced
+	chainSvr        *chain.Client
+	chainSvrLock    sync.Locker
+	chainSvrSynced  bool
+	chainSvrSyncMtx sync.Mutex
 
 	lockedOutpoints map[wire.OutPoint]struct{}
 	FeeIncrement    btcutil.Amount
@@ -131,7 +132,6 @@ func newWallet(mgr *waddrmgr.Manager, txs *txstore.Store) *Wallet {
 		Manager:             mgr,
 		TxStore:             txs,
 		chainSvrLock:        new(sync.Mutex),
-		chainSynced:         make(chan struct{}),
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
 		FeeIncrement:        defaultFeeIncrement,
 		rescanAddJob:        make(chan *RescanJob),
@@ -319,13 +319,6 @@ func (w *Wallet) Start(chainServer *chain.Client) {
 	go w.rescanBatchHandler()
 	go w.rescanProgressHandler()
 	go w.rescanRPCHandler()
-
-	go func() {
-		err := w.syncWithChain()
-		if err != nil && !w.ShuttingDown() {
-			log.Warnf("Unable to synchronize wallet to chain: %v", err)
-		}
-	}()
 }
 
 // Stop signals all wallet goroutines to shutdown.
@@ -366,40 +359,58 @@ func (w *Wallet) WaitForShutdown() {
 // ChainSynced returns whether the wallet has been attached to a chain server
 // and synced up to the best block on the main chain.
 func (w *Wallet) ChainSynced() bool {
-	select {
-	case <-w.chainSynced:
-		return true
-	default:
-		return false
+	w.chainSvrSyncMtx.Lock()
+	synced := w.chainSvrSynced
+	w.chainSvrSyncMtx.Unlock()
+	return synced
+}
+
+// SetChainSynced marks whether the wallet is connected to and currently in sync
+// with the latest block notified by the chain server.
+//
+// NOTE: Due to an API limitation with btcrpcclient, this may return true after
+// the client disconnected (and is attempting a reconnect).  This will be unknown
+// until the reconnect notification is received, at which point the wallet can be
+// marked out of sync again until after the next rescan completes.
+func (w *Wallet) SetChainSynced(synced bool) {
+	w.chainSvrSyncMtx.Lock()
+	w.chainSvrSynced = synced
+	w.chainSvrSyncMtx.Unlock()
+}
+
+// activeData returns the currently-active receiving addresses and all unspent
+// outputs.  This is primarely intended to provide the parameters for a
+// rescan request.
+func (w *Wallet) activeData() ([]btcutil.Address, []txstore.Credit, error) {
+	addrs, err := w.Manager.AllActiveAddresses()
+	if err != nil {
+		return nil, nil, err
 	}
+	unspent, err := w.TxStore.UnspentOutputs()
+	return addrs, unspent, err
 }
 
-// WaitForChainSync blocks until a wallet has been synced with the main chain
-// of an attached chain server.
-func (w *Wallet) WaitForChainSync() {
-	<-w.chainSynced
-}
+// syncWithChain creates a rescan request and blocks until the rescan has
+// finished.
+//
+func (w *Wallet) syncWithChain() error {
+	// TODO: only do this the first time.
+	w.ResendUnminedTxs()
 
-// SyncedChainTip returns the hash and height of the block of the most
-// recently seen block in the main chain.  It returns errors if the
-// wallet has not yet been marked as synched with the chain.
-func (w *Wallet) SyncedChainTip() (*waddrmgr.BlockStamp, error) {
-	select {
-	case <-w.chainSynced:
-		return w.chainSvr.BlockStamp()
-	default:
-		return nil, ErrNotSynced
+	// TODO: only do this the first time, btcrpcclient should resend
+	// this one.
+	// Request notifications for connected and disconnected blocks.
+	err := w.chainSvr.NotifyBlocks()
+	if err != nil {
+		return err
 	}
-}
 
-func (w *Wallet) syncWithChain() (err error) {
-	defer func() {
-		if err == nil {
-			// Request notifications for connected and disconnected
-			// blocks.
-			err = w.chainSvr.NotifyBlocks()
-		}
-	}()
+	// Request notifications for transactions sending to all wallet
+	// addresses.
+	addrs, unspent, err := w.activeData()
+	if err != nil {
+		return err
+	}
 
 	// TODO(jrick): How should this handle a synced height earlier than
 	// the chain server best block?
@@ -411,8 +422,8 @@ func (w *Wallet) syncWithChain() (err error) {
 		bs := iter.BlockStamp()
 		log.Debugf("Checking for previous saved block with height %v hash %v",
 			bs.Height, bs.Hash)
-
-		if _, err := w.chainSvr.GetBlock(&bs.Hash); err != nil {
+		_, err = w.chainSvr.GetBlock(&bs.Hash)
+		if err != nil {
 			continue
 		}
 
@@ -433,7 +444,7 @@ func (w *Wallet) syncWithChain() (err error) {
 		break
 	}
 
-	return w.RescanActiveAddresses()
+	return w.Rescan(addrs, unspent)
 }
 
 type (
