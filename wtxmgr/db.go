@@ -54,6 +54,7 @@ var (
 	txRecordsBucketName   = []byte("txrecords")
 	unconfirmedBucketName = []byte("unconfirmed")
 	debitsBucketName      = []byte("debits")
+	creditsBucketName     = []byte("credits")
 
 	metaBucketName             = []byte("meta")
 	numUnconfirmedRecordsName  = []byte("numunconfirmedrecords")
@@ -224,6 +225,11 @@ func updateTxRecord(tx walletdb.Tx, t *txRecord) error {
 			return err
 		}
 	}
+	if t.credits != nil {
+		if err := putCredits(tx, t.tx.Sha(), t.credits); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -278,6 +284,53 @@ func deserializeDebits(serializedRow []byte) (*debits, error) {
 	return &debits{amount, spends}, nil
 }
 
+func serializeCredit(c *credit) []byte {
+	buf := make([]byte, 1)
+	offset := 0
+
+	// Write a single byte to specify whether this credit
+	// was added as change, plus an extra empty byte which
+	// used to specify whether the credit was locked.  This
+	// extra byte is currently unused and may be used for
+	// other flags in the future.
+	changeByte := falseByte
+	if c.change {
+		changeByte = trueByte
+	}
+	buf[offset] = changeByte
+	offset += 1
+
+	// Write transaction lookup key.
+	if c.spentBy != nil {
+		buf = append(buf, serializeBlockTxKeyRow(c.spentBy)...)
+	}
+	offset += 8
+	return buf
+}
+
+func deserializeCredit(serializedRow []byte) (*credit, error) {
+	offset := 0
+	change, err := byteAsBool(serializedRow[offset])
+	offset += 1
+	if err != nil {
+		return nil, err
+	}
+
+	var spentBy *BlockTxKey
+	if len(serializedRow) > 1 {
+		// If spentBy pointer is valid, allocate and read a
+		// transaction lookup key.
+		spentBy, err = deserializeBlockTxKeyRow(nil,
+			serializedRow[offset:offset+8])
+		if err != nil {
+			return nil, err
+		}
+		offset += 8
+	}
+
+	return &credit{change, spentBy}, nil
+}
+
 func putDebits(tx walletdb.Tx, hash *wire.ShaHash, d *debits) error {
 	bucket := tx.RootBucket().Bucket(debitsBucketName)
 
@@ -298,6 +351,48 @@ func fetchDebits(tx walletdb.Tx, hash *wire.ShaHash) (*debits, error) {
 		return nil, nil
 	}
 	return deserializeDebits(val)
+}
+
+func putCredits(tx walletdb.Tx, hash *wire.ShaHash, creds []*credit) error {
+	bucket, err := tx.RootBucket().Bucket(creditsBucketName).CreateBucketIfNotExists(hash[:])
+	if err != nil {
+		return err
+	}
+
+	for i, c := range creds {
+		serializedRow := serializeCredit(c)
+		err := bucket.Put(uint32ToBytes(uint32(i)), serializedRow)
+		if err != nil {
+			str := fmt.Sprintf("failed to update credits '%s'", hash)
+			return txStoreError(ErrDatabase, str, err)
+		}
+	}
+	return nil
+}
+
+func fetchCredits(tx walletdb.Tx, hash *wire.ShaHash) ([]*credit, error) {
+	bucket := tx.RootBucket().Bucket(creditsBucketName).Bucket(hash[:])
+	if bucket == nil {
+		return nil, nil
+	}
+
+	var creds []*credit
+	err := bucket.ForEach(func(k, v []byte) error {
+		// Skip buckets.
+		if v == nil {
+			return nil
+		}
+		c, err := deserializeCredit(v)
+		if err != nil {
+			return err
+		}
+		creds = append(creds, c)
+		return nil
+	})
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
+	return creds, nil
 }
 
 // putTxRecord inserts a given tx record to the txrecords bucket
@@ -402,6 +497,11 @@ func fetchUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord,
 		return nil, err
 	}
 	r.debits = debits
+	credits, err := fetchCredits(tx, hash)
+	if err != nil {
+		return nil, err
+	}
+	r.credits = credits
 	return r, nil
 }
 
@@ -437,6 +537,11 @@ func fetchAllUnconfirmedTxRecords(tx walletdb.Tx) ([]*txRecord, error) {
 			return err
 		}
 		record.debits = debits
+		credits, err := fetchCredits(tx, record.tx.Sha())
+		if err != nil {
+			return err
+		}
+		record.credits = credits
 		records[i] = record
 		i++
 		return nil
@@ -480,6 +585,11 @@ func updateUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 	}
 	if t.debits != nil {
 		if err := putDebits(tx, t.tx.Sha(), t.debits); err != nil {
+			return err
+		}
+	}
+	if t.credits != nil {
+		if err := putCredits(tx, t.tx.Sha(), t.credits); err != nil {
 			return err
 		}
 	}
@@ -886,6 +996,11 @@ func fetchTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
 		return nil, err
 	}
 	r.debits = debits
+	credits, err := fetchCredits(tx, hash)
+	if err != nil {
+		return nil, err
+	}
+	r.credits = credits
 	return r, nil
 }
 
@@ -925,6 +1040,11 @@ func fetchBlockTxRecords(tx walletdb.Tx, height int32) ([]*txRecord, error) {
 			return err
 		}
 		row.debits = debits
+		credits, err := fetchCredits(tx, row.tx.Sha())
+		if err != nil {
+			return err
+		}
+		row.credits = credits
 		records[i] = row
 		i++
 		return nil
@@ -1135,64 +1255,6 @@ func deserializeTxRecordRow(k []byte, serializedTxRecord []byte) (*txRecord,
 	tx.SetIndex(txIndex)
 	txRecord.tx = tx
 
-	// Read number of pointers (as a uint32) written to be read into the
-	// credits slice (although some may be nil).
-	creditsCount := byteOrder.Uint32(serializedTxRecord[offset : offset+4])
-	offset += 4
-
-	// For each expected credits slice element, check whether the credit
-	// exists or the pointer is nil.  If nil, append nil to credits and
-	// continue with the next.  If non-nil, allocated and read the full
-	// credit structure.  This slice is originally set to nil (*not*
-	// preallocated to creditsCount size) to prevent accidentally allocating
-	// so much memory that the process dies.
-	credits := make([]*credit, creditsCount)
-	for i := uint32(0); i < creditsCount; i++ {
-		// Read identifer for a valid pointer.
-		validCredit, err := byteMarksValidPointer(serializedTxRecord[offset])
-		offset += 1
-		if err != nil {
-			return nil, err
-		}
-
-		if !validCredit {
-			credits[i] = nil
-		} else {
-			// Read single byte that specifies whether this credit
-			// was added as change.
-			change, err := byteAsBool(serializedTxRecord[offset])
-			offset += 1
-			if err != nil {
-				return nil, err
-			}
-
-			// Read identifier for a valid pointer.
-			validSpentBy, err := byteMarksValidPointer(
-				serializedTxRecord[offset])
-			offset += 1
-			if err != nil {
-				return nil, err
-			}
-
-			// If spentBy pointer is valid, allocate and read a
-			// transaction lookup key.
-			var spentBy *BlockTxKey
-			if validSpentBy {
-				spentBy, err = deserializeBlockTxKeyRow(k,
-					serializedTxRecord[offset:offset+8])
-				if err != nil {
-					return nil, err
-				}
-				offset += 8
-			}
-
-			c := &credit{change, spentBy}
-			credits[i] = c
-		}
-
-	}
-	txRecord.credits = credits
-
 	// Read received unix time (int64).
 	received := int64(byteOrder.Uint64(serializedTxRecord[offset : offset+8]))
 	offset += 8
@@ -1210,19 +1272,6 @@ func serializeTxRecordRow(row *txRecord) ([]byte, error) {
 	size := 4 + 8
 	// variable size
 	size += int(n)
-	size += 4
-	for _, c := range row.credits {
-		if c == nil {
-			size += 1
-		} else {
-			size += 1 + 1
-			if c.spentBy == nil {
-				size += 1
-			} else {
-				size += 1 + 12
-			}
-		}
-	}
 	size += 8
 	buf := make([]byte, size)
 
@@ -1240,53 +1289,6 @@ func serializeTxRecordRow(row *txRecord) ([]byte, error) {
 	}
 	copy(buf[12:12+n], b.Bytes())
 	offset := n + 12
-
-	// Write number of pointers (as a uint32) in the credits slice (although
-	// some may be nil).  Then, for each element in the credits slice, write
-	// an identifier whether the element is nil or valid, and if valid,
-	// write the credit structure.
-	byteOrder.PutUint32(buf[offset:offset+4], uint32(len(row.credits)))
-	offset += 4
-	for _, c := range row.credits {
-		if c == nil {
-			// Write identifier for nil credit.
-			buf[offset] = nilPointer
-			offset += 1
-		} else {
-			// Write identifier for valid credit.
-			buf[offset] = validPointer
-			offset += 1
-
-			// Write a single byte to specify whether this credit
-			// was added as change, plus an extra empty byte which
-			// used to specify whether the credit was locked.  This
-			// extra byte is currently unused and may be used for
-			// other flags in the future.
-			changeByte := falseByte
-			if c.change {
-				changeByte = trueByte
-			}
-			buf[offset] = changeByte
-			offset += 1
-
-			// If this credit is unspent, write an identifier for
-			// an invalid pointer.  Otherwise, write the identifier
-			// for a valid pointer and write the spending tx key.
-			if c.spentBy == nil {
-				// Write identifier for an unspent credit.
-				buf[offset] = nilPointer
-				offset += 1
-			} else {
-				// Write identifier for an unspent credit.
-				buf[offset] = validPointer
-				offset += 1
-
-				// Write transaction lookup key.
-				copy(buf[offset:offset+12], serializeBlockTxKeyRow(c.spentBy))
-				offset += 12
-			}
-		}
-	}
 
 	// Write received unix time (int64).
 	byteOrder.PutUint64(buf[offset:offset+8], uint64(row.received.Unix()))
@@ -1410,6 +1412,12 @@ func upgradeManager(namespace walletdb.Namespace) error {
 		_, err = rootBucket.CreateBucketIfNotExists(debitsBucketName)
 		if err != nil {
 			str := "failed to create debits bucket"
+			return txStoreError(ErrDatabase, str, err)
+		}
+
+		_, err = rootBucket.CreateBucketIfNotExists(creditsBucketName)
+		if err != nil {
+			str := "failed to create credits bucket"
 			return txStoreError(ErrDatabase, str, err)
 		}
 
