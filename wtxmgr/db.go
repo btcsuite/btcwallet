@@ -132,6 +132,20 @@ func blockOutputKeyToBytes(key *BlockOutputKey) []byte {
 	return buf
 }
 
+func numCreditsKey(hash *wire.ShaHash) []byte {
+	buf := make([]byte, 36)
+	copy(buf[0:32], hash[:])
+	copy(buf[32:36], []byte("cred"))
+	return buf
+}
+
+func creditKey(hash *wire.ShaHash, i uint32) []byte {
+	buf := make([]byte, 36)
+	copy(buf[0:32], hash[:])
+	byteOrder.PutUint32(buf[32:36], i)
+	return buf
+}
+
 // deserializeOutPoint deserializes the passed serialized outpoint information.
 func deserializeOutPoint(serializedOutPoint []byte) (*wire.OutPoint, error) {
 	// The serialized outpoint format is:
@@ -324,43 +338,45 @@ func fetchDebits(tx walletdb.Tx, hash *wire.ShaHash) (*debits, error) {
 }
 
 func putCredits(tx walletdb.Tx, hash *wire.ShaHash, creds []*credit) error {
-	bucket, err := tx.RootBucket().Bucket(creditsBucketName).CreateBucketIfNotExists(hash[:])
-	if err != nil {
+	bucket := tx.RootBucket().Bucket(creditsBucketName)
+
+	if err := putMeta(tx, numCreditsKey(hash), int32(len(creds))); err != nil {
 		return err
 	}
 
 	for i, c := range creds {
-		serializedRow := serializeCredit(c)
-		err := bucket.Put(uint32ToBytes(uint32(i)), serializedRow)
-		if err != nil {
-			str := fmt.Sprintf("failed to update credits '%s'", hash)
-			return txStoreError(ErrDatabase, str, err)
+		if c != nil {
+			serializedRow := serializeCredit(c)
+			err := bucket.Put(creditKey(hash, uint32(i)), serializedRow)
+			if err != nil {
+				str := fmt.Sprintf("failed to update credits '%s'", hash)
+				return txStoreError(ErrDatabase, str, err)
+			}
 		}
 	}
 	return nil
 }
 
 func fetchCredits(tx walletdb.Tx, hash *wire.ShaHash) ([]*credit, error) {
-	bucket := tx.RootBucket().Bucket(creditsBucketName).Bucket(hash[:])
-	if bucket == nil {
-		return nil, nil
+	bucket := tx.RootBucket().Bucket(creditsBucketName)
+
+	n, err := fetchMeta(tx, numCreditsKey(hash))
+	if err != nil {
+		return nil, err
 	}
 
-	var creds []*credit
-	err := bucket.ForEach(func(k, v []byte) error {
+	creds := make([]*credit, n)
+	for i := 0; i < int(n); i++ {
+		val := bucket.Get(creditKey(hash, uint32(i)))
 		// Skip buckets.
-		if v == nil {
-			return nil
+		if val == nil {
+			continue
 		}
-		c, err := deserializeCredit(v)
+		c, err := deserializeCredit(val)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		creds = append(creds, c)
-		return nil
-	})
-	if err != nil {
-		return nil, maybeConvertDbError(err)
+		creds[i] = c
 	}
 	return creds, nil
 }
