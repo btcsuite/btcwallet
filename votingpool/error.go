@@ -151,6 +151,10 @@ const (
 	// transactions.
 	ErrWithdrawalTxStorage
 
+	// ErrWithdrawalStorage indicates an error occurred when serializing or
+	// deserializing withdrawal information.
+	ErrWithdrawalStorage
+
 	// lastErr is used for testing, making it possible to iterate over
 	// the error codes in order to check that they all have proper
 	// translations in errorCodeStrings.
@@ -192,6 +196,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrInvalidScriptHash:         "ErrInvalidScriptHash",
 	ErrWithdrawFromUnusedAddr:    "ErrWithdrawFromUnusedAddr",
 	ErrWithdrawalTxStorage:       "ErrWithdrawalTxStorage",
+	ErrWithdrawalStorage:         "ErrWithdrawalStorage",
 }
 
 // String returns the ErrorCode as a human-readable name.
