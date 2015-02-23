@@ -421,3 +421,29 @@ func TstNewChangeAddress(t *testing.T, p *Pool, seriesID uint32, idx Index) (add
 func TstConstantFee(fee btcutil.Amount) func(tx *withdrawalTx) btcutil.Amount {
 	return func(tx *withdrawalTx) btcutil.Amount { return fee }
 }
+
+func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32) withdrawalInfo {
+
+	params := pool.Manager().ChainParams()
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
+	requests := []OutputRequest{
+		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, params),
+		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2e6, params),
+	}
+	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	dustThreshold := btcutil.Amount(1e4)
+	startAddr := TstNewWithdrawalAddress(t, pool, seriesID, 1, 0)
+	lastSeriesID := seriesID
+	w := newWithdrawal(roundID, requests, eligible, *changeStart)
+	if err := w.fulfillRequests(); err != nil {
+		t.Fatal(err)
+	}
+	return withdrawalInfo{
+		requests:      requests,
+		startAddress:  *startAddr,
+		changeStart:   *changeStart,
+		lastSeriesID:  lastSeriesID,
+		dustThreshold: dustThreshold,
+		status:        *w.status,
+	}
+}

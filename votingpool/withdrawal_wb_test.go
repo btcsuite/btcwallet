@@ -28,6 +28,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -656,6 +657,122 @@ func TestWithdrawalTxOutputTotal(t *testing.T) {
 
 	if tx.outputTotal() != btcutil.Amount(4) {
 		t.Fatalf("Wrong total output; got %v, want %v", tx.outputTotal(), btcutil.Amount(4))
+	}
+}
+
+func TestWithdrawalInfoMatch(t *testing.T) {
+	tearDown, _, pool := TstCreatePool(t)
+	defer tearDown()
+
+	roundID := uint32(0)
+	wi := createAndFulfillWithdrawalRequests(t, pool, roundID)
+
+	// Use freshly created values for requests, startAddress and changeStart
+	// to simulate what would happen if we had recreated them from the
+	// serialized data in the DB.
+	requestsCopy := make([]OutputRequest, len(wi.requests))
+	copy(requestsCopy, wi.requests)
+	startAddr := TstNewWithdrawalAddress(t, pool, wi.startAddress.seriesID, wi.startAddress.branch,
+		wi.startAddress.index)
+	changeStart := TstNewChangeAddress(t, pool, wi.changeStart.seriesID, wi.changeStart.index)
+
+	// First check that it matches when all fields are identical.
+	matches := wi.match(requestsCopy, *startAddr, wi.lastSeriesID, *changeStart, wi.dustThreshold)
+	if !matches {
+		t.Fatal("Should match when everything is identical.")
+	}
+
+	// It also matches if the OutputRequests are not in the same order.
+	diffOrderRequests := make([]OutputRequest, len(requestsCopy))
+	copy(diffOrderRequests, requestsCopy)
+	diffOrderRequests[0], diffOrderRequests[1] = requestsCopy[1], requestsCopy[0]
+	matches = wi.match(diffOrderRequests, *startAddr, wi.lastSeriesID, *changeStart,
+		wi.dustThreshold)
+	if !matches {
+		t.Fatal("Should match when requests are in different order.")
+	}
+
+	// It should not match when the OutputRequests are not the same.
+	diffRequests := diffOrderRequests
+	diffRequests[0] = OutputRequest{}
+	matches = wi.match(diffRequests, *startAddr, wi.lastSeriesID, *changeStart, wi.dustThreshold)
+	if matches {
+		t.Fatal("Should not match as requests is not equal.")
+	}
+
+	// It should not match when lastSeriesID is not equal.
+	matches = wi.match(requestsCopy, *startAddr, wi.lastSeriesID+1, *changeStart, wi.dustThreshold)
+	if matches {
+		t.Fatal("Should not match as lastSeriesID is not equal.")
+	}
+
+	// It should not match when dustThreshold is not equal.
+	matches = wi.match(requestsCopy, *startAddr, wi.lastSeriesID, *changeStart, wi.dustThreshold+1)
+	if matches {
+		t.Fatal("Should not match as dustThreshold is not equal.")
+	}
+
+	// It should not match when startAddress is not equal.
+	diffStartAddr := TstNewWithdrawalAddress(t, pool, startAddr.seriesID, startAddr.branch+1,
+		startAddr.index)
+	matches = wi.match(requestsCopy, *diffStartAddr, wi.lastSeriesID, *changeStart,
+		wi.dustThreshold)
+	if matches {
+		t.Fatal("Should not match as startAddress is not equal.")
+	}
+
+	// It should not match when changeStart is not equal.
+	diffChangeStart := TstNewChangeAddress(t, pool, changeStart.seriesID, changeStart.index+1)
+	matches = wi.match(requestsCopy, *startAddr, wi.lastSeriesID, *diffChangeStart,
+		wi.dustThreshold)
+	if matches {
+		t.Fatal("Should not match as changeStart is not equal.")
+	}
+}
+
+func TestGetWithdrawalStatus(t *testing.T) {
+	tearDown, _, pool := TstCreatePool(t)
+	defer tearDown()
+
+	roundID := uint32(0)
+	wi := createAndFulfillWithdrawalRequests(t, pool, roundID)
+
+	serialized, err := serializeWithdrawal(wi.requests, wi.startAddress, wi.lastSeriesID,
+		wi.changeStart, wi.dustThreshold, wi.status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = pool.namespace.Update(
+		func(tx walletdb.Tx) error {
+			return putWithdrawal(tx, pool.ID, roundID, serialized)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Here we should get a WithdrawalStatus that matches wi.status.
+	var status *WithdrawalStatus
+	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
+		status, err = getWithdrawalStatus(pool, roundID, wi.requests, wi.startAddress,
+			wi.lastSeriesID, wi.changeStart, wi.dustThreshold)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	TstCheckWithdrawalStatusMatches(t, wi.status, *status)
+
+	// Here we should get a nil WithdrawalStatus because the parameters are not
+	// identical to those of the stored WithdrawalStatus with this roundID.
+	dustThreshold := wi.dustThreshold + 1
+	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
+		status, err = getWithdrawalStatus(pool, roundID, wi.requests, wi.startAddress,
+			wi.lastSeriesID, wi.changeStart, dustThreshold)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != nil {
+		t.Fatalf("Expected a nil status, got %v", status)
 	}
 }
 

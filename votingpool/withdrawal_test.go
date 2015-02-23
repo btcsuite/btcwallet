@@ -96,6 +96,18 @@ func TestStartWithdrawal(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+
+	// Any subsequent StartWithdrawal() calls with the same parameters will
+	// return the previously stored WithdrawalStatus.
+	var status2 *vp.WithdrawalStatus
+	vp.TstRunWithManagerUnlocked(t, mgr, func() {
+		status2, err = pool.StartWithdrawal(0, requests, *startAddr, lastSeriesID, *changeStart,
+			store, currentBlock, dustThreshold)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vp.TstCheckWithdrawalStatusMatches(t, *status, *status2)
 }
 
 func checkWithdrawalOutputs(

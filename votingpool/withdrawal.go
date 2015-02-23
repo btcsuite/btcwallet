@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/fastsha256"
 )
@@ -84,7 +86,7 @@ type WithdrawalOutput struct {
 	outpoints []OutBailmentOutpoint
 }
 
-// OutBailmentOutpoint represents one of the outpoints created to fulfil an OutputRequest.
+// OutBailmentOutpoint represents one of the outpoints created to fulfill an OutputRequest.
 type OutBailmentOutpoint struct {
 	ntxid  Ntxid
 	index  uint32
@@ -108,6 +110,18 @@ type WithdrawalStatus struct {
 	outputs        map[OutBailmentID]*WithdrawalOutput
 	sigs           map[Ntxid]TxSigs
 	transactions   map[Ntxid]changeAwareTx
+}
+
+// withdrawalInfo contains all the details of an existing withdrawal, including
+// the original request parameters and the WithdrawalStatus returned by
+// StartWithdrawal.
+type withdrawalInfo struct {
+	requests      []OutputRequest
+	startAddress  WithdrawalAddress
+	changeStart   ChangeAddress
+	lastSeriesID  uint32
+	dustThreshold btcutil.Amount
+	status        WithdrawalStatus
 }
 
 // TxSigs is list of raw signatures (one for every pubkey in the multi-sig
@@ -443,10 +457,20 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 // signature lists (one for every private key available to this wallet) for each
 // of those transaction's inputs. More details about the actual algorithm can be
 // found at http://opentransactions.org/wiki/index.php/Startwithdrawal
+// This method must be called with the address manager unlocked.
 func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
 	txStore *wtxmgr.Store, chainHeight int32, dustThreshold btcutil.Amount) (
 	*WithdrawalStatus, error) {
+
+	status, err := getWithdrawalStatus(p, roundID, requests, startAddress, lastSeriesID,
+		changeStart, dustThreshold)
+	if err != nil {
+		return nil, err
+	}
+	if status != nil {
+		return status, nil
+	}
 
 	eligible, err := p.getEligibleInputs(txStore, startAddress, lastSeriesID, dustThreshold,
 		chainHeight, eligibleInputMinConfirmations)
@@ -459,6 +483,19 @@ func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 		return nil, err
 	}
 	w.status.sigs, err = getRawSigs(w.transactions)
+	if err != nil {
+		return nil, err
+	}
+
+	serialized, err := serializeWithdrawal(requests, startAddress, lastSeriesID, changeStart,
+		dustThreshold, *w.status)
+	if err != nil {
+		return nil, err
+	}
+	err = p.namespace.Update(
+		func(tx walletdb.Tx) error {
+			return putWithdrawal(tx, p.ID, roundID, serialized)
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -721,6 +758,74 @@ func (s *WithdrawalStatus) updateStatusFor(tx *withdrawalTx) {
 		// that gives us the amount of credits in a given series.
 		// http://opentransactions.org/wiki/index.php/Update_Status
 	}
+}
+
+// match returns true if the given arguments match the fields in this
+// withdrawalInfo. For the requests slice, the order of the items does not
+// matter.
+func (wi *withdrawalInfo) match(requests []OutputRequest, startAddress WithdrawalAddress,
+	lastSeriesID uint32, changeStart ChangeAddress, dustThreshold btcutil.Amount) bool {
+	// Use reflect.DeepEqual to compare changeStart and startAddress as they're
+	// structs that contain pointers and we want to compare their content and
+	// not their address.
+	if !reflect.DeepEqual(changeStart, wi.changeStart) {
+		log.Debugf("withdrawal changeStart does not match: %v != %v", changeStart, wi.changeStart)
+		return false
+	}
+	if !reflect.DeepEqual(startAddress, wi.startAddress) {
+		log.Debugf("withdrawal startAddr does not match: %v != %v", startAddress, wi.startAddress)
+		return false
+	}
+	if lastSeriesID != wi.lastSeriesID {
+		log.Debugf("withdrawal lastSeriesID does not match: %v != %v", lastSeriesID,
+			wi.lastSeriesID)
+		return false
+	}
+	if dustThreshold != wi.dustThreshold {
+		log.Debugf("withdrawal dustThreshold does not match: %v != %v", dustThreshold,
+			wi.dustThreshold)
+		return false
+	}
+	r1 := make([]OutputRequest, len(requests))
+	copy(r1, requests)
+	r2 := make([]OutputRequest, len(wi.requests))
+	copy(r2, wi.requests)
+	sort.Sort(byOutBailmentID(r1))
+	sort.Sort(byOutBailmentID(r2))
+	if !reflect.DeepEqual(r1, r2) {
+		log.Debugf("withdrawal requests does not match: %v != %v", requests, wi.requests)
+		return false
+	}
+	return true
+}
+
+// getWithdrawalStatus returns the existing WithdrawalStatus for the given
+// withdrawal parameters, if one exists. This function must be called with the
+// address manager unlocked.
+func getWithdrawalStatus(p *Pool, roundID uint32, requests []OutputRequest,
+	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
+	dustThreshold btcutil.Amount) (*WithdrawalStatus, error) {
+
+	var serialized []byte
+	err := p.namespace.View(
+		func(tx walletdb.Tx) error {
+			serialized = getWithdrawal(tx, p.ID, roundID)
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(serialized, []byte{}) {
+		return nil, nil
+	}
+	wInfo, err := deserializeWithdrawal(p, serialized)
+	if err != nil {
+		return nil, err
+	}
+	if wInfo.match(requests, startAddress, lastSeriesID, changeStart, dustThreshold) {
+		return &wInfo.status, nil
+	}
+	return nil, nil
 }
 
 // getRawSigs iterates over the inputs of each transaction given, constructing the
