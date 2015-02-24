@@ -1147,31 +1147,6 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 	return locked
 }
 
-// Track requests btcd to send notifications of new transactions for
-// each address stored in a wallet.
-func (w *Wallet) Track() {
-	// Request notifications for transactions sending to all wallet
-	// addresses.
-	//
-	// TODO: return as slice? (doesn't have to be ordered)
-	addrs, err := w.Manager.AllActiveAddresses()
-	if err != nil {
-		log.Error("Unable to acquire list of active addresses: %v", err)
-		return
-	}
-
-	if err := w.chainSvr.NotifyReceived(addrs); err != nil {
-		log.Error("Unable to request transaction updates for address.")
-	}
-
-	unspent, err := w.TxStore.UnspentOutputs()
-	if err != nil {
-		log.Errorf("Unable to access unspent outputs: %v", err)
-		return
-	}
-	w.ReqSpentUtxoNtfns(unspent)
-}
-
 // ResendUnminedTxs iterates through all transactions that spend from wallet
 // credits that are not known to have been mined into a block, and attempts
 // to send each to the chain server for relay.
@@ -1248,23 +1223,6 @@ func (w *Wallet) NewChangeAddress() (btcutil.Address, error) {
 	}
 
 	return utilAddrs[0], nil
-}
-
-// ReqSpentUtxoNtfns sends a message to btcd to request updates for when
-// a stored UTXO has been spent.
-func (w *Wallet) ReqSpentUtxoNtfns(credits []txstore.Credit) {
-	ops := make([]*wire.OutPoint, len(credits))
-	for i, c := range credits {
-		op := c.OutPoint()
-		log.Debugf("Requesting spent UTXO notifications for Outpoint "+
-			"hash %s index %d", op.Hash, op.Index)
-		ops[i] = op
-	}
-
-	if err := w.chainSvr.NotifySpent(ops); err != nil {
-		log.Errorf("Cannot request notifications for spent outputs: %v",
-			err)
-	}
 }
 
 // TotalReceived iterates through a wallet's transaction history, returning the
