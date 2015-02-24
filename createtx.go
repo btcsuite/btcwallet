@@ -416,7 +416,7 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Ma
 }
 
 func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
-	flags := txscript.ScriptCanonicalSignatures | txscript.ScriptStrictMultiSig
+	flags := txscript.ScriptVerifyDERSignatures | txscript.ScriptStrictMultiSig
 	bip16 := time.Now().After(txscript.Bip16Activation)
 	if bip16 {
 		flags |= txscript.ScriptBip16
