@@ -64,13 +64,11 @@ var (
 	debitsBucketName      = []byte("debits")
 	creditsBucketName     = []byte("credits")
 
-	metaBucketName             = []byte("meta")
-	numUnconfirmedRecordsName  = []byte("numunconfirmedrecords")
-	numUnconfirmedSpendsName   = []byte("numunconfirmedspends")
-	numConfirmedSpendsName     = []byte("numconfirmedspends")
-	numSpentBlockOutPointsName = []byte("numspentblockoutpoints")
-	numBlockTxRecordsName      = []byte("numtxrecords")
-	numBlocksName              = []byte("numblocks")
+	metaBucketName            = []byte("meta")
+	numUnconfirmedRecordsName = []byte("numunconfirmedrecords")
+	numUnconfirmedSpendsName  = []byte("numunconfirmedspends")
+	numConfirmedSpendsName    = []byte("numconfirmedspends")
+	numBlocksName             = []byte("numblocks")
 
 	// blockTxIdx indexes transactions mined in a block and maps the block
 	// height to the list of hashes of the transactions
@@ -110,10 +108,21 @@ func uint32ToBytes(number uint32) []byte {
 	return buf
 }
 
+// numCreditsKey returns the key in the meta bucket used to store number of credits
+// associated with the given tx hash
 func numCreditsKey(hash *wire.ShaHash) []byte {
 	buf := make([]byte, 36)
 	copy(buf[0:32], hash[:])
 	copy(buf[32:36], []byte("cred"))
+	return buf
+}
+
+// numBlockTxRecordsKey returns the key in the meta bucket used to store number
+// of tx records in the given block height
+func numBlockTxRecordsKey(height uint32) []byte {
+	buf := make([]byte, 8)
+	byteOrder.PutUint32(buf, height)
+	copy(buf[4:8], []byte("txrs"))
 	return buf
 }
 
@@ -536,11 +545,11 @@ func putTxRecord(tx walletdb.Tx, b *Block, t *txRecord) error {
 		str := fmt.Sprintf("failed to update txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
-	n, err := fetchNumBlockTxRecords(tx, b.Height)
+	n, err := fetchMeta(tx, numBlockTxRecordsKey(uint32(b.Height)))
 	if err != nil {
 		return err
 	}
-	if err := putNumBlockTxRecords(tx, b.Height, n+1); err != nil {
+	if err := putMeta(tx, numBlockTxRecordsKey(uint32(b.Height)), n+1); err != nil {
 		return err
 	}
 	return updateBlockTxIdx(tx, b, t.tx)
@@ -574,38 +583,6 @@ func fetchMeta(tx walletdb.Tx, key []byte) (int32, error) {
 	}
 
 	return int32(byteOrder.Uint32(val)), nil
-}
-
-// putNumBlockTxRecords stores the no. of tx in the given block height
-func putNumBlockTxRecords(tx walletdb.Tx, height int32, n uint32) error {
-	bucket, err := tx.RootBucket().Bucket(metaBucketName).
-		CreateBucketIfNotExists(uint32ToBytes(uint32(height)))
-	if err != nil {
-		return err
-	}
-	err = bucket.Put(numBlockTxRecordsName, uint32ToBytes(n))
-	if err != nil {
-		str := fmt.Sprintf("failed to store meta key '%s'", numBlockTxRecordsName)
-		return txStoreError(ErrDatabase, str, err)
-	}
-	return nil
-}
-
-// fetchNumBlockTxRecords fetch the no. of tx in the given block height
-func fetchNumBlockTxRecords(tx walletdb.Tx, height int32) (uint32, error) {
-	bucket := tx.RootBucket().Bucket(metaBucketName).
-		Bucket(uint32ToBytes(uint32(height)))
-
-	if bucket == nil {
-		return 0, nil
-	}
-	val := bucket.Get(numBlockTxRecordsName)
-	if val == nil {
-		str := fmt.Sprintf("meta key not found %s", numBlockTxRecordsName)
-		return 0, txStoreError(ErrDatabase, str, nil)
-	}
-
-	return byteOrder.Uint32(val), nil
 }
 
 // fetchUnconfirmedTxRecord retrieves a unconfirmed tx record from
@@ -1061,7 +1038,7 @@ func deleteBlock(tx walletdb.Tx, height int32) error {
 		return txStoreError(ErrDatabase, str, err)
 	}
 	// Update block metadata i.e. no. of tx in block and no. of blocks
-	if err := putNumBlockTxRecords(tx, height, 0); err != nil {
+	if err := putMeta(tx, numBlockTxRecordsKey(uint32(height)), 0); err != nil {
 		return err
 	}
 	n, err := fetchMeta(tx, numBlocksName)
@@ -1133,7 +1110,7 @@ func fetchBlockTxRecords(tx walletdb.Tx, height int32) ([]*txRecord, error) {
 		return nil, nil
 	}
 
-	n, err := fetchNumBlockTxRecords(tx, height)
+	n, err := fetchMeta(tx, numBlockTxRecordsKey(uint32(height)))
 	if err != nil {
 		return nil, err
 	}
