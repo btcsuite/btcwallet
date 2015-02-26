@@ -271,9 +271,15 @@ func (s *Store) updateBlock(b *Block) error {
 	return err
 }
 
-func (s *Store) putCredits(hash *wire.ShaHash, c []*credit) error {
+func (s *Store) putCredit(hash *wire.ShaHash, c *credit) error {
 	return s.namespace.Update(func(wtx walletdb.Tx) error {
-		return putCredits(wtx, hash, c)
+		return putCredit(wtx, hash, c)
+	})
+}
+
+func (s *Store) updateCredit(hash *wire.ShaHash, i uint32, c *credit) error {
+	return s.namespace.Update(func(wtx walletdb.Tx) error {
+		return updateCredit(wtx, hash, i, c)
 	})
 }
 
@@ -710,7 +716,7 @@ func (s *Store) markOutputsSpent(spent []Credit, t *TxRecord) (btcutil.Amount, e
 
 			// Increment total debited amount.
 			a += prev.amount()
-			if err := s.putCredits(prev.tx.Sha(), prev.credits); err != nil {
+			if err := s.updateCredit(prev.tx.Sha(), prev.OutputIndex, credit); err != nil {
 				return 0, err
 			}
 		}
@@ -776,10 +782,8 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 
 	switch t.BlockHeight {
 	case -1: // unconfirmed
-		if t.txRecord.credits != nil {
-			if err := t.s.unconfirmed.putCredits(t.tx.Sha(), t.credits); err != nil {
-				return Credit{}, err
-			}
+		if err := t.s.unconfirmed.putCredit(t.tx.Sha(), &credit{change: change}); err != nil {
+			return Credit{}, err
 		}
 	default:
 		b, err := t.s.lookupBlock(t.BlockHeight)
@@ -801,10 +805,8 @@ func (t *TxRecord) AddCredit(index uint32, change bool) (Credit, error) {
 		if err := t.s.updateBlock(b); err != nil {
 			return Credit{}, err
 		}
-		if t.txRecord.credits != nil {
-			if err := t.s.putCredits(t.tx.Sha(), t.credits); err != nil {
-				return Credit{}, err
-			}
+		if err := t.s.putCredit(t.tx.Sha(), &credit{change: change}); err != nil {
+			return Credit{}, err
 		}
 	}
 	c := Credit{t, index}

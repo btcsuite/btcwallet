@@ -44,9 +44,9 @@ func (u *unconfirmedStore) lookupTxRecord(hash *wire.ShaHash) (*txRecord,
 	return record, nil
 }
 
-func (u *unconfirmedStore) putCredits(hash *wire.ShaHash, c []*credit) error {
+func (u *unconfirmedStore) putCredit(hash *wire.ShaHash, c *credit) error {
 	return u.namespace.Update(func(wtx walletdb.Tx) error {
-		return putCredits(wtx, hash, c)
+		return putCredit(wtx, hash, c)
 	})
 }
 

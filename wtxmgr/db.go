@@ -370,22 +370,25 @@ func fetchDebits(tx walletdb.Tx, hash *wire.ShaHash) (*debits, error) {
 	return deserializeDebits(val)
 }
 
-func putCredits(tx walletdb.Tx, hash *wire.ShaHash, creds []*credit) error {
-	bucket := tx.RootBucket().Bucket(creditsBucketName)
-
-	if err := putMeta(tx, numCreditsKey(hash), int32(len(creds))); err != nil {
+func putCredit(tx walletdb.Tx, hash *wire.ShaHash, c *credit) error {
+	n, err := fetchMeta(tx, numCreditsKey(hash))
+	if err != nil {
 		return err
 	}
+	if err := putMeta(tx, numCreditsKey(hash), n+1); err != nil {
+		return err
+	}
+	return updateCredit(tx, hash, uint32(n), c)
+}
 
-	for i, c := range creds {
-		if c != nil {
-			serializedRow := serializeCredit(c)
-			err := bucket.Put(creditKey(hash, uint32(i)), serializedRow)
-			if err != nil {
-				str := fmt.Sprintf("failed to update credits '%s'", hash)
-				return txStoreError(ErrDatabase, str, err)
-			}
-		}
+func updateCredit(tx walletdb.Tx, hash *wire.ShaHash, i uint32, c *credit) error {
+	bucket := tx.RootBucket().Bucket(creditsBucketName)
+
+	serializedRow := serializeCredit(c)
+	err := bucket.Put(creditKey(hash, i), serializedRow)
+	if err != nil {
+		str := fmt.Sprintf("failed to update credits '%s'", hash)
+		return txStoreError(ErrDatabase, str, err)
 	}
 	return nil
 }
@@ -582,6 +585,9 @@ func fetchAllUnconfirmedTxRecords(tx walletdb.Tx) ([]*txRecord, error) {
 // putUnconfirmedTxRecord inserts an unconfirmed tx record to the unconfirmed
 // bucket
 func putUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(txRecordsBucketName)
+
 	n, err := fetchMeta(tx, numUnconfirmedRecordsName)
 	if err != nil {
 		return err
@@ -590,14 +596,6 @@ func putUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 		str := fmt.Sprintf("failed to store meta key '%s'", numUnconfirmedRecordsName)
 		return txStoreError(ErrDatabase, str, err)
 	}
-	return updateUnconfirmedTxRecord(tx, t)
-}
-
-// updateUnconfirmedTxRecord updates a unconfirmed tx record in the unconfirmed
-// txrecords bucket
-func updateUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(txRecordsBucketName)
 
 	// Write the serialized txrecord keyed by the tx hash.
 	serializedRow, err := serializeTxRecordRow(t)
@@ -609,11 +607,6 @@ func updateUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 	if err != nil {
 		str := fmt.Sprintf("failed to store confirmed txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
-	}
-	if t.credits != nil {
-		if err := putCredits(tx, t.tx.Sha(), t.credits); err != nil {
-			return err
-		}
 	}
 	return nil
 }
