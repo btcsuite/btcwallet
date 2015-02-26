@@ -18,6 +18,8 @@ package wtxmgr
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -27,10 +29,41 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
+var byteOrder = binary.LittleEndian
+
 const (
 	// LatestTxStoreVersion is the most recent tx store version.
 	LatestTxStoreVersion = 1
+
+	nilPointer byte = iota
+	validPointer
+
+	falseByte byte = iota
+	trueByte
 )
+
+func byteMarksValidPointer(b byte) (bool, error) {
+	switch b {
+	case nilPointer:
+		return false, nil
+	case validPointer:
+		return true, nil
+	default:
+		s := "invalid byte representation of valid pointer"
+		return false, errors.New(s)
+	}
+}
+
+func byteAsBool(b byte) (bool, error) {
+	switch b {
+	case falseByte:
+		return false, nil
+	case trueByte:
+		return true, nil
+	default:
+		return false, errors.New("invalid byte representation of bool")
+	}
+}
 
 // maybeConvertDbError converts the passed error to a TxStoreError with an
 // error code of ErrDatabase if it is not already a TxStoreError.  This is
