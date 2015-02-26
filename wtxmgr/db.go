@@ -110,15 +110,6 @@ func uint32ToBytes(number uint32) []byte {
 	return buf
 }
 
-// outPointToBytes converts a wire.OutPoint into a 36-byte slice
-// It is serialized by the hash followed by the uint32 index
-func outPointToBytes(op *wire.OutPoint) []byte {
-	buf := make([]byte, 36)
-	copy(buf[0:32], op.Hash[:])
-	byteOrder.PutUint32(buf[32:36], op.Index)
-	return buf
-}
-
 // blockTxKeyToBytes converts a BlockTxKey into a 8-byte slice
 // It is serialized as the uint32 block height followed by the
 // uint32 block index
@@ -154,61 +145,38 @@ func creditKey(hash *wire.ShaHash, i uint32) []byte {
 	return buf
 }
 
+// serializeOutPoint converts a wire.OutPoint into a 36-byte slice
+// It is serialized by the hash followed by the uint32 index
+// The serialized outpoint format is:
+//   <hash><index>
+//
+//   32 bytes hash length + 4 bytes index
+func serializeOutPoint(op *wire.OutPoint) []byte {
+	buf := make([]byte, 36)
+	copy(buf[0:32], op.Hash[:])
+	byteOrder.PutUint32(buf[32:36], op.Index)
+	return buf
+}
+
 // deserializeOutPoint deserializes the passed serialized outpoint information.
-func deserializeOutPoint(serializedOutPoint []byte) (*wire.OutPoint, error) {
-	// The serialized outpoint format is:
-	//   <hash><index>
-	//
-	//   32 bytes hash length + 4 bytes index
+func deserializeOutPoint(serializedOutPoint []byte, op *wire.OutPoint) error {
 	if len(serializedOutPoint) < 36 {
 		str := fmt.Sprintf("malformed serialized outpoint for key %x",
 			serializedOutPoint)
-		return nil, txStoreError(ErrDatabase, str, nil)
+		return txStoreError(ErrDatabase, str, nil)
 	}
-	row := new(wire.OutPoint)
-	copy(row.Hash[:], serializedOutPoint[0:32])
-	row.Index = byteOrder.Uint32(serializedOutPoint[32:36])
-	return row, nil
-}
-
-// deserializeOutPoint deserializes the passed serialized block information.
-func deserializeBlockRow(k []byte, serializedBlock []byte) (*Block, error) {
-	// The serialized block format is:
-	//   <blockhash><blocktime><blockheight><spendable><reward>
-	//
-	//   32 bytes hash length + 8 bytes timestamp + 4 bytes block height +
-	//   8 bytes spendable amount + 8 bytes reward amount
-	if len(serializedBlock) < 60 {
-		str := fmt.Sprintf("malformed serialized block for key %x",
-			k)
-		return nil, txStoreError(ErrDatabase, str, nil)
-	}
-
-	row := new(Block)
-
-	// Read block hash, unix time (int64), and height (int32).
-	copy(row.Hash[:], serializedBlock[0:32])
-	row.Time = time.Unix(int64(byteOrder.Uint64(serializedBlock[32:40])), 0)
-	row.Height = int32(byteOrder.Uint32(serializedBlock[40:44]))
-
-	// Read amount deltas as a result of transactions in this block.  This
-	// is the net total spendable balance as a result of transaction debits
-	// and credits, and the block reward (not immediately spendable) for
-	// coinbase outputs.  Both are int64s.
-	spendable := btcutil.Amount(int64(byteOrder.Uint64(serializedBlock[44:52])))
-	reward := btcutil.Amount(int64(byteOrder.Uint64(serializedBlock[52:60])))
-	row.amountDeltas.Spendable = spendable
-	row.amountDeltas.Reward = reward
-	return row, nil
+	copy(op.Hash[:], serializedOutPoint[0:32])
+	op.Index = byteOrder.Uint32(serializedOutPoint[32:36])
+	return nil
 }
 
 // serializeBlockRow returns the serialization of the passed block row.
+// The serialized block format is:
+//   <blockhash><blocktime><blockheight><spendable><reward>
+//
+//   32 bytes hash length + 8 bytes timestamp + 4 bytes block height +
+//   8 bytes spendable amount + 8 bytes reward amount
 func serializeBlockRow(row *Block) []byte {
-	// The serialized block format is:
-	//   <blockhash><blocktime><blockheight><spendable><reward>
-	//
-	//   32 bytes hash length + 8 bytes timestamp + 4 bytes block height +
-	//   8 bytes spendable amount + 8 bytes reward amount
 	buf := make([]byte, 60)
 
 	// Write block hash, unix time (int64), and height (int32).
@@ -225,6 +193,38 @@ func serializeBlockRow(row *Block) []byte {
 	return buf
 }
 
+// deserializeBlockRow deserializes the passed serialized block information.
+func deserializeBlockRow(k []byte, serializedBlock []byte, block *Block) error {
+	if len(serializedBlock) < 60 {
+		str := fmt.Sprintf("malformed serialized block for key %x",
+			k)
+		return txStoreError(ErrDatabase, str, nil)
+	}
+
+	// Read block hash, unix time (int64), and height (int32).
+	copy(block.Hash[:], serializedBlock[0:32])
+	block.Time = time.Unix(int64(byteOrder.Uint64(serializedBlock[32:40])), 0)
+	block.Height = int32(byteOrder.Uint32(serializedBlock[40:44]))
+
+	// Read amount deltas as a result of transactions in this block.  This
+	// is the net total spendable balance as a result of transaction debits
+	// and credits, and the block reward (not immediately spendable) for
+	// coinbase outputs.  Both are int64s.
+	spendable := btcutil.Amount(int64(byteOrder.Uint64(serializedBlock[44:52])))
+	reward := btcutil.Amount(int64(byteOrder.Uint64(serializedBlock[52:60])))
+	block.amountDeltas.Spendable = spendable
+	block.amountDeltas.Reward = reward
+	return nil
+}
+
+// serializeDebits returns the serialization of the passed debits information.
+// The serialized debits format is:
+//   <amount><numspends><spends>
+
+// where each spend is further serialized as a blockOutputKey i.e.:
+//   <blockindex><blockheight><outputindex> which is 12 bytes
+
+//   8 bytes amount + 4 bytes spends lenght + numspends * 12 bytes per spend
 func serializeDebits(d *debits) []byte {
 	size := 8 + 4 + 12*len(d.spends)
 	buf := make([]byte, size)
@@ -247,6 +247,7 @@ func serializeDebits(d *debits) []byte {
 	return buf
 }
 
+// deserializeDebits deserializes the passed debits information.
 func deserializeDebits(serializedRow []byte) (*debits, error) {
 	offset := 0
 	amount := btcutil.Amount(byteOrder.Uint64(serializedRow[offset : offset+8]))
@@ -276,6 +277,14 @@ func deserializeDebits(serializedRow []byte) (*debits, error) {
 	return &debits{amount, spends}, nil
 }
 
+// serializeCredit returns the serialization of the passed credit information.
+// The serialized credits format is:
+//   <change><spender>
+//
+// where spender is an optional blockTxKey:
+//   <blockindex><blockheight> which is 8 bytes
+//
+//   1 byte change + (optional) 8 bytes spender
 func serializeCredit(c *credit) []byte {
 	buf := make([]byte, 1)
 	offset := 0
@@ -299,6 +308,7 @@ func serializeCredit(c *credit) []byte {
 	return buf
 }
 
+// deserializeCredit deserializes the passed credit information.
 func deserializeCredit(serializedRow []byte) (*credit, error) {
 	offset := 0
 	change := byteAsBool(serializedRow[offset])
@@ -612,7 +622,7 @@ func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	}
 	bucket = tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointKeyIdxBucketName)
-	if err := bucket.Delete(outPointToBytes(op)); err != nil {
+	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
 		str := fmt.Sprintf("failed to delete outpoint spender '%s, %d'", op.Hash,
 			op.Index)
 		return txStoreError(ErrDatabase, str, err)
@@ -631,7 +641,7 @@ func setPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(prevOutPointIdxBucketName)
 
-	if err := bucket.Put(outPointToBytes(op),
+	if err := bucket.Put(serializeOutPoint(op),
 		t.tx.Sha()[:]); err != nil {
 		str := fmt.Sprintf("failed to store previous outpoint '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
@@ -646,7 +656,7 @@ func fetchPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) (*txRecord,
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(prevOutPointIdxBucketName)
 
-	key := outPointToBytes(op)
+	key := serializeOutPoint(op)
 	val := bucket.Get(key)
 	hash, err := wire.NewShaHash(val)
 	if err != nil {
@@ -659,7 +669,7 @@ func fetchPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) (*txRecord,
 func deletePrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(prevOutPointIdxBucketName)
-	if err := bucket.Delete(outPointToBytes(op)); err != nil {
+	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
 		str := fmt.Sprintf("failed to prev outpoint spender '%s, %d'", op.Hash,
 			op.Index)
 		return txStoreError(ErrDatabase, str, err)
@@ -689,7 +699,7 @@ func fetchSpentBlockOutPointKey(tx walletdb.Tx, op *wire.OutPoint) (
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointKeyIdxBucketName)
 
-	key := outPointToBytes(op)
+	key := serializeOutPoint(op)
 	val := bucket.Get(key)
 	return deserializeBlockOutputKeyRow(key, val)
 }
@@ -701,7 +711,7 @@ func setUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentUnconfirmedIdxBucketName)
 
-	err := bucket.Put(outPointToBytes(op), t.tx.Sha()[:])
+	err := bucket.Put(serializeOutPoint(op), t.tx.Sha()[:])
 	if err != nil {
 		str := fmt.Sprintf("failed to store spent unconfirmed tx '%s'",
 			t.tx.Sha())
@@ -762,7 +772,7 @@ func deleteUnconfirmedOutPointSpender(tx walletdb.Tx,
 	op *wire.OutPoint) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentUnconfirmedIdxBucketName)
-	if err := bucket.Delete(outPointToBytes(op)); err != nil {
+	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
 		str := fmt.Sprintf("failed to delete unconfirmed outpoint '%s'", op)
 		return txStoreError(ErrDatabase, str, err)
 	}
@@ -864,7 +874,7 @@ func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 
 	bucket = tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointKeyIdxBucketName)
-	err = bucket.Put(outPointToBytes(op), blockOutputKeyToBytes(key))
+	err = bucket.Put(serializeOutPoint(op), blockOutputKeyToBytes(key))
 	if err != nil {
 		str := fmt.Sprintf("failed to store spent block outpoint key '%d'",
 			key.BlockHeight)
@@ -1084,11 +1094,11 @@ func fetchUnspentOutpoints(tx walletdb.Tx) (map[*wire.OutPoint]*BlockTxKey,
 		if err != nil {
 			return err
 		}
-		op, err := deserializeOutPoint(k)
-		if err != nil {
+		var op wire.OutPoint
+		if err := deserializeOutPoint(k, &op); err != nil {
 			return err
 		}
-		outpoints[op] = row
+		outpoints[&op] = row
 		return nil
 	})
 	if err != nil {
@@ -1101,7 +1111,7 @@ func fetchUnspentOutpoints(tx walletdb.Tx) (map[*wire.OutPoint]*BlockTxKey,
 func fetchUnspent(tx walletdb.Tx, op *wire.OutPoint) (*BlockTxKey, error) {
 	bucket := tx.RootBucket().Bucket(unspentBucketName)
 
-	key := outPointToBytes(op)
+	key := serializeOutPoint(op)
 	val := bucket.Get(key)
 	if val == nil {
 		str := fmt.Sprintf("block tx key for outpoint '%s' not found", op)
@@ -1117,7 +1127,7 @@ func putUnspent(tx walletdb.Tx, op *wire.OutPoint, k *BlockTxKey) error {
 
 	// Write the serialized block tx key keyed by outpoint
 	serializedRow := serializeBlockTxKeyRow(k)
-	err := bucket.Put(outPointToBytes(op), serializedRow)
+	err := bucket.Put(serializeOutPoint(op), serializedRow)
 	if err != nil {
 		str := fmt.Sprintf("failed to store unspent record '%s'", op.Hash)
 		return txStoreError(ErrDatabase, str, err)
@@ -1129,7 +1139,7 @@ func putUnspent(tx walletdb.Tx, op *wire.OutPoint, k *BlockTxKey) error {
 func deleteUnspent(tx walletdb.Tx, op *wire.OutPoint) error {
 	bucket := tx.RootBucket().Bucket(unspentBucketName)
 
-	err := bucket.Delete(outPointToBytes(op))
+	err := bucket.Delete(serializeOutPoint(op))
 	if err != nil {
 		str := fmt.Sprintf("failed to delete unspent key '%s'", op.Hash)
 		return txStoreError(ErrDatabase, str, err)
@@ -1149,7 +1159,9 @@ func fetchBlockByHeight(tx walletdb.Tx, height int32) (*Block, error) {
 		return nil, txStoreError(ErrBlockNotFound, str, nil)
 	}
 
-	return deserializeBlockRow(key, val)
+	var block Block
+	err := deserializeBlockRow(key, val, &block)
+	return &block, err
 }
 
 // fetchAllBlocks returns all the blocks in the blocks bucket
@@ -1171,11 +1183,12 @@ func fetchAllBlocks(tx walletdb.Tx) ([]*Block, error) {
 			return txStoreError(ErrDatabase, str, nil)
 		}
 
-		block, err := deserializeBlockRow(k, v)
+		var block Block
+		err := deserializeBlockRow(k, v, &block)
 		if err != nil {
 			return err
 		}
-		blocks[i] = block
+		blocks[i] = &block
 		i++
 		return nil
 	})
@@ -1199,11 +1212,12 @@ func fetchBlocks(tx walletdb.Tx, height int32) ([]*Block, error) {
 		}
 		h := int32(byteOrder.Uint32(k))
 		if h >= height {
-			row, err := deserializeBlockRow(k, v)
+			var block Block
+			err := deserializeBlockRow(k, v, &block)
 			if err != nil {
 				return err
 			}
-			blocks = append(blocks, row)
+			blocks = append(blocks, &block)
 		}
 		return nil
 	})
