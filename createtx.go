@@ -415,14 +415,10 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, store *keystore.
 }
 
 func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
-	flags := txscript.ScriptVerifyDERSignatures | txscript.ScriptStrictMultiSig
-	bip16 := time.Now().After(txscript.Bip16Activation)
-	if bip16 {
-		flags |= txscript.ScriptBip16
-	}
 	for i, txin := range msgtx.TxIn {
 		engine, err := txscript.NewScript(
-			txin.SignatureScript, prevOutputs[i].TxOut().PkScript, i, msgtx, flags)
+			txin.SignatureScript, prevOutputs[i].TxOut().PkScript,
+			i, msgtx, txscript.StandardVerifyFlags)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
