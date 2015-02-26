@@ -19,7 +19,6 @@ package wtxmgr
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -34,35 +33,11 @@ var byteOrder = binary.LittleEndian
 const (
 	// LatestTxStoreVersion is the most recent tx store version.
 	LatestTxStoreVersion = 1
-
-	nilPointer byte = iota
-	validPointer
-
-	falseByte byte = iota
-	trueByte
 )
 
-func byteMarksValidPointer(b byte) (bool, error) {
-	switch b {
-	case nilPointer:
-		return false, nil
-	case validPointer:
-		return true, nil
-	default:
-		s := "invalid byte representation of valid pointer"
-		return false, errors.New(s)
-	}
-}
-
-func byteAsBool(b byte) (bool, error) {
-	switch b {
-	case falseByte:
-		return false, nil
-	case trueByte:
-		return true, nil
-	default:
-		return false, errors.New("invalid byte representation of bool")
-	}
+// byteAsBool returns a bool based on the serialized byte
+func byteAsBool(b byte) bool {
+	return b != 0
 }
 
 // maybeConvertDbError converts the passed error to a TxStoreError with an
@@ -310,11 +285,10 @@ func serializeCredit(c *credit) []byte {
 	// used to specify whether the credit was locked.  This
 	// extra byte is currently unused and may be used for
 	// other flags in the future.
-	changeByte := falseByte
+	buf[offset] = 0
 	if c.change {
-		changeByte = trueByte
+		buf[offset] = 1
 	}
-	buf[offset] = changeByte
 	offset += 1
 
 	// Write transaction lookup key.
@@ -327,13 +301,11 @@ func serializeCredit(c *credit) []byte {
 
 func deserializeCredit(serializedRow []byte) (*credit, error) {
 	offset := 0
-	change, err := byteAsBool(serializedRow[offset])
+	change := byteAsBool(serializedRow[offset])
 	offset += 1
-	if err != nil {
-		return nil, err
-	}
 
 	var spentBy *BlockTxKey
+	var err error
 	if len(serializedRow) > 1 {
 		// If spentBy pointer is valid, allocate and read a
 		// transaction lookup key.
