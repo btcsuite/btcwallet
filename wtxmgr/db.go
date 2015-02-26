@@ -110,27 +110,6 @@ func uint32ToBytes(number uint32) []byte {
 	return buf
 }
 
-// blockTxKeyToBytes converts a BlockTxKey into a 8-byte slice
-// It is serialized as the uint32 block height followed by the
-// uint32 block index
-func blockTxKeyToBytes(b *BlockTxKey) []byte {
-	buf := make([]byte, 8)
-	byteOrder.PutUint32(buf[0:4], uint32(b.BlockHeight))
-	byteOrder.PutUint32(buf[4:8], uint32(b.BlockIndex))
-	return buf
-}
-
-// blockOutputKeyToBytes converts a BlockOutputKey into a 12-byte slice
-// It is serialized as the uint32 block index followed by the
-// uint32 block height and uint32 output index
-func blockOutputKeyToBytes(key *BlockOutputKey) []byte {
-	buf := make([]byte, 12)
-	byteOrder.PutUint32(buf[0:4], uint32(key.BlockIndex))
-	byteOrder.PutUint32(buf[4:8], uint32(key.BlockHeight))
-	byteOrder.PutUint32(buf[8:12], uint32(key.OutputIndex))
-	return buf
-}
-
 func numCreditsKey(hash *wire.ShaHash) []byte {
 	buf := make([]byte, 36)
 	copy(buf[0:32], hash[:])
@@ -241,7 +220,7 @@ func serializeDebits(d *debits) []byte {
 
 	// Write each lookup key for a spent transaction output.
 	for _, k := range d.spends {
-		copy(buf[offset:offset+12], blockOutputKeyToBytes(&k))
+		copy(buf[offset:offset+12], serializeBlockOutputKey(&k))
 		offset += 12
 	}
 	return buf
@@ -302,7 +281,7 @@ func serializeCredit(c *credit) []byte {
 
 	// Write transaction lookup key.
 	if c.spentBy != nil {
-		buf = append(buf, serializeBlockTxKeyRow(c.spentBy)...)
+		buf = append(buf, serializeBlockTxKey(c.spentBy)...)
 	}
 	offset += 8
 	return buf
@@ -328,6 +307,148 @@ func deserializeCredit(serializedRow []byte) (*credit, error) {
 	}
 
 	return &credit{change, spentBy}, nil
+}
+
+// serializeTxRecordRow returns the serialization of the passed txrecord row.
+func serializeTxRecordRow(row *txRecord) ([]byte, error) {
+	msgTx := row.tx.MsgTx()
+	n := int64(msgTx.SerializeSize())
+
+	// fixed size
+	size := 4 + 8
+	// variable size
+	size += int(n)
+	size += 8
+	buf := make([]byte, size)
+
+	// Write transaction index (as a uint32).
+	byteOrder.PutUint32(buf[0:4], uint32(row.tx.Index()))
+
+	// Write msgTx size (as a uint64).
+	byteOrder.PutUint64(buf[4:12], uint64(n))
+
+	// Serialize and write transaction.
+	var b bytes.Buffer
+	err := msgTx.Serialize(&b)
+	if err != nil {
+		return nil, err
+	}
+	copy(buf[12:12+n], b.Bytes())
+	offset := n + 12
+
+	// Write received unix time (int64).
+	byteOrder.PutUint64(buf[offset:offset+8], uint64(row.received.Unix()))
+	offset += 8
+	return buf, nil
+}
+
+// deserializeTxRecordRow deserializes the passed serialized tx record
+// information.
+func deserializeTxRecordRow(k []byte, serializedTxRecord []byte) (*txRecord,
+	error) {
+	txRecord := new(txRecord)
+
+	// Read transaction index (as a uint32).
+	txIndex := int(byteOrder.Uint32(serializedTxRecord[0:4]))
+
+	// Read MsgTx size (as a uint64).
+	msgTxLen := int(byteOrder.Uint64(serializedTxRecord[4:12]))
+	buf := bytes.NewBuffer(serializedTxRecord[12 : 12+msgTxLen])
+
+	// Deserialize transaction.
+	msgTx := new(wire.MsgTx)
+	err := msgTx.Deserialize(buf)
+	if err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, err
+	}
+
+	offset := msgTxLen + 12
+	// Create and save the btcutil.Tx of the read MsgTx and set its index.
+	tx := btcutil.NewTx((*wire.MsgTx)(msgTx))
+	tx.SetIndex(txIndex)
+	txRecord.tx = tx
+
+	// Read received unix time (int64).
+	received := int64(byteOrder.Uint64(serializedTxRecord[offset : offset+8]))
+	offset += 8
+	txRecord.received = time.Unix(received, 0)
+
+	return txRecord, nil
+}
+
+// serializeBlockTxKey returns the serialization of the passed block tx key.
+func serializeBlockTxKey(row *BlockTxKey) []byte {
+	buf := make([]byte, 8)
+
+	// Write block index (as a uint32).
+	byteOrder.PutUint32(buf[0:4], uint32(row.BlockIndex))
+	// Write block height (int32).
+	byteOrder.PutUint32(buf[4:8], uint32(row.BlockHeight))
+	return buf
+}
+
+// deserializeBlockTxKeyRow deserializes the passed serialized block tx key
+// information.
+func deserializeBlockTxKeyRow(k []byte, serializedBlockTxKey []byte) (
+	*BlockTxKey, error) {
+	// The serialized block tx key format is:
+	//   <blockindex><blockheight>
+	//
+	//   4 bytes block index + 4 bytes block height
+	if len(serializedBlockTxKey) < 8 {
+		str := fmt.Sprintf("malformed serialized block tx key for key %x",
+			k)
+		return nil, txStoreError(ErrDatabase, str, nil)
+	}
+
+	blockTxKey := new(BlockTxKey)
+
+	// Read block index (as a uint32).
+	blockTxKey.BlockIndex = int(byteOrder.Uint32(serializedBlockTxKey[0:4]))
+	// Read block height (int32).
+	blockTxKey.BlockHeight = int32(byteOrder.Uint32(serializedBlockTxKey[4:8]))
+	return blockTxKey, nil
+}
+
+// serializeBlockOutputKey converts a BlockOutputKey into a 12-byte slice
+// It is serialized as the uint32 block index followed by the
+// uint32 block height and uint32 output index
+func serializeBlockOutputKey(key *BlockOutputKey) []byte {
+	buf := make([]byte, 12)
+	byteOrder.PutUint32(buf[0:4], uint32(key.BlockIndex))
+	byteOrder.PutUint32(buf[4:8], uint32(key.BlockHeight))
+	byteOrder.PutUint32(buf[8:12], uint32(key.OutputIndex))
+	return buf
+}
+
+// deserializeBlockOutputKeyRow deserializes the passed serialized block output
+// key information.
+func deserializeBlockOutputKeyRow(k []byte, serializedBlockOutputKey []byte) (
+	*BlockOutputKey, error) {
+	// The serialized block output key format is:
+	//   <blocktxkey><outputindex>
+	//
+	//   8 bytes block tx key + 4 bytes output index
+	if len(serializedBlockOutputKey) < 12 {
+		str := fmt.Sprintf("malformed serialized block output key for key %x",
+			k)
+		return nil, txStoreError(ErrDatabase, str, nil)
+	}
+
+	blockOutputKey := new(BlockOutputKey)
+	// Read embedded BlockTxKey.
+	blockTxKey, err := deserializeBlockTxKeyRow(k, serializedBlockOutputKey[0:8])
+	if err != nil {
+		return nil, err
+	}
+	blockOutputKey.BlockTxKey = *blockTxKey
+
+	// Read output index (uint32).
+	blockOutputKey.OutputIndex = byteOrder.Uint32(serializedBlockOutputKey[8:12])
+	return blockOutputKey, nil
 }
 
 func putDebits(tx walletdb.Tx, hash *wire.ShaHash, d *debits) error {
@@ -615,7 +736,7 @@ func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	key *BlockOutputKey) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
-	if err := bucket.Delete(blockOutputKeyToBytes(key)); err != nil {
+	if err := bucket.Delete(serializeBlockOutputKey(key)); err != nil {
 		str := fmt.Sprintf("failed to delete output key spender '(%d, %d), %d'",
 			key.BlockIndex, key.BlockHeight, key.OutputIndex)
 		return txStoreError(ErrDatabase, str, err)
@@ -684,7 +805,7 @@ func fetchBlockOutPointSpender(tx walletdb.Tx, key *BlockOutputKey) (*txRecord,
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
 
-	val := bucket.Get(blockOutputKeyToBytes(key))
+	val := bucket.Get(serializeBlockOutputKey(key))
 	hash, err := wire.NewShaHash(val)
 	if err != nil {
 		return nil, err
@@ -865,7 +986,7 @@ func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 	key *BlockOutputKey, t *txRecord) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
-	err := bucket.Put(blockOutputKeyToBytes(key), t.tx.Sha()[:])
+	err := bucket.Put(serializeBlockOutputKey(key), t.tx.Sha()[:])
 	if err != nil {
 		str := fmt.Sprintf("failed to store spent block outpoint index '%s'",
 			t.tx.Sha())
@@ -874,7 +995,7 @@ func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 
 	bucket = tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointKeyIdxBucketName)
-	err = bucket.Put(serializeOutPoint(op), blockOutputKeyToBytes(key))
+	err = bucket.Put(serializeOutPoint(op), serializeBlockOutputKey(key))
 	if err != nil {
 		str := fmt.Sprintf("failed to store spent block outpoint key '%d'",
 			key.BlockHeight)
@@ -912,7 +1033,7 @@ func updateBlockTxIdx(tx walletdb.Tx, b *Block, t *btcutil.Tx) error {
 	blockTxKey.BlockHeight = b.Height
 	blockTxKey.BlockIndex = t.Index()
 
-	if err = bucket.Put(blockTxKeyToBytes(blockTxKey),
+	if err = bucket.Put(serializeBlockTxKey(blockTxKey),
 		t.Sha()[:]); err != nil {
 		str := fmt.Sprintf("failed to store block index key '%s'", t.Sha())
 		return txStoreError(ErrDatabase, str, err)
@@ -963,7 +1084,7 @@ func fetchTxHashFromBlockTxKey(tx walletdb.Tx, key *BlockTxKey) (
 		return nil, txStoreError(ErrTxHashNotFound, str, nil)
 	}
 
-	val := bucket.Get(blockTxKeyToBytes(key))
+	val := bucket.Get(serializeBlockTxKey(key))
 	if val == nil {
 		str := fmt.Sprintf("missing tx hash for block tx key '%d, %d'",
 			key.BlockHeight, key.BlockIndex)
@@ -1126,7 +1247,7 @@ func putUnspent(tx walletdb.Tx, op *wire.OutPoint, k *BlockTxKey) error {
 	bucket := tx.RootBucket().Bucket(unspentBucketName)
 
 	// Write the serialized block tx key keyed by outpoint
-	serializedRow := serializeBlockTxKeyRow(k)
+	serializedRow := serializeBlockTxKey(k)
 	err := bucket.Put(serializeOutPoint(op), serializedRow)
 	if err != nil {
 		str := fmt.Sprintf("failed to store unspent record '%s'", op.Hash)
@@ -1225,137 +1346,6 @@ func fetchBlocks(tx walletdb.Tx, height int32) ([]*Block, error) {
 		return blocks, maybeConvertDbError(err)
 	}
 	return blocks, nil
-}
-
-// deserializeTxRecordRow deserializes the passed serialized tx record
-// information.
-func deserializeTxRecordRow(k []byte, serializedTxRecord []byte) (*txRecord,
-	error) {
-	txRecord := new(txRecord)
-
-	// Read transaction index (as a uint32).
-	txIndex := int(byteOrder.Uint32(serializedTxRecord[0:4]))
-
-	// Read MsgTx size (as a uint64).
-	msgTxLen := int(byteOrder.Uint64(serializedTxRecord[4:12]))
-	buf := bytes.NewBuffer(serializedTxRecord[12 : 12+msgTxLen])
-
-	// Deserialize transaction.
-	msgTx := new(wire.MsgTx)
-	err := msgTx.Deserialize(buf)
-	if err != nil {
-		if err == io.EOF {
-			err = io.ErrUnexpectedEOF
-		}
-		return nil, err
-	}
-
-	offset := msgTxLen + 12
-	// Create and save the btcutil.Tx of the read MsgTx and set its index.
-	tx := btcutil.NewTx((*wire.MsgTx)(msgTx))
-	tx.SetIndex(txIndex)
-	txRecord.tx = tx
-
-	// Read received unix time (int64).
-	received := int64(byteOrder.Uint64(serializedTxRecord[offset : offset+8]))
-	offset += 8
-	txRecord.received = time.Unix(received, 0)
-
-	return txRecord, nil
-}
-
-// serializeTxRecordRow returns the serialization of the passed txrecord row.
-func serializeTxRecordRow(row *txRecord) ([]byte, error) {
-	msgTx := row.tx.MsgTx()
-	n := int64(msgTx.SerializeSize())
-
-	// fixed size
-	size := 4 + 8
-	// variable size
-	size += int(n)
-	size += 8
-	buf := make([]byte, size)
-
-	// Write transaction index (as a uint32).
-	byteOrder.PutUint32(buf[0:4], uint32(row.tx.Index()))
-
-	// Write msgTx size (as a uint64).
-	byteOrder.PutUint64(buf[4:12], uint64(n))
-
-	// Serialize and write transaction.
-	var b bytes.Buffer
-	err := msgTx.Serialize(&b)
-	if err != nil {
-		return nil, err
-	}
-	copy(buf[12:12+n], b.Bytes())
-	offset := n + 12
-
-	// Write received unix time (int64).
-	byteOrder.PutUint64(buf[offset:offset+8], uint64(row.received.Unix()))
-	offset += 8
-	return buf, nil
-}
-
-// serializeBlockTxKeyRow returns the serialization of the passed block tx key.
-func serializeBlockTxKeyRow(row *BlockTxKey) []byte {
-	buf := make([]byte, 8)
-
-	// Write block index (as a uint32).
-	byteOrder.PutUint32(buf[0:4], uint32(row.BlockIndex))
-	// Write block height (int32).
-	byteOrder.PutUint32(buf[4:8], uint32(row.BlockHeight))
-	return buf
-}
-
-// deserializeBlockTxKeyRow deserializes the passed serialized block tx key
-// information.
-func deserializeBlockTxKeyRow(k []byte, serializedBlockTxKey []byte) (
-	*BlockTxKey, error) {
-	// The serialized block tx key format is:
-	//   <blockindex><blockheight>
-	//
-	//   4 bytes block index + 4 bytes block height
-	if len(serializedBlockTxKey) < 8 {
-		str := fmt.Sprintf("malformed serialized block tx key for key %x",
-			k)
-		return nil, txStoreError(ErrDatabase, str, nil)
-	}
-
-	blockTxKey := new(BlockTxKey)
-
-	// Read block index (as a uint32).
-	blockTxKey.BlockIndex = int(byteOrder.Uint32(serializedBlockTxKey[0:4]))
-	// Read block height (int32).
-	blockTxKey.BlockHeight = int32(byteOrder.Uint32(serializedBlockTxKey[4:8]))
-	return blockTxKey, nil
-}
-
-// deserializeBlockOutputKeyRow deserializes the passed serialized block output
-// key information.
-func deserializeBlockOutputKeyRow(k []byte, serializedBlockOutputKey []byte) (
-	*BlockOutputKey, error) {
-	// The serialized block output key format is:
-	//   <blocktxkey><outputindex>
-	//
-	//   8 bytes block tx key + 4 bytes output index
-	if len(serializedBlockOutputKey) < 12 {
-		str := fmt.Sprintf("malformed serialized block output key for key %x",
-			k)
-		return nil, txStoreError(ErrDatabase, str, nil)
-	}
-
-	blockOutputKey := new(BlockOutputKey)
-	// Read embedded BlockTxKey.
-	blockTxKey, err := deserializeBlockTxKeyRow(k, serializedBlockOutputKey[0:8])
-	if err != nil {
-		return nil, err
-	}
-	blockOutputKey.BlockTxKey = *blockTxKey
-
-	// Read output index (uint32).
-	blockOutputKey.OutputIndex = byteOrder.Uint32(serializedBlockOutputKey[8:12])
-	return blockOutputKey, nil
 }
 
 // upgradeManager opens the tx store using the specified namespace or creates
