@@ -274,7 +274,11 @@ func deserializeDebits(serializedRow []byte) (*debits, error) {
 //
 //   1 byte change + (optional) 8 bytes spender
 func serializeCredit(c *credit) []byte {
-	buf := make([]byte, 1)
+	size := 1
+	if c.spentBy != nil {
+		size += 8
+	}
+	buf := make([]byte, size)
 	offset := 0
 
 	// Write a single byte to specify whether this credit
@@ -290,9 +294,8 @@ func serializeCredit(c *credit) []byte {
 
 	// Write transaction lookup key.
 	if c.spentBy != nil {
-		buf = append(buf, serializeBlockTxKey(c.spentBy)...)
+		copy(buf[offset:offset+8], serializeBlockTxKey(c.spentBy))
 	}
-	offset += 8
 	return buf
 }
 
