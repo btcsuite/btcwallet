@@ -151,8 +151,7 @@ func serializeOutPoint(op *wire.OutPoint) []byte {
 // deserializeOutPoint deserializes the passed serialized outpoint information.
 func deserializeOutPoint(serializedOutPoint []byte, op *wire.OutPoint) error {
 	if len(serializedOutPoint) < 36 {
-		str := fmt.Sprintf("malformed serialized outpoint for key %x",
-			serializedOutPoint)
+		str := "malformed serialized outpoint"
 		return txStoreError(ErrDatabase, str, nil)
 	}
 	copy(op.Hash[:], serializedOutPoint[0:32])
@@ -186,8 +185,7 @@ func serializeBlock(row *Block) []byte {
 // deserializeBlock deserializes the passed serialized block information.
 func deserializeBlock(k []byte, serializedBlock []byte, block *Block) error {
 	if len(serializedBlock) < 60 {
-		str := fmt.Sprintf("malformed serialized block for key %x",
-			k)
+		str := fmt.Sprintf("malformed serialized block for key %s", k)
 		return txStoreError(ErrDatabase, str, nil)
 	}
 
@@ -406,8 +404,7 @@ func deserializeBlockTxKeyRow(k []byte, serializedBlockTxKey []byte) (*BlockTxKe
 	//
 	//   4 bytes block index + 4 bytes block height
 	if len(serializedBlockTxKey) < 8 {
-		str := fmt.Sprintf("malformed serialized block tx key for key %x",
-			k)
+		str := fmt.Sprintf("malformed serialized block tx key for key %s", k)
 		return nil, txStoreError(ErrDatabase, str, nil)
 	}
 
@@ -439,8 +436,7 @@ func deserializeBlockOutputKeyRow(k []byte, serializedBlockOutputKey []byte) (*B
 	//
 	//   8 bytes block tx key + 4 bytes output index
 	if len(serializedBlockOutputKey) < 12 {
-		str := fmt.Sprintf("malformed serialized block output key for key %x",
-			k)
+		str := fmt.Sprintf("malformed serialized block output key for key %s", k)
 		return nil, txStoreError(ErrDatabase, str, nil)
 	}
 
