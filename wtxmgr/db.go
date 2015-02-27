@@ -126,6 +126,8 @@ func numBlockTxRecordsKey(height uint32) []byte {
 	return buf
 }
 
+// creditKey returns the key in the credits bucket used to store credits
+// associated with the given tx hash
 func creditKey(hash *wire.ShaHash, i uint32) []byte {
 	buf := make([]byte, 36)
 	copy(buf[0:32], hash[:])
@@ -158,13 +160,13 @@ func deserializeOutPoint(serializedOutPoint []byte, op *wire.OutPoint) error {
 	return nil
 }
 
-// serializeBlockRow returns the serialization of the passed block row.
+// serializeBlock returns the serialization of the passed block row.
 // The serialized block format is:
 //   <blockhash><blocktime><blockheight><spendable><reward>
 //
 //   32 bytes hash length + 8 bytes timestamp + 4 bytes block height +
 //   8 bytes spendable amount + 8 bytes reward amount
-func serializeBlockRow(row *Block) []byte {
+func serializeBlock(row *Block) []byte {
 	buf := make([]byte, 60)
 
 	// Write block hash, unix time (int64), and height (int32).
@@ -181,8 +183,8 @@ func serializeBlockRow(row *Block) []byte {
 	return buf
 }
 
-// deserializeBlockRow deserializes the passed serialized block information.
-func deserializeBlockRow(k []byte, serializedBlock []byte, block *Block) error {
+// deserializeBlock deserializes the passed serialized block information.
+func deserializeBlock(k []byte, serializedBlock []byte, block *Block) error {
 	if len(serializedBlock) < 60 {
 		str := fmt.Sprintf("malformed serialized block for key %x",
 			k)
@@ -318,8 +320,8 @@ func deserializeCredit(serializedRow []byte) (*credit, error) {
 	return &credit{change, spentBy}, nil
 }
 
-// serializeTxRecordRow returns the serialization of the passed txrecord row.
-func serializeTxRecordRow(row *txRecord) ([]byte, error) {
+// serializeTxRecord returns the serialization of the passed txrecord row.
+func serializeTxRecord(row *txRecord) ([]byte, error) {
 	msgTx := row.tx.MsgTx()
 	n := int64(msgTx.SerializeSize())
 
@@ -351,12 +353,9 @@ func serializeTxRecordRow(row *txRecord) ([]byte, error) {
 	return buf, nil
 }
 
-// deserializeTxRecordRow deserializes the passed serialized tx record
+// deserializeTxRecord deserializes the passed serialized tx record
 // information.
-func deserializeTxRecordRow(k []byte, serializedTxRecord []byte) (*txRecord,
-	error) {
-	txRecord := new(txRecord)
-
+func deserializeTxRecord(k []byte, serializedTxRecord []byte, r *txRecord) error {
 	// Read transaction index (as a uint32).
 	txIndex := int(byteOrder.Uint32(serializedTxRecord[0:4]))
 
@@ -371,21 +370,21 @@ func deserializeTxRecordRow(k []byte, serializedTxRecord []byte) (*txRecord,
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
-		return nil, err
+		return err
 	}
 
 	offset := msgTxLen + 12
 	// Create and save the btcutil.Tx of the read MsgTx and set its index.
 	tx := btcutil.NewTx((*wire.MsgTx)(msgTx))
 	tx.SetIndex(txIndex)
-	txRecord.tx = tx
+	r.tx = tx
 
 	// Read received unix time (int64).
 	received := int64(byteOrder.Uint64(serializedTxRecord[offset : offset+8]))
 	offset += 8
-	txRecord.received = time.Unix(received, 0)
+	r.received = time.Unix(received, 0)
 
-	return txRecord, nil
+	return nil
 }
 
 // serializeBlockTxKey returns the serialization of the passed block tx key.
@@ -401,8 +400,7 @@ func serializeBlockTxKey(row *BlockTxKey) []byte {
 
 // deserializeBlockTxKeyRow deserializes the passed serialized block tx key
 // information.
-func deserializeBlockTxKeyRow(k []byte, serializedBlockTxKey []byte) (
-	*BlockTxKey, error) {
+func deserializeBlockTxKeyRow(k []byte, serializedBlockTxKey []byte) (*BlockTxKey, error) {
 	// The serialized block tx key format is:
 	//   <blockindex><blockheight>
 	//
@@ -435,8 +433,7 @@ func serializeBlockOutputKey(key *BlockOutputKey) []byte {
 
 // deserializeBlockOutputKeyRow deserializes the passed serialized block output
 // key information.
-func deserializeBlockOutputKeyRow(k []byte, serializedBlockOutputKey []byte) (
-	*BlockOutputKey, error) {
+func deserializeBlockOutputKeyRow(k []byte, serializedBlockOutputKey []byte) (*BlockOutputKey, error) {
 	// The serialized block output key format is:
 	//   <blocktxkey><outputindex>
 	//
@@ -535,7 +532,7 @@ func fetchCredits(tx walletdb.Tx, hash *wire.ShaHash) ([]*credit, error) {
 func putTxRecord(tx walletdb.Tx, b *Block, t *txRecord) error {
 	bucket := tx.RootBucket().Bucket(txRecordsBucketName)
 	// Write the serialized txrecord keyed by the tx hash.
-	serializedRow, err := serializeTxRecordRow(t)
+	serializedRow, err := serializeTxRecord(t)
 	if err != nil {
 		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
@@ -587,8 +584,7 @@ func fetchMeta(tx walletdb.Tx, key []byte) (int32, error) {
 
 // fetchUnconfirmedTxRecord retrieves a unconfirmed tx record from
 // the unconfirmed bucket based on the tx sha hash
-func fetchUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord,
-	error) {
+func fetchUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(txRecordsBucketName)
 
@@ -598,7 +594,8 @@ func fetchUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord,
 		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
 	}
 
-	r, err := deserializeTxRecordRow(hash[:], val)
+	var r txRecord
+	err := deserializeTxRecord(hash[:], val, &r)
 	if err != nil {
 		return nil, err
 	}
@@ -612,7 +609,7 @@ func fetchUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord,
 		return nil, err
 	}
 	r.credits = credits
-	return r, nil
+	return &r, nil
 }
 
 // fetchAllUnconfirmedTxRecords retrieves all unconfirmed tx records from
@@ -638,21 +635,22 @@ func fetchAllUnconfirmedTxRecords(tx walletdb.Tx) ([]*txRecord, error) {
 			str := "inconsistent unconfirmed tx records data stored in database"
 			return txStoreError(ErrDatabase, str, nil)
 		}
-		record, err := deserializeTxRecordRow(k, v)
+		var r txRecord
+		err := deserializeTxRecord(k, v, &r)
 		if err != nil {
 			return err
 		}
-		debits, err := fetchDebits(tx, record.tx.Sha())
+		debits, err := fetchDebits(tx, r.tx.Sha())
 		if err != nil {
 			return err
 		}
-		record.debits = debits
-		credits, err := fetchCredits(tx, record.tx.Sha())
+		r.debits = debits
+		credits, err := fetchCredits(tx, r.tx.Sha())
 		if err != nil {
 			return err
 		}
-		record.credits = credits
-		records[i] = record
+		r.credits = credits
+		records[i] = &r
 		i++
 		return nil
 	})
@@ -678,7 +676,7 @@ func putUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
 	}
 
 	// Write the serialized txrecord keyed by the tx hash.
-	serializedRow, err := serializeTxRecordRow(t)
+	serializedRow, err := serializeTxRecord(t)
 	if err != nil {
 		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
@@ -709,8 +707,7 @@ func deleteUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) error {
 
 // deleteBlockOutPointSpender deletes a block output key from the
 // spentblockoutpointidx bucket
-func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
-	key *BlockOutputKey) error {
+func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, key *BlockOutputKey) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
 	if err := bucket.Delete(serializeBlockOutputKey(key)); err != nil {
@@ -734,8 +731,7 @@ func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 
 // setPrevOutPointSpender updates previous outpoints index in the
 // prevoutpointidx bucket
-func setPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
-	t *txRecord) error {
+func setPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, t *txRecord) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(prevOutPointIdxBucketName)
 
@@ -749,8 +745,7 @@ func setPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
 
 // fetchPrevOutPointSpender retrieves a tx record from the prevoutpointidx
 // bucket which spends the given outpoint
-func fetchPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) (*txRecord,
-	error) {
+func fetchPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) (*txRecord, error) {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(prevOutPointIdxBucketName)
 
@@ -777,8 +772,7 @@ func deletePrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) error {
 
 // fetchBlockOutPointSpender retrieves a tx record from the
 // spentblockoutpointidx bucket which spends the given block output key
-func fetchBlockOutPointSpender(tx walletdb.Tx, key *BlockOutputKey) (*txRecord,
-	error) {
+func fetchBlockOutPointSpender(tx walletdb.Tx, key *BlockOutputKey) (*txRecord, error) {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
 
@@ -792,8 +786,7 @@ func fetchBlockOutPointSpender(tx walletdb.Tx, key *BlockOutputKey) (*txRecord,
 
 // fetchSpentBlockOutPointKey retrieves a tx record from the
 // spentblockoutpointkeyidx bucket which spends the given outpoint
-func fetchSpentBlockOutPointKey(tx walletdb.Tx, op *wire.OutPoint) (
-	*BlockOutputKey, error) {
+func fetchSpentBlockOutPointKey(tx walletdb.Tx, op *wire.OutPoint) (*BlockOutputKey, error) {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointKeyIdxBucketName)
 
@@ -804,8 +797,7 @@ func fetchSpentBlockOutPointKey(tx walletdb.Tx, op *wire.OutPoint) (
 
 // setUnconfirmedOutPointSpender updates the spent unconfirmed index in the
 // spentunconfirmedidx bucket
-func setUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
-	t *txRecord) error {
+func setUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, t *txRecord) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentUnconfirmedIdxBucketName)
 
@@ -866,8 +858,7 @@ func fetchUnconfirmedSpends(tx walletdb.Tx) ([]*txRecord, error) {
 
 // deleteUnconfirmedOutPointSpender deletes a outpoint from the
 // spentunconfirmedidx bucket
-func deleteUnconfirmedOutPointSpender(tx walletdb.Tx,
-	op *wire.OutPoint) error {
+func deleteUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentUnconfirmedIdxBucketName)
 	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
@@ -959,8 +950,7 @@ func fetchAllSpentBlockOutPoints(tx walletdb.Tx) ([]*BlockOutputKey, error) {
 
 // setBlockOutPointSpender updates the spent block outpoint index in the
 // spentblockoutpoint bucket
-func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint,
-	key *BlockOutputKey, t *txRecord) error {
+func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, key *BlockOutputKey, t *txRecord) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
 	err := bucket.Put(serializeBlockOutputKey(key), t.tx.Sha()[:])
@@ -1051,8 +1041,7 @@ func deleteBlock(tx walletdb.Tx, height int32) error {
 // fetchTxHashFromBlockTxKey retrieves the tx hash from the block tx key index
 // with the given block tx key. The tx record can be retrieved from the
 // txrecords bucket using the tx hash
-func fetchTxHashFromBlockTxKey(tx walletdb.Tx, key *BlockTxKey) (
-	*wire.ShaHash, error) {
+func fetchTxHashFromBlockTxKey(tx walletdb.Tx, key *BlockTxKey) (*wire.ShaHash, error) {
 	bucket := tx.RootBucket().Bucket(blockTxKeyIdxBucketName).
 		Bucket(uint32ToBytes(uint32(key.BlockHeight)))
 	if bucket == nil {
@@ -1082,7 +1071,8 @@ func fetchTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
 		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
 	}
 
-	r, err := deserializeTxRecordRow(hash[:], val)
+	var r txRecord
+	err := deserializeTxRecord(hash[:], val, &r)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,7 +1086,7 @@ func fetchTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
 		return nil, err
 	}
 	r.credits = credits
-	return r, nil
+	return &r, nil
 }
 
 // fetchBlockTxRecords retrieves all tx records from the txrecords bucket
@@ -1126,21 +1116,22 @@ func fetchBlockTxRecords(tx walletdb.Tx, height int32) ([]*txRecord, error) {
 		}
 
 		serializedRow := bucket.Get(k)
-		row, err := deserializeTxRecordRow(k, serializedRow)
+		var r txRecord
+		err := deserializeTxRecord(k, serializedRow, &r)
 		if err != nil {
 			return err
 		}
-		debits, err := fetchDebits(tx, row.tx.Sha())
+		debits, err := fetchDebits(tx, r.tx.Sha())
 		if err != nil {
 			return err
 		}
-		row.debits = debits
-		credits, err := fetchCredits(tx, row.tx.Sha())
+		r.debits = debits
+		credits, err := fetchCredits(tx, r.tx.Sha())
 		if err != nil {
 			return err
 		}
-		row.credits = credits
-		records[i] = row
+		r.credits = credits
+		records[i] = &r
 		i++
 		return nil
 	})
@@ -1167,7 +1158,7 @@ func updateBlock(tx walletdb.Tx, block *Block) error {
 	bucket := tx.RootBucket().Bucket(blocksBucketName)
 
 	// Write the serialized block keyed by the block hash.
-	serializedRow := serializeBlockRow(block)
+	serializedRow := serializeBlock(block)
 	err := bucket.Put(uint32ToBytes(uint32(block.Height)), serializedRow)
 	if err != nil {
 		str := fmt.Sprintf("failed to store block '%s'", block.Hash)
@@ -1177,8 +1168,7 @@ func updateBlock(tx walletdb.Tx, block *Block) error {
 }
 
 // fetchUnspentOutpoints returns all unspent outpoints from the unspent bucket
-func fetchUnspentOutpoints(tx walletdb.Tx) (map[*wire.OutPoint]*BlockTxKey,
-	error) {
+func fetchUnspentOutpoints(tx walletdb.Tx) (map[*wire.OutPoint]*BlockTxKey, error) {
 	bucket := tx.RootBucket().Bucket(unspentBucketName)
 
 	outpoints := make(map[*wire.OutPoint]*BlockTxKey)
@@ -1258,7 +1248,7 @@ func fetchBlockByHeight(tx walletdb.Tx, height int32) (*Block, error) {
 	}
 
 	var block Block
-	err := deserializeBlockRow(key, val, &block)
+	err := deserializeBlock(key, val, &block)
 	return &block, err
 }
 
@@ -1282,7 +1272,7 @@ func fetchAllBlocks(tx walletdb.Tx) ([]*Block, error) {
 		}
 
 		var block Block
-		err := deserializeBlockRow(k, v, &block)
+		err := deserializeBlock(k, v, &block)
 		if err != nil {
 			return err
 		}
@@ -1311,7 +1301,7 @@ func fetchBlocks(tx walletdb.Tx, height int32) ([]*Block, error) {
 		h := int32(byteOrder.Uint32(k))
 		if h >= height {
 			var block Block
-			err := deserializeBlockRow(k, v, &block)
+			err := deserializeBlock(k, v, &block)
 			if err != nil {
 				return err
 			}
