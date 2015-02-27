@@ -456,6 +456,8 @@ func deserializeBlockOutputKeyRow(k []byte, serializedBlockOutputKey []byte) (*B
 	return blockOutputKey, nil
 }
 
+// putDebits writes the given debits associated with the given tx hash to the
+// debits bucket
 func putDebits(tx walletdb.Tx, hash *wire.ShaHash, d *debits) error {
 	bucket := tx.RootBucket().Bucket(debitsBucketName)
 
@@ -468,6 +470,8 @@ func putDebits(tx walletdb.Tx, hash *wire.ShaHash, d *debits) error {
 	return nil
 }
 
+// fetchDebits returns the debits associated with the given tx hash fetched
+// from the debits bucket
 func fetchDebits(tx walletdb.Tx, hash *wire.ShaHash) (*debits, error) {
 	bucket := tx.RootBucket().Bucket(debitsBucketName)
 
@@ -478,6 +482,9 @@ func fetchDebits(tx walletdb.Tx, hash *wire.ShaHash) (*debits, error) {
 	return deserializeDebits(val)
 }
 
+// putCredit writes the given credit associated with the given tx hash to the
+// credits bucket. The index of the credit is calculated based on existing
+// metadata.
 func putCredit(tx walletdb.Tx, hash *wire.ShaHash, c *credit) error {
 	n, err := fetchMeta(tx, numCreditsKey(hash))
 	if err != nil {
@@ -489,18 +496,8 @@ func putCredit(tx walletdb.Tx, hash *wire.ShaHash, c *credit) error {
 	return updateCredit(tx, hash, uint32(n), c)
 }
 
-func updateCredit(tx walletdb.Tx, hash *wire.ShaHash, i uint32, c *credit) error {
-	bucket := tx.RootBucket().Bucket(creditsBucketName)
-
-	serializedRow := serializeCredit(c)
-	err := bucket.Put(creditKey(hash, i), serializedRow)
-	if err != nil {
-		str := fmt.Sprintf("failed to update credits '%s'", hash)
-		return txStoreError(ErrDatabase, str, err)
-	}
-	return nil
-}
-
+// fetchCredits returns a slice of all credits associated with the given tx
+// hash fetched from the credits bucket
 func fetchCredits(tx walletdb.Tx, hash *wire.ShaHash) ([]*credit, error) {
 	bucket := tx.RootBucket().Bucket(creditsBucketName)
 
@@ -523,6 +520,20 @@ func fetchCredits(tx walletdb.Tx, hash *wire.ShaHash) ([]*credit, error) {
 		creds[i] = c
 	}
 	return creds, nil
+}
+
+// updateCredit updates the credit at the given index and associated with the
+// given tx hash in the credits bucket.
+func updateCredit(tx walletdb.Tx, hash *wire.ShaHash, i uint32, c *credit) error {
+	bucket := tx.RootBucket().Bucket(creditsBucketName)
+
+	serializedRow := serializeCredit(c)
+	err := bucket.Put(creditKey(hash, i), serializedRow)
+	if err != nil {
+		str := fmt.Sprintf("failed to update credits '%s'", hash)
+		return txStoreError(ErrDatabase, str, err)
+	}
+	return nil
 }
 
 // putTxRecord inserts a given tx record to the txrecords bucket
@@ -551,9 +562,38 @@ func putTxRecord(tx walletdb.Tx, b *Block, t *txRecord) error {
 	return updateBlockTxIdx(tx, b, t.tx)
 }
 
-// putMeta inserts a metadata counter with the given key
-// The counter is used for keeping track of number of entries in various buckets
-// like blocks, tx records etc.
+// fetchTxRecord retrieves a tx record from the txrecords bucket with the given
+// hash
+func fetchTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
+	bucket := tx.RootBucket().Bucket(txRecordsBucketName)
+
+	val := bucket.Get(hash[:])
+	if val == nil {
+		str := fmt.Sprintf("missing tx record for hash '%s'", hash.String())
+		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
+	}
+
+	var r txRecord
+	err := deserializeTxRecord(hash[:], val, &r)
+	if err != nil {
+		return nil, err
+	}
+	debits, err := fetchDebits(tx, hash)
+	if err != nil {
+		return nil, err
+	}
+	r.debits = debits
+	credits, err := fetchCredits(tx, hash)
+	if err != nil {
+		return nil, err
+	}
+	r.credits = credits
+	return &r, nil
+}
+
+// putMeta inserts a metadata counter with the given key The counter is used
+// for keeping track of number of entries in various buckets like blocks, tx
+// records etc.
 func putMeta(tx walletdb.Tx, key []byte, n int32) error {
 	bucket := tx.RootBucket().Bucket(metaBucketName)
 	err := bucket.Put(key, uint32ToBytes(uint32(n)))
@@ -579,6 +619,35 @@ func fetchMeta(tx walletdb.Tx, key []byte) (int32, error) {
 	}
 
 	return int32(byteOrder.Uint32(val)), nil
+}
+
+// putUnconfirmedTxRecord inserts an unconfirmed tx record to the unconfirmed
+// bucket
+func putUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(txRecordsBucketName)
+
+	n, err := fetchMeta(tx, numUnconfirmedRecordsName)
+	if err != nil {
+		return err
+	}
+	if err := putMeta(tx, numUnconfirmedRecordsName, n+1); err != nil {
+		str := fmt.Sprintf("failed to store meta key '%s'", numUnconfirmedRecordsName)
+		return txStoreError(ErrDatabase, str, err)
+	}
+
+	// Write the serialized txrecord keyed by the tx hash.
+	serializedRow, err := serializeTxRecord(t)
+	if err != nil {
+		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
+		return txStoreError(ErrDatabase, str, err)
+	}
+	err = bucket.Put(t.tx.Sha()[:], serializedRow)
+	if err != nil {
+		str := fmt.Sprintf("failed to store confirmed txrecord '%s'", t.tx.Sha())
+		return txStoreError(ErrDatabase, str, err)
+	}
+	return nil
 }
 
 // fetchUnconfirmedTxRecord retrieves a unconfirmed tx record from
@@ -659,35 +728,6 @@ func fetchAllUnconfirmedTxRecords(tx walletdb.Tx) ([]*txRecord, error) {
 	return records, nil
 }
 
-// putUnconfirmedTxRecord inserts an unconfirmed tx record to the unconfirmed
-// bucket
-func putUnconfirmedTxRecord(tx walletdb.Tx, t *txRecord) error {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(txRecordsBucketName)
-
-	n, err := fetchMeta(tx, numUnconfirmedRecordsName)
-	if err != nil {
-		return err
-	}
-	if err := putMeta(tx, numUnconfirmedRecordsName, n+1); err != nil {
-		str := fmt.Sprintf("failed to store meta key '%s'", numUnconfirmedRecordsName)
-		return txStoreError(ErrDatabase, str, err)
-	}
-
-	// Write the serialized txrecord keyed by the tx hash.
-	serializedRow, err := serializeTxRecord(t)
-	if err != nil {
-		str := fmt.Sprintf("failed to serialize txrecord '%s'", t.tx.Sha())
-		return txStoreError(ErrDatabase, str, err)
-	}
-	err = bucket.Put(t.tx.Sha()[:], serializedRow)
-	if err != nil {
-		str := fmt.Sprintf("failed to store confirmed txrecord '%s'", t.tx.Sha())
-		return txStoreError(ErrDatabase, str, err)
-	}
-	return nil
-}
-
 // deleteUnconfirmedTxRecord deletes an unconfirmed tx record from the
 // unconfirmed bucket
 func deleteUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) error {
@@ -704,83 +744,31 @@ func deleteUnconfirmedTxRecord(tx walletdb.Tx, hash *wire.ShaHash) error {
 	return putMeta(tx, numUnconfirmedRecordsName, n-1)
 }
 
-// deleteBlockOutPointSpender deletes a block output key from the
-// spentblockoutpointidx bucket
-func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, key *BlockOutputKey) error {
+// setBlockOutPointSpender updates the spent block outpoint index in the
+// spentblockoutpoint bucket
+func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, key *BlockOutputKey, t *txRecord) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
-	if err := bucket.Delete(serializeBlockOutputKey(key)); err != nil {
-		str := fmt.Sprintf("failed to delete output key spender '(%d, %d), %d'",
-			key.BlockIndex, key.BlockHeight, key.OutputIndex)
+	err := bucket.Put(serializeBlockOutputKey(key), t.tx.Sha()[:])
+	if err != nil {
+		str := fmt.Sprintf("failed to store spent block outpoint index '%s'",
+			t.tx.Sha())
 		return txStoreError(ErrDatabase, str, err)
 	}
+
 	bucket = tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointKeyIdxBucketName)
-	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
-		str := fmt.Sprintf("failed to delete outpoint spender '%s, %d'", op.Hash,
-			op.Index)
+	err = bucket.Put(serializeOutPoint(op), serializeBlockOutputKey(key))
+	if err != nil {
+		str := fmt.Sprintf("failed to store spent block outpoint key '%d'",
+			key.BlockHeight)
 		return txStoreError(ErrDatabase, str, err)
 	}
 	n, err := fetchMeta(tx, numConfirmedSpendsName)
 	if err != nil {
 		return err
 	}
-	return putMeta(tx, numConfirmedSpendsName, n-1)
-}
-
-// setPrevOutPointSpender updates previous outpoints index in the
-// prevoutpointidx bucket
-func setPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, t *txRecord) error {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(prevOutPointIdxBucketName)
-
-	if err := bucket.Put(serializeOutPoint(op),
-		t.tx.Sha()[:]); err != nil {
-		str := fmt.Sprintf("failed to store previous outpoint '%s'", t.tx.Sha())
-		return txStoreError(ErrDatabase, str, err)
-	}
-	return nil
-}
-
-// fetchPrevOutPointSpender retrieves a tx record from the prevoutpointidx
-// bucket which spends the given outpoint
-func fetchPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) (*txRecord, error) {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(prevOutPointIdxBucketName)
-
-	key := serializeOutPoint(op)
-	val := bucket.Get(key)
-	hash, err := wire.NewShaHash(val)
-	if err != nil {
-		return nil, err
-	}
-	return fetchTxRecord(tx, hash)
-}
-
-// deletePrevOutPointSpender deletes a outpoint from the prevoutpointidx bucket
-func deletePrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) error {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(prevOutPointIdxBucketName)
-	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
-		str := fmt.Sprintf("failed to prev outpoint spender '%s, %d'", op.Hash,
-			op.Index)
-		return txStoreError(ErrDatabase, str, err)
-	}
-	return nil
-}
-
-// fetchBlockOutPointSpender retrieves a tx record from the
-// spentblockoutpointidx bucket which spends the given block output key
-func fetchBlockOutPointSpender(tx walletdb.Tx, key *BlockOutputKey) (*txRecord, error) {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(spentBlockOutPointIdxBucketName)
-
-	val := bucket.Get(serializeBlockOutputKey(key))
-	hash, err := wire.NewShaHash(val)
-	if err != nil {
-		return nil, err
-	}
-	return fetchUnconfirmedTxRecord(tx, hash)
+	return putMeta(tx, numConfirmedSpendsName, n+1)
 }
 
 // fetchSpentBlockOutPointKey retrieves a tx record from the
@@ -792,79 +780,6 @@ func fetchSpentBlockOutPointKey(tx walletdb.Tx, op *wire.OutPoint) (*BlockOutput
 	key := serializeOutPoint(op)
 	val := bucket.Get(key)
 	return deserializeBlockOutputKeyRow(key, val)
-}
-
-// setUnconfirmedOutPointSpender updates the spent unconfirmed index in the
-// spentunconfirmedidx bucket
-func setUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, t *txRecord) error {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(spentUnconfirmedIdxBucketName)
-
-	err := bucket.Put(serializeOutPoint(op), t.tx.Sha()[:])
-	if err != nil {
-		str := fmt.Sprintf("failed to store spent unconfirmed tx '%s'",
-			t.tx.Sha())
-		return txStoreError(ErrDatabase, str, err)
-	}
-	n, err := fetchMeta(tx, numUnconfirmedSpendsName)
-	if err != nil {
-		return err
-	}
-	return putMeta(tx, numUnconfirmedSpendsName, n+1)
-}
-
-// fetchUnconfirmedSpends retrieves all the spent unconfirmed tx records from
-// the spentunconfirmedidx bucket
-func fetchUnconfirmedSpends(tx walletdb.Tx) ([]*txRecord, error) {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(spentUnconfirmedIdxBucketName)
-
-	numUnconfirmedSpends, err := fetchMeta(tx, numUnconfirmedSpendsName)
-	if err != nil {
-		return nil, err
-	}
-	records := make([]*txRecord, numUnconfirmedSpends)
-
-	i := 0
-	err = bucket.ForEach(func(k, v []byte) error {
-		// Skip buckets.
-		if v == nil {
-			return nil
-		}
-		// Handle index out of range due to invalid metadata
-		if i > len(records)-1 {
-			str := "inconsistent unconfirmed spends data stored in database"
-			return txStoreError(ErrDatabase, str, nil)
-		}
-
-		hash, err := wire.NewShaHash(v)
-		if err != nil {
-			return err
-		}
-		record, err := fetchUnconfirmedTxRecord(tx, hash)
-		if err != nil {
-			return err
-		}
-		records[i] = record
-		i++
-		return nil
-	})
-	if err != nil {
-		return nil, maybeConvertDbError(err)
-	}
-	return records, nil
-}
-
-// deleteUnconfirmedOutPointSpender deletes a outpoint from the
-// spentunconfirmedidx bucket
-func deleteUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) error {
-	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
-		Bucket(spentUnconfirmedIdxBucketName)
-	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
-		str := fmt.Sprintf("failed to delete unconfirmed outpoint '%s'", op)
-		return txStoreError(ErrDatabase, str, err)
-	}
-	return putMeta(tx, numUnconfirmedSpendsName, -1)
 }
 
 // fetchConfirmedSpends retrieves all the spent tx records from the
@@ -947,61 +862,179 @@ func fetchAllSpentBlockOutPoints(tx walletdb.Tx) ([]*BlockOutputKey, error) {
 	return keys, nil
 }
 
-// setBlockOutPointSpender updates the spent block outpoint index in the
-// spentblockoutpoint bucket
-func setBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, key *BlockOutputKey, t *txRecord) error {
+// deleteBlockOutPointSpender deletes a block output key from the
+// spentblockoutpointidx bucket
+func deleteBlockOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, key *BlockOutputKey) error {
 	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointIdxBucketName)
-	err := bucket.Put(serializeBlockOutputKey(key), t.tx.Sha()[:])
-	if err != nil {
-		str := fmt.Sprintf("failed to store spent block outpoint index '%s'",
-			t.tx.Sha())
+	if err := bucket.Delete(serializeBlockOutputKey(key)); err != nil {
+		str := fmt.Sprintf("failed to delete output key spender '(%d, %d), %d'",
+			key.BlockIndex, key.BlockHeight, key.OutputIndex)
 		return txStoreError(ErrDatabase, str, err)
 	}
-
 	bucket = tx.RootBucket().Bucket(unconfirmedBucketName).
 		Bucket(spentBlockOutPointKeyIdxBucketName)
-	err = bucket.Put(serializeOutPoint(op), serializeBlockOutputKey(key))
-	if err != nil {
-		str := fmt.Sprintf("failed to store spent block outpoint key '%d'",
-			key.BlockHeight)
+	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
+		str := fmt.Sprintf("failed to delete outpoint spender '%s, %d'", op.Hash,
+			op.Index)
 		return txStoreError(ErrDatabase, str, err)
 	}
 	n, err := fetchMeta(tx, numConfirmedSpendsName)
 	if err != nil {
 		return err
 	}
-	return putMeta(tx, numConfirmedSpendsName, n+1)
+	return putMeta(tx, numConfirmedSpendsName, n-1)
 }
 
-// updateBlockTxIdx updates the block tx index for the given block and tx
-// record The indexes are used to lookup tx records belonging to a given block
-func updateBlockTxIdx(tx walletdb.Tx, b *Block, t *btcutil.Tx) error {
-	bucket, err := tx.RootBucket().Bucket(blockTxIdxBucketName).
-		CreateBucketIfNotExists(uint32ToBytes(uint32(b.Height)))
+// fetchBlockOutPointSpender retrieves a tx record from the
+// spentblockoutpointidx bucket which spends the given block output key
+func fetchBlockOutPointSpender(tx walletdb.Tx, key *BlockOutputKey) (*txRecord, error) {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(spentBlockOutPointIdxBucketName)
+
+	val := bucket.Get(serializeBlockOutputKey(key))
+	hash, err := wire.NewShaHash(val)
+	if err != nil {
+		return nil, err
+	}
+	return fetchUnconfirmedTxRecord(tx, hash)
+}
+
+// setPrevOutPointSpender updates previous outpoints index in the
+// prevoutpointidx bucket
+func setPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, t *txRecord) error {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(prevOutPointIdxBucketName)
+
+	if err := bucket.Put(serializeOutPoint(op),
+		t.tx.Sha()[:]); err != nil {
+		str := fmt.Sprintf("failed to store previous outpoint '%s'", t.tx.Sha())
+		return txStoreError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// fetchPrevOutPointSpender retrieves a tx record from the prevoutpointidx
+// bucket which spends the given outpoint
+func fetchPrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) (*txRecord, error) {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(prevOutPointIdxBucketName)
+
+	key := serializeOutPoint(op)
+	val := bucket.Get(key)
+	hash, err := wire.NewShaHash(val)
+	if err != nil {
+		return nil, err
+	}
+	return fetchTxRecord(tx, hash)
+}
+
+// deletePrevOutPointSpender deletes a outpoint from the prevoutpointidx bucket
+func deletePrevOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) error {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(prevOutPointIdxBucketName)
+	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
+		str := fmt.Sprintf("failed to prev outpoint spender '%s, %d'", op.Hash,
+			op.Index)
+		return txStoreError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// setUnconfirmedOutPointSpender updates the spent unconfirmed index in the
+// spentunconfirmedidx bucket
+func setUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint, t *txRecord) error {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(spentUnconfirmedIdxBucketName)
+
+	err := bucket.Put(serializeOutPoint(op), t.tx.Sha()[:])
+	if err != nil {
+		str := fmt.Sprintf("failed to store spent unconfirmed tx '%s'",
+			t.tx.Sha())
+		return txStoreError(ErrDatabase, str, err)
+	}
+	n, err := fetchMeta(tx, numUnconfirmedSpendsName)
 	if err != nil {
 		return err
 	}
+	return putMeta(tx, numUnconfirmedSpendsName, n+1)
+}
 
-	if err = bucket.Put(t.Sha()[:], []byte{0}); err != nil {
-		str := fmt.Sprintf("failed to store block tx index key '%s'", t.Sha())
-		return txStoreError(ErrDatabase, str, err)
-	}
+// fetchUnconfirmedSpends retrieves all the spent unconfirmed tx records from
+// the spentunconfirmedidx bucket
+func fetchUnconfirmedSpends(tx walletdb.Tx) ([]*txRecord, error) {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(spentUnconfirmedIdxBucketName)
 
-	bucket, err = tx.RootBucket().Bucket(blockTxKeyIdxBucketName).
-		CreateBucketIfNotExists(uint32ToBytes(uint32(b.Height)))
+	numUnconfirmedSpends, err := fetchMeta(tx, numUnconfirmedSpendsName)
 	if err != nil {
-		str := fmt.Sprintf("failed to create index bucket for block '%d'",
-			b.Height)
+		return nil, err
+	}
+	records := make([]*txRecord, numUnconfirmedSpends)
+
+	i := 0
+	err = bucket.ForEach(func(k, v []byte) error {
+		// Skip buckets.
+		if v == nil {
+			return nil
+		}
+		// Handle index out of range due to invalid metadata
+		if i > len(records)-1 {
+			str := "inconsistent unconfirmed spends data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
+		}
+
+		hash, err := wire.NewShaHash(v)
+		if err != nil {
+			return err
+		}
+		record, err := fetchUnconfirmedTxRecord(tx, hash)
+		if err != nil {
+			return err
+		}
+		records[i] = record
+		i++
+		return nil
+	})
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
+	return records, nil
+}
+
+// deleteUnconfirmedOutPointSpender deletes a outpoint from the
+// spentunconfirmedidx bucket
+func deleteUnconfirmedOutPointSpender(tx walletdb.Tx, op *wire.OutPoint) error {
+	bucket := tx.RootBucket().Bucket(unconfirmedBucketName).
+		Bucket(spentUnconfirmedIdxBucketName)
+	if err := bucket.Delete(serializeOutPoint(op)); err != nil {
+		str := fmt.Sprintf("failed to delete unconfirmed outpoint '%s'", op)
 		return txStoreError(ErrDatabase, str, err)
 	}
-	blockTxKey := new(BlockTxKey)
-	blockTxKey.BlockHeight = b.Height
-	blockTxKey.BlockIndex = t.Index()
+	return putMeta(tx, numUnconfirmedSpendsName, -1)
+}
 
-	if err = bucket.Put(serializeBlockTxKey(blockTxKey),
-		t.Sha()[:]); err != nil {
-		str := fmt.Sprintf("failed to store block index key '%s'", t.Sha())
+// putBlock inserts a block into the blocks bucket
+func putBlock(tx walletdb.Tx, block *Block) error {
+	n, err := fetchMeta(tx, numBlocksName)
+	if err != nil {
+		return err
+	}
+	if err := putMeta(tx, numBlocksName, n+1); err != nil {
+		return err
+	}
+	return updateBlock(tx, block)
+}
+
+// updateBlock updates a block into the blocks bucket
+func updateBlock(tx walletdb.Tx, block *Block) error {
+	bucket := tx.RootBucket().Bucket(blocksBucketName)
+
+	// Write the serialized block keyed by the block hash.
+	serializedRow := serializeBlock(block)
+	err := bucket.Put(uint32ToBytes(uint32(block.Height)), serializedRow)
+	if err != nil {
+		str := fmt.Sprintf("failed to store block '%s'", block.Hash)
 		return txStoreError(ErrDatabase, str, err)
 	}
 	return nil
@@ -1037,6 +1070,119 @@ func deleteBlock(tx walletdb.Tx, height int32) error {
 	return putMeta(tx, numBlocksName, n-1)
 }
 
+// fetchBlocks returns blocks from the blocks bucket
+// whose height is greater than or equal to the given height.
+func fetchBlocks(tx walletdb.Tx, height int32) ([]*Block, error) {
+	bucket := tx.RootBucket().Bucket(blocksBucketName)
+
+	var blocks []*Block
+
+	err := bucket.ForEach(func(k, v []byte) error {
+		// Skip buckets.
+		if v == nil {
+			return nil
+		}
+		h := int32(byteOrder.Uint32(k))
+		if h >= height {
+			var block Block
+			err := deserializeBlock(k, v, &block)
+			if err != nil {
+				return err
+			}
+			blocks = append(blocks, &block)
+		}
+		return nil
+	})
+	if err != nil {
+		return blocks, maybeConvertDbError(err)
+	}
+	return blocks, nil
+}
+
+// fetchAllBlocks returns all the blocks in the blocks bucket
+func fetchAllBlocks(tx walletdb.Tx) ([]*Block, error) {
+	bucket := tx.RootBucket().Bucket(blocksBucketName)
+
+	n, err := fetchMeta(tx, numBlocksName)
+	blocks := make([]*Block, n)
+
+	i := 0
+	err = bucket.ForEach(func(k, v []byte) error {
+		// Skip buckets.
+		if v == nil {
+			return nil
+		}
+		// Handle index out of range due to invalid metadata
+		if i > len(blocks)-1 {
+			str := "inconsistent blocks data stored in database"
+			return txStoreError(ErrDatabase, str, nil)
+		}
+
+		var block Block
+		err := deserializeBlock(k, v, &block)
+		if err != nil {
+			return err
+		}
+		blocks[i] = &block
+		i++
+		return nil
+	})
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
+	return blocks, nil
+}
+
+// fetchBlockByHeight returns a block from the blocks bucket with the given
+// height
+func fetchBlockByHeight(tx walletdb.Tx, height int32) (*Block, error) {
+	bucket := tx.RootBucket().Bucket(blocksBucketName)
+
+	key := uint32ToBytes(uint32(height))
+	val := bucket.Get(key)
+	if val == nil {
+		str := fmt.Sprintf("block '%d' not found", height)
+		return nil, txStoreError(ErrBlockNotFound, str, nil)
+	}
+
+	var block Block
+	err := deserializeBlock(key, val, &block)
+	return &block, err
+}
+
+// updateBlockTxIdx updates the block tx index for the given block and tx
+// record The indexes are used to lookup tx records belonging to a given block
+func updateBlockTxIdx(tx walletdb.Tx, b *Block, t *btcutil.Tx) error {
+	bucket, err := tx.RootBucket().Bucket(blockTxIdxBucketName).
+		CreateBucketIfNotExists(uint32ToBytes(uint32(b.Height)))
+	if err != nil {
+		return err
+	}
+
+	if err = bucket.Put(t.Sha()[:], []byte{0}); err != nil {
+		str := fmt.Sprintf("failed to store block tx index key '%s'", t.Sha())
+		return txStoreError(ErrDatabase, str, err)
+	}
+
+	bucket, err = tx.RootBucket().Bucket(blockTxKeyIdxBucketName).
+		CreateBucketIfNotExists(uint32ToBytes(uint32(b.Height)))
+	if err != nil {
+		str := fmt.Sprintf("failed to create index bucket for block '%d'",
+			b.Height)
+		return txStoreError(ErrDatabase, str, err)
+	}
+	blockTxKey := new(BlockTxKey)
+	blockTxKey.BlockHeight = b.Height
+	blockTxKey.BlockIndex = t.Index()
+
+	if err = bucket.Put(serializeBlockTxKey(blockTxKey),
+		t.Sha()[:]); err != nil {
+		str := fmt.Sprintf("failed to store block index key '%s'", t.Sha())
+		return txStoreError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
 // fetchTxHashFromBlockTxKey retrieves the tx hash from the block tx key index
 // with the given block tx key. The tx record can be retrieved from the
 // txrecords bucket using the tx hash
@@ -1057,35 +1203,6 @@ func fetchTxHashFromBlockTxKey(tx walletdb.Tx, key *BlockTxKey) (*wire.ShaHash, 
 	}
 
 	return wire.NewShaHash(val)
-}
-
-// fetchTxRecord retrieves a tx record from the txrecords bucket with the given
-// hash
-func fetchTxRecord(tx walletdb.Tx, hash *wire.ShaHash) (*txRecord, error) {
-	bucket := tx.RootBucket().Bucket(txRecordsBucketName)
-
-	val := bucket.Get(hash[:])
-	if val == nil {
-		str := fmt.Sprintf("missing tx record for hash '%s'", hash.String())
-		return nil, txStoreError(ErrTxRecordNotFound, str, nil)
-	}
-
-	var r txRecord
-	err := deserializeTxRecord(hash[:], val, &r)
-	if err != nil {
-		return nil, err
-	}
-	debits, err := fetchDebits(tx, hash)
-	if err != nil {
-		return nil, err
-	}
-	r.debits = debits
-	credits, err := fetchCredits(tx, hash)
-	if err != nil {
-		return nil, err
-	}
-	r.credits = credits
-	return &r, nil
 }
 
 // fetchBlockTxRecords retrieves all tx records from the txrecords bucket
@@ -1140,32 +1257,6 @@ func fetchBlockTxRecords(tx walletdb.Tx, height int32) ([]*txRecord, error) {
 	return records, nil
 }
 
-// putBlock inserts a block into the blocks bucket
-func putBlock(tx walletdb.Tx, block *Block) error {
-	n, err := fetchMeta(tx, numBlocksName)
-	if err != nil {
-		return err
-	}
-	if err := putMeta(tx, numBlocksName, n+1); err != nil {
-		return err
-	}
-	return updateBlock(tx, block)
-}
-
-// updateBlock updates a block into the blocks bucket
-func updateBlock(tx walletdb.Tx, block *Block) error {
-	bucket := tx.RootBucket().Bucket(blocksBucketName)
-
-	// Write the serialized block keyed by the block hash.
-	serializedRow := serializeBlock(block)
-	err := bucket.Put(uint32ToBytes(uint32(block.Height)), serializedRow)
-	if err != nil {
-		str := fmt.Sprintf("failed to store block '%s'", block.Hash)
-		return txStoreError(ErrDatabase, str, err)
-	}
-	return nil
-}
-
 // fetchUnspentOutpoints returns all unspent outpoints from the unspent bucket
 func fetchUnspentOutpoints(tx walletdb.Tx) (map[*wire.OutPoint]*BlockTxKey, error) {
 	bucket := tx.RootBucket().Bucket(unspentBucketName)
@@ -1194,20 +1285,6 @@ func fetchUnspentOutpoints(tx walletdb.Tx) (map[*wire.OutPoint]*BlockTxKey, erro
 	return outpoints, nil
 }
 
-// fetchUnspent returns an unspent outpoint from the unspent bucket
-func fetchUnspent(tx walletdb.Tx, op *wire.OutPoint) (*BlockTxKey, error) {
-	bucket := tx.RootBucket().Bucket(unspentBucketName)
-
-	key := serializeOutPoint(op)
-	val := bucket.Get(key)
-	if val == nil {
-		str := fmt.Sprintf("block tx key for outpoint '%s' not found", op)
-		return nil, txStoreError(ErrBlockTxKeyNotFound, str, nil)
-	}
-
-	return deserializeBlockTxKeyRow(key, val)
-}
-
 // putUnspent inserts a given unspent outpoint into the unspent bucket
 func putUnspent(tx walletdb.Tx, op *wire.OutPoint, k *BlockTxKey) error {
 	bucket := tx.RootBucket().Bucket(unspentBucketName)
@@ -1222,6 +1299,20 @@ func putUnspent(tx walletdb.Tx, op *wire.OutPoint, k *BlockTxKey) error {
 	return nil
 }
 
+// fetchUnspent returns an unspent outpoint from the unspent bucket
+func fetchUnspent(tx walletdb.Tx, op *wire.OutPoint) (*BlockTxKey, error) {
+	bucket := tx.RootBucket().Bucket(unspentBucketName)
+
+	key := serializeOutPoint(op)
+	val := bucket.Get(key)
+	if val == nil {
+		str := fmt.Sprintf("block tx key for outpoint '%s' not found", op)
+		return nil, txStoreError(ErrBlockTxKeyNotFound, str, nil)
+	}
+
+	return deserializeBlockTxKeyRow(key, val)
+}
+
 // deleteUnspent deletes a given unspent output from the unspent bucket
 func deleteUnspent(tx walletdb.Tx, op *wire.OutPoint) error {
 	bucket := tx.RootBucket().Bucket(unspentBucketName)
@@ -1232,86 +1323,6 @@ func deleteUnspent(tx walletdb.Tx, op *wire.OutPoint) error {
 		return txStoreError(ErrDatabase, str, err)
 	}
 	return nil
-}
-
-// fetchBlockByHeight returns a block from the blocks bucket with the given
-// height
-func fetchBlockByHeight(tx walletdb.Tx, height int32) (*Block, error) {
-	bucket := tx.RootBucket().Bucket(blocksBucketName)
-
-	key := uint32ToBytes(uint32(height))
-	val := bucket.Get(key)
-	if val == nil {
-		str := fmt.Sprintf("block '%d' not found", height)
-		return nil, txStoreError(ErrBlockNotFound, str, nil)
-	}
-
-	var block Block
-	err := deserializeBlock(key, val, &block)
-	return &block, err
-}
-
-// fetchAllBlocks returns all the blocks in the blocks bucket
-func fetchAllBlocks(tx walletdb.Tx) ([]*Block, error) {
-	bucket := tx.RootBucket().Bucket(blocksBucketName)
-
-	n, err := fetchMeta(tx, numBlocksName)
-	blocks := make([]*Block, n)
-
-	i := 0
-	err = bucket.ForEach(func(k, v []byte) error {
-		// Skip buckets.
-		if v == nil {
-			return nil
-		}
-		// Handle index out of range due to invalid metadata
-		if i > len(blocks)-1 {
-			str := "inconsistent blocks data stored in database"
-			return txStoreError(ErrDatabase, str, nil)
-		}
-
-		var block Block
-		err := deserializeBlock(k, v, &block)
-		if err != nil {
-			return err
-		}
-		blocks[i] = &block
-		i++
-		return nil
-	})
-	if err != nil {
-		return nil, maybeConvertDbError(err)
-	}
-	return blocks, nil
-}
-
-// fetchBlocks returns blocks from the blocks bucket
-// whose height is greater than or equal to the given height.
-func fetchBlocks(tx walletdb.Tx, height int32) ([]*Block, error) {
-	bucket := tx.RootBucket().Bucket(blocksBucketName)
-
-	var blocks []*Block
-
-	err := bucket.ForEach(func(k, v []byte) error {
-		// Skip buckets.
-		if v == nil {
-			return nil
-		}
-		h := int32(byteOrder.Uint32(k))
-		if h >= height {
-			var block Block
-			err := deserializeBlock(k, v, &block)
-			if err != nil {
-				return err
-			}
-			blocks = append(blocks, &block)
-		}
-		return nil
-	})
-	if err != nil {
-		return blocks, maybeConvertDbError(err)
-	}
-	return blocks, nil
 }
 
 // upgradeManager opens the tx store using the specified namespace or creates
