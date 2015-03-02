@@ -698,17 +698,13 @@ func deserializeImportedPubKeyAddress(addressID []byte, row *dbAddressRow) (*dbI
 		dbAddressRow: *row,
 	}
 
-	var offset uint32
-	pubLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
+	pubLen := binary.LittleEndian.Uint32(row.rawData[0:4])
 	retRow.encryptedPubKey = make([]byte, pubLen)
-	copy(retRow.encryptedPubKey, row.rawData[offset:offset+pubLen])
-	offset += pubLen
+	copy(retRow.encryptedPubKey, row.rawData[4:4+pubLen])
 
-	privLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
+	privLen := binary.LittleEndian.Uint32(row.rawData[4+pubLen : 8+pubLen])
 	retRow.encryptedPrivKey = make([]byte, privLen)
-	copy(retRow.encryptedPrivKey, row.rawData[offset:offset+privLen])
+	copy(retRow.encryptedPrivKey, row.rawData[8+pubLen:8+pubLen+privLen])
 
 	return &retRow, nil
 }
@@ -725,15 +721,11 @@ func serializeImportedPubKeyAddress(encryptedPKHash, encryptedPubKey, encryptedP
 	privLen := uint32(len(encryptedPrivKey))
 	rawData := make([]byte, 8+pubLen+privLen)
 
-	var offset uint32
-	binary.LittleEndian.PutUint32(rawData[offset:offset+4], pubLen)
-	offset += 4
-	copy(rawData[offset:offset+pubLen], encryptedPubKey)
-	offset += pubLen
+	binary.LittleEndian.PutUint32(rawData[0:4], pubLen)
+	copy(rawData[4:4+pubLen], encryptedPubKey)
 
-	binary.LittleEndian.PutUint32(rawData[offset:offset+4], privLen)
-	offset += 4
-	copy(rawData[offset:offset+privLen], encryptedPrivKey)
+	binary.LittleEndian.PutUint32(rawData[4+pubLen:8+pubLen], privLen)
+	copy(rawData[8+pubLen:8+pubLen+privLen], encryptedPrivKey)
 
 	return rawData
 }
