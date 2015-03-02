@@ -8,28 +8,43 @@ btcwallet is a daemon handling bitcoin wallet functionality for a
 single user.  It acts as both an RPC client to btcd and an RPC server
 for wallet clients and legacy RPC applications.
 
-The wallet file format is based on
-[Armory](https://github.com/etotheipi/BitcoinArmory) and provides a
-deterministic wallet where all future generated private keys can be
-recovered from a previous wallet backup.  Unencrypted wallets are
-unsupported and are never written to disk.  This design decision has
-the consequence of generating new wallets on the fly impossible: a
-client is required to provide a wallet encryption passphrase.
+Public and private keys are derived using the heirarchical
+deterministic format described by
+[BIP0032](https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki).
+Unencrypted private keys are not supported and are never written to
+disk.  btcwallet uses the
+`m/44'/<coin type>'/<account>'/<branch>/<address index>`
+HD path for all derived addresses, as described by
+[BIP0044](https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki).
+
+Due to the sensitive nature of public data in a BIP0032 wallet,
+btcwallet provides the option of encrypting not just private keys, but
+public data as well.  This is intended to thwart privacy risks where a
+wallet file is compromised without exposing all current and future
+addresses (public keys) managed by the wallet. While access to this
+information would not allow an attacker to spend or steal coins, it
+does mean they could track all transactions involving your addresses
+and therefore know your exact balance.  In a future release, public data
+encryption will extend to transactions as well.
 
 btcwallet is not an SPV client and requires connecting to a local or
 remote btcd instance for asynchronous blockchain queries and
 notifications over websockets.  Full btcd installation instructions
-can be found [here](https://github.com/btcsuite/btcd).
+can be found [here](https://github.com/btcsuite/btcd).  An alternative
+SPV mode that is compatible with btcd and Bitcoin Core is planned for
+a future release.
 
-As a daemon, btcwallet provides no user interface and an additional
-graphical or command line client is required for normal, personal
-wallet usage.  Conformal has written
-[btcgui](https://github.com/btcsuite/btcgui) as a graphical client
-to btcwallet.
+No release-ready graphical frontends currently exist, however the
+proof-of-concept [btcgui](https://github.com/btcsuite/btcgui) project
+shows some of the possibilities of btcwallet.  In the coming months a
+new stable RPC API is planned, at which point a high quality graphical
+frontend can be finished.
 
-This project is currently under active development is not production
-ready yet.  Support for creating and using wallets the main Bitcoin
-network is currently disabled by default.
+Mainnet support is currently disabled by default.  Use of btcwallet on
+mainnet requires passing the `--mainnet` flag on the command line or
+adding `mainnet=1` to the configuration file.  Mainnet will be enabled
+by default in a future release after further database changes and
+testing.
 
 ## Installation
 
@@ -91,6 +106,12 @@ want btcd and btcwallet running.
 $ btcd --testnet -u rpcuser -P rpcpass
 ```
 
+- Run the following command to create a wallet:
+
+```bash
+$ btcwallet -u rpcuser -P rpcpass --create
+```
+
 - Run the following command to start btcwallet:
 
 ```bash
@@ -110,10 +131,10 @@ $ $EDITOR ~/.btcwallet/btcwallet.conf
 
 ## Client Usage
 
-Clients wishing to use btcwallet must connect to the `ws` endpoint
-over a websocket connection.  Messages sent to btcwallet over this
-websocket are expected to follow the standard Bitcoin JSON API
-(partially documented
+Clients wishing to use btcwallet are recommended to connect to the
+`ws` endpoint over a websocket connection.  Messages sent to btcwallet
+over this websocket are expected to follow the standard Bitcoin JSON
+API (partially documented
 [here](https://en.bitcoin.it/wiki/Original_Bitcoin_client/API_Calls_list)).
 Websocket connections also enable additional API extensions and
 JSON-RPC notifications (currently undocumented).  The btcd packages
