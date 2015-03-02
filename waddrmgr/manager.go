@@ -1009,16 +1009,11 @@ func (m *Manager) ImportAddress(addr btcutil.Address, bs *BlockStamp) (ManagedAd
 //
 // All imported addresses will be part of the account defined by the
 // ImportedAddrAccount constant.
-func (m *Manager) ImportPublicKey(pubKey *btcec.PublicKey, bs *BlockStamp, compress bool) (ManagedPubKeyAddress, error) {
+func (m *Manager) ImportPublicKey(pubKey *btcec.PublicKey, bs *BlockStamp) (ManagedPubKeyAddress, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	var serializedPubKey []byte
-	if compress {
-		serializedPubKey = pubKey.SerializeCompressed()
-	} else {
-		serializedPubKey = pubKey.SerializeUncompressed()
-	}
+	serializedPubKey := pubKey.SerializeCompressed()
 	pubKeyHash := btcutil.Hash160(serializedPubKey)
 	alreadyExists, err := m.existsAddress(pubKeyHash)
 	if err != nil {
@@ -1070,7 +1065,7 @@ func (m *Manager) ImportPublicKey(pubKey *btcec.PublicKey, bs *BlockStamp, compr
 	// Create a new managed address based on the imported address.
 	var managedAddr *managedAddress
 	managedAddr, err = newManagedAddressWithoutPrivKey(m,
-		ImportedAddrAccount, pubKey, compress)
+		ImportedAddrAccount, pubKey, true)
 	if err != nil {
 		return nil, err
 	}

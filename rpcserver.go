@@ -1857,23 +1857,12 @@ func ImportAddress(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interfa
 func ImportPubKey(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	cmd := icmd.(*btcjson.ImportPubKeyCmd)
 
-	var compressed bool
 	// Import the public key, handling any errors.
 	pubKeyBytes, err := hex.DecodeString(cmd.PubKey)
 	if err != nil {
 		return nil, btcjson.Error{
 			Code:    btcjson.ErrInvalidAddressOrKey.Code,
 			Message: err.Error(),
-		}
-	}
-	if len(pubKeyBytes) == 33 {
-		compressed = true
-	} else if len(pubKeyBytes) == 65 {
-		compressed = false
-	} else {
-		return nil, btcjson.Error{
-			Code:    btcjson.ErrInvalidAddressOrKey.Code,
-			Message: "invalid public key",
 		}
 	}
 	pubKey, err := btcec.ParsePubKey(pubKeyBytes, btcec.S256())
@@ -1883,7 +1872,7 @@ func ImportPubKey(w *Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interfac
 			Message: err.Error(),
 		}
 	}
-	_, err = w.ImportPubKey(pubKey, nil, compressed, cmd.Rescan)
+	_, err = w.ImportPubKey(pubKey, nil, cmd.Rescan)
 	return nil, err
 }
 
