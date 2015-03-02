@@ -1026,8 +1026,7 @@ func (w *Wallet) ImportAddress(addr btcutil.Address, bs *waddrmgr.BlockStamp,
 }
 
 // ImportPubKey imports a raw pubkey as a watch-only address to the wallet.
-func (w *Wallet) ImportPubKey(pubKey *btcec.PublicKey, bs *waddrmgr.BlockStamp,
-	rescan bool) (string, error) {
+func (w *Wallet) ImportPubKey(pubKey *btcec.PublicKey, bs *waddrmgr.BlockStamp, compressed, rescan bool) (string, error) {
 
 	// The starting block for the key is the genesis block unless otherwise
 	// specified.
@@ -1039,7 +1038,7 @@ func (w *Wallet) ImportPubKey(pubKey *btcec.PublicKey, bs *waddrmgr.BlockStamp,
 	}
 
 	// Attempt to import address into wallet.
-	managedAddr, err := w.Manager.ImportPublicKey(pubKey, bs, true)
+	managedAddr, err := w.Manager.ImportPublicKey(pubKey, bs, compressed)
 	if err != nil {
 		return "", err
 	}
