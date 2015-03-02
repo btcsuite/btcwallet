@@ -25,6 +25,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/fastsha256"
+	"golang.org/x/crypto/ripemd160"
 )
 
 const (
@@ -64,9 +65,10 @@ type addressType uint8
 
 // These constants define the various supported address types.
 const (
-	adtChain  addressType = 0 // not iota as they need to be stable for db
-	adtImport addressType = 1
-	adtScript addressType = 2
+	adtChain    addressType = 0 // not iota as they need to be stable for db
+	adtImport   addressType = 1
+	adtScript   addressType = 2
+	adtWatching addressType = 3
 )
 
 // falseByte and trueByte are consts used to serialize boolean values.
@@ -95,6 +97,9 @@ type accountType uint8
 const (
 	actBIP0044 accountType = 0 // not iota as they need to be stable for db
 )
+
+// encryptedHash160Size is the size of an encrypted Hash160 address.
+const encryptedHash160Size = ripemd160.Size * 3
 
 // dbAccountRow houses information stored about an account in the database.
 type dbAccountRow struct {
@@ -640,13 +645,11 @@ func serializeChainedAddress(branch, index uint32) []byte {
 // row as an imported hash 160 address.
 func deserializeImportedHash160AddressRow(addressID []byte, row *dbAddressRow) (*dbImportedHash160AddressRow, error) {
 	// The serialized imported address raw data format is:
-	//   <encpkhashlen><encpkhash>
+	//   <enchash160>
 	//
-	// 4 bytes encrypted pkhash len + encrypted pkhash +
+	//  encrypted hash160 (ripemd160*3 = 60 bytes)
 
-	// Given the above, the length of the entry must be at a minimum
-	// the constant value sizes.
-	if len(row.rawData) < 4 {
+	if len(row.rawData) < encryptedHash160Size {
 		str := fmt.Sprintf("malformed serialized imported address for "+
 			"key %s", addressID)
 		return nil, managerError(ErrDatabase, str, nil)
@@ -656,12 +659,8 @@ func deserializeImportedHash160AddressRow(addressID []byte, row *dbAddressRow) (
 		dbAddressRow: *row,
 	}
 
-	var offset uint32
-	pkHashLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
-	offset += 4
-	retRow.encryptedHash160 = make([]byte, pkHashLen)
-	copy(retRow.encryptedHash160, row.rawData[offset:offset+pkHashLen])
-
+	retRow.encryptedHash160 = make([]byte, encryptedHash160Size)
+	copy(retRow.encryptedHash160, row.rawData)
 	return &retRow, nil
 }
 
@@ -669,18 +668,12 @@ func deserializeImportedHash160AddressRow(addressID []byte, row *dbAddressRow) (
 // an imported hash 160 address.
 func serializeImportedHash160AddressRow(encryptedHash160 []byte) []byte {
 	// The serialized imported address raw data format is:
-	//   <encpkhashlen><encpkhash>
+	//   <enchash160>
 	//
-	// 4 bytes encrypted pkhash len + encrypted pkhash +
+	//  encrypted hash160 (ripemd160*3 = 60 bytes)
 
-	pkHashLen := uint32(len(encryptedHash160))
-	rawData := make([]byte, 8+pkHashLen)
-
-	var offset uint32
-	binary.LittleEndian.PutUint32(rawData[offset:offset+4], pkHashLen)
-	offset += 4
-	copy(rawData[offset:offset+pkHashLen], encryptedHash160)
-
+	rawData := make([]byte, 8+encryptedHash160Size)
+	copy(rawData, encryptedHash160)
 	return rawData
 }
 
@@ -821,13 +814,11 @@ func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
 	case adtChain:
 		return deserializeChainedAddress(addressID, row)
 	case adtImport:
-		if row.watchingOnly {
-			return deserializeImportedHash160AddressRow(addressID, row)
-		} else {
-			return deserializeImportedPubKeyAddress(addressID, row)
-		}
+		return deserializeImportedPubKeyAddress(addressID, row)
 	case adtScript:
 		return deserializeScriptAddress(addressID, row)
+	case adtWatching:
+		return deserializeImportedHash160AddressRow(addressID, row)
 	}
 
 	str := fmt.Sprintf("unsupported address type '%d'", row.addrType)
@@ -933,7 +924,7 @@ func putImportedP2PKHAddress(tx walletdb.Tx, addressID []byte, account uint32,
 
 	rawData := serializeImportedHash160AddressRow(encryptedHash160)
 	addrRow := dbAddressRow{
-		addrType:     adtImport,
+		addrType:     adtWatching,
 		account:      account,
 		addTime:      uint64(time.Now().Unix()),
 		syncStatus:   status,
@@ -1000,6 +991,8 @@ func fetchAllAddresses(tx walletdb.Tx) ([]interface{}, error) {
 			addrRow, err = deserializeImportedPubKeyAddress(k, row)
 		case adtScript:
 			addrRow, err = deserializeScriptAddress(k, row)
+		case adtWatching:
+			addrRow, err = deserializeImportedHash160AddressRow(k, row)
 		default:
 			str := fmt.Sprintf("unsupported address type '%d'",
 				row.addrType)
