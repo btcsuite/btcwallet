@@ -137,7 +137,7 @@ type dbChainAddressRow struct {
 	index  uint32
 }
 
-// dbImportedP2PKHAddressRow houses additional information stored about an imported
+// dbImportedHash160AddressRow houses additional information stored about an imported
 // P2PKH address in the database.
 type dbImportedHash160AddressRow struct {
 	dbAddressRow
@@ -909,9 +909,9 @@ func putImportedPubKeyAddress(tx walletdb.Tx, addressID []byte, account uint32,
 	return putAddress(tx, addressID, &addrRow)
 }
 
-// putImportedP2PKHAddress stores the provided imported address information to the
+// putImportedHash160Address stores the provided imported address information to the
 // database.
-func putImportedP2PKHAddress(tx walletdb.Tx, addressID []byte, account uint32,
+func putImportedHash160Address(tx walletdb.Tx, addressID []byte, account uint32,
 	status syncStatus, encryptedHash160 []byte) error {
 
 	rawData := serializeImportedHash160AddressRow(encryptedHash160)

@@ -539,13 +539,13 @@ func (m *Manager) chainAddressRowToManaged(row *dbChainAddressRow) (ManagedAddre
 	return m.keyToManaged(addressKey, row.account, row.branch, row.index)
 }
 
-// importedP2PKHAddressRowToManaged returns a new managed address based on imported
+// importedHash160AddressRowToManaged returns a new managed address based on imported
 // address data loaded from the database.
-func (m *Manager) importedP2PKHAddressRowToManaged(row *dbImportedHash160AddressRow) (ManagedAddress, error) {
+func (m *Manager) importedHash160AddressRowToManaged(row *dbImportedHash160AddressRow) (ManagedAddress, error) {
 	// Use the crypto public key to decrypt the imported pk hash.
 	pkHash, err := m.cryptoKeyPub.Decrypt(row.encryptedHash160)
 	if err != nil {
-		str := "failed to decrypt pkhash for imported address"
+		str := "failed to decrypt hash 160 for imported address"
 		return nil, managerError(ErrCrypto, str, err)
 	}
 	return newAddress(m, row.account, pkHash)
@@ -604,7 +604,7 @@ func (m *Manager) rowInterfaceToManaged(rowInterface interface{}) (ManagedAddres
 		return m.importedPubKeyAddressRowToManaged(row)
 
 	case *dbImportedHash160AddressRow:
-		return m.importedP2PKHAddressRowToManaged(row)
+		return m.importedHash160AddressRowToManaged(row)
 
 	case *dbScriptAddressRow:
 		return m.scriptAddressRowToManaged(row)
@@ -973,7 +973,7 @@ func (m *Manager) ImportAddress(addr btcutil.Address, bs *BlockStamp) (ManagedAd
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
 	err = m.namespace.Update(func(tx walletdb.Tx) error {
-		err := putImportedP2PKHAddress(tx, addressID, ImportedAddrAccount,
+		err := putImportedHash160Address(tx, addressID, ImportedAddrAccount,
 			ssNone, encryptedHash160)
 		if err != nil {
 			return err
