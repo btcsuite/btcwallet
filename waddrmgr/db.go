@@ -32,6 +32,12 @@ const (
 	LatestMgrVersion = 1
 )
 
+var (
+	// latestMgrVersion is the most recent manager version as a variable so
+	// the tests can change it to force errors.
+	latestMgrVersion uint32 = LatestMgrVersion
+)
+
 // maybeConvertDbError converts the passed error to a ManagerError with an
 // error code of ErrDatabase if it is not already a ManagerError.  This is
 // useful for potential errors returned from managed transaction an other parts
@@ -157,6 +163,27 @@ var (
 	// Account related key names (account bucket).
 	acctNumAcctsName = []byte("numaccts")
 )
+
+// uint32ToBytes converts a 32 bit unsigned integer into a 4-byte slice in
+// little-endian order: 1 -> [1 0 0 0].
+func uint32ToBytes(number uint32) []byte {
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, number)
+	return buf
+}
+
+// putManagerVersion stores the provided version to the database.
+func putManagerVersion(tx walletdb.Tx, version uint32) error {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
+
+	verBytes := uint32ToBytes(version)
+	err := bucket.Put(mgrVersionName, verBytes)
+	if err != nil {
+		str := "failed to store version"
+		return managerError(ErrDatabase, str, err)
+	}
+	return nil
+}
 
 // fetchMasterKeyParams loads the master key parameters needed to derive them
 // (when given the correct user-supplied passphrase) from the database.  Either
@@ -306,14 +333,6 @@ func putWatchingOnly(tx walletdb.Tx, watchingOnly bool) error {
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil
-}
-
-// uint32ToBytes converts a 32 bit unsigned integer into a 4-byte slice in
-// little-endian order: 1 -> [1 0 0 0].
-func uint32ToBytes(number uint32) []byte {
-	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, number)
-	return buf
 }
 
 // deserializeAccountRow deserializes the passed serialized account information.
@@ -1188,75 +1207,53 @@ func managerExists(namespace walletdb.Namespace) (bool, error) {
 	return exists, nil
 }
 
-// upgradeManager opens the manager using the specified namespace or creates and
-// initializes it if it does not already exist.  It also provides facilities to
-// upgrade the data in the namespace to newer versions.
-func upgradeManager(namespace walletdb.Namespace) error {
-	// Initialize the buckets and main db fields as needed.
-	var version uint32
-	var createDate uint64
+// createManagerNS creates the initial namespace structure needed for all of the
+// manager data.  This includes things such as all of the buckets as well as the
+// version and creation date.
+func createManagerNS(namespace walletdb.Namespace) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
 		rootBucket := tx.RootBucket()
-		mainBucket, err := rootBucket.CreateBucketIfNotExists(
-			mainBucketName)
+		mainBucket, err := rootBucket.CreateBucket(mainBucketName)
 		if err != nil {
 			str := "failed to create main bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucketIfNotExists(addrBucketName)
+		_, err = rootBucket.CreateBucket(addrBucketName)
 		if err != nil {
 			str := "failed to create address bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucketIfNotExists(acctBucketName)
+		_, err = rootBucket.CreateBucket(acctBucketName)
 		if err != nil {
 			str := "failed to create account bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucketIfNotExists(addrAcctIdxBucketName)
+		_, err = rootBucket.CreateBucket(addrAcctIdxBucketName)
 		if err != nil {
 			str := "failed to create address index bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucketIfNotExists(syncBucketName)
+		_, err = rootBucket.CreateBucket(syncBucketName)
 		if err != nil {
 			str := "failed to create sync bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		// Save the most recent database version if it isn't already
-		// there, otherwise keep track of it for potential upgrades.
-		verBytes := mainBucket.Get(mgrVersionName)
-		if verBytes == nil {
-			version = LatestMgrVersion
-
-			var buf [4]byte
-			binary.LittleEndian.PutUint32(buf[:], version)
-			err := mainBucket.Put(mgrVersionName, buf[:])
-			if err != nil {
-				str := "failed to store latest database version"
-				return managerError(ErrDatabase, str, err)
-			}
-		} else {
-			version = binary.LittleEndian.Uint32(verBytes)
+		if err := putManagerVersion(tx, latestMgrVersion); err != nil {
+			return err
 		}
 
-		createBytes := mainBucket.Get(mgrCreateDateName)
-		if createBytes == nil {
-			createDate = uint64(time.Now().Unix())
-			var buf [8]byte
-			binary.LittleEndian.PutUint64(buf[:], createDate)
-			err := mainBucket.Put(mgrCreateDateName, buf[:])
-			if err != nil {
-				str := "failed to store database creation time"
-				return managerError(ErrDatabase, str, err)
-			}
-		} else {
-			createDate = binary.LittleEndian.Uint64(createBytes)
+		createDate := uint64(time.Now().Unix())
+		var dateBytes [8]byte
+		binary.LittleEndian.PutUint64(dateBytes[:], createDate)
+		err = mainBucket.Put(mgrCreateDateName, dateBytes[:])
+		if err != nil {
+			str := "failed to store database creation time"
+			return managerError(ErrDatabase, str, err)
 		}
 
 		return nil
@@ -1266,9 +1263,63 @@ func upgradeManager(namespace walletdb.Namespace) error {
 		return managerError(ErrDatabase, str, err)
 	}
 
-	// Upgrade the manager as needed.
-	if version < LatestMgrVersion {
-		// No upgrades yet.
+	return nil
+}
+
+// upgradeManager upgrades the data in the provided manager namespace to newer
+// versions as neeeded.
+func upgradeManager(namespace walletdb.Namespace) error {
+	// Get the current version.
+	var version uint32
+	err := namespace.View(func(tx walletdb.Tx) error {
+		mainBucket := tx.RootBucket().Bucket(mainBucketName)
+		verBytes := mainBucket.Get(mgrVersionName)
+		version = binary.LittleEndian.Uint32(verBytes)
+		return nil
+	})
+	if err != nil {
+		str := "failed to fetch version for update"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	// NOTE: There are currently no upgrades, but this is provided here as a
+	// template for how to properly do upgrades.  Each function to upgrade
+	// to the next version must include serializing the new version as a
+	// part of the same transaction so any failures in upgrades to later
+	// versions won't leave the database in an inconsistent state.  The
+	// putManagerVersion function provides a convenient mechanism for that
+	// purpose.
+	//
+	// Upgrade one version at a time so it is possible to upgrade across
+	// an aribtary number of versions without needing to write a bunch of
+	// additional code to go directly from version X to Y.
+	// if version < 2 {
+	// 	// Upgrade from version 1 to 2.
+	//	if err := upgradeToVersion2(namespace); err != nil {
+	//		return err
+	//	}
+	//
+	//	// The manager is now at version 2.
+	//	version = 2
+	// }
+	// if version < 3 {
+	// 	// Upgrade from version 2 to 3.
+	//	if err := upgradeToVersion3(namespace); err != nil {
+	//		return err
+	//	}
+	//
+	//	// The manager is now at version 3.
+	//	version = 3
+	// }
+
+	// Ensure the manager is upraded to the latest version.  This check is
+	// to intentionally cause a failure if the manager version is updated
+	// without writing code to handle the upgrade.
+	if version < latestMgrVersion {
+		str := fmt.Sprintf("the latest manager version is %d, but the "+
+			"current version after upgrades is only %d",
+			latestMgrVersion, version)
+		return managerError(ErrUpgrade, str, nil)
 	}
 
 	return nil

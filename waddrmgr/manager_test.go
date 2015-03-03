@@ -1508,6 +1508,16 @@ func TestManager(t *testing.T) {
 	})
 	mgr.Close()
 
+	// Ensure the expected error is returned if the latest manager version
+	// constant is bumped without writing code to actually do the upgrade.
+	*waddrmgr.TstLatestMgrVersion++
+	_, err = waddrmgr.Open(mgrNamespace, pubPassphrase,
+		&chaincfg.MainNetParams, fastScrypt)
+	if !checkManagerError(t, "Upgrade needed", err, waddrmgr.ErrUpgrade) {
+		return
+	}
+	*waddrmgr.TstLatestMgrVersion--
+
 	// Open the manager and run all the tests again in open mode which
 	// avoids reinserting new addresses like the create mode tests do.
 	mgr, err = waddrmgr.Open(mgrNamespace, pubPassphrase,

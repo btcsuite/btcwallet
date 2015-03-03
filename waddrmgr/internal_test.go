@@ -33,6 +33,10 @@ import (
 // when tests are run.
 var TstMaxRecentHashes = maxRecentHashes
 
+// TstLatestMgrVersion makes the unexported latestMgrVersion variable available
+// for change when the tests are run.
+var TstLatestMgrVersion = &latestMgrVersion
+
 // Replace the Manager.newSecretKey function with the given one and calls
 // the callback function. Afterwards the original newSecretKey
 // function will be restored.

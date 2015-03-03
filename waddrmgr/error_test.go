@@ -30,6 +30,7 @@ func TestErrorCodeStringer(t *testing.T) {
 		want string
 	}{
 		{waddrmgr.ErrDatabase, "ErrDatabase"},
+		{waddrmgr.ErrUpgrade, "ErrUpgrade"},
 		{waddrmgr.ErrKeyChain, "ErrKeyChain"},
 		{waddrmgr.ErrCrypto, "ErrCrypto"},
 		{waddrmgr.ErrInvalidKeyType, "ErrInvalidKeyType"},

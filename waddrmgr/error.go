@@ -57,6 +57,11 @@ const (
 	// set to the underlying error returned from the database.
 	ErrDatabase ErrorCode = iota
 
+	// ErrUpgrade indicates the manager needs to be upgraded.  This should
+	// not happen in practice unless the version number has been increased
+	// and there is not yet any code written to upgrade.
+	ErrUpgrade
+
 	// ErrKeyChain indicates an error with the key chain typically either
 	// due to the inability to create an extended key or deriving a child
 	// extended key.  When this error code is set, the Err field of the
@@ -128,6 +133,7 @@ const (
 // Map of ErrorCode values back to their constant names for pretty printing.
 var errorCodeStrings = map[ErrorCode]string{
 	ErrDatabase:          "ErrDatabase",
+	ErrUpgrade:           "ErrUpgrade",
 	ErrKeyChain:          "ErrKeyChain",
 	ErrCrypto:            "ErrCrypto",
 	ErrInvalidKeyType:    "ErrInvalidKeyType",

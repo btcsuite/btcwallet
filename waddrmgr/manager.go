@@ -1841,8 +1841,7 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chain
 		return nil, managerError(ErrNoExist, str, nil)
 	}
 
-	// Upgrade the manager to the latest version as needed.  This includes
-	// the initial creation.
+	// Upgrade the manager to the latest version as needed.
 	if err := upgradeManager(namespace); err != nil {
 		return nil, err
 	}
@@ -1882,9 +1881,8 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
 	}
 
-	// Upgrade the manager to the latest version as needed.  This includes
-	// the initial creation.
-	if err := upgradeManager(namespace); err != nil {
+	// Perform the initial bucket creation and database namespace setup.
+	if err := createManagerNS(namespace); err != nil {
 		return nil, err
 	}
 
