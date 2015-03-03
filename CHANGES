@@ -84,8 +84,8 @@ Changes in 0.5.0 (Tue Mar 03 2015)
       controlled by the wallet and using its private key for verification
 
   - Bug fixes:
-     - Prevent an out-of-bounds panic when handling a gettransaction RPC.
-     - Prevent a panic on client disconnect (#110).
+    - Prevent an out-of-bounds panic when handling a gettransaction RPC.
+    - Prevent a panic on client disconnect (#110).
     - Prevent double spending coins when creating multiple transactions at once
       by serializing access to the transaction creation logic (#120)
     - Mark unconfirmed transaction credits as spent when another unconfirmed
