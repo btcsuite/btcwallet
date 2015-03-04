@@ -32,7 +32,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
-	"golang.org/x/crypto/ssh/terminal"
+	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
 
 // promptConsoleList prompts the user with the given prefix, list of valid

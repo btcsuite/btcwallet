@@ -8,10 +8,9 @@ import (
 	"io"
 	"runtime/debug"
 
-	"golang.org/x/crypto/nacl/secretbox"
-	"golang.org/x/crypto/scrypt"
-
 	"github.com/btcsuite/fastsha256"
+	"github.com/btcsuite/golangcrypto/nacl/secretbox"
+	"github.com/btcsuite/golangcrypto/scrypt"
 )
 
 var (
