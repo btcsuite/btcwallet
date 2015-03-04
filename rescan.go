@@ -253,11 +253,6 @@ func (w *Wallet) rescanRPCHandler() {
 // current best block in the main chain, and is considered an initial sync
 // rescan.
 func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []txstore.Credit) error {
-	// Avoid rescan if there is no work to do.
-	if len(addrs) == 0 && len(unspent) == 0 {
-		return nil
-	}
-
 	outpoints := make([]*wire.OutPoint, len(unspent))
 	for i, output := range unspent {
 		outpoints[i] = output.OutPoint()
