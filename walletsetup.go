@@ -438,3 +438,49 @@ func createWallet(cfg *config) error {
 	fmt.Println("The wallet has been created successfully.")
 	return nil
 }
+
+// createSimulationWallet is intended to be called from the rpcclient
+// and used to create a wallet for actors involved in simulations.
+func createSimulationWallet(cfg *config) error {
+	// Simulation wallet password is 'password'.
+	privPass := []byte("password")
+
+	// Public passphrase is the default.
+	pubPass := []byte(defaultPubPassphrase)
+
+	// Generate a random seed.
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	if err != nil {
+		return err
+	}
+
+	netDir := networkDir(cfg.DataDir, activeNet.Params)
+
+	// Create the wallet.
+	dbPath := filepath.Join(netDir, walletDbName)
+	fmt.Println("Creating the wallet...")
+
+	// Create the wallet database backed by bolt db.
+	db, err := walletdb.Create("bdb", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Create the address manager.
+	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+
+	manager, err := waddrmgr.Create(waddrmgrNamespace, seed, []byte(pubPass),
+		[]byte(privPass), activeNet.Params, nil)
+	if err != nil {
+		return err
+	}
+
+	manager.Close()
+
+	fmt.Println("The wallet has been created successfully.")
+	return nil
+}

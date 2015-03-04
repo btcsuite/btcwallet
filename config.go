@@ -58,6 +58,7 @@ var (
 type config struct {
 	ShowVersion      bool     `short:"V" long:"version" description:"Display version information and exit"`
 	Create           bool     `long:"create" description:"Create the wallet if it does not exist"`
+	CreateTemp       bool     `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	CAFile           string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
 	RPCConnect       string   `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334, simnet: localhost:18556)"`
 	DebugLevel       string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
@@ -366,10 +367,57 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	// Exit if you try to use a simulation wallet with a standard
+	// data directory.
+	if cfg.DataDir == defaultDataDir && cfg.CreateTemp {
+		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
+			"wallet, but failed to specify data directory!")
+		os.Exit(0)
+	}
+
+	// Exit if you try to use a simulation wallet on anything other than
+	// simnet or testnet3.
+	if !cfg.SimNet && cfg.CreateTemp {
+		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
+			"wallet for network other than simnet!")
+		os.Exit(0)
+	}
+
 	// Ensure the wallet exists or create it when the create flag is set.
 	netDir := networkDir(cfg.DataDir, activeNet.Params)
 	dbPath := filepath.Join(netDir, walletDbName)
-	if cfg.Create {
+
+	if cfg.CreateTemp && cfg.Create {
+		err := fmt.Errorf("The flags --create and --createtemp can not " +
+			"be specified together. Use --help for more information.")
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+
+	if cfg.CreateTemp {
+		tempWalletExists := false
+
+		if fileExists(dbPath) {
+			str := fmt.Sprintf("The wallet already exists. Loading this " +
+				"wallet instead.")
+			fmt.Fprintln(os.Stdout, str)
+			tempWalletExists = true
+		}
+
+		// Ensure the data directory for the network exists.
+		if err := checkCreateDir(netDir); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return nil, nil, err
+		}
+
+		if !tempWalletExists {
+			// Perform the initial wallet creation wizard.
+			if err := createSimulationWallet(&cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
+				return nil, nil, err
+			}
+		}
+	} else if cfg.Create {
 		// Error if the create flag is set and the wallet already
 		// exists.
 		if fileExists(dbPath) {
@@ -392,7 +440,6 @@ func loadConfig() (*config, []string, error) {
 
 		// Created successfully, so exit now with success.
 		os.Exit(0)
-
 	} else if !fileExists(dbPath) {
 		var err error
 		keystorePath := filepath.Join(netDir, keystore.Filename)
