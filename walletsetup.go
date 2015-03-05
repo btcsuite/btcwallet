@@ -33,6 +33,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
+	"github.com/tyler-smith/go-bip39"
 )
 
 // promptConsoleList prompts the user with the given prefix, list of valid
@@ -239,13 +240,18 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 		return nil, err
 	}
 	if !useUserSeed {
-		seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+		hexMnemonic, err := hdkeychain.GenerateSeed(16) //128 bits //hdkeychain.RecommendedSeedLen
 		if err != nil {
 			return nil, err
 		}
 
+		mnemonic, err := bip39.NewMnemonic(hexMnemonic)
+
+		seed := bip39.NewSeed(mnemonic, "") //No bip 39 password because bip39 is stupid
+
 		fmt.Println("Your wallet generation seed is:")
 		fmt.Printf("%x\n", seed)
+		fmt.Printf("%s\n", mnemonic)
 		fmt.Println("IMPORTANT: Keep the seed in a safe place as you\n" +
 			"will NOT be able to restore your wallet without it.")
 		fmt.Println("Please keep in mind that anyone who has access\n" +
@@ -271,14 +277,26 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 	}
 
 	for {
-		fmt.Print("Enter existing wallet seed: ")
+		fmt.Print("Enter existing wallet seed or mnemonic: ")
 		seedStr, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, err
 		}
 		seedStr = strings.TrimSpace(strings.ToLower(seedStr))
 
-		seed, err := hex.DecodeString(seedStr)
+		//Check if it contains a space.
+		//If it doesn't contain a space, we assume it's hex
+		//If it contains a space, we assume it's a mnemonic
+		var seed []byte
+		if strings.Contains(seedStr, " ") {
+			seed = bip39.NewSeed(seedStr, "") //No bip 39 password because bip39 is stupid
+			fmt.Printf("%x\n", seed)
+		} else {
+			seed, err = hex.DecodeString(seedStr)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
 			len(seed) > hdkeychain.MaxSeedBytes {
 
