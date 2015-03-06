@@ -3,6 +3,20 @@ User visible changes for btcwallet
   A wallet daemon for btcd, written in Go
 ============================================================================
 
+Changes in 0.5.1 (Fri Mar 06 2015)
+  - New features:
+    - Add flag (--createtemp) to create a temporary simnet wallet
+
+  - Bug fixes:
+    - Mark newly received transactions confirmed when the wallet is initially
+      created or opened with no addresses
+
+  - Notable developer-related changes:
+    - Refactor the address manager database upgrade paths for easier future
+      upgrades
+    - Private key zeroing functions consolidated into the internal zero package
+      and optimized
+
 Changes in 0.5.0 (Tue Mar 03 2015)
   - New features:
     - Add a new address manager package (waddrmgr) to replace the previous
