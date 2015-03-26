@@ -370,7 +370,11 @@ func (w *Wallet) SetChainSynced(synced bool) {
 // outputs.  This is primarely intended to provide the parameters for a
 // rescan request.
 func (w *Wallet) activeData() ([]btcutil.Address, []wtxmgr.Credit, error) {
-	addrs, err := w.Manager.AllActiveAddresses()
+	var addrs []btcutil.Address
+	err := w.Manager.ForEachActiveAddress(func(addr btcutil.Address) error {
+		addrs = append(addrs, addr)
+		return nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -669,20 +673,23 @@ func (w *Wallet) ChangePassphrase(old, new []byte) error {
 // a given account. It returns true if atleast one address in the account was
 // used and false if no address in the account was used.
 func (w *Wallet) AccountUsed(account uint32) (bool, error) {
-	addrs, err := w.Manager.AllAccountAddresses(account)
-	if err != nil {
-		return false, err
+	var used bool
+	var err error
+	merr := w.Manager.ForEachAccountAddress(account,
+		func(maddr waddrmgr.ManagedAddress) error {
+			used, err = maddr.Used()
+			if err != nil {
+				return err
+			}
+			if used {
+				return waddrmgr.Break
+			}
+			return nil
+		})
+	if merr == waddrmgr.Break {
+		merr = nil
 	}
-	for _, addr := range addrs {
-		used, err := addr.Used()
-		if err != nil {
-			return false, err
-		}
-		if used {
-			return true, nil
-		}
-	}
-	return false, nil
+	return used, merr
 }
 
 // CalculateBalance sums the amounts of all unspent transaction
@@ -1203,24 +1210,19 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
 // private keys in a wallet.
 func (w *Wallet) DumpPrivKeys() ([]string, error) {
-	addrs, err := w.Manager.AllActiveAddresses()
-	if err != nil {
-		return nil, err
-	}
-
+	var privkeys []string
 	// Iterate over each active address, appending the private key to
 	// privkeys.
-	privkeys := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
+	err := w.Manager.ForEachActiveAddress(func(addr btcutil.Address) error {
 		ma, err := w.Manager.Address(addr)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		// Only those addresses with keys needed.
 		pka, ok := ma.(waddrmgr.ManagedPubKeyAddress)
 		if !ok {
-			continue
+			return nil
 		}
 
 		wif, err := pka.ExportPrivKey()
@@ -1228,12 +1230,12 @@ func (w *Wallet) DumpPrivKeys() ([]string, error) {
 			// It would be nice to zero out the array here. However,
 			// since strings in go are immutable, and we have no
 			// control over the caller I don't think we can. :(
-			return nil, err
+			return err
 		}
 		privkeys = append(privkeys, wif.String())
-	}
-
-	return privkeys, nil
+		return nil
+	})
+	return privkeys, err
 }
 
 // DumpWIFPrivateKey returns the WIF encoded private key for a
@@ -1436,14 +1438,13 @@ func (w *Wallet) ResendUnminedTxs() {
 // SortedActivePaymentAddresses returns a slice of all active payment
 // addresses in a wallet.
 func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
-	addrs, err := w.Manager.AllActiveAddresses()
+	var addrStrs []string
+	err := w.Manager.ForEachActiveAddress(func(addr btcutil.Address) error {
+		addrStrs = append(addrStrs, addr.EncodeAddress())
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	addrStrs := make([]string, len(addrs))
-	for i, addr := range addrs {
-		addrStrs[i] = addr.EncodeAddress()
 	}
 
 	sort.Sort(sort.StringSlice(addrStrs))

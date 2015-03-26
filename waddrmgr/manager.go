@@ -1821,22 +1821,14 @@ func (m *Manager) AccountName(account uint32) (string, error) {
 	return acctName, nil
 }
 
-// AllAccounts returns a slice of all the accounts stored in the manager.
-func (m *Manager) AllAccounts() ([]uint32, error) {
+// ForEachAccount calls the given function with each account stored in the
+// manager, breaking early on error.
+func (m *Manager) ForEachAccount(fn func(account uint32) error) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
-
-	var accounts []uint32
-	err := m.namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		accounts, err = fetchAllAccounts(tx)
-		return err
+	return m.namespace.View(func(tx walletdb.Tx) error {
+		return forEachAccount(tx, fn)
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return accounts, nil
 }
 
 // LastAccount returns the last account stored in the manager.
@@ -1853,73 +1845,58 @@ func (m *Manager) LastAccount() (uint32, error) {
 	return account, err
 }
 
-// AllAccountAddresses returns a slice of addresses of an account stored in the manager.
-func (m *Manager) AllAccountAddresses(account uint32) ([]ManagedAddress, error) {
+// ForEachAccountAddress calls the given function with each address of
+// the given account stored in the manager, breaking early on error.
+func (m *Manager) ForEachAccountAddress(account uint32, fn func(maddr ManagedAddress) error) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	// Load the raw address information from the database.
-	var rowInterfaces []interface{}
-	err := m.namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		rowInterfaces, err = fetchAccountAddresses(tx, account)
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	addrs := make([]ManagedAddress, 0, len(rowInterfaces))
-	for _, rowInterface := range rowInterfaces {
-		// Create a new managed address for the specific type of address
-		// based on type.
+	addrFn := func(rowInterface interface{}) error {
 		managedAddr, err := m.rowInterfaceToManaged(rowInterface)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
-		addrs = append(addrs, managedAddr)
+		return fn(managedAddr)
 	}
 
-	return addrs, nil
+	err := m.namespace.View(func(tx walletdb.Tx) error {
+		return forEachAccountAddress(tx, account, addrFn)
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
 }
 
-// ActiveAccountAddresses returns a slice of active addresses of an account
-// stored in the manager.
+// ForEachActiveAccountAddress calls the given function with each active
+// address of the given account stored in the manager, breaking early on
+// error.
 // TODO(tuxcanfly): actually return only active addresses
-func (m *Manager) ActiveAccountAddresses(account uint32) ([]ManagedAddress, error) {
-	return m.AllAccountAddresses(account)
+func (m *Manager) ForEachActiveAccountAddress(account uint32, fn func(maddr ManagedAddress) error) error {
+	return m.ForEachAccountAddress(account, fn)
 }
 
-// AllActiveAddresses returns a slice of all addresses stored in the manager.
-func (m *Manager) AllActiveAddresses() ([]btcutil.Address, error) {
+// ForEachActiveAddress calls the given function with each active address
+// stored in the manager, breaking early on error.
+func (m *Manager) ForEachActiveAddress(fn func(addr btcutil.Address) error) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	// Load the raw address information from the database.
-	var rowInterfaces []interface{}
-	err := m.namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		rowInterfaces, err = fetchAllAddresses(tx)
-		return err
-	})
-	if err != nil {
-		return nil, maybeConvertDbError(err)
-	}
-
-	addrs := make([]btcutil.Address, 0, len(rowInterfaces))
-	for _, rowInterface := range rowInterfaces {
-		// Create a new managed address for the specific type of address
-		// based on type.
+	addrFn := func(rowInterface interface{}) error {
 		managedAddr, err := m.rowInterfaceToManaged(rowInterface)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
-		addrs = append(addrs, managedAddr.Address())
+		return fn(managedAddr.Address())
 	}
 
-	return addrs, nil
+	err := m.namespace.View(func(tx walletdb.Tx) error {
+		return forEachActiveAddress(tx, addrFn)
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
 }
 
 // selectCryptoKey selects the appropriate crypto key based on the key type. An

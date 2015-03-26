@@ -1636,17 +1636,13 @@ func GetAddressesByAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd interf
 		return nil, err
 	}
 
-	addrs, err := w.Manager.AllAccountAddresses(account)
-	if err != nil {
-		return nil, err
-	}
-
-	addrStrs := make([]string, len(addrs))
-	for i, addr := range addrs {
-		addrStrs[i] = addr.Address().EncodeAddress()
-	}
-
-	return addrStrs, nil
+	var addrStrs []string
+	err = w.Manager.ForEachAccountAddress(account,
+		func(maddr waddrmgr.ManagedAddress) error {
+			addrStrs = append(addrStrs, maddr.Address().EncodeAddress())
+			return nil
+		})
+	return addrStrs, err
 }
 
 // GetBalance handles a getbalance request by returning the balance for an
@@ -2263,7 +2259,11 @@ func ListAccounts(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (i
 	cmd := icmd.(*btcjson.ListAccountsCmd)
 
 	accountBalances := map[string]float64{}
-	accounts, err := w.Manager.AllAccounts()
+	var accounts []uint32
+	err := w.Manager.ForEachAccount(func(account uint32) error {
+		accounts = append(accounts, account)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -2302,7 +2302,11 @@ func ListLockUnspent(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{})
 func ListReceivedByAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListReceivedByAccountCmd)
 
-	accounts, err := w.Manager.AllAccounts()
+	var accounts []uint32
+	err := w.Manager.ForEachAccount(func(account uint32) error {
+		accounts = append(accounts, account)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}

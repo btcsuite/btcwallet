@@ -577,23 +577,18 @@ func serializeBIP0044AccountRow(encryptedPubKey,
 	return rawData
 }
 
-// fetchAllAccounts loads information about all accounts from the database.
-// The returned value is a slice of account numbers which can be used to load
-// the respective account rows.
-// TODO(tuxcanfly): Switch over to an iterator to support the maximum of 2^31-2 accounts
-func fetchAllAccounts(tx walletdb.Tx) ([]uint32, error) {
+// forEachAccount calls the given function with each account stored in
+// the manager, breaking early on error.
+func forEachAccount(tx walletdb.Tx, fn func(account uint32) error) error {
 	bucket := tx.RootBucket().Bucket(acctBucketName)
 
-	var accounts []uint32
-	err := bucket.ForEach(func(k, v []byte) error {
+	return bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil {
 			return nil
 		}
-		accounts = append(accounts, binary.LittleEndian.Uint32(k))
-		return nil
+		return fn(binary.LittleEndian.Uint32(k))
 	})
-	return accounts, err
 }
 
 // fetchLastAccount retreives the last account from the database.
@@ -1187,19 +1182,17 @@ func fetchAddrAccount(tx walletdb.Tx, addressID []byte) (uint32, error) {
 	return binary.LittleEndian.Uint32(val), nil
 }
 
-// fetchAccountAddresses loads information about addresses of an account from the database.
-// The returned value is a slice address rows for each specific address type.
-// The caller should use type assertions to ascertain the types.
-func fetchAccountAddresses(tx walletdb.Tx, account uint32) ([]interface{}, error) {
+// forEachAccountAddress calls the given function with each address of
+// the given account stored in the manager, breaking early on error.
+func forEachAccountAddress(tx walletdb.Tx, account uint32, fn func(rowInterface interface{}) error) error {
 	bucket := tx.RootBucket().Bucket(addrAcctIdxBucketName).
 		Bucket(uint32ToBytes(account))
 	// if index bucket is missing the account, there hasn't been any address
 	// entries yet
 	if bucket == nil {
-		return nil, nil
+		return nil
 	}
 
-	var addrs []interface{}
 	err := bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil {
@@ -1216,24 +1209,19 @@ func fetchAccountAddresses(tx walletdb.Tx, account uint32) ([]interface{}, error
 			return err
 		}
 
-		addrs = append(addrs, addrRow)
-		return nil
+		return fn(addrRow)
 	})
 	if err != nil {
-		return nil, maybeConvertDbError(err)
+		return maybeConvertDbError(err)
 	}
-
-	return addrs, nil
+	return nil
 }
 
-// fetchAllAddresses loads information about all addresses from the database.
-// The returned value is a slice of address rows for each specific address type.
-// The caller should use type assertions to ascertain the types.
-// TODO(tuxcanfly): Switch over to an iterator to support the maximum of 2^62 - 2^32 - 2^31 + 2 addrs
-func fetchAllAddresses(tx walletdb.Tx) ([]interface{}, error) {
+// forEachActiveAddress calls the given function with each active address
+// stored in the manager, breaking early on error.
+func forEachActiveAddress(tx walletdb.Tx, fn func(rowInterface interface{}) error) error {
 	bucket := tx.RootBucket().Bucket(addrBucketName)
 
-	var addrs []interface{}
 	err := bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil {
@@ -1253,14 +1241,12 @@ func fetchAllAddresses(tx walletdb.Tx) ([]interface{}, error) {
 			return err
 		}
 
-		addrs = append(addrs, addrRow)
-		return nil
+		return fn(addrRow)
 	})
 	if err != nil {
-		return nil, maybeConvertDbError(err)
+		return maybeConvertDbError(err)
 	}
-
-	return addrs, nil
+	return nil
 }
 
 // deletePrivateKeys removes all private key material from the database.

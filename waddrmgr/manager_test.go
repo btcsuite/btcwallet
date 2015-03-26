@@ -1267,9 +1267,10 @@ func testRenameAccount(tc *testContext) bool {
 	return true
 }
 
-// testAllAccounts tests the retrieve all accounts func of the address manager works
-// as expected.
-func testAllAccounts(tc *testContext) bool {
+// testForEachAccount tests the retrieve all accounts func of the address
+// manager works as expected.
+func testForEachAccount(tc *testContext) bool {
+	prefix := testNamePrefix(tc) + " testForEachAccount"
 	expectedAccounts := []uint32{0, 1}
 	if !tc.create {
 		// Existing wallet manager will have 3 accounts
@@ -1277,38 +1278,47 @@ func testAllAccounts(tc *testContext) bool {
 	}
 	// Imported account
 	expectedAccounts = append(expectedAccounts, waddrmgr.ImportedAddrAccount)
-	accounts, err := tc.manager.AllAccounts()
+	var accounts []uint32
+	err := tc.manager.ForEachAccount(func(account uint32) error {
+		accounts = append(accounts, account)
+		return nil
+	})
 	if err != nil {
-		tc.t.Errorf("AllAccounts: unexpected error: %v", err)
+		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
 		return false
 	}
 	if len(accounts) != len(expectedAccounts) {
-		tc.t.Errorf("AllAccounts: unexpected number of accounts - got "+
-			"%d, want %d", len(accounts),
+		tc.t.Errorf("%s: unexpected number of accounts - got "+
+			"%d, want %d", prefix, len(accounts),
 			len(expectedAccounts))
 		return false
 	}
 	for i, account := range accounts {
 		if expectedAccounts[i] != account {
-			tc.t.Errorf("AllAccounts %s: "+
+			tc.t.Errorf("%s #%d: "+
 				"account mismatch -- got %d, "+
-				"want %d", i, account, expectedAccounts[i])
+				"want %d", prefix, i, account, expectedAccounts[i])
 		}
 	}
 	return true
 }
 
-// testAllAccountAddresses tests the account addresses returned by the manager
-// API.
-func testAllAccountAddresses(tc *testContext) bool {
-	prefix := testNamePrefix(tc) + " testAllAccountAddresses"
+// testForEachAccountAddress tests that iterating through the given
+// account addresses using the manager API works as expected.
+func testForEachAccountAddress(tc *testContext) bool {
+	prefix := testNamePrefix(tc) + " testForEachAccountAddress"
 	// Make a map of expected addresses
 	expectedAddrMap := make(map[string]*expectedAddr, len(expectedAddrs))
 	for i := 0; i < len(expectedAddrs); i++ {
 		expectedAddrMap[expectedAddrs[i].address] = &expectedAddrs[i]
 	}
 
-	addrs, err := tc.manager.AllAccountAddresses(tc.account)
+	var addrs []waddrmgr.ManagedAddress
+	err := tc.manager.ForEachAccountAddress(tc.account,
+		func(maddr waddrmgr.ManagedAddress) error {
+			addrs = append(addrs, maddr)
+			return nil
+		})
 	if err != nil {
 		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
 		return false
@@ -1349,8 +1359,8 @@ func testManagerAPI(tc *testContext) {
 	tc.account = 0
 	testNewAccount(tc)
 	testLookupAccount(tc)
-	testAllAccounts(tc)
-	testAllAccountAddresses(tc)
+	testForEachAccount(tc)
+	testForEachAccountAddress(tc)
 
 	// Rename account 1 "acct-create"
 	tc.account = 1
