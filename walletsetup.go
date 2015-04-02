@@ -26,14 +26,87 @@ import (
 	"strings"
 
 	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/legacy/keystore"
+	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
+
+var (
+	// waddrmgrNamespaceKey is the namespace key for the waddrmgr package.
+	waddrmgrNamespaceKey = []byte("waddrmgr")
+)
+
+// networkDir returns the directory name of a network directory to hold wallet
+// files.
+func networkDir(dataDir string, chainParams *chaincfg.Params) string {
+	netname := chainParams.Name
+
+	// For now, we must always name the testnet data directory as "testnet"
+	// and not "testnet3" or any other version, as the chaincfg testnet3
+	// paramaters will likely be switched to being named "testnet3" in the
+	// future.  This is done to future proof that change, and an upgrade
+	// plan to move the testnet3 data directory can be worked out later.
+	if chainParams.Net == wire.TestNet3 {
+		netname = "testnet"
+	}
+
+	return filepath.Join(dataDir, netname)
+}
+
+// promptSeed is used to prompt for the wallet seed which maybe required during
+// upgrades.
+func promptSeed() ([]byte, error) {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Enter existing wallet seed: ")
+		seedStr, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		seedStr = strings.TrimSpace(strings.ToLower(seedStr))
+
+		seed, err := hex.DecodeString(seedStr)
+		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
+			len(seed) > hdkeychain.MaxSeedBytes {
+
+			fmt.Printf("Invalid seed specified.  Must be a "+
+				"hexadecimal value that is at least %d bits and "+
+				"at most %d bits\n", hdkeychain.MinSeedBytes*8,
+				hdkeychain.MaxSeedBytes*8)
+			continue
+		}
+
+		return seed, nil
+	}
+}
+
+// promptPrivPassPhrase is used to prompt for the private passphrase which maybe
+// required during upgrades.
+func promptPrivPassPhrase() ([]byte, error) {
+	prompt := "Enter the private passphrase of your wallet: "
+	for {
+		fmt.Print(prompt)
+		pass, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+		if err != nil {
+			return nil, err
+		}
+		fmt.Print("\n")
+		pass = bytes.TrimSpace(pass)
+		if len(pass) == 0 {
+			continue
+		}
+
+		return pass, nil
+	}
+}
 
 // promptConsoleList prompts the user with the given prefix, list of valid
 // responses, and default list entry to use.  The function will repeat the
@@ -483,4 +556,95 @@ func createSimulationWallet(cfg *config) error {
 
 	fmt.Println("The wallet has been created successfully.")
 	return nil
+}
+
+// openDb opens and returns a *walletdb.DB (boltdb here) given the
+// directory and dbname
+func openDb(directory string, dbname string) (*walletdb.DB, error) {
+	dbPath := filepath.Join(directory, dbname)
+
+	// Ensure that the network directory exists.
+	if err := checkCreateDir(directory); err != nil {
+		return nil, err
+	}
+
+	// Open the database using the boltdb backend.
+	db, err := walletdb.Open("bdb", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	return &db, nil
+}
+
+// openWaddrmgr returns an address manager given a database, namespace,
+// public pass and the chain params
+// It prompts for seed and private passphrase required in case of upgrades
+func openWaddrmgr(db *walletdb.DB, namespaceKey []byte, pass string,
+	chainParams *chaincfg.Params) (*waddrmgr.Manager, error) {
+
+	// Get the namespace for the address manager.
+	namespace, err := (*db).Namespace(namespaceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	config := &waddrmgr.Options{
+		ObtainSeed:        promptSeed,
+		ObtainPrivatePass: promptPrivPassPhrase,
+	}
+	// Open address manager and transaction store.
+	//	var txs *txstore.Store
+	return waddrmgr.Open(namespace, []byte(pass),
+		chainParams, config)
+}
+
+// openWallet returns a wallet. The function handles opening an existing wallet
+// database, the address manager and the transaction store and uses the values
+// to open a wallet.Wallet
+func openWallet() (*wallet.Wallet, error) {
+	netdir := networkDir(cfg.DataDir, activeNet.Params)
+
+	db, err := openDb(netdir, walletDbName)
+	if err != nil {
+		log.Errorf("%v", err)
+		return nil, err
+	}
+
+	var txs *txstore.Store
+	mgr, err := openWaddrmgr(db, waddrmgrNamespaceKey, cfg.WalletPass,
+		activeNet.Params)
+	if err == nil {
+		txs, err = txstore.OpenDir(netdir)
+	}
+	if err != nil {
+		// Special case: if the address manager was successfully read
+		// (mgr != nil) but the transaction store was not, create a
+		// new txstore and write it out to disk.  Write an unsynced
+		// manager back to disk so on future opens, the empty txstore
+		// is not considered fully synced.
+		if mgr == nil {
+			log.Errorf("%v", err)
+			return nil, err
+		}
+
+		txs = txstore.New(netdir)
+		txs.MarkDirty()
+		err = txs.WriteIfDirty()
+		if err != nil {
+			log.Errorf("%v", err)
+			return nil, err
+		}
+		mgr.SetSyncedTo(nil)
+	}
+
+	walletConfig := &wallet.Config{
+		Db:          db,
+		TxStore:     txs,
+		Waddrmgr:    mgr,
+		ChainParams: activeNet.Params,
+	}
+	log.Infof("Opened wallet files") // TODO: log balance? last sync height?
+	w := wallet.Open(walletConfig)
+
+	return w, nil
 }

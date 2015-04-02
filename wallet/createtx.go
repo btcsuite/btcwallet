@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package main
+package wallet
 
 import (
 	"errors"
@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -108,9 +109,9 @@ const defaultFeeIncrement = 1e3
 // CreatedTx holds the state of a newly-created transaction and the change
 // output (if one was added).
 type CreatedTx struct {
-	tx          *btcutil.Tx
-	changeAddr  btcutil.Address
-	changeIndex int // negative if no change
+	Tx          *btcutil.Tx
+	ChangeAddr  btcutil.Address
+	ChangeIndex int // negative if no change
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
@@ -150,7 +151,7 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, account uint32, minc
 		return nil, err
 	}
 
-	return createTx(eligible, pairs, bs, w.FeeIncrement, w.Manager, account, w.NewChangeAddress)
+	return createTx(eligible, pairs, bs, w.FeeIncrement, w.Manager, account, w.NewChangeAddress, w.chainParams, w.DisallowFree)
 }
 
 // createTx selects inputs (from the given slice of eligible utxos)
@@ -158,18 +159,14 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, account uint32, minc
 // the mining fee. It then creates and returns a CreatedTx containing
 // the selected inputs and the given outputs, validating it (using
 // validateMsgTx) as well.
-func createTx(
-	eligible []txstore.Credit,
-	outputs map[string]btcutil.Amount,
-	bs *waddrmgr.BlockStamp,
-	feeIncrement btcutil.Amount,
-	mgr *waddrmgr.Manager,
-	account uint32,
-	changeAddress func(account uint32) (btcutil.Address, error)) (
-	*CreatedTx, error) {
+func createTx(eligible []txstore.Credit,
+	outputs map[string]btcutil.Amount, bs *waddrmgr.BlockStamp,
+	feeIncrement btcutil.Amount, mgr *waddrmgr.Manager, account uint32,
+	changeAddress func(account uint32) (btcutil.Address, error),
+	chainParams *chaincfg.Params, disallowFree bool) (*CreatedTx, error) {
 
 	msgtx := wire.NewMsgTx()
-	minAmount, err := addOutputs(msgtx, outputs)
+	minAmount, err := addOutputs(msgtx, outputs, chainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +193,7 @@ func createTx(
 	// Get an initial fee estimate based on the number of selected inputs
 	// and added outputs, with no change.
 	szEst := estimateTxSize(len(inputs), len(msgtx.TxOut))
-	feeEst := minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
+	feeEst := minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
 
 	// Now make sure the sum amount of all our inputs is enough for the
 	// sum amount of all outputs plus the fee. If necessary we add more,
@@ -210,7 +207,7 @@ func createTx(
 		msgtx.AddTxIn(wire.NewTxIn(input.OutPoint(), nil))
 		szEst += txInEstimate
 		totalAdded += input.Amount()
-		feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
+		feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
 	}
 
 	var changeAddr btcutil.Address
@@ -233,7 +230,7 @@ func createTx(
 			}
 		}
 
-		if err = signMsgTx(msgtx, inputs, mgr); err != nil {
+		if err = signMsgTx(msgtx, inputs, mgr, chainParams); err != nil {
 			return nil, err
 		}
 
@@ -261,7 +258,7 @@ func createTx(
 			msgtx.AddTxIn(wire.NewTxIn(input.OutPoint(), nil))
 			szEst += txInEstimate
 			totalAdded += input.Amount()
-			feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height)
+			feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
 		}
 	}
 
@@ -270,9 +267,9 @@ func createTx(
 	}
 
 	info := &CreatedTx{
-		tx:          btcutil.NewTx(msgtx),
-		changeAddr:  changeAddr,
-		changeIndex: changeIdx,
+		Tx:          btcutil.NewTx(msgtx),
+		ChangeAddr:  changeAddr,
+		ChangeIndex: changeIdx,
 	}
 	return info, nil
 }
@@ -296,14 +293,14 @@ func addChange(msgtx *wire.MsgTx, change btcutil.Amount, changeAddr btcutil.Addr
 
 // addOutputs adds the given address/amount pairs as outputs to msgtx,
 // returning their total amount.
-func addOutputs(msgtx *wire.MsgTx, pairs map[string]btcutil.Amount) (btcutil.Amount, error) {
+func addOutputs(msgtx *wire.MsgTx, pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) (btcutil.Amount, error) {
 	var minAmount btcutil.Amount
 	for addrStr, amt := range pairs {
 		if amt <= 0 {
 			return minAmount, ErrNonPositiveAmount
 		}
 		minAmount += amt
-		addr, err := btcutil.DecodeAddress(addrStr, activeNet.Params)
+		addr, err := btcutil.DecodeAddress(addrStr, chainParams)
 		if err != nil {
 			return minAmount, fmt.Errorf("cannot decode address: %s", err)
 		}
@@ -364,7 +361,7 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int, bs *waddrmgr.B
 // signMsgTx sets the SignatureScript for every item in msgtx.TxIn.
 // It must be called every time a msgtx is changed.
 // Only P2PKH outputs are supported at this point.
-func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Manager) error {
+func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Manager, chainParams *chaincfg.Params) error {
 	if len(prevOutputs) != len(msgtx.TxIn) {
 		return fmt.Errorf(
 			"Number of prevOutputs (%d) does not match number of tx inputs (%d)",
@@ -373,7 +370,7 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Ma
 	for i, output := range prevOutputs {
 		// Errors don't matter here, as we only consider the
 		// case where len(addrs) == 1.
-		_, addrs, _, _ := output.Addresses(activeNet.Params)
+		_, addrs, _, _ := output.Addresses(chainParams)
 		if len(addrs) != 1 {
 			continue
 		}
@@ -425,9 +422,9 @@ func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
 // s less than 1 kilobyte and none of the outputs contain a value
 // less than 1 bitcent. Otherwise, the fee will be calculated using
 // incr, incrementing the fee for each kilobyte of transaction.
-func minimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutputs []txstore.Credit, height int32) btcutil.Amount {
+func minimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutputs []txstore.Credit, height int32, disallowFree bool) btcutil.Amount {
 	allowFree := false
-	if !cfg.DisallowFree {
+	if !disallowFree {
 		allowFree = allowNoFeeTx(height, prevOutputs, txLen)
 	}
 	fee := feeForSize(incr, txLen)

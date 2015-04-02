@@ -14,10 +14,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package main
+package wallet
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
@@ -27,7 +26,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,12 +34,14 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/golangcrypto/ssh/terminal"
+)
+
+const (
+	walletDbWatchingOnlyName = "wowallet.db"
 )
 
 // ErrNotSynced describes an error where an operation cannot complete
@@ -54,82 +54,10 @@ var (
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 )
 
-const (
-	// defaultPubPassphrase is the default public wallet passphrase which is
-	// used when the user indicates they do not want additional protection
-	// provided by having all public data in the wallet encrypted by a
-	// passphrase only known to them.
-	defaultPubPassphrase = "public"
+type noopLocker struct{}
 
-	// maxEmptyAccounts is the number of accounts to scan even if they have no
-	// transaction history. This is a deviation from BIP044 to make account
-	// creation more easier by allowing a limited number of empty accounts.
-	maxEmptyAccounts = 100
-)
-
-// promptSeed is used to prompt for the wallet seed which maybe required during
-// upgrades.
-func promptSeed() ([]byte, error) {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("Enter existing wallet seed: ")
-		seedStr, err := reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		seedStr = strings.TrimSpace(strings.ToLower(seedStr))
-
-		seed, err := hex.DecodeString(seedStr)
-		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
-			len(seed) > hdkeychain.MaxSeedBytes {
-
-			fmt.Printf("Invalid seed specified.  Must be a "+
-				"hexadecimal value that is at least %d bits and "+
-				"at most %d bits\n", hdkeychain.MinSeedBytes*8,
-				hdkeychain.MaxSeedBytes*8)
-			continue
-		}
-
-		return seed, nil
-	}
-}
-
-// promptPrivPassPhrase is used to prompt for the private passphrase which maybe
-// required during upgrades.
-func promptPrivPassPhrase() ([]byte, error) {
-	prompt := "Enter the private passphrase of your wallet: "
-	for {
-		fmt.Print(prompt)
-		pass, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return nil, err
-		}
-		fmt.Print("\n")
-		pass = bytes.TrimSpace(pass)
-		if len(pass) == 0 {
-			continue
-		}
-
-		return pass, nil
-	}
-}
-
-// networkDir returns the directory name of a network directory to hold wallet
-// files.
-func networkDir(dataDir string, chainParams *chaincfg.Params) string {
-	netname := chainParams.Name
-
-	// For now, we must always name the testnet data directory as "testnet"
-	// and not "testnet3" or any other version, as the chaincfg testnet3
-	// paramaters will likely be switched to being named "testnet3" in the
-	// future.  This is done to future proof that change, and an upgrade
-	// plan to move the testnet3 data directory can be worked out later.
-	if chainParams.Net == wire.TestNet3 {
-		netname = "testnet"
-	}
-
-	return filepath.Join(dataDir, netname)
-}
+func (noopLocker) Lock()   {}
+func (noopLocker) Unlock() {}
 
 // Wallet is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style key store
@@ -147,6 +75,7 @@ type Wallet struct {
 
 	lockedOutpoints map[wire.OutPoint]struct{}
 	FeeIncrement    btcutil.Amount
+	DisallowFree    bool
 
 	// Channels for rescan processing.  Requests are added and merged with
 	// any waiting requests, before being sent to another goroutine to
@@ -177,14 +106,17 @@ type Wallet struct {
 	unconfirmedBalance chan btcutil.Amount
 	notificationLock   sync.Locker
 
-	wg   sync.WaitGroup
-	quit chan struct{}
+	chainParams *chaincfg.Params
+	Config      *Config
+	wg          sync.WaitGroup
+	quit        chan struct{}
 }
 
 // newWallet creates a new Wallet structure with the provided address manager
 // and transaction store.
-func newWallet(mgr *waddrmgr.Manager, txs *txstore.Store) *Wallet {
+func newWallet(mgr *waddrmgr.Manager, txs *txstore.Store, db *walletdb.DB) *Wallet {
 	return &Wallet{
+		db:                  *db,
 		Manager:             mgr,
 		TxStore:             txs,
 		chainSvrLock:        new(sync.Mutex),
@@ -231,7 +163,7 @@ func (w *Wallet) updateNotificationLock() {
 // with the given credit.
 // If no account is found, ErrAccountNotFound is returned.
 func (w *Wallet) CreditAccount(c txstore.Credit) (uint32, error) {
-	_, addrs, _, _ := c.Addresses(activeNet.Params)
+	_, addrs, _, _ := c.Addresses(w.chainParams)
 	addr := addrs[0]
 	return w.Manager.AddrAccount(addr)
 }
@@ -328,7 +260,7 @@ func (w *Wallet) markAddrsUsed(t *txstore.TxRecord) error {
 	for _, c := range t.Credits() {
 		// Errors don't matter here.  If addrs is nil, the
 		// range below does nothing.
-		_, addrs, _, _ := c.Addresses(activeNet.Params)
+		_, addrs, _, _ := c.Addresses(w.chainParams)
 		for _, addr := range addrs {
 			addressID := addr.ScriptAddress()
 			if err := w.Manager.MarkUsed(addressID); err != nil {
@@ -942,7 +874,7 @@ func (w *Wallet) ListAddressTransactions(pkHashes map[string]struct{}) (
 		for _, c := range r.Credits() {
 			// We only care about the case where len(addrs) == 1,
 			// and err will never be non-nil in that case.
-			_, addrs, _, _ := c.Addresses(activeNet.Params)
+			_, addrs, _, _ := c.Addresses(w.chainParams)
 			if len(addrs) != 1 {
 				continue
 			}
@@ -1032,7 +964,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int,
 			return nil, err
 		}
 
-		_, addrs, _, _ := credit.Addresses(activeNet.Params)
+		_, addrs, _, _ := credit.Addresses(w.chainParams)
 		if filter {
 			for _, addr := range addrs {
 				_, ok := addresses[addr.EncodeAddress()]
@@ -1131,7 +1063,7 @@ func (w *Wallet) ImportPrivateKey(wif *btcutil.WIF, bs *waddrmgr.BlockStamp,
 	// specified.
 	if bs == nil {
 		bs = &waddrmgr.BlockStamp{
-			Hash:   *activeNet.Params.GenesisHash,
+			Hash:   *w.chainParams.GenesisHash,
 			Height: 0,
 		}
 	}
@@ -1167,7 +1099,7 @@ func (w *Wallet) ImportPrivateKey(wif *btcutil.WIF, bs *waddrmgr.BlockStamp,
 
 // ExportWatchingWallet returns a watching-only version of the wallet serialized
 // in a map.
-func (w *Wallet) ExportWatchingWallet() (map[string]string, error) {
+func (w *Wallet) ExportWatchingWallet(pubPass string) (map[string]string, error) {
 	tmpDir, err := ioutil.TempDir("", "btcwallet")
 	if err != nil {
 		return nil, err
@@ -1200,8 +1132,8 @@ func (w *Wallet) ExportWatchingWallet() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	woMgr, err := waddrmgr.Open(namespace, []byte(cfg.WalletPass),
-		activeNet.Params, nil)
+	woMgr, err := waddrmgr.Open(namespace, []byte(pubPass),
+		w.chainParams, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1408,7 +1340,7 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, confirms int) (btcut
 				continue
 			}
 
-			_, addrs, _, err := c.Addresses(activeNet.Params)
+			_, addrs, _, err := c.Addresses(w.chainParams)
 			// An error creating addresses from the output script only
 			// indicates a non-standard script, so ignore this credit.
 			if err != nil {
@@ -1437,60 +1369,15 @@ func (w *Wallet) TxRecord(txSha *wire.ShaHash) (r *txstore.TxRecord, ok bool) {
 	return nil, false
 }
 
-// openWallet opens a wallet from disk.
-func openWallet() (*Wallet, error) {
-	netdir := networkDir(cfg.DataDir, activeNet.Params)
-	dbPath := filepath.Join(netdir, walletDbName)
+// Db returns wallet db being used by a wallet
+func (w *Wallet) Db() walletdb.DB {
+	return w.db
+}
 
-	// Ensure that the network directory exists.
-	if err := checkCreateDir(netdir); err != nil {
-		return nil, err
-	}
+// Open opens a wallet from disk.
+func Open(config *Config) *Wallet {
+	wallet := newWallet(config.Waddrmgr, config.TxStore, config.Db)
+	wallet.chainParams = config.ChainParams
 
-	// Open the database using the boltdb backend.
-	db, err := walletdb.Open("bdb", dbPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the namespace for the address manager.
-	namespace, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-
-	// Open address manager and transaction store.
-	var txs *txstore.Store
-	config := &waddrmgr.Options{
-		ObtainSeed:        promptSeed,
-		ObtainPrivatePass: promptPrivPassPhrase,
-	}
-	mgr, err := waddrmgr.Open(namespace, []byte(cfg.WalletPass),
-		activeNet.Params, config)
-	if err == nil {
-		txs, err = txstore.OpenDir(netdir)
-	}
-	if err != nil {
-		// Special case: if the address manager was successfully read
-		// (mgr != nil) but the transaction store was not, create a
-		// new txstore and write it out to disk.  Write an unsynced
-		// manager back to disk so on future opens, the empty txstore
-		// is not considered fully synced.
-		if mgr == nil {
-			return nil, err
-		}
-
-		txs = txstore.New(netdir)
-		txs.MarkDirty()
-		err = txs.WriteIfDirty()
-		if err != nil {
-			return nil, err
-		}
-		mgr.SetSyncedTo(nil)
-	}
-
-	log.Infof("Opened wallet files") // TODO: log balance? last sync height?
-	wallet := newWallet(mgr, txs)
-	wallet.db = db
-	return wallet, nil
+	return wallet
 }

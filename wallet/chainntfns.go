@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package main
+package wallet
 
 import (
 	"github.com/btcsuite/btcd/txscript"
@@ -120,7 +120,7 @@ func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
 		// Errors don't matter here.  If addrs is nil, the range below
 		// does nothing.
 		_, addrs, _, _ := txscript.ExtractPkScriptAddrs(txOut.PkScript,
-			activeNet.Params)
+			w.chainParams)
 		insert := false
 		for _, addr := range addrs {
 			_, err := w.Manager.Address(addr)

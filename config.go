@@ -24,24 +24,33 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/legacy/keystore"
 	flags "github.com/btcsuite/go-flags"
 )
 
 const (
-	defaultCAFilename        = "btcd.cert"
-	defaultConfigFilename    = "btcwallet.conf"
-	defaultBtcNet            = wire.TestNet3
-	defaultLogLevel          = "info"
-	defaultLogDirname        = "logs"
-	defaultLogFilename       = "btcwallet.log"
-	defaultDisallowFree      = false
-	defaultRPCMaxClients     = 10
-	defaultRPCMaxWebsockets  = 25
-	walletDbName             = "wallet.db"
-	walletDbWatchingOnlyName = "wowallet.db"
+	defaultCAFilename       = "btcd.cert"
+	defaultConfigFilename   = "btcwallet.conf"
+	defaultLogLevel         = "info"
+	defaultLogDirname       = "logs"
+	defaultLogFilename      = "btcwallet.log"
+	defaultDisallowFree     = false
+	defaultRPCMaxClients    = 10
+	defaultRPCMaxWebsockets = 25
+
+	// defaultPubPassphrase is the default public wallet passphrase which is
+	// used when the user indicates they do not want additional protection
+	// provided by having all public data in the wallet encrypted by a
+	// passphrase only known to them.
+	defaultPubPassphrase = "public"
+
+	// maxEmptyAccounts is the number of accounts to scan even if they have no
+	// transaction history. This is a deviation from BIP044 to make account
+	// creation easier by allowing a limited number of empty accounts.
+	maxEmptyAccounts = 100
+
+	walletDbName = "wallet.db"
 )
 
 var (

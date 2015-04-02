@@ -28,8 +28,7 @@ import (
 )
 
 var (
-	cfg          *config
-	shutdownChan = make(chan struct{})
+	cfg *config
 )
 
 func main() {
@@ -75,7 +74,7 @@ func walletMain() error {
 		log.Errorf("%v", err)
 		return err
 	}
-	defer wallet.db.Close()
+	defer wallet.Db().Close()
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client

@@ -1,4 +1,4 @@
-package main
+package wallet
 
 import (
 	"encoding/hex"
@@ -8,6 +8,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -56,7 +57,7 @@ var fastScrypt = &waddrmgr.Options{
 func Test_addOutputs(t *testing.T) {
 	msgtx := wire.NewMsgTx()
 	pairs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1}
-	if _, err := addOutputs(msgtx, pairs); err != nil {
+	if _, err := addOutputs(msgtx, pairs, &chaincfg.TestNet3Params); err != nil {
 		t.Fatal(err)
 	}
 	if len(msgtx.TxOut) != 2 {
@@ -70,11 +71,10 @@ func Test_addOutputs(t *testing.T) {
 }
 
 func TestCreateTx(t *testing.T) {
-	cfg = &config{DisallowFree: false}
 	bs := &waddrmgr.BlockStamp{Height: 11111}
 	mgr := newManager(t, txInfo.privKeys, bs)
 	account := uint32(0)
-	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
+	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", &chaincfg.TestNet3Params)
 	var tstChangeAddress = func(account uint32) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
@@ -83,17 +83,17 @@ func TestCreateTx(t *testing.T) {
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
 	// Now create a new TX sending 25e6 satoshis to the following addresses:
 	outputs := map[string]btcutil.Amount{outAddr1: 15e6, outAddr2: 10e6}
-	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, account, tstChangeAddress)
+	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, account, tstChangeAddress, &chaincfg.TestNet3Params, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if tx.changeAddr.String() != changeAddr.String() {
+	if tx.ChangeAddr.String() != changeAddr.String() {
 		t.Fatalf("Unexpected change address; got %v, want %v",
-			tx.changeAddr.String(), changeAddr.String())
+			tx.ChangeAddr.String(), changeAddr.String())
 	}
 
-	msgTx := tx.tx.MsgTx()
+	msgTx := tx.Tx.MsgTx()
 	if len(msgTx.TxOut) != 3 {
 		t.Fatalf("Unexpected number of outputs; got %d, want 3", len(msgTx.TxOut))
 	}
@@ -121,17 +121,16 @@ func TestCreateTx(t *testing.T) {
 }
 
 func TestCreateTxInsufficientFundsError(t *testing.T) {
-	cfg = &config{DisallowFree: false}
 	outputs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1e9}
 	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1})
 	bs := &waddrmgr.BlockStamp{Height: 11111}
 	account := uint32(0)
-	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", activeNet.Params)
+	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", &chaincfg.TestNet3Params)
 	var tstChangeAddress = func(account uint32) (btcutil.Address, error) {
 		return changeAddr, nil
 	}
 
-	_, err := createTx(eligible, outputs, bs, defaultFeeIncrement, nil, account, tstChangeAddress)
+	_, err := createTx(eligible, outputs, bs, defaultFeeIncrement, nil, account, tstChangeAddress, &chaincfg.TestNet3Params, false)
 
 	if err == nil {
 		t.Error("Expected InsufficientFundsError, got no error")
@@ -144,7 +143,7 @@ func TestCreateTxInsufficientFundsError(t *testing.T) {
 func checkOutputsMatch(t *testing.T, msgtx *wire.MsgTx, expected map[string]btcutil.Amount) {
 	// This is a bit convoluted because the index of the change output is randomized.
 	for addrStr, v := range expected {
-		addr, err := btcutil.DecodeAddress(addrStr, activeNet.Params)
+		addr, err := btcutil.DecodeAddress(addrStr, &chaincfg.TestNet3Params)
 		if err != nil {
 			t.Fatalf("Cannot decode address: %v", err)
 		}
@@ -187,7 +186,7 @@ func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddr
 	pubPassphrase := []byte("pub")
 	privPassphrase := []byte("priv")
 	mgr, err := waddrmgr.Create(namespace, seed, pubPassphrase,
-		privPassphrase, activeNet.Params, fastScrypt)
+		privPassphrase, &chaincfg.TestNet3Params, fastScrypt)
 	if err != nil {
 		t.Fatal(err)
 	}
