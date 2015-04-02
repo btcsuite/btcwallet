@@ -1756,7 +1756,7 @@ func (m *Manager) RenameAccount(account uint32, name string) error {
 			err = managerError(ErrDatabase, str, nil)
 		}
 		// Remove the old name key from the accout id index
-		if err = deleteAccountIdIndex(tx, account); err != nil {
+		if err = deleteAccountIDIndex(tx, account); err != nil {
 			return err
 		}
 		// Remove the old name key from the accout name index
