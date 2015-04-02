@@ -96,7 +96,8 @@ func (c byAddress) Less(i, j int) bool {
 }
 
 // getEligibleInputs returns eligible inputs with addresses between startAddress
-// and the last used address of lastSeriesID.
+// and the last used address of lastSeriesID. They're reverse ordered based on
+// their address.
 func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAddress,
 	lastSeriesID uint32, dustThreshold btcutil.Amount, chainHeight int32,
 	minConf int) ([]credit, error) {
@@ -125,8 +126,6 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 					eligibles = append(eligibles, candidate)
 				}
 			}
-			// Make sure the eligibles are correctly sorted.
-			sort.Sort(byAddress(eligibles))
 			inputs = append(inputs, eligibles...)
 		}
 		nAddr, err := nextAddr(p, address.seriesID, address.branch, address.index, lastSeriesID+1)
@@ -138,6 +137,7 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 		}
 		address = *nAddr
 	}
+	sort.Sort(sort.Reverse(byAddress(inputs)))
 	return inputs, nil
 }
 

@@ -89,7 +89,7 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 	smallInput := int64(2)
 	request := TstNewOutputRequest(
 		t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", requestAmount, pool.Manager().ChainParams())
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{bigInput, smallInput})
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{smallInput, bigInput})
 	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
 	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
 	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(0))
@@ -437,7 +437,7 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	defer tearDown()
 
 	net := pool.Manager().ChainParams()
-	series, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{1, 2, 3, 4, 5, 6})
+	series, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{6, 5, 4, 3, 2, 1})
 	requests := []OutputRequest{
 		// This is manually ordered by outBailmentIDHash, which is the order in
 		// which they're going to be fulfilled by w.fulfillRequests().
@@ -468,23 +468,24 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	}
 
 	// First tx should have one output with amount of 1, the first input from
-	// the list of eligible inputs, and no change output.
+	// the stack of eligible inputs (last slice item), and no change output.
 	firstTx := w.transactions[0]
 	req1 := requests[0]
 	checkTxOutputs(t, firstTx,
 		[]*withdrawalTxOut{&withdrawalTxOut{request: req1, amount: req1.Amount}})
-	checkTxInputs(t, firstTx, eligible[0:1])
+	checkTxInputs(t, firstTx, eligible[5:6])
 
 	// Second tx should have outputs for the two last requests (in the same
 	// order they were passed to newWithdrawal), and the 3 inputs needed to
-	// fulfill that (also in the same order as they were passed to
-	// newWithdrawal) and no change output.
+	// fulfill that (in reverse order as they were passed to newWithdrawal, as
+	// that's how fulfillRequests() consumes them) and no change output.
 	secondTx := w.transactions[1]
 	wantOutputs := []*withdrawalTxOut{
 		&withdrawalTxOut{request: requests[1], amount: requests[1].Amount},
 		&withdrawalTxOut{request: requests[2], amount: requests[2].Amount}}
 	checkTxOutputs(t, secondTx, wantOutputs)
-	checkTxInputs(t, secondTx, eligible[1:4])
+	wantInputs := []credit{eligible[4], eligible[3], eligible[2]}
+	checkTxInputs(t, secondTx, wantInputs)
 }
 
 func TestWithdrawalTxRemoveOutput(t *testing.T) {

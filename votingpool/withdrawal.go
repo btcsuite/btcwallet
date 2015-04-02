@@ -482,17 +482,14 @@ func (w *withdrawal) pushRequest(request OutputRequest) {
 // popInput removes and returns the first input from the stack of eligible
 // inputs.
 func (w *withdrawal) popInput() credit {
-	input := w.eligibleInputs[0]
-	w.eligibleInputs = w.eligibleInputs[1:]
+	input := w.eligibleInputs[len(w.eligibleInputs)-1]
+	w.eligibleInputs = w.eligibleInputs[:len(w.eligibleInputs)-1]
 	return input
 }
 
 // pushInput adds a new input to the top of the stack of eligible inputs.
-// TODO: Reverse the stack semantics here as the current one generates a lot of
-// extra garbage since it always creates a new single-element slice and append
-// the rest of the items to it.
 func (w *withdrawal) pushInput(input credit) {
-	w.eligibleInputs = append([]credit{input}, w.eligibleInputs...)
+	w.eligibleInputs = append(w.eligibleInputs, input)
 }
 
 // If this returns it means we have added an output and the necessary inputs to fulfil that

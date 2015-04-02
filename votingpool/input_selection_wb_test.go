@@ -74,8 +74,8 @@ func TestGetEligibleInputs(t *testing.T) {
 			len(eligibles), expNoEligibleInputs)
 	}
 
-	// Check that the returned eligibles are sorted by address.
-	if !sort.IsSorted(byAddress(eligibles)) {
+	// Check that the returned eligibles are reverse sorted by address.
+	if !sort.IsSorted(sort.Reverse(byAddress(eligibles))) {
 		t.Fatal("Eligible inputs are not sorted.")
 	}
 
