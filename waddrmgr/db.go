@@ -169,12 +169,12 @@ var (
 	// and id changes e.g. RenameAccount
 	acctNameIdxBucketName = []byte("acctnameidx")
 
-	// acctIdIdxBucketName is used to create an index
+	// acctIDIdxBucketName is used to create an index
 	// mapping an account id to the corresponding
 	// account name string.
 	// The index needs to be updated whenever the account name
 	// and id changes e.g. RenameAccount
-	acctIdIdxBucketName = []byte("acctididx")
+	acctIDIdxBucketName = []byte("acctididx")
 
 	// meta is used to store meta-data about the address manager
 	// e.g. last account number
@@ -613,7 +613,7 @@ func fetchLastAccount(tx walletdb.Tx) (uint32, error) {
 // fetchAccountName retreives the account name given an account number from
 // the database.
 func fetchAccountName(tx walletdb.Tx, account uint32) (string, error) {
-	bucket := tx.RootBucket().Bucket(acctIdIdxBucketName)
+	bucket := tx.RootBucket().Bucket(acctIDIdxBucketName)
 
 	val := bucket.Get(uint32ToBytes(account))
 	if val == nil {
@@ -681,8 +681,8 @@ func deleteAccountNameIndex(tx walletdb.Tx, name string) error {
 }
 
 // deleteAccounIdIndex deletes the given key from the account id index of the database.
-func deleteAccountIdIndex(tx walletdb.Tx, account uint32) error {
-	bucket := tx.RootBucket().Bucket(acctIdIdxBucketName)
+func deleteAccountIDIndex(tx walletdb.Tx, account uint32) error {
+	bucket := tx.RootBucket().Bucket(acctIDIdxBucketName)
 
 	// Delete the account id key
 	err := bucket.Delete(uint32ToBytes(account))
@@ -706,9 +706,9 @@ func putAccountNameIndex(tx walletdb.Tx, account uint32, name string) error {
 	return nil
 }
 
-// putAccountIdIndex stores the given key to the account id index of the database.
-func putAccountIdIndex(tx walletdb.Tx, account uint32, name string) error {
-	bucket := tx.RootBucket().Bucket(acctIdIdxBucketName)
+// putAccountIDIndex stores the given key to the account id index of the database.
+func putAccountIDIndex(tx walletdb.Tx, account uint32, name string) error {
+	bucket := tx.RootBucket().Bucket(acctIDIdxBucketName)
 
 	// Write the account number keyed by the account id.
 	err := bucket.Put(uint32ToBytes(account), stringToBytes(name))
@@ -772,7 +772,7 @@ func putAccountInfo(tx walletdb.Tx, account uint32, encryptedPubKey,
 		return err
 	}
 	// Update account id index
-	if err := putAccountIdIndex(tx, account, name); err != nil {
+	if err := putAccountIDIndex(tx, account, name); err != nil {
 		return err
 	}
 	// Update account name index
@@ -1599,7 +1599,7 @@ func createManagerNS(namespace walletdb.Namespace) error {
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucket(acctIdIdxBucketName)
+		_, err = rootBucket.CreateBucket(acctIDIdxBucketName)
 		if err != nil {
 			str := "failed to create an account id index bucket"
 			return managerError(ErrDatabase, str, err)
@@ -1757,7 +1757,7 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, config *
 // upgradeToVersion3 upgrades the database from version 2 to version 3
 // The following buckets were introduced in version 3 to support account names:
 // * acctNameIdxBucketName
-// * acctIdIdxBucketName
+// * acctIDIdxBucketName
 // * metaBucketName
 func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPassPhrase []byte) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
@@ -1820,7 +1820,7 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucket(acctIdIdxBucketName)
+		_, err = rootBucket.CreateBucket(acctIDIdxBucketName)
 		if err != nil {
 			str := "failed to create an account id index bucket"
 			return managerError(ErrDatabase, str, err)
@@ -1838,14 +1838,14 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Update default account indexes
-		if err := putAccountIdIndex(tx, DefaultAccountNum, DefaultAccountName); err != nil {
+		if err := putAccountIDIndex(tx, DefaultAccountNum, DefaultAccountName); err != nil {
 			return err
 		}
 		if err := putAccountNameIndex(tx, DefaultAccountNum, DefaultAccountName); err != nil {
 			return err
 		}
 		// Update imported account indexes
-		if err := putAccountIdIndex(tx, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
+		if err := putAccountIDIndex(tx, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
 			return err
 		}
 		if err := putAccountNameIndex(tx, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
