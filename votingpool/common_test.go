@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
@@ -98,20 +97,4 @@ func TstCheckWithdrawalStatusMatches(t *testing.T, s1, s2 WithdrawalStatus) {
 	if !reflect.DeepEqual(s1, s2) {
 		t.Fatalf("Wrong WithdrawalStatus; got %v, want %v", s1, s2)
 	}
-}
-
-// replaceCalculateTxFee replaces the calculateTxFee func with the given one
-// and returns a function that restores it to the original one.
-func replaceCalculateTxFee(f func(*withdrawalTx) btcutil.Amount) func() {
-	orig := calculateTxFee
-	calculateTxFee = f
-	return func() { calculateTxFee = orig }
-}
-
-// replaceCalculateTxSize replaces the calculateTxSize func with the given one
-// and returns a function that restores it to the original one.
-func replaceCalculateTxSize(f func(*withdrawalTx) int) func() {
-	orig := calculateTxSize
-	calculateTxSize = f
-	return func() { calculateTxSize = orig }
 }

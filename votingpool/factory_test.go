@@ -54,7 +54,7 @@ func getUniqueID() uint32 {
 // createWithdrawalTx creates a withdrawalTx with the given input and output amounts.
 func createWithdrawalTx(t *testing.T, pool *Pool, inputAmounts []int64, outputAmounts []int64) *withdrawalTx {
 	net := pool.Manager().ChainParams()
-	tx := newWithdrawalTx()
+	tx := newWithdrawalTx(defaultTxOptions)
 	_, credits := TstCreateCreditsOnNewSeries(t, pool, inputAmounts)
 	for _, c := range credits {
 		tx.addInput(c)
@@ -418,8 +418,8 @@ func TstNewChangeAddress(t *testing.T, p *Pool, seriesID uint32, idx Index) (add
 	return addr
 }
 
-func TstConstantFee(fee btcutil.Amount) func(tx *withdrawalTx) btcutil.Amount {
-	return func(tx *withdrawalTx) btcutil.Amount { return fee }
+func TstConstantFee(fee btcutil.Amount) func() btcutil.Amount {
+	return func() btcutil.Amount { return fee }
 }
 
 func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32) withdrawalInfo {

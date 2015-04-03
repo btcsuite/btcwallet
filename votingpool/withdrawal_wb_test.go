@@ -50,12 +50,13 @@ func TestOutputSplittingNotEnoughInputs(t *testing.T) {
 	}
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{7})
 	w := newWithdrawal(0, requests, eligible, *TstNewChangeAddress(t, pool, seriesID, 0))
+	w.txOptions = func(tx *withdrawalTx) {
+		// Trigger an output split because of lack of inputs by forcing a high fee.
+		// If we just started with not enough inputs for the requested outputs,
+		// fulfillRequests() would drop outputs until we had enough.
+		tx.calculateFee = TstConstantFee(3)
+	}
 
-	// Trigger an output split because of lack of inputs by forcing a high fee.
-	// If we just started with not enough inputs for the requested outputs,
-	// fulfillRequests() would drop outputs until we had enough.
-	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(3))
-	defer restoreCalculateTxFee()
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestOutputSplittingNotEnoughInputs(t *testing.T) {
 
 	// The last output should have had its amount updated to whatever we had
 	// left after satisfying all previous outputs.
-	newAmount := tx.inputTotal() - output1Amount - calculateTxFee(tx)
+	newAmount := tx.inputTotal() - output1Amount - tx.calculateFee()
 	checkLastOutputWasSplit(t, w, tx, output2Amount, newAmount)
 }
 
@@ -93,16 +94,16 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{smallInput, bigInput})
 	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
 	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
-	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(0))
-	defer restoreCalculateTxFee()
-	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int {
-		// Trigger an output split right after the second input is added.
-		if len(tx.inputs) == 2 {
-			return txMaxSize + 1
+	w.txOptions = func(tx *withdrawalTx) {
+		tx.calculateFee = TstConstantFee(0)
+		tx.calculateSize = func() int {
+			// Trigger an output split right after the second input is added.
+			if len(tx.inputs) == 2 {
+				return txMaxSize + 1
+			}
+			return txMaxSize - 1
 		}
-		return txMaxSize - 1
-	})
-	defer restoreCalcTxSize()
+	}
 
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
@@ -179,7 +180,7 @@ func TestWithdrawalTxOutputs(t *testing.T) {
 	// The created tx should include both eligible credits, so we expect it to have
 	// an input amount of 2e6+4e6 satoshis.
 	inputAmount := eligible[0].Amount + eligible[1].Amount
-	change := inputAmount - (outputs[0].Amount + outputs[1].Amount + calculateTxFee(tx))
+	change := inputAmount - (outputs[0].Amount + outputs[1].Amount + tx.calculateFee())
 	expectedOutputs := append(
 		outputs, TstNewOutputRequest(t, 3, changeStart.addr.String(), change, net))
 	msgtx := tx.toMsgTx()
@@ -247,7 +248,7 @@ func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
 	inputAmount := eligible[0].Amount + eligible[1].Amount
 	// We expect it to include outputs for requests 1 and 2, plus a change output, but
 	// output request #3 should not be there because we don't have enough credits.
-	change := inputAmount - (out1.Amount + out2.Amount + calculateTxFee(tx))
+	change := inputAmount - (out1.Amount + out2.Amount + tx.calculateFee())
 	expectedOutputs := []OutputRequest{out1, out2}
 	sort.Sort(byOutBailmentID(expectedOutputs))
 	expectedOutputs = append(
@@ -279,8 +280,7 @@ func TestRollbackLastOutput(t *testing.T) {
 	initialInputs := tx.inputs
 	initialOutputs := tx.outputs
 
-	restoreCalcTxFee := replaceCalculateTxFee(TstConstantFee(1))
-	defer restoreCalcTxFee()
+	tx.calculateFee = TstConstantFee(1)
 	removedInputs, removedOutput, err := tx.rollBackLastOutput()
 	if err != nil {
 		t.Fatal("Unexpected error:", err)
@@ -316,8 +316,7 @@ func TestRollbackLastOutputMultipleInputsRolledBack(t *testing.T) {
 	initialInputs := tx.inputs
 	initialOutputs := tx.outputs
 
-	restoreCalcTxFee := replaceCalculateTxFee(TstConstantFee(0))
-	defer restoreCalcTxFee()
+	tx.calculateFee = TstConstantFee(0)
 	removedInputs, _, err := tx.rollBackLastOutput()
 	if err != nil {
 		t.Fatal("Unexpected error:", err)
@@ -348,8 +347,7 @@ func TestRollbackLastOutputNoInputsRolledBack(t *testing.T) {
 	initialInputs := tx.inputs
 	initialOutputs := tx.outputs
 
-	restoreCalcTxFee := replaceCalculateTxFee(TstConstantFee(1))
-	defer restoreCalcTxFee()
+	tx.calculateFee = TstConstantFee(1)
 	removedInputs, removedOutput, err := tx.rollBackLastOutput()
 	if err != nil {
 		t.Fatal("Unexpected error:", err)
@@ -375,7 +373,7 @@ func TestRollbackLastOutputNoInputsRolledBack(t *testing.T) {
 // rollBackLastOutput returns an error if there are less than two
 // outputs in the transaction.
 func TestRollBackLastOutputInsufficientOutputs(t *testing.T) {
-	tx := newWithdrawalTx()
+	tx := newWithdrawalTx(defaultTxOptions)
 	_, _, err := tx.rollBackLastOutput()
 	TstCheckError(t, "", err, ErrPreconditionNotMet)
 
@@ -402,16 +400,16 @@ func TestRollbackLastOutputWhenNewOutputAdded(t *testing.T) {
 	changeStart := TstNewChangeAddress(t, pool, series, 0)
 
 	w := newWithdrawal(0, requests, eligible, *changeStart)
-	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(0))
-	defer restoreCalculateTxFee()
-	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int {
-		// Trigger an output split right after the second output is added.
-		if len(tx.outputs) > 1 {
-			return txMaxSize + 1
+	w.txOptions = func(tx *withdrawalTx) {
+		tx.calculateFee = TstConstantFee(0)
+		tx.calculateSize = func() int {
+			// Trigger an output split right after the second output is added.
+			if len(tx.outputs) > 1 {
+				return txMaxSize + 1
+			}
+			return txMaxSize - 1
 		}
-		return txMaxSize - 1
-	})
-	defer restoreCalcTxSize()
+	}
 
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal("Unexpected error:", err)
@@ -456,16 +454,16 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	changeStart := TstNewChangeAddress(t, pool, series, 0)
 
 	w := newWithdrawal(0, requests, eligible, *changeStart)
-	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(0))
-	defer restoreCalculateTxFee()
-	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int {
-		// Make a transaction too big as soon as a fourth input is added to it.
-		if len(tx.inputs) > 3 {
-			return txMaxSize + 1
+	w.txOptions = func(tx *withdrawalTx) {
+		tx.calculateFee = TstConstantFee(0)
+		tx.calculateSize = func() int {
+			// Make a transaction too big as soon as a fourth input is added to it.
+			if len(tx.inputs) > 3 {
+				return txMaxSize + 1
+			}
+			return txMaxSize - 1
 		}
-		return txMaxSize - 1
-	})
-	defer restoreCalcTxSize()
+	}
 
 	// The rollback should be triggered right after the 4th input is added in
 	// order to fulfill the second request.
@@ -559,8 +557,7 @@ func TestWithdrawalTxAddChange(t *testing.T) {
 
 	input, output, fee := int64(4e6), int64(3e6), int64(10)
 	tx := createWithdrawalTx(t, pool, []int64{input}, []int64{output})
-	restoreCalcTxFee := replaceCalculateTxFee(TstConstantFee(btcutil.Amount(fee)))
-	defer restoreCalcTxFee()
+	tx.calculateFee = TstConstantFee(btcutil.Amount(fee))
 
 	if !tx.addChange([]byte{}) {
 		t.Fatal("tx.addChange() returned false, meaning it did not add a change output")
@@ -586,8 +583,7 @@ func TestWithdrawalTxAddChangeNoChange(t *testing.T) {
 
 	input, output, fee := int64(4e6), int64(4e6), int64(0)
 	tx := createWithdrawalTx(t, pool, []int64{input}, []int64{output})
-	restoreCalcTxFee := replaceCalculateTxFee(TstConstantFee(btcutil.Amount(fee)))
-	defer restoreCalcTxFee()
+	tx.calculateFee = TstConstantFee(btcutil.Amount(fee))
 
 	if tx.addChange([]byte{}) {
 		t.Fatal("tx.addChange() returned true, meaning it added a change output")
@@ -1003,27 +999,24 @@ func TestTxTooBig(t *testing.T) {
 
 	tx := createWithdrawalTx(t, pool, []int64{5}, []int64{1})
 
-	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int { return txMaxSize - 1 })
+	tx.calculateSize = func() int { return txMaxSize - 1 }
 	if tx.isTooBig() {
 		t.Fatalf("Tx is smaller than max size (%d < %d) but was considered too big",
-			calculateTxSize(tx), txMaxSize)
+			tx.calculateSize(), txMaxSize)
 	}
-	restoreCalcTxSize()
 
 	// A tx whose size is equal to txMaxSize should be considered too big.
-	restoreCalcTxSize = replaceCalculateTxSize(func(tx *withdrawalTx) int { return txMaxSize })
+	tx.calculateSize = func() int { return txMaxSize }
 	if !tx.isTooBig() {
 		t.Fatalf("Tx size is equal to the max size (%d == %d) but was not considered too big",
-			calculateTxSize(tx), txMaxSize)
+			tx.calculateSize(), txMaxSize)
 	}
-	restoreCalcTxSize()
 
-	restoreCalcTxSize = replaceCalculateTxSize(func(tx *withdrawalTx) int { return txMaxSize + 1 })
+	tx.calculateSize = func() int { return txMaxSize + 1 }
 	if !tx.isTooBig() {
 		t.Fatalf("Tx size is bigger than max size (%d > %d) but was not considered too big",
-			calculateTxSize(tx), txMaxSize)
+			tx.calculateSize(), txMaxSize)
 	}
-	restoreCalcTxSize()
 }
 
 func TestTxSizeCalculation(t *testing.T) {
@@ -1032,14 +1025,13 @@ func TestTxSizeCalculation(t *testing.T) {
 
 	tx := createWithdrawalTx(t, pool, []int64{1, 5}, []int64{2})
 
-	size := calculateTxSize(tx)
+	size := tx.calculateSize()
 
 	// Now add a change output, get a msgtx, sign it and get its SerializedSize
-	// to compare with the value above. We need to replace the calculateTxFee
-	// function so that the tx.addChange() call below always adds a change
+	// to compare with the value above. We need to replace the calculateFee
+	// method so that the tx.addChange() call below always adds a change
 	// output.
-	restoreCalcTxFee := replaceCalculateTxFee(TstConstantFee(1))
-	defer restoreCalcTxFee()
+	tx.calculateFee = TstConstantFee(1)
 	seriesID := tx.inputs[0].addr.SeriesID()
 	tx.addChange(TstNewChangeAddress(t, pool, seriesID, 0).addr.ScriptAddress())
 	msgtx := tx.toMsgTx()
@@ -1050,7 +1042,7 @@ func TestTxSizeCalculation(t *testing.T) {
 	signTxAndValidate(t, pool.Manager(), msgtx, sigs[tx.ntxid()], tx.inputs)
 
 	// ECDSA signatures have variable length (71-73 bytes) but in
-	// calculateTxSize() we use a dummy signature for the worst-case scenario (73
+	// calculateSize() we use a dummy signature for the worst-case scenario (73
 	// bytes) so the estimate here can be up to 2 bytes bigger for every
 	// signature in every input's SigScript.
 	maxDiff := 2 * len(msgtx.TxIn) * int(tx.inputs[0].addr.series().reqSigs)
@@ -1072,13 +1064,12 @@ func TestTxSizeCalculation(t *testing.T) {
 }
 
 func TestTxFeeEstimationForSmallTx(t *testing.T) {
-	tx := newWithdrawalTx()
+	tx := newWithdrawalTx(defaultTxOptions)
 
 	// A tx that is smaller than 1000 bytes in size should have a fee of 10000
 	// satoshis.
-	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int { return 999 })
-	defer restoreCalcTxSize()
-	fee := calculateTxFee(tx)
+	tx.calculateSize = func() int { return 999 }
+	fee := tx.calculateFee()
 
 	wantFee := btcutil.Amount(1e3)
 	if fee != wantFee {
@@ -1087,13 +1078,12 @@ func TestTxFeeEstimationForSmallTx(t *testing.T) {
 }
 
 func TestTxFeeEstimationForLargeTx(t *testing.T) {
-	tx := newWithdrawalTx()
+	tx := newWithdrawalTx(defaultTxOptions)
 
 	// A tx that is larger than 1000 bytes in size should have a fee of 1e3
 	// satoshis plus 1e3 for every 1000 bytes.
-	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int { return 3000 })
-	defer restoreCalcTxSize()
-	fee := calculateTxFee(tx)
+	tx.calculateSize = func() int { return 3000 }
+	fee := tx.calculateFee()
 
 	wantFee := btcutil.Amount(4e3)
 	if fee != wantFee {
@@ -1188,7 +1178,7 @@ func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool 
 	def := TstCreateSeriesDef(t, pool, 2, masters)
 	TstCreateSeries(t, pool, []TstSeriesDef{def})
 	net := pool.Manager().ChainParams()
-	tx := newWithdrawalTx()
+	tx := newWithdrawalTx(defaultTxOptions)
 	for _, c := range TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, inputAmounts, store) {
 		tx.addInput(c)
 	}

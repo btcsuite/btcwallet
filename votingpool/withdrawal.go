@@ -269,6 +269,10 @@ type withdrawal struct {
 	pendingRequests []OutputRequest
 	eligibleInputs  []credit
 	current         *withdrawalTx
+	// txOptions is a function called for every new withdrawalTx created as
+	// part of this withdrawal. It is defined as a function field because it
+	// exists mainly so that tests can mock withdrawalTx fields.
+	txOptions func(tx *withdrawalTx)
 }
 
 // withdrawalTxOut wraps an OutputRequest and provides a separate amount field.
@@ -301,10 +305,26 @@ type withdrawalTx struct {
 
 	// changeOutput holds information about the change for this transaction.
 	changeOutput *wire.TxOut
+
+	// calculateSize returns the estimated serialized size (in bytes) of this
+	// tx. See calculateTxSize() for details on how that's done. We use a
+	// struct field instead of a method so that it can be replaced in tests.
+	calculateSize func() int
+	// calculateFee calculates the expected network fees for this tx. We use a
+	// struct field instead of a method so that it can be replaced in tests.
+	calculateFee func() btcutil.Amount
 }
 
-func newWithdrawalTx() *withdrawalTx {
-	return &withdrawalTx{}
+// newWithdrawalTx creates a new withdrawalTx and calls setOptions()
+// passing the newly created tx.
+func newWithdrawalTx(setOptions func(tx *withdrawalTx)) *withdrawalTx {
+	tx := &withdrawalTx{}
+	tx.calculateSize = func() int { return calculateTxSize(tx) }
+	tx.calculateFee = func() btcutil.Amount {
+		return btcutil.Amount(1+tx.calculateSize()/1000) * feeIncrement
+	}
+	setOptions(tx)
+	return tx
 }
 
 // ntxid returns the unique ID for this transaction.
@@ -323,7 +343,7 @@ func (tx *withdrawalTx) isTooBig() bool {
 	// In bitcoind a tx is considered standard only if smaller than
 	// MAX_STANDARD_TX_SIZE; that's why we consider anything >= txMaxSize to
 	// be too big.
-	return calculateTxSize(tx) >= txMaxSize
+	return tx.calculateSize() >= txMaxSize
 }
 
 // inputTotal returns the sum amount of all inputs in this tx.
@@ -401,7 +421,7 @@ func (tx *withdrawalTx) removeInput() credit {
 // added after it's called. Also, callsites must make sure adding a change
 // output won't cause the tx to exceed the size limit.
 func (tx *withdrawalTx) addChange(pkScript []byte) bool {
-	tx.fee = calculateTxFee(tx)
+	tx.fee = tx.calculateFee()
 	change := tx.inputTotal() - tx.outputTotal() - tx.fee
 	log.Debugf("addChange: input total %v, output total %v, fee %v", tx.inputTotal(),
 		tx.outputTotal(), tx.fee)
@@ -430,7 +450,7 @@ func (tx *withdrawalTx) rollBackLastOutput() ([]credit, *withdrawalTxOut, error)
 
 	var removedInputs []credit
 	// Continue until sum(in) < sum(out) + fee
-	for tx.inputTotal() >= tx.outputTotal()+calculateTxFee(tx) {
+	for tx.inputTotal() >= tx.outputTotal()+tx.calculateFee() {
 		removedInputs = append(removedInputs, tx.removeInput())
 	}
 
@@ -439,6 +459,8 @@ func (tx *withdrawalTx) rollBackLastOutput() ([]credit, *withdrawalTxOut, error)
 	removedInputs = removedInputs[:len(removedInputs)-1]
 	return removedInputs, removedOutput, nil
 }
+
+func defaultTxOptions(tx *withdrawalTx) {}
 
 func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 	changeStart ChangeAddress) *withdrawal {
@@ -452,10 +474,10 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 	}
 	return &withdrawal{
 		roundID:         roundID,
-		current:         newWithdrawalTx(),
 		pendingRequests: requests,
 		eligibleInputs:  inputs,
 		status:          status,
+		txOptions:       defaultTxOptions,
 	}
 }
 
@@ -553,7 +575,7 @@ func (w *withdrawal) fulfillNextRequest() error {
 		return w.handleOversizeTx()
 	}
 
-	fee := calculateTxFee(w.current)
+	fee := w.current.calculateFee()
 	for w.current.inputTotal() < w.current.outputTotal()+fee {
 		if len(w.eligibleInputs) == 0 {
 			log.Debug("Splitting last output because we don't have enough inputs")
@@ -563,7 +585,7 @@ func (w *withdrawal) fulfillNextRequest() error {
 			break
 		}
 		w.current.addInput(w.popInput())
-		fee = calculateTxFee(w.current)
+		fee = w.current.calculateFee()
 
 		if w.current.isTooBig() {
 			return w.handleOversizeTx()
@@ -647,7 +669,7 @@ func (w *withdrawal) finalizeCurrentTx() error {
 	}
 
 	w.transactions = append(w.transactions, tx)
-	w.current = newWithdrawalTx()
+	w.current = newWithdrawalTx(w.txOptions)
 	return nil
 }
 
@@ -683,12 +705,13 @@ func (w *withdrawal) fulfillRequests() error {
 	// Sort outputs by outBailmentID (hash(server ID, tx #))
 	sort.Sort(byOutBailmentID(w.pendingRequests))
 
+	w.current = newWithdrawalTx(w.txOptions)
 	for len(w.pendingRequests) > 0 {
 		if err := w.fulfillNextRequest(); err != nil {
 			return err
 		}
 		tx := w.current
-		if len(w.eligibleInputs) == 0 && tx.inputTotal() <= tx.outputTotal()+calculateTxFee(tx) {
+		if len(w.eligibleInputs) == 0 && tx.inputTotal() <= tx.outputTotal()+tx.calculateFee() {
 			// We don't have more eligible inputs and all the inputs in the
 			// current tx have been spent.
 			break
@@ -731,7 +754,7 @@ func (w *withdrawal) splitLastOutput() error {
 	output := tx.outputs[len(tx.outputs)-1]
 	log.Debugf("Splitting tx output for %s", output.request)
 	origAmount := output.amount
-	spentAmount := tx.outputTotal() + calculateTxFee(tx) - output.amount
+	spentAmount := tx.outputTotal() + tx.calculateFee() - output.amount
 	// This is how much we have left after satisfying all outputs except the last
 	// one. IOW, all we have left for the last output, so we set that as the
 	// amount of the tx's last output.
@@ -993,16 +1016,9 @@ func validateSigScript(msgtx *wire.MsgTx, idx int, pkScript []byte) error {
 	return nil
 }
 
-// calculateTxFee calculates the expected network fees for a given tx. We use
-// a variable instead of a function so that it can be replaced in tests.
-var calculateTxFee = func(tx *withdrawalTx) btcutil.Amount {
-	return btcutil.Amount(1+calculateTxSize(tx)/1000) * feeIncrement
-}
-
 // calculateTxSize returns an estimate of the serialized size (in bytes) of the
-// given transaction. It assumes all tx inputs are P2SH multi-sig.  We use a
-// variable instead of a function so that it can be replaced in tests.
-var calculateTxSize = func(tx *withdrawalTx) int {
+// given transaction. It assumes all tx inputs are P2SH multi-sig.
+func calculateTxSize(tx *withdrawalTx) int {
 	msgtx := tx.toMsgTx()
 	// Assume that there will always be a change output, for simplicity. We
 	// simulate that by simply copying the first output as all we care about is
