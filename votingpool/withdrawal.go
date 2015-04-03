@@ -317,6 +317,15 @@ func (tx *withdrawalTx) ntxid() Ntxid {
 	return Ntxid(msgtx.TxSha().String())
 }
 
+// isTooBig returns true if the size (in bytes) of the given tx is greater
+// than or equal to txMaxSize.
+func (tx *withdrawalTx) isTooBig() bool {
+	// In bitcoind a tx is considered standard only if smaller than
+	// MAX_STANDARD_TX_SIZE; that's why we consider anything >= txMaxSize to
+	// be too big.
+	return calculateTxSize(tx) >= txMaxSize
+}
+
 // inputTotal returns the sum amount of all inputs in this tx.
 func (tx *withdrawalTx) inputTotal() (total btcutil.Amount) {
 	for _, input := range tx.inputs {
@@ -540,7 +549,7 @@ func (w *withdrawal) fulfillNextRequest() error {
 	output.status = statusSuccess
 	w.current.addOutput(request)
 
-	if isTxTooBig(w.current) {
+	if w.current.isTooBig() {
 		return w.handleOversizeTx()
 	}
 
@@ -556,7 +565,7 @@ func (w *withdrawal) fulfillNextRequest() error {
 		w.current.addInput(w.popInput())
 		fee = calculateTxFee(w.current)
 
-		if isTxTooBig(w.current) {
+		if w.current.isTooBig() {
 			return w.handleOversizeTx()
 		}
 	}
@@ -988,16 +997,6 @@ func validateSigScript(msgtx *wire.MsgTx, idx int, pkScript []byte) error {
 // a variable instead of a function so that it can be replaced in tests.
 var calculateTxFee = func(tx *withdrawalTx) btcutil.Amount {
 	return btcutil.Amount(1+calculateTxSize(tx)/1000) * feeIncrement
-}
-
-// isTxTooBig returns true if the size (in bytes) of the given tx is greater
-// than or equal to txMaxSize. It is defined as a variable so it can be
-// replaced for testing purposes.
-var isTxTooBig = func(tx *withdrawalTx) bool {
-	// In bitcoind a tx is considered standard only if smaller than
-	// MAX_STANDARD_TX_SIZE; that's why we consider anything >= txMaxSize to
-	// be too big.
-	return calculateTxSize(tx) >= txMaxSize
 }
 
 // calculateTxSize returns an estimate of the serialized size (in bytes) of the

@@ -95,11 +95,14 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
 	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(0))
 	defer restoreCalculateTxFee()
-	restoreIsTxTooBig := replaceIsTxTooBig(func(tx *withdrawalTx) bool {
+	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int {
 		// Trigger an output split right after the second input is added.
-		return len(tx.inputs) == 2
+		if len(tx.inputs) == 2 {
+			return txMaxSize + 1
+		}
+		return txMaxSize - 1
 	})
-	defer restoreIsTxTooBig()
+	defer restoreCalcTxSize()
 
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
@@ -401,10 +404,14 @@ func TestRollbackLastOutputWhenNewOutputAdded(t *testing.T) {
 	w := newWithdrawal(0, requests, eligible, *changeStart)
 	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(0))
 	defer restoreCalculateTxFee()
-	restoreIsTxTooBig := replaceIsTxTooBig(func(tx *withdrawalTx) bool {
-		return len(tx.outputs) > 1
+	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int {
+		// Trigger an output split right after the second output is added.
+		if len(tx.outputs) > 1 {
+			return txMaxSize + 1
+		}
+		return txMaxSize - 1
 	})
-	defer restoreIsTxTooBig()
+	defer restoreCalcTxSize()
 
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal("Unexpected error:", err)
@@ -451,11 +458,14 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	w := newWithdrawal(0, requests, eligible, *changeStart)
 	restoreCalculateTxFee := replaceCalculateTxFee(TstConstantFee(0))
 	defer restoreCalculateTxFee()
-	restoreIsTxTooBig := replaceIsTxTooBig(func(tx *withdrawalTx) bool {
+	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int {
 		// Make a transaction too big as soon as a fourth input is added to it.
-		return len(tx.inputs) > 3
+		if len(tx.inputs) > 3 {
+			return txMaxSize + 1
+		}
+		return txMaxSize - 1
 	})
-	defer restoreIsTxTooBig()
+	defer restoreCalcTxSize()
 
 	// The rollback should be triggered right after the 4th input is added in
 	// order to fulfill the second request.
@@ -994,7 +1004,7 @@ func TestTxTooBig(t *testing.T) {
 	tx := createWithdrawalTx(t, pool, []int64{5}, []int64{1})
 
 	restoreCalcTxSize := replaceCalculateTxSize(func(tx *withdrawalTx) int { return txMaxSize - 1 })
-	if isTxTooBig(tx) {
+	if tx.isTooBig() {
 		t.Fatalf("Tx is smaller than max size (%d < %d) but was considered too big",
 			calculateTxSize(tx), txMaxSize)
 	}
@@ -1002,14 +1012,14 @@ func TestTxTooBig(t *testing.T) {
 
 	// A tx whose size is equal to txMaxSize should be considered too big.
 	restoreCalcTxSize = replaceCalculateTxSize(func(tx *withdrawalTx) int { return txMaxSize })
-	if !isTxTooBig(tx) {
+	if !tx.isTooBig() {
 		t.Fatalf("Tx size is equal to the max size (%d == %d) but was not considered too big",
 			calculateTxSize(tx), txMaxSize)
 	}
 	restoreCalcTxSize()
 
 	restoreCalcTxSize = replaceCalculateTxSize(func(tx *withdrawalTx) int { return txMaxSize + 1 })
-	if !isTxTooBig(tx) {
+	if !tx.isTooBig() {
 		t.Fatalf("Tx size is bigger than max size (%d > %d) but was not considered too big",
 			calculateTxSize(tx), txMaxSize)
 	}

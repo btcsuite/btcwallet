@@ -108,14 +108,6 @@ func replaceCalculateTxFee(f func(*withdrawalTx) btcutil.Amount) func() {
 	return func() { calculateTxFee = orig }
 }
 
-// replaceIsTxTooBig replaces the isTxTooBig func with the given one
-// and returns a function that restores it to the original one.
-func replaceIsTxTooBig(f func(*withdrawalTx) bool) func() {
-	orig := isTxTooBig
-	isTxTooBig = f
-	return func() { isTxTooBig = orig }
-}
-
 // replaceCalculateTxSize replaces the calculateTxSize func with the given one
 // and returns a function that restores it to the original one.
 func replaceCalculateTxSize(f func(*withdrawalTx) int) func() {
