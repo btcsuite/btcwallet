@@ -18,9 +18,9 @@ package wallet
 
 import (
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // Config is a structure used to initialize a Wallet
@@ -28,6 +28,6 @@ import (
 type Config struct {
 	ChainParams *chaincfg.Params
 	Db          *walletdb.DB
-	TxStore     *txstore.Store
+	TxStore     *wtxmgr.Store
 	Waddrmgr    *waddrmgr.Manager
 }

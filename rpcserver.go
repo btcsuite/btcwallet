@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>
+ * Copyright (c) 2013-2015 Conformal Systems LLC <info@conformal.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -45,9 +45,9 @@ import (
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/websocket"
 )
 
@@ -140,6 +140,24 @@ func checkDefaultAccount(account string) error {
 		return ErrNoAccountSupport
 	}
 	return nil
+}
+
+// confirmed checks whether a transaction at height txHeight has met minconf
+// confirmations for a blockchain at height curHeight.
+func confirmed(minconf, txHeight, curHeight int32) bool {
+	return confirms(txHeight, curHeight) >= minconf
+}
+
+// confirms returns the number of confirmations for a transaction in a block at
+// height txHeight (or -1 for an unconfirmed tx) given the chain height
+// curHeight.
+func confirms(txHeight, curHeight int32) int32 {
+	switch {
+	case txHeight == -1, txHeight > curHeight:
+		return 0
+	default:
+		return curHeight - txHeight + 1
+	}
 }
 
 type websocketClient struct {
@@ -309,10 +327,7 @@ type rpcServer struct {
 	// created.
 	connectedBlocks    <-chan waddrmgr.BlockStamp
 	disconnectedBlocks <-chan waddrmgr.BlockStamp
-	newCredits         <-chan txstore.Credit
-	newDebits          <-chan txstore.Debits
-	minedCredits       <-chan txstore.Credit
-	minedDebits        <-chan txstore.Debits
+	relevantTxs        <-chan chain.RelevantTx
 	managerLocked      <-chan bool
 	confirmedBalance   <-chan btcutil.Amount
 	unconfirmedBalance <-chan btcutil.Amount
@@ -1038,8 +1053,7 @@ type (
 	blockConnected    waddrmgr.BlockStamp
 	blockDisconnected waddrmgr.BlockStamp
 
-	txCredit txstore.Credit
-	txDebit  txstore.Debits
+	relevantTx chain.RelevantTx
 
 	managerLocked bool
 
@@ -1059,36 +1073,30 @@ func (b blockDisconnected) notificationCmds(w *wallet.Wallet) []btcjson.Cmd {
 	return []btcjson.Cmd{n}
 }
 
-func (c txCredit) notificationCmds(w *wallet.Wallet) []btcjson.Cmd {
-	blk := w.Manager.SyncedTo()
-	acctName := waddrmgr.DefaultAccountName
-	if creditAccount, err := w.CreditAccount(txstore.Credit(c)); err == nil {
-		// acctName is defaulted to DefaultAccountName in case of an error
-		acctName, _ = w.Manager.AccountName(creditAccount)
-	}
-	ltr, err := txstore.Credit(c).ToJSON(acctName, blk.Height, activeNet.Params)
-	if err != nil {
-		log.Errorf("Cannot create notification for transaction "+
-			"credit: %v", err)
-		return nil
-	}
-	n := btcws.NewTxNtfn(acctName, &ltr)
-	return []btcjson.Cmd{n}
-}
+func (t relevantTx) notificationCmds(w *wallet.Wallet) []btcjson.Cmd {
+	syncBlock := w.Manager.SyncedTo()
 
-func (d txDebit) notificationCmds(w *wallet.Wallet) []btcjson.Cmd {
-	blk := w.Manager.SyncedTo()
-	ltrs, err := txstore.Debits(d).ToJSON("", blk.Height, activeNet.Params)
+	var block *wtxmgr.Block
+	if t.Block != nil {
+		block = &t.Block.Block
+	}
+	details, err := w.TxStore.UniqueTxDetails(&t.TxRecord.Hash, block)
 	if err != nil {
-		log.Errorf("Cannot create notification for transaction "+
-			"debits: %v", err)
+		log.Errorf("Cannot fetch transaction details for "+
+			"client notification: %v", err)
 		return nil
 	}
-	ns := make([]btcjson.Cmd, len(ltrs))
-	for i := range ns {
-		ns[i] = btcws.NewTxNtfn("", &ltrs[i])
+	if details == nil {
+		log.Errorf("No details found for client transaction notification")
+		return nil
 	}
-	return ns
+
+	ltr := wallet.ListTransactions(details, syncBlock.Height, activeNet.Params)
+	ntfns := make([]btcjson.Cmd, len(ltr))
+	for i := range ntfns {
+		ntfns[i] = btcws.NewTxNtfn(ltr[i].Account, &ltr[i])
+	}
+	return ntfns
 }
 
 func (l managerLocked) notificationCmds(w *wallet.Wallet) []btcjson.Cmd {
@@ -1121,14 +1129,8 @@ out:
 			s.enqueueNotification <- blockConnected(n)
 		case n := <-s.disconnectedBlocks:
 			s.enqueueNotification <- blockDisconnected(n)
-		case n := <-s.newCredits:
-			s.enqueueNotification <- txCredit(n)
-		case n := <-s.newDebits:
-			s.enqueueNotification <- txDebit(n)
-		case n := <-s.minedCredits:
-			s.enqueueNotification <- txCredit(n)
-		case n := <-s.minedDebits:
-			s.enqueueNotification <- txDebit(n)
+		case n := <-s.relevantTxs:
+			s.enqueueNotification <- relevantTx(n)
 		case n := <-s.managerLocked:
 			s.enqueueNotification <- managerLocked(n)
 		case n := <-s.confirmedBalance:
@@ -1153,28 +1155,10 @@ out:
 					err)
 				continue
 			}
-			newCredits, err := s.wallet.TxStore.ListenNewCredits()
+			relevantTxs, err := s.wallet.ListenRelevantTxs()
 			if err != nil {
-				log.Errorf("Could not register for new "+
-					"credit notifications: %v", err)
-				continue
-			}
-			newDebits, err := s.wallet.TxStore.ListenNewDebits()
-			if err != nil {
-				log.Errorf("Could not register for new "+
-					"debit notifications: %v", err)
-				continue
-			}
-			minedCredits, err := s.wallet.TxStore.ListenMinedCredits()
-			if err != nil {
-				log.Errorf("Could not register for mined "+
-					"credit notifications: %v", err)
-				continue
-			}
-			minedDebits, err := s.wallet.TxStore.ListenMinedDebits()
-			if err != nil {
-				log.Errorf("Could not register for mined "+
-					"debit notifications: %v", err)
+				log.Errorf("Could not register for new relevant "+
+					"transaction notifications: %v", err)
 				continue
 			}
 			managerLocked, err := s.wallet.ListenLockStatus()
@@ -1197,10 +1181,7 @@ out:
 			}
 			s.connectedBlocks = connectedBlocks
 			s.disconnectedBlocks = disconnectedBlocks
-			s.newCredits = newCredits
-			s.newDebits = newDebits
-			s.minedCredits = minedCredits
-			s.minedDebits = minedDebits
+			s.relevantTxs = relevantTxs
 			s.managerLocked = managerLocked
 			s.confirmedBalance = confirmedBalance
 			s.unconfirmedBalance = unconfirmedBalance
@@ -1219,10 +1200,8 @@ func (s *rpcServer) drainNotifications() {
 		select {
 		case <-s.connectedBlocks:
 		case <-s.disconnectedBlocks:
-		case <-s.newCredits:
-		case <-s.newDebits:
-		case <-s.minedCredits:
-		case <-s.minedDebits:
+		case <-s.relevantTxs:
+		case <-s.managerLocked:
 		case <-s.confirmedBalance:
 		case <-s.unconfirmedBalance:
 		case <-s.registerWalletNtfns:
@@ -1694,13 +1673,13 @@ func GetBalance(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (int
 	var account uint32
 	var err error
 	if cmd.Account == nil || *cmd.Account == "*" {
-		balance, err = w.CalculateBalance(cmd.MinConf)
+		balance, err = w.CalculateBalance(int32(cmd.MinConf))
 	} else {
 		account, err = w.Manager.LookupAccount(*cmd.Account)
 		if err != nil {
 			return nil, err
 		}
-		balance, err = w.CalculateAccountBalance(account, cmd.MinConf)
+		balance, err = w.CalculateAccountBalance(account, int32(cmd.MinConf))
 	}
 	if err != nil {
 		return nil, err
@@ -1964,7 +1943,7 @@ func GetReceivedByAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson
 		return nil, err
 	}
 
-	bal, _, err := w.TotalReceivedForAccount(account, cmd.MinConf)
+	bal, _, err := w.TotalReceivedForAccount(account, int32(cmd.MinConf))
 	if err != nil {
 		return nil, err
 	}
@@ -1981,7 +1960,7 @@ func GetReceivedByAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson
 	if err != nil {
 		return nil, InvalidAddressOrKeyError{err}
 	}
-	total, err := w.TotalReceivedForAddr(addr, cmd.MinConf)
+	total, err := w.TotalReceivedForAddr(addr, int32(cmd.MinConf))
 	if err != nil {
 		return nil, err
 	}
@@ -1999,96 +1978,105 @@ func GetTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 		return nil, btcjson.ErrDecodeHexString
 	}
 
-	record, ok := w.TxRecord(txSha)
-	if !ok {
+	details, err := w.TxStore.TxDetails(txSha)
+	if err != nil {
+		return nil, err
+	}
+	if details == nil {
 		return nil, btcjson.ErrNoTxInfo
 	}
 
-	blk := w.Manager.SyncedTo()
+	syncBlock := w.Manager.SyncedTo()
 
+	// TODO: The serialized transaction is already in the DB, so
+	// reserializing can be avoided here.
 	var txBuf bytes.Buffer
-	txBuf.Grow(record.Tx().MsgTx().SerializeSize())
-	err = record.Tx().MsgTx().Serialize(&txBuf)
+	txBuf.Grow(details.MsgTx.SerializeSize())
+	err = details.MsgTx.Serialize(&txBuf)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO(jrick) set "generate" to true if this is the coinbase (if
-	// record.Tx().Index() == 0).
+	// TODO: Add a "generated" field to this result type.  "generated":true
+	// is only added if the transaction is a coinbase.
 	ret := btcjson.GetTransactionResult{
-		TxID:            txSha.String(),
+		TxID:            cmd.Txid,
 		Hex:             hex.EncodeToString(txBuf.Bytes()),
-		Time:            record.Received().Unix(),
-		TimeReceived:    record.Received().Unix(),
-		WalletConflicts: []string{},
+		Time:            details.Received.Unix(),
+		TimeReceived:    details.Received.Unix(),
+		WalletConflicts: []string{}, // Not saved
+		//Generated:     blockchain.IsCoinBaseTx(&details.MsgTx),
 	}
 
-	if record.BlockHeight != -1 {
-		txBlock, err := record.Block()
-		if err != nil {
-			return nil, err
+	if details.Block.Height != -1 {
+		ret.BlockHash = details.Block.Hash.String()
+		ret.BlockTime = details.Block.Time.Unix()
+		ret.Confirmations = int64(confirms(details.Block.Height, syncBlock.Height))
+	}
+
+	var (
+		debitTotal  btcutil.Amount
+		creditTotal btcutil.Amount // Excludes change
+		outputTotal btcutil.Amount
+		fee         btcutil.Amount
+		feeF64      float64
+	)
+	for _, deb := range details.Debits {
+		debitTotal += deb.Amount
+	}
+	for _, cred := range details.Credits {
+		if !cred.Change {
+			creditTotal += cred.Amount
 		}
-		ret.BlockIndex = int64(record.Tx().Index())
-		ret.BlockHash = txBlock.Hash.String()
-		ret.BlockTime = txBlock.Time.Unix()
-		ret.Confirmations = int64(record.Confirmations(blk.Height))
+	}
+	for _, output := range details.MsgTx.TxOut {
+		outputTotal -= btcutil.Amount(output.Value)
+	}
+	// Fee can only be determined if every input is a debit.
+	if len(details.Debits) == len(details.MsgTx.TxIn) {
+		fee = debitTotal - outputTotal
+		feeF64 = fee.ToBTC()
 	}
 
-	credits := record.Credits()
-	debits, err := record.Debits()
-	var targetAddr *string
-	var creditAmount btcutil.Amount
-	if err != nil {
+	if len(details.Debits) == 0 {
 		// Credits must be set later, but since we know the full length
 		// of the details slice, allocate it with the correct cap.
-		ret.Details = make([]btcjson.GetTransactionDetailsResult, 0, len(credits))
+		ret.Details = make([]btcjson.GetTransactionDetailsResult, 0, len(details.Credits))
 	} else {
-		ret.Details = make([]btcjson.GetTransactionDetailsResult, 1, len(credits)+1)
+		ret.Details = make([]btcjson.GetTransactionDetailsResult, 1, len(details.Credits)+1)
 
-		details := btcjson.GetTransactionDetailsResult{
+		ret.Details[0] = btcjson.GetTransactionDetailsResult{
 			Account:  waddrmgr.DefaultAccountName,
 			Category: "send",
-			// negative since it is a send
-			Amount: (-debits.OutputAmount(true)).ToBTC(),
-			Fee:    debits.Fee().ToBTC(),
+			Amount:   (-debitTotal).ToBTC(), // negative since it is a send
+			Fee:      feeF64,
 		}
-		targetAddr = &details.Address
-		ret.Details[0] = details
-		ret.Fee = details.Fee
-
-		creditAmount = -debits.InputAmount()
+		ret.Fee = feeF64
 	}
 
-	for _, cred := range record.Credits() {
+	credCat := wallet.RecvCategory(details, syncBlock.Height).String()
+	for _, cred := range details.Credits {
 		// Change is ignored.
-		if cred.Change() {
+		if cred.Change {
 			continue
 		}
 
-		creditAmount += cred.Amount()
-
 		var addr string
-		// Errors don't matter here, as we only consider the
-		// case where len(addrs) == 1.
-		_, addrs, _, _ := cred.Addresses(activeNet.Params)
-		if len(addrs) == 1 {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			details.MsgTx.TxOut[cred.Index].PkScript, activeNet.Params)
+		if err == nil && len(addrs) == 1 {
 			addr = addrs[0].EncodeAddress()
-			// The first non-change output address is considered the
-			// target for sent transactions.
-			if targetAddr != nil && *targetAddr == "" {
-				*targetAddr = addr
-			}
 		}
 
 		ret.Details = append(ret.Details, btcjson.GetTransactionDetailsResult{
 			Account:  waddrmgr.DefaultAccountName,
-			Category: cred.Category(blk.Height).String(),
-			Amount:   cred.Amount().ToBTC(),
+			Category: credCat,
+			Amount:   cred.Amount.ToBTC(),
 			Address:  addr,
 		})
 	}
 
-	ret.Amount = creditAmount.ToBTC()
+	ret.Amount = creditTotal.ToBTC()
 	return ret, nil
 }
 
@@ -2107,7 +2095,7 @@ func ListAccounts(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (i
 		if err != nil {
 			return nil, ErrAccountNameNotFound
 		}
-		bal, err := w.CalculateAccountBalance(account, cmd.MinConf)
+		bal, err := w.CalculateAccountBalance(account, int32(cmd.MinConf))
 		if err != nil {
 			return nil, err
 		}
@@ -2147,7 +2135,8 @@ func ListReceivedByAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjso
 		if err != nil {
 			return nil, ErrAccountNameNotFound
 		}
-		bal, confirmations, err := w.TotalReceivedForAccount(account, cmd.MinConf)
+		bal, confirmations, err := w.TotalReceivedForAccount(account,
+			int32(cmd.MinConf))
 		if err != nil {
 			return nil, err
 		}
@@ -2186,7 +2175,7 @@ func ListReceivedByAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjso
 		account string
 	}
 
-	blk := w.Manager.SyncedTo()
+	syncBlock := w.Manager.SyncedTo()
 
 	// Intermediate data for all addresses.
 	allAddrData := make(map[string]AddrData)
@@ -2202,35 +2191,46 @@ func ListReceivedByAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjso
 			allAddrData[address] = AddrData{}
 		}
 	}
-	for _, record := range w.TxStore.Records() {
-		for _, credit := range record.Credits() {
-			confirmations := credit.Confirmations(blk.Height)
-			if !credit.Confirmed(cmd.MinConf, blk.Height) {
-				// Not enough confirmations, skip the current block.
-				continue
-			}
-			_, addresses, _, err := credit.Addresses(activeNet.Params)
-			if err != nil {
-				// Unusable address, skip it.
-				continue
-			}
-			for _, address := range addresses {
-				addrStr := address.EncodeAddress()
-				addrData, ok := allAddrData[addrStr]
-				if ok {
-					addrData.amount += credit.Amount()
-					// Always overwrite confirmations with newer ones.
-					addrData.confirmations = confirmations
-				} else {
-					addrData = AddrData{
-						amount:        credit.Amount(),
-						confirmations: confirmations,
-					}
+
+	var endHeight int32
+	if cmd.MinConf == -1 {
+		endHeight = -1
+	} else {
+		endHeight = syncBlock.Height - int32(cmd.MinConf) + 1
+	}
+	err := w.TxStore.RangeTransactions(0, endHeight, func(details []wtxmgr.TxDetails) (bool, error) {
+		confirmations := confirms(details[0].Block.Height, syncBlock.Height)
+		for _, tx := range details {
+			for _, cred := range tx.Credits {
+				pkScript := tx.MsgTx.TxOut[cred.Index].PkScript
+				_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+					pkScript, activeNet.Params)
+				if err != nil {
+					// Non standard script, skip.
+					continue
 				}
-				addrData.tx = append(addrData.tx, credit.Tx().Sha().String())
-				allAddrData[addrStr] = addrData
+				for _, addr := range addrs {
+					addrStr := addr.EncodeAddress()
+					addrData, ok := allAddrData[addrStr]
+					if ok {
+						addrData.amount += cred.Amount
+						// Always overwrite confirmations with newer ones.
+						addrData.confirmations = confirmations
+					} else {
+						addrData = AddrData{
+							amount:        cred.Amount,
+							confirmations: confirmations,
+						}
+					}
+					addrData.tx = append(addrData.tx, tx.Hash.String())
+					allAddrData[addrStr] = addrData
+				}
 			}
 		}
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// Massage address data into output format.
@@ -2255,7 +2255,14 @@ func ListReceivedByAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjso
 func ListSinceBlock(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListSinceBlockCmd)
 
-	height := int32(-1)
+	syncBlock := w.Manager.SyncedTo()
+
+	// For the result we need the block hash for the last block counted
+	// in the blockchain due to confirmations. We send this off now so that
+	// it can arrive asynchronously while we figure out the rest.
+	gbh := chainSvr.GetBlockHashAsync(int64(syncBlock.Height) + 1 - int64(cmd.TargetConfirmations))
+
+	var start int32
 	if cmd.BlockHash != "" {
 		hash, err := wire.NewShaHashFromStr(cmd.BlockHash)
 		if err != nil {
@@ -2265,18 +2272,11 @@ func ListSinceBlock(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) 
 		if err != nil {
 			return nil, err
 		}
-		height = int32(block.Height())
+		start = int32(block.Height()) + 1
 	}
+	end := syncBlock.Height - int32(cmd.TargetConfirmations) + 1
 
-	blk := w.Manager.SyncedTo()
-
-	// For the result we need the block hash for the last block counted
-	// in the blockchain due to confirmations. We send this off now so that
-	// it can arrive asynchronously while we figure out the rest.
-	gbh := chainSvr.GetBlockHashAsync(int64(blk.Height) + 1 - int64(cmd.TargetConfirmations))
-
-	txInfoList, err := w.ListSinceBlock(height, blk.Height,
-		cmd.TargetConfirmations)
+	txInfoList, err := w.ListSinceBlock(start, end, syncBlock.Height)
 	if err != nil {
 		return nil, err
 	}
@@ -2377,7 +2377,7 @@ func ListUnspent(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 		}
 	}
 
-	return w.ListUnspent(cmd.MinConf, cmd.MaxConf, addresses)
+	return w.ListUnspent(int32(cmd.MinConf), int32(cmd.MaxConf), addresses)
 }
 
 // LockUnspent handles the lockunspent command.
@@ -2405,9 +2405,10 @@ func LockUnspent(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (in
 }
 
 // sendPairs is a helper routine to reduce duplicated code when creating and
-// sending payment transactions.
+// sending payment transactions.  It returns the transaction hash in string
+// format upon success.
 func sendPairs(w *wallet.Wallet, chainSvr *chain.Client, cmd btcjson.Cmd,
-	amounts map[string]btcutil.Amount, account uint32, minconf int) (interface{}, error) {
+	amounts map[string]btcutil.Amount, account uint32, minconf int32) (string, error) {
 
 	// Create transaction, replying with an error if the creation
 	// was not successful.
@@ -2415,41 +2416,44 @@ func sendPairs(w *wallet.Wallet, chainSvr *chain.Client, cmd btcjson.Cmd,
 	if err != nil {
 		switch {
 		case err == wallet.ErrNonPositiveAmount:
-			return nil, ErrNeedPositiveAmount
+			return "", ErrNeedPositiveAmount
 		case isManagerLockedError(err):
-			return nil, btcjson.ErrWalletUnlockNeeded
+			return "", btcjson.ErrWalletUnlockNeeded
 		}
 
-		return nil, err
+		return "", err
 	}
 
-	// Add to transaction store.
-	txr, err := w.TxStore.InsertTx(createdTx.Tx, nil)
+	// Create transaction record and insert into the db.
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(createdTx.MsgTx, time.Now())
+	if err != nil {
+		log.Errorf("Cannot create record for created transaction: %v", err)
+		return "", btcjson.ErrInternal
+	}
+	err = w.TxStore.InsertTx(rec, nil)
 	if err != nil {
 		log.Errorf("Error adding sent tx history: %v", err)
-		return nil, btcjson.ErrInternal
+		return "", btcjson.ErrInternal
 	}
-	_, err = txr.AddDebits()
-	if err != nil {
-		log.Errorf("Error adding sent tx history: %v", err)
-		return nil, btcjson.ErrInternal
-	}
+
 	if createdTx.ChangeIndex >= 0 {
-		_, err = txr.AddCredit(uint32(createdTx.ChangeIndex), true)
+		err = w.TxStore.AddCredit(rec, nil, uint32(createdTx.ChangeIndex), true)
 		if err != nil {
 			log.Errorf("Error adding change address for sent "+
 				"tx: %v", err)
-			return nil, btcjson.ErrInternal
+			return "", btcjson.ErrInternal
 		}
 	}
-	w.TxStore.MarkDirty()
 
-	txSha, err := chainSvr.SendRawTransaction(createdTx.Tx.MsgTx(), false)
+	// TODO: The record already has the serialized tx, so no need to
+	// serialize it again.
+	txSha, err := chainSvr.SendRawTransaction(&rec.MsgTx, false)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	log.Infof("Successfully sent transaction %v", txSha)
-	return txSha.String(), nil
+	txShaStr := txSha.String()
+	log.Infof("Successfully sent transaction %v", txShaStr)
+	return txShaStr, nil
 }
 
 // SendFrom handles a sendfrom RPC request by creating a new transaction
@@ -2477,7 +2481,7 @@ func SendFrom(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (inter
 		cmd.ToAddress: btcutil.Amount(cmd.Amount),
 	}
 
-	return sendPairs(w, chainSvr, cmd, pairs, account, cmd.MinConf)
+	return sendPairs(w, chainSvr, cmd, pairs, account, int32(cmd.MinConf))
 }
 
 // SendMany handles a sendmany RPC request by creating a new transaction
@@ -2504,7 +2508,7 @@ func SendMany(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd) (inter
 		pairs[k] = btcutil.Amount(v)
 	}
 
-	return sendPairs(w, chainSvr, cmd, pairs, account, cmd.MinConf)
+	return sendPairs(w, chainSvr, cmd, pairs, account, int32(cmd.MinConf))
 }
 
 // SendToAddress handles a sendtoaddress RPC request by creating a new

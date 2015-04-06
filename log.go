@@ -22,8 +22,8 @@ import (
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
 )
 
@@ -44,7 +44,7 @@ var (
 	backendLog = seelog.Disabled
 	log        = btclog.Disabled
 	walletLog  = btclog.Disabled
-	txstLog    = btclog.Disabled
+	txmgrLog   = btclog.Disabled
 	chainLog   = btclog.Disabled
 )
 
@@ -52,7 +52,7 @@ var (
 var subsystemLoggers = map[string]btclog.Logger{
 	"BTCW": log,
 	"WLLT": walletLog,
-	"TXST": txstLog,
+	"TMGR": txmgrLog,
 	"CHNS": chainLog,
 }
 
@@ -87,8 +87,8 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 		walletLog = logger
 		wallet.UseLogger(logger)
 	case "TXST":
-		txstLog = logger
-		txstore.UseLogger(logger)
+		txmgrLog = logger
+		wtxmgr.UseLogger(logger)
 	case "CHNS":
 		chainLog = logger
 		chain.UseLogger(logger)

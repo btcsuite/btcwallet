@@ -7,16 +7,18 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // This is a tx that transfers funds (0.371 BTC) to addresses of known privKeys.
@@ -80,7 +82,7 @@ func TestCreateTx(t *testing.T) {
 	}
 
 	// Pick all utxos from txInfo as eligible input.
-	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
+	eligible := mockCredits(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
 	// Now create a new TX sending 25e6 satoshis to the following addresses:
 	outputs := map[string]btcutil.Amount{outAddr1: 15e6, outAddr2: 10e6}
 	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, account, tstChangeAddress, &chaincfg.TestNet3Params, false)
@@ -93,7 +95,7 @@ func TestCreateTx(t *testing.T) {
 			tx.ChangeAddr.String(), changeAddr.String())
 	}
 
-	msgTx := tx.Tx.MsgTx()
+	msgTx := tx.MsgTx
 	if len(msgTx.TxOut) != 3 {
 		t.Fatalf("Unexpected number of outputs; got %d, want 3", len(msgTx.TxOut))
 	}
@@ -122,7 +124,7 @@ func TestCreateTx(t *testing.T) {
 
 func TestCreateTxInsufficientFundsError(t *testing.T) {
 	outputs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1e9}
-	eligible := eligibleInputsFromTx(t, txInfo.hex, []uint32{1})
+	eligible := mockCredits(t, txInfo.hex, []uint32{1})
 	bs := &waddrmgr.BlockStamp{Height: 11111}
 	account := uint32(0)
 	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", &chaincfg.TestNet3Params)
@@ -207,29 +209,36 @@ func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddr
 	return mgr
 }
 
-// eligibleInputsFromTx decodes the given txHex and returns the outputs with
+// mockCredits decodes the given txHex and returns the outputs with
 // the given indices as eligible inputs.
-func eligibleInputsFromTx(t *testing.T, txHex string, indices []uint32) []txstore.Credit {
+func mockCredits(t *testing.T, txHex string, indices []uint32) []wtxmgr.Credit {
 	serialized, err := hex.DecodeString(txHex)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx, err := btcutil.NewTxFromBytes(serialized)
+	utx, err := btcutil.NewTxFromBytes(serialized)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := txstore.New("/tmp/tx.bin")
-	r, err := s.InsertTx(tx, nil)
-	if err != nil {
-		t.Fatal(err)
+	tx := utx.MsgTx()
+
+	isCB := blockchain.IsCoinBaseTx(tx)
+	now := time.Now()
+
+	eligible := make([]wtxmgr.Credit, len(indices))
+	c := wtxmgr.Credit{
+		OutPoint: wire.OutPoint{Hash: *utx.Sha()},
+		BlockMeta: wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: -1},
+		},
 	}
-	eligible := make([]txstore.Credit, len(indices))
 	for i, idx := range indices {
-		credit, err := r.AddCredit(idx, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		eligible[i] = credit
+		c.OutPoint.Index = idx
+		c.Amount = btcutil.Amount(tx.TxOut[idx].Value)
+		c.PkScript = tx.TxOut[idx].PkScript
+		c.Received = now
+		c.FromCoinBase = isCB
+		eligible[i] = c
 	}
 	return eligible
 }

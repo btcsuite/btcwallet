@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>
+ * Copyright (c) 2013-2015 Conformal Systems LLC <info@conformal.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,10 +18,9 @@ package wallet
 
 import (
 	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 func (w *Wallet) handleChainNotifications() {
@@ -45,10 +44,8 @@ func (w *Wallet) handleChainNotifications() {
 			w.connectBlock(waddrmgr.BlockStamp(n))
 		case chain.BlockDisconnected:
 			err = w.disconnectBlock(waddrmgr.BlockStamp(n))
-		case chain.RecvTx:
-			err = w.addReceivedTx(n.Tx, n.Block)
-		case chain.RedeemingTx:
-			err = w.addRedeemingTx(n.Tx, n.Block)
+		case chain.RelevantTx:
+			err = w.addRelevantTx(n.TxRecord, n.Block)
 
 		// The following are handled by the wallet's rescan
 		// goroutines, so just pass them there.
@@ -116,69 +113,87 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
 	return nil
 }
 
-func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
-	// For every output, if it pays to a wallet address, insert the
-	// transaction into the store (possibly moving it from unconfirmed to
-	// confirmed), and add a credit record if one does not already exist.
-	var txr *txstore.TxRecord
-	txInserted := false
-	for txOutIdx, txOut := range tx.MsgTx().TxOut {
-		// Errors don't matter here.  If addrs is nil, the range below
-		// does nothing.
-		_, addrs, _, _ := txscript.ExtractPkScriptAddrs(txOut.PkScript,
-			w.chainParams)
-		insert := false
-		for _, addr := range addrs {
-			_, err := w.Manager.Address(addr)
-			if err == nil {
-				insert = true
-				break
-			}
-		}
-		if insert {
-			if !txInserted {
-				var err error
-				txr, err = w.TxStore.InsertTx(tx, block)
-				if err != nil {
-					return err
-				}
-				// InsertTx may have moved a previous unmined
-				// tx, so mark the entire store as dirty.
-				w.TxStore.MarkDirty()
-				txInserted = true
-			}
-			if txr.HasCredit(txOutIdx) {
-				continue
-			}
-			_, err := txr.AddCredit(uint32(txOutIdx), false)
-			if err != nil {
-				return err
-			}
-			w.TxStore.MarkDirty()
-		}
-	}
+func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) error {
+	// TODO: The transaction store and address manager need to be updated
+	// together, but each operate under different namespaces and are changed
+	// under new transactions.  This is not error safe as we lose
+	// transaction semantics.
+	//
+	// I'm unsure of the best way to solve this.  Some possible solutions
+	// and drawbacks:
+	//
+	//   1. Open write transactions here and pass the handle to every
+	//      waddrmr and wtxmgr method.  This complicates the caller code
+	//      everywhere, however.
+	//
+	//   2. Move the wtxmgr namespace into the waddrmgr namespace, likely
+	//      under its own bucket.  This entire function can then be moved
+	//      into the waddrmgr package, which updates the nested wtxmgr.
+	//      This removes some of separation between the components.
+	//
+	//   3. Use multiple wtxmgrs, one for each account, nested in the
+	//      waddrmgr namespace.  This still provides some sort of logical
+	//      separation (transaction handling remains in another package, and
+	//      is simply used by waddrmgr), but may result in duplicate
+	//      transactions being saved if they are relevant to multiple
+	//      accounts.
+	//
+	//   4. Store wtxmgr-related details under the waddrmgr namespace, but
+	//      solve the drawback of #3 by splitting wtxmgr to save entire
+	//      transaction records globally for all accounts, with
+	//      credit/debit/balance tracking per account.  Each account would
+	//      also save the relevant transaction hashes and block incidence so
+	//      the full transaction can be loaded from the waddrmgr
+	//      transactions bucket.  This currently seems like the best
+	//      solution.
 
-	bs, err := w.chainSvr.BlockStamp()
-	if err == nil {
-		w.notifyBalances(bs.Height)
-	}
-
-	return nil
-}
-
-// addRedeemingTx inserts the notified spending transaction as a debit and
-// schedules the transaction store for a future file write.
-func (w *Wallet) addRedeemingTx(tx *btcutil.Tx, block *txstore.Block) error {
-	txr, err := w.TxStore.InsertTx(tx, block)
+	// At the moment all notified transactions are assumed to actually be
+	// relevant.  This assumption will not hold true when SPV support is
+	// added, but until then, simply insert the transaction because there
+	// should either be one or more relevant inputs or outputs.
+	err := w.TxStore.InsertTx(rec, block)
 	if err != nil {
 		return err
 	}
-	if _, err := txr.AddDebits(); err != nil {
-		return err
+
+	// Check every output to determine whether it is controlled by a wallet
+	// key.  If so, mark the output as a credit.
+	for i, output := range rec.MsgTx.TxOut {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(output.PkScript,
+			w.chainParams)
+		if err != nil {
+			// Non-standard outputs are skipped.
+			continue
+		}
+		for _, addr := range addrs {
+			ma, err := w.Manager.Address(addr)
+			if err == nil {
+				// TODO: Credits should be added with the
+				// account they belong to, so wtxmgr is able to
+				// track per-account balances.
+				err = w.TxStore.AddCredit(rec, block, uint32(i),
+					ma.Internal())
+				if err != nil {
+					return err
+				}
+				err = w.Manager.MarkUsed(addr)
+				if err != nil {
+					return err
+				}
+				log.Debugf("Marked address %v used", addr)
+				continue
+			}
+
+			// Missing addresses are skipped.  Other errors should
+			// be propagated.
+			code := err.(waddrmgr.ManagerError).ErrorCode
+			if code != waddrmgr.ErrAddressNotFound {
+				return err
+			}
+		}
 	}
-	if err := w.markAddrsUsed(txr); err != nil {
-		return err
-	}
+
+	// TODO: Notify connected clients of the added transaction.
 
 	bs, err := w.chainSvr.BlockStamp()
 	if err == nil {

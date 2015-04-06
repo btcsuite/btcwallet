@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 Conformal Systems LLC <info@conformal.com>
+ * Copyright (c) 2013-2015 Conformal Systems LLC <info@conformal.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -26,8 +26,8 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // Client represents a persistent client connection to a bitcoin RPC server
@@ -159,18 +159,11 @@ type (
 	// BlockStamp was reorganized out of the best chain.
 	BlockDisconnected waddrmgr.BlockStamp
 
-	// RecvTx is a notification for a transaction which pays to a wallet
-	// address.
-	RecvTx struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
-	}
-
-	// RedeemingTx is a notification for a transaction which spends an
-	// output controlled by the wallet.
-	RedeemingTx struct {
-		Tx    *btcutil.Tx    // Index is guaranteed to be set.
-		Block *txstore.Block // nil if unmined
+	// RelevantTx is a notification for a transaction which spends wallet
+	// inputs or pays to a watched address.
+	RelevantTx struct {
+		TxRecord *wtxmgr.TxRecord
+		Block    *wtxmgr.BlockMeta // nil if unmined
 	}
 
 	// RescanProgress is a notification describing the current status
@@ -209,23 +202,25 @@ func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	}
 }
 
-// parseBlock parses a btcjson definition of the block a tx is mined it to the
-// Block structure of the txstore package, and the block index.  This is done
+// parseBlock parses a btcws definition of the block a tx is mined it to the
+// Block structure of the wtxmgr package, and the block index.  This is done
 // here since btcrpcclient doesn't parse this nicely for us.
-func parseBlock(block *btcjson.BlockDetails) (blk *txstore.Block, idx int, err error) {
+func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	if block == nil {
-		return nil, btcutil.TxIndexUnknown, nil
+		return nil, nil
 	}
 	blksha, err := wire.NewShaHashFromStr(block.Hash)
 	if err != nil {
-		return nil, btcutil.TxIndexUnknown, err
+		return nil, err
 	}
-	blk = &txstore.Block{
-		Height: block.Height,
-		Hash:   *blksha,
-		Time:   time.Unix(block.Time, 0),
+	blk := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Height: block.Height,
+			Hash:   *blksha,
+		},
+		Time: time.Unix(block.Time, 0),
 	}
-	return blk, block.Index, nil
+	return blk, nil
 }
 
 func (c *Client) onClientConnect() {
@@ -242,35 +237,25 @@ func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32) {
 }
 
 func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
-	var blk *txstore.Block
-	index := btcutil.TxIndexUnknown
-	if block != nil {
-		var err error
-		blk, index, err = parseBlock(block)
-		if err != nil {
-			// Log and drop improper notification.
-			log.Errorf("recvtx notification bad block: %v", err)
-			return
-		}
+	blk, err := parseBlock(block)
+	if err != nil {
+		// Log and drop improper notification.
+		log.Errorf("recvtx notification bad block: %v", err)
+		return
 	}
-	tx.SetIndex(index)
-	c.enqueueNotification <- RecvTx{tx, blk}
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx(), time.Now())
+	if err != nil {
+		log.Errorf("Cannot create transaction record for relevant "+
+			"tx: %v", err)
+		return
+	}
+	c.enqueueNotification <- RelevantTx{rec, blk}
 }
 
 func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
-	var blk *txstore.Block
-	index := btcutil.TxIndexUnknown
-	if block != nil {
-		var err error
-		blk, index, err = parseBlock(block)
-		if err != nil {
-			// Log and drop improper notification.
-			log.Errorf("redeemingtx notification bad block: %v", err)
-			return
-		}
-	}
-	tx.SetIndex(index)
-	c.enqueueNotification <- RedeemingTx{tx, blk}
+	// Handled exactly like recvtx notifications.
+	c.onRecvTx(tx, block)
 }
 
 func (c *Client) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
