@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcjson/btcws"
+	"github.com/btcsuite/btcd/btcjson/v2/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
@@ -209,10 +209,10 @@ func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	}
 }
 
-// parseBlock parses a btcws definition of the block a tx is mined it to the
+// parseBlock parses a btcjson definition of the block a tx is mined it to the
 // Block structure of the txstore package, and the block index.  This is done
 // here since btcrpcclient doesn't parse this nicely for us.
-func parseBlock(block *btcws.BlockDetails) (blk *txstore.Block, idx int, err error) {
+func parseBlock(block *btcjson.BlockDetails) (blk *txstore.Block, idx int, err error) {
 	if block == nil {
 		return nil, btcutil.TxIndexUnknown, nil
 	}
@@ -241,7 +241,7 @@ func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32) {
 	c.enqueueNotification <- BlockDisconnected{Hash: *hash, Height: height}
 }
 
-func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
+func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	var blk *txstore.Block
 	index := btcutil.TxIndexUnknown
 	if block != nil {
@@ -257,7 +257,7 @@ func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
 	c.enqueueNotification <- RecvTx{tx, blk}
 }
 
-func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcws.BlockDetails) {
+func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	var blk *txstore.Block
 	index := btcutil.TxIndexUnknown
 	if block != nil {
