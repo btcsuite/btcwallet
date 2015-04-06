@@ -82,6 +82,49 @@ type Bucket interface {
 	// that does not exist does not return an error.  Returns
 	// ErrTxNotWritable if attempted against a read-only transaction.
 	Delete(key []byte) error
+
+	// Cursor returns a new cursor, allowing for iteration over the bucket's
+	// key/value pairs and nested buckets in forward or backward order.
+	Cursor() Cursor
+}
+
+// Cursor represents a cursor over key/value pairs and nested buckets of a
+// bucket.
+//
+// Note that open cursors are not tracked on bucket changes and any
+// modifications to the bucket, with the exception of Cursor.Delete, invalidate
+// the cursor.  After invalidation, the cursor must be repositioned, or the keys
+// and values returned may be unpredictable.
+type Cursor interface {
+	// Bucket returns the bucket the cursor was created for.
+	Bucket() Bucket
+
+	// Delete removes the current key/value pair the cursor is at without
+	// invalidating the cursor.  Returns ErrTxNotWritable if attempted on a
+	// read-only transaction, or ErrIncompatibleValue if attempted when the
+	// cursor points to a nested bucket.
+	Delete() error
+
+	// First positions the cursor at the first key/value pair and returns
+	// the pair.
+	First() (key, value []byte)
+
+	// Last positions the cursor at the last key/value pair and returns the
+	// pair.
+	Last() (key, value []byte)
+
+	// Next moves the cursor one key/value pair forward and returns the new
+	// pair.
+	Next() (key, value []byte)
+
+	// Prev moves the cursor one key/value pair backward and returns the new
+	// pair.
+	Prev() (key, value []byte)
+
+	// Seek positions the cursor at the passed seek key.  If the key does
+	// not exist, the cursor is moved to the next key after seek.  Returns
+	// the new pair.
+	Seek(seek []byte) (key, value []byte)
 }
 
 // Tx represents a database transaction.  It can either by read-only or
