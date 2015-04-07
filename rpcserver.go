@@ -3126,6 +3126,7 @@ func ValidateAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{})
 		return nil, &ErrAccountNameNotFound
 	}
 	result.Account = acctName
+	result.IsWatchOnly = ainfo.WatchingOnly()
 
 	switch ma := ainfo.(type) {
 	case waddrmgr.ManagedPubKeyAddress:
