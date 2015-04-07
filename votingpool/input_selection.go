@@ -22,61 +22,31 @@ import (
 	"sort"
 
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 const eligibleInputMinConfirmations = 100
 
-// Credit is an abstraction over txstore.Credit used in the construction of
+// credit is an abstraction over wtxmgr.Credit used in the construction of
 // voting pool withdrawal transactions.
-type Credit interface {
-	TxSha() *wire.ShaHash
-	OutputIndex() uint32
-	Address() WithdrawalAddress
-	Amount() btcutil.Amount
-	OutPoint() *wire.OutPoint
-	TxOut() *wire.TxOut
-}
-
-// credit implements the Credit interface.
 type credit struct {
-	txstore.Credit
+	wtxmgr.Credit
 	addr WithdrawalAddress
 }
 
-// newCredit initialises a new credit.
-func newCredit(c txstore.Credit, addr WithdrawalAddress) *credit {
-	return &credit{Credit: c, addr: addr}
+func newCredit(c wtxmgr.Credit, addr WithdrawalAddress) credit {
+	return credit{Credit: c, addr: addr}
 }
 
 func (c *credit) String() string {
-	return fmt.Sprintf("credit of %v to %v", c.Amount(), c.Address())
+	return fmt.Sprintf("credit of %v locked to %v", c.Amount, c.addr)
 }
-
-// TxSha returns the sha hash of the underlying transaction.
-func (c *credit) TxSha() *wire.ShaHash {
-	return c.Credit.TxRecord.Tx().Sha()
-}
-
-// OutputIndex returns the outputindex of the ouput in the underlying
-// transaction.
-func (c *credit) OutputIndex() uint32 {
-	return c.Credit.OutputIndex
-}
-
-// Address returns the voting pool address.
-func (c *credit) Address() WithdrawalAddress {
-	return c.addr
-}
-
-// Compile time check that credit implements Credit interface.
-var _ Credit = (*credit)(nil)
 
 // byAddress defines the methods needed to satisify sort.Interface to sort a
-// slice of Credits by their address.
-type byAddress []Credit
+// slice of credits by their address.
+type byAddress []credit
 
 func (c byAddress) Len() int      { return len(c) }
 func (c byAddress) Swap(i, j int) { c[i], c[j] = c[j], c[i] }
@@ -86,8 +56,8 @@ func (c byAddress) Swap(i, j int) { c[i], c[j] = c[j], c[i] }
 // the lexicographic ordering defined on the tuple (SeriesID, Index,
 // Branch, TxSha, OutputIndex).
 func (c byAddress) Less(i, j int) bool {
-	iAddr := c[i].Address()
-	jAddr := c[j].Address()
+	iAddr := c[i].addr
+	jAddr := c[j].addr
 	if iAddr.seriesID < jAddr.seriesID {
 		return true
 	}
@@ -112,7 +82,7 @@ func (c byAddress) Less(i, j int) bool {
 	}
 
 	// The seriesID, index, and branch are equal, so compare hash.
-	txidComparison := bytes.Compare(c[i].TxSha().Bytes(), c[j].TxSha().Bytes())
+	txidComparison := bytes.Compare(c[i].OutPoint.Hash.Bytes(), c[j].OutPoint.Hash.Bytes())
 	if txidComparison < 0 {
 		return true
 	}
@@ -122,14 +92,14 @@ func (c byAddress) Less(i, j int) bool {
 
 	// The seriesID, index, branch, and hash are equal, so compare output
 	// index.
-	return c[i].OutputIndex() < c[j].OutputIndex()
+	return c[i].OutPoint.Index < c[j].OutPoint.Index
 }
 
 // getEligibleInputs returns eligible inputs with addresses between startAddress
 // and the last used address of lastSeriesID.
-func (p *Pool) getEligibleInputs(store *txstore.Store, startAddress WithdrawalAddress,
+func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAddress,
 	lastSeriesID uint32, dustThreshold btcutil.Amount, chainHeight int32,
-	minConf int) ([]Credit, error) {
+	minConf int) ([]credit, error) {
 
 	if p.Series(lastSeriesID) == nil {
 		str := fmt.Sprintf("lastSeriesID (%d) does not exist", lastSeriesID)
@@ -143,15 +113,16 @@ func (p *Pool) getEligibleInputs(store *txstore.Store, startAddress WithdrawalAd
 	if err != nil {
 		return nil, err
 	}
-	var inputs []Credit
+	var inputs []credit
 	address := startAddress
 	for {
 		log.Debugf("Looking for eligible inputs at address %v", address.addrIdentifier())
 		if candidates, ok := addrMap[address.addr.EncodeAddress()]; ok {
-			var eligibles []Credit
+			var eligibles []credit
 			for _, c := range candidates {
-				if p.isCreditEligible(c, minConf, chainHeight, dustThreshold) {
-					eligibles = append(eligibles, newCredit(c, address))
+				candidate := newCredit(c, address)
+				if p.isCreditEligible(candidate, minConf, chainHeight, dustThreshold) {
+					eligibles = append(eligibles, candidate)
 				}
 			}
 			// Make sure the eligibles are correctly sorted.
@@ -237,11 +208,11 @@ func (p *Pool) highestUsedSeriesIndex(seriesID uint32) (Index, error) {
 // groupCreditsByAddr converts a slice of credits to a map from the string
 // representation of an encoded address to the unspent outputs associated with
 // that address.
-func groupCreditsByAddr(credits []txstore.Credit, chainParams *chaincfg.Params) (
-	map[string][]txstore.Credit, error) {
-	addrMap := make(map[string][]txstore.Credit)
+func groupCreditsByAddr(credits []wtxmgr.Credit, chainParams *chaincfg.Params) (
+	map[string][]wtxmgr.Credit, error) {
+	addrMap := make(map[string][]wtxmgr.Credit)
 	for _, c := range credits {
-		_, addrs, _, err := c.Addresses(chainParams)
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(c.PkScript, chainParams)
 		if err != nil {
 			return nil, newError(ErrInputSelection, "failed to obtain input address", err)
 		}
@@ -255,7 +226,7 @@ func groupCreditsByAddr(credits []txstore.Credit, chainParams *chaincfg.Params) 
 		if v, ok := addrMap[encAddr]; ok {
 			addrMap[encAddr] = append(v, c)
 		} else {
-			addrMap[encAddr] = []txstore.Credit{c}
+			addrMap[encAddr] = []wtxmgr.Credit{c}
 		}
 	}
 
@@ -265,12 +236,12 @@ func groupCreditsByAddr(credits []txstore.Credit, chainParams *chaincfg.Params) 
 // isCreditEligible tests a given credit for eligibilty with respect
 // to number of confirmations, the dust threshold and that it is not
 // the charter output.
-func (p *Pool) isCreditEligible(c txstore.Credit, minConf int, chainHeight int32,
+func (p *Pool) isCreditEligible(c credit, minConf int, chainHeight int32,
 	dustThreshold btcutil.Amount) bool {
-	if c.Amount() < dustThreshold {
+	if c.Amount < dustThreshold {
 		return false
 	}
-	if !c.Confirmed(minConf, chainHeight) {
+	if confirms(c.BlockMeta.Block.Height, chainHeight) < int32(minConf) {
 		return false
 	}
 	if p.isCharterOutput(c) {
@@ -282,6 +253,18 @@ func (p *Pool) isCreditEligible(c txstore.Credit, minConf int, chainHeight int32
 
 // isCharterOutput - TODO: In order to determine this, we need the txid
 // and the output index of the current charter output, which we don't have yet.
-func (p *Pool) isCharterOutput(c txstore.Credit) bool {
+func (p *Pool) isCharterOutput(c credit) bool {
 	return false
+}
+
+// confirms returns the number of confirmations for a transaction in a block at
+// height txHeight (or -1 for an unconfirmed tx) given the chain height
+// curHeight.
+func confirms(txHeight, curHeight int32) int32 {
+	switch {
+	case txHeight == -1, txHeight > curHeight:
+		return 0
+	default:
+		return curHeight - txHeight + 1
+	}
 }

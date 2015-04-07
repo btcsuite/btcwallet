@@ -37,7 +37,7 @@ func TestStartWithdrawal(t *testing.T) {
 	def := vp.TstCreateSeriesDef(t, pool, 2, masters)
 	vp.TstCreateSeries(t, pool, []vp.TstSeriesDef{def})
 	// Create eligible inputs and the list of outputs we need to fulfil.
-	vp.TstCreateCreditsOnSeries(t, pool, def.SeriesID, []int64{5e6, 4e6}, store)
+	vp.TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, []int64{5e6, 4e6}, store)
 	address1 := "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6"
 	address2 := "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG"
 	requests := []vp.OutputRequest{

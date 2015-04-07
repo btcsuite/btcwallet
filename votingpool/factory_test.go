@@ -25,15 +25,16 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/legacy/txstore"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -51,11 +52,10 @@ func getUniqueID() uint32 {
 }
 
 // createWithdrawalTx creates a withdrawalTx with the given input and output amounts.
-func createWithdrawalTx(t *testing.T, pool *Pool, store *txstore.Store, inputAmounts []int64,
-	outputAmounts []int64) *withdrawalTx {
+func createWithdrawalTx(t *testing.T, pool *Pool, inputAmounts []int64, outputAmounts []int64) *withdrawalTx {
 	net := pool.Manager().ChainParams()
 	tx := newWithdrawalTx()
-	_, credits := TstCreateCredits(t, pool, inputAmounts, store)
+	_, credits := TstCreateCreditsOnNewSeries(t, pool, inputAmounts)
 	for _, c := range credits {
 		tx.addInput(c)
 	}
@@ -136,12 +136,23 @@ func TstCreatePkScript(t *testing.T, p *Pool, seriesID uint32, branch Branch, id
 	return pkScript
 }
 
-func TstCreateTxStore(t *testing.T) (store *txstore.Store, tearDown func()) {
-	dir, err := ioutil.TempDir("", "tx.bin")
+func TstCreateTxStore(t *testing.T) (store *wtxmgr.Store, tearDown func()) {
+	dir, err := ioutil.TempDir("", "pool_test_txstore")
 	if err != nil {
-		t.Fatalf("Failed to create db file: %v", err)
+		t.Fatalf("Failed to create txstore dir: %v", err)
 	}
-	s := txstore.New(dir)
+	db, err := walletdb.Create("bdb", filepath.Join(dir, "txstore.db"))
+	if err != nil {
+		t.Fatalf("Failed to create walletdb: %v", err)
+	}
+	wtxmgrNamespace, err := db.Namespace([]byte("testtxstore"))
+	if err != nil {
+		t.Fatalf("Failed to create walletdb namespace: %v", err)
+	}
+	s, err := wtxmgr.Create(wtxmgrNamespace)
+	if err != nil {
+		t.Fatalf("Failed to create txstore: %v", err)
+	}
 	return s, func() { os.RemoveAll(dir) }
 }
 
@@ -201,15 +212,12 @@ func TstCreateSeriesDef(t *testing.T, pool *Pool, reqSigs uint32, keys []*hdkeyc
 		pubkey, _ := key.Neuter()
 		pubKeys[i] = pubkey.String()
 	}
-	seriesID := uint32(len(pool.seriesLookup))
-	if seriesID == 0 {
-		seriesID++
-	}
+	seriesID := uint32(len(pool.seriesLookup)) + 1
 	return TstSeriesDef{
 		ReqSigs: reqSigs, SeriesID: seriesID, PubKeys: pubKeys, PrivKeys: privKeys}
 }
 
-func TstCreatePoolAndTxStore(t *testing.T) (tearDown func(), pool *Pool, store *txstore.Store) {
+func TstCreatePoolAndTxStore(t *testing.T) (tearDown func(), pool *Pool, store *wtxmgr.Store) {
 	mgrTearDown, _, pool := TstCreatePool(t)
 	store, storeTearDown := TstCreateTxStore(t)
 	tearDown = func() {
@@ -219,12 +227,11 @@ func TstCreatePoolAndTxStore(t *testing.T) (tearDown func(), pool *Pool, store *
 	return tearDown, pool, store
 }
 
-// TstCreateCredits creates a new Series (with a unique ID) and a slice of
-// credits locked to the series' address with branch==1 and index==0. The new
-// Series will use a 2-of-3 configuration and will be empowered with all of its
-// private keys.
-func TstCreateCredits(t *testing.T, pool *Pool, amounts []int64, store *txstore.Store) (
-	uint32, []Credit) {
+// TstCreateCreditsOnNewSeries creates a new Series (with a unique ID) and a
+// slice of credits locked to the series' address with branch==1 and index==0.
+// The new Series will use a 2-of-3 configuration and will be empowered with
+// all of its private keys.
+func TstCreateCreditsOnNewSeries(t *testing.T, pool *Pool, amounts []int64) (uint32, []credit) {
 	masters := []*hdkeychain.ExtendedKey{
 		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
 		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
@@ -232,56 +239,84 @@ func TstCreateCredits(t *testing.T, pool *Pool, amounts []int64, store *txstore.
 	}
 	def := TstCreateSeriesDef(t, pool, 2, masters)
 	TstCreateSeries(t, pool, []TstSeriesDef{def})
-	return def.SeriesID, TstCreateCreditsOnSeries(t, pool, def.SeriesID, amounts, store)
+	return def.SeriesID, TstCreateSeriesCredits(t, pool, def.SeriesID, amounts)
 }
 
-// TstCreateCreditsOnSeries creates a slice of credits locked to the given
-// series' address with branch==1 and index==0.
-func TstCreateCreditsOnSeries(t *testing.T, pool *Pool, seriesID uint32, amounts []int64,
-	store *txstore.Store) []Credit {
+// TstCreateSeriesCredits creates a new credit for every item in the amounts
+// slice, locked to the given series' address with branch==1 and index==0.
+func TstCreateSeriesCredits(t *testing.T, pool *Pool, seriesID uint32, amounts []int64) []credit {
+	addr := TstNewWithdrawalAddress(t, pool, seriesID, Branch(1), Index(0))
+	pkScript, err := txscript.PayToAddrScript(addr.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgTx := createMsgTx(pkScript, amounts)
+	txSha := msgTx.TxSha()
+	credits := make([]credit, len(amounts))
+	for i := range msgTx.TxOut {
+		c := wtxmgr.Credit{
+			OutPoint: wire.OutPoint{
+				Hash:  txSha,
+				Index: uint32(i),
+			},
+			BlockMeta: wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: TstInputsBlock},
+			},
+			Amount:   btcutil.Amount(msgTx.TxOut[i].Value),
+			PkScript: msgTx.TxOut[i].PkScript,
+		}
+		credits[i] = newCredit(c, *addr)
+	}
+	return credits
+}
+
+// TstCreateSeriesCreditsOnStore inserts a new credit in the given store for
+// every item in the amounts slice. These credits are locked to the votingpool
+// address composed of the given seriesID, branch==1 and index==0.
+func TstCreateSeriesCreditsOnStore(t *testing.T, pool *Pool, seriesID uint32, amounts []int64,
+	store *wtxmgr.Store) []credit {
 	branch := Branch(1)
 	idx := Index(0)
 	pkScript := TstCreatePkScript(t, pool, seriesID, branch, idx)
-	eligible := make([]Credit, len(amounts))
-	for i, credit := range TstCreateInputs(t, store, pkScript, amounts) {
+	eligible := make([]credit, len(amounts))
+	for i, credit := range TstCreateCreditsOnStore(t, store, pkScript, amounts) {
 		eligible[i] = newCredit(credit, *TstNewWithdrawalAddress(t, pool, seriesID, branch, idx))
 	}
 	return eligible
 }
 
-// TstCreateInputs is a convenience function.  See TstCreateInputsOnBlock
-// for a more flexible version.
-func TstCreateInputs(t *testing.T, store *txstore.Store, pkScript []byte, amounts []int64) []txstore.Credit {
-	return TstCreateInputsOnBlock(t, store, 1, pkScript, amounts)
-}
-
-// TstCreateInputsOnBlock creates a number of inputs by creating a transaction
-// with a number of outputs corresponding to the elements of the amounts slice.
-//
-// The transaction is added to a block and the index and blockheight must be
-// specified.
-func TstCreateInputsOnBlock(t *testing.T, s *txstore.Store,
-	blockTxIndex int, pkScript []byte, amounts []int64) []txstore.Credit {
+// TstCreateCreditsOnStore inserts a new credit in the given store for
+// every item in the amounts slice.
+func TstCreateCreditsOnStore(t *testing.T, s *wtxmgr.Store, pkScript []byte,
+	amounts []int64) []wtxmgr.Credit {
 	msgTx := createMsgTx(pkScript, amounts)
-	block := &txstore.Block{
-		Height: TstInputsBlock,
+	meta := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: TstInputsBlock},
 	}
 
-	tx := btcutil.NewTx(msgTx)
-	tx.SetIndex(blockTxIndex)
-
-	r, err := s.InsertTx(tx, block)
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(msgTx, time.Now())
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.InsertTx(rec, meta); err != nil {
 		t.Fatal("Failed to create inputs: ", err)
 	}
 
-	credits := make([]txstore.Credit, len(msgTx.TxOut))
+	credits := make([]wtxmgr.Credit, len(msgTx.TxOut))
 	for i := range msgTx.TxOut {
-		credit, err := r.AddCredit(uint32(i), false)
-		if err != nil {
+		if err := s.AddCredit(rec, meta, uint32(i), false); err != nil {
 			t.Fatal("Failed to create inputs: ", err)
 		}
-		credits[i] = credit
+		credits[i] = wtxmgr.Credit{
+			OutPoint: wire.OutPoint{
+				Hash:  rec.Hash,
+				Index: uint32(i),
+			},
+			BlockMeta: *meta,
+			Amount:    btcutil.Amount(msgTx.TxOut[i].Value),
+			PkScript:  msgTx.TxOut[i].PkScript,
+		}
 	}
 	return credits
 }
