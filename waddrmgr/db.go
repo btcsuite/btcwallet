@@ -695,12 +695,14 @@ func deleteAccountIDIndex(tx walletdb.Tx, account uint32) error {
 // putAccountNameIndex stores the given key to the account name index of the database.
 func putAccountNameIndex(tx walletdb.Tx, account uint32, name string) error {
 	bucket := tx.RootBucket().Bucket(acctNameIdxBucketName)
-
-	// Write the account number keyed by the account name.
-	err := bucket.Put(stringToBytes(name), uint32ToBytes(account))
-	if err != nil {
-		str := fmt.Sprintf("failed to store account name index key %s", name)
-		return managerError(ErrDatabase, str, err)
+	// Skip if we're working with the initial db version
+	if bucket != nil {
+		// Write the account number keyed by the account name.
+		err := bucket.Put(stringToBytes(name), uint32ToBytes(account))
+		if err != nil {
+			str := fmt.Sprintf("failed to store account name index key %s", name)
+			return managerError(ErrDatabase, str, err)
+		}
 	}
 	return nil
 }
@@ -708,12 +710,14 @@ func putAccountNameIndex(tx walletdb.Tx, account uint32, name string) error {
 // putAccountIDIndex stores the given key to the account id index of the database.
 func putAccountIDIndex(tx walletdb.Tx, account uint32, name string) error {
 	bucket := tx.RootBucket().Bucket(acctIDIdxBucketName)
-
-	// Write the account number keyed by the account id.
-	err := bucket.Put(uint32ToBytes(account), stringToBytes(name))
-	if err != nil {
-		str := fmt.Sprintf("failed to store account id index key %s", name)
-		return managerError(ErrDatabase, str, err)
+	// Skip if we're working with the initial db version
+	if bucket != nil {
+		// Write the account number keyed by the account id.
+		err := bucket.Put(uint32ToBytes(account), stringToBytes(name))
+		if err != nil {
+			str := fmt.Sprintf("failed to store account id index key %s", name)
+			return managerError(ErrDatabase, str, err)
+		}
 	}
 	return nil
 }
@@ -1581,39 +1585,6 @@ func createManagerNS(namespace walletdb.Namespace) error {
 			return managerError(ErrDatabase, str, err)
 		}
 
-		// usedAddrBucketName bucket was added after manager version 1 release
-		_, err = rootBucket.CreateBucket(usedAddrBucketName)
-		if err != nil {
-			str := "failed to create used addresses bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(acctNameIdxBucketName)
-		if err != nil {
-			str := "failed to create an account name index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(acctIDIdxBucketName)
-		if err != nil {
-			str := "failed to create an account id index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(metaBucketName)
-		if err != nil {
-			str := "failed to create a meta bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		if err := putLastAccount(tx, DefaultAccountNum); err != nil {
-			return err
-		}
-
-		if err := putManagerVersion(tx, latestMgrVersion); err != nil {
-			return err
-		}
-
 		createDate := uint64(time.Now().Unix())
 		var dateBytes [8]byte
 		binary.LittleEndian.PutUint64(dateBytes[:], createDate)
@@ -1638,19 +1609,17 @@ func createManagerNS(namespace walletdb.Namespace) error {
 // initialized and it will be updated on the next rescan.
 func upgradeToVersion2(namespace walletdb.Namespace) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
-		currentMgrVersion := uint32(2)
 		rootBucket := tx.RootBucket()
 
+		// Write manager version
+		if err := putManagerVersion(tx, 2); err != nil {
+			return err
+		}
 		_, err := rootBucket.CreateBucket(usedAddrBucketName)
 		if err != nil {
 			str := "failed to create used addresses bucket"
 			return managerError(ErrDatabase, str, err)
 		}
-
-		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
-			return err
-		}
-
 		return nil
 	})
 	if err != nil {
@@ -1659,104 +1628,14 @@ func upgradeToVersion2(namespace walletdb.Namespace) error {
 	return nil
 }
 
-// upgradeManager upgrades the data in the provided manager namespace to newer
-// versions as neeeded.
-func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, config *Options) error {
-	var version uint32
-	err := namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		version, err = fetchManagerVersion(tx)
-		return err
-	})
-	if err != nil {
-		str := "failed to fetch version for update"
-		return managerError(ErrDatabase, str, err)
-	}
-
-	// NOTE: There are currently no upgrades, but this is provided here as a
-	// template for how to properly do upgrades.  Each function to upgrade
-	// to the next version must include serializing the new version as a
-	// part of the same transaction so any failures in upgrades to later
-	// versions won't leave the database in an inconsistent state.  The
-	// putManagerVersion function provides a convenient mechanism for that
-	// purpose.
-	//
-	// Upgrade one version at a time so it is possible to upgrade across
-	// an aribtary number of versions without needing to write a bunch of
-	// additional code to go directly from version X to Y.
-	// if version < 2 {
-	// 	// Upgrade from version 1 to 2.
-	//	if err := upgradeToVersion2(namespace); err != nil {
-	//		return err
-	//	}
-	//
-	//	// The manager is now at version 2.
-	//	version = 2
-	// }
-	// if version < 3 {
-	// 	// Upgrade from version 2 to 3.
-	//	if err := upgradeToVersion3(namespace); err != nil {
-	//		return err
-	//	}
-	//
-	//	// The manager is now at version 3.
-	//	version = 3
-	// }
-
-	if version < 2 {
-		// Upgrade from version 1 to 2.
-		if err := upgradeToVersion2(namespace); err != nil {
-			return err
-		}
-
-		// The manager is now at version 2.
-		version = 2
-	}
-
-	if version < 3 {
-		if config.ObtainSeed == nil || config.ObtainPrivatePass == nil {
-			str := "failed to obtain seed and private passphrase required for upgrade"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		seed, err := config.ObtainSeed()
-		if err != nil {
-			return err
-		}
-		privPassPhrase, err := config.ObtainPrivatePass()
-		if err != nil {
-			return err
-		}
-		// Upgrade from version 2 to 3.
-		if err := upgradeToVersion3(namespace, seed, privPassPhrase, pubPassPhrase); err != nil {
-			return err
-		}
-
-		// The manager is now at version 3.
-		version = 3
-	}
-
-	// Ensure the manager is upraded to the latest version.  This check is
-	// to intentionally cause a failure if the manager version is updated
-	// without writing code to handle the upgrade.
-	if version < latestMgrVersion {
-		str := fmt.Sprintf("the latest manager version is %d, but the "+
-			"current version after upgrades is only %d",
-			latestMgrVersion, version)
-		return managerError(ErrUpgrade, str, nil)
-	}
-
-	return nil
-}
-
 // upgradeToVersion3 upgrades the database from version 2 to version 3
 // The following buckets were introduced in version 3 to support account names:
 // * acctNameIdxBucketName
 // * acctIDIdxBucketName
 // * metaBucketName
-func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPassPhrase []byte) error {
+// In addition, cointype keys are re-generated and stored in the database.
+func upgradeToVersion3(namespace walletdb.Namespace, seed, pubPassPhrase, privPassPhrase []byte) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
-		currentMgrVersion := uint32(3)
 		rootBucket := tx.RootBucket()
 
 		woMgr, err := loadManager(namespace, pubPassPhrase, &chaincfg.SimNetParams, nil)
@@ -1848,7 +1727,7 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Write current manager version
-		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
+		if err := putManagerVersion(tx, 3); err != nil {
 			return err
 		}
 
@@ -1857,6 +1736,109 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 	})
 	if err != nil {
 		return maybeConvertDbError(err)
+	}
+	return nil
+}
+
+// upgradeManager upgrades the data in the provided manager namespace to newer
+// versions as neeeded.
+var upgradeManager = func(namespace walletdb.Namespace, seed, pubPassPhrase, privPassPhrase []byte, config *Options) error {
+	var version uint32
+	err := namespace.View(func(tx walletdb.Tx) error {
+		var err error
+		version, err = fetchManagerVersion(tx)
+		return err
+	})
+	if err != nil {
+		str := "failed to fetch version for update"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	// NOTE: This is provided here as a template for how to properly do
+	// upgrades.  Each function to upgrade to the next version must include
+	// serializing the new version as a part of the same transaction so any
+	// failures in upgrades to later versions won't leave the database in
+	// an inconsistent state.  The putManagerVersion function provides a
+	// convenient mechanism for that purpose.
+	//
+	//
+	// Upgrade one version at a time so it is possible to upgrade across
+	// an aribtary number of versions without needing to write a bunch of
+	// additional code to go directly from version X to Y.
+	// if version < 2 {
+	// 	// Upgrade from version 1 to 2.
+	//	if err := upgradeToVersion2(namespace); err != nil {
+	//		return err
+	//	}
+	//
+	//	// The manager is now at version 2.
+	//	version = 2
+	// }
+	// if version < 3 {
+	// 	// Upgrade from version 2 to 3.
+	//	if err := upgradeToVersion3(namespace); err != nil {
+	//		return err
+	//	}
+	//
+	//	// The manager is now at version 3.
+	//	version = 3
+	// }
+
+	if version < 2 {
+		// Upgrade from version 1 to 2.
+		if err := upgradeToVersion2(namespace); err != nil {
+			return err
+		}
+
+		// The manager is now at version 2.
+		version = 2
+	}
+
+	if version < 3 {
+		var err error
+
+		// If seed was not provided, prompt user input
+		if seed == nil {
+			if config.ObtainSeed == nil {
+				str := "failed to obtain seed required for upgrade"
+				return managerError(ErrDatabase, str, err)
+			}
+			seed, err = config.ObtainSeed()
+			if err != nil {
+				return err
+			}
+		}
+
+		// If private passphrase was not provided, prompt user input
+		if privPassPhrase == nil {
+			if config.ObtainPrivatePass == nil {
+				str := "failed to obtain private passphrase required for upgrade"
+				return managerError(ErrDatabase, str, err)
+			}
+			privPassPhrase, err = config.ObtainPrivatePass()
+			if err != nil {
+				return err
+			}
+		}
+
+		// Upgrade from version 2 to 3.
+		if err := upgradeToVersion3(namespace, seed, pubPassPhrase,
+			privPassPhrase); err != nil {
+			return err
+		}
+
+		// The manager is now at version 3.
+		version = 3
+	}
+
+	// Ensure the manager is upraded to the latest version.  This check is
+	// to intentionally cause a failure if the manager version is updated
+	// without writing code to handle the upgrade.
+	if version < latestMgrVersion {
+		str := fmt.Sprintf("the latest manager version is %d, but the "+
+			"current version after upgrades is only %d",
+			latestMgrVersion, version)
+		return managerError(ErrUpgrade, str, nil)
 	}
 	return nil
 }
