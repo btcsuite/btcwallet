@@ -60,6 +60,14 @@ type testContext struct {
 	watchingOnly bool
 }
 
+// addrType is the type of address being tested
+type addrType byte
+
+const (
+	addrPubKeyHash addrType = iota
+	addrScriptHash
+)
+
 // expectedAddr is used to house the expected return values from a managed
 // address.  Not all fields for used for all managed address types.
 type expectedAddr struct {
@@ -293,60 +301,6 @@ func testAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedAddress
 // retrieved by Address, and that they work properly when the manager is locked
 // and unlocked.
 func testExternalAddresses(tc *testContext) bool {
-	// Define the expected addresses.
-	expectedAddrs := []expectedAddr{
-		{
-			address:     "14wtcepMNiEazuN7YosWY8bwD9tcCtxXRB",
-			addressHash: hexToBytes("2b49ecd0cf72006173e6e95acf416b6735b5f889"),
-			internal:    false,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("02d8f88468c5a2e8e1815faf555f59cbd1979e3dbdf823f80c271b6fb70d2d519b"),
-			privKey:     hexToBytes("c27d6581b92785834b381fa697c4b0ffc4574b495743722e0acb7601b1b68b99"),
-			privKeyWIF:  "L3jmpy54Pc7MLXTN2mL8Xas7BJziwKaUGmgnXXzgGbVRdiAniXZk",
-		},
-		{
-			address:     "1N3D8jy2aQuUsKBsDgZ6ZPTVR9VhHgJYpE",
-			addressHash: hexToBytes("e6c59a1542138d1bf08f45cd18899557cf56b356"),
-			internal:    false,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("02b9c175b908624f8a8eaac227d0e8c77c0eec327b8c512ad1b8b7a4b5b676971f"),
-			privKey:     hexToBytes("18f3b191019e83878a81557abebb2afda199e31d22e150d8bf4df4561671be6c"),
-			privKeyWIF:  "Kx4DNid19W8sjNFN3uPqQE7UYnCqyEp7unCvdkf2LrVUFpnDtwpB",
-		},
-		{
-			address:     "1VTfwD4iHre2bMrR9qGiJMwoiZGQZ8e6s",
-			addressHash: hexToBytes("0561e9373986965b647a57a09718e9c050215cfe"),
-			internal:    false,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("0329faddf1254d490d6add49e2b08cf52b561038c72baec0edb3cfacff71ff1021"),
-			privKey:     hexToBytes("ccb8f6305b73136b363644b647f6efc0fd27b6b7d9c11c7e560662ed38db7b34"),
-			privKeyWIF:  "L45fWF6Yd736fDohuB97vwRRLdQQJr3ZGvbokk9ubiT7aNrg7tTn",
-		},
-		{
-			address:     "13TdEj4ehUuYFiSaB47eLVBwM2XhAhrK2J",
-			addressHash: hexToBytes("1af950be02584ca230b7078cec0cfd38dd71b468"),
-			internal:    false,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("03d738324e2f0ce42e46975d7f8c7117c1670e3d7912b0291aea452add99674774"),
-			privKey:     hexToBytes("d6bc8ff768814fede2adcdb74826bd846924341b3862e3b6e31cdc084e992940"),
-			privKeyWIF:  "L4R8XyxYQyPSpTwj8w96tM86a6j3QA9jbRPj3RA7DVTVWk71ndeP",
-		},
-		{
-			address:     "1LTjSghkBecT59VjEKke331HxVdqcFwUDa",
-			addressHash: hexToBytes("d578a267a7174c6ba7f76b0ab2397ce0ba0c5c3c"),
-			internal:    false,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("03a917acd5cd5b6f544b43f1921a35677e4d5320e5d2add2056039b4b44fdf905e"),
-			privKey:     hexToBytes("8563ade061110e03aee50695ffc5cb1c06c8310bde0a3674257c853c966968c0"),
-			privKeyWIF:  "L1h16Hunxomww4FrpyQP2iFmWNgG7U1u3awp6Vd3s2uGf7v5VU8c",
-		},
-	}
-
 	prefix := testNamePrefix(tc) + " testExternalAddresses"
 	var addrs []waddrmgr.ManagedAddress
 	if tc.create {
@@ -357,10 +311,10 @@ func testExternalAddresses(tc *testContext) bool {
 			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
 			return false
 		}
-		if len(addrs) != len(expectedAddrs) {
+		if len(addrs) != len(expectedExternalAddrs) {
 			tc.t.Errorf("%s: unexpected number of addresses - got "+
 				"%d, want %d", prefix, len(addrs),
-				len(expectedAddrs))
+				len(expectedExternalAddrs))
 			return false
 		}
 	}
@@ -374,7 +328,7 @@ func testExternalAddresses(tc *testContext) bool {
 		// of the tests.
 		for i := 0; i < len(addrs); i++ {
 			prefix := fmt.Sprintf("%s ExternalAddress #%d", prefix, i)
-			if !testAddress(tc, prefix, addrs[i], &expectedAddrs[i]) {
+			if !testAddress(tc, prefix, addrs[i], &expectedExternalAddrs[i]) {
 				return false
 			}
 		}
@@ -386,15 +340,15 @@ func testExternalAddresses(tc *testContext) bool {
 			tc.t.Errorf("%s: unexpected error: %v", leaPrefix, err)
 			return false
 		}
-		if !testAddress(tc, leaPrefix, lastAddr, &expectedAddrs[len(expectedAddrs)-1]) {
+		if !testAddress(tc, leaPrefix, lastAddr, &expectedExternalAddrs[len(expectedExternalAddrs)-1]) {
 			return false
 		}
 
 		// Now, use the Address API to retrieve each of the expected new
 		// addresses and ensure they're accurate.
 		chainParams := tc.manager.ChainParams()
-		for i := 0; i < len(expectedAddrs); i++ {
-			pkHash := expectedAddrs[i].addressHash
+		for i := 0; i < len(expectedExternalAddrs); i++ {
+			pkHash := expectedExternalAddrs[i].addressHash
 			utilAddr, err := btcutil.NewAddressPubKeyHash(pkHash,
 				chainParams)
 			if err != nil {
@@ -411,7 +365,7 @@ func testExternalAddresses(tc *testContext) bool {
 				return false
 			}
 
-			if !testAddress(tc, prefix, addr, &expectedAddrs[i]) {
+			if !testAddress(tc, prefix, addr, &expectedExternalAddrs[i]) {
 				return false
 			}
 		}
@@ -459,60 +413,6 @@ func testExternalAddresses(tc *testContext) bool {
 // retrieved by Address, and that they work properly when the manager is locked
 // and unlocked.
 func testInternalAddresses(tc *testContext) bool {
-	// Define the expected addresses.
-	expectedAddrs := []expectedAddr{
-		{
-			address:     "15HNivzKhsLaMs1qRdQN1ifoJYUnJ2xW9z",
-			addressHash: hexToBytes("2ef94abb9ee8f785d087c3ec8d6ee467e92d0d0a"),
-			internal:    true,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("020a1290b997c0a234a95213962e7edcb761c7360f0230f698a1a3e71c37047bb0"),
-			privKey:     hexToBytes("fe4f855fcf059ec6ddf7b25f63b19aa49c771d1fcb9850b68ae3d65e20657a60"),
-			privKeyWIF:  "L5k4HivqXvohxBMpuwD38iUgi6uewffwZny91ZNYfM39RXH2x3QR",
-		},
-		{
-			address:     "1LJpGrAP1vWHuvfHqmUutQqFVYca2qwxhy",
-			addressHash: hexToBytes("d3c8ec46891f599bfeaa4c25918bfb3d46ea334c"),
-			internal:    true,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("03f79bbde32af42dde98195f011d95982602fcd0dab657fe4a1f49f9d5ada1e02d"),
-			privKey:     hexToBytes("bfef521317c65b018ae7e6d7ecc3aa700d5d0f7ea84d567be9270382d0b5e3e6"),
-			privKeyWIF:  "L3eomUajnTDM3Pc8GU47qqXUFuCjvpqY7NYN9mH3x1ZFjDgiY4BU",
-		},
-		{
-			address:     "13NhXy2nCLMwNug1TZ6uwaWnxp3uTqdDQq",
-			addressHash: hexToBytes("1a0ad2a04fde3b2afe068057591e1871c289c4b8"),
-			internal:    true,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("023ded84afe4fe91b52b45c3deb26fd263f749cbc27747dc964dae9e0739cbc579"),
-			privKey:     hexToBytes("f506dffd4494c24006df7a35f3291f7ca0297a1a431557a1339bfed6f48738ca"),
-			privKeyWIF:  "L5S1bVQUPqQb1Su82fLoSpnGCjcPfdAQE1pJxWRopJSBdYNDHESv",
-		},
-		{
-			address:     "1AY6yAHvojvpFcevAichLMnJfxgE8eSe4N",
-			addressHash: hexToBytes("689b0249c628265215fd1de6142d5d5594eb8dc2"),
-			internal:    true,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("030f1e79f06824e10a259914ec310528bb2d5b8d6356341fe9dff55498591af6af"),
-			privKey:     hexToBytes("b3629de8ef6a275b4ffae41aa2bbbc2952eb92282ea6402435abbb010ecc1fb8"),
-			privKeyWIF:  "L3EQsGeEnyXmKaux54cG4DQeCSQDvGuvEuy3W2ss4geum7AtWaHw",
-		},
-		{
-			address:     "1Jc7An3JqjzRQULVr6Wh3iYR7miB6WPJCD",
-			addressHash: hexToBytes("c11dd8a3577978807a0453febedee2994a6144d4"),
-			internal:    true,
-			compressed:  true,
-			imported:    false,
-			pubKey:      hexToBytes("0317d7182e26b6ca3e0f3db531c474b9cab7a763a75eabff2e14ac92f62a793238"),
-			privKey:     hexToBytes("ca747a7ef815ea0dbe68655272cecbfbd65f2a109019a9ed28e0d3dcaffe05c3"),
-			privKeyWIF:  "L41Frac75RPbTELKzw1EGC2qCkdveiVumpmsyX4daAvyyCMxit1W",
-		},
-	}
-
 	// When the address manager is not in watching-only mode, unlocked it
 	// first to ensure that address generation works correctly when the
 	// address manager is unlocked and then locked later.  These tests
@@ -538,10 +438,10 @@ func testInternalAddresses(tc *testContext) bool {
 			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
 			return false
 		}
-		if len(addrs) != len(expectedAddrs) {
+		if len(addrs) != len(expectedInternalAddrs) {
 			tc.t.Errorf("%s: unexpected number of addresses - got "+
 				"%d, want %d", prefix, len(addrs),
-				len(expectedAddrs))
+				len(expectedInternalAddrs))
 			return false
 		}
 	}
@@ -555,7 +455,7 @@ func testInternalAddresses(tc *testContext) bool {
 		// of the tests.
 		for i := 0; i < len(addrs); i++ {
 			prefix := fmt.Sprintf("%s InternalAddress #%d", prefix, i)
-			if !testAddress(tc, prefix, addrs[i], &expectedAddrs[i]) {
+			if !testAddress(tc, prefix, addrs[i], &expectedInternalAddrs[i]) {
 				return false
 			}
 		}
@@ -567,15 +467,15 @@ func testInternalAddresses(tc *testContext) bool {
 			tc.t.Errorf("%s: unexpected error: %v", liaPrefix, err)
 			return false
 		}
-		if !testAddress(tc, liaPrefix, lastAddr, &expectedAddrs[len(expectedAddrs)-1]) {
+		if !testAddress(tc, liaPrefix, lastAddr, &expectedInternalAddrs[len(expectedInternalAddrs)-1]) {
 			return false
 		}
 
 		// Now, use the Address API to retrieve each of the expected new
 		// addresses and ensure they're accurate.
 		chainParams := tc.manager.ChainParams()
-		for i := 0; i < len(expectedAddrs); i++ {
-			pkHash := expectedAddrs[i].addressHash
+		for i := 0; i < len(expectedInternalAddrs); i++ {
+			pkHash := expectedInternalAddrs[i].addressHash
 			utilAddr, err := btcutil.NewAddressPubKeyHash(pkHash,
 				chainParams)
 			if err != nil {
@@ -592,7 +492,7 @@ func testInternalAddresses(tc *testContext) bool {
 				return false
 			}
 
-			if !testAddress(tc, prefix, addr, &expectedAddrs[i]) {
+			if !testAddress(tc, prefix, addr, &expectedInternalAddrs[i]) {
 				return false
 			}
 		}
@@ -1019,47 +919,76 @@ func testImportScript(tc *testContext) bool {
 
 // testMarkUsed ensures used addresses are flagged as such.
 func testMarkUsed(tc *testContext) bool {
-	expectedAddr1 := expectedAddr{
-		addressHash: hexToBytes("2ef94abb9ee8f785d087c3ec8d6ee467e92d0d0a"),
-		used:        true,
+	tests := []struct {
+		name string
+		typ  addrType
+		in   []byte
+	}{
+		{
+			name: "managed address",
+			typ:  addrPubKeyHash,
+			in:   hexToBytes("2ef94abb9ee8f785d087c3ec8d6ee467e92d0d0a"),
+		},
+		{
+			name: "script address",
+			typ:  addrScriptHash,
+			in:   hexToBytes("da6e6a632d96dc5530d7b3c9f3017725d023093e"),
+		},
 	}
+
 	prefix := "MarkUsed"
 	chainParams := tc.manager.ChainParams()
-	addrHash := expectedAddr1.addressHash
-	addr, err := btcutil.NewAddressPubKeyHash(addrHash, chainParams)
+	for i, test := range tests {
+		addrHash := test.in
 
-	maddr, err := tc.manager.Address(addr)
-	if err != nil {
-		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
-		return false
-	}
-	if tc.create {
-		// Test that initially the address is not flagged as used
+		var addr btcutil.Address
+		var err error
+		switch test.typ {
+		case addrPubKeyHash:
+			addr, err = btcutil.NewAddressPubKeyHash(addrHash, chainParams)
+		case addrScriptHash:
+			addr, err = btcutil.NewAddressScriptHashFromHash(addrHash, chainParams)
+		default:
+			panic("unreachable")
+		}
+		if err != nil {
+			tc.t.Errorf("%s #%d: NewAddress unexpected error: %v", prefix, i, err)
+			continue
+		}
+
+		maddr, err := tc.manager.Address(addr)
+		if err != nil {
+			tc.t.Errorf("%s #%d: Address unexpected error: %v", prefix, i, err)
+			continue
+		}
+		if tc.create {
+			// Test that initially the address is not flagged as used
+			used, err := maddr.Used()
+			if err != nil {
+				tc.t.Errorf("%s #%d: Used unexpected error: %v", prefix, i, err)
+				continue
+			}
+			if used != false {
+				tc.t.Errorf("%s #%d: unexpected used flag -- got "+
+					"%v, want %v", prefix, i, used, false)
+			}
+		}
+		err = tc.manager.MarkUsed(addr)
+		if err != nil {
+			tc.t.Errorf("%s #%d: unexpected error: %v", prefix, i, err)
+			continue
+		}
 		used, err := maddr.Used()
 		if err != nil {
-			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
-			return false
+			tc.t.Errorf("%s #%d: Used unexpected error: %v", prefix, i, err)
+			continue
 		}
-		if used != false {
-			tc.t.Errorf("%v: unexpected used flag -- got "+
-				"%v, want %v", prefix, used, expectedAddr1.used)
-			return false
+		if used != true {
+			tc.t.Errorf("%s #%d: unexpected used flag -- got "+
+				"%v, want %v", prefix, i, used, true)
 		}
 	}
-	err = tc.manager.MarkUsed(addr)
-	if err != nil {
-		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
-		return false
-	}
-	used, err := maddr.Used()
-	if err != nil {
-		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
-		return false
-	}
-	if used != expectedAddr1.used {
-		tc.t.Errorf("%v: unexpected used flag -- got "+
-			"%v, want %v", prefix, used, expectedAddr1.used)
-	}
+
 	return true
 }
 
@@ -1195,15 +1124,13 @@ func testNewAccount(tc *testContext) bool {
 	}
 	tc.unlocked = true
 
-	// Get the next account number
+	testName := "acct-create"
 	expectedAccount := tc.account + 1
 	if !tc.create {
-		// Existing wallet manager, so it already has "account-1",
-		// so increment the expected account number
+		// Create a new account in open mode
+		testName = "acct-open"
 		expectedAccount++
 	}
-	// Create accounts with names "account-1", "account-2", etc
-	testName := fmt.Sprintf("account-%d", expectedAccount)
 	account, err := tc.manager.NewAccount(testName)
 	if err != nil {
 		tc.t.Errorf("NewAccount: unexpected error: %v", err)
@@ -1215,6 +1142,7 @@ func testNewAccount(tc *testContext) bool {
 			"want %d", account, expectedAccount)
 		return false
 	}
+
 	// Test duplicate account name error
 	_, err = tc.manager.NewAccount(testName)
 	wantErrCode := waddrmgr.ErrDuplicateAccount
@@ -1231,18 +1159,13 @@ func testNewAccount(tc *testContext) bool {
 	return true
 }
 
-// testLookupAccount tests the basic account lookup func of the address manager works
-// as expected.
+// testLookupAccount tests the basic account lookup func of the address manager
+// works as expected.
 func testLookupAccount(tc *testContext) bool {
 	// Lookup accounts created earlier in testNewAccount
 	expectedAccounts := map[string]uint32{
 		waddrmgr.DefaultAccountName:      waddrmgr.DefaultAccountNum,
-		"account-1":                      1,
 		waddrmgr.ImportedAddrAccountName: waddrmgr.ImportedAddrAccount,
-	}
-	if !tc.create {
-		// Existing wallet manager will have 2 accounts
-		expectedAccounts["account-2"] = 2
 	}
 	for acctName, expectedAccount := range expectedAccounts {
 		account, err := tc.manager.LookupAccount(acctName)
@@ -1263,6 +1186,43 @@ func testLookupAccount(tc *testContext) bool {
 	wantErrCode := waddrmgr.ErrAccountNotFound
 	if !checkManagerError(tc.t, testName, err, wantErrCode) {
 		return false
+	}
+
+	// Test last account
+	lastAccount, err := tc.manager.LastAccount()
+	var expectedLastAccount uint32
+	expectedLastAccount = 1
+	if !tc.create {
+		// Existing wallet manager will have 3 accounts
+		expectedLastAccount = 2
+	}
+	if lastAccount != expectedLastAccount {
+		tc.t.Errorf("LookupAccount "+
+			"account mismatch -- got %d, "+
+			"want %d", lastAccount, expectedLastAccount)
+		return false
+	}
+
+	// Test account lookup for default account adddress
+	var expectedAccount uint32
+	for i, addr := range expectedAddrs {
+		addr, err := btcutil.NewAddressPubKeyHash(addr.addressHash,
+			tc.manager.ChainParams())
+		if err != nil {
+			tc.t.Errorf("AddrAccount #%d: unexpected error: %v", i, err)
+			return false
+		}
+		account, err := tc.manager.AddrAccount(addr)
+		if err != nil {
+			tc.t.Errorf("AddrAccount #%d: unexpected error: %v", i, err)
+			return false
+		}
+		if account != expectedAccount {
+			tc.t.Errorf("AddrAccount "+
+				"account mismatch -- got %d, "+
+				"want %d", account, expectedAccount)
+			return false
+		}
 	}
 	return true
 }
@@ -1345,40 +1305,38 @@ func testAllAccounts(tc *testContext) bool {
 	return true
 }
 
-// testActiveAccountAddresses tests the retrieve all account addrs func of the address manager works
-// as expected.
-func testActiveAccountAddresses(tc *testContext) bool {
-	expectedAddrs := []string{
-		"1VTfwD4iHre2bMrR9qGiJMwoiZGQZ8e6s",
-		"1LJpGrAP1vWHuvfHqmUutQqFVYca2qwxhy",
-		"1Jc7An3JqjzRQULVr6Wh3iYR7miB6WPJCD",
-		"1AY6yAHvojvpFcevAichLMnJfxgE8eSe4N",
-		"1LTjSghkBecT59VjEKke331HxVdqcFwUDa",
-		"14wtcepMNiEazuN7YosWY8bwD9tcCtxXRB",
-		"1N3D8jy2aQuUsKBsDgZ6ZPTVR9VhHgJYpE",
-		"13TdEj4ehUuYFiSaB47eLVBwM2XhAhrK2J",
-		"15HNivzKhsLaMs1qRdQN1ifoJYUnJ2xW9z",
-		"13NhXy2nCLMwNug1TZ6uwaWnxp3uTqdDQq",
+// testAllAccountAddresses tests the account addresses returned by the manager
+// API.
+func testAllAccountAddresses(tc *testContext) bool {
+	prefix := testNamePrefix(tc) + " testAllAccountAddresses"
+	// Make a map of expected addresses
+	expectedAddrMap := make(map[string]*expectedAddr, len(expectedAddrs))
+	for i := 0; i < len(expectedAddrs); i++ {
+		expectedAddrMap[expectedAddrs[i].address] = &expectedAddrs[i]
 	}
+
 	addrs, err := tc.manager.AllAccountAddresses(tc.account)
 	if err != nil {
-		tc.t.Errorf("ActiveAccountAddresses: unexpected error: %v", err)
+		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
 		return false
 	}
-	if len(addrs) != len(expectedAddrs) {
-		tc.t.Errorf("ActiveAccountAddresses: unexpected number of addrs - got "+
-			"%d, want %d", len(addrs),
-			len(expectedAddrs))
-		return false
-	}
-	for i, addr := range addrs {
-		if expectedAddrs[i] != addr.Address().EncodeAddress() {
-			tc.t.Errorf("ActiveAccountAddresses %s: "+
-				"addr mismatch -- got %s, "+
-				"want %s", i, addr.Address().EncodeAddress(),
-				expectedAddrs[i])
+
+	for i := 0; i < len(addrs); i++ {
+		prefix := fmt.Sprintf("%s: #%d", prefix, i)
+		gotAddr := addrs[i]
+		wantAddr := expectedAddrMap[gotAddr.Address().String()]
+		if !testAddress(tc, prefix, gotAddr, wantAddr) {
+			return false
 		}
+		delete(expectedAddrMap, gotAddr.Address().String())
 	}
+
+	if len(expectedAddrMap) != 0 {
+		tc.t.Errorf("%s: unexpected addresses -- got %d, want %d", prefix,
+			len(expectedAddrMap), 0)
+		return false
+	}
+
 	return true
 }
 
@@ -1399,7 +1357,11 @@ func testManagerAPI(tc *testContext) {
 	testNewAccount(tc)
 	testLookupAccount(tc)
 	testAllAccounts(tc)
-	testActiveAccountAddresses(tc)
+	testAllAccountAddresses(tc)
+
+	// Rename account 1 "acct-create"
+	tc.account = 1
+	testRenameAccount(tc)
 }
 
 // testWatchingOnly tests various facets of a watching-only address
