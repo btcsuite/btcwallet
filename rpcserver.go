@@ -1891,7 +1891,11 @@ func CreateNewAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.Cmd
 
 	_, err = w.Manager.NewAccount(cmd.Account)
 	if isManagerLockedError(err) {
-		return nil, btcjson.ErrWalletUnlockNeeded
+		return nil, btcjson.Error{
+			Code: btcjson.ErrWalletUnlockNeeded.Code,
+			Message: "Creating an account requires the wallet to be unlocked. " +
+				"Enter the wallet passphrase with walletpassphrase to unlock",
+		}
 	}
 	return nil, err
 }
