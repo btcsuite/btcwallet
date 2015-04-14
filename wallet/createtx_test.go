@@ -113,7 +113,7 @@ func TestCreateTx(t *testing.T) {
 	outputs[changeAddr.String()] = expectedChange
 	checkOutputsMatch(t, msgTx, outputs)
 
-	minFee := feeForSize(defaultFeeIncrement, msgTx.SerializeSize())
+	minFee := FeeForSize(defaultFeeIncrement, msgTx.SerializeSize())
 	actualFee := btcutil.Amount(1e3)
 	if minFee > actualFee {
 		t.Fatalf("Requested fee (%v) for tx size higher than actual fee (%v)", minFee, actualFee)

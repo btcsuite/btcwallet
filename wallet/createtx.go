@@ -62,11 +62,15 @@ const (
 	txOutEstimate = 8 + 1 + pkScriptEstimate
 )
 
-func estimateTxSize(numInputs, numOutputs int) int {
+// EstimateTxSize returns an estimate for the trasanction size given
+// a fixed number of inputs and outputs
+func EstimateTxSize(numInputs, numOutputs int) int {
 	return txOverheadEstimate + txInEstimate*numInputs + txOutEstimate*numOutputs
 }
 
-func feeForSize(incr btcutil.Amount, sz int) btcutil.Amount {
+// FeeForSize determines the fee required to get a transaction of a
+// specific size and amount into a block
+func FeeForSize(incr btcutil.Amount, sz int) btcutil.Amount {
 	return btcutil.Amount(1+sz/1000) * incr
 }
 
@@ -192,8 +196,8 @@ func createTx(eligible []txstore.Credit,
 
 	// Get an initial fee estimate based on the number of selected inputs
 	// and added outputs, with no change.
-	szEst := estimateTxSize(len(inputs), len(msgtx.TxOut))
-	feeEst := minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
+	szEst := EstimateTxSize(len(inputs), len(msgtx.TxOut))
+	feeEst := MinimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
 
 	// Now make sure the sum amount of all our inputs is enough for the
 	// sum amount of all outputs plus the fee. If necessary we add more,
@@ -207,7 +211,7 @@ func createTx(eligible []txstore.Credit,
 		msgtx.AddTxIn(wire.NewTxIn(input.OutPoint(), nil))
 		szEst += txInEstimate
 		totalAdded += input.Amount()
-		feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
+		feeEst = MinimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
 	}
 
 	var changeAddr btcutil.Address
@@ -234,7 +238,7 @@ func createTx(eligible []txstore.Credit,
 			return nil, err
 		}
 
-		if feeForSize(feeIncrement, msgtx.SerializeSize()) <= feeEst {
+		if FeeForSize(feeIncrement, msgtx.SerializeSize()) <= feeEst {
 			// The required fee for this size is less than or equal to what
 			// we guessed, so we're done.
 			break
@@ -258,7 +262,7 @@ func createTx(eligible []txstore.Credit,
 			msgtx.AddTxIn(wire.NewTxIn(input.OutPoint(), nil))
 			szEst += txInEstimate
 			totalAdded += input.Amount()
-			feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
+			feeEst = MinimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
 		}
 	}
 
@@ -417,17 +421,17 @@ func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
 	return nil
 }
 
-// minimumFee estimates the minimum fee required for a transaction.
-// If cfg.DisallowFree is false, a fee may be zero so long as txLen
+// MinimumFee estimates the minimum fee required for a transaction.
+// If disallowFree is false, a fee may be zero so long as txLen
 // s less than 1 kilobyte and none of the outputs contain a value
 // less than 1 bitcent. Otherwise, the fee will be calculated using
 // incr, incrementing the fee for each kilobyte of transaction.
-func minimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutputs []txstore.Credit, height int32, disallowFree bool) btcutil.Amount {
+func MinimumFee(incr btcutil.Amount, txLen int, outputs []*wire.TxOut, prevOutputs []txstore.Credit, height int32, disallowFree bool) btcutil.Amount {
 	allowFree := false
 	if !disallowFree {
 		allowFree = allowNoFeeTx(height, prevOutputs, txLen)
 	}
-	fee := feeForSize(incr, txLen)
+	fee := FeeForSize(incr, txLen)
 
 	if allowFree && txLen < 1000 {
 		fee = 0
