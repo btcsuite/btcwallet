@@ -374,7 +374,7 @@ func (m *Manager) Close() error {
 // The passed derivedKey is zeroed after the new address is created.
 //
 // This function MUST be called with the manager lock held for writes.
-func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32, used bool) (ManagedAddress, error) {
+func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32) (ManagedAddress, error) {
 	// Create a new managed address based on the public or private key
 	// depending on whether the passed key is private.  Also, zero the
 	// key after creating the managed address from it.
@@ -397,7 +397,6 @@ func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, bran
 	if branch == internalBranch {
 		ma.internal = true
 	}
-	ma.used = used
 
 	return ma, nil
 }
@@ -512,7 +511,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index, false)
+	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index)
 	if err != nil {
 		return nil, err
 	}
@@ -527,7 +526,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index, false)
+	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index)
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +562,7 @@ func (m *Manager) chainAddressRowToManaged(row *dbChainAddressRow) (ManagedAddre
 		return nil, err
 	}
 
-	return m.keyToManaged(addressKey, row.account, row.branch, row.index, row.used)
+	return m.keyToManaged(addressKey, row.account, row.branch, row.index)
 }
 
 // importedAddressRowToManaged returns a new managed address based on imported
@@ -590,7 +589,6 @@ func (m *Manager) importedAddressRowToManaged(row *dbImportedAddressRow) (Manage
 	}
 	ma.privKeyEncrypted = row.encryptedPrivKey
 	ma.imported = true
-	ma.used = row.used
 
 	return ma, nil
 }
@@ -605,7 +603,7 @@ func (m *Manager) scriptAddressRowToManaged(row *dbScriptAddressRow) (ManagedAdd
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
-	return newScriptAddress(m, row.account, scriptHash, row.encryptedScript, row.used)
+	return newScriptAddress(m, row.account, scriptHash, row.encryptedScript)
 }
 
 // rowInterfaceToManaged returns a new managed address based on the given
@@ -1173,7 +1171,7 @@ func (m *Manager) ImportScript(script []byte, bs *BlockStamp) (ManagedScriptAddr
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
 	scriptAddr, err := newScriptAddress(m, ImportedAddrAccount, scriptHash,
-		encryptedScript, false)
+		encryptedScript)
 	if err != nil {
 		return nil, err
 	}
@@ -1360,15 +1358,26 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	return nil
 }
 
-// MarkUsed updates the used flag for the provided address id.
-func (m *Manager) MarkUsed(addressID []byte) error {
+// fetchUsed returns true if the provided address id was flagged used.
+func (m *Manager) fetchUsed(addressID []byte) (bool, error) {
+	var used bool
+	err := m.namespace.View(func(tx walletdb.Tx) error {
+		used = fetchAddressUsed(tx, addressID)
+		return nil
+	})
+	return used, err
+}
+
+// MarkUsed updates the used flag for the provided address.
+func (m *Manager) MarkUsed(address btcutil.Address) error {
+	addressID := address.ScriptAddress()
 	err := m.namespace.Update(func(tx walletdb.Tx) error {
 		return markAddressUsed(tx, addressID)
 	})
 	if err != nil {
 		return maybeConvertDbError(err)
 	}
-	// 'used' flag has become stale so remove key from cache
+	// Clear caches which might have stale entries for used addresses
 	delete(m.addrs, addrKey(addressID))
 	return nil
 }
@@ -1580,7 +1589,11 @@ func (m *Manager) LastExternalAddress(account uint32) (ManagedAddress, error) {
 		return nil, err
 	}
 
-	return acctInfo.lastExternalAddr, nil
+	if acctInfo.nextExternalIndex > 0 {
+		return acctInfo.lastExternalAddr, nil
+	}
+
+	return nil, managerError(ErrAddressNotFound, "no previous external address", nil)
 }
 
 // LastInternalAddress returns the most recently requested chained internal
@@ -1608,7 +1621,11 @@ func (m *Manager) LastInternalAddress(account uint32) (ManagedAddress, error) {
 		return nil, err
 	}
 
-	return acctInfo.lastInternalAddr, nil
+	if acctInfo.nextInternalIndex > 0 {
+		return acctInfo.lastInternalAddr, nil
+	}
+
+	return nil, managerError(ErrAddressNotFound, "no previous internal address", nil)
 }
 
 // ValidateAccountName validates the given account name and returns an error, if any.

@@ -113,7 +113,6 @@ type dbAddressRow struct {
 	account    uint32
 	addTime    uint64
 	syncStatus syncStatus
-	used       bool
 	rawData    []byte // Varies based on address type field.
 }
 
@@ -987,17 +986,6 @@ func serializeScriptAddress(encryptedHash, encryptedScript []byte) []byte {
 	return rawData
 }
 
-// fetchAddressUsed returns true if the provided address hash was flagged as used.
-func fetchAddressUsed(tx walletdb.Tx, addrHash []byte) bool {
-	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
-
-	val := bucket.Get(addrHash[:])
-	if val != nil {
-		return true
-	}
-	return false
-}
-
 // fetchAddressByHash loads address information for the provided address hash
 // from the database.  The returned value is one of the address rows for the
 // specific address type.  The caller should use type assertions to ascertain
@@ -1016,7 +1004,6 @@ func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	row.used = fetchAddressUsed(tx, addrHash[:])
 
 	switch row.addrType {
 	case adtChain:
@@ -1029,6 +1016,14 @@ func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
 
 	str := fmt.Sprintf("unsupported address type '%d'", row.addrType)
 	return nil, managerError(ErrDatabase, str, nil)
+}
+
+// fetchAddressUsed returns true if the provided address id was flagged as used.
+func fetchAddressUsed(tx walletdb.Tx, addressID []byte) bool {
+	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
+
+	addrHash := fastsha256.Sum256(addressID)
+	return bucket.Get(addrHash[:]) != nil
 }
 
 // markAddressUsed flags the provided address id as used in the database.

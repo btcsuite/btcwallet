@@ -1028,28 +1028,37 @@ func testMarkUsed(tc *testContext) bool {
 	addrHash := expectedAddr1.addressHash
 	addr, err := btcutil.NewAddressPubKeyHash(addrHash, chainParams)
 
-	if tc.create {
-		// Test that initially the address is not flagged as used
-		maddr, err := tc.manager.Address(addr)
-		if err != nil {
-			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
-		}
-		if maddr.Used() != false {
-			tc.t.Errorf("%v: unexpected used flag -- got "+
-				"%v, want %v", prefix, maddr.Used(), expectedAddr1.used)
-		}
-	}
-	err = tc.manager.MarkUsed(addrHash)
-	if err != nil {
-		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
-	}
 	maddr, err := tc.manager.Address(addr)
 	if err != nil {
 		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
+		return false
 	}
-	if maddr.Used() != expectedAddr1.used {
+	if tc.create {
+		// Test that initially the address is not flagged as used
+		used, err := maddr.Used()
+		if err != nil {
+			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
+			return false
+		}
+		if used != false {
+			tc.t.Errorf("%v: unexpected used flag -- got "+
+				"%v, want %v", prefix, used, expectedAddr1.used)
+			return false
+		}
+	}
+	err = tc.manager.MarkUsed(addr)
+	if err != nil {
+		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
+		return false
+	}
+	used, err := maddr.Used()
+	if err != nil {
+		tc.t.Errorf("%s: unexpected error: %v", prefix, err)
+		return false
+	}
+	if used != expectedAddr1.used {
 		tc.t.Errorf("%v: unexpected used flag -- got "+
-			"%v, want %v", prefix, maddr.Used(), expectedAddr1.used)
+			"%v, want %v", prefix, used, expectedAddr1.used)
 	}
 	return true
 }

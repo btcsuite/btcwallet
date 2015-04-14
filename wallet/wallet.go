@@ -262,8 +262,7 @@ func (w *Wallet) markAddrsUsed(t *txstore.TxRecord) error {
 		// range below does nothing.
 		_, addrs, _, _ := c.Addresses(w.chainParams)
 		for _, addr := range addrs {
-			addressID := addr.ScriptAddress()
-			if err := w.Manager.MarkUsed(addressID); err != nil {
+			if err := w.Manager.MarkUsed(addr); err != nil {
 				return err
 			}
 			log.Infof("Marked address used %s", addr.EncodeAddress())
@@ -715,14 +714,6 @@ func (w *Wallet) diskWriter() {
 	w.wg.Done()
 }
 
-// AddressUsed returns whether there are any recorded transactions spending to
-// a given address.  Assumming correct TxStore usage, this will return true iff
-// there are any transactions with outputs to this address in the blockchain or
-// the btcd mempool.
-func (w *Wallet) AddressUsed(addr waddrmgr.ManagedAddress) bool {
-	return addr.Used()
-}
-
 // AccountUsed returns whether there are any recorded transactions spending to
 // a given account. It returns true if atleast one address in the account was
 // used and false if no address in the account was used.
@@ -732,7 +723,11 @@ func (w *Wallet) AccountUsed(account uint32) (bool, error) {
 		return false, err
 	}
 	for _, addr := range addrs {
-		if w.AddressUsed(addr) {
+		used, err := addr.Used()
+		if err != nil {
+			return false, err
+		}
+		if used {
 			return true, nil
 		}
 	}
@@ -791,11 +786,20 @@ func (w *Wallet) CalculateAccountBalance(account uint32, confirms int) (btcutil.
 func (w *Wallet) CurrentAddress(account uint32) (btcutil.Address, error) {
 	addr, err := w.Manager.LastExternalAddress(account)
 	if err != nil {
+		// If no address exists yet, create the first external address
+		merr, ok := err.(waddrmgr.ManagerError)
+		if ok && merr.ErrorCode == waddrmgr.ErrAddressNotFound {
+			return w.NewAddress(account)
+		}
 		return nil, err
 	}
 
 	// Get next chained address if the last one has already been used.
-	if w.AddressUsed(addr) {
+	used, err := addr.Used()
+	if err != nil {
+		return nil, err
+	}
+	if used {
 		return w.NewAddress(account)
 	}
 

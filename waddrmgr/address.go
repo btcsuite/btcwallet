@@ -53,7 +53,7 @@ type ManagedAddress interface {
 	Compressed() bool
 
 	// Used returns true if the backing address has been used in a transaction.
-	Used() bool
+	Used() (bool, error)
 }
 
 // ManagedPubKeyAddress extends ManagedAddress and additionally provides the
@@ -191,8 +191,8 @@ func (a *managedAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *managedAddress) Used() bool {
-	return a.used
+func (a *managedAddress) Used() (bool, error) {
+	return a.manager.fetchUsed(a.AddrHash())
 }
 
 // PubKey returns the public key associated with the address.
@@ -456,8 +456,8 @@ func (a *scriptAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *scriptAddress) Used() bool {
-	return a.used
+func (a *scriptAddress) Used() (bool, error) {
+	return a.manager.fetchUsed(a.AddrHash())
 }
 
 // Script returns the script associated with the address.
@@ -484,7 +484,7 @@ func (a *scriptAddress) Script() ([]byte, error) {
 }
 
 // newScriptAddress initializes and returns a new pay-to-script-hash address.
-func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []byte, used bool) (*scriptAddress, error) {
+func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []byte) (*scriptAddress, error) {
 	address, err := btcutil.NewAddressScriptHashFromHash(scriptHash,
 		m.chainParams)
 	if err != nil {
@@ -496,6 +496,5 @@ func newScriptAddress(m *Manager, account uint32, scriptHash, scriptEncrypted []
 		account:         account,
 		address:         address,
 		scriptEncrypted: scriptEncrypted,
-		used:            used,
 	}, nil
 }
