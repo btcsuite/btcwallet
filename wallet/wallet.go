@@ -1127,6 +1127,11 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 	}
 	sort.Sort(sort.Reverse(creditSlice(unspent)))
 
+	defaultAccountName, err := w.Manager.AccountName(waddrmgr.DefaultAccountNum)
+	if err != nil {
+		return nil, err
+	}
+
 	results := make([]*btcjson.ListUnspentResult, 0, len(unspent))
 	for i := range unspent {
 		output := &unspent[i]
@@ -1157,7 +1162,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 		//
 		// This will be unnecessary once transactions and outputs are
 		// grouped under the associated account in the db.
-		acctName := waddrmgr.DefaultAccountName
+		acctName := defaultAccountName
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			output.PkScript, w.chainParams)
 		if err != nil {

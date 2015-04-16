@@ -57,9 +57,9 @@ var helpDescsEnUS = map[string]string{
 	// GetBalanceCmd help.
 	"getbalance--synopsis":   "Calculates and returns the balance of one or all accounts.",
 	"getbalance-minconf":     "Minimum number of block confirmations required before an unspent output's value is included in the balance",
-	"getbalance-account":     "DEPRECATED -- The account name to query the balance for, or '*' to consider all accounts",
-	"getbalance--condition0": "account!=*",
-	"getbalance--condition1": "account=*",
+	"getbalance-account":     "DEPRECATED -- The account name to query the balance for, or \"*\" to consider all accounts (default=\"*\")",
+	"getbalance--condition0": "account != \"*\"",
+	"getbalance--condition1": "account = \"*\"",
 	"getbalance--result0":    "The balance of 'account' valued in bitcoin",
 	"getbalance--result1":    "The balance of all accounts valued in bitcoin",
 
@@ -94,12 +94,12 @@ var helpDescsEnUS = map[string]string{
 
 	// GetNewAddressCmd help.
 	"getnewaddress--synopsis": "Generates and returns a new payment address.",
-	"getnewaddress-account":   "DEPRECATED -- Account name the new address will belong to",
+	"getnewaddress-account":   "DEPRECATED -- Account name the new address will belong to (default=\"default\")",
 	"getnewaddress--result0":  "The payment address",
 
 	// GetRawChangeAddressCmd help.
 	"getrawchangeaddress--synopsis": "Generates and returns a new internal payment address for use as a change address in raw transactions.",
-	"getrawchangeaddress-account":   "Account name the new internal address will belong to",
+	"getrawchangeaddress-account":   "Account name the new internal address will belong to (default=\"default\")",
 	"getrawchangeaddress--result0":  "The internal payment address",
 
 	// GetReceivedByAccountCmd help.
@@ -151,7 +151,7 @@ var helpDescsEnUS = map[string]string{
 	// ImportPrivKeyCmd help.
 	"importprivkey--synopsis": "Imports a WIF-encoded private key to the 'imported' account.",
 	"importprivkey-privkey":   "The WIF-encoded private key",
-	"importprivkey-label":     "Unused (all imported addresses belong to the imported account)",
+	"importprivkey-label":     "Unused (must be unset or 'imported')",
 	"importprivkey-rescan":    "Rescan the blockchain (since the genesis block) for outputs controlled by the imported key",
 
 	// KeypoolRefillCmd help.
@@ -227,7 +227,7 @@ var helpDescsEnUS = map[string]string{
 
 	// ListTransactionsCmd help.
 	"listtransactions--synopsis":        "Returns a JSON array of objects containing verbose details for wallet transactions.",
-	"listtransactions-account":          "DEPRECATED -- Unused",
+	"listtransactions-account":          "DEPRECATED -- Unused (must be unset or \"*\")",
 	"listtransactions-count":            "Maximum number of transactions to create results from",
 	"listtransactions-from":             "Number of transactions to skip before results are created",
 	"listtransactions-includewatchonly": "Unused",
@@ -363,7 +363,7 @@ var helpDescsEnUS = map[string]string{
 
 	// ExportWatchingWalletCmd help.
 	"exportwatchingwallet--synopsis": "Creates and returns a duplicate of the wallet database without any private keys to be used as a watching-only wallet.",
-	"exportwatchingwallet-account":   "Unused",
+	"exportwatchingwallet-account":   "Unused (must be unset or \"*\")",
 	"exportwatchingwallet-download":  "Unused",
 	"exportwatchingwallet--result0":  "The watching-only database encoded as a base64 string",
 
@@ -376,17 +376,17 @@ var helpDescsEnUS = map[string]string{
 
 	// GetUnconfirmedBalanceCmd help.
 	"getunconfirmedbalance--synopsis": "Calculates the unspent output value of all unmined transaction outputs for an account.",
-	"getunconfirmedbalance-account":   "The account to query the unconfirmed balance for",
+	"getunconfirmedbalance-account":   "The account to query the unconfirmed balance for (default=\"default\")",
 	"getunconfirmedbalance--result0":  "Total amount of all unmined unspent outputs of the account valued in bitcoin.",
 
 	// ListAddressTransactionsCmd help.
 	"listaddresstransactions--synopsis": "Returns a JSON array of objects containing verbose details for wallet transactions pertaining some addresses.",
 	"listaddresstransactions-addresses": "Addresses to filter transaction results by",
-	"listaddresstransactions-account":   "Unused",
+	"listaddresstransactions-account":   "Unused (must be unset or \"*\")",
 
 	// ListAllTransactionsCmd help.
 	"listalltransactions--synopsis": "Returns a JSON array of objects in the same format as 'listtransactions' without limiting the number of returned objects.",
-	"listalltransactions-account":   "Unused",
+	"listalltransactions-account":   "Unused (must be unset or \"*\")",
 
 	// RenameAccountCmd help.
 	"renameaccount--synopsis":  "Renames an account.",

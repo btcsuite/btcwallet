@@ -112,6 +112,11 @@ var (
 		Code:    btcjson.ErrRPCNoTxInfo,
 		Message: "No information for transaction",
 	}
+
+	ErrReservedAccountName = btcjson.RPCError{
+		Code:    btcjson.ErrRPCInvalidParameter,
+		Message: "Account name is reserved by RPC server",
+	}
 )
 
 // TODO(jrick): There are several error paths which 'replace' various errors
@@ -1608,6 +1613,15 @@ func DumpWallet(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (int
 // current wallet as a watching wallet (with no private keys), and returning
 // base64-encoding of serialized account files.
 func ExportWatchingWallet(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
+	cmd := icmd.(*btcjson.ExportWatchingWalletCmd)
+
+	if cmd.Account != nil && *cmd.Account != "*" {
+		return nil, &btcjson.RPCError{
+			Code:    btcjson.ErrRPCWallet,
+			Message: "Individual accounts can not be exported as watching-only",
+		}
+	}
+
 	return w.ExportWatchingWallet(cfg.WalletPass)
 }
 
@@ -1643,7 +1657,10 @@ func GetBalance(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (int
 
 	var balance btcutil.Amount
 	var err error
-	accountName := *cmd.Account
+	accountName := "*"
+	if cmd.Account != nil {
+		accountName = *cmd.Account
+	}
 	if accountName == "*" {
 		balance, err = w.CalculateBalance(int32(*cmd.MinConf))
 	} else {
@@ -1783,11 +1800,14 @@ func GetAccountAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{
 func GetUnconfirmedBalance(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetUnconfirmedBalanceCmd)
 
-	account, err := w.Manager.LookupAccount(*cmd.Account)
+	acctName := "default"
+	if cmd.Account != nil {
+		acctName = *cmd.Account
+	}
+	account, err := w.Manager.LookupAccount(acctName)
 	if err != nil {
 		return nil, err
 	}
-
 	unconfirmed, err := w.CalculateAccountBalance(account, 0)
 	if err != nil {
 		return nil, err
@@ -1808,7 +1828,7 @@ func ImportPrivKey(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (
 	// Ensure that private keys are only imported to the correct account.
 	//
 	// Yes, Label is the account name.
-	if *cmd.Label != waddrmgr.ImportedAddrAccountName {
+	if cmd.Label != nil && *cmd.Label != waddrmgr.ImportedAddrAccountName {
 		return nil, &ErrNotImportedAccount
 	}
 
@@ -1851,6 +1871,12 @@ func KeypoolRefill(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (
 func CreateNewAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
 	cmd := icmd.(*btcjson.CreateNewAccountCmd)
 
+	// The wildcard * is reserved by the rpc server with the special meaning
+	// of "all accounts", so disallow naming accounts to this string.
+	if cmd.Account == "*" {
+		return nil, &ErrReservedAccountName
+	}
+
 	// Check that we are within the maximum allowed non-empty accounts limit.
 	account, err := w.Manager.LastAccount()
 	if err != nil {
@@ -1882,6 +1908,13 @@ func CreateNewAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}
 // If the account does not exist an appropiate error will be returned.
 func RenameAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
 	cmd := icmd.(*btcjson.RenameAccountCmd)
+
+	// The wildcard * is reserved by the rpc server with the special meaning
+	// of "all accounts", so disallow naming accounts to this string.
+	if cmd.NewAccount == "*" {
+		return nil, &ErrReservedAccountName
+	}
+
 	// Check that given account exists
 	account, err := w.Manager.LookupAccount(cmd.OldAccount)
 	if err != nil {
@@ -1898,11 +1931,14 @@ func RenameAccount(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (
 func GetNewAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetNewAddressCmd)
 
-	account, err := w.Manager.LookupAccount(*cmd.Account)
+	acctName := "default"
+	if cmd.Account != nil {
+		acctName = *cmd.Account
+	}
+	account, err := w.Manager.LookupAccount(acctName)
 	if err != nil {
 		return nil, err
 	}
-
 	addr, err := w.NewAddress(account)
 	if err != nil {
 		return nil, err
@@ -1919,7 +1955,12 @@ func GetNewAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (
 // but ignores the parameter.
 func GetRawChangeAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetRawChangeAddressCmd)
-	account, err := w.Manager.LookupAccount(*cmd.Account)
+
+	acctName := "default"
+	if cmd.Account != nil {
+		acctName = *cmd.Account
+	}
+	account, err := w.Manager.LookupAccount(acctName)
 	if err != nil {
 		return nil, err
 	}
@@ -2424,7 +2465,7 @@ func ListTransactions(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}
 	// between transactions pertaining to one account from another.  This
 	// will be resolved when wtxmgr is combined with the waddrmgr namespace.
 
-	if cmd.Account != nil {
+	if cmd.Account != nil && *cmd.Account != "*" {
 		// For now, don't bother trying to continue if the user
 		// specified an account, since this can't be (easily or
 		// efficiently) calculated.
@@ -2445,6 +2486,13 @@ func ListTransactions(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}
 func ListAddressTransactions(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListAddressTransactionsCmd)
 
+	if cmd.Account != nil && *cmd.Account != "*" {
+		return nil, &btcjson.RPCError{
+			Code:    btcjson.ErrRPCInvalidParameter,
+			Message: "Listing transactions for addresses may only be done for all accounts",
+		}
+	}
+
 	// Decode addresses.
 	hash160Map := make(map[string]struct{})
 	for _, addrStr := range cmd.Addresses {
@@ -2463,6 +2511,15 @@ func ListAddressTransactions(w *wallet.Wallet, chainSvr *chain.Client, icmd inte
 // similar to ListTransactions, except it takes only a single optional
 // argument for the account name and replies with all transactions.
 func ListAllTransactions(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (interface{}, error) {
+	cmd := icmd.(*btcjson.ListAllTransactionsCmd)
+
+	if cmd.Account != nil && *cmd.Account != "*" {
+		return nil, &btcjson.RPCError{
+			Code:    btcjson.ErrRPCInvalidParameter,
+			Message: "Listing all transactions may only be done for all accounts",
+		}
+	}
+
 	return w.ListAllTransactions()
 }
 

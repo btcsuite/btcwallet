@@ -17,6 +17,7 @@
 package waddrmgr
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -30,7 +31,7 @@ import (
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 3
+	LatestMgrVersion = 4
 )
 
 var (
@@ -1661,7 +1662,7 @@ func upgradeToVersion2(namespace walletdb.Namespace) error {
 
 // upgradeManager upgrades the data in the provided manager namespace to newer
 // versions as neeeded.
-func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, config *Options) error {
+func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainParams *chaincfg.Params, config *Options) error {
 	var version uint32
 	err := namespace.View(func(tx walletdb.Tx) error {
 		var err error
@@ -1728,12 +1729,21 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, config *
 			return err
 		}
 		// Upgrade from version 2 to 3.
-		if err := upgradeToVersion3(namespace, seed, privPassPhrase, pubPassPhrase); err != nil {
+		if err := upgradeToVersion3(namespace, seed, privPassPhrase, pubPassPhrase, chainParams); err != nil {
 			return err
 		}
 
 		// The manager is now at version 3.
 		version = 3
+	}
+
+	if version < 4 {
+		if err := upgradeToVersion4(namespace, pubPassPhrase); err != nil {
+			return err
+		}
+
+		// The manager is now at version 4.
+		version = 4
 	}
 
 	// Ensure the manager is upraded to the latest version.  This check is
@@ -1754,12 +1764,12 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, config *
 // * acctNameIdxBucketName
 // * acctIDIdxBucketName
 // * metaBucketName
-func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPassPhrase []byte) error {
+func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
 		currentMgrVersion := uint32(3)
 		rootBucket := tx.RootBucket()
 
-		woMgr, err := loadManager(namespace, pubPassPhrase, &chaincfg.SimNetParams, nil)
+		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams, nil)
 		if err != nil {
 			return err
 		}
@@ -1778,7 +1788,7 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Derive the cointype key according to BIP0044.
-		coinTypeKeyPriv, err := deriveCoinTypeKey(root, chaincfg.SimNetParams.HDCoinType)
+		coinTypeKeyPriv, err := deriveCoinTypeKey(root, chainParams.HDCoinType)
 		if err != nil {
 			str := "failed to derive cointype extended key"
 			return managerError(ErrKeyChain, str, err)
@@ -1833,10 +1843,10 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Update default account indexes
-		if err := putAccountIDIndex(tx, DefaultAccountNum, DefaultAccountName); err != nil {
+		if err := putAccountIDIndex(tx, DefaultAccountNum, defaultAccountName); err != nil {
 			return err
 		}
-		if err := putAccountNameIndex(tx, DefaultAccountNum, DefaultAccountName); err != nil {
+		if err := putAccountNameIndex(tx, DefaultAccountNum, defaultAccountName); err != nil {
 			return err
 		}
 		// Update imported account indexes
@@ -1854,6 +1864,96 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 
 		// Save "" alias for default account name for backward compat
 		return putAccountNameIndex(tx, DefaultAccountNum, "")
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
+}
+
+// upgradeToVersion4 upgrades the database from version 3 to version 4.  The
+// default account remains unchanged (even if it was modified by the user), but
+// the empty string alias to the default account is removed.
+func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		// Write new manager version.
+		err := putManagerVersion(tx, 4)
+		if err != nil {
+			return err
+		}
+
+		// Lookup the old account info to determine the real name of the
+		// default account.  All other names will be removed.
+		acctInfoIface, err := fetchAccountInfo(tx, DefaultAccountNum)
+		if err != nil {
+			return err
+		}
+		acctInfo, ok := acctInfoIface.(*dbBIP0044AccountRow)
+		if !ok {
+			str := fmt.Sprintf("unsupported account type %T", acctInfoIface)
+			return managerError(ErrDatabase, str, nil)
+		}
+
+		var oldName string
+
+		// Delete any other names for the default account.
+		c := tx.RootBucket().Bucket(acctNameIdxBucketName).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			// Skip nested buckets.
+			if v == nil {
+				continue
+			}
+
+			// Skip account names which aren't for the default account.
+			account := binary.LittleEndian.Uint32(v)
+			if account != DefaultAccountNum {
+				continue
+			}
+
+			if !bytes.Equal(k[4:], []byte(acctInfo.name)) {
+				err := c.Delete()
+				if err != nil {
+					const str = "error deleting default account alias"
+					return managerError(ErrUpgrade, str, err)
+				}
+				oldName = string(k[4:])
+				break
+			}
+		}
+
+		// Ensure that the "default" name maps forwards and backwards to
+		// the default account index.
+		name, err := fetchAccountName(tx, DefaultAccountNum)
+		if err != nil {
+			return err
+		}
+		if name != acctInfo.name {
+			const str = "account name index does not map default account number to correct name"
+			return managerError(ErrUpgrade, str, nil)
+		}
+		acct, err := fetchAccountByName(tx, acctInfo.name)
+		if err != nil {
+			return err
+		}
+		if acct != DefaultAccountNum {
+			const str = "default account not accessible under correct name"
+			return managerError(ErrUpgrade, str, nil)
+		}
+
+		// Ensure that looking up the default account by the old name
+		// cannot succeed.
+		_, err = fetchAccountByName(tx, oldName)
+		if err == nil {
+			const str = "default account exists under old name"
+			return managerError(ErrUpgrade, str, nil)
+		} else {
+			merr, ok := err.(ManagerError)
+			if !ok || merr.ErrorCode != ErrAccountNotFound {
+				return err
+			}
+		}
+
+		return nil
 	})
 	if err != nil {
 		return maybeConvertDbError(err)

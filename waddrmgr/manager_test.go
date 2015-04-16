@@ -1150,7 +1150,7 @@ func testNewAccount(tc *testContext) bool {
 		return false
 	}
 	// Test account name validation
-	testName = "*"
+	testName = "imported" // A reserved account name
 	_, err = tc.manager.NewAccount(testName)
 	wantErrCode = waddrmgr.ErrInvalidAccount
 	if !checkManagerError(tc.t, testName, err, wantErrCode) {
@@ -1164,7 +1164,7 @@ func testNewAccount(tc *testContext) bool {
 func testLookupAccount(tc *testContext) bool {
 	// Lookup accounts created earlier in testNewAccount
 	expectedAccounts := map[string]uint32{
-		waddrmgr.DefaultAccountName:      waddrmgr.DefaultAccountNum,
+		waddrmgr.TstDefaultAccountName:   waddrmgr.DefaultAccountNum,
 		waddrmgr.ImportedAddrAccountName: waddrmgr.ImportedAddrAccount,
 	}
 	for acctName, expectedAccount := range expectedAccounts {
@@ -1261,13 +1261,6 @@ func testRenameAccount(tc *testContext) bool {
 	// Test old account name is no longer valid
 	_, err = tc.manager.LookupAccount(acctName)
 	wantErrCode = waddrmgr.ErrAccountNotFound
-	if !checkManagerError(tc.t, testName, err, wantErrCode) {
-		return false
-	}
-	// Test account name validation
-	testName = "*"
-	err = tc.manager.RenameAccount(tc.account, testName)
-	wantErrCode = waddrmgr.ErrInvalidAccount
 	if !checkManagerError(tc.t, testName, err, wantErrCode) {
 		return false
 	}
