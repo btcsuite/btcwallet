@@ -58,7 +58,7 @@ const (
 	DefaultAccountNum = 0
 
 	// DefaultAccountName is the name of the default account.
-	DefaultAccountName = "default"
+	DefaultAccountName = ""
 
 	// The hierarchy described by BIP0043 is:
 	//  m/<purpose>'/*
@@ -88,15 +88,28 @@ const (
 	saltSize = 32
 )
 
-var (
-	// reservedAccountNames is a set of account names reserved for internal
-	// purposes
-	reservedAccountNames = map[string]struct{}{
-		"*":                     struct{}{},
-		DefaultAccountName:      struct{}{},
-		ImportedAddrAccountName: struct{}{},
+// isReservedAccountName returns true if the account name is reserved.  Reserved
+// accounts may never be renamed, and other account may not be renamed to a
+// reserved name.
+func isReservedAccountName(name string) bool {
+	switch name {
+	case "*", DefaultAccountName, ImportedAddrAccountName:
+		return true
+	default:
+		return false
 	}
-)
+}
+
+// isReservedAccountNum returns true if the account number is reserved.
+// Reserved accounts may not be renamed.
+func isReservedAccountNum(acct uint32) bool {
+	switch acct {
+	case DefaultAccountNum, ImportedAddrAccount:
+		return true
+	default:
+		return false
+	}
+}
 
 // Options is used to hold the optional parameters passed to Create or Load.
 type Options struct {
@@ -1634,7 +1647,7 @@ func ValidateAccountName(name string) error {
 		str := "invalid account name, cannot be blank"
 		return managerError(ErrInvalidAccount, str, nil)
 	}
-	if _, ok := reservedAccountNames[name]; ok {
+	if isReservedAccountName(name) {
 		str := "reserved account name"
 		return managerError(ErrInvalidAccount, str, nil)
 	}
@@ -1747,6 +1760,12 @@ func (m *Manager) NewAccount(name string) (uint32, error) {
 func (m *Manager) RenameAccount(account uint32, name string) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
+
+	// Ensure that a reserved account is not being renamed.
+	if isReservedAccountNum(account) {
+		str := "reserved account cannot be renamed"
+		return managerError(ErrInvalidAccount, str, nil)
+	}
 
 	// Check that account with the new name does not exist
 	_, err := m.lookupAccount(name)
@@ -2201,7 +2220,7 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chain
 	}
 
 	// Upgrade the manager to the latest version as needed.
-	if err := upgradeManager(namespace, pubPassphrase, config); err != nil {
+	if err := upgradeManager(namespace, pubPassphrase, chainParams, config); err != nil {
 		return nil, err
 	}
 
@@ -2454,12 +2473,7 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 		// Save the information for the default account to the database.
 		err = putAccountInfo(tx, DefaultAccountNum, acctPubEnc,
 			acctPrivEnc, 0, 0, DefaultAccountName)
-		if err != nil {
-			return err
-		}
-
-		// Save "" alias for default account name for backward compat
-		return putAccountNameIndex(tx, DefaultAccountNum, "")
+		return err
 	})
 	if err != nil {
 		return nil, maybeConvertDbError(err)
