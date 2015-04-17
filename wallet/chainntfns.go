@@ -44,7 +44,7 @@ func (w *Wallet) handleChainNotifications() {
 		case chain.BlockConnected:
 			w.connectBlock(waddrmgr.BlockStamp(n))
 		case chain.BlockDisconnected:
-			w.disconnectBlock(waddrmgr.BlockStamp(n))
+			err = w.disconnectBlock(waddrmgr.BlockStamp(n))
 		case chain.RecvTx:
 			err = w.addReceivedTx(n.Tx, n.Block)
 		case chain.RedeemingTx:
@@ -84,9 +84,9 @@ func (w *Wallet) connectBlock(bs waddrmgr.BlockStamp) {
 // disconnectBlock handles a chain server reorganize by rolling back all
 // block history from the reorged block for a wallet in-sync with the chain
 // server.
-func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) {
+func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
 	if !w.ChainSynced() {
-		return
+		return nil
 	}
 
 	// Disconnect the last seen block from the manager if it matches the
@@ -96,6 +96,10 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) {
 		if iter.Prev() {
 			prev := iter.BlockStamp()
 			w.Manager.SetSyncedTo(&prev)
+			err := w.TxStore.Rollback(prev.Height)
+			if err != nil {
+				return err
+			}
 		} else {
 			// The reorg is farther back than the recently-seen list
 			// of blocks has recorded, so set it to unsynced which
@@ -108,6 +112,8 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) {
 	w.notifyDisconnectedBlock(bs)
 
 	w.notifyBalances(bs.Height - 1)
+
+	return nil
 }
 
 func (w *Wallet) addReceivedTx(tx *btcutil.Tx, block *txstore.Block) error {
