@@ -282,9 +282,7 @@ func (tx *withdrawalTx) ntxid() Ntxid {
 	for _, txin := range msgtx.TxIn {
 		txin.SignatureScript = empty
 	}
-	// Ignore the error as TxSha() can't fail.
-	sha, _ := msgtx.TxSha()
-	return Ntxid(sha.String())
+	return Ntxid(msgtx.TxSha().String())
 }
 
 // inputTotal returns the sum amount of all inputs in this tx.
