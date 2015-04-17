@@ -30,7 +30,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcjson/v2/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -1115,7 +1115,7 @@ func (s creditSlice) Swap(i, j int) {
 // contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
 func (w *Wallet) ListUnspent(minconf, maxconf int32,
-	addresses map[string]bool) ([]*btcjson.ListUnspentResult, error) {
+	addresses map[string]struct{}) ([]*btcjson.ListUnspentResult, error) {
 
 	syncBlock := w.Manager.SyncedTo()
 
@@ -1184,7 +1184,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 		}
 	include:
 		result := &btcjson.ListUnspentResult{
-			TxId:          output.OutPoint.Hash.String(),
+			TxID:          output.OutPoint.Hash.String(),
 			Vout:          output.OutPoint.Index,
 			Account:       acctName,
 			ScriptPubKey:  hex.EncodeToString(output.PkScript),
