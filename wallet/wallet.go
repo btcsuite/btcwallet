@@ -1271,9 +1271,14 @@ func (w *Wallet) NewAddress(account uint32) (btcutil.Address, error) {
 	for i, addr := range addrs {
 		utilAddrs[i] = addr.Address()
 	}
-	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
-		return nil, err
+	w.chainSvrLock.Lock()
+	if w.chainSvr != nil {
+		if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
+			w.chainSvrLock.Unlock()
+			return nil, err
+		}
 	}
+	w.chainSvrLock.Unlock()
 
 	return utilAddrs[0], nil
 }
@@ -1292,9 +1297,14 @@ func (w *Wallet) NewChangeAddress(account uint32) (btcutil.Address, error) {
 		utilAddrs[i] = addr.Address()
 	}
 
-	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
-		return nil, err
+	w.chainSvrLock.Lock()
+	if w.chainSvr != nil {
+		if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
+			w.chainSvrLock.Unlock()
+			return nil, err
+		}
 	}
+	w.chainSvrLock.Unlock()
 
 	return utilAddrs[0], nil
 }
