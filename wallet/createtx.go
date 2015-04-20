@@ -404,12 +404,12 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit, mgr *waddrmgr.Ma
 
 func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []txstore.Credit) error {
 	for i := range msgtx.TxIn {
-		engine, err := txscript.NewScript(prevOutputs[i].TxOut().PkScript,
+		vm, err := txscript.NewEngine(prevOutputs[i].TxOut().PkScript,
 			msgtx, i, txscript.StandardVerifyFlags)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
-		if err = engine.Execute(); err != nil {
+		if err = vm.Execute(); err != nil {
 			return fmt.Errorf("cannot validate transaction: %s", err)
 		}
 	}

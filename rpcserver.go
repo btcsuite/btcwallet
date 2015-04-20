@@ -2834,9 +2834,9 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd btcjson.C
 
 		// Either it was already signed or we just signed it.
 		// Find out if it is completely satisfied or still needs more.
-		engine, err := txscript.NewScript(input, msgTx, i,
+		vm, err := txscript.NewEngine(input, msgTx, i,
 			txscript.StandardVerifyFlags)
-		if err != nil || engine.Execute() != nil {
+		if err != nil || vm.Execute() != nil {
 			complete = false
 		}
 	}

@@ -844,12 +844,12 @@ func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript [
 // validateSigScripts executes the signature script of the tx input with the
 // given index, returning an error if it fails.
 func validateSigScript(msgtx *wire.MsgTx, idx int, pkScript []byte) error {
-	engine, err := txscript.NewScript(pkScript, msgtx, idx,
+	vm, err := txscript.NewEngine(pkScript, msgtx, idx,
 		txscript.StandardVerifyFlags)
 	if err != nil {
 		return newError(ErrTxSigning, "cannot create script engine", err)
 	}
-	if err = engine.Execute(); err != nil {
+	if err = vm.Execute(); err != nil {
 		return newError(ErrTxSigning, "cannot validate tx signature", err)
 	}
 	return nil
