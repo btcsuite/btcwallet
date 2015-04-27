@@ -2201,7 +2201,7 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chain
 	}
 
 	// Upgrade the manager to the latest version as needed.
-	if err := upgradeManager(namespace, pubPassphrase, config); err != nil {
+	if err := upgradeManager(namespace, nil, pubPassphrase, nil, config); err != nil {
 		return nil, err
 	}
 
@@ -2360,23 +2360,6 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
-	// Encrypt the cointype keys with the associated crypto keys.
-	coinTypeKeyPub, err := coinTypeKeyPriv.Neuter()
-	if err != nil {
-		str := "failed to convert cointype private key"
-		return nil, managerError(ErrKeyChain, str, err)
-	}
-	coinTypePubEnc, err := cryptoKeyPub.Encrypt([]byte(coinTypeKeyPub.String()))
-	if err != nil {
-		str := "failed to encrypt cointype public key"
-		return nil, managerError(ErrCrypto, str, err)
-	}
-	coinTypePrivEnc, err := cryptoKeyPriv.Encrypt([]byte(coinTypeKeyPriv.String()))
-	if err != nil {
-		str := "failed to encrypt cointype private key"
-		return nil, managerError(ErrCrypto, str, err)
-	}
-
 	// Encrypt the default account keys with the associated crypto keys.
 	acctPubEnc, err := cryptoKeyPub.Encrypt([]byte(acctKeyPub.String()))
 	if err != nil {
@@ -2415,12 +2398,6 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 			return err
 		}
 
-		// Save the encrypted cointype keys to the database.
-		err = putCoinTypeKeys(tx, coinTypePubEnc, coinTypePrivEnc)
-		if err != nil {
-			return err
-		}
-
 		// Save the fact this is not a watching-only address manager to
 		// the database.
 		err = putWatchingOnly(tx, false)
@@ -2451,18 +2428,22 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 			return err
 		}
 
-		// Save the information for the default account to the database.
-		err = putAccountInfo(tx, DefaultAccountNum, acctPubEnc,
-			acctPrivEnc, 0, 0, DefaultAccountName)
-		if err != nil {
+		// Write initial manager version
+		if err := putManagerVersion(tx, 1); err != nil {
 			return err
 		}
 
-		// Save "" alias for default account name for backward compat
-		return putAccountNameIndex(tx, DefaultAccountNum, "")
+		// Save the information for the default account to the database.
+		return putAccountInfo(tx, DefaultAccountNum, acctPubEnc,
+			acctPrivEnc, 0, 0, DefaultAccountName)
 	})
 	if err != nil {
 		return nil, maybeConvertDbError(err)
+	}
+
+	// Upgrade the manager to the latest version as needed.
+	if err := upgradeManager(namespace, seed, pubPassphrase, privPassphrase, config); err != nil {
+		return nil, err
 	}
 
 	// The new address manager is locked by default, so clear the master,
