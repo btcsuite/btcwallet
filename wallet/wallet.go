@@ -1591,13 +1591,50 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 	return amount, err
 }
 
+// SendPairs creates and sends payment transactions. It returns the transaction
+// hash upon success
+func (w *Wallet) SendPairs(amounts map[string]btcutil.Amount, account uint32,
+	minconf int32) (*wire.ShaHash, error) {
+
+	// Create transaction, replying with an error if the creation
+	// was not successful.
+	createdTx, err := w.CreateSimpleTx(account, amounts, minconf)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create transaction record and insert into the db.
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(createdTx.MsgTx, time.Now())
+	if err != nil {
+		log.Errorf("Cannot create record for created transaction: %v", err)
+		return nil, err
+	}
+	err = w.TxStore.InsertTx(rec, nil)
+	if err != nil {
+		log.Errorf("Error adding sent tx history: %v", err)
+		return nil, err
+	}
+
+	if createdTx.ChangeIndex >= 0 {
+		err = w.TxStore.AddCredit(rec, nil, uint32(createdTx.ChangeIndex), true)
+		if err != nil {
+			log.Errorf("Error adding change address for sent "+
+				"tx: %v", err)
+			return nil, err
+		}
+	}
+
+	// TODO: The record already has the serialized tx, so no need to
+	// serialize it again.
+	return w.chainSvr.SendRawTransaction(&rec.MsgTx, false)
+}
+
 // Open loads an already-created wallet from the passed database and namespaces.
 func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS, wtxmgrNS walletdb.Namespace, cbs *waddrmgr.OpenCallbacks) (*Wallet, error) {
 	addrMgr, err := waddrmgr.Open(waddrmgrNS, pubPass, params, cbs)
 	if err != nil {
 		return nil, err
 	}
-
 	txMgr, err := wtxmgr.Open(wtxmgrNS)
 	if err != nil {
 		if !wtxmgr.IsNoExists(err) {

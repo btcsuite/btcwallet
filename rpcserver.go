@@ -2582,53 +2582,30 @@ func LockUnspent(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (in
 	return true, nil
 }
 
-// sendPairs is a helper routine to reduce duplicated code when creating and
-// sending payment transactions.  It returns the transaction hash in string
-// format upon success.
-func sendPairs(w *wallet.Wallet, chainSvr *chain.Client, cmd interface{},
-	amounts map[string]btcutil.Amount, account uint32, minconf int32) (string, error) {
-
-	// Create transaction, replying with an error if the creation
-	// was not successful.
-	createdTx, err := w.CreateSimpleTx(account, amounts, minconf)
+// sendPairs creates and sends payment transactions.
+// It returns the transaction hash in string format upon success
+// All errors are returned in btcjson.RPCError format
+func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
+	account uint32, minconf int32) (string, error) {
+	txSha, err := w.SendPairs(amounts, account, minconf)
 	if err != nil {
-		switch {
-		case err == wallet.ErrNonPositiveAmount:
+		if err == wallet.ErrNonPositiveAmount {
 			return "", ErrNeedPositiveAmount
-		case isManagerLockedError(err):
+		}
+		if isManagerLockedError(err) {
 			return "", &ErrWalletUnlockNeeded
 		}
+		switch err.(type) {
+		case btcjson.RPCError:
+			return "", err
+		}
 
-		return "", err
-	}
-
-	// Create transaction record and insert into the db.
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(createdTx.MsgTx, time.Now())
-	if err != nil {
-		log.Errorf("Cannot create record for created transaction: %v", err)
-		return "", btcjson.ErrRPCInternal
-	}
-	err = w.TxStore.InsertTx(rec, nil)
-	if err != nil {
-		log.Errorf("Error adding sent tx history: %v", err)
-		return "", btcjson.ErrRPCInternal
-	}
-
-	if createdTx.ChangeIndex >= 0 {
-		err = w.TxStore.AddCredit(rec, nil, uint32(createdTx.ChangeIndex), true)
-		if err != nil {
-			log.Errorf("Error adding change address for sent "+
-				"tx: %v", err)
-			return "", btcjson.ErrRPCInternal
+		return "", &btcjson.RPCError{
+			Code:    btcjson.ErrRPCInternal.Code,
+			Message: err.Error(),
 		}
 	}
 
-	// TODO: The record already has the serialized tx, so no need to
-	// serialize it again.
-	txSha, err := chainSvr.SendRawTransaction(&rec.MsgTx, false)
-	if err != nil {
-		return "", err
-	}
 	txShaStr := txSha.String()
 	log.Infof("Successfully sent transaction %v", txShaStr)
 	return txShaStr, nil
@@ -2673,7 +2650,7 @@ func SendFrom(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (inter
 		cmd.ToAddress: amt,
 	}
 
-	return sendPairs(w, chainSvr, cmd, pairs, account, minConf)
+	return sendPairs(w, pairs, account, minConf)
 }
 
 // SendMany handles a sendmany RPC request by creating a new transaction
@@ -2714,7 +2691,7 @@ func SendMany(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (inter
 		pairs[k] = amt
 	}
 
-	return sendPairs(w, chainSvr, cmd, pairs, account, minConf)
+	return sendPairs(w, pairs, account, minConf)
 }
 
 // SendToAddress handles a sendtoaddress RPC request by creating a new
@@ -2750,7 +2727,7 @@ func SendToAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (
 	}
 
 	// sendtoaddress always spends from the default account, this matches bitcoind
-	return sendPairs(w, chainSvr, cmd, pairs, waddrmgr.DefaultAccountNum, 1)
+	return sendPairs(w, pairs, waddrmgr.DefaultAccountNum, 1)
 }
 
 // SetTxFee sets the transaction fee per kilobyte added to transactions.
