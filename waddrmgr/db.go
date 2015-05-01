@@ -1921,8 +1921,18 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 			}
 		}
 
-		// Ensure that the "default" name maps forwards and backwards to
-		// the default account index.
+		// The account number to name index may map to the wrong name,
+		// so rewrite the entry with the true name from the account row
+		// instead of leaving it set to an incorrect alias.
+		err = putAccountIDIndex(tx, DefaultAccountNum, acctInfo.name)
+		if err != nil {
+			const str = "account number to name index could not be " +
+				"rewritten with actual account name"
+			return managerError(ErrUpgrade, str, err)
+		}
+
+		// Ensure that the true name for the default account maps
+		// forwards and backwards to the default account number.
 		name, err := fetchAccountName(tx, DefaultAccountNum)
 		if err != nil {
 			return err
