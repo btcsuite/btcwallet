@@ -18,7 +18,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/btcsuite/btcd/btcjson/v2/btcjson"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcwallet/internal/rpchelp"
 )
 

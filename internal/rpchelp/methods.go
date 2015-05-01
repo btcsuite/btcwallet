@@ -16,7 +16,7 @@
 
 package rpchelp
 
-import "github.com/btcsuite/btcd/btcjson/v2/btcjson"
+import "github.com/btcsuite/btcd/btcjson"
 
 // Common return types.
 var (

@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcjson/v2/btcjson"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"

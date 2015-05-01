@@ -38,7 +38,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/btcjson/v2/btcjson"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
