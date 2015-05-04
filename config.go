@@ -26,6 +26,8 @@ import (
 
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	flags "github.com/btcsuite/go-flags"
 )
 
@@ -66,6 +68,7 @@ var (
 
 type config struct {
 	ShowVersion      bool     `short:"V" long:"version" description:"Display version information and exit"`
+	Check            bool     `long:"check" description:"Check and attempt to fix databases"`
 	Create           bool     `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp       bool     `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	CAFile           string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
@@ -374,6 +377,31 @@ func loadConfig() (*config, []string, error) {
 		fmt.Fprintln(os.Stderr, err)
 		parser.WriteHelp(os.Stderr)
 		return nil, nil, err
+	}
+
+	// Check existing database for consistency and attempt fixes if possible
+	if cfg.Check {
+		netDir := networkDir(cfg.DataDir, activeNet.Params)
+		dbPath := filepath.Join(netDir, walletDbName)
+		db, err := walletdb.Open("bdb", dbPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return nil, nil, err
+		}
+		defer db.Close()
+		namespace, err := db.Namespace(waddrmgrNamespaceKey)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return nil, nil, err
+		}
+		err = waddrmgr.CheckIndexes(namespace)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return nil, nil, err
+		}
+		str := "Wallet check completed."
+		fmt.Fprintln(os.Stdout, str)
+		os.Exit(0)
 	}
 
 	// Exit if you try to use a simulation wallet with a standard

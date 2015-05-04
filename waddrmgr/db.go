@@ -31,7 +31,7 @@ import (
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 4
+	LatestMgrVersion = 5
 )
 
 var (
@@ -612,7 +612,7 @@ func fetchAccountName(tx walletdb.Tx, account uint32) (string, error) {
 
 	val := bucket.Get(uint32ToBytes(account))
 	if val == nil {
-		str := fmt.Sprintf("account %d not found", account)
+		str := fmt.Sprintf("account index id #%d not found", account)
 		return "", managerError(ErrAccountNotFound, str, nil)
 	}
 	offset := uint32(0)
@@ -629,7 +629,7 @@ func fetchAccountByName(tx walletdb.Tx, name string) (uint32, error) {
 
 	val := bucket.Get(stringToBytes(name))
 	if val == nil {
-		str := fmt.Sprintf("account name '%s' not found", name)
+		str := fmt.Sprintf("account index name '%s' not found", name)
 		return 0, managerError(ErrAccountNotFound, str, nil)
 	}
 
@@ -1732,6 +1732,15 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 		version = 4
 	}
 
+	if version < 5 {
+		if err := upgradeToVersion5(namespace); err != nil {
+			return err
+		}
+
+		// The manager is now at version 5.
+		version = 5
+	}
+
 	// Ensure the manager is upraded to the latest version.  This check is
 	// to intentionally cause a failure if the manager version is updated
 	// without writing code to handle the upgrade.
@@ -1955,4 +1964,67 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		return maybeConvertDbError(err)
 	}
 	return nil
+}
+
+func upgradeToVersion5(namespace walletdb.Namespace) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		// Write new manager version.
+		return putManagerVersion(tx, 5)
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return CheckIndexes(namespace)
+}
+
+// CheckIndexes checks for any missing entries in the account id and name
+// indexes and rebuils them, if required, to make sure that the indexes are
+// consistent
+func CheckIndexes(namespace walletdb.Namespace) error {
+	return namespace.Update(func(tx walletdb.Tx) error {
+		bucket := tx.RootBucket().Bucket(acctBucketName)
+
+		return bucket.ForEach(func(k, v []byte) error {
+			account := binary.LittleEndian.Uint32(k)
+			if v == nil {
+				return nil
+			}
+
+			row, err := deserializeAccountRow(k, v)
+			if err != nil {
+				return err
+			}
+
+			switch row.acctType {
+			case actBIP0044:
+				// Fetch the name from the account row
+				acctInfo, err := deserializeBIP0044AccountRow(k, row)
+				if err != nil {
+					return err
+				}
+				name := acctInfo.name
+
+				// Check that the bidirectional index exists for this (id, name)
+				// pair and rebuild entries if required
+				oldName, _ := fetchAccountName(tx, account)
+				if oldName != name {
+					if err := putAccountIDIndex(tx, account, name); err != nil {
+						return err
+					}
+					fmt.Printf("account #%d: fixed invalid id index - "+
+						"'%s' -> '%s'\n", account, oldName, name)
+				}
+
+				oldAccount, _ := fetchAccountByName(tx, name)
+				if oldAccount != account {
+					if err := putAccountNameIndex(tx, account, name); err != nil {
+						return err
+					}
+					fmt.Printf("account '%s': fixed invalid name index - "+
+						"#%d -> #%d\n", name, oldAccount, account)
+				}
+			}
+			return nil
+		})
+	})
 }
