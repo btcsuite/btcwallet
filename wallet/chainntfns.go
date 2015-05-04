@@ -93,7 +93,7 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
 		if iter.Prev() {
 			prev := iter.BlockStamp()
 			w.Manager.SetSyncedTo(&prev)
-			err := w.TxStore.Rollback(prev.Height)
+			err := w.TxStore.Rollback(prev.Height + 1)
 			if err != nil {
 				return err
 			}
