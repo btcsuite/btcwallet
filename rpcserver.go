@@ -2452,9 +2452,8 @@ func ListSinceBlock(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) 
 		}
 		start = int32(block.Height) + 1
 	}
-	end := syncBlock.Height - int32(targetConf) + 1
 
-	txInfoList, err := w.ListSinceBlock(start, end, syncBlock.Height)
+	txInfoList, err := w.ListSinceBlock(start, -1, syncBlock.Height)
 	if err != nil {
 		return nil, err
 	}

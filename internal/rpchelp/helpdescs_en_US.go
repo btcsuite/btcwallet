@@ -200,10 +200,14 @@ var helpDescsEnUS = map[string]string{
 	"listreceivedbyaddressresult-involvesWatchonly": "Unset",
 
 	// ListSinceBlockCmd help.
-	"listsinceblock--synopsis":           "Returns a JSON array of objects listing details of wallet transactions after some block.",
-	"listsinceblock-blockhash":           "Hash of the parent block of the first block to consider transactions from",
-	"listsinceblock-targetconfirmations": "Minimum number of block confirmations required before a transaction is considered",
+	"listsinceblock--synopsis":           "Returns a JSON array of objects listing details of all wallet transactions after some block.",
+	"listsinceblock-blockhash":           "Hash of the parent block of the first block to consider transactions from, or unset to list all transactions",
+	"listsinceblock-targetconfirmations": "Minimum number of block confirmations of the last block in the result object.  Must be 1 or greater.  Note: The transactions array in the result object is not affected by this parameter",
 	"listsinceblock-includewatchonly":    "Unused",
+	"listsinceblock--condition0":         "blockhash specified",
+	"listsinceblock--condition1":         "no blockhash specified",
+	"listsinceblock--result0":            "Lists all transactions, including unmined transactions, since the specified block",
+	"listsinceblock--result1":            "Lists all transactions since the genesis block",
 
 	// ListSinceBlockResult help.
 	"listsinceblockresult-transactions": "JSON array of objects containing verbose details of the each transaction",
