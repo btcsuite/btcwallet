@@ -900,15 +900,25 @@ outputs:
 
 		amountF64 := btcutil.Amount(output.Value).ToBTC()
 		result := btcjson.ListTransactionsResult{
+			// Fields left zeroed:
+			//   InvolvesWatchOnly
+			//   Account
+			//   BlockIndex
+			//
+			// Fields set below:
+			//   Category
+			//   Amount
+			//   Fee
 			Address:         address,
+			Vout:            uint32(i),
+			Confirmations:   confirmations,
 			Generated:       generated,
-			TxID:            txHashStr,
-			Time:            received,
-			TimeReceived:    received,
-			WalletConflicts: []string{},
 			BlockHash:       blockHashStr,
 			BlockTime:       blockTime,
-			Confirmations:   confirmations,
+			TxID:            txHashStr,
+			WalletConflicts: []string{},
+			Time:            received,
+			TimeReceived:    received,
 		}
 
 		// Add a received/generated/immature result if this is a credit.
@@ -924,12 +934,13 @@ outputs:
 		if send || spentCredit {
 			result.Category = "send"
 			result.Amount = -amountF64
-			result.Fee = feeF64
+			result.Fee = &feeF64
 			results = append(results, result)
 		}
 		if isCredit {
 			result.Category = recvCat
 			result.Amount = amountF64
+			result.Fee = nil
 			results = append(results, result)
 		}
 	}
