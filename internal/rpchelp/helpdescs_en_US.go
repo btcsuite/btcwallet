@@ -316,6 +316,14 @@ var helpDescsEnUS = map[string]string{
 	// SignRawTransactionResult help.
 	"signrawtransactionresult-hex":      "The resulting transaction encoded as a hexadecimal string",
 	"signrawtransactionresult-complete": "Whether all input signatures have been created",
+	"signrawtransactionresult-errors":   "Script verification errors (if exists)",
+
+	// SignRawTransactionError help.
+	"signrawtransactionerror-error":     "Verification or signing error related to the input",
+	"signrawtransactionerror-sequence":  "Script sequence number",
+	"signrawtransactionerror-scriptSig": "The hex-encoded signature script",
+	"signrawtransactionerror-txid":      "The transaction hash of the referenced previous output",
+	"signrawtransactionerror-vout":      "The output index of the referenced previous output",
 
 	// ValidateAddressCmd help.
 	"validateaddress--synopsis": "Verify that an address is valid.\n" +

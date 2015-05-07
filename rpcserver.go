@@ -2981,7 +2981,7 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 	// `complete' denotes that we successfully signed all outputs and that
 	// all scripts will run to completion. This is returned as part of the
 	// reply.
-	complete := true
+	var signErrors []btcjson.SignRawTransactionError
 	for i, txIn := range msgTx.TxIn {
 		input, ok := inputs[txIn.PreviousOutPoint]
 		if !ok {
@@ -3060,7 +3060,14 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 			// Failure to sign isn't an error, it just means that
 			// the tx isn't complete.
 			if err != nil {
-				complete = false
+				signErrors = append(signErrors,
+					btcjson.SignRawTransactionError{
+						TxID:      txIn.PreviousOutPoint.Hash.String(),
+						Vout:      txIn.PreviousOutPoint.Index,
+						ScriptSig: hex.EncodeToString(txIn.SignatureScript),
+						Sequence:  txIn.Sequence,
+						Error:     err.Error(),
+					})
 				continue
 			}
 			txIn.SignatureScript = script
@@ -3070,8 +3077,18 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 		// Find out if it is completely satisfied or still needs more.
 		vm, err := txscript.NewEngine(input, msgTx, i,
 			txscript.StandardVerifyFlags)
-		if err != nil || vm.Execute() != nil {
-			complete = false
+		if err == nil {
+			err = vm.Execute()
+		}
+		if err != nil {
+			signErrors = append(signErrors,
+				btcjson.SignRawTransactionError{
+					TxID:      txIn.PreviousOutPoint.Hash.String(),
+					Vout:      txIn.PreviousOutPoint.Index,
+					ScriptSig: hex.EncodeToString(txIn.SignatureScript),
+					Sequence:  txIn.Sequence,
+					Error:     err.Error(),
+				})
 		}
 	}
 
@@ -3086,7 +3103,8 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 
 	return btcjson.SignRawTransactionResult{
 		Hex:      hex.EncodeToString(buf.Bytes()),
-		Complete: complete,
+		Complete: len(signErrors) == 0,
+		Errors:   signErrors,
 	}, nil
 }
 
