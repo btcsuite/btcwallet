@@ -65,11 +65,11 @@ type ManagedPubKeyAddress interface {
 	ManagedAddress
 
 	// PubKey returns the public key associated with the address.
-	PubKey() (*btcec.PublicKey, error)
+	PubKey() (*btcec.PublicKey, bool, bool)
 
 	// ExportPubKey returns the public key associated with the address
 	// serialized as a hex encoded string.
-	ExportPubKey() (string, error)
+	ExportPubKey() (string, bool)
 
 	// PrivKey returns the private key for the address.  It can fail if the
 	// address manager is watching-only or locked, or the address does not
@@ -212,38 +212,33 @@ func (a *managedAddress) WatchingOnly() bool {
 // PubKey returns the public key associated with the address.
 //
 // This is part of the ManagedPubKeyAddress interface implementation.
-func (a *managedAddress) PubKey() (*btcec.PublicKey, error) {
-	// Make sure public key is available for this address.
-	if a.pubKey == nil {
-		return nil, managerError(ErrNoPubKey, errNoPubKey, nil)
-	}
-
-	return a.pubKey, nil
+func (a *managedAddress) PubKey() (*btcec.PublicKey, bool, bool) {
+	return a.pubKey, a.compressed, a.pubKey != nil
 }
 
 // pubKeyBytes returns the serialized public key bytes for the managed address
 // based on whether or not the managed address is marked as compressed.
-func (a *managedAddress) pubKeyBytes() ([]byte, error) {
-	pubKey, err := a.PubKey()
-	if err != nil {
-		return nil, err
+func (a *managedAddress) pubKeyBytes() ([]byte, bool) {
+	pubKey, compressed, ok := a.PubKey()
+	if !ok {
+		return nil, false
 	}
-	if a.compressed {
-		return pubKey.SerializeCompressed(), nil
+	if compressed {
+		return pubKey.SerializeCompressed(), true
 	}
-	return pubKey.SerializeUncompressed(), nil
+	return pubKey.SerializeUncompressed(), true
 }
 
 // ExportPubKey returns the public key associated with the address
 // serialized as a hex encoded string.
 //
 // This is part of the ManagedPubKeyAddress interface implementation.
-func (a *managedAddress) ExportPubKey() (string, error) {
-	pkBytes, err := a.pubKeyBytes()
-	if err != nil {
-		return "", err
+func (a *managedAddress) ExportPubKey() (string, bool) {
+	pkBytes, ok := a.pubKeyBytes()
+	if !ok {
+		return "", false
 	}
-	return hex.EncodeToString(pkBytes), nil
+	return hex.EncodeToString(pkBytes), true
 }
 
 // PrivKey returns the private key for the address.  It can fail if the address
