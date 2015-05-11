@@ -17,7 +17,6 @@
 package waddrmgr
 
 import (
-	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -66,10 +65,6 @@ type ManagedPubKeyAddress interface {
 
 	// PubKey returns the public key associated with the address.
 	PubKey() (*btcec.PublicKey, bool, bool)
-
-	// ExportPubKey returns the public key associated with the address
-	// serialized as a hex encoded string.
-	ExportPubKey() (string, bool)
 
 	// PrivKey returns the private key for the address.  It can fail if the
 	// address manager is watching-only or locked, or the address does not
@@ -214,31 +209,6 @@ func (a *managedAddress) WatchingOnly() bool {
 // This is part of the ManagedPubKeyAddress interface implementation.
 func (a *managedAddress) PubKey() (*btcec.PublicKey, bool, bool) {
 	return a.pubKey, a.compressed, a.pubKey != nil
-}
-
-// pubKeyBytes returns the serialized public key bytes for the managed address
-// based on whether or not the managed address is marked as compressed.
-func (a *managedAddress) pubKeyBytes() ([]byte, bool) {
-	pubKey, compressed, ok := a.PubKey()
-	if !ok {
-		return nil, false
-	}
-	if compressed {
-		return pubKey.SerializeCompressed(), true
-	}
-	return pubKey.SerializeUncompressed(), true
-}
-
-// ExportPubKey returns the public key associated with the address
-// serialized as a hex encoded string.
-//
-// This is part of the ManagedPubKeyAddress interface implementation.
-func (a *managedAddress) ExportPubKey() (string, bool) {
-	pkBytes, ok := a.pubKeyBytes()
-	if !ok {
-		return "", false
-	}
-	return hex.EncodeToString(pkBytes), true
 }
 
 // PrivKey returns the private key for the address.  It can fail if the address
