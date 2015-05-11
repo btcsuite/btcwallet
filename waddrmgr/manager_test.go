@@ -106,41 +106,31 @@ func testNamePrefix(tc *testContext) string {
 // are checked to ensure they return the correct error.
 func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedPubKeyAddress, wantAddr *expectedAddr) bool {
 	// Ensure pubkey is the expected value for the managed address.
-	gpubKey, err := gotAddr.PubKey()
-	if wantAddr.pubKey == nil {
-		if !checkManagerError(tc.t, prefix, err, waddrmgr.ErrNoPubKey) {
+	gpubKey, compressed, ok := gotAddr.PubKey()
+	if ok && wantAddr.pubKey != nil {
+		var gpubBytes []byte
+		if compressed {
+			gpubBytes = gpubKey.SerializeCompressed()
+		} else {
+			gpubBytes = gpubKey.SerializeUncompressed()
+		}
+		if !reflect.DeepEqual(gpubBytes, wantAddr.pubKey) {
+			tc.t.Errorf("%s PubKey: unexpected public key - got %x, want "+
+				"%x", prefix, gpubBytes, wantAddr.pubKey)
 			return false
 		}
-		return true
-	}
-	if err != nil {
-		tc.t.Errorf("%s PubKey: unexpected error: %v", prefix, err)
-		return false
-	}
-	var gpubBytes []byte
-	if gotAddr.Compressed() {
-		gpubBytes = gpubKey.SerializeCompressed()
-	} else {
-		gpubBytes = gpubKey.SerializeUncompressed()
-	}
-	if !reflect.DeepEqual(gpubBytes, wantAddr.pubKey) {
-		tc.t.Errorf("%s PubKey: unexpected public key - got %x, want "+
-			"%x", prefix, gpubBytes, wantAddr.pubKey)
-		return false
 	}
 
 	// Ensure exported pubkey string is the expected value for the managed
 	// address.
-	gpubHex, err := gotAddr.ExportPubKey()
-	if err != nil {
-		tc.t.Errorf("%s ExportPubKey: unexpected error: %v", prefix, err)
-		return false
-	}
+	gpubHex, ok := gotAddr.ExportPubKey()
 	wantPubHex := hex.EncodeToString(wantAddr.pubKey)
-	if gpubHex != wantPubHex {
-		tc.t.Errorf("%s ExportPubKey: unexpected public key - got %s, "+
-			"want %s", prefix, gpubHex, wantPubHex)
-		return false
+	if ok && wantPubHex != "" {
+		if gpubHex != wantPubHex {
+			tc.t.Errorf("%s ExportPubKey: unexpected public key - got %s, "+
+				"want %s", prefix, gpubHex, wantPubHex)
+			return false
+		}
 	}
 
 	// Ensure private key is the expected value for the managed address.

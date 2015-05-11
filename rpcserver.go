@@ -1463,9 +1463,9 @@ func makeMultiSigScript(w *wallet.Wallet, keys []string, nRequired int) ([]byte,
 
 			apkinfo := ainfo.(waddrmgr.ManagedPubKeyAddress)
 
-			pubKey, err := apkinfo.ExportPubKey()
-			if err != nil {
-				return nil, err
+			pubKey, ok := apkinfo.ExportPubKey()
+			if !ok {
+				return nil, errors.New("no pubkey for address")
 			}
 			// This will be an addresspubkey
 			a, err := decodeAddress(pubKey,
@@ -3123,8 +3123,8 @@ func ValidateAddress(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{})
 	switch ma := ainfo.(type) {
 	case waddrmgr.ManagedPubKeyAddress:
 		// Make sure the public key is available, break out if it's not.
-		pubKey, err := ma.ExportPubKey()
-		if err != nil {
+		pubKey, ok := ma.ExportPubKey()
+		if !ok {
 			break
 		}
 		result.IsCompressed = ma.Compressed()
