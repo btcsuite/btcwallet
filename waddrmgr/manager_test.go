@@ -18,7 +18,6 @@ package waddrmgr_test
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"reflect"
@@ -107,7 +106,12 @@ func testNamePrefix(tc *testContext) string {
 func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedPubKeyAddress, wantAddr *expectedAddr) bool {
 	// Ensure pubkey is the expected value for the managed address.
 	gpubKey, compressed, ok := gotAddr.PubKey()
-	if ok && wantAddr.pubKey != nil {
+	if ok != (wantAddr.pubKey != nil) {
+		tc.t.Errorf("%s PubKey: unexpected public key status - got %v, want %v",
+			prefix, ok, wantAddr.pubKey != nil)
+		return false
+	}
+	if ok {
 		var gpubBytes []byte
 		if compressed {
 			gpubBytes = gpubKey.SerializeCompressed()
@@ -117,18 +121,6 @@ func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.M
 		if !reflect.DeepEqual(gpubBytes, wantAddr.pubKey) {
 			tc.t.Errorf("%s PubKey: unexpected public key - got %x, want "+
 				"%x", prefix, gpubBytes, wantAddr.pubKey)
-			return false
-		}
-	}
-
-	// Ensure exported pubkey string is the expected value for the managed
-	// address.
-	gpubHex, ok := gotAddr.ExportPubKey()
-	wantPubHex := hex.EncodeToString(wantAddr.pubKey)
-	if ok && wantPubHex != "" {
-		if gpubHex != wantPubHex {
-			tc.t.Errorf("%s ExportPubKey: unexpected public key - got %s, "+
-				"want %s", prefix, gpubHex, wantPubHex)
 			return false
 		}
 	}
