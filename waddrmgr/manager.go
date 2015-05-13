@@ -1417,10 +1417,10 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	return nil
 }
 
-// addressKey returns a byte slice to be used as the key for storing address
+// addressKey returns a byte slice to be used as the key for storing an address
 func (m *Manager) addressKey(address btcutil.Address) ([]byte, error) {
-	// TODO: Encrypt using public key
-	hash := fastsha256.Sum256(address.ScriptAddress())
+	hash := fastsha256.Sum256(append(m.cryptoKeyPub.Bytes(),
+		address.ScriptAddress()...))
 	return hash[:], nil
 }
 
