@@ -1002,7 +1002,7 @@ func testChangePassphrase(tc *testContext) bool {
 
 	var err error
 	waddrmgr.TstRunWithReplacedNewSecretKey(func() {
-		err = tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false)
+		err = tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false, fastScrypt)
 	})
 	if !checkManagerError(tc.t, testName, err, waddrmgr.ErrCrypto) {
 		return false
@@ -1010,14 +1010,14 @@ func testChangePassphrase(tc *testContext) bool {
 
 	// Attempt to change public passphrase with invalid old passphrase.
 	testName = "ChangePassphrase (public) with invalid old passphrase"
-	err = tc.manager.ChangePassphrase([]byte("bogus"), pubPassphrase2, false)
+	err = tc.manager.ChangePassphrase([]byte("bogus"), pubPassphrase2, false, fastScrypt)
 	if !checkManagerError(tc.t, testName, err, waddrmgr.ErrWrongPassphrase) {
 		return false
 	}
 
 	// Change the public passphrase.
 	testName = "ChangePassphrase (public)"
-	err = tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false)
+	err = tc.manager.ChangePassphrase(pubPassphrase, pubPassphrase2, false, fastScrypt)
 	if err != nil {
 		tc.t.Errorf("%s: unexpected error: %v", testName, err)
 		return false
@@ -1030,7 +1030,7 @@ func testChangePassphrase(tc *testContext) bool {
 	}
 
 	// Change the private passphrase back to what it was.
-	err = tc.manager.ChangePassphrase(pubPassphrase2, pubPassphrase, false)
+	err = tc.manager.ChangePassphrase(pubPassphrase2, pubPassphrase, false, fastScrypt)
 	if err != nil {
 		tc.t.Errorf("%s: unexpected error: %v", testName, err)
 		return false
@@ -1040,7 +1040,7 @@ func testChangePassphrase(tc *testContext) bool {
 	// The error should be ErrWrongPassphrase or ErrWatchingOnly depending
 	// on the type of the address manager.
 	testName = "ChangePassphrase (private) with invalid old passphrase"
-	err = tc.manager.ChangePassphrase([]byte("bogus"), privPassphrase2, true)
+	err = tc.manager.ChangePassphrase([]byte("bogus"), privPassphrase2, true, fastScrypt)
 	wantErrCode := waddrmgr.ErrWrongPassphrase
 	if tc.watchingOnly {
 		wantErrCode = waddrmgr.ErrWatchingOnly
@@ -1059,7 +1059,7 @@ func testChangePassphrase(tc *testContext) bool {
 
 	// Change the private passphrase.
 	testName = "ChangePassphrase (private)"
-	err = tc.manager.ChangePassphrase(privPassphrase, privPassphrase2, true)
+	err = tc.manager.ChangePassphrase(privPassphrase, privPassphrase2, true, fastScrypt)
 	if err != nil {
 		tc.t.Errorf("%s: unexpected error: %v", testName, err)
 		return false
@@ -1076,7 +1076,7 @@ func testChangePassphrase(tc *testContext) bool {
 
 	// Change the private passphrase back to what it was while the manager
 	// is unlocked to ensure that path works properly as well.
-	err = tc.manager.ChangePassphrase(privPassphrase2, privPassphrase, true)
+	err = tc.manager.ChangePassphrase(privPassphrase2, privPassphrase, true, fastScrypt)
 	if err != nil {
 		tc.t.Errorf("%s: unexpected error: %v", testName, err)
 		return false
@@ -1388,7 +1388,7 @@ func testWatchingOnly(tc *testContext) bool {
 
 	// Open the manager using the namespace and convert it to watching-only.
 	mgr, err := waddrmgr.Open(namespace, pubPassphrase,
-		&chaincfg.MainNetParams, fastScrypt)
+		&chaincfg.MainNetParams, nil)
 	if err != nil {
 		tc.t.Errorf("%v", err)
 		return false
@@ -1412,7 +1412,7 @@ func testWatchingOnly(tc *testContext) bool {
 
 	// Open the watching-only manager and run all the tests again.
 	mgr, err = waddrmgr.Open(namespace, pubPassphrase, &chaincfg.MainNetParams,
-		fastScrypt)
+		nil)
 	if err != nil {
 		tc.t.Errorf("Open Watching-Only: unexpected error: %v", err)
 		return false
@@ -1696,7 +1696,7 @@ func TestManager(t *testing.T) {
 	// Open manager that does not exist to ensure the expected error is
 	// returned.
 	_, err = waddrmgr.Open(mgrNamespace, pubPassphrase,
-		&chaincfg.MainNetParams, fastScrypt)
+		&chaincfg.MainNetParams, nil)
 	if !checkManagerError(t, "Open non-existant", err, waddrmgr.ErrNoExist) {
 		return
 	}
@@ -1737,7 +1737,7 @@ func TestManager(t *testing.T) {
 	// constant is bumped without writing code to actually do the upgrade.
 	*waddrmgr.TstLatestMgrVersion++
 	_, err = waddrmgr.Open(mgrNamespace, pubPassphrase,
-		&chaincfg.MainNetParams, fastScrypt)
+		&chaincfg.MainNetParams, nil)
 	if !checkManagerError(t, "Upgrade needed", err, waddrmgr.ErrUpgrade) {
 		return
 	}
@@ -1746,7 +1746,7 @@ func TestManager(t *testing.T) {
 	// Open the manager and run all the tests again in open mode which
 	// avoids reinserting new addresses like the create mode tests do.
 	mgr, err = waddrmgr.Open(mgrNamespace, pubPassphrase,
-		&chaincfg.MainNetParams, fastScrypt)
+		&chaincfg.MainNetParams, nil)
 	if err != nil {
 		t.Errorf("Open: unexpected error: %v", err)
 		return

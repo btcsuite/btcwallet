@@ -50,10 +50,10 @@ var (
 
 // fastScrypt are options to passed to the wallet address manager to speed up
 // the scrypt derivations.
-var fastScrypt = &waddrmgr.Options{
-	ScryptN: 16,
-	ScryptR: 8,
-	ScryptP: 1,
+var fastScrypt = &waddrmgr.ScryptOptions{
+	N: 16,
+	R: 8,
+	P: 1,
 }
 
 func Test_addOutputs(t *testing.T) {

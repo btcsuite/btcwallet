@@ -107,11 +107,16 @@ func isReservedAccountNum(acct uint32) bool {
 	return acct == ImportedAddrAccount
 }
 
-// Options is used to hold the optional parameters passed to Create or Load.
-type Options struct {
-	ScryptN int
-	ScryptR int
-	ScryptP int
+// ScryptOptions is used to hold the scrypt parameters needed when deriving new
+// passphrase keys.
+type ScryptOptions struct {
+	N, R, P int
+}
+
+// OpenCallbacks houses caller-provided callbacks that may be called when
+// opening an existing manager.  The open blocks on the execution of these
+// functions.
+type OpenCallbacks struct {
 	// ObtainSeed is a callback function that is potentially invoked during
 	// upgrades.  It is intended to be used to request the wallet seed
 	// from the user (or any other mechanism the caller deems fit).
@@ -123,12 +128,12 @@ type Options struct {
 	ObtainPrivatePass ObtainUserInputFunc
 }
 
-// defaultConfig is an instance of the Options struct initialized with default
+// DefaultConfig is an instance of the Options struct initialized with default
 // configuration options.
-var defaultConfig = &Options{
-	ScryptN: 262144, // 2^18
-	ScryptR: 8,
-	ScryptP: 1,
+var DefaultScryptOptions = ScryptOptions{
+	N: 262144, // 2^18
+	R: 8,
+	P: 1,
 }
 
 // addrKey is used to uniquely identify an address even when those addresses
@@ -170,9 +175,8 @@ type unlockDeriveInfo struct {
 }
 
 // defaultNewSecretKey returns a new secret key.  See newSecretKey.
-func defaultNewSecretKey(passphrase *[]byte, config *Options) (*snacl.SecretKey, error) {
-	return snacl.NewSecretKey(passphrase, config.ScryptN, config.ScryptR,
-		config.ScryptP)
+func defaultNewSecretKey(passphrase *[]byte, config *ScryptOptions) (*snacl.SecretKey, error) {
+	return snacl.NewSecretKey(passphrase, config.N, config.R, config.P)
 }
 
 // newSecretKey is used as a way to replace the new secret key generation
@@ -293,9 +297,6 @@ type Manager struct {
 	// the private extended key (hence nor the underlying private key) in
 	// order to encrypt it.
 	deriveOnUnlock []*unlockDeriveInfo
-
-	// config holds overridable options, such as scrypt parameters.
-	config *Options
 
 	// privPassphraseSalt and hashedPrivPassphrase allow for the secure
 	// detection of a correct passphrase on manager unlock when the
@@ -709,8 +710,11 @@ func (m *Manager) AddrAccount(address btcutil.Address) (uint32, error) {
 
 // ChangePassphrase changes either the public or private passphrase to the
 // provided value depending on the private flag.  In order to change the private
-// password, the address manager must not be watching-only.
-func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private bool) error {
+// password, the address manager must not be watching-only.  The new passphrase
+// keys are derived using the scrypt parameters in the options, so changing the
+// passphrase may be used to bump the computational difficulty needed to brute
+// force the passphrase.
+func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private bool, config *ScryptOptions) error {
 	// No private passphrase to change for a watching-only address manager.
 	if private && m.watchingOnly {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
@@ -746,7 +750,7 @@ func (m *Manager) ChangePassphrase(oldPassphrase, newPassphrase []byte, private 
 
 	// Generate a new master key from the passphrase which is used to secure
 	// the actual secret keys.
-	newMasterKey, err := newSecretKey(&newPassphrase, m.config)
+	newMasterKey, err := newSecretKey(&newPassphrase, config)
 	if err != nil {
 		str := "failed to create new master private key"
 		return managerError(ErrCrypto, str, err)
@@ -1990,7 +1994,7 @@ func newManager(namespace walletdb.Namespace, chainParams *chaincfg.Params,
 	masterKeyPub *snacl.SecretKey, masterKeyPriv *snacl.SecretKey,
 	cryptoKeyPub EncryptorDecryptor, cryptoKeyPrivEncrypted,
 	cryptoKeyScriptEncrypted []byte, syncInfo *syncState,
-	config *Options, privPassphraseSalt [saltSize]byte) *Manager {
+	privPassphraseSalt [saltSize]byte) *Manager {
 
 	return &Manager{
 		namespace:                namespace,
@@ -2006,7 +2010,6 @@ func newManager(namespace walletdb.Namespace, chainParams *chaincfg.Params,
 		cryptoKeyPriv:            &cryptoKey{},
 		cryptoKeyScriptEncrypted: cryptoKeyScriptEncrypted,
 		cryptoKeyScript:          &cryptoKey{},
-		config:                   config,
 		privPassphraseSalt:       privPassphraseSalt,
 	}
 }
@@ -2088,7 +2091,7 @@ func checkBranchKeys(acctKey *hdkeychain.ExtendedKey) error {
 // loadManager returns a new address manager that results from loading it from
 // the passed opened database.  The public passphrase is required to decrypt the
 // public keys.
-func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chaincfg.Params, config *Options) (*Manager, error) {
+func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chaincfg.Params) (*Manager, error) {
 	// Perform all database lookups in a read-only view.
 	var watchingOnly bool
 	var masterKeyPubParams, masterKeyPrivParams []byte
@@ -2184,7 +2187,7 @@ func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, chainParams
 	// call to new with the values loaded from the database.
 	mgr := newManager(namespace, chainParams, &masterKeyPub, &masterKeyPriv,
 		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
-		config, privPassphraseSalt)
+		privPassphraseSalt)
 	mgr.watchingOnly = watchingOnly
 	return mgr, nil
 }
@@ -2199,7 +2202,7 @@ func loadManager(namespace walletdb.Namespace, pubPassphrase []byte, chainParams
 //
 // A ManagerError with an error code of ErrNoExist will be returned if the
 // passed manager does not exist in the specified namespace.
-func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chaincfg.Params, config *Options) (*Manager, error) {
+func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chaincfg.Params, cbs *OpenCallbacks) (*Manager, error) {
 	// Return an error if the manager has NOT already been created in the
 	// given database namespace.
 	exists, err := managerExists(namespace)
@@ -2212,15 +2215,11 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chain
 	}
 
 	// Upgrade the manager to the latest version as needed.
-	if err := upgradeManager(namespace, pubPassphrase, chainParams, config); err != nil {
+	if err := upgradeManager(namespace, pubPassphrase, chainParams, cbs); err != nil {
 		return nil, err
 	}
 
-	if config == nil {
-		config = defaultConfig
-	}
-
-	return loadManager(namespace, pubPassphrase, chainParams, config)
+	return loadManager(namespace, pubPassphrase, chainParams)
 }
 
 // Create returns a new locked address manager in the given namespace.  The
@@ -2240,7 +2239,7 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chain
 //
 // A ManagerError with an error code of ErrAlreadyExists will be returned the
 // address manager already exists in the specified namespace.
-func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []byte, chainParams *chaincfg.Params, config *Options) (*Manager, error) {
+func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []byte, chainParams *chaincfg.Params, config *ScryptOptions) (*Manager, error) {
 	// Return an error if the manager has already been created in the given
 	// database namespace.
 	exists, err := managerExists(namespace)
@@ -2257,7 +2256,7 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	}
 
 	if config == nil {
-		config = defaultConfig
+		config = &DefaultScryptOptions
 	}
 
 	// Generate the BIP0044 HD key structure to ensure the provided seed
@@ -2479,5 +2478,5 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	coinTypeKeyPriv.Zero()
 	return newManager(namespace, chainParams, masterKeyPub, masterKeyPriv,
 		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
-		config, privPassphraseSalt), nil
+		privPassphraseSalt), nil
 }

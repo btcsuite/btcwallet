@@ -45,10 +45,10 @@ var (
 
 	// fastScrypt are parameters used throughout the tests to speed up the
 	// scrypt operations.
-	fastScrypt = &waddrmgr.Options{
-		ScryptN: 16,
-		ScryptR: 8,
-		ScryptP: 1,
+	fastScrypt = &waddrmgr.ScryptOptions{
+		N: 16,
+		R: 8,
+		P: 1,
 	}
 
 	// waddrmgrNamespaceKey is the namespace key for the waddrmgr package.

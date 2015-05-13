@@ -35,7 +35,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
 
@@ -594,73 +593,31 @@ func openDb(directory string, dbname string) (walletdb.DB, error) {
 	return walletdb.Open("bdb", dbPath)
 }
 
-// openManagers opens and returns the wallet address and transaction managers.
-// If the transaction store does not already exist, the manager is marked
-// unsynced so the wallet will sync with a full rescan.
-//
-// It prompts for seed and private passphrase required in case of upgrades
-func openManagers(db walletdb.DB, pass string) (*waddrmgr.Manager, *wtxmgr.Store, error) {
-	// Get the namespace for the address manager.
-	namespace, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	config := &waddrmgr.Options{
-		ObtainSeed:        promptSeed,
-		ObtainPrivatePass: promptPrivPassPhrase,
-	}
-	addrMgr, err := waddrmgr.Open(namespace, []byte(pass), activeNet.Params, config)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	namespace, err = db.Namespace(wtxmgrNamespaceKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	txMgr, err := wtxmgr.Open(namespace)
-	if err != nil {
-		if !wtxmgr.IsNoExists(err) {
-			return nil, nil, err
-		}
-		log.Info("No recorded transaction history -- needs full rescan")
-		err = addrMgr.SetSyncedTo(nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		txMgr, err = wtxmgr.Create(namespace)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	return addrMgr, txMgr, nil
-}
-
 // openWallet returns a wallet. The function handles opening an existing wallet
 // database, the address manager and the transaction store and uses the values
 // to open a wallet.Wallet
-func openWallet() (*wallet.Wallet, error) {
+func openWallet() (*wallet.Wallet, walletdb.DB, error) {
 	netdir := networkDir(cfg.DataDir, activeNet.Params)
 
 	db, err := openDb(netdir, walletDbName)
 	if err != nil {
-		log.Errorf("%v", err)
-		return nil, err
+		log.Errorf("Failed to open database: %v", err)
+		return nil, nil, err
 	}
 
-	mgr, txs, err := openManagers(db, cfg.WalletPass)
+	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	walletConfig := &wallet.Config{
-		Db:          &db, // TODO: Remove the pointer
-		TxStore:     txs,
-		Waddrmgr:    mgr,
-		ChainParams: activeNet.Params,
+	txMgrNS, err := db.Namespace(wtxmgrNamespaceKey)
+	if err != nil {
+		return nil, nil, err
 	}
-	log.Infof("Opened wallet files") // TODO: log balance? last sync height?
-	w := wallet.Open(walletConfig)
-
-	return w, nil
+	cbs := &waddrmgr.OpenCallbacks{
+		ObtainSeed:        promptSeed,
+		ObtainPrivatePass: promptPrivPassPhrase,
+	}
+	w, err := wallet.Open([]byte(cfg.WalletPass), activeNet.Params, db,
+		addrMgrNS, txMgrNS, cbs)
+	return w, db, err
 }

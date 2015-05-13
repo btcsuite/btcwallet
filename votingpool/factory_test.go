@@ -344,7 +344,7 @@ func TstCreatePool(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager, po
 	if err != nil {
 		t.Fatalf("Failed to create addr manager DB namespace: %v", err)
 	}
-	var fastScrypt = &waddrmgr.Options{ScryptN: 16, ScryptR: 8, ScryptP: 1}
+	var fastScrypt = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
 	mgr, err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase, privPassphrase,
 		&chaincfg.MainNetParams, fastScrypt)
 	if err != nil {

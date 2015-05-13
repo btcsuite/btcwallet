@@ -57,7 +57,7 @@ func ExampleCreate() {
 
 	// Create the address manager.
 	seed := bytes.Repeat([]byte{0x2a, 0x64, 0xdf, 0x08}, 8)
-	var fastScrypt = &waddrmgr.Options{ScryptN: 16, ScryptR: 8, ScryptP: 1}
+	var fastScrypt = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
 	mgr, err := waddrmgr.Create(
 		mgrNamespace, seed, pubPassphrase, privPassphrase, &chaincfg.MainNetParams, fastScrypt)
 	if err != nil {
@@ -270,7 +270,7 @@ func exampleCreateMgrAndDBNamespace() (*waddrmgr.Manager, walletdb.Namespace, fu
 
 	// Create the address manager
 	seed := bytes.Repeat([]byte{0x2a, 0x64, 0xdf, 0x08}, 8)
-	var fastScrypt = &waddrmgr.Options{ScryptN: 16, ScryptR: 8, ScryptP: 1}
+	var fastScrypt = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
 	mgr, err := waddrmgr.Create(
 		mgrNamespace, seed, pubPassphrase, privPassphrase, &chaincfg.MainNetParams, fastScrypt)
 	if err != nil {

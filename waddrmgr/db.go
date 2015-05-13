@@ -1662,7 +1662,7 @@ func upgradeToVersion2(namespace walletdb.Namespace) error {
 
 // upgradeManager upgrades the data in the provided manager namespace to newer
 // versions as neeeded.
-func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainParams *chaincfg.Params, config *Options) error {
+func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainParams *chaincfg.Params, cbs *OpenCallbacks) error {
 	var version uint32
 	err := namespace.View(func(tx walletdb.Tx) error {
 		var err error
@@ -1715,16 +1715,16 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 	}
 
 	if version < 3 {
-		if config.ObtainSeed == nil || config.ObtainPrivatePass == nil {
+		if cbs == nil || cbs.ObtainSeed == nil || cbs.ObtainPrivatePass == nil {
 			str := "failed to obtain seed and private passphrase required for upgrade"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		seed, err := config.ObtainSeed()
+		seed, err := cbs.ObtainSeed()
 		if err != nil {
 			return err
 		}
-		privPassPhrase, err := config.ObtainPrivatePass()
+		privPassPhrase, err := cbs.ObtainPrivatePass()
 		if err != nil {
 			return err
 		}
@@ -1769,7 +1769,7 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		currentMgrVersion := uint32(3)
 		rootBucket := tx.RootBucket()
 
-		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams, nil)
+		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams)
 		if err != nil {
 			return err
 		}
