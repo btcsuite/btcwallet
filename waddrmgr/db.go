@@ -19,7 +19,7 @@ import (
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 4
+	LatestMgrVersion = 5
 )
 
 var (
@@ -49,6 +49,15 @@ func maybeConvertDbError(err error) error {
 // syncStatus represents a address synchronization status stored in the
 // database.
 type syncStatus uint8
+
+// addressFlags holds flags associated with a address stored in the database.
+type addressFlags uint32
+
+// These constants define the various supported address flags.
+const (
+	addrNone addressFlags = 0
+	addrUsed addressFlags = addressFlags(byte(1) << 0)
+)
 
 // These constants define the various supported sync status types.
 //
@@ -102,6 +111,7 @@ type dbAddressRow struct {
 	account    uint32
 	addTime    uint64
 	syncStatus syncStatus
+	addrFlags  addressFlags
 	rawData    []byte // Varies based on address type field.
 }
 
@@ -250,6 +260,35 @@ func putManagerVersion(tx walletdb.Tx, version uint32) error {
 	err := bucket.Put(mgrVersionName, verBytes)
 	if err != nil {
 		str := "failed to store version"
+		return managerError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// markAddressUsed flags the provided address id as used in the database.
+func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
+	bucket := tx.RootBucket().Bucket(addrBucketName)
+
+	addrHash := fastsha256.Sum256(addressID)
+	val := bucket.Get(addrHash[:])
+	if len(val) < 22 {
+		str := "malformed serialized address"
+		return managerError(ErrDatabase, str, nil)
+	}
+	// Check existing flag and return early if already flagged
+	addrFlags := addressFlags(binary.LittleEndian.Uint32(val[14:18]))
+	if addrFlags&addrUsed == 0x1 {
+		return nil
+	}
+	// Update flag field with used flag
+	addrFlags |= addrUsed
+	row := make([]byte, len(val))
+	copy(row[:14], val[:14])
+	binary.LittleEndian.PutUint32(row[14:18], uint32(addrFlags))
+	copy(row[18:], val[18:])
+	err := bucket.Put(addrHash[:], row)
+	if err != nil {
+		str := fmt.Sprintf("failed to mark address used %x", addressID)
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil
@@ -787,14 +826,14 @@ func putLastAccount(tx walletdb.Tx, account uint32) error {
 // the common parts.
 func deserializeAddressRow(serializedAddress []byte) (*dbAddressRow, error) {
 	// The serialized address format is:
-	//   <addrType><account><addedTime><syncStatus><rawdata>
+	//   <addrType><account><addedTime><syncStatus><addrFlags><rawdata>
 	//
 	// 1 byte addrType + 4 bytes account + 8 bytes addTime + 1 byte
-	// syncStatus + 4 bytes raw data length + raw data
+	// syncStatus + 4 bytes flags + 4 bytes raw data length + raw data
 
 	// Given the above, the length of the entry must be at a minimum
 	// the constant value sizes.
-	if len(serializedAddress) < 18 {
+	if len(serializedAddress) < 22 {
 		str := "malformed serialized address"
 		return nil, managerError(ErrDatabase, str, nil)
 	}
@@ -804,9 +843,10 @@ func deserializeAddressRow(serializedAddress []byte) (*dbAddressRow, error) {
 	row.account = binary.LittleEndian.Uint32(serializedAddress[1:5])
 	row.addTime = binary.LittleEndian.Uint64(serializedAddress[5:13])
 	row.syncStatus = syncStatus(serializedAddress[13])
-	rdlen := binary.LittleEndian.Uint32(serializedAddress[14:18])
+	row.addrFlags = addressFlags(binary.LittleEndian.Uint32(serializedAddress[14:18]))
+	rdlen := binary.LittleEndian.Uint32(serializedAddress[18:22])
 	row.rawData = make([]byte, rdlen)
-	copy(row.rawData, serializedAddress[18:18+rdlen])
+	copy(row.rawData, serializedAddress[22:22+rdlen])
 
 	return &row, nil
 }
@@ -814,19 +854,19 @@ func deserializeAddressRow(serializedAddress []byte) (*dbAddressRow, error) {
 // serializeAddressRow returns the serialization of the passed address row.
 func serializeAddressRow(row *dbAddressRow) []byte {
 	// The serialized address format is:
-	//   <addrType><account><addedTime><syncStatus><commentlen><comment>
-	//   <rawdata>
+	//   <addrType><account><addedTime><syncStatus><addrFlags><rawdata>
 	//
 	// 1 byte addrType + 4 bytes account + 8 bytes addTime + 1 byte
-	// syncStatus + 4 bytes raw data length + raw data
+	// syncStatus + 4 bytes flags + 4 bytes raw data length + raw data
 	rdlen := len(row.rawData)
-	buf := make([]byte, 18+rdlen)
+	buf := make([]byte, 22+rdlen)
 	buf[0] = byte(row.addrType)
 	binary.LittleEndian.PutUint32(buf[1:5], row.account)
 	binary.LittleEndian.PutUint64(buf[5:13], row.addTime)
 	buf[13] = byte(row.syncStatus)
-	binary.LittleEndian.PutUint32(buf[14:18], uint32(rdlen))
-	copy(buf[18:18+rdlen], row.rawData)
+	binary.LittleEndian.PutUint32(buf[14:18], uint32(row.addrFlags))
+	binary.LittleEndian.PutUint32(buf[18:22], uint32(rdlen))
+	copy(buf[22:22+rdlen], row.rawData)
 	return buf
 }
 
@@ -1000,31 +1040,6 @@ func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
 
 	str := fmt.Sprintf("unsupported address type '%d'", row.addrType)
 	return nil, managerError(ErrDatabase, str, nil)
-}
-
-// fetchAddressUsed returns true if the provided address id was flagged as used.
-func fetchAddressUsed(tx walletdb.Tx, addressID []byte) bool {
-	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
-
-	addrHash := fastsha256.Sum256(addressID)
-	return bucket.Get(addrHash[:]) != nil
-}
-
-// markAddressUsed flags the provided address id as used in the database.
-func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
-	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
-
-	addrHash := fastsha256.Sum256(addressID)
-	val := bucket.Get(addrHash[:])
-	if val != nil {
-		return nil
-	}
-	err := bucket.Put(addrHash[:], []byte{0})
-	if err != nil {
-		str := fmt.Sprintf("failed to mark address used %x", addressID)
-		return managerError(ErrDatabase, str, err)
-	}
-	return nil
 }
 
 // fetchAddress loads address information for the provided address id from the
@@ -1556,13 +1571,6 @@ func createManagerNS(namespace walletdb.Namespace) error {
 			return managerError(ErrDatabase, str, err)
 		}
 
-		// usedAddrBucketName bucket was added after manager version 1 release
-		_, err = rootBucket.CreateBucket(usedAddrBucketName)
-		if err != nil {
-			str := "failed to create used addresses bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
 		_, err = rootBucket.CreateBucket(acctNameIdxBucketName)
 		if err != nil {
 			str := "failed to create an account name index bucket"
@@ -1718,6 +1726,16 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 
 		// The manager is now at version 4.
 		version = 4
+	}
+
+	if version < 5 {
+		// Upgrade from version 4 to 5.
+		if err := upgradeToVersion5(namespace); err != nil {
+			return err
+		}
+
+		// The manager is now at version 5.
+		version = 5
 	}
 
 	// Ensure the manager is upraded to the latest version.  This check is
@@ -1938,6 +1956,48 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		}
 
 		return nil
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
+}
+
+// upgradeToVersion5 upgrades the database from version 4 to version 5.
+// Instead of a bucket storing keys of used addrs, a flag field addrFlags was
+// added to the address row in the address bucket.
+func upgradeToVersion5(namespace walletdb.Namespace) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		// Write new manager version.
+		err := putManagerVersion(tx, 5)
+		if err != nil {
+			return err
+		}
+
+		addrBucket := tx.RootBucket().Bucket(addrBucketName)
+		usedAddrBucket := tx.RootBucket().Bucket(usedAddrBucketName)
+
+		// Iterate addresses and check for used, then update the flags field
+		err = addrBucket.ForEach(func(k, v []byte) error {
+			if len(v) < 18 {
+				str := "malformed serialized address"
+				return managerError(ErrDatabase, str, nil)
+			}
+			row := make([]byte, len(v)+4)
+			copy(row[:14], v[:14])
+			if usedAddrBucket.Get(k) != nil {
+				binary.LittleEndian.PutUint32(row[14:18], uint32(addrUsed))
+			} else {
+				binary.LittleEndian.PutUint32(row[14:18], uint32(addrNone))
+			}
+			copy(row[18:], v[14:])
+			return addrBucket.Put(k, row)
+		})
+		if err != nil {
+			return err
+		}
+		// Delete old used addr bucket
+		return tx.RootBucket().DeleteBucket(usedAddrBucketName)
 	})
 	if err != nil {
 		return maybeConvertDbError(err)

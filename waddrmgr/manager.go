@@ -384,7 +384,7 @@ func (m *Manager) Close() error {
 // The passed derivedKey is zeroed after the new address is created.
 //
 // This function MUST be called with the manager lock held for writes.
-func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32) (ManagedAddress, error) {
+func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32, flags addressFlags) (ManagedAddress, error) {
 	// Create a new managed address based on the public or private key
 	// depending on whether the passed key is private.  Also, zero the
 	// key after creating the managed address from it.
@@ -407,6 +407,7 @@ func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, bran
 	if branch == internalBranch {
 		ma.internal = true
 	}
+	ma.used = (flags&addrUsed == 0x1)
 
 	return ma, nil
 }
@@ -522,7 +523,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index)
+	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index, addrNone)
 	if err != nil {
 		return nil, err
 	}
@@ -537,7 +538,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index)
+	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index, addrNone)
 	if err != nil {
 		return nil, err
 	}
@@ -627,7 +628,7 @@ func (m *Manager) chainAddressRowToManaged(row *dbChainAddressRow) (ManagedAddre
 		return nil, err
 	}
 
-	return m.keyToManaged(addressKey, row.account, row.branch, row.index)
+	return m.keyToManaged(addressKey, row.account, row.branch, row.index, row.addrFlags)
 }
 
 // importedAddressRowToManaged returns a new managed address based on imported
@@ -1435,16 +1436,6 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	m.hashedPrivPassphrase = sha512.Sum512(saltedPassphrase)
 	zero.Bytes(saltedPassphrase)
 	return nil
-}
-
-// fetchUsed returns true if the provided address id was flagged used.
-func (m *Manager) fetchUsed(addressID []byte) (bool, error) {
-	var used bool
-	err := m.namespace.View(func(tx walletdb.Tx) error {
-		used = fetchAddressUsed(tx, addressID)
-		return nil
-	})
-	return used, err
 }
 
 // MarkUsed updates the used flag for the provided address.
