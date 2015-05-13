@@ -870,7 +870,10 @@ func ListTransactions(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg
 		for _, output := range details.MsgTx.TxOut {
 			outputTotal += btcutil.Amount(output.Value)
 		}
-		feeF64 = (debitTotal - outputTotal).ToBTC()
+		// Note: The actual fee is debitTotal - outputTotal.  However,
+		// this RPC reports negative numbers for fees, so the inverse
+		// is calculated.
+		feeF64 = (outputTotal - debitTotal).ToBTC()
 	}
 
 outputs:
