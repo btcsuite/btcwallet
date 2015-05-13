@@ -611,12 +611,14 @@ out:
 
 		// Select statement fell through by an explicit lock or the
 		// timer expiring.  Lock the manager here.
-		timeout = nil
-		err := w.Manager.Lock()
-		if err != nil {
-			log.Errorf("Could not lock wallet: %v", err)
-		} else {
-			w.notifyLockStateChange(true)
+		if timeout != nil {
+			timeout = nil
+			err := w.Manager.Lock()
+			if err != nil {
+				log.Errorf("Could not lock wallet: %v", err)
+			} else {
+				w.notifyLockStateChange(true)
+			}
 		}
 	}
 	w.wg.Done()
