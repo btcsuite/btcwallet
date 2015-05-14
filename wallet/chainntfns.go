@@ -104,6 +104,11 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
 			// earliest blockstamp the addresses in the manager are
 			// known to have been created.
 			w.Manager.SetSyncedTo(nil)
+			// Rollback everything but the genesis block.
+			err := w.TxStore.Rollback(1)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	w.notifyDisconnectedBlock(bs)
