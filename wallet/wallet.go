@@ -843,7 +843,7 @@ func ListTransactions(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg
 	var (
 		blockHashStr  string
 		blockTime     int64
-		confirmations int64 = -1
+		confirmations int64
 	)
 	if details.Block.Height != -1 {
 		blockHashStr = details.Block.Hash.String()
