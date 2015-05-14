@@ -90,13 +90,13 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
 	// removed block.
 	iter := w.Manager.NewIterateRecentBlocks()
 	if iter != nil && iter.BlockStamp().Hash == bs.Hash {
+		err := w.TxStore.Rollback(iter.BlockStamp().Height)
+		if err != nil {
+			return err
+		}
 		if iter.Prev() {
 			prev := iter.BlockStamp()
 			w.Manager.SetSyncedTo(&prev)
-			err := w.TxStore.Rollback(prev.Height + 1)
-			if err != nil {
-				return err
-			}
 		} else {
 			// The reorg is farther back than the recently-seen list
 			// of blocks has recorded, so set it to unsynced which
