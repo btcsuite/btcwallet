@@ -64,7 +64,7 @@ type ManagedPubKeyAddress interface {
 	ManagedAddress
 
 	// PubKey returns the public key associated with the address.
-	PubKey() (*btcec.PublicKey, bool, bool)
+	PubKey() (pk *btcec.PublicKey, compressed bool, ok bool)
 
 	// PrivKey returns the private key for the address.  It can fail if the
 	// address manager is watching-only or locked, or the address does not
@@ -204,11 +204,15 @@ func (a *managedAddress) WatchingOnly() bool {
 	return len(a.privKeyEncrypted) == 0
 }
 
-// PubKey returns the public key associated with the address.
+// PubKey returns the public key associated with the address, whether it is
+// compressed and whether it is available.
 //
 // This is part of the ManagedPubKeyAddress interface implementation.
-func (a *managedAddress) PubKey() (*btcec.PublicKey, bool, bool) {
-	return a.pubKey, a.compressed, a.pubKey != nil
+func (a *managedAddress) PubKey() (pk *btcec.PublicKey, compressed bool, ok bool) {
+	pk = a.pubKey
+	compressed = a.compressed
+	ok = a.pubKey != nil
+	return
 }
 
 // PrivKey returns the private key for the address.  It can fail if the address
