@@ -1460,7 +1460,7 @@ func jsonError(err error) *btcjson.RPCError {
 		return nil
 	}
 
-	var code btcjson.RPCErrorCode
+	code := btcjson.ErrRPCWallet
 	switch e := err.(type) {
 	case btcjson.RPCError:
 		return &e
@@ -1472,8 +1472,11 @@ func jsonError(err error) *btcjson.RPCError {
 		code = btcjson.ErrRPCInvalidParameter
 	case ParseError:
 		code = btcjson.ErrRPCParse.Code
-	default: // All other errors get the wallet error code.
-		code = btcjson.ErrRPCWallet
+	case waddrmgr.ManagerError:
+		switch e.ErrorCode {
+		case waddrmgr.ErrWrongPassphrase:
+			code = btcjson.ErrRPCWalletPassphraseIncorrect
+		}
 	}
 	return &btcjson.RPCError{
 		Code:    code,
