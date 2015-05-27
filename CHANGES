@@ -3,6 +3,95 @@ User visible changes for btcwallet
   A wallet daemon for btcd, written in Go
 ============================================================================
 
+Changes in 0.6.0 (Wed May 27 2015)
+  - New features:
+    - Add initial account support (#155):
+      - Add account names for each account number
+      - Create initial account with the "default" name
+      - Create new accounts using the createnewaccount RPC
+      - All accounts (with the exception of the imported account) may be
+        renamed using the renameaccount RPC
+      - RPC requests with an unspecified account that default to the unnamed
+        account in Bitcoin Core Wallet default to "default", the name of the
+	initial account
+      - Several RPCs with account parameters do not work with btcwallet
+        accounts due to concerns over expectations of API compatibility with
+	Bitcoin Core Wallet.  A new RPC API is being planned to rectify this
+	(#220).
+    - Store transactions, transaction history, and spend tracking in the
+      database (#217, #234)
+      - A full rescan is required when updating from previous wallet
+        versions to rebuild the transaction history
+    - Add utility (cmd/dropwtxmgr) to drop transaction history and force a
+      rescan (#234)
+    - Implement the help RPC to return single line usages of all wallet and
+      btcd server requests as well as detailed usage for a single request
+
+  - Bug fixes:
+    - Handle chain reorgs by unconfirming transactions from removed blocks
+      (#248)
+    - Rollback all transaction history when none of the saved recently seen
+      block hashes are known to btcd (#234, #281)
+    - Prevent the situation where the default account was renamed but cannot
+      be renamed back to "" or "default" by removing the special case naming
+      policy for the default account (#253)
+    - Create the initial account address if needed when calling the
+      getaccountaddress RPC (#238)
+    - Prevent listsinceblock RPC from including all listtransactions result
+      objects for all transactions since the genesis block (fix included in
+      #227)
+    - Add missing fields to listtransactions and gettransaction RPC results
+      (#265)
+    - Remove target confirmations limit on listsinceblock results (#266)
+    - Add JSON array to report errors creating input signature for
+      signrawtransaction RPC (#267)
+    - Use negative fees with listtransactions result types (#272)
+    - Prevent duplicate wallet lock attempt after timeout if explicitly
+      locked (#275)
+    - Use correct RPC server JSON-RPC error code for incorrect passphrases
+      with a walletpassphrase request (#284)
+
+  - Regressions:
+    - Inserting transactions and marking outputs as controlled by wallet in
+      the new transaction database is extremely slow compared to the previous
+      in-memory implementation.  Later versions may improve this performance
+      regression by using write-ahead logging (WAL) and performing more
+      updates at a time under a single database transaction.
+
+  - Notable developer-related changes:
+    - Relicense all code to the btcsuite developers (#258)
+    - Replace txstore package with wtxmgr, the walletdb-based transaction
+      store (#217, #234)
+    - Add Cursor API to walletdb for forwards and backwards iteration over
+      a bucket (included in #234)
+    - Factor out much of main's wallet.go into a wallet package (#213,
+      #276, #255)
+    - Convert RPC server and client to btcjson v2 API (#233, #227)
+      - Help text and single line usages for the help RPC are pregenerated
+        from descriptions in the internal/rpchelp package and saved as
+	globals in main.  Help text must be regenerated (using `go generate`)
+	each time the btcjson struct tags change or the help definitions are
+	modified.
+    - Add additional features to the votingpool package:
+      - Implement StartWithdrawal API to begin an Open Transactions
+        withdrawal (#178)
+      - Add internal APIs to store withdrawal transactions in the wallet's
+        transaction database (#221)
+    - Addresses marked as used after appearing publicly on the blockchain or
+      in mempool; required for future single-use address support (#207)
+    - Modified waddrmgr APIs to use ForEach functions to iterate over
+      address strings and managed addresses to improve scability (#216)
+    - Move legacy directory under internal directory to prevent importing
+      of unmaintained packages (enforced since Go 1.5) (#285)
+    - Improve test coverage in the waddrmgr and wtxmgr packages (#239, #217)
+
+  - Contributors (alphabetical order):
+    - Dave Collins
+    - Guilherme Salgado
+    - Javed Khan
+    - Josh Rickmar
+    - Manan Patel
+
 Changes in 0.5.1 (Fri Mar 06 2015)
   - New features:
     - Add flag (--createtemp) to create a temporary simnet wallet
