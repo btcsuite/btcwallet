@@ -255,6 +255,7 @@ var helpDescsEnUS = map[string]string{
 	"listunspentresult-redeemScript":  "Unset",
 	"listunspentresult-amount":        "The amount of the output valued in bitcoin",
 	"listunspentresult-confirmations": "The number of block confirmations of the transaction",
+	"listunspentresult-spendable":     "Whether the output is entirely controlled by wallet keys/scripts (false for partially controlled multisig outputs or outputs to watch-only addresses)",
 
 	// LockUnspentCmd help.
 	"lockunspent--synopsis": "Locks or unlocks an unspent output.\n" +

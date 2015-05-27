@@ -1130,7 +1130,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 		// This will be unnecessary once transactions and outputs are
 		// grouped under the associated account in the db.
 		acctName := defaultAccountName
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		sc, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			output.PkScript, w.chainParams)
 		if err != nil {
 			continue
@@ -1154,7 +1154,42 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			}
 			continue
 		}
+
 	include:
+		// At the moment watch-only addresses are not supported, so all
+		// recorded outputs that are not multisig are "spendable".
+		// Multisig outputs are only "spendable" if all keys are
+		// controlled by this wallet.
+		//
+		// TODO: Each case will need updates when watch-only addrs
+		// is added.  For P2PK, P2PKH, and P2SH, the address must be
+		// looked up and not be watching-only.  For multisig, all
+		// pubkeys must belong to the manager with the associated
+		// private key (currently it only checks whether the pubkey
+		// exists, since the private key is required at the moment).
+		var spendable bool
+	scSwitch:
+		switch sc {
+		case txscript.PubKeyHashTy:
+			spendable = true
+		case txscript.PubKeyTy:
+			spendable = true
+		case txscript.ScriptHashTy:
+			spendable = true
+		case txscript.MultiSigTy:
+			for _, a := range addrs {
+				_, err := w.Manager.Address(a)
+				if err == nil {
+					continue
+				}
+				if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+					break scSwitch
+				}
+				return nil, err
+			}
+			spendable = true
+		}
+
 		result := &btcjson.ListUnspentResult{
 			TxID:          output.OutPoint.Hash.String(),
 			Vout:          output.OutPoint.Index,
@@ -1162,6 +1197,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			ScriptPubKey:  hex.EncodeToString(output.PkScript),
 			Amount:        output.Amount.ToBTC(),
 			Confirmations: int64(confs),
+			Spendable:     spendable,
 		}
 
 		// BUG: this should be a JSON array so that all
