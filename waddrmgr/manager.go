@@ -1418,10 +1418,11 @@ func (m *Manager) Unlock(passphrase []byte) error {
 }
 
 // addressKey returns a byte slice to be used as the key for storing an address
+// Key is sha256(sha256(script address) + cryptoKeyPub)
 func (m *Manager) addressKey(address btcutil.Address) ([]byte, error) {
-	hash := fastsha256.Sum256(append(m.cryptoKeyPub.Bytes(),
-		address.ScriptAddress()...))
-	return hash[:], nil
+	key := fastsha256.Sum256(address.ScriptAddress())
+	key = fastsha256.Sum256(append(key[:], m.cryptoKeyPub.Bytes()...))
+	return key[:], nil
 }
 
 // fetchUsed returns true if the provided address id was flagged used.

@@ -25,12 +25,15 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
+
+	"github.com/btcsuite/fastsha256"
 )
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 4
+	LatestMgrVersion = 5
 )
 
 var (
@@ -1716,6 +1719,15 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 		version = 4
 	}
 
+	if version < 5 {
+		if err := upgradeToVersion5(namespace, pubPassPhrase, chainParams); err != nil {
+			return err
+		}
+
+		// The manager is now at version 5.
+		version = 5
+	}
+
 	// Ensure the manager is upraded to the latest version.  This check is
 	// to intentionally cause a failure if the manager version is updated
 	// without writing code to handle the upgrade.
@@ -1929,6 +1941,52 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		} else {
 			merr, ok := err.(ManagerError)
 			if !ok || merr.ErrorCode != ErrAccountNotFound {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
+}
+
+// upgradeToVersion5 upgrades the database from version 4 to version 5.
+// Keys for the address buckets were re-hashed with cryptoKeyPub to
+// prevent leaking the information that a given address was present in
+// the db.
+func upgradeToVersion5(namespace walletdb.Namespace, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		// Write new manager version.
+		err := putManagerVersion(tx, 5)
+		if err != nil {
+			return err
+		}
+		addrBuckets := []walletdb.Bucket{
+			tx.RootBucket().Bucket(addrBucketName),
+			tx.RootBucket().Bucket(addrAcctIdxBucketName),
+		}
+
+		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams)
+		if err != nil {
+			return err
+		}
+		defer woMgr.Close()
+
+		cryptoKeyPub := woMgr.cryptoKeyPub
+		// For all buckets keyed by addr hash, add cryptoKeyPub and re-hash
+		// and write the new key
+		for _, bucket := range addrBuckets {
+			err := bucket.ForEach(func(k, v []byte) error {
+				hash := make([]byte, len(k)+snacl.KeySize)
+				copy(hash, k)
+				copy(hash[len(k):], cryptoKeyPub.Bytes())
+				key := fastsha256.Sum256(hash)
+				return bucket.Put(key[:], v)
+			})
+			if err != nil {
 				return err
 			}
 		}
