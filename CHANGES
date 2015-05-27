@@ -13,11 +13,11 @@ Changes in 0.6.0 (Wed May 27 2015)
         renamed using the renameaccount RPC
       - RPC requests with an unspecified account that default to the unnamed
         account in Bitcoin Core Wallet default to "default", the name of the
-	initial account
+        initial account
       - Several RPCs with account parameters do not work with btcwallet
         accounts due to concerns over expectations of API compatibility with
-	Bitcoin Core Wallet.  A new RPC API is being planned to rectify this
-	(#220).
+        Bitcoin Core Wallet.  A new RPC API is being planned to rectify this
+        (#220).
     - Store transactions, transaction history, and spend tracking in the
       database (#217, #234)
       - A full rescan is required when updating from previous wallet
@@ -69,9 +69,9 @@ Changes in 0.6.0 (Wed May 27 2015)
     - Convert RPC server and client to btcjson v2 API (#233, #227)
       - Help text and single line usages for the help RPC are pregenerated
         from descriptions in the internal/rpchelp package and saved as
-	globals in main.  Help text must be regenerated (using `go generate`)
-	each time the btcjson struct tags change or the help definitions are
-	modified.
+        globals in main.  Help text must be regenerated (using `go generate`)
+        each time the btcjson struct tags change or the help definitions are
+        modified.
     - Add additional features to the votingpool package:
       - Implement StartWithdrawal API to begin an Open Transactions
         withdrawal (#178)
