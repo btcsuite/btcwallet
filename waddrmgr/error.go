@@ -204,3 +204,10 @@ func managerError(c ErrorCode, desc string, err error) ManagerError {
 // Break is a global err used to signal a break from the callback
 // function by returning an error with the code ErrCallBackBreak
 var Break = managerError(ErrCallBackBreak, "callback break", nil)
+
+// IsError returns whether the error is a MangerError with a matching error
+// code.
+func IsError(err error, code ErrorCode) bool {
+	e, ok := err.(ManagerError)
+	return ok && e.ErrorCode == code
+}

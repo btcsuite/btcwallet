@@ -17,6 +17,7 @@
 package waddrmgr_test
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -117,6 +118,50 @@ func TestManagerError(t *testing.T) {
 			t.Errorf("Error #%d\ngot: %s\nwant: %s", i, result,
 				test.want)
 			continue
+		}
+	}
+}
+
+// TestIsError tests the IsError func.
+func TestIsError(t *testing.T) {
+	tests := []struct {
+		err  error
+		code waddrmgr.ErrorCode
+		exp  bool
+	}{
+		{
+			err: waddrmgr.ManagerError{
+				ErrorCode: waddrmgr.ErrDatabase,
+			},
+			code: waddrmgr.ErrDatabase,
+			exp:  true,
+		},
+		{
+			// package should never return *ManagerError
+			err: &waddrmgr.ManagerError{
+				ErrorCode: waddrmgr.ErrDatabase,
+			},
+			code: waddrmgr.ErrDatabase,
+			exp:  false,
+		},
+		{
+			err: waddrmgr.ManagerError{
+				ErrorCode: waddrmgr.ErrCrypto,
+			},
+			code: waddrmgr.ErrDatabase,
+			exp:  false,
+		},
+		{
+			err:  errors.New("not a ManagerError"),
+			code: waddrmgr.ErrDatabase,
+			exp:  false,
+		},
+	}
+
+	for i, test := range tests {
+		got := waddrmgr.IsError(test.err, test.code)
+		if got != test.exp {
+			t.Errorf("Test %d: got %v expected %v", i, got, test.exp)
 		}
 	}
 }
