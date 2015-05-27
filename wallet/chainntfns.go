@@ -191,8 +191,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) er
 
 			// Missing addresses are skipped.  Other errors should
 			// be propagated.
-			code := err.(waddrmgr.ManagerError).ErrorCode
-			if code != waddrmgr.ErrAddressNotFound {
+			if !waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
 				return err
 			}
 		}

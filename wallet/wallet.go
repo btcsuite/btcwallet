@@ -752,8 +752,7 @@ func (w *Wallet) CurrentAddress(account uint32) (btcutil.Address, error) {
 	addr, err := w.Manager.LastExternalAddress(account)
 	if err != nil {
 		// If no address exists yet, create the first external address
-		merr, ok := err.(waddrmgr.ManagerError)
-		if ok && merr.ErrorCode == waddrmgr.ErrAddressNotFound {
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
 			return w.NewAddress(account)
 		}
 		return nil, err
@@ -1349,8 +1348,7 @@ func (w *Wallet) ExportWatchingWallet(pubPass string) (string, error) {
 		// Only return the error is it's not because it's already
 		// watching-only.  When it is already watching-only, the code
 		// just falls through to the export below.
-		if merr, ok := err.(waddrmgr.ManagerError); ok &&
-			merr.ErrorCode != waddrmgr.ErrWatchingOnly {
+		if !waddrmgr.IsError(err, waddrmgr.ErrWatchingOnly) {
 			return "", err
 		}
 	}
