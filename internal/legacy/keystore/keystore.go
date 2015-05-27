@@ -39,7 +39,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/legacy/rename"
+	"github.com/btcsuite/btcwallet/internal/legacy/rename"
 	"github.com/btcsuite/golangcrypto/ripemd160"
 )
 

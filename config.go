@@ -25,7 +25,7 @@ import (
 	"strings"
 
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/legacy/keystore"
+	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	flags "github.com/btcsuite/go-flags"
 )
 
