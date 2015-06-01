@@ -30,11 +30,13 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// Client represents a persistent client connection to a bitcoin RPC server
+// RPCClient represents a persistent client connection to a bitcoin RPC server
 // for information regarding the current best block chain.
-type Client struct {
+type RPCClient struct {
 	*btcrpcclient.Client
-	chainParams *chaincfg.Params
+	connConfig        *btcrpcclient.ConnConfig // Work around unexported field
+	chainParams       *chaincfg.Params
+	reconnectAttempts int
 
 	enqueueNotification chan interface{}
 	dequeueNotification chan interface{}
@@ -46,21 +48,38 @@ type Client struct {
 	quitMtx sync.Mutex
 }
 
-// NewClient creates a client connection to the server described by the connect
-// string.  If disableTLS is false, the remote RPC certificate must be provided
-// in the certs slice.  The connection is not established immediately, but must
-// be done using the Start method.  If the remote server does not operate on
-// the same bitcoin network as described by the passed chain parameters, the
-// connection will be disconnected.
-func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte, disableTLS bool) (*Client, error) {
-	client := Client{
+// NewRPCClient creates a client connection to the server described by the
+// connect string.  If disableTLS is false, the remote RPC certificate must be
+// provided in the certs slice.  The connection is not established immediately,
+// but must be done using the Start method.  If the remote server does not
+// operate on the same bitcoin network as described by the passed chain
+// parameters, the connection will be disconnected.
+func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte,
+	disableTLS bool, reconnectAttempts int) (*RPCClient, error) {
+
+	if reconnectAttempts < 0 {
+		return nil, errors.New("reconnectAttempts must be positive")
+	}
+
+	client := &RPCClient{
+		connConfig: &btcrpcclient.ConnConfig{
+			Host:                 connect,
+			Endpoint:             "ws",
+			User:                 user,
+			Pass:                 pass,
+			Certificates:         certs,
+			DisableAutoReconnect: true,
+			DisableConnectOnNew:  true,
+			DisableTLS:           disableTLS,
+		},
 		chainParams:         chainParams,
+		reconnectAttempts:   reconnectAttempts,
 		enqueueNotification: make(chan interface{}),
 		dequeueNotification: make(chan interface{}),
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
-	ntfnCallbacks := btcrpcclient.NotificationHandlers{
+	ntfnCallbacks := &btcrpcclient.NotificationHandlers{
 		OnClientConnected:   client.onClientConnect,
 		OnBlockConnected:    client.onBlockConnected,
 		OnBlockDisconnected: client.onBlockDisconnected,
@@ -69,22 +88,12 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs [
 		OnRescanFinished:    client.onRescanFinished,
 		OnRescanProgress:    client.onRescanProgress,
 	}
-	conf := btcrpcclient.ConnConfig{
-		Host:                 connect,
-		Endpoint:             "ws",
-		User:                 user,
-		Pass:                 pass,
-		Certificates:         certs,
-		DisableAutoReconnect: true,
-		DisableConnectOnNew:  true,
-		DisableTLS:           disableTLS,
-	}
-	c, err := btcrpcclient.New(&conf, &ntfnCallbacks)
+	rpcClient, err := btcrpcclient.New(client.connConfig, ntfnCallbacks)
 	if err != nil {
 		return nil, err
 	}
-	client.Client = c
-	return &client, nil
+	client.Client = rpcClient
+	return client, nil
 }
 
 // Start attempts to establish a client connection with the remote server.
@@ -92,8 +101,8 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs [
 // sent by the server.  After a limited number of connection attempts, this
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
-func (c *Client) Start() error {
-	err := c.Connect(5) // attempt connection 5 tries at most
+func (c *RPCClient) Start() error {
+	err := c.Connect(c.reconnectAttempts)
 	if err != nil {
 		return err
 	}
@@ -120,7 +129,7 @@ func (c *Client) Start() error {
 
 // Stop disconnects the client and signals the shutdown of all goroutines
 // started by Start.
-func (c *Client) Stop() {
+func (c *RPCClient) Stop() {
 	c.quitMtx.Lock()
 	select {
 	case <-c.quit:
@@ -137,7 +146,7 @@ func (c *Client) Stop() {
 
 // WaitForShutdown blocks until both the client has finished disconnecting
 // and all handlers have exited.
-func (c *Client) WaitForShutdown() {
+func (c *RPCClient) WaitForShutdown() {
 	c.Client.WaitForShutdown()
 	c.wg.Wait()
 }
@@ -187,13 +196,13 @@ type (
 // bitcoin RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for
 // later reads.
-func (c *Client) Notifications() <-chan interface{} {
+func (c *RPCClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
 // if the client has been shut down.
-func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
+func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
 	case bs := <-c.currentBlock:
 		return bs, nil
@@ -223,14 +232,14 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	return blk, nil
 }
 
-func (c *Client) onClientConnect() {
+func (c *RPCClient) onClientConnect() {
 	select {
 	case c.enqueueNotification <- ClientConnected{}:
 	case <-c.quit:
 	}
 }
 
-func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
+func (c *RPCClient) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockConnected{
 		Block: wtxmgr.Block{
@@ -243,7 +252,7 @@ func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32, time time.Ti
 	}
 }
 
-func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
+func (c *RPCClient) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockDisconnected{
 		Block: wtxmgr.Block{
@@ -256,7 +265,7 @@ func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32, time time
 	}
 }
 
-func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+func (c *RPCClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	blk, err := parseBlock(block)
 	if err != nil {
 		// Log and drop improper notification.
@@ -276,19 +285,19 @@ func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	}
 }
 
-func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+func (c *RPCClient) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	// Handled exactly like recvtx notifications.
 	c.onRecvTx(tx, block)
 }
 
-func (c *Client) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
+func (c *RPCClient) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
 	case <-c.quit:
 	}
 }
 
-func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time.Time) {
+func (c *RPCClient) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
 	case <-c.quit:
@@ -298,7 +307,7 @@ func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
-func (c *Client) handler() {
+func (c *RPCClient) handler() {
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to receive best block from chain server: %v", err)
@@ -409,4 +418,11 @@ out:
 	c.Stop()
 	close(c.dequeueNotification)
 	c.wg.Done()
+}
+
+// POSTClient creates the equivalent HTTP POST btcrpcclient.Client.
+func (c *RPCClient) POSTClient() (*btcrpcclient.Client, error) {
+	configCopy := *c.connConfig
+	configCopy.HTTPPostMode = true
+	return btcrpcclient.New(&configCopy, nil)
 }

@@ -142,6 +142,10 @@ type Credit struct {
 // transactions.
 type Store struct {
 	namespace walletdb.Namespace
+
+	// Event callbacks.  These execute in the same goroutine as the wtxmgr
+	// caller.
+	NotifyUnspent func(hash *wire.ShaHash, index uint32)
 }
 
 // Open opens the wallet transaction store from a walletdb namespace.  If the
@@ -153,7 +157,7 @@ func Open(namespace walletdb.Namespace) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{namespace}, nil
+	return &Store{namespace, nil}, nil // TODO: set callbacks
 }
 
 // Create creates and opens a new persistent transaction store in the walletdb
@@ -164,7 +168,7 @@ func Create(namespace walletdb.Namespace) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{namespace}, nil
+	return &Store{namespace, nil}, nil // TODO: set callbacks
 }
 
 // moveMinedTx moves a transaction record from the unmined buckets to block
@@ -419,21 +423,34 @@ func (s *Store) AddCredit(rec *TxRecord, block *BlockMeta, index uint32, change 
 		return storeError(ErrInput, str, nil)
 	}
 
-	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		return s.addCredit(ns, rec, block, index, change)
+	var isNew bool
+	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
+		var err error
+		isNew, err = s.addCredit(ns, rec, block, index, change)
+		return err
 	})
+	if err == nil && isNew && s.NotifyUnspent != nil {
+		s.NotifyUnspent(&rec.Hash, index)
+	}
+	return err
 }
 
-func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta, index uint32, change bool) error {
+// addCredit is an AddCredit helper that runs in an update transaction.  The
+// bool return specifies whether the unspent output is newly added (true) or a
+// duplicate (false).
+func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta, index uint32, change bool) (bool, error) {
 	if block == nil {
 		k := canonicalOutPoint(&rec.Hash, index)
+		if existsRawUnminedCredit(ns, k) != nil {
+			return false, nil
+		}
 		v := valueUnminedCredit(btcutil.Amount(rec.MsgTx.TxOut[index].Value), change)
-		return putRawUnminedCredit(ns, k, v)
+		return true, putRawUnminedCredit(ns, k, v)
 	}
 
 	k, v := existsCredit(ns, &rec.Hash, index, &block.Block)
 	if v != nil {
-		return nil
+		return false, nil
 	}
 
 	txOutAmt := btcutil.Amount(rec.MsgTx.TxOut[index].Value)
@@ -453,19 +470,19 @@ func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta, i
 	v = valueUnspentCredit(&cred)
 	err := putRawCredit(ns, k, v)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	minedBalance, err := fetchMinedBalance(ns)
 	if err != nil {
-		return err
+		return false, err
 	}
 	err = putMinedBalance(ns, minedBalance+txOutAmt)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	return putUnspent(ns, &cred.outPoint, &block.Block)
+	return true, putUnspent(ns, &cred.outPoint, &block.Block)
 }
 
 // Rollback removes all blocks at height onwards, moving any transactions within

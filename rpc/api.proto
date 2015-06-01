@@ -1,0 +1,303 @@
+syntax = "proto3";
+
+package walletrpc;
+
+service WalletService {
+	// Queries
+	rpc Ping (PingRequest) returns (PingResponse);
+	rpc Network (NetworkRequest) returns (NetworkResponse);
+	rpc AccountNumber (AccountNumberRequest) returns (AccountNumberResponse);
+	rpc Accounts (AccountsRequest) returns (AccountsResponse);
+	rpc Balance (BalanceRequest) returns (BalanceResponse);
+	rpc GetTransactions (GetTransactionsRequest) returns (GetTransactionsResponse);
+
+	// Notifications
+	rpc TransactionNotifications (TransactionNotificationsRequest) returns (stream TransactionNotificationsResponse);
+	rpc SpentnessNotifications (SpentnessNotificationsRequest) returns (stream SpentnessNotificationsResponse);
+	rpc AccountNotifications (AccountNotificationsRequest) returns (stream AccountNotificationsResponse);
+
+	// Control
+	rpc ChangePassphrase (ChangePassphraseRequest) returns (ChangePassphraseResponse);
+	rpc RenameAccount (RenameAccountRequest) returns (RenameAccountResponse);
+	rpc NextAccount (NextAccountRequest) returns (NextAccountResponse);
+	rpc NextAddress (NextAddressRequest) returns (NextAddressResponse);
+	rpc ImportPrivateKey (ImportPrivateKeyRequest) returns (ImportPrivateKeyResponse);
+	rpc FundTransaction (FundTransactionRequest) returns (FundTransactionResponse);
+	rpc SignTransaction (SignTransactionRequest) returns (SignTransactionResponse);
+	rpc PublishTransaction (PublishTransactionRequest) returns (PublishTransactionResponse);
+}
+
+service WalletLoaderService {
+	rpc WalletExists (WalletExistsRequest) returns (WalletExistsResponse);
+	rpc CreateWallet (CreateWalletRequest) returns (CreateWalletResponse);
+	rpc OpenWallet (OpenWalletRequest) returns (OpenWalletResponse);
+	rpc CloseWallet (CloseWalletRequest) returns (CloseWalletResponse);
+	rpc StartBtcdRpc (StartBtcdRpcRequest) returns (StartBtcdRpcResponse);
+}
+
+message TransactionDetails {
+	message Input {
+		uint32 index = 1;
+		uint32 previous_account = 2;
+		int64 previous_amount = 3;
+	}
+	message Output {
+		bool mine = 3;
+
+		// These fields only relevant if mine==true.
+		uint32 account = 4;
+		bool internal = 5;
+
+		// These fields only relevant if mine==false.
+		repeated string addresses = 6; // None if non-standard.
+	}
+	bytes hash = 1;
+	bytes transaction = 2;
+	repeated Input debits = 3;
+	repeated Output outputs = 4;
+	int64 fee = 5;
+	int64 timestamp = 6; // May be earlier than a block timestamp, but never later.
+}
+
+message BlockDetails {
+	bytes hash = 1;
+	int32 height = 2;
+	int64 timestamp = 3;
+	repeated TransactionDetails transactions = 4;
+}
+
+message AccountBalance {
+	uint32 account = 1;
+	int64 total_balance = 2;
+}
+
+message PingRequest {}
+message PingResponse {}
+
+message NetworkRequest {}
+message NetworkResponse {
+	uint32 active_network = 1;
+}
+
+message AccountNumberRequest {
+	string account_name = 1;
+}
+message AccountNumberResponse {
+	uint32 account_number = 1;
+}
+
+message AccountsRequest {}
+message AccountsResponse {
+	message Account {
+		uint32 account_number = 1;
+		string account_name = 2;
+		int64 total_balance = 3;
+		uint32 external_key_count = 4;
+		uint32 internal_key_count = 5;
+		uint32 imported_key_count = 6;
+	}
+	repeated Account accounts = 1;
+	bytes current_block_hash = 2;
+	int32 current_block_height = 3;
+}
+
+message RenameAccountRequest {
+	uint32 account_number = 1;
+	string new_name = 2;
+}
+message RenameAccountResponse {}
+
+message NextAccountRequest {
+	bytes passphrase = 1;
+	string account_name = 2;
+}
+message NextAccountResponse {
+	uint32 account_number = 1;
+}
+
+message NextAddressRequest {
+	uint32 account = 1;
+}
+message NextAddressResponse {
+	string address = 1;
+}
+
+message ImportPrivateKeyRequest {
+	bytes passphrase = 1;
+	uint32 account = 2;
+	string private_key_wif = 3;
+	bool rescan = 4;
+}
+message ImportPrivateKeyResponse {
+}
+
+message BalanceRequest {
+	uint32 account_number = 1;
+	int32 required_confirmations = 2;
+}
+message BalanceResponse {
+	int64 total = 1;
+	int64 spendable = 2;
+	int64 immature_reward = 3;
+}
+
+message GetTransactionsRequest {
+	// Optionally specify the starting block from which to begin including all transactions.
+	// Either the starting block hash or height may be specified, but not both.
+	// If a block height is specified and is negative, the absolute value becomes the number of
+	// last blocks to include.  That is, given a current chain height of 1000 and a starting block
+	// height of -3, transaction notifications will be created for blocks 998, 999, and 1000.
+	// If both options are excluded, transaction results are created for transactions since the
+	// genesis block.
+	bytes starting_block_hash = 1;
+	sint32 starting_block_height = 2;
+
+	// Optionally specify the last block that transaction results may appear in.
+	// Either the ending block hash or height may be specified, but not both.
+	// If both are excluded, transaction results are created for all transactions
+	// through the best block, and include all unmined transactions.
+	bytes ending_block_hash = 3;
+	int32 ending_block_height = 4;
+	
+	// Include at least this many of the newest transactions if they exist.
+	// Cannot be used when the ending block hash is specified.
+	//
+	// TODO: remove until spec adds it back in some way.
+	int32 minimum_recent_transactions = 5;
+
+	// TODO: limit max number of txs?
+}
+message GetTransactionsResponse {
+	repeated BlockDetails mined_transactions = 1;
+	repeated TransactionDetails unmined_transactions = 2;
+}
+
+message ChangePassphraseRequest {
+	enum Key {
+	     PRIVATE = 0;
+	     PUBLIC = 1;
+	}
+	Key key = 1;
+	bytes old_passphrase = 2;
+	bytes new_passphrase = 3;
+}
+message ChangePassphraseResponse {}
+
+message FundTransactionRequest {
+	uint32 account = 1;
+	int64 target_amount = 2;
+	int32 required_confirmations = 3;
+	bool include_immature_coinbases = 4;
+	bool include_change_script = 5;
+}
+message FundTransactionResponse {
+	message PreviousOutput {
+		bytes transaction_hash = 1;
+		uint32 output_index = 2;
+		int64 amount = 3;
+		bytes pk_script = 4;
+		int64 receive_time = 5;
+		bool from_coinbase = 6;
+	}
+	repeated PreviousOutput selected_outputs = 1;
+	int64 total_amount = 2;
+	bytes change_pk_script = 3;
+}
+
+message SignTransactionRequest {
+	bytes passphrase = 1;
+	
+	bytes serialized_transaction = 2;
+
+	// If no indexes are specified, signatures scripts will be added for
+	// every input. If any input indexes are specified, only those inputs
+	// will be signed.  Rather than returning an incompletely signed
+	// transaction if any of the inputs to be signed can not be, the RPC
+	// immediately errors.
+	repeated uint32 input_indexes = 3;
+}
+message SignTransactionResponse {
+	bytes transaction = 1;
+	repeated uint32 unsigned_input_indexes = 2;
+}
+
+message PublishTransactionRequest {
+	bytes signed_transaction = 1;
+}
+message PublishTransactionResponse {}
+
+message TransactionNotificationsRequest {}
+message TransactionNotificationsResponse {
+	// Sorted by increasing height.  This is a repeated field so many new blocks
+	// in a new best chain can be notified at once during a reorganize.
+	repeated BlockDetails attached_blocks = 1;
+
+	// If there was a chain reorganize, there may have been blocks with wallet
+	// transactions that are no longer in the best chain.  These are those
+	// block's hashes.
+	repeated bytes detached_blocks = 2;
+	
+	// Any new unmined transactions are included here.  These unmined transactions
+	// refer to the current best chain, so transactions from detached blocks may
+	// be moved to mempool and included here if they are not mined or double spent
+	// in the new chain.  Additonally, if no new blocks were attached but a relevant
+	// unmined transaction is seen by the wallet, it will be reported here.
+	repeated TransactionDetails unmined_transactions = 3;
+
+	// Instead of notifying all of the removed unmined transactions,
+	// just send all of the current hashes.
+	repeated bytes unmined_transaction_hashes = 4;
+}
+
+message SpentnessNotificationsRequest {
+	uint32 account = 1;
+	bool no_notify_unspent = 2;
+	bool no_notify_spent = 3;
+}
+
+message SpentnessNotificationsResponse {
+	bytes transaction_hash = 1;
+	uint32 output_index = 2;
+	message Spender {
+		bytes transaction_hash = 1;
+		uint32 input_index = 2;
+	}
+	Spender spender = 3;
+}
+
+message AccountNotificationsRequest {}
+message AccountNotificationsResponse {
+	uint32 account_number = 1;
+	string account_name = 2;
+	uint32 external_key_count = 3;
+	uint32 internal_key_count = 4;
+	uint32 imported_key_count = 5;
+}
+
+message CreateWalletRequest {
+	bytes public_passphrase = 1;
+	bytes private_passphrase = 2;
+	bytes seed = 3;
+}
+message CreateWalletResponse {}
+
+message OpenWalletRequest {
+	bytes public_passphrase = 1;
+}
+message OpenWalletResponse {}
+
+message CloseWalletRequest {}
+message CloseWalletResponse {}
+
+message WalletExistsRequest {}
+message WalletExistsResponse {
+	bool exists = 1;
+}
+
+message StartBtcdRpcRequest {
+	string network_address = 1;
+	string username = 2;
+	bytes password = 3;
+	bytes certificate = 4;
+}
+message StartBtcdRpcResponse {}

@@ -135,6 +135,10 @@ const (
 	// ErrCallBackBreak is used to break from a callback function passed
 	// down to the manager.
 	ErrCallBackBreak
+
+	// ErrEmptyPassphrase indicates that the private passphrase was refused
+	// due to being empty.
+	ErrEmptyPassphrase
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
@@ -159,6 +163,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrWrongPassphrase:   "ErrWrongPassphrase",
 	ErrWrongNet:          "ErrWrongNet",
 	ErrCallBackBreak:     "ErrCallBackBreak",
+	ErrEmptyPassphrase:   "ErrEmptyPassphrase",
 }
 
 // String returns the ErrorCode as a human-readable name.

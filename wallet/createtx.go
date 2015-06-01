@@ -112,6 +112,7 @@ type CreatedTx struct {
 	MsgTx       *wire.MsgTx
 	ChangeAddr  btcutil.Address
 	ChangeIndex int // negative if no change
+	Fee         btcutil.Amount
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
@@ -140,8 +141,13 @@ func (w *Wallet) txToPairs(pairs map[string]btcutil.Amount, account uint32, minc
 	}
 	defer heldUnlock.Release()
 
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
 	// Get current block's height and hash.
-	bs, err := w.chainSvr.BlockStamp()
+	bs, err := chainClient.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +276,7 @@ func createTx(eligible []wtxmgr.Credit,
 		MsgTx:       msgtx,
 		ChangeAddr:  changeAddr,
 		ChangeIndex: changeIdx,
+		Fee:         feeEst, // Last estimate is the actual fee
 	}
 	return info, nil
 }

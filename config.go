@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2013-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -28,6 +28,7 @@ import (
 	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	"github.com/btcsuite/btcwallet/netparams"
+	"github.com/btcsuite/btcwallet/wallet"
 	flags "github.com/btcsuite/go-flags"
 )
 
@@ -40,17 +41,6 @@ const (
 	defaultDisallowFree     = false
 	defaultRPCMaxClients    = 10
 	defaultRPCMaxWebsockets = 25
-
-	// defaultPubPassphrase is the default public wallet passphrase which is
-	// used when the user indicates they do not want additional protection
-	// provided by having all public data in the wallet encrypted by a
-	// passphrase only known to them.
-	defaultPubPassphrase = "public"
-
-	// maxEmptyAccounts is the number of accounts to scan even if they have no
-	// transaction history. This is a deviation from BIP044 to make account
-	// creation easier by allowing a limited number of empty accounts.
-	maxEmptyAccounts = 100
 
 	walletDbName = "wallet.db"
 )
@@ -67,35 +57,58 @@ var (
 )
 
 type config struct {
-	ShowVersion      bool     `short:"V" long:"version" description:"Display version information and exit"`
-	Create           bool     `long:"create" description:"Create the wallet if it does not exist"`
-	CreateTemp       bool     `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	CAFile           string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
-	RPCConnect       string   `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334, simnet: localhost:18556)"`
-	DebugLevel       string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
-	ConfigFile       string   `short:"C" long:"configfile" description:"Path to configuration file"`
-	SvrListeners     []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
-	DataDir          string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
-	LogDir           string   `long:"logdir" description:"Directory to log output."`
-	Username         string   `short:"u" long:"username" description:"Username for client and btcd authorization"`
-	Password         string   `short:"P" long:"password" default-mask:"-" description:"Password for client and btcd authorization"`
-	BtcdUsername     string   `long:"btcdusername" description:"Alternative username for btcd authorization"`
-	BtcdPassword     string   `long:"btcdpassword" default-mask:"-" description:"Alternative password for btcd authorization"`
-	WalletPass       string   `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
-	RPCCert          string   `long:"rpccert" description:"File containing the certificate file"`
-	RPCKey           string   `long:"rpckey" description:"File containing the certificate key"`
-	RPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of RPC clients for standard connections"`
-	RPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
-	DisableServerTLS bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
-	DisableClientTLS bool     `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
-	MainNet          bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
-	SimNet           bool     `long:"simnet" description:"Use the simulation test network (default testnet3)"`
-	KeypoolSize      uint     `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
-	DisallowFree     bool     `long:"disallowfree" description:"Force transactions to always include a fee"`
-	Proxy            string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
-	ProxyUser        string   `long:"proxyuser" description:"Username for proxy server"`
-	ProxyPass        string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
-	Profile          string   `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+	// General application behavior
+	ConfigFile    string `short:"C" long:"configfile" description:"Path to configuration file"`
+	ShowVersion   bool   `short:"V" long:"version" description:"Display version information and exit"`
+	Create        bool   `long:"create" description:"Create the wallet if it does not exist"`
+	CreateTemp    bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
+	DataDir       string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
+	MainNet       bool   `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
+	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default testnet3)"`
+	NoInitialLoad bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
+	DebugLevel    string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
+	LogDir        string `long:"logdir" description:"Directory to log output."`
+	Profile       string `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+
+	// Wallet options
+	WalletPass   string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
+	DisallowFree bool   `long:"disallowfree" description:"Force transactions to always include a fee"`
+
+	// RPC client options
+	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334, simnet: localhost:18556)"`
+	CAFile           string `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
+	DisableClientTLS bool   `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
+	BtcdUsername     string `long:"btcdusername" description:"Username for btcd authentication"`
+	BtcdPassword     string `long:"btcdpassword" default-mask:"-" description:"Password for btcd authentication"`
+	Proxy            string `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
+	ProxyUser        string `long:"proxyuser" description:"Username for proxy server"`
+	ProxyPass        string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
+
+	// RPC server options
+	//
+	// The legacy server is still enabled by default (and eventually will be
+	// replaced with the experimental server) so prepare for that change by
+	// renaming the struct fields (but not the configuration options).
+	//
+	// Usernames can also be used for the consensus RPC client, so they
+	// aren't considered legacy.
+	RPCCert                string   `long:"rpccert" description:"File containing the certificate file"`
+	RPCKey                 string   `long:"rpckey" description:"File containing the certificate key"`
+	DisableServerTLS       bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
+	LegacyRPCListeners     []string `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
+	LegacyRPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of legacy RPC clients for standard connections"`
+	LegacyRPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of legacy RPC websocket connections"`
+	Username               string   `short:"u" long:"username" description:"Username for legacy RPC and btcd authentication (if btcdusername is unset)"`
+	Password               string   `short:"P" long:"password" default-mask:"-" description:"Password for legacy RPC and btcd authentication (if btcdpassword is unset)"`
+
+	// EXPERIMENTAL RPC server options
+	//
+	// These options will change (and require changes to config files, etc.)
+	// when the new gRPC server is enabled.
+	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
+
+	// Deprecated options
+	KeypoolSize uint `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -107,8 +120,9 @@ func cleanAndExpandPath(path string) string {
 		path = strings.Replace(path, "~", homeDir, 1)
 	}
 
-	// NOTE: The os.ExpandEnv doesn't work with Windows-style %VARIABLE%,
-	// but they variables can still be expanded via POSIX-style $VARIABLE.
+	// NOTE: The os.ExpandEnv doesn't work with Windows cmd.exe-style
+	// %VARIABLE%, but they variables can still be expanded via POSIX-style
+	// $VARIABLE.
 	return filepath.Clean(os.ExpandEnv(path))
 }
 
@@ -211,16 +225,16 @@ func parseAndSetDebugLevels(debugLevel string) error {
 func loadConfig() (*config, []string, error) {
 	// Default config.
 	cfg := config{
-		DebugLevel:       defaultLogLevel,
-		ConfigFile:       defaultConfigFile,
-		DataDir:          defaultDataDir,
-		LogDir:           defaultLogDir,
-		WalletPass:       defaultPubPassphrase,
-		RPCKey:           defaultRPCKeyFile,
-		RPCCert:          defaultRPCCertFile,
-		DisallowFree:     defaultDisallowFree,
-		RPCMaxClients:    defaultRPCMaxClients,
-		RPCMaxWebsockets: defaultRPCMaxWebsockets,
+		DebugLevel:             defaultLogLevel,
+		ConfigFile:             defaultConfigFile,
+		DataDir:                defaultDataDir,
+		LogDir:                 defaultLogDir,
+		WalletPass:             wallet.InsecurePubPassphrase,
+		RPCKey:                 defaultRPCKeyFile,
+		RPCCert:                defaultRPCCertFile,
+		DisallowFree:           defaultDisallowFree,
+		LegacyRPCMaxClients:    defaultRPCMaxClients,
+		LegacyRPCMaxWebsockets: defaultRPCMaxWebsockets,
 	}
 
 	// A config file in the current directory takes precedence.
@@ -418,7 +432,7 @@ func loadConfig() (*config, []string, error) {
 
 		// Created successfully, so exit now with success.
 		os.Exit(0)
-	} else if !dbFileExists {
+	} else if !dbFileExists && !cfg.NoInitialLoad {
 		keystorePath := filepath.Join(netDir, keystore.Filename)
 		keystoreExists, err := cfgutil.FileExists(keystorePath)
 		if err != nil {
@@ -496,32 +510,64 @@ func loadConfig() (*config, []string, error) {
 		}
 	}
 
-	if len(cfg.SvrListeners) == 0 {
+	// Only set default RPC listeners when there are no listeners set for
+	// the experimental RPC server.  This is required to prevent the old RPC
+	// server from sharing listen addresses, since it is impossible to
+	// remove defaults from go-flags slice options without assigning
+	// specific behavior to a particular string.
+	if len(cfg.ExperimentalRPCListeners) == 0 && len(cfg.LegacyRPCListeners) == 0 {
 		addrs, err := net.LookupHost("localhost")
 		if err != nil {
 			return nil, nil, err
 		}
-		cfg.SvrListeners = make([]string, 0, len(addrs))
+		cfg.LegacyRPCListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
 			addr = net.JoinHostPort(addr, activeNet.RPCServerPort)
-			cfg.SvrListeners = append(cfg.SvrListeners, addr)
+			cfg.LegacyRPCListeners = append(cfg.LegacyRPCListeners, addr)
 		}
 	}
 
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
-	cfg.SvrListeners, err = cfgutil.NormalizeAddresses(
-		cfg.SvrListeners, activeNet.RPCServerPort)
+	cfg.LegacyRPCListeners, err = cfgutil.NormalizeAddresses(
+		cfg.LegacyRPCListeners, activeNet.RPCServerPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Invalid network address in legacy RPC listeners: %v\n", err)
+		return nil, nil, err
+	}
+	cfg.ExperimentalRPCListeners, err = cfgutil.NormalizeAddresses(
+		cfg.ExperimentalRPCListeners, activeNet.RPCServerPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr,
 			"Invalid network address in RPC listeners: %v\n", err)
 		return nil, nil, err
 	}
 
-	// Only allow server TLS to be disabled if the RPC is bound to localhost
-	// addresses.
+	// Both RPC servers may not listen on the same interface/port.
+	if len(cfg.LegacyRPCListeners) > 0 && len(cfg.ExperimentalRPCListeners) > 0 {
+		seenAddresses := make(map[string]struct{}, len(cfg.LegacyRPCListeners))
+		for _, addr := range cfg.LegacyRPCListeners {
+			seenAddresses[addr] = struct{}{}
+		}
+		for _, addr := range cfg.ExperimentalRPCListeners {
+			_, seen := seenAddresses[addr]
+			if seen {
+				err := fmt.Errorf("Address `%s` may not be "+
+					"used as a listener address for both "+
+					"RPC servers", addr)
+				fmt.Fprintln(os.Stderr, err)
+				return nil, nil, err
+			}
+		}
+	}
+
+	// Only allow server TLS to be disabled if the RPC server is bound to
+	// localhost addresses.
 	if cfg.DisableServerTLS {
-		for _, addr := range cfg.SvrListeners {
+		allListeners := append(cfg.LegacyRPCListeners,
+			cfg.ExperimentalRPCListeners...)
+		for _, addr := range allListeners {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
 				str := "%s: RPC listen interface '%s' is " +

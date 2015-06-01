@@ -24,6 +24,13 @@ import (
 )
 
 func (w *Wallet) handleChainNotifications() {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Errorf("handleChainNotifications called without RPC client")
+		w.wg.Done()
+		return
+	}
+
 	sync := func(w *Wallet) {
 		// At the moment there is no recourse if the rescan fails for
 		// some reason, however, the wallet will not be marked synced
@@ -35,7 +42,7 @@ func (w *Wallet) handleChainNotifications() {
 		}
 	}
 
-	for n := range w.chainSvr.Notifications() {
+	for n := range chainClient.Notifications() {
 		var err error
 		switch n := n.(type) {
 		case chain.ClientConnected:
@@ -64,10 +71,6 @@ func (w *Wallet) handleChainNotifications() {
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
 func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
-	if !w.ChainSynced() {
-		return
-	}
-
 	bs := waddrmgr.BlockStamp{
 		Height: b.Height,
 		Hash:   b.Hash,
@@ -77,9 +80,13 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 			"connect block for hash %v (height %d): %v", b.Hash,
 			b.Height, err)
 	}
-	w.notifyConnectedBlock(b)
 
-	w.notifyBalances(bs.Height)
+	// Notify interested clients of the connected block.
+	w.NtfnServer.notifyAttachedBlock(&b)
+
+	// Legacy JSON-RPC notifications
+	w.notifyConnectedBlock(b)
+	w.notifyBalances(b.Height)
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
@@ -116,6 +123,10 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 		}
 	}
 
+	// Notify interested clients of the disconnected block.
+	w.NtfnServer.notifyDetachedBlock(&b.Hash)
+
+	// Legacy JSON-RPC notifications
 	w.notifyDisconnectedBlock(b)
 	w.notifyBalances(b.Height - 1)
 
@@ -201,11 +212,36 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) er
 		}
 	}
 
-	// TODO: Notify connected clients of the added transaction.
+	// Send notification of mined or unmined transaction to any interested
+	// clients.
+	//
+	// TODO: Avoid the extra db hits.
+	if block == nil {
+		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, nil)
+		if err != nil {
+			log.Errorf("Cannot query transaction details for notifiation: %v", err)
+		} else {
+			w.NtfnServer.notifyUnminedTransaction(details)
+		}
+	} else {
+		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, &block.Block)
+		if err != nil {
+			log.Errorf("Cannot query transaction details for notifiation: %v", err)
+		} else {
+			w.NtfnServer.notifyMinedTransaction(details, block)
+		}
+	}
 
-	bs, err := w.chainSvr.BlockStamp()
+	// Legacy JSON-RPC notifications
+	//
+	// TODO: Synced-to information should be handled by the wallet, not the
+	// RPC client.
+	chainClient, err := w.requireChainClient()
 	if err == nil {
-		w.notifyBalances(bs.Height)
+		bs, err := chainClient.BlockStamp()
+		if err == nil {
+			w.notifyBalances(bs.Height)
+		}
 	}
 
 	return nil

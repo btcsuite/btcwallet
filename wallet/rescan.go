@@ -238,6 +238,13 @@ out:
 // RPC requests to perform a rescan.  New jobs are not read until a rescan
 // finishes.
 func (w *Wallet) rescanRPCHandler() {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Errorf("rescanRPCHandler called without an RPC client")
+		w.wg.Done()
+		return
+	}
+
 	quit := w.quitChan()
 
 out:
@@ -250,7 +257,7 @@ out:
 			log.Infof("Started rescan from block %v (height %d) for %d %s",
 				batch.bs.Hash, batch.bs.Height, numAddrs, noun)
 
-			err := w.chainSvr.Rescan(&batch.bs.Hash, batch.addrs,
+			err := chainClient.Rescan(&batch.bs.Hash, batch.addrs,
 				batch.outpoints)
 			if err != nil {
 				log.Errorf("Rescan for %d %s failed: %v", numAddrs,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2014-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -147,6 +147,8 @@ type addrKey string
 // private extended key so the unencrypted versions can be cleared from memory
 // when the address manager is locked.
 type accountInfo struct {
+	acctName string
+
 	// The account key is used to derive the branches which in turn derive
 	// the internal and external addresses.
 	// The accountKeyPriv will be nil when the address manager is locked.
@@ -163,6 +165,16 @@ type accountInfo struct {
 	// intended for internal wallet use such as change addresses.
 	nextInternalIndex uint32
 	lastInternalAddr  ManagedAddress
+}
+
+// AccountProperties contains properties associated with each account, such as
+// the account name, number, and the nubmer of derived and imported keys.
+type AccountProperties struct {
+	AccountNumber    uint32
+	AccountName      string
+	ExternalKeyCount uint32
+	InternalKeyCount uint32
+	ImportedKeyCount uint32
 }
 
 // unlockDeriveInfo houses the information needed to derive a private key for a
@@ -487,6 +499,7 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	// Create the new account info with the known information.  The rest
 	// of the fields are filled out below.
 	acctInfo := &accountInfo{
+		acctName:          row.name,
 		acctKeyEncrypted:  row.privKeyEncrypted,
 		acctKeyPub:        acctKeyPub,
 		nextExternalIndex: row.nextExternalIndex,
@@ -545,6 +558,60 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	// Add it to the cache and return it when everything is successful.
 	m.acctInfo[account] = acctInfo
 	return acctInfo, nil
+}
+
+// AccountProperties returns properties associated with the account, such as the
+// account number, name, and the number of derived and imported keys.
+//
+// TODO: Instead of opening a second read transaction after making a change, and
+// then fetching the account properties with a new read tx, this can be made
+// more performant by simply returning the new account properties during the
+// change.
+func (m *Manager) AccountProperties(account uint32) (*AccountProperties, error) {
+	defer m.mtx.RUnlock()
+	m.mtx.RLock()
+
+	props := &AccountProperties{AccountNumber: account}
+
+	// Until keys can be imported into any account, special handling is
+	// required for the imported account.
+	//
+	// loadAccountInfo errors when using it on the imported account since
+	// the accountInfo struct is filled with a BIP0044 account's extended
+	// keys, and the imported accounts has none.
+	//
+	// Since only the imported account allows imports currently, the number
+	// of imported keys for any other account is zero, and since the
+	// imported account cannot contain non-imported keys, the external and
+	// internal key counts for it are zero.
+	if account != ImportedAddrAccount {
+		acctInfo, err := m.loadAccountInfo(account)
+		if err != nil {
+			return nil, err
+		}
+		props.AccountName = acctInfo.acctName
+		props.ExternalKeyCount = acctInfo.nextExternalIndex
+		props.InternalKeyCount = acctInfo.nextInternalIndex
+	} else {
+		props.AccountName = ImportedAddrAccountName // reserved, nonchangable
+
+		// Could be more efficient if this was tracked by the db.
+		var importedKeyCount uint32
+		err := m.namespace.View(func(tx walletdb.Tx) error {
+			count := func(interface{}) error {
+				importedKeyCount++
+				return nil
+			}
+			return forEachAccountAddress(tx, ImportedAddrAccount,
+				count)
+		})
+		if err != nil {
+			return nil, err
+		}
+		props.ImportedKeyCount = importedKeyCount
+	}
+
+	return props, nil
 }
 
 // deriveKeyFromPath returns either a public or private derived extended key
@@ -1804,7 +1871,7 @@ func (m *Manager) RenameAccount(account uint32, name string) error {
 		if err = deleteAccountIDIndex(tx, account); err != nil {
 			return err
 		}
-		// Remove the old name key from the accout name index
+		// Remove the old name key from the account name index
 		if err = deleteAccountNameIndex(tx, row.name); err != nil {
 			return err
 		}
@@ -1812,6 +1879,15 @@ func (m *Manager) RenameAccount(account uint32, name string) error {
 			row.privKeyEncrypted, row.nextExternalIndex, row.nextInternalIndex, name)
 		return err
 	})
+
+	// Update in-memory account info with new name if cached and the db
+	// write was successful.
+	if err == nil {
+		if acctInfo, ok := m.acctInfo[account]; ok {
+			acctInfo.acctName = name
+		}
+	}
+
 	return err
 }
 
@@ -2230,6 +2306,12 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	}
 	if exists {
 		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
+	}
+
+	// Ensure the private passphrase is not empty.
+	if len(privPassphrase) == 0 {
+		str := "private passphrase may not be empty"
+		return nil, managerError(ErrEmptyPassphrase, str, nil)
 	}
 
 	// Perform the initial bucket creation and database namespace setup.

@@ -28,6 +28,21 @@ var interruptChannel chan os.Signal
 // to be invoked on SIGINT (Ctrl+C) signals.
 var addHandlerChannel = make(chan func())
 
+// interruptHandlersDone is closed after all interrupt handlers run the first
+// time an interrupt is signaled.
+var interruptHandlersDone = make(chan struct{})
+
+var simulateInterruptChannel = make(chan struct{}, 1)
+
+// simulateInterrupt requests invoking the clean termination process by an
+// internal component instead of a SIGINT.
+func simulateInterrupt() {
+	select {
+	case simulateInterruptChannel <- struct{}{}:
+	default:
+	}
+}
+
 // mainInterruptHandler listens for SIGINT (Ctrl+C) signals on the
 // interruptChannel and invokes the registered interruptCallbacks accordingly.
 // It also listens for callback registration.  It must be run as a goroutine.
@@ -35,16 +50,25 @@ func mainInterruptHandler() {
 	// interruptCallbacks is a list of callbacks to invoke when a
 	// SIGINT (Ctrl+C) is received.
 	var interruptCallbacks []func()
+	invokeCallbacks := func() {
+		// run handlers in LIFO order.
+		for i := range interruptCallbacks {
+			idx := len(interruptCallbacks) - 1 - i
+			interruptCallbacks[idx]()
+		}
+		close(interruptHandlersDone)
+	}
 
 	for {
 		select {
 		case <-interruptChannel:
 			log.Info("Received SIGINT (Ctrl+C).  Shutting down...")
-			// run handlers in LIFO order.
-			for i := range interruptCallbacks {
-				idx := len(interruptCallbacks) - 1 - i
-				interruptCallbacks[idx]()
-			}
+			invokeCallbacks()
+			return
+		case <-simulateInterruptChannel:
+			log.Info("Received shutdown request.  Shutting down...")
+			invokeCallbacks()
+			return
 
 		case handler := <-addHandlerChannel:
 			interruptCallbacks = append(interruptCallbacks, handler)
