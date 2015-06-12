@@ -256,7 +256,7 @@ type rpcServer struct {
 	chainSvr      *chain.Client
 	createOK      bool
 	handlerLookup func(string) (requestHandler, bool)
-	handlerLock   sync.Locker
+	handlerMu     sync.Mutex
 
 	listeners []net.Listener
 	authsha   [sha256.Size]byte
@@ -303,7 +303,6 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
 	s := rpcServer{
 		handlerLookup:       unloadedWalletHandlerFunc,
-		handlerLock:         new(sync.Mutex),
 		authsha:             sha256.Sum256([]byte(auth)),
 		maxPostClients:      maxPost,
 		maxWebsocketClients: maxWebsockets,
@@ -474,14 +473,14 @@ func (s *rpcServer) Stop() {
 	log.Warn("Server shutting down")
 
 	// Stop the connected wallet and chain server, if any.
-	s.handlerLock.Lock()
+	s.handlerMu.Lock()
 	if s.wallet != nil {
 		s.wallet.Stop()
 	}
 	if s.chainSvr != nil {
 		s.chainSvr.Stop()
 	}
-	s.handlerLock.Unlock()
+	s.handlerMu.Unlock()
 
 	// Stop all the listeners.
 	for _, listener := range s.listeners {
@@ -499,30 +498,25 @@ func (s *rpcServer) Stop() {
 func (s *rpcServer) WaitForShutdown() {
 	// First wait for the wallet and chain server to stop, if they
 	// were ever set.
-	s.handlerLock.Lock()
+	s.handlerMu.Lock()
 	if s.wallet != nil {
 		s.wallet.WaitForShutdown()
 	}
 	if s.chainSvr != nil {
 		s.chainSvr.WaitForShutdown()
 	}
-	s.handlerLock.Unlock()
+	s.handlerMu.Unlock()
 
 	s.wg.Wait()
 }
-
-type noopLocker struct{}
-
-func (noopLocker) Lock()   {}
-func (noopLocker) Unlock() {}
 
 // SetWallet sets the wallet dependency component needed to run a fully
 // functional bitcoin wallet RPC server.  If wallet is nil, this informs the
 // server that the createencryptedwallet RPC method is valid and must be called
 // by a client before any other wallet methods are allowed.
 func (s *rpcServer) SetWallet(wallet *wallet.Wallet) {
-	s.handlerLock.Lock()
-	defer s.handlerLock.Unlock()
+	defer s.handlerMu.Unlock()
+	s.handlerMu.Lock()
 
 	if wallet == nil {
 		s.handlerLookup = missingWalletHandlerFunc
@@ -534,11 +528,6 @@ func (s *rpcServer) SetWallet(wallet *wallet.Wallet) {
 	s.registerWalletNtfns <- struct{}{}
 
 	if s.chainSvr != nil {
-		// If the chain server rpc client is also set, there's no reason
-		// to keep the mutex around.  Make the locker simply execute
-		// noops instead.
-		s.handlerLock = noopLocker{}
-
 		// With both the wallet and chain server set, all handlers are
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
@@ -551,17 +540,12 @@ func (s *rpcServer) SetWallet(wallet *wallet.Wallet) {
 // a never connected client, rather than panicking (or never being looked up)
 // if the client was never conneceted and added.
 func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
-	s.handlerLock.Lock()
-	defer s.handlerLock.Unlock()
+	defer s.handlerMu.Unlock()
+	s.handlerMu.Lock()
 
 	s.chainSvr = chainSvr
 
 	if s.wallet != nil {
-		// If the wallet had already been set, there's no reason to keep
-		// the mutex around.  Make the locker simply execute noops
-		// instead.
-		s.handlerLock = noopLocker{}
-
 		// With both the chain server and wallet set, all handlers are
 		// ok to run.
 		s.handlerLookup = lookupAnyHandler
@@ -576,8 +560,8 @@ func (s *rpcServer) SetChainServer(chainSvr *chain.Client) {
 // method.  Each of these must be checked beforehand (the method is already
 // known) and handled accordingly.
 func (s *rpcServer) HandlerClosure(method string) requestHandlerClosure {
-	s.handlerLock.Lock()
-	defer s.handlerLock.Unlock()
+	defer s.handlerMu.Unlock()
+	s.handlerMu.Lock()
 
 	// With the lock held, make copies of these pointers for the closure.
 	wallet := s.wallet
