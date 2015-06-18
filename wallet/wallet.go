@@ -96,8 +96,8 @@ type Wallet struct {
 	// Notification channels so other components can listen in on wallet
 	// activity.  These are initialized as nil, and must be created by
 	// calling one of the Listen* methods.
-	connectedBlocks    chan waddrmgr.BlockStamp
-	disconnectedBlocks chan waddrmgr.BlockStamp
+	connectedBlocks    chan wtxmgr.BlockMeta
+	disconnectedBlocks chan wtxmgr.BlockMeta
 	relevantTxs        chan chain.RelevantTx
 	lockStateChanges   chan bool // true when locked
 	confirmedBalance   chan btcutil.Amount
@@ -119,14 +119,14 @@ var ErrDuplicateListen = errors.New("duplicate listen")
 // methods will block.
 //
 // If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenConnectedBlocks() (<-chan waddrmgr.BlockStamp, error) {
+func (w *Wallet) ListenConnectedBlocks() (<-chan wtxmgr.BlockMeta, error) {
 	defer w.notificationMu.Unlock()
 	w.notificationMu.Lock()
 
 	if w.connectedBlocks != nil {
 		return nil, ErrDuplicateListen
 	}
-	w.connectedBlocks = make(chan waddrmgr.BlockStamp)
+	w.connectedBlocks = make(chan wtxmgr.BlockMeta)
 	return w.connectedBlocks, nil
 }
 
@@ -135,14 +135,14 @@ func (w *Wallet) ListenConnectedBlocks() (<-chan waddrmgr.BlockStamp, error) {
 // block.
 //
 // If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenDisconnectedBlocks() (<-chan waddrmgr.BlockStamp, error) {
+func (w *Wallet) ListenDisconnectedBlocks() (<-chan wtxmgr.BlockMeta, error) {
 	defer w.notificationMu.Unlock()
 	w.notificationMu.Lock()
 
 	if w.disconnectedBlocks != nil {
 		return nil, ErrDuplicateListen
 	}
-	w.disconnectedBlocks = make(chan waddrmgr.BlockStamp)
+	w.disconnectedBlocks = make(chan wtxmgr.BlockMeta)
 	return w.disconnectedBlocks, nil
 }
 
@@ -211,7 +211,7 @@ func (w *Wallet) ListenRelevantTxs() (<-chan chain.RelevantTx, error) {
 	return w.relevantTxs, nil
 }
 
-func (w *Wallet) notifyConnectedBlock(block waddrmgr.BlockStamp) {
+func (w *Wallet) notifyConnectedBlock(block wtxmgr.BlockMeta) {
 	w.notificationMu.Lock()
 	if w.connectedBlocks != nil {
 		w.connectedBlocks <- block
@@ -219,7 +219,7 @@ func (w *Wallet) notifyConnectedBlock(block waddrmgr.BlockStamp) {
 	w.notificationMu.Unlock()
 }
 
-func (w *Wallet) notifyDisconnectedBlock(block waddrmgr.BlockStamp) {
+func (w *Wallet) notifyDisconnectedBlock(block wtxmgr.BlockMeta) {
 	w.notificationMu.Lock()
 	if w.disconnectedBlocks != nil {
 		w.disconnectedBlocks <- block

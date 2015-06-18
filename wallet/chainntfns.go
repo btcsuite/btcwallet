@@ -41,9 +41,9 @@ func (w *Wallet) handleChainNotifications() {
 		case chain.ClientConnected:
 			go sync(w)
 		case chain.BlockConnected:
-			w.connectBlock(waddrmgr.BlockStamp(n))
+			w.connectBlock(wtxmgr.BlockMeta(n))
 		case chain.BlockDisconnected:
-			err = w.disconnectBlock(waddrmgr.BlockStamp(n))
+			err = w.disconnectBlock(wtxmgr.BlockMeta(n))
 		case chain.RelevantTx:
 			err = w.addRelevantTx(n.TxRecord, n.Block)
 
@@ -63,17 +63,21 @@ func (w *Wallet) handleChainNotifications() {
 // connectBlock handles a chain server notification by marking a wallet
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
-func (w *Wallet) connectBlock(bs waddrmgr.BlockStamp) {
+func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 	if !w.ChainSynced() {
 		return
 	}
 
+	bs := waddrmgr.BlockStamp{
+		Height: b.Height,
+		Hash:   b.Hash,
+	}
 	if err := w.Manager.SetSyncedTo(&bs); err != nil {
 		log.Errorf("Failed to update address manager sync state in "+
-			"connect block for hash %v (height %d): %v", bs.Hash,
-			bs.Height, err)
+			"connect block for hash %v (height %d): %v", b.Hash,
+			b.Height, err)
 	}
-	w.notifyConnectedBlock(bs)
+	w.notifyConnectedBlock(b)
 
 	w.notifyBalances(bs.Height)
 }
@@ -81,7 +85,7 @@ func (w *Wallet) connectBlock(bs waddrmgr.BlockStamp) {
 // disconnectBlock handles a chain server reorganize by rolling back all
 // block history from the reorged block for a wallet in-sync with the chain
 // server.
-func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
+func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 	if !w.ChainSynced() {
 		return nil
 	}
@@ -89,7 +93,7 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
 	// Disconnect the last seen block from the manager if it matches the
 	// removed block.
 	iter := w.Manager.NewIterateRecentBlocks()
-	if iter != nil && iter.BlockStamp().Hash == bs.Hash {
+	if iter != nil && iter.BlockStamp().Hash == b.Hash {
 		if iter.Prev() {
 			prev := iter.BlockStamp()
 			w.Manager.SetSyncedTo(&prev)
@@ -111,9 +115,9 @@ func (w *Wallet) disconnectBlock(bs waddrmgr.BlockStamp) error {
 			}
 		}
 	}
-	w.notifyDisconnectedBlock(bs)
 
-	w.notifyBalances(bs.Height - 1)
+	w.notifyDisconnectedBlock(b)
+	w.notifyBalances(b.Height - 1)
 
 	return nil
 }

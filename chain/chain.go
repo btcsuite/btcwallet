@@ -153,11 +153,11 @@ type (
 
 	// BlockConnected is a notification for a newly-attached block to the
 	// best chain.
-	BlockConnected waddrmgr.BlockStamp
+	BlockConnected wtxmgr.BlockMeta
 
 	// BlockDisconnected is a notifcation that the block described by the
 	// BlockStamp was reorganized out of the best chain.
-	BlockDisconnected waddrmgr.BlockStamp
+	BlockDisconnected wtxmgr.BlockMeta
 
 	// RelevantTx is a notification for a transaction which spends wallet
 	// inputs or pays to a watched address.
@@ -228,12 +228,24 @@ func (c *Client) onClientConnect() {
 	c.enqueueNotification <- ClientConnected{}
 }
 
-func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32) {
-	c.enqueueNotification <- BlockConnected{Hash: *hash, Height: height}
+func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
+	c.enqueueNotification <- BlockConnected{
+		Block: wtxmgr.Block{
+			Hash:   *hash,
+			Height: height,
+		},
+		Time: time,
+	}
 }
 
-func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32) {
-	c.enqueueNotification <- BlockDisconnected{Hash: *hash, Height: height}
+func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
+	c.enqueueNotification <- BlockDisconnected{
+		Block: wtxmgr.Block{
+			Hash:   *hash,
+			Height: height,
+		},
+		Time: time,
+	}
 }
 
 func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
@@ -310,7 +322,10 @@ out:
 
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
-				bs = (*waddrmgr.BlockStamp)(&n)
+				bs = &waddrmgr.BlockStamp{
+					n.Height,
+					n.Hash,
+				}
 			}
 
 			notifications[0] = nil

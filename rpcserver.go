@@ -272,8 +272,8 @@ type rpcServer struct {
 
 	// Channels read from other components from which notifications are
 	// created.
-	connectedBlocks    <-chan waddrmgr.BlockStamp
-	disconnectedBlocks <-chan waddrmgr.BlockStamp
+	connectedBlocks    <-chan wtxmgr.BlockMeta
+	disconnectedBlocks <-chan wtxmgr.BlockMeta
 	relevantTxs        <-chan chain.RelevantTx
 	managerLocked      <-chan bool
 	confirmedBalance   <-chan btcutil.Amount
@@ -959,8 +959,8 @@ type (
 		notificationCmds(w *wallet.Wallet) []interface{}
 	}
 
-	blockConnected    waddrmgr.BlockStamp
-	blockDisconnected waddrmgr.BlockStamp
+	blockConnected    wtxmgr.BlockMeta
+	blockDisconnected wtxmgr.BlockMeta
 
 	relevantTx chain.RelevantTx
 
@@ -973,12 +973,12 @@ type (
 )
 
 func (b blockConnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewBlockConnectedNtfn(b.Hash.String(), b.Height)
+	n := btcjson.NewBlockConnectedNtfn(b.Hash.String(), b.Height, b.Time.Unix())
 	return []interface{}{n}
 }
 
 func (b blockDisconnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := btcjson.NewBlockDisconnectedNtfn(b.Hash.String(), b.Height)
+	n := btcjson.NewBlockDisconnectedNtfn(b.Hash.String(), b.Height, b.Time.Unix())
 	return []interface{}{n}
 }
 

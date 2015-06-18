@@ -217,7 +217,14 @@ out:
 			// every connected client.  This is code smell and
 			// should be removed or replaced with a more
 			// appropiate notification when the API is redone.
-			w.notifyConnectedBlock(bs)
+			b := wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{
+					*n.Hash,
+					n.Height,
+				},
+				Time: n.Time,
+			}
+			w.notifyConnectedBlock(b)
 
 		case <-w.quit:
 			break out
