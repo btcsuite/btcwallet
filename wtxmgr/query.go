@@ -28,8 +28,8 @@ import (
 // transaction.  Further details may be looked up by indexing a wire.MsgTx.TxOut
 // with the Index field.
 type CreditRecord struct {
-	Index  uint32
 	Amount btcutil.Amount
+	Index  uint32
 	Spent  bool
 	Change bool
 }
