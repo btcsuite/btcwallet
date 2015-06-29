@@ -83,11 +83,11 @@ func TestGetMaxUsedIdx(t *testing.T) {
 }
 
 func TestWithdrawalSerialization(t *testing.T) {
-	tearDown, _, pool := TstCreatePool(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	roundID := uint32(0)
-	wi := createAndFulfillWithdrawalRequests(t, pool, roundID)
+	wi := createAndFulfillWithdrawalRequests(t, pool, roundID, store)
 
 	serialized, err := serializeWithdrawal(wi.requests, wi.startAddress, wi.lastSeriesID,
 		wi.changeStart, wi.dustThreshold, wi.status)

@@ -107,6 +107,7 @@ type dbChangeAwareTx struct {
 	SerializedMsgTx []byte
 	ChangeIdx       int32
 	Addrs           map[wire.OutPoint]dbWithdrawalAddress
+	Broadcast       bool
 }
 
 type dbWithdrawalStatus struct {
@@ -464,6 +465,7 @@ func serializeWithdrawal(requests []OutputRequest, startAddress WithdrawalAddres
 			SerializedMsgTx: buf.Bytes(),
 			ChangeIdx:       tx.changeIdx,
 			Addrs:           addrs,
+			Broadcast:       tx.broadcast,
 		}
 	}
 	nextChange := status.nextChangeAddr
@@ -590,6 +592,7 @@ func deserializeWithdrawal(p *Pool, serialized []byte) (*withdrawalInfo, error) 
 			MsgTx:     msgtx,
 			changeIdx: tx.ChangeIdx,
 			addrs:     addrs,
+			broadcast: tx.Broadcast,
 		}
 	}
 	return wInfo, nil

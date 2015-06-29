@@ -484,20 +484,32 @@ func TstConstantFee(fee btcutil.Amount) func() btcutil.Amount {
 	return func() btcutil.Amount { return fee }
 }
 
-func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32) withdrawalInfo {
-
+// createAndFulfillWithdrawalRequests creates two output requests with amounts
+// 3e6 and 2e6 and fulfills them using newly created inputs (locked to a 2-of-3
+// multi-sig address belonging to a series created with a unique ID) of amounts
+// 2e6 and 4e6. The returned withdrawalInfo will contain a single transaction
+// and all raw signatures needed to sign that transaction.
+func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32, store *wtxmgr.Store) withdrawalInfo {
+	masters := []*hdkeychain.ExtendedKey{
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+	}
+	def := TstCreateSeriesDef(t, pool, 2, masters)
+	TstCreateSeries(t, pool, []TstSeriesDef{def})
+	credits := TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, []int64{2e6, 4e6}, store)
 	params := pool.Manager().ChainParams()
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
 	requests := []OutputRequest{
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, params),
 		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2e6, params),
 	}
-	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, def.SeriesID, 0)
 	dustThreshold := btcutil.Amount(1e4)
-	startAddr := TstNewWithdrawalAddress(t, pool, seriesID, 1, 0)
-	lastSeriesID := seriesID
-	w := newWithdrawal(roundID, requests, eligible, *changeStart)
-	if err := w.fulfillRequests(); err != nil {
+	startAddr := TstNewWithdrawalAddress(t, pool, def.SeriesID, 1, 0)
+	lastSeriesID := def.SeriesID
+	status, err := pool.fulfillAndSaveWithdrawal(roundID, requests, *startAddr, lastSeriesID,
+		*changeStart, dustThreshold, credits)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return withdrawalInfo{
@@ -506,6 +518,6 @@ func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32
 		changeStart:   *changeStart,
 		lastSeriesID:  lastSeriesID,
 		dustThreshold: dustThreshold,
-		status:        *w.status,
+		status:        *status,
 	}
 }
