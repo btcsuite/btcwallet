@@ -343,13 +343,13 @@ func (p *Pool) CreateSeries(version, seriesID, reqSigs uint32, rawPubKeys []stri
 		return newError(ErrSeriesIDInvalid, "series ID cannot be 0", nil)
 	}
 
-	if series := p.Series(seriesID); series != nil {
+	if p.Series(seriesID) != nil {
 		str := fmt.Sprintf("series #%d already exists", seriesID)
 		return newError(ErrSeriesAlreadyExists, str, nil)
 	}
 
 	if seriesID != 1 {
-		if _, ok := p.seriesLookup[seriesID-1]; !ok {
+		if p.Series(seriesID-1) == nil {
 			str := fmt.Sprintf("series #%d cannot be created because series #%d does not exist",
 				seriesID, seriesID-1)
 			return newError(ErrSeriesIDNotSequential, str, nil)
