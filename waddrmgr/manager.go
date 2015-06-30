@@ -619,6 +619,8 @@ func (m *Manager) scriptAddressRowToManaged(row *dbScriptAddressRow) (ManagedAdd
 // rowInterfaceToManaged returns a new managed address based on the given
 // address data loaded from the database.  It will automatically select the
 // appropriate type.
+//
+// This function MUST be called with the manager lock held for writes.
 func (m *Manager) rowInterfaceToManaged(rowInterface interface{}) (ManagedAddress, error) {
 	switch row := rowInterface.(type) {
 	case *dbChainAddressRow:
@@ -1807,9 +1809,6 @@ func (m *Manager) RenameAccount(account uint32, name string) error {
 // AccountName returns the account name for the given account number
 // stored in the manager.
 func (m *Manager) AccountName(account uint32) (string, error) {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
-
 	var acctName string
 	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
@@ -1826,8 +1825,6 @@ func (m *Manager) AccountName(account uint32) (string, error) {
 // ForEachAccount calls the given function with each account stored in the
 // manager, breaking early on error.
 func (m *Manager) ForEachAccount(fn func(account uint32) error) error {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
 	return m.namespace.View(func(tx walletdb.Tx) error {
 		return forEachAccount(tx, fn)
 	})
@@ -1835,9 +1832,6 @@ func (m *Manager) ForEachAccount(fn func(account uint32) error) error {
 
 // LastAccount returns the last account stored in the manager.
 func (m *Manager) LastAccount() (uint32, error) {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
-
 	var account uint32
 	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
