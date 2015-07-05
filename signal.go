@@ -19,6 +19,8 @@ package main
 import (
 	"os"
 	"os/signal"
+
+	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
 
 // interruptChannel is used to receive SIGINT (Ctrl+C) signals.
@@ -45,6 +47,7 @@ func mainInterruptHandler() {
 				idx := len(interruptCallbacks) - 1 - i
 				interruptCallbacks[idx]()
 			}
+			terminal.Restore(int(os.Stdin.Fd()), terminalState)
 
 		case handler := <-addHandlerChannel:
 			interruptCallbacks = append(interruptCallbacks, handler)

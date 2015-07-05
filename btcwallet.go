@@ -25,10 +25,12 @@ import (
 	"runtime"
 
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
 
 var (
-	cfg *config
+	cfg           *config
+	terminalState *terminal.State
 )
 
 func main() {
@@ -47,6 +49,12 @@ func main() {
 // point any defers have already run, and if the error is non-nil, the program
 // can be exited with an error exit status.
 func walletMain() error {
+	var err error
+	terminalState, err = terminal.GetState(int(os.Stdin.Fd()))
+	if err != nil {
+		return err
+	}
+
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.
 	tcfg, _, err := loadConfig()
