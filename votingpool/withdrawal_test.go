@@ -107,7 +107,7 @@ func TestStartWithdrawal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vp.TstCheckWithdrawalStatusMatches(t, *status, *status2)
+	vp.TstCheckWithdrawalStatusMatches(t, *status2, *status)
 }
 
 func checkWithdrawalOutputs(
