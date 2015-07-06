@@ -816,7 +816,7 @@ func TestSignMultiSigUTXOUnparseablePkScript(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	unparseablePkScript := []byte{0x01}
-	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -831,7 +831,7 @@ func TestSignMultiSigUTXOPkScriptNotP2SH(t *testing.T) {
 	pubKeyHashPkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressPubKeyHash))
 	msgtx := tx.toMsgTx()
 
-	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -851,7 +851,7 @@ func TestSignMultiSigUTXORedeemScriptNotFound(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	pkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressScriptHash))
-	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -871,8 +871,8 @@ func TestSignMultiSigUTXONotEnoughSigs(t *testing.T) {
 
 	idx := 0 // The index of the tx input we're going to sign.
 	// Here we provide reqSigs-1 signatures to SignMultiSigUTXO()
-	reqSigs := tx.inputs[idx].addr.series().TstGetReqSigs()
-	txInSigs := txSigs[idx][:reqSigs-1]
+	txInSigs := txSigs[idx]
+	txInSigs.Sigs = txInSigs.Sigs[:txInSigs.Required-1]
 	pkScript := tx.inputs[idx].PkScript
 	TstRunWithManagerUnlocked(t, mgr, func() {
 		err = signMultiSigUTXO(mgr, msgtx, idx, pkScript, txInSigs)
@@ -887,7 +887,8 @@ func TestSignMultiSigUTXOWrongRawSigs(t *testing.T) {
 
 	mgr := pool.Manager()
 	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
-	sigs := []RawSig{RawSig{0x00}, RawSig{0x01}}
+	sigs := newTxInSigs(1, 2)
+	sigs.Sigs = []RawSig{RawSig{0x00}, RawSig{0x01}}
 
 	idx := 0 // The index of the tx input we're going to sign.
 	pkScript := tx.inputs[idx].PkScript
@@ -1196,11 +1197,11 @@ func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool 
 // http://opentransactions.org/wiki/index.php/Siglist.
 func checkNonEmptySigsForPrivKeys(t *testing.T, txSigs TxSigs, privKeys []*hdkeychain.ExtendedKey) {
 	for _, txInSigs := range txSigs {
-		if len(txInSigs) != len(privKeys) {
+		if len(txInSigs.Sigs) != len(privKeys) {
 			t.Fatalf("Number of items in sig list (%d) does not match number of privkeys (%d)",
-				len(txInSigs), len(privKeys))
+				len(txInSigs.Sigs), len(privKeys))
 		}
-		for sigIdx, sig := range txInSigs {
+		for sigIdx, sig := range txInSigs.Sigs {
 			key := privKeys[sigIdx]
 			if bytes.Equal(sig, []byte{}) && key != nil {
 				t.Fatalf("Empty signature (idx=%d) but key (%s) is available",
