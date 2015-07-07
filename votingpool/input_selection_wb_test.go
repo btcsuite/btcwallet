@@ -42,8 +42,8 @@ func TestGetEligibleInputs(t *testing.T) {
 	}
 	TstCreateSeries(t, pool, series)
 	scripts := append(
-		getPKScriptsForAddressRange(t, pool, 1, 0, 2, 0, 4),
-		getPKScriptsForAddressRange(t, pool, 2, 0, 2, 0, 6)...)
+		getPKScriptsForAddressRange(t, pool, 1, 1, 3, 0, 4),
+		getPKScriptsForAddressRange(t, pool, 2, 1, 3, 0, 6)...)
 
 	// Create two eligible inputs locked to each of the PKScripts above.
 	expNoEligibleInputs := 2 * len(scripts)
@@ -221,7 +221,7 @@ func TestEligibleInputsAreEligible(t *testing.T) {
 	// Make sure credit is old enough to pass the minConf check.
 	c.BlockMeta.Height = int32(eligibleInputMinConfirmations)
 
-	if !pool.isCreditEligible(c, eligibleInputMinConfirmations, chainHeight, dustThreshold) {
+	if !isCreditEligible(c, eligibleInputMinConfirmations, chainHeight, dustThreshold) {
 		t.Errorf("Input is not eligible and it should be.")
 	}
 }
@@ -237,7 +237,7 @@ func TestNonEligibleInputsAreNotEligible(t *testing.T) {
 	c.BlockMeta.Height = int32(eligibleInputMinConfirmations)
 
 	// Check that credit below dustThreshold is rejected.
-	if pool.isCreditEligible(c, eligibleInputMinConfirmations, chainHeight, dustThreshold) {
+	if isCreditEligible(c, eligibleInputMinConfirmations, chainHeight, dustThreshold) {
 		t.Errorf("Input is eligible and it should not be.")
 	}
 
@@ -248,7 +248,7 @@ func TestNonEligibleInputsAreNotEligible(t *testing.T) {
 	// 1 >= target, which is quite weird, but the reason why I need to put 902
 	// is *that* makes 1000 - 902 +1 = 99 >= 100 false
 	c.BlockMeta.Height = int32(902)
-	if pool.isCreditEligible(c, eligibleInputMinConfirmations, chainHeight, dustThreshold) {
+	if isCreditEligible(c, eligibleInputMinConfirmations, chainHeight, dustThreshold) {
 		t.Errorf("Input is eligible and it should not be.")
 	}
 }
@@ -297,6 +297,32 @@ func TestCreditSortingByAddress(t *testing.T) {
 					got[idx], want[idx])
 			}
 		}
+	}
+}
+
+func TestIsCharterOutput(t *testing.T) {
+	teardown, _, pool := TstCreatePool(t)
+	defer teardown()
+
+	def := TstSeriesDef{ReqSigs: 2, PubKeys: TstPubKeys[1:4], SeriesID: 1}
+	TstCreateSeries(t, pool, []TstSeriesDef{def})
+	shaHash := bytes.Repeat([]byte{2}, 32)
+
+	// The charter output is always stored on the address identified by
+	// branch==0 and index==0
+	c := newDummyCredit(t, pool, def.SeriesID, Index(0), Branch(0), shaHash, 0)
+	if isCharterOutput(c) != true {
+		t.Fatalf("Credit %v should be the charter output", c.addr.addrIdentifier())
+	}
+
+	c = newDummyCredit(t, pool, def.SeriesID, Index(1), Branch(0), shaHash, 0)
+	if isCharterOutput(c) != false {
+		t.Fatalf("Credit %v should not be the charter output", c.addr.addrIdentifier())
+	}
+
+	c = newDummyCredit(t, pool, def.SeriesID, Index(0), Branch(1), shaHash, 0)
+	if isCharterOutput(c) != false {
+		t.Fatalf("Credit %v should not be the charter output", c.addr.addrIdentifier())
 	}
 }
 
