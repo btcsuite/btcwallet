@@ -910,7 +910,7 @@ func (p *Pool) seriesBalance(seriesID uint32, dustThreshold btcutil.Amount, minC
 	for _, addr := range usedAddrs {
 		for _, c := range creditsByAddr[addr.EncodeAddress()] {
 			credit := newCredit(c, *addr)
-			if p.isCreditEligible(credit, minConf, chainHeight, dustThreshold) {
+			if isCreditEligible(credit, minConf, chainHeight, dustThreshold) {
 				total += credit.Amount
 			}
 		}
