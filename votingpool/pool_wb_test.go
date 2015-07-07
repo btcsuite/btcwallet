@@ -179,7 +179,9 @@ func TestPoolSeriesBalance(t *testing.T) {
 	seriesID := uint32(1)
 	TstCreateSeries(t, pool, []TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: seriesID}})
 	expectedBalance := btcutil.Amount(0)
-	for branch := 0; branch <= 3; branch++ {
+	// Start from branch==1 because otherwise we'd need to add extra logic to
+	// skip the input on branch==0/index==0 as that's the charter contract.
+	for branch := 1; branch <= 3; branch++ {
 		for index := 0; index < 2; index++ {
 			pkScript := TstCreatePkScript(t, pool, seriesID, Branch(branch), Index(index))
 			for _, c := range TstCreateCreditsOnStore(t, store, pkScript, []int64{creditAmt}) {
