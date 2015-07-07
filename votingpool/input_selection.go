@@ -117,12 +117,12 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 	chainHeight := p.manager.SyncedTo().Height
 	address := startAddress
 	for {
-		log.Debugf("Looking for eligible inputs at address %s", address)
+		log.Debugf("Looking for eligible inputs at address %v", address.addressIdentifier)
 		if candidates, ok := addrMap[address.addr.EncodeAddress()]; ok {
 			var eligibles []credit
 			for _, c := range candidates {
 				candidate := newCredit(c, address)
-				if p.isCreditEligible(candidate, minConf, chainHeight, dustThreshold) {
+				if isCreditEligible(candidate, minConf, chainHeight, dustThreshold) {
 					eligibles = append(eligibles, candidate)
 				}
 			}
@@ -236,8 +236,7 @@ func groupCreditsByAddr(credits []wtxmgr.Credit, chainParams *chaincfg.Params) (
 // isCreditEligible tests a given credit for eligibilty with respect
 // to number of confirmations, the dust threshold and that it is not
 // the charter output.
-func (p *Pool) isCreditEligible(c credit, minConf int, chainHeight int32,
-	dustThreshold btcutil.Amount) bool {
+func isCreditEligible(c credit, minConf int, chainHeight int32, dustThreshold btcutil.Amount) bool {
 	if c.Amount < dustThreshold {
 		log.Debugf("Credit amount (%v) is below dust threshold (%v); skipping", c.Amount, dustThreshold)
 		return false
@@ -246,7 +245,7 @@ func (p *Pool) isCreditEligible(c credit, minConf int, chainHeight int32,
 		log.Debugf("Credit has less than %d confirmations; skipping", minConf)
 		return false
 	}
-	if p.isCharterOutput(c) {
+	if isCharterOutput(c) {
 		log.Debugf("Credit is the charter output; skipping")
 		return false
 	}
@@ -254,9 +253,12 @@ func (p *Pool) isCreditEligible(c credit, minConf int, chainHeight int32,
 	return true
 }
 
-// isCharterOutput - TODO: In order to determine this, we need the txid
-// and the output index of the current charter output, which we don't have yet.
-func (p *Pool) isCharterOutput(c credit) bool {
+// isCharterOutput returns true if the given credit is the one storing the
+// votingpool's charter output.
+func isCharterOutput(c credit) bool {
+	if c.addr.Branch() == 0 && c.addr.Index() == 0 {
+		return true
+	}
 	return false
 }
 
