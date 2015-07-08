@@ -93,11 +93,15 @@ type OutBailmentOutpoint struct {
 	amount btcutil.Amount
 }
 
-// changeAwareTx is just a wrapper around wire.MsgTx that knows about its change
-// output, if any.
+// changeAwareTx is a wrapper around wire.MsgTx that has some auxiliary data
+// needed when processing voting pool withdrawals.
 type changeAwareTx struct {
 	*wire.MsgTx
-	changeIdx int32 // -1 if there's no change output.
+	// The index of the tx's change output. -1 if there's no change output.
+	changeIdx int32
+	// A map allowing us to link each TxIn from this tx to the
+	// WithdrawalAddress of the credit they spend.
+	addrs map[wire.OutPoint]WithdrawalAddress
 }
 
 // WithdrawalStatus contains the details of a processed withdrawal, including
@@ -524,7 +528,7 @@ func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 	if err := w.fulfillRequests(); err != nil {
 		return nil, err
 	}
-	w.status.sigs, err = getRawSigs(w.transactions)
+	w.status.sigs, err = getRawSigs(w.status.transactions)
 	if err != nil {
 		return nil, err
 	}
@@ -747,9 +751,22 @@ func (w *withdrawal) fulfillRequests() error {
 			// in the generated MsgTx.
 			changeIdx = len(msgtx.TxOut) - 1
 		}
+		addrs := make(map[wire.OutPoint]WithdrawalAddress)
+		for _, txIn := range msgtx.TxIn {
+			prevOutpoint := txIn.PreviousOutPoint
+			var c credit
+			for _, input := range tx.inputs {
+				if prevOutpoint == input.OutPoint {
+					c = input
+					break
+				}
+			}
+			addrs[prevOutpoint] = c.addr
+		}
 		w.status.transactions[tx.ntxid()] = changeAwareTx{
 			MsgTx:     msgtx,
 			changeIdx: int32(changeIdx),
+			addrs:     addrs,
 		}
 	}
 	return nil
@@ -871,14 +888,12 @@ func getWithdrawalStatus(p *Pool, roundID uint32, requests []OutputRequest,
 // getRawSigs iterates over the inputs of each transaction given, constructing the
 // raw signatures for them using the private keys available to us.
 // It returns a map of ntxids to signature lists.
-func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
+func getRawSigs(transactions map[Ntxid]changeAwareTx) (map[Ntxid]TxSigs, error) {
 	sigs := make(map[Ntxid]TxSigs)
-	for _, tx := range transactions {
-		txSigs := make(TxSigs, len(tx.inputs))
-		msgtx := tx.toMsgTx()
-		ntxid := tx.ntxid()
-		for inputIdx, input := range tx.inputs {
-			creditAddr := input.addr
+	for ntxid, tx := range transactions {
+		txSigs := make(TxSigs, len(tx.TxIn))
+		for inputIdx, input := range tx.TxIn {
+			creditAddr := tx.addrs[input.PreviousOutPoint]
 			redeemScript := creditAddr.redeemScript()
 			series := creditAddr.series()
 			// The order of the raw signatures in the signature script must match the
@@ -908,7 +923,7 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 					log.Debugf("Generating raw sig for input %d of tx %s with privkey of %s",
 						inputIdx, ntxid, pubKey.String())
 					sig, err = txscript.RawTxInSignature(
-						msgtx, inputIdx, redeemScript, txscript.SigHashAll, ecPrivKey)
+						tx.MsgTx, inputIdx, redeemScript, txscript.SigHashAll, ecPrivKey)
 					if err != nil {
 						return nil, newError(ErrRawSigning, "failed to generate raw signature", err)
 					}
