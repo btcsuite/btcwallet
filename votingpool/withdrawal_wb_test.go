@@ -108,6 +108,9 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
 	}
+	if err := w.updateOutputsStatusAndNextInputAddr(seriesID); err != nil {
+		t.Fatal(err)
+	}
 
 	if len(w.transactions) != 2 {
 		t.Fatalf("Wrong number of finalized transactions; got %d, want 2", len(w.transactions))
@@ -268,6 +271,27 @@ func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
 				wOutput.status, expectedStatuses[wOutput.request.outBailmentID()])
 		}
 	}
+}
+
+func TestWithdrawalNextInputAddr(t *testing.T) {
+	tearDown, _, pool := TstCreatePool(t)
+	defer tearDown()
+
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
+	// Sort the inputs by address like in getEligibleInputs().
+	sort.Sort(sort.Reverse(byAddress(eligible)))
+	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	w := newWithdrawal(0, []OutputRequest{}, eligible, *changeStart)
+
+	// This withdrawal won't use any eligible inputs, so the NextInputAddr
+	// will be set to the address of the first eligible input.
+	if err := w.updateOutputsStatusAndNextInputAddr(seriesID); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedAddr := w.peekInput().addr
+	TstCheckAddressIdentifier(t, w.status.NextInputAddr(), expectedAddr.SeriesID(),
+		expectedAddr.Branch(), expectedAddr.Index())
 }
 
 // TestRollbackLastOutput tests the case where we rollback one output
@@ -995,7 +1019,9 @@ func TestGetRawSigsUnparseableRedeemScript(t *testing.T) {
 	ntxid := Ntxid("ntxid")
 	// Change the redeem script for one of our tx inputs, to force an error in
 	// getRawSigs().
-	tx.addrs[tx.TxIn[0].PreviousOutPoint].script = []byte{0x01}
+	addr := tx.addrs[tx.TxIn[0].PreviousOutPoint]
+	addr.script = []byte{0x01}
+	tx.addrs[tx.TxIn[0].PreviousOutPoint] = addr
 
 	_, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 
