@@ -110,8 +110,8 @@ type changeAwareTx struct {
 // the status of each requested output, the total amount of network fees and the
 // next input and change addresses to use in a subsequent withdrawal request.
 type WithdrawalStatus struct {
-	nextInputAddr  WithdrawalAddress
-	nextChangeAddr ChangeAddress
+	nextInputAddr  AddressIdentifier
+	nextChangeAddr AddressIdentifier
 	fees           btcutil.Amount
 	outputs        map[OutBailmentID]*WithdrawalOutput
 	sigs           map[Ntxid]TxSigs
@@ -222,13 +222,13 @@ func (s *WithdrawalStatus) Fees() btcutil.Amount {
 
 // NextInputAddr returns the votingpool address that should be used as the
 // startAddress of subsequent withdrawals.
-func (s *WithdrawalStatus) NextInputAddr() WithdrawalAddress {
+func (s *WithdrawalStatus) NextInputAddr() AddressIdentifier {
 	return s.nextInputAddr
 }
 
 // NextChangeAddr returns the votingpool address that should be used as the
 // changeStart of subsequent withdrawals.
-func (s *WithdrawalStatus) NextChangeAddr() ChangeAddress {
+func (s *WithdrawalStatus) NextChangeAddr() AddressIdentifier {
 	return s.nextChangeAddr
 }
 
@@ -293,6 +293,7 @@ type withdrawal struct {
 	pendingRequests []OutputRequest
 	eligibleInputs  []credit
 	current         *withdrawalTx
+	nextChangeAddr  ChangeAddress
 	// txOptions is a function called for every new withdrawalTx created as
 	// part of this withdrawal. It is defined as a function field because it
 	// exists mainly so that tests can mock withdrawalTx fields.
@@ -501,6 +502,7 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 		eligibleInputs:  inputs,
 		status:          status,
 		txOptions:       defaultTxOptions,
+		nextChangeAddr:  changeStart,
 	}
 }
 
@@ -542,6 +544,9 @@ func (p *Pool) fulfillAndSaveWithdrawal(roundID uint32, requests []OutputRequest
 	var err error
 	w := newWithdrawal(roundID, requests, eligible, changeStart)
 	if err = w.fulfillRequests(); err != nil {
+		return nil, err
+	}
+	if err = w.updateOutputsStatusAndNextInputAddr(lastSeriesID); err != nil {
 		return nil, err
 	}
 	w.status.sigs, err = getRawSigs(w.status.transactions)
@@ -715,6 +720,12 @@ func (w *withdrawal) popInput() credit {
 	return input
 }
 
+// peekInput returns the first input from the stack of eligible inputs, without
+// changing the stack.
+func (w *withdrawal) peekInput() credit {
+	return w.eligibleInputs[len(w.eligibleInputs)-1]
+}
+
 // pushInput adds a new input to the top of the stack of eligible inputs.
 func (w *withdrawal) pushInput(input credit) {
 	w.eligibleInputs = append(w.eligibleInputs, input)
@@ -790,13 +801,13 @@ func (w *withdrawal) finalizeCurrentTx() error {
 		return nil
 	}
 
-	pkScript, err := txscript.PayToAddrScript(w.status.nextChangeAddr.addr)
+	pkScript, err := txscript.PayToAddrScript(w.nextChangeAddr.addr)
 	if err != nil {
 		return newError(ErrWithdrawalProcessing, "failed to generate pkScript for change address", err)
 	}
 	if tx.addChange(pkScript) {
 		var err error
-		w.status.nextChangeAddr, err = nextChangeAddress(w.status.nextChangeAddr)
+		w.nextChangeAddr, err = nextChangeAddress(w.nextChangeAddr)
 		if err != nil {
 			return newError(ErrWithdrawalProcessing, "failed to get next change address", err)
 		}
@@ -859,6 +870,7 @@ func (w *withdrawal) maybeDropRequests() {
 func (w *withdrawal) fulfillRequests() error {
 	w.maybeDropRequests()
 	if len(w.pendingRequests) == 0 {
+		log.Info("Not enough inputs to fulfill any withdrawal requests")
 		return nil
 	}
 
@@ -882,12 +894,9 @@ func (w *withdrawal) fulfillRequests() error {
 		return err
 	}
 
-	// TODO: Update w.status.nextInputAddr. Not yet implemented as in some
-	// conditions we need to know about un-thawed series.
-
+	w.status.nextChangeAddr = w.nextChangeAddr.addressIdentifier
 	w.status.transactions = make(map[Ntxid]changeAwareTx, len(w.transactions))
 	for _, tx := range w.transactions {
-		w.status.updateStatusFor(tx)
 		w.status.fees += tx.fee
 		msgtx := tx.toMsgTx()
 		changeIdx := -1
@@ -951,15 +960,32 @@ func (w *withdrawal) splitLastOutput() error {
 	return nil
 }
 
-func (s *WithdrawalStatus) updateStatusFor(tx *withdrawalTx) {
-	for _, output := range s.outputs {
+// updateOutputsStatusAndNextInputAddr updates the status of outputs that were
+// either partially fulfilled or split across multiple transactions and sets
+// the nextInputAddr, according to the rules described in
+// http://opentransactions.org/wiki/index.php/Update_Status.
+func (w *withdrawal) updateOutputsStatusAndNextInputAddr(lastSeriesID uint32) error {
+	for _, output := range w.status.outputs {
 		if len(output.outpoints) > 1 {
 			output.status = statusSplit
 		}
 		// TODO: Update outputs with status=='partial-'. For this we need an API
 		// that gives us the amount of credits in a given series.
-		// http://opentransactions.org/wiki/index.php/Update_Status
 	}
+
+	if len(w.eligibleInputs) > 0 {
+		nextInputAddr := w.peekInput().addr
+		w.status.nextInputAddr = nextInputAddr.addressIdentifier
+		log.Debugf("Withdrawal fulfilled with elibigle inputs still available; "+
+			"setting nextInputAddr to %s", nextInputAddr)
+	} else {
+		pool := w.nextChangeAddr.pool
+		w.status.nextInputAddr = &addressIdentifier{
+			pool: pool, seriesID: lastSeriesID + 1, branch: Branch(0), index: Index(0)}
+		log.Debugf("Withdrawal fulfilled but ran out of elibigle inputs; setting "+
+			"nextInputAddr to %s", w.status.nextInputAddr)
+	}
+	return nil
 }
 
 // match returns true if the given arguments match the fields in this
@@ -995,7 +1021,7 @@ func (wi *withdrawalInfo) match(requests []OutputRequest, startAddress Withdrawa
 	sort.Sort(byOutBailmentID(r1))
 	sort.Sort(byOutBailmentID(r2))
 	if !reflect.DeepEqual(r1, r2) {
-		log.Debugf("withdrawal requests does not match: %v != %v", requests, wi.requests)
+		log.Debugf("withdrawal requests do not match: %v != %v", requests, wi.requests)
 		return false
 	}
 	return true
@@ -1016,6 +1042,7 @@ func getWithdrawalStatusMatching(p *Pool, roundID uint32, requests []OutputReque
 	if wInfo == nil {
 		return nil, nil
 	}
+	log.Debugf("Found existing withdrawal for round %d, checking if parameters match", roundID)
 	if wInfo.match(requests, startAddress, lastSeriesID, changeStart, dustThreshold) {
 		return &wInfo.status, nil
 	}
@@ -1047,7 +1074,7 @@ func getRawSigs(transactions map[Ntxid]changeAwareTx) (map[Ntxid]TxSigs, error) 
 		txSigs := make(TxSigs, len(tx.TxIn))
 		for inputIdx, input := range tx.TxIn {
 			creditAddr := tx.addrs[input.PreviousOutPoint]
-			redeemScript := creditAddr.redeemScript()
+			redeemScript := creditAddr.script
 			series := creditAddr.series()
 			// The order of the raw signatures in the signature script must match the
 			// order of the public keys in the redeem script, so we sort the public keys
@@ -1227,7 +1254,7 @@ func calculateTxSize(tx *withdrawalTx) int {
 		// length they may have:
 		// https://en.bitcoin.it/wiki/Elliptic_Curve_Digital_Signature_Algorithm
 		addr := tx.inputs[i].addr
-		redeemScriptLen := len(addr.redeemScript())
+		redeemScriptLen := len(addr.script)
 		n := wire.VarIntSerializeSize(uint64(redeemScriptLen))
 		sigScriptLen := 1 + (74 * int(addr.series().reqSigs)) + redeemScriptLen + 1 + n
 		txin.SignatureScript = bytes.Repeat([]byte{1}, sigScriptLen)

@@ -64,21 +64,16 @@ type dbSeriesRow struct {
 
 type dbWithdrawalRow struct {
 	Requests      []dbOutputRequest
-	StartAddress  dbWithdrawalAddress
-	ChangeStart   dbChangeAddress
+	StartAddress  dbAddressIdentifier
+	ChangeStart   dbAddressIdentifier
 	LastSeriesID  uint32
 	DustThreshold btcutil.Amount
 	Status        dbWithdrawalStatus
 }
 
-type dbWithdrawalAddress struct {
+type dbAddressIdentifier struct {
 	SeriesID uint32
 	Branch   Branch
-	Index    Index
-}
-
-type dbChangeAddress struct {
-	SeriesID uint32
 	Index    Index
 }
 
@@ -106,13 +101,13 @@ type dbOutBailmentOutpoint struct {
 type dbChangeAwareTx struct {
 	SerializedMsgTx []byte
 	ChangeIdx       int32
-	Addrs           map[wire.OutPoint]dbWithdrawalAddress
+	Addrs           map[wire.OutPoint]dbAddressIdentifier
 	Broadcast       bool
 }
 
 type dbWithdrawalStatus struct {
-	NextInputAddr  dbWithdrawalAddress
-	NextChangeAddr dbChangeAddress
+	NextInputAddr  dbAddressIdentifier
+	NextChangeAddr dbAddressIdentifier
 	Fees           btcutil.Amount
 	Outputs        map[OutBailmentID]dbWithdrawalOutput
 	Sigs           map[Ntxid]TxSigs
@@ -412,14 +407,15 @@ func serializeWithdrawal(requests []OutputRequest, startAddress WithdrawalAddres
 	lastSeriesID uint32, changeStart ChangeAddress, dustThreshold btcutil.Amount,
 	status WithdrawalStatus) ([]byte, error) {
 
-	dbStartAddr := dbWithdrawalAddress{
+	dbStartAddr := dbAddressIdentifier{
 		SeriesID: startAddress.SeriesID(),
 		Branch:   startAddress.Branch(),
 		Index:    startAddress.Index(),
 	}
-	dbChangeStart := dbChangeAddress{
-		SeriesID: startAddress.SeriesID(),
-		Index:    startAddress.Index(),
+	dbChangeStart := dbAddressIdentifier{
+		SeriesID: changeStart.SeriesID(),
+		Branch:   changeStart.Branch(),
+		Index:    changeStart.Index(),
 	}
 	dbRequests := make([]dbOutputRequest, len(requests))
 	for i, request := range requests {
@@ -453,9 +449,9 @@ func serializeWithdrawal(requests []OutputRequest, startAddress WithdrawalAddres
 		if err := tx.Serialize(&buf); err != nil {
 			return nil, err
 		}
-		addrs := make(map[wire.OutPoint]dbWithdrawalAddress)
+		addrs := make(map[wire.OutPoint]dbAddressIdentifier)
 		for outpoint, addr := range tx.addrs {
-			addrs[outpoint] = dbWithdrawalAddress{
+			addrs[outpoint] = dbAddressIdentifier{
 				SeriesID: addr.SeriesID(),
 				Branch:   addr.Branch(),
 				Index:    addr.Index(),
@@ -469,10 +465,17 @@ func serializeWithdrawal(requests []OutputRequest, startAddress WithdrawalAddres
 		}
 	}
 	nextChange := status.nextChangeAddr
+	nextInput := status.nextInputAddr
 	dbStatus := dbWithdrawalStatus{
-		NextChangeAddr: dbChangeAddress{
-			SeriesID: nextChange.seriesID,
-			Index:    nextChange.index,
+		NextChangeAddr: dbAddressIdentifier{
+			SeriesID: nextChange.SeriesID(),
+			Branch:   nextChange.Branch(),
+			Index:    nextChange.Index(),
+		},
+		NextInputAddr: dbAddressIdentifier{
+			SeriesID: nextInput.SeriesID(),
+			Branch:   nextInput.Branch(),
+			Index:    nextInput.Index(),
 		},
 		Fees:         status.fees,
 		Outputs:      dbOutputs,
@@ -545,16 +548,22 @@ func deserializeWithdrawal(p *Pool, serialized []byte) (*withdrawalInfo, error) 
 	}
 	wInfo.changeStart = *cAddr
 
-	// TODO: Copy over row.Status.nextInputAddr. Not done because StartWithdrawal
-	// does not update that yet.
-	nextChangeAddr := row.Status.NextChangeAddr
-	cAddr, err = p.ChangeAddress(nextChangeAddr.SeriesID, nextChangeAddr.Index)
-	if err != nil {
-		return nil, newError(ErrWithdrawalStorage,
-			"cannot deserialize nextChangeAddress for withdrawal", err)
-	}
+	dbInputAddr := row.Status.NextInputAddr
+	nextInputAddr := &addressIdentifier{
+		pool:     p,
+		seriesID: dbInputAddr.SeriesID,
+		branch:   dbInputAddr.Branch,
+		index:    dbInputAddr.Index}
+
+	dbChangeAddr := row.Status.NextChangeAddr
+	nextChangeAddr := &addressIdentifier{
+		pool:     p,
+		seriesID: dbChangeAddr.SeriesID,
+		branch:   dbChangeAddr.Branch,
+		index:    dbChangeAddr.Index}
 	wInfo.status = WithdrawalStatus{
-		nextChangeAddr: *cAddr,
+		nextInputAddr:  nextInputAddr,
+		nextChangeAddr: nextChangeAddr,
 		fees:           row.Status.Fees,
 		outputs:        make(map[OutBailmentID]*WithdrawalOutput, len(row.Status.Outputs)),
 		sigs:           row.Status.Sigs,

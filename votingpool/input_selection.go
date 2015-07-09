@@ -117,7 +117,7 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 	var inputs []credit
 	address := startAddress
 	for {
-		log.Debugf("Looking for eligible inputs at address %v", address.addrIdentifier())
+		log.Debugf("Looking for eligible inputs at address %s", address)
 		if candidates, ok := addrMap[address.addr.EncodeAddress()]; ok {
 			var eligibles []credit
 			for _, c := range candidates {

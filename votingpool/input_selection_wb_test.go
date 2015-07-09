@@ -132,7 +132,7 @@ func TestNextAddrWithVaryingHighestIndices(t *testing.T) {
 		t.Fatalf("Failed to get next address: %v", err)
 	}
 	if addr != nil {
-		t.Fatalf("Wrong next addr; got '%s', want 'nil'", addr.addrIdentifier())
+		t.Fatalf("Wrong next addr; got '%s', want 'nil'", addr)
 	}
 }
 
@@ -207,7 +207,7 @@ func TestNextAddr(t *testing.T) {
 		t.Fatalf("Failed to get next address: %v", err)
 	}
 	if addr != nil {
-		t.Fatalf("Wrong WithdrawalAddress; got %s, want nil", addr.addrIdentifier())
+		t.Fatalf("Wrong WithdrawalAddress; got %s, want nil", addr)
 	}
 }
 
