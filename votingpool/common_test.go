@@ -99,3 +99,17 @@ func TstCheckWithdrawalStatusMatches(t *testing.T, got, want WithdrawalStatus) {
 		t.Fatalf("Wrong WithdrawalStatus; got %v, want %v", got, want)
 	}
 }
+
+func TstCheckAddressIdentifier(t *testing.T, addr AddressIdentifier, seriesID uint32,
+	branch Branch, index Index) {
+
+	if addr.SeriesID() != seriesID {
+		t.Fatalf("Wrong SeriesID; got %d, want %d", addr.SeriesID(), seriesID)
+	}
+	if addr.Branch() != branch {
+		t.Fatalf("Wrong Branch; got %d, want %d", addr.Branch(), branch)
+	}
+	if addr.Index() != index {
+		t.Fatalf("Wrong Index; got %d, want %d", addr.Index(), index)
+	}
+}

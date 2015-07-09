@@ -904,7 +904,7 @@ func TestPoolChangeAddress(t *testing.T) {
 	vp.TstCreateSeries(t, pool, []vp.TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: 1}})
 
 	addr := vp.TstNewChangeAddress(t, pool, 1, 0)
-	checkPoolAddress(t, addr, 1, 0, 0)
+	vp.TstCheckAddressIdentifier(t, addr, 1, 0, 0)
 
 	// When the series is not active, we should get an error.
 	pubKeys = vp.TstPubKeys[3:6]
@@ -921,24 +921,10 @@ func TestPoolWithdrawalAddress(t *testing.T) {
 	pubKeys := vp.TstPubKeys[1:4]
 	vp.TstCreateSeries(t, pool, []vp.TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: 1}})
 	addr := vp.TstNewWithdrawalAddress(t, pool, 1, 0, 0)
-	checkPoolAddress(t, addr, 1, 0, 0)
+	vp.TstCheckAddressIdentifier(t, addr, 1, 0, 0)
 
 	// When the requested address is not present in the set of used addresses
 	// for that Pool, we should get an error.
 	_, err := pool.WithdrawalAddress(1, 2, 3)
 	vp.TstCheckError(t, "", err, vp.ErrWithdrawFromUnusedAddr)
-}
-
-func checkPoolAddress(t *testing.T, addr vp.PoolAddress, seriesID uint32, branch vp.Branch,
-	index vp.Index) {
-
-	if addr.SeriesID() != seriesID {
-		t.Fatalf("Wrong SeriesID; got %d, want %d", addr.SeriesID(), seriesID)
-	}
-	if addr.Branch() != branch {
-		t.Fatalf("Wrong Branch; got %d, want %d", addr.Branch(), branch)
-	}
-	if addr.Index() != index {
-		t.Fatalf("Wrong Index; got %d, want %d", addr.Index(), index)
-	}
 }
