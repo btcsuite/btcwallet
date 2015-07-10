@@ -49,7 +49,7 @@ func TestOutputSplittingNotEnoughInputs(t *testing.T) {
 		TstNewOutputRequest(t, 2, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", output2Amount, net),
 	}
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{7})
-	w := newWithdrawal(0, requests, eligible, *TstNewChangeAddress(t, pool, seriesID, 0))
+	w := newWithdrawal(0, requests, eligible, *TstNewChangeAddress(t, pool, seriesID, Index(1)))
 	w.txOptions = func(tx *withdrawalTx) {
 		// Trigger an output split because of lack of inputs by forcing a high fee.
 		// If we just started with not enough inputs for the requested outputs,
@@ -92,7 +92,7 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 	request := TstNewOutputRequest(
 		t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", requestAmount, pool.Manager().ChainParams())
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{smallInput, bigInput})
-	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
 	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
 	w.txOptions = func(tx *withdrawalTx) {
 		tx.calculateFee = TstConstantFee(0)
@@ -168,7 +168,7 @@ func TestWithdrawalTxOutputs(t *testing.T) {
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, net),
 		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2e6, net),
 	}
-	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
 
 	w := newWithdrawal(0, outputs, eligible, *changeStart)
 	if err := w.fulfillRequests(); err != nil {
@@ -199,7 +199,7 @@ func TestFulfillRequestsNoSatisfiableOutputs(t *testing.T) {
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{1e6})
 	request := TstNewOutputRequest(
 		t, 1, "3Qt1EaKRD9g9FeL2DGkLLswhK1AKmmXFSe", btcutil.Amount(3e6), pool.Manager().ChainParams())
-	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
 
 	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
 	if err := w.fulfillRequests(); err != nil {
@@ -238,7 +238,7 @@ func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
 	out3 := TstNewOutputRequest(
 		t, 3, "3Qt1EaKRD9g9FeL2DGkLLswhK1AKmmXFSe", btcutil.Amount(5e6), net)
 	outputs := []OutputRequest{out1, out2, out3}
-	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
 
 	w := newWithdrawal(0, outputs, eligible, *changeStart)
 	if err := w.fulfillRequests(); err != nil {
@@ -280,7 +280,7 @@ func TestWithdrawalNextInputAddr(t *testing.T) {
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
 	// Sort the inputs by address like in getEligibleInputs().
 	sort.Sort(sort.Reverse(byAddress(eligible)))
-	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
 	w := newWithdrawal(0, []OutputRequest{}, eligible, *changeStart)
 
 	// This withdrawal won't use any eligible inputs, so the NextInputAddr
@@ -421,7 +421,7 @@ func TestRollbackLastOutputWhenNewOutputAdded(t *testing.T) {
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 1, net),
 		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2, net),
 	}
-	changeStart := TstNewChangeAddress(t, pool, series, 0)
+	changeStart := TstNewChangeAddress(t, pool, series, Index(1))
 
 	w := newWithdrawal(0, requests, eligible, *changeStart)
 	w.txOptions = func(tx *withdrawalTx) {
@@ -475,7 +475,7 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 		TstNewOutputRequest(t, 3, "3Qt1EaKRD9g9FeL2DGkLLswhK1AKmmXFSe", 6, net),
 		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 3, net),
 	}
-	changeStart := TstNewChangeAddress(t, pool, series, 0)
+	changeStart := TstNewChangeAddress(t, pool, series, Index(1))
 
 	w := newWithdrawal(0, requests, eligible, *changeStart)
 	w.txOptions = func(tx *withdrawalTx) {
@@ -1175,7 +1175,7 @@ func TestTxSizeCalculation(t *testing.T) {
 	// output.
 	tx.calculateFee = TstConstantFee(1)
 	seriesID := tx.inputs[0].addr.SeriesID()
-	tx.addChange(TstNewChangeAddress(t, pool, seriesID, 0).addr.ScriptAddress())
+	tx.addChange(TstNewChangeAddress(t, pool, seriesID, Index(1)).addr.ScriptAddress())
 	cTx := changeAwareTxFromWithdrawalTx(tx)
 	msgtx := cTx.MsgTx
 	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: cTx})

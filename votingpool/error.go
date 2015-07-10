@@ -166,6 +166,10 @@ const (
 	// inputs.
 	ErrNotEnoughSigs
 
+	// ErrInvalidAddrIdentifierIndex indicates an invalid index value for an
+	// address identifier.
+	ErrInvalidAddrIdentifierIndex
+
 	// lastErr is used for testing, making it possible to iterate over
 	// the error codes in order to check that they all have proper
 	// translations in errorCodeStrings.
@@ -174,42 +178,43 @@ const (
 
 // Map of ErrorCode values back to their constant names for pretty printing.
 var errorCodeStrings = map[ErrorCode]string{
-	ErrInputSelection:            "ErrInputSelection",
-	ErrWithdrawalProcessing:      "ErrWithdrawalProcessing",
-	ErrUnknownPubKey:             "ErrUnknownPubKey",
-	ErrSeriesSerialization:       "ErrSeriesSerialization",
-	ErrSeriesVersion:             "ErrSeriesVersion",
-	ErrSeriesNotExists:           "ErrSeriesNotExists",
-	ErrSeriesAlreadyExists:       "ErrSeriesAlreadyExists",
-	ErrSeriesAlreadyEmpowered:    "ErrSeriesAlreadyEmpowered",
-	ErrSeriesIDNotSequential:     "ErrSeriesIDNotSequential",
-	ErrSeriesIDInvalid:           "ErrSeriesIDInvalid",
-	ErrSeriesNotActive:           "ErrSeriesNotActive",
-	ErrKeyIsPrivate:              "ErrKeyIsPrivate",
-	ErrKeyIsPublic:               "ErrKeyIsPublic",
-	ErrKeyNeuter:                 "ErrKeyNeuter",
-	ErrKeyMismatch:               "ErrKeyMismatch",
-	ErrKeysPrivatePublicMismatch: "ErrKeysPrivatePublicMismatch",
-	ErrKeyDuplicate:              "ErrKeyDuplicate",
-	ErrTooFewPublicKeys:          "ErrTooFewPublicKeys",
-	ErrPoolAlreadyExists:         "ErrPoolAlreadyExists",
-	ErrPoolNotExists:             "ErrPoolNotExists",
-	ErrScriptCreation:            "ErrScriptCreation",
-	ErrTooManyReqSignatures:      "ErrTooManyReqSignatures",
-	ErrInvalidBranch:             "ErrInvalidBranch",
-	ErrInvalidValue:              "ErrInvalidValue",
-	ErrDatabase:                  "ErrDatabase",
-	ErrKeyChain:                  "ErrKeyChain",
-	ErrCrypto:                    "ErrCrypto",
-	ErrRawSigning:                "ErrRawSigning",
-	ErrPreconditionNotMet:        "ErrPreconditionNotMet",
-	ErrTxSigning:                 "ErrTxSigning",
-	ErrInvalidScriptHash:         "ErrInvalidScriptHash",
-	ErrWithdrawFromUnusedAddr:    "ErrWithdrawFromUnusedAddr",
-	ErrWithdrawalTxStorage:       "ErrWithdrawalTxStorage",
-	ErrWithdrawalStorage:         "ErrWithdrawalStorage",
-	ErrSigsListMismatch:          "ErrSigsListMismatch",
-	ErrNotEnoughSigs:             "ErrNotEnoughSigs",
+	ErrInputSelection:             "ErrInputSelection",
+	ErrWithdrawalProcessing:       "ErrWithdrawalProcessing",
+	ErrUnknownPubKey:              "ErrUnknownPubKey",
+	ErrSeriesSerialization:        "ErrSeriesSerialization",
+	ErrSeriesVersion:              "ErrSeriesVersion",
+	ErrSeriesNotExists:            "ErrSeriesNotExists",
+	ErrSeriesAlreadyExists:        "ErrSeriesAlreadyExists",
+	ErrSeriesAlreadyEmpowered:     "ErrSeriesAlreadyEmpowered",
+	ErrSeriesIDNotSequential:      "ErrSeriesIDNotSequential",
+	ErrSeriesIDInvalid:            "ErrSeriesIDInvalid",
+	ErrSeriesNotActive:            "ErrSeriesNotActive",
+	ErrKeyIsPrivate:               "ErrKeyIsPrivate",
+	ErrKeyIsPublic:                "ErrKeyIsPublic",
+	ErrKeyNeuter:                  "ErrKeyNeuter",
+	ErrKeyMismatch:                "ErrKeyMismatch",
+	ErrKeysPrivatePublicMismatch:  "ErrKeysPrivatePublicMismatch",
+	ErrKeyDuplicate:               "ErrKeyDuplicate",
+	ErrTooFewPublicKeys:           "ErrTooFewPublicKeys",
+	ErrPoolAlreadyExists:          "ErrPoolAlreadyExists",
+	ErrPoolNotExists:              "ErrPoolNotExists",
+	ErrScriptCreation:             "ErrScriptCreation",
+	ErrTooManyReqSignatures:       "ErrTooManyReqSignatures",
+	ErrInvalidBranch:              "ErrInvalidBranch",
+	ErrInvalidValue:               "ErrInvalidValue",
+	ErrDatabase:                   "ErrDatabase",
+	ErrKeyChain:                   "ErrKeyChain",
+	ErrCrypto:                     "ErrCrypto",
+	ErrRawSigning:                 "ErrRawSigning",
+	ErrPreconditionNotMet:         "ErrPreconditionNotMet",
+	ErrTxSigning:                  "ErrTxSigning",
+	ErrInvalidScriptHash:          "ErrInvalidScriptHash",
+	ErrWithdrawFromUnusedAddr:     "ErrWithdrawFromUnusedAddr",
+	ErrWithdrawalTxStorage:        "ErrWithdrawalTxStorage",
+	ErrWithdrawalStorage:          "ErrWithdrawalStorage",
+	ErrSigsListMismatch:           "ErrSigsListMismatch",
+	ErrNotEnoughSigs:              "ErrNotEnoughSigs",
+	ErrInvalidAddrIdentifierIndex: "ErrInvalidAddrIdentifierIndex",
 }
 
 // String returns the ErrorCode as a human-readable name.
