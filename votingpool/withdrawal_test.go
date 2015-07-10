@@ -44,9 +44,9 @@ func TestStartWithdrawal(t *testing.T) {
 		vp.TstNewOutputRequest(t, 1, address1, 4e6, mgr.ChainParams()),
 		vp.TstNewOutputRequest(t, 2, address2, 1e6, mgr.ChainParams()),
 	}
-	changeStart := vp.TstNewChangeAddress(t, pool, def.SeriesID, 0)
+	changeStart := vp.TstNewChangeAddress(t, pool, def.SeriesID, vp.Index(1))
 
-	startAddr := vp.TstNewWithdrawalAddress(t, pool, def.SeriesID, 0, 0)
+	startAddr := vp.TstNewWithdrawalAddress(t, pool, def.SeriesID, vp.Branch(0), vp.Index(0))
 	lastSeriesID := def.SeriesID
 	dustThreshold := btcutil.Amount(1e4)
 	currentBlock := int32(vp.TstInputsBlock + vp.TstEligibleInputMinConfirmations + 1)
@@ -78,17 +78,19 @@ func TestStartWithdrawal(t *testing.T) {
 	// one of the series after lastSeriesID.
 	vp.TstCheckAddressIdentifier(t, status.NextInputAddr(), lastSeriesID+1, 0, 0)
 
-	// NOTE: The ntxid is deterministic so we hardcode it here, but if the test
-	// or the code is changed in a way that causes the generated transaction to
-	// change (e.g. different inputs/outputs), the ntxid will change too and
-	// this will have to be updated.
-	ntxid := vp.Ntxid("eb753083db55bd0ad2eb184bfd196a7ea8b90eaa000d9293e892999695af2519")
-	txSigs := status.Sigs()[ntxid]
+	// Get the ntxid of the sole transaction created as part of this withdrawal.
+	if len(status.Sigs()) != 1 {
+		t.Fatalf("Wrong number of sig lists; got %v, want 1", len(status.Sigs()))
+	}
+	var ntxid vp.Ntxid
+	for ntxid = range status.Sigs() {
+	}
 
 	// Finally we use SignTx() to construct the SignatureScripts (using the raw
 	// signatures).  Must unlock the manager as signing involves looking up the
 	// redeem script, which is stored encrypted.
 	msgtx := status.TstGetMsgTx(ntxid)
+	txSigs := status.Sigs()[ntxid]
 	vp.TstRunWithManagerUnlocked(t, mgr, func() {
 		if err = vp.SignTx(msgtx, txSigs, mgr, store); err != nil {
 			t.Fatal(err)
