@@ -204,7 +204,7 @@ func Example_withdrawal() {
 			Server:      "server-id",
 			Transaction: 123},
 	}
-	changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(0))
+	changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(1))
 	if err != nil {
 		fmt.Println(err)
 		return

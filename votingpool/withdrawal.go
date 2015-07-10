@@ -19,7 +19,6 @@ package votingpool
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -293,7 +292,7 @@ type withdrawal struct {
 	pendingRequests []OutputRequest
 	eligibleInputs  []credit
 	current         *withdrawalTx
-	nextChangeAddr  ChangeAddress
+	nextChangeAddr  *ChangeAddress
 	// txOptions is a function called for every new withdrawalTx created as
 	// part of this withdrawal. It is defined as a function field because it
 	// exists mainly so that tests can mock withdrawalTx fields.
@@ -502,7 +501,7 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 		eligibleInputs:  inputs,
 		status:          status,
 		txOptions:       defaultTxOptions,
-		nextChangeAddr:  changeStart,
+		nextChangeAddr:  &changeStart,
 	}
 }
 
@@ -807,7 +806,8 @@ func (w *withdrawal) finalizeCurrentTx() error {
 	}
 	if tx.addChange(pkScript) {
 		var err error
-		w.nextChangeAddr, err = nextChangeAddress(w.nextChangeAddr)
+		addr := w.nextChangeAddr
+		w.nextChangeAddr, err = addr.pool.ChangeAddress(addr.SeriesID(), addr.Index()+1)
 		if err != nil {
 			return newError(ErrWithdrawalProcessing, "failed to get next change address", err)
 		}
@@ -1261,17 +1261,4 @@ func calculateTxSize(tx *withdrawalTx) int {
 		txin.SignatureScript = bytes.Repeat([]byte{1}, sigScriptLen)
 	}
 	return msgtx.SerializeSize()
-}
-
-func nextChangeAddress(a ChangeAddress) (ChangeAddress, error) {
-	index := a.index
-	seriesID := a.seriesID
-	if index == math.MaxUint32 {
-		index = 0
-		seriesID++
-	} else {
-		index++
-	}
-	addr, err := a.pool.ChangeAddress(seriesID, index)
-	return *addr, err
 }
