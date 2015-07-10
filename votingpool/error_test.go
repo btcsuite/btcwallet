@@ -68,6 +68,7 @@ func TestErrorCodeStringer(t *testing.T) {
 		{vp.ErrWithdrawalStorage, "ErrWithdrawalStorage"},
 		{vp.ErrSigsListMismatch, "ErrSigsListMismatch"},
 		{vp.ErrNotEnoughSigs, "ErrNotEnoughSigs"},
+		{vp.ErrInvalidAddrIdentifierIndex, "ErrInvalidAddrIdentifierIndex"},
 		{0xffff, "Unknown ErrorCode (65535)"},
 	}
 

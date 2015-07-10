@@ -171,18 +171,16 @@ func TestDepositScriptAddressForNonExistentSeries(t *testing.T) {
 	vp.TstCheckError(t, "", err, vp.ErrSeriesNotExists)
 }
 
-func TestDepositScriptAddressForHardenedPubKey(t *testing.T) {
+func TestDepositScriptTooBigIndex(t *testing.T) {
 	tearDown, _, pool := vp.TstCreatePool(t)
 	defer tearDown()
 	if err := pool.CreateSeries(1, 1, 2, vp.TstPubKeys[0:3]); err != nil {
 		t.Fatalf("Cannot creates series")
 	}
 
-	// Ask for a DepositScriptAddress using an index for a hardened child, which should
-	// fail as we use the extended public keys to derive childs.
-	_, err := pool.DepositScriptAddress(1, 0, vp.Index(hdkeychain.HardenedKeyStart+1))
+	_, err := pool.DepositScriptAddress(1, 0, vp.Index(hdkeychain.HardenedKeyStart))
 
-	vp.TstCheckError(t, "", err, vp.ErrKeyChain)
+	vp.TstCheckError(t, "", err, vp.ErrInvalidAddrIdentifierIndex)
 }
 
 func TestLoadPool(t *testing.T) {
@@ -901,16 +899,24 @@ func TestPoolChangeAddress(t *testing.T) {
 	defer tearDown()
 
 	pubKeys := vp.TstPubKeys[1:4]
-	vp.TstCreateSeries(t, pool, []vp.TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: 1}})
+	seriesID := uint32(1)
+	vp.TstCreateSeries(t, pool, []vp.TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: seriesID}})
 
-	addr := vp.TstNewChangeAddress(t, pool, 1, 0)
-	vp.TstCheckAddressIdentifier(t, addr, 1, 0, 0)
+	addr := vp.TstNewChangeAddress(t, pool, seriesID, vp.Index(1))
+	vp.TstCheckAddressIdentifier(t, addr, seriesID, vp.Branch(0), vp.Index(1))
+
+	// For change addresses, the index must be >= 1 because on every series,
+	// the change address with branch==0, index==0 is reserved for the charter
+	// output.
+	_, err := pool.ChangeAddress(seriesID, vp.Index(0))
+	vp.TstCheckError(t, "", err, vp.ErrInvalidAddrIdentifierIndex)
 
 	// When the series is not active, we should get an error.
+	seriesID = uint32(2)
 	pubKeys = vp.TstPubKeys[3:6]
 	vp.TstCreateSeries(t, pool,
-		[]vp.TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: 2, Inactive: true}})
-	_, err := pool.ChangeAddress(2, 0)
+		[]vp.TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: seriesID, Inactive: true}})
+	_, err = pool.ChangeAddress(seriesID, vp.Index(1))
 	vp.TstCheckError(t, "", err, vp.ErrSeriesNotActive)
 }
 

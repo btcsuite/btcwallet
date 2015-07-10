@@ -503,9 +503,9 @@ func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, params),
 		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2e6, params),
 	}
-	changeStart := TstNewChangeAddress(t, pool, def.SeriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, def.SeriesID, Index(1))
 	dustThreshold := btcutil.Amount(1e4)
-	startAddr := TstNewWithdrawalAddress(t, pool, def.SeriesID, 1, 0)
+	startAddr := TstNewWithdrawalAddress(t, pool, def.SeriesID, Branch(1), Index(0))
 	lastSeriesID := def.SeriesID
 	status, err := pool.fulfillAndSaveWithdrawal(roundID, requests, *startAddr, lastSeriesID,
 		*changeStart, dustThreshold, credits)

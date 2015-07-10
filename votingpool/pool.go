@@ -557,12 +557,18 @@ func (p *Pool) addressFor(script []byte) (btcutil.Address, error) {
 
 // DepositScript constructs and returns a multi-signature redemption script where
 // a certain number (Series.reqSigs) of the public keys belonging to the series
-// with the given ID are required to sign the transaction for it to be successful.
+// with the given ID are required to sign the transaction for it to be
+// successful. The index must be smaller than hdkeychain.HardenedKeyStart.
 func (p *Pool) DepositScript(seriesID uint32, branch Branch, index Index) ([]byte, error) {
 	series := p.Series(seriesID)
 	if series == nil {
 		str := fmt.Sprintf("series #%d does not exist", seriesID)
 		return nil, newError(ErrSeriesNotExists, str, nil)
+	}
+
+	if index >= hdkeychain.HardenedKeyStart {
+		msg := fmt.Sprintf("index cannot be >= %d", hdkeychain.HardenedKeyStart)
+		return nil, newError(ErrInvalidAddrIdentifierIndex, msg, nil)
 	}
 
 	pubKeys, err := branchOrder(series.publicKeys, branch)
@@ -605,8 +611,13 @@ func (p *Pool) DepositScript(seriesID uint32, branch Branch, index Index) ([]byt
 
 // ChangeAddress returns a new votingpool address for the given seriesID and
 // index, on the 0th branch (which is reserved for change addresses). The series
-// with the given ID must be active.
+// with the given ID must be active and the index must not be 0, as the address
+// with branch==0 and index==0 is reserved for the pool's charter output.
 func (p *Pool) ChangeAddress(seriesID uint32, index Index) (*ChangeAddress, error) {
+	if index == 0 {
+		msg := fmt.Sprintf("index for change address cannot be 0")
+		return nil, newError(ErrInvalidAddrIdentifierIndex, msg, nil)
+	}
 	series := p.Series(seriesID)
 	if series == nil {
 		return nil, newError(ErrSeriesNotExists,
