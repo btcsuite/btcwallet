@@ -150,6 +150,24 @@ func getUsedAddrHash(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Bran
 	return bucket.Get(uint32ToBytes(uint32(index)))
 }
 
+func getUsedAddrHashes(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Branch) (map[Index][]byte, error) {
+	usedAddrs := tx.RootBucket().Bucket(poolID).Bucket(usedAddrsBucketName)
+	bucket := usedAddrs.Bucket(getUsedAddrBucketID(seriesID, branch))
+	if bucket == nil {
+		return nil, nil
+	}
+	hashes := make(map[Index][]byte)
+	err := bucket.ForEach(
+		func(k, v []byte) error {
+			hashes[Index(bytesToUint32(k))] = v
+			return nil
+		})
+	if err != nil {
+		return nil, newError(ErrDatabase, "failed to get used addr hashes", err)
+	}
+	return hashes, nil
+}
+
 // getMaxUsedIdx returns the highest used index from the used addresses bucket
 // of the given pool, series and branch.
 func getMaxUsedIdx(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Branch) (Index, error) {

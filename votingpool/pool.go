@@ -26,6 +26,7 @@ import (
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 const (
@@ -662,7 +663,11 @@ func (p *Pool) WithdrawalAddress(seriesID uint32, branch Branch, index Index) (
 			seriesID, branch, index)
 		return nil, newError(ErrWithdrawFromUnusedAddr, str, nil)
 	}
-	script, err := addr.Script()
+	return p.withdrawalAddressFromManagedAddr(seriesID, branch, index, addr)
+}
+
+func (p *Pool) withdrawalAddressFromManagedAddr(seriesID uint32, branch Branch, index Index, mAddr waddrmgr.ManagedScriptAddress) (*WithdrawalAddress, error) {
+	script, err := mAddr.Script()
 	if err != nil {
 		return nil, err
 	}
@@ -670,7 +675,7 @@ func (p *Pool) WithdrawalAddress(seriesID uint32, branch Branch, index Index) (
 	return &WithdrawalAddress{
 		addressIdentifier: addrID,
 		script:            script,
-		addr:              addr.Address()}, nil
+		addr:              mAddr.Address()}, nil
 }
 
 // EmpowerSeries adds the given extended private key (in raw format) to the
@@ -798,7 +803,6 @@ func (p *Pool) addUsedAddr(seriesID uint32, branch Branch, index Index) error {
 func (p *Pool) getUsedAddr(seriesID uint32, branch Branch, index Index) (
 	waddrmgr.ManagedScriptAddress, error) {
 
-	mgr := p.manager
 	var encryptedHash []byte
 	err := p.namespace.View(
 		func(tx walletdb.Tx) error {
@@ -811,15 +815,20 @@ func (p *Pool) getUsedAddr(seriesID uint32, branch Branch, index Index) (
 	if encryptedHash == nil {
 		return nil, nil
 	}
-	hash, err := p.manager.Decrypt(waddrmgr.CKTPublic, encryptedHash)
+	return managedAddrFromHash(p.manager, encryptedHash)
+}
+
+func managedAddrFromHash(manager *waddrmgr.Manager, encryptedHash []byte) (
+	waddrmgr.ManagedScriptAddress, error) {
+	hash, err := manager.Decrypt(waddrmgr.CKTPublic, encryptedHash)
 	if err != nil {
 		return nil, newError(ErrCrypto, "failed to decrypt stored script hash", err)
 	}
-	addr, err := btcutil.NewAddressScriptHashFromHash(hash, mgr.ChainParams())
+	addr, err := btcutil.NewAddressScriptHashFromHash(hash, manager.ChainParams())
 	if err != nil {
 		return nil, newError(ErrInvalidScriptHash, "failed to parse script hash", err)
 	}
-	mAddr, err := mgr.Address(addr)
+	mAddr, err := manager.Address(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -838,6 +847,75 @@ func (p *Pool) highestUsedIndexFor(seriesID uint32, branch Branch) (Index, error
 			return err
 		})
 	return maxIdx, err
+}
+
+func (p *Pool) usedAddrs(seriesID uint32) ([]*WithdrawalAddress, error) {
+	series := p.Series(seriesID)
+	if series == nil {
+		str := fmt.Sprintf("series #%d does not exist, cannot get its balance", seriesID)
+		return nil, newError(ErrSeriesNotExists, str, nil)
+	}
+	var addresses []*WithdrawalAddress
+	// A series has one branch for every member, plus one common branch (0) for
+	// change outputs; that's why we iterate from 0 to len(series.publicKeys).
+	for branch := 0; branch <= len(series.publicKeys); branch++ {
+		var encryptedHashes map[Index][]byte
+		err := p.namespace.View(
+			func(tx walletdb.Tx) error {
+				var err error
+				encryptedHashes, err = getUsedAddrHashes(tx, p.ID, seriesID, Branch(branch))
+				return err
+			})
+		if err != nil {
+			return nil, err
+		}
+		for index, encryptedHash := range encryptedHashes {
+			mAddr, err := managedAddrFromHash(p.manager, encryptedHash)
+			if err != nil {
+				return nil, err
+			}
+			addr, err := p.withdrawalAddressFromManagedAddr(seriesID, Branch(branch), index, mAddr)
+			if err != nil {
+				return nil, err
+			}
+			addresses = append(addresses, addr)
+		}
+	}
+	return addresses, nil
+}
+
+// seriesBalance sums the amounts of all unspent outputs belonging to the given
+// series. Only outputs containing at least dustThreshold satoshis and from
+// transactions that have at least minConf confirmations are considered.
+// This method must be called with the pool's address manager unlocked.
+func (p *Pool) seriesBalance(seriesID uint32, dustThreshold btcutil.Amount, minConf int,
+	store *wtxmgr.Store) (btcutil.Amount, error) {
+	chainHeight := p.manager.SyncedTo().Height
+	unspents, err := store.UnspentOutputs()
+	if err != nil {
+		return 0, err
+	}
+
+	creditsByAddr, err := groupCreditsByAddr(unspents, p.manager.ChainParams())
+	if err != nil {
+		return 0, err
+	}
+
+	usedAddrs, err := p.usedAddrs(seriesID)
+	if err != nil {
+		return 0, err
+	}
+
+	total := btcutil.Amount(0)
+	for _, addr := range usedAddrs {
+		for _, c := range creditsByAddr[addr.EncodeAddress()] {
+			credit := newCredit(c, *addr)
+			if p.isCreditEligible(credit, minConf, chainHeight, dustThreshold) {
+				total += credit.Amount
+			}
+		}
+	}
+	return total, nil
 }
 
 // String returns a string encoding of the underlying bitcoin payment address.
@@ -860,6 +938,12 @@ func (a *addressIdentifier) Branch() Branch {
 
 func (a *addressIdentifier) Index() Index {
 	return a.index
+}
+
+// EncodeAddress returns the string encoding of the payment address
+// associated with this WithdrawalAddress.
+func (a *WithdrawalAddress) EncodeAddress() string {
+	return a.addr.EncodeAddress()
 }
 
 // IsEmpowered returns true if this series is empowered (i.e. if it has
