@@ -49,12 +49,12 @@ func TestStartWithdrawal(t *testing.T) {
 	startAddr := vp.TstNewWithdrawalAddress(t, pool, def.SeriesID, vp.Branch(0), vp.Index(0))
 	lastSeriesID := def.SeriesID
 	dustThreshold := btcutil.Amount(1e4)
-	currentBlock := int32(vp.TstInputsBlock + vp.TstEligibleInputMinConfirmations + 1)
+	minConf := 0
 	var status *vp.WithdrawalStatus
 	var err error
 	vp.TstRunWithManagerUnlocked(t, mgr, func() {
 		status, err = pool.StartWithdrawal(0, requests, *startAddr, lastSeriesID, *changeStart,
-			store, currentBlock, dustThreshold)
+			dustThreshold, minConf, store)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestStartWithdrawal(t *testing.T) {
 	var status2 *vp.WithdrawalStatus
 	vp.TstRunWithManagerUnlocked(t, mgr, func() {
 		status2, err = pool.StartWithdrawal(0, requests, *startAddr, lastSeriesID, *changeStart,
-			store, currentBlock, dustThreshold)
+			dustThreshold, minConf, store)
 	})
 	if err != nil {
 		t.Fatal(err)

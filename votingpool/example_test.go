@@ -223,7 +223,7 @@ func Example_withdrawal() {
 	}
 	lastSeriesID := seriesID
 	dustThreshold := btcutil.Amount(1e4)
-	currentBlock := int32(19432)
+	minConf := 0
 	roundID := uint32(0)
 	txstore, tearDownFunc, err := exampleCreateTxStore()
 	if err != nil {
@@ -236,8 +236,7 @@ func Example_withdrawal() {
 	// they construct identical transactions. This will also generate raw
 	// signatures for each private key(s) available to every member.
 	_, err = pool.StartWithdrawal(
-		roundID, requests, *startAddr, lastSeriesID, *changeStart, txstore, currentBlock,
-		dustThreshold)
+		roundID, requests, *startAddr, lastSeriesID, *changeStart, dustThreshold, minConf, txstore)
 	if err != nil {
 		fmt.Println(err)
 	}

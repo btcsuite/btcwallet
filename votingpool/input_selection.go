@@ -99,8 +99,7 @@ func (c byAddress) Less(i, j int) bool {
 // and the last used address of lastSeriesID. They're reverse ordered based on
 // their address.
 func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAddress,
-	lastSeriesID uint32, dustThreshold btcutil.Amount, chainHeight int32,
-	minConf int) ([]credit, error) {
+	lastSeriesID uint32, dustThreshold btcutil.Amount, minConf int) ([]credit, error) {
 
 	if p.Series(lastSeriesID) == nil {
 		str := fmt.Sprintf("lastSeriesID (%d) does not exist", lastSeriesID)
@@ -115,6 +114,7 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 		return nil, err
 	}
 	var inputs []credit
+	chainHeight := p.manager.SyncedTo().Height
 	address := startAddress
 	for {
 		log.Debugf("Looking for eligible inputs at address %s", address)
