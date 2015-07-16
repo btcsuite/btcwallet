@@ -88,7 +88,7 @@ type dbWithdrawalOutput struct {
 	// We store the OutBailmentID here as we need a way to look up the
 	// corresponding dbOutputRequest in dbWithdrawalRow when deserializing.
 	OutBailmentID OutBailmentID
-	Status        outputStatus
+	Status        string
 	Outpoints     []dbOutBailmentOutpoint
 }
 
