@@ -18,6 +18,7 @@ package votingpool
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -49,7 +50,7 @@ func TestOutputSplittingNotEnoughInputs(t *testing.T) {
 		TstNewOutputRequest(t, 2, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", output2Amount, net),
 	}
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{7})
-	w := newWithdrawal(0, requests, eligible, *TstNewChangeAddress(t, pool, seriesID, Index(1)))
+	w := newWithdrawal(pool, 0, requests, eligible, *TstNewChangeAddress(t, pool, seriesID, Index(1)))
 	w.txOptions = func(tx *withdrawalTx) {
 		// Trigger an output split because of lack of inputs by forcing a high fee.
 		// If we just started with not enough inputs for the requested outputs,
@@ -83,7 +84,7 @@ func TestOutputSplittingNotEnoughInputs(t *testing.T) {
 }
 
 func TestOutputSplittingOversizeTx(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	requestAmount := btcutil.Amount(5)
@@ -93,7 +94,7 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 		t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", requestAmount, pool.Manager().ChainParams())
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{smallInput, bigInput})
 	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
-	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
+	w := newWithdrawal(pool, 0, []OutputRequest{request}, eligible, *changeStart)
 	w.txOptions = func(tx *withdrawalTx) {
 		tx.calculateFee = TstConstantFee(0)
 		tx.calculateSize = func() int {
@@ -104,11 +105,13 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 			return txMaxSize - 1
 		}
 	}
+	dustThreshold := btcutil.Amount(0)
+	minConf := 0
 
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.updateOutputsStatusAndNextInputAddr(seriesID); err != nil {
+	if err := w.updateOutputsStatusAndNextInputAddr(seriesID, dustThreshold, minConf, store); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,8 +141,8 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 		t.Fatalf("Wrong number of output statuses; got %d, want 1", len(w.status.outputs))
 	}
 	status := w.status.outputs[request.outBailmentID()].status
-	if status != statusSplit {
-		t.Fatalf("Wrong output status; got '%s', want '%s'", status, statusSplit)
+	if status != outputStatusSplit {
+		t.Fatalf("Wrong output status; got '%s', want '%s'", status, outputStatusSplit)
 	}
 }
 
@@ -147,7 +150,7 @@ func TestSplitLastOutputNoOutputs(t *testing.T) {
 	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	w := newWithdrawal(0, []OutputRequest{}, []credit{}, ChangeAddress{})
+	w := newWithdrawal(pool, 0, []OutputRequest{}, []credit{}, ChangeAddress{})
 	w.current = createWithdrawalTx(t, pool, []int64{}, []int64{})
 
 	err := w.splitLastOutput()
@@ -170,7 +173,7 @@ func TestWithdrawalTxOutputs(t *testing.T) {
 	}
 	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
 
-	w := newWithdrawal(0, outputs, eligible, *changeStart)
+	w := newWithdrawal(pool, 0, outputs, eligible, *changeStart)
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +204,7 @@ func TestFulfillRequestsNoSatisfiableOutputs(t *testing.T) {
 		t, 1, "3Qt1EaKRD9g9FeL2DGkLLswhK1AKmmXFSe", btcutil.Amount(3e6), pool.Manager().ChainParams())
 	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
 
-	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
+	w := newWithdrawal(pool, 0, []OutputRequest{request}, eligible, *changeStart)
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
 	}
@@ -216,34 +219,55 @@ func TestFulfillRequestsNoSatisfiableOutputs(t *testing.T) {
 	}
 
 	status := w.status.outputs[request.outBailmentID()].status
-	if status != statusPartial {
+	if status != outputStatusPartial {
 		t.Fatalf("Unexpected status for requested outputs; got '%s', want '%s'",
-			status, statusPartial)
+			status, outputStatusPartial)
 	}
 }
 
 // Check that some requested outputs are not fulfilled when we don't have credits for all
 // of them.
 func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 	net := pool.Manager().ChainParams()
 
 	// Create eligible inputs and the list of outputs we need to fulfil.
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
+	def := TstCreateSeriesDef(t, pool, 2, createMasterKeys(t, 3))
+	TstCreateSeries(t, pool, []TstSeriesDef{def})
+	eligible := TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, []int64{2e6, 4e6}, store)
+	// Here we create extra credits on two separate series, but we don't
+	// include them in the eligible slice passed to newWithdrawal(). They're
+	// needed so that w.updateOutputsStatusAndNextInputAddr() can update the
+	// status of the output request that won't be fulfilled because of lack of
+	// credits. The status will include the ID of the series that needs to be
+	// thawed in order for the request to be fulfilled.
+	def2 := TstCreateSeriesDef(t, pool, 2, createMasterKeys(t, 3))
+	TstCreateSeries(t, pool, []TstSeriesDef{def2})
+	TstCreateSeriesCreditsOnStore(t, pool, def2.SeriesID, []int64{2e6}, store)
+	def3 := TstCreateSeriesDef(t, pool, 2, createMasterKeys(t, 3))
+	TstCreateSeries(t, pool, []TstSeriesDef{def3})
+	TstCreateSeriesCreditsOnStore(t, pool, def3.SeriesID, []int64{9e6}, store)
 	out1 := TstNewOutputRequest(
 		t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", btcutil.Amount(3e6), net)
 	out2 := TstNewOutputRequest(
 		t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", btcutil.Amount(2e6), net)
 	out3 := TstNewOutputRequest(
-		t, 3, "3Qt1EaKRD9g9FeL2DGkLLswhK1AKmmXFSe", btcutil.Amount(5e6), net)
+		t, 3, "3Qt1EaKRD9g9FeL2DGkLLswhK1AKmmXFSe", btcutil.Amount(9e6), net)
 	outputs := []OutputRequest{out1, out2, out3}
-	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
+	changeStart := TstNewChangeAddress(t, pool, def.SeriesID, Index(1))
+	dustThreshold := btcutil.Amount(0)
+	minConf := 0
 
-	w := newWithdrawal(0, outputs, eligible, *changeStart)
+	w := newWithdrawal(pool, 0, outputs, eligible, *changeStart)
 	if err := w.fulfillRequests(); err != nil {
 		t.Fatal(err)
 	}
+	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
+		if err := w.updateOutputsStatusAndNextInputAddr(def.SeriesID, dustThreshold, minConf, store); err != nil {
+			t.Fatal(err)
+		}
+	})
 
 	tx := w.transactions[0]
 	// The created tx should spend both eligible credits, so we expect it to have
@@ -261,10 +285,10 @@ func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
 
 	// withdrawal.status should state that outputs 1 and 2 were successfully fulfilled,
 	// and that output 3 was not.
-	expectedStatuses := map[OutBailmentID]outputStatus{
-		out1.outBailmentID(): statusSuccess,
-		out2.outBailmentID(): statusSuccess,
-		out3.outBailmentID(): statusPartial}
+	expectedStatuses := map[OutBailmentID]string{
+		out1.outBailmentID(): outputStatusSuccess,
+		out2.outBailmentID(): outputStatusSuccess,
+		out3.outBailmentID(): fmt.Sprintf("%s-%d", outputStatusPartial, def3.SeriesID)}
 	for _, wOutput := range w.status.outputs {
 		if wOutput.status != expectedStatuses[wOutput.request.outBailmentID()] {
 			t.Fatalf("Unexpected status for %v; got '%s', want '%s'", wOutput.request,
@@ -274,18 +298,20 @@ func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
 }
 
 func TestWithdrawalNextInputAddr(t *testing.T) {
-	tearDown, _, pool := TstCreatePool(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
 	// Sort the inputs by address like in getEligibleInputs().
 	sort.Sort(sort.Reverse(byAddress(eligible)))
 	changeStart := TstNewChangeAddress(t, pool, seriesID, Index(1))
-	w := newWithdrawal(0, []OutputRequest{}, eligible, *changeStart)
+	dustThreshold := btcutil.Amount(0)
+	minConf := 0
+	w := newWithdrawal(pool, 0, []OutputRequest{}, eligible, *changeStart)
 
 	// This withdrawal won't use any eligible inputs, so the NextInputAddr
 	// will be set to the address of the first eligible input.
-	if err := w.updateOutputsStatusAndNextInputAddr(seriesID); err != nil {
+	if err := w.updateOutputsStatusAndNextInputAddr(seriesID, dustThreshold, minConf, store); err != nil {
 		t.Fatal(err)
 	}
 
@@ -423,7 +449,7 @@ func TestRollbackLastOutputWhenNewOutputAdded(t *testing.T) {
 	}
 	changeStart := TstNewChangeAddress(t, pool, series, Index(1))
 
-	w := newWithdrawal(0, requests, eligible, *changeStart)
+	w := newWithdrawal(pool, 0, requests, eligible, *changeStart)
 	w.txOptions = func(tx *withdrawalTx) {
 		tx.calculateFee = TstConstantFee(0)
 		tx.calculateSize = func() int {
@@ -477,7 +503,7 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	}
 	changeStart := TstNewChangeAddress(t, pool, series, Index(1))
 
-	w := newWithdrawal(0, requests, eligible, *changeStart)
+	w := newWithdrawal(pool, 0, requests, eligible, *changeStart)
 	w.txOptions = func(tx *withdrawalTx) {
 		tx.calculateFee = TstConstantFee(0)
 		tx.calculateSize = func() int {
@@ -1543,8 +1569,8 @@ func checkLastOutputWasSplit(t *testing.T, w *withdrawal, tx *withdrawalTx,
 	}
 
 	status := w.status.outputs[origRequest.outBailmentID()].status
-	if status != statusPartial {
-		t.Fatalf("Wrong output status; got '%s', want '%s'", status, statusPartial)
+	if status != outputStatusPartial {
+		t.Fatalf("Wrong output status; got '%s', want '%s'", status, outputStatusPartial)
 	}
 }
 

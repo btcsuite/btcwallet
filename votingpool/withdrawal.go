@@ -33,20 +33,18 @@ import (
 	"github.com/btcsuite/fastsha256"
 )
 
-// Maximum tx size (in bytes). This should be the same as bitcoind's
-// MAX_STANDARD_TX_SIZE.
-const txMaxSize = 100000
-
-// feeIncrement is the minimum transation fee (0.00001 BTC, measured in satoshis)
-// added to transactions requiring a fee.
-const feeIncrement = 1e3
-
-type outputStatus byte
-
 const (
-	statusSuccess outputStatus = iota
-	statusPartial
-	statusSplit
+	// Maximum tx size (in bytes). This should be the same as bitcoind's
+	// MAX_STANDARD_TX_SIZE.
+	txMaxSize = 100000
+
+	// feeIncrement is the minimum transation fee (0.00001 BTC, measured in satoshis)
+	// added to transactions requiring a fee.
+	feeIncrement = 1e3
+
+	outputStatusSuccess = "success"
+	outputStatusSplit   = "split"
+	outputStatusPartial = "partial"
 )
 
 // OutBailmentID is the unique ID of a user's outbailment, comprising the
@@ -79,7 +77,7 @@ type OutputRequest struct {
 // WithdrawalOutput represents a possibly fulfilled OutputRequest.
 type WithdrawalOutput struct {
 	request OutputRequest
-	status  outputStatus
+	status  string
 	// The outpoints that fulfill the OutputRequest. There will be more than one in case we
 	// need to split the request across multiple transactions.
 	outpoints []OutBailmentOutpoint
@@ -174,15 +172,6 @@ func (s byOutBailmentID) Less(i, j int) bool {
 	return bytes.Compare(s[i].outBailmentIDHash(), s[j].outBailmentIDHash()) < 0
 }
 
-func (s outputStatus) String() string {
-	strings := map[outputStatus]string{
-		statusSuccess: "success",
-		statusPartial: "partial-",
-		statusSplit:   "split",
-	}
-	return strings[s]
-}
-
 func (tx *changeAwareTx) addToStore(store *wtxmgr.Store) error {
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx, time.Now())
 	if err != nil {
@@ -265,7 +254,7 @@ func (o *WithdrawalOutput) addOutpoint(outpoint OutBailmentOutpoint) {
 
 // Status returns the status of this WithdrawalOutput.
 func (o *WithdrawalOutput) Status() string {
-	return o.status.String()
+	return o.status
 }
 
 // Address returns the string representation of this WithdrawalOutput's address.
@@ -286,6 +275,7 @@ func (o OutBailmentOutpoint) Amount() btcutil.Amount {
 
 // withdrawal holds all the state needed for Pool.Withdrawal() to do its job.
 type withdrawal struct {
+	pool            *Pool
 	roundID         uint32
 	status          *WithdrawalStatus
 	transactions    []*withdrawalTx
@@ -485,7 +475,7 @@ func (tx *withdrawalTx) rollBackLastOutput() ([]credit, *withdrawalTxOut, error)
 
 func defaultTxOptions(tx *withdrawalTx) {}
 
-func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
+func newWithdrawal(pool *Pool, roundID uint32, requests []OutputRequest, inputs []credit,
 	changeStart ChangeAddress) *withdrawal {
 	outputs := make(map[OutBailmentID]*WithdrawalOutput, len(requests))
 	for _, request := range requests {
@@ -496,6 +486,7 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 		nextChangeAddr: changeStart,
 	}
 	return &withdrawal{
+		pool:            pool,
 		roundID:         roundID,
 		pendingRequests: requests,
 		eligibleInputs:  inputs,
@@ -515,8 +506,7 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 // This method must be called with the address manager unlocked.
 func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
-	txStore *wtxmgr.Store, chainHeight int32, dustThreshold btcutil.Amount) (
-	*WithdrawalStatus, error) {
+	dustThreshold btcutil.Amount, minConf int, txStore *wtxmgr.Store) (*WithdrawalStatus, error) {
 
 	status, err := getWithdrawalStatusMatching(p, roundID, requests, startAddress, lastSeriesID,
 		changeStart, dustThreshold)
@@ -527,25 +517,23 @@ func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 		return status, nil
 	}
 
-	eligible, err := p.getEligibleInputs(txStore, startAddress, lastSeriesID, dustThreshold,
-		chainHeight, eligibleInputMinConfirmations)
-	if err != nil {
-		return nil, err
-	}
-
 	return p.fulfillAndSaveWithdrawal(roundID, requests, startAddress, lastSeriesID, changeStart,
-		dustThreshold, eligible)
+		dustThreshold, minConf, txStore)
 }
 
 func (p *Pool) fulfillAndSaveWithdrawal(roundID uint32, requests []OutputRequest,
 	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
-	dustThreshold btcutil.Amount, eligible []credit) (*WithdrawalStatus, error) {
-	var err error
-	w := newWithdrawal(roundID, requests, eligible, changeStart)
+	dustThreshold btcutil.Amount, minConf int, store *wtxmgr.Store) (*WithdrawalStatus, error) {
+	eligible, err := p.getEligibleInputs(store, startAddress, lastSeriesID, dustThreshold, minConf)
+	if err != nil {
+		return nil, err
+	}
+
+	w := newWithdrawal(p, roundID, requests, eligible, changeStart)
 	if err = w.fulfillRequests(); err != nil {
 		return nil, err
 	}
-	if err = w.updateOutputsStatusAndNextInputAddr(lastSeriesID); err != nil {
+	if err = w.updateOutputsStatusAndNextInputAddr(lastSeriesID, dustThreshold, minConf, store); err != nil {
 		return nil, err
 	}
 	w.status.sigs, err = getRawSigs(w.status.transactions)
@@ -738,7 +726,7 @@ func (w *withdrawal) fulfillNextRequest() error {
 	output := w.status.outputs[request.outBailmentID()]
 	// We start with an output status of success and let the methods that deal
 	// with special cases change it when appropriate.
-	output.status = statusSuccess
+	output.status = outputStatusSuccess
 	w.current.addOutput(request)
 
 	if w.current.isTooBig() {
@@ -832,7 +820,7 @@ func (w *withdrawal) finalizeCurrentTx() error {
 		for _, outpoint := range outputStatus.outpoints {
 			amtFulfilled += outpoint.amount
 		}
-		if outputStatus.status == statusSuccess && amtFulfilled != origRequest.Amount {
+		if outputStatus.status == outputStatusSuccess && amtFulfilled != origRequest.Amount {
 			msg := fmt.Sprintf("%s was not completely fulfilled; only %v fulfilled", origRequest,
 				amtFulfilled)
 			return newError(ErrWithdrawalProcessing, msg, nil)
@@ -847,7 +835,7 @@ func (w *withdrawal) finalizeCurrentTx() error {
 // maybeDropRequests will check the total amount we have in eligible inputs and drop
 // requested outputs (in descending amount order) if we don't have enough to
 // fulfill them all. For every dropped output request we update its entry in
-// w.status.outputs with the status string set to statusPartial.
+// w.status.outputs with the status string set to outputStatusPartial.
 func (w *withdrawal) maybeDropRequests() {
 	inputAmount := btcutil.Amount(0)
 	for _, input := range w.eligibleInputs {
@@ -863,7 +851,11 @@ func (w *withdrawal) maybeDropRequests() {
 		log.Infof("Not fulfilling request to send %v to %v; not enough credits.",
 			request.Amount, request.Address)
 		outputAmount -= request.Amount
-		w.status.outputs[request.outBailmentID()].status = statusPartial
+		// We set the status to outputStatusPartial here but later on in
+		// updateOutputsStatusAndNextInputAddr() we'll update it again to
+		// include the series that need to be thawed in order for this request
+		// to be fulfilled.
+		w.status.outputs[request.outBailmentID()].status = outputStatusPartial
 	}
 }
 
@@ -956,7 +948,7 @@ func (w *withdrawal) splitLastOutput() error {
 	w.pushRequest(newRequest)
 	log.Debugf("Created a new pending output request with amount %v", newRequest.Amount)
 
-	w.status.outputs[request.outBailmentID()].status = statusPartial
+	w.status.outputs[request.outBailmentID()].status = outputStatusPartial
 	return nil
 }
 
@@ -964,13 +956,46 @@ func (w *withdrawal) splitLastOutput() error {
 // either partially fulfilled or split across multiple transactions and sets
 // the nextInputAddr, according to the rules described in
 // http://opentransactions.org/wiki/index.php/Update_Status.
-func (w *withdrawal) updateOutputsStatusAndNextInputAddr(lastSeriesID uint32) error {
+func (w *withdrawal) updateOutputsStatusAndNextInputAddr(lastSeriesID uint32,
+	dustThreshold btcutil.Amount, minConf int, store *wtxmgr.Store) error {
+	missingAmount := btcutil.Amount(0)
 	for _, output := range w.status.outputs {
 		if len(output.outpoints) > 1 {
-			output.status = statusSplit
+			output.status = outputStatusSplit
 		}
-		// TODO: Update outputs with status=='partial-'. For this we need an API
-		// that gives us the amount of credits in a given series.
+		if output.status == outputStatusPartial {
+			amountFulfilled := btcutil.Amount(0)
+			for _, outpoint := range output.outpoints {
+				amountFulfilled += outpoint.Amount()
+			}
+			missingAmount += output.request.Amount - amountFulfilled
+		}
+	}
+
+	if missingAmount > 0 {
+		log.Debugf("Updating status of partially fulfilled output requests. "+
+			"Total missing amount: %v. Finding out how many series need to be thawed "+
+			"before these requests can be fulfilled.", missingAmount)
+		balance := btcutil.Amount(0)
+		targetSeriesID := lastSeriesID
+		for balance < missingAmount {
+			targetSeriesID++
+			if w.pool.Series(targetSeriesID) == nil {
+				break
+			}
+			sBalance, err := w.pool.seriesBalance(targetSeriesID, dustThreshold, minConf, store)
+			if err != nil {
+				return err
+			}
+			log.Debugf("Found %v worth of eligible credits in series %d", sBalance, targetSeriesID)
+			balance += sBalance
+		}
+		log.Debugf("Target seriesID for partial output requests: %d", targetSeriesID)
+		for _, output := range w.status.outputs {
+			if output.status == outputStatusPartial {
+				output.status = fmt.Sprintf("%s-%d", outputStatusPartial, targetSeriesID)
+			}
+		}
 	}
 
 	if len(w.eligibleInputs) > 0 {
@@ -979,9 +1004,8 @@ func (w *withdrawal) updateOutputsStatusAndNextInputAddr(lastSeriesID uint32) er
 		log.Debugf("Withdrawal fulfilled with elibigle inputs still available; "+
 			"setting nextInputAddr to %s", nextInputAddr)
 	} else {
-		pool := w.nextChangeAddr.pool
 		w.status.nextInputAddr = &addressIdentifier{
-			pool: pool, seriesID: lastSeriesID + 1, branch: Branch(0), index: Index(0)}
+			pool: w.pool, seriesID: lastSeriesID + 1, branch: Branch(0), index: Index(0)}
 		log.Debugf("Withdrawal fulfilled but ran out of elibigle inputs; setting "+
 			"nextInputAddr to %s", w.status.nextInputAddr)
 	}

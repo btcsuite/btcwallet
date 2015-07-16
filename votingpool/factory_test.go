@@ -447,8 +447,7 @@ func TstNewOutputRequest(t *testing.T, transaction uint32, address string, amoun
 	}
 }
 
-func TstNewWithdrawalOutput(r OutputRequest, status outputStatus,
-	outpoints []OutBailmentOutpoint) *WithdrawalOutput {
+func TstNewWithdrawalOutput(r OutputRequest, status string, outpoints []OutBailmentOutpoint) *WithdrawalOutput {
 	output := &WithdrawalOutput{
 		request:   r,
 		status:    status,
@@ -495,7 +494,7 @@ func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32
 	}
 	def := TstCreateSeriesDef(t, pool, 2, masters)
 	TstCreateSeries(t, pool, []TstSeriesDef{def})
-	credits := TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, []int64{2e6, 4e6}, store)
+	TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, []int64{2e6, 4e6}, store)
 	params := pool.Manager().ChainParams()
 	requests := []OutputRequest{
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, params),
@@ -505,8 +504,9 @@ func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32
 	dustThreshold := btcutil.Amount(1e4)
 	startAddr := TstNewWithdrawalAddress(t, pool, def.SeriesID, Branch(1), Index(0))
 	lastSeriesID := def.SeriesID
+	minConf := 0
 	status, err := pool.fulfillAndSaveWithdrawal(roundID, requests, *startAddr, lastSeriesID,
-		*changeStart, dustThreshold, credits)
+		*changeStart, dustThreshold, minConf, store)
 	if err != nil {
 		t.Fatal(err)
 	}
