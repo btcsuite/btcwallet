@@ -119,8 +119,8 @@ func walletMain() error {
 		}
 		err = rpcc.Start()
 		if err != nil {
-			log.Warnf("Connection to Bitcoin RPC chain server " +
-				"unsuccessful -- available RPC methods will be limited")
+			log.Warnf("Connection to Bitcoin RPC chain server unsuccessful " +
+				"-- available RPC methods will be limited -- error: %v", err)
 		}
 		// Even if Start errored, we still add the server disconnected.
 		// All client methods will then error, so it's obvious to a
