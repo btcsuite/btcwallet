@@ -3013,7 +3013,7 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 			err = vm.Execute()
 		}
 		if err != nil {
-			localErr := err
+			multisigNotEnoughSigs := false
 			class, addr, _, _ := txscript.ExtractPkScriptAddrs(
 				inputs[txIn.PreviousOutPoint],
 				activeNet.Params)
@@ -3025,19 +3025,23 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 					redeemScript,
 					activeNet.Params)
 				if redeemClass == txscript.MultiSigTy {
-					localErr = errors.New("failed to produce enough " +
-						"signatures to satisfy the conditions of the " +
-						"multisignature script")
+					multisigNotEnoughSigs = true
 				}
 			}
-			signErrors = append(signErrors,
-				btcjson.SignRawTransactionError{
-					TxID:      txIn.PreviousOutPoint.Hash.String(),
-					Vout:      txIn.PreviousOutPoint.Index,
-					ScriptSig: hex.EncodeToString(txIn.SignatureScript),
-					Sequence:  txIn.Sequence,
-					Error:     localErr.Error(),
-				})
+			// Only report an error for the script engine in the event
+			// that it's not a multisignature underflow, indicating that
+			// we didn't have enough signatures in front of the
+			// redeemScript rather than an actual error.
+			if !multisigNotEnoughSigs {
+				signErrors = append(signErrors,
+					btcjson.SignRawTransactionError{
+						TxID:      txIn.PreviousOutPoint.Hash.String(),
+						Vout:      txIn.PreviousOutPoint.Index,
+						ScriptSig: hex.EncodeToString(txIn.SignatureScript),
+						Sequence:  txIn.Sequence,
+						Error:     err.Error(),
+					})
+			}
 		}
 	}
 
