@@ -3021,9 +3021,7 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 			if err == txscript.ErrStackUnderflow &&
 				class == txscript.ScriptHashTy {
 				redeemScript, _ := getScript(addr[0])
-				redeemClass, _, _, _ := txscript.ExtractPkScriptAddrs(
-					redeemScript,
-					activeNet.Params)
+				redeemClass := txscript.GetScriptClass(redeemScript)
 				if redeemClass == txscript.MultiSigTy {
 					multisigNotEnoughSigs = true
 				}
