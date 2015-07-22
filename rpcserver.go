@@ -3013,13 +3013,30 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 			err = vm.Execute()
 		}
 		if err != nil {
+			localErr := err
+			class, addr, _, _ := txscript.ExtractPkScriptAddrs(
+				inputs[txIn.PreviousOutPoint],
+				activeNet.Params)
+
+			if err == txscript.ErrStackUnderflow &&
+				class == txscript.ScriptHashTy {
+				redeemScript, _ := getScript(addr[0])
+				redeemClass, _, _, _ := txscript.ExtractPkScriptAddrs(
+					redeemScript,
+					activeNet.Params)
+				if redeemClass == txscript.MultiSigTy {
+					localErr = errors.New("failed to produce enough " +
+						"signatures to satisfy the conditions of the " +
+						"multisignature script")
+				}
+			}
 			signErrors = append(signErrors,
 				btcjson.SignRawTransactionError{
 					TxID:      txIn.PreviousOutPoint.Hash.String(),
 					Vout:      txIn.PreviousOutPoint.Index,
 					ScriptSig: hex.EncodeToString(txIn.SignatureScript),
 					Sequence:  txIn.Sequence,
-					Error:     err.Error(),
+					Error:     localErr.Error(),
 				})
 		}
 	}

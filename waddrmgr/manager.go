@@ -678,6 +678,15 @@ func (m *Manager) loadAndCacheAddress(address btcutil.Address) (ManagedAddress, 
 // pay-to-pubkey-hash addresses and the script associated with
 // pay-to-script-hash addresses.
 func (m *Manager) Address(address btcutil.Address) (ManagedAddress, error) {
+	// ScriptAddress will only return a script hash if we're
+	// accessing an address that is either PKH or SH. In
+	// the event we're passed a PK address, convert the
+	// PK to PKH address so that we can access it from
+	// the addrs map and database.
+	if pka, ok := address.(*btcutil.AddressPubKey); ok {
+		address = pka.AddressPubKeyHash()
+	}
+
 	// Return the address from cache if it's available.
 	//
 	// NOTE: Not using a defer on the lock here since a write lock is
