@@ -202,7 +202,7 @@ func Example_startWithdrawal() {
 			Server:      "server-id",
 			Transaction: 123},
 	}
-	changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(0))
+	changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(1))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -221,7 +221,7 @@ func Example_startWithdrawal() {
 	}
 	lastSeriesID := seriesID
 	dustThreshold := btcutil.Amount(1e4)
-	currentBlock := int32(19432)
+	minConf := 0
 	roundID := uint32(0)
 	txstore, tearDownFunc, err := exampleCreateTxStore()
 	if err != nil {
@@ -229,8 +229,7 @@ func Example_startWithdrawal() {
 		return
 	}
 	_, err = pool.StartWithdrawal(
-		roundID, requests, *startAddr, lastSeriesID, *changeStart, txstore, currentBlock,
-		dustThreshold)
+		roundID, requests, *startAddr, lastSeriesID, *changeStart, dustThreshold, minConf, txstore)
 	if err != nil {
 		fmt.Println(err)
 	}

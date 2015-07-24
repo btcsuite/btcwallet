@@ -56,13 +56,12 @@ func TestGetEligibleInputs(t *testing.T) {
 
 	startAddr := TstNewWithdrawalAddress(t, pool, 1, 0, 0)
 	lastSeriesID := uint32(2)
-	currentBlock := int32(TstInputsBlock + eligibleInputMinConfirmations + 1)
+	minConf := 0
 	var eligibles []credit
 	var err error
 	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
 		eligibles, err = pool.getEligibleInputs(
-			store, *startAddr, lastSeriesID, dustThreshold, int32(currentBlock),
-			eligibleInputMinConfirmations)
+			store, *startAddr, lastSeriesID, dustThreshold, minConf)
 	})
 	if err != nil {
 		t.Fatal("InputSelection failed:", err)
@@ -132,7 +131,7 @@ func TestNextAddrWithVaryingHighestIndices(t *testing.T) {
 		t.Fatalf("Failed to get next address: %v", err)
 	}
 	if addr != nil {
-		t.Fatalf("Wrong next addr; got '%s', want 'nil'", addr.addrIdentifier())
+		t.Fatalf("Wrong next addr; got '%s', want 'nil'", addr)
 	}
 }
 
@@ -207,7 +206,7 @@ func TestNextAddr(t *testing.T) {
 		t.Fatalf("Failed to get next address: %v", err)
 	}
 	if addr != nil {
-		t.Fatalf("Wrong WithdrawalAddress; got %s, want nil", addr.addrIdentifier())
+		t.Fatalf("Wrong WithdrawalAddress; got %s, want nil", addr)
 	}
 }
 
@@ -230,11 +229,11 @@ func TestNonEligibleInputsAreNotEligible(t *testing.T) {
 	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	var chainHeight int32 = 1000
+	chainHeight := pool.manager.SyncedTo().Height
 	_, credits := TstCreateCreditsOnNewSeries(t, pool, []int64{int64(dustThreshold - 1)})
 	c := credits[0]
 	// Make sure credit is old enough to pass the minConf check.
-	c.BlockMeta.Height = int32(eligibleInputMinConfirmations)
+	c.Height = int32(eligibleInputMinConfirmations)
 
 	// Check that credit below dustThreshold is rejected.
 	if pool.isCreditEligible(c, eligibleInputMinConfirmations, chainHeight, dustThreshold) {

@@ -63,38 +63,53 @@ func TstRunWithManagerUnlocked(t *testing.T, mgr *waddrmgr.Manager, callback fun
 	callback()
 }
 
-// TstCheckWithdrawalStatusMatches compares s1 and s2 using reflect.DeepEqual
-// and calls t.Fatal() if they're not identical.
-func TstCheckWithdrawalStatusMatches(t *testing.T, s1, s2 WithdrawalStatus) {
-	if s1.Fees() != s2.Fees() {
-		t.Fatalf("Wrong amount of network fees; want %d, got %d", s1.Fees(), s2.Fees())
+// TstCheckWithdrawalStatusMatches compares the individual fields of the two
+// WithdrawalStatus given (using reflect.DeepEqual) and calls t.Fatal() if
+// any of them don't match.
+func TstCheckWithdrawalStatusMatches(t *testing.T, got, want WithdrawalStatus) {
+	if got.Fees() != want.Fees() {
+		t.Fatalf("Wrong amount of network fees; got %d, want %d", got.Fees(), want.Fees())
 	}
 
-	if !reflect.DeepEqual(s1.Sigs(), s2.Sigs()) {
-		t.Fatalf("Wrong tx signatures; got %x, want %x", s1.Sigs(), s2.Sigs())
+	if !reflect.DeepEqual(got.Sigs(), want.Sigs()) {
+		t.Fatalf("Wrong tx signatures; got %x, want %x", got.Sigs(), want.Sigs())
 	}
 
-	if !reflect.DeepEqual(s1.NextInputAddr(), s2.NextInputAddr()) {
-		t.Fatalf("Wrong NextInputAddr; got %v, want %v", s1.NextInputAddr(), s2.NextInputAddr())
+	if !reflect.DeepEqual(got.NextInputAddr(), want.NextInputAddr()) {
+		t.Fatalf("Wrong NextInputAddr; got %v, want %v", got.NextInputAddr(), want.NextInputAddr())
 	}
 
-	if !reflect.DeepEqual(s1.NextChangeAddr(), s2.NextChangeAddr()) {
-		t.Fatalf("Wrong NextChangeAddr; got %v, want %v", s1.NextChangeAddr(), s2.NextChangeAddr())
+	if !reflect.DeepEqual(got.NextChangeAddr(), want.NextChangeAddr()) {
+		t.Fatalf("Wrong NextChangeAddr; got %v, want %v", got.NextChangeAddr(), want.NextChangeAddr())
 	}
 
-	if !reflect.DeepEqual(s1.Outputs(), s2.Outputs()) {
-		t.Fatalf("Wrong WithdrawalOutputs; got %v, want %v", s1.Outputs(), s2.Outputs())
+	if !reflect.DeepEqual(got.Outputs(), want.Outputs()) {
+		t.Fatalf("Wrong WithdrawalOutputs; got %v, want %v", got.Outputs(), want.Outputs())
 	}
 
-	if !reflect.DeepEqual(s1.transactions, s2.transactions) {
-		t.Fatalf("Wrong transactions; got %v, want %v", s1.transactions, s2.transactions)
+	if !reflect.DeepEqual(got.transactions, want.transactions) {
+		t.Fatalf("Wrong transactions; got %v, want %v", got.transactions, want.transactions)
 	}
 
 	// The above checks could be replaced by this one, but when they fail the
 	// failure msg wouldn't give us much clue as to what is not equal, so we do
 	// the individual checks above and use this one as a catch-all check in case
 	// we forget to check any of the individual fields.
-	if !reflect.DeepEqual(s1, s2) {
-		t.Fatalf("Wrong WithdrawalStatus; got %v, want %v", s1, s2)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Wrong WithdrawalStatus; got %v, want %v", got, want)
+	}
+}
+
+func TstCheckAddressIdentifier(t *testing.T, addr AddressIdentifier, seriesID uint32,
+	branch Branch, index Index) {
+
+	if addr.SeriesID() != seriesID {
+		t.Fatalf("Wrong SeriesID; got %d, want %d", addr.SeriesID(), seriesID)
+	}
+	if addr.Branch() != branch {
+		t.Fatalf("Wrong Branch; got %d, want %d", addr.Branch(), branch)
+	}
+	if addr.Index() != index {
+		t.Fatalf("Wrong Index; got %d, want %d", addr.Index(), index)
 	}
 }

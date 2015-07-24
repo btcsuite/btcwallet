@@ -99,8 +99,7 @@ func (c byAddress) Less(i, j int) bool {
 // and the last used address of lastSeriesID. They're reverse ordered based on
 // their address.
 func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAddress,
-	lastSeriesID uint32, dustThreshold btcutil.Amount, chainHeight int32,
-	minConf int) ([]credit, error) {
+	lastSeriesID uint32, dustThreshold btcutil.Amount, minConf int) ([]credit, error) {
 
 	if p.Series(lastSeriesID) == nil {
 		str := fmt.Sprintf("lastSeriesID (%d) does not exist", lastSeriesID)
@@ -115,9 +114,10 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 		return nil, err
 	}
 	var inputs []credit
+	chainHeight := p.manager.SyncedTo().Height
 	address := startAddress
 	for {
-		log.Debugf("Looking for eligible inputs at address %v", address.addrIdentifier())
+		log.Debugf("Looking for eligible inputs at address %s", address)
 		if candidates, ok := addrMap[address.addr.EncodeAddress()]; ok {
 			var eligibles []credit
 			for _, c := range candidates {
@@ -239,12 +239,15 @@ func groupCreditsByAddr(credits []wtxmgr.Credit, chainParams *chaincfg.Params) (
 func (p *Pool) isCreditEligible(c credit, minConf int, chainHeight int32,
 	dustThreshold btcutil.Amount) bool {
 	if c.Amount < dustThreshold {
+		log.Debugf("Credit amount (%v) is below dust threshold (%v); skipping", c.Amount, dustThreshold)
 		return false
 	}
-	if confirms(c.BlockMeta.Block.Height, chainHeight) < int32(minConf) {
+	if confirms(c.Height, chainHeight) < int32(minConf) {
+		log.Debugf("Credit has less than %d confirmations; skipping", minConf)
 		return false
 	}
 	if p.isCharterOutput(c) {
+		log.Debugf("Credit is the charter output; skipping")
 		return false
 	}
 
