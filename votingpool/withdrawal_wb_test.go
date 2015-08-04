@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
@@ -784,24 +785,23 @@ func TestGetWithdrawalStatus(t *testing.T) {
 }
 
 func TestSignMultiSigUTXO(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	// Create a new tx with a single input that we're going to sign.
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{4e6})
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	tx := createChangeAwareTx(t, store, pool, []int64{4e6}, []int64{4e6})
+	ntxid := Ntxid("ntxid")
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	msgtx := tx.toMsgTx()
-	txSigs := sigs[tx.ntxid()]
+	txSigs := sigs[ntxid]
 
 	idx := 0 // The index of the tx input we're going to sign.
-	pkScript := tx.inputs[idx].PkScript
+	pkScript := getTxInPkScript(t, store, tx.MsgTx, idx)
 	TstRunWithManagerUnlocked(t, mgr, func() {
-		if err = signMultiSigUTXO(mgr, msgtx, idx, pkScript, txSigs[idx]); err != nil {
+		if err = signMultiSigUTXO(mgr, tx.MsgTx, idx, pkScript, txSigs[idx]); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -816,7 +816,7 @@ func TestSignMultiSigUTXOUnparseablePkScript(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	unparseablePkScript := []byte{0x01}
-	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -831,7 +831,7 @@ func TestSignMultiSigUTXOPkScriptNotP2SH(t *testing.T) {
 	pubKeyHashPkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressPubKeyHash))
 	msgtx := tx.toMsgTx()
 
-	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -851,126 +851,131 @@ func TestSignMultiSigUTXORedeemScriptNotFound(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	pkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressScriptHash))
-	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestSignMultiSigUTXONotEnoughSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	tx := createChangeAwareTx(t, store, pool, []int64{4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgtx := tx.toMsgTx()
-	txSigs := sigs[tx.ntxid()]
+	txSigs := sigs[ntxid]
 
 	idx := 0 // The index of the tx input we're going to sign.
 	// Here we provide reqSigs-1 signatures to SignMultiSigUTXO()
-	reqSigs := tx.inputs[idx].addr.series().TstGetReqSigs()
-	txInSigs := txSigs[idx][:reqSigs-1]
-	pkScript := tx.inputs[idx].PkScript
+	txInSigs := txSigs[idx]
+	txInSigs.Sigs = txInSigs.Sigs[:txInSigs.Required-1]
+	pkScript := getTxInPkScript(t, store, tx.MsgTx, idx)
+
 	TstRunWithManagerUnlocked(t, mgr, func() {
-		err = signMultiSigUTXO(mgr, msgtx, idx, pkScript, txInSigs)
+		err = signMultiSigUTXO(mgr, tx.MsgTx, idx, pkScript, txInSigs)
 	})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestSignMultiSigUTXOWrongRawSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
-	sigs := []RawSig{RawSig{0x00}, RawSig{0x01}}
+	tx := createChangeAwareTx(t, store, pool, []int64{4e6}, []int64{})
+	sigs := newTxInSigs(1, 2)
+	sigs.Sigs = []RawSig{RawSig{0x00}, RawSig{0x01}}
 
 	idx := 0 // The index of the tx input we're going to sign.
-	pkScript := tx.inputs[idx].PkScript
+	pkScript := getTxInPkScript(t, store, tx.MsgTx, idx)
 	var err error
 	TstRunWithManagerUnlocked(t, mgr, func() {
-		err = signMultiSigUTXO(mgr, tx.toMsgTx(), idx, pkScript, sigs)
+		err = signMultiSigUTXO(mgr, tx.MsgTx, idx, pkScript, sigs)
 	})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestGetRawSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
-
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgtx := tx.toMsgTx()
-	txSigs := sigs[tx.ntxid()]
-	if len(txSigs) != len(tx.inputs) {
-		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.inputs))
+	txSigs := sigs[ntxid]
+	if len(txSigs) != len(tx.TxIn) {
+		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.TxIn))
 	}
 
-	checkNonEmptySigsForPrivKeys(t, txSigs, tx.inputs[0].addr.series().privateKeys)
+	privKeys := tx.addrs[tx.TxIn[0].PreviousOutPoint].series().privateKeys
+	checkNonEmptySigsForPrivKeys(t, txSigs, privKeys)
 
 	// Since we have all the necessary signatures (m-of-n), we construct the
 	// sigsnature scripts and execute them to make sure the raw signatures are
 	// valid.
-	signTxAndValidate(t, pool.Manager(), msgtx, txSigs, tx.inputs)
+	signTxAndValidate(t, pool.Manager(), store, tx.MsgTx, txSigs)
 }
 
 func TestGetRawSigsOnlyOnePrivKeyAvailable(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
 	// Remove all private keys but the first one from the credit's series.
-	series := tx.inputs[0].addr.series()
+	series := tx.addrs[tx.TxIn[0].PreviousOutPoint].series()
 	for i := range series.privateKeys[1:] {
 		series.privateKeys[i] = nil
 	}
 
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	txSigs := sigs[tx.ntxid()]
-	if len(txSigs) != len(tx.inputs) {
-		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.inputs))
+	txSigs := sigs[ntxid]
+	if len(txSigs) != len(tx.TxIn) {
+		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.TxIn))
 	}
 
 	checkNonEmptySigsForPrivKeys(t, txSigs, series.privateKeys)
 }
 
 func TestGetRawSigsUnparseableRedeemScript(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
 	// Change the redeem script for one of our tx inputs, to force an error in
 	// getRawSigs().
-	tx.inputs[0].addr.script = []byte{0x01}
+	tx.addrs[tx.TxIn[0].PreviousOutPoint].script = []byte{0x01}
 
-	_, err := getRawSigs([]*withdrawalTx{tx})
+	_, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 
 	TstCheckError(t, "", err, ErrRawSigning)
 }
 
 func TestGetRawSigsInvalidAddrBranch(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
 	// Change the branch of our input's address to an invalid value, to force
 	// an error in getRawSigs().
-	tx.inputs[0].addr.branch = Branch(999)
+	tx.addrs[tx.TxIn[0].PreviousOutPoint].branch = Branch(999)
 
-	_, err := getRawSigs([]*withdrawalTx{tx})
+	_, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 
 	TstCheckError(t, "", err, ErrInvalidBranch)
 }
@@ -1020,10 +1025,11 @@ func TestTxTooBig(t *testing.T) {
 }
 
 func TestTxSizeCalculation(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{1, 5}, []int64{2})
+	tx := createWithdrawalTxWithStoreCredits(t, store, pool, []int64{1, 5}, []int64{2})
+	ntxid := tx.ntxid()
 
 	size := tx.calculateSize()
 
@@ -1034,12 +1040,13 @@ func TestTxSizeCalculation(t *testing.T) {
 	tx.calculateFee = TstConstantFee(1)
 	seriesID := tx.inputs[0].addr.SeriesID()
 	tx.addChange(TstNewChangeAddress(t, pool, seriesID, 0).addr.ScriptAddress())
-	msgtx := tx.toMsgTx()
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	cTx := changeAwareTxFromWithdrawalTx(tx)
+	msgtx := cTx.MsgTx
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: cTx})
 	if err != nil {
 		t.Fatal(err)
 	}
-	signTxAndValidate(t, pool.Manager(), msgtx, sigs[tx.ntxid()], tx.inputs)
+	signTxAndValidate(t, pool.Manager(), store, msgtx, sigs[ntxid])
 
 	// ECDSA signatures have variable length (71-73 bytes) but in
 	// calculateSize() we use a dummy signature for the worst-case scenario (73
@@ -1165,42 +1172,17 @@ func TestStoreTransactionsWithChangeOutput(t *testing.T) {
 	}
 }
 
-// createWithdrawalTxWithStoreCredits creates a new Credit in the given store
-// for each entry in inputAmounts, and uses them to construct a withdrawalTx
-// with one output for every entry in outputAmounts.
-func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool *Pool,
-	inputAmounts []int64, outputAmounts []int64) *withdrawalTx {
-	masters := []*hdkeychain.ExtendedKey{
-		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
-		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
-		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
-	}
-	def := TstCreateSeriesDef(t, pool, 2, masters)
-	TstCreateSeries(t, pool, []TstSeriesDef{def})
-	net := pool.Manager().ChainParams()
-	tx := newWithdrawalTx(defaultTxOptions)
-	for _, c := range TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, inputAmounts, store) {
-		tx.addInput(c)
-	}
-	for i, amount := range outputAmounts {
-		request := TstNewOutputRequest(
-			t, uint32(i), "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", btcutil.Amount(amount), net)
-		tx.addOutput(request)
-	}
-	return tx
-}
-
 // checkNonEmptySigsForPrivKeys checks that every signature list in txSigs has
 // one non-empty signature for every non-nil private key in the given list. This
 // is to make sure every signature list matches the specification at
 // http://opentransactions.org/wiki/index.php/Siglist.
 func checkNonEmptySigsForPrivKeys(t *testing.T, txSigs TxSigs, privKeys []*hdkeychain.ExtendedKey) {
 	for _, txInSigs := range txSigs {
-		if len(txInSigs) != len(privKeys) {
+		if len(txInSigs.Sigs) != len(privKeys) {
 			t.Fatalf("Number of items in sig list (%d) does not match number of privkeys (%d)",
-				len(txInSigs), len(privKeys))
+				len(txInSigs.Sigs), len(privKeys))
 		}
-		for sigIdx, sig := range txInSigs {
+		for sigIdx, sig := range txInSigs.Sigs {
 			key := privKeys[sigIdx]
 			if bytes.Equal(sig, []byte{}) && key != nil {
 				t.Fatalf("Empty signature (idx=%d) but key (%s) is available",
@@ -1262,12 +1244,11 @@ func checkTxInputs(t *testing.T, tx *withdrawalTx, inputs []credit) {
 }
 
 // signTxAndValidate will construct the signature script for each input of the given
-// transaction (using the given raw signatures and the pkScripts from credits) and execute
-// those scripts to validate them.
-func signTxAndValidate(t *testing.T, mgr *waddrmgr.Manager, tx *wire.MsgTx, txSigs TxSigs,
-	credits []credit) {
+// transaction (using the given raw signatures, and looking up the pkScript
+// from the wtxmgr.Store) and execute those scripts to validate them.
+func signTxAndValidate(t *testing.T, mgr *waddrmgr.Manager, store *wtxmgr.Store, tx *wire.MsgTx, txSigs TxSigs) {
 	for i := range tx.TxIn {
-		pkScript := credits[i].PkScript
+		pkScript := getTxInPkScript(t, store, tx, i)
 		TstRunWithManagerUnlocked(t, mgr, func() {
 			if err := signMultiSigUTXO(mgr, tx, i, pkScript, txSigs[i]); err != nil {
 				t.Fatal(err)
@@ -1373,4 +1354,16 @@ func checkLastOutputWasSplit(t *testing.T, w *withdrawal, tx *withdrawalTx,
 	if status != statusPartial {
 		t.Fatalf("Wrong output status; got '%s', want '%s'", status, statusPartial)
 	}
+}
+
+func getTxInPkScript(t *testing.T, store *wtxmgr.Store, tx *wire.MsgTx, idx int) []byte {
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkScripts, err := store.PreviousPkScripts(rec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pkScripts[idx]
 }
