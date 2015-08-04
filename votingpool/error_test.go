@@ -66,10 +66,13 @@ func TestErrorCodeStringer(t *testing.T) {
 		{vp.ErrWithdrawFromUnusedAddr, "ErrWithdrawFromUnusedAddr"},
 		{vp.ErrWithdrawalTxStorage, "ErrWithdrawalTxStorage"},
 		{vp.ErrWithdrawalStorage, "ErrWithdrawalStorage"},
+		{vp.ErrSigsListMismatch, "ErrSigsListMismatch"},
+		{vp.ErrNotEnoughSigs, "ErrNotEnoughSigs"},
+		{vp.ErrInvalidAddrIdentifierIndex, "ErrInvalidAddrIdentifierIndex"},
 		{0xffff, "Unknown ErrorCode (65535)"},
 	}
 
-	if int(vp.TstLastErr) != len(tests)-1 {
+	if int(vp.TstLastErr) != len(tests) {
 		t.Errorf("Wrong number of errorCodeStrings. Got: %d, want: %d",
 			int(vp.TstLastErr), len(tests))
 	}
