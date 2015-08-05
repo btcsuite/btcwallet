@@ -106,6 +106,8 @@ type dbOutBailmentOutpoint struct {
 type dbChangeAwareTx struct {
 	SerializedMsgTx []byte
 	ChangeIdx       int32
+	Addrs           map[wire.OutPoint]dbWithdrawalAddress
+	Broadcast       bool
 }
 
 type dbWithdrawalStatus struct {
@@ -451,9 +453,19 @@ func serializeWithdrawal(requests []OutputRequest, startAddress WithdrawalAddres
 		if err := tx.Serialize(&buf); err != nil {
 			return nil, err
 		}
+		addrs := make(map[wire.OutPoint]dbWithdrawalAddress)
+		for outpoint, addr := range tx.addrs {
+			addrs[outpoint] = dbWithdrawalAddress{
+				SeriesID: addr.SeriesID(),
+				Branch:   addr.Branch(),
+				Index:    addr.Index(),
+			}
+		}
 		dbTransactions[ntxid] = dbChangeAwareTx{
 			SerializedMsgTx: buf.Bytes(),
 			ChangeIdx:       tx.changeIdx,
+			Addrs:           addrs,
+			Broadcast:       tx.broadcast,
 		}
 	}
 	nextChange := status.nextChangeAddr
@@ -568,9 +580,19 @@ func deserializeWithdrawal(p *Pool, serialized []byte) (*withdrawalInfo, error) 
 		if err := msgtx.Deserialize(bytes.NewBuffer(tx.SerializedMsgTx)); err != nil {
 			return nil, newError(ErrWithdrawalStorage, "cannot deserialize transaction", err)
 		}
+		addrs := make(map[wire.OutPoint]WithdrawalAddress)
+		for outpoint, addr := range tx.Addrs {
+			wAddr, err := p.WithdrawalAddress(addr.SeriesID, addr.Branch, addr.Index)
+			if err != nil {
+				return nil, newError(ErrWithdrawalStorage, "cannot deserialize addr: ", err)
+			}
+			addrs[outpoint] = *wAddr
+		}
 		wInfo.status.transactions[ntxid] = changeAwareTx{
 			MsgTx:     msgtx,
 			changeIdx: tx.ChangeIdx,
+			addrs:     addrs,
+			broadcast: tx.Broadcast,
 		}
 	}
 	return wInfo, nil
