@@ -67,6 +67,64 @@ func createWithdrawalTx(t *testing.T, pool *Pool, inputAmounts []int64, outputAm
 	return tx
 }
 
+// createWithdrawalTxWithStoreCredits creates a new Credit in the given store
+// for each entry in inputAmounts, and uses them to construct a withdrawalTx
+// with one output for every entry in outputAmounts.
+func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool *Pool,
+	inputAmounts []int64, outputAmounts []int64) *withdrawalTx {
+	masters := []*hdkeychain.ExtendedKey{
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+	}
+	def := TstCreateSeriesDef(t, pool, 2, masters)
+	TstCreateSeries(t, pool, []TstSeriesDef{def})
+	net := pool.Manager().ChainParams()
+	tx := newWithdrawalTx(defaultTxOptions)
+	for _, c := range TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, inputAmounts, store) {
+		tx.addInput(c)
+	}
+	for i, amount := range outputAmounts {
+		request := TstNewOutputRequest(
+			t, uint32(i), "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", btcutil.Amount(amount), net)
+		tx.addOutput(request)
+	}
+	return tx
+}
+
+func createChangeAwareTx(t *testing.T, store *wtxmgr.Store, pool *Pool, inputAmounts []int64,
+	outputAmounts []int64) changeAwareTx {
+	wTx := createWithdrawalTxWithStoreCredits(t, store, pool, inputAmounts, outputAmounts)
+	return changeAwareTxFromWithdrawalTx(wTx)
+}
+
+func changeAwareTxFromWithdrawalTx(tx *withdrawalTx) changeAwareTx {
+	msgtx := tx.toMsgTx()
+	changeIdx := -1
+	if tx.hasChange() {
+		// When withdrawalTx has a change, we know it will be the last entry
+		// in the generated MsgTx.
+		changeIdx = len(msgtx.TxOut) - 1
+	}
+	cTx := changeAwareTx{
+		MsgTx:     msgtx,
+		changeIdx: int32(changeIdx),
+	}
+	cTx.addrs = make(map[wire.OutPoint]WithdrawalAddress)
+	for _, txIn := range msgtx.TxIn {
+		prevOutpoint := txIn.PreviousOutPoint
+		var c credit
+		for _, input := range tx.inputs {
+			if prevOutpoint == input.OutPoint {
+				c = input
+				break
+			}
+		}
+		cTx.addrs[prevOutpoint] = c.addr
+	}
+	return cTx
+}
+
 func createMsgTx(pkScript []byte, amts []int64) *wire.MsgTx {
 	msgtx := &wire.MsgTx{
 		Version: 1,
@@ -243,27 +301,29 @@ func TstCreateCreditsOnNewSeries(t *testing.T, pool *Pool, amounts []int64) (uin
 }
 
 // TstCreateSeriesCredits creates a new credit for every item in the amounts
-// slice, locked to the given series' address with branch==1 and index==0.
+// slice, locked to the given series' address with branch==1 and the index
+// varying according to the index of the amount on the amounts slice.
 func TstCreateSeriesCredits(t *testing.T, pool *Pool, seriesID uint32, amounts []int64) []credit {
-	addr := TstNewWithdrawalAddress(t, pool, seriesID, Branch(1), Index(0))
-	pkScript, err := txscript.PayToAddrScript(addr.addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	msgTx := createMsgTx(pkScript, amounts)
-	txSha := msgTx.TxSha()
 	credits := make([]credit, len(amounts))
-	for i := range msgTx.TxOut {
+	for i, amount := range amounts {
+		addr := TstNewWithdrawalAddress(t, pool, seriesID, Branch(1), Index(i))
+		pkScript, err := txscript.PayToAddrScript(addr.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		msgTx := createMsgTx(pkScript, []int64{amount})
+		txSha := msgTx.TxSha()
+		idx := 0
 		c := wtxmgr.Credit{
 			OutPoint: wire.OutPoint{
 				Hash:  txSha,
-				Index: uint32(i),
+				Index: uint32(idx),
 			},
 			BlockMeta: wtxmgr.BlockMeta{
 				Block: wtxmgr.Block{Height: TstInputsBlock},
 			},
-			Amount:   btcutil.Amount(msgTx.TxOut[i].Value),
-			PkScript: msgTx.TxOut[i].PkScript,
+			Amount:   btcutil.Amount(amount),
+			PkScript: msgTx.TxOut[idx].PkScript,
 		}
 		credits[i] = newCredit(c, *addr)
 	}
@@ -422,20 +482,32 @@ func TstConstantFee(fee btcutil.Amount) func() btcutil.Amount {
 	return func() btcutil.Amount { return fee }
 }
 
-func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32) withdrawalInfo {
-
+// createAndFulfillWithdrawalRequests creates two output requests with amounts
+// 3e6 and 2e6 and fulfills them using newly created inputs (locked to a 2-of-3
+// multi-sig address belonging to a series created with a unique ID) of amounts
+// 2e6 and 4e6. The returned withdrawalInfo will contain a single transaction
+// and all raw signatures needed to sign that transaction.
+func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32, store *wtxmgr.Store) withdrawalInfo {
+	masters := []*hdkeychain.ExtendedKey{
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+	}
+	def := TstCreateSeriesDef(t, pool, 2, masters)
+	TstCreateSeries(t, pool, []TstSeriesDef{def})
+	credits := TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, []int64{2e6, 4e6}, store)
 	params := pool.Manager().ChainParams()
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
 	requests := []OutputRequest{
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, params),
 		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2e6, params),
 	}
-	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	changeStart := TstNewChangeAddress(t, pool, def.SeriesID, 0)
 	dustThreshold := btcutil.Amount(1e4)
-	startAddr := TstNewWithdrawalAddress(t, pool, seriesID, 1, 0)
-	lastSeriesID := seriesID
-	w := newWithdrawal(roundID, requests, eligible, *changeStart)
-	if err := w.fulfillRequests(); err != nil {
+	startAddr := TstNewWithdrawalAddress(t, pool, def.SeriesID, 1, 0)
+	lastSeriesID := def.SeriesID
+	status, err := pool.fulfillAndSaveWithdrawal(roundID, requests, *startAddr, lastSeriesID,
+		*changeStart, dustThreshold, credits)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return withdrawalInfo{
@@ -444,6 +516,6 @@ func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32
 		changeStart:   *changeStart,
 		lastSeriesID:  lastSeriesID,
 		dustThreshold: dustThreshold,
-		status:        *w.status,
+		status:        *status,
 	}
 }

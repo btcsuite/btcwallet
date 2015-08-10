@@ -56,7 +56,7 @@ const (
 type OutBailmentID string
 
 // Ntxid is the normalized ID of a given bitcoin transaction, which is generated
-// by hashing the serialized tx with blank sig scripts on all inputs.
+// by hashing the serialized tx with nil sig scripts on all inputs.
 type Ntxid string
 
 // OutputRequest represents one of the outputs (address/amount) requested by a
@@ -93,19 +93,25 @@ type OutBailmentOutpoint struct {
 	amount btcutil.Amount
 }
 
-// changeAwareTx is just a wrapper around wire.MsgTx that knows about its change
-// output, if any.
+// changeAwareTx is a wrapper around wire.MsgTx that has some auxiliary data
+// needed when processing voting pool withdrawals.
 type changeAwareTx struct {
 	*wire.MsgTx
-	changeIdx int32 // -1 if there's no change output.
+	// The index of the tx's change output. -1 if there's no change output.
+	changeIdx int32
+	// A map allowing us to link each TxIn from this tx to the
+	// WithdrawalAddress of the credit they spend.
+	addrs map[wire.OutPoint]WithdrawalAddress
+	// Has this transaction been broadcast yet?
+	broadcast bool
 }
 
 // WithdrawalStatus contains the details of a processed withdrawal, including
 // the status of each requested output, the total amount of network fees and the
 // next input and change addresses to use in a subsequent withdrawal request.
 type WithdrawalStatus struct {
-	nextInputAddr  WithdrawalAddress
-	nextChangeAddr ChangeAddress
+	nextInputAddr  AddressIdentifier
+	nextChangeAddr AddressIdentifier
 	fees           btcutil.Amount
 	outputs        map[OutBailmentID]*WithdrawalOutput
 	sigs           map[Ntxid]TxSigs
@@ -124,15 +130,32 @@ type withdrawalInfo struct {
 	status        WithdrawalStatus
 }
 
-// TxSigs is list of raw signatures (one for every pubkey in the multi-sig
+// TxSigs is a slice containing one element for each input of a given
+// transaction.
+type TxSigs []TxInSigs
+
+// TxInSigs represents the raw signatures (one for every pubkey in the multi-sig
 // script) for a given transaction input. They should match the order of pubkeys
 // in the script and an empty RawSig should be used when the private key for a
 // pubkey is not known.
-type TxSigs [][]RawSig
+type TxInSigs struct {
+	Required uint32
+	Sigs     []RawSig
+}
+
+func newTxInSigs(reqSigs uint32, length int) TxInSigs {
+	sigs := make([]RawSig, length)
+	for i := range sigs {
+		sigs[i] = emptyRawSig
+	}
+	return TxInSigs{Required: reqSigs, Sigs: sigs}
+}
 
 // RawSig represents one of the signatures included in the unlocking script of
 // inputs spending from P2SH UTXOs.
 type RawSig []byte
+
+var emptyRawSig = RawSig{}
 
 // byAmount defines the methods needed to satisify sort.Interface to
 // sort a slice of OutputRequests by their amount.
@@ -161,7 +184,7 @@ func (s outputStatus) String() string {
 	return strings[s]
 }
 
-func (tx *changeAwareTx) addSelfToStore(store *wtxmgr.Store) error {
+func (tx *changeAwareTx) addToStore(store *wtxmgr.Store) error {
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx, time.Now())
 	if err != nil {
 		return newError(ErrWithdrawalTxStorage, "error constructing TxRecord for storing", err)
@@ -175,6 +198,7 @@ func (tx *changeAwareTx) addSelfToStore(store *wtxmgr.Store) error {
 			return newError(ErrWithdrawalTxStorage, "error adding tx credits to store", err)
 		}
 	}
+	tx.broadcast = true
 	return nil
 }
 
@@ -198,13 +222,13 @@ func (s *WithdrawalStatus) Fees() btcutil.Amount {
 
 // NextInputAddr returns the votingpool address that should be used as the
 // startAddress of subsequent withdrawals.
-func (s *WithdrawalStatus) NextInputAddr() WithdrawalAddress {
+func (s *WithdrawalStatus) NextInputAddr() AddressIdentifier {
 	return s.nextInputAddr
 }
 
 // NextChangeAddr returns the votingpool address that should be used as the
 // changeStart of subsequent withdrawals.
-func (s *WithdrawalStatus) NextChangeAddr() ChangeAddress {
+func (s *WithdrawalStatus) NextChangeAddr() AddressIdentifier {
 	return s.nextChangeAddr
 }
 
@@ -269,6 +293,7 @@ type withdrawal struct {
 	pendingRequests []OutputRequest
 	eligibleInputs  []credit
 	current         *withdrawalTx
+	nextChangeAddr  ChangeAddress
 	// txOptions is a function called for every new withdrawalTx created as
 	// part of this withdrawal. It is defined as a function field because it
 	// exists mainly so that tests can mock withdrawalTx fields.
@@ -330,9 +355,8 @@ func newWithdrawalTx(setOptions func(tx *withdrawalTx)) *withdrawalTx {
 // ntxid returns the unique ID for this transaction.
 func (tx *withdrawalTx) ntxid() Ntxid {
 	msgtx := tx.toMsgTx()
-	var empty []byte
 	for _, txin := range msgtx.TxIn {
-		txin.SignatureScript = empty
+		txin.SignatureScript = nil
 	}
 	return Ntxid(msgtx.TxSha().String())
 }
@@ -478,6 +502,7 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 		eligibleInputs:  inputs,
 		status:          status,
 		txOptions:       defaultTxOptions,
+		nextChangeAddr:  changeStart,
 	}
 }
 
@@ -494,7 +519,7 @@ func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 	txStore *wtxmgr.Store, chainHeight int32, dustThreshold btcutil.Amount) (
 	*WithdrawalStatus, error) {
 
-	status, err := getWithdrawalStatus(p, roundID, requests, startAddress, lastSeriesID,
+	status, err := getWithdrawalStatusMatching(p, roundID, requests, startAddress, lastSeriesID,
 		changeStart, dustThreshold)
 	if err != nil {
 		return nil, err
@@ -509,29 +534,168 @@ func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 		return nil, err
 	}
 
+	return p.fulfillAndSaveWithdrawal(roundID, requests, startAddress, lastSeriesID, changeStart,
+		dustThreshold, eligible)
+}
+
+func (p *Pool) fulfillAndSaveWithdrawal(roundID uint32, requests []OutputRequest,
+	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
+	dustThreshold btcutil.Amount, eligible []credit) (*WithdrawalStatus, error) {
+	var err error
 	w := newWithdrawal(roundID, requests, eligible, changeStart)
-	if err := w.fulfillRequests(); err != nil {
+	if err = w.fulfillRequests(); err != nil {
 		return nil, err
 	}
-	w.status.sigs, err = getRawSigs(w.transactions)
+	if err = w.updateOutputsStatusAndNextInputAddr(lastSeriesID); err != nil {
+		return nil, err
+	}
+	w.status.sigs, err = getRawSigs(w.status.transactions)
 	if err != nil {
 		return nil, err
 	}
-
-	serialized, err := serializeWithdrawal(requests, startAddress, lastSeriesID, changeStart,
+	err = p.saveWithdrawal(roundID, requests, startAddress, lastSeriesID, changeStart,
 		dustThreshold, *w.status)
 	if err != nil {
 		return nil, err
 	}
-	err = p.namespace.Update(
+	return w.status, nil
+}
+
+// UpdateWithdrawal looks up the information from the withdrawal with the given
+// roundID, merges the existing signature lists with the given ones, broadcasts
+// all transactions that can be signed (i.e. for which we have the minimum
+// number of signatures) and that haven't been broadcast yet, and finally saves
+// the updated withdrawal information in the database.
+// It must be called with the address manager unlocked.
+func (p *Pool) UpdateWithdrawal(roundID uint32, sigs map[Ntxid]TxSigs, store *wtxmgr.Store) error {
+	wInfo, err := getWithdrawalInfo(p, roundID)
+	if err != nil {
+		return err
+	}
+	status := wInfo.status
+
+	// Re-generate the raw signatures and merge them with the existing ones as
+	// one or more series may have been made hot since the StartWithdrawal call
+	// that initiated this withdrawal.
+	newSigs, err := getRawSigs(status.transactions)
+	if err != nil {
+		return err
+	}
+	if err = status.mergeSigs(newSigs); err != nil {
+		return err
+	}
+
+	// Now merge the raw signatures passed in.
+	if err = status.mergeSigs(sigs); err != nil {
+		return err
+	}
+	if err = status.maybeBroadcastTxs(p.manager, store); err != nil {
+		return err
+	}
+	err = p.saveWithdrawal(roundID, wInfo.requests, wInfo.startAddress, wInfo.lastSeriesID,
+		wInfo.changeStart, wInfo.dustThreshold, wInfo.status)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// maybeBroadcastTxs will attempt to sign all transactions in this
+// WithdrawalStatus (using the raw signatures from WithdrawalStatus.sigs),
+// and broadcast the ones that can be signed (i.e. those for which we have
+// the minimum required signatures for each input). Any transactions broadcast
+// will be modified to indicate that, so the DB entry for this WithdrawalStatus
+// must be updated (via Pool.saveWithdrawal()) after this method returns.
+// This method must be called with the manager unlocked.
+func (s *WithdrawalStatus) maybeBroadcastTxs(mgr *waddrmgr.Manager, store *wtxmgr.Store) error {
+	for ntxid, tx := range s.transactions {
+		err := SignTx(tx.MsgTx, s.sigs[ntxid], mgr, store)
+		if err != nil && err.(Error).ErrorCode == ErrNotEnoughSigs {
+			log.Debugf("Not enough signatures for all inputs of tx %s; not broadcasting it", ntxid)
+			continue
+		} else if err != nil {
+			log.Debugf("Error attempting to sign tx %s", ntxid)
+			return err
+		}
+		// NOTE: Transactions are added one by one to wtxmgr, but if this
+		// method returns an error the callsites will not update this
+		// WithdrawalStatus in the DB and we may end up with broadcast
+		// transactions that are not marked as such in the votingpool DB. That
+		// shouldn't be a problem as wallet clients will retry the operation
+		// and tx.addToStore() is a no-op for transactions that have already
+		// been added.
+		if err := tx.addToStore(store); err != nil {
+			return err
+		}
+		log.Debugf("Successfully signed and broadcast tx %s", ntxid)
+		// tx.addSelfToStore() will have modified tx fields, but we're working
+		// on a copy of the original one thanks to the for/range loop, so we
+		// need to overwrite the original one in the map.
+		s.transactions[ntxid] = tx
+	}
+	return nil
+}
+
+func (s *WithdrawalStatus) mergeSigs(sigs map[Ntxid]TxSigs) error {
+	if len(s.sigs) != len(sigs) {
+		msg := fmt.Sprintf("number of new TxSigs (%d) does not match existing ones (%d)",
+			len(s.sigs), len(sigs))
+		return newError(ErrSigsListMismatch, msg, nil)
+	}
+	for ntxid, txSigs := range sigs {
+		existingSigs, ok := s.sigs[ntxid]
+		if !ok {
+			return newError(ErrSigsListMismatch, fmt.Sprintf("missing sigs for tx %s", ntxid), nil)
+		}
+		if len(existingSigs) != len(txSigs) {
+			msg := fmt.Sprintf("number of new siglists (%d) for tx %s does not match existing "+
+				"ones (%d)", len(txSigs), ntxid, len(existingSigs))
+			return newError(ErrSigsListMismatch, msg, nil)
+		}
+		for input, txInSigs := range txSigs {
+			if len(txInSigs.Sigs) != len(existingSigs[input].Sigs) {
+				msg := fmt.Sprintf("number of new sigs (%d) for tx %s, input %d "+
+					"does not match existing ones (%d)", len(txInSigs.Sigs), ntxid,
+					input, len(existingSigs[input].Sigs))
+				return newError(ErrSigsListMismatch, msg, nil)
+			}
+			for branch, sig := range txInSigs.Sigs {
+				if bytes.Equal(sig, emptyRawSig) {
+					continue
+				}
+				existingSig := existingSigs[input].Sigs[branch]
+				if bytes.Equal(existingSig, emptyRawSig) {
+					log.Debugf("Adding raw sig for tx %v, input %d, branch %d", ntxid, input, branch)
+					existingSigs[input].Sigs[branch] = sig
+				} else if !bytes.Equal(existingSig, sig) {
+					// Neither the new sig nor the existing one are empty, and
+					// they don't match. Since we use deterministic signatures,
+					// this could only happen if there's a bug in the code that
+					// generates the signature lists or in the signature
+					// construction itself.
+					msg := fmt.Sprintf("cannot merge signatures: both existing and new sig for "+
+						"tx %s, input %d, branch %d are non-empty but they don't match.",
+						ntxid, input, branch)
+					return newError(ErrSigsListMismatch, msg, nil)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (p *Pool) saveWithdrawal(roundID uint32, requests []OutputRequest,
+	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
+	dustThreshold btcutil.Amount, status WithdrawalStatus) error {
+	serialized, err := serializeWithdrawal(requests, startAddress, lastSeriesID, changeStart,
+		dustThreshold, status)
+	if err != nil {
+		return err
+	}
+	return p.namespace.Update(
 		func(tx walletdb.Tx) error {
 			return putWithdrawal(tx, p.ID, roundID, serialized)
 		})
-	if err != nil {
-		return nil, err
-	}
-
-	return w.status, nil
 }
 
 // popRequest removes and returns the first request from the stack of pending
@@ -553,6 +717,12 @@ func (w *withdrawal) popInput() credit {
 	input := w.eligibleInputs[len(w.eligibleInputs)-1]
 	w.eligibleInputs = w.eligibleInputs[:len(w.eligibleInputs)-1]
 	return input
+}
+
+// peekInput returns the first input from the stack of eligible inputs, without
+// changing the stack.
+func (w *withdrawal) peekInput() credit {
+	return w.eligibleInputs[len(w.eligibleInputs)-1]
 }
 
 // pushInput adds a new input to the top of the stack of eligible inputs.
@@ -630,13 +800,13 @@ func (w *withdrawal) finalizeCurrentTx() error {
 		return nil
 	}
 
-	pkScript, err := txscript.PayToAddrScript(w.status.nextChangeAddr.addr)
+	pkScript, err := txscript.PayToAddrScript(w.nextChangeAddr.addr)
 	if err != nil {
 		return newError(ErrWithdrawalProcessing, "failed to generate pkScript for change address", err)
 	}
 	if tx.addChange(pkScript) {
 		var err error
-		w.status.nextChangeAddr, err = nextChangeAddress(w.status.nextChangeAddr)
+		w.nextChangeAddr, err = nextChangeAddress(w.nextChangeAddr)
 		if err != nil {
 			return newError(ErrWithdrawalProcessing, "failed to get next change address", err)
 		}
@@ -699,6 +869,7 @@ func (w *withdrawal) maybeDropRequests() {
 func (w *withdrawal) fulfillRequests() error {
 	w.maybeDropRequests()
 	if len(w.pendingRequests) == 0 {
+		log.Info("Not enough inputs to fulfill any withdrawal requests")
 		return nil
 	}
 
@@ -722,12 +893,9 @@ func (w *withdrawal) fulfillRequests() error {
 		return err
 	}
 
-	// TODO: Update w.status.nextInputAddr. Not yet implemented as in some
-	// conditions we need to know about un-thawed series.
-
+	w.status.nextChangeAddr = w.nextChangeAddr.addressIdentifier
 	w.status.transactions = make(map[Ntxid]changeAwareTx, len(w.transactions))
 	for _, tx := range w.transactions {
-		w.status.updateStatusFor(tx)
 		w.status.fees += tx.fee
 		msgtx := tx.toMsgTx()
 		changeIdx := -1
@@ -736,9 +904,22 @@ func (w *withdrawal) fulfillRequests() error {
 			// in the generated MsgTx.
 			changeIdx = len(msgtx.TxOut) - 1
 		}
+		addrs := make(map[wire.OutPoint]WithdrawalAddress)
+		for _, txIn := range msgtx.TxIn {
+			prevOutpoint := txIn.PreviousOutPoint
+			var c credit
+			for _, input := range tx.inputs {
+				if prevOutpoint == input.OutPoint {
+					c = input
+					break
+				}
+			}
+			addrs[prevOutpoint] = c.addr
+		}
 		w.status.transactions[tx.ntxid()] = changeAwareTx{
 			MsgTx:     msgtx,
 			changeIdx: int32(changeIdx),
+			addrs:     addrs,
 		}
 	}
 	return nil
@@ -778,15 +959,32 @@ func (w *withdrawal) splitLastOutput() error {
 	return nil
 }
 
-func (s *WithdrawalStatus) updateStatusFor(tx *withdrawalTx) {
-	for _, output := range s.outputs {
+// updateOutputsStatusAndNextInputAddr updates the status of outputs that were
+// either partially fulfilled or split across multiple transactions and sets
+// the nextInputAddr, according to the rules described in
+// http://opentransactions.org/wiki/index.php/Update_Status.
+func (w *withdrawal) updateOutputsStatusAndNextInputAddr(lastSeriesID uint32) error {
+	for _, output := range w.status.outputs {
 		if len(output.outpoints) > 1 {
 			output.status = statusSplit
 		}
 		// TODO: Update outputs with status=='partial-'. For this we need an API
 		// that gives us the amount of credits in a given series.
-		// http://opentransactions.org/wiki/index.php/Update_Status
 	}
+
+	if len(w.eligibleInputs) > 0 {
+		nextInputAddr := w.peekInput().addr
+		w.status.nextInputAddr = nextInputAddr.addressIdentifier
+		log.Debugf("Withdrawal fulfilled with elibigle inputs still available; "+
+			"setting nextInputAddr to %s", nextInputAddr)
+	} else {
+		pool := w.nextChangeAddr.pool
+		w.status.nextInputAddr = &addressIdentifier{
+			pool: pool, seriesID: lastSeriesID + 1, branch: Branch(0), index: Index(0)}
+		log.Debugf("Withdrawal fulfilled but ran out of elibigle inputs; setting "+
+			"nextInputAddr to %s", w.status.nextInputAddr)
+	}
+	return nil
 }
 
 // match returns true if the given arguments match the fields in this
@@ -822,19 +1020,35 @@ func (wi *withdrawalInfo) match(requests []OutputRequest, startAddress Withdrawa
 	sort.Sort(byOutBailmentID(r1))
 	sort.Sort(byOutBailmentID(r2))
 	if !reflect.DeepEqual(r1, r2) {
-		log.Debugf("withdrawal requests does not match: %v != %v", requests, wi.requests)
+		log.Debugf("withdrawal requests do not match: %v != %v", requests, wi.requests)
 		return false
 	}
 	return true
 }
 
 // getWithdrawalStatus returns the existing WithdrawalStatus for the given
-// withdrawal parameters, if one exists. This function must be called with the
-// address manager unlocked.
-func getWithdrawalStatus(p *Pool, roundID uint32, requests []OutputRequest,
+// withdrawal parameters, if one exists and has attributes matching all the
+// arguments passed here. This function must be called with the address
+// manager unlocked.
+func getWithdrawalStatusMatching(p *Pool, roundID uint32, requests []OutputRequest,
 	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
 	dustThreshold btcutil.Amount) (*WithdrawalStatus, error) {
 
+	wInfo, err := getWithdrawalInfo(p, roundID)
+	if err != nil {
+		return nil, err
+	}
+	if wInfo == nil {
+		return nil, nil
+	}
+	log.Debugf("Found existing withdrawal for round %d, checking if parameters match", roundID)
+	if wInfo.match(requests, startAddress, lastSeriesID, changeStart, dustThreshold) {
+		return &wInfo.status, nil
+	}
+	return nil, nil
+}
+
+func getWithdrawalInfo(p *Pool, roundID uint32) (*withdrawalInfo, error) {
 	var serialized []byte
 	err := p.namespace.View(
 		func(tx walletdb.Tx) error {
@@ -847,28 +1061,19 @@ func getWithdrawalStatus(p *Pool, roundID uint32, requests []OutputRequest,
 	if bytes.Equal(serialized, []byte{}) {
 		return nil, nil
 	}
-	wInfo, err := deserializeWithdrawal(p, serialized)
-	if err != nil {
-		return nil, err
-	}
-	if wInfo.match(requests, startAddress, lastSeriesID, changeStart, dustThreshold) {
-		return &wInfo.status, nil
-	}
-	return nil, nil
+	return deserializeWithdrawal(p, serialized)
 }
 
 // getRawSigs iterates over the inputs of each transaction given, constructing the
 // raw signatures for them using the private keys available to us.
 // It returns a map of ntxids to signature lists.
-func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
+func getRawSigs(transactions map[Ntxid]changeAwareTx) (map[Ntxid]TxSigs, error) {
 	sigs := make(map[Ntxid]TxSigs)
-	for _, tx := range transactions {
-		txSigs := make(TxSigs, len(tx.inputs))
-		msgtx := tx.toMsgTx()
-		ntxid := tx.ntxid()
-		for inputIdx, input := range tx.inputs {
-			creditAddr := input.addr
-			redeemScript := creditAddr.redeemScript()
+	for ntxid, tx := range transactions {
+		txSigs := make(TxSigs, len(tx.TxIn))
+		for inputIdx, input := range tx.TxIn {
+			creditAddr := tx.addrs[input.PreviousOutPoint]
+			redeemScript := creditAddr.script
 			series := creditAddr.series()
 			// The order of the raw signatures in the signature script must match the
 			// order of the public keys in the redeem script, so we sort the public keys
@@ -878,7 +1083,7 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 			if err != nil {
 				return nil, err
 			}
-			txInSigs := make([]RawSig, len(pubKeys))
+			txInSigs := newTxInSigs(series.reqSigs, len(pubKeys))
 			for i, pubKey := range pubKeys {
 				var sig RawSig
 				privKey, err := series.getPrivKeyFor(pubKey)
@@ -897,16 +1102,16 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 					log.Debugf("Generating raw sig for input %d of tx %s with privkey of %s",
 						inputIdx, ntxid, pubKey.String())
 					sig, err = txscript.RawTxInSignature(
-						msgtx, inputIdx, redeemScript, txscript.SigHashAll, ecPrivKey)
+						tx.MsgTx, inputIdx, redeemScript, txscript.SigHashAll, ecPrivKey)
 					if err != nil {
 						return nil, newError(ErrRawSigning, "failed to generate raw signature", err)
 					}
 				} else {
 					log.Debugf("Not generating raw sig for input %d of %s because private key "+
 						"for %s is not available: %v", inputIdx, ntxid, pubKey.String(), err)
-					sig = []byte{}
+					sig = emptyRawSig
 				}
-				txInSigs[i] = sig
+				txInSigs.Sigs[i] = sig
 			}
 			txSigs[inputIdx] = txInSigs
 		}
@@ -929,6 +1134,11 @@ func SignTx(msgtx *wire.MsgTx, sigs TxSigs, mgr *waddrmgr.Manager, store *wtxmgr
 	pkScripts, err := store.PreviousPkScripts(rec, nil)
 	if err != nil {
 		return newError(ErrTxSigning, "failed to obtain pkScripts for signing", err)
+	}
+	if len(pkScripts) != len(sigs) {
+		msg := fmt.Sprintf("number of pkScripts (%d) do not match number of sigs (%d)",
+			len(pkScripts), len(sigs))
+		return newError(ErrTxSigning, msg, nil)
 	}
 	for i, pkScript := range pkScripts {
 		if err = signMultiSigUTXO(mgr, msgtx, i, pkScript, sigs[i]); err != nil {
@@ -955,7 +1165,7 @@ func getRedeemScript(mgr *waddrmgr.Manager, addr *btcutil.AddressScriptHash) ([]
 // The order of the signatures must match that of the public keys in the multi-sig
 // script as OP_CHECKMULTISIG expects that.
 // This function must be called with the manager unlocked.
-func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript []byte, sigs []RawSig) error {
+func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript []byte, sigs TxInSigs) error {
 	class, addresses, _, err := txscript.ExtractPkScriptAddrs(pkScript, mgr.ChainParams())
 	if err != nil {
 		return newError(ErrTxSigning, "unparseable pkScript", err)
@@ -975,16 +1185,22 @@ func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript [
 	if class != txscript.MultiSigTy {
 		return newError(ErrTxSigning, fmt.Sprintf("redeem script is not multi-sig: %v", class), nil)
 	}
-	if len(sigs) < nRequired {
+	var nonEmptySigs []RawSig
+	for _, sig := range sigs.Sigs {
+		if !bytes.Equal(sig, emptyRawSig) {
+			nonEmptySigs = append(nonEmptySigs, sig)
+		}
+	}
+	if len(nonEmptySigs) < nRequired {
 		errStr := fmt.Sprintf("not enough signatures; need %d but got only %d", nRequired,
-			len(sigs))
-		return newError(ErrTxSigning, errStr, nil)
+			len(nonEmptySigs))
+		return newError(ErrNotEnoughSigs, errStr, nil)
 	}
 
 	// Construct the unlocking script.
 	// Start with an OP_0 because of the bug in bitcoind, then add nRequired signatures.
 	unlockingScript := txscript.NewScriptBuilder().AddOp(txscript.OP_FALSE)
-	for _, sig := range sigs[:nRequired] {
+	for _, sig := range nonEmptySigs[:nRequired] {
 		unlockingScript.AddData(sig)
 	}
 
@@ -1005,8 +1221,7 @@ func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript [
 // validateSigScripts executes the signature script of the tx input with the
 // given index, returning an error if it fails.
 func validateSigScript(msgtx *wire.MsgTx, idx int, pkScript []byte) error {
-	vm, err := txscript.NewEngine(pkScript, msgtx, idx,
-		txscript.StandardVerifyFlags)
+	vm, err := txscript.NewEngine(pkScript, msgtx, idx, txscript.StandardVerifyFlags)
 	if err != nil {
 		return newError(ErrTxSigning, "cannot create script engine", err)
 	}
@@ -1038,7 +1253,7 @@ func calculateTxSize(tx *withdrawalTx) int {
 		// length they may have:
 		// https://en.bitcoin.it/wiki/Elliptic_Curve_Digital_Signature_Algorithm
 		addr := tx.inputs[i].addr
-		redeemScriptLen := len(addr.redeemScript())
+		redeemScriptLen := len(addr.script)
 		n := wire.VarIntSerializeSize(uint64(redeemScriptLen))
 		sigScriptLen := 1 + (74 * int(addr.series().reqSigs)) + redeemScriptLen + 1 + n
 		txin.SignatureScript = bytes.Repeat([]byte{1}, sigScriptLen)
@@ -1057,13 +1272,4 @@ func nextChangeAddress(a ChangeAddress) (ChangeAddress, error) {
 	}
 	addr, err := a.pool.ChangeAddress(seriesID, index)
 	return *addr, err
-}
-
-func storeTransactions(store *wtxmgr.Store, transactions []*changeAwareTx) error {
-	for _, tx := range transactions {
-		if err := tx.addSelfToStore(store); err != nil {
-			return err
-		}
-	}
-	return nil
 }

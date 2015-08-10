@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
@@ -28,7 +29,6 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -106,6 +106,9 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 	}
 
 	if err := w.fulfillRequests(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.updateOutputsStatusAndNextInputAddr(seriesID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -268,6 +271,27 @@ func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
 				wOutput.status, expectedStatuses[wOutput.request.outBailmentID()])
 		}
 	}
+}
+
+func TestWithdrawalNextInputAddr(t *testing.T) {
+	tearDown, _, pool := TstCreatePool(t)
+	defer tearDown()
+
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
+	// Sort the inputs by address like in getEligibleInputs().
+	sort.Sort(sort.Reverse(byAddress(eligible)))
+	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
+	w := newWithdrawal(0, []OutputRequest{}, eligible, *changeStart)
+
+	// This withdrawal won't use any eligible inputs, so the NextInputAddr
+	// will be set to the address of the first eligible input.
+	if err := w.updateOutputsStatusAndNextInputAddr(seriesID); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedAddr := w.peekInput().addr
+	TstCheckAddressIdentifier(t, w.status.NextInputAddr(), expectedAddr.SeriesID(),
+		expectedAddr.Branch(), expectedAddr.Index())
 }
 
 // TestRollbackLastOutput tests the case where we rollback one output
@@ -497,6 +521,53 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	checkTxInputs(t, secondTx, wantInputs)
 }
 
+func TestPoolUpdateWithdrawal(t *testing.T) {
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
+	defer tearDown()
+
+	roundID := uint32(0)
+	// This will create some withdrawal requests and fulfill them by creating
+	// one tx containing 2 inputs locked to a 2-of-3 multi-sig address.
+	wi := createAndFulfillWithdrawalRequests(t, pool, roundID, store)
+	status := wi.status
+	if len(status.transactions) != 1 {
+		t.Fatalf("Expected 1 transaction to have been created, got %d", len(status.transactions))
+	}
+	// Get the ntxid of our sole transaction.
+	var ntxid Ntxid
+	for ntxid = range status.transactions {
+	}
+	// The wInfo created above contains all the raw signatures necessary to
+	// sign the tx, so in order to test UpdateWithdrawal() we'll replace them
+	// with empty signatures and pass the original signature list to
+	// UpdateWithdrawal().
+	allSigs := copySigs(status.sigs)
+	status.sigs[ntxid] = TxSigs{newTxInSigs(2, 3), newTxInSigs(2, 3)}
+	err := pool.saveWithdrawal(roundID, wi.requests, wi.startAddress, wi.lastSeriesID,
+		wi.changeStart, wi.dustThreshold, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
+		if err := pool.UpdateWithdrawal(roundID, allSigs, store); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	var storedStatus *WithdrawalStatus
+	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
+		storedStatus, err = getWithdrawalStatusMatching(pool, roundID, wi.requests,
+			wi.startAddress, wi.lastSeriesID, wi.changeStart, wi.dustThreshold)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedStatus.transactions[ntxid].broadcast != true {
+		t.Fatalf("Tx %s should have been broadcast", ntxid)
+	}
+}
+
 func TestWithdrawalTxRemoveOutput(t *testing.T) {
 	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
 	defer tearDown()
@@ -668,11 +739,11 @@ func TestWithdrawalTxOutputTotal(t *testing.T) {
 }
 
 func TestWithdrawalInfoMatch(t *testing.T) {
-	tearDown, _, pool := TstCreatePool(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	roundID := uint32(0)
-	wi := createAndFulfillWithdrawalRequests(t, pool, roundID)
+	wi := createAndFulfillWithdrawalRequests(t, pool, roundID, store)
 
 	// Use freshly created values for requests, startAddress and changeStart
 	// to simulate what would happen if we had recreated them from the
@@ -737,30 +808,18 @@ func TestWithdrawalInfoMatch(t *testing.T) {
 	}
 }
 
-func TestGetWithdrawalStatus(t *testing.T) {
-	tearDown, _, pool := TstCreatePool(t)
+func TestGetWithdrawalStatusMatching(t *testing.T) {
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	roundID := uint32(0)
-	wi := createAndFulfillWithdrawalRequests(t, pool, roundID)
-
-	serialized, err := serializeWithdrawal(wi.requests, wi.startAddress, wi.lastSeriesID,
-		wi.changeStart, wi.dustThreshold, wi.status)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = pool.namespace.Update(
-		func(tx walletdb.Tx) error {
-			return putWithdrawal(tx, pool.ID, roundID, serialized)
-		})
-	if err != nil {
-		t.Fatal(err)
-	}
+	wi := createAndFulfillWithdrawalRequests(t, pool, roundID, store)
 
 	// Here we should get a WithdrawalStatus that matches wi.status.
 	var status *WithdrawalStatus
+	var err error
 	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
-		status, err = getWithdrawalStatus(pool, roundID, wi.requests, wi.startAddress,
+		status, err = getWithdrawalStatusMatching(pool, roundID, wi.requests, wi.startAddress,
 			wi.lastSeriesID, wi.changeStart, wi.dustThreshold)
 	})
 	if err != nil {
@@ -772,7 +831,7 @@ func TestGetWithdrawalStatus(t *testing.T) {
 	// identical to those of the stored WithdrawalStatus with this roundID.
 	dustThreshold := wi.dustThreshold + 1
 	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
-		status, err = getWithdrawalStatus(pool, roundID, wi.requests, wi.startAddress,
+		status, err = getWithdrawalStatusMatching(pool, roundID, wi.requests, wi.startAddress,
 			wi.lastSeriesID, wi.changeStart, dustThreshold)
 	})
 	if err != nil {
@@ -784,24 +843,23 @@ func TestGetWithdrawalStatus(t *testing.T) {
 }
 
 func TestSignMultiSigUTXO(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	// Create a new tx with a single input that we're going to sign.
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{4e6})
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	tx := createChangeAwareTx(t, store, pool, []int64{4e6}, []int64{4e6})
+	ntxid := Ntxid("ntxid")
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	msgtx := tx.toMsgTx()
-	txSigs := sigs[tx.ntxid()]
+	txSigs := sigs[ntxid]
 
 	idx := 0 // The index of the tx input we're going to sign.
-	pkScript := tx.inputs[idx].PkScript
+	pkScript := getTxInPkScript(t, store, tx.MsgTx, idx)
 	TstRunWithManagerUnlocked(t, mgr, func() {
-		if err = signMultiSigUTXO(mgr, msgtx, idx, pkScript, txSigs[idx]); err != nil {
+		if err = signMultiSigUTXO(mgr, tx.MsgTx, idx, pkScript, txSigs[idx]); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -816,7 +874,7 @@ func TestSignMultiSigUTXOUnparseablePkScript(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	unparseablePkScript := []byte{0x01}
-	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -831,7 +889,7 @@ func TestSignMultiSigUTXOPkScriptNotP2SH(t *testing.T) {
 	pubKeyHashPkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressPubKeyHash))
 	msgtx := tx.toMsgTx()
 
-	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -851,128 +909,211 @@ func TestSignMultiSigUTXORedeemScriptNotFound(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	pkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressScriptHash))
-	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, newTxInSigs(1, 1))
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestSignMultiSigUTXONotEnoughSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	tx := createChangeAwareTx(t, store, pool, []int64{4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgtx := tx.toMsgTx()
-	txSigs := sigs[tx.ntxid()]
+	txSigs := sigs[ntxid]
 
 	idx := 0 // The index of the tx input we're going to sign.
+	pkScript := getTxInPkScript(t, store, tx.MsgTx, idx)
 	// Here we provide reqSigs-1 signatures to SignMultiSigUTXO()
-	reqSigs := tx.inputs[idx].addr.series().TstGetReqSigs()
-	txInSigs := txSigs[idx][:reqSigs-1]
-	pkScript := tx.inputs[idx].PkScript
+	txInSigs := txSigs[idx]
+	// Here we provide reqSigs-1 non-empty signatures to signMultiSigUTXO()
+	for i := 0; i < len(txInSigs.Sigs)-int(txInSigs.Required)+1; i++ {
+		txInSigs.Sigs[i] = emptyRawSig
+	}
+
 	TstRunWithManagerUnlocked(t, mgr, func() {
-		err = signMultiSigUTXO(mgr, msgtx, idx, pkScript, txInSigs)
+		err = signMultiSigUTXO(mgr, tx.MsgTx, idx, pkScript, txInSigs)
 	})
 
-	TstCheckError(t, "", err, ErrTxSigning)
+	TstCheckError(t, "", err, ErrNotEnoughSigs)
 }
 
 func TestSignMultiSigUTXOWrongRawSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
-	sigs := []RawSig{RawSig{0x00}, RawSig{0x01}}
+	tx := createChangeAwareTx(t, store, pool, []int64{4e6}, []int64{})
+	sigs := newTxInSigs(1, 2)
+	sigs.Sigs = []RawSig{RawSig{0x00}, RawSig{0x01}}
 
 	idx := 0 // The index of the tx input we're going to sign.
-	pkScript := tx.inputs[idx].PkScript
+	pkScript := getTxInPkScript(t, store, tx.MsgTx, idx)
 	var err error
 	TstRunWithManagerUnlocked(t, mgr, func() {
-		err = signMultiSigUTXO(mgr, tx.toMsgTx(), idx, pkScript, sigs)
+		err = signMultiSigUTXO(mgr, tx.MsgTx, idx, pkScript, sigs)
 	})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestGetRawSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
-
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
-	msgtx := tx.toMsgTx()
-	txSigs := sigs[tx.ntxid()]
-	if len(txSigs) != len(tx.inputs) {
-		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.inputs))
+	txSigs := sigs[ntxid]
+	if len(txSigs) != len(tx.TxIn) {
+		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.TxIn))
 	}
 
-	checkNonEmptySigsForPrivKeys(t, txSigs, tx.inputs[0].addr.series().privateKeys)
+	privKeys := tx.addrs[tx.TxIn[0].PreviousOutPoint].series().privateKeys
+	checkNonEmptySigsForPrivKeys(t, txSigs, privKeys)
 
 	// Since we have all the necessary signatures (m-of-n), we construct the
 	// sigsnature scripts and execute them to make sure the raw signatures are
 	// valid.
-	signTxAndValidate(t, pool.Manager(), msgtx, txSigs, tx.inputs)
+	signTxAndValidate(t, pool.Manager(), store, tx.MsgTx, txSigs)
 }
 
 func TestGetRawSigsOnlyOnePrivKeyAvailable(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
 	// Remove all private keys but the first one from the credit's series.
-	series := tx.inputs[0].addr.series()
+	series := tx.addrs[tx.TxIn[0].PreviousOutPoint].series()
 	for i := range series.privateKeys[1:] {
 		series.privateKeys[i] = nil
 	}
 
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	txSigs := sigs[tx.ntxid()]
-	if len(txSigs) != len(tx.inputs) {
-		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.inputs))
+	txSigs := sigs[ntxid]
+	if len(txSigs) != len(tx.TxIn) {
+		t.Fatalf("Unexpected number of sig lists; got %d, want %d", len(txSigs), len(tx.TxIn))
 	}
 
 	checkNonEmptySigsForPrivKeys(t, txSigs, series.privateKeys)
 }
 
 func TestGetRawSigsUnparseableRedeemScript(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
 	// Change the redeem script for one of our tx inputs, to force an error in
 	// getRawSigs().
-	tx.inputs[0].addr.script = []byte{0x01}
+	addr := tx.addrs[tx.TxIn[0].PreviousOutPoint]
+	addr.script = []byte{0x01}
+	tx.addrs[tx.TxIn[0].PreviousOutPoint] = addr
 
-	_, err := getRawSigs([]*withdrawalTx{tx})
+	_, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 
 	TstCheckError(t, "", err, ErrRawSigning)
 }
 
 func TestGetRawSigsInvalidAddrBranch(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	tx := createChangeAwareTx(t, store, pool, []int64{5e6, 4e6}, []int64{})
+	ntxid := Ntxid("ntxid")
 	// Change the branch of our input's address to an invalid value, to force
 	// an error in getRawSigs().
-	tx.inputs[0].addr.branch = Branch(999)
+	tx.addrs[tx.TxIn[0].PreviousOutPoint].branch = Branch(999)
 
-	_, err := getRawSigs([]*withdrawalTx{tx})
+	_, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: tx})
 
 	TstCheckError(t, "", err, ErrInvalidBranch)
+}
+
+func TestWithdrawalStatusMergeSigs(t *testing.T) {
+	someSigs := map[Ntxid]TxSigs{
+		"ntxid1": TxSigs{
+			newTxInSigsWithRawSigs(2, emptyRawSig, RawSig{1}, RawSig{2}),
+			newTxInSigsWithRawSigs(2, emptyRawSig, RawSig{3}, RawSig{4}),
+		}}
+	moreSigs := map[Ntxid]TxSigs{
+		"ntxid1": TxSigs{
+			newTxInSigsWithRawSigs(2, RawSig{5}, emptyRawSig, emptyRawSig),
+			newTxInSigsWithRawSigs(2, RawSig{6}, emptyRawSig, emptyRawSig),
+		}}
+	status := WithdrawalStatus{sigs: copySigs(someSigs)}
+
+	if err := status.mergeSigs(moreSigs); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := copySigs(someSigs)
+	txSigs := expected["ntxid1"]
+	txSigs[0].Sigs[0] = moreSigs["ntxid1"][0].Sigs[0]
+	txSigs[1].Sigs[0] = moreSigs["ntxid1"][1].Sigs[0]
+	expected["ntxid1"] = txSigs
+	if !reflect.DeepEqual(status.sigs, expected) {
+		t.Fatalf("Signatures mismatch; want %v, got %v", expected, status.sigs)
+	}
+}
+
+func TestWithdrawalStatusMergeSigsNoNewSignatures(t *testing.T) {
+	someSigs := map[Ntxid]TxSigs{
+		"ntxid1": TxSigs{
+			newTxInSigsWithRawSigs(2, emptyRawSig, RawSig{0x01}, RawSig{0x02}),
+			newTxInSigsWithRawSigs(2, emptyRawSig, RawSig{0x03}, RawSig{0x04}),
+		}}
+	noSigs := map[Ntxid]TxSigs{
+		"ntxid1": TxSigs{
+			newTxInSigsWithRawSigs(2, emptyRawSig, emptyRawSig, emptyRawSig),
+			newTxInSigsWithRawSigs(2, emptyRawSig, emptyRawSig, emptyRawSig),
+		}}
+	status := WithdrawalStatus{sigs: copySigs(someSigs)}
+
+	if err := status.mergeSigs(noSigs); err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(status.sigs, someSigs) {
+		t.Fatalf("Signatures mismatch; want %v, got %v", someSigs, status.sigs)
+	}
+}
+
+func TestWithdrawalStatusMergeSigsErrors(t *testing.T) {
+	someSigs := map[Ntxid]TxSigs{
+		"ntxid1": TxSigs{
+			newTxInSigsWithRawSigs(2, emptyRawSig, RawSig{0x01}, RawSig{0x02}),
+			newTxInSigsWithRawSigs(2, emptyRawSig, RawSig{0x03}, RawSig{0x04}),
+		}}
+	missingTxSigs := map[Ntxid]TxSigs{}
+	status := WithdrawalStatus{sigs: copySigs(someSigs)}
+
+	err := status.mergeSigs(missingTxSigs)
+	TstCheckError(t, "", err, ErrSigsListMismatch)
+
+	missingTxInSigs := map[Ntxid]TxSigs{"ntxid1": TxSigs{}}
+	err = status.mergeSigs(missingTxInSigs)
+	TstCheckError(t, "", err, ErrSigsListMismatch)
+
+	missingBranchSigs := map[Ntxid]TxSigs{"ntxid1": TxSigs{
+		newTxInSigsWithRawSigs(2, RawSig{0}, RawSig{1}),
+		newTxInSigsWithRawSigs(2, RawSig{0}, RawSig{1}),
+	}}
+	err = status.mergeSigs(missingBranchSigs)
+	TstCheckError(t, "", err, ErrSigsListMismatch)
 }
 
 // TestOutBailmentIDSort tests that we can correctly sort a slice
@@ -1020,10 +1161,11 @@ func TestTxTooBig(t *testing.T) {
 }
 
 func TestTxSizeCalculation(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{1, 5}, []int64{2})
+	tx := createWithdrawalTxWithStoreCredits(t, store, pool, []int64{1, 5}, []int64{2})
+	ntxid := tx.ntxid()
 
 	size := tx.calculateSize()
 
@@ -1034,12 +1176,13 @@ func TestTxSizeCalculation(t *testing.T) {
 	tx.calculateFee = TstConstantFee(1)
 	seriesID := tx.inputs[0].addr.SeriesID()
 	tx.addChange(TstNewChangeAddress(t, pool, seriesID, 0).addr.ScriptAddress())
-	msgtx := tx.toMsgTx()
-	sigs, err := getRawSigs([]*withdrawalTx{tx})
+	cTx := changeAwareTxFromWithdrawalTx(tx)
+	msgtx := cTx.MsgTx
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid: cTx})
 	if err != nil {
 		t.Fatal(err)
 	}
-	signTxAndValidate(t, pool.Manager(), msgtx, sigs[tx.ntxid()], tx.inputs)
+	signTxAndValidate(t, pool.Manager(), store, msgtx, sigs[ntxid])
 
 	// ECDSA signatures have variable length (71-73 bytes) but in
 	// calculateSize() we use a dummy signature for the worst-case scenario (73
@@ -1091,13 +1234,53 @@ func TestTxFeeEstimationForLargeTx(t *testing.T) {
 	}
 }
 
-func TestStoreTransactionsWithoutChangeOutput(t *testing.T) {
+func TestWithdrawalStatusMaybeBroadcastTxs(t *testing.T) {
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
+	defer tearDown()
+
+	// Create a WithdrawalStatus with 3 transactions where we have all required
+	// sigs for one of them (tx1), no sigs for the second one (tx2) and a third
+	// tx that has already been broadcast before.
+	tx1 := createChangeAwareTx(t, store, pool, []int64{4}, []int64{4})
+	ntxid1 := Ntxid("ntxid1")
+	tx2 := createChangeAwareTx(t, store, pool, []int64{9}, []int64{6, 3})
+	ntxid2 := Ntxid("ntxid2")
+	tx3 := createChangeAwareTx(t, store, pool, []int64{1}, []int64{1})
+	tx3.broadcast = true
+	ntxid3 := Ntxid("ntxid3")
+	sigs, err := getRawSigs(map[Ntxid]changeAwareTx{ntxid1: tx1, ntxid2: tx2, ntxid3: tx3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := WithdrawalStatus{
+		transactions: map[Ntxid]changeAwareTx{ntxid1: tx1, ntxid2: tx2, ntxid3: tx3},
+		sigs:         sigs,
+	}
+	// Replace the raw sigs for tx2 so that it is not broadcast.
+	sigs[ntxid2] = TxSigs{newTxInSigs(2, 3)}
+
+	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
+		err = status.maybeBroadcastTxs(pool.Manager(), store)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if status.transactions[ntxid1].broadcast == false {
+		t.Fatalf("Tx1 should have been broadcast")
+	}
+	if status.transactions[ntxid2].broadcast != false {
+		t.Fatalf("Tx2 should not have been broadcast")
+	}
+}
+
+func TestChangeAwareTxAddToStoreWithoutChangeOutput(t *testing.T) {
 	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
 	wtx := createWithdrawalTxWithStoreCredits(t, store, pool, []int64{4e6}, []int64{3e6})
 	tx := &changeAwareTx{MsgTx: wtx.toMsgTx(), changeIdx: int32(-1)}
-	if err := storeTransactions(store, []*changeAwareTx{tx}); err != nil {
+	if err := tx.addToStore(store); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1108,9 +1291,12 @@ func TestStoreTransactionsWithoutChangeOutput(t *testing.T) {
 	if len(credits) != 0 {
 		t.Fatalf("Unexpected number of credits in txstore; got %d, want 0", len(credits))
 	}
+	if tx.broadcast == false {
+		t.Fatal("Transaction should have been marked as broadcast")
+	}
 }
 
-func TestStoreTransactionsWithChangeOutput(t *testing.T) {
+func TestChangeAwareTxAddToStoreWithChangeOutput(t *testing.T) {
 	tearDown, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
@@ -1119,7 +1305,7 @@ func TestStoreTransactionsWithChangeOutput(t *testing.T) {
 	msgtx := wtx.toMsgTx()
 	tx := &changeAwareTx{MsgTx: msgtx, changeIdx: int32(len(msgtx.TxOut) - 1)}
 
-	if err := storeTransactions(store, []*changeAwareTx{tx}); err != nil {
+	if err := tx.addToStore(store); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1163,31 +1349,15 @@ func TestStoreTransactionsWithChangeOutput(t *testing.T) {
 		t.Fatalf("Credit's outpoint (%v) doesn't match the one from change output (%v)",
 			credits[0].OutPoint, changeOutpoint)
 	}
-}
+	if tx.broadcast == false {
+		t.Fatal("Transaction should have been marked as broadcast")
+	}
 
-// createWithdrawalTxWithStoreCredits creates a new Credit in the given store
-// for each entry in inputAmounts, and uses them to construct a withdrawalTx
-// with one output for every entry in outputAmounts.
-func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool *Pool,
-	inputAmounts []int64, outputAmounts []int64) *withdrawalTx {
-	masters := []*hdkeychain.ExtendedKey{
-		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
-		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
-		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
+	// Attempting to add the transaction a second time is a no-op and doesn't
+	// return an error.
+	if err := tx.addToStore(store); err != nil {
+		t.Fatal(err)
 	}
-	def := TstCreateSeriesDef(t, pool, 2, masters)
-	TstCreateSeries(t, pool, []TstSeriesDef{def})
-	net := pool.Manager().ChainParams()
-	tx := newWithdrawalTx(defaultTxOptions)
-	for _, c := range TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, inputAmounts, store) {
-		tx.addInput(c)
-	}
-	for i, amount := range outputAmounts {
-		request := TstNewOutputRequest(
-			t, uint32(i), "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", btcutil.Amount(amount), net)
-		tx.addOutput(request)
-	}
-	return tx
 }
 
 // checkNonEmptySigsForPrivKeys checks that every signature list in txSigs has
@@ -1196,16 +1366,16 @@ func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool 
 // http://opentransactions.org/wiki/index.php/Siglist.
 func checkNonEmptySigsForPrivKeys(t *testing.T, txSigs TxSigs, privKeys []*hdkeychain.ExtendedKey) {
 	for _, txInSigs := range txSigs {
-		if len(txInSigs) != len(privKeys) {
+		if len(txInSigs.Sigs) != len(privKeys) {
 			t.Fatalf("Number of items in sig list (%d) does not match number of privkeys (%d)",
-				len(txInSigs), len(privKeys))
+				len(txInSigs.Sigs), len(privKeys))
 		}
-		for sigIdx, sig := range txInSigs {
+		for sigIdx, sig := range txInSigs.Sigs {
 			key := privKeys[sigIdx]
-			if bytes.Equal(sig, []byte{}) && key != nil {
+			if bytes.Equal(sig, emptyRawSig) && key != nil {
 				t.Fatalf("Empty signature (idx=%d) but key (%s) is available",
 					sigIdx, key.String())
-			} else if !bytes.Equal(sig, []byte{}) && key == nil {
+			} else if !bytes.Equal(sig, emptyRawSig) && key == nil {
 				t.Fatalf("Signature not empty (idx=%d) but key is not available", sigIdx)
 			}
 		}
@@ -1262,12 +1432,11 @@ func checkTxInputs(t *testing.T, tx *withdrawalTx, inputs []credit) {
 }
 
 // signTxAndValidate will construct the signature script for each input of the given
-// transaction (using the given raw signatures and the pkScripts from credits) and execute
-// those scripts to validate them.
-func signTxAndValidate(t *testing.T, mgr *waddrmgr.Manager, tx *wire.MsgTx, txSigs TxSigs,
-	credits []credit) {
+// transaction (using the given raw signatures, and looking up the pkScript
+// from the wtxmgr.Store) and execute those scripts to validate them.
+func signTxAndValidate(t *testing.T, mgr *waddrmgr.Manager, store *wtxmgr.Store, tx *wire.MsgTx, txSigs TxSigs) {
 	for i := range tx.TxIn {
-		pkScript := credits[i].PkScript
+		pkScript := getTxInPkScript(t, store, tx, i)
 		TstRunWithManagerUnlocked(t, mgr, func() {
 			if err := signMultiSigUTXO(mgr, tx, i, pkScript, txSigs[i]); err != nil {
 				t.Fatal(err)
@@ -1373,4 +1542,36 @@ func checkLastOutputWasSplit(t *testing.T, w *withdrawal, tx *withdrawalTx,
 	if status != statusPartial {
 		t.Fatalf("Wrong output status; got '%s', want '%s'", status, statusPartial)
 	}
+}
+
+func getTxInPkScript(t *testing.T, store *wtxmgr.Store, tx *wire.MsgTx, idx int) []byte {
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkScripts, err := store.PreviousPkScripts(rec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pkScripts[idx]
+}
+
+func newTxInSigsWithRawSigs(required uint32, sigs ...RawSig) TxInSigs {
+	txInSigs := newTxInSigs(required, len(sigs))
+	txInSigs.Sigs = sigs
+	return txInSigs
+}
+
+func copySigs(sigs map[Ntxid]TxSigs) map[Ntxid]TxSigs {
+	sigsCopy := make(map[Ntxid]TxSigs)
+	for ntxid, txSigs := range sigs {
+		txSigsCopy := make(TxSigs, len(txSigs))
+		for i, txInSigs := range txSigs {
+			txInSigsCopy := newTxInSigs(txInSigs.Required, len(txInSigs.Sigs))
+			copy(txInSigsCopy.Sigs, txInSigs.Sigs)
+			txSigsCopy[i] = txInSigsCopy
+		}
+		sigsCopy[ntxid] = txSigsCopy
+	}
+	return sigsCopy
 }
