@@ -92,7 +92,7 @@ func TestStartWithdrawal(t *testing.T) {
 	msgtx := status.TstGetMsgTx(ntxid)
 	txSigs := status.Sigs()[ntxid]
 	vp.TstRunWithManagerUnlocked(t, mgr, func() {
-		if err = vp.SignTx(msgtx, txSigs, mgr, store); err != nil {
+		if err = vp.TstSignTx(msgtx, txSigs, mgr, store); err != nil {
 			t.Fatal(err)
 		}
 	})
