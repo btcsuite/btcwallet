@@ -257,9 +257,9 @@ func (p *Pool) saveSeriesToDisk(seriesID uint32, data *SeriesData) error {
 	return nil
 }
 
-// CanonicalKeyOrder will return a copy of the input canonically
+// canonicalKeyOrder will return a copy of the input canonically
 // ordered which is defined to be lexicographical.
-func CanonicalKeyOrder(keys []string) []string {
+func canonicalKeyOrder(keys []string) []string {
 	orderedKeys := make([]string, len(keys))
 	copy(orderedKeys, keys)
 	sort.Sort(sort.StringSlice(orderedKeys))
@@ -295,7 +295,7 @@ func convertAndValidatePubKeys(rawPubKeys []string) ([]*hdkeychain.ExtendedKey, 
 }
 
 // putSeries creates a new seriesData with the given arguments, ordering the
-// given public keys (using CanonicalKeyOrder), validating and converting them
+// given public keys (using canonicalKeyOrder), validating and converting them
 // to hdkeychain.ExtendedKeys, saves that to disk and adds it to this voting
 // pool's seriesLookup map. It also ensures inRawPubKeys has at least
 // minSeriesPubKeys items and reqSigs is not greater than the number of items in
@@ -314,7 +314,7 @@ func (p *Pool) putSeries(version, seriesID, reqSigs uint32, inRawPubKeys []strin
 		return newError(ErrTooManyReqSignatures, str, nil)
 	}
 
-	rawPubKeys := CanonicalKeyOrder(inRawPubKeys)
+	rawPubKeys := canonicalKeyOrder(inRawPubKeys)
 
 	keys, err := convertAndValidatePubKeys(rawPubKeys)
 	if err != nil {

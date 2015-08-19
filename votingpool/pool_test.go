@@ -396,14 +396,14 @@ var replaceSeriesTestData = []replaceSeriesTestEntry{
 			id:      1,
 			version: 1,
 			reqSigs: 2,
-			pubKeys: vp.CanonicalKeyOrder([]string{vp.TstPubKeys[0], vp.TstPubKeys[1],
+			pubKeys: vp.TstCanonicalKeyOrder([]string{vp.TstPubKeys[0], vp.TstPubKeys[1],
 				vp.TstPubKeys[2], vp.TstPubKeys[4]}),
 		},
 		replaceWith: seriesRaw{
 			id:      1,
 			version: 1,
 			reqSigs: 1,
-			pubKeys: vp.CanonicalKeyOrder(vp.TstPubKeys[3:6]),
+			pubKeys: vp.TstCanonicalKeyOrder(vp.TstPubKeys[3:6]),
 		},
 	},
 	{
@@ -412,13 +412,13 @@ var replaceSeriesTestData = []replaceSeriesTestEntry{
 			id:      2,
 			version: 1,
 			reqSigs: 2,
-			pubKeys: vp.CanonicalKeyOrder(vp.TstPubKeys[0:3]),
+			pubKeys: vp.TstCanonicalKeyOrder(vp.TstPubKeys[0:3]),
 		},
 		replaceWith: seriesRaw{
 			id:      2,
 			version: 1,
 			reqSigs: 2,
-			pubKeys: vp.CanonicalKeyOrder(vp.TstPubKeys[3:7]),
+			pubKeys: vp.TstCanonicalKeyOrder(vp.TstPubKeys[3:7]),
 		},
 	},
 	{
@@ -427,13 +427,13 @@ var replaceSeriesTestData = []replaceSeriesTestEntry{
 			id:      3,
 			version: 1,
 			reqSigs: 8,
-			pubKeys: vp.CanonicalKeyOrder(vp.TstPubKeys[0:9]),
+			pubKeys: vp.TstCanonicalKeyOrder(vp.TstPubKeys[0:9]),
 		},
 		replaceWith: seriesRaw{
 			id:      3,
 			version: 1,
 			reqSigs: 7,
-			pubKeys: vp.CanonicalKeyOrder(vp.TstPubKeys[0:8]),
+			pubKeys: vp.TstCanonicalKeyOrder(vp.TstPubKeys[0:8]),
 		},
 	},
 }
@@ -555,7 +555,7 @@ func TestEmpowerSeriesErrors(t *testing.T) {
 func TestPoolSeries(t *testing.T) {
 	tearDown, _, pool := vp.TstCreatePool(t)
 	defer tearDown()
-	expectedPubKeys := vp.CanonicalKeyOrder(vp.TstPubKeys[0:3])
+	expectedPubKeys := vp.TstCanonicalKeyOrder(vp.TstPubKeys[0:3])
 	if err := pool.CreateSeries(vp.CurrentVersion, 1, 2, expectedPubKeys); err != nil {
 		t.Fatalf("Failed to create series: %v", err)
 	}
@@ -690,7 +690,7 @@ func validateLoadAllSeries(t *testing.T, pool *vp.Pool, testID int, seriesData s
 			testID, seriesData.id, len(privateKeys), len(publicKeys))
 	}
 
-	sortedKeys := vp.CanonicalKeyOrder(seriesData.pubKeys)
+	sortedKeys := vp.TstCanonicalKeyOrder(seriesData.pubKeys)
 	if !reflect.DeepEqual(publicKeys, sortedKeys) {
 		t.Errorf("Test #%d, series #%d: public keys mismatch. Got %v, want %v",
 			testID, seriesData.id, sortedKeys, publicKeys)
@@ -703,8 +703,8 @@ func validateLoadAllSeries(t *testing.T, pool *vp.Pool, testID int, seriesData s
 			foundPrivKeys = append(foundPrivKeys, privateKey)
 		}
 	}
-	foundPrivKeys = vp.CanonicalKeyOrder(foundPrivKeys)
-	privKeys := vp.CanonicalKeyOrder(seriesData.privKeys)
+	foundPrivKeys = vp.TstCanonicalKeyOrder(foundPrivKeys)
+	privKeys := vp.TstCanonicalKeyOrder(seriesData.privKeys)
 	if !reflect.DeepEqual(privKeys, foundPrivKeys) {
 		t.Errorf("Test #%d, series #%d: private keys mismatch. Got %v, want %v",
 			testID, seriesData.id, foundPrivKeys, privKeys)

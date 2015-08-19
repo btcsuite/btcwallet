@@ -34,6 +34,8 @@ func (vp *Pool) TstPutSeries(version, seriesID, reqSigs uint32, inRawPubKeys []s
 
 var TstBranchOrder = branchOrder
 
+var TstCanonicalKeyOrder = canonicalKeyOrder
+
 // TstExistsSeries checks whether a series is stored in the database.
 func (vp *Pool) TstExistsSeries(seriesID uint32) (bool, error) {
 	var exists bool
