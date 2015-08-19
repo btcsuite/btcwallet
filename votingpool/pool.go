@@ -142,66 +142,6 @@ func newPool(namespace walletdb.Namespace, m *waddrmgr.Manager, poolID []byte) *
 	}
 }
 
-// LoadAndGetDepositScript generates and returns a deposit script for the given seriesID,
-// branch and index of the Pool identified by poolID.
-func LoadAndGetDepositScript(namespace walletdb.Namespace, m *waddrmgr.Manager, poolID string, seriesID uint32, branch Branch, index Index) ([]byte, error) {
-	pid := []byte(poolID)
-	p, err := Load(namespace, m, pid)
-	if err != nil {
-		return nil, err
-	}
-	script, err := p.DepositScript(seriesID, branch, index)
-	if err != nil {
-		return nil, err
-	}
-	return script, nil
-}
-
-// LoadAndCreateSeries loads the Pool with the given ID, creating a new one if it doesn't
-// yet exist, and then creates and returns a Series with the given seriesID, rawPubKeys
-// and reqSigs. See CreateSeries for the constraints enforced on rawPubKeys and reqSigs.
-func LoadAndCreateSeries(namespace walletdb.Namespace, m *waddrmgr.Manager, version uint32,
-	poolID string, seriesID, reqSigs uint32, rawPubKeys []string) error {
-	pid := []byte(poolID)
-	p, err := Load(namespace, m, pid)
-	if err != nil {
-		vpErr := err.(Error)
-		if vpErr.ErrorCode == ErrPoolNotExists {
-			p, err = Create(namespace, m, pid)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	}
-	return p.CreateSeries(version, seriesID, reqSigs, rawPubKeys)
-}
-
-// LoadAndReplaceSeries loads the voting pool with the given ID and calls ReplaceSeries,
-// passing the given series ID, public keys and reqSigs to it.
-func LoadAndReplaceSeries(namespace walletdb.Namespace, m *waddrmgr.Manager, version uint32,
-	poolID string, seriesID, reqSigs uint32, rawPubKeys []string) error {
-	pid := []byte(poolID)
-	p, err := Load(namespace, m, pid)
-	if err != nil {
-		return err
-	}
-	return p.ReplaceSeries(version, seriesID, reqSigs, rawPubKeys)
-}
-
-// LoadAndEmpowerSeries loads the voting pool with the given ID and calls EmpowerSeries,
-// passing the given series ID and private key to it.
-func LoadAndEmpowerSeries(namespace walletdb.Namespace, m *waddrmgr.Manager,
-	poolID string, seriesID uint32, rawPrivKey string) error {
-	pid := []byte(poolID)
-	pool, err := Load(namespace, m, pid)
-	if err != nil {
-		return err
-	}
-	return pool.EmpowerSeries(seriesID, rawPrivKey)
-}
-
 // Series returns the series with the given ID, or nil if it doesn't
 // exist.
 func (p *Pool) Series(seriesID uint32) *SeriesData {
