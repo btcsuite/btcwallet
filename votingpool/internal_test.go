@@ -23,18 +23,17 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-var TstLastErr = lastErr
-
-const TstEligibleInputMinConfirmations = eligibleInputMinConfirmations
+var (
+	TstLastErr           = lastErr
+	TstBranchOrder       = branchOrder
+	TstCanonicalKeyOrder = canonicalKeyOrder
+	TstSignTx            = signTx
+)
 
 // TstPutSeries transparently wraps the voting pool putSeries method.
 func (vp *Pool) TstPutSeries(version, seriesID, reqSigs uint32, inRawPubKeys []string) error {
 	return vp.putSeries(version, seriesID, reqSigs, inRawPubKeys)
 }
-
-var TstBranchOrder = branchOrder
-
-var TstCanonicalKeyOrder = canonicalKeyOrder
 
 // TstExistsSeries checks whether a series is stored in the database.
 func (vp *Pool) TstExistsSeries(seriesID uint32) (bool, error) {
