@@ -18,7 +18,6 @@ package votingpool_test
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"reflect"
 	"testing"
@@ -29,93 +28,6 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
-
-func TestLoadPoolAndDepositScript(t *testing.T) {
-	tearDown, manager, pool := vp.TstCreatePool(t)
-	defer tearDown()
-	// setup
-	poolID := "test"
-	pubKeys := vp.TstPubKeys[0:3]
-	err := vp.LoadAndCreateSeries(pool.TstNamespace(), manager, 1, poolID, 1, 2, pubKeys)
-	if err != nil {
-		t.Fatalf("Failed to create voting pool and series: %v", err)
-	}
-
-	// execute
-	script, err := vp.LoadAndGetDepositScript(pool.TstNamespace(), manager, poolID, 1, 0, 0)
-	if err != nil {
-		t.Fatalf("Failed to get deposit script: %v", err)
-	}
-
-	// validate
-	strScript := hex.EncodeToString(script)
-	want := "5221035e94da75731a2153b20909017f62fcd49474c45f3b46282c0dafa8b40a3a312b2102e983a53dd20b7746dd100dfd2925b777436fc1ab1dd319433798924a5ce143e32102908d52a548ee9ef6b2d0ea67a3781a0381bc3570ad623564451e63757ff9393253ae"
-	if want != strScript {
-		t.Fatalf("Failed to get the right deposit script. Got %v, want %v",
-			strScript, want)
-	}
-}
-
-func TestLoadPoolAndCreateSeries(t *testing.T) {
-	tearDown, manager, pool := vp.TstCreatePool(t)
-	defer tearDown()
-
-	poolID := "test"
-
-	// first time, the voting pool is created
-	pubKeys := vp.TstPubKeys[0:3]
-	err := vp.LoadAndCreateSeries(pool.TstNamespace(), manager, 1, poolID, 1, 2, pubKeys)
-	if err != nil {
-		t.Fatalf("Creating voting pool and Creating series failed: %v", err)
-	}
-
-	// create another series where the voting pool is loaded this time
-	pubKeys = vp.TstPubKeys[3:6]
-	err = vp.LoadAndCreateSeries(pool.TstNamespace(), manager, 1, poolID, 2, 2, pubKeys)
-
-	if err != nil {
-		t.Fatalf("Loading voting pool and Creating series failed: %v", err)
-	}
-}
-
-func TestLoadPoolAndReplaceSeries(t *testing.T) {
-	tearDown, manager, pool := vp.TstCreatePool(t)
-	defer tearDown()
-
-	// setup
-	poolID := "test"
-	pubKeys := vp.TstPubKeys[0:3]
-	err := vp.LoadAndCreateSeries(pool.TstNamespace(), manager, 1, poolID, 1, 2, pubKeys)
-	if err != nil {
-		t.Fatalf("Failed to create voting pool and series: %v", err)
-	}
-
-	pubKeys = vp.TstPubKeys[3:6]
-	err = vp.LoadAndReplaceSeries(pool.TstNamespace(), manager, 1, poolID, 1, 2, pubKeys)
-	if err != nil {
-		t.Fatalf("Failed to replace series: %v", err)
-	}
-}
-
-func TestLoadPoolAndEmpowerSeries(t *testing.T) {
-	tearDown, manager, pool := vp.TstCreatePool(t)
-	defer tearDown()
-
-	// setup
-	poolID := "test"
-	pubKeys := vp.TstPubKeys[0:3]
-	err := vp.LoadAndCreateSeries(pool.TstNamespace(), manager, 1, poolID, 1, 2, pubKeys)
-	if err != nil {
-		t.Fatalf("Creating voting pool and Creating series failed: %v", err)
-	}
-
-	vp.TstRunWithManagerUnlocked(t, pool.Manager(), func() {
-		err = vp.LoadAndEmpowerSeries(pool.TstNamespace(), manager, poolID, 1, vp.TstPrivKeys[0])
-	})
-	if err != nil {
-		t.Fatalf("Load voting pool and Empower series failed: %v", err)
-	}
-}
 
 func TestDepositScriptAddress(t *testing.T) {
 	tearDown, _, pool := vp.TstCreatePool(t)
