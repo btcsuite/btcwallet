@@ -1390,6 +1390,28 @@ func TestChangeAwareTxAddToStoreWithChangeOutput(t *testing.T) {
 	}
 }
 
+func TestGetWithdrawalMtx(t *testing.T) {
+	roundID := getUniqueID()
+	globalMtx.Lock()
+	if _, ok := mutexes[roundID]; ok {
+		t.Fatalf("There should be no mutex for round %d", roundID)
+	}
+	globalMtx.Unlock()
+
+	// The first attempt to get a mutex for a given roundID will create a new
+	// mutex, which will be stored in the mutexes map.
+	mtx := getWithdrawalMtx(roundID)
+	if mtx != mutexes[roundID] {
+		t.Fatalf("Unexpected mutex; got %p, want %p", mtx, mutexes[roundID])
+	}
+
+	// Subsequent attempts will return the existing one.
+	mtx2 := getWithdrawalMtx(roundID)
+	if mtx2 != mtx {
+		t.Fatalf("Unexpected mutex; got %p, want %p", mtx2, mtx)
+	}
+}
+
 // checkNonEmptySigsForPrivKeys checks that every signature list in txSigs has
 // one non-empty signature for every non-nil private key in the given list. This
 // is to make sure every signature list matches the specification at

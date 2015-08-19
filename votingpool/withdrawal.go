@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/txscript"
@@ -513,6 +514,10 @@ func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 		return status, nil
 	}
 
+	mtx := getWithdrawalMtx(roundID)
+	mtx.Lock()
+	defer mtx.Unlock()
+
 	return p.fulfillAndSaveWithdrawal(roundID, requests, startAddress, lastSeriesID, changeStart,
 		dustThreshold, minConf, txStore)
 }
@@ -552,6 +557,10 @@ func (p *Pool) fulfillAndSaveWithdrawal(roundID uint32, requests []OutputRequest
 // It must be called with the address manager unlocked.
 func (p *Pool) UpdateWithdrawal(roundID uint32, sigs map[Ntxid]TxSigs, store *wtxmgr.Store) (
 	map[Ntxid]TxSigs, error) {
+	mtx := getWithdrawalMtx(roundID)
+	mtx.Lock()
+	defer mtx.Unlock()
+
 	wInfo, err := getWithdrawalInfo(p, roundID)
 	if err != nil {
 		return nil, err
@@ -1281,4 +1290,20 @@ func calculateTxSize(tx *withdrawalTx) int {
 		txin.SignatureScript = bytes.Repeat([]byte{1}, sigScriptLen)
 	}
 	return msgtx.SerializeSize()
+}
+
+// A map of withdrawal roundIDs to mutexes, used to prevent concurrent calls to
+// StartWithdrawal/UpdateWithdrawal with the same roundID.
+var mutexes = make(map[uint32]*sync.Mutex)
+var globalMtx sync.Mutex
+
+func getWithdrawalMtx(roundID uint32) *sync.Mutex {
+	globalMtx.Lock()
+	defer globalMtx.Unlock()
+	mtx, ok := mutexes[roundID]
+	if !ok {
+		mtx = &sync.Mutex{}
+		mutexes[roundID] = mtx
+	}
+	return mtx
 }
