@@ -142,66 +142,6 @@ func newPool(namespace walletdb.Namespace, m *waddrmgr.Manager, poolID []byte) *
 	}
 }
 
-// LoadAndGetDepositScript generates and returns a deposit script for the given seriesID,
-// branch and index of the Pool identified by poolID.
-func LoadAndGetDepositScript(namespace walletdb.Namespace, m *waddrmgr.Manager, poolID string, seriesID uint32, branch Branch, index Index) ([]byte, error) {
-	pid := []byte(poolID)
-	p, err := Load(namespace, m, pid)
-	if err != nil {
-		return nil, err
-	}
-	script, err := p.DepositScript(seriesID, branch, index)
-	if err != nil {
-		return nil, err
-	}
-	return script, nil
-}
-
-// LoadAndCreateSeries loads the Pool with the given ID, creating a new one if it doesn't
-// yet exist, and then creates and returns a Series with the given seriesID, rawPubKeys
-// and reqSigs. See CreateSeries for the constraints enforced on rawPubKeys and reqSigs.
-func LoadAndCreateSeries(namespace walletdb.Namespace, m *waddrmgr.Manager, version uint32,
-	poolID string, seriesID, reqSigs uint32, rawPubKeys []string) error {
-	pid := []byte(poolID)
-	p, err := Load(namespace, m, pid)
-	if err != nil {
-		vpErr := err.(Error)
-		if vpErr.ErrorCode == ErrPoolNotExists {
-			p, err = Create(namespace, m, pid)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	}
-	return p.CreateSeries(version, seriesID, reqSigs, rawPubKeys)
-}
-
-// LoadAndReplaceSeries loads the voting pool with the given ID and calls ReplaceSeries,
-// passing the given series ID, public keys and reqSigs to it.
-func LoadAndReplaceSeries(namespace walletdb.Namespace, m *waddrmgr.Manager, version uint32,
-	poolID string, seriesID, reqSigs uint32, rawPubKeys []string) error {
-	pid := []byte(poolID)
-	p, err := Load(namespace, m, pid)
-	if err != nil {
-		return err
-	}
-	return p.ReplaceSeries(version, seriesID, reqSigs, rawPubKeys)
-}
-
-// LoadAndEmpowerSeries loads the voting pool with the given ID and calls EmpowerSeries,
-// passing the given series ID and private key to it.
-func LoadAndEmpowerSeries(namespace walletdb.Namespace, m *waddrmgr.Manager,
-	poolID string, seriesID uint32, rawPrivKey string) error {
-	pid := []byte(poolID)
-	pool, err := Load(namespace, m, pid)
-	if err != nil {
-		return err
-	}
-	return pool.EmpowerSeries(seriesID, rawPrivKey)
-}
-
 // Series returns the series with the given ID, or nil if it doesn't
 // exist.
 func (p *Pool) Series(seriesID uint32) *SeriesData {
@@ -257,9 +197,9 @@ func (p *Pool) saveSeriesToDisk(seriesID uint32, data *SeriesData) error {
 	return nil
 }
 
-// CanonicalKeyOrder will return a copy of the input canonically
+// canonicalKeyOrder will return a copy of the input canonically
 // ordered which is defined to be lexicographical.
-func CanonicalKeyOrder(keys []string) []string {
+func canonicalKeyOrder(keys []string) []string {
 	orderedKeys := make([]string, len(keys))
 	copy(orderedKeys, keys)
 	sort.Sort(sort.StringSlice(orderedKeys))
@@ -295,7 +235,7 @@ func convertAndValidatePubKeys(rawPubKeys []string) ([]*hdkeychain.ExtendedKey, 
 }
 
 // putSeries creates a new seriesData with the given arguments, ordering the
-// given public keys (using CanonicalKeyOrder), validating and converting them
+// given public keys (using canonicalKeyOrder), validating and converting them
 // to hdkeychain.ExtendedKeys, saves that to disk and adds it to this voting
 // pool's seriesLookup map. It also ensures inRawPubKeys has at least
 // minSeriesPubKeys items and reqSigs is not greater than the number of items in
@@ -314,7 +254,7 @@ func (p *Pool) putSeries(version, seriesID, reqSigs uint32, inRawPubKeys []strin
 		return newError(ErrTooManyReqSignatures, str, nil)
 	}
 
-	rawPubKeys := CanonicalKeyOrder(inRawPubKeys)
+	rawPubKeys := canonicalKeyOrder(inRawPubKeys)
 
 	keys, err := convertAndValidatePubKeys(rawPubKeys)
 	if err != nil {
