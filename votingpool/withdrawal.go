@@ -597,7 +597,7 @@ func (p *Pool) UpdateWithdrawal(roundID uint32, sigs map[Ntxid]TxSigs, store *wt
 // This method must be called with the manager unlocked.
 func (s *WithdrawalStatus) maybeBroadcastTxs(mgr *waddrmgr.Manager, store *wtxmgr.Store) error {
 	for ntxid, tx := range s.transactions {
-		err := SignTx(tx.MsgTx, s.sigs[ntxid], mgr, store)
+		err := signTx(tx.MsgTx, s.sigs[ntxid], mgr, store)
 		if err != nil && err.(Error).ErrorCode == ErrNotEnoughSigs {
 			log.Debugf("Not enough signatures for all inputs of tx %s; not broadcasting it", ntxid)
 			continue
@@ -1145,11 +1145,11 @@ func getRawSigs(transactions map[Ntxid]changeAwareTx) (map[Ntxid]TxSigs, error) 
 	return sigs, nil
 }
 
-// SignTx signs every input of the given MsgTx by looking up (on the addr
+// signTx signs every input of the given MsgTx by looking up (on the addr
 // manager) the redeem script for each of them and constructing the signature
 // script using that and the given raw signatures.
 // This function must be called with the manager unlocked.
-func SignTx(msgtx *wire.MsgTx, sigs TxSigs, mgr *waddrmgr.Manager, store *wtxmgr.Store) error {
+func signTx(msgtx *wire.MsgTx, sigs TxSigs, mgr *waddrmgr.Manager, store *wtxmgr.Store) error {
 	// We use time.Now() here as we're not going to store the new TxRecord
 	// anywhere -- we just need it to pass to store.PreviousPkScripts().
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(msgtx, time.Now())
