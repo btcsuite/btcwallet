@@ -1086,6 +1086,9 @@ func (m *Manager) ImportAddress(addr btcutil.Address, bs *BlockStamp) (ManagedAd
 			return nil, err
 		}
 
+		// PK addresses are keyed by pkh script addr
+		addressID = addr.AddressPubKeyHash().ScriptAddress()
+
 		// Save the new imported address to the db and update start block (if
 		// needed) in a single transaction.
 		err = m.namespace.Update(func(tx walletdb.Tx) error {
@@ -1121,7 +1124,7 @@ func (m *Manager) ImportAddress(addr btcutil.Address, bs *BlockStamp) (ManagedAd
 		// Save the new imported address to the db and update start block (if
 		// needed) in a single transaction.
 		err = m.namespace.Update(func(tx walletdb.Tx) error {
-			err := putScriptAddress(tx, addr.ScriptAddress(),
+			err := putScriptAddress(tx, addressID,
 				ImportedAddrAccount, ssNone, encryptedScriptHash, nil)
 			if err != nil {
 				return err
