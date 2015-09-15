@@ -70,13 +70,14 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs [
 		OnRescanProgress:    client.onRescanProgress,
 	}
 	conf := btcrpcclient.ConnConfig{
-		Host:                connect,
-		Endpoint:            "ws",
-		User:                user,
-		Pass:                pass,
-		Certificates:        certs,
-		DisableConnectOnNew: true,
-		DisableTLS:          disableTLS,
+		Host:                 connect,
+		Endpoint:             "ws",
+		User:                 user,
+		Pass:                 pass,
+		Certificates:         certs,
+		DisableAutoReconnect: true,
+		DisableConnectOnNew:  true,
+		DisableTLS:           disableTLS,
 	}
 	c, err := btcrpcclient.New(&conf, &ntfnCallbacks)
 	if err != nil {
@@ -121,8 +122,6 @@ func (c *Client) Start() error {
 // started by Start.
 func (c *Client) Stop() {
 	c.quitMtx.Lock()
-	defer c.quitMtx.Unlock()
-
 	select {
 	case <-c.quit:
 	default:
@@ -133,6 +132,7 @@ func (c *Client) Stop() {
 			close(c.dequeueNotification)
 		}
 	}
+	c.quitMtx.Unlock()
 }
 
 // WaitForShutdown blocks until both the client has finished disconnecting
@@ -225,26 +225,35 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 
 func (c *Client) onClientConnect() {
 	log.Info("Established websocket RPC connection to btcd")
-	c.enqueueNotification <- ClientConnected{}
+	select {
+	case c.enqueueNotification <- ClientConnected{}:
+	case <-c.quit:
+	}
 }
 
 func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
-	c.enqueueNotification <- BlockConnected{
+	select {
+	case c.enqueueNotification <- BlockConnected{
 		Block: wtxmgr.Block{
 			Hash:   *hash,
 			Height: height,
 		},
 		Time: time,
+	}:
+	case <-c.quit:
 	}
 }
 
 func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
-	c.enqueueNotification <- BlockDisconnected{
+	select {
+	case c.enqueueNotification <- BlockDisconnected{
 		Block: wtxmgr.Block{
 			Hash:   *hash,
 			Height: height,
 		},
 		Time: time,
+	}:
+	case <-c.quit:
 	}
 }
 
@@ -262,7 +271,10 @@ func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 			"tx: %v", err)
 		return
 	}
-	c.enqueueNotification <- RelevantTx{rec, blk}
+	select {
+	case c.enqueueNotification <- RelevantTx{rec, blk}:
+	case <-c.quit:
+	}
 }
 
 func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
@@ -271,21 +283,41 @@ func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 }
 
 func (c *Client) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
-	c.enqueueNotification <- &RescanProgress{hash, height, blkTime}
+	select {
+	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
+	case <-c.quit:
+	}
 }
 
 func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time.Time) {
-	c.enqueueNotification <- &RescanFinished{hash, height, blkTime}
+	select {
+	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
+	case <-c.quit:
+	}
+
 }
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
 func (c *Client) handler() {
+	sessionResult := c.SessionAsync()
+
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
-		close(c.quit)
+		log.Errorf("Failed to receive best block from chain server: %v", err)
+		c.Stop()
 		c.wg.Done()
+		return
 	}
+
+	session, err := sessionResult.Receive()
+	if err != nil {
+		log.Errorf("Failed to receive session ID from chain server: %v", err)
+		c.Stop()
+		c.wg.Done()
+		return
+	}
+	sessionID := session.SessionID
 
 	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
 
@@ -300,6 +332,7 @@ func (c *Client) handler() {
 	enqueue := c.enqueueNotification
 	var dequeue chan interface{}
 	var next interface{}
+	pingChan := time.After(time.Minute)
 out:
 	for {
 		select {
@@ -319,6 +352,7 @@ out:
 				dequeue = c.dequeueNotification
 			}
 			notifications = append(notifications, n)
+			pingChan = time.After(time.Minute)
 
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
@@ -341,12 +375,70 @@ out:
 				dequeue = nil
 			}
 
+		case <-pingChan:
+			// No notifications were received in the last 60s.
+			// Ensure the connection is still active by making a new
+			// request to the server.
+			// A 3 second timeout is used to prevent the handler loop
+			// from blocking here forever.
+			// Use the session RPC and compare the session ID with the
+			// ID previously fetched to verify that the client did not
+			// silently reconnect to the server.
+			type sessionResult struct {
+				sessionID uint64
+				err       error
+			}
+			sessionResponse := make(chan sessionResult, 1)
+			go func() {
+				// Due to a limitation of the futures API in
+				// btcrpcclient, this goroutine may leak if
+				// Session never returns.  However, if ever does
+				// (perhaps due to an error returned much later,
+				// after the 3s timeout) the response chan write
+				// will not block because it is buffered and the
+				// goroutine will exit.
+				resp, err := c.Session()
+				if err != nil {
+					sessionResponse <- sessionResult{
+						err: err,
+					}
+					return
+				}
+				sessionResponse <- sessionResult{
+					sessionID: resp.SessionID,
+				}
+			}()
+
+			select {
+			case resp := <-sessionResponse:
+				if resp.err != nil {
+					log.Errorf("Failed to receive session "+
+						"result: %v", err)
+					c.Stop()
+					break out
+				}
+				if resp.sessionID != sessionID {
+					log.Errorf("Websocket Session ID no " +
+						"longer matches previous connection")
+					c.Stop()
+					break out
+				}
+				pingChan = time.After(time.Minute)
+
+			case <-time.After(3 * time.Second):
+				log.Errorf("Timeout waiting for session RPC")
+				c.Stop()
+				break out
+			}
+
 		case c.currentBlock <- bs:
 
 		case <-c.quit:
 			break out
 		}
 	}
+
+	c.Stop()
 	close(c.dequeueNotification)
 	c.wg.Done()
 }
