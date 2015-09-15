@@ -106,7 +106,10 @@ type Wallet struct {
 
 	chainParams *chaincfg.Params
 	wg          sync.WaitGroup
-	quit        chan struct{}
+
+	started bool
+	quit    chan struct{}
+	quitMu  sync.Mutex
 }
 
 // ErrDuplicateListen is returned for any attempts to listen for the same
@@ -261,15 +264,25 @@ func (w *Wallet) notifyRelevantTx(relevantTx chain.RelevantTx) {
 
 // Start starts the goroutines necessary to manage a wallet.
 func (w *Wallet) Start(chainServer *chain.Client) {
+	w.quitMu.Lock()
 	select {
 	case <-w.quit:
-		return
+		// Restart the wallet goroutines after shutdown finishes.
+		w.WaitForShutdown()
+		w.quit = make(chan struct{})
 	default:
+		// Ignore when the wallet is still running.
+		if w.started {
+			w.quitMu.Unlock()
+			return
+		}
+		w.started = true
 	}
+	w.quitMu.Unlock()
 
-	defer w.chainSvrLock.Unlock()
 	w.chainSvrLock.Lock()
 	w.chainSvr = chainServer
+	w.chainSvrLock.Unlock()
 
 	w.wg.Add(6)
 	go w.handleChainNotifications()
@@ -280,12 +293,24 @@ func (w *Wallet) Start(chainServer *chain.Client) {
 	go w.rescanRPCHandler()
 }
 
+// quitChan atomically reads the quit channel.
+func (w *Wallet) quitChan() <-chan struct{} {
+	w.quitMu.Lock()
+	c := w.quit
+	w.quitMu.Unlock()
+	return c
+}
+
 // Stop signals all wallet goroutines to shutdown.
 func (w *Wallet) Stop() {
+	w.quitMu.Lock()
+	quit := w.quit
+	w.quitMu.Unlock()
+
 	select {
-	case <-w.quit:
+	case <-quit:
 	default:
-		close(w.quit)
+		close(quit)
 		w.chainSvrLock.Lock()
 		if w.chainSvr != nil {
 			w.chainSvr.Stop()
@@ -298,7 +323,7 @@ func (w *Wallet) Stop() {
 // shutting down or not.
 func (w *Wallet) ShuttingDown() bool {
 	select {
-	case <-w.quit:
+	case <-w.quitChan():
 		return true
 	default:
 		return false
@@ -445,6 +470,7 @@ type (
 // for both requests, rather than just one, to fail due to not enough available
 // inputs.
 func (w *Wallet) txCreator() {
+	quit := w.quitChan()
 out:
 	for {
 		select {
@@ -452,7 +478,7 @@ out:
 			tx, err := w.txToPairs(txr.pairs, txr.account, txr.minconf)
 			txr.resp <- createTxResponse{tx, err}
 
-		case <-w.quit:
+		case <-quit:
 			break out
 		}
 	}
@@ -503,6 +529,7 @@ type (
 func (w *Wallet) walletLocker() {
 	var timeout <-chan time.Time
 	holdChan := make(HeldUnlock)
+	quit := w.quitChan()
 out:
 	for {
 		select {
@@ -551,7 +578,7 @@ out:
 		case w.lockState <- w.Manager.IsLocked():
 			continue
 
-		case <-w.quit:
+		case <-quit:
 			break out
 
 		case <-w.lockRequests:
