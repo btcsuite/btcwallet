@@ -413,7 +413,7 @@ out:
 			case resp := <-sessionResponse:
 				if resp.err != nil {
 					log.Errorf("Failed to receive session "+
-						"result: %v", err)
+						"result: %v", resp.err)
 					c.Stop()
 					break out
 				}
