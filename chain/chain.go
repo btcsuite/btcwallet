@@ -300,8 +300,6 @@ func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
 func (c *Client) handler() {
-	sessionResult := c.SessionAsync()
-
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to receive best block from chain server: %v", err)
@@ -309,15 +307,6 @@ func (c *Client) handler() {
 		c.wg.Done()
 		return
 	}
-
-	session, err := sessionResult.Receive()
-	if err != nil {
-		log.Errorf("Failed to receive session ID from chain server: %v", err)
-		c.Stop()
-		c.wg.Done()
-		return
-	}
-	sessionID := session.SessionID
 
 	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
 
@@ -381,32 +370,13 @@ out:
 			// request to the server.
 			// A 3 second timeout is used to prevent the handler loop
 			// from blocking here forever.
-			// Use the session RPC and compare the session ID with the
-			// ID previously fetched to verify that the client did not
-			// silently reconnect to the server.
 			type sessionResult struct {
-				sessionID uint64
-				err       error
+				err error
 			}
 			sessionResponse := make(chan sessionResult, 1)
 			go func() {
-				// Due to a limitation of the futures API in
-				// btcrpcclient, this goroutine may leak if
-				// Session never returns.  However, if ever does
-				// (perhaps due to an error returned much later,
-				// after the 3s timeout) the response chan write
-				// will not block because it is buffered and the
-				// goroutine will exit.
-				resp, err := c.Session()
-				if err != nil {
-					sessionResponse <- sessionResult{
-						err: err,
-					}
-					return
-				}
-				sessionResponse <- sessionResult{
-					sessionID: resp.SessionID,
-				}
+				_, err := c.Session()
+				sessionResponse <- sessionResult{err}
 			}()
 
 			select {
@@ -414,12 +384,6 @@ out:
 				if resp.err != nil {
 					log.Errorf("Failed to receive session "+
 						"result: %v", resp.err)
-					c.Stop()
-					break out
-				}
-				if resp.sessionID != sessionID {
-					log.Errorf("Websocket Session ID no " +
-						"longer matches previous connection")
 					c.Stop()
 					break out
 				}
