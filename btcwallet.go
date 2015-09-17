@@ -123,7 +123,7 @@ func walletMain() error {
 			server.SetChainServer(rpcc)
 
 			// Start wallet goroutines and handle RPC client notifications
-			// if the wallet is not shutting down.
+			// if the server is not shutting down.
 			select {
 			case <-server.quit:
 				return
@@ -134,6 +134,7 @@ func walletMain() error {
 			// Block goroutine until the client is finished.
 			rpcc.WaitForShutdown()
 
+			wallet.SetChainSynced(false)
 			wallet.Stop()
 
 			// Reconnect only if the server is not shutting down.
