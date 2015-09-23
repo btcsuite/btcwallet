@@ -368,8 +368,13 @@ out:
 			// No notifications were received in the last 60s.
 			// Ensure the connection is still active by making a new
 			// request to the server.
-			// A 3 second timeout is used to prevent the handler loop
-			// from blocking here forever.
+			// TODO: A minute timeout is used to prevent the handler
+			// loop from blocking here forever, but this is much larger
+			// then it needs to be due to btcd processing websocket
+			// requests synchronously (see
+			// https://github.com/btcsuite/btcd/issues/504).  Decrease
+			// this to something saner like 3s when the above issue is
+			// fixed.
 			type sessionResult struct {
 				err error
 			}
@@ -389,7 +394,7 @@ out:
 				}
 				pingChan = time.After(time.Minute)
 
-			case <-time.After(3 * time.Second):
+			case <-time.After(time.Minute):
 				log.Errorf("Timeout waiting for session RPC")
 				c.Stop()
 				break out
