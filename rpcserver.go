@@ -3008,7 +3008,7 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 		// Either it was already signed or we just signed it.
 		// Find out if it is completely satisfied or still needs more.
 		vm, err := txscript.NewEngine(input, msgTx, i,
-			txscript.StandardVerifyFlags)
+			txscript.StandardVerifyFlags, nil)
 		if err == nil {
 			err = vm.Execute()
 		}

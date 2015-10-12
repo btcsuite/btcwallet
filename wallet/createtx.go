@@ -421,7 +421,7 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []wtxmgr.Credit, mgr *waddrmgr.Man
 func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []wtxmgr.Credit) error {
 	for i := range msgtx.TxIn {
 		vm, err := txscript.NewEngine(prevOutputs[i].PkScript,
-			msgtx, i, txscript.StandardVerifyFlags)
+			msgtx, i, txscript.StandardVerifyFlags, nil)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
