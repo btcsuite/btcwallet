@@ -2732,9 +2732,12 @@ func SignMessage(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (in
 		return nil, err
 	}
 
-	fullmsg := "Bitcoin Signed Message:\n" + cmd.Message
+	var buf bytes.Buffer
+	wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
+	wire.WriteVarString(&buf, 0, cmd.Message)
+	messageHash := wire.DoubleSha256(buf.Bytes())
 	sigbytes, err := btcec.SignCompact(btcec.S256(), privKey,
-		wire.DoubleSha256([]byte(fullmsg)), ainfo.Compressed())
+		messageHash, ainfo.Compressed())
 	if err != nil {
 		return nil, err
 	}
@@ -3138,9 +3141,12 @@ func VerifyMessage(w *wallet.Wallet, chainSvr *chain.Client, icmd interface{}) (
 
 	// Validate the signature - this just shows that it was valid at all.
 	// we will compare it with the key next.
+	var buf bytes.Buffer
+	wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
+	wire.WriteVarString(&buf, 0, cmd.Message)
+	expectedMessageHash := wire.DoubleSha256(buf.Bytes())
 	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
-		wire.DoubleSha256([]byte("Bitcoin Signed Message:\n"+
-			cmd.Message)))
+		expectedMessageHash)
 	if err != nil {
 		return nil, err
 	}
