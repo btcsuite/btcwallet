@@ -102,9 +102,9 @@ var ErrNonPositiveAmount = errors.New("amount is not positive")
 // negative.
 var ErrNegativeFee = errors.New("fee is negative")
 
-// defaultFeeIncrement is the default minimum transation fee (0.00001 BTC,
+// defaultFeeIncrement is the default minimum transation fee (0.00005 BTC,
 // measured in satoshis) added to transactions requiring a fee.
-const defaultFeeIncrement = 1e3
+const defaultFeeIncrement = 5e3
 
 // CreatedTx holds the state of a newly-created transaction and the change
 // output (if one was added).
