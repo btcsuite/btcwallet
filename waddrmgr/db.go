@@ -1767,7 +1767,7 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Derive the master extended key from the seed.
-		root, err := hdkeychain.NewMaster(seed)
+		root, err := hdkeychain.NewMaster(seed, chainParams)
 		if err != nil {
 			str := "failed to derive master extended key"
 			return managerError(ErrKeyChain, str, err)

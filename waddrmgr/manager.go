@@ -2245,7 +2245,7 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	// can generate the required structure with no issues.
 
 	// Derive the master extended key from the seed.
-	root, err := hdkeychain.NewMaster(seed)
+	root, err := hdkeychain.NewMaster(seed, chainParams)
 	if err != nil {
 		str := "failed to derive master extended key"
 		return nil, managerError(ErrKeyChain, str, err)

@@ -185,7 +185,7 @@ func TstCreateSeries(t *testing.T, pool *Pool, definitions []TstSeriesDef) {
 }
 
 func TstCreateMasterKey(t *testing.T, seed []byte) *hdkeychain.ExtendedKey {
-	key, err := hdkeychain.NewMaster(seed)
+	key, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
 	if err != nil {
 		t.Fatal(err)
 	}
