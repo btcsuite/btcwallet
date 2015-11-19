@@ -224,7 +224,6 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 }
 
 func (c *Client) onClientConnect() {
-	log.Info("Established websocket RPC connection to btcd")
 	select {
 	case c.enqueueNotification <- ClientConnected{}:
 	case <-c.quit:
