@@ -25,7 +25,9 @@ import (
 	"strings"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
+	"github.com/btcsuite/btcwallet/netparams"
 	flags "github.com/btcsuite/go-flags"
 )
 
@@ -194,50 +196,6 @@ func parseAndSetDebugLevels(debugLevel string) error {
 	return nil
 }
 
-// removeDuplicateAddresses returns a new slice with all duplicate entries in
-// addrs removed.
-func removeDuplicateAddresses(addrs []string) []string {
-	result := []string{}
-	seen := map[string]bool{}
-	for _, val := range addrs {
-		if _, ok := seen[val]; !ok {
-			result = append(result, val)
-			seen[val] = true
-		}
-	}
-	return result
-}
-
-// normalizeAddresses returns a new slice with all the passed peer addresses
-// normalized with the given default port, and all duplicates removed.
-func normalizeAddresses(addrs []string, defaultPort string) []string {
-	for i, addr := range addrs {
-		addrs[i] = normalizeAddress(addr, defaultPort)
-	}
-
-	return removeDuplicateAddresses(addrs)
-}
-
-// filesExists reports whether the named file or directory exists.
-func fileExists(name string) bool {
-	if _, err := os.Stat(name); err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-	}
-	return true
-}
-
-// normalizeAddress returns addr with the passed default port appended if
-// there is not already a port specified.
-func normalizeAddress(addr, defaultPort string) string {
-	_, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return net.JoinHostPort(addr, defaultPort)
-	}
-	return addr
-}
-
 // loadConfig initializes and parses the config using a config file and command
 // line options.
 //
@@ -266,7 +224,12 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// A config file in the current directory takes precedence.
-	if fileExists(defaultConfigFilename) {
+	exists, err := cfgutil.FileExists(defaultConfigFilename)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+	if exists {
 		cfg.ConfigFile = defaultConfigFile
 	}
 
@@ -274,7 +237,7 @@ func loadConfig() (*config, []string, error) {
 	// file or the version flag was specified.
 	preCfg := cfg
 	preParser := flags.NewParser(&preCfg, flags.Default)
-	_, err := preParser.Parse()
+	_, err = preParser.Parse()
 	if err != nil {
 		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
 			preParser.WriteHelp(os.Stderr)
@@ -337,11 +300,11 @@ func loadConfig() (*config, []string, error) {
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
 	if cfg.MainNet {
-		activeNet = &mainNetParams
+		activeNet = &netparams.MainNetParams
 		numNets++
 	}
 	if cfg.SimNet {
-		activeNet = &simNetParams
+		activeNet = &netparams.SimNetParams
 		numNets++
 	}
 	if numNets > 1 {
@@ -403,10 +366,16 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	dbFileExists, err := cfgutil.FileExists(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+
 	if cfg.CreateTemp {
 		tempWalletExists := false
 
-		if fileExists(dbPath) {
+		if dbFileExists {
 			str := fmt.Sprintf("The wallet already exists. Loading this " +
 				"wallet instead.")
 			fmt.Fprintln(os.Stdout, str)
@@ -429,7 +398,7 @@ func loadConfig() (*config, []string, error) {
 	} else if cfg.Create {
 		// Error if the create flag is set and the wallet already
 		// exists.
-		if fileExists(dbPath) {
+		if dbFileExists {
 			err := fmt.Errorf("The wallet already exists.")
 			fmt.Fprintln(os.Stderr, err)
 			return nil, nil, err
@@ -449,10 +418,14 @@ func loadConfig() (*config, []string, error) {
 
 		// Created successfully, so exit now with success.
 		os.Exit(0)
-	} else if !fileExists(dbPath) {
-		var err error
+	} else if !dbFileExists {
 		keystorePath := filepath.Join(netDir, keystore.Filename)
-		if !fileExists(keystorePath) {
+		keystoreExists, err := cfgutil.FileExists(keystorePath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return nil, nil, err
+		}
+		if !keystoreExists {
 			err = fmt.Errorf("The wallet does not exist.  Run with the " +
 				"--create option to initialize and create it.")
 		} else {
@@ -464,11 +437,17 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	if cfg.RPCConnect == "" {
-		cfg.RPCConnect = activeNet.connect
+		cfg.RPCConnect = net.JoinHostPort("localhost", activeNet.RPCClientPort)
 	}
 
 	// Add default port to connect flag if missing.
-	cfg.RPCConnect = normalizeAddress(cfg.RPCConnect, activeNet.btcdPort)
+	cfg.RPCConnect, err = cfgutil.NormalizeAddress(cfg.RPCConnect,
+		activeNet.RPCClientPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Invalid rpcconnect network address: %v\n", err)
+		return nil, nil, err
+	}
 
 	localhostListeners := map[string]struct{}{
 		"localhost": struct{}{},
@@ -496,9 +475,20 @@ func loadConfig() (*config, []string, error) {
 
 			// If the CA copy does not exist, check if we're connecting to
 			// a local btcd and switch to its RPC cert if it exists.
-			if !fileExists(cfg.CAFile) {
+			certExists, err := cfgutil.FileExists(cfg.CAFile)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return nil, nil, err
+			}
+			if !certExists {
 				if _, ok := localhostListeners[RPCHost]; ok {
-					if fileExists(btcdHomedirCAFile) {
+					btcdCertExists, err := cfgutil.FileExists(
+						btcdHomedirCAFile)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						return nil, nil, err
+					}
+					if btcdCertExists {
 						cfg.CAFile = btcdHomedirCAFile
 					}
 				}
@@ -513,15 +503,20 @@ func loadConfig() (*config, []string, error) {
 		}
 		cfg.SvrListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
-			addr = net.JoinHostPort(addr, activeNet.svrPort)
+			addr = net.JoinHostPort(addr, activeNet.RPCServerPort)
 			cfg.SvrListeners = append(cfg.SvrListeners, addr)
 		}
 	}
 
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
-	cfg.SvrListeners = normalizeAddresses(cfg.SvrListeners,
-		activeNet.svrPort)
+	cfg.SvrListeners, err = cfgutil.NormalizeAddresses(
+		cfg.SvrListeners, activeNet.RPCServerPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Invalid network address in RPC listeners: %v\n", err)
+		return nil, nil, err
+	}
 
 	// Only allow server TLS to be disabled if the RPC is bound to localhost
 	// addresses.

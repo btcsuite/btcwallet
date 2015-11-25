@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 The btcsuite developers
+ * Copyright (c) 2015 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,8 +14,18 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package main
+package cfgutil
 
-import "github.com/btcsuite/btcwallet/netparams"
+import "os"
 
-var activeNet = &netparams.TestNet3Params
+// FilesExists reports whether the named file or directory exists.
+func FileExists(filePath string) (bool, error) {
+	_, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}

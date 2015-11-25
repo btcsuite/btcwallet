@@ -432,8 +432,13 @@ func createWallet(cfg *config) error {
 	netDir := networkDir(cfg.DataDir, activeNet.Params)
 	keystorePath := filepath.Join(netDir, keystore.Filename)
 	var legacyKeyStore *keystore.Store
-	if fileExists(keystorePath) {
-		var err error
+	_, err := os.Stat(keystorePath)
+	if err != nil && !os.IsNotExist(err) {
+		// A stat error not due to a non-existant file should be
+		// returned to the caller.
+		return err
+	} else if err == nil {
+		// Keystore file exists.
 		legacyKeyStore, err = keystore.OpenDir(netDir)
 		if err != nil {
 			return err

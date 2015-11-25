@@ -322,9 +322,11 @@ func newRPCServer(listenAddrs []string, maxPost, maxWebsockets int64) (*rpcServe
 	// Setup TLS if not disabled.
 	listenFunc := net.Listen
 	if !cfg.DisableServerTLS {
-		// Check for existence of cert file and key file
-		if !fileExists(cfg.RPCKey) && !fileExists(cfg.RPCCert) {
-			// if both files do not exist, we generate them.
+		// Check for existence of cert file and key file.  Generate a
+		// new keypair if both are missing.
+		_, e1 := os.Stat(cfg.RPCKey)
+		_, e2 := os.Stat(cfg.RPCCert)
+		if os.IsNotExist(e1) && os.IsNotExist(e2) {
 			err := genCertPair(cfg.RPCCert, cfg.RPCKey)
 			if err != nil {
 				return nil, err
