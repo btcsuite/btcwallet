@@ -46,82 +46,74 @@ adding `mainnet=1` to the configuration file.  Mainnet will be enabled
 by default in a future release after further database changes and
 testing.
 
-## Installation
+## Installation and updating
 
-### Windows - MSI Available
+### Windows - MSIs Available
 
-Install the btcd suite MSI here:
+Install the latest MSIs available here:
 
-https://opensource.conformal.com/packages/windows/btcdsuite/
+https://github.com/btcsuite/btcd/releases
 
-### Linux/BSD/POSIX - Build from Source
+https://github.com/btcsuite/btcwallet/releases
 
-- Install Go according to the installation instructions here:
-  http://golang.org/doc/install
+### Windows/Linux/BSD/POSIX - Build from source
 
-- Run the following commands to obtain and install btcwallet and all
-  dependencies:
-```bash
-$ go get -u -v github.com/btcsuite/btcd/...
-$ go get -u -v github.com/btcsuite/btcwallet/...
+- If necessary, install Go according to the installation instructions
+  here: http://golang.org/doc/install.  It is recommended to add
+  `$GOPATH/bin` to your `PATH` at this point.
+
+- Run the following commands to obtain and install btcd, btcwallet
+  and all dependencies:
 ```
-
-- btcd and btcwallet will now be installed in either ```$GOROOT/bin``` or
-  ```$GOPATH/bin``` depending on your configuration.  If you did not already
-  add to your system path during the installation, we recommend you do so now.
-
-## Updating
-
-### Windows
-
-Install a newer btcd suite MSI here:
-
-https://opensource.conformal.com/packages/windows/btcdsuite/
-
-### Linux/BSD/POSIX - Build from Source
-
-- Run the following commands to update btcwallet, all dependencies, and install it:
-
-```bash
-$ go get -u -v github.com/btcsuite/btcd/...
-$ go get -u -v github.com/btcsuite/btcwallet/...
+go get -u -v github.com/btcsuite/btcd/...
+go get -u -v github.com/btcsuite/btcwallet/...
 ```
 
 ## Getting Started
 
-The follow instructions detail how to get started with btcwallet
-connecting to a localhost btcd.
-
-### Windows (Installed from MSI)
-
-Open ```Btcd Suite``` from the ```Btcd Suite``` menu in the Start
-Menu.  This will also open btcgui, which can be closed if you only
-want btcd and btcwallet running.
-
-### Linux/BSD/POSIX/Source
+The following instructions detail how to get started with btcwallet
+connecting to a localhost btcd.  Commands should be run in `cmd.exe`
+or PowerShell on Windows, or any terminal emulator on *nix.
 
 - Run the following command to start btcd:
 
-```bash
-$ btcd --testnet -u rpcuser -P rpcpass
+```
+btcd --testnet -u rpcuser -P rpcpass
 ```
 
 - Run the following command to create a wallet:
 
-```bash
-$ btcwallet -u rpcuser -P rpcpass --create
+```
+btcwallet -u rpcuser -P rpcpass --create
 ```
 
 - Run the following command to start btcwallet:
 
-```bash
-$ btcwallet -u rpcuser -P rpcpass
+```
+btcwallet -u rpcuser -P rpcpass
 ```
 
 If everything appears to be working, it is recommended at this point to
 copy the sample btcd and btcwallet configurations and update with your
 RPC username and password.
 
+PowerShell (Installed from MSI):
+```
+PS> cp "$env:ProgramFiles\Btcd Suite\Btcd\sample-btcd.conf" $env:LOCALAPPDATA\Btcd\btcd.conf
+PS> cp "$env:ProgramFiles\Btcd Suite\Btcwallet\sample-btcwallet.conf" $env:LOCALAPPDATA\Btcwallet\btcwallet.conf
+PS> $editor $env:LOCALAPPDATA\Btcd\btcd.conf
+PS> $editor $env:LOCALAPPDATA\Btcwallet\btcwallet.conf
+```
+
+PowerShell (Installed from source):
+```
+PS> cp $env:GOPATH\src\github.com\btcsuite\btcd\sample-btcd.conf $env:LOCALAPPDATA\Btcd\btcd.conf
+PS> cp $env:GOPATH\src\github.com\btcsuite\btcwallet\sample-btcwallet.conf $env:LOCALAPPDATA\Btcwallet\btcwallet.conf
+PS> $editor $env:LOCALAPPDATA\Btcd\btcd.conf
+PS> $editor $env:LOCALAPPDATA\Btcwallet\btcwallet.conf
+```
+
+Linux/BSD/POSIX (Installed from source):
 ```bash
 $ cp $GOPATH/src/github.com/btcsuite/btcd/sample-btcd.conf ~/.btcd/btcd.conf
 $ cp $GOPATH/src/github.com/btcsuite/btcwallet/sample-btcwallet.conf ~/.btcwallet/btcwallet.conf
