@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 
 	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
@@ -28,23 +26,6 @@ var (
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
-
-// networkDir returns the directory name of a network directory to hold wallet
-// files.
-func networkDir(dataDir string, chainParams *chaincfg.Params) string {
-	netname := chainParams.Name
-
-	// For now, we must always name the testnet data directory as "testnet"
-	// and not "testnet3" or any other version, as the chaincfg testnet3
-	// paramaters will likely be switched to being named "testnet3" in the
-	// future.  This is done to future proof that change, and an upgrade
-	// plan to move the testnet3 data directory can be worked out later.
-	if chainParams.Net == wire.TestNet3 {
-		netname = "testnet"
-	}
-
-	return filepath.Join(dataDir, netname)
-}
 
 // convertLegacyKeystore converts all of the addresses in the passed legacy
 // key store to the new waddrmgr.Manager format.  Both the legacy keystore and
@@ -106,13 +87,14 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 // and generates the wallet accordingly.  The new wallet will reside at the
 // provided path.
 func createWallet(cfg *config) error {
-	dbDir := networkDir(cfg.DataDir, activeNet.Params)
-	loader := wallet.NewLoader(activeNet.Params, dbDir)
+	// TODO: pass resources directly to loader.
+	dbDir := filepath.Dir(appResources.ApplicationDataDirectory)
+	loader := wallet.NewLoader(appResources.ActiveNetwork.Params, dbDir)
 
 	// When there is a legacy keystore, open it now to ensure any errors
 	// don't end up exiting the process after the user has spent time
 	// entering a bunch of information.
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := appResources.NetworkDirectory()
 	keystorePath := filepath.Join(netDir, keystore.Filename)
 	var legacyKeyStore *keystore.Store
 	_, err := os.Stat(keystorePath)
@@ -220,14 +202,9 @@ func createSimulationWallet(cfg *config) error {
 		return err
 	}
 
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
-
-	// Create the wallet.
-	dbPath := filepath.Join(netDir, walletDbName)
-	fmt.Println("Creating the wallet...")
-
 	// Create the wallet database backed by bolt db.
-	db, err := walletdb.Create("bdb", dbPath)
+	fmt.Println("Creating the wallet...")
+	db, err := walletdb.Create("bdb", appResources.DatabaseFilePath())
 	if err != nil {
 		return err
 	}
@@ -240,7 +217,7 @@ func createSimulationWallet(cfg *config) error {
 	}
 
 	manager, err := waddrmgr.Create(waddrmgrNamespace, seed, []byte(pubPass),
-		[]byte(privPass), activeNet.Params, nil)
+		[]byte(privPass), appResources.ActiveNetwork.Params, nil)
 	if err != nil {
 		return err
 	}

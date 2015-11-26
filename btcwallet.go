@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,16 +10,14 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/resources"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
-)
-
-var (
-	cfg *config
 )
 
 func main() {
@@ -32,6 +30,14 @@ func main() {
 	}
 }
 
+// TODO: Pass this around instead of declaring a global.  This change should be
+// easier after the rpc server becomes its own package.
+var appResources *resources.Resources
+
+// TODO: Also remove this global.  Pass only the required details into each
+// subsystem.
+var cfg *config
+
 // walletMain is a work-around main function that is required since deferred
 // functions (such as log flushing) are not called with calls to os.Exit.
 // Instead, main runs this function and checks for a non-nil error, at which
@@ -40,11 +46,11 @@ func main() {
 func walletMain() error {
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.
-	tcfg, _, err := loadConfig()
+	var err error
+	cfg, _, appResources, err = loadConfig()
 	if err != nil {
 		return err
 	}
-	cfg = tcfg
 	defer backendLog.Flush()
 
 	if cfg.Profile != "" {
@@ -58,8 +64,9 @@ func walletMain() error {
 		}()
 	}
 
-	dbDir := networkDir(cfg.DataDir, activeNet.Params)
-	loader := wallet.NewLoader(activeNet.Params, dbDir)
+	// TODO: pass in the whole path.
+	dbDir := filepath.Dir(appResources.DatabaseFilePath())
+	loader := wallet.NewLoader(appResources.ActiveNetwork.Params, dbDir)
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client
@@ -214,8 +221,9 @@ func readCAFile() []byte {
 // authentication error.  Instead, all requests to the client will simply error.
 func startChainRPC(certs []byte) (*chain.RPCClient, error) {
 	log.Infof("Attempting RPC client connection to %v", cfg.RPCConnect)
-	rpcc, err := chain.NewRPCClient(activeNet.Params, cfg.RPCConnect,
-		cfg.BtcdUsername, cfg.BtcdPassword, certs, cfg.DisableClientTLS, 0)
+	rpcc, err := chain.NewRPCClient(appResources.ActiveNetwork.Params,
+		cfg.RPCConnect, cfg.BtcdUsername, cfg.BtcdPassword, certs,
+		cfg.DisableClientTLS, 0)
 	if err != nil {
 		return nil, err
 	}
