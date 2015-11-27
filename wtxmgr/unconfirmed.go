@@ -179,8 +179,8 @@ func (s *Store) unminedTxs(ns walletdb.Bucket) ([]*wire.MsgTx, error) {
 		return nil, err
 	}
 
-	// Transactions with no local depencies are excluded from this list, so
-	// we need to add them back now. First, find transactions with local
+	// Transactions with no local dependencies are excluded from this list,
+	// so we need to add them back now. First, find transactions with local
 	// dependencies. Then, sort those as DAGs. Finally, append all the
 	// transactions with no local dependencies and ship them out to the
 	// caller.

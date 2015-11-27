@@ -32,14 +32,10 @@ type inDegree map[wire.ShaHash]int
 // txRecExistsInSlice returns true is a transaction exists in a slice (by hash),
 // otherwise false.
 func txRecExistsInSlice(s []*TxRecord, e *TxRecord) bool {
-	if s == nil {
-		return false
-	}
-
 	hashE := e.Hash
 	for _, a := range s {
 		hashS := a.Hash
-		if hashS.IsEqual(&hashE) {
+		if hashS == hashE {
 			return true
 		}
 	}
@@ -49,13 +45,9 @@ func txRecExistsInSlice(s []*TxRecord, e *TxRecord) bool {
 // txRecHashExistsInSlice returns true is a transaction hash exists in a slice of
 // msgTx (by hash), otherwise false.
 func txRecHashExistsInSlice(s []*TxRecord, e wire.ShaHash) bool {
-	if s == nil {
-		return false
-	}
-
 	for _, a := range s {
 		hashS := a.Hash
-		if hashS.IsEqual(&e) {
+		if hashS == e {
 			return true
 		}
 	}
@@ -65,13 +57,9 @@ func txRecHashExistsInSlice(s []*TxRecord, e wire.ShaHash) bool {
 // txRecFromSliceByHash searches for a tx in a slice by hash, and then returns
 // that tx.
 func txRecFromSliceByHash(s []*TxRecord, h wire.ShaHash) *TxRecord {
-	if s == nil {
-		return nil
-	}
-
 	for _, tx := range s {
 		hS := tx.Hash
-		if hS.IsEqual(&h) {
+		if hS == h {
 			return tx
 		}
 	}
@@ -98,7 +86,7 @@ func parseTxRecsAsGraph(txs []*TxRecord) (g txGraph, in inDegree, err error) {
 			}
 
 			in[dep.PreviousOutPoint.Hash] = in[dep.PreviousOutPoint.Hash]
-			if dep.PreviousOutPoint.Hash.IsEqual(&txHash) {
+			if dep.PreviousOutPoint.Hash == txHash {
 				return nil, nil, fmt.Errorf("internal dependency detected")
 			}
 			successors := g[dep.PreviousOutPoint.Hash]
