@@ -1,3 +1,7 @@
+// Copyright (c) 2015 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
 // TODO(jrick) Due to the extra encapsulation added during the switch
 // to the new txstore, structures can no longer be mocked due to private
 // members.  Since all members for RecvTxOut and SignedTx are private, the
