@@ -17,6 +17,7 @@
 package chain
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -30,9 +31,72 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// Client represents a persistent client connection to a bitcoin RPC server
+// Client allows multiple bitcoin backends to be used. It is primarily designed with the btcrpcclient in mind.
+// See https://godoc.org/github.com/btcsuite/btcrpcclient
+type Client interface {
+	// Start attempts to establish a client connection with the remote server.
+	Start() error
+	// Stop disconnects the client.
+	Stop()
+	// WaitForShutdown waits for the client to shutdown.
+	WaitForShutdown()
+
+	// BlockStamp returns the latest block notified by the client, or an error
+	// if the client has been shut down.
+	BlockStamp() (*waddrmgr.BlockStamp, error)
+
+	// Rescan rescans the block chain starting from the provided starting block
+	// to the end of the longest chain for transactions that pay to the passed
+	// addresses and transactions which spend the passed outpoints.
+	Rescan(startBlock *wire.ShaHash, addresses []btcutil.Address, outpoints []*wire.OutPoint) error
+
+	// NotifyBlocks registers the client to receive notifications when blocks are
+	// connected and disconnected from the main chain. The notifications are
+	// delivered to the notification handlers associated with the client. Calling
+	// this function has no effect if there are no notification handlers and will
+	// result in an error if the client is configured to run in HTTP POST mode.
+	NotifyBlocks() error
+
+	// Notifications returns a channel of parsed notifications sent by the remote
+	// bitcoin RPC server.
+	Notifications() <-chan interface{}
+
+	// GetBlock returns a raw block from the server given its hash.
+	GetBlock(blockHash *wire.ShaHash) (*btcutil.Block, error)
+
+	// SendRawTransaction submits the encoded transaction to the server which
+	// will then relay it to the network.
+	SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (*wire.ShaHash, error)
+
+	// NotifyReceived registers the client to receive notifications every time a
+	// new transaction which pays to one of the passed addresses is accepted to
+	// memory pool or in a block connected to the block chain.
+	NotifyReceived(addresses []btcutil.Address) error
+
+	// RawRequest allows the caller to send a raw or custom request to the server.
+	RawRequest(method string, params []json.RawMessage) (json.RawMessage, error)
+
+	// GetInfo returns miscellaneous info regarding the RPC server. The returned
+	// info object may be void of wallet information if the remote server does
+	// not include wallet functionality.
+	GetInfo() (*btcjson.InfoWalletResult, error)
+
+	// GetBlockHashAsync returns an instance of a type that can be used to get
+	// the result of the RPC at some future time by invoking the Receive function
+	// on the returned instance.
+	GetBlockHashAsync(blockHeight int64) btcrpcclient.FutureGetBlockHashResult
+
+	// GetBlockVerbose returns a data structure from the server with information
+	// about a block given its hash.
+	GetBlockVerbose(blockHash *wire.ShaHash, verboseTx bool) (*btcjson.GetBlockVerboseResult, error)
+
+	// GetRawTransactionAsync returns an instance of a type that can be used to get the result of the RPC at some future time by invoking the Receive function on the returned instance.
+	GetRawTransactionAsync(txHash *wire.ShaHash) btcrpcclient.FutureGetRawTransactionResult
+}
+
+// BTCRPCClient represents a persistent client connection to a bitcoin RPC server
 // for information regarding the current best block chain.
-type Client struct {
+type BTCRPCClient struct {
 	*btcrpcclient.Client
 	chainParams *chaincfg.Params
 
@@ -52,8 +116,8 @@ type Client struct {
 // be done using the Start method.  If the remote server does not operate on
 // the same bitcoin network as described by the passed chain parameters, the
 // connection will be disconnected.
-func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte, disableTLS bool) (*Client, error) {
-	client := Client{
+func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte, disableTLS bool) (*BTCRPCClient, error) {
+	client := BTCRPCClient{
 		chainParams:         chainParams,
 		enqueueNotification: make(chan interface{}),
 		dequeueNotification: make(chan interface{}),
@@ -92,7 +156,7 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs [
 // sent by the server.  After a limited number of connection attempts, this
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
-func (c *Client) Start() error {
+func (c *BTCRPCClient) Start() error {
 	err := c.Connect(5) // attempt connection 5 tries at most
 	if err != nil {
 		return err
@@ -120,7 +184,7 @@ func (c *Client) Start() error {
 
 // Stop disconnects the client and signals the shutdown of all goroutines
 // started by Start.
-func (c *Client) Stop() {
+func (c *BTCRPCClient) Stop() {
 	c.quitMtx.Lock()
 	select {
 	case <-c.quit:
@@ -137,7 +201,7 @@ func (c *Client) Stop() {
 
 // WaitForShutdown blocks until both the client has finished disconnecting
 // and all handlers have exited.
-func (c *Client) WaitForShutdown() {
+func (c *BTCRPCClient) WaitForShutdown() {
 	c.Client.WaitForShutdown()
 	c.wg.Wait()
 }
@@ -187,13 +251,13 @@ type (
 // bitcoin RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for
 // later reads.
-func (c *Client) Notifications() <-chan interface{} {
+func (c *BTCRPCClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
 // if the client has been shut down.
-func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
+func (c *BTCRPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
 	case bs := <-c.currentBlock:
 		return bs, nil
@@ -223,14 +287,14 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	return blk, nil
 }
 
-func (c *Client) onClientConnect() {
+func (c *BTCRPCClient) onClientConnect() {
 	select {
 	case c.enqueueNotification <- ClientConnected{}:
 	case <-c.quit:
 	}
 }
 
-func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
+func (c *BTCRPCClient) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockConnected{
 		Block: wtxmgr.Block{
@@ -243,7 +307,7 @@ func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32, time time.Ti
 	}
 }
 
-func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
+func (c *BTCRPCClient) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockDisconnected{
 		Block: wtxmgr.Block{
@@ -256,7 +320,7 @@ func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32, time time
 	}
 }
 
-func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+func (c *BTCRPCClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	blk, err := parseBlock(block)
 	if err != nil {
 		// Log and drop improper notification.
@@ -276,19 +340,19 @@ func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	}
 }
 
-func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+func (c *BTCRPCClient) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	// Handled exactly like recvtx notifications.
 	c.onRecvTx(tx, block)
 }
 
-func (c *Client) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
+func (c *BTCRPCClient) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
 	case <-c.quit:
 	}
 }
 
-func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time.Time) {
+func (c *BTCRPCClient) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
 	case <-c.quit:
@@ -298,7 +362,7 @@ func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
-func (c *Client) handler() {
+func (c *BTCRPCClient) handler() {
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to receive best block from chain server: %v", err)
