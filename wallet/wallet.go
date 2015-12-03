@@ -65,7 +65,7 @@ type Wallet struct {
 	Manager *waddrmgr.Manager
 	TxStore *wtxmgr.Store
 
-	chainSvr        *chain.Client
+	chainSvr        chain.Client
 	chainSvrLock    sync.Mutex
 	chainSvrSynced  bool
 	chainSvrSyncMtx sync.Mutex
@@ -263,7 +263,7 @@ func (w *Wallet) notifyRelevantTx(relevantTx chain.RelevantTx) {
 }
 
 // Start starts the goroutines necessary to manage a wallet.
-func (w *Wallet) Start(chainServer *chain.Client) {
+func (w *Wallet) Start(chainServer chain.Client) {
 	w.quitMu.Lock()
 	select {
 	case <-w.quit:
