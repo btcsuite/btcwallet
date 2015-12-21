@@ -31,7 +31,7 @@ import (
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 4
+	LatestMgrVersion = 5
 )
 
 var (
@@ -129,8 +129,9 @@ type dbChainAddressRow struct {
 // public key address in the database.
 type dbImportedAddressRow struct {
 	dbAddressRow
-	encryptedPubKey  []byte
-	encryptedPrivKey []byte
+	encryptedPubKeyHash []byte
+	encryptedPubKey     []byte
+	encryptedPrivKey    []byte
 }
 
 // dbImportedAddressRow houses additional information stored about a script
@@ -826,8 +827,7 @@ func deserializeAddressRow(serializedAddress []byte) (*dbAddressRow, error) {
 // serializeAddressRow returns the serialization of the passed address row.
 func serializeAddressRow(row *dbAddressRow) []byte {
 	// The serialized address format is:
-	//   <addrType><account><addedTime><syncStatus><commentlen><comment>
-	//   <rawdata>
+	//   <addrType><account><addedTime><syncStatus><rawdata>
 	//
 	// 1 byte addrType + 4 bytes account + 8 bytes addTime + 1 byte
 	// syncStatus + 4 bytes raw data length + raw data
@@ -881,14 +881,16 @@ func serializeChainedAddress(branch, index uint32) []byte {
 // row as an imported address.
 func deserializeImportedAddress(row *dbAddressRow) (*dbImportedAddressRow, error) {
 	// The serialized imported address raw data format is:
-	//   <encpubkeylen><encpubkey><encprivkeylen><encprivkey>
+	//   <encpkhashlen><encpkhash><encpubkeylen><encpubkey>
+	//   <encprivkeylen><encprivkey>
 	//
-	// 4 bytes encrypted pubkey len + encrypted pubkey + 4 bytes encrypted
-	// privkey len + encrypted privkey
+	// 4 bytes encrypted pkhash len + encrypted pkhash +
+	// 4 bytes encrypted pubkey len + encrypted pubkey +
+	// 4 bytes encrypted privkey len + encrypted privkey
 
 	// Given the above, the length of the entry must be at a minimum
 	// the constant value sizes.
-	if len(row.rawData) < 8 {
+	if len(row.rawData) < 12 {
 		str := "malformed serialized imported address"
 		return nil, managerError(ErrDatabase, str, nil)
 	}
@@ -897,10 +899,17 @@ func deserializeImportedAddress(row *dbAddressRow) (*dbImportedAddressRow, error
 		dbAddressRow: *row,
 	}
 
-	pubLen := binary.LittleEndian.Uint32(row.rawData[0:4])
+	pkHashLen := binary.LittleEndian.Uint32(row.rawData[0:4])
+	retRow.encryptedPubKeyHash = make([]byte, pkHashLen)
+	copy(retRow.encryptedPubKeyHash, row.rawData[4:4+pkHashLen])
+	offset := 4 + pkHashLen
+
+	pubLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
+	offset += 4
 	retRow.encryptedPubKey = make([]byte, pubLen)
-	copy(retRow.encryptedPubKey, row.rawData[4:4+pubLen])
-	offset := 4 + pubLen
+	copy(retRow.encryptedPubKey, row.rawData[offset:offset+pubLen])
+	offset += pubLen
+
 	privLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
 	offset += 4
 	retRow.encryptedPrivKey = make([]byte, privLen)
@@ -911,21 +920,35 @@ func deserializeImportedAddress(row *dbAddressRow) (*dbImportedAddressRow, error
 
 // serializeImportedAddress returns the serialization of the raw data field for
 // an imported address.
-func serializeImportedAddress(encryptedPubKey, encryptedPrivKey []byte) []byte {
+// encryptedPubKeyHash is the encrypted hash160 of the public key associated
+// with an imported  address. It maybe nil if the private/public key of the
+// imported address is available.
+func serializeImportedAddress(encryptedPubKeyHash, encryptedPubKey, encryptedPrivKey []byte) []byte {
 	// The serialized imported address raw data format is:
-	//   <encpubkeylen><encpubkey><encprivkeylen><encprivkey>
+	//   <encpkhashlen><encpkhash><encpubkeylen><encpubkey>
+	//   <encprivkeylen><encprivkey>
 	//
-	// 4 bytes encrypted pubkey len + encrypted pubkey + 4 bytes encrypted
-	// privkey len + encrypted privkey
+	// 4 bytes encrypted pkhash len + encrypted pkhash +
+	// 4 bytes encrypted pubkey len + encrypted pubkey +
+	// 4 bytes encrypted privkey len + encrypted privkey
+	pkHashLen := uint32(len(encryptedPubKeyHash))
 	pubLen := uint32(len(encryptedPubKey))
 	privLen := uint32(len(encryptedPrivKey))
-	rawData := make([]byte, 8+pubLen+privLen)
-	binary.LittleEndian.PutUint32(rawData[0:4], pubLen)
-	copy(rawData[4:4+pubLen], encryptedPubKey)
-	offset := 4 + pubLen
+	rawData := make([]byte, 12+pkHashLen+pubLen+privLen)
+
+	binary.LittleEndian.PutUint32(rawData[0:4], pkHashLen)
+	copy(rawData[4:4+pkHashLen], encryptedPubKeyHash)
+	offset := 4 + pkHashLen
+
+	binary.LittleEndian.PutUint32(rawData[offset:offset+4], pubLen)
+	offset += 4
+	copy(rawData[offset:offset+pubLen], encryptedPubKey)
+	offset += pubLen
+
 	binary.LittleEndian.PutUint32(rawData[offset:offset+4], privLen)
 	offset += 4
 	copy(rawData[offset:offset+privLen], encryptedPrivKey)
+
 	return rawData
 }
 
@@ -1126,9 +1149,11 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 // putImportedAddress stores the provided imported address information to the
 // database.
 func putImportedAddress(tx walletdb.Tx, addressID []byte, account uint32,
-	status syncStatus, encryptedPubKey, encryptedPrivKey []byte) error {
+	status syncStatus, encryptedPubKeyHash, encryptedPubKey,
+	encryptedPrivKey []byte) error {
 
-	rawData := serializeImportedAddress(encryptedPubKey, encryptedPrivKey)
+	rawData := serializeImportedAddress(encryptedPubKeyHash, encryptedPubKey,
+		encryptedPrivKey)
 	addrRow := dbAddressRow{
 		addrType:   adtImport,
 		account:    account,
@@ -1343,7 +1368,8 @@ func deletePrivateKeys(tx walletdb.Tx) error {
 			// Reserialize the imported address without the private
 			// key and store it.
 			row.rawData = serializeImportedAddress(
-				irow.encryptedPubKey, nil)
+				irow.encryptedPubKeyHash, irow.encryptedPubKey,
+				nil)
 			err = bucket.Put(k, serializeAddressRow(row))
 			if err != nil {
 				str := "failed to delete imported private key"
@@ -1625,7 +1651,6 @@ func createManagerNS(namespace walletdb.Namespace) error {
 // initialized and it will be updated on the next rescan.
 func upgradeToVersion2(namespace walletdb.Namespace) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
-		currentMgrVersion := uint32(2)
 		rootBucket := tx.RootBucket()
 
 		_, err := rootBucket.CreateBucket(usedAddrBucketName)
@@ -1634,7 +1659,7 @@ func upgradeToVersion2(namespace walletdb.Namespace) error {
 			return managerError(ErrDatabase, str, err)
 		}
 
-		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
+		if err := putManagerVersion(tx, 2); err != nil {
 			return err
 		}
 
@@ -1732,6 +1757,15 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 		version = 4
 	}
 
+	if version < 5 {
+		if err := upgradeToVersion5(namespace); err != nil {
+			return err
+		}
+
+		// The manager is now at version 5.
+		version = 5
+	}
+
 	// Ensure the manager is upraded to the latest version.  This check is
 	// to intentionally cause a failure if the manager version is updated
 	// without writing code to handle the upgrade.
@@ -1752,7 +1786,6 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 // * metaBucketName
 func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
-		currentMgrVersion := uint32(3)
 		rootBucket := tx.RootBucket()
 
 		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams)
@@ -1844,7 +1877,7 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Write current manager version
-		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
+		if err := putManagerVersion(tx, 3); err != nil {
 			return err
 		}
 
@@ -1950,6 +1983,60 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		}
 
 		return nil
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
+}
+
+// upgradeToVersion5 upgrades the database from version 4 to version 5
+// The following fields were added to the serialized address row to support
+// imported public addresses:
+// * 'encryptedPubKeyHash' - encrypted pubkey hash of imported p2pkh address
+func upgradeToVersion5(namespace walletdb.Namespace) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		bucket := tx.RootBucket().Bucket(addrBucketName)
+
+		err := bucket.ForEach(func(k, v []byte) error {
+			// Skip buckets.
+			if v == nil {
+				return nil
+			}
+
+			addrType := addressType(v[0])
+
+			// Update imported private key addresses for encryptedPubKeyHash
+			// field
+			switch addrType {
+			case adtImport:
+				// Initialize new serialized address with four extra bytes
+				// and copy the initial bytes upto raw data length
+				serializedAddress := make([]byte, len(v)+4)
+				copy(serializedAddress[:14], v[:14])
+
+				// Update raw data length by four bytes to accomodate
+				// encryptedPubKeyHash
+				rdlen := binary.LittleEndian.Uint32(v[14:18])
+				binary.LittleEndian.PutUint32(serializedAddress[14:18],
+					uint32(rdlen+4))
+
+				// Insert nil pkHash length and shift old raw data by four bytes
+				binary.LittleEndian.PutUint32(serializedAddress[18:22], 0)
+				copy(serializedAddress[22:], v[18:])
+				err := bucket.Put(k, serializedAddress)
+				if err != nil {
+					str := "failed to update address"
+					return managerError(ErrDatabase, str, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		return putManagerVersion(tx, 5)
 	})
 	if err != nil {
 		return maybeConvertDbError(err)

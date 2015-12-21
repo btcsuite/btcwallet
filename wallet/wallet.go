@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
@@ -1290,6 +1291,66 @@ func (w *Wallet) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 		return "", err
 	}
 	return wif.String(), nil
+}
+
+// ImportAddress imports a watch-only address to the wallet. Rescan starts
+// at the genesis block unless a non-nil blockstamp is passed.
+func (w *Wallet) ImportAddress(addr btcutil.Address, bs *waddrmgr.BlockStamp,
+	rescan bool) (string, error) {
+
+	// The starting block for the address is the genesis block unless otherwise
+	// specified.
+	if bs == nil {
+		bs = &waddrmgr.BlockStamp{
+			Hash:   *w.chainParams.GenesisHash,
+			Height: 0,
+		}
+	}
+
+	_, err := w.Manager.ImportAddress(addr, bs)
+	if err != nil {
+		return "", err
+	}
+
+	// Rescan blockchain for transactions with txout scripts paying to the
+	// imported address.
+	if rescan {
+		job := &RescanJob{
+			Addrs:      []btcutil.Address{addr},
+			OutPoints:  nil,
+			BlockStamp: *bs,
+		}
+
+		// Submit rescan job and log when the import has completed.
+		// Do not block on finishing the rescan.  The rescan success
+		// or failure is logged elsewhere, and the channel is not
+		// required to be read, so discard the return value.
+		_ = w.SubmitRescan(job)
+	}
+
+	addrStr := addr.EncodeAddress()
+	log.Infof("Imported payment address %s", addrStr)
+
+	// Return the payment address string of the imported address.
+	return addrStr, nil
+}
+
+// ImportPubKey imports a public key to the wallet.
+func (w *Wallet) ImportPubKey(pubKey *btcec.PublicKey, bs *waddrmgr.BlockStamp, compressed, rescan bool) (string, error) {
+	var addr btcutil.Address
+	var err error
+	if compressed {
+		addr, err = btcutil.NewAddressPubKey(
+			pubKey.SerializeCompressed(), w.chainParams)
+	} else {
+		addr, err = btcutil.NewAddressPubKey(
+			pubKey.SerializeUncompressed(), w.chainParams)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return w.ImportAddress(addr, bs, rescan)
 }
 
 // ImportPrivateKey imports a private key to the wallet and writes the new
