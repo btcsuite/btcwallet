@@ -3018,14 +3018,33 @@ func SignRawTransaction(w *wallet.Wallet, chainSvr *chain.Client, icmd interface
 			err = vm.Execute()
 		}
 		if err != nil {
-			signErrors = append(signErrors,
-				btcjson.SignRawTransactionError{
-					TxID:      txIn.PreviousOutPoint.Hash.String(),
-					Vout:      txIn.PreviousOutPoint.Index,
-					ScriptSig: hex.EncodeToString(txIn.SignatureScript),
-					Sequence:  txIn.Sequence,
-					Error:     err.Error(),
-				})
+			multisigNotEnoughSigs := false
+			class, addr, _, _ := txscript.ExtractPkScriptAddrs(
+				inputs[txIn.PreviousOutPoint],
+				activeNet.Params)
+
+			if err == txscript.ErrStackUnderflow &&
+				class == txscript.ScriptHashTy {
+				redeemScript, _ := getScript(addr[0])
+				redeemClass := txscript.GetScriptClass(redeemScript)
+				if redeemClass == txscript.MultiSigTy {
+					multisigNotEnoughSigs = true
+				}
+			}
+			// Only report an error for the script engine in the event
+			// that it's not a multisignature underflow, indicating that
+			// we didn't have enough signatures in front of the
+			// redeemScript rather than an actual error.
+			if !multisigNotEnoughSigs {
+				signErrors = append(signErrors,
+					btcjson.SignRawTransactionError{
+						TxID:      txIn.PreviousOutPoint.Hash.String(),
+						Vout:      txIn.PreviousOutPoint.Index,
+						ScriptSig: hex.EncodeToString(txIn.SignatureScript),
+						Sequence:  txIn.Sequence,
+						Error:     err.Error(),
+					})
+			}
 		}
 	}
 
