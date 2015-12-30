@@ -369,7 +369,7 @@ out:
 			// request to the server.
 			// TODO: A minute timeout is used to prevent the handler
 			// loop from blocking here forever, but this is much larger
-			// then it needs to be due to btcd processing websocket
+			// than it needs to be due to btcd processing websocket
 			// requests synchronously (see
 			// https://github.com/btcsuite/btcd/issues/504).  Decrease
 			// this to something saner like 3s when the above issue is

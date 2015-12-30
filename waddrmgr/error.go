@@ -205,7 +205,7 @@ func managerError(c ErrorCode, desc string, err error) ManagerError {
 // function by returning an error with the code ErrCallBackBreak
 var Break = managerError(ErrCallBackBreak, "callback break", nil)
 
-// IsError returns whether the error is a MangerError with a matching error
+// IsError returns whether the error is a ManagerError with a matching error
 // code.
 func IsError(err error, code ErrorCode) bool {
 	e, ok := err.(ManagerError)
