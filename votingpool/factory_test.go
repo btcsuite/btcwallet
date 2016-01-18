@@ -125,7 +125,7 @@ func changeAwareTxFromWithdrawalTx(tx *withdrawalTx) changeAwareTx {
 	return cTx
 }
 
-func createMsgTx(pkScript []byte, amts []int64) *wire.MsgTx {
+func createMsgTx(txOuts ...*wire.TxOut) *wire.MsgTx {
 	msgtx := &wire.MsgTx{
 		Version: 1,
 		TxIn: []*wire.TxIn{
@@ -141,8 +141,8 @@ func createMsgTx(pkScript []byte, amts []int64) *wire.MsgTx {
 		LockTime: 0,
 	}
 
-	for _, amt := range amts {
-		msgtx.AddTxOut(wire.NewTxOut(amt, pkScript))
+	for _, txOut := range txOuts {
+		msgtx.AddTxOut(txOut)
 	}
 	return msgtx
 }
@@ -311,7 +311,7 @@ func TstCreateSeriesCredits(t *testing.T, pool *Pool, seriesID uint32, amounts [
 		if err != nil {
 			t.Fatal(err)
 		}
-		msgTx := createMsgTx(pkScript, []int64{amount})
+		msgTx := createMsgTx(wire.NewTxOut(amount, pkScript))
 		txSha := msgTx.TxSha()
 		// The index of the sole TxOut in the tx created above, which is going
 		// to be the Outpoint of the Credit we create here.
@@ -351,7 +351,11 @@ func TstCreateSeriesCreditsOnStore(t *testing.T, pool *Pool, seriesID uint32, am
 // every item in the amounts slice.
 func TstCreateCreditsOnStore(t *testing.T, s *wtxmgr.Store, pkScript []byte,
 	amounts []int64) []wtxmgr.Credit {
-	msgTx := createMsgTx(pkScript, amounts)
+	txOuts := make([]*wire.TxOut, len(amounts))
+	for i, amount := range amounts {
+		txOuts[i] = wire.NewTxOut(amount, pkScript)
+	}
+	msgTx := createMsgTx(txOuts...)
 	meta := &wtxmgr.BlockMeta{
 		Block: wtxmgr.Block{Height: TstInputsBlock},
 	}
