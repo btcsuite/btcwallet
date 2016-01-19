@@ -106,6 +106,9 @@ const (
 	// ErrInvalidAccount indicates that the requested account is not valid.
 	ErrInvalidAccount
 
+	// ErrInvalidAddress indicates that the given address is not valid.
+	ErrInvalidAddress
+
 	// ErrAddressNotFound indicates that the requested address is not known to
 	// the account manager.
 	ErrAddressNotFound
@@ -151,6 +154,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrLocked:            "ErrLocked",
 	ErrWatchingOnly:      "ErrWatchingOnly",
 	ErrInvalidAccount:    "ErrInvalidAccount",
+	ErrInvalidAddress:    "ErrInvalidAddress",
 	ErrAddressNotFound:   "ErrAddressNotFound",
 	ErrAccountNotFound:   "ErrAccountNotFound",
 	ErrDuplicateAddress:  "ErrDuplicateAddress",

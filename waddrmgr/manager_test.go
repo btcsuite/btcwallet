@@ -17,7 +17,7 @@
 package waddrmgr_test
 
 import (
-	"encoding/hex"
+	"bytes"
 	"fmt"
 	"os"
 	"reflect"
@@ -65,22 +65,24 @@ type addrType byte
 
 const (
 	addrPubKeyHash addrType = iota
+	addrPubKey
 	addrScriptHash
 )
 
 // expectedAddr is used to house the expected return values from a managed
 // address.  Not all fields for used for all managed address types.
 type expectedAddr struct {
-	address     string
-	addressHash []byte
-	internal    bool
-	compressed  bool
-	used        bool
-	imported    bool
-	pubKey      []byte
-	privKey     []byte
-	privKeyWIF  string
-	script      []byte
+	address      string
+	addressHash  []byte
+	internal     bool
+	compressed   bool
+	used         bool
+	watchingOnly bool
+	imported     bool
+	pubKey       []byte
+	privKey      []byte
+	privKeyWIF   string
+	script       []byte
 }
 
 // testNamePrefix is a helper to return a prefix to show for test errors based
@@ -103,26 +105,24 @@ func testNamePrefix(tc *testContext) string {
 // are checked to ensure they return the correct error.
 func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedPubKeyAddress, wantAddr *expectedAddr) bool {
 	// Ensure pubkey is the expected value for the managed address.
-	var gpubBytes []byte
-	if gotAddr.Compressed() {
-		gpubBytes = gotAddr.PubKey().SerializeCompressed()
-	} else {
-		gpubBytes = gotAddr.PubKey().SerializeUncompressed()
-	}
-	if !reflect.DeepEqual(gpubBytes, wantAddr.pubKey) {
-		tc.t.Errorf("%s PubKey: unexpected public key - got %x, want "+
-			"%x", prefix, gpubBytes, wantAddr.pubKey)
+	gpubKey, compressed, ok := gotAddr.PubKey()
+	if ok != (wantAddr.pubKey != nil) {
+		tc.t.Errorf("%s PubKey: unexpected public key status - got %v, want %v",
+			prefix, ok, wantAddr.pubKey != nil)
 		return false
 	}
-
-	// Ensure exported pubkey string is the expected value for the managed
-	// address.
-	gpubHex := gotAddr.ExportPubKey()
-	wantPubHex := hex.EncodeToString(wantAddr.pubKey)
-	if gpubHex != wantPubHex {
-		tc.t.Errorf("%s ExportPubKey: unexpected public key - got %s, "+
-			"want %s", prefix, gpubHex, wantPubHex)
-		return false
+	if ok {
+		var gpubBytes []byte
+		if compressed {
+			gpubBytes = gpubKey.SerializeCompressed()
+		} else {
+			gpubBytes = gpubKey.SerializeUncompressed()
+		}
+		if !reflect.DeepEqual(gpubBytes, wantAddr.pubKey) {
+			tc.t.Errorf("%s PubKey: unexpected public key - got %x, want "+
+				"%x", prefix, gpubBytes, wantAddr.pubKey)
+			return false
+		}
 	}
 
 	// Ensure private key is the expected value for the managed address.
@@ -130,7 +130,7 @@ func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.M
 	// for the expected error when the manager is locked.
 	gotPrivKey, err := gotAddr.PrivKey()
 	switch {
-	case tc.watchingOnly:
+	case tc.watchingOnly, wantAddr.watchingOnly:
 		// Confirm expected watching-only error.
 		testName := fmt.Sprintf("%s PrivKey", prefix)
 		if !checkManagerError(tc.t, testName, err, waddrmgr.ErrWatchingOnly) {
@@ -148,12 +148,6 @@ func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.M
 				"got %x, want %x", prefix, gpriv, wantAddr.privKey)
 			return false
 		}
-	default:
-		// Confirm expected locked error.
-		testName := fmt.Sprintf("%s PrivKey", prefix)
-		if !checkManagerError(tc.t, testName, err, waddrmgr.ErrLocked) {
-			return false
-		}
 	}
 
 	// Ensure exported private key in Wallet Import Format (WIF) is the
@@ -162,7 +156,7 @@ func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.M
 	// the manager is locked.
 	gotWIF, err := gotAddr.ExportPrivKey()
 	switch {
-	case tc.watchingOnly:
+	case tc.watchingOnly, wantAddr.watchingOnly:
 		// Confirm expected watching-only error.
 		testName := fmt.Sprintf("%s ExportPrivKey", prefix)
 		if !checkManagerError(tc.t, testName, err, waddrmgr.ErrWatchingOnly) {
@@ -180,12 +174,6 @@ func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.M
 				wantAddr.privKeyWIF)
 			return false
 		}
-	default:
-		// Confirm expected locked error.
-		testName := fmt.Sprintf("%s ExportPrivKey", prefix)
-		if !checkManagerError(tc.t, testName, err, waddrmgr.ErrLocked) {
-			return false
-		}
 	}
 
 	return true
@@ -199,13 +187,12 @@ func testManagedPubKeyAddress(tc *testContext, prefix string, gotAddr waddrmgr.M
 // will also be tested, otherwise, the functions which deal with private data
 // are checked to ensure they return the correct error.
 func testManagedScriptAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedScriptAddress, wantAddr *expectedAddr) bool {
-	// Ensure script is the expected value for the managed address.
 	// Ensure script is the expected value for the managed address.  Since
 	// this is only available when the manager is unlocked, also check for
 	// the expected error when the manager is locked.
 	gotScript, err := gotAddr.Script()
 	switch {
-	case tc.watchingOnly:
+	case tc.watchingOnly, wantAddr.watchingOnly:
 		// Confirm expected watching-only error.
 		testName := fmt.Sprintf("%s Script", prefix)
 		if !checkManagerError(tc.t, testName, err, waddrmgr.ErrWatchingOnly) {
@@ -289,6 +276,11 @@ func testAddress(tc *testContext, prefix string, gotAddr waddrmgr.ManagedAddress
 
 	case waddrmgr.ManagedScriptAddress:
 		if !testManagedScriptAddress(tc, prefix, addr, wantAddr) {
+			return false
+		}
+
+	case waddrmgr.ManagedAddress:
+		if !bytes.Equal(addr.AddrHash(), wantAddr.addressHash) {
 			return false
 		}
 	}
@@ -606,6 +598,213 @@ func testLocking(tc *testContext) bool {
 	if !tc.manager.IsLocked() {
 		tc.t.Error("IsLocked: manager is unlocked after failed unlock " +
 			"attempt")
+		return false
+	}
+
+	return true
+}
+
+// testImportAddress tests that importing addresses works properly.  It
+// ensures they can be retrieved by Address after they have been imported and
+// the addresses give the expected values when the manager is locked and
+// unlocked.
+//
+// This function expects the manager is already locked when called and returns
+// with the manager locked.
+func testImportAddress(tc *testContext) bool {
+	tests := []struct {
+		name       string
+		typ        addrType
+		in         string
+		blockstamp waddrmgr.BlockStamp
+		expected   expectedAddr
+	}{
+		{
+			name: "p2pkh address",
+			typ:  addrPubKeyHash,
+			in:   "1HZwkjkeaoZfTSaJxDw6aKkxp45agDiEzN",
+			expected: expectedAddr{
+				address:      "1HZwkjkeaoZfTSaJxDw6aKkxp45agDiEzN",
+				addressHash:  hexToBytes("b5bd079c4d57cc7fc28ecf8213a6b791625b8183"),
+				imported:     true,
+				watchingOnly: true,
+			},
+		},
+		{
+			name: "p2pk address compressed",
+			typ:  addrPubKey,
+			in:   "1JLv4miwKGsCeUuTSnBnji52ncZGEVNZjd",
+			expected: expectedAddr{
+				address:      "1JLv4miwKGsCeUuTSnBnji52ncZGEVNZjd",
+				addressHash:  hexToBytes("be3e568a1fc5b22a61af3aadb53dff30c22ae97f"),
+				imported:     true,
+				watchingOnly: true,
+				compressed:   true,
+				pubKey:       hexToBytes("03562d206cc133e83316ee8b8f0b328c854e4877b8df207aa4e0328cf8ee684595"),
+			},
+		},
+		{
+			name: "p2pk address uncompressed",
+			typ:  addrPubKey,
+			in:   "15cPmDAEUXeczViFAMDWVVKGhn4Z2ekgY5",
+			expected: expectedAddr{
+				address:      "15cPmDAEUXeczViFAMDWVVKGhn4Z2ekgY5",
+				addressHash:  hexToBytes("32921010b2a98d446e026969cb6b7523759cebd9"),
+				imported:     true,
+				watchingOnly: true,
+				compressed:   false,
+				pubKey:       hexToBytes("04c99afd77ff6f1ecfe49667b4233723e3244760b6f65c43cd73bb62c1e9580917b3b9add88dc210dee6a6d6b0ceedb6db61407876d499b69d34c8c9729bf5b655"),
+			},
+		},
+		{
+			name: "p2sh address",
+			typ:  addrScriptHash,
+			in:   "3Faj1Lk5dmEhjiVw2RRT5w8iRrAUiwY2z3",
+			expected: expectedAddr{
+				address:      "3Faj1Lk5dmEhjiVw2RRT5w8iRrAUiwY2z3",
+				addressHash:  hexToBytes("986124b379ef96d971b4cdad450536a0b55e7824"),
+				imported:     true,
+				watchingOnly: true,
+			},
+		},
+	}
+
+	// The manager must be unlocked to import a address, however a
+	// watching-only manager can't be unlocked.
+	if !tc.watchingOnly {
+		if err := tc.manager.Unlock(privPassphrase); err != nil {
+			tc.t.Errorf("Unlock: unexpected error: %v", err)
+			return false
+		}
+		tc.unlocked = true
+	}
+
+	// Only import the addresses when in the create phase of testing.
+	net := tc.manager.ChainParams()
+	tc.account = waddrmgr.ImportedAddrAccount
+	prefix := testNamePrefix(tc) + " testImportAddress"
+	if tc.create {
+		for i, test := range tests {
+			var err error
+			var addr btcutil.Address
+			switch test.typ {
+			case addrPubKeyHash:
+				addr, err = btcutil.NewAddressPubKeyHash(test.expected.addressHash, net)
+				if err != nil {
+					tc.t.Errorf("%s NewAddressPubKeyHash #%d (%s): "+
+						"unexpected error: %v", prefix, i,
+						test.name, err)
+					continue
+				}
+			case addrPubKey:
+				addr, err = btcutil.NewAddressPubKey(test.expected.pubKey, net)
+				if err != nil {
+					tc.t.Errorf("%s NewAddressPubKey #%d (%s): "+
+						"unexpected error: %v", prefix, i,
+						test.name, err)
+					continue
+				}
+			case addrScriptHash:
+				addr, err = btcutil.NewAddressScriptHashFromHash(test.expected.addressHash, net)
+				if err != nil {
+					tc.t.Errorf("%s NewAddressScriptHashFromHash #%d (%s): "+
+						"unexpected error: %v", prefix, i,
+						test.name, err)
+					continue
+				}
+			}
+			maddr, err := tc.manager.ImportAddress(addr,
+				&test.blockstamp)
+			if err != nil {
+				tc.t.Errorf("%s ImportAddress #%d (%s): "+
+					"unexpected error: %v", prefix, i,
+					test.name, err)
+				continue
+			}
+			if !testAddress(tc, prefix+" ImportAddress", maddr,
+				&test.expected) {
+				continue
+			}
+		}
+	}
+
+	// Setup a closure to test the results since the same tests need to be
+	// repeated with the manager unlocked and locked.
+	testResults := func() bool {
+		failed := false
+		for i, test := range tests {
+			var err error
+			var addr btcutil.Address
+			switch test.typ {
+			case addrPubKeyHash:
+				addr, err = btcutil.NewAddressPubKeyHash(test.expected.addressHash, net)
+				if err != nil {
+					tc.t.Errorf("%s NewAddressPubKeyHash #%d (%s): "+
+						"unexpected error: %v", prefix, i,
+						test.name, err)
+					continue
+				}
+			case addrPubKey:
+				addr, err = btcutil.NewAddressPubKey(test.expected.pubKey, net)
+				if err != nil {
+					tc.t.Errorf("%s NewAddressPubKey #%d (%s): "+
+						"unexpected error: %v", prefix, i,
+						test.name, err)
+					continue
+				}
+			case addrScriptHash:
+				addr, err = btcutil.NewAddressScriptHashFromHash(test.expected.addressHash, net)
+				if err != nil {
+					tc.t.Errorf("%s NewAddressScriptHashFromHash #%d (%s): "+
+						"unexpected error: %v", prefix, i,
+						test.name, err)
+					continue
+				}
+			}
+			taPrefix := fmt.Sprintf("%s Address #%d (%s)", prefix,
+				i, test.name)
+			ma, err := tc.manager.Address(addr)
+			if err != nil {
+				tc.t.Errorf("%s: unexpected error: %v", taPrefix,
+					err)
+				failed = true
+				continue
+			}
+			if !testAddress(tc, taPrefix, ma, &test.expected) {
+				failed = true
+				continue
+			}
+		}
+
+		return !failed
+	}
+
+	// The address manager could either be locked or unlocked here depending
+	// on whether or not it's a watching-only manager.  When it's unlocked,
+	// this will test both the public and private address data are accurate.
+	// When it's locked, it must be watching-only, so only the public
+	// address  information is tested and the private functions are checked
+	// to ensure they return the expected ErrWatchingOnly error.
+	if !testResults() {
+		return false
+	}
+
+	// Everything after this point involves locking the address manager and
+	// retesting the addresses with a locked manager.  However, for
+	// watching-only mode, this has already happened, so just exit now in
+	// that case.
+	if tc.watchingOnly {
+		return true
+	}
+
+	// Lock the manager and retest all of the addresses to ensure the
+	// private information returns the expected error.
+	if err := tc.manager.Lock(); err != nil {
+		tc.t.Errorf("Lock: unexpected error: %v", err)
+		return false
+	}
+	tc.unlocked = false
+	if !testResults() {
 		return false
 	}
 
@@ -1351,6 +1550,7 @@ func testManagerAPI(tc *testContext) {
 	testExternalAddresses(tc)
 	testInternalAddresses(tc)
 	testImportPrivateKey(tc)
+	testImportAddress(tc)
 	testImportScript(tc)
 	testMarkUsed(tc)
 	testChangePassphrase(tc)
