@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014-2015 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,20 +22,24 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainec"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrutil/hdkeychain"
+	"github.com/decred/dcrwallet/internal/legacy/keystore"
+	"github.com/decred/dcrwallet/pgpwordlist"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/wallet"
+	"github.com/decred/dcrwallet/walletdb"
+	_ "github.com/decred/dcrwallet/walletdb/bdb"
+	"github.com/decred/dcrwallet/wstakemgr"
+
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
 
@@ -42,6 +47,9 @@ import (
 var (
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
+
+	// wstakemgrNamespaceKey is the namespace key for the wstakemgr package.
+	wstakemgrNamespaceKey = []byte("wstakemgr")
 )
 
 // networkDir returns the directory name of a network directory to hold wallet
@@ -50,11 +58,11 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 	netname := chainParams.Name
 
 	// For now, we must always name the testnet data directory as "testnet"
-	// and not "testnet3" or any other version, as the chaincfg testnet3
-	// paramaters will likely be switched to being named "testnet3" in the
+	// and not "testnet" or any other version, as the chaincfg testnet
+	// paramaters will likely be switched to being named "testnet" in the
 	// future.  This is done to future proof that change, and an upgrade
-	// plan to move the testnet3 data directory can be worked out later.
-	if chainParams.Net == wire.TestNet3 {
+	// plan to move the testnet data directory can be worked out later.
+	if chainParams.Net == wire.TestNet {
 		netname = "testnet"
 	}
 
@@ -317,8 +325,22 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 			return nil, err
 		}
 
+		seedStr, err := pgpwordlist.ToStringChecksum(seed)
+		if err != nil {
+			return nil, err
+		}
+		seedStrSplit := strings.Split(seedStr, " ")
+
 		fmt.Println("Your wallet generation seed is:")
-		fmt.Printf("%x\n", seed)
+		for i := 0; i < hdkeychain.RecommendedSeedLen+1; i++ {
+			fmt.Printf("%v ", seedStrSplit[i])
+
+			if (i+1)%6 == 0 {
+				fmt.Printf("\n")
+			}
+		}
+
+		fmt.Printf("\n\nHex: %x\n", seed)
 		fmt.Println("IMPORTANT: Keep the seed in a safe place as you\n" +
 			"will NOT be able to restore your wallet without it.")
 		fmt.Println("Please keep in mind that anyone who has access\n" +
@@ -349,11 +371,15 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		seedStr = strings.TrimSpace(strings.ToLower(seedStr))
 
-		seed, err := hex.DecodeString(seedStr)
+		seedStrTrimmed := strings.TrimSpace(seedStr)
+
+		seed, err := pgpwordlist.ToBytesChecksum(seedStrTrimmed)
 		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
 			len(seed) > hdkeychain.MaxSeedBytes {
+			if err != nil {
+				fmt.Printf("Input error: %v\n", err.Error())
+			}
 
 			fmt.Printf("Invalid seed specified.  Must be a "+
 				"hexadecimal value that is at least %d bits and "+
@@ -361,6 +387,8 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 				hdkeychain.MaxSeedBytes*8)
 			continue
 		}
+
+		fmt.Printf("\nSeed input successful. \nHex: %x\n", seed)
 
 		return seed, nil
 	}
@@ -386,8 +414,8 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 				continue
 			}
 
-			wif, err := btcutil.NewWIF((*btcec.PrivateKey)(privKey),
-				netParams, addr.Compressed())
+			wif, err := dcrutil.NewWIF((chainec.PrivateKey)(privKey),
+				netParams, chainec.ECTypeSecp256k1)
 			if err != nil {
 				fmt.Printf("WARN: Failed to create wallet "+
 					"import format for address %v: %v\n",
@@ -529,6 +557,18 @@ func createSimulationWallet(cfg *config) error {
 
 	netDir := networkDir(cfg.DataDir, activeNet.Params)
 
+	// Write the seed to disk, so that we can restore it later
+	// if need be, for testing purposes.
+	seedStr, err := pgpwordlist.ToStringChecksum(seed)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(filepath.Join(netDir, "seed"), []byte(seedStr), 0644)
+	if err != nil {
+		return err
+	}
+
 	// Create the wallet.
 	dbPath := filepath.Join(netDir, walletDbName)
 	fmt.Println("Creating the wallet...")
@@ -551,10 +591,93 @@ func createSimulationWallet(cfg *config) error {
 	if err != nil {
 		return err
 	}
+	defer manager.Close()
 
-	manager.Close()
+	// Create the stake manager/store.
+	wstakemgrNamespace, err := db.Namespace(wstakemgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	stakeStore, err := wstakemgr.Create(wstakemgrNamespace, manager,
+		activeNet.Params)
+	if err != nil {
+		return err
+	}
+	defer stakeStore.Close()
 
 	fmt.Println("The wallet has been created successfully.")
+	return nil
+}
+
+// promptHDPublicKey prompts the user for an extended public key.
+func promptHDPublicKey(reader *bufio.Reader) (string, error) {
+	for {
+		fmt.Print("Enter HD wallet public key: ")
+		keyString, err := reader.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+
+		keyStringTrimmed := strings.TrimSpace(keyString)
+
+		return keyStringTrimmed, nil
+	}
+}
+
+// createWatchingOnlyWallet
+func createWatchingOnlyWallet(cfg *config) error {
+	// Get the public key.
+	reader := bufio.NewReader(os.Stdin)
+	pubKeyString, err := promptHDPublicKey(reader)
+	if err != nil {
+		return err
+	}
+
+	// Ask if the user wants to encrypt the wallet with a password.
+	pubPass, err := promptConsolePublicPass(reader, []byte{}, cfg)
+	if err != nil {
+		return err
+	}
+
+	netDir := networkDir(cfg.DataDir, activeNet.Params)
+
+	// Create the wallet.
+	dbPath := filepath.Join(netDir, walletDbName)
+	fmt.Println("Creating the wallet...")
+
+	// Create the wallet database backed by bolt db.
+	db, err := walletdb.Create("bdb", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Create the address manager.
+	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+
+	manager, err := waddrmgr.CreateWatchOnly(waddrmgrNamespace, pubKeyString,
+		[]byte(pubPass), activeNet.Params, nil)
+	if err != nil {
+		return err
+	}
+	defer manager.Close()
+
+	// Create the stake manager/store.
+	wstakemgrNamespace, err := db.Namespace(wstakemgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	stakeStore, err := wstakemgr.Create(wstakemgrNamespace, manager,
+		activeNet.Params)
+	if err != nil {
+		return err
+	}
+	defer stakeStore.Close()
+
+	fmt.Println("The watching only wallet has been created successfully.")
 	return nil
 }
 
@@ -580,7 +703,7 @@ func checkCreateDir(path string) error {
 }
 
 // openDb opens and returns a walletdb.DB (boltdb here) given the directory and
-// dbname
+// dbname.
 func openDb(directory string, dbname string) (walletdb.DB, error) {
 	dbPath := filepath.Join(directory, dbname)
 
@@ -595,8 +718,8 @@ func openDb(directory string, dbname string) (walletdb.DB, error) {
 
 // openWallet returns a wallet. The function handles opening an existing wallet
 // database, the address manager and the transaction store and uses the values
-// to open a wallet.Wallet
-func openWallet() (*wallet.Wallet, walletdb.DB, error) {
+// to open a wallet.Wallet.
+func openWallet(cfg *config) (*wallet.Wallet, walletdb.DB, error) {
 	netdir := networkDir(cfg.DataDir, activeNet.Params)
 
 	db, err := openDb(netdir, walletDbName)
@@ -613,11 +736,19 @@ func openWallet() (*wallet.Wallet, walletdb.DB, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	stMgrNS, err := db.Namespace(wstakemgrNamespaceKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	cbs := &waddrmgr.OpenCallbacks{
 		ObtainSeed:        promptSeed,
 		ObtainPrivatePass: promptPrivPassPhrase,
 	}
 	w, err := wallet.Open([]byte(cfg.WalletPass), activeNet.Params, db,
-		addrMgrNS, txMgrNS, cbs)
+		addrMgrNS, txMgrNS, stMgrNS, cbs, cfg.VoteBits, cfg.EnableStakeMining,
+		cfg.BalanceToMaintain, cfg.ReuseAddresses, cfg.RollbackTest,
+		cfg.PruneTickets, cfg.TicketAddress, cfg.TicketMaxPrice,
+		cfg.AutomaticRepair)
 	return w, db, err
 }

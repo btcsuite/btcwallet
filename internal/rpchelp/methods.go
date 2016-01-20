@@ -1,4 +1,5 @@
 // Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
 //
 // Permission to use, copy, modify, and distribute this software for any
 // purpose with or without fee is hereby granted, provided that the above
@@ -16,7 +17,7 @@
 
 package rpchelp
 
-import "github.com/btcsuite/btcd/btcjson"
+import "github.com/decred/dcrd/dcrjson"
 
 // Common return types.
 var (
@@ -24,7 +25,7 @@ var (
 	returnsNumber      = []interface{}{(*float64)(nil)}
 	returnsString      = []interface{}{(*string)(nil)}
 	returnsStringArray = []interface{}{(*[]string)(nil)}
-	returnsLTRArray    = []interface{}{(*[]btcjson.ListTransactionsResult)(nil)}
+	returnsLTRArray    = []interface{}{(*[]dcrjson.ListTransactionsResult)(nil)}
 )
 
 // Contains all methods and result types that help is generated for, for every
@@ -34,7 +35,7 @@ var Methods = []struct {
 	ResultTypes []interface{}
 }{
 	{"addmultisigaddress", returnsString},
-	{"createmultisig", []interface{}{(*btcjson.CreateMultiSigResult)(nil)}},
+	{"createmultisig", []interface{}{(*dcrjson.CreateMultiSigResult)(nil)}},
 	{"dumpprivkey", returnsString},
 	{"getaccount", returnsString},
 	{"getaccountaddress", returnsString},
@@ -42,42 +43,57 @@ var Methods = []struct {
 	{"getbalance", append(returnsNumber, returnsNumber[0])},
 	{"getbestblockhash", returnsString},
 	{"getblockcount", returnsNumber},
-	{"getinfo", []interface{}{(*btcjson.InfoWalletResult)(nil)}},
+	{"getinfo", []interface{}{(*dcrjson.InfoWalletResult)(nil)}},
+	{"getmasterpubkey", []interface{}{(*dcrjson.GetMasterPubkeyResult)(nil)}},
+	{"getmultisigoutinfo", []interface{}{(*dcrjson.GetMultisigOutInfoResult)(nil)}},
+	{"getseed", []interface{}{(*dcrjson.GetSeedResult)(nil)}},
 	{"getnewaddress", returnsString},
 	{"getrawchangeaddress", returnsString},
 	{"getreceivedbyaccount", returnsNumber},
 	{"getreceivedbyaddress", returnsNumber},
-	{"gettransaction", []interface{}{(*btcjson.GetTransactionResult)(nil)}},
+	{"gettickets", []interface{}{(*dcrjson.GetTicketsResult)(nil)}},
+	{"getticketmaxprice", returnsNumber},
+	{"gettransaction", []interface{}{(*dcrjson.GetTransactionResult)(nil)}},
 	{"help", append(returnsString, returnsString[0])},
 	{"importprivkey", nil},
+	{"importscript", nil},
 	{"keypoolrefill", nil},
 	{"listaccounts", []interface{}{(*map[string]float64)(nil)}},
-	{"listlockunspent", []interface{}{(*[]btcjson.TransactionInput)(nil)}},
-	{"listreceivedbyaccount", []interface{}{(*[]btcjson.ListReceivedByAccountResult)(nil)}},
-	{"listreceivedbyaddress", []interface{}{(*[]btcjson.ListReceivedByAddressResult)(nil)}},
-	{"listsinceblock", []interface{}{(*btcjson.ListSinceBlockResult)(nil)}},
+	{"listlockunspent", []interface{}{(*[]dcrjson.TransactionInput)(nil)}},
+	{"listreceivedbyaccount", []interface{}{(*[]dcrjson.ListReceivedByAccountResult)(nil)}},
+	{"listreceivedbyaddress", []interface{}{(*[]dcrjson.ListReceivedByAddressResult)(nil)}},
+	{"listsinceblock", []interface{}{(*dcrjson.ListSinceBlockResult)(nil)}},
 	{"listtransactions", returnsLTRArray},
-	{"listunspent", []interface{}{(*btcjson.ListUnspentResult)(nil)}},
+	{"listunspent", []interface{}{(*dcrjson.ListUnspentResult)(nil)}},
 	{"lockunspent", returnsBool},
+	{"redeemmultisigout", []interface{}{(*dcrjson.RedeemMultiSigOutResult)(nil)}},
+	{"redeemmultisigouts", []interface{}{(*dcrjson.RedeemMultiSigOutResult)(nil)}},
 	{"sendfrom", returnsString},
 	{"sendmany", returnsString},
 	{"sendtoaddress", returnsString},
+	{"sendtomultisig", returnsString},
+	{"setticketmaxprice", nil},
 	{"settxfee", returnsBool},
 	{"signmessage", returnsString},
-	{"signrawtransaction", []interface{}{(*btcjson.SignRawTransactionResult)(nil)}},
-	{"validateaddress", []interface{}{(*btcjson.ValidateAddressWalletResult)(nil)}},
+	{"signrawtransaction", []interface{}{(*dcrjson.SignRawTransactionResult)(nil)}},
+	{"signrawtransactions", []interface{}{(*dcrjson.SignRawTransactionsResult)(nil)}},
+	{"validateaddress", []interface{}{(*dcrjson.ValidateAddressWalletResult)(nil)}},
 	{"verifymessage", returnsBool},
 	{"walletlock", nil},
 	{"walletpassphrase", nil},
 	{"walletpassphrasechange", nil},
 	{"createnewaccount", nil},
 	{"exportwatchingwallet", returnsString},
-	{"getbestblock", []interface{}{(*btcjson.GetBestBlockResult)(nil)}},
+	{"getbestblock", []interface{}{(*dcrjson.GetBestBlockResult)(nil)}},
 	{"getunconfirmedbalance", returnsNumber},
 	{"listaddresstransactions", returnsLTRArray},
 	{"listalltransactions", returnsLTRArray},
 	{"renameaccount", nil},
 	{"walletislocked", returnsBool},
+	{"purchaseticket", returnsString},
+	{"sendtossrtx", returnsString},
+	{"sendtosstx", returnsString},
+	{"sendtossgen", returnsString},
 }
 
 var HelpDescs = []struct {

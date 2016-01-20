@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,8 +22,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/decred/dcrutil/hdkeychain"
+	"github.com/decred/dcrwallet/waddrmgr"
 )
 
 func TestPoolEnsureUsedAddr(t *testing.T) {
@@ -372,11 +373,23 @@ func TestValidateAndDecryptKeys(t *testing.T) {
 		t.Fatalf("Unexpected number of decrypted private keys: got %d, want 2", len(privKeys))
 	}
 
-	if pubKeys[0].String() != TstPubKeys[0] || pubKeys[1].String() != TstPubKeys[1] {
+	pKey0, err := pubKeys[0].String()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pKey1, err := pubKeys[1].String()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pKey0 != TstPubKeys[0] || pKey1 != TstPubKeys[1] {
 		t.Fatalf("Public keys don't match: %v!=%v ", TstPubKeys[0:2], pubKeys)
 	}
 
-	if privKeys[0].String() != TstPrivKeys[0] || privKeys[1] != nil {
+	privKey0, err := privKeys[0].String()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if privKey0 != TstPrivKeys[0] || privKeys[1] != nil {
 		t.Fatalf("Private keys don't match: %v, %v", []string{TstPrivKeys[0], ""}, privKeys)
 	}
 
@@ -384,9 +397,13 @@ func TestValidateAndDecryptKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to neuter private key: %v", err)
 	}
-	if pubKeys[0].String() != neuteredKey.String() {
+	nKey, err := neuteredKey.String()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pKey0 != nKey {
 		t.Errorf("Public key (%v) does not match neutered private key (%v)",
-			pubKeys[0].String(), neuteredKey.String())
+			pKey0, nKey)
 	}
 }
 

@@ -1,4 +1,5 @@
 // Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
 //
 // Permission to use, copy, modify, and distribute this software for any
 // purpose with or without fee is hereby granted, provided that the above
@@ -23,33 +24,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
-	. "github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/walletdb"
+	_ "github.com/decred/dcrwallet/walletdb/bdb"
+	"github.com/decred/dcrwallet/wtxmgr"
+	. "github.com/decred/dcrwallet/wtxmgr"
 )
 
 // Received transaction output for mainnet outpoint
 // 61d3696de4c888730cbe06b0ad8ecb6d72d6108e893895aa9bc067bd7eba3fad:0
 var (
-	TstRecvSerializedTx, _          = hex.DecodeString("010000000114d9ff358894c486b4ae11c2a8cf7851b1df64c53d2e511278eff17c22fb7373000000008c493046022100995447baec31ee9f6d4ec0e05cb2a44f6b817a99d5f6de167d1c75354a946410022100c9ffc23b64d770b0e01e7ff4d25fbc2f1ca8091053078a247905c39fce3760b601410458b8e267add3c1e374cf40f1de02b59213a82e1d84c2b94096e22e2f09387009c96debe1d0bcb2356ffdcf65d2a83d4b34e72c62eccd8490dbf2110167783b2bffffffff0280969800000000001976a914479ed307831d0ac19ebc5f63de7d5f1a430ddb9d88ac38bfaa00000000001976a914dadf9e3484f28b385ddeaa6c575c0c0d18e9788a88ac00000000")
-	TstRecvTx, _                    = btcutil.NewTxFromBytes(TstRecvSerializedTx)
-	TstRecvTxSpendingTxBlockHash, _ = wire.NewShaHashFromStr("00000000000000017188b968a371bab95aa43522665353b646e41865abae02a4")
-	TstRecvAmt                      = int64(10000000)
+	TstRecvSerializedTx, _          = hex.DecodeString("01000000020000000000000000000000000000000000000000000000000000000000000000ffffffff0000ffffffff04a2b971f28a2068ca54c6ba47507be802b3204264c67a8d8ce1fa7b34980908000000000100ffffffff0300000000000000002a6a28147ecac1bb4fe2db0246bebf91ea469c7ae53bd764c8f97edb7e9d637d8100035c0c0000000000000000000000000000046a02ffffb8101d1e000000001abb76a91414ab317ede91b40545f2e3b32678f9b6cc21b69e88ac000000000204deadbeef6a47304402200d590d4da7cea182fe9f2f812f1f42ac2ab8217018a5f423774f8f9c9f665c8f02200128fc6222d7daa44f5492aae5f60345e4a78935fafa6c73d2e531f4a297405f012103ca49eba5fb8d6c881e8a7385cc3c027971257d938de9e0ea6fa8426268703501")
+	TstRecvTx, _                    = dcrutil.NewTxFromBytes(TstRecvSerializedTx)
+	TstRecvTxSpendingTxBlockHash, _ = chainhash.NewHashFromStr("60be28d1fa9721a22a4346245fa9694bde31ea2c8f29e49fdcd5d0a00e59bf4e")
+	TstRecvAmt                      = int64(100)
 	TstRecvTxBlockDetails           = &BlockMeta{
-		Block: Block{Hash: *TstRecvTxSpendingTxBlockHash, Height: 276425},
+		Block: Block{Hash: *TstRecvTxSpendingTxBlockHash, Height: 762},
 		Time:  time.Unix(1387737310, 0),
 	}
 
 	TstRecvCurrentHeight = int32(284498) // mainnet blockchain height at time of writing
 	TstRecvTxOutConfirms = 8074          // hardcoded number of confirmations given the above block height
 
-	TstSpendingSerializedTx, _ = hex.DecodeString("0100000003ad3fba7ebd67c09baa9538898e10d6726dcb8eadb006be0c7388c8e46d69d361000000006b4830450220702c4fbde5532575fed44f8d6e8c3432a2a9bd8cff2f966c3a79b2245a7c88db02210095d6505a57e350720cb52b89a9b56243c15ddfcea0596aedc1ba55d9fb7d5aa0012103cccb5c48a699d3efcca6dae277fee6b82e0229ed754b742659c3acdfed2651f9ffffffffdbd36173f5610e34de5c00ed092174603761595d90190f790e79cda3e5b45bc2010000006b483045022000fa20735e5875e64d05bed43d81b867f3bd8745008d3ff4331ef1617eac7c44022100ad82261fc57faac67fc482a37b6bf18158da0971e300abf5fe2f9fd39e107f58012102d4e1caf3e022757512c204bf09ff56a9981df483aba3c74bb60d3612077c9206ffffffff65536c9d964b6f89b8ef17e83c6666641bc495cb27bab60052f76cd4556ccd0d040000006a473044022068e3886e0299ffa69a1c3ee40f8b6700f5f6d463a9cf9dbf22c055a131fc4abc02202b58957fe19ff1be7a84c458d08016c53fbddec7184ac5e633f2b282ae3420ae012103b4e411b81d32a69fb81178a8ea1abaa12f613336923ee920ffbb1b313af1f4d2ffffffff02ab233200000000001976a91418808b2fbd8d2c6d022aed5cd61f0ce6c0a4cbb688ac4741f011000000001976a914f081088a300c80ce36b717a9914ab5ec8a7d283988ac00000000")
-	TstSpendingTx, _           = btcutil.NewTxFromBytes(TstSpendingSerializedTx)
+	TstSpendingSerializedTx, _ = hex.DecodeString("01000000042238516e1d48beb5b0c90dfcbaff751088237efc09c13cf66178969fe0d880cb0a000000016a47304402205ae23e9fb4ab4b4b23a7c762df8541b3313197d2f408337da91973ef97eac66202204734fbabed53405febfe64f4cebad29b8434f4f69c56879f1a703d997ea395a90121036b392a1272ca0fbe04de90e48ef872ef470839887842ad5520fd3d79b42ed223ffffffff308c17f850f1b18034da3446a8dc0d69406ed1f37683b6f43071f0070de27d6003000000016b483045022100eac9a62e4499dd80b20c16c6a65c9ecab1e1e4bf00c85f8fb1691cd5c8e9628d02202b79b30b6fc4cbee8cca548093040b5bb05c15a79f4d0664a2ef0f909150f1cf0121031f9913f6db4884a463e77c050fae18626376c0cf8e20232c9de40aeebcd7c457ffffffff3241e3b556db727f6003613fbbb38d7c409f6ac0971c200d6052cc7dde68dd5904000000016a47304402207d08ebb2f70856624e5ac1054c3c6ae289c280e6ed47877f05395f6f7a1ef7880220264b011099af48d548b12ac5e69f6a2abadded6ad68dbbe3f716bec9c806edab0121023ccb059324229c1149701380468b4b656f043ea75bf785b9ed83a0700650a08dffffffff2c4e4360883e113cde3c6857d71e65e822289ef13e4b2a3229b42a65f9b7b93b03000000006a473044022020d50f153f5a0dadbbaedd2e76a7f12fb4c06c09e57fe9927187739da5695a350220648cc08901fa238007525b4cfd0e0014b5e8f5546200bf56797456dd6d95f73c0121032501f9806b6e00949f91105b4363b10507352ca42ecc4260842259bb45f3fcd0ffffffff0200e40b54020000001976a914de6d4ab876fd17638a0f651dda6b9e5f84637acb88ac34849525000000001976a9140bf5130cf9c0e8a10a7da6f6d90961335783fd7b88ac00000000")
+	TstSpendingTx, _           = dcrutil.NewTxFromBytes(TstSpendingSerializedTx)
 	TstSpendingTxBlockHeight   = int32(279143)
-	TstSignedTxBlockHash, _    = wire.NewShaHashFromStr("00000000000000017188b968a371bab95aa43522665353b646e41865abae02a4")
+	TstSignedTxBlockHash, _    = chainhash.NewHashFromStr("00000000000000017188b968a371bab95aa43522665353b646e41865abae02a4")
 	TstSignedTxBlockDetails    = &BlockMeta{
 		Block: Block{Hash: *TstSignedTxBlockHash, Height: TstSpendingTxBlockHeight},
 		Time:  time.Unix(1389114091, 0),
@@ -85,11 +88,11 @@ func testStore() (*Store, func(), error) {
 	if err != nil {
 		return nil, teardown, err
 	}
-	s, err := Create(ns)
+	s, err := Create(ns, &chaincfg.TestNetParams)
 	return s, teardown, err
 }
 
-func serializeTx(tx *btcutil.Tx) []byte {
+func serializeTx(tx *dcrutil.Tx) []byte {
 	var buf bytes.Buffer
 	err := tx.MsgTx().Serialize(&buf)
 	if err != nil {
@@ -102,35 +105,41 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 	t.Parallel()
 
 	// Create a double spend of the received blockchain transaction.
-	dupRecvTx, _ := btcutil.NewTxFromBytes(TstRecvSerializedTx)
-	// Switch txout amount to 1 BTC.  Transaction store doesn't
+	dupRecvTx, err := dcrutil.NewTxFromBytesLegacy(TstRecvSerializedTx)
+	if err != nil {
+		t.Errorf("failed to deserialize test transaction: %v", err.Error())
+		return
+	}
+
+	// Switch txout amount to 1 DCR.  Transaction store doesn't
 	// validate txs, so this is fine for testing a double spend
 	// removal.
+
 	TstDupRecvAmount := int64(1e8)
 	newDupMsgTx := dupRecvTx.MsgTx()
 	newDupMsgTx.TxOut[0].Value = TstDupRecvAmount
-	TstDoubleSpendTx := btcutil.NewTx(newDupMsgTx)
+	TstDoubleSpendTx := dcrutil.NewTx(newDupMsgTx)
 	TstDoubleSpendSerializedTx := serializeTx(TstDoubleSpendTx)
 
 	// Create a "signed" (with invalid sigs) tx that spends output 0 of
 	// the double spend.
 	spendingTx := wire.NewMsgTx()
-	spendingTxIn := wire.NewTxIn(wire.NewOutPoint(TstDoubleSpendTx.Sha(), 0), []byte{0, 1, 2, 3, 4})
+	spendingTxIn := wire.NewTxIn(wire.NewOutPoint(TstDoubleSpendTx.Sha(), 0, dcrutil.TxTreeRegular), []byte{0, 1, 2, 3, 4})
 	spendingTx.AddTxIn(spendingTxIn)
 	spendingTxOut1 := wire.NewTxOut(1e7, []byte{5, 6, 7, 8, 9})
 	spendingTxOut2 := wire.NewTxOut(9e7, []byte{10, 11, 12, 13, 14})
 	spendingTx.AddTxOut(spendingTxOut1)
 	spendingTx.AddTxOut(spendingTxOut2)
-	TstSpendingTx := btcutil.NewTx(spendingTx)
+	TstSpendingTx := dcrutil.NewTx(spendingTx)
 	TstSpendingSerializedTx := serializeTx(TstSpendingTx)
 	var _ = TstSpendingTx
 
 	tests := []struct {
 		name     string
 		f        func(*Store) (*Store, error)
-		bal, unc btcutil.Amount
+		bal, unc dcrutil.Amount
 		unspents map[wire.OutPoint]struct{}
-		unmined  map[wire.ShaHash]struct{}
+		unmined  map[chainhash.Hash]struct{}
 	}{
 		{
 			name: "new store",
@@ -140,7 +149,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal:      0,
 			unc:      0,
 			unspents: map[wire.OutPoint]struct{}{},
-			unmined:  map[wire.ShaHash]struct{}{},
+			unmined:  map[chainhash.Hash]struct{}{},
 		},
 		{
 			name: "txout insert",
@@ -158,11 +167,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				return s, err
 			},
 			bal: 0,
-			unc: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
+			unc: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 0}: {},
+				wire.OutPoint{*TstRecvTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstRecvTx.Sha(): {},
 			},
 		},
@@ -182,11 +191,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				return s, err
 			},
 			bal: 0,
-			unc: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
+			unc: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 0}: {},
+				wire.OutPoint{*TstRecvTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstRecvTx.Sha(): {},
 			},
 		},
@@ -205,12 +214,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
-			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
+			bal: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 0}: {},
+				wire.OutPoint{*TstRecvTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{},
+			unmined: map[chainhash.Hash]struct{}{},
 		},
 		{
 			name: "insert duplicate confirmed",
@@ -227,12 +236,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
-			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
+			bal: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 0}: {},
+				wire.OutPoint{*TstRecvTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{},
+			unmined: map[chainhash.Hash]struct{}{},
 		},
 		{
 			name: "rollback confirmed credit",
@@ -241,11 +250,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				return s, err
 			},
 			bal: 0,
-			unc: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
+			unc: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 0}: {},
+				wire.OutPoint{*TstRecvTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstRecvTx.Sha(): {},
 			},
 		},
@@ -264,12 +273,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
-			bal: btcutil.Amount(TstDoubleSpendTx.MsgTx().TxOut[0].Value),
+			bal: dcrutil.Amount(TstDoubleSpendTx.MsgTx().TxOut[0].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstDoubleSpendTx.Sha(), 0}: {},
+				wire.OutPoint{*TstDoubleSpendTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{},
+			unmined: map[chainhash.Hash]struct{}{},
 		},
 		{
 			name: "insert unconfirmed debit",
@@ -284,7 +293,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal:      0,
 			unc:      0,
 			unspents: map[wire.OutPoint]struct{}{},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -301,7 +310,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal:      0,
 			unc:      0,
 			unspents: map[wire.OutPoint]struct{}{},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -321,11 +330,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				return s, err
 			},
 			bal: 0,
-			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value),
+			unc: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -344,12 +353,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				return s, err
 			},
 			bal: 0,
-			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
+			unc: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -363,13 +372,13 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				err = s.InsertTx(rec, TstSignedTxBlockDetails)
 				return s, err
 			},
-			bal: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
+			bal: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{},
+			unmined: map[chainhash.Hash]struct{}{},
 		},
 		{
 			name: "rollback after spending tx",
@@ -377,13 +386,13 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				err := s.Rollback(TstSignedTxBlockDetails.Height + 1)
 				return s, err
 			},
-			bal: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
+			bal: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{},
+			unmined: map[chainhash.Hash]struct{}{},
 		},
 		{
 			name: "rollback spending tx block",
@@ -392,12 +401,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				return s, err
 			},
 			bal: 0,
-			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
+			unc: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
 			},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
 			},
 		},
@@ -408,12 +417,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				return s, err
 			},
 			bal: 0,
-			unc: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
+			unc: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				*wire.NewOutPoint(TstSpendingTx.Sha(), 0): {},
-				*wire.NewOutPoint(TstSpendingTx.Sha(), 1): {},
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular): {},
+				*wire.NewOutPoint(TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular): {},
 			},
-			unmined: map[wire.ShaHash]struct{}{
+			unmined: map[chainhash.Hash]struct{}{
 				*TstDoubleSpendTx.Sha(): {},
 				*TstSpendingTx.Sha():    {},
 			},
@@ -432,12 +441,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
-			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
+			bal: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				*wire.NewOutPoint(TstRecvTx.Sha(), 0): {},
+				*wire.NewOutPoint(TstRecvTx.Sha(), 0, dcrutil.TxTreeRegular): {},
 			},
-			unmined: map[wire.ShaHash]struct{}{},
+			unmined: map[chainhash.Hash]struct{}{},
 		},
 	}
 
@@ -453,14 +462,14 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			t.Fatalf("%s: got error: %v", test.name, err)
 		}
 		s = tmpStore
-		bal, err := s.Balance(1, TstRecvCurrentHeight)
+		bal, err := s.Balance(1, TstRecvCurrentHeight, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("%s: Confirmed Balance failed: %v", test.name, err)
 		}
 		if bal != test.bal {
 			t.Fatalf("%s: balance mismatch: expected: %d, got: %d", test.name, test.bal, bal)
 		}
-		unc, err := s.Balance(0, TstRecvCurrentHeight)
+		unc, err := s.Balance(0, TstRecvCurrentHeight, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("%s: Unconfirmed Balance failed: %v", test.name, err)
 		}
@@ -542,11 +551,11 @@ func TestFindingSpentCredits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bal, err := s.Balance(1, TstSignedTxBlockDetails.Height)
+	bal, err := s.Balance(1, TstSignedTxBlockDetails.Height, wtxmgr.BFBalanceSpendable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedBal := btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value)
+	expectedBal := dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value)
 	if bal != expectedBal {
 		t.Fatalf("bad balance: %v != %v", bal, expectedBal)
 	}
@@ -554,7 +563,7 @@ func TestFindingSpentCredits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	op := wire.NewOutPoint(TstSpendingTx.Sha(), 0)
+	op := wire.NewOutPoint(TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular)
 	if unspents[0].OutPoint != *op {
 		t.Fatal("unspent outpoint doesn't match expected")
 	}
@@ -577,7 +586,7 @@ func newCoinBase(outputValues ...int64) *wire.MsgTx {
 	return &tx
 }
 
-func spendOutput(txHash *wire.ShaHash, index uint32, outputValues ...int64) *wire.MsgTx {
+func spendOutput(txHash *chainhash.Hash, index uint32, outputValues ...int64) *wire.MsgTx {
 	tx := wire.MsgTx{
 		TxIn: []*wire.TxIn{
 			&wire.TxIn{
@@ -625,7 +634,7 @@ func TestCoinbases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Balance should be 0 if the coinbase is immature, 50 BTC at and beyond
+	// Balance should be 0 if the coinbase is immature, 50 DCR at and beyond
 	// maturity.
 	//
 	// Outputs when depth is below maturity are never included, no matter
@@ -634,77 +643,77 @@ func TestCoinbases(t *testing.T) {
 	type balTest struct {
 		height  int32
 		minConf int32
-		bal     btcutil.Amount
+		bal     dcrutil.Amount
 	}
 	balTests := []balTest{
 		// Next block it is still immature
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 2,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 2,
 			minConf: 0,
 			bal:     0,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 2,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 2,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			bal:     0,
 		},
 
 		// Next block it matures
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
 			minConf: 0,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
 			minConf: 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 1,
 			bal:     0,
 		},
 
 		// Matures at this block
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			minConf: 0,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			minConf: 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 2,
 			bal:     0,
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(tst.minConf, tst.height, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -736,56 +745,56 @@ func TestCoinbases(t *testing.T) {
 	balTests = []balTest{
 		// Next block it matures
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
 			minConf: 0,
 			bal:     35e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
 			minConf: 1,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity) - 1,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 1,
 			bal:     0,
 		},
 
 		// Matures at this block
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			minConf: 0,
 			bal:     35e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			minConf: 1,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 1,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			height:  b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity),
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 2,
 			bal:     0,
 		},
 	}
 	balTestsBeforeMaturity := balTests
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(tst.minConf, tst.height, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -799,7 +808,7 @@ func TestCoinbases(t *testing.T) {
 
 	// Mine the spending transaction in the block the coinbase matures.
 	bMaturity := BlockMeta{
-		Block: Block{Height: b100.Height + blockchain.CoinbaseMaturity},
+		Block: Block{Height: b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity)},
 		Time:  time.Now(),
 	}
 	err = s.InsertTx(spenderARec, &bMaturity)
@@ -826,17 +835,17 @@ func TestCoinbases(t *testing.T) {
 		},
 		{
 			height:  bMaturity.Height,
-			minConf: blockchain.CoinbaseMaturity,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity),
 			bal:     30e8,
 		},
 		{
 			height:  bMaturity.Height,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 1,
 			bal:     30e8,
 		},
 		{
 			height:  bMaturity.Height,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 2,
 			bal:     0,
 		},
 
@@ -858,17 +867,17 @@ func TestCoinbases(t *testing.T) {
 		},
 		{
 			height:  bMaturity.Height + 1,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 2,
 			bal:     30e8,
 		},
 		{
 			height:  bMaturity.Height + 1,
-			minConf: blockchain.CoinbaseMaturity + 3,
+			minConf: int32(chaincfg.TestNetParams.CoinbaseMaturity) + 3,
 			bal:     0,
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(tst.minConf, tst.height, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -901,7 +910,7 @@ func TestCoinbases(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(tst.minConf, tst.height, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -921,7 +930,7 @@ func TestCoinbases(t *testing.T) {
 	}
 	balTests = balTestsBeforeMaturity
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(tst.minConf, tst.height, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -967,7 +976,7 @@ func TestCoinbases(t *testing.T) {
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(tst.minConf, tst.height, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -1063,7 +1072,7 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 
 	// Mine both transactions in the block that matures the coinbase.
 	bMaturity := BlockMeta{
-		Block: Block{Height: b100.Height + blockchain.CoinbaseMaturity},
+		Block: Block{Height: b100.Height + int32(chaincfg.TestNetParams.CoinbaseMaturity)},
 		Time:  time.Now(),
 	}
 	err = s.InsertTx(spenderARec, &bMaturity)
@@ -1096,7 +1105,7 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 	balTests := []struct {
 		height  int32
 		minConf int32
-		bal     btcutil.Amount
+		bal     dcrutil.Amount
 	}{
 		// Maturity height
 		{
@@ -1133,7 +1142,7 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(tst.minConf, tst.height, wtxmgr.BFBalanceSpendable)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}

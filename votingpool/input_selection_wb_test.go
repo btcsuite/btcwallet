@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,14 +23,15 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 var (
-	// random small number of satoshis used as dustThreshold
-	dustThreshold btcutil.Amount = 1e4
+	// random small number of atoms used as dustThreshold
+	dustThreshold dcrutil.Amount = 1e4
 )
 
 func TestGetEligibleInputs(t *testing.T) {
@@ -305,7 +307,7 @@ func TestCreditSortingByAddress(t *testing.T) {
 // series/index/branch.
 func newDummyCredit(t *testing.T, pool *Pool, series uint32, index Index, branch Branch,
 	txSha []byte, outpointIdx uint32) credit {
-	var hash wire.ShaHash
+	var hash chainhash.Hash
 	if err := hash.SetBytes(txSha); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +329,7 @@ func checkUniqueness(t *testing.T, credits byAddress) {
 		series      uint32
 		branch      Branch
 		index       Index
-		hash        wire.ShaHash
+		hash        chainhash.Hash
 		outputIndex uint32
 	}
 

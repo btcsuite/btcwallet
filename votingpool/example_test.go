@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,14 +24,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/votingpool"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/votingpool"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
+	_ "github.com/decred/dcrwallet/walletdb/bdb"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 var (
@@ -192,7 +193,7 @@ func Example_startWithdrawal() {
 	}
 	defer mgr.Lock()
 
-	addr, _ := btcutil.DecodeAddress("1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX", mgr.ChainParams())
+	addr, _ := dcrutil.DecodeAddress("1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX", mgr.ChainParams())
 	pkScript, _ := txscript.PayToAddrScript(addr)
 	requests := []votingpool.OutputRequest{
 		votingpool.OutputRequest{
@@ -220,7 +221,7 @@ func Example_startWithdrawal() {
 		return
 	}
 	lastSeriesID := seriesID
-	dustThreshold := btcutil.Amount(1e4)
+	dustThreshold := dcrutil.Amount(1e4)
 	currentBlock := int32(19432)
 	roundID := uint32(0)
 	txstore, tearDownFunc, err := exampleCreateTxStore()
@@ -331,7 +332,7 @@ func exampleCreateTxStore() (*wtxmgr.Store, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	s, err := wtxmgr.Create(wtxmgrNamespace)
+	s, err := wtxmgr.Create(wtxmgrNamespace, &chaincfg.SimNetParams)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,9 +21,9 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	vp "github.com/btcsuite/btcwallet/votingpool"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrutil/hdkeychain"
+	vp "github.com/decred/dcrwallet/votingpool"
 )
 
 func TestStartWithdrawal(t *testing.T) {
@@ -48,7 +49,7 @@ func TestStartWithdrawal(t *testing.T) {
 
 	startAddr := vp.TstNewWithdrawalAddress(t, pool, def.SeriesID, 0, 0)
 	lastSeriesID := def.SeriesID
-	dustThreshold := btcutil.Amount(1e4)
+	dustThreshold := dcrutil.Amount(1e4)
 	currentBlock := int32(vp.TstInputsBlock + vp.TstEligibleInputMinConfirmations + 1)
 	var status *vp.WithdrawalStatus
 	var err error
@@ -61,10 +62,10 @@ func TestStartWithdrawal(t *testing.T) {
 	}
 
 	// Check that all outputs were successfully fulfilled.
-	checkWithdrawalOutputs(t, status, map[string]btcutil.Amount{address1: 4e6, address2: 1e6})
+	checkWithdrawalOutputs(t, status, map[string]dcrutil.Amount{address1: 4e6, address2: 1e6})
 
-	if status.Fees() != btcutil.Amount(1e3) {
-		t.Fatalf("Wrong amount for fees; got %v, want %v", status.Fees(), btcutil.Amount(1e3))
+	if status.Fees() != dcrutil.Amount(1e3) {
+		t.Fatalf("Wrong amount for fees; got %v, want %v", status.Fees(), dcrutil.Amount(1e3))
 	}
 
 	// This withdrawal generated a single transaction with just one change
@@ -84,7 +85,7 @@ func TestStartWithdrawal(t *testing.T) {
 	// or the code is changed in a way that causes the generated transaction to
 	// change (e.g. different inputs/outputs), the ntxid will change too and
 	// this will have to be updated.
-	ntxid := vp.Ntxid("eb753083db55bd0ad2eb184bfd196a7ea8b90eaa000d9293e892999695af2519")
+	ntxid := vp.Ntxid("d81876caf7b3214e10c1465ac701ae62205797dee249d5a3a2d035013bff03d7")
 	txSigs := status.Sigs()[ntxid]
 
 	// Finally we use SignTx() to construct the SignatureScripts (using the raw
@@ -111,7 +112,7 @@ func TestStartWithdrawal(t *testing.T) {
 }
 
 func checkWithdrawalOutputs(
-	t *testing.T, wStatus *vp.WithdrawalStatus, amounts map[string]btcutil.Amount) {
+	t *testing.T, wStatus *vp.WithdrawalStatus, amounts map[string]dcrutil.Amount) {
 	fulfilled := wStatus.Outputs()
 	if len(fulfilled) != 2 {
 		t.Fatalf("Unexpected number of outputs in WithdrawalStatus; got %d, want %d",

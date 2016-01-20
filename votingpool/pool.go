@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,12 +21,12 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/internal/zero"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrutil/hdkeychain"
+	"github.com/decred/dcrwallet/internal/zero"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 const (
@@ -74,7 +75,7 @@ type PoolAddress interface {
 
 type poolAddress struct {
 	pool     *Pool
-	addr     btcutil.Address
+	addr     dcrutil.Address
 	script   []byte
 	seriesID uint32
 	branch   Branch
@@ -221,8 +222,12 @@ func (p *Pool) saveSeriesToDisk(seriesID uint32, data *SeriesData) error {
 	var err error
 	encryptedPubKeys := make([][]byte, len(data.publicKeys))
 	for i, pubKey := range data.publicKeys {
+		key, err := pubKey.String()
+		if err != nil {
+			return err
+		}
 		encryptedPubKeys[i], err = p.manager.Encrypt(
-			waddrmgr.CKTPublic, []byte(pubKey.String()))
+			waddrmgr.CKTPublic, []byte(key))
 		if err != nil {
 			str := fmt.Sprintf("key %v failed encryption", pubKey)
 			return newError(ErrCrypto, str, err)
@@ -233,8 +238,12 @@ func (p *Pool) saveSeriesToDisk(seriesID uint32, data *SeriesData) error {
 		if privKey == nil {
 			encryptedPrivKeys[i] = nil
 		} else {
+			key, err := privKey.String()
+			if err != nil {
+				return err
+			}
 			encryptedPrivKeys[i], err = p.manager.Encrypt(
-				waddrmgr.CKTPrivate, []byte(privKey.String()))
+				waddrmgr.CKTPrivate, []byte(key))
 		}
 		if err != nil {
 			str := fmt.Sprintf("key %v failed encryption", privKey)
@@ -452,7 +461,15 @@ func validateAndDecryptKeys(rawPubKeys, rawPrivKeys [][]byte, p *Pool) (pubKeys,
 				str := fmt.Sprintf("cannot neuter key %v", privKey)
 				return nil, nil, newError(ErrKeyNeuter, str, err)
 			}
-			if pubKey.String() != checkPubKey.String() {
+			key, err := pubKey.String()
+			if err != nil {
+				return nil, nil, err
+			}
+			checkKey, err := pubKey.String()
+			if err != nil {
+				return nil, nil, err
+			}
+			if key != checkKey {
 				str := fmt.Sprintf("public key %v different than expected %v",
 					pubKey, checkPubKey)
 				return nil, nil, newError(ErrKeyMismatch, str, nil)
@@ -539,7 +556,7 @@ func branchOrder(pks []*hdkeychain.ExtendedKey, branch Branch) ([]*hdkeychain.Ex
 
 // DepositScriptAddress calls DepositScript to get a multi-signature
 // redemption script and returns the pay-to-script-hash-address for that script.
-func (p *Pool) DepositScriptAddress(seriesID uint32, branch Branch, index Index) (btcutil.Address, error) {
+func (p *Pool) DepositScriptAddress(seriesID uint32, branch Branch, index Index) (dcrutil.Address, error) {
 	script, err := p.DepositScript(seriesID, branch, index)
 	if err != nil {
 		return nil, err
@@ -547,9 +564,9 @@ func (p *Pool) DepositScriptAddress(seriesID uint32, branch Branch, index Index)
 	return p.addressFor(script)
 }
 
-func (p *Pool) addressFor(script []byte) (btcutil.Address, error) {
-	scriptHash := btcutil.Hash160(script)
-	return btcutil.NewAddressScriptHashFromHash(scriptHash, p.manager.ChainParams())
+func (p *Pool) addressFor(script []byte) (dcrutil.Address, error) {
+	scriptHash := dcrutil.Hash160(script)
+	return dcrutil.NewAddressScriptHashFromHash(scriptHash, p.manager.ChainParams())
 }
 
 // DepositScript constructs and returns a multi-signature redemption script where
@@ -567,7 +584,7 @@ func (p *Pool) DepositScript(seriesID uint32, branch Branch, index Index) ([]byt
 		return nil, err
 	}
 
-	pks := make([]*btcutil.AddressPubKey, len(pubKeys))
+	pks := make([]*dcrutil.AddressSecpPubKey, len(pubKeys))
 	for i, key := range pubKeys {
 		child, err := key.Child(uint32(index))
 		// TODO: implement getting the next index until we find a valid one,
@@ -581,7 +598,7 @@ func (p *Pool) DepositScript(seriesID uint32, branch Branch, index Index) ([]byt
 			str := fmt.Sprintf("child #%d for this pubkey %d does not exist", index, i)
 			return nil, newError(ErrKeyChain, str, err)
 		}
-		pks[i], err = btcutil.NewAddressPubKey(pubkey.SerializeCompressed(),
+		pks[i], err = dcrutil.NewAddressSecpPubKey(pubkey.SerializeCompressed(),
 			p.manager.ChainParams())
 		if err != nil {
 			str := fmt.Sprintf(
@@ -702,13 +719,22 @@ func (p *Pool) EmpowerSeries(seriesID uint32, rawPrivKey string) error {
 		return newError(ErrKeyNeuter, str, err)
 	}
 
-	lookingFor := pubKey.String()
+	lookingFor, err := pubKey.String()
+	if err != nil {
+		return err
+	}
+
 	found := false
 
 	// Make sure the private key has the corresponding public key in the series,
 	// to be able to empower it.
 	for i, publicKey := range series.publicKeys {
-		if publicKey.String() == lookingFor {
+		key, err := publicKey.String()
+		if err != nil {
+			return err
+		}
+
+		if key == lookingFor {
 			found = true
 			series.privateKeys[i] = privKey
 		}
@@ -771,7 +797,7 @@ func (p *Pool) addUsedAddr(seriesID uint32, branch Branch, index Index) error {
 		return err
 	}
 
-	encryptedHash, err := p.manager.Encrypt(waddrmgr.CKTPublic, btcutil.Hash160(script))
+	encryptedHash, err := p.manager.Encrypt(waddrmgr.CKTPublic, dcrutil.Hash160(script))
 	if err != nil {
 		return newError(ErrCrypto, "failed to encrypt script hash", err)
 	}
@@ -809,7 +835,7 @@ func (p *Pool) getUsedAddr(seriesID uint32, branch Branch, index Index) (
 	if err != nil {
 		return nil, newError(ErrCrypto, "failed to decrypt stored script hash", err)
 	}
-	addr, err := btcutil.NewAddressScriptHashFromHash(hash, mgr.ChainParams())
+	addr, err := dcrutil.NewAddressScriptHashFromHash(hash, mgr.ChainParams())
 	if err != nil {
 		return nil, newError(ErrInvalidScriptHash, "failed to parse script hash", err)
 	}
@@ -834,7 +860,7 @@ func (p *Pool) highestUsedIndexFor(seriesID uint32, branch Branch) (Index, error
 	return maxIdx, err
 }
 
-// String returns a string encoding of the underlying bitcoin payment address.
+// String returns a string encoding of the underlying decred payment address.
 func (a *poolAddress) String() string {
 	return a.addr.EncodeAddress()
 }
@@ -876,11 +902,21 @@ func (s *SeriesData) IsEmpowered() bool {
 }
 
 func (s *SeriesData) getPrivKeyFor(pubKey *hdkeychain.ExtendedKey) (*hdkeychain.ExtendedKey, error) {
+	pKey, err := pubKey.String()
+	if err != nil {
+		return nil, err
+	}
+
 	for i, key := range s.publicKeys {
-		if key.String() == pubKey.String() {
+		k, err := key.String()
+		if err != nil {
+			return nil, err
+		}
+
+		if k == pKey {
 			return s.privateKeys[i], nil
 		}
 	}
 	return nil, newError(ErrUnknownPubKey, fmt.Sprintf("unknown public key '%s'",
-		pubKey.String()), nil)
+		pKey), nil)
 }

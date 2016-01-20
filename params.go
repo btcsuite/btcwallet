@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,43 +18,43 @@
 package main
 
 import (
-	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/decred/dcrd/chaincfg"
 )
 
-var activeNet = &testNet3Params
+var activeNet = &testNetParams
 
 // params is used to group parameters for various networks such as the main
 // network and test networks.
 type params struct {
 	*chaincfg.Params
 	connect  string
-	btcdPort string
+	dcrdPort string
 	svrPort  string
 }
 
-// mainNetParams contains parameters specific running btcwallet and
-// btcd on the main network (wire.MainNet).
+// mainNetParams contains parameters specific running dcrwallet and
+// dcrd on the main network (wire.MainNet).
 var mainNetParams = params{
 	Params:   &chaincfg.MainNetParams,
-	connect:  "localhost:8334",
-	btcdPort: "8334",
-	svrPort:  "8332",
+	connect:  "localhost:9109",
+	dcrdPort: "9109",
+	svrPort:  "9110",
 }
 
-// testNet3Params contains parameters specific running btcwallet and
-// btcd on the test network (version 3) (wire.TestNet3).
-var testNet3Params = params{
-	Params:   &chaincfg.TestNet3Params,
-	connect:  "localhost:18334",
-	btcdPort: "18334",
-	svrPort:  "18332",
+// testNetParams contains parameters specific running dcrwallet and
+// dcrd on the test network (version 0) (wire.TestNet).
+var testNetParams = params{
+	Params:   &chaincfg.TestNetParams,
+	connect:  "localhost:19109",
+	dcrdPort: "19109",
+	svrPort:  "19110",
 }
 
 // simNetParams contains parameters specific to the simulation test network
 // (wire.SimNet).
 var simNetParams = params{
 	Params:   &chaincfg.SimNetParams,
-	connect:  "localhost:18556",
-	btcdPort: "18556",
-	svrPort:  "18554",
+	connect:  "localhost:19556",
+	dcrdPort: "19556",
+	svrPort:  "19557",
 }

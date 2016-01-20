@@ -1,4 +1,5 @@
 // Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
 //
 // Permission to use, copy, modify, and distribute this software for any
 // purpose with or without fee is hereby granted, provided that the above
@@ -22,8 +23,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcwallet/internal/rpchelp"
+	"github.com/decred/dcrd/dcrjson"
+	"github.com/decred/dcrwallet/internal/rpchelp"
 )
 
 var outputFile = func() *os.File {
@@ -51,7 +52,7 @@ func writeLocaleHelp(locale, goLocale string, descs map[string]string) {
 	writefln("return map[string]string{")
 	for i := range rpchelp.Methods {
 		m := &rpchelp.Methods[i]
-		helpText, err := btcjson.GenerateHelp(m.Method, descs, m.ResultTypes...)
+		helpText, err := dcrjson.GenerateHelp(m.Method, descs, m.ResultTypes...)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -73,7 +74,7 @@ func writeUsage() {
 	usageStrs := make([]string, len(rpchelp.Methods))
 	var err error
 	for i := range rpchelp.Methods {
-		usageStrs[i], err = btcjson.MethodUsageText(rpchelp.Methods[i].Method)
+		usageStrs[i], err = dcrjson.MethodUsageText(rpchelp.Methods[i].Method)
 		if err != nil {
 			log.Fatal(err)
 		}

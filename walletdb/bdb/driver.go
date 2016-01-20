@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,7 +20,7 @@ package bdb
 import (
 	"fmt"
 
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 const (
@@ -72,7 +73,7 @@ func init() {
 		Open:   openDBDriver,
 	}
 	if err := walletdb.RegisterDriver(driver); err != nil {
-		panic(fmt.Sprintf("Failed to regiser database driver '%s': %v",
+		panic(fmt.Sprintf("Failed to register database driver '%s': %v",
 			dbType, err))
 	}
 }

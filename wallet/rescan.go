@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,24 +18,24 @@
 package wallet
 
 import (
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/chain"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 // RescanProgressMsg reports the current progress made by a rescan for a
 // set of wallet addresses.
 type RescanProgressMsg struct {
-	Addresses    []btcutil.Address
+	Addresses    []dcrutil.Address
 	Notification *chain.RescanProgress
 }
 
 // RescanFinishedMsg reports the addresses that were rescanned when a
 // rescanfinished message was received rescanning a batch of addresses.
 type RescanFinishedMsg struct {
-	Addresses    []btcutil.Address
+	Addresses    []dcrutil.Address
 	Notification *chain.RescanFinished
 }
 
@@ -45,7 +46,7 @@ type RescanFinishedMsg struct {
 // channel.
 type RescanJob struct {
 	InitialSync bool
-	Addrs       []btcutil.Address
+	Addrs       []dcrutil.Address
 	OutPoints   []*wire.OutPoint
 	BlockStamp  waddrmgr.BlockStamp
 	err         chan error
@@ -55,7 +56,7 @@ type RescanJob struct {
 // together before a rescan is performed.
 type rescanBatch struct {
 	initialSync bool
-	addrs       []btcutil.Address
+	addrs       []dcrutil.Address
 	outpoints   []*wire.OutPoint
 	bs          waddrmgr.BlockStamp
 	errChans    []chan error
@@ -111,6 +112,7 @@ func (b *rescanBatch) done(err error) {
 // can be handled by a single rescan after the current one completes.
 func (w *Wallet) rescanBatchHandler() {
 	var curBatch, nextBatch *rescanBatch
+	quit := w.quitChan()
 
 out:
 	for {
@@ -162,18 +164,18 @@ out:
 				panic(n)
 			}
 
-		case <-w.quit:
+		case <-quit:
 			break out
 		}
 	}
 
-	close(w.rescanBatch)
 	w.wg.Done()
 }
 
 // rescanProgressHandler handles notifications for partially and fully completed
 // rescans by marking each rescanned address as partially or fully synced.
 func (w *Wallet) rescanProgressHandler() {
+	quit := w.quitChan()
 out:
 	for {
 		// These can't be processed out of order since both chans are
@@ -226,7 +228,7 @@ out:
 			}
 			w.notifyConnectedBlock(b)
 
-		case <-w.quit:
+		case <-quit:
 			break out
 		}
 	}
@@ -237,38 +239,41 @@ out:
 // RPC requests to perform a rescan.  New jobs are not read until a rescan
 // finishes.
 func (w *Wallet) rescanRPCHandler() {
-	for batch := range w.rescanBatch {
-		// Log the newly-started rescan.
-		numAddrs := len(batch.addrs)
-		noun := pickNoun(numAddrs, "address", "addresses")
-		log.Infof("Started rescan from block %v (height %d) for %d %s",
-			batch.bs.Hash, batch.bs.Height, numAddrs, noun)
+	quit := w.quitChan()
 
-		err := w.chainSvr.Rescan(&batch.bs.Hash, batch.addrs,
-			batch.outpoints)
-		if err != nil {
-			log.Errorf("Rescan for %d %s failed: %v", numAddrs,
-				noun, err)
+out:
+	for {
+		select {
+		case batch := <-w.rescanBatch:
+			// Log the newly-started rescan.
+			numAddrs := len(batch.addrs)
+			noun := pickNoun(numAddrs, "address", "addresses")
+			log.Infof("Started rescan from block %v (height %d) for %d %s",
+				batch.bs.Hash, batch.bs.Height, numAddrs, noun)
+
+			err := w.chainSvr.Rescan(&batch.bs.Hash, batch.addrs,
+				batch.outpoints)
+			if err != nil {
+				log.Errorf("Rescan for %d %s failed: %v", numAddrs,
+					noun, err)
+			}
+			batch.done(err)
+		case <-quit:
+			break out
 		}
-		batch.done(err)
 	}
+
 	w.wg.Done()
 }
 
 // Rescan begins a rescan for all active addresses and unspent outputs of
 // a wallet.  This is intended to be used to sync a wallet back up to the
-// current best block in the main chain, and is considered an initial sync
-// rescan.
-func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error {
-	outpoints := make([]*wire.OutPoint, len(unspent))
-	for i, output := range unspent {
-		outpoints[i] = &output.OutPoint
-	}
-
+// current best block in the main chain, and is considered an initial sync.
+func (w *Wallet) Rescan(addrs []dcrutil.Address, unspent []*wire.OutPoint) error {
 	job := &RescanJob{
 		InitialSync: true,
 		Addrs:       addrs,
-		OutPoints:   outpoints,
+		OutPoints:   unspent,
 		BlockStamp:  w.Manager.SyncedTo(),
 	}
 

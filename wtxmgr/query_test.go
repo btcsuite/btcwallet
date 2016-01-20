@@ -1,4 +1,5 @@
 // Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The Decred developers
 //
 // Permission to use, copy, modify, and distribute this software for any
 // purpose with or without fee is hereby granted, provided that the above
@@ -21,20 +22,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	. "github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	. "github.com/decred/dcrwallet/wtxmgr"
 )
 
 type queryState struct {
 	// slice items are ordered by height, mempool comes last.
 	blocks    [][]TxDetails
-	txDetails map[wire.ShaHash][]TxDetails
+	txDetails map[chainhash.Hash][]TxDetails
 }
 
 func newQueryState() *queryState {
 	return &queryState{
-		txDetails: make(map[wire.ShaHash][]TxDetails),
+		txDetails: make(map[chainhash.Hash][]TxDetails),
 	}
 }
 
@@ -47,7 +49,7 @@ func (q *queryState) deepCopy() *queryState {
 		}
 		cpy.blocks = append(cpy.blocks, cpyDetails)
 	}
-	cpy.txDetails = make(map[wire.ShaHash][]TxDetails)
+	cpy.txDetails = make(map[chainhash.Hash][]TxDetails)
 	for txHash, details := range q.txDetails {
 		detailsSlice := make([]TxDetails, len(details))
 		for i, detail := range details {
@@ -292,7 +294,7 @@ func TestStoreQueries(t *testing.T) {
 	}
 
 	// Insert an unmined transaction.  Mark no credits yet.
-	txA := spendOutput(&wire.ShaHash{}, 0, 100e8)
+	txA := spendOutput(&chainhash.Hash{}, 0, 100e8)
 	recA := newTxRecordFromMsgTx(txA, timeNow())
 	newState := lastState.deepCopy()
 	newState.blocks = [][]TxDetails{
@@ -318,7 +320,7 @@ func TestStoreQueries(t *testing.T) {
 	newState.blocks[0][0].Credits = []CreditRecord{
 		{
 			Index:  0,
-			Amount: btcutil.Amount(recA.MsgTx.TxOut[0].Value),
+			Amount: dcrutil.Amount(recA.MsgTx.TxOut[0].Value),
 			Spent:  false,
 			Change: true,
 		},
@@ -332,7 +334,7 @@ func TestStoreQueries(t *testing.T) {
 	})
 
 	// Insert another unmined transaction which spends txA:0, splitting the
-	// amount into outputs of 40 and 60 BTC.
+	// amount into outputs of 40 and 60 DCR.
 	txB := spendOutput(&recA.Hash, 0, 40e8, 60e8)
 	recB := newTxRecordFromMsgTx(txB, timeNow())
 	newState = lastState.deepCopy()
@@ -342,7 +344,7 @@ func TestStoreQueries(t *testing.T) {
 		Block:    BlockMeta{Block: Block{Height: -1}},
 		Debits: []DebitRecord{
 			{
-				Amount: btcutil.Amount(recA.MsgTx.TxOut[0].Value),
+				Amount: dcrutil.Amount(recA.MsgTx.TxOut[0].Value),
 				Index:  0, // recB.MsgTx.TxIn index
 			},
 		},
@@ -359,7 +361,7 @@ func TestStoreQueries(t *testing.T) {
 	newState.blocks[0][1].Credits = []CreditRecord{
 		{
 			Index:  0,
-			Amount: btcutil.Amount(recB.MsgTx.TxOut[0].Value),
+			Amount: dcrutil.Amount(recB.MsgTx.TxOut[0].Value),
 			Spent:  false,
 			Change: false,
 		},
@@ -422,7 +424,7 @@ func TestStoreQueries(t *testing.T) {
 		t.Errorf("Expected no details, found details for tx %v", missingDetails.Hash)
 	}
 	missingUniqueTests := []struct {
-		hash  *wire.ShaHash
+		hash  *chainhash.Hash
 		block *Block
 	}{
 		{&missingRec.Hash, &b100.Block},
@@ -564,11 +566,11 @@ func TestPreviousPkScripts(t *testing.T) {
 
 	// Create a transaction spending two prevous outputs and generating two
 	// new outputs the passed pkScipts.  Spends outputs 0 and 1 from prevHash.
-	buildTx := func(prevHash *wire.ShaHash, script0, script1 []byte) *wire.MsgTx {
+	buildTx := func(prevHash *chainhash.Hash, script0, script1 []byte) *wire.MsgTx {
 		return &wire.MsgTx{
 			TxIn: []*wire.TxIn{
-				&wire.TxIn{PreviousOutPoint: wire.OutPoint{*prevHash, 0}},
-				&wire.TxIn{PreviousOutPoint: wire.OutPoint{*prevHash, 1}},
+				&wire.TxIn{PreviousOutPoint: wire.OutPoint{*prevHash, 0, dcrutil.TxTreeRegular}},
+				&wire.TxIn{PreviousOutPoint: wire.OutPoint{*prevHash, 1, dcrutil.TxTreeRegular}},
 			},
 			TxOut: []*wire.TxOut{
 				&wire.TxOut{Value: 1e8, PkScript: script0},
@@ -587,7 +589,7 @@ func TestPreviousPkScripts(t *testing.T) {
 
 	// Create transactions with the fake output scripts.
 	var (
-		txA  = buildTx(&wire.ShaHash{}, scriptA0, scriptA1)
+		txA  = buildTx(&chainhash.Hash{}, scriptA0, scriptA1)
 		recA = newTxRecordFromMsgTx(txA)
 		txB  = buildTx(&recA.Hash, scriptB0, scriptB1)
 		recB = newTxRecordFromMsgTx(txB)

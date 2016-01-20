@@ -56,6 +56,9 @@ const (
 	// but the database version is newer than latest version known to this
 	// software.  This likely indicates an outdated binary.
 	ErrUnknownVersion
+
+	// ErrIsClosed indicates that the transaction manager is closed.
+	ErrIsClosed
 )
 
 var errStrs = [...]string{
@@ -65,6 +68,7 @@ var errStrs = [...]string{
 	ErrAlreadyExists:  "ErrAlreadyExists",
 	ErrNoExists:       "ErrNoExists",
 	ErrUnknownVersion: "ErrUnknownVersion",
+	ErrIsClosed:       "ErrIsClosed",
 }
 
 // String returns the ErrorCode as a human-readable name.

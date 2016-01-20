@@ -12,10 +12,11 @@ package wallet
 import (
 	"testing"
 
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/tx"
+	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/tx"
+	"github.com/decred/dcrwallet/wallet"
 )
 
 func init() {
@@ -37,7 +38,7 @@ var allowFreeTests = []allowFreeTest{
 		name: "priority < 57,600,000",
 		inputs: []*tx.Utxo{
 			{
-				Amt:    btcutil.SatoshiPerBitcoin,
+				Amt:    dcrutil.AtomPerCoin,
 				Height: 0,
 			},
 		},
@@ -49,7 +50,7 @@ var allowFreeTests = []allowFreeTest{
 		name: "priority == 57,600,000",
 		inputs: []*tx.Utxo{
 			{
-				Amt:    btcutil.SatoshiPerBitcoin,
+				Amt:    dcrutil.AtomPerCoin,
 				Height: 0,
 			},
 		},
@@ -61,7 +62,7 @@ var allowFreeTests = []allowFreeTest{
 		name: "priority > 57,600,000",
 		inputs: []*tx.Utxo{
 			{
-				Amt:    btcutil.SatoshiPerBitcoin,
+				Amt:    dcrutil.AtomPerCoin,
 				Height: 0,
 			},
 		},
@@ -98,7 +99,7 @@ func TestFakeTxs(t *testing.T) {
 	// Create and add a fake Utxo so we have some funds to spend.
 	//
 	// This will pass validation because txcscript is unaware of invalid
-	// tx inputs, however, this example would fail in btcd.
+	// tx inputs, however, this example would fail in dcrd.
 	utxo := &tx.Utxo{}
 	addr, err := w.NextChainedAddress(&keystore.BlockStamp{}, 100)
 	if err != nil {
@@ -106,7 +107,7 @@ func TestFakeTxs(t *testing.T) {
 		return
 	}
 	copy(utxo.AddrHash[:], addr.ScriptAddress())
-	ophash := (wire.ShaHash)([...]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+	ophash := (chainhash.Hash)([...]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
 		12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
 		28, 29, 30, 31, 32})
 	out := wire.NewOutPoint(&ophash, 0)
@@ -121,7 +122,7 @@ func TestFakeTxs(t *testing.T) {
 	utxo.Height = 12345
 	a.UtxoStore = append(a.UtxoStore, utxo)
 
-	// Fake our current block height so btcd doesn't need to be queried.
+	// Fake our current block height so dcrd doesn't need to be queried.
 	curBlock.BlockStamp.Height = 12346
 
 	// Create the transaction.

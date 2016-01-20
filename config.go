@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -24,20 +25,28 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	flags "github.com/btcsuite/go-flags"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/internal/legacy/keystore"
 )
 
 const (
-	defaultCAFilename       = "btcd.cert"
-	defaultConfigFilename   = "btcwallet.conf"
-	defaultLogLevel         = "info"
-	defaultLogDirname       = "logs"
-	defaultLogFilename      = "btcwallet.log"
-	defaultDisallowFree     = false
-	defaultRPCMaxClients    = 10
-	defaultRPCMaxWebsockets = 25
+	defaultCAFilename        = "dcrd.cert"
+	defaultConfigFilename    = "dcrwallet.conf"
+	defaultLogLevel          = "info"
+	defaultLogDirname        = "logs"
+	defaultLogFilename       = "dcrwallet.log"
+	defaultDisallowFree      = false
+	defaultRPCMaxClients     = 10
+	defaultRPCMaxWebsockets  = 25
+	defaultEnableStakeMining = false
+	defaultVoteBits          = 0x0001
+	defaultBalanceToMaintain = 0.0
+	defaultReuseAddresses    = false
+	defaultRollbackTest      = false
+	defaultPruneTickets      = false
+	defaultTicketMaxPrice    = 50.0
+	defaultAutomaticRepair   = false
 
 	// defaultPubPassphrase is the default public wallet passphrase which is
 	// used when the user indicates they do not want additional protection
@@ -54,46 +63,57 @@ const (
 )
 
 var (
-	btcdHomeDir        = btcutil.AppDataDir("btcd", false)
-	btcwalletHomeDir   = btcutil.AppDataDir("btcwallet", false)
-	btcdHomedirCAFile  = filepath.Join(btcdHomeDir, "rpc.cert")
-	defaultConfigFile  = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
-	defaultDataDir     = btcwalletHomeDir
-	defaultRPCKeyFile  = filepath.Join(btcwalletHomeDir, "rpc.key")
-	defaultRPCCertFile = filepath.Join(btcwalletHomeDir, "rpc.cert")
-	defaultLogDir      = filepath.Join(btcwalletHomeDir, defaultLogDirname)
+	dcrdHomeDir        = dcrutil.AppDataDir("dcrd", false)
+	dcrwalletHomeDir   = dcrutil.AppDataDir("dcrwallet", false)
+	dcrdHomedirCAFile  = filepath.Join(dcrdHomeDir, "rpc.cert")
+	defaultConfigFile  = filepath.Join(dcrwalletHomeDir, defaultConfigFilename)
+	defaultDataDir     = dcrwalletHomeDir
+	defaultRPCKeyFile  = filepath.Join(dcrwalletHomeDir, "rpc.key")
+	defaultRPCCertFile = filepath.Join(dcrwalletHomeDir, "rpc.cert")
+	defaultLogDir      = filepath.Join(dcrwalletHomeDir, defaultLogDirname)
 )
 
 type config struct {
-	ShowVersion      bool     `short:"V" long:"version" description:"Display version information and exit"`
-	Create           bool     `long:"create" description:"Create the wallet if it does not exist"`
-	CreateTemp       bool     `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	CAFile           string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
-	RPCConnect       string   `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334, simnet: localhost:18556)"`
-	DebugLevel       string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
-	ConfigFile       string   `short:"C" long:"configfile" description:"Path to configuration file"`
-	SvrListeners     []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
-	DataDir          string   `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
-	LogDir           string   `long:"logdir" description:"Directory to log output."`
-	Username         string   `short:"u" long:"username" description:"Username for client and btcd authorization"`
-	Password         string   `short:"P" long:"password" default-mask:"-" description:"Password for client and btcd authorization"`
-	BtcdUsername     string   `long:"btcdusername" description:"Alternative username for btcd authorization"`
-	BtcdPassword     string   `long:"btcdpassword" default-mask:"-" description:"Alternative password for btcd authorization"`
-	WalletPass       string   `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
-	RPCCert          string   `long:"rpccert" description:"File containing the certificate file"`
-	RPCKey           string   `long:"rpckey" description:"File containing the certificate key"`
-	RPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of RPC clients for standard connections"`
-	RPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
-	DisableServerTLS bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
-	DisableClientTLS bool     `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
-	MainNet          bool     `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
-	SimNet           bool     `long:"simnet" description:"Use the simulation test network (default testnet3)"`
-	KeypoolSize      uint     `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
-	DisallowFree     bool     `long:"disallowfree" description:"Force transactions to always include a fee"`
-	Proxy            string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
-	ProxyUser        string   `long:"proxyuser" description:"Username for proxy server"`
-	ProxyPass        string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
-	Profile          string   `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+	ShowVersion        bool     `short:"V" long:"version" description:"Display version information and exit"`
+	Create             bool     `long:"create" description:"Create the wallet if it does not exist"`
+	CreateTemp         bool     `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
+	CreateWatchingOnly bool     `long:"createwatchingonly" description:"Create the wallet and instantiate it as watching only with an HD extended pubkey; must call with --create"`
+	CAFile             string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with dcrd"`
+	RPCConnect         string   `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:19109, mainnet: localhost:9109, simnet: localhost:19556)"`
+	DebugLevel         string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
+	ConfigFile         string   `short:"C" long:"configfile" description:"Path to configuration file"`
+	SvrListeners       []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 19110, mainnet: 9110, simnet: 19557)"`
+	DataDir            string   `short:"b" long:"datadir" description:"Directory to store wallets and transactions"`
+	LogDir             string   `long:"logdir" description:"Directory to log output."`
+	Username           string   `short:"u" long:"username" description:"Username for client and dcrd authorization"`
+	Password           string   `short:"P" long:"password" default-mask:"-" description:"Password for client and dcrd authorization"`
+	DcrdUsername       string   `long:"dcrdusername" description:"Alternative username for dcrd authorization"`
+	DcrdPassword       string   `long:"dcrdpassword" default-mask:"-" description:"Alternative password for dcrd authorization"`
+	WalletPass         string   `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
+	RPCCert            string   `long:"rpccert" description:"File containing the certificate file"`
+	RPCKey             string   `long:"rpckey" description:"File containing the certificate key"`
+	RPCMaxClients      int64    `long:"rpcmaxclients" description:"Max number of RPC clients for standard connections"`
+	RPCMaxWebsockets   int64    `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
+	DisableServerTLS   bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
+	DisableClientTLS   bool     `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
+	TestNet            bool     `long:"testnet" description:"Use the test network (default mainnet)"`
+	SimNet             bool     `long:"simnet" description:"Use the simulation test network (default mainnet)"`
+	KeypoolSize        uint     `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
+	DisallowFree       bool     `long:"disallowfree" description:"Force transactions to always include a fee"`
+	Proxy              string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
+	ProxyUser          string   `long:"proxyuser" description:"Username for proxy server"`
+	ProxyPass          string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
+	Profile            string   `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+	EnableStakeMining  bool     `long:"enablestakemining" description:"Enable stake mining"`
+	VoteBits           uint16   `long:"votebits" description:"Set your stake mining votebits to value (default: 0xFFFF)"`
+	BalanceToMaintain  float64  `long:"balancetomaintain" description:"Minimum amount of funds to leave in wallet when stake mining (default: 0.0)"`
+	MemProfile         string   `long:"memprofile" description:"Write mem profile to the specified file"`
+	ReuseAddresses     bool     `long:"reuseaddresses" description:"Reuse addresses for ticket purchase to cut down on address overuse"`
+	RollbackTest       bool     `long:"rollbacktest" description:"Rollback testing is a simnet testing mode that eventually stops wallet and examines wtxmgr database integrity"`
+	PruneTickets       bool     `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
+	TicketAddress      string   `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
+	TicketMaxPrice     float64  `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
+	AutomaticRepair    bool     `long:"automaticrepair" description:"Attempt to repair the wallet automatically if a database inconsistency is found"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -101,7 +121,7 @@ type config struct {
 func cleanAndExpandPath(path string) string {
 	// Expand initial ~ to OS specific home directory.
 	if strings.HasPrefix(path, "~") {
-		homeDir := filepath.Dir(btcwalletHomeDir)
+		homeDir := filepath.Dir(dcrwalletHomeDir)
 		path = strings.Replace(path, "~", homeDir, 1)
 	}
 
@@ -247,22 +267,30 @@ func normalizeAddress(addr, defaultPort string) string {
 //      3) Load configuration file overwriting defaults with any specified options
 //      4) Parse CLI options and overwrite/add any specified options
 //
-// The above results in btcwallet functioning properly without any config
+// The above results in dcrwallet functioning properly without any config
 // settings while still allowing the user to override settings with config files
 // and command line options.  Command line options always take precedence.
 func loadConfig() (*config, []string, error) {
 	// Default config.
 	cfg := config{
-		DebugLevel:       defaultLogLevel,
-		ConfigFile:       defaultConfigFile,
-		DataDir:          defaultDataDir,
-		LogDir:           defaultLogDir,
-		WalletPass:       defaultPubPassphrase,
-		RPCKey:           defaultRPCKeyFile,
-		RPCCert:          defaultRPCCertFile,
-		DisallowFree:     defaultDisallowFree,
-		RPCMaxClients:    defaultRPCMaxClients,
-		RPCMaxWebsockets: defaultRPCMaxWebsockets,
+		DebugLevel:        defaultLogLevel,
+		ConfigFile:        defaultConfigFile,
+		DataDir:           defaultDataDir,
+		LogDir:            defaultLogDir,
+		WalletPass:        defaultPubPassphrase,
+		RPCKey:            defaultRPCKeyFile,
+		RPCCert:           defaultRPCCertFile,
+		DisallowFree:      defaultDisallowFree,
+		RPCMaxClients:     defaultRPCMaxClients,
+		RPCMaxWebsockets:  defaultRPCMaxWebsockets,
+		EnableStakeMining: defaultEnableStakeMining,
+		VoteBits:          defaultVoteBits,
+		BalanceToMaintain: defaultBalanceToMaintain,
+		ReuseAddresses:    defaultReuseAddresses,
+		RollbackTest:      defaultRollbackTest,
+		PruneTickets:      defaultPruneTickets,
+		TicketMaxPrice:    defaultTicketMaxPrice,
+		AutomaticRepair:   defaultAutomaticRepair,
 	}
 
 	// A config file in the current directory takes precedence.
@@ -336,8 +364,12 @@ func loadConfig() (*config, []string, error) {
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
-	if cfg.MainNet {
-		activeNet = &mainNetParams
+	activeNet = &mainNetParams
+	if cfg.TestNet {
+		// DECRED DEBUG
+		//fmt.Println("Mainnet is currently disabled")
+		// os.Exit(0)
+		activeNet = &testNetParams
 		numNets++
 	}
 	if cfg.SimNet {
@@ -345,7 +377,7 @@ func loadConfig() (*config, []string, error) {
 		numNets++
 	}
 	if numNets > 1 {
-		str := "%s: The mainnet and simnet params can't be used " +
+		str := "%s: The mainnet, testnet, and simnet params can't be used " +
 			"together -- choose one"
 		err := fmt.Errorf(str, "loadConfig")
 		fmt.Fprintln(os.Stderr, err)
@@ -385,9 +417,17 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Exit if you try to use a simulation wallet on anything other than
-	// simnet or testnet3.
+	// simnet or testnet.
 	if !cfg.SimNet && cfg.CreateTemp {
 		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
+			"wallet for network other than simnet!")
+		os.Exit(0)
+	}
+
+	// Exit if you tried to do rollback testing on a network other than
+	// simnet.
+	if cfg.RollbackTest && !cfg.SimNet {
+		fmt.Fprintln(os.Stderr, "Tried to do rollback testing of "+
 			"wallet for network other than simnet!")
 		os.Exit(0)
 	}
@@ -442,9 +482,16 @@ func loadConfig() (*config, []string, error) {
 		}
 
 		// Perform the initial wallet creation wizard.
-		if err := createWallet(&cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
-			return nil, nil, err
+		if !cfg.CreateWatchingOnly {
+			if err := createWallet(&cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
+				return nil, nil, err
+			}
+		} else if cfg.CreateWatchingOnly {
+			if err := createWatchingOnlyWallet(&cfg); err != nil {
+				fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
+				return nil, nil, err
+			}
 		}
 
 		// Created successfully, so exit now with success.
@@ -468,7 +515,7 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Add default port to connect flag if missing.
-	cfg.RPCConnect = normalizeAddress(cfg.RPCConnect, activeNet.btcdPort)
+	cfg.RPCConnect = normalizeAddress(cfg.RPCConnect, activeNet.dcrdPort)
 
 	localhostListeners := map[string]struct{}{
 		"localhost": struct{}{},
@@ -490,16 +537,16 @@ func loadConfig() (*config, []string, error) {
 			return nil, nil, err
 		}
 	} else {
-		// If CAFile is unset, choose either the copy or local btcd cert.
+		// If CAFile is unset, choose either the copy or local dcrd cert.
 		if cfg.CAFile == "" {
 			cfg.CAFile = filepath.Join(cfg.DataDir, defaultCAFilename)
 
 			// If the CA copy does not exist, check if we're connecting to
-			// a local btcd and switch to its RPC cert if it exists.
+			// a local dcrd and switch to its RPC cert if it exists.
 			if !fileExists(cfg.CAFile) {
 				if _, ok := localhostListeners[RPCHost]; ok {
-					if fileExists(btcdHomedirCAFile) {
-						cfg.CAFile = btcdHomedirCAFile
+					if fileExists(dcrdHomedirCAFile) {
+						cfg.CAFile = dcrdHomedirCAFile
 					}
 				}
 			}
@@ -551,15 +598,15 @@ func loadConfig() (*config, []string, error) {
 	// Expand environment variable and leading ~ for filepaths.
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
 
-	// If the btcd username or password are unset, use the same auth as for
-	// the client.  The two settings were previously shared for btcd and
+	// If the dcrd username or password are unset, use the same auth as for
+	// the client.  The two settings were previously shared for dcrd and
 	// client auth, so this avoids breaking backwards compatibility while
-	// allowing users to use different auth settings for btcd and wallet.
-	if cfg.BtcdUsername == "" {
-		cfg.BtcdUsername = cfg.Username
+	// allowing users to use different auth settings for dcrd and wallet.
+	if cfg.DcrdUsername == "" {
+		cfg.DcrdUsername = cfg.Username
 	}
-	if cfg.BtcdPassword == "" {
-		cfg.BtcdPassword = cfg.Password
+	if cfg.DcrdPassword == "" {
+		cfg.DcrdPassword = cfg.Password
 	}
 
 	return &cfg, remainingArgs, nil

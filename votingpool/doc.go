@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015-2016 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,12 +16,12 @@
  */
 
 /*
-Package votingpool provides voting pool functionality for btcwallet.
+Package votingpool provides voting pool functionality for dcrwallet.
 
 Overview
 
 The purpose of the voting pool package is to make it possible to store
-bitcoins using m-of-n multisig transactions. A pool can have multiple
+decred using m-of-n multisig transactions. A pool can have multiple
 series, each of them with a set of pubkeys (one for each of the members
 in that pool's series) and the minimum number of required signatures (m)
 needed to spend the pool's coins. Each member will hold a private key
@@ -85,7 +86,7 @@ StartWithdrawal method:
 	startAddress: the seriesID, branch and indes where we should start looking for inputs
 	lastSeriesID: the ID of the last series where we should take inputs from
 	changeStart: the first change address to use
-	dustThreshold: the minimum amount of satoshis an input needs to be considered eligible
+	dustThreshold: the minimum amount of atoms an input needs to be considered eligible
 
 StartWithdrawal will then select all eligible inputs in the given address
 range (following the algorithim at <http://opentransactions.org/wiki/index.php/Input_Selection_Algorithm_(voting_pools)>)

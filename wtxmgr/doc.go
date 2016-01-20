@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013-2015 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,7 +16,7 @@
  */
 
 // Package wtxmgr provides an implementation of a transaction database handling
-// spend tracking for a bitcoin wallet.  Its primary purpose is to save
+// spend tracking for a decred wallet.  Its primary purpose is to save
 // transactions with outputs spendable with wallet keys and transactions that
 // are signed by wallet keys in memory, handle spend tracking for unspent
 // outputs and newly-inserted transactions, and report the spendable balance

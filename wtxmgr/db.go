@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,9 +23,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/golangcrypto/ripemd160"
+	"github.com/decred/dcrd/blockchain/stake"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 // Naming
@@ -69,11 +73,11 @@ const (
 	LatestVersion = 1
 )
 
-// This package makes assumptions that the width of a wire.ShaHash is always 32
+// This package makes assumptions that the width of a chainhash.Hash is always 32
 // bytes.  If this is ever changed (unlikely for bitcoin, possible for alts),
 // offsets have to be rewritten.  Use a compile-time assertion that this
 // assumption holds true.
-var _ [32]byte = wire.ShaHash{}
+var _ [32]byte = chainhash.Hash{}
 
 // Bucket names
 var (
@@ -85,6 +89,9 @@ var (
 	bucketUnmined        = []byte("m")
 	bucketUnminedCredits = []byte("mc")
 	bucketUnminedInputs  = []byte("mi")
+	bucketScripts        = []byte("sc")
+	bucketMultisig       = []byte("ms")
+	bucketMultisigUsp    = []byte("mu")
 )
 
 // Root (namespace) bucket keys
@@ -99,18 +106,17 @@ var (
 // outputs spent by mempool transactions, which must be considered when
 // returning the actual balance for a given number of block confirmations.  The
 // value is the amount serialized as a uint64.
-
-func fetchMinedBalance(ns walletdb.Bucket) (btcutil.Amount, error) {
+func fetchMinedBalance(ns walletdb.Bucket) (dcrutil.Amount, error) {
 	v := ns.Get(rootMinedBalance)
 	if len(v) != 8 {
-		str := fmt.Sprintf("balance: short read (expected 8 bytes, "+
+		str := fmt.Sprintf("mined balance: short read (expected 8 bytes, "+
 			"read %v)", len(v))
 		return 0, storeError(ErrData, str, nil)
 	}
-	return btcutil.Amount(byteOrder.Uint64(v)), nil
+	return dcrutil.Amount(byteOrder.Uint64(v)), nil
 }
 
-func putMinedBalance(ns walletdb.Bucket, amt btcutil.Amount) error {
+func putMinedBalance(ns walletdb.Bucket, amt dcrutil.Amount) error {
 	v := make([]byte, 8)
 	byteOrder.PutUint64(v, uint64(amt))
 	err := ns.Put(rootMinedBalance, v)
@@ -132,7 +138,7 @@ func putMinedBalance(ns walletdb.Bucket, amt btcutil.Amount) error {
 //
 // The canonical transaction hash serialization is simply the hash.
 
-func canonicalOutPoint(txHash *wire.ShaHash, index uint32) []byte {
+func canonicalOutPoint(txHash *chainhash.Hash, index uint32) []byte {
 	k := make([]byte, 36)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], index)
@@ -154,8 +160,9 @@ func readCanonicalOutPoint(k []byte, op *wire.OutPoint) error {
 //
 //   [0:32]  Hash (32 bytes)
 //   [32:40] Unix time (8 bytes)
-//   [40:44] Number of transaction hashes (4 bytes)
-//   [44:]   For each transaction hash:
+//   [40:42] VoteBits (2 bytes/uint16)
+//   [42:46] Number of transaction hashes (4 bytes)
+//   [46:]   For each transaction hash:
 //             Hash (32 bytes)
 
 func keyBlockRecord(height int32) []byte {
@@ -164,27 +171,79 @@ func keyBlockRecord(height int32) []byte {
 	return k
 }
 
-func valueBlockRecord(block *BlockMeta, txHash *wire.ShaHash) []byte {
-	v := make([]byte, 76)
+func valueBlockRecordEmpty(block *BlockMeta) []byte {
+	v := make([]byte, 46)
 	copy(v, block.Hash[:])
 	byteOrder.PutUint64(v[32:40], uint64(block.Time.Unix()))
-	byteOrder.PutUint32(v[40:44], 1)
-	copy(v[44:76], txHash[:])
+	byteOrder.PutUint16(v[40:42], block.VoteBits)
+	byteOrder.PutUint32(v[42:46], 0)
+	return v
+}
+
+func valueBlockRecord(block *BlockMeta, txHash *chainhash.Hash) []byte {
+	v := make([]byte, 78)
+	copy(v, block.Hash[:])
+	byteOrder.PutUint64(v[32:40], uint64(block.Time.Unix()))
+	byteOrder.PutUint16(v[40:42], block.VoteBits)
+	byteOrder.PutUint32(v[42:46], 1)
+	copy(v[46:78], txHash[:])
 	return v
 }
 
 // appendRawBlockRecord returns a new block record value with a transaction
 // hash appended to the end and an incremented number of transactions.
-func appendRawBlockRecord(v []byte, txHash *wire.ShaHash) ([]byte, error) {
-	if len(v) < 44 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketBlocks, 44, len(v))
+func appendRawBlockRecord(v []byte, txHash *chainhash.Hash) ([]byte, error) {
+	if len(v) < 46 {
+		str := fmt.Sprintf("%s: appendRawBlockRecord short read "+
+			"(expected %d bytes, read %d)", bucketBlocks, 46, len(v))
 		return nil, storeError(ErrData, str, nil)
 	}
 	newv := append(v[:len(v):len(v)], txHash[:]...)
-	n := byteOrder.Uint32(newv[40:44])
-	byteOrder.PutUint32(newv[40:44], n+1)
+	n := byteOrder.Uint32(newv[42:46])
+	byteOrder.PutUint32(newv[42:46], n+1)
 	return newv, nil
+}
+
+// removeRawBlockRecord returns a new block record value with a transaction
+// hash removed from the list of transaction and a decremented number of
+// transactions.
+func removeRawBlockRecord(v []byte, txHash *chainhash.Hash) ([]byte, error) {
+	length := len(v)
+	if length < 46 {
+		str := fmt.Sprintf("%s: short read for removeRawBlockRecord "+
+			"(expected %d bytes, read %d)", bucketBlocks, 46, len(v))
+		return nil, storeError(ErrData, str, nil)
+	}
+
+	newLength := length - 32 // size of hash
+	oldNumHashes := (length - 46) / 32
+	newValue := make([]byte, newLength, newLength)
+	copy(newValue[0:46], v[0:46])
+
+	cursor := 46
+	newCursor := 46
+
+	// Only copy the hash in the new value if it's not the one we want to
+	// remove.
+	for i := 0; i < oldNumHashes; i++ {
+		h, err := chainhash.NewHash(v[cursor : cursor+32])
+		if err != nil {
+			return nil, err
+		}
+
+		if h.IsEqual(txHash) {
+			cursor += 32
+			continue
+		}
+
+		copy(newValue[newCursor:newCursor+32], v[cursor:cursor+32])
+		cursor += 32
+		newCursor += 32
+	}
+
+	n := byteOrder.Uint32(newValue[42:46])
+	byteOrder.PutUint32(newValue[42:46], n-1)
+	return newValue, nil
 }
 
 func putRawBlockRecord(ns walletdb.Bucket, k, v []byte) error {
@@ -196,7 +255,8 @@ func putRawBlockRecord(ns walletdb.Bucket, k, v []byte) error {
 	return nil
 }
 
-func putBlockRecord(ns walletdb.Bucket, block *BlockMeta, txHash *wire.ShaHash) error {
+func putBlockRecord(ns walletdb.Bucket, block *BlockMeta,
+	txHash *chainhash.Hash) error {
 	k := keyBlockRecord(block.Height)
 	v := valueBlockRecord(block, txHash)
 	return putRawBlockRecord(ns, k, v)
@@ -205,12 +265,39 @@ func putBlockRecord(ns walletdb.Bucket, block *BlockMeta, txHash *wire.ShaHash) 
 func fetchBlockTime(ns walletdb.Bucket, height int32) (time.Time, error) {
 	k := keyBlockRecord(height)
 	v := ns.Bucket(bucketBlocks).Get(k)
-	if len(v) < 44 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketBlocks, 44, len(v))
+	if len(v) < 46 {
+		str := fmt.Sprintf("%s: short read for fetchBlockTime (expected "+
+			"%d bytes, read %d)", bucketBlocks, 46, len(v))
 		return time.Time{}, storeError(ErrData, str, nil)
 	}
 	return time.Unix(int64(byteOrder.Uint64(v[32:40])), 0), nil
+}
+
+func fetchBlockRecord(ns walletdb.Bucket, height int32) (*blockRecord, error) {
+	br := &blockRecord{}
+	k := keyBlockRecord(height)
+	v := ns.Bucket(bucketBlocks).Get(k)
+	err := readRawBlockRecord(k, v, br)
+
+	return br, err
+}
+
+func fetchChainHeight(ns walletdb.Bucket, startHeight int32) (int32, error) {
+	lastValidHeight := int32(0)
+	for i := startHeight; ; i++ {
+		_, v := existsBlockRecord(ns, i)
+		if v == nil {
+			break
+		}
+
+		lastValidHeight = i
+	}
+
+	if lastValidHeight == 0 {
+		return 0, fmt.Errorf("blockchain could not iterate to top block")
+	}
+
+	return lastValidHeight, nil
 }
 
 func existsBlockRecord(ns walletdb.Bucket, height int32) (k, v []byte) {
@@ -221,31 +308,33 @@ func existsBlockRecord(ns walletdb.Bucket, height int32) (k, v []byte) {
 
 func readRawBlockRecord(k, v []byte, block *blockRecord) error {
 	if len(k) < 4 {
-		str := fmt.Sprintf("%s: short key (expected %d bytes, read %d)",
-			bucketBlocks, 4, len(k))
+		str := fmt.Sprintf("%s: short key for readRawBlockRecord (expected "+
+			"%d bytes, read %d)", bucketBlocks, 4, len(k))
 		return storeError(ErrData, str, nil)
 	}
-	if len(v) < 44 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketBlocks, 44, len(v))
+	if len(v) < 46 {
+		str := fmt.Sprintf("%s: short value read for readRawBlockRecord "+
+			"(expected %d bytes, read %d)", bucketBlocks, 46, len(v))
 		return storeError(ErrData, str, nil)
 	}
-	numTransactions := int(byteOrder.Uint32(v[40:44]))
-	expectedLen := 44 + wire.HashSize*numTransactions
+
+	numTransactions := int(byteOrder.Uint32(v[42:46]))
+	expectedLen := 46 + chainhash.HashSize*numTransactions
 	if len(v) < expectedLen {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketBlocks, expectedLen, len(v))
+		str := fmt.Sprintf("%s: short read readRawBlockRecord for hashes "+
+			"(expected %d bytes, read %d)", bucketBlocks, expectedLen, len(v))
 		return storeError(ErrData, str, nil)
 	}
 
 	block.Height = int32(byteOrder.Uint32(k))
 	copy(block.Hash[:], v)
 	block.Time = time.Unix(int64(byteOrder.Uint64(v[32:40])), 0)
-	block.transactions = make([]wire.ShaHash, numTransactions)
-	off := 44
+	block.VoteBits = byteOrder.Uint16(v[40:42])
+	block.transactions = make([]chainhash.Hash, numTransactions)
+	off := 46
 	for i := range block.transactions {
 		copy(block.transactions[i][:], v[off:])
-		off += wire.HashSize
+		off += chainhash.HashSize
 	}
 
 	return nil
@@ -347,6 +436,11 @@ func (it *blockIterator) delete() error {
 	return nil
 }
 
+func deleteBlockRecord(ns walletdb.Bucket, height int32) error {
+	k := keyBlockRecord(height)
+	return ns.Bucket(bucketBlocks).Delete(k)
+}
+
 // Transaction records are keyed as such:
 //
 //   [0:32]  Transaction hash (32 bytes)
@@ -362,7 +456,7 @@ func (it *blockIterator) delete() error {
 //   [0:8]   Received time (8 bytes)
 //   [8:]    Serialized transaction (varies)
 
-func keyTxRecord(txHash *wire.ShaHash, block *Block) []byte {
+func keyTxRecord(txHash *chainhash.Hash, block *Block) []byte {
 	k := make([]byte, 68)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], uint32(block.Height))
@@ -412,10 +506,10 @@ func putRawTxRecord(ns walletdb.Bucket, k, v []byte) error {
 	return nil
 }
 
-func readRawTxRecord(txHash *wire.ShaHash, v []byte, rec *TxRecord) error {
+func readRawTxRecord(txHash *chainhash.Hash, v []byte, rec *TxRecord) error {
 	if len(v) < 8 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketTxRecords, 8, len(v))
+		str := fmt.Sprintf("%s: short read for raw tx record (expected %d "+
+			"bytes, read %d, txHash %v)", bucketTxRecords, 8, len(v), txHash)
 		return storeError(ErrData, str, nil)
 	}
 	rec.Hash = *txHash
@@ -426,6 +520,10 @@ func readRawTxRecord(txHash *wire.ShaHash, v []byte, rec *TxRecord) error {
 			bucketTxRecords, txHash)
 		return storeError(ErrData, str, err)
 	}
+
+	// Calculate the stake TxType from the MsgTx.
+	rec.TxType = stake.DetermineTxType(dcrutil.NewTx(&rec.MsgTx))
+
 	return nil
 }
 
@@ -440,7 +538,7 @@ func readRawTxRecordBlock(k []byte, block *Block) error {
 	return nil
 }
 
-func fetchTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) (*TxRecord, error) {
+func fetchTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash, block *Block) (*TxRecord, error) {
 	k := keyTxRecord(txHash, block)
 	v := ns.Bucket(bucketTxRecords).Get(k)
 
@@ -465,7 +563,7 @@ func fetchRawTxRecordPkScript(k, v []byte, index uint32) ([]byte, error) {
 	return rec.MsgTx.TxOut[index].PkScript, nil
 }
 
-func existsTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) (k, v []byte) {
+func existsTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash, block *Block) (k, v []byte) {
 	k = keyTxRecord(txHash, block)
 	v = ns.Bucket(bucketTxRecords).Get(k)
 	return
@@ -475,7 +573,7 @@ func existsRawTxRecord(ns walletdb.Bucket, k []byte) (v []byte) {
 	return ns.Bucket(bucketTxRecords).Get(k)
 }
 
-func deleteTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) error {
+func deleteTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash, block *Block) error {
 	k := keyTxRecord(txHash, block)
 	return ns.Bucket(bucketTxRecords).Delete(k)
 }
@@ -483,7 +581,7 @@ func deleteTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) erro
 // latestTxRecord searches for the newest recorded mined transaction record with
 // a matching hash.  In case of a hash collision, the record from the newest
 // block is returned.  Returns (nil, nil) if no matching transactions are found.
-func latestTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash) (k, v []byte) {
+func latestTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash) (k, v []byte) {
 	prefix := txHash[:]
 	c := ns.Bucket(bucketTxRecords).Cursor()
 	ck, cv := c.Seek(prefix)
@@ -509,8 +607,15 @@ func latestTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash) (k, v []byte) {
 //
 //   [0:8]   Amount (8 bytes)
 //   [8]     Flags (1 byte)
-//             0x01: Spent
-//             0x02: Change
+//             [0]: Spent
+//             [1]: Change
+//             [2:5]: P2PKH stake flag
+//                 000: None (translates to OP_NOP10)
+//                 001: OP_SSTX
+//                 010: OP_SSGEN
+//                 011: OP_SSRTX
+//                 100: OP_SSTXCHANGE
+//             [6]: IsCoinbase
 //   [9:81]  OPTIONAL Debit bucket key (72 bytes)
 //             [9:41]  Spender transaction hash (32 bytes)
 //             [41:45] Spender block height (4 bytes)
@@ -520,7 +625,7 @@ func latestTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash) (k, v []byte) {
 // The optional debits key is only included if the credit is spent by another
 // mined debit.
 
-func keyCredit(txHash *wire.ShaHash, index uint32, block *Block) []byte {
+func keyCredit(txHash *chainhash.Hash, index uint32, block *Block) []byte {
 	k := make([]byte, 72)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], uint32(block.Height))
@@ -529,14 +634,22 @@ func keyCredit(txHash *wire.ShaHash, index uint32, block *Block) []byte {
 	return k
 }
 
+func condenseOpCode(opCode uint8) byte {
+	return (opCode - 0xb9) << 2
+}
+
 // valueUnspentCredit creates a new credit value for an unspent credit.  All
 // credits are created unspent, and are only marked spent later, so there is no
 // value function to create either spent or unspent credits.
 func valueUnspentCredit(cred *credit) []byte {
 	v := make([]byte, 9)
 	byteOrder.PutUint64(v, uint64(cred.amount))
+	v[8] = condenseOpCode(cred.opCode)
 	if cred.change {
 		v[8] |= 1 << 1
+	}
+	if cred.isCoinbase {
+		v[8] |= 1 << 5
 	}
 	return v
 }
@@ -559,8 +672,24 @@ func putUnspentCredit(ns walletdb.Bucket, cred *credit) error {
 	return putRawCredit(ns, k, v)
 }
 
+func extractRawCreditTxHash(k []byte) chainhash.Hash {
+	hash, _ := chainhash.NewHash(k[0:32])
+	return *hash
+}
+
 func extractRawCreditTxRecordKey(k []byte) []byte {
 	return k[0:68]
+}
+
+func extractRawCreditBlock(k []byte) *Block {
+	hashBytes := k[36:68]
+	hash, _ := chainhash.NewHash(hashBytes)
+	height := int32(byteOrder.Uint32(k[32:36]))
+	return &Block{*hash, height}
+}
+
+func extractRawCreditHeight(k []byte) int32 {
+	return int32(byteOrder.Uint32(k[32:36]))
 }
 
 func extractRawCreditIndex(k []byte) uint32 {
@@ -568,35 +697,35 @@ func extractRawCreditIndex(k []byte) uint32 {
 }
 
 // fetchRawCreditAmount returns the amount of the credit.
-func fetchRawCreditAmount(v []byte) (btcutil.Amount, error) {
+func fetchRawCreditAmount(v []byte) (dcrutil.Amount, error) {
 	if len(v) < 9 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketCredits, 9, len(v))
+		str := fmt.Sprintf("%s: short read for raw credit amount (expected %d "+
+			"bytes, read %d)", bucketCredits, 9, len(v))
 		return 0, storeError(ErrData, str, nil)
 	}
-	return btcutil.Amount(byteOrder.Uint64(v)), nil
+	return dcrutil.Amount(byteOrder.Uint64(v)), nil
 }
 
 // fetchRawCreditAmountSpent returns the amount of the credit and whether the
 // credit is spent.
-func fetchRawCreditAmountSpent(v []byte) (btcutil.Amount, bool, error) {
+func fetchRawCreditAmountSpent(v []byte) (dcrutil.Amount, bool, error) {
 	if len(v) < 9 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketCredits, 9, len(v))
+		str := fmt.Sprintf("%s: short read for raw credit amount spent "+
+			"(expected %d bytes, read %d)", bucketCredits, 9, len(v))
 		return 0, false, storeError(ErrData, str, nil)
 	}
-	return btcutil.Amount(byteOrder.Uint64(v)), v[8]&(1<<0) != 0, nil
+	return dcrutil.Amount(byteOrder.Uint64(v)), v[8]&(1<<0) != 0, nil
 }
 
 // fetchRawCreditAmountChange returns the amount of the credit and whether the
 // credit is marked as change.
-func fetchRawCreditAmountChange(v []byte) (btcutil.Amount, bool, error) {
+func fetchRawCreditAmountChange(v []byte) (dcrutil.Amount, bool, error) {
 	if len(v) < 9 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketCredits, 9, len(v))
+		str := fmt.Sprintf("%s: short read for raw credit amount change "+
+			"(expected %d bytes, read %d)", bucketCredits, 9, len(v))
 		return 0, false, storeError(ErrData, str, nil)
 	}
-	return btcutil.Amount(byteOrder.Uint64(v)), v[8]&(1<<1) != 0, nil
+	return dcrutil.Amount(byteOrder.Uint64(v)), v[8]&(1<<1) != 0, nil
 }
 
 // fetchRawCreditUnspentValue returns the unspent value for a raw credit key.
@@ -610,10 +739,18 @@ func fetchRawCreditUnspentValue(k []byte) ([]byte, error) {
 	return k[32:68], nil
 }
 
+func fetchRawCreditTagOpCode(v []byte) uint8 {
+	return (((v[8] >> 2) & 0x07) + 0xb9)
+}
+
+func fetchRawCreditIsCoinbase(v []byte) bool {
+	return v[8]&(1<<5) != 0
+}
+
 // spendRawCredit marks the credit with a given key as mined at some particular
 // block as spent by the input at some transaction incidence.  The debited
 // amount is returned.
-func spendCredit(ns walletdb.Bucket, k []byte, spender *indexedIncidence) (btcutil.Amount, error) {
+func spendCredit(ns walletdb.Bucket, k []byte, spender *indexedIncidence) (dcrutil.Amount, error) {
 	v := ns.Bucket(bucketCredits).Get(k)
 	newv := make([]byte, 81)
 	copy(newv, v)
@@ -624,13 +761,13 @@ func spendCredit(ns walletdb.Bucket, k []byte, spender *indexedIncidence) (btcut
 	copy(v[45:77], spender.block.Hash[:])
 	byteOrder.PutUint32(v[77:81], spender.index)
 
-	return btcutil.Amount(byteOrder.Uint64(v[0:8])), putRawCredit(ns, k, v)
+	return dcrutil.Amount(byteOrder.Uint64(v[0:8])), putRawCredit(ns, k, v)
 }
 
 // unspendRawCredit rewrites the credit for the given key as unspent.  The
 // output amount of the credit is returned.  It returns without error if no
 // credit exists for the key.
-func unspendRawCredit(ns walletdb.Bucket, k []byte) (btcutil.Amount, error) {
+func unspendRawCredit(ns walletdb.Bucket, k []byte) (dcrutil.Amount, error) {
 	b := ns.Bucket(bucketCredits)
 	v := b.Get(k)
 	if v == nil {
@@ -645,10 +782,10 @@ func unspendRawCredit(ns walletdb.Bucket, k []byte) (btcutil.Amount, error) {
 		str := "failed to put credit"
 		return 0, storeError(ErrDatabase, str, err)
 	}
-	return btcutil.Amount(byteOrder.Uint64(v[0:8])), nil
+	return dcrutil.Amount(byteOrder.Uint64(v[0:8])), nil
 }
 
-func existsCredit(ns walletdb.Bucket, txHash *wire.ShaHash, index uint32, block *Block) (k, v []byte) {
+func existsCredit(ns walletdb.Bucket, txHash *chainhash.Hash, index uint32, block *Block) (k, v []byte) {
 	k = keyCredit(txHash, index, block)
 	v = ns.Bucket(bucketCredits).Get(k)
 	return
@@ -703,19 +840,22 @@ func makeCreditIterator(ns walletdb.Bucket, prefix []byte) creditIterator {
 
 func (it *creditIterator) readElem() error {
 	if len(it.ck) < 72 {
-		str := fmt.Sprintf("%s: short key (expected %d bytes, read %d)",
-			bucketCredits, 72, len(it.ck))
+		str := fmt.Sprintf("%s: short key for credit iterator key "+
+			"(expected %d bytes, read %d)", bucketCredits, 72, len(it.ck))
 		return storeError(ErrData, str, nil)
 	}
 	if len(it.cv) < 9 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketCredits, 9, len(it.cv))
+		str := fmt.Sprintf("%s: short read for credit iterator value "+
+			"(expected %d bytes, read %d)", bucketCredits, 9, len(it.cv))
 		return storeError(ErrData, str, nil)
 	}
 	it.elem.Index = byteOrder.Uint32(it.ck[68:72])
-	it.elem.Amount = btcutil.Amount(byteOrder.Uint64(it.cv))
+	it.elem.Amount = dcrutil.Amount(byteOrder.Uint64(it.cv))
 	it.elem.Spent = it.cv[8]&(1<<0) != 0
 	it.elem.Change = it.cv[8]&(1<<1) != 0
+	it.elem.OpCode = fetchRawCreditTagOpCode(it.cv)
+	it.elem.IsCoinbase = fetchRawCreditIsCoinbase(it.cv)
+
 	return nil
 }
 
@@ -847,7 +987,7 @@ func deleteRawUnspent(ns walletdb.Bucket, k []byte) error {
 //             [44:76] Block hash (32 bytes)
 //             [76:80] Output index (4 bytes)
 
-func keyDebit(txHash *wire.ShaHash, index uint32, block *Block) []byte {
+func keyDebit(txHash *chainhash.Hash, index uint32, block *Block) []byte {
 	k := make([]byte, 72)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], uint32(block.Height))
@@ -856,7 +996,7 @@ func keyDebit(txHash *wire.ShaHash, index uint32, block *Block) []byte {
 	return k
 }
 
-func putDebit(ns walletdb.Bucket, txHash *wire.ShaHash, index uint32, amount btcutil.Amount, block *Block, credKey []byte) error {
+func putDebit(ns walletdb.Bucket, txHash *chainhash.Hash, index uint32, amount dcrutil.Amount, block *Block, credKey []byte) error {
 	k := keyDebit(txHash, index, block)
 
 	v := make([]byte, 80)
@@ -879,15 +1019,16 @@ func extractRawDebitCreditKey(v []byte) []byte {
 // existsDebit checks for the existance of a debit.  If found, the debit and
 // previous credit keys are returned.  If the debit does not exist, both keys
 // are nil.
-func existsDebit(ns walletdb.Bucket, txHash *wire.ShaHash, index uint32, block *Block) (k, credKey []byte, err error) {
+func existsDebit(ns walletdb.Bucket, txHash *chainhash.Hash, index uint32,
+	block *Block) (k, credKey []byte, err error) {
 	k = keyDebit(txHash, index, block)
 	v := ns.Bucket(bucketDebits).Get(k)
 	if v == nil {
 		return nil, nil, nil
 	}
 	if len(v) < 80 {
-		str := fmt.Sprintf("%s: short read (expected 80 bytes, read %v)",
-			bucketDebits, len(v))
+		str := fmt.Sprintf("%s: short read for exists debit (expected 80 "+
+			"bytes, read %v)", bucketDebits, len(v))
 		return nil, nil, storeError(ErrData, str, nil)
 	}
 	return k, v[8:80], nil
@@ -932,17 +1073,17 @@ func makeDebitIterator(ns walletdb.Bucket, prefix []byte) debitIterator {
 
 func (it *debitIterator) readElem() error {
 	if len(it.ck) < 72 {
-		str := fmt.Sprintf("%s: short key (expected %d bytes, read %d)",
-			bucketDebits, 72, len(it.ck))
+		str := fmt.Sprintf("%s: short key for debit iterator key "+
+			"(expected %d bytes, read %d)", bucketDebits, 72, len(it.ck))
 		return storeError(ErrData, str, nil)
 	}
 	if len(it.cv) < 80 {
-		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
-			bucketDebits, 80, len(it.cv))
+		str := fmt.Sprintf("%s: short read for debite iterator value "+
+			"(expected %d bytes, read %d)", bucketDebits, 80, len(it.cv))
 		return storeError(ErrData, str, nil)
 	}
 	it.elem.Index = byteOrder.Uint32(it.ck[68:72])
-	it.elem.Amount = btcutil.Amount(byteOrder.Uint64(it.cv))
+	it.elem.Amount = dcrutil.Amount(byteOrder.Uint64(it.cv))
 	return nil
 }
 
@@ -984,7 +1125,7 @@ func putRawUnmined(ns walletdb.Bucket, k, v []byte) error {
 	return nil
 }
 
-func readRawUnminedHash(k []byte, txHash *wire.ShaHash) error {
+func readRawUnminedHash(k []byte, txHash *chainhash.Hash) error {
 	if len(k) < 32 {
 		str := "short unmined key"
 		return storeError(ErrData, str, nil)
@@ -1017,13 +1158,25 @@ func deleteRawUnmined(ns walletdb.Bucket, k []byte) error {
 //
 //   [0:8]   Amount (8 bytes)
 //   [8]     Flags (1 byte)
-//             0x02: Change
+//             [1]: Change
+//             [2:5]: P2PKH stake flag
+//                 000: None (translates to OP_NOP10)
+//                 001: OP_SSTX
+//                 010: OP_SSGEN
+//                 011: OP_SSRTX
+//                 100: OP_SSTXCHANGE
+//             [6]: Is coinbase
 
-func valueUnminedCredit(amount btcutil.Amount, change bool) []byte {
+func valueUnminedCredit(amount dcrutil.Amount, change bool, opCode uint8,
+	IsCoinbase bool) []byte {
 	v := make([]byte, 9)
 	byteOrder.PutUint64(v, uint64(amount))
+	v[8] = condenseOpCode(opCode)
 	if change {
-		v[8] = 1 << 1
+		v[8] |= 1 << 1
+	}
+	if IsCoinbase {
+		v[8] |= 1 << 5
 	}
 	return v
 }
@@ -1045,22 +1198,30 @@ func fetchRawUnminedCreditIndex(k []byte) (uint32, error) {
 	return byteOrder.Uint32(k[32:36]), nil
 }
 
-func fetchRawUnminedCreditAmount(v []byte) (btcutil.Amount, error) {
+func fetchRawUnminedCreditAmount(v []byte) (dcrutil.Amount, error) {
 	if len(v) < 9 {
 		str := "short unmined credit value"
 		return 0, storeError(ErrData, str, nil)
 	}
-	return btcutil.Amount(byteOrder.Uint64(v)), nil
+	return dcrutil.Amount(byteOrder.Uint64(v)), nil
 }
 
-func fetchRawUnminedCreditAmountChange(v []byte) (btcutil.Amount, bool, error) {
+func fetchRawUnminedCreditAmountChange(v []byte) (dcrutil.Amount, bool, error) {
 	if len(v) < 9 {
 		str := "short unmined credit value"
 		return 0, false, storeError(ErrData, str, nil)
 	}
-	amt := btcutil.Amount(byteOrder.Uint64(v))
+	amt := dcrutil.Amount(byteOrder.Uint64(v))
 	change := v[8]&(1<<1) != 0
 	return amt, change, nil
+}
+
+func fetchRawUnminedCreditTagOpcode(v []byte) uint8 {
+	return (((v[8] >> 2) & 0x07) + 0xb9)
+}
+
+func fetchRawUnminedCreditTagIsCoinbase(v []byte) bool {
+	return v[8]&(1<<5) != 0
 }
 
 func existsRawUnminedCredit(ns walletdb.Bucket, k []byte) []byte {
@@ -1104,7 +1265,7 @@ type unminedCreditIterator struct {
 	err    error
 }
 
-func makeUnminedCreditIterator(ns walletdb.Bucket, txHash *wire.ShaHash) unminedCreditIterator {
+func makeUnminedCreditIterator(ns walletdb.Bucket, txHash *chainhash.Hash) unminedCreditIterator {
 	c := ns.Bucket(bucketUnminedCredits).Cursor()
 	return unminedCreditIterator{c: c, prefix: txHash[:]}
 }
@@ -1159,7 +1320,7 @@ func (it *unminedCreditIterator) delete() error {
 	return nil
 }
 
-// Outpoints spent by unmined transactions are saved in the unmined inputs
+// OutPoints spent by unmined transactions are saved in the unmined inputs
 // bucket.  This bucket maps between each previous output spent, for both mined
 // and unmined transactions, to the hash of the unmined transaction.
 //
@@ -1192,6 +1353,309 @@ func deleteRawUnminedInput(ns walletdb.Bucket, k []byte) error {
 		return storeError(ErrDatabase, str, err)
 	}
 	return nil
+}
+
+// Tx scripts are stored as the raw serialized script. The key in the database
+// for the TxScript itself is the hash160 of the script.
+func keyTxScript(script []byte) []byte {
+	return dcrutil.Hash160(script)
+}
+
+func deleteRawTxScript(ns walletdb.Bucket, hash []byte) error {
+	err := ns.Bucket(bucketScripts).Delete(hash)
+	if err != nil {
+		str := "failed to delete tx script"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func putTxScript(ns walletdb.Bucket, script []byte) error {
+	k := keyTxScript(script)
+	err := ns.Bucket(bucketScripts).Put(k, script)
+	if err != nil {
+		str := "failed to put tx script"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func existsTxScript(ns walletdb.Bucket, hash []byte) []byte {
+	vOrig := ns.Bucket(bucketScripts).Get(hash)
+	if vOrig == nil {
+		return nil
+	}
+	v := make([]byte, len(vOrig), len(vOrig))
+	copy(v, vOrig)
+	return v
+}
+
+// The multisig bucket stores utxos that are P2SH output scripts to the user.
+// These are handled separately and less efficiently than the more typical
+// P2PKH types.
+// Transactions with multisig outputs are keyed to serialized outpoints:
+// [0:32]    Hash (32 bytes)
+// [32:36]   Index (uint32)
+//
+// The value is the following:
+// [0:20]    P2SH Hash (20 bytes)
+// [20]      m (in m-of-n) (uint8)
+// [21]      n (in m-of-n) (uint8)
+// [22]      Flags (1 byte)
+//           [0]: Spent
+//           [1]: Tree
+// [23:55]   Block hash (32 byte hash)
+// [55:59]   Block height (uint32)
+// [59:67]   Amount (int64)
+// [67:99]   SpentBy (32 byte hash)
+// [99:103]  SpentByIndex (uint32)
+// [103:135] TxHash (32 byte hash)
+//
+// The structure is set up so that the user may easily spend from any unspent
+// P2SH multisig outpoints they own an address in.
+func keyMultisigOut(hash chainhash.Hash, index uint32) []byte {
+	return canonicalOutPoint(&hash, index)
+}
+
+func valueMultisigOut(sh [ripemd160.Size]byte, m uint8, n uint8,
+	spent bool, tree int8, blockHash chainhash.Hash,
+	blockHeight uint32, amount dcrutil.Amount, spentBy chainhash.Hash,
+	sbi uint32, txHash chainhash.Hash) []byte {
+	v := make([]byte, 135, 135)
+
+	copy(v[0:20], sh[0:20])
+	v[20] = m
+	v[21] = n
+	v[22] = uint8(0)
+
+	if spent {
+		v[22] |= 1 << 0
+	}
+
+	if tree == dcrutil.TxTreeStake {
+		v[22] |= 1 << 1
+	}
+
+	copy(v[23:55], blockHash[:])
+	byteOrder.PutUint32(v[55:59], blockHeight)
+	byteOrder.PutUint64(v[59:67], uint64(amount))
+
+	copy(v[67:99], spentBy[:])
+	byteOrder.PutUint32(v[99:103], sbi)
+
+	copy(v[103:135], txHash[:])
+
+	return v
+}
+
+func fetchMultisigOut(k, v []byte) (*MultisigOut, error) {
+	if len(k) != 36 {
+		str := "multisig out k is wrong size"
+		return nil, storeError(ErrDatabase, str, nil)
+	}
+	if len(v) != 135 {
+		str := "multisig out v is wrong size"
+		return nil, storeError(ErrDatabase, str, nil)
+	}
+
+	var mso MultisigOut
+
+	var op wire.OutPoint
+	err := readCanonicalOutPoint(k, &op)
+	if err != nil {
+		return nil, err
+	}
+	mso.OutPoint = &op
+	mso.OutPoint.Tree = dcrutil.TxTreeRegular
+
+	copy(mso.ScriptHash[0:20], v[0:20])
+
+	mso.M = uint8(v[20])
+	mso.N = uint8(v[21])
+	mso.Spent = v[22]&(1<<0) != 0
+	mso.Tree = 0
+	isStakeTree := v[22]&(1<<1) != 0
+	if isStakeTree {
+		mso.Tree = 1
+	}
+
+	copy(mso.BlockHash[0:32], v[23:55])
+	mso.BlockHeight = byteOrder.Uint32(v[55:59])
+	mso.Amount = dcrutil.Amount(byteOrder.Uint64(v[59:67]))
+
+	copy(mso.SpentBy[0:32], v[67:99])
+	mso.SpentByIndex = byteOrder.Uint32(v[99:103])
+
+	copy(mso.TxHash[0:32], v[103:135])
+
+	return &mso, nil
+}
+
+func fetchMultisigOutScrHash(v []byte) [ripemd160.Size]byte {
+	var sh [ripemd160.Size]byte
+	copy(sh[0:20], v[0:20])
+	return sh
+}
+
+func fetchMultisigOutMN(v []byte) (uint8, uint8) {
+	return uint8(v[20]), uint8(v[21])
+}
+
+func fetchMultisigOutSpent(v []byte) bool {
+	spent := v[22]&(1<<0) != 0
+
+	return spent
+}
+
+func fetchMultisigOutTree(v []byte) int8 {
+	isStakeTree := v[22]&(1<<1) != 0
+	tree := dcrutil.TxTreeRegular
+	if isStakeTree {
+		tree = dcrutil.TxTreeStake
+	}
+
+	return tree
+}
+
+func fetchMultisigOutSpentVerbose(v []byte) (bool, chainhash.Hash, uint32) {
+	spent := v[22]&(1<<0) != 0
+	spentBy := chainhash.Hash{}
+	copy(spentBy[0:32], v[67:99])
+	spentIndex := byteOrder.Uint32(v[99:103])
+
+	return spent, spentBy, spentIndex
+}
+
+func fetchMultisigOutMined(v []byte) (chainhash.Hash, uint32) {
+	blockHash := chainhash.Hash{}
+	copy(blockHash[0:32], v[23:55])
+	blockHeight := byteOrder.Uint32(v[55:59])
+
+	return blockHash, blockHeight
+}
+
+func fetchMultisigOutAmount(v []byte) dcrutil.Amount {
+	return dcrutil.Amount(byteOrder.Uint64(v[59:67]))
+}
+
+func setMultisigOutSpent(v []byte, spendHash chainhash.Hash, spendIndex uint32) {
+	spentByte := uint8(0)
+	spentByte |= 1 << 0
+	v[22] = spentByte
+	copy(v[67:99], spendHash[:])
+	byteOrder.PutUint32(v[99:103], spendIndex)
+}
+
+func setMultisigOutUnSpent(v []byte) {
+	empty := chainhash.Hash{}
+	spentByte := uint8(0)
+	v[22] = spentByte
+	copy(v[67:98], empty[:])
+	byteOrder.PutUint32(v[99:103], 0xFFFFFFFF)
+}
+
+func setMultisigOutMined(v []byte, blockHash chainhash.Hash,
+	blockHeight uint32) {
+	copy(v[23:55], blockHash[:])
+	byteOrder.PutUint32(v[55:59], blockHeight)
+}
+
+func setMultisigOutUnmined(v []byte) {
+	empty := chainhash.Hash{}
+	copy(v[23:55], empty[:])
+	byteOrder.PutUint32(v[55:59], 0)
+}
+
+func deleteMultisigOut(ns walletdb.Bucket, k []byte) error {
+	err := ns.Bucket(bucketMultisig).Delete(k)
+	if err != nil {
+		str := "failed to delete multisig output"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func putMultisigOut(ns walletdb.Bucket, mso *MultisigOut) error {
+	msok := keyMultisigOut(mso.OutPoint.Hash,
+		mso.OutPoint.Index)
+	msov := valueMultisigOut(mso.ScriptHash,
+		mso.M,
+		mso.N,
+		mso.Spent,
+		mso.Tree,
+		mso.BlockHash,
+		mso.BlockHeight,
+		mso.Amount,
+		mso.SpentBy,
+		mso.SpentByIndex,
+		mso.TxHash)
+	err := ns.Bucket(bucketMultisig).Put(msok, msov)
+	if err != nil {
+		str := "failed to put multisig output"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func putMultisigOutRawValues(ns walletdb.Bucket, k []byte, v []byte) error {
+	err := ns.Bucket(bucketMultisig).Put(k, v)
+	if err != nil {
+		str := "failed to put multisig output"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func existsMultisigOut(ns walletdb.Bucket, k []byte) []byte {
+	vOrig := ns.Bucket(bucketMultisig).Get(k)
+	if vOrig == nil {
+		return nil
+	}
+	v := make([]byte, 135, 135)
+	copy(v, vOrig)
+	return v
+}
+
+// The multisignature unspent bucket simply keeps a list of all unspent
+// multisignature script outpoints. They are keyed [outpoint] -> [blank byte].
+func keyMultisigOutUS(hash chainhash.Hash, index uint32) []byte {
+	return canonicalOutPoint(&hash, index)
+}
+
+func putMultisigOutUS(ns walletdb.Bucket, k []byte) error {
+	blank := []byte{0x00}
+	err := ns.Bucket(bucketMultisigUsp).Put(k, blank)
+	if err != nil {
+		str := "failed to put unspent multisig output"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func putMultisigOutOutpointUS(ns walletdb.Bucket, op *wire.OutPoint) error {
+	msok := keyMultisigOut(op.Hash,
+		op.Index)
+	blank := []byte{0x00}
+	err := ns.Bucket(bucketMultisigUsp).Put(msok, blank)
+	if err != nil {
+		str := "failed to put unspent multisig output"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func deleteMultisigOutUS(ns walletdb.Bucket, k []byte) error {
+	err := ns.Bucket(bucketMultisigUsp).Delete(k)
+	if err != nil {
+		str := "failed to delete multisig output"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func existsMultisigOutUS(ns walletdb.Bucket, k []byte) bool {
+	v := ns.Bucket(bucketMultisigUsp).Get(k)
+	return v != nil
 }
 
 // openStore opens an existing transaction store from the passed namespace.  If
@@ -1230,19 +1694,6 @@ func openStore(namespace walletdb.Namespace) error {
 			"understood version %d", version, LatestVersion)
 		return storeError(ErrUnknownVersion, str, nil)
 	}
-
-	// Upgrade the tx store as needed, one version at a time, until
-	// LatestVersion is reached.  Versions are not skipped when performing
-	// database upgrades, and each upgrade is done in its own transaction.
-	//
-	// No upgrades yet.
-	//if version < LatestVersion {
-	//	err := scopedUpdate(namespace, func(ns walletdb.Bucket) error {
-	//	})
-	//	if err != nil {
-	//		// Handle err
-	//	}
-	//}
 
 	return nil
 }
@@ -1330,6 +1781,24 @@ func createStore(namespace walletdb.Namespace) error {
 		_, err = ns.CreateBucket(bucketUnminedInputs)
 		if err != nil {
 			str := "failed to create unmined inputs bucket"
+			return storeError(ErrDatabase, str, err)
+		}
+
+		_, err = ns.CreateBucket(bucketScripts)
+		if err != nil {
+			str := "failed to create scripts bucket"
+			return storeError(ErrDatabase, str, err)
+		}
+
+		_, err = ns.CreateBucket(bucketMultisig)
+		if err != nil {
+			str := "failed to create multisig tx bucket"
+			return storeError(ErrDatabase, str, err)
+		}
+
+		_, err = ns.CreateBucket(bucketMultisigUsp)
+		if err != nil {
+			str := "failed to create multisig unspent tx bucket"
 			return storeError(ErrDatabase, str, err)
 		}
 

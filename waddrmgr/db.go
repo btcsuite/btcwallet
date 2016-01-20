@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,11 +23,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/fastsha256"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrutil/hdkeychain"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 const (
@@ -191,6 +192,7 @@ var (
 	mgrCreateDateName = []byte("mgrcreated")
 
 	// Crypto related key names (main bucket).
+	seedName            = []byte("seed")
 	masterPrivKeyName   = []byte("mpriv")
 	masterPubKeyName    = []byte("mpub")
 	cryptoPrivKeyName   = []byte("cpriv")
@@ -201,9 +203,10 @@ var (
 	watchingOnlyName    = []byte("watchonly")
 
 	// Sync related key names (sync bucket).
-	syncedToName     = []byte("syncedto")
-	startBlockName   = []byte("startblock")
-	recentBlocksName = []byte("recentblocks")
+	syncedToName         = []byte("syncedto")
+	startBlockName       = []byte("startblock")
+	recentBlocksName     = []byte("recentblocks")
+	lastDefaultAddsrName = []byte("lastaddrs")
 
 	// Account related key names (account bucket).
 	acctNumAcctsName = []byte("numaccts")
@@ -265,6 +268,43 @@ func putManagerVersion(tx walletdb.Tx, version uint32) error {
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil
+}
+
+// fetchSeed loads the encrypted seed needed to restore the wallet. This will
+// return an error for watching only wallets.
+func fetchSeed(tx walletdb.Tx) ([]byte, error) {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
+
+	// Load the master private key parameters if they were stored.
+	var seed []byte
+	val := bucket.Get(seedName)
+	if val != nil {
+		seed = make([]byte, len(val))
+		copy(seed, val)
+	} else {
+		str := "seed is not present (watching only wallet?)"
+		return nil, managerError(ErrDatabase, str, nil)
+	}
+
+	return seed, nil
+}
+
+// putSeed inserts the encrypted seed needed to restore the wallet.
+func putSeed(tx walletdb.Tx, seed []byte) error {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
+
+	if seed != nil {
+		err := bucket.Put(seedName, seed)
+		if err != nil {
+			str := "failed to store seed"
+			return managerError(ErrDatabase, str, err)
+		}
+
+		return nil
+	}
+
+	str := "nil seed given"
+	return managerError(ErrDatabase, str, nil)
 }
 
 // fetchMasterKeyParams loads the master key parameters needed to derive them
@@ -1104,7 +1144,7 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 	// is internal or external.
 	nextExternalIndex := arow.nextExternalIndex
 	nextInternalIndex := arow.nextInternalIndex
-	if branch == internalBranch {
+	if branch == InternalBranch {
 		nextInternalIndex = index + 1
 	} else {
 		nextExternalIndex = index + 1
@@ -1460,7 +1500,7 @@ func putStartBlock(tx walletdb.Tx, bs *BlockStamp) error {
 
 // fetchRecentBlocks returns the height of the most recent block height and
 // hashes of the most recent blocks.
-func fetchRecentBlocks(tx walletdb.Tx) (int32, []wire.ShaHash, error) {
+func fetchRecentBlocks(tx walletdb.Tx) (int32, []chainhash.Hash, error) {
 	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:
@@ -1479,7 +1519,7 @@ func fetchRecentBlocks(tx walletdb.Tx) (int32, []wire.ShaHash, error) {
 
 	recentHeight := int32(binary.LittleEndian.Uint32(buf[0:4]))
 	numHashes := binary.LittleEndian.Uint32(buf[4:8])
-	recentHashes := make([]wire.ShaHash, numHashes)
+	recentHashes := make([]chainhash.Hash, numHashes)
 	offset := 8
 	for i := uint32(0); i < numHashes; i++ {
 		copy(recentHashes[i][:], buf[offset:offset+32])
@@ -1490,7 +1530,7 @@ func fetchRecentBlocks(tx walletdb.Tx) (int32, []wire.ShaHash, error) {
 }
 
 // putRecentBlocks stores the provided start block stamp to the database.
-func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []wire.ShaHash) error {
+func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []chainhash.Hash) error {
 	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:
@@ -1513,6 +1553,49 @@ func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []wire.Sha
 		str := "failed to store recent blocks"
 		return managerError(ErrDatabase, str, err)
 	}
+	return nil
+}
+
+// fetchSeed loads the encrypted seed needed to restore the wallet. This will
+// return an error for watching only wallets.
+func fetchLastUsedAddrs(tx walletdb.Tx) ([20]byte, [20]byte, error) {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
+
+	// Load the master private key parameters if they were stored.
+	var lastUsedPkhs []byte
+	val := bucket.Get(lastDefaultAddsrName)
+	if val != nil {
+		lastUsedPkhs = make([]byte, len(val))
+		copy(lastUsedPkhs, val)
+	} else {
+		str := "lastUsedPkhs is not present"
+		return [20]byte{}, [20]byte{}, managerError(ErrDatabase, str, nil)
+	}
+
+	var addrExtPkh [20]byte
+	var addrIntPkh [20]byte
+	copy(addrExtPkh[:], lastUsedPkhs[:20])
+	copy(addrIntPkh[:], lastUsedPkhs[20:])
+
+	return addrExtPkh, addrIntPkh, nil
+}
+
+// putSeed inserts the encrypted seed needed to restore the wallet.
+func putLastUsedAddrs(tx walletdb.Tx, addrExtPkh [20]byte,
+	addrIntPkh [20]byte) error {
+	bucket := tx.RootBucket().Bucket(mainBucketName)
+
+	// Enough space for 2x PKHs.
+	lastUsedPkhs := make([]byte, 40, 40)
+	copy(lastUsedPkhs[:20], addrExtPkh[:])
+	copy(lastUsedPkhs[20:], addrIntPkh[:])
+
+	err := bucket.Put(lastDefaultAddsrName, lastUsedPkhs)
+	if err != nil {
+		str := "failed to store lastUsedPkhs"
+		return managerError(ErrDatabase, str, err)
+	}
+
 	return nil
 }
 
@@ -1767,7 +1850,7 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Derive the master extended key from the seed.
-		root, err := hdkeychain.NewMaster(seed)
+		root, err := hdkeychain.NewMaster(seed, chainParams)
 		if err != nil {
 			str := "failed to derive master extended key"
 			return managerError(ErrKeyChain, str, err)
@@ -1788,12 +1871,22 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 			str := "failed to convert cointype private key"
 			return managerError(ErrKeyChain, str, err)
 		}
-		coinTypePubEnc, err := cryptoKeyPub.Encrypt([]byte(coinTypeKeyPub.String()))
+		ctkps, err := coinTypeKeyPub.String()
+		if err != nil {
+			str := "failed to convert cointype public key string"
+			return managerError(ErrKeyChain, str, err)
+		}
+		coinTypePubEnc, err := cryptoKeyPub.Encrypt([]byte(ctkps))
 		if err != nil {
 			str := "failed to encrypt cointype public key"
 			return managerError(ErrCrypto, str, err)
 		}
-		coinTypePrivEnc, err := cryptoKeyPriv.Encrypt([]byte(coinTypeKeyPriv.String()))
+		ctkps, err = coinTypeKeyPriv.String()
+		if err != nil {
+			str := "failed to convert cointype private key string"
+			return managerError(ErrKeyChain, str, err)
+		}
+		coinTypePrivEnc, err := cryptoKeyPriv.Encrypt([]byte(ctkps))
 		if err != nil {
 			str := "failed to encrypt cointype private key"
 			return managerError(ErrCrypto, str, err)

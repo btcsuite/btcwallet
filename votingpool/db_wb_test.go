@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,7 +22,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 func TestPutUsedAddrHash(t *testing.T) {

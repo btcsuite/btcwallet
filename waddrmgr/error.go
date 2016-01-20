@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,7 +21,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/decred/dcrutil/hdkeychain"
 )
 
 var (
@@ -135,6 +136,10 @@ const (
 	// ErrCallBackBreak is used to break from a callback function passed
 	// down to the manager.
 	ErrCallBackBreak
+
+	// ErrCreateAddress is used to indicate that an address could not be
+	// created from a public key.
+	ErrCreateAddress
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
@@ -145,7 +150,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrCrypto:            "ErrCrypto",
 	ErrInvalidKeyType:    "ErrInvalidKeyType",
 	ErrNoExist:           "ErrNoExist",
-	ErrAlreadyExists:     "ErrAlreadyExists",
+	ErrAlreadyExists:     "ErrAlreadyExists", // ErrDuplicateAddress??? cj
 	ErrCoinTypeTooHigh:   "ErrCoinTypeTooHigh",
 	ErrAccountNumTooHigh: "ErrAccountNumTooHigh",
 	ErrLocked:            "ErrLocked",
@@ -159,6 +164,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrWrongPassphrase:   "ErrWrongPassphrase",
 	ErrWrongNet:          "ErrWrongNet",
 	ErrCallBackBreak:     "ErrCallBackBreak",
+	ErrCreateAddress:     "ErrCreateAddress",
 }
 
 // String returns the ErrorCode as a human-readable name.

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,10 +18,10 @@
 package votingpool
 
 import (
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil/hdkeychain"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 var TstLastErr = lastErr
@@ -65,7 +66,11 @@ func (vp *Pool) TstNamespace() walletdb.Namespace {
 func (s *SeriesData) TstGetRawPublicKeys() []string {
 	rawKeys := make([]string, len(s.publicKeys))
 	for i, key := range s.publicKeys {
-		rawKeys[i] = key.String()
+		keyString, err := key.String()
+		if err != nil {
+			return nil
+		}
+		rawKeys[i] = keyString
 	}
 	return rawKeys
 }
@@ -75,7 +80,11 @@ func (s *SeriesData) TstGetRawPrivateKeys() []string {
 	rawKeys := make([]string, len(s.privateKeys))
 	for i, key := range s.privateKeys {
 		if key != nil {
-			rawKeys[i] = key.String()
+			keyString, err := key.String()
+			if err != nil {
+				return nil
+			}
+			rawKeys[i] = keyString
 		}
 	}
 	return rawKeys

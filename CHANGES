@@ -256,7 +256,7 @@ Changes in 0.5.0 (Tue Mar 03 2015)
       - [debug] Log each transaction that is removed in a rollback
     - Only log rollbacks if transactions are reorged out of the old chain
     - Save logs to network-specific directories
-      (e.g. ~/.btcwallet/logs/testnet3) to match btcd behavior (#114)
+      (e.g. ~/.btcwallet/logs/testnet) to match btcd behavior (#114)
 
 Changes in 0.4.0 (Sun May 25 2014)
   - Implement the following standard bitcoin server RPC requests:

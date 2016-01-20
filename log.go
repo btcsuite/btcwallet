@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,10 +22,12 @@ import (
 	"os"
 
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
+
+	"github.com/decred/dcrwallet/chain"
+	"github.com/decred/dcrwallet/wallet"
+	"github.com/decred/dcrwallet/wstakemgr"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 const (
@@ -45,14 +48,16 @@ var (
 	log        = btclog.Disabled
 	walletLog  = btclog.Disabled
 	txmgrLog   = btclog.Disabled
+	stkmLog    = btclog.Disabled
 	chainLog   = btclog.Disabled
 )
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
 var subsystemLoggers = map[string]btclog.Logger{
-	"BTCW": log,
+	"DCRW": log,
 	"WLLT": walletLog,
 	"TMGR": txmgrLog,
+	"STKM": stkmLog,
 	"CHNS": chainLog,
 }
 
@@ -81,14 +86,17 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	subsystemLoggers[subsystemID] = logger
 
 	switch subsystemID {
-	case "BTCW":
+	case "DCRW":
 		log = logger
 	case "WLLT":
 		walletLog = logger
 		wallet.UseLogger(logger)
-	case "TXST":
+	case "TMGR":
 		txmgrLog = logger
 		wtxmgr.UseLogger(logger)
+	case "STKM":
+		stkmLog = logger
+		wstakemgr.UseLogger(logger)
 	case "CHNS":
 		chainLog = logger
 		chain.UseLogger(logger)
@@ -162,4 +170,11 @@ func pickNoun(n int, singular, plural string) string {
 		return singular
 	}
 	return plural
+}
+
+// fatalf logs a string, then cleanly exits.
+func fatalf(str string) {
+	log.Errorf("Unable to create profiler: %v", str)
+	backendLog.Flush()
+	os.Exit(1)
 }

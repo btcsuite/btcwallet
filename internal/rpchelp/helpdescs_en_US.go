@@ -1,4 +1,5 @@
 // Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The Decred developers
 //
 // Permission to use, copy, modify, and distribute this software for any
 // purpose with or without fee is hereby granted, provided that the above
@@ -58,10 +59,11 @@ var helpDescsEnUS = map[string]string{
 	"getbalance--synopsis":   "Calculates and returns the balance of one or all accounts.",
 	"getbalance-minconf":     "Minimum number of block confirmations required before an unspent output's value is included in the balance",
 	"getbalance-account":     "DEPRECATED -- The account name to query the balance for, or \"*\" to consider all accounts (default=\"*\")",
+	"getbalance-balancetype": "The type of balance to return, 'spendable', 'locked', 'all', or 'fullscan'",
 	"getbalance--condition0": "account != \"*\"",
 	"getbalance--condition1": "account = \"*\"",
-	"getbalance--result0":    "The balance of 'account' valued in bitcoin",
-	"getbalance--result1":    "The balance of all accounts valued in bitcoin",
+	"getbalance--result0":    "The balance of 'account' valued in decred",
+	"getbalance--result1":    "The balance of all accounts valued in decred",
 
 	// GetBestBlockHashCmd help.
 	"getbestblockhash--synopsis": "Returns the hash of the newest block in the best chain that wallet has finished syncing with.",
@@ -74,6 +76,45 @@ var helpDescsEnUS = map[string]string{
 	// GetInfoCmd help.
 	"getinfo--synopsis": "Returns a JSON object containing various state info.",
 
+	// GetMasterPubkey help.
+	"getmasterpubkey--synopsis": "Requests the master pubkey from the wallet.",
+	"getmasterpubkeyresult-key": "The master pubkey for the wallet",
+
+	// GetMultisigOutInfo help.
+	"getmultisigoutinfo--synopsis": "Returns information about a multisignature output.",
+	"getmultisigoutinfo-index":     "Index of input.",
+	"getmultisigoutinfo-hash":      "Input hash to check.",
+
+	"getmultisigoutinforesult-amount":       "Amount of coins contained.",
+	"getmultisigoutinforesult-spentbyindex": "Index of spending tx.",
+	"getmultisigoutinforesult-spentby":      "Hash of spending tx.",
+	"getmultisigoutinforesult-spent":        "If it has been spent.",
+	"getmultisigoutinforesult-blockhash":    "Hash of the containing block.",
+	"getmultisigoutinforesult-blockheight":  "Height of the containing block.",
+	"getmultisigoutinforesult-txhash":       "txhash",
+	"getmultisigoutinforesult-pubkeys":      "Associated pubkeys.",
+	"getmultisigoutinforesult-n":            "n (in m-of-n)",
+	"getmultisigoutinforesult-m":            "m (in m-of-n)",
+	"getmultisigoutinforesult-redeemscript": "Hex of the redeeming script.",
+	"getmultisigoutinforesult-address":      "Script address.",
+
+	// GetSeed help.
+	"getseed--synopsis": "Returns the seed needed to recreate the wallet.",
+
+	// GetSeedResult help.
+	"getseedresult-seed": "The seed cooresponding to the wallet.",
+
+	// GetTickets help.
+	"gettickets--synopsis":       "Returning the hashes of the tickets currently owned by wallet.",
+	"gettickets-includeimmature": "If true include immature tickets in the results.",
+
+	// GetTicketMaxPrice help.
+	"getticketmaxprice--synopsis": "Returns the max price the wallet will pay for a ticket.",
+	"getticketmaxprice--result0":  "Max price wallet will spend on a ticket.",
+
+	// GetTicketsResult help.
+	"getticketsresult-hashes": "Hashes of the tickets owned by the wallet encoded as strings",
+
 	// InfoWalletResult help.
 	"infowalletresult-version":         "The version of the server",
 	"infowalletresult-protocolversion": "The latest supported protocol version",
@@ -83,7 +124,7 @@ var helpDescsEnUS = map[string]string{
 	"infowalletresult-proxy":           "The proxy used by the server",
 	"infowalletresult-difficulty":      "The current target difficulty",
 	"infowalletresult-testnet":         "Whether or not server is using testnet",
-	"infowalletresult-relayfee":        "The minimum relay fee for non-free transactions in BTC/KB",
+	"infowalletresult-relayfee":        "The minimum relay fee for non-free transactions in DCR/KB",
 	"infowalletresult-errors":          "Any current errors",
 	"infowalletresult-paytxfee":        "The increment used each time more fee is required for an authored transaction",
 	"infowalletresult-balance":         "The balance of all accounts calculated with one block confirmation",
@@ -95,24 +136,26 @@ var helpDescsEnUS = map[string]string{
 	// GetNewAddressCmd help.
 	"getnewaddress--synopsis": "Generates and returns a new payment address.",
 	"getnewaddress-account":   "DEPRECATED -- Account name the new address will belong to (default=\"default\")",
+	"getnewaddress-verbose":   "Show pub key as well as address",
 	"getnewaddress--result0":  "The payment address",
 
 	// GetRawChangeAddressCmd help.
 	"getrawchangeaddress--synopsis": "Generates and returns a new internal payment address for use as a change address in raw transactions.",
 	"getrawchangeaddress-account":   "Account name the new internal address will belong to (default=\"default\")",
+	"getrawchangeaddress-verbose":   "Show pub key as well as address",
 	"getrawchangeaddress--result0":  "The internal payment address",
 
 	// GetReceivedByAccountCmd help.
 	"getreceivedbyaccount--synopsis": "DEPRECATED -- Returns the total amount received by addresses of some account, including spent outputs.",
 	"getreceivedbyaccount-account":   "Account name to query total received amount for",
 	"getreceivedbyaccount-minconf":   "Minimum number of block confirmations required before an output's value is included in the total",
-	"getreceivedbyaccount--result0":  "The total received amount valued in bitcoin",
+	"getreceivedbyaccount--result0":  "The total received amount valued in decred",
 
 	// GetReceivedByAddressCmd help.
 	"getreceivedbyaddress--synopsis": "Returns the total amount received by a single address, including spent outputs.",
 	"getreceivedbyaddress-address":   "Payment address which received outputs to include in total",
 	"getreceivedbyaddress-minconf":   "Minimum number of block confirmations required before an output's value is included in the total",
-	"getreceivedbyaddress--result0":  "The total received amount valued in bitcoin",
+	"getreceivedbyaddress--result0":  "The total received amount valued in decred",
 
 	// GetTransactionCmd help.
 	"gettransaction--synopsis":        "Returns a JSON object with details regarding a transaction relevant to this wallet.",
@@ -128,7 +171,7 @@ var helpDescsEnUS = map[string]string{
 	"help--result1":    "Help for specified command",
 
 	// GetTransactionResult help.
-	"gettransactionresult-amount":          "The total amount this transaction credits to the wallet, valued in bitcoin",
+	"gettransactionresult-amount":          "The total amount this transaction credits to the wallet, valued in decred",
 	"gettransactionresult-fee":             "The total input value minus the total output value, or 0 if 'txid' is not a sent transaction",
 	"gettransactionresult-confirmations":   "The number of block confirmations of the transaction",
 	"gettransactionresult-blockhash":       "The hash of the block this transaction is mined in, or the empty string if unmined",
@@ -156,6 +199,10 @@ var helpDescsEnUS = map[string]string{
 	"importprivkey-label":     "Unused (must be unset or 'imported')",
 	"importprivkey-rescan":    "Rescan the blockchain (since the genesis block) for outputs controlled by the imported key",
 
+	// ImportScript help.
+	"importscript--synopsis": "Import a redeem script.",
+	"importscript-hex":       "Hex encoded script to import",
+
 	// KeypoolRefillCmd help.
 	"keypoolrefill--synopsis": "DEPRECATED -- This request does nothing since no keypool is maintained.",
 	"keypoolrefill-newsize":   "Unused",
@@ -163,9 +210,9 @@ var helpDescsEnUS = map[string]string{
 	// ListAccountsCmd help.
 	"listaccounts--synopsis":       "DEPRECATED -- Returns a JSON object of all accounts and their balances.",
 	"listaccounts-minconf":         "Minimum number of block confirmations required before an unspent output's value is included in the balance",
-	"listaccounts--result0--desc":  "JSON object with account names as keys and bitcoin amounts as values",
+	"listaccounts--result0--desc":  "JSON object with account names as keys and decred amounts as values",
 	"listaccounts--result0--key":   "The account name",
-	"listaccounts--result0--value": "The account balance valued in bitcoin",
+	"listaccounts--result0--value": "The account balance valued in decred",
 
 	// ListLockUnspentCmd help.
 	"listlockunspent--synopsis": "Returns a JSON array of outpoints marked as locked (with lockunspent) for this wallet session.",
@@ -173,6 +220,7 @@ var helpDescsEnUS = map[string]string{
 	// TransactionInput help.
 	"transactioninput-txid": "The transaction hash of the referenced output",
 	"transactioninput-vout": "The output index of the referenced output",
+	"transactioninput-tree": "The tree to generate transaction for",
 
 	// ListReceivedByAccountCmd help.
 	"listreceivedbyaccount--synopsis":        "DEPRECATED -- Returns a JSON array of objects listing all accounts and the total amount received by each account.",
@@ -182,7 +230,7 @@ var helpDescsEnUS = map[string]string{
 
 	// ListReceivedByAccountResult help.
 	"listreceivedbyaccountresult-account":       "The name of the account",
-	"listreceivedbyaccountresult-amount":        "Total amount received by payment addresses of the account valued in bitcoin",
+	"listreceivedbyaccountresult-amount":        "Total amount received by payment addresses of the account valued in decred",
 	"listreceivedbyaccountresult-confirmations": "Number of block confirmations of the most recent transaction relevant to the account",
 
 	// ListReceivedByAddressCmd help.
@@ -194,7 +242,7 @@ var helpDescsEnUS = map[string]string{
 	// ListReceivedByAddressResult help.
 	"listreceivedbyaddressresult-account":           "DEPRECATED -- Unset",
 	"listreceivedbyaddressresult-address":           "The payment address",
-	"listreceivedbyaddressresult-amount":            "Total amount received by the payment address valued in bitcoin",
+	"listreceivedbyaddressresult-amount":            "Total amount received by the payment address valued in decred",
 	"listreceivedbyaddressresult-confirmations":     "Number of block confirmations of the most recent transaction relevant to the address",
 	"listreceivedbyaddressresult-txids":             "Transaction hashes of all transactions involving this address",
 	"listreceivedbyaddressresult-involvesWatchonly": "Unset",
@@ -217,7 +265,7 @@ var helpDescsEnUS = map[string]string{
 	"listtransactionsresult-account":           "DEPRECATED -- Unset",
 	"listtransactionsresult-address":           "Payment address for a transaction output",
 	"listtransactionsresult-category":          `The kind of transaction: "send" for sent transactions, "immature" for immature coinbase outputs, "generate" for mature coinbase outputs, or "recv" for all other received outputs.  Note: A single output may be included multiple times under different categories`,
-	"listtransactionsresult-amount":            "The value of the transaction output valued in bitcoin",
+	"listtransactionsresult-amount":            "The value of the transaction output valued in decred",
 	"listtransactionsresult-fee":               "The total input value minus the total output value for sent transactions",
 	"listtransactionsresult-confirmations":     "The number of block confirmations of the transaction",
 	"listtransactionsresult-generated":         "Whether the transaction output is a coinbase output",
@@ -253,8 +301,10 @@ var helpDescsEnUS = map[string]string{
 	"listunspentresult-account":       "The account associated with the receiving payment address",
 	"listunspentresult-scriptPubKey":  "The output script encoded as a hexadecimal string",
 	"listunspentresult-redeemScript":  "Unset",
-	"listunspentresult-amount":        "The amount of the output valued in bitcoin",
+	"listunspentresult-amount":        "The amount of the output valued in decred",
 	"listunspentresult-confirmations": "The number of block confirmations of the transaction",
+	"listunspentresult-txtype":        "The type of the transaction",
+	"listunspentresult-tree":          "The tree the transaction comes from",
 
 	// LockUnspentCmd help.
 	"lockunspent--synopsis": "Locks or unlocks an unspent output.\n" +
@@ -270,7 +320,7 @@ var helpDescsEnUS = map[string]string{
 		"A change output is automatically included to send extra output value back to the original account.",
 	"sendfrom-fromaccount": "Account to pick unspent outputs from",
 	"sendfrom-toaddress":   "Address to pay",
-	"sendfrom-amount":      "Amount to send to the payment address valued in bitcoin",
+	"sendfrom-amount":      "Amount to send to the payment address valued in decred",
 	"sendfrom-minconf":     "Minimum number of block confirmations required before a transaction output is eligible to be spent",
 	"sendfrom-comment":     "Unused",
 	"sendfrom-commentto":   "Unused",
@@ -281,9 +331,9 @@ var helpDescsEnUS = map[string]string{
 		"A change output is automatically included to send extra output value back to the original account.",
 	"sendmany-fromaccount":    "DEPRECATED -- Account to pick unspent outputs from",
 	"sendmany-amounts":        "Pairs of payment addresses and the output amount to pay each",
-	"sendmany-amounts--desc":  "JSON object using payment addresses as keys and output amounts valued in bitcoin to send to each address",
+	"sendmany-amounts--desc":  "JSON object using payment addresses as keys and output amounts valued in decred to send to each address",
 	"sendmany-amounts--key":   "Address to pay",
-	"sendmany-amounts--value": "Amount to send to the payment address valued in bitcoin",
+	"sendmany-amounts--value": "Amount to send to the payment address valued in decred",
 	"sendmany-minconf":        "Minimum number of block confirmations required before a transaction output is eligible to be spent",
 	"sendmany-comment":        "Unused",
 	"sendmany--result0":       "The transaction hash of the sent transaction",
@@ -293,14 +343,30 @@ var helpDescsEnUS = map[string]string{
 		"Unlike sendfrom, outputs are always chosen from the default account.\n" +
 		"A change output is automatically included to send extra output value back to the original account.",
 	"sendtoaddress-address":   "Address to pay",
-	"sendtoaddress-amount":    "Amount to send to the payment address valued in bitcoin",
+	"sendtoaddress-amount":    "Amount to send to the payment address valued in decred",
 	"sendtoaddress-comment":   "Unused",
 	"sendtoaddress-commentto": "Unused",
 	"sendtoaddress--result0":  "The transaction hash of the sent transaction",
 
+	// SendToMultisigCmd help.
+	"sendtomultisig--synopsis": "Authors, signs, and sends a transaction that outputs some amount to a multisig address.\n" +
+		"Unlike sendfrom, outputs are always chosen from the default account.\n" +
+		"A change output is automatically included to send extra output value back to the original account.",
+	"sendtomultisig-minconf":     "Minimum number of block confirmations required",
+	"sendtomultisig-nrequired":   "The number of signatures required to redeem outputs paid to this address",
+	"sendtomultisig-pubkeys":     "Pubkey to send to.",
+	"sendtomultisig-fromaccount": "Unused",
+	"sendtomultisig-amount":      "Amount to send to the payment address valued in decred",
+	"sendtomultisig-comment":     "Unused",
+	"sendtomultisig--result0":    "The transaction hash of the sent transaction",
+
+	// SetTicketMaxPrice help.
+	"setticketmaxprice--synopsis": "Set the max price user is willing to pay for a ticket.",
+	"setticketmaxprice-max":       "The max price (in dcr).",
+
 	// SetTxFeeCmd help.
 	"settxfee--synopsis": "Modify the increment used each time more fee is required for an authored transaction.",
-	"settxfee-amount":    "The new fee increment valued in bitcoin",
+	"settxfee-amount":    "The new fee increment valued in decred",
 	"settxfee--result0":  "The boolean 'true'",
 
 	// SignMessageCmd help.
@@ -329,6 +395,17 @@ var helpDescsEnUS = map[string]string{
 	"signrawtransactionerror-txid":      "The transaction hash of the referenced previous output",
 	"signrawtransactionerror-vout":      "The output index of the referenced previous output",
 
+	// SignRawTransactions help.
+	"signrawtransactions--synopsis": "Signs transaction inputs using private keys from this wallet and request for a list of transactions.\n",
+	"signrawtransactions-send":      "Set true to send the transactions after signing.",
+	"signrawtransactions-rawtxs":    "A list of transactions to sign (and optionally send).",
+
+	// SignRawTransactionsResults help.
+	"signrawtransactionsresult-results": "Returned values from the signrawtransactions command.",
+	"signedtransaction-txhash":          "The hash of the signed tx.",
+	"signedtransaction-sent":            "Tells if the transaction was sent.",
+	"signedtransaction-signingresult":   "Success or failure of signing.",
+
 	// ValidateAddressCmd help.
 	"validateaddress--synopsis": "Verify that an address is valid.\n" +
 		"Extra details are returned if the address is controlled by this wallet.\n" +
@@ -348,6 +425,7 @@ var helpDescsEnUS = map[string]string{
 	"validateaddresswalletresult-iscompressed": "Whether the address was created by hashing a compressed public key, if any (only when isvalid is true)",
 	"validateaddresswalletresult-account":      "The account this payment address belongs to (only when isvalid is true)",
 	"validateaddresswalletresult-addresses":    "All associated payment addresses of the script if address is a multisig address (only when isvalid is true)",
+	"validateaddresswalletresult-pubkeyaddr":   "The pubkey for this payment address (only when isvalid is true)",
 	"validateaddresswalletresult-hex":          "The redeem script ",
 	"validateaddresswalletresult-script":       "The class of redeem script for a multisig address",
 	"validateaddresswalletresult-sigsrequired": "The number of required signatures to redeem outputs to the multisig address",
@@ -393,7 +471,7 @@ var helpDescsEnUS = map[string]string{
 	// GetUnconfirmedBalanceCmd help.
 	"getunconfirmedbalance--synopsis": "Calculates the unspent output value of all unmined transaction outputs for an account.",
 	"getunconfirmedbalance-account":   "The account to query the unconfirmed balance for (default=\"default\")",
-	"getunconfirmedbalance--result0":  "Total amount of all unmined unspent outputs of the account valued in bitcoin.",
+	"getunconfirmedbalance--result0":  "Total amount of all unmined unspent outputs of the account valued in decred.",
 
 	// ListAddressTransactionsCmd help.
 	"listaddresstransactions--synopsis": "Returns a JSON array of objects containing verbose details for wallet transactions pertaining some addresses.",
@@ -404,6 +482,23 @@ var helpDescsEnUS = map[string]string{
 	"listalltransactions--synopsis": "Returns a JSON array of objects in the same format as 'listtransactions' without limiting the number of returned objects.",
 	"listalltransactions-account":   "Unused (must be unset or \"*\")",
 
+	// RedeemMultiSigout help.
+	"redeemmultisigout--synopsis": "Takes the input and constructs a P2PKH paying to the specified address.",
+	"redeemmultisigout-address":   "Address to pay to.",
+	"redeemmultisigout-tree":      "Tree the transaction is on.",
+	"redeemmultisigout-index":     "Idx of the input transaction",
+	"redeemmultisigout-hash":      "Hash of the input transaction",
+
+	"redeemmultisigoutresult-errors":   "Any errors generated.",
+	"redeemmultisigoutresult-complete": "Shows if opperation was completed.",
+	"redeemmultisigoutresult-hex":      "Resulting hash.",
+
+	// RedeemMultiSigouts help.
+	"redeemmultisigouts--synopsis":      "Takes a hash, looks up all unspent outpoints and generates list artially signed transactions spending to either an address specified or internal addresses",
+	"redeemmultisigouts-number":         "Number of outpoints found.",
+	"redeemmultisigouts-toaddress":      "Address to look for (if not internal addresses).",
+	"redeemmultisigouts-fromscraddress": "Input script hash address.",
+
 	// RenameAccountCmd help.
 	"renameaccount--synopsis":  "Renames an account.",
 	"renameaccount-oldaccount": "The old account name to rename",
@@ -412,4 +507,52 @@ var helpDescsEnUS = map[string]string{
 	// WalletIsLockedCmd help.
 	"walletislocked--synopsis": "Returns whether or not the wallet is locked.",
 	"walletislocked--result0":  "Whether the wallet is locked",
+
+	// PurchaseTicketCmd help.
+	"purchaseticket--synopsis":     "Purchase ticket using available funds.",
+	"purchaseticket--result0":      "Hash of the resulting ticket",
+	"purchaseticket-spendlimit":    "Limit on the amount to spend on ticket",
+	"purchaseticket-fromaccount":   "The account to use for purchase (default=\"default\")",
+	"purchaseticket-minconf":       "Minimum number of block confirmations required",
+	"purchaseticket-ticketaddress": "Override the ticket address to which voting rights are given",
+	"purchaseticket-comment":       "Unused",
+
+	// SendToSSRtxCmd help.
+	"sendtossrtx--synopsis":   "Send to SS Revocation transaction",
+	"sendtossrtx--result0":    "txid of the resulting transaction",
+	"sendtossrtx-comment":     "Unused",
+	"sendtossrtx-tickethash":  "Hash of the ticket to be revoked",
+	"sendtossrtx-fromaccount": "The account to spend a stake ticket from (default=\"default\")",
+
+	// SendToSStxCmd help.
+	"sendtosstx--synopsis":      "Send to SStx",
+	"sendtosstx--result0":       "txid of the resulting transaction",
+	"sendtosstx-comment":        "Unused",
+	"sendtosstx-minconf":        "Minimum number of block confirmations required",
+	"sendtosstx-couts":          "Couts for the tx",
+	"sendtosstx-inputs":         "Inputs for the tx",
+	"sendtosstx-amounts--desc":  "Unused",
+	"sendtosstx-amounts--value": "Value",
+	"sendtosstx-amounts--key":   "Key",
+	"sendtosstx-amounts":        "Amounts to send",
+	"sendtosstx-account":        "The account to use (default=\"default\")",
+	"sendtosstx-fromaccount":    "The account sent from",
+	"sstxcommitout-changeamt":   "Change amount",
+	"sstxcommitout-changeaddr":  "Change address to use",
+	"sstxcommitout-commitamt":   "Amount to commit",
+	"sstxcommitout-addr":        "Address to use",
+	"sstxinput-amt":             "Amount",
+	"sstxinput-tree":            "Input tree",
+	"sstxinput-vout":            "Vout for the input tx",
+	"sstxinput-txid":            "Txid to use",
+
+	// SendToSSGenCmd help.
+	"sendtossgen--synopsis":   "Generate a vote tx",
+	"sendtossgen--result0":    "txid of the resulting transaction",
+	"sendtossgen-comment":     "Unused",
+	"sendtossgen-votebits":    "Votebits to set",
+	"sendtossgen-height":      "Blockheight for vote",
+	"sendtossgen-blockhash":   "Hash for the block being voted on",
+	"sendtossgen-tickethash":  "Hash of the ticket used for vote",
+	"sendtossgen-fromaccount": "The account to use (default=\"default\")",
 }

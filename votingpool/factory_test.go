@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -27,14 +28,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrutil/hdkeychain"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 var (
@@ -61,7 +63,7 @@ func createWithdrawalTx(t *testing.T, pool *Pool, inputAmounts []int64, outputAm
 	}
 	for i, amount := range outputAmounts {
 		request := TstNewOutputRequest(
-			t, uint32(i), "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", btcutil.Amount(amount), net)
+			t, uint32(i), "TsoK1DJEHv5vVNRjuJ6E9HhSM7YoVunbPtV", dcrutil.Amount(amount), net)
 		tx.addOutput(request)
 	}
 	return tx
@@ -73,7 +75,7 @@ func createMsgTx(pkScript []byte, amts []int64) *wire.MsgTx {
 		TxIn: []*wire.TxIn{
 			{
 				PreviousOutPoint: wire.OutPoint{
-					Hash:  wire.ShaHash{},
+					Hash:  chainhash.Hash{},
 					Index: 0xffffffff,
 				},
 				SignatureScript: []byte{txscript.OP_NOP},
@@ -149,7 +151,7 @@ func TstCreateTxStore(t *testing.T) (store *wtxmgr.Store, tearDown func()) {
 	if err != nil {
 		t.Fatalf("Failed to create walletdb namespace: %v", err)
 	}
-	s, err := wtxmgr.Create(wtxmgrNamespace)
+	s, err := wtxmgr.Create(wtxmgrNamespace, &chaincfg.TestNetParams)
 	if err != nil {
 		t.Fatalf("Failed to create txstore: %v", err)
 	}
@@ -185,7 +187,7 @@ func TstCreateSeries(t *testing.T, pool *Pool, definitions []TstSeriesDef) {
 }
 
 func TstCreateMasterKey(t *testing.T, seed []byte) *hdkeychain.ExtendedKey {
-	key, err := hdkeychain.NewMaster(seed)
+	key, err := hdkeychain.NewMaster(seed, &chaincfg.TestNetParams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,9 +210,17 @@ func TstCreateSeriesDef(t *testing.T, pool *Pool, reqSigs uint32, keys []*hdkeyc
 	pubKeys := make([]string, len(keys))
 	privKeys := make([]string, len(keys))
 	for i, key := range keys {
-		privKeys[i] = key.String()
+		keyString, err := key.String()
+		if err != nil {
+			t.Error(err)
+		}
+		privKeys[i] = keyString
 		pubkey, _ := key.Neuter()
-		pubKeys[i] = pubkey.String()
+		pKeyString, err := pubkey.String()
+		if err != nil {
+			t.Error(err)
+		}
+		pubKeys[i] = pKeyString
 	}
 	seriesID := uint32(len(pool.seriesLookup)) + 1
 	return TstSeriesDef{
@@ -262,7 +272,7 @@ func TstCreateSeriesCredits(t *testing.T, pool *Pool, seriesID uint32, amounts [
 			BlockMeta: wtxmgr.BlockMeta{
 				Block: wtxmgr.Block{Height: TstInputsBlock},
 			},
-			Amount:   btcutil.Amount(msgTx.TxOut[i].Value),
+			Amount:   dcrutil.Amount(msgTx.TxOut[i].Value),
 			PkScript: msgTx.TxOut[i].PkScript,
 		}
 		credits[i] = newCredit(c, *addr)
@@ -314,7 +324,7 @@ func TstCreateCreditsOnStore(t *testing.T, s *wtxmgr.Store, pkScript []byte,
 				Index: uint32(i),
 			},
 			BlockMeta: *meta,
-			Amount:    btcutil.Amount(msgTx.TxOut[i].Value),
+			Amount:    dcrutil.Amount(msgTx.TxOut[i].Value),
 			PkScript:  msgTx.TxOut[i].PkScript,
 		}
 	}
@@ -346,7 +356,7 @@ func TstCreatePool(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager, po
 	}
 	var fastScrypt = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
 	mgr, err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase, privPassphrase,
-		&chaincfg.MainNetParams, fastScrypt)
+		&chaincfg.TestNetParams, fastScrypt)
 	if err != nil {
 		t.Fatalf("Failed to create addr manager: %v", err)
 	}
@@ -368,9 +378,9 @@ func TstCreatePool(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager, po
 	return tearDownFunc, mgr, pool
 }
 
-func TstNewOutputRequest(t *testing.T, transaction uint32, address string, amount btcutil.Amount,
+func TstNewOutputRequest(t *testing.T, transaction uint32, address string, amount dcrutil.Amount,
 	net *chaincfg.Params) OutputRequest {
-	addr, err := btcutil.DecodeAddress(address, net)
+	addr, err := dcrutil.DecodeAddress(address, net)
 	if err != nil {
 		t.Fatalf("Unable to decode address %s", address)
 	}
@@ -418,8 +428,8 @@ func TstNewChangeAddress(t *testing.T, p *Pool, seriesID uint32, idx Index) (add
 	return addr
 }
 
-func TstConstantFee(fee btcutil.Amount) func() btcutil.Amount {
-	return func() btcutil.Amount { return fee }
+func TstConstantFee(fee dcrutil.Amount) func() dcrutil.Amount {
+	return func() dcrutil.Amount { return fee }
 }
 
 func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32) withdrawalInfo {
@@ -427,11 +437,11 @@ func createAndFulfillWithdrawalRequests(t *testing.T, pool *Pool, roundID uint32
 	params := pool.Manager().ChainParams()
 	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
 	requests := []OutputRequest{
-		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, params),
-		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2e6, params),
+		TstNewOutputRequest(t, 1, "TsaEqDBJf63vJnqULb892wwwwPBTURUuuvn", 3e6, params),
+		TstNewOutputRequest(t, 2, "Tsk7JZPtyeQHuNsSZ2K5Q8apJBusEzNtWPk", 2e6, params),
 	}
 	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
-	dustThreshold := btcutil.Amount(1e4)
+	dustThreshold := dcrutil.Amount(1e4)
 	startAddr := TstNewWithdrawalAddress(t, pool, seriesID, 1, 0)
 	lastSeriesID := seriesID
 	w := newWithdrawal(roundID, requests, eligible, *changeStart)

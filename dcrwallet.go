@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,8 +24,10 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"runtime"
+	"runtime/pprof"
+	"time"
 
-	"github.com/btcsuite/btcwallet/chain"
+	"github.com/decred/dcrwallet/chain"
 )
 
 var (
@@ -49,6 +52,7 @@ func main() {
 func walletMain() error {
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.
+	log.Infof("load the config")
 	tcfg, _, err := loadConfig()
 	if err != nil {
 		return err
@@ -63,13 +67,31 @@ func walletMain() error {
 			profileRedirect := http.RedirectHandler("/debug/pprof",
 				http.StatusSeeOther)
 			http.Handle("/", profileRedirect)
-			log.Errorf("%v", http.ListenAndServe(listenAddr, nil))
+			err := http.ListenAndServe(listenAddr, nil)
+			if err != nil {
+				fatalf(err.Error())
+			}
+		}()
+	}
+
+	// Write mem profile if requested.
+	if cfg.MemProfile != "" {
+		f, err := os.Create(cfg.MemProfile)
+		if err != nil {
+			log.Errorf("Unable to create cpu profile: %v", err)
+			return err
+		}
+		timer := time.NewTimer(time.Minute * 5) // 5 minutes
+		go func() {
+			<-timer.C
+			pprof.WriteHeapProfile(f)
+			f.Close()
 		}()
 	}
 
 	// Load the wallet database.  It must have been created with the
 	// --create option already or this will return an appropriate error.
-	wallet, db, err := openWallet()
+	wallet, db, err := openWallet(cfg)
 	if err != nil {
 		log.Errorf("%v", err)
 		return err
@@ -91,52 +113,58 @@ func walletMain() error {
 	// Shutdown the server if an interrupt signal is received.
 	addInterruptHandler(server.Stop)
 
-	// Create channel so that the goroutine which opens the chain server
-	// connection can pass the conn to the goroutine which opens the wallet.
-	// Buffer the channel so sends are not blocked, since if the wallet is
-	// not yet created, the wallet open goroutine does not read this.
-	chainSvrChan := make(chan *chain.Client, 1)
-
 	go func() {
-		// Read CA certs and create the RPC client.
-		var certs []byte
-		if !cfg.DisableClientTLS {
-			certs, err = ioutil.ReadFile(cfg.CAFile)
-			if err != nil {
-				log.Warnf("Cannot open CA file: %v", err)
-				// If there's an error reading the CA file, continue
-				// with nil certs and without the client connection
-				certs = nil
+		for {
+			// Read CA certs and create the RPC client.
+			var certs []byte
+			if !cfg.DisableClientTLS {
+				certs, err = ioutil.ReadFile(cfg.CAFile)
+				if err != nil {
+					log.Warnf("Cannot open CA file: %v", err)
+					// If there's an error reading the CA file, continue
+					// with nil certs and without the client connection
+					certs = nil
+				}
+			} else {
+				log.Info("Client TLS is disabled")
 			}
-		} else {
-			log.Info("Client TLS is disabled")
-		}
-		rpcc, err := chain.NewClient(activeNet.Params, cfg.RPCConnect,
-			cfg.BtcdUsername, cfg.BtcdPassword, certs, cfg.DisableClientTLS)
-		if err != nil {
-			log.Errorf("Cannot create chain server RPC client: %v", err)
-			return
-		}
-		err = rpcc.Start()
-		if err != nil {
-			log.Warnf("Connection to Bitcoin RPC chain server " +
-				"unsuccessful -- available RPC methods will be limited")
-		}
-		// Even if Start errored, we still add the server disconnected.
-		// All client methods will then error, so it's obvious to a
-		// client that the there was a connection problem.
-		server.SetChainServer(rpcc)
+			rpcc, err := chain.NewClient(activeNet.Params, cfg.RPCConnect,
+				cfg.DcrdUsername, cfg.DcrdPassword, certs, cfg.DisableClientTLS)
+			if err != nil {
+				log.Errorf("Cannot create chain server RPC client: %v", err)
+				return
+			}
+			err = rpcc.Start()
+			if err != nil {
+				log.Warnf("Connection to Decred RPC chain server " +
+					"unsuccessful -- available RPC methods will be limited")
+			}
+			// Even if Start errored, we still add the server disconnected.
+			// All client methods will then error, so it's obvious to a
+			// client that the there was a connection problem.
+			server.SetChainServer(rpcc)
 
-		chainSvrChan <- rpcc
-	}()
+			// Start wallet goroutines and handle RPC client notifications
+			// if the server is not shutting down.
+			select {
+			case <-server.quit:
+				return
+			default:
+				wallet.Start(rpcc)
+			}
 
-	go func() {
-		// Start wallet goroutines and handle RPC client notifications
-		// if the chain server connection was opened.
-		select {
-		case chainSvr := <-chainSvrChan:
-			wallet.Start(chainSvr)
-		case <-server.quit:
+			// Block goroutine until the client is finished.
+			rpcc.WaitForShutdown()
+
+			wallet.SetChainSynced(false)
+			wallet.Stop()
+
+			// Reconnect only if the server is not shutting down.
+			select {
+			case <-server.quit:
+				return
+			default:
+			}
 		}
 	}()
 

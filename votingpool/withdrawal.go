@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 The btcsuite developers
+ * Copyright (c) 2015-2016 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -25,20 +26,19 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/btcsuite/fastsha256"
+	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-// Maximum tx size (in bytes). This should be the same as bitcoind's
-// MAX_STANDARD_TX_SIZE.
+// Maximum tx size (in bytes).
 const txMaxSize = 100000
 
-// feeIncrement is the minimum transation fee (0.00001 BTC, measured in satoshis)
+// feeIncrement is the minimum transation fee (0.00001 DCR, measured in atoms)
 // added to transactions requiring a fee.
 const feeIncrement = 1e3
 
@@ -55,15 +55,15 @@ const (
 // internal to that server.
 type OutBailmentID string
 
-// Ntxid is the normalized ID of a given bitcoin transaction, which is generated
+// Ntxid is the normalized ID of a given decred transaction, which is generated
 // by hashing the serialized tx with blank sig scripts on all inputs.
 type Ntxid string
 
 // OutputRequest represents one of the outputs (address/amount) requested by a
 // withdrawal, and includes information about the user's outbailment request.
 type OutputRequest struct {
-	Address  btcutil.Address
-	Amount   btcutil.Amount
+	Address  dcrutil.Address
+	Amount   dcrutil.Amount
 	PkScript []byte
 
 	// The notary server that received the outbailment request.
@@ -90,7 +90,7 @@ type WithdrawalOutput struct {
 type OutBailmentOutpoint struct {
 	ntxid  Ntxid
 	index  uint32
-	amount btcutil.Amount
+	amount dcrutil.Amount
 }
 
 // changeAwareTx is just a wrapper around wire.MsgTx that knows about its change
@@ -106,7 +106,7 @@ type changeAwareTx struct {
 type WithdrawalStatus struct {
 	nextInputAddr  WithdrawalAddress
 	nextChangeAddr ChangeAddress
-	fees           btcutil.Amount
+	fees           dcrutil.Amount
 	outputs        map[OutBailmentID]*WithdrawalOutput
 	sigs           map[Ntxid]TxSigs
 	transactions   map[Ntxid]changeAwareTx
@@ -120,7 +120,7 @@ type withdrawalInfo struct {
 	startAddress  WithdrawalAddress
 	changeStart   ChangeAddress
 	lastSeriesID  uint32
-	dustThreshold btcutil.Amount
+	dustThreshold dcrutil.Amount
 	status        WithdrawalStatus
 }
 
@@ -192,7 +192,7 @@ func (s *WithdrawalStatus) Sigs() map[Ntxid]TxSigs {
 
 // Fees returns the total amount of network fees included in all transactions
 // generated as part of a withdrawal.
-func (s *WithdrawalStatus) Fees() btcutil.Amount {
+func (s *WithdrawalStatus) Fees() dcrutil.Amount {
 	return s.fees
 }
 
@@ -256,8 +256,8 @@ func (o *WithdrawalOutput) Outpoints() []OutBailmentOutpoint {
 	return o.outpoints
 }
 
-// Amount returns the amount (in satoshis) in this OutBailmentOutpoint.
-func (o OutBailmentOutpoint) Amount() btcutil.Amount {
+// Amount returns the amount (in atoms) in this OutBailmentOutpoint.
+func (o OutBailmentOutpoint) Amount() dcrutil.Amount {
 	return o.amount
 }
 
@@ -285,7 +285,7 @@ type withdrawalTxOut struct {
 	// withdrawalTxOut. The original OutputRequest, if needed, can be obtained
 	// from WithdrawalStatus.outputs.
 	request OutputRequest
-	amount  btcutil.Amount
+	amount  dcrutil.Amount
 }
 
 // String makes withdrawalTxOut satisfy the Stringer interface.
@@ -301,7 +301,7 @@ func (o *withdrawalTxOut) pkScript() []byte {
 type withdrawalTx struct {
 	inputs  []credit
 	outputs []*withdrawalTxOut
-	fee     btcutil.Amount
+	fee     dcrutil.Amount
 
 	// changeOutput holds information about the change for this transaction.
 	changeOutput *wire.TxOut
@@ -312,7 +312,7 @@ type withdrawalTx struct {
 	calculateSize func() int
 	// calculateFee calculates the expected network fees for this tx. We use a
 	// struct field instead of a method so that it can be replaced in tests.
-	calculateFee func() btcutil.Amount
+	calculateFee func() dcrutil.Amount
 }
 
 // newWithdrawalTx creates a new withdrawalTx and calls setOptions()
@@ -320,8 +320,8 @@ type withdrawalTx struct {
 func newWithdrawalTx(setOptions func(tx *withdrawalTx)) *withdrawalTx {
 	tx := &withdrawalTx{}
 	tx.calculateSize = func() int { return calculateTxSize(tx) }
-	tx.calculateFee = func() btcutil.Amount {
-		return btcutil.Amount(1+tx.calculateSize()/1000) * feeIncrement
+	tx.calculateFee = func() dcrutil.Amount {
+		return dcrutil.Amount(1+tx.calculateSize()/1000) * feeIncrement
 	}
 	setOptions(tx)
 	return tx
@@ -347,7 +347,7 @@ func (tx *withdrawalTx) isTooBig() bool {
 }
 
 // inputTotal returns the sum amount of all inputs in this tx.
-func (tx *withdrawalTx) inputTotal() (total btcutil.Amount) {
+func (tx *withdrawalTx) inputTotal() (total dcrutil.Amount) {
 	for _, input := range tx.inputs {
 		total += input.Amount
 	}
@@ -356,7 +356,7 @@ func (tx *withdrawalTx) inputTotal() (total btcutil.Amount) {
 
 // outputTotal returns the sum amount of all outputs in this tx. It does not
 // include the amount for the change output, in case the tx has one.
-func (tx *withdrawalTx) outputTotal() (total btcutil.Amount) {
+func (tx *withdrawalTx) outputTotal() (total dcrutil.Amount) {
 	for _, output := range tx.outputs {
 		total += output.amount
 	}
@@ -368,7 +368,7 @@ func (tx *withdrawalTx) hasChange() bool {
 	return tx.changeOutput != nil
 }
 
-// toMsgTx generates a btcwire.MsgTx with this tx's inputs and outputs.
+// toMsgTx generates a wire.MsgTx with this tx's inputs and outputs.
 func (tx *withdrawalTx) toMsgTx() *wire.MsgTx {
 	msgtx := wire.NewMsgTx()
 	for _, o := range tx.outputs {
@@ -413,7 +413,7 @@ func (tx *withdrawalTx) removeInput() credit {
 	return removed
 }
 
-// addChange adds a change output if there are any satoshis left after paying
+// addChange adds a change output if there are any atoms left after paying
 // all the outputs and network fees. It returns true if a change output was
 // added.
 //
@@ -491,7 +491,7 @@ func newWithdrawal(roundID uint32, requests []OutputRequest, inputs []credit,
 // This method must be called with the address manager unlocked.
 func (p *Pool) StartWithdrawal(roundID uint32, requests []OutputRequest,
 	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
-	txStore *wtxmgr.Store, chainHeight int32, dustThreshold btcutil.Amount) (
+	txStore *wtxmgr.Store, chainHeight int32, dustThreshold dcrutil.Amount) (
 	*WithdrawalStatus, error) {
 
 	status, err := getWithdrawalStatus(p, roundID, requests, startAddress, lastSeriesID,
@@ -657,7 +657,7 @@ func (w *withdrawal) finalizeCurrentTx() error {
 		// original one.
 		outputStatus := w.status.outputs[txOut.request.outBailmentID()]
 		origRequest := outputStatus.request
-		amtFulfilled := btcutil.Amount(0)
+		amtFulfilled := dcrutil.Amount(0)
 		for _, outpoint := range outputStatus.outpoints {
 			amtFulfilled += outpoint.amount
 		}
@@ -678,11 +678,11 @@ func (w *withdrawal) finalizeCurrentTx() error {
 // fulfill them all. For every dropped output request we update its entry in
 // w.status.outputs with the status string set to statusPartial.
 func (w *withdrawal) maybeDropRequests() {
-	inputAmount := btcutil.Amount(0)
+	inputAmount := dcrutil.Amount(0)
 	for _, input := range w.eligibleInputs {
 		inputAmount += input.Amount
 	}
-	outputAmount := btcutil.Amount(0)
+	outputAmount := dcrutil.Amount(0)
 	for _, request := range w.pendingRequests {
 		outputAmount += request.Amount
 	}
@@ -793,7 +793,7 @@ func (s *WithdrawalStatus) updateStatusFor(tx *withdrawalTx) {
 // withdrawalInfo. For the requests slice, the order of the items does not
 // matter.
 func (wi *withdrawalInfo) match(requests []OutputRequest, startAddress WithdrawalAddress,
-	lastSeriesID uint32, changeStart ChangeAddress, dustThreshold btcutil.Amount) bool {
+	lastSeriesID uint32, changeStart ChangeAddress, dustThreshold dcrutil.Amount) bool {
 	// Use reflect.DeepEqual to compare changeStart and startAddress as they're
 	// structs that contain pointers and we want to compare their content and
 	// not their address.
@@ -833,7 +833,7 @@ func (wi *withdrawalInfo) match(requests []OutputRequest, startAddress Withdrawa
 // address manager unlocked.
 func getWithdrawalStatus(p *Pool, roundID uint32, requests []OutputRequest,
 	startAddress WithdrawalAddress, lastSeriesID uint32, changeStart ChangeAddress,
-	dustThreshold btcutil.Amount) (*WithdrawalStatus, error) {
+	dustThreshold dcrutil.Amount) (*WithdrawalStatus, error) {
 
 	var serialized []byte
 	err := p.namespace.View(
@@ -885,6 +885,11 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 				if err != nil {
 					return nil, err
 				}
+				pKey, err := pubKey.String()
+				if err != nil {
+					return nil, err
+				}
+
 				if privKey != nil {
 					childKey, err := privKey.Child(uint32(creditAddr.Index()))
 					if err != nil {
@@ -895,7 +900,7 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 						return nil, newError(ErrKeyChain, "failed to obtain ECPrivKey", err)
 					}
 					log.Debugf("Generating raw sig for input %d of tx %s with privkey of %s",
-						inputIdx, ntxid, pubKey.String())
+						inputIdx, ntxid, pKey)
 					sig, err = txscript.RawTxInSignature(
 						msgtx, inputIdx, redeemScript, txscript.SigHashAll, ecPrivKey)
 					if err != nil {
@@ -903,7 +908,7 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 					}
 				} else {
 					log.Debugf("Not generating raw sig for input %d of %s because private key "+
-						"for %s is not available: %v", inputIdx, ntxid, pubKey.String(), err)
+						"for %s is not available: %v", inputIdx, ntxid, pKey, err)
 					sig = []byte{}
 				}
 				txInSigs[i] = sig
@@ -940,7 +945,7 @@ func SignTx(msgtx *wire.MsgTx, sigs TxSigs, mgr *waddrmgr.Manager, store *wtxmgr
 
 // getRedeemScript returns the redeem script for the given P2SH address. It must
 // be called with the manager unlocked.
-func getRedeemScript(mgr *waddrmgr.Manager, addr *btcutil.AddressScriptHash) ([]byte, error) {
+func getRedeemScript(mgr *waddrmgr.Manager, addr *dcrutil.AddressScriptHash) ([]byte, error) {
 	address, err := mgr.Address(addr)
 	if err != nil {
 		return nil, err
@@ -956,19 +961,19 @@ func getRedeemScript(mgr *waddrmgr.Manager, addr *btcutil.AddressScriptHash) ([]
 // script as OP_CHECKMULTISIG expects that.
 // This function must be called with the manager unlocked.
 func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript []byte, sigs []RawSig) error {
-	class, addresses, _, err := txscript.ExtractPkScriptAddrs(pkScript, mgr.ChainParams())
+	class, addresses, _, err := txscript.ExtractPkScriptAddrs(txscript.DefaultScriptVersion, pkScript, mgr.ChainParams())
 	if err != nil {
 		return newError(ErrTxSigning, "unparseable pkScript", err)
 	}
 	if class != txscript.ScriptHashTy {
 		return newError(ErrTxSigning, fmt.Sprintf("pkScript is not P2SH: %s", class), nil)
 	}
-	redeemScript, err := getRedeemScript(mgr, addresses[0].(*btcutil.AddressScriptHash))
+	redeemScript, err := getRedeemScript(mgr, addresses[0].(*dcrutil.AddressScriptHash))
 	if err != nil {
 		return newError(ErrTxSigning, "unable to retrieve redeem script", err)
 	}
 
-	class, _, nRequired, err := txscript.ExtractPkScriptAddrs(redeemScript, mgr.ChainParams())
+	class, _, nRequired, err := txscript.ExtractPkScriptAddrs(txscript.DefaultScriptVersion, redeemScript, mgr.ChainParams())
 	if err != nil {
 		return newError(ErrTxSigning, "unparseable redeem script", err)
 	}
@@ -1006,7 +1011,7 @@ func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript [
 // given index, returning an error if it fails.
 func validateSigScript(msgtx *wire.MsgTx, idx int, pkScript []byte) error {
 	vm, err := txscript.NewEngine(pkScript, msgtx, idx,
-		txscript.StandardVerifyFlags)
+		txscript.StandardVerifyFlags, txscript.DefaultScriptVersion)
 	if err != nil {
 		return newError(ErrTxSigning, "cannot create script engine", err)
 	}

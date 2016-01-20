@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2015-2016 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,19 +24,20 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainec"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 // newShaHash converts the passed big-endian hex string into a wire.ShaHash.
 // It only differs from the one available in wire in that it panics on an
 // error since it will only (and must only) be called with hard-coded, and
 // therefore known good, hashes.
-func newShaHash(hexStr string) *wire.ShaHash {
-	sha, err := wire.NewShaHashFromStr(hexStr)
+func newShaHash(hexStr string) *chainhash.Hash {
+	sha, err := chainhash.NewHashFromStr(hexStr)
 	if err != nil {
 		panic(err)
 	}
@@ -335,7 +337,7 @@ func testExternalAddresses(tc *testContext) bool {
 
 		// Ensure the last external address is the expected one.
 		leaPrefix := prefix + " LastExternalAddress"
-		lastAddr, err := tc.manager.LastExternalAddress(tc.account)
+		lastAddr, _, err := tc.manager.LastExternalAddress(tc.account)
 		if err != nil {
 			tc.t.Errorf("%s: unexpected error: %v", leaPrefix, err)
 			return false
@@ -349,8 +351,8 @@ func testExternalAddresses(tc *testContext) bool {
 		chainParams := tc.manager.ChainParams()
 		for i := 0; i < len(expectedExternalAddrs); i++ {
 			pkHash := expectedExternalAddrs[i].addressHash
-			utilAddr, err := btcutil.NewAddressPubKeyHash(pkHash,
-				chainParams)
+			utilAddr, err := dcrutil.NewAddressPubKeyHash(pkHash,
+				chainParams, chainec.ECTypeSecp256k1)
 			if err != nil {
 				tc.t.Errorf("%s NewAddressPubKeyHash #%d: "+
 					"unexpected error: %v", prefix, i, err)
@@ -462,7 +464,7 @@ func testInternalAddresses(tc *testContext) bool {
 
 		// Ensure the last internal address is the expected one.
 		liaPrefix := prefix + " LastInternalAddress"
-		lastAddr, err := tc.manager.LastInternalAddress(tc.account)
+		lastAddr, _, err := tc.manager.LastInternalAddress(tc.account)
 		if err != nil {
 			tc.t.Errorf("%s: unexpected error: %v", liaPrefix, err)
 			return false
@@ -476,8 +478,8 @@ func testInternalAddresses(tc *testContext) bool {
 		chainParams := tc.manager.ChainParams()
 		for i := 0; i < len(expectedInternalAddrs); i++ {
 			pkHash := expectedInternalAddrs[i].addressHash
-			utilAddr, err := btcutil.NewAddressPubKeyHash(pkHash,
-				chainParams)
+			utilAddr, err := dcrutil.NewAddressPubKeyHash(pkHash,
+				chainParams, chainec.ECTypeSecp256k1)
 			if err != nil {
 				tc.t.Errorf("%s NewAddressPubKeyHash #%d: "+
 					"unexpected error: %v", prefix, i, err)
@@ -674,7 +676,7 @@ func testImportPrivateKey(tc *testContext) bool {
 	if tc.create {
 		for i, test := range tests {
 			test.expected.privKeyWIF = test.in
-			wif, err := btcutil.DecodeWIF(test.in)
+			wif, err := dcrutil.DecodeWIF(test.in)
 			if err != nil {
 				tc.t.Errorf("%s DecodeWIF #%d (%s): unexpected "+
 					"error: %v", prefix, i, test.name, err)
@@ -705,8 +707,8 @@ func testImportPrivateKey(tc *testContext) bool {
 
 			// Use the Address API to retrieve each of the expected
 			// new addresses and ensure they're accurate.
-			utilAddr, err := btcutil.NewAddressPubKeyHash(
-				test.expected.addressHash, chainParams)
+			utilAddr, err := dcrutil.NewAddressPubKeyHash(
+				test.expected.addressHash, chainParams, chainec.ECTypeSecp256k1)
 			if err != nil {
 				tc.t.Errorf("%s NewAddressPubKeyHash #%d (%s): "+
 					"unexpected error: %v", prefix, i,
@@ -858,7 +860,7 @@ func testImportScript(tc *testContext) bool {
 
 			// Use the Address API to retrieve each of the expected
 			// new addresses and ensure they're accurate.
-			utilAddr, err := btcutil.NewAddressScriptHash(test.in,
+			utilAddr, err := dcrutil.NewAddressScriptHash(test.in,
 				chainParams)
 			if err != nil {
 				tc.t.Errorf("%s NewAddressScriptHash #%d (%s): "+
@@ -941,13 +943,13 @@ func testMarkUsed(tc *testContext) bool {
 	for i, test := range tests {
 		addrHash := test.in
 
-		var addr btcutil.Address
+		var addr dcrutil.Address
 		var err error
 		switch test.typ {
 		case addrPubKeyHash:
-			addr, err = btcutil.NewAddressPubKeyHash(addrHash, chainParams)
+			addr, err = dcrutil.NewAddressPubKeyHash(addrHash, chainParams, chainec.ECTypeSecp256k1)
 		case addrScriptHash:
-			addr, err = btcutil.NewAddressScriptHashFromHash(addrHash, chainParams)
+			addr, err = dcrutil.NewAddressScriptHashFromHash(addrHash, chainParams)
 		default:
 			panic("unreachable")
 		}
@@ -1206,8 +1208,8 @@ func testLookupAccount(tc *testContext) bool {
 	// Test account lookup for default account adddress
 	var expectedAccount uint32
 	for i, addr := range expectedAddrs {
-		addr, err := btcutil.NewAddressPubKeyHash(addr.addressHash,
-			tc.manager.ChainParams())
+		addr, err := dcrutil.NewAddressPubKeyHash(addr.addressHash,
+			tc.manager.ChainParams(), chainec.ECTypeSecp256k1)
 		if err != nil {
 			tc.t.Errorf("AddrAccount #%d: unexpected error: %v", i, err)
 			return false
@@ -1445,7 +1447,7 @@ func testWatchingOnly(tc *testContext) bool {
 func testSync(tc *testContext) bool {
 	tests := []struct {
 		name string
-		hash *wire.ShaHash
+		hash *chainhash.Hash
 	}{
 		{
 			name: "Block 1",
@@ -1566,7 +1568,7 @@ func testSync(tc *testContext) bool {
 		iter := tc.manager.NewIterateRecentBlocks()
 		for cont := iter != nil; cont; cont = iter.Prev() {
 			wantHeight := int32(i) - int32(j) + 1
-			var wantHash *wire.ShaHash
+			var wantHash *chainhash.Hash
 			if wantHeight == 0 {
 				wantHash = chaincfg.MainNetParams.GenesisHash
 			} else {

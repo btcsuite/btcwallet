@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013-2015 The btcsuite developers
+ * Copyright (c) 2015-2016 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,24 +22,31 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcrpcclient"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/dcrjson"
+	"github.com/decred/dcrrpcclient"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-// Client represents a persistent client connection to a bitcoin RPC server
+// Client represents a persistent client connection to a decred RPC server
 // for information regarding the current best block chain.
 type Client struct {
-	*btcrpcclient.Client
+	*dcrrpcclient.Client
 	chainParams *chaincfg.Params
 
-	enqueueNotification chan interface{}
-	dequeueNotification chan interface{}
-	currentBlock        chan *waddrmgr.BlockStamp
+	enqueueNotification       chan interface{}
+	dequeueNotification       chan interface{}
+	enqueueVotingNotification chan interface{}
+	dequeueVotingNotification chan interface{}
+	currentBlock              chan *waddrmgr.BlockStamp
+
+	// Information for reorganization handling.
+	reorganizingLock sync.Mutex
+	reorganizeToHash chainhash.Hash
+	reorganizing     bool
 
 	quit    chan struct{}
 	wg      sync.WaitGroup
@@ -50,35 +58,45 @@ type Client struct {
 // string.  If disableTLS is false, the remote RPC certificate must be provided
 // in the certs slice.  The connection is not established immediately, but must
 // be done using the Start method.  If the remote server does not operate on
-// the same bitcoin network as described by the passed chain parameters, the
+// the same decred network as described by the passed chain parameters, the
 // connection will be disconnected.
-func NewClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte, disableTLS bool) (*Client, error) {
+func NewClient(chainParams *chaincfg.Params, connect, user, pass string,
+	certs []byte, disableTLS bool) (*Client, error) {
 	client := Client{
-		chainParams:         chainParams,
-		enqueueNotification: make(chan interface{}),
-		dequeueNotification: make(chan interface{}),
-		currentBlock:        make(chan *waddrmgr.BlockStamp),
-		quit:                make(chan struct{}),
+		reorganizeToHash:          chainhash.Hash{},
+		reorganizing:              false,
+		chainParams:               chainParams,
+		enqueueNotification:       make(chan interface{}),
+		dequeueNotification:       make(chan interface{}),
+		enqueueVotingNotification: make(chan interface{}),
+		dequeueVotingNotification: make(chan interface{}),
+		currentBlock:              make(chan *waddrmgr.BlockStamp),
+		quit:                      make(chan struct{}),
 	}
-	ntfnCallbacks := btcrpcclient.NotificationHandlers{
-		OnClientConnected:   client.onClientConnect,
-		OnBlockConnected:    client.onBlockConnected,
-		OnBlockDisconnected: client.onBlockDisconnected,
-		OnRecvTx:            client.onRecvTx,
-		OnRedeemingTx:       client.onRedeemingTx,
-		OnRescanFinished:    client.onRescanFinished,
-		OnRescanProgress:    client.onRescanProgress,
+	ntfnCallbacks := dcrrpcclient.NotificationHandlers{
+		OnClientConnected:       client.onClientConnect,
+		OnBlockConnected:        client.onBlockConnected,
+		OnBlockDisconnected:     client.onBlockDisconnected,
+		OnReorganization:        client.onReorganization,
+		OnWinningTickets:        client.onWinningTickets,
+		OnSpentAndMissedTickets: client.onSpentAndMissedTickets,
+		OnStakeDifficulty:       client.onStakeDifficulty,
+		OnRecvTx:                client.onRecvTx,
+		OnRedeemingTx:           client.onRedeemingTx,
+		OnRescanFinished:        client.onRescanFinished,
+		OnRescanProgress:        client.onRescanProgress,
 	}
-	conf := btcrpcclient.ConnConfig{
-		Host:                connect,
-		Endpoint:            "ws",
-		User:                user,
-		Pass:                pass,
-		Certificates:        certs,
-		DisableConnectOnNew: true,
-		DisableTLS:          disableTLS,
+	conf := dcrrpcclient.ConnConfig{
+		Host:                 connect,
+		Endpoint:             "ws",
+		User:                 user,
+		Pass:                 pass,
+		Certificates:         certs,
+		DisableAutoReconnect: true,
+		DisableConnectOnNew:  true,
+		DisableTLS:           disableTLS,
 	}
-	c, err := btcrpcclient.New(&conf, &ntfnCallbacks)
+	c, err := dcrrpcclient.New(&conf, &ntfnCallbacks)
 	if err != nil {
 		return nil, err
 	}
@@ -112,8 +130,9 @@ func (c *Client) Start() error {
 	c.started = true
 	c.quitMtx.Unlock()
 
-	c.wg.Add(1)
+	c.wg.Add(2)
 	go c.handler()
+	go c.handlerVoting()
 	return nil
 }
 
@@ -121,8 +140,6 @@ func (c *Client) Start() error {
 // started by Start.
 func (c *Client) Stop() {
 	c.quitMtx.Lock()
-	defer c.quitMtx.Unlock()
-
 	select {
 	case <-c.quit:
 	default:
@@ -131,8 +148,10 @@ func (c *Client) Stop() {
 
 		if !c.started {
 			close(c.dequeueNotification)
+			close(c.dequeueVotingNotification)
 		}
 	}
+	c.quitMtx.Unlock()
 }
 
 // WaitForShutdown blocks until both the client has finished disconnecting
@@ -144,7 +163,7 @@ func (c *Client) WaitForShutdown() {
 
 // Notification types.  These are defined here and processed from from reading
 // a notificationChan to avoid handling these notifications directly in
-// btcrpcclient callbacks, which isn't very Go-like and doesn't allow
+// dcrrpcclient callbacks, which isn't very Go-like and doesn't allow
 // blocking client calls.
 type (
 	// ClientConnected is a notification for when a client connection is
@@ -159,6 +178,29 @@ type (
 	// BlockStamp was reorganized out of the best chain.
 	BlockDisconnected wtxmgr.BlockMeta
 
+	Reorganization struct {
+		OldHash   *chainhash.Hash
+		OldHeight int64
+		NewHash   *chainhash.Hash
+		NewHeight int64
+	}
+
+	WinningTickets struct {
+		BlockHash   *chainhash.Hash
+		BlockHeight int64
+		Tickets     []*chainhash.Hash
+	}
+	MissedTickets struct {
+		BlockHash   *chainhash.Hash
+		BlockHeight int64
+		Tickets     []*chainhash.Hash
+	}
+	StakeDifficulty struct {
+		BlockHash   *chainhash.Hash
+		BlockHeight int64
+		StakeDiff   int64
+	}
+
 	// RelevantTx is a notification for a transaction which spends wallet
 	// inputs or pays to a watched address.
 	RelevantTx struct {
@@ -169,7 +211,7 @@ type (
 	// RescanProgress is a notification describing the current status
 	// of an in-progress rescan.
 	RescanProgress struct {
-		Hash   *wire.ShaHash
+		Hash   *chainhash.Hash
 		Height int32
 		Time   time.Time
 	}
@@ -177,18 +219,43 @@ type (
 	// RescanFinished is a notification that a previous rescan request
 	// has finished.
 	RescanFinished struct {
-		Hash   *wire.ShaHash
+		Hash   *chainhash.Hash
 		Height int32
 		Time   time.Time
 	}
 )
 
+// SetReorganizing allows you to set the flag for blockchain reorganization.
+func (c *Client) SetReorganizingState(is bool, hash chainhash.Hash) {
+	c.reorganizingLock.Lock()
+	defer c.reorganizingLock.Unlock()
+
+	c.reorganizing = is
+	c.reorganizeToHash = hash
+}
+
+// SetReorganizing allows you to set the flag for blockchain reorganization.
+func (c *Client) GetReorganizing() (bool, chainhash.Hash) {
+	c.reorganizingLock.Lock()
+	defer c.reorganizingLock.Unlock()
+
+	return c.reorganizing, c.reorganizeToHash
+}
+
 // Notifications returns a channel of parsed notifications sent by the remote
-// bitcoin RPC server.  This channel must be continually read or the process
+// decred RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for
 // later reads.
 func (c *Client) Notifications() <-chan interface{} {
 	return c.dequeueNotification
+}
+
+// NotificationsVoting returns a channel of parsed voting notifications sent
+// by the remote RPC server.  This channel must be continually read or the
+// process may abort for running out memory, as unread notifications are
+// queued for later reads.
+func (c *Client) NotificationsVoting() <-chan interface{} {
+	return c.dequeueVotingNotification
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
@@ -202,14 +269,14 @@ func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	}
 }
 
-// parseBlock parses a btcws definition of the block a tx is mined it to the
+// parseBlock parses a dcrws definition of the block a tx is mined it to the
 // Block structure of the wtxmgr package, and the block index.  This is done
-// here since btcrpcclient doesn't parse this nicely for us.
-func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
+// here since dcrrpcclient doesn't parse this nicely for us.
+func parseBlock(block *dcrjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	if block == nil {
 		return nil, nil
 	}
-	blksha, err := wire.NewShaHashFromStr(block.Hash)
+	blksha, err := chainhash.NewHashFromStr(block.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -218,37 +285,109 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 			Height: block.Height,
 			Hash:   *blksha,
 		},
-		Time: time.Unix(block.Time, 0),
+		Time:     time.Unix(block.Time, 0),
+		VoteBits: block.VoteBits,
 	}
 	return blk, nil
 }
 
 func (c *Client) onClientConnect() {
-	log.Info("Established websocket RPC connection to btcd")
-	c.enqueueNotification <- ClientConnected{}
+	log.Info("Established websocket RPC connection to dcrd")
+	select {
+	case c.enqueueNotification <- ClientConnected{}:
+	case <-c.quit:
+	}
 }
 
-func (c *Client) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
-	c.enqueueNotification <- BlockConnected{
+func (c *Client) onBlockConnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
+	select {
+	case c.enqueueNotification <- BlockConnected{
 		Block: wtxmgr.Block{
 			Hash:   *hash,
 			Height: height,
 		},
-		Time: time,
+		VoteBits: voteBits,
+		Time:     time,
+	}:
+	case <-c.quit:
 	}
 }
 
-func (c *Client) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
-	c.enqueueNotification <- BlockDisconnected{
+func (c *Client) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
+	select {
+	case c.enqueueNotification <- BlockDisconnected{
 		Block: wtxmgr.Block{
 			Hash:   *hash,
 			Height: height,
 		},
-		Time: time,
+		VoteBits: voteBits,
+		Time:     time,
+	}:
+	case <-c.quit:
 	}
 }
 
-func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+// onReorganization handles reorganization notifications and passes them
+// downstream to the notifications queue.
+func (c *Client) onReorganization(oldHash *chainhash.Hash, oldHeight int32,
+	newHash *chainhash.Hash, newHeight int32) {
+	c.enqueueNotification <- Reorganization{
+		oldHash,
+		int64(oldHeight),
+		newHash,
+		int64(newHeight),
+	}
+}
+
+// onWinningTickets handles winning tickets notifications data and passes it
+// downstream to the notifications queue.
+func (c *Client) onWinningTickets(hash *chainhash.Hash, height int64,
+	tickets []*chainhash.Hash) {
+	c.enqueueVotingNotification <- WinningTickets{
+		hash,
+		height,
+		tickets,
+	}
+}
+
+// onSpentAndMissedTickets handles missed tickets notifications data and passes it
+// downstream to the notifications queue.
+func (c *Client) onSpentAndMissedTickets(hash *chainhash.Hash,
+	height int64,
+	stakeDiff int64,
+	tickets map[chainhash.Hash]bool) {
+
+	missedTickets := make([]*chainhash.Hash, 0)
+
+	// Copy the missing ticket hashes to a slice.
+	for ticket, isSpent := range tickets {
+		newTicket := ticket
+		if !isSpent { // if missed
+			missedTickets = append(missedTickets, &newTicket)
+		}
+	}
+
+	c.enqueueVotingNotification <- MissedTickets{
+		hash,
+		height,
+		missedTickets,
+	}
+}
+
+// onStakeDifficulty handles stake difficulty notifications data and passes it
+// downstream to the notification queue.
+func (c *Client) onStakeDifficulty(hash *chainhash.Hash,
+	height int64,
+	stakeDiff int64) {
+
+	c.enqueueNotification <- StakeDifficulty{
+		hash,
+		height,
+		stakeDiff,
+	}
+}
+
+func (c *Client) onRecvTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
 	blk, err := parseBlock(block)
 	if err != nil {
 		// Log and drop improper notification.
@@ -262,20 +401,30 @@ func (c *Client) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 			"tx: %v", err)
 		return
 	}
-	c.enqueueNotification <- RelevantTx{rec, blk}
+	select {
+	case c.enqueueNotification <- RelevantTx{rec, blk}:
+	case <-c.quit:
+	}
 }
 
-func (c *Client) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+func (c *Client) onRedeemingTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
 	// Handled exactly like recvtx notifications.
 	c.onRecvTx(tx, block)
 }
 
-func (c *Client) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
-	c.enqueueNotification <- &RescanProgress{hash, height, blkTime}
+func (c *Client) onRescanProgress(hash *chainhash.Hash, height int32, blkTime time.Time) {
+	select {
+	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
+	case <-c.quit:
+	}
 }
 
-func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time.Time) {
-	c.enqueueNotification <- &RescanFinished{hash, height, blkTime}
+func (c *Client) onRescanFinished(hash *chainhash.Hash, height int32, blkTime time.Time) {
+	select {
+	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
+	case <-c.quit:
+	}
+
 }
 
 // handler maintains a queue of notifications and the current state (best
@@ -283,8 +432,10 @@ func (c *Client) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time
 func (c *Client) handler() {
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
-		close(c.quit)
+		log.Errorf("Failed to receive best block from chain server: %v", err)
+		c.Stop()
 		c.wg.Done()
+		return
 	}
 
 	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
@@ -300,6 +451,7 @@ func (c *Client) handler() {
 	enqueue := c.enqueueNotification
 	var dequeue chan interface{}
 	var next interface{}
+	pingChan := time.After(time.Minute)
 out:
 	for {
 		select {
@@ -319,6 +471,7 @@ out:
 				dequeue = c.dequeueNotification
 			}
 			notifications = append(notifications, n)
+			pingChan = time.After(time.Minute)
 
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
@@ -341,12 +494,94 @@ out:
 				dequeue = nil
 			}
 
+		case <-pingChan:
+			// No notifications were received in the last 60s.
+			// Ensure the connection is still active by making a new
+			// request to the server.
+			// A 3 second timeout is used to prevent the handler loop
+			// from blocking here forever.
+			type sessionResult struct {
+				err error
+			}
+			sessionResponse := make(chan sessionResult, 1)
+			go func() {
+				_, err := c.Session()
+				sessionResponse <- sessionResult{err}
+			}()
+
+			select {
+			case resp := <-sessionResponse:
+				if resp.err != nil {
+					log.Errorf("Failed to receive session "+
+						"result: %v", resp.err)
+					c.Stop()
+					break out
+				}
+				pingChan = time.After(time.Minute)
+
+			case <-time.After(3 * time.Second):
+				log.Errorf("Timeout waiting for session RPC")
+				c.Stop()
+				break out
+			}
+
 		case c.currentBlock <- bs:
 
 		case <-c.quit:
 			break out
 		}
 	}
+
+	c.Stop()
 	close(c.dequeueNotification)
+	c.wg.Done()
+}
+
+// handler maintains a queue of notifications and the current state (best
+// block) of the chain.
+func (c *Client) handlerVoting() {
+	var notifications []interface{}
+	enqueue := c.enqueueVotingNotification
+	var dequeue chan interface{}
+	var next interface{}
+out:
+	for {
+		select {
+		case n, ok := <-enqueue:
+			if !ok {
+				// If no notifications are queued for handling,
+				// the queue is finished.
+				if len(notifications) == 0 {
+					break out
+				}
+				// nil channel so no more reads can occur.
+				enqueue = nil
+				continue
+			}
+			if len(notifications) == 0 {
+				next = n
+				dequeue = c.dequeueVotingNotification
+			}
+			notifications = append(notifications, n)
+
+		case dequeue <- next:
+			notifications[0] = nil
+			notifications = notifications[1:]
+			if len(notifications) != 0 {
+				next = notifications[0]
+			} else {
+				// If no more notifications can be enqueued, the
+				// queue is finished.
+				if enqueue == nil {
+					break out
+				}
+				dequeue = nil
+			}
+
+		case <-c.quit:
+			break out
+		}
+	}
+	close(c.dequeueVotingNotification)
 	c.wg.Done()
 }

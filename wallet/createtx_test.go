@@ -9,19 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/blockchain"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/wire"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrutil/hdkeychain"
+	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
+	_ "github.com/decred/dcrwallet/walletdb/bdb"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-// This is a tx that transfers funds (0.371 BTC) to addresses of known privKeys.
+// This is a tx that transfers funds (0.371 DCR) to addresses of known privKeys.
 // It contains 6 outputs, in this order, with the following values/addresses:
 // {0: 0.2283 (addr: myVT6o4GfR57Cfw7pP3vayfHZzMHh2BxXJ - change),
 //  1: 0.03   (addr: mjqnv9JoxdYyQK7NMZGCKLxNWHfA6XFVC7),
@@ -31,11 +31,11 @@ import (
 //  5: 0.001  (addr: mgLBkENLdGXXMfu5RZYPuhJdC88UgvsAxY)}
 var txInfo = struct {
 	hex      string
-	amount   btcutil.Amount
+	amount   dcrutil.Amount
 	privKeys []string
 }{
 	hex:    "010000000113918955c6ba3c7a2e8ec02ca3e91a2571cb11ade7d5c3e9c1a73b3ac8309d74000000006b483045022100a6f33d4ad476d126ee45e19e43190971e148a1e940abe4165bc686d22ac847e502200936efa4da4225787d4b7e11e8f3389dba626817d7ece0cab38b4f456b0880d6012103ccb8b1038ad6af10a15f68e8d5e347c08befa6cc2ab1718a37e3ea0e38102b92ffffffff06b05b5c01000000001976a914c5297a660cef8088b8472755f4827df7577c612988acc0c62d00000000001976a9142f7094083d750bdfc1f2fad814779e2dde35ce2088ac40548900000000001976a9146fcb336a187619ca20b84af9eac9fbff68d1061d88ac80969800000000001976a91495322d12e18345f4855cbe863d4a8ebcc0e95e0188acc0e1e400000000001976a914aace7f06f94fa298685f6e58769543993fa5fae888aca0860100000000001976a91408eec7602655fdb2531f71070cca4c363c3a15ab88ac00000000",
-	amount: btcutil.Amount(3e6 + 9e6 + 1e7 + 1.5e7 + 1e5),
+	amount: dcrutil.Amount(3e6 + 9e6 + 1e7 + 1.5e7 + 1e5),
 	privKeys: []string{
 		"cSYUVdPL6pkabu7Fxp4PaKqYjJFz2Aopw5ygunFbek9HAimLYxp4",
 		"cVnNzZm3DiwkN1Ghs4W8cwcJC9f6TynCCcqzYt8n1c4hwjN2PfTw",
@@ -44,8 +44,8 @@ var txInfo = struct {
 		"cR9ApAZ3FLtRMfqRBEr3niD9Mmmvfh3V8Uh56qfJ5b4bFH8ibDkA"}}
 
 var (
-	outAddr1 = "1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX"
-	outAddr2 = "12MzCDwodF9G1e7jfwLXfR164RNtx4BRVG"
+	outAddr1 = "Tsk7JZPtyeQHuNsSZ2K5Q8apJBusEzNtWPk"
+	outAddr2 = "TshMBKqCQfdiRVqLhDvpjdA5mGLZSUoHZ95"
 )
 
 // fastScrypt are options to passed to the wallet address manager to speed up
@@ -56,10 +56,12 @@ var fastScrypt = &waddrmgr.ScryptOptions{
 	P: 1,
 }
 
+var TstDbPath = "/tmp/testwallet.db"
+
 func Test_addOutputs(t *testing.T) {
 	msgtx := wire.NewMsgTx()
-	pairs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1}
-	if _, err := addOutputs(msgtx, pairs, &chaincfg.TestNet3Params); err != nil {
+	pairs := map[string]dcrutil.Amount{outAddr1: 10, outAddr2: 1}
+	if _, err := addOutputs(msgtx, pairs, &chaincfg.TestNetParams); err != nil {
 		t.Fatal(err)
 	}
 	if len(msgtx.TxOut) != 2 {
@@ -72,80 +74,87 @@ func Test_addOutputs(t *testing.T) {
 	}
 }
 
-func TestCreateTx(t *testing.T) {
-	bs := &waddrmgr.BlockStamp{Height: 11111}
-	mgr := newManager(t, txInfo.privKeys, bs)
-	account := uint32(0)
-	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", &chaincfg.TestNet3Params)
-	var tstChangeAddress = func(account uint32) (btcutil.Address, error) {
-		return changeAddr, nil
-	}
+// TODO(jcv) Both of these tests require a temporary test wallet be made first.
+// This should probably follow the createSimulationWallet from the main package.
 
-	// Pick all utxos from txInfo as eligible input.
-	eligible := mockCredits(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
-	// Now create a new TX sending 25e6 satoshis to the following addresses:
-	outputs := map[string]btcutil.Amount{outAddr1: 15e6, outAddr2: 10e6}
-	tx, err := createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, account, tstChangeAddress, &chaincfg.TestNet3Params, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+// func TestCreateTx(t *testing.T) {
+// 	bs := &waddrmgr.BlockStamp{Height: 11111}
+// 	mgr := newManager(t, txInfo.privKeys, bs)
+// 	account := uint32(0)
+// 	changeAddr, _ := dcrutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", &chaincfg.TestNetParams)
+// 	var tstChangeAddress = func(account uint32) (dcrutil.Address, error) {
+// 		return changeAddr, nil
+// 	}
 
-	if tx.ChangeAddr.String() != changeAddr.String() {
-		t.Fatalf("Unexpected change address; got %v, want %v",
-			tx.ChangeAddr.String(), changeAddr.String())
-	}
+// 	// Create a simnet wallet.
 
-	msgTx := tx.MsgTx
-	if len(msgTx.TxOut) != 3 {
-		t.Fatalf("Unexpected number of outputs; got %d, want 3", len(msgTx.TxOut))
-	}
+// 	// Pick all utxos from txInfo as eligible input.
+// 	eligible := mockCredits(t, txInfo.hex, []uint32{1, 2, 3, 4, 5})
+// 	// Now create a new TX sending 25e6 atoms to the following addresses:
+// 	outputs := map[string]dcrutil.Amount{outAddr1: 15e6, outAddr2: 10e6}
+// 	tx, err := w.createTx(eligible, outputs, bs, defaultFeeIncrement, mgr, account, tstChangeAddress, &chaincfg.TestNetParams, false)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	// The outputs in our new TX amount to 25e6 satoshis, so to fulfil that
-	// createTx should have picked the utxos with indices 4, 3 and 5, which
-	// total 25.1e6.
-	if len(msgTx.TxIn) != 3 {
-		t.Fatalf("Unexpected number of inputs; got %d, want 3", len(msgTx.TxIn))
-	}
+// 	if tx.ChangeAddr.String() != changeAddr.String() {
+// 		t.Fatalf("Unexpected change address; got %v, want %v",
+// 			tx.ChangeAddr.String(), changeAddr.String())
+// 	}
 
-	// Given the input (15e6 + 10e6 + 1e7) and requested output (15e6 + 10e6)
-	// amounts in the new TX, we should have a change output with 8.99e6, which
-	// implies a fee of 1e3 satoshis.
-	expectedChange := btcutil.Amount(8.999e6)
+// 	msgTx := tx.MsgTx
+// 	if len(msgTx.TxOut) != 3 {
+// 		t.Fatalf("Unexpected number of outputs; got %d, want 3", len(msgTx.TxOut))
+// 	}
 
-	outputs[changeAddr.String()] = expectedChange
-	checkOutputsMatch(t, msgTx, outputs)
+// 	// The outputs in our new TX amount to 25e6 atoms, so to fulfil that
+// 	// createTx should have picked the utxos with indices 4, 3 and 5, which
+// 	// total 25.1e6.
+// 	if len(msgTx.TxIn) != 3 {
+// 		t.Fatalf("Unexpected number of inputs; got %d, want 3", len(msgTx.TxIn))
+// 	}
 
-	minFee := feeForSize(defaultFeeIncrement, msgTx.SerializeSize())
-	actualFee := btcutil.Amount(1e3)
-	if minFee > actualFee {
-		t.Fatalf("Requested fee (%v) for tx size higher than actual fee (%v)", minFee, actualFee)
-	}
-}
+// 	// Given the input (15e6 + 10e6 + 1e7) and requested output (15e6 + 10e6)
+// 	// amounts in the new TX, we should have a change output with 8.99e6, which
+// 	// implies a fee of 1e4 atoms.
+// 	expectedChange := dcrutil.Amount(8.99e6)
 
-func TestCreateTxInsufficientFundsError(t *testing.T) {
-	outputs := map[string]btcutil.Amount{outAddr1: 10, outAddr2: 1e9}
-	eligible := mockCredits(t, txInfo.hex, []uint32{1})
-	bs := &waddrmgr.BlockStamp{Height: 11111}
-	account := uint32(0)
-	changeAddr, _ := btcutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", &chaincfg.TestNet3Params)
-	var tstChangeAddress = func(account uint32) (btcutil.Address, error) {
-		return changeAddr, nil
-	}
+// 	outputs[changeAddr.String()] = expectedChange
+// 	checkOutputsMatch(t, msgTx, outputs)
 
-	_, err := createTx(eligible, outputs, bs, defaultFeeIncrement, nil, account, tstChangeAddress, &chaincfg.TestNet3Params, false)
+// 	minFee := feeForSize(defaultFeeIncrement, msgTx.SerializeSize())
+// 	actualFee := dcrutil.Amount(1e4)
+// 	if minFee > actualFee {
+// 		t.Fatalf("Requested fee (%v) for tx size higher than actual fee (%v)", minFee, actualFee)
+// 	}
+// }
 
-	if err == nil {
-		t.Error("Expected InsufficientFundsError, got no error")
-	} else if _, ok := err.(InsufficientFundsError); !ok {
-		t.Errorf("Unexpected error, got %v, want InsufficientFundsError", err)
-	}
-}
+// func TestCreateTxInsufficientFundsError(t *testing.T) {
+// 	outputs := map[string]dcrutil.Amount{outAddr1: 10, outAddr2: 1e9}
+// 	eligible := mockCredits(t, txInfo.hex, []uint32{1})
+// 	bs := &waddrmgr.BlockStamp{Height: 11111}
+// 	account := uint32(0)
+// 	changeAddr, _ := dcrutil.DecodeAddress("muqW4gcixv58tVbSKRC5q6CRKy8RmyLgZ5", &chaincfg.TestNetParams)
+// 	var tstChangeAddress = func(account uint32) (dcrutil.Address, error) {
+// 		return changeAddr, nil
+// 	}
+
+// 	// Create Simnet wallet.
+
+// 	_, err := w.createTx(eligible, outputs, bs, defaultFeeIncrement, nil, account, tstChangeAddress, &chaincfg.TestNetParams, false)
+
+// 	if err == nil {
+// 		t.Error("Expected InsufficientFundsError, got no error")
+// 	} else if _, ok := err.(InsufficientFundsError); !ok {
+// 		t.Errorf("Unexpected error, got %v, want InsufficientFundsError", err)
+// 	}
+// }
 
 // checkOutputsMatch checks that the outputs in the tx match the expected ones.
-func checkOutputsMatch(t *testing.T, msgtx *wire.MsgTx, expected map[string]btcutil.Amount) {
+func checkOutputsMatch(t *testing.T, msgtx *wire.MsgTx, expected map[string]dcrutil.Amount) {
 	// This is a bit convoluted because the index of the change output is randomized.
 	for addrStr, v := range expected {
-		addr, err := btcutil.DecodeAddress(addrStr, &chaincfg.TestNet3Params)
+		addr, err := dcrutil.DecodeAddress(addrStr, &chaincfg.TestNetParams)
 		if err != nil {
 			t.Fatalf("Cannot decode address: %v", err)
 		}
@@ -188,13 +197,13 @@ func newManager(t *testing.T, privKeys []string, bs *waddrmgr.BlockStamp) *waddr
 	pubPassphrase := []byte("pub")
 	privPassphrase := []byte("priv")
 	mgr, err := waddrmgr.Create(namespace, seed, pubPassphrase,
-		privPassphrase, &chaincfg.TestNet3Params, fastScrypt)
+		privPassphrase, &chaincfg.TestNetParams, fastScrypt)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for _, key := range privKeys {
-		wif, err := btcutil.DecodeWIF(key)
+		wif, err := dcrutil.DecodeWIF(key)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -216,7 +225,7 @@ func mockCredits(t *testing.T, txHex string, indices []uint32) []wtxmgr.Credit {
 	if err != nil {
 		t.Fatal(err)
 	}
-	utx, err := btcutil.NewTxFromBytes(serialized)
+	utx, err := dcrutil.NewTxFromBytes(serialized)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +243,7 @@ func mockCredits(t *testing.T, txHex string, indices []uint32) []wtxmgr.Credit {
 	}
 	for i, idx := range indices {
 		c.OutPoint.Index = idx
-		c.Amount = btcutil.Amount(tx.TxOut[idx].Value)
+		c.Amount = dcrutil.Amount(tx.TxOut[idx].Value)
 		c.PkScript = tx.TxOut[idx].PkScript
 		c.Received = now
 		c.FromCoinBase = isCB

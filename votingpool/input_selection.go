@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 The btcsuite developers
+ * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,10 +22,10 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 const eligibleInputMinConfirmations = 100
@@ -99,7 +100,7 @@ func (c byAddress) Less(i, j int) bool {
 // and the last used address of lastSeriesID. They're reverse ordered based on
 // their address.
 func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAddress,
-	lastSeriesID uint32, dustThreshold btcutil.Amount, chainHeight int32,
+	lastSeriesID uint32, dustThreshold dcrutil.Amount, chainHeight int32,
 	minConf int) ([]credit, error) {
 
 	if p.Series(lastSeriesID) == nil {
@@ -208,11 +209,11 @@ func (p *Pool) highestUsedSeriesIndex(seriesID uint32) (Index, error) {
 // groupCreditsByAddr converts a slice of credits to a map from the string
 // representation of an encoded address to the unspent outputs associated with
 // that address.
-func groupCreditsByAddr(credits []wtxmgr.Credit, chainParams *chaincfg.Params) (
+func groupCreditsByAddr(credits []*wtxmgr.Credit, chainParams *chaincfg.Params) (
 	map[string][]wtxmgr.Credit, error) {
 	addrMap := make(map[string][]wtxmgr.Credit)
 	for _, c := range credits {
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(c.PkScript, chainParams)
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(txscript.DefaultScriptVersion, c.PkScript, chainParams)
 		if err != nil {
 			return nil, newError(ErrInputSelection, "failed to obtain input address", err)
 		}
@@ -224,9 +225,9 @@ func groupCreditsByAddr(credits []wtxmgr.Credit, chainParams *chaincfg.Params) (
 		}
 		encAddr := addrs[0].EncodeAddress()
 		if v, ok := addrMap[encAddr]; ok {
-			addrMap[encAddr] = append(v, c)
+			addrMap[encAddr] = append(v, *c)
 		} else {
-			addrMap[encAddr] = []wtxmgr.Credit{c}
+			addrMap[encAddr] = []wtxmgr.Credit{*c}
 		}
 	}
 
@@ -237,7 +238,7 @@ func groupCreditsByAddr(credits []wtxmgr.Credit, chainParams *chaincfg.Params) (
 // to number of confirmations, the dust threshold and that it is not
 // the charter output.
 func (p *Pool) isCreditEligible(c credit, minConf int, chainHeight int32,
-	dustThreshold btcutil.Amount) bool {
+	dustThreshold dcrutil.Amount) bool {
 	if c.Amount < dustThreshold {
 		return false
 	}
