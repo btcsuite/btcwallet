@@ -857,7 +857,6 @@ func GetTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	var (
 		debitTotal  btcutil.Amount
 		creditTotal btcutil.Amount // Excludes change
-		outputTotal btcutil.Amount
 		fee         btcutil.Amount
 		feeF64      float64
 	)
@@ -869,11 +868,12 @@ func GetTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 			creditTotal += cred.Amount
 		}
 	}
-	for _, output := range details.MsgTx.TxOut {
-		outputTotal -= btcutil.Amount(output.Value)
-	}
 	// Fee can only be determined if every input is a debit.
 	if len(details.Debits) == len(details.MsgTx.TxIn) {
+		var outputTotal btcutil.Amount
+		for _, output := range details.MsgTx.TxOut {
+			outputTotal += btcutil.Amount(output.Value)
+		}
 		fee = debitTotal - outputTotal
 		feeF64 = fee.ToBTC()
 	}
