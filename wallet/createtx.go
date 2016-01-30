@@ -216,6 +216,13 @@ func createTx(eligible []wtxmgr.Credit,
 		feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height, disallowFree)
 	}
 
+	// If we're spending the outputs of an imported address, we default
+	// to generating change addresses from the default account.
+	prevAccount := account
+	if account == waddrmgr.ImportedAddrAccount {
+		account = waddrmgr.DefaultAccountNum
+	}
+
 	var changeAddr btcutil.Address
 	// changeIdx is -1 unless there's a change output.
 	changeIdx := -1
@@ -241,6 +248,11 @@ func createTx(eligible []wtxmgr.Credit,
 		}
 
 		if feeForSize(feeIncrement, msgtx.SerializeSize()) <= feeEst {
+			if change > 0 && prevAccount == waddrmgr.ImportedAddrAccount {
+				log.Warnf("Spend from imported account produced change: moving"+
+					" %v from imported account into default account.", change)
+			}
+
 			// The required fee for this size is less than or equal to what
 			// we guessed, so we're done.
 			break
