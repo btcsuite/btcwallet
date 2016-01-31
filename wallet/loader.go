@@ -110,14 +110,24 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 		return nil, err
 	}
 
-	// Create the address manager.
+	// If a seed was provided, ensure that it is of valid length. Otherwise,
+	// we generate a random seed for the wallet with the recommended seed
+	// length.
 	if seed != nil {
 		if len(seed) < hdkeychain.MinSeedBytes ||
 			len(seed) > hdkeychain.MaxSeedBytes {
 
 			return nil, hdkeychain.ErrInvalidSeedLen
 		}
+	} else {
+		hdSeed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+		if err != nil {
+			return nil, err
+		}
+		seed = hdSeed
 	}
+
+	// Create the address manager.
 	addrMgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
