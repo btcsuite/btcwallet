@@ -62,7 +62,7 @@ type config struct {
 	ShowVersion   bool   `short:"V" long:"version" description:"Display version information and exit"`
 	Create        bool   `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp    bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	DataDir       string `short:"D" long:"datadir" description:"Directory to store wallets and transactions"`
+	DataDir       string `short:"b" long:"datadir" description:"Directory to store wallets and transactions"`
 	MainNet       bool   `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
 	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default testnet3)"`
 	NoInitialLoad bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
