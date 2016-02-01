@@ -119,6 +119,12 @@ type Server struct {
 	requestShutdownChan chan struct{}
 }
 
+// jsonAuthFail sends a message back to the client if the http auth is rejected.
+func jsonAuthFail(w http.ResponseWriter) {
+	w.Header().Add("WWW-Authenticate", `Basic realm="btcwallet RPC"`)
+	http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
+}
+
 // NewServer creates a new server for serving legacy RPC client connections,
 // both HTTP POST and websocket.
 func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Listener) *Server {
@@ -162,7 +168,7 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 
 			if err := server.checkAuthHeader(r); err != nil {
 				log.Warnf("Unauthorized client connection attempt")
-				http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
+				jsonAuthFail(w)
 				return
 			}
 			server.wg.Add(1)
@@ -183,7 +189,7 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 				// being missing, immediately terminate the connection.
 				log.Warnf("Disconnecting improperly authorized " +
 					"websocket client")
-				http.Error(w, "401 Unauthorized.", http.StatusUnauthorized)
+				jsonAuthFail(w)
 				return
 			}
 
