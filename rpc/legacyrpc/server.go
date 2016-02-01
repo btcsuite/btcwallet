@@ -760,7 +760,8 @@ func (t relevantTx) notificationCmds(w *wallet.Wallet) []interface{} {
 		return nil
 	}
 
-	ltr := wallet.ListTransactions(details, syncBlock.Height, w.ChainParams())
+	ltr := wallet.ListTransactions(details, w.Manager, syncBlock.Height,
+		w.ChainParams())
 	ntfns := make([]interface{}, len(ltr))
 	for i := range ntfns {
 		ntfns[i] = btcjson.NewNewTxNtfn(ltr[i].Account, ltr[i])
