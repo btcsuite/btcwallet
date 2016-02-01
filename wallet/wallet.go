@@ -693,20 +693,17 @@ out:
 			break out
 
 		case <-w.lockRequests:
-			timeout = nil
 		case <-timeout:
 		}
 
 		// Select statement fell through by an explicit lock or the
 		// timer expiring.  Lock the manager here.
-		if timeout != nil {
-			timeout = nil
-			err := w.Manager.Lock()
-			if err != nil {
-				log.Errorf("Could not lock wallet: %v", err)
-			} else {
-				w.notifyLockStateChange(true)
-			}
+		timeout = nil
+		err := w.Manager.Lock()
+		if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+			log.Errorf("Could not lock wallet: %v", err)
+		} else {
+			w.notifyLockStateChange(true)
 		}
 	}
 	w.wg.Done()
