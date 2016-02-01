@@ -975,9 +975,10 @@ func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32) CreditCategory {
 // ListTransactions creates a object that may be marshalled to a response result
 // for a listtransactions RPC.
 //
-// TODO: This should be moved out of this package into the main package's
-// rpcserver.go, along with everything that requires this.
-func ListTransactions(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg.Params) []btcjson.ListTransactionsResult {
+// TODO: This should be moved to the legacyrpc package.
+func ListTransactions(details *wtxmgr.TxDetails, addrMgr *waddrmgr.Manager,
+	syncHeight int32, net *chaincfg.Params) []btcjson.ListTransactionsResult {
+
 	var (
 		blockHashStr  string
 		blockTime     int64
@@ -1034,19 +1035,28 @@ outputs:
 		}
 
 		var address string
+		var accountName string
 		_, addrs, _, _ := txscript.ExtractPkScriptAddrs(output.PkScript, net)
 		if len(addrs) == 1 {
-			address = addrs[0].EncodeAddress()
+			addr := addrs[0]
+			address = addr.EncodeAddress()
+			account, err := addrMgr.AddrAccount(addrs[0])
+			if err == nil {
+				accountName, err = addrMgr.AccountName(account)
+				if err != nil {
+					accountName = ""
+				}
+			}
 		}
 
 		amountF64 := btcutil.Amount(output.Value).ToBTC()
 		result := btcjson.ListTransactionsResult{
 			// Fields left zeroed:
 			//   InvolvesWatchOnly
-			//   Account
 			//   BlockIndex
 			//
 			// Fields set below:
+			//   Account (only for non-"send" categories)
 			//   Category
 			//   Amount
 			//   Fee
@@ -1079,6 +1089,7 @@ outputs:
 			results = append(results, result)
 		}
 		if isCredit {
+			result.Account = accountName
 			result.Category = recvCat
 			result.Amount = amountF64
 			result.Fee = nil
@@ -1095,8 +1106,8 @@ func (w *Wallet) ListSinceBlock(start, end, syncHeight int32) ([]btcjson.ListTra
 	txList := []btcjson.ListTransactionsResult{}
 	err := w.TxStore.RangeTransactions(start, end, func(details []wtxmgr.TxDetails) (bool, error) {
 		for _, detail := range details {
-			jsonResults := ListTransactions(&detail, syncHeight,
-				w.chainParams)
+			jsonResults := ListTransactions(&detail, w.Manager,
+				syncHeight, w.chainParams)
 			txList = append(txList, jsonResults...)
 		}
 		return false, nil
@@ -1138,7 +1149,7 @@ func (w *Wallet) ListTransactions(from, count int) ([]btcjson.ListTransactionsRe
 			}
 
 			jsonResults := ListTransactions(&details[i],
-				syncBlock.Height, w.chainParams)
+				w.Manager, syncBlock.Height, w.chainParams)
 			txList = append(txList, jsonResults...)
 		}
 
@@ -1181,7 +1192,7 @@ func (w *Wallet) ListAddressTransactions(pkHashes map[string]struct{}) (
 					continue
 				}
 
-				jsonResults := ListTransactions(detail,
+				jsonResults := ListTransactions(detail, w.Manager,
 					syncBlock.Height, w.chainParams)
 				if err != nil {
 					return false, err
@@ -1214,7 +1225,7 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 		// unsorted, but it will process mined transactions in the
 		// reverse order they were marked mined.
 		for i := len(details) - 1; i >= 0; i-- {
-			jsonResults := ListTransactions(&details[i],
+			jsonResults := ListTransactions(&details[i], w.Manager,
 				syncBlock.Height, w.chainParams)
 			txList = append(txList, jsonResults...)
 		}
