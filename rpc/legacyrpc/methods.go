@@ -1416,6 +1416,10 @@ func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
 	return txShaStr, nil
 }
 
+func isNilOrEmpty(s *string) bool {
+	return s == nil || *s == ""
+}
+
 // SendFrom handles a sendfrom RPC request by creating a new transaction
 // spending unspent transaction outputs for a wallet to another payment
 // address.  Leftover inputs not sent to the payment address or a fee for
@@ -1426,7 +1430,7 @@ func SendFrom(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) 
 
 	// Transaction comments are not yet supported.  Error instead of
 	// pretending to save them.
-	if cmd.Comment != nil || cmd.CommentTo != nil {
+	if !isNilOrEmpty(cmd.Comment) || !isNilOrEmpty(cmd.CommentTo) {
 		return nil, &btcjson.RPCError{
 			Code:    btcjson.ErrRPCUnimplemented,
 			Message: "Transaction comments are not yet supported",
@@ -1468,7 +1472,7 @@ func SendMany(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 
 	// Transaction comments are not yet supported.  Error instead of
 	// pretending to save them.
-	if cmd.Comment != nil {
+	if !isNilOrEmpty(cmd.Comment) {
 		return nil, &btcjson.RPCError{
 			Code:    btcjson.ErrRPCUnimplemented,
 			Message: "Transaction comments are not yet supported",
@@ -1509,7 +1513,7 @@ func SendToAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 
 	// Transaction comments are not yet supported.  Error instead of
 	// pretending to save them.
-	if cmd.Comment != nil || cmd.CommentTo != nil {
+	if !isNilOrEmpty(cmd.Comment) || !isNilOrEmpty(cmd.CommentTo) {
 		return nil, &btcjson.RPCError{
 			Code:    btcjson.ErrRPCUnimplemented,
 			Message: "Transaction comments are not yet supported",
