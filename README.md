@@ -34,11 +34,25 @@ can be found [here](https://github.com/btcsuite/btcd).  An alternative
 SPV mode that is compatible with btcd and Bitcoin Core is planned for
 a future release.
 
-No release-ready graphical frontends currently exist, however the
-proof-of-concept [btcgui](https://github.com/btcsuite/btcgui) project
-shows some of the possibilities of btcwallet.  In the coming months a
-new stable RPC API is planned, at which point a high quality graphical
-frontend can be finished.
+Wallet clients can use one of two RPC servers:
+
+  1. A legacy JSON-RPC server mostly compatible with Bitcoin Core
+
+     The JSON-RPC server exists to ease the migration of wallet applications
+     from Core, but complete compatibility is not guaranteed.  Some portions of
+     the API (and especially accounts) have to work differently due to other
+     design decisions (mostly due to BIP0044).  However, if you find a
+     compatibility issue and feel that it could be reasonably supported, please
+     report an issue.  This server is enabled by default.
+
+  2. An experimental gRPC server
+
+     The gRPC server uses a new API built for btcwallet, but the API is not
+     stabilized and the server is feature gated behind a config option
+     (`--experimentalrpclisten`).  If you don't mind applications breaking due
+     to API changes, don't want to deal with issues of the legacy API, or need
+     notifications for changes to the wallet, this is the RPC server to use.
+     The gRPC server is documented [here](./rpc/documentation/README.md).
 
 Mainnet support is currently disabled by default.  Use of btcwallet on
 mainnet requires passing the `--mainnet` flag on the command line or
@@ -120,18 +134,6 @@ $ cp $GOPATH/src/github.com/btcsuite/btcwallet/sample-btcwallet.conf ~/.btcwalle
 $ $EDITOR ~/.btcd/btcd.conf
 $ $EDITOR ~/.btcwallet/btcwallet.conf
 ```
-
-## Client Usage
-
-Clients wishing to use btcwallet are recommended to connect to the
-`ws` endpoint over a websocket connection.  Messages sent to btcwallet
-over this websocket are expected to follow the standard Bitcoin JSON
-API (partially documented
-[here](https://en.bitcoin.it/wiki/Original_Bitcoin_client/API_Calls_list)).
-Websocket connections also enable additional API extensions and
-JSON-RPC notifications (currently undocumented).  The btcd packages
-`btcjson` and `btcws` provide types and functions for creating and
-JSON (un)marshaling these requests and notifications.
 
 ## Issue Tracker
 
