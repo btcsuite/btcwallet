@@ -37,7 +37,7 @@ a future release.
 No release-ready graphical frontends currently exist, however the
 proof-of-concept [btcgui](https://github.com/btcsuite/btcgui) project
 shows some of the possibilities of btcwallet.  In the coming months a
-new stable RPC API is planned, at which point a high quality graphical
+[new stable RPC API](https://github.com/btcsuite/btcwallet/issues/220) is planned, at which point a high quality graphical
 frontend can be finished.
 
 Mainnet support is currently disabled by default.  Use of btcwallet on
