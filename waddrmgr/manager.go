@@ -1395,8 +1395,10 @@ func (m *Manager) ImportScript(script []byte,
 	// The start block needs to be updated when the newly imported address
 	// is before the current one.
 	updateStartBlock := false
-	if bs.Height < m.syncState.startBlock.Height {
-		updateStartBlock = true
+	if bs != nil {
+		if bs.Height < m.syncState.startBlock.Height {
+			updateStartBlock = true
+		}
 	}
 
 	// Save the new imported address to the db and update start block (if
