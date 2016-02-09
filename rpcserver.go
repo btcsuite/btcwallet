@@ -2506,21 +2506,31 @@ func GetTransaction(w *wallet.Wallet, chainSvr *chain.Client,
 			continue
 		}
 
-		var addr string
+		var address string
+		var accountName string
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			details.MsgTx.TxOut[cred.Index].Version,
 			details.MsgTx.TxOut[cred.Index].PkScript,
 			activeNet.Params)
 		if err == nil && len(addrs) == 1 {
-			addr = addrs[0].EncodeAddress()
+			addr := addrs[0]
+			address = addr.EncodeAddress()
+			account, err := w.Manager.AddrAccount(addr)
+			if err == nil {
+				accountName, err = w.Manager.AccountName(account)
+				if err != nil {
+					accountName = ""
+				}
+			}
+
 		}
 
 		ret.Details = append(ret.Details, dcrjson.GetTransactionDetailsResult{
 			// Fields left zeroed:
 			//   InvolvesWatchOnly
-			//   Account
 			//   Fee
-			Address:  addr,
+			Account:  accountName,
+			Address:  address,
 			Category: credCat,
 			Amount:   cred.Amount.ToCoin(),
 			Vout:     cred.Index,
