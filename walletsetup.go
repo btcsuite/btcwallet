@@ -373,15 +373,27 @@ func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
 		}
 
 		seedStrTrimmed := strings.TrimSpace(seedStr)
+		wordCount := strings.Count(seedStrTrimmed, " ") + 1
 
-		seed, err := pgpwordlist.ToBytesChecksum(seedStrTrimmed)
-		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
-			len(seed) > hdkeychain.MaxSeedBytes {
+		var seed []byte
+		if wordCount == 1 {
+			if len(seedStrTrimmed)%2 != 0 {
+				seedStrTrimmed = "0" + seedStrTrimmed
+			}
+			seed, err = hex.DecodeString(seedStrTrimmed)
 			if err != nil {
 				fmt.Printf("Input error: %v\n", err.Error())
 			}
-
+		} else {
+			seed, err = pgpwordlist.ToBytesChecksum(seedStrTrimmed)
+			if err != nil {
+				fmt.Printf("Input error: %v\n", err.Error())
+			}
+		}
+		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
+			len(seed) > hdkeychain.MaxSeedBytes {
 			fmt.Printf("Invalid seed specified.  Must be a "+
+				"word seed (usually 33 words) using the PGP wordlist or "+
 				"hexadecimal value that is at least %d bits and "+
 				"at most %d bits\n", hdkeychain.MinSeedBytes*8,
 				hdkeychain.MaxSeedBytes*8)
