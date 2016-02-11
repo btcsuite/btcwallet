@@ -106,8 +106,10 @@ type Wallet struct {
 	chainSvrSyncMtx sync.Mutex
 
 	lockedOutpoints map[wire.OutPoint]struct{}
-	FeeIncrement    dcrutil.Amount
-	DisallowFree    bool
+
+	feeIncrementLock sync.Mutex
+	feeIncrement     dcrutil.Amount
+	DisallowFree     bool
 
 	// Channels for rescan processing.  Requests are added and merged with
 	// any waiting requests, before being sent to another goroutine to
@@ -201,7 +203,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		BalanceToMaintain:        btm,
 		CurrentStakeDiff:         &StakeDifficultyInfo{nil, -1, -1},
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
-		FeeIncrement:             feeIncrement,
+		feeIncrement:             feeIncrement,
 		rescanAddJob:             make(chan *RescanJob),
 		rescanBatch:              make(chan *rescanBatch),
 		rescanNotifications:      make(chan interface{}),
@@ -255,6 +257,23 @@ func (w *Wallet) SetStakeDifficulty(sdi *StakeDifficultyInfo) {
 	defer w.stakeSettingsLock.Unlock()
 
 	w.CurrentStakeDiff = sdi
+}
+
+// FeeIncrement is used to get the current feeIncrement for the wallet.
+func (w *Wallet) FeeIncrement() dcrutil.Amount {
+	w.feeIncrementLock.Lock()
+	fee := w.feeIncrement
+	w.feeIncrementLock.Unlock()
+
+	return fee
+}
+
+// SetFeeIncrement is used to set the current w.FeeIncrement for the wallet.
+// Uses non-exported mutex safe setFeeIncrement func
+func (w *Wallet) SetFeeIncrement(fee dcrutil.Amount) {
+	w.feeIncrementLock.Lock()
+	w.feeIncrement = fee
+	w.feeIncrementLock.Unlock()
 }
 
 // SetGenerate is used to enable or disable stake mining in the

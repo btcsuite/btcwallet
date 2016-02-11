@@ -370,7 +370,7 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 		return nil, err
 	}
 
-	return w.createTx(eligible, pairs, bs, w.FeeIncrement, account,
+	return w.createTx(eligible, pairs, bs, w.FeeIncrement(), account,
 		addrFunc, w.chainParams, w.DisallowFree)
 }
 

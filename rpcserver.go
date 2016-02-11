@@ -1339,6 +1339,7 @@ var rpcHandlers = map[string]struct {
 	"getticketmaxprice":      {handler: GetTicketMaxPrice},
 	"gettickets":             {handler: GetTickets},
 	"gettransaction":         {handler: GetTransaction},
+	"getwalletfee":           {handler: GetWalletFee},
 	"help":                   {handler: Help},
 	"importprivkey":          {handler: ImportPrivKey},
 	"importscript":           {handler: ImportScript},
@@ -1805,7 +1806,7 @@ func GetInfo(w *wallet.Wallet, chainSvr *chain.Client,
 	info.Balance = bal.ToCoin()
 	info.KeypoolOldest = time.Now().Unix()
 	info.KeypoolSize = int32(cfg.KeypoolSize)
-	info.PaytxFee = w.FeeIncrement.ToCoin()
+	info.PaytxFee = w.FeeIncrement().ToCoin()
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
 	//  - unlocked_until
@@ -2539,6 +2540,13 @@ func GetTransaction(w *wallet.Wallet, chainSvr *chain.Client,
 
 	ret.Amount = creditTotal.ToCoin()
 	return ret, nil
+}
+
+// GetWalletFee returns the currently set tx fee for the requested wallet
+func GetWalletFee(w *wallet.Wallet, chainSvr *chain.Client,
+	icmd interface{}) (interface{}, error) {
+
+	return w.FeeIncrement(), nil
 }
 
 // These generators create the following global variables in this package:
@@ -3694,7 +3702,7 @@ func SetTxFee(w *wallet.Wallet, chainSvr *chain.Client,
 	if err != nil {
 		return nil, err
 	}
-	w.FeeIncrement = incr
+	w.SetFeeIncrement(incr)
 
 	// A boolean true result is returned upon success.
 	return true, nil
