@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
@@ -36,23 +37,36 @@ import (
 )
 
 // openRPCKeyPair creates or loads the RPC TLS keypair specified by the
-// application config.
+// application config.  This function respects the cfg.OneTimeTLSKey setting.
 func openRPCKeyPair() (tls.Certificate, error) {
-	// Check for existence of cert file and key file.  Generate a new
-	// keypair if both are missing.  If one exists but not the other, the
-	// error will occur in LoadX509KeyPair.
-	_, e1 := os.Stat(cfg.RPCKey)
-	_, e2 := os.Stat(cfg.RPCCert)
-	if os.IsNotExist(e1) && os.IsNotExist(e2) {
-		return generateRPCKeyPair()
+	// Check for existence of the TLS key file.  If one time TLS keys are
+	// enabled but a key already exists, this function should error since
+	// it's possible that a persistent certificate was copied to a remote
+	// machine.  Otherwise, generate a new keypair when the key is missing.
+	// When generating new persistent keys, overwriting an existing cert is
+	// acceptable if the previous execution used a one time TLS key.
+	// Otherwise, both the cert and key should be read from disk.  If the
+	// cert is missing, the read error will occur in LoadX509KeyPair.
+	_, e := os.Stat(cfg.RPCKey)
+	keyExists := !os.IsNotExist(e)
+	switch {
+	case cfg.OneTimeTLSKey && keyExists:
+		err := fmt.Errorf("one time TLS keys are enabled, but TLS key "+
+			"`%s` already exists", cfg.RPCKey)
+		return tls.Certificate{}, err
+	case cfg.OneTimeTLSKey:
+		return generateRPCKeyPair(false)
+	case !keyExists:
+		return generateRPCKeyPair(true)
+	default:
+		return tls.LoadX509KeyPair(cfg.RPCCert, cfg.RPCKey)
 	}
-	return tls.LoadX509KeyPair(cfg.RPCCert, cfg.RPCKey)
 }
 
-// generateRPCKeyPair generates a new RPC TLS keypair and writes the pair in PEM
-// format to the paths specified by the config.  If successful, the new keypair
-// is returned.
-func generateRPCKeyPair() (tls.Certificate, error) {
+// generateRPCKeyPair generates a new RPC TLS keypair and writes the cert and
+// possibly also the key in PEM format to the paths specified by the config.  If
+// successful, the new keypair is returned.
+func generateRPCKeyPair(writeKey bool) (tls.Certificate, error) {
 	log.Infof("Generating TLS certificates...")
 
 	// Create directories for cert and key files if they do not yet exist.
@@ -79,18 +93,21 @@ func generateRPCKeyPair() (tls.Certificate, error) {
 		return tls.Certificate{}, err
 	}
 
-	// Write cert and key files.
+	// Write cert and (potentially) the key files.
 	err = ioutil.WriteFile(cfg.RPCCert, cert, 0600)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	err = ioutil.WriteFile(cfg.RPCKey, key, 0600)
-	if err != nil {
-		rmErr := os.Remove(cfg.RPCCert)
-		if rmErr != nil {
-			log.Warnf("Cannot remove written certificates: %v", rmErr)
+	if writeKey {
+		err = ioutil.WriteFile(cfg.RPCKey, key, 0600)
+		if err != nil {
+			rmErr := os.Remove(cfg.RPCCert)
+			if rmErr != nil {
+				log.Warnf("Cannot remove written certificates: %v",
+					rmErr)
+			}
+			return tls.Certificate{}, err
 		}
-		return tls.Certificate{}, err
 	}
 
 	log.Info("Done generating TLS certificates")

@@ -94,6 +94,7 @@ type config struct {
 	// aren't considered legacy.
 	RPCCert                string   `long:"rpccert" description:"File containing the certificate file"`
 	RPCKey                 string   `long:"rpckey" description:"File containing the certificate key"`
+	OneTimeTLSKey          bool     `long:"onetimetlskey" description:"Generate a new TLS certpair at startup, but only write the certificate to disk"`
 	DisableServerTLS       bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
 	LegacyRPCListeners     []string `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
 	LegacyRPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of legacy RPC clients for standard connections"`
