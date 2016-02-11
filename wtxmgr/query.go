@@ -374,8 +374,14 @@ func (s *Store) rangeBlockTransactions(ns walletdb.Bucket, begin, end int32, f f
 			details = append(details, detail)
 		}
 
-		// Every block record must have at least one transaction, so it
-		// is safe to call f.
+		// Decred: Block records are saved even when no transactions are
+		// included.  This is used to save the votebits from every
+		// block.  This differs from btcwallet where every block must
+		// have one transaction.  Since f may only be called when
+		// len(details) > 0, this must be explicitly tested.
+		if len(details) == 0 {
+			continue
+		}
 		brk, err := f(details)
 		if err != nil || brk {
 			return brk, err
