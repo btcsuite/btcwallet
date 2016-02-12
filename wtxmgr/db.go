@@ -793,7 +793,7 @@ func readUnspentBlock(v []byte, block *Block) error {
 	return nil
 }
 
-// existsUnspent returns the key for the unspent output and the cooresponding
+// existsUnspent returns the key for the unspent output and the corresponding
 // key for the credits bucket.  If there is no unspent output recorded, the
 // credit key is nil.
 func existsUnspent(ns walletdb.Bucket, outPoint *wire.OutPoint) (k, credKey []byte) {

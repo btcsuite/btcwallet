@@ -181,7 +181,7 @@ publishing transactions to the Bitcoin network.
 
 - `string network_address`: The host/IP and optional port of the RPC server to
   connect to.  IP addresses may be IPv4 or IPv6.  If the port is missing, a
-  default port is chosen cooresponding to the default btcd RPC port of the
+  default port is chosen corresponding to the default btcd RPC port of the
   active Bitcoin network.
 
 - `string username`: The RPC username required to authenticate to the RPC
@@ -753,7 +753,7 @@ regarding changes to the blockchain and transactions relevant to the wallet.
 
 - `repeated BlockDetails attached_blocks`: A list of blocks attached to the main
   chain, sorted by increasing height.  All newly mined transactions are included
-  in these messages, in the message cooresponding to the block that contains
+  in these messages, in the message corresponding to the block that contains
   them.  If this field has zero length, the notification is due to an unmined
   transaction being added to the wallet.
 
@@ -912,7 +912,7 @@ transaction was seen.
   - `int64 previous_amount`: The previous output value.
 
 - `repeated Output outputs`: Properties for every transaction output.  Every
-  transaction output has a cooresponding properties message in this repeated
+  transaction output has a corresponding properties message in this repeated
   field.
 
   **Nested message:** `Output`
