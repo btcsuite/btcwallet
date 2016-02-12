@@ -42,9 +42,9 @@ import (
 
 const (
 	// All transactions have 4 bytes for version, 4 bytes of locktime,
-	// and 2 varints for the number of inputs and outputs, and 1 varint
-	// for the witnesses.
-	txOverheadEstimate = 4 + 4 + 1 + 1 + 1
+	// 4 bytes of expiry, and 2 varints for the number of inputs and
+	// outputs, and 1 varint for the witnesses.
+	txOverheadEstimate = 4 + 4 + 4 + 1 + 1 + 1
 
 	// A worst case signature script to redeem a P2PKH output for a
 	// compressed pubkey has 73 bytes of the possible DER signature
@@ -54,9 +54,9 @@ const (
 	sigScriptEstimate = 1 + 73 + 1 + 65 + 1
 
 	// A best case tx input serialization cost is 32 bytes of sha, 4 bytes
-	// of output index, 1 byte for tree, 4 bytes of sequence, and the
-	// estimated signature script size.
-	txInEstimate = 32 + 4 + 1 + 4 + sigScriptEstimate
+	// of output index, 1 byte for tree, 4 bytes of sequence, 12 bytes for
+	// fraud proof, and the estimated signature script size.
+	txInEstimate = 32 + 4 + 1 + 12 + 4 + sigScriptEstimate
 
 	// A P2PKH pkScript contains the following bytes:
 	//  - OP_DUP
@@ -69,12 +69,13 @@ const (
 	// pkScriptEstimateSS
 	pkScriptEstimateSS = 1 + 1 + 1 + 1 + 20 + 1 + 1
 
-	// txOutEstimate is a best case tx output serialization cost is 8 bytes of value, one
-	// byte of varint, and the pkScript size.
-	txOutEstimate = 8 + 1 + pkScriptEstimate
+	// txOutEstimate is a best case tx output serialization cost is 8 bytes
+	// of value, two bytes of version, one byte of varint, and the pkScript
+	// size.
+	txOutEstimate = 8 + 2 + 1 + pkScriptEstimate
 
 	// ssTxOutEsimate
-	ssTxOutEsimate = 8 + 1 + pkScriptEstimateSS
+	ssTxOutEsimate = 8 + 2 + 1 + pkScriptEstimateSS
 )
 
 var (
@@ -352,7 +353,9 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 		needed += amt
 	}
 
-	// Simple fee guesstimate.
+	// Simple fee guesstimate. Assume that there are double
+	// the amount of inputs as compared to the amount of
+	// outputs.
 	var feeIncrement dcrutil.Amount
 	switch {
 	case w.chainParams == &chaincfg.MainNetParams:
@@ -363,7 +366,7 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 		feeIncrement = FeeIncrementTestnet
 	}
 	needed += feeForSize(feeIncrement,
-		estimateTxSize(len(pairs), len(pairs)))
+		estimateTxSize(len(pairs)*2, len(pairs)))
 
 	eligible, err := w.findEligibleOutputsAmount(account, minconf, needed, bs)
 	if err != nil {
