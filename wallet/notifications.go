@@ -131,9 +131,6 @@ func makeTxSummary(w *Wallet, details *wtxmgr.TxDetails) TransactionSummary {
 	var credIndex int
 	for i, txOut := range details.MsgTx.TxOut {
 		mine := len(details.Credits) > credIndex && details.Credits[credIndex].Index == uint32(i)
-		if !mine && len(details.Debits) == 0 {
-			continue
-		}
 		output := TransactionSummaryOutput{
 			Index:  uint32(i),
 			Amount: btcutil.Amount(txOut.Value),
@@ -156,7 +153,7 @@ func makeTxSummary(w *Wallet, details *wtxmgr.TxDetails) TransactionSummary {
 		Hash:        &details.Hash,
 		Transaction: serializedTx,
 		MyInputs:    inputs,
-		MyOutputs:   outputs,
+		Outputs:     outputs,
 		Fee:         fee,
 		Timestamp:   details.Received.Unix(),
 	}
@@ -198,7 +195,7 @@ func relevantAccounts(w *Wallet, m map[uint32]btcutil.Amount, txs []TransactionS
 		for _, d := range tx.MyInputs {
 			m[d.PreviousAccount] = 0
 		}
-		for _, c := range tx.MyOutputs {
+		for _, c := range tx.Outputs {
 			m[c.Account] = 0
 		}
 	}
@@ -369,7 +366,7 @@ type TransactionSummary struct {
 	Hash        *wire.ShaHash
 	Transaction []byte
 	MyInputs    []TransactionSummaryInput
-	MyOutputs   []TransactionSummaryOutput
+	Outputs     []TransactionSummaryOutput
 	Fee         btcutil.Amount
 	Timestamp   int64
 }

@@ -570,7 +570,7 @@ func marshalTransactionDetails(v []wallet.TransactionSummary) []*pb.TransactionD
 			Hash:        tx.Hash[:],
 			Transaction: tx.Transaction,
 			Debits:      marshalTransactionInputs(tx.MyInputs),
-			Outputs:     marshalTransactionOutputs(tx.MyOutputs),
+			Outputs:     marshalTransactionOutputs(tx.Outputs),
 			Fee:         int64(tx.Fee),
 			Timestamp:   tx.Timestamp,
 		}
