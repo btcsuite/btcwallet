@@ -1956,7 +1956,11 @@ func WalletPassphrase(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.WalletPassphraseCmd)
 
 	timeout := time.Second * time.Duration(cmd.Timeout)
-	err := w.Unlock([]byte(cmd.Passphrase), time.After(timeout))
+	var unlockAfter <-chan time.Time
+	if timeout != 0 {
+		unlockAfter = time.After(timeout)
+	}
+	err := w.Unlock([]byte(cmd.Passphrase), unlockAfter)
 	return nil, err
 }
 
