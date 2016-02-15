@@ -43,8 +43,11 @@ const (
 
 // sstxRecord is the structure for a stored SStx.
 type sstxRecord struct {
-	tx *dcrutil.Tx
-	ts time.Time
+	tx          *dcrutil.Tx
+	ts          time.Time
+	voteBitsSet bool
+	voteBits    uint16
+	voteBitsExt []byte
 }
 
 // ssgenRecord is the structure for a stored SSGen tx. There's no
@@ -122,7 +125,7 @@ func (s *StakeStore) addHashToStore(hash *chainhash.Hash) {
 }
 
 // insertSStx inserts an SStx into the store.
-func (s *StakeStore) insertSStx(sstx *dcrutil.Tx) error {
+func (s *StakeStore) insertSStx(sstx *dcrutil.Tx, voteBits uint16) error {
 	// If we already have the SStx, no need to
 	// try to include twice.
 	exists := s.checkHashInStore(sstx.Sha())
@@ -134,11 +137,14 @@ func (s *StakeStore) insertSStx(sstx *dcrutil.Tx) error {
 	record := &sstxRecord{
 		sstx,
 		time.Now(),
+		true,
+		voteBits,
+		nil, // TODO Allow for extensible voteBits
 	}
 
 	// Add the SStx to the database.
 	err := s.namespace.Update(func(tx walletdb.Tx) error {
-		if putErr := putSStxRecord(tx, record); putErr != nil {
+		if putErr := putSStxRecord(tx, record, voteBits); putErr != nil {
 			return putErr
 		}
 
@@ -156,7 +162,7 @@ func (s *StakeStore) insertSStx(sstx *dcrutil.Tx) error {
 
 // InsertSStx is the exported version of insertSStx that is safe for concurrent
 // access.
-func (s *StakeStore) InsertSStx(sstx *dcrutil.Tx) error {
+func (s *StakeStore) InsertSStx(sstx *dcrutil.Tx, voteBits uint16) error {
 	if s.isClosed {
 		str := "stake store is closed"
 		return stakeStoreError(ErrStoreClosed, str, nil)
@@ -165,7 +171,93 @@ func (s *StakeStore) InsertSStx(sstx *dcrutil.Tx) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.insertSStx(sstx)
+	return s.insertSStx(sstx, voteBits)
+}
+
+// sstxVoteBits fetches the intended voteBits for a given SStx. This per-
+// ticket voteBits will override the default voteBits set by the wallet.
+func (s *StakeStore) sstxVoteBits(sstx *chainhash.Hash) (bool, uint16, error) {
+	// If we already have the SStx, no need to
+	// try to include twice.
+	exists := s.checkHashInStore(sstx)
+	if !exists {
+		str := fmt.Sprintf("ticket %v not found in store", sstx)
+		return false, 0, stakeStoreError(ErrNoExist, str, nil)
+	}
+
+	// Attempt to update the SStx in the database.
+	voteBitsSet := false
+	voteBits := uint16(0)
+	err := s.namespace.View(func(tx walletdb.Tx) error {
+		var fetchErr error
+		if voteBitsSet, voteBits, fetchErr = fetchSStxRecordVoteBits(tx,
+			sstx); fetchErr != nil {
+			return fetchErr
+		}
+
+		return nil
+	})
+	if err != nil {
+		return voteBitsSet, voteBits, err
+	}
+
+	return voteBitsSet, voteBits, err
+}
+
+// SStxVoteBits is the exported version of sstxVoteBits that is
+// safe for concurrent access.
+func (s *StakeStore) SStxVoteBits(sstx *chainhash.Hash) (bool, uint16, error) {
+	if s.isClosed {
+		str := "stake store is closed"
+		return false, 0, stakeStoreError(ErrStoreClosed, str, nil)
+	}
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	return s.sstxVoteBits(sstx)
+}
+
+// updateSStxVoteBits updates the intended voteBits for a given SStx. This per-
+// ticket voteBits will override the default voteBits set by the wallet.
+func (s *StakeStore) updateSStxVoteBits(sstx *chainhash.Hash,
+	voteBits uint16) error {
+	// If we already have the SStx, no need to
+	// try to include twice.
+	exists := s.checkHashInStore(sstx)
+	if !exists {
+		str := fmt.Sprintf("ticket %v not found in store", sstx)
+		return stakeStoreError(ErrNoExist, str, nil)
+	}
+
+	// Attempt to update the SStx in the database.
+	err := s.namespace.Update(func(tx walletdb.Tx) error {
+		if updErr := updateSStxRecordVoteBits(tx, sstx, voteBits); updErr != nil {
+			return updErr
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// UpdateSStxVoteBits is the exported version of updateSStxVoteBits that is
+// safe for concurrent access.
+func (s *StakeStore) UpdateSStxVoteBits(sstx *chainhash.Hash,
+	voteBits uint16) error {
+	if s.isClosed {
+		str := "stake store is closed"
+		return stakeStoreError(ErrStoreClosed, str, nil)
+	}
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	return s.updateSStxVoteBits(sstx, voteBits)
 }
 
 // dumpSStxHashes dumps the hashes of all owned SStxs. Note
@@ -464,7 +556,7 @@ func (s *StakeStore) SignVRTransaction(msgTx *wire.MsgTx, sstx *dcrutil.Tx,
 // GenerateVote creates a new SSGen given a header hash, height, sstx
 // tx hash, and votebits.
 func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
-	sstxHash *chainhash.Hash, voteBits uint16) (*StakeNotification, error) {
+	sstxHash *chainhash.Hash, defaultVoteBits uint16) (*StakeNotification, error) {
 	// 1. Fetch the SStx, then calculate all the values we'll need later for
 	// the generation of the SSGen tx outputs.
 	sstxRecord, err := s.getSStx(sstxHash)
@@ -473,6 +565,14 @@ func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
 	}
 	sstx := sstxRecord.tx
 	sstxMsgTx := sstx.MsgTx()
+
+	// The legacy wallet didn't store anything about the voteBits to use.
+	// In the case we're loading a legacy wallet and the voteBits are
+	// unset, just use the default voteBits as set by the user.
+	voteBits := defaultVoteBits
+	if sstxRecord.voteBitsSet {
+		voteBits = sstxRecord.voteBits
+	}
 
 	// Store the sstx pubkeyhashes and amounts as found in the transaction
 	// outputs.
@@ -801,7 +901,7 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
 	blockHeight int64,
 	tickets []*chainhash.Hash,
-	voteBits uint16) ([]*StakeNotification, error) {
+	defaultVoteBits uint16) ([]*StakeNotification, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -832,7 +932,7 @@ func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
 	// Matching tickets (yay!), generate some SSGen.
 	for i, ticket := range ticketsToPull {
 		ntfns[i], voteErrors[i] = s.generateVote(blockHash, blockHeight, ticket,
-			voteBits)
+			defaultVoteBits)
 	}
 
 	errStr := ""

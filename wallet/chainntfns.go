@@ -391,7 +391,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		}
 
 		if insert {
-			err := w.StakeMgr.InsertSStx(tx)
+			err := w.StakeMgr.InsertSStx(tx, w.VoteBits)
 			if err != nil {
 				log.Errorf("Failed to insert SStx %v"+
 					"into the stake store.", tx.Sha())

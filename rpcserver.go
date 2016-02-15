@@ -1338,6 +1338,7 @@ var rpcHandlers = map[string]struct {
 	"getseed":                {handler: GetSeed},
 	"getticketmaxprice":      {handler: GetTicketMaxPrice},
 	"gettickets":             {handler: GetTickets},
+	"getticketvotebits":      {handler: GetTicketVoteBits},
 	"gettransaction":         {handler: GetTransaction},
 	"getwalletfee":           {handler: GetWalletFee},
 	"help":                   {handler: Help},
@@ -1362,6 +1363,7 @@ var rpcHandlers = map[string]struct {
 	"sendtossrtx":            {handler: SendToSSRtx},
 	"setgenerate":            {handler: SetGenerate},
 	"setticketmaxprice":      {handler: SetTicketMaxPrice},
+	"setticketvotebits":      {handler: SetTicketVoteBits},
 	"settxfee":               {handler: SetTxFee},
 	"signmessage":            {handler: SignMessage},
 	"signrawtransaction":     {handler: SignRawTransaction},
@@ -2394,6 +2396,35 @@ func GetTickets(w *wallet.Wallet, chainSvr *chain.Client,
 	}
 
 	return &dcrjson.GetTicketsResult{ticketsStr}, nil
+}
+
+// GetTicketVoteBits fetches the per-ticket voteBits for a given ticket from
+// a ticket hash. If the voteBits are unset, it returns the default voteBits.
+// Otherwise, it returns the voteBits it finds. Missing tickets return an
+// error.
+func GetTicketVoteBits(w *wallet.Wallet, chainSvr *chain.Client,
+	icmd interface{}) (interface{}, error) {
+	cmd := icmd.(*dcrjson.GetTicketVoteBitsCmd)
+	ticket, err := chainhash.NewHashFromStr(cmd.TxHash)
+	if err != nil {
+		return nil, err
+	}
+
+	set, voteBits, err := w.StakeMgr.SStxVoteBits(ticket)
+	if err != nil {
+		return nil, err
+	}
+	if !set {
+		return &dcrjson.GetTicketVoteBitsResult{
+			VoteBits:    w.VoteBits,
+			VoteBitsExt: "",
+		}, nil
+	}
+
+	return &dcrjson.GetTicketVoteBitsResult{
+		VoteBits:    voteBits,
+		VoteBitsExt: "",
+	}, nil
 }
 
 // GetTransaction handles a gettransaction request by returning details about
@@ -3685,6 +3716,24 @@ func SetTicketMaxPrice(w *wallet.Wallet, chainSvr *chain.Client,
 	}
 
 	w.SetTicketMaxPrice(amt)
+	return nil, nil
+}
+
+// SetTicketVoteBits sets the per-ticket voteBits for a given ticket from
+// a ticket hash. Missing tickets return an error.
+func SetTicketVoteBits(w *wallet.Wallet, chainSvr *chain.Client,
+	icmd interface{}) (interface{}, error) {
+	cmd := icmd.(*dcrjson.SetTicketVoteBitsCmd)
+	ticket, err := chainhash.NewHashFromStr(cmd.TxHash)
+	if err != nil {
+		return nil, err
+	}
+
+	err = w.StakeMgr.UpdateSStxVoteBits(ticket, cmd.VoteBits)
+	if err != nil {
+		return nil, err
+	}
+
 	return nil, nil
 }
 

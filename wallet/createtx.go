@@ -1384,7 +1384,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	// automatically insert it.
 	if _, err := w.Manager.Address(ticketAddr); err == nil {
 		if w.ticketAddress == nil {
-			err = w.StakeMgr.InsertSStx(txTemp)
+			err = w.StakeMgr.InsertSStx(txTemp, w.VoteBits)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to insert SStx %v"+
 					"into the stake store", txTemp.Sha())
