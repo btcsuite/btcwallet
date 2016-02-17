@@ -1556,41 +1556,42 @@ func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []chainhas
 	return nil
 }
 
-// fetchSeed loads the encrypted seed needed to restore the wallet. This will
-// return an error for watching only wallets.
-func fetchLastUsedAddrs(tx walletdb.Tx) ([20]byte, [20]byte, error) {
+// fetchNextToUseAddrs loads the next to use addresses for the internal and
+// external default accounts as 20 byte P2PKH address scripts.
+func fetchNextToUseAddrs(tx walletdb.Tx) ([20]byte, [20]byte, error) {
 	bucket := tx.RootBucket().Bucket(mainBucketName)
 
 	// Load the master private key parameters if they were stored.
-	var lastUsedPkhs []byte
+	var nextToUsePkhs []byte
 	val := bucket.Get(lastDefaultAddsrName)
 	if val != nil {
-		lastUsedPkhs = make([]byte, len(val))
-		copy(lastUsedPkhs, val)
+		nextToUsePkhs = make([]byte, len(val))
+		copy(nextToUsePkhs, val)
 	} else {
-		str := "lastUsedPkhs is not present"
+		str := "nextToUsePkhs is not present"
 		return [20]byte{}, [20]byte{}, managerError(ErrDatabase, str, nil)
 	}
 
 	var addrExtPkh [20]byte
 	var addrIntPkh [20]byte
-	copy(addrExtPkh[:], lastUsedPkhs[:20])
-	copy(addrIntPkh[:], lastUsedPkhs[20:])
+	copy(addrExtPkh[:], nextToUsePkhs[:20])
+	copy(addrIntPkh[:], nextToUsePkhs[20:])
 
 	return addrExtPkh, addrIntPkh, nil
 }
 
-// putSeed inserts the encrypted seed needed to restore the wallet.
-func putLastUsedAddrs(tx walletdb.Tx, addrExtPkh [20]byte,
+// putNextToUseAddrs inserts the next to be used address into the waddrmgr
+// database.
+func putNextToUseAddrs(tx walletdb.Tx, addrExtPkh [20]byte,
 	addrIntPkh [20]byte) error {
 	bucket := tx.RootBucket().Bucket(mainBucketName)
 
 	// Enough space for 2x PKHs.
-	lastUsedPkhs := make([]byte, 40, 40)
-	copy(lastUsedPkhs[:20], addrExtPkh[:])
-	copy(lastUsedPkhs[20:], addrIntPkh[:])
+	nextToUsePkhs := make([]byte, 40, 40)
+	copy(nextToUsePkhs[:20], addrExtPkh[:])
+	copy(nextToUsePkhs[20:], addrIntPkh[:])
 
-	err := bucket.Put(lastDefaultAddsrName, lastUsedPkhs)
+	err := bucket.Put(lastDefaultAddsrName, nextToUsePkhs)
 	if err != nil {
 		str := "failed to store lastUsedPkhs"
 		return managerError(ErrDatabase, str, err)

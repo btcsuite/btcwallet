@@ -18,6 +18,7 @@
 package wallet
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/decred/dcrutil"
@@ -38,13 +39,61 @@ type addressPool struct {
 	addresses []string
 	cursor    int
 	branch    uint32
+	index     uint32
+	started   bool
 	mutex     *sync.Mutex
 	wallet    *Wallet
+}
+
+// NewAddressPool creates a new address pool for the wallet default account.
+func NewAddressPool() *addressPool {
+	return &addressPool{
+		started: false,
+	}
+}
+
+// getLastAddressIndex retrieves the last known address index for the wallet
+// default account's passed branch. If the address couldn't be found, it is
+// assumed that the wallet is being newly initialized and 0, nil are returned.
+func getLastAddressIndex(w *Wallet, branch uint32) (uint32, error) {
+	var lastIndex uint32
+	var err error
+	var lastAddrFunc func(uint32) (waddrmgr.ManagedAddress, uint32, error)
+	switch branch {
+	case waddrmgr.InternalBranch:
+		lastAddrFunc = w.Manager.LastInternalAddress
+	case waddrmgr.ExternalBranch:
+		lastAddrFunc = w.Manager.LastExternalAddress
+	}
+
+	if lastAddrFunc == nil {
+		return 0, fmt.Errorf("unknown branch for last address index in address " +
+			"pool")
+	}
+
+	_, lastIndex, err = lastAddrFunc(waddrmgr.DefaultAccountNum)
+	if err != nil {
+		if errMgr, ok := err.(waddrmgr.ManagerError); ok {
+			if errMgr.ErrorCode == waddrmgr.ErrAddressNotFound {
+				return 0, nil
+			}
+		}
+		return 0, err
+	}
+
+	return lastIndex, nil
 }
 
 // initialize initializes an address pool for usage by loading the latest
 // unused address from the blockchain itself.
 func (a *addressPool) initialize(branch uint32, w *Wallet) error {
+	// Do not reinitialize an address pool that was already started.
+	// This can happen if the RPC client dies due to a disconnect
+	// from the daemon.
+	if a.started {
+		return nil
+	}
+
 	a.addresses = make([]string, 0)
 	a.mutex = new(sync.Mutex)
 	a.wallet = w
@@ -52,30 +101,30 @@ func (a *addressPool) initialize(branch uint32, w *Wallet) error {
 
 	var err error
 
-	// Retrieve the last addresses from wallet closing and storing.
-	lastExtAddr, lastIntAddr, err := w.Manager.LastUsedAddresses()
+	// Retrieve the next to use addresses from wallet closing and storing.
+	lastExtAddr, lastIntAddr, err := w.Manager.NextToUseAddresses()
 	if err != nil {
 		return err
 	}
 	var lastSavedAddr dcrutil.Address
+	switch branch {
+	case waddrmgr.ExternalBranch:
+		lastSavedAddr = lastExtAddr
+	case waddrmgr.InternalBranch:
+		lastSavedAddr = lastIntAddr
+	default:
+		return fmt.Errorf("unknown branch %v for wallet default account given",
+			branch)
+	}
 
 	// Get the last managed address for the account and branch.
-	var lastIndex uint32
-	if branch == waddrmgr.InternalBranch {
-		_, lastIndex, err =
-			a.wallet.Manager.LastInternalAddress(waddrmgr.DefaultAccountNum)
-		if err != nil {
-			return err
-		}
-		lastSavedAddr = lastIntAddr
-	}
-	if branch == waddrmgr.ExternalBranch {
-		_, lastIndex, err =
-			a.wallet.Manager.LastExternalAddress(waddrmgr.DefaultAccountNum)
-		if err != nil {
-			return err
-		}
-		lastSavedAddr = lastExtAddr
+	lastIndex, err := getLastAddressIndex(w, branch)
+	if lastIndex == 0 && err == nil {
+		// Handle the case that the wallet is newly initialized.
+		a.index = 0
+		a.cursor = 0
+		a.started = true
+		return nil
 	}
 
 	// Get the actual last index as recorded in the blockchain.
@@ -125,7 +174,12 @@ func (a *addressPool) initialize(branch uint32, w *Wallet) error {
 		traversed++
 	}
 
+	log.Debugf("Address pool initialized to last actual index %v on pool "+
+		"branch %v", actualLastIndex, branch)
+
+	a.index = actualLastIndex
 	a.cursor = 0
+	a.started = true
 
 	return nil
 }
@@ -135,32 +189,30 @@ func (a *addressPool) initialize(branch uint32, w *Wallet) error {
 // address to the toDelete map. If the address pool runs out of addresses, it
 // generates more from the address manager.
 func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
+	if !a.started {
+		return nil, fmt.Errorf("failed to GetNewAddress; pool not started")
+	}
+
 	// Replenish the pool if we're at the last address.
 	if a.cursor == len(a.addresses)-1 || len(a.addresses) == 0 {
-		if a.branch == waddrmgr.InternalBranch {
-			addrs, err :=
-				a.wallet.Manager.NextInternalAddresses(
-					waddrmgr.DefaultAccountNum, addressPoolBuffer)
-			if err != nil {
-				return nil, err
-			}
-
-			for _, addr := range addrs {
-				a.addresses = append(a.addresses, addr.Address().EncodeAddress())
-			}
+		var nextAddrFunc func(uint32, uint32) ([]waddrmgr.ManagedAddress, error)
+		switch a.branch {
+		case waddrmgr.InternalBranch:
+			nextAddrFunc = a.wallet.Manager.NextInternalAddresses
+		case waddrmgr.ExternalBranch:
+			nextAddrFunc = a.wallet.Manager.NextExternalAddresses
+		default:
+			return nil, fmt.Errorf("unknown default account branch %v", a.branch)
 		}
 
-		if a.branch == waddrmgr.ExternalBranch {
-			addrs, err :=
-				a.wallet.Manager.NextExternalAddresses(
-					waddrmgr.DefaultAccountNum, addressPoolBuffer)
-			if err != nil {
-				return nil, err
-			}
+		addrs, err :=
+			nextAddrFunc(waddrmgr.DefaultAccountNum, addressPoolBuffer)
+		if err != nil {
+			return nil, err
+		}
 
-			for _, addr := range addrs {
-				a.addresses = append(a.addresses, addr.Address().EncodeAddress())
-			}
+		for _, addr := range addrs {
+			a.addresses = append(a.addresses, addr.Address().EncodeAddress())
 		}
 	}
 
@@ -169,6 +221,10 @@ func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
 	curAddressStr := a.addresses[a.cursor]
 	curAddress, _ := dcrutil.DecodeAddress(curAddressStr, a.wallet.chainParams)
 	a.cursor++
+	a.index++
+
+	log.Debugf("Get new address for branch %v returned %s (idx %v) from "+
+		"the address pool", a.branch, curAddressStr, a.index)
 
 	// Add the address to the notifications watcher.
 	addrs := make([]dcrutil.Address, 1)
@@ -183,10 +239,35 @@ func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
 // BatchFinish must be run after every successful series of usages of
 // GetNewAddress to purge the addresses from the unused map.
 func (a *addressPool) BatchFinish() {
+	// We used all the addresses, so we need to pull new addresses
+	// on the next call of this function.
 	if a.cursor >= len(a.addresses) {
 		a.addresses = nil
 		a.cursor = 0
 		return
+	}
+
+	// Write the next address to use to the database.
+	addr, err := a.wallet.Manager.GetAddress(a.index+1,
+		waddrmgr.DefaultAccountNum, a.branch)
+	if err != nil {
+		log.Errorf("Encountered unexpected error when trying to get "+
+			"the next to use address for branch %v, index %v", a.branch,
+			a.index+1)
+	}
+	switch a.branch {
+	case waddrmgr.ExternalBranch:
+		err = a.wallet.Manager.StoreNextToUseAddresses(addr, nil)
+		if err != nil {
+			log.Errorf("Failed to store next to use address for external "+
+				"pool in the manager on batch finish: %v", err.Error())
+		}
+	case waddrmgr.InternalBranch:
+		err = a.wallet.Manager.StoreNextToUseAddresses(nil, addr)
+		if err != nil {
+			log.Errorf("Failed to store next to use address for internal "+
+				"pool in the manager on batch finish: %v", err.Error())
+		}
 	}
 
 	a.addresses = a.addresses[a.cursor:len(a.addresses)]
@@ -197,6 +278,7 @@ func (a *addressPool) BatchFinish() {
 // of GetNewAddress to restore the cursor to the original position in
 // the slice, thus marking all addresses unused again.
 func (a *addressPool) BatchRollback() {
+	a.index -= uint32(a.cursor)
 	a.cursor = 0
 }
 
@@ -211,6 +293,9 @@ func (w *Wallet) CloseAddressPools() {
 	if w.externalPool == nil {
 		return
 	}
+	if !w.internalPool.started || !w.externalPool.started {
+		return
+	}
 	if w.internalPool.mutex == nil {
 		return
 	}
@@ -223,22 +308,22 @@ func (w *Wallet) CloseAddressPools() {
 	defer w.internalPool.mutex.Unlock()
 	defer w.externalPool.mutex.Unlock()
 
-	lastExtAddr, err := w.externalPool.GetNewAddress()
+	nextExtAddr, err := w.externalPool.GetNewAddress()
 	if err != nil {
-		log.Errorf("Failed to get last used address for address "+
+		log.Errorf("Failed to get next to use address for address "+
 			"pool external: %v", err.Error())
 		return
 	}
-	lastIntAddr, err := w.internalPool.GetNewAddress()
+	nextIntAddr, err := w.internalPool.GetNewAddress()
 	if err != nil {
-		log.Errorf("Failed to get last used address for address "+
+		log.Errorf("Failed to get next to use address for address "+
 			"pool internal: %v", err.Error())
 		return
 	}
 
-	err = w.Manager.StoreLastUsedAddresses(lastExtAddr, lastIntAddr)
+	err = w.Manager.StoreNextToUseAddresses(nextExtAddr, nextIntAddr)
 	if err != nil {
-		log.Errorf("Failed to store last used addresses for address "+
+		log.Errorf("Failed to store next to use addresses for address "+
 			"pools in the manager: %v", err.Error())
 	}
 	return

@@ -1129,17 +1129,46 @@ func (m *Manager) ExistsAddress(addressID []byte) (bool, error) {
 	return m.existsAddress(addressID)
 }
 
-// storeLastUsedAddresses stores the last used default external and internal
-// addresses to the database.
+// storeNextToUseAddresses stores the last used default external and internal
+// addresses to the database. It will only update one of the values if the
+// other passed address is nil.
 //
 // This function MUST be called with the manager lock held for reads.
-func (m *Manager) storeLastUsedAddresses(lastExt dcrutil.Address,
-	lastInt dcrutil.Address) error {
-	lastExtPKH := lastExt.Hash160()
-	lastIntPKH := lastInt.Hash160()
+func (m *Manager) storeNextToUseAddresses(nextExt dcrutil.Address,
+	nextInt dcrutil.Address) error {
+	// If we're only updating one address, fetch the current contents
+	// and reuse the other address.
+	doFetch := false
+	if nextExt == nil || nextInt == nil {
+		doFetch = true
+	}
+	if doFetch {
+		nextExtFetch, nextIntFetch, err := m.nextToUseAddresses()
+		if err != nil {
+			return maybeConvertDbError(err)
+		}
+		if nextExt == nil {
+			nextExt = nextExtFetch
+		}
+		if nextInt == nil {
+			nextInt = nextIntFetch
+		}
+	}
+
+	// These might still be nil if the wallet is being created from
+	// a seed and the next addresses are uninitialized. Leave them
+	// in their uninitialized state in this case.
+	nextExtPKH := new([20]byte)
+	nextIntPKH := new([20]byte)
+	if nextExt != nil {
+		nextExtPKH = nextExt.Hash160()
+	}
+	if nextInt != nil {
+		nextIntPKH = nextInt.Hash160()
+	}
 
 	err := m.namespace.Update(func(tx walletdb.Tx) error {
-		errLocal := putLastUsedAddrs(tx, *lastExtPKH, *lastIntPKH)
+		errLocal := putNextToUseAddrs(tx, *nextExtPKH, *nextIntPKH)
 		return errLocal
 	})
 	if err != nil {
@@ -1149,31 +1178,31 @@ func (m *Manager) storeLastUsedAddresses(lastExt dcrutil.Address,
 	return nil
 }
 
-// StoreLastUsedAddresses is the exported version of storeLastUsedAddresses. It
+// StoreNextToUseAddresses is the exported version of storeNextToUseAddresses. It
 // is used to store the last used default external and internal addresses to
 // the database upon closing the wallet. This is for addresses in the pool
 // only.
 //
 // This function is safe for concurrent access.
-func (m *Manager) StoreLastUsedAddresses(lastExt dcrutil.Address,
+func (m *Manager) StoreNextToUseAddresses(lastExt dcrutil.Address,
 	lastInt dcrutil.Address) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	return m.storeLastUsedAddresses(lastExt, lastInt)
+	return m.storeNextToUseAddresses(lastExt, lastInt)
 }
 
-// lastUsedAddresses is used to retrieve the last used addresses for the
+// nextToUseAddresses is used to retrieve the next addresses for the
 // default account that were stored upon wallet last closing. If the
 // stored addresses are empty (zeroed), it returns nil pointers for
 // the addresses.
-func (m *Manager) lastUsedAddresses() (dcrutil.Address, dcrutil.Address, error) {
-	var lastExtPKH [20]byte
-	var lastIntPKH [20]byte
+func (m *Manager) nextToUseAddresses() (dcrutil.Address, dcrutil.Address, error) {
+	var nextExtPKH [20]byte
+	var nextIntPKH [20]byte
 
 	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var errLocal error
-		lastExtPKH, lastIntPKH, errLocal = fetchLastUsedAddrs(tx)
+		nextExtPKH, nextIntPKH, errLocal = fetchNextToUseAddrs(tx)
 		return errLocal
 	})
 	if err != nil {
@@ -1183,17 +1212,17 @@ func (m *Manager) lastUsedAddresses() (dcrutil.Address, dcrutil.Address, error) 
 	var addrExt dcrutil.Address
 	var addrInt dcrutil.Address
 	var emptyArray [20]byte
-	if lastExtPKH != emptyArray {
+	if nextExtPKH != emptyArray {
 		var localErr error
-		addrExt, localErr = dcrutil.NewAddressPubKeyHash(lastExtPKH[:],
+		addrExt, localErr = dcrutil.NewAddressPubKeyHash(nextExtPKH[:],
 			m.chainParams, chainec.ECTypeSecp256k1)
 		if localErr != nil {
 			return nil, nil, maybeConvertDbError(localErr)
 		}
 	}
-	if lastIntPKH != emptyArray {
+	if nextIntPKH != emptyArray {
 		var localErr error
-		addrInt, localErr = dcrutil.NewAddressPubKeyHash(lastIntPKH[:],
+		addrInt, localErr = dcrutil.NewAddressPubKeyHash(nextIntPKH[:],
 			m.chainParams, chainec.ECTypeSecp256k1)
 		if localErr != nil {
 			return nil, nil, maybeConvertDbError(localErr)
@@ -1203,17 +1232,17 @@ func (m *Manager) lastUsedAddresses() (dcrutil.Address, dcrutil.Address, error) 
 	return addrExt, addrInt, nil
 }
 
-// LastUsedAddresses is the exported version of storeLastUsedAddresses. It
-// is used to get the last used default external and internal addresses to
+// NextToUseAddresses is the exported version of nextToUseAddresses. It
+// is used to get the next default external and internal addresses from
 // the database upon opening the wallet. This is for addresses in the pool
 // only.
 //
 // This function is safe for concurrent access.
-func (m *Manager) LastUsedAddresses() (dcrutil.Address, dcrutil.Address, error) {
+func (m *Manager) NextToUseAddresses() (dcrutil.Address, dcrutil.Address, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	return m.lastUsedAddresses()
+	return m.nextToUseAddresses()
 }
 
 // ImportPrivateKey imports a WIF private key into the address manager.  The
@@ -2791,7 +2820,7 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase,
 		}
 
 		// Set the last used addresses as empty.
-		err = putLastUsedAddrs(tx, [20]byte{}, [20]byte{})
+		err = putNextToUseAddrs(tx, [20]byte{}, [20]byte{})
 		if err != nil {
 			return err
 		}
@@ -3015,7 +3044,7 @@ func CreateWatchOnly(namespace walletdb.Namespace, hdPubKey string,
 		}
 
 		// Set the last used addresses as empty.
-		err = putLastUsedAddrs(tx, [20]byte{}, [20]byte{})
+		err = putNextToUseAddrs(tx, [20]byte{}, [20]byte{})
 		if err != nil {
 			return err
 		}
