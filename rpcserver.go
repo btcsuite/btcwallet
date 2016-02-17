@@ -2297,7 +2297,7 @@ func GetMasterPubkey(w *wallet.Wallet, chainSvr *chain.Client,
 		return nil, err
 	}
 
-	return &dcrjson.GetMasterPubkeyResult{pkString}, nil
+	return pkString, nil
 }
 
 // GetSeed handles a getseed request by returning the wallet seed encoded as
@@ -2309,7 +2309,7 @@ func GetSeed(w *wallet.Wallet, chainSvr *chain.Client,
 		return nil, err
 	}
 
-	return &dcrjson.GetSeedResult{seedStr}, nil
+	return seedStr, nil
 }
 
 // GetTicketMaxPrice gets the maximum price the user is willing to pay for a

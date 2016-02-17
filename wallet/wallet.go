@@ -773,11 +773,11 @@ func (w *Wallet) bisectLastIndex(hi, low int, account uint32, branch uint32) int
 					continue
 				}
 
-				existsJson, err := w.chainSvr.ExistsAddress(addr)
+				exists, err := w.chainSvr.ExistsAddress(addr)
 				if err != nil {
 					return 0
 				}
-				if existsJson.Exists {
+				if exists {
 					return i + offset
 				}
 			}
@@ -787,11 +787,11 @@ func (w *Wallet) bisectLastIndex(hi, low int, account uint32, branch uint32) int
 			if err != nil {
 				continue
 			}
-			existsJson, err := w.chainSvr.ExistsAddress(addr)
+			exists, err := w.chainSvr.ExistsAddress(addr)
 			if err != nil {
 				return 0
 			}
-			if existsJson.Exists {
+			if exists {
 				return i + offset
 			}
 		}
@@ -836,13 +836,13 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 				continue
 			}
 
-			existsJson, err := w.chainSvr.ExistsAddress(addr)
+			exists, err := w.chainSvr.ExistsAddress(addr)
 			if err != nil {
 				return 0, nil, fmt.Errorf("failed to access chain server: %v",
 					err.Error())
 			}
 
-			if existsJson.Exists {
+			if exists {
 				lastUsed = i
 				break
 			}
@@ -937,13 +937,13 @@ func (w *Wallet) rescanActiveAddresses() error {
 			if err != nil {
 				continue
 			}
-			existsJson, err := w.chainSvr.ExistsAddress(addr)
+			exists, err := w.chainSvr.ExistsAddress(addr)
 			if err != nil {
 				return fmt.Errorf("failed to access chain server: %v",
 					err.Error())
 			}
 
-			if existsJson.Exists {
+			if exists {
 				addrFunction := w.Manager.NextExternalAddresses
 				if i == 1 {
 					addrFunction = w.Manager.NextInternalAddresses
@@ -1683,12 +1683,12 @@ func (w *Wallet) CurrentAddress(account uint32) (dcrutil.Address, error) {
 // existsAddressOnChain checks the chain on daemon to see if the given address
 // has been used before on the main chain.
 func (w *Wallet) existsAddressOnChain(address dcrutil.Address) (bool, error) {
-	reply, err := w.chainSvr.ExistsAddress(address)
+	exists, err := w.chainSvr.ExistsAddress(address)
 	if err != nil {
 		return false, err
 	}
 
-	return reply.Exists, nil
+	return exists, nil
 }
 
 // ExistsAddressOnChain is the exported version of existsAddressOnChain that is
