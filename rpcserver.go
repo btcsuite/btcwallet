@@ -1336,6 +1336,7 @@ var rpcHandlers = map[string]struct {
 	"getreceivedbyaddress":   {handler: GetReceivedByAddress},
 	"getmasterpubkey":        {handler: GetMasterPubkey},
 	"getseed":                {handler: GetSeed},
+	"getstakeinfo":           {handler: GetStakeInfo},
 	"getticketmaxprice":      {handler: GetTicketMaxPrice},
 	"gettickets":             {handler: GetTickets},
 	"getticketvotebits":      {handler: GetTicketVoteBits},
@@ -2310,6 +2311,232 @@ func GetSeed(w *wallet.Wallet, chainSvr *chain.Client,
 	}
 
 	return seedStr, nil
+}
+
+// hashInPointerSlice returns whether a hash exists in a slice of hash pointers
+// or not.
+func hashInPointerSlice(h chainhash.Hash, list []*chainhash.Hash) bool {
+	for _, hash := range list {
+		if h == *hash {
+			return true
+		}
+	}
+
+	return false
+}
+
+// GetStakeInfo gets a large amounts of information about the stake environment
+// and a number of statistics about local staking in the wallet. These are
+// better explained one-by-one:
+//
+//	PoolSize         uint32   Number of live tickets in the ticket pool
+//	Difficulty       int64    Current stake difficulty
+//	AllMempoolTix    uint32   Number of tickets currently in the mempool
+//	OwnMempoolTix    uint32   Number of tickets in mempool that are from
+//	                            this wallet
+//	Immature         uint32   Number of tickets from this wallet that are in the
+//                              blockchain but which are not yet mature
+//	Live             uint32   Number of mature, active tickets owned by this
+//                              wallet
+//	ProportionLive   float64  (Live / PoolSize)
+//	Voted            uint32   Number of votes cast by this wallet
+//	TotalSubsidy     int64    Total amount of coins earned by stake mining
+//	Missed           uint32   Number of missed tickets (failing to vote or
+//                              expired)
+//	ProportionMissed float64  (Missed / (Missed + Voted))
+//	Revoked          uint32   Number of missed tickets that were missed and
+//                              then revoked
+//
+// Getting this information is extremely costly as in involves a massive
+// number of chain server calls.
+func GetStakeInfo(w *wallet.Wallet, chainSvr *chain.Client,
+	icmd interface{}) (interface{}, error) {
+	// Check to ensure both the wallet and the blockchain are synced.
+	// Return a failure if the wallet is currently processing a new
+	// block and is not yet synced.
+	bs := w.Manager.SyncedTo()
+	chainBest, chainHeight, err := chainSvr.GetBestBlock()
+	if err != nil {
+		return nil, err
+	}
+	if !bs.Hash.IsEqual(chainBest) && (int32(chainHeight) != bs.Height) {
+		return nil, fmt.Errorf("the wallet is currently syncing to " +
+			"the best block, please try again later")
+	}
+
+	// Load all transaction hash data about stake transactions from the
+	// stake manager.
+	localTickets, err := w.StakeMgr.DumpSStxHashes()
+	if err != nil {
+		return nil, err
+	}
+	localVotes, err := w.StakeMgr.DumpSSGenHashes()
+	if err != nil {
+		return nil, err
+	}
+	revokedTickets, err := w.StakeMgr.DumpSSRtxTickets()
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the poolsize estimate from the current best block.
+	// The correct poolsize would be the pool size to be mined
+	// into the next block, which takes into account maturing
+	// stake tickets, voters, and expiring tickets. There
+	// currently isn't a way to get this from the RPC, so
+	// just use the current block pool size as a "good
+	// enough" estimate for now.
+	bestBlock, err := chainSvr.GetBlock(&bs.Hash)
+	if err != nil {
+		return nil, err
+	}
+	poolSize := bestBlock.MsgBlock().Header.PoolSize
+
+	// Get the current difficulty.
+	stakeDiff := w.GetStakeDifficulty().StakeDifficulty
+
+	// Fetch all transactions from the mempool, and store only the
+	// the ticket hashes for transactions that are tickets. Then see
+	// how many of these mempool tickets also belong to the wallet.
+	allMempoolTx, err := chainSvr.GetRawMempool()
+	if err != nil {
+		return nil, err
+	}
+	var allMempoolTickets []*chainhash.Hash
+	for _, txHash := range allMempoolTx {
+		tx, err := chainSvr.GetRawTransaction(txHash)
+		if err != nil {
+			log.Warnf("Failed to find mempool transaction while generating "+
+				"stake info (hash %v, err %s)", txHash, err.Error())
+			continue
+		}
+		if is, _ := stake.IsSStx(tx); is {
+			allMempoolTickets = append(allMempoolTickets, txHash)
+		}
+	}
+	var localTicketsInMempool []*chainhash.Hash
+	for i := range localTickets {
+		if hashInPointerSlice(localTickets[i], allMempoolTickets) {
+			localTicketsInMempool = append(localTicketsInMempool,
+				&localTickets[i])
+		}
+	}
+
+	// Access the tickets the wallet owns against the chain server
+	// and see how many exist in the blockchain and how many are
+	// immature. The speed this up a little, cheaper ExistsLiveTicket
+	// calls are first used to determine which tickets are actually
+	// mature. These tickets are cached. Possibly immature tickets
+	// are then determined by checking against this list and
+	// assembling a maybeImmature list. All transactions in the
+	// maybeImmature list are pulled and their height checked.
+	// If they aren't in the blockchain, they are skipped, in they
+	// are in the blockchain and are immature, they are not included
+	// in the immature number of tickets.
+	//
+	// It's not immediately clear why to use this over gettickets.
+	// GetTickets will only return tickets which are directly held
+	// by this wallet's public keys and excludes things like P2SH
+	// scripts that stake pools use. Doing it this way will give
+	// more accurate results.
+	var maybeImmature []*chainhash.Hash
+	liveTicketNum := 0
+	immatureTicketNum := 0
+	for i := range localTickets {
+		exists, err := chainSvr.ExistsLiveTicket(&localTickets[i])
+		if err != nil {
+			log.Warnf("Failed to find assess whether ticket in live bucket "+
+				"when generating stake info (hash %v, err %s)", localTickets[i],
+				err.Error())
+			continue
+		}
+		if exists {
+			liveTicketNum++
+		} else {
+			maybeImmature = append(maybeImmature, &localTickets[i])
+		}
+	}
+	curHeight := int64(bs.Height)
+	ticketMaturity := int64(activeNet.TicketMaturity)
+	for _, ticketHash := range maybeImmature {
+		// Skip tickets that aren't in the blockchain.
+		if hashInPointerSlice(*ticketHash, localTicketsInMempool) {
+			continue
+		}
+
+		txResult, err := chainSvr.GetRawTransactionVerbose(ticketHash)
+		if err != nil {
+			log.Tracef("Failed to find ticket in blockchain while generating "+
+				"stake info (hash %v, err %s)", ticketHash, err.Error())
+			continue
+		}
+
+		immature := (txResult.BlockHeight != 0) &&
+			(curHeight-txResult.BlockHeight < ticketMaturity)
+		if immature {
+			immatureTicketNum++
+		}
+	}
+
+	// Get all the missed tickets from mainnet and determine how many
+	// from this wallet are still missed. Add the number of revoked
+	// tickets to this sum as well.
+	missedNum := 0
+	missedOnChain, err := chainSvr.MissedTickets()
+	if err != nil {
+		return nil, err
+	}
+	for i := range localTickets {
+		if hashInPointerSlice(localTickets[i], missedOnChain) {
+			missedNum++
+		}
+	}
+	missedNum += len(revokedTickets)
+
+	// Get all the subsidy for votes cast by this wallet so far
+	// by accessing the votes directly from the daemon blockchain.
+	totalSubsidy := dcrutil.Amount(0)
+	for i := range localVotes {
+		txResult, err := chainSvr.GetRawTransactionVerbose(&localVotes[i])
+		if err != nil {
+			log.Tracef("Failed to find vote in blockchain while generating "+
+				"stake info (hash %v, err %s)", localVotes[i], err.Error())
+			continue
+		}
+
+		// Check to ensure that the vote was actually included in the
+		// blockchain.
+		if txResult.BlockHeight != 0 {
+			totalSubsidy += dcrutil.Amount(txResult.Vin[0].AmountIn)
+		}
+	}
+
+	// Bring it all together.
+	proportionLive := float64(0.0)
+	if float64(poolSize) > 0.0 {
+		proportionLive = float64(liveTicketNum) / float64(poolSize)
+	}
+	proportionMissed := float64(0.0)
+	if (float64(poolSize) + float64(missedNum)) > 0.0 {
+		proportionMissed = float64(missedNum) /
+			(float64(poolSize) + float64(missedNum))
+	}
+	resp := &dcrjson.GetStakeInfoResult{
+		PoolSize:         poolSize,
+		Difficulty:       dcrutil.Amount(stakeDiff).ToCoin(),
+		AllMempoolTix:    uint32(len(allMempoolTickets)),
+		OwnMempoolTix:    uint32(len(localTicketsInMempool)),
+		Immature:         uint32(immatureTicketNum),
+		Live:             uint32(liveTicketNum),
+		ProportionLive:   proportionLive,
+		Voted:            uint32(len(localVotes)),
+		TotalSubsidy:     totalSubsidy.ToCoin(),
+		Missed:           uint32(missedNum),
+		ProportionMissed: proportionMissed,
+		Revoked:          uint32(len(revokedTickets)),
+	}
+
+	return resp, nil
 }
 
 // GetTicketMaxPrice gets the maximum price the user is willing to pay for a
