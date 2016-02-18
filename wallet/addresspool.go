@@ -41,7 +41,7 @@ type addressPool struct {
 	branch    uint32
 	index     uint32
 	started   bool
-	mutex     *sync.Mutex
+	mutex     sync.Mutex
 	wallet    *Wallet
 }
 
@@ -95,7 +95,6 @@ func (a *addressPool) initialize(branch uint32, w *Wallet) error {
 	}
 
 	a.addresses = make([]string, 0)
-	a.mutex = new(sync.Mutex)
 	a.wallet = w
 	a.branch = branch
 
@@ -294,12 +293,6 @@ func (w *Wallet) CloseAddressPools() {
 		return
 	}
 	if !w.internalPool.started || !w.externalPool.started {
-		return
-	}
-	if w.internalPool.mutex == nil {
-		return
-	}
-	if w.externalPool.mutex == nil {
 		return
 	}
 
