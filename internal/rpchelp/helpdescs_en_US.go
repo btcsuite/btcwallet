@@ -78,7 +78,7 @@ var helpDescsEnUS = map[string]string{
 
 	// GetMasterPubkey help.
 	"getmasterpubkey--synopsis": "Requests the master pubkey from the wallet.",
-	"getmasterpubkeyresult-key": "The master pubkey for the wallet",
+	"getmasterpubkey--result0":  "The master pubkey for the wallet",
 
 	// GetMultisigOutInfo help.
 	"getmultisigoutinfo--synopsis": "Returns information about a multisignature output.",
@@ -100,9 +100,23 @@ var helpDescsEnUS = map[string]string{
 
 	// GetSeed help.
 	"getseed--synopsis": "Returns the seed needed to recreate the wallet.",
+	"getseed--result0":  "The seed cooresponding to the wallet.",
 
-	// GetSeedResult help.
-	"getseedresult-seed": "The seed cooresponding to the wallet.",
+	// GetStakeInfo help.
+	"getstakeinfo--synopsis": "Returns statistics about staking from the wallet.",
+
+	// GetStakeInfoResult help.
+	"getstakeinforesult-poolsize":         "Number of live tickets in the ticket pool.",
+	"getstakeinforesult-difficulty":       "Current stake difficulty.",
+	"getstakeinforesult-allmempooltix":    "Number of tickets currently in the mempool",
+	"getstakeinforesult-immature":         "Number of tickets from this wallet that are in the blockchain but which are not yet mature",
+	"getstakeinforesult-live":             "Number of mature, active tickets owned by this wallet",
+	"getstakeinforesult-proportionlive":   "(Live / PoolSize)",
+	"getstakeinforesult-voted":            "Number of votes cast by this wallet",
+	"getstakeinforesult-totalsubsidy":     "Total amount of coins earned by stake mining",
+	"getstakeinforesult-missed":           "Number of missed tickets (failing to vote or expired)",
+	"getstakeinforesult-proportionmissed": "(Missed / (Missed + Voted))",
+	"getstakeinforesult-revoked":          " Number of missed tickets that were missed and then revoked",
 
 	// GetTickets help.
 	"gettickets--synopsis":       "Returning the hashes of the tickets currently owned by wallet.",

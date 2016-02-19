@@ -180,6 +180,7 @@ var (
 	// meta is used to store meta-data about the address manager
 	// e.g. last account number
 	metaBucketName = []byte("meta")
+
 	// lastAccountName is used to store the metadata - last account
 	// in the manager
 	lastAccountName = []byte("lastaccount")

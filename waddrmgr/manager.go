@@ -18,6 +18,7 @@
 package waddrmgr
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha512"
 	"fmt"
@@ -94,6 +95,12 @@ const (
 	// saltSize is the number of bytes of the salt used when hashing
 	// private passphrases.
 	saltSize = 32
+)
+
+var (
+	// nullSeed is an uninitialized wallet seed. It is stored as a
+	// dummy seed in mainnet wallets to protect the actual seed.
+	nullSeed = bytes.Repeat([]byte{0x00}, 32)
 )
 
 // isReservedAccountName returns true if the account name is reserved.  Reserved
@@ -477,96 +484,55 @@ func (m *Manager) GetSeed() (string, error) {
 		return "", managerError(ErrCrypto, str, nil)
 	}
 
+	if bytes.Equal(seed, nullSeed) {
+		str := "wallet seed was never stored"
+		return "", managerError(ErrNoExist, str, nil)
+	}
+
 	return pgpwordlist.ToStringChecksum(seed)
 }
 
 // GetMasterPubKey gives the encoded string version of the HD master public key
-// if the wallet is unlocked.
-func (m *Manager) GetMasterPubkey() (string, error) {
-	if m.locked {
-		str := "manager is locked"
-		return "", managerError(ErrLocked, str, nil)
-	}
-
-	var seedEnc []byte
+// for the default account of the wallet.
+//
+// This function MUST be called with the manager lock held for writes.
+func (m *Manager) getMasterPubkey() (string, error) {
+	// The account is either invalid or just wasn't cached, so attempt to
+	// load the information from the database.
+	var rowInterface interface{}
 	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
-		var localSeed []byte
-		localSeed, err = fetchSeed(tx)
-		seedEnc = make([]byte, len(localSeed), len(localSeed))
-		copy(seedEnc, localSeed)
+		rowInterface, err = fetchAccountInfo(tx, DefaultAccountNum)
 		return err
 	})
 	if err != nil {
 		return "", maybeConvertDbError(err)
 	}
 
-	seed, err := m.cryptoKeyPriv.Decrypt(seedEnc)
+	// Ensure the account type is a BIP0044 account.
+	row, ok := rowInterface.(*dbBIP0044AccountRow)
+	if !ok {
+		str := fmt.Sprintf("unsupported account type %T", row)
+		err = managerError(ErrDatabase, str, nil)
+	}
+
+	// Use the crypto public key to decrypt the account public extended key.
+	serializedKeyPub, err := m.cryptoKeyPub.Decrypt(row.pubKeyEncrypted)
 	if err != nil {
-		str := "failed to decrypt seed"
-		return "", managerError(ErrCrypto, str, nil)
+		str := fmt.Sprintf("failed to decrypt public key for account %d",
+			DefaultAccountNum)
+		return "", managerError(ErrCrypto, str, err)
 	}
 
-	// Derive the master extended key from the seed.
-	root, err := hdkeychain.NewMaster(seed, m.chainParams)
-	if err != nil {
-		str := "failed to derive master extended key"
-		return "", managerError(ErrKeyChain, str, err)
-	}
+	return string(serializedKeyPub), nil
+}
 
-	// Derive the cointype key according to BIP0044.
-	coinTypeKeyPriv, err := deriveCoinTypeKey(root, m.chainParams.HDCoinType)
-	if err != nil {
-		str := "failed to derive cointype extended key"
-		return "", managerError(ErrKeyChain, str, err)
-	}
+// GetMasterPubkey is the exported, concurrency safe version of getMasterPubkey.
+func (m *Manager) GetMasterPubkey() (string, error) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
 
-	// Derive the account key for the first account according to BIP0044.
-	acctKeyPriv, err := deriveAccountKey(coinTypeKeyPriv, 0)
-	if err != nil {
-		// The seed is unusable if the any of the children in the
-		// required hierarchy can't be derived due to invalid child.
-		if err == hdkeychain.ErrInvalidChild {
-			str := "the provided seed is unusable"
-			return "", managerError(ErrKeyChain, str,
-				hdkeychain.ErrUnusableSeed)
-		}
-
-		return "", err
-	}
-
-	// Ensure the branch keys can be derived for the provided seed according
-	// to BIP0044.
-	if err := checkBranchKeys(acctKeyPriv); err != nil {
-		// The seed is unusable if the any of the children in the
-		// required hierarchy can't be derived due to invalid child.
-		if err == hdkeychain.ErrInvalidChild {
-			str := "the provided seed is unusable"
-			return "", managerError(ErrKeyChain, str,
-				hdkeychain.ErrUnusableSeed)
-		}
-
-		return "", err
-	}
-
-	// The address manager needs the public extended key for the account.
-	pubKeyMaster, err := acctKeyPriv.Neuter()
-	if err != nil {
-		str := "failed to convert private key for account 0"
-		return "", managerError(ErrKeyChain, str, err)
-	}
-
-	pkmStr, err := pubKeyMaster.String()
-	if err != nil {
-		str := "failed to get string public master extended key"
-		return "", managerError(ErrKeyChain, str, err)
-	}
-
-	root.Zero()
-	coinTypeKeyPriv.Zero()
-	acctKeyPriv.Zero()
-
-	return pkmStr, nil
+	return m.getMasterPubkey()
 }
 
 // loadAccountInfo attempts to load and cache information about the given
@@ -2573,7 +2539,7 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte,
 // address manager already exists in the specified namespace.
 func Create(namespace walletdb.Namespace, seed, pubPassphrase,
 	privPassphrase []byte, chainParams *chaincfg.Params,
-	config *ScryptOptions) (*Manager, error) {
+	config *ScryptOptions, unsafeMainNet bool) (*Manager, error) {
 	// Return an error if the manager has already been created in the given
 	// database namespace.
 	exists, err := managerExists(namespace)
@@ -2681,11 +2647,18 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase,
 		str := "failed to generate crypto private key"
 		return nil, managerError(ErrCrypto, str, err)
 	}
+
+	// For SimNet and TestNet wallets, store the seed. For MainNet
+	// wallets, encrypt and store a zeroed 32-byte slice instead.
+	if (chainParams == &chaincfg.MainNetParams) && !unsafeMainNet {
+		seed = nullSeed
+	}
 	seedEnc, err := cryptoKeyPriv.Encrypt(seed)
 	if err != nil {
 		str := "failed to encrypt seed"
 		return nil, managerError(ErrCrypto, str, err)
 	}
+
 	cryptoKeyScript, err := newCryptoKey()
 	if err != nil {
 		str := "failed to generate crypto script key"
@@ -2769,7 +2742,7 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase,
 
 	// Perform all database updates in a single transaction.
 	err = namespace.Update(func(tx walletdb.Tx) error {
-		// Insert the encrypted seed.
+		// Save the encrypted seed.
 		err = putSeed(tx, seedEnc)
 		if err != nil {
 			return err
@@ -3020,7 +2993,7 @@ func CreateWatchOnly(namespace walletdb.Namespace, hdPubKey string,
 			return err
 		}
 
-		// Save the fact this is not a watching-only address manager to
+		// Save the fact this is a watching-only address manager to
 		// the database.
 		err = putWatchingOnly(tx, true)
 		if err != nil {

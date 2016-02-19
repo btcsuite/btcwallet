@@ -47,6 +47,7 @@ const (
 	defaultPruneTickets      = false
 	defaultTicketMaxPrice    = 50.0
 	defaultAutomaticRepair   = false
+	defaultUnsafeMainNet     = false
 
 	// defaultPubPassphrase is the default public wallet passphrase which is
 	// used when the user indicates they do not want additional protection
@@ -114,6 +115,7 @@ type config struct {
 	TicketAddress      string   `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
 	TicketMaxPrice     float64  `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
 	AutomaticRepair    bool     `long:"automaticrepair" description:"Attempt to repair the wallet automatically if a database inconsistency is found"`
+	UnsafeMainNet      bool     `long:"unsafemainnet" description:"Enable storage of master seed in mainnet wallet when calling --create and enable unsafe private information RPC commands"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -291,6 +293,7 @@ func loadConfig() (*config, []string, error) {
 		PruneTickets:      defaultPruneTickets,
 		TicketMaxPrice:    defaultTicketMaxPrice,
 		AutomaticRepair:   defaultAutomaticRepair,
+		UnsafeMainNet:     defaultUnsafeMainNet,
 	}
 
 	// A config file in the current directory takes precedence.

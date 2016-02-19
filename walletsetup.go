@@ -521,7 +521,7 @@ func createWallet(cfg *config) error {
 		return err
 	}
 	manager, err := waddrmgr.Create(namespace, seed, []byte(pubPass),
-		[]byte(privPass), activeNet.Params, nil)
+		[]byte(privPass), activeNet.Params, nil, cfg.UnsafeMainNet)
 	if err != nil {
 		return err
 	}
@@ -599,7 +599,7 @@ func createSimulationWallet(cfg *config) error {
 	}
 
 	manager, err := waddrmgr.Create(waddrmgrNamespace, seed, []byte(pubPass),
-		[]byte(privPass), activeNet.Params, nil)
+		[]byte(privPass), activeNet.Params, nil, false)
 	if err != nil {
 		return err
 	}
@@ -636,7 +636,8 @@ func promptHDPublicKey(reader *bufio.Reader) (string, error) {
 	}
 }
 
-// createWatchingOnlyWallet
+// createWatchingOnlyWallet creates a watching only wallet using the passed
+// extended public key.
 func createWatchingOnlyWallet(cfg *config) error {
 	// Get the public key.
 	reader := bufio.NewReader(os.Stdin)

@@ -126,6 +126,11 @@ var (
 		Code:    dcrjson.ErrRPCInvalidParameter,
 		Message: "Account name is reserved by RPC server",
 	}
+
+	ErrMainNetSafety = dcrjson.RPCError{
+		Code:    dcrjson.ErrRPCWallet,
+		Message: "RPC function disabled on MainNet wallets for security purposes",
+	}
 )
 
 // TODO(jrick): There are several error paths which 'replace' various errors
@@ -1329,12 +1334,12 @@ var rpcHandlers = map[string]struct {
 	"getbestblockhash":       {handler: GetBestBlockHash},
 	"getblockcount":          {handler: GetBlockCount},
 	"getinfo":                {handler: GetInfo},
+	"getmasterpubkey":        {handler: GetMasterPubkey},
 	"getmultisigoutinfo":     {handler: GetMultisigOutInfo},
 	"getnewaddress":          {handler: GetNewAddress},
 	"getrawchangeaddress":    {handler: GetRawChangeAddress},
 	"getreceivedbyaccount":   {handler: GetReceivedByAccount},
 	"getreceivedbyaddress":   {handler: GetReceivedByAddress},
-	"getmasterpubkey":        {handler: GetMasterPubkey},
 	"getseed":                {handler: GetSeed},
 	"getstakeinfo":           {handler: GetStakeInfo},
 	"getticketmaxprice":      {handler: GetTicketMaxPrice},
@@ -1662,6 +1667,12 @@ func CreateMultiSig(w *wallet.Wallet, chainSvr *chain.Client,
 // is locked.
 func DumpPrivKey(w *wallet.Wallet, chainSvr *chain.Client,
 	icmd interface{}) (interface{}, error) {
+	// This is disabled on a mainnet wallet unless run with the specified
+	// flag.
+	if (activeNet.Params == &chaincfg.MainNetParams) && !cfg.UnsafeMainNet {
+		return nil, ErrMainNetSafety
+	}
+
 	cmd := icmd.(*dcrjson.DumpPrivKeyCmd)
 
 	addr, err := decodeAddress(cmd.Address, activeNet.Params)
@@ -2305,6 +2316,12 @@ func GetMasterPubkey(w *wallet.Wallet, chainSvr *chain.Client,
 // a string.
 func GetSeed(w *wallet.Wallet, chainSvr *chain.Client,
 	icmd interface{}) (interface{}, error) {
+	// This is disabled on a mainnet wallet unless run with the specified
+	// flag.
+	if (activeNet.Params == &chaincfg.MainNetParams) && !cfg.UnsafeMainNet {
+		return nil, ErrMainNetSafety
+	}
+
 	seedStr, err := w.Manager.GetSeed()
 	if err != nil {
 		return nil, err
