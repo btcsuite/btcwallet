@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/walletdb"
 )
@@ -210,6 +211,52 @@ func (s *Store) TxDetails(txHash *chainhash.Hash) (*TxDetails, error) {
 		return err
 	})
 	return details, err
+}
+
+// parseTx deserializes a transaction into a MsgTx using the readRawTxRecord
+// method.
+func (s *Store) parseTx(txHash chainhash.Hash, v []byte) (*wire.MsgTx, error) {
+	details := TxDetails{
+		Block: BlockMeta{Block: Block{Height: -1}},
+	}
+	err := readRawTxRecord(&txHash, v, &details.TxRecord)
+	if err != nil {
+		return nil, err
+	}
+
+	return &details.MsgTx, nil
+}
+
+// Tx looks up all the stored wire.MsgTx for a transaction with some
+// hash.  In case of a hash collision, the most recent transaction with a
+// matching hash is returned.
+//
+// Not finding a transaction with this hash is not an error.  In this case,
+// a nil TxDetails is returned.
+func (s *Store) Tx(txHash *chainhash.Hash) (*wire.MsgTx, error) {
+	var msgTx *wire.MsgTx
+	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
+		var err error
+
+		// First, check whether there exists an unmined transaction with this
+		// hash.  Use it if found.
+		v := existsRawUnmined(ns, txHash[:])
+		if v != nil {
+			msgTx, err = s.parseTx(*txHash, v)
+			return err
+		}
+
+		// Otherwise, if there exists a mined transaction with this matching
+		// hash, skip over to the newest and begin fetching the msgTx.
+		_, v = latestTxRecord(ns, txHash)
+		if v == nil {
+			// not found
+			return nil
+		}
+		msgTx, err = s.parseTx(*txHash, v)
+		return err
+	})
+	return msgTx, err
 }
 
 // UniqueTxDetails looks up all recorded details for a transaction recorded

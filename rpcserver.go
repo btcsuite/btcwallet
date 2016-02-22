@@ -40,6 +40,8 @@ import (
 
 	"github.com/btcsuite/websocket"
 
+	"github.com/decred/bitset"
+
 	"github.com/decred/dcrd/blockchain/stake"
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainec"
@@ -47,8 +49,11 @@ import (
 	"github.com/decred/dcrd/dcrjson"
 	"github.com/decred/dcrd/txscript"
 	"github.com/decred/dcrd/wire"
+
 	"github.com/decred/dcrrpcclient"
+
 	"github.com/decred/dcrutil"
+
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet"
@@ -2415,21 +2420,9 @@ func GetStakeInfo(w *wallet.Wallet, chainSvr *chain.Client,
 	// Fetch all transactions from the mempool, and store only the
 	// the ticket hashes for transactions that are tickets. Then see
 	// how many of these mempool tickets also belong to the wallet.
-	allMempoolTx, err := chainSvr.GetRawMempool()
+	allMempoolTickets, err := chainSvr.GetRawMempool(dcrjson.GRMTickets)
 	if err != nil {
 		return nil, err
-	}
-	var allMempoolTickets []*chainhash.Hash
-	for _, txHash := range allMempoolTx {
-		tx, err := chainSvr.GetRawTransaction(txHash)
-		if err != nil {
-			log.Warnf("Failed to find mempool transaction while generating "+
-				"stake info (hash %v, err %s)", txHash, err.Error())
-			continue
-		}
-		if is, _ := stake.IsSStx(tx); is {
-			allMempoolTickets = append(allMempoolTickets, txHash)
-		}
 	}
 	var localTicketsInMempool []*chainhash.Hash
 	for i := range localTickets {
@@ -2459,20 +2452,31 @@ func GetStakeInfo(w *wallet.Wallet, chainSvr *chain.Client,
 	var maybeImmature []*chainhash.Hash
 	liveTicketNum := 0
 	immatureTicketNum := 0
+	localTicketPtrs := make([]*chainhash.Hash, len(localTickets))
 	for i := range localTickets {
-		exists, err := chainSvr.ExistsLiveTicket(&localTickets[i])
-		if err != nil {
-			log.Warnf("Failed to find assess whether ticket in live bucket "+
-				"when generating stake info (hash %v, err %s)", localTickets[i],
-				err.Error())
-			continue
-		}
-		if exists {
+		localTicketPtrs[i] = &localTickets[i]
+	}
+	existsBitSetBStr, err := chainSvr.ExistsLiveTickets(localTicketPtrs)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to find assess whether tickets "+
+			"were in live buckets when generating stake info (err %s)",
+			err.Error())
+	}
+	existsBitSetB, err := hex.DecodeString(existsBitSetBStr)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to decode response for whether tickets "+
+			"were in live buckets when generating stake info (err %s)",
+			err.Error())
+	}
+	existsBitSet := bitset.Bytes(existsBitSetB)
+	for i := range localTickets {
+		if existsBitSet.Get(i) {
 			liveTicketNum++
 		} else {
 			maybeImmature = append(maybeImmature, &localTickets[i])
 		}
 	}
+
 	curHeight := int64(bs.Height)
 	ticketMaturity := int64(activeNet.TicketMaturity)
 	for _, ticketHash := range maybeImmature {
@@ -2481,15 +2485,15 @@ func GetStakeInfo(w *wallet.Wallet, chainSvr *chain.Client,
 			continue
 		}
 
-		txResult, err := chainSvr.GetRawTransactionVerbose(ticketHash)
+		txResult, err := w.TxStore.TxDetails(ticketHash)
 		if err != nil {
 			log.Tracef("Failed to find ticket in blockchain while generating "+
 				"stake info (hash %v, err %s)", ticketHash, err.Error())
 			continue
 		}
 
-		immature := (txResult.BlockHeight != 0) &&
-			(curHeight-txResult.BlockHeight < ticketMaturity)
+		immature := (txResult.Block.Height != -1) &&
+			(curHeight-int64(txResult.Block.Height) < ticketMaturity)
 		if immature {
 			immatureTicketNum++
 		}
@@ -2514,18 +2518,14 @@ func GetStakeInfo(w *wallet.Wallet, chainSvr *chain.Client,
 	// by accessing the votes directly from the daemon blockchain.
 	totalSubsidy := dcrutil.Amount(0)
 	for i := range localVotes {
-		txResult, err := chainSvr.GetRawTransactionVerbose(&localVotes[i])
-		if err != nil {
+		msgTx, err := w.TxStore.Tx(&localVotes[i])
+		if err != nil || msgTx == nil {
 			log.Tracef("Failed to find vote in blockchain while generating "+
-				"stake info (hash %v, err %s)", localVotes[i], err.Error())
+				"stake info (hash %v, err %s)", localVotes[i], err)
 			continue
 		}
 
-		// Check to ensure that the vote was actually included in the
-		// blockchain.
-		if txResult.BlockHeight != 0 {
-			totalSubsidy += dcrutil.Amount(txResult.Vin[0].AmountIn)
-		}
+		totalSubsidy += dcrutil.Amount(msgTx.TxIn[0].ValueIn)
 	}
 
 	// Bring it all together.
