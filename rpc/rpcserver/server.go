@@ -348,10 +348,6 @@ func (s *walletServer) FundTransaction(ctx context.Context, req *pb.FundTransact
 
 	}
 
-	if req.TargetAmount != 0 && totalAmount < btcutil.Amount(req.TargetAmount) {
-		return nil, errors.New("insufficient output value to reach target")
-	}
-
 	var changeScript []byte
 	if req.IncludeChangeScript && totalAmount > btcutil.Amount(req.TargetAmount) {
 		changeAddr, err := s.wallet.NewChangeAddress(req.Account)
