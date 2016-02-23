@@ -73,6 +73,10 @@ var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
 
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the proto package it is being compiled against.
+const _ = proto.ProtoPackageIsVersion1
+
 type ChangePassphraseRequest_Key int32
 
 const (
@@ -92,6 +96,9 @@ var ChangePassphraseRequest_Key_value = map[string]int32{
 func (x ChangePassphraseRequest_Key) String() string {
 	return proto.EnumName(ChangePassphraseRequest_Key_name, int32(x))
 }
+func (ChangePassphraseRequest_Key) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor0, []int{23, 0}
+}
 
 type TransactionDetails struct {
 	Hash        []byte                       `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
@@ -102,9 +109,10 @@ type TransactionDetails struct {
 	Timestamp   int64                        `protobuf:"varint,6,opt,name=timestamp" json:"timestamp,omitempty"`
 }
 
-func (m *TransactionDetails) Reset()         { *m = TransactionDetails{} }
-func (m *TransactionDetails) String() string { return proto.CompactTextString(m) }
-func (*TransactionDetails) ProtoMessage()    {}
+func (m *TransactionDetails) Reset()                    { *m = TransactionDetails{} }
+func (m *TransactionDetails) String() string            { return proto.CompactTextString(m) }
+func (*TransactionDetails) ProtoMessage()               {}
+func (*TransactionDetails) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{0} }
 
 func (m *TransactionDetails) GetDebits() []*TransactionDetails_Input {
 	if m != nil {
@@ -122,13 +130,14 @@ func (m *TransactionDetails) GetOutputs() []*TransactionDetails_Output {
 
 type TransactionDetails_Input struct {
 	Index           uint32 `protobuf:"varint,1,opt,name=index" json:"index,omitempty"`
-	PreviousAccount uint32 `protobuf:"varint,2,opt,name=previous_account" json:"previous_account,omitempty"`
-	PreviousAmount  int64  `protobuf:"varint,3,opt,name=previous_amount" json:"previous_amount,omitempty"`
+	PreviousAccount uint32 `protobuf:"varint,2,opt,name=previous_account,json=previousAccount" json:"previous_account,omitempty"`
+	PreviousAmount  int64  `protobuf:"varint,3,opt,name=previous_amount,json=previousAmount" json:"previous_amount,omitempty"`
 }
 
-func (m *TransactionDetails_Input) Reset()         { *m = TransactionDetails_Input{} }
-func (m *TransactionDetails_Input) String() string { return proto.CompactTextString(m) }
-func (*TransactionDetails_Input) ProtoMessage()    {}
+func (m *TransactionDetails_Input) Reset()                    { *m = TransactionDetails_Input{} }
+func (m *TransactionDetails_Input) String() string            { return proto.CompactTextString(m) }
+func (*TransactionDetails_Input) ProtoMessage()               {}
+func (*TransactionDetails_Input) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{0, 0} }
 
 type TransactionDetails_Output struct {
 	Mine bool `protobuf:"varint,3,opt,name=mine" json:"mine,omitempty"`
@@ -139,9 +148,10 @@ type TransactionDetails_Output struct {
 	Addresses []string `protobuf:"bytes,6,rep,name=addresses" json:"addresses,omitempty"`
 }
 
-func (m *TransactionDetails_Output) Reset()         { *m = TransactionDetails_Output{} }
-func (m *TransactionDetails_Output) String() string { return proto.CompactTextString(m) }
-func (*TransactionDetails_Output) ProtoMessage()    {}
+func (m *TransactionDetails_Output) Reset()                    { *m = TransactionDetails_Output{} }
+func (m *TransactionDetails_Output) String() string            { return proto.CompactTextString(m) }
+func (*TransactionDetails_Output) ProtoMessage()               {}
+func (*TransactionDetails_Output) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{0, 1} }
 
 type BlockDetails struct {
 	Hash         []byte                `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
@@ -150,9 +160,10 @@ type BlockDetails struct {
 	Transactions []*TransactionDetails `protobuf:"bytes,4,rep,name=transactions" json:"transactions,omitempty"`
 }
 
-func (m *BlockDetails) Reset()         { *m = BlockDetails{} }
-func (m *BlockDetails) String() string { return proto.CompactTextString(m) }
-func (*BlockDetails) ProtoMessage()    {}
+func (m *BlockDetails) Reset()                    { *m = BlockDetails{} }
+func (m *BlockDetails) String() string            { return proto.CompactTextString(m) }
+func (*BlockDetails) ProtoMessage()               {}
+func (*BlockDetails) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{1} }
 
 func (m *BlockDetails) GetTransactions() []*TransactionDetails {
 	if m != nil {
@@ -163,74 +174,83 @@ func (m *BlockDetails) GetTransactions() []*TransactionDetails {
 
 type AccountBalance struct {
 	Account      uint32 `protobuf:"varint,1,opt,name=account" json:"account,omitempty"`
-	TotalBalance int64  `protobuf:"varint,2,opt,name=total_balance" json:"total_balance,omitempty"`
+	TotalBalance int64  `protobuf:"varint,2,opt,name=total_balance,json=totalBalance" json:"total_balance,omitempty"`
 }
 
-func (m *AccountBalance) Reset()         { *m = AccountBalance{} }
-func (m *AccountBalance) String() string { return proto.CompactTextString(m) }
-func (*AccountBalance) ProtoMessage()    {}
+func (m *AccountBalance) Reset()                    { *m = AccountBalance{} }
+func (m *AccountBalance) String() string            { return proto.CompactTextString(m) }
+func (*AccountBalance) ProtoMessage()               {}
+func (*AccountBalance) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{2} }
 
 type PingRequest struct {
 }
 
-func (m *PingRequest) Reset()         { *m = PingRequest{} }
-func (m *PingRequest) String() string { return proto.CompactTextString(m) }
-func (*PingRequest) ProtoMessage()    {}
+func (m *PingRequest) Reset()                    { *m = PingRequest{} }
+func (m *PingRequest) String() string            { return proto.CompactTextString(m) }
+func (*PingRequest) ProtoMessage()               {}
+func (*PingRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{3} }
 
 type PingResponse struct {
 }
 
-func (m *PingResponse) Reset()         { *m = PingResponse{} }
-func (m *PingResponse) String() string { return proto.CompactTextString(m) }
-func (*PingResponse) ProtoMessage()    {}
+func (m *PingResponse) Reset()                    { *m = PingResponse{} }
+func (m *PingResponse) String() string            { return proto.CompactTextString(m) }
+func (*PingResponse) ProtoMessage()               {}
+func (*PingResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{4} }
 
 type NetworkRequest struct {
 }
 
-func (m *NetworkRequest) Reset()         { *m = NetworkRequest{} }
-func (m *NetworkRequest) String() string { return proto.CompactTextString(m) }
-func (*NetworkRequest) ProtoMessage()    {}
+func (m *NetworkRequest) Reset()                    { *m = NetworkRequest{} }
+func (m *NetworkRequest) String() string            { return proto.CompactTextString(m) }
+func (*NetworkRequest) ProtoMessage()               {}
+func (*NetworkRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{5} }
 
 type NetworkResponse struct {
-	ActiveNetwork uint32 `protobuf:"varint,1,opt,name=active_network" json:"active_network,omitempty"`
+	ActiveNetwork uint32 `protobuf:"varint,1,opt,name=active_network,json=activeNetwork" json:"active_network,omitempty"`
 }
 
-func (m *NetworkResponse) Reset()         { *m = NetworkResponse{} }
-func (m *NetworkResponse) String() string { return proto.CompactTextString(m) }
-func (*NetworkResponse) ProtoMessage()    {}
+func (m *NetworkResponse) Reset()                    { *m = NetworkResponse{} }
+func (m *NetworkResponse) String() string            { return proto.CompactTextString(m) }
+func (*NetworkResponse) ProtoMessage()               {}
+func (*NetworkResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{6} }
 
 type AccountNumberRequest struct {
-	AccountName string `protobuf:"bytes,1,opt,name=account_name" json:"account_name,omitempty"`
+	AccountName string `protobuf:"bytes,1,opt,name=account_name,json=accountName" json:"account_name,omitempty"`
 }
 
-func (m *AccountNumberRequest) Reset()         { *m = AccountNumberRequest{} }
-func (m *AccountNumberRequest) String() string { return proto.CompactTextString(m) }
-func (*AccountNumberRequest) ProtoMessage()    {}
+func (m *AccountNumberRequest) Reset()                    { *m = AccountNumberRequest{} }
+func (m *AccountNumberRequest) String() string            { return proto.CompactTextString(m) }
+func (*AccountNumberRequest) ProtoMessage()               {}
+func (*AccountNumberRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{7} }
 
 type AccountNumberResponse struct {
-	AccountNumber uint32 `protobuf:"varint,1,opt,name=account_number" json:"account_number,omitempty"`
+	AccountNumber uint32 `protobuf:"varint,1,opt,name=account_number,json=accountNumber" json:"account_number,omitempty"`
 }
 
-func (m *AccountNumberResponse) Reset()         { *m = AccountNumberResponse{} }
-func (m *AccountNumberResponse) String() string { return proto.CompactTextString(m) }
-func (*AccountNumberResponse) ProtoMessage()    {}
+func (m *AccountNumberResponse) Reset()                    { *m = AccountNumberResponse{} }
+func (m *AccountNumberResponse) String() string            { return proto.CompactTextString(m) }
+func (*AccountNumberResponse) ProtoMessage()               {}
+func (*AccountNumberResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{8} }
 
 type AccountsRequest struct {
 }
 
-func (m *AccountsRequest) Reset()         { *m = AccountsRequest{} }
-func (m *AccountsRequest) String() string { return proto.CompactTextString(m) }
-func (*AccountsRequest) ProtoMessage()    {}
+func (m *AccountsRequest) Reset()                    { *m = AccountsRequest{} }
+func (m *AccountsRequest) String() string            { return proto.CompactTextString(m) }
+func (*AccountsRequest) ProtoMessage()               {}
+func (*AccountsRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{9} }
 
 type AccountsResponse struct {
 	Accounts           []*AccountsResponse_Account `protobuf:"bytes,1,rep,name=accounts" json:"accounts,omitempty"`
-	CurrentBlockHash   []byte                      `protobuf:"bytes,2,opt,name=current_block_hash,proto3" json:"current_block_hash,omitempty"`
-	CurrentBlockHeight int32                       `protobuf:"varint,3,opt,name=current_block_height" json:"current_block_height,omitempty"`
+	CurrentBlockHash   []byte                      `protobuf:"bytes,2,opt,name=current_block_hash,json=currentBlockHash,proto3" json:"current_block_hash,omitempty"`
+	CurrentBlockHeight int32                       `protobuf:"varint,3,opt,name=current_block_height,json=currentBlockHeight" json:"current_block_height,omitempty"`
 }
 
-func (m *AccountsResponse) Reset()         { *m = AccountsResponse{} }
-func (m *AccountsResponse) String() string { return proto.CompactTextString(m) }
-func (*AccountsResponse) ProtoMessage()    {}
+func (m *AccountsResponse) Reset()                    { *m = AccountsResponse{} }
+func (m *AccountsResponse) String() string            { return proto.CompactTextString(m) }
+func (*AccountsResponse) ProtoMessage()               {}
+func (*AccountsResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{10} }
 
 func (m *AccountsResponse) GetAccounts() []*AccountsResponse_Account {
 	if m != nil {
@@ -240,103 +260,114 @@ func (m *AccountsResponse) GetAccounts() []*AccountsResponse_Account {
 }
 
 type AccountsResponse_Account struct {
-	AccountNumber    uint32 `protobuf:"varint,1,opt,name=account_number" json:"account_number,omitempty"`
-	AccountName      string `protobuf:"bytes,2,opt,name=account_name" json:"account_name,omitempty"`
-	TotalBalance     int64  `protobuf:"varint,3,opt,name=total_balance" json:"total_balance,omitempty"`
-	ExternalKeyCount uint32 `protobuf:"varint,4,opt,name=external_key_count" json:"external_key_count,omitempty"`
-	InternalKeyCount uint32 `protobuf:"varint,5,opt,name=internal_key_count" json:"internal_key_count,omitempty"`
-	ImportedKeyCount uint32 `protobuf:"varint,6,opt,name=imported_key_count" json:"imported_key_count,omitempty"`
+	AccountNumber    uint32 `protobuf:"varint,1,opt,name=account_number,json=accountNumber" json:"account_number,omitempty"`
+	AccountName      string `protobuf:"bytes,2,opt,name=account_name,json=accountName" json:"account_name,omitempty"`
+	TotalBalance     int64  `protobuf:"varint,3,opt,name=total_balance,json=totalBalance" json:"total_balance,omitempty"`
+	ExternalKeyCount uint32 `protobuf:"varint,4,opt,name=external_key_count,json=externalKeyCount" json:"external_key_count,omitempty"`
+	InternalKeyCount uint32 `protobuf:"varint,5,opt,name=internal_key_count,json=internalKeyCount" json:"internal_key_count,omitempty"`
+	ImportedKeyCount uint32 `protobuf:"varint,6,opt,name=imported_key_count,json=importedKeyCount" json:"imported_key_count,omitempty"`
 }
 
-func (m *AccountsResponse_Account) Reset()         { *m = AccountsResponse_Account{} }
-func (m *AccountsResponse_Account) String() string { return proto.CompactTextString(m) }
-func (*AccountsResponse_Account) ProtoMessage()    {}
+func (m *AccountsResponse_Account) Reset()                    { *m = AccountsResponse_Account{} }
+func (m *AccountsResponse_Account) String() string            { return proto.CompactTextString(m) }
+func (*AccountsResponse_Account) ProtoMessage()               {}
+func (*AccountsResponse_Account) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{10, 0} }
 
 type RenameAccountRequest struct {
-	AccountNumber uint32 `protobuf:"varint,1,opt,name=account_number" json:"account_number,omitempty"`
-	NewName       string `protobuf:"bytes,2,opt,name=new_name" json:"new_name,omitempty"`
+	AccountNumber uint32 `protobuf:"varint,1,opt,name=account_number,json=accountNumber" json:"account_number,omitempty"`
+	NewName       string `protobuf:"bytes,2,opt,name=new_name,json=newName" json:"new_name,omitempty"`
 }
 
-func (m *RenameAccountRequest) Reset()         { *m = RenameAccountRequest{} }
-func (m *RenameAccountRequest) String() string { return proto.CompactTextString(m) }
-func (*RenameAccountRequest) ProtoMessage()    {}
+func (m *RenameAccountRequest) Reset()                    { *m = RenameAccountRequest{} }
+func (m *RenameAccountRequest) String() string            { return proto.CompactTextString(m) }
+func (*RenameAccountRequest) ProtoMessage()               {}
+func (*RenameAccountRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{11} }
 
 type RenameAccountResponse struct {
 }
 
-func (m *RenameAccountResponse) Reset()         { *m = RenameAccountResponse{} }
-func (m *RenameAccountResponse) String() string { return proto.CompactTextString(m) }
-func (*RenameAccountResponse) ProtoMessage()    {}
+func (m *RenameAccountResponse) Reset()                    { *m = RenameAccountResponse{} }
+func (m *RenameAccountResponse) String() string            { return proto.CompactTextString(m) }
+func (*RenameAccountResponse) ProtoMessage()               {}
+func (*RenameAccountResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{12} }
 
 type NextAccountRequest struct {
 	Passphrase  []byte `protobuf:"bytes,1,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
-	AccountName string `protobuf:"bytes,2,opt,name=account_name" json:"account_name,omitempty"`
+	AccountName string `protobuf:"bytes,2,opt,name=account_name,json=accountName" json:"account_name,omitempty"`
 }
 
-func (m *NextAccountRequest) Reset()         { *m = NextAccountRequest{} }
-func (m *NextAccountRequest) String() string { return proto.CompactTextString(m) }
-func (*NextAccountRequest) ProtoMessage()    {}
+func (m *NextAccountRequest) Reset()                    { *m = NextAccountRequest{} }
+func (m *NextAccountRequest) String() string            { return proto.CompactTextString(m) }
+func (*NextAccountRequest) ProtoMessage()               {}
+func (*NextAccountRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{13} }
 
 type NextAccountResponse struct {
-	AccountNumber uint32 `protobuf:"varint,1,opt,name=account_number" json:"account_number,omitempty"`
+	AccountNumber uint32 `protobuf:"varint,1,opt,name=account_number,json=accountNumber" json:"account_number,omitempty"`
 }
 
-func (m *NextAccountResponse) Reset()         { *m = NextAccountResponse{} }
-func (m *NextAccountResponse) String() string { return proto.CompactTextString(m) }
-func (*NextAccountResponse) ProtoMessage()    {}
+func (m *NextAccountResponse) Reset()                    { *m = NextAccountResponse{} }
+func (m *NextAccountResponse) String() string            { return proto.CompactTextString(m) }
+func (*NextAccountResponse) ProtoMessage()               {}
+func (*NextAccountResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{14} }
 
 type NextAddressRequest struct {
 	Account uint32 `protobuf:"varint,1,opt,name=account" json:"account,omitempty"`
 }
 
-func (m *NextAddressRequest) Reset()         { *m = NextAddressRequest{} }
-func (m *NextAddressRequest) String() string { return proto.CompactTextString(m) }
-func (*NextAddressRequest) ProtoMessage()    {}
+func (m *NextAddressRequest) Reset()                    { *m = NextAddressRequest{} }
+func (m *NextAddressRequest) String() string            { return proto.CompactTextString(m) }
+func (*NextAddressRequest) ProtoMessage()               {}
+func (*NextAddressRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{15} }
 
 type NextAddressResponse struct {
 	Address string `protobuf:"bytes,1,opt,name=address" json:"address,omitempty"`
 }
 
-func (m *NextAddressResponse) Reset()         { *m = NextAddressResponse{} }
-func (m *NextAddressResponse) String() string { return proto.CompactTextString(m) }
-func (*NextAddressResponse) ProtoMessage()    {}
+func (m *NextAddressResponse) Reset()                    { *m = NextAddressResponse{} }
+func (m *NextAddressResponse) String() string            { return proto.CompactTextString(m) }
+func (*NextAddressResponse) ProtoMessage()               {}
+func (*NextAddressResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{16} }
 
 type ImportPrivateKeyRequest struct {
 	Passphrase    []byte `protobuf:"bytes,1,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
 	Account       uint32 `protobuf:"varint,2,opt,name=account" json:"account,omitempty"`
-	PrivateKeyWif string `protobuf:"bytes,3,opt,name=private_key_wif" json:"private_key_wif,omitempty"`
+	PrivateKeyWif string `protobuf:"bytes,3,opt,name=private_key_wif,json=privateKeyWif" json:"private_key_wif,omitempty"`
 	Rescan        bool   `protobuf:"varint,4,opt,name=rescan" json:"rescan,omitempty"`
 }
 
-func (m *ImportPrivateKeyRequest) Reset()         { *m = ImportPrivateKeyRequest{} }
-func (m *ImportPrivateKeyRequest) String() string { return proto.CompactTextString(m) }
-func (*ImportPrivateKeyRequest) ProtoMessage()    {}
+func (m *ImportPrivateKeyRequest) Reset()                    { *m = ImportPrivateKeyRequest{} }
+func (m *ImportPrivateKeyRequest) String() string            { return proto.CompactTextString(m) }
+func (*ImportPrivateKeyRequest) ProtoMessage()               {}
+func (*ImportPrivateKeyRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{17} }
 
 type ImportPrivateKeyResponse struct {
 }
 
-func (m *ImportPrivateKeyResponse) Reset()         { *m = ImportPrivateKeyResponse{} }
-func (m *ImportPrivateKeyResponse) String() string { return proto.CompactTextString(m) }
-func (*ImportPrivateKeyResponse) ProtoMessage()    {}
+func (m *ImportPrivateKeyResponse) Reset()                    { *m = ImportPrivateKeyResponse{} }
+func (m *ImportPrivateKeyResponse) String() string            { return proto.CompactTextString(m) }
+func (*ImportPrivateKeyResponse) ProtoMessage()               {}
+func (*ImportPrivateKeyResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{18} }
 
 type BalanceRequest struct {
-	AccountNumber         uint32 `protobuf:"varint,1,opt,name=account_number" json:"account_number,omitempty"`
-	RequiredConfirmations int32  `protobuf:"varint,2,opt,name=required_confirmations" json:"required_confirmations,omitempty"`
+	AccountNumber         uint32 `protobuf:"varint,1,opt,name=account_number,json=accountNumber" json:"account_number,omitempty"`
+	RequiredConfirmations int32  `protobuf:"varint,2,opt,name=required_confirmations,json=requiredConfirmations" json:"required_confirmations,omitempty"`
 }
 
-func (m *BalanceRequest) Reset()         { *m = BalanceRequest{} }
-func (m *BalanceRequest) String() string { return proto.CompactTextString(m) }
-func (*BalanceRequest) ProtoMessage()    {}
+func (m *BalanceRequest) Reset()                    { *m = BalanceRequest{} }
+func (m *BalanceRequest) String() string            { return proto.CompactTextString(m) }
+func (*BalanceRequest) ProtoMessage()               {}
+func (*BalanceRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{19} }
 
 type BalanceResponse struct {
 	Total          int64 `protobuf:"varint,1,opt,name=total" json:"total,omitempty"`
 	Spendable      int64 `protobuf:"varint,2,opt,name=spendable" json:"spendable,omitempty"`
-	ImmatureReward int64 `protobuf:"varint,3,opt,name=immature_reward" json:"immature_reward,omitempty"`
+	ImmatureReward int64 `protobuf:"varint,3,opt,name=immature_reward,json=immatureReward" json:"immature_reward,omitempty"`
 }
 
-func (m *BalanceResponse) Reset()         { *m = BalanceResponse{} }
-func (m *BalanceResponse) String() string { return proto.CompactTextString(m) }
-func (*BalanceResponse) ProtoMessage()    {}
+func (m *BalanceResponse) Reset()                    { *m = BalanceResponse{} }
+func (m *BalanceResponse) String() string            { return proto.CompactTextString(m) }
+func (*BalanceResponse) ProtoMessage()               {}
+func (*BalanceResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{20} }
 
 type GetTransactionsRequest struct {
 	// Optionally specify the starting block from which to begin including all transactions.
@@ -346,33 +377,35 @@ type GetTransactionsRequest struct {
 	// height of -3, transaction notifications will be created for blocks 998, 999, and 1000.
 	// If both options are excluded, transaction results are created for transactions since the
 	// genesis block.
-	StartingBlockHash   []byte `protobuf:"bytes,1,opt,name=starting_block_hash,proto3" json:"starting_block_hash,omitempty"`
-	StartingBlockHeight int32  `protobuf:"zigzag32,2,opt,name=starting_block_height" json:"starting_block_height,omitempty"`
+	StartingBlockHash   []byte `protobuf:"bytes,1,opt,name=starting_block_hash,json=startingBlockHash,proto3" json:"starting_block_hash,omitempty"`
+	StartingBlockHeight int32  `protobuf:"zigzag32,2,opt,name=starting_block_height,json=startingBlockHeight" json:"starting_block_height,omitempty"`
 	// Optionally specify the last block that transaction results may appear in.
 	// Either the ending block hash or height may be specified, but not both.
 	// If both are excluded, transaction results are created for all transactions
 	// through the best block, and include all unmined transactions.
-	EndingBlockHash   []byte `protobuf:"bytes,3,opt,name=ending_block_hash,proto3" json:"ending_block_hash,omitempty"`
-	EndingBlockHeight int32  `protobuf:"varint,4,opt,name=ending_block_height" json:"ending_block_height,omitempty"`
+	EndingBlockHash   []byte `protobuf:"bytes,3,opt,name=ending_block_hash,json=endingBlockHash,proto3" json:"ending_block_hash,omitempty"`
+	EndingBlockHeight int32  `protobuf:"varint,4,opt,name=ending_block_height,json=endingBlockHeight" json:"ending_block_height,omitempty"`
 	// Include at least this many of the newest transactions if they exist.
 	// Cannot be used when the ending block hash is specified.
 	//
 	// TODO: remove until spec adds it back in some way.
-	MinimumRecentTransactions int32 `protobuf:"varint,5,opt,name=minimum_recent_transactions" json:"minimum_recent_transactions,omitempty"`
+	MinimumRecentTransactions int32 `protobuf:"varint,5,opt,name=minimum_recent_transactions,json=minimumRecentTransactions" json:"minimum_recent_transactions,omitempty"`
 }
 
-func (m *GetTransactionsRequest) Reset()         { *m = GetTransactionsRequest{} }
-func (m *GetTransactionsRequest) String() string { return proto.CompactTextString(m) }
-func (*GetTransactionsRequest) ProtoMessage()    {}
+func (m *GetTransactionsRequest) Reset()                    { *m = GetTransactionsRequest{} }
+func (m *GetTransactionsRequest) String() string            { return proto.CompactTextString(m) }
+func (*GetTransactionsRequest) ProtoMessage()               {}
+func (*GetTransactionsRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{21} }
 
 type GetTransactionsResponse struct {
-	MinedTransactions   []*BlockDetails       `protobuf:"bytes,1,rep,name=mined_transactions" json:"mined_transactions,omitempty"`
-	UnminedTransactions []*TransactionDetails `protobuf:"bytes,2,rep,name=unmined_transactions" json:"unmined_transactions,omitempty"`
+	MinedTransactions   []*BlockDetails       `protobuf:"bytes,1,rep,name=mined_transactions,json=minedTransactions" json:"mined_transactions,omitempty"`
+	UnminedTransactions []*TransactionDetails `protobuf:"bytes,2,rep,name=unmined_transactions,json=unminedTransactions" json:"unmined_transactions,omitempty"`
 }
 
-func (m *GetTransactionsResponse) Reset()         { *m = GetTransactionsResponse{} }
-func (m *GetTransactionsResponse) String() string { return proto.CompactTextString(m) }
-func (*GetTransactionsResponse) ProtoMessage()    {}
+func (m *GetTransactionsResponse) Reset()                    { *m = GetTransactionsResponse{} }
+func (m *GetTransactionsResponse) String() string            { return proto.CompactTextString(m) }
+func (*GetTransactionsResponse) ProtoMessage()               {}
+func (*GetTransactionsResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{22} }
 
 func (m *GetTransactionsResponse) GetMinedTransactions() []*BlockDetails {
 	if m != nil {
@@ -390,42 +423,46 @@ func (m *GetTransactionsResponse) GetUnminedTransactions() []*TransactionDetails
 
 type ChangePassphraseRequest struct {
 	Key           ChangePassphraseRequest_Key `protobuf:"varint,1,opt,name=key,enum=walletrpc.ChangePassphraseRequest_Key" json:"key,omitempty"`
-	OldPassphrase []byte                      `protobuf:"bytes,2,opt,name=old_passphrase,proto3" json:"old_passphrase,omitempty"`
-	NewPassphrase []byte                      `protobuf:"bytes,3,opt,name=new_passphrase,proto3" json:"new_passphrase,omitempty"`
+	OldPassphrase []byte                      `protobuf:"bytes,2,opt,name=old_passphrase,json=oldPassphrase,proto3" json:"old_passphrase,omitempty"`
+	NewPassphrase []byte                      `protobuf:"bytes,3,opt,name=new_passphrase,json=newPassphrase,proto3" json:"new_passphrase,omitempty"`
 }
 
-func (m *ChangePassphraseRequest) Reset()         { *m = ChangePassphraseRequest{} }
-func (m *ChangePassphraseRequest) String() string { return proto.CompactTextString(m) }
-func (*ChangePassphraseRequest) ProtoMessage()    {}
+func (m *ChangePassphraseRequest) Reset()                    { *m = ChangePassphraseRequest{} }
+func (m *ChangePassphraseRequest) String() string            { return proto.CompactTextString(m) }
+func (*ChangePassphraseRequest) ProtoMessage()               {}
+func (*ChangePassphraseRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{23} }
 
 type ChangePassphraseResponse struct {
 }
 
-func (m *ChangePassphraseResponse) Reset()         { *m = ChangePassphraseResponse{} }
-func (m *ChangePassphraseResponse) String() string { return proto.CompactTextString(m) }
-func (*ChangePassphraseResponse) ProtoMessage()    {}
+func (m *ChangePassphraseResponse) Reset()                    { *m = ChangePassphraseResponse{} }
+func (m *ChangePassphraseResponse) String() string            { return proto.CompactTextString(m) }
+func (*ChangePassphraseResponse) ProtoMessage()               {}
+func (*ChangePassphraseResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{24} }
 
 type FundTransactionRequest struct {
 	Account                  uint32 `protobuf:"varint,1,opt,name=account" json:"account,omitempty"`
-	TargetAmount             int64  `protobuf:"varint,2,opt,name=target_amount" json:"target_amount,omitempty"`
-	RequiredConfirmations    int32  `protobuf:"varint,3,opt,name=required_confirmations" json:"required_confirmations,omitempty"`
-	IncludeImmatureCoinbases bool   `protobuf:"varint,4,opt,name=include_immature_coinbases" json:"include_immature_coinbases,omitempty"`
-	IncludeChangeScript      bool   `protobuf:"varint,5,opt,name=include_change_script" json:"include_change_script,omitempty"`
+	TargetAmount             int64  `protobuf:"varint,2,opt,name=target_amount,json=targetAmount" json:"target_amount,omitempty"`
+	RequiredConfirmations    int32  `protobuf:"varint,3,opt,name=required_confirmations,json=requiredConfirmations" json:"required_confirmations,omitempty"`
+	IncludeImmatureCoinbases bool   `protobuf:"varint,4,opt,name=include_immature_coinbases,json=includeImmatureCoinbases" json:"include_immature_coinbases,omitempty"`
+	IncludeChangeScript      bool   `protobuf:"varint,5,opt,name=include_change_script,json=includeChangeScript" json:"include_change_script,omitempty"`
 }
 
-func (m *FundTransactionRequest) Reset()         { *m = FundTransactionRequest{} }
-func (m *FundTransactionRequest) String() string { return proto.CompactTextString(m) }
-func (*FundTransactionRequest) ProtoMessage()    {}
+func (m *FundTransactionRequest) Reset()                    { *m = FundTransactionRequest{} }
+func (m *FundTransactionRequest) String() string            { return proto.CompactTextString(m) }
+func (*FundTransactionRequest) ProtoMessage()               {}
+func (*FundTransactionRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{25} }
 
 type FundTransactionResponse struct {
-	SelectedOutputs []*FundTransactionResponse_PreviousOutput `protobuf:"bytes,1,rep,name=selected_outputs" json:"selected_outputs,omitempty"`
-	TotalAmount     int64                                     `protobuf:"varint,2,opt,name=total_amount" json:"total_amount,omitempty"`
-	ChangePkScript  []byte                                    `protobuf:"bytes,3,opt,name=change_pk_script,proto3" json:"change_pk_script,omitempty"`
+	SelectedOutputs []*FundTransactionResponse_PreviousOutput `protobuf:"bytes,1,rep,name=selected_outputs,json=selectedOutputs" json:"selected_outputs,omitempty"`
+	TotalAmount     int64                                     `protobuf:"varint,2,opt,name=total_amount,json=totalAmount" json:"total_amount,omitempty"`
+	ChangePkScript  []byte                                    `protobuf:"bytes,3,opt,name=change_pk_script,json=changePkScript,proto3" json:"change_pk_script,omitempty"`
 }
 
-func (m *FundTransactionResponse) Reset()         { *m = FundTransactionResponse{} }
-func (m *FundTransactionResponse) String() string { return proto.CompactTextString(m) }
-func (*FundTransactionResponse) ProtoMessage()    {}
+func (m *FundTransactionResponse) Reset()                    { *m = FundTransactionResponse{} }
+func (m *FundTransactionResponse) String() string            { return proto.CompactTextString(m) }
+func (*FundTransactionResponse) ProtoMessage()               {}
+func (*FundTransactionResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{26} }
 
 func (m *FundTransactionResponse) GetSelectedOutputs() []*FundTransactionResponse_PreviousOutput {
 	if m != nil {
@@ -435,12 +472,12 @@ func (m *FundTransactionResponse) GetSelectedOutputs() []*FundTransactionRespons
 }
 
 type FundTransactionResponse_PreviousOutput struct {
-	TransactionHash []byte `protobuf:"bytes,1,opt,name=transaction_hash,proto3" json:"transaction_hash,omitempty"`
-	OutputIndex     uint32 `protobuf:"varint,2,opt,name=output_index" json:"output_index,omitempty"`
+	TransactionHash []byte `protobuf:"bytes,1,opt,name=transaction_hash,json=transactionHash,proto3" json:"transaction_hash,omitempty"`
+	OutputIndex     uint32 `protobuf:"varint,2,opt,name=output_index,json=outputIndex" json:"output_index,omitempty"`
 	Amount          int64  `protobuf:"varint,3,opt,name=amount" json:"amount,omitempty"`
-	PkScript        []byte `protobuf:"bytes,4,opt,name=pk_script,proto3" json:"pk_script,omitempty"`
-	ReceiveTime     int64  `protobuf:"varint,5,opt,name=receive_time" json:"receive_time,omitempty"`
-	FromCoinbase    bool   `protobuf:"varint,6,opt,name=from_coinbase" json:"from_coinbase,omitempty"`
+	PkScript        []byte `protobuf:"bytes,4,opt,name=pk_script,json=pkScript,proto3" json:"pk_script,omitempty"`
+	ReceiveTime     int64  `protobuf:"varint,5,opt,name=receive_time,json=receiveTime" json:"receive_time,omitempty"`
+	FromCoinbase    bool   `protobuf:"varint,6,opt,name=from_coinbase,json=fromCoinbase" json:"from_coinbase,omitempty"`
 }
 
 func (m *FundTransactionResponse_PreviousOutput) Reset() {
@@ -448,45 +485,52 @@ func (m *FundTransactionResponse_PreviousOutput) Reset() {
 }
 func (m *FundTransactionResponse_PreviousOutput) String() string { return proto.CompactTextString(m) }
 func (*FundTransactionResponse_PreviousOutput) ProtoMessage()    {}
+func (*FundTransactionResponse_PreviousOutput) Descriptor() ([]byte, []int) {
+	return fileDescriptor0, []int{26, 0}
+}
 
 type SignTransactionRequest struct {
 	Passphrase            []byte `protobuf:"bytes,1,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
-	SerializedTransaction []byte `protobuf:"bytes,2,opt,name=serialized_transaction,proto3" json:"serialized_transaction,omitempty"`
+	SerializedTransaction []byte `protobuf:"bytes,2,opt,name=serialized_transaction,json=serializedTransaction,proto3" json:"serialized_transaction,omitempty"`
 	// If no indexes are specified, signatures scripts will be added for
 	// every input. If any input indexes are specified, only those inputs
 	// will be signed.  Rather than returning an incompletely signed
 	// transaction if any of the inputs to be signed can not be, the RPC
 	// immediately errors.
-	InputIndexes []uint32 `protobuf:"varint,3,rep,name=input_indexes" json:"input_indexes,omitempty"`
+	InputIndexes []uint32 `protobuf:"varint,3,rep,name=input_indexes,json=inputIndexes" json:"input_indexes,omitempty"`
 }
 
-func (m *SignTransactionRequest) Reset()         { *m = SignTransactionRequest{} }
-func (m *SignTransactionRequest) String() string { return proto.CompactTextString(m) }
-func (*SignTransactionRequest) ProtoMessage()    {}
+func (m *SignTransactionRequest) Reset()                    { *m = SignTransactionRequest{} }
+func (m *SignTransactionRequest) String() string            { return proto.CompactTextString(m) }
+func (*SignTransactionRequest) ProtoMessage()               {}
+func (*SignTransactionRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{27} }
 
 type SignTransactionResponse struct {
 	Transaction          []byte   `protobuf:"bytes,1,opt,name=transaction,proto3" json:"transaction,omitempty"`
-	UnsignedInputIndexes []uint32 `protobuf:"varint,2,rep,name=unsigned_input_indexes" json:"unsigned_input_indexes,omitempty"`
+	UnsignedInputIndexes []uint32 `protobuf:"varint,2,rep,name=unsigned_input_indexes,json=unsignedInputIndexes" json:"unsigned_input_indexes,omitempty"`
 }
 
-func (m *SignTransactionResponse) Reset()         { *m = SignTransactionResponse{} }
-func (m *SignTransactionResponse) String() string { return proto.CompactTextString(m) }
-func (*SignTransactionResponse) ProtoMessage()    {}
+func (m *SignTransactionResponse) Reset()                    { *m = SignTransactionResponse{} }
+func (m *SignTransactionResponse) String() string            { return proto.CompactTextString(m) }
+func (*SignTransactionResponse) ProtoMessage()               {}
+func (*SignTransactionResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{28} }
 
 type PublishTransactionRequest struct {
-	SignedTransaction []byte `protobuf:"bytes,1,opt,name=signed_transaction,proto3" json:"signed_transaction,omitempty"`
+	SignedTransaction []byte `protobuf:"bytes,1,opt,name=signed_transaction,json=signedTransaction,proto3" json:"signed_transaction,omitempty"`
 }
 
-func (m *PublishTransactionRequest) Reset()         { *m = PublishTransactionRequest{} }
-func (m *PublishTransactionRequest) String() string { return proto.CompactTextString(m) }
-func (*PublishTransactionRequest) ProtoMessage()    {}
+func (m *PublishTransactionRequest) Reset()                    { *m = PublishTransactionRequest{} }
+func (m *PublishTransactionRequest) String() string            { return proto.CompactTextString(m) }
+func (*PublishTransactionRequest) ProtoMessage()               {}
+func (*PublishTransactionRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{29} }
 
 type PublishTransactionResponse struct {
 }
 
-func (m *PublishTransactionResponse) Reset()         { *m = PublishTransactionResponse{} }
-func (m *PublishTransactionResponse) String() string { return proto.CompactTextString(m) }
-func (*PublishTransactionResponse) ProtoMessage()    {}
+func (m *PublishTransactionResponse) Reset()                    { *m = PublishTransactionResponse{} }
+func (m *PublishTransactionResponse) String() string            { return proto.CompactTextString(m) }
+func (*PublishTransactionResponse) ProtoMessage()               {}
+func (*PublishTransactionResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{30} }
 
 type TransactionNotificationsRequest struct {
 }
@@ -494,29 +538,35 @@ type TransactionNotificationsRequest struct {
 func (m *TransactionNotificationsRequest) Reset()         { *m = TransactionNotificationsRequest{} }
 func (m *TransactionNotificationsRequest) String() string { return proto.CompactTextString(m) }
 func (*TransactionNotificationsRequest) ProtoMessage()    {}
+func (*TransactionNotificationsRequest) Descriptor() ([]byte, []int) {
+	return fileDescriptor0, []int{31}
+}
 
 type TransactionNotificationsResponse struct {
 	// Sorted by increasing height.  This is a repeated field so many new blocks
 	// in a new best chain can be notified at once during a reorganize.
-	AttachedBlocks []*BlockDetails `protobuf:"bytes,1,rep,name=attached_blocks" json:"attached_blocks,omitempty"`
+	AttachedBlocks []*BlockDetails `protobuf:"bytes,1,rep,name=attached_blocks,json=attachedBlocks" json:"attached_blocks,omitempty"`
 	// If there was a chain reorganize, there may have been blocks with wallet
 	// transactions that are no longer in the best chain.  These are those
 	// block's hashes.
-	DetachedBlocks [][]byte `protobuf:"bytes,2,rep,name=detached_blocks,proto3" json:"detached_blocks,omitempty"`
+	DetachedBlocks [][]byte `protobuf:"bytes,2,rep,name=detached_blocks,json=detachedBlocks,proto3" json:"detached_blocks,omitempty"`
 	// Any new unmined transactions are included here.  These unmined transactions
 	// refer to the current best chain, so transactions from detached blocks may
 	// be moved to mempool and included here if they are not mined or double spent
 	// in the new chain.  Additonally, if no new blocks were attached but a relevant
 	// unmined transaction is seen by the wallet, it will be reported here.
-	UnminedTransactions []*TransactionDetails `protobuf:"bytes,3,rep,name=unmined_transactions" json:"unmined_transactions,omitempty"`
+	UnminedTransactions []*TransactionDetails `protobuf:"bytes,3,rep,name=unmined_transactions,json=unminedTransactions" json:"unmined_transactions,omitempty"`
 	// Instead of notifying all of the removed unmined transactions,
 	// just send all of the current hashes.
-	UnminedTransactionHashes [][]byte `protobuf:"bytes,4,rep,name=unmined_transaction_hashes,proto3" json:"unmined_transaction_hashes,omitempty"`
+	UnminedTransactionHashes [][]byte `protobuf:"bytes,4,rep,name=unmined_transaction_hashes,json=unminedTransactionHashes,proto3" json:"unmined_transaction_hashes,omitempty"`
 }
 
 func (m *TransactionNotificationsResponse) Reset()         { *m = TransactionNotificationsResponse{} }
 func (m *TransactionNotificationsResponse) String() string { return proto.CompactTextString(m) }
 func (*TransactionNotificationsResponse) ProtoMessage()    {}
+func (*TransactionNotificationsResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor0, []int{32}
+}
 
 func (m *TransactionNotificationsResponse) GetAttachedBlocks() []*BlockDetails {
 	if m != nil {
@@ -534,23 +584,25 @@ func (m *TransactionNotificationsResponse) GetUnminedTransactions() []*Transacti
 
 type SpentnessNotificationsRequest struct {
 	Account         uint32 `protobuf:"varint,1,opt,name=account" json:"account,omitempty"`
-	NoNotifyUnspent bool   `protobuf:"varint,2,opt,name=no_notify_unspent" json:"no_notify_unspent,omitempty"`
-	NoNotifySpent   bool   `protobuf:"varint,3,opt,name=no_notify_spent" json:"no_notify_spent,omitempty"`
+	NoNotifyUnspent bool   `protobuf:"varint,2,opt,name=no_notify_unspent,json=noNotifyUnspent" json:"no_notify_unspent,omitempty"`
+	NoNotifySpent   bool   `protobuf:"varint,3,opt,name=no_notify_spent,json=noNotifySpent" json:"no_notify_spent,omitempty"`
 }
 
-func (m *SpentnessNotificationsRequest) Reset()         { *m = SpentnessNotificationsRequest{} }
-func (m *SpentnessNotificationsRequest) String() string { return proto.CompactTextString(m) }
-func (*SpentnessNotificationsRequest) ProtoMessage()    {}
+func (m *SpentnessNotificationsRequest) Reset()                    { *m = SpentnessNotificationsRequest{} }
+func (m *SpentnessNotificationsRequest) String() string            { return proto.CompactTextString(m) }
+func (*SpentnessNotificationsRequest) ProtoMessage()               {}
+func (*SpentnessNotificationsRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{33} }
 
 type SpentnessNotificationsResponse struct {
-	TransactionHash []byte                                  `protobuf:"bytes,1,opt,name=transaction_hash,proto3" json:"transaction_hash,omitempty"`
-	OutputIndex     uint32                                  `protobuf:"varint,2,opt,name=output_index" json:"output_index,omitempty"`
+	TransactionHash []byte                                  `protobuf:"bytes,1,opt,name=transaction_hash,json=transactionHash,proto3" json:"transaction_hash,omitempty"`
+	OutputIndex     uint32                                  `protobuf:"varint,2,opt,name=output_index,json=outputIndex" json:"output_index,omitempty"`
 	Spender         *SpentnessNotificationsResponse_Spender `protobuf:"bytes,3,opt,name=spender" json:"spender,omitempty"`
 }
 
-func (m *SpentnessNotificationsResponse) Reset()         { *m = SpentnessNotificationsResponse{} }
-func (m *SpentnessNotificationsResponse) String() string { return proto.CompactTextString(m) }
-func (*SpentnessNotificationsResponse) ProtoMessage()    {}
+func (m *SpentnessNotificationsResponse) Reset()                    { *m = SpentnessNotificationsResponse{} }
+func (m *SpentnessNotificationsResponse) String() string            { return proto.CompactTextString(m) }
+func (*SpentnessNotificationsResponse) ProtoMessage()               {}
+func (*SpentnessNotificationsResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{34} }
 
 func (m *SpentnessNotificationsResponse) GetSpender() *SpentnessNotificationsResponse_Spender {
 	if m != nil {
@@ -560,8 +612,8 @@ func (m *SpentnessNotificationsResponse) GetSpender() *SpentnessNotificationsRes
 }
 
 type SpentnessNotificationsResponse_Spender struct {
-	TransactionHash []byte `protobuf:"bytes,1,opt,name=transaction_hash,proto3" json:"transaction_hash,omitempty"`
-	InputIndex      uint32 `protobuf:"varint,2,opt,name=input_index" json:"input_index,omitempty"`
+	TransactionHash []byte `protobuf:"bytes,1,opt,name=transaction_hash,json=transactionHash,proto3" json:"transaction_hash,omitempty"`
+	InputIndex      uint32 `protobuf:"varint,2,opt,name=input_index,json=inputIndex" json:"input_index,omitempty"`
 }
 
 func (m *SpentnessNotificationsResponse_Spender) Reset() {
@@ -569,106 +621,173 @@ func (m *SpentnessNotificationsResponse_Spender) Reset() {
 }
 func (m *SpentnessNotificationsResponse_Spender) String() string { return proto.CompactTextString(m) }
 func (*SpentnessNotificationsResponse_Spender) ProtoMessage()    {}
+func (*SpentnessNotificationsResponse_Spender) Descriptor() ([]byte, []int) {
+	return fileDescriptor0, []int{34, 0}
+}
 
 type AccountNotificationsRequest struct {
 }
 
-func (m *AccountNotificationsRequest) Reset()         { *m = AccountNotificationsRequest{} }
-func (m *AccountNotificationsRequest) String() string { return proto.CompactTextString(m) }
-func (*AccountNotificationsRequest) ProtoMessage()    {}
+func (m *AccountNotificationsRequest) Reset()                    { *m = AccountNotificationsRequest{} }
+func (m *AccountNotificationsRequest) String() string            { return proto.CompactTextString(m) }
+func (*AccountNotificationsRequest) ProtoMessage()               {}
+func (*AccountNotificationsRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{35} }
 
 type AccountNotificationsResponse struct {
-	AccountNumber    uint32 `protobuf:"varint,1,opt,name=account_number" json:"account_number,omitempty"`
-	AccountName      string `protobuf:"bytes,2,opt,name=account_name" json:"account_name,omitempty"`
-	ExternalKeyCount uint32 `protobuf:"varint,3,opt,name=external_key_count" json:"external_key_count,omitempty"`
-	InternalKeyCount uint32 `protobuf:"varint,4,opt,name=internal_key_count" json:"internal_key_count,omitempty"`
-	ImportedKeyCount uint32 `protobuf:"varint,5,opt,name=imported_key_count" json:"imported_key_count,omitempty"`
+	AccountNumber    uint32 `protobuf:"varint,1,opt,name=account_number,json=accountNumber" json:"account_number,omitempty"`
+	AccountName      string `protobuf:"bytes,2,opt,name=account_name,json=accountName" json:"account_name,omitempty"`
+	ExternalKeyCount uint32 `protobuf:"varint,3,opt,name=external_key_count,json=externalKeyCount" json:"external_key_count,omitempty"`
+	InternalKeyCount uint32 `protobuf:"varint,4,opt,name=internal_key_count,json=internalKeyCount" json:"internal_key_count,omitempty"`
+	ImportedKeyCount uint32 `protobuf:"varint,5,opt,name=imported_key_count,json=importedKeyCount" json:"imported_key_count,omitempty"`
 }
 
-func (m *AccountNotificationsResponse) Reset()         { *m = AccountNotificationsResponse{} }
-func (m *AccountNotificationsResponse) String() string { return proto.CompactTextString(m) }
-func (*AccountNotificationsResponse) ProtoMessage()    {}
+func (m *AccountNotificationsResponse) Reset()                    { *m = AccountNotificationsResponse{} }
+func (m *AccountNotificationsResponse) String() string            { return proto.CompactTextString(m) }
+func (*AccountNotificationsResponse) ProtoMessage()               {}
+func (*AccountNotificationsResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{36} }
 
 type CreateWalletRequest struct {
-	PublicPassphrase  []byte `protobuf:"bytes,1,opt,name=public_passphrase,proto3" json:"public_passphrase,omitempty"`
-	PrivatePassphrase []byte `protobuf:"bytes,2,opt,name=private_passphrase,proto3" json:"private_passphrase,omitempty"`
+	PublicPassphrase  []byte `protobuf:"bytes,1,opt,name=public_passphrase,json=publicPassphrase,proto3" json:"public_passphrase,omitempty"`
+	PrivatePassphrase []byte `protobuf:"bytes,2,opt,name=private_passphrase,json=privatePassphrase,proto3" json:"private_passphrase,omitempty"`
 	Seed              []byte `protobuf:"bytes,3,opt,name=seed,proto3" json:"seed,omitempty"`
 }
 
-func (m *CreateWalletRequest) Reset()         { *m = CreateWalletRequest{} }
-func (m *CreateWalletRequest) String() string { return proto.CompactTextString(m) }
-func (*CreateWalletRequest) ProtoMessage()    {}
+func (m *CreateWalletRequest) Reset()                    { *m = CreateWalletRequest{} }
+func (m *CreateWalletRequest) String() string            { return proto.CompactTextString(m) }
+func (*CreateWalletRequest) ProtoMessage()               {}
+func (*CreateWalletRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{37} }
 
 type CreateWalletResponse struct {
 }
 
-func (m *CreateWalletResponse) Reset()         { *m = CreateWalletResponse{} }
-func (m *CreateWalletResponse) String() string { return proto.CompactTextString(m) }
-func (*CreateWalletResponse) ProtoMessage()    {}
+func (m *CreateWalletResponse) Reset()                    { *m = CreateWalletResponse{} }
+func (m *CreateWalletResponse) String() string            { return proto.CompactTextString(m) }
+func (*CreateWalletResponse) ProtoMessage()               {}
+func (*CreateWalletResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{38} }
 
 type OpenWalletRequest struct {
-	PublicPassphrase []byte `protobuf:"bytes,1,opt,name=public_passphrase,proto3" json:"public_passphrase,omitempty"`
+	PublicPassphrase []byte `protobuf:"bytes,1,opt,name=public_passphrase,json=publicPassphrase,proto3" json:"public_passphrase,omitempty"`
 }
 
-func (m *OpenWalletRequest) Reset()         { *m = OpenWalletRequest{} }
-func (m *OpenWalletRequest) String() string { return proto.CompactTextString(m) }
-func (*OpenWalletRequest) ProtoMessage()    {}
+func (m *OpenWalletRequest) Reset()                    { *m = OpenWalletRequest{} }
+func (m *OpenWalletRequest) String() string            { return proto.CompactTextString(m) }
+func (*OpenWalletRequest) ProtoMessage()               {}
+func (*OpenWalletRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{39} }
 
 type OpenWalletResponse struct {
 }
 
-func (m *OpenWalletResponse) Reset()         { *m = OpenWalletResponse{} }
-func (m *OpenWalletResponse) String() string { return proto.CompactTextString(m) }
-func (*OpenWalletResponse) ProtoMessage()    {}
+func (m *OpenWalletResponse) Reset()                    { *m = OpenWalletResponse{} }
+func (m *OpenWalletResponse) String() string            { return proto.CompactTextString(m) }
+func (*OpenWalletResponse) ProtoMessage()               {}
+func (*OpenWalletResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{40} }
 
 type CloseWalletRequest struct {
 }
 
-func (m *CloseWalletRequest) Reset()         { *m = CloseWalletRequest{} }
-func (m *CloseWalletRequest) String() string { return proto.CompactTextString(m) }
-func (*CloseWalletRequest) ProtoMessage()    {}
+func (m *CloseWalletRequest) Reset()                    { *m = CloseWalletRequest{} }
+func (m *CloseWalletRequest) String() string            { return proto.CompactTextString(m) }
+func (*CloseWalletRequest) ProtoMessage()               {}
+func (*CloseWalletRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{41} }
 
 type CloseWalletResponse struct {
 }
 
-func (m *CloseWalletResponse) Reset()         { *m = CloseWalletResponse{} }
-func (m *CloseWalletResponse) String() string { return proto.CompactTextString(m) }
-func (*CloseWalletResponse) ProtoMessage()    {}
+func (m *CloseWalletResponse) Reset()                    { *m = CloseWalletResponse{} }
+func (m *CloseWalletResponse) String() string            { return proto.CompactTextString(m) }
+func (*CloseWalletResponse) ProtoMessage()               {}
+func (*CloseWalletResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{42} }
 
 type WalletExistsRequest struct {
 }
 
-func (m *WalletExistsRequest) Reset()         { *m = WalletExistsRequest{} }
-func (m *WalletExistsRequest) String() string { return proto.CompactTextString(m) }
-func (*WalletExistsRequest) ProtoMessage()    {}
+func (m *WalletExistsRequest) Reset()                    { *m = WalletExistsRequest{} }
+func (m *WalletExistsRequest) String() string            { return proto.CompactTextString(m) }
+func (*WalletExistsRequest) ProtoMessage()               {}
+func (*WalletExistsRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{43} }
 
 type WalletExistsResponse struct {
 	Exists bool `protobuf:"varint,1,opt,name=exists" json:"exists,omitempty"`
 }
 
-func (m *WalletExistsResponse) Reset()         { *m = WalletExistsResponse{} }
-func (m *WalletExistsResponse) String() string { return proto.CompactTextString(m) }
-func (*WalletExistsResponse) ProtoMessage()    {}
+func (m *WalletExistsResponse) Reset()                    { *m = WalletExistsResponse{} }
+func (m *WalletExistsResponse) String() string            { return proto.CompactTextString(m) }
+func (*WalletExistsResponse) ProtoMessage()               {}
+func (*WalletExistsResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{44} }
 
 type StartBtcdRpcRequest struct {
-	NetworkAddress string `protobuf:"bytes,1,opt,name=network_address" json:"network_address,omitempty"`
+	NetworkAddress string `protobuf:"bytes,1,opt,name=network_address,json=networkAddress" json:"network_address,omitempty"`
 	Username       string `protobuf:"bytes,2,opt,name=username" json:"username,omitempty"`
 	Password       []byte `protobuf:"bytes,3,opt,name=password,proto3" json:"password,omitempty"`
 	Certificate    []byte `protobuf:"bytes,4,opt,name=certificate,proto3" json:"certificate,omitempty"`
 }
 
-func (m *StartBtcdRpcRequest) Reset()         { *m = StartBtcdRpcRequest{} }
-func (m *StartBtcdRpcRequest) String() string { return proto.CompactTextString(m) }
-func (*StartBtcdRpcRequest) ProtoMessage()    {}
+func (m *StartBtcdRpcRequest) Reset()                    { *m = StartBtcdRpcRequest{} }
+func (m *StartBtcdRpcRequest) String() string            { return proto.CompactTextString(m) }
+func (*StartBtcdRpcRequest) ProtoMessage()               {}
+func (*StartBtcdRpcRequest) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{45} }
 
 type StartBtcdRpcResponse struct {
 }
 
-func (m *StartBtcdRpcResponse) Reset()         { *m = StartBtcdRpcResponse{} }
-func (m *StartBtcdRpcResponse) String() string { return proto.CompactTextString(m) }
-func (*StartBtcdRpcResponse) ProtoMessage()    {}
+func (m *StartBtcdRpcResponse) Reset()                    { *m = StartBtcdRpcResponse{} }
+func (m *StartBtcdRpcResponse) String() string            { return proto.CompactTextString(m) }
+func (*StartBtcdRpcResponse) ProtoMessage()               {}
+func (*StartBtcdRpcResponse) Descriptor() ([]byte, []int) { return fileDescriptor0, []int{46} }
 
 func init() {
+	proto.RegisterType((*TransactionDetails)(nil), "walletrpc.TransactionDetails")
+	proto.RegisterType((*TransactionDetails_Input)(nil), "walletrpc.TransactionDetails.Input")
+	proto.RegisterType((*TransactionDetails_Output)(nil), "walletrpc.TransactionDetails.Output")
+	proto.RegisterType((*BlockDetails)(nil), "walletrpc.BlockDetails")
+	proto.RegisterType((*AccountBalance)(nil), "walletrpc.AccountBalance")
+	proto.RegisterType((*PingRequest)(nil), "walletrpc.PingRequest")
+	proto.RegisterType((*PingResponse)(nil), "walletrpc.PingResponse")
+	proto.RegisterType((*NetworkRequest)(nil), "walletrpc.NetworkRequest")
+	proto.RegisterType((*NetworkResponse)(nil), "walletrpc.NetworkResponse")
+	proto.RegisterType((*AccountNumberRequest)(nil), "walletrpc.AccountNumberRequest")
+	proto.RegisterType((*AccountNumberResponse)(nil), "walletrpc.AccountNumberResponse")
+	proto.RegisterType((*AccountsRequest)(nil), "walletrpc.AccountsRequest")
+	proto.RegisterType((*AccountsResponse)(nil), "walletrpc.AccountsResponse")
+	proto.RegisterType((*AccountsResponse_Account)(nil), "walletrpc.AccountsResponse.Account")
+	proto.RegisterType((*RenameAccountRequest)(nil), "walletrpc.RenameAccountRequest")
+	proto.RegisterType((*RenameAccountResponse)(nil), "walletrpc.RenameAccountResponse")
+	proto.RegisterType((*NextAccountRequest)(nil), "walletrpc.NextAccountRequest")
+	proto.RegisterType((*NextAccountResponse)(nil), "walletrpc.NextAccountResponse")
+	proto.RegisterType((*NextAddressRequest)(nil), "walletrpc.NextAddressRequest")
+	proto.RegisterType((*NextAddressResponse)(nil), "walletrpc.NextAddressResponse")
+	proto.RegisterType((*ImportPrivateKeyRequest)(nil), "walletrpc.ImportPrivateKeyRequest")
+	proto.RegisterType((*ImportPrivateKeyResponse)(nil), "walletrpc.ImportPrivateKeyResponse")
+	proto.RegisterType((*BalanceRequest)(nil), "walletrpc.BalanceRequest")
+	proto.RegisterType((*BalanceResponse)(nil), "walletrpc.BalanceResponse")
+	proto.RegisterType((*GetTransactionsRequest)(nil), "walletrpc.GetTransactionsRequest")
+	proto.RegisterType((*GetTransactionsResponse)(nil), "walletrpc.GetTransactionsResponse")
+	proto.RegisterType((*ChangePassphraseRequest)(nil), "walletrpc.ChangePassphraseRequest")
+	proto.RegisterType((*ChangePassphraseResponse)(nil), "walletrpc.ChangePassphraseResponse")
+	proto.RegisterType((*FundTransactionRequest)(nil), "walletrpc.FundTransactionRequest")
+	proto.RegisterType((*FundTransactionResponse)(nil), "walletrpc.FundTransactionResponse")
+	proto.RegisterType((*FundTransactionResponse_PreviousOutput)(nil), "walletrpc.FundTransactionResponse.PreviousOutput")
+	proto.RegisterType((*SignTransactionRequest)(nil), "walletrpc.SignTransactionRequest")
+	proto.RegisterType((*SignTransactionResponse)(nil), "walletrpc.SignTransactionResponse")
+	proto.RegisterType((*PublishTransactionRequest)(nil), "walletrpc.PublishTransactionRequest")
+	proto.RegisterType((*PublishTransactionResponse)(nil), "walletrpc.PublishTransactionResponse")
+	proto.RegisterType((*TransactionNotificationsRequest)(nil), "walletrpc.TransactionNotificationsRequest")
+	proto.RegisterType((*TransactionNotificationsResponse)(nil), "walletrpc.TransactionNotificationsResponse")
+	proto.RegisterType((*SpentnessNotificationsRequest)(nil), "walletrpc.SpentnessNotificationsRequest")
+	proto.RegisterType((*SpentnessNotificationsResponse)(nil), "walletrpc.SpentnessNotificationsResponse")
+	proto.RegisterType((*SpentnessNotificationsResponse_Spender)(nil), "walletrpc.SpentnessNotificationsResponse.Spender")
+	proto.RegisterType((*AccountNotificationsRequest)(nil), "walletrpc.AccountNotificationsRequest")
+	proto.RegisterType((*AccountNotificationsResponse)(nil), "walletrpc.AccountNotificationsResponse")
+	proto.RegisterType((*CreateWalletRequest)(nil), "walletrpc.CreateWalletRequest")
+	proto.RegisterType((*CreateWalletResponse)(nil), "walletrpc.CreateWalletResponse")
+	proto.RegisterType((*OpenWalletRequest)(nil), "walletrpc.OpenWalletRequest")
+	proto.RegisterType((*OpenWalletResponse)(nil), "walletrpc.OpenWalletResponse")
+	proto.RegisterType((*CloseWalletRequest)(nil), "walletrpc.CloseWalletRequest")
+	proto.RegisterType((*CloseWalletResponse)(nil), "walletrpc.CloseWalletResponse")
+	proto.RegisterType((*WalletExistsRequest)(nil), "walletrpc.WalletExistsRequest")
+	proto.RegisterType((*WalletExistsResponse)(nil), "walletrpc.WalletExistsResponse")
+	proto.RegisterType((*StartBtcdRpcRequest)(nil), "walletrpc.StartBtcdRpcRequest")
+	proto.RegisterType((*StartBtcdRpcResponse)(nil), "walletrpc.StartBtcdRpcResponse")
 	proto.RegisterEnum("walletrpc.ChangePassphraseRequest_Key", ChangePassphraseRequest_Key_name, ChangePassphraseRequest_Key_value)
 }
 
@@ -1434,4 +1553,148 @@ var _WalletLoaderService_serviceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{},
+}
+
+var fileDescriptor0 = []byte{
+	// 2235 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x09, 0x6e, 0x88, 0x02, 0xff, 0xac, 0x19, 0x5b, 0x6f, 0xdc, 0x58,
+	0x99, 0x89, 0x73, 0x99, 0x7c, 0x93, 0xb9, 0x9d, 0xdc, 0xa6, 0x6e, 0xd3, 0xa6, 0x2e, 0xdb, 0xcd,
+	0xee, 0x42, 0x58, 0x0a, 0x88, 0x45, 0xac, 0xca, 0xb6, 0x61, 0x97, 0x0d, 0x5b, 0x25, 0x91, 0xd3,
+	0xd2, 0x95, 0x40, 0x1a, 0x39, 0x9e, 0x93, 0xc4, 0xca, 0x8c, 0xed, 0xda, 0x9e, 0xa6, 0xe5, 0x09,
+	0x21, 0xf1, 0xc8, 0x0b, 0xf0, 0xb0, 0x12, 0xe2, 0x01, 0xfe, 0x02, 0x2f, 0xbc, 0xf2, 0x1b, 0x78,
+	0x84, 0x5f, 0xc1, 0x2f, 0xe0, 0x5c, 0xbe, 0x33, 0x3e, 0xc7, 0xf6, 0x4c, 0x92, 0x15, 0x6f, 0xe3,
+	0xef, 0x7c, 0xf7, 0xf3, 0x5d, 0xcf, 0xc0, 0xb2, 0x17, 0x07, 0xbb, 0x71, 0x12, 0x65, 0x11, 0x59,
+	0xbe, 0xf4, 0x86, 0x43, 0x9a, 0x25, 0xb1, 0xef, 0xfc, 0xc7, 0x02, 0xf2, 0x3c, 0xf1, 0xc2, 0xd4,
+	0xf3, 0xb3, 0x20, 0x0a, 0x7f, 0x4a, 0x33, 0x2f, 0x18, 0xa6, 0x84, 0xc0, 0xfc, 0xb9, 0x97, 0x9e,
+	0xf7, 0x6a, 0xdb, 0xb5, 0x9d, 0x15, 0x57, 0xfc, 0x26, 0xdb, 0xd0, 0xc8, 0x72, 0xcc, 0xde, 0x9c,
+	0x38, 0xd2, 0x41, 0xe4, 0xc7, 0xb0, 0x38, 0xa0, 0x27, 0x41, 0x96, 0xf6, 0xac, 0x6d, 0x6b, 0xa7,
+	0xf1, 0xe8, 0xc1, 0xee, 0x44, 0xd0, 0x6e, 0x59, 0xc8, 0xee, 0x7e, 0x18, 0x8f, 0x33, 0x17, 0x49,
+	0xc8, 0x63, 0x58, 0x8a, 0xc6, 0x19, 0x83, 0xa4, 0xbd, 0x79, 0x41, 0xfd, 0xcd, 0xd9, 0xd4, 0x87,
+	0x02, 0xd9, 0x55, 0x44, 0xa4, 0x03, 0xd6, 0x29, 0xa5, 0xbd, 0x05, 0xa6, 0x96, 0xe5, 0xf2, 0x9f,
+	0xe4, 0x0e, 0x2c, 0x67, 0xc1, 0x88, 0xa6, 0x99, 0x37, 0x8a, 0x7b, 0x8b, 0x02, 0x9e, 0x03, 0xec,
+	0x57, 0xb0, 0x20, 0x14, 0x20, 0x6b, 0xb0, 0x10, 0x84, 0x03, 0xfa, 0x46, 0x18, 0xdb, 0x74, 0xe5,
+	0x07, 0x79, 0x0f, 0x3a, 0x71, 0x42, 0x5f, 0x07, 0xd1, 0x38, 0xed, 0x7b, 0xbe, 0x1f, 0x8d, 0xc3,
+	0x4c, 0x98, 0xdc, 0x74, 0xdb, 0x0a, 0xfe, 0x44, 0x82, 0xc9, 0xbb, 0xd0, 0xce, 0x51, 0x47, 0x02,
+	0xd3, 0x12, 0xd2, 0x5a, 0x13, 0x4c, 0x01, 0xb5, 0x63, 0x58, 0x94, 0x5a, 0x73, 0xff, 0x8e, 0x82,
+	0x90, 0x0a, 0xbc, 0xba, 0x2b, 0x7e, 0x93, 0x1e, 0x2c, 0x29, 0x41, 0xf3, 0x42, 0x90, 0xfa, 0x24,
+	0x36, 0xd4, 0x83, 0x30, 0xa3, 0x49, 0xe8, 0x0d, 0x85, 0x7d, 0x75, 0x77, 0xf2, 0xcd, 0x8d, 0xf4,
+	0x06, 0x83, 0x84, 0xa6, 0x29, 0x4d, 0x99, 0x91, 0xd6, 0xce, 0xb2, 0x9b, 0x03, 0x9c, 0x3f, 0xd7,
+	0x60, 0xe5, 0xe9, 0x30, 0xf2, 0x2f, 0x66, 0x5d, 0xec, 0x06, 0x2c, 0x9e, 0xd3, 0xe0, 0xec, 0x5c,
+	0x1a, 0xb8, 0xe0, 0xe2, 0x97, 0xe9, 0x3f, 0xab, 0xe0, 0x3f, 0xf2, 0x04, 0x56, 0xb4, 0xbb, 0x57,
+	0x97, 0xb6, 0x35, 0xf3, 0xd2, 0x5c, 0x83, 0xc4, 0x39, 0x84, 0x16, 0xfa, 0xf0, 0xa9, 0x37, 0xf4,
+	0x42, 0xdf, 0xf0, 0x41, 0xcd, 0xf4, 0xc1, 0x03, 0x68, 0x66, 0x51, 0xe6, 0x0d, 0xfb, 0x27, 0x12,
+	0x55, 0xe8, 0x6a, 0x31, 0x86, 0x1c, 0x88, 0xe4, 0x4e, 0x13, 0x1a, 0x47, 0x41, 0x78, 0xe6, 0xd2,
+	0x57, 0x63, 0xa6, 0xa5, 0xd3, 0x82, 0x15, 0xf9, 0x99, 0xc6, 0x4c, 0x1c, 0x75, 0x3a, 0xd0, 0x3a,
+	0xa0, 0xd9, 0x65, 0x94, 0x5c, 0x28, 0x8c, 0x8f, 0xa0, 0x3d, 0x81, 0x48, 0x24, 0xf2, 0x0e, 0xb4,
+	0xb8, 0x7e, 0xaf, 0x69, 0x3f, 0x94, 0x27, 0xa8, 0x49, 0x53, 0x42, 0x11, 0xdd, 0xf9, 0x11, 0xac,
+	0xa1, 0xee, 0x07, 0xe3, 0xd1, 0x09, 0x4d, 0x90, 0x23, 0xb9, 0x0f, 0x2b, 0xa8, 0x72, 0x3f, 0xf4,
+	0x46, 0x54, 0x10, 0x2f, 0xbb, 0x0d, 0x84, 0x1d, 0x30, 0x90, 0xf3, 0x18, 0xd6, 0x0b, 0xa4, 0xba,
+	0x68, 0xa4, 0x15, 0x27, 0xb9, 0x68, 0x0d, 0xdd, 0xe9, 0x42, 0x1b, 0xe9, 0x53, 0x65, 0xc7, 0x3f,
+	0x2c, 0xe8, 0xe4, 0x30, 0x64, 0xf7, 0x13, 0xa8, 0x23, 0x61, 0xca, 0x18, 0x15, 0x13, 0xb2, 0x88,
+	0xae, 0x00, 0xee, 0x84, 0x88, 0x7c, 0x0b, 0x88, 0x3f, 0x4e, 0x12, 0xca, 0xf4, 0x39, 0xe1, 0x41,
+	0xd4, 0x17, 0xa1, 0x23, 0x13, 0xbf, 0x83, 0x27, 0x22, 0xba, 0x3e, 0xe7, 0x61, 0xf4, 0x21, 0xac,
+	0x15, 0xb0, 0x65, 0x50, 0x59, 0x22, 0xa8, 0x88, 0x81, 0x2f, 0x4e, 0xec, 0xdf, 0xce, 0xc1, 0x92,
+	0x4a, 0xa2, 0xeb, 0xd9, 0x5e, 0x72, 0xef, 0x5c, 0xc9, 0xbd, 0xe5, 0x48, 0xb1, 0xca, 0x91, 0xc2,
+	0x4d, 0xa3, 0x6f, 0x64, 0x0a, 0xf5, 0x2f, 0xe8, 0xdb, 0xbe, 0x9e, 0x77, 0x1d, 0x75, 0xf2, 0x05,
+	0x7d, 0xbb, 0x27, 0x94, 0x63, 0xd8, 0x2a, 0xe1, 0x34, 0xec, 0x05, 0x89, 0xad, 0x4e, 0x0c, 0xec,
+	0x51, 0x1c, 0x25, 0x19, 0x1d, 0x68, 0xd8, 0x8b, 0x88, 0x8d, 0x27, 0x0a, 0xdb, 0xf9, 0x12, 0xd6,
+	0x5c, 0xca, 0x6d, 0x51, 0xfe, 0xc7, 0x40, 0xba, 0xa6, 0x43, 0x6e, 0x41, 0x3d, 0xa4, 0x97, 0xba,
+	0x33, 0x96, 0xd8, 0xb7, 0x88, 0xb3, 0x4d, 0x58, 0x2f, 0x70, 0xc6, 0x3c, 0x78, 0x09, 0xe4, 0x80,
+	0xd9, 0x58, 0x10, 0x78, 0x17, 0x20, 0xf6, 0xd2, 0x34, 0x3e, 0x4f, 0xbc, 0x94, 0x62, 0x81, 0xd0,
+	0x20, 0xd7, 0x70, 0xbd, 0xf3, 0x31, 0xac, 0x1a, 0x8c, 0x6f, 0x16, 0xd7, 0xbb, 0xa8, 0x96, 0xac,
+	0x5e, 0x4a, 0xad, 0xa9, 0x25, 0xc1, 0xf9, 0x0e, 0x4a, 0x53, 0xf8, 0x28, 0x8d, 0x13, 0x48, 0x10,
+	0x26, 0x9f, 0xfa, 0x74, 0xfe, 0x58, 0x83, 0xcd, 0x7d, 0xe1, 0xff, 0xa3, 0x24, 0x78, 0xed, 0x65,
+	0x94, 0x5d, 0xc2, 0x75, 0xad, 0xd7, 0xd4, 0x98, 0x33, 0x2b, 0xd3, 0x43, 0x5e, 0xfe, 0x05, 0x3b,
+	0x71, 0xdb, 0x97, 0xc1, 0xa9, 0x88, 0xb8, 0x65, 0xb7, 0x19, 0x4f, 0xa4, 0xbc, 0x0c, 0x4e, 0x79,
+	0x99, 0x65, 0x5a, 0xf8, 0x5e, 0x28, 0xc2, 0xac, 0xee, 0xe2, 0x97, 0x63, 0x43, 0xaf, 0xac, 0x14,
+	0xde, 0x54, 0x08, 0x2d, 0x8c, 0xd8, 0x1b, 0x86, 0xc5, 0x0f, 0x60, 0x23, 0x61, 0x14, 0x41, 0xc2,
+	0x62, 0xd0, 0x8f, 0xc2, 0xd3, 0x20, 0x19, 0x79, 0xb2, 0x4e, 0xcb, 0x1a, 0xbf, 0xae, 0x4e, 0xf7,
+	0xf4, 0x43, 0x26, 0xaf, 0x3d, 0x91, 0x87, 0xee, 0x64, 0xed, 0x51, 0x64, 0x8e, 0x90, 0x63, 0xb9,
+	0xf2, 0x83, 0xf7, 0x86, 0x34, 0xa6, 0xe1, 0xc0, 0x3b, 0x19, 0xaa, 0x52, 0x9c, 0x03, 0x78, 0x47,
+	0x0c, 0x46, 0x8c, 0xe7, 0x38, 0xa1, 0xfd, 0x84, 0x5e, 0x7a, 0xc9, 0x40, 0x75, 0x44, 0x05, 0x76,
+	0x05, 0xd4, 0xf9, 0x6a, 0x0e, 0x36, 0x7e, 0x46, 0x33, 0xad, 0x53, 0x4c, 0xee, 0x7d, 0x17, 0x56,
+	0x59, 0xa3, 0x49, 0x32, 0x56, 0xc0, 0xf5, 0xea, 0x23, 0x6f, 0xa6, 0xab, 0x8e, 0xf2, 0xf2, 0xf3,
+	0x08, 0xd6, 0x8b, 0xf8, 0x79, 0x53, 0xeb, 0xba, 0xab, 0x26, 0x85, 0xec, 0x70, 0xef, 0x43, 0x97,
+	0xa9, 0x5c, 0x90, 0x60, 0x09, 0x09, 0x6d, 0x79, 0x90, 0xf3, 0x67, 0xfa, 0x98, 0xb8, 0x92, 0xfb,
+	0xbc, 0x70, 0x67, 0x57, 0xc7, 0x96, 0xbc, 0x1f, 0xc3, 0x6d, 0xd6, 0xd6, 0x83, 0xd1, 0x78, 0xc4,
+	0x5c, 0xe0, 0xf3, 0xaa, 0x68, 0xb4, 0xcb, 0x05, 0x41, 0x77, 0x0b, 0x51, 0x5c, 0x81, 0xa1, 0xbb,
+	0xc1, 0xf9, 0x3b, 0x0b, 0xd6, 0x92, 0x6b, 0xf0, 0x4e, 0x3e, 0x03, 0xc2, 0x47, 0x86, 0x81, 0xc9,
+	0x52, 0xd6, 0xf8, 0x4d, 0xad, 0xc6, 0xeb, 0xad, 0xdf, 0xed, 0x0a, 0x12, 0x9d, 0x1f, 0x39, 0x82,
+	0xb5, 0x71, 0x58, 0xc1, 0x69, 0xee, 0x3a, 0xbd, 0x7c, 0x15, 0x49, 0x0d, 0xad, 0xff, 0xc9, 0xb4,
+	0xde, 0x3b, 0xf7, 0xc2, 0x33, 0x7a, 0x34, 0xc9, 0x1d, 0x75, 0xa3, 0x1f, 0x81, 0xc5, 0x12, 0x44,
+	0xdc, 0x60, 0xeb, 0xd1, 0x43, 0x8d, 0xf9, 0x14, 0x82, 0x5d, 0x9e, 0x09, 0x9c, 0x84, 0x07, 0x7d,
+	0x34, 0x1c, 0xf4, 0xb5, 0x04, 0x95, 0x4d, 0xa8, 0xc9, 0xa0, 0x39, 0x19, 0x47, 0xe3, 0xb5, 0x50,
+	0x43, 0x93, 0x77, 0xd9, 0x64, 0xd0, 0x1c, 0xcd, 0xb9, 0x0b, 0x16, 0xe3, 0x4c, 0x1a, 0xb0, 0x74,
+	0xe4, 0xee, 0xff, 0xe2, 0xc9, 0xf3, 0x4f, 0x3b, 0xdf, 0x20, 0x00, 0x8b, 0x47, 0x2f, 0x9e, 0x3e,
+	0xdb, 0xdf, 0xeb, 0xd4, 0x78, 0x42, 0x96, 0x35, 0xc2, 0x84, 0xfc, 0x0d, 0x0b, 0xd8, 0xcf, 0xc6,
+	0xa1, 0x6e, 0xf4, 0x95, 0x85, 0x4a, 0x74, 0x24, 0x2f, 0x39, 0xa3, 0x99, 0x1a, 0x0f, 0xd5, 0xec,
+	0x22, 0x80, 0x72, 0x38, 0x9c, 0x91, 0xb1, 0xd6, 0x8c, 0x8c, 0x25, 0x1f, 0x83, 0x1d, 0x84, 0xfe,
+	0x70, 0x3c, 0xa0, 0xfd, 0x49, 0xca, 0xf9, 0x51, 0x10, 0x9e, 0x78, 0x7c, 0x20, 0x94, 0x95, 0xa6,
+	0x87, 0x18, 0xfb, 0x88, 0xb0, 0xa7, 0xce, 0x79, 0xd2, 0x28, 0x6a, 0x5f, 0x98, 0xdc, 0x4f, 0xfd,
+	0x24, 0x88, 0x33, 0x1c, 0x33, 0x57, 0xf1, 0x50, 0xba, 0xe3, 0x58, 0x1c, 0x39, 0x7f, 0xb3, 0x60,
+	0xb3, 0xe4, 0x02, 0x0c, 0xcc, 0x5f, 0x41, 0x27, 0xa5, 0x43, 0xea, 0xf3, 0xd6, 0xa7, 0xa6, 0x79,
+	0x19, 0x96, 0xdf, 0xd5, 0xee, 0x7b, 0x0a, 0xf5, 0xee, 0x11, 0x8e, 0xcb, 0x38, 0xda, 0xb7, 0x15,
+	0xab, 0x43, 0x1c, 0xf1, 0x59, 0x07, 0x92, 0x9d, 0xdd, 0x70, 0x63, 0x43, 0xc0, 0xd0, 0x8b, 0x3b,
+	0xd0, 0x41, 0x43, 0xe2, 0x0b, 0x65, 0x8b, 0x0c, 0x82, 0x96, 0x84, 0x1f, 0x5d, 0x48, 0x33, 0xec,
+	0x7f, 0xd7, 0xa0, 0x65, 0x0a, 0xe4, 0x33, 0xbf, 0x96, 0x06, 0x7a, 0xbd, 0x69, 0x6b, 0x70, 0x51,
+	0x0d, 0x98, 0x2a, 0xd2, 0xbe, 0xbe, 0xdc, 0x1d, 0x64, 0x4f, 0x68, 0x48, 0xd8, 0xbe, 0xd8, 0x20,
+	0x58, 0xbd, 0x37, 0xb6, 0x01, 0xfc, 0x22, 0xb7, 0x61, 0x39, 0xd7, 0x6d, 0x5e, 0xb0, 0xaf, 0xc7,
+	0xa8, 0x15, 0xe7, 0xcb, 0xab, 0x05, 0x1f, 0x3f, 0xf9, 0xa8, 0x8d, 0xeb, 0x4c, 0x03, 0x61, 0xcf,
+	0x03, 0x39, 0xdf, 0x9c, 0x26, 0xd1, 0x68, 0x72, 0xcb, 0x62, 0xb2, 0xa8, 0xbb, 0x2b, 0x1c, 0xa8,
+	0x6e, 0xd6, 0xf9, 0x53, 0x0d, 0x36, 0x8e, 0x83, 0xb3, 0xb0, 0x22, 0x4e, 0xaf, 0xea, 0x74, 0x2c,
+	0x10, 0x53, 0x9a, 0x04, 0xde, 0x30, 0xf8, 0xb5, 0x59, 0x17, 0x30, 0xe9, 0xd6, 0xf3, 0x53, 0x8d,
+	0x3b, 0x57, 0x2b, 0x08, 0x27, 0x0e, 0xa1, 0x72, 0x07, 0x6c, 0xba, 0x2b, 0x02, 0xb8, 0x2f, 0x61,
+	0xce, 0x2b, 0xd8, 0x2c, 0x69, 0x85, 0xa1, 0x53, 0x58, 0x2f, 0x6b, 0xe5, 0xf5, 0xf2, 0xfb, 0xb0,
+	0x31, 0x0e, 0x53, 0x46, 0xce, 0xd4, 0x32, 0x45, 0xcd, 0x09, 0x51, 0x6b, 0xea, 0x74, 0x5f, 0x17,
+	0xf9, 0x73, 0xb8, 0x75, 0x34, 0x3e, 0x19, 0x06, 0xe9, 0x79, 0x85, 0x2f, 0xbe, 0x0d, 0x04, 0x19,
+	0x96, 0x65, 0x77, 0xe5, 0x89, 0x46, 0xe5, 0xdc, 0x01, 0xbb, 0x8a, 0x17, 0xd6, 0x86, 0xfb, 0x70,
+	0x4f, 0x03, 0x1f, 0x44, 0x59, 0x70, 0x1a, 0xf8, 0x9e, 0xde, 0xd4, 0x9c, 0xbf, 0xcc, 0xc1, 0xf6,
+	0x74, 0x1c, 0xf4, 0xc4, 0x27, 0xd0, 0xf6, 0xb2, 0xcc, 0xf3, 0xcf, 0x99, 0x5a, 0xa2, 0xd7, 0x5c,
+	0x59, 0xda, 0x5b, 0x0a, 0x5f, 0x40, 0x53, 0xde, 0x7f, 0x07, 0xd4, 0xe4, 0xc0, 0x5d, 0xc4, 0x92,
+	0x40, 0x81, 0x11, 0x71, 0x5a, 0x03, 0xb0, 0xbe, 0x6e, 0x03, 0xe0, 0xf5, 0xa8, 0x82, 0xa3, 0xc8,
+	0x25, 0x2a, 0x97, 0xc4, 0x15, 0xb7, 0x57, 0x26, 0xfc, 0x5c, 0x9c, 0x3b, 0xbf, 0xaf, 0xc1, 0xd6,
+	0x31, 0x1b, 0x23, 0xb2, 0x90, 0xcd, 0x6b, 0x55, 0x1e, 0x9c, 0x51, 0x65, 0x59, 0x33, 0x0f, 0xa3,
+	0x7e, 0xc8, 0x89, 0xde, 0xf6, 0x59, 0x28, 0x70, 0x36, 0x22, 0x64, 0xeb, 0x6e, 0x3b, 0x8c, 0x04,
+	0xb3, 0xb7, 0x2f, 0x24, 0x98, 0xcf, 0x6c, 0x39, 0xae, 0xc4, 0x94, 0xab, 0x78, 0x53, 0x61, 0x0a,
+	0x2d, 0x9c, 0x3f, 0xcc, 0xc1, 0xdd, 0x69, 0xfa, 0xe0, 0x6d, 0xfd, 0x7f, 0x8b, 0xc6, 0x17, 0xb0,
+	0x24, 0xc6, 0x28, 0x36, 0xd7, 0x71, 0x85, 0xcc, 0xba, 0x39, 0x5b, 0x13, 0x71, 0xcc, 0x08, 0x5d,
+	0xc5, 0xc1, 0x7e, 0x01, 0x4b, 0x08, 0xbb, 0x89, 0x96, 0xf7, 0xa0, 0xa1, 0x65, 0x17, 0x2a, 0x09,
+	0x79, 0x1a, 0x3b, 0x5b, 0x70, 0x5b, 0xed, 0xaf, 0x55, 0x31, 0xfe, 0xdf, 0x1a, 0xdc, 0xa9, 0x3e,
+	0xbf, 0xd1, 0x3a, 0x70, 0x9d, 0x55, 0xaf, 0x7a, 0x8b, 0xb3, 0x6e, 0xb4, 0xc5, 0xcd, 0xdf, 0x68,
+	0x8b, 0x5b, 0x98, 0xb2, 0xc5, 0xfd, 0xae, 0x06, 0xab, 0x7b, 0x09, 0x65, 0xe3, 0xfb, 0x4b, 0x71,
+	0x5d, 0x2a, 0x5c, 0x3f, 0x80, 0x6e, 0xcc, 0x2b, 0x86, 0xdf, 0x2f, 0xd5, 0xdc, 0x8e, 0x3c, 0xd0,
+	0xe6, 0x17, 0x56, 0x8d, 0xd4, 0x26, 0x51, 0x1a, 0x75, 0xba, 0x78, 0xa2, 0xa1, 0x13, 0x98, 0x4f,
+	0x29, 0x1d, 0x60, 0x7f, 0x13, 0xbf, 0x9d, 0x0d, 0x58, 0x33, 0xd5, 0xc0, 0xda, 0xf4, 0x09, 0x74,
+	0x0f, 0x59, 0x28, 0x7c, 0x7d, 0xe5, 0x9c, 0x35, 0x20, 0x3a, 0x07, 0xe4, 0xcb, 0xa0, 0x7b, 0xc3,
+	0x28, 0x35, 0xad, 0x76, 0xd6, 0x99, 0x33, 0x74, 0x28, 0x22, 0x33, 0xb0, 0x84, 0x7c, 0xfa, 0x26,
+	0x48, 0xf3, 0xc7, 0x8b, 0x5d, 0x58, 0x33, 0xc1, 0x18, 0x27, 0xac, 0x81, 0x52, 0x01, 0x11, 0x3a,
+	0xb1, 0x85, 0x49, 0x7e, 0x39, 0x5f, 0x31, 0x5f, 0x1f, 0xf3, 0x69, 0xfe, 0x69, 0xe6, 0x0f, 0xdc,
+	0xd8, 0x57, 0xe6, 0xb0, 0xaa, 0x87, 0x4f, 0x36, 0x7d, 0x73, 0x01, 0x6c, 0x21, 0x18, 0x37, 0x45,
+	0xfe, 0x9e, 0x36, 0x4e, 0xf9, 0x6d, 0x4f, 0xa2, 0x6a, 0xf2, 0xcd, 0xcf, 0xb8, 0x33, 0x18, 0xba,
+	0x72, 0xec, 0xe4, 0x9b, 0xb7, 0x28, 0x9f, 0x26, 0x18, 0xd2, 0x14, 0x7b, 0xb7, 0x0e, 0xe2, 0xee,
+	0x37, 0x35, 0x93, 0xa6, 0x3c, 0xfa, 0x57, 0x03, 0x9a, 0xd2, 0xc6, 0x63, 0x9a, 0xbc, 0x0e, 0x7c,
+	0x4a, 0x7e, 0x08, 0xf3, 0xfc, 0x6d, 0x8a, 0x6c, 0x68, 0xf9, 0xad, 0xbd, 0x5d, 0xd9, 0x9b, 0x25,
+	0xf8, 0xa4, 0x3b, 0x2c, 0xe1, 0x1b, 0x14, 0xb9, 0xa5, 0xe1, 0x98, 0x0f, 0x5b, 0xb6, 0x5d, 0x75,
+	0x84, 0x1c, 0x5c, 0x68, 0x1a, 0xef, 0x4f, 0xe4, 0x5e, 0xf9, 0x59, 0xc8, 0x78, 0xd4, 0xb2, 0xb7,
+	0xa7, 0x23, 0x20, 0xcf, 0x3d, 0xa8, 0xab, 0x07, 0x25, 0x62, 0x57, 0xbe, 0x32, 0x49, 0x4e, 0xb7,
+	0x67, 0xbc, 0x40, 0x71, 0xd3, 0xd4, 0xfb, 0x8c, 0x6e, 0x9a, 0xb9, 0x01, 0x1b, 0xa6, 0x15, 0x97,
+	0xd5, 0x2f, 0xa1, 0x5d, 0xd8, 0x99, 0xc8, 0x7d, 0x0d, 0xbd, 0x7a, 0xd5, 0xb4, 0x9d, 0x59, 0x28,
+	0xc8, 0x79, 0x0c, 0xbd, 0x69, 0x8d, 0x9b, 0xbc, 0x5f, 0xdd, 0x27, 0xab, 0xaa, 0xa3, 0xfd, 0xc1,
+	0xb5, 0x70, 0xa5, 0xd0, 0x0f, 0x6b, 0x24, 0x62, 0x63, 0x5c, 0x65, 0xd5, 0x27, 0x3b, 0xd7, 0x68,
+	0x0c, 0x52, 0xe4, 0x7b, 0xd7, 0x6e, 0x21, 0x4c, 0x60, 0x90, 0xbf, 0x6b, 0x1a, 0xe2, 0x1e, 0x56,
+	0x84, 0x40, 0x95, 0xb0, 0x77, 0xaf, 0xc4, 0x9b, 0x88, 0xfa, 0x25, 0x74, 0x8a, 0x7b, 0x16, 0x71,
+	0xae, 0x5e, 0x0b, 0xed, 0x07, 0x33, 0x71, 0xf2, 0x20, 0x37, 0x1e, 0xbf, 0x8c, 0x20, 0xaf, 0x7a,
+	0x70, 0x33, 0x82, 0xbc, 0xf2, 0xdd, 0x8c, 0x3c, 0x83, 0x86, 0xf6, 0xbc, 0x45, 0xb6, 0x8c, 0x1c,
+	0x2b, 0xbe, 0xa7, 0xd9, 0x77, 0xa7, 0x1d, 0x17, 0xb8, 0x61, 0x51, 0x2a, 0x71, 0x33, 0x9e, 0xc1,
+	0xca, 0xdc, 0x0a, 0xaf, 0x5e, 0xcc, 0x99, 0xc5, 0x57, 0x24, 0xc3, 0x99, 0x53, 0xde, 0xbd, 0x0c,
+	0x67, 0x4e, 0x7b, 0x86, 0xe2, 0x69, 0x55, 0xd8, 0xd9, 0x8c, 0xb4, 0xaa, 0x5e, 0x88, 0x8d, 0xb4,
+	0x9a, 0xb6, 0x30, 0x32, 0xce, 0x85, 0x85, 0xc0, 0xe0, 0x5c, 0xbd, 0xc2, 0x18, 0x9c, 0xa7, 0xed,
+	0x13, 0x1e, 0x90, 0xf2, 0xac, 0x4e, 0xf4, 0x3f, 0x95, 0xa6, 0xae, 0x05, 0xf6, 0x3b, 0x57, 0x60,
+	0x61, 0x55, 0xff, 0xab, 0xa5, 0x1a, 0xda, 0xb3, 0xc8, 0x63, 0x53, 0x96, 0xaa, 0xed, 0x87, 0xb0,
+	0xa2, 0x37, 0x34, 0xa2, 0xdf, 0x5d, 0x45, 0x03, 0xb4, 0xef, 0x4d, 0x3d, 0x47, 0x5b, 0x18, 0x43,
+	0xbd, 0xab, 0x1b, 0x0c, 0x2b, 0xa6, 0x0e, 0x83, 0x61, 0xd5, 0x38, 0x40, 0xf6, 0x01, 0xf2, 0x66,
+	0x4e, 0xee, 0x68, 0xe8, 0xa5, 0x29, 0xc1, 0xde, 0x9a, 0x72, 0x9a, 0x87, 0xb1, 0xd6, 0xeb, 0x8d,
+	0x30, 0x2e, 0x4f, 0x06, 0x46, 0x18, 0x57, 0x8c, 0x08, 0xdc, 0x52, 0xbd, 0x81, 0x1a, 0x96, 0x56,
+	0xf4, 0x7c, 0xc3, 0xd2, 0xaa, 0xce, 0x7b, 0xb2, 0x28, 0xfe, 0xf2, 0xfc, 0xde, 0xff, 0x02, 0x00,
+	0x00, 0xff, 0xff, 0xdc, 0xa2, 0x3c, 0xa8, 0xff, 0x1c, 0x00, 0x00,
 }
