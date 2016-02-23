@@ -2486,9 +2486,9 @@ func GetStakeInfo(w *wallet.Wallet, chainSvr *chain.Client,
 		}
 
 		txResult, err := w.TxStore.TxDetails(ticketHash)
-		if err != nil {
+		if err != nil || txResult == nil {
 			log.Tracef("Failed to find ticket in blockchain while generating "+
-				"stake info (hash %v, err %s)", ticketHash, err.Error())
+				"stake info (hash %v, err %s)", ticketHash, err)
 			continue
 		}
 
