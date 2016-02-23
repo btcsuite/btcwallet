@@ -207,7 +207,18 @@ func (s *walletServer) NextAccount(ctx context.Context, req *pb.NextAccountReque
 func (s *walletServer) NextAddress(ctx context.Context, req *pb.NextAddressRequest) (
 	*pb.NextAddressResponse, error) {
 
-	addr, err := s.wallet.NewAddress(req.Account)
+	var (
+		addr btcutil.Address
+		err  error
+	)
+	switch req.Kind {
+	case pb.NextAddressRequest_BIP0044_EXTERNAL:
+		addr, err = s.wallet.NewAddress(req.Account)
+	case pb.NextAddressRequest_BIP0044_INTERNAL:
+		addr, err = s.wallet.NewChangeAddress(req.Account)
+	default:
+		return nil, grpc.Errorf(codes.InvalidArgument, "kind=%v", req.Kind)
+	}
 	if err != nil {
 		return nil, translateError(err)
 	}

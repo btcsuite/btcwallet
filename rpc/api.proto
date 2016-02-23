@@ -117,6 +117,11 @@ message NextAccountResponse {
 
 message NextAddressRequest {
 	uint32 account = 1;
+	enum Kind {
+	     BIP0044_EXTERNAL = 0;
+	     BIP0044_INTERNAL = 1;
+	}
+	Kind kind = 2;
 }
 message NextAddressResponse {
 	string address = 1;
