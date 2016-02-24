@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 0.1.0
+Version: 0.2.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -546,12 +546,22 @@ ___
 
 #### `NextAddress`
 
-The `NextAddress` method generates the next BIP0044 external account address for
-the wallet.
+The `NextAddress` method generates the next deterministic address for the
+wallet.
 
 **Request:** `NextAddressRequest`
 
 - `uint32 account`: The number of the account to derive the next address for.
+
+- `Kind kind`: The type of address to generate.
+
+  **Nested enum:** `Kind`
+
+  - `BIP0044_EXTERNAL`: The request specifies to generate the next address for
+    the account's BIP0044 external key chain.
+
+  - `BIP0044_INTERNAL`: The request specifies to generate the next address for
+    the account's BIP0044 internal key chain.
 
 **Response:** `NextAddressResponse`
 
