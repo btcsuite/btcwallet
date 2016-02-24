@@ -536,16 +536,17 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 				}
 			}
 
-			// If we're spending a multisig outpoint we
-			// know about, update the outpoint.
-			// Inefficient because you deserialize the
-			// entire multisig output info, consider
-			// a specific exists function in wtxmgr. cj
+			// If we're spending a multisig outpoint we know about,
+			// update the outpoint. Inefficient because you deserialize
+			// the entire multisig output info. Consider a specific
+			// exists function in wtxmgr. The error here is skipped
+			// because the absence of an multisignature output for
+			// some script can not always be considered an error. For
+			// example, the wallet might be rescanning as called from
+			// the above function and so does not have the output
+			// included yet.
 			mso, err := w.TxStore.GetMultisigOutput(&input.PreviousOutPoint)
-			if err != nil {
-				return err
-			}
-			if mso != nil {
+			if mso != nil && err == nil {
 				w.TxStore.SpendMultisigOut(&input.PreviousOutPoint,
 					rec.Hash,
 					uint32(i))
