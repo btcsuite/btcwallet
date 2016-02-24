@@ -1361,6 +1361,7 @@ var rpcHandlers = map[string]struct {
 	"listreceivedbyaccount":  {handler: ListReceivedByAccount},
 	"listreceivedbyaddress":  {handler: ListReceivedByAddress},
 	"listsinceblock":         {handler: ListSinceBlock},
+	"listscripts":            {handler: ListScripts},
 	"listtransactions":       {handler: ListTransactions},
 	"listunspent":            {handler: ListUnspent},
 	"lockunspent":            {handler: LockUnspent},
@@ -3176,6 +3177,81 @@ func ListSinceBlock(w *wallet.Wallet, chainSvr *chain.Client,
 		LastBlock:    blockHash.String(),
 	}
 	return res, nil
+}
+
+// scriptInfo models the binary or interface versions of JSON data to
+// return in a ListScriptsResult.
+type scriptInfo struct {
+	redeemScript []byte
+	address      dcrutil.Address
+}
+
+// ListScripts handles a listscripts request by returning an
+// array of script details for all scripts in the wallet.
+func ListScripts(w *wallet.Wallet, chainSvr *chain.Client,
+	icmd interface{}) (interface{}, error) {
+	scriptList := make(map[[20]byte]scriptInfo)
+
+	// Fetch all the address manager scripts first.
+	importedAcct, err := w.Manager.LookupAccount(waddrmgr.ImportedAddrAccountName)
+	if err != nil {
+		return nil, err
+	}
+
+	var managerScriptAddrs []waddrmgr.ManagedScriptAddress
+	err = w.Manager.ForEachAccountAddress(importedAcct,
+		func(maddr waddrmgr.ManagedAddress) error {
+			msa, is := maddr.(waddrmgr.ManagedScriptAddress)
+			if is {
+				managerScriptAddrs = append(managerScriptAddrs, msa)
+			}
+			return nil
+		})
+	if err != nil {
+		log.Errorf("failed to iterate through the addrmgr scripts: %v", err)
+	}
+	for _, msa := range managerScriptAddrs {
+		h := msa.Address().Hash160()
+		scr, err := msa.Script()
+		if err != nil {
+			return nil, err
+		}
+		scriptList[*h] = scriptInfo{
+			redeemScript: scr,
+			address:      msa.Address(),
+		}
+	}
+
+	// Fetch all the scripts from the transaction manager.
+	txsScripts, err := w.TxStore.StoredTxScripts()
+	if err != nil {
+		return nil, fmt.Errorf("failed to access stored txmgr scripts")
+	}
+	for _, scr := range txsScripts {
+		addr, err := dcrutil.NewAddressScriptHash(scr, activeNet.Params)
+		if err != nil {
+			log.Errorf("failed to parse txstore script: %v", err)
+			continue
+		}
+		h := addr.Hash160()
+		scriptList[*h] = scriptInfo{
+			redeemScript: scr,
+			address:      addr,
+		}
+	}
+
+	// Generate the JSON struct result.
+	listScriptsResultSIs := make([]dcrjson.ScriptInfo, len(scriptList))
+	itr := 0
+	for h, si := range scriptList {
+		listScriptsResultSIs[itr].Hash160 = hex.EncodeToString(h[:])
+		listScriptsResultSIs[itr].RedeemScript =
+			hex.EncodeToString(si.redeemScript)
+		listScriptsResultSIs[itr].Address = si.address.EncodeAddress()
+		itr++
+	}
+
+	return &dcrjson.ListScriptsResult{listScriptsResultSIs}, nil
 }
 
 // ListTransactions handles a listtransactions request by returning an
