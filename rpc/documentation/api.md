@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 0.2.0
+Version: 0.3.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -20,7 +20,7 @@ perceived usefulness and ease-of-use over alternatives, and user feedback.
 This document is the authoritative source on the RPC API's definitions and
 semantics.  Any divergence from this document is an implementation error.  API
 fixes and additions require a version increase according to the rules of
-[Semantic Versioning 2.0](http://semver.org/).
+[Semantic Versioning 2.0.0](http://semver.org/).
 
 Only optional proto3 message fields are used (the `required` keyword is never
 used in the `.proto` file).  If a message field must be set to something other
@@ -35,8 +35,45 @@ server may be running without a loaded wallet, in which case the Wallet service
 is not running and the Loader service must be used to create a new or load an
 existing wallet.
 
+- [`VersionService`](#versionservice)
 - [`LoaderService`](#loaderservice)
 - [`WalletService`](#walletservice)
+
+## `VersionService`
+
+The `VersionService` service provides the caller with versioning information
+regarding the RPC server.  It has no dependencies and is always running.
+
+**Methods:**
+
+- [`Version`](#version)
+
+### Methods
+
+#### `Version`
+
+The `Version` method returns the RPC server version.  Versioning follows the
+rules of Semantic Versioning (SemVer) 2.0.0.
+
+**Request:** `VersionRequest`
+
+**Response:** `VersionResponse`
+
+- `string version_string`: The version encoded as a string.
+
+- `uint32 major`: The SemVer major version number.
+
+- `uint32 minor`: The SemVer minor version number.
+
+- `uint32 patch`: The SemVer patch version number.
+
+- `string prerelease`: The SemVer pre-release version identifier, if any.
+
+- `string build_metadata`: Extra SemVer build metadata, if any.
+
+**Expected errors:** None
+
+**Stability:** Stable
 
 ## `LoaderService`
 

@@ -51,6 +51,14 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
+// Public API version constants
+const (
+	semverString = "0.3.0"
+	semverMajor  = 0
+	semverMinor  = 3
+	semverPatch  = 0
+)
+
 // translateError creates a new gRPC error with an appropiate error code for
 // recognized errors.
 //
@@ -99,6 +107,11 @@ func errorCode(err error) codes.Code {
 	}
 }
 
+// versionServer provides RPC clients with the ability to query the RPC server
+// version.
+type versionServer struct {
+}
+
 // walletServer provides wallet services for RPC clients.
 type walletServer struct {
 	wallet *wallet.Wallet
@@ -113,7 +126,22 @@ type loaderServer struct {
 	mu        sync.Mutex
 }
 
-// StartWalletService creates a implementation of the WalletService and
+// StartVersionService creates an implementation of the VersionService and
+// registers it with the gRPC server.
+func StartVersionService(server *grpc.Server) {
+	pb.RegisterVersionServiceServer(server, &versionServer{})
+}
+
+func (*versionServer) Version(ctx context.Context, req *pb.VersionRequest) (*pb.VersionResponse, error) {
+	return &pb.VersionResponse{
+		VersionString: semverString,
+		Major:         semverMajor,
+		Minor:         semverMinor,
+		Patch:         semverPatch,
+	}, nil
+}
+
+// StartWalletService creates an implementation of the WalletService and
 // registers it with the gRPC server.
 func StartWalletService(server *grpc.Server, wallet *wallet.Wallet) {
 	service := &walletServer{wallet}
@@ -715,7 +743,7 @@ func (s *walletServer) AccountNotifications(req *pb.AccountNotificationsRequest,
 	}
 }
 
-// StartWalletLoaderService creates a implementation of the WalletLoaderService
+// StartWalletLoaderService creates an implementation of the WalletLoaderService
 // and registers it with the gRPC server.
 func StartWalletLoaderService(server *grpc.Server, loader *wallet.Loader,
 	activeNet *netparams.Params) {
