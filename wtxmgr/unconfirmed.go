@@ -78,7 +78,7 @@ func (s *Store) removeDoubleSpends(ns walletdb.Bucket, rec *TxRecord) error {
 
 			log.Debugf("Removing double spending transaction %v",
 				doubleSpend.Hash)
-			err = s.removeConflict(ns, &doubleSpend)
+			err = s.removeUnconfirmed(ns, &doubleSpend)
 			if err != nil {
 				return err
 			}
@@ -87,11 +87,13 @@ func (s *Store) removeDoubleSpends(ns walletdb.Bucket, rec *TxRecord) error {
 	return nil
 }
 
-// removeConflict removes an unmined transaction record and all spend chains
+// removeUnconfirmed removes an unmined transaction record and all spend chains
 // deriving from it from the store.  This is designed to remove transactions
 // that would otherwise result in double spend conflicts if left in the store,
-// and to remove transactions that spend coinbase transactions on reorgs.
-func (s *Store) removeConflict(ns walletdb.Bucket, rec *TxRecord) error {
+// and to remove transactions that spend coinbase transactions on reorgs. It
+// can also be used to remove old tickets that do not meet the network difficulty
+// and expired transactions.
+func (s *Store) removeUnconfirmed(ns walletdb.Bucket, rec *TxRecord) error {
 	// For each potential credit for this record, each spender (if any) must
 	// be recursively removed as well.  Once the spenders are removed, the
 	// credit is deleted.
@@ -110,7 +112,7 @@ func (s *Store) removeConflict(ns walletdb.Bucket, rec *TxRecord) error {
 
 			log.Debugf("Transaction %v is part of a removed conflict "+
 				"chain -- removing as well", spender.Hash)
-			err = s.removeConflict(ns, &spender)
+			err = s.removeUnconfirmed(ns, &spender)
 			if err != nil {
 				return err
 			}

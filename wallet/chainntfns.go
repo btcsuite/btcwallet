@@ -277,6 +277,16 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 
 		w.Stop()
 	}
+
+	// Prune all expired transactions and all stake tickets that no longer
+	// meet the minimum stake difficulty.
+	stakeDifficultyInfo := w.GetStakeDifficulty()
+	err = w.TxStore.PruneUnconfirmed(bs.Height,
+		stakeDifficultyInfo.StakeDifficulty)
+	if err != nil {
+		log.Errorf("Failed to prune unconfirmed transactions when "+
+			"connecting block height %v: %v", bs.Height, err.Error())
+	}
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all

@@ -494,6 +494,83 @@ func (s *Store) getBlockHash(ns walletdb.Bucket, height int32) (chainhash.Hash,
 	return br.Block.Hash, nil
 }
 
+// PruneUnconfirmed prunes old stake tickets that are below the current stake
+// difficulty or any unconfirmed transaction which is expired.
+func (s *Store) PruneUnconfirmed(height int32, stakeDiff int64) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.isClosed {
+		str := "tx manager is closed"
+		return storeError(ErrIsClosed, str, nil)
+	}
+
+	var unconfTxRs []*TxRecord
+	var uTxRstoRemove []*TxRecord
+
+	// Open an update transaction in the database and
+	// remove all of the tagged transactions.
+	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
+		errDb := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
+			// TODO: Parsing transactions from the db may be a little
+			// expensive.  It's possible the caller only wants the
+			// serialized transactions.
+			var txHash chainhash.Hash
+			errLocal := readRawUnminedHash(k, &txHash)
+			if errLocal != nil {
+				return errLocal
+			}
+
+			var rec TxRecord
+			errLocal = readRawTxRecord(&txHash, v, &rec)
+			if errLocal != nil {
+				return errLocal
+			}
+
+			unconfTxRs = append(unconfTxRs, &rec)
+
+			return nil
+		})
+		if errDb != nil {
+			return errDb
+		}
+
+		for _, uTxR := range unconfTxRs {
+			// Tag all transactions that are expired.
+			if uTxR.MsgTx.Expiry <= uint32(height) &&
+				uTxR.MsgTx.Expiry != wire.NoExpiryValue {
+				log.Debugf("Tagging expired tx %v for removal (expiry %v, "+
+					"height %v)", uTxR.Hash, uTxR.MsgTx.Expiry, height)
+				uTxRstoRemove = append(uTxRstoRemove, uTxR)
+			}
+
+			// Tag all stake tickets which are below
+			// network difficulty.
+			if uTxR.TxType == stake.TxTypeSStx {
+				if uTxR.MsgTx.TxOut[0].Value < stakeDiff {
+					log.Debugf("Tagging low diff ticket %v for removal "+
+						"(stake %v, target %v)", uTxR.Hash,
+						uTxR.MsgTx.TxOut[0].Value, stakeDiff)
+					uTxRstoRemove = append(uTxRstoRemove, uTxR)
+				}
+			}
+		}
+
+		for _, uTxR := range uTxRstoRemove {
+			errLocal := s.removeUnconfirmed(ns, uTxR)
+			if errLocal != nil {
+				return errLocal
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // moveMinedTx moves a transaction record from the unmined buckets to block
 // buckets.
 func (s *Store) moveMinedTx(ns walletdb.Bucket, rec *TxRecord, recKey,
@@ -1422,7 +1499,7 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 
 			log.Debugf("Transaction %v spends a removed coinbase "+
 				"output -- removing as well", unminedRec.Hash)
-			err = s.removeConflict(ns, &unminedRec)
+			err = s.removeUnconfirmed(ns, &unminedRec)
 			if err != nil {
 				return err
 			}
