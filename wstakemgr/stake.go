@@ -361,12 +361,14 @@ func (s *StakeStore) dumpSSGenHashes() ([]chainhash.Hash, error) {
 
 		// Store each hash sequentially.
 		errForEach = bucket.ForEach(func(k []byte, v []byte) error {
-			rec, errDeser := deserializeSSGenRecord(v)
+			recs, errDeser := deserializeSSGenRecords(v)
 			if errDeser != nil {
 				return errDeser
 			}
 
-			voteList = append(voteList, rec.txHash)
+			for _, rec := range recs {
+				voteList = append(voteList, rec.txHash)
+			}
 			return nil
 		})
 
@@ -548,12 +550,9 @@ func (s *StakeStore) InsertSSGen(blockHash *chainhash.Hash, blockHeight int64,
 	return s.insertSSGen(blockHash, blockHeight, ssgenHash, voteBits, sstxHash)
 }
 
-// GetSSGens gets a list of SSGens that have been generated for some stake
+// getSSGens gets a list of SSGens that have been generated for some stake
 // ticket.
 func (s *StakeStore) getSSGens(sstxHash *chainhash.Hash) ([]*ssgenRecord, error) {
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-
 	var records []*ssgenRecord
 
 	// Access the database and store the result locally.
