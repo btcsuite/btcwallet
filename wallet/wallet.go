@@ -27,6 +27,8 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -73,7 +75,7 @@ type Wallet struct {
 	chainClientSyncMtx sync.Mutex
 
 	lockedOutpoints map[wire.OutPoint]struct{}
-	FeeIncrement    btcutil.Amount
+	RelayFee        btcutil.Amount
 	DisallowFree    bool
 
 	// Channels for rescan processing.  Requests are added and merged with
@@ -552,12 +554,12 @@ func (w *Wallet) syncWithChain() error {
 type (
 	createTxRequest struct {
 		account uint32
-		pairs   map[string]btcutil.Amount
+		outputs []*wire.TxOut
 		minconf int32
 		resp    chan createTxResponse
 	}
 	createTxResponse struct {
-		tx  *CreatedTx
+		tx  *txauthor.AuthoredTx
 		err error
 	}
 )
@@ -578,7 +580,7 @@ out:
 	for {
 		select {
 		case txr := <-w.createTxRequests:
-			tx, err := w.txToPairs(txr.pairs, txr.account, txr.minconf)
+			tx, err := w.txToOutputs(txr.outputs, txr.account, txr.minconf)
 			txr.resp <- createTxResponse{tx, err}
 
 		case <-quit:
@@ -590,16 +592,16 @@ out:
 
 // CreateSimpleTx creates a new signed transaction spending unspent P2PKH
 // outputs with at laest minconf confirmations spending to any number of
-// address/amount pairs.  Change and an appropiate transaction fee are
-// automatically included, if necessary.  All transaction creation through
-// this function is serialized to prevent the creation of many transactions
-// which spend the same outputs.
-func (w *Wallet) CreateSimpleTx(account uint32, pairs map[string]btcutil.Amount,
-	minconf int32) (*CreatedTx, error) {
+// address/amount pairs.  Change and an appropriate transaction fee are
+// automatically included, if necessary.  All transaction creation through this
+// function is serialized to prevent the creation of many transactions which
+// spend the same outputs.
+func (w *Wallet) CreateSimpleTx(account uint32, outputs []*wire.TxOut,
+	minconf int32) (*txauthor.AuthoredTx, error) {
 
 	req := createTxRequest{
 		account: account,
-		pairs:   pairs,
+		outputs: outputs,
 		minconf: minconf,
 		resp:    make(chan createTxResponse),
 	}
@@ -1996,9 +1998,9 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 	return amount, err
 }
 
-// SendPairs creates and sends payment transactions. It returns the transaction
-// hash upon success
-func (w *Wallet) SendPairs(amounts map[string]btcutil.Amount, account uint32,
+// SendOutputs creates and sends payment transactions. It returns the
+// transaction hash upon success.
+func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 	minconf int32) (*wire.ShaHash, error) {
 
 	chainClient, err := w.requireChainClient()
@@ -2006,15 +2008,22 @@ func (w *Wallet) SendPairs(amounts map[string]btcutil.Amount, account uint32,
 		return nil, err
 	}
 
+	for _, output := range outputs {
+		err = txrules.CheckOutput(output, w.RelayFee)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := w.CreateSimpleTx(account, amounts, minconf)
+	createdTx, err := w.CreateSimpleTx(account, outputs, minconf)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create transaction record and insert into the db.
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(createdTx.MsgTx, time.Now())
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(createdTx.Tx, time.Now())
 	if err != nil {
 		log.Errorf("Cannot create record for created transaction: %v", err)
 		return nil, err
@@ -2105,7 +2114,6 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 
 			return key, pka.Compressed(), nil
 		})
-
 		getScript := txscript.ScriptClosure(func(
 			addr btcutil.Address) ([]byte, error) {
 			// If keys were provided then we can only use the
@@ -2222,7 +2230,7 @@ func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS, w
 		Manager:             addrMgr,
 		TxStore:             txMgr,
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
-		FeeIncrement:        defaultFeeIncrement,
+		RelayFee:            txrules.DefaultRelayFeePerKb,
 		rescanAddJob:        make(chan *RescanJob),
 		rescanBatch:         make(chan *rescanBatch),
 		rescanNotifications: make(chan interface{}),

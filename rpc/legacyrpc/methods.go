@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -511,7 +512,7 @@ func GetInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (
 	// to using the manager version.
 	info.WalletVersion = int32(waddrmgr.LatestMgrVersion)
 	info.Balance = bal.ToBTC()
-	info.PaytxFee = w.FeeIncrement.ToBTC()
+	info.PaytxFee = w.RelayFee.ToBTC()
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
 	//  - unlocked_until
@@ -1384,14 +1385,40 @@ func LockUnspent(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	return true, nil
 }
 
+// makeOutputs creates a slice of transaction outputs from a pair of address
+// strings to amounts.  This is used to create the outputs to include in newly
+// created transactions from a JSON object describing the output destinations
+// and amounts.
+func makeOutputs(pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) ([]*wire.TxOut, error) {
+	outputs := make([]*wire.TxOut, 0, len(pairs))
+	for addrStr, amt := range pairs {
+		addr, err := btcutil.DecodeAddress(addrStr, chainParams)
+		if err != nil {
+			return nil, fmt.Errorf("cannot decode address: %s", err)
+		}
+
+		pkScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create txout script: %s", err)
+		}
+
+		outputs = append(outputs, wire.NewTxOut(int64(amt), pkScript))
+	}
+	return outputs, nil
+}
+
 // sendPairs creates and sends payment transactions.
 // It returns the transaction hash in string format upon success
 // All errors are returned in btcjson.RPCError format
 func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
 	account uint32, minconf int32) (string, error) {
-	txSha, err := w.SendPairs(amounts, account, minconf)
+	outputs, err := makeOutputs(amounts, w.ChainParams())
 	if err != nil {
-		if err == wallet.ErrNonPositiveAmount {
+		return "", err
+	}
+	txSha, err := w.SendOutputs(outputs, account, minconf)
+	if err != nil {
+		if err == txrules.ErrAmountNegative {
 			return "", ErrNeedPositiveAmount
 		}
 		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
@@ -1549,7 +1576,7 @@ func SetTxFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	w.FeeIncrement = incr
+	w.RelayFee = incr
 
 	// A boolean true result is returned upon success.
 	return true, nil

@@ -26,7 +26,6 @@ const (
 	defaultLogLevel         = "info"
 	defaultLogDirname       = "logs"
 	defaultLogFilename      = "btcwallet.log"
-	defaultDisallowFree     = false
 	defaultRPCMaxClients    = 10
 	defaultRPCMaxWebsockets = 25
 
@@ -59,8 +58,7 @@ type config struct {
 	Profile       string `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
 
 	// Wallet options
-	WalletPass   string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
-	DisallowFree bool   `long:"disallowfree" description:"Force transactions to always include a fee"`
+	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
 
 	// RPC client options
 	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334, simnet: localhost:18556)"`
@@ -97,7 +95,8 @@ type config struct {
 	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
 
 	// Deprecated options
-	KeypoolSize uint `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
+	DisallowFree bool `long:"disallowfree" description:"DEPRECATED -- Force transactions to always include a fee"`
+	KeypoolSize  uint `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -221,7 +220,6 @@ func loadConfig() (*config, []string, error) {
 		WalletPass:             wallet.InsecurePubPassphrase,
 		RPCKey:                 defaultRPCKeyFile,
 		RPCCert:                defaultRPCCertFile,
-		DisallowFree:           defaultDisallowFree,
 		LegacyRPCMaxClients:    defaultRPCMaxClients,
 		LegacyRPCMaxWebsockets: defaultRPCMaxWebsockets,
 	}
