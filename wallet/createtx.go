@@ -58,6 +58,20 @@ const (
 	// fraud proof, and the estimated signature script size.
 	txInEstimate = 32 + 4 + 1 + 12 + 4 + sigScriptEstimate
 
+	// sstxTicketCommitmentEstimate =
+	// - version + amount +
+	// OP_SSTX OP_DUP OP_HASH160 OP_DATA_20 OP_EQUALVERIFY OP_CHECKSIG
+	sstxTicketCommitmentEstimate = 2 + 8 + 1 + 1 + 1 + 1 + 20 + 1 + 1
+
+	// sstxSubsidyCommitmentEstimate =
+	// version + amount + OP_RETURN OP_DATA_30
+	sstxSubsidyCommitmentEstimate = 2 + 8 + 2 + 30
+
+	// sstxChangeOutputEstimate =
+	// version + amount + OP_SSTXCHANGE OP_DUP OP_HASH160 OP_DATA_20
+	//	OP_EQUALVERIFY OP_CHECKSIG
+	sstxChangeOutputEstimate = 2 + 8 + 1 + 1 + 1 + 1 + 20 + 1 + 1
+
 	// A P2PKH pkScript contains the following bytes:
 	//  - OP_DUP
 	//  - OP_HASH160
@@ -92,8 +106,11 @@ func EstimateTxSize(numInputs, numOutputs int) int {
 	return estimateTxSize(numInputs, numOutputs)
 }
 
-func estimateSSTxSize(numInputs, numOutputs int) int {
-	return txOverheadEstimate + txInEstimate*numInputs + ssTxOutEsimate*numOutputs
+func estimateSSTxSize(numInputs int) int {
+	return txOverheadEstimate + txInEstimate*numInputs +
+		sstxTicketCommitmentEstimate +
+		(sstxSubsidyCommitmentEstimate+
+			sstxChangeOutputEstimate)*numInputs
 }
 
 func feeForSize(incr dcrutil.Amount, sz int) dcrutil.Amount {
@@ -111,6 +128,14 @@ const FeeIncrementMainnet = 5e6
 // FeeIncrementTestnet is the default minimum transation fee (0.00001 coin,
 // measured in atoms) added to transactions requiring a fee for TestNet.
 const FeeIncrementTestnet = 1e3
+
+// TicketFeeIncrement is the default minimum stake transation fee (0.05 coin,
+// measured in atoms).
+const TicketFeeIncrement = 5e6
+
+// EstMaxTicketFeeAmount is the estimated max ticket fee to be used for size
+// calculation for eligible utxos for ticket purchasing
+const EstMaxTicketFeeAmount = 0.1 * 1e8
 
 // --------------------------------------------------------------------------------
 // Error Handling
@@ -1301,9 +1326,15 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	pair := make(map[string]dcrutil.Amount, 1)
 	pair[ticketAddr.String()] = ticketPrice
 
+	// TODO Currently we are using an estimated max ticket size
+	// to get estimate fees to make sure we have enough eligible
+	// utxos
+	var estFee dcrutil.Amount
+	estFee = EstMaxTicketFeeAmount
+
 	// Instead of taking reward addresses by arg, just create them now and
 	// automatically find all eligible outputs from all current utxos.
-	amountNeeded := req.minBalance + ticketPrice
+	amountNeeded := req.minBalance + ticketPrice + estFee
 	eligible, err := w.findEligibleOutputsAmount(account, req.minConf,
 		amountNeeded, bs)
 	if err != nil {
@@ -1361,18 +1392,11 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 			// so we'll have to change to pop in the
 			// last output.
 
-			// Calculate the amount of fees needed.
-			s := estimateSSTxSize(i, i)
+			estSize := estimateSSTxSize(i)
 			var feeIncrement dcrutil.Amount
-			switch {
-			case w.chainParams == &chaincfg.MainNetParams:
-				feeIncrement = FeeIncrementMainnet
-			case w.chainParams == &chaincfg.TestNetParams:
-				feeIncrement = FeeIncrementTestnet
-			default:
-				feeIncrement = FeeIncrementTestnet
-			}
-			fee := feeForSize(feeIncrement, s)
+			feeIncrement = w.TicketFeeIncrement()
+
+			fee := feeForSize(feeIncrement, estSize)
 
 			// Not enough funds after taking fee into account.
 			// Should retry instead of failing, Decred TODO

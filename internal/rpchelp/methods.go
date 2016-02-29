@@ -95,6 +95,8 @@ var Methods = []struct {
 	{"sendtosstx", returnsString},
 	{"sendtossgen", returnsString},
 	{"getstakeinfo", []interface{}{(*dcrjson.GetStakeInfoResult)(nil)}},
+	{"getticketfee", returnsNumber},
+	{"setticketfee", returnsBool},
 }
 
 var HelpDescs = []struct {

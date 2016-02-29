@@ -571,4 +571,13 @@ var helpDescsEnUS = map[string]string{
 	"sendtossgen-blockhash":   "Hash for the block being voted on",
 	"sendtossgen-tickethash":  "Hash of the ticket used for vote",
 	"sendtossgen-fromaccount": "The account to use (default=\"default\")",
+
+	// SetTxFeeCmd help.
+	"setticketfee--synopsis": "Modify the increment used each time more fee is required for an authored stake transaction.",
+	"setticketfee-fee":       "The new fee increment valued in decred",
+	"setticketfee--result0":  "The boolean 'true'",
+
+	// SetTxFeeCmd help.
+	"getticketfee--synopsis": "Get the current fee increment used for an authored stake transaction.",
+	"getticketfee--result0":  "The current fee",
 }

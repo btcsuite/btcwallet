@@ -121,9 +121,11 @@ type Wallet struct {
 
 	lockedOutpoints map[wire.OutPoint]struct{}
 
-	feeIncrementLock sync.Mutex
-	feeIncrement     dcrutil.Amount
-	DisallowFree     bool
+	feeIncrementLock       sync.Mutex
+	feeIncrement           dcrutil.Amount
+	ticketFeeIncrementLock sync.Mutex
+	ticketFeeIncrement     dcrutil.Amount
+	DisallowFree           bool
 
 	// Channels for rescan processing.  Requests are added and merged with
 	// any waiting requests, before being sent to another goroutine to
@@ -212,6 +214,9 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		feeIncrement = FeeIncrementTestnet
 	}
 
+	var ticketFeeIncrement dcrutil.Amount
+	ticketFeeIncrement = TicketFeeIncrement
+
 	internalPool := NewAddressPool()
 	externalPool := NewAddressPool()
 
@@ -226,6 +231,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		CurrentStakeDiff:         &StakeDifficultyInfo{nil, -1, -1},
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
 		feeIncrement:             feeIncrement,
+		ticketFeeIncrement:       ticketFeeIncrement,
 		rescanAddJob:             make(chan *RescanJob),
 		rescanBatch:              make(chan *rescanBatch),
 		rescanNotifications:      make(chan interface{}),
@@ -296,11 +302,26 @@ func (w *Wallet) FeeIncrement() dcrutil.Amount {
 }
 
 // SetFeeIncrement is used to set the current w.FeeIncrement for the wallet.
-// Uses non-exported mutex safe setFeeIncrement func
 func (w *Wallet) SetFeeIncrement(fee dcrutil.Amount) {
 	w.feeIncrementLock.Lock()
 	w.feeIncrement = fee
 	w.feeIncrementLock.Unlock()
+}
+
+// TicketFeeIncrement is used to get the current feeIncrement for the wallet.
+func (w *Wallet) TicketFeeIncrement() dcrutil.Amount {
+	w.ticketFeeIncrementLock.Lock()
+	fee := w.ticketFeeIncrement
+	w.ticketFeeIncrementLock.Unlock()
+
+	return fee
+}
+
+// SetTicketFeeIncrement is used to set the current w.ticketFeeIncrement for the wallet.
+func (w *Wallet) SetTicketFeeIncrement(fee dcrutil.Amount) {
+	w.ticketFeeIncrementLock.Lock()
+	w.ticketFeeIncrement = fee
+	w.ticketFeeIncrementLock.Unlock()
 }
 
 // SetGenerate is used to enable or disable stake mining in the

@@ -119,6 +119,7 @@ var rpcHandlers = map[string]struct {
 	"getreceivedbyaddress":   {handler: GetReceivedByAddress},
 	"getseed":                {handler: GetSeed, requireUnsafeOnMainNet: true},
 	"getstakeinfo":           {handlerWithChain: GetStakeInfo},
+	"getticketfee":           {handler: GetTicketFee},
 	"getticketmaxprice":      {handler: GetTicketMaxPrice},
 	"gettickets":             {handlerWithChain: GetTickets},
 	"getticketvotebits":      {handler: GetTicketVoteBits},
@@ -146,6 +147,7 @@ var rpcHandlers = map[string]struct {
 	"sendtossgen":            {handler: SendToSSGen},
 	"sendtossrtx":            {handlerWithChain: SendToSSRtx},
 	"setgenerate":            {handler: SetGenerate},
+	"setticketfee":           {handler: SetTicketFee},
 	"setticketmaxprice":      {handler: SetTicketMaxPrice},
 	"setticketvotebits":      {handler: SetTicketVoteBits},
 	"settxfee":               {handler: SetTxFee},
@@ -1283,6 +1285,11 @@ func GetStakeInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 	}
 
 	return resp, nil
+}
+
+// GetTicketFee gets the currently set price per kb for tickets
+func GetTicketFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	return w.TicketFeeIncrement().ToCoin(), nil
 }
 
 // GetTicketMaxPrice gets the maximum price the user is willing to pay for a
@@ -2740,6 +2747,25 @@ func SetTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	}
 
 	return nil, nil
+}
+
+// SetTicketFee sets the transaction fee per kilobyte added to tickets.
+func SetTicketFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.SetTicketFeeCmd)
+
+	// Check that amount is not negative.
+	if cmd.Fee < 0 {
+		return nil, ErrNeedPositiveAmount
+	}
+
+	incr, err := dcrutil.NewAmount(cmd.Fee)
+	if err != nil {
+		return nil, err
+	}
+	w.SetTicketFeeIncrement(incr)
+
+	// A boolean true result is returned upon success.
+	return true, nil
 }
 
 // SetTxFee sets the transaction fee per kilobyte added to transactions.
