@@ -109,6 +109,7 @@ var helpDescsEnUS = map[string]string{
 	"getstakeinforesult-poolsize":         "Number of live tickets in the ticket pool.",
 	"getstakeinforesult-difficulty":       "Current stake difficulty.",
 	"getstakeinforesult-allmempooltix":    "Number of tickets currently in the mempool",
+	"getstakeinforesult-ownmempooltix":    "Number of tickets submitted by this wallet currently in mempool",
 	"getstakeinforesult-immature":         "Number of tickets from this wallet that are in the blockchain but which are not yet mature",
 	"getstakeinforesult-live":             "Number of mature, active tickets owned by this wallet",
 	"getstakeinforesult-proportionlive":   "(Live / PoolSize)",

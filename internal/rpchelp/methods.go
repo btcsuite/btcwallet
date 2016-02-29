@@ -94,6 +94,7 @@ var Methods = []struct {
 	{"sendtossrtx", returnsString},
 	{"sendtosstx", returnsString},
 	{"sendtossgen", returnsString},
+	{"getstakeinfo", []interface{}{(*dcrjson.GetStakeInfoResult)(nil)}},
 }
 
 var HelpDescs = []struct {
