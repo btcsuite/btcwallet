@@ -31,11 +31,13 @@ import (
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-// Client represents a persistent client connection to a decred RPC server
+// RPCClient represents a persistent client connection to a decred RPC server
 // for information regarding the current best block chain.
-type Client struct {
+type RPCClient struct {
 	*dcrrpcclient.Client
-	chainParams *chaincfg.Params
+	connConfig        *dcrrpcclient.ConnConfig // Work around unexported field
+	chainParams       *chaincfg.Params
+	reconnectAttempts int
 
 	enqueueNotification       chan interface{}
 	dequeueNotification       chan interface{}
@@ -54,18 +56,34 @@ type Client struct {
 	quitMtx sync.Mutex
 }
 
-// NewClient creates a client connection to the server described by the connect
-// string.  If disableTLS is false, the remote RPC certificate must be provided
-// in the certs slice.  The connection is not established immediately, but must
-// be done using the Start method.  If the remote server does not operate on
-// the same decred network as described by the passed chain parameters, the
-// connection will be disconnected.
-func NewClient(chainParams *chaincfg.Params, connect, user, pass string,
-	certs []byte, disableTLS bool) (*Client, error) {
-	client := Client{
+// NewRPCClient creates a client connection to the server described by the
+// connect string.  If disableTLS is false, the remote RPC certificate must be
+// provided in the certs slice.  The connection is not established immediately,
+// but must be done using the Start method.  If the remote server does not
+// operate on the same bitcoin network as described by the passed chain
+// parameters, the connection will be disconnected.
+func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte,
+	disableTLS bool, reconnectAttempts int) (*RPCClient, error) {
+
+	if reconnectAttempts < 0 {
+		return nil, errors.New("reconnectAttempts must be positive")
+	}
+
+	client := &RPCClient{
+		connConfig: &dcrrpcclient.ConnConfig{
+			Host:                 connect,
+			Endpoint:             "ws",
+			User:                 user,
+			Pass:                 pass,
+			Certificates:         certs,
+			DisableAutoReconnect: true,
+			DisableConnectOnNew:  true,
+			DisableTLS:           disableTLS,
+		},
 		reorganizeToHash:          chainhash.Hash{},
 		reorganizing:              false,
 		chainParams:               chainParams,
+		reconnectAttempts:         reconnectAttempts,
 		enqueueNotification:       make(chan interface{}),
 		dequeueNotification:       make(chan interface{}),
 		enqueueVotingNotification: make(chan interface{}),
@@ -73,7 +91,7 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string,
 		currentBlock:              make(chan *waddrmgr.BlockStamp),
 		quit:                      make(chan struct{}),
 	}
-	ntfnCallbacks := dcrrpcclient.NotificationHandlers{
+	ntfnCallbacks := &dcrrpcclient.NotificationHandlers{
 		OnClientConnected:       client.onClientConnect,
 		OnBlockConnected:        client.onBlockConnected,
 		OnBlockDisconnected:     client.onBlockDisconnected,
@@ -86,22 +104,12 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string,
 		OnRescanFinished:        client.onRescanFinished,
 		OnRescanProgress:        client.onRescanProgress,
 	}
-	conf := dcrrpcclient.ConnConfig{
-		Host:                 connect,
-		Endpoint:             "ws",
-		User:                 user,
-		Pass:                 pass,
-		Certificates:         certs,
-		DisableAutoReconnect: true,
-		DisableConnectOnNew:  true,
-		DisableTLS:           disableTLS,
-	}
-	c, err := dcrrpcclient.New(&conf, &ntfnCallbacks)
+	rpcClient, err := dcrrpcclient.New(client.connConfig, ntfnCallbacks)
 	if err != nil {
 		return nil, err
 	}
-	client.Client = c
-	return &client, nil
+	client.Client = rpcClient
+	return client, nil
 }
 
 // Start attempts to establish a client connection with the remote server.
@@ -109,8 +117,8 @@ func NewClient(chainParams *chaincfg.Params, connect, user, pass string,
 // sent by the server.  After a limited number of connection attempts, this
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
-func (c *Client) Start() error {
-	err := c.Connect(5) // attempt connection 5 tries at most
+func (c *RPCClient) Start() error {
+	err := c.Connect(c.reconnectAttempts)
 	if err != nil {
 		return err
 	}
@@ -138,7 +146,7 @@ func (c *Client) Start() error {
 
 // Stop disconnects the client and signals the shutdown of all goroutines
 // started by Start.
-func (c *Client) Stop() {
+func (c *RPCClient) Stop() {
 	c.quitMtx.Lock()
 	select {
 	case <-c.quit:
@@ -156,7 +164,7 @@ func (c *Client) Stop() {
 
 // WaitForShutdown blocks until both the client has finished disconnecting
 // and all handlers have exited.
-func (c *Client) WaitForShutdown() {
+func (c *RPCClient) WaitForShutdown() {
 	c.Client.WaitForShutdown()
 	c.wg.Wait()
 }
@@ -226,7 +234,7 @@ type (
 )
 
 // SetReorganizing allows you to set the flag for blockchain reorganization.
-func (c *Client) SetReorganizingState(is bool, hash chainhash.Hash) {
+func (c *RPCClient) SetReorganizingState(is bool, hash chainhash.Hash) {
 	c.reorganizingLock.Lock()
 	defer c.reorganizingLock.Unlock()
 
@@ -235,7 +243,7 @@ func (c *Client) SetReorganizingState(is bool, hash chainhash.Hash) {
 }
 
 // SetReorganizing allows you to set the flag for blockchain reorganization.
-func (c *Client) GetReorganizing() (bool, chainhash.Hash) {
+func (c *RPCClient) GetReorganizing() (bool, chainhash.Hash) {
 	c.reorganizingLock.Lock()
 	defer c.reorganizingLock.Unlock()
 
@@ -246,7 +254,7 @@ func (c *Client) GetReorganizing() (bool, chainhash.Hash) {
 // decred RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for
 // later reads.
-func (c *Client) Notifications() <-chan interface{} {
+func (c *RPCClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
@@ -254,13 +262,13 @@ func (c *Client) Notifications() <-chan interface{} {
 // by the remote RPC server.  This channel must be continually read or the
 // process may abort for running out memory, as unread notifications are
 // queued for later reads.
-func (c *Client) NotificationsVoting() <-chan interface{} {
+func (c *RPCClient) NotificationsVoting() <-chan interface{} {
 	return c.dequeueVotingNotification
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
 // if the client has been shut down.
-func (c *Client) BlockStamp() (*waddrmgr.BlockStamp, error) {
+func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
 	case bs := <-c.currentBlock:
 		return bs, nil
@@ -291,15 +299,14 @@ func parseBlock(block *dcrjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	return blk, nil
 }
 
-func (c *Client) onClientConnect() {
-	log.Info("Established websocket RPC connection to dcrd")
+func (c *RPCClient) onClientConnect() {
 	select {
 	case c.enqueueNotification <- ClientConnected{}:
 	case <-c.quit:
 	}
 }
 
-func (c *Client) onBlockConnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
+func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
 	select {
 	case c.enqueueNotification <- BlockConnected{
 		Block: wtxmgr.Block{
@@ -313,7 +320,7 @@ func (c *Client) onBlockConnected(hash *chainhash.Hash, height int32, time time.
 	}
 }
 
-func (c *Client) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
+func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
 	select {
 	case c.enqueueNotification <- BlockDisconnected{
 		Block: wtxmgr.Block{
@@ -329,7 +336,7 @@ func (c *Client) onBlockDisconnected(hash *chainhash.Hash, height int32, time ti
 
 // onReorganization handles reorganization notifications and passes them
 // downstream to the notifications queue.
-func (c *Client) onReorganization(oldHash *chainhash.Hash, oldHeight int32,
+func (c *RPCClient) onReorganization(oldHash *chainhash.Hash, oldHeight int32,
 	newHash *chainhash.Hash, newHeight int32) {
 	c.enqueueNotification <- Reorganization{
 		oldHash,
@@ -341,7 +348,7 @@ func (c *Client) onReorganization(oldHash *chainhash.Hash, oldHeight int32,
 
 // onWinningTickets handles winning tickets notifications data and passes it
 // downstream to the notifications queue.
-func (c *Client) onWinningTickets(hash *chainhash.Hash, height int64,
+func (c *RPCClient) onWinningTickets(hash *chainhash.Hash, height int64,
 	tickets []*chainhash.Hash) {
 	c.enqueueVotingNotification <- WinningTickets{
 		hash,
@@ -352,7 +359,7 @@ func (c *Client) onWinningTickets(hash *chainhash.Hash, height int64,
 
 // onSpentAndMissedTickets handles missed tickets notifications data and passes it
 // downstream to the notifications queue.
-func (c *Client) onSpentAndMissedTickets(hash *chainhash.Hash,
+func (c *RPCClient) onSpentAndMissedTickets(hash *chainhash.Hash,
 	height int64,
 	stakeDiff int64,
 	tickets map[chainhash.Hash]bool) {
@@ -376,7 +383,7 @@ func (c *Client) onSpentAndMissedTickets(hash *chainhash.Hash,
 
 // onStakeDifficulty handles stake difficulty notifications data and passes it
 // downstream to the notification queue.
-func (c *Client) onStakeDifficulty(hash *chainhash.Hash,
+func (c *RPCClient) onStakeDifficulty(hash *chainhash.Hash,
 	height int64,
 	stakeDiff int64) {
 
@@ -387,7 +394,7 @@ func (c *Client) onStakeDifficulty(hash *chainhash.Hash,
 	}
 }
 
-func (c *Client) onRecvTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
+func (c *RPCClient) onRecvTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
 	blk, err := parseBlock(block)
 	if err != nil {
 		// Log and drop improper notification.
@@ -407,19 +414,19 @@ func (c *Client) onRecvTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
 	}
 }
 
-func (c *Client) onRedeemingTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
+func (c *RPCClient) onRedeemingTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
 	// Handled exactly like recvtx notifications.
 	c.onRecvTx(tx, block)
 }
 
-func (c *Client) onRescanProgress(hash *chainhash.Hash, height int32, blkTime time.Time) {
+func (c *RPCClient) onRescanProgress(hash *chainhash.Hash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
 	case <-c.quit:
 	}
 }
 
-func (c *Client) onRescanFinished(hash *chainhash.Hash, height int32, blkTime time.Time) {
+func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
 	case <-c.quit:
@@ -429,7 +436,7 @@ func (c *Client) onRescanFinished(hash *chainhash.Hash, height int32, blkTime ti
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
-func (c *Client) handler() {
+func (c *RPCClient) handler() {
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to receive best block from chain server: %v", err)
@@ -498,8 +505,13 @@ out:
 			// No notifications were received in the last 60s.
 			// Ensure the connection is still active by making a new
 			// request to the server.
-			// A 3 second timeout is used to prevent the handler loop
-			// from blocking here forever.
+			// TODO: A minute timeout is used to prevent the handler
+			// loop from blocking here forever, but this is much larger
+			// than it needs to be due to dcrd processing websocket
+			// requests synchronously (see
+			// https://github.com/btcsuite/btcd/issues/504).  Decrease
+			// this to something saner like 3s when the above issue is
+			// fixed.
 			type sessionResult struct {
 				err error
 			}
@@ -519,7 +531,7 @@ out:
 				}
 				pingChan = time.After(time.Minute)
 
-			case <-time.After(3 * time.Second):
+			case <-time.After(time.Minute):
 				log.Errorf("Timeout waiting for session RPC")
 				c.Stop()
 				break out
@@ -539,7 +551,7 @@ out:
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
-func (c *Client) handlerVoting() {
+func (c *RPCClient) handlerVoting() {
 	var notifications []interface{}
 	enqueue := c.enqueueVotingNotification
 	var dequeue chan interface{}
@@ -584,4 +596,11 @@ out:
 	}
 	close(c.dequeueVotingNotification)
 	c.wg.Done()
+}
+
+// POSTClient creates the equivalent HTTP POST dcrrpcclient.Client.
+func (c *RPCClient) POSTClient() (*dcrrpcclient.Client, error) {
+	configCopy := *c.connConfig
+	configCopy.HTTPPostMode = true
+	return dcrrpcclient.New(&configCopy, nil)
 }

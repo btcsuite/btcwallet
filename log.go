@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2013-2015 The btcsuite developers
  * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -24,19 +24,13 @@ import (
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/seelog"
 
+	"github.com/decred/dcrrpcclient"
 	"github.com/decred/dcrwallet/chain"
+	"github.com/decred/dcrwallet/rpc/legacyrpc"
+	"github.com/decred/dcrwallet/rpc/rpcserver"
 	"github.com/decred/dcrwallet/wallet"
 	"github.com/decred/dcrwallet/wstakemgr"
 	"github.com/decred/dcrwallet/wtxmgr"
-)
-
-const (
-	// lockTimeThreshold is the number below which a lock time is
-	// interpreted to be a block number.  Since an average of one block
-	// is generated per 10 minutes, this allows blocks for about 9,512
-	// years.  However, if the field is interpreted as a timestamp, given
-	// the lock time is a uint32, the max is sometime around 2106.
-	lockTimeThreshold uint32 = 5e8 // Tue Nov 5 00:53:20 1985 UTC
 )
 
 // Loggers per subsytem.  Note that backendLog is a seelog logger that all of
@@ -44,12 +38,14 @@ const (
 // add a reference here, to the subsystemLoggers map, and the useLogger
 // function.
 var (
-	backendLog = seelog.Disabled
-	log        = btclog.Disabled
-	walletLog  = btclog.Disabled
-	txmgrLog   = btclog.Disabled
-	stkmLog    = btclog.Disabled
-	chainLog   = btclog.Disabled
+	backendLog   = seelog.Disabled
+	log          = btclog.Disabled
+	walletLog    = btclog.Disabled
+	txmgrLog     = btclog.Disabled
+	stkmLog      = btclog.Disabled
+	chainLog     = btclog.Disabled
+	grpcLog      = btclog.Disabled
+	legacyRPCLog = btclog.Disabled
 )
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
@@ -59,6 +55,8 @@ var subsystemLoggers = map[string]btclog.Logger{
 	"TMGR": txmgrLog,
 	"STKM": stkmLog,
 	"CHNS": chainLog,
+	"GRPC": grpcLog,
+	"RPCS": legacyRPCLog,
 }
 
 // logClosure is used to provide a closure over expensive logging operations
@@ -100,6 +98,13 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	case "CHNS":
 		chainLog = logger
 		chain.UseLogger(logger)
+		dcrrpcclient.UseLogger(logger)
+	case "GRPC":
+		grpcLog = logger
+		rpcserver.UseLogger(logger)
+	case "RPCS":
+		legacyRPCLog = logger
+		legacyrpc.UseLogger(logger)
 	}
 }
 

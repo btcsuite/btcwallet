@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2013-2016 The btcsuite developers
  * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -27,7 +27,10 @@ import (
 
 	flags "github.com/btcsuite/go-flags"
 	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/internal/cfgutil"
 	"github.com/decred/dcrwallet/internal/legacy/keystore"
+	"github.com/decred/dcrwallet/netparams"
+	"github.com/decred/dcrwallet/wallet"
 )
 
 const (
@@ -49,17 +52,6 @@ const (
 	defaultAutomaticRepair   = false
 	defaultUnsafeMainNet     = false
 
-	// defaultPubPassphrase is the default public wallet passphrase which is
-	// used when the user indicates they do not want additional protection
-	// provided by having all public data in the wallet encrypted by a
-	// passphrase only known to them.
-	defaultPubPassphrase = "public"
-
-	// maxEmptyAccounts is the number of accounts to scan even if they have no
-	// transaction history. This is a deviation from BIP044 to make account
-	// creation easier by allowing a limited number of empty accounts.
-	maxEmptyAccounts = 100
-
 	walletDbName = "wallet.db"
 )
 
@@ -75,47 +67,71 @@ var (
 )
 
 type config struct {
-	ShowVersion        bool     `short:"V" long:"version" description:"Display version information and exit"`
-	Create             bool     `long:"create" description:"Create the wallet if it does not exist"`
-	CreateTemp         bool     `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	CreateWatchingOnly bool     `long:"createwatchingonly" description:"Create the wallet and instantiate it as watching only with an HD extended pubkey; must call with --create"`
-	CAFile             string   `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with dcrd"`
-	RPCConnect         string   `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:19109, mainnet: localhost:9109, simnet: localhost:19556)"`
-	DebugLevel         string   `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
-	ConfigFile         string   `short:"C" long:"configfile" description:"Path to configuration file"`
-	SvrListeners       []string `long:"rpclisten" description:"Listen for RPC/websocket connections on this interface/port (default port: 19110, mainnet: 9110, simnet: 19557)"`
-	DataDir            string   `short:"b" long:"datadir" description:"Directory to store wallets and transactions"`
-	LogDir             string   `long:"logdir" description:"Directory to log output."`
-	Username           string   `short:"u" long:"username" description:"Username for client and dcrd authorization"`
-	Password           string   `short:"P" long:"password" default-mask:"-" description:"Password for client and dcrd authorization"`
-	DcrdUsername       string   `long:"dcrdusername" description:"Alternative username for dcrd authorization"`
-	DcrdPassword       string   `long:"dcrdpassword" default-mask:"-" description:"Alternative password for dcrd authorization"`
-	WalletPass         string   `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
-	RPCCert            string   `long:"rpccert" description:"File containing the certificate file"`
-	RPCKey             string   `long:"rpckey" description:"File containing the certificate key"`
-	RPCMaxClients      int64    `long:"rpcmaxclients" description:"Max number of RPC clients for standard connections"`
-	RPCMaxWebsockets   int64    `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
-	DisableServerTLS   bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
-	DisableClientTLS   bool     `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
-	TestNet            bool     `long:"testnet" description:"Use the test network (default mainnet)"`
-	SimNet             bool     `long:"simnet" description:"Use the simulation test network (default mainnet)"`
-	KeypoolSize        uint     `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
-	DisallowFree       bool     `long:"disallowfree" description:"Force transactions to always include a fee"`
-	Proxy              string   `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
-	ProxyUser          string   `long:"proxyuser" description:"Username for proxy server"`
-	ProxyPass          string   `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
-	Profile            string   `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
-	EnableStakeMining  bool     `long:"enablestakemining" description:"Enable stake mining"`
-	VoteBits           uint16   `long:"votebits" description:"Set your stake mining votebits to value (default: 0xFFFF)"`
-	BalanceToMaintain  float64  `long:"balancetomaintain" description:"Minimum amount of funds to leave in wallet when stake mining (default: 0.0)"`
-	MemProfile         string   `long:"memprofile" description:"Write mem profile to the specified file"`
-	ReuseAddresses     bool     `long:"reuseaddresses" description:"Reuse addresses for ticket purchase to cut down on address overuse"`
-	RollbackTest       bool     `long:"rollbacktest" description:"Rollback testing is a simnet testing mode that eventually stops wallet and examines wtxmgr database integrity"`
-	PruneTickets       bool     `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
-	TicketAddress      string   `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
-	TicketMaxPrice     float64  `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
-	AutomaticRepair    bool     `long:"automaticrepair" description:"Attempt to repair the wallet automatically if a database inconsistency is found"`
-	UnsafeMainNet      bool     `long:"unsafemainnet" description:"Enable storage of master seed in mainnet wallet when calling --create and enable unsafe private information RPC commands"`
+	// General application behavior
+	ConfigFile         string `short:"C" long:"configfile" description:"Path to configuration file"`
+	ShowVersion        bool   `short:"V" long:"version" description:"Display version information and exit"`
+	Create             bool   `long:"create" description:"Create the wallet if it does not exist"`
+	CreateTemp         bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
+	CreateWatchingOnly bool   `long:"createwatchingonly" description:"Create the wallet and instantiate it as watching only with an HD extended pubkey; must call with --create"`
+	DataDir            string `short:"b" long:"datadir" description:"Directory to store wallets and transactions"`
+	TestNet            bool   `long:"testnet" description:"Use the test network (default mainnet)"`
+	SimNet             bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
+	NoInitialLoad      bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
+	DebugLevel         string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
+	LogDir             string `long:"logdir" description:"Directory to log output."`
+	Profile            string `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+	MemProfile         string `long:"memprofile" description:"Write mem profile to the specified file"`
+	RollbackTest       bool   `long:"rollbacktest" description:"Rollback testing is a simnet testing mode that eventually stops wallet and examines wtxmgr database integrity"`
+	AutomaticRepair    bool   `long:"automaticrepair" description:"Attempt to repair the wallet automatically if a database inconsistency is found"`
+	UnsafeMainNet      bool   `long:"unsafemainnet" description:"Enable storage of master seed in mainnet wallet when calling --create and enable unsafe private information RPC commands"`
+
+	// Wallet options
+	WalletPass        string  `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
+	DisallowFree      bool    `long:"disallowfree" description:"Force transactions to always include a fee"`
+	EnableStakeMining bool    `long:"enablestakemining" description:"Enable stake mining"`
+	VoteBits          uint16  `long:"votebits" description:"Set your stake mining votebits to value (default: 0xFFFF)"`
+	BalanceToMaintain float64 `long:"balancetomaintain" description:"Minimum amount of funds to leave in wallet when stake mining (default: 0.0)"`
+	ReuseAddresses    bool    `long:"reuseaddresses" description:"Reuse addresses for ticket purchase to cut down on address overuse"`
+	PruneTickets      bool    `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
+	TicketAddress     string  `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
+	TicketMaxPrice    float64 `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
+
+	// RPC client options
+	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:19109, mainnet: localhost:9109, simnet: localhost:18556)"`
+	CAFile           string `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with dcrd"`
+	DisableClientTLS bool   `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
+	DcrdUsername     string `long:"dcrdusername" description:"Username for dcrd authentication"`
+	DcrdPassword     string `long:"dcrdpassword" default-mask:"-" description:"Password for dcrd authentication"`
+	Proxy            string `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
+	ProxyUser        string `long:"proxyuser" description:"Username for proxy server"`
+	ProxyPass        string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
+
+	// RPC server options
+	//
+	// The legacy server is still enabled by default (and eventually will be
+	// replaced with the experimental server) so prepare for that change by
+	// renaming the struct fields (but not the configuration options).
+	//
+	// Usernames can also be used for the consensus RPC client, so they
+	// aren't considered legacy.
+	RPCCert                string   `long:"rpccert" description:"File containing the certificate file"`
+	RPCKey                 string   `long:"rpckey" description:"File containing the certificate key"`
+	OneTimeTLSKey          bool     `long:"onetimetlskey" description:"Generate a new TLS certpair at startup, but only write the certificate to disk"`
+	DisableServerTLS       bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
+	LegacyRPCListeners     []string `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 19110, mainnet: 9110, simnet: 18557)"`
+	LegacyRPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of legacy RPC clients for standard connections"`
+	LegacyRPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of legacy RPC websocket connections"`
+	Username               string   `short:"u" long:"username" description:"Username for legacy RPC and dcrd authentication (if dcrdusername is unset)"`
+	Password               string   `short:"P" long:"password" default-mask:"-" description:"Password for legacy RPC and dcrd authentication (if dcrdpassword is unset)"`
+
+	// EXPERIMENTAL RPC server options
+	//
+	// These options will change (and require changes to config files, etc.)
+	// when the new gRPC server is enabled.
+	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
+
+	// Deprecated options
+	KeypoolSize uint `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -127,8 +143,9 @@ func cleanAndExpandPath(path string) string {
 		path = strings.Replace(path, "~", homeDir, 1)
 	}
 
-	// NOTE: The os.ExpandEnv doesn't work with Windows-style %VARIABLE%,
-	// but they variables can still be expanded via POSIX-style $VARIABLE.
+	// NOTE: The os.ExpandEnv doesn't work with Windows cmd.exe-style
+	// %VARIABLE%, but they variables can still be expanded via POSIX-style
+	// $VARIABLE.
 	return filepath.Clean(os.ExpandEnv(path))
 }
 
@@ -216,50 +233,6 @@ func parseAndSetDebugLevels(debugLevel string) error {
 	return nil
 }
 
-// removeDuplicateAddresses returns a new slice with all duplicate entries in
-// addrs removed.
-func removeDuplicateAddresses(addrs []string) []string {
-	result := []string{}
-	seen := map[string]bool{}
-	for _, val := range addrs {
-		if _, ok := seen[val]; !ok {
-			result = append(result, val)
-			seen[val] = true
-		}
-	}
-	return result
-}
-
-// normalizeAddresses returns a new slice with all the passed peer addresses
-// normalized with the given default port, and all duplicates removed.
-func normalizeAddresses(addrs []string, defaultPort string) []string {
-	for i, addr := range addrs {
-		addrs[i] = normalizeAddress(addr, defaultPort)
-	}
-
-	return removeDuplicateAddresses(addrs)
-}
-
-// filesExists reports whether the named file or directory exists.
-func fileExists(name string) bool {
-	if _, err := os.Stat(name); err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-	}
-	return true
-}
-
-// normalizeAddress returns addr with the passed default port appended if
-// there is not already a port specified.
-func normalizeAddress(addr, defaultPort string) string {
-	_, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return net.JoinHostPort(addr, defaultPort)
-	}
-	return addr
-}
-
 // loadConfig initializes and parses the config using a config file and command
 // line options.
 //
@@ -275,29 +248,34 @@ func normalizeAddress(addr, defaultPort string) string {
 func loadConfig() (*config, []string, error) {
 	// Default config.
 	cfg := config{
-		DebugLevel:        defaultLogLevel,
-		ConfigFile:        defaultConfigFile,
-		DataDir:           defaultDataDir,
-		LogDir:            defaultLogDir,
-		WalletPass:        defaultPubPassphrase,
-		RPCKey:            defaultRPCKeyFile,
-		RPCCert:           defaultRPCCertFile,
-		DisallowFree:      defaultDisallowFree,
-		RPCMaxClients:     defaultRPCMaxClients,
-		RPCMaxWebsockets:  defaultRPCMaxWebsockets,
-		EnableStakeMining: defaultEnableStakeMining,
-		VoteBits:          defaultVoteBits,
-		BalanceToMaintain: defaultBalanceToMaintain,
-		ReuseAddresses:    defaultReuseAddresses,
-		RollbackTest:      defaultRollbackTest,
-		PruneTickets:      defaultPruneTickets,
-		TicketMaxPrice:    defaultTicketMaxPrice,
-		AutomaticRepair:   defaultAutomaticRepair,
-		UnsafeMainNet:     defaultUnsafeMainNet,
+		DebugLevel:             defaultLogLevel,
+		ConfigFile:             defaultConfigFile,
+		DataDir:                defaultDataDir,
+		LogDir:                 defaultLogDir,
+		WalletPass:             wallet.InsecurePubPassphrase,
+		RPCKey:                 defaultRPCKeyFile,
+		RPCCert:                defaultRPCCertFile,
+		DisallowFree:           defaultDisallowFree,
+		LegacyRPCMaxClients:    defaultRPCMaxClients,
+		LegacyRPCMaxWebsockets: defaultRPCMaxWebsockets,
+		EnableStakeMining:      defaultEnableStakeMining,
+		VoteBits:               defaultVoteBits,
+		BalanceToMaintain:      defaultBalanceToMaintain,
+		ReuseAddresses:         defaultReuseAddresses,
+		RollbackTest:           defaultRollbackTest,
+		PruneTickets:           defaultPruneTickets,
+		TicketMaxPrice:         defaultTicketMaxPrice,
+		AutomaticRepair:        defaultAutomaticRepair,
+		UnsafeMainNet:          defaultUnsafeMainNet,
 	}
 
 	// A config file in the current directory takes precedence.
-	if fileExists(defaultConfigFilename) {
+	exists, err := cfgutil.FileExists(defaultConfigFilename)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+	if exists {
 		cfg.ConfigFile = defaultConfigFile
 	}
 
@@ -305,7 +283,7 @@ func loadConfig() (*config, []string, error) {
 	// file or the version flag was specified.
 	preCfg := cfg
 	preParser := flags.NewParser(&preCfg, flags.Default)
-	_, err := preParser.Parse()
+	_, err = preParser.Parse()
 	if err != nil {
 		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
 			preParser.WriteHelp(os.Stderr)
@@ -367,16 +345,16 @@ func loadConfig() (*config, []string, error) {
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
-	activeNet = &mainNetParams
+	activeNet = &netparams.MainNetParams
 	if cfg.TestNet {
 		// DECRED DEBUG
 		//fmt.Println("Mainnet is currently disabled")
 		// os.Exit(0)
-		activeNet = &testNetParams
+		activeNet = &netparams.TestNetParams
 		numNets++
 	}
 	if cfg.SimNet {
-		activeNet = &simNetParams
+		activeNet = &netparams.SimNetParams
 		numNets++
 	}
 	if numNets > 1 {
@@ -446,10 +424,16 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	dbFileExists, err := cfgutil.FileExists(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+
 	if cfg.CreateTemp {
 		tempWalletExists := false
 
-		if fileExists(dbPath) {
+		if dbFileExists {
 			str := fmt.Sprintf("The wallet already exists. Loading this " +
 				"wallet instead.")
 			fmt.Fprintln(os.Stdout, str)
@@ -472,7 +456,7 @@ func loadConfig() (*config, []string, error) {
 	} else if cfg.Create {
 		// Error if the create flag is set and the wallet already
 		// exists.
-		if fileExists(dbPath) {
+		if dbFileExists {
 			err := fmt.Errorf("The wallet database file `%v` "+
 				"already exists.", dbPath)
 			fmt.Fprintln(os.Stderr, err)
@@ -500,10 +484,14 @@ func loadConfig() (*config, []string, error) {
 
 		// Created successfully, so exit now with success.
 		os.Exit(0)
-	} else if !fileExists(dbPath) {
-		var err error
+	} else if !dbFileExists && !cfg.NoInitialLoad {
 		keystorePath := filepath.Join(netDir, keystore.Filename)
-		if !fileExists(keystorePath) {
+		keystoreExists, err := cfgutil.FileExists(keystorePath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return nil, nil, err
+		}
+		if !keystoreExists {
 			err = fmt.Errorf("The wallet does not exist.  Run with the " +
 				"--create option to initialize and create it.")
 		} else {
@@ -515,11 +503,17 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	if cfg.RPCConnect == "" {
-		cfg.RPCConnect = activeNet.connect
+		cfg.RPCConnect = net.JoinHostPort("localhost", activeNet.RPCClientPort)
 	}
 
 	// Add default port to connect flag if missing.
-	cfg.RPCConnect = normalizeAddress(cfg.RPCConnect, activeNet.dcrdPort)
+	cfg.RPCConnect, err = cfgutil.NormalizeAddress(cfg.RPCConnect,
+		activeNet.RPCClientPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Invalid rpcconnect network address: %v\n", err)
+		return nil, nil, err
+	}
 
 	localhostListeners := map[string]struct{}{
 		"localhost": struct{}{},
@@ -547,9 +541,20 @@ func loadConfig() (*config, []string, error) {
 
 			// If the CA copy does not exist, check if we're connecting to
 			// a local dcrd and switch to its RPC cert if it exists.
-			if !fileExists(cfg.CAFile) {
+			certExists, err := cfgutil.FileExists(cfg.CAFile)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return nil, nil, err
+			}
+			if !certExists {
 				if _, ok := localhostListeners[RPCHost]; ok {
-					if fileExists(dcrdHomedirCAFile) {
+					dcrdCertExists, err := cfgutil.FileExists(
+						dcrdHomedirCAFile)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						return nil, nil, err
+					}
+					if dcrdCertExists {
 						cfg.CAFile = dcrdHomedirCAFile
 					}
 				}
@@ -557,27 +562,64 @@ func loadConfig() (*config, []string, error) {
 		}
 	}
 
-	if len(cfg.SvrListeners) == 0 {
+	// Only set default RPC listeners when there are no listeners set for
+	// the experimental RPC server.  This is required to prevent the old RPC
+	// server from sharing listen addresses, since it is impossible to
+	// remove defaults from go-flags slice options without assigning
+	// specific behavior to a particular string.
+	if len(cfg.ExperimentalRPCListeners) == 0 && len(cfg.LegacyRPCListeners) == 0 {
 		addrs, err := net.LookupHost("localhost")
 		if err != nil {
 			return nil, nil, err
 		}
-		cfg.SvrListeners = make([]string, 0, len(addrs))
+		cfg.LegacyRPCListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
-			addr = net.JoinHostPort(addr, activeNet.svrPort)
-			cfg.SvrListeners = append(cfg.SvrListeners, addr)
+			addr = net.JoinHostPort(addr, activeNet.RPCServerPort)
+			cfg.LegacyRPCListeners = append(cfg.LegacyRPCListeners, addr)
 		}
 	}
 
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
-	cfg.SvrListeners = normalizeAddresses(cfg.SvrListeners,
-		activeNet.svrPort)
+	cfg.LegacyRPCListeners, err = cfgutil.NormalizeAddresses(
+		cfg.LegacyRPCListeners, activeNet.RPCServerPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Invalid network address in legacy RPC listeners: %v\n", err)
+		return nil, nil, err
+	}
+	cfg.ExperimentalRPCListeners, err = cfgutil.NormalizeAddresses(
+		cfg.ExperimentalRPCListeners, activeNet.RPCServerPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Invalid network address in RPC listeners: %v\n", err)
+		return nil, nil, err
+	}
 
-	// Only allow server TLS to be disabled if the RPC is bound to localhost
-	// addresses.
+	// Both RPC servers may not listen on the same interface/port.
+	if len(cfg.LegacyRPCListeners) > 0 && len(cfg.ExperimentalRPCListeners) > 0 {
+		seenAddresses := make(map[string]struct{}, len(cfg.LegacyRPCListeners))
+		for _, addr := range cfg.LegacyRPCListeners {
+			seenAddresses[addr] = struct{}{}
+		}
+		for _, addr := range cfg.ExperimentalRPCListeners {
+			_, seen := seenAddresses[addr]
+			if seen {
+				err := fmt.Errorf("Address `%s` may not be "+
+					"used as a listener address for both "+
+					"RPC servers", addr)
+				fmt.Fprintln(os.Stderr, err)
+				return nil, nil, err
+			}
+		}
+	}
+
+	// Only allow server TLS to be disabled if the RPC server is bound to
+	// localhost addresses.
 	if cfg.DisableServerTLS {
-		for _, addr := range cfg.SvrListeners {
+		allListeners := append(cfg.LegacyRPCListeners,
+			cfg.ExperimentalRPCListeners...)
+		for _, addr := range allListeners {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
 				str := "%s: RPC listen interface '%s' is " +

@@ -36,6 +36,13 @@ type TicketsNotification struct {
 }
 
 func (w *Wallet) handleChainNotifications() {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Errorf("handleChainNotifications called without RPC client")
+		w.wg.Done()
+		return
+	}
+
 	sync := func(w *Wallet) {
 		// At the moment there is no recourse if the rescan fails for
 		// some reason, however, the wallet will not be marked synced
@@ -59,7 +66,7 @@ func (w *Wallet) handleChainNotifications() {
 		}
 	}
 
-	for n := range w.chainSvr.Notifications() {
+	for n := range chainClient.Notifications() {
 		var err error
 		strErrType := ""
 
@@ -174,10 +181,6 @@ ticketPurchaseLoop:
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
 func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
-	if !w.ChainSynced() {
-		return
-	}
-
 	bs := waddrmgr.BlockStamp{
 		Height: b.Height,
 		Hash:   b.Hash,
@@ -192,7 +195,13 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 
 	w.notifyBalances(bs.Height, wtxmgr.BFBalanceSpendable)
 
-	isReorganizing, topHash := w.chainSvr.GetReorganizing()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	isReorganizing, topHash := chainClient.GetReorganizing()
 
 	// If we've made it to the height where the reorganization is finished,
 	// revert our reorganization state.
@@ -200,7 +209,7 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 		if bs.Hash.IsEqual(&topHash) {
 			log.Infof("Wallet reorganization to block %v complete",
 				topHash)
-			w.chainSvr.SetReorganizingState(false, chainhash.Hash{})
+			chainClient.SetReorganizingState(false, chainhash.Hash{})
 		}
 	}
 
@@ -211,7 +220,7 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 	}
 
 	// Insert the block if we haven't already through a relevant tx.
-	err := w.TxStore.InsertBlock(&b)
+	err = w.TxStore.InsertBlock(&b)
 	if err != nil {
 		log.Errorf("Couldn't insert block %v into database: %v",
 			b.Hash, err)
@@ -287,6 +296,9 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 		log.Errorf("Failed to prune unconfirmed transactions when "+
 			"connecting block height %v: %v", bs.Height, err.Error())
 	}
+
+	// Notify interested clients of the connected block.
+	w.NtfnServer.notifyAttachedBlock(&b)
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
@@ -328,6 +340,10 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 		}
 	}
 
+	// Notify interested clients of the disconnected block.
+	w.NtfnServer.notifyDetachedBlock(&b.Hash)
+
+	// Legacy JSON-RPC notifications
 	w.notifyDisconnectedBlock(b)
 	w.notifyBalances(b.Height-1, wtxmgr.BFBalanceSpendable)
 
@@ -345,7 +361,13 @@ func (w *Wallet) handleReorganizing(oldHash *chainhash.Hash, oldHeight int64,
 	log.Infof("New top block hash: %v", newHash)
 	log.Infof("New top block height: %v", newHeight)
 
-	w.chainSvr.SetReorganizingState(true, *newHash)
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	chainClient.SetReorganizingState(true, *newHash)
 }
 
 func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
@@ -671,11 +693,36 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		}
 	}
 
-	// TODO: Notify connected clients of the added transaction.
+	// Send notification of mined or unmined transaction to any interested
+	// clients.
+	//
+	// TODO: Avoid the extra db hits.
+	if block == nil {
+		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, nil)
+		if err != nil {
+			log.Errorf("Cannot query transaction details for notifiation: %v", err)
+		} else {
+			w.NtfnServer.notifyUnminedTransaction(details)
+		}
+	} else {
+		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, &block.Block)
+		if err != nil {
+			log.Errorf("Cannot query transaction details for notifiation: %v", err)
+		} else {
+			w.NtfnServer.notifyMinedTransaction(details, block)
+		}
+	}
 
-	bs, err := w.chainSvr.BlockStamp()
+	// Legacy JSON-RPC notifications
+	//
+	// TODO: Synced-to information should be handled by the wallet, not the
+	// RPC client.
+	chainClient, err := w.requireChainClient()
 	if err == nil {
-		w.notifyBalances(bs.Height, wtxmgr.BFBalanceSpendable)
+		bs, err := chainClient.BlockStamp()
+		if err == nil {
+			w.notifyBalances(bs.Height, wtxmgr.BFBalanceSpendable)
+		}
 	}
 
 	return nil
@@ -718,7 +765,13 @@ func (w *Wallet) notifyBalances(curHeight int32, balanceFlag wtxmgr.BehaviorFlag
 }
 
 func (w *Wallet) handleChainVotingNotifications() {
-	for n := range w.chainSvr.NotificationsVoting() {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Error(err)
+		w.wg.Done()
+		return
+	}
+	for n := range chainClient.NotificationsVoting() {
 		var err error
 		strErrType := ""
 

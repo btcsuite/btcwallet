@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2013-2015 The btcsuite developers
- * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,8 +14,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-package main
+package legacyrpc
 
-import "github.com/decred/dcrwallet/netparams"
+import "github.com/btcsuite/btclog"
 
-var activeNet = &netparams.TestNetParams
+var log = btclog.Disabled
+
+// UseLogger sets the package-wide logger.  Any calls to this function must be
+// made before a server is created and used (it is not concurrent safe).
+func UseLogger(logger btclog.Logger) {
+	log = logger
+}

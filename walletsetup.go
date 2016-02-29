@@ -19,8 +19,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/hex"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -33,14 +31,13 @@ import (
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/internal/legacy/keystore"
+	"github.com/decred/dcrwallet/internal/prompt"
 	"github.com/decred/dcrwallet/pgpwordlist"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet"
 	"github.com/decred/dcrwallet/walletdb"
 	_ "github.com/decred/dcrwallet/walletdb/bdb"
 	"github.com/decred/dcrwallet/wstakemgr"
-
-	"github.com/btcsuite/golangcrypto/ssh/terminal"
 )
 
 // Namespace keys
@@ -67,343 +64,6 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 	}
 
 	return filepath.Join(dataDir, netname)
-}
-
-// promptSeed is used to prompt for the wallet seed which maybe required during
-// upgrades.
-func promptSeed() ([]byte, error) {
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("Enter existing wallet seed: ")
-		seedStr, err := reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-		seedStr = strings.TrimSpace(strings.ToLower(seedStr))
-
-		seed, err := hex.DecodeString(seedStr)
-		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
-			len(seed) > hdkeychain.MaxSeedBytes {
-
-			fmt.Printf("Invalid seed specified.  Must be a "+
-				"hexadecimal value that is at least %d bits and "+
-				"at most %d bits\n", hdkeychain.MinSeedBytes*8,
-				hdkeychain.MaxSeedBytes*8)
-			continue
-		}
-
-		return seed, nil
-	}
-}
-
-// promptPrivPassPhrase is used to prompt for the private passphrase which maybe
-// required during upgrades.
-func promptPrivPassPhrase() ([]byte, error) {
-	prompt := "Enter the private passphrase of your wallet: "
-	for {
-		fmt.Print(prompt)
-		pass, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return nil, err
-		}
-		fmt.Print("\n")
-		pass = bytes.TrimSpace(pass)
-		if len(pass) == 0 {
-			continue
-		}
-
-		return pass, nil
-	}
-}
-
-// promptConsoleList prompts the user with the given prefix, list of valid
-// responses, and default list entry to use.  The function will repeat the
-// prompt to the user until they enter a valid response.
-func promptConsoleList(reader *bufio.Reader, prefix string, validResponses []string, defaultEntry string) (string, error) {
-	// Setup the prompt according to the parameters.
-	validStrings := strings.Join(validResponses, "/")
-	var prompt string
-	if defaultEntry != "" {
-		prompt = fmt.Sprintf("%s (%s) [%s]: ", prefix, validStrings,
-			defaultEntry)
-	} else {
-		prompt = fmt.Sprintf("%s (%s): ", prefix, validStrings)
-	}
-
-	// Prompt the user until one of the valid responses is given.
-	for {
-		fmt.Print(prompt)
-		reply, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-		reply = strings.TrimSpace(strings.ToLower(reply))
-		if reply == "" {
-			reply = defaultEntry
-		}
-
-		for _, validResponse := range validResponses {
-			if reply == validResponse {
-				return reply, nil
-			}
-		}
-	}
-}
-
-// promptConsoleListBool prompts the user for a boolean (yes/no) with the given
-// prefix.  The function will repeat the prompt to the user until they enter a
-// valid reponse.
-func promptConsoleListBool(reader *bufio.Reader, prefix string, defaultEntry string) (bool, error) {
-	// Setup the valid responses.
-	valid := []string{"n", "no", "y", "yes"}
-	response, err := promptConsoleList(reader, prefix, valid, defaultEntry)
-	if err != nil {
-		return false, err
-	}
-	return response == "yes" || response == "y", nil
-}
-
-// promptConsolePass prompts the user for a passphrase with the given prefix.
-// The function will ask the user to confirm the passphrase and will repeat
-// the prompts until they enter a matching response.
-func promptConsolePass(reader *bufio.Reader, prefix string, confirm bool) ([]byte, error) {
-	// Prompt the user until they enter a passphrase.
-	prompt := fmt.Sprintf("%s: ", prefix)
-	for {
-		fmt.Print(prompt)
-		pass, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return nil, err
-		}
-		fmt.Print("\n")
-		pass = bytes.TrimSpace(pass)
-		if len(pass) == 0 {
-			continue
-		}
-
-		if !confirm {
-			return pass, nil
-		}
-
-		fmt.Print("Confirm passphrase: ")
-		confirm, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-		if err != nil {
-			return nil, err
-		}
-		fmt.Print("\n")
-		confirm = bytes.TrimSpace(confirm)
-		if !bytes.Equal(pass, confirm) {
-			fmt.Println("The entered passphrases do not match")
-			continue
-		}
-
-		return pass, nil
-	}
-}
-
-// promptConsolePrivatePass prompts the user for a private passphrase with
-// varying behavior depending on whether the passed legacy keystore exists.
-// When it does, the user is prompted for the existing passphrase which is then
-// used to unlock it.  On the other hand, when the legacy keystore is nil, the
-// user is prompted for a new private passphrase.  All prompts are repeated
-// until the user enters a valid response.
-func promptConsolePrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Store) ([]byte, error) {
-	// When there is not an existing legacy wallet, simply prompt the user
-	// for a new private passphase and return it.
-	if legacyKeyStore == nil {
-		return promptConsolePass(reader, "Enter the private "+
-			"passphrase for your new wallet", true)
-	}
-
-	// At this point, there is an existing legacy wallet, so prompt the user
-	// for the existing private passphrase and ensure it properly unlocks
-	// the legacy wallet so all of the addresses can later be imported.
-	fmt.Println("You have an existing legacy wallet.  All addresses from " +
-		"your existing legacy wallet will be imported into the new " +
-		"wallet format.")
-	for {
-		privPass, err := promptConsolePass(reader, "Enter the private "+
-			"passphrase for your existing wallet", false)
-		if err != nil {
-			return nil, err
-		}
-
-		// Keep prompting the user until the passphrase is correct.
-		if err := legacyKeyStore.Unlock([]byte(privPass)); err != nil {
-			if err == keystore.ErrWrongPassphrase {
-				fmt.Println(err)
-				continue
-			}
-
-			return nil, err
-		}
-
-		return privPass, nil
-	}
-}
-
-// promptConsolePublicPass prompts the user whether they want to add an
-// additional layer of encryption to the wallet.  When the user answers yes and
-// there is already a public passphrase provided via the passed config,  it
-// prompts them whether or not to use that configured passphrase.  It will also
-// detect when the same passphrase is used for the private and public passphrase
-// and prompt the user if they are sure they want to use the same passphrase for
-// both.  Finally, all prompts are repeated until the user enters a valid
-// response.
-func promptConsolePublicPass(reader *bufio.Reader, privPass []byte, cfg *config) ([]byte, error) {
-	pubPass := []byte(defaultPubPassphrase)
-	usePubPass, err := promptConsoleListBool(reader, "Do you want "+
-		"to add an additional layer of encryption for public "+
-		"data?", "no")
-	if err != nil {
-		return nil, err
-	}
-
-	if !usePubPass {
-		return pubPass, nil
-	}
-
-	walletPass := []byte(cfg.WalletPass)
-	if !bytes.Equal(walletPass, pubPass) {
-		useExisting, err := promptConsoleListBool(reader, "Use the "+
-			"existing configured public passphrase for encryption "+
-			"of public data?", "no")
-		if err != nil {
-			return nil, err
-		}
-
-		if useExisting {
-			return walletPass, nil
-		}
-	}
-
-	for {
-		pubPass, err = promptConsolePass(reader, "Enter the public "+
-			"passphrase for your new wallet", true)
-		if err != nil {
-			return nil, err
-		}
-
-		if bytes.Equal(pubPass, privPass) {
-			useSamePass, err := promptConsoleListBool(reader,
-				"Are you sure want to use the same passphrase "+
-					"for public and private data?", "no")
-			if err != nil {
-				return nil, err
-			}
-
-			if useSamePass {
-				break
-			}
-
-			continue
-		}
-
-		break
-	}
-
-	fmt.Println("NOTE: Use the --walletpass option to configure your " +
-		"public passphrase.")
-	return pubPass, nil
-}
-
-// promptConsoleSeed prompts the user whether they want to use an existing
-// wallet generation seed.  When the user answers no, a seed will be generated
-// and displayed to the user along with prompting them for confirmation.  When
-// the user answers yes, a the user is prompted for it.  All prompts are
-// repeated until the user enters a valid response.
-func promptConsoleSeed(reader *bufio.Reader) ([]byte, error) {
-	// Ascertain the wallet generation seed.
-	useUserSeed, err := promptConsoleListBool(reader, "Do you have an "+
-		"existing wallet seed you want to use?", "no")
-	if err != nil {
-		return nil, err
-	}
-	if !useUserSeed {
-		seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
-		if err != nil {
-			return nil, err
-		}
-
-		seedStr, err := pgpwordlist.ToStringChecksum(seed)
-		if err != nil {
-			return nil, err
-		}
-		seedStrSplit := strings.Split(seedStr, " ")
-
-		fmt.Println("Your wallet generation seed is:")
-		for i := 0; i < hdkeychain.RecommendedSeedLen+1; i++ {
-			fmt.Printf("%v ", seedStrSplit[i])
-
-			if (i+1)%6 == 0 {
-				fmt.Printf("\n")
-			}
-		}
-
-		fmt.Printf("\n\nHex: %x\n", seed)
-		fmt.Println("IMPORTANT: Keep the seed in a safe place as you\n" +
-			"will NOT be able to restore your wallet without it.")
-		fmt.Println("Please keep in mind that anyone who has access\n" +
-			"to the seed can also restore your wallet thereby\n" +
-			"giving them access to all your funds, so it is\n" +
-			"imperative that you keep it in a secure location.")
-
-		for {
-			fmt.Print(`Once you have stored the seed in a safe ` +
-				`and secure location, enter "OK" to continue: `)
-			confirmSeed, err := reader.ReadString('\n')
-			if err != nil {
-				return nil, err
-			}
-			confirmSeed = strings.TrimSpace(confirmSeed)
-			confirmSeed = strings.Trim(confirmSeed, `"`)
-			if confirmSeed == "OK" {
-				break
-			}
-		}
-
-		return seed, nil
-	}
-
-	for {
-		fmt.Print("Enter existing wallet seed: ")
-		seedStr, err := reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
-
-		seedStrTrimmed := strings.TrimSpace(seedStr)
-		wordCount := strings.Count(seedStrTrimmed, " ") + 1
-
-		var seed []byte
-		if wordCount == 1 {
-			if len(seedStrTrimmed)%2 != 0 {
-				seedStrTrimmed = "0" + seedStrTrimmed
-			}
-			seed, err = hex.DecodeString(seedStrTrimmed)
-			if err != nil {
-				fmt.Printf("Input error: %v\n", err.Error())
-			}
-		} else {
-			seed, err = pgpwordlist.ToBytesChecksum(seedStrTrimmed)
-			if err != nil {
-				fmt.Printf("Input error: %v\n", err.Error())
-			}
-		}
-		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
-			len(seed) > hdkeychain.MaxSeedBytes {
-			fmt.Printf("Invalid seed specified.  Must be a "+
-				"word seed (usually 33 words) using the PGP wordlist or "+
-				"hexadecimal value that is at least %d bits and "+
-				"at most %d bits\n", hdkeychain.MinSeedBytes*8,
-				hdkeychain.MaxSeedBytes*8)
-			continue
-		}
-
-		fmt.Printf("\nSeed input successful. \nHex: %x\n", seed)
-
-		return seed, nil
-	}
 }
 
 // convertLegacyKeystore converts all of the addresses in the passed legacy
@@ -466,14 +126,32 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 // and generates the wallet accordingly.  The new wallet will reside at the
 // provided path.
 func createWallet(cfg *config) error {
+	dbDir := networkDir(cfg.DataDir, activeNet.Params)
+	stakeOptions := &wallet.StakeOptions{
+		VoteBits:           cfg.VoteBits,
+		StakeMiningEnabled: cfg.EnableStakeMining,
+		BalanceToMaintain:  cfg.BalanceToMaintain,
+		RollbackTest:       cfg.RollbackTest,
+		PruneTickets:       cfg.PruneTickets,
+		AddressReuse:       cfg.ReuseAddresses,
+		TicketAddress:      cfg.TicketAddress,
+		TicketMaxPrice:     cfg.TicketMaxPrice,
+	}
+	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions, cfg.AutomaticRepair, cfg.UnsafeMainNet)
+
 	// When there is a legacy keystore, open it now to ensure any errors
 	// don't end up exiting the process after the user has spent time
 	// entering a bunch of information.
 	netDir := networkDir(cfg.DataDir, activeNet.Params)
 	keystorePath := filepath.Join(netDir, keystore.Filename)
 	var legacyKeyStore *keystore.Store
-	if fileExists(keystorePath) {
-		var err error
+	_, err := os.Stat(keystorePath)
+	if err != nil && !os.IsNotExist(err) {
+		// A stat error not due to a non-existant file should be
+		// returned to the caller.
+		return err
+	} else if err == nil {
+		// Keystore file exists.
 		legacyKeyStore, err = keystore.OpenDir(netDir)
 		if err != nil {
 			return err
@@ -484,15 +162,56 @@ func createWallet(cfg *config) error {
 	// existing keystore, the user will be promped for that passphrase,
 	// otherwise they will be prompted for a new one.
 	reader := bufio.NewReader(os.Stdin)
-	privPass, err := promptConsolePrivatePass(reader, legacyKeyStore)
+	privPass, err := prompt.PrivatePass(reader, legacyKeyStore)
 	if err != nil {
 		return err
+	}
+
+	// When there exists a legacy keystore, unlock it now and set up a
+	// callback to import all keystore keys into the new walletdb
+	// wallet
+	if legacyKeyStore != nil {
+		err = legacyKeyStore.Unlock(privPass)
+		if err != nil {
+			return err
+		}
+
+		// Import the addresses in the legacy keystore to the new wallet if
+		// any exist, locking each wallet again when finished.
+		loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+			defer legacyKeyStore.Lock()
+
+			fmt.Println("Importing addresses from existing wallet...")
+
+			err := w.Manager.Unlock(privPass)
+			if err != nil {
+				fmt.Printf("ERR: Failed to unlock new wallet "+
+					"during old wallet key import: %v", err)
+				return
+			}
+			defer w.Manager.Lock()
+
+			err = convertLegacyKeystore(legacyKeyStore, w.Manager)
+			if err != nil {
+				fmt.Printf("ERR: Failed to import keys from old "+
+					"wallet format: %v", err)
+				return
+			}
+
+			// Remove the legacy key store.
+			err = os.Remove(keystorePath)
+			if err != nil {
+				fmt.Printf("WARN: Failed to remove legacy wallet "+
+					"from'%s'\n", keystorePath)
+			}
+		})
 	}
 
 	// Ascertain the public passphrase.  This will either be a value
 	// specified by the user or the default hard-coded public passphrase if
 	// the user does not want the additional public data encryption.
-	pubPass, err := promptConsolePublicPass(reader, privPass, cfg)
+	pubPass, err := prompt.PublicPass(reader, privPass,
+		[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
 	if err != nil {
 		return err
 	}
@@ -500,54 +219,18 @@ func createWallet(cfg *config) error {
 	// Ascertain the wallet generation seed.  This will either be an
 	// automatically generated value the user has already confirmed or a
 	// value the user has entered which has already been validated.
-	seed, err := promptConsoleSeed(reader)
+	seed, err := prompt.Seed(reader)
 	if err != nil {
 		return err
 	}
 
-	// Create the wallet.
-	dbPath := filepath.Join(netDir, walletDbName)
 	fmt.Println("Creating the wallet...")
-
-	// Create the wallet database backed by bolt db.
-	db, err := walletdb.Create("bdb", dbPath)
+	w, err := loader.CreateNewWallet(pubPass, privPass, seed)
 	if err != nil {
 		return err
 	}
 
-	// Create the address manager.
-	namespace, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return err
-	}
-	manager, err := waddrmgr.Create(namespace, seed, []byte(pubPass),
-		[]byte(privPass), activeNet.Params, nil, cfg.UnsafeMainNet)
-	if err != nil {
-		return err
-	}
-
-	// Import the addresses in the legacy keystore to the new wallet if
-	// any exist.
-	if legacyKeyStore != nil {
-		fmt.Println("Importing addresses from existing wallet...")
-		if err := manager.Unlock([]byte(privPass)); err != nil {
-			return err
-		}
-		if err := convertLegacyKeystore(legacyKeyStore, manager); err != nil {
-			return err
-		}
-
-		legacyKeyStore.Lock()
-		legacyKeyStore = nil
-
-		// Remove the legacy key store.
-		if err := os.Remove(keystorePath); err != nil {
-			fmt.Printf("WARN: Failed to remove legacy wallet "+
-				"from'%s'\n", keystorePath)
-		}
-	}
-
-	manager.Close()
+	w.Manager.Close()
 	fmt.Println("The wallet has been created successfully.")
 	return nil
 }
@@ -559,7 +242,7 @@ func createSimulationWallet(cfg *config) error {
 	privPass := []byte("password")
 
 	// Public passphrase is the default.
-	pubPass := []byte(defaultPubPassphrase)
+	pubPass := []byte(wallet.InsecurePubPassphrase)
 
 	// Generate a random seed.
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
@@ -599,7 +282,7 @@ func createSimulationWallet(cfg *config) error {
 	}
 
 	manager, err := waddrmgr.Create(waddrmgrNamespace, seed, []byte(pubPass),
-		[]byte(privPass), activeNet.Params, nil, false)
+		[]byte(privPass), activeNet.Params, nil, cfg.UnsafeMainNet)
 	if err != nil {
 		return err
 	}
@@ -647,7 +330,8 @@ func createWatchingOnlyWallet(cfg *config) error {
 	}
 
 	// Ask if the user wants to encrypt the wallet with a password.
-	pubPass, err := promptConsolePublicPass(reader, []byte{}, cfg)
+	pubPass, err := prompt.PublicPass(reader, []byte{},
+		[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
 	if err != nil {
 		return err
 	}
@@ -713,55 +397,4 @@ func checkCreateDir(path string) error {
 	}
 
 	return nil
-}
-
-// openDb opens and returns a walletdb.DB (boltdb here) given the directory and
-// dbname.
-func openDb(directory string, dbname string) (walletdb.DB, error) {
-	dbPath := filepath.Join(directory, dbname)
-
-	// Ensure that the network directory exists.
-	if err := checkCreateDir(directory); err != nil {
-		return nil, err
-	}
-
-	// Open the database using the boltdb backend.
-	return walletdb.Open("bdb", dbPath)
-}
-
-// openWallet returns a wallet. The function handles opening an existing wallet
-// database, the address manager and the transaction store and uses the values
-// to open a wallet.Wallet.
-func openWallet(cfg *config) (*wallet.Wallet, walletdb.DB, error) {
-	netdir := networkDir(cfg.DataDir, activeNet.Params)
-
-	db, err := openDb(netdir, walletDbName)
-	if err != nil {
-		log.Errorf("Failed to open database: %v", err)
-		return nil, nil, err
-	}
-
-	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	txMgrNS, err := db.Namespace(wtxmgrNamespaceKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	stMgrNS, err := db.Namespace(wstakemgrNamespaceKey)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	cbs := &waddrmgr.OpenCallbacks{
-		ObtainSeed:        promptSeed,
-		ObtainPrivatePass: promptPrivPassPhrase,
-	}
-	w, err := wallet.Open([]byte(cfg.WalletPass), activeNet.Params, db,
-		addrMgrNS, txMgrNS, stMgrNS, cbs, cfg.VoteBits, cfg.EnableStakeMining,
-		cfg.BalanceToMaintain, cfg.ReuseAddresses, cfg.RollbackTest,
-		cfg.PruneTickets, cfg.TicketAddress, cfg.TicketMaxPrice,
-		cfg.AutomaticRepair)
-	return w, db, err
 }

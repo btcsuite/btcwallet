@@ -3,6 +3,43 @@ User visible changes for btcwallet
   A wallet daemon for btcd, written in Go
 ============================================================================
 
+Changes in 0.7.0 (Mon Nov 23 2015)
+  - New features:
+    - Wallet will now detect network inactivity and reconnect to the btcd
+      RPC server if the connection was lost (#320)
+
+  - Bug fixes:
+    - Removed data races in the RPC server (#292) and waddrmgr package
+      (#293)
+    - Corrected handling of btcutil.AddressPubKey addresses when querying
+      for a ManagedAddress from the address manager (#313)
+    - Fixed signmessage and verifymessage algorithm to match the equivalent
+      algorithms used by Core (#324)
+
+  - Notable developer-related changes:
+    - Added support for AppVeyor continuous integration (#299)
+    - Take advantage of optimized zeroing from the Go 1.5 release (#286)
+    - Added IsError function to waddrmgr to check that an error is a
+      ManagerError and contains a matching error code (#289).  Simplified
+      error handling in the wallet package and RPC server with this function
+      (#290).
+    - Switched to using a more space efficient data structure for the
+      wtxmgr CreditRecord type (#295)
+    - Incorporated latest updates to the votingpool package (#315)
+
+  - Miscellaneous:
+    - Updated websocket notification handlers to latest API required by
+      btcd (#294)
+    - Enabled the logging subsystem of the btcrpcclient package (#328)
+
+  - Contributors (alphabetical order):
+    - Alex Yocom-Piatt
+    - cjepson
+    - Dave Collins
+    - John C. Vernaleo
+    - Josh Rickmar
+    - Rune T. Aune
+
 Changes in 0.6.0 (Wed May 27 2015)
   - New features:
     - Add initial account support (#155):

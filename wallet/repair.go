@@ -35,6 +35,11 @@ func (w *Wallet) attemptToRepairInconsistencies() error {
 		return nil
 	}
 
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
 	log.Warnf("Inconsistencies have been found in the wallet database! To " +
 		"ensure smooth operation, they are being corrected. However, it is " +
 		"recommended that you restore your wallet from seed to ensure that " +
@@ -49,7 +54,7 @@ func (w *Wallet) attemptToRepairInconsistencies() error {
 
 	var toDelete []*wire.OutPoint
 	for _, utxo := range utxos {
-		_, err := w.chainSvr.GetRawTransaction(&utxo.Hash)
+		_, err := chainClient.GetRawTransaction(&utxo.Hash)
 		if err != nil {
 			toDelete = append(toDelete, utxo)
 		}

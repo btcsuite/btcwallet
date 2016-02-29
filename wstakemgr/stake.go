@@ -81,7 +81,7 @@ type StakeStore struct {
 	namespace walletdb.Namespace
 	Params    *chaincfg.Params
 	Manager   *waddrmgr.Manager
-	chainSvr  *walletchain.Client
+	chainSvr  *walletchain.RPCClient
 	isClosed  bool
 
 	ownedSStxs map[chainhash.Hash]struct{}
@@ -1182,7 +1182,7 @@ func (s *StakeStore) loadOwnedSStxs(namespace walletdb.Namespace) error {
 
 // SetChainSvr is used to set the chainSvr to a given pointer. Should
 // be called after chainSvr is initialized in wallet.
-func (s *StakeStore) SetChainSvr(chainSvr *walletchain.Client) {
+func (s *StakeStore) SetChainSvr(chainSvr *walletchain.RPCClient) {
 	s.chainSvr = chainSvr
 }
 

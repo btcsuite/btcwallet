@@ -50,6 +50,8 @@ func TestErrorCodeStringer(t *testing.T) {
 		{waddrmgr.ErrTooManyAddresses, "ErrTooManyAddresses"},
 		{waddrmgr.ErrWrongPassphrase, "ErrWrongPassphrase"},
 		{waddrmgr.ErrWrongNet, "ErrWrongNet"},
+		{waddrmgr.ErrCallBackBreak, "ErrCallBackBreak"},
+		{waddrmgr.ErrEmptyPassphrase, "ErrEmptyPassphrase"},
 		{0xffff, "Unknown ErrorCode (65535)"},
 	}
 	t.Logf("Running %d tests", len(tests))

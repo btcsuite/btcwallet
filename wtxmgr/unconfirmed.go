@@ -220,3 +220,28 @@ func (s *Store) unminedTxs(ns walletdb.Bucket) ([]*wire.MsgTx, error) {
 
 	return txs, err
 }
+
+// UnminedTxHashes returns the hashes of all transactions not known to have been
+// mined in a block.
+func (s *Store) UnminedTxHashes() ([]*chainhash.Hash, error) {
+	var hashes []*chainhash.Hash
+	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
+		var err error
+		hashes, err = s.unminedTxHashes(ns)
+		return err
+	})
+	return hashes, err
+}
+
+func (s *Store) unminedTxHashes(ns walletdb.Bucket) ([]*chainhash.Hash, error) {
+	var hashes []*chainhash.Hash
+	err := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
+		hash := new(chainhash.Hash)
+		err := readRawUnminedHash(k, hash)
+		if err == nil {
+			hashes = append(hashes, hash)
+		}
+		return err
+	})
+	return hashes, err
+}

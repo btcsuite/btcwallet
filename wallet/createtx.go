@@ -187,6 +187,7 @@ type CreatedTx struct {
 	MsgTx       *wire.MsgTx
 	ChangeAddr  dcrutil.Address
 	ChangeIndex int // negative if no change
+	Fee         dcrutil.Amount
 }
 
 // ByAmount defines the methods needed to satisify sort.Interface to
@@ -277,8 +278,22 @@ func (w *Wallet) NewAddress(account uint32) (dcrutil.Address, error) {
 	for i, addr := range addrs {
 		utilAddrs[i] = addr.Address()
 	}
-	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
-		return nil, err
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+	if chainClient != nil {
+		err := chainClient.NotifyReceived(utilAddrs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	props, err := w.Manager.AccountProperties(account)
+	if err != nil {
+		log.Errorf("Cannot fetch account properties for notification "+
+			"after deriving next external address: %v", err)
+	} else {
+		w.NtfnServer.notifyAccountProperties(props)
 	}
 
 	return utilAddrs[0], nil
@@ -298,8 +313,12 @@ func (w *Wallet) NewChangeAddress(account uint32) (dcrutil.Address, error) {
 		utilAddrs[i] = addr.Address()
 	}
 
-	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
-		return nil, err
+	chainClient, err := w.requireChainClient()
+	if err == nil {
+		err = chainClient.NotifyReceived(utilAddrs)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return utilAddrs[0], nil
@@ -328,11 +347,6 @@ func (w *Wallet) ReusedAddress() (dcrutil.Address, error) {
 func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 	minconf int32, addrFunc func() (dcrutil.Address, error)) (*CreatedTx,
 	error) {
-	isReorganizing, _ := w.chainSvr.GetReorganizing()
-	if isReorganizing {
-		return nil, ErrBlockchainReorganizing
-	}
-
 	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
 	// error if already locked.
@@ -342,8 +356,18 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 	}
 	defer heldUnlock.Release()
 
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	isReorganizing, _ := chainClient.GetReorganizing()
+	if isReorganizing {
+		return nil, ErrBlockchainReorganizing
+	}
+
 	// Get current block's height and hash.
-	bs, err := w.chainSvr.BlockStamp()
+	bs, err := chainClient.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -387,6 +411,11 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 	feeIncrement dcrutil.Amount, account uint32,
 	addrFunc func() (dcrutil.Address, error), chainParams *chaincfg.Params,
 	disallowFree bool) (*CreatedTx, error) {
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
 
 	msgtx := wire.NewMsgTx()
 	minAmount, err := addOutputs(msgtx, outputs, chainParams)
@@ -442,6 +471,7 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 
 	// If we're spending the outputs of an imported address, we default
 	// to generating change addresses from the default account.
+	prevAccount := account
 	if account == waddrmgr.ImportedAddrAccount {
 		account = waddrmgr.DefaultAccountNum
 	}
@@ -471,6 +501,11 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 		}
 
 		if feeForSize(feeIncrement, msgtx.SerializeSize()) <= feeEst {
+			if change > 0 && prevAccount == waddrmgr.ImportedAddrAccount {
+				log.Warnf("Spend from imported account produced change: moving"+
+					" %v from imported account into default account.", change)
+			}
+
 			// The required fee for this size is less than or equal to what
 			// we guessed, so we're done.
 			break
@@ -503,7 +538,7 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 		return nil, err
 	}
 
-	_, err = w.chainSvr.SendRawTransaction(msgtx, false)
+	_, err = chainClient.SendRawTransaction(msgtx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -527,6 +562,7 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 		MsgTx:       msgtx,
 		ChangeAddr:  changeAddr,
 		ChangeIndex: changeIdx,
+		Fee:         feeEst, // Last estimate is the actual fee
 	}
 	return info, nil
 }
@@ -606,7 +642,12 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 			return nil, nil, nil, err
 		}
 
-	isReorganizing, _ := w.chainSvr.GetReorganizing()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return errorOut(err)
+	}
+
+	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
 		return errorOut(ErrBlockchainReorganizing)
 	}
@@ -621,7 +662,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	defer heldUnlock.Release()
 
 	// Get current block's height and hash.
-	bs, err := w.chainSvr.BlockStamp()
+	bs, err := chainClient.BlockStamp()
 	if err != nil {
 		return errorOut(err)
 	}
@@ -735,7 +776,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 		return errorOut(err)
 	}
 
-	_, err = w.chainSvr.SendRawTransaction(msgtx, false)
+	_, err = chainClient.SendRawTransaction(msgtx, false)
 	if err != nil {
 		return errorOut(err)
 	}
@@ -744,7 +785,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	// script hash address.
 	utilAddrs := make([]dcrutil.Address, 1)
 	utilAddrs[0] = scAddr
-	if err := w.chainSvr.NotifyReceived(utilAddrs); err != nil {
+	if err := chainClient.NotifyReceived(utilAddrs); err != nil {
 		return errorOut(err)
 	}
 
@@ -765,13 +806,18 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 // compressWallet compresses all the utxos in a wallet into a single change
 // address. For use when it becomes dusty.
 func (w *Wallet) compressWallet(maxNumIns int) error {
-	isReorganizing, _ := w.chainSvr.GetReorganizing()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
+	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
 		return ErrBlockchainReorganizing
 	}
 
 	// Get current block's height and hash.
-	bs, err := w.chainSvr.BlockStamp()
+	bs, err := chainClient.BlockStamp()
 	if err != nil {
 		return err
 	}
@@ -858,7 +904,7 @@ func (w *Wallet) compressWallet(maxNumIns int) error {
 		return err
 	}
 
-	txSha, err := w.chainSvr.SendRawTransaction(msgtx, false)
+	txSha, err := chainClient.SendRawTransaction(msgtx, false)
 	if err != nil {
 		return err
 	}
@@ -882,6 +928,11 @@ func (w *Wallet) compressWallet(maxNumIns int) error {
 // compressEligible compresses all the utxos passed to it into a single
 // output back to the wallet.
 func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
 	// Initialize the address pool for use.
 	pool := w.internalPool
 	pool.mutex.Lock()
@@ -948,7 +999,7 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 		return err
 	}
 
-	txSha, err := w.chainSvr.SendRawTransaction(msgtx, false)
+	txSha, err := chainClient.SendRawTransaction(msgtx, false)
 	if err != nil {
 		return err
 	}
@@ -984,8 +1035,13 @@ func (w *Wallet) txToSStx(pair map[string]dcrutil.Amount,
 	addrFunc func() (dcrutil.Address, error), minconf int32) (*CreatedTx,
 	error) {
 
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
 	// Quit if the blockchain is reorganizing.
-	isReorganizing, _ := w.chainSvr.GetReorganizing()
+	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
 		return nil, ErrBlockchainReorganizing
 	}
@@ -1190,7 +1246,12 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		addrFunc = w.ReusedAddress
 	}
 
-	isReorganizing, _ := w.chainSvr.GetReorganizing()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
 		return "", ErrBlockchainReorganizing
 	}
@@ -1214,7 +1275,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	}
 
 	// Get current block's height and hash.
-	bs, err := w.chainSvr.BlockStamp()
+	bs, err := chainClient.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -1236,7 +1297,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		}
 	}
 
-	// Recreate address/amount pairs, using btcutil.Amount.
+	// Recreate address/amount pairs, using dcrutil.Amount.
 	pair := make(map[string]dcrutil.Amount, 1)
 	pair[ticketAddr.String()] = ticketPrice
 
@@ -1352,7 +1413,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		}
 	}
 
-	txSha, err := w.chainSvr.SendRawTransaction(createdTx.MsgTx, false)
+	txSha, err := chainClient.SendRawTransaction(createdTx.MsgTx, false)
 	if err != nil {
 		log.Warnf("Failed to send raw transaction: %v", err.Error())
 		inconsistent := strings.Contains(err.Error(),
@@ -1423,7 +1484,11 @@ func addOutputsSStx(msgtx *wire.MsgTx,
 // DECRED TODO
 func (w *Wallet) txToSSGen(ticketHash chainhash.Hash, blockHash chainhash.Hash,
 	height int64, votebits uint16) (*CreatedTx, error) {
-	isReorganizing, _ := w.chainSvr.GetReorganizing()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
 		return nil, ErrBlockchainReorganizing
 	}
@@ -1434,7 +1499,11 @@ func (w *Wallet) txToSSGen(ticketHash chainhash.Hash, blockHash chainhash.Hash,
 // txToSSRtx ...
 // DECRED TODO
 func (w *Wallet) txToSSRtx(ticketHash chainhash.Hash) (*CreatedTx, error) {
-	isReorganizing, _ := w.chainSvr.GetReorganizing()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
 		return nil, ErrBlockchainReorganizing
 	}

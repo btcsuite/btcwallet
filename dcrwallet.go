@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014 The btcsuite developers
+ * Copyright (c) 2013-2015 The btcsuite developers
  * Copyright (c) 2015 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -25,9 +25,13 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"sync"
 	"time"
 
 	"github.com/decred/dcrwallet/chain"
+	"github.com/decred/dcrwallet/rpc/legacyrpc"
+	"github.com/decred/dcrwallet/wallet"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 var (
@@ -89,88 +93,179 @@ func walletMain() error {
 		}()
 	}
 
-	// Load the wallet database.  It must have been created with the
-	// --create option already or this will return an appropriate error.
-	wallet, db, err := openWallet(cfg)
-	if err != nil {
-		log.Errorf("%v", err)
-		return err
+	dbDir := networkDir(cfg.DataDir, activeNet.Params)
+	stakeOptions := &wallet.StakeOptions{
+		VoteBits:           cfg.VoteBits,
+		StakeMiningEnabled: cfg.EnableStakeMining,
+		BalanceToMaintain:  cfg.BalanceToMaintain,
+		RollbackTest:       cfg.RollbackTest,
+		PruneTickets:       cfg.PruneTickets,
+		AddressReuse:       cfg.ReuseAddresses,
+		TicketAddress:      cfg.TicketAddress,
+		TicketMaxPrice:     cfg.TicketMaxPrice,
 	}
-	defer db.Close()
+	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions, cfg.AutomaticRepair, cfg.UnsafeMainNet)
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client
 	// created below after each is created.
-	server, err := newRPCServer(cfg.SvrListeners, cfg.RPCMaxClients,
-		cfg.RPCMaxWebsockets)
+	rpcs, legacyRPCServer, err := startRPCServers(loader)
 	if err != nil {
-		log.Errorf("Unable to create HTTP server: %v", err)
+		log.Errorf("Unable to create RPC servers: %v", err)
 		return err
 	}
-	server.Start()
-	server.SetWallet(wallet)
 
-	// Shutdown the server if an interrupt signal is received.
-	addInterruptHandler(server.Stop)
+	// Create and start chain RPC client so it's ready to connect to
+	// the wallet when loaded later.
+	if !cfg.NoInitialLoad {
+		go rpcClientConnectLoop(legacyRPCServer, loader)
+	}
 
-	go func() {
-		for {
-			// Read CA certs and create the RPC client.
-			var certs []byte
-			if !cfg.DisableClientTLS {
-				certs, err = ioutil.ReadFile(cfg.CAFile)
-				if err != nil {
-					log.Warnf("Cannot open CA file: %v", err)
-					// If there's an error reading the CA file, continue
-					// with nil certs and without the client connection
-					certs = nil
-				}
-			} else {
-				log.Info("Client TLS is disabled")
-			}
-			rpcc, err := chain.NewClient(activeNet.Params, cfg.RPCConnect,
-				cfg.DcrdUsername, cfg.DcrdPassword, certs, cfg.DisableClientTLS)
+	var closeDB func() error
+	defer func() {
+		if closeDB != nil {
+			err := closeDB()
 			if err != nil {
-				log.Errorf("Cannot create chain server RPC client: %v", err)
-				return
-			}
-			err = rpcc.Start()
-			if err != nil {
-				log.Warnf("Connection to Decred RPC chain server " +
-					"unsuccessful -- available RPC methods will be limited")
-			}
-			// Even if Start errored, we still add the server disconnected.
-			// All client methods will then error, so it's obvious to a
-			// client that the there was a connection problem.
-			server.SetChainServer(rpcc)
-
-			// Start wallet goroutines and handle RPC client notifications
-			// if the server is not shutting down.
-			select {
-			case <-server.quit:
-				return
-			default:
-				wallet.Start(rpcc)
-			}
-
-			// Block goroutine until the client is finished.
-			rpcc.WaitForShutdown()
-
-			wallet.SetChainSynced(false)
-			wallet.Stop()
-
-			// Reconnect only if the server is not shutting down.
-			select {
-			case <-server.quit:
-				return
-			default:
+				log.Errorf("Unable to close wallet database: %v", err)
 			}
 		}
 	}()
+	loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+		startWalletRPCServices(w, rpcs, legacyRPCServer)
+		closeDB = db.Close
+	})
 
-	// Wait for the server to shutdown either due to a stop RPC request
-	// or an interrupt.
-	server.WaitForShutdown()
+	if !cfg.NoInitialLoad {
+		// Load the wallet database.  It must have been created already
+		// or this will return an appropriate error.
+		_, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+		if err != nil {
+			log.Error(err)
+			return err
+		}
+	}
+
+	// Shutdown the server(s) when interrupt signal is received.
+	if rpcs != nil {
+		addInterruptHandler(func() {
+			// TODO: Does this need to wait for the grpc server to
+			// finish up any requests?
+			log.Warn("Stopping RPC server...")
+			rpcs.Stop()
+			log.Info("RPC server shutdown")
+		})
+	}
+	if legacyRPCServer != nil {
+		go func() {
+			<-legacyRPCServer.RequestProcessShutdown()
+			simulateInterrupt()
+		}()
+		addInterruptHandler(func() {
+			log.Warn("Stopping legacy RPC server...")
+			legacyRPCServer.Stop()
+			log.Info("Legacy RPC server shutdown")
+		})
+	}
+
+	<-interruptHandlersDone
 	log.Info("Shutdown complete")
 	return nil
+}
+
+// rpcClientConnectLoop continuously attempts a connection to the consensus RPC
+// server.  When a connection is established, the client is used to sync the
+// loaded wallet, either immediately or when loaded at a later time.
+//
+// The legacy RPC is optional.  If set, the connected RPC client will be
+// associated with the server for RPC passthrough and to enable additional
+// methods.
+func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Loader) {
+	certs := readCAFile()
+
+	for {
+		chainClient, err := startChainRPC(certs)
+		if err != nil {
+			log.Errorf("Unable to open connection to consensus RPC server: %v", err)
+			continue
+		}
+
+		// Rather than inlining this logic directly into the loader
+		// callback, a function variable is used to avoid running any of
+		// this after the client disconnects by setting it to nil.  This
+		// prevents the callback from associating a wallet loaded at a
+		// later time with a client that has already disconnected.  A
+		// mutex is used to make this concurrent safe.
+		associateRPCClient := func(w *wallet.Wallet) {
+			w.SynchronizeRPC(chainClient)
+			if legacyRPCServer != nil {
+				legacyRPCServer.SetChainServer(chainClient)
+			}
+		}
+		mu := new(sync.Mutex)
+		loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+			mu.Lock()
+			associate := associateRPCClient
+			mu.Unlock()
+			if associate != nil {
+				associate(w)
+			}
+		})
+
+		chainClient.WaitForShutdown()
+
+		mu.Lock()
+		associateRPCClient = nil
+		mu.Unlock()
+
+		loadedWallet, ok := loader.LoadedWallet()
+		if ok {
+			// Do not attempt a reconnect when the wallet was
+			// explicitly stopped.
+			if loadedWallet.ShuttingDown() {
+				return
+			}
+
+			loadedWallet.SetChainSynced(false)
+
+			// TODO: Rework the wallet so changing the RPC client
+			// does not require stopping and restarting everything.
+			loadedWallet.Stop()
+			loadedWallet.WaitForShutdown()
+			loadedWallet.Start()
+		}
+	}
+}
+
+func readCAFile() []byte {
+	// Read certificate file if TLS is not disabled.
+	var certs []byte
+	if !cfg.DisableClientTLS {
+		var err error
+		certs, err = ioutil.ReadFile(cfg.CAFile)
+		if err != nil {
+			log.Warnf("Cannot open CA file: %v", err)
+			// If there's an error reading the CA file, continue
+			// with nil certs and without the client connection.
+			certs = nil
+		}
+	} else {
+		log.Info("Chain server RPC TLS is disabled")
+	}
+
+	return certs
+}
+
+// startChainRPC opens a RPC client connection to a dtcd server for blockchain
+// services.  This function uses the RPC options from the global config and
+// there is no recovery in case the server is not available or if there is an
+// authentication error.  Instead, all requests to the client will simply error.
+func startChainRPC(certs []byte) (*chain.RPCClient, error) {
+	log.Infof("Attempting RPC client connection to %v", cfg.RPCConnect)
+	rpcc, err := chain.NewRPCClient(activeNet.Params, cfg.RPCConnect,
+		cfg.DcrdUsername, cfg.DcrdPassword, certs, cfg.DisableClientTLS, 0)
+	if err != nil {
+		return nil, err
+	}
+	err = rpcc.Start()
+	return rpcc, err
 }

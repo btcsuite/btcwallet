@@ -197,6 +197,10 @@ type Store struct {
 
 	namespace   walletdb.Namespace
 	chainParams *chaincfg.Params
+
+	// Event callbacks.  These execute in the same goroutine as the wtxmgr
+	// caller.
+	NotifyUnspent func(hash *chainhash.Hash, index uint32)
 }
 
 // SortedTxRecords is a list of transaction records that can be sorted.
@@ -393,8 +397,7 @@ func Open(namespace walletdb.Namespace, pruneTickets bool,
 	if err != nil {
 		return nil, err
 	}
-
-	s := &Store{new(sync.Mutex), false, namespace, chainParams}
+	s := &Store{new(sync.Mutex), false, namespace, chainParams, nil} // TODO: set callbacks
 
 	// Skip pruning on simnet, because the adjustment times are
 	// so short.
@@ -423,7 +426,7 @@ func Create(namespace walletdb.Namespace, chainParams *chaincfg.Params) (*Store,
 	if err != nil {
 		return nil, err
 	}
-	return &Store{new(sync.Mutex), false, namespace, chainParams}, nil
+	return &Store{new(sync.Mutex), false, namespace, chainParams, nil}, nil // TODO: set callbacks
 }
 
 // Close safely closes the transaction manager by waiting for the mutex to
@@ -865,9 +868,16 @@ func (s *Store) AddCredit(rec *TxRecord, block *BlockMeta, index uint32,
 		return storeError(ErrInput, str, nil)
 	}
 
-	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		return s.addCredit(ns, rec, block, index, change)
+	var isNew bool
+	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
+		var err error
+		isNew, err = s.addCredit(ns, rec, block, index, change)
+		return err
 	})
+	if err == nil && isNew && s.NotifyUnspent != nil {
+		s.NotifyUnspent(&rec.Hash, index)
+	}
+	return err
 }
 
 // getP2PKHOpCode returns OP_NONSTAKE for non-stake transactions, or
@@ -889,20 +899,23 @@ func getP2PKHOpCode(pkScript []byte) uint8 {
 }
 
 func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta,
-	index uint32, change bool) error {
+	index uint32, change bool) (bool, error) {
 	opCode := getP2PKHOpCode(rec.MsgTx.TxOut[index].PkScript)
 	isCoinbase := blockchain.IsCoinBaseTx(&rec.MsgTx)
 
 	if block == nil {
 		k := canonicalOutPoint(&rec.Hash, index)
+		if existsRawUnminedCredit(ns, k) != nil {
+			return false, nil
+		}
 		v := valueUnminedCredit(dcrutil.Amount(rec.MsgTx.TxOut[index].Value),
 			change, opCode, isCoinbase)
-		return putRawUnminedCredit(ns, k, v)
+		return true, putRawUnminedCredit(ns, k, v)
 	}
 
 	k, v := existsCredit(ns, &rec.Hash, index, &block.Block)
 	if v != nil {
-		return nil
+		return false, nil
 	}
 
 	txOutAmt := dcrutil.Amount(rec.MsgTx.TxOut[index].Value)
@@ -924,22 +937,22 @@ func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta,
 	v = valueUnspentCredit(&cred)
 	err := putRawCredit(ns, k, v)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	minedBalance, err := fetchMinedBalance(ns)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Update the balance so long as it's not a ticket output.
 	if !(opCode == txscript.OP_SSTX) {
 		err = putMinedBalance(ns, minedBalance+txOutAmt)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
-	return putUnspent(ns, &cred.outPoint, &block.Block)
+	return true, putUnspent(ns, &cred.outPoint, &block.Block)
 }
 
 // AddMultisigOut adds a P2SH multisignature spendable output into the
