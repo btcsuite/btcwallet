@@ -1243,6 +1243,7 @@ func GetStakeInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 
 	// Get all the subsidy for votes cast by this wallet so far
 	// by accessing the votes directly from the daemon blockchain.
+	votesNum := 0
 	totalSubsidy := dcrutil.Amount(0)
 	for i := range localVotes {
 		msgTx, err := w.TxStore.Tx(&localVotes[i])
@@ -1252,6 +1253,7 @@ func GetStakeInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 			continue
 		}
 
+		votesNum++
 		totalSubsidy += dcrutil.Amount(msgTx.TxIn[0].ValueIn)
 	}
 
@@ -1273,7 +1275,7 @@ func GetStakeInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 		Immature:         uint32(immatureTicketNum),
 		Live:             uint32(liveTicketNum),
 		ProportionLive:   proportionLive,
-		Voted:            uint32(len(localVotes)),
+		Voted:            uint32(votesNum),
 		TotalSubsidy:     totalSubsidy.ToCoin(),
 		Missed:           uint32(missedNum),
 		ProportionMissed: proportionMissed,
