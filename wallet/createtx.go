@@ -406,14 +406,8 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 	// the amount of inputs as compared to the amount of
 	// outputs.
 	var feeIncrement dcrutil.Amount
-	switch {
-	case w.chainParams == &chaincfg.MainNetParams:
-		feeIncrement = FeeIncrementMainnet
-	case w.chainParams == &chaincfg.TestNetParams:
-		feeIncrement = FeeIncrementTestnet
-	default:
-		feeIncrement = FeeIncrementTestnet
-	}
+	feeIncrement = w.FeeIncrement()
+
 	needed += feeForSize(feeIncrement,
 		estimateTxSize(len(pairs)*2, len(pairs)))
 
@@ -422,7 +416,7 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 		return nil, err
 	}
 
-	return w.createTx(eligible, pairs, bs, w.FeeIncrement(), account,
+	return w.createTx(eligible, pairs, bs, feeIncrement, account,
 		addrFunc, w.chainParams, w.DisallowFree)
 }
 
@@ -769,14 +763,8 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	// case.
 	feeSize := estimateTxSize(numInputs, 2)
 	var feeIncrement dcrutil.Amount
-	switch {
-	case w.chainParams == &chaincfg.MainNetParams:
-		feeIncrement = FeeIncrementMainnet
-	case w.chainParams == &chaincfg.TestNetParams:
-		feeIncrement = FeeIncrementTestnet
-	default:
-		feeIncrement = FeeIncrementTestnet
-	}
+	feeIncrement = w.FeeIncrement()
+
 	feeEst := feeForSize(feeIncrement, feeSize)
 
 	if totalInput < amount+feeEst {
@@ -881,14 +869,8 @@ func (w *Wallet) compressWallet(maxNumIns int) error {
 	// and added outputs, with no change.
 	szEst := estimateTxSize(txInCount, 1)
 	var feeIncrement dcrutil.Amount
-	switch {
-	case w.chainParams == &chaincfg.MainNetParams:
-		feeIncrement = FeeIncrementMainnet
-	case w.chainParams == &chaincfg.TestNetParams:
-		feeIncrement = FeeIncrementTestnet
-	default:
-		feeIncrement = FeeIncrementTestnet
-	}
+	feeIncrement = w.FeeIncrement()
+
 	feeEst := feeForSize(feeIncrement, szEst)
 
 	msgtx := wire.NewMsgTx()
@@ -982,14 +964,8 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 	// and added outputs, with no change.
 	szEst := estimateTxSize(txInCount, 1)
 	var feeIncrement dcrutil.Amount
-	switch {
-	case w.chainParams == &chaincfg.MainNetParams:
-		feeIncrement = FeeIncrementMainnet
-	case w.chainParams == &chaincfg.TestNetParams:
-		feeIncrement = FeeIncrementTestnet
-	default:
-		feeIncrement = FeeIncrementTestnet
-	}
+	feeIncrement = w.FeeIncrement()
+
 	feeEst := feeForSize(feeIncrement, szEst)
 
 	msgtx := wire.NewMsgTx()
