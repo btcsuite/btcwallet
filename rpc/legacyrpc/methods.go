@@ -123,6 +123,7 @@ var rpcHandlers = map[string]struct {
 	"getticketmaxprice":      {handler: GetTicketMaxPrice},
 	"gettickets":             {handlerWithChain: GetTickets},
 	"getticketvotebits":      {handler: GetTicketVoteBits},
+	"getticketsvotebits":     {handler: GetTicketsVoteBits},
 	"gettransaction":         {handler: GetTransaction},
 	"getwalletfee":           {handler: GetWalletFee},
 	"help":                   {handler: HelpNoChainRPC, handlerWithChain: HelpWithChainRPC},
@@ -1392,15 +1393,55 @@ func GetTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	}
 	if !set {
 		return &dcrjson.GetTicketVoteBitsResult{
-			VoteBits:    w.VoteBits,
-			VoteBitsExt: "",
+			dcrjson.VoteBitsData{
+				VoteBits:    w.VoteBits,
+				VoteBitsExt: "",
+			},
 		}, nil
 	}
 
 	return &dcrjson.GetTicketVoteBitsResult{
-		VoteBits:    voteBits,
-		VoteBitsExt: "",
+		dcrjson.VoteBitsData{
+			VoteBits:    voteBits,
+			VoteBitsExt: "",
+		},
 	}, nil
+}
+
+// GetTicketsVoteBits fetches the per-ticket voteBits for a given array of ticket
+// hashes. If the voteBits are unset, it returns the default voteBits.
+// Otherwise, it returns the voteBits it finds. Missing tickets return an
+// error.
+func GetTicketsVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.GetTicketsVoteBitsCmd)
+	ticketsLen := len(cmd.TxHashes)
+	ticketHashes := make([]*chainhash.Hash, 0, ticketsLen)
+	for _, thStr := range cmd.TxHashes {
+		h, err := chainhash.NewHashFromStr(thStr)
+		if err != nil {
+			return nil, err
+		}
+		ticketHashes = append(ticketHashes, h)
+	}
+
+	voteBitsData := make([]dcrjson.VoteBitsData, 0, ticketsLen)
+	for _, th := range ticketHashes {
+		set, voteBits, err := w.StakeMgr.SStxVoteBits(th)
+		if err != nil {
+			return nil, err
+		}
+		var vbr dcrjson.VoteBitsData
+		if !set {
+			vbr.VoteBits = w.VoteBits
+			vbr.VoteBitsExt = ""
+		} else {
+			vbr.VoteBits = voteBits
+			vbr.VoteBitsExt = ""
+		}
+		voteBitsData = append(voteBitsData, vbr)
+	}
+
+	return &dcrjson.GetTicketsVoteBitsResult{VoteBitsList: voteBitsData}, nil
 }
 
 // GetTransaction handles a gettransaction request by returning details about

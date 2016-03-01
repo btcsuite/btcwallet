@@ -123,6 +123,18 @@ var helpDescsEnUS = map[string]string{
 	"gettickets--synopsis":       "Returning the hashes of the tickets currently owned by wallet.",
 	"gettickets-includeimmature": "If true include immature tickets in the results.",
 
+	// GetTicketVoteBits help.
+	"getticketvotebits--synopsis":          "Retrieve the intended voteBits for any given ticket",
+	"getticketvotebits-txhash":             "The hash of the ticket",
+	"getticketvotebitsresult-votebitsdata": "The voteBits and extended voteBits for this ticket",
+	"votebitsdata-votebits":                "The voteBits for this ticket",
+	"votebitsdata-votebitsext":             "The extended voteBits for this ticket",
+
+	// GetTicketsVoteBits help.
+	"getticketsvotebits--synopsis":          "Retrieve the intended voteBits for any given list of tickets",
+	"getticketsvotebits-txhashes":           "The list of ticket hashes",
+	"getticketsvotebitsresult-votebitslist": "The voteBits and extended voteBits for all tickets passed",
+
 	// GetTicketMaxPrice help.
 	"getticketmaxprice--synopsis": "Returns the max price the wallet will pay for a ticket.",
 	"getticketmaxprice--result0":  "Max price wallet will spend on a ticket.",
@@ -379,6 +391,12 @@ var helpDescsEnUS = map[string]string{
 	// SetTicketMaxPrice help.
 	"setticketmaxprice--synopsis": "Set the max price user is willing to pay for a ticket.",
 	"setticketmaxprice-max":       "The max price (in dcr).",
+
+	// SetTicketVoteBits
+	"setticketvotebits--synopsis":   "Set the voteBits to be used when voting for any given ticket",
+	"setticketvotebits-txhash":      "The hash of the ticket",
+	"setticketvotebits-votebits":    "The voteBits to set for the ticket",
+	"setticketvotebits-votebitsext": "The extended voteBits to set for the ticket",
 
 	// SetTxFeeCmd help.
 	"settxfee--synopsis": "Modify the increment used each time more fee is required for an authored transaction.",
