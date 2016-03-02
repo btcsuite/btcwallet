@@ -270,8 +270,22 @@ func Seed(reader *bufio.Reader) ([]byte, error) {
 			return nil, err
 		}
 
+		seedStr, err := pgpwordlist.ToStringChecksum(seed)
+		if err != nil {
+			return nil, err
+		}
+		seedStrSplit := strings.Split(seedStr, " ")
+
 		fmt.Println("Your wallet generation seed is:")
-		fmt.Printf("%x\n", seed)
+		for i := 0; i < hdkeychain.RecommendedSeedLen+1; i++ {
+			fmt.Printf("%v ", seedStrSplit[i])
+
+			if (i+1)%6 == 0 {
+				fmt.Printf("\n")
+			}
+		}
+
+		fmt.Printf("\n\nHex: %x\n", seed)
 		fmt.Println("IMPORTANT: Keep the seed in a safe place as you\n" +
 			"will NOT be able to restore your wallet without it.")
 		fmt.Println("Please keep in mind that anyone who has access\n" +
