@@ -780,9 +780,6 @@ func (w *Wallet) quitChan() <-chan struct{} {
 func (w *Wallet) CloseDatabases() {
 	w.TxStore.Close()
 	w.StakeMgr.Close()
-
-	// Store the current address pool last addresses.
-	w.CloseAddressPools()
 }
 
 // Stop signals all wallet goroutines to shutdown.
@@ -790,6 +787,9 @@ func (w *Wallet) Stop() {
 	w.quitMu.Lock()
 	quit := w.quit
 	w.quitMu.Unlock()
+
+	// Store the current address pool last addresses.
+	w.CloseAddressPools()
 
 	select {
 	case <-quit:

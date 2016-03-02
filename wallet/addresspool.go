@@ -243,14 +243,6 @@ func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
 // BatchFinish must be run after every successful series of usages of
 // GetNewAddress to purge the addresses from the unused map.
 func (a *addressPool) BatchFinish() {
-	// We used all the addresses, so we need to pull new addresses
-	// on the next call of this function.
-	if a.cursor >= len(a.addresses) {
-		a.addresses = nil
-		a.cursor = 0
-		return
-	}
-
 	// Write the next address to use to the database.
 	addr, err := a.wallet.Manager.GetAddress(a.index+1,
 		waddrmgr.DefaultAccountNum, a.branch)
@@ -272,6 +264,14 @@ func (a *addressPool) BatchFinish() {
 			log.Errorf("Failed to store next to use address for internal "+
 				"pool in the manager on batch finish: %v", err.Error())
 		}
+	}
+
+	// We used all the addresses, so we need to pull new addresses
+	// on the next call of this function.
+	if a.cursor >= len(a.addresses) {
+		a.addresses = nil
+		a.cursor = 0
+		return
 	}
 
 	a.addresses = a.addresses[a.cursor:len(a.addresses)]
@@ -332,13 +332,21 @@ func (w *Wallet) CloseAddressPools() {
 func (w *Wallet) GetNewAddressExternal() (dcrutil.Address, error) {
 	w.externalPool.mutex.Lock()
 	defer w.externalPool.mutex.Unlock()
-	return w.externalPool.GetNewAddress()
+	address, err := w.externalPool.GetNewAddress()
+	if err == nil {
+		w.externalPool.BatchFinish()
+	}
+	return address, err
 }
 
-// GetNewAddressExternal is the exported function that gets a new internal address
+// GetNewAddressInternal is the exported function that gets a new internal address
 // for the default account from the internal address mempool.
 func (w *Wallet) GetNewAddressInternal() (dcrutil.Address, error) {
 	w.internalPool.mutex.Lock()
 	defer w.internalPool.mutex.Unlock()
-	return w.internalPool.GetNewAddress()
+	address, err := w.internalPool.GetNewAddress()
+	if err == nil {
+		w.internalPool.BatchFinish()
+	}
+	return address, err
 }
