@@ -259,6 +259,35 @@ func (s *Store) Tx(txHash *chainhash.Hash) (*wire.MsgTx, error) {
 	return msgTx, err
 }
 
+// ExistsTx checks to see if a transaction exists in the database.
+func (s *Store) ExistsTx(txHash *chainhash.Hash) (bool, error) {
+	exists := false
+	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
+		// First, check whether there exists an unmined transaction with this
+		// hash.  Use it if found.
+		v := existsRawUnmined(ns, txHash[:])
+		if v != nil {
+			exists = true
+			return nil
+		}
+
+		// Otherwise, if there exists a mined transaction with this matching
+		// hash, skip over to the newest and begin fetching the msgTx.
+		_, v = latestTxRecord(ns, txHash)
+		if v != nil {
+			exists = true
+			return nil
+		}
+
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return exists, nil
+}
+
 // UniqueTxDetails looks up all recorded details for a transaction recorded
 // mined in some particular block, or an unmined transaction if block is nil.
 //

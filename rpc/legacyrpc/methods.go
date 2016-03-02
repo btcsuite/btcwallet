@@ -1188,6 +1188,8 @@ func GetStakeInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 	for i := range localTickets {
 		localTicketPtrs[i] = &localTickets[i]
 	}
+
+	// Check the live ticket pool for the presense of tickets.
 	existsBitSetBStr, err := chainClient.ExistsLiveTickets(localTicketPtrs)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to find assess whether tickets "+
@@ -2335,6 +2337,9 @@ func RedeemMultiSigOuts(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	return dcrjson.RedeemMultiSigOutsResult{rmsoResults}, nil
 }
 
+// TicketsForAddress retrieves all ticket hashes that have the passed voting
+// address. It will only return tickets that are in the mempool or blockchain,
+// and should not return pruned tickets.
 func TicketsForAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.TicketsForAddressCmd)
 
@@ -2343,9 +2348,22 @@ func TicketsForAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 		return nil, err
 	}
 
-	tickets, err := w.StakeMgr.DumpSStxHashesForAddress(addr)
+	ticketsAll, err := w.StakeMgr.DumpSStxHashesForAddress(addr)
 	if err != nil {
 		return nil, err
+	}
+
+	// Check the wallet database.
+	tickets := make([]chainhash.Hash, 0, len(ticketsAll))
+	for i := range ticketsAll {
+		exists, err := w.TxStore.ExistsTx(&ticketsAll[i])
+		if err != nil {
+			log.Errorf("Enountered database error while retrieving "+
+				"tickets for address: %v", err.Error())
+		}
+		if exists {
+			tickets = append(tickets, ticketsAll[i])
+		}
 	}
 
 	ticketsStr := make([]string, len(tickets), len(tickets))
