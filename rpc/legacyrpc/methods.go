@@ -111,6 +111,7 @@ var rpcHandlers = map[string]struct {
 	"getbestblockhash":       {handler: GetBestBlockHash},
 	"getblockcount":          {handler: GetBlockCount},
 	"getinfo":                {handlerWithChain: GetInfo},
+	"getgenerate":            {handler: GetGenerate},
 	"getmasterpubkey":        {handler: GetMasterPubkey},
 	"getmultisigoutinfo":     {handlerWithChain: GetMultisigOutInfo},
 	"getnewaddress":          {handler: GetNewAddress},
@@ -2746,6 +2747,11 @@ func SendToSSRtx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClien
 	}
 	log.Infof("Successfully sent transaction %v", txSha)
 	return txSha.String(), nil
+}
+
+// GetGenerate returns if stake mining is enabled for the wallet.
+func GetGenerate(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	return w.StakeMiningEnabled, nil
 }
 
 // SetGenerate enables or disables stake mining the wallet (ticket

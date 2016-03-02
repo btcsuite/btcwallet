@@ -76,6 +76,10 @@ var helpDescsEnUS = map[string]string{
 	// GetInfoCmd help.
 	"getinfo--synopsis": "Returns a JSON object containing various state info.",
 
+	// GetGenerate help
+	"getgenerate--synopsis": "Return current state of stake mining.",
+	"getgenerate--result0":  "True if stake mining is enabled, false if it is not.",
+
 	// GetMasterPubkey help.
 	"getmasterpubkey--synopsis": "Requests the master pubkey from the wallet.",
 	"getmasterpubkey--result0":  "The master pubkey for the wallet",
@@ -387,6 +391,11 @@ var helpDescsEnUS = map[string]string{
 	"sendtomultisig-amount":      "Amount to send to the payment address valued in decred",
 	"sendtomultisig-comment":     "Unused",
 	"sendtomultisig--result0":    "The transaction hash of the sent transaction",
+
+	// SetGenerate help
+	"setgenerate--synopsis":    "Enable or disable stake mining",
+	"setgenerate-generate":     "True to enable stake mining, false to disable.",
+	"setgenerate-genproclimit": "Not used for stake mining",
 
 	// SetTicketMaxPrice help.
 	"setticketmaxprice--synopsis": "Set the max price user is willing to pay for a ticket.",
