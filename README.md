@@ -62,9 +62,7 @@ testing.
 
 Install the latest MSIs available here:
 
-https://github.com/decred/dcrd/releases
-
-https://github.com/btcsuite/dcrwallet/releases
+https://github.com/decred/decred-release/releases
 
 ### Windows/Linux/BSD/POSIX - Build from source
 
