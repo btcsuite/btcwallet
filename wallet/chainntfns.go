@@ -807,12 +807,12 @@ func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
 	// out of sync with the voting channel here. This should probably
 	// be fixed somehow, but this should be stable for networks that
 	// are voting at normal block speeds.
-	if blockHeight >= w.chainParams.StakeValidationHeight-1 &&
+	if blockHeight >= int64(w.chainParams.StakeValidationHeight-1) &&
 		topBlockStamp.Hash.IsEqual(blockHash) {
 		w.SetCurrentVotingInfo(blockHash, blockHeight, tickets)
 	}
 
-	if blockHeight >= w.chainParams.StakeValidationHeight-1 &&
+	if blockHeight >= int64(w.chainParams.StakeValidationHeight-1) &&
 		w.StakeMiningEnabled {
 		ntfns, err := w.StakeMgr.HandleWinningTicketsNtfn(blockHash,
 			blockHeight,
@@ -852,7 +852,7 @@ func (w *Wallet) handleMissedTickets(blockHash *chainhash.Hash,
 		return nil
 	}
 
-	if blockHeight >= w.chainParams.StakeValidationHeight+1 &&
+	if blockHeight >= int64(w.chainParams.StakeValidationHeight+1) &&
 		w.StakeMiningEnabled {
 		ntfns, err := w.StakeMgr.HandleMissedTicketsNtfn(blockHash,
 			blockHeight,
