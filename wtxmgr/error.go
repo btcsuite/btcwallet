@@ -52,6 +52,14 @@ const (
 	// handled by creating a new store.
 	ErrNoExists
 
+	// ErrValueNoExists describes an error indicating that the value for
+	// a given key does not exist in the database queried.
+	ErrValueNoExists
+
+	// ErrDoubleSpend indicates that an output was attempted to be spent
+	// twice.
+	ErrDoubleSpend
+
 	// ErrUnknownVersion describes an error where the store already exists
 	// but the database version is newer than latest version known to this
 	// software.  This likely indicates an outdated binary.
@@ -67,6 +75,8 @@ var errStrs = [...]string{
 	ErrInput:          "ErrInput",
 	ErrAlreadyExists:  "ErrAlreadyExists",
 	ErrNoExists:       "ErrNoExists",
+	ErrValueNoExists:  "ErrValueNoExists",
+	ErrDoubleSpend:    "ErrDoubleSpend",
 	ErrUnknownVersion: "ErrUnknownVersion",
 	ErrIsClosed:       "ErrIsClosed",
 }

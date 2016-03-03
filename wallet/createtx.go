@@ -160,6 +160,19 @@ func (e InsufficientFundsError) Error() string {
 		e.fee, e.in)
 }
 
+// CreateTxFundsError represents an error where there are not enough
+// funds from unspent tx outputs for a wallet to create a transaction
+// through createtx. The amount needed and the fee required are passed
+// back.
+type CreateTxFundsError struct {
+	needed, fee dcrutil.Amount
+}
+
+// Error satisifies the builtin error interface.
+func (e CreateTxFundsError) Error() string {
+	return fmt.Sprintf("insufficient funds")
+}
+
 // ErrUnsupportedTransactionType represents an error where a transaction
 // cannot be signed as the API only supports spending P2PKH outputs.
 var ErrUnsupportedTransactionType = errors.New("Only P2PKH transactions " +
@@ -253,7 +266,7 @@ func (w *Wallet) insertCreditsIntoTxMgr(msgTx *wire.MsgTx,
 				// account they belong to, so wtxmgr is able to
 				// track per-account balances.
 				err = w.TxStore.AddCredit(rec, nil, uint32(i),
-					ma.Internal())
+					ma.Internal(), ma.Account())
 				if err != nil {
 					return err
 				}
@@ -288,78 +301,6 @@ func (w *Wallet) insertMultisigOutIntoTxMgr(msgTx *wire.MsgTx,
 	}
 
 	return w.TxStore.AddMultisigOut(rec, nil, index)
-}
-
-// NewAddress returns the next external chained address for a wallet.
-func (w *Wallet) NewAddress(account uint32) (dcrutil.Address, error) {
-	// Get next address from wallet.
-	addrs, err := w.Manager.NextExternalAddresses(account, 1)
-	if err != nil {
-		return nil, err
-	}
-
-	// Request updates from dcrd for new transactions sent to this address.
-	utilAddrs := make([]dcrutil.Address, len(addrs))
-	for i, addr := range addrs {
-		utilAddrs[i] = addr.Address()
-	}
-	w.chainClientLock.Lock()
-	chainClient := w.chainClient
-	w.chainClientLock.Unlock()
-	if chainClient != nil {
-		err := chainClient.NotifyReceived(utilAddrs)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	props, err := w.Manager.AccountProperties(account)
-	if err != nil {
-		log.Errorf("Cannot fetch account properties for notification "+
-			"after deriving next external address: %v", err)
-	} else {
-		w.NtfnServer.notifyAccountProperties(props)
-	}
-
-	return utilAddrs[0], nil
-}
-
-// NewChangeAddress returns a new change address for a wallet.
-func (w *Wallet) NewChangeAddress(account uint32) (dcrutil.Address, error) {
-	// Get next chained change address from wallet for account.
-	addrs, err := w.Manager.NextInternalAddresses(account, 1)
-	if err != nil {
-		return nil, err
-	}
-
-	// Request updates from dcrd for new transactions sent to this address.
-	utilAddrs := make([]dcrutil.Address, len(addrs))
-	for i, addr := range addrs {
-		utilAddrs[i] = addr.Address()
-	}
-
-	chainClient, err := w.requireChainClient()
-	if err == nil {
-		err = chainClient.NotifyReceived(utilAddrs)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return utilAddrs[0], nil
-}
-
-// ReusedAddress returns an address that is reused from the external
-// branch of the wallet, to cut down on new address usage for wallets.
-// Should be used judiciously.
-func (w *Wallet) ReusedAddress() (dcrutil.Address, error) {
-	addr, err := w.Manager.GetAddress(0, waddrmgr.DefaultAccountNum,
-		waddrmgr.ExternalBranch)
-	if err != nil {
-		return nil, err
-	}
-
-	return addr, err
 }
 
 // txToPairs creates a raw transaction sending the amounts for each
@@ -407,17 +348,31 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 	// outputs.
 	var feeIncrement dcrutil.Amount
 	feeIncrement = w.FeeIncrement()
-
-	needed += feeForSize(feeIncrement,
-		estimateTxSize(len(pairs)*2, len(pairs)))
+	fee := feeForSize(feeIncrement, estimateTxSize(len(pairs)*2, len(pairs)))
+	needed += fee
 
 	eligible, err := w.findEligibleOutputsAmount(account, minconf, needed, bs)
 	if err != nil {
 		return nil, err
 	}
 
-	return w.createTx(eligible, pairs, bs, feeIncrement, account,
+	resp, err := w.createTx(eligible, pairs, bs, feeIncrement, account,
 		addrFunc, w.chainParams, w.DisallowFree)
+	if err != nil {
+		errTyped, ok := err.(CreateTxFundsError)
+		if ok {
+			bal, errBalance := w.TxStore.Balance(minconf, bs.Height,
+				wtxmgr.BFBalanceFullScan, false, account)
+			if errBalance != nil {
+				return nil, errBalance
+			}
+			return nil, InsufficientFundsError{bal, errTyped.needed,
+				errTyped.fee}
+		}
+		return nil, err
+	}
+
+	return resp, nil
 }
 
 // createTx selects inputs (from the given slice of eligible utxos)
@@ -453,12 +408,7 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 	totalAdded := dcrutil.Amount(0)
 	for totalAdded < minAmount {
 		if len(eligible) == 0 {
-			bal, err := w.TxStore.Balance(1, bs.Height,
-				wtxmgr.BFBalanceSpendable)
-			if err != nil {
-				return nil, err
-			}
-			return nil, InsufficientFundsError{bal, minAmount, 0}
+			return nil, CreateTxFundsError{minAmount, 0}
 		}
 		input, eligible = eligible[0], eligible[1:]
 		inputs = append(inputs, input)
@@ -477,7 +427,7 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 	// inputs, but in that case we also need to recalculate the fee.
 	for totalAdded < minAmount+feeEst {
 		if len(eligible) == 0 {
-			return nil, InsufficientFundsError{totalAdded, minAmount, feeEst}
+			return nil, CreateTxFundsError{minAmount, feeEst}
 		}
 		input, eligible = eligible[0], eligible[1:]
 		inputs = append(inputs, input)
@@ -818,7 +768,8 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 
 // compressWallet compresses all the utxos in a wallet into a single change
 // address. For use when it becomes dusty.
-func (w *Wallet) compressWallet(maxNumIns int) (*chainhash.Hash, error) {
+func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
+	error) {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return nil, err
@@ -847,9 +798,20 @@ func (w *Wallet) compressWallet(maxNumIns int) (*chainhash.Hash, error) {
 			pool.BatchRollback()
 		}
 	}()
-	addrFunc := pool.GetNewAddress
+	var addrFunc func() (dcrutil.Address, error)
+	if account == waddrmgr.DefaultAccountNum ||
+		account == waddrmgr.ImportedAddrAccount {
+		addrFunc = pool.GetNewAddress
+	} else {
+		// A pass through to enable the user to get a
+		// change address for a non-default account.
+		// In the future, this should be replaced with
+		// a tracking address pool for this account.
+		addrFunc = func() (dcrutil.Address, error) {
+			return w.NewChangeAddress(account)
+		}
+	}
 
-	account := uint32(waddrmgr.DefaultAccountNum)
 	minconf := int32(1)
 	eligible, err := w.findEligibleOutputs(account, minconf, bs)
 	if err != nil {
@@ -1241,7 +1203,19 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 			pool.BatchRollback()
 		}
 	}()
-	addrFunc := pool.GetNewAddress
+	var addrFunc func() (dcrutil.Address, error)
+	if req.account == waddrmgr.DefaultAccountNum ||
+		req.account == waddrmgr.ImportedAddrAccount {
+		addrFunc = pool.GetNewAddress
+	} else {
+		// A pass through to enable the user to get a
+		// change address for a non-default account.
+		// In the future, this should be replaced with
+		// a tracking address pool for this account.
+		addrFunc = func() (dcrutil.Address, error) {
+			return w.NewChangeAddress(req.account)
+		}
+	}
 
 	if w.addressReuse {
 		addrFunc = w.ReusedAddress
@@ -1257,7 +1231,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		return "", ErrBlockchainReorganizing
 	}
 
-	account := uint32(waddrmgr.DefaultAccountNum)
+	account := req.account
 
 	// Ensure the minimum number of required confirmations is positive.
 	if req.minConf < 0 {
@@ -1623,7 +1597,8 @@ func (w *Wallet) FindEligibleOutputs(account uint32, minconf int32,
 func (w *Wallet) findEligibleOutputsAmount(account uint32, minconf int32,
 	amount dcrutil.Amount, bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
 
-	unspent, err := w.TxStore.UnspentOutputsForAmount(amount, bs.Height, minconf)
+	unspent, err := w.TxStore.UnspentOutputsForAmount(amount, bs.Height, minconf,
+		false, account)
 	if err != nil {
 		errRepair := w.attemptToRepairInconsistencies()
 		if errRepair != nil {

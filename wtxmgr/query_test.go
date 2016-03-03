@@ -153,7 +153,6 @@ func (q *queryState) compare(t *testing.T, s *Store, changeDesc string) {
 func equalTxDetails(t *testing.T, got, exp *TxDetails) {
 	// Need to avoid using reflect.DeepEqual against slices, since it
 	// returns false for nil vs non-nil zero length slices.
-
 	equalTxs(t, &got.MsgTx, &exp.MsgTx)
 	if got.Hash != exp.Hash {
 		t.Errorf("Found mismatched hashes")
@@ -211,8 +210,8 @@ func equalTxs(t *testing.T, got, exp *wire.MsgTx) {
 	}
 	if !bytes.Equal(bufGot.Bytes(), bufExp.Bytes()) {
 		t.Errorf("Found unexpected wire.MsgTx:")
-		t.Errorf("Got: %v", got)
-		t.Errorf("Expected: %v", exp)
+		t.Errorf("Got: %x", bufGot.Bytes())
+		t.Errorf("Expected: %x", bufExp.Bytes())
 	}
 }
 
@@ -273,8 +272,9 @@ func TestStoreQueries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	defaultAccount := uint32(0)
 	addCredit := func(s *Store, rec *TxRecord, block *BlockMeta, index uint32, change bool) {
-		err := s.AddCredit(rec, block, index, change)
+		err := s.AddCredit(rec, block, index, change, defaultAccount)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -294,7 +294,7 @@ func TestStoreQueries(t *testing.T) {
 	}
 
 	// Insert an unmined transaction.  Mark no credits yet.
-	txA := spendOutput(&chainhash.Hash{}, 0, 100e8)
+	txA := spendOutput(&chainhash.Hash{}, 0, 0, 100e8)
 	recA := newTxRecordFromMsgTx(txA, timeNow())
 	newState := lastState.deepCopy()
 	newState.blocks = [][]TxDetails{
@@ -335,7 +335,7 @@ func TestStoreQueries(t *testing.T) {
 
 	// Insert another unmined transaction which spends txA:0, splitting the
 	// amount into outputs of 40 and 60 DCR.
-	txB := spendOutput(&recA.Hash, 0, 40e8, 60e8)
+	txB := spendOutput(&recA.Hash, 0, 0, 40e8, 60e8)
 	recB := newTxRecordFromMsgTx(txB, timeNow())
 	newState = lastState.deepCopy()
 	newState.blocks[0][0].Credits[0].Spent = true
@@ -413,7 +413,7 @@ func TestStoreQueries(t *testing.T) {
 	//   - Verify that breaking early on RangeTransactions stops further
 	//     iteration.
 
-	missingTx := spendOutput(&recB.Hash, 0, 40e8)
+	missingTx := spendOutput(&recB.Hash, 0, 0, 40e8)
 	missingRec := newTxRecordFromMsgTx(missingTx, timeNow())
 	missingBlock := makeBlockMeta(102)
 	missingDetails, err := s.TxDetails(&missingRec.Hash)
@@ -605,8 +605,9 @@ func TestPreviousPkScripts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	defaultAccount := uint32(0)
 	addCredit := func(rec *TxRecord, block *BlockMeta, index uint32) {
-		err := s.AddCredit(rec, block, index, false)
+		err := s.AddCredit(rec, block, index, false, defaultAccount)
 		if err != nil {
 			t.Fatal(err)
 		}

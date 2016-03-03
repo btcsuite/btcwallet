@@ -35,14 +35,14 @@ var (
 )
 
 func init() {
-	tx := spendOutput(&chainhash.Hash{}, 0, 10e8)
+	tx := spendOutput(&chainhash.Hash{}, 0, 0, 10e8)
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, timeNow())
 	if err != nil {
 		panic(err)
 	}
 	exampleTxRecordA = rec
 
-	tx = spendOutput(&exampleTxRecordA.Hash, 0, 5e8, 5e8)
+	tx = spendOutput(&exampleTxRecordA.Hash, 0, 0, 5e8, 5e8)
 	rec, err = wtxmgr.NewTxRecordFromMsgTx(tx, timeNow())
 	if err != nil {
 		panic(err)
@@ -64,18 +64,22 @@ func ExampleStore_Balance() {
 
 	// Prints balances for 0 block confirmations, 1 confirmation, and 6
 	// confirmations.
+	defaultAccount := uint32(0)
 	printBalances := func(syncHeight int32) {
-		zeroConfBal, err := s.Balance(0, syncHeight, wtxmgr.BFBalanceSpendable)
+		zeroConfBal, err := s.Balance(0, syncHeight, wtxmgr.BFBalanceSpendable,
+			true, defaultAccount)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		oneConfBal, err := s.Balance(1, syncHeight, wtxmgr.BFBalanceSpendable)
+		oneConfBal, err := s.Balance(1, syncHeight, wtxmgr.BFBalanceSpendable,
+			true, defaultAccount)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		sixConfBal, err := s.Balance(6, syncHeight, wtxmgr.BFBalanceSpendable)
+		sixConfBal, err := s.Balance(6, syncHeight, wtxmgr.BFBalanceSpendable,
+			true, defaultAccount)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -90,7 +94,7 @@ func ExampleStore_Balance() {
 		fmt.Println(err)
 		return
 	}
-	err = s.AddCredit(exampleTxRecordA, nil, 0, false)
+	err = s.AddCredit(exampleTxRecordA, nil, 0, false, defaultAccount)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -181,7 +185,8 @@ func Example_basicUsage() {
 		fmt.Println(err)
 		return
 	}
-	err = s.AddCredit(exampleTxRecordA, nil, 0, false)
+	defaultAccount := uint32(0)
+	err = s.AddCredit(exampleTxRecordA, nil, 0, false, defaultAccount)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -194,7 +199,7 @@ func Example_basicUsage() {
 		fmt.Println(err)
 		return
 	}
-	err = s.AddCredit(exampleTxRecordB, nil, 1, true)
+	err = s.AddCredit(exampleTxRecordB, nil, 1, true, defaultAccount)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -213,7 +218,8 @@ func Example_basicUsage() {
 	}
 
 	// Print the one confirmation balance.
-	bal, err := s.Balance(1, 100, wtxmgr.BFBalanceSpendable)
+	bal, err := s.Balance(1, 100, wtxmgr.BFBalanceSpendable, true,
+		defaultAccount)
 	if err != nil {
 		fmt.Println(err)
 		return

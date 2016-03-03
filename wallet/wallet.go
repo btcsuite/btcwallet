@@ -1330,8 +1330,9 @@ func (w *Wallet) syncWithChain() error {
 
 type (
 	consolidateRequest struct {
-		inputs int
-		resp   chan consolidateResponse
+		inputs  int
+		account uint32
+		resp    chan consolidateResponse
 	}
 	createTxRequest struct {
 		account uint32
@@ -1371,6 +1372,7 @@ type (
 		spendLimit dcrutil.Amount
 		minConf    int32
 		ticketAddr dcrutil.Address
+		account    uint32
 		resp       chan purchaseTicketResponse
 	}
 
@@ -1422,14 +1424,26 @@ out:
 	for {
 		select {
 		case txr := <-w.consolidateRequests:
-			txh, err := w.compressWallet(txr.inputs)
+			txh, err := w.compressWallet(txr.inputs, txr.account)
 			txr.resp <- consolidateResponse{txh, err}
 
 		case txr := <-w.createTxRequests:
 			// Initialize the address pool for use.
 			pool := w.internalPool
 			pool.mutex.Lock()
-			addrFunc := pool.GetNewAddress
+			var addrFunc func() (dcrutil.Address, error)
+			if txr.account == waddrmgr.DefaultAccountNum ||
+				txr.account == waddrmgr.ImportedAddrAccount {
+				addrFunc = pool.GetNewAddress
+			} else {
+				// A pass through to enable the user to get a
+				// change address for a non-default account.
+				// In the future, this should be replaced with
+				// a tracking address pool for this account.
+				addrFunc = func() (dcrutil.Address, error) {
+					return w.NewChangeAddress(txr.account)
+				}
+			}
 
 			tx, err := w.txToPairs(txr.pairs, txr.account, txr.minconf,
 				addrFunc)
@@ -1494,10 +1508,11 @@ out:
 // Consolidate consolidates as many UTXOs as are passed in the inputs argument.
 // If that many UTXOs can not be found, it will use the maximum it finds. This
 // will only compress UTXOs in the default account
-func (w *Wallet) Consolidate(inputs int) (*chainhash.Hash, error) {
+func (w *Wallet) Consolidate(inputs int, account uint32) (*chainhash.Hash, error) {
 	req := consolidateRequest{
-		inputs: inputs,
-		resp:   make(chan consolidateResponse),
+		inputs:  inputs,
+		account: account,
+		resp:    make(chan consolidateResponse),
 	}
 	w.consolidateRequests <- req
 	resp := <-req.resp
@@ -1599,13 +1614,15 @@ func (w *Wallet) CreateSSRtx(ticketHash chainhash.Hash) (*CreatedTx, error) {
 // CreatePurchaseTicket receives a request from the RPC and ships it to txCreator
 // to purchase a new ticket.
 func (w *Wallet) CreatePurchaseTicket(minBalance, spendLimit dcrutil.Amount,
-	minConf int32, ticketAddr dcrutil.Address) (interface{}, error) {
+	minConf int32, ticketAddr dcrutil.Address, account uint32) (interface{},
+	error) {
 
 	req := purchaseTicketRequest{
 		minBalance: minBalance,
 		spendLimit: spendLimit,
 		minConf:    minConf,
 		ticketAddr: ticketAddr,
+		account:    account,
 		resp:       make(chan purchaseTicketResponse),
 	}
 	w.purchaseTicketRequests <- req
@@ -1805,58 +1822,41 @@ func (w *Wallet) AccountUsed(account uint32) (bool, error) {
 // include a UTXO.
 func (w *Wallet) CalculateBalance(confirms int32, balanceType wtxmgr.BehaviorFlags) (dcrutil.Amount, error) {
 	blk := w.Manager.SyncedTo()
-	return w.TxStore.Balance(confirms, blk.Height, balanceType)
+	return w.TxStore.Balance(confirms, blk.Height, balanceType, true, 0)
 }
 
-// Balances records total, spendable (by policy), and immature coinbase
-// reward balance amounts.
-type Balances struct {
-	Total          dcrutil.Amount
-	Spendable      dcrutil.Amount
-	ImmatureReward dcrutil.Amount
-}
-
-// CalculateAccountBalances sums the amounts of all unspent transaction
+// CalculateAccountBalance sums the amounts of all unspent transaction
 // outputs to the given account of a wallet and returns the balance.
-//
-// This function is much slower than it needs to be since transactions outputs
-// are not indexed by the accounts they credit to, and all unspent transaction
-// outputs must be iterated.
-func (w *Wallet) CalculateAccountBalances(account uint32,
-	confirms int32) (Balances, error) {
-	var bals Balances
+func (w *Wallet) CalculateAccountBalance(account uint32, confirms int32,
+	balanceType wtxmgr.BehaviorFlags) (dcrutil.Amount, error) {
+	var bal dcrutil.Amount
+	var err error
 
 	// Get current block.  The block height used for calculating
 	// the number of tx confirmations.
 	syncBlock := w.Manager.SyncedTo()
 
-	unspent, err := w.TxStore.UnspentOutputs()
+	bal, err = w.TxStore.Balance(confirms, syncBlock.Height,
+		balanceType, false, account)
 	if err != nil {
-		return bals, err
+		return 0, err
 	}
-	for i := range unspent {
-		output := unspent[i]
 
-		var outputAcct uint32
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			txscript.DefaultScriptVersion, output.PkScript, w.chainParams)
-		if err == nil && len(addrs) > 0 {
-			outputAcct, err = w.Manager.AddrAccount(addrs[0])
-		}
-		if err != nil || outputAcct != account {
-			continue
-		}
+	return bal, nil
+}
 
-		bals.Total += output.Amount
-		if output.FromCoinBase {
-			var target = int32(w.ChainParams().CoinbaseMaturity)
-			if !confirmed(target, output.Height, syncBlock.Height) {
-				bals.ImmatureReward += output.Amount
-			}
-		} else if confirmed(confirms, output.Height, syncBlock.Height) {
-			bals.Spendable += output.Amount
-		}
+// CalculateAccountBalances calculates the values for the wtxmgr struct Balance,
+// which includes the total balance, the spendable balance, and the balance
+// which has yet to mature.
+func (w *Wallet) CalculateAccountBalances(account uint32,
+	confirms int32) (wtxmgr.Balances, error) {
+	syncBlock := w.Manager.SyncedTo()
+
+	bals, err := w.TxStore.AccountBalances(syncBlock.Height, confirms, account)
+	if err != nil {
+		return wtxmgr.Balances{}, err
 	}
+
 	return bals, nil
 }
 
@@ -3192,7 +3192,11 @@ func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS,
 	if err != nil {
 		return nil, err
 	}
-	txMgr, err := wtxmgr.Open(wtxmgrNS, pruneTickets, params)
+
+	// Create a callback for account lookup from waddrmgr.
+	accountCallback := addrMgr.AddrAccount
+
+	txMgr, err := wtxmgr.Open(wtxmgrNS, pruneTickets, params, accountCallback)
 	if err != nil {
 		if wtxmgr.IsNoExists(err) {
 			log.Info("No recorded transaction history -- needs full rescan")

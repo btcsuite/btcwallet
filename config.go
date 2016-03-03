@@ -347,9 +347,6 @@ func loadConfig() (*config, []string, error) {
 	numNets := 0
 	activeNet = &netparams.MainNetParams
 	if cfg.TestNet {
-		// DECRED DEBUG
-		//fmt.Println("Mainnet is currently disabled")
-		// os.Exit(0)
 		activeNet = &netparams.TestNetParams
 		numNets++
 	}

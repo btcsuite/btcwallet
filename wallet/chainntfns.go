@@ -128,7 +128,7 @@ ticketPurchaseLoop:
 		// amount to the ticket price, thus avoiding more costly db
 		// lookups.
 		eligible, err := w.CreatePurchaseTicket(w.BalanceToMaintain, -1,
-			0, nil)
+			0, nil, waddrmgr.DefaultAccountNum)
 		if err != nil {
 			switch {
 			case err == ErrSStxNotEnoughFunds:
@@ -590,6 +590,11 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 	// Check every output to determine whether it is controlled by a wallet
 	// key.  If so, mark the output as a credit.
 	for i, output := range rec.MsgTx.TxOut {
+		// Ignore unspendable outputs.
+		if output.Value == 0 {
+			continue
+		}
+
 		class, addrs, _, err := txscript.ExtractPkScriptAddrs(output.Version,
 			output.PkScript, w.chainParams)
 		if err != nil {
@@ -616,7 +621,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 				// account they belong to, so wtxmgr is able to
 				// track per-account balances.
 				err = w.TxStore.AddCredit(rec, block, uint32(i),
-					ma.Internal())
+					ma.Internal(), ma.Account())
 				if err != nil {
 					return err
 				}
@@ -769,13 +774,13 @@ func (w *Wallet) notifyBalances(curHeight int32, balanceFlag wtxmgr.BehaviorFlag
 	}
 
 	// Notify any potential changes to the balance.
-	confirmed, err := w.TxStore.Balance(1, curHeight, balanceFlag)
+	confirmed, err := w.TxStore.Balance(1, curHeight, balanceFlag, true, 0)
 	if err != nil {
 		log.Errorf("Cannot determine 1-conf balance: %v", err)
 		return
 	}
 	w.notifyConfirmedBalance(confirmed)
-	unconfirmed, err := w.TxStore.Balance(0, curHeight, balanceFlag)
+	unconfirmed, err := w.TxStore.Balance(0, curHeight, balanceFlag, true, 0)
 	if err != nil {
 		log.Errorf("Cannot determine 0-conf balance: %v", err)
 		return

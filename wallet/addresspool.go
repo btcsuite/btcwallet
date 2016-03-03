@@ -350,3 +350,76 @@ func (w *Wallet) GetNewAddressInternal() (dcrutil.Address, error) {
 	}
 	return address, err
 }
+
+// NewAddress returns the next external chained address for a wallet given some
+// account.
+func (w *Wallet) NewAddress(account uint32) (dcrutil.Address, error) {
+	// Get next address from wallet.
+	addrs, err := w.Manager.NextExternalAddresses(account, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	// Request updates from dcrd for new transactions sent to this address.
+	utilAddrs := make([]dcrutil.Address, len(addrs))
+	for i, addr := range addrs {
+		utilAddrs[i] = addr.Address()
+	}
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+	if chainClient != nil {
+		err := chainClient.NotifyReceived(utilAddrs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	props, err := w.Manager.AccountProperties(account)
+	if err != nil {
+		log.Errorf("Cannot fetch account properties for notification "+
+			"after deriving next external address: %v", err)
+	} else {
+		w.NtfnServer.notifyAccountProperties(props)
+	}
+
+	return utilAddrs[0], nil
+}
+
+// NewChangeAddress returns a new change address for a wallet.
+func (w *Wallet) NewChangeAddress(account uint32) (dcrutil.Address, error) {
+	// Get next chained change address from wallet for account.
+	addrs, err := w.Manager.NextInternalAddresses(account, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	// Request updates from dcrd for new transactions sent to this address.
+	utilAddrs := make([]dcrutil.Address, len(addrs))
+	for i, addr := range addrs {
+		utilAddrs[i] = addr.Address()
+	}
+
+	chainClient, err := w.requireChainClient()
+	if err == nil {
+		err = chainClient.NotifyReceived(utilAddrs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return utilAddrs[0], nil
+}
+
+// ReusedAddress returns an address that is reused from the external
+// branch of the wallet, to cut down on new address usage for wallets.
+// Should be used judiciously.
+func (w *Wallet) ReusedAddress() (dcrutil.Address, error) {
+	addr, err := w.Manager.GetAddress(0, waddrmgr.DefaultAccountNum,
+		waddrmgr.ExternalBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	return addr, err
+}
