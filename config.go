@@ -502,6 +502,17 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	if len(cfg.TicketAddress) != 0 {
+		_, err := dcrutil.DecodeAddress(cfg.TicketAddress, activeNet.Params)
+		if err != nil {
+			str := "%s: ticketaddress '%s' failed to decode: %v"
+			err := fmt.Errorf(str, funcName, cfg.TicketAddress, err)
+			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, usageMessage)
+			return nil, nil, err
+		}
+	}
+
 	if cfg.RPCConnect == "" {
 		cfg.RPCConnect = net.JoinHostPort("localhost", activeNet.RPCClientPort)
 	}
