@@ -46,7 +46,7 @@ service WalletLoaderService {
 	rpc CreateWallet (CreateWalletRequest) returns (CreateWalletResponse);
 	rpc OpenWallet (OpenWalletRequest) returns (OpenWalletResponse);
 	rpc CloseWallet (CloseWalletRequest) returns (CloseWalletResponse);
-	rpc StartBtcdRpc (StartBtcdRpcRequest) returns (StartBtcdRpcResponse);
+	rpc StartConsensusRpc (StartConsensusRpcRequest) returns (StartConsensusRpcResponse);
 }
 
 message TransactionDetails {
@@ -313,10 +313,10 @@ message WalletExistsResponse {
 	bool exists = 1;
 }
 
-message StartBtcdRpcRequest {
+message StartConsensusRpcRequest {
 	string network_address = 1;
 	string username = 2;
 	bytes password = 3;
 	bytes certificate = 4;
 }
-message StartBtcdRpcResponse {}
+message StartConsensusRpcResponse {}

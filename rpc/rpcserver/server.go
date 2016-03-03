@@ -43,9 +43,9 @@ import (
 
 // Public API version constants
 const (
-	semverString = "0.3.0"
-	semverMajor  = 0
-	semverMinor  = 3
+	semverString = "1.0.0"
+	semverMajor  = 1
+	semverMinor  = 0
 	semverPatch  = 0
 )
 
@@ -817,8 +817,8 @@ func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletReque
 	return &pb.CloseWalletResponse{}, nil
 }
 
-func (s *loaderServer) StartBtcdRpc(ctx context.Context, req *pb.StartBtcdRpcRequest) (
-	*pb.StartBtcdRpcResponse, error) {
+func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConsensusRpcRequest) (
+	*pb.StartConsensusRpcResponse, error) {
 
 	defer zero.Bytes(req.Password)
 
@@ -866,5 +866,5 @@ func (s *loaderServer) StartBtcdRpc(ctx context.Context, req *pb.StartBtcdRpcReq
 		wallet.SynchronizeRPC(rpcClient)
 	}
 
-	return &pb.StartBtcdRpcResponse{}, nil
+	return &pb.StartConsensusRpcResponse{}, nil
 }
