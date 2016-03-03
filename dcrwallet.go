@@ -132,7 +132,10 @@ func walletMain() error {
 	}()
 	loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
 		startWalletRPCServices(w, rpcs, legacyRPCServer)
-		closeDB = db.Close
+		closeDB = func() error {
+			w.CloseDatabases()
+			return db.Close()
+		}
 	})
 
 	if !cfg.NoInitialLoad {
