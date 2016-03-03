@@ -78,7 +78,7 @@ rules of Semantic Versioning (SemVer) 2.0.0.
 ## `LoaderService`
 
 The `LoaderService` service provides the caller with functions related to the
-management of the wallet and its connection to the Bitcoin network.  It has no
+management of the wallet and its connection to the Decred network.  It has no
 dependencies and is always running.
 
 **Methods:**
@@ -211,15 +211,15 @@ ___
 #### `StartBtcdRpc`
 
 The `StartBtcdRpc` method is used to provide clients the ability to dynamically
-start the btcd RPC client.  This RPC client is used for wallet syncing and
-publishing transactions to the Bitcoin network.
+start the dcrd RPC client.  This RPC client is used for wallet syncing and
+publishing transactions to the Decred network.
 
 **Request:** `StartBtcdRpcRequest`
 
 - `string network_address`: The host/IP and optional port of the RPC server to
   connect to.  IP addresses may be IPv4 or IPv6.  If the port is missing, a
-  default port is chosen corresponding to the default btcd RPC port of the
-  active Bitcoin network.
+  default port is chosen corresponding to the default dcrd RPC port of the
+  active Decred network.
 
 - `string username`: The RPC username required to authenticate to the RPC
   server.
@@ -768,7 +768,7 @@ ___
 #### `PublishTransaction`
 
 The `PublishTransaction` method publishes a signed, serialized transaction to
-the Bitcoin network.  If the transaction spends any of the wallet's unspent
+the Decred network.  If the transaction spends any of the wallet's unspent
 outputs or creates a new output controlled by the wallet, it is saved by the
 wallet and republished later if it or a double spend are not mined.
 

@@ -1,6 +1,6 @@
 # Making API Changes
 
-This document describes the process of how btcwallet developers must make
+This document describes the process of how dcrwallet developers must make
 changes to the RPC API and server.  Due to the use of gRPC and Protocol Buffers
 for the RPC implementation, changes to this API require extra dependencies and
 steps before changes to the server can be implemented.
