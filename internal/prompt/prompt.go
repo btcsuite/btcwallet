@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
 	"github.com/decred/dcrutil/hdkeychain"
@@ -311,13 +312,23 @@ func Seed(reader *bufio.Reader) ([]byte, error) {
 	}
 
 	for {
-		fmt.Print("Enter existing wallet seed: ")
-		seedStr, err := reader.ReadString('\n')
-		if err != nil {
-			return nil, err
-		}
+		fmt.Print("Enter existing wallet seed " +
+			"(followed by a blank line): ")
 
+		// Use scanner instead of buffio.Reader so we can choose choose
+		// more complicated ending condition rather than just a single
+		// newline.
+		var seedStr string
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				break
+			}
+			seedStr += " " + line
+		}
 		seedStrTrimmed := strings.TrimSpace(seedStr)
+		seedStrTrimmed = collapseSpace(seedStrTrimmed)
 		wordCount := strings.Count(seedStrTrimmed, " ") + 1
 
 		var seed []byte
@@ -349,4 +360,23 @@ func Seed(reader *bufio.Reader) ([]byte, error) {
 
 		return seed, nil
 	}
+}
+
+// collapseSpace takes a string and replaces any repeated areas of whitespace
+// with a single space character.
+func collapseSpace(in string) string {
+	whiteSpace := false
+	out := ""
+	for _, c := range in {
+		if unicode.IsSpace(c) {
+			if !whiteSpace {
+				out = out + " "
+			}
+			whiteSpace = true
+		} else {
+			out = out + string(c)
+			whiteSpace = false
+		}
+	}
+	return out
 }
