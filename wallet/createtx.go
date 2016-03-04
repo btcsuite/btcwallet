@@ -818,21 +818,21 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 
 // compressWallet compresses all the utxos in a wallet into a single change
 // address. For use when it becomes dusty.
-func (w *Wallet) compressWallet(maxNumIns int) error {
+func (w *Wallet) compressWallet(maxNumIns int) (*chainhash.Hash, error) {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
-		return ErrBlockchainReorganizing
+		return nil, ErrBlockchainReorganizing
 	}
 
 	// Get current block's height and hash.
 	bs, err := chainClient.BlockStamp()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Initialize the address pool for use.
@@ -853,11 +853,11 @@ func (w *Wallet) compressWallet(maxNumIns int) error {
 	minconf := int32(1)
 	eligible, err := w.findEligibleOutputs(account, minconf, bs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if len(eligible) == 0 {
-		return ErrNoOutsToConsolidate
+		return nil, ErrNoOutsToConsolidate
 	}
 
 	txInCount := len(eligible)
@@ -894,42 +894,42 @@ func (w *Wallet) compressWallet(maxNumIns int) error {
 
 	changeAddr, err := addrFunc()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	pkScript, err := txscript.PayToAddrScript(changeAddr)
 	if err != nil {
-		return fmt.Errorf("cannot create txout script: %s", err)
+		return nil, fmt.Errorf("cannot create txout script: %s", err)
 	}
 	msgtx.AddTxOut(wire.NewTxOut(int64(outputAmt), pkScript))
 
 	if err = signMsgTx(msgtx, forSigning, w.Manager,
 		w.chainParams); err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateMsgTx(msgtx, forSigning); err != nil {
-		return err
+		return nil, err
 	}
 
 	txSha, err := chainClient.SendRawTransaction(msgtx, false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	txSucceeded = true
 
 	// Insert the transaction and credits into the transaction manager.
 	rec, err := w.insertIntoTxMgr(msgtx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	err = w.insertCreditsIntoTxMgr(msgtx, rec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	log.Infof("Successfully consolidated funds in transaction %v", txSha)
 
-	return nil
+	return txSha, nil
 }
 
 // compressEligible compresses all the utxos passed to it into a single

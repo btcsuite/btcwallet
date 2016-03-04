@@ -35,6 +35,7 @@ var Methods = []struct {
 	ResultTypes []interface{}
 }{
 	{"addmultisigaddress", returnsString},
+	{"consolidate", returnsString},
 	{"createmultisig", []interface{}{(*dcrjson.CreateMultiSigResult)(nil)}},
 	{"dumpprivkey", returnsString},
 	{"getaccount", returnsString},

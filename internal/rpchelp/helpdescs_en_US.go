@@ -25,6 +25,12 @@ var helpDescsEnUS = map[string]string{
 	"addmultisigaddress-nrequired": "The number of signatures required to redeem outputs paid to this address",
 	"addmultisigaddress--result0":  "The imported pay-to-script-hash address",
 
+	// ConsolidateCmd help.
+	"consolidate--synopsis": "Consolidate n many UTXOs into a single output in the wallet.",
+	"consolidate-inputs":    "Number of UTXOs to consolidate as inputs",
+	"consolidate-account":   "Optional: Account to use",
+	"consolidate--result0":  "Transaction hash for the consolidation transaction",
+
 	// CreateMultisigCmd help.
 	"createmultisig--synopsis": "Generate a multisig address and redeem script.",
 	"createmultisig-keys":      "Pubkeys and/or pay-to-pubkey-hash addresses to partially control the multisig address",
