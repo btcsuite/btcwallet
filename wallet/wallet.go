@@ -1239,14 +1239,14 @@ func (w *Wallet) syncWithChain() error {
 			continue
 		}
 
-		log.Debug("Found matching block %v at height %v. Rolling back "+
+		log.Debugf("Found matching block %v at height %v. Rolling back "+
 			"blockchain if necessary.", blhLocal, i)
 		syncBlock.Hash = blhLocal
 		syncBlock.Height = i
 		break
 	}
 	if rollback {
-		log.Debug("Rolling back blockchain to height %v.", syncBlock.Height)
+		log.Debugf("Rolling back blockchain to height %v.", syncBlock.Height)
 		err = w.Manager.SetSyncedTo(&syncBlock)
 		if err != nil {
 			return err
