@@ -441,13 +441,13 @@ func (s *Store) Close() {
 // InsertBlock inserts a block into the block database if it doesn't already
 // exist.
 func (s *Store) InsertBlock(bm *BlockMeta) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
 		return s.insertBlock(ns, bm)
@@ -469,13 +469,13 @@ func (s *Store) insertBlock(ns walletdb.Bucket, bm *BlockMeta) error {
 // GetBlockHash fetches the block hash for the block at the given height,
 // and returns an error if it's missing.
 func (s *Store) GetBlockHash(height int32) (chainhash.Hash, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return chainhash.Hash{}, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var blockHash chainhash.Hash
 	var err error
@@ -715,13 +715,13 @@ func (s *Store) moveMinedTx(ns walletdb.Bucket, rec *TxRecord, recKey,
 // history.  If block is nil, the transaction is considered unspent, and the
 // transaction's index must be unset.
 func (s *Store) InsertTx(rec *TxRecord, block *BlockMeta) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
 		if block == nil {
@@ -855,13 +855,13 @@ func (s *Store) insertMinedTx(ns walletdb.Bucket, rec *TxRecord,
 // inserted into the store.
 func (s *Store) AddCredit(rec *TxRecord, block *BlockMeta, index uint32,
 	change bool) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	if int(index) >= len(rec.MsgTx.TxOut) {
 		str := "transaction output does not exist"
@@ -962,13 +962,13 @@ func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta,
 //
 func (s *Store) AddMultisigOut(rec *TxRecord, block *BlockMeta,
 	index uint32) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	if int(index) >= len(rec.MsgTx.TxOut) {
 		str := "transaction output does not exist"
@@ -1079,13 +1079,13 @@ func (s *Store) addMultisigOut(ns walletdb.Bucket, rec *TxRecord,
 // the general bucket and removing it from the unspent bucket.
 func (s *Store) SpendMultisigOut(op *wire.OutPoint, spendHash chainhash.Hash,
 	spendIndex uint32) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
 		return s.spendMultisigOut(ns, op, spendHash, spendIndex)
@@ -1139,13 +1139,13 @@ func (s *Store) spendMultisigOut(ns walletdb.Bucket, op *wire.OutPoint,
 // Rollback removes all blocks at height onwards, moving any transactions within
 // each block to the unconfirmed pool.
 func (s *Store) Rollback(height int32) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
 		return s.rollback(ns, height)
@@ -1525,13 +1525,13 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 // UnspentOutputs returns all unspent received transaction outputs.
 // The order is undefined.
 func (s *Store) UnspentOutputs() ([]*Credit, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var credits []*Credit
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -1668,13 +1668,13 @@ func (s *Store) unspentOutputs(ns walletdb.Bucket) ([]*Credit, error) {
 // UnspentOutpoints returns all unspent received transaction outpoints.
 // The order is undefined.
 func (s *Store) UnspentOutpoints() ([]*wire.OutPoint, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var credits []*wire.OutPoint
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -1768,13 +1768,13 @@ func (s *Store) unspentOutpoints(ns walletdb.Bucket) ([]*wire.OutPoint, error) {
 // The order is undefined.
 func (s *Store) UnspentTickets(syncHeight int32,
 	includeImmature bool) ([]chainhash.Hash, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var tickets []chainhash.Hash
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -1876,13 +1876,13 @@ type MultisigCredit struct {
 // GetMultisigCredit takes an outpoint and returns multisignature
 // credit data stored about it.
 func (s *Store) GetMultisigCredit(op *wire.OutPoint) (*MultisigCredit, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var credit *MultisigCredit
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -1944,13 +1944,13 @@ func (s *Store) getMultisigCredit(ns walletdb.Bucket,
 // GetMultisigOutput takes an outpoint and returns multisignature
 // credit data stored about it.
 func (s *Store) GetMultisigOutput(op *wire.OutPoint) (*MultisigOut, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var credit *MultisigOut
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -1989,13 +1989,13 @@ func (s *Store) getMultisigOutput(ns walletdb.Bucket,
 // UnspentMultisigCredits returns all unspent multisignature P2SH credits in
 // the wallet.
 func (s *Store) UnspentMultisigCredits() ([]*MultisigCredit, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var credits []*MultisigCredit
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -2059,13 +2059,13 @@ func (s *Store) unspentMultisigCredits(ns walletdb.Bucket) ([]*MultisigCredit,
 // credits in the wallet for some specified address.
 func (s *Store) UnspentMultisigCreditsForAddress(
 	addr dcrutil.Address) ([]*MultisigCredit, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var credits []*MultisigCredit
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -2146,13 +2146,13 @@ func (s *Store) unspentMultisigCreditsForAddress(ns walletdb.Bucket,
 // without error.
 func (s *Store) UnspentOutputsForAmount(amt dcrutil.Amount, height int32,
 	minConf int32) ([]*Credit, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var credits []*Credit
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -2486,13 +2486,13 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 // height of the most recent mined transaction in the store.
 func (s *Store) Balance(minConf, syncHeight int32,
 	balanceType BehaviorFlags) (dcrutil.Amount, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return 0, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var amt dcrutil.Amount
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -3076,13 +3076,13 @@ func (s *Store) balanceAll(ns walletdb.Bucket, minConf int32,
 
 // InsertTxScript is the exported version of insertTxScript.
 func (s *Store) InsertTxScript(script []byte) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
 		var err error
@@ -3099,13 +3099,13 @@ func (s *Store) insertTxScript(ns walletdb.Bucket, script []byte) error {
 
 // GetTxScript is the exported version of getTxScript.
 func (s *Store) GetTxScript(hash []byte) ([]byte, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var script []byte
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -3123,13 +3123,13 @@ func (s *Store) getTxScript(ns walletdb.Bucket, hash []byte) []byte {
 
 // StoredTxScripts is the exported version of storedTxScripts.
 func (s *Store) StoredTxScripts() ([][]byte, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var scripts [][]byte
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
@@ -3165,13 +3165,13 @@ func (s *Store) storedTxScripts(ns walletdb.Bucket) ([][]byte, error) {
 // and, if they don't, can trigger their deletion.
 //
 func (s *Store) RepairInconsistencies() ([]*wire.OutPoint, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var utxos []*wire.OutPoint
 	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
@@ -3261,13 +3261,13 @@ func (s *Store) repairInconsistencies(ns walletdb.Bucket) ([]*wire.OutPoint,
 // of its choosing, e.g. if those unspent outpoint transactions are found to not
 // exist in the daemon.
 func (s *Store) DeleteUnspent(utxos []*wire.OutPoint) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
 		localErr := s.deleteUnspent(ns, utxos)
@@ -3307,13 +3307,13 @@ func (s *Store) deleteUnspent(ns walletdb.Bucket, utxos []*wire.OutPoint) error 
 // RepairMinedBalance allows an external caller to attempt to fix the mined
 // balance with a full scan balance call.
 func (s *Store) RepairMinedBalance(curHeight int32) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
 		localErr := s.repairMinedBalance(ns, curHeight)
@@ -3511,13 +3511,13 @@ func (d1 *DatabaseContents) Equals(d2 *DatabaseContents, skipUnmined bool) (bool
 // all databases as a
 func (s *Store) DatabaseDump(height int32,
 	oldUnminedInputs map[string][]byte) (*DatabaseContents, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.isClosed {
 		str := "tx manager is closed"
 		return nil, storeError(ErrIsClosed, str, nil)
 	}
-
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
 	var dbDump *DatabaseContents
 	var err error
