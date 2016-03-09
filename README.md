@@ -8,7 +8,7 @@ btcwallet is a daemon handling bitcoin wallet functionality for a
 single user.  It acts as both an RPC client to btcd and an RPC server
 for wallet clients and legacy RPC applications.
 
-Public and private keys are derived using the heirarchical
+Public and private keys are derived using the hierarchical
 deterministic format described by
 [BIP0032](https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki).
 Unencrypted private keys are not supported and are never written to

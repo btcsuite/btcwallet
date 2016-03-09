@@ -13,4 +13,4 @@ implementation:
 - [Making API changes](./serverchanges.md)
 
 A legacy RPC server based on the JSON-RPC API of Bitcoin Core's wallet is also
-available, but documenting its usage it out of scope for these documents.
+available, but documenting its usage is out of scope for these documents.

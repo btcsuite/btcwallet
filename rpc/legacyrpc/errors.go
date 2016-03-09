@@ -19,19 +19,19 @@ import (
 // errors, and their *btcjson.RPCError creation.
 type (
 	// DeserializationError describes a failed deserializaion due to bad
-	// user input.  It cooresponds to btcjson.ErrRPCDeserialization.
+	// user input.  It corresponds to btcjson.ErrRPCDeserialization.
 	DeserializationError struct {
 		error
 	}
 
 	// InvalidParameterError describes an invalid parameter passed by
-	// the user.  It cooresponds to btcjson.ErrRPCInvalidParameter.
+	// the user.  It corresponds to btcjson.ErrRPCInvalidParameter.
 	InvalidParameterError struct {
 		error
 	}
 
 	// ParseError describes a failed parse due to bad user input.  It
-	// cooresponds to btcjson.ErrRPCParse.
+	// corresponds to btcjson.ErrRPCParse.
 	ParseError struct {
 		error
 	}

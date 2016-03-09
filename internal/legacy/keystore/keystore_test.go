@@ -1166,7 +1166,7 @@ func TestChangePassphrase(t *testing.T) {
 
 	// Change passphrase.
 	if err := w.ChangePassphrase([]byte("potato")); err != nil {
-		t.Errorf("Changing passhprase failed: %v", err)
+		t.Errorf("Changing passphrase failed: %v", err)
 		return
 	}
 

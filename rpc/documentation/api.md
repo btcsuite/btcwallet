@@ -167,7 +167,7 @@ After opening a wallet, the `WalletService` service begins running.
 **Request:** `OpenWalletRequest`
 
 - `bytes public_passphrase`: The passphrase used for the outer wallet
-  encryption.  This passhprase protects data that is made public on the
+  encryption.  This passphrase protects data that is made public on the
   blockchain.  If this passphrase has zero length, an insecure default is used
   instead.
 
