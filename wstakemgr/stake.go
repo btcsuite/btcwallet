@@ -717,7 +717,7 @@ func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
 		stake.GetSStxStakeOutputInfo(sstx)
 
 	// Get the current reward.
-	stakeVoteSubsidy := blockchain.CalcStakeVoteSubsidy(int32(height),
+	stakeVoteSubsidy := blockchain.CalcStakeVoteSubsidy(height,
 		s.Params)
 
 	// Calculate the output values from this data.
