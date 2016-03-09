@@ -134,7 +134,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		}
 		return txscript.PayToAddrScript(changeAddr)
 	}
-	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee,
+	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
 		inputSource, changeSource)
 	if err != nil {
 		return nil, err

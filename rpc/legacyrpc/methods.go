@@ -512,7 +512,7 @@ func GetInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (
 	// to using the manager version.
 	info.WalletVersion = int32(waddrmgr.LatestMgrVersion)
 	info.Balance = bal.ToBTC()
-	info.PaytxFee = w.RelayFee.ToBTC()
+	info.PaytxFee = w.RelayFee().ToBTC()
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
 	//  - unlocked_until
@@ -1572,11 +1572,11 @@ func SetTxFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, ErrNeedPositiveAmount
 	}
 
-	incr, err := btcutil.NewAmount(cmd.Amount)
+	relayFee, err := btcutil.NewAmount(cmd.Amount)
 	if err != nil {
 		return nil, err
 	}
-	w.RelayFee = incr
+	w.SetRelayFee(relayFee)
 
 	// A boolean true result is returned upon success.
 	return true, nil

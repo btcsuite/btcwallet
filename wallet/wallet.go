@@ -75,8 +75,8 @@ type Wallet struct {
 	chainClientSyncMtx sync.Mutex
 
 	lockedOutpoints map[wire.OutPoint]struct{}
-	RelayFee        btcutil.Amount
-	DisallowFree    bool
+	relayFee        btcutil.Amount
+	relayFeeMu      sync.Mutex
 
 	// Channels for rescan processing.  Requests are added and merged with
 	// any waiting requests, before being sent to another goroutine to
@@ -355,6 +355,23 @@ func (w *Wallet) ChainClient() *chain.RPCClient {
 	chainClient := w.chainClient
 	w.chainClientLock.Unlock()
 	return chainClient
+}
+
+// RelayFee returns the current minimum relay fee (per kB of serialized
+// transaction) used when constructing transactions.
+func (w *Wallet) RelayFee() btcutil.Amount {
+	w.relayFeeMu.Lock()
+	relayFee := w.relayFee
+	w.relayFeeMu.Unlock()
+	return relayFee
+}
+
+// SetRelayFee sets a new minimum relay fee (per kB of serialized
+// transaction) used when constructing transactions.
+func (w *Wallet) SetRelayFee(relayFee btcutil.Amount) {
+	w.relayFeeMu.Lock()
+	w.relayFee = relayFee
+	w.relayFeeMu.Unlock()
 }
 
 // quitChan atomically reads the quit channel.
@@ -2009,7 +2026,7 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 	}
 
 	for _, output := range outputs {
-		err = txrules.CheckOutput(output, w.RelayFee)
+		err = txrules.CheckOutput(output, w.RelayFee())
 		if err != nil {
 			return nil, err
 		}
@@ -2230,7 +2247,7 @@ func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS, w
 		Manager:             addrMgr,
 		TxStore:             txMgr,
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
-		RelayFee:            txrules.DefaultRelayFeePerKb,
+		relayFee:            txrules.DefaultRelayFeePerKb,
 		rescanAddJob:        make(chan *RescanJob),
 		rescanBatch:         make(chan *rescanBatch),
 		rescanNotifications: make(chan interface{}),
