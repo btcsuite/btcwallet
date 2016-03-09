@@ -1180,7 +1180,12 @@ func (w *Wallet) activeData() ([]dcrutil.Address, []*wire.OutPoint, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+
 	unspent, err := w.TxStore.UnspentOutpoints()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	return addrs, unspent, err
 }
 

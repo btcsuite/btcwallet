@@ -541,8 +541,9 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 					case waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress):
 						break
 					case waddrmgr.IsError(err, waddrmgr.ErrLocked):
-						log.Debugf("failed to attempt script importation " +
-							"of incoming tx because addrmgr was locked")
+						log.Warnf("failed to attempt script importation "+
+							"of incoming tx script %x because addrmgr "+
+							"was locked", rs)
 						break
 					default:
 						return err
@@ -602,42 +603,45 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		if isStakeType {
 			class, err = txscript.GetStakeOutSubclass(output.PkScript)
 			if err != nil {
-				log.Errorf("Unknown stake output subclass encountered")
+				log.Errorf("Unknown stake output subclass parse error "+
+					"encountered: %v", err)
 				continue
 			}
 		}
-		switch {
-		case class == txscript.PubKeyHashTy:
-			for _, addr := range addrs {
-				ma, err := w.Manager.Address(addr)
-				if err == nil {
-					// TODO: Credits should be added with the
-					// account they belong to, so wtxmgr is able to
-					// track per-account balances.
-					err = w.TxStore.AddCredit(rec, block, uint32(i),
-						ma.Internal())
-					if err != nil {
-						return err
-					}
-					err = w.Manager.MarkUsed(addr)
-					if err != nil {
-						return err
-					}
-					log.Debugf("Marked address %v used", addr)
-					continue
-				}
 
-				// Missing addresses are skipped.  Other errors should
-				// be propagated.
-				if !waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+		for _, addr := range addrs {
+			ma, err := w.Manager.Address(addr)
+			if err == nil {
+				// TODO: Credits should be added with the
+				// account they belong to, so wtxmgr is able to
+				// track per-account balances.
+				err = w.TxStore.AddCredit(rec, block, uint32(i),
+					ma.Internal())
+				if err != nil {
 					return err
 				}
+				err = w.Manager.MarkUsed(addr)
+				if err != nil {
+					return err
+				}
+				log.Debugf("Marked address %v used", addr)
+				continue
 			}
+
+			// Missing addresses are skipped.  Other errors should
+			// be propagated.
+			if !waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+				return err
+			}
+		}
+
 		// Handle P2SH addresses that are multisignature scripts
 		// with keys that we own.
-		case class == txscript.ScriptHashTy:
+		if class == txscript.ScriptHashTy {
 			var expandedScript []byte
 			for _, addr := range addrs {
+				// Search both the script store in the tx store
+				// and the address manager for the redeem script.
 				var err error
 				expandedScript, err =
 					w.TxStore.GetTxScript(addr.ScriptAddress())
@@ -645,20 +649,35 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 					return err
 				}
 
-				// TODO make this work, the type conversion is broken cj
-				//scrAddr, err := w.Manager.Address(addr)
-				//if err == nil {
-				//	addrTyped := scrAddr.(*waddrmgr.ManagedScriptAddress)
-				//	retrievedScript, err := addrTyped.Script()
-				//	if err == nil {
-				//		expandedScript = retrievedScript
-				//	}
-				//}
-			}
+				if expandedScript == nil {
+					scrAddr, err := w.Manager.Address(addr)
+					if err == nil {
+						sa, ok := scrAddr.(waddrmgr.ManagedScriptAddress)
+						if !ok {
+							log.Warnf("address %v is not a script"+
+								" address (type %T)",
+								scrAddr.Address().EncodeAddress(),
+								scrAddr.Address())
+							continue
+						}
+						retrievedScript, err := sa.Script()
+						if err != nil {
+							log.Errorf("failed to decode redeemscript for "+
+								"address %v: %v", addr.EncodeAddress(),
+								err.Error())
+							continue
+						}
+						expandedScript = retrievedScript
 
-			// We don't have the script for this hash, skip.
-			if expandedScript == nil {
-				continue
+					} else {
+						// We can't find this redeem script anywhere.
+						// Skip this output.
+						log.Debugf("failed to find redeemscript for "+
+							"address %v in address manager: %v",
+							addr.EncodeAddress(), err.Error())
+						continue
+					}
+				}
 			}
 
 			// Otherwise, extract the actual addresses and
