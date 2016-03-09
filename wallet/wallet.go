@@ -2025,8 +2025,9 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 		return nil, err
 	}
 
+	relayFee := w.RelayFee()
 	for _, output := range outputs {
-		err = txrules.CheckOutput(output, w.RelayFee())
+		err = txrules.CheckOutput(output, relayFee)
 		if err != nil {
 			return nil, err
 		}
