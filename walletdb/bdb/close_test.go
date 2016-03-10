@@ -9,16 +9,16 @@ import (
 	"os"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-const _ = time.Second
-
 func doWithDb(t *testing.T, action func(walletdb.DB, walletdb.Namespace)) {
 	dbPath := "closetest.db"
 	db, err := walletdb.Create(dbType, dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create db: %v", err)
+	}
 	defer os.Remove(dbPath)
 
 	ns, err := db.Namespace([]byte("ns"))
