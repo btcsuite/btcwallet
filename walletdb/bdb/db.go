@@ -7,6 +7,7 @@ package bdb
 import (
 	"io"
 	"os"
+	"sync"
 
 	"github.com/btcsuite/bolt"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -231,6 +232,7 @@ func (c *cursor) Seek(seek []byte) (key, value []byte) {
 type transaction struct {
 	boltTx     *bolt.Tx
 	rootBucket *bolt.Bucket
+	mu         *sync.RWMutex
 }
 
 // Enforce transaction implements the walletdb.Tx interface.
@@ -249,7 +251,12 @@ func (tx *transaction) RootBucket() walletdb.Bucket {
 //
 // This function is part of the walletdb.Tx interface implementation.
 func (tx *transaction) Commit() error {
-	return convertErr(tx.boltTx.Commit())
+	err := tx.boltTx.Commit()
+	if tx.mu != nil {
+		tx.mu.RUnlock()
+		tx.mu = nil
+	}
+	return convertErr(err)
 }
 
 // Rollback undoes all changes that have been made to the root bucket and all of
@@ -257,7 +264,12 @@ func (tx *transaction) Commit() error {
 //
 // This function is part of the walletdb.Tx interface implementation.
 func (tx *transaction) Rollback() error {
-	return convertErr(tx.boltTx.Rollback())
+	err := tx.boltTx.Rollback()
+	if tx.mu != nil {
+		tx.mu.RUnlock()
+		tx.mu = nil
+	}
+	return convertErr(err)
 }
 
 // namespace represents a database namespace that is inteded to support the
@@ -265,7 +277,7 @@ func (tx *transaction) Rollback() error {
 // of a database while providing other entities their own namespace to work in.
 // It implements the walletdb.Namespace interface.
 type namespace struct {
-	db  *bolt.DB
+	db  *db
 	key []byte
 }
 
@@ -283,17 +295,21 @@ var _ walletdb.Namespace = (*namespace)(nil)
 //
 // This function is part of the walletdb.Namespace interface implementation.
 func (ns *namespace) Begin(writable bool) (walletdb.Tx, error) {
-	boltTx, err := ns.db.Begin(writable)
+	ns.db.mu.RLock()
+
+	boltTx, err := ns.db.boltDB.Begin(writable)
 	if err != nil {
+		ns.db.mu.RUnlock()
 		return nil, convertErr(err)
 	}
 
 	bucket := boltTx.Bucket(ns.key)
 	if bucket == nil {
+		ns.db.mu.RUnlock()
 		return nil, walletdb.ErrBucketNotFound
 	}
 
-	return &transaction{boltTx: boltTx, rootBucket: bucket}, nil
+	return &transaction{boltTx: boltTx, rootBucket: bucket, mu: &ns.db.mu}, nil
 }
 
 // View invokes the passed function in the context of a managed read-only
@@ -305,13 +321,16 @@ func (ns *namespace) Begin(writable bool) (walletdb.Tx, error) {
 //
 // This function is part of the walletdb.Namespace interface implementation.
 func (ns *namespace) View(fn func(walletdb.Tx) error) error {
-	return convertErr(ns.db.View(func(boltTx *bolt.Tx) error {
+	ns.db.mu.RLock()
+	return convertErr(ns.db.boltDB.View(func(boltTx *bolt.Tx) error {
+		defer ns.db.mu.RUnlock()
+
 		bucket := boltTx.Bucket(ns.key)
 		if bucket == nil {
 			return walletdb.ErrBucketNotFound
 		}
 
-		return fn(&transaction{boltTx: boltTx, rootBucket: bucket})
+		return fn(&transaction{boltTx: boltTx, rootBucket: bucket, mu: nil})
 	}))
 }
 
@@ -326,20 +345,31 @@ func (ns *namespace) View(fn func(walletdb.Tx) error) error {
 //
 // This function is part of the walletdb.Namespace interface implementation.
 func (ns *namespace) Update(fn func(walletdb.Tx) error) error {
-	return convertErr(ns.db.Update(func(boltTx *bolt.Tx) error {
+	ns.db.mu.RLock()
+	return convertErr(ns.db.boltDB.Update(func(boltTx *bolt.Tx) error {
+		defer ns.db.mu.RUnlock()
+
 		bucket := boltTx.Bucket(ns.key)
 		if bucket == nil {
 			return walletdb.ErrBucketNotFound
 		}
 
-		return fn(&transaction{boltTx: boltTx, rootBucket: bucket})
+		return fn(&transaction{boltTx: boltTx, rootBucket: bucket, mu: nil})
 	}))
 }
 
 // db represents a collection of namespaces which are persisted and implements
 // the walletdb.Db interface.  All database access is performed through
 // transactions which are obtained through the specific Namespace.
-type db bolt.DB
+type db struct {
+	boltDB *bolt.DB
+
+	// Reader lock held for open transactions (both reads and writes).
+	// Writer lock is held for closing the database.  This causes closing
+	// the DB to block on any open transactions until they are committed or
+	// rolled back.
+	mu sync.RWMutex
+}
 
 // Enforce db implements the walletdb.Db interface.
 var _ walletdb.DB = (*db)(nil)
@@ -355,7 +385,7 @@ func (db *db) Namespace(key []byte) (walletdb.Namespace, error) {
 	// transaction.  This is done because read-only transactions are faster
 	// and don't block like write transactions.
 	var doCreate bool
-	err := (*bolt.DB)(db).View(func(tx *bolt.Tx) error {
+	err := db.boltDB.View(func(tx *bolt.Tx) error {
 		boltBucket := tx.Bucket(key)
 		if boltBucket == nil {
 			doCreate = true
@@ -369,7 +399,7 @@ func (db *db) Namespace(key []byte) (walletdb.Namespace, error) {
 	// Create the namespace if needed by using an writable update
 	// transaction.
 	if doCreate {
-		err := (*bolt.DB)(db).Update(func(tx *bolt.Tx) error {
+		err := db.boltDB.Update(func(tx *bolt.Tx) error {
 			_, err := tx.CreateBucket(key)
 			return err
 		})
@@ -378,7 +408,7 @@ func (db *db) Namespace(key []byte) (walletdb.Namespace, error) {
 		}
 	}
 
-	return &namespace{db: (*bolt.DB)(db), key: key}, nil
+	return &namespace{db: db, key: key}, nil
 }
 
 // DeleteNamespace deletes the namespace for the passed key.  ErrBucketNotFound
@@ -386,7 +416,7 @@ func (db *db) Namespace(key []byte) (walletdb.Namespace, error) {
 //
 // This function is part of the walletdb.Db interface implementation.
 func (db *db) DeleteNamespace(key []byte) error {
-	return convertErr((*bolt.DB)(db).Update(func(tx *bolt.Tx) error {
+	return convertErr(db.boltDB.Update(func(tx *bolt.Tx) error {
 		return tx.DeleteBucket(key)
 	}))
 }
@@ -396,7 +426,7 @@ func (db *db) DeleteNamespace(key []byte) error {
 //
 // This function is part of the walletdb.Db interface implementation.
 func (db *db) Copy(w io.Writer) error {
-	return convertErr((*bolt.DB)(db).View(func(tx *bolt.Tx) error {
+	return convertErr(db.boltDB.View(func(tx *bolt.Tx) error {
 		return tx.Copy(w)
 	}))
 }
@@ -405,7 +435,10 @@ func (db *db) Copy(w io.Writer) error {
 //
 // This function is part of the walletdb.Db interface implementation.
 func (db *db) Close() error {
-	return convertErr((*bolt.DB)(db).Close())
+	defer db.mu.Unlock()
+	db.mu.Lock()
+	err := db.boltDB.Close()
+	return convertErr(err)
 }
 
 // filesExists reports whether the named file or directory exists.
@@ -426,5 +459,5 @@ func openDB(dbPath string, create bool) (walletdb.DB, error) {
 	}
 
 	boltDB, err := bolt.Open(dbPath, 0600, nil)
-	return (*db)(boltDB), convertErr(err)
+	return &db{boltDB: boltDB}, convertErr(err)
 }
