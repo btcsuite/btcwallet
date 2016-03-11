@@ -235,47 +235,47 @@ func (s *NotificationServer) notifyDetachedBlock(hash *wire.ShaHash) {
 	s.currentTxNtfn.DetachedBlocks = append(s.currentTxNtfn.DetachedBlocks, hash)
 }
 
-func (s *NotificationServer) notifyMinedTransaction(details *wtxmgr.TxDetails, block *wtxmgr.BlockMeta) {
-	if s.currentTxNtfn == nil {
-		s.currentTxNtfn = &TransactionNotifications{}
-	}
-	n := len(s.currentTxNtfn.AttachedBlocks)
-	if n == 0 || *s.currentTxNtfn.AttachedBlocks[n-1].Hash != block.Hash {
-		s.currentTxNtfn.AttachedBlocks = append(s.currentTxNtfn.AttachedBlocks, Block{
-			Hash:      &block.Hash,
-			Height:    block.Height,
-			Timestamp: block.Time.Unix(),
-		})
-		n++
-	}
-	txs := s.currentTxNtfn.AttachedBlocks[n-1].Transactions
-	s.currentTxNtfn.AttachedBlocks[n-1].Transactions = append(txs, makeTxSummary(s.wallet, details))
-}
-
-func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
+func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta, walletTxs []*wtxmgr.TxDetails) {
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
 
-	// Add block details if it wasn't already included for previously
-	// notified mined transactions.
-	n := len(s.currentTxNtfn.AttachedBlocks)
-	if n == 0 || *s.currentTxNtfn.AttachedBlocks[n-1].Hash != block.Hash {
-		s.currentTxNtfn.AttachedBlocks = append(s.currentTxNtfn.AttachedBlocks, Block{
-			Hash:      &block.Hash,
-			Height:    block.Height,
-			Timestamp: block.Time.Unix(),
-		})
+	n := Block{
+		Hash:         &block.Hash,
+		Height:       block.Height,
+		Timestamp:    block.Time.Unix(),
+		Transactions: make([]TransactionSummary, 0, len(walletTxs)),
+	}
+	for _, wtx := range walletTxs {
+		n.Transactions = append(n.Transactions, makeTxSummary(s.wallet, wtx))
 	}
 
-	// For now (until notification coalescing isn't necessary) just use
-	// chain length to determine if this is the new best block.
+	s.currentTxNtfn.AttachedBlocks = append(s.currentTxNtfn.AttachedBlocks, n)
+
+	// Use chain height to determine whether this notification is ready to
+	// send to clients.  This is not totally correct (since best chain is
+	// actually determined by total proof of work, not chain height), but it
+	// is the best guess available at the time since wallet does not receive
+	// every block attached and removed during a chain switch.
 	if s.wallet.ChainSynced() {
 		if len(s.currentTxNtfn.DetachedBlocks) >= len(s.currentTxNtfn.AttachedBlocks) {
 			return
 		}
 	}
 
+	// If the client count check was performed at the top of this function,
+	// there is a race where clients can be added between several calls to
+	// notifyDetachedBlock and notifyAttachedBlock.  Due to this, the
+	// clients have to be checked here, just before the notification is
+	// ready to finish creating before sending.  This prevents missing
+	// detached or previous attached blocks when constructing the
+	// notification.  If this is fixed by changing the consensus RPC
+	// server's notifications to notify an entire chain switch (with both
+	// attached and detached blocks), then some work could be avoided by
+	// checking the clients up front first.  This would also be a good idea
+	// for atomicity and performance benefits as it would cut down on the
+	// number of database transactions the wallet must make during a
+	// reorganize.
 	defer s.mu.Unlock()
 	s.mu.Lock()
 	clients := s.transactions
