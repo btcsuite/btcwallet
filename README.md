@@ -54,12 +54,6 @@ Wallet clients can use one of two RPC servers:
      notifications for changes to the wallet, this is the RPC server to use.
      The gRPC server is documented [here](./rpc/documentation/README.md).
 
-Mainnet support is currently disabled by default.  Use of btcwallet on
-mainnet requires passing the `--mainnet` flag on the command line or
-adding `mainnet=1` to the configuration file.  Mainnet will be enabled
-by default in a future release after further database changes and
-testing.
-
 ## Installation and updating
 
 ### Windows - MSIs Available
@@ -85,14 +79,14 @@ go get -u -v github.com/btcsuite/btcwallet/...
 
 ## Getting Started
 
-The following instructions detail how to get started with btcwallet
-connecting to a localhost btcd.  Commands should be run in `cmd.exe`
-or PowerShell on Windows, or any terminal emulator on *nix.
+The following instructions detail how to get started with btcwallet connecting
+to a localhost btcd.  Commands should be run in `cmd.exe` or PowerShell on
+Windows, or any terminal emulator on *nix.
 
 - Run the following command to start btcd:
 
 ```
-btcd --testnet -u rpcuser -P rpcpass
+btcd -u rpcuser -P rpcpass
 ```
 
 - Run the following command to create a wallet:

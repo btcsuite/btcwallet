@@ -50,8 +50,8 @@ type config struct {
 	Create        bool   `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp    bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	DataDir       string `short:"b" long:"datadir" description:"Directory to store wallets and transactions"`
-	MainNet       bool   `long:"mainnet" description:"Use the main Bitcoin network (default testnet3)"`
-	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default testnet3)"`
+	TestNet3      bool   `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
+	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	NoInitialLoad bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
 	DebugLevel    string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	LogDir        string `long:"logdir" description:"Directory to log output."`
@@ -61,7 +61,7 @@ type config struct {
 	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
 
 	// RPC client options
-	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:18334, mainnet: localhost:8334, simnet: localhost:18556)"`
+	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:8334, testnet: localhost:18334, simnet: localhost:18556)"`
 	CAFile           string `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with btcd"`
 	DisableClientTLS bool   `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
 	BtcdUsername     string `long:"btcdusername" description:"Username for btcd authentication"`
@@ -82,7 +82,7 @@ type config struct {
 	RPCKey                 string   `long:"rpckey" description:"File containing the certificate key"`
 	OneTimeTLSKey          bool     `long:"onetimetlskey" description:"Generate a new TLS certpair at startup, but only write the certificate to disk"`
 	DisableServerTLS       bool     `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
-	LegacyRPCListeners     []string `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 18332, mainnet: 8332, simnet: 18554)"`
+	LegacyRPCListeners     []string `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 8332, testnet: 18332, simnet: 18554)"`
 	LegacyRPCMaxClients    int64    `long:"rpcmaxclients" description:"Max number of legacy RPC clients for standard connections"`
 	LegacyRPCMaxWebsockets int64    `long:"rpcmaxwebsockets" description:"Max number of legacy RPC websocket connections"`
 	Username               string   `short:"u" long:"username" description:"Username for legacy RPC and btcd authentication (if btcdusername is unset)"`
@@ -93,10 +93,6 @@ type config struct {
 	// These options will change (and require changes to config files, etc.)
 	// when the new gRPC server is enabled.
 	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
-
-	// Deprecated options
-	DisallowFree bool `long:"disallowfree" description:"DEPRECATED -- Force transactions to always include a fee"`
-	KeypoolSize  uint `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -300,8 +296,8 @@ func loadConfig() (*config, []string, error) {
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
-	if cfg.MainNet {
-		activeNet = &netparams.MainNetParams
+	if cfg.TestNet3 {
+		activeNet = &netparams.TestNet3Params
 		numNets++
 	}
 	if cfg.SimNet {
@@ -309,7 +305,7 @@ func loadConfig() (*config, []string, error) {
 		numNets++
 	}
 	if numNets > 1 {
-		str := "%s: The mainnet and simnet params can't be used " +
+		str := "%s: The testnet and simnet params can't be used " +
 			"together -- choose one"
 		err := fmt.Errorf(str, "loadConfig")
 		fmt.Fprintln(os.Stderr, err)

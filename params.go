@@ -6,4 +6,4 @@ package main
 
 import "github.com/btcsuite/btcwallet/netparams"
 
-var activeNet = &netparams.TestNet3Params
+var activeNet = &netparams.MainNetParams
