@@ -27,6 +27,10 @@ var (
 	// create a wallet when the loader has already done so.
 	ErrLoaded = errors.New("wallet already loaded")
 
+	// ErrNotLoaded describes the error condition of attempting to close a
+	// loaded wallet when a wallet has not been loaded.
+	ErrNotLoaded = errors.New("wallet is not loaded")
+
 	// ErrExists describes the error condition of attempting to create a new
 	// wallet when one exists already.
 	ErrExists = errors.New("wallet already exists")
@@ -40,7 +44,7 @@ var (
 //
 // Loader is safe for concurrent access.
 type Loader struct {
-	callbacks   []func(*Wallet, walletdb.DB)
+	callbacks   []func(*Wallet)
 	chainParams *chaincfg.Params
 	dbDirPath   string
 	wallet      *Wallet
@@ -60,7 +64,7 @@ func NewLoader(chainParams *chaincfg.Params, dbDirPath string) *Loader {
 // additional wallets.  Requires mutex to be locked.
 func (l *Loader) onLoaded(w *Wallet, db walletdb.DB) {
 	for _, fn := range l.callbacks {
-		fn(w, db)
+		fn(w)
 	}
 
 	l.wallet = w
@@ -71,13 +75,12 @@ func (l *Loader) onLoaded(w *Wallet, db walletdb.DB) {
 // RunAfterLoad adds a function to be executed when the loader creates or opens
 // a wallet.  Functions are executed in a single goroutine in the order they are
 // added.
-func (l *Loader) RunAfterLoad(fn func(*Wallet, walletdb.DB)) {
+func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
 	l.mu.Lock()
 	if l.wallet != nil {
 		w := l.wallet
-		db := l.db
 		l.mu.Unlock()
-		fn(w, db)
+		fn(w)
 	} else {
 		l.callbacks = append(l.callbacks, fn)
 		l.mu.Unlock()
@@ -157,6 +160,7 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 	if err != nil {
 		return nil, err
 	}
+	w.Start()
 
 	l.onLoaded(w, db)
 	return w, nil
@@ -238,6 +242,30 @@ func (l *Loader) LoadedWallet() (*Wallet, bool) {
 	w := l.wallet
 	l.mu.Unlock()
 	return w, w != nil
+}
+
+// UnloadWallet stops the loaded wallet, if any, and closes the wallet database.
+// This returns ErrNotLoaded if the wallet has not been loaded with
+// CreateNewWallet or LoadExistingWallet.  The Loader may be reused if this
+// function returns without error.
+func (l *Loader) UnloadWallet() error {
+	defer l.mu.Unlock()
+	l.mu.Lock()
+
+	if l.wallet == nil {
+		return ErrNotLoaded
+	}
+
+	l.wallet.Stop()
+	l.wallet.WaitForShutdown()
+	err := l.db.Close()
+	if err != nil {
+		return err
+	}
+
+	l.wallet = nil
+	l.db = nil
+	return nil
 }
 
 func fileExists(filePath string) (bool, error) {

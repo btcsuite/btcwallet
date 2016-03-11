@@ -16,7 +16,6 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 var (
@@ -77,18 +76,8 @@ func walletMain() error {
 		go rpcClientConnectLoop(legacyRPCServer, loader)
 	}
 
-	var closeDB func() error
-	defer func() {
-		if closeDB != nil {
-			err := closeDB()
-			if err != nil {
-				log.Errorf("Unable to close wallet database: %v", err)
-			}
-		}
-	}()
-	loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+	loader.RunAfterLoad(func(w *wallet.Wallet) {
 		startWalletRPCServices(w, rpcs, legacyRPCServer)
-		closeDB = db.Close
 	})
 
 	if !cfg.NoInitialLoad {
@@ -101,7 +90,15 @@ func walletMain() error {
 		}
 	}
 
-	// Shutdown the server(s) when interrupt signal is received.
+	// Add interrupt handlers to shutdown the various process components
+	// before exiting.  Interrupt handlers run in LIFO order, so the wallet
+	// (which should be closed last) is added first.
+	addInterruptHandler(func() {
+		err := loader.UnloadWallet()
+		if err != nil && err != wallet.ErrNotLoaded {
+			log.Errorf("Failed to close wallet: %v", err)
+		}
+	})
 	if rpcs != nil {
 		addInterruptHandler(func() {
 			// TODO: Does this need to wait for the grpc server to
@@ -112,15 +109,15 @@ func walletMain() error {
 		})
 	}
 	if legacyRPCServer != nil {
-		go func() {
-			<-legacyRPCServer.RequestProcessShutdown()
-			simulateInterrupt()
-		}()
 		addInterruptHandler(func() {
 			log.Warn("Stopping legacy RPC server...")
 			legacyRPCServer.Stop()
 			log.Info("Legacy RPC server shutdown")
 		})
+		go func() {
+			<-legacyRPCServer.RequestProcessShutdown()
+			simulateInterrupt()
+		}()
 	}
 
 	<-interruptHandlersDone
@@ -158,7 +155,7 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 			}
 		}
 		mu := new(sync.Mutex)
-		loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+		loader.RunAfterLoad(func(w *wallet.Wallet) {
 			mu.Lock()
 			associate := associateRPCClient
 			mu.Unlock()

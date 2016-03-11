@@ -806,13 +806,13 @@ func (s *loaderServer) WalletExists(ctx context.Context, req *pb.WalletExistsReq
 func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletRequest) (
 	*pb.CloseWalletResponse, error) {
 
-	loadedWallet, ok := s.loader.LoadedWallet()
-	if !ok {
+	err := s.loader.UnloadWallet()
+	if err == wallet.ErrNotLoaded {
 		return nil, grpc.Errorf(codes.FailedPrecondition, "wallet is not loaded")
 	}
-
-	loadedWallet.Stop()
-	loadedWallet.WaitForShutdown()
+	if err != nil {
+		return nil, translateError(err)
+	}
 
 	return &pb.CloseWalletResponse{}, nil
 }
