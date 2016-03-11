@@ -201,20 +201,6 @@ out:
 
 			go w.ResendUnminedTxs()
 
-			// TODO(jrick): The current websocket API requires
-			// notifying the block the rescan synced through to
-			// every connected client.  This is code smell and
-			// should be removed or replaced with a more
-			// appropiate notification when the API is redone.
-			b := wtxmgr.BlockMeta{
-				Block: wtxmgr.Block{
-					*n.Hash,
-					n.Height,
-				},
-				Time: n.Time,
-			}
-			w.notifyConnectedBlock(b)
-
 		case <-quit:
 			break out
 		}

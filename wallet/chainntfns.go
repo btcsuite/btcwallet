@@ -71,10 +71,6 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 
 	// Notify interested clients of the connected block.
 	w.NtfnServer.notifyAttachedBlock(&b)
-
-	// Legacy JSON-RPC notifications
-	w.notifyConnectedBlock(b)
-	w.notifyBalances(b.Height)
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
@@ -113,10 +109,6 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 
 	// Notify interested clients of the disconnected block.
 	w.NtfnServer.notifyDetachedBlock(&b.Hash)
-
-	// Legacy JSON-RPC notifications
-	w.notifyDisconnectedBlock(b)
-	w.notifyBalances(b.Height - 1)
 
 	return nil
 }
@@ -220,38 +212,5 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) er
 		}
 	}
 
-	// Legacy JSON-RPC notifications
-	//
-	// TODO: Synced-to information should be handled by the wallet, not the
-	// RPC client.
-	chainClient, err := w.requireChainClient()
-	if err == nil {
-		bs, err := chainClient.BlockStamp()
-		if err == nil {
-			w.notifyBalances(bs.Height)
-		}
-	}
-
 	return nil
-}
-
-func (w *Wallet) notifyBalances(curHeight int32) {
-	// Don't notify unless wallet is synced to the chain server.
-	if !w.ChainSynced() {
-		return
-	}
-
-	// Notify any potential changes to the balance.
-	confirmed, err := w.TxStore.Balance(1, curHeight)
-	if err != nil {
-		log.Errorf("Cannot determine 1-conf balance: %v", err)
-		return
-	}
-	w.notifyConfirmedBalance(confirmed)
-	unconfirmed, err := w.TxStore.Balance(0, curHeight)
-	if err != nil {
-		log.Errorf("Cannot determine 0-conf balance: %v", err)
-		return
-	}
-	w.notifyUnconfirmedBalance(unconfirmed - confirmed)
 }

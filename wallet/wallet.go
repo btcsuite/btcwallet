@@ -99,176 +99,12 @@ type Wallet struct {
 
 	NtfnServer *NotificationServer
 
-	// Legacy notification channels so other components can listen in on
-	// wallet activity.  These are initialized as nil, and must be created
-	// by calling one of the Listen* methods.
-	//
-	// These channels and the features needed by them are on a fast path to
-	// deletion.  Use the server instead.
-	connectedBlocks    chan wtxmgr.BlockMeta
-	disconnectedBlocks chan wtxmgr.BlockMeta
-	relevantTxs        chan chain.RelevantTx
-	lockStateChanges   chan bool // true when locked
-	confirmedBalance   chan btcutil.Amount
-	unconfirmedBalance chan btcutil.Amount
-	notificationMu     sync.Mutex
-
 	chainParams *chaincfg.Params
 	wg          sync.WaitGroup
 
 	started bool
 	quit    chan struct{}
 	quitMu  sync.Mutex
-}
-
-// ErrDuplicateListen is returned for any attempts to listen for the same
-// notification more than once.  If callers must pass along a notifiation to
-// multiple places, they must broadcast it themself.
-var ErrDuplicateListen = errors.New("duplicate listen")
-
-// ListenConnectedBlocks returns a channel that passes all blocks that a wallet
-// has been marked in sync with. The channel must be read, or other wallet
-// methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenConnectedBlocks() (<-chan wtxmgr.BlockMeta, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.connectedBlocks != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.connectedBlocks = make(chan wtxmgr.BlockMeta)
-	return w.connectedBlocks, nil
-}
-
-// ListenDisconnectedBlocks returns a channel that passes all blocks that a
-// wallet has detached.  The channel must be read, or other wallet methods will
-// block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenDisconnectedBlocks() (<-chan wtxmgr.BlockMeta, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.disconnectedBlocks != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.disconnectedBlocks = make(chan wtxmgr.BlockMeta)
-	return w.disconnectedBlocks, nil
-}
-
-// ListenLockStatus returns a channel that passes the current lock state
-// of the wallet whenever the lock state is changed.  The value is true for
-// locked, and false for unlocked.  The channel must be read, or other wallet
-// methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenLockStatus() (<-chan bool, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.lockStateChanges != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.lockStateChanges = make(chan bool)
-	return w.lockStateChanges, nil
-}
-
-// ListenConfirmedBalance returns a channel that passes the confirmed balance
-// when any changes to the balance are made.  This channel must be read, or
-// other wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenConfirmedBalance() (<-chan btcutil.Amount, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.confirmedBalance != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.confirmedBalance = make(chan btcutil.Amount)
-	return w.confirmedBalance, nil
-}
-
-// ListenUnconfirmedBalance returns a channel that passes the unconfirmed
-// balance when any changes to the balance are made.  This channel must be
-// read, or other wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenUnconfirmedBalance() (<-chan btcutil.Amount, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.unconfirmedBalance != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.unconfirmedBalance = make(chan btcutil.Amount)
-	return w.unconfirmedBalance, nil
-}
-
-// ListenRelevantTxs returns a channel that passes all transactions relevant to
-// a wallet, optionally including metadata regarding the block they were mined
-// in.  This channel must be read, or other wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenRelevantTxs() (<-chan chain.RelevantTx, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.relevantTxs != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.relevantTxs = make(chan chain.RelevantTx)
-	return w.relevantTxs, nil
-}
-
-func (w *Wallet) notifyConnectedBlock(block wtxmgr.BlockMeta) {
-	w.notificationMu.Lock()
-	if w.connectedBlocks != nil {
-		w.connectedBlocks <- block
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyDisconnectedBlock(block wtxmgr.BlockMeta) {
-	w.notificationMu.Lock()
-	if w.disconnectedBlocks != nil {
-		w.disconnectedBlocks <- block
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyLockStateChange(locked bool) {
-	w.notificationMu.Lock()
-	if w.lockStateChanges != nil {
-		w.lockStateChanges <- locked
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyConfirmedBalance(bal btcutil.Amount) {
-	w.notificationMu.Lock()
-	if w.confirmedBalance != nil {
-		w.confirmedBalance <- bal
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyUnconfirmedBalance(bal btcutil.Amount) {
-	w.notificationMu.Lock()
-	if w.unconfirmedBalance != nil {
-		w.unconfirmedBalance <- bal
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyRelevantTx(relevantTx chain.RelevantTx) {
-	w.notificationMu.Lock()
-	if w.relevantTxs != nil {
-		w.relevantTxs <- relevantTx
-	}
-	w.notificationMu.Unlock()
 }
 
 // Start starts the goroutines necessary to manage a wallet.
@@ -661,7 +497,6 @@ out:
 				req.err <- err
 				continue
 			}
-			w.notifyLockStateChange(false)
 			timeout = req.lockAfter
 			req.err <- nil
 			continue
@@ -709,8 +544,6 @@ out:
 		err := w.Manager.Lock()
 		if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 			log.Errorf("Could not lock wallet: %v", err)
-		} else {
-			w.notifyLockStateChange(true)
 		}
 	}
 	w.wg.Done()
