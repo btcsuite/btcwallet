@@ -498,6 +498,11 @@ out:
 				continue
 			}
 			timeout = req.lockAfter
+			if timeout == nil {
+				log.Info("Wallet unlocked without timeout")
+			} else {
+				log.Info("Wallet temporarily unlocked")
+			}
 			req.err <- nil
 			continue
 
@@ -544,6 +549,8 @@ out:
 		err := w.Manager.Lock()
 		if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 			log.Errorf("Could not lock wallet: %v", err)
+		} else {
+			log.Info("Wallet locked")
 		}
 	}
 	w.wg.Done()
