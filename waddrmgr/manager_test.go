@@ -1138,6 +1138,12 @@ func testNewAccount(tc *testContext) bool {
 		return false
 	}
 	// Test account name validation
+	testName = "" // Empty account names are not allowed
+	_, err = tc.manager.NewAccount(testName)
+	wantErrCode = waddrmgr.ErrInvalidAccount
+	if !checkManagerError(tc.t, testName, err, wantErrCode) {
+		return false
+	}
 	testName = "imported" // A reserved account name
 	_, err = tc.manager.NewAccount(testName)
 	wantErrCode = waddrmgr.ErrInvalidAccount

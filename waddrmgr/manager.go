@@ -1711,6 +1711,10 @@ func (m *Manager) LastInternalAddress(account uint32) (ManagedAddress, error) {
 
 // ValidateAccountName validates the given account name and returns an error, if any.
 func ValidateAccountName(name string) error {
+	if name == "" {
+		str := "accounts may not be named the empty string"
+		return managerError(ErrInvalidAccount, str, nil)
+	}
 	if isReservedAccountName(name) {
 		str := "reserved account name"
 		return managerError(ErrInvalidAccount, str, nil)
