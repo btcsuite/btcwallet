@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -123,37 +123,42 @@ func (s *Store) removeConflict(ns walletdb.Bucket, rec *TxRecord) error {
 }
 
 // UnminedTxs returns the underlying transactions for all unmined transactions
-// which are not known to have been mined in a block.
+// which are not known to have been mined in a block.  Transactions are
+// guaranteed to be sorted by their dependency order.
 func (s *Store) UnminedTxs() ([]*wire.MsgTx, error) {
-	var txs []*wire.MsgTx
+	var recSet map[wire.ShaHash]*TxRecord
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
 		var err error
-		txs, err = s.unminedTxs(ns)
+		recSet, err = s.unminedTxRecords(ns)
 		return err
 	})
-	return txs, err
+	if err != nil {
+		return nil, err
+	}
+
+	recs := dependencySort(recSet)
+	txs := make([]*wire.MsgTx, 0, len(recs))
+	for _, rec := range recs {
+		txs = append(txs, &rec.MsgTx)
+	}
+	return txs, nil
 }
 
-func (s *Store) unminedTxs(ns walletdb.Bucket) ([]*wire.MsgTx, error) {
-	var unmined []*wire.MsgTx
+func (s *Store) unminedTxRecords(ns walletdb.Bucket) (map[wire.ShaHash]*TxRecord, error) {
+	unmined := make(map[wire.ShaHash]*TxRecord)
 	err := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
-		// TODO: Parsing transactions from the db may be a little
-		// expensive.  It's possible the caller only wants the
-		// serialized transactions.
 		var txHash wire.ShaHash
 		err := readRawUnminedHash(k, &txHash)
 		if err != nil {
 			return err
 		}
 
-		var rec TxRecord
-		err = readRawTxRecord(&txHash, v, &rec)
+		rec := new(TxRecord)
+		err = readRawTxRecord(&txHash, v, rec)
 		if err != nil {
 			return err
 		}
-
-		tx := rec.MsgTx
-		unmined = append(unmined, &tx)
+		unmined[rec.Hash] = rec
 		return nil
 	})
 	return unmined, err
