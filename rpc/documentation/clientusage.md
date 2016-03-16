@@ -19,7 +19,7 @@ dcrwallet itself.
 
 The rest of this document provides short examples of how to quickly get started
 by implementing a basic client that fetches the balance of the default account
-(account 0) from a testnet3 wallet listening on `localhost:19110` in several
+(account 0) from a testnet wallet listening on `localhost:19110` in several
 different languages:
 
 - [Go](#go)
