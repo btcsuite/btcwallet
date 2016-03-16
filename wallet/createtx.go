@@ -18,6 +18,7 @@
 package wallet
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	badrand "math/rand"
@@ -25,8 +26,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/btcsuite/golangcrypto/ripemd160"
+
 	"github.com/decred/dcrd/blockchain/stake"
 	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/chaincfg/chainec"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/dcrjson"
 	"github.com/decred/dcrd/txscript"
@@ -1309,10 +1313,6 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		if err != nil {
 			return nil, err
 		}
-		newChangeAddress, err := addrFunc()
-		if err != nil {
-			return nil, err
-		}
 
 		creditAmount := int64(credit.Amount)
 		inputSum += creditAmount
@@ -1328,6 +1328,14 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 
 		// All credits used that are not the last credit.
 		if outputSum+creditAmount <= int64(ticketPrice) {
+			// Use a random address if the change amount is
+			// unspendable. This is the case if it's not
+			// the last credit.
+			newChangeAddress, err := randomAddress(w.chainParams)
+			if err != nil {
+				return nil, err
+			}
+
 			cout := dcrjson.SStxCommitOut{
 				Addr:       newAddress.String(),
 				CommitAmt:  creditAmount,
@@ -1357,6 +1365,11 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 
 			remaining := int64(ticketPrice) - outputSum
 			change := creditAmount - remaining - int64(fee)
+
+			newChangeAddress, err := addrFunc()
+			if err != nil {
+				return nil, err
+			}
 			cout := dcrjson.SStxCommitOut{
 				Addr:       newAddress.String(),
 				CommitAmt:  creditAmount - change,
@@ -1782,4 +1795,17 @@ func chainDepth(target, current int32) int32 {
 
 	// target is in a block.
 	return current - target + 1
+}
+
+// randomAddress returns a random address. Mainly used for 0-value (unspendable)
+// OP_SSTXCHANGE tagged outputs.
+func randomAddress(params *chaincfg.Params) (dcrutil.Address, error) {
+	b := make([]byte, ripemd160.Size)
+	_, err := rand.Read(b)
+	if err != nil {
+		return nil, err
+	}
+
+	return dcrutil.NewAddressPubKeyHash(b, params,
+		chainec.ECTypeSecp256k1)
 }
