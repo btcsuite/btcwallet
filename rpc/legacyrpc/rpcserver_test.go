@@ -9,15 +9,15 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestThrottle(t *testing.T) {
 	const threshold = 1
+	busy := make(chan struct{})
 
 	srv := httptest.NewServer(throttledFn(threshold,
 		func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(20 * time.Millisecond)
+			<-busy
 		}),
 	)
 
@@ -35,6 +35,10 @@ func TestThrottle(t *testing.T) {
 	got := make(map[int]int, cap(codes))
 	for i := 0; i < cap(codes); i++ {
 		got[<-codes]++
+
+		if i == 0 {
+			close(busy)
+		}
 	}
 
 	want := map[int]int{200: 1, 429: 1}
