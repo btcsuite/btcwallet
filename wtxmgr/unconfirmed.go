@@ -135,7 +135,7 @@ func (s *Store) UnminedTxs() ([]*wire.MsgTx, error) {
 }
 
 func (s *Store) unminedTxs(ns walletdb.Bucket) ([]*wire.MsgTx, error) {
-	var unmined []*wire.MsgTx
+	var unmined []*TxRecord
 	err := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
 		// TODO: Parsing transactions from the db may be a little
 		// expensive.  It's possible the caller only wants the
@@ -152,11 +152,53 @@ func (s *Store) unminedTxs(ns walletdb.Bucket) ([]*wire.MsgTx, error) {
 			return err
 		}
 
-		tx := rec.MsgTx
-		unmined = append(unmined, &tx)
+		unmined = append(unmined, &rec)
 		return nil
 	})
-	return unmined, err
+
+	// Sort by dependency on other transactions, if any.
+	g, i, err := parseTxRecsAsGraph(unmined)
+	if err != nil {
+		return nil, err
+	}
+
+	order, _, err := topSortKahn(g, i)
+	if err != nil {
+		return nil, err
+	}
+
+	// Transactions with no local dependencies are excluded from this list,
+	// so we need to add them back now. First, find transactions with local
+	// dependencies. Then, sort those as DAGs. Finally, append all the
+	// transactions with no local dependencies and ship them out to the
+	// caller.
+	numTxs := len(unmined)
+	numOrder := len(order)
+	allTxs := make([]*TxRecord, numTxs, numTxs)
+	orderTxs := make([]*TxRecord, numOrder, numOrder)
+	if order != nil {
+		for idx, tx := range order {
+			allTxs[idx] = txRecFromSliceByHash(unmined, tx)
+			orderTxs[idx] = txRecFromSliceByHash(unmined, tx)
+		}
+	} else {
+		orderTxs = nil
+	}
+
+	itr := len(order)
+	for _, tx := range unmined {
+		if !txRecExistsInSlice(orderTxs, tx) {
+			allTxs[itr] = tx
+			itr++
+		}
+	}
+
+	txs := make([]*wire.MsgTx, numTxs, numTxs)
+	for i, txr := range allTxs {
+		txs[i] = &txr.MsgTx
+	}
+
+	return txs, err
 }
 
 // UnminedTxHashes returns the hashes of all transactions not known to have been
