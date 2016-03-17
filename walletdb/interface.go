@@ -171,6 +171,18 @@ type Namespace interface {
 	Update(fn func(Tx) error) error
 }
 
+// NamespaceIsEmpty returns whether the namespace is empty, that is, whether there
+// are no key/value pairs or nested buckets.
+func NamespaceIsEmpty(namespace Namespace) (bool, error) {
+	var empty bool
+	err := namespace.View(func(tx Tx) error {
+		k, v := tx.RootBucket().Cursor().First()
+		empty = k == nil && v == nil
+		return nil
+	})
+	return empty, err
+}
+
 // DB represents a collection of namespaces which are persisted.  All database
 // access is performed through transactions which are obtained through the
 // specific Namespace.

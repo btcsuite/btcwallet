@@ -149,9 +149,13 @@ func TstCreateTxStore(t *testing.T) (store *wtxmgr.Store, tearDown func()) {
 	if err != nil {
 		t.Fatalf("Failed to create walletdb namespace: %v", err)
 	}
-	s, err := wtxmgr.Create(wtxmgrNamespace)
+	err = wtxmgr.Create(wtxmgrNamespace)
 	if err != nil {
 		t.Fatalf("Failed to create txstore: %v", err)
+	}
+	s, err := wtxmgr.Open(wtxmgrNamespace)
+	if err != nil {
+		t.Fatalf("Failed to open txstore: %v", err)
 	}
 	return s, func() { os.RemoveAll(dir) }
 }
@@ -345,8 +349,12 @@ func TstCreatePool(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager, po
 		t.Fatalf("Failed to create addr manager DB namespace: %v", err)
 	}
 	var fastScrypt = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
-	mgr, err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase, privPassphrase,
+	err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase, privPassphrase,
 		&chaincfg.MainNetParams, fastScrypt)
+	if err == nil {
+		mgr, err = waddrmgr.Open(mgrNamespace, pubPassphrase,
+			&chaincfg.MainNetParams, nil)
+	}
 	if err != nil {
 		t.Fatalf("Failed to create addr manager: %v", err)
 	}

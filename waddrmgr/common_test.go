@@ -234,8 +234,12 @@ func setupManager(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)
 	}
-	mgr, err = waddrmgr.Create(namespace, seed, pubPassphrase,
+	err = waddrmgr.Create(namespace, seed, pubPassphrase,
 		privPassphrase, &chaincfg.MainNetParams, fastScrypt)
+	if err == nil {
+		mgr, err = waddrmgr.Open(namespace, pubPassphrase,
+			&chaincfg.MainNetParams, nil)
+	}
 	if err != nil {
 		db.Close()
 		_ = os.RemoveAll(dirName)

@@ -148,15 +148,11 @@ func Open(namespace walletdb.Namespace) (*Store, error) {
 	return &Store{namespace, nil}, nil // TODO: set callbacks
 }
 
-// Create creates and opens a new persistent transaction store in the walletdb
-// namespace.  Creating the store when one already exists in this namespace will
-// error with ErrAlreadyExists.
-func Create(namespace walletdb.Namespace) (*Store, error) {
-	err := createStore(namespace)
-	if err != nil {
-		return nil, err
-	}
-	return &Store{namespace, nil}, nil // TODO: set callbacks
+// Create creates a new persistent transaction store in the walletdb namespace.
+// Creating the store when one already exists in this namespace will error with
+// ErrAlreadyExists.
+func Create(namespace walletdb.Namespace) error {
+	return createStore(namespace)
 }
 
 // moveMinedTx moves a transaction record from the unmined buckets to block

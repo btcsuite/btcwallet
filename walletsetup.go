@@ -14,19 +14,12 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
-)
-
-// Namespace keys
-var (
-	waddrmgrNamespaceKey = []byte("waddrmgr")
-	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
 
 // networkDir returns the directory name of a network directory to hold wallet
@@ -214,12 +207,6 @@ func createSimulationWallet(cfg *config) error {
 	// Public passphrase is the default.
 	pubPass := []byte(wallet.InsecurePubPassphrase)
 
-	// Generate a random seed.
-	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
-	if err != nil {
-		return err
-	}
-
 	netDir := networkDir(cfg.DataDir, activeNet.Params)
 
 	// Create the wallet.
@@ -233,19 +220,11 @@ func createSimulationWallet(cfg *config) error {
 	}
 	defer db.Close()
 
-	// Create the address manager.
-	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	// Create the wallet.
+	err = wallet.Create(db, pubPass, privPass, nil, activeNet.Params)
 	if err != nil {
 		return err
 	}
-
-	manager, err := waddrmgr.Create(waddrmgrNamespace, seed, []byte(pubPass),
-		[]byte(privPass), activeNet.Params, nil)
-	if err != nil {
-		return err
-	}
-
-	manager.Close()
 
 	fmt.Println("The wallet has been created successfully.")
 	return nil

@@ -11,11 +11,9 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 const (
@@ -117,46 +115,14 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 		return nil, err
 	}
 
-	// If a seed was provided, ensure that it is of valid length. Otherwise,
-	// we generate a random seed for the wallet with the recommended seed
-	// length.
-	if seed != nil {
-		if len(seed) < hdkeychain.MinSeedBytes ||
-			len(seed) > hdkeychain.MaxSeedBytes {
-
-			return nil, hdkeychain.ErrInvalidSeedLen
-		}
-	} else {
-		hdSeed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
-		if err != nil {
-			return nil, err
-		}
-		seed = hdSeed
-	}
-
-	// Create the address manager.
-	addrMgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-	_, err = waddrmgr.Create(addrMgrNamespace, seed, pubPassphrase,
-		privPassphrase, l.chainParams, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create empty transaction manager.
-	txMgrNamespace, err := db.Namespace(wtxmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-	_, err = wtxmgr.Create(txMgrNamespace)
+	// Initialize the newly created database for the wallet before opening.
+	err = Create(db, pubPassphrase, privPassphrase, seed, l.chainParams)
 	if err != nil {
 		return nil, err
 	}
 
 	// Open the newly-created wallet.
-	w, err := Open(pubPassphrase, l.chainParams, db, addrMgrNamespace, txMgrNamespace, nil)
+	w, err := Open(db, pubPassphrase, nil, l.chainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -197,14 +163,6 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 		return nil, err
 	}
 
-	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-	txMgrNS, err := db.Namespace(wtxmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
 	var cbs *waddrmgr.OpenCallbacks
 	if canConsolePrompt {
 		cbs = &waddrmgr.OpenCallbacks{
@@ -217,7 +175,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 			ObtainPrivatePass: noConsole,
 		}
 	}
-	w, err := Open(pubPassphrase, l.chainParams, db, addrMgrNS, txMgrNS, cbs)
+	w, err := Open(db, pubPassphrase, cbs, l.chainParams)
 	if err != nil {
 		return nil, err
 	}

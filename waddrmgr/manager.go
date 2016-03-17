@@ -2272,11 +2272,11 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chain
 	return loadManager(namespace, pubPassphrase, chainParams)
 }
 
-// Create returns a new locked address manager in the given namespace.  The
-// seed must conform to the standards described in hdkeychain.NewMaster and will
-// be used to create the master root node from which all hierarchical
-// deterministic addresses are derived.  This allows all chained addresses in
-// the address manager to be recovered by using the same seed.
+// Create creates a new address manager in the given namespace.  The seed must
+// conform to the standards described in hdkeychain.NewMaster and will be used
+// to create the master root node from which all hierarchical deterministic
+// addresses are derived.  This allows all chained addresses in the address
+// manager to be recovered by using the same seed.
 //
 // All private and public keys and information are protected by secret keys
 // derived from the provided private and public passphrases.  The public
@@ -2289,26 +2289,26 @@ func Open(namespace walletdb.Namespace, pubPassphrase []byte, chainParams *chain
 //
 // A ManagerError with an error code of ErrAlreadyExists will be returned the
 // address manager already exists in the specified namespace.
-func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []byte, chainParams *chaincfg.Params, config *ScryptOptions) (*Manager, error) {
+func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []byte, chainParams *chaincfg.Params, config *ScryptOptions) error {
 	// Return an error if the manager has already been created in the given
 	// database namespace.
 	exists, err := managerExists(namespace)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if exists {
-		return nil, managerError(ErrAlreadyExists, errAlreadyExists, nil)
+		return managerError(ErrAlreadyExists, errAlreadyExists, nil)
 	}
 
 	// Ensure the private passphrase is not empty.
 	if len(privPassphrase) == 0 {
 		str := "private passphrase may not be empty"
-		return nil, managerError(ErrEmptyPassphrase, str, nil)
+		return managerError(ErrEmptyPassphrase, str, nil)
 	}
 
 	// Perform the initial bucket creation and database namespace setup.
 	if err := createManagerNS(namespace); err != nil {
-		return nil, err
+		return err
 	}
 
 	if config == nil {
@@ -2322,15 +2322,16 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	root, err := hdkeychain.NewMaster(seed, chainParams)
 	if err != nil {
 		str := "failed to derive master extended key"
-		return nil, managerError(ErrKeyChain, str, err)
+		return managerError(ErrKeyChain, str, err)
 	}
 
 	// Derive the cointype key according to BIP0044.
 	coinTypeKeyPriv, err := deriveCoinTypeKey(root, chainParams.HDCoinType)
 	if err != nil {
 		str := "failed to derive cointype extended key"
-		return nil, managerError(ErrKeyChain, str, err)
+		return managerError(ErrKeyChain, str, err)
 	}
+	defer coinTypeKeyPriv.Zero()
 
 	// Derive the account key for the first account according to BIP0044.
 	acctKeyPriv, err := deriveAccountKey(coinTypeKeyPriv, 0)
@@ -2339,11 +2340,11 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 		// required hierarchy can't be derived due to invalid child.
 		if err == hdkeychain.ErrInvalidChild {
 			str := "the provided seed is unusable"
-			return nil, managerError(ErrKeyChain, str,
+			return managerError(ErrKeyChain, str,
 				hdkeychain.ErrUnusableSeed)
 		}
 
-		return nil, err
+		return err
 	}
 
 	// Ensure the branch keys can be derived for the provided seed according
@@ -2353,18 +2354,18 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 		// required hierarchy can't be derived due to invalid child.
 		if err == hdkeychain.ErrInvalidChild {
 			str := "the provided seed is unusable"
-			return nil, managerError(ErrKeyChain, str,
+			return managerError(ErrKeyChain, str,
 				hdkeychain.ErrUnusableSeed)
 		}
 
-		return nil, err
+		return err
 	}
 
 	// The address manager needs the public extended key for the account.
 	acctKeyPub, err := acctKeyPriv.Neuter()
 	if err != nil {
 		str := "failed to convert private key for account 0"
-		return nil, managerError(ErrKeyChain, str, err)
+		return managerError(ErrKeyChain, str, err)
 	}
 
 	// Generate new master keys.  These master keys are used to protect the
@@ -2372,13 +2373,14 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	masterKeyPub, err := newSecretKey(&pubPassphrase, config)
 	if err != nil {
 		str := "failed to master public key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 	masterKeyPriv, err := newSecretKey(&privPassphrase, config)
 	if err != nil {
 		str := "failed to master private key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
+	defer masterKeyPriv.Zero()
 
 	// Generate the private  passphrase salt.  This is used when hashing
 	// passwords to detect whether an unlock can be avoided when the manager
@@ -2387,7 +2389,7 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	_, err = rand.Read(privPassphraseSalt[:])
 	if err != nil {
 		str := "failed to read random source for passphrase salt"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 
 	// Generate new crypto public, private, and script keys.  These keys are
@@ -2396,63 +2398,65 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 	cryptoKeyPub, err := newCryptoKey()
 	if err != nil {
 		str := "failed to generate crypto public key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 	cryptoKeyPriv, err := newCryptoKey()
 	if err != nil {
 		str := "failed to generate crypto private key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
+	defer cryptoKeyPriv.Zero()
 	cryptoKeyScript, err := newCryptoKey()
 	if err != nil {
 		str := "failed to generate crypto script key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
+	defer cryptoKeyScript.Zero()
 
 	// Encrypt the crypto keys with the associated master keys.
 	cryptoKeyPubEnc, err := masterKeyPub.Encrypt(cryptoKeyPub.Bytes())
 	if err != nil {
 		str := "failed to encrypt crypto public key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 	cryptoKeyPrivEnc, err := masterKeyPriv.Encrypt(cryptoKeyPriv.Bytes())
 	if err != nil {
 		str := "failed to encrypt crypto private key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 	cryptoKeyScriptEnc, err := masterKeyPriv.Encrypt(cryptoKeyScript.Bytes())
 	if err != nil {
 		str := "failed to encrypt crypto script key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 
 	// Encrypt the cointype keys with the associated crypto keys.
 	coinTypeKeyPub, err := coinTypeKeyPriv.Neuter()
 	if err != nil {
 		str := "failed to convert cointype private key"
-		return nil, managerError(ErrKeyChain, str, err)
+		return managerError(ErrKeyChain, str, err)
 	}
 	coinTypePubEnc, err := cryptoKeyPub.Encrypt([]byte(coinTypeKeyPub.String()))
 	if err != nil {
 		str := "failed to encrypt cointype public key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 	coinTypePrivEnc, err := cryptoKeyPriv.Encrypt([]byte(coinTypeKeyPriv.String()))
 	if err != nil {
 		str := "failed to encrypt cointype private key"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 
 	// Encrypt the default account keys with the associated crypto keys.
 	acctPubEnc, err := cryptoKeyPub.Encrypt([]byte(acctKeyPub.String()))
 	if err != nil {
 		str := "failed to  encrypt public key for account 0"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 	acctPrivEnc, err := cryptoKeyPriv.Encrypt([]byte(acctKeyPriv.String()))
 	if err != nil {
 		str := "failed to encrypt private key for account 0"
-		return nil, managerError(ErrCrypto, str, err)
+		return managerError(ErrCrypto, str, err)
 	}
 
 	// Use the genesis block for the passed chain as the created at block
@@ -2523,16 +2527,8 @@ func Create(namespace walletdb.Namespace, seed, pubPassphrase, privPassphrase []
 		return err
 	})
 	if err != nil {
-		return nil, maybeConvertDbError(err)
+		return maybeConvertDbError(err)
 	}
 
-	// The new address manager is locked by default, so clear the master,
-	// crypto private, crypto script and cointype keys from memory.
-	masterKeyPriv.Zero()
-	cryptoKeyPriv.Zero()
-	cryptoKeyScript.Zero()
-	coinTypeKeyPriv.Zero()
-	return newManager(namespace, chainParams, masterKeyPub, masterKeyPriv,
-		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
-		privPassphraseSalt), nil
+	return nil
 }

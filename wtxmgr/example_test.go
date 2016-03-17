@@ -155,7 +155,12 @@ func Example_basicUsage() {
 	}
 
 	// Create (or open) the transaction store in the provided namespace.
-	s, err := wtxmgr.Create(ns)
+	err = wtxmgr.Create(ns)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	s, err := wtxmgr.Open(ns)
 	if err != nil {
 		fmt.Println(err)
 		return

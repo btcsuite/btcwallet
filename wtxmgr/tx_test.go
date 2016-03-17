@@ -75,7 +75,11 @@ func testStore() (*Store, func(), error) {
 	if err != nil {
 		return nil, teardown, err
 	}
-	s, err := Create(ns)
+	err = Create(ns)
+	if err != nil {
+		return nil, teardown, err
+	}
+	s, err := Open(ns)
 	return s, teardown, err
 }
 

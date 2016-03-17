@@ -1706,10 +1706,16 @@ func TestManager(t *testing.T) {
 	}
 
 	// Create a new manager.
-	mgr, err := waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
+	err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
 		privPassphrase, &chaincfg.MainNetParams, fastScrypt)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
+		return
+	}
+	mgr, err := waddrmgr.Open(mgrNamespace, pubPassphrase,
+		&chaincfg.MainNetParams, nil)
+	if err != nil {
+		t.Errorf("Open: unexpected error: %v", err)
 		return
 	}
 
@@ -1718,7 +1724,7 @@ func TestManager(t *testing.T) {
 
 	// Attempt to create the manager again to ensure the expected error is
 	// returned.
-	_, err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
+	err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
 		privPassphrase, &chaincfg.MainNetParams, fastScrypt)
 	if !checkManagerError(t, "Create existing", err, waddrmgr.ErrAlreadyExists) {
 		mgr.Close()

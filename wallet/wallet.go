@@ -25,6 +25,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
@@ -2058,27 +2059,77 @@ func (w *Wallet) ChainParams() *chaincfg.Params {
 	return w.chainParams
 }
 
+// Create creates an new wallet, writing it to an empty database.  If the passed
+// seed is non-nil, it is used.  Otherwise, a secure random seed of the
+// recommended length is generated.
+func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Params) error {
+	// If a seed was provided, ensure that it is of valid length. Otherwise,
+	// we generate a random seed for the wallet with the recommended seed
+	// length.
+	if seed == nil {
+		hdSeed, err := hdkeychain.GenerateSeed(
+			hdkeychain.RecommendedSeedLen)
+		if err != nil {
+			return err
+		}
+		seed = hdSeed
+	}
+	if len(seed) < hdkeychain.MinSeedBytes ||
+		len(seed) > hdkeychain.MaxSeedBytes {
+		return hdkeychain.ErrInvalidSeedLen
+	}
+
+	// Create the address manager.
+	addrMgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	err = waddrmgr.Create(addrMgrNamespace, seed, pubPass, privPass,
+		params, nil)
+	if err != nil {
+		return err
+	}
+
+	// Create empty transaction manager.
+	txMgrNamespace, err := db.Namespace(wtxmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	return wtxmgr.Create(txMgrNamespace)
+}
+
 // Open loads an already-created wallet from the passed database and namespaces.
-func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS, wtxmgrNS walletdb.Namespace, cbs *waddrmgr.OpenCallbacks) (*Wallet, error) {
-	addrMgr, err := waddrmgr.Open(waddrmgrNS, pubPass, params, cbs)
+func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *chaincfg.Params) (*Wallet, error) {
+	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
 	}
-	txMgr, err := wtxmgr.Open(wtxmgrNS)
+	txMgrNS, err := db.Namespace(wtxmgrNamespaceKey)
 	if err != nil {
-		if wtxmgr.IsNoExists(err) {
-			log.Info("No recorded transaction history -- needs full rescan")
-			err = addrMgr.SetSyncedTo(nil)
-			if err != nil {
-				return nil, err
-			}
-			txMgr, err = wtxmgr.Create(wtxmgrNS)
-			if err != nil {
-				return nil, err
-			}
-		} else {
+		return nil, err
+	}
+	addrMgr, err := waddrmgr.Open(addrMgrNS, pubPass, params, cbs)
+	if err != nil {
+		return nil, err
+	}
+	noTxMgr, err := walletdb.NamespaceIsEmpty(txMgrNS)
+	if err != nil {
+		return nil, err
+	}
+	if noTxMgr {
+		log.Info("No recorded transaction history -- needs full rescan")
+		err = addrMgr.SetSyncedTo(nil)
+		if err != nil {
 			return nil, err
 		}
+		err = wtxmgr.Create(txMgrNS)
+		if err != nil {
+			return nil, err
+		}
+	}
+	txMgr, err := wtxmgr.Open(txMgrNS)
+	if err != nil {
+		return nil, err
 	}
 
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
