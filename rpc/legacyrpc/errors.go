@@ -56,6 +56,10 @@ var (
 		errors.New("amount must be positive"),
 	}
 
+	ErrNeedBelowMaxAmount = InvalidParameterError{
+		errors.New("amount must be below max amount"),
+	}
+
 	ErrNeedPositiveSpendLimit = InvalidParameterError{
 		errors.New("spend limit must be positive"),
 	}

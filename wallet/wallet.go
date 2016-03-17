@@ -110,9 +110,9 @@ type Wallet struct {
 	VoteBits           uint16
 	StakeMiningEnabled bool
 	CurrentStakeDiff   *StakeDifficultyInfo
-	BalanceToMaintain  dcrutil.Amount
 	CurrentVotingInfo  *VotingInfo
 	TicketMaxPrice     dcrutil.Amount
+	balanceToMaintain  dcrutil.Amount
 
 	automaticRepair bool
 
@@ -230,7 +230,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		StakeMgr:                 smgr,
 		StakeMiningEnabled:       esm,
 		VoteBits:                 vb,
-		BalanceToMaintain:        btm,
+		balanceToMaintain:        btm,
 		CurrentStakeDiff:         &StakeDifficultyInfo{nil, -1, -1},
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
 		feeIncrement:             feeIncrement,
@@ -326,6 +326,22 @@ func (w *Wallet) SetTicketFeeIncrement(fee dcrutil.Amount) {
 	w.ticketFeeIncrementLock.Lock()
 	w.ticketFeeIncrement = fee
 	w.ticketFeeIncrementLock.Unlock()
+}
+
+// BalanceToMaintain is used to get the current balancetomaintain for the wallet.
+func (w *Wallet) BalanceToMaintain() dcrutil.Amount {
+	w.stakeSettingsLock.Lock()
+	balance := w.balanceToMaintain
+	w.stakeSettingsLock.Unlock()
+
+	return balance
+}
+
+// SetBalanceToMaintain is used to set the current w.balancetomaintain for the wallet.
+func (w *Wallet) SetBalanceToMaintain(balance dcrutil.Amount) {
+	w.stakeSettingsLock.Lock()
+	w.balanceToMaintain = balance
+	w.stakeSettingsLock.Unlock()
 }
 
 // SetGenerate is used to enable or disable stake mining in the
@@ -736,7 +752,7 @@ func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 
 	if w.StakeMiningEnabled {
 		log.Infof("Stake mining is enabled. Votebits: %v, minimum wallet "+
-			"balance %v", w.VoteBits, w.BalanceToMaintain.ToCoin())
+			"balance %v", w.VoteBits, w.BalanceToMaintain().ToCoin())
 		log.Infof("PLEASE ENSURE YOUR WALLET IS UNLOCKED SO IT MAY " +
 			"VOTE ON BLOCKS AND RECEIVE STAKE REWARDS")
 	}

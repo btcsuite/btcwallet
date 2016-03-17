@@ -605,12 +605,21 @@ var helpDescsEnUS = map[string]string{
 	"sendtossgen-tickethash":  "Hash of the ticket used for vote",
 	"sendtossgen-fromaccount": "The account to use (default=\"default\")",
 
-	// SetTxFeeCmd help.
+	// SetTicketFeeCmd help.
 	"setticketfee--synopsis": "Modify the increment used each time more fee is required for an authored stake transaction.",
 	"setticketfee-fee":       "The new fee increment valued in decred",
 	"setticketfee--result0":  "The boolean 'true'",
 
-	// SetTxFeeCmd help.
+	// GetTicketFeeCmd help.
 	"getticketfee--synopsis": "Get the current fee increment used for an authored stake transaction.",
 	"getticketfee--result0":  "The current fee",
+
+	// SetBalanceToMaintainCmd help.
+	"setbalancetomaintain--synopsis": "Modify the balance for wallet to maintain for automatic ticket purchasing",
+	"setbalancetomaintain-balance":   "The new balance for wallet to maintain for automatic ticket purchasing",
+	"setbalancetomaintain--result0":  "Should return nothing",
+
+	// GetBalanceToMaintainCmd help.
+	"getbalancetomaintain--synopsis": "Get the current balance to maintain",
+	"getbalancetomaintain--result0":  "The current balancetomaintain",
 }

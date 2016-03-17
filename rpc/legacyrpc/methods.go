@@ -112,6 +112,7 @@ var rpcHandlers = map[string]struct {
 	"getbestblockhash":       {handler: GetBestBlockHash},
 	"getblockcount":          {handler: GetBlockCount},
 	"getinfo":                {handlerWithChain: GetInfo},
+	"getbalancetomaintain":   {handler: GetBalanceToMaintain},
 	"getgenerate":            {handler: GetGenerate},
 	"getmasterpubkey":        {handler: GetMasterPubkey},
 	"getmultisigoutinfo":     {handlerWithChain: GetMultisigOutInfo},
@@ -150,6 +151,7 @@ var rpcHandlers = map[string]struct {
 	"sendtossgen":            {handler: SendToSSGen},
 	"sendtossrtx":            {handlerWithChain: SendToSSRtx},
 	"setgenerate":            {handler: SetGenerate},
+	"setbalancetomaintain":   {handler: SetBalanceToMaintain},
 	"setticketfee":           {handler: SetTicketFee},
 	"setticketmaxprice":      {handler: SetTicketMaxPrice},
 	"setticketvotebits":      {handler: SetTicketVoteBits},
@@ -1084,6 +1086,13 @@ func GetReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, erro
 	}
 
 	return total.ToCoin(), nil
+}
+
+// GetBalanceToMaintain handles a getbalancetomaintain request by returning the wallet
+// balancetomaintain as a float64.
+func GetBalanceToMaintain(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	balance := w.BalanceToMaintain().ToCoin()
+	return balance, nil
 }
 
 // GetMasterPubkey handles a getmasterpubkey request by returning the wallet
@@ -2859,6 +2868,31 @@ func SetTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 		return nil, err
 	}
 
+	return nil, nil
+}
+
+// SetBalanceToMaintain sets the balance to maintain for automatic ticket pur.
+func SetBalanceToMaintain(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.SetBalanceToMaintainCmd)
+
+	// Check that amount is not negative.
+	if cmd.Balance < 0 {
+		return nil, ErrNeedPositiveAmount
+	}
+	// XXX this is a temporary check until proper checks are added to
+	// dcrutil.NewAmount() to avoid overflows
+	if cmd.Balance > dcrutil.Amount(dcrutil.MaxAmount).ToCoin() {
+		return nil, ErrNeedBelowMaxAmount
+	}
+
+	balance, err := dcrutil.NewAmount(cmd.Balance)
+	if err != nil {
+		return nil, err
+	}
+
+	w.SetBalanceToMaintain(balance)
+
+	// A boolean true result is returned upon success.
 	return nil, nil
 }
 

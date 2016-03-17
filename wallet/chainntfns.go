@@ -127,7 +127,7 @@ ticketPurchaseLoop:
 		// wtxmgr is instead returned. We can use this to compress the
 		// amount to the ticket price, thus avoiding more costly db
 		// lookups.
-		eligible, err := w.CreatePurchaseTicket(w.BalanceToMaintain, -1,
+		eligible, err := w.CreatePurchaseTicket(w.BalanceToMaintain(), -1,
 			0, nil, waddrmgr.DefaultAccountNum)
 		if err != nil {
 			switch {
