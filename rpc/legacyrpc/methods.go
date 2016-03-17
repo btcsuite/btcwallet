@@ -1034,7 +1034,15 @@ func GetRawChangeAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error
 	if err != nil {
 		return nil, err
 	}
-	addr, err := w.NewChangeAddress(account)
+
+	// Use the address pool for the default or imported accounts.
+	var addr dcrutil.Address
+	if account == waddrmgr.DefaultAccountNum ||
+		account == waddrmgr.ImportedAddrAccount {
+		addr, err = w.GetNewAddressInternal()
+	} else {
+		addr, err = w.NewChangeAddress(account)
+	}
 	if err != nil {
 		return nil, err
 	}

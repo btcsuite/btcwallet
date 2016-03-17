@@ -243,6 +243,9 @@ func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
 // BatchFinish must be run after every successful series of usages of
 // GetNewAddress to purge the addresses from the unused map.
 func (a *addressPool) BatchFinish() {
+	log.Debugf("Closing address batch for pool branch %v, next index %v",
+		a.branch, a.index+1)
+
 	// Write the next address to use to the database.
 	addr, err := a.wallet.Manager.GetAddress(a.index+1,
 		waddrmgr.DefaultAccountNum, a.branch)

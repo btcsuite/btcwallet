@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btclog"
+
 	"github.com/decred/dcrd/blockchain"
 	"github.com/decred/dcrd/blockchain/stake"
 	"github.com/decred/dcrd/chaincfg"
@@ -670,10 +672,6 @@ func (w *Wallet) Start() {
 	w.wg.Add(2)
 	go w.txCreator()
 	go w.walletLocker()
-
-	// Spin up the address pools.
-	w.internalPool.initialize(waddrmgr.InternalBranch, w)
-	w.externalPool.initialize(waddrmgr.ExternalBranch, w)
 }
 
 // SynchronizeRPC associates the wallet with the consensus RPC client,
@@ -862,9 +860,14 @@ func (w *Wallet) SetChainSynced(synced bool) {
 	w.chainClientSyncMtx.Unlock()
 }
 
-// finalScanLength is the final length of keys to scan for the recursive
+// finalScanLength is the final length of keys to scan for the
 // function below.
-var finalScanLength int = 100
+var finalScanLength int = 1000
+
+// debugScanLength is the final length of keys to scan past the
+// last index returned from the logarithmic scanning function
+// when creating the debug string of used addresses.
+var debugScanLength int = 3500
 
 // addrSeekWidth is the number of new addresses to generate and add to the
 // address manager when trying to sync up a wallet to the main chain. This
@@ -939,6 +942,92 @@ func (w *Wallet) findEnd(start, stop int, account uint32, branch uint32) int {
 	return indexLast
 }
 
+// debugAccountGapsString is a debug function that prints a graphical outlook
+// of address usage to a string, from the perspective of the daemon.
+func debugAccountGapsString(scanBackFrom int, account uint32, branch uint32,
+	w *Wallet) (string, error) {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	str := fmt.Sprintf("Begin debug address scan scanning backwards from "+
+		"idx %v, account %v, branch %v\n", scanBackFrom, account, branch)
+	buf.WriteString(str)
+	firstUsedIndex := 0
+	for i := scanBackFrom; i > 0; i-- {
+		addr, err := w.Manager.GetAddress(uint32(i), account, branch)
+		// Skip erroneous keys.
+		if err != nil {
+			continue
+		}
+
+		exists, err := chainClient.ExistsAddress(addr)
+		if err != nil {
+			return "", fmt.Errorf("failed to access chain server: %v",
+				err.Error())
+		}
+
+		if exists {
+			firstUsedIndex = i
+			break
+		}
+	}
+
+	str = fmt.Sprintf("Last used index found: %v\n", firstUsedIndex)
+	buf.WriteString(str)
+
+	batchSize := 50
+	batches := (firstUsedIndex / batchSize) + 1
+	lastBatchSize := 0
+	if firstUsedIndex%batchSize != 0 {
+		lastBatchSize = firstUsedIndex - ((batches - 1) * batchSize)
+	}
+
+	for i := 0; i < batches; i++ {
+		str = fmt.Sprintf("%8v", i*batchSize)
+		buf.WriteString(str)
+
+		start := i * batchSize
+		end := (i + 1) * batchSize
+		if i == batches-1 {
+			// Nothing to do because last batch empty.
+			if lastBatchSize == 0 {
+				break
+			}
+			end = i*batchSize + lastBatchSize
+		}
+
+		for j := start; j < end; j++ {
+			if j%10 == 0 {
+				buf.WriteString("  ")
+			}
+
+			char := "_"
+			addr, err := w.Manager.GetAddress(uint32(j), account, branch)
+			if err != nil {
+				char = "X"
+			}
+
+			exists, err := chainClient.ExistsAddress(addr)
+			if err != nil {
+				return "", fmt.Errorf("failed to access chain server: %v",
+					err.Error())
+			}
+			if exists {
+				char = "#"
+			}
+
+			buf.WriteString(char)
+		}
+
+		buf.WriteString("\n")
+	}
+
+	return buf.String(), nil
+}
+
 // scanAddressIndex identifies the last used address in an HD keychain of public
 // keys. It returns the index of the last used key, along with the address of
 // this key.
@@ -953,6 +1042,20 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 	// gap from that position, which is possible. Then, return the address
 	// in that position.
 	lastUsed := w.findEnd(start, end, account, branch)
+
+	// If debug is on, do an exhaustive check and a graphical printout
+	// of what the used addresses currently look like.
+	if log.Level() == btclog.DebugLvl || log.Level() == btclog.TraceLvl {
+		dbgStr, err := debugAccountGapsString(lastUsed+debugScanLength, account,
+			branch, w)
+		if err != nil {
+			log.Debugf("Failed to debug address gaps for account %v, "+
+				"branch %v: %v", account, branch, err)
+		} else {
+			log.Debugf("%v", dbgStr)
+		}
+	}
+
 	if lastUsed != 0 {
 		for i := lastUsed + finalScanLength; i > lastUsed; i-- {
 			addr, err := w.Manager.GetAddress(uint32(i), account, branch)
