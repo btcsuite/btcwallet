@@ -175,6 +175,9 @@ func (s *Store) unminedTxs(ns walletdb.Bucket) ([]*wire.MsgTx, error) {
 		unmined = append(unmined, &rec)
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Sort by dependency on other transactions, if any.
 	g, i, err := parseTxRecsAsGraph(unmined)
