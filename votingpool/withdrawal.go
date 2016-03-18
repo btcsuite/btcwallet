@@ -171,7 +171,7 @@ func (tx *changeAwareTx) addSelfToStore(store *wtxmgr.Store) error {
 		return newError(ErrWithdrawalTxStorage, "error adding tx to store", err)
 	}
 	if tx.changeIdx != -1 {
-		if err = store.AddCredit(rec, nil, uint32(tx.changeIdx), true); err != nil {
+		if err = store.AddCredit(rec, nil, uint32(tx.changeIdx), true, uint32(0)); err != nil {
 			return newError(ErrWithdrawalTxStorage, "error adding tx credits to store", err)
 		}
 	}

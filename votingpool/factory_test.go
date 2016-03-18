@@ -315,7 +315,7 @@ func TstCreateCreditsOnStore(t *testing.T, s *wtxmgr.Store, pkScript []byte,
 
 	credits := make([]wtxmgr.Credit, len(msgTx.TxOut))
 	for i := range msgTx.TxOut {
-		if err := s.AddCredit(rec, meta, uint32(i), false); err != nil {
+		if err := s.AddCredit(rec, meta, uint32(i), false, uint32(0)); err != nil {
 			t.Fatal("Failed to create inputs: ", err)
 		}
 		credits[i] = wtxmgr.Credit{
