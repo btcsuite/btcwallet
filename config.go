@@ -186,6 +186,15 @@ func parseAndSetDebugLevels(debugLevel string) error {
 	return nil
 }
 
+func isLocalhostListener(listener string) bool {
+	switch listener {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
 // loadConfig initializes and parses the config using a config file and command
 // line options.
 //
@@ -466,17 +475,12 @@ func loadConfig() (*config, []string, *resources.Resources, error) {
 		return nil, nil, nil, err
 	}
 
-	localhostListeners := map[string]struct{}{
-		"localhost": struct{}{},
-		"127.0.0.1": struct{}{},
-		"::1":       struct{}{},
-	}
 	RPCHost, _, err := net.SplitHostPort(cfg.RPCConnect)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if cfg.DisableClientTLS {
-		if _, ok := localhostListeners[RPCHost]; !ok {
+		if !isLocalhostListener(RPCHost) {
 			str := "%s: the --noclienttls option may not be used " +
 				"when connecting RPC to non localhost " +
 				"addresses: %s"
@@ -500,7 +504,7 @@ func loadConfig() (*config, []string, *resources.Resources, error) {
 			return nil, nil, nil, err
 		}
 		if !certExists {
-			if _, ok := localhostListeners[RPCHost]; ok {
+			if isLocalhostListener(RPCHost) {
 				localCert := appResources.ConsensusRPCLocalCertificateFilePath()
 				btcdCertExists, err := cfgutil.FileExists(localCert)
 				if err != nil {
@@ -582,7 +586,7 @@ func loadConfig() (*config, []string, *resources.Resources, error) {
 				fmt.Fprintln(os.Stderr, usageMessage)
 				return nil, nil, nil, err
 			}
-			if _, ok := localhostListeners[host]; !ok {
+			if !isLocalhostListener(host) {
 				str := "%s: the --noservertls option may not be used " +
 					"when binding RPC to non localhost " +
 					"addresses: %s"
