@@ -8,39 +8,23 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	"github.com/btcsuite/btcwallet/netparams"
+	"github.com/btcsuite/btcwallet/resources"
 	"github.com/btcsuite/btcwallet/wallet"
 	flags "github.com/btcsuite/go-flags"
 )
 
 const (
-	defaultCAFilename       = "btcd.cert"
-	defaultConfigFilename   = "btcwallet.conf"
 	defaultLogLevel         = "info"
-	defaultLogDirname       = "logs"
-	defaultLogFilename      = "btcwallet.log"
 	defaultRPCMaxClients    = 10
 	defaultRPCMaxWebsockets = 25
-
-	walletDbName = "wallet.db"
-)
-
-var (
-	btcdHomeDir        = btcutil.AppDataDir("btcd", false)
-	btcwalletHomeDir   = btcutil.AppDataDir("btcwallet", false)
-	btcdHomedirCAFile  = filepath.Join(btcdHomeDir, "rpc.cert")
-	defaultConfigFile  = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
-	defaultDataDir     = btcwalletHomeDir
-	defaultRPCKeyFile  = filepath.Join(btcwalletHomeDir, "rpc.key")
-	defaultRPCCertFile = filepath.Join(btcwalletHomeDir, "rpc.cert")
-	defaultLogDir      = filepath.Join(btcwalletHomeDir, defaultLogDirname)
 )
 
 type config struct {
@@ -95,13 +79,21 @@ type config struct {
 	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
 }
 
+var userHomeDirectory string
+
+func init() {
+	currentUser, err := user.Current()
+	if err == nil {
+		userHomeDirectory = currentUser.HomeDir
+	}
+}
+
 // cleanAndExpandPath expands environement variables and leading ~ in the
 // passed path, cleans the result, and returns it.
 func cleanAndExpandPath(path string) string {
 	// Expand initial ~ to OS specific home directory.
-	if strings.HasPrefix(path, "~") {
-		homeDir := filepath.Dir(btcwalletHomeDir)
-		path = strings.Replace(path, "~", homeDir, 1)
+	if userHomeDirectory != "" && strings.HasPrefix(path, "~") {
+		path = strings.Replace(path, "~", userHomeDirectory, 1)
 	}
 
 	// NOTE: The os.ExpandEnv doesn't work with Windows cmd.exe-style
@@ -194,6 +186,15 @@ func parseAndSetDebugLevels(debugLevel string) error {
 	return nil
 }
 
+func isLocalhostListener(listener string) bool {
+	switch listener {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
 // loadConfig initializes and parses the config using a config file and command
 // line options.
 //
@@ -206,25 +207,28 @@ func parseAndSetDebugLevels(debugLevel string) error {
 // The above results in btcwallet functioning properly without any config
 // settings while still allowing the user to override settings with config files
 // and command line options.  Command line options always take precedence.
-func loadConfig() (*config, []string, error) {
+func loadConfig() (*config, []string, *resources.Resources, error) {
+	appResources := resources.Defaults()
+
 	// Default config.
 	cfg := config{
 		DebugLevel:             defaultLogLevel,
-		ConfigFile:             defaultConfigFile,
-		DataDir:                defaultDataDir,
-		LogDir:                 defaultLogDir,
+		ConfigFile:             appResources.ConfigFilePath(),
+		DataDir:                appResources.ApplicationDataDirectory,
+		LogDir:                 appResources.DefaultLoggingDirectory(),
 		WalletPass:             wallet.InsecurePubPassphrase,
-		RPCKey:                 defaultRPCKeyFile,
-		RPCCert:                defaultRPCCertFile,
+		RPCKey:                 appResources.RPCKeyFilePath(),
+		RPCCert:                appResources.RPCCertificateFilePath(),
 		LegacyRPCMaxClients:    defaultRPCMaxClients,
 		LegacyRPCMaxWebsockets: defaultRPCMaxWebsockets,
 	}
 
 	// A config file in the current directory takes precedence.
-	exists, err := cfgutil.FileExists(defaultConfigFilename)
+	defaultConfigFile := appResources.ConfigFilePath()
+	exists, err := cfgutil.FileExists(defaultConfigFile)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if exists {
 		cfg.ConfigFile = defaultConfigFile
@@ -239,7 +243,7 @@ func loadConfig() (*config, []string, error) {
 		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
 			preParser.WriteHelp(os.Stderr)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Show the version and exit if the version flag was specified.
@@ -260,7 +264,7 @@ func loadConfig() (*config, []string, error) {
 		if _, ok := err.(*os.PathError); !ok {
 			fmt.Fprintln(os.Stderr, err)
 			parser.WriteHelp(os.Stderr)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		configFileError = err
 	}
@@ -271,7 +275,7 @@ func loadConfig() (*config, []string, error) {
 		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
 			parser.WriteHelp(os.Stderr)
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Warn about missing config file after the final command line parse
@@ -281,27 +285,54 @@ func loadConfig() (*config, []string, error) {
 		log.Warnf("%v", configFileError)
 	}
 
-	// If an alternate data directory was specified, and paths with defaults
-	// relative to the data dir are unchanged, modify each path to be
-	// relative to the new data dir.
-	if cfg.DataDir != defaultDataDir {
-		if cfg.RPCKey == defaultRPCKeyFile {
-			cfg.RPCKey = filepath.Join(cfg.DataDir, "rpc.key")
+	// Clean and expand all remaining filepaths.
+	cfg.DataDir = cleanAndExpandPath(cfg.DataDir)
+	cfg.RPCKey = cleanAndExpandPath(cfg.RPCKey)
+	cfg.RPCCert = cleanAndExpandPath(cfg.RPCCert)
+	cfg.LogDir = cleanAndExpandPath(cfg.LogDir)
+	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
+
+	// If an alternate data directory was specified, update the application
+	// data directory in the resources package.  This causes resources'
+	// functions to return absolute filepaths with the user-set application
+	// data directory.
+	//
+	// When other files relative to the data directory have not been
+	// modified from their defaults, update them to use the new data
+	// directory.
+	defaultAppDataDir := appResources.ApplicationDataDirectory
+	if cfg.DataDir != defaultAppDataDir {
+		defaultRPCCertificate := appResources.RPCCertificateFilePath()
+		defaultRPCKey := appResources.RPCKeyFilePath()
+		defaultLogDir := appResources.DefaultLoggingDirectory()
+
+		appResources.ApplicationDataDirectory = cfg.DataDir
+
+		if cfg.RPCCert == defaultRPCCertificate {
+			cfg.RPCCert = appResources.RPCCertificateFilePath()
 		}
-		if cfg.RPCCert == defaultRPCCertFile {
-			cfg.RPCCert = filepath.Join(cfg.DataDir, "rpc.cert")
+		if cfg.RPCKey == defaultRPCKey {
+			cfg.RPCKey = appResources.RPCKeyFilePath()
 		}
+		if cfg.LogDir == defaultLogDir {
+			cfg.LogDir = appResources.DefaultLoggingDirectory()
+		}
+
+		// Consensus certificate file is unset by default, so if
+		// explicitly set, use it even if it's in the default
+		// application data directory.  Finding the actual cert when
+		// unset is handled later.
 	}
 
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
 	if cfg.TestNet3 {
-		activeNet = &netparams.TestNet3Params
+		appResources.ActiveNetwork = &netparams.TestNet3Params
 		numNets++
 	}
 	if cfg.SimNet {
-		activeNet = &netparams.SimNetParams
+		appResources.ActiveNetwork = &netparams.SimNetParams
 		numNets++
 	}
 	if numNets > 1 {
@@ -310,13 +341,8 @@ func loadConfig() (*config, []string, error) {
 		err := fmt.Errorf(str, "loadConfig")
 		fmt.Fprintln(os.Stderr, err)
 		parser.WriteHelp(os.Stderr)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-
-	// Append the network type to the log directory so it is "namespaced"
-	// per network.
-	cfg.LogDir = cleanAndExpandPath(cfg.LogDir)
-	cfg.LogDir = filepath.Join(cfg.LogDir, activeNet.Params.Name)
 
 	// Special show command to list supported subsystems and exit.
 	if cfg.DebugLevel == "show" {
@@ -325,7 +351,7 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Initialize logging at the default logging level.
-	initSeelogLogger(filepath.Join(cfg.LogDir, defaultLogFilename))
+	initSeelogLogger(appResources.LogFilePath(cfg.LogDir))
 	setLogLevels(defaultLogLevel)
 
 	// Parse, validate, and set debug log level(s).
@@ -333,12 +359,12 @@ func loadConfig() (*config, []string, error) {
 		err := fmt.Errorf("%s: %v", "loadConfig", err.Error())
 		fmt.Fprintln(os.Stderr, err)
 		parser.WriteHelp(os.Stderr)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Exit if you try to use a simulation wallet with a standard
 	// data directory.
-	if cfg.DataDir == defaultDataDir && cfg.CreateTemp {
+	if cfg.DataDir == defaultAppDataDir && cfg.CreateTemp {
 		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
 			"wallet, but failed to specify data directory!")
 		os.Exit(0)
@@ -352,21 +378,19 @@ func loadConfig() (*config, []string, error) {
 		os.Exit(0)
 	}
 
-	// Ensure the wallet exists or create it when the create flag is set.
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
-	dbPath := filepath.Join(netDir, walletDbName)
-
 	if cfg.CreateTemp && cfg.Create {
 		err := fmt.Errorf("The flags --create and --createtemp can not " +
 			"be specified together. Use --help for more information.")
 		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	dbFileExists, err := cfgutil.FileExists(dbPath)
+	// Ensure the wallet exists or create it when the create flag is set.
+	dbFilePath := appResources.DatabaseFilePath()
+	dbFileExists, err := cfgutil.FileExists(dbFilePath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if cfg.CreateTemp {
@@ -380,16 +404,17 @@ func loadConfig() (*config, []string, error) {
 		}
 
 		// Ensure the data directory for the network exists.
-		if err := checkCreateDir(netDir); err != nil {
+		err := checkCreateDir(appResources.NetworkDirectory())
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		if !tempWalletExists {
 			// Perform the initial wallet creation wizard.
 			if err := createSimulationWallet(&cfg); err != nil {
 				fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	} else if cfg.Create {
@@ -397,31 +422,33 @@ func loadConfig() (*config, []string, error) {
 		// exists.
 		if dbFileExists {
 			err := fmt.Errorf("The wallet database file `%v` "+
-				"already exists.", dbPath)
+				"already exists.", dbFilePath)
 			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		// Ensure the data directory for the network exists.
-		if err := checkCreateDir(netDir); err != nil {
+		err := checkCreateDir(appResources.NetworkDirectory())
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		// Perform the initial wallet creation wizard.
 		if err := createWallet(&cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		// Created successfully, so exit now with success.
 		os.Exit(0)
 	} else if !dbFileExists && !cfg.NoInitialLoad {
-		keystorePath := filepath.Join(netDir, keystore.Filename)
+		keystorePath := filepath.Join(appResources.NetworkDirectory(),
+			keystore.Filename)
 		keystoreExists, err := cfgutil.FileExists(keystorePath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if !keystoreExists {
 			err = fmt.Errorf("The wallet does not exist.  Run with the " +
@@ -431,64 +458,61 @@ func loadConfig() (*config, []string, error) {
 				"--create option to import it.")
 		}
 		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if cfg.RPCConnect == "" {
-		cfg.RPCConnect = net.JoinHostPort("localhost", activeNet.RPCClientPort)
+		cfg.RPCConnect = net.JoinHostPort("localhost",
+			appResources.ActiveNetwork.RPCClientPort)
 	}
 
 	// Add default port to connect flag if missing.
 	cfg.RPCConnect, err = cfgutil.NormalizeAddress(cfg.RPCConnect,
-		activeNet.RPCClientPort)
+		appResources.ActiveNetwork.RPCClientPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr,
 			"Invalid rpcconnect network address: %v\n", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	localhostListeners := map[string]struct{}{
-		"localhost": struct{}{},
-		"127.0.0.1": struct{}{},
-		"::1":       struct{}{},
-	}
 	RPCHost, _, err := net.SplitHostPort(cfg.RPCConnect)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if cfg.DisableClientTLS {
-		if _, ok := localhostListeners[RPCHost]; !ok {
+		if !isLocalhostListener(RPCHost) {
 			str := "%s: the --noclienttls option may not be used " +
 				"when connecting RPC to non localhost " +
 				"addresses: %s"
 			err := fmt.Errorf(str, funcName, cfg.RPCConnect)
 			fmt.Fprintln(os.Stderr, err)
 			fmt.Fprintln(os.Stderr, usageMessage)
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-	} else {
-		// If CAFile is unset, choose either the copy or local btcd cert.
-		if cfg.CAFile == "" {
-			cfg.CAFile = filepath.Join(cfg.DataDir, defaultCAFilename)
+	} else if cfg.CAFile == "." {
+		// If TLS is enabled but the CAFile is unset, choose either the
+		// local copy in the wallet's application data directory, or the
+		// btcd certificate from the default btcd application data
+		// directory if the copy is not found.
+		cfg.CAFile = appResources.ConsensusRPCRemoteCertificateFilePath()
 
-			// If the CA copy does not exist, check if we're connecting to
-			// a local btcd and switch to its RPC cert if it exists.
-			certExists, err := cfgutil.FileExists(cfg.CAFile)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return nil, nil, err
-			}
-			if !certExists {
-				if _, ok := localhostListeners[RPCHost]; ok {
-					btcdCertExists, err := cfgutil.FileExists(
-						btcdHomedirCAFile)
-					if err != nil {
-						fmt.Fprintln(os.Stderr, err)
-						return nil, nil, err
-					}
-					if btcdCertExists {
-						cfg.CAFile = btcdHomedirCAFile
-					}
+		// If the CA copy does not exist, check if we're connecting to
+		// a local btcd and switch to its RPC cert if it exists.
+		certExists, err := cfgutil.FileExists(cfg.CAFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return nil, nil, nil, err
+		}
+		if !certExists {
+			if isLocalhostListener(RPCHost) {
+				localCert := appResources.ConsensusRPCLocalCertificateFilePath()
+				btcdCertExists, err := cfgutil.FileExists(localCert)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					return nil, nil, nil, err
+				}
+				if btcdCertExists {
+					cfg.CAFile = appResources.ConsensusRPCDataDirectory
 				}
 			}
 		}
@@ -502,11 +526,12 @@ func loadConfig() (*config, []string, error) {
 	if len(cfg.ExperimentalRPCListeners) == 0 && len(cfg.LegacyRPCListeners) == 0 {
 		addrs, err := net.LookupHost("localhost")
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		cfg.LegacyRPCListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
-			addr = net.JoinHostPort(addr, activeNet.RPCServerPort)
+			addr = net.JoinHostPort(addr,
+				appResources.ActiveNetwork.RPCServerPort)
 			cfg.LegacyRPCListeners = append(cfg.LegacyRPCListeners, addr)
 		}
 	}
@@ -514,18 +539,18 @@ func loadConfig() (*config, []string, error) {
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
 	cfg.LegacyRPCListeners, err = cfgutil.NormalizeAddresses(
-		cfg.LegacyRPCListeners, activeNet.RPCServerPort)
+		cfg.LegacyRPCListeners, appResources.ActiveNetwork.RPCServerPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr,
 			"Invalid network address in legacy RPC listeners: %v\n", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	cfg.ExperimentalRPCListeners, err = cfgutil.NormalizeAddresses(
-		cfg.ExperimentalRPCListeners, activeNet.RPCServerPort)
+		cfg.ExperimentalRPCListeners, appResources.ActiveNetwork.RPCServerPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr,
 			"Invalid network address in RPC listeners: %v\n", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Both RPC servers may not listen on the same interface/port.
@@ -541,7 +566,7 @@ func loadConfig() (*config, []string, error) {
 					"used as a listener address for both "+
 					"RPC servers", addr)
 				fmt.Fprintln(os.Stderr, err)
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	}
@@ -559,22 +584,19 @@ func loadConfig() (*config, []string, error) {
 				err := fmt.Errorf(str, funcName, addr, err)
 				fmt.Fprintln(os.Stderr, err)
 				fmt.Fprintln(os.Stderr, usageMessage)
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
-			if _, ok := localhostListeners[host]; !ok {
+			if !isLocalhostListener(host) {
 				str := "%s: the --noservertls option may not be used " +
 					"when binding RPC to non localhost " +
 					"addresses: %s"
 				err := fmt.Errorf(str, funcName, addr)
 				fmt.Fprintln(os.Stderr, err)
 				fmt.Fprintln(os.Stderr, usageMessage)
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	}
-
-	// Expand environment variable and leading ~ for filepaths.
-	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
 
 	// If the btcd username or password are unset, use the same auth as for
 	// the client.  The two settings were previously shared for btcd and
@@ -587,5 +609,5 @@ func loadConfig() (*config, []string, error) {
 		cfg.BtcdPassword = cfg.Password
 	}
 
-	return &cfg, remainingArgs, nil
+	return &cfg, remainingArgs, &appResources, nil
 }
