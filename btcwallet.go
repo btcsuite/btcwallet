@@ -47,6 +47,9 @@ func walletMain() error {
 	cfg = tcfg
 	defer backendLog.Flush()
 
+	// Show version at startup.
+	log.Infof("Version %s", version())
+
 	if cfg.Profile != "" {
 		go func() {
 			listenAddr := net.JoinHostPort("", cfg.Profile)
