@@ -102,8 +102,14 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 
 // createWallet prompts the user for information needed to generate a new wallet
 // and generates the wallet accordingly.  The new wallet will reside at the
-// provided path.
+// provided path. The bool passed back gives whether or not the wallet was
+// restored from seed, while the []byte passed is the private password required
+// to do the initial sync.
 func createWallet(cfg *config) error {
+	createWalletError := func(err error) error {
+		return err
+	}
+
 	dbDir := networkDir(cfg.DataDir, activeNet.Params)
 	stakeOptions := &wallet.StakeOptions{
 		VoteBits:           cfg.VoteBits,
@@ -115,7 +121,7 @@ func createWallet(cfg *config) error {
 		TicketAddress:      cfg.TicketAddress,
 		TicketMaxPrice:     cfg.TicketMaxPrice,
 	}
-	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions, cfg.AutomaticRepair, cfg.UnsafeMainNet)
+	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions, cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.PromptPass)
 
 	// When there is a legacy keystore, open it now to ensure any errors
 	// don't end up exiting the process after the user has spent time
@@ -127,12 +133,12 @@ func createWallet(cfg *config) error {
 	if err != nil && !os.IsNotExist(err) {
 		// A stat error not due to a non-existant file should be
 		// returned to the caller.
-		return err
+		return createWalletError(err)
 	} else if err == nil {
 		// Keystore file exists.
 		legacyKeyStore, err = keystore.OpenDir(netDir)
 		if err != nil {
-			return err
+			return createWalletError(err)
 		}
 	}
 
@@ -142,7 +148,7 @@ func createWallet(cfg *config) error {
 	reader := bufio.NewReader(os.Stdin)
 	privPass, err := prompt.PrivatePass(reader, legacyKeyStore)
 	if err != nil {
-		return err
+		return createWalletError(err)
 	}
 
 	// When there exists a legacy keystore, unlock it now and set up a
@@ -151,7 +157,7 @@ func createWallet(cfg *config) error {
 	if legacyKeyStore != nil {
 		err = legacyKeyStore.Unlock(privPass)
 		if err != nil {
-			return err
+			return createWalletError(err)
 		}
 
 		// Import the addresses in the legacy keystore to the new wallet if
@@ -191,7 +197,7 @@ func createWallet(cfg *config) error {
 	pubPass, err := prompt.PublicPass(reader, privPass,
 		[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
 	if err != nil {
-		return err
+		return createWalletError(err)
 	}
 
 	// Ascertain the wallet generation seed.  This will either be an
@@ -199,17 +205,17 @@ func createWallet(cfg *config) error {
 	// value the user has entered which has already been validated.
 	seed, err := prompt.Seed(reader)
 	if err != nil {
-		return err
+		return createWalletError(err)
 	}
 
 	fmt.Println("Creating the wallet...")
-	w, err := loader.CreateNewWallet(pubPass, privPass, seed)
+	_, err = loader.CreateNewWallet(pubPass, privPass, seed)
 	if err != nil {
-		return err
+		return createWalletError(err)
 	}
 
-	w.Manager.Close()
 	fmt.Println("The wallet has been created successfully.")
+
 	return nil
 }
 
@@ -217,7 +223,7 @@ func createWallet(cfg *config) error {
 // and used to create a wallet for actors involved in simulations.
 func createSimulationWallet(cfg *config) error {
 	// Simulation wallet password is 'password'.
-	privPass := []byte("password")
+	privPass := wallet.SimulationPassphrase
 
 	// Public passphrase is the default.
 	pubPass := []byte(wallet.InsecurePubPassphrase)

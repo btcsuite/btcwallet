@@ -113,10 +113,10 @@ func promptListBool(reader *bufio.Reader, prefix string, defaultEntry string) (b
 	return response == "yes" || response == "y", nil
 }
 
-// promptPass prompts the user for a passphrase with the given prefix.  The
+// PromptPass prompts the user for a passphrase with the given prefix.  The
 // function will ask the user to confirm the passphrase and will repeat the
 // prompts until they enter a matching response.
-func promptPass(reader *bufio.Reader, prefix string, confirm bool) ([]byte, error) {
+func PromptPass(reader *bufio.Reader, prefix string, confirm bool) ([]byte, error) {
 	// Prompt the user until they enter a passphrase.
 	prompt := fmt.Sprintf("%s: ", prefix)
 	for {
@@ -161,7 +161,7 @@ func PrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Store) ([]byte, 
 	// When there is not an existing legacy wallet, simply prompt the user
 	// for a new private passphase and return it.
 	if legacyKeyStore == nil {
-		return promptPass(reader, "Enter the private "+
+		return PromptPass(reader, "Enter the private "+
 			"passphrase for your new wallet", true)
 	}
 
@@ -172,7 +172,7 @@ func PrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Store) ([]byte, 
 		"your existing legacy wallet will be imported into the new " +
 		"wallet format.")
 	for {
-		privPass, err := promptPass(reader, "Enter the private "+
+		privPass, err := PromptPass(reader, "Enter the private "+
 			"passphrase for your existing wallet", false)
 		if err != nil {
 			return nil, err
@@ -228,7 +228,7 @@ func PublicPass(reader *bufio.Reader, privPass []byte,
 	}
 
 	for {
-		pubPass, err = promptPass(reader, "Enter the public "+
+		pubPass, err = PromptPass(reader, "Enter the public "+
 			"passphrase for your new wallet", true)
 		if err != nil {
 			return nil, err
@@ -261,7 +261,8 @@ func PublicPass(reader *bufio.Reader, privPass []byte,
 // seed.  When the user answers no, a seed will be generated and displayed to
 // the user along with prompting them for confirmation.  When the user answers
 // yes, a the user is prompted for it.  All prompts are repeated until the user
-// enters a valid response.
+// enters a valid response. The bool returned indicates if the wallet was
+// restored from a given seed or not.
 func Seed(reader *bufio.Reader) ([]byte, error) {
 	// Ascertain the wallet generation seed.
 	useUserSeed, err := promptListBool(reader, "Do you have an "+

@@ -6,7 +6,6 @@
 package waddrmgr
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -14,13 +13,12 @@ import (
 	"github.com/btcsuite/fastsha256"
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/walletdb"
 )
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 4
+	LatestMgrVersion = 5
 )
 
 var (
@@ -169,6 +167,25 @@ var (
 	// e.g. last account number
 	metaBucketName = []byte("meta")
 
+	// addrPoolMetaKeyLen is the byte length of the address pool
+	// prefixes. It is 11 bytes for the prefix and 4 bytes for
+	// the account number.
+	addrPoolMetaKeyLen = 15
+
+	// addrPoolKeyPrefixExt is the prefix for keys mapping the
+	// last used address pool index to a BIP0044 account. The
+	// BIP0044 account is appended to this slice in order to
+	// derive the key. This is the external branch.
+	// e.g. in pseudocode:
+	// key = append([]byte("addrpoolext"), []byte(account))
+	addrPoolKeyPrefixExt = []byte("addrpoolext")
+
+	// addrPoolKeyPrefixInt is the prefix for keys mapping the
+	// last used address pool index to a BIP0044 account. The
+	// BIP0044 account is appended to this slice in order to
+	// derive the key. This is the internal branch.
+	addrPoolKeyPrefixInt = []byte("addrpoolint")
+
 	// lastAccountName is used to store the metadata - last account
 	// in the manager
 	lastAccountName = []byte("lastaccount")
@@ -192,16 +209,18 @@ var (
 	watchingOnlyName    = []byte("watchonly")
 
 	// Sync related key names (sync bucket).
-	syncedToName         = []byte("syncedto")
-	startBlockName       = []byte("startblock")
-	recentBlocksName     = []byte("recentblocks")
-	lastDefaultAddsrName = []byte("lastaddrs")
+	syncedToName     = []byte("syncedto")
+	startBlockName   = []byte("startblock")
+	recentBlocksName = []byte("recentblocks")
 
 	// Account related key names (account bucket).
 	acctNumAcctsName = []byte("numaccts")
 
-	// Used addresses (used bucket)
+	// Used addresses (used bucket).
 	usedAddrBucketName = []byte("usedaddrs")
+
+	// Legacy buckets and names.
+	lastDefaultAddsrNameLegacyV4 = []byte("lastaddrs")
 )
 
 // uint32ToBytes converts a 32 bit unsigned integer into a 4-byte slice in
@@ -1545,44 +1564,54 @@ func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []chainhas
 	return nil
 }
 
-// fetchNextToUseAddrs loads the next to use addresses for the internal and
-// external default accounts as 20 byte P2PKH address scripts.
-func fetchNextToUseAddrs(tx walletdb.Tx) ([20]byte, [20]byte, error) {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
-
-	// Load the master private key parameters if they were stored.
-	var nextToUsePkhs []byte
-	val := bucket.Get(lastDefaultAddsrName)
-	if val != nil {
-		nextToUsePkhs = make([]byte, len(val))
-		copy(nextToUsePkhs, val)
+// accountNumberToAddrPoolKey converts an account into a meta-bucket key for
+// the storage of the next to use address index as the value.
+func accountNumberToAddrPoolKey(isInternal bool, account uint32) []byte {
+	k := make([]byte, addrPoolMetaKeyLen)
+	if isInternal {
+		copy(k, addrPoolKeyPrefixInt)
+		binary.LittleEndian.PutUint32(k[addrPoolMetaKeyLen-4:], account)
 	} else {
-		str := "nextToUsePkhs is not present"
-		return [20]byte{}, [20]byte{}, managerError(ErrDatabase, str, nil)
+		copy(k, addrPoolKeyPrefixExt)
+		binary.LittleEndian.PutUint32(k[addrPoolMetaKeyLen-4:], account)
 	}
 
-	var addrExtPkh [20]byte
-	var addrIntPkh [20]byte
-	copy(addrExtPkh[:], nextToUsePkhs[:20])
-	copy(addrIntPkh[:], nextToUsePkhs[20:])
-
-	return addrExtPkh, addrIntPkh, nil
+	return k
 }
 
-// putNextToUseAddrs inserts the next to be used address into the waddrmgr
+// fetchNextToUseAddrPoolIdx retrieves an address pool address index for a
+// given account and branch from the meta bucket of the address manager
 // database.
-func putNextToUseAddrs(tx walletdb.Tx, addrExtPkh [20]byte,
-	addrIntPkh [20]byte) error {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func fetchNextToUseAddrPoolIdx(tx walletdb.Tx, isInternal bool,
+	account uint32) (uint32, error) {
+	bucket := tx.RootBucket().Bucket(metaBucketName)
+	k := accountNumberToAddrPoolKey(isInternal, account)
+	val := bucket.Get(k)
 
-	// Enough space for 2x PKHs.
-	nextToUsePkhs := make([]byte, 40, 40)
-	copy(nextToUsePkhs[:20], addrExtPkh[:])
-	copy(nextToUsePkhs[20:], addrIntPkh[:])
+	// Value should be a uint32. The serialized format
+	// is simply a little endian slice 4 bytes long.
+	if len(val) < 4 {
+		str := fmt.Sprintf("short read for acct %v, isinternal %v",
+			account, isInternal)
+		err := fmt.Errorf("short read")
+		return 0, managerError(ErrMetaPoolIdxNoExist, str, err)
+	}
 
-	err := bucket.Put(lastDefaultAddsrName, nextToUsePkhs)
+	return binary.LittleEndian.Uint32(val[0:4]), nil
+}
+
+// putNextToUseAddrPoolIdx stores an address pool address index for a
+// given account and branch in the meta bucket of the address manager
+// database.
+func putNextToUseAddrPoolIdx(tx walletdb.Tx, isInternal bool, account uint32, index uint32) error {
+	bucket := tx.RootBucket().Bucket(metaBucketName)
+	k := accountNumberToAddrPoolKey(isInternal, account)
+	v := make([]byte, 4, 4)
+	binary.LittleEndian.PutUint32(v, index)
+
+	err := bucket.Put(k, v)
 	if err != nil {
-		str := "failed to store lastUsedPkhs"
+		str := "failed to store next to use idx"
 		return managerError(ErrDatabase, str, err)
 	}
 
@@ -1693,19 +1722,14 @@ func createManagerNS(namespace walletdb.Namespace) error {
 	return nil
 }
 
-// upgradeToVersion2 upgrades the database from version 1 to version 2
-// 'usedAddrBucketName' a bucket for storing addrs flagged as marked is
-// initialized and it will be updated on the next rescan.
-func upgradeToVersion2(namespace walletdb.Namespace) error {
+// upgradeToVersion5 upgrades the database from version 4 to version 5.
+// Version 5 uses the metadata bucket to store the address pool indexes,
+// so lastAddrs can be removed from the db.
+func upgradeToVersion5(namespace walletdb.Namespace) error {
 	err := namespace.Update(func(tx walletdb.Tx) error {
-		currentMgrVersion := uint32(2)
-		rootBucket := tx.RootBucket()
-
-		_, err := rootBucket.CreateBucket(usedAddrBucketName)
-		if err != nil {
-			str := "failed to create used addresses bucket"
-			return managerError(ErrDatabase, str, err)
-		}
+		currentMgrVersion := uint32(5)
+		bucket := tx.RootBucket().Bucket(mainBucketName)
+		bucket.Delete(lastDefaultAddsrNameLegacyV4)
 
 		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
 			return err
@@ -1733,13 +1757,8 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 		return managerError(ErrDatabase, str, err)
 	}
 
-	// NOTE: There are currently no upgrades, but this is provided here as a
-	// template for how to properly do upgrades.  Each function to upgrade
-	// to the next version must include serializing the new version as a
-	// part of the same transaction so any failures in upgrades to later
-	// versions won't leave the database in an inconsistent state.  The
-	// putManagerVersion function provides a convenient mechanism for that
-	// purpose.
+	// Below is some example code on how to properly perform DB
+	// upgrades. Use it as a model for future upgrades.
 	//
 	// Upgrade one version at a time so it is possible to upgrade across
 	// an aribtary number of versions without needing to write a bunch of
@@ -1763,46 +1782,13 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 	//	version = 3
 	// }
 
-	if version < 2 {
-		// Upgrade from version 1 to 2.
-		if err := upgradeToVersion2(namespace); err != nil {
+	if version < 5 {
+		if err := upgradeToVersion5(namespace); err != nil {
 			return err
 		}
 
-		// The manager is now at version 2.
-		version = 2
-	}
-
-	if version < 3 {
-		if cbs == nil || cbs.ObtainSeed == nil || cbs.ObtainPrivatePass == nil {
-			str := "failed to obtain seed and private passphrase required for upgrade"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		seed, err := cbs.ObtainSeed()
-		if err != nil {
-			return err
-		}
-		privPassPhrase, err := cbs.ObtainPrivatePass()
-		if err != nil {
-			return err
-		}
-		// Upgrade from version 2 to 3.
-		if err := upgradeToVersion3(namespace, seed, privPassPhrase, pubPassPhrase, chainParams); err != nil {
-			return err
-		}
-
-		// The manager is now at version 3.
-		version = 3
-	}
-
-	if version < 4 {
-		if err := upgradeToVersion4(namespace, pubPassPhrase); err != nil {
-			return err
-		}
-
-		// The manager is now at version 4.
-		version = 4
+		// The manager is now at version 5.
+		version = 5
 	}
 
 	// Ensure the manager is upraded to the latest version.  This check is
@@ -1815,227 +1801,5 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 		return managerError(ErrUpgrade, str, nil)
 	}
 
-	return nil
-}
-
-// upgradeToVersion3 upgrades the database from version 2 to version 3
-// The following buckets were introduced in version 3 to support account names:
-// * acctNameIdxBucketName
-// * acctIDIdxBucketName
-// * metaBucketName
-func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
-	err := namespace.Update(func(tx walletdb.Tx) error {
-		currentMgrVersion := uint32(3)
-		rootBucket := tx.RootBucket()
-
-		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams)
-		if err != nil {
-			return err
-		}
-		defer woMgr.Close()
-
-		err = woMgr.Unlock(privPassPhrase)
-		if err != nil {
-			return err
-		}
-
-		// Derive the master extended key from the seed.
-		root, err := hdkeychain.NewMaster(seed, chainParams)
-		if err != nil {
-			str := "failed to derive master extended key"
-			return managerError(ErrKeyChain, str, err)
-		}
-
-		// Derive the cointype key according to BIP0044.
-		coinTypeKeyPriv, err := deriveCoinTypeKey(root, chainParams.HDCoinType)
-		if err != nil {
-			str := "failed to derive cointype extended key"
-			return managerError(ErrKeyChain, str, err)
-		}
-
-		cryptoKeyPub := woMgr.cryptoKeyPub
-		cryptoKeyPriv := woMgr.cryptoKeyPriv
-		// Encrypt the cointype keys with the associated crypto keys.
-		coinTypeKeyPub, err := coinTypeKeyPriv.Neuter()
-		if err != nil {
-			str := "failed to convert cointype private key"
-			return managerError(ErrKeyChain, str, err)
-		}
-		ctkps, err := coinTypeKeyPub.String()
-		if err != nil {
-			str := "failed to convert cointype public key string"
-			return managerError(ErrKeyChain, str, err)
-		}
-		coinTypePubEnc, err := cryptoKeyPub.Encrypt([]byte(ctkps))
-		if err != nil {
-			str := "failed to encrypt cointype public key"
-			return managerError(ErrCrypto, str, err)
-		}
-		ctkps, err = coinTypeKeyPriv.String()
-		if err != nil {
-			str := "failed to convert cointype private key string"
-			return managerError(ErrKeyChain, str, err)
-		}
-		coinTypePrivEnc, err := cryptoKeyPriv.Encrypt([]byte(ctkps))
-		if err != nil {
-			str := "failed to encrypt cointype private key"
-			return managerError(ErrCrypto, str, err)
-		}
-
-		// Save the encrypted cointype keys to the database.
-		err = putCoinTypeKeys(tx, coinTypePubEnc, coinTypePrivEnc)
-		if err != nil {
-			return err
-		}
-
-		_, err = rootBucket.CreateBucket(acctNameIdxBucketName)
-		if err != nil {
-			str := "failed to create an account name index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(acctIDIdxBucketName)
-		if err != nil {
-			str := "failed to create an account id index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(metaBucketName)
-		if err != nil {
-			str := "failed to create a meta bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		// Initialize metadata for all keys
-		if err := putLastAccount(tx, DefaultAccountNum); err != nil {
-			return err
-		}
-
-		// Update default account indexes
-		if err := putAccountIDIndex(tx, DefaultAccountNum, defaultAccountName); err != nil {
-			return err
-		}
-		if err := putAccountNameIndex(tx, DefaultAccountNum, defaultAccountName); err != nil {
-			return err
-		}
-		// Update imported account indexes
-		if err := putAccountIDIndex(tx, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
-			return err
-		}
-		if err := putAccountNameIndex(tx, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
-			return err
-		}
-
-		// Write current manager version
-		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
-			return err
-		}
-
-		// Save "" alias for default account name for backward compat
-		return putAccountNameIndex(tx, DefaultAccountNum, "")
-	})
-	if err != nil {
-		return maybeConvertDbError(err)
-	}
-	return nil
-}
-
-// upgradeToVersion4 upgrades the database from version 3 to version 4.  The
-// default account remains unchanged (even if it was modified by the user), but
-// the empty string alias to the default account is removed.
-func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error {
-	err := namespace.Update(func(tx walletdb.Tx) error {
-		// Write new manager version.
-		err := putManagerVersion(tx, 4)
-		if err != nil {
-			return err
-		}
-
-		// Lookup the old account info to determine the real name of the
-		// default account.  All other names will be removed.
-		acctInfoIface, err := fetchAccountInfo(tx, DefaultAccountNum)
-		if err != nil {
-			return err
-		}
-		acctInfo, ok := acctInfoIface.(*dbBIP0044AccountRow)
-		if !ok {
-			str := fmt.Sprintf("unsupported account type %T", acctInfoIface)
-			return managerError(ErrDatabase, str, nil)
-		}
-
-		var oldName string
-
-		// Delete any other names for the default account.
-		c := tx.RootBucket().Bucket(acctNameIdxBucketName).Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			// Skip nested buckets.
-			if v == nil {
-				continue
-			}
-
-			// Skip account names which aren't for the default account.
-			account := binary.LittleEndian.Uint32(v)
-			if account != DefaultAccountNum {
-				continue
-			}
-
-			if !bytes.Equal(k[4:], []byte(acctInfo.name)) {
-				err := c.Delete()
-				if err != nil {
-					const str = "error deleting default account alias"
-					return managerError(ErrUpgrade, str, err)
-				}
-				oldName = string(k[4:])
-				break
-			}
-		}
-
-		// The account number to name index may map to the wrong name,
-		// so rewrite the entry with the true name from the account row
-		// instead of leaving it set to an incorrect alias.
-		err = putAccountIDIndex(tx, DefaultAccountNum, acctInfo.name)
-		if err != nil {
-			const str = "account number to name index could not be " +
-				"rewritten with actual account name"
-			return managerError(ErrUpgrade, str, err)
-		}
-
-		// Ensure that the true name for the default account maps
-		// forwards and backwards to the default account number.
-		name, err := fetchAccountName(tx, DefaultAccountNum)
-		if err != nil {
-			return err
-		}
-		if name != acctInfo.name {
-			const str = "account name index does not map default account number to correct name"
-			return managerError(ErrUpgrade, str, nil)
-		}
-		acct, err := fetchAccountByName(tx, acctInfo.name)
-		if err != nil {
-			return err
-		}
-		if acct != DefaultAccountNum {
-			const str = "default account not accessible under correct name"
-			return managerError(ErrUpgrade, str, nil)
-		}
-
-		// Ensure that looking up the default account by the old name
-		// cannot succeed.
-		_, err = fetchAccountByName(tx, oldName)
-		if err == nil {
-			const str = "default account exists under old name"
-			return managerError(ErrUpgrade, str, nil)
-		} else {
-			merr, ok := err.(ManagerError)
-			if !ok || merr.ErrorCode != ErrAccountNotFound {
-				return err
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return maybeConvertDbError(err)
-	}
 	return nil
 }

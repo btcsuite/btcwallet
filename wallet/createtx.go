@@ -346,32 +346,33 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		return nil, err
 	}
 
-	// Initialize the address pool for use.
-	pool := w.internalPool
+	// Initialize the address pool for use. If we
+	// are using an imported account, loopback to
+	// the default account to create change.
+	var pool *addressPool
+	if account == waddrmgr.ImportedAddrAccount {
+		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+	} else {
+		pool = w.addrPools[account].internal
+	}
+	if pool == nil {
+		log.Errorf("tried to use uninitialized pool for acct %v "+
+			"when attempting to make a transaction", account)
+	}
+	txSucceeded := false
 	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
 	defer func() {
-		if err == nil {
+		if txSucceeded {
 			pool.BatchFinish()
 		} else {
 			pool.BatchRollback()
 		}
-		pool.mutex.Unlock()
 	}()
 
 	inputSource := w.TxStore.MakeInputSource(account, minconf, bs.Height)
 	changeSource := func() ([]byte, error) {
-		// Derive the change output script.  As a hack to allow spending from
-		// the imported account, change addresses are created from account 0.
-		var changeAddr dcrutil.Address
-		var err error
-		switch account {
-		case waddrmgr.DefaultAccountNum, waddrmgr.ImportedAddrAccount:
-			changeAddr, err = pool.GetNewAddress()
-		default:
-			// TODO: In the future, this should be replaced with a
-			// tracking address pool for this account.
-			changeAddr, err = w.NewChangeAddress(account)
-		}
+		changeAddr, err := pool.GetNewAddress()
 		if err != nil {
 			return nil, err
 		}
@@ -414,6 +415,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	if err != nil {
 		return nil, err
 	}
+	txSucceeded = true
 
 	// Create transaction record and insert into the db.
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.Tx, time.Now())
@@ -447,15 +449,28 @@ func constructMultiSigScript(keys []dcrutil.AddressSecpPubKey,
 func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	pubkeys []*dcrutil.AddressSecpPubKey, nRequired int8,
 	minconf int32) (*CreatedTx, dcrutil.Address, []byte, error) {
-	// Initialize the address pool for use.
-	pool := w.internalPool
+	// Initialize the address pool for use. If we
+	// are using an imported account, loopback to
+	// the default account to create change.
+	var pool *addressPool
+	if account == waddrmgr.ImportedAddrAccount {
+		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+	} else {
+		pool = w.addrPools[account].internal
+	}
+	if pool == nil {
+		log.Errorf("tried to use uninitialized pool for acct %v "+
+			"when attempting to make a transaction", account)
+	}
+	txSucceeded := false
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
 	defer func() {
-		// For multisig, assumed it succeeded even
-		// if SendRawTransaction fails. There may
-		// be not enough signatures.
-		pool.BatchFinish()
+		if txSucceeded {
+			pool.BatchFinish()
+		} else {
+			pool.BatchRollback()
+		}
 	}()
 	addrFunc := pool.GetNewAddress
 
@@ -666,10 +681,22 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 	}
 
 	// Initialize the address pool for use.
-	pool := w.internalPool
+	// Initialize the address pool for use. If we
+	// are using an imported account, loopback to
+	// the default account to create change.
+	var pool *addressPool
+	if account == waddrmgr.ImportedAddrAccount {
+		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+	} else {
+		pool = w.addrPools[account].internal
+	}
+	if pool == nil {
+		log.Errorf("tried to use uninitialized pool for acct %v "+
+			"when attempting to make a transaction", account)
+	}
+	txSucceeded := false
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
-	txSucceeded := false
 	defer func() {
 		if txSucceeded {
 			pool.BatchFinish()
@@ -677,19 +704,7 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 			pool.BatchRollback()
 		}
 	}()
-	var addrFunc func() (dcrutil.Address, error)
-	if account == waddrmgr.DefaultAccountNum ||
-		account == waddrmgr.ImportedAddrAccount {
-		addrFunc = pool.GetNewAddress
-	} else {
-		// A pass through to enable the user to get a
-		// change address for a non-default account.
-		// In the future, this should be replaced with
-		// a tracking address pool for this account.
-		addrFunc = func() (dcrutil.Address, error) {
-			return w.NewChangeAddress(account)
-		}
-	}
+	addrFunc := pool.GetNewAddress
 
 	minconf := int32(1)
 	eligible, err := w.findEligibleOutputs(account, minconf, bs)
@@ -782,10 +797,16 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 	}
 
 	// Initialize the address pool for use.
-	pool := w.internalPool
+	var pool *addressPool
+	pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+	if pool == nil {
+		log.Errorf("tried to use uninitialized pool for acct %v "+
+			"when attempting to make a transaction",
+			waddrmgr.DefaultAccountNum)
+	}
+	txSucceeded := false
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
-	txSucceeded := false
 	defer func() {
 		if txSucceeded {
 			pool.BatchFinish()
@@ -1071,7 +1092,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	error) {
 
 	// Initialize the address pool for use.
-	pool := w.internalPool
+	pool := w.addrPools[waddrmgr.DefaultAccountNum].internal
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
 	txSucceeded := false
@@ -1082,18 +1103,8 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 			pool.BatchRollback()
 		}
 	}()
-	var addrFunc func() (dcrutil.Address, error)
-	if req.account == waddrmgr.DefaultAccountNum ||
-		req.account == waddrmgr.ImportedAddrAccount {
-		addrFunc = pool.GetNewAddress
-	} else {
-		// A pass through to enable the user to get a
-		// change address for a non-default account.
-		// In the future, this should be replaced with
-		// a tracking address pool for this account.
-		addrFunc = func() (dcrutil.Address, error) {
-			return w.NewChangeAddress(req.account)
-		}
+	addrFunc := func() (dcrutil.Address, error) {
+		return w.NewChangeAddress(req.account)
 	}
 
 	if w.addressReuse {

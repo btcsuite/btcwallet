@@ -132,32 +132,37 @@ const (
 	// ErrCreateAddress is used to indicate that an address could not be
 	// created from a public key.
 	ErrCreateAddress
+
+	// ErrMetaPoolIdxNoExist indicates that the address index for some
+	// account's address pool was unset or short.
+	ErrMetaPoolIdxNoExist
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
 var errorCodeStrings = map[ErrorCode]string{
-	ErrDatabase:          "ErrDatabase",
-	ErrUpgrade:           "ErrUpgrade",
-	ErrKeyChain:          "ErrKeyChain",
-	ErrCrypto:            "ErrCrypto",
-	ErrInvalidKeyType:    "ErrInvalidKeyType",
-	ErrNoExist:           "ErrNoExist",
-	ErrAlreadyExists:     "ErrAlreadyExists", // ErrDuplicateAddress??? cj
-	ErrCoinTypeTooHigh:   "ErrCoinTypeTooHigh",
-	ErrAccountNumTooHigh: "ErrAccountNumTooHigh",
-	ErrLocked:            "ErrLocked",
-	ErrWatchingOnly:      "ErrWatchingOnly",
-	ErrInvalidAccount:    "ErrInvalidAccount",
-	ErrAddressNotFound:   "ErrAddressNotFound",
-	ErrAccountNotFound:   "ErrAccountNotFound",
-	ErrDuplicateAddress:  "ErrDuplicateAddress",
-	ErrDuplicateAccount:  "ErrDuplicateAccount",
-	ErrTooManyAddresses:  "ErrTooManyAddresses",
-	ErrWrongPassphrase:   "ErrWrongPassphrase",
-	ErrWrongNet:          "ErrWrongNet",
-	ErrCallBackBreak:     "ErrCallBackBreak",
-	ErrEmptyPassphrase:   "ErrEmptyPassphrase",
-	ErrCreateAddress:     "ErrCreateAddress",
+	ErrDatabase:           "ErrDatabase",
+	ErrUpgrade:            "ErrUpgrade",
+	ErrKeyChain:           "ErrKeyChain",
+	ErrCrypto:             "ErrCrypto",
+	ErrInvalidKeyType:     "ErrInvalidKeyType",
+	ErrNoExist:            "ErrNoExist",
+	ErrAlreadyExists:      "ErrAlreadyExists", // ErrDuplicateAddress??? cj
+	ErrCoinTypeTooHigh:    "ErrCoinTypeTooHigh",
+	ErrAccountNumTooHigh:  "ErrAccountNumTooHigh",
+	ErrLocked:             "ErrLocked",
+	ErrWatchingOnly:       "ErrWatchingOnly",
+	ErrInvalidAccount:     "ErrInvalidAccount",
+	ErrAddressNotFound:    "ErrAddressNotFound",
+	ErrAccountNotFound:    "ErrAccountNotFound",
+	ErrDuplicateAddress:   "ErrDuplicateAddress",
+	ErrDuplicateAccount:   "ErrDuplicateAccount",
+	ErrTooManyAddresses:   "ErrTooManyAddresses",
+	ErrWrongPassphrase:    "ErrWrongPassphrase",
+	ErrWrongNet:           "ErrWrongNet",
+	ErrCallBackBreak:      "ErrCallBackBreak",
+	ErrEmptyPassphrase:    "ErrEmptyPassphrase",
+	ErrCreateAddress:      "ErrCreateAddress",
+	ErrMetaPoolIdxNoExist: "ErrMetaPoolIdxNoExist",
 }
 
 // String returns the ErrorCode as a human-readable name.

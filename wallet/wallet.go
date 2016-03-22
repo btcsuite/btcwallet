@@ -6,16 +6,16 @@
 package wallet
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/btcsuite/btclog"
 
 	"github.com/decred/dcrd/blockchain"
 	"github.com/decred/dcrd/blockchain/stake"
@@ -29,6 +29,8 @@ import (
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/chain"
+	"github.com/decred/dcrwallet/internal/prompt"
+	"github.com/decred/dcrwallet/internal/zero"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet/txauthor"
 	"github.com/decred/dcrwallet/wallet/txrules"
@@ -56,6 +58,12 @@ const (
 
 	// rollbackTestDepth is the depth to rollback to when testing.
 	rollbackTestDepth = 100
+)
+
+var (
+	// SimulationPassphrase is the password for a wallet created for simnet
+	// with --createtemp.
+	SimulationPassphrase = []byte("password")
 )
 
 // ErrNotSynced describes an error where an operation cannot complete
@@ -106,7 +114,9 @@ type Wallet struct {
 	TicketMaxPrice     dcrutil.Amount
 	balanceToMaintain  dcrutil.Amount
 
+	// Start up flags/settings
 	automaticRepair bool
+	promptPass      bool
 
 	chainClient        *chain.RPCClient
 	chainClientLock    sync.Mutex
@@ -142,8 +152,7 @@ type Wallet struct {
 	purchaseTicketRequests chan purchaseTicketRequest
 
 	// Internal address handling.
-	internalPool  *addressPool
-	externalPool  *addressPool
+	addrPools     map[uint32]*addressPools
 	addressReuse  bool
 	ticketAddress dcrutil.Address
 
@@ -173,8 +182,9 @@ type Wallet struct {
 // and transaction store.
 func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
-	smgr *wstakemgr.StakeStore, db *walletdb.DB, params *chaincfg.Params) *Wallet {
+	autoRepair bool, promptPass bool, mgr *waddrmgr.Manager,
+	txs *wtxmgr.Store, smgr *wstakemgr.StakeStore, db *walletdb.DB,
+	params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
 	if rollbackTest {
 		rollbackBlockDB = make(map[uint32]*wtxmgr.DatabaseContents)
@@ -192,9 +202,6 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 
 	var ticketFeeIncrement dcrutil.Amount
 	ticketFeeIncrement = TicketFeeIncrement
-
-	internalPool := NewAddressPool()
-	externalPool := NewAddressPool()
 
 	w := &Wallet{
 		db:                       *db,
@@ -220,12 +227,12 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		createSSGenRequests:      make(chan createSSGenRequest),
 		createSSRtxRequests:      make(chan createSSRtxRequest),
 		purchaseTicketRequests:   make(chan purchaseTicketRequest),
-		internalPool:             internalPool,
-		externalPool:             externalPool,
+		addrPools:                make(map[uint32]*addressPools),
 		addressReuse:             addressReuse,
 		ticketAddress:            ticketAddress,
 		TicketMaxPrice:           tmp,
 		automaticRepair:          autoRepair,
+		promptPass:               promptPass,
 		rollbackTesting:          rollbackTest,
 		rollbackBlockDB:          rollbackBlockDB,
 		unlockRequests:           make(chan unlockRequest),
@@ -450,8 +457,15 @@ func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 	if w.StakeMiningEnabled {
 		log.Infof("Stake mining is enabled. Votebits: %v, minimum wallet "+
 			"balance %v", w.VoteBits, w.BalanceToMaintain().ToCoin())
-		log.Infof("PLEASE ENSURE YOUR WALLET IS UNLOCKED SO IT MAY " +
+		log.Infof("PLEASE ENSURE YOUR WALLET REMAINS UNLOCKED SO IT MAY " +
 			"VOTE ON BLOCKS AND RECEIVE STAKE REWARDS")
+	}
+
+	if w.promptPass || w.StakeMiningEnabled {
+		log.Infof("Please enter the private wallet passphrase. " +
+			"This will complete syncing of the wallet accounts " +
+			"and then leave your wallet unlocked. You may relock " +
+			"wallet after by calling 'walletlock' through the RPC.")
 	}
 }
 
@@ -524,6 +538,8 @@ func (w *Wallet) quitChan() <-chan struct{} {
 
 // CloseDatabases triggers the wallet databases to shut down.
 func (w *Wallet) CloseDatabases() {
+	// Store the current address pool last addresses.
+	w.CloseAddressPools()
 	w.TxStore.Close()
 	w.StakeMgr.Close()
 }
@@ -533,9 +549,6 @@ func (w *Wallet) Stop() {
 	w.quitMu.Lock()
 	quit := w.quit
 	w.quitMu.Unlock()
-
-	// Store the current address pool last addresses.
-	w.CloseAddressPools()
 
 	select {
 	case <-quit:
@@ -606,421 +619,11 @@ func (w *Wallet) SetChainSynced(synced bool) {
 	w.chainClientSyncMtx.Unlock()
 }
 
-// finalScanLength is the final length of keys to scan for the
-// function below.
-var finalScanLength int = 1000
-
-// debugScanLength is the final length of keys to scan past the
-// last index returned from the logarithmic scanning function
-// when creating the debug string of used addresses.
-var debugScanLength int = 3500
-
-// addrSeekWidth is the number of new addresses to generate and add to the
-// address manager when trying to sync up a wallet to the main chain. This
-// is the maximum gap introduced by a resyncing as well, and should be less
-// than finalScanLength above.
-// TODO Optimize the scanning so that rather than overshooting the end address,
-// you instead step through addresses incrementally until reaching idx so that
-// you don't reach a gap. This can be done by keeping track of where the current
-// cursor is and adding addresses in big chunks until you hit the end.
-var addrSeekWidth uint32 = 20
-
-// bisectLastIndex is a helper function for search through addresses.
-func (w *Wallet) bisectLastIndex(hi, low int, account uint32, branch uint32) int {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return 0
-	}
-
-	offset := low
-	for i := hi - low - 1; i > 0; i /= 2 {
-		if i+offset+int(addrSeekWidth) < waddrmgr.MaxAddressesPerAccount {
-			for j := i + offset; j < i+offset+int(addrSeekWidth); j++ {
-				addr, err := w.Manager.GetAddress(uint32(j), account, branch)
-				// Skip erroneous keys, which happen rarely.
-				if err != nil {
-					continue
-				}
-
-				exists, err := chainClient.ExistsAddress(addr)
-				if err != nil {
-					return 0
-				}
-				if exists {
-					return i + offset
-				}
-			}
-		} else {
-			addr, err := w.Manager.GetAddress(uint32(i+offset), account, branch)
-			// Skip erroneous keys, which happen rarely.
-			if err != nil {
-				continue
-			}
-			exists, err := chainClient.ExistsAddress(addr)
-			if err != nil {
-				return 0
-			}
-			if exists {
-				return i + offset
-			}
-		}
-	}
-
-	return 0
-}
-
-// findEnd is a helper function for searching for used addresses.
-func (w *Wallet) findEnd(start, stop int, account uint32, branch uint32) int {
-	indexStart := w.bisectLastIndex(stop, start, account, branch)
-	indexLast := 0
-	for {
-		indexLastStored := indexStart
-		low := indexLastStored
-		hi := indexLast + ((indexStart - indexLast) * 2) + 1
-		indexStart = w.bisectLastIndex(hi, low, account, branch)
-		indexLast = indexLastStored
-
-		if indexStart == 0 {
-			break
-		}
-	}
-
-	return indexLast
-}
-
-// debugAccountGapsString is a debug function that prints a graphical outlook
-// of address usage to a string, from the perspective of the daemon.
-func debugAccountGapsString(scanBackFrom int, account uint32, branch uint32,
-	w *Wallet) (string, error) {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return "", err
-	}
-
-	var buf bytes.Buffer
-	str := fmt.Sprintf("Begin debug address scan scanning backwards from "+
-		"idx %v, account %v, branch %v\n", scanBackFrom, account, branch)
-	buf.WriteString(str)
-	firstUsedIndex := 0
-	for i := scanBackFrom; i > 0; i-- {
-		addr, err := w.Manager.GetAddress(uint32(i), account, branch)
-		// Skip erroneous keys.
-		if err != nil {
-			continue
-		}
-
-		exists, err := chainClient.ExistsAddress(addr)
-		if err != nil {
-			return "", fmt.Errorf("failed to access chain server: %v",
-				err.Error())
-		}
-
-		if exists {
-			firstUsedIndex = i
-			break
-		}
-	}
-
-	str = fmt.Sprintf("Last used index found: %v\n", firstUsedIndex)
-	buf.WriteString(str)
-
-	batchSize := 50
-	batches := (firstUsedIndex / batchSize) + 1
-	lastBatchSize := 0
-	if firstUsedIndex%batchSize != 0 {
-		lastBatchSize = firstUsedIndex - ((batches - 1) * batchSize)
-	}
-
-	for i := 0; i < batches; i++ {
-		str = fmt.Sprintf("%8v", i*batchSize)
-		buf.WriteString(str)
-
-		start := i * batchSize
-		end := (i + 1) * batchSize
-		if i == batches-1 {
-			// Nothing to do because last batch empty.
-			if lastBatchSize == 0 {
-				break
-			}
-			end = i*batchSize + lastBatchSize
-		}
-
-		for j := start; j < end; j++ {
-			if j%10 == 0 {
-				buf.WriteString("  ")
-			}
-
-			char := "_"
-			addr, err := w.Manager.GetAddress(uint32(j), account, branch)
-			if err != nil {
-				char = "X"
-			}
-
-			exists, err := chainClient.ExistsAddress(addr)
-			if err != nil {
-				return "", fmt.Errorf("failed to access chain server: %v",
-					err.Error())
-			}
-			if exists {
-				char = "#"
-			}
-
-			buf.WriteString(char)
-		}
-
-		buf.WriteString("\n")
-	}
-
-	return buf.String(), nil
-}
-
-// scanAddressIndex identifies the last used address in an HD keychain of public
-// keys. It returns the index of the last used key, along with the address of
-// this key.
-func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
-	branch uint32) (uint32, dcrutil.Address, error) {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return 0, nil, err
-	}
-
-	// Find the last used address. Scan from it to the end in case there was a
-	// gap from that position, which is possible. Then, return the address
-	// in that position.
-	lastUsed := w.findEnd(start, end, account, branch)
-
-	// If debug is on, do an exhaustive check and a graphical printout
-	// of what the used addresses currently look like.
-	if log.Level() == btclog.DebugLvl || log.Level() == btclog.TraceLvl {
-		dbgStr, err := debugAccountGapsString(lastUsed+debugScanLength, account,
-			branch, w)
-		if err != nil {
-			log.Debugf("Failed to debug address gaps for account %v, "+
-				"branch %v: %v", account, branch, err)
-		} else {
-			log.Debugf("%v", dbgStr)
-		}
-	}
-
-	if lastUsed != 0 {
-		for i := lastUsed + finalScanLength; i > lastUsed; i-- {
-			addr, err := w.Manager.GetAddress(uint32(i), account, branch)
-			// Skip erroneous keys.
-			if err != nil {
-				continue
-			}
-
-			exists, err := chainClient.ExistsAddress(addr)
-			if err != nil {
-				return 0, nil, fmt.Errorf("failed to access chain server: %v",
-					err.Error())
-			}
-
-			if exists {
-				lastUsed = i
-				break
-			}
-		}
-
-		addr, err := w.Manager.GetAddress(uint32(lastUsed), account, branch)
-		if err != nil {
-			return 0, nil, err
-		}
-		return uint32(lastUsed), addr, nil
-	}
-
-	// We can't find any used addresses. The wallet is
-	// unused.
-	return 0, nil, nil
-}
-
-// doAddressResync resyncs the address manager to a given address.
-func (w *Wallet) doAddressResync(addr dcrutil.Address, idx uint32,
-	internal bool) error {
-	isSynced := false
-	addrFunction := w.Manager.NextExternalAddresses
-	if internal {
-		addrFunction = w.Manager.NextInternalAddresses
-	}
-
-	counter := uint32(0)
-	for !isSynced {
-		// Generate some new addresses and scan them to see
-		// if any of the match the address to sync to.
-		addrs, err :=
-			addrFunction(waddrmgr.DefaultAccountNum,
-				addrSeekWidth)
-		if err != nil {
-			return err
-		}
-
-		for _, newAddr := range addrs {
-			if bytes.Compare(addr.ScriptAddress(),
-				newAddr.Address().ScriptAddress()) == 0 {
-				isSynced = true
-			}
-		}
-
-		// Don't let this loop infinitely.
-		if counter > waddrmgr.MaxAddressesPerAccount/addrSeekWidth {
-			break
-		}
-
-		log.Debugf("Currently getting address %v", counter*addrSeekWidth)
-
-		counter++
-	}
-
-	if isSynced {
-		return nil
-	}
-
-	return fmt.Errorf("failed to sync to address %v during address rescan",
-		addr.String())
-}
-
-// rescanActiveAddresses accesses the daemon to discover all the addresses that
-// have been used by an HD keychain stemming from this wallet in the default
-// account.
-// TODO Discover and rescan all other active accounts.
-func (w *Wallet) rescanActiveAddresses() error {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return err
-	}
-
-	min := 0
-	max := waddrmgr.MaxAddressesPerAccount
-
-	log.Infof("Beginning a rescan of active addresses using the daemon. " +
-		"This may take a while.")
-
-	// Do this for both external (0) and internal (1) branches.
-	for i := uint32(0); i < 2; i++ {
-		idx, addr, err := w.scanAddressIndex(min, max,
-			waddrmgr.DefaultAccountNum, i)
-		if err != nil {
-			return err
-		}
-
-		branchString := "external"
-		if i == 1 {
-			branchString = "internal"
-		}
-
-		if addr == nil && err == nil {
-			// Check if the zeroeth address is used. If it is, insert it.
-			addr, err := w.Manager.GetAddress(uint32(i),
-				waddrmgr.DefaultAccountNum, i)
-			// Skip erroneous keys.
-			if err != nil {
-				continue
-			}
-			exists, err := chainClient.ExistsAddress(addr)
-			if err != nil {
-				return fmt.Errorf("failed to access chain server: %v",
-					err.Error())
-			}
-
-			if exists {
-				addrFunction := w.Manager.NextExternalAddresses
-				if i == 1 {
-					addrFunction = w.Manager.NextInternalAddresses
-				}
-				addrFunction(waddrmgr.DefaultAccountNum, 1)
-
-				log.Infof("Wallet has 1 used address for "+
-					"default account %v branch", branchString)
-				continue
-			}
-
-			log.Infof("Wallet has no used addresses for "+
-				"default account %v branch", branchString)
-			continue
-		}
-
-		// Exit out if we already have the address in question.
-		exists, err := w.Manager.ExistsAddress(addr.ScriptAddress())
-		if err != nil {
-			return err
-		}
-		if exists {
-			log.Debugf("Wallet is already synchronized to address %v"+
-				" of default account %v branch", addr, branchString)
-			continue
-		}
-
-		log.Infof("Wallet default account %v branch is desynced and must be "+
-			"resynced. Doing this now...", branchString)
-
-		if i == 0 { // External
-			err := w.doAddressResync(addr, idx, false)
-			if err != nil {
-				return fmt.Errorf("couldn't sync external addresses in " +
-					"address manager")
-			}
-
-			// Set the next address in the waddrmgr database so that the
-			// address pool can synchronize properly after.
-			addr, err := w.Manager.GetAddress(idx+1,
-				waddrmgr.DefaultAccountNum, i)
-			if err != nil {
-				log.Errorf("Encountered unexpected error when trying to get "+
-					"the next to use address for branch %v, index %v", i,
-					idx+1)
-			}
-			err = w.Manager.StoreNextToUseAddresses(addr, nil)
-			if err != nil {
-				log.Errorf("Failed to store next to use address for external "+
-					"pool in the manager on init sync: %v", err.Error())
-			}
-
-			log.Infof("Successfully synchronized the address manager to "+
-				"external address %v (key index %v)",
-				addr.String(),
-				idx)
-		}
-		if i == 1 { // Internal
-			err := w.doAddressResync(addr, idx, true)
-			if err != nil {
-				return fmt.Errorf("couldn't sync internal addresses in " +
-					"address manager")
-			}
-
-			// Set the next address in the waddrmgr database so that the
-			// address pool can synchronize properly after.
-			addr, err := w.Manager.GetAddress(idx+1,
-				waddrmgr.DefaultAccountNum, i)
-			if err != nil {
-				log.Errorf("Encountered unexpected error when trying to get "+
-					"the next to use address for branch %v, index %v", i,
-					idx+1)
-			}
-			err = w.Manager.StoreNextToUseAddresses(nil, addr)
-			if err != nil {
-				log.Errorf("Failed to store next to use address for internal "+
-					"pool in the manager on init sync: %v", err.Error())
-			}
-
-			log.Infof("Successfully synchronized the address manager to "+
-				"internal address %v (key index %v)",
-				addr.String(),
-				idx)
-		}
-	}
-
-	return nil
-}
-
 // activeData returns the currently-active receiving addresses and all unspent
 // outputs.  This is primarely intended to provide the parameters for a
 // rescan request.
 func (w *Wallet) activeData() ([]dcrutil.Address, []*wire.OutPoint, error) {
-	err := w.rescanActiveAddresses()
-	if err != nil {
-		return nil, nil, err
-	}
-
+	var err error
 	var addrs []dcrutil.Address
 	err = w.Manager.ForEachActiveAddress(func(addr dcrutil.Address) error {
 		addrs = append(addrs, addr)
@@ -1041,11 +644,40 @@ func (w *Wallet) activeData() ([]dcrutil.Address, []*wire.OutPoint, error) {
 // syncWithChain brings the wallet up to date with the current chain server
 // connection.  It creates a rescan request and blocks until the rescan has
 // finished.
-//
 func (w *Wallet) syncWithChain() error {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return err
+	}
+
+	// We need to rescan accounts for the initial sync. Unlock the
+	// wallet after prompting for the passphrase. The special case
+	// of a --createtemp simnet wallet is handled by first
+	// attempting to automatically open it with the default
+	// passphrase. The wallet should also request to be unlocked
+	// if stake mining is currently on, so users with this flag
+	// are prompted here as well.
+	defaultTempPass := false
+	if w.chainParams == &chaincfg.SimNetParams {
+		var unlockAfter <-chan time.Time
+		err = w.Unlock(SimulationPassphrase, unlockAfter)
+		if err == nil {
+			defaultTempPass = true
+		}
+	}
+	if (w.promptPass || w.StakeMiningEnabled) && !defaultTempPass {
+		reader := bufio.NewReader(os.Stdin)
+		passphrase, err := prompt.PromptPass(reader, "", false)
+		if err != nil {
+			return err
+		}
+		defer zero.Bytes(passphrase)
+
+		var unlockAfter <-chan time.Time
+		err = w.Unlock(passphrase, unlockAfter)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Request notifications for connected and disconnected blocks.
@@ -1057,6 +689,13 @@ func (w *Wallet) syncWithChain() error {
 	// notification re-registrations, in which case the code here should be
 	// left as is.
 	err = chainClient.NotifyBlocks()
+	if err != nil {
+		return err
+	}
+
+	// Rescan to the newest used addresses. This also initializes the
+	// address pools.
+	err = w.rescanActiveAddresses()
 	if err != nil {
 		return err
 	}
@@ -1174,6 +813,8 @@ func (w *Wallet) syncWithChain() error {
 		bestBlock.MsgBlock().Header.SBits,
 	})
 
+	log.Infof("Blockchain sync completed, wallet ready for general usage.")
+
 	return nil
 }
 
@@ -1287,7 +928,7 @@ out:
 
 		case txr := <-w.createSStxRequests:
 			// Initialize the address pool for use.
-			pool := w.internalPool
+			pool := w.addrPools[waddrmgr.DefaultAccountNum].internal
 			pool.mutex.Lock()
 			addrFunc := pool.GetNewAddress
 
@@ -1542,7 +1183,7 @@ out:
 		if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 			log.Errorf("Could not lock wallet: %v", err)
 		} else {
-			log.Info("The wallet has been locked")
+			log.Info("The wallet has been locked.")
 		}
 	}
 	w.wg.Done()
@@ -1567,7 +1208,6 @@ func (w *Wallet) Unlock(passphrase []byte, lock <-chan time.Time) error {
 // Lock locks the wallet's address manager.
 func (w *Wallet) Lock() {
 	w.lockRequests <- struct{}{}
-	log.Infof("The wallet has been locked.")
 }
 
 // Locked returns whether the account manager for a wallet is locked.
@@ -1767,6 +1407,12 @@ func (w *Wallet) NextAccount(name string) (uint32, error) {
 			"after account creation: %v", err)
 	} else {
 		w.NtfnServer.notifyAccountProperties(props)
+	}
+
+	// Initialize a new address pool for this account.
+	w.addrPools[account], err = NewAddressPools(account, 0, 0, w)
+	if err != nil {
+		return 0, err
 	}
 
 	return account, nil
@@ -3049,16 +2695,6 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Par
 		return err
 	}
 
-	// Create empty transaction manager.
-	txMgrNamespace, err := db.Namespace(wtxmgrNamespaceKey)
-	if err != nil {
-		return err
-	}
-	err = wtxmgr.Create(txMgrNamespace)
-	if err != nil {
-		return err
-	}
-
 	// Create empty stake manager.
 	stakeMgrNamespace, err := db.Namespace([]byte("wstakemgr"))
 	if err != nil {
@@ -3097,7 +2733,8 @@ func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, para
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
-	ticketMaxPrice float64, autoRepair bool, params *chaincfg.Params) (*Wallet, error) {
+	ticketMaxPrice float64, autoRepair bool, promptPass bool,
+	params *chaincfg.Params) (*Wallet, error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -3120,6 +2757,11 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 	if noTxMgr {
 		log.Info("No recorded transaction history -- needs full rescan")
+
+		// We need the wallet unlocked to restore the accounts.
+		// Request that the user unlock it for us.
+		promptPass = true
+
 		err = addrMgr.SetSyncedTo(nil)
 		if err != nil {
 			return nil, err
@@ -3138,15 +2780,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 
 	smgr, err := wstakemgr.Open(stakeMgrNS, addrMgr, params)
 	if err != nil {
-		log.Info("No stake manager present, generating")
-		err = wstakemgr.Create(stakeMgrNS)
-		if err != nil {
-			return nil, err
-		}
-		smgr, err = wstakemgr.Open(stakeMgrNS, addrMgr, params)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	// XXX Should we check error here?  Right now error gives default (0).
@@ -3179,6 +2813,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		ticketAddr,
 		tmp,
 		autoRepair,
+		promptPass,
 		addrMgr,
 		txMgr,
 		smgr,

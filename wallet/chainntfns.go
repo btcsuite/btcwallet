@@ -40,18 +40,6 @@ func (w *Wallet) handleChainNotifications() {
 		log.Warnf("Unable to synchronize wallet to chain: %v", err)
 	}
 
-	// Spin up the address pools.
-	err = w.internalPool.initialize(waddrmgr.InternalBranch, w)
-	if err != nil {
-		log.Errorf("Failed to start the default internal branch address "+
-			"pool: %v", err)
-	}
-	err = w.externalPool.initialize(waddrmgr.ExternalBranch, w)
-	if err != nil {
-		log.Errorf("Failed to start the default external branch address "+
-			"pool: %v", err)
-	}
-
 	for n := range chainClient.Notifications() {
 		var err error
 		strErrType := ""

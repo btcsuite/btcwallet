@@ -52,6 +52,7 @@ type Loader struct {
 	stakeOptions  *StakeOptions
 	autoRepair    bool
 	unsafeMainNet bool
+	promptPass    bool
 }
 
 type StakeOptions struct {
@@ -66,12 +67,13 @@ type StakeOptions struct {
 }
 
 // NewLoader constructs a Loader.
-func NewLoader(chainParams *chaincfg.Params, dbDirPath string, stakeOptions *StakeOptions, autoRepair bool, unsafeMainNet bool) *Loader {
+func NewLoader(chainParams *chaincfg.Params, dbDirPath string, stakeOptions *StakeOptions, autoRepair bool, unsafeMainNet bool, promptPass bool) *Loader {
 	return &Loader{
 		chainParams:  chainParams,
 		dbDirPath:    dbDirPath,
 		stakeOptions: stakeOptions,
 		autoRepair:   autoRepair,
+		promptPass:   promptPass,
 	}
 }
 
@@ -139,19 +141,9 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 		return nil, err
 	}
 
-	// Open the newly-created wallet.
-	so := l.stakeOptions
-	w, err := Open(db, pubPassphrase, nil, so.VoteBits, so.StakeMiningEnabled,
-		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
-		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, l.autoRepair,
-		l.chainParams)
-	if err != nil {
-		return nil, err
-	}
-	w.Start()
-
-	l.onLoaded(w, db)
-	return w, nil
+	l.onLoaded(nil, db)
+	db.Close()
+	return nil, nil
 }
 
 var errNoConsole = errors.New("db upgrade requires console access for additional input")
@@ -163,7 +155,7 @@ func noConsole() ([]byte, error) {
 // OpenExistingWallet opens the wallet from the loader's wallet database path
 // and the public passphrase.  If the loader is being called by a context where
 // standard input prompts may be used during wallet upgrades, setting
-// canConsolePrompt will enables these prompts.
+// canConsolePrompt will enable these prompts.
 func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool) (*Wallet, error) {
 	defer l.mu.Unlock()
 	l.mu.Lock()
@@ -201,10 +193,11 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	w, err := Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, l.autoRepair,
-		l.chainParams)
+		l.promptPass, l.chainParams)
 	if err != nil {
 		return nil, err
 	}
+
 	w.Start()
 
 	l.onLoaded(w, db)
