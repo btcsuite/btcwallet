@@ -5,7 +5,11 @@
 package wallet
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -36,7 +40,8 @@ func (w *Wallet) handleChainNotifications() {
 		case chain.ClientConnected:
 			go sync(w)
 		case chain.BlockConnected:
-			w.connectBlock(wtxmgr.BlockMeta(n))
+			err = w.connectBlock(wtxmgr.BlockMeta(n.Block),
+				n.Transactions)
 		case chain.BlockDisconnected:
 			err = w.disconnectBlock(wtxmgr.BlockMeta(n))
 		case chain.RelevantTx:
@@ -55,22 +60,59 @@ func (w *Wallet) handleChainNotifications() {
 	w.wg.Done()
 }
 
-// connectBlock handles a chain server notification by marking a wallet
-// that's currently in-sync with the chain server as being synced up to
-// the passed block.
-func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
+// connectBlock handles a chain server notification by marking a wallet that's
+// currently in-sync with the chain server as being synced up to the passed
+// block.
+//
+// TODO: All DB operations performed by this notification handler should be done
+// under a single transaction.  Transactions and blocks used to be notified
+// separately making this necessary, but now that relevant transactions are
+// included in the blockconnected notification and are processed together from
+// this function, this can be more easilly corrected.
+func (w *Wallet) connectBlock(b wtxmgr.BlockMeta, transactions []wire.MsgTx) error {
+	relevantTxDetails := make([]*wtxmgr.TxDetails, 0, len(transactions))
+	now := time.Now()
+	for i := range transactions {
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(&transactions[i], now)
+		if err != nil {
+			return err
+		}
+		err = w.addRelevantTx(rec, &b)
+		if err != nil {
+			return err
+		}
+
+		// Look up the full transaction details for the newly inserted
+		// transaction.  This is only used for notifying the details to
+		// subscribed clients through the wallet's notification server.
+		//
+		// TODO: Could be made more efficient by avoiding the additional
+		// DB call to look up the information that was just inserted.
+		// Note that while notifications require credits and debit
+		// information, the extra block data in each details object is
+		// unnecessary since it is notified with the block metadata.
+		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, &b.Block)
+		if err != nil {
+			return err
+		}
+		relevantTxDetails = append(relevantTxDetails, details)
+	}
+
 	bs := waddrmgr.BlockStamp{
 		Height: b.Height,
 		Hash:   b.Hash,
 	}
-	if err := w.Manager.SetSyncedTo(&bs); err != nil {
-		log.Errorf("Failed to update address manager sync state in "+
-			"connect block for hash %v (height %d): %v", b.Hash,
+	err := w.Manager.SetSyncedTo(&bs)
+	if err != nil {
+		return fmt.Errorf("failed to update address manager sync state "+
+			"in connect block for hash %v (height %d): %v", b.Hash,
 			b.Height, err)
 	}
 
 	// Notify interested clients of the connected block.
-	w.NtfnServer.notifyAttachedBlock(&b)
+	w.NtfnServer.notifyAttachedBlock(&b, relevantTxDetails)
+
+	return nil
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
@@ -199,16 +241,9 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) er
 	if block == nil {
 		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, nil)
 		if err != nil {
-			log.Errorf("Cannot query transaction details for notifiation: %v", err)
+			log.Errorf("Cannot query transaction details for notification: %v", err)
 		} else {
 			w.NtfnServer.notifyUnminedTransaction(details)
-		}
-	} else {
-		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, &block.Block)
-		if err != nil {
-			log.Errorf("Cannot query transaction details for notifiation: %v", err)
-		} else {
-			w.NtfnServer.notifyMinedTransaction(details, block)
 		}
 	}
 

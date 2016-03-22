@@ -150,7 +150,10 @@ type (
 
 	// BlockConnected is a notification for a newly-attached block to the
 	// best chain.
-	BlockConnected wtxmgr.BlockMeta
+	BlockConnected struct {
+		Block        wtxmgr.BlockMeta
+		Transactions []wire.MsgTx
+	}
 
 	// BlockDisconnected is a notifcation that the block described by the
 	// BlockStamp was reorganized out of the best chain.
@@ -227,14 +230,17 @@ func (c *RPCClient) onClientConnect() {
 	}
 }
 
-func (c *RPCClient) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
+func (c *RPCClient) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time, txs []wire.MsgTx) {
 	select {
 	case c.enqueueNotification <- BlockConnected{
-		Block: wtxmgr.Block{
-			Hash:   *hash,
-			Height: height,
+		Block: wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Hash:   *hash,
+				Height: height,
+			},
+			Time: time,
 		},
-		Time: time,
+		Transactions: txs,
 	}:
 	case <-c.quit:
 	}
@@ -342,8 +348,8 @@ out:
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
 				bs = &waddrmgr.BlockStamp{
-					n.Height,
-					n.Hash,
+					n.Block.Height,
+					n.Block.Hash,
 				}
 			}
 
