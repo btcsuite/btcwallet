@@ -1230,32 +1230,23 @@ func Open(namespace walletdb.Namespace, manager *waddrmgr.Manager,
 	return ss, nil
 }
 
-// Create returns a new stake manager from the given namespace, waddrmgr,
-// and network parameters.
+// Create creates a new persistent stake manager in the passed database namespace.
 // A ManagerError with an error code of ErrAlreadyExists will be returned the
 // address manager already exists in the specified namespace.
-func Create(namespace walletdb.Namespace, manager *waddrmgr.Manager,
-	params *chaincfg.Params) (*StakeStore, error) {
+func Create(namespace walletdb.Namespace) error {
 	// Return an error if the manager has already been created in the given
 	// database namespace.
 	exists, err := stakeStoreExists(namespace)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if exists {
 		str := "error, stake store exists already"
-		return nil, stakeStoreError(ErrAlreadyExists, str, nil)
+		return stakeStoreError(ErrAlreadyExists, str, nil)
 	}
 
 	// Initialize the database for first use.
-	err = initializeEmpty(namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	ss := newStakeStore(namespace, params, manager)
-
-	return ss, nil
+	return initializeEmpty(namespace)
 }
 
 // Close cleanly shuts down the stake store.

@@ -46,7 +46,7 @@ must always be appended.
 It is forbidden to use the `required` attribute on a message field as this can
 cause errors during parsing when the new API is used by an older client.
 Instead, the (implicit) optional attribute is used, and the server
-implementation must return an appropiate error if the new request field is not
+implementation must return an appropriate error if the new request field is not
 set to a valid value.
 
 ## Step 2: Compile the `.proto`

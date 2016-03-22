@@ -1,3 +1,7 @@
+// Copyright (c) 2015-2016 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
 package wallet
 
 import (
@@ -7,12 +11,9 @@ import (
 	"sync"
 
 	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/internal/prompt"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/walletdb"
-	"github.com/decred/dcrwallet/wstakemgr"
-	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 const (
@@ -23,6 +24,10 @@ var (
 	// ErrLoaded describes the error condition of attempting to load or
 	// create a wallet when the loader has already done so.
 	ErrLoaded = errors.New("wallet already loaded")
+
+	// ErrNotLoaded describes the error condition of attempting to close a
+	// loaded wallet when a wallet has not been loaded.
+	ErrNotLoaded = errors.New("wallet is not loaded")
 
 	// ErrExists describes the error condition of attempting to create a new
 	// wallet when one exists already.
@@ -37,7 +42,7 @@ var (
 //
 // Loader is safe for concurrent access.
 type Loader struct {
-	callbacks   []func(*Wallet, walletdb.DB)
+	callbacks   []func(*Wallet)
 	chainParams *chaincfg.Params
 	dbDirPath   string
 	wallet      *Wallet
@@ -74,7 +79,7 @@ func NewLoader(chainParams *chaincfg.Params, dbDirPath string, stakeOptions *Sta
 // additional wallets.  Requires mutex to be locked.
 func (l *Loader) onLoaded(w *Wallet, db walletdb.DB) {
 	for _, fn := range l.callbacks {
-		fn(w, db)
+		fn(w)
 	}
 
 	l.wallet = w
@@ -85,13 +90,12 @@ func (l *Loader) onLoaded(w *Wallet, db walletdb.DB) {
 // RunAfterLoad adds a function to be executed when the loader creates or opens
 // a wallet.  Functions are executed in a single goroutine in the order they are
 // added.
-func (l *Loader) RunAfterLoad(fn func(*Wallet, walletdb.DB)) {
+func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
 	l.mu.Lock()
 	if l.wallet != nil {
 		w := l.wallet
-		db := l.db
 		l.mu.Unlock()
-		fn(w, db)
+		fn(w)
 	} else {
 		l.callbacks = append(l.callbacks, fn)
 		l.mu.Unlock()
@@ -128,64 +132,23 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 		return nil, err
 	}
 
-	// If a seed was provided, ensure that it is of valid length. Otherwise,
-	// we generate a random seed for the wallet with the recommended seed
-	// length.
-	if seed != nil {
-		if len(seed) < hdkeychain.MinSeedBytes ||
-			len(seed) > hdkeychain.MaxSeedBytes {
-
-			return nil, hdkeychain.ErrInvalidSeedLen
-		}
-	} else {
-		hdSeed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
-		if err != nil {
-			return nil, err
-		}
-		seed = hdSeed
-	}
-
-	// Create the address manager.
-	addrMgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-	addrMgr, err := waddrmgr.Create(addrMgrNamespace, seed, pubPassphrase,
-		privPassphrase, l.chainParams, nil, l.unsafeMainNet)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create empty transaction manager.
-	txMgrNamespace, err := db.Namespace(wtxmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-	_, err = wtxmgr.Create(txMgrNamespace, l.chainParams)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create empty stake manager.
-	stakeMgrNamespace, err := db.Namespace([]byte("wstakemgr"))
-	if err != nil {
-		return nil, err
-	}
-	_, err = wstakemgr.Create(stakeMgrNamespace, addrMgr, l.chainParams)
+	// Initialize the newly created database for the wallet before opening.
+	err = Create(db, pubPassphrase, privPassphrase, seed, l.chainParams,
+		l.unsafeMainNet)
 	if err != nil {
 		return nil, err
 	}
 
 	// Open the newly-created wallet.
 	so := l.stakeOptions
-	w, err := Open(pubPassphrase, l.chainParams, db, addrMgrNamespace,
-		txMgrNamespace, stakeMgrNamespace, nil, so.VoteBits,
-		so.StakeMiningEnabled, so.BalanceToMaintain, so.AddressReuse,
-		so.RollbackTest, so.PruneTickets, so.TicketAddress,
-		so.TicketMaxPrice, l.autoRepair)
+	w, err := Open(db, pubPassphrase, nil, so.VoteBits, so.StakeMiningEnabled,
+		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
+		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, l.autoRepair,
+		l.chainParams)
 	if err != nil {
 		return nil, err
 	}
+	w.Start()
 
 	l.onLoaded(w, db)
 	return w, nil
@@ -222,18 +185,6 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 		return nil, err
 	}
 
-	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-	txMgrNS, err := db.Namespace(wtxmgrNamespaceKey)
-	if err != nil {
-		return nil, err
-	}
-	stkMgrNS, err := db.Namespace([]byte("wstakemgr"))
-	if err != nil {
-		return nil, err
-	}
 	var cbs *waddrmgr.OpenCallbacks
 	if canConsolePrompt {
 		cbs = &waddrmgr.OpenCallbacks{
@@ -247,11 +198,10 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 		}
 	}
 	so := l.stakeOptions
-	w, err := Open(pubPassphrase, l.chainParams, db, addrMgrNS, txMgrNS,
-		stkMgrNS, cbs, so.VoteBits, so.StakeMiningEnabled,
+	w, err := Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
-		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice,
-		l.autoRepair)
+		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, l.autoRepair,
+		l.chainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +226,30 @@ func (l *Loader) LoadedWallet() (*Wallet, bool) {
 	w := l.wallet
 	l.mu.Unlock()
 	return w, w != nil
+}
+
+// UnloadWallet stops the loaded wallet, if any, and closes the wallet database.
+// This returns ErrNotLoaded if the wallet has not been loaded with
+// CreateNewWallet or LoadExistingWallet.  The Loader may be reused if this
+// function returns without error.
+func (l *Loader) UnloadWallet() error {
+	defer l.mu.Unlock()
+	l.mu.Lock()
+
+	if l.wallet == nil {
+		return ErrNotLoaded
+	}
+
+	l.wallet.Stop()
+	l.wallet.WaitForShutdown()
+	err := l.db.Close()
+	if err != nil {
+		return err
+	}
+
+	l.wallet = nil
+	l.db = nil
+	return nil
 }
 
 func fileExists(filePath string) (bool, error) {

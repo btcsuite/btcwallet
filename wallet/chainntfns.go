@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2013-2015 The btcsuite developers
- * Copyright (c) 2015 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package wallet
 
@@ -190,10 +178,7 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 			"connect block for hash %v (height %d): %v", b.Hash,
 			b.Height, err)
 	}
-	w.notifyConnectedBlock(b)
 	log.Infof("Connecting block %v, height %v", bs.Hash, bs.Height)
-
-	w.notifyBalances(bs.Height, wtxmgr.BFBalanceSpendable)
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -342,10 +327,6 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 
 	// Notify interested clients of the disconnected block.
 	w.NtfnServer.notifyDetachedBlock(&b.Hash)
-
-	// Legacy JSON-RPC notifications
-	w.notifyDisconnectedBlock(b)
-	w.notifyBalances(b.Height-1, wtxmgr.BFBalanceSpendable)
 
 	return nil
 }
@@ -737,18 +718,6 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		}
 	}
 
-	// Legacy JSON-RPC notifications
-	//
-	// TODO: Synced-to information should be handled by the wallet, not the
-	// RPC client.
-	chainClient, err := w.requireChainClient()
-	if err == nil {
-		bs, err := chainClient.BlockStamp()
-		if err == nil {
-			w.notifyBalances(bs.Height, wtxmgr.BFBalanceSpendable)
-		}
-	}
-
 	return nil
 }
 
@@ -765,27 +734,6 @@ func (w *Wallet) handleStakeDifficulty(blockHash *chainhash.Hash,
 	})
 
 	return nil
-}
-
-func (w *Wallet) notifyBalances(curHeight int32, balanceFlag wtxmgr.BehaviorFlags) {
-	// Don't notify unless wallet is synced to the chain server.
-	if !w.ChainSynced() {
-		return
-	}
-
-	// Notify any potential changes to the balance.
-	confirmed, err := w.TxStore.Balance(1, curHeight, balanceFlag, true, 0)
-	if err != nil {
-		log.Errorf("Cannot determine 1-conf balance: %v", err)
-		return
-	}
-	w.notifyConfirmedBalance(confirmed)
-	unconfirmed, err := w.TxStore.Balance(0, curHeight, balanceFlag, true, 0)
-	if err != nil {
-		log.Errorf("Cannot determine 0-conf balance: %v", err)
-		return
-	}
-	w.notifyUnconfirmedBalance(unconfirmed - confirmed)
 }
 
 func (w *Wallet) handleChainVotingNotifications() {
@@ -846,10 +794,6 @@ func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
 		if ntfns != nil {
 			// Send notifications for newly created votes by the RPC.
 			for _, ntfn := range ntfns {
-				if ntfn != nil {
-					w.notifyVoteCreated(*ntfn)
-				}
-
 				// Inform the console that we've voted, too.
 				log.Infof("Voted on block %v (height %v) using ticket %v "+
 					"(vote hash: %v)",
@@ -886,8 +830,6 @@ func (w *Wallet) handleMissedTickets(blockHash *chainhash.Hash,
 			// Send notifications for newly created revocations by the RPC.
 			for _, ntfn := range ntfns {
 				if ntfn != nil {
-					w.notifyRevocationCreated(*ntfn)
-
 					// Inform the console that we've revoked our ticket.
 					log.Infof("Revoked missed ticket %v (tx hash: %v)",
 						ntfn.SStxIn,

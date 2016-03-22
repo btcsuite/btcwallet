@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2014 The btcsuite developers
- * Copyright (c) 2015-2016 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2014 The btcsuite developers
+// Copyright (c) 2015-2016 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package waddrmgr_test
 
@@ -1152,6 +1140,12 @@ func testNewAccount(tc *testContext) bool {
 		return false
 	}
 	// Test account name validation
+	testName = "" // Empty account names are not allowed
+	_, err = tc.manager.NewAccount(testName)
+	wantErrCode = waddrmgr.ErrInvalidAccount
+	if !checkManagerError(tc.t, testName, err, wantErrCode) {
+		return false
+	}
 	testName = "imported" // A reserved account name
 	_, err = tc.manager.NewAccount(testName)
 	wantErrCode = waddrmgr.ErrInvalidAccount
@@ -1714,10 +1708,16 @@ func TestManager(t *testing.T) {
 	}
 
 	// Create a new manager.
-	mgr, err := waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
+	err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
 		privPassphrase, &chaincfg.MainNetParams, fastScrypt)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
+		return
+	}
+	mgr, err := waddrmgr.Open(mgrNamespace, pubPassphrase,
+		&chaincfg.MainNetParams, nil)
+	if err != nil {
+		t.Errorf("Open: unexpected error: %v", err)
 		return
 	}
 
@@ -1726,7 +1726,7 @@ func TestManager(t *testing.T) {
 
 	// Attempt to create the manager again to ensure the expected error is
 	// returned.
-	_, err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
+	err = waddrmgr.Create(mgrNamespace, seed, pubPassphrase,
 		privPassphrase, &chaincfg.MainNetParams, fastScrypt)
 	if !checkManagerError(t, "Create existing", err, waddrmgr.ErrAlreadyExists) {
 		mgr.Close()

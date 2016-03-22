@@ -1,16 +1,6 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-//
-// Permission to use, copy, modify, and distribute this software for any
-// purpose with or without fee is hereby granted, provided that the above
-// copyright notice and this permission notice appear in all copies.
-//
-// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 // This package implements the RPC API and is used by the main package to start
 // gRPC services.
@@ -53,9 +43,9 @@ import (
 
 // Public API version constants
 const (
-	semverString = "0.3.0"
-	semverMajor  = 0
-	semverMinor  = 3
+	semverString = "1.0.0"
+	semverMajor  = 1
+	semverMinor  = 0
 	semverPatch  = 0
 )
 
@@ -816,19 +806,19 @@ func (s *loaderServer) WalletExists(ctx context.Context, req *pb.WalletExistsReq
 func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletRequest) (
 	*pb.CloseWalletResponse, error) {
 
-	loadedWallet, ok := s.loader.LoadedWallet()
-	if !ok {
+	err := s.loader.UnloadWallet()
+	if err == wallet.ErrNotLoaded {
 		return nil, grpc.Errorf(codes.FailedPrecondition, "wallet is not loaded")
 	}
-
-	loadedWallet.Stop()
-	loadedWallet.WaitForShutdown()
+	if err != nil {
+		return nil, translateError(err)
+	}
 
 	return &pb.CloseWalletResponse{}, nil
 }
 
-func (s *loaderServer) StartBtcdRpc(ctx context.Context, req *pb.StartBtcdRpcRequest) (
-	*pb.StartBtcdRpcResponse, error) {
+func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConsensusRpcRequest) (
+	*pb.StartConsensusRpcResponse, error) {
 
 	defer zero.Bytes(req.Password)
 
@@ -876,5 +866,5 @@ func (s *loaderServer) StartBtcdRpc(ctx context.Context, req *pb.StartBtcdRpcReq
 		wallet.SynchronizeRPC(rpcClient)
 	}
 
-	return &pb.StartBtcdRpcResponse{}, nil
+	return &pb.StartConsensusRpcResponse{}, nil
 }

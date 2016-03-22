@@ -37,7 +37,18 @@ import (
 var (
 	pubPassphrase  = []byte("pubPassphrase")
 	privPassphrase = []byte("privPassphrase")
+	seed           = bytes.Repeat([]byte{0x2a, 0x64, 0xdf, 0x08}, 8)
+	fastScrypt     = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
 )
+
+func createWaddrmgr(ns walletdb.Namespace, params *chaincfg.Params) (*waddrmgr.Manager, error) {
+	err := waddrmgr.Create(ns, seed, pubPassphrase, privPassphrase, params,
+		fastScrypt)
+	if err != nil {
+		return nil, err
+	}
+	return waddrmgr.Open(ns, pubPassphrase, params, nil)
+}
 
 func ExampleCreate() {
 	// Create a new walletdb.DB. See the walletdb docs for instructions on how
@@ -57,10 +68,7 @@ func ExampleCreate() {
 	}
 
 	// Create the address manager.
-	seed := bytes.Repeat([]byte{0x2a, 0x64, 0xdf, 0x08}, 8)
-	var fastScrypt = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
-	mgr, err := waddrmgr.Create(
-		mgrNamespace, seed, pubPassphrase, privPassphrase, &chaincfg.MainNetParams, fastScrypt)
+	mgr, err := createWaddrmgr(mgrNamespace, &chaincfg.MainNetParams)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -270,10 +278,7 @@ func exampleCreateMgrAndDBNamespace() (*waddrmgr.Manager, walletdb.Namespace, fu
 	}
 
 	// Create the address manager
-	seed := bytes.Repeat([]byte{0x2a, 0x64, 0xdf, 0x08}, 8)
-	var fastScrypt = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
-	mgr, err := waddrmgr.Create(
-		mgrNamespace, seed, pubPassphrase, privPassphrase, &chaincfg.MainNetParams, fastScrypt)
+	mgr, err := createWaddrmgr(mgrNamespace, &chaincfg.MainNetParams)
 	if err != nil {
 		dbTearDown()
 		return nil, nil, nil, err
@@ -332,7 +337,11 @@ func exampleCreateTxStore() (*wtxmgr.Store, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	s, err := wtxmgr.Create(wtxmgrNamespace, &chaincfg.SimNetParams)
+	err = wtxmgr.Create(wtxmgrNamespace)
+	if err != nil {
+		return nil, nil, err
+	}
+	s, err := wtxmgr.Open(wtxmgrNamespace, &chaincfg.SimNetParams)
 	if err != nil {
 		return nil, nil, err
 	}

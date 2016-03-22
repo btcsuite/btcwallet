@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2014-2015 The btcsuite developers
- * Copyright (c) 2015 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2014-2015 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package main
 
@@ -37,16 +25,6 @@ import (
 	"github.com/decred/dcrwallet/wallet"
 	"github.com/decred/dcrwallet/walletdb"
 	_ "github.com/decred/dcrwallet/walletdb/bdb"
-	"github.com/decred/dcrwallet/wstakemgr"
-)
-
-// Namespace keys
-var (
-	waddrmgrNamespaceKey = []byte("waddrmgr")
-	wtxmgrNamespaceKey   = []byte("wtxmgr")
-
-	// wstakemgrNamespaceKey is the namespace key for the wstakemgr package.
-	wstakemgrNamespaceKey = []byte("wstakemgr")
 )
 
 // networkDir returns the directory name of a network directory to hold wallet
@@ -178,7 +156,7 @@ func createWallet(cfg *config) error {
 
 		// Import the addresses in the legacy keystore to the new wallet if
 		// any exist, locking each wallet again when finished.
-		loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+		loader.RunAfterLoad(func(w *wallet.Wallet) {
 			defer legacyKeyStore.Lock()
 
 			fmt.Println("Importing addresses from existing wallet...")
@@ -275,30 +253,11 @@ func createSimulationWallet(cfg *config) error {
 	}
 	defer db.Close()
 
-	// Create the address manager.
-	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	// Create the wallet.
+	err = wallet.Create(db, pubPass, privPass, seed, activeNet.Params, cfg.UnsafeMainNet)
 	if err != nil {
 		return err
 	}
-
-	manager, err := waddrmgr.Create(waddrmgrNamespace, seed, []byte(pubPass),
-		[]byte(privPass), activeNet.Params, nil, cfg.UnsafeMainNet)
-	if err != nil {
-		return err
-	}
-	defer manager.Close()
-
-	// Create the stake manager/store.
-	wstakemgrNamespace, err := db.Namespace(wstakemgrNamespaceKey)
-	if err != nil {
-		return err
-	}
-	stakeStore, err := wstakemgr.Create(wstakemgrNamespace, manager,
-		activeNet.Params)
-	if err != nil {
-		return err
-	}
-	defer stakeStore.Close()
 
 	fmt.Println("The wallet has been created successfully.")
 	return nil
@@ -349,30 +308,10 @@ func createWatchingOnlyWallet(cfg *config) error {
 	}
 	defer db.Close()
 
-	// Create the address manager.
-	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	err = wallet.CreateWatchOnly(db, pubKeyString, pubPass, activeNet.Params)
 	if err != nil {
 		return err
 	}
-
-	manager, err := waddrmgr.CreateWatchOnly(waddrmgrNamespace, pubKeyString,
-		[]byte(pubPass), activeNet.Params, nil)
-	if err != nil {
-		return err
-	}
-	defer manager.Close()
-
-	// Create the stake manager/store.
-	wstakemgrNamespace, err := db.Namespace(wstakemgrNamespaceKey)
-	if err != nil {
-		return err
-	}
-	stakeStore, err := wstakemgr.Create(wstakemgrNamespace, manager,
-		activeNet.Params)
-	if err != nil {
-		return err
-	}
-	defer stakeStore.Close()
 
 	fmt.Println("The watching only wallet has been created successfully.")
 	return nil

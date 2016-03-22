@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2013-2015 The btcsuite developers
- * Copyright (c) 2015 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package wtxmgr
 
@@ -419,16 +407,11 @@ func Open(namespace walletdb.Namespace, pruneTickets bool,
 	return s, nil
 }
 
-// Create creates and opens a new persistent transaction store in the walletdb
-// namespace.  Creating the store when one already exists in this namespace will
-// error with ErrAlreadyExists.
-func Create(namespace walletdb.Namespace, chainParams *chaincfg.Params) (*Store,
-	error) {
-	err := createStore(namespace)
-	if err != nil {
-		return nil, err
-	}
-	return &Store{new(sync.Mutex), false, namespace, chainParams, nil, nil}, nil // TODO: set callbacks
+// Create creates a new persistent transaction store in the walletdb namespace.
+// Creating the store when one already exists in this namespace will error with
+// ErrAlreadyExists.
+func Create(namespace walletdb.Namespace) error {
+	return createStore(namespace)
 }
 
 // Close safely closes the transaction manager by waiting for the mutex to

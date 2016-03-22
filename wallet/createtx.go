@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2013-2015 The btcsuite developers
- * Copyright (c) 2015-2016 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (c) 2015-2016 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package wallet
 
@@ -21,7 +9,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	badrand "math/rand"
 	"sort"
 	"strings"
 	"time"
@@ -37,7 +24,7 @@ import (
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/waddrmgr"
-	"github.com/decred/dcrwallet/wstakemgr"
+	"github.com/decred/dcrwallet/wallet/txauthor"
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
@@ -102,6 +89,38 @@ var (
 	maxTxSize = chaincfg.MainNetParams.MaximumBlockSize - 75000
 )
 
+// byAmount defines the methods needed to satisify sort.Interface to
+// sort credits by their output amount.
+type byAmount []wtxmgr.Credit
+
+func (s byAmount) Len() int           { return len(s) }
+func (s byAmount) Less(i, j int) bool { return s[i].Amount < s[j].Amount }
+func (s byAmount) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+
+func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+	// Pick largest outputs first.  This is only done for compatibility with
+	// previous tx creation code, not because it's a good idea.
+	sort.Sort(sort.Reverse(byAmount(eligible)))
+
+	// Current inputs and their total value.  These are closed over by the
+	// returned input source and reused across multiple calls.
+	currentTotal := dcrutil.Amount(0)
+	currentInputs := make([]*wire.TxIn, 0, len(eligible))
+	currentScripts := make([][]byte, 0, len(eligible))
+
+	return func(target dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error) {
+		for currentTotal < target && len(eligible) != 0 {
+			nextCredit := &eligible[0]
+			eligible = eligible[1:]
+			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil)
+			currentTotal += nextCredit.Amount
+			currentInputs = append(currentInputs, nextInput)
+			currentScripts = append(currentScripts, nextCredit.PkScript)
+		}
+		return currentTotal, currentInputs, currentScripts, nil
+	}
+}
+
 func estimateTxSize(numInputs, numOutputs int) int {
 	return txOverheadEstimate + txInEstimate*numInputs + txOutEstimate*numOutputs
 }
@@ -150,18 +169,6 @@ const EstMaxTicketFeeAmount = 0.1 * 1e8
 // transaction output amount, or due to
 type InsufficientFundsError struct {
 	in, out, fee dcrutil.Amount
-}
-
-// Error satisifies the builtin error interface.
-func (e InsufficientFundsError) Error() string {
-	total := e.out + e.fee
-	if e.fee == 0 {
-		return fmt.Sprintf("insufficient funds: transaction requires "+
-			"%s input but only %v spendable", total, e.in)
-	}
-	return fmt.Sprintf("insufficient funds: transaction requires %s input "+
-		"(%v output + %v fee) but only %v spendable", total, e.out,
-		e.fee, e.in)
 }
 
 // CreateTxFundsError represents an error where there are not enough
@@ -222,6 +229,44 @@ var ErrClientPurchaseTicket = errors.New("sendrawtransaction failed: the " +
 
 // --------------------------------------------------------------------------------
 // Transaction creation
+
+// secretSource is an implementation of txauthor.SecretSource for the wallet's
+// address manager.
+type secretSource struct {
+	*waddrmgr.Manager
+}
+
+func (s secretSource) GetKey(addr dcrutil.Address) (chainec.PrivateKey, bool, error) {
+	ma, err := s.Address(addr)
+	if err != nil {
+		return nil, false, err
+	}
+	mpka, ok := ma.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		e := fmt.Errorf("managed address type for %v is `%T` but "+
+			"want waddrmgr.ManagedPubKeyAddress", addr, ma)
+		return nil, false, e
+	}
+	privKey, err := mpka.PrivKey()
+	if err != nil {
+		return nil, false, err
+	}
+	return privKey, ma.Compressed(), nil
+}
+
+func (s secretSource) GetScript(addr dcrutil.Address) ([]byte, error) {
+	ma, err := s.Address(addr)
+	if err != nil {
+		return nil, err
+	}
+	msa, ok := ma.(waddrmgr.ManagedScriptAddress)
+	if !ok {
+		e := fmt.Errorf("managed address type for %v is `%T` but "+
+			"want waddrmgr.ManagedScriptAddress", addr, ma)
+		return nil, e
+	}
+	return msa.Script()
+}
 
 // CreatedTx holds the state of a newly-created transaction and the change
 // output (if one was added).
@@ -307,16 +352,16 @@ func (w *Wallet) insertMultisigOutIntoTxMgr(msgTx *wire.MsgTx,
 	return w.TxStore.AddMultisigOut(rec, nil, index)
 }
 
-// txToPairs creates a raw transaction sending the amounts for each
-// address/amount pair and fee to each address and the miner.  minconf
-// specifies the minimum number of confirmations required before an
-// unspent output is eligible for spending. Leftover input funds not sent
-// to addr or as a fee for the miner are sent to a newly generated
-// address. InsufficientFundsError is returned if there are not enough
-// eligible unspent outputs to create the transaction.
-func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
-	minconf int32, addrFunc func() (dcrutil.Address, error)) (*CreatedTx,
-	error) {
+// txToOutputs creates a signed transaction which includes each output from
+// outputs.  Previous outputs to reedeem are chosen from the passed account's
+// UTXO set and minconf policy. An additional output may be added to return
+// change to the wallet.  An appropriate fee is included based on the wallet's
+// current relay fee.  The wallet must be unlocked to create the transaction.
+//
+// Decred: This func also sends the transaction, and if successful, inserts it
+// into the database, rather than delegating this work to the caller as
+// btcwallet does.
+func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32) (atx *txauthor.AuthoredTx, err error) {
 	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
 	// error if already locked.
@@ -342,182 +387,78 @@ func (w *Wallet) txToPairs(pairs map[string]dcrutil.Amount, account uint32,
 		return nil, err
 	}
 
-	needed := dcrutil.Amount(0)
-	for _, amt := range pairs {
-		needed += amt
-	}
+	// Initialize the address pool for use.
+	pool := w.internalPool
+	pool.mutex.Lock()
+	defer func() {
+		if err == nil {
+			pool.BatchFinish()
+		} else {
+			pool.BatchRollback()
+		}
+		pool.mutex.Unlock()
+	}()
 
-	// Simple fee guesstimate. Assume that there are double
-	// the amount of inputs as compared to the amount of
-	// outputs.
-	var feeIncrement dcrutil.Amount
-	feeIncrement = w.FeeIncrement()
-	fee := feeForSize(feeIncrement, estimateTxSize(len(pairs)*2, len(pairs)))
-	needed += fee
-
-	eligible, err := w.findEligibleOutputsAmount(account, minconf, needed, bs)
+	eligible, err := w.findEligibleOutputs(account, minconf, bs)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := w.createTx(eligible, pairs, bs, feeIncrement, account,
-		addrFunc, w.chainParams, w.DisallowFree)
-	if err != nil {
-		errTyped, ok := err.(CreateTxFundsError)
-		if ok {
-			bal, errBalance := w.TxStore.Balance(minconf, bs.Height,
-				wtxmgr.BFBalanceFullScan, false, account)
-			if errBalance != nil {
-				return nil, errBalance
-			}
-			return nil, InsufficientFundsError{bal, errTyped.needed,
-				errTyped.fee}
+	inputSource := makeInputSource(eligible)
+	changeSource := func() ([]byte, error) {
+		// Derive the change output script.  As a hack to allow spending from
+		// the imported account, change addresses are created from account 0.
+		var changeAddr dcrutil.Address
+		var err error
+		switch account {
+		case waddrmgr.DefaultAccountNum, waddrmgr.ImportedAddrAccount:
+			changeAddr, err = pool.GetNewAddress()
+		default:
+			// TODO: In the future, this should be replaced with a
+			// tracking address pool for this account.
+			changeAddr, err = w.NewChangeAddress(account)
 		}
-		return nil, err
-	}
-
-	return resp, nil
-}
-
-// createTx selects inputs (from the given slice of eligible utxos)
-// whose amount are sufficient to fulfil all the desired outputs plus
-// the mining fee. It then creates and returns a CreatedTx containing
-// the selected inputs and the given outputs, validating it (using
-// validateMsgTx) as well.
-func (w *Wallet) createTx(eligible []wtxmgr.Credit,
-	outputs map[string]dcrutil.Amount, bs *waddrmgr.BlockStamp,
-	feeIncrement dcrutil.Amount, account uint32,
-	addrFunc func() (dcrutil.Address, error), chainParams *chaincfg.Params,
-	disallowFree bool) (*CreatedTx, error) {
-
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
-
-	msgtx := wire.NewMsgTx()
-	minAmount, err := addOutputs(msgtx, outputs, chainParams)
-	if err != nil {
-		return nil, err
-	}
-
-	// Sort eligible inputs so that we first pick the ones with highest
-	// amount, thus reducing number of inputs.
-	sort.Sort(sort.Reverse(ByAmount(eligible)))
-
-	// Start by adding enough inputs to cover for the total amount of all
-	// desired outputs.
-	var input wtxmgr.Credit
-	var inputs []wtxmgr.Credit
-	totalAdded := dcrutil.Amount(0)
-	for totalAdded < minAmount {
-		if len(eligible) == 0 {
-			return nil, CreateTxFundsError{minAmount, 0}
-		}
-		input, eligible = eligible[0], eligible[1:]
-		inputs = append(inputs, input)
-		msgtx.AddTxIn(wire.NewTxIn(&input.OutPoint, nil))
-		totalAdded += input.Amount
-	}
-
-	// Get an initial fee estimate based on the number of selected inputs
-	// and added outputs, with no change.
-	szEst := estimateTxSize(len(inputs), len(msgtx.TxOut))
-	feeEst := minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height,
-		disallowFree)
-
-	// Now make sure the sum amount of all our inputs is enough for the
-	// sum amount of all outputs plus the fee. If necessary we add more,
-	// inputs, but in that case we also need to recalculate the fee.
-	for totalAdded < minAmount+feeEst {
-		if len(eligible) == 0 {
-			return nil, CreateTxFundsError{minAmount, feeEst}
-		}
-		input, eligible = eligible[0], eligible[1:]
-		inputs = append(inputs, input)
-		msgtx.AddTxIn(wire.NewTxIn(&input.OutPoint, nil))
-		szEst += txInEstimate
-		totalAdded += input.Amount
-		feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs, bs.Height,
-			disallowFree)
-	}
-
-	// If we're spending the outputs of an imported address, we default
-	// to generating change addresses from the default account.
-	prevAccount := account
-	if account == waddrmgr.ImportedAddrAccount {
-		account = waddrmgr.DefaultAccountNum
-	}
-
-	var changeAddr dcrutil.Address
-	// changeIdx is -1 unless there's a change output.
-	changeIdx := -1
-
-	for {
-		change := totalAdded - minAmount - feeEst
-		if change > 0 {
-			if changeAddr == nil {
-				changeAddr, err = addrFunc()
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			changeIdx, err = addChange(msgtx, change, changeAddr)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		if err = signMsgTx(msgtx, inputs, w.Manager, chainParams); err != nil {
+		if err != nil {
 			return nil, err
 		}
-
-		if feeForSize(feeIncrement, msgtx.SerializeSize()) <= feeEst {
-			if change > 0 && prevAccount == waddrmgr.ImportedAddrAccount {
-				log.Warnf("Spend from imported account produced change: moving"+
-					" %v from imported account into default account.", change)
-			}
-
-			// The required fee for this size is less than or equal to what
-			// we guessed, so we're done.
-			break
-		}
-
-		if change > 0 {
-			// Remove the change output since the next iteration will add
-			// it again (with a new amount) if necessary.
-			tmp := msgtx.TxOut[:changeIdx]
-			tmp = append(tmp, msgtx.TxOut[changeIdx+1:]...)
-			msgtx.TxOut = tmp
-		}
-
-		feeEst += feeIncrement
-		for totalAdded < minAmount+feeEst {
-			if len(eligible) == 0 {
-				return nil, InsufficientFundsError{totalAdded, minAmount, feeEst}
-			}
-			input, eligible = eligible[0], eligible[1:]
-			inputs = append(inputs, input)
-			msgtx.AddTxIn(wire.NewTxIn(&input.OutPoint, nil))
-			szEst += txInEstimate
-			totalAdded += input.Amount
-			feeEst = minimumFee(feeIncrement, szEst, msgtx.TxOut, inputs,
-				bs.Height, disallowFree)
-		}
+		return txscript.PayToAddrScript(changeAddr)
 	}
-
-	if err := validateMsgTx(msgtx, inputs); err != nil {
+	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
+		inputSource, changeSource)
+	if err != nil {
 		return nil, err
 	}
 
-	_, err = chainClient.SendRawTransaction(msgtx, false)
+	// Randomize change position, if change exists, before signing.  This
+	// doesn't affect the serialize size, so the change amount will still be
+	// valid.
+	if tx.ChangeIndex >= 0 {
+		tx.RandomizeChangePosition()
+	}
+
+	err = tx.AddAllInputScripts(secretSource{w.Manager})
+	if err != nil {
+		return nil, err
+	}
+
+	err = validateMsgTx(tx.Tx, tx.PrevScripts)
+	if err != nil {
+		return nil, err
+	}
+
+	if tx.ChangeIndex >= 0 && account == waddrmgr.ImportedAddrAccount {
+		changeAmount := dcrutil.Amount(tx.Tx.TxOut[tx.ChangeIndex].Value)
+		log.Warnf("Spend from imported account produced change: moving"+
+			" %v from imported account into default account.", changeAmount)
+	}
+
+	_, err = chainClient.SendRawTransaction(tx.Tx, false)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create transaction record and insert into the db.
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(msgtx, time.Now())
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.Tx, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("Cannot create record for created transaction: %v",
 			err)
@@ -526,62 +467,12 @@ func (w *Wallet) createTx(eligible []wtxmgr.Credit,
 	if err != nil {
 		return nil, fmt.Errorf("Error adding sent tx history: %v", err)
 	}
-	err = w.insertCreditsIntoTxMgr(msgtx, rec)
+	err = w.insertCreditsIntoTxMgr(tx.Tx, rec)
 	if err != nil {
 		return nil, err
 	}
 
-	info := &CreatedTx{
-		MsgTx:       msgtx,
-		ChangeAddr:  changeAddr,
-		ChangeIndex: changeIdx,
-		Fee:         feeEst, // Last estimate is the actual fee
-	}
-	return info, nil
-}
-
-// addChange adds a new output with the given amount and address, and
-// randomizes the index (and returns it) of the newly added output.
-func addChange(msgtx *wire.MsgTx, change dcrutil.Amount,
-	changeAddr dcrutil.Address) (int, error) {
-	pkScript, err := txscript.PayToAddrScript(changeAddr)
-	if err != nil {
-		return 0, fmt.Errorf("cannot create txout script: %s", err)
-	}
-	msgtx.AddTxOut(wire.NewTxOut(int64(change), pkScript))
-
-	// Randomize index of the change output.
-	rng := badrand.New(badrand.NewSource(time.Now().UnixNano()))
-	r := rng.Int31n(int32(len(msgtx.TxOut))) // random index
-	c := len(msgtx.TxOut) - 1                // change index
-	msgtx.TxOut[r], msgtx.TxOut[c] = msgtx.TxOut[c], msgtx.TxOut[r]
-	return int(r), nil
-}
-
-// addOutputs adds the given address/amount pairs as outputs to msgtx,
-// returning their total amount.
-func addOutputs(msgtx *wire.MsgTx, pairs map[string]dcrutil.Amount,
-	chainParams *chaincfg.Params) (dcrutil.Amount, error) {
-	var minAmount dcrutil.Amount
-	for addrStr, amt := range pairs {
-		if amt <= 0 {
-			return minAmount, ErrNonPositiveAmount
-		}
-		minAmount += amt
-		addr, err := dcrutil.DecodeAddress(addrStr, chainParams)
-		if err != nil {
-			return minAmount, fmt.Errorf("cannot decode address: %s", err)
-		}
-
-		// Add output to spend amt to addr.
-		pkScript, err := txscript.PayToAddrScript(addr)
-		if err != nil {
-			return minAmount, fmt.Errorf("cannot create txout script: %s", err)
-		}
-		txout := wire.NewTxOut(int64(amt), pkScript)
-		msgtx.AddTxOut(txout)
-	}
-	return minAmount, nil
+	return tx, nil
 }
 
 // constructMultiSigScript create a multisignature output script from a
@@ -717,7 +608,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	// case.
 	feeSize := estimateTxSize(numInputs, 2)
 	var feeIncrement dcrutil.Amount
-	feeIncrement = w.FeeIncrement()
+	feeIncrement = w.RelayFee()
 
 	feeEst := feeForSize(feeIncrement, feeSize)
 
@@ -768,6 +659,32 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	}
 
 	return ctx, scAddr, msScript, nil
+}
+
+// validateMsgTx verifies transaction input scripts for tx.  All previous output
+// scripts from outputs redeemed by the transaction, in the same order they are
+// spent, must be passed in the prevScripts slice.
+func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte) error {
+	for i, prevScript := range prevScripts {
+		vm, err := txscript.NewEngine(prevScript, tx, i,
+			txscript.StandardVerifyFlags, txscript.DefaultScriptVersion)
+		if err != nil {
+			return fmt.Errorf("cannot create script engine: %s", err)
+		}
+		err = vm.Execute()
+		if err != nil {
+			return fmt.Errorf("cannot validate transaction: %s", err)
+		}
+	}
+	return nil
+}
+
+func validateMsgTxCredits(tx *wire.MsgTx, prevCredits []wtxmgr.Credit) error {
+	prevScripts := make([][]byte, 0, len(prevCredits))
+	for _, c := range prevCredits {
+		prevScripts = append(prevScripts, c.PkScript)
+	}
+	return validateMsgTx(tx, prevScripts)
 }
 
 // compressWallet compresses all the utxos in a wallet into a single change
@@ -835,7 +752,7 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 	// and added outputs, with no change.
 	szEst := estimateTxSize(txInCount, 1)
 	var feeIncrement dcrutil.Amount
-	feeIncrement = w.FeeIncrement()
+	feeIncrement = w.RelayFee()
 
 	feeEst := feeForSize(feeIncrement, szEst)
 
@@ -873,7 +790,7 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 		w.chainParams); err != nil {
 		return nil, err
 	}
-	if err := validateMsgTx(msgtx, forSigning); err != nil {
+	if err := validateMsgTxCredits(msgtx, forSigning); err != nil {
 		return nil, err
 	}
 
@@ -930,7 +847,7 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 	// and added outputs, with no change.
 	szEst := estimateTxSize(txInCount, 1)
 	var feeIncrement dcrutil.Amount
-	feeIncrement = w.FeeIncrement()
+	feeIncrement = w.RelayFee()
 
 	feeEst := feeForSize(feeIncrement, szEst)
 
@@ -962,7 +879,7 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 		w.chainParams); err != nil {
 		return err
 	}
-	if err := validateMsgTx(msgtx, forSigning); err != nil {
+	if err := validateMsgTxCredits(msgtx, forSigning); err != nil {
 		return err
 	}
 
@@ -1172,7 +1089,7 @@ func (w *Wallet) txToSStx(pair map[string]dcrutil.Amount,
 		w.chainParams); err != nil {
 		return nil, err
 	}
-	if err := validateMsgTx(msgtx, inputCredits); err != nil {
+	if err := validateMsgTxCredits(msgtx, inputCredits); err != nil {
 		return nil, err
 	}
 	info := &CreatedTx{
@@ -1442,18 +1359,6 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 
 	log.Infof("Successfully sent SStx purchase transaction %v", txSha)
 
-	// Send a notification via the RPC.
-	ntfn := wstakemgr.StakeNotification{
-		TxType:    int8(stake.TxTypeSStx),
-		TxHash:    *txSha,
-		BlockHash: chainhash.Hash{},
-		Height:    0,
-		Amount:    int64(ticketPrice),
-		SStxIn:    chainhash.Hash{},
-		VoteBits:  0,
-	}
-	w.notifyTicketPurchase(ntfn)
-
 	return txSha.String(), nil
 }
 
@@ -1552,7 +1457,7 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32,
 		// sendrawtransaction).
 		class, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			txscript.DefaultScriptVersion, output.PkScript, w.chainParams)
-		if err != nil {
+		if err != nil || len(addrs) != 1 {
 			continue
 		}
 
@@ -1587,8 +1492,10 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32,
 		}
 
 		// Only include the output if it is associated with the passed
-		// account.  There should only be one address since this is a
-		// P2PKH script.
+		// account.
+		//
+		// TODO: Handle multisig outputs by determining if enough of the
+		// addresses are controlled.
 		addrAcct, err := w.Manager.AddrAccount(addrs[0])
 		if err != nil || addrAcct != account {
 			continue
@@ -1703,35 +1610,6 @@ func signMsgTx(msgtx *wire.MsgTx, prevOutputs []wtxmgr.Credit,
 		msgtx.TxIn[i].SignatureScript = sigscript
 	}
 
-	return nil
-}
-
-func validateMsgTx(msgtx *wire.MsgTx, prevOutputs []wtxmgr.Credit) error {
-	for i := range msgtx.TxIn {
-		vm, err := txscript.NewEngine(prevOutputs[i].PkScript, msgtx,
-			i, txscript.StandardVerifyFlags, txscript.DefaultScriptVersion)
-		if err != nil {
-			return fmt.Errorf("cannot create script engine for input %v: %s"+
-				" (pkscript %x, sigscript %x)",
-				i,
-				err,
-				prevOutputs[i].PkScript,
-				msgtx.TxIn[i].SignatureScript)
-		}
-		if err = vm.Execute(); err != nil {
-			return fmt.Errorf("cannot validate input script for input %v: %s"+
-				" (pkscript %x, sigscript %x)",
-				i,
-				err,
-				prevOutputs[i].PkScript,
-				msgtx.TxIn[i].SignatureScript)
-		}
-	}
-
-	if msgtx.SerializeSize() > maxTxSize {
-		return fmt.Errorf("transaction generated was too big; try sending " +
-			"smaller amount")
-	}
 	return nil
 }
 

@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2013-2015 The btcsuite developers
- * Copyright (c) 2015 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package main
 
@@ -31,7 +19,6 @@ import (
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/rpc/legacyrpc"
 	"github.com/decred/dcrwallet/wallet"
-	"github.com/decred/dcrwallet/walletdb"
 )
 
 var (
@@ -124,21 +111,8 @@ func walletMain() error {
 		go rpcClientConnectLoop(legacyRPCServer, loader)
 	}
 
-	var closeDB func() error
-	defer func() {
-		if closeDB != nil {
-			err := closeDB()
-			if err != nil {
-				log.Errorf("Unable to close wallet database: %v", err)
-			}
-		}
-	}()
-	loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+	loader.RunAfterLoad(func(w *wallet.Wallet) {
 		startWalletRPCServices(w, rpcs, legacyRPCServer)
-		closeDB = func() error {
-			w.CloseDatabases()
-			return db.Close()
-		}
 	})
 
 	if !cfg.NoInitialLoad {
@@ -151,7 +125,15 @@ func walletMain() error {
 		}
 	}
 
-	// Shutdown the server(s) when interrupt signal is received.
+	// Add interrupt handlers to shutdown the various process components
+	// before exiting.  Interrupt handlers run in LIFO order, so the wallet
+	// (which should be closed last) is added first.
+	addInterruptHandler(func() {
+		err := loader.UnloadWallet()
+		if err != nil && err != wallet.ErrNotLoaded {
+			log.Errorf("Failed to close wallet: %v", err)
+		}
+	})
 	if rpcs != nil {
 		addInterruptHandler(func() {
 			// TODO: Does this need to wait for the grpc server to
@@ -162,15 +144,15 @@ func walletMain() error {
 		})
 	}
 	if legacyRPCServer != nil {
-		go func() {
-			<-legacyRPCServer.RequestProcessShutdown()
-			simulateInterrupt()
-		}()
 		addInterruptHandler(func() {
 			log.Warn("Stopping legacy RPC server...")
 			legacyRPCServer.Stop()
 			log.Info("Legacy RPC server shutdown")
 		})
+		go func() {
+			<-legacyRPCServer.RequestProcessShutdown()
+			simulateInterrupt()
+		}()
 	}
 
 	<-interruptHandlersDone
@@ -208,7 +190,7 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 			}
 		}
 		mu := new(sync.Mutex)
-		loader.RunAfterLoad(func(w *wallet.Wallet, db walletdb.DB) {
+		loader.RunAfterLoad(func(w *wallet.Wallet) {
 			mu.Lock()
 			associate := associateRPCClient
 			mu.Unlock()

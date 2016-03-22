@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2013-2016 The btcsuite developers
- * Copyright (c) 2015 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package main
 
@@ -39,7 +27,6 @@ const (
 	defaultLogLevel          = "info"
 	defaultLogDirname        = "logs"
 	defaultLogFilename       = "dcrwallet.log"
-	defaultDisallowFree      = false
 	defaultRPCMaxClients     = 10
 	defaultRPCMaxWebsockets  = 25
 	defaultEnableStakeMining = false
@@ -97,7 +84,7 @@ type config struct {
 	TicketMaxPrice    float64 `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
 
 	// RPC client options
-	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:19109, mainnet: localhost:9109, simnet: localhost:18556)"`
+	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:18556)"`
 	CAFile           string `long:"cafile" description:"File containing root certificates to authenticate a TLS connections with dcrd"`
 	DisableClientTLS bool   `long:"noclienttls" description:"Disable TLS for the RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
 	DcrdUsername     string `long:"dcrdusername" description:"Username for dcrd authentication"`
@@ -129,9 +116,6 @@ type config struct {
 	// These options will change (and require changes to config files, etc.)
 	// when the new gRPC server is enabled.
 	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
-
-	// Deprecated options
-	KeypoolSize uint `short:"k" long:"keypoolsize" description:"DEPRECATED -- Maximum number of addresses in keypool"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -255,7 +239,6 @@ func loadConfig() (*config, []string, error) {
 		WalletPass:             wallet.InsecurePubPassphrase,
 		RPCKey:                 defaultRPCKeyFile,
 		RPCCert:                defaultRPCCertFile,
-		DisallowFree:           defaultDisallowFree,
 		LegacyRPCMaxClients:    defaultRPCMaxClients,
 		LegacyRPCMaxWebsockets: defaultRPCMaxWebsockets,
 		EnableStakeMining:      defaultEnableStakeMining,
@@ -345,7 +328,6 @@ func loadConfig() (*config, []string, error) {
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
-	activeNet = &netparams.MainNetParams
 	if cfg.TestNet {
 		activeNet = &netparams.TestNetParams
 		numNets++
@@ -355,7 +337,7 @@ func loadConfig() (*config, []string, error) {
 		numNets++
 	}
 	if numNets > 1 {
-		str := "%s: The mainnet, testnet, and simnet params can't be used " +
+		str := "%s: The testnet and simnet params can't be used " +
 			"together -- choose one"
 		err := fmt.Errorf(str, "loadConfig")
 		fmt.Fprintln(os.Stderr, err)

@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2013-2016 The btcsuite developers
- * Copyright (c) 2015-2016 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (c) 2015-2016 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package legacyrpc
 
@@ -44,6 +32,7 @@ import (
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet"
+	"github.com/decred/dcrwallet/wallet/txrules"
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
@@ -617,7 +606,7 @@ func GetInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (
 	info.Balance = bal.ToCoin()
 	info.KeypoolOldest = time.Now().Unix()
 	info.KeypoolSize = 0
-	info.PaytxFee = w.FeeIncrement().ToCoin()
+	info.PaytxFee = w.RelayFee().ToCoin()
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
 	//  - unlocked_until
@@ -1643,7 +1632,7 @@ func GetTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 
 // GetWalletFee returns the currently set tx fee for the requested wallet
 func GetWalletFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	return w.FeeIncrement(), nil
+	return w.RelayFee(), nil
 }
 
 // These generators create the following global variables in this package:
@@ -2231,6 +2220,59 @@ func PurchaseTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	return hash, err
 }
 
+// makeOutputs creates a slice of transaction outputs from a pair of address
+// strings to amounts.  This is used to create the outputs to include in newly
+// created transactions from a JSON object describing the output destinations
+// and amounts.
+func makeOutputs(pairs map[string]dcrutil.Amount, chainParams *chaincfg.Params) ([]*wire.TxOut, error) {
+	outputs := make([]*wire.TxOut, 0, len(pairs))
+	for addrStr, amt := range pairs {
+		addr, err := dcrutil.DecodeAddress(addrStr, chainParams)
+		if err != nil {
+			return nil, fmt.Errorf("cannot decode address: %s", err)
+		}
+
+		pkScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create txout script: %s", err)
+		}
+
+		outputs = append(outputs, wire.NewTxOut(int64(amt), pkScript))
+	}
+	return outputs, nil
+}
+
+// sendPairs creates and sends payment transactions.
+// It returns the transaction hash in string format upon success
+// All errors are returned in dcrjson.RPCError format
+func sendPairs(w *wallet.Wallet, amounts map[string]dcrutil.Amount,
+	account uint32, minconf int32) (string, error) {
+	outputs, err := makeOutputs(amounts, w.ChainParams())
+	if err != nil {
+		return "", err
+	}
+	txSha, err := w.SendOutputs(outputs, account, minconf)
+	if err != nil {
+		if err == txrules.ErrAmountNegative {
+			return "", ErrNeedPositiveAmount
+		}
+		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+			return "", &ErrWalletUnlockNeeded
+		}
+		switch err.(type) {
+		case dcrjson.RPCError:
+			return "", err
+		}
+
+		return "", &dcrjson.RPCError{
+			Code:    dcrjson.ErrRPCInternal.Code,
+			Message: err.Error(),
+		}
+	}
+
+	return txSha.String(), err
+}
+
 // RedeemMultiSigOut receives a transaction hash/idx and fetches the first output
 // index or indices with known script hashes from the transaction. It then
 // construct a transaction with a single P2PKH paying to a specified address.
@@ -2428,35 +2470,6 @@ func TicketsForAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	}
 
 	return dcrjson.TicketsForAddressResult{ticketsStr}, nil
-}
-
-// sendPairs creates and sends payment transactions.
-// It returns the transaction hash in string format upon success
-// All errors are returned in dcrjson.RPCError format
-func sendPairs(w *wallet.Wallet, amounts map[string]dcrutil.Amount,
-	account uint32, minconf int32) (string, error) {
-	createdTx, err := w.SendPairs(amounts, account, minconf)
-	if err != nil {
-		if err == wallet.ErrNonPositiveAmount {
-			return "", ErrNeedPositiveAmount
-		}
-		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
-			return "", &ErrWalletUnlockNeeded
-		}
-		switch err.(type) {
-		case dcrjson.RPCError:
-			return "", err
-		}
-
-		return "", &dcrjson.RPCError{
-			Code:    dcrjson.ErrRPCInternal.Code,
-			Message: err.Error(),
-		}
-	}
-
-	txShaStr := createdTx.MsgTx.TxSha().String()
-	log.Infof("Successfully sent transaction %v", txShaStr)
-	return txShaStr, nil
 }
 
 func isNilOrEmpty(s *string) bool {
@@ -2924,11 +2937,11 @@ func SetTxFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, ErrNeedPositiveAmount
 	}
 
-	incr, err := dcrutil.NewAmount(cmd.Amount)
+	relayFee, err := dcrutil.NewAmount(cmd.Amount)
 	if err != nil {
 		return nil, err
 	}
-	w.SetFeeIncrement(incr)
+	w.SetRelayFee(relayFee)
 
 	// A boolean true result is returned upon success.
 	return true, nil
@@ -3550,16 +3563,6 @@ func WalletPassphrase(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		unlockAfter = time.After(timeout)
 	}
 	err := w.Unlock([]byte(cmd.Passphrase), unlockAfter)
-
-	if err == nil {
-		if timeout > 0 {
-			log.Infof("The wallet has been unlocked. This is set to expire  "+
-				"in %v.", timeout)
-		} else {
-			log.Infof("The wallet has been unlocked without a time limit.")
-		}
-	}
-
 	return nil, err
 }
 

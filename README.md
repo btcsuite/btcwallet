@@ -5,7 +5,7 @@ dcrwallet is a daemon handling decred wallet functionality for a
 single user.  It acts as both an RPC client to dcrd and an RPC server
 for wallet clients and legacy RPC applications.
 
-Public and private keys are derived using the heirarchical
+Public and private keys are derived using the hierarchical
 deterministic format described by
 [BIP0032](https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki).
 Unencrypted private keys are not supported and are never written to
@@ -50,12 +50,6 @@ Wallet clients can use one of two RPC servers:
      notifications for changes to the wallet, this is the RPC server to use.
      The gRPC server is documented [here](./rpc/documentation/README.md).
 
-Mainnet support is currently disabled by default.  Use of dcrwallet on
-mainnet requires passing the `--mainnet` flag on the command line or
-adding `mainnet=1` to the configuration file.  Mainnet will be enabled
-by default in a future release after further database changes and
-testing.
-
 ## Installation and updating
 
 ### Windows - MSIs Available
@@ -80,14 +74,14 @@ go get -u -v github.com/decred/dcrwallet/...
 
 ## Getting Started
 
-The following instructions detail how to get started with dcrwallet
-connecting to a localhost dcrd.  Commands should be run in `cmd.exe`
-or PowerShell on Windows, or any terminal emulator on *nix.
+The following instructions detail how to get started with dcrwallet connecting
+to a localhost dcrd.  Commands should be run in `cmd.exe` or PowerShell on
+Windows, or any terminal emulator on *nix.
 
 - Run the following command to start dcrd:
 
 ```
-dcrd --testnet -u rpcuser -P rpcpass
+dcrd -u rpcuser -P rpcpass
 ```
 
 - Run the following command to create a wallet:

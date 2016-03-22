@@ -1,19 +1,7 @@
-/*
- * Copyright (c) 2013-2016 The btcsuite developers
- * Copyright (c) 2015 The Decred developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package wallet
 
@@ -39,8 +27,11 @@ import (
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrrpcclient"
 	"github.com/decred/dcrutil"
+	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/wallet/txauthor"
+	"github.com/decred/dcrwallet/wallet/txrules"
 	"github.com/decred/dcrwallet/walletdb"
 	"github.com/decred/dcrwallet/wstakemgr"
 	"github.com/decred/dcrwallet/wtxmgr"
@@ -74,8 +65,9 @@ var ErrNotSynced = errors.New("wallet is not synchronized with the chain server"
 
 // Namespace bucket keys.
 var (
-	waddrmgrNamespaceKey = []byte("waddrmgr")
-	wtxmgrNamespaceKey   = []byte("wtxmgr")
+	waddrmgrNamespaceKey  = []byte("waddrmgr")
+	wtxmgrNamespaceKey    = []byte("wtxmgr")
+	wstakemgrNamespaceKey = []byte("wstakemgr")
 )
 
 // StakeDifficultyInfo is a container for stake difficulty information updates.
@@ -123,8 +115,8 @@ type Wallet struct {
 
 	lockedOutpoints map[wire.OutPoint]struct{}
 
-	feeIncrementLock       sync.Mutex
-	feeIncrement           dcrutil.Amount
+	relayFee               dcrutil.Amount
+	relayFeeMu             sync.Mutex
 	ticketFeeIncrementLock sync.Mutex
 	ticketFeeIncrement     dcrutil.Amount
 	DisallowFree           bool
@@ -167,25 +159,6 @@ type Wallet struct {
 	changePassphrase   chan changePassphraseRequest
 
 	NtfnServer *NotificationServer
-
-	// Notification channels so other components can listen in on wallet
-	// activity.  These are initialized as nil, and must be created by
-	// calling one of the Listen* methods.
-	//
-	// These channels and the features needed by them are on a fast path to
-	// deletion.  Use the server instead.
-	connectedBlocks         chan wtxmgr.BlockMeta
-	disconnectedBlocks      chan wtxmgr.BlockMeta
-	ticketsPurchased        chan wstakemgr.StakeNotification
-	votesCreated            chan wstakemgr.StakeNotification
-	revocationsCreated      chan wstakemgr.StakeNotification
-	relevantTxs             chan chain.RelevantTx
-	lockStateChanges        chan bool // true when locked
-	confirmedBalance        chan dcrutil.Amount
-	unconfirmedBalance      chan dcrutil.Amount
-	confirmedBalanceStake   chan dcrutil.Amount
-	unconfirmedBalanceStake chan dcrutil.Amount
-	notificationMu          sync.Mutex
 
 	chainParams *chaincfg.Params
 
@@ -233,7 +206,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		balanceToMaintain:        btm,
 		CurrentStakeDiff:         &StakeDifficultyInfo{nil, -1, -1},
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
-		feeIncrement:             feeIncrement,
+		relayFee:                 feeIncrement,
 		ticketFeeIncrement:       ticketFeeIncrement,
 		rescanAddJob:             make(chan *RescanJob),
 		rescanBatch:              make(chan *rescanBatch),
@@ -296,38 +269,6 @@ func (w *Wallet) SetStakeDifficulty(sdi *StakeDifficultyInfo) {
 	w.CurrentStakeDiff = sdi
 }
 
-// FeeIncrement is used to get the current feeIncrement for the wallet.
-func (w *Wallet) FeeIncrement() dcrutil.Amount {
-	w.feeIncrementLock.Lock()
-	fee := w.feeIncrement
-	w.feeIncrementLock.Unlock()
-
-	return fee
-}
-
-// SetFeeIncrement is used to set the current w.FeeIncrement for the wallet.
-func (w *Wallet) SetFeeIncrement(fee dcrutil.Amount) {
-	w.feeIncrementLock.Lock()
-	w.feeIncrement = fee
-	w.feeIncrementLock.Unlock()
-}
-
-// TicketFeeIncrement is used to get the current feeIncrement for the wallet.
-func (w *Wallet) TicketFeeIncrement() dcrutil.Amount {
-	w.ticketFeeIncrementLock.Lock()
-	fee := w.ticketFeeIncrement
-	w.ticketFeeIncrementLock.Unlock()
-
-	return fee
-}
-
-// SetTicketFeeIncrement is used to set the current w.ticketFeeIncrement for the wallet.
-func (w *Wallet) SetTicketFeeIncrement(fee dcrutil.Amount) {
-	w.ticketFeeIncrementLock.Lock()
-	w.ticketFeeIncrement = fee
-	w.ticketFeeIncrementLock.Unlock()
-}
-
 // BalanceToMaintain is used to get the current balancetomaintain for the wallet.
 func (w *Wallet) BalanceToMaintain() dcrutil.Amount {
 	w.stakeSettingsLock.Lock()
@@ -358,20 +299,13 @@ func (w *Wallet) SetGenerate(flag bool) error {
 	// block.
 	if w.StakeMiningEnabled && isChanged &&
 		w.CurrentVotingInfo != nil {
-		ntfns, err := w.StakeMgr.HandleWinningTicketsNtfn(
+		_, err := w.StakeMgr.HandleWinningTicketsNtfn(
 			w.CurrentVotingInfo.BlockHash,
 			w.CurrentVotingInfo.BlockHeight,
 			w.CurrentVotingInfo.Tickets,
 			w.VoteBits)
 		if err != nil {
 			return err
-		}
-
-		if ntfns != nil {
-			// Send notifications for newly created votes by the RPC.
-			for _, ntfn := range ntfns {
-				w.notifyVoteCreated(*ntfn)
-			}
 		}
 	}
 
@@ -428,243 +362,6 @@ func (w *Wallet) SetTicketMaxPrice(amt dcrutil.Amount) {
 	defer w.stakeSettingsLock.Unlock()
 
 	w.TicketMaxPrice = amt
-}
-
-// ErrDuplicateListen is returned for any attempts to listen for the same
-// notification more than once.  If callers must pass along a notifiation to
-// multiple places, they must broadcast it themself.
-var ErrDuplicateListen = errors.New("duplicate listen")
-
-// ListenConnectedBlocks returns a channel that passes all blocks that a wallet
-// has been marked in sync with. The channel must be read, or other wallet
-// methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenConnectedBlocks() (<-chan wtxmgr.BlockMeta, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.connectedBlocks != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.connectedBlocks = make(chan wtxmgr.BlockMeta)
-	return w.connectedBlocks, nil
-}
-
-// ListenDisconnectedBlocks returns a channel that passes all blocks that a
-// wallet has detached.  The channel must be read, or other wallet methods will
-// block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenDisconnectedBlocks() (<-chan wtxmgr.BlockMeta, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.disconnectedBlocks != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.disconnectedBlocks = make(chan wtxmgr.BlockMeta)
-	return w.disconnectedBlocks, nil
-}
-
-// ListenTicketsPurchased returns a channel that passes all SStx generated by
-// the wallet to the relevant ntfn channel. The channel must be read, or other
-// wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenTicketsPurchased() (<-chan wstakemgr.StakeNotification, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.ticketsPurchased != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.ticketsPurchased = make(chan wstakemgr.StakeNotification)
-	return w.ticketsPurchased, nil
-}
-
-// ListenVotesCreated returns a channel that passes all SSGen generated by
-// the wallet to the relevant ntfn channel. The channel must be read, or other
-// wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenVotesCreated() (<-chan wstakemgr.StakeNotification, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.votesCreated != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.votesCreated = make(chan wstakemgr.StakeNotification)
-	return w.votesCreated, nil
-}
-
-// ListenRevocationsCreated returns a channel that passes all SSRtx generated by
-// the wallet to the relevant ntfn channel. The channel must be read, or other
-// wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenRevocationsCreated() (<-chan wstakemgr.StakeNotification, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.revocationsCreated != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.revocationsCreated = make(chan wstakemgr.StakeNotification)
-	return w.revocationsCreated, nil
-}
-
-// ListenLockStatus returns a channel that passes the current lock state
-// of the wallet whenever the lock state is changed.  The value is true for
-// locked, and false for unlocked.  The channel must be read, or other wallet
-// methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenLockStatus() (<-chan bool, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.lockStateChanges != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.lockStateChanges = make(chan bool)
-	return w.lockStateChanges, nil
-}
-
-// ListenConfirmedBalance returns a channel that passes the confirmed balance
-// when any changes to the balance are made.  This channel must be read, or
-// other wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenConfirmedBalance() (<-chan dcrutil.Amount, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.confirmedBalance != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.confirmedBalance = make(chan dcrutil.Amount)
-	return w.confirmedBalance, nil
-}
-
-// ListenUnconfirmedBalance returns a channel that passes the unconfirmed
-// balance when any changes to the balance are made.  This channel must be
-// read, or other wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenUnconfirmedBalance() (<-chan dcrutil.Amount, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.unconfirmedBalance != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.unconfirmedBalance = make(chan dcrutil.Amount)
-	return w.unconfirmedBalance, nil
-}
-
-// ListenRelevantTxs returns a channel that passes all transactions relevant to
-// a wallet, optionally including metadata regarding the block they were mined
-// in.  This channel must be read, or other wallet methods will block.
-//
-// If this is called twice, ErrDuplicateListen is returned.
-func (w *Wallet) ListenRelevantTxs() (<-chan chain.RelevantTx, error) {
-	defer w.notificationMu.Unlock()
-	w.notificationMu.Lock()
-
-	if w.relevantTxs != nil {
-		return nil, ErrDuplicateListen
-	}
-	w.relevantTxs = make(chan chain.RelevantTx)
-	return w.relevantTxs, nil
-}
-
-func (w *Wallet) notifyConnectedBlock(block wtxmgr.BlockMeta) {
-	w.notificationMu.Lock()
-	if w.connectedBlocks != nil {
-		w.connectedBlocks <- block
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyDisconnectedBlock(block wtxmgr.BlockMeta) {
-	w.notificationMu.Lock()
-	if w.disconnectedBlocks != nil {
-		w.disconnectedBlocks <- block
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyLockStateChange(locked bool) {
-	w.notificationMu.Lock()
-	if w.lockStateChanges != nil {
-		w.lockStateChanges <- locked
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyConfirmedBalance(bal dcrutil.Amount) {
-	w.notificationMu.Lock()
-	if w.confirmedBalance != nil {
-		w.confirmedBalance <- bal
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyUnconfirmedBalance(bal dcrutil.Amount) {
-	w.notificationMu.Lock()
-	if w.unconfirmedBalance != nil {
-		w.unconfirmedBalance <- bal
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyConfirmedBalanceStake(bal dcrutil.Amount) {
-	w.notificationMu.Lock()
-	if w.confirmedBalanceStake != nil {
-		w.confirmedBalanceStake <- bal
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyUnconfirmedBalanceStake(bal dcrutil.Amount) {
-	w.notificationMu.Lock()
-	if w.unconfirmedBalanceStake != nil {
-		w.unconfirmedBalanceStake <- bal
-	}
-	w.notificationMu.Unlock()
-}
-func (w *Wallet) notifyTicketPurchase(sn wstakemgr.StakeNotification) {
-	w.notificationMu.Lock()
-	if w.ticketsPurchased != nil {
-		w.ticketsPurchased <- sn
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyVoteCreated(sn wstakemgr.StakeNotification) {
-	w.notificationMu.Lock()
-	if w.votesCreated != nil {
-		w.votesCreated <- sn
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyRevocationCreated(sn wstakemgr.StakeNotification) {
-	w.notificationMu.Lock()
-	if w.revocationsCreated != nil {
-		w.revocationsCreated <- sn
-	}
-	w.notificationMu.Unlock()
-}
-
-func (w *Wallet) notifyRelevantTx(relevantTx chain.RelevantTx) {
-	w.notificationMu.Lock()
-	if w.relevantTxs != nil {
-		w.relevantTxs <- relevantTx
-	}
-	w.notificationMu.Unlock()
 }
 
 // Start starts the goroutines necessary to manage a wallet.
@@ -782,6 +479,39 @@ func (w *Wallet) ChainClient() *chain.RPCClient {
 	chainClient := w.chainClient
 	w.chainClientLock.Unlock()
 	return chainClient
+}
+
+// RelayFee returns the current minimum relay fee (per kB of serialized
+// transaction) used when constructing transactions.
+func (w *Wallet) RelayFee() dcrutil.Amount {
+	w.relayFeeMu.Lock()
+	relayFee := w.relayFee
+	w.relayFeeMu.Unlock()
+	return relayFee
+}
+
+// SetRelayFee sets a new minimum relay fee (per kB of serialized
+// transaction) used when constructing transactions.
+func (w *Wallet) SetRelayFee(relayFee dcrutil.Amount) {
+	w.relayFeeMu.Lock()
+	w.relayFee = relayFee
+	w.relayFeeMu.Unlock()
+}
+
+// TicketFeeIncrement is used to get the current feeIncrement for the wallet.
+func (w *Wallet) TicketFeeIncrement() dcrutil.Amount {
+	w.ticketFeeIncrementLock.Lock()
+	fee := w.ticketFeeIncrement
+	w.ticketFeeIncrementLock.Unlock()
+
+	return fee
+}
+
+// SetTicketFeeIncrement is used to set the current w.ticketFeeIncrement for the wallet.
+func (w *Wallet) SetTicketFeeIncrement(fee dcrutil.Amount) {
+	w.ticketFeeIncrementLock.Lock()
+	w.ticketFeeIncrement = fee
+	w.ticketFeeIncrementLock.Unlock()
 }
 
 // quitChan atomically reads the quit channel.
@@ -1455,7 +1185,7 @@ type (
 	}
 	createTxRequest struct {
 		account uint32
-		pairs   map[string]dcrutil.Amount
+		outputs []*wire.TxOut
 		minconf int32
 		resp    chan createTxResponse
 	}
@@ -1500,7 +1230,7 @@ type (
 		err    error
 	}
 	createTxResponse struct {
-		tx  *CreatedTx
+		tx  *txauthor.AuthoredTx
 		err error
 	}
 	createMultisigTxResponse struct {
@@ -1547,32 +1277,7 @@ out:
 			txr.resp <- consolidateResponse{txh, err}
 
 		case txr := <-w.createTxRequests:
-			// Initialize the address pool for use.
-			pool := w.internalPool
-			pool.mutex.Lock()
-			var addrFunc func() (dcrutil.Address, error)
-			if txr.account == waddrmgr.DefaultAccountNum ||
-				txr.account == waddrmgr.ImportedAddrAccount {
-				addrFunc = pool.GetNewAddress
-			} else {
-				// A pass through to enable the user to get a
-				// change address for a non-default account.
-				// In the future, this should be replaced with
-				// a tracking address pool for this account.
-				addrFunc = func() (dcrutil.Address, error) {
-					return w.NewChangeAddress(txr.account)
-				}
-			}
-
-			tx, err := w.txToPairs(txr.pairs, txr.account, txr.minconf,
-				addrFunc)
-			if err == nil {
-				pool.BatchFinish()
-			} else {
-				pool.BatchRollback()
-			}
-			pool.mutex.Unlock()
-
+			tx, err := w.txToOutputs(txr.outputs, txr.account, txr.minconf)
 			txr.resp <- createTxResponse{tx, err}
 
 		case txr := <-w.createMultisigTxRequests:
@@ -1640,16 +1345,16 @@ func (w *Wallet) Consolidate(inputs int, account uint32) (*chainhash.Hash, error
 
 // CreateSimpleTx creates a new signed transaction spending unspent P2PKH
 // outputs with at laest minconf confirmations spending to any number of
-// address/amount pairs.  Change and an appropiate transaction fee are
-// automatically included, if necessary.  All transaction creation through
-// this function is serialized to prevent the creation of many transactions
-// which spend the same outputs.
-func (w *Wallet) CreateSimpleTx(account uint32, pairs map[string]dcrutil.Amount,
-	minconf int32) (*CreatedTx, error) {
+// address/amount pairs.  Change and an appropriate transaction fee are
+// automatically included, if necessary.  All transaction creation through this
+// function is serialized to prevent the creation of many transactions which
+// spend the same outputs.
+func (w *Wallet) CreateSimpleTx(account uint32, outputs []*wire.TxOut,
+	minconf int32) (*txauthor.AuthoredTx, error) {
 
 	req := createTxRequest{
 		account: account,
-		pairs:   pairs,
+		outputs: outputs,
 		minconf: minconf,
 		resp:    make(chan createTxResponse),
 	}
@@ -1783,8 +1488,12 @@ out:
 				req.err <- err
 				continue
 			}
-			w.notifyLockStateChange(false)
 			timeout = req.lockAfter
+			if timeout == nil {
+				log.Info("The wallet has been unlocked without a time limit")
+			} else {
+				log.Info("The wallet has been temporarily unlocked")
+			}
 			req.err <- nil
 			continue
 
@@ -1833,7 +1542,7 @@ out:
 		if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 			log.Errorf("Could not lock wallet: %v", err)
 		} else {
-			w.notifyLockStateChange(true)
+			log.Info("The wallet has been locked")
 		}
 	}
 	w.wg.Done()
@@ -3073,21 +2782,30 @@ func (w *Wallet) TotalReceivedForAddr(addr dcrutil.Address, minConf int32) (dcru
 	return amount, err
 }
 
-// SendPairs creates and sends payment transactions. It returns the transaction
-// hash upon success
-func (w *Wallet) SendPairs(amounts map[string]dcrutil.Amount, account uint32,
-	minconf int32) (*CreatedTx, error) {
+// SendOutputs creates and sends payment transactions. It returns the
+// transaction hash upon success
+func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
+	minconf int32) (*chainhash.Hash, error) {
+
+	relayFee := w.RelayFee()
+	for _, output := range outputs {
+		err := txrules.CheckOutput(output, relayFee)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := w.CreateSimpleTx(account, amounts, minconf)
+	createdTx, err := w.CreateSimpleTx(account, outputs, minconf)
 	if err != nil {
 		return nil, err
 	}
 
 	// TODO: The record already has the serialized tx, so no need to
 	// serialize it again.
-	return createdTx, nil
+	hash := createdTx.Tx.TxSha()
+	return &hash, nil
 }
 
 // SignatureError records the underlying error when validating a transaction
@@ -3168,7 +2886,6 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 
 			return key, pka.Compressed(), nil
 		})
-
 		getScript := txscript.ScriptClosure(func(
 			addr dcrutil.Address) ([]byte, error) {
 			// If keys were provided then we can only use the
@@ -3301,41 +3018,132 @@ func (w *Wallet) ChainParams() *chaincfg.Params {
 	return w.chainParams
 }
 
+// Create creates an new wallet, writing it to an empty database.  If the passed
+// seed is non-nil, it is used.  Otherwise, a secure random seed of the
+// recommended length is generated.
+func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Params, unsafeMainNet bool) error {
+	// If a seed was provided, ensure that it is of valid length. Otherwise,
+	// we generate a random seed for the wallet with the recommended seed
+	// length.
+	if seed == nil {
+		hdSeed, err := hdkeychain.GenerateSeed(
+			hdkeychain.RecommendedSeedLen)
+		if err != nil {
+			return err
+		}
+		seed = hdSeed
+	}
+	if len(seed) < hdkeychain.MinSeedBytes ||
+		len(seed) > hdkeychain.MaxSeedBytes {
+		return hdkeychain.ErrInvalidSeedLen
+	}
+
+	// Create the address manager.
+	addrMgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	err = waddrmgr.Create(addrMgrNamespace, seed, pubPass, privPass,
+		params, nil, unsafeMainNet)
+	if err != nil {
+		return err
+	}
+
+	// Create empty transaction manager.
+	txMgrNamespace, err := db.Namespace(wtxmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	err = wtxmgr.Create(txMgrNamespace)
+	if err != nil {
+		return err
+	}
+
+	// Create empty stake manager.
+	stakeMgrNamespace, err := db.Namespace([]byte("wstakemgr"))
+	if err != nil {
+		return err
+	}
+	return wstakemgr.Create(stakeMgrNamespace)
+}
+
+func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, params *chaincfg.Params) error {
+	// Create the address manager.
+	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+
+	err = waddrmgr.CreateWatchOnly(waddrmgrNamespace, extendedPubKey,
+		pubPass, params, nil)
+	if err != nil {
+		return err
+	}
+
+	// Create the stake manager/store.
+	wstakemgrNamespace, err := db.Namespace(wstakemgrNamespaceKey)
+	if err != nil {
+		return err
+	}
+	err = wstakemgr.Create(wstakemgrNamespace)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Open loads an already-created wallet from the passed database and namespaces.
-func Open(pubPass []byte, params *chaincfg.Params, db walletdb.DB, waddrmgrNS,
-	wtxmgrNS, wstmgrNS walletdb.Namespace, cbs *waddrmgr.OpenCallbacks,
+func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
-	ticketMaxPrice float64, autoRepair bool) (*Wallet, error) {
-	addrMgr, err := waddrmgr.Open(waddrmgrNS, pubPass, params, cbs)
+	ticketMaxPrice float64, autoRepair bool, params *chaincfg.Params) (*Wallet, error) {
+	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
+	if err != nil {
+		return nil, err
+	}
+	txMgrNS, err := db.Namespace(wtxmgrNamespaceKey)
+	if err != nil {
+		return nil, err
+	}
+	stakeMgrNS, err := db.Namespace(wstakemgrNamespaceKey)
+	if err != nil {
+		return nil, err
+	}
+	addrMgr, err := waddrmgr.Open(addrMgrNS, pubPass, params, cbs)
+	if err != nil {
+		return nil, err
+	}
+	noTxMgr, err := walletdb.NamespaceIsEmpty(txMgrNS)
+	if err != nil {
+		return nil, err
+	}
+	if noTxMgr {
+		log.Info("No recorded transaction history -- needs full rescan")
+		err = addrMgr.SetSyncedTo(nil)
+		if err != nil {
+			return nil, err
+		}
+		err = wtxmgr.Create(txMgrNS)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Create a callback for account lookup from waddrmgr.
+	accountCallback := addrMgr.AddrAccount
+	txMgr, err := wtxmgr.Open(txMgrNS, pruneTickets, params, accountCallback)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create a callback for account lookup from waddrmgr.
-	accountCallback := addrMgr.AddrAccount
-
-	txMgr, err := wtxmgr.Open(wtxmgrNS, pruneTickets, params, accountCallback)
-	if err != nil {
-		if wtxmgr.IsNoExists(err) {
-			log.Info("No recorded transaction history -- needs full rescan")
-			err = addrMgr.SetSyncedTo(nil)
-			if err != nil {
-				return nil, err
-			}
-			txMgr, err = wtxmgr.Create(wtxmgrNS, params)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, err
-		}
-	}
-
-	smgr, err := wstakemgr.Open(wstmgrNS, addrMgr, params)
+	smgr, err := wstakemgr.Open(stakeMgrNS, addrMgr, params)
 	if err != nil {
 		log.Info("No stake manager present, generating")
-		smgr, err = wstakemgr.Create(wstmgrNS, addrMgr, params)
+		err = wstakemgr.Create(stakeMgrNS)
+		if err != nil {
+			return nil, err
+		}
+		smgr, err = wstakemgr.Open(stakeMgrNS, addrMgr, params)
 		if err != nil {
 			return nil, err
 		}

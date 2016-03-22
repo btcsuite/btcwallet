@@ -1,18 +1,6 @@
-/*
- * Copyright (c) 2013-2015 The btcsuite developers
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright (c) 2013-2015 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
 
 package legacyrpc
 
@@ -33,11 +21,8 @@ import (
 	"github.com/btcsuite/fastsha256"
 	"github.com/btcsuite/websocket"
 	"github.com/decred/dcrd/dcrjson"
-	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/wallet"
-	"github.com/decred/dcrwallet/wstakemgr"
-	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 type websocketClient struct {
@@ -87,35 +72,6 @@ type Server struct {
 	maxPostClients      int64 // Max concurrent HTTP POST clients.
 	maxWebsocketClients int64 // Max concurrent websocket clients.
 
-	// Channels to register or unregister a websocket client for
-	// websocket notifications.
-	registerWSC   chan *websocketClient
-	unregisterWSC chan *websocketClient
-
-	// Channels read from other components from which notifications are
-	// created.
-	connectedBlocks    <-chan wtxmgr.BlockMeta
-	disconnectedBlocks <-chan wtxmgr.BlockMeta
-	ticketsPurchased   <-chan wstakemgr.StakeNotification
-	votesCreated       <-chan wstakemgr.StakeNotification
-	revocationsCreated <-chan wstakemgr.StakeNotification
-	relevantTxs        <-chan chain.RelevantTx
-	managerLocked      <-chan bool
-	confirmedBalance   <-chan dcrutil.Amount
-	unconfirmedBalance <-chan dcrutil.Amount
-	//chainServerConnected  <-chan bool
-	registerWalletNtfns chan struct{}
-
-	// enqueueNotification and dequeueNotification handle both sides of an
-	// infinitly growing queue for websocket client notifications.
-	enqueueNotification chan wsClientNotification
-	dequeueNotification chan wsClientNotification
-
-	// notificationHandlerQuit is closed when the notification handler
-	// goroutine shuts down.  After this is closed, no more notifications
-	// will be sent to any websocket client response channel.
-	notificationHandlerQuit chan struct{}
-
 	wg      sync.WaitGroup
 	quit    chan struct{}
 	quitMtx sync.Mutex
@@ -156,12 +112,6 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 			// Allow all origins.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		registerWSC:             make(chan *websocketClient),
-		unregisterWSC:           make(chan *websocketClient),
-		registerWalletNtfns:     make(chan struct{}),
-		enqueueNotification:     make(chan wsClientNotification),
-		dequeueNotification:     make(chan wsClientNotification),
-		notificationHandlerQuit: make(chan struct{}),
 		quit:                make(chan struct{}),
 		requestShutdownChan: make(chan struct{}, 1),
 		unsafeMainNet:       opts.UnsafeMainNet,
@@ -210,11 +160,6 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 			server.websocketClientRPC(wsc)
 		}))
 
-	server.wg.Add(3)
-	go server.notificationListener()
-	go server.notificationQueue()
-	go server.notificationHandler()
-
 	for _, lis := range listeners {
 		server.serve(lis)
 	}
@@ -259,7 +204,6 @@ func (s *Server) serve(lis net.Listener) {
 func (s *Server) RegisterWallet(w *wallet.Wallet) {
 	s.handlerMu.Lock()
 	s.wallet = w
-	s.registerWalletNtfns <- struct{}{}
 	s.handlerMu.Unlock()
 }
 
@@ -555,16 +499,6 @@ out:
 		}
 	}
 
-	// Remove websocket client from notification group, or if the server is
-	// shutting down, wait until the notification handler has finished
-	// running.  This is needed to ensure that no more notifications will be
-	// sent to the client's responses chan before it's closed below.
-	select {
-	case s.unregisterWSC <- wsc:
-	case <-s.quit:
-		<-s.notificationHandlerQuit
-	}
-
 	// allow client to disconnect after all handler goroutines are done
 	wsc.wg.Wait()
 	close(wsc.responses)
@@ -603,8 +537,8 @@ out:
 	s.wg.Done()
 }
 
-// websocketClientRPC starts the goroutines to serve JSON-RPC requests and
-// notifications over a websocket connection for a single client.
+// websocketClientRPC starts the goroutines to serve JSON-RPC requests over a
+// websocket connection for a single client.
 func (s *Server) websocketClientRPC(wsc *websocketClient) {
 	log.Infof("New websocket client %s", wsc.remoteAddr)
 
@@ -612,14 +546,6 @@ func (s *Server) websocketClientRPC(wsc *websocketClient) {
 	// the connection.
 	if err := wsc.conn.SetReadDeadline(time.Time{}); err != nil {
 		log.Warnf("Cannot remove read deadline: %v", err)
-	}
-
-	// Add client context so notifications duplicated to each
-	// client are received by this client.
-	select {
-	case s.registerWSC <- wsc:
-	case <-s.quit:
-		return
 	}
 
 	// WebsocketClientRead is intentionally not run with the waitgroup
@@ -716,325 +642,4 @@ func (s *Server) requestProcessShutdown() {
 // client requests remote shutdown.
 func (s *Server) RequestProcessShutdown() <-chan struct{} {
 	return s.requestShutdownChan
-}
-
-// Notification messages for websocket clients.
-type (
-	wsClientNotification interface {
-		// This returns a slice only because some of these types result
-		// in multpile client notifications.
-		notificationCmds(w *wallet.Wallet) []interface{}
-	}
-
-	blockConnected    wtxmgr.BlockMeta
-	blockDisconnected wtxmgr.BlockMeta
-
-	// Stake notifications.
-	ticketPurchased   wstakemgr.StakeNotification
-	voteCreated       wstakemgr.StakeNotification
-	revocationCreated wstakemgr.StakeNotification
-
-	relevantTx chain.RelevantTx
-
-	managerLocked bool
-
-	confirmedBalance   dcrutil.Amount
-	unconfirmedBalance dcrutil.Amount
-
-	daemonConnected bool
-)
-
-func (b ticketPurchased) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewTicketPurchasedNtfn(b.TxHash.String(), b.Amount)
-	return []interface{}{n}
-}
-
-func (b voteCreated) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewVoteCreatedNtfn(
-		b.TxHash.String(),
-		b.BlockHash.String(),
-		int32(b.Height),
-		b.SStxIn.String(),
-		b.VoteBits)
-	return []interface{}{n}
-}
-
-func (b revocationCreated) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewRevocationCreatedNtfn(
-		b.TxHash.String(),
-		b.SStxIn.String())
-	return []interface{}{n}
-}
-
-func (b blockConnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewBlockConnectedNtfn(b.Hash.String(), b.Height, b.Time.Unix(),
-		b.VoteBits)
-	return []interface{}{n}
-}
-
-func (b blockDisconnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewBlockDisconnectedNtfn(b.Hash.String(), b.Height, b.Time.Unix(),
-		b.VoteBits)
-	return []interface{}{n}
-}
-
-func (t relevantTx) notificationCmds(w *wallet.Wallet) []interface{} {
-	syncBlock := w.Manager.SyncedTo()
-
-	var block *wtxmgr.Block
-	if t.Block != nil {
-		block = &t.Block.Block
-	}
-	details, err := w.TxStore.UniqueTxDetails(&t.TxRecord.Hash, block)
-	if err != nil {
-		log.Errorf("Cannot fetch transaction details for "+
-			"client notification: %v", err)
-		return nil
-	}
-	if details == nil {
-		log.Errorf("No details found for client transaction notification")
-		return nil
-	}
-
-	ltr := wallet.ListTransactions(details, w.Manager, syncBlock.Height,
-		w.ChainParams())
-	ntfns := make([]interface{}, len(ltr))
-	for i := range ntfns {
-		ntfns[i] = dcrjson.NewNewTxNtfn(ltr[i].Account, ltr[i])
-	}
-	return ntfns
-}
-
-func (l managerLocked) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewWalletLockStateNtfn(bool(l))
-	return []interface{}{n}
-}
-
-func (b confirmedBalance) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewAccountBalanceNtfn("",
-		dcrutil.Amount(b).ToCoin(), true)
-	return []interface{}{n}
-}
-
-func (b unconfirmedBalance) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewAccountBalanceNtfn("",
-		dcrutil.Amount(b).ToCoin(), false)
-	return []interface{}{n}
-}
-
-func (b daemonConnected) notificationCmds(w *wallet.Wallet) []interface{} {
-	n := dcrjson.NewBtcdConnectedNtfn(bool(b))
-	return []interface{}{n}
-}
-
-func (s *Server) notificationListener() {
-out:
-	for {
-		select {
-		case n := <-s.connectedBlocks:
-			s.enqueueNotification <- blockConnected(n)
-		case n := <-s.disconnectedBlocks:
-			s.enqueueNotification <- blockDisconnected(n)
-		case n := <-s.ticketsPurchased:
-			s.enqueueNotification <- ticketPurchased(n)
-		case n := <-s.votesCreated:
-			s.enqueueNotification <- voteCreated(n)
-		case n := <-s.revocationsCreated:
-			s.enqueueNotification <- revocationCreated(n)
-		case n := <-s.relevantTxs:
-			s.enqueueNotification <- relevantTx(n)
-		case n := <-s.managerLocked:
-			s.enqueueNotification <- managerLocked(n)
-		case n := <-s.confirmedBalance:
-			s.enqueueNotification <- confirmedBalance(n)
-		case n := <-s.unconfirmedBalance:
-			s.enqueueNotification <- unconfirmedBalance(n)
-
-		// Registration of all notifications is done by the handler so
-		// it doesn't require another Server mutex.
-		case <-s.registerWalletNtfns:
-			connectedBlocks, err := s.wallet.ListenConnectedBlocks()
-			if err != nil {
-				log.Errorf("Could not register for new "+
-					"connected block notifications: %v",
-					err)
-				continue
-			}
-			disconnectedBlocks, err := s.wallet.ListenDisconnectedBlocks()
-			if err != nil {
-				log.Errorf("Could not register for new "+
-					"disconnected block notifications: %v",
-					err)
-				continue
-			}
-			ticketsPurchased, err := s.wallet.ListenTicketsPurchased()
-			if err != nil {
-				log.Errorf("Could not register for newly created "+
-					"tickets notifications: %v",
-					err)
-				continue
-			}
-			votesCreated, err := s.wallet.ListenVotesCreated()
-			if err != nil {
-				log.Errorf("Could not register for newly created "+
-					"votes notifications: %v",
-					err)
-				continue
-			}
-			revocationsCreated, err := s.wallet.ListenRevocationsCreated()
-			if err != nil {
-				log.Errorf("Could not register for newly created "+
-					"revocations notifications: %v",
-					err)
-				continue
-			}
-			relevantTxs, err := s.wallet.ListenRelevantTxs()
-			if err != nil {
-				log.Errorf("Could not register for new relevant "+
-					"transaction notifications: %v", err)
-				continue
-			}
-			managerLocked, err := s.wallet.ListenLockStatus()
-			if err != nil {
-				log.Errorf("Could not register for manager "+
-					"lock state changes: %v", err)
-				continue
-			}
-			confirmedBalance, err := s.wallet.ListenConfirmedBalance()
-			if err != nil {
-				log.Errorf("Could not register for confirmed "+
-					"balance changes: %v", err)
-				continue
-			}
-			unconfirmedBalance, err := s.wallet.ListenUnconfirmedBalance()
-			if err != nil {
-				log.Errorf("Could not register for unconfirmed "+
-					"balance changes: %v", err)
-				continue
-			}
-			s.connectedBlocks = connectedBlocks
-			s.disconnectedBlocks = disconnectedBlocks
-			s.ticketsPurchased = ticketsPurchased
-			s.votesCreated = votesCreated
-			s.revocationsCreated = revocationsCreated
-			s.relevantTxs = relevantTxs
-			s.managerLocked = managerLocked
-			s.confirmedBalance = confirmedBalance
-			s.unconfirmedBalance = unconfirmedBalance
-
-		case <-s.quit:
-			break out
-		}
-	}
-	close(s.enqueueNotification)
-	go s.drainNotifications()
-	s.wg.Done()
-}
-
-func (s *Server) drainNotifications() {
-	for {
-		select {
-		case <-s.connectedBlocks:
-		case <-s.disconnectedBlocks:
-		case <-s.ticketsPurchased:
-		case <-s.votesCreated:
-		case <-s.revocationsCreated:
-		case <-s.relevantTxs:
-		case <-s.managerLocked:
-		case <-s.confirmedBalance:
-		case <-s.unconfirmedBalance:
-		case <-s.registerWalletNtfns:
-		}
-	}
-}
-
-// notificationQueue manages an infinitly-growing queue of notifications that
-// wallet websocket clients may be interested in.  It quits when the
-// enqueueNotification channel is closed, dropping any still pending
-// notifications.
-func (s *Server) notificationQueue() {
-	var q []wsClientNotification
-	var dequeue chan<- wsClientNotification
-	skipQueue := s.dequeueNotification
-	var next wsClientNotification
-out:
-	for {
-		select {
-		case n, ok := <-s.enqueueNotification:
-			if !ok {
-				// Sender closed input channel.
-				break out
-			}
-
-			// Either send to out immediately if skipQueue is
-			// non-nil (queue is empty) and reader is ready,
-			// or append to the queue and send later.
-			select {
-			case skipQueue <- n:
-			default:
-				q = append(q, n)
-				dequeue = s.dequeueNotification
-				skipQueue = nil
-				next = q[0]
-			}
-
-		case dequeue <- next:
-			q[0] = nil // avoid leak
-			q = q[1:]
-			if len(q) == 0 {
-				dequeue = nil
-				skipQueue = s.dequeueNotification
-			} else {
-				next = q[0]
-			}
-		}
-	}
-	close(s.dequeueNotification)
-	s.wg.Done()
-}
-
-func (s *Server) notificationHandler() {
-	clients := make(map[chan struct{}]*websocketClient)
-out:
-	for {
-		select {
-		case c := <-s.registerWSC:
-			clients[c.quit] = c
-
-		case c := <-s.unregisterWSC:
-			delete(clients, c.quit)
-
-		case nmsg, ok := <-s.dequeueNotification:
-			// No more notifications.
-			if !ok {
-				break out
-			}
-
-			// Ignore if there are no clients to receive the
-			// notification.
-			if len(clients) == 0 {
-				continue
-			}
-
-			ns := nmsg.notificationCmds(s.wallet)
-			for _, n := range ns {
-				mn, err := dcrjson.MarshalCmd(nil, n)
-				// All notifications are expected to be
-				// marshalable.
-				if err != nil {
-					panic(err)
-				}
-				for _, c := range clients {
-					if err := c.send(mn); err != nil {
-						delete(clients, c.quit)
-					}
-				}
-			}
-
-		case <-s.quit:
-			break out
-		}
-	}
-	close(s.notificationHandlerQuit)
-	s.wg.Done()
 }

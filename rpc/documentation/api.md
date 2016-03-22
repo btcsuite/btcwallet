@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 0.3.0
+Version: 1.0.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -87,7 +87,7 @@ dependencies and is always running.
 - [`CreateWallet`](#createwallet)
 - [`OpenWallet`](#openwallet)
 - [`CloseWallet`](#closewallet)
-- [`StartBtcdRpc`](#startbtcdrpc)
+- [`StartConsensusRpc`](#startconsensusrpc)
 
 **Shared messages:**
 
@@ -167,7 +167,7 @@ After opening a wallet, the `WalletService` service begins running.
 **Request:** `OpenWalletRequest`
 
 - `bytes public_passphrase`: The passphrase used for the outer wallet
-  encryption.  This passhprase protects data that is made public on the
+  encryption.  This passphrase protects data that is made public on the
   blockchain.  If this passphrase has zero length, an insecure default is used
   instead.
 
@@ -208,13 +208,13 @@ unusable.
 
 ___
 
-#### `StartBtcdRpc`
+#### `StartConsensusRpc`
 
-The `StartBtcdRpc` method is used to provide clients the ability to dynamically
+The `StartConsensusRpc` method is used to provide clients the ability to dynamically
 start the dcrd RPC client.  This RPC client is used for wallet syncing and
 publishing transactions to the Decred network.
 
-**Request:** `StartBtcdRpcRequest`
+**Request:** `StartConsensusRpcRequest`
 
 - `string network_address`: The host/IP and optional port of the RPC server to
   connect to.  IP addresses may be IPv4 or IPv6.  If the port is missing, a
@@ -230,7 +230,7 @@ publishing transactions to the Decred network.
   field has zero length and the network address describes a loopback connection
   (`localhost`, `127.0.0.1`, or `::1`) TLS will be disabled.
 
-**Response:** `StartBtcdRpcResponse`
+**Response:** `StartConsensusRpcResponse`
 
 **Expected errors:**
 
