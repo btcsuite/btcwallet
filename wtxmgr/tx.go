@@ -2755,6 +2755,273 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 	return unspent, nil
 }
 
+// InputSource provides a method (SelectInputs) to incrementally select unspent
+// outputs to use as transaction inputs.  It represents an open database
+// transaction view, and must be closed with CloseTransaction when input
+// selection is finished.
+type InputSource struct {
+	source func(dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error)
+	tx     walletdb.Tx
+}
+
+// SelectInputs selects transaction inputs to redeem unspent outputs stored in
+// the database.  It may be called multiple times with increasing target amounts
+// to return additional inputs for a higher target amount.  It returns the total
+// input amount referenced by the previous transaction outputs, a slice of
+// transaction inputs referencing these outputs, and a slice of previous output
+// scripts from each previous output referenced by the corresponding input.
+func (s *InputSource) SelectInputs(target dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error) {
+	return s.source(target)
+}
+
+// CloseTransaction closes any transaction opened when creating the InputSource.
+// Calling SelectInputs will panic after CloseTransaction has been called.
+func (s *InputSource) CloseTransaction() error {
+	s.source = nil
+	if s.tx != nil {
+		return s.tx.Rollback()
+	}
+	return nil
+}
+
+// MakeInputSource creates an InputSource to redeem unspent outputs from an
+// account.  The minConf and syncHeight parameters are used to filter outputs
+// based on some spendable policy.
+func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) InputSource {
+	defer s.mutex.Unlock()
+	s.mutex.Lock()
+
+	sourceError := func(err error) InputSource {
+		f := func(dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error) {
+			return 0, nil, nil, err
+		}
+		return InputSource{source: f, tx: nil}
+	}
+
+	if s.isClosed {
+		str := "tx manager is closed"
+		err := storeError(ErrIsClosed, str, nil)
+		return sourceError(err)
+	}
+
+	tx, err := s.namespace.Begin(false)
+	if err != nil {
+		str := "cannot begin read transaction"
+		err := storeError(ErrDatabase, str, err)
+		return sourceError(err)
+	}
+	ns := tx.RootBucket()
+
+	// Cursors to iterate over the (mined) unspent and unmined credit
+	// buckets.  These are closed over by the returned input source and
+	// reused across multiple calls.
+	//
+	// These cursors are initialized to nil and are set to a valid cursor
+	// when first needed.  This is done since cursors are not positioned
+	// when created, and positioning a cursor also returns a key/value pair.
+	// The simplest way to handle this is to branch to either cursor.First
+	// or cursor.Next depending on whether the cursor has already been
+	// created or not.
+	var bucketUnspentCursor, bucketUnminedCreditsCursor walletdb.Cursor
+
+	// Current inputs and their total value.  These are closed over by the
+	// returned input source and reused across multiple calls.
+	var (
+		currentTotal   dcrutil.Amount
+		currentInputs  []*wire.TxIn
+		currentScripts [][]byte
+	)
+
+	f := func(target dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error) {
+		for currentTotal < target {
+			var k, v []byte
+			if bucketUnspentCursor == nil {
+				b := ns.Bucket(bucketUnspent)
+				bucketUnspentCursor = b.Cursor()
+				k, v = bucketUnspentCursor.First()
+			} else {
+				k, v = bucketUnspentCursor.Next()
+			}
+			if k == nil || v == nil {
+				break
+			}
+			if existsRawUnminedInput(ns, k) != nil {
+				// Output is spent by an unmined transaction.
+				// Skip to next unmined credit.
+				continue
+			}
+
+			cKey := make([]byte, 72)
+			copy(cKey[0:32], k[0:32])   // Tx hash
+			copy(cKey[32:36], v[0:4])   // Block height
+			copy(cKey[36:68], v[4:36])  // Block hash
+			copy(cKey[68:72], k[32:36]) // Output index
+
+			cVal := existsRawCredit(ns, cKey)
+
+			// Check the account first.
+			pkScript, err := s.fastCreditPkScriptLookup(ns, cKey, nil)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			thisAcct, err := s.fetchAccountForPkScript(cVal, nil, pkScript)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			if account != thisAcct {
+				continue
+			}
+
+			amt, spent, err := fetchRawCreditAmountSpent(cVal)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+
+			// This should never happen since this is already in bucket
+			// unspent, but let's be careful anyway.
+			if spent {
+				continue
+			}
+			// Skip ticket outputs, as only SSGen can spend these.
+			opcode := fetchRawCreditTagOpCode(cVal)
+			if opcode == txscript.OP_SSTX {
+				continue
+			}
+
+			// Only include this output if it meets the required number of
+			// confirmations.  Coinbase transactions must have have reached
+			// maturity before their outputs may be spent.
+			txHeight := extractRawCreditHeight(cKey)
+			if !confirmed(minConf, txHeight, syncHeight) {
+				continue
+			}
+
+			// Skip outputs that are not mature.
+			if opcode == OP_NONSTAKE && fetchRawCreditIsCoinbase(cVal) {
+				if !confirmed(int32(s.chainParams.CoinbaseMaturity), txHeight,
+					syncHeight) {
+					continue
+				}
+			}
+			if opcode == txscript.OP_SSGEN || opcode == txscript.OP_SSRTX {
+				if !confirmed(int32(s.chainParams.CoinbaseMaturity), txHeight,
+					syncHeight) {
+					continue
+				}
+			}
+			if opcode == txscript.OP_SSTXCHANGE {
+				if !confirmed(int32(s.chainParams.SStxChangeMaturity), txHeight,
+					syncHeight) {
+					continue
+				}
+			}
+
+			// Determine the txtree for the outpoint by whether or not it's
+			// using stake tagged outputs.
+			tree := dcrutil.TxTreeRegular
+			if opcode != OP_NONSTAKE {
+				tree = dcrutil.TxTreeStake
+			}
+
+			var op wire.OutPoint
+			err = readCanonicalOutPoint(k, &op)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			op.Tree = tree
+
+			input := wire.NewTxIn(&op, nil)
+
+			currentTotal += amt
+			currentInputs = append(currentInputs, input)
+			currentScripts = append(currentScripts, pkScript)
+		}
+
+		// Return the current results if the target amount was reached
+		// or there are no more mined transaction outputs to redeem and
+		// unspent outputs can be not be included.
+		if currentTotal >= target || minConf != 0 {
+			return currentTotal, currentInputs, currentScripts, nil
+		}
+
+		// Iterate through unspent unmined credits
+		for currentTotal < target {
+			var k, v []byte
+			if bucketUnminedCreditsCursor == nil {
+				b := ns.Bucket(bucketUnminedCredits)
+				bucketUnminedCreditsCursor = b.Cursor()
+				k, v = bucketUnminedCreditsCursor.First()
+			} else {
+				k, v = bucketUnminedCreditsCursor.Next()
+			}
+			if k == nil || v == nil {
+				break
+			}
+
+			// Make sure this output was not spent by an unmined transaction.
+			// If it was, skip this credit.
+			if existsRawUnminedInput(ns, k) != nil {
+				continue
+			}
+
+			// Check the account first.
+			pkScript, err := s.fastCreditPkScriptLookup(ns, nil, k)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			thisAcct, err := s.fetchAccountForPkScript(nil, v, pkScript)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			if account != thisAcct {
+				continue
+			}
+
+			amt, err := fetchRawUnminedCreditAmount(v)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+
+			// Skip ticket outputs, as only SSGen can spend these.
+			opcode := fetchRawUnminedCreditTagOpcode(v)
+			if opcode == txscript.OP_SSTX {
+				continue
+			}
+
+			// Skip outputs that are not mature.
+			if opcode == txscript.OP_SSGEN || opcode == txscript.OP_SSRTX {
+				continue
+			}
+			if opcode == txscript.OP_SSTXCHANGE {
+				continue
+			}
+
+			// Determine the txtree for the outpoint by whether or not it's
+			// using stake tagged outputs.
+			tree := dcrutil.TxTreeRegular
+			if opcode != OP_NONSTAKE {
+				tree = dcrutil.TxTreeStake
+			}
+
+			var op wire.OutPoint
+			err = readCanonicalOutPoint(k, &op)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			op.Tree = tree
+
+			input := wire.NewTxIn(&op, nil)
+
+			currentTotal += amt
+			currentInputs = append(currentInputs, input)
+			currentScripts = append(currentScripts, pkScript)
+		}
+		return currentTotal, currentInputs, currentScripts, nil
+	}
+
+	return InputSource{source: f, tx: tx}
+}
+
 // Balance returns the spendable wallet balance (total value of all unspent
 // transaction outputs) given a minimum of minConf confirmations, calculated
 // at a current chain height of curHeight.  Coinbase outputs are only included

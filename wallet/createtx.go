@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -88,38 +87,6 @@ var (
 	// build with the wallet.
 	maxTxSize = chaincfg.MainNetParams.MaximumBlockSize - 75000
 )
-
-// byAmount defines the methods needed to satisify sort.Interface to
-// sort credits by their output amount.
-type byAmount []wtxmgr.Credit
-
-func (s byAmount) Len() int           { return len(s) }
-func (s byAmount) Less(i, j int) bool { return s[i].Amount < s[j].Amount }
-func (s byAmount) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-
-func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
-	// Pick largest outputs first.  This is only done for compatibility with
-	// previous tx creation code, not because it's a good idea.
-	sort.Sort(sort.Reverse(byAmount(eligible)))
-
-	// Current inputs and their total value.  These are closed over by the
-	// returned input source and reused across multiple calls.
-	currentTotal := dcrutil.Amount(0)
-	currentInputs := make([]*wire.TxIn, 0, len(eligible))
-	currentScripts := make([][]byte, 0, len(eligible))
-
-	return func(target dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error) {
-		for currentTotal < target && len(eligible) != 0 {
-			nextCredit := &eligible[0]
-			eligible = eligible[1:]
-			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil)
-			currentTotal += nextCredit.Amount
-			currentInputs = append(currentInputs, nextInput)
-			currentScripts = append(currentScripts, nextCredit.PkScript)
-		}
-		return currentTotal, currentInputs, currentScripts, nil
-	}
-}
 
 func estimateTxSize(numInputs, numOutputs int) int {
 	return txOverheadEstimate + txInEstimate*numInputs + txOutEstimate*numOutputs
@@ -277,14 +244,6 @@ type CreatedTx struct {
 	Fee         dcrutil.Amount
 }
 
-// ByAmount defines the methods needed to satisify sort.Interface to
-// sort a slice of Utxos by their amount.
-type ByAmount []wtxmgr.Credit
-
-func (u ByAmount) Len() int           { return len(u) }
-func (u ByAmount) Less(i, j int) bool { return u[i].Amount < u[j].Amount }
-func (u ByAmount) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
-
 // insertIntoTxMgr inserts a newly created transaction into the tx store
 // as unconfirmed.
 func (w *Wallet) insertIntoTxMgr(msgTx *wire.MsgTx) (*wtxmgr.TxRecord, error) {
@@ -399,12 +358,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		pool.mutex.Unlock()
 	}()
 
-	eligible, err := w.findEligibleOutputs(account, minconf, bs)
-	if err != nil {
-		return nil, err
-	}
-
-	inputSource := makeInputSource(eligible)
+	inputSource := w.TxStore.MakeInputSource(account, minconf, bs.Height)
 	changeSource := func() ([]byte, error) {
 		// Derive the change output script.  As a hack to allow spending from
 		// the imported account, change addresses are created from account 0.
@@ -424,7 +378,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		return txscript.PayToAddrScript(changeAddr)
 	}
 	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
-		inputSource, changeSource)
+		inputSource.SelectInputs, changeSource)
+	closeErr := inputSource.CloseTransaction()
+	if closeErr != nil {
+		log.Errorf("Failed to close view: %v", closeErr)
+	}
 	if err != nil {
 		return nil, err
 	}
