@@ -1,6 +1,16 @@
 language: go
 go:
-  - 1.4.3
-  - 1.5.2
+  - 1.5.3
+  - 1.6
 sudo: false
-install: go get -d -t -v ./...
+before_install:
+  - gotools=golang.org/x/tools
+install:
+  - go get -d -t -v ./...
+  - go get -v $gotools/cmd/cover
+  - go get -v $gotools/cmd/vet
+  - go get -v github.com/bradfitz/goimports
+  - go get -v github.com/golang/lint/golint
+script:
+  - export PATH=$PATH:$HOME/gopath/bin
+  - ./goclean.sh

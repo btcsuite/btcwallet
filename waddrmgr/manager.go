@@ -116,8 +116,7 @@ type OpenCallbacks struct {
 	ObtainPrivatePass ObtainUserInputFunc
 }
 
-// DefaultConfig is an instance of the Options struct initialized with default
-// configuration options.
+// DefaultScryptOptions is the default options used with scrypt.
 var DefaultScryptOptions = ScryptOptions{
 	N: 262144, // 2^18
 	R: 8,

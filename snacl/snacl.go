@@ -22,12 +22,14 @@ var (
 	prng = rand.Reader
 )
 
+// Error types and messages.
 var (
 	ErrInvalidPassword = errors.New("invalid password")
 	ErrMalformed       = errors.New("malformed data")
 	ErrDecryptFailed   = errors.New("unable to decrypt")
 )
 
+// Various constants needed for encryption scheme.
 const (
 	// Expose secretbox's Overhead const here for convenience.
 	Overhead  = secretbox.Overhead

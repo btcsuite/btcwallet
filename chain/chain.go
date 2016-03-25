@@ -342,8 +342,8 @@ out:
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
 				bs = &waddrmgr.BlockStamp{
-					n.Height,
-					n.Hash,
+					Height: n.Height,
+					Hash:   n.Hash,
 				}
 			}
 

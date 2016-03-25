@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcutil"
 )
 
+// SumOutputValues sums up the list of TxOuts and returns an Amount.
 func SumOutputValues(outputs []*wire.TxOut) (totalOutput btcutil.Amount) {
 	for _, txOut := range outputs {
 		totalOutput += btcutil.Amount(txOut.Value)
@@ -18,6 +19,7 @@ func SumOutputValues(outputs []*wire.TxOut) (totalOutput btcutil.Amount) {
 	return totalOutput
 }
 
+// SumOutputSerializeSizes sums up the serialized size of the supplied outputs.
 func SumOutputSerializeSizes(outputs []*wire.TxOut) (serializeSize int) {
 	for _, txOut := range outputs {
 		serializeSize += txOut.SerializeSize()

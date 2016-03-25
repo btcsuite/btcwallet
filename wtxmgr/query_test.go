@@ -557,8 +557,13 @@ func TestPreviousPkScripts(t *testing.T) {
 	buildTx := func(prevHash *wire.ShaHash, script0, script1 []byte) *wire.MsgTx {
 		return &wire.MsgTx{
 			TxIn: []*wire.TxIn{
-				&wire.TxIn{PreviousOutPoint: wire.OutPoint{*prevHash, 0}},
-				&wire.TxIn{PreviousOutPoint: wire.OutPoint{*prevHash, 1}},
+				&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+					Hash:  *prevHash,
+					Index: 0,
+				}},
+				&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+					Hash: *prevHash, Index: 1,
+				}},
 			},
 			TxOut: []*wire.TxOut{
 				&wire.TxOut{Value: 1e8, PkScript: script0},

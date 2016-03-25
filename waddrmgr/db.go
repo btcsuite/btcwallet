@@ -1930,11 +1930,10 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		if err == nil {
 			const str = "default account exists under old name"
 			return managerError(ErrUpgrade, str, nil)
-		} else {
-			merr, ok := err.(ManagerError)
-			if !ok || merr.ErrorCode != ErrAccountNotFound {
-				return err
-			}
+		}
+		merr, ok := err.(ManagerError)
+		if !ok || merr.ErrorCode != ErrAccountNotFound {
+			return err
 		}
 
 		return nil
