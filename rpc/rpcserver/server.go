@@ -2,8 +2,8 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-// This package implements the RPC API and is used by the main package to start
-// gRPC services.
+// Package rpcserver implements the RPC API and is used by the main package to
+// start gRPC services.
 //
 // Full documentation of the API implemented by this package is maintained in a
 // language-agnostic document:
@@ -854,10 +854,9 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConse
 		if err == dcrrpcclient.ErrInvalidAuth {
 			return nil, grpc.Errorf(codes.InvalidArgument,
 				"Invalid RPC credentials: %v", err)
-		} else {
-			return nil, grpc.Errorf(codes.NotFound,
-				"Connection to RPC server failed: %v", err)
 		}
+		return nil, grpc.Errorf(codes.NotFound,
+			"Connection to RPC server failed: %v", err)
 	}
 
 	s.rpcClient = rpcClient

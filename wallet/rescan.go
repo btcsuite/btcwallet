@@ -191,7 +191,7 @@ out:
 			log.Infof("Finished rescan for %d %s (synced to block "+
 				"%s, height %d)", len(addrs), noun, n.Hash,
 				n.Height)
-			bs := waddrmgr.BlockStamp{n.Height, *n.Hash}
+			bs := waddrmgr.BlockStamp{Height: n.Height, Hash: *n.Hash}
 			if err := w.Manager.SetSyncedTo(&bs); err != nil {
 				log.Errorf("Failed to update address manager "+
 					"sync state for hash %v (height %d): %v",

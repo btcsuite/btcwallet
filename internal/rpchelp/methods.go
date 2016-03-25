@@ -18,8 +18,8 @@ var (
 	returnsLTRArray    = []interface{}{(*[]dcrjson.ListTransactionsResult)(nil)}
 )
 
-// Contains all methods and result types that help is generated for, for every
-// locale.
+// Methods contains all methods and result types that help is generated for,
+// for every locale.
 var Methods = []struct {
 	Method      string
 	ResultTypes []interface{}
@@ -95,6 +95,7 @@ var Methods = []struct {
 	{"setticketfee", returnsBool},
 }
 
+// HelpDescs contains the locale-specific help strings along with the locale.
 var HelpDescs = []struct {
 	Locale   string // Actual locale, e.g. en_US
 	GoLocale string // Locale used in Go names, e.g. EnUS

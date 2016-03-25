@@ -164,7 +164,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: 0,
 			unc: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstRecvTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{
 				*TstRecvTx.Sha(): {},
@@ -188,7 +192,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: 0,
 			unc: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstRecvTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{
 				*TstRecvTx.Sha(): {},
@@ -213,7 +221,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[1].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstRecvTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeREgular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{},
 		},
@@ -236,7 +248,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[1].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstRecvTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{},
 		},
@@ -249,7 +265,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: 0,
 			unc: dcrutil.Amount(TstRecvTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstRecvTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstRecvTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{
 				*TstRecvTx.Sha(): {},
@@ -274,7 +294,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: dcrutil.Amount(TstDoubleSpendTx.MsgTx().TxOut[1].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstDoubleSpendTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstDoubleSpendTx.Sha(),
+					Index: 0,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{},
 		},
@@ -330,7 +354,11 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: 0,
 			unc: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 0,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
@@ -353,8 +381,16 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: 0,
 			unc: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 0,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
@@ -373,8 +409,16 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 0,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{},
 		},
@@ -387,8 +431,16 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unc: 0,
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 0,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{},
 		},
@@ -401,8 +453,16 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 			bal: 0,
 			unc: dcrutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
 			unspents: map[wire.OutPoint]struct{}{
-				wire.OutPoint{*TstSpendingTx.Sha(), 0, dcrutil.TxTreeRegular}: {},
-				wire.OutPoint{*TstSpendingTx.Sha(), 1, dcrutil.TxTreeRegular}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 0,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
+				wire.OutPoint{
+					Hash:  *TstSpendingTx.Sha(),
+					Index: 1,
+					Tree:  dcrutil.TxTreeRegular,
+				}: {},
 			},
 			unmined: map[chainhash.Hash]struct{}{
 				*TstSpendingTx.Sha(): {},
