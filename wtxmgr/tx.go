@@ -804,52 +804,7 @@ func (s *Store) InsertTx(rec *TxRecord, block *BlockMeta) error {
 // are removed.
 func (s *Store) insertMinedTx(ns walletdb.Bucket, rec *TxRecord,
 	block *BlockMeta) error {
-	// If a transaction record for this tx hash and block already exist,
-	// there is nothing left to do.
-	k, v := existsTxRecord(ns, &rec.Hash, &block.Block)
-	if v != nil {
-		return nil
-	}
-
-	// If the exact tx (not a double spend) is already included but
-	// unconfirmed, move it to a block.
-	v = existsRawUnmined(ns, rec.Hash[:])
-	if v != nil {
-		return s.moveMinedTx(ns, rec, k, v, block)
-	}
-
-	// As there may be unconfirmed transactions that are invalidated by this
-	// transaction (either being duplicates, or double spends), remove them
-	// from the unconfirmed set.  This also handles removing unconfirmed
-	// transaction spend chains if any other unconfirmed transactions spend
-	// outputs of the removed double spend.
-	err := s.removeDoubleSpends(ns, rec)
-	if err != nil {
-		return err
-	}
-
-	// If a block record does not yet exist for any transactions from this
-	// block, insert the record.  Otherwise, update it by adding the
-	// transaction hash to the set of transactions from this block.
-	blockKey, blockValue := existsBlockRecord(ns, block.Height)
-	if blockValue == nil {
-		err = putBlockRecord(ns, block, &rec.Hash)
-	} else {
-		blockValue, err = appendRawBlockRecord(blockValue, &rec.Hash)
-		if err != nil {
-			return err
-		}
-		err = putRawBlockRecord(ns, blockKey, blockValue)
-	}
-	if err != nil {
-		return err
-	}
-
-	err = putTxRecord(ns, rec, &block.Block)
-	if err != nil {
-		return err
-	}
-
+	// Fetch the mined balance in case we need to update it.
 	minedBalance, err := fetchMinedBalance(ns)
 	if err != nil {
 		return err
@@ -910,7 +865,60 @@ func (s *Store) insertMinedTx(ns walletdb.Bucket, rec *TxRecord,
 		}
 	}
 
-	return putMinedBalance(ns, minedBalance)
+	// TODO only update if we actually modified the
+	// mined balance.
+	err = putMinedBalance(ns, minedBalance)
+	if err != nil {
+		return nil
+	}
+
+	// If a transaction record for this tx hash and block already exist,
+	// there is nothing left to do.
+	k, v := existsTxRecord(ns, &rec.Hash, &block.Block)
+	if v != nil {
+		return nil
+	}
+
+	// If the exact tx (not a double spend) is already included but
+	// unconfirmed, move it to a block.
+	v = existsRawUnmined(ns, rec.Hash[:])
+	if v != nil {
+		return s.moveMinedTx(ns, rec, k, v, block)
+	}
+
+	// As there may be unconfirmed transactions that are invalidated by this
+	// transaction (either being duplicates, or double spends), remove them
+	// from the unconfirmed set.  This also handles removing unconfirmed
+	// transaction spend chains if any other unconfirmed transactions spend
+	// outputs of the removed double spend.
+	err = s.removeDoubleSpends(ns, rec)
+	if err != nil {
+		return err
+	}
+
+	// If a block record does not yet exist for any transactions from this
+	// block, insert the record.  Otherwise, update it by adding the
+	// transaction hash to the set of transactions from this block.
+	blockKey, blockValue := existsBlockRecord(ns, block.Height)
+	if blockValue == nil {
+		err = putBlockRecord(ns, block, &rec.Hash)
+	} else {
+		blockValue, err = appendRawBlockRecord(blockValue, &rec.Hash)
+		if err != nil {
+			return err
+		}
+		err = putRawBlockRecord(ns, blockKey, blockValue)
+	}
+	if err != nil {
+		return err
+	}
+
+	err = putTxRecord(ns, rec, &block.Block)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // AddCredit marks a transaction record as containing a transaction output
