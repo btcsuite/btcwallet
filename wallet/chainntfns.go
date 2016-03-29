@@ -31,27 +31,25 @@ func (w *Wallet) handleChainNotifications() {
 		return
 	}
 
-	sync := func(w *Wallet) {
-		// At the moment there is no recourse if the rescan fails for
-		// some reason, however, the wallet will not be marked synced
-		// and many methods will error early since the wallet is known
-		// to be out of date.
-		err := w.syncWithChain()
-		if err != nil && !w.ShuttingDown() {
-			log.Warnf("Unable to synchronize wallet to chain: %v", err)
-		}
+	// At the moment there is no recourse if the rescan fails for
+	// some reason, however, the wallet will not be marked synced
+	// and many methods will error early since the wallet is known
+	// to be out of date.
+	err = w.syncWithChain()
+	if err != nil && !w.ShuttingDown() {
+		log.Warnf("Unable to synchronize wallet to chain: %v", err)
+	}
 
-		// Spin up the address pools.
-		err = w.internalPool.initialize(waddrmgr.InternalBranch, w)
-		if err != nil {
-			log.Errorf("Failed to start the default internal branch address "+
-				"pool: %v", err)
-		}
-		err = w.externalPool.initialize(waddrmgr.ExternalBranch, w)
-		if err != nil {
-			log.Errorf("Failed to start the default external branch address "+
-				"pool: %v", err)
-		}
+	// Spin up the address pools.
+	err = w.internalPool.initialize(waddrmgr.InternalBranch, w)
+	if err != nil {
+		log.Errorf("Failed to start the default internal branch address "+
+			"pool: %v", err)
+	}
+	err = w.externalPool.initialize(waddrmgr.ExternalBranch, w)
+	if err != nil {
+		log.Errorf("Failed to start the default external branch address "+
+			"pool: %v", err)
 	}
 
 	for n := range chainClient.Notifications() {
@@ -60,7 +58,8 @@ func (w *Wallet) handleChainNotifications() {
 
 		switch n := n.(type) {
 		case chain.ClientConnected:
-			go sync(w)
+			log.Infof("The client has successfully connected to dcrd and " +
+				"is now handling websocket notifications")
 		case chain.BlockConnected:
 			w.connectBlock(wtxmgr.BlockMeta(n))
 		case chain.BlockDisconnected:
