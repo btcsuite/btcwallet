@@ -1308,9 +1308,9 @@ func GetStakeInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 		proportionLive = float64(liveTicketNum) / float64(poolSize)
 	}
 	proportionMissed := float64(0.0)
-	if (float64(poolSize) + float64(missedNum)) > 0.0 {
+	if missedNum > 0 {
 		proportionMissed = float64(missedNum) /
-			(float64(poolSize) + float64(missedNum))
+			(float64(votesNum) + float64(missedNum))
 	}
 	resp := &dcrjson.GetStakeInfoResult{
 		PoolSize:         poolSize,
