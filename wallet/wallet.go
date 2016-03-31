@@ -6,13 +6,11 @@
 package wallet
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"sync"
 	"time"
@@ -29,8 +27,6 @@ import (
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/chain"
-	"github.com/decred/dcrwallet/internal/prompt"
-	"github.com/decred/dcrwallet/internal/zero"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet/txauthor"
 	"github.com/decred/dcrwallet/wallet/txrules"
@@ -116,7 +112,7 @@ type Wallet struct {
 
 	// Start up flags/settings
 	automaticRepair bool
-	promptPass      bool
+	resyncAccounts  bool
 
 	chainClient        *chain.RPCClient
 	chainClientLock    sync.Mutex
@@ -182,9 +178,8 @@ type Wallet struct {
 // and transaction store.
 func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	autoRepair bool, promptPass bool, mgr *waddrmgr.Manager,
-	txs *wtxmgr.Store, smgr *wstakemgr.StakeStore, db *walletdb.DB,
-	params *chaincfg.Params) *Wallet {
+	autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
+	smgr *wstakemgr.StakeStore, db *walletdb.DB, params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
 	if rollbackTest {
 		rollbackBlockDB = make(map[uint32]*wtxmgr.DatabaseContents)
@@ -232,7 +227,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		ticketAddress:            ticketAddress,
 		TicketMaxPrice:           tmp,
 		automaticRepair:          autoRepair,
-		promptPass:               promptPass,
+		resyncAccounts:           false,
 		rollbackTesting:          rollbackTest,
 		rollbackBlockDB:          rollbackBlockDB,
 		unlockRequests:           make(chan unlockRequest),
@@ -371,6 +366,14 @@ func (w *Wallet) SetTicketMaxPrice(amt dcrutil.Amount) {
 	w.TicketMaxPrice = amt
 }
 
+// SetResyncAccounts sets whether or not the user needs to sync accounts,
+// which dictates some of the start up syncing behaviour. It should only
+// be called before the wallet RPC servers are accessible. It is not safe
+// for concurrent access.
+func (w *Wallet) SetResyncAccounts(set bool) {
+	w.resyncAccounts = set
+}
+
 // Start starts the goroutines necessary to manage a wallet.
 func (w *Wallet) Start() {
 	w.quitMu.Lock()
@@ -459,13 +462,6 @@ func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 			"balance %v", w.VoteBits, w.BalanceToMaintain().ToCoin())
 		log.Infof("PLEASE ENSURE YOUR WALLET REMAINS UNLOCKED SO IT MAY " +
 			"VOTE ON BLOCKS AND RECEIVE STAKE REWARDS")
-	}
-
-	if w.promptPass || w.StakeMiningEnabled {
-		log.Infof("Please enter the private wallet passphrase. " +
-			"This will complete syncing of the wallet accounts " +
-			"and then leave your wallet unlocked. You may relock " +
-			"wallet after by calling 'walletlock' through the RPC.")
 	}
 }
 
@@ -648,36 +644,6 @@ func (w *Wallet) syncWithChain() error {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return err
-	}
-
-	// We need to rescan accounts for the initial sync. Unlock the
-	// wallet after prompting for the passphrase. The special case
-	// of a --createtemp simnet wallet is handled by first
-	// attempting to automatically open it with the default
-	// passphrase. The wallet should also request to be unlocked
-	// if stake mining is currently on, so users with this flag
-	// are prompted here as well.
-	defaultTempPass := false
-	if w.chainParams == &chaincfg.SimNetParams {
-		var unlockAfter <-chan time.Time
-		err = w.Unlock(SimulationPassphrase, unlockAfter)
-		if err == nil {
-			defaultTempPass = true
-		}
-	}
-	if (w.promptPass || w.StakeMiningEnabled) && !defaultTempPass {
-		reader := bufio.NewReader(os.Stdin)
-		passphrase, err := prompt.PromptPass(reader, "", false)
-		if err != nil {
-			return err
-		}
-		defer zero.Bytes(passphrase)
-
-		var unlockAfter <-chan time.Time
-		err = w.Unlock(passphrase, unlockAfter)
-		if err != nil {
-			return err
-		}
 	}
 
 	// Request notifications for connected and disconnected blocks.
@@ -2733,8 +2699,8 @@ func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, para
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
-	ticketMaxPrice float64, autoRepair bool, promptPass bool,
-	params *chaincfg.Params) (*Wallet, error) {
+	ticketMaxPrice float64, autoRepair bool, params *chaincfg.Params) (*Wallet,
+	error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -2757,11 +2723,6 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 	if noTxMgr {
 		log.Info("No recorded transaction history -- needs full rescan")
-
-		// We need the wallet unlocked to restore the accounts.
-		// Request that the user unlock it for us.
-		promptPass = true
-
 		err = addrMgr.SetSyncedTo(nil)
 		if err != nil {
 			return nil, err
@@ -2813,7 +2774,6 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		ticketAddr,
 		tmp,
 		autoRepair,
-		promptPass,
 		addrMgr,
 		txMgr,
 		smgr,

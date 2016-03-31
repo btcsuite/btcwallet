@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bufio"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -16,7 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrwallet/chain"
+	"github.com/decred/dcrwallet/internal/prompt"
+	"github.com/decred/dcrwallet/internal/zero"
 	"github.com/decred/dcrwallet/rpc/legacyrpc"
 	"github.com/decred/dcrwallet/wallet"
 )
@@ -112,6 +116,7 @@ func walletMain() error {
 	}
 
 	loader.RunAfterLoad(func(w *wallet.Wallet) {
+		startPromptPass(w)
 		startWalletRPCServices(w, rpcs, legacyRPCServer)
 	})
 
@@ -158,6 +163,66 @@ func walletMain() error {
 	<-interruptHandlersDone
 	log.Info("Shutdown complete")
 	return nil
+}
+
+// startPromptPass prompts the user for a password to unlock their wallet in
+// the event that it was restored from seed or --promptpass flag is set.
+func startPromptPass(w *wallet.Wallet) {
+	promptPass := cfg.PromptPass
+
+	// The wallet is totally desynced, so we need to resync accounts.
+	// Prompt for the password. Then, set the flag it wallet so it
+	// knows which address functions to call when resyncing.
+	firstRunBS := w.Manager.SyncedTo()
+	if firstRunBS.Hash == *w.ChainParams().GenesisHash {
+		promptPass = true
+	}
+	if promptPass {
+		w.SetResyncAccounts(true)
+		log.Infof("Please enter the private wallet passphrase. " +
+			"This will complete syncing of the wallet accounts " +
+			"and then leave your wallet unlocked. You may relock " +
+			"wallet after by calling 'walletlock' through the RPC.")
+	} else {
+		return
+	}
+
+	// We need to rescan accounts for the initial sync. Unlock the
+	// wallet after prompting for the passphrase. The special case
+	// of a --createtemp simnet wallet is handled by first
+	// attempting to automatically open it with the default
+	// passphrase. The wallet should also request to be unlocked
+	// if stake mining is currently on, so users with this flag
+	// are prompted here as well.
+	for {
+		if w.ChainParams() == &chaincfg.SimNetParams {
+			var unlockAfter <-chan time.Time
+			err := w.Unlock(wallet.SimulationPassphrase, unlockAfter)
+			if err == nil {
+				// Unlock success with the default password.
+				return
+			}
+		}
+		if promptPass {
+			reader := bufio.NewReader(os.Stdin)
+			passphrase, err := prompt.PromptPass(reader, "", false)
+			if err != nil {
+				log.Errorf("Failed to input password. Please try again.")
+				continue
+			}
+			defer zero.Bytes(passphrase)
+
+			var unlockAfter <-chan time.Time
+			err = w.Unlock(passphrase, unlockAfter)
+			if err != nil {
+				log.Errorf("Incorrect password entered. Please " +
+					"try again.")
+				continue
+			}
+
+			break
+		}
+	}
 }
 
 // rpcClientConnectLoop continuously attempts a connection to the consensus RPC

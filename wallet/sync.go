@@ -47,7 +47,7 @@ func (w *Wallet) accountIsUsed(account uint32, chainClient *chain.RPCClient) boo
 	// exists in accounts that have not yet been created, while
 	// AddressDerivedFromDbAcct can not.
 	addrFunc := w.Manager.AddressDerivedFromDbAcct
-	if w.promptPass {
+	if w.resyncAccounts {
 		addrFunc = w.Manager.AddressDerivedFromCointype
 	}
 
@@ -439,7 +439,7 @@ func (w *Wallet) rescanActiveAddresses() error {
 	// current account index is. This scan should only ever be
 	// performed if we're restoring our wallet from seed.
 	lastAcct := uint32(0)
-	if w.promptPass {
+	if w.resyncAccounts {
 		min := 0
 		max := waddrmgr.MaxAccountNum
 		lastAcct, err = w.scanAccountIndex(min, max)

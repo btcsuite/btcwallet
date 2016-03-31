@@ -193,13 +193,12 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	w, err := Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, l.autoRepair,
-		l.promptPass, l.chainParams)
+		l.chainParams)
 	if err != nil {
 		return nil, err
 	}
 
 	w.Start()
-
 	l.onLoaded(w, db)
 	return w, nil
 }
