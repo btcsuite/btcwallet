@@ -267,9 +267,42 @@ func (w *Wallet) CloseAddressPools() {
 	return
 }
 
+// CheckAddressPoolsInitialized checks to make sure an address pool exists
+// that that one can safely access functions and internal memory such as
+// mutexes.
+func (w *Wallet) CheckAddressPoolsInitialized(account uint32) error {
+	if w.addrPools[account] == nil {
+		return fmt.Errorf("Address pools for account %v "+
+			"are undeclared", account)
+	}
+	if w.addrPools[account].external == nil {
+		return fmt.Errorf("External address pool for "+
+			"account %v is undeclared", account)
+	}
+	if w.addrPools[account].internal == nil {
+		return fmt.Errorf("Internal address pool for "+
+			"account %v is undeclared", account)
+	}
+	if !w.addrPools[account].external.started {
+		return fmt.Errorf("External address pool for the "+
+			"account %v is uninitialized", account)
+	}
+	if !w.addrPools[account].internal.started {
+		return fmt.Errorf("Internal address pool for the "+
+			"account %v is uninitialized", account)
+	}
+
+	return nil
+}
+
 // GetNewAddressExternal is the exported function that gets a new external address
 // for the default account from the external address mempool.
 func (w *Wallet) GetNewAddressExternal() (dcrutil.Address, error) {
+	err := w.CheckAddressPoolsInitialized(waddrmgr.DefaultAccountNum)
+	if err != nil {
+		return nil, err
+	}
+
 	w.addrPools[waddrmgr.DefaultAccountNum].external.mutex.Lock()
 	defer w.addrPools[waddrmgr.DefaultAccountNum].external.mutex.Unlock()
 	address, err :=
@@ -283,6 +316,11 @@ func (w *Wallet) GetNewAddressExternal() (dcrutil.Address, error) {
 // GetNewAddressInternal is the exported function that gets a new internal address
 // for the default account from the internal address mempool.
 func (w *Wallet) GetNewAddressInternal() (dcrutil.Address, error) {
+	err := w.CheckAddressPoolsInitialized(waddrmgr.DefaultAccountNum)
+	if err != nil {
+		return nil, err
+	}
+
 	w.addrPools[waddrmgr.DefaultAccountNum].internal.mutex.Lock()
 	defer w.addrPools[waddrmgr.DefaultAccountNum].internal.mutex.Unlock()
 	address, err :=
@@ -296,6 +334,11 @@ func (w *Wallet) GetNewAddressInternal() (dcrutil.Address, error) {
 // NewAddress returns the next external chained address for a wallet given some
 // account.
 func (w *Wallet) NewAddress(account uint32) (dcrutil.Address, error) {
+	err := w.CheckAddressPoolsInitialized(account)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get next address from wallet.
 	addr, err := w.addrPools[account].external.GetNewAddress()
 	if err != nil {
@@ -328,6 +371,11 @@ func (w *Wallet) NewAddress(account uint32) (dcrutil.Address, error) {
 
 // NewChangeAddress returns a new change address for a wallet.
 func (w *Wallet) NewChangeAddress(account uint32) (dcrutil.Address, error) {
+	err := w.CheckAddressPoolsInitialized(account)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get next chained change address from wallet for account.
 	addr, err := w.addrPools[account].internal.GetNewAddress()
 	if err != nil {

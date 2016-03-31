@@ -351,13 +351,17 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	// the default account to create change.
 	var pool *addressPool
 	if account == waddrmgr.ImportedAddrAccount {
+		err := w.CheckAddressPoolsInitialized(waddrmgr.DefaultAccountNum)
+		if err != nil {
+			return nil, err
+		}
 		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
 	} else {
+		err := w.CheckAddressPoolsInitialized(account)
+		if err != nil {
+			return nil, err
+		}
 		pool = w.addrPools[account].internal
-	}
-	if pool == nil {
-		log.Errorf("tried to use uninitialized pool for acct %v "+
-			"when attempting to make a transaction", account)
 	}
 	txSucceeded := false
 	pool.mutex.Lock()
@@ -449,18 +453,27 @@ func constructMultiSigScript(keys []dcrutil.AddressSecpPubKey,
 func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	pubkeys []*dcrutil.AddressSecpPubKey, nRequired int8,
 	minconf int32) (*CreatedTx, dcrutil.Address, []byte, error) {
+	txToMultisigError :=
+		func(err error) (*CreatedTx, dcrutil.Address, []byte, error) {
+			return nil, nil, nil, err
+		}
+
 	// Initialize the address pool for use. If we
 	// are using an imported account, loopback to
 	// the default account to create change.
 	var pool *addressPool
 	if account == waddrmgr.ImportedAddrAccount {
+		err := w.CheckAddressPoolsInitialized(waddrmgr.DefaultAccountNum)
+		if err != nil {
+			return txToMultisigError(err)
+		}
 		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
 	} else {
+		err := w.CheckAddressPoolsInitialized(account)
+		if err != nil {
+			return txToMultisigError(err)
+		}
 		pool = w.addrPools[account].internal
-	}
-	if pool == nil {
-		log.Errorf("tried to use uninitialized pool for acct %v "+
-			"when attempting to make a transaction", account)
 	}
 	txSucceeded := false
 	pool.mutex.Lock()
@@ -474,19 +487,14 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	}()
 	addrFunc := pool.GetNewAddress
 
-	errorOut :=
-		func(err error) (*CreatedTx, dcrutil.Address, []byte, error) {
-			return nil, nil, nil, err
-		}
-
 	chainClient, err := w.requireChainClient()
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 
 	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
-		return errorOut(ErrBlockchainReorganizing)
+		return txToMultisigError(err)
 	}
 
 	// Address manager must be unlocked to compose transaction.  Grab
@@ -494,14 +502,14 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	// error if already locked.
 	heldUnlock, err := w.HoldUnlock()
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 	defer heldUnlock.Release()
 
 	// Get current block's height and hash.
 	bs, err := chainClient.BlockStamp()
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 
 	// Add in some extra for fees. TODO In the future, make a better
@@ -522,10 +530,10 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	eligible, err := w.findEligibleOutputsAmount(account, minconf,
 		amountRequired, bs)
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 	if eligible == nil {
-		return errorOut(
+		return txToMultisigError(
 			fmt.Errorf("Not enough funds to send to multisig address"))
 	}
 
@@ -549,27 +557,27 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	totalOutput := dcrutil.Amount(0)
 	msScript, err := txscript.MultiSigScript(pubkeys, int(nRequired))
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 	_, err = w.Manager.ImportScript(msScript, bs)
 	if err != nil {
 		// We don't care if we've already used this address.
 		if err.(waddrmgr.ManagerError).ErrorCode !=
 			waddrmgr.ErrDuplicateAddress {
-			return errorOut(err)
+			return txToMultisigError(err)
 		}
 	}
 	err = w.TxStore.InsertTxScript(msScript)
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 	scAddr, err := dcrutil.NewAddressScriptHash(msScript, w.chainParams)
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 	p2shScript, err := txscript.PayToAddrScript(scAddr)
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 	txout := wire.NewTxOut(int64(amount), p2shScript)
 	msgtx.AddTxOut(txout)
@@ -586,30 +594,31 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	feeEst := feeForSize(feeIncrement, feeSize)
 
 	if totalInput < amount+feeEst {
-		return errorOut(fmt.Errorf("Not enough funds to send to " +
+		return txToMultisigError(fmt.Errorf("Not enough funds to send to " +
 			"multisig address after accounting for fees"))
 	}
 	if totalInput > amount+feeEst {
 		changeAddr, err := addrFunc()
 		if err != nil {
-			return errorOut(err)
+			return txToMultisigError(err)
 		}
 		change := totalInput - (amount + feeEst)
 		pkScript, err := txscript.PayToAddrScript(changeAddr)
 		if err != nil {
-			return errorOut(fmt.Errorf("cannot create txout script: %s", err))
+			return txToMultisigError(
+				fmt.Errorf("cannot create txout script: %s", err))
 		}
 		msgtx.AddTxOut(wire.NewTxOut(int64(change), pkScript))
 	}
 
 	if err = signMsgTx(msgtx, forSigning, w.Manager,
 		w.chainParams); err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 
 	_, err = chainClient.SendRawTransaction(msgtx, false)
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 
 	// Request updates from dcrd for new transactions sent to this
@@ -617,12 +626,12 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	utilAddrs := make([]dcrutil.Address, 1)
 	utilAddrs[0] = scAddr
 	if err := chainClient.NotifyReceived(utilAddrs); err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 
 	err = w.insertMultisigOutIntoTxMgr(msgtx, 0)
 	if err != nil {
-		return errorOut(err)
+		return txToMultisigError(err)
 	}
 
 	ctx := &CreatedTx{
@@ -680,19 +689,22 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 		return nil, err
 	}
 
-	// Initialize the address pool for use.
 	// Initialize the address pool for use. If we
 	// are using an imported account, loopback to
 	// the default account to create change.
 	var pool *addressPool
 	if account == waddrmgr.ImportedAddrAccount {
+		err := w.CheckAddressPoolsInitialized(waddrmgr.DefaultAccountNum)
+		if err != nil {
+			return nil, err
+		}
 		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
 	} else {
+		err := w.CheckAddressPoolsInitialized(account)
+		if err != nil {
+			return nil, err
+		}
 		pool = w.addrPools[account].internal
-	}
-	if pool == nil {
-		log.Errorf("tried to use uninitialized pool for acct %v "+
-			"when attempting to make a transaction", account)
 	}
 	txSucceeded := false
 	pool.mutex.Lock()
@@ -798,6 +810,10 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 
 	// Initialize the address pool for use.
 	var pool *addressPool
+	err = w.CheckAddressPoolsInitialized(waddrmgr.DefaultAccountNum)
+	if err != nil {
+		return err
+	}
 	pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
 	if pool == nil {
 		log.Errorf("tried to use uninitialized pool for acct %v "+
