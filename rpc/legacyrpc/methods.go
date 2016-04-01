@@ -797,8 +797,8 @@ func ImportScript(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 			Addrs:     []dcrutil.Address{mscriptaddr.Address()},
 			OutPoints: nil,
 			BlockStamp: waddrmgr.BlockStamp{
-				0,
-				*w.ChainParams().GenesisHash,
+				Height: 0,
+				Hash:   *w.ChainParams().GenesisHash,
 			},
 		}
 
@@ -891,7 +891,11 @@ func GetMultisigOutInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	}
 
 	// Multisig outs are always in TxTreeRegular.
-	op := &wire.OutPoint{*hash, cmd.Index, dcrutil.TxTreeRegular}
+	op := &wire.OutPoint{
+		Hash:  *hash,
+		Index: cmd.Index,
+		Tree:  dcrutil.TxTreeRegular,
+	}
 	mso, err := w.TxStore.GetMultisigOutput(op)
 	if err != nil {
 		return nil, err
@@ -1415,7 +1419,7 @@ func GetTickets(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient
 		ticketsStr[i] = ticket.String()
 	}
 
-	return &dcrjson.GetTicketsResult{ticketsStr}, nil
+	return &dcrjson.GetTicketsResult{Hashes: ticketsStr}, nil
 }
 
 // GetTicketVoteBits fetches the per-ticket voteBits for a given ticket from
@@ -1435,7 +1439,7 @@ func GetTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	}
 	if !set {
 		return &dcrjson.GetTicketVoteBitsResult{
-			dcrjson.VoteBitsData{
+			VoteBitsData: dcrjson.VoteBitsData{
 				VoteBits:    w.VoteBits,
 				VoteBitsExt: "",
 			},
@@ -1443,7 +1447,7 @@ func GetTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	}
 
 	return &dcrjson.GetTicketVoteBitsResult{
-		dcrjson.VoteBitsData{
+		VoteBitsData: dcrjson.VoteBitsData{
 			VoteBits:    voteBits,
 			VoteBitsExt: "",
 		},
@@ -2050,7 +2054,7 @@ func ListScripts(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		itr++
 	}
 
-	return &dcrjson.ListScriptsResult{listScriptsResultSIs}, nil
+	return &dcrjson.ListScriptsResult{Scripts: listScriptsResultSIs}, nil
 }
 
 // ListTransactions handles a listtransactions request by returning an
@@ -2304,9 +2308,9 @@ func RedeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 		return nil, err
 	}
 	op := wire.OutPoint{
-		*hash,
-		cmd.Index,
-		cmd.Tree,
+		Hash:  *hash,
+		Index: cmd.Index,
+		Tree:  cmd.Tree,
 	}
 	msCredit, err := w.TxStore.GetMultisigCredit(&op)
 	if err != nil {
@@ -2352,11 +2356,11 @@ func RedeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 	outpointScriptStr := hex.EncodeToString(outpointScript)
 
 	rti := dcrjson.RawTxInput{
-		cmd.Hash,
-		cmd.Index,
-		cmd.Tree,
-		outpointScriptStr,
-		"",
+		Txid:         cmd.Hash,
+		Vout:         cmd.Index,
+		Tree:         cmd.Tree,
+		ScriptPubKey: outpointScriptStr,
+		RedeemScript: "",
 	}
 	rtis := []dcrjson.RawTxInput{rti}
 
@@ -2369,10 +2373,10 @@ func RedeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 	sigHashAll := "ALL"
 
 	srtc := &dcrjson.SignRawTransactionCmd{
-		txDataStr,
-		&rtis,
-		&[]string{},
-		&sigHashAll,
+		RawTx:    txDataStr,
+		Inputs:   &rtis,
+		PrivKeys: &[]string{},
+		Flags:    &sigHashAll,
 	}
 
 	// Sign it and give the results to the user.
@@ -2381,9 +2385,11 @@ func RedeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 		return nil, err
 	}
 	srtTyped := signedTxResult.(dcrjson.SignRawTransactionResult)
-	return dcrjson.RedeemMultiSigOutResult{srtTyped.Hex,
-		srtTyped.Complete,
-		srtTyped.Errors}, nil
+	return dcrjson.RedeemMultiSigOutResult{
+		Hex:      srtTyped.Hex,
+		Complete: srtTyped.Complete,
+		Errors:   srtTyped.Errors,
+	}, nil
 }
 
 // RedeemMultisigOuts receives a script hash (in the form of a
@@ -2432,7 +2438,7 @@ func RedeemMultiSigOuts(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		itr++
 	}
 
-	return dcrjson.RedeemMultiSigOutsResult{rmsoResults}, nil
+	return dcrjson.RedeemMultiSigOutsResult{Results: rmsoResults}, nil
 }
 
 // TicketsForAddress retrieves all ticket hashes that have the passed voting
@@ -2469,7 +2475,7 @@ func TicketsForAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 		ticketsStr[i] = h.String()
 	}
 
-	return dcrjson.TicketsForAddressResult{ticketsStr}, nil
+	return dcrjson.TicketsForAddressResult{Tickets: ticketsStr}, nil
 }
 
 func isNilOrEmpty(s *string) bool {
@@ -2659,9 +2665,9 @@ func SendToMultiSig(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCl
 	}
 
 	result := &dcrjson.SendToMultiSigResult{
-		ctx.MsgTx.TxSha().String(),
-		addr.EncodeAddress(),
-		hex.EncodeToString(script),
+		TxHash:       ctx.MsgTx.TxSha().String(),
+		Address:      addr.EncodeAddress(),
+		RedeemScript: hex.EncodeToString(script),
 	}
 
 	err = chainClient.NotifyReceived([]dcrutil.Address{addr})
@@ -3153,8 +3159,8 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 						Addrs:     []dcrutil.Address{mscriptaddr.Address()},
 						OutPoints: nil,
 						BlockStamp: waddrmgr.BlockStamp{
-							0,
-							*w.ChainParams().GenesisHash,
+							Height: 0,
+							Hash:   *w.ChainParams().GenesisHash,
 						},
 					}
 
@@ -3369,16 +3375,16 @@ func SignRawTransactions(icmd interface{}, w *wallet.Wallet, chainClient *chain.
 				}
 
 				st := dcrjson.SignedTransaction{
-					result,
-					sent,
-					&hashStr,
+					SigningResult: result,
+					Sent:          sent,
+					TxHash:        &hashStr,
 				}
 				toReturn[i] = st
 			} else {
 				st := dcrjson.SignedTransaction{
-					result,
-					false,
-					nil,
+					SigningResult: result,
+					Sent:          false,
+					TxHash:        nil,
 				}
 				toReturn[i] = st
 			}
@@ -3386,15 +3392,15 @@ func SignRawTransactions(icmd interface{}, w *wallet.Wallet, chainClient *chain.
 	} else { // Just return the results.
 		for i, result := range results {
 			st := dcrjson.SignedTransaction{
-				result,
-				false,
-				nil,
+				SigningResult: result,
+				Sent:          false,
+				TxHash:        nil,
 			}
 			toReturn[i] = st
 		}
 	}
 
-	return &dcrjson.SignRawTransactionsResult{toReturn}, nil
+	return &dcrjson.SignRawTransactionsResult{Results: toReturn}, nil
 }
 
 // ValidateAddress handles the validateaddress command.

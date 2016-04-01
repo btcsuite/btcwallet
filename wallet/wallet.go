@@ -81,7 +81,7 @@ type StakeDifficultyInfo struct {
 	StakeDifficulty int64
 }
 
-// CurrentVotingInfo is a container for the current height, hash, and list
+// VotingInfo is a container for the current height, hash, and list
 // of eligible tickets.
 type VotingInfo struct {
 	BlockHash   *chainhash.Hash
@@ -750,9 +750,12 @@ func (w *Wallet) syncWithChain() error {
 			blHeight := bl.MsgBlock().Header.Height
 			vb := bl.MsgBlock().Header.VoteBits
 			wtxBm := wtxmgr.BlockMeta{
-				wtxmgr.Block{*curBlock, int32(blHeight)},
-				time.Now(),
-				vb,
+				Block: wtxmgr.Block{
+					Hash:   *curBlock,
+					Height: int32(blHeight),
+				},
+				Time:     time.Now(),
+				VoteBits: vb,
 			}
 			err = w.TxStore.InsertBlock(&wtxBm)
 			if err != nil {
@@ -970,8 +973,8 @@ func (w *Wallet) CreateSimpleTx(account uint32, outputs []*wire.TxOut,
 	return resp.tx, resp.err
 }
 
-// CreateSStxTx receives a request from the RPC and ships it to txCreator to
-// generate a new SStx.
+// CreateMultisigTx receives a request from the RPC and ships it to txCreator to
+// generate a new multisigtx.
 func (w *Wallet) CreateMultisigTx(account uint32, amount dcrutil.Amount,
 	pubkeys []*dcrutil.AddressSecpPubKey, nrequired int8,
 	minconf int32) (*CreatedTx, dcrutil.Address, []byte, error) {
@@ -1029,8 +1032,8 @@ func (w *Wallet) CreateSSGenTx(ticketHash chainhash.Hash,
 	return resp.tx, resp.err
 }
 
-// CreateSSGenTx receives a request from the RPC and ships it to txCreator to
-// generate a new SSGen.
+// CreateSSRtx receives a request from the RPC and ships it to txCreator to
+// generate a new SSRtx.
 func (w *Wallet) CreateSSRtx(ticketHash chainhash.Hash) (*CreatedTx, error) {
 
 	req := createSSRtxRequest{
@@ -1376,7 +1379,7 @@ func (w *Wallet) NextAccount(name string) (uint32, error) {
 	}
 
 	// Initialize a new address pool for this account.
-	w.addrPools[account], err = NewAddressPools(account, 0, 0, w)
+	w.addrPools[account], err = newAddressPools(account, 0, 0, w)
 	if err != nil {
 		return 0, err
 	}
@@ -2675,6 +2678,7 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Par
 	return wstakemgr.Create(stakeMgrNamespace)
 }
 
+// CreateWatchOnly creates a watchonly wallet on the provided db.
 func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, params *chaincfg.Params) error {
 	// Create the address manager.
 	waddrmgrNamespace, err := db.Namespace(waddrmgrNamespaceKey)

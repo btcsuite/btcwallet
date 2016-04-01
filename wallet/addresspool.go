@@ -46,8 +46,8 @@ type addressPool struct {
 	wallet    *Wallet
 }
 
-// NewAddressPool creates a new address pool for the wallet default account.
-func NewAddressPool() *addressPool {
+// newAddressPool creates a new address pool for the wallet default account.
+func newAddressPool() *addressPool {
 	return &addressPool{
 		started: false,
 	}
@@ -60,13 +60,13 @@ type addressPools struct {
 	external *addressPool
 }
 
-// NewAddressPools creates a pair of address pools as an addressPools struct. It
+// newAddressPools creates a pair of address pools as an addressPools struct. It
 // also initializes the address pools to the passed indexes.
-func NewAddressPools(account uint32, intIdx, extIdx uint32,
+func newAddressPools(account uint32, intIdx, extIdx uint32,
 	w *Wallet) (*addressPools, error) {
 	a := &addressPools{
-		internal: NewAddressPool(),
-		external: NewAddressPool(),
+		internal: newAddressPool(),
+		external: newAddressPool(),
 	}
 	err := a.internal.initialize(account, waddrmgr.InternalBranch, intIdx, w)
 	if err != nil {

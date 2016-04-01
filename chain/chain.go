@@ -174,6 +174,8 @@ type (
 	// BlockStamp was reorganized out of the best chain.
 	BlockDisconnected wtxmgr.BlockMeta
 
+	// Reorganization is a notification that a reorg has happen with the new
+	// old and new tip included.
 	Reorganization struct {
 		OldHash   *chainhash.Hash
 		OldHeight int64
@@ -181,16 +183,22 @@ type (
 		NewHeight int64
 	}
 
+	// WinningTickets is a notification with the winning tickets (and the
+	// block they are in.
 	WinningTickets struct {
 		BlockHash   *chainhash.Hash
 		BlockHeight int64
 		Tickets     []*chainhash.Hash
 	}
+
+	// MissedTickets is a notifcation for tickets that have been missed.
 	MissedTickets struct {
 		BlockHash   *chainhash.Hash
 		BlockHeight int64
 		Tickets     []*chainhash.Hash
 	}
+
+	// StakeDifficulty is a notification for the current stake difficulty.
 	StakeDifficulty struct {
 		BlockHash   *chainhash.Hash
 		BlockHeight int64
@@ -221,7 +229,8 @@ type (
 	}
 )
 
-// SetReorganizing allows you to set the flag for blockchain reorganization.
+// SetReorganizingState allows you to set the flag for blockchain
+// reorganization.
 func (c *RPCClient) SetReorganizingState(is bool, hash chainhash.Hash) {
 	c.reorganizingLock.Lock()
 	defer c.reorganizingLock.Unlock()
@@ -230,7 +239,8 @@ func (c *RPCClient) SetReorganizingState(is bool, hash chainhash.Hash) {
 	c.reorganizeToHash = hash
 }
 
-// SetReorganizing allows you to set the flag for blockchain reorganization.
+// GetReorganizing allows you to get the value of the flag for blockchain
+// reorganization.
 func (c *RPCClient) GetReorganizing() (bool, chainhash.Hash) {
 	c.reorganizingLock.Lock()
 	defer c.reorganizingLock.Unlock()
@@ -345,14 +355,14 @@ func (c *RPCClient) onWinningTickets(hash *chainhash.Hash, height int64,
 	}
 }
 
-// onSpentAndMissedTickets handles missed tickets notifications data and passes it
-// downstream to the notifications queue.
+// onSpentAndMissedTickets handles missed tickets notifications data and passes
+// it downstream to the notifications queue.
 func (c *RPCClient) onSpentAndMissedTickets(hash *chainhash.Hash,
 	height int64,
 	stakeDiff int64,
 	tickets map[chainhash.Hash]bool) {
 
-	missedTickets := make([]*chainhash.Hash, 0)
+	var missedTickets []*chainhash.Hash
 
 	// Copy the missing ticket hashes to a slice.
 	for ticket, isSpent := range tickets {

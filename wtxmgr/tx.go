@@ -177,7 +177,7 @@ type Credit struct {
 	FromCoinBase bool
 }
 
-// SortedTxRecords is a list of transaction records that can be sorted.
+// SortableTxRecords is a list of transaction records that can be sorted.
 type SortableTxRecords []*TxRecord
 
 func (p SortableTxRecords) Len() int { return len(p) }
@@ -339,10 +339,10 @@ func (s *Store) pruneOldTickets(ns walletdb.Bucket,
 				class == txscript.StakeSubChangeTy:
 				// See if we inserted the unmined credit. If so,
 				// remove it.
-				kOut := canonicalOutPoint(&rec.Hash, uint32(idx))
-				val := existsRawUnminedCredit(ns, kOut)
+				outK := canonicalOutPoint(&rec.Hash, uint32(idx))
+				val := existsRawUnminedCredit(ns, outK)
 				if val != nil {
-					err = deleteRawUnminedCredit(ns, kOut)
+					err = deleteRawUnminedCredit(ns, outK)
 					if err != nil {
 						return err
 					}
@@ -575,13 +575,12 @@ func (s *Store) fetchAccountForPkScript(credVal []byte, unminedCredVal []byte,
 		storeErr, ok := err.(Error)
 		if !ok {
 			return 0, err
-		} else {
-			switch storeErr.Code {
-			case ErrValueNoExists:
-			case ErrData:
-			default:
-				return 0, err
-			}
+		}
+		switch storeErr.Code {
+		case ErrValueNoExists:
+		case ErrData:
+		default:
+			return 0, err
 		}
 	}
 	if unminedCredVal != nil {
@@ -592,13 +591,12 @@ func (s *Store) fetchAccountForPkScript(credVal []byte, unminedCredVal []byte,
 		storeErr, ok := err.(Error)
 		if !ok {
 			return 0, err
-		} else {
-			switch storeErr.Code {
-			case ErrValueNoExists:
-			case ErrData:
-			default:
-				return 0, err
-			}
+		}
+		switch storeErr.Code {
+		case ErrValueNoExists:
+		case ErrData:
+		default:
+			return 0, err
 		}
 	}
 
@@ -1119,10 +1117,9 @@ func (s *Store) addMultisigOut(ns walletdb.Bucket, rec *TxRecord,
 				uint32(block.Block.Height))
 			putMultisigOutRawValues(ns, key, val)
 			return nil
-		} else {
-			str := "tried to update a mined multisig out's mined information"
-			return storeError(ErrDatabase, str, nil)
 		}
+		str := "tried to update a mined multisig out's mined information"
+		return storeError(ErrDatabase, str, nil)
 	}
 	// The multisignature output already exists in the database
 	// as an unmined, unspent output and something is trying to
@@ -1326,8 +1323,11 @@ func (s *Store) rollbackTransaction(hash chainhash.Hash, b *blockRecord,
 				continue
 			}
 
-			cbc := append(*coinBaseCredits, wire.OutPoint{rec.Hash,
-				uint32(i), dcrutil.TxTreeRegular})
+			cbc := append(*coinBaseCredits, wire.OutPoint{
+				Hash:  rec.Hash,
+				Index: uint32(i),
+				Tree:  dcrutil.TxTreeRegular,
+			})
 			coinBaseCredits = &cbc
 
 			outPointKey := canonicalOutPoint(&rec.Hash, uint32(i))
@@ -1554,7 +1554,7 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 	//
 	// It is necessary to keep these in memory and fix the unmined
 	// transactions later since blocks are removed in increasing order.
-	cbcInitial := make([]wire.OutPoint, 0)
+	var cbcInitial []wire.OutPoint
 	coinBaseCredits := &cbcInitial
 
 	topHeight, err := fetchChainHeight(ns, height)
@@ -1585,7 +1585,7 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 		// more efficiently if we stored the tx tree of transactions in
 		// the txRecord so we don't have to deserialize the txRecords and
 		// test them too.
-		stakeTxFromBlock := make([]chainhash.Hash, 0)
+		var stakeTxFromBlock []chainhash.Hash
 		for _, hash := range b.transactions {
 			// Super slow!
 			txr, err := fetchTxRecord(ns, &hash, &Block{b.Hash, b.Height})
@@ -1599,7 +1599,7 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 			}
 		}
 
-		regularTxFromParent := make([]chainhash.Hash, 0)
+		var regularTxFromParent []chainhash.Hash
 		if parentIsValid {
 			for _, hash := range pb.transactions {
 				// Super slow!
@@ -2526,8 +2526,8 @@ func (s *Store) minimalCreditToCredit(ns walletdb.Bucket,
 	return cred, nil
 }
 
-// forEachBreakout is used to break out of a a wallet db ForEach loop.
-var forEachBreakout = errors.New("forEachBreakout")
+// errForEachBreakout is used to break out of a a wallet db ForEach loop.
+var errForEachBreakout = errors.New("forEachBreakout")
 
 func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amount,
 	syncHeight int32, minConf int32, all bool, account uint32) ([]*Credit, error) {
@@ -2538,7 +2538,7 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 
 	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		if found >= needed {
-			return forEachBreakout
+			return errForEachBreakout
 		}
 
 		if existsRawUnminedInput(ns, k) != nil {
@@ -2638,7 +2638,7 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 		return nil
 	})
 	if err != nil {
-		if err != forEachBreakout {
+		if err != errForEachBreakout {
 			if _, ok := err.(Error); ok {
 				return nil, err
 			}
@@ -2651,7 +2651,7 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 	if minConf == 0 {
 		err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 			if found >= needed {
-				return forEachBreakout
+				return errForEachBreakout
 			}
 
 			// Make sure this output was not spent by an unmined transaction.
@@ -2722,7 +2722,7 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 		})
 	}
 	if err != nil {
-		if err != forEachBreakout {
+		if err != errForEachBreakout {
 			if _, ok := err.(Error); ok {
 				return nil, err
 			}
@@ -3238,8 +3238,8 @@ func (s *Store) balanceFullScanSimulated(ns walletdb.Bucket, minConf int32,
 	var amt dcrutil.Amount
 
 	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		_, ok := unminedInputs[kStr]
+		strK := hex.EncodeToString(k)
+		_, ok := unminedInputs[strK]
 		if ok {
 			// Output is spent by an unmined transaction.
 			// Skip to next unmined credit.
@@ -3492,8 +3492,8 @@ func (s *Store) balanceSpendableSimulated(ns walletdb.Bucket, minConf int32,
 			return err
 		}
 
-		kStr := hex.EncodeToString(k)
-		_, ok := unminedInputs[kStr]
+		strK := hex.EncodeToString(k)
+		_, ok := unminedInputs[strK]
 		if ok {
 			_, v := existsCredit(ns, &op.Hash, op.Index, &block)
 			amt, err := fetchRawCreditAmount(v)
@@ -3541,8 +3541,8 @@ func (s *Store) balanceSpendableSimulated(ns walletdb.Bucket, minConf int32,
 				// if it was already removed for being spent by
 				// an unmined tx.
 				opKey := canonicalOutPoint(txHash, i)
-				kStr := hex.EncodeToString(opKey)
-				_, ok := unminedInputs[kStr]
+				strK := hex.EncodeToString(opKey)
+				_, ok := unminedInputs[strK]
 				if ok {
 					continue
 				}
@@ -4333,60 +4333,60 @@ func (s *Store) generateDatabaseDump(ns walletdb.Bucket,
 	}
 
 	ns.Bucket(bucketBlocks).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
+		strK := hex.EncodeToString(k)
 		vCopy := make([]byte, len(v), len(v))
 		copy(vCopy, v)
-		dbDump.BucketBlocks[kStr] = append([]byte(nil), v...)
+		dbDump.BucketBlocks[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketTxRecords).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketTxRecords[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketTxRecords[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketCredits).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketCredits[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketCredits[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketUnspent[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketUnspent[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketDebits).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketDebits[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketDebits[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketUnmined[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketUnmined[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketUnminedCredits[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketUnminedCredits[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketUnminedInputs).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketUnminedInputs[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketUnminedInputs[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketScripts).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketScripts[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketScripts[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketMultisig).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketMultisig[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketMultisig[strK] = append([]byte(nil), v...)
 		return nil
 	})
 	ns.Bucket(bucketMultisigUsp).ForEach(func(k, v []byte) error {
-		kStr := hex.EncodeToString(k)
-		dbDump.BucketMultisigUsp[kStr] = append([]byte(nil), v...)
+		strK := hex.EncodeToString(k)
+		dbDump.BucketMultisigUsp[strK] = append([]byte(nil), v...)
 		return nil
 	})
 

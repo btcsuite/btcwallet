@@ -1711,7 +1711,7 @@ func (m *Manager) AddressDerivedFromCointype(index uint32, account uint32,
 
 	addr, err := key.Address(m.chainParams)
 	if err != nil {
-		str := fmt.Sprintf("failed to generate address %d", key)
+		str := fmt.Sprintf("failed to generate address %v", key)
 		return nil, managerError(ErrCreateAddress, str, err)
 	}
 
@@ -1759,7 +1759,7 @@ func (m *Manager) AddressDerivedFromDbAcct(index uint32, account uint32,
 
 	addr, err := key.Address(m.chainParams)
 	if err != nil {
-		str := fmt.Sprintf("failed to generate address %d", key)
+		str := fmt.Sprintf("failed to generate address %v", key)
 		return nil, managerError(ErrCreateAddress, str, err)
 	}
 

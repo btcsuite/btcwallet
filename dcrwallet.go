@@ -205,7 +205,7 @@ func startPromptPass(w *wallet.Wallet) {
 		}
 		if promptPass {
 			reader := bufio.NewReader(os.Stdin)
-			passphrase, err := prompt.PromptPass(reader, "", false)
+			passphrase, err := prompt.PassPrompt(reader, "", false)
 			if err != nil {
 				log.Errorf("Failed to input password. Please try again.")
 				continue

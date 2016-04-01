@@ -31,7 +31,7 @@ import (
 
 // finalScanLength is the final length of accounts to scan for the
 // function below.
-var finalAcctScanLength int = 50
+var finalAcctScanLength = 50
 
 // acctSeekWidth is the number of addresses for both internal and external
 // branches to scan to determine whether or not an account exists and should
@@ -147,12 +147,12 @@ func (w *Wallet) scanAccountIndex(start int, end int) (uint32, error) {
 
 // finalScanLength is the final length of keys to scan for the
 // function below.
-var finalAddrScanLength int = 750
+var finalAddrScanLength = 750
 
 // debugScanLength is the final length of keys to scan past the
 // last index returned from the logarithmic scanning function
 // when creating the debug string of used addresses.
-var debugAddrScanLength int = 3500
+var debugAddrScanLength = 3500
 
 // addrSeekWidth is the number of new addresses to generate and add to the
 // address manager when trying to sync up a wallet to the main chain. This
@@ -630,7 +630,7 @@ func (w *Wallet) rescanActiveAddresses() error {
 			}
 		}
 
-		pool, err := NewAddressPools(acct, intIdx, extIdx, w)
+		pool, err := newAddressPools(acct, intIdx, extIdx, w)
 		if err != nil {
 			return err
 		}

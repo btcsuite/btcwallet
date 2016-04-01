@@ -72,6 +72,9 @@ func writeUnspentDebugDataToBuf(buf *bytes.Buffer, udd *unspentDebugData) {
 	buf.Write(b)
 }
 
+// DebugBucketUnspentString is the exported version of debugBuckedUnspentString
+// It returns string versions of unspent outpoints for debug ussage (with a flag
+// for including unmined txes or not).
 func (s *Store) DebugBucketUnspentString(inclUnmined bool) (string, error) {
 	var str string
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {

@@ -20,11 +20,13 @@ import (
 	"strings"
 )
 
-// The wordlists to use.
+// WordList to use.
 var WordList = PGPWordList
+
+// WordMap is the mapping of WordList to the values.
 var WordMap = pgpWordMap
 
-// The PGP wordlist, as a slice.
+// PGPWordList as a slice.
 var PGPWordList = strings.Split(pgpWordList, "\n")
 var pgpWordList = `aardvark
 adroitness

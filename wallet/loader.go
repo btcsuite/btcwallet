@@ -55,6 +55,7 @@ type Loader struct {
 	promptPass    bool
 }
 
+// StakeOptions contains the various options necessary for stake mining.
 type StakeOptions struct {
 	VoteBits           uint16
 	StakeMiningEnabled bool

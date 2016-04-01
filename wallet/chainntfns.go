@@ -17,12 +17,6 @@ import (
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-type TicketsNotification struct {
-	blockHash   *chainhash.Hash
-	blockHeight int64
-	tickets     []*chainhash.Hash
-}
-
 func (w *Wallet) handleChainNotifications() {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -500,7 +494,10 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 				}
 				var blockToUse *waddrmgr.BlockStamp
 				if block != nil {
-					blockToUse = &waddrmgr.BlockStamp{block.Height, block.Hash}
+					blockToUse = &waddrmgr.BlockStamp{
+						Height: block.Height,
+						Hash:   block.Hash,
+					}
 				}
 				mscriptaddr, err := w.Manager.ImportScript(rs, blockToUse)
 				if err != nil {
@@ -524,8 +521,8 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 						Addrs:     []dcrutil.Address{mscriptaddr.Address()},
 						OutPoints: nil,
 						BlockStamp: waddrmgr.BlockStamp{
-							0,
-							*w.chainParams.GenesisHash,
+							Height: 0,
+							Hash:   *w.chainParams.GenesisHash,
 						},
 					}
 

@@ -92,6 +92,9 @@ func estimateTxSize(numInputs, numOutputs int) int {
 	return txOverheadEstimate + txInEstimate*numInputs + txOutEstimate*numOutputs
 }
 
+// EstimateTxSize is the exported version of estimateTxSize which provides
+// an estimate of the tx size based on the number of inputs, outputs, and some
+// assumed overhead.
 func EstimateTxSize(numInputs, numOutputs int) int {
 	return estimateTxSize(numInputs, numOutputs)
 }
@@ -107,6 +110,8 @@ func feeForSize(incr dcrutil.Amount, sz int) dcrutil.Amount {
 	return dcrutil.Amount(1+sz/1000) * incr
 }
 
+// FeeForSize is the exported version of feeForSize which returns a fee
+// based on the provided feeIncrement and provided size.
 func FeeForSize(incr dcrutil.Amount, sz int) dcrutil.Amount {
 	return feeForSize(incr, sz)
 }
@@ -1220,10 +1225,11 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		inputSum += creditAmount
 
 		newInput := dcrjson.SStxInput{
-			credit.Hash.String(),
-			credit.Index,
-			credit.Tree,
-			creditAmount}
+			Txid: credit.Hash.String(),
+			Vout: credit.Index,
+			Tree: credit.Tree,
+			Amt:  creditAmount,
+		}
 
 		inputs = append(inputs, newInput)
 		usedCredits = append(usedCredits, credit)
@@ -1491,7 +1497,8 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32,
 	return eligible, nil
 }
 
-// Exported version of findEligibleOutputs.
+// FindEligibleOutputs is the exported version of findEligibleOutputs (which
+// tried to find unspent outputs that pass a maturity check).
 func (w *Wallet) FindEligibleOutputs(account uint32, minconf int32,
 	bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
 	return w.findEligibleOutputs(account, minconf, bs)
