@@ -2055,6 +2055,12 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			spendable = true
 		case txscript.ScriptHashTy:
 			spendable = true
+		case txscript.StakeGenTy:
+			spendable = true
+		case txscript.StakeRevocationTy:
+			spendable = true
+		case txscript.StakeSubChangeTy:
+			spendable = true
 		case txscript.MultiSigTy:
 			for _, a := range addrs {
 				_, err := w.Manager.Address(a)
