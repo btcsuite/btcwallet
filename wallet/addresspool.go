@@ -72,7 +72,7 @@ func newAddressPools(account uint32, intIdx, extIdx uint32,
 	if err != nil {
 		return nil, err
 	}
-	err = a.external.initialize(account, waddrmgr.ExternalBranch, intIdx, w)
+	err = a.external.initialize(account, waddrmgr.ExternalBranch, extIdx, w)
 	if err != nil {
 		return nil, err
 	}
