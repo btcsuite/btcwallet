@@ -375,63 +375,38 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 		return uint32(lastUsed), addr, nil
 	}
 
-	// We can't find any used addresses. The wallet is
-	// unused.
-	return 0, nil, nil
-}
-
-// doAddressResync resyncs the address manager to a given address.
-func (w *Wallet) doAddressResync(addr dcrutil.Address, acct uint32, idx uint32,
-	internal bool) error {
-	isSynced := false
-	addrFunction := w.Manager.NextExternalAddresses
-	if internal {
-		addrFunction = w.Manager.NextInternalAddresses
-	}
-
-	counter := uint32(0)
-	for !isSynced {
-		// Generate some new addresses and scan them to see
-		// if any of the match the address to sync to.
-		addrs, err := addrFunction(acct, addrSeekWidth)
+	// In the case that 0 was returned as the last used address,
+	// make sure the the 0th address was not used. If it was,
+	// return this address to let the caller know that this
+	// 0th address was used.
+	if lastUsed == 0 {
+		addr, err := w.Manager.AddressDerivedFromDbAcct(0,
+			account, branch)
+		// Skip erroneous keys.
 		if err != nil {
-			return err
+			return 0, nil, err
 		}
 
-		for _, newAddr := range addrs {
-			if bytes.Compare(addr.ScriptAddress(),
-				newAddr.Address().ScriptAddress()) == 0 {
-				isSynced = true
-			}
+		exists, err := chainClient.ExistsAddress(addr)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to access chain server: %v",
+				err.Error())
 		}
 
-		// Don't let this loop infinitely.
-		if counter > waddrmgr.MaxAddressesPerAccount/addrSeekWidth {
-			break
+		if exists {
+			return 0, addr, nil
 		}
-
-		log.Debugf("Currently getting address %v", counter*addrSeekWidth)
-
-		counter++
 	}
 
-	if isSynced {
-		return nil
-	}
-
-	return fmt.Errorf("failed to sync to address %v during address rescan",
-		addr.String())
+	// We can't find any used addresses for this account's
+	// branch.
+	return 0, nil, nil
 }
 
 // rescanActiveAddresses accesses the daemon to discover all the addresses that
 // have been used by an HD keychain stemming from this wallet in the default
 // account.
 func (w *Wallet) rescanActiveAddresses() error {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return err
-	}
-
 	log.Infof("Beginning a rescan of active addresses using the daemon. " +
 		"This may take a while.")
 
@@ -439,6 +414,7 @@ func (w *Wallet) rescanActiveAddresses() error {
 	// current account index is. This scan should only ever be
 	// performed if we're restoring our wallet from seed.
 	lastAcct := uint32(0)
+	var err error
 	if w.resyncAccounts {
 		min := 0
 		max := waddrmgr.MaxAccountNum
@@ -487,9 +463,23 @@ func (w *Wallet) rescanActiveAddresses() error {
 
 		// Do this for both external (0) and internal (1) branches.
 		for branch := uint32(0); branch < 2; branch++ {
-			idx, addr, err := w.scanAddressIndex(min, max, acct, branch)
+			idx, lastAddr, err := w.scanAddressIndex(min, max, acct, branch)
 			if err != nil {
 				return err
+			}
+
+			// If the account is unused, buffer the initial address pool
+			// by syncing the address manager upstream.
+			unusedAcct := (lastAddr == nil)
+			if unusedAcct {
+				_, err := w.Manager.SyncAccountToAddrIndex(acct,
+					addressPoolBuffer, branch)
+				if err != nil {
+					return fmt.Errorf("failed to create initial waddrmgr "+
+						"address buffer for the address pool, "+
+						"account %v, branch %v: %s", acct, branch,
+						err.Error())
+				}
 			}
 
 			branchString := "external"
@@ -497,6 +487,8 @@ func (w *Wallet) rescanActiveAddresses() error {
 				branchString = "internal"
 			}
 
+			// Fetch the address pool index for this account and
+			// branch from the database meta bucket.
 			isInternal := branch == waddrmgr.InternalBranch
 			oldIdx, err := w.Manager.NextToUseAddrPoolIndex(isInternal, acct)
 			unexpectedError := false
@@ -523,111 +515,59 @@ func (w *Wallet) rescanActiveAddresses() error {
 			// If the stored index is further along than the sync-to
 			// index determined by the contents of daemon's addrindex,
 			// use it to initialize the address pool instead.
-			if oldIdx > idx {
-				idx = oldIdx
+			nextToUseIdx := idx
+			if !unusedAcct {
+				nextToUseIdx++
+			}
+			if oldIdx > nextToUseIdx {
+				nextToUseIdx = oldIdx
+			}
+			nextToUseAddr, err := w.Manager.AddressDerivedFromDbAcct(
+				nextToUseIdx, acct, branch)
+			if err != nil {
+				return fmt.Errorf("failed to derive next address for "+
+					"account %v, branch %v: %s", acct, branch,
+					err.Error())
 			}
 
 			// Save these for the address pool startup later.
 			if isInternal {
-				intIdx = idx
+				intIdx = nextToUseIdx
 			} else {
-				extIdx = idx
+				extIdx = nextToUseIdx
 			}
 
-			// The account exists, but no addresses appear to have been
-			// used. Sync to the zeroeth address.
-			if addr == nil && (err == nil || !unexpectedError) {
-				// Check if the zeroeth address is used. If it is, insert it.
-				addr, err := w.Manager.AddressDerivedFromDbAcct(idx,
-					acct, branch)
-				// Fail if this address cannot be derived.
-				if err != nil {
-					return err
-				}
-				exists, err := chainClient.ExistsAddress(addr)
-				if err != nil {
-					return fmt.Errorf("failed to access chain server: %v",
-						err.Error())
-				}
-
-				if exists {
-					addrFunction := w.Manager.NextExternalAddresses
-					if branch == 1 {
-						addrFunction = w.Manager.NextInternalAddresses
-					}
-					_, err := addrFunction(acct, 1)
-					if err != nil {
-						return err
-					}
-
-					log.Infof("Wallet has 1 used address for "+
-						"account %v %v branch", acct, branchString)
-					continue
-				}
-
-				log.Infof("Wallet has no used addresses for "+
-					"account %v %v branch", acct, branchString)
-				continue
-			}
-
-			// Exit out if we already have the address in question.
-			exists, err := w.Manager.ExistsAddress(addr.ScriptAddress())
+			// Synchronize the account manager to our address index plus
+			// an extra chunk of addresses that are used as a buffer
+			// in the address pool.
+			_, err = w.Manager.SyncAccountToAddrIndex(acct,
+				nextToUseIdx+addressPoolBuffer, branch)
 			if err != nil {
-				return err
-			}
-			if exists {
-				log.Debugf("Wallet is already synchronized to address %v "+
-					"(idx %v) of account %v %v branch", addr, idx, acct,
-					branchString)
-				continue
-			}
-
-			log.Infof("Wallet default account %v branch is desynced and must be "+
-				"resynced. Doing this now...", branchString)
-
-			if branch == 0 { // External
-				err := w.doAddressResync(addr, acct, idx, false)
-				if err != nil {
-					return fmt.Errorf("couldn't sync external addresses in " +
-						"address manager")
+				// A ErrSyncToIndex error indicates that we're already
+				// synced to beyond the end of the account in the
+				// waddrmgr.
+				errWaddrmgr, ok := err.(waddrmgr.ManagerError)
+				if !ok || errWaddrmgr.ErrorCode != waddrmgr.ErrSyncToIndex {
+					return fmt.Errorf("couldn't sync %s addresses in "+
+						"address manager: %v", branchString, err.Error())
 				}
-
-				// Set the next address in the waddrmgr database so that the
-				// address pool can synchronize properly after.
-				err = w.Manager.StoreNextToUseAddress(false, acct, idx+1)
-				if err != nil {
-					log.Errorf("Failed to store next to use pool idx for "+
-						"external pool in the manager on init sync: %v",
-						err.Error())
-				}
-
-				log.Infof("Successfully synchronized the address manager to "+
-					"external address %v (key index %v)",
-					addr.String(),
-					idx)
 			}
-			if branch == 1 { // Internal
-				err := w.doAddressResync(addr, acct, idx, true)
-				if err != nil {
-					return fmt.Errorf("couldn't sync internal addresses in " +
-						"address manager")
-				}
 
-				// Set the next address in the waddrmgr database so that the
-				// address pool can synchronize properly after.
-				err = w.Manager.StoreNextToUseAddress(false, acct, idx+1)
-				if err != nil {
-					log.Errorf("Failed to store next to use address for "+
-						"internal pool in the manager on init sync: %v",
-						err.Error())
-				}
-
-				log.Infof("Successfully synchronized the address manager to "+
-					"internal address %v (key index %v) for account %v",
-					addr.String(),
-					idx,
-					acct)
+			// Set the next address in the waddrmgr database so that the
+			// address pool can synchronize properly after.
+			err = w.Manager.StoreNextToUseAddress(isInternal, acct, nextToUseIdx)
+			if err != nil {
+				log.Errorf("Failed to store next to use pool idx for "+
+					"%s pool in the manager on init sync: %v",
+					branchString, err.Error())
 			}
+
+			log.Infof("Successfully synchronized the address manager to "+
+				"%s address %v (key index %v) for account %v",
+				branchString,
+				nextToUseAddr.String(),
+				nextToUseIdx,
+				acct)
 		}
 
 		pool, err := newAddressPools(acct, intIdx, extIdx, w)

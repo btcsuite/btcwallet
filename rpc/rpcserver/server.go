@@ -231,9 +231,15 @@ func (s *walletServer) NextAddress(ctx context.Context, req *pb.NextAddressReque
 	)
 	switch req.Kind {
 	case pb.NextAddressRequest_BIP0044_EXTERNAL:
-		addr, err = s.wallet.NewAddress(req.Account)
+		addr, err = s.wallet.NewAddress(req.Account, waddrmgr.ExternalBranch)
+		if err != nil {
+			return nil, translateError(err)
+		}
 	case pb.NextAddressRequest_BIP0044_INTERNAL:
-		addr, err = s.wallet.NewChangeAddress(req.Account)
+		addr, err = s.wallet.NewAddress(req.Account, waddrmgr.InternalBranch)
+		if err != nil {
+			return nil, translateError(err)
+		}
 	default:
 		return nil, grpc.Errorf(codes.InvalidArgument, "kind=%v", req.Kind)
 	}
@@ -379,7 +385,8 @@ func (s *walletServer) FundTransaction(ctx context.Context, req *pb.FundTransact
 
 	var changeScript []byte
 	if req.IncludeChangeScript && totalAmount > dcrutil.Amount(req.TargetAmount) {
-		changeAddr, err := s.wallet.NewChangeAddress(req.Account)
+		changeAddr, err := s.wallet.NewAddress(req.Account,
+			waddrmgr.InternalBranch)
 		if err != nil {
 			return nil, translateError(err)
 		}

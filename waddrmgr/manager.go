@@ -495,13 +495,13 @@ func (m *Manager) GetSeed() (string, error) {
 // for the default account of the wallet.
 //
 // This function MUST be called with the manager lock held for writes.
-func (m *Manager) getMasterPubkey() (string, error) {
+func (m *Manager) getMasterPubkey(account uint32) (string, error) {
 	// The account is either invalid or just wasn't cached, so attempt to
 	// load the information from the database.
 	var rowInterface interface{}
 	err := m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
-		rowInterface, err = fetchAccountInfo(tx, DefaultAccountNum)
+		rowInterface, err = fetchAccountInfo(tx, account)
 		return err
 	})
 	if err != nil {
@@ -527,11 +527,11 @@ func (m *Manager) getMasterPubkey() (string, error) {
 }
 
 // GetMasterPubkey is the exported, concurrency safe version of getMasterPubkey.
-func (m *Manager) GetMasterPubkey() (string, error) {
+func (m *Manager) GetMasterPubkey(account uint32) (string, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	return m.getMasterPubkey()
+	return m.getMasterPubkey(account)
 }
 
 // loadAccountInfo attempts to load and cache information about the given
@@ -1764,6 +1764,251 @@ func (m *Manager) AddressDerivedFromDbAcct(index uint32, account uint32,
 	}
 
 	return addr, nil
+}
+
+// AddressesDerivedFromDbAcct accesses the internal extended keys to produce
+// addresses for some given account, branch, start index and end index.
+// In contrast to the NextAddresses function, this function does NOT add
+// these addresses to the address manager.
+// TODO There's no reason to continue holding the lock on the waddrmgr while
+// the addresses themselves are being computed from the public account key.
+// Instead the mutex should release as soon as the loadAccountInfo is called,
+// which should free up the address manager to do other things.
+func (m *Manager) AddressesDerivedFromDbAcct(start uint32, end uint32,
+	account uint32, branch uint32) ([]dcrutil.Address, error) {
+	// Enforce maximum account number.
+	if account > MaxAccountNum {
+		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
+		return nil, err
+	}
+
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	// The next address can only be generated for accounts that have already
+	// been created.
+	acctInfo, err := m.loadAccountInfo(account)
+	if err != nil {
+		return nil, err
+	}
+	acctKey := acctInfo.acctKeyPub
+
+	// Derive the appropriate branch key and ensure it is zeroed when done.
+	branchKey, err := acctKey.Child(branch)
+	if err != nil {
+		str := fmt.Sprintf("failed to derive extended key branch %d",
+			branch)
+		return nil, managerError(ErrKeyChain, str, err)
+	}
+	defer branchKey.Zero() // Ensure branch key is zeroed when done.
+
+	addresses := make([]dcrutil.Address, end-start)
+	slIndex := 0
+	for i := start; i < end; i++ {
+		key, err := branchKey.Child(i)
+		if err != nil {
+			str := fmt.Sprintf("failed to generate child %d", i)
+			return nil, managerError(ErrKeyChain, str, err)
+		}
+
+		addr, err := key.Address(m.chainParams)
+		if err != nil {
+			str := fmt.Sprintf("failed to generate address %v", key)
+			return nil, managerError(ErrCreateAddress, str, err)
+		}
+
+		addresses[slIndex] = addr
+		slIndex++
+	}
+
+	return addresses, nil
+}
+
+// syncAccountToAddrIndex takes an account, branch, and index and synchronizes
+// the waddrmgr account to it.
+//
+// This function MUST be called with the manager lock held for writes.
+func (m *Manager) syncAccountToAddrIndex(account uint32, syncToIndex uint32,
+	branch uint32) ([]ManagedAddress, error) {
+	// The next address can only be generated for accounts that have already
+	// been created.
+	acctInfo, err := m.loadAccountInfo(account)
+	if err != nil {
+		return nil, err
+	}
+
+	// Choose the account key to used based on whether the address manager
+	// is locked.
+	acctKey := acctInfo.acctKeyPub
+	if !m.locked {
+		acctKey = acctInfo.acctKeyPriv
+	}
+
+	if branch > InternalBranch {
+		str := fmt.Sprintf("bad branch %v passed", branch)
+		return nil, managerError(ErrBranch, str, nil)
+	}
+
+	// Choose the branch key and index depending on whether or not this
+	// is an internal address.
+	branchNum := ExternalBranch
+	nextIndex := acctInfo.nextExternalIndex
+	if branch == InternalBranch {
+		branchNum = InternalBranch
+		nextIndex = acctInfo.nextInternalIndex
+	}
+
+	// Special case for the account just being loaded, causing the
+	// account to be unused. In this case, don't subtract because
+	// the wallet will underflow.
+	lastLoadedIndex := uint32(0)
+	if nextIndex > 0 {
+		lastLoadedIndex = nextIndex - 1
+	}
+
+	// Ensure the requested index to sync to doesn't exceed the maximum
+	// allowed for this account.
+	if syncToIndex > MaxAddressesPerAccount {
+		str := fmt.Sprintf("%d syncing to index would exceed the maximum "+
+			"allowed number of addresses per account of %d",
+			syncToIndex, MaxAddressesPerAccount)
+		return nil, managerError(ErrTooManyAddresses, str, nil)
+	}
+
+	// Our sync to index is below our next index. Return an error.
+	if syncToIndex < lastLoadedIndex {
+		str := fmt.Sprintf("can not sync to lower index %v from index %v",
+			syncToIndex, nextIndex)
+		return nil, managerError(ErrSyncToIndex, str, nil)
+	}
+
+	// We're already synced to this index, just return.
+	numAddresses := syncToIndex - lastLoadedIndex
+	if numAddresses == 0 {
+		return nil, nil
+	}
+
+	// Derive the appropriate branch key and ensure it is zeroed when done.
+	branchKey, err := acctKey.Child(branchNum)
+	if err != nil {
+		str := fmt.Sprintf("failed to derive extended key branch %d",
+			branchNum)
+		return nil, managerError(ErrKeyChain, str, err)
+	}
+	defer branchKey.Zero() // Ensure branch key is zeroed when done.
+
+	// Create the requested number of addresses and keep track of the index
+	// with each one.
+	addressInfo := make([]*unlockDeriveInfo, 0, numAddresses)
+	for i := uint32(0); i < numAddresses; i++ {
+		// There is an extremely small chance that a particular child is
+		// invalid, so use a loop to derive the next valid child.
+		var nextKey *hdkeychain.ExtendedKey
+		for {
+			// Derive the next child in the external chain branch.
+			key, err := branchKey.Child(nextIndex)
+			if err != nil {
+				// When this particular child is invalid, skip to the
+				// next index.
+				if err == hdkeychain.ErrInvalidChild {
+					nextIndex++
+					continue
+				}
+
+				str := fmt.Sprintf("failed to generate child %d",
+					nextIndex)
+				return nil, managerError(ErrKeyChain, str, err)
+			}
+			key.SetNet(m.chainParams)
+
+			nextIndex++
+			nextKey = key
+			break
+		}
+
+		// Create a new managed address based on the public or private
+		// key depending on whether the generated key is private.  Also,
+		// zero the next key after creating the managed address from it.
+		managedAddr, err := newManagedAddressFromExtKey(m, account, nextKey)
+		nextKey.Zero()
+		if err != nil {
+			return nil, err
+		}
+		if branch == InternalBranch {
+			managedAddr.internal = true
+		}
+		info := unlockDeriveInfo{
+			managedAddr: managedAddr,
+			branch:      branchNum,
+			index:       nextIndex - 1,
+		}
+		addressInfo = append(addressInfo, &info)
+	}
+
+	// Now that all addresses have been successfully generated, update the
+	// database in a single transaction.
+	err = m.namespace.Update(func(tx walletdb.Tx) error {
+		for _, info := range addressInfo {
+			ma := info.managedAddr
+			addressID := ma.Address().ScriptAddress()
+			err := putChainedAddress(tx, addressID, account, ssFull,
+				info.branch, info.index)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
+
+	// Finally update the next address tracking and add the addresses to the
+	// cache after the newly generated addresses have been successfully
+	// added to the db.
+	managedAddresses := make([]ManagedAddress, 0, len(addressInfo))
+	for _, info := range addressInfo {
+		ma := info.managedAddr
+		m.addrs[addrKey(ma.Address().ScriptAddress())] = ma
+
+		// Add the new managed address to the list of addresses that
+		// need their private keys derived when the address manager is
+		// next unlocked.
+		if m.locked && !m.watchingOnly {
+			m.deriveOnUnlock = append(m.deriveOnUnlock, info)
+		}
+
+		managedAddresses = append(managedAddresses, ma)
+	}
+
+	// Set the last address and next address for tracking.
+	ma := addressInfo[len(addressInfo)-1].managedAddr
+	if branch == InternalBranch {
+		acctInfo.nextInternalIndex = nextIndex
+		acctInfo.lastInternalAddr = ma
+	} else {
+		acctInfo.nextExternalIndex = nextIndex
+		acctInfo.lastExternalAddr = ma
+	}
+
+	return managedAddresses, nil
+}
+
+// SyncAccountToAddrIndex returns the specified number of next chained addresses
+// that are intended for internal use such as change from the address manager.
+func (m *Manager) SyncAccountToAddrIndex(account uint32, syncToIndex uint32,
+	branch uint32) ([]ManagedAddress, error) {
+	// Enforce maximum account number.
+	if account > MaxAccountNum {
+		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
+		return nil, err
+	}
+
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	return m.syncAccountToAddrIndex(account, syncToIndex, branch)
 }
 
 // nextAddresses returns the specified number of next chained address from the

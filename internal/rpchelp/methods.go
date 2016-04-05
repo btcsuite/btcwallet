@@ -24,6 +24,9 @@ var Methods = []struct {
 	Method      string
 	ResultTypes []interface{}
 }{
+	{"accountaddressindex", []interface{}{(*int)(nil)}},
+	{"accountfetchaddresses", []interface{}{(*dcrjson.AccountFetchAddressesResult)(nil)}},
+	{"accountsyncaddressindex", nil},
 	{"addmultisigaddress", returnsString},
 	{"consolidate", returnsString},
 	{"createmultisig", []interface{}{(*dcrjson.CreateMultiSigResult)(nil)}},
@@ -83,6 +86,9 @@ var Methods = []struct {
 	{"listalltransactions", returnsLTRArray},
 	{"renameaccount", nil},
 	{"walletislocked", returnsBool},
+	{"walletinfo", []interface{}{(*dcrjson.WalletInfoResult)(nil)}},
+
+	// TODO Alphabetize
 	{"purchaseticket", returnsString},
 	{"sendtossrtx", returnsString},
 	{"sendtosstx", returnsString},

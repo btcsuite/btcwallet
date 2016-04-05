@@ -8,6 +8,27 @@
 package rpchelp
 
 var helpDescsEnUS = map[string]string{
+	// AccountAddressIndexCmd help.
+	"accountaddressindex--synopsis": "Get the current address index for some account branch",
+	"accountaddressindex-account":   "String for the account",
+	"accountaddressindex-branch":    "Number for the branch (0=external, 1=internal)",
+	"accountaddressindex--result0":  "The address index for this account branch",
+
+	// AccountAddressIndexCmd help.
+	"accountfetchaddresses--synopsis": "Get the current address index for some account branch",
+	"accountfetchaddresses-account":   "String for the account",
+	"accountfetchaddresses-branch":    "Number for the branch (0=external, 1=internal)",
+	"accountfetchaddresses-start":     "The start address index to fetch, inclusive",
+	"accountfetchaddresses-end":       "The end address index to fetch, excluse",
+
+	"accountfetchaddressesresult-addresses": "The list of requested addresses for this account branch",
+
+	// AccountSyncAddressIndexCmd help.
+	"accountsyncaddressindex--synopsis": "Synchronize an account branch to some passed address index",
+	"accountsyncaddressindex-account":   "String for the account",
+	"accountsyncaddressindex-branch":    "Number for the branch (0=external, 1=internal)",
+	"accountsyncaddressindex-index":     "The address index to synchronize to",
+
 	// AddMultisigAddressCmd help.
 	"addmultisigaddress--synopsis": "Generates and imports a multisig address and redeeming script to the 'imported' account.",
 	"addmultisigaddress-account":   "DEPRECATED -- Unused (all imported addresses belong to the imported account)",
@@ -78,6 +99,7 @@ var helpDescsEnUS = map[string]string{
 
 	// GetMasterPubkey help.
 	"getmasterpubkey--synopsis": "Requests the master pubkey from the wallet.",
+	"getmasterpubkey-account":   "The account to get the master pubkey for",
 	"getmasterpubkey--result0":  "The master pubkey for the wallet",
 
 	// GetMultisigOutInfo help.
@@ -546,6 +568,19 @@ var helpDescsEnUS = map[string]string{
 	// WalletIsLockedCmd help.
 	"walletislocked--synopsis": "Returns whether or not the wallet is locked.",
 	"walletislocked--result0":  "Whether the wallet is locked",
+
+	// WalletInfoCmd help.
+	"walletinfo--synopsis": "Returns global information about the wallet",
+
+	"walletinforesult-daemonconnected":   "Whether or not the wallet is currently connected to the daemon RPC",
+	"walletinforesult-unlocked":          "Whether or not the wallet is unlocked",
+	"walletinforesult-txfee":             "Transaction fee in coins",
+	"walletinforesult-ticketfee":         "Ticket fee in coins",
+	"walletinforesult-ticketmaxprice":    "The maximum price to pay for a ticket",
+	"walletinforesult-balancetomaintain": "The balance to try to maintain while purchasing tickets",
+	"walletinforesult-stakemining":       "Whether or not the wallet is currently stake mining",
+
+	// TODO Alphabetize
 
 	// PurchaseTicketCmd help.
 	"purchaseticket--synopsis":     "Purchase ticket using available funds.",

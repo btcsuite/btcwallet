@@ -136,6 +136,14 @@ const (
 	// ErrMetaPoolIdxNoExist indicates that the address index for some
 	// account's address pool was unset or short.
 	ErrMetaPoolIdxNoExist
+
+	// ErrBranch indicates that the branch passed was not internal
+	// or external for some account.
+	ErrBranch
+
+	// ErrSyncToIndex indicates that the passed address index to sync
+	// an account branch to was erroneous.
+	ErrSyncToIndex
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
@@ -163,6 +171,8 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrEmptyPassphrase:    "ErrEmptyPassphrase",
 	ErrCreateAddress:      "ErrCreateAddress",
 	ErrMetaPoolIdxNoExist: "ErrMetaPoolIdxNoExist",
+	ErrBranch:             "ErrBranch",
+	ErrSyncToIndex:        "ErrSyncToIndex",
 }
 
 // String returns the ErrorCode as a human-readable name.

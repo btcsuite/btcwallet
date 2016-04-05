@@ -287,6 +287,13 @@ func (w *Wallet) SetBalanceToMaintain(balance dcrutil.Amount) {
 	w.stakeSettingsLock.Unlock()
 }
 
+// Generate returns the current status of the generation stake of the wallet.
+func (w *Wallet) Generate() bool {
+	w.stakeSettingsLock.Lock()
+	defer w.stakeSettingsLock.Unlock()
+	return w.StakeMiningEnabled
+}
+
 // SetGenerate is used to enable or disable stake mining in the
 // wallet.
 func (w *Wallet) SetGenerate(flag bool) error {
@@ -899,7 +906,7 @@ out:
 			// Initialize the address pool for use.
 			pool := w.addrPools[waddrmgr.DefaultAccountNum].internal
 			pool.mutex.Lock()
-			addrFunc := pool.GetNewAddress
+			addrFunc := pool.getNewAddress
 
 			tx, err := w.txToSStx(txr.pair,
 				txr.usedInputs,
@@ -1302,25 +1309,21 @@ func (w *Wallet) CalculateAccountBalances(account uint32,
 // spending to it in the blockchain or dcrd mempool), the next chained address
 // is returned.
 func (w *Wallet) CurrentAddress(account uint32) (dcrutil.Address, error) {
-	addr, _, err := w.Manager.LastExternalAddress(account)
-	if err != nil {
-		// If no address exists yet, create the first external address
-		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
-			return w.NewAddress(account)
-		}
-		return nil, err
-	}
-
-	// Get next chained address if the last one has already been used.
-	used, err := addr.Used()
+	// Access the address index to get the next to use
+	// address.
+	nextToUseIdx, err := w.AddressPoolIndex(account, waddrmgr.ExternalBranch)
 	if err != nil {
 		return nil, err
 	}
-	if used {
-		return w.NewAddress(account)
+	lastUsedIdx := nextToUseIdx - 1
+
+	addr, err := w.Manager.AddressDerivedFromDbAcct(lastUsedIdx, account,
+		waddrmgr.ExternalBranch)
+	if err != nil {
+		return nil, err
 	}
 
-	return addr.Address(), nil
+	return addr, nil
 }
 
 // existsAddressOnChain checks the chain on daemon to see if the given address
@@ -1376,6 +1379,25 @@ func (w *Wallet) NextAccount(name string) (uint32, error) {
 			"after account creation: %v", err)
 	} else {
 		w.NtfnServer.notifyAccountProperties(props)
+	}
+
+	// Start an address buffer for this account in the address
+	// manager for both the internal and external branches.
+	_, err = w.Manager.SyncAccountToAddrIndex(account,
+		addressPoolBuffer, waddrmgr.ExternalBranch)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create initial waddrmgr "+
+			"external address buffer for the address pool, "+
+			"account %v during createnewaccount: %s",
+			account, err.Error())
+	}
+	_, err = w.Manager.SyncAccountToAddrIndex(account,
+		addressPoolBuffer, waddrmgr.InternalBranch)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create initial waddrmgr "+
+			"internal address buffer for the address pool, "+
+			"account %v during createnewaccount: %s",
+			account, err.Error())
 	}
 
 	// Initialize a new address pool for this account.

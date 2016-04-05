@@ -381,7 +381,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 
 	inputSource := w.TxStore.MakeInputSource(account, minconf, bs.Height)
 	changeSource := func() ([]byte, error) {
-		changeAddr, err := pool.GetNewAddress()
+		changeAddr, err := pool.getNewAddress()
 		if err != nil {
 			return nil, err
 		}
@@ -490,7 +490,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 			pool.BatchRollback()
 		}
 	}()
-	addrFunc := pool.GetNewAddress
+	addrFunc := pool.getNewAddress
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -721,7 +721,7 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 			pool.BatchRollback()
 		}
 	}()
-	addrFunc := pool.GetNewAddress
+	addrFunc := pool.getNewAddress
 
 	minconf := int32(1)
 	eligible, err := w.findEligibleOutputs(account, minconf, bs)
@@ -835,7 +835,7 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 			pool.BatchRollback()
 		}
 	}()
-	addrFunc := pool.GetNewAddress
+	addrFunc := pool.getNewAddress
 
 	if len(eligible) == 0 {
 		return ErrNoOutsToConsolidate
@@ -1113,7 +1113,12 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	error) {
 
 	// Initialize the address pool for use.
-	pool := w.addrPools[waddrmgr.DefaultAccountNum].internal
+	var pool *addressPool
+	err := w.CheckAddressPoolsInitialized(req.account)
+	if err != nil {
+		return nil, err
+	}
+	pool = w.addrPools[req.account].internal
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
 	txSucceeded := false
@@ -1124,9 +1129,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 			pool.BatchRollback()
 		}
 	}()
-	addrFunc := func() (dcrutil.Address, error) {
-		return w.NewChangeAddress(req.account)
-	}
+	addrFunc := pool.getNewAddress
 
 	if w.addressReuse {
 		addrFunc = w.ReusedAddress

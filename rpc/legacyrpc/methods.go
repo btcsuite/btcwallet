@@ -90,72 +90,76 @@ var rpcHandlers = map[string]struct {
 	requireUnsafeOnMainNet bool
 }{
 	// Reference implementation wallet methods (implemented)
-	"addmultisigaddress":     {handlerWithChain: AddMultiSigAddress},
-	"consolidate":            {handler: Consolidate},
-	"createmultisig":         {handler: CreateMultiSig},
-	"dumpprivkey":            {handler: DumpPrivKey, requireUnsafeOnMainNet: true},
-	"getaccount":             {handler: GetAccount},
-	"getaccountaddress":      {handler: GetAccountAddress},
-	"getaddressesbyaccount":  {handler: GetAddressesByAccount},
-	"getbalance":             {handler: GetBalance},
-	"getbestblockhash":       {handler: GetBestBlockHash},
-	"getblockcount":          {handler: GetBlockCount},
-	"getinfo":                {handlerWithChain: GetInfo},
-	"getbalancetomaintain":   {handler: GetBalanceToMaintain},
-	"getgenerate":            {handler: GetGenerate},
-	"getmasterpubkey":        {handler: GetMasterPubkey},
-	"getmultisigoutinfo":     {handlerWithChain: GetMultisigOutInfo},
-	"getnewaddress":          {handler: GetNewAddress},
-	"getrawchangeaddress":    {handler: GetRawChangeAddress},
-	"getreceivedbyaccount":   {handler: GetReceivedByAccount},
-	"getreceivedbyaddress":   {handler: GetReceivedByAddress},
-	"getseed":                {handler: GetSeed, requireUnsafeOnMainNet: true},
-	"getstakeinfo":           {handlerWithChain: GetStakeInfo},
-	"getticketfee":           {handler: GetTicketFee},
-	"getticketmaxprice":      {handler: GetTicketMaxPrice},
-	"gettickets":             {handlerWithChain: GetTickets},
-	"getticketvotebits":      {handler: GetTicketVoteBits},
-	"getticketsvotebits":     {handler: GetTicketsVoteBits},
-	"gettransaction":         {handler: GetTransaction},
-	"getwalletfee":           {handler: GetWalletFee},
-	"help":                   {handler: HelpNoChainRPC, handlerWithChain: HelpWithChainRPC},
-	"importprivkey":          {handler: ImportPrivKey},
-	"importscript":           {handlerWithChain: ImportScript},
-	"keypoolrefill":          {handler: KeypoolRefill},
-	"listaccounts":           {handler: ListAccounts},
-	"listlockunspent":        {handler: ListLockUnspent},
-	"listreceivedbyaccount":  {handler: ListReceivedByAccount},
-	"listreceivedbyaddress":  {handler: ListReceivedByAddress},
-	"listsinceblock":         {handlerWithChain: ListSinceBlock},
-	"listscripts":            {handler: ListScripts},
-	"listtransactions":       {handler: ListTransactions},
-	"listunspent":            {handler: ListUnspent},
-	"lockunspent":            {handler: LockUnspent},
-	"purchaseticket":         {handler: PurchaseTicket},
-	"sendfrom":               {handlerWithChain: SendFrom},
-	"sendmany":               {handler: SendMany},
-	"sendtoaddress":          {handler: SendToAddress},
-	"sendtomultisig":         {handlerWithChain: SendToMultiSig},
-	"sendtosstx":             {handlerWithChain: SendToSStx},
-	"sendtossgen":            {handler: SendToSSGen},
-	"sendtossrtx":            {handlerWithChain: SendToSSRtx},
-	"setgenerate":            {handler: SetGenerate},
-	"setbalancetomaintain":   {handler: SetBalanceToMaintain},
-	"setticketfee":           {handler: SetTicketFee},
-	"setticketmaxprice":      {handler: SetTicketMaxPrice},
-	"setticketvotebits":      {handler: SetTicketVoteBits},
-	"settxfee":               {handler: SetTxFee},
-	"signmessage":            {handler: SignMessage},
-	"signrawtransaction":     {handlerWithChain: SignRawTransaction},
-	"signrawtransactions":    {handlerWithChain: SignRawTransactions},
-	"redeemmultisigout":      {handlerWithChain: RedeemMultiSigOut},
-	"redeemmultisigouts":     {handlerWithChain: RedeemMultiSigOuts},
-	"ticketsforaddress":      {handler: TicketsForAddress},
-	"validateaddress":        {handler: ValidateAddress},
-	"verifymessage":          {handler: VerifyMessage},
-	"walletlock":             {handler: WalletLock},
-	"walletpassphrase":       {handler: WalletPassphrase},
-	"walletpassphrasechange": {handler: WalletPassphraseChange},
+	"accountaddressindex":     {handler: AccountAddressIndex},
+	"accountfetchaddresses":   {handler: AccountFetchAddresses},
+	"accountsyncaddressindex": {handler: AccountSyncAddressIndex},
+	"addmultisigaddress":      {handlerWithChain: AddMultiSigAddress},
+	"consolidate":             {handler: Consolidate},
+	"createmultisig":          {handler: CreateMultiSig},
+	"dumpprivkey":             {handler: DumpPrivKey, requireUnsafeOnMainNet: true},
+	"getaccount":              {handler: GetAccount},
+	"getaccountaddress":       {handler: GetAccountAddress},
+	"getaddressesbyaccount":   {handler: GetAddressesByAccount},
+	"getbalance":              {handler: GetBalance},
+	"getbestblockhash":        {handler: GetBestBlockHash},
+	"getblockcount":           {handler: GetBlockCount},
+	"getinfo":                 {handlerWithChain: GetInfo},
+	"getbalancetomaintain":    {handler: GetBalanceToMaintain},
+	"getgenerate":             {handler: GetGenerate},
+	"getmasterpubkey":         {handler: GetMasterPubkey},
+	"getmultisigoutinfo":      {handlerWithChain: GetMultisigOutInfo},
+	"getnewaddress":           {handler: GetNewAddress},
+	"getrawchangeaddress":     {handler: GetRawChangeAddress},
+	"getreceivedbyaccount":    {handler: GetReceivedByAccount},
+	"getreceivedbyaddress":    {handler: GetReceivedByAddress},
+	"getseed":                 {handler: GetSeed, requireUnsafeOnMainNet: true},
+	"getstakeinfo":            {handlerWithChain: GetStakeInfo},
+	"getticketfee":            {handler: GetTicketFee},
+	"getticketmaxprice":       {handler: GetTicketMaxPrice},
+	"gettickets":              {handlerWithChain: GetTickets},
+	"getticketvotebits":       {handler: GetTicketVoteBits},
+	"getticketsvotebits":      {handler: GetTicketsVoteBits},
+	"gettransaction":          {handler: GetTransaction},
+	"getwalletfee":            {handler: GetWalletFee},
+	"help":                    {handler: HelpNoChainRPC, handlerWithChain: HelpWithChainRPC},
+	"importprivkey":           {handler: ImportPrivKey},
+	"importscript":            {handlerWithChain: ImportScript},
+	"keypoolrefill":           {handler: KeypoolRefill},
+	"listaccounts":            {handler: ListAccounts},
+	"listlockunspent":         {handler: ListLockUnspent},
+	"listreceivedbyaccount":   {handler: ListReceivedByAccount},
+	"listreceivedbyaddress":   {handler: ListReceivedByAddress},
+	"listsinceblock":          {handlerWithChain: ListSinceBlock},
+	"listscripts":             {handler: ListScripts},
+	"listtransactions":        {handler: ListTransactions},
+	"listunspent":             {handler: ListUnspent},
+	"lockunspent":             {handler: LockUnspent},
+	"purchaseticket":          {handler: PurchaseTicket},
+	"sendfrom":                {handlerWithChain: SendFrom},
+	"sendmany":                {handler: SendMany},
+	"sendtoaddress":           {handler: SendToAddress},
+	"sendtomultisig":          {handlerWithChain: SendToMultiSig},
+	"sendtosstx":              {handlerWithChain: SendToSStx},
+	"sendtossgen":             {handler: SendToSSGen},
+	"sendtossrtx":             {handlerWithChain: SendToSSRtx},
+	"setgenerate":             {handler: SetGenerate},
+	"setbalancetomaintain":    {handler: SetBalanceToMaintain},
+	"setticketfee":            {handler: SetTicketFee},
+	"setticketmaxprice":       {handler: SetTicketMaxPrice},
+	"setticketvotebits":       {handler: SetTicketVoteBits},
+	"settxfee":                {handler: SetTxFee},
+	"signmessage":             {handler: SignMessage},
+	"signrawtransaction":      {handlerWithChain: SignRawTransaction},
+	"signrawtransactions":     {handlerWithChain: SignRawTransactions},
+	"redeemmultisigout":       {handlerWithChain: RedeemMultiSigOut},
+	"redeemmultisigouts":      {handlerWithChain: RedeemMultiSigOuts},
+	"ticketsforaddress":       {handler: TicketsForAddress},
+	"validateaddress":         {handler: ValidateAddress},
+	"verifymessage":           {handler: VerifyMessage},
+	"walletinfo":              {handlerWithChain: WalletInfo},
+	"walletlock":              {handler: WalletLock},
+	"walletpassphrase":        {handler: WalletPassphrase},
+	"walletpassphrasechange":  {handler: WalletPassphraseChange},
 
 	// Reference implementation methods (still unimplemented)
 	"backupwallet":         {handler: Unimplemented, noHelp: true},
@@ -317,6 +321,100 @@ func jsonError(err error) *dcrjson.RPCError {
 		Code:    code,
 		Message: err.Error(),
 	}
+}
+
+// AccountAddressIndex returns the current address index for the passed
+// account and branch.
+func AccountAddressIndex(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.AccountAddressIndexCmd)
+	account, err := w.Manager.LookupAccount(cmd.Account)
+	if err != nil {
+		return nil, err
+	}
+
+	// The branch may only be internal or external.
+	branch := uint32(cmd.Branch)
+	if branch > waddrmgr.InternalBranch {
+		return nil, fmt.Errorf("invalid branch %v", branch)
+	}
+
+	idx, err := w.AddressPoolIndex(account, branch)
+	if err != nil {
+		return nil, err
+	}
+
+	return idx, nil
+}
+
+// AccountFetchAddresses returns the all addresses from (start,end] for the
+// passed account and branch.
+func AccountFetchAddresses(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.AccountFetchAddressesCmd)
+	account, err := w.Manager.LookupAccount(cmd.Account)
+	if err != nil {
+		return nil, err
+	}
+
+	// The branch may only be internal or external.
+	branch := uint32(cmd.Branch)
+	if branch > waddrmgr.InternalBranch {
+		return nil, fmt.Errorf("invalid branch %v", branch)
+	}
+
+	if cmd.End <= cmd.Start ||
+		cmd.Start > waddrmgr.MaxAddressesPerAccount ||
+		cmd.End > waddrmgr.MaxAddressesPerAccount {
+		return nil, fmt.Errorf("bad indexes start %v, end %v", cmd.Start,
+			cmd.End)
+	}
+
+	addrs, err := w.Manager.AddressesDerivedFromDbAcct(uint32(cmd.Start),
+		uint32(cmd.End), account, branch)
+	if err != nil {
+		return nil, err
+	}
+	addrsStr := make([]string, cmd.End-cmd.Start)
+	for i := range addrs {
+		addrsStr[i] = addrs[i].EncodeAddress()
+	}
+
+	return dcrjson.AccountFetchAddressesResult{Addresses: addrsStr}, nil
+}
+
+// AccountSyncAddressIndex synchronizes the address manager and local address
+// pool for some account and branch to the passed index. If the current pool
+// index is beyond the passed index, an error is returned. If the passed index
+// is the same as the current pool index, nothing is returned. If the syncing
+// is successful, nothing is returned.
+func AccountSyncAddressIndex(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.AccountSyncAddressIndexCmd)
+	account, err := w.Manager.LookupAccount(cmd.Account)
+	if err != nil {
+		return nil, err
+	}
+
+	// The branch may only be internal or external.
+	branch := uint32(cmd.Branch)
+	if branch > waddrmgr.InternalBranch {
+		return nil, fmt.Errorf("invalid branch %v", branch)
+	}
+
+	// Get the current address pool index for this branch
+	// and do basic sanity checks.
+	index := uint32(cmd.Index)
+	currentIndex, err := w.AddressPoolIndex(account, branch)
+	if err != nil {
+		return nil, err
+	}
+	if index < currentIndex {
+		return nil, fmt.Errorf("the passed index, %v, is before the "+
+			"currently synced to address index %v", index, currentIndex)
+	}
+	if index == currentIndex {
+		return nil, nil
+	}
+
+	return nil, w.SyncAddressPoolIndex(account, branch, index)
 }
 
 // makeMultiSigScript is a helper function to combine common logic for
@@ -494,13 +592,41 @@ func GetAddressesByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, err
 		return nil, err
 	}
 
-	var addrStrs []string
-	err = w.Manager.ForEachAccountAddress(account,
-		func(maddr waddrmgr.ManagedAddress) error {
-			addrStrs = append(addrStrs, maddr.Address().EncodeAddress())
-			return nil
-		})
-	return addrStrs, err
+	// Find the current synced-to indexes from the address pool.
+	endExt, err := w.AddressPoolIndex(account, waddrmgr.ExternalBranch)
+	if err != nil {
+		return nil, err
+	}
+	endInt, err := w.AddressPoolIndex(account, waddrmgr.InternalBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	// Nothing to do if we have no addresses.
+	if endExt+endInt == 0 {
+		return nil, nil
+	}
+
+	// Derive the addresses.
+	addrsStr := make([]string, endInt+endExt)
+	addrsExt, err := w.Manager.AddressesDerivedFromDbAcct(0, endExt,
+		account, waddrmgr.ExternalBranch)
+	if err != nil {
+		return nil, err
+	}
+	for i := range addrsExt {
+		addrsStr[i] = addrsExt[i].EncodeAddress()
+	}
+	addrsInt, err := w.Manager.AddressesDerivedFromDbAcct(0, endInt,
+		account, waddrmgr.InternalBranch)
+	if err != nil {
+		return nil, err
+	}
+	for i := range addrsInt {
+		addrsStr[i+int(endExt)] = addrsInt[i].EncodeAddress()
+	}
+
+	return addrsStr, nil
 }
 
 // GetBalance handles a getbalance request by returning the balance for an
@@ -973,17 +1099,9 @@ func GetNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, err
 	}
 
-	var addr dcrutil.Address
-	if acctName == "default" {
-		addr, err = w.GetNewAddressExternal()
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		addr, err = w.NewAddress(account)
-		if err != nil {
-			return nil, err
-		}
+	addr, err := w.NewAddress(account, waddrmgr.ExternalBranch)
+	if err != nil {
+		return nil, err
 	}
 
 	if *cmd.Verbose {
@@ -1031,13 +1149,7 @@ func GetRawChangeAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error
 	}
 
 	// Use the address pool for the default or imported accounts.
-	var addr dcrutil.Address
-	if account == waddrmgr.DefaultAccountNum ||
-		account == waddrmgr.ImportedAddrAccount {
-		addr, err = w.GetNewAddressInternal()
-	} else {
-		addr, err = w.NewChangeAddress(account)
-	}
+	addr, err := w.NewAddress(account, waddrmgr.InternalBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -1091,7 +1203,20 @@ func GetBalanceToMaintain(icmd interface{}, w *wallet.Wallet) (interface{}, erro
 // GetMasterPubkey handles a getmasterpubkey request by returning the wallet
 // master pubkey encoded as a string.
 func GetMasterPubkey(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	pkString, err := w.Manager.GetMasterPubkey()
+	cmd := icmd.(*dcrjson.GetMasterPubkeyCmd)
+
+	// If no account is passed, we provide the extended public key
+	// for the default account number.
+	account := uint32(waddrmgr.DefaultAccountNum)
+	if cmd.Account != nil {
+		var err error
+		account, err = w.Manager.LookupAccount(*cmd.Account)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	pkString, err := w.Manager.GetMasterPubkey(account)
 	if err != nil {
 		return nil, err
 	}
@@ -2294,7 +2419,7 @@ func RedeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 		addr, err = decodeAddress(*cmd.Address, w.ChainParams())
 	} else {
 		account := uint32(waddrmgr.DefaultAccountNum)
-		addr, err = w.NewAddress(account)
+		addr, err = w.NewAddress(account, waddrmgr.InternalBranch)
 		if err != nil {
 			return nil, err
 		}
@@ -2740,19 +2865,6 @@ func SendToSStx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient
 			return nil, err
 		}
 	}
-	// TODO Why is this here? Can we remove it? cj
-	/*
-		var ok bool
-		createdTx.msgtx, ok, err = chainClient.SignRawTransaction(createdTx.msgtx)
-		if err != nil {
-			log.Errorf("Error signing tx: %v", err)
-			return nil, err
-		}
-		if !ok {
-			log.Errorf("Not all inputs have been signed for sstx")
-			return nil, err
-		}
-	*/
 
 	txSha, err := chainClient.SendRawTransaction(createdTx.MsgTx, false)
 	if err != nil {
@@ -3540,6 +3652,37 @@ func VerifyMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	default:
 		return nil, errors.New("address type not supported")
 	}
+}
+
+// WalletInfo gets the current information about the wallet. If the daemon
+// is connected and fails to ping, the function will still return that the
+// daemon is disconnected.
+func WalletInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+	connected := !(chainClient.Disconnected())
+	if connected {
+		err := chainClient.Ping()
+		if err != nil {
+			log.Warnf("Ping failed on connected daemon client: %s", err.Error())
+			connected = false
+		}
+	}
+
+	unlocked := !(w.Locked())
+	fi := w.RelayFee()
+	tfi := w.TicketFeeIncrement()
+	tmp := w.GetTicketMaxPrice()
+	btm := w.BalanceToMaintain()
+	sm := w.Generate()
+
+	return &dcrjson.WalletInfoResult{
+		DaemonConnected:   connected,
+		Unlocked:          unlocked,
+		TxFee:             fi.ToCoin(),
+		TicketFee:         tfi.ToCoin(),
+		TicketMaxPrice:    tmp.ToCoin(),
+		BalanceToMaintain: btm.ToCoin(),
+		StakeMining:       sm,
+	}, nil
 }
 
 // WalletIsLocked handles the walletislocked extension request by
