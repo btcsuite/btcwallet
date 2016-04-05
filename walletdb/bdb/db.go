@@ -290,6 +290,7 @@ func (ns *namespace) Begin(writable bool) (walletdb.Tx, error) {
 
 	bucket := boltTx.Bucket(ns.key)
 	if bucket == nil {
+		boltTx.Rollback()
 		return nil, walletdb.ErrBucketNotFound
 	}
 
