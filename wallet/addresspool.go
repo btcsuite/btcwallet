@@ -163,7 +163,7 @@ func (a *addressPool) initialize(account uint32, branch uint32, index uint32,
 // finish or rollback must be called after.
 func (a *addressPool) getNewAddress() (dcrutil.Address, error) {
 	if !a.started {
-		return nil, fmt.Errorf("failed to GetNewAddress; pool not started")
+		return nil, fmt.Errorf("failed to getNewAddress; pool not started")
 	}
 
 	chainClient, err := a.wallet.requireChainClient()
@@ -266,7 +266,7 @@ func (a *addressPool) BatchFinish() {
 }
 
 // BatchRollback must be run after every unsuccessful series of usages
-// of GetNewAddress to restore the cursor to the original position in
+// of getNewAddress to restore the cursor to the original position in
 // the slice, thus marking all addresses unused again.
 func (a *addressPool) BatchRollback() {
 	a.index -= uint32(a.cursor)
@@ -380,7 +380,7 @@ func (w *Wallet) AddressPoolIndex(account uint32, branch uint32) (uint32, error)
 }
 
 // SyncAddressPoolIndex synchronizes an account's branch to the given address
-// by iteratively calling GetNewAddress on the respective address pool.
+// by iteratively calling getNewAddress on the respective address pool.
 func (w *Wallet) SyncAddressPoolIndex(account uint32, branch uint32,
 	index uint32) error {
 	// Sanity checks.
@@ -410,7 +410,7 @@ func (w *Wallet) SyncAddressPoolIndex(account uint32, branch uint32,
 		return nil
 	}
 
-	// Synchronize our address pool by calling GetNewAddress
+	// Synchronize our address pool by calling getNewAddress
 	// iteratively until the next to use index is synced to
 	// where we need it.
 	toFetch := index - addrPool.index
