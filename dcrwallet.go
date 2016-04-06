@@ -170,6 +170,11 @@ func walletMain() error {
 func startPromptPass(w *wallet.Wallet) {
 	promptPass := cfg.PromptPass
 
+	// Watching only wallets never require a password.
+	if w.Manager.WatchingOnly() {
+		return
+	}
+
 	// The wallet is totally desynced, so we need to resync accounts.
 	// Prompt for the password. Then, set the flag it wallet so it
 	// knows which address functions to call when resyncing.
