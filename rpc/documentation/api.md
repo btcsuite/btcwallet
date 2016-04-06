@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 1.0.0
+Version: 1.1.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -963,6 +963,10 @@ transaction was seen.
   field.
 
   **Nested message:** `Output`
+
+  - `uint32 index`: The transaction output index of the output being reported.
+
+  - `int64 amount`: The output value.
 
   - `bool mine`: Whether the output is controlled by the wallet.
 

@@ -43,9 +43,9 @@ import (
 
 // Public API version constants
 const (
-	semverString = "1.0.0"
+	semverString = "1.1.0"
 	semverMajor  = 1
-	semverMinor  = 0
+	semverMinor  = 1
 	semverPatch  = 0
 )
 
@@ -578,6 +578,8 @@ func marshalTransactionOutputs(v []wallet.TransactionSummaryOutput) []*pb.Transa
 		}
 
 		outputs[i] = &pb.TransactionDetails_Output{
+			Index:     output.Index,
+			Amount:    int64(output.Amount),
 			Mine:      output.Mine,
 			Account:   output.Account,
 			Internal:  output.Internal,
