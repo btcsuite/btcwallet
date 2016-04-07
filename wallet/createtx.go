@@ -368,25 +368,37 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		}
 		pool = w.addrPools[account].internal
 	}
+	changeAddrUsed := false
 	txSucceeded := false
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
 	defer func() {
-		if txSucceeded {
+		if txSucceeded && changeAddrUsed {
 			pool.BatchFinish()
 		} else {
 			pool.BatchRollback()
 		}
 	}()
 
-	inputSource := w.TxStore.MakeInputSource(account, minconf, bs.Height)
+	// The change address is pulled here rather than after
+	// MakeInputSource is called because MakeInputSource
+	// accesses the database in a way that deadlocks other
+	// packages that also access the database like waddmgr.
+	// Because the address pool occasionally makes calls
+	// to the address manager to replenish the address pool,
+	// calling the address function after MakeInputSource
+	// and before inputSource.CloseTransaction() will
+	// sometimes cause a lockup.
+	changeAddr, err := pool.getNewAddress()
+	if err != nil {
+		return nil, err
+	}
 	changeSource := func() ([]byte, error) {
-		changeAddr, err := pool.getNewAddress()
-		if err != nil {
-			return nil, err
-		}
+		changeAddrUsed = true
 		return txscript.PayToAddrScript(changeAddr)
 	}
+
+	inputSource := w.TxStore.MakeInputSource(account, minconf, bs.Height)
 	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
 		inputSource.SelectInputs, changeSource)
 	closeErr := inputSource.CloseTransaction()
