@@ -1761,7 +1761,7 @@ func GetTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 
 // GetWalletFee returns the currently set tx fee for the requested wallet
 func GetWalletFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	return w.RelayFee(), nil
+	return w.RelayFee().ToCoin(), nil
 }
 
 // These generators create the following global variables in this package:
