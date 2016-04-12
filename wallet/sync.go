@@ -475,10 +475,16 @@ func (w *Wallet) rescanActiveAddresses() error {
 				_, err := w.Manager.SyncAccountToAddrIndex(acct,
 					addressPoolBuffer, branch)
 				if err != nil {
-					return fmt.Errorf("failed to create initial waddrmgr "+
-						"address buffer for the address pool, "+
-						"account %v, branch %v: %s", acct, branch,
-						err.Error())
+					// A ErrSyncToIndex error indicates that we're already
+					// synced to beyond the end of the account in the
+					// waddrmgr.
+					errWaddrmgr, ok := err.(waddrmgr.ManagerError)
+					if !ok || errWaddrmgr.ErrorCode != waddrmgr.ErrSyncToIndex {
+						return fmt.Errorf("failed to create initial waddrmgr "+
+							"address buffer for the address pool, "+
+							"account %v, branch %v: %s", acct, branch,
+							err.Error())
+					}
 				}
 			}
 
