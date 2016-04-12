@@ -123,7 +123,7 @@ func (a *addressPool) initialize(account uint32, branch uint32, index uint32,
 	if mgrIdx == index {
 		a.addresses = make([]string, 0)
 	} else {
-		fetchNum := mgrIdx - index
+		fetchNum := mgrIdx - index + 1
 		a.addresses = make([]string, fetchNum)
 		for i := uint32(0); i < fetchNum; i++ {
 			addr, err := w.Manager.AddressDerivedFromDbAcct(index+i, account,
