@@ -40,7 +40,7 @@ func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 		for currentTotal < target && len(eligible) != 0 {
 			nextCredit := &eligible[0]
 			eligible = eligible[1:]
-			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil)
+			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil, nil)
 			currentTotal += nextCredit.Amount
 			currentInputs = append(currentInputs, nextInput)
 			currentScripts = append(currentScripts, nextCredit.PkScript)
@@ -224,7 +224,7 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32, bs *waddrmgr
 func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte) error {
 	for i, prevScript := range prevScripts {
 		vm, err := txscript.NewEngine(prevScript, tx, i,
-			txscript.StandardVerifyFlags, nil)
+			txscript.StandardVerifyFlags, nil, nil, 0)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
