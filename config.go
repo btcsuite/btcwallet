@@ -33,14 +33,12 @@ const (
 )
 
 var (
-	btcdHomeDir        = btcutil.AppDataDir("btcd", false)
-	btcwalletHomeDir   = btcutil.AppDataDir("btcwallet", false)
-	btcdHomedirCAFile  = filepath.Join(btcdHomeDir, "rpc.cert")
-	defaultConfigFile  = filepath.Join(btcwalletHomeDir, defaultConfigFilename)
-	defaultDataDir     = btcwalletHomeDir
-	defaultRPCKeyFile  = filepath.Join(btcwalletHomeDir, "rpc.key")
-	defaultRPCCertFile = filepath.Join(btcwalletHomeDir, "rpc.cert")
-	defaultLogDir      = filepath.Join(btcwalletHomeDir, defaultLogDirname)
+	btcdDefaultCAFile  = filepath.Join(btcutil.AppDataDir("btcd", false), "rpc.cert")
+	defaultAppDataDir  = btcutil.AppDataDir("btcwallet", false)
+	defaultConfigFile  = filepath.Join(defaultAppDataDir, defaultConfigFilename)
+	defaultRPCKeyFile  = filepath.Join(defaultAppDataDir, "rpc.key")
+	defaultRPCCertFile = filepath.Join(defaultAppDataDir, "rpc.cert")
+	defaultLogDir      = filepath.Join(defaultAppDataDir, defaultLogDirname)
 )
 
 type config struct {
@@ -49,7 +47,7 @@ type config struct {
 	ShowVersion   bool   `short:"V" long:"version" description:"Display version information and exit"`
 	Create        bool   `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp    bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	DataDir       string `short:"b" long:"datadir" description:"Directory to store wallets and transactions"`
+	AppDataDir    string `short:"A" long:"appdata" description:"Application data directory to save wallet database and logs"`
 	TestNet3      bool   `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
 	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	NoInitialLoad bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
@@ -93,6 +91,9 @@ type config struct {
 	// These options will change (and require changes to config files, etc.)
 	// when the new gRPC server is enabled.
 	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
+
+	// Deprecated options
+	DataDir string `short:"D" long:"datadir" default-mask:"-" description:"DEPRECATED -- use appdata instead"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
@@ -100,7 +101,7 @@ type config struct {
 func cleanAndExpandPath(path string) string {
 	// Expand initial ~ to OS specific home directory.
 	if strings.HasPrefix(path, "~") {
-		homeDir := filepath.Dir(btcwalletHomeDir)
+		homeDir := filepath.Dir(defaultAppDataDir)
 		path = strings.Replace(path, "~", homeDir, 1)
 	}
 
@@ -211,13 +212,14 @@ func loadConfig() (*config, []string, error) {
 	cfg := config{
 		DebugLevel:             defaultLogLevel,
 		ConfigFile:             defaultConfigFile,
-		DataDir:                defaultDataDir,
+		AppDataDir:             defaultAppDataDir,
 		LogDir:                 defaultLogDir,
 		WalletPass:             wallet.InsecurePubPassphrase,
 		RPCKey:                 defaultRPCKeyFile,
 		RPCCert:                defaultRPCCertFile,
 		LegacyRPCMaxClients:    defaultRPCMaxClients,
 		LegacyRPCMaxWebsockets: defaultRPCMaxWebsockets,
+		DataDir:                defaultAppDataDir,
 	}
 
 	// A config file in the current directory takes precedence.
@@ -281,15 +283,25 @@ func loadConfig() (*config, []string, error) {
 		log.Warnf("%v", configFileError)
 	}
 
+	// Check deprecated aliases.  The new options receive priority when both
+	// are changed from the default.
+	if cfg.DataDir != defaultAppDataDir {
+		fmt.Fprintln(os.Stderr, "datadir option has been replaced by "+
+			"appdata -- please update your config")
+		if cfg.AppDataDir == defaultAppDataDir {
+			cfg.AppDataDir = cfg.DataDir
+		}
+	}
+
 	// If an alternate data directory was specified, and paths with defaults
 	// relative to the data dir are unchanged, modify each path to be
 	// relative to the new data dir.
-	if cfg.DataDir != defaultDataDir {
+	if cfg.AppDataDir != defaultAppDataDir {
 		if cfg.RPCKey == defaultRPCKeyFile {
-			cfg.RPCKey = filepath.Join(cfg.DataDir, "rpc.key")
+			cfg.RPCKey = filepath.Join(cfg.AppDataDir, "rpc.key")
 		}
 		if cfg.RPCCert == defaultRPCCertFile {
-			cfg.RPCCert = filepath.Join(cfg.DataDir, "rpc.cert")
+			cfg.RPCCert = filepath.Join(cfg.AppDataDir, "rpc.cert")
 		}
 	}
 
@@ -338,7 +350,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Exit if you try to use a simulation wallet with a standard
 	// data directory.
-	if cfg.DataDir == defaultDataDir && cfg.CreateTemp {
+	if cfg.AppDataDir == defaultAppDataDir && cfg.CreateTemp {
 		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
 			"wallet, but failed to specify data directory!")
 		os.Exit(0)
@@ -353,7 +365,7 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Ensure the wallet exists or create it when the create flag is set.
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	dbPath := filepath.Join(netDir, walletDbName)
 
 	if cfg.CreateTemp && cfg.Create {
@@ -469,7 +481,7 @@ func loadConfig() (*config, []string, error) {
 	} else {
 		// If CAFile is unset, choose either the copy or local btcd cert.
 		if cfg.CAFile == "" {
-			cfg.CAFile = filepath.Join(cfg.DataDir, defaultCAFilename)
+			cfg.CAFile = filepath.Join(cfg.AppDataDir, defaultCAFilename)
 
 			// If the CA copy does not exist, check if we're connecting to
 			// a local btcd and switch to its RPC cert if it exists.
@@ -481,13 +493,13 @@ func loadConfig() (*config, []string, error) {
 			if !certExists {
 				if _, ok := localhostListeners[RPCHost]; ok {
 					btcdCertExists, err := cfgutil.FileExists(
-						btcdHomedirCAFile)
+						btcdDefaultCAFile)
 					if err != nil {
 						fmt.Fprintln(os.Stderr, err)
 						return nil, nil, err
 					}
 					if btcdCertExists {
-						cfg.CAFile = btcdHomedirCAFile
+						cfg.CAFile = btcdDefaultCAFile
 					}
 				}
 			}

@@ -99,13 +99,13 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 // and generates the wallet accordingly.  The new wallet will reside at the
 // provided path.
 func createWallet(cfg *config) error {
-	dbDir := networkDir(cfg.DataDir, activeNet.Params)
+	dbDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	loader := wallet.NewLoader(activeNet.Params, dbDir)
 
 	// When there is a legacy keystore, open it now to ensure any errors
 	// don't end up exiting the process after the user has spent time
 	// entering a bunch of information.
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	keystorePath := filepath.Join(netDir, keystore.Filename)
 	var legacyKeyStore *keystore.Store
 	_, err := os.Stat(keystorePath)
@@ -207,7 +207,7 @@ func createSimulationWallet(cfg *config) error {
 	// Public passphrase is the default.
 	pubPass := []byte(wallet.InsecurePubPassphrase)
 
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
 
 	// Create the wallet.
 	dbPath := filepath.Join(netDir, walletDbName)
