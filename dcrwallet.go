@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -184,10 +185,13 @@ func startPromptPass(w *wallet.Wallet) {
 	}
 	if promptPass {
 		w.SetResyncAccounts(true)
-		log.Infof("Please enter the private wallet passphrase. " +
-			"This will complete syncing of the wallet accounts " +
-			"and then leave your wallet unlocked. You may relock " +
-			"wallet after by calling 'walletlock' through the RPC.")
+		backendLog.Flush()
+		fmt.Println("*** ATTENTION ***")
+		fmt.Println("Since this is your first time running we need to sync accounts. Please enter")
+		fmt.Println("the private wallet passphrase. This will complete syncing of the wallet")
+		fmt.Println("accounts and then leave your wallet unlocked. You may relock wallet after by")
+		fmt.Println("calling 'walletlock' through the RPC.")
+		fmt.Println("*****************")
 	} else {
 		return
 	}
@@ -209,10 +213,11 @@ func startPromptPass(w *wallet.Wallet) {
 			}
 		}
 		if promptPass {
+			backendLog.Flush()
 			reader := bufio.NewReader(os.Stdin)
-			passphrase, err := prompt.PassPrompt(reader, "", false)
+			passphrase, err := prompt.PassPrompt(reader, "Enter private passphrase", false)
 			if err != nil {
-				log.Errorf("Failed to input password. Please try again.")
+				fmt.Println("Failed to input password. Please try again.")
 				continue
 			}
 			defer zero.Bytes(passphrase)
@@ -220,7 +225,7 @@ func startPromptPass(w *wallet.Wallet) {
 			var unlockAfter <-chan time.Time
 			err = w.Unlock(passphrase, unlockAfter)
 			if err != nil {
-				log.Errorf("Incorrect password entered. Please " +
+				fmt.Println("Incorrect password entered. Please " +
 					"try again.")
 				continue
 			}
