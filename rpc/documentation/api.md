@@ -1,6 +1,7 @@
 # RPC API Specification
 
 Version: 2.0.1
+=======
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
