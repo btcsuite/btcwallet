@@ -99,7 +99,9 @@ func walletMain() error {
 		TicketAddress:      cfg.TicketAddress,
 		TicketMaxPrice:     cfg.TicketMaxPrice,
 	}
-	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions, cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.PromptPass)
+	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
+		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.PromptPass,
+		cfg.AddrIdxScanLen)
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client

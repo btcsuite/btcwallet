@@ -19,11 +19,13 @@ package wallet
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 
 	"github.com/btcsuite/btclog"
 
+	"github.com/decred/bitset"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
@@ -38,7 +40,8 @@ var finalAcctScanLength = 50
 // be rescanned. This is the tolerance for account gaps as well.
 var acctSeekWidth uint32 = 5
 
-// accountIsUsed
+// accountIsUsed checks if an account has ever been used by scanning the
+// first acctSeekWidth many addresses for usage.
 func (w *Wallet) accountIsUsed(account uint32, chainClient *chain.RPCClient) bool {
 	// Search external branch then internal branch for a used
 	// address. We need to set the address function to use based
@@ -164,6 +167,50 @@ var debugAddrScanLength = 3500
 // cursor is and adding addresses in big chunks until you hit the end.
 var addrSeekWidth uint32 = 20
 
+// errDerivation is an error type signifying that the waddrmgr failed to
+// derive a key.
+var errDerivation = fmt.Errorf("failed to derive key")
+
+// scanAddressRange scans backwards from end to start many addresses in the
+// account branch, and return the first index that is found on the blockchain.
+// If the address doesn't exist, false is returned as the first argument.
+func (w *Wallet) scanAddressRange(account uint32, branch uint32, start int,
+	end int, chainClient *chain.RPCClient) (bool, int, error) {
+	addresses, err := w.Manager.AddressesDerivedFromDbAcct(uint32(start),
+		uint32(end+1), account, branch)
+	if err != nil {
+		return false, 0, errDerivation
+	}
+
+	// Whether or not the addresses exist is encoded as a binary
+	// bitset.
+	exists, err := chainClient.ExistsAddresses(addresses)
+	if err != nil {
+		return false, 0, err
+	}
+	existsB, err := hex.DecodeString(exists)
+	if err != nil {
+		return false, 0, err
+	}
+	set := bitset.Bytes(existsB)
+
+	// Scan backwards and return if we find an address exists.
+	idx := end
+	itr := len(addresses) - 1
+	for idx >= start {
+		// If the address exists in the mempool or blockchain according
+		// to the bit set returned, return this index.
+		if set.Get(itr) {
+			return true, idx, nil
+		}
+
+		itr--
+		idx--
+	}
+
+	return false, 0, nil
+}
+
 // bisectLastAddrIndex is a helper function for search through addresses.
 func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32,
 	branch uint32) int {
@@ -172,24 +219,31 @@ func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32,
 		return 0
 	}
 
+	// Logarithmically scan address indexes to find the last used
+	// address index. Each time the algorithm receives an end point,
+	// scans a chunk of addresses at the end point, and if no
+	// addresses are found, divides the address index by two and
+	// repeats until it finds the last used index.
 	offset := low
 	for i := hi - low - 1; i > 0; i /= 2 {
 		if i+offset+int(addrSeekWidth) < waddrmgr.MaxAddressesPerAccount {
-			for j := i + offset + int(addrSeekWidth); j >= i+offset; j-- {
-				addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(j),
-					account, branch)
-				// Skip erroneous keys, which happen rarely.
-				if err != nil {
-					continue
-				}
-
-				exists, err := chainClient.ExistsAddress(addr)
-				if err != nil {
-					return 0
-				}
-				if exists {
-					return i + offset
-				}
+			start := i + offset
+			end := i + offset + int(addrSeekWidth)
+			exists, idx, err := w.scanAddressRange(account, branch, start, end,
+				chainClient)
+			// Skip erroneous keys, which happen rarely. Don't skip
+			// other errors.
+			if err == errDerivation {
+				continue
+			}
+			if err != nil {
+				log.Warnf("unexpected error encountered during bisection "+
+					"scan of account %v, branch %v: %s", account, branch,
+					err.Error())
+				return 0
+			}
+			if exists {
+				return idx
 			}
 		} else {
 			addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(i+offset),
@@ -346,33 +400,27 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 		}
 	}
 
+	// If there was a last used index, do an exhaustive final scan that
+	// reexamines the last used addresses and ensures that the final index
+	// we have found is correct.
 	if lastUsed != 0 {
-		for i := lastUsed + finalAddrScanLength; i >= lastUsed; i-- {
-			addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(i),
-				account, branch)
-			// Skip erroneous keys.
-			if err != nil {
-				continue
-			}
-
-			exists, err := chainClient.ExistsAddress(addr)
-			if err != nil {
-				return 0, nil, fmt.Errorf("failed to access chain server: %v",
-					err.Error())
-			}
-
-			if exists {
-				lastUsed = i
-				break
-			}
-		}
-
-		addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(lastUsed),
-			account, branch)
+		start := lastUsed
+		end := lastUsed + finalAddrScanLength
+		exists, idx, err := w.scanAddressRange(account, branch, start, end,
+			chainClient)
 		if err != nil {
 			return 0, nil, err
 		}
-		return uint32(lastUsed), addr, nil
+
+		if exists {
+			lastUsed = idx
+			addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(lastUsed),
+				account, branch)
+			if err != nil {
+				return 0, nil, err
+			}
+			return uint32(lastUsed), addr, nil
+		}
 	}
 
 	// In the case that 0 was returned as the last used address,

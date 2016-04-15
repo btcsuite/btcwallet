@@ -49,10 +49,11 @@ type Loader struct {
 	db          walletdb.DB
 	mu          sync.Mutex
 
-	stakeOptions  *StakeOptions
-	autoRepair    bool
-	unsafeMainNet bool
-	promptPass    bool
+	stakeOptions   *StakeOptions
+	autoRepair     bool
+	unsafeMainNet  bool
+	promptPass     bool
+	addrIdxScanLen int
 }
 
 // StakeOptions contains the various options necessary for stake mining.
@@ -70,13 +71,17 @@ type StakeOptions struct {
 }
 
 // NewLoader constructs a Loader.
-func NewLoader(chainParams *chaincfg.Params, dbDirPath string, stakeOptions *StakeOptions, autoRepair bool, unsafeMainNet bool, promptPass bool) *Loader {
+func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
+	stakeOptions *StakeOptions, autoRepair bool, unsafeMainNet bool,
+	promptPass bool, addrIdxScanLen int) *Loader {
 	return &Loader{
-		chainParams:  chainParams,
-		dbDirPath:    dbDirPath,
-		stakeOptions: stakeOptions,
-		autoRepair:   autoRepair,
-		promptPass:   promptPass,
+		chainParams:    chainParams,
+		dbDirPath:      dbDirPath,
+		stakeOptions:   stakeOptions,
+		autoRepair:     autoRepair,
+		unsafeMainNet:  unsafeMainNet,
+		promptPass:     promptPass,
+		addrIdxScanLen: addrIdxScanLen,
 	}
 }
 
@@ -196,7 +201,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	w, err := Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, so.PoolAddress,
-		so.PoolFees, l.autoRepair, l.chainParams)
+		so.PoolFees, l.addrIdxScanLen, l.autoRepair, l.chainParams)
 	if err != nil {
 		return nil, err
 	}

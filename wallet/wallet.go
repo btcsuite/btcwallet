@@ -115,6 +115,7 @@ type Wallet struct {
 	// Start up flags/settings
 	automaticRepair bool
 	resyncAccounts  bool
+	addrIdxScanLen  int
 
 	chainClient        *chain.RPCClient
 	chainClientLock    sync.Mutex
@@ -180,9 +181,10 @@ type Wallet struct {
 // and transaction store.
 func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	poolAddress dcrutil.Address, pf dcrutil.Amount, autoRepair bool,
-	mgr *waddrmgr.Manager, txs *wtxmgr.Store, smgr *wstakemgr.StakeStore,
-	db *walletdb.DB, params *chaincfg.Params) *Wallet {
+	poolAddress dcrutil.Address, pf dcrutil.Amount, addrIdxScanLen int,
+	autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
+	smgr *wstakemgr.StakeStore, db *walletdb.DB,
+	params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
 	if rollbackTest {
 		rollbackBlockDB = make(map[uint32]*wtxmgr.DatabaseContents)
@@ -231,6 +233,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		TicketMaxPrice:           tmp,
 		poolAddress:              poolAddress,
 		poolFees:                 pf,
+		addrIdxScanLen:           addrIdxScanLen,
 		automaticRepair:          autoRepair,
 		resyncAccounts:           false,
 		rollbackTesting:          rollbackTest,
@@ -2761,8 +2764,9 @@ func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, para
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
-	ticketMaxPrice float64, poolAddress string, poolFees float64, autoRepair bool,
-	params *chaincfg.Params) (*Wallet, error) {
+	ticketMaxPrice float64, poolAddress string, poolFees float64,
+	addrIdxScanLen int, autoRepair bool, params *chaincfg.Params) (*Wallet,
+	error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -2851,6 +2855,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		tmp,
 		poolAddr,
 		pf,
+		addrIdxScanLen,
 		autoRepair,
 		addrMgr,
 		txMgr,
