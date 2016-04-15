@@ -56,19 +56,14 @@ message TransactionDetails {
 		int64 previous_amount = 3;
 	}
 	message Output {
-		bool mine = 3;
-
-		// These fields only relevant if mine==true.
-		uint32 account = 4;
-		bool internal = 5;
-
-		// These fields only relevant if mine==false.
-		repeated string addresses = 6; // None if non-standard.
+		uint32 index = 1;
+		uint32 account = 2;
+		bool internal = 3;
 	}
 	bytes hash = 1;
 	bytes transaction = 2;
 	repeated Input debits = 3;
-	repeated Output outputs = 4;
+	repeated Output credits = 4;
 	int64 fee = 5;
 	int64 timestamp = 6; // May be earlier than a block timestamp, but never later.
 }

@@ -43,8 +43,8 @@ import (
 
 // Public API version constants
 const (
-	semverString = "1.0.0"
-	semverMajor  = 1
+	semverString = "2.0.0"
+	semverMajor  = 2
 	semverMinor  = 0
 	semverPatch  = 0
 )
@@ -568,20 +568,10 @@ func marshalTransactionOutputs(v []wallet.TransactionSummaryOutput) []*pb.Transa
 	outputs := make([]*pb.TransactionDetails_Output, len(v))
 	for i := range v {
 		output := &v[i]
-
-		var addresses []string
-		if len(output.Addresses) != 0 {
-			addresses = make([]string, 0, len(output.Addresses))
-			for _, a := range output.Addresses {
-				addresses = append(addresses, a.EncodeAddress())
-			}
-		}
-
 		outputs[i] = &pb.TransactionDetails_Output{
-			Mine:      output.Mine,
-			Account:   output.Account,
-			Internal:  output.Internal,
-			Addresses: addresses,
+			Index:    output.Index,
+			Account:  output.Account,
+			Internal: output.Internal,
 		}
 	}
 	return outputs
@@ -595,7 +585,7 @@ func marshalTransactionDetails(v []wallet.TransactionSummary) []*pb.TransactionD
 			Hash:        tx.Hash[:],
 			Transaction: tx.Transaction,
 			Debits:      marshalTransactionInputs(tx.MyInputs),
-			Outputs:     marshalTransactionOutputs(tx.Outputs),
+			Credits:     marshalTransactionOutputs(tx.MyOutputs),
 			Fee:         int64(tx.Fee),
 			Timestamp:   tx.Timestamp,
 		}
