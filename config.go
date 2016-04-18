@@ -283,7 +283,8 @@ func loadConfig() (*config, []string, error) {
 	// Load additional config from file.
 	var configFileError error
 	parser := flags.NewParser(&cfg, flags.Default)
-	err = flags.NewIniParser(parser).ParseFile(preCfg.ConfigFile)
+	configFilePath := cleanAndExpandPath(preCfg.ConfigFile)
+	err = flags.NewIniParser(parser).ParseFile(configFilePath)
 	if err != nil {
 		if _, ok := err.(*os.PathError); !ok {
 			fmt.Fprintln(os.Stderr, err)
@@ -323,6 +324,7 @@ func loadConfig() (*config, []string, error) {
 	// relative to the data dir are unchanged, modify each path to be
 	// relative to the new data dir.
 	if cfg.AppDataDir != defaultAppDataDir {
+		cfg.AppDataDir = cleanAndExpandPath(cfg.AppDataDir)
 		if cfg.RPCKey == defaultRPCKeyFile {
 			cfg.RPCKey = filepath.Join(cfg.AppDataDir, "rpc.key")
 		}
@@ -613,6 +615,8 @@ func loadConfig() (*config, []string, error) {
 
 	// Expand environment variable and leading ~ for filepaths.
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
+	cfg.RPCCert = cleanAndExpandPath(cfg.RPCCert)
+	cfg.RPCKey = cleanAndExpandPath(cfg.RPCKey)
 
 	// If the btcd username or password are unset, use the same auth as for
 	// the client.  The two settings were previously shared for btcd and
