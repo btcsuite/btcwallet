@@ -107,7 +107,8 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, relayFeePerKb btcutil.Amount,
 		}
 		changeIndex := -1
 		changeAmount := inputAmount - targetAmount - maxRequiredFee
-		if !txrules.IsDustAmount(changeAmount, txsizes.P2PKHPkScriptSize, relayFeePerKb) {
+		if changeAmount != 0 && !txrules.IsDustAmount(changeAmount,
+			txsizes.P2PKHPkScriptSize, relayFeePerKb) {
 			changeScript, err := fetchChange()
 			if err != nil {
 				return nil, err
