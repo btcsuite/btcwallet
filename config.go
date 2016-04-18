@@ -222,21 +222,11 @@ func loadConfig() (*config, []string, error) {
 		DataDir:                defaultAppDataDir,
 	}
 
-	// A config file in the current directory takes precedence.
-	exists, err := cfgutil.FileExists(defaultConfigFilename)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
-	}
-	if exists {
-		cfg.ConfigFile = defaultConfigFile
-	}
-
 	// Pre-parse the command line options to see if an alternative config
 	// file or the version flag was specified.
 	preCfg := cfg
 	preParser := flags.NewParser(&preCfg, flags.Default)
-	_, err = preParser.Parse()
+	_, err := preParser.Parse()
 	if err != nil {
 		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
 			preParser.WriteHelp(os.Stderr)
