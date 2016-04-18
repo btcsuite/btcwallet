@@ -84,6 +84,8 @@ type config struct {
 	PruneTickets      bool    `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
 	TicketAddress     string  `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
 	TicketMaxPrice    float64 `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
+	PoolAddress       string  `long:"pooladdress" description:"The ticket pool address where ticket fees will go to"`
+	PoolFees          float64 `long:"poolfees" description:"The per-ticket fee mandated by the ticket pool, in coins"`
 
 	// RPC client options
 	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:18556)"`
@@ -496,6 +498,17 @@ func loadConfig() (*config, []string, error) {
 		if err != nil {
 			str := "%s: ticketaddress '%s' failed to decode: %v"
 			err := fmt.Errorf(str, funcName, cfg.TicketAddress, err)
+			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, usageMessage)
+			return loadConfigError(err)
+		}
+	}
+
+	if len(cfg.PoolAddress) != 0 {
+		_, err := dcrutil.DecodeAddress(cfg.PoolAddress, activeNet.Params)
+		if err != nil {
+			str := "%s: pooladdress '%s' failed to decode: %v"
+			err := fmt.Errorf(str, funcName, cfg.PoolAddress, err)
 			fmt.Fprintln(os.Stderr, err)
 			fmt.Fprintln(os.Stderr, usageMessage)
 			return loadConfigError(err)

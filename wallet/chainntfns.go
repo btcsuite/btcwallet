@@ -14,7 +14,14 @@ import (
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/wallet/txauthor"
 	"github.com/decred/dcrwallet/wtxmgr"
+)
+
+const (
+	// ticketPurchaseAttemptsPerBlock is the default number of ticket
+	// purchase attempts per block.
+	ticketPurchaseAttemptsPerBlock = 10
 )
 
 func (w *Wallet) handleChainNotifications() {
@@ -73,10 +80,11 @@ func (w *Wallet) handleTicketPurchases() {
 	purchased := 0
 	attempts := 0
 	maxTickets := int(w.chainParams.MaxFreshStakePerBlock)
-	maxAttempts := 20 // Sane-ish?
 
 	sdiff := dcrutil.Amount(w.GetStakeDifficulty().StakeDifficulty)
 	maxToPay := w.GetTicketMaxPrice()
+	minBalance := w.BalanceToMaintain()
+
 	if sdiff > maxToPay {
 		return
 	}
@@ -87,49 +95,32 @@ ticketPurchaseLoop:
 			break
 		}
 
-		if attempts >= maxAttempts {
+		if attempts >= ticketPurchaseAttemptsPerBlock {
 			break
 		}
 
-		// eligible may also be the tx hash as a string; however, for the
-		// too many inputs error, the list of eligible Credits from
-		// wtxmgr is instead returned. We can use this to compress the
-		// amount to the ticket price, thus avoiding more costly db
-		// lookups.
-		eligible, err := w.CreatePurchaseTicket(w.BalanceToMaintain(), -1,
-			0, nil, waddrmgr.DefaultAccountNum)
+		_, err := w.CreatePurchaseTicket(minBalance,
+			maxToPay,
+			0, // No minconf
+			w.TicketAddress(),
+			waddrmgr.DefaultAccountNum,
+			1, // One ticket at a time
+			w.PoolAddress(),
+			w.PoolFees(),
+			0) // No expiry
 		if err != nil {
+			_, insufficientFunds := err.(txauthor.InsufficientFundsError)
 			switch {
-			case err == ErrSStxNotEnoughFunds:
+			case insufficientFunds:
 				break ticketPurchaseLoop
-			case err == ErrSStxInputOverflow:
-				switch v := eligible.(type) {
-				case string:
-					log.Errorf("Was given a string instead of eligible credits!")
-					continue
-				case []wtxmgr.Credit:
-					err := w.compressEligible(v)
-					if err != nil {
-						log.Errorf("Failed to compress outputs: %v", err.Error())
-					}
-					attempts++
-					continue
-				}
 			case waddrmgr.IsError(err, waddrmgr.ErrLocked):
 				log.Warnf("Ticket purchase for stake mining is enabled, " +
 					"but tickets could not be purchased because the " +
 					"wallet is currently locked!")
 				break ticketPurchaseLoop
 			case err == ErrTicketPriceNotSet:
-				// TODO make this trigger a request to the daemon
-				// through chainsvr to get the latest ticket price.
-				// The current behaviour simply waits for a block
-				// to be connected to get the stake difficulty.
-				// Probably need a retrigger for the ntfn like
-				// "rebroadcaststakediff"
-				log.Warnf("Ticket prices not yet established because the " +
-					"client was recently connected; aborting ticket purchase " +
-					"attempts")
+				log.Warnf("Tickets could not be purchased because the " +
+					"ticket price could not be established")
 				break ticketPurchaseLoop
 			case err == ErrClientPurchaseTicket:
 				log.Warnf("A chainSvr error was returned attempting to " +

@@ -589,6 +589,10 @@ var helpDescsEnUS = map[string]string{
 	"purchaseticket-fromaccount":   "The account to use for purchase (default=\"default\")",
 	"purchaseticket-minconf":       "Minimum number of block confirmations required",
 	"purchaseticket-ticketaddress": "Override the ticket address to which voting rights are given",
+	"purchaseticket-numtickets":    "The number of tickets to purchase",
+	"purchaseticket-pooladdress":   "The address to pay stake pool fees to",
+	"purchaseticket-poolfees":      "The amount of fees to pay to the stake pool",
+	"purchaseticket-expiry":        "Height at which the purchase tickets expire",
 	"purchaseticket-comment":       "Unused",
 
 	// SendToSSRtxCmd help.

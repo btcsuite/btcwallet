@@ -25,7 +25,8 @@ import (
 // can not be satisified, this can be signaled by returning a total amount less
 // than the target or by returning a more detailed error implementing
 // InputSourceError.
-type InputSource func(target dcrutil.Amount) (total dcrutil.Amount, inputs []*wire.TxIn, scripts [][]byte, err error)
+type InputSource func(target dcrutil.Amount) (total dcrutil.Amount,
+	inputs []*wire.TxIn, scripts [][]byte, err error)
 
 // InputSourceError describes the failure to provide enough input value from
 // unspent transaction outputs to meet a target amount.  A typed error is used
@@ -37,11 +38,15 @@ type InputSourceError interface {
 	InputSourceError()
 }
 
-// Default implementation of InputSourceError.
-type insufficientFundsError struct{}
+// InsufficientFundsError is the default implementation of InputSourceError.
+type InsufficientFundsError struct{}
 
-func (insufficientFundsError) InputSourceError() {}
-func (insufficientFundsError) Error() string {
+// InputSourceError generates the InputSourceError interface for an
+// InsufficientFundsError.
+func (InsufficientFundsError) InputSourceError() {}
+
+// Error satistifies the error interface.
+func (InsufficientFundsError) Error() string {
 	return "insufficient funds available to construct transaction"
 }
 
@@ -90,7 +95,7 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, relayFeePerKb dcrutil.Amount,
 			return nil, err
 		}
 		if inputAmount < targetAmount+targetFee {
-			return nil, insufficientFundsError{}
+			return nil, InsufficientFundsError{}
 		}
 
 		maxSignedSize := txsizes.EstimateSerializeSize(len(inputs), outputs, true)
@@ -110,7 +115,8 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, relayFeePerKb dcrutil.Amount,
 		}
 		changeIndex := -1
 		changeAmount := inputAmount - targetAmount - maxRequiredFee
-		if !txrules.IsDustAmount(changeAmount, txsizes.P2PKHPkScriptSize, relayFeePerKb) {
+		if !txrules.IsDustAmount(changeAmount, txsizes.P2PKHPkScriptSize,
+			relayFeePerKb) {
 			changeScript, err := fetchChange()
 			if err != nil {
 				return nil, err
@@ -171,7 +177,8 @@ type SecretsSource interface {
 // are passed in prevPkScripts and the slice length must match the number of
 // inputs.  Private keys and redeem scripts are looked up using a SecretsSource
 // based on the previous output script.
-func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte, secrets SecretsSource) error {
+func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte,
+	secrets SecretsSource) error {
 	inputs := tx.TxIn
 	chainParams := secrets.ChainParams()
 

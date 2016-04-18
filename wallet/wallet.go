@@ -109,6 +109,8 @@ type Wallet struct {
 	CurrentVotingInfo  *VotingInfo
 	TicketMaxPrice     dcrutil.Amount
 	balanceToMaintain  dcrutil.Amount
+	poolAddress        dcrutil.Address
+	poolFees           dcrutil.Amount
 
 	// Start up flags/settings
 	automaticRepair bool
@@ -178,8 +180,9 @@ type Wallet struct {
 // and transaction store.
 func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
-	smgr *wstakemgr.StakeStore, db *walletdb.DB, params *chaincfg.Params) *Wallet {
+	poolAddress dcrutil.Address, pf dcrutil.Amount, autoRepair bool,
+	mgr *waddrmgr.Manager, txs *wtxmgr.Store, smgr *wstakemgr.StakeStore,
+	db *walletdb.DB, params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
 	if rollbackTest {
 		rollbackBlockDB = make(map[uint32]*wtxmgr.DatabaseContents)
@@ -226,6 +229,8 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		addressReuse:             addressReuse,
 		ticketAddress:            ticketAddress,
 		TicketMaxPrice:           tmp,
+		poolAddress:              poolAddress,
+		poolFees:                 pf,
 		automaticRepair:          autoRepair,
 		resyncAccounts:           false,
 		rollbackTesting:          rollbackTest,
@@ -371,6 +376,22 @@ func (w *Wallet) SetTicketMaxPrice(amt dcrutil.Amount) {
 	defer w.stakeSettingsLock.Unlock()
 
 	w.TicketMaxPrice = amt
+}
+
+// TicketAddress gets the ticket address for the wallet to give the ticket
+// voting rights to.
+func (w *Wallet) TicketAddress() dcrutil.Address {
+	return w.ticketAddress
+}
+
+// PoolAddress gets the pool address for the wallet to give ticket fees to.
+func (w *Wallet) PoolAddress() dcrutil.Address {
+	return w.poolAddress
+}
+
+// PoolFees gets the per-ticket pool fee for the wallet.
+func (w *Wallet) PoolFees() dcrutil.Amount {
+	return w.poolFees
 }
 
 // SetResyncAccounts sets whether or not the user needs to sync accounts,
@@ -834,12 +855,16 @@ type (
 		resp       chan createSSRtxResponse
 	}
 	purchaseTicketRequest struct {
-		minBalance dcrutil.Amount
-		spendLimit dcrutil.Amount
-		minConf    int32
-		ticketAddr dcrutil.Address
-		account    uint32
-		resp       chan purchaseTicketResponse
+		minBalance  dcrutil.Amount
+		spendLimit  dcrutil.Amount
+		minConf     int32
+		ticketAddr  dcrutil.Address
+		account     uint32
+		numTickets  int
+		poolAddress dcrutil.Address
+		poolFees    dcrutil.Amount
+		expiry      int32
+		resp        chan purchaseTicketResponse
 	}
 
 	consolidateResponse struct {
@@ -894,7 +919,7 @@ out:
 			txr.resp <- consolidateResponse{txh, err}
 
 		case txr := <-w.createTxRequests:
-			tx, err := w.txToOutputs(txr.outputs, txr.account, txr.minconf)
+			tx, err := w.txToOutputs(txr.outputs, txr.account, txr.minconf, true)
 			txr.resp <- createTxResponse{tx, err}
 
 		case txr := <-w.createMultisigTxRequests:
@@ -1055,16 +1080,21 @@ func (w *Wallet) CreateSSRtx(ticketHash chainhash.Hash) (*CreatedTx, error) {
 // CreatePurchaseTicket receives a request from the RPC and ships it to txCreator
 // to purchase a new ticket.
 func (w *Wallet) CreatePurchaseTicket(minBalance, spendLimit dcrutil.Amount,
-	minConf int32, ticketAddr dcrutil.Address, account uint32) (interface{},
-	error) {
+	minConf int32, ticketAddr dcrutil.Address, account uint32,
+	numTickets int, poolAddress dcrutil.Address,
+	poolFees dcrutil.Amount, expiry int32) (interface{}, error) {
 
 	req := purchaseTicketRequest{
-		minBalance: minBalance,
-		spendLimit: spendLimit,
-		minConf:    minConf,
-		ticketAddr: ticketAddr,
-		account:    account,
-		resp:       make(chan purchaseTicketResponse),
+		minBalance:  minBalance,
+		spendLimit:  spendLimit,
+		minConf:     minConf,
+		ticketAddr:  ticketAddr,
+		account:     account,
+		numTickets:  numTickets,
+		poolAddress: poolAddress,
+		poolFees:    poolFees,
+		expiry:      expiry,
+		resp:        make(chan purchaseTicketResponse),
 	}
 	w.purchaseTicketRequests <- req
 	resp := <-req.resp
@@ -2731,8 +2761,8 @@ func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, para
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
-	ticketMaxPrice float64, autoRepair bool, params *chaincfg.Params) (*Wallet,
-	error) {
+	ticketMaxPrice float64, poolAddress string, poolFees float64, autoRepair bool,
+	params *chaincfg.Params) (*Wallet, error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -2796,6 +2826,20 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		return nil, err
 	}
 
+	var poolAddr dcrutil.Address
+	if poolAddress != "" {
+		poolAddr, err = dcrutil.DecodeAddress(poolAddress, params)
+		if err != nil {
+			return nil, fmt.Errorf("pool address could not parse: %v",
+				err.Error())
+		}
+	}
+
+	pf, err := dcrutil.NewAmount(poolFees)
+	if err != nil {
+		return nil, err
+	}
+
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
 
 	w := newWallet(voteBits,
@@ -2805,6 +2849,8 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		rollbackTest,
 		ticketAddr,
 		tmp,
+		poolAddr,
+		pf,
 		autoRepair,
 		addrMgr,
 		txMgr,
