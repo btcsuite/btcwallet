@@ -161,6 +161,16 @@ func TestNewUnsignedTransaction(t *testing.T) {
 				txsizes.EstimateSerializeSize(2, p2pkhOutputs(1e8), true)),
 			InputCount: 2,
 		},
+
+		// Test that zero change outputs are not included
+		// (ChangeAmount=0 means don't include any change output).
+		12: {
+			UnspentOutputs: p2pkhOutputs(1e8),
+			Outputs:        p2pkhOutputs(1e8),
+			RelayFee:       0,
+			ChangeAmount:   0,
+			InputCount:     1,
+		},
 	}
 
 	changeSource := func() ([]byte, error) {
@@ -191,6 +201,11 @@ func TestNewUnsignedTransaction(t *testing.T) {
 			}
 		} else {
 			changeAmount := dcrutil.Amount(tx.Tx.TxOut[tx.ChangeIndex].Value)
+			if test.ChangeAmount == 0 {
+				t.Errorf("Test %d: Included change output with value %v but expected no change",
+					i, changeAmount)
+				continue
+			}
 			if changeAmount != test.ChangeAmount {
 				t.Errorf("Test %d: Got change amount %v, Expected %v",
 					i, changeAmount, test.ChangeAmount)
