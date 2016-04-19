@@ -66,15 +66,72 @@ https://github.com/btcsuite/btcwallet/releases
 
 ### Windows/Linux/BSD/POSIX - Build from source
 
-- If necessary, install Go according to the installation instructions
-  here: http://golang.org/doc/install.  It is recommended to add
-  `$GOPATH/bin` to your `PATH` at this point.
+Building or updating from source requires the following build dependencies:
 
-- Run the following commands to obtain and install btcd, btcwallet
-  and all dependencies:
+- **Go 1.5 or 1.6**
+
+  Installation instructions can be found here: http://golang.org/doc/install.
+  It is recommended to add `$GOPATH/bin` to your `PATH` at this point.
+
+- **Glide**
+
+  Glide is used to manage project dependencies and provide reproducible builds.
+  To install:
+
+  `go get -u github.com/Masterminds/glide`
+
+Unfortunately, the use of `glide` prevents a handy tool such as `go get` from
+automatically downloading, building, and installing the source in a single
+command.  Instead, the latest project and dependency sources must be first
+obtained manually with `git` and `glide`, and then `go` is used to build and
+install the project.
+
+**Getting the source**:
+
+For a first time installation, the project and dependency sources can be
+obtained manually with `git` and `glide` (create directories as needed):
+
 ```
-go get -u -v github.com/btcsuite/btcd/...
-go get -u -v github.com/btcsuite/btcwallet/...
+git clone https://github.com/btcsuite/btcwallet $GOPATH/src/github.com/btcsuite/btcwallet
+cd $GOPATH/src/github.com/btcsuite/btcwallet
+glide install
+```
+
+To update an existing source tree, pull the latest changes and install the
+matching dependencies:
+
+```
+cd $GOPATH/src/github.com/btcsuite/btcwallet
+git pull
+glide install
+```
+
+**Building/Installing**:
+
+The `go` tool is used to build or install (to `GOPATH`) the project.  Some
+example build instructions are provided below (all must run from the `btcwallet`
+project directory) in a `sh`-compatible shell on Unix, or PowerShell on Windows
+(`$()` subshells are not supported by `cmd`).
+
+To build and install `btcwallet` and all helper commands (in the `cmd`
+directory) to `$GOPATH/bin/`, as well as installing all compiled non-vendored
+packages to `$GOPATH/pkg/` (**use this if you are unsure which command to
+run**):
+
+```
+go install $(glide novendor)
+```
+
+To build a `btcwallet` executable and install it to `$GOPATH/bin/`:
+
+```
+go install
+```
+
+To build a `btcwallet` executable and place it in the current directory:
+
+```
+go build
 ```
 
 ## Getting Started

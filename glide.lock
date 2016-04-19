@@ -1,0 +1,74 @@
+hash: 340dfe35ff5fb371aef999130fa60b2d7c84384c0c23bed06bbfd712139a6b3e
+updated: 2016-04-19T15:13:03.285169879-04:00
+imports:
+- name: github.com/btcsuite/bolt
+  version: 38b9bbfde72d4b62b6a038a3adfca64c44da0133
+- name: github.com/btcsuite/btcd
+  version: 474547b211c8f5566d094478318fcfd3c2c838d4
+  subpackages:
+  - blockchain
+  - btcec
+  - btcjson
+  - chaincfg
+  - txscript
+  - wire
+  - database
+- name: github.com/btcsuite/btclog
+  version: f96df2375f37300305f329b8e5258764b4f19a7f
+- name: github.com/btcsuite/btcrpcclient
+  version: 64922553b5c21f333438edaed6e0ba2b5a7760ee
+- name: github.com/btcsuite/btcutil
+  version: bdf4400ecafb82f0c121ed5db1ae70639e7f4018
+  subpackages:
+  - hdkeychain
+  - base58
+- name: github.com/btcsuite/fastsha256
+  version: 302ad4db268b46f9ebda3078f6f7397f96047735
+- name: github.com/btcsuite/go-flags
+  version: 6c288d648c1cc1befcb90cb5511dcacf64ae8e61
+- name: github.com/btcsuite/go-socks
+  version: cfe8b59e565c1a5bd4e2005d77cd9aa8b2e14524
+  subpackages:
+  - socks
+- name: github.com/btcsuite/golangcrypto
+  version: 53f62d9b43e87a6c56975cf862af7edf33a8d0df
+  subpackages:
+  - nacl/secretbox
+  - ripemd160
+  - scrypt
+  - ssh/terminal
+  - poly1305
+  - salsa20/salsa
+  - pbkdf2
+- name: github.com/btcsuite/seelog
+  version: 313961b101eb55f65ae0f03ddd4e322731763b6c
+- name: github.com/btcsuite/websocket
+  version: 31079b6807923eb23992c421b114992b95131b55
+- name: github.com/golang/protobuf
+  version: 2ebff28ac76fb19e2d25e5ddd4885708dfdd5611
+  subpackages:
+  - proto
+- name: golang.org/x/net
+  version: fb93926129b8ec0056f2f458b1f519654814edf0
+  subpackages:
+  - context
+  - http2
+  - trace
+  - http2/hpack
+  - internal/timeseries
+- name: golang.org/x/sys
+  version: f64b50fbea64174967a8882830d621a18ee1548e
+  subpackages:
+  - unix
+- name: google.golang.org/grpc
+  version: dd828651e45229541896bc41cd9cf2f89ac7002a
+  subpackages:
+  - codes
+  - credentials
+  - grpclog
+  - internal
+  - metadata
+  - naming
+  - transport
+  - peer
+devImports: []

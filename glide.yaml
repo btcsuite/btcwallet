@@ -1,0 +1,37 @@
+package: github.com/btcsuite/btcwallet
+import:
+- package: github.com/btcsuite/bolt
+- package: github.com/btcsuite/btcd
+  subpackages:
+  - blockchain
+  - btcec
+  - btcjson
+  - chaincfg
+  - txscript
+  - wire
+- package: github.com/btcsuite/btclog
+- package: github.com/btcsuite/btcrpcclient
+- package: github.com/btcsuite/btcutil
+  subpackages:
+  - hdkeychain
+- package: github.com/btcsuite/fastsha256
+- package: github.com/btcsuite/go-flags
+- package: github.com/btcsuite/golangcrypto
+  subpackages:
+  - nacl/secretbox
+  - ripemd160
+  - scrypt
+  - ssh/terminal
+- package: github.com/btcsuite/seelog
+- package: github.com/btcsuite/websocket
+- package: github.com/golang/protobuf
+  subpackages:
+  - proto
+- package: golang.org/x/net
+  subpackages:
+  - context
+- package: google.golang.org/grpc
+  subpackages:
+  - codes
+  - credentials
+  - grpclog

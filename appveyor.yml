@@ -7,12 +7,16 @@ environment:
  GOPATH: c:\projects
  GORACE: halt_on_error=1
 
-install:
+init:
  - go version
- - go get -v -t ./...
+ - go get -u github.com/Masterminds/glide
+ - go get -u github.com/davecgh/go-spew/spew
+
+install:
+ - glide install
 
 build_script:
- - go build ./...
+ - ps: go get $(glide novendor)
 
 test_script:
- - go test -v -race ./...
+ - ps: go test -race $(glide novendor)
