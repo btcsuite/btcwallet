@@ -844,6 +844,10 @@ func init() {
 var _ context.Context
 var _ grpc.ClientConn
 
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the grpc package it is being compiled against.
+const _ = grpc.SupportPackageIsVersion2
+
 // Client API for VersionService service
 
 type VersionServiceClient interface {
@@ -877,16 +881,22 @@ func RegisterVersionServiceServer(s *grpc.Server, srv VersionServiceServer) {
 	s.RegisterService(&_VersionService_serviceDesc, srv)
 }
 
-func _VersionService_Version_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _VersionService_Version_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(VersionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(VersionServiceServer).Version(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(VersionServiceServer).Version(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.VersionService/Version",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VersionServiceServer).Version(ctx, req.(*VersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 var _VersionService_serviceDesc = grpc.ServiceDesc{
@@ -1185,76 +1195,112 @@ func RegisterWalletServiceServer(s *grpc.Server, srv WalletServiceServer) {
 	s.RegisterService(&_WalletService_serviceDesc, srv)
 }
 
-func _WalletService_Ping_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_Ping_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PingRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).Ping(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).Ping(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/Ping",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).Ping(ctx, req.(*PingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_Network_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_Network_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NetworkRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).Network(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).Network(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/Network",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).Network(ctx, req.(*NetworkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_AccountNumber_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_AccountNumber_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AccountNumberRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).AccountNumber(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).AccountNumber(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/AccountNumber",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).AccountNumber(ctx, req.(*AccountNumberRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_Accounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_Accounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AccountsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).Accounts(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).Accounts(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/Accounts",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).Accounts(ctx, req.(*AccountsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_Balance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_Balance_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BalanceRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).Balance(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).Balance(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/Balance",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).Balance(ctx, req.(*BalanceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_GetTransactions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_GetTransactions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetTransactionsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).GetTransactions(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).GetTransactions(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/GetTransactions",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).GetTransactions(ctx, req.(*GetTransactionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _WalletService_TransactionNotifications_Handler(srv interface{}, stream grpc.ServerStream) error {
@@ -1320,100 +1366,148 @@ func (x *walletServiceAccountNotificationsServer) Send(m *AccountNotificationsRe
 	return x.ServerStream.SendMsg(m)
 }
 
-func _WalletService_ChangePassphrase_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_ChangePassphrase_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ChangePassphraseRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).ChangePassphrase(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).ChangePassphrase(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/ChangePassphrase",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).ChangePassphrase(ctx, req.(*ChangePassphraseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_RenameAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_RenameAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RenameAccountRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).RenameAccount(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).RenameAccount(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/RenameAccount",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).RenameAccount(ctx, req.(*RenameAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_NextAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_NextAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NextAccountRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).NextAccount(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).NextAccount(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/NextAccount",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).NextAccount(ctx, req.(*NextAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_NextAddress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_NextAddress_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NextAddressRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).NextAddress(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).NextAddress(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/NextAddress",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).NextAddress(ctx, req.(*NextAddressRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_ImportPrivateKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_ImportPrivateKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ImportPrivateKeyRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).ImportPrivateKey(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).ImportPrivateKey(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/ImportPrivateKey",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).ImportPrivateKey(ctx, req.(*ImportPrivateKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_FundTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_FundTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(FundTransactionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).FundTransaction(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).FundTransaction(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/FundTransaction",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).FundTransaction(ctx, req.(*FundTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_SignTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_SignTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SignTransactionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).SignTransaction(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).SignTransaction(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/SignTransaction",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).SignTransaction(ctx, req.(*SignTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletService_PublishTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletService_PublishTransaction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PublishTransactionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletServiceServer).PublishTransaction(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletServiceServer).PublishTransaction(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletService/PublishTransaction",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletServiceServer).PublishTransaction(ctx, req.(*PublishTransactionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 var _WalletService_serviceDesc = grpc.ServiceDesc{
@@ -1573,64 +1667,94 @@ func RegisterWalletLoaderServiceServer(s *grpc.Server, srv WalletLoaderServiceSe
 	s.RegisterService(&_WalletLoaderService_serviceDesc, srv)
 }
 
-func _WalletLoaderService_WalletExists_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletLoaderService_WalletExists_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(WalletExistsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletLoaderServiceServer).WalletExists(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletLoaderServiceServer).WalletExists(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletLoaderService/WalletExists",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletLoaderServiceServer).WalletExists(ctx, req.(*WalletExistsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletLoaderService_CreateWallet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletLoaderService_CreateWallet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateWalletRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletLoaderServiceServer).CreateWallet(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletLoaderServiceServer).CreateWallet(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletLoaderService/CreateWallet",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletLoaderServiceServer).CreateWallet(ctx, req.(*CreateWalletRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletLoaderService_OpenWallet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletLoaderService_OpenWallet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(OpenWalletRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletLoaderServiceServer).OpenWallet(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletLoaderServiceServer).OpenWallet(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletLoaderService/OpenWallet",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletLoaderServiceServer).OpenWallet(ctx, req.(*OpenWalletRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletLoaderService_CloseWallet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletLoaderService_CloseWallet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CloseWalletRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletLoaderServiceServer).CloseWallet(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletLoaderServiceServer).CloseWallet(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletLoaderService/CloseWallet",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletLoaderServiceServer).CloseWallet(ctx, req.(*CloseWalletRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-func _WalletLoaderService_StartConsensusRpc_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error) (interface{}, error) {
+func _WalletLoaderService_StartConsensusRpc_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(StartConsensusRpcRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
-	out, err := srv.(WalletLoaderServiceServer).StartConsensusRpc(ctx, in)
-	if err != nil {
-		return nil, err
+	if interceptor == nil {
+		return srv.(WalletLoaderServiceServer).StartConsensusRpc(ctx, in)
 	}
-	return out, nil
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/walletrpc.WalletLoaderService/StartConsensusRpc",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WalletLoaderServiceServer).StartConsensusRpc(ctx, req.(*StartConsensusRpcRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 var _WalletLoaderService_serviceDesc = grpc.ServiceDesc{
