@@ -55,7 +55,7 @@ var opts = struct {
 	RPCConnect:            "localhost",
 	RPCUsername:           "",
 	RPCCertificateFile:    filepath.Join(walletDataDirectory, "rpc.cert"),
-	FeeRate:               &cfgutil.AmountFlag{txrules.DefaultRelayFeePerKb},
+	FeeRate:               cfgutil.NewAmountFlag(txrules.DefaultRelayFeePerKb),
 	SourceAccount:         "imported",
 	DestinationAccount:    "default",
 	RequiredConfirmations: 1,
@@ -337,7 +337,7 @@ func parseOutPoint(input *btcjson.ListUnspentResult) (wire.OutPoint, error) {
 	if err != nil {
 		return wire.OutPoint{}, err
 	}
-	return wire.OutPoint{*txHash, input.Vout}, nil
+	return wire.OutPoint{Hash: *txHash, Index: input.Vout}, nil
 }
 
 func pickNoun(n int, singularForm, pluralForm string) string {
