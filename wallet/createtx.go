@@ -22,6 +22,7 @@ import (
 	"github.com/decred/dcrd/txscript"
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrutil"
+	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet/txauthor"
 	"github.com/decred/dcrwallet/wtxmgr"
@@ -314,16 +315,10 @@ func (w *Wallet) insertMultisigOutIntoTxMgr(msgTx *wire.MsgTx,
 	return w.TxStore.AddMultisigOut(rec, nil, index)
 }
 
-// txToOutputs creates a signed transaction which includes each output from
-// outputs.  Previous outputs to reedeem are chosen from the passed account's
-// UTXO set and minconf policy. An additional output may be added to return
-// change to the wallet.  An appropriate fee is included based on the wallet's
-// current relay fee.  The wallet must be unlocked to create the transaction.
-//
-// Decred: This func also sends the transaction, and if successful, inserts it
-// into the database, rather than delegating this work to the caller as
-// btcwallet does.
-func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32,
+// TxToOutputs is the exported version of txToOutputs that does all relevant
+// locking to ensure the safety of the wallet state to generate a transaction.
+// It then calls txToOutputs to generate a transaction.
+func (w *Wallet) TxToOutputs(outputs []*wire.TxOut, account uint32, minconf int32,
 	randomizeChangeIdx bool) (atx *txauthor.AuthoredTx, err error) {
 	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
@@ -342,12 +337,6 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	isReorganizing, _ := chainClient.GetReorganizing()
 	if isReorganizing {
 		return nil, ErrBlockchainReorganizing
-	}
-
-	// Get current block's height and hash.
-	bs, err := chainClient.BlockStamp()
-	if err != nil {
-		return nil, err
 	}
 
 	// Initialize the address pool for use. If we
@@ -379,6 +368,28 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		}
 	}()
 
+	atx, err = w.txToOutputs(outputs, account, minconf, pool, chainClient,
+		randomizeChangeIdx)
+	txSucceeded = atx != nil
+
+	return atx, err
+}
+
+// txToOutputs creates a signed transaction which includes each output from
+// outputs.  Previous outputs to reedeem are chosen from the passed account's
+// UTXO set and minconf policy. An additional output may be added to return
+// change to the wallet.  An appropriate fee is included based on the wallet's
+// current relay fee.  The wallet must be unlocked to create the transaction.
+// The address pool passed must be locked and engaged in an address pool
+// batch call.
+//
+// Decred: This func also sends the transaction, and if successful, inserts it
+// into the database, rather than delegating this work to the caller as
+// btcwallet does.
+func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32,
+	pool *addressPool, chainClient *chain.RPCClient,
+	randomizeChangeIdx bool) (atx *txauthor.AuthoredTx, err error) {
+
 	// The change address is pulled here rather than after
 	// MakeInputSource is called because MakeInputSource
 	// accesses the database in a way that deadlocks other
@@ -388,6 +399,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	// calling the address function after MakeInputSource
 	// and before inputSource.CloseTransaction() will
 	// sometimes cause a lockup.
+	changeAddrUsed := false
 	changeAddr, err := pool.getNewAddress()
 	if err != nil {
 		return nil, err
@@ -395,6 +407,12 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	changeSource := func() ([]byte, error) {
 		changeAddrUsed = true
 		return txscript.PayToAddrScript(changeAddr)
+	}
+
+	// Get current block's height and hash.
+	bs, err := chainClient.BlockStamp()
+	if err != nil {
+		return nil, err
 	}
 
 	inputSource := w.TxStore.MakeInputSource(account, minconf, bs.Height)
@@ -435,7 +453,6 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	if err != nil {
 		return nil, err
 	}
-	txSucceeded = true
 
 	// Create transaction record and insert into the db.
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.Tx, time.Now())
@@ -1056,6 +1073,42 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	}
 	pool = w.addrPools[req.account].internal
 
+	// Address manager must be unlocked to compose tickets.  Grab
+	// the unlock if possible (to prevent future unlocks), or return the
+	// error if already locked.
+	heldUnlock, err := w.HoldUnlock()
+	if err != nil {
+		return nil, err
+	}
+	defer heldUnlock.Release()
+
+	// Fire up the address pool for usage in generating tickets.
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	txSucceeded := false
+	defer func() {
+		if txSucceeded {
+			pool.BatchFinish()
+		} else {
+			pool.BatchRollback()
+		}
+	}()
+	addrFunc := pool.getNewAddress
+
+	if w.addressReuse {
+		addrFunc = w.ReusedAddress
+	}
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	isReorganizing, _ := chainClient.GetReorganizing()
+	if isReorganizing {
+		return "", ErrBlockchainReorganizing
+	}
+
 	// Fetch a new address for creating a split transaction. Then,
 	// make a split transaction that contains exact outputs for use
 	// in ticket generation. Cache its hash to use below when
@@ -1139,7 +1192,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 
 	// Fetch the single use split address to break tickets into, to
 	// immediately be consumed as tickets.
-	splitTxAddr, err := pool.GetNewAddress()
+	splitTxAddr, err := pool.getNewAddress()
 	if err != nil {
 		return nil, err
 	}
@@ -1183,46 +1236,18 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		}
 
 	}
-	splitTx, err := w.txToOutputs(splitOuts, account, req.minConf, false)
+	splitTx, err := w.txToOutputs(splitOuts, account, req.minConf, pool,
+		chainClient, false)
 	if err != nil {
 		return nil, err
 	}
 
-	// Address manager must be unlocked to compose tickets.  Grab
-	// the unlock if possible (to prevent future unlocks), or return the
-	// error if already locked.
-	heldUnlock, err := w.HoldUnlock()
-	if err != nil {
-		return nil, err
-	}
-	defer heldUnlock.Release()
-
-	// Fire up the address pool for usage in generating tickets.
-	pool.mutex.Lock()
-	defer pool.mutex.Unlock()
-	txSucceeded := false
-	defer func() {
-		if txSucceeded {
-			pool.BatchFinish()
-		} else {
-			pool.BatchRollback()
-		}
-	}()
-	addrFunc := pool.getNewAddress
-
-	if w.addressReuse {
-		addrFunc = w.ReusedAddress
-	}
-
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
-
-	isReorganizing, _ := chainClient.GetReorganizing()
-	if isReorganizing {
-		return "", ErrBlockchainReorganizing
-	}
+	// At this point, addresses have been used in tx in the
+	// mempool, so we need to close the batch after. It might
+	// be the case that tickets fail after this, but it should
+	// be very unlikely since all tickets will use known,
+	// accepted outputs.
+	txSucceeded = true
 
 	// Generate the tickets individually.
 	ticketHashes := make([]string, req.numTickets)
@@ -1346,7 +1371,6 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 			}
 			return nil, ErrClientPurchaseTicket
 		}
-		txSucceeded = true
 
 		// Insert the transaction and credits into the transaction manager.
 		rec, err := w.insertIntoTxMgr(ticket)

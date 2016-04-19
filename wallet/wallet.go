@@ -922,7 +922,7 @@ out:
 			txr.resp <- consolidateResponse{txh, err}
 
 		case txr := <-w.createTxRequests:
-			tx, err := w.txToOutputs(txr.outputs, txr.account, txr.minconf, true)
+			tx, err := w.TxToOutputs(txr.outputs, txr.account, txr.minconf, true)
 			txr.resp <- createTxResponse{tx, err}
 
 		case txr := <-w.createMultisigTxRequests:
