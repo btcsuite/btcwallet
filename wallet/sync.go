@@ -148,10 +148,6 @@ func (w *Wallet) scanAccountIndex(start int, end int) (uint32, error) {
 	return 0, nil
 }
 
-// finalScanLength is the final length of keys to scan for the
-// function below.
-var finalAddrScanLength = 750
-
 // debugScanLength is the final length of keys to scan past the
 // last index returned from the logarithmic scanning function
 // when creating the debug string of used addresses.
@@ -405,7 +401,7 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 	// we have found is correct.
 	if lastUsed != 0 {
 		start := lastUsed
-		end := lastUsed + finalAddrScanLength
+		end := lastUsed + w.addrIdxScanLen
 		exists, idx, err := w.scanAddressRange(account, branch, start, end,
 			chainClient)
 		if err != nil {
