@@ -49,7 +49,7 @@ type config struct {
 	ShowVersion   bool   `short:"V" long:"version" description:"Display version information and exit"`
 	Create        bool   `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp    bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	AppDataDir    string `short:"A" long:"appdata" description:"Application data directory to save wallet database and logs"`
+	AppDataDir    string `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
 	TestNet3      bool   `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
 	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	NoInitialLoad bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
@@ -283,7 +283,18 @@ func loadConfig() (*config, []string, error) {
 	// Load additional config from file.
 	var configFileError error
 	parser := flags.NewParser(&cfg, flags.Default)
-	configFilePath := cleanAndExpandPath(preCfg.ConfigFile)
+	configFilePath := preCfg.ConfigFile
+	if configFilePath == defaultConfigFile {
+		appDataDir := preCfg.AppDataDir
+		if appDataDir == defaultAppDataDir && preCfg.DataDir != defaultAppDataDir {
+			appDataDir = cleanAndExpandPath(preCfg.DataDir)
+		}
+		if appDataDir != defaultAppDataDir {
+			configFilePath = filepath.Join(appDataDir, defaultConfigFilename)
+		}
+	} else {
+		configFilePath = cleanAndExpandPath(configFilePath)
+	}
 	err = flags.NewIniParser(parser).ParseFile(configFilePath)
 	if err != nil {
 		if _, ok := err.(*os.PathError); !ok {
