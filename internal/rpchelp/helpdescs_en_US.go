@@ -175,7 +175,7 @@ var helpDescsEnUS = map[string]string{
 	"infowalletresult-testnet":         "Whether or not server is using testnet",
 	"infowalletresult-relayfee":        "The minimum relay fee for non-free transactions in DCR/KB",
 	"infowalletresult-errors":          "Any current errors",
-	"infowalletresult-paytxfee":        "The increment used each time more fee is required for an authored transaction",
+	"infowalletresult-paytxfee":        "The fee per kB of the serialized tx size used each time more fee is required for an authored transaction",
 	"infowalletresult-balance":         "The balance of all accounts calculated with one block confirmation",
 	"infowalletresult-walletversion":   "The version of the address manager database",
 	"infowalletresult-unlocked_until":  "Unset",
@@ -426,8 +426,8 @@ var helpDescsEnUS = map[string]string{
 	"setticketvotebits-votebitsext": "The extended voteBits to set for the ticket",
 
 	// SetTxFeeCmd help.
-	"settxfee--synopsis": "Modify the increment used each time more fee is required for an authored transaction.",
-	"settxfee-amount":    "The new fee increment valued in decred",
+	"settxfee--synopsis": "Modify the fee per kB of the serialized tx size used each time more fee is required for an authored transaction.",
+	"settxfee-amount":    "The new fee per kB of the serialized tx size valued in decred",
 	"settxfee--result0":  "The boolean 'true'",
 
 	// SignMessageCmd help.
@@ -574,8 +574,8 @@ var helpDescsEnUS = map[string]string{
 
 	"walletinforesult-daemonconnected":   "Whether or not the wallet is currently connected to the daemon RPC",
 	"walletinforesult-unlocked":          "Whether or not the wallet is unlocked",
-	"walletinforesult-txfee":             "Transaction fee in coins",
-	"walletinforesult-ticketfee":         "Ticket fee in coins",
+	"walletinforesult-txfee":             "Transaction fee per kB of the serialized tx size in coins",
+	"walletinforesult-ticketfee":         "Ticket fee per kB of the serialized tx size in coins",
 	"walletinforesult-ticketmaxprice":    "The maximum price to pay for a ticket",
 	"walletinforesult-balancetomaintain": "The balance to try to maintain while purchasing tickets",
 	"walletinforesult-stakemining":       "Whether or not the wallet is currently stake mining",
@@ -635,12 +635,12 @@ var helpDescsEnUS = map[string]string{
 	"sendtossgen-fromaccount": "The account to use (default=\"default\")",
 
 	// SetTicketFeeCmd help.
-	"setticketfee--synopsis": "Modify the increment used each time more fee is required for an authored stake transaction.",
-	"setticketfee-fee":       "The new fee increment valued in decred",
+	"setticketfee--synopsis": "Modify the fee per kB of the serialized tx size used each time more fee is required for an authored stake transaction.",
+	"setticketfee-fee":       "The new fee per kB of the serialized tx size valued in decred",
 	"setticketfee--result0":  "The boolean 'true'",
 
 	// GetTicketFeeCmd help.
-	"getticketfee--synopsis": "Get the current fee increment used for an authored stake transaction.",
+	"getticketfee--synopsis": "Get the current fee per kB of the serialized tx size used for an authored stake transaction.",
 	"getticketfee--result0":  "The current fee",
 
 	// SetBalanceToMaintainCmd help.
