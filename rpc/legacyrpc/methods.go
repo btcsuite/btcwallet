@@ -2331,11 +2331,13 @@ func PurchaseTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	// Set ticket address if specified.
 	var ticketAddr dcrutil.Address
 	if cmd.TicketAddress != nil {
-		addr, err := decodeAddress(*cmd.TicketAddress, w.ChainParams())
-		if err != nil {
-			return nil, err
+		if *cmd.TicketAddress != "" {
+			addr, err := decodeAddress(*cmd.TicketAddress, w.ChainParams())
+			if err != nil {
+				return nil, err
+			}
+			ticketAddr = addr
 		}
-		ticketAddr = addr
 	}
 
 	numTickets := 1
@@ -2349,20 +2351,22 @@ func PurchaseTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	var poolAddr dcrutil.Address
 	var poolFee dcrutil.Amount
 	if cmd.PoolAddress != nil {
-		addr, err := decodeAddress(*cmd.PoolAddress, w.ChainParams())
-		if err != nil {
-			return nil, err
-		}
-		poolAddr = addr
+		if *cmd.PoolAddress != "" {
+			addr, err := decodeAddress(*cmd.PoolAddress, w.ChainParams())
+			if err != nil {
+				return nil, err
+			}
+			poolAddr = addr
 
-		// Attempt to get the amount to send to
-		// the pool after.
-		if cmd.PoolFees == nil {
-			return nil, fmt.Errorf("gave pool address but no pool fee")
-		}
-		poolFee, err = dcrutil.NewAmount(*cmd.PoolFees)
-		if err != nil {
-			return nil, err
+			// Attempt to get the amount to send to
+			// the pool after.
+			if cmd.PoolFees == nil {
+				return nil, fmt.Errorf("gave pool address but no pool fee")
+			}
+			poolFee, err = dcrutil.NewAmount(*cmd.PoolFees)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
