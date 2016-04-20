@@ -141,6 +141,10 @@ const FeeIncrementTestnet = 1e3
 // coin, measured in atoms).
 const TicketFeeIncrement = 1e6
 
+// TicketFeeIncrementTestnet is the default minimum stake transation fees per KB
+// (0.00001 coin, measured in atoms) for Testnet.
+const TicketFeeIncrementTestnet = 1e3
+
 // EstMaxTicketFeeAmount is the estimated max ticket fee to be used for size
 // calculation for eligible utxos for ticket purchasing.
 const EstMaxTicketFeeAmount = 0.1 * 1e8

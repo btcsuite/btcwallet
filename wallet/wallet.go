@@ -191,17 +191,18 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	}
 
 	var feeIncrement dcrutil.Amount
+	var ticketFeeIncrement dcrutil.Amount
 	switch {
 	case params == &chaincfg.MainNetParams:
 		feeIncrement = FeeIncrementMainnet
+		ticketFeeIncrement = TicketFeeIncrement
 	case params == &chaincfg.TestNetParams:
 		feeIncrement = FeeIncrementTestnet
+		ticketFeeIncrement = TicketFeeIncrementTestnet
 	default:
 		feeIncrement = FeeIncrementTestnet
+		ticketFeeIncrement = TicketFeeIncrementTestnet
 	}
-
-	var ticketFeeIncrement dcrutil.Amount
-	ticketFeeIncrement = TicketFeeIncrement
 
 	w := &Wallet{
 		db:                       *db,
