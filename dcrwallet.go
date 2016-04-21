@@ -98,6 +98,7 @@ func walletMain() error {
 		AddressReuse:       cfg.ReuseAddresses,
 		TicketAddress:      cfg.TicketAddress,
 		TicketMaxPrice:     cfg.TicketMaxPrice,
+		TicketBuyFreq:      cfg.TicketBuyFreq,
 	}
 	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
 		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.PromptPass,

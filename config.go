@@ -36,6 +36,7 @@ const (
 	defaultRollbackTest      = false
 	defaultPruneTickets      = false
 	defaultTicketMaxPrice    = 50.0
+	defaultTicketBuyFreq     = 1
 	defaultAutomaticRepair   = false
 	defaultUnsafeMainNet     = false
 	defaultPromptPass        = false
@@ -85,6 +86,7 @@ type config struct {
 	PruneTickets      bool    `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
 	TicketAddress     string  `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
 	TicketMaxPrice    float64 `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
+	TicketBuyFreq     int     `long:"ticketbuyfreq" description:"The number of tickets to try to buy per block (default: 1), where negative numbers indicate one ticket for each 1-in-? blocks"`
 	PoolAddress       string  `long:"pooladdress" description:"The ticket pool address where ticket fees will go to"`
 	PoolFees          float64 `long:"poolfees" description:"The per-ticket fee mandated by the ticket pool, in coins"`
 	AddrIdxScanLen    int     `long:"addridxscanlen" description:"The width of the scan for last used addresses on wallet restore and start up (default: 750)"`
@@ -262,6 +264,7 @@ func loadConfig() (*config, []string, error) {
 		RollbackTest:           defaultRollbackTest,
 		PruneTickets:           defaultPruneTickets,
 		TicketMaxPrice:         defaultTicketMaxPrice,
+		TicketBuyFreq:          defaultTicketBuyFreq,
 		AutomaticRepair:        defaultAutomaticRepair,
 		UnsafeMainNet:          defaultUnsafeMainNet,
 		AddrIdxScanLen:         defaultAddrIdxScanLen,

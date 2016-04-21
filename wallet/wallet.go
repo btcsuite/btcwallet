@@ -108,6 +108,7 @@ type Wallet struct {
 	CurrentStakeDiff   *StakeDifficultyInfo
 	CurrentVotingInfo  *VotingInfo
 	TicketMaxPrice     dcrutil.Amount
+	ticketBuyFreq      int
 	balanceToMaintain  dcrutil.Amount
 	poolAddress        dcrutil.Address
 	poolFees           dcrutil.Amount
@@ -181,8 +182,8 @@ type Wallet struct {
 // and transaction store.
 func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	poolAddress dcrutil.Address, pf dcrutil.Amount, addrIdxScanLen int,
-	autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
+	ticketBuyFreq int, poolAddress dcrutil.Address, pf dcrutil.Amount,
+	addrIdxScanLen int, autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
 	smgr *wstakemgr.StakeStore, db *walletdb.DB,
 	params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
@@ -232,6 +233,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		addressReuse:             addressReuse,
 		ticketAddress:            ticketAddress,
 		TicketMaxPrice:           tmp,
+		ticketBuyFreq:            ticketBuyFreq,
 		poolAddress:              poolAddress,
 		poolFees:                 pf,
 		addrIdxScanLen:           addrIdxScanLen,
@@ -2765,9 +2767,9 @@ func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, para
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
-	ticketMaxPrice float64, poolAddress string, poolFees float64,
-	addrIdxScanLen int, autoRepair bool, params *chaincfg.Params) (*Wallet,
-	error) {
+	ticketMaxPrice float64, ticketBuyFreq int, poolAddress string,
+	poolFees float64, addrIdxScanLen int, autoRepair bool,
+	params *chaincfg.Params) (*Wallet, error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -2854,6 +2856,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		rollbackTest,
 		ticketAddr,
 		tmp,
+		ticketBuyFreq,
 		poolAddr,
 		pf,
 		addrIdxScanLen,

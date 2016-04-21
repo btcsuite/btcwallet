@@ -79,7 +79,22 @@ func (w *Wallet) handleChainNotifications() {
 func (w *Wallet) handleTicketPurchases() {
 	purchased := 0
 	attempts := 0
-	maxTickets := int(w.chainParams.MaxFreshStakePerBlock)
+
+	// Parse the ticket purchase frequency. Positive numbers mean
+	// that many tickets per block. Negative numbers mean to only
+	// purchase one ticket once every abs(num) blocks.
+	maxTickets := 1
+	switch {
+	case w.ticketBuyFreq == 0:
+		return
+	case w.ticketBuyFreq > 1:
+		maxTickets = w.ticketBuyFreq
+	case w.ticketBuyFreq < 0:
+		bs := w.Manager.SyncedTo()
+		if int(bs.Height)%w.ticketBuyFreq != 0 {
+			return
+		}
+	}
 
 	sdiff := dcrutil.Amount(w.GetStakeDifficulty().StakeDifficulty)
 	maxToPay := w.GetTicketMaxPrice()
