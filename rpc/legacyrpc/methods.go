@@ -1622,13 +1622,6 @@ func SignMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	return base64.StdEncoding.EncodeToString(sigbytes), nil
 }
 
-// pendingTx is used for async fetching of transaction dependancies in
-// SignRawTransaction.
-type pendingTx struct {
-	resp   btcrpcclient.FutureGetRawTransactionResult
-	inputs []uint32 // list of inputs that care about this tx.
-}
-
 // SignRawTransaction handles the signrawtransaction command.
 func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	cmd := icmd.(*btcjson.SignRawTransactionCmd)
@@ -1711,30 +1704,17 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	// querying btcd with getrawtransaction. We queue up a bunch of async
 	// requests and will wait for replies after we have checked the rest of
 	// the arguments.
-	requested := make(map[wire.ShaHash]*pendingTx)
+	requested := make(map[wire.OutPoint]btcrpcclient.FutureGetTxOutResult)
 	for _, txIn := range tx.TxIn {
-		// Did we get this txin from the arguments?
+		// Did we get this outpoint from the arguments?
 		if _, ok := inputs[txIn.PreviousOutPoint]; ok {
 			continue
 		}
 
-		// Are we already fetching this tx? If so mark us as interested
-		// in this outpoint. (N.B. that any *sane* tx will only
-		// reference each outpoint once, since anything else is a double
-		// spend. We don't check this ourselves to save having to scan
-		// the array, it will fail later if so).
-		if ptx, ok := requested[txIn.PreviousOutPoint.Hash]; ok {
-			ptx.inputs = append(ptx.inputs,
-				txIn.PreviousOutPoint.Index)
-			continue
-		}
-
-		// Never heard of this one before, request it.
-		prevHash := &txIn.PreviousOutPoint.Hash
-		requested[txIn.PreviousOutPoint.Hash] = &pendingTx{
-			resp:   chainClient.GetRawTransactionAsync(prevHash),
-			inputs: []uint32{txIn.PreviousOutPoint.Index},
-		}
+		// Asynchronously request the output script.
+		requested[txIn.PreviousOutPoint] = chainClient.GetTxOutAsync(
+			&txIn.PreviousOutPoint.Hash, txIn.PreviousOutPoint.Index,
+			true)
 	}
 
 	// Parse list of private keys, if present. If there are any keys here
@@ -1767,24 +1747,16 @@ func SignRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	// We have checked the rest of the args. now we can collect the async
 	// txs. TODO: If we don't mind the possibility of wasting work we could
 	// move waiting to the following loop and be slightly more asynchronous.
-	for txid, ptx := range requested {
-		tx, err := ptx.resp.Receive()
+	for outPoint, resp := range requested {
+		result, err := resp.Receive()
 		if err != nil {
 			return nil, err
 		}
-
-		for _, input := range ptx.inputs {
-			if input >= uint32(len(tx.MsgTx().TxOut)) {
-				e := fmt.Errorf("input %s:%d is not in tx",
-					txid.String(), input)
-				return nil, InvalidParameterError{e}
-			}
-
-			inputs[wire.OutPoint{
-				Hash:  txid,
-				Index: input,
-			}] = tx.MsgTx().TxOut[input].PkScript
+		script, err := hex.DecodeString(result.ScriptPubKey.Hex)
+		if err != nil {
+			return nil, err
 		}
+		inputs[outPoint] = script
 	}
 
 	// All args collected. Now we can sign all the inputs that we can.
