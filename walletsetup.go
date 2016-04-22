@@ -122,8 +122,7 @@ func createWallet(cfg *config) error {
 		TicketMaxPrice:     cfg.TicketMaxPrice,
 	}
 	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
-		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.PromptPass,
-		cfg.AddrIdxScanLen)
+		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen)
 
 	// When there is a legacy keystore, open it now to ensure any errors
 	// don't end up exiting the process after the user has spent time

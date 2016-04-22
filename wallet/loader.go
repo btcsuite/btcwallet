@@ -52,7 +52,6 @@ type Loader struct {
 	stakeOptions   *StakeOptions
 	autoRepair     bool
 	unsafeMainNet  bool
-	promptPass     bool
 	addrIdxScanLen int
 }
 
@@ -74,14 +73,13 @@ type StakeOptions struct {
 // NewLoader constructs a Loader.
 func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
 	stakeOptions *StakeOptions, autoRepair bool, unsafeMainNet bool,
-	promptPass bool, addrIdxScanLen int) *Loader {
+	addrIdxScanLen int) *Loader {
 	return &Loader{
 		chainParams:    chainParams,
 		dbDirPath:      dbDirPath,
 		stakeOptions:   stakeOptions,
 		autoRepair:     autoRepair,
 		unsafeMainNet:  unsafeMainNet,
-		promptPass:     promptPass,
 		addrIdxScanLen: addrIdxScanLen,
 	}
 }
