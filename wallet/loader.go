@@ -150,9 +150,20 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 		return nil, err
 	}
 
-	l.onLoaded(nil, db)
-	db.Close()
-	return nil, nil
+	// Open the newly-created wallet.
+	so := l.stakeOptions
+	w, err := Open(db, pubPassphrase, nil, so.VoteBits, so.StakeMiningEnabled,
+		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
+		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice,
+		so.TicketBuyFreq, so.PoolAddress, so.PoolFees, l.addrIdxScanLen,
+		l.autoRepair, l.chainParams)
+	if err != nil {
+		return nil, err
+	}
+	w.Start()
+
+	l.onLoaded(w, db)
+	return w, nil
 }
 
 var errNoConsole = errors.New("db upgrade requires console access for additional input")
