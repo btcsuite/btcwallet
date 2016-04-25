@@ -168,7 +168,7 @@ type AccountProperties struct {
 // managed address when the address manager is unlocked.  See the deriveOnUnlock
 // field in the Manager struct for more details on how this is used.
 type unlockDeriveInfo struct {
-	managedAddr *managedAddress
+	managedAddr ManagedAddress
 	branch      uint32
 	index       uint32
 }
@@ -387,11 +387,13 @@ func (m *Manager) Close() {
 // The passed derivedKey is zeroed after the new address is created.
 //
 // This function MUST be called with the manager lock held for writes.
-func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey, account, branch, index uint32) (ManagedAddress, error) {
+func (m *Manager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
+	addrType addressType, account, branch, index uint32) (ManagedAddress, error) {
+
 	// Create a new managed address based on the public or private key
 	// depending on whether the passed key is private.  Also, zero the
 	// key after creating the managed address from it.
-	ma, err := newManagedAddressFromExtKey(m, account, derivedKey)
+	ma, err := newManagedAddressFromExtKey(m, account, derivedKey, addrType)
 	defer derivedKey.Zero()
 	if err != nil {
 		return nil, err
@@ -525,7 +527,9 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastExtAddr, err := m.keyToManaged(lastExtKey, account, branch, index)
+	// TODO(roasbeef): default type??
+	lastExtAddr, err := m.keyToManaged(lastExtKey, adtChainWitness,
+		account, branch, index)
 	if err != nil {
 		return nil, err
 	}
@@ -540,7 +544,8 @@ func (m *Manager) loadAccountInfo(account uint32) (*accountInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	lastIntAddr, err := m.keyToManaged(lastIntKey, account, branch, index)
+	lastIntAddr, err := m.keyToManaged(lastIntKey, adtChainWitness,
+		account, branch, index)
 	if err != nil {
 		return nil, err
 	}
@@ -630,7 +635,7 @@ func (m *Manager) chainAddressRowToManaged(row *dbChainAddressRow) (ManagedAddre
 		return nil, err
 	}
 
-	return m.keyToManaged(addressKey, row.account, row.branch, row.index)
+	return m.keyToManaged(addressKey, row.addrType, row.account, row.branch, row.index)
 }
 
 // importedAddressRowToManaged returns a new managed address based on imported
@@ -651,7 +656,7 @@ func (m *Manager) importedAddressRowToManaged(row *dbImportedAddressRow) (Manage
 
 	compressed := len(pubBytes) == btcec.PubKeyBytesLenCompressed
 	ma, err := newManagedAddressWithoutPrivKey(m, row.account, pubKey,
-		compressed)
+		compressed, row.addrType)
 	if err != nil {
 		return nil, err
 	}
@@ -744,6 +749,8 @@ func (m *Manager) Address(address btcutil.Address) (ManagedAddress, error) {
 	if pka, ok := address.(*btcutil.AddressPubKey); ok {
 		address = pka.AddressPubKeyHash()
 	}
+
+	// TODO(roasbeef): also need to distinguish p2wkh from p2pkh
 
 	// Return the address from cache if it's available.
 	//
@@ -1143,13 +1150,15 @@ func (m *Manager) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (ManagedPub
 
 	// Create a new managed address based on the imported address.
 	var managedAddr *managedAddress
+	// TODO(roasbeef): default type? need to watch for all
 	if !m.watchingOnly {
 		managedAddr, err = newManagedAddress(m, ImportedAddrAccount,
-			wif.PrivKey, wif.CompressPubKey)
+			wif.PrivKey, wif.CompressPubKey, adtChain)
 	} else {
 		pubKey := (*btcec.PublicKey)(&wif.PrivKey.PublicKey)
 		managedAddr, err = newManagedAddressWithoutPrivKey(m,
-			ImportedAddrAccount, pubKey, wif.CompressPubKey)
+			ImportedAddrAccount, pubKey, wif.CompressPubKey,
+			adtChain)
 	}
 	if err != nil {
 		return nil, err
@@ -1403,7 +1412,8 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	// Derive any private keys that are pending due to them being created
 	// while the address manager was locked.
 	for _, info := range m.deriveOnUnlock {
-		addressKey, err := m.deriveKeyFromPath(info.managedAddr.account,
+		// TODO(roasbeef): addr type here?
+		addressKey, err := m.deriveKeyFromPath(info.managedAddr.Account(),
 			info.branch, info.index, true)
 		if err != nil {
 			m.lock()
@@ -1425,8 +1435,14 @@ func (m *Manager) Unlock(passphrase []byte) error {
 				"address %s", info.managedAddr.Address())
 			return managerError(ErrCrypto, str, err)
 		}
-		info.managedAddr.privKeyEncrypted = privKeyEncrypted
-		info.managedAddr.privKeyCT = privKeyBytes
+
+		// TODO(roasbeef): don't need to do anythign further?
+		switch a := info.managedAddr.(type) {
+		case *managedAddress:
+			a.privKeyEncrypted = privKeyEncrypted
+			a.privKeyCT = privKeyBytes
+		case *scriptAddress:
+		}
 
 		// Avoid re-deriving this key on subsequent unlocks.
 		m.deriveOnUnlock[0] = nil
@@ -1478,7 +1494,9 @@ func (m *Manager) ChainParams() *chaincfg.Params {
 // branch indicated by the internal flag.
 //
 // This function MUST be called with the manager lock held for writes.
-func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bool) ([]ManagedAddress, error) {
+func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bool,
+	addrType addressType) ([]ManagedAddress, error) {
+
 	// The next address can only be generated for accounts that have already
 	// been created.
 	acctInfo, err := m.loadAccountInfo(account)
@@ -1552,14 +1570,16 @@ func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bo
 		// Create a new managed address based on the public or private
 		// key depending on whether the generated key is private.  Also,
 		// zero the next key after creating the managed address from it.
-		managedAddr, err := newManagedAddressFromExtKey(m, account, nextKey)
-		nextKey.Zero()
+		addr, err := newManagedAddressFromExtKey(m, account, nextKey, addrType)
 		if err != nil {
 			return nil, err
 		}
 		if internal {
-			managedAddr.internal = true
+			addr.internal = true
 		}
+		managedAddr := addr
+		nextKey.Zero()
+
 		info := unlockDeriveInfo{
 			managedAddr: managedAddr,
 			branch:      branchNum,
@@ -1573,11 +1593,29 @@ func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bo
 	err = m.namespace.Update(func(tx walletdb.Tx) error {
 		for _, info := range addressInfo {
 			ma := info.managedAddr
+			// TODO(roasbeef): need to distinguish between p2pkh and p2wkh
 			addressID := ma.Address().ScriptAddress()
-			err := putChainedAddress(tx, addressID, account, ssFull,
-				info.branch, info.index)
-			if err != nil {
-				return err
+
+			switch a := ma.(type) {
+			case *managedAddress:
+				err := putChainedAddress(tx, addressID, account, ssFull,
+					info.branch, info.index, addrType)
+				if err != nil {
+					return err
+				}
+			case *scriptAddress: // TODO(roasbeef): no longer needed?
+				encryptedHash, err := m.cryptoKeyPub.Encrypt(a.AddrHash())
+				if err != nil {
+					str := fmt.Sprintf("failed to encrypt script hash %x",
+						a.AddrHash())
+					return managerError(ErrCrypto, str, err)
+				}
+
+				err = putScriptAddress(tx, a.AddrHash(), ImportedAddrAccount,
+					ssNone, encryptedHash, a.scriptEncrypted)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -1620,7 +1658,9 @@ func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bo
 
 // NextExternalAddresses returns the specified number of next chained addresses
 // that are intended for external use from the address manager.
-func (m *Manager) NextExternalAddresses(account uint32, numAddresses uint32) ([]ManagedAddress, error) {
+func (m *Manager) NextExternalAddresses(account uint32, numAddresses uint32,
+	addrType AddressType) ([]ManagedAddress, error) {
+
 	// Enforce maximum account number.
 	if account > MaxAccountNum {
 		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
@@ -1630,12 +1670,15 @@ func (m *Manager) NextExternalAddresses(account uint32, numAddresses uint32) ([]
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	return m.nextAddresses(account, numAddresses, false)
+	t := addressTypeToInternal(addrType)
+	return m.nextAddresses(account, numAddresses, false, t)
 }
 
 // NextInternalAddresses returns the specified number of next chained addresses
 // that are intended for internal use such as change from the address manager.
-func (m *Manager) NextInternalAddresses(account uint32, numAddresses uint32) ([]ManagedAddress, error) {
+func (m *Manager) NextInternalAddresses(account uint32, numAddresses uint32,
+	addrType AddressType) ([]ManagedAddress, error) {
+
 	// Enforce maximum account number.
 	if account > MaxAccountNum {
 		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
@@ -1645,7 +1688,8 @@ func (m *Manager) NextInternalAddresses(account uint32, numAddresses uint32) ([]
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	return m.nextAddresses(account, numAddresses, true)
+	t := addressTypeToInternal(addrType)
+	return m.nextAddresses(account, numAddresses, true, t)
 }
 
 // LastExternalAddress returns the most recently requested chained external

@@ -294,7 +294,8 @@ func testExternalAddresses(tc *testContext) bool {
 	if tc.create {
 		prefix := prefix + " NextExternalAddresses"
 		var err error
-		addrs, err = tc.manager.NextExternalAddresses(tc.account, 5)
+		addrs, err = tc.manager.NextExternalAddresses(tc.account, 5,
+			waddrmgr.PubKeyHash)
 		if err != nil {
 			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
 			return false
@@ -421,7 +422,8 @@ func testInternalAddresses(tc *testContext) bool {
 	if tc.create {
 		prefix := prefix + " NextInternalAddress"
 		var err error
-		addrs, err = tc.manager.NextInternalAddresses(tc.account, 5)
+		addrs, err = tc.manager.NextInternalAddresses(tc.account, 5,
+			waddrmgr.PubKeyHash)
 		if err != nil {
 			tc.t.Errorf("%s: unexpected error: %v", prefix, err)
 			return false
