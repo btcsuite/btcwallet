@@ -35,8 +35,11 @@ func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 	currentTotal := btcutil.Amount(0)
 	currentInputs := make([]*wire.TxIn, 0, len(eligible))
 	currentScripts := make([][]byte, 0, len(eligible))
+	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
 
-	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn, [][]byte, error) {
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
 		for currentTotal < target && len(eligible) != 0 {
 			nextCredit := &eligible[0]
 			eligible = eligible[1:]
@@ -44,8 +47,9 @@ func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 			currentTotal += nextCredit.Amount
 			currentInputs = append(currentInputs, nextInput)
 			currentScripts = append(currentScripts, nextCredit.PkScript)
+			currentInputValues = append(currentInputValues, nextCredit.Amount)
 		}
-		return currentTotal, currentInputs, currentScripts, nil
+		return currentTotal, currentInputs, currentInputValues, currentScripts, nil
 	}
 }
 
@@ -60,6 +64,7 @@ func (s secretSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool, err
 	if err != nil {
 		return nil, false, err
 	}
+
 	mpka, ok := ma.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
 		e := fmt.Errorf("managed address type for %v is `%T` but "+
@@ -78,6 +83,7 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	msa, ok := ma.(waddrmgr.ManagedScriptAddress)
 	if !ok {
 		e := fmt.Errorf("managed address type for %v is `%T` but "+
@@ -124,9 +130,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		// the imported account, change addresses are created from account 0.
 		var changeAddr btcutil.Address
 		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.NewChangeAddress(0)
+			changeAddr, err = w.NewChangeAddress(0,
+				waddrmgr.WitnessPubKey)
 		} else {
-			changeAddr, err = w.NewChangeAddress(account)
+			changeAddr, err = w.NewChangeAddress(account,
+				waddrmgr.WitnessPubKey)
 		}
 		if err != nil {
 			return nil, err
@@ -151,7 +159,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		return nil, err
 	}
 
-	err = validateMsgTx(tx.Tx, tx.PrevScripts)
+	err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
 	if err != nil {
 		return nil, err
 	}
@@ -221,10 +229,10 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32, bs *waddrmgr
 // validateMsgTx verifies transaction input scripts for tx.  All previous output
 // scripts from outputs redeemed by the transaction, in the same order they are
 // spent, must be passed in the prevScripts slice.
-func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte) error {
+func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte, inputValues []btcutil.Amount) error {
 	for i, prevScript := range prevScripts {
 		vm, err := txscript.NewEngine(prevScript, tx, i,
-			txscript.StandardVerifyFlags, nil, nil, 0)
+			txscript.StandardVerifyFlags, nil, nil, int64(inputValues[i]))
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
