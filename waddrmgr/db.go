@@ -65,9 +65,11 @@ type addressType uint8
 
 // These constants define the various supported address types.
 const (
-	adtChain  addressType = 0 // not iota as they need to be stable for db
-	adtImport addressType = 1
-	adtScript addressType = 2
+	adtChain              addressType = 0 // not iota as they need to be stable for db
+	adtImport             addressType = 1
+	adtScript             addressType = 2
+	adtChainWitness       addressType = 3
+	adtChainNestedWitness addressType = 4
 )
 
 // accountType represents a type of address stored in the database.
@@ -990,6 +992,10 @@ func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
 	}
 
 	switch row.addrType {
+	case adtChainWitness:
+		fallthrough
+	case adtChainNestedWitness:
+		fallthrough
 	case adtChain:
 		return deserializeChainedAddress(row)
 	case adtImport:
@@ -1058,10 +1064,10 @@ func putAddress(tx walletdb.Tx, addressID []byte, row *dbAddressRow) error {
 // putChainedAddress stores the provided chained address information to the
 // database.
 func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
-	status syncStatus, branch, index uint32) error {
+	status syncStatus, branch, index uint32, addrType addressType) error {
 
 	addrRow := dbAddressRow{
-		addrType:   adtChain,
+		addrType:   addrType,
 		account:    account,
 		addTime:    uint64(time.Now().Unix()),
 		syncStatus: status,
@@ -1079,7 +1085,6 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 
 	// Deserialize the account row.
 	row, err := deserializeAccountRow(accountID, serializedAccount)
-
 	if err != nil {
 		return err
 	}
