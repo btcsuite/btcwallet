@@ -51,6 +51,8 @@ const (
 	//   - 1 byte compact int encoding value 25
 	//   - 25 bytes P2PKH output script
 	P2PKHOutputSize = 8 + 1 + P2PKHPkScriptSize
+
+	// TODO(roasbeef): add estimates for nested p2wkh and p2pkh
 )
 
 // EstimateSerializeSize returns a worst case serialize size estimate for a
