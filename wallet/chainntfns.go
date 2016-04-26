@@ -974,7 +974,9 @@ func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
 		ntfns, err := w.StakeMgr.HandleWinningTicketsNtfn(blockHash,
 			blockHeight,
 			tickets,
-			w.VoteBits)
+			w.VoteBits,
+			w.AllowHighFees,
+		)
 
 		if ntfns != nil {
 			// Send notifications for newly created votes by the RPC.
@@ -1009,7 +1011,7 @@ func (w *Wallet) handleMissedTickets(blockHash *chainhash.Hash,
 		w.StakeMiningEnabled {
 		ntfns, err := w.StakeMgr.HandleMissedTicketsNtfn(blockHash,
 			blockHeight,
-			tickets)
+			tickets, w.AllowHighFees)
 
 		if ntfns != nil {
 			// Send notifications for newly created revocations by the RPC.

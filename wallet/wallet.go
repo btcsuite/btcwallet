@@ -134,6 +134,7 @@ type Wallet struct {
 	ticketFeeIncrementLock sync.Mutex
 	ticketFeeIncrement     dcrutil.Amount
 	DisallowFree           bool
+	AllowHighFees          bool
 
 	// Channels for rescan processing.  Requests are added and merged with
 	// any waiting requests, before being sent to another goroutine to
@@ -188,7 +189,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
 	ticketBuyFreq int, poolAddress dcrutil.Address, pf float64,
 	addrIdxScanLen int, stakePoolColdAddrs map[string]struct{},
-	autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
+	autoRepair, AllowHighFees bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
 	smgr *wstakemgr.StakeStore, db *walletdb.DB,
 	params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
@@ -222,6 +223,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
 		relayFee:                 feeIncrement,
 		ticketFeeIncrement:       ticketFeeIncrement,
+		AllowHighFees:            AllowHighFees,
 		rescanAddJob:             make(chan *RescanJob),
 		rescanBatch:              make(chan *rescanBatch),
 		rescanNotifications:      make(chan interface{}),
@@ -331,7 +333,9 @@ func (w *Wallet) SetGenerate(flag bool) error {
 			w.CurrentVotingInfo.BlockHash,
 			w.CurrentVotingInfo.BlockHeight,
 			w.CurrentVotingInfo.Tickets,
-			w.VoteBits)
+			w.VoteBits,
+			w.AllowHighFees,
+		)
 		if err != nil {
 			return err
 		}
@@ -2339,7 +2343,7 @@ func (w *Wallet) ResendUnminedTxs() {
 		return
 	}
 	for _, tx := range txs {
-		resp, err := chainClient.SendRawTransaction(tx, false)
+		resp, err := chainClient.SendRawTransaction(tx, w.AllowHighFees)
 		if err != nil {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
@@ -2695,7 +2699,7 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 		return err
 	}
 
-	_, err = server.SendRawTransaction(tx, false)
+	_, err = server.SendRawTransaction(tx, w.AllowHighFees)
 	return err
 }
 
@@ -2835,7 +2839,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
 	ticketMaxPrice float64, ticketBuyFreq int, poolAddress string,
 	poolFees float64, addrIdxScanLen int, stakePoolColdExtKey string,
-	autoRepair bool, params *chaincfg.Params) (*Wallet, error) {
+	autoRepair, allowHighFees bool, params *chaincfg.Params) (*Wallet, error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -2928,6 +2932,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		addrIdxScanLen,
 		stakePoolColdAddrs,
 		autoRepair,
+		allowHighFees,
 		addrMgr,
 		txMgr,
 		smgr,

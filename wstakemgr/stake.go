@@ -644,7 +644,7 @@ func (s *StakeStore) getSSGens(sstxHash *chainhash.Hash) ([]*ssgenRecord, error)
 // SendRawTransaction sends a raw transaction using the chainSvr.
 // TODO Shouldn't this be locked? Eventually import the mutex lock
 // from wallet maybe.
-func (s *StakeStore) SendRawTransaction(msgTx *wire.MsgTx) (*chainhash.Hash,
+func (s *StakeStore) SendRawTransaction(msgTx *wire.MsgTx, allowHighFees bool) (*chainhash.Hash,
 	error) {
 	if s.isClosed {
 		str := "stake store is closed"
@@ -652,7 +652,7 @@ func (s *StakeStore) SendRawTransaction(msgTx *wire.MsgTx) (*chainhash.Hash,
 	}
 
 	if s.chainSvr != nil {
-		return s.chainSvr.SendRawTransaction(msgTx, false)
+		return s.chainSvr.SendRawTransaction(msgTx, allowHighFees)
 	}
 
 	return nil, fmt.Errorf("cannot sendrawtranscation, client not " +
@@ -763,7 +763,7 @@ func (s *StakeStore) SignVRTransaction(msgTx *wire.MsgTx, sstx *dcrutil.Tx,
 // GenerateVote creates a new SSGen given a header hash, height, sstx
 // tx hash, and votebits.
 func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
-	sstxHash *chainhash.Hash, defaultVoteBits uint16) (*StakeNotification, error) {
+	sstxHash *chainhash.Hash, defaultVoteBits uint16, allowHighFees bool) (*StakeNotification, error) {
 	// 1. Fetch the SStx, then calculate all the values we'll need later for
 	// the generation of the SSGen tx outputs.
 	sstxRecord, err := s.getSStx(sstxHash)
@@ -890,7 +890,7 @@ func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
 	}
 
 	// Send the transaction.
-	ssgenSha, err := s.chainSvr.SendRawTransaction(msgTx, false)
+	ssgenSha, err := s.chainSvr.SendRawTransaction(msgTx, allowHighFees)
 	if err != nil {
 		return nil, err
 	}
@@ -981,7 +981,7 @@ func (s *StakeStore) getSSRtxs(sstxHash *chainhash.Hash) ([]*ssrtxRecord, error)
 // submits it by SendRawTransaction. It also stores a record of it
 // in the local database.
 func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
-	sstxHash *chainhash.Hash) (*StakeNotification, error) {
+	sstxHash *chainhash.Hash, allowHighFees bool) (*StakeNotification, error) {
 	var revocationFee int64
 	switch {
 	case s.Params == &chaincfg.MainNetParams:
@@ -1079,7 +1079,7 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 	}
 
 	// Send the transaction.
-	ssrtxSha, err := s.chainSvr.SendRawTransaction(msgTx, false)
+	ssrtxSha, err := s.chainSvr.SendRawTransaction(msgTx, allowHighFees)
 	if err != nil {
 		return nil, err
 	}
@@ -1107,7 +1107,8 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
 	blockHeight int64,
 	tickets []*chainhash.Hash,
-	defaultVoteBits uint16) ([]*StakeNotification, error) {
+	defaultVoteBits uint16,
+	allowHighFees bool) ([]*StakeNotification, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -1138,7 +1139,7 @@ func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
 	// Matching tickets (yay!), generate some SSGen.
 	for i, ticket := range ticketsToPull {
 		ntfns[i], voteErrors[i] = s.generateVote(blockHash, blockHeight, ticket,
-			defaultVoteBits)
+			defaultVoteBits, allowHighFees)
 	}
 
 	errStr := ""
@@ -1163,7 +1164,8 @@ func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
 // SSRtx.
 func (s StakeStore) HandleMissedTicketsNtfn(blockHash *chainhash.Hash,
 	blockHeight int64,
-	tickets []*chainhash.Hash) ([]*StakeNotification, error) {
+	tickets []*chainhash.Hash,
+	allowHighFees bool) ([]*StakeNotification, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -1194,7 +1196,7 @@ func (s StakeStore) HandleMissedTicketsNtfn(blockHash *chainhash.Hash,
 	// Matching tickets, generate some SSRtx.
 	for i, ticket := range ticketsToPull {
 		ntfns[i], revocationErrors[i] = s.generateRevocation(blockHash,
-			blockHeight, ticket)
+			blockHeight, ticket, allowHighFees)
 	}
 
 	errStr := ""

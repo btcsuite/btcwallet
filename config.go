@@ -43,6 +43,7 @@ const (
 	defaultPromptPass          = false
 	defaultAddrIdxScanLen      = 750
 	defaultStakePoolColdExtKey = ""
+	defaultAllowHighFees       = false
 
 	walletDbName = "wallet.db"
 )
@@ -93,6 +94,7 @@ type config struct {
 	PoolFees            float64 `long:"poolfees" description:"The per-ticket fee mandated by the ticket pool as a percent (e.g. 1.00 for 1.00% fee)"`
 	AddrIdxScanLen      int     `long:"addridxscanlen" description:"The width of the scan for last used addresses on wallet restore and start up (default: 750)"`
 	StakePoolColdExtKey string  `long:"stakepoolcoldextkey" description:"Enables the wallet as a stake pool with an extended key in the format of \"xpub...:index\" to derive cold wallet addresses to send fees to"`
+	AllowHighFees       bool    `long:"allowhighfees" description:"Force the RPC client to use the 'allowHighFees' flag when sending transactions"`
 
 	// RPC client options
 	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:18556)"`
@@ -272,6 +274,7 @@ func loadConfig() (*config, []string, error) {
 		UnsafeMainNet:          defaultUnsafeMainNet,
 		AddrIdxScanLen:         defaultAddrIdxScanLen,
 		StakePoolColdExtKey:    defaultStakePoolColdExtKey,
+		AllowHighFees:          defaultAllowHighFees,
 	}
 
 	// A config file in the current directory takes precedence.

@@ -104,7 +104,8 @@ func walletMain() error {
 		StakePoolColdExtKey: cfg.StakePoolColdExtKey,
 	}
 	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
-		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen)
+		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen,
+		cfg.AllowHighFees)
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client

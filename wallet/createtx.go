@@ -448,7 +448,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 			" %v from imported account into default account.", changeAmount)
 	}
 
-	_, err = chainClient.SendRawTransaction(tx.Tx, false)
+	_, err = chainClient.SendRawTransaction(tx.Tx, w.AllowHighFees)
 	if err != nil {
 		return nil, err
 	}
@@ -648,7 +648,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 		return txToMultisigError(err)
 	}
 
-	_, err = chainClient.SendRawTransaction(msgtx, false)
+	_, err = chainClient.SendRawTransaction(msgtx, w.AllowHighFees)
 	if err != nil {
 		return txToMultisigError(err)
 	}
@@ -811,7 +811,7 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 		return nil, err
 	}
 
-	txSha, err := chainClient.SendRawTransaction(msgtx, false)
+	txSha, err := chainClient.SendRawTransaction(msgtx, w.AllowHighFees)
 	if err != nil {
 		return nil, err
 	}
@@ -910,7 +910,7 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 		return err
 	}
 
-	txSha, err := chainClient.SendRawTransaction(msgtx, false)
+	txSha, err := chainClient.SendRawTransaction(msgtx, w.AllowHighFees)
 	if err != nil {
 		return err
 	}
@@ -1365,7 +1365,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		}
 
 		// Send the ticket over the network.
-		txSha, err := chainClient.SendRawTransaction(ticket, false)
+		txSha, err := chainClient.SendRawTransaction(ticket, w.AllowHighFees)
 		if err != nil {
 			return nil, err
 		}

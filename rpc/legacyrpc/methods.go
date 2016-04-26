@@ -2982,7 +2982,7 @@ func SendToSStx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient
 		}
 	}
 
-	txSha, err := chainClient.SendRawTransaction(createdTx.MsgTx, false)
+	txSha, err := chainClient.SendRawTransaction(createdTx.MsgTx, w.AllowHighFees)
 	if err != nil {
 		return nil, err
 	}
@@ -3063,7 +3063,7 @@ func SendToSSRtx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClien
 		}
 	}
 
-	txSha, err := chainClient.SendRawTransaction(createdTx.MsgTx, false)
+	txSha, err := chainClient.SendRawTransaction(createdTx.MsgTx, w.AllowHighFees)
 	if err != nil {
 		return nil, err
 	}
@@ -3594,7 +3594,7 @@ func SignRawTransactions(icmd interface{}, w *wallet.Wallet, chainClient *chain.
 				}
 				sent := false
 				hashStr := ""
-				hash, err := chainClient.SendRawTransaction(msgTx, false)
+				hash, err := chainClient.SendRawTransaction(msgTx, w.AllowHighFees)
 				// If sendrawtransaction errors out (blockchain rule
 				// issue, etc), continue onto the next transaction.
 				if err == nil {
