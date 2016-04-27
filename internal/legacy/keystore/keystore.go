@@ -22,12 +22,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/internal/legacy/rename"
+	"github.com/jadeblaquiere/btcd/btcec"
+	"github.com/jadeblaquiere/btcd/chaincfg"
+	"github.com/jadeblaquiere/btcd/txscript"
+	"github.com/jadeblaquiere/btcd/wire"
+	"github.com/jadeblaquiere/btcutil"
+	"github.com/jadeblaquiere/btcwallet/internal/legacy/rename"
 	"github.com/btcsuite/golangcrypto/ripemd160"
 )
 

@@ -4,7 +4,7 @@
 
 package netparams
 
-import "github.com/btcsuite/btcd/chaincfg"
+import "github.com/jadeblaquiere/btcd/chaincfg"
 
 // Params is used to group parameters for various networks such as the main
 // network and test networks.
@@ -36,4 +36,12 @@ var SimNetParams = Params{
 	Params:        &chaincfg.SimNetParams,
 	RPCClientPort: "18556",
 	RPCServerPort: "18554",
+}
+
+// CTRedNetParams contains parameters specific to the simulation test network
+// (wire.SimNet).
+var CTRedNetParams = Params{
+	Params:        &chaincfg.CTRedNetParams,
+	RPCClientPort: "17762",
+	RPCServerPort: "17763",
 }

@@ -10,14 +10,14 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
-	"github.com/btcsuite/btcwallet/internal/zero"
-	"github.com/btcsuite/btcwallet/snacl"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/jadeblaquiere/btcd/btcec"
+	"github.com/jadeblaquiere/btcd/chaincfg"
+	"github.com/jadeblaquiere/btcd/wire"
+	"github.com/jadeblaquiere/btcutil"
+	"github.com/jadeblaquiere/btcutil/hdkeychain"
+	"github.com/jadeblaquiere/btcwallet/internal/zero"
+	"github.com/jadeblaquiere/btcwallet/snacl"
+	"github.com/jadeblaquiere/btcwallet/walletdb"
 )
 
 const (

@@ -10,11 +10,11 @@ import (
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcrpcclient"
-	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
-	"github.com/btcsuite/btcwallet/rpc/rpcserver"
-	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/jadeblaquiere/btcwallet/chain"
+	"github.com/jadeblaquiere/btcwallet/rpc/legacyrpc"
+	"github.com/jadeblaquiere/btcwallet/rpc/rpcserver"
+	"github.com/jadeblaquiere/btcwallet/wallet"
+	"github.com/jadeblaquiere/btcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
 )
 

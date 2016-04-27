@@ -10,9 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/jadeblaquiere/btcutil"
+	"github.com/jadeblaquiere/btcwallet/walletdb"
+	_ "github.com/jadeblaquiere/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/go-flags"
 )
 

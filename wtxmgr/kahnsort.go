@@ -5,7 +5,7 @@
 package wtxmgr
 
 import (
-	"github.com/btcsuite/btcd/wire"
+	"github.com/jadeblaquiere/btcd/wire"
 )
 
 type graphNode struct {

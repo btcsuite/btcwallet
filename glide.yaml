@@ -1,7 +1,7 @@
-package: github.com/btcsuite/btcwallet
+package: github.com/jadeblaquiere/btcwallet
 import:
 - package: github.com/btcsuite/bolt
-- package: github.com/btcsuite/btcd
+- package: github.com/jadeblaquiere/btcd
   subpackages:
   - blockchain
   - btcec
@@ -10,8 +10,8 @@ import:
   - txscript
   - wire
 - package: github.com/btcsuite/btclog
-- package: github.com/btcsuite/btcrpcclient
-- package: github.com/btcsuite/btcutil
+- package: github.com/jadeblaquiere/btcrpcclient
+- package: github.com/jadeblaquiere/btcutil
   subpackages:
   - hdkeychain
 - package: github.com/btcsuite/fastsha256

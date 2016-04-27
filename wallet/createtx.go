@@ -8,14 +8,14 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wallet/txauthor"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/jadeblaquiere/btcd/blockchain"
+	"github.com/jadeblaquiere/btcd/btcec"
+	"github.com/jadeblaquiere/btcd/txscript"
+	"github.com/jadeblaquiere/btcd/wire"
+	"github.com/jadeblaquiere/btcutil"
+	"github.com/jadeblaquiere/btcwallet/waddrmgr"
+	"github.com/jadeblaquiere/btcwallet/wallet/txauthor"
+	"github.com/jadeblaquiere/btcwallet/wtxmgr"
 )
 
 // byAmount defines the methods needed to satisify sort.Interface to

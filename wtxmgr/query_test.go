@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	. "github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/jadeblaquiere/btcd/wire"
+	"github.com/jadeblaquiere/btcutil"
+	. "github.com/jadeblaquiere/btcwallet/wtxmgr"
 )
 
 type queryState struct {

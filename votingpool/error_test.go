@@ -7,7 +7,7 @@ package votingpool_test
 import (
 	"testing"
 
-	vp "github.com/btcsuite/btcwallet/votingpool"
+	vp "github.com/jadeblaquiere/btcwallet/votingpool"
 )
 
 // TestErrorCodeStringer tests that all error codes has a text
