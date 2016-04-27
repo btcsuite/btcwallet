@@ -366,7 +366,7 @@ if (os.platform == 'win32') {
 }
 
 var cert = fs.readFileSync(certPath);
-var creds = grpc.Credentials.createSsl(cert);
+var creds = grpc.credentials.createSsl(cert);
 var client = new walletrpc.WalletService('localhost:18332', creds);
 
 var request = {
