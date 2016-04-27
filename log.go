@@ -9,7 +9,7 @@ import (
 	"os"
 
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcrpcclient"
+	"github.com/jadeblaquiere/btcrpcclient"
 	"github.com/jadeblaquiere/btcwallet/chain"
 	"github.com/jadeblaquiere/btcwallet/rpc/legacyrpc"
 	"github.com/jadeblaquiere/btcwallet/rpc/rpcserver"

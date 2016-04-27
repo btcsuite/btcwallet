@@ -19,7 +19,7 @@ import (
 	"github.com/jadeblaquiere/btcd/chaincfg"
 	"github.com/jadeblaquiere/btcd/txscript"
 	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/btcsuite/btcrpcclient"
+	"github.com/jadeblaquiere/btcrpcclient"
 	"github.com/jadeblaquiere/btcutil"
 	"github.com/jadeblaquiere/btcwallet/chain"
 	"github.com/jadeblaquiere/btcwallet/waddrmgr"

@@ -28,7 +28,7 @@ import (
 	"github.com/jadeblaquiere/btcd/blockchain"
 	"github.com/jadeblaquiere/btcd/txscript"
 	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/btcsuite/btcrpcclient"
+	"github.com/jadeblaquiere/btcrpcclient"
 	"github.com/jadeblaquiere/btcutil"
 	"github.com/jadeblaquiere/btcutil/hdkeychain"
 	"github.com/jadeblaquiere/btcwallet/chain"

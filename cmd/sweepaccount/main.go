@@ -13,7 +13,7 @@ import (
 	"github.com/jadeblaquiere/btcd/btcjson"
 	"github.com/jadeblaquiere/btcd/txscript"
 	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/btcsuite/btcrpcclient"
+	"github.com/jadeblaquiere/btcrpcclient"
 	"github.com/jadeblaquiere/btcutil"
 	"github.com/jadeblaquiere/btcwallet/internal/cfgutil"
 	"github.com/jadeblaquiere/btcwallet/netparams"
