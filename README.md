@@ -73,6 +73,10 @@ Building or updating from source requires the following build dependencies:
   Installation instructions can be found here: http://golang.org/doc/install.
   It is recommended to add `$GOPATH/bin` to your `PATH` at this point.
 
+  **Note:** If you are using Go 1.5, you must manually enable the vendor
+    experiment by setting the `GO15VENDOREXPERIMENT` environment variable to
+    `1`.  This step is not required for Go 1.6.
+
 - **Glide**
 
   Glide is used to manage project dependencies and provide reproducible builds.
