@@ -3,10 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // This file implements range-based zeroing, which as of Go 1.5 is
-// optimized using a Duff's device.  See slice14.go for an implementation
-// optimized for previous Go versions.
-//
-// +build !go1.3,!go1.4
+// optimized using a Duff's device.
 
 package zero
 
