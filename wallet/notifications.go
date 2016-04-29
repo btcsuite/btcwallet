@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -119,23 +119,16 @@ func makeTxSummary(w *Wallet, details *wtxmgr.TxDetails) TransactionSummary {
 	}
 	outputs := make([]TransactionSummaryOutput, 0, len(details.MsgTx.TxOut))
 	var credIndex int
-	for i, txOut := range details.MsgTx.TxOut {
+	for i := range details.MsgTx.TxOut {
 		mine := len(details.Credits) > credIndex && details.Credits[credIndex].Index == uint32(i)
-		output := TransactionSummaryOutput{
-			Index:  uint32(i),
-			Amount: btcutil.Amount(txOut.Value),
-			Mine:   mine,
+		if !mine {
+			continue
 		}
-		if mine {
-			acct, internal := lookupOutputChain(w, details, details.Credits[credIndex])
-			output.Account = acct
-			output.Internal = internal
-			credIndex++
-		} else {
-			_, addresses, _, err := txscript.ExtractPkScriptAddrs(txOut.PkScript, w.chainParams)
-			if err == nil {
-				output.Addresses = addresses
-			}
+		acct, internal := lookupOutputChain(w, details, details.Credits[credIndex])
+		output := TransactionSummaryOutput{
+			Index:    uint32(i),
+			Account:  acct,
+			Internal: internal,
 		}
 		outputs = append(outputs, output)
 	}
@@ -143,7 +136,7 @@ func makeTxSummary(w *Wallet, details *wtxmgr.TxDetails) TransactionSummary {
 		Hash:        &details.Hash,
 		Transaction: serializedTx,
 		MyInputs:    inputs,
-		Outputs:     outputs,
+		MyOutputs:   outputs,
 		Fee:         fee,
 		Timestamp:   details.Received.Unix(),
 	}
@@ -185,7 +178,7 @@ func relevantAccounts(w *Wallet, m map[uint32]btcutil.Amount, txs []TransactionS
 		for _, d := range tx.MyInputs {
 			m[d.PreviousAccount] = 0
 		}
-		for _, c := range tx.Outputs {
+		for _, c := range tx.MyOutputs {
 			m[c.Account] = 0
 		}
 	}
@@ -356,7 +349,7 @@ type TransactionSummary struct {
 	Hash        *wire.ShaHash
 	Transaction []byte
 	MyInputs    []TransactionSummaryInput
-	Outputs     []TransactionSummaryOutput
+	MyOutputs   []TransactionSummaryOutput
 	Fee         btcutil.Amount
 	Timestamp   int64
 }
@@ -371,23 +364,13 @@ type TransactionSummaryInput struct {
 	PreviousAmount  btcutil.Amount
 }
 
-// TransactionSummaryOutput describes a transaction output of a relevant
-// transaction.  When the transaction is authored by this wallet, all
-// transaction outputs are considered relevant.  The Mine field describes
-// whether outputs to these authored transactions pay back to the wallet
-// (e.g. change) or create an uncontrolled output.  For convenience, the
-// addresses (if any) of an uncontrolled output are included.
+// TransactionSummaryOutput describes wallet properties of a transaction output
+// controlled by the wallet.  The Index field marks the transaction output index
+// of the transaction (not included here).
 type TransactionSummaryOutput struct {
-	Index  uint32
-	Amount btcutil.Amount
-	Mine   bool
-
-	// Only relevant if mine==true.
+	Index    uint32
 	Account  uint32
 	Internal bool
-
-	// Only relevant if mine==false.
-	Addresses []btcutil.Address
 }
 
 // AccountBalance associates a total (zero confirmation) balance with an

@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 1.0.0
+Version: 2.0.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -958,23 +958,17 @@ transaction was seen.
 
   - `int64 previous_amount`: The previous output value.
 
-- `repeated Output outputs`: Properties for every transaction output.  Every
-  transaction output has a corresponding properties message in this repeated
-  field.
+- `repeated Output credits`: Properties for every output controlled by the wallet.
 
   **Nested message:** `Output`
 
-  - `bool mine`: Whether the output is controlled by the wallet.
+  - `uint32 index`: The transaction output index of the output being reported.
 
-  - `uint32 account`: The account number of the controlled output.  This field
-    is only relevant if `mine` is true.
+  - `uint32 account`: The account number of the controlled output.
 
   - `bool internal`: Whether the output pays to an address derived from the
     account's internal key series.  This often means the output is a change
-    output.  This field is only relevant if `mine` is true.
-
-  - `repeated string addresses`: The payment address string(s) this output pays
-    to.  This is only relevant if `mine` is false.
+    output.
 
 - `int64 fee`: The transaction fee, if calculable.  The fee is only calculable
   when every previous output spent by this transaction is also recorded by
@@ -984,5 +978,5 @@ transaction was seen.
   seen.
 
 **Stability**: Unstable: Since the caller is expected to decode the serialized
-  transaction, and would have access to every output script, The output
+  transaction, and would have access to every output script, the output
   properties could be changed to only include outputs controlled by the wallet.

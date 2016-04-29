@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -47,7 +49,7 @@ type config struct {
 	ShowVersion   bool   `short:"V" long:"version" description:"Display version information and exit"`
 	Create        bool   `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp    bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	AppDataDir    string `short:"A" long:"appdata" description:"Application data directory to save wallet database and logs"`
+	AppDataDir    string `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
 	TestNet3      bool   `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
 	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	CTRedNet      bool   `long:"ctrednet" description:"Use the ciphrtxt red test network (default mainnet)"`
@@ -100,16 +102,50 @@ type config struct {
 // cleanAndExpandPath expands environement variables and leading ~ in the
 // passed path, cleans the result, and returns it.
 func cleanAndExpandPath(path string) string {
-	// Expand initial ~ to OS specific home directory.
-	if strings.HasPrefix(path, "~") {
-		homeDir := filepath.Dir(defaultAppDataDir)
-		path = strings.Replace(path, "~", homeDir, 1)
-	}
-
 	// NOTE: The os.ExpandEnv doesn't work with Windows cmd.exe-style
 	// %VARIABLE%, but they variables can still be expanded via POSIX-style
 	// $VARIABLE.
-	return filepath.Clean(os.ExpandEnv(path))
+	path = os.ExpandEnv(path)
+
+	if !strings.HasPrefix(path, "~") {
+		return filepath.Clean(path)
+	}
+
+	// Expand initial ~ to the current user's home directory, or ~otheruser
+	// to otheruser's home directory.  On Windows, both forward and backward
+	// slashes can be used.
+	path = path[1:]
+
+	var pathSeparators string
+	if runtime.GOOS == "windows" {
+		pathSeparators = string(os.PathSeparator) + "/"
+	} else {
+		pathSeparators = string(os.PathSeparator)
+	}
+
+	userName := ""
+	if i := strings.IndexAny(path, pathSeparators); i != -1 {
+		userName = path[:i]
+		path = path[i:]
+	}
+
+	homeDir := ""
+	var u *user.User
+	var err error
+	if userName == "" {
+		u, err = user.Current()
+	} else {
+		u, err = user.Lookup(userName)
+	}
+	if err == nil {
+		homeDir = u.HomeDir
+	}
+	// Fallback to CWD if user lookup fails or user has no home directory.
+	if homeDir == "" {
+		homeDir = "."
+	}
+
+	return filepath.Join(homeDir, path)
 }
 
 // validLogLevel returns whether or not logLevel is a valid debug log level.
@@ -248,7 +284,19 @@ func loadConfig() (*config, []string, error) {
 	// Load additional config from file.
 	var configFileError error
 	parser := flags.NewParser(&cfg, flags.Default)
-	err = flags.NewIniParser(parser).ParseFile(preCfg.ConfigFile)
+	configFilePath := preCfg.ConfigFile
+	if configFilePath == defaultConfigFile {
+		appDataDir := preCfg.AppDataDir
+		if appDataDir == defaultAppDataDir && preCfg.DataDir != defaultAppDataDir {
+			appDataDir = cleanAndExpandPath(preCfg.DataDir)
+		}
+		if appDataDir != defaultAppDataDir {
+			configFilePath = filepath.Join(appDataDir, defaultConfigFilename)
+		}
+	} else {
+		configFilePath = cleanAndExpandPath(configFilePath)
+	}
+	err = flags.NewIniParser(parser).ParseFile(configFilePath)
 	if err != nil {
 		if _, ok := err.(*os.PathError); !ok {
 			fmt.Fprintln(os.Stderr, err)
@@ -288,6 +336,7 @@ func loadConfig() (*config, []string, error) {
 	// relative to the data dir are unchanged, modify each path to be
 	// relative to the new data dir.
 	if cfg.AppDataDir != defaultAppDataDir {
+		cfg.AppDataDir = cleanAndExpandPath(cfg.AppDataDir)
 		if cfg.RPCKey == defaultRPCKeyFile {
 			cfg.RPCKey = filepath.Join(cfg.AppDataDir, "rpc.key")
 		}
@@ -582,6 +631,8 @@ func loadConfig() (*config, []string, error) {
 
 	// Expand environment variable and leading ~ for filepaths.
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
+	cfg.RPCCert = cleanAndExpandPath(cfg.RPCCert)
+	cfg.RPCKey = cleanAndExpandPath(cfg.RPCKey)
 
 	// If the btcd username or password are unset, use the same auth as for
 	// the client.  The two settings were previously shared for btcd and
