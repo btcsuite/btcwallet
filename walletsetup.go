@@ -10,16 +10,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jadeblaquiere/btcd/btcec"
-	"github.com/jadeblaquiere/btcd/chaincfg"
-	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/jadeblaquiere/btcutil"
-	"github.com/jadeblaquiere/btcwallet/internal/legacy/keystore"
-	"github.com/jadeblaquiere/btcwallet/internal/prompt"
-	"github.com/jadeblaquiere/btcwallet/waddrmgr"
-	"github.com/jadeblaquiere/btcwallet/wallet"
-	"github.com/jadeblaquiere/btcwallet/walletdb"
-	_ "github.com/jadeblaquiere/btcwallet/walletdb/bdb"
+	"github.com/jadeblaquiere/ctcd/btcec"
+	"github.com/jadeblaquiere/ctcd/chaincfg"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/internal/legacy/keystore"
+	"github.com/jadeblaquiere/ctcwallet/internal/prompt"
+	"github.com/jadeblaquiere/ctcwallet/waddrmgr"
+	"github.com/jadeblaquiere/ctcwallet/wallet"
+	"github.com/jadeblaquiere/ctcwallet/walletdb"
+	_ "github.com/jadeblaquiere/ctcwallet/walletdb/bdb"
 )
 
 // networkDir returns the directory name of a network directory to hold wallet

@@ -13,9 +13,9 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/jadeblaquiere/btcwallet/chain"
-	"github.com/jadeblaquiere/btcwallet/rpc/legacyrpc"
-	"github.com/jadeblaquiere/btcwallet/wallet"
+	"github.com/jadeblaquiere/ctcwallet/chain"
+	"github.com/jadeblaquiere/ctcwallet/rpc/legacyrpc"
+	"github.com/jadeblaquiere/ctcwallet/wallet"
 )
 
 var (

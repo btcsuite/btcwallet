@@ -11,11 +11,11 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jadeblaquiere/btcd/chaincfg"
-	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/jadeblaquiere/btcutil"
-	"github.com/jadeblaquiere/btcwallet/waddrmgr"
-	"github.com/jadeblaquiere/btcwallet/walletdb"
+	"github.com/jadeblaquiere/ctcd/chaincfg"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/waddrmgr"
+	"github.com/jadeblaquiere/ctcwallet/walletdb"
 )
 
 // newShaHash converts the passed big-endian hex string into a wire.ShaHash.

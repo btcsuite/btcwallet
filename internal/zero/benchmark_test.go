@@ -7,7 +7,7 @@ package zero_test
 import (
 	"testing"
 
-	. "github.com/jadeblaquiere/btcwallet/internal/zero"
+	. "github.com/jadeblaquiere/ctcwallet/internal/zero"
 )
 
 var (

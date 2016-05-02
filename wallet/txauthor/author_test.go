@@ -7,12 +7,12 @@ package txauthor_test
 import (
 	"testing"
 
-	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/jadeblaquiere/btcutil"
-	. "github.com/jadeblaquiere/btcwallet/wallet/txauthor"
-	"github.com/jadeblaquiere/btcwallet/wallet/txrules"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcutil"
+	. "github.com/jadeblaquiere/ctcwallet/wallet/txauthor"
+	"github.com/jadeblaquiere/ctcwallet/wallet/txrules"
 
-	"github.com/jadeblaquiere/btcwallet/wallet/internal/txsizes"
+	"github.com/jadeblaquiere/ctcwallet/wallet/internal/txsizes"
 )
 
 func p2pkhOutputs(amounts ...btcutil.Amount) []*wire.TxOut {

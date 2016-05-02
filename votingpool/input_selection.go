@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/jadeblaquiere/btcd/chaincfg"
-	"github.com/jadeblaquiere/btcd/txscript"
-	"github.com/jadeblaquiere/btcutil"
-	"github.com/jadeblaquiere/btcwallet/wtxmgr"
+	"github.com/jadeblaquiere/ctcd/chaincfg"
+	"github.com/jadeblaquiere/ctcd/txscript"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
 )
 
 const eligibleInputMinConfirmations = 100

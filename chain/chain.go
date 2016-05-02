@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jadeblaquiere/btcd/btcjson"
-	"github.com/jadeblaquiere/btcd/chaincfg"
-	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/jadeblaquiere/btcrpcclient"
-	"github.com/jadeblaquiere/btcutil"
-	"github.com/jadeblaquiere/btcwallet/waddrmgr"
-	"github.com/jadeblaquiere/btcwallet/wtxmgr"
+	"github.com/jadeblaquiere/ctcd/btcjson"
+	"github.com/jadeblaquiere/ctcd/chaincfg"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcrpcclient"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/waddrmgr"
+	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
 )
 
 // RPCClient represents a persistent client connection to a bitcoin RPC server

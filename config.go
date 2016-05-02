@@ -14,17 +14,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jadeblaquiere/btcutil"
-	"github.com/jadeblaquiere/btcwallet/internal/cfgutil"
-	"github.com/jadeblaquiere/btcwallet/internal/legacy/keystore"
-	"github.com/jadeblaquiere/btcwallet/netparams"
-	"github.com/jadeblaquiere/btcwallet/wallet"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/internal/cfgutil"
+	"github.com/jadeblaquiere/ctcwallet/internal/legacy/keystore"
+	"github.com/jadeblaquiere/ctcwallet/netparams"
+	"github.com/jadeblaquiere/ctcwallet/wallet"
 	flags "github.com/btcsuite/go-flags"
 )
 
 const (
-	defaultCAFilename       = "btcd.cert"
-	defaultConfigFilename   = "btcwallet.conf"
+	defaultCAFilename       = "ctcd.cert"
+	defaultConfigFilename   = "ctcwallet.conf"
 	defaultLogLevel         = "info"
 	defaultLogDirname       = "logs"
 	defaultLogFilename      = "btcwallet.log"
@@ -35,8 +35,8 @@ const (
 )
 
 var (
-	btcdDefaultCAFile  = filepath.Join(btcutil.AppDataDir("btcd", false), "rpc.cert")
-	defaultAppDataDir  = btcutil.AppDataDir("btcwallet", false)
+	btcdDefaultCAFile  = filepath.Join(btcutil.AppDataDir("ctcd", false), "rpc.cert")
+	defaultAppDataDir  = btcutil.AppDataDir("ctcwallet", false)
 	defaultConfigFile  = filepath.Join(defaultAppDataDir, defaultConfigFilename)
 	defaultRPCKeyFile  = filepath.Join(defaultAppDataDir, "rpc.key")
 	defaultRPCCertFile = filepath.Join(defaultAppDataDir, "rpc.cert")

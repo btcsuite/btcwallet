@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/jadeblaquiere/btcd/txscript"
-	"github.com/jadeblaquiere/btcutil"
-	"github.com/jadeblaquiere/btcutil/hdkeychain"
-	"github.com/jadeblaquiere/btcwallet/internal/zero"
-	"github.com/jadeblaquiere/btcwallet/waddrmgr"
-	"github.com/jadeblaquiere/btcwallet/walletdb"
+	"github.com/jadeblaquiere/ctcd/txscript"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcutil/hdkeychain"
+	"github.com/jadeblaquiere/ctcwallet/internal/zero"
+	"github.com/jadeblaquiere/ctcwallet/waddrmgr"
+	"github.com/jadeblaquiere/ctcwallet/walletdb"
 )
 
 const (

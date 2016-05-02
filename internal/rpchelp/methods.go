@@ -6,7 +6,7 @@
 
 package rpchelp
 
-import "github.com/jadeblaquiere/btcd/btcjson"
+import "github.com/jadeblaquiere/ctcd/btcjson"
 
 // Common return types.
 var (

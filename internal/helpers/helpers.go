@@ -7,8 +7,8 @@
 package helpers
 
 import (
-	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/jadeblaquiere/btcutil"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcutil"
 )
 
 // SumOutputValues sums up the list of TxOuts and returns an Amount.

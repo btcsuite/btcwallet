@@ -8,14 +8,14 @@ package txauthor
 import (
 	"errors"
 
-	"github.com/jadeblaquiere/btcd/chaincfg"
-	"github.com/jadeblaquiere/btcd/txscript"
-	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/jadeblaquiere/btcutil"
-	"github.com/jadeblaquiere/btcwallet/wallet/txrules"
+	"github.com/jadeblaquiere/ctcd/chaincfg"
+	"github.com/jadeblaquiere/ctcd/txscript"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/wallet/txrules"
 
-	h "github.com/jadeblaquiere/btcwallet/internal/helpers"
-	"github.com/jadeblaquiere/btcwallet/wallet/internal/txsizes"
+	h "github.com/jadeblaquiere/ctcwallet/internal/helpers"
+	"github.com/jadeblaquiere/ctcwallet/wallet/internal/txsizes"
 )
 
 // InputSource provides transaction inputs referencing spendable outputs to

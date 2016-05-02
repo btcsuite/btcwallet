@@ -3,8 +3,8 @@ package txsizes_test
 import (
 	"testing"
 
-	"github.com/jadeblaquiere/btcd/wire"
-	. "github.com/jadeblaquiere/btcwallet/wallet/internal/txsizes"
+	"github.com/jadeblaquiere/ctcd/wire"
+	. "github.com/jadeblaquiere/ctcwallet/wallet/internal/txsizes"
 )
 
 const (

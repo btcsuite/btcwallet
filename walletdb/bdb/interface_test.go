@@ -17,7 +17,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jadeblaquiere/btcwallet/walletdb"
+	"github.com/jadeblaquiere/ctcwallet/walletdb"
 )
 
 // subTestFailError is used to signal that a sub test returned false.

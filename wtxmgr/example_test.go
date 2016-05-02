@@ -7,8 +7,8 @@ package wtxmgr_test
 import (
 	"fmt"
 
-	"github.com/jadeblaquiere/btcd/wire"
-	"github.com/jadeblaquiere/btcwallet/wtxmgr"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
 )
 
 var (

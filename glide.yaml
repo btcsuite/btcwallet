@@ -1,4 +1,4 @@
-package: github.com/jadeblaquiere/btcwallet
+package: github.com/jadeblaquiere/ctcwallet
 import:
 - package: github.com/btcsuite/bolt
 - package: github.com/btcsuite/btclog
@@ -15,7 +15,7 @@ import:
 - package: github.com/golang/protobuf
   subpackages:
   - proto
-- package: github.com/jadeblaquiere/btcd
+- package: github.com/jadeblaquiere/ctcd
   subpackages:
   - blockchain
   - btcec
@@ -23,8 +23,8 @@ import:
   - chaincfg
   - txscript
   - wire
-- package: github.com/jadeblaquiere/btcrpcclient
-- package: github.com/jadeblaquiere/btcutil
+- package: github.com/jadeblaquiere/ctcrpcclient
+- package: github.com/jadeblaquiere/ctcutil
   subpackages:
   - hdkeychain
 - package: golang.org/x/net

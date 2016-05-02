@@ -52,12 +52,12 @@ import (
 	"fmt"
 	"path/filepath"
 
-	pb "github.com/jadeblaquiere/btcwallet/rpc/walletrpc"
+	pb "github.com/jadeblaquiere/ctcwallet/rpc/walletrpc"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/jadeblaquiere/btcutil"
+	"github.com/jadeblaquiere/ctcutil"
 )
 
 var certificateFile = filepath.Join(btcutil.AppDataDir("btcwallet", false), "rpc.cert")

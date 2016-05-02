@@ -4,6 +4,6 @@
 
 package main
 
-import "github.com/jadeblaquiere/btcwallet/netparams"
+import "github.com/jadeblaquiere/ctcwallet/netparams"
 
 var activeNet = &netparams.MainNetParams
