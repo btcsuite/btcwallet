@@ -336,11 +336,14 @@ func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time
 // downstream to the notifications queue.
 func (c *RPCClient) onReorganization(oldHash *chainhash.Hash, oldHeight int32,
 	newHash *chainhash.Hash, newHeight int32) {
-	c.enqueueNotification <- Reorganization{
+	select {
+	case c.enqueueNotification <- Reorganization{
 		oldHash,
 		int64(oldHeight),
 		newHash,
 		int64(newHeight),
+	}:
+	case <-c.quit:
 	}
 }
 
@@ -348,10 +351,13 @@ func (c *RPCClient) onReorganization(oldHash *chainhash.Hash, oldHeight int32,
 // downstream to the notifications queue.
 func (c *RPCClient) onWinningTickets(hash *chainhash.Hash, height int64,
 	tickets []*chainhash.Hash) {
-	c.enqueueVotingNotification <- WinningTickets{
+	select {
+	case c.enqueueVotingNotification <- WinningTickets{
 		hash,
 		height,
 		tickets,
+	}:
+	case <-c.quit:
 	}
 }
 
@@ -372,10 +378,13 @@ func (c *RPCClient) onSpentAndMissedTickets(hash *chainhash.Hash,
 		}
 	}
 
-	c.enqueueVotingNotification <- MissedTickets{
+	select {
+	case c.enqueueVotingNotification <- MissedTickets{
 		hash,
 		height,
 		missedTickets,
+	}:
+	case <-c.quit:
 	}
 }
 
@@ -385,10 +394,13 @@ func (c *RPCClient) onStakeDifficulty(hash *chainhash.Hash,
 	height int64,
 	stakeDiff int64) {
 
-	c.enqueueNotification <- StakeDifficulty{
+	select {
+	case c.enqueueNotification <- StakeDifficulty{
 		hash,
 		height,
 		stakeDiff,
+	}:
+	case <-c.quit:
 	}
 }
 
