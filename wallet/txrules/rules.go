@@ -3,8 +3,6 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-// Package txrules provides transaction rules that should be followed by
-// transaction authors for wide mempool acceptance and quick mining.
 package txrules
 
 import (

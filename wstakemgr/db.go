@@ -50,6 +50,24 @@ const (
 	// Size of a serialized ssrtxRecord.
 	// hash + uint32 + hash + uint64
 	ssrtxRecordSize = 32 + 4 + 32 + 8
+
+	// stakePoolUserTicketSize is the size
+	// of a serialized stake pool user
+	// ticket.
+	// hash + uint32 + uint8 + uint32 + hash
+	stakePoolUserTicketSize = 32 + 4 + 1 + 4 + 32
+
+	// stakePoolTicketsPrefixSize is the length of
+	// stakePoolTicketsPrefix.
+	stakePoolTicketsPrefixSize = 5
+
+	// stakePoolInvalidPrefixSize is the length of
+	// stakePoolInvalidPrefix.
+	stakePoolInvalidPrefixSize = 5
+
+	// scriptHashLen is the length of a HASH160
+	// hash.
+	scriptHashSize = 20
 )
 
 var (
@@ -61,6 +79,14 @@ var (
 	// sstxTicket2SHPrefix is the PkScript byte prefix for an SStx
 	// P2SH ticket output.
 	sstxTicket2SHPrefix = []byte{0xba, 0xa9, 0x14}
+
+	// stakePoolTicketsPrefix is the byte slice prefix for valid
+	// tickets in the stake pool for a given user.
+	stakePoolTicketsPrefix = []byte("tickt")
+
+	// stakePoolInvalidPrefix is the byte slice prefix for invalid
+	// tickets in the stake pool for a given user.
+	stakePoolInvalidPrefix = []byte("invld")
 )
 
 // byteOrder refers to the endianness used to encode data.
@@ -827,7 +853,359 @@ func putSSRtxRecord(tx walletdb.Tx, hash *chainhash.Hash,
 	return updateSSRtxRecord(tx, hash, record)
 }
 
-// putMeta
+// deserializeUserTicket deserializes the passed serialized user
+// ticket information.
+func deserializeUserTicket(serializedTicket []byte) (*PoolTicket,
+	error) {
+
+	// Cursory check to make sure that the size of the
+	// ticket makes sense.
+	if len(serializedTicket)%stakePoolUserTicketSize != 0 {
+		str := "serialized pool ticket record was wrong size"
+		return nil, stakeStoreError(ErrDatabase, str, nil)
+	}
+
+	record := new(PoolTicket)
+
+	curPos := 0
+
+	// Insert the ticket hash into the record.
+	copy(record.Ticket[:], serializedTicket[curPos:curPos+hashSize])
+	curPos += hashSize
+
+	// Insert the ticket height into the record.
+	record.HeightTicket = byteOrder.Uint32(
+		serializedTicket[curPos : curPos+int32Size])
+	curPos += int32Size
+
+	// Insert the status into the record.
+	record.Status = TicketStatus(serializedTicket[curPos])
+	curPos += int8Size
+
+	// Insert the spent by height into the record.
+	record.HeightSpent = byteOrder.Uint32(
+		serializedTicket[curPos : curPos+int32Size])
+	curPos += int32Size
+
+	// Insert the spending hash into the record.
+	copy(record.SpentBy[:], serializedTicket[curPos:curPos+hashSize])
+	curPos += hashSize
+
+	return record, nil
+}
+
+// deserializeUserTickets deserializes the passed serialized pool
+// users tickets information.
+func deserializeUserTickets(serializedTickets []byte) ([]*PoolTicket,
+	error) {
+
+	// Cursory check to make sure that the number of records
+	// makes sense.
+	if len(serializedTickets)%stakePoolUserTicketSize != 0 {
+		err := io.ErrUnexpectedEOF
+		return nil, err
+	}
+
+	numRecords := len(serializedTickets) / stakePoolUserTicketSize
+
+	records := make([]*PoolTicket, numRecords)
+
+	// Loop through all the records, deserialize them, and
+	// store them.
+	for i := 0; i < numRecords; i++ {
+		record, err := deserializeUserTicket(
+			serializedTickets[i*stakePoolUserTicketSize : (i+
+				1)*stakePoolUserTicketSize])
+
+		if err != nil {
+			str := "problem deserializing stake pool user tickets"
+			return nil, stakeStoreError(ErrDatabase, str, err)
+		}
+
+		records[i] = record
+	}
+
+	return records, nil
+}
+
+// serializeUserTicket returns the serialization of a single stake pool
+// user ticket.
+func serializeUserTicket(record *PoolTicket) []byte {
+	buf := make([]byte, stakePoolUserTicketSize)
+
+	curPos := 0
+
+	// Write the ticket hash.
+	copy(buf[curPos:curPos+hashSize], record.Ticket[:])
+	curPos += hashSize
+
+	// Write the ticket block height.
+	byteOrder.PutUint32(buf[curPos:curPos+int32Size], record.HeightTicket)
+	curPos += int32Size
+
+	// Write the ticket status.
+	buf[curPos] = byte(record.Status)
+	curPos += int8Size
+
+	// Write the spending height.
+	byteOrder.PutUint32(buf[curPos:curPos+int32Size], record.HeightSpent)
+	curPos += int32Size
+
+	// Write the spending tx hash.
+	copy(buf[curPos:curPos+hashSize], record.SpentBy[:])
+	curPos += hashSize
+
+	return buf
+}
+
+// serializeUserTickets returns the serialization of the passed stake pool
+// user tickets slice.
+func serializeUserTickets(records []*PoolTicket) []byte {
+	numRecords := len(records)
+
+	buf := make([]byte, numRecords*stakePoolUserTicketSize)
+
+	// Serialize and write each record into the slice sequentially.
+	for i := 0; i < numRecords; i++ {
+		recordBytes := serializeUserTicket(records[i])
+
+		copy(buf[i*stakePoolUserTicketSize:(i+1)*stakePoolUserTicketSize],
+			recordBytes)
+	}
+
+	return buf
+}
+
+// fetchStakePoolUserTickets retrieves pool user tickets from the meta bucket with
+// the given hash.
+func fetchStakePoolUserTickets(tx walletdb.Tx,
+	scriptHash [20]byte) ([]*PoolTicket, error) {
+	bucket := tx.RootBucket().Bucket(metaBucketName)
+
+	key := make([]byte, stakePoolTicketsPrefixSize+scriptHashSize)
+	copy(key[0:stakePoolTicketsPrefixSize], stakePoolTicketsPrefix)
+	copy(key[stakePoolTicketsPrefixSize:stakePoolTicketsPrefixSize+scriptHashSize],
+		scriptHash[:])
+	val := bucket.Get(key)
+	if val == nil {
+		str := fmt.Sprintf("missing pool user ticket records for hash '%x'",
+			scriptHash)
+		return nil, stakeStoreError(ErrPoolUserTicketsNotFound, str, nil)
+	}
+
+	return deserializeUserTickets(val)
+}
+
+// duplicateExistsInUserTickets checks to see if an exact duplicated of a
+// record already exists in a slice of user ticket records.
+func duplicateExistsInUserTickets(record *PoolTicket,
+	records []*PoolTicket) bool {
+	for _, r := range records {
+		if *r == *record {
+			return true
+		}
+	}
+
+	return false
+}
+
+// recordExistsInUserTickets checks to see if a record already exists
+// in a slice of user ticket records. If it does exist, it returns
+// the location where it exists in the slice.
+func recordExistsInUserTickets(record *PoolTicket,
+	records []*PoolTicket) (bool, int) {
+	for i, r := range records {
+		if r.Ticket == record.Ticket {
+			return true, i
+		}
+	}
+
+	return false, 0
+}
+
+// updateStakePoolUserTickets updates a database entry for a pool user's tickets.
+// The function pulls the current entry in the database, checks to see if the
+// ticket is already there, updates it accordingly, or adds it to the list of
+// tickets.
+func updateStakePoolUserTickets(tx walletdb.Tx, scriptHash [20]byte,
+	record *PoolTicket) error {
+	// Fetch the current content of the key.
+	// Possible buggy behaviour: If deserialization fails,
+	// we won't detect it here. We assume we're throwing
+	// ErrPoolUserTicketsNotFound.
+	oldRecords, _ := fetchStakePoolUserTickets(tx, scriptHash)
+
+	// Don't reinsert duplicate records we already have.
+	if duplicateExistsInUserTickets(record, oldRecords) {
+		return nil
+	}
+
+	// Does this modify an old record? If so, modify the record
+	// itself and push. Otherwise, we need to insert a new
+	// record.
+	var records []*PoolTicket
+	preExists, loc := recordExistsInUserTickets(record, oldRecords)
+	if preExists {
+		records = oldRecords
+		records[loc] = record
+	} else {
+		// Either create a slice if currently nothing exists for this
+		// key in the db, or append the entry to the slice.
+		if oldRecords == nil {
+			records = make([]*PoolTicket, 1)
+			records[0] = record
+		} else {
+			records = append(oldRecords, record)
+		}
+	}
+
+	bucket := tx.RootBucket().Bucket(metaBucketName)
+	key := make([]byte, stakePoolTicketsPrefixSize+scriptHashSize)
+	copy(key[0:stakePoolTicketsPrefixSize], stakePoolTicketsPrefix)
+	copy(key[stakePoolTicketsPrefixSize:stakePoolTicketsPrefixSize+scriptHashSize],
+		scriptHash[:])
+
+	// Write the serialized ticket data keyed by the script.
+	serializedRecords := serializeUserTickets(records)
+
+	err := bucket.Put(key, serializedRecords)
+	if err != nil {
+		str := fmt.Sprintf("failed to store pool user ticket records '%x'",
+			scriptHash)
+		return stakeStoreError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// deserializeUserInvalTickets deserializes the passed serialized pool
+// users invalid tickets information.
+func deserializeUserInvalTickets(serializedTickets []byte) ([]*chainhash.Hash,
+	error) {
+
+	// Cursory check to make sure that the number of records
+	// makes sense.
+	if len(serializedTickets)%chainhash.HashSize != 0 {
+		err := io.ErrUnexpectedEOF
+		return nil, err
+	}
+
+	numRecords := len(serializedTickets) / chainhash.HashSize
+
+	records := make([]*chainhash.Hash, numRecords)
+
+	// Loop through all the ssgen records, deserialize them, and
+	// store them.
+	for i := 0; i < numRecords; i++ {
+		start := i * chainhash.HashSize
+		end := (i + 1) * chainhash.HashSize
+		h, err := chainhash.NewHash(serializedTickets[start:end])
+		if err != nil {
+			str := "problem deserializing stake pool invalid user tickets"
+			return nil, stakeStoreError(ErrDatabase, str, err)
+		}
+
+		records[i] = h
+	}
+
+	return records, nil
+}
+
+// serializeUserInvalTickets returns the serialization of the passed stake pool
+// invalid user tickets slice.
+func serializeUserInvalTickets(records []*chainhash.Hash) []byte {
+	numRecords := len(records)
+
+	buf := make([]byte, numRecords*chainhash.HashSize)
+
+	// Serialize and write each record into the slice sequentially.
+	for i := 0; i < numRecords; i++ {
+		start := i * chainhash.HashSize
+		end := (i + 1) * chainhash.HashSize
+		copy(buf[start:end], records[i][:])
+	}
+
+	return buf
+}
+
+// fetchStakePoolUserInvalTickets retrieves the list of invalid pool user tickets
+// from the meta bucket with the given hash.
+func fetchStakePoolUserInvalTickets(tx walletdb.Tx,
+	scriptHash [20]byte) ([]*chainhash.Hash, error) {
+	bucket := tx.RootBucket().Bucket(metaBucketName)
+
+	key := make([]byte, stakePoolInvalidPrefixSize+scriptHashSize)
+	copy(key[0:stakePoolInvalidPrefixSize], stakePoolInvalidPrefix)
+	copy(key[stakePoolInvalidPrefixSize:stakePoolInvalidPrefixSize+scriptHashSize],
+		scriptHash[:])
+	val := bucket.Get(key)
+	if val == nil {
+		str := fmt.Sprintf("missing pool user invalid ticket records "+
+			"for hash '%x'", scriptHash)
+		return nil, stakeStoreError(ErrPoolUserInvalTcktsNotFound, str, nil)
+	}
+
+	return deserializeUserInvalTickets(val)
+}
+
+// duplicateExistsInInvalTickets checks to see if an exact duplicated of a
+// record already exists in a slice of invalid user ticket records.
+func duplicateExistsInInvalTickets(record *chainhash.Hash,
+	records []*chainhash.Hash) bool {
+	for _, r := range records {
+		if *r == *record {
+			return true
+		}
+	}
+
+	return false
+}
+
+// updateStakePoolInvalUserTickets updates a database entry for a pool user's
+// invalid tickets. The function pulls the current entry in the database,
+// checks to see if the ticket is already there. If it is it returns, otherwise
+// it adds it to the list of tickets.
+func updateStakePoolInvalUserTickets(tx walletdb.Tx, scriptHash [20]byte,
+	record *chainhash.Hash) error {
+	// Fetch the current content of the key.
+	// Possible buggy behaviour: If deserialization fails,
+	// we won't detect it here. We assume we're throwing
+	// ErrPoolUserInvalTcktsNotFound.
+	oldRecords, _ := fetchStakePoolUserInvalTickets(tx, scriptHash)
+
+	// Don't reinsert duplicate records we already have.
+	if duplicateExistsInInvalTickets(record, oldRecords) {
+		return nil
+	}
+
+	// Either create a slice if currently nothing exists for this
+	// key in the db, or append the entry to the slice.
+	var records []*chainhash.Hash
+	if oldRecords == nil {
+		records = make([]*chainhash.Hash, 1)
+		records[0] = record
+	} else {
+		records = append(oldRecords, record)
+	}
+
+	bucket := tx.RootBucket().Bucket(metaBucketName)
+	key := make([]byte, stakePoolInvalidPrefixSize+scriptHashSize)
+	copy(key[0:stakePoolInvalidPrefixSize], stakePoolInvalidPrefix)
+	copy(key[stakePoolInvalidPrefixSize:stakePoolInvalidPrefixSize+scriptHashSize],
+		scriptHash[:])
+
+	// Write the serialized invalid user ticket hashes.
+	serializedRecords := serializeUserInvalTickets(records)
+
+	err := bucket.Put(key, serializedRecords)
+	if err != nil {
+		str := fmt.Sprintf("failed to store pool user invalid ticket "+
+			"records '%x'", scriptHash)
+		return stakeStoreError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// putMeta puts a k-v into the meta bucket.
 func putMeta(tx walletdb.Tx, key []byte, n int32) error {
 	bucket := tx.RootBucket().Bucket(metaBucketName)
 	err := bucket.Put(key, uint32ToBytes(uint32(n)))
@@ -838,7 +1216,7 @@ func putMeta(tx walletdb.Tx, key []byte, n int32) error {
 	return nil
 }
 
-// fetchMeta
+// fetchMeta fetches a v from a k in the meta bucket.
 func fetchMeta(tx walletdb.Tx, key []byte) (int32, error) {
 	bucket := tx.RootBucket().Bucket(metaBucketName)
 

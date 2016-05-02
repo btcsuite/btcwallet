@@ -50,6 +50,18 @@ const (
 	// the SSRtxs store.
 	ErrSSRtxsNotFound
 
+	// ErrPoolUserTicketsNotFound indicates that the requested script hash
+	// is not known to the meta bucket.
+	ErrPoolUserTicketsNotFound
+
+	// ErrPoolUserInvalTcktsNotFound indicates that the requested script hash
+	// is not known to the meta bucket.
+	ErrPoolUserInvalTcktsNotFound
+
+	// ErrBadPoolUserAddr indicates that the passed pool user address was
+	// faulty.
+	ErrBadPoolUserAddr
+
 	// ErrStoreClosed indicates that a function was called after the stake
 	// store was closed.
 	ErrStoreClosed
@@ -57,14 +69,17 @@ const (
 
 // Map of ErrorCode values back to their constant names for pretty printing.
 var errorCodeStrings = map[ErrorCode]string{
-	ErrDatabase:       "ErrDatabase",
-	ErrInput:          "ErrInput",
-	ErrNoExist:        "ErrNoExist",
-	ErrAlreadyExists:  "ErrAlreadyExists",
-	ErrSStxNotFound:   "ErrSStxNotFound",
-	ErrSSGensNotFound: "ErrSSGensNotFound",
-	ErrSSRtxsNotFound: "ErrSSRtxsNotFound",
-	ErrStoreClosed:    "ErrStoreClosed",
+	ErrDatabase:                   "ErrDatabase",
+	ErrInput:                      "ErrInput",
+	ErrNoExist:                    "ErrNoExist",
+	ErrAlreadyExists:              "ErrAlreadyExists",
+	ErrSStxNotFound:               "ErrSStxNotFound",
+	ErrSSGensNotFound:             "ErrSSGensNotFound",
+	ErrSSRtxsNotFound:             "ErrSSRtxsNotFound",
+	ErrPoolUserTicketsNotFound:    "ErrPoolUserTicketsNotFound",
+	ErrPoolUserInvalTcktsNotFound: "ErrPoolUserInvalTcktsNotFound",
+	ErrBadPoolUserAddr:            "ErrBadPoolUserAddr",
+	ErrStoreClosed:                "ErrStoreClosed",
 }
 
 // String returns the ErrorCode as a human-readable name.

@@ -33,6 +33,7 @@ import (
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet"
 	"github.com/decred/dcrwallet/wallet/txrules"
+	"github.com/decred/dcrwallet/wstakemgr"
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
@@ -94,6 +95,7 @@ var rpcHandlers = map[string]struct {
 	"accountfetchaddresses":   {handler: AccountFetchAddresses},
 	"accountsyncaddressindex": {handler: AccountSyncAddressIndex},
 	"addmultisigaddress":      {handlerWithChain: AddMultiSigAddress},
+	"addticket":               {handler: AddTicket},
 	"consolidate":             {handler: Consolidate},
 	"createmultisig":          {handler: CreateMultiSig},
 	"dumpprivkey":             {handler: DumpPrivKey, requireUnsafeOnMainNet: true},
@@ -153,6 +155,7 @@ var rpcHandlers = map[string]struct {
 	"signrawtransactions":     {handlerWithChain: SignRawTransactions},
 	"redeemmultisigout":       {handlerWithChain: RedeemMultiSigOut},
 	"redeemmultisigouts":      {handlerWithChain: RedeemMultiSigOuts},
+	"stakepooluserinfo":       {handler: StakePoolUserInfo},
 	"ticketsforaddress":       {handler: TicketsForAddress},
 	"validateaddress":         {handler: ValidateAddress},
 	"verifymessage":           {handler: VerifyMessage},
@@ -501,6 +504,27 @@ func AddMultiSigAddress(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	}
 
 	return addr.Address().EncodeAddress(), nil
+}
+
+// AddTicket adds a ticket to the stake manager manually.
+func AddTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.AddTicketCmd)
+
+	rawTx, err := hex.DecodeString(cmd.TicketHex)
+	if err != nil {
+		return nil, err
+	}
+
+	mtx := new(wire.MsgTx)
+	err = mtx.FromBytes(rawTx)
+	if err != nil {
+		return nil, err
+	}
+	tx := dcrutil.NewTx(mtx)
+
+	err = w.StakeMgr.InsertSStx(tx, w.VoteBits)
+
+	return nil, err
 }
 
 // Consolidate handles a consolidate request by returning attempting to compress
@@ -2349,7 +2373,7 @@ func PurchaseTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 
 	// Set pool address if specified.
 	var poolAddr dcrutil.Address
-	var poolFee dcrutil.Amount
+	var poolFee float64
 	if cmd.PoolAddress != nil {
 		if *cmd.PoolAddress != "" {
 			addr, err := decodeAddress(*cmd.PoolAddress, w.ChainParams())
@@ -2363,7 +2387,8 @@ func PurchaseTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 			if cmd.PoolFees == nil {
 				return nil, fmt.Errorf("gave pool address but no pool fee")
 			}
-			poolFee, err = dcrutil.NewAmount(*cmd.PoolFees)
+			poolFee = *cmd.PoolFees
+			err = txrules.IsValidPoolFeeRate(poolFee)
 			if err != nil {
 				return nil, err
 			}
@@ -2602,6 +2627,59 @@ func RedeemMultiSigOuts(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	}
 
 	return dcrjson.RedeemMultiSigOutsResult{Results: rmsoResults}, nil
+}
+
+// StakePoolUserInfo returns the ticket information for a given user from the
+// stake pool.
+func StakePoolUserInfo(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.StakePoolUserInfoCmd)
+
+	userAddr, err := dcrutil.DecodeAddress(cmd.User, w.ChainParams())
+	if err != nil {
+		return nil, err
+	}
+	_, isScriptHash := userAddr.(*dcrutil.AddressScriptHash)
+	_, isP2PKH := userAddr.(*dcrutil.AddressPubKeyHash)
+	if !(isScriptHash || isP2PKH) {
+		return nil, fmt.Errorf("invalid user address %v, must be P2SH or "+
+			"P2PKH", userAddr.EncodeAddress())
+	}
+
+	// Access the stake manager and fetch the user information.
+	spui, err := w.StakeMgr.StakePoolUserInfo(userAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := new(dcrjson.StakePoolUserInfoResult)
+	for _, ticket := range spui.Tickets {
+		var ticketRes dcrjson.PoolUserTicket
+
+		status := ""
+		switch ticket.Status {
+		case wstakemgr.TSImmatureOrLive:
+			status = "live"
+		case wstakemgr.TSVoted:
+			status = "voted"
+		case wstakemgr.TSMissed:
+			status = "missed"
+		}
+		ticketRes.Status = status
+
+		ticketRes.Ticket = ticket.Ticket.String()
+		ticketRes.TicketHeight = ticket.HeightTicket
+		ticketRes.SpentBy = ticket.SpentBy.String()
+		ticketRes.SpentByHeight = ticket.HeightSpent
+
+		resp.Tickets = append(resp.Tickets, ticketRes)
+	}
+	for _, invalid := range spui.InvalidTickets {
+		invalidTicket := invalid.String()
+
+		resp.InvalidTickets = append(resp.InvalidTickets, invalidTicket)
+	}
+
+	return resp, nil
 }
 
 // TicketsForAddress retrieves all ticket hashes that have the passed voting

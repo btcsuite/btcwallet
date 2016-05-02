@@ -1766,33 +1766,12 @@ func (m *Manager) AddressDerivedFromDbAcct(index uint32, account uint32,
 	return addr, nil
 }
 
-// AddressesDerivedFromDbAcct accesses the internal extended keys to produce
-// addresses for some given account, branch, start index and end index.
-// In contrast to the NextAddresses function, this function does NOT add
-// these addresses to the address manager.
-// TODO There's no reason to continue holding the lock on the waddrmgr while
-// the addresses themselves are being computed from the public account key.
-// Instead the mutex should release as soon as the loadAccountInfo is called,
-// which should free up the address manager to do other things.
-func (m *Manager) AddressesDerivedFromDbAcct(start uint32, end uint32,
-	account uint32, branch uint32) ([]dcrutil.Address, error) {
-	// Enforce maximum account number.
-	if account > MaxAccountNum {
-		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
-		return nil, err
-	}
-
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
-
-	// The next address can only be generated for accounts that have already
-	// been created.
-	acctInfo, err := m.loadAccountInfo(account)
-	if err != nil {
-		return nil, err
-	}
-	acctKey := acctInfo.acctKeyPub
-
+// AddressesDerivedFromExtPub derives a slice of dcrutil.Address from the
+// [start, end) indexes passed for the branch passed. The extended key passed
+// should be a key for a BIP0044 style account.
+func AddressesDerivedFromExtPub(start uint32, end uint32,
+	acctKey *hdkeychain.ExtendedKey, branch uint32,
+	params *chaincfg.Params) ([]dcrutil.Address, error) {
 	// Derive the appropriate branch key and ensure it is zeroed when done.
 	branchKey, err := acctKey.Child(branch)
 	if err != nil {
@@ -1811,7 +1790,7 @@ func (m *Manager) AddressesDerivedFromDbAcct(start uint32, end uint32,
 			return nil, managerError(ErrKeyChain, str, err)
 		}
 
-		addr, err := key.Address(m.chainParams)
+		addr, err := key.Address(params)
 		if err != nil {
 			str := fmt.Sprintf("failed to generate address %v", key)
 			return nil, managerError(ErrCreateAddress, str, err)
@@ -1822,6 +1801,37 @@ func (m *Manager) AddressesDerivedFromDbAcct(start uint32, end uint32,
 	}
 
 	return addresses, nil
+}
+
+// AddressesDerivedFromDbAcct accesses the internal extended keys to produce
+// addresses for some given account, branch, start index and end index.
+// In contrast to the NextAddresses function, this function does NOT add
+// these addresses to the address manager.
+func (m *Manager) AddressesDerivedFromDbAcct(start uint32, end uint32,
+	account uint32, branch uint32) ([]dcrutil.Address, error) {
+	// Enforce maximum account number.
+	if account > MaxAccountNum {
+		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
+		return nil, err
+	}
+
+	// The only time the mutex should be held is while fetching the
+	// account information. After this, the derivation of addresses
+	// is all done in a way completely independent of the waddrmgr
+	// database.
+	m.mtx.Lock()
+
+	// The next address can only be generated for accounts that have already
+	// been created.
+	acctInfo, err := m.loadAccountInfo(account)
+	if err != nil {
+		m.mtx.Unlock()
+		return nil, err
+	}
+	m.mtx.Unlock()
+
+	return AddressesDerivedFromExtPub(start, end, acctInfo.acctKeyPub, branch,
+		m.chainParams)
 }
 
 // syncAccountToAddrIndex takes an account, branch, and index and synchronizes

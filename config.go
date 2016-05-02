@@ -19,28 +19,30 @@ import (
 	"github.com/decred/dcrwallet/internal/legacy/keystore"
 	"github.com/decred/dcrwallet/netparams"
 	"github.com/decred/dcrwallet/wallet"
+	"github.com/decred/dcrwallet/wallet/txrules"
 )
 
 const (
-	defaultCAFilename        = "dcrd.cert"
-	defaultConfigFilename    = "dcrwallet.conf"
-	defaultLogLevel          = "info"
-	defaultLogDirname        = "logs"
-	defaultLogFilename       = "dcrwallet.log"
-	defaultRPCMaxClients     = 10
-	defaultRPCMaxWebsockets  = 25
-	defaultEnableStakeMining = false
-	defaultVoteBits          = 0x0001
-	defaultBalanceToMaintain = 0.0
-	defaultReuseAddresses    = false
-	defaultRollbackTest      = false
-	defaultPruneTickets      = false
-	defaultTicketMaxPrice    = 50.0
-	defaultTicketBuyFreq     = 1
-	defaultAutomaticRepair   = false
-	defaultUnsafeMainNet     = false
-	defaultPromptPass        = false
-	defaultAddrIdxScanLen    = 750
+	defaultCAFilename          = "dcrd.cert"
+	defaultConfigFilename      = "dcrwallet.conf"
+	defaultLogLevel            = "info"
+	defaultLogDirname          = "logs"
+	defaultLogFilename         = "dcrwallet.log"
+	defaultRPCMaxClients       = 10
+	defaultRPCMaxWebsockets    = 25
+	defaultEnableStakeMining   = false
+	defaultVoteBits            = 0x0001
+	defaultBalanceToMaintain   = 0.0
+	defaultReuseAddresses      = false
+	defaultRollbackTest        = false
+	defaultPruneTickets        = false
+	defaultTicketMaxPrice      = 50.0
+	defaultTicketBuyFreq       = 1
+	defaultAutomaticRepair     = false
+	defaultUnsafeMainNet       = false
+	defaultPromptPass          = false
+	defaultAddrIdxScanLen      = 750
+	defaultStakePoolColdExtKey = ""
 
 	walletDbName = "wallet.db"
 )
@@ -76,20 +78,21 @@ type config struct {
 	UnsafeMainNet      bool   `long:"unsafemainnet" description:"Enable storage of master seed in mainnet wallet when calling --create and enable unsafe private information RPC commands"`
 
 	// Wallet options
-	WalletPass        string  `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
-	PromptPass        bool    `long:"promptpass" description:"The private wallet password is prompted for at start up, so the wallet starts unlocked without a time limit"`
-	DisallowFree      bool    `long:"disallowfree" description:"Force transactions to always include a fee"`
-	EnableStakeMining bool    `long:"enablestakemining" description:"Enable stake mining"`
-	VoteBits          uint16  `long:"votebits" description:"Set your stake mining votebits to value (default: 0xFFFF)"`
-	BalanceToMaintain float64 `long:"balancetomaintain" description:"Minimum amount of funds to leave in wallet when stake mining (default: 0.0)"`
-	ReuseAddresses    bool    `long:"reuseaddresses" description:"Reuse addresses for ticket purchase to cut down on address overuse"`
-	PruneTickets      bool    `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
-	TicketAddress     string  `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
-	TicketMaxPrice    float64 `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
-	TicketBuyFreq     int     `long:"ticketbuyfreq" description:"The number of tickets to try to buy per block (default: 1), where negative numbers indicate one ticket for each 1-in-? blocks"`
-	PoolAddress       string  `long:"pooladdress" description:"The ticket pool address where ticket fees will go to"`
-	PoolFees          float64 `long:"poolfees" description:"The per-ticket fee mandated by the ticket pool, in coins"`
-	AddrIdxScanLen    int     `long:"addridxscanlen" description:"The width of the scan for last used addresses on wallet restore and start up (default: 750)"`
+	WalletPass          string  `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
+	PromptPass          bool    `long:"promptpass" description:"The private wallet password is prompted for at start up, so the wallet starts unlocked without a time limit"`
+	DisallowFree        bool    `long:"disallowfree" description:"Force transactions to always include a fee"`
+	EnableStakeMining   bool    `long:"enablestakemining" description:"Enable stake mining"`
+	VoteBits            uint16  `long:"votebits" description:"Set your stake mining votebits to value (default: 0xFFFF)"`
+	BalanceToMaintain   float64 `long:"balancetomaintain" description:"Minimum amount of funds to leave in wallet when stake mining (default: 0.0)"`
+	ReuseAddresses      bool    `long:"reuseaddresses" description:"Reuse addresses for ticket purchase to cut down on address overuse"`
+	PruneTickets        bool    `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
+	TicketAddress       string  `long:"ticketaddress" description:"Send all ticket outputs to this address (P2PKH or P2SH only)"`
+	TicketMaxPrice      float64 `long:"ticketmaxprice" description:"The maximum price the user is willing to spend on buying a ticket"`
+	TicketBuyFreq       int     `long:"ticketbuyfreq" description:"The number of tickets to try to buy per block (default: 1), where negative numbers indicate one ticket for each 1-in-? blocks"`
+	PoolAddress         string  `long:"pooladdress" description:"The ticket pool address where ticket fees will go to"`
+	PoolFees            float64 `long:"poolfees" description:"The per-ticket fee mandated by the ticket pool as a percent (e.g. 1.00 for 1.00% fee)"`
+	AddrIdxScanLen      int     `long:"addridxscanlen" description:"The width of the scan for last used addresses on wallet restore and start up (default: 750)"`
+	StakePoolColdExtKey string  `long:"stakepoolcoldextkey" description:"Enables the wallet as a stake pool with an extended key in the format of \"xpub...:index\" to derive cold wallet addresses to send fees to"`
 
 	// RPC client options
 	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:18556)"`
@@ -268,6 +271,7 @@ func loadConfig() (*config, []string, error) {
 		AutomaticRepair:        defaultAutomaticRepair,
 		UnsafeMainNet:          defaultUnsafeMainNet,
 		AddrIdxScanLen:         defaultAddrIdxScanLen,
+		StakePoolColdExtKey:    defaultStakePoolColdExtKey,
 	}
 
 	// A config file in the current directory takes precedence.
@@ -357,6 +361,17 @@ func loadConfig() (*config, []string, error) {
 	if numNets > 1 {
 		str := "%s: The testnet and simnet params can't be used " +
 			"together -- choose one"
+		err := fmt.Errorf(str, "loadConfig")
+		fmt.Fprintln(os.Stderr, err)
+		parser.WriteHelp(os.Stderr)
+		return loadConfigError(err)
+	}
+
+	// Temporarily disable stakepool mode on mainnet.
+	if !(cfg.TestNet || cfg.SimNet) && cfg.StakePoolColdExtKey !=
+		defaultStakePoolColdExtKey {
+		str := "%s: Mainnet params can't be used " +
+			"together with stake pool mode"
 		err := fmt.Errorf(str, "loadConfig")
 		fmt.Fprintln(os.Stderr, err)
 		parser.WriteHelp(os.Stderr)
@@ -502,8 +517,8 @@ func loadConfig() (*config, []string, error) {
 	if len(cfg.TicketAddress) != 0 {
 		_, err := dcrutil.DecodeAddress(cfg.TicketAddress, activeNet.Params)
 		if err != nil {
-			str := "%s: ticketaddress '%s' failed to decode: %v"
-			err := fmt.Errorf(str, funcName, cfg.TicketAddress, err)
+			err := fmt.Errorf("ticketaddress '%s' failed to decode: %v",
+				cfg.TicketAddress, err)
 			fmt.Fprintln(os.Stderr, err)
 			fmt.Fprintln(os.Stderr, usageMessage)
 			return loadConfigError(err)
@@ -513,9 +528,20 @@ func loadConfig() (*config, []string, error) {
 	if len(cfg.PoolAddress) != 0 {
 		_, err := dcrutil.DecodeAddress(cfg.PoolAddress, activeNet.Params)
 		if err != nil {
-			str := "%s: pooladdress '%s' failed to decode: %v"
-			err := fmt.Errorf(str, funcName, cfg.PoolAddress, err)
-			fmt.Fprintln(os.Stderr, err)
+			err := fmt.Errorf("pooladdress '%s' failed to decode: %v",
+				cfg.PoolAddress, err)
+			fmt.Fprintln(os.Stderr, err.Error())
+			fmt.Fprintln(os.Stderr, usageMessage)
+			return loadConfigError(err)
+		}
+	}
+
+	if cfg.PoolFees != 0.0 {
+		err := txrules.IsValidPoolFeeRate(cfg.PoolFees)
+		if err != nil {
+			err := fmt.Errorf("poolfees '%v' failed to decode: %v",
+				cfg.PoolFees, err)
+			fmt.Fprintln(os.Stderr, err.Error())
 			fmt.Fprintln(os.Stderr, usageMessage)
 			return loadConfigError(err)
 		}

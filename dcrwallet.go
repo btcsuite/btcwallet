@@ -90,15 +90,18 @@ func walletMain() error {
 
 	dbDir := networkDir(cfg.DataDir, activeNet.Params)
 	stakeOptions := &wallet.StakeOptions{
-		VoteBits:           cfg.VoteBits,
-		StakeMiningEnabled: cfg.EnableStakeMining,
-		BalanceToMaintain:  cfg.BalanceToMaintain,
-		RollbackTest:       cfg.RollbackTest,
-		PruneTickets:       cfg.PruneTickets,
-		AddressReuse:       cfg.ReuseAddresses,
-		TicketAddress:      cfg.TicketAddress,
-		TicketMaxPrice:     cfg.TicketMaxPrice,
-		TicketBuyFreq:      cfg.TicketBuyFreq,
+		VoteBits:            cfg.VoteBits,
+		StakeMiningEnabled:  cfg.EnableStakeMining,
+		BalanceToMaintain:   cfg.BalanceToMaintain,
+		RollbackTest:        cfg.RollbackTest,
+		PruneTickets:        cfg.PruneTickets,
+		AddressReuse:        cfg.ReuseAddresses,
+		TicketAddress:       cfg.TicketAddress,
+		TicketMaxPrice:      cfg.TicketMaxPrice,
+		TicketBuyFreq:       cfg.TicketBuyFreq,
+		PoolAddress:         cfg.PoolAddress,
+		PoolFees:            cfg.PoolFees,
+		StakePoolColdExtKey: cfg.StakePoolColdExtKey,
 	}
 	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
 		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen)

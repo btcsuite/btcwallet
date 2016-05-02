@@ -57,17 +57,18 @@ type Loader struct {
 
 // StakeOptions contains the various options necessary for stake mining.
 type StakeOptions struct {
-	VoteBits           uint16
-	StakeMiningEnabled bool
-	BalanceToMaintain  float64
-	RollbackTest       bool
-	PruneTickets       bool
-	AddressReuse       bool
-	TicketAddress      string
-	TicketMaxPrice     float64
-	TicketBuyFreq      int
-	PoolAddress        string
-	PoolFees           float64
+	VoteBits            uint16
+	StakeMiningEnabled  bool
+	BalanceToMaintain   float64
+	RollbackTest        bool
+	PruneTickets        bool
+	AddressReuse        bool
+	TicketAddress       string
+	TicketMaxPrice      float64
+	TicketBuyFreq       int
+	PoolAddress         string
+	PoolFees            float64
+	StakePoolColdExtKey string
 }
 
 // NewLoader constructs a Loader.
@@ -154,7 +155,7 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice,
 		so.TicketBuyFreq, so.PoolAddress, so.PoolFees, l.addrIdxScanLen,
-		l.autoRepair, l.chainParams)
+		so.StakePoolColdExtKey, l.autoRepair, l.chainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -211,8 +212,8 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	w, err := Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, so.TicketBuyFreq,
-		so.PoolAddress, so.PoolFees, l.addrIdxScanLen, l.autoRepair,
-		l.chainParams)
+		so.PoolAddress, so.PoolFees, l.addrIdxScanLen, so.StakePoolColdExtKey,
+		l.autoRepair, l.chainParams)
 	if err != nil {
 		return nil, err
 	}

@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,7 +113,9 @@ type Wallet struct {
 	ticketBuyFreq      int
 	balanceToMaintain  dcrutil.Amount
 	poolAddress        dcrutil.Address
-	poolFees           dcrutil.Amount
+	poolFees           float64
+	stakePoolEnabled   bool
+	stakePoolColdAddrs map[string]struct{}
 
 	// Start up flags/settings
 	automaticRepair bool
@@ -182,8 +186,9 @@ type Wallet struct {
 // and transaction store.
 func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	ticketBuyFreq int, poolAddress dcrutil.Address, pf dcrutil.Amount,
-	addrIdxScanLen int, autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
+	ticketBuyFreq int, poolAddress dcrutil.Address, pf float64,
+	addrIdxScanLen int, stakePoolColdAddrs map[string]struct{},
+	autoRepair bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
 	smgr *wstakemgr.StakeStore, db *walletdb.DB,
 	params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
@@ -237,6 +242,8 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		poolAddress:              poolAddress,
 		poolFees:                 pf,
 		addrIdxScanLen:           addrIdxScanLen,
+		stakePoolEnabled:         len(stakePoolColdAddrs) > 0,
+		stakePoolColdAddrs:       stakePoolColdAddrs,
 		automaticRepair:          autoRepair,
 		resyncAccounts:           false,
 		rollbackTesting:          rollbackTest,
@@ -249,6 +256,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		chainParams:              params,
 		quit:                     make(chan struct{}),
 	}
+
 	w.NtfnServer = newNotificationServer(w)
 	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
@@ -396,7 +404,7 @@ func (w *Wallet) PoolAddress() dcrutil.Address {
 }
 
 // PoolFees gets the per-ticket pool fee for the wallet.
-func (w *Wallet) PoolFees() dcrutil.Amount {
+func (w *Wallet) PoolFees() float64 {
 	return w.poolFees
 }
 
@@ -868,7 +876,7 @@ type (
 		account     uint32
 		numTickets  int
 		poolAddress dcrutil.Address
-		poolFees    dcrutil.Amount
+		poolFees    float64
 		expiry      int32
 		resp        chan purchaseTicketResponse
 	}
@@ -1088,7 +1096,7 @@ func (w *Wallet) CreateSSRtx(ticketHash chainhash.Hash) (*CreatedTx, error) {
 func (w *Wallet) CreatePurchaseTicket(minBalance, spendLimit dcrutil.Amount,
 	minConf int32, ticketAddr dcrutil.Address, account uint32,
 	numTickets int, poolAddress dcrutil.Address,
-	poolFees dcrutil.Amount, expiry int32) (interface{}, error) {
+	poolFees float64, expiry int32) (interface{}, error) {
 
 	req := purchaseTicketRequest{
 		minBalance:  minBalance,
@@ -2763,13 +2771,71 @@ func CreateWatchOnly(db walletdb.DB, extendedPubKey string, pubPass []byte, para
 	return nil
 }
 
+// decodeStakePoolColdExtKey decodes the string of stake pool addresses
+// to search incoming tickets for. The format for the passed string is:
+//   "xpub...:end"
+// where xpub... is the extended public key and end is the last
+// address index to scan to, exclusive. Effectively, it returns the derived
+// addresses for this public key for the address indexes [0,end). The branch
+// used for the derivation is always the external branch.
+func decodeStakePoolColdExtKey(encStr string,
+	params *chaincfg.Params) (map[string]struct{}, error) {
+	// Default option; stake pool is disabled.
+	if encStr == "" {
+		return nil, nil
+	}
+
+	// Split the string.
+	splStrs := strings.Split(encStr, ":")
+	if len(splStrs) != 2 {
+		return nil, fmt.Errorf("failed to correctly parse passed stakepool " +
+			"address public key and index")
+	}
+
+	// Parse the extended public key and ensure it's the right network.
+	key, err := hdkeychain.NewKeyFromString(splStrs[0])
+	if err != nil {
+		return nil, err
+	}
+	if !key.IsForNet(params) {
+		return nil, fmt.Errorf("extended public key is for wrong network")
+	}
+
+	// Parse the ending index and ensure it's valid.
+	end, err := strconv.Atoi(splStrs[1])
+	if err != nil {
+		return nil, err
+	}
+	if end < 0 || end > waddrmgr.MaxAddressesPerAccount {
+		return nil, fmt.Errorf("pool address index is invalid (got %v)",
+			end)
+	}
+
+	log.Infof("Please wait, deriving %v stake pool fees addresses "+
+		"for extended public key %s", end, splStrs[0])
+
+	// Derive the addresses from [0, end) for this extended public key.
+	addrs, err := waddrmgr.AddressesDerivedFromExtPub(0, uint32(end),
+		key, waddrmgr.ExternalBranch, params)
+	if err != nil {
+		return nil, err
+	}
+
+	addrMap := make(map[string]struct{})
+	for i := range addrs {
+		addrMap[addrs[i].EncodeAddress()] = struct{}{}
+	}
+
+	return addrMap, nil
+}
+
 // Open loads an already-created wallet from the passed database and namespaces.
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
 	ticketMaxPrice float64, ticketBuyFreq int, poolAddress string,
-	poolFees float64, addrIdxScanLen int, autoRepair bool,
-	params *chaincfg.Params) (*Wallet, error) {
+	poolFees float64, addrIdxScanLen int, stakePoolColdExtKey string,
+	autoRepair bool, params *chaincfg.Params) (*Wallet, error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -2841,8 +2907,8 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 				err.Error())
 		}
 	}
-
-	pf, err := dcrutil.NewAmount(poolFees)
+	stakePoolColdAddrs, err := decodeStakePoolColdExtKey(stakePoolColdExtKey,
+		params)
 	if err != nil {
 		return nil, err
 	}
@@ -2858,8 +2924,9 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		tmp,
 		ticketBuyFreq,
 		poolAddr,
-		pf,
+		poolFees,
 		addrIdxScanLen,
+		stakePoolColdAddrs,
 		autoRepair,
 		addrMgr,
 		txMgr,

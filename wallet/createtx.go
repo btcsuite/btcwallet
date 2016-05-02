@@ -25,6 +25,7 @@ import (
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet/txauthor"
+	"github.com/decred/dcrwallet/wallet/txrules"
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
@@ -1144,15 +1145,11 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		poolAddress = w.PoolAddress()
 	}
 	poolFees := req.poolFees
-	if poolFees == 0 {
+	if poolFees == 0.0 {
 		poolFees = w.PoolFees()
 	}
-	if poolAddress != nil && poolFees == 0 {
+	if poolAddress != nil && poolFees == 0.0 {
 		return nil, fmt.Errorf("pool address given, but pool fees not set")
-	}
-	if poolFees >= ticketPrice {
-		return nil, fmt.Errorf("pool fees of %v >= than current "+
-			"ticket price of %v", poolFees, ticketPrice)
 	}
 
 	// Make sure that we have enough funds. Calculate different
@@ -1168,6 +1165,18 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		ticketFee = ((w.TicketFeeIncrement() * doubleInputTicketSize) /
 			1000)
 		neededPerTicket = ticketFee + ticketPrice
+	}
+
+	// If we need to calculate the amount for a pool fee percentage,
+	// do so now.
+	var poolFeeAmt dcrutil.Amount
+	if poolAddress != nil {
+		poolFeeAmt = txrules.StakePoolTicketFee(ticketPrice, ticketFee,
+			bs.Height, poolFees, w.ChainParams())
+		if poolFeeAmt >= ticketPrice {
+			return nil, fmt.Errorf("pool fee amt of %v >= than current "+
+				"ticket price of %v", poolFeeAmt, ticketPrice)
+		}
 	}
 
 	// Make sure this doesn't over spend based on the balance to
@@ -1219,8 +1228,8 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 				wire.NewTxOut(int64(neededPerTicket), pkScript))
 		} else {
 			// Stake pool used.
-			userAmt := neededPerTicket - poolFees
-			poolAmt := poolFees
+			userAmt := neededPerTicket - poolFeeAmt
+			poolAmt := poolFeeAmt
 
 			// Pool amount.
 			pkScript, err := txscript.PayToAddrScript(splitTxAddr)
