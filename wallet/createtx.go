@@ -230,9 +230,10 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32, bs *waddrmgr
 // scripts from outputs redeemed by the transaction, in the same order they are
 // spent, must be passed in the prevScripts slice.
 func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte, inputValues []btcutil.Amount) error {
+	hashCache := txscript.NewTxSigHashes(tx)
 	for i, prevScript := range prevScripts {
 		vm, err := txscript.NewEngine(prevScript, tx, i,
-			txscript.StandardVerifyFlags, nil, nil, int64(inputValues[i]))
+			txscript.StandardVerifyFlags, nil, hashCache, int64(inputValues[i]))
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
