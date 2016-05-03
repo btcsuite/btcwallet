@@ -363,6 +363,9 @@ func newManagedAddressWithoutPrivKey(m *Manager, account uint32, pubKey *btcec.P
 		if err != nil {
 			return nil, err
 		}
+	case adtImport:
+		// TODO(roasbeef): truly proper?
+		fallthrough
 	case adtChain:
 		address, err = btcutil.NewAddressPubKeyHash(pubKeyHash, m.chainParams)
 		if err != nil {
