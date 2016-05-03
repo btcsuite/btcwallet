@@ -141,12 +141,9 @@ ticketPurchaseLoop:
 				log.Warnf("Tickets could not be purchased because the " +
 					"ticket price could not be established")
 				break ticketPurchaseLoop
-			case err == ErrClientPurchaseTicket:
-				log.Warnf("A chainSvr error was returned attempting to " +
-					"purchase a ticket; ticket purchases aborted.")
-				break ticketPurchaseLoop
 			default:
 				log.Errorf("PurchaseTicket error returned: %v", err)
+				break ticketPurchaseLoop
 			}
 		} else {
 			purchased++

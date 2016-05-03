@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/btcsuite/golangcrypto/ripemd160"
@@ -197,11 +196,6 @@ var ErrBlockchainReorganizing = errors.New("blockchain is currently " +
 // ErrTicketPriceNotSet indicates that the wallet was recently connected
 // and that the ticket price has not yet been set.
 var ErrTicketPriceNotSet = errors.New("ticket price not yet established")
-
-// ErrClientPurchaseTicket is the error returned when the daemon has
-// disconnected from the
-var ErrClientPurchaseTicket = errors.New("sendrawtransaction failed: the " +
-	"client has been shutdown")
 
 // --------------------------------------------------------------------------------
 // Transaction creation
@@ -1373,16 +1367,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		// Send the ticket over the network.
 		txSha, err := chainClient.SendRawTransaction(ticket, false)
 		if err != nil {
-			log.Warnf("Failed to send raw transaction: %v", err.Error())
-			inconsistent := strings.Contains(err.Error(),
-				"transaction spends unknown inputs")
-			if inconsistent {
-				errFix := w.attemptToRepairInconsistencies()
-				if errFix != nil {
-					log.Warnf("Failed to fix wallet inconsistencies!")
-				}
-			}
-			return nil, ErrClientPurchaseTicket
+			return nil, err
 		}
 
 		// Insert the transaction and credits into the transaction manager.
