@@ -95,7 +95,7 @@ type config struct {
 	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
 
 	// Deprecated options
-	DataDir string `short:"D" long:"datadir" default-mask:"-" description:"DEPRECATED -- use appdata instead"`
+	DataDir string `short:"b" long:"datadir" default-mask:"-" description:"DEPRECATED -- use appdata instead"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
