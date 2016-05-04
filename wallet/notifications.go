@@ -119,8 +119,8 @@ func makeTxSummary(w *Wallet, details *wtxmgr.TxDetails) TransactionSummary {
 		}
 	}
 	outputs := make([]TransactionSummaryOutput, 0, len(details.MsgTx.TxOut))
-	var credIndex int
 	for i := range details.MsgTx.TxOut {
+		credIndex := len(outputs)
 		mine := len(details.Credits) > credIndex && details.Credits[credIndex].Index == uint32(i)
 		if !mine {
 			continue
