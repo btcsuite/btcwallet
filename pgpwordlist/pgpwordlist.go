@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 The Decred developers
+ * Copyright (c) 2015-2016 The Decred developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,11 +18,15 @@ package pgpwordlist
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"strings"
-
-	"github.com/btcsuite/btcd/wire"
 )
+
+func doubleSha256(b []byte) [sha256.Size]byte {
+	intermediateHash := sha256.Sum256(b)
+	return sha256.Sum256(intermediateHash[:])
+}
 
 // ToString converts a byteslice to a string of words from the
 // PGP word list.
@@ -62,7 +66,7 @@ func ToStringChecksum(b []byte) (string, error) {
 		return "", err
 	}
 
-	hash := wire.DoubleSha256(b)
+	hash := doubleSha256(b)
 
 	toUse := uint16(0)
 	toUse = uint16(uint8(hash[0])) * 2
@@ -113,7 +117,7 @@ func ToBytesChecksum(s string) ([]byte, error) {
 	}
 	bdata := b[:len(b)-1]
 
-	hash := wire.DoubleSha256(bdata)
+	hash := doubleSha256(bdata)
 	toUse := uint16(0)
 	toUse = uint16(uint8(hash[0])) * 2
 	// Odd numbered byte for last char.
