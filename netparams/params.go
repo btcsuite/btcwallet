@@ -38,7 +38,15 @@ var SimNetParams = Params{
 	RPCServerPort: "18554",
 }
 
-// CTRedNetParams contains parameters specific to the simulation test network
+// CTIndigoNetParams contains parameters specific to the ciphrtxt indigo network
+// (wire.SimNet).
+var CTIndigoNetParams = Params{
+	Params:        &chaincfg.CTIndigoNetParams,
+	RPCClientPort: "17765",
+	RPCServerPort: "17766",
+}
+
+// CTRedNetParams contains parameters specific to the ciphrtxt red test network
 // (wire.SimNet).
 var CTRedNetParams = Params{
 	Params:        &chaincfg.CTRedNetParams,

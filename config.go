@@ -53,6 +53,7 @@ type config struct {
 	TestNet3      bool   `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
 	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	CTRedNet      bool   `long:"ctrednet" description:"Use the ciphrtxt red test network (default mainnet)"`
+	CTIndigoNet   bool   `long:"ctindigonet" description:"Use the ciphrtxt indigo network (default mainnet)"`
 	NoInitialLoad bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
 	DebugLevel    string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	LogDir        string `long:"logdir" description:"Directory to log output."`
@@ -358,6 +359,10 @@ func loadConfig() (*config, []string, error) {
 	}
 	if cfg.CTRedNet {
 		activeNet = &netparams.CTRedNetParams
+		numNets++
+	}
+	if cfg.CTIndigoNet {
+		activeNet = &netparams.CTIndigoNetParams
 		numNets++
 	}
 	if numNets > 1 {
