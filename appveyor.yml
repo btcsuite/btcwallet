@@ -16,7 +16,7 @@ install:
  - glide install
 
 build_script:
- - ps: go get $(glide novendor)
+ - go get ./...
 
 test_script:
  - ps: go test -race $(glide novendor)

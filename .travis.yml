@@ -8,7 +8,7 @@ before_install:
 install:
   - go get -v github.com/Masterminds/glide
   - glide install
-  - go get -v $(glide novendor)
+  - go get -v ./...
   - go get -v $gotools/cmd/cover
   - go get -v github.com/golang/lint/golint
   - go get -v github.com/davecgh/go-spew/spew
