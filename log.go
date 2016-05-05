@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
