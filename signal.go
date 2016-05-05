@@ -22,6 +22,10 @@ var interruptHandlersDone = make(chan struct{})
 
 var simulateInterruptChannel = make(chan struct{}, 1)
 
+// signals defines the signals that are handled to do a clean shutdown.
+// Conditional compilation is used to also include SIGTERM on Unix.
+var signals = []os.Signal{os.Interrupt}
+
 // simulateInterrupt requests invoking the clean termination process by an
 // internal component instead of a SIGINT.
 func simulateInterrupt() {
@@ -49,8 +53,8 @@ func mainInterruptHandler() {
 
 	for {
 		select {
-		case <-interruptChannel:
-			log.Info("Received SIGINT (Ctrl+C).  Shutting down...")
+		case sig := <-interruptChannel:
+			log.Infof("Received signal (%s).  Shutting down...", sig)
 			invokeCallbacks()
 			return
 		case <-simulateInterruptChannel:
@@ -71,7 +75,7 @@ func addInterruptHandler(handler func()) {
 	// all other callbacks and exits if not already done.
 	if interruptChannel == nil {
 		interruptChannel = make(chan os.Signal, 1)
-		signal.Notify(interruptChannel, os.Interrupt)
+		signal.Notify(interruptChannel, signals...)
 		go mainInterruptHandler()
 	}
 
