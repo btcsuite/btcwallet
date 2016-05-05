@@ -118,9 +118,8 @@ project directory) in a `sh`-compatible shell on Unix, or PowerShell on Windows
 (`$()` subshells are not supported by `cmd`).
 
 To build and install `btcwallet` and all helper commands (in the `cmd`
-directory) to `$GOPATH/bin/`, as well as installing all compiled non-vendored
-packages to `$GOPATH/pkg/` (**use this if you are unsure which command to
-run**):
+directory) to `$GOPATH/bin/`, as well as installing all compiled packages to
+`$GOPATH/pkg/` (**use this if you are unsure which command to run**):
 
 ```
 go install $(glide novendor)
