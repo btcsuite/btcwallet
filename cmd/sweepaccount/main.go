@@ -19,8 +19,8 @@ import (
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
-	"github.com/btcsuite/go-flags"
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
+	"github.com/jessevdk/go-flags"
 )
 
 var (

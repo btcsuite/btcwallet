@@ -15,7 +15,6 @@ import:
   subpackages:
   - hdkeychain
 - package: github.com/btcsuite/fastsha256
-- package: github.com/btcsuite/go-flags
 - package: github.com/btcsuite/golangcrypto
   subpackages:
   - nacl/secretbox
@@ -35,3 +34,5 @@ import:
   - codes
   - credentials
   - grpclog
+- package: github.com/jessevdk/go-flags
+  version: 1679536dcc895411a9f5848d9a0250be7856448c
