@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/btcsuite/bolt"
+	"github.com/boltdb/bolt"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
