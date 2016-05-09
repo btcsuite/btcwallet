@@ -2514,16 +2514,7 @@ func redeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 	// Calculate the fees required, and make sure we have enough.
 	// Then produce the txout.
 	size := wallet.EstimateTxSize(1, 1)
-	var feeIncrement dcrutil.Amount
-	switch {
-	case w.ChainParams() == &chaincfg.MainNetParams:
-		feeIncrement = wallet.FeeIncrementMainnet
-	case w.ChainParams() == &chaincfg.TestNetParams:
-		feeIncrement = wallet.FeeIncrementTestnet
-	default:
-		feeIncrement = wallet.FeeIncrementTestnet
-	}
-	feeEst := wallet.FeeForSize(feeIncrement, size)
+	feeEst := wallet.FeeForSize(w.RelayFee(), size)
 	if feeEst >= msCredit.Amount {
 		return nil, fmt.Errorf("multisig out amt is too small "+
 			"(have %v, %v fee suggested)", msCredit.Amount, feeEst)

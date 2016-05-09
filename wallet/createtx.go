@@ -129,21 +129,9 @@ func FeeForSize(incr dcrutil.Amount, sz int) dcrutil.Amount {
 	return feeForSize(incr, sz)
 }
 
-// FeeIncrementMainnet is the default minimum transaction fees per KB (0.01 coin,
-// measured in atoms) added to transactions requiring a fee for MainNet.
-const FeeIncrementMainnet = 1e6
-
-// FeeIncrementTestnet is the default minimum transaction fees per KB (0.00001
-// coin, measured in atoms) added to transactions requiring a fee for TestNet.
-const FeeIncrementTestnet = 1e3
-
 // TicketFeeIncrement is the default minimum stake transaction fees per KB (0.01
 // coin, measured in atoms).
 const TicketFeeIncrement = 1e6
-
-// TicketFeeIncrementTestnet is the default minimum stake transaction fees per KB
-// (0.00001 coin, measured in atoms) for Testnet.
-const TicketFeeIncrementTestnet = 1e3
 
 // EstMaxTicketFeeAmount is the estimated max ticket fee to be used for size
 // calculation for eligible utxos for ticket purchasing.
@@ -620,8 +608,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 	// we don't need to add a change output in this
 	// case.
 	feeSize := estimateTxSize(numInputs, 2)
-	var feeIncrement dcrutil.Amount
-	feeIncrement = w.RelayFee()
+	feeIncrement := w.RelayFee()
 
 	feeEst := feeForSize(feeIncrement, feeSize)
 

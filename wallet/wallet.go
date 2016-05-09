@@ -197,20 +197,6 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		rollbackBlockDB = make(map[uint32]*wtxmgr.DatabaseContents)
 	}
 
-	var feeIncrement dcrutil.Amount
-	var ticketFeeIncrement dcrutil.Amount
-	switch {
-	case params == &chaincfg.MainNetParams:
-		feeIncrement = FeeIncrementMainnet
-		ticketFeeIncrement = TicketFeeIncrement
-	case params == &chaincfg.TestNetParams:
-		feeIncrement = FeeIncrementTestnet
-		ticketFeeIncrement = TicketFeeIncrementTestnet
-	default:
-		feeIncrement = FeeIncrementTestnet
-		ticketFeeIncrement = TicketFeeIncrementTestnet
-	}
-
 	w := &Wallet{
 		db:                       *db,
 		Manager:                  mgr,
@@ -221,8 +207,8 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		balanceToMaintain:        btm,
 		CurrentStakeDiff:         &StakeDifficultyInfo{nil, -1, -1},
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
-		relayFee:                 feeIncrement,
-		ticketFeeIncrement:       ticketFeeIncrement,
+		relayFee:                 txrules.DefaultRelayFeePerKb,
+		ticketFeeIncrement:       TicketFeeIncrement,
 		AllowHighFees:            AllowHighFees,
 		rescanAddJob:             make(chan *RescanJob),
 		rescanBatch:              make(chan *rescanBatch),
