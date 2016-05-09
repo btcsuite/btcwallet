@@ -1531,6 +1531,16 @@ func ListTransactions(details *wtxmgr.TxDetails, addrMgr *waddrmgr.Manager,
 
 	send := len(details.Debits) != 0
 
+	txTypeStr := dcrjson.LTTTRegular
+	switch details.TxType {
+	case stake.TxTypeSStx:
+		txTypeStr = dcrjson.LTTTTicket
+	case stake.TxTypeSSGen:
+		txTypeStr = dcrjson.LTTTVote
+	case stake.TxTypeSSRtx:
+		txTypeStr = dcrjson.LTTTRevocation
+	}
+
 	// Fee can only be determined if every input is a debit.
 	var feeF64 float64
 	if len(details.Debits) == len(details.MsgTx.TxIn) {
@@ -1604,6 +1614,7 @@ outputs:
 			WalletConflicts: []string{},
 			Time:            received,
 			TimeReceived:    received,
+			TxType:          &txTypeStr,
 		}
 
 		// Add a received/generated/immature result if this is a credit.
