@@ -2539,6 +2539,10 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 			prevIndex := txIn.PreviousOutPoint.Index
 			txDetails, err := w.TxStore.TxDetails(prevHash)
 			if err != nil {
+				return nil, fmt.Errorf("Cannot query previous transaction "+
+					"details for %v: %v", txIn.PreviousOutPoint, err)
+			}
+			if txDetails == nil {
 				return nil, fmt.Errorf("%v not found",
 					txIn.PreviousOutPoint)
 			}

@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Copyright (c) 2015 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
@@ -127,89 +127,46 @@ func (s *Store) removeUnconfirmed(ns walletdb.Bucket, rec *TxRecord) error {
 }
 
 // UnminedTxs returns the underlying transactions for all unmined transactions
-// which are not known to have been mined in a block.
+// which are not known to have been mined in a block.  Transactions are
+// guaranteed to be sorted by their dependency order.
 func (s *Store) UnminedTxs() ([]*wire.MsgTx, error) {
-	var txs []*wire.MsgTx
+	var recSet map[chainhash.Hash]*TxRecord
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
 		var err error
-		txs, err = s.unminedTxs(ns)
+		recSet, err = s.unminedTxRecords(ns)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	recs := dependencySort(recSet)
+	txs := make([]*wire.MsgTx, 0, len(recs))
+	for _, rec := range recs {
+		txs = append(txs, &rec.MsgTx)
+	}
 	return txs, nil
 }
 
-func (s *Store) unminedTxs(ns walletdb.Bucket) ([]*wire.MsgTx, error) {
-	var unmined []*TxRecord
+func (s *Store) unminedTxRecords(ns walletdb.Bucket) (map[chainhash.Hash]*TxRecord, error) {
+	unmined := make(map[chainhash.Hash]*TxRecord)
 	err := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
-		// TODO: Parsing transactions from the db may be a little
-		// expensive.  It's possible the caller only wants the
-		// serialized transactions.
 		var txHash chainhash.Hash
 		err := readRawUnminedHash(k, &txHash)
 		if err != nil {
 			return err
 		}
 
-		var rec TxRecord
-		err = readRawTxRecord(&txHash, v, &rec)
+		rec := new(TxRecord)
+		err = readRawTxRecord(&txHash, v, rec)
 		if err != nil {
 			return err
 		}
 
-		unmined = append(unmined, &rec)
+		unmined[rec.Hash] = rec
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Sort by dependency on other transactions, if any.
-	g, i, err := parseTxRecsAsGraph(unmined)
-	if err != nil {
-		return nil, err
-	}
-
-	order, _, err := topSortKahn(g, i)
-	if err != nil {
-		return nil, err
-	}
-
-	// Transactions with no local depencies are excluded from this list, so
-	// we need to add them back now. First, find transactions with local
-	// dependencies. Then, sort those as DAGs. Finally, append all the
-	// transactions with no local dependencies and ship them out to the
-	// caller.
-	numTxs := len(unmined)
-	numOrder := len(order)
-	allTxs := make([]*TxRecord, numTxs, numTxs)
-	orderTxs := make([]*TxRecord, numOrder, numOrder)
-	if order != nil {
-		for idx, tx := range order {
-			allTxs[idx] = txRecFromSliceByHash(unmined, tx)
-			orderTxs[idx] = txRecFromSliceByHash(unmined, tx)
-		}
-	} else {
-		orderTxs = nil
-	}
-
-	itr := len(order)
-	for _, tx := range unmined {
-		if !txRecExistsInSlice(orderTxs, tx) {
-			allTxs[itr] = tx
-			itr++
-		}
-	}
-
-	txs := make([]*wire.MsgTx, numTxs, numTxs)
-	for i, txr := range allTxs {
-		txs[i] = &txr.MsgTx
-	}
-
-	return txs, err
+	return unmined, err
 }
 
 // UnminedTxHashes returns the hashes of all transactions not known to have been

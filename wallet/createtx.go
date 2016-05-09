@@ -1334,22 +1334,22 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		var forSigning []wtxmgr.Credit
 		if eopPool != nil {
 			eopPoolCredit := wtxmgr.Credit{
-				*eopPool.op,
-				wtxmgr.BlockMeta{},
-				dcrutil.Amount(eopPool.amt),
-				eopPool.pkScript,
-				time.Now(),
-				false,
+				OutPoint:     *eopPool.op,
+				BlockMeta:    wtxmgr.BlockMeta{},
+				Amount:       dcrutil.Amount(eopPool.amt),
+				PkScript:     eopPool.pkScript,
+				Received:     time.Now(),
+				FromCoinBase: false,
 			}
 			forSigning = append(forSigning, eopPoolCredit)
 		}
 		eopCredit := wtxmgr.Credit{
-			*eop.op,
-			wtxmgr.BlockMeta{},
-			dcrutil.Amount(eop.amt),
-			eop.pkScript,
-			time.Now(),
-			false,
+			OutPoint:     *eop.op,
+			BlockMeta:    wtxmgr.BlockMeta{},
+			Amount:       dcrutil.Amount(eop.amt),
+			PkScript:     eop.pkScript,
+			Received:     time.Now(),
+			FromCoinBase: false,
 		}
 		forSigning = append(forSigning, eopCredit)
 

@@ -110,7 +110,7 @@ func createWallet(cfg *config) error {
 		return err
 	}
 
-	dbDir := networkDir(cfg.DataDir, activeNet.Params)
+	dbDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	stakeOptions := &wallet.StakeOptions{
 		VoteBits:           cfg.VoteBits,
 		StakeMiningEnabled: cfg.EnableStakeMining,
@@ -127,7 +127,7 @@ func createWallet(cfg *config) error {
 	// When there is a legacy keystore, open it now to ensure any errors
 	// don't end up exiting the process after the user has spent time
 	// entering a bunch of information.
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	keystorePath := filepath.Join(netDir, keystore.Filename)
 	var legacyKeyStore *keystore.Store
 	_, err := os.Stat(keystorePath)
@@ -235,7 +235,7 @@ func createSimulationWallet(cfg *config) error {
 		return err
 	}
 
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
 
 	// Write the seed to disk, so that we can restore it later
 	// if need be, for testing purposes.
@@ -302,7 +302,7 @@ func createWatchingOnlyWallet(cfg *config) error {
 		return err
 	}
 
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
 
 	// Create the wallet.
 	dbPath := filepath.Join(netDir, walletDbName)

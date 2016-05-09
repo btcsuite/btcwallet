@@ -1,0 +1,87 @@
+hash: bc0bbb45aaf5aacecf12dd0be5b2d2bafb37a9dbe34442a38a94520ae9948898
+updated: 2016-05-09T09:15:13.9383174-04:00
+imports:
+- name: github.com/boltdb/bolt
+  version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
+- name: github.com/btcsuite/btclog
+  version: f96df2375f37300305f329b8e5258764b4f19a7f
+- name: github.com/btcsuite/fastsha256
+  version: 302ad4db268b46f9ebda3078f6f7397f96047735
+- name: github.com/btcsuite/go-socks
+  version: cfe8b59e565c1a5bd4e2005d77cd9aa8b2e14524
+  subpackages:
+  - socks
+- name: github.com/btcsuite/golangcrypto
+  version: 53f62d9b43e87a6c56975cf862af7edf33a8d0df
+  subpackages:
+  - nacl/secretbox
+  - ripemd160
+  - scrypt
+  - ssh/terminal
+  - poly1305
+  - salsa20/salsa
+  - pbkdf2
+- name: github.com/btcsuite/seelog
+  version: 313961b101eb55f65ae0f03ddd4e322731763b6c
+- name: github.com/btcsuite/websocket
+  version: 31079b6807923eb23992c421b114992b95131b55
+- name: github.com/decred/bitset
+  version: 484b833245d5f9046e2893a6bd2e54b1df3a53a4
+- name: github.com/decred/blake256
+  version: a840e32d7c31fe2e0218607334cb120a683951a4
+- name: github.com/decred/dcrd
+  version: f93cb9fd9fd7b471481e4cfb122186514f84e879
+  subpackages:
+  - blockchain
+  - blockchain/stake
+  - chaincfg
+  - chaincfg/chainec
+  - chaincfg/chainhash
+  - dcrjson
+  - txscript
+  - wire
+  - dcrec/edwards
+  - dcrec/secp256k1
+  - dcrec/secp256k1/schnorr
+  - database
+- name: github.com/decred/dcrrpcclient
+  version: a5a51f5ca4f0038e475239cfe3c635a21fd28111
+- name: github.com/decred/dcrutil
+  version: 74563ea520b1215b9c10f96507b7a9984894c0b5
+  subpackages:
+  - hdkeychain
+  - base58
+- name: github.com/decred/ed25519
+  version: b0909d3f798b97a03c9e77023f97a5301a2a7900
+  subpackages:
+  - edwards25519
+- name: github.com/golang/protobuf
+  version: 7cc19b78d562895b13596ddce7aafb59dd789318
+  subpackages:
+  - proto
+- name: github.com/jessevdk/go-flags
+  version: 1679536dcc895411a9f5848d9a0250be7856448c
+- name: golang.org/x/net
+  version: 35ec611a141ee705590b9eb64d673f9e6dfeb1ac
+  subpackages:
+  - context
+  - http2
+  - trace
+  - http2/hpack
+  - internal/timeseries
+- name: golang.org/x/sys
+  version: b776ec39b3e54652e09028aaaaac9757f4f8211a
+  subpackages:
+  - unix
+- name: google.golang.org/grpc
+  version: 7f24e5e90e7e79ee1c68359b05908b668a23ffb2
+  subpackages:
+  - codes
+  - credentials
+  - grpclog
+  - internal
+  - metadata
+  - naming
+  - transport
+  - peer
+devImports: []

@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The btcsuite developers
 // Copyright (c) 2015-2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
@@ -11,10 +11,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/btcsuite/go-flags"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/walletdb"
 	_ "github.com/decred/dcrwallet/walletdb/bdb"
+	"github.com/jessevdk/go-flags"
 )
 
 const defaultNet = "mainnet"

@@ -9,17 +9,19 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
-	flags "github.com/btcsuite/go-flags"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/internal/cfgutil"
 	"github.com/decred/dcrwallet/internal/legacy/keystore"
 	"github.com/decred/dcrwallet/netparams"
 	"github.com/decred/dcrwallet/wallet"
 	"github.com/decred/dcrwallet/wallet/txrules"
+	flags "github.com/jessevdk/go-flags"
 )
 
 const (
@@ -49,14 +51,12 @@ const (
 )
 
 var (
-	dcrdHomeDir        = dcrutil.AppDataDir("dcrd", false)
-	dcrwalletHomeDir   = dcrutil.AppDataDir("dcrwallet", false)
-	dcrdHomedirCAFile  = filepath.Join(dcrdHomeDir, "rpc.cert")
-	defaultConfigFile  = filepath.Join(dcrwalletHomeDir, defaultConfigFilename)
-	defaultDataDir     = dcrwalletHomeDir
-	defaultRPCKeyFile  = filepath.Join(dcrwalletHomeDir, "rpc.key")
-	defaultRPCCertFile = filepath.Join(dcrwalletHomeDir, "rpc.cert")
-	defaultLogDir      = filepath.Join(dcrwalletHomeDir, defaultLogDirname)
+	dcrdDefaultCAFile  = filepath.Join(dcrutil.AppDataDir("dcrd", false), "rpc.cert")
+	defaultAppDataDir  = dcrutil.AppDataDir("dcrwallet", false)
+	defaultConfigFile  = filepath.Join(defaultAppDataDir, defaultConfigFilename)
+	defaultRPCKeyFile  = filepath.Join(defaultAppDataDir, "rpc.key")
+	defaultRPCCertFile = filepath.Join(defaultAppDataDir, "rpc.cert")
+	defaultLogDir      = filepath.Join(defaultAppDataDir, defaultLogDirname)
 )
 
 type config struct {
@@ -66,7 +66,7 @@ type config struct {
 	Create             bool   `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp         bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	CreateWatchingOnly bool   `long:"createwatchingonly" description:"Create the wallet and instantiate it as watching only with an HD extended pubkey; must call with --create"`
-	DataDir            string `short:"b" long:"datadir" description:"Directory to store wallets and transactions"`
+	AppDataDir         string `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
 	TestNet            bool   `long:"testnet" description:"Use the test network (default mainnet)"`
 	SimNet             bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	NoInitialLoad      bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
@@ -129,21 +129,58 @@ type config struct {
 	// These options will change (and require changes to config files, etc.)
 	// when the new gRPC server is enabled.
 	ExperimentalRPCListeners []string `long:"experimentalrpclisten" description:"Listen for RPC connections on this interface/port"`
+
+	// Deprecated options
+	DataDir string `short:"b" long:"datadir" default-mask:"-" description:"DEPRECATED -- use appdata instead"`
 }
 
 // cleanAndExpandPath expands environement variables and leading ~ in the
 // passed path, cleans the result, and returns it.
 func cleanAndExpandPath(path string) string {
-	// Expand initial ~ to OS specific home directory.
-	if strings.HasPrefix(path, "~") {
-		homeDir := filepath.Dir(dcrwalletHomeDir)
-		path = strings.Replace(path, "~", homeDir, 1)
-	}
-
 	// NOTE: The os.ExpandEnv doesn't work with Windows cmd.exe-style
 	// %VARIABLE%, but they variables can still be expanded via POSIX-style
 	// $VARIABLE.
-	return filepath.Clean(os.ExpandEnv(path))
+	path = os.ExpandEnv(path)
+
+	if !strings.HasPrefix(path, "~") {
+		return filepath.Clean(path)
+	}
+
+	// Expand initial ~ to the current user's home directory, or ~otheruser
+	// to otheruser's home directory.  On Windows, both forward and backward
+	// slashes can be used.
+	path = path[1:]
+
+	var pathSeparators string
+	if runtime.GOOS == "windows" {
+		pathSeparators = string(os.PathSeparator) + "/"
+	} else {
+		pathSeparators = string(os.PathSeparator)
+	}
+
+	userName := ""
+	if i := strings.IndexAny(path, pathSeparators); i != -1 {
+		userName = path[:i]
+		path = path[i:]
+	}
+
+	homeDir := ""
+	var u *user.User
+	var err error
+	if userName == "" {
+		u, err = user.Current()
+	} else {
+		u, err = user.Lookup(userName)
+	}
+	if err == nil {
+		homeDir = u.HomeDir
+	}
+	// Fallback to CWD if user lookup fails or user has no home directory.
+	if homeDir == "" {
+		homeDir = "."
+	}
+
+	return filepath.Join(homeDir, path)
 }
 
 // validLogLevel returns whether or not logLevel is a valid debug log level.
@@ -254,7 +291,7 @@ func loadConfig() (*config, []string, error) {
 	cfg := config{
 		DebugLevel:             defaultLogLevel,
 		ConfigFile:             defaultConfigFile,
-		DataDir:                defaultDataDir,
+		AppDataDir:             defaultAppDataDir,
 		LogDir:                 defaultLogDir,
 		WalletPass:             wallet.InsecurePubPassphrase,
 		PromptPass:             defaultPromptPass,
@@ -275,23 +312,14 @@ func loadConfig() (*config, []string, error) {
 		AddrIdxScanLen:         defaultAddrIdxScanLen,
 		StakePoolColdExtKey:    defaultStakePoolColdExtKey,
 		AllowHighFees:          defaultAllowHighFees,
-	}
-
-	// A config file in the current directory takes precedence.
-	exists, err := cfgutil.FileExists(defaultConfigFilename)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return loadConfigError(err)
-	}
-	if exists {
-		cfg.ConfigFile = defaultConfigFile
+		DataDir:                defaultAppDataDir,
 	}
 
 	// Pre-parse the command line options to see if an alternative config
 	// file or the version flag was specified.
 	preCfg := cfg
 	preParser := flags.NewParser(&preCfg, flags.Default)
-	_, err = preParser.Parse()
+	_, err := preParser.Parse()
 	if err != nil {
 		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
 			preParser.WriteHelp(os.Stderr)
@@ -312,7 +340,19 @@ func loadConfig() (*config, []string, error) {
 	// Load additional config from file.
 	var configFileError error
 	parser := flags.NewParser(&cfg, flags.Default)
-	err = flags.NewIniParser(parser).ParseFile(preCfg.ConfigFile)
+	configFilePath := preCfg.ConfigFile
+	if configFilePath == defaultConfigFile {
+		appDataDir := preCfg.AppDataDir
+		if appDataDir == defaultAppDataDir && preCfg.DataDir != defaultAppDataDir {
+			appDataDir = cleanAndExpandPath(preCfg.DataDir)
+		}
+		if appDataDir != defaultAppDataDir {
+			configFilePath = filepath.Join(appDataDir, defaultConfigFilename)
+		}
+	} else {
+		configFilePath = cleanAndExpandPath(configFilePath)
+	}
+	err = flags.NewIniParser(parser).ParseFile(configFilePath)
 	if err != nil {
 		if _, ok := err.(*os.PathError); !ok {
 			fmt.Fprintln(os.Stderr, err)
@@ -338,15 +378,26 @@ func loadConfig() (*config, []string, error) {
 		log.Warnf("%v", configFileError)
 	}
 
+	// Check deprecated aliases.  The new options receive priority when both
+	// are changed from the default.
+	if cfg.DataDir != defaultAppDataDir {
+		fmt.Fprintln(os.Stderr, "datadir option has been replaced by "+
+			"appdata -- please update your config")
+		if cfg.AppDataDir == defaultAppDataDir {
+			cfg.AppDataDir = cfg.DataDir
+		}
+	}
+
 	// If an alternate data directory was specified, and paths with defaults
 	// relative to the data dir are unchanged, modify each path to be
 	// relative to the new data dir.
-	if cfg.DataDir != defaultDataDir {
+	if cfg.AppDataDir != defaultAppDataDir {
+		cfg.AppDataDir = cleanAndExpandPath(cfg.AppDataDir)
 		if cfg.RPCKey == defaultRPCKeyFile {
-			cfg.RPCKey = filepath.Join(cfg.DataDir, "rpc.key")
+			cfg.RPCKey = filepath.Join(cfg.AppDataDir, "rpc.key")
 		}
 		if cfg.RPCCert == defaultRPCCertFile {
-			cfg.RPCCert = filepath.Join(cfg.DataDir, "rpc.cert")
+			cfg.RPCCert = filepath.Join(cfg.AppDataDir, "rpc.cert")
 		}
 	}
 
@@ -406,7 +457,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Exit if you try to use a simulation wallet with a standard
 	// data directory.
-	if cfg.DataDir == defaultDataDir && cfg.CreateTemp {
+	if cfg.AppDataDir == defaultAppDataDir && cfg.CreateTemp {
 		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
 			"wallet, but failed to specify data directory!")
 		os.Exit(0)
@@ -429,7 +480,7 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Ensure the wallet exists or create it when the create flag is set.
-	netDir := networkDir(cfg.DataDir, activeNet.Params)
+	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	dbPath := filepath.Join(netDir, walletDbName)
 
 	if cfg.CreateTemp && cfg.Create {
@@ -585,7 +636,7 @@ func loadConfig() (*config, []string, error) {
 	} else {
 		// If CAFile is unset, choose either the copy or local dcrd cert.
 		if cfg.CAFile == "" {
-			cfg.CAFile = filepath.Join(cfg.DataDir, defaultCAFilename)
+			cfg.CAFile = filepath.Join(cfg.AppDataDir, defaultCAFilename)
 
 			// If the CA copy does not exist, check if we're connecting to
 			// a local dcrd and switch to its RPC cert if it exists.
@@ -597,13 +648,13 @@ func loadConfig() (*config, []string, error) {
 			if !certExists {
 				if _, ok := localhostListeners[RPCHost]; ok {
 					dcrdCertExists, err := cfgutil.FileExists(
-						dcrdHomedirCAFile)
+						dcrdDefaultCAFile)
 					if err != nil {
 						fmt.Fprintln(os.Stderr, err)
 						return loadConfigError(err)
 					}
 					if dcrdCertExists {
-						cfg.CAFile = dcrdHomedirCAFile
+						cfg.CAFile = dcrdDefaultCAFile
 					}
 				}
 			}
@@ -691,6 +742,8 @@ func loadConfig() (*config, []string, error) {
 
 	// Expand environment variable and leading ~ for filepaths.
 	cfg.CAFile = cleanAndExpandPath(cfg.CAFile)
+	cfg.RPCCert = cleanAndExpandPath(cfg.RPCCert)
+	cfg.RPCKey = cleanAndExpandPath(cfg.RPCKey)
 
 	// If the dcrd username or password are unset, use the same auth as for
 	// the client.  The two settings were previously shared for dcrd and

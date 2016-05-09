@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/btcsuite/go-flags"
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/dcrjson"
@@ -23,6 +22,7 @@ import (
 	"github.com/decred/dcrwallet/netparams"
 	"github.com/decred/dcrwallet/wallet/txauthor"
 	"github.com/decred/dcrwallet/wallet/txrules"
+	"github.com/jessevdk/go-flags"
 )
 
 var (
@@ -57,7 +57,7 @@ var opts = struct {
 	RPCConnect:            "localhost",
 	RPCUsername:           "",
 	RPCCertificateFile:    filepath.Join(walletDataDirectory, "rpc.cert"),
-	FeeRate:               &cfgutil.AmountFlag{txrules.DefaultRelayFeePerKb},
+	FeeRate:               cfgutil.NewAmountFlag(txrules.DefaultRelayFeePerKb),
 	SourceAccount:         "imported",
 	DestinationAccount:    "default",
 	RequiredConfirmations: 2,
@@ -339,7 +339,7 @@ func parseOutPoint(input *dcrjson.ListUnspentResult) (wire.OutPoint, error) {
 	if err != nil {
 		return wire.OutPoint{}, err
 	}
-	return wire.OutPoint{*txHash, input.Vout, input.Tree}, nil
+	return wire.OutPoint{Hash: *txHash, Index: input.Vout, Tree: input.Tree}, nil
 }
 
 func pickNoun(n int, singularForm, pluralForm string) string {

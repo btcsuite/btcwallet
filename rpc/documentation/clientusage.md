@@ -144,7 +144,7 @@ auto read_file(std::string const& file_path) -> std::string {
 
 auto main() -> int {
     // Before the gRPC native library (gRPC Core) is lazily loaded and
-    // initialized, an environment variable must be set so OpenSSL is
+    // initialized, an environment variable must be set so BoringSSL is
     // configured to use ECDSA TLS certificates (required by dcrwallet).
     setenv("GRPC_SSL_CIPHER_SUITES", "HIGH+ECDSA", 1);
 
@@ -244,7 +244,7 @@ namespace Example
         static async Task ExampleAsync()
         {
             // Before the gRPC native library (gRPC Core) is lazily loaded and initialized,
-            // an environment variable must be set so OpenSSL is configured to use ECDSA TLS
+            // an environment variable must be set so BoringSSL is configured to use ECDSA TLS
             // certificates (required by dcrwallet).
             Environment.SetEnvironmentVariable("GRPC_SSL_CIPHER_SUITES", "HIGH+ECDSA");
 
@@ -345,17 +345,17 @@ the client project directory, or reference the file from the
 `dcrwallet` project directory.
 
 ```JavaScript
+// Before the gRPC native library (gRPC Core) is lazily loaded and
+// initialized, an environment variable must be set so BoringSSL is
+// configured to use ECDSA TLS certificates (required by dcrwallet).
+process.env['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA';
+
 var fs = require('fs');
 var path = require('path');
 var os = require('os');
 var grpc = require('grpc');
 var protoDescriptor = grpc.load('./api.proto');
 var walletrpc = protoDescriptor.walletrpc;
-
-// Before the gRPC native library (gRPC Core) is lazily loaded and
-// initialized, an environment variable must be set so OpenSSL is
-// configured to use ECDSA TLS certificates (required by dcrwallet).
-process.env['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA';
 
 var certPath = path.join(process.env.HOME, '.dcrwallet', 'rpc.cert');
 if (os.platform == 'win32') {
@@ -366,7 +366,7 @@ if (os.platform == 'win32') {
 }
 
 var cert = fs.readFileSync(certPath);
-var creds = grpc.Credentials.createSsl(cert);
+var creds = grpc.credentials.createSsl(cert);
 var client = new walletrpc.WalletService('localhost:19110', creds);
 
 var request = {
@@ -412,7 +412,7 @@ timeout = 1 # seconds
 
 def main():
     # Before the gRPC native library (gRPC Core) is lazily loaded and
-    # initialized, an environment variable must be set so OpenSSL is
+    # initialized, an environment variable must be set so BoringSSL is
     # configured to use ECDSA TLS certificates (required by dcrwallet).
     os.environ['GRPC_SSL_CIPHER_SUITES'] = 'HIGH+ECDSA'
 

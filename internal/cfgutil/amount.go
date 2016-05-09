@@ -18,6 +18,11 @@ type AmountFlag struct {
 	dcrutil.Amount
 }
 
+// NewAmountFlag creates an AmountFlag with a default dcrutil.Amount.
+func NewAmountFlag(defaultValue dcrutil.Amount) *AmountFlag {
+	return &AmountFlag{defaultValue}
+}
+
 // MarshalFlag satisifes the flags.Marshaler interface.
 func (a *AmountFlag) MarshalFlag() (string, error) {
 	return a.Amount.String(), nil
