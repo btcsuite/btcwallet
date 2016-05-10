@@ -1,5 +1,5 @@
 hash: bc512f42285c0afbef5adad730e5bbf97f7581f4e859b13bc9505c285d3f8c42
-updated: 2016-05-09T11:30:37.527027365-05:00
+updated: 2016-05-10T16:25:42.006454568Z
 imports:
 - name: github.com/boltdb/bolt
   version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
@@ -45,7 +45,7 @@ imports:
   - dcrec/secp256k1/schnorr
   - database
 - name: github.com/decred/dcrrpcclient
-  version: e889894fea7b5d3c43f7596e749420d23da6fbde
+  version: e625cc131dc06129f56e0d472061c3e378ada396
 - name: github.com/decred/dcrutil
   version: 74563ea520b1215b9c10f96507b7a9984894c0b5
   subpackages:
