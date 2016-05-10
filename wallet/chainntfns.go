@@ -289,29 +289,15 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 
 	// Disconnect the last seen block from the manager if it matches the
 	// removed block.
-	iter := w.Manager.NewIterateRecentBlocks()
-	if iter != nil && iter.BlockStamp().Hash == b.Hash {
-		if iter.Prev() {
-			prev := iter.BlockStamp()
-			w.Manager.SetSyncedTo(&prev)
-			err := w.TxStore.Rollback(prev.Height + 1)
-			if err != nil {
-				return err
-			}
-		} else {
-			// The reorg is farther back than the recently-seen list
-			// of blocks has recorded, so set it to unsynced which
-			// will in turn lead to a rescan from either the
-			// earliest blockstamp the addresses in the manager are
-			// known to have been created.
-			w.Manager.SetSyncedTo(nil)
-			// Rollback everything but the genesis block.
-			err := w.TxStore.Rollback(1)
-			if err != nil {
-				return err
-			}
-		}
+	err := w.TxStore.Rollback(b.Height)
+	if err != nil {
+		return err
 	}
+	prev, err := w.TxStore.GetBlockHash(b.Height - 1)
+	if err != nil {
+		return err
+	}
+	w.Manager.SetSyncedTo(&waddrmgr.BlockStamp{Hash: prev, Height: b.Height - 1})
 
 	// Notify interested clients of the disconnected block.
 	w.NtfnServer.notifyDetachedBlock(&b.Hash)

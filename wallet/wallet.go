@@ -811,7 +811,7 @@ func (w *Wallet) syncWithChain() error {
 			curBlock = &bl.MsgBlock().Header.PrevBlock
 
 			// Break early if we hit the genesis block.
-			if i == 1 {
+			if i == 0 {
 				break
 			}
 		}
