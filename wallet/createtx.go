@@ -1120,10 +1120,14 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	// address this better and prevent address burning.
 	account := req.account
 
-	// Get the current ticket price.
-	ticketPrice := dcrutil.Amount(w.GetStakeDifficulty().StakeDifficulty)
-	if ticketPrice == -1 {
-		return nil, ErrTicketPriceNotSet
+	// Get the current ticket price from the daemon.
+	ticketPricesF64, err := w.ChainClient().GetStakeDifficulty()
+	if err != nil {
+		return nil, err
+	}
+	ticketPrice, err := dcrutil.NewAmount(ticketPricesF64.NextStakeDifficulty)
+	if err != nil {
+		return nil, err
 	}
 
 	// Ensure the ticket price does not exceed the spend limit if set.
