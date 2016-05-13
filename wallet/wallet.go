@@ -800,7 +800,7 @@ func (w *Wallet) syncWithChain() error {
 					Hash:   *curBlock,
 					Height: int32(blHeight),
 				},
-				Time:     time.Now(),
+				Time:     bl.MsgBlock().Header.Timestamp,
 				VoteBits: vb,
 			}
 			err = w.TxStore.InsertBlock(&wtxBm)
