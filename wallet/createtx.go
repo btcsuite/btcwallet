@@ -129,19 +129,19 @@ func FeeForSize(incr dcrutil.Amount, sz int) dcrutil.Amount {
 	return feeForSize(incr, sz)
 }
 
-// FeeIncrementMainnet is the default minimum transation fees per KB (0.01 coin,
+// FeeIncrementMainnet is the default minimum transaction fees per KB (0.01 coin,
 // measured in atoms) added to transactions requiring a fee for MainNet.
 const FeeIncrementMainnet = 1e6
 
-// FeeIncrementTestnet is the default minimum transation fees per KB (0.00001
+// FeeIncrementTestnet is the default minimum transaction fees per KB (0.00001
 // coin, measured in atoms) added to transactions requiring a fee for TestNet.
 const FeeIncrementTestnet = 1e3
 
-// TicketFeeIncrement is the default minimum stake transation fees per KB (0.01
+// TicketFeeIncrement is the default minimum stake transaction fees per KB (0.01
 // coin, measured in atoms).
 const TicketFeeIncrement = 1e6
 
-// TicketFeeIncrementTestnet is the default minimum stake transation fees per KB
+// TicketFeeIncrementTestnet is the default minimum stake transaction fees per KB
 // (0.00001 coin, measured in atoms) for Testnet.
 const TicketFeeIncrementTestnet = 1e3
 
