@@ -190,7 +190,7 @@ func (s *NotificationServer) notifyUnminedTransaction(details *wtxmgr.TxDetails)
 	// Sanity check: should not be currently coalescing a notification for
 	// mined transactions at the same time that an unmined tx is notified.
 	if s.currentTxNtfn != nil {
-		log.Errorf("Notifying unmined tx notification while creating notification for blocks")
+		log.Tracef("Notifying unmined tx notification while creating notification for blocks")
 	}
 
 	defer s.mu.Unlock()
