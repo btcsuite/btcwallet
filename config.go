@@ -421,17 +421,6 @@ func loadConfig() (*config, []string, error) {
 		return loadConfigError(err)
 	}
 
-	// Temporarily disable stakepool mode on mainnet.
-	if !(cfg.TestNet || cfg.SimNet) && cfg.StakePoolColdExtKey !=
-		defaultStakePoolColdExtKey {
-		str := "%s: Mainnet params can't be used " +
-			"together with stake pool mode"
-		err := fmt.Errorf(str, "loadConfig")
-		fmt.Fprintln(os.Stderr, err)
-		parser.WriteHelp(os.Stderr)
-		return loadConfigError(err)
-	}
-
 	// Append the network type to the log directory so it is "namespaced"
 	// per network.
 	cfg.LogDir = cleanAndExpandPath(cfg.LogDir)
