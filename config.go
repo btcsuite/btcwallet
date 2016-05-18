@@ -38,7 +38,7 @@ const (
 	defaultReuseAddresses      = false
 	defaultRollbackTest        = false
 	defaultPruneTickets        = false
-	defaultTicketMaxPrice      = 50.0
+	defaultTicketMaxPrice      = 0.0
 	defaultTicketBuyFreq       = 1
 	defaultAutomaticRepair     = false
 	defaultUnsafeMainNet       = false
