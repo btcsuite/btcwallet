@@ -118,9 +118,9 @@ type Wallet struct {
 	stakePoolColdAddrs map[string]struct{}
 
 	// Start up flags/settings
-	automaticRepair bool
-	resyncAccounts  bool
-	addrIdxScanLen  int
+	automaticRepair   bool
+	initiallyUnlocked bool
+	addrIdxScanLen    int
 
 	chainClient        *chain.RPCClient
 	chainClientLock    sync.Mutex
@@ -233,7 +233,7 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		stakePoolEnabled:         len(stakePoolColdAddrs) > 0,
 		stakePoolColdAddrs:       stakePoolColdAddrs,
 		automaticRepair:          autoRepair,
-		resyncAccounts:           false,
+		initiallyUnlocked:        false,
 		rollbackTesting:          rollbackTest,
 		rollbackBlockDB:          rollbackBlockDB,
 		unlockRequests:           make(chan unlockRequest),
@@ -398,12 +398,12 @@ func (w *Wallet) PoolFees() float64 {
 	return w.poolFees
 }
 
-// SetResyncAccounts sets whether or not the user needs to sync accounts,
-// which dictates some of the start up syncing behaviour. It should only
-// be called before the wallet RPC servers are accessible. It is not safe
-// for concurrent access.
-func (w *Wallet) SetResyncAccounts(set bool) {
-	w.resyncAccounts = set
+// SetInitiallyUnlocked sets whether or not the wallet is initially unlocked.
+// This allows the user to resync accounts, dictating some of the start up
+// syncing behaviour. It should only be called before the wallet RPC servers
+// are accessible. It is not safe for concurrent access.
+func (w *Wallet) SetInitiallyUnlocked(set bool) {
+	w.initiallyUnlocked = set
 }
 
 // Start starts the goroutines necessary to manage a wallet.
@@ -813,6 +813,21 @@ func (w *Wallet) syncWithChain() error {
 		int64(bestBlockHeight),
 		bestBlock.MsgBlock().Header.SBits,
 	})
+
+	// Send winning and missed ticket notifications out so that the wallet
+	// can immediately vote and redeem any tickets it may have missed on
+	// startup.
+	// TODO A proper pass through for dcrrpcclient for these cmds.
+	if w.initiallyUnlocked {
+		_, err = w.chainClient.RawRequest("rebroadcastwinners", nil)
+		if err != nil {
+			return err
+		}
+		_, err = w.chainClient.RawRequest("rebroadcastmissed", nil)
+		if err != nil {
+			return err
+		}
+	}
 
 	log.Infof("Blockchain sync completed, wallet ready for general usage.")
 

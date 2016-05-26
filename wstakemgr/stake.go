@@ -33,12 +33,12 @@ import (
 	"github.com/decred/dcrutil"
 	walletchain "github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/wallet/txrules"
 	"github.com/decred/dcrwallet/walletdb"
 )
 
 const (
-	revocationFeeTestNet int64 = 10000
-	revocationFeeMainNet int64 = 7500000
+	revocationFeePerKB dcrutil.Amount = 1e6
 )
 
 // sstxRecord is the structure for a stored SStx.
@@ -982,16 +982,6 @@ func (s *StakeStore) getSSRtxs(sstxHash *chainhash.Hash) ([]*ssrtxRecord, error)
 // in the local database.
 func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 	sstxHash *chainhash.Hash, allowHighFees bool) (*StakeNotification, error) {
-	var revocationFee int64
-	switch {
-	case s.Params == &chaincfg.MainNetParams:
-		revocationFee = revocationFeeMainNet
-	case s.Params == &chaincfg.TestNetParams:
-		revocationFee = revocationFeeTestNet
-	default:
-		revocationFee = revocationFeeTestNet
-	}
-
 	// 1. Fetch the SStx, then calculate all the values we'll need later for
 	// the generation of the SSRtx tx outputs.
 	sstxRecord, err := s.getSStx(sstxHash)
@@ -1006,9 +996,14 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 	// and check to make sure we don't overflow that.
 	sstxPayTypes, sstxPkhs, sstxAmts, _, _, _ :=
 		stake.GetSStxStakeOutputInfo(sstx)
-
 	ssrtxCalcAmts := stake.GetStakeRewards(sstxAmts, sstx.MsgTx().TxOut[0].Value,
 		int64(0))
+
+	// Calculate the fee to use for this revocation based on the fee
+	// per KB that is standard for mainnet.
+	revocationSizeEst := estimateSSRtxTxSize(1, len(sstxPkhs))
+	revocationFee := txrules.FeeForSerializeSize(revocationFeePerKB,
+		revocationSizeEst)
 
 	// 2. Add the only input.
 	msgTx := wire.NewMsgTx()
@@ -1045,8 +1040,8 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 
 		// Add a fee from an output that has enough.
 		amt := ssrtxCalcAmts[i]
-		if !feeAdded && ssrtxCalcAmts[i] >= revocationFee {
-			amt -= revocationFee
+		if !feeAdded && ssrtxCalcAmts[i] >= int64(revocationFee) {
+			amt -= int64(revocationFee)
 			feeAdded = true
 		}
 

@@ -201,7 +201,7 @@ func startPromptPass(w *wallet.Wallet) {
 		promptPass = true
 	}
 	if promptPass {
-		w.SetResyncAccounts(true)
+		w.SetInitiallyUnlocked(true)
 		backendLog.Flush()
 		fmt.Println("*** ATTENTION ***")
 		fmt.Println("Since this is your first time running we need to sync accounts. Please enter")
