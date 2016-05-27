@@ -641,24 +641,6 @@ func (s *StakeStore) getSSGens(sstxHash *chainhash.Hash) ([]*ssgenRecord, error)
 	return records, nil
 }
 
-// SendRawTransaction sends a raw transaction using the chainSvr.
-// TODO Shouldn't this be locked? Eventually import the mutex lock
-// from wallet maybe.
-func (s *StakeStore) SendRawTransaction(msgTx *wire.MsgTx, allowHighFees bool) (*chainhash.Hash,
-	error) {
-	if s.isClosed {
-		str := "stake store is closed"
-		return nil, stakeStoreError(ErrStoreClosed, str, nil)
-	}
-
-	if s.chainSvr != nil {
-		return s.chainSvr.SendRawTransaction(msgTx, allowHighFees)
-	}
-
-	return nil, fmt.Errorf("cannot sendrawtranscation, client not " +
-		"initialized")
-}
-
 // SignVRTransaction signs a vote (SSGen) or revocation (SSRtx)
 // transaction. isSSGen indicates if it is an SSGen; if it's not,
 // it's an SSRtx.
