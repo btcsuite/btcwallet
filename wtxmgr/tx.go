@@ -1615,15 +1615,22 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 			}
 		}
 
-		if parentIsValid {
-			for _, hash := range regularTxFromParent {
-				s.rollbackTransaction(hash, pb, coinBaseCredits, minedBalance,
-					ns, true)
-			}
+		// The stake transactions from the current block are removed first,
+		// as they were added last. Following this, the block is checked to
+		// see if the transactions from the parent block were added when
+		// this block was added. If they were, remove them too. The slice of
+		// transactions is iterated in reverse order because they should have
+		// been added in the order of their dependencies, so they must be
+		// removed backwards.
+		for j := len(stakeTxFromBlock) - 1; j >= 0; j-- {
+			s.rollbackTransaction(stakeTxFromBlock[j], b, coinBaseCredits,
+				minedBalance, ns, false)
 		}
-		for _, hash := range stakeTxFromBlock {
-			s.rollbackTransaction(hash, b, coinBaseCredits, minedBalance, ns,
-				false)
+		if parentIsValid {
+			for j := len(regularTxFromParent) - 1; j >= 0; j-- {
+				s.rollbackTransaction(regularTxFromParent[j], pb,
+					coinBaseCredits, minedBalance, ns, true)
+			}
 		}
 
 		err = deleteBlockRecord(ns, i)

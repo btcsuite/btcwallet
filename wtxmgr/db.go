@@ -609,6 +609,14 @@ func readRawTxRecordBlock(k []byte, block *Block) error {
 
 func fetchRawTxRecordPkScript(k, v []byte, index uint32, scrLoc uint32,
 	scrLen uint32) ([]byte, error) {
+	if k == nil {
+		str := fmt.Sprintf("nil key in pkscript fetch call")
+		return nil, storeError(ErrData, str, nil)
+	}
+	if v == nil {
+		str := fmt.Sprintf("nil val in pkscript fetch call")
+		return nil, storeError(ErrData, str, nil)
+	}
 	var pkScript []byte
 
 	// The script isn't stored (legacy credits). Deserialize the
@@ -631,6 +639,17 @@ func fetchRawTxRecordPkScript(k, v []byte, index uint32, scrLoc uint32,
 		// timestamp that prefixes it.
 		scrLocInt := int(scrLoc) + int64Size
 		scrLenInt := int(scrLen)
+
+		// Check the bounds to make sure the we don't read beyond
+		// the end of the serialized transaction value, which
+		// would cause a panic.
+		if scrLocInt > len(v)-1 || scrLocInt+scrLenInt > len(v) {
+			str := fmt.Sprintf("bad pkscript location in serialized "+
+				"transaction; v[%v:%v] requested but v is only "+
+				"len %v", scrLocInt, scrLocInt+scrLenInt, len(v))
+			return nil, storeError(ErrData, str, nil)
+		}
+
 		pkScript = make([]byte, scrLenInt)
 		copy(pkScript, v[scrLocInt:scrLocInt+scrLenInt])
 	}
