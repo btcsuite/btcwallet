@@ -668,7 +668,7 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte) error {
 	for i, prevScript := range prevScripts {
 		vm, err := txscript.NewEngine(prevScript, tx, i,
-			txscript.StandardVerifyFlags, txscript.DefaultScriptVersion)
+			txscript.StandardVerifyFlags, txscript.DefaultScriptVersion, nil)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}

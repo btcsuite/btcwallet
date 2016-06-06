@@ -277,7 +277,7 @@ func (s *walletServer) ImportPrivateKey(ctx context.Context, req *pb.ImportPriva
 			"Only the imported account accepts private key imports")
 	}
 
-	_, err = s.wallet.ImportPrivateKey(wif, nil, req.Rescan)
+	_, err = s.wallet.ImportPrivateKey(wif, nil, req.Rescan, 0)
 	if err != nil {
 		return nil, translateError(err)
 	}

@@ -123,7 +123,7 @@ var rpcHandlers = map[string]struct {
 	"gettransaction":          {handler: getTransaction},
 	"getwalletfee":            {handler: getWalletFee},
 	"help":                    {handler: helpNoChainRPC, handlerWithChain: helpWithChainRPC},
-	"importprivkey":           {handler: importPrivKey},
+	"importprivkey":           {handlerWithChain: importPrivKey},
 	"importscript":            {handlerWithChain: importScript},
 	"keypoolrefill":           {handler: keypoolRefill},
 	"listaccounts":            {handler: listAccounts},
@@ -866,7 +866,7 @@ func getUnconfirmedBalance(icmd interface{}, w *wallet.Wallet) (interface{}, err
 
 // importPrivKey handles an importprivkey request by parsing
 // a WIF-encoded private key and adding it to an account.
-func importPrivKey(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+func importPrivKey(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	cmd := icmd.(*dcrjson.ImportPrivKeyCmd)
 
 	// Ensure that private keys are only imported to the correct account.
@@ -890,8 +890,18 @@ func importPrivKey(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		}
 	}
 
+	rescan := true
+	if cmd.Rescan != nil {
+		rescan = *cmd.Rescan
+	}
+
+	scanFrom := 0
+	if cmd.ScanFrom != nil {
+		scanFrom = *cmd.ScanFrom
+	}
+
 	// Import the private key, handling any errors.
-	_, err = w.ImportPrivateKey(wif, nil, *cmd.Rescan)
+	_, err = w.ImportPrivateKey(wif, nil, rescan, int32(scanFrom))
 	switch {
 	case waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress):
 		// Do not return duplicate key errors to the client.
@@ -915,54 +925,17 @@ func importScript(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 		return nil, fmt.Errorf("passed empty script")
 	}
 
-	err = w.TxStore.InsertTxScript(rs)
-	if err != nil {
-		return nil, err
+	rescan := true
+	if cmd.Rescan != nil {
+		rescan = *cmd.Rescan
 	}
 
-	// Get current block's height and hash.
-	bs, err := chainClient.BlockStamp()
-	if err != nil {
-		return nil, err
-	}
-	mscriptaddr, err := w.Manager.ImportScript(rs, bs)
-	if err != nil {
-		switch {
-		// Don't care if it's already there.
-		case waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress):
-			return nil, err
-		case waddrmgr.IsError(err, waddrmgr.ErrLocked):
-			log.Debugf("failed to attempt script importation " +
-				"of incoming tx because addrmgr was locked")
-			return nil, err
-		default:
-			return nil, err
-		}
-	} else {
-		// This is the first time seeing this script address
-		// belongs to us, so do a rescan and see if there are
-		// any other outputs to this address.
-		job := &wallet.RescanJob{
-			Addrs:     []dcrutil.Address{mscriptaddr.Address()},
-			OutPoints: nil,
-			BlockStamp: waddrmgr.BlockStamp{
-				Height: 0,
-				Hash:   *w.ChainParams().GenesisHash,
-			},
-		}
-
-		// Submit rescan job and log when the import has completed.
-		// Do not block on finishing the rescan.  The rescan success
-		// or failure is logged elsewhere, and the channel is not
-		// required to be read, so discard the return value.
-		_ = w.SubmitRescan(job)
-
-		log.Infof("Redeem script hash %x (address %v) successfully added.",
-			mscriptaddr.Address().ScriptAddress(),
-			mscriptaddr.Address().EncodeAddress())
+	scanFrom := 0
+	if cmd.ScanFrom != nil {
+		scanFrom = *cmd.ScanFrom
 	}
 
-	return nil, nil
+	return nil, w.ImportScript(rs, rescan, int32(scanFrom))
 }
 
 // keypoolRefill handles the keypoolrefill command. Since we handle the keypool

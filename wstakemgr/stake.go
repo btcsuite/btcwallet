@@ -728,7 +728,8 @@ func (s *StakeStore) SignVRTransaction(msgTx *wire.MsgTx, sstx *dcrutil.Tx,
 		msgTx,
 		txInNumToSign,
 		flags,
-		txscript.DefaultScriptVersion)
+		txscript.DefaultScriptVersion,
+		nil)
 	if err != nil {
 		return fmt.Errorf("failed to generate signature script engine for "+
 			"ssgen or ssrtx, error: %v", err.Error())

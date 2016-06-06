@@ -2240,14 +2240,34 @@ func (w *Wallet) DumpWIFPrivateKey(addr dcrutil.Address) (string, error) {
 // ImportPrivateKey imports a private key to the wallet and writes the new
 // wallet to disk.
 func (w *Wallet) ImportPrivateKey(wif *dcrutil.WIF, bs *waddrmgr.BlockStamp,
-	rescan bool) (string, error) {
+	rescan bool, scanFrom int32) (string, error) {
+	if scanFrom < 0 {
+		return "", fmt.Errorf("invalid scan from height of %v", scanFrom)
+	}
+
+	curBlockStamp := w.Manager.SyncedTo()
+	if scanFrom > curBlockStamp.Height {
+		return "", fmt.Errorf("requested height %v to scan from is "+
+			"above the tip height of %v", scanFrom,
+			curBlockStamp.Height)
+	}
+
+	scanFromHash := w.chainParams.GenesisHash
+	if scanFrom != 0 {
+		var err error
+		scanFromHash, err = w.chainClient.GetBlockHash(int64(scanFrom))
+		if err != nil {
+			return "", fmt.Errorf("couldn't find block header hash for "+
+				"block at height %v: %s", scanFrom, err.Error())
+		}
+	}
 
 	// The starting block for the key is the genesis block unless otherwise
 	// specified.
 	if bs == nil {
 		bs = &waddrmgr.BlockStamp{
-			Hash:   *w.chainParams.GenesisHash,
-			Height: 0,
+			Hash:   *scanFromHash,
+			Height: int32(scanFrom),
 		}
 	}
 
@@ -2271,6 +2291,14 @@ func (w *Wallet) ImportPrivateKey(wif *dcrutil.WIF, bs *waddrmgr.BlockStamp,
 		// or failure is logged elsewhere, and the channel is not
 		// required to be read, so discard the return value.
 		_ = w.SubmitRescan(job)
+	} else {
+		err := w.chainClient.NotifyReceived(
+			[]dcrutil.Address{addr.Address()})
+		if err != nil {
+			return "", fmt.Errorf("Failed to subscribe for address ntfns for "+
+				"address %s: %s", addr.Address().EncodeAddress(),
+				err.Error())
+		}
 	}
 
 	addrStr := addr.Address().EncodeAddress()
@@ -2286,6 +2314,88 @@ func (w *Wallet) ImportPrivateKey(wif *dcrutil.WIF, bs *waddrmgr.BlockStamp,
 
 	// Return the payment address string of the imported private key.
 	return addrStr, nil
+}
+
+// ImportScript imports a redeemscript to the wallet. If it also allows the
+// user to specify whether or not they want the redeemscript to be rescanned,
+// and how far back they wish to rescan.
+func (w *Wallet) ImportScript(rs []byte, rescan bool, scanFrom int32) error {
+	if scanFrom < 0 {
+		return fmt.Errorf("invalid scan from height of %v", scanFrom)
+	}
+
+	curBlockStamp := w.Manager.SyncedTo()
+	if scanFrom > curBlockStamp.Height {
+		return fmt.Errorf("requested height %v to scan from is "+
+			"above the tip height of %v", scanFrom,
+			curBlockStamp.Height)
+	}
+
+	scanFromHash := w.chainParams.GenesisHash
+	if scanFrom != 0 {
+		var err error
+		scanFromHash, err = w.chainClient.GetBlockHash(int64(scanFrom))
+		if err != nil {
+			return fmt.Errorf("couldn't find block header hash for "+
+				"block at height %v: %s", scanFrom, err.Error())
+		}
+	}
+
+	err := w.TxStore.InsertTxScript(rs)
+	if err != nil {
+		return err
+	}
+
+	// Get current block's height and hash.
+	bs := w.Manager.SyncedTo()
+	mscriptaddr, err := w.Manager.ImportScript(rs, &bs)
+	if err != nil {
+		switch {
+		// Don't care if it's already there.
+		case waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress):
+			return nil
+		case waddrmgr.IsError(err, waddrmgr.ErrLocked):
+			log.Debugf("failed to attempt script importation " +
+				"of incoming tx because addrmgr was locked")
+			return err
+		default:
+			return err
+		}
+	} else {
+		if rescan {
+			// This is the first time seeing this script address
+			// belongs to us, so do a rescan and see if there are
+			// any other outputs to this address.
+			job := &RescanJob{
+				Addrs:     []dcrutil.Address{mscriptaddr.Address()},
+				OutPoints: nil,
+				BlockStamp: waddrmgr.BlockStamp{
+					Height: int32(scanFrom),
+					Hash:   *scanFromHash,
+				},
+			}
+
+			// Submit rescan job and log when the import has completed.
+			// Do not block on finishing the rescan.  The rescan success
+			// or failure is logged elsewhere, and the channel is not
+			// required to be read, so discard the return value.
+			_ = w.SubmitRescan(job)
+		} else {
+			err := w.chainClient.NotifyReceived(
+				[]dcrutil.Address{mscriptaddr.Address()})
+			if err != nil {
+				return fmt.Errorf("Failed to subscribe for address ntfns for "+
+					"address %s: %s", mscriptaddr.Address().EncodeAddress(),
+					err.Error())
+			}
+		}
+	}
+
+	log.Infof("Redeem script hash %x (address %v) successfully added.",
+		mscriptaddr.Address().ScriptAddress(),
+		mscriptaddr.Address().EncodeAddress())
+
+	return nil
 }
 
 // exportBase64 exports a wallet's serialized database as a base64-encoded
@@ -2668,7 +2778,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 		// Either it was already signed or we just signed it.
 		// Find out if it is completely satisfied or still needs more.
 		vm, err := txscript.NewEngine(prevOutScript, tx, i,
-			txscript.StandardVerifyFlags, txscript.DefaultScriptVersion)
+			txscript.StandardVerifyFlags, txscript.DefaultScriptVersion, nil)
 		if err == nil {
 			err = vm.Execute()
 		}
