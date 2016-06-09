@@ -106,10 +106,6 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 // restored from seed, while the []byte passed is the private password required
 // to do the initial sync.
 func createWallet(cfg *config) error {
-	createWalletError := func(err error) error {
-		return err
-	}
-
 	dbDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	stakeOptions := &wallet.StakeOptions{
 		VoteBits:           cfg.VoteBits,
@@ -124,95 +120,14 @@ func createWallet(cfg *config) error {
 	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
 		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen, cfg.AllowHighFees)
 
-	// When there is a legacy keystore, open it now to ensure any errors
-	// don't end up exiting the process after the user has spent time
-	// entering a bunch of information.
-	netDir := networkDir(cfg.AppDataDir, activeNet.Params)
-	keystorePath := filepath.Join(netDir, keystore.Filename)
-	var legacyKeyStore *keystore.Store
-	_, err := os.Stat(keystorePath)
-	if err != nil && !os.IsNotExist(err) {
-		// A stat error not due to a non-existant file should be
-		// returned to the caller.
-		return createWalletError(err)
-	} else if err == nil {
-		// Keystore file exists.
-		legacyKeyStore, err = keystore.OpenDir(netDir)
-		if err != nil {
-			return createWalletError(err)
-		}
-	}
-
-	// Start by prompting for the private passphrase.  When there is an
-	// existing keystore, the user will be promped for that passphrase,
-	// otherwise they will be prompted for a new one.
 	reader := bufio.NewReader(os.Stdin)
-	privPass, err := prompt.PrivatePass(reader, legacyKeyStore)
-	if err != nil {
-		return createWalletError(err)
-	}
-
-	// When there exists a legacy keystore, unlock it now and set up a
-	// callback to import all keystore keys into the new walletdb
-	// wallet
-	if legacyKeyStore != nil {
-		err = legacyKeyStore.Unlock(privPass)
-		if err != nil {
-			return createWalletError(err)
-		}
-
-		// Import the addresses in the legacy keystore to the new wallet if
-		// any exist, locking each wallet again when finished.
-		loader.RunAfterLoad(func(w *wallet.Wallet) {
-			defer legacyKeyStore.Lock()
-
-			fmt.Println("Importing addresses from existing wallet...")
-
-			err := w.Manager.Unlock(privPass)
-			if err != nil {
-				fmt.Printf("ERR: Failed to unlock new wallet "+
-					"during old wallet key import: %v", err)
-				return
-			}
-			defer w.Manager.Lock()
-
-			err = convertLegacyKeystore(legacyKeyStore, w.Manager)
-			if err != nil {
-				fmt.Printf("ERR: Failed to import keys from old "+
-					"wallet format: %v", err)
-				return
-			}
-
-			// Remove the legacy key store.
-			err = os.Remove(keystorePath)
-			if err != nil {
-				fmt.Printf("WARN: Failed to remove legacy wallet "+
-					"from'%s'\n", keystorePath)
-			}
-		})
-	}
-
-	// Ascertain the public passphrase.  This will either be a value
-	// specified by the user or the default hard-coded public passphrase if
-	// the user does not want the additional public data encryption.
-	pubPass, err := prompt.PublicPass(reader, privPass,
+	privPass, pubPass, seed, err := prompt.Setup(reader,
 		[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
-	if err != nil {
-		return createWalletError(err)
-	}
-
-	// Ascertain the wallet generation seed.  This will either be an
-	// automatically generated value the user has already confirmed or a
-	// value the user has entered which has already been validated.
-	seed, err := prompt.Seed(reader)
-	if err != nil {
-		return createWalletError(err)
-	}
 
 	fmt.Println("Creating the wallet...")
 	_, err = loader.CreateNewWallet(pubPass, privPass, seed)
 	if err != nil {
-		return createWalletError(err)
+		return err
 	}
 
 	fmt.Println("The wallet has been created successfully.")
