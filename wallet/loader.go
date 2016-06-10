@@ -14,6 +14,7 @@ import (
 	"github.com/decred/dcrwallet/internal/prompt"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/walletdb"
+	_ "github.com/decred/dcrwallet/walletdb/bdb" // driver loaded during init
 )
 
 const (
