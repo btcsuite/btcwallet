@@ -101,7 +101,7 @@ var primaryHarness *rpctest.Harness
 
 func TestMain(m *testing.M) {
 	var err error
-	primaryHarness, err = rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	primaryHarness, err = rpctest.NewHarness(&chaincfg.SimNetParams, nil, nil)
 	if err != nil {
 		fmt.Println("unable to create primary harness: ", err)
 		os.Exit(1)
