@@ -99,6 +99,13 @@ var Methods = []struct {
 	{"getstakeinfo", []interface{}{(*dcrjson.GetStakeInfoResult)(nil)}},
 	{"getticketfee", returnsNumber},
 	{"setticketfee", returnsBool},
+	{"getwalletfee", returnsNumber},
+	{"addticket", nil},
+	{"listscripts", []interface{}{(*dcrjson.ListScriptsResult)(nil)}},
+	{"stakepooluserinfo", []interface{}{(*dcrjson.StakePoolUserInfoResult)(nil)}},
+	{"setbalancetomaintain", returnsBool},
+	{"getbalancetomaintain", returnsBool},
+	{"ticketsforaddress", returnsBool},
 }
 
 // HelpDescs contains the locale-specific help strings along with the locale.

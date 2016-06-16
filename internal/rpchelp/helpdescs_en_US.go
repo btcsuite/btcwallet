@@ -246,11 +246,14 @@ var helpDescsEnUS = map[string]string{
 	"importprivkey--synopsis": "Imports a WIF-encoded private key to the 'imported' account.",
 	"importprivkey-privkey":   "The WIF-encoded private key",
 	"importprivkey-label":     "Unused (must be unset or 'imported')",
-	"importprivkey-rescan":    "Rescan the blockchain (since the genesis block) for outputs controlled by the imported key",
+	"importprivkey-rescan":    "Rescan the blockchain (since the genesis block, or scanfrom block) for outputs controlled by the imported key",
+	"importprivkey-scanfrom":  "Block number for where to start rescan from",
 
 	// ImportScript help.
 	"importscript--synopsis": "Import a redeem script.",
 	"importscript-hex":       "Hex encoded script to import",
+	"importscript-rescan":    "Rescansfdsfd the blockchain (since the genesis block, or scanfrom block) for outputs controlled by the imported key",
+	"importscript-scanfrom":  "Block number for where to start rescan from",
 
 	// KeypoolRefillCmd help.
 	"keypoolrefill--synopsis": "DEPRECATED -- This request does nothing since no keypool is maintained.",
@@ -329,6 +332,7 @@ var helpDescsEnUS = map[string]string{
 	"listtransactionsresult-involveswatchonly": "Unset",
 	"listtransactionsresult-comment":           "Unset",
 	"listtransactionsresult-otheraccount":      "Unset",
+	"listtransactionsresult-txtype":            "The type of tx (regular tx, stake tx)",
 
 	// ListTransactionsCmd help.
 	"listtransactions--synopsis":        "Returns a JSON array of objects containing verbose details for wallet transactions.",
@@ -581,6 +585,41 @@ var helpDescsEnUS = map[string]string{
 	"walletinforesult-stakemining":       "Whether or not the wallet is currently stake mining",
 
 	// TODO Alphabetize
+
+	// AddTicketCmd help.
+	"addticket--synopsis": "Add ticket to stakepool for watching",
+	"addticket-tickethex": "Hash of ticket that is attempting to be added",
+
+	// GetWalletFeeCmd help.
+	"getwalletfee--synopsis": "Get currently set transaction fee for the wallet",
+	"getwalletfee--result0":  "Current tx fee (in DCR)",
+
+	// StakePoolUserInfoCmd help.
+	"stakepooluserinfo--synopsis": "Get user info for stakepool",
+	"stakepooluserinfo-user":      "The id of the user to be looked up",
+
+	"stakepooluserinforesult-invalid": "A list of invalid tickets that the user has added",
+	"stakepooluserinforesult-tickets": "A list of valid tickets that the user has added",
+
+	"pooluserticket-spentbyheight": "The height in which the ticket was spent",
+	"pooluserticket-spentby":       "The vote in which the ticket was spent",
+	"pooluserticket-ticketheight":  "The height in which the ticket was added",
+	"pooluserticket-ticket":        "The hash of the added ticket",
+	"pooluserticket-status":        "The current status of the added ticket",
+
+	// ListScriptsCmd help.
+	"listscripts--synopsis": "List all scripts that have been added to wallet",
+
+	"listscriptsresult-scripts": "A list of the imported scripts",
+
+	"scriptinfo-redeemscript": "The redeem script",
+	"scriptinfo-address":      "The script address",
+	"scriptinfo-hash160":      "The script hash",
+
+	// TicketsForAddressCmd help.
+	"ticketsforaddress--synopsis": "Request all the tickets for an address.",
+	"ticketsforaddress-address":   "Address to look for.",
+	"ticketsforaddress--result0":  "Tickets owned by the specified address.",
 
 	// PurchaseTicketCmd help.
 	"purchaseticket--synopsis":     "Purchase ticket using available funds.",
