@@ -20,6 +20,7 @@ import (
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainec"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/dcrec/secp256k1"
 	"github.com/decred/dcrd/dcrjson"
 	"github.com/decred/dcrd/txscript"
 	"github.com/decred/dcrd/wire"
@@ -3175,13 +3176,17 @@ func signMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	wire.WriteVarString(&buf, 0, "Decred Signed Message:\n")
 	wire.WriteVarString(&buf, 0, cmd.Message)
 	messageHash := chainhash.HashFuncB(buf.Bytes())
-	r, s, err := chainec.Secp256k1.Sign(privKey, messageHash)
+	pkCast, ok := privKey.(*secp256k1.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("Unable to create secp256k1.PrivateKey" +
+			"from chainec.PrivateKey")
+	}
+	sig, err := secp256k1.SignCompact(secp256k1.S256(), pkCast, messageHash, true)
 	if err != nil {
 		return nil, err
 	}
-	sig := chainec.Secp256k1.NewSignature(r, s)
 
-	return base64.StdEncoding.EncodeToString(sig.Serialize()), nil
+	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
 // signRawTransaction handles the signrawtransaction command.
