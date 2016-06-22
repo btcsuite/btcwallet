@@ -54,9 +54,11 @@ func (w *Wallet) handleChainNotifications() {
 			log.Infof("The client has successfully connected to dcrd and " +
 				"is now handling websocket notifications")
 		case chain.BlockConnected:
-			w.connectBlock(wtxmgr.BlockMeta(n))
+			err = w.connectBlock(wtxmgr.BlockMeta(n))
+			strErrType = "BlockConnected"
 		case chain.BlockDisconnected:
 			err = w.disconnectBlock(wtxmgr.BlockMeta(n))
+			strErrType = "BlockDisconnected"
 		case chain.Reorganization:
 			w.handleReorganizing(n.OldHash, n.OldHeight, n.NewHash, n.NewHeight)
 		case chain.StakeDifficulty:
@@ -64,6 +66,7 @@ func (w *Wallet) handleChainNotifications() {
 			strErrType = "StakeDifficulty"
 		case chain.RelevantTx:
 			err = w.addRelevantTx(n.TxRecord, n.Block)
+			strErrType = "RelevantTx"
 
 		// The following are handled by the wallet's rescan
 		// goroutines, so just pass them there.
@@ -156,7 +159,7 @@ ticketPurchaseLoop:
 // connectBlock handles a chain server notification by marking a wallet
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
-func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
+func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) error {
 	bs := waddrmgr.BlockStamp{
 		Height: b.Height,
 		Hash:   b.Hash,
@@ -170,8 +173,7 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
-		log.Error(err)
-		return
+		return err
 	}
 
 	isReorganizing, topHash := chainClient.GetReorganizing()
@@ -195,8 +197,9 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 	// Insert the block if we haven't already through a relevant tx.
 	err = w.TxStore.InsertBlock(&b)
 	if err != nil {
-		log.Errorf("Couldn't insert block %v into database: %v",
+		err = fmt.Errorf("Couldn't insert block %v into database: %v",
 			b.Hash, err)
+		return err
 	}
 
 	// Rollback testing for simulation network, if enabled.
@@ -266,12 +269,14 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 	err = w.TxStore.PruneUnconfirmed(bs.Height,
 		stakeDifficultyInfo.StakeDifficulty)
 	if err != nil {
-		log.Errorf("Failed to prune unconfirmed transactions when "+
+		err = fmt.Errorf("Failed to prune unconfirmed transactions when "+
 			"connecting block height %v: %v", bs.Height, err.Error())
+		return err
 	}
 
 	// Notify interested clients of the connected block.
 	w.NtfnServer.notifyAttachedBlock(&b)
+	return nil
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
