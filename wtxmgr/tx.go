@@ -2897,6 +2897,12 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 			if spent {
 				continue
 			}
+
+			// Skip zero value outputs.
+			if amt == 0 {
+				continue
+			}
+
 			// Skip ticket outputs, as only SSGen can spend these.
 			opcode := fetchRawCreditTagOpCode(cVal)
 			if opcode == txscript.OP_SSTX {
