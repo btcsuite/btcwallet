@@ -1687,19 +1687,22 @@ func (w *Wallet) ListTransactions(from, count int) ([]dcrjson.ListTransactionsRe
 		// unsorted, but it will process mined transactions in the
 		// reverse order they were marked mined.
 		for i := len(details) - 1; i >= 0; i-- {
+			if n >= count {
+				return true, nil
+			}
+
 			if from > skipped {
 				skipped++
 				continue
 			}
 
-			n++
-			if n > count {
-				return true, nil
-			}
-
 			jsonResults := ListTransactions(&details[i],
 				w.Manager, syncBlock.Height, w.chainParams)
 			txList = append(txList, jsonResults...)
+
+			if len(jsonResults) > 0 {
+				n++
+			}
 		}
 
 		return false, nil
