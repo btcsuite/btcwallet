@@ -20,12 +20,6 @@ import (
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-const (
-	// ticketPurchaseAttemptsPerBlock is the default number of ticket
-	// purchase attempts per block.
-	ticketPurchaseAttemptsPerBlock = 10
-)
-
 // handleChainNotifications is the major chain notification handler that
 // receives websocket notifications about the blockchain.
 func (w *Wallet) handleChainNotifications() {
@@ -114,10 +108,6 @@ func (w *Wallet) handleTicketPurchases() {
 ticketPurchaseLoop:
 	for {
 		if purchased >= maxTickets {
-			break
-		}
-
-		if attempts >= ticketPurchaseAttemptsPerBlock {
 			break
 		}
 
