@@ -1364,6 +1364,9 @@ func (w *Wallet) CurrentAddress(account uint32) (dcrutil.Address, error) {
 	if err != nil {
 		return nil, err
 	}
+	if nextToUseIdx <= 0 {
+		return nil, fmt.Errorf("there have not been any addresses used for this account")
+	}
 	lastUsedIdx := nextToUseIdx - 1
 
 	addr, err := w.Manager.AddressDerivedFromDbAcct(lastUsedIdx, account,
