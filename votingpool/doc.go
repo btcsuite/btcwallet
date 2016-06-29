@@ -83,5 +83,15 @@ the state of every requested output, the raw signatures for the constructed
 transactions, the network fees included in those transactions and the input
 range to use in the next withdrawal.
 
+Signing and broadcasting withdrawal transactions
+
+The raw signatures returned by StartWithdrawal are exchanged by the pool
+members and passed on to their wallets via the Pool.UpdateWithdrawal method,
+which takes the ID of the consensus round, a list of raw signatures and a
+wtxmgr.Store. The given list of signatures is merged with the existing one, and
+then any transactions that can be signed (i.e. those for which we have the
+minimum required raw signatures for each input) are broadcast. The merged list
+of signatures is then returned so that it can be passed on to other pool members.
+
 */
 package votingpool

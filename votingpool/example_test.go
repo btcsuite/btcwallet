@@ -174,8 +174,10 @@ func Example_empowerSeries() {
 	//
 }
 
-// This example demonstrates how to use the Pool.StartWithdrawal method.
-func Example_startWithdrawal() {
+// This example demonstrates how to use Pool.StartWithdrawal to construct
+// transactions that fulfill withdrawal requests from users, and
+// Pool.UpdateWithdrawal to sign and broadcast those transactions.
+func Example_withdrawal() {
 	// Create the address manager and votingpool DB namespace. See the example
 	// for the Create() function for more info on how this is done.
 	mgr, vpNamespace, tearDownFunc, err := exampleCreateMgrAndDBNamespace()
@@ -210,7 +212,7 @@ func Example_startWithdrawal() {
 			Server:      "server-id",
 			Transaction: 123},
 	}
-	changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(0))
+	changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(1))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -229,17 +231,31 @@ func Example_startWithdrawal() {
 	}
 	lastSeriesID := seriesID
 	dustThreshold := btcutil.Amount(1e4)
-	currentBlock := int32(19432)
+	minConf := 0
 	roundID := uint32(0)
 	txstore, tearDownFunc, err := exampleCreateTxStore()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	// Pool.StartWithdrawal uses a deterministic algorithm to generate
+	// transactions that fulfill the given requests. The wallets of each
+	// votingpool member should execute this with the same arguments to ensure
+	// they construct identical transactions. This will also generate raw
+	// signatures for each private key(s) available to every member.
 	_, err = pool.StartWithdrawal(
-		roundID, requests, *startAddr, lastSeriesID, *changeStart, txstore, currentBlock,
-		dustThreshold)
+		roundID, requests, *startAddr, lastSeriesID, *changeStart, dustThreshold, minConf, txstore)
 	if err != nil {
+		fmt.Println(err)
+	}
+
+	// The signatures generated above (a different set for each member) are
+	// then exchanged between the members and passed on to their wallets via
+	// pool.UpdateWithdrawal, which combines the lists of signatures and
+	// broadcasts any transaction that can be successfully signed (i.e. we have
+	// the minimum number of required raw signatures for every input).
+	sigs := map[votingpool.Ntxid]votingpool.TxSigs{}
+	if _, err = pool.UpdateWithdrawal(roundID, sigs, txstore); err != nil {
 		fmt.Println(err)
 	}
 

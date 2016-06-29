@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
@@ -107,6 +108,119 @@ func TestPoolGetUsedAddr(t *testing.T) {
 	wantScript, _ := pool.DepositScript(1, 0, 10)
 	if !bytes.Equal(script, wantScript) {
 		t.Fatalf("Script from looked up addr is not what we expect")
+	}
+}
+
+func TestPoolUsedAddrs(t *testing.T) {
+	tearDown, mgr, pool := TstCreatePool(t)
+	defer tearDown()
+
+	seriesID := uint32(1)
+	pubKeys := 3
+	TstCreateSeries(t, pool, []TstSeriesDef{
+		{ReqSigs: 2, PubKeys: TstPubKeys[0:pubKeys], SeriesID: seriesID}})
+
+	var addrs []*WithdrawalAddress
+	var err error
+	TstRunWithManagerUnlocked(t, mgr, func() {
+		addrs, err = pool.usedAddrs(seriesID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Initially there should obviously be no used addresses for a series.
+	if len(addrs) != 0 {
+		t.Fatalf("Unexpected number of used addresses; got %d, want 0", len(addrs))
+	}
+
+	// This will add 3 entries (Index==[0..2]) to each of our 4 (pubKeys+1)
+	// series/branch usedAddr bucket.
+	idx := Index(2)
+	TstRunWithManagerUnlocked(t, mgr, func() {
+		for branch := 0; branch <= pubKeys; branch++ {
+			err = pool.EnsureUsedAddr(seriesID, Branch(branch), idx)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	TstRunWithManagerUnlocked(t, mgr, func() {
+		addrs, err = pool.usedAddrs(seriesID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedCount := (int(idx) + 1) * (pubKeys + 1)
+	if len(addrs) != expectedCount {
+		t.Fatalf("Unexpected number of used addresses; got %d, want %d", len(addrs), expectedCount)
+	}
+}
+
+func TestPoolSeriesBalance(t *testing.T) {
+	tearDown, pool, store := TstCreatePoolAndTxStore(t)
+	defer tearDown()
+
+	creditAmt := int64(2)
+	pubKeys := TstPubKeys[0:3]
+	seriesID := uint32(1)
+	TstCreateSeries(t, pool, []TstSeriesDef{{ReqSigs: 2, PubKeys: pubKeys, SeriesID: seriesID}})
+	expectedBalance := btcutil.Amount(0)
+	// Start from branch==1 because otherwise we'd need to add extra logic to
+	// skip the input on branch==0/index==0 as that's the charter contract.
+	for branch := 1; branch <= 3; branch++ {
+		for index := 0; index < 2; index++ {
+			pkScript := TstCreatePkScript(t, pool, seriesID, Branch(branch), Index(index))
+			for _, c := range TstCreateCreditsOnStore(t, store, pkScript, []int64{creditAmt}) {
+				expectedBalance += c.Amount
+			}
+		}
+	}
+	// Require 0 confirmations so that all credits created above are included.
+	minConf := 0
+	dustThreshold := btcutil.Amount(0)
+
+	var balance btcutil.Amount
+	var err error
+	TstRunWithManagerUnlocked(t, pool.manager, func() {
+		balance, err = pool.seriesBalance(seriesID, dustThreshold, minConf, store)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if balance != expectedBalance {
+		t.Fatalf("Unexpected series balance; got %v, want %v", balance, expectedBalance)
+	}
+
+	// If we require any confirmations the balance will be 0 because none of
+	// the credits above will have the minimum required confirmations.
+	minConf = 1
+	TstRunWithManagerUnlocked(t, pool.manager, func() {
+		balance, err = pool.seriesBalance(seriesID, dustThreshold, minConf, store)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if balance != btcutil.Amount(0) {
+		t.Fatalf("Unexpected series balance; got %v, want %v", balance, btcutil.Amount(0))
+	}
+
+	// Similary, if the dustThreshold is higher than the amount in our credits,
+	// the balance will be 0.
+	minConf = 0
+	dustThreshold = btcutil.Amount(creditAmt + 1)
+	TstRunWithManagerUnlocked(t, pool.manager, func() {
+		balance, err = pool.seriesBalance(seriesID, dustThreshold, minConf, store)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if balance != btcutil.Amount(0) {
+		t.Fatalf("Unexpected series balance; got %v, want %v", balance, btcutil.Amount(0))
 	}
 }
 
