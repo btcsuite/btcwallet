@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 2.0.2
+Version: 2.1.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -704,6 +704,9 @@ transaction paying to already known addresses or scripts.
     transaction containing this output.
 
   - `bool from_coinbase`: Whether the output is a coinbase output.
+
+  - `int32 tree`: The tree the output belongs to.  This can take on the values
+    `-1` (invalid), `0` (regular), and `1` (stake).
 
 - `int64 total_amount`: The sum of all returned output amounts.  This may be
   less than a positive target amount if there were not enough eligible outputs

@@ -43,10 +43,10 @@ import (
 
 // Public API version constants
 const (
-	semverString = "2.0.2"
+	semverString = "2.1.0"
 	semverMajor  = 2
-	semverMinor  = 0
-	semverPatch  = 2
+	semverMinor  = 1
+	semverPatch  = 0
 )
 
 // translateError creates a new gRPC error with an appropiate error code for
@@ -374,6 +374,7 @@ func (s *walletServer) FundTransaction(ctx context.Context, req *pb.FundTransact
 			PkScript:        output.PkScript,
 			ReceiveTime:     output.Received.Unix(),
 			FromCoinbase:    output.FromCoinBase,
+			Tree:            int32(output.Tree),
 		})
 		totalAmount += output.Amount
 

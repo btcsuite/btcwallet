@@ -212,6 +212,7 @@ message FundTransactionResponse {
 		bytes pk_script = 4;
 		int64 receive_time = 5;
 		bool from_coinbase = 6;
+		int32 tree = 7;
 	}
 	repeated PreviousOutput selected_outputs = 1;
 	int64 total_amount = 2;
