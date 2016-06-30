@@ -178,7 +178,7 @@ func noConsole() ([]byte, error) {
 // and the public passphrase.  If the loader is being called by a context where
 // standard input prompts may be used during wallet upgrades, setting
 // canConsolePrompt will enable these prompts.
-func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool) (*Wallet, error) {
+func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool) (w *Wallet, rerr error) {
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
@@ -198,6 +198,15 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 		log.Errorf("Failed to open database: %v", err)
 		return nil, err
 	}
+	// If this function does not return to completion the database must be
+	// closed.  Otherwise, because the database is locked on opens, any
+	// other attempts to open the wallet will hang, and there is no way to
+	// recover since this db handle would be leaked.
+	defer func() {
+		if rerr != nil {
+			db.Close()
+		}
+	}()
 
 	var cbs *waddrmgr.OpenCallbacks
 	if canConsolePrompt {
@@ -212,7 +221,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 		}
 	}
 	so := l.stakeOptions
-	w, err := Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
+	w, err = Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, so.TicketBuyFreq,
 		so.PoolAddress, so.PoolFees, l.addrIdxScanLen, so.StakePoolColdExtKey,
