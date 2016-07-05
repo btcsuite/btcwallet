@@ -190,6 +190,11 @@ func (w *Wallet) scanAddressRange(account uint32, branch uint32, start int,
 	}
 	set := bitset.Bytes(existsB)
 
+	// Prevent a panic when an empty message is passed as a response.
+	if len(set) == 0 {
+		return false, 0, nil
+	}
+
 	// Scan backwards and return if we find an address exists.
 	idx := end
 	itr := len(addresses) - 1
