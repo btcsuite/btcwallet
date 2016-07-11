@@ -232,6 +232,10 @@ func createWatchingOnlyWallet(cfg *config) error {
 
 	err = wallet.CreateWatchOnly(db, pubKeyString, pubPass, activeNet.Params)
 	if err != nil {
+		errOS := os.Remove(dbPath)
+		if errOS != nil {
+			fmt.Println(errOS)
+		}
 		return err
 	}
 
