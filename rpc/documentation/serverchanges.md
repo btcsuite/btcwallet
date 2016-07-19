@@ -17,10 +17,13 @@ steps before changes to the server can be implemented.
 
 - The gRPC `protoc` plugin for Go
 
-  This plugin is written in Go and can be installed using `go get`:
+  This plugin is written in Go.  It is important to install the plugin from the
+  dcrwallet `vendor` repo to avoid incompatibilities between generated code and
+  the vendored copy of gRPC:
 
   ```
-  go get github.com/golang/protobuf/protoc-gen-go
+  cd vendor/github.com/golang/protobuf/protoc-gen-go
+  go install
   ```
 
 - Knowledge of Protocol Buffers version 3 (proto3)
