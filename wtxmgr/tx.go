@@ -3805,25 +3805,25 @@ func (s *Store) AccountBalances(syncHeight int32, minConf int32,
 
 	var bals Balances
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		bal, err := s.balanceFullScan(ns, syncHeight, minConf,
+		bal, err := s.balanceFullScan(ns, minConf, syncHeight,
 			false, account)
 		if err != nil {
 			return err
 		}
 
-		bal0Conf, err := s.balanceFullScan(ns, syncHeight, 0,
+		bal0Conf, err := s.balanceFullScan(ns, 0, syncHeight,
 			false, account)
 		if err != nil {
 			return err
 		}
 
-		balTotal, err := s.balanceAll(ns, syncHeight, minConf,
+		balTotal, err := s.balanceAll(ns, minConf, syncHeight,
 			false, account)
 		if err != nil {
 			return err
 		}
 
-		balAll, err := s.balanceAll(ns, syncHeight, 0,
+		balAll, err := s.balanceAll(ns, 0, syncHeight,
 			false, account)
 		if err != nil {
 			return err

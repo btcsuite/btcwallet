@@ -43,10 +43,10 @@ import (
 
 // Public API version constants
 const (
-	semverString = "2.1.0"
+	semverString = "2.1.1"
 	semverMajor  = 2
 	semverMinor  = 1
-	semverPatch  = 0
+	semverPatch  = 1
 )
 
 // translateError creates a new gRPC error with an appropiate error code for
