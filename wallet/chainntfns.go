@@ -55,9 +55,6 @@ func (w *Wallet) handleChainNotifications() {
 			strErrType = "BlockDisconnected"
 		case chain.Reorganization:
 			w.handleReorganizing(n.OldHash, n.OldHeight, n.NewHash, n.NewHeight)
-		case chain.StakeDifficulty:
-			err = w.handleStakeDifficulty(n.BlockHash, n.BlockHeight, n.StakeDiff)
-			strErrType = "StakeDifficulty"
 		case chain.RelevantTx:
 			err = w.addRelevantTx(n.TxRecord, n.Block)
 			strErrType = "RelevantTx"
@@ -97,7 +94,11 @@ func (w *Wallet) handleTicketPurchases() {
 		}
 	}
 
-	sdiff := dcrutil.Amount(w.GetStakeDifficulty().StakeDifficulty)
+	sdiff, err := w.StakeDifficulty()
+	if err != nil {
+		return
+	}
+
 	maxToPay := w.GetTicketMaxPrice()
 	minBalance := w.BalanceToMaintain()
 
@@ -111,7 +112,7 @@ ticketPurchaseLoop:
 			break
 		}
 
-		_, err := w.CreatePurchaseTicket(minBalance,
+		_, err := w.PurchaseTickets(minBalance,
 			maxToPay,
 			0, // No minconf
 			w.TicketAddress(),
@@ -119,7 +120,9 @@ ticketPurchaseLoop:
 			1, // One ticket at a time
 			w.PoolAddress(),
 			w.PoolFees(),
-			0) // No expiry
+			0, // No expiry
+			w.RelayFee(),
+			w.TicketFeeIncrement())
 		if err != nil {
 			_, insufficientFunds := err.(txauthor.InsufficientFundsError)
 			switch {
@@ -255,12 +258,15 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) error {
 
 	// Prune all expired transactions and all stake tickets that no longer
 	// meet the minimum stake difficulty.
-	stakeDifficultyInfo := w.GetStakeDifficulty()
-	err = w.TxStore.PruneUnconfirmed(bs.Height,
-		stakeDifficultyInfo.StakeDifficulty)
+	stakeDifficulty, err := w.StakeDifficulty()
+	if err != nil {
+		return fmt.Errorf("Failed to get stake difficulty for pruning: %s",
+			err.Error())
+	}
+	err = w.TxStore.PruneUnconfirmed(bs.Height, int64(stakeDifficulty))
 	if err != nil {
 		err = fmt.Errorf("Failed to prune unconfirmed transactions when "+
-			"connecting block height %v: %v", bs.Height, err.Error())
+			"connecting block height %v: %s", bs.Height, err.Error())
 		return err
 	}
 
@@ -883,21 +889,6 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 			w.NtfnServer.notifyMinedTransaction(details, block)
 		}
 	}
-
-	return nil
-}
-
-// handleStakeDifficulty receives a stake difficulty and some block information
-// and submits uses it to update the current stake difficulty in wallet.
-func (w *Wallet) handleStakeDifficulty(blockHash *chainhash.Hash,
-	blockHeight int64,
-	StakeDifficulty int64) error {
-
-	w.SetStakeDifficulty(&StakeDifficultyInfo{
-		blockHash,
-		blockHeight,
-		StakeDifficulty,
-	})
 
 	return nil
 }

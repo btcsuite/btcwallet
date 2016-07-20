@@ -24,6 +24,8 @@ service WalletService {
 	rpc Accounts (AccountsRequest) returns (AccountsResponse);
 	rpc Balance (BalanceRequest) returns (BalanceResponse);
 	rpc GetTransactions (GetTransactionsRequest) returns (GetTransactionsResponse);
+	rpc TicketPrice (TicketPriceRequest) returns (TicketPriceResponse);
+	rpc StakeInfo (StakeInfoRequest) returns (StakeInfoResponse);
 
 	// Notifications
 	rpc TransactionNotifications (TransactionNotificationsRequest) returns (stream TransactionNotificationsResponse);
@@ -36,9 +38,11 @@ service WalletService {
 	rpc NextAccount (NextAccountRequest) returns (NextAccountResponse);
 	rpc NextAddress (NextAddressRequest) returns (NextAddressResponse);
 	rpc ImportPrivateKey (ImportPrivateKeyRequest) returns (ImportPrivateKeyResponse);
+	rpc ImportScript(ImportScriptRequest) returns (ImportScriptResponse);
 	rpc FundTransaction (FundTransactionRequest) returns (FundTransactionResponse);
 	rpc SignTransaction (SignTransactionRequest) returns (SignTransactionResponse);
 	rpc PublishTransaction (PublishTransactionRequest) returns (PublishTransactionResponse);
+	rpc PurchaseTickets(PurchaseTicketsRequest) returns (PurchaseTicketsResponse);
 }
 
 service WalletLoaderService {
@@ -141,8 +145,18 @@ message ImportPrivateKeyRequest {
 	uint32 account = 2;
 	string private_key_wif = 3;
 	bool rescan = 4;
+	int32 scan_from = 5;
 }
 message ImportPrivateKeyResponse {
+}
+
+message ImportScriptRequest {
+	bytes passphrase = 1;
+	bytes script = 2;
+	bool rescan = 3;
+	int32 scan_from = 4;
+}
+message ImportScriptResponse {
 }
 
 message BalanceRequest {
@@ -184,6 +198,28 @@ message GetTransactionsRequest {
 message GetTransactionsResponse {
 	repeated BlockDetails mined_transactions = 1;
 	repeated TransactionDetails unmined_transactions = 2;
+}
+
+message TicketPriceRequest {
+}
+message TicketPriceResponse {
+	int64 ticket_price = 1;
+	int32 height = 2;
+}
+
+message StakeInfoRequest {
+}
+message StakeInfoResponse {
+	uint32 pool_size = 1;
+	uint32 all_mempool_tix = 2;
+	uint32 own_mempool_tix = 3;
+	uint32 immature = 4;
+	uint32 live = 5;
+	uint32 voted = 6;
+	uint32 missed = 7;
+	uint32 revoked = 8;
+	uint32 expired = 9;
+	int64 total_subsidy = 10;
 }
 
 message ChangePassphraseRequest {
@@ -240,6 +276,23 @@ message PublishTransactionRequest {
 	bytes signed_transaction = 1;
 }
 message PublishTransactionResponse {}
+
+message PurchaseTicketsRequest {
+	bytes passphrase = 1;
+	uint32 account = 2;
+	int64 spend_limit = 3;
+	uint32 required_confirmations = 4;
+	string ticket_address = 5;
+	uint32 num_tickets = 6;
+	string pool_address = 7;
+	double pool_fees = 8;
+	uint32 expiry = 9;
+	int64 tx_fee = 10;
+	int64 ticket_fee = 11;
+}
+message PurchaseTicketsResponse {
+	repeated bytes ticket_hashes = 1;
+}
 
 message TransactionNotificationsRequest {}
 message TransactionNotificationsResponse {

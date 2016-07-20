@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 2.1.0
+Version: 2.2.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -269,9 +269,13 @@ The service provides the following methods:
 - [`NextAccount`](#nextaccount)
 - [`NextAddress`](#nextaddress)
 - [`ImportPrivateKey`](#importprivatekey)
+- [`ImportScript`](#importscript)
 - [`FundTransaction`](#fundtransaction)
 - [`SignTransaction`](#signtransaction)
 - [`PublishTransaction`](#publishtransaction)
+- [`TicketPrice`](#ticketprice)
+- [`StakeInfo`](#stakeinfo)
+- [`PurchaseTickets`](#purchasetickets)
 - [`TransactionNotifications`](#transactionnotifications)
 - [`SpentnessNotifications`](#spentnessnotifications)
 - [`AccountNotifications`](#accountnotifications)
@@ -635,11 +639,50 @@ search for transactions involving the private key's associated payment address.
 
 **Expected errors:**
 
+- `InvalidArgument`: The private passphrase is incorrect.
+
 - `InvalidArgument`: The private key WIF string is not a valid WIF encoding.
+
+- `InvalidArgument`: A rescan height was specified, but the rescan option was 
+  not set.
+
+- `InvalidArgument`: A negative rescan height was passed.
 
 - `Aborted`: The wallet database is closed.
 
+- `NotFound`: The account does not exist.
+
+**Stability:** Unstable
+
+___
+
+#### `ImportScript`
+
+The `ImportScript` method imports a script into the wallet.  A rescan may 
+optionally be started to search for transactions involving the script, either 
+as an output or in a P2SH input.
+
+**Request:** `ImportScriptRequest`
+
+- `bytes passphrase`: The wallet's private passphrase.
+
+- `bytes script`: The raw script.
+
+- `bool rescan`: Whether or not to perform a blockchain rescan for the imported
+  script.
+
+**Response:** `ImportScriptResponse`
+
+**Expected errors:**
+
 - `InvalidArgument`: The private passphrase is incorrect.
+
+- `InvalidArgument`: A rescan height was specified, but the rescan option was 
+  not set.
+
+- `InvalidArgument`: A negative rescan height was passed.
+
+- `Aborted`: The wallet database is closed.
 
 - `NotFound`: The account does not exist.
 
@@ -789,6 +832,152 @@ wallet and republished later if it or a double spend are not mined.
 - `Aborted`: The wallet database is closed.
 
 **Stability:** Unstable
+
+___
+
+#### `TicketPrice`
+
+The `TicketPrice` method returns the price of a ticket for the next block, also 
+known as the stake difficulty. May be incorrect if the daemon is currently 
+syncing.
+
+**Request:** `TicketPriceRequest`
+
+**Response:** `TicketPriceResponse`
+
+- `int64 ticket_price`: The stake difficulty for the next block.
+
+- `int32 height`: The block height for this query.
+
+**Expected errors:** None
+
+**Stability:** Unstable: The ticket price and height are pulled from separate 
+daemon passthroughs and may race. Ideally these would be returned from stored 
+values in the wallet when it updates from incoming stake ticket price 
+notifications passed from the JSON RPC of dcrd. Right now, wallet block processing 
+is very slow and it's difficult for these notifications to stay in sync. In the 
+future, this API may be completely removed in favour of a passthrough for that 
+set of notifications.
+
+___
+
+#### `StakeInfo`
+
+The `StakeInfo` method returns various statistics about the wallet in relation 
+to tickets owned fully or completely by the wallet, such as number of tickets 
+owned and votes cast.
+
+**Request:** `StakeInfoRequest`
+
+**Response:** `StakeInfoResponse`
+
+- `uint32 pool_size`: The current size of the ticket pool.
+
+- `uint32 all_mempool_tix`: The number of tickets in the mempool.
+
+- `uint32 own_mempool_tix`: The number of tickets in the mempool owned by this 
+  wallet.
+
+- `uint32 immature`: The number of tickets in the blockchain that are not yet 
+  mature (can't yet be used to vote on blocks).
+
+- `uint32 live`: The number of active tickets owned by the user.
+
+- `uint32 voted`: The number of successful votes cast by the user.
+
+- `uint32 missed`: The number of votes that were missed by the user.
+
+- `uint32 revoked`: The number of revocations for missed votes cast by the user.
+
+- `uint32 expired`: The number of expired tickets owned by the user.
+
+- `int64 total_subsidy`: The total subsidy received by the user for stake mining.
+
+**Expected errors:** None
+
+**Stability:** Unstable
+
+___
+
+#### `PurchaseTickets`
+
+The `PurchaseTickets` method is used to purchase tickets. It can use a specified 
+address for voting rights, and can additionally be used in conjunction with a 
+stake pool. An expiration value can be set for the tickets. Expired tickets are 
+pruned from the wallet and funds and then restored to the user. The following 
+fields can be left unset, and unset (empty or zero) behaviour is given below: 
+ticker_address, pool_address, expiry, tx_fee, ticket_fee.
+
+**Request:** `PurchaseTicketsRequest`
+
+- `bytes passphrase`: The wallet's private passphrase.
+
+- `uint32 account`: The account to use to purchase the tickets.
+
+- `int64 spend_limit`: The maximum amount to pay for a single ticket. If the 
+  current stake difficulty is above this amount, the wallet will return an error.
+
+- `uint32 required_confirmations`: The number of required confirmations for 
+  funds used to purchase a ticket. If set to zero, it will use unconfirmed and 
+  confirmed outputs to purchase tickets.
+
+- `string ticket_address`: The address to give voting rights to. If it is set 
+  to an empty string, an internal address will be used from the wallet.
+
+- `uint32 num_tickets`: The number of tickets to purchase. It must be set and 
+  at least 1.
+
+- `string pool_address`: The address of the stake pool used. Pool mode will 
+  be disabled if an empty string is passed.
+
+- `double pool_fees`: The stake pool fees amount. This must be set to a positive 
+  value in the allowed range of 0.01 to 100.00 to be valid. It must be set when 
+  the pool_address is also set.
+
+- `uint32 expiry`: The height at which the tickets expire and can no longer enter 
+  the blockchain. It defaults to 0 (no expiry).
+
+- `int64 tx_fee`: Fees per kB to use for the transaction generating outputs to use 
+  for buying tickets. If 0 is passed, the global value for a transaction fee 
+  will be used.
+
+- `int64 ticket_fee`: Fees per kB to use for all purchased tickets. If 0 is 
+  passed, the global value for a ticket fee will be used.
+
+**Response:** `PurchaseTicketsResponse`
+
+- `repeated bytes ticket_hashes`: The transaction hashes of the generated tickets.
+
+**Expected errors:**
+
+- `InvalidArgument`: The private passphrase is incorrect.
+
+- `InvalidArgument`: The spent limit was negative.
+
+- `InvalidArgument`: An invalid number of tickets was specified.
+
+- `InvalidArgument`: An invalid ticket address was specified.
+
+- `InvalidArgument`: An invalid pool address was specified.
+
+- `InvalidArgument`: Pool address was specified, but pool fees were not.
+
+- `InvalidArgument`: Pool address was not specified, but pool fees were.
+
+- `InvalidArgument`: And invalid pool fees amount was given, either too large or 
+  small.
+
+- `InvalidArgument`: A negative fees per kB was set.
+
+- `FailedPrecondition`: The wallet balance was not enough to buy tickets.
+
+**Stability:** Unstable: there are a number of current bugs with ticket purchase 
+and querying for stake difficulty. When the wallet has a more suitable means to 
+track stake difficulty, and daemon is patched to better handle ticket purchases, 
+these issues should disappear. They include the stake difficulty changing from the 
+time it is queried, to the time the ticket is attempted to be purchased, to the 
+time the ticket hits the daemon mempool and out of date stake difficulties queried 
+from the daemon.
 
 ___
 

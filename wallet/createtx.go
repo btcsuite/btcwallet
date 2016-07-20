@@ -168,10 +168,6 @@ var ErrSStxNotEnoughFunds = errors.New("not enough to purchase sstx")
 // the specified spend maximum spend limit.
 var ErrSStxPriceExceedsSpendLimit = errors.New("ticket price exceeds spend limit")
 
-// ErrSStxInputOverflow indicates that too many inputs were used to generate
-// a ticket.
-var ErrSStxInputOverflow = errors.New("too many inputs to purchase ticket with")
-
 // ErrNoOutsToConsolidate indicates that there were no outputs available
 // to compress.
 var ErrNoOutsToConsolidate = errors.New("no outputs to consolidate")
@@ -356,7 +352,7 @@ func (w *Wallet) TxToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	}()
 
 	atx, err = w.txToOutputs(outputs, account, minconf, pool, chainClient,
-		randomizeChangeIdx)
+		randomizeChangeIdx, w.RelayFee())
 	txSucceeded = atx != nil
 
 	return atx, err
@@ -374,8 +370,8 @@ func (w *Wallet) TxToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 // into the database, rather than delegating this work to the caller as
 // btcwallet does.
 func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32,
-	pool *addressPool, chainClient *chain.RPCClient,
-	randomizeChangeIdx bool) (atx *txauthor.AuthoredTx, err error) {
+	pool *addressPool, chainClient *chain.RPCClient, randomizeChangeIdx bool,
+	txFee dcrutil.Amount) (atx *txauthor.AuthoredTx, err error) {
 
 	// The change address is pulled here rather than after
 	// MakeInputSource is called because MakeInputSource
@@ -403,7 +399,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 	}
 
 	inputSource := w.TxStore.MakeInputSource(account, minconf, bs.Height)
-	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
+	tx, err := txauthor.NewUnsignedTransaction(outputs, txFee,
 		inputSource.SelectInputs, changeSource)
 	closeErr := inputSource.CloseTransaction()
 	if closeErr != nil {
@@ -1139,16 +1135,21 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 
 	// Make sure that we have enough funds. Calculate different
 	// ticket required amounts depending on whether or not a
-	// pool output is needed.
+	// pool output is needed. If the ticket fee increment is
+	// unset in the request, use the global ticket fee increment.
 	neededPerTicket := dcrutil.Amount(0)
 	ticketFee := dcrutil.Amount(0)
+	ticketFeeIncrement := req.ticketFee
+	if ticketFeeIncrement == 0 {
+		ticketFeeIncrement = w.TicketFeeIncrement()
+	}
 	if poolAddress == nil {
-		ticketFee = ((w.TicketFeeIncrement() * singleInputTicketSize) /
-			1000)
+		ticketFee = (ticketFeeIncrement * singleInputTicketSize) /
+			1000
 		neededPerTicket = ticketFee + ticketPrice
 	} else {
-		ticketFee = ((w.TicketFeeIncrement() * doubleInputTicketSize) /
-			1000)
+		ticketFee = (ticketFeeIncrement * doubleInputTicketSize) /
+			1000
 		neededPerTicket = ticketFee + ticketPrice
 	}
 
@@ -1235,7 +1236,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 
 	}
 	splitTx, err := w.txToOutputs(splitOuts, account, req.minConf, pool,
-		chainClient, false)
+		chainClient, false, req.txFee)
 	if err != nil {
 		return nil, err
 	}
@@ -1248,7 +1249,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	txSucceeded = true
 
 	// Generate the tickets individually.
-	ticketHashes := make([]string, req.numTickets)
+	ticketHashes := make([]*chainhash.Hash, req.numTickets)
 	for i := 0; i < req.numTickets; i++ {
 		// Generate the extended outpoints that we
 		// need to use for ticket inputs. There are
@@ -1387,7 +1388,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		}
 
 		log.Infof("Successfully sent SStx purchase transaction %v", txSha)
-		ticketHashes[i] = txSha.String()
+		ticketHashes[i] = txSha
 	}
 
 	return ticketHashes, nil

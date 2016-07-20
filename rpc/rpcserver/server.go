@@ -38,15 +38,16 @@ import (
 	pb "github.com/decred/dcrwallet/rpc/walletrpc"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet"
+	"github.com/decred/dcrwallet/wallet/txrules"
 	"github.com/decred/dcrwallet/walletdb"
 )
 
 // Public API version constants
 const (
-	semverString = "2.1.1"
+	semverString = "2.2.0"
 	semverMajor  = 2
-	semverMinor  = 1
-	semverPatch  = 1
+	semverMinor  = 2
+	semverPatch  = 0
 )
 
 // translateError creates a new gRPC error with an appropiate error code for
@@ -277,12 +278,54 @@ func (s *walletServer) ImportPrivateKey(ctx context.Context, req *pb.ImportPriva
 			"Only the imported account accepts private key imports")
 	}
 
-	_, err = s.wallet.ImportPrivateKey(wif, nil, req.Rescan, 0)
+	if req.ScanFrom < 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Attempted to scan from a negative block height")
+	}
+
+	if req.ScanFrom > 0 && req.Rescan == true {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Passed a rescan height without rescan set")
+	}
+
+	_, err = s.wallet.ImportPrivateKey(wif, nil, req.Rescan, req.ScanFrom)
 	if err != nil {
 		return nil, translateError(err)
 	}
 
 	return &pb.ImportPrivateKeyResponse{}, nil
+}
+
+func (s *walletServer) ImportScript(ctx context.Context,
+	req *pb.ImportScriptRequest) (*pb.ImportScriptResponse, error) {
+
+	defer zero.Bytes(req.Passphrase)
+
+	lock := make(chan time.Time, 1)
+	defer func() {
+		lock <- time.Time{} // send matters, not the value
+	}()
+	err := s.wallet.Unlock(req.Passphrase, lock)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	if req.ScanFrom < 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Attempted to scan from a negative block height")
+	}
+
+	if req.ScanFrom > 0 && req.Rescan == true {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Passed a rescan height without rescan set")
+	}
+
+	err = s.wallet.ImportScript(req.Script, req.Rescan, req.ScanFrom)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	return &pb.ImportScriptResponse{}, nil
 }
 
 func (s *walletServer) Balance(ctx context.Context, req *pb.BalanceRequest) (
@@ -303,6 +346,48 @@ func (s *walletServer) Balance(ctx context.Context, req *pb.BalanceRequest) (
 		ImmatureReward: int64(bals.ImmatureReward),
 	}
 	return resp, nil
+}
+
+func (s *walletServer) TicketPrice(ctx context.Context,
+	req *pb.TicketPriceRequest) (*pb.TicketPriceResponse, error) {
+	tp, err := s.wallet.StakeDifficulty()
+	if err != nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"Failed to query stake difficulty: %s", err.Error())
+	}
+
+	_, blockHeight, err := s.wallet.ChainClient().GetBestBlock()
+	if err != nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"Failed to query block height: %s", err.Error())
+	}
+
+	return &pb.TicketPriceResponse{
+		TicketPrice: int64(tp),
+		Height:      blockHeight,
+	}, nil
+}
+
+func (s *walletServer) StakeInfo(ctx context.Context,
+	req *pb.StakeInfoRequest) (*pb.StakeInfoResponse, error) {
+	si, err := s.wallet.StakeInfo()
+	if err != nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"Failed to query stake info: %s", err.Error())
+	}
+
+	return &pb.StakeInfoResponse{
+		PoolSize:      si.PoolSize,
+		AllMempoolTix: si.AllMempoolTix,
+		OwnMempoolTix: si.OwnMempoolTix,
+		Immature:      si.Immature,
+		Live:          si.Live,
+		Voted:         si.Voted,
+		Missed:        si.Missed,
+		Revoked:       si.Revoked,
+		Expired:       0, // Placeholder
+		TotalSubsidy:  int64(si.TotalSubsidy),
+	}, nil
 }
 
 // confirmed checks whether a transaction at height txHeight has met minconf
@@ -557,6 +642,100 @@ func (s *walletServer) PublishTransaction(ctx context.Context, req *pb.PublishTr
 	}
 
 	return &pb.PublishTransactionResponse{}, nil
+}
+
+// PurchaseTickets purchases tickets from the wallet.
+func (s *walletServer) PurchaseTickets(ctx context.Context,
+	req *pb.PurchaseTicketsRequest) (*pb.PurchaseTicketsResponse, error) {
+	// Unmarshall the received data and prepare it as input for the ticket
+	// purchase request.
+	spendLimit := dcrutil.Amount(req.SpendLimit)
+	if spendLimit < 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Negative spend limit given")
+	}
+
+	minConf := int32(req.RequiredConfirmations)
+
+	var ticketAddr dcrutil.Address
+	var err error
+	if req.TicketAddress != "" {
+		ticketAddr, err = dcrutil.DecodeAddress(req.TicketAddress,
+			s.wallet.ChainParams())
+		if err != nil {
+			return nil, grpc.Errorf(codes.InvalidArgument,
+				"Ticket address invalid: %v", err)
+		}
+	}
+
+	var poolAddr dcrutil.Address
+	if req.PoolAddress != "" {
+		poolAddr, err = dcrutil.DecodeAddress(req.PoolAddress,
+			s.wallet.ChainParams())
+		if err != nil {
+			return nil, grpc.Errorf(codes.InvalidArgument,
+				"Pool address invalid: %v", err)
+		}
+	}
+
+	if req.PoolFees > 0 {
+		err = txrules.IsValidPoolFeeRate(req.PoolFees)
+		if err != nil {
+			return nil, grpc.Errorf(codes.InvalidArgument,
+				"Pool fees amount invalid: %v", err)
+		}
+	}
+
+	if req.PoolFees > 0 && poolAddr == nil {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Pool fees set but no pool address given")
+	}
+
+	if req.PoolFees <= 0 && poolAddr != nil {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Pool fees negative or unset but pool address given")
+	}
+
+	numTickets := int(req.NumTickets)
+	if numTickets < 1 {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Zero or negative number of tickets given")
+	}
+
+	expiry := int32(req.Expiry)
+	txFee := dcrutil.Amount(req.TxFee)
+	ticketFee := dcrutil.Amount(req.TicketFee)
+
+	if txFee < 0 || ticketFee < 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument,
+			"Negative fees per KB given")
+	}
+
+	lock := make(chan time.Time, 1)
+	defer func() {
+		lock <- time.Time{} // send matters, not the value
+	}()
+	err = s.wallet.Unlock(req.Passphrase, lock)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	resp, err := s.wallet.PurchaseTickets(0, spendLimit, minConf,
+		ticketAddr, req.Account, numTickets, poolAddr, req.PoolFees,
+		expiry, txFee, ticketFee)
+	if err != nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"Unable to purchase tickets: %v", err)
+	}
+
+	respTyped, ok := resp.([]*chainhash.Hash)
+	if !ok {
+		return nil, grpc.Errorf(codes.Internal,
+			"Unable to cast response as a slice of hash strings")
+	}
+	hashes := marshalHashes(respTyped)
+
+	return &pb.PurchaseTicketsResponse{TicketHashes: hashes}, nil
 }
 
 func marshalTransactionInputs(v []wallet.TransactionSummaryInput) []*pb.TransactionDetails_Input {
