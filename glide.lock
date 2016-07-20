@@ -30,7 +30,7 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: eda86f5267b747f095da4235cfb10fa361b5f769
+  version: b88cf9e80c3fee5dd3a38826b5fe79fb14d225f1 
   subpackages:
   - blockchain
   - blockchain/stake
