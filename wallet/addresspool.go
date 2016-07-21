@@ -226,6 +226,13 @@ func (a *addressPool) getNewAddress() (dcrutil.Address, error) {
 // used in calls that provide a single new address to the user for
 // them to use externally.
 func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
+	defer func() {
+		errNotify := a.wallet.notifyAccountAddrIdxs(a.account)
+		if errNotify != nil {
+			log.Errorf("Failed to push account update notification "+
+				"for account %v", a.account)
+		}
+	}()
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
@@ -236,6 +243,36 @@ func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
 		a.BatchRollback()
 	}
 	return address, err
+}
+
+// notifyAccountAddrIdxs sends out an account notification when the address index
+// for some account branch has changed.
+func (w *Wallet) notifyAccountAddrIdxs(account uint32) error {
+	name, err := w.Manager.AccountName(account)
+	if err != nil {
+		return err
+	}
+
+	idxExt, err := w.AddressPoolIndex(account, waddrmgr.ExternalBranch)
+	if err != nil {
+		return err
+	}
+	idxInt, err := w.AddressPoolIndex(account, waddrmgr.InternalBranch)
+	if err != nil {
+		return err
+	}
+
+	ap := &waddrmgr.AccountProperties{
+		AccountNumber:    account,
+		AccountName:      name,
+		ExternalKeyCount: idxExt,
+		InternalKeyCount: idxInt,
+		ImportedKeyCount: 0, // ???
+	}
+
+	w.NtfnServer.notifyAccountProperties(ap)
+
+	return nil
 }
 
 // BatchFinish must be run after every successful series of usages of
@@ -401,6 +438,14 @@ func (w *Wallet) SyncAddressPoolIndex(account uint32, branch uint32,
 	if err != nil {
 		return err
 	}
+
+	defer func() {
+		errNotify := w.notifyAccountAddrIdxs(account)
+		if errNotify != nil {
+			log.Errorf("Failed to push account update notification "+
+				"for account %v", account)
+		}
+	}()
 	var addrPool *addressPool
 	switch branch {
 	case waddrmgr.ExternalBranch:

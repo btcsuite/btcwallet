@@ -1375,6 +1375,36 @@ func (w *Wallet) ExistsAddressOnChain(address dcrutil.Address) (bool, error) {
 	return w.existsAddressOnChain(address)
 }
 
+// AccountProperties returns the properties of an account, including address
+// indexes and name. It first fetches the desynced information from the address
+// manager, then updates the indexes based on the address pools.
+func (w *Wallet) AccountProperties(acct uint32) (*waddrmgr.AccountProperties,
+	error) {
+	props, err := w.Manager.AccountProperties(acct)
+	if err != nil {
+		return nil, err
+	}
+
+	// Look up where the address pool index is, not the address forward
+	// buffer. Skip the imported account, which is not a BIP32-like
+	// account.
+	if acct != waddrmgr.ImportedAddrAccount {
+		extIdx, err := w.AddressPoolIndex(acct, waddrmgr.ExternalBranch)
+		if err != nil {
+			return nil, err
+		}
+		props.ExternalKeyCount = extIdx
+
+		intIdx, err := w.AddressPoolIndex(acct, waddrmgr.InternalBranch)
+		if err != nil {
+			return nil, err
+		}
+		props.InternalKeyCount = intIdx
+	}
+
+	return props, nil
+}
+
 // RenameAccount sets the name for an account number to newName.
 func (w *Wallet) RenameAccount(account uint32, newName string) error {
 	err := w.Manager.RenameAccount(account, newName)
@@ -1382,7 +1412,7 @@ func (w *Wallet) RenameAccount(account uint32, newName string) error {
 		return err
 	}
 
-	props, err := w.Manager.AccountProperties(account)
+	props, err := w.AccountProperties(account)
 	if err != nil {
 		log.Errorf("Cannot fetch new account properties for notification "+
 			"during account rename: %v", err)
@@ -1401,7 +1431,7 @@ func (w *Wallet) NextAccount(name string) (uint32, error) {
 		return 0, err
 	}
 
-	props, err := w.Manager.AccountProperties(account)
+	props, err := w.AccountProperties(account)
 	if err != nil {
 		log.Errorf("Cannot fetch new account properties for notification "+
 			"after account creation: %v", err)
@@ -1906,28 +1936,10 @@ func (w *Wallet) Accounts() (*AccountsResult, error) {
 		return nil, err
 	}
 	err = w.Manager.ForEachAccount(func(acct uint32) error {
-		props, err := w.Manager.AccountProperties(acct)
+		props, err := w.AccountProperties(acct)
 		if err != nil {
 			return err
 		}
-
-		// Look up where the address pool index is, not the address forward
-		// buffer. Skip the imported account, which is not a BIP32-like
-		// account.
-		if acct != waddrmgr.ImportedAddrAccount {
-			extIdx, err := w.AddressPoolIndex(acct, waddrmgr.ExternalBranch)
-			if err != nil {
-				return err
-			}
-			props.ExternalKeyCount = extIdx
-
-			intIdx, err := w.AddressPoolIndex(acct, waddrmgr.InternalBranch)
-			if err != nil {
-				return err
-			}
-			props.InternalKeyCount = intIdx
-		}
-
 		accounts = append(accounts, AccountResult{
 			AccountProperties: *props,
 			// TotalBalance set below
@@ -2304,7 +2316,7 @@ func (w *Wallet) ImportPrivateKey(wif *dcrutil.WIF, bs *waddrmgr.BlockStamp,
 	addrStr := addr.Address().EncodeAddress()
 	log.Infof("Imported payment address %s", addrStr)
 
-	props, err := w.Manager.AccountProperties(waddrmgr.ImportedAddrAccount)
+	props, err := w.AccountProperties(waddrmgr.ImportedAddrAccount)
 	if err != nil {
 		log.Errorf("Cannot fetch account properties for imported "+
 			"account after importing key: %v", err)
