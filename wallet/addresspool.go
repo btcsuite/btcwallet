@@ -362,7 +362,20 @@ func (w *Wallet) CheckAddressPoolsInitialized(account uint32) error {
 func (w *Wallet) AddressPoolIndex(account uint32, branch uint32) (uint32, error) {
 	err := w.CheckAddressPoolsInitialized(account)
 	if err != nil {
-		return 0, err
+		log.Tracef("Error on fetch of address pool account %v, branch %v from "+
+			"the local map: %s", account, branch, err.Error())
+
+		// The address pools are uninitialized. This is usually due to
+		// the wallet being in the process of synchronizing. Instead,
+		// try to load the last saved address index from the meta bucket
+		// of the database. If that fails, give up and return an error.
+		isInternal := branch == waddrmgr.InternalBranch
+		idx, err := w.Manager.NextToUseAddrPoolIndex(isInternal, account)
+		if err != nil {
+			return 0, err
+		}
+
+		return idx, nil
 	}
 
 	switch branch {

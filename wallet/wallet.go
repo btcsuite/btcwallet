@@ -1910,6 +1910,24 @@ func (w *Wallet) Accounts() (*AccountsResult, error) {
 		if err != nil {
 			return err
 		}
+
+		// Look up where the address pool index is, not the address forward
+		// buffer. Skip the imported account, which is not a BIP32-like
+		// account.
+		if acct != waddrmgr.ImportedAddrAccount {
+			extIdx, err := w.AddressPoolIndex(acct, waddrmgr.ExternalBranch)
+			if err != nil {
+				return err
+			}
+			props.ExternalKeyCount = extIdx
+
+			intIdx, err := w.AddressPoolIndex(acct, waddrmgr.InternalBranch)
+			if err != nil {
+				return err
+			}
+			props.InternalKeyCount = intIdx
+		}
+
 		accounts = append(accounts, AccountResult{
 			AccountProperties: *props,
 			// TotalBalance set below
