@@ -2413,6 +2413,7 @@ func (w *Wallet) ImportScript(rs []byte, rescan bool, scanFrom int32) error {
 // StakeInfoData is a struct containing the data that would be returned from
 // a StakeInfo request to the wallet.
 type StakeInfoData struct {
+	BlockHeight   int64
 	PoolSize      uint32
 	AllMempoolTix uint32
 	OwnMempoolTix uint32
@@ -2615,6 +2616,7 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 
 	// Bring it all together.
 	resp := &StakeInfoData{
+		BlockHeight:   int64(bs.Height),
 		PoolSize:      poolSize,
 		AllMempoolTix: uint32(len(allMempoolTickets)),
 		OwnMempoolTix: uint32(len(localTicketsInMempool)),

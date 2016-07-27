@@ -1,5 +1,5 @@
 hash: bc512f42285c0afbef5adad730e5bbf97f7581f4e859b13bc9505c285d3f8c42
-updated: 2016-06-03T17:54:15.848446683-04:00
+updated: 2016-06-28T10:27:40.63857188-05:00
 imports:
 - name: github.com/boltdb/bolt
   version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
@@ -40,14 +40,14 @@ imports:
   - dcrjson
   - txscript
   - wire
-  - dcrec/edwards
   - dcrec/secp256k1
+  - dcrec/edwards
   - dcrec/secp256k1/schnorr
   - database
 - name: github.com/decred/dcrrpcclient
   version: f3c620d63cb02aec0c1152a72d3c8669b92a2fb5
 - name: github.com/decred/dcrutil
-  version: 74563ea520b1215b9c10f96507b7a9984894c0b5
+  version: 4a3bdb1cb08b49811674750998363b8b8ccfd66e
   subpackages:
   - hdkeychain
   - base58
@@ -56,25 +56,26 @@ imports:
   subpackages:
   - edwards25519
 - name: github.com/golang/protobuf
-  version: 7cc19b78d562895b13596ddce7aafb59dd789318
+  version: 78b168c14fc28c8c711844d210f7ab845083e3b1
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 - name: golang.org/x/net
-  version: 35ec611a141ee705590b9eb64d673f9e6dfeb1ac
+  version: 04557861f124410b768b1ba5bb3a91b705afbfc6
   subpackages:
   - context
   - http2
   - trace
   - http2/hpack
+  - lex/httplex
   - internal/timeseries
 - name: golang.org/x/sys
-  version: b776ec39b3e54652e09028aaaaac9757f4f8211a
+  version: 62bee037599929a6e9146f29d10dd5208c43507d
   subpackages:
   - unix
 - name: google.golang.org/grpc
-  version: 7f24e5e90e7e79ee1c68359b05908b668a23ffb2
+  version: 7f24e5e90e7e79ee1c68359b05908b668a23ffb2 
   subpackages:
   - codes
   - credentials
@@ -84,4 +85,16 @@ imports:
   - naming
   - transport
   - peer
-devImports: []
+testImports:
+- name: github.com/davecgh/go-spew
+  version: 5215b55f46b2b919f50a1df0eaa5886afe4e3b3d
+  subpackages:
+  - spew
+- name: github.com/pmezard/go-difflib
+  version: 792786c7400a136282c1664665ae0a8db921c6c2
+  subpackages:
+  - difflib
+- name: github.com/stretchr/testify
+  version: d77da356e56a7428ad25149ca77381849a6a5232
+  subpackages:
+  - assert

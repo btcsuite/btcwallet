@@ -128,6 +128,7 @@ var helpDescsEnUS = map[string]string{
 	"getstakeinfo--synopsis": "Returns statistics about staking from the wallet.",
 
 	// GetStakeInfoResult help.
+	"getstakeinforesult-blockheight":      "Current block height for stake info.",
 	"getstakeinforesult-poolsize":         "Number of live tickets in the ticket pool.",
 	"getstakeinforesult-difficulty":       "Current stake difficulty.",
 	"getstakeinforesult-allmempooltix":    "Number of tickets currently in the mempool",
