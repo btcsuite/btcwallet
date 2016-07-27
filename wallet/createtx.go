@@ -129,9 +129,9 @@ func FeeForSize(incr dcrutil.Amount, sz int) dcrutil.Amount {
 	return feeForSize(incr, sz)
 }
 
-// TicketFeeIncrement is the default minimum stake transaction fees per KB (0.01
+// DefaultTicketFeeIncrement is the default minimum stake transaction fees per KB (0.01
 // coin, measured in atoms).
-const TicketFeeIncrement = 1e6
+const DefaultTicketFeeIncrement dcrutil.Amount = 1e6
 
 // EstMaxTicketFeeAmount is the estimated max ticket fee to be used for size
 // calculation for eligible utxos for ticket purchasing.

@@ -55,6 +55,7 @@ type Loader struct {
 	unsafeMainNet  bool
 	addrIdxScanLen int
 	allowHighFees  bool
+	relayFee       float64
 }
 
 // StakeOptions contains the various options necessary for stake mining.
@@ -62,6 +63,7 @@ type StakeOptions struct {
 	VoteBits            uint16
 	StakeMiningEnabled  bool
 	BalanceToMaintain   float64
+	TicketFee           float64
 	RollbackTest        bool
 	PruneTickets        bool
 	AddressReuse        bool
@@ -76,7 +78,7 @@ type StakeOptions struct {
 // NewLoader constructs a Loader.
 func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
 	stakeOptions *StakeOptions, autoRepair bool, unsafeMainNet bool,
-	addrIdxScanLen int, allowHighFees bool) *Loader {
+	addrIdxScanLen int, allowHighFees bool, relayFee float64) *Loader {
 	return &Loader{
 		chainParams:    chainParams,
 		dbDirPath:      dbDirPath,
@@ -85,6 +87,7 @@ func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
 		unsafeMainNet:  unsafeMainNet,
 		addrIdxScanLen: addrIdxScanLen,
 		allowHighFees:  allowHighFees,
+		relayFee:       relayFee,
 	}
 }
 
@@ -157,8 +160,8 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 	w, err := Open(db, pubPassphrase, nil, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice,
-		so.TicketBuyFreq, so.PoolAddress, so.PoolFees, l.addrIdxScanLen,
-		so.StakePoolColdExtKey, l.autoRepair, l.allowHighFees, l.chainParams)
+		so.TicketBuyFreq, so.PoolAddress, so.PoolFees, so.TicketFee, l.addrIdxScanLen,
+		so.StakePoolColdExtKey, l.autoRepair, l.allowHighFees, l.relayFee, l.chainParams)
 	if err != nil {
 		return nil, err
 	}
@@ -224,8 +227,8 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	w, err = Open(db, pubPassphrase, cbs, so.VoteBits, so.StakeMiningEnabled,
 		so.BalanceToMaintain, so.AddressReuse, so.RollbackTest,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice, so.TicketBuyFreq,
-		so.PoolAddress, so.PoolFees, l.addrIdxScanLen, so.StakePoolColdExtKey,
-		l.autoRepair, l.allowHighFees, l.chainParams)
+		so.PoolAddress, so.PoolFees, so.TicketFee, l.addrIdxScanLen, so.StakePoolColdExtKey,
+		l.autoRepair, l.allowHighFees, l.relayFee, l.chainParams)
 	if err != nil {
 		return nil, err
 	}

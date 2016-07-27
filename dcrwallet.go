@@ -102,10 +102,11 @@ func walletMain() error {
 		PoolAddress:         cfg.PoolAddress,
 		PoolFees:            cfg.PoolFees,
 		StakePoolColdExtKey: cfg.StakePoolColdExtKey,
+		TicketFee:           cfg.TicketFee,
 	}
 	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
 		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen,
-		cfg.AllowHighFees)
+		cfg.AllowHighFees, cfg.RelayFee)
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client

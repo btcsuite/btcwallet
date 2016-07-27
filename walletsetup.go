@@ -116,9 +116,11 @@ func createWallet(cfg *config) error {
 		AddressReuse:       cfg.ReuseAddresses,
 		TicketAddress:      cfg.TicketAddress,
 		TicketMaxPrice:     cfg.TicketMaxPrice,
+		TicketFee:          cfg.TicketFee,
 	}
 	loader := wallet.NewLoader(activeNet.Params, dbDir, stakeOptions,
-		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen, cfg.AllowHighFees)
+		cfg.AutomaticRepair, cfg.UnsafeMainNet, cfg.AddrIdxScanLen, cfg.AllowHighFees,
+		cfg.RelayFee)
 
 	reader := bufio.NewReader(os.Stdin)
 	privPass, pubPass, seed, err := prompt.Setup(reader,

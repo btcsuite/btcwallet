@@ -95,6 +95,8 @@ type config struct {
 	AddrIdxScanLen      int     `long:"addridxscanlen" description:"The width of the scan for last used addresses on wallet restore and start up (default: 750)"`
 	StakePoolColdExtKey string  `long:"stakepoolcoldextkey" description:"Enables the wallet as a stake pool with an extended key in the format of \"xpub...:index\" to derive cold wallet addresses to send fees to"`
 	AllowHighFees       bool    `long:"allowhighfees" description:"Force the RPC client to use the 'allowHighFees' flag when sending transactions"`
+	RelayFee            float64 `long:"txfee" description:"Sets the wallet's tx fee per kb (default: 0.01)"`
+	TicketFee           float64 `long:"ticketfee" description:"Sets the wallet's ticket fee per kb (default: 0.01)"`
 
 	// RPC client options
 	RPCConnect       string `short:"c" long:"rpcconnect" description:"Hostname/IP and port of dcrd RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:18556)"`
@@ -592,6 +594,15 @@ func loadConfig() (*config, []string, error) {
 
 	if cfg.RPCConnect == "" {
 		cfg.RPCConnect = net.JoinHostPort("localhost", activeNet.RPCClientPort)
+	}
+
+	// Set ticketfee and txfee to defaults if none are set.  Avoiding using default
+	// confs because they are dcrutil.Amounts
+	if cfg.TicketFee == 0.0 {
+		cfg.TicketFee = wallet.DefaultTicketFeeIncrement.ToCoin()
+	}
+	if cfg.RelayFee == 0.0 {
+		cfg.RelayFee = txrules.DefaultRelayFeePerKb.ToCoin()
 	}
 
 	// Add default port to connect flag if missing.

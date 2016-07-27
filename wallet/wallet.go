@@ -187,8 +187,8 @@ type Wallet struct {
 // and transaction store.
 func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	ticketBuyFreq int, poolAddress dcrutil.Address, pf float64,
-	addrIdxScanLen int, stakePoolColdAddrs map[string]struct{},
+	ticketBuyFreq int, poolAddress dcrutil.Address, pf float64, relayFee,
+	ticketFee dcrutil.Amount, addrIdxScanLen int, stakePoolColdAddrs map[string]struct{},
 	autoRepair, AllowHighFees bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
 	smgr *wstakemgr.StakeStore, db *walletdb.DB,
 	params *chaincfg.Params) *Wallet {
@@ -206,8 +206,8 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 		VoteBits:                 vb,
 		balanceToMaintain:        btm,
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
-		relayFee:                 txrules.DefaultRelayFeePerKb,
-		ticketFeeIncrement:       TicketFeeIncrement,
+		relayFee:                 relayFee,
+		ticketFeeIncrement:       ticketFee,
 		AllowHighFees:            AllowHighFees,
 		rescanAddJob:             make(chan *RescanJob),
 		rescanBatch:              make(chan *rescanBatch),
@@ -3210,8 +3210,8 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
 	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
 	ticketMaxPrice float64, ticketBuyFreq int, poolAddress string,
-	poolFees float64, addrIdxScanLen int, stakePoolColdExtKey string,
-	autoRepair, allowHighFees bool, params *chaincfg.Params) (*Wallet, error) {
+	poolFees float64, ticketFee float64, addrIdxScanLen int, stakePoolColdExtKey string,
+	autoRepair, allowHighFees bool, relayFee float64, params *chaincfg.Params) (*Wallet, error) {
 	addrMgrNS, err := db.Namespace(waddrmgrNamespaceKey)
 	if err != nil {
 		return nil, err
@@ -3289,6 +3289,16 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		return nil, err
 	}
 
+	ticketFeeAmt, err := dcrutil.NewAmount(ticketFee)
+	if err != nil {
+		return nil, err
+	}
+
+	relayFeeAmt, err := dcrutil.NewAmount(relayFee)
+	if err != nil {
+		return nil, err
+	}
+
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
 
 	w := newWallet(voteBits,
@@ -3301,6 +3311,8 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		ticketBuyFreq,
 		poolAddr,
 		poolFees,
+		relayFeeAmt,
+		ticketFeeAmt,
 		addrIdxScanLen,
 		stakePoolColdAddrs,
 		autoRepair,
