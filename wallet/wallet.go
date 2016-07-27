@@ -2591,11 +2591,24 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Determine if one of your current localTickets has been missed on Chain
 	for i := range localTickets {
+		found := false
 		if hashInPointerSlice(localTickets[i], missedOnChain) {
-			missedNum++
+			// Increment missedNum if the missed ticket doesn't have a
+			// revoked associated with it
+			for j := range revokedTickets {
+				if localTickets[i] == revokedTickets[j] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				missedNum++
+			}
 		}
 	}
+
 	missedNum += len(revokedTickets)
 
 	// Get all the subsidy for votes cast by this wallet so far
