@@ -253,7 +253,12 @@ func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
 
 // StakeDifficulty is used to get the current stake difficulty from the daemon.
 func (w *Wallet) StakeDifficulty() (dcrutil.Amount, error) {
-	sdResp, err := w.chainClient.GetStakeDifficulty()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return 0, err
+	}
+
+	sdResp, err := chainClient.GetStakeDifficulty()
 	if err != nil {
 		return 0, err
 	}
@@ -2458,11 +2463,17 @@ func hashInPointerSlice(h chainhash.Hash, list []*chainhash.Hash) bool {
 // Getting this information is extremely costly as in involves a massive
 // number of chain server calls.
 func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
+	// Get a safe pointer for the chain client.
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
 	// Check to ensure both the wallet and the blockchain are synced.
 	// Return a failure if the wallet is currently processing a new
 	// block and is not yet synced.
 	bs := w.Manager.SyncedTo()
-	chainBest, chainHeight, err := w.chainClient.GetBestBlock()
+	chainBest, chainHeight, err := chainClient.GetBestBlock()
 	if err != nil {
 		return nil, err
 	}
@@ -2493,7 +2504,7 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 	// currently isn't a way to get this from the RPC, so
 	// just use the current block pool size as a "good
 	// enough" estimate for now.
-	bestBlock, err := w.chainClient.GetBlock(&bs.Hash)
+	bestBlock, err := chainClient.GetBlock(&bs.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -2502,7 +2513,7 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 	// Fetch all transactions from the mempool, and store only the
 	// the ticket hashes for transactions that are tickets. Then see
 	// how many of these mempool tickets also belong to the wallet.
-	allMempoolTickets, err := w.chainClient.GetRawMempool(dcrjson.GRMTickets)
+	allMempoolTickets, err := chainClient.GetRawMempool(dcrjson.GRMTickets)
 	if err != nil {
 		return nil, err
 	}
@@ -2540,7 +2551,7 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 	}
 
 	// Check the live ticket pool for the presense of tickets.
-	existsBitSetBStr, err := w.chainClient.ExistsLiveTickets(localTicketPtrs)
+	existsBitSetBStr, err := chainClient.ExistsLiveTickets(localTicketPtrs)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to find assess whether tickets "+
 			"were in live buckets when generating stake info (err %s)",
@@ -2587,7 +2598,7 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 	// from this wallet are still missed. Add the number of revoked
 	// tickets to this sum as well.
 	missedNum := 0
-	missedOnChain, err := w.chainClient.MissedTickets()
+	missedOnChain, err := chainClient.MissedTickets()
 	if err != nil {
 		return nil, err
 	}
