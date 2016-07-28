@@ -3076,14 +3076,13 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 //
 // This function is unstable and will be removed once syncing code is moved out
 // of the wallet.
-func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
+func (w *Wallet) PublishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	server, err := w.requireChainClient()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	_, err = server.SendRawTransaction(tx, w.AllowHighFees)
-	return err
+	return server.SendRawTransaction(tx, w.AllowHighFees)
 }
 
 // ChainParams returns the network parameters for the blockchain the wallet

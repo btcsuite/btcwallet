@@ -275,7 +275,9 @@ message SignTransactionResponse {
 message PublishTransactionRequest {
 	bytes signed_transaction = 1;
 }
-message PublishTransactionResponse {}
+message PublishTransactionResponse {
+	bytes transaction_hash = 1;
+}
 
 message PurchaseTicketsRequest {
 	bytes passphrase = 1;

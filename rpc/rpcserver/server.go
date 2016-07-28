@@ -44,10 +44,10 @@ import (
 
 // Public API version constants
 const (
-	semverString = "2.2.1"
+	semverString = "2.3.0"
 	semverMajor  = 2
-	semverMinor  = 2
-	semverPatch  = 1
+	semverMinor  = 3
+	semverPatch  = 0
 )
 
 // translateError creates a new gRPC error with an appropiate error code for
@@ -636,12 +636,12 @@ func (s *walletServer) PublishTransaction(ctx context.Context, req *pb.PublishTr
 			"Bytes do not represent a valid raw transaction: %v", err)
 	}
 
-	err = s.wallet.PublishTransaction(&msgTx)
+	txHash, err := s.wallet.PublishTransaction(&msgTx)
 	if err != nil {
 		return nil, translateError(err)
 	}
 
-	return &pb.PublishTransactionResponse{}, nil
+	return &pb.PublishTransactionResponse{TransactionHash: txHash[:]}, nil
 }
 
 // PurchaseTickets purchases tickets from the wallet.

@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 2.2.1
+Version: 2.3.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -823,6 +823,8 @@ wallet and republished later if it or a double spend are not mined.
 - `bytes signed_transaction`: The signed transaction to publish.
 
 **Response:** `PublishTransactionResponse`
+
+- `bytes transaction_hash`: The hash of the published transaction.
 
 **Expected errors:**
 
