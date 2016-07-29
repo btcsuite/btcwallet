@@ -1,5 +1,5 @@
-hash: 0cff4a723566a3e33910785c104bddde49d1e0ba2d51f3833599a423140f5163
-updated: 2016-05-06T14:41:32.674803-04:00
+hash: 0d52c812d9cc1fb6037ad6037b620b5d82204364e271b2b5613357c488c07805
+updated: 2016-05-06T15:13:43.7622649-04:00
 imports:
 - name: github.com/boltdb/bolt
   version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
@@ -47,7 +47,7 @@ imports:
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
-  version: 1679536dcc895411a9f5848d9a0250be7856448c
+  version: 6b9493b3cb60367edd942144879646604089e3f7
 - name: golang.org/x/net
   version: fb93926129b8ec0056f2f458b1f519654814edf0
   subpackages:

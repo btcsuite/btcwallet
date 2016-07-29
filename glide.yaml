@@ -34,6 +34,5 @@ import:
   - credentials
   - grpclog
 - package: github.com/jessevdk/go-flags
-  version: 1679536dcc895411a9f5848d9a0250be7856448c
 - package: github.com/boltdb/bolt
   version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
