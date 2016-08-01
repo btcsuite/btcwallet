@@ -74,9 +74,9 @@ Building or updating from source requires the following build dependencies:
 - **Glide**
 
   Glide is used to manage project dependencies and provide reproducible builds.
-  To install:
-
-  `go get -u github.com/Masterminds/glide`
+  It is recommended to use the latest Glide release, unless a bug prevents doing
+  so.  The latest releases (for both binary and source) can be found
+  [here](https://github.com/Masterminds/glide/releases).
 
 Unfortunately, the use of `glide` prevents a handy tool such as `go get` from
 automatically downloading, building, and installing the source in a single
