@@ -401,6 +401,9 @@ func loadConfig() (*config, []string, error) {
 		if cfg.RPCCert == defaultRPCCertFile {
 			cfg.RPCCert = filepath.Join(cfg.AppDataDir, "rpc.cert")
 		}
+		if cfg.LogDir == defaultLogDir {
+			cfg.LogDir = filepath.Join(cfg.AppDataDir, defaultLogDirname)
+		}
 	}
 
 	// Choose the active network params based on the selected network.
