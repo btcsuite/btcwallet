@@ -85,7 +85,9 @@ var _ = math.Inf
 
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the proto package it is being compiled against.
-const _ = proto.ProtoPackageIsVersion1
+// A compilation error at this line likely means your copy of the
+// proto package needs to be updated.
+const _ = proto.ProtoPackageIsVersion2 // please upgrade the proto package
 
 type NextAddressRequest_Kind int32
 
@@ -614,7 +616,7 @@ type SignTransactionRequest struct {
 	// will be signed.  Rather than returning an incompletely signed
 	// transaction if any of the inputs to be signed can not be, the RPC
 	// immediately errors.
-	InputIndexes []uint32 `protobuf:"varint,3,rep,name=input_indexes,json=inputIndexes" json:"input_indexes,omitempty"`
+	InputIndexes []uint32 `protobuf:"varint,3,rep,packed,name=input_indexes,json=inputIndexes" json:"input_indexes,omitempty"`
 }
 
 func (m *SignTransactionRequest) Reset()                    { *m = SignTransactionRequest{} }
@@ -624,7 +626,7 @@ func (*SignTransactionRequest) Descriptor() ([]byte, []int) { return fileDescrip
 
 type SignTransactionResponse struct {
 	Transaction          []byte   `protobuf:"bytes,1,opt,name=transaction,proto3" json:"transaction,omitempty"`
-	UnsignedInputIndexes []uint32 `protobuf:"varint,2,rep,name=unsigned_input_indexes,json=unsignedInputIndexes" json:"unsigned_input_indexes,omitempty"`
+	UnsignedInputIndexes []uint32 `protobuf:"varint,2,rep,packed,name=unsigned_input_indexes,json=unsignedInputIndexes" json:"unsigned_input_indexes,omitempty"`
 }
 
 func (m *SignTransactionResponse) Reset()                    { *m = SignTransactionResponse{} }
@@ -954,7 +956,7 @@ var _ grpc.ClientConn
 
 // This is a compile-time assertion to ensure that this generated file
 // is compatible with the grpc package it is being compiled against.
-const _ = grpc.SupportPackageIsVersion2
+const _ = grpc.SupportPackageIsVersion3
 
 // Client API for VersionService service
 
@@ -1016,7 +1018,8 @@ var _VersionService_serviceDesc = grpc.ServiceDesc{
 			Handler:    _VersionService_Version_Handler,
 		},
 	},
-	Streams: []grpc.StreamDesc{},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: fileDescriptor0,
 }
 
 // Client API for WalletService service
@@ -1828,6 +1831,7 @@ var _WalletService_serviceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
+	Metadata: fileDescriptor0,
 }
 
 // Client API for WalletLoaderService service
@@ -2022,8 +2026,11 @@ var _WalletLoaderService_serviceDesc = grpc.ServiceDesc{
 			Handler:    _WalletLoaderService_StartConsensusRpc_Handler,
 		},
 	},
-	Streams: []grpc.StreamDesc{},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: fileDescriptor0,
 }
+
+func init() { proto.RegisterFile("api.proto", fileDescriptor0) }
 
 var fileDescriptor0 = []byte{
 	// 2851 bytes of a gzipped FileDescriptorProto

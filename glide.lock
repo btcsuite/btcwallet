@@ -1,5 +1,5 @@
 hash: bc512f42285c0afbef5adad730e5bbf97f7581f4e859b13bc9505c285d3f8c42
-updated: 2016-06-28T10:27:40.63857188-05:00
+updated: 2016-08-01T11:05:05.3170756-04:00
 imports:
 - name: github.com/boltdb/bolt
   version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
@@ -30,7 +30,7 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: b88cf9e80c3fee5dd3a38826b5fe79fb14d225f1 
+  version: b88cf9e80c3fee5dd3a38826b5fe79fb14d225f1
   subpackages:
   - blockchain
   - blockchain/stake
@@ -56,7 +56,7 @@ imports:
   subpackages:
   - edwards25519
 - name: github.com/golang/protobuf
-  version: 78b168c14fc28c8c711844d210f7ab845083e3b1
+  version: c3cefd437628a0b7d31b34fe44b3a7a540e98527
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
@@ -75,7 +75,7 @@ imports:
   subpackages:
   - unix
 - name: google.golang.org/grpc
-  version: 7f24e5e90e7e79ee1c68359b05908b668a23ffb2 
+  version: 452f01f3ae159dcec83bbf0c6b0d96860e07b5e6
   subpackages:
   - codes
   - credentials
