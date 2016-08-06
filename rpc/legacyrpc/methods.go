@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
@@ -799,7 +800,7 @@ func getReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, erro
 func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetTransactionCmd)
 
-	txSha, err := wire.NewShaHashFromStr(cmd.Txid)
+	txHash, err := chainhash.NewHashFromStr(cmd.Txid)
 	if err != nil {
 		return nil, &btcjson.RPCError{
 			Code:    btcjson.ErrRPCDecodeHexString,
@@ -807,7 +808,7 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		}
 	}
 
-	details, err := w.TxStore.TxDetails(txSha)
+	details, err := w.TxStore.TxDetails(txHash)
 	if err != nil {
 		return nil, err
 	}
@@ -1245,7 +1246,7 @@ func listSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCl
 
 	var start int32
 	if cmd.BlockHash != nil {
-		hash, err := wire.NewShaHashFromStr(*cmd.BlockHash)
+		hash, err := chainhash.NewHashFromStr(*cmd.BlockHash)
 		if err != nil {
 			return nil, DeserializationError{err}
 		}
@@ -1370,11 +1371,11 @@ func lockUnspent(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		w.ResetLockedOutpoints()
 	default:
 		for _, input := range cmd.Transactions {
-			txSha, err := wire.NewShaHashFromStr(input.Txid)
+			txHash, err := chainhash.NewHashFromStr(input.Txid)
 			if err != nil {
 				return nil, ParseError{err}
 			}
-			op := wire.OutPoint{Hash: *txSha, Index: input.Vout}
+			op := wire.OutPoint{Hash: *txHash, Index: input.Vout}
 			if cmd.Unlock {
 				w.UnlockOutpoint(op)
 			} else {
@@ -1416,7 +1417,7 @@ func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
 	if err != nil {
 		return "", err
 	}
-	txSha, err := w.SendOutputs(outputs, account, minconf)
+	txHash, err := w.SendOutputs(outputs, account, minconf)
 	if err != nil {
 		if err == txrules.ErrAmountNegative {
 			return "", ErrNeedPositiveAmount
@@ -1435,9 +1436,9 @@ func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
 		}
 	}
 
-	txShaStr := txSha.String()
-	log.Infof("Successfully sent transaction %v", txShaStr)
-	return txShaStr, nil
+	txHashStr := txHash.String()
+	log.Infof("Successfully sent transaction %v", txHashStr)
+	return txHashStr, nil
 }
 
 func isNilOrEmpty(s *string) bool {
@@ -1612,7 +1613,7 @@ func signMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	var buf bytes.Buffer
 	wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
 	wire.WriteVarString(&buf, 0, cmd.Message)
-	messageHash := wire.DoubleSha256(buf.Bytes())
+	messageHash := chainhash.DoubleHashB(buf.Bytes())
 	sigbytes, err := btcec.SignCompact(btcec.S256(), privKey,
 		messageHash, ainfo.Compressed())
 	if err != nil {
@@ -1665,7 +1666,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		cmdInputs = *cmd.Inputs
 	}
 	for _, rti := range cmdInputs {
-		inputSha, err := wire.NewShaHashFromStr(rti.Txid)
+		inputHash, err := chainhash.NewHashFromStr(rti.Txid)
 		if err != nil {
 			return nil, DeserializationError{err}
 		}
@@ -1695,7 +1696,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 			scripts[addr.String()] = redeemScript
 		}
 		inputs[wire.OutPoint{
-			Hash:  *inputSha,
+			Hash:  *inputHash,
 			Index: rti.Vout,
 		}] = script
 	}
@@ -1897,7 +1898,7 @@ func verifyMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	var buf bytes.Buffer
 	wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
 	wire.WriteVarString(&buf, 0, cmd.Message)
-	expectedMessageHash := wire.DoubleSha256(buf.Bytes())
+	expectedMessageHash := chainhash.DoubleHashB(buf.Bytes())
 	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
 		expectedMessageHash)
 	if err != nil {

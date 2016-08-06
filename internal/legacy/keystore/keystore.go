@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2014 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -24,6 +24,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -189,7 +190,7 @@ func chainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 	}
 
 	xorbytes := make([]byte, 32)
-	chainMod := wire.DoubleSha256(pubkey)
+	chainMod := chainhash.DoubleHashB(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
@@ -221,7 +222,7 @@ func chainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 	}
 
 	xorbytes := make([]byte, 32)
-	chainMod := wire.DoubleSha256(pubkey)
+	chainMod := chainhash.DoubleHashB(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
@@ -588,7 +589,7 @@ func New(dir string, desc string, passphrase []byte, net *chaincfg.Params,
 		kdfParams:   *kdfp,
 		recent: recentBlocks{
 			lastHeight: createdAt.Height,
-			hashes: []*wire.ShaHash{
+			hashes: []*chainhash.Hash{
 				createdAt.Hash,
 			},
 		},
@@ -1341,7 +1342,7 @@ func (s *Store) SetSyncedWith(bs *BlockStamp) {
 // NOTE: If the hash of the synced block is not known, hash will be nil, and
 // must be obtained from elsewhere.   This must be explicitly checked before
 // dereferencing the pointer.
-func (s *Store) SyncedTo() (hash *wire.ShaHash, height int32) {
+func (s *Store) SyncedTo() (hash *chainhash.Hash, height int32) {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
 
@@ -1528,7 +1529,7 @@ func (s *Store) ExportWatchingWallet() (*Store, error) {
 	kgwc := s.keyGenerator.watchingCopy(ws)
 	ws.keyGenerator = *(kgwc.(*btcAddress))
 	if len(s.recent.hashes) != 0 {
-		ws.recent.hashes = make([]*wire.ShaHash, 0, len(s.recent.hashes))
+		ws.recent.hashes = make([]*chainhash.Hash, 0, len(s.recent.hashes))
 		for _, hash := range s.recent.hashes {
 			hashCpy := *hash
 			ws.recent.hashes = append(ws.recent.hashes, &hashCpy)
@@ -1783,7 +1784,7 @@ func (af *addrFlags) WriteTo(w io.Writer) (int64, error) {
 // recentBlocks holds at most the last 20 seen block hashes as well as
 // the block height of the most recently seen block.
 type recentBlocks struct {
-	hashes     []*wire.ShaHash
+	hashes     []*chainhash.Hash
 	lastHeight int32
 }
 
@@ -1815,14 +1816,14 @@ func (rb *recentBlocks) readFromVersion(v version, r io.Reader) (int64, error) {
 	}
 
 	// Read block hash.
-	var syncedBlockHash wire.ShaHash
+	var syncedBlockHash chainhash.Hash
 	n, err = io.ReadFull(r, syncedBlockHash[:])
 	read += int64(n)
 	if err != nil {
 		return read, err
 	}
 
-	rb.hashes = []*wire.ShaHash{
+	rb.hashes = []*chainhash.Hash{
 		&syncedBlockHash,
 	}
 
@@ -1866,15 +1867,15 @@ func (rb *recentBlocks) ReadFrom(r io.Reader) (int64, error) {
 	// Read nBlocks block hashes.  Hashes are expected to be in
 	// order of oldest to newest, but there's no way to check
 	// that here.
-	rb.hashes = make([]*wire.ShaHash, 0, nBlocks)
+	rb.hashes = make([]*chainhash.Hash, 0, nBlocks)
 	for i := uint32(0); i < nBlocks; i++ {
-		var blockSha wire.ShaHash
-		n, err := io.ReadFull(r, blockSha[:])
+		var blockHash chainhash.Hash
+		n, err := io.ReadFull(r, blockHash[:])
 		read += int64(n)
 		if err != nil {
 			return read, err
 		}
-		rb.hashes = append(rb.hashes, &blockSha)
+		rb.hashes = append(rb.hashes, &blockHash)
 	}
 
 	return read, nil
@@ -3027,7 +3028,7 @@ func (sa *scriptAddress) watchingCopy(s *Store) walletAddress {
 }
 
 func walletHash(b []byte) uint32 {
-	sum := wire.DoubleSha256(b)
+	sum := chainhash.DoubleHashB(b)
 	return binary.LittleEndian.Uint32(sum)
 }
 
@@ -3234,6 +3235,6 @@ func (e *scriptEntry) ReadFrom(r io.Reader) (n int64, err error) {
 // used to mark a point in the blockchain that a key store element is
 // synced to.
 type BlockStamp struct {
-	Hash   *wire.ShaHash
+	Hash   *chainhash.Hash
 	Height int32
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2014-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -73,7 +74,7 @@ func createMsgTx(pkScript []byte, amts []int64) *wire.MsgTx {
 		TxIn: []*wire.TxIn{
 			{
 				PreviousOutPoint: wire.OutPoint{
-					Hash:  wire.ShaHash{},
+					Hash:  chainhash.Hash{},
 					Index: 0xffffffff,
 				},
 				SignatureScript: []byte{txscript.OP_NOP},
@@ -255,12 +256,12 @@ func TstCreateSeriesCredits(t *testing.T, pool *Pool, seriesID uint32, amounts [
 		t.Fatal(err)
 	}
 	msgTx := createMsgTx(pkScript, amounts)
-	txSha := msgTx.TxSha()
+	txHash := msgTx.TxHash()
 	credits := make([]credit, len(amounts))
 	for i := range msgTx.TxOut {
 		c := wtxmgr.Credit{
 			OutPoint: wire.OutPoint{
-				Hash:  txSha,
+				Hash:  txHash,
 				Index: uint32(i),
 			},
 			BlockMeta: wtxmgr.BlockMeta{

@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,7 +11,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -166,7 +166,7 @@ type (
 	// RescanProgress is a notification describing the current status
 	// of an in-progress rescan.
 	RescanProgress struct {
-		Hash   *wire.ShaHash
+		Hash   *chainhash.Hash
 		Height int32
 		Time   time.Time
 	}
@@ -174,7 +174,7 @@ type (
 	// RescanFinished is a notification that a previous rescan request
 	// has finished.
 	RescanFinished struct {
-		Hash   *wire.ShaHash
+		Hash   *chainhash.Hash
 		Height int32
 		Time   time.Time
 	}
@@ -206,14 +206,14 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	if block == nil {
 		return nil, nil
 	}
-	blksha, err := wire.NewShaHashFromStr(block.Hash)
+	blkHash, err := chainhash.NewHashFromStr(block.Hash)
 	if err != nil {
 		return nil, err
 	}
 	blk := &wtxmgr.BlockMeta{
 		Block: wtxmgr.Block{
 			Height: block.Height,
-			Hash:   *blksha,
+			Hash:   *blkHash,
 		},
 		Time: time.Unix(block.Time, 0),
 	}
@@ -227,7 +227,7 @@ func (c *RPCClient) onClientConnect() {
 	}
 }
 
-func (c *RPCClient) onBlockConnected(hash *wire.ShaHash, height int32, time time.Time) {
+func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockConnected{
 		Block: wtxmgr.Block{
@@ -240,7 +240,7 @@ func (c *RPCClient) onBlockConnected(hash *wire.ShaHash, height int32, time time
 	}
 }
 
-func (c *RPCClient) onBlockDisconnected(hash *wire.ShaHash, height int32, time time.Time) {
+func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockDisconnected{
 		Block: wtxmgr.Block{
@@ -278,14 +278,14 @@ func (c *RPCClient) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	c.onRecvTx(tx, block)
 }
 
-func (c *RPCClient) onRescanProgress(hash *wire.ShaHash, height int32, blkTime time.Time) {
+func (c *RPCClient) onRescanProgress(hash *chainhash.Hash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
 	case <-c.quit:
 	}
 }
 
-func (c *RPCClient) onRescanFinished(hash *wire.ShaHash, height int32, blkTime time.Time) {
+func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
 	case <-c.quit:

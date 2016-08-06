@@ -21,6 +21,7 @@ import (
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
@@ -1086,7 +1087,7 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 // BlockIdentifier identifies a block by either a height or a hash.
 type BlockIdentifier struct {
 	height int32
-	hash   *wire.ShaHash
+	hash   *chainhash.Hash
 }
 
 // NewBlockIdentifierFromHeight constructs a BlockIdentifier for a block height.
@@ -1095,7 +1096,7 @@ func NewBlockIdentifierFromHeight(height int32) *BlockIdentifier {
 }
 
 // NewBlockIdentifierFromHash constructs a BlockIdentifier for a block hash.
-func NewBlockIdentifierFromHash(hash *wire.ShaHash) *BlockIdentifier {
+func NewBlockIdentifierFromHash(hash *chainhash.Hash) *BlockIdentifier {
 	return &BlockIdentifier{hash: hash}
 }
 
@@ -1208,7 +1209,7 @@ type AccountResult struct {
 // method for more details.
 type AccountsResult struct {
 	Accounts           []AccountResult
-	CurrentBlockHash   *wire.ShaHash
+	CurrentBlockHash   *chainhash.Hash
 	CurrentBlockHeight int32
 }
 
@@ -1674,7 +1675,7 @@ func (w *Wallet) ResendUnminedTxs() {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
 			log.Debugf("Could not resend transaction %v: %v",
-				tx.TxSha(), err)
+				tx.TxHash(), err)
 			continue
 		}
 		log.Debugf("Resent unmined transaction %v", resp)
@@ -1859,7 +1860,7 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 // SendOutputs creates and sends payment transactions. It returns the
 // transaction hash upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32) (*wire.ShaHash, error) {
+	minconf int32) (*chainhash.Hash, error) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -2159,7 +2160,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *c
 		quit:                make(chan struct{}),
 	}
 	w.NtfnServer = newNotificationServer(w)
-	w.TxStore.NotifyUnspent = func(hash *wire.ShaHash, index uint32) {
+	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
 	return w, nil

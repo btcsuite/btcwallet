@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,6 +10,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -292,9 +293,9 @@ func TestCreditSortingByAddress(t *testing.T) {
 // locked to the votingpool address identified by the given
 // series/index/branch.
 func newDummyCredit(t *testing.T, pool *Pool, series uint32, index Index, branch Branch,
-	txSha []byte, outpointIdx uint32) credit {
-	var hash wire.ShaHash
-	if err := hash.SetBytes(txSha); err != nil {
+	txHash []byte, outpointIdx uint32) credit {
+	var hash chainhash.Hash
+	if err := hash.SetBytes(txHash); err != nil {
 		t.Fatal(err)
 	}
 	// Ensure the address defined by the given series/branch/index is present on
@@ -315,7 +316,7 @@ func checkUniqueness(t *testing.T, credits byAddress) {
 		series      uint32
 		branch      Branch
 		index       Index
-		hash        wire.ShaHash
+		hash        chainhash.Hash
 		outputIndex uint32
 	}
 

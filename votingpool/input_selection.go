@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 The btcsuite developers
+ * Copyright (c) 2015-2016 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -82,7 +82,7 @@ func (c byAddress) Less(i, j int) bool {
 	}
 
 	// The seriesID, index, and branch are equal, so compare hash.
-	txidComparison := bytes.Compare(c[i].OutPoint.Hash.Bytes(), c[j].OutPoint.Hash.Bytes())
+	txidComparison := bytes.Compare(c[i].OutPoint.Hash[:], c[j].OutPoint.Hash[:])
 	if txidComparison < 0 {
 		return true
 	}

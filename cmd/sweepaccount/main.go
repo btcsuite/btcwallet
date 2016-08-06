@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
@@ -333,7 +334,7 @@ func saneOutputValue(amount btcutil.Amount) bool {
 }
 
 func parseOutPoint(input *btcjson.ListUnspentResult) (wire.OutPoint, error) {
-	txHash, err := wire.NewShaHashFromStr(input.TxID)
+	txHash, err := chainhash.NewHashFromStr(input.TxID)
 	if err != nil {
 		return wire.OutPoint{}, err
 	}
