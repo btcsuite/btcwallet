@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcrpcclient"
@@ -417,7 +418,7 @@ func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransacti
 		return nil, errors.New(
 			"starting block hash and height may not be specified simultaneously")
 	} else if req.StartingBlockHash != nil {
-		startBlockHash, err := wire.NewShaHash(req.StartingBlockHash)
+		startBlockHash, err := chainhash.NewHash(req.StartingBlockHash)
 		if err != nil {
 			return nil, grpc.Errorf(codes.InvalidArgument, "%s", err.Error())
 		}
@@ -430,7 +431,7 @@ func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransacti
 		return nil, grpc.Errorf(codes.InvalidArgument,
 			"ending block hash and height may not be specified simultaneously")
 	} else if req.EndingBlockHash != nil {
-		endBlockHash, err := wire.NewShaHash(req.EndingBlockHash)
+		endBlockHash, err := chainhash.NewHash(req.EndingBlockHash)
 		if err != nil {
 			return nil, grpc.Errorf(codes.InvalidArgument, "%s", err.Error())
 		}
@@ -607,7 +608,7 @@ func marshalBlocks(v []wallet.Block) []*pb.BlockDetails {
 	return blocks
 }
 
-func marshalHashes(v []*wire.ShaHash) [][]byte {
+func marshalHashes(v []*chainhash.Hash) [][]byte {
 	hashes := make([][]byte, len(v))
 	for i, hash := range v {
 		hashes[i] = hash[:]

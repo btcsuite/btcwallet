@@ -7,7 +7,7 @@ package waddrmgr
 import (
 	"sync"
 
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -22,7 +22,7 @@ const (
 // synced to.
 type BlockStamp struct {
 	Height int32
-	Hash   wire.ShaHash
+	Hash   chainhash.Hash
 }
 
 // syncState houses the sync state of the manager.  It consists of the recently
@@ -41,7 +41,7 @@ type syncState struct {
 	recentHeight int32
 
 	// recentHashes is a list of the last several seen block hashes.
-	recentHashes []wire.ShaHash
+	recentHashes []chainhash.Hash
 }
 
 // iter returns a BlockIterator that can be used to iterate over the recently
@@ -60,7 +60,7 @@ func (s *syncState) iter(mtx *sync.RWMutex) *BlockIterator {
 
 // newSyncState returns a new sync state with the provided parameters.
 func newSyncState(startBlock, syncedTo *BlockStamp, recentHeight int32,
-	recentHashes []wire.ShaHash) *syncState {
+	recentHashes []chainhash.Hash) *syncState {
 
 	return &syncState{
 		startBlock:   *startBlock,

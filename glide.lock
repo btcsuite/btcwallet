@@ -1,27 +1,28 @@
 hash: 0cff4a723566a3e33910785c104bddde49d1e0ba2d51f3833599a423140f5163
-updated: 2016-05-06T14:41:32.674803-04:00
+updated: 2016-08-08T14:07:48.6427885-05:00
 imports:
 - name: github.com/boltdb/bolt
   version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
 - name: github.com/btcsuite/btcd
-  version: 474547b211c8f5566d094478318fcfd3c2c838d4
+  version: bd4e64d1d43bad445dd8e6577907c0c265cd83c2
   subpackages:
   - blockchain
   - btcec
   - btcjson
   - chaincfg
+  - chaincfg/chainhash
+  - database
   - txscript
   - wire
-  - database
 - name: github.com/btcsuite/btclog
   version: f96df2375f37300305f329b8e5258764b4f19a7f
 - name: github.com/btcsuite/btcrpcclient
-  version: 64922553b5c21f333438edaed6e0ba2b5a7760ee
+  version: c39e35318d5dc8d7e5e4171a34a17bc03dce06b4
 - name: github.com/btcsuite/btcutil
-  version: bdf4400ecafb82f0c121ed5db1ae70639e7f4018
+  version: 22c91fa80a5e90e3feda26cf6d43adc249306188
   subpackages:
-  - hdkeychain
   - base58
+  - hdkeychain
 - name: github.com/btcsuite/fastsha256
   version: 302ad4db268b46f9ebda3078f6f7397f96047735
 - name: github.com/btcsuite/go-socks
@@ -32,12 +33,12 @@ imports:
   version: 53f62d9b43e87a6c56975cf862af7edf33a8d0df
   subpackages:
   - nacl/secretbox
+  - pbkdf2
+  - poly1305
   - ripemd160
+  - salsa20/salsa
   - scrypt
   - ssh/terminal
-  - poly1305
-  - salsa20/salsa
-  - pbkdf2
 - name: github.com/btcsuite/seelog
   version: 313961b101eb55f65ae0f03ddd4e322731763b6c
 - name: github.com/btcsuite/websocket
@@ -53,9 +54,9 @@ imports:
   subpackages:
   - context
   - http2
-  - trace
   - http2/hpack
   - internal/timeseries
+  - trace
 - name: golang.org/x/sys
   version: f64b50fbea64174967a8882830d621a18ee1548e
   subpackages:
@@ -71,4 +72,8 @@ imports:
   - naming
   - transport
   - peer
-devImports: []
+testImports:
+- name: github.com/davecgh/go-spew
+  version: 5215b55f46b2b919f50a1df0eaa5886afe4e3b3d
+  subpackages:
+  - spew

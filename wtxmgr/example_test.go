@@ -7,6 +7,7 @@ package wtxmgr_test
 import (
 	"fmt"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -22,7 +23,7 @@ var (
 )
 
 func init() {
-	tx := spendOutput(&wire.ShaHash{}, 0, 10e8)
+	tx := spendOutput(&chainhash.Hash{}, 0, 10e8)
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, timeNow())
 	if err != nil {
 		panic(err)

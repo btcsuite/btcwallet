@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The btcsuite developers
+// Copyright (c) 2014-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -12,22 +12,22 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-// newShaHash converts the passed big-endian hex string into a wire.ShaHash.
+// newHash converts the passed big-endian hex string into a chainhash.Hash.
 // It only differs from the one available in wire in that it panics on an
 // error since it will only (and must only) be called with hard-coded, and
 // therefore known good, hashes.
-func newShaHash(hexStr string) *wire.ShaHash {
-	sha, err := wire.NewShaHashFromStr(hexStr)
+func newHash(hexStr string) *chainhash.Hash {
+	hash, err := chainhash.NewHashFromStr(hexStr)
 	if err != nil {
 		panic(err)
 	}
-	return sha
+	return hash
 }
 
 // testContext is used to store context information about a running test which
@@ -1439,91 +1439,91 @@ func testWatchingOnly(tc *testContext) bool {
 func testSync(tc *testContext) bool {
 	tests := []struct {
 		name string
-		hash *wire.ShaHash
+		hash *chainhash.Hash
 	}{
 		{
 			name: "Block 1",
-			hash: newShaHash("00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"),
+			hash: newHash("00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"),
 		},
 		{
 			name: "Block 2",
-			hash: newShaHash("000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd"),
+			hash: newHash("000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd"),
 		},
 		{
 			name: "Block 3",
-			hash: newShaHash("0000000082b5015589a3fdf2d4baff403e6f0be035a5d9742c1cae6295464449"),
+			hash: newHash("0000000082b5015589a3fdf2d4baff403e6f0be035a5d9742c1cae6295464449"),
 		},
 		{
 			name: "Block 4",
-			hash: newShaHash("000000004ebadb55ee9096c9a2f8880e09da59c0d68b1c228da88e48844a1485"),
+			hash: newHash("000000004ebadb55ee9096c9a2f8880e09da59c0d68b1c228da88e48844a1485"),
 		},
 		{
 			name: "Block 5",
-			hash: newShaHash("000000009b7262315dbf071787ad3656097b892abffd1f95a1a022f896f533fc"),
+			hash: newHash("000000009b7262315dbf071787ad3656097b892abffd1f95a1a022f896f533fc"),
 		},
 		{
 			name: "Block 6",
-			hash: newShaHash("000000003031a0e73735690c5a1ff2a4be82553b2a12b776fbd3a215dc8f778d"),
+			hash: newHash("000000003031a0e73735690c5a1ff2a4be82553b2a12b776fbd3a215dc8f778d"),
 		},
 		{
 			name: "Block 7",
-			hash: newShaHash("0000000071966c2b1d065fd446b1e485b2c9d9594acd2007ccbd5441cfc89444"),
+			hash: newHash("0000000071966c2b1d065fd446b1e485b2c9d9594acd2007ccbd5441cfc89444"),
 		},
 		{
 			name: "Block 8",
-			hash: newShaHash("00000000408c48f847aa786c2268fc3e6ec2af68e8468a34a28c61b7f1de0dc6"),
+			hash: newHash("00000000408c48f847aa786c2268fc3e6ec2af68e8468a34a28c61b7f1de0dc6"),
 		},
 		{
 			name: "Block 9",
-			hash: newShaHash("000000008d9dc510f23c2657fc4f67bea30078cc05a90eb89e84cc475c080805"),
+			hash: newHash("000000008d9dc510f23c2657fc4f67bea30078cc05a90eb89e84cc475c080805"),
 		},
 		{
 			name: "Block 10",
-			hash: newShaHash("000000002c05cc2e78923c34df87fd108b22221ac6076c18f3ade378a4d915e9"),
+			hash: newHash("000000002c05cc2e78923c34df87fd108b22221ac6076c18f3ade378a4d915e9"),
 		},
 		{
 			name: "Block 11",
-			hash: newShaHash("0000000097be56d606cdd9c54b04d4747e957d3608abe69198c661f2add73073"),
+			hash: newHash("0000000097be56d606cdd9c54b04d4747e957d3608abe69198c661f2add73073"),
 		},
 		{
 			name: "Block 12",
-			hash: newShaHash("0000000027c2488e2510d1acf4369787784fa20ee084c258b58d9fbd43802b5e"),
+			hash: newHash("0000000027c2488e2510d1acf4369787784fa20ee084c258b58d9fbd43802b5e"),
 		},
 		{
 			name: "Block 13",
-			hash: newShaHash("000000005c51de2031a895adc145ee2242e919a01c6d61fb222a54a54b4d3089"),
+			hash: newHash("000000005c51de2031a895adc145ee2242e919a01c6d61fb222a54a54b4d3089"),
 		},
 		{
 			name: "Block 14",
-			hash: newShaHash("0000000080f17a0c5a67f663a9bc9969eb37e81666d9321125f0e293656f8a37"),
+			hash: newHash("0000000080f17a0c5a67f663a9bc9969eb37e81666d9321125f0e293656f8a37"),
 		},
 		{
 			name: "Block 15",
-			hash: newShaHash("00000000b3322c8c3ef7d2cf6da009a776e6a99ee65ec5a32f3f345712238473"),
+			hash: newHash("00000000b3322c8c3ef7d2cf6da009a776e6a99ee65ec5a32f3f345712238473"),
 		},
 		{
 			name: "Block 16",
-			hash: newShaHash("00000000174a25bb399b009cc8deff1c4b3ea84df7e93affaaf60dc3416cc4f5"),
+			hash: newHash("00000000174a25bb399b009cc8deff1c4b3ea84df7e93affaaf60dc3416cc4f5"),
 		},
 		{
 			name: "Block 17",
-			hash: newShaHash("000000003ff1d0d70147acfbef5d6a87460ff5bcfce807c2d5b6f0a66bfdf809"),
+			hash: newHash("000000003ff1d0d70147acfbef5d6a87460ff5bcfce807c2d5b6f0a66bfdf809"),
 		},
 		{
 			name: "Block 18",
-			hash: newShaHash("000000008693e98cf893e4c85a446b410bb4dfa129bd1be582c09ed3f0261116"),
+			hash: newHash("000000008693e98cf893e4c85a446b410bb4dfa129bd1be582c09ed3f0261116"),
 		},
 		{
 			name: "Block 19",
-			hash: newShaHash("00000000841cb802ca97cf20fb9470480cae9e5daa5d06b4a18ae2d5dd7f186f"),
+			hash: newHash("00000000841cb802ca97cf20fb9470480cae9e5daa5d06b4a18ae2d5dd7f186f"),
 		},
 		{
 			name: "Block 20",
-			hash: newShaHash("0000000067a97a2a37b8f190a17f0221e9c3f4fa824ddffdc2e205eae834c8d7"),
+			hash: newHash("0000000067a97a2a37b8f190a17f0221e9c3f4fa824ddffdc2e205eae834c8d7"),
 		},
 		{
 			name: "Block 21",
-			hash: newShaHash("000000006f016342d1275be946166cff975c8b27542de70a7113ac6d1ef3294f"),
+			hash: newHash("000000006f016342d1275be946166cff975c8b27542de70a7113ac6d1ef3294f"),
 		},
 	}
 
@@ -1560,7 +1560,7 @@ func testSync(tc *testContext) bool {
 		iter := tc.manager.NewIterateRecentBlocks()
 		for cont := iter != nil; cont; cont = iter.Prev() {
 			wantHeight := int32(i) - int32(j) + 1
-			var wantHash *wire.ShaHash
+			var wantHash *chainhash.Hash
 			if wantHeight == 0 {
 				wantHash = chaincfg.MainNetParams.GenesisHash
 			} else {
@@ -1613,7 +1613,7 @@ func testSync(tc *testContext) bool {
 	// current  block stamp clears the old recent blocks.
 	blockStamp = waddrmgr.BlockStamp{
 		Height: 100,
-		Hash:   *newShaHash("000000007bc154e0fa7ea32218a72fe2c1bb9f86cf8c9ebf9a715ed27fdb229a"),
+		Hash:   *newHash("000000007bc154e0fa7ea32218a72fe2c1bb9f86cf8c9ebf9a715ed27fdb229a"),
 	}
 	if err := tc.manager.SetSyncedTo(&blockStamp); err != nil {
 		tc.t.Errorf("SetSyncedTo unexpected err on future block stamp: "+

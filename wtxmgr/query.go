@@ -7,7 +7,7 @@ package wtxmgr
 import (
 	"fmt"
 
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -42,7 +42,7 @@ type TxDetails struct {
 
 // minedTxDetails fetches the TxDetails for the mined transaction with hash
 // txHash and the passed tx record key and value.
-func (s *Store) minedTxDetails(ns walletdb.Bucket, txHash *wire.ShaHash, recKey, recVal []byte) (*TxDetails, error) {
+func (s *Store) minedTxDetails(ns walletdb.Bucket, txHash *chainhash.Hash, recKey, recVal []byte) (*TxDetails, error) {
 	var details TxDetails
 
 	// Parse transaction record k/v, lookup the full block record for the
@@ -94,7 +94,7 @@ func (s *Store) minedTxDetails(ns walletdb.Bucket, txHash *wire.ShaHash, recKey,
 
 // unminedTxDetails fetches the TxDetails for the unmined transaction with the
 // hash txHash and the passed unmined record value.
-func (s *Store) unminedTxDetails(ns walletdb.Bucket, txHash *wire.ShaHash, v []byte) (*TxDetails, error) {
+func (s *Store) unminedTxDetails(ns walletdb.Bucket, txHash *chainhash.Hash, v []byte) (*TxDetails, error) {
 	details := TxDetails{
 		Block: BlockMeta{Block: Block{Height: -1}},
 	}
@@ -166,7 +166,7 @@ func (s *Store) unminedTxDetails(ns walletdb.Bucket, txHash *wire.ShaHash, v []b
 //
 // Not finding a transaction with this hash is not an error.  In this case,
 // a nil TxDetails is returned.
-func (s *Store) TxDetails(txHash *wire.ShaHash) (*TxDetails, error) {
+func (s *Store) TxDetails(txHash *chainhash.Hash) (*TxDetails, error) {
 	var details *TxDetails
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
 		var err error
@@ -197,7 +197,7 @@ func (s *Store) TxDetails(txHash *wire.ShaHash) (*TxDetails, error) {
 //
 // Not finding a transaction with this hash from this block is not an error.  In
 // this case, a nil TxDetails is returned.
-func (s *Store) UniqueTxDetails(txHash *wire.ShaHash, block *Block) (*TxDetails, error) {
+func (s *Store) UniqueTxDetails(txHash *chainhash.Hash, block *Block) (*TxDetails, error) {
 	var details *TxDetails
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
 		var err error
@@ -234,7 +234,7 @@ func (s *Store) rangeUnminedTransactions(ns walletdb.Bucket, f func([]TxDetails)
 			return storeError(ErrData, str, nil)
 		}
 
-		var txHash wire.ShaHash
+		var txHash chainhash.Hash
 		copy(txHash[:], k)
 		detail, err := s.unminedTxDetails(ns, &txHash, v)
 		if err != nil {

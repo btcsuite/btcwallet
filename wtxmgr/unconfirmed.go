@@ -5,6 +5,7 @@
 package wtxmgr
 
 import (
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -126,7 +127,7 @@ func (s *Store) removeConflict(ns walletdb.Bucket, rec *TxRecord) error {
 // which are not known to have been mined in a block.  Transactions are
 // guaranteed to be sorted by their dependency order.
 func (s *Store) UnminedTxs() ([]*wire.MsgTx, error) {
-	var recSet map[wire.ShaHash]*TxRecord
+	var recSet map[chainhash.Hash]*TxRecord
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
 		var err error
 		recSet, err = s.unminedTxRecords(ns)
@@ -144,10 +145,10 @@ func (s *Store) UnminedTxs() ([]*wire.MsgTx, error) {
 	return txs, nil
 }
 
-func (s *Store) unminedTxRecords(ns walletdb.Bucket) (map[wire.ShaHash]*TxRecord, error) {
-	unmined := make(map[wire.ShaHash]*TxRecord)
+func (s *Store) unminedTxRecords(ns walletdb.Bucket) (map[chainhash.Hash]*TxRecord, error) {
+	unmined := make(map[chainhash.Hash]*TxRecord)
 	err := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
-		var txHash wire.ShaHash
+		var txHash chainhash.Hash
 		err := readRawUnminedHash(k, &txHash)
 		if err != nil {
 			return err
@@ -166,8 +167,8 @@ func (s *Store) unminedTxRecords(ns walletdb.Bucket) (map[wire.ShaHash]*TxRecord
 
 // UnminedTxHashes returns the hashes of all transactions not known to have been
 // mined in a block.
-func (s *Store) UnminedTxHashes() ([]*wire.ShaHash, error) {
-	var hashes []*wire.ShaHash
+func (s *Store) UnminedTxHashes() ([]*chainhash.Hash, error) {
+	var hashes []*chainhash.Hash
 	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
 		var err error
 		hashes, err = s.unminedTxHashes(ns)
@@ -176,10 +177,10 @@ func (s *Store) UnminedTxHashes() ([]*wire.ShaHash, error) {
 	return hashes, err
 }
 
-func (s *Store) unminedTxHashes(ns walletdb.Bucket) ([]*wire.ShaHash, error) {
-	var hashes []*wire.ShaHash
+func (s *Store) unminedTxHashes(ns walletdb.Bucket) ([]*chainhash.Hash, error) {
+	var hashes []*chainhash.Hash
 	err := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
-		hash := new(wire.ShaHash)
+		hash := new(chainhash.Hash)
 		err := readRawUnminedHash(k, hash)
 		if err == nil {
 			hashes = append(hashes, hash)
