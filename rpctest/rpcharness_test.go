@@ -58,6 +58,7 @@ func TestRpcServer(t *testing.T) {
 		testCase(primaryHarness, t)
 	}
 }
+
 func testSendFrom(r *Harness, t *testing.T) {
 
 	accountName := "sendFromTest"

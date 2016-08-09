@@ -1,4 +1,5 @@
 // Copyright (c) 2016 The btcsuite developers
+// Copyright (c) 2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -42,11 +43,12 @@ type nodeConfig struct {
 	certificates []byte
 }
 
-// newConfig returns a newConfig with all default values.
+// newConfig returns a nodeConfig with default values.
 func newConfig(prefix, certFile, keyFile string, extra []string) (*nodeConfig, error) {
+	// TODO: use defaultP2pPort and defaultRPCPort instead of literals
 	a := &nodeConfig{
 		listen:    "127.0.0.1:18555",
-		rpcListen: "127.0.0.1:18556",
+		rpcListen: "127.0.0.1:19556",
 		rpcUser:   "user",
 		rpcPass:   "pass",
 		extra:     extra,

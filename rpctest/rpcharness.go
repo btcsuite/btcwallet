@@ -1,4 +1,4 @@
-// Copyright (c) 2016 The decred developers
+// Copyright (c) 2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -26,41 +26,44 @@ var (
 	// current number of active test nodes.
 	numTestInstances = 0
 
-	// defaultP2pPort is the initial p2p port which will be used by the
-	// first created rpc harnesses to listen on for incoming p2p connections.
+	// defaultP2pPort is the initial p2p port which will be used by the first
+	// created rpc harnesses to listen on for incoming p2p connections.
 	// Subsequent allocated ports for future rpc harness instances will be
 	// monotonically increasing odd numbers calculated as such:
 	// defaultP2pPort + (2 * harness.nodeNum).
 	defaultP2pPort = 18555
 
-	// defaultRPCPort is the initial rpc port which will be used by the first created
-	// rpc harnesses to listen on for incoming rpc connections. Subsequent
-	// allocated ports for future rpc harness instances will be monotonically
-	// increasing even numbers calculated as such:
-	// defaultP2pPort + (2 * harness.nodeNum).
+	// defaultRPCPort is the initial rpc port which will be used by the first
+	// created rpc harnesses to listen on for incoming rpc connections.
+	// Subsequent allocated ports for future rpc harness instances will be
+	// monotonically increasing even numbers calculated as such:
+	// defaultRPCPort + (2 * harness.nodeNum).
 	defaultRPCPort = 19556
 
+	// defaultWalletRPCPort is the initial RPC port similar to defaultRPCPort
+	// but used for the wallet RPC.
 	defaultWalletRPCPort = 19557
 
 	// testInstances is a private package-level slice used to keep track of
-	// allvactive test harnesses. This global can be used to perform various
+	// all active test harnesses. This global can be used to perform various
 	// "joins", shutdown several active harnesses after a test, etc.
 	testInstances map[string]*Harness
 
-	// Used to protest concurrent access to above declared variables.
+	// harnessStateMtx is used to protect concurrent access to the variables
+	// declared above.
 	harnessStateMtx sync.RWMutex
 )
 
-// Harness fully encapsulates an active dcrd process, along with an embdedded
-// dcrwallet in order to provide a unified platform for creating rpc driven
-// integration tests involving dcrd. The active dcrd node will typically be
-// run in simnet mode in order to allow for easy generation of test blockchains.
-// Additionally, a special method is provided which allows on to easily generate
-// coinbase spends. The active dcrd process if fully managed by Harness, which
-// handles the necessary initialization, and teardown of the process along with
-// any temporary directories created as a result. Multiple Harness instances may
-// be run concurrently, in order to allow for testing complex scenarios involving
-// multuple nodes.
+// Harness fully encapsulates an active dcrd process, along with an embedded
+// dcrwallet to provide a unified platform for creating RPC-driven integration
+// tests involving dcrd. The active dcrd node will typically be run in simnet
+// mode to allow for easy generation of test blockchains. Additionally, a
+// special method is provided which allows one to easily generate coinbase
+// spends. The active dcrd process is fully managed by Harness, which handles
+// the necessary initialization, and teardown of the process along with any
+// temporary directories created as a result. Multiple Harness instances may be
+// run concurrently, to allow for testing complex scenarios involving multuple
+// nodes.
 type Harness struct {
 	ActiveNet *chaincfg.Params
 
@@ -79,9 +82,10 @@ type Harness struct {
 	nodeNum        int
 }
 
-// NewHarness creates and initializes new instance of the rpc test harness.
+// NewHarness creates and initializes a new instance of the rpc test harness.
 // Optionally, websocket handlers and a specified configuration may be passed.
-// In the case that a nil config is passed, a default configuration will be used.
+// In the case that a nil configuration is passed, a default configuration will
+// be used.
 //
 // NOTE: This function is safe for concurrent access.
 func NewHarness(activeNet *chaincfg.Params, handlers *rpc.NotificationHandlers,
@@ -90,6 +94,7 @@ func NewHarness(activeNet *chaincfg.Params, handlers *rpc.NotificationHandlers,
 	harnessStateMtx.Lock()
 	defer harnessStateMtx.Unlock()
 
+	// Create data folders for this Harness instance
 	harnessID := strconv.Itoa(int(numTestInstances))
 	testDataPath := "rpctest-" + harnessID
 
@@ -98,11 +103,13 @@ func NewHarness(activeNet *chaincfg.Params, handlers *rpc.NotificationHandlers,
 		return nil, err
 	}
 
+	// Subdirectory for daemon data
 	nodeTestData, err := ioutil.TempDir(testData, "node")
 	if err != nil {
 		return nil, err
 	}
 
+	// Subdirectory for wallet data
 	walletTestData, err := ioutil.TempDir(testData, "wallet")
 	if err != nil {
 		return nil, err
@@ -121,6 +128,7 @@ func NewHarness(activeNet *chaincfg.Params, handlers *rpc.NotificationHandlers,
 	// Generate p2p+rpc listening addresses.
 	p2p, rpcPort, walletRPC := generateListeningAddresses()
 
+	// Create new nodeConfig
 	config, err := newConfig(nodeTestData, certFile, keyFile, extraArgs)
 	if err != nil {
 		return nil, err
@@ -134,15 +142,17 @@ func NewHarness(activeNet *chaincfg.Params, handlers *rpc.NotificationHandlers,
 		return nil, err
 	}
 
+	// Create new walletTestConfig
 	walletConfig, err := newWalletConfig(walletTestData, certFile, certFileWallet, keyFileWallet, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	// Generate p2p+rpc listening addresses.
+	// Set RPC connect (node) port
 	walletConfig.rpcConnect = rpcPort
+	// Set RPC listen port
 	walletConfig.rpcListen = walletRPC
 
+	// Create the testing wallet
 	walletTest, err := newWallet(walletConfig, walletTestData)
 	if err != nil {
 		return nil, err
@@ -217,7 +227,8 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 		break
 	}
 	if miningAddr == nil {
-		return fmt.Errorf("RPC not up for mining addr %v %v", h.testNodeDir, h.testWalletDir)
+		return fmt.Errorf("RPC not up for mining addr %v %v", h.testNodeDir,
+			h.testWalletDir)
 	}
 
 	var extraArgs []string
@@ -229,7 +240,8 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 		return err
 	}
 
-	config, err := newConfig(h.node.config.prefix, h.node.config.certFile, h.node.config.keyFile, extraArgs)
+	config, err := newConfig(h.node.config.prefix, h.node.config.certFile,
+		h.node.config.keyFile, extraArgs)
 	if err != nil {
 		return err
 	}
@@ -295,7 +307,7 @@ out:
 	return nil
 }
 
-// TearDown stops the running rpc test instance. All created p.
+// TearDown stops the running rpc test instance. All created p. (?)
 // killed, and temporary directories removed.
 func (h *Harness) TearDown() error {
 	if h.Node != nil {
@@ -359,10 +371,10 @@ func (h *Harness) RPCConfig() rpc.ConnConfig {
 	return h.node.config.rpcConnConfig()
 }
 
-// generateListeningAddresses returns two strings representing listening
-// addresses designated for the current rpc test. If there haven't been any
-// test instances created, the default ports are used. Otherwise, in order to
-// support multiple test nodes running at once, the p2p and rpc port are
+// generateListeningAddresses returns three strings representing listening
+// addresses designated for the current rpc test. If there haven't been any test
+// instances created, the default ports are used. Otherwise, in order to support
+// multiple test nodes running at once, the p2p and both rpc ports are
 // incremented after each initialization.
 func generateListeningAddresses() (string, string, string) {
 	var p2p, rpc, walletRPC string
@@ -378,7 +390,7 @@ func generateListeningAddresses() (string, string, string) {
 		rpc = net.JoinHostPort(localhost,
 			strconv.Itoa(defaultRPCPort+(2*numTestInstances)))
 		walletRPC = net.JoinHostPort(localhost,
-			strconv.Itoa(defaultRPCPort+(2*numTestInstances)))
+			strconv.Itoa(defaultWalletRPCPort+(2*numTestInstances)))
 	}
 
 	return p2p, rpc, walletRPC

@@ -1,4 +1,4 @@
-// Copyright (c) 2016 The decred developers
+// Copyright (c) 2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -42,6 +42,7 @@ type walletTestConfig struct {
 
 // newConfig returns a newConfig with all default values.
 func newWalletConfig(prefix, caFile, certFile, keyFile string, extra []string) (*walletTestConfig, error) {
+	// TODO: use defaultRPCPort and defaultWalletRPCPort instead of literals
 	a := &walletTestConfig{
 		rpcConnect: "127.0.0.1:19556",
 		rpcListen:  "127.0.0.1:19557",
@@ -132,7 +133,8 @@ func (n *walletTestConfig) arguments() []string {
 	return args
 }
 
-// command returns the exec.Cmd which will be used to start the dcrwallet process.
+// command returns the exec.Cmd which will be used to start the dcrwallet
+// process.
 func (n *walletTestConfig) command() *exec.Cmd {
 	return exec.Command(n.exe, n.arguments()...)
 }
@@ -170,8 +172,8 @@ func (n *walletTestConfig) cleanup() error {
 	return err
 }
 
-// walletTest houses the neccessary state required to configure, launch, and manaage
-// a dcrwallet process.
+// walletTest houses the neccessary state required to configure, launch, and
+// manaage a dcrwallet process.
 type walletTest struct {
 	config *walletTestConfig
 
@@ -181,9 +183,9 @@ type walletTest struct {
 	dataDir string
 }
 
-// newNode creates a new walletTest instance according to the passed config. dataDir
-// will be used to hold a file recording the pid of the launched process, and
-// as the base for the log and data directories for dcrwallet.
+// newWallet creates a new walletTest instance according to the passed config.
+// dataDir will be used to hold a file recording the pid of the launched
+// process, and as the base for the log and data directories for dcrwallet.
 func newWallet(config *walletTestConfig, dataDir string) (*walletTest, error) {
 	return &walletTest{
 		config:  config,
@@ -192,11 +194,11 @@ func newWallet(config *walletTestConfig, dataDir string) (*walletTest, error) {
 	}, nil
 }
 
-// Start creates a new dcrwallet process, and writes its pid in a file reserved for
-// recording the pid of the launched process. This file can ue used to terminate
-// the procress in case of a hang, or panic. In the case of a failing test case,
-// or panic, it is important that the process be stopped via stop(), otherwise,
-// it will persist unless explicitly killed.
+// Start creates a new dcrwallet process, and writes its pid in a file reserved
+// for recording the pid of the launched process. This file can ue used to
+// terminate the process in case of a hang, or panic. In the case of a failing
+// test case, or panic, it is important that the process be stopped via Stop(),
+// otherwise, it will persist unless explicitly killed.
 func (n *walletTest) Start() error {
 	if err := n.cmd.Start(); err != nil {
 		return err
@@ -248,7 +250,7 @@ func (n *walletTest) Cleanup() error {
 	return n.config.cleanup()
 }
 
-// shutdown terminates the running dcrwallet process, and cleans up all
+// Shutdown terminates the running dcrwallet process, and cleans up all
 // file/directories created by walletTest.
 func (n *walletTest) Shutdown() error {
 	if err := n.Stop(); err != nil {
