@@ -894,7 +894,7 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		ret.Fee = feeF64
 	}
 
-	credCat := wallet.RecvCategory(details, syncBlock.Height).String()
+	credCat := wallet.RecvCategory(details, syncBlock.Height, w.ChainParams()).String()
 	for _, cred := range details.Credits {
 		// Change is ignored.
 		if cred.Change {

@@ -25,7 +25,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -341,8 +340,9 @@ func (s *walletServer) FundTransaction(ctx context.Context, req *pb.FundTransact
 		if !confirmed(req.RequiredConfirmations, output.Height, syncBlock.Height) {
 			continue
 		}
+		target := int32(s.wallet.ChainParams().CoinbaseMaturity)
 		if !req.IncludeImmatureCoinbases && output.FromCoinBase &&
-			!confirmed(blockchain.CoinbaseMaturity, output.Height, syncBlock.Height) {
+			!confirmed(target, output.Height, syncBlock.Height) {
 			continue
 		}
 

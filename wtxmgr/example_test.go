@@ -7,6 +7,7 @@ package wtxmgr_test
 import (
 	"fmt"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -161,7 +162,7 @@ func Example_basicUsage() {
 		fmt.Println(err)
 		return
 	}
-	s, err := wtxmgr.Open(ns)
+	s, err := wtxmgr.Open(ns, &chaincfg.TestNet3Params)
 	if err != nil {
 		fmt.Println(err)
 		return

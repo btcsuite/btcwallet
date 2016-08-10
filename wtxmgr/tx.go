@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -130,7 +131,8 @@ type Credit struct {
 // Store implements a transaction store for storing and managing wallet
 // transactions.
 type Store struct {
-	namespace walletdb.Namespace
+	namespace   walletdb.Namespace
+	chainParams *chaincfg.Params
 
 	// Event callbacks.  These execute in the same goroutine as the wtxmgr
 	// caller.
@@ -140,13 +142,13 @@ type Store struct {
 // Open opens the wallet transaction store from a walletdb namespace.  If the
 // store does not exist, ErrNoExist is returned.  Existing stores will be
 // upgraded to new database formats as necessary.
-func Open(namespace walletdb.Namespace) (*Store, error) {
+func Open(namespace walletdb.Namespace, chainParams *chaincfg.Params) (*Store, error) {
 	// Open the store, upgrading to the latest version as needed.
 	err := openStore(namespace)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{namespace, nil}, nil // TODO: set callbacks
+	return &Store{namespace, chainParams, nil}, nil // TODO: set callbacks
 }
 
 // Create creates a new persistent transaction store in the walletdb namespace.
@@ -856,9 +858,10 @@ func (s *Store) balance(ns walletdb.Bucket, minConf int32, syncHeight int32) (bt
 
 	// Decrement the balance for any unspent credit with less than
 	// minConf confirmations and any (unspent) immature coinbase credit.
+	coinbaseMaturity := int32(s.chainParams.CoinbaseMaturity)
 	stopConf := minConf
-	if blockchain.CoinbaseMaturity > stopConf {
-		stopConf = blockchain.CoinbaseMaturity
+	if coinbaseMaturity > stopConf {
+		stopConf = coinbaseMaturity
 	}
 	lastHeight := syncHeight - stopConf
 	blockIt := makeReverseBlockIterator(ns)
@@ -898,7 +901,7 @@ func (s *Store) balance(ns walletdb.Bucket, minConf int32, syncHeight int32) (bt
 				}
 				confs := syncHeight - block.Height + 1
 				if confs < minConf || (blockchain.IsCoinBaseTx(&rec.MsgTx) &&
-					confs < blockchain.CoinbaseMaturity) {
+					confs < coinbaseMaturity) {
 					bal -= amt
 				}
 			}
