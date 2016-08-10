@@ -3214,6 +3214,13 @@ func CreateWatchOnly(namespace walletdb.Namespace, hdPubKey string,
 		return err
 	}
 
+	// Ensure the extended public key is valid for the active network.
+	if !acctKeyPub.IsForNet(chainParams) {
+		str := fmt.Sprintf("the provided extended public key is not "+
+			"for %s", chainParams.Net)
+		return managerError(ErrWrongNet, str, nil)
+	}
+
 	// Ensure the branch keys can be derived for the provided seed according
 	// to BIP0044.
 	if err := checkBranchKeys(acctKeyPub); err != nil {
