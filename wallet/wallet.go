@@ -2070,6 +2070,13 @@ func (w *Wallet) ChainParams() *chaincfg.Params {
 	return w.chainParams
 }
 
+// Database returns the underlying walletdb database. This method is provided
+// in order to allow applications wrapping btcwallet to store app-specific data
+// with the wallet's database.
+func (w *Wallet) Database() walletdb.DB {
+	return w.db
+}
+
 // Create creates an new wallet, writing it to an empty database.  If the passed
 // seed is non-nil, it is used.  Otherwise, a secure random seed of the
 // recommended length is generated.
