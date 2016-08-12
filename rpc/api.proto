@@ -138,6 +138,7 @@ message NextAddressRequest {
 }
 message NextAddressResponse {
 	string address = 1;
+	string public_key = 2;
 }
 
 message ImportPrivateKeyRequest {

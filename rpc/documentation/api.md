@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 2.3.0
+Version: 2.4.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -607,6 +607,9 @@ wallet.
 **Response:** `NextAddressResponse`
 
 - `string address`: The payment address string.
+
+- `string public_key`: The public key encoded as a string in the Decred encoding 
+  format.
 
 **Expected errors:**
 

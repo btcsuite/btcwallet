@@ -18,6 +18,7 @@ package rpcserver
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -45,9 +46,9 @@ import (
 
 // Public API version constants
 const (
-	semverString = "2.3.0"
+	semverString = "2.4.0"
 	semverMajor  = 2
-	semverMinor  = 3
+	semverMinor  = 4
 	semverPatch  = 0
 )
 
@@ -249,7 +250,30 @@ func (s *walletServer) NextAddress(ctx context.Context, req *pb.NextAddressReque
 		return nil, translateError(err)
 	}
 
-	return &pb.NextAddressResponse{Address: addr.EncodeAddress()}, nil
+	ainfo, err := s.wallet.Manager.Address(addr)
+	if err != nil {
+		return nil, grpc.Errorf(codes.Internal,
+			"Unable to find generated address in address manager")
+	}
+	mpka, ok := ainfo.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, grpc.Errorf(codes.Internal,
+			"Unable to cast returned address data as ManagedPubKeyAddress")
+	}
+	pubKeyBytes, err := hex.DecodeString(mpka.ExportPubKey())
+	if err != nil {
+		return nil, err
+	}
+	pubKeyAddr, err := dcrutil.NewAddressSecpPubKey(pubKeyBytes,
+		s.wallet.ChainParams())
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.NextAddressResponse{
+		Address:   addr.EncodeAddress(),
+		PublicKey: pubKeyAddr.String(),
+	}, nil
 }
 
 func (s *walletServer) ImportPrivateKey(ctx context.Context, req *pb.ImportPrivateKeyRequest) (
