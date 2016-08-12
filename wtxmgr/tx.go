@@ -948,7 +948,10 @@ func (s *Store) AddCredit(rec *TxRecord, block *BlockMeta, index uint32,
 		return err
 	})
 	if err == nil && isNew && s.NotifyUnspent != nil {
-		s.NotifyUnspent(&rec.Hash, index)
+		// This causes a lockup because wtxmgr is non-reentrant.
+		// TODO: move this call outside of wtxmgr and do not use
+		// a passthrough to perform the notification.
+		// s.NotifyUnspent(&rec.Hash, index)
 	}
 	return err
 }
