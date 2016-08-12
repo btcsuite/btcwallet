@@ -1235,8 +1235,13 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 		}
 
 	}
+
+	txFeeIncrement := req.txFee
+	if txFeeIncrement == 0 {
+		txFeeIncrement = w.RelayFee()
+	}
 	splitTx, err := w.txToOutputs(splitOuts, account, req.minConf, pool,
-		chainClient, false, req.txFee)
+		chainClient, false, txFeeIncrement)
 	if err != nil {
 		return nil, err
 	}
