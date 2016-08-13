@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -80,7 +80,7 @@ func testStore() (*Store, func(), error) {
 	if err != nil {
 		return nil, teardown, err
 	}
-	s, err := Open(ns)
+	s, err := Open(ns, &chaincfg.TestNet3Params)
 	return s, teardown, err
 }
 
@@ -665,6 +665,8 @@ func TestCoinbases(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	coinbaseMaturity := int32(chaincfg.TestNet3Params.CoinbaseMaturity)
+
 	// Balance should be 0 if the coinbase is immature, 50 BTC at and beyond
 	// maturity.
 	//
@@ -679,67 +681,67 @@ func TestCoinbases(t *testing.T) {
 	balTests := []balTest{
 		// Next block it is still immature
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 2,
+			height:  b100.Height + coinbaseMaturity - 2,
 			minConf: 0,
 			bal:     0,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 2,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity - 2,
+			minConf: coinbaseMaturity,
 			bal:     0,
 		},
 
 		// Next block it matures
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + coinbaseMaturity - 1,
 			minConf: 0,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + coinbaseMaturity - 1,
 			minConf: 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + coinbaseMaturity - 1,
+			minConf: coinbaseMaturity - 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity - 1,
+			minConf: coinbaseMaturity,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + coinbaseMaturity - 1,
+			minConf: coinbaseMaturity + 1,
 			bal:     0,
 		},
 
 		// Matures at this block
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity,
 			minConf: 0,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity,
 			minConf: 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity,
+			minConf: coinbaseMaturity,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + coinbaseMaturity,
+			minConf: coinbaseMaturity + 1,
 			bal:     50e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			height:  b100.Height + coinbaseMaturity,
+			minConf: coinbaseMaturity + 2,
 			bal:     0,
 		},
 	}
@@ -776,50 +778,50 @@ func TestCoinbases(t *testing.T) {
 	balTests = []balTest{
 		// Next block it matures
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + coinbaseMaturity - 1,
 			minConf: 0,
 			bal:     35e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
+			height:  b100.Height + coinbaseMaturity - 1,
 			minConf: 1,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity - 1,
+			minConf: coinbaseMaturity,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity - 1,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + coinbaseMaturity - 1,
+			minConf: coinbaseMaturity + 1,
 			bal:     0,
 		},
 
 		// Matures at this block
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity,
 			minConf: 0,
 			bal:     35e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity,
 			minConf: 1,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity,
+			height:  b100.Height + coinbaseMaturity,
+			minConf: coinbaseMaturity,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			height:  b100.Height + coinbaseMaturity,
+			minConf: coinbaseMaturity + 1,
 			bal:     30e8,
 		},
 		{
-			height:  b100.Height + blockchain.CoinbaseMaturity,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			height:  b100.Height + coinbaseMaturity,
+			minConf: coinbaseMaturity + 2,
 			bal:     0,
 		},
 	}
@@ -839,7 +841,7 @@ func TestCoinbases(t *testing.T) {
 
 	// Mine the spending transaction in the block the coinbase matures.
 	bMaturity := BlockMeta{
-		Block: Block{Height: b100.Height + blockchain.CoinbaseMaturity},
+		Block: Block{Height: b100.Height + coinbaseMaturity},
 		Time:  time.Now(),
 	}
 	err = s.InsertTx(spenderARec, &bMaturity)
@@ -866,17 +868,17 @@ func TestCoinbases(t *testing.T) {
 		},
 		{
 			height:  bMaturity.Height,
-			minConf: blockchain.CoinbaseMaturity,
+			minConf: coinbaseMaturity,
 			bal:     30e8,
 		},
 		{
 			height:  bMaturity.Height,
-			minConf: blockchain.CoinbaseMaturity + 1,
+			minConf: coinbaseMaturity + 1,
 			bal:     30e8,
 		},
 		{
 			height:  bMaturity.Height,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			minConf: coinbaseMaturity + 2,
 			bal:     0,
 		},
 
@@ -898,12 +900,12 @@ func TestCoinbases(t *testing.T) {
 		},
 		{
 			height:  bMaturity.Height + 1,
-			minConf: blockchain.CoinbaseMaturity + 2,
+			minConf: coinbaseMaturity + 2,
 			bal:     30e8,
 		},
 		{
 			height:  bMaturity.Height + 1,
-			minConf: blockchain.CoinbaseMaturity + 3,
+			minConf: coinbaseMaturity + 3,
 			bal:     0,
 		},
 	}
@@ -1101,9 +1103,11 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	coinbaseMaturity := int32(chaincfg.TestNet3Params.CoinbaseMaturity)
+
 	// Mine both transactions in the block that matures the coinbase.
 	bMaturity := BlockMeta{
-		Block: Block{Height: b100.Height + blockchain.CoinbaseMaturity},
+		Block: Block{Height: b100.Height + coinbaseMaturity},
 		Time:  time.Now(),
 	}
 	err = s.InsertTx(spenderARec, &bMaturity)

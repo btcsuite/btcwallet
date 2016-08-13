@@ -154,7 +154,7 @@ func TstCreateTxStore(t *testing.T) (store *wtxmgr.Store, tearDown func()) {
 	if err != nil {
 		t.Fatalf("Failed to create txstore: %v", err)
 	}
-	s, err := wtxmgr.Open(wtxmgrNamespace)
+	s, err := wtxmgr.Open(wtxmgrNamespace, &chaincfg.MainNetParams)
 	if err != nil {
 		t.Fatalf("Failed to open txstore: %v", err)
 	}

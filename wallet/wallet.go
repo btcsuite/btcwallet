@@ -701,7 +701,7 @@ func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balan
 
 		bals.Total += output.Amount
 		if output.FromCoinBase {
-			const target = blockchain.CoinbaseMaturity
+			target := int32(w.chainParams.CoinbaseMaturity)
 			if !confirmed(target, output.Height, syncBlock.Height) {
 				bals.ImmatureReward += output.Amount
 			}
@@ -811,9 +811,10 @@ func (c CreditCategory) String() string {
 //
 // TODO: This is intended for use by the RPC server and should be moved out of
 // this package at a later time.
-func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32) CreditCategory {
+func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg.Params) CreditCategory {
 	if blockchain.IsCoinBaseTx(&details.MsgTx) {
-		if confirmed(blockchain.CoinbaseMaturity, details.Block.Height, syncHeight) {
+		if confirmed(int32(net.CoinbaseMaturity), details.Block.Height,
+			syncHeight) {
 			return CreditGenerate
 		}
 		return CreditImmature
@@ -843,7 +844,7 @@ func ListTransactions(details *wtxmgr.TxDetails, addrMgr *waddrmgr.Manager,
 	txHashStr := details.Hash.String()
 	received := details.Received.Unix()
 	generated := blockchain.IsCoinBaseTx(&details.MsgTx)
-	recvCat := RecvCategory(details, syncHeight).String()
+	recvCat := RecvCategory(details, syncHeight, net).String()
 
 	send := len(details.Debits) != 0
 
@@ -1340,7 +1341,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 
 		// Only mature coinbase outputs are included.
 		if output.FromCoinBase {
-			const target = blockchain.CoinbaseMaturity
+			target := int32(w.chainParams.CoinbaseMaturity)
 			if !confirmed(target, output.Height, syncBlock.Height) {
 				continue
 			}
@@ -2132,7 +2133,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *c
 			return nil, err
 		}
 	}
-	txMgr, err := wtxmgr.Open(txMgrNS)
+	txMgr, err := wtxmgr.Open(txMgrNS, params)
 	if err != nil {
 		return nil, err
 	}
