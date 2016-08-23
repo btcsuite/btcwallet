@@ -201,7 +201,7 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 		return err
 	}
 
-	// Connect walletClient so we can get the miningaddress
+	// Connect walletClient so we can get the mining address
 	var walletClient *rpc.Client
 	walletRPCConf := h.wallet.config.rpcConnConfig()
 	for i := 0; i < 200; i++ {
@@ -212,12 +212,12 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 		break
 	}
 	if walletClient == nil {
-		return fmt.Errorf("walletclient connection timedout")
+		return fmt.Errorf("walletClient connection timedout")
 
 	}
 	h.WalletRPC = walletClient
 
-	// Attempt to a new address from the wallet to be set as the miningaddress
+	// Get a new address from the wallet to be set with dcrd's --miningaddr
 	var miningAddr dcrutil.Address
 	for i := 0; i < 100; i++ {
 		if miningAddr, err = walletClient.GetNewAddress("default"); err != nil {
