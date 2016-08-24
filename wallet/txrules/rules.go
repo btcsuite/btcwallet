@@ -44,7 +44,7 @@ func IsDustOutput(output *wire.TxOut, relayFeePerKb dcrutil.Amount) bool {
 	}
 
 	// All other unspendable outputs are considered dust.
-	if txscript.IsUnspendable(output.PkScript) {
+	if txscript.IsUnspendable(output.Value, output.PkScript) {
 		return true
 	}
 

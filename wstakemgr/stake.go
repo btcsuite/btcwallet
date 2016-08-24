@@ -743,6 +743,9 @@ func (s *StakeStore) SignVRTransaction(msgTx *wire.MsgTx, sstx *dcrutil.Tx,
 	return nil
 }
 
+var subsidyCache *blockchain.SubsidyCache
+var initSudsidyCacheOnce sync.Once
+
 // GenerateVote creates a new SSGen given a header hash, height, sstx
 // tx hash, and votebits.
 func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
@@ -769,14 +772,17 @@ func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
 	// TODO Get information on the allowable fee range for the vote
 	// and check to make sure we don't overflow that.
 	ssgenPayTypes, ssgenPkhs, sstxAmts, _, _, _ :=
-		stake.GetSStxStakeOutputInfo(sstx)
+		stake.TxSStxStakeOutputInfo(sstx)
 
 	// Get the current reward.
-	stakeVoteSubsidy := blockchain.CalcStakeVoteSubsidy(height,
-		s.Params)
+	initSudsidyCacheOnce.Do(func() {
+		subsidyCache = blockchain.NewSubsidyCache(height, s.Params)
+	})
+	stakeVoteSubsidy := blockchain.CalcStakeVoteSubsidy(subsidyCache,
+		height, s.Params)
 
 	// Calculate the output values from this data.
-	ssgenCalcAmts := stake.GetStakeRewards(sstxAmts,
+	ssgenCalcAmts := stake.CalculateRewards(sstxAmts,
 		sstxMsgTx.TxOut[0].Value,
 		stakeVoteSubsidy)
 
@@ -978,8 +984,8 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 	// TODO Get information on the allowable fee range for the revocation
 	// and check to make sure we don't overflow that.
 	sstxPayTypes, sstxPkhs, sstxAmts, _, _, _ :=
-		stake.GetSStxStakeOutputInfo(sstx)
-	ssrtxCalcAmts := stake.GetStakeRewards(sstxAmts, sstx.MsgTx().TxOut[0].Value,
+		stake.TxSStxStakeOutputInfo(sstx)
+	ssrtxCalcAmts := stake.CalculateRewards(sstxAmts, sstx.MsgTx().TxOut[0].Value,
 		int64(0))
 
 	// Calculate the fee to use for this revocation based on the fee

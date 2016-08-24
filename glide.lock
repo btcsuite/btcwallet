@@ -1,5 +1,5 @@
 hash: 5cc50197a8683b16e3e120937d59e244ba000d7c0d474d8b613e17a93b9723ef
-updated: 2016-08-24T10:08:50.2439991-04:00
+updated: 2016-08-24T14:27:52.45949-04:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
@@ -30,9 +30,10 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: 0a9a0f1969c21d520e2676c55a4f80518b7c37aa
+  version: 717040c9453370196efb0a3706c83f17456cc374
   subpackages:
   - blockchain
+  - blockchain/dbnamespace
   - blockchain/stake
   - chaincfg
   - chaincfg/chainec
@@ -45,7 +46,7 @@ imports:
   - txscript
   - wire
 - name: github.com/decred/dcrrpcclient
-  version: 0b8d19f926da6b33a36c2e680be8db55e7c15d52
+  version: 103ed11be3a7035554d3925fbfaa67742641510f
 - name: github.com/decred/dcrutil
   version: 4fc91a08eea88e74539d42d6301fd298b9bd8230
   subpackages:
@@ -87,7 +88,7 @@ imports:
   - transport
 testImports:
 - name: github.com/davecgh/go-spew
-  version: 5215b55f46b2b919f50a1df0eaa5886afe4e3b3d
+  version: 6cf5744a041a0022271cefed95ba843f6d87fd51
   subpackages:
   - spew
 - name: github.com/pmezard/go-difflib

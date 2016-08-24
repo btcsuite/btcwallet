@@ -389,7 +389,7 @@ func (s *walletServer) TicketPrice(ctx context.Context,
 
 	return &pb.TicketPriceResponse{
 		TicketPrice: int64(tp),
-		Height:      blockHeight,
+		Height:      int32(blockHeight),
 	}, nil
 }
 

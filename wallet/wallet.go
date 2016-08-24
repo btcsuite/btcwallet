@@ -752,7 +752,7 @@ func (w *Wallet) syncWithChain() error {
 		return err
 	}
 	curBlock := bestBlockHash
-	maxBlockDistToRestore := int32(512)
+	maxBlockDistToRestore := int64(512)
 
 	if !curBlock.IsEqual(w.chainParams.GenesisHash) {
 		// The default behaviour of the wtxmgr is to insert a block if

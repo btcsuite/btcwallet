@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sync"
 
 	"github.com/decred/dcrd/blockchain"
 	"github.com/decred/dcrd/chaincfg"
@@ -29,6 +30,9 @@ func IsValidPoolFeeRate(feeRate float64) error {
 
 	return nil
 }
+
+var subsidyCache *blockchain.SubsidyCache
+var initSubsidyCacheOnce sync.Once
 
 // StakePoolTicketFee determines the stake pool ticket fee for a given ticket
 // from the passed percentage. Pool fee as a percentage is truncated from 0.01%
@@ -57,7 +61,11 @@ func StakePoolTicketFee(stakeDiff dcrutil.Amount, relayFee dcrutil.Amount,
 	// reduction interval.
 	adjs := int(math.Ceil(float64(params.TicketPoolSize) /
 		float64(params.ReductionInterval)))
-	subsidy := blockchain.CalcStakeVoteSubsidy(int64(height), params)
+	initSubsidyCacheOnce.Do(func() {
+		subsidyCache = blockchain.NewSubsidyCache(int64(height), params)
+	})
+	subsidy := blockchain.CalcStakeVoteSubsidy(subsidyCache, int64(height),
+		params)
 	for i := 0; i < adjs; i++ {
 		subsidy *= 100
 		subsidy /= 101

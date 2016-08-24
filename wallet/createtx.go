@@ -945,14 +945,14 @@ func makeTicket(params *chaincfg.Params, inputPool *extendedOutPoint,
 	var amountsCommitted []int64
 	userSubsidyNullIdx := 0
 	if addrPool == nil {
-		_, amountsCommitted, err = stake.GetSStxNullOutputAmounts(
+		_, amountsCommitted, err = stake.SStxNullOutputAmounts(
 			[]int64{input.amt}, []int64{0}, ticketCost)
 		if err != nil {
 			return nil, err
 		}
 
 	} else {
-		_, amountsCommitted, err = stake.GetSStxNullOutputAmounts(
+		_, amountsCommitted, err = stake.SStxNullOutputAmounts(
 			[]int64{inputPool.amt, input.amt}, []int64{0, 0}, ticketCost)
 		if err != nil {
 			return nil, err

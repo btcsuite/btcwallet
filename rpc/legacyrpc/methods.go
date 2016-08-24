@@ -713,7 +713,7 @@ func getBestBlock(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	blk := w.Manager.SyncedTo()
 	result := &dcrjson.GetBestBlockResult{
 		Hash:   blk.Hash.String(),
-		Height: blk.Height,
+		Height: int64(blk.Height),
 	}
 	return result, nil
 }

@@ -455,7 +455,7 @@ func (c *RPCClient) handler() {
 		return
 	}
 
-	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
+	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: int32(height)}
 
 	// TODO: Rather than leaving this as an unbounded queue for all types of
 	// notifications, try dropping ones where a later enqueued notification
