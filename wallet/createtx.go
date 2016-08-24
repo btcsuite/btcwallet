@@ -44,10 +44,10 @@ const (
 	// appended to the end of the signature.
 	sigScriptEstimate = 1 + 73 + 1 + 65 + 1
 
-	// A best case tx input serialization cost is 32 bytes of sha, 4 bytes
-	// of output index, 1 byte for tree, 4 bytes of sequence, 12 bytes for
+	// A best case tx input serialization cost is chainhash.HashSize, 4 bytes
+	// of output index, 1 byte for tree, 4 bytes of sequence, 16 bytes for
 	// fraud proof, and the estimated signature script size.
-	txInEstimate = 32 + 4 + 1 + 12 + 4 + sigScriptEstimate
+	txInEstimate = chainhash.HashSize + 4 + 1 + 8 + 4 + 4 + sigScriptEstimate
 
 	// sstxTicketCommitmentEstimate =
 	// - version + amount +
@@ -93,6 +93,12 @@ const (
 	// defaultTicketFeeLimits is the default byte string for the default
 	// fee limits imposed on a ticket.
 	defaultTicketFeeLimits = 0x5800
+
+	// maxStandardTxSize is the maximum size allowed for transactions that
+	// are considered standard and will therefore be relayed and considered
+	// for mining.
+	// TODO: import from dcrd.
+	maxStandardTxSize = 100000
 )
 
 var (
@@ -756,7 +762,21 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 
 	feeEst := feeForSize(feeIncrement, szEst)
 
+	changeAddr, err := addrFunc()
+	if err != nil {
+		return nil, err
+	}
+	pkScript, err := txscript.PayToAddrScript(changeAddr)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create txout script: %s", err)
+	}
 	msgtx := wire.NewMsgTx()
+	msgtx.AddTxOut(wire.NewTxOut(0, pkScript))
+	msgTxSize := msgtx.SerializeSize()
+	maximumTxSize := maxTxSize
+	if w.chainParams.Net == wire.MainNet {
+		maximumTxSize = maxStandardTxSize
+	}
 
 	// Add the txins using all the eligible outputs.
 	totalAdded := dcrutil.Amount(0)
@@ -766,6 +786,11 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 		if count >= maxNumIns {
 			break
 		}
+		// Add the size of a wire.OutPoint
+		msgTxSize += txInEstimate
+		if msgTxSize > maximumTxSize {
+			break
+		}
 		msgtx.AddTxIn(wire.NewTxIn(&e.OutPoint, nil))
 		totalAdded += e.Amount
 		forSigning = append(forSigning, e)
@@ -773,18 +798,7 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 		count++
 	}
 
-	outputAmt := totalAdded - feeEst
-
-	changeAddr, err := addrFunc()
-	if err != nil {
-		return nil, err
-	}
-
-	pkScript, err := txscript.PayToAddrScript(changeAddr)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create txout script: %s", err)
-	}
-	msgtx.AddTxOut(wire.NewTxOut(int64(outputAmt), pkScript))
+	msgtx.TxOut[0].Value = int64(totalAdded - feeEst)
 
 	if err = signMsgTx(msgtx, forSigning, w.Manager,
 		w.chainParams); err != nil {
