@@ -692,8 +692,8 @@ func validateMsgTxCredits(tx *wire.MsgTx, prevCredits []wtxmgr.Credit) error {
 
 // compressWallet compresses all the utxos in a wallet into a single change
 // address. For use when it becomes dusty.
-func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
-	error) {
+func (w *Wallet) compressWallet(maxNumIns int, account uint32,
+	changeAddr dcrutil.Address) (*chainhash.Hash, error) {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return nil, err
@@ -762,9 +762,12 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32) (*chainhash.Hash,
 
 	feeEst := feeForSize(feeIncrement, szEst)
 
-	changeAddr, err := addrFunc()
-	if err != nil {
-		return nil, err
+	// Check if output address is default, and generate a new adress if needed
+	if changeAddr == nil {
+		changeAddr, err = addrFunc()
+		if err != nil {
+			return nil, err
+		}
 	}
 	pkScript, err := txscript.PayToAddrScript(changeAddr)
 	if err != nil {

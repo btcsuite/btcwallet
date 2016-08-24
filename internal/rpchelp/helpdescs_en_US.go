@@ -39,7 +39,8 @@ var helpDescsEnUS = map[string]string{
 	// ConsolidateCmd help.
 	"consolidate--synopsis": "Consolidate n many UTXOs into a single output in the wallet.",
 	"consolidate-inputs":    "Number of UTXOs to consolidate as inputs",
-	"consolidate-account":   "Optional: Account to use",
+	"consolidate-account":   "Optional: Account from which unspent outputs are picked. When no address specified, also the account used to obtain an output address.",
+	"consolidate-address":   "Optional: Address to pay.  Default is obtained via getnewaddress from the account's address pool.",
 	"consolidate--result0":  "Transaction hash for the consolidation transaction",
 
 	// CreateMultisigCmd help.

@@ -813,6 +813,7 @@ type (
 	consolidateRequest struct {
 		inputs  int
 		account uint32
+		address dcrutil.Address
 		resp    chan consolidateResponse
 	}
 	createTxRequest struct {
@@ -911,7 +912,7 @@ out:
 	for {
 		select {
 		case txr := <-w.consolidateRequests:
-			txh, err := w.compressWallet(txr.inputs, txr.account)
+			txh, err := w.compressWallet(txr.inputs, txr.account, txr.address)
 			txr.resp <- consolidateResponse{txh, err}
 
 		case txr := <-w.createTxRequests:
@@ -970,10 +971,12 @@ out:
 // Consolidate consolidates as many UTXOs as are passed in the inputs argument.
 // If that many UTXOs can not be found, it will use the maximum it finds. This
 // will only compress UTXOs in the default account
-func (w *Wallet) Consolidate(inputs int, account uint32) (*chainhash.Hash, error) {
+func (w *Wallet) Consolidate(inputs int, account uint32,
+	address dcrutil.Address) (*chainhash.Hash, error) {
 	req := consolidateRequest{
 		inputs:  inputs,
 		account: account,
+		address: address,
 		resp:    make(chan consolidateResponse),
 	}
 	w.consolidateRequests <- req

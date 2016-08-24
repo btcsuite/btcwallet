@@ -539,9 +539,21 @@ func consolidate(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		}
 	}
 
+	// Set change address if specified.
+	var changeAddr dcrutil.Address
+	if cmd.Address != nil {
+		if *cmd.Address != "" {
+			addr, err := decodeAddress(*cmd.Address, w.ChainParams())
+			if err != nil {
+				return nil, err
+			}
+			changeAddr = addr
+		}
+	}
+
 	// TODO In the future this should take the optional account and
 	// only consolidate UTXOs found within that account.
-	txHash, err := w.Consolidate(cmd.Inputs, account)
+	txHash, err := w.Consolidate(cmd.Inputs, account, changeAddr)
 	if err != nil {
 		return nil, err
 	}
