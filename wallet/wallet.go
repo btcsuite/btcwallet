@@ -158,6 +158,7 @@ type Wallet struct {
 
 	// Internal address handling.
 	addrPools     map[uint32]*addressPools
+	addrPoolsMtx  sync.RWMutex
 	addressReuse  bool
 	ticketAddress dcrutil.Address
 
@@ -926,7 +927,7 @@ out:
 
 		case txr := <-w.createSStxRequests:
 			// Initialize the address pool for use.
-			pool := w.addrPools[waddrmgr.DefaultAccountNum].internal
+			pool := w.getAddressPools(waddrmgr.DefaultAccountNum).internal
 			pool.mutex.Lock()
 			addrFunc := pool.getNewAddress
 
@@ -1467,6 +1468,8 @@ func (w *Wallet) NextAccount(name string) (uint32, error) {
 	}
 
 	// Initialize a new address pool for this account.
+	w.addrPoolsMtx.Lock()
+	defer w.addrPoolsMtx.Unlock()
 	w.addrPools[account], err = newAddressPools(account, 0, 0, w)
 	if err != nil {
 		return 0, err

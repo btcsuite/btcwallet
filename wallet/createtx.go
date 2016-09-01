@@ -337,13 +337,13 @@ func (w *Wallet) TxToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		if err != nil {
 			return nil, err
 		}
-		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+		pool = w.getAddressPools(waddrmgr.DefaultAccountNum).internal
 	} else {
 		err := w.CheckAddressPoolsInitialized(account)
 		if err != nil {
 			return nil, err
 		}
-		pool = w.addrPools[account].internal
+		pool = w.getAddressPools(account).internal
 	}
 	changeAddrUsed := false
 	txSucceeded := false
@@ -489,13 +489,13 @@ func (w *Wallet) txToMultisig(account uint32, amount dcrutil.Amount,
 		if err != nil {
 			return txToMultisigError(err)
 		}
-		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+		pool = w.getAddressPools(waddrmgr.DefaultAccountNum).internal
 	} else {
 		err := w.CheckAddressPoolsInitialized(account)
 		if err != nil {
 			return txToMultisigError(err)
 		}
-		pool = w.addrPools[account].internal
+		pool = w.getAddressPools(account).internal
 	}
 	txSucceeded := false
 	pool.mutex.Lock()
@@ -719,13 +719,13 @@ func (w *Wallet) compressWallet(maxNumIns int, account uint32,
 		if err != nil {
 			return nil, err
 		}
-		pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+		pool = w.getAddressPools(waddrmgr.DefaultAccountNum).internal
 	} else {
 		err := w.CheckAddressPoolsInitialized(account)
 		if err != nil {
 			return nil, err
 		}
-		pool = w.addrPools[account].internal
+		pool = w.getAddressPools(account).internal
 	}
 	txSucceeded := false
 	pool.mutex.Lock()
@@ -846,7 +846,7 @@ func (w *Wallet) compressEligible(eligible []wtxmgr.Credit) error {
 	if err != nil {
 		return err
 	}
-	pool = w.addrPools[waddrmgr.DefaultAccountNum].internal
+	pool = w.getAddressPools(waddrmgr.DefaultAccountNum).internal
 	if pool == nil {
 		log.Errorf("tried to use uninitialized pool for acct %v "+
 			"when attempting to make a transaction",
@@ -1070,7 +1070,7 @@ func (w *Wallet) purchaseTicket(req purchaseTicketRequest) (interface{},
 	if err != nil {
 		return nil, err
 	}
-	pool = w.addrPools[req.account].internal
+	pool = w.getAddressPools(req.account).internal
 
 	// Address manager must be unlocked to compose tickets.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the

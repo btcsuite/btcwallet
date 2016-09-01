@@ -245,6 +245,15 @@ func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
 	return address, err
 }
 
+// getAddressPools returns the pair of internal and external address pools for
+// the given account.
+// It is safe for concurrent access and uses a read lock on addrPoolsMtx mutex.
+func (w *Wallet) getAddressPools(account uint32) *addressPools {
+	w.addrPoolsMtx.RLock()
+	defer w.addrPoolsMtx.RUnlock()
+	return w.addrPools[account]
+}
+
 // notifyAccountAddrIdxs sends out an account notification when the address index
 // for some account branch has changed.
 func (w *Wallet) notifyAccountAddrIdxs(account uint32) error {
@@ -338,6 +347,9 @@ func (a *addressPool) Close() error {
 // the address manager can be used upon startup to restore the cursor position
 // in the address pool.
 func (w *Wallet) CloseAddressPools() {
+	w.addrPoolsMtx.Lock()
+	defer w.addrPoolsMtx.Unlock()
+
 	for _, addressPools := range w.addrPools {
 		if addressPools.internal == nil {
 			return
@@ -370,23 +382,25 @@ func (w *Wallet) CloseAddressPools() {
 // that that one can safely access functions and internal memory such as
 // mutexes.
 func (w *Wallet) CheckAddressPoolsInitialized(account uint32) error {
-	if w.addrPools[account] == nil {
+	addrPools := w.getAddressPools(account)
+
+	if addrPools == nil {
 		return fmt.Errorf("Address pools for account %v "+
 			"are undeclared", account)
 	}
-	if w.addrPools[account].external == nil {
+	if addrPools.external == nil {
 		return fmt.Errorf("External address pool for "+
 			"account %v is undeclared", account)
 	}
-	if w.addrPools[account].internal == nil {
+	if addrPools.internal == nil {
 		return fmt.Errorf("Internal address pool for "+
 			"account %v is undeclared", account)
 	}
-	if !w.addrPools[account].external.started {
+	if !addrPools.external.started {
 		return fmt.Errorf("External address pool for the "+
 			"account %v is uninitialized", account)
 	}
-	if !w.addrPools[account].internal.started {
+	if !addrPools.internal.started {
 		return fmt.Errorf("Internal address pool for the "+
 			"account %v is uninitialized", account)
 	}
@@ -417,13 +431,15 @@ func (w *Wallet) AddressPoolIndex(account uint32, branch uint32) (uint32, error)
 
 	switch branch {
 	case waddrmgr.ExternalBranch:
-		w.addrPools[account].external.mutex.Lock()
-		defer w.addrPools[account].external.mutex.Unlock()
-		return w.addrPools[account].external.index, nil
+		addrPool := w.getAddressPools(account).external
+		addrPool.mutex.Lock()
+		defer addrPool.mutex.Unlock()
+		return addrPool.index, nil
 	case waddrmgr.InternalBranch:
-		w.addrPools[account].internal.mutex.Lock()
-		defer w.addrPools[account].internal.mutex.Unlock()
-		return w.addrPools[account].internal.index, nil
+		addrPool := w.getAddressPools(account).internal
+		addrPool.mutex.Lock()
+		defer addrPool.mutex.Unlock()
+		return addrPool.index, nil
 	}
 
 	return 0, fmt.Errorf("unknown branch number %v", branch)
@@ -449,11 +465,11 @@ func (w *Wallet) SyncAddressPoolIndex(account uint32, branch uint32,
 	var addrPool *addressPool
 	switch branch {
 	case waddrmgr.ExternalBranch:
-		addrPool = w.addrPools[account].external
+		addrPool = w.getAddressPools(account).external
 		addrPool.mutex.Lock()
 		defer addrPool.mutex.Unlock()
 	case waddrmgr.InternalBranch:
-		addrPool = w.addrPools[account].internal
+		addrPool = w.getAddressPools(account).internal
 		addrPool.mutex.Lock()
 		defer addrPool.mutex.Unlock()
 	default:
@@ -496,9 +512,9 @@ func (w *Wallet) NewAddress(account uint32, branch uint32) (dcrutil.Address,
 	var addrPool *addressPool
 	switch branch {
 	case waddrmgr.ExternalBranch:
-		addrPool = w.addrPools[account].external
+		addrPool = w.getAddressPools(account).external
 	case waddrmgr.InternalBranch:
-		addrPool = w.addrPools[account].internal
+		addrPool = w.getAddressPools(account).internal
 	default:
 		return nil, fmt.Errorf("new address failed; unknown branch number %v",
 			branch)

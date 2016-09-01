@@ -630,7 +630,9 @@ func (w *Wallet) rescanActiveAddresses() error {
 			return err
 		}
 
+		w.addrPoolsMtx.Lock()
 		w.addrPools[acct] = pool
+		w.addrPoolsMtx.Unlock()
 	}
 
 	log.Infof("Successfully synchronized wallet accounts to account "+
