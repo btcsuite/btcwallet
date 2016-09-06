@@ -1,10 +1,11 @@
 language: go
 go:
   - 1.5.4
-  - 1.6.1
+  - 1.6.2
 sudo: false
 before_install:
   - gotools=golang.org/x/tools
+  - export GO15VENDOREXPERIMENT=1
 install:
   - go get -v github.com/Masterminds/glide
   - glide install

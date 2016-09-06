@@ -164,11 +164,11 @@ type SecretsSource interface {
 	ChainParams() *chaincfg.Params
 }
 
-// AddAllInputScripts modifies transaction a transaction by adding inputs
-// scripts for each input.  Previous output scripts being redeemed by each input
-// are passed in prevPkScripts and the slice length must match the number of
-// inputs.  Private keys and redeem scripts are looked up using a SecretsSource
-// based on the previous output script.
+// AddAllInputScripts modifies a transaction by adding inputs scripts for each
+// input.  Previous output scripts being redeemed by each input are passed in
+// prevPkScripts and the slice length must match the number of inputs.  Private
+// keys and redeem scripts are looked up using a SecretsSource based on the
+// previous output script.
 func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte, secrets SecretsSource) error {
 	inputs := tx.TxIn
 	chainParams := secrets.ChainParams()

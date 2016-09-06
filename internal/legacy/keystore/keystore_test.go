@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2014 The btcsuite developers
+// Copyright (c) 2013-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,11 +11,19 @@ import (
 	"reflect"
 	"testing"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/btcec"
 	"github.com/jadeblaquiere/ctcd/chaincfg"
 	"github.com/jadeblaquiere/ctcd/txscript"
 	"github.com/jadeblaquiere/ctcd/wire"
 	"github.com/jadeblaquiere/ctcutil"
+=======
+	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcutil"
+>>>>>>> btcsuite/master
 
 	"github.com/davecgh/go-spew/spew"
 )
@@ -26,7 +34,7 @@ var tstNetParams = &chaincfg.MainNetParams
 
 func makeBS(height int32) *BlockStamp {
 	return &BlockStamp{
-		Hash:   new(wire.ShaHash),
+		Hash:   new(chainhash.Hash),
 		Height: height,
 	}
 }

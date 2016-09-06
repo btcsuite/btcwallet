@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/blockchain"
 	"github.com/jadeblaquiere/ctcd/btcec"
 	"github.com/jadeblaquiere/ctcd/txscript"
@@ -16,6 +17,15 @@ import (
 	"github.com/jadeblaquiere/ctcwallet/waddrmgr"
 	"github.com/jadeblaquiere/ctcwallet/wallet/txauthor"
 	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
+=======
+	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+>>>>>>> btcsuite/master
 )
 
 // byAmount defines the methods needed to satisify sort.Interface to
@@ -188,7 +198,7 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32, bs *waddrmgr
 			continue
 		}
 		if output.FromCoinBase {
-			const target = blockchain.CoinbaseMaturity
+			target := int32(w.chainParams.CoinbaseMaturity)
 			if !confirmed(target, output.Height, bs.Height) {
 				continue
 			}

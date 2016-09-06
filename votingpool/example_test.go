@@ -340,7 +340,7 @@ func exampleCreateTxStore() (*wtxmgr.Store, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	s, err := wtxmgr.Open(wtxmgrNamespace)
+	s, err := wtxmgr.Open(wtxmgrNamespace, &chaincfg.MainNetParams)
 	if err != nil {
 		return nil, nil, err
 	}

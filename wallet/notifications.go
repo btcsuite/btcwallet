@@ -8,11 +8,20 @@ import (
 	"bytes"
 	"sync"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/txscript"
 	"github.com/jadeblaquiere/ctcd/wire"
 	"github.com/jadeblaquiere/ctcutil"
 	"github.com/jadeblaquiere/ctcwallet/waddrmgr"
 	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
+=======
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+>>>>>>> btcsuite/master
 )
 
 // TODO: It would be good to send errors during notification creation to the rpc
@@ -221,7 +230,7 @@ func (s *NotificationServer) notifyUnminedTransaction(details *wtxmgr.TxDetails)
 	}
 }
 
-func (s *NotificationServer) notifyDetachedBlock(hash *wire.ShaHash) {
+func (s *NotificationServer) notifyDetachedBlock(hash *chainhash.Hash) {
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
@@ -328,16 +337,16 @@ func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
 // changes to transactions, it needs a better name.
 type TransactionNotifications struct {
 	AttachedBlocks           []Block
-	DetachedBlocks           []*wire.ShaHash
+	DetachedBlocks           []*chainhash.Hash
 	UnminedTransactions      []TransactionSummary
-	UnminedTransactionHashes []*wire.ShaHash
+	UnminedTransactionHashes []*chainhash.Hash
 	NewBalances              []AccountBalance
 }
 
 // Block contains the properties and all relevant transactions of an attached
 // block.
 type Block struct {
-	Hash         *wire.ShaHash
+	Hash         *chainhash.Hash
 	Height       int32
 	Timestamp    int64
 	Transactions []TransactionSummary
@@ -346,7 +355,7 @@ type Block struct {
 // TransactionSummary contains a transaction relevant to the wallet and marks
 // which inputs and outputs were relevant.
 type TransactionSummary struct {
-	Hash        *wire.ShaHash
+	Hash        *chainhash.Hash
 	Transaction []byte
 	MyInputs    []TransactionSummaryInput
 	MyOutputs   []TransactionSummaryOutput
@@ -438,14 +447,14 @@ func (c *TransactionNotificationsClient) Done() {
 // now spent.  When spent, the notification includes the spending transaction's
 // hash and input index.
 type SpentnessNotifications struct {
-	hash         *wire.ShaHash
-	spenderHash  *wire.ShaHash
+	hash         *chainhash.Hash
+	spenderHash  *chainhash.Hash
 	index        uint32
 	spenderIndex uint32
 }
 
 // Hash returns the transaction hash of the spent output.
-func (n *SpentnessNotifications) Hash() *wire.ShaHash {
+func (n *SpentnessNotifications) Hash() *chainhash.Hash {
 	return n.hash
 }
 
@@ -456,13 +465,13 @@ func (n *SpentnessNotifications) Index() uint32 {
 
 // Spender returns the spending transction's hash and input index, if any.  If
 // the output is unspent, the final bool return is false.
-func (n *SpentnessNotifications) Spender() (*wire.ShaHash, uint32, bool) {
+func (n *SpentnessNotifications) Spender() (*chainhash.Hash, uint32, bool) {
 	return n.spenderHash, n.spenderIndex, n.spenderHash != nil
 }
 
 // notifyUnspentOutput notifies registered clients of a new unspent output that
 // is controlled by the wallet.
-func (s *NotificationServer) notifyUnspentOutput(account uint32, hash *wire.ShaHash, index uint32) {
+func (s *NotificationServer) notifyUnspentOutput(account uint32, hash *chainhash.Hash, index uint32) {
 	defer s.mu.Unlock()
 	s.mu.Lock()
 	clients := s.spentness[account]
@@ -481,7 +490,7 @@ func (s *NotificationServer) notifyUnspentOutput(account uint32, hash *wire.ShaH
 // notifySpentOutput notifies registered clients that a previously-unspent
 // output is now spent, and includes the spender hash and input index in the
 // notification.
-func (s *NotificationServer) notifySpentOutput(account uint32, op *wire.OutPoint, spenderHash *wire.ShaHash, spenderIndex uint32) {
+func (s *NotificationServer) notifySpentOutput(account uint32, op *wire.OutPoint, spenderHash *chainhash.Hash, spenderIndex uint32) {
 	defer s.mu.Unlock()
 	s.mu.Lock()
 	clients := s.spentness[account]

@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -322,7 +322,7 @@ func (tx *withdrawalTx) ntxid() Ntxid {
 	for _, txin := range msgtx.TxIn {
 		txin.SignatureScript = empty
 	}
-	return Ntxid(msgtx.TxSha().String())
+	return Ntxid(msgtx.TxHash().String())
 }
 
 // isTooBig returns true if the size (in bytes) of the given tx is greater

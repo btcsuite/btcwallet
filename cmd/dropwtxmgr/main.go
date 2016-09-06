@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,10 +10,17 @@ import (
 	"os"
 	"path/filepath"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcutil"
 	"github.com/jadeblaquiere/ctcwallet/walletdb"
 	_ "github.com/jadeblaquiere/ctcwallet/walletdb/bdb"
 	"github.com/btcsuite/go-flags"
+=======
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/jessevdk/go-flags"
+>>>>>>> btcsuite/master
 )
 
 const defaultNet = "mainnet"

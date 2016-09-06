@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,20 +11,27 @@ import (
 	"testing"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/wire"
 	"github.com/jadeblaquiere/ctcutil"
 	. "github.com/jadeblaquiere/ctcwallet/wtxmgr"
+=======
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	. "github.com/btcsuite/btcwallet/wtxmgr"
+>>>>>>> btcsuite/master
 )
 
 type queryState struct {
 	// slice items are ordered by height, mempool comes last.
 	blocks    [][]TxDetails
-	txDetails map[wire.ShaHash][]TxDetails
+	txDetails map[chainhash.Hash][]TxDetails
 }
 
 func newQueryState() *queryState {
 	return &queryState{
-		txDetails: make(map[wire.ShaHash][]TxDetails),
+		txDetails: make(map[chainhash.Hash][]TxDetails),
 	}
 }
 
@@ -37,7 +44,7 @@ func (q *queryState) deepCopy() *queryState {
 		}
 		cpy.blocks = append(cpy.blocks, cpyDetails)
 	}
-	cpy.txDetails = make(map[wire.ShaHash][]TxDetails)
+	cpy.txDetails = make(map[chainhash.Hash][]TxDetails)
 	for txHash, details := range q.txDetails {
 		detailsSlice := make([]TxDetails, len(details))
 		for i, detail := range details {
@@ -282,7 +289,7 @@ func TestStoreQueries(t *testing.T) {
 	}
 
 	// Insert an unmined transaction.  Mark no credits yet.
-	txA := spendOutput(&wire.ShaHash{}, 0, 100e8)
+	txA := spendOutput(&chainhash.Hash{}, 0, 100e8)
 	recA := newTxRecordFromMsgTx(txA, timeNow())
 	newState := lastState.deepCopy()
 	newState.blocks = [][]TxDetails{
@@ -412,7 +419,7 @@ func TestStoreQueries(t *testing.T) {
 		t.Errorf("Expected no details, found details for tx %v", missingDetails.Hash)
 	}
 	missingUniqueTests := []struct {
-		hash  *wire.ShaHash
+		hash  *chainhash.Hash
 		block *Block
 	}{
 		{&missingRec.Hash, &b100.Block},
@@ -554,7 +561,7 @@ func TestPreviousPkScripts(t *testing.T) {
 
 	// Create a transaction spending two prevous outputs and generating two
 	// new outputs the passed pkScipts.  Spends outputs 0 and 1 from prevHash.
-	buildTx := func(prevHash *wire.ShaHash, script0, script1 []byte) *wire.MsgTx {
+	buildTx := func(prevHash *chainhash.Hash, script0, script1 []byte) *wire.MsgTx {
 		return &wire.MsgTx{
 			TxIn: []*wire.TxIn{
 				&wire.TxIn{PreviousOutPoint: wire.OutPoint{
@@ -582,7 +589,7 @@ func TestPreviousPkScripts(t *testing.T) {
 
 	// Create transactions with the fake output scripts.
 	var (
-		txA  = buildTx(&wire.ShaHash{}, scriptA0, scriptA1)
+		txA  = buildTx(&chainhash.Hash{}, scriptA0, scriptA1)
 		recA = newTxRecordFromMsgTx(txA)
 		txB  = buildTx(&recA.Hash, scriptB0, scriptB1)
 		recB = newTxRecordFromMsgTx(txB)

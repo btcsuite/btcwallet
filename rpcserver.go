@@ -35,19 +35,19 @@ func openRPCKeyPair() (tls.Certificate, error) {
 	// acceptable if the previous execution used a one time TLS key.
 	// Otherwise, both the cert and key should be read from disk.  If the
 	// cert is missing, the read error will occur in LoadX509KeyPair.
-	_, e := os.Stat(cfg.RPCKey)
+	_, e := os.Stat(cfg.RPCKey.Value)
 	keyExists := !os.IsNotExist(e)
 	switch {
 	case cfg.OneTimeTLSKey && keyExists:
 		err := fmt.Errorf("one time TLS keys are enabled, but TLS key "+
-			"`%s` already exists", cfg.RPCKey)
+			"`%s` already exists", cfg.RPCKey.Value)
 		return tls.Certificate{}, err
 	case cfg.OneTimeTLSKey:
 		return generateRPCKeyPair(false)
 	case !keyExists:
 		return generateRPCKeyPair(true)
 	default:
-		return tls.LoadX509KeyPair(cfg.RPCCert, cfg.RPCKey)
+		return tls.LoadX509KeyPair(cfg.RPCCert.Value, cfg.RPCKey.Value)
 	}
 }
 
@@ -58,8 +58,8 @@ func generateRPCKeyPair(writeKey bool) (tls.Certificate, error) {
 	log.Infof("Generating TLS certificates...")
 
 	// Create directories for cert and key files if they do not yet exist.
-	certDir, _ := filepath.Split(cfg.RPCCert)
-	keyDir, _ := filepath.Split(cfg.RPCKey)
+	certDir, _ := filepath.Split(cfg.RPCCert.Value)
+	keyDir, _ := filepath.Split(cfg.RPCKey.Value)
 	err := os.MkdirAll(certDir, 0700)
 	if err != nil {
 		return tls.Certificate{}, err
@@ -82,14 +82,14 @@ func generateRPCKeyPair(writeKey bool) (tls.Certificate, error) {
 	}
 
 	// Write cert and (potentially) the key files.
-	err = ioutil.WriteFile(cfg.RPCCert, cert, 0600)
+	err = ioutil.WriteFile(cfg.RPCCert.Value, cert, 0600)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
 	if writeKey {
-		err = ioutil.WriteFile(cfg.RPCKey, key, 0600)
+		err = ioutil.WriteFile(cfg.RPCKey.Value, key, 0600)
 		if err != nil {
-			rmErr := os.Remove(cfg.RPCCert)
+			rmErr := os.Remove(cfg.RPCCert.Value)
 			if rmErr != nil {
 				log.Warnf("Cannot remove written certificates: %v",
 					rmErr)

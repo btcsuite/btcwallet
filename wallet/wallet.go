@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/blockchain"
 	"github.com/jadeblaquiere/ctcd/btcec"
 	"github.com/jadeblaquiere/ctcd/btcjson"
@@ -32,6 +33,24 @@ import (
 	"github.com/jadeblaquiere/ctcwallet/wallet/txrules"
 	"github.com/jadeblaquiere/ctcwallet/walletdb"
 	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
+=======
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcrpcclient"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+>>>>>>> btcsuite/master
 )
 
 const (
@@ -700,7 +719,7 @@ func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balan
 
 		bals.Total += output.Amount
 		if output.FromCoinBase {
-			const target = blockchain.CoinbaseMaturity
+			target := int32(w.chainParams.CoinbaseMaturity)
 			if !confirmed(target, output.Height, syncBlock.Height) {
 				bals.ImmatureReward += output.Amount
 			}
@@ -810,9 +829,10 @@ func (c CreditCategory) String() string {
 //
 // TODO: This is intended for use by the RPC server and should be moved out of
 // this package at a later time.
-func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32) CreditCategory {
+func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg.Params) CreditCategory {
 	if blockchain.IsCoinBaseTx(&details.MsgTx) {
-		if confirmed(blockchain.CoinbaseMaturity, details.Block.Height, syncHeight) {
+		if confirmed(int32(net.CoinbaseMaturity), details.Block.Height,
+			syncHeight) {
 			return CreditGenerate
 		}
 		return CreditImmature
@@ -842,7 +862,7 @@ func ListTransactions(details *wtxmgr.TxDetails, addrMgr *waddrmgr.Manager,
 	txHashStr := details.Hash.String()
 	received := details.Received.Unix()
 	generated := blockchain.IsCoinBaseTx(&details.MsgTx)
-	recvCat := RecvCategory(details, syncHeight).String()
+	recvCat := RecvCategory(details, syncHeight, net).String()
 
 	send := len(details.Debits) != 0
 
@@ -1086,7 +1106,7 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 // BlockIdentifier identifies a block by either a height or a hash.
 type BlockIdentifier struct {
 	height int32
-	hash   *wire.ShaHash
+	hash   *chainhash.Hash
 }
 
 // NewBlockIdentifierFromHeight constructs a BlockIdentifier for a block height.
@@ -1095,7 +1115,7 @@ func NewBlockIdentifierFromHeight(height int32) *BlockIdentifier {
 }
 
 // NewBlockIdentifierFromHash constructs a BlockIdentifier for a block hash.
-func NewBlockIdentifierFromHash(hash *wire.ShaHash) *BlockIdentifier {
+func NewBlockIdentifierFromHash(hash *chainhash.Hash) *BlockIdentifier {
 	return &BlockIdentifier{hash: hash}
 }
 
@@ -1208,7 +1228,7 @@ type AccountResult struct {
 // method for more details.
 type AccountsResult struct {
 	Accounts           []AccountResult
-	CurrentBlockHash   *wire.ShaHash
+	CurrentBlockHash   *chainhash.Hash
 	CurrentBlockHeight int32
 }
 
@@ -1339,7 +1359,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 
 		// Only mature coinbase outputs are included.
 		if output.FromCoinBase {
-			const target = blockchain.CoinbaseMaturity
+			target := int32(w.chainParams.CoinbaseMaturity)
 			if !confirmed(target, output.Height, syncBlock.Height) {
 				continue
 			}
@@ -1674,7 +1694,7 @@ func (w *Wallet) ResendUnminedTxs() {
 			// TODO(jrick): Check error for if this tx is a double spend,
 			// remove it if so.
 			log.Debugf("Could not resend transaction %v: %v",
-				tx.TxSha(), err)
+				tx.TxHash(), err)
 			continue
 		}
 		log.Debugf("Resent unmined transaction %v", resp)
@@ -1859,7 +1879,7 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 // SendOutputs creates and sends payment transactions. It returns the
 // transaction hash upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32) (*wire.ShaHash, error) {
+	minconf int32) (*chainhash.Hash, error) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -2131,7 +2151,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *c
 			return nil, err
 		}
 	}
-	txMgr, err := wtxmgr.Open(txMgrNS)
+	txMgr, err := wtxmgr.Open(txMgrNS, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2159,7 +2179,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *c
 		quit:                make(chan struct{}),
 	}
 	w.NtfnServer = newNotificationServer(w)
-	w.TxStore.NotifyUnspent = func(hash *wire.ShaHash, index uint32) {
+	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
 	return w, nil

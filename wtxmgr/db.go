@@ -10,9 +10,16 @@ import (
 	"fmt"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/wire"
 	"github.com/jadeblaquiere/ctcutil"
 	"github.com/jadeblaquiere/ctcwallet/walletdb"
+=======
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/walletdb"
+>>>>>>> btcsuite/master
 )
 
 // Naming
@@ -57,11 +64,11 @@ const (
 	LatestVersion = 1
 )
 
-// This package makes assumptions that the width of a wire.ShaHash is always 32
-// bytes.  If this is ever changed (unlikely for bitcoin, possible for alts),
+// This package makes assumptions that the width of a chainhash.Hash is always
+// 32 bytes.  If this is ever changed (unlikely for bitcoin, possible for alts),
 // offsets have to be rewritten.  Use a compile-time assertion that this
 // assumption holds true.
-var _ [32]byte = wire.ShaHash{}
+var _ [32]byte = chainhash.Hash{}
 
 // Bucket names
 var (
@@ -120,7 +127,7 @@ func putMinedBalance(ns walletdb.Bucket, amt btcutil.Amount) error {
 //
 // The canonical transaction hash serialization is simply the hash.
 
-func canonicalOutPoint(txHash *wire.ShaHash, index uint32) []byte {
+func canonicalOutPoint(txHash *chainhash.Hash, index uint32) []byte {
 	k := make([]byte, 36)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], index)
@@ -152,7 +159,7 @@ func keyBlockRecord(height int32) []byte {
 	return k
 }
 
-func valueBlockRecord(block *BlockMeta, txHash *wire.ShaHash) []byte {
+func valueBlockRecord(block *BlockMeta, txHash *chainhash.Hash) []byte {
 	v := make([]byte, 76)
 	copy(v, block.Hash[:])
 	byteOrder.PutUint64(v[32:40], uint64(block.Time.Unix()))
@@ -163,7 +170,7 @@ func valueBlockRecord(block *BlockMeta, txHash *wire.ShaHash) []byte {
 
 // appendRawBlockRecord returns a new block record value with a transaction
 // hash appended to the end and an incremented number of transactions.
-func appendRawBlockRecord(v []byte, txHash *wire.ShaHash) ([]byte, error) {
+func appendRawBlockRecord(v []byte, txHash *chainhash.Hash) ([]byte, error) {
 	if len(v) < 44 {
 		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
 			bucketBlocks, 44, len(v))
@@ -184,7 +191,7 @@ func putRawBlockRecord(ns walletdb.Bucket, k, v []byte) error {
 	return nil
 }
 
-func putBlockRecord(ns walletdb.Bucket, block *BlockMeta, txHash *wire.ShaHash) error {
+func putBlockRecord(ns walletdb.Bucket, block *BlockMeta, txHash *chainhash.Hash) error {
 	k := keyBlockRecord(block.Height)
 	v := valueBlockRecord(block, txHash)
 	return putRawBlockRecord(ns, k, v)
@@ -219,7 +226,7 @@ func readRawBlockRecord(k, v []byte, block *blockRecord) error {
 		return storeError(ErrData, str, nil)
 	}
 	numTransactions := int(byteOrder.Uint32(v[40:44]))
-	expectedLen := 44 + wire.HashSize*numTransactions
+	expectedLen := 44 + chainhash.HashSize*numTransactions
 	if len(v) < expectedLen {
 		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
 			bucketBlocks, expectedLen, len(v))
@@ -229,11 +236,11 @@ func readRawBlockRecord(k, v []byte, block *blockRecord) error {
 	block.Height = int32(byteOrder.Uint32(k))
 	copy(block.Hash[:], v)
 	block.Time = time.Unix(int64(byteOrder.Uint64(v[32:40])), 0)
-	block.transactions = make([]wire.ShaHash, numTransactions)
+	block.transactions = make([]chainhash.Hash, numTransactions)
 	off := 44
 	for i := range block.transactions {
 		copy(block.transactions[i][:], v[off:])
-		off += wire.HashSize
+		off += chainhash.HashSize
 	}
 
 	return nil
@@ -350,7 +357,7 @@ func (it *blockIterator) delete() error {
 //   [0:8]   Received time (8 bytes)
 //   [8:]    Serialized transaction (varies)
 
-func keyTxRecord(txHash *wire.ShaHash, block *Block) []byte {
+func keyTxRecord(txHash *chainhash.Hash, block *Block) []byte {
 	k := make([]byte, 68)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], uint32(block.Height))
@@ -400,7 +407,7 @@ func putRawTxRecord(ns walletdb.Bucket, k, v []byte) error {
 	return nil
 }
 
-func readRawTxRecord(txHash *wire.ShaHash, v []byte, rec *TxRecord) error {
+func readRawTxRecord(txHash *chainhash.Hash, v []byte, rec *TxRecord) error {
 	if len(v) < 8 {
 		str := fmt.Sprintf("%s: short read (expected %d bytes, read %d)",
 			bucketTxRecords, 8, len(v))
@@ -428,7 +435,7 @@ func readRawTxRecordBlock(k []byte, block *Block) error {
 	return nil
 }
 
-func fetchTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) (*TxRecord, error) {
+func fetchTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash, block *Block) (*TxRecord, error) {
 	k := keyTxRecord(txHash, block)
 	v := ns.Bucket(bucketTxRecords).Get(k)
 
@@ -453,7 +460,7 @@ func fetchRawTxRecordPkScript(k, v []byte, index uint32) ([]byte, error) {
 	return rec.MsgTx.TxOut[index].PkScript, nil
 }
 
-func existsTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) (k, v []byte) {
+func existsTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash, block *Block) (k, v []byte) {
 	k = keyTxRecord(txHash, block)
 	v = ns.Bucket(bucketTxRecords).Get(k)
 	return
@@ -463,7 +470,7 @@ func existsRawTxRecord(ns walletdb.Bucket, k []byte) (v []byte) {
 	return ns.Bucket(bucketTxRecords).Get(k)
 }
 
-func deleteTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) error {
+func deleteTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash, block *Block) error {
 	k := keyTxRecord(txHash, block)
 	return ns.Bucket(bucketTxRecords).Delete(k)
 }
@@ -471,7 +478,7 @@ func deleteTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash, block *Block) erro
 // latestTxRecord searches for the newest recorded mined transaction record with
 // a matching hash.  In case of a hash collision, the record from the newest
 // block is returned.  Returns (nil, nil) if no matching transactions are found.
-func latestTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash) (k, v []byte) {
+func latestTxRecord(ns walletdb.Bucket, txHash *chainhash.Hash) (k, v []byte) {
 	prefix := txHash[:]
 	c := ns.Bucket(bucketTxRecords).Cursor()
 	ck, cv := c.Seek(prefix)
@@ -508,7 +515,7 @@ func latestTxRecord(ns walletdb.Bucket, txHash *wire.ShaHash) (k, v []byte) {
 // The optional debits key is only included if the credit is spent by another
 // mined debit.
 
-func keyCredit(txHash *wire.ShaHash, index uint32, block *Block) []byte {
+func keyCredit(txHash *chainhash.Hash, index uint32, block *Block) []byte {
 	k := make([]byte, 72)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], uint32(block.Height))
@@ -636,7 +643,7 @@ func unspendRawCredit(ns walletdb.Bucket, k []byte) (btcutil.Amount, error) {
 	return btcutil.Amount(byteOrder.Uint64(v[0:8])), nil
 }
 
-func existsCredit(ns walletdb.Bucket, txHash *wire.ShaHash, index uint32, block *Block) (k, v []byte) {
+func existsCredit(ns walletdb.Bucket, txHash *chainhash.Hash, index uint32, block *Block) (k, v []byte) {
 	k = keyCredit(txHash, index, block)
 	v = ns.Bucket(bucketCredits).Get(k)
 	return
@@ -835,7 +842,7 @@ func deleteRawUnspent(ns walletdb.Bucket, k []byte) error {
 //             [44:76] Block hash (32 bytes)
 //             [76:80] Output index (4 bytes)
 
-func keyDebit(txHash *wire.ShaHash, index uint32, block *Block) []byte {
+func keyDebit(txHash *chainhash.Hash, index uint32, block *Block) []byte {
 	k := make([]byte, 72)
 	copy(k, txHash[:])
 	byteOrder.PutUint32(k[32:36], uint32(block.Height))
@@ -844,7 +851,7 @@ func keyDebit(txHash *wire.ShaHash, index uint32, block *Block) []byte {
 	return k
 }
 
-func putDebit(ns walletdb.Bucket, txHash *wire.ShaHash, index uint32, amount btcutil.Amount, block *Block, credKey []byte) error {
+func putDebit(ns walletdb.Bucket, txHash *chainhash.Hash, index uint32, amount btcutil.Amount, block *Block, credKey []byte) error {
 	k := keyDebit(txHash, index, block)
 
 	v := make([]byte, 80)
@@ -867,7 +874,7 @@ func extractRawDebitCreditKey(v []byte) []byte {
 // existsDebit checks for the existance of a debit.  If found, the debit and
 // previous credit keys are returned.  If the debit does not exist, both keys
 // are nil.
-func existsDebit(ns walletdb.Bucket, txHash *wire.ShaHash, index uint32, block *Block) (k, credKey []byte, err error) {
+func existsDebit(ns walletdb.Bucket, txHash *chainhash.Hash, index uint32, block *Block) (k, credKey []byte, err error) {
 	k = keyDebit(txHash, index, block)
 	v := ns.Bucket(bucketDebits).Get(k)
 	if v == nil {
@@ -972,7 +979,7 @@ func putRawUnmined(ns walletdb.Bucket, k, v []byte) error {
 	return nil
 }
 
-func readRawUnminedHash(k []byte, txHash *wire.ShaHash) error {
+func readRawUnminedHash(k []byte, txHash *chainhash.Hash) error {
 	if len(k) < 32 {
 		str := "short unmined key"
 		return storeError(ErrData, str, nil)
@@ -1092,7 +1099,7 @@ type unminedCreditIterator struct {
 	err    error
 }
 
-func makeUnminedCreditIterator(ns walletdb.Bucket, txHash *wire.ShaHash) unminedCreditIterator {
+func makeUnminedCreditIterator(ns walletdb.Bucket, txHash *chainhash.Hash) unminedCreditIterator {
 	c := ns.Bucket(bucketUnminedCredits).Cursor()
 	return unminedCreditIterator{c: c, prefix: txHash[:]}
 }

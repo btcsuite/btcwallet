@@ -1111,8 +1111,8 @@ func TestStoreTransactionsWithChangeOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sha := msgtx.TxSha()
-	txDetails, err := store.TxDetails(&sha)
+	hash := msgtx.TxHash()
+	txDetails, err := store.TxDetails(&hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1146,7 +1146,7 @@ func TestStoreTransactionsWithChangeOutput(t *testing.T) {
 	if len(credits) != 1 {
 		t.Fatalf("Unexpected number of credits in txstore; got %d, want 1", len(credits))
 	}
-	changeOutpoint := wire.OutPoint{Hash: sha, Index: uint32(tx.changeIdx)}
+	changeOutpoint := wire.OutPoint{Hash: hash, Index: uint32(tx.changeIdx)}
 	if credits[0].OutPoint != changeOutpoint {
 		t.Fatalf("Credit's outpoint (%v) doesn't match the one from change output (%v)",
 			credits[0].OutPoint, changeOutpoint)

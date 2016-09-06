@@ -4,19 +4,23 @@
 
 package wtxmgr
 
+<<<<<<< HEAD
 import (
 	"github.com/jadeblaquiere/ctcd/wire"
 )
+=======
+import "github.com/btcsuite/btcd/chaincfg/chainhash"
+>>>>>>> btcsuite/master
 
 type graphNode struct {
 	value    *TxRecord
-	outEdges []*wire.ShaHash
+	outEdges []*chainhash.Hash
 	inDegree int
 }
 
-type hashGraph map[wire.ShaHash]graphNode
+type hashGraph map[chainhash.Hash]graphNode
 
-func makeGraph(set map[wire.ShaHash]*TxRecord) hashGraph {
+func makeGraph(set map[chainhash.Hash]*TxRecord) hashGraph {
 	graph := make(hashGraph)
 
 	for _, rec := range set {
@@ -83,7 +87,7 @@ func graphRoots(graph hashGraph) []*TxRecord {
 
 // dependencySort topologically sorts a set of transaction records by their
 // dependency order.  It is implemented using Kahn's algorithm.
-func dependencySort(txs map[wire.ShaHash]*TxRecord) []*TxRecord {
+func dependencySort(txs map[chainhash.Hash]*TxRecord) []*TxRecord {
 	graph := makeGraph(txs)
 	s := graphRoots(graph)
 

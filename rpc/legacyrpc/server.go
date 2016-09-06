@@ -126,7 +126,7 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 				return
 			}
 			server.wg.Add(1)
-			server.PostClientRPC(w, r)
+			server.postClientRPC(w, r)
 			server.wg.Done()
 		}))
 
@@ -562,8 +562,8 @@ func (s *Server) websocketClientRPC(wsc *websocketClient) {
 // that may be read from a client.  This is currently limited to 4MB.
 const maxRequestSize = 1024 * 1024 * 4
 
-// PostClientRPC processes and replies to a JSON-RPC client request.
-func (s *Server) PostClientRPC(w http.ResponseWriter, r *http.Request) {
+// postClientRPC processes and replies to a JSON-RPC client request.
+func (s *Server) postClientRPC(w http.ResponseWriter, r *http.Request) {
 	body := http.MaxBytesReader(w, r.Body, maxRequestSize)
 	rpcRequest, err := ioutil.ReadAll(body)
 	if err != nil {

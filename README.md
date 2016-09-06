@@ -114,16 +114,14 @@ glide install
 
 The `go` tool is used to build or install (to `GOPATH`) the project.  Some
 example build instructions are provided below (all must run from the `btcwallet`
-project directory) in a `sh`-compatible shell on Unix, or PowerShell on Windows
-(`$()` subshells are not supported by `cmd`).
+project directory).
 
 To build and install `btcwallet` and all helper commands (in the `cmd`
-directory) to `$GOPATH/bin/`, as well as installing all compiled non-vendored
-packages to `$GOPATH/pkg/` (**use this if you are unsure which command to
-run**):
+directory) to `$GOPATH/bin/`, as well as installing all compiled packages to
+`$GOPATH/pkg/` (**use this if you are unsure which command to run**):
 
 ```
-go install $(glide novendor)
+go install . ./cmd/...
 ```
 
 To build a `btcwallet` executable and install it to `$GOPATH/bin/`:

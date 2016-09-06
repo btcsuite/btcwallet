@@ -42,8 +42,8 @@ var SimNetParams = Params{
 // (wire.SimNet).
 var CTIndigoNetParams = Params{
 	Params:        &chaincfg.CTIndigoNetParams,
-	RPCClientPort: "17765",
-	RPCServerPort: "17766",
+	RPCClientPort: "7765",
+	RPCServerPort: "7766",
 }
 
 // CTRedNetParams contains parameters specific to the ciphrtxt red test network

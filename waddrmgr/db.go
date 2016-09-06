@@ -1,4 +1,4 @@
-// Copyright (c) 2014 The btcsuite developers
+// Copyright (c) 2014-2016 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,10 +10,17 @@ import (
 	"fmt"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/chaincfg"
 	"github.com/jadeblaquiere/ctcd/wire"
 	"github.com/jadeblaquiere/ctcutil/hdkeychain"
 	"github.com/jadeblaquiere/ctcwallet/walletdb"
+=======
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/walletdb"
+>>>>>>> btcsuite/master
 	"github.com/btcsuite/fastsha256"
 )
 
@@ -1448,7 +1455,7 @@ func putStartBlock(tx walletdb.Tx, bs *BlockStamp) error {
 
 // fetchRecentBlocks returns the height of the most recent block height and
 // hashes of the most recent blocks.
-func fetchRecentBlocks(tx walletdb.Tx) (int32, []wire.ShaHash, error) {
+func fetchRecentBlocks(tx walletdb.Tx) (int32, []chainhash.Hash, error) {
 	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:
@@ -1467,7 +1474,7 @@ func fetchRecentBlocks(tx walletdb.Tx) (int32, []wire.ShaHash, error) {
 
 	recentHeight := int32(binary.LittleEndian.Uint32(buf[0:4]))
 	numHashes := binary.LittleEndian.Uint32(buf[4:8])
-	recentHashes := make([]wire.ShaHash, numHashes)
+	recentHashes := make([]chainhash.Hash, numHashes)
 	offset := 8
 	for i := uint32(0); i < numHashes; i++ {
 		copy(recentHashes[i][:], buf[offset:offset+32])
@@ -1478,7 +1485,7 @@ func fetchRecentBlocks(tx walletdb.Tx) (int32, []wire.ShaHash, error) {
 }
 
 // putRecentBlocks stores the provided start block stamp to the database.
-func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []wire.ShaHash) error {
+func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []chainhash.Hash) error {
 	bucket := tx.RootBucket().Bucket(syncBucketName)
 
 	// The serialized recent blocks format is:

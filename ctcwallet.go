@@ -61,7 +61,7 @@ func walletMain() error {
 		}()
 	}
 
-	dbDir := networkDir(cfg.AppDataDir, activeNet.Params)
+	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 	loader := wallet.NewLoader(activeNet.Params, dbDir)
 
 	// Create and start HTTP server to serve wallet client connections.
@@ -197,7 +197,7 @@ func readCAFile() []byte {
 	var certs []byte
 	if !cfg.DisableClientTLS {
 		var err error
-		certs, err = ioutil.ReadFile(cfg.CAFile)
+		certs, err = ioutil.ReadFile(cfg.CAFile.Value)
 		if err != nil {
 			log.Warnf("Cannot open CA file: %v", err)
 			// If there's an error reading the CA file, continue

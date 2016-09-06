@@ -8,8 +8,13 @@ import (
 	"io"
 	"os"
 
+<<<<<<< HEAD
 	"github.com/btcsuite/bolt"
 	"github.com/jadeblaquiere/ctcwallet/walletdb"
+=======
+	"github.com/boltdb/bolt"
+	"github.com/btcsuite/btcwallet/walletdb"
+>>>>>>> btcsuite/master
 )
 
 // convertErr converts some bolt errors to the equivalent walletdb error.
