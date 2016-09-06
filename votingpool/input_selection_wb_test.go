@@ -10,16 +10,10 @@ import (
 	"sort"
 	"testing"
 
-<<<<<<< HEAD
+	"github.com/jadeblaquiere/ctcd/chaincfg/chainhash"
 	"github.com/jadeblaquiere/ctcd/wire"
 	"github.com/jadeblaquiere/ctcutil"
 	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
-=======
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/wtxmgr"
->>>>>>> btcsuite/master
 )
 
 var (

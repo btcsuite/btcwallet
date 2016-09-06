@@ -7,13 +7,8 @@ package waddrmgr
 import (
 	"sync"
 
-<<<<<<< HEAD
-	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcd/chaincfg/chainhash"
 	"github.com/jadeblaquiere/ctcwallet/walletdb"
-=======
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcwallet/walletdb"
->>>>>>> btcsuite/master
 )
 
 const (

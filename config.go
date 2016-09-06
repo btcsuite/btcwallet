@@ -14,21 +14,12 @@ import (
 	"sort"
 	"strings"
 
-<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcutil"
 	"github.com/jadeblaquiere/ctcwallet/internal/cfgutil"
 	"github.com/jadeblaquiere/ctcwallet/internal/legacy/keystore"
 	"github.com/jadeblaquiere/ctcwallet/netparams"
 	"github.com/jadeblaquiere/ctcwallet/wallet"
-	flags "github.com/btcsuite/go-flags"
-=======
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/internal/cfgutil"
-	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
-	"github.com/btcsuite/btcwallet/netparams"
-	"github.com/btcsuite/btcwallet/wallet"
 	flags "github.com/jessevdk/go-flags"
->>>>>>> btcsuite/master
 )
 
 const (
@@ -54,21 +45,6 @@ var (
 
 type config struct {
 	// General application behavior
-<<<<<<< HEAD
-	ConfigFile    string `short:"C" long:"configfile" description:"Path to configuration file"`
-	ShowVersion   bool   `short:"V" long:"version" description:"Display version information and exit"`
-	Create        bool   `long:"create" description:"Create the wallet if it does not exist"`
-	CreateTemp    bool   `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	AppDataDir    string `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
-	TestNet3      bool   `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
-	SimNet        bool   `long:"simnet" description:"Use the simulation test network (default mainnet)"`
-	CTRedNet      bool   `long:"ctrednet" description:"Use the ciphrtxt red test network (default mainnet)"`
-	CTIndigoNet   bool   `long:"ctindigonet" description:"Use the ciphrtxt indigo network (default mainnet)"`
-	NoInitialLoad bool   `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
-	DebugLevel    string `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
-	LogDir        string `long:"logdir" description:"Directory to log output."`
-	Profile       string `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
-=======
 	ConfigFile    *cfgutil.ExplicitString `short:"C" long:"configfile" description:"Path to configuration file"`
 	ShowVersion   bool                    `short:"V" long:"version" description:"Display version information and exit"`
 	Create        bool                    `long:"create" description:"Create the wallet if it does not exist"`
@@ -76,11 +52,12 @@ type config struct {
 	AppDataDir    *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
 	TestNet3      bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
 	SimNet        bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
+	CTRedNet      bool                    `long:"ctrednet" description:"Use the ciphrtxt red test network (default mainnet)"`
+	CTIndigoNet   bool                    `long:"ctindigonet" description:"Use the ciphrtxt indigo network (default mainnet)"`
 	NoInitialLoad bool                    `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
 	DebugLevel    string                  `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	LogDir        string                  `long:"logdir" description:"Directory to log output."`
 	Profile       string                  `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
->>>>>>> btcsuite/master
 
 	// Wallet options
 	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`

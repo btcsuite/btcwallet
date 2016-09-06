@@ -9,23 +9,13 @@ import (
 	"sync"
 	"time"
 
-<<<<<<< HEAD
 	"github.com/jadeblaquiere/ctcd/btcjson"
 	"github.com/jadeblaquiere/ctcd/chaincfg"
-	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcd/chaincfg/chainhash"
 	"github.com/jadeblaquiere/ctcrpcclient"
 	"github.com/jadeblaquiere/ctcutil"
 	"github.com/jadeblaquiere/ctcwallet/waddrmgr"
 	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
-=======
-	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcrpcclient"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wtxmgr"
->>>>>>> btcsuite/master
 )
 
 // RPCClient represents a persistent client connection to a bitcoin RPC server
