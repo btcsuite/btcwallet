@@ -44,7 +44,7 @@ imports:
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/golang/protobuf
-  version: 2ebff28ac76fb19e2d25e5ddd4885708dfdd5611
+  version: 888eb0692c857ec880338addf316bd662d5e630e
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
