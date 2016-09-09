@@ -29,6 +29,7 @@ import:
   subpackages:
   - context
 - package: google.golang.org/grpc
+  version: ^1.0.0
   subpackages:
   - codes
   - credentials
@@ -36,4 +37,4 @@ import:
 - package: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 - package: github.com/boltdb/bolt
-  version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
+  version: ^1.3.0

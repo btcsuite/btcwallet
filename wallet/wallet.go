@@ -1137,7 +1137,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 			if chainClient == nil {
 				return nil, errors.New("no chain server client")
 			}
-			startResp = chainClient.GetBlockVerboseAsync(startBlock.hash, false)
+			startResp = chainClient.GetBlockVerboseAsync(startBlock.hash)
 		}
 	}
 	if endBlock != nil {
@@ -1147,7 +1147,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 			if chainClient == nil {
 				return nil, errors.New("no chain server client")
 			}
-			endResp = chainClient.GetBlockVerboseAsync(endBlock.hash, false)
+			endResp = chainClient.GetBlockVerboseAsync(endBlock.hash)
 		}
 	}
 	if startResp != nil {
@@ -1598,17 +1598,14 @@ func (w *Wallet) ExportWatchingWallet() (string, error) {
 	}
 
 	// Export the watching only wallet's serialized data.
-	woWallet := *w
-	woWallet.db = woDb
-	woWallet.Manager = woMgr
-	return woWallet.exportBase64()
+	return exportBase64DB(woDb)
 }
 
-// exportBase64 exports a wallet's serialized database as a base64-encoded
+// exportBase64DB exports a wallet's serialized database as a base64-encoded
 // string.
-func (w *Wallet) exportBase64() (string, error) {
+func exportBase64DB(db walletdb.DB) (string, error) {
 	var buf bytes.Buffer
-	if err := w.db.Copy(&buf); err != nil {
+	if err := db.Copy(&buf); err != nil {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
