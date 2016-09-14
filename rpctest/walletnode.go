@@ -220,6 +220,17 @@ func (n *walletTest) Start() error {
 	return nil
 }
 
+// FullCommand returns the full command used to start the wallet
+func (n *walletTest) FullCommand() string {
+	args := strings.Join(n.cmd.Args, " ")
+	return n.cmd.Path + args
+}
+
+// CertFile returns the wallet RPC's TLS certificate
+func (n *walletTest) CertFile() string {
+	return n.config.certFile
+}
+
 // Stop interrupts the running dcrwalletTest process process, and waits until it exits
 // properly. On windows, interrupt is not supported, so a kill signal is used
 // instead

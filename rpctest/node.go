@@ -226,9 +226,19 @@ func (n *node) Start() error {
 	return nil
 }
 
-// Stop interrupts the running dcrd process process, and waits until it exits
-// properly. On windows, interrupt is not supported, so a kill signal is used
-// instead
+// FullCommand returns the full command used to start the node
+func (n *node) FullCommand() string {
+	args := strings.Join(n.cmd.Args, " ")
+	return n.cmd.Path + args
+}
+
+// CertFile returns the node RPC's TLS certificate
+func (n *node) CertFile() string {
+	return n.config.certFile
+}
+
+// Stop interrupts the running dcrd process, and waits until it exits properly.
+// On windows, interrupt is not supported, so a kill signal is used instead.
 func (n *node) Stop() error {
 	if n.cmd == nil || n.cmd.Process == nil {
 		// return if not properly initialized

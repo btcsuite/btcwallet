@@ -7,16 +7,17 @@ package rpctest
 import (
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrwallet/chain"
 
 	rpc "github.com/decred/dcrrpcclient"
 	"github.com/decred/dcrutil"
@@ -74,12 +75,11 @@ type Harness struct {
 
 	wallet *walletTest
 
-	chainClient *chain.RPCClient
-
 	testNodeDir    string
 	testWalletDir  string
 	maxConnRetries int
 	nodeNum        int
+	miningAddr     dcrutil.Address
 }
 
 // NewHarness creates and initializes a new instance of the rpc test harness.
@@ -191,37 +191,40 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 	if err = h.node.Start(); err != nil {
 		return err
 	}
+	time.Sleep(200 * time.Millisecond)
 	if err := h.connectRPCClient(); err != nil {
 		return err
 	}
+	fmt.Println("Node RPC client connected.")
 
-	// Start the dcrd node itself. This spawns a new process which will be
-	// managed
+	// Start dcrwallet. This spawns a new process which will be managed
 	if err = h.wallet.Start(); err != nil {
 		return err
 	}
+	time.Sleep(1 * time.Second)
 
 	// Connect walletClient so we can get the mining address
 	var walletClient *rpc.Client
 	walletRPCConf := h.wallet.config.rpcConnConfig()
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 400; i++ {
 		if walletClient, err = rpc.New(&walletRPCConf, nil); err != nil {
-			time.Sleep(time.Duration(i) * 50 * time.Millisecond)
+			time.Sleep(time.Duration(math.Log(float64(i+3))) * 50 * time.Millisecond)
 			continue
 		}
 		break
 	}
 	if walletClient == nil {
 		return fmt.Errorf("walletClient connection timedout")
-
 	}
+	fmt.Println("Wallet RPC client connected.")
 	h.WalletRPC = walletClient
 
 	// Get a new address from the wallet to be set with dcrd's --miningaddr
+	time.Sleep(5 * time.Second)
 	var miningAddr dcrutil.Address
 	for i := 0; i < 100; i++ {
 		if miningAddr, err = walletClient.GetNewAddress("default"); err != nil {
-			time.Sleep(time.Duration(i) * 50 * time.Millisecond)
+			time.Sleep(time.Duration(math.Log(float64(i+3))) * 50 * time.Millisecond)
 			continue
 		}
 		break
@@ -230,12 +233,13 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 		return fmt.Errorf("RPC not up for mining addr %v %v", h.testNodeDir,
 			h.testWalletDir)
 	}
+	h.miningAddr = miningAddr
 
 	var extraArgs []string
 	miningArg := fmt.Sprintf("--miningaddr=%s", miningAddr)
 	extraArgs = append(extraArgs, miningArg)
 
-	// Shutdown
+	// Shutdown node so we can restart it with --miningaddr
 	if err := h.node.Shutdown(); err != nil {
 		return err
 	}
@@ -253,41 +257,34 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 	if err != nil {
 		return err
 	}
-
 	h.node = node
+
 	// Restart node with mining address set
 	if err = h.node.Start(); err != nil {
 		return err
 	}
+	time.Sleep(1 * time.Second)
 	if err := h.connectRPCClient(); err != nil {
 		return err
 	}
+	fmt.Printf("Node RPC client connected, miningaddr: %v.\n", miningAddr)
 
-	// Create a test chain with the desired number of mature coinbase
-	// outputs.
+	// Create a test chain with the desired number of mature coinbase outputs
 	if createTestChain {
 		numToGenerate := uint32(h.ActiveNet.CoinbaseMaturity) + numMatureOutputs
+		fmt.Printf("Generating %v blocks...\n", numToGenerate)
 		_, err := h.Node.Generate(numToGenerate)
 		if err != nil {
 			return err
 		}
-	}
-
-	rpcConf := h.node.config.rpcConnConfig()
-	rpcc, err := chain.NewRPCClient(h.ActiveNet, rpcConf.Host, rpcConf.User,
-		rpcConf.Pass, rpcConf.Certificates, false, 20)
-	if err != nil {
-		return err
-	}
-
-	// Start the goroutines in the underlying wallet.
-	h.chainClient = rpcc
-	if err := h.chainClient.Start(); err != nil {
-		return err
+		fmt.Println("Block generation complete.")
 	}
 
 	// Wait for the wallet to sync up to the current height.
-	ticker := time.NewTicker(time.Millisecond * 100)
+	// TODO: Figure out why this is the longest wait, about 60 sec, when it
+	// should be almost immediate.
+	fmt.Println("Waiting for wallet to sync to current height.")
+	ticker := time.NewTicker(time.Millisecond * 500)
 	desiredHeight := int64(numMatureOutputs + uint32(h.ActiveNet.CoinbaseMaturity))
 out:
 	for {
@@ -304,18 +301,16 @@ out:
 	}
 	ticker.Stop()
 
+	fmt.Println("Wallet sync complete.")
+
 	return nil
 }
 
-// TearDown stops the running rpc test instance. All created p. (?)
-// killed, and temporary directories removed.
+// TearDown stops the running RPC test instance. All created processes killed,
+// and temporary directories removed.
 func (h *Harness) TearDown() error {
 	if h.Node != nil {
 		h.Node.Shutdown()
-	}
-
-	if h.chainClient != nil {
-		h.chainClient.Shutdown()
 	}
 
 	if err := h.node.Shutdown(); err != nil {
@@ -338,6 +333,12 @@ func (h *Harness) TearDown() error {
 	return nil
 }
 
+// IsUp checks if the harness is still being tracked by rpctest
+func (h *Harness) IsUp() bool {
+	_, up := testInstances[h.testNodeDir]
+	return up
+}
+
 // connectRPCClient attempts to establish an RPC connection to the created
 // dcrd process belonging to this Harness instance. If the initial connection
 // attempt fails, this function will retry h.maxConnRetries times, backing off
@@ -350,14 +351,19 @@ func (h *Harness) connectRPCClient() error {
 	rpcConf := h.node.config.rpcConnConfig()
 	for i := 0; i < h.maxConnRetries; i++ {
 		if client, err = rpc.New(&rpcConf, h.handlers); err != nil {
-			time.Sleep(time.Duration(i) * 50 * time.Millisecond)
+			time.Sleep(time.Duration(math.Log(float64(i+3))) * 50 * time.Millisecond)
 			continue
 		}
 		break
 	}
 
 	if client == nil {
-		return fmt.Errorf("connection timedout")
+		return fmt.Errorf("Connection timedout, err: %v\n", err)
+	}
+
+	err = client.NotifyBlocks()
+	if err != nil {
+		return err
 	}
 
 	h.Node = client
@@ -369,6 +375,35 @@ func (h *Harness) connectRPCClient() error {
 // instance.
 func (h *Harness) RPCConfig() rpc.ConnConfig {
 	return h.node.config.rpcConnConfig()
+}
+
+// RPCWalletConfig returns the harnesses current rpc configuration. This allows other
+// potential RPC clients created within tests to connect to a given test harness
+// instance.
+func (h *Harness) RPCWalletConfig() rpc.ConnConfig {
+	return h.wallet.config.rpcConnConfig()
+}
+
+// RPCCertFile returns the full path the node RPC's TLS certifiate
+func (h *Harness) RPCCertFile() string {
+	return h.node.CertFile()
+}
+
+// RPCWalletCertFile returns the full path the wallet RPC's TLS certifiate
+func (h *Harness) RPCWalletCertFile() string {
+	return h.wallet.CertFile()
+}
+
+// FullNodeCommand returns the full command line of the node
+func (h *Harness) FullNodeCommand() string {
+	args := strings.Join(h.node.cmd.Args[1:], " ")
+	return h.node.cmd.Path + " " + args
+}
+
+// FullWalletCommand returns the full command line of the wallet
+func (h *Harness) FullWalletCommand() string {
+	args := strings.Join(h.wallet.cmd.Args[1:], " ")
+	return h.wallet.cmd.Path + " " + args
 }
 
 // generateListeningAddresses returns three strings representing listening
