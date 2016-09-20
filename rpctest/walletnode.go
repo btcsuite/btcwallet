@@ -260,15 +260,3 @@ func (n *walletTest) Cleanup() error {
 
 	return n.config.cleanup()
 }
-
-// Shutdown terminates the running dcrwallet process, and cleans up all
-// file/directories created by walletTest.
-func (n *walletTest) Shutdown() error {
-	if err := n.Stop(); err != nil {
-		return err
-	}
-	if err := n.Cleanup(); err != nil {
-		return err
-	}
-	return nil
-}

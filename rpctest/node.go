@@ -29,12 +29,10 @@ type nodeConfig struct {
 	listen     string
 	rpcListen  string
 	rpcConnect string
-	dataDir    string
-	logDir     string
 	profile    string
 	debugLevel string
 	extra      []string
-	prefix     string
+	appDataDir string
 
 	exe          string
 	endpoint     string
@@ -44,15 +42,15 @@ type nodeConfig struct {
 }
 
 // newConfig returns a nodeConfig with default values.
-func newConfig(prefix, certFile, keyFile string, extra []string) (*nodeConfig, error) {
+func newConfig(appDataDir, certFile, keyFile string, extra []string) (*nodeConfig, error) {
 	// TODO: use defaultP2pPort and defaultRPCPort instead of literals
 	a := &nodeConfig{
-		listen:    "127.0.0.1:18555",
-		rpcListen: "127.0.0.1:19556",
-		rpcUser:   "user",
-		rpcPass:   "pass",
-		extra:     extra,
-		prefix:    prefix,
+		listen:     "127.0.0.1:18555",
+		rpcListen:  "127.0.0.1:19556",
+		rpcUser:    "user",
+		rpcPass:    "pass",
+		extra:      extra,
+		appDataDir: appDataDir,
 
 		exe:      "dcrd",
 		endpoint: "ws",
@@ -69,16 +67,6 @@ func newConfig(prefix, certFile, keyFile string, extra []string) (*nodeConfig, e
 // temporary data, and log directories which must be cleaned up with a call to
 // cleanup().
 func (n *nodeConfig) setDefaults() error {
-	datadir, err := ioutil.TempDir(n.prefix, "data")
-	if err != nil {
-		return err
-	}
-	n.dataDir = datadir
-	logdir, err := ioutil.TempDir(n.prefix, "logs")
-	if err != nil {
-		return err
-	}
-	n.logDir = logdir
 	cert, err := ioutil.ReadFile(n.certFile)
 	if err != nil {
 		return err
@@ -117,14 +105,7 @@ func (n *nodeConfig) arguments() []string {
 	args = append(args, fmt.Sprintf("--rpccert=%s", n.certFile))
 	// --rpckey
 	args = append(args, fmt.Sprintf("--rpckey=%s", n.keyFile))
-	if n.dataDir != "" {
-		// --datadir
-		args = append(args, fmt.Sprintf("--datadir=%s", n.dataDir))
-	}
-	if n.logDir != "" {
-		// --logdir
-		args = append(args, fmt.Sprintf("--logdir=%s", n.logDir))
-	}
+	args = append(args, fmt.Sprintf("--appdata=%s", n.appDataDir))
 	if n.profile != "" {
 		// --profile
 		args = append(args, fmt.Sprintf("--profile=%s", n.profile))
@@ -159,22 +140,15 @@ func (n *nodeConfig) rpcConnConfig() rpc.ConnConfig {
 
 // String returns the string representation of this nodeConfig.
 func (n *nodeConfig) String() string {
-	return n.prefix
+	return n.appDataDir
 }
 
 // cleanup removes the tmp data and log directories.
 func (n *nodeConfig) cleanup() error {
-	dirs := []string{
-		n.logDir,
-		n.dataDir,
+	if err := os.RemoveAll(n.appDataDir); err != nil {
+		return err
 	}
-	var err error
-	for _, dir := range dirs {
-		if err = os.RemoveAll(dir); err != nil {
-			log.Printf("Cannot remove dir %s: %v", dir, err)
-		}
-	}
-	return err
+	return nil
 }
 
 // node houses the neccessary state required to configure, launch, and manaage
@@ -264,18 +238,6 @@ func (n *node) Cleanup() error {
 	}
 
 	return n.config.cleanup()
-}
-
-// shutdown terminates the running dcrd process, and cleans up all
-// file/directories created by node.
-func (n *node) Shutdown() error {
-	if err := n.Stop(); err != nil {
-		return err
-	}
-	if err := n.Cleanup(); err != nil {
-		return err
-	}
-	return nil
 }
 
 // genCertPair generates a key/cert pair to the paths provided.
