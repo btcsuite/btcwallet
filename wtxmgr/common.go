@@ -75,23 +75,17 @@ func writeUnspentDebugDataToBuf(buf *bytes.Buffer, udd *unspentDebugData) {
 // DebugBucketUnspentString is the exported version of debugBuckedUnspentString
 // It returns string versions of unspent outpoints for debug ussage (with a flag
 // for including unmined txes or not).
-func (s *Store) DebugBucketUnspentString(inclUnmined bool) (string, error) {
-	var str string
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		str, err = s.debugBucketUnspentString(ns, inclUnmined)
-		return err
-	})
-	return str, err
+func (s *Store) DebugBucketUnspentString(ns walletdb.ReadBucket, inclUnmined bool) (string, error) {
+	return s.debugBucketUnspentString(ns, inclUnmined)
 }
 
-func (s *Store) debugBucketUnspentString(ns walletdb.Bucket,
+func (s *Store) debugBucketUnspentString(ns walletdb.ReadBucket,
 	inclUnmined bool) (string, error) {
 	var unspent []*unspentDebugData
 
 	var op wire.OutPoint
 	var block Block
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
 			return err

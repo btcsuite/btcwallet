@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/btcsuite/golangcrypto/ripemd160"
@@ -186,11 +185,12 @@ func (p SortableTxRecords) Less(i, j int) bool {
 }
 func (p SortableTxRecords) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
 
-// pruneOldTickets prunes old stake tickets from before ticketCutoff from the
-// database. Maybe corrupt the database if the user Ctrl+C's during this short
-// function.
-func (s *Store) pruneOldTickets(ns walletdb.Bucket,
-	ticketCutoff time.Duration) error {
+// PruneOldTickets prunes old stake tickets from before ticketCutoff from the
+// database.
+func (s *Store) PruneOldTickets(ns walletdb.ReadWriteBucket) error {
+	ticketCutoff := s.chainParams.TimePerBlock *
+		time.Duration(s.chainParams.WorkDiffWindowSize)
+
 	current := time.Now()
 	log.Infof("Pruning old tickets from before from the transaction " +
 		"database, please do not attempt to close your wallet.")
@@ -203,7 +203,7 @@ func (s *Store) pruneOldTickets(ns walletdb.Bucket,
 	// Cache for records, so we can sort them.
 	var savedSStxs SortableTxRecords
 
-	err = ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
+	err = ns.NestedReadWriteBucket(bucketUnmined).ForEach(func(k, v []byte) error {
 		// TODO: Parsing transactions from the db may be a little
 		// expensive.  It's possible the caller only wants the
 		// serialized transactions.
@@ -256,7 +256,7 @@ func (s *Store) pruneOldTickets(ns walletdb.Bucket,
 			var valCredit []byte
 			// Look up and see if it spends a mined credit.
 			spendsMinedCredit := true
-			err := ns.Bucket(bucketCredits).ForEach(
+			err := ns.NestedReadWriteBucket(bucketCredits).ForEach(
 				func(lkc, lvc []byte) error {
 					lcHash := extractRawCreditTxHash(lkc)
 					lcIndex := extractRawCreditIndex(lkc)
@@ -364,82 +364,50 @@ func (s *Store) pruneOldTickets(ns walletdb.Bucket,
 // Store implements a transaction store for storing and managing wallet
 // transactions.
 type Store struct {
-	mutex    *sync.Mutex
-	isClosed bool
-
-	namespace      walletdb.Namespace
 	chainParams    *chaincfg.Params
-	acctLookupFunc func(dcrutil.Address) (uint32, error)
+	acctLookupFunc func(walletdb.ReadBucket, dcrutil.Address) (uint32, error)
 
 	// Event callbacks.  These execute in the same goroutine as the wtxmgr
 	// caller.
 	NotifyUnspent func(hash *chainhash.Hash, index uint32)
 }
 
+// DoUpgrades performs any necessary upgrades to the transaction history
+// contained in the wallet database, namespaced by the top level bucket key
+// namespaceKey.
+func DoUpgrades(db walletdb.DB, namespaceKey []byte) error {
+	// No upgrades
+	return nil
+}
+
 // Open opens the wallet transaction store from a walletdb namespace.  If the
-// store does not exist, ErrNoExist is returned.  Existing stores will be
-// upgraded to new database formats as necessary.
-func Open(namespace walletdb.Namespace, pruneTickets bool,
-	chainParams *chaincfg.Params,
-	acctLookupFunc func(dcrutil.Address) (uint32, error)) (*Store, error) {
-	// Open the store, upgrading to the latest version as needed.
-	err := openStore(namespace)
+// store does not exist, ErrNoExist is returned.
+func Open(ns walletdb.ReadBucket, chainParams *chaincfg.Params,
+	acctLookupFunc func(walletdb.ReadBucket, dcrutil.Address) (uint32, error)) (*Store, error) {
+
+	// Open the store.
+	err := openStore(ns)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{new(sync.Mutex), false, namespace, chainParams, acctLookupFunc, nil} // TODO: set callbacks
-
-	// Skip pruning on simnet, because the adjustment times are
-	// so short.
-	if pruneTickets && chainParams.Name != "simnet" {
-		ticketCutoff := chainParams.TimePerBlock *
-			time.Duration(chainParams.WorkDiffWindowSize)
-		err = scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-			var err error
-			err = s.pruneOldTickets(ns, ticketCutoff)
-			return err
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-
+	s := &Store{chainParams, acctLookupFunc, nil} // TODO: set callbacks
 	return s, nil
 }
 
 // Create creates a new persistent transaction store in the walletdb namespace.
 // Creating the store when one already exists in this namespace will error with
 // ErrAlreadyExists.
-func Create(namespace walletdb.Namespace) error {
-	return createStore(namespace)
-}
-
-// Close safely closes the transaction manager by waiting for the mutex to
-// unlock and then preventing any new calls to the transaction manager.
-func (s *Store) Close() {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	s.isClosed = true
+func Create(ns walletdb.ReadWriteBucket) error {
+	return createStore(ns)
 }
 
 // InsertBlock inserts a block into the block database if it doesn't already
 // exist.
-func (s *Store) InsertBlock(bm *BlockMeta) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
-
-	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		return s.insertBlock(ns, bm)
-	})
+func (s *Store) InsertBlock(ns walletdb.ReadWriteBucket, bm *BlockMeta) error {
+	return s.insertBlock(ns, bm)
 }
 
-func (s *Store) insertBlock(ns walletdb.Bucket, bm *BlockMeta) error {
+func (s *Store) insertBlock(ns walletdb.ReadWriteBucket, bm *BlockMeta) error {
 	// Check to see if the block already exists; nothing to add in this case.
 	blockKey, blockVal := existsBlockRecord(ns, bm.Height)
 	if blockVal != nil {
@@ -453,26 +421,11 @@ func (s *Store) insertBlock(ns walletdb.Bucket, bm *BlockMeta) error {
 
 // GetBlockHash fetches the block hash for the block at the given height,
 // and returns an error if it's missing.
-func (s *Store) GetBlockHash(height int32) (chainhash.Hash, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return chainhash.Hash{}, storeError(ErrIsClosed, str, nil)
-	}
-
-	var blockHash chainhash.Hash
-	var err error
-	err = scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		blockHash, err = s.getBlockHash(ns, height)
-		return err
-	})
-
-	return blockHash, err
+func (s *Store) GetBlockHash(ns walletdb.ReadBucket, height int32) (chainhash.Hash, error) {
+	return s.getBlockHash(ns, height)
 }
 
-func (s *Store) getBlockHash(ns walletdb.Bucket, height int32) (chainhash.Hash,
+func (s *Store) getBlockHash(ns walletdb.ReadBucket, height int32) (chainhash.Hash,
 	error) {
 	br, err := fetchBlockRecord(ns, height)
 	if err != nil {
@@ -484,86 +437,72 @@ func (s *Store) getBlockHash(ns walletdb.Bucket, height int32) (chainhash.Hash,
 
 // PruneUnconfirmed prunes old stake tickets that are below the current stake
 // difficulty or any unconfirmed transaction which is expired.
-func (s *Store) PruneUnconfirmed(height int32, stakeDiff int64) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
-
+func (s *Store) PruneUnconfirmed(ns walletdb.ReadWriteBucket, height int32, stakeDiff int64) error {
 	var unconfTxRs []*TxRecord
 	var uTxRstoRemove []*TxRecord
 
 	// Open an update transaction in the database and
 	// remove all of the tagged transactions.
-	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		errDb := ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
-			// TODO: Parsing transactions from the db may be a little
-			// expensive.  It's possible the caller only wants the
-			// serialized transactions.
-			var txHash chainhash.Hash
-			errLocal := readRawUnminedHash(k, &txHash)
-			if errLocal != nil {
-				return errLocal
-			}
-
-			var rec TxRecord
-			errLocal = readRawTxRecord(&txHash, v, &rec)
-			if errLocal != nil {
-				return errLocal
-			}
-
-			unconfTxRs = append(unconfTxRs, &rec)
-
-			return nil
-		})
-		if errDb != nil {
-			return errDb
+	errDb := ns.NestedReadWriteBucket(bucketUnmined).ForEach(func(k, v []byte) error {
+		// TODO: Parsing transactions from the db may be a little
+		// expensive.  It's possible the caller only wants the
+		// serialized transactions.
+		var txHash chainhash.Hash
+		errLocal := readRawUnminedHash(k, &txHash)
+		if errLocal != nil {
+			return errLocal
 		}
 
-		for _, uTxR := range unconfTxRs {
-			// Tag all transactions that are expired.
-			if uTxR.MsgTx.Expiry <= uint32(height) &&
-				uTxR.MsgTx.Expiry != wire.NoExpiryValue {
-				log.Debugf("Tagging expired tx %v for removal (expiry %v, "+
-					"height %v)", uTxR.Hash, uTxR.MsgTx.Expiry, height)
-				uTxRstoRemove = append(uTxRstoRemove, uTxR)
-			}
-
-			// Tag all stake tickets which are below
-			// network difficulty.
-			if uTxR.TxType == stake.TxTypeSStx {
-				if uTxR.MsgTx.TxOut[0].Value < stakeDiff {
-					log.Debugf("Tagging low diff ticket %v for removal "+
-						"(stake %v, target %v)", uTxR.Hash,
-						uTxR.MsgTx.TxOut[0].Value, stakeDiff)
-					uTxRstoRemove = append(uTxRstoRemove, uTxR)
-				}
-			}
+		var rec TxRecord
+		errLocal = readRawTxRecord(&txHash, v, &rec)
+		if errLocal != nil {
+			return errLocal
 		}
 
-		for _, uTxR := range uTxRstoRemove {
-			errLocal := s.removeUnconfirmed(ns, uTxR)
-			if errLocal != nil {
-				return errLocal
-			}
-		}
+		unconfTxRs = append(unconfTxRs, &rec)
+
 		return nil
 	})
-	if err != nil {
-		return err
+	if errDb != nil {
+		return errDb
 	}
 
+	for _, uTxR := range unconfTxRs {
+		// Tag all transactions that are expired.
+		if uTxR.MsgTx.Expiry <= uint32(height) &&
+			uTxR.MsgTx.Expiry != wire.NoExpiryValue {
+			log.Debugf("Tagging expired tx %v for removal (expiry %v, "+
+				"height %v)", uTxR.Hash, uTxR.MsgTx.Expiry, height)
+			uTxRstoRemove = append(uTxRstoRemove, uTxR)
+		}
+
+		// Tag all stake tickets which are below
+		// network difficulty.
+		if uTxR.TxType == stake.TxTypeSStx {
+			if uTxR.MsgTx.TxOut[0].Value < stakeDiff {
+				log.Debugf("Tagging low diff ticket %v for removal "+
+					"(stake %v, target %v)", uTxR.Hash,
+					uTxR.MsgTx.TxOut[0].Value, stakeDiff)
+				uTxRstoRemove = append(uTxRstoRemove, uTxR)
+			}
+		}
+	}
+
+	for _, uTxR := range uTxRstoRemove {
+		errLocal := s.removeUnconfirmed(ns, uTxR)
+		if errLocal != nil {
+			return errLocal
+		}
+	}
 	return nil
 }
 
 // fetchAccountForPkScript fetches an account for a given pkScript given a
 // credit value, the script, and an account lookup function. It does this
 // to maintain compatibility with older versions of the database.
-func (s *Store) fetchAccountForPkScript(credVal []byte, unminedCredVal []byte,
-	pkScript []byte) (uint32, error) {
+func (s *Store) fetchAccountForPkScript(addrmgrNs walletdb.ReadBucket,
+	credVal []byte, unminedCredVal []byte, pkScript []byte) (uint32, error) {
+
 	// Attempt to get the account from the mined credit. If the
 	// account was never stored, we can ignore the error and
 	// fall through to do the lookup with the acctLookupFunc.
@@ -613,7 +552,7 @@ func (s *Store) fetchAccountForPkScript(credVal []byte, unminedCredVal []byte,
 	// Only look at the first address returned. This does not
 	// handle multisignature or other custom pkScripts in the
 	// correct way, which requires multiple account tracking.
-	acct, err := s.acctLookupFunc(addrs[0])
+	acct, err := s.acctLookupFunc(addrmgrNs, addrs[0])
 	if err != nil {
 		return 0, err
 	}
@@ -623,7 +562,7 @@ func (s *Store) fetchAccountForPkScript(credVal []byte, unminedCredVal []byte,
 
 // moveMinedTx moves a transaction record from the unmined buckets to block
 // buckets.
-func (s *Store) moveMinedTx(ns walletdb.Bucket, rec *TxRecord, recKey,
+func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, rec *TxRecord, recKey,
 	recVal []byte, block *BlockMeta) error {
 	log.Debugf("Marking unconfirmed transaction %v mined in block %d",
 		&rec.Hash, block.Height)
@@ -741,7 +680,7 @@ func (s *Store) moveMinedTx(ns walletdb.Bucket, rec *TxRecord, recKey,
 			return err
 		}
 
-		acct, err := s.fetchAccountForPkScript(nil, it.cv, pkScript)
+		acct, err := s.fetchAccountForPkScript(addrmgrNs, nil, it.cv, pkScript)
 		if err != nil {
 			return err
 		}
@@ -779,28 +718,18 @@ func (s *Store) moveMinedTx(ns walletdb.Bucket, rec *TxRecord, recKey,
 // InsertTx records a transaction as belonging to a wallet's transaction
 // history.  If block is nil, the transaction is considered unspent, and the
 // transaction's index must be unset.
-func (s *Store) InsertTx(rec *TxRecord, block *BlockMeta) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
+func (s *Store) InsertTx(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, rec *TxRecord, block *BlockMeta) error {
+	if block == nil {
+		return s.insertMemPoolTx(ns, rec)
 	}
-
-	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		if block == nil {
-			return s.insertMemPoolTx(ns, rec)
-		}
-		return s.insertMinedTx(ns, rec, block)
-	})
+	return s.insertMinedTx(ns, addrmgrNs, rec, block)
 }
 
 // insertMinedTx inserts a new transaction record for a mined transaction into
 // the database.  It is expected that the exact transation does not already
 // exist in the unmined buckets, but unmined double spends (including mutations)
 // are removed.
-func (s *Store) insertMinedTx(ns walletdb.Bucket, rec *TxRecord,
+func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, rec *TxRecord,
 	block *BlockMeta) error {
 	// Fetch the mined balance in case we need to update it.
 	minedBalance, err := fetchMinedBalance(ns)
@@ -881,7 +810,7 @@ func (s *Store) insertMinedTx(ns walletdb.Bucket, rec *TxRecord,
 	// unconfirmed, move it to a block.
 	v = existsRawUnmined(ns, rec.Hash[:])
 	if v != nil {
-		return s.moveMinedTx(ns, rec, k, v, block)
+		return s.moveMinedTx(ns, addrmgrNs, rec, k, v, block)
 	}
 
 	// As there may be unconfirmed transactions that are invalidated by this
@@ -926,27 +855,15 @@ func (s *Store) insertMinedTx(ns walletdb.Bucket, rec *TxRecord,
 // TODO(jrick): This should not be necessary.  Instead, pass the indexes
 // that are known to contain credits when a transaction or merkleblock is
 // inserted into the store.
-func (s *Store) AddCredit(rec *TxRecord, block *BlockMeta, index uint32,
-	change bool, account uint32) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
+func (s *Store) AddCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta,
+	index uint32, change bool, account uint32) error {
 
 	if int(index) >= len(rec.MsgTx.TxOut) {
 		str := "transaction output does not exist"
 		return storeError(ErrInput, str, nil)
 	}
 
-	var isNew bool
-	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		isNew, err = s.addCredit(ns, rec, block, index, change, account)
-		return err
-	})
+	isNew, err := s.addCredit(ns, rec, block, index, change, account)
 	if err == nil && isNew && s.NotifyUnspent != nil {
 		// This causes a lockup because wtxmgr is non-reentrant.
 		// TODO: move this call outside of wtxmgr and do not use
@@ -1011,7 +928,7 @@ func pkScriptType(pkScript []byte) scriptType {
 	return scriptTypeUnspecified
 }
 
-func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta,
+func (s *Store) addCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta,
 	index uint32, change bool, account uint32) (bool, error) {
 	opCode := getP2PKHOpCode(rec.MsgTx.TxOut[index].PkScript)
 	isCoinbase := blockchain.IsCoinBaseTx(&rec.MsgTx)
@@ -1085,27 +1002,18 @@ func (s *Store) addCredit(ns walletdb.Bucket, rec *TxRecord, block *BlockMeta,
 // was not mined, the output is updated so its value reflects the block
 // it was included in.
 //
-func (s *Store) AddMultisigOut(rec *TxRecord, block *BlockMeta,
+func (s *Store) AddMultisigOut(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta,
 	index uint32) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
 
 	if int(index) >= len(rec.MsgTx.TxOut) {
 		str := "transaction output does not exist"
 		return storeError(ErrInput, str, nil)
 	}
 
-	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		return s.addMultisigOut(ns, rec, block, index)
-	})
+	return s.addMultisigOut(ns, rec, block, index)
 }
 
-func (s *Store) addMultisigOut(ns walletdb.Bucket, rec *TxRecord,
+func (s *Store) addMultisigOut(ns walletdb.ReadWriteBucket, rec *TxRecord,
 	block *BlockMeta, index uint32) error {
 	empty := &chainhash.Hash{}
 
@@ -1201,22 +1109,13 @@ func (s *Store) addMultisigOut(ns walletdb.Bucket, rec *TxRecord,
 
 // SpendMultisigOut spends a multisignature output by making it spent in
 // the general bucket and removing it from the unspent bucket.
-func (s *Store) SpendMultisigOut(op *wire.OutPoint, spendHash chainhash.Hash,
-	spendIndex uint32) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+func (s *Store) SpendMultisigOut(ns walletdb.ReadWriteBucket, op *wire.OutPoint,
+	spendHash chainhash.Hash, spendIndex uint32) error {
 
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
-
-	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		return s.spendMultisigOut(ns, op, spendHash, spendIndex)
-	})
+	return s.spendMultisigOut(ns, op, spendHash, spendIndex)
 }
 
-func (s *Store) spendMultisigOut(ns walletdb.Bucket, op *wire.OutPoint,
+func (s *Store) spendMultisigOut(ns walletdb.ReadWriteBucket, op *wire.OutPoint,
 	spendHash chainhash.Hash, spendIndex uint32) error {
 	// Mark the output spent.
 	key := keyMultisigOut(op.Hash, op.Index)
@@ -1262,25 +1161,15 @@ func (s *Store) spendMultisigOut(ns walletdb.Bucket, op *wire.OutPoint,
 
 // Rollback removes all blocks at height onwards, moving any transactions within
 // each block to the unconfirmed pool.
-func (s *Store) Rollback(height int32) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
-
-	return scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		return s.rollback(ns, height)
-	})
+func (s *Store) Rollback(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, height int32) error {
+	return s.rollback(ns, addrmgrNs, height)
 }
 
 // rollbackTransaction removes a transaction that was previously contained
 // in a block during reorganization handling.
 func (s *Store) rollbackTransaction(hash chainhash.Hash, b *blockRecord,
 	coinBaseCredits *[]wire.OutPoint, minedBalance *dcrutil.Amount,
-	ns walletdb.Bucket, isParent bool) error {
+	ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, isParent bool) error {
 	txHash := &hash
 
 	recKey := keyTxRecord(txHash, &b.Block)
@@ -1491,7 +1380,7 @@ func (s *Store) rollbackTransaction(hash chainhash.Hash, b *blockRecord,
 		scrLoc := rec.MsgTx.PkScriptLocs()[i]
 		scrLen := len(rec.MsgTx.TxOut[i].PkScript)
 
-		acct, err := s.fetchAccountForPkScript(v, nil, output.PkScript)
+		acct, err := s.fetchAccountForPkScript(addrmgrNs, v, nil, output.PkScript)
 		if err != nil {
 			return err
 		}
@@ -1541,7 +1430,7 @@ func (s *Store) rollbackTransaction(hash chainhash.Hash, b *blockRecord,
 	return nil
 }
 
-func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
+func (s *Store) rollback(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, height int32) error {
 	minedBalanceWallet, err := fetchMinedBalance(ns)
 	if err != nil {
 		return err
@@ -1627,12 +1516,12 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 		// removed backwards.
 		for j := len(stakeTxFromBlock) - 1; j >= 0; j-- {
 			s.rollbackTransaction(stakeTxFromBlock[j], b, coinBaseCredits,
-				minedBalance, ns, false)
+				minedBalance, ns, addrmgrNs, false)
 		}
 		if parentIsValid {
 			for j := len(regularTxFromParent) - 1; j >= 0; j-- {
 				s.rollbackTransaction(regularTxFromParent[j], pb,
-					coinBaseCredits, minedBalance, ns, true)
+					coinBaseCredits, minedBalance, ns, addrmgrNs, true)
 			}
 		}
 
@@ -1668,27 +1557,13 @@ func (s *Store) rollback(ns walletdb.Bucket, height int32) error {
 
 // UnspentOutputs returns all unspent received transaction outputs.
 // The order is undefined.
-func (s *Store) UnspentOutputs() ([]*Credit, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var credits []*Credit
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		credits, err = s.unspentOutputs(ns)
-		return err
-	})
-	return credits, err
+func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]*Credit, error) {
+	return s.unspentOutputs(ns)
 }
 
 // outputCreditInfo fetches information about a credit from the database,
 // fills out a credit struct, and returns it.
-func (s *Store) outputCreditInfo(ns walletdb.Bucket, op wire.OutPoint,
+func (s *Store) outputCreditInfo(ns walletdb.ReadBucket, op wire.OutPoint,
 	block *Block) (*Credit, error) {
 	// It has to exists as a credit or an unmined credit.
 	// Look both of these up. If it doesn't, throw an
@@ -1813,13 +1688,13 @@ func (s *Store) outputCreditInfo(ns walletdb.Bucket, op wire.OutPoint,
 	return c, nil
 }
 
-func (s *Store) unspentOutputs(ns walletdb.Bucket) ([]*Credit, error) {
+func (s *Store) unspentOutputs(ns walletdb.ReadBucket) ([]*Credit, error) {
 	var unspent []*Credit
 	numUtxos := 0
 
 	var op wire.OutPoint
 	var block Block
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
 			return err
@@ -1853,7 +1728,7 @@ func (s *Store) unspentOutputs(ns walletdb.Bucket) ([]*Credit, error) {
 		return nil, storeError(ErrDatabase, str, err)
 	}
 
-	err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+	err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 		if existsRawUnminedInput(ns, k) != nil {
 			// Output is spent by an unmined transaction.
 			// Skip to next unmined credit.
@@ -1890,29 +1765,15 @@ func (s *Store) unspentOutputs(ns walletdb.Bucket) ([]*Credit, error) {
 
 // UnspentOutpoints returns all unspent received transaction outpoints.
 // The order is undefined.
-func (s *Store) UnspentOutpoints() ([]*wire.OutPoint, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var credits []*wire.OutPoint
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		credits, err = s.unspentOutpoints(ns)
-		return err
-	})
-	return credits, err
+func (s *Store) UnspentOutpoints(ns walletdb.ReadBucket) ([]*wire.OutPoint, error) {
+	return s.unspentOutpoints(ns)
 }
 
-func (s *Store) unspentOutpoints(ns walletdb.Bucket) ([]*wire.OutPoint, error) {
+func (s *Store) unspentOutpoints(ns walletdb.ReadBucket) ([]*wire.OutPoint, error) {
 	var unspent []*wire.OutPoint
 	numUtxos := 0
 
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		var op wire.OutPoint
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
@@ -1950,7 +1811,7 @@ func (s *Store) unspentOutpoints(ns walletdb.Bucket) ([]*wire.OutPoint, error) {
 	}
 
 	var unspentZC []*wire.OutPoint
-	err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+	err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 		if existsRawUnminedInput(ns, k) != nil {
 			// Output is spent by an unmined transaction.
 			// Skip to next unmined credit.
@@ -1989,33 +1850,21 @@ func (s *Store) unspentOutpoints(ns walletdb.Bucket) ([]*wire.OutPoint, error) {
 
 // UnspentTickets returns all unspent tickets that are known for this wallet.
 // The order is undefined.
-func (s *Store) UnspentTickets(syncHeight int32,
+func (s *Store) UnspentTickets(ns walletdb.ReadBucket, syncHeight int32,
 	includeImmature bool) ([]chainhash.Hash, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var tickets []chainhash.Hash
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		tickets, err = s.unspentTickets(ns, syncHeight, includeImmature)
-		return err
-	})
-	return tickets, err
+	return s.unspentTickets(ns, syncHeight, includeImmature)
 }
 
-func (s *Store) unspentTickets(ns walletdb.Bucket, syncHeight int32,
+func (s *Store) unspentTickets(ns walletdb.ReadBucket, syncHeight int32,
 	includeImmature bool) ([]chainhash.Hash, error) {
+
 	var tickets []chainhash.Hash
 	numTickets := 0
 
 	var op wire.OutPoint
 	var block Block
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
 			return err
@@ -2054,7 +1903,7 @@ func (s *Store) unspentTickets(ns walletdb.Bucket, syncHeight int32,
 	}
 
 	if includeImmature {
-		err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+		err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 			if existsRawUnminedInput(ns, k) != nil {
 				// Output is spent by an unmined transaction.
 				// Skip to next unmined credit.
@@ -2098,25 +1947,11 @@ type MultisigCredit struct {
 
 // GetMultisigCredit takes an outpoint and returns multisignature
 // credit data stored about it.
-func (s *Store) GetMultisigCredit(op *wire.OutPoint) (*MultisigCredit, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var credit *MultisigCredit
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		credit, err = s.getMultisigCredit(ns, op)
-		return err
-	})
-	return credit, err
+func (s *Store) GetMultisigCredit(ns walletdb.ReadBucket, op *wire.OutPoint) (*MultisigCredit, error) {
+	return s.getMultisigCredit(ns, op)
 }
 
-func (s *Store) getMultisigCredit(ns walletdb.Bucket,
+func (s *Store) getMultisigCredit(ns walletdb.ReadBucket,
 	op *wire.OutPoint) (*MultisigCredit, error) {
 	if op == nil {
 		str := fmt.Sprintf("missing input outpoint")
@@ -2166,26 +2001,11 @@ func (s *Store) getMultisigCredit(ns walletdb.Bucket,
 
 // GetMultisigOutput takes an outpoint and returns multisignature
 // credit data stored about it.
-func (s *Store) GetMultisigOutput(op *wire.OutPoint) (*MultisigOut, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var credit *MultisigOut
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		credit, err = s.getMultisigOutput(ns, op)
-		return err
-	})
-	return credit, err
+func (s *Store) GetMultisigOutput(ns walletdb.ReadBucket, op *wire.OutPoint) (*MultisigOut, error) {
+	return s.getMultisigOutput(ns, op)
 }
 
-func (s *Store) getMultisigOutput(ns walletdb.Bucket,
-	op *wire.OutPoint) (*MultisigOut, error) {
+func (s *Store) getMultisigOutput(ns walletdb.ReadBucket, op *wire.OutPoint) (*MultisigOut, error) {
 	if op == nil {
 		str := fmt.Sprintf("missing input outpoint")
 		return nil, storeError(ErrInput, str, nil)
@@ -2211,29 +2031,15 @@ func (s *Store) getMultisigOutput(ns walletdb.Bucket,
 
 // UnspentMultisigCredits returns all unspent multisignature P2SH credits in
 // the wallet.
-func (s *Store) UnspentMultisigCredits() ([]*MultisigCredit, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var credits []*MultisigCredit
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		credits, err = s.unspentMultisigCredits(ns)
-		return err
-	})
-	return credits, err
+func (s *Store) UnspentMultisigCredits(ns walletdb.ReadBucket) ([]*MultisigCredit, error) {
+	return s.unspentMultisigCredits(ns)
 }
 
-func (s *Store) unspentMultisigCredits(ns walletdb.Bucket) ([]*MultisigCredit,
+func (s *Store) unspentMultisigCredits(ns walletdb.ReadBucket) ([]*MultisigCredit,
 	error) {
 	var unspentKeys [][]byte
 
-	err := ns.Bucket(bucketMultisigUsp).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketMultisigUsp).ForEach(func(k, v []byte) error {
 		unspentKeys = append(unspentKeys, k)
 		return nil
 	})
@@ -2280,26 +2086,13 @@ func (s *Store) unspentMultisigCredits(ns walletdb.Bucket) ([]*MultisigCredit,
 
 // UnspentMultisigCreditsForAddress returns all unspent multisignature P2SH
 // credits in the wallet for some specified address.
-func (s *Store) UnspentMultisigCreditsForAddress(
+func (s *Store) UnspentMultisigCreditsForAddress(ns walletdb.ReadBucket,
 	addr dcrutil.Address) ([]*MultisigCredit, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var credits []*MultisigCredit
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		credits, err = s.unspentMultisigCreditsForAddress(ns, addr)
-		return err
-	})
-	return credits, err
+	return s.unspentMultisigCreditsForAddress(ns, addr)
 }
 
-func (s *Store) unspentMultisigCreditsForAddress(ns walletdb.Bucket,
+func (s *Store) unspentMultisigCreditsForAddress(ns walletdb.ReadBucket,
 	addr dcrutil.Address) ([]*MultisigCredit, error) {
 	// Make sure the address is P2SH, then get the
 	// Hash160 for the script from the address.
@@ -2312,7 +2105,7 @@ func (s *Store) unspentMultisigCreditsForAddress(ns walletdb.Bucket,
 	}
 
 	var unspentKeys [][]byte
-	err := ns.Bucket(bucketMultisigUsp).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketMultisigUsp).ForEach(func(k, v []byte) error {
 		unspentKeys = append(unspentKeys, k)
 		return nil
 	})
@@ -2367,24 +2160,11 @@ func (s *Store) unspentMultisigCreditsForAddress(ns walletdb.Bucket,
 // UnspentOutputsForAmount returns all non-stake outputs that sum up to the
 // amount passed. If not enough funds are found, a nil pointer is returned
 // without error.
-func (s *Store) UnspentOutputsForAmount(amt dcrutil.Amount, height int32,
-	minConf int32, all bool, account uint32) ([]*Credit, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+func (s *Store) UnspentOutputsForAmount(ns, addrmgrNs walletdb.ReadBucket,
+	amt dcrutil.Amount, height int32, minConf int32, all bool,
+	account uint32) ([]*Credit, error) {
 
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var credits []*Credit
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		credits, err = s.unspentOutputsForAmount(ns, amt, height, minConf,
-			all, account)
-		return err
-	})
-	return credits, err
+	return s.unspentOutputsForAmount(ns, addrmgrNs, amt, height, minConf, all, account)
 }
 
 type minimalCredit struct {
@@ -2423,7 +2203,7 @@ func confirms(txHeight, curHeight int32) int32 {
 
 // outputCreditInfo fetches information about a credit from the database,
 // fills out a credit struct, and returns it.
-func (s *Store) fastCreditPkScriptLookup(ns walletdb.Bucket, credKey []byte,
+func (s *Store) fastCreditPkScriptLookup(ns walletdb.ReadBucket, credKey []byte,
 	unminedCredKey []byte) ([]byte, error) {
 	// It has to exists as a credit or an unmined credit.
 	// Look both of these up. If it doesn't, throw an
@@ -2491,7 +2271,7 @@ func (s *Store) fastCreditPkScriptLookup(ns walletdb.Bucket, credKey []byte,
 
 // minimalCreditToCredit looks up a minimal credit's data and prepares a Credit
 // from this data.
-func (s *Store) minimalCreditToCredit(ns walletdb.Bucket,
+func (s *Store) minimalCreditToCredit(ns walletdb.ReadBucket,
 	mc *minimalCredit) (*Credit, error) {
 	var cred *Credit
 
@@ -2539,14 +2319,14 @@ func (s *Store) minimalCreditToCredit(ns walletdb.Bucket,
 // errForEachBreakout is used to break out of a a wallet db ForEach loop.
 var errForEachBreakout = errors.New("forEachBreakout")
 
-func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amount,
+func (s *Store) unspentOutputsForAmount(ns, addrmgrNs walletdb.ReadBucket, needed dcrutil.Amount,
 	syncHeight int32, minConf int32, all bool, account uint32) ([]*Credit, error) {
 	var eligible []*minimalCredit
 	var toUse []*minimalCredit
 	var unspent []*Credit
 	found := dcrutil.Amount(0)
 
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		if found >= needed {
 			return errForEachBreakout
 		}
@@ -2574,7 +2354,7 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 			if err != nil {
 				return err
 			}
-			thisAcct, err := s.fetchAccountForPkScript(cVal, nil, pkScript)
+			thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, cVal, nil, pkScript)
 			if err != nil {
 				return err
 			}
@@ -2659,7 +2439,7 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 
 	// Unconfirmed transaction output handling.
 	if minConf == 0 {
-		err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+		err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 			if found >= needed {
 				return errForEachBreakout
 			}
@@ -2676,7 +2456,7 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 				if err != nil {
 					return err
 				}
-				thisAcct, err := s.fetchAccountForPkScript(nil, v, pkScript)
+				thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, nil, v, pkScript)
 				if err != nil {
 					return err
 				}
@@ -2774,12 +2554,9 @@ func (s *Store) unspentOutputsForAmount(ns walletdb.Bucket, needed dcrutil.Amoun
 }
 
 // InputSource provides a method (SelectInputs) to incrementally select unspent
-// outputs to use as transaction inputs.  It represents an open database
-// transaction view, and must be closed with CloseTransaction when input
-// selection is finished.
+// outputs to use as transaction inputs.
 type InputSource struct {
 	source func(dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error)
-	tx     walletdb.Tx
 }
 
 // SelectInputs selects transaction inputs to redeem unspent outputs stored in
@@ -2792,44 +2569,10 @@ func (s *InputSource) SelectInputs(target dcrutil.Amount) (dcrutil.Amount, []*wi
 	return s.source(target)
 }
 
-// CloseTransaction closes any transaction opened when creating the InputSource.
-// Calling SelectInputs will panic after CloseTransaction has been called.
-func (s *InputSource) CloseTransaction() error {
-	s.source = nil
-	if s.tx != nil {
-		return s.tx.Rollback()
-	}
-	return nil
-}
-
 // MakeInputSource creates an InputSource to redeem unspent outputs from an
 // account.  The minConf and syncHeight parameters are used to filter outputs
 // based on some spendable policy.
-func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) InputSource {
-	defer s.mutex.Unlock()
-	s.mutex.Lock()
-
-	sourceError := func(err error) InputSource {
-		f := func(dcrutil.Amount) (dcrutil.Amount, []*wire.TxIn, [][]byte, error) {
-			return 0, nil, nil, err
-		}
-		return InputSource{source: f, tx: nil}
-	}
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		err := storeError(ErrIsClosed, str, nil)
-		return sourceError(err)
-	}
-
-	tx, err := s.namespace.Begin(false)
-	if err != nil {
-		str := "cannot begin read transaction"
-		err := storeError(ErrDatabase, str, err)
-		return sourceError(err)
-	}
-	ns := tx.RootBucket()
-
+func (s *Store) MakeInputSource(ns, addrmgrNs walletdb.ReadBucket, account uint32, minConf, syncHeight int32) InputSource {
 	// Cursors to iterate over the (mined) unspent and unmined credit
 	// buckets.  These are closed over by the returned input source and
 	// reused across multiple calls.
@@ -2840,7 +2583,7 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 	// The simplest way to handle this is to branch to either cursor.First
 	// or cursor.Next depending on whether the cursor has already been
 	// created or not.
-	var bucketUnspentCursor, bucketUnminedCreditsCursor walletdb.Cursor
+	var bucketUnspentCursor, bucketUnminedCreditsCursor walletdb.ReadCursor
 
 	// Current inputs and their total value.  These are closed over by the
 	// returned input source and reused across multiple calls.
@@ -2854,8 +2597,8 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 		for currentTotal < target {
 			var k, v []byte
 			if bucketUnspentCursor == nil {
-				b := ns.Bucket(bucketUnspent)
-				bucketUnspentCursor = b.Cursor()
+				b := ns.NestedReadBucket(bucketUnspent)
+				bucketUnspentCursor = b.ReadCursor()
 				k, v = bucketUnspentCursor.First()
 			} else {
 				k, v = bucketUnspentCursor.Next()
@@ -2882,7 +2625,7 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 			if err != nil {
 				return 0, nil, nil, err
 			}
-			thisAcct, err := s.fetchAccountForPkScript(cVal, nil, pkScript)
+			thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, cVal, nil, pkScript)
 			if err != nil {
 				return 0, nil, nil, err
 			}
@@ -2972,8 +2715,8 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 		for currentTotal < target {
 			var k, v []byte
 			if bucketUnminedCreditsCursor == nil {
-				b := ns.Bucket(bucketUnminedCredits)
-				bucketUnminedCreditsCursor = b.Cursor()
+				b := ns.NestedReadBucket(bucketUnminedCredits)
+				bucketUnminedCreditsCursor = b.ReadCursor()
 				k, v = bucketUnminedCreditsCursor.First()
 			} else {
 				k, v = bucketUnminedCreditsCursor.Next()
@@ -2993,7 +2736,7 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 			if err != nil {
 				return 0, nil, nil, err
 			}
-			thisAcct, err := s.fetchAccountForPkScript(nil, v, pkScript)
+			thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, nil, v, pkScript)
 			if err != nil {
 				return 0, nil, nil, err
 			}
@@ -3043,7 +2786,7 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 		return currentTotal, currentInputs, currentScripts, nil
 	}
 
-	return InputSource{source: f, tx: tx}
+	return InputSource{source: f}
 }
 
 // Balance returns the spendable wallet balance (total value of all unspent
@@ -3053,36 +2796,23 @@ func (s *Store) MakeInputSource(account uint32, minConf, syncHeight int32) Input
 //
 // Balance may return unexpected results if syncHeight is lower than the block
 // height of the most recent mined transaction in the store.
-func (s *Store) Balance(minConf, syncHeight int32, balanceType BehaviorFlags,
-	all bool, account uint32) (dcrutil.Amount, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+func (s *Store) Balance(ns, addrmgrNs walletdb.ReadBucket, minConf, syncHeight int32,
+	balanceType BehaviorFlags, all bool, account uint32) (dcrutil.Amount, error) {
 
-	if s.isClosed {
-		str := "tx manager is closed"
-		return 0, storeError(ErrIsClosed, str, nil)
-	}
-
-	var amt dcrutil.Amount
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		amt, err = s.balance(ns, minConf, syncHeight, balanceType, all, account)
-		return err
-	})
-	return amt, err
+	return s.balance(ns, addrmgrNs, minConf, syncHeight, balanceType, all, account)
 }
 
-func (s *Store) balance(ns walletdb.Bucket, minConf int32, syncHeight int32,
+func (s *Store) balance(ns, addrmgrNs walletdb.ReadBucket, minConf int32, syncHeight int32,
 	balanceType BehaviorFlags, all bool, account uint32) (dcrutil.Amount, error) {
 	switch balanceType {
 	case BFBalanceFullScan:
-		return s.balanceFullScan(ns, minConf, syncHeight, all, account)
+		return s.balanceFullScan(ns, addrmgrNs, minConf, syncHeight, all, account)
 	case BFBalanceSpendable:
 		return s.balanceSpendable(ns, minConf, syncHeight)
 	case BFBalanceLockedStake:
-		return s.balanceLockedStake(ns, minConf, syncHeight, all, account)
+		return s.balanceLockedStake(ns, addrmgrNs, minConf, syncHeight, all, account)
 	case BFBalanceAll:
-		return s.balanceAll(ns, minConf, syncHeight, all, account)
+		return s.balanceAll(ns, addrmgrNs, minConf, syncHeight, all, account)
 	default:
 		return 0, fmt.Errorf("unknown balance type flag")
 	}
@@ -3091,11 +2821,11 @@ func (s *Store) balance(ns walletdb.Bucket, minConf int32, syncHeight int32,
 // balanceFullScan does a fullscan of the UTXO set to get the current balance.
 // It is less efficient than the other balance functions, but works fine for
 // accounts.
-func (s *Store) balanceFullScan(ns walletdb.Bucket, minConf int32,
+func (s *Store) balanceFullScan(ns, addrmgrNs walletdb.ReadBucket, minConf int32,
 	syncHeight int32, all bool, account uint32) (dcrutil.Amount, error) {
 	var amt dcrutil.Amount
 
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		if existsRawUnminedInput(ns, k) != nil {
 			// Output is spent by an unmined transaction.
 			// Skip to next unmined credit.
@@ -3119,7 +2849,7 @@ func (s *Store) balanceFullScan(ns walletdb.Bucket, minConf int32,
 			if err != nil {
 				return err
 			}
-			thisAcct, err := s.fetchAccountForPkScript(cVal, nil, pkScript)
+			thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, cVal, nil, pkScript)
 			if err != nil {
 				return err
 			}
@@ -3184,7 +2914,7 @@ func (s *Store) balanceFullScan(ns walletdb.Bucket, minConf int32,
 
 	// Unconfirmed transaction output handling.
 	if minConf == 0 {
-		err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+		err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 			// Make sure this output was not spent by an unmined transaction.
 			// If it was, skip this credit.
 			if existsRawUnminedInput(ns, k) != nil {
@@ -3197,7 +2927,7 @@ func (s *Store) balanceFullScan(ns walletdb.Bucket, minConf int32,
 				if err != nil {
 					return err
 				}
-				thisAcct, err := s.fetchAccountForPkScript(nil, v, pkScript)
+				thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, nil, v, pkScript)
 				if err != nil {
 					return err
 				}
@@ -3244,7 +2974,7 @@ func (s *Store) balanceFullScan(ns walletdb.Bucket, minConf int32,
 // Use only with minconf>0.
 // It is only to be used for simulation testing of wallet database
 // integrity.
-func (s *Store) balanceFullScanSimulated(ns walletdb.Bucket, minConf int32,
+func (s *Store) balanceFullScanSimulated(ns walletdb.ReadBucket, minConf int32,
 	syncHeight int32, unminedInputs map[string][]byte) (dcrutil.Amount, error) {
 	if minConf <= 0 {
 		return 0, storeError(ErrInput, "0 or negative minconf given "+
@@ -3253,7 +2983,7 @@ func (s *Store) balanceFullScanSimulated(ns walletdb.Bucket, minConf int32,
 
 	var amt dcrutil.Amount
 
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		_, ok := unminedInputs[strK]
 		if ok {
@@ -3326,7 +3056,7 @@ func (s *Store) balanceFullScanSimulated(ns walletdb.Bucket, minConf int32,
 
 // balanceSpendable is the current spendable balance of all accounts in the
 // wallet.
-func (s *Store) balanceSpendable(ns walletdb.Bucket, minConf int32,
+func (s *Store) balanceSpendable(ns walletdb.ReadBucket, minConf int32,
 	syncHeight int32) (dcrutil.Amount, error) {
 	bal, err := fetchMinedBalance(ns)
 	if err != nil {
@@ -3337,7 +3067,7 @@ func (s *Store) balanceSpendable(ns walletdb.Bucket, minConf int32,
 	// transaction, except for those spending tickets.
 	var op wire.OutPoint
 	var block Block
-	err = ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err = ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
 			return err
@@ -3374,7 +3104,7 @@ func (s *Store) balanceSpendable(ns walletdb.Bucket, minConf int32,
 		stopConf = int32(s.chainParams.CoinbaseMaturity)
 	}
 	lastHeight := syncHeight - stopConf
-	blockIt := makeReverseBlockIterator(ns)
+	blockIt := makeReadReverseBlockIterator(ns)
 	for blockIt.prev() {
 		blockIter := &blockIt.elem
 
@@ -3455,7 +3185,7 @@ func (s *Store) balanceSpendable(ns walletdb.Bucket, minConf int32,
 	// If unmined outputs are included, increment the balance for each
 	// output that is unspent.
 	if minConf == 0 {
-		err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+		err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 			if existsRawUnminedInput(ns, k) != nil {
 				// Output is spent by an unmined transaction.
 				// Skip to next unmined credit.
@@ -3487,7 +3217,7 @@ func (s *Store) balanceSpendable(ns walletdb.Bucket, minConf int32,
 // function that allows you to verify the integrity of a balance after
 // performing a rollback by using an old bucket of unmined inputs.
 // Use only with minconf>0.
-func (s *Store) balanceSpendableSimulated(ns walletdb.Bucket, minConf int32,
+func (s *Store) balanceSpendableSimulated(ns walletdb.ReadBucket, minConf int32,
 	syncHeight int32, unminedInputs map[string][]byte) (dcrutil.Amount, error) {
 	bal, err := fetchMinedBalance(ns)
 	if err != nil {
@@ -3498,7 +3228,7 @@ func (s *Store) balanceSpendableSimulated(ns walletdb.Bucket, minConf int32,
 	// transaction, except for those spending tickets.
 	var op wire.OutPoint
 	var block Block
-	err = ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err = ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
 			return err
@@ -3538,7 +3268,7 @@ func (s *Store) balanceSpendableSimulated(ns walletdb.Bucket, minConf int32,
 		stopConf = int32(s.chainParams.CoinbaseMaturity)
 	}
 	lastHeight := syncHeight - stopConf
-	blockIt := makeReverseBlockIterator(ns)
+	blockIt := makeReadReverseBlockIterator(ns)
 	for blockIt.prev() {
 		blockIter := &blockIt.elem
 
@@ -3623,12 +3353,12 @@ func (s *Store) balanceSpendableSimulated(ns walletdb.Bucket, minConf int32,
 
 // balanceLockedStake returns the current balance of the wallet that is locked
 // in tickets.
-func (s *Store) balanceLockedStake(ns walletdb.Bucket, minConf int32,
+func (s *Store) balanceLockedStake(ns, addrmgrNs walletdb.ReadBucket, minConf int32,
 	syncHeight int32, all bool, account uint32) (dcrutil.Amount, error) {
 	var amt dcrutil.Amount
 	var op wire.OutPoint
 
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
 			return err
@@ -3657,7 +3387,7 @@ func (s *Store) balanceLockedStake(ns walletdb.Bucket, minConf int32,
 			if err != nil {
 				return err
 			}
-			thisAcct, err := s.fetchAccountForPkScript(cVal, nil, pkScript)
+			thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, cVal, nil, pkScript)
 			if err != nil {
 				return err
 			}
@@ -3689,12 +3419,12 @@ func (s *Store) balanceLockedStake(ns walletdb.Bucket, minConf int32,
 }
 
 // balanceAll returns the balance of all unspent outputs.
-func (s *Store) balanceAll(ns walletdb.Bucket, minConf int32,
+func (s *Store) balanceAll(ns, addrmgrNs walletdb.ReadBucket, minConf int32,
 	syncHeight int32, all bool, account uint32) (dcrutil.Amount, error) {
 	var amt dcrutil.Amount
 	var op wire.OutPoint
 
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		err := readCanonicalOutPoint(k, &op)
 		if err != nil {
 			return err
@@ -3722,7 +3452,7 @@ func (s *Store) balanceAll(ns walletdb.Bucket, minConf int32,
 			if err != nil {
 				return err
 			}
-			thisAcct, err := s.fetchAccountForPkScript(cVal, nil, pkScript)
+			thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, cVal, nil, pkScript)
 			if err != nil {
 				return err
 			}
@@ -3746,7 +3476,7 @@ func (s *Store) balanceAll(ns walletdb.Bucket, minConf int32,
 
 	// Unconfirmed transaction output handling.
 	if minConf == 0 {
-		err = ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+		err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 			// Make sure this output was not spent by an unmined transaction.
 			// If it was, skip this credit.
 			if existsRawUnminedInput(ns, k) != nil {
@@ -3759,7 +3489,7 @@ func (s *Store) balanceAll(ns walletdb.Bucket, minConf int32,
 				if err != nil {
 					return err
 				}
-				thisAcct, err := s.fetchAccountForPkScript(nil, v, pkScript)
+				thisAcct, err := s.fetchAccountForPkScript(addrmgrNs, nil, v, pkScript)
 				if err != nil {
 					return err
 				}
@@ -3796,123 +3526,72 @@ type Balances struct {
 
 // AccountBalances returns a Balances struct for some given account at
 // syncHeight block height with all UTXOs that have minConf many confirms.
-func (s *Store) AccountBalances(syncHeight int32, minConf int32,
-	account uint32) (Balances, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+func (s *Store) AccountBalances(ns, addrmgrNs walletdb.ReadBucket, syncHeight int32,
+	minConf int32, account uint32) (Balances, error) {
 
-	if s.isClosed {
-		str := "tx manager is closed"
-		return Balances{}, storeError(ErrIsClosed, str, nil)
+	bal, err := s.balanceFullScan(ns, addrmgrNs, minConf, syncHeight,
+		false, account)
+	if err != nil {
+		return Balances{}, err
 	}
 
-	var bals Balances
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		bal, err := s.balanceFullScan(ns, minConf, syncHeight,
-			false, account)
-		if err != nil {
-			return err
-		}
+	bal0Conf, err := s.balanceFullScan(ns, addrmgrNs, 0, syncHeight,
+		false, account)
+	if err != nil {
+		return Balances{}, err
+	}
 
-		bal0Conf, err := s.balanceFullScan(ns, 0, syncHeight,
-			false, account)
-		if err != nil {
-			return err
-		}
+	balTotal, err := s.balanceAll(ns, addrmgrNs, minConf, syncHeight,
+		false, account)
+	if err != nil {
+		return Balances{}, err
+	}
 
-		balTotal, err := s.balanceAll(ns, minConf, syncHeight,
-			false, account)
-		if err != nil {
-			return err
-		}
+	balAll, err := s.balanceAll(ns, addrmgrNs, 0, syncHeight,
+		false, account)
+	if err != nil {
+		return Balances{}, err
+	}
 
-		balAll, err := s.balanceAll(ns, 0, syncHeight,
-			false, account)
-		if err != nil {
-			return err
-		}
-
-		bals.Total = balTotal
-		bals.Spendable = bal
-		bals.ImmatureReward = balAll - bal0Conf
-
-		return nil
-	})
-
-	return bals, err
+	bals := Balances{
+		Total:          balTotal,
+		Spendable:      bal,
+		ImmatureReward: balAll - bal0Conf,
+	}
+	return bals, nil
 }
 
 // InsertTxScript is the exported version of insertTxScript.
-func (s *Store) InsertTxScript(script []byte) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
-
-	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		var err error
-		err = s.insertTxScript(ns, script)
-		return err
-	})
-	return err
+func (s *Store) InsertTxScript(ns walletdb.ReadWriteBucket, script []byte) error {
+	return s.insertTxScript(ns, script)
 }
 
 // insertTxScript inserts a transaction script into the database.
-func (s *Store) insertTxScript(ns walletdb.Bucket, script []byte) error {
+func (s *Store) insertTxScript(ns walletdb.ReadWriteBucket, script []byte) error {
 	return putTxScript(ns, script)
 }
 
 // GetTxScript is the exported version of getTxScript.
-func (s *Store) GetTxScript(hash []byte) ([]byte, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var script []byte
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		script = s.getTxScript(ns, hash)
-		return nil
-	})
-	return script, err
+func (s *Store) GetTxScript(ns walletdb.ReadBucket, hash []byte) ([]byte, error) {
+	return s.getTxScript(ns, hash), nil
 }
 
 // getTxScript fetches a transaction script from the database using
 // the RIPEMD160 hash as a key.
-func (s *Store) getTxScript(ns walletdb.Bucket, hash []byte) []byte {
+func (s *Store) getTxScript(ns walletdb.ReadBucket, hash []byte) []byte {
 	return existsTxScript(ns, hash)
 }
 
 // StoredTxScripts is the exported version of storedTxScripts.
-func (s *Store) StoredTxScripts() ([][]byte, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var scripts [][]byte
-	err := scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		localScripts, localErr := s.storedTxScripts(ns)
-		scripts = localScripts
-		return localErr
-	})
-	return scripts, err
+func (s *Store) StoredTxScripts(ns walletdb.ReadBucket) ([][]byte, error) {
+	return s.storedTxScripts(ns)
 }
 
 // storedTxScripts returns a slice of byte slices containing all the transaction
 // scripts currently stored in wallet.
-func (s *Store) storedTxScripts(ns walletdb.Bucket) ([][]byte, error) {
+func (s *Store) storedTxScripts(ns walletdb.ReadBucket) ([][]byte, error) {
 	var scripts [][]byte
-	err := ns.Bucket(bucketScripts).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadBucket(bucketScripts).ForEach(func(k, v []byte) error {
 		scripts = append(scripts, v)
 		return nil
 	})
@@ -3932,22 +3611,8 @@ func (s *Store) storedTxScripts(ns walletdb.Bucket) ([][]byte, error) {
 // UTXOs so wallet can further investigate whether or not they exist in daemon
 // and, if they don't, can trigger their deletion.
 //
-func (s *Store) RepairInconsistencies() ([]*wire.OutPoint, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var utxos []*wire.OutPoint
-	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		ut, localErr := s.repairInconsistencies(ns)
-		utxos = ut
-		return localErr
-	})
-	return utxos, err
+func (s *Store) RepairInconsistencies(ns walletdb.ReadWriteBucket) ([]*wire.OutPoint, error) {
+	return s.repairInconsistencies(ns)
 }
 
 type dbCredit struct {
@@ -3955,7 +3620,7 @@ type dbCredit struct {
 	bl *Block
 }
 
-func (s *Store) repairInconsistencies(ns walletdb.Bucket) ([]*wire.OutPoint,
+func (s *Store) repairInconsistencies(ns walletdb.ReadWriteBucket) ([]*wire.OutPoint,
 	error) {
 	var unspent []*wire.OutPoint
 	var badUnspent []*wire.OutPoint
@@ -3964,7 +3629,7 @@ func (s *Store) repairInconsistencies(ns walletdb.Bucket) ([]*wire.OutPoint,
 	// Unspent should map 1:1 with credits. If the credit can't be found, the utxo
 	// should be deleted. If the credit can be found but the transaction or block
 	// doesn't exist, the credit and unspent should be deleted.
-	err := ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	err := ns.NestedReadWriteBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		op := new(wire.OutPoint)
 		readCanonicalOutPoint(k, op)
 		bl := new(Block)
@@ -4028,23 +3693,11 @@ func (s *Store) repairInconsistencies(ns walletdb.Bucket) ([]*wire.OutPoint,
 // DeleteUnspent allows an external caller to delete unspent transaction outputs
 // of its choosing, e.g. if those unspent outpoint transactions are found to not
 // exist in the daemon.
-func (s *Store) DeleteUnspent(utxos []*wire.OutPoint) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
-
-	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		localErr := s.deleteUnspent(ns, utxos)
-		return localErr
-	})
-	return err
+func (s *Store) DeleteUnspent(ns walletdb.ReadWriteBucket, utxos []*wire.OutPoint) error {
+	return s.deleteUnspent(ns, utxos)
 }
 
-func (s *Store) deleteUnspent(ns walletdb.Bucket, utxos []*wire.OutPoint) error {
+func (s *Store) deleteUnspent(ns walletdb.ReadWriteBucket, utxos []*wire.OutPoint) error {
 	// Look up the credit and see if it exists; if it does, we want to
 	// get rid of that too.
 	for _, bad := range utxos {
@@ -4074,24 +3727,12 @@ func (s *Store) deleteUnspent(ns walletdb.Bucket, utxos []*wire.OutPoint) error 
 
 // RepairMinedBalance allows an external caller to attempt to fix the mined
 // balance with a full scan balance call.
-func (s *Store) RepairMinedBalance(curHeight int32) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if s.isClosed {
-		str := "tx manager is closed"
-		return storeError(ErrIsClosed, str, nil)
-	}
-
-	err := scopedUpdate(s.namespace, func(ns walletdb.Bucket) error {
-		localErr := s.repairMinedBalance(ns, curHeight)
-		return localErr
-	})
-	return err
+func (s *Store) RepairMinedBalance(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, curHeight int32) error {
+	return s.repairMinedBalance(ns, addrmgrNs, curHeight)
 }
 
-func (s *Store) repairMinedBalance(ns walletdb.Bucket, curHeight int32) error {
-	bal, err := s.balanceFullScan(ns, 1, curHeight, true, 0)
+func (s *Store) repairMinedBalance(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket, curHeight int32) error {
+	bal, err := s.balanceFullScan(ns, addrmgrNs, 1, curHeight, true, 0)
 	if err != nil {
 		return err
 	}
@@ -4277,29 +3918,15 @@ func (d1 *DatabaseContents) Equals(d2 *DatabaseContents, skipUnmined bool) (bool
 
 // DatabaseDump is a testing function for wallet that exports the contents of
 // all databases as a
-func (s *Store) DatabaseDump(height int32,
+func (s *Store) DatabaseDump(ns, addrmgrNs walletdb.ReadBucket, height int32,
 	oldUnminedInputs map[string][]byte) (*DatabaseContents, error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 
-	if s.isClosed {
-		str := "tx manager is closed"
-		return nil, storeError(ErrIsClosed, str, nil)
-	}
-
-	var dbDump *DatabaseContents
-	var err error
-	err = scopedView(s.namespace, func(ns walletdb.Bucket) error {
-		var localErr error
-		dbDump, localErr = s.generateDatabaseDump(ns, height, oldUnminedInputs)
-		return localErr
-	})
-	return dbDump, err
+	return s.generateDatabaseDump(ns, addrmgrNs, height, oldUnminedInputs)
 }
 
 // storedTxScripts returns a slice of byte slices containing all the transaction
 // scripts currently stored in wallet.
-func (s *Store) generateDatabaseDump(ns walletdb.Bucket,
+func (s *Store) generateDatabaseDump(ns, addrmgrNs walletdb.ReadBucket,
 	height int32, oldUnminedInputs map[string][]byte) (*DatabaseContents, error) {
 
 	dbDump := new(DatabaseContents)
@@ -4335,7 +3962,7 @@ func (s *Store) generateDatabaseDump(ns walletdb.Bucket,
 	}
 
 	if oldUnminedInputs == nil {
-		dbDump.OneConfCalcBalance, err = s.balanceFullScan(ns, 1, height, true,
+		dbDump.OneConfCalcBalance, err = s.balanceFullScan(ns, addrmgrNs, 1, height, true,
 			0)
 		if err != nil {
 			return nil, err
@@ -4348,59 +3975,59 @@ func (s *Store) generateDatabaseDump(ns walletdb.Bucket,
 		}
 	}
 
-	ns.Bucket(bucketBlocks).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketBlocks).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		vCopy := make([]byte, len(v), len(v))
 		copy(vCopy, v)
 		dbDump.BucketBlocks[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketTxRecords).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketTxRecords).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketTxRecords[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketCredits).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketCredits).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketCredits[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketUnspent).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketUnspent[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketDebits).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketDebits).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketDebits[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketUnmined).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketUnmined).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketUnmined[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketUnminedCredits[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketUnminedInputs).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketUnminedInputs).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketUnminedInputs[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketScripts).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketScripts).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketScripts[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketMultisig).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketMultisig).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketMultisig[strK] = append([]byte(nil), v...)
 		return nil
 	})
-	ns.Bucket(bucketMultisigUsp).ForEach(func(k, v []byte) error {
+	ns.NestedReadBucket(bucketMultisigUsp).ForEach(func(k, v []byte) error {
 		strK := hex.EncodeToString(k)
 		dbDump.BucketMultisigUsp[strK] = append([]byte(nil), v...)
 		return nil

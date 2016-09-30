@@ -104,7 +104,9 @@ func mainInt() int {
 	}
 	defer db.Close()
 	fmt.Println("Dropping wtxmgr namespace")
-	err = db.DeleteNamespace(wtxmgrNamespace)
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		return tx.DeleteTopLevelBucket(wtxmgrNamespace)
+	})
 	if err != nil && err != walletdb.ErrBucketNotFound {
 		fmt.Println("Failed to drop namespace:", err)
 		return 1

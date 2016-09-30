@@ -14,14 +14,10 @@ import (
 	"strings"
 
 	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/chaincfg/chainec"
 	"github.com/decred/dcrd/wire"
-	"github.com/decred/dcrutil"
 	"github.com/decred/dcrutil/hdkeychain"
-	"github.com/decred/dcrwallet/internal/legacy/keystore"
 	"github.com/decred/dcrwallet/internal/prompt"
 	"github.com/decred/dcrwallet/pgpwordlist"
-	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet"
 	"github.com/decred/dcrwallet/walletdb"
 	_ "github.com/decred/dcrwallet/walletdb/bdb"
@@ -42,62 +38,6 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 	}
 
 	return filepath.Join(dataDir, netname)
-}
-
-// convertLegacyKeystore converts all of the addresses in the passed legacy
-// key store to the new waddrmgr.Manager format.  Both the legacy keystore and
-// the new manager must be unlocked.
-func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Manager) error {
-	netParams := legacyKeyStore.Net()
-	blockStamp := waddrmgr.BlockStamp{
-		Height: 0,
-		Hash:   *netParams.GenesisHash,
-	}
-	for _, walletAddr := range legacyKeyStore.ActiveAddresses() {
-		switch addr := walletAddr.(type) {
-		case keystore.PubKeyAddress:
-			privKey, err := addr.PrivKey()
-			if err != nil {
-				fmt.Printf("WARN: Failed to obtain private key "+
-					"for address %v: %v\n", addr.Address(),
-					err)
-				continue
-			}
-
-			wif, err := dcrutil.NewWIF((chainec.PrivateKey)(privKey),
-				netParams, chainec.ECTypeSecp256k1)
-			if err != nil {
-				fmt.Printf("WARN: Failed to create wallet "+
-					"import format for address %v: %v\n",
-					addr.Address(), err)
-				continue
-			}
-
-			_, err = manager.ImportPrivateKey(wif, &blockStamp)
-			if err != nil {
-				fmt.Printf("WARN: Failed to import private "+
-					"key for address %v: %v\n",
-					addr.Address(), err)
-				continue
-			}
-
-		case keystore.ScriptAddress:
-			_, err := manager.ImportScript(addr.Script(), &blockStamp)
-			if err != nil {
-				fmt.Printf("WARN: Failed to import "+
-					"pay-to-script-hash script for "+
-					"address %v: %v\n", addr.Address(), err)
-				continue
-			}
-
-		default:
-			fmt.Printf("WARN: Skipping unrecognized legacy "+
-				"keystore type: %T\n", addr)
-			continue
-		}
-	}
-
-	return nil
 }
 
 // createWallet prompts the user for information needed to generate a new wallet

@@ -111,11 +111,10 @@ type StakePoolUser struct {
 type StakeStore struct {
 	mtx *sync.Mutex
 
-	namespace walletdb.Namespace
-	Params    *chaincfg.Params
-	Manager   *waddrmgr.Manager
-	chainSvr  *walletchain.RPCClient
-	isClosed  bool
+	Params   *chaincfg.Params
+	Manager  *waddrmgr.Manager
+	chainSvr *walletchain.RPCClient
+	isClosed bool
 
 	ownedSStxs map[chainhash.Hash]struct{}
 }
@@ -158,7 +157,7 @@ func (s *StakeStore) addHashToStore(hash *chainhash.Hash) {
 }
 
 // insertSStx inserts an SStx into the store.
-func (s *StakeStore) insertSStx(sstx *dcrutil.Tx, voteBits uint16) error {
+func (s *StakeStore) insertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, voteBits uint16) error {
 	// If we already have the SStx, no need to
 	// try to include twice.
 	exists := s.checkHashInStore(sstx.Sha())
@@ -176,13 +175,7 @@ func (s *StakeStore) insertSStx(sstx *dcrutil.Tx, voteBits uint16) error {
 	}
 
 	// Add the SStx to the database.
-	err := s.namespace.Update(func(tx walletdb.Tx) error {
-		if putErr := putSStxRecord(tx, record, voteBits); putErr != nil {
-			return putErr
-		}
-
-		return nil
-	})
+	err := putSStxRecord(ns, record, voteBits)
 	if err != nil {
 		return err
 	}
@@ -195,7 +188,7 @@ func (s *StakeStore) insertSStx(sstx *dcrutil.Tx, voteBits uint16) error {
 
 // InsertSStx is the exported version of insertSStx that is safe for concurrent
 // access.
-func (s *StakeStore) InsertSStx(sstx *dcrutil.Tx, voteBits uint16) error {
+func (s *StakeStore) InsertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, voteBits uint16) error {
 	if s.isClosed {
 		str := "stake store is closed"
 		return stakeStoreError(ErrStoreClosed, str, nil)
@@ -204,12 +197,12 @@ func (s *StakeStore) InsertSStx(sstx *dcrutil.Tx, voteBits uint16) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.insertSStx(sstx, voteBits)
+	return s.insertSStx(ns, sstx, voteBits)
 }
 
 // sstxVoteBits fetches the intended voteBits for a given SStx. This per-
 // ticket voteBits will override the default voteBits set by the wallet.
-func (s *StakeStore) sstxVoteBits(sstx *chainhash.Hash) (bool, uint16, error) {
+func (s *StakeStore) sstxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) (bool, uint16, error) {
 	// If we already have the SStx, no need to
 	// try to include twice.
 	exists := s.checkHashInStore(sstx)
@@ -219,17 +212,7 @@ func (s *StakeStore) sstxVoteBits(sstx *chainhash.Hash) (bool, uint16, error) {
 	}
 
 	// Attempt to update the SStx in the database.
-	voteBitsSet := false
-	voteBits := uint16(0)
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		var fetchErr error
-		if voteBitsSet, voteBits, fetchErr = fetchSStxRecordVoteBits(tx,
-			sstx); fetchErr != nil {
-			return fetchErr
-		}
-
-		return nil
-	})
+	voteBitsSet, voteBits, err := fetchSStxRecordVoteBits(ns, sstx)
 	if err != nil {
 		return voteBitsSet, voteBits, err
 	}
@@ -239,7 +222,7 @@ func (s *StakeStore) sstxVoteBits(sstx *chainhash.Hash) (bool, uint16, error) {
 
 // SStxVoteBits is the exported version of sstxVoteBits that is
 // safe for concurrent access.
-func (s *StakeStore) SStxVoteBits(sstx *chainhash.Hash) (bool, uint16, error) {
+func (s *StakeStore) SStxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) (bool, uint16, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return false, 0, stakeStoreError(ErrStoreClosed, str, nil)
@@ -248,12 +231,12 @@ func (s *StakeStore) SStxVoteBits(sstx *chainhash.Hash) (bool, uint16, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.sstxVoteBits(sstx)
+	return s.sstxVoteBits(ns, sstx)
 }
 
 // updateSStxVoteBits updates the intended voteBits for a given SStx. This per-
 // ticket voteBits will override the default voteBits set by the wallet.
-func (s *StakeStore) updateSStxVoteBits(sstx *chainhash.Hash,
+func (s *StakeStore) updateSStxVoteBits(ns walletdb.ReadWriteBucket, sstx *chainhash.Hash,
 	voteBits uint16) error {
 	// If we already have the SStx, no need to
 	// try to include twice.
@@ -264,13 +247,7 @@ func (s *StakeStore) updateSStxVoteBits(sstx *chainhash.Hash,
 	}
 
 	// Attempt to update the SStx in the database.
-	err := s.namespace.Update(func(tx walletdb.Tx) error {
-		if updErr := updateSStxRecordVoteBits(tx, sstx, voteBits); updErr != nil {
-			return updErr
-		}
-
-		return nil
-	})
+	err := updateSStxRecordVoteBits(ns, sstx, voteBits)
 	if err != nil {
 		return err
 	}
@@ -280,7 +257,7 @@ func (s *StakeStore) updateSStxVoteBits(sstx *chainhash.Hash,
 
 // UpdateSStxVoteBits is the exported version of updateSStxVoteBits that is
 // safe for concurrent access.
-func (s *StakeStore) UpdateSStxVoteBits(sstx *chainhash.Hash,
+func (s *StakeStore) UpdateSStxVoteBits(ns walletdb.ReadWriteBucket, sstx *chainhash.Hash,
 	voteBits uint16) error {
 	if s.isClosed {
 		str := "stake store is closed"
@@ -290,7 +267,7 @@ func (s *StakeStore) UpdateSStxVoteBits(sstx *chainhash.Hash,
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.updateSStxVoteBits(sstx, voteBits)
+	return s.updateSStxVoteBits(ns, sstx, voteBits)
 }
 
 // dumpSStxHashes dumps the hashes of all owned SStxs. Note
@@ -330,7 +307,7 @@ func (s *StakeStore) DumpSStxHashes() ([]chainhash.Hash, error) {
 }
 
 // dumpSStxHashes dumps the hashes of all owned SStxs for some address.
-func (s *StakeStore) dumpSStxHashesForAddress(addr dcrutil.Address) ([]chainhash.Hash, error) {
+func (s *StakeStore) dumpSStxHashesForAddress(ns walletdb.ReadBucket, addr dcrutil.Address) ([]chainhash.Hash, error) {
 	// Extract the HASH160 script hash; if it's not 20 bytes
 	// long, return an error.
 	scriptHash := addr.ScriptAddress()
@@ -339,28 +316,19 @@ func (s *StakeStore) dumpSStxHashesForAddress(addr dcrutil.Address) ([]chainhash
 		return nil, stakeStoreError(ErrInput, str, nil)
 	}
 
-	var err error
 	allTickets := s.dumpSStxHashes()
 	var ticketsForAddr []chainhash.Hash
 
 	// Access the database and store the result locally.
-	err = s.namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		var thisScrHash []byte
-		for _, h := range allTickets {
-			thisScrHash, err = fetchSStxRecordSStxTicketScriptHash(tx, &h)
-			if err != nil {
-				return err
-			}
-			if bytes.Equal(scriptHash, thisScrHash) {
-				ticketsForAddr = append(ticketsForAddr, h)
-			}
+	for _, h := range allTickets {
+		thisScrHash, err := fetchSStxRecordSStxTicketScriptHash(ns, &h)
+		if err != nil {
+			str := "failure getting ticket 0th out script hashes from db"
+			return nil, stakeStoreError(ErrDatabase, str, err)
 		}
-		return nil
-	})
-	if err != nil {
-		str := "failure getting ticket 0th out script hashes from db"
-		return nil, stakeStoreError(ErrDatabase, str, err)
+		if bytes.Equal(scriptHash, thisScrHash) {
+			ticketsForAddr = append(ticketsForAddr, h)
+		}
 	}
 
 	return ticketsForAddr, nil
@@ -368,7 +336,7 @@ func (s *StakeStore) dumpSStxHashesForAddress(addr dcrutil.Address) ([]chainhash
 
 // DumpSStxHashesForAddress is the exported version of dumpSStxHashesForAddress
 // that is safe for concurrent access.
-func (s *StakeStore) DumpSStxHashesForAddress(addr dcrutil.Address) ([]chainhash.Hash, error) {
+func (s *StakeStore) DumpSStxHashesForAddress(ns walletdb.ReadBucket, addr dcrutil.Address) ([]chainhash.Hash, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -377,27 +345,19 @@ func (s *StakeStore) DumpSStxHashesForAddress(addr dcrutil.Address) ([]chainhash
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.dumpSStxHashesForAddress(addr)
+	return s.dumpSStxHashesForAddress(ns, addr)
 }
 
 // sstxAddress returns the address for a given ticket.
-func (s *StakeStore) sstxAddress(hash *chainhash.Hash) (dcrutil.Address, error) {
+func (s *StakeStore) sstxAddress(ns walletdb.ReadBucket, hash *chainhash.Hash) (dcrutil.Address, error) {
 	// Access the database and store the result locally.
-	var addr dcrutil.Address
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		thisScrHash, errFetch := fetchSStxRecordSStxTicketScriptHash(tx, hash)
-		if errFetch != nil {
-			return errFetch
-		}
-		var errAddr error
-		addr, errAddr = dcrutil.NewAddressScriptHashFromHash(thisScrHash,
-			s.Params)
-		if errAddr != nil {
-			return errAddr
-		}
-
-		return nil
-	})
+	thisScrHash, err := fetchSStxRecordSStxTicketScriptHash(ns, hash)
+	if err != nil {
+		str := "failure getting ticket 0th out script hashes from db"
+		return nil, stakeStoreError(ErrDatabase, str, err)
+	}
+	addr, err := dcrutil.NewAddressScriptHashFromHash(thisScrHash,
+		s.Params)
 	if err != nil {
 		str := "failure getting ticket 0th out script hashes from db"
 		return nil, stakeStoreError(ErrDatabase, str, err)
@@ -407,7 +367,7 @@ func (s *StakeStore) sstxAddress(hash *chainhash.Hash) (dcrutil.Address, error) 
 }
 
 // SStxAddress is the exported, concurrency safe version of sstxAddress.
-func (s *StakeStore) SStxAddress(hash *chainhash.Hash) (dcrutil.Address, error) {
+func (s *StakeStore) SStxAddress(ns walletdb.ReadBucket, hash *chainhash.Hash) (dcrutil.Address, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -416,46 +376,36 @@ func (s *StakeStore) SStxAddress(hash *chainhash.Hash) (dcrutil.Address, error) 
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.sstxAddress(hash)
+	return s.sstxAddress(ns, hash)
 }
 
 // dumpSSGenHashes fetches and returns the entire list of votes generated by
 // this wallet, including votes that were produced but were never included in
 // the blockchain.
-func (s *StakeStore) dumpSSGenHashes() ([]chainhash.Hash, error) {
+func (s *StakeStore) dumpSSGenHashes(ns walletdb.ReadBucket) ([]chainhash.Hash, error) {
 	var voteList []chainhash.Hash
 
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		var errForEach error
+	// Open the vite records database.
+	bucket := ns.NestedReadBucket(ssgenRecordsBucketName)
 
-		// Open the vite records database.
-		bucket := tx.RootBucket().Bucket(ssgenRecordsBucketName)
+	// Store each hash sequentially.
+	err := bucket.ForEach(func(k []byte, v []byte) error {
+		recs, errDeser := deserializeSSGenRecords(v)
+		if errDeser != nil {
+			return errDeser
+		}
 
-		// Store each hash sequentially.
-		errForEach = bucket.ForEach(func(k []byte, v []byte) error {
-			recs, errDeser := deserializeSSGenRecords(v)
-			if errDeser != nil {
-				return errDeser
-			}
-
-			for _, rec := range recs {
-				voteList = append(voteList, rec.txHash)
-			}
-			return nil
-		})
-
-		return errForEach
+		for _, rec := range recs {
+			voteList = append(voteList, rec.txHash)
+		}
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return voteList, nil
+	return voteList, err
 }
 
 // DumpSSGenHashes is the exported version of dumpSSGenHashes that is safe
 // for concurrent access.
-func (s *StakeStore) DumpSSGenHashes() ([]chainhash.Hash, error) {
+func (s *StakeStore) DumpSSGenHashes(ns walletdb.ReadBucket) ([]chainhash.Hash, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -464,43 +414,33 @@ func (s *StakeStore) DumpSSGenHashes() ([]chainhash.Hash, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.dumpSSGenHashes()
+	return s.dumpSSGenHashes(ns)
 }
 
 // dumpSSRtxHashes fetches the entire list of revocations generated by this
 // wallet.
-func (s *StakeStore) dumpSSRtxHashes() ([]chainhash.Hash, error) {
+func (s *StakeStore) dumpSSRtxHashes(ns walletdb.ReadBucket) ([]chainhash.Hash, error) {
 	var revocationList []chainhash.Hash
 
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		var errForEach error
+	// Open the revocation records database.
+	bucket := ns.NestedReadBucket(ssrtxRecordsBucketName)
 
-		// Open the revocation records database.
-		bucket := tx.RootBucket().Bucket(ssrtxRecordsBucketName)
+	// Store each hash sequentially.
+	err := bucket.ForEach(func(k []byte, v []byte) error {
+		rec, errDeser := deserializeSSRtxRecord(v)
+		if errDeser != nil {
+			return errDeser
+		}
 
-		// Store each hash sequentially.
-		errForEach = bucket.ForEach(func(k []byte, v []byte) error {
-			rec, errDeser := deserializeSSRtxRecord(v)
-			if errDeser != nil {
-				return errDeser
-			}
-
-			revocationList = append(revocationList, rec.txHash)
-			return nil
-		})
-
-		return errForEach
+		revocationList = append(revocationList, rec.txHash)
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return revocationList, nil
+	return revocationList, err
 }
 
 // DumpSSRtxHashes is the exported version of dumpSSRtxHashes that is safe
 // for concurrent access.
-func (s *StakeStore) DumpSSRtxHashes() ([]chainhash.Hash, error) {
+func (s *StakeStore) DumpSSRtxHashes(ns walletdb.ReadBucket) ([]chainhash.Hash, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -509,43 +449,33 @@ func (s *StakeStore) DumpSSRtxHashes() ([]chainhash.Hash, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.dumpSSRtxHashes()
+	return s.dumpSSRtxHashes(ns)
 }
 
 // dumpSSRtxTickets fetches the entire list of tickets spent as revocations
 // byt this wallet.
-func (s *StakeStore) dumpSSRtxTickets() ([]chainhash.Hash, error) {
+func (s *StakeStore) dumpSSRtxTickets(ns walletdb.ReadBucket) ([]chainhash.Hash, error) {
 	var ticketList []chainhash.Hash
 
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		var errForEach error
+	// Open the revocation records database.
+	bucket := ns.NestedReadBucket(ssrtxRecordsBucketName)
 
-		// Open the revocation records database.
-		bucket := tx.RootBucket().Bucket(ssrtxRecordsBucketName)
+	// Store each hash sequentially.
+	err := bucket.ForEach(func(k []byte, v []byte) error {
+		ticket, errDeser := chainhash.NewHash(k)
+		if errDeser != nil {
+			return errDeser
+		}
 
-		// Store each hash sequentially.
-		errForEach = bucket.ForEach(func(k []byte, v []byte) error {
-			ticket, errDeser := chainhash.NewHash(k)
-			if errDeser != nil {
-				return errDeser
-			}
-
-			ticketList = append(ticketList, *ticket)
-			return nil
-		})
-
-		return errForEach
+		ticketList = append(ticketList, *ticket)
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return ticketList, nil
+	return ticketList, err
 }
 
 // DumpSSRtxTickets is the exported version of dumpSSRtxTickets that is safe
 // for concurrent access.
-func (s *StakeStore) DumpSSRtxTickets() ([]chainhash.Hash, error) {
+func (s *StakeStore) DumpSSRtxTickets(ns walletdb.ReadBucket) ([]chainhash.Hash, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -554,30 +484,17 @@ func (s *StakeStore) DumpSSRtxTickets() ([]chainhash.Hash, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.dumpSSRtxTickets()
+	return s.dumpSSRtxTickets(ns)
 }
 
 // A function to get a single owned SStx.
-func (s *StakeStore) getSStx(hash *chainhash.Hash) (*sstxRecord, error) {
-	var record *sstxRecord
-
-	// Access the database and store the result locally.
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		record, err = fetchSStxRecord(tx, hash)
-
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return record, nil
+func (s *StakeStore) getSStx(ns walletdb.ReadBucket, hash *chainhash.Hash) (*sstxRecord, error) {
+	return fetchSStxRecord(ns, hash)
 }
 
 // insertSSGen inserts an SSGen record into the DB (keyed to the SStx it
 // spends.
-func (s *StakeStore) insertSSGen(blockHash *chainhash.Hash, blockHeight int64,
+func (s *StakeStore) insertSSGen(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64,
 	ssgenHash *chainhash.Hash, voteBits uint16, sstxHash *chainhash.Hash) error {
 
 	if blockHeight <= 0 {
@@ -593,23 +510,12 @@ func (s *StakeStore) insertSSGen(blockHash *chainhash.Hash, blockHeight int64,
 	}
 
 	// Add the SSGen to the database.
-	err := s.namespace.Update(func(tx walletdb.Tx) error {
-		if putErr := putSSGenRecord(tx, sstxHash, record); putErr != nil {
-			return putErr
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return putSSGenRecord(ns, sstxHash, record)
 }
 
 // InsertSSGen is the exported version of insertSSGen that is safe for
 // concurrent access.
-func (s *StakeStore) InsertSSGen(blockHash *chainhash.Hash, blockHeight int64,
+func (s *StakeStore) InsertSSGen(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64,
 	ssgenHash *chainhash.Hash, voteBits uint16, sstxHash *chainhash.Hash) error {
 	if s.isClosed {
 		str := "stake store is closed"
@@ -619,33 +525,21 @@ func (s *StakeStore) InsertSSGen(blockHash *chainhash.Hash, blockHeight int64,
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.insertSSGen(blockHash, blockHeight, ssgenHash, voteBits, sstxHash)
+	return s.insertSSGen(ns, blockHash, blockHeight, ssgenHash, voteBits, sstxHash)
 }
 
 // getSSGens gets a list of SSGens that have been generated for some stake
 // ticket.
-func (s *StakeStore) getSSGens(sstxHash *chainhash.Hash) ([]*ssgenRecord, error) {
-	var records []*ssgenRecord
-
-	// Access the database and store the result locally.
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		records, err = fetchSSGenRecords(tx, sstxHash)
-
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return records, nil
+func (s *StakeStore) getSSGens(ns walletdb.ReadBucket, sstxHash *chainhash.Hash) ([]*ssgenRecord, error) {
+	return fetchSSGenRecords(ns, sstxHash)
 }
 
 // SignVRTransaction signs a vote (SSGen) or revocation (SSRtx)
 // transaction. isSSGen indicates if it is an SSGen; if it's not,
 // it's an SSRtx.
-func (s *StakeStore) SignVRTransaction(msgTx *wire.MsgTx, sstx *dcrutil.Tx,
-	isSSGen bool) error {
+func (s *StakeStore) SignVRTransaction(waddrmgrNs walletdb.ReadBucket, msgTx *wire.MsgTx,
+	sstx *dcrutil.Tx, isSSGen bool) error {
+
 	if s.isClosed {
 		str := "stake store is closed"
 		return stakeStoreError(ErrStoreClosed, str, nil)
@@ -669,7 +563,7 @@ func (s *StakeStore) SignVRTransaction(msgTx *wire.MsgTx, sstx *dcrutil.Tx,
 	// look up the appropriate keys and scripts by address.
 	getKey := txscript.KeyClosure(func(addr dcrutil.Address) (
 		chainec.PrivateKey, bool, error) {
-		address, err := s.Manager.Address(addr)
+		address, err := s.Manager.Address(waddrmgrNs, addr)
 		if err != nil {
 			return nil, false, err
 		}
@@ -690,7 +584,7 @@ func (s *StakeStore) SignVRTransaction(msgTx *wire.MsgTx, sstx *dcrutil.Tx,
 
 	getScript := txscript.ScriptClosure(func(
 		addr dcrutil.Address) ([]byte, error) {
-		address, err := s.Manager.Address(addr)
+		address, err := s.Manager.Address(waddrmgrNs, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -748,11 +642,13 @@ var initSudsidyCacheOnce sync.Once
 
 // GenerateVote creates a new SSGen given a header hash, height, sstx
 // tx hash, and votebits.
-func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
-	sstxHash *chainhash.Hash, defaultVoteBits uint16, allowHighFees bool) (*StakeNotification, error) {
+func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
+	blockHash *chainhash.Hash, height int64, sstxHash *chainhash.Hash, defaultVoteBits uint16,
+	allowHighFees bool) (*StakeNotification, error) {
+
 	// 1. Fetch the SStx, then calculate all the values we'll need later for
 	// the generation of the SSGen tx outputs.
-	sstxRecord, err := s.getSStx(sstxHash)
+	sstxRecord, err := s.getSStx(ns, sstxHash)
 	if err != nil {
 		return nil, err
 	}
@@ -863,13 +759,13 @@ func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
 	}
 
 	// Sign the transaction.
-	err = s.SignVRTransaction(msgTx, sstx, true)
+	err = s.SignVRTransaction(waddrmgrNs, msgTx, sstx, true)
 	if err != nil {
 		return nil, err
 	}
 
 	// Store the information about the SSGen.
-	err = s.insertSSGen(blockHash,
+	err = s.insertSSGen(ns, blockHash,
 		height,
 		ssgenTx.Sha(),
 		voteBits,
@@ -904,8 +800,9 @@ func (s *StakeStore) generateVote(blockHash *chainhash.Hash, height int64,
 
 // insertSSRtx inserts an SSRtx record into the DB (keyed to the SStx it
 // spends.
-func (s *StakeStore) insertSSRtx(blockHash *chainhash.Hash, blockHeight int64,
+func (s *StakeStore) insertSSRtx(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64,
 	ssrtxHash *chainhash.Hash, sstxHash *chainhash.Hash) error {
+
 	if blockHeight <= 0 {
 		return fmt.Errorf("invalid SSRtx block height")
 	}
@@ -918,24 +815,14 @@ func (s *StakeStore) insertSSRtx(blockHash *chainhash.Hash, blockHeight int64,
 	}
 
 	// Add the SSRtx to the database.
-	err := s.namespace.Update(func(tx walletdb.Tx) error {
-		if putErr := putSSRtxRecord(tx, sstxHash, record); putErr != nil {
-			return putErr
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return putSSRtxRecord(ns, sstxHash, record)
 }
 
 // InsertSSRtx is the exported version of insertSSRtx that is safe for
 // concurrent access.
-func (s *StakeStore) InsertSSRtx(blockHash *chainhash.Hash, blockHeight int64,
+func (s *StakeStore) InsertSSRtx(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64,
 	ssrtxHash *chainhash.Hash, sstxHash *chainhash.Hash) error {
+
 	if s.isClosed {
 		str := "stake store is closed"
 		return stakeStoreError(ErrStoreClosed, str, nil)
@@ -944,36 +831,25 @@ func (s *StakeStore) InsertSSRtx(blockHash *chainhash.Hash, blockHeight int64,
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.insertSSRtx(blockHash, blockHeight, ssrtxHash, sstxHash)
+	return s.insertSSRtx(ns, blockHash, blockHeight, ssrtxHash, sstxHash)
 }
 
 // GetSSRtxs gets a list of SSRtxs that have been generated for some stake
 // ticket.
-func (s *StakeStore) getSSRtxs(sstxHash *chainhash.Hash) ([]*ssrtxRecord, error) {
-	var records []*ssrtxRecord
-
-	// Access the database and store the result locally.
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		var err error
-		records, err = fetchSSRtxRecords(tx, sstxHash)
-
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return records, nil
+func (s *StakeStore) getSSRtxs(ns walletdb.ReadBucket, sstxHash *chainhash.Hash) ([]*ssrtxRecord, error) {
+	return fetchSSRtxRecords(ns, sstxHash)
 }
 
 // GenerateRevocation generates a revocation (SSRtx), signs it, and
 // submits it by SendRawTransaction. It also stores a record of it
 // in the local database.
-func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
-	sstxHash *chainhash.Hash, allowHighFees bool) (*StakeNotification, error) {
+func (s *StakeStore) generateRevocation(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
+	blockHash *chainhash.Hash, height int64, sstxHash *chainhash.Hash,
+	allowHighFees bool) (*StakeNotification, error) {
+
 	// 1. Fetch the SStx, then calculate all the values we'll need later for
 	// the generation of the SSRtx tx outputs.
-	sstxRecord, err := s.getSStx(sstxHash)
+	sstxRecord, err := s.getSStx(ns, sstxHash)
 	if err != nil {
 		return nil, err
 	}
@@ -1048,13 +924,13 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 	}
 
 	// Sign the transaction.
-	err = s.SignVRTransaction(msgTx, sstx, false)
+	err = s.SignVRTransaction(waddrmgrNs, msgTx, sstx, false)
 	if err != nil {
 		return nil, err
 	}
 
 	// Store the information about the SSRtx.
-	err = s.insertSSRtx(blockHash,
+	err = s.insertSSRtx(ns, blockHash,
 		height,
 		ssrtxTx.Sha(),
 		sstx.Sha())
@@ -1088,11 +964,13 @@ func (s *StakeStore) generateRevocation(blockHash *chainhash.Hash, height int64,
 // HandleWinningTicketsNtfn scans the list of eligible tickets and, if any
 // of these tickets in the sstx store match these tickets, spends them as
 // votes.
-func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
+func (s StakeStore) HandleWinningTicketsNtfn(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
+	blockHash *chainhash.Hash,
 	blockHeight int64,
 	tickets []*chainhash.Hash,
 	defaultVoteBits uint16,
 	allowHighFees bool) ([]*StakeNotification, error) {
+
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -1122,7 +1000,7 @@ func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
 	voteErrors := make([]error, len(ticketsToPull), len(ticketsToPull))
 	// Matching tickets (yay!), generate some SSGen.
 	for i, ticket := range ticketsToPull {
-		ntfns[i], voteErrors[i] = s.generateVote(blockHash, blockHeight, ticket,
+		ntfns[i], voteErrors[i] = s.generateVote(ns, waddrmgrNs, blockHash, blockHeight, ticket,
 			defaultVoteBits, allowHighFees)
 	}
 
@@ -1146,7 +1024,8 @@ func (s StakeStore) HandleWinningTicketsNtfn(blockHash *chainhash.Hash,
 // HandleMissedTicketsNtfn scans the list of missed tickets and, if any
 // of these tickets in the sstx store match these tickets, spends them as
 // SSRtx.
-func (s StakeStore) HandleMissedTicketsNtfn(blockHash *chainhash.Hash,
+func (s StakeStore) HandleMissedTicketsNtfn(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
+	blockHash *chainhash.Hash,
 	blockHeight int64,
 	tickets []*chainhash.Hash,
 	allowHighFees bool) ([]*StakeNotification, error) {
@@ -1179,8 +1058,8 @@ func (s StakeStore) HandleMissedTicketsNtfn(blockHash *chainhash.Hash,
 	revocationErrors := make([]error, len(ticketsToPull), len(ticketsToPull))
 	// Matching tickets, generate some SSRtx.
 	for i, ticket := range ticketsToPull {
-		ntfns[i], revocationErrors[i] = s.generateRevocation(blockHash,
-			blockHeight, ticket, allowHighFees)
+		ntfns[i], revocationErrors[i] = s.generateRevocation(ns, waddrmgrNs,
+			blockHash, blockHeight, ticket, allowHighFees)
 	}
 
 	errStr := ""
@@ -1203,8 +1082,9 @@ func (s StakeStore) HandleMissedTicketsNtfn(blockHash *chainhash.Hash,
 // updateStakePoolUserTickets updates a stake pool ticket for a given user.
 // If the ticket does not currently exist in the database, it adds it. If it
 // does exist (the ticket hash exists), it replaces the old record.
-func (s *StakeStore) updateStakePoolUserTickets(user dcrutil.Address,
-	ticket *PoolTicket) error {
+func (s *StakeStore) updateStakePoolUserTickets(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
+	user dcrutil.Address, ticket *PoolTicket) error {
+
 	_, isScriptHash := user.(*dcrutil.AddressScriptHash)
 	_, isP2PKH := user.(*dcrutil.AddressPubKeyHash)
 	if !(isScriptHash || isP2PKH) {
@@ -1215,36 +1095,26 @@ func (s *StakeStore) updateStakePoolUserTickets(user dcrutil.Address,
 	scriptHash := new([20]byte)
 	copy(scriptHash[:], scriptHashB)
 
-	err := s.namespace.Update(func(tx walletdb.Tx) error {
-		if updErr := updateStakePoolUserTickets(tx, *scriptHash,
-			ticket); updErr != nil {
-			return updErr
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return updateStakePoolUserTickets(ns, *scriptHash, ticket)
 }
 
 // UpdateStakePoolUserTickets is the exported and concurrency safe form of
 // updateStakePoolUserTickets.
-func (s *StakeStore) UpdateStakePoolUserTickets(user dcrutil.Address,
-	ticket *PoolTicket) error {
+func (s *StakeStore) UpdateStakePoolUserTickets(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
+	user dcrutil.Address, ticket *PoolTicket) error {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.updateStakePoolUserTickets(user, ticket)
+	return s.updateStakePoolUserTickets(ns, waddrmgrNs, user, ticket)
 }
 
 // updateStakePoolUserInvalTickets updates the list of invalid stake pool
 // tickets for a given user. If the ticket does not currently exist in the
 // database, it adds it.
-func (s *StakeStore) updateStakePoolUserInvalTickets(user dcrutil.Address,
+func (s *StakeStore) updateStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address,
 	ticket *chainhash.Hash) error {
+
 	_, isScriptHash := user.(*dcrutil.AddressScriptHash)
 	_, isP2PKH := user.(*dcrutil.AddressPubKeyHash)
 	if !(isScriptHash || isP2PKH) {
@@ -1255,35 +1125,23 @@ func (s *StakeStore) updateStakePoolUserInvalTickets(user dcrutil.Address,
 	scriptHash := new([20]byte)
 	copy(scriptHash[:], scriptHashB)
 
-	err := s.namespace.Update(func(tx walletdb.Tx) error {
-		if updErr := updateStakePoolInvalUserTickets(tx, *scriptHash,
-			ticket); updErr != nil {
-			return updErr
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return updateStakePoolInvalUserTickets(ns, *scriptHash, ticket)
 }
 
 // UpdateStakePoolUserInvalTickets is the exported and concurrency safe form of
 // updateStakePoolUserInvalTickets.
-func (s *StakeStore) UpdateStakePoolUserInvalTickets(user dcrutil.Address,
+func (s *StakeStore) UpdateStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address,
 	ticket *chainhash.Hash) error {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.updateStakePoolUserInvalTickets(user, ticket)
+	return s.updateStakePoolUserInvalTickets(ns, user, ticket)
 }
 
 // stakePoolUserInfo returns the stake pool user information for a given stake
 // pool user, keyed to their P2SH voting address.
-func (s *StakeStore) stakePoolUserInfo(user dcrutil.Address) (*StakePoolUser,
-	error) {
+func (s *StakeStore) stakePoolUserInfo(ns walletdb.ReadBucket, user dcrutil.Address) (*StakePoolUser, error) {
 	_, isScriptHash := user.(*dcrutil.AddressScriptHash)
 	_, isP2PKH := user.(*dcrutil.AddressPubKeyHash)
 	if !(isScriptHash || isP2PKH) {
@@ -1296,91 +1154,77 @@ func (s *StakeStore) stakePoolUserInfo(user dcrutil.Address) (*StakePoolUser,
 
 	stakePoolUser := new(StakePoolUser)
 
-	err := s.namespace.View(func(tx walletdb.Tx) error {
-		// Catch missing user errors below and blank out the stake
-		// pool user information for the section if the user has
-		// no entries.
-		missingValidTickets, missingInvalidTickets := false, false
+	// Catch missing user errors below and blank out the stake
+	// pool user information for the section if the user has
+	// no entries.
+	missingValidTickets, missingInvalidTickets := false, false
 
-		userTickets, fetchErrVal := fetchStakePoolUserTickets(tx, *scriptHash)
-		if fetchErrVal != nil {
-			stakeMgrErr, is := fetchErrVal.(StakeStoreError)
-			if is {
-				missingValidTickets = stakeMgrErr.ErrorCode ==
-					ErrPoolUserTicketsNotFound
-			} else {
-				return fetchErrVal
-			}
+	userTickets, fetchErrVal := fetchStakePoolUserTickets(ns, *scriptHash)
+	if fetchErrVal != nil {
+		stakeMgrErr, is := fetchErrVal.(StakeStoreError)
+		if is {
+			missingValidTickets = stakeMgrErr.ErrorCode ==
+				ErrPoolUserTicketsNotFound
+		} else {
+			return nil, fetchErrVal
 		}
-		if missingValidTickets {
-			userTickets = make([]*PoolTicket, 0)
-		}
-
-		invalTickets, fetchErrInval := fetchStakePoolUserInvalTickets(tx,
-			*scriptHash)
-		if fetchErrInval != nil {
-			stakeMgrErr, is := fetchErrInval.(StakeStoreError)
-			if is {
-				missingInvalidTickets = stakeMgrErr.ErrorCode ==
-					ErrPoolUserInvalTcktsNotFound
-			} else {
-				return fetchErrInval
-			}
-		}
-		if missingInvalidTickets {
-			invalTickets = make([]*chainhash.Hash, 0)
-		}
-
-		stakePoolUser.Tickets = userTickets
-		stakePoolUser.InvalidTickets = invalTickets
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
+	if missingValidTickets {
+		userTickets = make([]*PoolTicket, 0)
+	}
+
+	invalTickets, fetchErrInval := fetchStakePoolUserInvalTickets(ns,
+		*scriptHash)
+	if fetchErrInval != nil {
+		stakeMgrErr, is := fetchErrInval.(StakeStoreError)
+		if is {
+			missingInvalidTickets = stakeMgrErr.ErrorCode ==
+				ErrPoolUserInvalTcktsNotFound
+		} else {
+			return nil, fetchErrInval
+		}
+	}
+	if missingInvalidTickets {
+		invalTickets = make([]*chainhash.Hash, 0)
+	}
+
+	stakePoolUser.Tickets = userTickets
+	stakePoolUser.InvalidTickets = invalTickets
 
 	return stakePoolUser, nil
 }
 
 // StakePoolUserInfo is the exported and concurrency safe form of
 // stakePoolUserInfo.
-func (s *StakeStore) StakePoolUserInfo(user dcrutil.Address) (*StakePoolUser,
-	error) {
+func (s *StakeStore) StakePoolUserInfo(ns walletdb.ReadBucket, user dcrutil.Address) (*StakePoolUser, error) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	return s.stakePoolUserInfo(user)
+	return s.stakePoolUserInfo(ns, user)
 }
 
 // loadManager returns a new stake manager that results from loading it from
 // the passed opened database.  The public passphrase is required to decrypt the
 // public keys.
-func (s *StakeStore) loadOwnedSStxs(namespace walletdb.Namespace) error {
+func (s *StakeStore) loadOwnedSStxs(ns walletdb.ReadBucket) error {
 	// Regenerate the list of tickets.
 	// Perform all database lookups in a read-only view.
 	ticketList := make(map[chainhash.Hash]struct{})
 
-	err := namespace.View(func(tx walletdb.Tx) error {
-		var errForEach error
+	// Open the sstx records database.
+	bucket := ns.NestedReadBucket(sstxRecordsBucketName)
 
-		// Open the sstx records database.
-		bucket := tx.RootBucket().Bucket(sstxRecordsBucketName)
+	// Store each key sequentially.
+	err := bucket.ForEach(func(k []byte, v []byte) error {
+		var errNewHash error
+		var hash *chainhash.Hash
 
-		// Store each key sequentially.
-		errForEach = bucket.ForEach(func(k []byte, v []byte) error {
-			var errNewHash error
-			var hash *chainhash.Hash
-
-			hash, errNewHash = chainhash.NewHash(k)
-			if errNewHash != nil {
-				return errNewHash
-			}
-			ticketList[*hash] = struct{}{}
-			return nil
-		})
-
-		return errForEach
+		hash, errNewHash = chainhash.NewHash(k)
+		if errNewHash != nil {
+			return errNewHash
+		}
+		ticketList[*hash] = struct{}{}
+		return nil
 	})
 	if err != nil {
 		return err
@@ -1397,13 +1241,11 @@ func (s *StakeStore) SetChainSvr(chainSvr *walletchain.RPCClient) {
 }
 
 // newStakeStore initializes a new stake store with the given parameters.
-func newStakeStore(namespace walletdb.Namespace, params *chaincfg.Params,
-	manager *waddrmgr.Manager) *StakeStore {
+func newStakeStore(params *chaincfg.Params, manager *waddrmgr.Manager) *StakeStore {
 	var mtx = &sync.Mutex{}
 
 	return &StakeStore{
 		mtx:        mtx,
-		namespace:  namespace,
 		Params:     params,
 		Manager:    manager,
 		chainSvr:   nil,
@@ -1412,27 +1254,30 @@ func newStakeStore(namespace walletdb.Namespace, params *chaincfg.Params,
 	}
 }
 
+// DoUpgrades performs any necessary upgrades to the stake manager contained in
+// the wallet database, namespaced by the top level bucket key namespaceKey.
+func DoUpgrades(db walletdb.DB, namespaceKey []byte) error {
+	// No upgrades
+	return nil
+}
+
 // Open loads an existing stake manager from the given namespace, waddrmgr, and
 // network parameters.
 //
 // A ManagerError with an error code of ErrNoExist will be returned if the
 // passed manager does not exist in the specified namespace.
-func Open(namespace walletdb.Namespace, manager *waddrmgr.Manager,
-	params *chaincfg.Params) (*StakeStore, error) {
+func Open(ns walletdb.ReadBucket, manager *waddrmgr.Manager, params *chaincfg.Params) (*StakeStore, error) {
 	// Return an error if the manager has NOT already been created in the
 	// given database namespace.
-	exists, err := stakeStoreExists(namespace)
-	if err != nil {
-		return nil, err
-	}
+	exists := stakeStoreExists(ns)
 	if !exists {
 		str := "the specified stake store/manager does not exist in db"
 		return nil, stakeStoreError(ErrNoExist, str, nil)
 	}
 
-	ss := newStakeStore(namespace, params, manager)
+	ss := newStakeStore(params, manager)
 
-	err = ss.loadOwnedSStxs(namespace)
+	err := ss.loadOwnedSStxs(ns)
 	if err != nil {
 		return nil, err
 	}
@@ -1443,20 +1288,17 @@ func Open(namespace walletdb.Namespace, manager *waddrmgr.Manager,
 // Create creates a new persistent stake manager in the passed database namespace.
 // A ManagerError with an error code of ErrAlreadyExists will be returned the
 // address manager already exists in the specified namespace.
-func Create(namespace walletdb.Namespace) error {
+func Create(ns walletdb.ReadWriteBucket) error {
 	// Return an error if the manager has already been created in the given
 	// database namespace.
-	exists, err := stakeStoreExists(namespace)
-	if err != nil {
-		return err
-	}
+	exists := stakeStoreExists(ns)
 	if exists {
 		str := "error, stake store exists already"
 		return stakeStoreError(ErrAlreadyExists, str, nil)
 	}
 
 	// Initialize the database for first use.
-	return initializeEmpty(namespace)
+	return initializeEmpty(ns)
 }
 
 // Close cleanly shuts down the stake store.

@@ -14,6 +14,7 @@ import (
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/internal/zero"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 // ManagedAddress is an interface that provides acces to information regarding
@@ -46,7 +47,7 @@ type ManagedAddress interface {
 	Compressed() bool
 
 	// Used returns true if the backing address has been used in a transaction.
-	Used() (bool, error)
+	Used(ns walletdb.ReadBucket) bool
 }
 
 // ManagedPubKeyAddress extends ManagedAddress and additionally provides the
@@ -191,8 +192,8 @@ func (a *managedAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *managedAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+func (a *managedAddress) Used(ns walletdb.ReadBucket) bool {
+	return a.manager.fetchUsed(ns, a.AddrHash())
 }
 
 // PubKey returns the public key associated with the address.
@@ -473,8 +474,8 @@ func (a *scriptAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *scriptAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+func (a *scriptAddress) Used(ns walletdb.ReadBucket) bool {
+	return a.manager.fetchUsed(ns, a.AddrHash())
 }
 
 // Script returns the script associated with the address.

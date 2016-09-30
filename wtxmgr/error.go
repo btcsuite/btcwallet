@@ -48,6 +48,10 @@ const (
 	// twice.
 	ErrDoubleSpend
 
+	// ErrNeedsUpgrade describes an error during store opening where the
+	// database contains an older version of the store.
+	ErrNeedsUpgrade
+
 	// ErrUnknownVersion describes an error where the store already exists
 	// but the database version is newer than latest version known to this
 	// software.  This likely indicates an outdated binary.

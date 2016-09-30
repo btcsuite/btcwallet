@@ -18,7 +18,6 @@ package rpcserver
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -154,7 +153,7 @@ func (s *walletServer) Network(ctx context.Context, req *pb.NetworkRequest) (
 func (s *walletServer) AccountNumber(ctx context.Context, req *pb.AccountNumberRequest) (
 	*pb.AccountNumberResponse, error) {
 
-	accountNum, err := s.wallet.Manager.LookupAccount(req.AccountName)
+	accountNum, err := s.wallet.AccountNumber(req.AccountName)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -250,24 +249,13 @@ func (s *walletServer) NextAddress(ctx context.Context, req *pb.NextAddressReque
 		return nil, translateError(err)
 	}
 
-	ainfo, err := s.wallet.Manager.Address(addr)
+	pubKey, err := s.wallet.PubKeyForAddress(addr)
 	if err != nil {
-		return nil, grpc.Errorf(codes.Internal,
-			"Unable to find generated address in address manager")
+		return nil, translateError(err)
 	}
-	mpka, ok := ainfo.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return nil, grpc.Errorf(codes.Internal,
-			"Unable to cast returned address data as ManagedPubKeyAddress")
-	}
-	pubKeyBytes, err := hex.DecodeString(mpka.ExportPubKey())
+	pubKeyAddr, err := dcrutil.NewAddressSecpPubKey(pubKey.Serialize(), s.wallet.ChainParams())
 	if err != nil {
-		return nil, err
-	}
-	pubKeyAddr, err := dcrutil.NewAddressSecpPubKey(pubKeyBytes,
-		s.wallet.ChainParams())
-	if err != nil {
-		return nil, err
+		return nil, translateError(err)
 	}
 
 	return &pb.NextAddressResponse{
@@ -436,62 +424,32 @@ func confirms(txHeight, curHeight int32) int32 {
 func (s *walletServer) FundTransaction(ctx context.Context, req *pb.FundTransactionRequest) (
 	*pb.FundTransactionResponse, error) {
 
-	// TODO: A predicate function for selecting outputs should be created
-	// and passed to a database view of just a particular account's utxos to
-	// prevent reading every unspent transaction output from every account
-	// into memory at once.
-
-	syncBlock := s.wallet.Manager.SyncedTo()
-
-	outputs, err := s.wallet.TxStore.UnspentOutputs()
+	policy := wallet.OutputSelectionPolicy{
+		Account:               req.Account,
+		RequiredConfirmations: req.RequiredConfirmations,
+	}
+	unspentOutputs, err := s.wallet.UnspentOutputs(policy)
 	if err != nil {
 		return nil, translateError(err)
 	}
 
-	selectedOutputs := make([]*pb.FundTransactionResponse_PreviousOutput, 0, len(outputs))
+	selectedOutputs := make([]*pb.FundTransactionResponse_PreviousOutput, 0, len(unspentOutputs))
 	var totalAmount dcrutil.Amount
-	for i := range outputs {
-		output := outputs[i]
-
-		if !confirmed(req.RequiredConfirmations, output.Height, syncBlock.Height) {
-			continue
-		}
-		if !req.IncludeImmatureCoinbases && output.FromCoinBase &&
-			!confirmed(int32(s.wallet.ChainParams().CoinbaseMaturity), output.Height, syncBlock.Height) {
-			continue
-		}
-
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			txscript.DefaultScriptVersion, output.PkScript, s.wallet.ChainParams())
-		if err != nil || len(addrs) == 0 {
-			// Cannot determine which account this belongs to
-			// without a valid address.  Fix this by saving
-			// outputs per account (per-account wtxmgr).
-			continue
-		}
-		outputAcct, err := s.wallet.Manager.AddrAccount(addrs[0])
-		if err != nil {
-			return nil, translateError(err)
-		}
-		if outputAcct != req.Account {
-			continue
-		}
-
+	for _, output := range unspentOutputs {
 		selectedOutputs = append(selectedOutputs, &pb.FundTransactionResponse_PreviousOutput{
 			TransactionHash: output.OutPoint.Hash[:],
-			OutputIndex:     output.Index,
-			Amount:          int64(output.Amount),
-			PkScript:        output.PkScript,
-			ReceiveTime:     output.Received.Unix(),
-			FromCoinbase:    output.FromCoinBase,
-			Tree:            int32(output.Tree),
+			OutputIndex:     output.OutPoint.Index,
+			Amount:          output.Output.Value,
+			PkScript:        output.Output.PkScript,
+			ReceiveTime:     output.ReceiveTime.Unix(),
+			FromCoinbase:    output.OutputKind == wallet.OutputKindCoinbase,
+			Tree:            int32(output.OutPoint.Tree),
 		})
-		totalAmount += output.Amount
+		totalAmount += dcrutil.Amount(output.Output.Value)
 
 		if req.TargetAmount != 0 && totalAmount > dcrutil.Amount(req.TargetAmount) {
 			break
 		}
-
 	}
 
 	var changeScript []byte
@@ -588,12 +546,18 @@ func (s *walletServer) ChangePassphrase(ctx context.Context, req *pb.ChangePassp
 		zero.Bytes(req.NewPassphrase)
 	}()
 
-	err := s.wallet.Manager.ChangePassphrase(req.OldPassphrase, req.NewPassphrase,
-		req.Key != pb.ChangePassphraseRequest_PUBLIC, &waddrmgr.DefaultScryptOptions)
+	var err error
+	switch req.Key {
+	case pb.ChangePassphraseRequest_PRIVATE:
+		err = s.wallet.ChangePrivatePassphrase(req.OldPassphrase, req.NewPassphrase)
+	case pb.ChangePassphraseRequest_PUBLIC:
+		err = s.wallet.ChangePublicPassphrase(req.OldPassphrase, req.NewPassphrase)
+	default:
+		return nil, grpc.Errorf(codes.InvalidArgument, "Unknown key type (%d)", req.Key)
+	}
 	if err != nil {
 		return nil, translateError(err)
 	}
-
 	return &pb.ChangePassphraseResponse{}, nil
 }
 

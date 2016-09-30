@@ -177,8 +177,7 @@ type SecretsSource interface {
 // are passed in prevPkScripts and the slice length must match the number of
 // inputs.  Private keys and redeem scripts are looked up using a SecretsSource
 // based on the previous output script.
-func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte,
-	secrets SecretsSource) error {
+func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte, secrets SecretsSource) error {
 	inputs := tx.TxIn
 	chainParams := secrets.ChainParams()
 

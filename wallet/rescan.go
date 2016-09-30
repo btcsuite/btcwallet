@@ -10,6 +10,7 @@ import (
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 // RescanProgressMsg reports the current progress made by a rescan for a
@@ -178,7 +179,11 @@ out:
 				Hash:   *n.Hash,
 				Height: n.Height,
 			}
-			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				return w.Manager.SetSyncedTo(ns, &bs)
+			})
+			if err != nil {
 				log.Errorf("Failed to update address manager "+
 					"sync state for hash %v (height %d): %v",
 					n.Hash, n.Height, err)
@@ -191,15 +196,24 @@ out:
 			log.Infof("Finished rescan for %d %s (synced to block "+
 				"%s, height %d)", len(addrs), noun, n.Hash,
 				n.Height)
-			bs := waddrmgr.BlockStamp{Height: n.Height, Hash: *n.Hash}
-			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+
+			bs := waddrmgr.BlockStamp{
+				Height: n.Height,
+				Hash:   *n.Hash,
+			}
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				return w.Manager.SetSyncedTo(ns, &bs)
+			})
+			if err != nil {
 				log.Errorf("Failed to update address manager "+
 					"sync state for hash %v (height %d): %v",
 					n.Hash, n.Height, err)
+				continue
 			}
-			w.SetChainSynced(true)
 
-			go w.ResendUnminedTxs()
+			w.SetChainSynced(true)
+			go w.resendUnminedTxs()
 
 		case <-quit:
 			break out

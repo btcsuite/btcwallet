@@ -139,7 +139,7 @@ func (m *Manager) NewIterateRecentBlocks() *BlockIterator {
 // imported addresses will be used.  This effectively allows the manager to be
 // marked as unsynced back to the oldest known point any of the addresses have
 // appeared in the block chain.
-func (m *Manager) SetSyncedTo(bs *BlockStamp) error {
+func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
@@ -201,14 +201,11 @@ func (m *Manager) SetSyncedTo(bs *BlockStamp) error {
 	}
 
 	// Update the database.
-	err := m.namespace.Update(func(tx walletdb.Tx) error {
-		err := putSyncedTo(tx, bs)
-		if err != nil {
-			return err
-		}
-
-		return putRecentBlocks(tx, recentHeight, recentHashes)
-	})
+	err := putSyncedTo(ns, bs)
+	if err != nil {
+		return err
+	}
+	err = putRecentBlocks(ns, recentHeight, recentHashes)
 	if err != nil {
 		return err
 	}

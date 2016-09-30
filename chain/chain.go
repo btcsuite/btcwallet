@@ -33,11 +33,6 @@ type RPCClient struct {
 	dequeueVotingNotification chan interface{}
 	currentBlock              chan *waddrmgr.BlockStamp
 
-	// Information for reorganization handling.
-	reorganizingLock sync.Mutex
-	reorganizeToHash chainhash.Hash
-	reorganizing     bool
-
 	quit    chan struct{}
 	wg      sync.WaitGroup
 	started bool
@@ -68,8 +63,6 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 			DisableConnectOnNew:  true,
 			DisableTLS:           disableTLS,
 		},
-		reorganizeToHash:          chainhash.Hash{},
-		reorganizing:              false,
 		chainParams:               chainParams,
 		reconnectAttempts:         reconnectAttempts,
 		enqueueNotification:       make(chan interface{}),
@@ -228,25 +221,6 @@ type (
 		Time   time.Time
 	}
 )
-
-// SetReorganizingState allows you to set the flag for blockchain
-// reorganization.
-func (c *RPCClient) SetReorganizingState(is bool, hash chainhash.Hash) {
-	c.reorganizingLock.Lock()
-	defer c.reorganizingLock.Unlock()
-
-	c.reorganizing = is
-	c.reorganizeToHash = hash
-}
-
-// GetReorganizing allows you to get the value of the flag for blockchain
-// reorganization.
-func (c *RPCClient) GetReorganizing() (bool, chainhash.Hash) {
-	c.reorganizingLock.Lock()
-	defer c.reorganizingLock.Unlock()
-
-	return c.reorganizing, c.reorganizeToHash
-}
 
 // Notifications returns a channel of parsed notifications sent by the remote
 // decred RPC server.  This channel must be continually read or the process

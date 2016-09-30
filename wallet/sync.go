@@ -29,6 +29,7 @@ import (
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 // finalScanLength is the final length of accounts to scan for the
@@ -56,9 +57,15 @@ func (w *Wallet) accountIsUsed(account uint32, chainClient *chain.RPCClient) boo
 
 	for branch := uint32(0); branch < 2; branch++ {
 		for i := uint32(0); i < acctSeekWidth; i++ {
-			addr, err := addrFunc(i, account, branch)
-			// Skip erroneous keys, which happen rarely.
+			var addr dcrutil.Address
+			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+				var err error
+				addr, err = addrFunc(addrmgrNs, i, account, branch)
+				return err
+			})
 			if err != nil {
+				// Skip erroneous keys, which happen rarely.
 				continue
 			}
 
@@ -172,10 +179,20 @@ var errDerivation = fmt.Errorf("failed to derive key")
 // If the address doesn't exist, false is returned as the first argument.
 func (w *Wallet) scanAddressRange(account uint32, branch uint32, start int,
 	end int, chainClient *chain.RPCClient) (bool, int, error) {
-	addresses, err := w.Manager.AddressesDerivedFromDbAcct(uint32(start),
-		uint32(end+1), account, branch)
+
+	var addresses []dcrutil.Address
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		var err error
+		addresses, err = w.Manager.AddressesDerivedFromDbAcct(addrmgrNs,
+			uint32(start), uint32(end+1), account, branch)
+		if err != nil {
+			return errDerivation
+		}
+		return nil
+	})
 	if err != nil {
-		return false, 0, errDerivation
+		return false, 0, err
 	}
 
 	// Whether or not the addresses exist is encoded as a binary
@@ -213,8 +230,7 @@ func (w *Wallet) scanAddressRange(account uint32, branch uint32, start int,
 }
 
 // bisectLastAddrIndex is a helper function for search through addresses.
-func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32,
-	branch uint32) int {
+func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32, branch uint32) int {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return 0
@@ -247,12 +263,19 @@ func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32,
 				return idx
 			}
 		} else {
-			addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(i+offset),
-				account, branch)
+			var addr dcrutil.Address
+			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+				var err error
+				addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
+					uint32(i+offset), account, branch)
+				return err
+			})
 			// Skip erroneous keys, which happen rarely.
 			if err != nil {
 				continue
 			}
+
 			exists, err := chainClient.ExistsAddress(addr)
 			if err != nil {
 				return 0
@@ -289,6 +312,7 @@ func (w *Wallet) findAddrEnd(start, stop int, account uint32, branch uint32) int
 // of address usage to a string, from the perspective of the daemon.
 func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 	w *Wallet) (string, error) {
+
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return "", err
@@ -300,8 +324,14 @@ func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 	buf.WriteString(str)
 	firstUsedIndex := 0
 	for i := scanBackFrom; i > 0; i-- {
-		addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(i), account,
-			branch)
+		var addr dcrutil.Address
+		err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
+				uint32(i), account, branch)
+			return err
+		})
 		// Skip erroneous keys.
 		if err != nil {
 			continue
@@ -349,8 +379,14 @@ func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 			}
 
 			char := "_"
-			addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(j),
-				account, branch)
+			var addr dcrutil.Address
+			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+				var err error
+				addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
+					uint32(j), account, branch)
+				return err
+			})
 			if err != nil {
 				char = "X"
 			}
@@ -415,8 +451,14 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 
 		if exists {
 			lastUsed = idx
-			addr, err := w.Manager.AddressDerivedFromDbAcct(uint32(lastUsed),
-				account, branch)
+			var addr dcrutil.Address
+			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+				var err error
+				addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
+					uint32(lastUsed), account, branch)
+				return err
+			})
 			if err != nil {
 				return 0, nil, err
 			}
@@ -429,8 +471,14 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 	// return this address to let the caller know that this
 	// 0th address was used.
 	if lastUsed == 0 {
-		addr, err := w.Manager.AddressDerivedFromDbAcct(0,
-			account, branch)
+		var addr dcrutil.Address
+		err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs, 0,
+				account, branch)
+			return err
+		})
 		// Skip erroneous keys.
 		if err != nil {
 			return 0, nil, err
@@ -473,30 +521,38 @@ func (w *Wallet) rescanActiveAddresses() error {
 		}
 	}
 
-	lastAcctMgr, err := w.Manager.LastAccount()
-	if err != nil {
-		return err
-	}
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		lastAcctMgr, err := w.Manager.LastAccount(addrmgrNs)
+		if err != nil {
+			return err
+		}
 
-	// The address manager is not synced (wallet has been restored
-	// from seed?). In this case, spawn the accounts in the address
-	// manager first. The accounts are named by their respective
-	// index number, as strings.
-	if lastAcctMgr < lastAcct {
-		for i := lastAcctMgr + 1; i <= lastAcct; i++ {
-			_, err := w.Manager.NewAccount(strconv.Itoa(int(i)))
-			if err != nil {
-				return err
+		// The address manager is not synced (wallet has been restored
+		// from seed?). In this case, spawn the accounts in the address
+		// manager first. The accounts are named by their respective
+		// index number, as strings.
+		if lastAcctMgr < lastAcct {
+			for i := lastAcctMgr + 1; i <= lastAcct; i++ {
+				_, err := w.Manager.NewAccount(
+					addrmgrNs, strconv.Itoa(int(i)))
+				if err != nil {
+					return err
+				}
 			}
 		}
-	}
 
-	// The account manager has a greater index than the rescan.
-	// It is likely that the end user created a new account but
-	// did not use it yet. Rescan it anyway so that the address
-	// pool is created.
-	if lastAcctMgr > lastAcct {
-		lastAcct = lastAcctMgr
+		// The account manager has a greater index than the rescan.
+		// It is likely that the end user created a new account but
+		// did not use it yet. Rescan it anyway so that the address
+		// pool is created.
+		if lastAcctMgr > lastAcct {
+			lastAcct = lastAcctMgr
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	log.Infof("The last used account was %v. Beginning a rescan for "+
@@ -517,112 +573,122 @@ func (w *Wallet) rescanActiveAddresses() error {
 				return err
 			}
 
-			// If the account is unused, buffer the initial address pool
-			// by syncing the address manager upstream.
-			unusedAcct := (lastAddr == nil)
-			if unusedAcct {
-				_, err := w.Manager.SyncAccountToAddrIndex(acct,
-					addressPoolBuffer, branch)
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+				// If the account is unused, buffer the initial address pool
+				// by syncing the address manager upstream.
+				unusedAcct := (lastAddr == nil)
+				if unusedAcct {
+					_, err := w.Manager.SyncAccountToAddrIndex(
+						addrmgrNs, acct, addressPoolBuffer, branch)
+					if err != nil {
+						// A ErrSyncToIndex error indicates that we're already
+						// synced to beyond the end of the account in the
+						// waddrmgr.
+						errWaddrmgr, ok := err.(waddrmgr.ManagerError)
+						if !ok || errWaddrmgr.ErrorCode != waddrmgr.ErrSyncToIndex {
+							return fmt.Errorf("failed to create initial waddrmgr "+
+								"address buffer for the address pool, "+
+								"account %v, branch %v: %s", acct, branch,
+								err.Error())
+						}
+					}
+				}
+
+				branchString := "external"
+				if branch == waddrmgr.InternalBranch {
+					branchString = "internal"
+				}
+
+				// Fetch the address pool index for this account and
+				// branch from the database meta bucket.
+				isInternal := branch == waddrmgr.InternalBranch
+				oldIdx, err := w.Manager.NextToUseAddrPoolIndex(
+					addrmgrNs, isInternal, acct)
+				unexpectedError := false
+				if err != nil {
+					mErr, ok := err.(waddrmgr.ManagerError)
+					if !ok {
+						unexpectedError = true
+					} else {
+						// Skip errors where the account's address index
+						// has not been store. For this case, oldIdx will
+						// be the special case 0 which will always be
+						// skipped in the initialization step below.
+						if mErr.ErrorCode != waddrmgr.ErrMetaPoolIdxNoExist {
+							unexpectedError = true
+						}
+					}
+					if unexpectedError {
+						return fmt.Errorf("got unexpected error trying to "+
+							"retrieve last known addr index for acct %v, "+
+							"%s branch: %v", acct, branchString, err)
+					}
+				}
+
+				// If the stored index is further along than the sync-to
+				// index determined by the contents of daemon's addrindex,
+				// use it to initialize the address pool instead.
+				nextToUseIdx := idx
+				if !unusedAcct {
+					nextToUseIdx++
+				}
+				if oldIdx > nextToUseIdx {
+					nextToUseIdx = oldIdx
+				}
+				nextToUseAddr, err := w.Manager.AddressDerivedFromDbAcct(
+					addrmgrNs, nextToUseIdx, acct, branch)
+				if err != nil {
+					return fmt.Errorf("failed to derive next address for "+
+						"account %v, branch %v: %s", acct, branch,
+						err.Error())
+				}
+
+				// Save these for the address pool startup later.
+				if isInternal {
+					intIdx = nextToUseIdx
+				} else {
+					extIdx = nextToUseIdx
+				}
+
+				// Synchronize the account manager to our address index plus
+				// an extra chunk of addresses that are used as a buffer
+				// in the address pool.
+				_, err = w.Manager.SyncAccountToAddrIndex(addrmgrNs,
+					acct, nextToUseIdx+addressPoolBuffer, branch)
 				if err != nil {
 					// A ErrSyncToIndex error indicates that we're already
 					// synced to beyond the end of the account in the
 					// waddrmgr.
 					errWaddrmgr, ok := err.(waddrmgr.ManagerError)
 					if !ok || errWaddrmgr.ErrorCode != waddrmgr.ErrSyncToIndex {
-						return fmt.Errorf("failed to create initial waddrmgr "+
-							"address buffer for the address pool, "+
-							"account %v, branch %v: %s", acct, branch,
-							err.Error())
+						return fmt.Errorf("couldn't sync %s addresses in "+
+							"address manager: %v", branchString, err.Error())
 					}
 				}
-			}
 
-			branchString := "external"
-			if branch == waddrmgr.InternalBranch {
-				branchString = "internal"
-			}
-
-			// Fetch the address pool index for this account and
-			// branch from the database meta bucket.
-			isInternal := branch == waddrmgr.InternalBranch
-			oldIdx, err := w.Manager.NextToUseAddrPoolIndex(isInternal, acct)
-			unexpectedError := false
-			if err != nil {
-				mErr, ok := err.(waddrmgr.ManagerError)
-				if !ok {
-					unexpectedError = true
-				} else {
-					// Skip errors where the account's address index
-					// has not been store. For this case, oldIdx will
-					// be the special case 0 which will always be
-					// skipped in the initialization step below.
-					if mErr.ErrorCode != waddrmgr.ErrMetaPoolIdxNoExist {
-						unexpectedError = true
-					}
+				// Set the next address in the waddrmgr database so that the
+				// address pool can synchronize properly after.
+				err = w.Manager.StoreNextToUseAddress(
+					addrmgrNs, isInternal, acct, nextToUseIdx)
+				if err != nil {
+					log.Errorf("Failed to store next to use pool idx for "+
+						"%s pool in the manager on init sync: %v",
+						branchString, err.Error())
 				}
-				if unexpectedError {
-					return fmt.Errorf("got unexpected error trying to "+
-						"retrieve last known addr index for acct %v, "+
-						"%s branch: %v", acct, branchString, err)
-				}
-			}
 
-			// If the stored index is further along than the sync-to
-			// index determined by the contents of daemon's addrindex,
-			// use it to initialize the address pool instead.
-			nextToUseIdx := idx
-			if !unusedAcct {
-				nextToUseIdx++
-			}
-			if oldIdx > nextToUseIdx {
-				nextToUseIdx = oldIdx
-			}
-			nextToUseAddr, err := w.Manager.AddressDerivedFromDbAcct(
-				nextToUseIdx, acct, branch)
+				log.Infof("Successfully synchronized the address manager to "+
+					"%s address %v (key index %v) for account %v",
+					branchString,
+					nextToUseAddr.String(),
+					nextToUseIdx,
+					acct)
+				return nil
+			})
 			if err != nil {
-				return fmt.Errorf("failed to derive next address for "+
-					"account %v, branch %v: %s", acct, branch,
-					err.Error())
+				return err
 			}
-
-			// Save these for the address pool startup later.
-			if isInternal {
-				intIdx = nextToUseIdx
-			} else {
-				extIdx = nextToUseIdx
-			}
-
-			// Synchronize the account manager to our address index plus
-			// an extra chunk of addresses that are used as a buffer
-			// in the address pool.
-			_, err = w.Manager.SyncAccountToAddrIndex(acct,
-				nextToUseIdx+addressPoolBuffer, branch)
-			if err != nil {
-				// A ErrSyncToIndex error indicates that we're already
-				// synced to beyond the end of the account in the
-				// waddrmgr.
-				errWaddrmgr, ok := err.(waddrmgr.ManagerError)
-				if !ok || errWaddrmgr.ErrorCode != waddrmgr.ErrSyncToIndex {
-					return fmt.Errorf("couldn't sync %s addresses in "+
-						"address manager: %v", branchString, err.Error())
-				}
-			}
-
-			// Set the next address in the waddrmgr database so that the
-			// address pool can synchronize properly after.
-			err = w.Manager.StoreNextToUseAddress(isInternal, acct, nextToUseIdx)
-			if err != nil {
-				log.Errorf("Failed to store next to use pool idx for "+
-					"%s pool in the manager on init sync: %v",
-					branchString, err.Error())
-			}
-
-			log.Infof("Successfully synchronized the address manager to "+
-				"%s address %v (key index %v) for account %v",
-				branchString,
-				nextToUseAddr.String(),
-				nextToUseIdx,
-				acct)
 		}
 
 		pool, err := newAddressPools(acct, intIdx, extIdx, w)

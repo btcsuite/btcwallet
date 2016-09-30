@@ -16,6 +16,7 @@ import (
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/wallet/txauthor"
 	"github.com/decred/dcrwallet/wallet/txrules"
+	"github.com/decred/dcrwallet/walletdb"
 	"github.com/decred/dcrwallet/wstakemgr"
 	"github.com/decred/dcrwallet/wtxmgr"
 )
@@ -48,15 +49,21 @@ func (w *Wallet) handleChainNotifications() {
 			log.Infof("The client has successfully connected to dcrd and " +
 				"is now handling websocket notifications")
 		case chain.BlockConnected:
-			err = w.connectBlock(wtxmgr.BlockMeta(n))
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.connectBlock(tx, wtxmgr.BlockMeta(n))
+			})
 			strErrType = "BlockConnected"
 		case chain.BlockDisconnected:
-			err = w.disconnectBlock(wtxmgr.BlockMeta(n))
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.disconnectBlock(tx, wtxmgr.BlockMeta(n))
+			})
 			strErrType = "BlockDisconnected"
 		case chain.Reorganization:
 			w.handleReorganizing(n.OldHash, n.OldHeight, n.NewHash, n.NewHeight)
 		case chain.RelevantTx:
-			err = w.addRelevantTx(n.TxRecord, n.Block)
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.addRelevantTx(tx, n.TxRecord, n.Block)
+			})
 			strErrType = "RelevantTx"
 
 		// The following are handled by the wallet's rescan
@@ -74,9 +81,20 @@ func (w *Wallet) handleChainNotifications() {
 
 // handleTicketPurchases autopurchases stake tickets for the wallet
 // if stake mining is enabled.
-func (w *Wallet) handleTicketPurchases() {
-	purchased := 0
-	attempts := 0
+func (w *Wallet) handleTicketPurchases(dbtx walletdb.ReadWriteTx) error {
+	// Nothing to do when stake mining is disabled.
+	if !w.StakeMiningEnabled {
+		return nil
+	}
+
+	// Tickets are not purchased if the just there are still more blocks to
+	// connect to the best chain add as part of a reorg.
+	w.reorganizingLock.Lock()
+	reorg := w.reorganizing
+	w.reorganizingLock.Unlock()
+	if reorg {
+		return nil
+	}
 
 	// Parse the ticket purchase frequency. Positive numbers mean
 	// that many tickets per block. Negative numbers mean to only
@@ -84,111 +102,87 @@ func (w *Wallet) handleTicketPurchases() {
 	maxTickets := 1
 	switch {
 	case w.ticketBuyFreq == 0:
-		return
+		return nil
 	case w.ticketBuyFreq > 1:
 		maxTickets = w.ticketBuyFreq
 	case w.ticketBuyFreq < 0:
 		bs := w.Manager.SyncedTo()
 		if int(bs.Height)%w.ticketBuyFreq != 0 {
-			return
+			return nil
 		}
 	}
 
 	sdiff, err := w.StakeDifficulty()
 	if err != nil {
-		return
+		return err
 	}
 
 	maxToPay := w.GetTicketMaxPrice()
 	minBalance := w.BalanceToMaintain()
 
 	if sdiff > maxToPay {
-		return
+		log.Debugf("No tickets will be auto-purchased: current stake "+
+			"difficulty %v is above maximum allowed price %v", sdiff,
+			maxToPay)
+		return nil
 	}
 
-ticketPurchaseLoop:
-	for {
-		if purchased >= maxTickets {
-			break
-		}
-
-		_, err := w.PurchaseTickets(minBalance,
-			maxToPay,
-			0, // No minconf
-			w.TicketAddress(),
-			waddrmgr.DefaultAccountNum,
-			1, // One ticket at a time
-			w.PoolAddress(),
-			w.PoolFees(),
-			0, // No expiry
-			w.RelayFee(),
-			w.TicketFeeIncrement())
-		if err != nil {
-			_, insufficientFunds := err.(txauthor.InsufficientFundsError)
-			switch {
-			case insufficientFunds:
-				break ticketPurchaseLoop
-			case waddrmgr.IsError(err, waddrmgr.ErrLocked):
-				log.Warnf("Ticket purchase for stake mining is enabled, " +
-					"but tickets could not be purchased because the " +
-					"wallet is currently locked!")
-				break ticketPurchaseLoop
-			case err == ErrTicketPriceNotSet:
-				log.Warnf("Tickets could not be purchased because the " +
-					"ticket price could not be established")
-				break ticketPurchaseLoop
-			default:
-				log.Errorf("PurchaseTicket error returned: %v", err)
-				break ticketPurchaseLoop
-			}
-		} else {
-			purchased++
-		}
-
-		attempts++
-	}
+	_, err = w.purchaseTicketsInternal(dbtx, purchaseTicketRequest{
+		minBalance:  minBalance,
+		spendLimit:  maxToPay,
+		minConf:     0, // No minconf
+		ticketAddr:  w.ticketAddress,
+		account:     waddrmgr.DefaultAccountNum,
+		numTickets:  maxTickets,
+		poolAddress: w.poolAddress,
+		poolFees:    w.poolFees,
+		expiry:      0, // No expiry
+		txFee:       w.RelayFee(),
+		ticketFee:   w.TicketFeeIncrement(),
+		resp:        nil, // not used, error is returned
+	})
+	return err
 }
 
 // connectBlock handles a chain server notification by marking a wallet
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
-func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) error {
-	bs := waddrmgr.BlockStamp{
-		Height: b.Height,
-		Hash:   b.Hash,
-	}
-	if err := w.Manager.SetSyncedTo(&bs); err != nil {
-		log.Errorf("Failed to update address manager sync state in "+
-			"connect block for hash %v (height %d): %v", b.Hash,
-			b.Height, err)
-	}
-	log.Infof("Connecting block %v, height %v", bs.Hash, bs.Height)
+func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return err
 	}
 
-	isReorganizing, topHash := chainClient.GetReorganizing()
+	bs := waddrmgr.BlockStamp{
+		Height: b.Height,
+		Hash:   b.Hash,
+	}
+	log.Infof("Connecting block %v, height %v", bs.Hash, bs.Height)
 
-	// If we've made it to the height where the reorganization is finished,
-	// revert our reorganization state.
-	if isReorganizing {
-		if bs.Hash.IsEqual(&topHash) {
-			log.Infof("Wallet reorganization to block %v complete",
-				topHash)
-			chainClient.SetReorganizingState(false, chainhash.Hash{})
-		}
+	err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
+	if err != nil {
+		return err
 	}
 
-	if bs.Height >= int32(w.chainParams.CoinbaseMaturity) &&
-		w.StakeMiningEnabled &&
-		!isReorganizing {
-		w.handleTicketPurchases()
+	// Handle automatic ticket purchasing if enabled.  This function should
+	// not error due to an error purchasing tickets (several tickets may be
+	// have been purhcased and successfully published, as well as addresses
+	// created and used), so just log it instead.
+	err = w.handleTicketPurchases(dbtx)
+	switch err.(type) {
+	case nil:
+	case txauthor.InsufficientFundsError:
+		log.Debugf("Insufficient funds to auto-purchase maximum number " +
+			"of tickets")
+	default:
+		log.Errorf("Failed to perform automatic picket purchasing: %v", err)
 	}
 
 	// Insert the block if we haven't already through a relevant tx.
-	err = w.TxStore.InsertBlock(&b)
+	err = w.TxStore.InsertBlock(txmgrNs, &b)
 	if err != nil {
 		err = fmt.Errorf("Couldn't insert block %v into database: %v",
 			b.Hash, err)
@@ -197,7 +191,7 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) error {
 
 	// Rollback testing for simulation network, if enabled.
 	if b.Height < rollbackTestHeight && w.rollbackTesting {
-		dbd, err := w.TxStore.DatabaseDump(b.Height, nil)
+		dbd, err := w.TxStore.DatabaseDump(txmgrNs, addrmgrNs, b.Height, nil)
 		if err != nil {
 			panicStr := fmt.Sprintf("Failed to dump database at connection "+
 				"of block %v (height %v): %v",
@@ -224,13 +218,13 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) error {
 			"database evaluations.")
 		finalHeight := rollbackTestHeight - rollbackTestDepth
 		for i := rollbackTestHeight; i >= finalHeight; i-- {
-			err := w.TxStore.Rollback(int32(i))
+			err := w.TxStore.Rollback(txmgrNs, addrmgrNs, int32(i))
 			if err != nil {
 				log.Errorf("Error rolling back block at height %v: %v",
 					i, err)
 			}
 
-			rolledbackDb, err := w.TxStore.DatabaseDump(int32(i-1),
+			rolledbackDb, err := w.TxStore.DatabaseDump(txmgrNs, addrmgrNs, int32(i-1),
 				w.rollbackBlockDB[uint32(i-1)].BucketUnminedInputs)
 			if err != nil {
 				panicStr := fmt.Sprintf("Failed to dump database at "+
@@ -258,27 +252,42 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) error {
 
 	// Prune all expired transactions and all stake tickets that no longer
 	// meet the minimum stake difficulty.
-	stakeDifficulty, err := w.StakeDifficulty()
+	block, err := chainClient.GetBlock(&b.Hash)
 	if err != nil {
-		return fmt.Errorf("Failed to get stake difficulty for pruning: %s",
-			err.Error())
+		return err
 	}
-	err = w.TxStore.PruneUnconfirmed(bs.Height, int64(stakeDifficulty))
+	stakeDifficulty := dcrutil.Amount(block.MsgBlock().Header.SBits)
+	err = w.TxStore.PruneUnconfirmed(txmgrNs, bs.Height, int64(stakeDifficulty))
 	if err != nil {
 		err = fmt.Errorf("Failed to prune unconfirmed transactions when "+
 			"connecting block height %v: %s", bs.Height, err.Error())
 		return err
 	}
 
+	w.reorganizingLock.Lock()
+	isReorganizing, topHash := w.reorganizing, w.reorganizeToHash
+	// If we've made it to the height where the reorganization is finished,
+	// revert our reorganization state.
+	if isReorganizing && bs.Hash == topHash {
+		log.Infof("Wallet reorganization to block %v complete", topHash)
+		w.reorganizing = false
+	}
+	w.reorganizingLock.Unlock()
+
 	// Notify interested clients of the connected block.
-	w.NtfnServer.notifyAttachedBlock(&b)
+	//
+	// TODO: move all notifications outside of the database transaction.
+	w.NtfnServer.notifyAttachedBlock(dbtx, &b)
 	return nil
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
 // block history from the reorged block for a wallet in-sync with the chain
 // server.
-func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
+func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
+
 	if !w.ChainSynced() {
 		return nil
 	}
@@ -290,15 +299,19 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 
 	// Disconnect the last seen block from the manager if it matches the
 	// removed block.
-	err := w.TxStore.Rollback(b.Height)
+	err := w.TxStore.Rollback(txmgrNs, addrmgrNs, b.Height)
 	if err != nil {
 		return err
 	}
-	prev, err := w.TxStore.GetBlockHash(b.Height - 1)
+	prev, err := w.TxStore.GetBlockHash(txmgrNs, b.Height-1)
 	if err != nil {
 		return err
 	}
-	w.Manager.SetSyncedTo(&waddrmgr.BlockStamp{Hash: prev, Height: b.Height - 1})
+	prevBlock := &waddrmgr.BlockStamp{Hash: prev, Height: b.Height - 1}
+	err = w.Manager.SetSyncedTo(addrmgrNs, prevBlock)
+	if err != nil {
+		return err
+	}
 
 	// Notify interested clients of the disconnected block.
 	w.NtfnServer.notifyDetachedBlock(&b.Hash)
@@ -317,13 +330,10 @@ func (w *Wallet) handleReorganizing(oldHash *chainhash.Hash, oldHeight int64,
 	log.Infof("New top block hash: %v", newHash)
 	log.Infof("New top block height: %v", newHeight)
 
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		log.Error(err)
-		return
-	}
-
-	chainClient.SetReorganizingState(true, *newHash)
+	w.reorganizingLock.Lock()
+	w.reorganizing = true
+	w.reorganizeToHash = *newHash
+	w.reorganizingLock.Unlock()
 }
 
 // evaluateStakePoolTicket evaluates a stake pool ticket to see if it's
@@ -402,40 +412,12 @@ func (w *Wallet) evaluateStakePoolTicket(rec *wtxmgr.TxRecord,
 	return true, nil
 }
 
-func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
+func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 	block *wtxmgr.BlockMeta) error {
-	// TODO: The transaction store and address manager need to be updated
-	// together, but each operate under different namespaces and are changed
-	// under new transactions.  This is not error safe as we lose
-	// transaction semantics.
-	//
-	// I'm unsure of the best way to solve this.  Some possible solutions
-	// and drawbacks:
-	//
-	//   1. Open write transactions here and pass the handle to every
-	//      waddrmr and wtxmgr method.  This complicates the caller code
-	//      everywhere, however.
-	//
-	//   2. Move the wtxmgr namespace into the waddrmgr namespace, likely
-	//      under its own bucket.  This entire function can then be moved
-	//      into the waddrmgr package, which updates the nested wtxmgr.
-	//      This removes some of separation between the components.
-	//
-	//   3. Use multiple wtxmgrs, one for each account, nested in the
-	//      waddrmgr namespace.  This still provides some sort of logical
-	//      separation (transaction handling remains in another package, and
-	//      is simply used by waddrmgr), but may result in duplicate
-	//      transactions being saved if they are relevant to multiple
-	//      accounts.
-	//
-	//   4. Store wtxmgr-related details under the waddrmgr namespace, but
-	//      solve the drawback of #3 by splitting wtxmgr to save entire
-	//      transaction records globally for all accounts, with
-	//      credit/debit/balance tracking per account.  Each account would
-	//      also save the relevant transaction hashes and block incidence so
-	//      the full transaction can be loaded from the waddrmgr
-	//      transactions bucket.  This currently seems like the best
-	//      solution.
+
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	stakemgrNs := dbtx.ReadWriteBucket(wstakemgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 	// At the moment all notified transactions are assumed to actually be
 	// relevant.  This assumption will not hold true when SPV support is
@@ -462,7 +444,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 			txOut.PkScript, w.chainParams)
 		insert := false
 		for _, addr := range addrs {
-			_, err := w.Manager.Address(addr)
+			_, err := w.Manager.Address(addrmgrNs, addr)
 			if err == nil {
 				// We own the voting output pubkey or script and we're
 				// not operating as a stake pool, so simply insert this
@@ -489,8 +471,8 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 							HeightTicket: uint32(block.Height),
 							Status:       wstakemgr.TSImmatureOrLive,
 						}
-						errUpdate := w.StakeMgr.UpdateStakePoolUserTickets(addr,
-							poolTicket)
+						errUpdate := w.StakeMgr.UpdateStakePoolUserTickets(
+							stakemgrNs, addrmgrNs, addr, poolTicket)
 						if errUpdate != nil {
 							log.Warnf("Failed to insert stake pool "+
 								"user ticket: %s", err.Error())
@@ -509,8 +491,8 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 						log.Warnf("Ticket %v failed ticket evaluation for "+
 							"the stake pool: %s", rec.Hash, err.Error())
 					}
-					errUpdate := w.StakeMgr.UpdateStakePoolUserInvalTickets(addr,
-						&rec.Hash)
+					errUpdate := w.StakeMgr.UpdateStakePoolUserInvalTickets(
+						stakemgrNs, addr, &rec.Hash)
 					if errUpdate != nil {
 						log.Warnf("Failed to update pool user %v with "+
 							"invalid ticket %v", addr.EncodeAddress(),
@@ -521,7 +503,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		}
 
 		if insert {
-			err := w.StakeMgr.InsertSStx(tx, w.VoteBits)
+			err := w.StakeMgr.InsertSStx(stakemgrNs, tx, w.VoteBits)
 			if err != nil {
 				log.Errorf("Failed to insert SStx %v"+
 					"into the stake store.", tx.Sha())
@@ -535,7 +517,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		if block != nil {
 			txInHash := tx.MsgTx().TxIn[1].PreviousOutPoint.Hash
 			if w.StakeMgr.CheckHashInStore(&txInHash) {
-				w.StakeMgr.InsertSSGen(&block.Hash,
+				w.StakeMgr.InsertSSGen(stakemgrNs, &block.Hash,
 					int64(block.Height),
 					&txHash,
 					w.VoteBits,
@@ -554,13 +536,13 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 					HeightSpent:  uint32(block.Height),
 				}
 
-				poolUser, err := w.StakeMgr.SStxAddress(&txInHash)
+				poolUser, err := w.StakeMgr.SStxAddress(stakemgrNs, &txInHash)
 				if err != nil {
 					log.Warnf("Failed to fetch stake pool user for "+
 						"ticket %v (voted ticket)", txInHash)
 				} else {
-					err = w.StakeMgr.UpdateStakePoolUserTickets(poolUser,
-						poolTicket)
+					err = w.StakeMgr.UpdateStakePoolUserTickets(
+						stakemgrNs, addrmgrNs, poolUser, poolTicket)
 					if err != nil {
 						log.Warnf("Failed to update stake pool ticket for "+
 							"stake pool user %s after voting",
@@ -587,7 +569,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 			txInHash := tx.MsgTx().TxIn[0].PreviousOutPoint.Hash
 
 			if w.StakeMgr.CheckHashInStore(&txInHash) {
-				w.StakeMgr.InsertSSRtx(&block.Hash,
+				w.StakeMgr.InsertSSRtx(stakemgrNs, &block.Hash,
 					int64(block.Height),
 					&txHash,
 					&txInHash)
@@ -605,13 +587,13 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 					HeightSpent:  uint32(block.Height),
 				}
 
-				poolUser, err := w.StakeMgr.SStxAddress(&txInHash)
+				poolUser, err := w.StakeMgr.SStxAddress(stakemgrNs, &txInHash)
 				if err != nil {
 					log.Warnf("failed to fetch stake pool user for "+
 						"ticket %v (missed ticket)", txInHash)
 				} else {
-					err = w.StakeMgr.UpdateStakePoolUserTickets(poolUser,
-						poolTicket)
+					err = w.StakeMgr.UpdateStakePoolUserTickets(
+						stakemgrNs, addrmgrNs, poolUser, poolTicket)
 					if err != nil {
 						log.Warnf("failed to update stake pool ticket for "+
 							"stake pool user %s after revoking",
@@ -626,7 +608,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		}
 	}
 
-	err := w.TxStore.InsertTx(rec, block)
+	err := w.TxStore.InsertTx(txmgrNs, addrmgrNs, rec, block)
 	if err != nil {
 		return err
 	}
@@ -654,10 +636,10 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 
 			isRelevant := false
 			for _, addr := range addrs {
-				_, err := w.Manager.Address(addr)
+				_, err := w.Manager.Address(addrmgrNs, addr)
 				if err == nil {
 					isRelevant = true
-					err = w.Manager.MarkUsed(addr)
+					err = w.Manager.MarkUsed(addrmgrNs, addr)
 					if err != nil {
 						return err
 					}
@@ -674,7 +656,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 			// Add the script to the script databases.
 			// TODO Markused script address? cj
 			if isRelevant {
-				err = w.TxStore.InsertTxScript(rs)
+				err = w.TxStore.InsertTxScript(txmgrNs, rs)
 				if err != nil {
 					return err
 				}
@@ -685,7 +667,7 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 						Hash:   block.Hash,
 					}
 				}
-				mscriptaddr, err := w.Manager.ImportScript(rs, blockToUse)
+				mscriptaddr, err := w.Manager.ImportScript(addrmgrNs, rs, blockToUse)
 				if err != nil {
 					switch {
 					// Don't care if it's already there.
@@ -729,9 +711,9 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 			// example, the wallet might be rescanning as called from
 			// the above function and so does not have the output
 			// included yet.
-			mso, err := w.TxStore.GetMultisigOutput(&input.PreviousOutPoint)
+			mso, err := w.TxStore.GetMultisigOutput(txmgrNs, &input.PreviousOutPoint)
 			if mso != nil && err == nil {
-				w.TxStore.SpendMultisigOut(&input.PreviousOutPoint,
+				w.TxStore.SpendMultisigOut(txmgrNs, &input.PreviousOutPoint,
 					rec.Hash,
 					uint32(i))
 			}
@@ -766,17 +748,17 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 		}
 
 		for _, addr := range addrs {
-			ma, err := w.Manager.Address(addr)
+			ma, err := w.Manager.Address(addrmgrNs, addr)
 			if err == nil {
 				// TODO: Credits should be added with the
 				// account they belong to, so wtxmgr is able to
 				// track per-account balances.
-				err = w.TxStore.AddCredit(rec, block, uint32(i),
-					ma.Internal(), ma.Account())
+				err = w.TxStore.AddCredit(txmgrNs, rec, block,
+					uint32(i), ma.Internal(), ma.Account())
 				if err != nil {
 					return err
 				}
-				err = w.Manager.MarkUsed(addr)
+				err = w.Manager.MarkUsed(addrmgrNs, addr)
 				if err != nil {
 					return err
 				}
@@ -800,13 +782,14 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 				// and the address manager for the redeem script.
 				var err error
 				expandedScript, err =
-					w.TxStore.GetTxScript(addr.ScriptAddress())
+					w.TxStore.GetTxScript(txmgrNs,
+						addr.ScriptAddress())
 				if err != nil {
 					return err
 				}
 
 				if expandedScript == nil {
-					scrAddr, err := w.Manager.Address(addr)
+					scrAddr, err := w.Manager.Address(addrmgrNs, addr)
 					if err == nil {
 						sa, ok := scrAddr.(waddrmgr.ManagedScriptAddress)
 						if !ok {
@@ -852,10 +835,11 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 			}
 
 			for _, maddr := range multisigAddrs {
-				_, err := w.Manager.Address(maddr)
+				_, err := w.Manager.Address(addrmgrNs, maddr)
 				// An address we own; handle accordingly.
 				if err == nil {
-					errStore := w.TxStore.AddMultisigOut(rec, block, uint32(i))
+					errStore := w.TxStore.AddMultisigOut(
+						txmgrNs, rec, block, uint32(i))
 					if errStore != nil {
 						// This will throw if there are multiple private keys
 						// for this multisignature output owned by the wallet,
@@ -873,20 +857,20 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord,
 	//
 	// TODO: Avoid the extra db hits.
 	if block == nil {
-		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, nil)
+		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, nil)
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notifiation: %v",
 				err)
 		} else {
-			w.NtfnServer.notifyUnminedTransaction(details)
+			w.NtfnServer.notifyUnminedTransaction(dbtx, details)
 		}
 	} else {
-		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, &block.Block)
+		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, &block.Block)
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notifiation: %v",
 				err)
 		} else {
-			w.NtfnServer.notifyMinedTransaction(details, block)
+			w.NtfnServer.notifyMinedTransaction(dbtx, details, block)
 		}
 	}
 
@@ -906,10 +890,14 @@ func (w *Wallet) handleChainVotingNotifications() {
 
 		switch n := n.(type) {
 		case chain.WinningTickets:
-			err = w.handleWinningTickets(n.BlockHash, n.BlockHeight, n.Tickets)
+			err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+				return w.handleWinningTickets(dbtx, n.BlockHash, n.BlockHeight, n.Tickets)
+			})
 			strErrType = "WinningTickets"
 		case chain.MissedTickets:
-			err = w.handleMissedTickets(n.BlockHash, n.BlockHeight, n.Tickets)
+			err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+				return w.handleMissedTickets(dbtx, n.BlockHash, n.BlockHeight, n.Tickets)
+			})
 			strErrType = "MissedTickets"
 		default:
 			err = fmt.Errorf("voting handler received unknown ntfn type")
@@ -924,9 +912,12 @@ func (w *Wallet) handleChainVotingNotifications() {
 
 // handleWinningTickets receives a list of hashes and some block information
 // and submits it to the wstakemgr to handle SSGen production.
-func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
-	blockHeight int64,
-	tickets []*chainhash.Hash) error {
+func (w *Wallet) handleWinningTickets(dbtx walletdb.ReadWriteTx, blockHash *chainhash.Hash,
+	blockHeight int64, tickets []*chainhash.Hash) error {
+
+	stakemgrNs := dbtx.ReadWriteBucket(wstakemgrNamespaceKey)
+	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+
 	topBlockStamp := w.Manager.SyncedTo()
 
 	// Even if stake voting is disabled, we should still store eligible
@@ -943,7 +934,10 @@ func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
 
 	if blockHeight >= w.chainParams.StakeValidationHeight-1 &&
 		w.StakeMiningEnabled {
-		ntfns, err := w.StakeMgr.HandleWinningTicketsNtfn(blockHash,
+		ntfns, err := w.StakeMgr.HandleWinningTicketsNtfn(
+			stakemgrNs,
+			addrmgrNs,
+			blockHash,
 			blockHeight,
 			tickets,
 			w.VoteBits,
@@ -971,9 +965,11 @@ func (w *Wallet) handleWinningTickets(blockHash *chainhash.Hash,
 
 // handleMissedTickets receives a list of hashes and some block information
 // and submits it to the wstakemgr to handle SSRtx production.
-func (w *Wallet) handleMissedTickets(blockHash *chainhash.Hash,
-	blockHeight int64,
-	tickets []*chainhash.Hash) error {
+func (w *Wallet) handleMissedTickets(dbtx walletdb.ReadWriteTx, blockHash *chainhash.Hash,
+	blockHeight int64, tickets []*chainhash.Hash) error {
+
+	stakemgrNs := dbtx.ReadWriteBucket(wstakemgrNamespaceKey)
+	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 
 	if !w.StakeMiningEnabled {
 		return nil
@@ -981,9 +977,8 @@ func (w *Wallet) handleMissedTickets(blockHash *chainhash.Hash,
 
 	if blockHeight >= w.chainParams.StakeValidationHeight+1 &&
 		w.StakeMiningEnabled {
-		ntfns, err := w.StakeMgr.HandleMissedTicketsNtfn(blockHash,
-			blockHeight,
-			tickets, w.AllowHighFees)
+		ntfns, err := w.StakeMgr.HandleMissedTicketsNtfn(stakemgrNs, addrmgrNs,
+			blockHash, blockHeight, tickets, w.AllowHighFees)
 
 		if ntfns != nil {
 			// Send notifications for newly created revocations by the RPC.

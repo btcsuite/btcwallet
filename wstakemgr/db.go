@@ -570,24 +570,15 @@ func serializeSSRtxRecords(records []*ssrtxRecord) []byte {
 
 // stakeStoreExists returns whether or not the stake store has already
 // been created in the given database namespace.
-func stakeStoreExists(namespace walletdb.Namespace) (bool, error) {
-	var exists bool
-	err := namespace.View(func(tx walletdb.Tx) error {
-		mainBucket := tx.RootBucket().Bucket(mainBucketName)
-		exists = mainBucket != nil
-		return nil
-	})
-	if err != nil {
-		str := fmt.Sprintf("failed to obtain database view: %v", err)
-		return false, stakeStoreError(ErrDatabase, str, err)
-	}
-	return exists, nil
+func stakeStoreExists(ns walletdb.ReadBucket) bool {
+	mainBucket := ns.NestedReadBucket(mainBucketName)
+	return mainBucket != nil
 }
 
 // fetchSStxRecord retrieves a tx record from the sstx records bucket
 // with the given hash.
-func fetchSStxRecord(tx walletdb.Tx, hash *chainhash.Hash) (*sstxRecord, error) {
-	bucket := tx.RootBucket().Bucket(sstxRecordsBucketName)
+func fetchSStxRecord(ns walletdb.ReadBucket, hash *chainhash.Hash) (*sstxRecord, error) {
+	bucket := ns.NestedReadBucket(sstxRecordsBucketName)
 
 	key := hash.Bytes()
 	val := bucket.Get(key)
@@ -601,9 +592,10 @@ func fetchSStxRecord(tx walletdb.Tx, hash *chainhash.Hash) (*sstxRecord, error) 
 
 // fetchSStxRecordSStxTicketScriptHash retrieves a ticket 0th output script or
 // pubkeyhash from the sstx records bucket with the given hash.
-func fetchSStxRecordSStxTicketScriptHash(tx walletdb.Tx,
+func fetchSStxRecordSStxTicketScriptHash(ns walletdb.ReadBucket,
 	hash *chainhash.Hash) ([]byte, error) {
-	bucket := tx.RootBucket().Bucket(sstxRecordsBucketName)
+
+	bucket := ns.NestedReadBucket(sstxRecordsBucketName)
 
 	key := hash.Bytes()
 	val := bucket.Get(key)
@@ -617,9 +609,10 @@ func fetchSStxRecordSStxTicketScriptHash(tx walletdb.Tx,
 
 // fetchSStxRecordVoteBits fetches an individual ticket's intended voteBits
 // which are used to override the default voteBits when voting.
-func fetchSStxRecordVoteBits(tx walletdb.Tx, hash *chainhash.Hash) (bool, uint16,
+func fetchSStxRecordVoteBits(ns walletdb.ReadBucket, hash *chainhash.Hash) (bool, uint16,
 	error) {
-	bucket := tx.RootBucket().Bucket(sstxRecordsBucketName)
+
+	bucket := ns.NestedReadBucket(sstxRecordsBucketName)
 
 	key := hash.Bytes()
 	val := bucket.Get(key)
@@ -651,9 +644,10 @@ func fetchSStxRecordVoteBits(tx walletdb.Tx, hash *chainhash.Hash) (bool, uint16
 
 // updateSStxRecordVoteBits updates an individual ticket's intended voteBits
 // which are used to override the default voteBits when voting.
-func updateSStxRecordVoteBits(tx walletdb.Tx, hash *chainhash.Hash,
+func updateSStxRecordVoteBits(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
 	voteBits uint16) error {
-	bucket := tx.RootBucket().Bucket(sstxRecordsBucketName)
+
+	bucket := ns.NestedReadWriteBucket(sstxRecordsBucketName)
 
 	key := hash.Bytes()
 	val := bucket.Get(key)
@@ -687,8 +681,8 @@ func updateSStxRecordVoteBits(tx walletdb.Tx, hash *chainhash.Hash,
 }
 
 // updateSStxRecord updates a sstx record in the sstx records bucket.
-func updateSStxRecord(tx walletdb.Tx, record *sstxRecord, voteBits uint16) error {
-	bucket := tx.RootBucket().Bucket(sstxRecordsBucketName)
+func updateSStxRecord(ns walletdb.ReadWriteBucket, record *sstxRecord, voteBits uint16) error {
+	bucket := ns.NestedReadWriteBucket(sstxRecordsBucketName)
 
 	// Write the serialized txrecord keyed by the tx hash.
 	serializedSStxRecord, err := serializeSStxRecord(record, voteBits)
@@ -705,15 +699,16 @@ func updateSStxRecord(tx walletdb.Tx, record *sstxRecord, voteBits uint16) error
 }
 
 // putSStxRecord inserts a given SStx record to the SStxrecords bucket.
-func putSStxRecord(tx walletdb.Tx, record *sstxRecord, voteBits uint16) error {
-	return updateSStxRecord(tx, record, voteBits)
+func putSStxRecord(ns walletdb.ReadWriteBucket, record *sstxRecord, voteBits uint16) error {
+	return updateSStxRecord(ns, record, voteBits)
 }
 
 // fetchSSGenRecords retrieves SSGen records from the SSGenRecords bucket with
 // the given hash.
-func fetchSSGenRecords(tx walletdb.Tx, hash *chainhash.Hash) ([]*ssgenRecord,
+func fetchSSGenRecords(ns walletdb.ReadBucket, hash *chainhash.Hash) ([]*ssgenRecord,
 	error) {
-	bucket := tx.RootBucket().Bucket(ssgenRecordsBucketName)
+
+	bucket := ns.NestedReadBucket(ssgenRecordsBucketName)
 
 	key := hash.Bytes()
 	val := bucket.Get(key)
@@ -727,32 +722,31 @@ func fetchSSGenRecords(tx walletdb.Tx, hash *chainhash.Hash) ([]*ssgenRecord,
 
 // ssgenRecordExistsInRecords checks to see if a record already exists
 // in a slice of ssgen records.
-func ssgenRecordExistsInRecords(record *ssgenRecord,
-	records []*ssgenRecord) bool {
+func ssgenRecordExistsInRecords(record *ssgenRecord, records []*ssgenRecord) bool {
 	for _, r := range records {
 		if r.txHash.IsEqual(&record.txHash) {
 			return true
 		}
 	}
-
 	return false
 }
 
 // updateSSGenRecord updates an SSGen record in the SSGen records bucket.
-func updateSSGenRecord(tx walletdb.Tx, hash *chainhash.Hash,
+func updateSSGenRecord(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
 	record *ssgenRecord) error {
+
 	// Fetch the current content of the key.
 	// Possible buggy behaviour: If deserialization fails,
 	// we won't detect it here. We assume we're throwing
 	// ErrSSGenNotFound.
-	oldRecords, _ := fetchSSGenRecords(tx, hash)
+	oldRecords, _ := fetchSSGenRecords(ns, hash)
 
 	// Don't reinsert records we already have.
 	if ssgenRecordExistsInRecords(record, oldRecords) {
 		return nil
 	}
 
-	bucket := tx.RootBucket().Bucket(ssgenRecordsBucketName)
+	bucket := ns.NestedReadWriteBucket(ssgenRecordsBucketName)
 
 	var records []*ssgenRecord
 	// Either create a slice if currently nothing exists for this
@@ -776,16 +770,18 @@ func updateSSGenRecord(tx walletdb.Tx, hash *chainhash.Hash,
 }
 
 // putSSGenRecord inserts a given SSGen record to the SSGenrecords bucket.
-func putSSGenRecord(tx walletdb.Tx, hash *chainhash.Hash,
+func putSSGenRecord(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
 	record *ssgenRecord) error {
-	return updateSSGenRecord(tx, hash, record)
+
+	return updateSSGenRecord(ns, hash, record)
 }
 
 // fetchSSRtxRecords retrieves SSRtx records from the SSRtxRecords bucket with
 // the given hash.
-func fetchSSRtxRecords(tx walletdb.Tx, hash *chainhash.Hash) ([]*ssrtxRecord,
+func fetchSSRtxRecords(ns walletdb.ReadBucket, hash *chainhash.Hash) ([]*ssrtxRecord,
 	error) {
-	bucket := tx.RootBucket().Bucket(ssrtxRecordsBucketName)
+
+	bucket := ns.NestedReadBucket(ssrtxRecordsBucketName)
 
 	key := hash.Bytes()
 	val := bucket.Get(key)
@@ -799,32 +795,31 @@ func fetchSSRtxRecords(tx walletdb.Tx, hash *chainhash.Hash) ([]*ssrtxRecord,
 
 // ssrtxRecordExistsInRecords checks to see if a record already exists
 // in a slice of ssrtx records.
-func ssrtxRecordExistsInRecords(record *ssrtxRecord,
-	records []*ssrtxRecord) bool {
+func ssrtxRecordExistsInRecords(record *ssrtxRecord, records []*ssrtxRecord) bool {
 	for _, r := range records {
 		if r.txHash.IsEqual(&record.txHash) {
 			return true
 		}
 	}
-
 	return false
 }
 
 // updateSSRtxRecord updates an SSRtx record in the SSRtx records bucket.
-func updateSSRtxRecord(tx walletdb.Tx, hash *chainhash.Hash,
+func updateSSRtxRecord(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
 	record *ssrtxRecord) error {
+
 	// Fetch the current content of the key.
 	// Possible buggy behaviour: If deserialization fails,
 	// we won't detect it here. We assume we're throwing
 	// ErrSSRtxsNotFound.
-	oldRecords, _ := fetchSSRtxRecords(tx, hash)
+	oldRecords, _ := fetchSSRtxRecords(ns, hash)
 
 	// Don't reinsert records we already have.
 	if ssrtxRecordExistsInRecords(record, oldRecords) {
 		return nil
 	}
 
-	bucket := tx.RootBucket().Bucket(ssrtxRecordsBucketName)
+	bucket := ns.NestedReadWriteBucket(ssrtxRecordsBucketName)
 
 	var records []*ssrtxRecord
 	// Either create a slice if currently nothing exists for this
@@ -848,16 +843,15 @@ func updateSSRtxRecord(tx walletdb.Tx, hash *chainhash.Hash,
 }
 
 // putSSRtxRecord inserts a given SSRtxs record to the SSRtxs records bucket.
-func putSSRtxRecord(tx walletdb.Tx, hash *chainhash.Hash,
+func putSSRtxRecord(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
 	record *ssrtxRecord) error {
-	return updateSSRtxRecord(tx, hash, record)
+
+	return updateSSRtxRecord(ns, hash, record)
 }
 
 // deserializeUserTicket deserializes the passed serialized user
 // ticket information.
-func deserializeUserTicket(serializedTicket []byte) (*PoolTicket,
-	error) {
-
+func deserializeUserTicket(serializedTicket []byte) (*PoolTicket, error) {
 	// Cursory check to make sure that the size of the
 	// ticket makes sense.
 	if len(serializedTicket)%stakePoolUserTicketSize != 0 {
@@ -978,9 +972,10 @@ func serializeUserTickets(records []*PoolTicket) []byte {
 
 // fetchStakePoolUserTickets retrieves pool user tickets from the meta bucket with
 // the given hash.
-func fetchStakePoolUserTickets(tx walletdb.Tx,
+func fetchStakePoolUserTickets(ns walletdb.ReadBucket,
 	scriptHash [20]byte) ([]*PoolTicket, error) {
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+
+	bucket := ns.NestedReadBucket(metaBucketName)
 
 	key := make([]byte, stakePoolTicketsPrefixSize+scriptHashSize)
 	copy(key[0:stakePoolTicketsPrefixSize], stakePoolTicketsPrefix)
@@ -998,28 +993,24 @@ func fetchStakePoolUserTickets(tx walletdb.Tx,
 
 // duplicateExistsInUserTickets checks to see if an exact duplicated of a
 // record already exists in a slice of user ticket records.
-func duplicateExistsInUserTickets(record *PoolTicket,
-	records []*PoolTicket) bool {
+func duplicateExistsInUserTickets(record *PoolTicket, records []*PoolTicket) bool {
 	for _, r := range records {
 		if *r == *record {
 			return true
 		}
 	}
-
 	return false
 }
 
 // recordExistsInUserTickets checks to see if a record already exists
 // in a slice of user ticket records. If it does exist, it returns
 // the location where it exists in the slice.
-func recordExistsInUserTickets(record *PoolTicket,
-	records []*PoolTicket) (bool, int) {
+func recordExistsInUserTickets(record *PoolTicket, records []*PoolTicket) (bool, int) {
 	for i, r := range records {
 		if r.Ticket == record.Ticket {
 			return true, i
 		}
 	}
-
 	return false, 0
 }
 
@@ -1027,13 +1018,14 @@ func recordExistsInUserTickets(record *PoolTicket,
 // The function pulls the current entry in the database, checks to see if the
 // ticket is already there, updates it accordingly, or adds it to the list of
 // tickets.
-func updateStakePoolUserTickets(tx walletdb.Tx, scriptHash [20]byte,
+func updateStakePoolUserTickets(ns walletdb.ReadWriteBucket, scriptHash [20]byte,
 	record *PoolTicket) error {
+
 	// Fetch the current content of the key.
 	// Possible buggy behaviour: If deserialization fails,
 	// we won't detect it here. We assume we're throwing
 	// ErrPoolUserTicketsNotFound.
-	oldRecords, _ := fetchStakePoolUserTickets(tx, scriptHash)
+	oldRecords, _ := fetchStakePoolUserTickets(ns, scriptHash)
 
 	// Don't reinsert duplicate records we already have.
 	if duplicateExistsInUserTickets(record, oldRecords) {
@@ -1059,7 +1051,7 @@ func updateStakePoolUserTickets(tx walletdb.Tx, scriptHash [20]byte,
 		}
 	}
 
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+	bucket := ns.NestedReadWriteBucket(metaBucketName)
 	key := make([]byte, stakePoolTicketsPrefixSize+scriptHashSize)
 	copy(key[0:stakePoolTicketsPrefixSize], stakePoolTicketsPrefix)
 	copy(key[stakePoolTicketsPrefixSize:stakePoolTicketsPrefixSize+scriptHashSize],
@@ -1129,9 +1121,10 @@ func serializeUserInvalTickets(records []*chainhash.Hash) []byte {
 
 // fetchStakePoolUserInvalTickets retrieves the list of invalid pool user tickets
 // from the meta bucket with the given hash.
-func fetchStakePoolUserInvalTickets(tx walletdb.Tx,
+func fetchStakePoolUserInvalTickets(ns walletdb.ReadBucket,
 	scriptHash [20]byte) ([]*chainhash.Hash, error) {
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+
+	bucket := ns.NestedReadBucket(metaBucketName)
 
 	key := make([]byte, stakePoolInvalidPrefixSize+scriptHashSize)
 	copy(key[0:stakePoolInvalidPrefixSize], stakePoolInvalidPrefix)
@@ -1164,13 +1157,14 @@ func duplicateExistsInInvalTickets(record *chainhash.Hash,
 // invalid tickets. The function pulls the current entry in the database,
 // checks to see if the ticket is already there. If it is it returns, otherwise
 // it adds it to the list of tickets.
-func updateStakePoolInvalUserTickets(tx walletdb.Tx, scriptHash [20]byte,
+func updateStakePoolInvalUserTickets(ns walletdb.ReadWriteBucket, scriptHash [20]byte,
 	record *chainhash.Hash) error {
+
 	// Fetch the current content of the key.
 	// Possible buggy behaviour: If deserialization fails,
 	// we won't detect it here. We assume we're throwing
 	// ErrPoolUserInvalTcktsNotFound.
-	oldRecords, _ := fetchStakePoolUserInvalTickets(tx, scriptHash)
+	oldRecords, _ := fetchStakePoolUserInvalTickets(ns, scriptHash)
 
 	// Don't reinsert duplicate records we already have.
 	if duplicateExistsInInvalTickets(record, oldRecords) {
@@ -1187,7 +1181,7 @@ func updateStakePoolInvalUserTickets(tx walletdb.Tx, scriptHash [20]byte,
 		records = append(oldRecords, record)
 	}
 
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+	bucket := ns.NestedReadWriteBucket(metaBucketName)
 	key := make([]byte, stakePoolInvalidPrefixSize+scriptHashSize)
 	copy(key[0:stakePoolInvalidPrefixSize], stakePoolInvalidPrefix)
 	copy(key[stakePoolInvalidPrefixSize:stakePoolInvalidPrefixSize+scriptHashSize],
@@ -1206,8 +1200,8 @@ func updateStakePoolInvalUserTickets(tx walletdb.Tx, scriptHash [20]byte,
 }
 
 // putMeta puts a k-v into the meta bucket.
-func putMeta(tx walletdb.Tx, key []byte, n int32) error {
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+func putMeta(ns walletdb.ReadWriteBucket, key []byte, n int32) error {
+	bucket := ns.NestedReadWriteBucket(metaBucketName)
 	err := bucket.Put(key, uint32ToBytes(uint32(n)))
 	if err != nil {
 		str := fmt.Sprintf("failed to store meta key '%s'", key)
@@ -1217,8 +1211,8 @@ func putMeta(tx walletdb.Tx, key []byte, n int32) error {
 }
 
 // fetchMeta fetches a v from a k in the meta bucket.
-func fetchMeta(tx walletdb.Tx, key []byte) (int32, error) {
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+func fetchMeta(ns walletdb.ReadBucket, key []byte) (int32, error) {
+	bucket := ns.NestedReadBucket(metaBucketName)
 
 	val := bucket.Get(key)
 	// Return 0 if the metadata is uninitialized
@@ -1235,76 +1229,70 @@ func fetchMeta(tx walletdb.Tx, key []byte) (int32, error) {
 
 // initialize creates the DB if it doesn't exist, and otherwise
 // loads the database.
-func initializeEmpty(namespace walletdb.Namespace) error {
+func initializeEmpty(ns walletdb.ReadWriteBucket) error {
 	// Initialize the buckets and main db fields as needed.
+	mainBucket, err := ns.CreateBucketIfNotExists(mainBucketName)
+	if err != nil {
+		str := "failed to create main bucket"
+		return stakeStoreError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucketIfNotExists(sstxRecordsBucketName)
+	if err != nil {
+		str := "failed to create sstx records bucket"
+		return stakeStoreError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucketIfNotExists(ssgenRecordsBucketName)
+	if err != nil {
+		str := "failed to create ssgen records bucket"
+		return stakeStoreError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucketIfNotExists(ssrtxRecordsBucketName)
+	if err != nil {
+		str := "failed to create ssrtx records bucket"
+		return stakeStoreError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucketIfNotExists(metaBucketName)
+	if err != nil {
+		str := "failed to create meta bucket"
+		return stakeStoreError(ErrDatabase, str, err)
+	}
+
+	// Save the most recent tx store version if it isn't already
+	// there, otherwise keep track of it for potential upgrades.
 	var version uint32
+	verBytes := mainBucket.Get(stakeStoreVersionName)
+	if verBytes == nil {
+		version = LatestStakeMgrVersion
+
+		var buf [4]byte
+		byteOrder.PutUint32(buf[:], version)
+		err := mainBucket.Put(stakeStoreVersionName, buf[:])
+		if err != nil {
+			str := "failed to store latest database version"
+			return stakeStoreError(ErrDatabase, str, err)
+		}
+	} else {
+		version = byteOrder.Uint32(verBytes)
+	}
+
 	var createDate uint64
-	err := namespace.Update(func(tx walletdb.Tx) error {
-		rootBucket := tx.RootBucket()
-		mainBucket, err := rootBucket.CreateBucketIfNotExists(
-			mainBucketName)
+	createBytes := mainBucket.Get(stakeStoreCreateDateName)
+	if createBytes == nil {
+		createDate = uint64(time.Now().Unix())
+		var buf [8]byte
+		byteOrder.PutUint64(buf[:], createDate)
+		err := mainBucket.Put(stakeStoreCreateDateName, buf[:])
 		if err != nil {
-			str := "failed to create main bucket"
+			str := "failed to store database creation time"
 			return stakeStoreError(ErrDatabase, str, err)
 		}
-
-		_, err = rootBucket.CreateBucketIfNotExists(sstxRecordsBucketName)
-		if err != nil {
-			str := "failed to create sstx records bucket"
-			return stakeStoreError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucketIfNotExists(ssgenRecordsBucketName)
-		if err != nil {
-			str := "failed to create ssgen records bucket"
-			return stakeStoreError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucketIfNotExists(ssrtxRecordsBucketName)
-		if err != nil {
-			str := "failed to create ssrtx records bucket"
-			return stakeStoreError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucketIfNotExists(metaBucketName)
-		if err != nil {
-			str := "failed to create meta bucket"
-			return stakeStoreError(ErrDatabase, str, err)
-		}
-
-		// Save the most recent tx store version if it isn't already
-		// there, otherwise keep track of it for potential upgrades.
-		verBytes := mainBucket.Get(stakeStoreVersionName)
-		if verBytes == nil {
-			version = LatestStakeMgrVersion
-
-			var buf [4]byte
-			byteOrder.PutUint32(buf[:], version)
-			err := mainBucket.Put(stakeStoreVersionName, buf[:])
-			if err != nil {
-				str := "failed to store latest database version"
-				return stakeStoreError(ErrDatabase, str, err)
-			}
-		} else {
-			version = byteOrder.Uint32(verBytes)
-		}
-
-		createBytes := mainBucket.Get(stakeStoreCreateDateName)
-		if createBytes == nil {
-			createDate = uint64(time.Now().Unix())
-			var buf [8]byte
-			byteOrder.PutUint64(buf[:], createDate)
-			err := mainBucket.Put(stakeStoreCreateDateName, buf[:])
-			if err != nil {
-				str := "failed to store database creation time"
-				return stakeStoreError(ErrDatabase, str, err)
-			}
-		} else {
-			createDate = byteOrder.Uint64(createBytes)
-		}
-
-		return nil
-	})
+	} else {
+		createDate = byteOrder.Uint64(createBytes)
+	}
 
 	if err != nil {
 		str := "failed to load database"

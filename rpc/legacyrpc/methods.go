@@ -35,13 +35,6 @@ import (
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-const (
-	// maxEmptyAccounts is the number of accounts to scan even if they have no
-	// transaction history. This is a deviation from BIP044 to make account
-	// creation easier by allowing a limited number of empty accounts.
-	maxEmptyAccounts = 100
-)
-
 // confirmed checks whether a transaction at height txHeight has met minconf
 // confirmations for a blockchain at height curHeight.
 func confirmed(minconf, txHeight, curHeight int32) bool {
@@ -328,7 +321,7 @@ func jsonError(err error) *dcrjson.RPCError {
 // account and branch.
 func accountAddressIndex(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.AccountAddressIndexCmd)
-	account, err := w.Manager.LookupAccount(cmd.Account)
+	account, err := w.AccountNumber(cmd.Account)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +344,7 @@ func accountAddressIndex(icmd interface{}, w *wallet.Wallet) (interface{}, error
 // passed account and branch.
 func accountFetchAddresses(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.AccountFetchAddressesCmd)
-	account, err := w.Manager.LookupAccount(cmd.Account)
+	account, err := w.AccountNumber(cmd.Account)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +362,7 @@ func accountFetchAddresses(icmd interface{}, w *wallet.Wallet) (interface{}, err
 			cmd.End)
 	}
 
-	addrs, err := w.Manager.AddressesDerivedFromDbAcct(uint32(cmd.Start),
+	addrs, err := w.AccountBranchAddressRange(uint32(cmd.Start),
 		uint32(cmd.End), account, branch)
 	if err != nil {
 		return nil, err
@@ -389,7 +382,7 @@ func accountFetchAddresses(icmd interface{}, w *wallet.Wallet) (interface{}, err
 // is successful, nothing is returned.
 func accountSyncAddressIndex(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.AccountSyncAddressIndexCmd)
-	account, err := w.Manager.LookupAccount(cmd.Account)
+	account, err := w.AccountNumber(cmd.Account)
 	if err != nil {
 		return nil, err
 	}
@@ -418,10 +411,6 @@ func accountSyncAddressIndex(icmd interface{}, w *wallet.Wallet) (interface{}, e
 	return nil, w.SyncAddressPoolIndex(account, branch, index)
 }
 
-// makeMultiSigScript is a helper function to combine common logic for
-// AddMultiSig and CreateMultiSig.
-// all error codes are rpc parse error here to match bitcoind which just throws
-// a runtime exception. *sigh*.
 func makeMultiSigScript(w *wallet.Wallet, keys []string,
 	nRequired int) ([]byte, error) {
 	keysesPrecious := make([]*dcrutil.AddressSecpPubKey, len(keys))
@@ -439,25 +428,21 @@ func makeMultiSigScript(w *wallet.Wallet, keys []string,
 		switch addr := a.(type) {
 		case *dcrutil.AddressSecpPubKey:
 			keysesPrecious[i] = addr
-		case *dcrutil.AddressPubKeyHash:
-			ainfo, err := w.Manager.Address(addr)
-			if err != nil {
-				return nil, err
-			}
-
-			apkinfo := ainfo.(waddrmgr.ManagedPubKeyAddress)
-
-			// This will be an addresspubkey
-			a, err := decodeAddress(apkinfo.ExportPubKey(),
-				w.ChainParams())
-			if err != nil {
-				return nil, err
-			}
-
-			apk := a.(*dcrutil.AddressSecpPubKey)
-			keysesPrecious[i] = apk
 		default:
-			return nil, err
+			pubKey, err := w.PubKeyForAddress(addr)
+			if err != nil {
+				return nil, err
+			}
+			if pubKey.GetType() != chainec.ECTypeSecp256k1 {
+				return nil, errors.New("only secp256k1 " +
+					"pubkeys are currently supported")
+			}
+			pubKeyAddr, err := dcrutil.NewAddressSecpPubKey(
+				pubKey.Serialize(), w.ChainParams())
+			if err != nil {
+				return nil, err
+			}
+			keysesPrecious[i] = pubKeyAddr
 		}
 	}
 
@@ -474,34 +459,31 @@ func addMultiSigAddress(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		return nil, &ErrNotImportedAccount
 	}
 
-	script, err := makeMultiSigScript(w, cmd.Keys, cmd.NRequired)
-	if err != nil {
-		return nil, ParseError{err}
+	secp256k1Addrs := make([]dcrutil.Address, len(cmd.Keys))
+	for i, k := range cmd.Keys {
+		addr, err := decodeAddress(k, w.ChainParams())
+		if err != nil {
+			return nil, ParseError{err}
+		}
+		secp256k1Addrs[i] = addr
 	}
 
-	// Insert into the tx store.
-	err = w.TxStore.InsertTxScript(script)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO(oga) blockstamp current block?
-	bs := &waddrmgr.BlockStamp{
-		Hash:   *w.ChainParams().GenesisHash,
-		Height: 0,
-	}
-
-	addr, err := w.Manager.ImportScript(script, bs)
+	script, err := w.MakeSecp256k1MultiSigScript(secp256k1Addrs, cmd.NRequired)
 	if err != nil {
 		return nil, err
 	}
 
-	err = chainClient.NotifyReceived([]dcrutil.Address{addr.Address()})
+	p2shAddr, err := w.ImportP2SHRedeemScript(script)
 	if err != nil {
 		return nil, err
 	}
 
-	return addr.Address().EncodeAddress(), nil
+	err = chainClient.NotifyReceived([]dcrutil.Address{p2shAddr})
+	if err != nil {
+		return nil, err
+	}
+
+	return p2shAddr.EncodeAddress(), nil
 }
 
 // addTicket adds a ticket to the stake manager manually.
@@ -518,10 +500,7 @@ func addTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	tx := dcrutil.NewTx(mtx)
-
-	err = w.StakeMgr.InsertSStx(tx, w.VoteBits)
-
+	err = w.AddTicket(dcrutil.NewTx(mtx))
 	return nil, err
 }
 
@@ -533,7 +512,7 @@ func consolidate(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	account := uint32(waddrmgr.DefaultAccountNum)
 	var err error
 	if cmd.Account != nil {
-		account, err = w.Manager.LookupAccount(*cmd.Account)
+		account, err = w.AccountNumber(*cmd.Account)
 		if err != nil {
 			return nil, err
 		}
@@ -621,7 +600,7 @@ func dumpWallet(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 func getAddressesByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.GetAddressesByAccountCmd)
 
-	account, err := w.Manager.LookupAccount(cmd.Account)
+	account, err := w.AccountNumber(cmd.Account)
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +622,7 @@ func getAddressesByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, err
 
 	// Derive the addresses.
 	addrsStr := make([]string, endInt+endExt)
-	addrsExt, err := w.Manager.AddressesDerivedFromDbAcct(0, endExt,
+	addrsExt, err := w.AccountBranchAddressRange(0, endExt,
 		account, waddrmgr.ExternalBranch)
 	if err != nil {
 		return nil, err
@@ -651,7 +630,7 @@ func getAddressesByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, err
 	for i := range addrsExt {
 		addrsStr[i] = addrsExt[i].EncodeAddress()
 	}
-	addrsInt, err := w.Manager.AddressesDerivedFromDbAcct(0, endInt,
+	addrsInt, err := w.AccountBranchAddressRange(0, endInt,
 		account, waddrmgr.InternalBranch)
 	if err != nil {
 		return nil, err
@@ -696,7 +675,7 @@ func getBalance(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 			balType)
 	} else {
 		var account uint32
-		account, err = w.Manager.LookupAccount(accountName)
+		account, err = w.AccountNumber(accountName)
 		if err != nil {
 			return nil, err
 		}
@@ -821,12 +800,12 @@ func getAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 
 	// Fetch the associated account
-	account, err := w.Manager.AddrAccount(addr)
+	account, err := w.AccountOfAddress(addr)
 	if err != nil {
 		return nil, &ErrAddressNotInWallet
 	}
 
-	acctName, err := w.Manager.AccountName(account)
+	acctName, err := w.AccountName(account)
 	if err != nil {
 		return nil, &ErrAccountNameNotFound
 	}
@@ -842,7 +821,7 @@ func getAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 func getAccountAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.GetAccountAddressCmd)
 
-	account, err := w.Manager.LookupAccount(cmd.Account)
+	account, err := w.AccountNumber(cmd.Account)
 	if err != nil {
 		return nil, err
 	}
@@ -863,7 +842,7 @@ func getUnconfirmedBalance(icmd interface{}, w *wallet.Wallet) (interface{}, err
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
-	account, err := w.Manager.LookupAccount(acctName)
+	account, err := w.AccountNumber(acctName)
 	if err != nil {
 		return nil, err
 	}
@@ -967,23 +946,7 @@ func createNewAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, &ErrReservedAccountName
 	}
 
-	// Check that we are within the maximum allowed non-empty accounts limit.
-	account, err := w.Manager.LastAccount()
-	if err != nil {
-		return nil, err
-	}
-	if account > maxEmptyAccounts {
-		used, err := w.AccountUsed(account)
-		if err != nil {
-			return nil, err
-		}
-		if !used {
-			return nil, errors.New("cannot create account: " +
-				"previous account has no transaction history")
-		}
-	}
-
-	_, err = w.NextAccount(cmd.Account)
+	_, err := w.NextAccount(cmd.Account)
 	if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 		return nil, &dcrjson.RPCError{
 			Code: dcrjson.ErrRPCWalletUnlockNeeded,
@@ -1006,7 +969,7 @@ func renameAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 
 	// Check that given account exists
-	account, err := w.Manager.LookupAccount(cmd.OldAccount)
+	account, err := w.AccountNumber(cmd.OldAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -1029,43 +992,17 @@ func getMultisigOutInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		Index: cmd.Index,
 		Tree:  dcrutil.TxTreeRegular,
 	}
-	mso, err := w.TxStore.GetMultisigOutput(op)
+
+	p2shOutput, err := w.FetchP2SHMultiSigOutput(op)
 	if err != nil {
 		return nil, err
-	}
-
-	scriptAddr, err := dcrutil.NewAddressScriptHashFromHash(mso.ScriptHash[:],
-		w.ChainParams())
-	if err != nil {
-		return nil, err
-	}
-
-	redeemScript, err := w.TxStore.GetTxScript(mso.ScriptHash[:])
-	if err != nil {
-		return nil, err
-	}
-	// Couldn't find it, look in the manager too.
-	if redeemScript == nil {
-		address, err := w.Manager.Address(scriptAddr)
-		if err != nil {
-			return nil, err
-		}
-		sa, ok := address.(waddrmgr.ManagedScriptAddress)
-		if !ok {
-			return nil, errors.New("address is not a script" +
-				" address")
-		}
-
-		redeemScript, err = sa.Script()
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	// Get the list of pubkeys required to sign.
 	var pubkeys []string
 	_, pubkeyAddrs, _, err := txscript.ExtractPkScriptAddrs(
-		txscript.DefaultScriptVersion, redeemScript, w.ChainParams())
+		txscript.DefaultScriptVersion, p2shOutput.RedeemScript,
+		w.ChainParams())
 	if err != nil {
 		return nil, err
 	}
@@ -1073,20 +1010,25 @@ func getMultisigOutInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		pubkeys = append(pubkeys, hex.EncodeToString(pka.ScriptAddress()))
 	}
 
-	return dcrjson.GetMultisigOutInfoResult{
-		Address:      scriptAddr.EncodeAddress(),
-		RedeemScript: hex.EncodeToString(redeemScript),
-		M:            mso.M,
-		N:            mso.N,
+	result := &dcrjson.GetMultisigOutInfoResult{
+		Address:      p2shOutput.P2SHAddress.EncodeAddress(),
+		RedeemScript: hex.EncodeToString(p2shOutput.RedeemScript),
+		M:            p2shOutput.M,
+		N:            p2shOutput.N,
 		Pubkeys:      pubkeys,
-		TxHash:       mso.TxHash.String(),
-		BlockHeight:  mso.BlockHeight,
-		BlockHash:    mso.BlockHash.String(),
-		Spent:        mso.Spent,
-		SpentBy:      mso.SpentBy.String(),
-		SpentByIndex: mso.SpentByIndex,
-		Amount:       mso.Amount.ToCoin(),
-	}, nil
+		TxHash:       p2shOutput.OutPoint.Hash.String(),
+		Amount:       p2shOutput.OutputAmount.ToCoin(),
+	}
+	if !p2shOutput.ContainingBlock.None() {
+		result.BlockHeight = uint32(p2shOutput.ContainingBlock.Height)
+		result.BlockHash = p2shOutput.ContainingBlock.Hash.String()
+	}
+	if p2shOutput.Redeemer != nil {
+		result.Spent = true
+		result.SpentBy = p2shOutput.Redeemer.TxHash.String()
+		result.SpentByIndex = p2shOutput.Redeemer.InputIndex
+	}
+	return result, nil
 }
 
 // getNewAddress handles a getnewaddress request by returning a new
@@ -1101,7 +1043,7 @@ func getNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
-	account, err := w.Manager.LookupAccount(acctName)
+	account, err := w.AccountNumber(acctName)
 	if err != nil {
 		return nil, err
 	}
@@ -1115,21 +1057,16 @@ func getNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		toReturn := make(map[string]string)
 		toReturn["address"] = addr.EncodeAddress()
 
-		ainfo, err := w.Manager.Address(addr)
+		pubKey, err := w.PubKeyForAddress(addr)
 		if err != nil {
 			return nil, err
 		}
-
-		apkinfo := ainfo.(waddrmgr.ManagedPubKeyAddress)
-
-		// This will be an addresspubkey.
-		a, err := decodeAddress(apkinfo.ExportPubKey(),
-			w.ChainParams())
+		pubKeyAddr, err := dcrutil.NewAddressSecpPubKey(
+			pubKey.Serialize(), w.ChainParams())
 		if err != nil {
 			return nil, err
 		}
-		apk := a.(*dcrutil.AddressSecpPubKey)
-		toReturn["pubkey"] = apk.String()
+		toReturn["pubkey"] = pubKeyAddr.String()
 
 		// Return the new payment address string along with the pubkey.
 		return toReturn, nil
@@ -1150,7 +1087,7 @@ func getRawChangeAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
-	account, err := w.Manager.LookupAccount(acctName)
+	account, err := w.AccountNumber(acctName)
 	if err != nil {
 		return nil, err
 	}
@@ -1170,17 +1107,23 @@ func getRawChangeAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error
 func getReceivedByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.GetReceivedByAccountCmd)
 
-	account, err := w.Manager.LookupAccount(cmd.Account)
+	account, err := w.AccountNumber(cmd.Account)
 	if err != nil {
 		return nil, err
 	}
 
-	bal, _, err := w.TotalReceivedForAccount(account, int32(*cmd.MinConf))
+	// TODO: This is more inefficient that it could be, but the entire
+	// algorithm is already dominated by reading every transaction in the
+	// wallet's history.
+	results, err := w.TotalReceivedForAccounts(int32(*cmd.MinConf))
 	if err != nil {
 		return nil, err
 	}
-
-	return bal.ToCoin(), nil
+	acctIndex := int(account)
+	if account == waddrmgr.ImportedAddrAccount {
+		acctIndex = len(results) - 1
+	}
+	return results[acctIndex].TotalReceived.ToCoin(), nil
 }
 
 // getReceivedByAddress handles a getreceivedbyaddress request by returning
@@ -1217,29 +1160,19 @@ func getMasterPubkey(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	account := uint32(waddrmgr.DefaultAccountNum)
 	if cmd.Account != nil {
 		var err error
-		account, err = w.Manager.LookupAccount(*cmd.Account)
+		account, err = w.AccountNumber(*cmd.Account)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	pkString, err := w.Manager.GetMasterPubkey(account)
-	if err != nil {
-		return nil, err
-	}
-
-	return pkString, nil
+	return w.MasterPubKey(account)
 }
 
 // getSeed handles a getseed request by returning the wallet seed encoded as
 // a string.
 func getSeed(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	seedStr, err := w.Manager.GetSeed()
-	if err != nil {
-		return nil, err
-	}
-
-	return seedStr, nil
+	return w.Seed()
 }
 
 // getStakeInfo gets a large amounts of information about the stake environment
@@ -1296,81 +1229,23 @@ func getTicketMaxPrice(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	return w.GetTicketMaxPrice().ToCoin(), nil
 }
 
-// hashInSlice returns whether a hash exists in a slice or not.
-func hashInSlice(h chainhash.Hash, list []chainhash.Hash) bool {
-	for _, hash := range list {
-		if h == hash {
-			return true
-		}
-	}
-
-	return false
-}
-
 // getTickets handles a gettickets request by returning the hashes of the tickets
 // currently owned by wallet, encoded as strings.
 func getTickets(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	cmd := icmd.(*dcrjson.GetTicketsCmd)
-	blk := w.Manager.SyncedTo()
 
-	// UnspentTickets collects all the tickets that pay out to a
-	// public key hash for a public key owned by this wallet.
-	tickets, err := w.TxStore.UnspentTickets(blk.Height, cmd.IncludeImmature)
+	ticketHashes, err := w.LiveTicketHashes(chainClient, cmd.IncludeImmature)
 	if err != nil {
 		return nil, err
-	}
-
-	// Access the stake manager and see if there are any extra tickets
-	// there. Likely they were either pruned because they failed to get
-	// into the blockchain or they are P2SH for some script we own.
-	var extraTickets []chainhash.Hash
-	stakeMgrTickets, err := w.StakeMgr.DumpSStxHashes()
-	if err != nil {
-		return nil, err
-	}
-	for _, h := range stakeMgrTickets {
-		if !hashInSlice(h, tickets) {
-			extraTickets = append(extraTickets, h)
-		}
-	}
-	for _, h := range extraTickets {
-		// Get the raw transaction information from daemon and add
-		// any relevant tickets. The ticket output is always the
-		// zeroeth output.
-		spent, err := chainClient.GetTxOut(&h, 0, true)
-		if err != nil {
-			continue
-		}
-		// This returns nil if the output is spent.
-		if spent == nil {
-			continue
-		}
-
-		ticketTx, err := chainClient.GetRawTransactionVerbose(&h)
-		if err != nil {
-			continue
-		}
-
-		txHeight := ticketTx.BlockHeight
-		unconfirmed := (txHeight == 0)
-		immature := (blk.Height-int32(txHeight) <
-			int32(w.ChainParams().TicketMaturity))
-		if cmd.IncludeImmature {
-			tickets = append(tickets, h)
-		} else {
-			if !(unconfirmed || immature) {
-				tickets = append(tickets, h)
-			}
-		}
 	}
 
 	// Compose a slice of strings to return.
-	ticketsStr := make([]string, len(tickets), len(tickets))
-	for i, ticket := range tickets {
-		ticketsStr[i] = ticket.String()
+	ticketHashStrs := make([]string, 0, len(ticketHashes))
+	for i := range ticketHashes {
+		ticketHashStrs = append(ticketHashStrs, ticketHashes[i].String())
 	}
 
-	return &dcrjson.GetTicketsResult{Hashes: ticketsStr}, nil
+	return &dcrjson.GetTicketsResult{Hashes: ticketHashStrs}, nil
 }
 
 // getTicketVoteBits fetches the per-ticket voteBits for a given ticket from
@@ -1384,19 +1259,10 @@ func getTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 		return nil, err
 	}
 
-	set, voteBits, err := w.StakeMgr.SStxVoteBits(ticket)
+	voteBits, err := w.VoteBitsForTicket(ticket)
 	if err != nil {
 		return nil, err
 	}
-	if !set {
-		return &dcrjson.GetTicketVoteBitsResult{
-			VoteBitsData: dcrjson.VoteBitsData{
-				VoteBits:    w.VoteBits,
-				VoteBitsExt: "",
-			},
-		}, nil
-	}
-
 	return &dcrjson.GetTicketVoteBitsResult{
 		VoteBitsData: dcrjson.VoteBitsData{
 			VoteBits:    voteBits,
@@ -1423,19 +1289,14 @@ func getTicketsVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error)
 
 	voteBitsData := make([]dcrjson.VoteBitsData, 0, ticketsLen)
 	for _, th := range ticketHashes {
-		set, voteBits, err := w.StakeMgr.SStxVoteBits(th)
+		voteBits, err := w.VoteBitsForTicket(th)
 		if err != nil {
 			return nil, err
 		}
-		var vbr dcrjson.VoteBitsData
-		if !set {
-			vbr.VoteBits = w.VoteBits
-			vbr.VoteBitsExt = ""
-		} else {
-			vbr.VoteBits = voteBits
-			vbr.VoteBitsExt = ""
-		}
-		voteBitsData = append(voteBitsData, vbr)
+		voteBitsData = append(voteBitsData, dcrjson.VoteBitsData{
+			VoteBits:    voteBits,
+			VoteBitsExt: "",
+		})
 	}
 
 	return &dcrjson.GetTicketsVoteBitsResult{VoteBitsList: voteBitsData}, nil
@@ -1454,7 +1315,7 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		}
 	}
 
-	details, err := w.TxStore.TxDetails(txSha)
+	details, err := wallet.UnstableAPI(w).TxDetails(txSha)
 	if err != nil {
 		return nil, err
 	}
@@ -1560,11 +1421,11 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		if err == nil && len(addrs) == 1 {
 			addr := addrs[0]
 			address = addr.EncodeAddress()
-			account, err := w.Manager.AddrAccount(addr)
+			account, err := w.AccountOfAddress(addr)
 			if err == nil {
-				accountName, err = w.Manager.AccountName(account)
-				if err != nil {
-					accountName = ""
+				name, err := w.AccountName(account)
+				if err == nil {
+					accountName = name
 				}
 			}
 		}
@@ -1716,26 +1577,12 @@ func listAccounts(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.ListAccountsCmd)
 
 	accountBalances := map[string]float64{}
-	var accounts []uint32
-	err := w.Manager.ForEachAccount(func(account uint32) error {
-		accounts = append(accounts, account)
-		return nil
-	})
+	results, err := w.AccountBalances(int32(*cmd.MinConf), wtxmgr.BFBalanceFullScan)
 	if err != nil {
 		return nil, err
 	}
-	minConf := int32(*cmd.MinConf)
-	for _, account := range accounts {
-		acctName, err := w.Manager.AccountName(account)
-		if err != nil {
-			return nil, &ErrAccountNameNotFound
-		}
-		bal, err := w.CalculateAccountBalance(account, minConf,
-			wtxmgr.BFBalanceFullScan)
-		if err != nil {
-			return nil, err
-		}
-		accountBalances[acctName] = bal.ToCoin()
+	for _, result := range results {
+		accountBalances[result.AccountName] = result.AccountBalance.ToCoin()
 	}
 	// Return the map.  This will be marshaled into a JSON object.
 	return accountBalances, nil
@@ -1760,34 +1607,20 @@ func listLockUnspent(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 func listReceivedByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.ListReceivedByAccountCmd)
 
-	var accounts []uint32
-	err := w.Manager.ForEachAccount(func(account uint32) error {
-		accounts = append(accounts, account)
-		return nil
-	})
+	results, err := w.TotalReceivedForAccounts(int32(*cmd.MinConf))
 	if err != nil {
 		return nil, err
 	}
 
-	ret := make([]dcrjson.ListReceivedByAccountResult, 0, len(accounts))
-	minConf := int32(*cmd.MinConf)
-	for _, account := range accounts {
-		acctName, err := w.Manager.AccountName(account)
-		if err != nil {
-			return nil, &ErrAccountNameNotFound
-		}
-		bal, confirmations, err := w.TotalReceivedForAccount(account,
-			minConf)
-		if err != nil {
-			return nil, err
-		}
-		ret = append(ret, dcrjson.ListReceivedByAccountResult{
-			Account:       acctName,
-			Amount:        bal.ToCoin(),
-			Confirmations: uint64(confirmations),
+	jsonResults := make([]dcrjson.ListReceivedByAccountResult, 0, len(results))
+	for _, result := range results {
+		jsonResults = append(jsonResults, dcrjson.ListReceivedByAccountResult{
+			Account:       result.AccountName,
+			Amount:        result.TotalReceived.ToCoin(),
+			Confirmations: uint64(result.LastConfirmation),
 		})
 	}
-	return ret, nil
+	return jsonResults, nil
 }
 
 // listReceivedByAddress handles a listreceivedbyaddress request by returning
@@ -1838,7 +1671,7 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 	} else {
 		endHeight = syncBlock.Height - int32(minConf) + 1
 	}
-	err = w.TxStore.RangeTransactions(0, endHeight, func(details []wtxmgr.TxDetails) (bool, error) {
+	err = wallet.UnstableAPI(w).RangeTransactions(0, endHeight, func(details []wtxmgr.TxDetails) (bool, error) {
 		confirmations := confirms(details[0].Block.Height, syncBlock.Height)
 		for _, tx := range details {
 			for _, cred := range tx.Credits {
@@ -1944,67 +1777,23 @@ type scriptInfo struct {
 // listScripts handles a listscripts request by returning an
 // array of script details for all scripts in the wallet.
 func listScripts(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	scriptList := make(map[[20]byte]scriptInfo)
-
-	// Fetch all the address manager scripts first.
-	importedAcct, err := w.Manager.LookupAccount(waddrmgr.ImportedAddrAccountName)
+	redeemScripts, err := w.FetchAllRedeemScripts()
 	if err != nil {
 		return nil, err
 	}
-
-	var managerScriptAddrs []waddrmgr.ManagedScriptAddress
-	err = w.Manager.ForEachAccountAddress(importedAcct,
-		func(maddr waddrmgr.ManagedAddress) error {
-			msa, is := maddr.(waddrmgr.ManagedScriptAddress)
-			if is {
-				managerScriptAddrs = append(managerScriptAddrs, msa)
-			}
-			return nil
-		})
-	if err != nil {
-		log.Errorf("failed to iterate through the addrmgr scripts: %v", err)
-	}
-	for _, msa := range managerScriptAddrs {
-		h := msa.Address().Hash160()
-		scr, err := msa.Script()
+	listScriptsResultSIs := make([]dcrjson.ScriptInfo, len(redeemScripts))
+	for i, redeemScript := range redeemScripts {
+		p2shAddr, err := dcrutil.NewAddressScriptHash(redeemScript,
+			w.ChainParams())
 		if err != nil {
 			return nil, err
 		}
-		scriptList[*h] = scriptInfo{
-			redeemScript: scr,
-			address:      msa.Address(),
+		listScriptsResultSIs[i] = dcrjson.ScriptInfo{
+			Hash160:      hex.EncodeToString(p2shAddr.Hash160()[:]),
+			Address:      p2shAddr.EncodeAddress(),
+			RedeemScript: hex.EncodeToString(redeemScript),
 		}
 	}
-
-	// Fetch all the scripts from the transaction manager.
-	txsScripts, err := w.TxStore.StoredTxScripts()
-	if err != nil {
-		return nil, fmt.Errorf("failed to access stored txmgr scripts")
-	}
-	for _, scr := range txsScripts {
-		addr, err := dcrutil.NewAddressScriptHash(scr, w.ChainParams())
-		if err != nil {
-			log.Errorf("failed to parse txstore script: %v", err)
-			continue
-		}
-		h := addr.Hash160()
-		scriptList[*h] = scriptInfo{
-			redeemScript: scr,
-			address:      addr,
-		}
-	}
-
-	// Generate the JSON struct result.
-	listScriptsResultSIs := make([]dcrjson.ScriptInfo, len(scriptList))
-	itr := 0
-	for h, si := range scriptList {
-		listScriptsResultSIs[itr].Hash160 = hex.EncodeToString(h[:])
-		listScriptsResultSIs[itr].RedeemScript =
-			hex.EncodeToString(si.redeemScript)
-		listScriptsResultSIs[itr].Address = si.address.EncodeAddress()
-		itr++
-	}
-
 	return &dcrjson.ListScriptsResult{Scripts: listScriptsResultSIs}, nil
 }
 
@@ -2139,7 +1928,7 @@ func purchaseTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, ErrNeedPositiveSpendLimit
 	}
 
-	account, err := w.Manager.LookupAccount(cmd.FromAccount)
+	account, err := w.AccountNumber(cmd.FromAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -2312,12 +2101,12 @@ func redeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 		Index: cmd.Index,
 		Tree:  cmd.Tree,
 	}
-	msCredit, err := w.TxStore.GetMultisigCredit(&op)
+	p2shOutput, err := w.FetchP2SHMultiSigOutput(&op)
 	if err != nil {
 		return nil, err
 	}
 	sc := txscript.GetScriptClass(txscript.DefaultScriptVersion,
-		msCredit.MSScript)
+		p2shOutput.RedeemScript)
 	if sc != txscript.MultiSigTy {
 		return nil, fmt.Errorf("invalid P2SH script: not multisig")
 	}
@@ -2328,11 +2117,11 @@ func redeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 	// Then produce the txout.
 	size := wallet.EstimateTxSize(1, 1)
 	feeEst := wallet.FeeForSize(w.RelayFee(), size)
-	if feeEst >= msCredit.Amount {
+	if feeEst >= p2shOutput.OutputAmount {
 		return nil, fmt.Errorf("multisig out amt is too small "+
-			"(have %v, %v fee suggested)", msCredit.Amount, feeEst)
+			"(have %v, %v fee suggested)", p2shOutput.OutputAmount, feeEst)
 	}
-	toReceive := msCredit.Amount - feeEst
+	toReceive := p2shOutput.OutputAmount - feeEst
 	pkScript, err := txscript.PayToAddrScript(addr)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create txout script: %s", err)
@@ -2340,7 +2129,7 @@ func redeemMultiSigOut(icmd interface{}, w *wallet.Wallet, chainClient *chain.RP
 	msgTx.AddTxOut(wire.NewTxOut(int64(toReceive), pkScript))
 
 	// Start creating the SignRawTransactionCmd.
-	outpointScript, err := txscript.PayToScriptHashScript(msCredit.ScriptHash[:])
+	outpointScript, err := txscript.PayToScriptHashScript(p2shOutput.P2SHAddress.Hash160()[:])
 	if err != nil {
 		return nil, err
 	}
@@ -2397,7 +2186,11 @@ func redeemMultiSigOuts(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	if err != nil {
 		return nil, err
 	}
-	msos, err := w.TxStore.UnspentMultisigCreditsForAddress(addr)
+	p2shAddr, ok := addr.(*dcrutil.AddressScriptHash)
+	if !ok {
+		return nil, errors.New("address is not P2SH")
+	}
+	msos, err := wallet.UnstableAPI(w).UnspentMultisigCreditsForAddress(p2shAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -2441,15 +2234,7 @@ func stakePoolUserInfo(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	if err != nil {
 		return nil, err
 	}
-	_, isScriptHash := userAddr.(*dcrutil.AddressScriptHash)
-	_, isP2PKH := userAddr.(*dcrutil.AddressPubKeyHash)
-	if !(isScriptHash || isP2PKH) {
-		return nil, fmt.Errorf("invalid user address %v, must be P2SH or "+
-			"P2PKH", userAddr.EncodeAddress())
-	}
-
-	// Access the stake manager and fetch the user information.
-	spui, err := w.StakeMgr.StakePoolUserInfo(userAddr)
+	spui, err := w.StakePoolUserInfo(userAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -2496,30 +2281,17 @@ func ticketsForAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 		return nil, err
 	}
 
-	ticketsAll, err := w.StakeMgr.DumpSStxHashesForAddress(addr)
+	ticketHashes, err := w.TicketHashesForVotingAddress(addr)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check the wallet database.
-	tickets := make([]chainhash.Hash, 0, len(ticketsAll))
-	for i := range ticketsAll {
-		exists, err := w.TxStore.ExistsTx(&ticketsAll[i])
-		if err != nil {
-			log.Errorf("Enountered database error while retrieving "+
-				"tickets for address: %v", err.Error())
-		}
-		if exists {
-			tickets = append(tickets, ticketsAll[i])
-		}
+	ticketHashStrs := make([]string, 0, len(ticketHashes))
+	for _, hash := range ticketHashes {
+		ticketHashStrs = append(ticketHashStrs, hash.String())
 	}
 
-	ticketsStr := make([]string, len(tickets), len(tickets))
-	for i, h := range tickets {
-		ticketsStr[i] = h.String()
-	}
-
-	return dcrjson.TicketsForAddressResult{Tickets: ticketsStr}, nil
+	return dcrjson.TicketsForAddressResult{Tickets: ticketHashStrs}, nil
 }
 
 func isNilOrEmpty(s *string) bool {
@@ -2543,7 +2315,7 @@ func sendFrom(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) 
 		}
 	}
 
-	account, err := w.Manager.LookupAccount(cmd.FromAccount)
+	account, err := w.AccountNumber(cmd.FromAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -2585,7 +2357,7 @@ func sendMany(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		}
 	}
 
-	account, err := w.Manager.LookupAccount(cmd.FromAccount)
+	account, err := w.AccountNumber(cmd.FromAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -2680,25 +2452,21 @@ func sendToMultiSig(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCl
 		switch addr := a.(type) {
 		case *dcrutil.AddressSecpPubKey:
 			pubkeys[i] = addr
-		case *dcrutil.AddressPubKeyHash:
-			ainfo, err := w.Manager.Address(addr)
-			if err != nil {
-				return nil, err
-			}
-
-			apkinfo := ainfo.(waddrmgr.ManagedPubKeyAddress)
-
-			// This will be an addresspubkey.
-			a, err := decodeAddress(apkinfo.ExportPubKey(),
-				w.ChainParams())
-			if err != nil {
-				return nil, err
-			}
-
-			apk := a.(*dcrutil.AddressSecpPubKey)
-			pubkeys[i] = apk
 		default:
-			return nil, err
+			pubKey, err := w.PubKeyForAddress(addr)
+			if err != nil {
+				return nil, err
+			}
+			if pubKey.GetType() != chainec.ECTypeSecp256k1 {
+				return nil, errors.New("only secp256k1 " +
+					"pubkeys are currently supported")
+			}
+			pubKeyAddr, err := dcrutil.NewAddressSecpPubKey(
+				pubKey.Serialize(), w.ChainParams())
+			if err != nil {
+				return nil, err
+			}
+			pubkeys[i] = pubKeyAddr
 		}
 	}
 
@@ -2734,7 +2502,7 @@ func sendToSStx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient
 	cmd := icmd.(*dcrjson.SendToSStxCmd)
 	minconf := int32(*cmd.MinConf)
 
-	account, err := w.Manager.LookupAccount(cmd.FromAccount)
+	account, err := w.AccountNumber(cmd.FromAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -2800,7 +2568,7 @@ func sendToSStx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient
 func sendToSSGen(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.SendToSSGenCmd)
 
-	_, err := w.Manager.LookupAccount(cmd.FromAccount)
+	_, err := w.AccountNumber(cmd.FromAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -2843,7 +2611,7 @@ func sendToSSGen(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 func sendToSSRtx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	cmd := icmd.(*dcrjson.SendToSSRtxCmd)
 
-	_, err := w.Manager.LookupAccount(cmd.FromAccount)
+	_, err := w.AccountNumber(cmd.FromAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -2913,12 +2681,8 @@ func setTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 		return nil, err
 	}
 
-	err = w.StakeMgr.UpdateSStxVoteBits(ticket, cmd.VoteBits)
-	if err != nil {
-		return nil, err
-	}
-
-	return nil, nil
+	err = w.SetVoteBitsForTicket(ticket, cmd.VoteBits)
+	return nil, err
 }
 
 // setBalanceToMaintain sets the balance to maintain for automatic ticket pur.
@@ -2994,19 +2758,7 @@ func signMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, err
 	}
 
-	ainfo, err := w.Manager.Address(addr)
-	if err != nil {
-		return nil, err
-	}
-	pka, ok := ainfo.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		msg := fmt.Sprintf("Address '%s' does not have an associated private key", addr)
-		return nil, &dcrjson.RPCError{
-			Code:    dcrjson.ErrRPCInvalidAddressOrKey,
-			Message: msg,
-		}
-	}
-	privKey, err := pka.PrivKey()
+	privKey, err := w.PrivKeyForAddress(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -3138,66 +2890,41 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 
 			isRelevant := false
 			for _, addr := range addrs {
-				_, err := w.Manager.Address(addr)
-				if err == nil {
+				haveAddr, err := w.HaveAddress(addr)
+				if err != nil {
+					return nil, err
+				}
+				if haveAddr {
 					isRelevant = true
-					err = w.Manager.MarkUsed(addr)
-					if err != nil {
-						return nil, err
-					}
-					log.Debugf("Marked address %v used", addr)
-				} else {
-					// Missing addresses are skipped.  Other errors should
-					// be propagated.
-					if !waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
-						return nil, err
-					}
 				}
 			}
 			// Add the script to the script databases.
 			if isRelevant {
-				err = w.TxStore.InsertTxScript(rs)
+				p2shAddr, err := w.ImportP2SHRedeemScript(rs)
 				if err != nil {
 					return nil, err
 				}
 
-				// Get current block's height and hash.
-				bs, err := chainClient.BlockStamp()
-				if err != nil {
-					return nil, err
+				// This is the first time seeing this script
+				// address belongs to us, so do a rescan and see
+				// if there are any other outputs to this
+				// address.
+				job := &wallet.RescanJob{
+					Addrs:     []dcrutil.Address{p2shAddr},
+					OutPoints: nil,
+					BlockStamp: waddrmgr.BlockStamp{
+						Height: 0,
+						Hash:   *w.ChainParams().GenesisHash,
+					},
 				}
-				mscriptaddr, err := w.Manager.ImportScript(rs, bs)
-				if err != nil {
-					switch {
-					// Don't care if it's already there.
-					case waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress):
-						break
-					case waddrmgr.IsError(err, waddrmgr.ErrLocked):
-						log.Debugf("failed to attempt script importation " +
-							"of incoming tx because addrmgr was locked")
-						break
-					default:
-						return nil, err
-					}
-				} else {
-					// This is the first time seeing this script address
-					// belongs to us, so do a rescan and see if there are
-					// any other outputs to this address.
-					job := &wallet.RescanJob{
-						Addrs:     []dcrutil.Address{mscriptaddr.Address()},
-						OutPoints: nil,
-						BlockStamp: waddrmgr.BlockStamp{
-							Height: 0,
-							Hash:   *w.ChainParams().GenesisHash,
-						},
-					}
 
-					// Submit rescan job and log when the import has completed.
-					// Do not block on finishing the rescan.  The rescan success
-					// or failure is logged elsewhere, and the channel is not
-					// required to be read, so discard the return value.
-					_ = w.SubmitRescan(job)
-				}
+				// Submit rescan job and log when the import has
+				// completed.  Do not block on finishing the
+				// rescan.  The rescan success or failure is
+				// logged elsewhere, and the channel is not
+				// required to be read, so discard the return
+				// value.
+				_ = w.SubmitRescan(job)
 			}
 		}
 	}
@@ -3421,7 +3148,7 @@ func validateAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	result.Address = addr.EncodeAddress()
 	result.IsValid = true
 
-	ainfo, err := w.Manager.Address(addr)
+	ainfo, err := w.AddressInfo(addr)
 	if err != nil {
 		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
 			// No additional information available about the address.
@@ -3433,7 +3160,7 @@ func validateAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	// The address lookup was successful which means there is further
 	// information about it available and it is "mine".
 	result.IsMine = true
-	acctName, err := w.Manager.AccountName(ainfo.Account())
+	acctName, err := w.AccountName(ainfo.Account())
 	if err != nil {
 		return nil, &ErrAccountNameNotFound
 	}
@@ -3613,7 +3340,7 @@ func walletPassphrase(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 func walletPassphraseChange(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.WalletPassphraseChangeCmd)
 
-	err := w.ChangePassphrase([]byte(cmd.OldPassphrase),
+	err := w.ChangePrivatePassphrase([]byte(cmd.OldPassphrase),
 		[]byte(cmd.NewPassphrase))
 	if waddrmgr.IsError(err, waddrmgr.ErrWrongPassphrase) {
 		return nil, &dcrjson.RPCError{

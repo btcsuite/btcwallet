@@ -23,6 +23,7 @@ import (
 
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/walletdb"
 )
 
 // addressPoolBuffer is the number of addresses to fetch when the address pool
@@ -83,8 +84,7 @@ func newAddressPools(account uint32, intIdx, extIdx uint32,
 // initialize initializes an address pool for the passed account and branch
 // to the address index given. It will automatically load a buffer of addresses
 // from the address manager to use for upcoming calls.
-func (a *addressPool) initialize(account uint32, branch uint32, index uint32,
-	w *Wallet) error {
+func (a *addressPool) initialize(account uint32, branch uint32, index uint32, w *Wallet) error {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
@@ -104,37 +104,47 @@ func (a *addressPool) initialize(account uint32, branch uint32, index uint32,
 
 	// Access the manager and get the synced to index, then insert all
 	// the unused addresses into the address pool.
-	lastAddrFunc := w.Manager.LastExternalAddress
-	if branch == waddrmgr.InternalBranch {
-		lastAddrFunc = w.Manager.LastInternalAddress
-	}
-	_, mgrIdx, err := lastAddrFunc(account)
-	if err != nil {
-		return fmt.Errorf("failed to retrieve the last used addr index "+
-			"from the address manager for branch %v, acct %v: %s", branch,
-			account, err.Error())
-	}
+	var mgrIdx uint32
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		waddrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 
-	if mgrIdx < index {
-		return fmt.Errorf("manager is out of sync with the passed index "+
-			"(index %v, mgr index %v)", index, mgrIdx)
-	}
-
-	if mgrIdx == index {
-		a.addresses = make([]string, 0)
-	} else {
-		fetchNum := mgrIdx - index + 1
-		a.addresses = make([]string, fetchNum)
-		for i := uint32(0); i < fetchNum; i++ {
-			addr, err := w.Manager.AddressDerivedFromDbAcct(index+i, account,
-				branch)
-			if err != nil {
-				return fmt.Errorf("failed to get the address at index %v "+
-					"for account %v, branch %v: %s", index+i, account, branch,
-					err.Error())
-			}
-			a.addresses[i] = addr.EncodeAddress()
+		lastAddrFunc := w.Manager.LastExternalAddress
+		if branch == waddrmgr.InternalBranch {
+			lastAddrFunc = w.Manager.LastInternalAddress
 		}
+		var err error
+		_, mgrIdx, err = lastAddrFunc(waddrmgrNs, account)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve the last used addr index "+
+				"from the address manager for branch %v, acct %v: %s", branch,
+				account, err.Error())
+		}
+
+		if mgrIdx < index {
+			return fmt.Errorf("manager is out of sync with the passed index "+
+				"(index %v, mgr index %v)", index, mgrIdx)
+		}
+
+		if mgrIdx == index {
+			a.addresses = make([]string, 0)
+		} else {
+			fetchNum := mgrIdx - index + 1
+			a.addresses = make([]string, fetchNum)
+			for i := uint32(0); i < fetchNum; i++ {
+				addr, err := w.Manager.AddressDerivedFromDbAcct(waddrmgrNs,
+					index+i, account, branch)
+				if err != nil {
+					return fmt.Errorf("failed to get the address at index %v "+
+						"for account %v, branch %v: %s", index+i, account, branch,
+						err.Error())
+				}
+				a.addresses[i] = addr.EncodeAddress()
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize address pool: %v", err)
 	}
 
 	a.wallet = w
@@ -161,7 +171,7 @@ func (a *addressPool) initialize(account uint32, branch uint32, index uint32,
 //
 // This function MUST be called with the address pool mutex held and batch
 // finish or rollback must be called after.
-func (a *addressPool) getNewAddress() (dcrutil.Address, error) {
+func (a *addressPool) getNewAddress(waddrmgrNs walletdb.ReadWriteBucket) (dcrutil.Address, error) {
 	if !a.started {
 		return nil, fmt.Errorf("failed to getNewAddress; pool not started")
 	}
@@ -173,7 +183,7 @@ func (a *addressPool) getNewAddress() (dcrutil.Address, error) {
 
 	// Replenish the pool if we're at the last address.
 	if a.cursor == len(a.addresses)-1 || len(a.addresses) == 0 {
-		var nextAddrFunc func(uint32, uint32) ([]waddrmgr.ManagedAddress, error)
+		var nextAddrFunc func(walletdb.ReadWriteBucket, uint32, uint32) ([]waddrmgr.ManagedAddress, error)
 		switch a.branch {
 		case waddrmgr.InternalBranch:
 			nextAddrFunc = a.wallet.Manager.NextInternalAddresses
@@ -183,12 +193,10 @@ func (a *addressPool) getNewAddress() (dcrutil.Address, error) {
 			return nil, fmt.Errorf("unknown default account branch %v", a.branch)
 		}
 
-		addrs, err :=
-			nextAddrFunc(a.account, addressPoolBuffer)
+		addrs, err := nextAddrFunc(waddrmgrNs, a.account, addressPoolBuffer)
 		if err != nil {
 			return nil, err
 		}
-
 		for _, addr := range addrs {
 			a.addresses = append(a.addresses, addr.Address().EncodeAddress())
 		}
@@ -206,15 +214,15 @@ func (a *addressPool) getNewAddress() (dcrutil.Address, error) {
 	log.Debugf("Get new address for branch %v returned %s (idx %v) from "+
 		"the address pool", a.branch, curAddressStr, a.index)
 
-	a.cursor++
-	a.index++
-
 	// Add the address to the notifications watcher.
 	addrs := make([]dcrutil.Address, 1)
 	addrs[0] = curAddress
 	if err := chainClient.NotifyReceived(addrs); err != nil {
 		return nil, err
 	}
+
+	a.cursor++
+	a.index++
 
 	return curAddress, nil
 }
@@ -225,9 +233,9 @@ func (a *addressPool) getNewAddress() (dcrutil.Address, error) {
 // rolled back after in the event of failure. It should mainly be
 // used in calls that provide a single new address to the user for
 // them to use externally.
-func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
+func (a *addressPool) GetNewAddress(waddrmgrNs walletdb.ReadWriteBucket) (dcrutil.Address, error) {
 	defer func() {
-		errNotify := a.wallet.notifyAccountAddrIdxs(a.account)
+		errNotify := a.wallet.notifyAccountAddrIdxs(waddrmgrNs, a.account)
 		if errNotify != nil {
 			log.Errorf("Failed to push account update notification "+
 				"for account %v", a.account)
@@ -236,9 +244,9 @@ func (a *addressPool) GetNewAddress() (dcrutil.Address, error) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	address, err := a.getNewAddress()
+	address, err := a.getNewAddress(waddrmgrNs)
 	if err == nil {
-		a.BatchFinish()
+		a.BatchFinish(waddrmgrNs)
 	} else {
 		a.BatchRollback()
 	}
@@ -256,8 +264,8 @@ func (w *Wallet) getAddressPools(account uint32) *addressPools {
 
 // notifyAccountAddrIdxs sends out an account notification when the address index
 // for some account branch has changed.
-func (w *Wallet) notifyAccountAddrIdxs(account uint32) error {
-	name, err := w.Manager.AccountName(account)
+func (w *Wallet) notifyAccountAddrIdxs(waddrmgrNs walletdb.ReadBucket, account uint32) error {
+	name, err := w.Manager.AccountName(waddrmgrNs, account)
 	if err != nil {
 		return err
 	}
@@ -286,12 +294,12 @@ func (w *Wallet) notifyAccountAddrIdxs(account uint32) error {
 
 // BatchFinish must be run after every successful series of usages of
 // GetNewAddress to purge the addresses from the unused map.
-func (a *addressPool) BatchFinish() {
+func (a *addressPool) BatchFinish(waddrmgrNs walletdb.ReadWriteBucket) {
 	log.Debugf("Closing address batch for pool branch %v, next index %v",
 		a.branch, a.index)
 
 	isInternal := a.branch == waddrmgr.InternalBranch
-	err := a.wallet.Manager.StoreNextToUseAddress(isInternal, a.account,
+	err := a.wallet.Manager.StoreNextToUseAddress(waddrmgrNs, isInternal, a.account,
 		a.index)
 	if err != nil {
 		log.Errorf("Failed to store next to use address idx for "+
@@ -321,7 +329,7 @@ func (a *addressPool) BatchRollback() {
 
 // Close writes the next to use index for the address pool to disk, then sets
 // the address pool as closed.
-func (a *addressPool) Close() error {
+func (a *addressPool) Close(waddrmgrNs walletdb.ReadWriteBucket) error {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
@@ -330,7 +338,7 @@ func (a *addressPool) Close() error {
 	}
 
 	isInternal := a.branch == waddrmgr.InternalBranch
-	err := a.wallet.Manager.StoreNextToUseAddress(isInternal, a.account,
+	err := a.wallet.Manager.StoreNextToUseAddress(waddrmgrNs, isInternal, a.account,
 		a.index)
 	if err != nil {
 		return fmt.Errorf("Failed to store next to use address idx for "+
@@ -346,10 +354,9 @@ func (a *addressPool) Close() error {
 // acounts. Then it inserts them into the address manager database, so that
 // the address manager can be used upon startup to restore the cursor position
 // in the address pool.
-func (w *Wallet) CloseAddressPools() {
+func (w *Wallet) CloseAddressPools(waddrmgrNs walletdb.ReadWriteBucket) {
 	w.addrPoolsMtx.Lock()
 	defer w.addrPoolsMtx.Unlock()
-
 	for _, addressPools := range w.addrPools {
 		if addressPools.internal == nil {
 			return
@@ -361,12 +368,12 @@ func (w *Wallet) CloseAddressPools() {
 			return
 		}
 
-		err := addressPools.internal.Close()
+		err := addressPools.internal.Close(waddrmgrNs)
 		if err != nil {
 			log.Errorf("failed to close default acct internal addr pool: %v",
 				err)
 		}
-		err = addressPools.external.Close()
+		err = addressPools.external.Close(waddrmgrNs)
 		if err != nil {
 			log.Errorf("failed to close default acct external addr pool: %v",
 				err)
@@ -411,6 +418,17 @@ func (w *Wallet) CheckAddressPoolsInitialized(account uint32) error {
 // AddressPoolIndex returns the next to use address index for the passed
 // branch of the passed account.
 func (w *Wallet) AddressPoolIndex(account uint32, branch uint32) (uint32, error) {
+	var index uint32
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		var err error
+		index, err = w.addressPoolIndex(waddrmgrNs, account, branch)
+		return err
+	})
+	return index, err
+}
+
+func (w *Wallet) addressPoolIndex(waddrmgrNs walletdb.ReadBucket, account uint32, branch uint32) (uint32, error) {
 	err := w.CheckAddressPoolsInitialized(account)
 	if err != nil {
 		log.Tracef("Error on fetch of address pool account %v, branch %v from "+
@@ -421,7 +439,7 @@ func (w *Wallet) AddressPoolIndex(account uint32, branch uint32) (uint32, error)
 		// try to load the last saved address index from the meta bucket
 		// of the database. If that fails, give up and return an error.
 		isInternal := branch == waddrmgr.InternalBranch
-		idx, err := w.Manager.NextToUseAddrPoolIndex(isInternal, account)
+		idx, err := w.Manager.NextToUseAddrPoolIndex(waddrmgrNs, isInternal, account)
 		if err != nil {
 			return 0, err
 		}
@@ -447,91 +465,96 @@ func (w *Wallet) AddressPoolIndex(account uint32, branch uint32) (uint32, error)
 
 // SyncAddressPoolIndex synchronizes an account's branch to the given address
 // by iteratively calling getNewAddress on the respective address pool.
-func (w *Wallet) SyncAddressPoolIndex(account uint32, branch uint32,
-	index uint32) error {
+func (w *Wallet) SyncAddressPoolIndex(account uint32, branch uint32, index uint32) error {
 	// Sanity checks.
 	err := w.CheckAddressPoolsInitialized(account)
 	if err != nil {
 		return err
 	}
 
-	defer func() {
-		errNotify := w.notifyAccountAddrIdxs(account)
-		if errNotify != nil {
-			log.Errorf("Failed to push account update notification "+
-				"for account %v", account)
+	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		waddrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		defer func() {
+			errNotify := w.notifyAccountAddrIdxs(waddrmgrNs, account)
+			if errNotify != nil {
+				log.Errorf("Failed to push account update notification "+
+					"for account %v", account)
+			}
+		}()
+
+		var addrPool *addressPool
+		switch branch {
+		case waddrmgr.ExternalBranch:
+			addrPool = w.getAddressPools(account).external
+			addrPool.mutex.Lock()
+			defer addrPool.mutex.Unlock()
+		case waddrmgr.InternalBranch:
+			addrPool = w.getAddressPools(account).internal
+			addrPool.mutex.Lock()
+			defer addrPool.mutex.Unlock()
+		default:
+			return fmt.Errorf("unknown branch number %v", branch)
 		}
-	}()
-	var addrPool *addressPool
-	switch branch {
-	case waddrmgr.ExternalBranch:
-		addrPool = w.getAddressPools(account).external
-		addrPool.mutex.Lock()
-		defer addrPool.mutex.Unlock()
-	case waddrmgr.InternalBranch:
-		addrPool = w.getAddressPools(account).internal
-		addrPool.mutex.Lock()
-		defer addrPool.mutex.Unlock()
-	default:
-		return fmt.Errorf("unknown branch number %v", branch)
-	}
-	if index < addrPool.index {
-		return fmt.Errorf("the passed index, %v, is before the "+
-			"currently synced to address index %v", index,
-			addrPool.index)
-	}
-	if index == addrPool.index {
+		if index < addrPool.index {
+			return fmt.Errorf("the passed index, %v, is before the "+
+				"currently synced to address index %v", index,
+				addrPool.index)
+		}
+		if index == addrPool.index {
+			return nil
+		}
+
+		// Synchronize our address pool by calling getNewAddress
+		// iteratively until the next to use index is synced to
+		// where we need it.
+		toFetch := index - addrPool.index
+		for i := uint32(0); i < toFetch; i++ {
+			_, err := addrPool.getNewAddress(waddrmgrNs)
+			if err != nil {
+				addrPool.BatchRollback()
+				return err
+			}
+		}
+		addrPool.BatchFinish(waddrmgrNs)
+
 		return nil
-	}
-
-	// Synchronize our address pool by calling getNewAddress
-	// iteratively until the next to use index is synced to
-	// where we need it.
-	toFetch := index - addrPool.index
-	for i := uint32(0); i < toFetch; i++ {
-		_, err := addrPool.getNewAddress()
-		if err != nil {
-			addrPool.BatchRollback()
-			return err
-		}
-	}
-	addrPool.BatchFinish()
-
-	return nil
+	})
 }
 
 // NewAddress checks the address pools and then attempts to return a new
 // address for the account and branch requested.
-func (w *Wallet) NewAddress(account uint32, branch uint32) (dcrutil.Address,
-	error) {
-	err := w.CheckAddressPoolsInitialized(account)
-	if err != nil {
-		return nil, err
-	}
+func (w *Wallet) NewAddress(account uint32, branch uint32) (dcrutil.Address, error) {
+	var address dcrutil.Address
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		waddrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-	var addrPool *addressPool
-	switch branch {
-	case waddrmgr.ExternalBranch:
-		addrPool = w.getAddressPools(account).external
-	case waddrmgr.InternalBranch:
-		addrPool = w.getAddressPools(account).internal
-	default:
-		return nil, fmt.Errorf("new address failed; unknown branch number %v",
-			branch)
-	}
+		err := w.CheckAddressPoolsInitialized(account)
+		if err != nil {
+			return err
+		}
 
-	return addrPool.GetNewAddress()
+		var addrPool *addressPool
+		switch branch {
+		case waddrmgr.ExternalBranch:
+			addrPool = w.getAddressPools(account).external
+		case waddrmgr.InternalBranch:
+			addrPool = w.getAddressPools(account).internal
+		default:
+			return fmt.Errorf("new address failed; unknown branch number %v",
+				branch)
+		}
+
+		address, err = addrPool.GetNewAddress(waddrmgrNs)
+		return err
+	})
+	return address, err
 }
 
-// ReusedAddress returns an address that is reused from the external
+// reusedAddress returns an address that is reused from the external
 // branch of the wallet, to cut down on new address usage for wallets.
 // Should be used judiciously.
-func (w *Wallet) ReusedAddress() (dcrutil.Address, error) {
-	addr, err := w.Manager.AddressDerivedFromDbAcct(0,
+func (w *Wallet) reusedAddress(waddrmgrNs walletdb.ReadBucket) (dcrutil.Address, error) {
+	return w.Manager.AddressDerivedFromDbAcct(waddrmgrNs, 0,
 		waddrmgr.DefaultAccountNum, waddrmgr.ExternalBranch)
-	if err != nil {
-		return nil, err
-	}
-
-	return addr, err
 }
