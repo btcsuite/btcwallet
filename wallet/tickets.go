@@ -114,8 +114,9 @@ func (w *Wallet) TicketHashesForVotingAddress(votingAddr dcrutil.Address) ([]cha
 		// they are copies of iterators of a Go map in wstakemgr) so
 		// when one must be removed, replace it with the last and
 		// decrease the len.
-		for i := range ticketHashes {
+		for i := 0; i < len(ticketHashes); {
 			if w.TxStore.ExistsTx(txmgrNs, &ticketHashes[i]) {
+				i++
 				continue
 			}
 
