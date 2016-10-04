@@ -1710,7 +1710,10 @@ func createManagerNS(ns walletdb.ReadWriteBucket) error {
 func upgradeToVersion5(ns walletdb.ReadWriteBucket) error {
 	currentMgrVersion := uint32(5)
 	bucket := ns.NestedReadWriteBucket(mainBucketName)
-	bucket.Delete(lastDefaultAddsrNameLegacyV4)
+	err := bucket.Delete(lastDefaultAddsrNameLegacyV4)
+	if err != nil {
+		return err
+	}
 
 	return putManagerVersion(ns, currentMgrVersion)
 }

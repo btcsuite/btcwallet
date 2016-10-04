@@ -2285,10 +2285,16 @@ func (m *Manager) NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, 
 	// Create a database entry for the address pool for the account.
 	// The pool will be synced to the zeroeth index for both
 	// branches.
-	m.storeNextToUseAddress(ns, false, account, 0)
-	m.storeNextToUseAddress(ns, true, account, 0)
+	err = m.storeNextToUseAddress(ns, false, account, 0)
+	if err != nil {
+		return 0, err
+	}
+	err = m.storeNextToUseAddress(ns, true, account, 0)
+	if err != nil {
+		return 0, err
+	}
 
-	return account, err
+	return account, nil
 }
 
 // RenameAccount renames an account stored in the manager based on the
