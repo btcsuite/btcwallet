@@ -99,12 +99,12 @@ func (w *Wallet) LiveTicketHashes(rpcClient *chain.RPCClient, includeImmature bo
 func (w *Wallet) TicketHashesForVotingAddress(votingAddr dcrutil.Address) ([]chainhash.Hash, error) {
 	var ticketHashes []chainhash.Hash
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		stakemgrNs := tx.ReadBucket(wstakemgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
 		var err error
 		ticketHashes, err = w.StakeMgr.DumpSStxHashesForAddress(
-			addrmgrNs, votingAddr)
+			stakemgrNs, votingAddr)
 		if err != nil {
 			return err
 		}
