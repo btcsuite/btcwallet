@@ -605,7 +605,7 @@ func readRawTxRecord(txHash *chainhash.Hash, v []byte, rec *TxRecord) error {
 	}
 
 	// Calculate the stake TxType from the MsgTx.
-	rec.TxType = stake.DetermineTxType(dcrutil.NewTx(&rec.MsgTx))
+	rec.TxType = stake.DetermineTxType(&rec.MsgTx)
 
 	return nil
 }

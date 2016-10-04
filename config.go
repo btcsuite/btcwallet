@@ -34,6 +34,7 @@ const (
 	defaultRPCMaxWebsockets    = 25
 	defaultEnableStakeMining   = false
 	defaultVoteBits            = 0x0001
+	defaultVoteBitsExtended    = "02000000"
 	defaultBalanceToMaintain   = 0.0
 	defaultReuseAddresses      = false
 	defaultRollbackTest        = false
@@ -84,6 +85,7 @@ type config struct {
 	DisallowFree        bool    `long:"disallowfree" description:"Force transactions to always include a fee"`
 	EnableStakeMining   bool    `long:"enablestakemining" description:"Enable stake mining"`
 	VoteBits            uint16  `long:"votebits" description:"Set your stake mining votebits to value (default: 0xFFFF)"`
+	VoteBitsExtended    string  `long:"votebitsextended" description:"Set your stake mining extended votebits to the hexademical value indicated by the passed string"`
 	BalanceToMaintain   float64 `long:"balancetomaintain" description:"Minimum amount of funds to leave in wallet when stake mining (default: 0.0)"`
 	ReuseAddresses      bool    `long:"reuseaddresses" description:"Reuse addresses for ticket purchase to cut down on address overuse"`
 	PruneTickets        bool    `long:"prunetickets" description:"Prune old tickets from the wallet and restore their inputs"`
@@ -303,6 +305,7 @@ func loadConfig() (*config, []string, error) {
 		LegacyRPCMaxWebsockets: defaultRPCMaxWebsockets,
 		EnableStakeMining:      defaultEnableStakeMining,
 		VoteBits:               defaultVoteBits,
+		VoteBitsExtended:       defaultVoteBitsExtended,
 		BalanceToMaintain:      defaultBalanceToMaintain,
 		ReuseAddresses:         defaultReuseAddresses,
 		RollbackTest:           defaultRollbackTest,

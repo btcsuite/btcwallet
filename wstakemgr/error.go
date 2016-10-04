@@ -65,6 +65,15 @@ const (
 	// ErrStoreClosed indicates that a function was called after the stake
 	// store was closed.
 	ErrStoreClosed
+
+	// ErrData describes an error where data stored in the stake database
+	// is incorrect.  This may be due to missing values, values of
+	// wrong sizes, or data from different buckets that is inconsistent with
+	// itself.  Recovering from an ErrData requires rebuilding all
+	// stake database history or manual database surgery.  If the failure was
+	// not due to data corruption, this error category indicates a
+	// programming error in this package.
+	ErrData
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
@@ -80,6 +89,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrPoolUserInvalTcktsNotFound: "ErrPoolUserInvalTcktsNotFound",
 	ErrBadPoolUserAddr:            "ErrBadPoolUserAddr",
 	ErrStoreClosed:                "ErrStoreClosed",
+	ErrData:                       "ErrData",
 }
 
 // String returns the ErrorCode as a human-readable name.

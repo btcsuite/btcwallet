@@ -435,7 +435,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 	// the OP_SSTX tagged out, except if we're operating as a stake pool
 	// server. In that case, additionally consider the first commitment
 	// output as well.
-	if is, _ := stake.IsSStx(tx); is {
+	if is, _ := stake.IsSStx(&rec.MsgTx); is {
 		// Errors don't matter here.  If addrs is nil, the range below
 		// does nothing.
 		txOut := tx.MsgTx().TxOut[0]
@@ -513,14 +513,14 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 
 	// Handle incoming SSGen; store them if we own
 	// the ticket used to purchase them.
-	if is, _ := stake.IsSSGen(tx); is {
+	if is, _ := stake.IsSSGen(&rec.MsgTx); is {
 		if block != nil {
 			txInHash := tx.MsgTx().TxIn[1].PreviousOutPoint.Hash
 			if w.StakeMgr.CheckHashInStore(&txInHash) {
 				w.StakeMgr.InsertSSGen(stakemgrNs, &block.Hash,
 					int64(block.Height),
 					&txHash,
-					w.VoteBits,
+					w.VoteBits.Bits,
 					&txInHash)
 			}
 
@@ -564,7 +564,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 
 	// Handle incoming SSRtx; store them if we own
 	// the ticket used to purchase them.
-	if is, _ := stake.IsSSRtx(tx); is {
+	if is, _ := stake.IsSSRtx(&rec.MsgTx); is {
 		if block != nil {
 			txInHash := tx.MsgTx().TxIn[0].PreviousOutPoint.Hash
 

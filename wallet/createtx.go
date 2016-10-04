@@ -942,7 +942,7 @@ func makeTicket(params *chaincfg.Params, inputPool *extendedOutPoint,
 	mtx.AddTxOut(txOut)
 
 	// Make sure we generated a valid SStx.
-	if _, err := stake.IsSStx(dcrutil.NewTx(mtx)); err != nil {
+	if _, err := stake.IsSStx(mtx); err != nil {
 		return nil, err
 	}
 
@@ -1527,7 +1527,7 @@ func (w *Wallet) txToSStxInternal(dbtx walletdb.ReadWriteTx, pair map[string]dcr
 		}
 
 	}
-	if _, err := stake.IsSStx(dcrutil.NewTx(msgtx)); err != nil {
+	if _, err := stake.IsSStx(msgtx); err != nil {
 		return nil, err
 	}
 	err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {

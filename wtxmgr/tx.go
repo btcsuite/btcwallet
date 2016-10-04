@@ -120,7 +120,7 @@ func NewTxRecord(serializedTx []byte, received time.Time) (*TxRecord, error) {
 		str := "failed to deserialize transaction"
 		return nil, storeError(ErrInput, str, err)
 	}
-	rec.TxType = stake.DetermineTxType(dcrutil.NewTx(&rec.MsgTx))
+	rec.TxType = stake.DetermineTxType(&rec.MsgTx)
 	hash := rec.MsgTx.TxSha()
 	copy(rec.Hash[:], hash[:])
 	return rec, nil
@@ -141,7 +141,7 @@ func NewTxRecordFromMsgTx(msgTx *wire.MsgTx, received time.Time) (*TxRecord,
 		Received:     received,
 		SerializedTx: buf.Bytes(),
 	}
-	rec.TxType = stake.DetermineTxType(dcrutil.NewTx(&rec.MsgTx))
+	rec.TxType = stake.DetermineTxType(&rec.MsgTx)
 	hash := rec.MsgTx.TxSha()
 	copy(rec.Hash[:], hash[:])
 	return rec, nil
@@ -219,7 +219,7 @@ func (s *Store) PruneOldTickets(ns walletdb.ReadWriteBucket) error {
 			return err
 		}
 
-		txType := stake.DetermineTxType(dcrutil.NewTx(&rec.MsgTx))
+		txType := stake.DetermineTxType(&rec.MsgTx)
 
 		// Prune all old tickets.
 		if current.Sub(rec.Received) > ticketCutoff &&
@@ -773,7 +773,7 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.Re
 		},
 		// index set for each iteration below
 	}
-	txType := stake.DetermineTxType(dcrutil.NewTx(&rec.MsgTx))
+	txType := stake.DetermineTxType(&rec.MsgTx)
 
 	for i, input := range rec.MsgTx.TxIn {
 		unspentKey, credKey := existsUnspent(ns, &input.PreviousOutPoint)
@@ -1286,7 +1286,7 @@ func (s *Store) rollbackTransaction(hash chainhash.Hash, b *blockRecord,
 		return err
 	}
 
-	txType := stake.DetermineTxType(dcrutil.NewTx(&rec.MsgTx))
+	txType := stake.DetermineTxType(&rec.MsgTx)
 
 	// For each debit recorded for this transaction, mark
 	// the credit it spends as unspent (as long as it still
@@ -1513,8 +1513,7 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBuc
 				return err
 			}
 
-			if stake.DetermineTxType(dcrutil.NewTx(&txr.MsgTx)) !=
-				stake.TxTypeRegular {
+			if stake.DetermineTxType(&txr.MsgTx) != stake.TxTypeRegular {
 				stakeTxFromBlock = append(stakeTxFromBlock, hash)
 			}
 		}
@@ -1528,8 +1527,7 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBuc
 					return err
 				}
 
-				if stake.DetermineTxType(dcrutil.NewTx(&txr.MsgTx)) ==
-					stake.TxTypeRegular {
+				if stake.DetermineTxType(&txr.MsgTx) == stake.TxTypeRegular {
 					regularTxFromParent = append(regularTxFromParent, hash)
 				}
 			}

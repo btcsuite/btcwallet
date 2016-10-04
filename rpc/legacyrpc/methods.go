@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/decred/dcrd/blockchain/stake"
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainec"
 	"github.com/decred/dcrd/chaincfg/chainhash"
@@ -140,6 +141,7 @@ var rpcHandlers = map[string]struct {
 	"setticketfee":            {handler: setTicketFee},
 	"setticketmaxprice":       {handler: setTicketMaxPrice},
 	"setticketvotebits":       {handler: setTicketVoteBits},
+	"setticketsvotebits":      {handler: setTicketsVoteBits},
 	"settxfee":                {handler: setTxFee},
 	"signmessage":             {handler: signMessage},
 	"signrawtransaction":      {handlerWithChain: signRawTransaction},
@@ -1265,8 +1267,8 @@ func getTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 	}
 	return &dcrjson.GetTicketVoteBitsResult{
 		VoteBitsData: dcrjson.VoteBitsData{
-			VoteBits:    voteBits,
-			VoteBitsExt: "",
+			VoteBits:    voteBits.Bits,
+			VoteBitsExt: hex.EncodeToString(voteBits.ExtendedBits),
 		},
 	}, nil
 }
@@ -1294,8 +1296,8 @@ func getTicketsVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error)
 			return nil, err
 		}
 		voteBitsData = append(voteBitsData, dcrjson.VoteBitsData{
-			VoteBits:    voteBits,
-			VoteBitsExt: "",
+			VoteBits:    voteBits.Bits,
+			VoteBitsExt: hex.EncodeToString(voteBits.ExtendedBits),
 		})
 	}
 
@@ -2681,7 +2683,38 @@ func setTicketVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 		return nil, err
 	}
 
-	err = w.SetVoteBitsForTicket(ticket, cmd.VoteBits)
+	var voteBitsExt []byte
+	if cmd.VoteBitsExt != nil {
+		voteBitsExt, err = hex.DecodeString(*cmd.VoteBitsExt)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = w.SetVoteBitsForTicket(ticket,
+		stake.VoteBits{
+			Bits:         cmd.VoteBits,
+			ExtendedBits: voteBitsExt,
+		})
+	return nil, err
+}
+
+// setTicketsVoteBits sets the per-ticket voteBits for a given ticket from
+// a ticket hash. Missing tickets return an error.
+func setTicketsVoteBits(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*dcrjson.SetTicketsVoteBitsCmd)
+
+	tickets, err := dcrjson.DecodeConcatenatedHashes(cmd.TxHashes)
+	if err != nil {
+		return nil, err
+	}
+
+	voteBitsSlice, err := dcrjson.DecodeConcatenatedVoteBits(cmd.VoteBitsBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	err = w.SetVoteBitsForTickets(tickets, voteBitsSlice)
 	return nil, err
 }
 

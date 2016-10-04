@@ -91,6 +91,7 @@ func walletMain() error {
 	dbDir := networkDir(cfg.AppDataDir, activeNet.Params)
 	stakeOptions := &wallet.StakeOptions{
 		VoteBits:            cfg.VoteBits,
+		VoteBitsExtended:    cfg.VoteBitsExtended,
 		StakeMiningEnabled:  cfg.EnableStakeMining,
 		BalanceToMaintain:   cfg.BalanceToMaintain,
 		RollbackTest:        cfg.RollbackTest,

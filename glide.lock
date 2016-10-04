@@ -1,5 +1,5 @@
 hash: 5cc50197a8683b16e3e120937d59e244ba000d7c0d474d8b613e17a93b9723ef
-updated: 2016-10-13T09:08:42.0437835-04:00
+updated: 2016-10-14T13:42:35.5906491-04:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
@@ -30,11 +30,15 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: 717040c9453370196efb0a3706c83f17456cc374
+  version: cc25399f6a78b09957d82e2c98960b24685e1475
   subpackages:
   - blockchain
-  - blockchain/dbnamespace
+  - blockchain/internal/dbnamespace
+  - blockchain/internal/progresslog
   - blockchain/stake
+  - blockchain/stake/internal/dbnamespace
+  - blockchain/stake/internal/ticketdb
+  - blockchain/stake/internal/tickettreap
   - chaincfg
   - chaincfg/chainec
   - chaincfg/chainhash
@@ -46,9 +50,9 @@ imports:
   - txscript
   - wire
 - name: github.com/decred/dcrrpcclient
-  version: 103ed11be3a7035554d3925fbfaa67742641510f
+  version: 0f562bb540de12dfd5248aee87063eaa4792705f
 - name: github.com/decred/dcrutil
-  version: 4fc91a08eea88e74539d42d6301fd298b9bd8230
+  version: 0484582bf5503574d824f110e836a8c48aa60c8c
   subpackages:
   - base58
   - hdkeychain
@@ -57,22 +61,23 @@ imports:
   subpackages:
   - edwards25519
 - name: github.com/golang/protobuf
-  version: c3cefd437628a0b7d31b34fe44b3a7a540e98527
+  version: 98fa357170587e470c5f27d3c3ea0947b71eb455
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 - name: golang.org/x/net
-  version: 04557861f124410b768b1ba5bb3a91b705afbfc6
+  version: 8b4af36cd21a1f85a7484b49feb7c79363106d8e
   subpackages:
   - context
   - http2
   - http2/hpack
+  - idna
   - internal/timeseries
   - lex/httplex
   - trace
 - name: golang.org/x/sys
-  version: 62bee037599929a6e9146f29d10dd5208c43507d
+  version: 9bb9f0998d48b31547d975974935ae9b48c7a03c
   subpackages:
   - unix
 - name: google.golang.org/grpc
@@ -88,14 +93,14 @@ imports:
   - transport
 testImports:
 - name: github.com/davecgh/go-spew
-  version: 5215b55f46b2b919f50a1df0eaa5886afe4e3b3d
+  version: 6d212800a42e8ab5c146b8ace3490ee17e5225f9
   subpackages:
   - spew
 - name: github.com/pmezard/go-difflib
-  version: d8ed2627bdf02c080bf22230dbb337003b7aba2d
+  version: 792786c7400a136282c1664665ae0a8db921c6c2
   subpackages:
   - difflib
 - name: github.com/stretchr/testify
-  version: d77da356e56a7428ad25149ca77381849a6a5232
+  version: 976c720a22c8eb4eb6a0b4348ad85ad12491a506
   subpackages:
   - assert

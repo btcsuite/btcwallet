@@ -176,11 +176,15 @@ func deserializeSStxRecord(serializedSStxRecord []byte) (*sstxRecord, error) {
 	}
 	curPos += int8Size
 
-	// Read the assumed 2 byte VoteBits and pretend to read the
-	// extended votebits (75 bytes).
+	// Read the assumed 2 byte VoteBits as well as the extended
+	// votebits (75 bytes max).
 	record.voteBits = byteOrder.Uint16(
 		serializedSStxRecord[curPos : curPos+int16Size])
-	curPos += stake.MaxSingleBytePushLength
+	curPos += int16Size
+	record.voteBitsExt = make([]byte, int(voteBitsLen)-int16Size)
+	copy(record.voteBitsExt[:],
+		serializedSStxRecord[curPos:curPos+int(voteBitsLen)-int16Size])
+	curPos += stake.MaxSingleBytePushLength - int16Size
 
 	// Prepare a buffer for the msgTx.
 	buf := bytes.NewBuffer(serializedSStxRecord[curPos : curPos+msgTxLen])
@@ -263,7 +267,7 @@ func deserializeSStxTicketScriptHash(serializedSStxRecord []byte) ([]byte, error
 }
 
 // serializeSSTxRecord returns the serialization of the passed txrecord row.
-func serializeSStxRecord(record *sstxRecord, voteBits uint16) ([]byte, error) {
+func serializeSStxRecord(record *sstxRecord, voteBits stake.VoteBits) ([]byte, error) {
 	msgTx := record.tx.MsgTx()
 	msgTxSize := int64(msgTx.SerializeSize())
 
@@ -303,13 +307,16 @@ func serializeSStxRecord(record *sstxRecord, voteBits uint16) ([]byte, error) {
 	curPos += int32Size
 
 	// Write the intended votebits length (uint8). Hardcode the uint16
-	// size for now. TODO Allow for extended voteBits.
-	buf[curPos] = byte(int16Size)
+	// size for now.
+	buf[curPos] = byte(int16Size + len(voteBits.ExtendedBits))
 	curPos += int8Size
 
-	// Write the first two bytes for the intended votebits (75 bytes max).
-	byteOrder.PutUint16(buf[curPos:curPos+int16Size], voteBits)
-	curPos += stake.MaxSingleBytePushLength
+	// Write the first two bytes for the intended votebits (75 bytes max),
+	// then write the extended vote bits.
+	byteOrder.PutUint16(buf[curPos:curPos+int16Size], voteBits.Bits)
+	curPos += int16Size
+	copy(buf[curPos:], voteBits.ExtendedBits[:])
+	curPos += stake.MaxSingleBytePushLength - 2
 
 	// Serialize and write transaction.
 	var b bytes.Buffer
@@ -609,8 +616,8 @@ func fetchSStxRecordSStxTicketScriptHash(ns walletdb.ReadBucket,
 
 // fetchSStxRecordVoteBits fetches an individual ticket's intended voteBits
 // which are used to override the default voteBits when voting.
-func fetchSStxRecordVoteBits(ns walletdb.ReadBucket, hash *chainhash.Hash) (bool, uint16,
-	error) {
+func fetchSStxRecordVoteBits(ns walletdb.ReadBucket, hash *chainhash.Hash) (bool,
+	stake.VoteBits, error) {
 
 	bucket := ns.NestedReadBucket(sstxRecordsBucketName)
 
@@ -618,7 +625,7 @@ func fetchSStxRecordVoteBits(ns walletdb.ReadBucket, hash *chainhash.Hash) (bool
 	val := bucket.Get(key)
 	if val == nil {
 		str := fmt.Sprintf("missing sstx record for hash '%s'", hash.String())
-		return false, 0, stakeStoreError(ErrSStxNotFound, str, nil)
+		return false, stake.VoteBits{}, stakeStoreError(ErrSStxNotFound, str, nil)
 	}
 	valLen := len(val)
 	valCopy := make([]byte, valLen, valLen)
@@ -630,22 +637,37 @@ func fetchSStxRecordVoteBits(ns walletdb.ReadBucket, hash *chainhash.Hash) (bool
 	curPos += int32Size
 
 	// Read the intended votebits length (uint8). If it is unset, return now.
+	// Check it for sanity.
 	voteBitsLen := uint8(val[curPos])
 	if voteBitsLen == 0 {
-		return false, 0, nil
+		return false, stake.VoteBits{}, nil
+	}
+	if voteBitsLen < 2 || voteBitsLen > stake.MaxSingleBytePushLength {
+		str := fmt.Sprintf("corrupt votebits length '%v'", voteBitsLen)
+		return false, stake.VoteBits{}, stakeStoreError(ErrData, str, nil)
 	}
 	curPos += int8Size
 
 	// Read the first two bytes for the intended votebits.
 	voteBits := byteOrder.Uint16(valCopy[curPos : curPos+int16Size])
+	curPos += int16Size
 
-	return true, voteBits, nil
+	// Retrieve the extended vote bits.
+	voteBitsExt := make([]byte, voteBitsLen-int16Size)
+	copy(voteBitsExt[:], valCopy[curPos:(curPos+int(voteBitsLen)-int16Size)])
+
+	return true, stake.VoteBits{Bits: voteBits, ExtendedBits: voteBitsExt}, nil
 }
 
 // updateSStxRecordVoteBits updates an individual ticket's intended voteBits
 // which are used to override the default voteBits when voting.
 func updateSStxRecordVoteBits(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
-	voteBits uint16) error {
+	voteBits stake.VoteBits) error {
+	if len(voteBits.ExtendedBits) > stake.MaxSingleBytePushLength-2 {
+		str := fmt.Sprintf("voteBitsExt too long (got %v bytes, want max %v)",
+			len(voteBits.ExtendedBits), stake.MaxSingleBytePushLength-2)
+		return stakeStoreError(ErrData, str, nil)
+	}
 
 	bucket := ns.NestedReadWriteBucket(sstxRecordsBucketName)
 
@@ -664,13 +686,16 @@ func updateSStxRecordVoteBits(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
 	curPos += int64Size
 	curPos += int32Size
 
-	// Write the intended votebits length (uint8). Hardcode the uint16
-	// size for now. TODO Allow for extended voteBits.
-	valCopy[curPos] = byte(int16Size)
+	// Write the intended votebits length (uint8).
+	valCopy[curPos] = byte(int16Size + len(voteBits.ExtendedBits))
 	curPos += int8Size
 
 	// Write the first two bytes for the intended votebits.
-	byteOrder.PutUint16(valCopy[curPos:curPos+int16Size], voteBits)
+	byteOrder.PutUint16(valCopy[curPos:curPos+int16Size], voteBits.Bits)
+	curPos += int16Size
+
+	// Copy the remaining data from voteBitsExt.
+	copy(valCopy[curPos:], voteBits.ExtendedBits[:])
 
 	err := bucket.Put(key, valCopy)
 	if err != nil {
@@ -681,7 +706,7 @@ func updateSStxRecordVoteBits(ns walletdb.ReadWriteBucket, hash *chainhash.Hash,
 }
 
 // updateSStxRecord updates a sstx record in the sstx records bucket.
-func updateSStxRecord(ns walletdb.ReadWriteBucket, record *sstxRecord, voteBits uint16) error {
+func updateSStxRecord(ns walletdb.ReadWriteBucket, record *sstxRecord, voteBits stake.VoteBits) error {
 	bucket := ns.NestedReadWriteBucket(sstxRecordsBucketName)
 
 	// Write the serialized txrecord keyed by the tx hash.
@@ -699,7 +724,7 @@ func updateSStxRecord(ns walletdb.ReadWriteBucket, record *sstxRecord, voteBits 
 }
 
 // putSStxRecord inserts a given SStx record to the SStxrecords bucket.
-func putSStxRecord(ns walletdb.ReadWriteBucket, record *sstxRecord, voteBits uint16) error {
+func putSStxRecord(ns walletdb.ReadWriteBucket, record *sstxRecord, voteBits stake.VoteBits) error {
 	return updateSStxRecord(ns, record, voteBits)
 }
 

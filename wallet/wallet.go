@@ -106,7 +106,7 @@ type Wallet struct {
 
 	// Handlers for stake system.
 	stakeSettingsLock  sync.Mutex
-	VoteBits           uint16
+	VoteBits           stake.VoteBits
 	StakeMiningEnabled bool
 	CurrentVotingInfo  *VotingInfo
 	ticketMaxPrice     dcrutil.Amount
@@ -191,25 +191,29 @@ type Wallet struct {
 
 // newWallet creates a new Wallet structure with the provided address manager
 // and transaction store.
-func newWallet(vb uint16, esm bool, btm dcrutil.Amount, addressReuse bool,
-	rollbackTest bool, ticketAddress dcrutil.Address, tmp dcrutil.Amount,
-	ticketBuyFreq int, poolAddress dcrutil.Address, pf float64, relayFee,
-	ticketFee dcrutil.Amount, addrIdxScanLen int, stakePoolColdAddrs map[string]struct{},
-	autoRepair, AllowHighFees bool, mgr *waddrmgr.Manager, txs *wtxmgr.Store,
-	smgr *wstakemgr.StakeStore, db *walletdb.DB,
-	params *chaincfg.Params) *Wallet {
+func newWallet(vb uint16, vbe []byte, esm bool, btm dcrutil.Amount,
+	addressReuse bool, rollbackTest bool, ticketAddress dcrutil.Address,
+	tmp dcrutil.Amount, ticketBuyFreq int, poolAddress dcrutil.Address, pf float64,
+	relayFee, ticketFee dcrutil.Amount, addrIdxScanLen int,
+	stakePoolColdAddrs map[string]struct{}, autoRepair, AllowHighFees bool,
+	mgr *waddrmgr.Manager, txs *wtxmgr.Store, smgr *wstakemgr.StakeStore,
+	db *walletdb.DB, params *chaincfg.Params) *Wallet {
 	var rollbackBlockDB map[uint32]*wtxmgr.DatabaseContents
 	if rollbackTest {
 		rollbackBlockDB = make(map[uint32]*wtxmgr.DatabaseContents)
 	}
 
+	vbs := stake.VoteBits{
+		Bits:         vb,
+		ExtendedBits: vbe,
+	}
 	w := &Wallet{
 		db:                       *db,
 		Manager:                  mgr,
 		TxStore:                  txs,
 		StakeMgr:                 smgr,
 		StakeMiningEnabled:       esm,
-		VoteBits:                 vb,
+		VoteBits:                 vbs,
 		balanceToMaintain:        btm,
 		lockedOutpoints:          map[wire.OutPoint]struct{}{},
 		relayFee:                 relayFee,
@@ -3360,7 +3364,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 			// For an SSGen tx, skip the first input as it is a stake base
 			// and doesn't need to be signed.
 			if i == 0 {
-				isSSGen, err := stake.IsSSGen(dcrutil.NewTx(tx))
+				isSSGen, err := stake.IsSSGen(tx)
 				if err == nil && isSSGen {
 					// Put some garbage in the signature script.
 					txIn.SignatureScript = []byte{0xDE, 0xAD, 0xBE, 0xEF}
@@ -3668,11 +3672,12 @@ func decodeStakePoolColdExtKey(encStr string,
 
 // Open loads an already-created wallet from the passed database and namespaces.
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
-	voteBits uint16, stakeMiningEnabled bool, balanceToMaintain float64,
-	addressReuse bool, rollbackTest bool, pruneTickets bool, ticketAddress string,
-	ticketMaxPrice float64, ticketBuyFreq int, poolAddress string,
-	poolFees float64, ticketFee float64, addrIdxScanLen int, stakePoolColdExtKey string,
-	autoRepair, allowHighFees bool, relayFee float64, params *chaincfg.Params) (*Wallet, error) {
+	voteBits uint16, voteBitsExtended string, stakeMiningEnabled bool,
+	balanceToMaintain float64, addressReuse bool, rollbackTest bool,
+	pruneTickets bool, ticketAddress string, ticketMaxPrice float64,
+	ticketBuyFreq int, poolAddress string, poolFees float64, ticketFee float64,
+	addrIdxScanLen int, stakePoolColdExtKey string, autoRepair, allowHighFees bool,
+	relayFee float64, params *chaincfg.Params) (*Wallet, error) {
 
 	missingTxHistory := false
 
@@ -3791,6 +3796,16 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		return nil, err
 	}
 
+	voteBitsExtendedB, err := hex.DecodeString(voteBitsExtended)
+	if err != nil {
+		return nil, err
+	}
+	if len(voteBitsExtendedB) > stake.MaxSingleBytePushLength-2 {
+		return nil, fmt.Errorf("bad extended votebits length passed "+
+			"from configuration (got %v, max %v)", voteBitsExtendedB,
+			stake.MaxSingleBytePushLength-2)
+	}
+
 	var ticketAddr dcrutil.Address
 	if ticketAddress != "" {
 		ticketAddr, err = dcrutil.DecodeAddress(ticketAddress, params)
@@ -3832,6 +3847,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
 
 	w := newWallet(voteBits,
+		voteBitsExtendedB,
 		stakeMiningEnabled,
 		btm,
 		addressReuse,

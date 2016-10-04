@@ -19,6 +19,7 @@ package wstakemgr
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -54,6 +55,8 @@ type sstxRecord struct {
 // real reason to store the actual transaction I don't think,
 // the inputs and outputs are all predetermined from the block
 // height and the original SStx it references.
+//
+// TODO Store the extended votebits, too.
 type ssgenRecord struct {
 	blockHash   chainhash.Hash
 	blockHeight uint32
@@ -157,7 +160,7 @@ func (s *StakeStore) addHashToStore(hash *chainhash.Hash) {
 }
 
 // insertSStx inserts an SStx into the store.
-func (s *StakeStore) insertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, voteBits uint16) error {
+func (s *StakeStore) insertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, voteBits stake.VoteBits) error {
 	// If we already have the SStx, no need to
 	// try to include twice.
 	exists := s.checkHashInStore(sstx.Sha())
@@ -170,8 +173,8 @@ func (s *StakeStore) insertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, v
 		sstx,
 		time.Now(),
 		true,
-		voteBits,
-		nil, // TODO Allow for extensible voteBits
+		voteBits.Bits,
+		voteBits.ExtendedBits,
 	}
 
 	// Add the SStx to the database.
@@ -188,7 +191,7 @@ func (s *StakeStore) insertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, v
 
 // InsertSStx is the exported version of insertSStx that is safe for concurrent
 // access.
-func (s *StakeStore) InsertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, voteBits uint16) error {
+func (s *StakeStore) InsertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, voteBits stake.VoteBits) error {
 	if s.isClosed {
 		str := "stake store is closed"
 		return stakeStoreError(ErrStoreClosed, str, nil)
@@ -202,13 +205,13 @@ func (s *StakeStore) InsertSStx(ns walletdb.ReadWriteBucket, sstx *dcrutil.Tx, v
 
 // sstxVoteBits fetches the intended voteBits for a given SStx. This per-
 // ticket voteBits will override the default voteBits set by the wallet.
-func (s *StakeStore) sstxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) (bool, uint16, error) {
+func (s *StakeStore) sstxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) (bool, stake.VoteBits, error) {
 	// If we already have the SStx, no need to
 	// try to include twice.
 	exists := s.checkHashInStore(sstx)
 	if !exists {
 		str := fmt.Sprintf("ticket %v not found in store", sstx)
-		return false, 0, stakeStoreError(ErrNoExist, str, nil)
+		return false, stake.VoteBits{}, stakeStoreError(ErrNoExist, str, nil)
 	}
 
 	// Attempt to update the SStx in the database.
@@ -222,10 +225,10 @@ func (s *StakeStore) sstxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) 
 
 // SStxVoteBits is the exported version of sstxVoteBits that is
 // safe for concurrent access.
-func (s *StakeStore) SStxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) (bool, uint16, error) {
+func (s *StakeStore) SStxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) (bool, stake.VoteBits, error) {
 	if s.isClosed {
 		str := "stake store is closed"
-		return false, 0, stakeStoreError(ErrStoreClosed, str, nil)
+		return false, stake.VoteBits{}, stakeStoreError(ErrStoreClosed, str, nil)
 	}
 
 	s.mtx.Lock()
@@ -236,8 +239,8 @@ func (s *StakeStore) SStxVoteBits(ns walletdb.ReadBucket, sstx *chainhash.Hash) 
 
 // updateSStxVoteBits updates the intended voteBits for a given SStx. This per-
 // ticket voteBits will override the default voteBits set by the wallet.
-func (s *StakeStore) updateSStxVoteBits(ns walletdb.ReadWriteBucket, sstx *chainhash.Hash,
-	voteBits uint16) error {
+func (s *StakeStore) updateSStxVoteBits(ns walletdb.ReadWriteBucket,
+	sstx *chainhash.Hash, voteBits stake.VoteBits) error {
 	// If we already have the SStx, no need to
 	// try to include twice.
 	exists := s.checkHashInStore(sstx)
@@ -257,8 +260,8 @@ func (s *StakeStore) updateSStxVoteBits(ns walletdb.ReadWriteBucket, sstx *chain
 
 // UpdateSStxVoteBits is the exported version of updateSStxVoteBits that is
 // safe for concurrent access.
-func (s *StakeStore) UpdateSStxVoteBits(ns walletdb.ReadWriteBucket, sstx *chainhash.Hash,
-	voteBits uint16) error {
+func (s *StakeStore) UpdateSStxVoteBits(ns walletdb.ReadWriteBucket,
+	sstx *chainhash.Hash, voteBits stake.VoteBits) error {
 	if s.isClosed {
 		str := "stake store is closed"
 		return stakeStoreError(ErrStoreClosed, str, nil)
@@ -515,8 +518,7 @@ func (s *StakeStore) insertSSGen(ns walletdb.ReadWriteBucket, blockHash *chainha
 
 // InsertSSGen is the exported version of insertSSGen that is safe for
 // concurrent access.
-func (s *StakeStore) InsertSSGen(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64,
-	ssgenHash *chainhash.Hash, voteBits uint16, sstxHash *chainhash.Hash) error {
+func (s *StakeStore) InsertSSGen(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64, ssgenHash *chainhash.Hash, voteBits uint16, sstxHash *chainhash.Hash) error {
 	if s.isClosed {
 		str := "stake store is closed"
 		return stakeStoreError(ErrStoreClosed, str, nil)
@@ -640,12 +642,24 @@ func (s *StakeStore) SignVRTransaction(waddrmgrNs walletdb.ReadBucket, msgTx *wi
 var subsidyCache *blockchain.SubsidyCache
 var initSudsidyCacheOnce sync.Once
 
-// GenerateVote creates a new SSGen given a header hash, height, sstx
-// tx hash, and votebits.
-func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
-	blockHash *chainhash.Hash, height int64, sstxHash *chainhash.Hash, defaultVoteBits uint16,
-	allowHighFees bool) (*StakeNotification, error) {
+// generateVoteScript generates a voting script from the passed VoteBits, for
+// use in a vote.
+func generateVoteScript(voteBits stake.VoteBits) ([]byte, error) {
+	toPush := make([]byte, 2+len(voteBits.ExtendedBits))
+	binary.LittleEndian.PutUint16(toPush[0:2], voteBits.Bits)
+	copy(toPush[2:], voteBits.ExtendedBits[:])
 
+	blockVBScript, err := txscript.GenerateProvablyPruneableOut(toPush)
+	if err != nil {
+		return nil, err
+	}
+
+	return blockVBScript, nil
+}
+
+// generateVote creates a new SSGen given a header hash, height, sstx
+// tx hash, and votebits.
+func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket, blockHash *chainhash.Hash, height int64, sstxHash *chainhash.Hash, defaultVoteBits stake.VoteBits, allowHighFees bool) (*StakeNotification, error) {
 	// 1. Fetch the SStx, then calculate all the values we'll need later for
 	// the generation of the SSGen tx outputs.
 	sstxRecord, err := s.getSStx(ns, sstxHash)
@@ -660,7 +674,8 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 	// unset, just use the default voteBits as set by the user.
 	voteBits := defaultVoteBits
 	if sstxRecord.voteBitsSet {
-		voteBits = sstxRecord.voteBits
+		voteBits.Bits = sstxRecord.voteBits
+		voteBits.ExtendedBits = sstxRecord.voteBitsExt
 	}
 
 	// Store the sstx pubkeyhashes and amounts as found in the transaction
@@ -668,7 +683,7 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 	// TODO Get information on the allowable fee range for the vote
 	// and check to make sure we don't overflow that.
 	ssgenPayTypes, ssgenPkhs, sstxAmts, _, _, _ :=
-		stake.TxSStxStakeOutputInfo(sstx)
+		stake.TxSStxStakeOutputInfo(sstxMsgTx)
 
 	// Get the current reward.
 	initSudsidyCacheOnce.Do(func() {
@@ -682,6 +697,7 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 		sstxMsgTx.TxOut[0].Value,
 		stakeVoteSubsidy)
 
+	subsidyCache = blockchain.NewSubsidyCache(height, s.Params)
 	// 2. Add all transaction inputs to a new transaction after performing
 	// some validity checks. First, add the stake base, then the OP_SSTX
 	// tagged output.
@@ -718,7 +734,7 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 	msgTx.AddTxOut(blockRefOut)
 
 	// Votebits output.
-	blockVBScript, err := txscript.GenerateSSGenVotes(voteBits)
+	blockVBScript, err := generateVoteScript(voteBits)
 	if err != nil {
 		return nil, err
 	}
@@ -751,9 +767,7 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 	}
 
 	// Check to make sure our SSGen was created correctly.
-	ssgenTx := dcrutil.NewTx(msgTx)
-	ssgenTx.SetTree(dcrutil.TxTreeStake)
-	_, err = stake.IsSSGen(ssgenTx)
+	_, err = stake.IsSSGen(msgTx)
 	if err != nil {
 		return nil, err
 	}
@@ -765,10 +779,12 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 	}
 
 	// Store the information about the SSGen.
-	err = s.insertSSGen(ns, blockHash,
+	hash := msgTx.TxSha()
+	err = s.insertSSGen(ns,
+		blockHash,
 		height,
-		ssgenTx.Sha(),
-		voteBits,
+		&hash,
+		voteBits.Bits,
 		sstx.Sha())
 	if err != nil {
 		return nil, err
@@ -792,7 +808,7 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 		Height:    int32(height),
 		Amount:    0,
 		SStxIn:    *sstx.Sha(),
-		VoteBits:  voteBits,
+		VoteBits:  voteBits.Bits,
 	}
 
 	return ntfn, nil
@@ -800,8 +816,7 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 
 // insertSSRtx inserts an SSRtx record into the DB (keyed to the SStx it
 // spends.
-func (s *StakeStore) insertSSRtx(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64,
-	ssrtxHash *chainhash.Hash, sstxHash *chainhash.Hash) error {
+func (s *StakeStore) insertSSRtx(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64, ssrtxHash *chainhash.Hash, sstxHash *chainhash.Hash) error {
 
 	if blockHeight <= 0 {
 		return fmt.Errorf("invalid SSRtx block height")
@@ -820,8 +835,7 @@ func (s *StakeStore) insertSSRtx(ns walletdb.ReadWriteBucket, blockHash *chainha
 
 // InsertSSRtx is the exported version of insertSSRtx that is safe for
 // concurrent access.
-func (s *StakeStore) InsertSSRtx(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64,
-	ssrtxHash *chainhash.Hash, sstxHash *chainhash.Hash) error {
+func (s *StakeStore) InsertSSRtx(ns walletdb.ReadWriteBucket, blockHash *chainhash.Hash, blockHeight int64, ssrtxHash *chainhash.Hash, sstxHash *chainhash.Hash) error {
 
 	if s.isClosed {
 		str := "stake store is closed"
@@ -843,8 +857,7 @@ func (s *StakeStore) getSSRtxs(ns walletdb.ReadBucket, sstxHash *chainhash.Hash)
 // GenerateRevocation generates a revocation (SSRtx), signs it, and
 // submits it by SendRawTransaction. It also stores a record of it
 // in the local database.
-func (s *StakeStore) generateRevocation(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
-	blockHash *chainhash.Hash, height int64, sstxHash *chainhash.Hash,
+func (s *StakeStore) generateRevocation(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket, blockHash *chainhash.Hash, height int64, sstxHash *chainhash.Hash,
 	allowHighFees bool) (*StakeNotification, error) {
 
 	// 1. Fetch the SStx, then calculate all the values we'll need later for
@@ -860,7 +873,7 @@ func (s *StakeStore) generateRevocation(ns walletdb.ReadWriteBucket, waddrmgrNs 
 	// TODO Get information on the allowable fee range for the revocation
 	// and check to make sure we don't overflow that.
 	sstxPayTypes, sstxPkhs, sstxAmts, _, _, _ :=
-		stake.TxSStxStakeOutputInfo(sstx)
+		stake.TxSStxStakeOutputInfo(sstx.MsgTx())
 	ssrtxCalcAmts := stake.CalculateRewards(sstxAmts, sstx.MsgTx().TxOut[0].Value,
 		int64(0))
 
@@ -916,9 +929,7 @@ func (s *StakeStore) generateRevocation(ns walletdb.ReadWriteBucket, waddrmgrNs 
 	}
 
 	// Check to make sure our SSRtx was created correctly.
-	ssrtxTx := dcrutil.NewTx(msgTx)
-	ssrtxTx.SetTree(dcrutil.TxTreeStake)
-	_, err = stake.IsSSRtx(ssrtxTx)
+	_, err = stake.IsSSRtx(msgTx)
 	if err != nil {
 		return nil, err
 	}
@@ -930,9 +941,11 @@ func (s *StakeStore) generateRevocation(ns walletdb.ReadWriteBucket, waddrmgrNs 
 	}
 
 	// Store the information about the SSRtx.
-	err = s.insertSSRtx(ns, blockHash,
+	hash := msgTx.TxSha()
+	err = s.insertSSRtx(ns,
+		blockHash,
 		height,
-		ssrtxTx.Sha(),
+		&hash,
 		sstx.Sha())
 	if err != nil {
 		return nil, err
@@ -964,13 +977,7 @@ func (s *StakeStore) generateRevocation(ns walletdb.ReadWriteBucket, waddrmgrNs 
 // HandleWinningTicketsNtfn scans the list of eligible tickets and, if any
 // of these tickets in the sstx store match these tickets, spends them as
 // votes.
-func (s StakeStore) HandleWinningTicketsNtfn(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
-	blockHash *chainhash.Hash,
-	blockHeight int64,
-	tickets []*chainhash.Hash,
-	defaultVoteBits uint16,
-	allowHighFees bool) ([]*StakeNotification, error) {
-
+func (s StakeStore) HandleWinningTicketsNtfn(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket, blockHash *chainhash.Hash, blockHeight int64, tickets []*chainhash.Hash, defaultVoteBits stake.VoteBits, allowHighFees bool) ([]*StakeNotification, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -1000,8 +1007,8 @@ func (s StakeStore) HandleWinningTicketsNtfn(ns walletdb.ReadWriteBucket, waddrm
 	voteErrors := make([]error, len(ticketsToPull), len(ticketsToPull))
 	// Matching tickets (yay!), generate some SSGen.
 	for i, ticket := range ticketsToPull {
-		ntfns[i], voteErrors[i] = s.generateVote(ns, waddrmgrNs, blockHash, blockHeight, ticket,
-			defaultVoteBits, allowHighFees)
+		ntfns[i], voteErrors[i] = s.generateVote(ns, waddrmgrNs, blockHash,
+			blockHeight, ticket, defaultVoteBits, allowHighFees)
 	}
 
 	errStr := ""
@@ -1024,11 +1031,7 @@ func (s StakeStore) HandleWinningTicketsNtfn(ns walletdb.ReadWriteBucket, waddrm
 // HandleMissedTicketsNtfn scans the list of missed tickets and, if any
 // of these tickets in the sstx store match these tickets, spends them as
 // SSRtx.
-func (s StakeStore) HandleMissedTicketsNtfn(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
-	blockHash *chainhash.Hash,
-	blockHeight int64,
-	tickets []*chainhash.Hash,
-	allowHighFees bool) ([]*StakeNotification, error) {
+func (s StakeStore) HandleMissedTicketsNtfn(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket, blockHash *chainhash.Hash, blockHeight int64, tickets []*chainhash.Hash, allowHighFees bool) ([]*StakeNotification, error) {
 	if s.isClosed {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrStoreClosed, str, nil)
@@ -1082,9 +1085,7 @@ func (s StakeStore) HandleMissedTicketsNtfn(ns walletdb.ReadWriteBucket, waddrmg
 // updateStakePoolUserTickets updates a stake pool ticket for a given user.
 // If the ticket does not currently exist in the database, it adds it. If it
 // does exist (the ticket hash exists), it replaces the old record.
-func (s *StakeStore) updateStakePoolUserTickets(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
-	user dcrutil.Address, ticket *PoolTicket) error {
-
+func (s *StakeStore) updateStakePoolUserTickets(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket, user dcrutil.Address, ticket *PoolTicket) error {
 	_, isScriptHash := user.(*dcrutil.AddressScriptHash)
 	_, isP2PKH := user.(*dcrutil.AddressPubKeyHash)
 	if !(isScriptHash || isP2PKH) {
@@ -1100,9 +1101,7 @@ func (s *StakeStore) updateStakePoolUserTickets(ns walletdb.ReadWriteBucket, wad
 
 // UpdateStakePoolUserTickets is the exported and concurrency safe form of
 // updateStakePoolUserTickets.
-func (s *StakeStore) UpdateStakePoolUserTickets(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket,
-	user dcrutil.Address, ticket *PoolTicket) error {
-
+func (s *StakeStore) UpdateStakePoolUserTickets(ns walletdb.ReadWriteBucket, waddrmgrNs walletdb.ReadBucket, user dcrutil.Address, ticket *PoolTicket) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -1112,9 +1111,7 @@ func (s *StakeStore) UpdateStakePoolUserTickets(ns walletdb.ReadWriteBucket, wad
 // updateStakePoolUserInvalTickets updates the list of invalid stake pool
 // tickets for a given user. If the ticket does not currently exist in the
 // database, it adds it.
-func (s *StakeStore) updateStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address,
-	ticket *chainhash.Hash) error {
-
+func (s *StakeStore) updateStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address, ticket *chainhash.Hash) error {
 	_, isScriptHash := user.(*dcrutil.AddressScriptHash)
 	_, isP2PKH := user.(*dcrutil.AddressPubKeyHash)
 	if !(isScriptHash || isP2PKH) {
@@ -1130,9 +1127,7 @@ func (s *StakeStore) updateStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket
 
 // UpdateStakePoolUserInvalTickets is the exported and concurrency safe form of
 // updateStakePoolUserInvalTickets.
-func (s *StakeStore) UpdateStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address,
-	ticket *chainhash.Hash) error {
-
+func (s *StakeStore) UpdateStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address, ticket *chainhash.Hash) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
