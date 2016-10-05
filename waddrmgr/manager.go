@@ -104,6 +104,18 @@ func isReservedAccountNum(acct uint32) bool {
 	return acct == ImportedAddrAccount
 }
 
+// normalizeAddress normalizes addresses for usage by the address manager.  In
+// particular, it converts all pubkeys to pubkey hash addresses so they are
+// interchangeable by callers.
+func normalizeAddress(addr dcrutil.Address) dcrutil.Address {
+	switch addr := addr.(type) {
+	case *dcrutil.AddressSecpPubKey:
+		return addr.AddressPubKeyHash()
+	default:
+		return addr
+	}
+}
+
 // ScryptOptions is used to hold the scrypt parameters needed when deriving new
 // passphrase keys.
 type ScryptOptions struct {
@@ -807,14 +819,7 @@ func (m *Manager) loadAndCacheAddress(ns walletdb.ReadBucket,
 // pay-to-pubkey-hash addresses and the script associated with
 // pay-to-script-hash addresses.
 func (m *Manager) Address(ns walletdb.ReadBucket, address dcrutil.Address) (ManagedAddress, error) {
-	// ScriptAddress will only return a script hash if we're
-	// accessing an address that is either PKH or SH. In
-	// the event we're passed a PK address, convert the
-	// PK to PKH address so that we can access it from
-	// the addrs map and database.
-	if pka, ok := address.(*dcrutil.AddressSecpPubKey); ok {
-		address = pka.AddressPubKeyHash()
-	}
+	address = normalizeAddress(address)
 
 	// Return the address from cache if it's available.
 	//
@@ -836,6 +841,7 @@ func (m *Manager) Address(ns walletdb.ReadBucket, address dcrutil.Address) (Mana
 
 // AddrAccount returns the account to which the given address belongs.
 func (m *Manager) AddrAccount(ns walletdb.ReadBucket, address dcrutil.Address) (uint32, error) {
+	address = normalizeAddress(address)
 	account, err := fetchAddrAccount(ns, address.ScriptAddress())
 	if err != nil {
 		return 0, maybeConvertDbError(err)
@@ -1549,6 +1555,7 @@ func (m *Manager) fetchUsed(ns walletdb.ReadBucket, addressID []byte) bool {
 
 // MarkUsed updates the used flag for the provided address.
 func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket, address dcrutil.Address) error {
+	address = normalizeAddress(address)
 	addressID := address.ScriptAddress()
 	err := markAddressUsed(ns, addressID)
 	if err != nil {
