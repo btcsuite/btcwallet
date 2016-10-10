@@ -376,8 +376,36 @@ type Store struct {
 // contained in the wallet database, namespaced by the top level bucket key
 // namespaceKey.
 func DoUpgrades(db walletdb.DB, namespaceKey []byte) error {
-	// No upgrades
-	return nil
+	return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(namespaceKey)
+
+		v := ns.Get(rootVersion)
+		if len(v) != 4 {
+			str := "no transaction store exists in namespace"
+			return storeError(ErrNoExists, str, nil)
+		}
+		version := byteOrder.Uint32(v)
+
+		// Versions start at 1, 0 is an error.
+		if version == 0 {
+			str := "current database version is 0 when " +
+				"earliest version was 1"
+			return storeError(ErrData, str, nil)
+		}
+
+		// Perform upgrades from version 1 to 2 when necessary.
+		if version == 1 {
+			err := upgradeToVersion2(ns)
+			if err != nil {
+				return err
+			}
+			version++
+		}
+
+		// Version 2 to 3 upgrade should be added here.
+
+		return nil
+	})
 }
 
 // Open opens the wallet transaction store from a walletdb namespace.  If the

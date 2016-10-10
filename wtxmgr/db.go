@@ -1934,6 +1934,22 @@ func existsMultisigOutUS(ns walletdb.ReadBucket, k []byte) bool {
 	return v != nil
 }
 
+// upgradeToVersion2 upgrades the transaction store from version 1 to version 2.
+// This must only be called after the caller has asserted the database is
+// currently at version 1.  This upgrade is only a version bump as the new DB
+// format is forwards compatible with version 1, but old software that does not
+// know about version 2 should not be opening the upgraded DBs.
+func upgradeToVersion2(ns walletdb.ReadWriteBucket) error {
+	versionBytes := make([]byte, 4)
+	byteOrder.PutUint32(versionBytes, 2)
+	err := ns.Put(rootVersion, versionBytes)
+	if err != nil {
+		str := "failed to write database version"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
 // openStore opens an existing transaction store from the passed namespace.
 func openStore(ns walletdb.ReadBucket) error {
 	v := ns.Get(rootVersion)
