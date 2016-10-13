@@ -1,5 +1,5 @@
 hash: 5cc50197a8683b16e3e120937d59e244ba000d7c0d474d8b613e17a93b9723ef
-updated: 2016-10-05T20:34:26.502215634Z
+updated: 2016-10-13T09:08:42.0437835-04:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
@@ -30,15 +30,11 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: 4c838e82b5110af8b69b34a81e2cbc224e5888fa
+  version: 717040c9453370196efb0a3706c83f17456cc374
   subpackages:
   - blockchain
-  - blockchain/internal/dbnamespace
-  - blockchain/internal/progresslog
+  - blockchain/dbnamespace
   - blockchain/stake
-  - blockchain/stake/internal/dbnamespace
-  - blockchain/stake/internal/ticketdb
-  - blockchain/stake/internal/tickettreap
   - chaincfg
   - chaincfg/chainec
   - chaincfg/chainhash
@@ -50,9 +46,9 @@ imports:
   - txscript
   - wire
 - name: github.com/decred/dcrrpcclient
-  version: 0f562bb540de12dfd5248aee87063eaa4792705f
+  version: 103ed11be3a7035554d3925fbfaa67742641510f
 - name: github.com/decred/dcrutil
-  version: 0484582bf5503574d824f110e836a8c48aa60c8c
+  version: 4fc91a08eea88e74539d42d6301fd298b9bd8230
   subpackages:
   - base58
   - hdkeychain
@@ -80,7 +76,7 @@ imports:
   subpackages:
   - unix
 - name: google.golang.org/grpc
-  version: 0032a855ba5c8a3c8e0d71c2deef354b70af1584
+  version: b1a2821ca5a4fd6b6e48ddfbb7d6d7584d839d21
   subpackages:
   - codes
   - credentials
@@ -92,11 +88,11 @@ imports:
   - transport
 testImports:
 - name: github.com/davecgh/go-spew
-  version: 6cf5744a041a0022271cefed95ba843f6d87fd51
+  version: 5215b55f46b2b919f50a1df0eaa5886afe4e3b3d
   subpackages:
   - spew
 - name: github.com/pmezard/go-difflib
-  version: 792786c7400a136282c1664665ae0a8db921c6c2
+  version: d8ed2627bdf02c080bf22230dbb337003b7aba2d
   subpackages:
   - difflib
 - name: github.com/stretchr/testify
