@@ -12,7 +12,7 @@ import (
 
 	"github.com/jadeblaquiere/ctcd/btcec"
 	"github.com/jadeblaquiere/ctcd/chaincfg"
-	"github.com/jadeblaquiere/ctcd/wire"
+	//"github.com/jadeblaquiere/ctcd/wire"
 	"github.com/jadeblaquiere/ctcutil"
 	"github.com/jadeblaquiere/ctcwallet/internal/legacy/keystore"
 	"github.com/jadeblaquiere/ctcwallet/internal/prompt"
@@ -32,9 +32,9 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 	// paramaters will likely be switched to being named "testnet3" in the
 	// future.  This is done to future proof that change, and an upgrade
 	// plan to move the testnet3 data directory can be worked out later.
-	if chainParams.Net == wire.TestNet3 {
-		netname = "testnet"
-	}
+	//if chainParams.Net == wire.TestNet3 {
+	//	netname = "testnet"
+	//}
 
 	return filepath.Join(dataDir, netname)
 }
