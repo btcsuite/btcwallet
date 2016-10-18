@@ -12,7 +12,7 @@ import (
 	"io"
 	"runtime/debug"
 
-	"github.com/btcsuite/btcwallet/internal/zero"
+	"github.com/jadeblaquiere/ctcwallet/internal/zero"
 	"github.com/btcsuite/fastsha256"
 	"github.com/btcsuite/golangcrypto/nacl/secretbox"
 	"github.com/btcsuite/golangcrypto/scrypt"

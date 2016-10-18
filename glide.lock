@@ -1,30 +1,14 @@
-hash: 0cff4a723566a3e33910785c104bddde49d1e0ba2d51f3833599a423140f5163
-updated: 2016-08-12T09:43:45.22287-05:00
+hash: 382b8c2702cac077dfaa0133c4ace60347de57dc2473409a8c71904258cacc24
+updated: 2016-05-04T22:13:57.462960026-04:00
 imports:
-- name: github.com/boltdb/bolt
-  version: 831b652a7f8dbefaf94da0eb66abd46c0c4bcf23
-- name: github.com/btcsuite/btcd
-  version: a7b35d9f9e24f8cebf3dc30cf083668700690095
-  subpackages:
-  - blockchain
-  - btcec
-  - btcjson
-  - chaincfg
-  - chaincfg/chainhash
-  - database
-  - txscript
-  - wire
+- name: github.com/btcsuite/bolt
+  version: 38b9bbfde72d4b62b6a038a3adfca64c44da0133
 - name: github.com/btcsuite/btclog
   version: f96df2375f37300305f329b8e5258764b4f19a7f
-- name: github.com/btcsuite/btcrpcclient
-  version: c39e35318d5dc8d7e5e4171a34a17bc03dce06b4
-- name: github.com/btcsuite/btcutil
-  version: 22c91fa80a5e90e3feda26cf6d43adc249306188
-  subpackages:
-  - base58
-  - hdkeychain
 - name: github.com/btcsuite/fastsha256
   version: 302ad4db268b46f9ebda3078f6f7397f96047735
+- name: github.com/btcsuite/go-flags
+  version: 6c288d648c1cc1befcb90cb5511dcacf64ae8e61
 - name: github.com/btcsuite/go-socks
   version: cfe8b59e565c1a5bd4e2005d77cd9aa8b2e14524
   subpackages:
@@ -33,36 +17,51 @@ imports:
   version: 53f62d9b43e87a6c56975cf862af7edf33a8d0df
   subpackages:
   - nacl/secretbox
-  - pbkdf2
-  - poly1305
   - ripemd160
-  - salsa20/salsa
   - scrypt
   - ssh/terminal
+  - poly1305
+  - salsa20/salsa
+  - pbkdf2
 - name: github.com/btcsuite/seelog
   version: 313961b101eb55f65ae0f03ddd4e322731763b6c
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/golang/protobuf
-  version: 2ebff28ac76fb19e2d25e5ddd4885708dfdd5611
+  version: 7cc19b78d562895b13596ddce7aafb59dd789318
   subpackages:
   - proto
-- name: github.com/jessevdk/go-flags
-  version: 1679536dcc895411a9f5848d9a0250be7856448c
+- name: github.com/jadeblaquiere/ctcd
+  version: 9f662596136c14d51027e1a317c64d27a6270227
+  subpackages:
+  - blockchain
+  - btcec
+  - btcjson
+  - chaincfg
+  - txscript
+  - wire
+  - database
+- name: github.com/jadeblaquiere/ctcrpcclient
+  version: e85a57e8996e53273d7b4c6741c920a5b97275ce
+- name: github.com/jadeblaquiere/ctcutil
+  version: a04d5a6a43bf742af3a359182b9a6d4f1d09f31e
+  subpackages:
+  - hdkeychain
+  - base58
 - name: golang.org/x/net
-  version: fb93926129b8ec0056f2f458b1f519654814edf0
+  version: 35ec611a141ee705590b9eb64d673f9e6dfeb1ac
   subpackages:
   - context
   - http2
+  - trace
   - http2/hpack
   - internal/timeseries
-  - trace
 - name: golang.org/x/sys
-  version: f64b50fbea64174967a8882830d621a18ee1548e
+  version: b776ec39b3e54652e09028aaaaac9757f4f8211a
   subpackages:
   - unix
 - name: google.golang.org/grpc
-  version: dd828651e45229541896bc41cd9cf2f89ac7002a
+  version: 8eb8dd0298f7a44728405d92c7ed710f65f7ad17
   subpackages:
   - codes
   - credentials
@@ -72,8 +71,4 @@ imports:
   - naming
   - transport
   - peer
-testImports:
-- name: github.com/davecgh/go-spew
-  version: 5215b55f46b2b919f50a1df0eaa5886afe4e3b3d
-  subpackages:
-  - spew
+devImports: []

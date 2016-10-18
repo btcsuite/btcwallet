@@ -29,16 +29,16 @@ if err != nil {
 
 ## Documentation
 
-[![GoDoc](https://godoc.org/github.com/btcsuite/btcwallet/walletdb/bdb?status.png)]
-(http://godoc.org/github.com/btcsuite/btcwallet/walletdb/bdb)
+[![GoDoc](https://godoc.org/github.com/jadeblaquiere/btcwallet/walletdb/bdb?status.png)]
+(http://godoc.org/github.com/jadeblaquiere/btcwallet/walletdb/bdb)
 
 Full `go doc` style documentation for the project can be viewed online without
 installing this package by using the GoDoc site here:
-http://godoc.org/github.com/btcsuite/btcwallet/walletdb/bdb
+http://godoc.org/github.com/jadeblaquiere/btcwallet/walletdb/bdb
 
 You can also view the documentation locally once the package is installed with
 the `godoc` tool by running `godoc -http=":6060"` and pointing your browser to
-http://localhost:6060/pkg/github.com/btcsuite/btcwallet/walletdb/bdb
+http://localhost:6060/pkg/github.com/jadeblaquiere/btcwallet/walletdb/bdb
 
 ## License
 

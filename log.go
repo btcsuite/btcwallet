@@ -9,12 +9,12 @@ import (
 	"os"
 
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcrpcclient"
-	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
-	"github.com/btcsuite/btcwallet/rpc/rpcserver"
-	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/jadeblaquiere/ctcrpcclient"
+	"github.com/jadeblaquiere/ctcwallet/chain"
+	"github.com/jadeblaquiere/ctcwallet/rpc/legacyrpc"
+	"github.com/jadeblaquiere/ctcwallet/rpc/rpcserver"
+	"github.com/jadeblaquiere/ctcwallet/wallet"
+	"github.com/jadeblaquiere/ctcwallet/wtxmgr"
 	"github.com/btcsuite/seelog"
 )
 
@@ -34,7 +34,7 @@ var (
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
 var subsystemLoggers = map[string]btclog.Logger{
-	"BTCW": log,
+	"CTCW": log,
 	"WLLT": walletLog,
 	"TMGR": txmgrLog,
 	"CHNS": chainLog,
@@ -67,7 +67,7 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	subsystemLoggers[subsystemID] = logger
 
 	switch subsystemID {
-	case "BTCW":
+	case "CTCW":
 		log = logger
 	case "WLLT":
 		walletLog = logger

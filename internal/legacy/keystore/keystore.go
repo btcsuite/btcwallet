@@ -22,13 +22,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/internal/legacy/rename"
+	"github.com/jadeblaquiere/ctcd/btcec"
+	"github.com/jadeblaquiere/ctcd/chaincfg"
+	"github.com/jadeblaquiere/ctcd/chaincfg/chainhash"
+	"github.com/jadeblaquiere/ctcd/txscript"
+	"github.com/jadeblaquiere/ctcd/wire"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/internal/legacy/rename"
 	"github.com/btcsuite/golangcrypto/ripemd160"
 )
 
@@ -476,12 +476,10 @@ func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
 	}
 
 	switch wire.BitcoinNet(binary.LittleEndian.Uint32(uint32Bytes)) {
-	case wire.MainNet:
-		*net = (netParams)(chaincfg.MainNetParams)
-	case wire.TestNet3:
-		*net = (netParams)(chaincfg.TestNet3Params)
-	case wire.SimNet:
-		*net = (netParams)(chaincfg.SimNetParams)
+	case wire.CTIndigoNet:
+		*net = (netParams)(chaincfg.CTIndigoNetParams)
+	case wire.CTRedNet:
+		*net = (netParams)(chaincfg.CTRedNetParams)
 	default:
 		return n64, errors.New("unknown network")
 	}

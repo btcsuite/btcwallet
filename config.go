@@ -14,17 +14,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/internal/cfgutil"
-	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
-	"github.com/btcsuite/btcwallet/netparams"
-	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/jadeblaquiere/ctcutil"
+	"github.com/jadeblaquiere/ctcwallet/internal/cfgutil"
+	"github.com/jadeblaquiere/ctcwallet/internal/legacy/keystore"
+	"github.com/jadeblaquiere/ctcwallet/netparams"
+	"github.com/jadeblaquiere/ctcwallet/wallet"
 	flags "github.com/jessevdk/go-flags"
 )
 
 const (
-	defaultCAFilename       = "btcd.cert"
-	defaultConfigFilename   = "btcwallet.conf"
+	defaultCAFilename       = "ctcd.cert"
+	defaultConfigFilename   = "ctcwallet.conf"
 	defaultLogLevel         = "info"
 	defaultLogDirname       = "logs"
 	defaultLogFilename      = "btcwallet.log"
@@ -35,8 +35,8 @@ const (
 )
 
 var (
-	btcdDefaultCAFile  = filepath.Join(btcutil.AppDataDir("btcd", false), "rpc.cert")
-	defaultAppDataDir  = btcutil.AppDataDir("btcwallet", false)
+	btcdDefaultCAFile  = filepath.Join(btcutil.AppDataDir("ctcd", false), "rpc.cert")
+	defaultAppDataDir  = btcutil.AppDataDir("ctcwallet", false)
 	defaultConfigFile  = filepath.Join(defaultAppDataDir, defaultConfigFilename)
 	defaultRPCKeyFile  = filepath.Join(defaultAppDataDir, "rpc.key")
 	defaultRPCCertFile = filepath.Join(defaultAppDataDir, "rpc.cert")
@@ -50,8 +50,8 @@ type config struct {
 	Create        bool                    `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp    bool                    `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	AppDataDir    *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
-	TestNet3      bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
-	SimNet        bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
+	CTRedNet      bool                    `long:"ctrednet" description:"Use the ciphrtxt red test network (default mainnet)"`
+	CTIndigoNet   bool                    `long:"ctindigonet" description:"Use the ciphrtxt indigo network (default mainnet)"`
 	NoInitialLoad bool                    `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
 	DebugLevel    string                  `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	LogDir        string                  `long:"logdir" description:"Directory to log output."`
@@ -348,12 +348,12 @@ func loadConfig() (*config, []string, error) {
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
-	if cfg.TestNet3 {
-		activeNet = &netparams.TestNet3Params
+	if cfg.CTRedNet {
+		activeNet = &netparams.CTRedNetParams
 		numNets++
 	}
-	if cfg.SimNet {
-		activeNet = &netparams.SimNetParams
+	if cfg.CTIndigoNet {
+		activeNet = &netparams.CTIndigoNetParams
 		numNets++
 	}
 	if numNets > 1 {
@@ -398,11 +398,11 @@ func loadConfig() (*config, []string, error) {
 
 	// Exit if you try to use a simulation wallet on anything other than
 	// simnet or testnet3.
-	if !cfg.SimNet && cfg.CreateTemp {
-		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
-			"wallet for network other than simnet!")
-		os.Exit(0)
-	}
+	//if !cfg.SimNet && cfg.CreateTemp {
+	//	fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
+	//		"wallet for network other than simnet!")
+	//	os.Exit(0)
+	//}
 
 	// Ensure the wallet exists or create it when the create flag is set.
 	netDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
