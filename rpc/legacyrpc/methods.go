@@ -503,6 +503,7 @@ func addTicket(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, err
 	}
 	err = w.AddTicket(dcrutil.NewTx(mtx))
+
 	return nil, err
 }
 

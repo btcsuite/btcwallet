@@ -9,10 +9,12 @@ import (
 
 	"github.com/decred/dcrd/blockchain/stake"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/txscript"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/walletdb"
+	"github.com/decred/dcrwallet/wstakemgr"
 )
 
 func sliceContainsHash(s []chainhash.Hash, h chainhash.Hash) bool {
@@ -132,11 +134,70 @@ func (w *Wallet) TicketHashesForVotingAddress(votingAddr dcrutil.Address) ([]cha
 	return ticketHashes, err
 }
 
+// updateStakePoolInvalidTicket properly updates a previously marked Invalid pool ticket,
+// it then creates a new entry in the validly tracked pool ticket db.
+func (w *Wallet) updateStakePoolInvalidTicket(stakemgrNs walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBucket,
+	addr dcrutil.Address, ticket *chainhash.Hash, ticketHeight int64) error {
+	err := w.StakeMgr.RemoveStakePoolUserInvalTickets(stakemgrNs, addr, ticket)
+	if err != nil {
+		return err
+	}
+	poolTicket := &wstakemgr.PoolTicket{
+		Ticket:       *ticket,
+		HeightTicket: uint32(ticketHeight),
+		Status:       wstakemgr.TSImmatureOrLive,
+	}
+
+	err = w.StakeMgr.UpdateStakePoolUserTickets(stakemgrNs, addrmgrNs, addr, poolTicket)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // AddTicket adds a ticket transaction to the wallet.
 func (w *Wallet) AddTicket(ticket *dcrutil.Tx) error {
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		stakemgrNs := tx.ReadWriteBucket(wstakemgrNamespaceKey)
-		return w.StakeMgr.InsertSStx(stakemgrNs, ticket, w.VoteBits)
+
+		// Insert the ticket to be tracked and voted.
+		err := w.StakeMgr.InsertSStx(stakemgrNs, ticket, w.VoteBits)
+		if err != nil {
+			return err
+		}
+
+		if w.stakePoolEnabled {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+			// Pluck the ticketaddress to indentify the stakepool user.
+			pkVersion := ticket.MsgTx().TxOut[0].Version
+			pkScript := ticket.MsgTx().TxOut[0].PkScript
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkVersion,
+				pkScript, w.ChainParams())
+			if err != nil {
+				return err
+			}
+
+			ticketHash := ticket.MsgTx().TxSha()
+
+			chainClient, err := w.requireChainClient()
+			if err != nil {
+				return err
+			}
+			rawTx, err := chainClient.GetRawTransactionVerbose(&ticketHash)
+			if err != nil {
+				return err
+			}
+
+			// Update the pool ticket stake. This will include removing it from the
+			// invalid slice and adding a ImmatureOrLive ticket to the valid ones.
+			err = w.updateStakePoolInvalidTicket(stakemgrNs, addrmgrNs, addrs[0], &ticketHash, rawTx.BlockHeight)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

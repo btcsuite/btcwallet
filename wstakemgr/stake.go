@@ -1108,6 +1108,35 @@ func (s *StakeStore) UpdateStakePoolUserTickets(ns walletdb.ReadWriteBucket, wad
 	return s.updateStakePoolUserTickets(ns, waddrmgrNs, user, ticket)
 }
 
+// removeStakePoolUserInvalTickets prepares the user.Address and asks stakedb
+// to remove the formerly invalid tickets.
+func (s *StakeStore) removeStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address,
+	ticket *chainhash.Hash) error {
+
+	_, isScriptHash := user.(*dcrutil.AddressScriptHash)
+	_, isP2PKH := user.(*dcrutil.AddressPubKeyHash)
+	if !(isScriptHash || isP2PKH) {
+		str := fmt.Sprintf("user %v is invalid", user.EncodeAddress())
+		return stakeStoreError(ErrBadPoolUserAddr, str, nil)
+	}
+	scriptHashB := user.ScriptAddress()
+	scriptHash := new([20]byte)
+	copy(scriptHash[:], scriptHashB)
+
+	return removeStakePoolInvalUserTickets(ns, *scriptHash, ticket)
+}
+
+// RemoveStakePoolUserInvalTickets is the exported and concurrency safe form of
+// removetStakePoolUserInvalTickets.
+func (s *StakeStore) RemoveStakePoolUserInvalTickets(ns walletdb.ReadWriteBucket, user dcrutil.Address,
+	ticket *chainhash.Hash) error {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	return s.removeStakePoolUserInvalTickets(ns, user, ticket)
+}
+
 // updateStakePoolUserInvalTickets updates the list of invalid stake pool
 // tickets for a given user. If the ticket does not currently exist in the
 // database, it adds it.
