@@ -1,16 +1,17 @@
 language: go
 go:
-  - 1.5.4
-  - 1.6.2
+  - 1.6.3
+  - 1.7.3
 sudo: false
 before_install:
-  - gotools=golang.org/x/tools
-  - export GO15VENDOREXPERIMENT=1
-install:
-  - go get -v github.com/Masterminds/glide
+  - GLIDE_TAG=v0.12.3
+  - GLIDE_DOWNLOAD="https://github.com/Masterminds/glide/releases/download/$GLIDE_TAG/glide-$GLIDE_TAG-linux-amd64.tar.gz"
+  - curl -L $GLIDE_DOWNLOAD | tar -xvz
+  - export PATH=$PATH:$PWD/linux-amd64/
   - glide install
-  - go get -v $(glide novendor)
-  - go get -v $gotools/cmd/cover
+install:
+  - go install -v $(glide novendor)
+  - go get -v golang.org/x/tools/cmd/cover
   - go get -v github.com/golang/lint/golint
   - go get -v github.com/davecgh/go-spew/spew
 script:
