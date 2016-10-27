@@ -358,7 +358,7 @@ func (tx *withdrawalTx) hasChange() bool {
 
 // toMsgTx generates a btcwire.MsgTx with this tx's inputs and outputs.
 func (tx *withdrawalTx) toMsgTx() *wire.MsgTx {
-	msgtx := wire.NewMsgTx()
+	msgtx := wire.NewMsgTx(wire.TxVersion)
 	for _, o := range tx.outputs {
 		msgtx.AddTxOut(wire.NewTxOut(int64(o.amount), o.pkScript()))
 	}
