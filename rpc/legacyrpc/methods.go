@@ -1631,7 +1631,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	if err != nil {
 		return nil, err
 	}
-	tx := wire.NewMsgTx()
+	var tx wire.MsgTx
 	err = tx.Deserialize(bytes.NewBuffer(serializedTx))
 	if err != nil {
 		e := errors.New("TX decode failed")
@@ -1764,7 +1764,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	// `complete' denotes that we successfully signed all outputs and that
 	// all scripts will run to completion. This is returned as part of the
 	// reply.
-	signErrs, err := w.SignTransaction(tx, hashType, inputs, keys, scripts)
+	signErrs, err := w.SignTransaction(&tx, hashType, inputs, keys, scripts)
 	if err != nil {
 		return nil, err
 	}

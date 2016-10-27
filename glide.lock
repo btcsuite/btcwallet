@@ -1,10 +1,10 @@
 hash: 5efa5cef5495a0b5256f45ecb2456ea21101934ed56e780a46b1c16e30177ebc
-updated: 2016-10-27T11:04:37.4161268-04:00
+updated: 2016-10-27T11:54:19.492811-05:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
 - name: github.com/btcsuite/btcd
-  version: e3eeb4a34a04c8ec40298fee9f9d8fe2ce0c13ca
+  version: f6ad7eb2c963151c71de2bd37d04d9af644a891d
   subpackages:
   - blockchain
   - btcec
@@ -19,7 +19,7 @@ imports:
 - name: github.com/btcsuite/btcrpcclient
   version: 2b780d16b042054d07aa322146194118fd7f7b81
 - name: github.com/btcsuite/btcutil
-  version: 68e5965458062d031a6e333b35c778ce464fb73f
+  version: 9b9ce80a2edafc6198569550fcc01df11d214425
   subpackages:
   - base58
   - hdkeychain

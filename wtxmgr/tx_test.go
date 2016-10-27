@@ -109,7 +109,7 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 
 	// Create a "signed" (with invalid sigs) tx that spends output 0 of
 	// the double spend.
-	spendingTx := wire.NewMsgTx()
+	spendingTx := wire.NewMsgTx(wire.TxVersion)
 	spendingTxIn := wire.NewTxIn(wire.NewOutPoint(TstDoubleSpendTx.Hash(), 0), []byte{0, 1, 2, 3, 4})
 	spendingTx.AddTxIn(spendingTxIn)
 	spendingTxOut1 := wire.NewTxOut(1e7, []byte{5, 6, 7, 8, 9})

@@ -552,12 +552,12 @@ func deserializeWithdrawal(p *Pool, serialized []byte) (*withdrawalInfo, error) 
 		}
 	}
 	for ntxid, tx := range row.Status.Transactions {
-		msgtx := wire.NewMsgTx()
+		var msgtx wire.MsgTx
 		if err := msgtx.Deserialize(bytes.NewBuffer(tx.SerializedMsgTx)); err != nil {
 			return nil, newError(ErrWithdrawalStorage, "cannot deserialize transaction", err)
 		}
 		wInfo.status.transactions[ntxid] = changeAwareTx{
-			MsgTx:     msgtx,
+			MsgTx:     &msgtx,
 			changeIdx: tx.ChangeIdx,
 		}
 	}
