@@ -1,5 +1,5 @@
 hash: 5cc50197a8683b16e3e120937d59e244ba000d7c0d474d8b613e17a93b9723ef
-updated: 2016-10-14T13:42:35.5906491-04:00
+updated: 2016-10-31T14:50:08.516748873Z
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
@@ -30,7 +30,7 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: cc25399f6a78b09957d82e2c98960b24685e1475
+  version: b086c13d6bca0016dfb22c9259f61afa68f64041
   subpackages:
   - blockchain
   - blockchain/internal/dbnamespace
@@ -50,7 +50,7 @@ imports:
   - txscript
   - wire
 - name: github.com/decred/dcrrpcclient
-  version: 0f562bb540de12dfd5248aee87063eaa4792705f
+  version: 942b0e6ec21340e61d7d8db02df4cdfe4f38264c
 - name: github.com/decred/dcrutil
   version: 0484582bf5503574d824f110e836a8c48aa60c8c
   subpackages:
@@ -89,8 +89,8 @@ imports:
   - internal
   - metadata
   - naming
-  - peer
   - transport
+  - peer
 testImports:
 - name: github.com/davecgh/go-spew
   version: 6d212800a42e8ab5c146b8ace3490ee17e5225f9

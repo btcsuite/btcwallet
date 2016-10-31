@@ -1216,6 +1216,7 @@ func getStakeInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 		Missed:           stakeInfo.Missed,
 		ProportionMissed: proportionMissed,
 		Revoked:          stakeInfo.Revoked,
+		Expired:          stakeInfo.Expired,
 	}
 
 	return resp, nil

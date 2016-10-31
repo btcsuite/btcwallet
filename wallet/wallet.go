@@ -2829,6 +2829,7 @@ type StakeInfoData struct {
 	Voted         uint32
 	Missed        uint32
 	Revoked       uint32
+	Expired       uint32
 	TotalSubsidy  dcrutil.Amount
 }
 
@@ -2979,6 +2980,32 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 			}
 		}
 
+		expiredTicketNum := 0
+		revokeTicketPtrs := make([]*chainhash.Hash, len(revokedTickets))
+		for i := range revokedTickets {
+			revokeTicketPtrs[i] = &revokedTickets[i]
+		}
+
+		// Check the expired ticket pool for the presense of tickets.
+		expiredBitSetBStr, err := chainClient.ExistsExpiredTickets(revokeTicketPtrs)
+		if err != nil {
+			return fmt.Errorf("Failed to find assess whether tickets "+
+				"were in expired buckets when generating stake info (err %s)",
+				err.Error())
+		}
+		expiredBitSetB, err := hex.DecodeString(expiredBitSetBStr)
+		if err != nil {
+			return fmt.Errorf("Failed to decode response for whether tickets "+
+				"were in expired bucket when generating stake info (err %s)",
+				err.Error())
+		}
+		expiredBitSet := bitset.Bytes(expiredBitSetB)
+		for i := range revokedTickets {
+			if expiredBitSet.Get(i) {
+				expiredTicketNum++
+			}
+		}
+
 		curHeight := int64(bs.Height)
 		ticketMaturity := int64(w.ChainParams().TicketMaturity)
 		for _, ticketHash := range maybeImmature {
@@ -3057,6 +3084,7 @@ func (w *Wallet) StakeInfo() (*StakeInfoData, error) {
 			TotalSubsidy:  totalSubsidy,
 			Missed:        uint32(missedNum),
 			Revoked:       uint32(len(revokedTickets)),
+			Expired:       uint32(expiredTicketNum),
 		}
 		return nil
 	})
