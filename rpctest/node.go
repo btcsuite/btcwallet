@@ -145,10 +145,7 @@ func (n *nodeConfig) String() string {
 
 // cleanup removes the tmp data and log directories.
 func (n *nodeConfig) cleanup() error {
-	if err := os.RemoveAll(n.appDataDir); err != nil {
-		return err
-	}
-	return nil
+	return os.RemoveAll(n.appDataDir)
 }
 
 // node houses the neccessary state required to configure, launch, and manaage
@@ -253,14 +250,18 @@ func genCertPair(certFile, keyFile, certFileWallet, keyFileWallet string) error 
 		return err
 	}
 	if err = ioutil.WriteFile(keyFile, key, 0600); err != nil {
-		os.Remove(certFile)
+		if errR := os.Remove(certFile); errR != nil {
+			fmt.Printf("Failed to remove %s, %v", certFile, err)
+		}
 		return err
 	}
 	if err = ioutil.WriteFile(certFileWallet, cert, 0666); err != nil {
 		return err
 	}
 	if err = ioutil.WriteFile(keyFileWallet, key, 0600); err != nil {
-		os.Remove(certFile)
+		if errR := os.Remove(certFile); errR != nil {
+			fmt.Printf("Failed to remove %s, %v", certFile, err)
+		}
 		return err
 	}
 	return nil

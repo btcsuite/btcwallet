@@ -95,7 +95,7 @@ func NewHarness(activeNet *chaincfg.Params, handlers *rpc.NotificationHandlers,
 	defer harnessStateMtx.Unlock()
 
 	// Create data folders for this Harness instance
-	harnessID := strconv.Itoa(int(numTestInstances))
+	harnessID := strconv.Itoa(numTestInstances)
 	testDataPath := "rpctest-" + harnessID
 
 	testData, err := ioutil.TempDir("", testDataPath)
@@ -121,7 +121,7 @@ func NewHarness(activeNet *chaincfg.Params, handlers *rpc.NotificationHandlers,
 	keyFileWallet := filepath.Join(walletTestData, "rpc.key")
 
 	// Generate the default config if needed.
-	if err := genCertPair(certFile, keyFile, certFileWallet, keyFileWallet); err != nil {
+	if err = genCertPair(certFile, keyFile, certFileWallet, keyFileWallet); err != nil {
 		return nil, err
 	}
 
@@ -192,7 +192,7 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 		return err
 	}
 	time.Sleep(200 * time.Millisecond)
-	if err := h.connectRPCClient(); err != nil {
+	if err = h.connectRPCClient(); err != nil {
 		return err
 	}
 	fmt.Println("Node RPC client connected.")
@@ -240,7 +240,7 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 	extraArgs = append(extraArgs, miningArg)
 
 	// Stop node so we can restart it with --miningaddr
-	if err := h.node.Stop(); err != nil {
+	if err = h.node.Stop(); err != nil {
 		return err
 	}
 
@@ -287,16 +287,13 @@ func (h *Harness) SetUp(createTestChain bool, numMatureOutputs uint32) error {
 	ticker := time.NewTicker(time.Millisecond * 500)
 	desiredHeight := int64(numMatureOutputs + uint32(h.ActiveNet.CoinbaseMaturity))
 out:
-	for {
-		select {
-		case <-ticker.C:
-			count, err := h.WalletRPC.GetBlockCount()
-			if err != nil {
-				return err
-			}
-			if count == desiredHeight {
-				break out
-			}
+	for range ticker.C {
+		count, err := h.WalletRPC.GetBlockCount()
+		if err != nil {
+			return err
+		}
+		if count == desiredHeight {
+			break out
 		}
 	}
 	ticker.Stop()
@@ -309,6 +306,10 @@ out:
 // TearDown stops the running RPC test instance. All created processes killed,
 // and temporary directories removed.
 func (h *Harness) TearDown() error {
+	if h == nil {
+		return nil
+	}
+
 	if h.Node != nil {
 		h.Node.Shutdown()
 	}
@@ -341,6 +342,9 @@ func (h *Harness) TearDown() error {
 
 // IsUp checks if the harness is still being tracked by rpctest
 func (h *Harness) IsUp() bool {
+	if h == nil {
+		return false
+	}
 	_, up := testInstances[h.testNodeDir]
 	return up
 }
@@ -450,7 +454,7 @@ func (h *Harness) GenerateBlock(startHeight uint32) ([]*chainhash.Hash, error) {
 	}
 	newHeight := block.MsgBlock().Header.Height
 	for newHeight == startHeight {
-		blockHashes, err := h.Node.Generate(1)
+		blockHashes, err = h.Node.Generate(1)
 		if err != nil {
 			return nil, fmt.Errorf("unable to generate single block: %v", err)
 		}

@@ -27,7 +27,7 @@ type walletTestConfig struct {
 	rpcConnect string
 	dataDir    string
 	logDir     string
-	profile    string
+	//profile    string // TODO: Decide if this is needed
 	debugLevel string
 	extra      []string
 	prefix     string
