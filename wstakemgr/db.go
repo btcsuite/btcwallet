@@ -215,9 +215,9 @@ func deserializeSStxRecord(serializedSStxRecord []byte) (*sstxRecord, error) {
 	return record, nil
 }
 
-// deserializeSStxTicketScriptHash deserializes and returns a 20 byte script
+// deserializeSStxTicketHash160 deserializes and returns a 20 byte script
 // hash for a ticket's 0th output.
-func deserializeSStxTicketScriptHash(serializedSStxRecord []byte) ([]byte, error) {
+func deserializeSStxTicketHash160(serializedSStxRecord []byte) (hash160 []byte, p2sh bool, err error) {
 	dataLen := len(serializedSStxRecord)
 	curPos := 0
 
@@ -238,7 +238,7 @@ func deserializeSStxTicketScriptHash(serializedSStxRecord []byte) ([]byte, error
 	// Figure out the actual location of the script.
 	actualLoc := curPos + pkScrLoc
 	if actualLoc+3 >= dataLen {
-		return nil, stakeStoreError(ErrDatabase,
+		return nil, false, stakeStoreError(ErrDatabase,
 			"bad serialized sstx record size", nil)
 	}
 
@@ -246,24 +246,26 @@ func deserializeSStxTicketScriptHash(serializedSStxRecord []byte) ([]byte, error
 	// HASH160 pubkey or script hash.
 	prefixBytes := serializedSStxRecord[actualLoc : actualLoc+3]
 	scriptHash := make([]byte, 20, 20)
+	p2sh = false
 	switch {
 	case bytes.Equal(prefixBytes, sstxTicket2PKHPrefix):
 		scrHashLoc := actualLoc + 4
 		if scrHashLoc+20 >= dataLen {
-			return nil, stakeStoreError(ErrDatabase,
+			return nil, false, stakeStoreError(ErrDatabase,
 				"bad serialized sstx record size for pubkey hash", nil)
 		}
 		copy(scriptHash, serializedSStxRecord[scrHashLoc:scrHashLoc+20])
 	case bytes.Equal(prefixBytes, sstxTicket2SHPrefix):
 		scrHashLoc := actualLoc + 3
 		if scrHashLoc+20 >= dataLen {
-			return nil, stakeStoreError(ErrDatabase,
+			return nil, false, stakeStoreError(ErrDatabase,
 				"bad serialized sstx record size for script hash", nil)
 		}
 		copy(scriptHash, serializedSStxRecord[scrHashLoc:scrHashLoc+20])
+		p2sh = true
 	}
 
-	return scriptHash, nil
+	return scriptHash, p2sh, nil
 }
 
 // serializeSSTxRecord returns the serialization of the passed txrecord row.
@@ -597,10 +599,10 @@ func fetchSStxRecord(ns walletdb.ReadBucket, hash *chainhash.Hash) (*sstxRecord,
 	return deserializeSStxRecord(val)
 }
 
-// fetchSStxRecordSStxTicketScriptHash retrieves a ticket 0th output script or
+// fetchSStxRecordSStxTicketHash160 retrieves a ticket 0th output script or
 // pubkeyhash from the sstx records bucket with the given hash.
-func fetchSStxRecordSStxTicketScriptHash(ns walletdb.ReadBucket,
-	hash *chainhash.Hash) ([]byte, error) {
+func fetchSStxRecordSStxTicketHash160(ns walletdb.ReadBucket,
+	hash *chainhash.Hash) (hash160 []byte, p2sh bool, err error) {
 
 	bucket := ns.NestedReadBucket(sstxRecordsBucketName)
 
@@ -608,10 +610,10 @@ func fetchSStxRecordSStxTicketScriptHash(ns walletdb.ReadBucket,
 	val := bucket.Get(key)
 	if val == nil {
 		str := fmt.Sprintf("missing sstx record for hash '%s'", hash.String())
-		return nil, stakeStoreError(ErrSStxNotFound, str, nil)
+		return nil, false, stakeStoreError(ErrSStxNotFound, str, nil)
 	}
 
-	return deserializeSStxTicketScriptHash(val)
+	return deserializeSStxTicketHash160(val)
 }
 
 // fetchSStxRecordVoteBits fetches an individual ticket's intended voteBits

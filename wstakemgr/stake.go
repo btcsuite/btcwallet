@@ -313,23 +313,28 @@ func (s *StakeStore) DumpSStxHashes() ([]chainhash.Hash, error) {
 func (s *StakeStore) dumpSStxHashesForAddress(ns walletdb.ReadBucket, addr dcrutil.Address) ([]chainhash.Hash, error) {
 	// Extract the HASH160 script hash; if it's not 20 bytes
 	// long, return an error.
-	scriptHash := addr.ScriptAddress()
-	if len(scriptHash) != 20 {
+	hash160 := addr.ScriptAddress()
+	if len(hash160) != 20 {
 		str := "stake store is closed"
 		return nil, stakeStoreError(ErrInput, str, nil)
 	}
+	_, addrIsP2SH := addr.(*dcrutil.AddressScriptHash)
 
 	allTickets := s.dumpSStxHashes()
 	var ticketsForAddr []chainhash.Hash
 
 	// Access the database and store the result locally.
 	for _, h := range allTickets {
-		thisScrHash, err := fetchSStxRecordSStxTicketScriptHash(ns, &h)
+		thisHash160, p2sh, err := fetchSStxRecordSStxTicketHash160(ns, &h)
 		if err != nil {
 			str := "failure getting ticket 0th out script hashes from db"
 			return nil, stakeStoreError(ErrDatabase, str, err)
 		}
-		if bytes.Equal(scriptHash, thisScrHash) {
+		if addrIsP2SH != p2sh {
+			continue
+		}
+
+		if bytes.Equal(hash160, thisHash160) {
 			ticketsForAddr = append(ticketsForAddr, h)
 		}
 	}
@@ -354,13 +359,17 @@ func (s *StakeStore) DumpSStxHashesForAddress(ns walletdb.ReadBucket, addr dcrut
 // sstxAddress returns the address for a given ticket.
 func (s *StakeStore) sstxAddress(ns walletdb.ReadBucket, hash *chainhash.Hash) (dcrutil.Address, error) {
 	// Access the database and store the result locally.
-	thisScrHash, err := fetchSStxRecordSStxTicketScriptHash(ns, hash)
+	thisHash160, p2sh, err := fetchSStxRecordSStxTicketHash160(ns, hash)
 	if err != nil {
 		str := "failure getting ticket 0th out script hashes from db"
 		return nil, stakeStoreError(ErrDatabase, str, err)
 	}
-	addr, err := dcrutil.NewAddressScriptHashFromHash(thisScrHash,
-		s.Params)
+	var addr dcrutil.Address
+	if p2sh {
+		addr, err = dcrutil.NewAddressScriptHashFromHash(thisHash160, s.Params)
+	} else {
+		addr, err = dcrutil.NewAddressPubKeyHash(thisHash160, s.Params, chainec.ECTypeSecp256k1)
+	}
 	if err != nil {
 		str := "failure getting ticket 0th out script hashes from db"
 		return nil, stakeStoreError(ErrDatabase, str, err)
