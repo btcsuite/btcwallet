@@ -215,9 +215,9 @@ func (a *addressPool) getNewAddress(waddrmgrNs walletdb.ReadWriteBucket) (dcruti
 		"the address pool", a.branch, curAddressStr, a.index)
 
 	// Add the address to the notifications watcher.
-	addrs := make([]dcrutil.Address, 1)
-	addrs[0] = curAddress
-	if err := chainClient.NotifyReceived(addrs); err != nil {
+	addrs := []dcrutil.Address{curAddress}
+	err = chainClient.LoadTxFilter(false, addrs, nil)
+	if err != nil {
 		return nil, err
 	}
 

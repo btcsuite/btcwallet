@@ -1,276 +1,169 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015 The Decred developers
+// Copyright (c) 2015-2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package wallet
 
 import (
-	"github.com/decred/dcrd/wire"
-	"github.com/decred/dcrutil"
+	"encoding/hex"
+
+	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrwallet/chain"
-	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/walletdb"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-// RescanProgressMsg reports the current progress made by a rescan for a
-// set of wallet addresses.
-type RescanProgressMsg struct {
-	Addresses    []dcrutil.Address
-	Notification *chain.RescanProgress
-}
+const maxBlocksPerRescan = 2000
 
-// RescanFinishedMsg reports the addresses that were rescanned when a
-// rescanfinished message was received rescanning a batch of addresses.
-type RescanFinishedMsg struct {
-	Addresses    []dcrutil.Address
-	Notification *chain.RescanFinished
-}
+// TODO: track whether a rescan is already in progress, and cancel either it or
+// this new rescan, keeping the one that still has the most blocks to scan.
 
-// RescanJob is a job to be processed by the RescanManager.  The job includes
-// a set of wallet addresses, a starting height to begin the rescan, and
-// outpoints spendable by the addresses thought to be unspent.  After the
-// rescan completes, the error result of the rescan RPC is sent on the Err
-// channel.
-type RescanJob struct {
-	InitialSync bool
-	Addrs       []dcrutil.Address
-	OutPoints   []*wire.OutPoint
-	BlockStamp  waddrmgr.BlockStamp
-	err         chan error
-}
-
-// rescanBatch is a collection of one or more RescanJobs that were merged
-// together before a rescan is performed.
-type rescanBatch struct {
-	initialSync bool
-	addrs       []dcrutil.Address
-	outpoints   []*wire.OutPoint
-	bs          waddrmgr.BlockStamp
-	errChans    []chan error
-}
-
-// SubmitRescan submits a RescanJob to the RescanManager.  A channel is
-// returned with the final error of the rescan.  The channel is buffered
-// and does not need to be read to prevent a deadlock.
-func (w *Wallet) SubmitRescan(job *RescanJob) <-chan error {
-	errChan := make(chan error, 1)
-	job.err = errChan
-	w.rescanAddJob <- job
-	return errChan
-}
-
-// batch creates the rescanBatch for a single rescan job.
-func (job *RescanJob) batch() *rescanBatch {
-	return &rescanBatch{
-		initialSync: job.InitialSync,
-		addrs:       job.Addrs,
-		outpoints:   job.OutPoints,
-		bs:          job.BlockStamp,
-		errChans:    []chan error{job.err},
-	}
-}
-
-// merge merges the work from k into j, setting the starting height to
-// the minimum of the two jobs.  This method does not check for
-// duplicate addresses or outpoints.
-func (b *rescanBatch) merge(job *RescanJob) {
-	if job.InitialSync {
-		b.initialSync = true
-	}
-	b.addrs = append(b.addrs, job.Addrs...)
-	b.outpoints = append(b.outpoints, job.OutPoints...)
-	if job.BlockStamp.Height < b.bs.Height {
-		b.bs = job.BlockStamp
-	}
-	b.errChans = append(b.errChans, job.err)
-}
-
-// done iterates through all error channels, duplicating sending the error
-// to inform callers that the rescan finished (or could not complete due
-// to an error).
-func (b *rescanBatch) done(err error) {
-	for _, c := range b.errChans {
-		c <- err
-	}
-}
-
-// rescanBatchHandler handles incoming rescan request, serializing rescan
-// submissions, and possibly batching many waiting requests together so they
-// can be handled by a single rescan after the current one completes.
-func (w *Wallet) rescanBatchHandler() {
-	var curBatch, nextBatch *rescanBatch
-	quit := w.quitChan()
-
-out:
+// rescan synchronously scans over all blocks on the main chain starting at
+// startHash and height up through the recorded main chain tip block.
+func (w *Wallet) rescan(chainClient *chain.RPCClient, startHash *chainhash.Hash, height int32) error {
+	blockHashStorage := make([]chainhash.Hash, maxBlocksPerRescan)
+	rescanFrom := *startHash
+	inclusive := true
 	for {
-		select {
-		case job := <-w.rescanAddJob:
-			if curBatch == nil {
-				// Set current batch as this job and send
-				// request.
-				curBatch = job.batch()
-				w.rescanBatch <- curBatch
-			} else {
-				// Create next batch if it doesn't exist, or
-				// merge the job.
-				if nextBatch == nil {
-					nextBatch = job.batch()
-				} else {
-					nextBatch.merge(job)
+		var rescanBlocks []chainhash.Hash
+		err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+			txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+			var err error
+			rescanBlocks, err = w.TxStore.GetMainChainBlockHashes(txmgrNs,
+				&rescanFrom, inclusive, blockHashStorage)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if len(rescanBlocks) == 0 {
+			return nil
+		}
+
+		log.Infof("Rescanning blocks %v-%v...", height,
+			height+int32(len(rescanBlocks))-1)
+		rescanResults, err := chainClient.Rescan(rescanBlocks)
+		if err != nil {
+			return err
+		}
+		var rawBlockHeader wtxmgr.RawBlockHeader
+		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+			txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
+			for _, r := range rescanResults.DiscoveredData {
+				blockHash, err := chainhash.NewHashFromStr(r.Hash)
+				if err != nil {
+					return err
+				}
+				blockMeta, err := w.TxStore.GetBlockMetaForHash(txmgrNs, blockHash)
+				if err != nil {
+					return err
+				}
+				serHeader, err := w.TxStore.GetSerializedBlockHeader(txmgrNs,
+					blockHash)
+				if err != nil {
+					return err
+				}
+				err = copyHeaderSliceToArray(&rawBlockHeader, serHeader)
+				if err != nil {
+					return err
+				}
+
+				for _, hexTx := range r.Transactions {
+					serTx, err := hex.DecodeString(hexTx)
+					if err != nil {
+						return err
+					}
+					err = w.processTransaction(dbtx, serTx, &rawBlockHeader,
+						&blockMeta)
+					if err != nil {
+						return err
+					}
 				}
 			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		rescanFrom = rescanBlocks[len(rescanBlocks)-1]
+		height += int32(len(rescanBlocks))
+		inclusive = false
+	}
+}
 
-		case n := <-w.rescanNotifications:
-			switch n := n.(type) {
-			case *chain.RescanProgress:
-				w.rescanProgress <- &RescanProgressMsg{
-					Addresses:    curBatch.addrs,
-					Notification: n,
-				}
+// Rescan starts a rescan of the wallet for all blocks on the main chain
+// beginning at startHash.
+//
+// An error channel is returned for consumers of this API, but it is not
+// required to be read.  If the error can not be immediately written to the
+// returned channel, the error will be logged and the channel will be closed.
+func (w *Wallet) Rescan(chainClient *chain.RPCClient, startHash *chainhash.Hash) <-chan error {
+	errc := make(chan error)
 
-			case *chain.RescanFinished:
-				if curBatch == nil {
-					log.Warnf("Received rescan finished " +
-						"notification but no rescan " +
-						"currently running")
-					continue
-				}
-				w.rescanFinished <- &RescanFinishedMsg{
-					Addresses:    curBatch.addrs,
-					Notification: n,
-				}
-
-				curBatch, nextBatch = nextBatch, nil
-
-				if curBatch != nil {
-					w.rescanBatch <- curBatch
-				}
-
+	go func() (err error) {
+		defer func() {
+			select {
+			case errc <- err:
 			default:
-				// Unexpected message
-				panic(n)
+				if err != nil {
+					log.Errorf("Rescan failed: %v", err)
+				}
+				close(errc)
 			}
+		}()
 
-		case <-quit:
-			break out
+		var startHeight int32
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+			header, err := w.TxStore.GetSerializedBlockHeader(txmgrNs, startHash)
+			if err != nil {
+				return err
+			}
+			startHeight = wtxmgr.ExtractBlockHeaderHeight(header)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-	}
 
-	w.wg.Done()
+		return w.rescan(chainClient, startHash, startHeight)
+	}()
+
+	return errc
 }
 
-// rescanProgressHandler handles notifications for partially and fully completed
-// rescans by marking each rescanned address as partially or fully synced.
-func (w *Wallet) rescanProgressHandler() {
-	quit := w.quitChan()
-out:
-	for {
-		// These can't be processed out of order since both chans are
-		// unbuffured and are sent from same context (the batch
-		// handler).
-		select {
-		case msg := <-w.rescanProgress:
-			n := msg.Notification
-			log.Infof("Rescanned through block %v (height %d)",
-				n.Hash, n.Height)
+// RescanFromHeight is an alternative to Rescan that takes a block height
+// instead of a hash.  See Rescan for more details.
+func (w *Wallet) RescanFromHeight(chainClient *chain.RPCClient, startHeight int32) <-chan error {
+	errc := make(chan error)
 
-			bs := waddrmgr.BlockStamp{
-				Hash:   *n.Hash,
-				Height: n.Height,
+	go func() (err error) {
+		defer func() {
+			select {
+			case errc <- err:
+			default:
+				if err != nil {
+					log.Errorf("Rescan failed: %v", err)
+				}
+				close(errc)
 			}
-			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				return w.Manager.SetSyncedTo(ns, &bs)
-			})
-			if err != nil {
-				log.Errorf("Failed to update address manager "+
-					"sync state for hash %v (height %d): %v",
-					n.Hash, n.Height, err)
-			}
+		}()
 
-		case msg := <-w.rescanFinished:
-			n := msg.Notification
-			addrs := msg.Addresses
-			noun := pickNoun(len(addrs), "address", "addresses")
-			log.Infof("Finished rescan for %d %s (synced to block "+
-				"%s, height %d)", len(addrs), noun, n.Hash,
-				n.Height)
-
-			bs := waddrmgr.BlockStamp{
-				Height: n.Height,
-				Hash:   *n.Hash,
-			}
-			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				return w.Manager.SetSyncedTo(ns, &bs)
-			})
-			if err != nil {
-				log.Errorf("Failed to update address manager "+
-					"sync state for hash %v (height %d): %v",
-					n.Hash, n.Height, err)
-				continue
-			}
-
-			w.SetChainSynced(true)
-			go w.resendUnminedTxs()
-
-		case <-quit:
-			break out
+		var startHash chainhash.Hash
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+			var err error
+			startHash, err = w.TxStore.GetMainChainBlockHashForHeight(
+				txmgrNs, startHeight)
+			return err
+		})
+		if err != nil {
+			return err
 		}
-	}
-	w.wg.Done()
-}
 
-// rescanRPCHandler reads batch jobs sent by rescanBatchHandler and sends the
-// RPC requests to perform a rescan.  New jobs are not read until a rescan
-// finishes.
-func (w *Wallet) rescanRPCHandler() {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		log.Errorf("rescanRPCHandler called without an RPC client")
-		w.wg.Done()
-		return
-	}
+		return w.rescan(chainClient, &startHash, startHeight)
+	}()
 
-	quit := w.quitChan()
-
-out:
-	for {
-		select {
-		case batch := <-w.rescanBatch:
-			// Log the newly-started rescan.
-			numAddrs := len(batch.addrs)
-			noun := pickNoun(numAddrs, "address", "addresses")
-			log.Infof("Started rescan from block %v (height %d) for %d %s",
-				batch.bs.Hash, batch.bs.Height, numAddrs, noun)
-
-			err := chainClient.Rescan(&batch.bs.Hash, batch.addrs,
-				batch.outpoints)
-			if err != nil {
-				log.Errorf("Rescan for %d %s failed: %v", numAddrs,
-					noun, err)
-			}
-			batch.done(err)
-		case <-quit:
-			break out
-		}
-	}
-
-	w.wg.Done()
-}
-
-// Rescan begins a rescan for all active addresses and unspent outputs of
-// a wallet.  This is intended to be used to sync a wallet back up to the
-// current best block in the main chain, and is considered an initial sync.
-func (w *Wallet) Rescan(addrs []dcrutil.Address, unspent []*wire.OutPoint) error {
-	job := &RescanJob{
-		InitialSync: true,
-		Addrs:       addrs,
-		OutPoints:   unspent,
-		BlockStamp:  w.Manager.SyncedTo(),
-	}
-
-	// Submit merged job and block until rescan completes.
-	return <-w.SubmitRescan(job)
+	return errc
 }

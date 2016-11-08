@@ -1,5 +1,5 @@
-hash: 5cc50197a8683b16e3e120937d59e244ba000d7c0d474d8b613e17a93b9723ef
-updated: 2016-10-31T14:50:08.516748873Z
+hash: 709b04a17e1014f7083faf174355642301fd67168c8cf293772689914f9a0898
+updated: 2016-11-08T16:32:02.3385433-05:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
@@ -30,7 +30,7 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: b086c13d6bca0016dfb22c9259f61afa68f64041
+  version: 18049cb68e1a266bbe44573ac0fd6bbd505401c9
   subpackages:
   - blockchain
   - blockchain/internal/dbnamespace
@@ -50,7 +50,7 @@ imports:
   - txscript
   - wire
 - name: github.com/decred/dcrrpcclient
-  version: 942b0e6ec21340e61d7d8db02df4cdfe4f38264c
+  version: c872526c08ce3caddab82434bf5f4616e38b527b
 - name: github.com/decred/dcrutil
   version: 0484582bf5503574d824f110e836a8c48aa60c8c
   subpackages:
@@ -67,7 +67,7 @@ imports:
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 - name: golang.org/x/net
-  version: 8b4af36cd21a1f85a7484b49feb7c79363106d8e
+  version: 40d3034e575b6eafbca34e64224da61de35ae04c
   subpackages:
   - context
   - http2
@@ -77,11 +77,11 @@ imports:
   - lex/httplex
   - trace
 - name: golang.org/x/sys
-  version: 9bb9f0998d48b31547d975974935ae9b48c7a03c
+  version: 9a2e24c3733eddc63871eda99f253e2db29bd3b9
   subpackages:
   - unix
 - name: google.golang.org/grpc
-  version: b1a2821ca5a4fd6b6e48ddfbb7d6d7584d839d21
+  version: b7f1379d3cbbbeb2ca3405852012e237aa05459e
   subpackages:
   - codes
   - credentials
@@ -89,15 +89,15 @@ imports:
   - internal
   - metadata
   - naming
-  - transport
   - peer
+  - transport
 testImports:
 - name: github.com/davecgh/go-spew
   version: 6d212800a42e8ab5c146b8ace3490ee17e5225f9
   subpackages:
   - spew
 - name: github.com/pmezard/go-difflib
-  version: 792786c7400a136282c1664665ae0a8db921c6c2
+  version: d8ed2627bdf02c080bf22230dbb337003b7aba2d
   subpackages:
   - difflib
 - name: github.com/stretchr/testify

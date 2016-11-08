@@ -12,7 +12,6 @@ import (
 	"github.com/decred/dcrd/txscript"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrwallet/chain"
-	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/walletdb"
 	"github.com/decred/dcrwallet/wstakemgr"
 )
@@ -33,18 +32,18 @@ func (w *Wallet) LiveTicketHashes(rpcClient *chain.RPCClient, includeImmature bo
 	// implementation, hence the overall weirdness, inefficiencies, and the
 	// direct dependency on the consensus server RPC client.
 
-	var blk waddrmgr.BlockStamp
+	var tipHeight int32
 	var ticketHashes []chainhash.Hash
 	var stakeMgrTickets []chainhash.Hash
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
-		blk = w.Manager.SyncedTo()
+		_, tipHeight = w.TxStore.MainChainTip(txmgrNs)
 
 		// UnspentTickets collects all the tickets that pay out to a
 		// public key hash for a public key owned by this wallet.
 		var err error
-		ticketHashes, err = w.TxStore.UnspentTickets(txmgrNs, blk.Height,
+		ticketHashes, err = w.TxStore.UnspentTickets(txmgrNs, tipHeight,
 			includeImmature)
 		if err != nil {
 			return err
@@ -84,7 +83,7 @@ func (w *Wallet) LiveTicketHashes(rpcClient *chain.RPCClient, includeImmature bo
 
 		txHeight := ticketTx.BlockHeight
 		unconfirmed := (txHeight == 0)
-		immature := (blk.Height-int32(txHeight) <
+		immature := (tipHeight-int32(txHeight) <
 			int32(w.ChainParams().TicketMaturity))
 		if includeImmature {
 			ticketHashes = append(ticketHashes, h)

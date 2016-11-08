@@ -14,7 +14,6 @@ import (
 
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainec"
-	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrutil"
 	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/internal/zero"
@@ -271,7 +270,6 @@ type Manager struct {
 
 	chainParams  *chaincfg.Params
 	addrs        map[addrKey]ManagedAddress
-	syncState    syncState
 	watchingOnly bool
 	locked       bool
 	closed       bool
@@ -1180,7 +1178,7 @@ func (m *Manager) NextToUseAddrPoolIndex(ns walletdb.ReadBucket, isInternal bool
 // watching-only, or not for the same network as the key trying to be imported.
 // It will also return an error if the address already exists.  Any other errors
 // returned are generally unexpected.
-func (m *Manager) ImportPrivateKey(ns walletdb.ReadWriteBucket, wif *dcrutil.WIF, bs *BlockStamp) (ManagedPubKeyAddress, error) {
+func (m *Manager) ImportPrivateKey(ns walletdb.ReadWriteBucket, wif *dcrutil.WIF) (ManagedPubKeyAddress, error) {
 	// Ensure the address is intended for network the address manager is
 	// associated with.
 	if !wif.IsForNet(m.chainParams) {
@@ -1229,29 +1227,12 @@ func (m *Manager) ImportPrivateKey(ns walletdb.ReadWriteBucket, wif *dcrutil.WIF
 		}
 	}
 
-	// The start block needs to be updated when the newly imported address
-	// is before the current one.
-	updateStartBlock := bs.Height < m.syncState.startBlock.Height
-
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
 	err = putImportedAddress(ns, pubKeyHash, ImportedAddrAccount, ssNone,
 		encryptedPubKey, encryptedPrivKey)
 	if err != nil {
 		return nil, err
-	}
-
-	if updateStartBlock {
-		err := putStartBlock(ns, bs)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Now that the database has been updated, update the start block in
-	// memory too if needed.
-	if updateStartBlock {
-		m.syncState.startBlock = *bs
 	}
 
 	// Create a new managed address based on the imported address.
@@ -1288,8 +1269,7 @@ func (m *Manager) ImportPrivateKey(ns walletdb.ReadWriteBucket, wif *dcrutil.WIF
 // This function will return an error if the address manager is locked and not
 // watching-only, or the address already exists.  Any other errors returned are
 // generally unexpected.
-func (m *Manager) ImportScript(ns walletdb.ReadWriteBucket, script []byte,
-	bs *BlockStamp) (ManagedScriptAddress, error) {
+func (m *Manager) ImportScript(ns walletdb.ReadWriteBucket, script []byte) (ManagedScriptAddress, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
@@ -1328,34 +1308,12 @@ func (m *Manager) ImportScript(ns walletdb.ReadWriteBucket, script []byte,
 		}
 	}
 
-	// The start block needs to be updated when the newly imported address
-	// is before the current one.
-	updateStartBlock := false
-	if bs != nil {
-		if bs.Height < m.syncState.startBlock.Height {
-			updateStartBlock = true
-		}
-	}
-
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
 	err = putScriptAddress(ns, scriptHash, ImportedAddrAccount,
 		ssNone, encryptedHash, encryptedScript)
 	if err != nil {
 		return nil, maybeConvertDbError(err)
-	}
-
-	if updateStartBlock {
-		err := putStartBlock(ns, bs)
-		if err != nil {
-			return nil, maybeConvertDbError(err)
-		}
-	}
-
-	// Now that the database has been updated, update the start block in
-	// memory too if needed.
-	if updateStartBlock {
-		m.syncState.startBlock = *bs
 	}
 
 	// Create a new managed address based on the imported script.  Also,
@@ -2505,13 +2463,12 @@ func (m *Manager) Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
 // newManager returns a new locked address manager with the given parameters.
 func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 	masterKeyPriv *snacl.SecretKey, cryptoKeyPub EncryptorDecryptor,
-	cryptoKeyPrivEncrypted, cryptoKeyScriptEncrypted []byte, syncInfo *syncState,
+	cryptoKeyPrivEncrypted, cryptoKeyScriptEncrypted []byte,
 	privPassphraseSalt [saltSize]byte) *Manager {
 
 	return &Manager{
 		chainParams:              chainParams,
 		addrs:                    make(map[addrKey]ManagedAddress),
-		syncState:                *syncInfo,
 		locked:                   true,
 		acctInfo:                 make(map[uint32]*accountInfo),
 		masterKeyPub:             masterKeyPub,
@@ -2624,21 +2581,6 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 		return nil, maybeConvertDbError(err)
 	}
 
-	// Load the sync state from the db.
-	syncedTo, err := fetchSyncedTo(ns)
-	if err != nil {
-		return nil, maybeConvertDbError(err)
-	}
-	startBlock, err := fetchStartBlock(ns)
-	if err != nil {
-		return nil, maybeConvertDbError(err)
-	}
-
-	recentHeight, recentHashes, err := fetchRecentBlocks(ns)
-	if err != nil {
-		return nil, maybeConvertDbError(err)
-	}
-
 	// When not a watching-only manager, set the master private key params,
 	// but don't derive it now since the manager starts off locked.
 	var masterKeyPriv snacl.SecretKey
@@ -2672,9 +2614,6 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 	cryptoKeyPub.CopyBytes(cryptoKeyPubCT)
 	zero.Bytes(cryptoKeyPubCT)
 
-	// Create the sync state struct.
-	syncInfo := newSyncState(startBlock, syncedTo, recentHeight, recentHashes)
-
 	// Generate private passphrase salt.
 	var privPassphraseSalt [saltSize]byte
 	_, err = rand.Read(privPassphraseSalt[:])
@@ -2687,7 +2626,7 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 	// the defaults for the additional fields which are not specified in the
 	// call to new with the values loaded from the database.
 	mgr := newManager(chainParams, &masterKeyPub, &masterKeyPriv,
-		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
+		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc,
 		privPassphraseSalt)
 	mgr.watchingOnly = watchingOnly
 	return mgr, nil
@@ -2942,15 +2881,6 @@ func Create(ns walletdb.ReadWriteBucket, seed, pubPassphrase, privPassphrase []b
 			return managerError(ErrCrypto, str, err)
 		}
 
-		// Use the genesis block for the passed chain as the created at block
-		// for the default.
-		createdAt := &BlockStamp{Hash: *chainParams.GenesisHash, Height: 0}
-
-		// Create the initial sync state.
-		recentHashes := []chainhash.Hash{createdAt.Hash}
-		recentHeight := createdAt.Height
-		syncInfo := newSyncState(createdAt, createdAt, recentHeight, recentHashes)
-
 		// Save the encrypted seed.
 		err = putSeed(ns, seedEnc)
 		if err != nil {
@@ -2981,22 +2911,6 @@ func Create(ns walletdb.ReadWriteBucket, seed, pubPassphrase, privPassphrase []b
 		// Save the fact this is a watching-only address manager to
 		// the database.
 		err = putWatchingOnly(ns, false)
-		if err != nil {
-			return err
-		}
-
-		// Save the initial synced to state.
-		err = putSyncedTo(ns, &syncInfo.syncedTo)
-		if err != nil {
-			return err
-		}
-		err = putStartBlock(ns, &syncInfo.startBlock)
-		if err != nil {
-			return err
-		}
-
-		// Save the initial recent blocks state.
-		err = putRecentBlocks(ns, recentHeight, recentHashes)
 		if err != nil {
 			return err
 		}
@@ -3187,15 +3101,6 @@ func CreateWatchOnly(ns walletdb.ReadWriteBucket, hdPubKey string,
 		return managerError(ErrCrypto, str, err)
 	}
 
-	// Use the genesis block for the passed chain as the created at block
-	// for the default.
-	createdAt := &BlockStamp{Hash: *chainParams.GenesisHash, Height: 0}
-
-	// Create the initial sync state.
-	recentHashes := []chainhash.Hash{createdAt.Hash}
-	recentHeight := createdAt.Height
-	syncInfo := newSyncState(createdAt, createdAt, recentHeight, recentHashes)
-
 	// Save the master key params to the database.
 	pubParams := masterKeyPub.Marshal()
 	privParams := masterKeyPriv.Marshal()
@@ -3214,22 +3119,6 @@ func CreateWatchOnly(ns walletdb.ReadWriteBucket, hdPubKey string,
 	// Save the fact this is not a watching-only address manager to
 	// the database.
 	err = putWatchingOnly(ns, true)
-	if err != nil {
-		return err
-	}
-
-	// Save the initial synced to state.
-	err = putSyncedTo(ns, &syncInfo.syncedTo)
-	if err != nil {
-		return err
-	}
-	err = putStartBlock(ns, &syncInfo.startBlock)
-	if err != nil {
-		return err
-	}
-
-	// Save the initial recent blocks state.
-	err = putRecentBlocks(ns, recentHeight, recentHashes)
 	if err != nil {
 		return err
 	}

@@ -500,10 +500,10 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 	return 0, nil, nil
 }
 
-// rescanActiveAddresses accesses the daemon to discover all the addresses that
+// discoverActiveAddresses accesses the daemon to discover all the addresses that
 // have been used by an HD keychain stemming from this wallet in the default
 // account.
-func (w *Wallet) rescanActiveAddresses() error {
+func (w *Wallet) discoverActiveAddresses() error {
 	log.Infof("Beginning a rescan of active addresses using the daemon. " +
 		"This may take a while.")
 

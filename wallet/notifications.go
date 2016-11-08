@@ -257,7 +257,7 @@ func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx, detail
 		append(txs, makeTxSummary(dbtx, s.wallet, details))
 }
 
-func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wtxmgr.BlockMeta) {
+func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wire.BlockHeader, blockHash *chainhash.Hash) {
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
@@ -265,11 +265,11 @@ func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wt
 	// Add block details if it wasn't already included for previously
 	// notified mined transactions.
 	n := len(s.currentTxNtfn.AttachedBlocks)
-	if n == 0 || *s.currentTxNtfn.AttachedBlocks[n-1].Hash != block.Hash {
+	if n == 0 || *s.currentTxNtfn.AttachedBlocks[n-1].Hash != *blockHash {
 		s.currentTxNtfn.AttachedBlocks = append(s.currentTxNtfn.AttachedBlocks, Block{
-			Hash:      &block.Hash,
-			Height:    block.Height,
-			Timestamp: block.Time.Unix(),
+			Hash:      blockHash,
+			Height:    int32(block.Height),
+			Timestamp: block.Timestamp.Unix(),
 		})
 	}
 

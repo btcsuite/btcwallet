@@ -25,7 +25,7 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
-		syncBlock := w.Manager.SyncedTo()
+		_, tipHeight := w.TxStore.MainChainTip(txmgrNs)
 
 		// TODO: actually stream outputs from the db instead of fetching
 		// all of them at once.
@@ -37,7 +37,7 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 		for _, output := range outputs {
 			// Ignore outputs that haven't reached the required
 			// number of confirmations.
-			if !policy.meetsRequiredConfs(output.Height, syncBlock.Height) {
+			if !policy.meetsRequiredConfs(output.Height, tipHeight) {
 				continue
 			}
 

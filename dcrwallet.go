@@ -94,7 +94,6 @@ func walletMain() error {
 		VoteBitsExtended:    cfg.VoteBitsExtended,
 		StakeMiningEnabled:  cfg.EnableStakeMining,
 		BalanceToMaintain:   cfg.BalanceToMaintain,
-		RollbackTest:        cfg.RollbackTest,
 		PruneTickets:        cfg.PruneTickets,
 		AddressReuse:        cfg.ReuseAddresses,
 		TicketAddress:       cfg.TicketAddress,
@@ -198,22 +197,21 @@ func startPromptPass(w *wallet.Wallet) {
 	// The wallet is totally desynced, so we need to resync accounts.
 	// Prompt for the password. Then, set the flag it wallet so it
 	// knows which address functions to call when resyncing.
-	firstRunBS := w.Manager.SyncedTo()
-	if firstRunBS.Hash == *w.ChainParams().GenesisHash {
+	needSync := w.NeedsAccountsSync()
+	if needSync {
 		promptPass = true
 	}
-	if promptPass {
-		w.SetInitiallyUnlocked(true)
-		backendLog.Flush()
-		fmt.Println("*** ATTENTION ***")
-		fmt.Println("Since this is your first time running we need to sync accounts. Please enter")
-		fmt.Println("the private wallet passphrase. This will complete syncing of the wallet")
-		fmt.Println("accounts and then leave your wallet unlocked. You may relock wallet after by")
-		fmt.Println("calling 'walletlock' through the RPC.")
-		fmt.Println("*****************")
-	} else {
+	if !promptPass {
 		return
 	}
+	w.SetInitiallyUnlocked(true)
+	backendLog.Flush()
+	fmt.Println("*** ATTENTION ***")
+	fmt.Println("Since this is your first time running we need to sync accounts. Please enter")
+	fmt.Println("the private wallet passphrase. This will complete syncing of the wallet")
+	fmt.Println("accounts and then leave your wallet unlocked. You may relock wallet after by")
+	fmt.Println("calling 'walletlock' through the RPC.")
+	fmt.Println("*****************")
 
 	// We need to rescan accounts for the initial sync. Unlock the
 	// wallet after prompting for the passphrase. The special case

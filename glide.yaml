@@ -18,7 +18,6 @@ import:
 - package: github.com/decred/bitset
   version: master
 - package: github.com/decred/dcrd
-  version: master
   subpackages:
   - blockchain
   - blockchain/stake
@@ -29,7 +28,6 @@ import:
   - txscript
   - wire
 - package: github.com/decred/dcrrpcclient
-  version: master
 - package: github.com/decred/dcrutil
   version: master
   subpackages:
@@ -41,7 +39,7 @@ import:
   subpackages:
   - context
 - package: google.golang.org/grpc
-  version: ^1.0.0
+  version: v1.0.3
   subpackages:
   - codes
   - credentials

@@ -1,5 +1,5 @@
 // Copyright (c) 2014-2015 The btcsuite developers
-// Copyright (c) 2015 The Decred developers
+// Copyright (c) 2015-2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -51,7 +51,6 @@ func createWallet(cfg *config) error {
 		VoteBits:           cfg.VoteBits,
 		StakeMiningEnabled: cfg.EnableStakeMining,
 		BalanceToMaintain:  cfg.BalanceToMaintain,
-		RollbackTest:       cfg.RollbackTest,
 		PruneTickets:       cfg.PruneTickets,
 		AddressReuse:       cfg.ReuseAddresses,
 		TicketAddress:      cfg.TicketAddress,

@@ -101,10 +101,7 @@ func funcName(tc rpcTestCase) string {
 func TestMain(m *testing.M) {
 	// For timing of block generation, create an OnBlockConnected notification
 	ntfnHandlersNode := dcrrpcclient.NotificationHandlers{
-		OnBlockConnected: func(hash *chainhash.Hash, height int32,
-			time time.Time, vb uint16) {
-			// fmt.Printf("New block connected, at height: %v\n", height)
-		},
+		OnBlockConnected: func(blockHeader []byte, transactions [][]byte) {},
 	}
 
 	var gracefulExit = func(code int) {
@@ -1277,10 +1274,10 @@ func testListTransactions(r *Harness, t *testing.T) {
 		t.Fatal(`txtype not "regular".`)
 	}
 
-	// ListUnspent only shows validated (confirmations>=2) coinbase tx, so the
+	// ListUnspent only shows validated (confirmations>=1) coinbase tx, so the
 	// first result should have 2 confirmations.
-	if txList1[0].Confirmations != 2 {
-		t.Fatalf("Latest coinbase tx listed has %v confirmations, expected 2.",
+	if txList1[0].Confirmations != 1 {
+		t.Fatalf("Latest coinbase tx listed has %v confirmations, expected 1.",
 			txList1[0].Confirmations)
 	}
 

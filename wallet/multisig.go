@@ -91,13 +91,7 @@ func (w *Wallet) ImportP2SHRedeemScript(script []byte) (*dcrutil.AddressScriptHa
 			return err
 		}
 
-		// TODO(oga) blockstamp current block?
-		bs := &waddrmgr.BlockStamp{
-			Hash:   *w.ChainParams().GenesisHash,
-			Height: 0,
-		}
-
-		addrInfo, err := w.Manager.ImportScript(addrmgrNs, script, bs)
+		addrInfo, err := w.Manager.ImportScript(addrmgrNs, script)
 		if err != nil {
 			// Don't care if it's already there, but still have to
 			// set the p2shAddr since the address manager didn't

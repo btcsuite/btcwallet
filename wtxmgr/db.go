@@ -1,5 +1,5 @@
 // Copyright (c) 2015 The btcsuite developers
-// Copyright (c) 2015 The Decred developers
+// Copyright (c) 2015-2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -13,6 +13,7 @@ import (
 
 	"github.com/btcsuite/golangcrypto/ripemd160"
 	"github.com/decred/dcrd/blockchain/stake"
+	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/dcrutil"
@@ -138,8 +139,15 @@ var byteOrder = binary.BigEndian
 // Database versions.  Versions start at 1 and increment for each database
 // change.
 const (
-	// LatestVersion is the most recent store version.
-	LatestVersion = 2
+	dbVersion1 = 1
+	dbVersion2 = 2
+
+	// Vesion 3 introduces a new root bucket key to save the current tip
+	// block and adds a new nested bucket containing all block headers.
+	dbVersion3 = 3
+
+	// LatestVersion is the most recent database version.
+	LatestVersion = dbVersion3
 )
 
 // This package makes assumptions that the width of a chainhash.Hash is always 32
@@ -150,17 +158,20 @@ var _ [32]byte = chainhash.Hash{}
 
 // Bucket names
 var (
-	bucketBlocks         = []byte("b")
-	bucketTxRecords      = []byte("t")
-	bucketCredits        = []byte("c")
-	bucketUnspent        = []byte("u")
-	bucketDebits         = []byte("d")
-	bucketUnmined        = []byte("m")
-	bucketUnminedCredits = []byte("mc")
-	bucketUnminedInputs  = []byte("mi")
-	bucketScripts        = []byte("sc")
-	bucketMultisig       = []byte("ms")
-	bucketMultisigUsp    = []byte("mu")
+	bucketBlocks                  = []byte("b")
+	bucketHeaders                 = []byte("h")
+	bucketTxRecords               = []byte("t")
+	bucketCredits                 = []byte("c")
+	bucketUnspent                 = []byte("u")
+	bucketDebits                  = []byte("d")
+	bucketUnmined                 = []byte("m")
+	bucketUnminedCredits          = []byte("mc")
+	bucketUnminedInputs           = []byte("mi")
+	bucketScripts                 = []byte("sc")
+	bucketMultisig                = []byte("ms")
+	bucketMultisigUsp             = []byte("mu")
+	bucketStakeInvalidatedCredits = []byte("ic")
+	bucketStakeInvalidatedDebits  = []byte("id")
 )
 
 // Root (namespace) bucket keys
@@ -168,6 +179,7 @@ var (
 	rootCreateDate   = []byte("date")
 	rootVersion      = []byte("vers")
 	rootMinedBalance = []byte("bal")
+	rootTipBlock     = []byte("tip")
 )
 
 // The root bucket's mined balance k/v pair records the total balance for all
@@ -227,11 +239,15 @@ func readCanonicalOutPoint(k []byte, op *wire.OutPoint) error {
 // Details regarding blocks are saved as k/v pairs in the blocks bucket.
 // blockRecords are keyed by their height.  The value is serialized as such:
 //
+// TODO: Unix time and vote bits are redundant now that headers are saved and
+// these can be removed from the block record in a future update.
+//
 //   [0:32]  Hash (32 bytes)
 //   [32:40] Unix time (8 bytes)
 //   [40:42] VoteBits (2 bytes/uint16)
-//   [42:46] Number of transaction hashes (4 bytes)
-//   [46:]   For each transaction hash:
+//   [42:43] Whether regular transactions are stake invalidated (1 byte, 0==false)
+//   [43:47] Number of transaction hashes (4 bytes)
+//   [47:]   For each transaction hash:
 //             Hash (32 bytes)
 
 func keyBlockRecord(height int32) []byte {
@@ -241,35 +257,63 @@ func keyBlockRecord(height int32) []byte {
 }
 
 func valueBlockRecordEmpty(block *BlockMeta) []byte {
-	v := make([]byte, 46)
+	v := make([]byte, 47)
 	copy(v, block.Hash[:])
 	byteOrder.PutUint64(v[32:40], uint64(block.Time.Unix()))
 	byteOrder.PutUint16(v[40:42], block.VoteBits)
-	byteOrder.PutUint32(v[42:46], 0)
+	byteOrder.PutUint32(v[43:47], 0)
+	return v
+}
+
+func valueBlockRecordEmptyFromHeader(blockHash *chainhash.Hash, header *RawBlockHeader) []byte {
+	v := make([]byte, 47)
+	copy(v, blockHash[:])
+	byteOrder.PutUint64(v[32:40], uint64(extractBlockHeaderUnixTime(header[:])))
+	byteOrder.PutUint16(v[40:42], extractBlockHeaderVoteBits(header[:]))
+	byteOrder.PutUint32(v[43:47], 0)
 	return v
 }
 
 func valueBlockRecord(block *BlockMeta, txHash *chainhash.Hash) []byte {
-	v := make([]byte, 78)
+	v := make([]byte, 79)
 	copy(v, block.Hash[:])
 	byteOrder.PutUint64(v[32:40], uint64(block.Time.Unix()))
 	byteOrder.PutUint16(v[40:42], block.VoteBits)
-	byteOrder.PutUint32(v[42:46], 1)
-	copy(v[46:78], txHash[:])
+	byteOrder.PutUint32(v[43:47], 1)
+	copy(v[47:79], txHash[:])
 	return v
+}
+
+// valueBlockRecordStakeValidated returns a copy of the block record value with
+// stake validated byte set to zero.
+func valueBlockRecordStakeValidated(v []byte) []byte {
+	newv := make([]byte, len(v))
+	copy(newv, v[:42])
+	copy(newv[43:], v[43:])
+	return newv
+}
+
+// valueBlockRecordStakeInvalidated returns a copy of the block record value
+// with stake validated byte set to one.
+func valueBlockRecordStakeInvalidated(v []byte) []byte {
+	newv := make([]byte, len(v))
+	copy(newv, v[:42])
+	newv[42] = 1
+	copy(newv[43:], v[43:])
+	return newv
 }
 
 // appendRawBlockRecord returns a new block record value with a transaction
 // hash appended to the end and an incremented number of transactions.
 func appendRawBlockRecord(v []byte, txHash *chainhash.Hash) ([]byte, error) {
-	if len(v) < 46 {
+	if len(v) < 47 {
 		str := fmt.Sprintf("%s: appendRawBlockRecord short read "+
-			"(expected %d bytes, read %d)", bucketBlocks, 46, len(v))
+			"(expected %d bytes, read %d)", bucketBlocks, 47, len(v))
 		return nil, storeError(ErrData, str, nil)
 	}
 	newv := append(v[:len(v):len(v)], txHash[:]...)
-	n := byteOrder.Uint32(newv[42:46])
-	byteOrder.PutUint32(newv[42:46], n+1)
+	n := byteOrder.Uint32(newv[43:47])
+	byteOrder.PutUint32(newv[43:47], n+1)
 	return newv, nil
 }
 
@@ -278,19 +322,19 @@ func appendRawBlockRecord(v []byte, txHash *chainhash.Hash) ([]byte, error) {
 // transactions.
 func removeRawBlockRecord(v []byte, txHash *chainhash.Hash) ([]byte, error) {
 	length := len(v)
-	if length < 46 {
+	if length < 47 {
 		str := fmt.Sprintf("%s: short read for removeRawBlockRecord "+
-			"(expected %d bytes, read %d)", bucketBlocks, 46, len(v))
+			"(expected %d bytes, read %d)", bucketBlocks, 47, len(v))
 		return nil, storeError(ErrData, str, nil)
 	}
 
 	newLength := length - 32 // size of hash
-	oldNumHashes := (length - 46) / 32
+	oldNumHashes := (length - 47) / 32
 	newValue := make([]byte, newLength, newLength)
-	copy(newValue[0:46], v[0:46])
+	copy(newValue[0:47], v[0:47])
 
-	cursor := 46
-	newCursor := 46
+	cursor := 47
+	newCursor := 47
 
 	// Only copy the hash in the new value if it's not the one we want to
 	// remove.
@@ -310,8 +354,8 @@ func removeRawBlockRecord(v []byte, txHash *chainhash.Hash) ([]byte, error) {
 		newCursor += 32
 	}
 
-	n := byteOrder.Uint32(newValue[42:46])
-	byteOrder.PutUint32(newValue[42:46], n-1)
+	n := byteOrder.Uint32(newValue[43:47])
+	byteOrder.PutUint32(newValue[43:47], n-1)
 	return newValue, nil
 }
 
@@ -334,9 +378,9 @@ func putBlockRecord(ns walletdb.ReadWriteBucket, block *BlockMeta,
 func fetchBlockTime(ns walletdb.ReadBucket, height int32) (time.Time, error) {
 	k := keyBlockRecord(height)
 	v := ns.NestedReadBucket(bucketBlocks).Get(k)
-	if len(v) < 46 {
+	if len(v) < 47 {
 		str := fmt.Sprintf("%s: short read for fetchBlockTime (expected "+
-			"%d bytes, read %d)", bucketBlocks, 46, len(v))
+			"%d bytes, read %d)", bucketBlocks, 47, len(v))
 		return time.Time{}, storeError(ErrData, str, nil)
 	}
 	return time.Unix(int64(byteOrder.Uint64(v[32:40])), 0), nil
@@ -381,14 +425,14 @@ func readRawBlockRecord(k, v []byte, block *blockRecord) error {
 			"%d bytes, read %d)", bucketBlocks, 4, len(k))
 		return storeError(ErrData, str, nil)
 	}
-	if len(v) < 46 {
+	if len(v) < 47 {
 		str := fmt.Sprintf("%s: short value read for readRawBlockRecord "+
-			"(expected %d bytes, read %d)", bucketBlocks, 46, len(v))
+			"(expected %d bytes, read %d)", bucketBlocks, 47, len(v))
 		return storeError(ErrData, str, nil)
 	}
 
-	numTransactions := int(byteOrder.Uint32(v[42:46]))
-	expectedLen := 46 + chainhash.HashSize*numTransactions
+	numTransactions := int(byteOrder.Uint32(v[43:47]))
+	expectedLen := 47 + chainhash.HashSize*numTransactions
 	if len(v) < expectedLen {
 		str := fmt.Sprintf("%s: short read readRawBlockRecord for hashes "+
 			"(expected %d bytes, read %d)", bucketBlocks, expectedLen, len(v))
@@ -400,13 +444,21 @@ func readRawBlockRecord(k, v []byte, block *blockRecord) error {
 	block.Time = time.Unix(int64(byteOrder.Uint64(v[32:40])), 0)
 	block.VoteBits = byteOrder.Uint16(v[40:42])
 	block.transactions = make([]chainhash.Hash, numTransactions)
-	off := 46
+	off := 47
 	for i := range block.transactions {
 		copy(block.transactions[i][:], v[off:])
 		off += chainhash.HashSize
 	}
 
 	return nil
+}
+
+func extractRawBlockRecordHash(v []byte) []byte {
+	return v[:32]
+}
+
+func extractRawBlockRecordStakeInvalid(v []byte) bool {
+	return v[42] != 0
 }
 
 type blockIterator struct {
@@ -510,18 +562,52 @@ func (it *blockIterator) prev() bool {
 	return true
 }
 
-func (it *blockIterator) delete() error {
-	err := it.c.Delete()
-	if err != nil {
-		str := "failed to delete block record"
-		storeError(ErrDatabase, str, err)
-	}
-	return nil
+// unavailable until https://github.com/boltdb/bolt/issues/620 is fixed.
+// func (it *blockIterator) delete() error {
+// 	err := it.c.Delete()
+// 	if err != nil {
+// 		str := "failed to delete block record"
+// 		storeError(ErrDatabase, str, err)
+// 	}
+// 	return nil
+// }
+
+func (it *blockIterator) reposition(height int32) {
+	it.c.Seek(keyBlockRecord(height))
 }
 
 func deleteBlockRecord(ns walletdb.ReadWriteBucket, height int32) error {
 	k := keyBlockRecord(height)
 	return ns.NestedReadWriteBucket(bucketBlocks).Delete(k)
+}
+
+// Block headers are saved as k/v pairs in the headers bucket.  Block headers
+// are keyed by their block hashes.  The value is the serialized block header.
+
+func keyBlockHeader(blockHash *chainhash.Hash) []byte { return blockHash[:] }
+
+func putRawBlockHeader(ns walletdb.ReadWriteBucket, k, v []byte) error {
+	err := ns.NestedReadWriteBucket(bucketHeaders).Put(k, v)
+	if err != nil {
+		str := "failed to store block header"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func fetchRawBlockHeader(ns walletdb.ReadBucket, k []byte) ([]byte, error) {
+	v := ns.NestedReadBucket(bucketHeaders).Get(k)
+	if v == nil {
+		str := "block header not found"
+		return nil, storeError(ErrValueNoExists, str, nil)
+	}
+	vcopy := make([]byte, len(v))
+	copy(vcopy, v)
+	return vcopy, nil
+}
+
+func existsBlockHeader(ns walletdb.ReadWriteBucket, k []byte) []byte {
+	return ns.NestedReadBucket(bucketHeaders).Get(k)
 }
 
 // Transaction records are keyed as such:
@@ -985,8 +1071,23 @@ func existsRawCredit(ns walletdb.ReadBucket, k []byte) []byte {
 	return ns.NestedReadBucket(bucketCredits).Get(k)
 }
 
+func existsInvalidatedCredit(ns walletdb.ReadBucket, txHash *chainhash.Hash, index uint32, block *Block) (k, v []byte) {
+	k = keyCredit(txHash, index, block)
+	v = ns.NestedReadBucket(bucketStakeInvalidatedCredits).Get(k)
+	return
+}
+
 func deleteRawCredit(ns walletdb.ReadWriteBucket, k []byte) error {
 	err := ns.NestedReadWriteBucket(bucketCredits).Delete(k)
+	if err != nil {
+		str := "failed to delete credit"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func deleteRawInvalidatedCredit(ns walletdb.ReadWriteBucket, k []byte) error {
+	err := ns.NestedReadWriteBucket(bucketStakeInvalidatedCredits).Delete(k)
 	if err != nil {
 		str := "failed to delete credit"
 		return storeError(ErrDatabase, str, err)
@@ -1191,12 +1292,16 @@ func keyDebit(txHash *chainhash.Hash, index uint32, block *Block) []byte {
 	return k
 }
 
-func putDebit(ns walletdb.ReadWriteBucket, txHash *chainhash.Hash, index uint32, amount dcrutil.Amount, block *Block, credKey []byte) error {
-	k := keyDebit(txHash, index, block)
-
+func valueDebit(amount dcrutil.Amount, credKey []byte) []byte {
 	v := make([]byte, 80)
 	byteOrder.PutUint64(v, uint64(amount))
 	copy(v[8:80], credKey)
+	return v
+}
+
+func putDebit(ns walletdb.ReadWriteBucket, txHash *chainhash.Hash, index uint32, amount dcrutil.Amount, block *Block, credKey []byte) error {
+	k := keyDebit(txHash, index, block)
+	v := valueDebit(amount, credKey)
 
 	err := ns.NestedReadWriteBucket(bucketDebits).Put(k, v)
 	if err != nil {
@@ -1207,8 +1312,25 @@ func putDebit(ns walletdb.ReadWriteBucket, txHash *chainhash.Hash, index uint32,
 	return nil
 }
 
+func putRawDebit(ns walletdb.ReadWriteBucket, k, v []byte) error {
+	err := ns.NestedReadWriteBucket(bucketDebits).Put(k, v)
+	if err != nil {
+		const str = "failed to put raw debit"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+func extractRawDebitAmount(v []byte) dcrutil.Amount {
+	return dcrutil.Amount(byteOrder.Uint64(v[:8]))
+}
+
 func extractRawDebitCreditKey(v []byte) []byte {
 	return v[8:80]
+}
+
+func extractRawDebitUnspentValue(v []byte) []byte {
+	return v[40:76]
 }
 
 // existsDebit checks for the existance of a debit.  If found, the debit and
@@ -1224,6 +1346,21 @@ func existsDebit(ns walletdb.ReadBucket, txHash *chainhash.Hash, index uint32,
 	if len(v) < 80 {
 		str := fmt.Sprintf("%s: short read for exists debit (expected 80 "+
 			"bytes, read %v)", bucketDebits, len(v))
+		return nil, nil, storeError(ErrData, str, nil)
+	}
+	return k, v[8:80], nil
+}
+
+func existsInvalidatedDebit(ns walletdb.ReadBucket, txHash *chainhash.Hash, index uint32,
+	block *Block) (k, credKey []byte, err error) {
+	k = keyDebit(txHash, index, block)
+	v := ns.NestedReadBucket(bucketStakeInvalidatedDebits).Get(k)
+	if v == nil {
+		return nil, nil, nil
+	}
+	if len(v) < 80 {
+		str := fmt.Sprintf("%s: short read for exists debit (expected 80 "+
+			"bytes, read %v)", bucketStakeInvalidatedDebits, len(v))
 		return nil, nil, storeError(ErrData, str, nil)
 	}
 	return k, v[8:80], nil
@@ -1587,13 +1724,18 @@ func (it *unminedCreditIterator) next() bool {
 	return true
 }
 
-func (it *unminedCreditIterator) delete() error {
-	err := it.c.Delete()
-	if err != nil {
-		str := "failed to delete unmined credit"
-		return storeError(ErrDatabase, str, err)
-	}
-	return nil
+// unavailable until https://github.com/boltdb/bolt/issues/620 is fixed.
+// func (it *unminedCreditIterator) delete() error {
+// 	err := it.c.Delete()
+// 	if err != nil {
+// 		str := "failed to delete unmined credit"
+// 		return storeError(ErrDatabase, str, err)
+// 	}
+// 	return nil
+// }
+
+func (it *unminedCreditIterator) reposition(txHash *chainhash.Hash, index uint32) {
+	it.c.Seek(canonicalOutPoint(txHash, index))
 }
 
 // OutPoints spent by unmined transactions are saved in the unmined inputs
@@ -1950,6 +2092,102 @@ func upgradeToVersion2(ns walletdb.ReadWriteBucket) error {
 	return nil
 }
 
+// upgradeToVersion3 performs an upgrade from version 2 to 3.  The store must
+// already be at version 2.
+//
+// This update adds a new nested bucket in the namespace bucket for block
+// headers and a new namespace k/v pair for the current tip block.
+//
+// Headers, except for the genesis block, are not immediately filled in during
+// the upgrade (the information is not available) but should be inserted by the
+// caller along with setting the best block.  Some features now require headers
+// to be saved, so if this step is skipped the store will not operate correctly.
+//
+// In addition to the headers, an additional byte is added to the block record
+// values at position 42, inbetween the vote bits and the number of
+// transactions.  This byte is used as a boolean and records whether or not the
+// block has been stake invalidated by the next block in the main chain.
+func upgradeToVersion3(ns walletdb.ReadWriteBucket, chainParams *chaincfg.Params) error {
+	versionBytes := make([]byte, 4)
+	byteOrder.PutUint32(versionBytes, dbVersion3)
+	err := ns.Put(rootVersion, versionBytes)
+	if err != nil {
+		str := "failed to write database version"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(bucketHeaders)
+	if err != nil {
+		str := "failed to create headers bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	_, err = ns.CreateBucket(bucketStakeInvalidatedCredits)
+	if err != nil {
+		str := "failed to create invalidated credits bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	_, err = ns.CreateBucket(bucketStakeInvalidatedDebits)
+	if err != nil {
+		str := "failed to create invalidated debits bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	// For all block records, add the byte for marking stake invalidation.  The
+	// function passed to ForEach may not modify the bucket, so record all
+	// values and write the updates outside the ForEach.
+	type kvpair struct{ k, v []byte }
+	var blockRecsToUpgrade []kvpair
+	blockRecordsBucket := ns.NestedReadWriteBucket(bucketBlocks)
+	blockRecordsBucket.ForEach(func(k, v []byte) error {
+		blockRecsToUpgrade = append(blockRecsToUpgrade, kvpair{k, v})
+		return nil
+	})
+	for _, kvp := range blockRecsToUpgrade {
+		v := make([]byte, len(kvp.v)+1)
+		copy(v, kvp.v[:42])
+		copy(v[43:], kvp.v[42:])
+		blockRecordsBucket.Put(kvp.k, v)
+	}
+
+	// Insert the genesis block header.
+	var serializedGenesisBlock RawBlockHeader
+	buf := bytes.NewBuffer(serializedGenesisBlock[:0])
+	err = chainParams.GenesisBlock.Header.Serialize(buf)
+	if err != nil {
+		// we have bigger problems.
+		panic(err)
+	}
+	err = putRawBlockHeader(ns, keyBlockHeader(chainParams.GenesisHash),
+		serializedGenesisBlock[:])
+	if err != nil {
+		return err
+	}
+
+	// Insert block record for the genesis block if one doesn't yet exist.
+	genesisBlockKey, genesisBlockVal := existsBlockRecord(ns, 0)
+	if genesisBlockVal == nil {
+		genesisBlockVal = valueBlockRecordEmptyFromHeader(
+			chainParams.GenesisHash, &serializedGenesisBlock)
+		err = putRawBlockRecord(ns, genesisBlockKey, genesisBlockVal)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Mark the genesis block as the tip block.  It would not be a good idea
+	// to find a newer tip block from the mined blocks bucket since headers
+	// are still missing and the latest recorded block is unlikely to be the
+	// actual block the wallet was marked in sync with anyways (that
+	// information was saved in waddrmgr).
+	err = ns.Put(rootTipBlock, chainParams.GenesisHash[:])
+	if err != nil {
+		str := "failed to mark genesis block as tip"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	return nil
+}
+
 // openStore opens an existing transaction store from the passed namespace.
 func openStore(ns walletdb.ReadBucket) error {
 	v := ns.Get(rootVersion)
@@ -1977,7 +2215,7 @@ func openStore(ns walletdb.ReadBucket) error {
 
 // createStore creates the tx store (with the latest db version) in the passed
 // namespace.  If a store already exists, ErrAlreadyExists is returned.
-func createStore(ns walletdb.ReadWriteBucket) error {
+func createStore(ns walletdb.ReadWriteBucket, chainParams *chaincfg.Params) error {
 	// Ensure that nothing currently exists in the namespace bucket.
 	ck, cv := ns.ReadCursor().First()
 	if ck != nil || cv != nil {
@@ -2015,6 +2253,12 @@ func createStore(ns walletdb.ReadWriteBucket) error {
 	if err != nil {
 		str := "failed to create blocks bucket"
 		return storeError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(bucketHeaders)
+	if err != nil {
+		str := "faled to create block headers bucket"
+		return storeError(ErrData, str, err)
 	}
 
 	_, err = ns.CreateBucket(bucketTxRecords)
@@ -2074,6 +2318,47 @@ func createStore(ns walletdb.ReadWriteBucket) error {
 	_, err = ns.CreateBucket(bucketMultisigUsp)
 	if err != nil {
 		str := "failed to create multisig unspent tx bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(bucketStakeInvalidatedCredits)
+	if err != nil {
+		str := "failed to create invalidated credits bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	_, err = ns.CreateBucket(bucketStakeInvalidatedDebits)
+	if err != nil {
+		str := "failed to create invalidated debits bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	// Insert the genesis block header.
+	var serializedGenesisBlock RawBlockHeader
+	buf := bytes.NewBuffer(serializedGenesisBlock[:0])
+	err = chainParams.GenesisBlock.Header.Serialize(buf)
+	if err != nil {
+		// we have bigger problems.
+		panic(err)
+	}
+	err = putRawBlockHeader(ns, keyBlockHeader(chainParams.GenesisHash),
+		serializedGenesisBlock[:])
+	if err != nil {
+		return err
+	}
+
+	// Insert block record for the genesis block.
+	genesisBlockKey := keyBlockRecord(0)
+	genesisBlockVal := valueBlockRecordEmptyFromHeader(
+		chainParams.GenesisHash, &serializedGenesisBlock)
+	err = putRawBlockRecord(ns, genesisBlockKey, genesisBlockVal)
+	if err != nil {
+		return err
+	}
+
+	// Mark the genesis block as the tip block.
+	err = ns.Put(rootTipBlock, chainParams.GenesisHash[:])
+	if err != nil {
+		str := "failed to mark genesis block as tip"
 		return storeError(ErrDatabase, str, err)
 	}
 

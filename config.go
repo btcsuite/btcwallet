@@ -468,12 +468,9 @@ func loadConfig() (*config, []string, error) {
 		os.Exit(0)
 	}
 
-	// Exit if you tried to do rollback testing on a network other than
-	// simnet.
-	if cfg.RollbackTest && !cfg.SimNet {
-		fmt.Fprintln(os.Stderr, "Tried to do rollback testing of "+
-			"wallet for network other than simnet!")
-		os.Exit(0)
+	// Warn if rollback testing is enabled, as this feature was removed.
+	if cfg.RollbackTest {
+		fmt.Fprintln(os.Stderr, "WARN: Rollback testing no longer exists")
 	}
 
 	// Ensure the wallet exists or create it when the create flag is set.

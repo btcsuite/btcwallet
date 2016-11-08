@@ -480,7 +480,7 @@ func addMultiSigAddress(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		return nil, err
 	}
 
-	err = chainClient.NotifyReceived([]dcrutil.Address{p2shAddr})
+	err = chainClient.LoadTxFilter(false, []dcrutil.Address{p2shAddr}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -651,6 +651,12 @@ func getAddressesByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, err
 func getBalance(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*dcrjson.GetBalanceCmd)
 
+	minConf := int32(*cmd.MinConf)
+	if minConf < 0 {
+		e := errors.New("minconf must be non-negative")
+		return nil, InvalidParameterError{e}
+	}
+
 	var balance dcrutil.Amount
 	var err error
 	accountName := "*"
@@ -704,10 +710,10 @@ func getBalance(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // getBestBlock handles a getbestblock request by returning a JSON object
 // with the height and hash of the most recently processed block.
 func getBestBlock(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	blk := w.Manager.SyncedTo()
+	hash, height := w.MainChainTip()
 	result := &dcrjson.GetBestBlockResult{
-		Hash:   blk.Hash.String(),
-		Height: int64(blk.Height),
+		Hash:   hash.String(),
+		Height: int64(height),
 	}
 	return result, nil
 }
@@ -715,15 +721,15 @@ func getBestBlock(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // getBestBlockHash handles a getbestblockhash request by returning the hash
 // of the most recently processed block.
 func getBestBlockHash(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	blk := w.Manager.SyncedTo()
-	return blk.Hash.String(), nil
+	hash, _ := w.MainChainTip()
+	return hash.String(), nil
 }
 
 // getBlockCount handles a getblockcount request by returning the chain height
 // of the most recently processed block.
 func getBlockCount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	blk := w.Manager.SyncedTo()
-	return blk.Height, nil
+	_, height := w.MainChainTip()
+	return height, nil
 }
 
 // getInfo handles a getinfo request by returning the a structure containing
@@ -888,19 +894,23 @@ func importPrivKey(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCli
 		rescan = *cmd.Rescan
 	}
 
-	scanFrom := 0
+	scanFrom := int32(0)
 	if cmd.ScanFrom != nil {
-		scanFrom = *cmd.ScanFrom
+		scanFrom = int32(*cmd.ScanFrom)
 	}
 
 	// Import the private key, handling any errors.
-	_, err = w.ImportPrivateKey(wif, nil, rescan, int32(scanFrom))
+	_, err = w.ImportPrivateKey(wif)
 	switch {
 	case waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress):
 		// Do not return duplicate key errors to the client.
 		return nil, nil
 	case waddrmgr.IsError(err, waddrmgr.ErrLocked):
 		return nil, &ErrWalletUnlockNeeded
+	}
+
+	if rescan {
+		w.RescanFromHeight(chainClient, scanFrom)
 	}
 
 	return nil, err
@@ -928,7 +938,16 @@ func importScript(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClie
 		scanFrom = *cmd.ScanFrom
 	}
 
-	return nil, w.ImportScript(rs, rescan, int32(scanFrom))
+	err = w.ImportScript(rs)
+	if err != nil {
+		return nil, err
+	}
+
+	if rescan {
+		w.RescanFromHeight(chainClient, int32(scanFrom))
+	}
+
+	return nil, nil
 }
 
 // keypoolRefill handles the keypoolrefill command. Since we handle the keypool
@@ -1327,7 +1346,7 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, &ErrNoTransactionInfo
 	}
 
-	syncBlock := w.Manager.SyncedTo()
+	_, tipHeight := w.MainChainTip()
 
 	// TODO: The serialized transaction is already in the DB, so
 	// reserializing can be avoided here.
@@ -1353,7 +1372,7 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		ret.BlockHash = details.Block.Hash.String()
 		ret.BlockTime = details.Block.Time.Unix()
 		ret.Confirmations = int64(confirms(details.Block.Height,
-			syncBlock.Height))
+			tipHeight))
 	}
 
 	var (
@@ -1408,7 +1427,7 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		ret.Fee = feeF64
 	}
 
-	credCat := wallet.RecvCategory(details, syncBlock.Height,
+	credCat := wallet.RecvCategory(details, tipHeight,
 		w.ChainParams()).String()
 	for _, cred := range details.Credits {
 		// Change is ignored.
@@ -1653,7 +1672,7 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 		account string
 	}
 
-	syncBlock := w.Manager.SyncedTo()
+	_, tipHeight := w.MainChainTip()
 
 	// Intermediate data for all addresses.
 	allAddrData := make(map[string]AddrData)
@@ -1673,10 +1692,10 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 	if minConf == 0 {
 		endHeight = -1
 	} else {
-		endHeight = syncBlock.Height - int32(minConf) + 1
+		endHeight = tipHeight - int32(minConf) + 1
 	}
 	err = wallet.UnstableAPI(w).RangeTransactions(0, endHeight, func(details []wtxmgr.TxDetails) (bool, error) {
-		confirmations := confirms(details[0].Block.Height, syncBlock.Height)
+		confirmations := confirms(details[0].Block.Height, tipHeight)
 		for _, tx := range details {
 			for _, cred := range tx.Credits {
 				pkVersion := tx.MsgTx.TxOut[cred.Index].Version
@@ -1732,13 +1751,13 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 func listSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	cmd := icmd.(*dcrjson.ListSinceBlockCmd)
 
-	syncBlock := w.Manager.SyncedTo()
+	_, tipHeight := w.MainChainTip()
 	targetConf := int64(*cmd.TargetConfirmations)
 
 	// For the result we need the block hash for the last block counted
 	// in the blockchain due to confirmations. We send this off now so that
 	// it can arrive asynchronously while we figure out the rest.
-	gbh := chainClient.GetBlockHashAsync(int64(syncBlock.Height) + 1 - targetConf)
+	gbh := chainClient.GetBlockHashAsync(int64(tipHeight) + 1 - targetConf)
 
 	var start int32
 	if cmd.BlockHash != nil {
@@ -1753,7 +1772,7 @@ func listSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCl
 		start = int32(block.Height) + 1
 	}
 
-	txInfoList, err := w.ListSinceBlock(start, -1, syncBlock.Height)
+	txInfoList, err := w.ListSinceBlock(start, -1, tipHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -2486,7 +2505,7 @@ func sendToMultiSig(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCCl
 		RedeemScript: hex.EncodeToString(script),
 	}
 
-	err = chainClient.NotifyReceived([]dcrutil.Address{addr})
+	err = chainClient.LoadTxFilter(false, []dcrutil.Address{addr}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2521,14 +2540,11 @@ func sendToSStx(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient
 	for k, v := range cmd.Amounts {
 		pair[k] = dcrutil.Amount(v)
 	}
-	// Get current block's height and hash.
-	bs, err := chainClient.BlockStamp()
-	if err != nil {
-		return nil, err
-	}
+	// Get current block's height.
+	_, tipHeight := w.MainChainTip()
 
 	usedEligible := []wtxmgr.Credit{}
-	eligible, err := w.FindEligibleOutputs(account, minconf, bs)
+	eligible, err := w.FindEligibleOutputs(account, minconf, tipHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -2939,27 +2955,17 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 				if err != nil {
 					return nil, err
 				}
+				err = chainClient.LoadTxFilter(false,
+					[]dcrutil.Address{p2shAddr}, nil)
+				if err != nil {
+					return nil, err
+				}
 
 				// This is the first time seeing this script
 				// address belongs to us, so do a rescan and see
 				// if there are any other outputs to this
 				// address.
-				job := &wallet.RescanJob{
-					Addrs:     []dcrutil.Address{p2shAddr},
-					OutPoints: nil,
-					BlockStamp: waddrmgr.BlockStamp{
-						Height: 0,
-						Hash:   *w.ChainParams().GenesisHash,
-					},
-				}
-
-				// Submit rescan job and log when the import has
-				// completed.  Do not block on finishing the
-				// rescan.  The rescan success or failure is
-				// logged elsewhere, and the channel is not
-				// required to be read, so discard the return
-				// value.
-				_ = w.SubmitRescan(job)
+				w.Rescan(chainClient, w.ChainParams().GenesisHash)
 			}
 		}
 	}

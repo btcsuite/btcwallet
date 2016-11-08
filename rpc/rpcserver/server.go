@@ -301,9 +301,19 @@ func (s *walletServer) ImportPrivateKey(ctx context.Context, req *pb.ImportPriva
 			"Passed a rescan height without rescan set")
 	}
 
-	_, err = s.wallet.ImportPrivateKey(wif, nil, req.Rescan, req.ScanFrom)
+	chainClient := s.wallet.ChainClient()
+	if req.Rescan && chainClient == nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"Cannot rescan without an associated consensus server RPC client")
+	}
+
+	_, err = s.wallet.ImportPrivateKey(wif)
 	if err != nil {
 		return nil, translateError(err)
+	}
+
+	if req.Rescan {
+		s.wallet.RescanFromHeight(chainClient, req.ScanFrom)
 	}
 
 	return &pb.ImportPrivateKeyResponse{}, nil
@@ -333,9 +343,19 @@ func (s *walletServer) ImportScript(ctx context.Context,
 			"Passed a rescan height without rescan set")
 	}
 
-	err = s.wallet.ImportScript(req.Script, req.Rescan, req.ScanFrom)
+	chainClient := s.wallet.ChainClient()
+	if req.Rescan && chainClient == nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"Cannot rescan without an associated consensus server RPC client")
+	}
+
+	err = s.wallet.ImportScript(req.Script)
 	if err != nil {
 		return nil, translateError(err)
+	}
+
+	if req.Rescan {
+		s.wallet.RescanFromHeight(chainClient, req.ScanFrom)
 	}
 
 	return &pb.ImportScriptResponse{}, nil

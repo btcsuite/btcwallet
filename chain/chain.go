@@ -12,12 +12,10 @@ import (
 
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrjson"
 	"github.com/decred/dcrrpcclient"
-	"github.com/decred/dcrutil"
-	"github.com/decred/dcrwallet/waddrmgr"
-	"github.com/decred/dcrwallet/wtxmgr"
 )
+
+var requiredChainServerAPI = semver{major: 2, minor: 0, patch: 0}
 
 // RPCClient represents a persistent client connection to a decred RPC server
 // for information regarding the current best block chain.
@@ -31,7 +29,6 @@ type RPCClient struct {
 	dequeueNotification       chan interface{}
 	enqueueVotingNotification chan interface{}
 	dequeueVotingNotification chan interface{}
-	currentBlock              chan *waddrmgr.BlockStamp
 
 	quit    chan struct{}
 	wg      sync.WaitGroup
@@ -69,21 +66,17 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		dequeueNotification:       make(chan interface{}),
 		enqueueVotingNotification: make(chan interface{}),
 		dequeueVotingNotification: make(chan interface{}),
-		currentBlock:              make(chan *waddrmgr.BlockStamp),
-		quit:                      make(chan struct{}),
+		quit: make(chan struct{}),
 	}
 	ntfnCallbacks := &dcrrpcclient.NotificationHandlers{
 		OnClientConnected:       client.onClientConnect,
 		OnBlockConnected:        client.onBlockConnected,
 		OnBlockDisconnected:     client.onBlockDisconnected,
+		OnRelevantTxAccepted:    client.onRelevantTxAccepted,
 		OnReorganization:        client.onReorganization,
 		OnWinningTickets:        client.onWinningTickets,
 		OnSpentAndMissedTickets: client.onSpentAndMissedTickets,
 		OnStakeDifficulty:       client.onStakeDifficulty,
-		OnRecvTx:                client.onRecvTx,
-		OnRedeemingTx:           client.onRedeemingTx,
-		OnRescanFinished:        client.onRescanFinished,
-		OnRescanProgress:        client.onRescanProgress,
 	}
 	rpcClient, err := dcrrpcclient.New(client.connConfig, ntfnCallbacks)
 	if err != nil {
@@ -113,6 +106,21 @@ func (c *RPCClient) Start() error {
 	if net != c.chainParams.Net {
 		c.Disconnect()
 		return errors.New("mismatched networks")
+	}
+
+	// Ensure the RPC server has a compatible API version.
+	var serverAPI semver
+	versionResult, err := c.Version()
+	if err == nil {
+		serverAPI = semver{
+			major: versionResult.Major,
+			minor: versionResult.Minor,
+			patch: versionResult.Patch,
+		}
+	}
+	if !semverCompatible(requiredChainServerAPI, serverAPI) {
+		return errors.New("consensus JSON-RPC server does not have a " +
+			"compatible API version")
 	}
 
 	c.quitMtx.Lock()
@@ -161,11 +169,22 @@ type (
 
 	// BlockConnected is a notification for a newly-attached block to the
 	// best chain.
-	BlockConnected wtxmgr.BlockMeta
+	BlockConnected struct {
+		BlockHeader  []byte
+		Transactions [][]byte
+	}
 
 	// BlockDisconnected is a notifcation that the block described by the
 	// BlockStamp was reorganized out of the best chain.
-	BlockDisconnected wtxmgr.BlockMeta
+	BlockDisconnected struct {
+		BlockHeader []byte
+	}
+
+	// RelevantTxAccepted is a notification that a transaction accepted by
+	// mempool passed the client's transaction filter.
+	RelevantTxAccepted struct {
+		Transaction []byte
+	}
 
 	// Reorganization is a notification that a reorg has happen with the new
 	// old and new tip included.
@@ -197,29 +216,6 @@ type (
 		BlockHeight int64
 		StakeDiff   int64
 	}
-
-	// RelevantTx is a notification for a transaction which spends wallet
-	// inputs or pays to a watched address.
-	RelevantTx struct {
-		TxRecord *wtxmgr.TxRecord
-		Block    *wtxmgr.BlockMeta // nil if unmined
-	}
-
-	// RescanProgress is a notification describing the current status
-	// of an in-progress rescan.
-	RescanProgress struct {
-		Hash   *chainhash.Hash
-		Height int32
-		Time   time.Time
-	}
-
-	// RescanFinished is a notification that a previous rescan request
-	// has finished.
-	RescanFinished struct {
-		Hash   *chainhash.Hash
-		Height int32
-		Time   time.Time
-	}
 )
 
 // Notifications returns a channel of parsed notifications sent by the remote
@@ -238,39 +234,6 @@ func (c *RPCClient) NotificationsVoting() <-chan interface{} {
 	return c.dequeueVotingNotification
 }
 
-// BlockStamp returns the latest block notified by the client, or an error
-// if the client has been shut down.
-func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
-	select {
-	case bs := <-c.currentBlock:
-		return bs, nil
-	case <-c.quit:
-		return nil, errors.New("disconnected")
-	}
-}
-
-// parseBlock parses a dcrws definition of the block a tx is mined it to the
-// Block structure of the wtxmgr package, and the block index.  This is done
-// here since dcrrpcclient doesn't parse this nicely for us.
-func parseBlock(block *dcrjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
-	if block == nil {
-		return nil, nil
-	}
-	blksha, err := chainhash.NewHashFromStr(block.Hash)
-	if err != nil {
-		return nil, err
-	}
-	blk := &wtxmgr.BlockMeta{
-		Block: wtxmgr.Block{
-			Height: block.Height,
-			Hash:   *blksha,
-		},
-		Time:     time.Unix(block.Time, 0),
-		VoteBits: block.VoteBits,
-	}
-	return blk, nil
-}
-
 func (c *RPCClient) onClientConnect() {
 	select {
 	case c.enqueueNotification <- ClientConnected{}:
@@ -278,29 +241,29 @@ func (c *RPCClient) onClientConnect() {
 	}
 }
 
-func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
+func (c *RPCClient) onBlockConnected(header []byte, transactions [][]byte) {
 	select {
 	case c.enqueueNotification <- BlockConnected{
-		Block: wtxmgr.Block{
-			Hash:   *hash,
-			Height: height,
-		},
-		VoteBits: voteBits,
-		Time:     time,
+		BlockHeader:  header,
+		Transactions: transactions,
 	}:
 	case <-c.quit:
 	}
 }
 
-func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time, voteBits uint16) {
+func (c *RPCClient) onBlockDisconnected(header []byte) {
 	select {
 	case c.enqueueNotification <- BlockDisconnected{
-		Block: wtxmgr.Block{
-			Hash:   *hash,
-			Height: height,
-		},
-		VoteBits: voteBits,
-		Time:     time,
+		BlockHeader: header,
+	}:
+	case <-c.quit:
+	}
+}
+
+func (c *RPCClient) onRelevantTxAccepted(transaction []byte) {
+	select {
+	case c.enqueueNotification <- RelevantTxAccepted{
+		Transaction: transaction,
 	}:
 	case <-c.quit:
 	}
@@ -378,59 +341,9 @@ func (c *RPCClient) onStakeDifficulty(hash *chainhash.Hash,
 	}
 }
 
-func (c *RPCClient) onRecvTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
-	blk, err := parseBlock(block)
-	if err != nil {
-		// Log and drop improper notification.
-		log.Errorf("recvtx notification bad block: %v", err)
-		return
-	}
-
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx(), time.Now())
-	if err != nil {
-		log.Errorf("Cannot create transaction record for relevant "+
-			"tx: %v", err)
-		return
-	}
-	select {
-	case c.enqueueNotification <- RelevantTx{rec, blk}:
-	case <-c.quit:
-	}
-}
-
-func (c *RPCClient) onRedeemingTx(tx *dcrutil.Tx, block *dcrjson.BlockDetails) {
-	// Handled exactly like recvtx notifications.
-	c.onRecvTx(tx, block)
-}
-
-func (c *RPCClient) onRescanProgress(hash *chainhash.Hash, height int32, blkTime time.Time) {
-	select {
-	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
-	case <-c.quit:
-	}
-}
-
-func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime time.Time) {
-	select {
-	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
-	case <-c.quit:
-	}
-
-}
-
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
 func (c *RPCClient) handler() {
-	hash, height, err := c.GetBestBlock()
-	if err != nil {
-		log.Errorf("Failed to receive best block from chain server: %v", err)
-		c.Stop()
-		c.wg.Done()
-		return
-	}
-
-	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: int32(height)}
-
 	// TODO: Rather than leaving this as an unbounded queue for all types of
 	// notifications, try dropping ones where a later enqueued notification
 	// can fully invalidate one waiting to be processed.  For example,
@@ -465,13 +378,6 @@ out:
 			pingChan = time.After(time.Minute)
 
 		case dequeue <- next:
-			if n, ok := next.(BlockConnected); ok {
-				bs = &waddrmgr.BlockStamp{
-					Height: n.Height,
-					Hash:   n.Hash,
-				}
-			}
-
 			notifications[0] = nil
 			notifications = notifications[1:]
 			if len(notifications) != 0 {
@@ -520,8 +426,6 @@ out:
 				c.Stop()
 				break out
 			}
-
-		case c.currentBlock <- bs:
 
 		case <-c.quit:
 			break out

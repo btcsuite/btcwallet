@@ -11,9 +11,9 @@ import (
 	"github.com/decred/dcrwallet/walletdb"
 )
 
-// insertMemPoolTx inserts the unmined transaction record.  It also marks
-// previous outputs referenced by the inputs as spent.
-func (s *Store) insertMemPoolTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
+// InsertMemPoolTx inserts a memory pool transaction record.  It also marks
+// previous outputs referenced by its inputs as spent.
+func (s *Store) InsertMemPoolTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
 	v := existsRawUnmined(ns, rec.Hash[:])
 	if v != nil {
 		// TODO: compare serialized txs to ensure this isn't a hash collision?
