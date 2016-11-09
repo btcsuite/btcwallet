@@ -115,10 +115,8 @@ type Wallet struct {
 	initiallyUnlocked bool
 	addrIdxScanLen    int
 
-	chainClient        *chain.RPCClient
-	chainClientLock    sync.Mutex
-	chainClientSynced  bool
-	chainClientSyncMtx sync.Mutex
+	chainClient     *chain.RPCClient
+	chainClientLock sync.Mutex
 
 	lockedOutpoints map[wire.OutPoint]struct{}
 
@@ -593,32 +591,10 @@ func (w *Wallet) SynchronizingToNetwork() bool {
 	// future, when SPV is added, a separate check will also be needed, or
 	// SPV could always be enabled if RPC was not explicitly specified when
 	// creating the wallet.
-	w.chainClientSyncMtx.Lock()
+	w.chainClientLock.Lock()
 	syncing := w.chainClient != nil
-	w.chainClientSyncMtx.Unlock()
+	w.chainClientLock.Unlock()
 	return syncing
-}
-
-// ChainSynced returns whether the wallet has been attached to a chain server
-// and synced up to the best block on the main chain.
-func (w *Wallet) ChainSynced() bool {
-	w.chainClientSyncMtx.Lock()
-	synced := w.chainClientSynced
-	w.chainClientSyncMtx.Unlock()
-	return synced
-}
-
-// SetChainSynced marks whether the wallet is connected to and currently in sync
-// with the latest block notified by the chain server.
-//
-// NOTE: Due to an API limitation with dcrrpcclient, this may return true after
-// the client disconnected (and is attempting a reconnect).  This will be unknown
-// until the reconnect notification is received, at which point the wallet can be
-// marked out of sync again until after the next rescan completes.
-func (w *Wallet) SetChainSynced(synced bool) {
-	w.chainClientSyncMtx.Lock()
-	w.chainClientSynced = synced
-	w.chainClientSyncMtx.Unlock()
 }
 
 // MainChainTip returns the hash and height of the tip-most block in the main
