@@ -1,5 +1,5 @@
-hash: 709b04a17e1014f7083faf174355642301fd67168c8cf293772689914f9a0898
-updated: 2016-11-08T16:32:02.3385433-05:00
+hash: e8d332f58ad0a43b3d06d428ac2df127cbbff2042b3bfffa5e94cf90d0fd36b0
+updated: 2016-11-10T09:59:37.8888972-05:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
@@ -30,7 +30,7 @@ imports:
 - name: github.com/decred/blake256
   version: a840e32d7c31fe2e0218607334cb120a683951a4
 - name: github.com/decred/dcrd
-  version: 18049cb68e1a266bbe44573ac0fd6bbd505401c9
+  version: d7c2adadc6995b614ab97d1955b5486690a7b2ed
   subpackages:
   - blockchain
   - blockchain/internal/dbnamespace
@@ -61,13 +61,13 @@ imports:
   subpackages:
   - edwards25519
 - name: github.com/golang/protobuf
-  version: 98fa357170587e470c5f27d3c3ea0947b71eb455
+  version: 4bd1920723d7b7c925de087aa32e2187708897f7
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 - name: golang.org/x/net
-  version: 40d3034e575b6eafbca34e64224da61de35ae04c
+  version: 9ef22118a4b25863aa94546daffbc0a18feaafb3
   subpackages:
   - context
   - http2
@@ -81,7 +81,7 @@ imports:
   subpackages:
   - unix
 - name: google.golang.org/grpc
-  version: b7f1379d3cbbbeb2ca3405852012e237aa05459e
+  version: 777daa17ff9b5daef1cfdf915088a2ada3332bf0
   subpackages:
   - codes
   - credentials

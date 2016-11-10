@@ -39,7 +39,7 @@ import:
   subpackages:
   - context
 - package: google.golang.org/grpc
-  version: v1.0.3
+  version: ^1.0.0
   subpackages:
   - codes
   - credentials
