@@ -266,6 +266,7 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 		chainClient, err := startChainRPC(certs)
 		if err != nil {
 			log.Errorf("Unable to open connection to consensus RPC server: %v", err)
+			time.Sleep(30 * time.Second)
 			continue
 		}
 

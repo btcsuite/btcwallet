@@ -4,13 +4,15 @@
 
 package chain
 
+import "fmt"
+
 type semver struct {
 	major, minor, patch uint32
 }
 
 func semverCompatible(required, actual semver) bool {
 	switch {
-	case required.major != required.major:
+	case required.major != actual.major:
 		return false
 	case required.minor > actual.minor:
 		return false
@@ -19,4 +21,8 @@ func semverCompatible(required, actual semver) bool {
 	default:
 		return true
 	}
+}
+
+func (s semver) String() string {
+	return fmt.Sprintf("%d.%d.%d", s.major, s.minor, s.patch)
 }

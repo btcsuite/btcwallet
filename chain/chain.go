@@ -7,6 +7,7 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -91,27 +92,32 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 // sent by the server.  After a limited number of connection attempts, this
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
-func (c *RPCClient) Start() error {
-	err := c.Connect(c.reconnectAttempts)
+func (c *RPCClient) Start() (err error) {
+	err = c.Connect(c.reconnectAttempts)
 	if err != nil {
 		return err
 	}
 
+	defer func() {
+		if err != nil {
+			c.Disconnect()
+		}
+	}()
+
 	// Verify that the server is running on the expected network.
 	net, err := c.GetCurrentNet()
 	if err != nil {
-		c.Disconnect()
 		return err
 	}
 	if net != c.chainParams.Net {
-		c.Disconnect()
 		return errors.New("mismatched networks")
 	}
 
 	// Ensure the RPC server has a compatible API version.
 	var serverAPI semver
-	versionResult, err := c.Version()
+	versions, err := c.Version()
 	if err == nil {
+		versionResult := versions["dcrdjsonrpcapi"]
 		serverAPI = semver{
 			major: versionResult.Major,
 			minor: versionResult.Minor,
@@ -119,8 +125,9 @@ func (c *RPCClient) Start() error {
 		}
 	}
 	if !semverCompatible(requiredChainServerAPI, serverAPI) {
-		return errors.New("consensus JSON-RPC server does not have a " +
-			"compatible API version")
+		return fmt.Errorf("consensus JSON-RPC server does not have a "+
+			"compatible API version: advertises %v but require %v",
+			serverAPI, requiredChainServerAPI)
 	}
 
 	c.quitMtx.Lock()
