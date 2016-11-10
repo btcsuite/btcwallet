@@ -41,13 +41,14 @@ import (
 	"github.com/decred/dcrwallet/wallet"
 	"github.com/decred/dcrwallet/wallet/txrules"
 	"github.com/decred/dcrwallet/walletdb"
+	"github.com/decred/dcrwallet/wtxmgr"
 )
 
 // Public API version constants
 const (
-	semverString = "2.4.0"
+	semverString = "2.5.0"
 	semverMajor  = 2
-	semverMinor  = 4
+	semverMinor  = 5
 	semverPatch  = 0
 )
 
@@ -78,6 +79,15 @@ func errorCode(err error) codes.Code {
 			return codes.InvalidArgument
 		case waddrmgr.ErrDuplicateAccount:
 			return codes.AlreadyExists
+		}
+
+		err = e.Err
+	}
+
+	if e, ok := err.(wtxmgr.Error); ok {
+		switch e.Code {
+		case wtxmgr.ErrValueNoExists:
+			return codes.NotFound
 		}
 
 		err = e.Err
@@ -196,6 +206,49 @@ func (s *walletServer) RenameAccount(ctx context.Context, req *pb.RenameAccountR
 	}
 
 	return &pb.RenameAccountResponse{}, nil
+}
+
+func (s *walletServer) Rescan(req *pb.RescanRequest, svr pb.WalletService_RescanServer) error {
+	chainClient := s.wallet.ChainClient()
+	if chainClient == nil {
+		return grpc.Errorf(codes.FailedPrecondition,
+			"wallet is not associated with a consensus server RPC client")
+	}
+
+	if req.BeginHeight < 0 {
+		return grpc.Errorf(codes.InvalidArgument, "begin height must be non-negative")
+	}
+
+	progress := make(chan wallet.RescanProgress, 1)
+	cancel := make(chan struct{})
+	go s.wallet.RescanProgressFromHeight(chainClient, req.BeginHeight, progress, cancel)
+
+	ctxDone := svr.Context().Done()
+	for {
+		select {
+		case p, ok := <-progress:
+			if !ok {
+				// finished or cancelled rescan without error
+				select {
+				case <-cancel:
+					return grpc.Errorf(codes.Canceled, "rescan canceled")
+				default:
+					return nil
+				}
+			}
+			if p.Err != nil {
+				return translateError(p.Err)
+			}
+			resp := &pb.RescanResponse{RescannedThrough: p.ScannedThrough}
+			err := svr.Send(resp)
+			if err != nil {
+				return translateError(err)
+			}
+		case <-ctxDone:
+			close(cancel)
+			ctxDone = nil
+		}
+	}
 }
 
 func (s *walletServer) NextAccount(ctx context.Context, req *pb.NextAccountRequest) (

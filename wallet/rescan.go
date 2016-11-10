@@ -20,12 +20,22 @@ const maxBlocksPerRescan = 2000
 // this new rescan, keeping the one that still has the most blocks to scan.
 
 // rescan synchronously scans over all blocks on the main chain starting at
-// startHash and height up through the recorded main chain tip block.
-func (w *Wallet) rescan(chainClient *chain.RPCClient, startHash *chainhash.Hash, height int32) error {
+// startHash and height up through the recorded main chain tip block.  The
+// progress channel, if non-nil, is sent non-error progress notifications with
+// the heights the rescan has completed through, starting with the start height.
+func (w *Wallet) rescan(chainClient *chain.RPCClient, startHash *chainhash.Hash, height int32,
+	p chan<- RescanProgress, cancel <-chan struct{}) error {
+
 	blockHashStorage := make([]chainhash.Hash, maxBlocksPerRescan)
 	rescanFrom := *startHash
 	inclusive := true
 	for {
+		select {
+		case <-cancel:
+			return nil
+		default:
+		}
+
 		var rescanBlocks []chainhash.Hash
 		err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
 			txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
@@ -41,8 +51,9 @@ func (w *Wallet) rescan(chainClient *chain.RPCClient, startHash *chainhash.Hash,
 			return nil
 		}
 
+		scanningThrough := height + int32(len(rescanBlocks)) - 1
 		log.Infof("Rescanning blocks %v-%v...", height,
-			height+int32(len(rescanBlocks))-1)
+			scanningThrough)
 		rescanResults, err := chainClient.Rescan(rescanBlocks)
 		if err != nil {
 			return err
@@ -86,6 +97,9 @@ func (w *Wallet) rescan(chainClient *chain.RPCClient, startHash *chainhash.Hash,
 		if err != nil {
 			return err
 		}
+		if p != nil {
+			p <- RescanProgress{ScannedThrough: scanningThrough}
+		}
 		rescanFrom = rescanBlocks[len(rescanBlocks)-1]
 		height += int32(len(rescanBlocks))
 		inclusive = false
@@ -127,7 +141,7 @@ func (w *Wallet) Rescan(chainClient *chain.RPCClient, startHash *chainhash.Hash)
 			return err
 		}
 
-		return w.rescan(chainClient, startHash, startHeight)
+		return w.rescan(chainClient, startHash, startHeight, nil, nil)
 	}()
 
 	return errc
@@ -162,8 +176,41 @@ func (w *Wallet) RescanFromHeight(chainClient *chain.RPCClient, startHeight int3
 			return err
 		}
 
-		return w.rescan(chainClient, &startHash, startHeight)
+		return w.rescan(chainClient, &startHash, startHeight, nil, nil)
 	}()
 
 	return errc
+}
+
+// RescanProgress records the height the rescan has completed through and any
+// errors during processing of the rescan.
+type RescanProgress struct {
+	Err            error
+	ScannedThrough int32
+}
+
+// RescanProgressFromHeight rescans for relevant transactions in all blocks in
+// the main chain starting at startHeight.  Progress notifications and any
+// errors are sent to the channel p.  This function blocks until the rescan
+// completes or ends in an error.  p is closed before returning.
+func (w *Wallet) RescanProgressFromHeight(chainClient *chain.RPCClient, startHeight int32, p chan<- RescanProgress, cancel <-chan struct{}) {
+	defer close(p)
+
+	var startHash chainhash.Hash
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+		var err error
+		startHash, err = w.TxStore.GetMainChainBlockHashForHeight(
+			txmgrNs, startHeight)
+		return err
+	})
+	if err != nil {
+		p <- RescanProgress{Err: err}
+		return
+	}
+
+	err = w.rescan(chainClient, &startHash, startHeight, p, cancel)
+	if err != nil {
+		p <- RescanProgress{Err: err}
+	}
 }

@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 2.4.0
+Version: 2.5.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -266,6 +266,7 @@ The service provides the following methods:
 - [`GetTransactions`](#gettransactions)
 - [`ChangePassphrase`](#changepassphrase)
 - [`RenameAccount`](#renameaccount)
+- [`Rescan`](#rescan)
 - [`NextAccount`](#nextaccount)
 - [`NextAddress`](#nextaddress)
 - [`ImportPrivateKey`](#importprivatekey)
@@ -549,10 +550,37 @@ The `RenameAccount` method requests a change to an account's name property.
 
 - `AlreadyExists`: An account by the same name already exists.
 
-**Stability:** Unstable: There should be a way to specify a starting block or
-  time to begin the rescan at.  Additionally, since the client is expected to be
-  able to do asynchronous RPC, it may be useful for the response to block on the
-  rescan finishing before returning.
+**Stability:** Unstable
+
+___
+
+#### `Rescan`
+
+The `Rescan` method begins a rescan for all relevant transactions involving all
+active addresses and watched outpoints.  Rescans can be time consuming depending
+on the amount of data that must be checked, and the size of the blockchain.  If
+transactions being scanned for are known to only exist after some height, the
+request can specify which block height to begin scanning from.  This RPC returns
+a stream of block heights the rescan has completed through.
+
+**Request:** `RescanRequest`
+
+- `int32 begin_height`: The block height to begin the rescan at (inclusive).
+
+**Response:** `stream RescanResponse`
+
+- `int32 rescanned_through`: The block height the rescan has completed through
+  (inclusive).
+
+**Expected errors:**
+
+- `FailedPrecondition`: There is no consensus server associated with the wallet.
+
+- `InvalidArgument`: The begin height is negative.
+
+- `NotFound`: There is no known block in the main chain at the begin height.
+
+**Stability:** Unstable
 
 ___
 
