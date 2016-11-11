@@ -27,98 +27,124 @@ import (
 
 	"github.com/decred/bitset"
 	"github.com/decred/dcrutil"
+	"github.com/decred/dcrutil/hdkeychain"
 	"github.com/decred/dcrwallet/chain"
 	"github.com/decred/dcrwallet/waddrmgr"
 	"github.com/decred/dcrwallet/walletdb"
 )
 
-// finalScanLength is the final length of accounts to scan for the
-// function below.
-var finalAcctScanLength = 50
+const (
+	// finalScanLength is the final length of accounts to scan for the function
+	// below.
+	finalAcctScanLength = 50
 
-// acctSeekWidth is the number of addresses for both internal and external
-// branches to scan to determine whether or not an account exists and should
-// be rescanned. This is the tolerance for account gaps as well.
-var acctSeekWidth uint32 = 5
+	// acctSeekWidth is the number of addresses for both internal and external
+	// branches to scan to determine whether or not an account exists and should
+	// be rescanned. This is the tolerance for account gaps as well.
+	acctSeekWidth = 5
+
+	// debugScanLength is the final length of keys to scan past the
+	// last index returned from the logarithmic scanning function
+	// when creating the debug string of used addresses.
+	debugAddrScanLength = 3500
+
+	// addrSeekWidth is the number of new addresses to generate and add to the
+	// address manager when trying to sync up a wallet to the main chain. This
+	// is the maximum gap introduced by a resyncing as well, and should be less
+	// than finalScanLength above.
+	//
+	// TODO Optimize the scanning so that rather than overshooting the end
+	// address, you instead step through addresses incrementally until reaching
+	// idx so that you don't reach a gap. This can be done by keeping track of
+	// where the current cursor is and adding addresses in big chunks until you
+	// hit the end.
+	addrSeekWidth = 20
+)
+
+type discoveryContext struct {
+	chainClient *chain.RPCClient
+	deriveAddr  func(ns walletdb.ReadBucket, index uint32, account uint32, branch uint32) (dcrutil.Address, error)
+}
 
 // accountIsUsed checks if an account has ever been used by scanning the
 // first acctSeekWidth many addresses for usage.
-func (w *Wallet) accountIsUsed(account uint32, chainClient *chain.RPCClient) bool {
-	// Search external branch then internal branch for a used
-	// address. We need to set the address function to use based
-	// on whether or not this is the initial sync. The function
-	// AddressDerivedFromCointype is able to see addresses that
-	// exists in accounts that have not yet been created, while
-	// AddressDerivedFromDbAcct can not.
-	addrFunc := w.Manager.AddressDerivedFromDbAcct
-	if w.initiallyUnlocked {
-		addrFunc = w.Manager.AddressDerivedFromCointype
-	}
-
+func (w *Wallet) accountIsUsed(ctx *discoveryContext, account uint32) (bool, error) {
 	for branch := uint32(0); branch < 2; branch++ {
 		for i := uint32(0); i < acctSeekWidth; i++ {
 			var addr dcrutil.Address
 			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 				var err error
-				addr, err = addrFunc(addrmgrNs, i, account, branch)
+				addr, err = ctx.deriveAddr(addrmgrNs, i, account, branch)
 				return err
 			})
-			if err != nil {
-				// Skip erroneous keys, which happen rarely.
+			// Skip erroneous keys, which happen rarely.
+			if e, ok := err.(waddrmgr.ManagerError); ok && e.Err == hdkeychain.ErrInvalidChild {
 				continue
 			}
-
-			exists, err := chainClient.ExistsAddress(addr)
 			if err != nil {
-				return false
+				return false, err
+			}
+
+			exists, err := ctx.chainClient.ExistsAddress(addr)
+			if err != nil {
+				return false, err
 			}
 			if exists {
-				return true
+				return true, nil
 			}
 		}
 	}
 
-	return false
+	return false, nil
 }
 
 // bisectLastAcctIndex is a helper function for searching through accounts to
 // find the last used account. It uses logarithmic scanning to determine if
 // an account has been used.
-func (w *Wallet) bisectLastAcctIndex(hi, low int) int {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return 0
-	}
-
+func (w *Wallet) bisectLastAcctIndex(ctx *discoveryContext, hi, low uint32) (uint32, error) {
 	offset := low
 	for i := hi - low - 1; i > 0; i /= 2 {
-		if i+offset+int(acctSeekWidth) < waddrmgr.MaxAddressesPerAccount {
-			for j := i + offset + int(addrSeekWidth); j >= i+offset; j-- {
-				if w.accountIsUsed(uint32(j), chainClient) {
-					return i + offset
+		if i+offset+acctSeekWidth < waddrmgr.MaxAddressesPerAccount {
+			for j := i + offset + addrSeekWidth; j >= i+offset; j-- {
+				used, err := w.accountIsUsed(ctx, j)
+				if err != nil {
+					return 0, err
+				}
+				if used {
+					return i + offset, nil
 				}
 			}
 		} else {
-			if w.accountIsUsed(uint32(i+offset), chainClient) {
-				return i + offset
+			used, err := w.accountIsUsed(ctx, i+offset)
+			if err != nil {
+				return 0, err
+			}
+			if used {
+				return i + offset, nil
 			}
 		}
 	}
 
-	return 0
+	return 0, nil
 }
 
 // findAcctEnd is a helper function for searching for the last used account by
 // logarithmic scanning of the account indexes.
-func (w *Wallet) findAcctEnd(start, stop int) int {
-	indexStart := w.bisectLastAcctIndex(stop, start)
-	indexLast := 0
+func (w *Wallet) findAcctEnd(ctx *discoveryContext, start, stop uint32) (uint32, error) {
+	indexStart, err := w.bisectLastAcctIndex(ctx, stop, start)
+	if err != nil {
+		return 0, err
+	}
+	var indexLast uint32
 	for {
 		indexLastStored := indexStart
 		low := indexLastStored
 		hi := indexLast + ((indexStart - indexLast) * 2) + 1
-		indexStart = w.bisectLastAcctIndex(hi, low)
+		indexStart, err = w.bisectLastAcctIndex(ctx, hi, low)
+		if err != nil {
+			return 0, err
+		}
 		indexLast = indexLastStored
 
 		if indexStart == 0 {
@@ -126,26 +152,28 @@ func (w *Wallet) findAcctEnd(start, stop int) int {
 		}
 	}
 
-	return indexLast
+	return indexLast, nil
 }
 
 // scanAccountIndex identifies the last used address in an HD keychain of public
 // keys. It returns the index of the last used key, along with the address of
 // this key.
-func (w *Wallet) scanAccountIndex(start int, end int) (uint32, error) {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return 0, err
-	}
-
+func (w *Wallet) scanAccountIndex(ctx *discoveryContext, start, end uint32) (uint32, error) {
 	// Find the last used account. Scan from it to the end in case there was a
 	// gap from that position, which is possible. Then, return the account
 	// in that position.
-	lastUsed := w.findAcctEnd(start, end)
+	lastUsed, err := w.findAcctEnd(ctx, start, end)
+	if err != nil {
+		return 0, err
+	}
 	if lastUsed != 0 {
 		for i := lastUsed + finalAcctScanLength; i >= lastUsed; i-- {
-			if w.accountIsUsed(uint32(i), chainClient) {
-				return uint32(i), nil
+			used, err := w.accountIsUsed(ctx, i)
+			if err != nil {
+				return 0, err
+			}
+			if used {
+				return i, nil
 			}
 		}
 	}
@@ -155,41 +183,19 @@ func (w *Wallet) scanAccountIndex(start int, end int) (uint32, error) {
 	return 0, nil
 }
 
-// debugScanLength is the final length of keys to scan past the
-// last index returned from the logarithmic scanning function
-// when creating the debug string of used addresses.
-var debugAddrScanLength = 3500
-
-// addrSeekWidth is the number of new addresses to generate and add to the
-// address manager when trying to sync up a wallet to the main chain. This
-// is the maximum gap introduced by a resyncing as well, and should be less
-// than finalScanLength above.
-// TODO Optimize the scanning so that rather than overshooting the end address,
-// you instead step through addresses incrementally until reaching idx so that
-// you don't reach a gap. This can be done by keeping track of where the current
-// cursor is and adding addresses in big chunks until you hit the end.
-var addrSeekWidth uint32 = 20
-
-// errDerivation is an error type signifying that the waddrmgr failed to
-// derive a key.
-var errDerivation = fmt.Errorf("failed to derive key")
-
 // scanAddressRange scans backwards from end to start many addresses in the
 // account branch, and return the first index that is found on the blockchain.
 // If the address doesn't exist, false is returned as the first argument.
-func (w *Wallet) scanAddressRange(account uint32, branch uint32, start int,
-	end int, chainClient *chain.RPCClient) (bool, int, error) {
+func (w *Wallet) scanAddressRange(ctx *discoveryContext,
+	account uint32, branch uint32, start, end uint32) (bool, uint32, error) {
 
 	var addresses []dcrutil.Address
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		var err error
 		addresses, err = w.Manager.AddressesDerivedFromDbAcct(addrmgrNs,
-			uint32(start), uint32(end+1), account, branch)
-		if err != nil {
-			return errDerivation
-		}
-		return nil
+			start, end+1, account, branch)
+		return err
 	})
 	if err != nil {
 		return false, 0, err
@@ -197,7 +203,7 @@ func (w *Wallet) scanAddressRange(account uint32, branch uint32, start int,
 
 	// Whether or not the addresses exist is encoded as a binary
 	// bitset.
-	exists, err := chainClient.ExistsAddresses(addresses)
+	exists, err := ctx.chainClient.ExistsAddresses(addresses)
 	if err != nil {
 		return false, 0, err
 	}
@@ -230,11 +236,8 @@ func (w *Wallet) scanAddressRange(account uint32, branch uint32, start int,
 }
 
 // bisectLastAddrIndex is a helper function for search through addresses.
-func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32, branch uint32) int {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return 0
-	}
+func (w *Wallet) bisectLastAddrIndex(ctx *discoveryContext, hi, low uint32,
+	account uint32, branch uint32) (uint32, error) {
 
 	// Logarithmically scan address indexes to find the last used
 	// address index. Each time the algorithm receives an end point,
@@ -243,24 +246,20 @@ func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32, branch uint32)
 	// repeats until it finds the last used index.
 	offset := low
 	for i := hi - low - 1; i > 0; i /= 2 {
-		if i+offset+int(addrSeekWidth) < waddrmgr.MaxAddressesPerAccount {
+		if i+offset+addrSeekWidth < waddrmgr.MaxAddressesPerAccount {
 			start := i + offset
-			end := i + offset + int(addrSeekWidth)
-			exists, idx, err := w.scanAddressRange(account, branch, start, end,
-				chainClient)
+			end := i + offset + addrSeekWidth
+			exists, idx, err := w.scanAddressRange(ctx, account, branch, start, end)
 			// Skip erroneous keys, which happen rarely. Don't skip
 			// other errors.
-			if err == errDerivation {
+			if e, ok := err.(waddrmgr.ManagerError); ok && e.Err == hdkeychain.ErrInvalidChild {
 				continue
 			}
 			if err != nil {
-				log.Warnf("unexpected error encountered during bisection "+
-					"scan of account %v, branch %v: %s", account, branch,
-					err.Error())
-				return 0
+				return 0, err
 			}
 			if exists {
-				return idx
+				return idx, nil
 			}
 		} else {
 			var addr dcrutil.Address
@@ -268,7 +267,7 @@ func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32, branch uint32)
 				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 				var err error
 				addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
-					uint32(i+offset), account, branch)
+					i+offset, account, branch)
 				return err
 			})
 			// Skip erroneous keys, which happen rarely.
@@ -276,28 +275,36 @@ func (w *Wallet) bisectLastAddrIndex(hi, low int, account uint32, branch uint32)
 				continue
 			}
 
-			exists, err := chainClient.ExistsAddress(addr)
+			exists, err := ctx.chainClient.ExistsAddress(addr)
 			if err != nil {
-				return 0
+				return 0, err
 			}
 			if exists {
-				return i + offset
+				return i + offset, nil
 			}
 		}
 	}
 
-	return 0
+	return 0, nil
 }
 
 // findEnd is a helper function for searching for used addresses.
-func (w *Wallet) findAddrEnd(start, stop int, account uint32, branch uint32) int {
-	indexStart := w.bisectLastAddrIndex(stop, start, account, branch)
-	indexLast := 0
+func (w *Wallet) findAddrEnd(ctx *discoveryContext, start, stop uint32,
+	account uint32, branch uint32) (uint32, error) {
+
+	indexStart, err := w.bisectLastAddrIndex(ctx, stop, start, account, branch)
+	if err != nil {
+		return 0, err
+	}
+	var indexLast uint32
 	for {
 		indexLastStored := indexStart
 		low := indexLastStored
 		hi := indexLast + ((indexStart - indexLast) * 2) + 1
-		indexStart = w.bisectLastAddrIndex(hi, low, account, branch)
+		indexStart, err = w.bisectLastAddrIndex(ctx, hi, low, account, branch)
+		if err != nil {
+			return 0, err
+		}
 		indexLast = indexLastStored
 
 		if indexStart == 0 {
@@ -305,31 +312,26 @@ func (w *Wallet) findAddrEnd(start, stop int, account uint32, branch uint32) int
 		}
 	}
 
-	return indexLast
+	return indexLast, nil
 }
 
 // debugAccountAddrGapsString is a debug function that prints a graphical outlook
 // of address usage to a string, from the perspective of the daemon.
-func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
-	w *Wallet) (string, error) {
-
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return "", err
-	}
+func debugAccountAddrGapsString(chainClient *chain.RPCClient, scanBackFrom uint32,
+	account uint32, branch uint32, w *Wallet) (string, error) {
 
 	var buf bytes.Buffer
 	str := fmt.Sprintf("Begin debug address scan scanning backwards from "+
 		"idx %v, account %v, branch %v\n", scanBackFrom, account, branch)
 	buf.WriteString(str)
-	firstUsedIndex := 0
+	var firstUsedIndex uint32
 	for i := scanBackFrom; i > 0; i-- {
 		var addr dcrutil.Address
 		err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 			var err error
 			addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
-				uint32(i), account, branch)
+				i, account, branch)
 			return err
 		})
 		// Skip erroneous keys.
@@ -340,7 +342,7 @@ func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 		exists, err := chainClient.ExistsAddress(addr)
 		if err != nil {
 			return "", fmt.Errorf("failed to access chain server: %v",
-				err.Error())
+				err)
 		}
 
 		if exists {
@@ -352,14 +354,14 @@ func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 	str = fmt.Sprintf("Last used index found: %v\n", firstUsedIndex)
 	buf.WriteString(str)
 
-	batchSize := 50
+	var batchSize uint32 = 50
 	batches := (firstUsedIndex / batchSize) + 1
-	lastBatchSize := 0
+	var lastBatchSize uint32
 	if firstUsedIndex%batchSize != 0 {
 		lastBatchSize = firstUsedIndex - ((batches - 1) * batchSize)
 	}
 
-	for i := 0; i < batches; i++ {
+	for i := uint32(0); i < batches; i++ {
 		str = fmt.Sprintf("%8v", i*batchSize)
 		buf.WriteString(str)
 
@@ -384,7 +386,7 @@ func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 				var err error
 				addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
-					uint32(j), account, branch)
+					j, account, branch)
 				return err
 			})
 			if err != nil {
@@ -394,7 +396,7 @@ func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 			exists, err := chainClient.ExistsAddress(addr)
 			if err != nil {
 				return "", fmt.Errorf("failed to access chain server: %v",
-					err.Error())
+					err)
 			}
 			if exists {
 				char = "#"
@@ -412,23 +414,22 @@ func debugAccountAddrGapsString(scanBackFrom int, account uint32, branch uint32,
 // scanAddressIndex identifies the last used address in an HD keychain of public
 // keys. It returns the index of the last used key, along with the address of
 // this key.
-func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
-	branch uint32) (uint32, dcrutil.Address, error) {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return 0, nil, err
-	}
+func (w *Wallet) scanAddressIndex(ctx *discoveryContext, start, end uint32,
+	account uint32, branch uint32) (uint32, dcrutil.Address, error) {
 
 	// Find the last used address. Scan from it to the end in case there was a
 	// gap from that position, which is possible. Then, return the address
 	// in that position.
-	lastUsed := w.findAddrEnd(start, end, account, branch)
+	lastUsed, err := w.findAddrEnd(ctx, start, end, account, branch)
+	if err != nil {
+		return 0, nil, err
+	}
 
 	// If debug is on, do an exhaustive check and a graphical printout
 	// of what the used addresses currently look like.
-	if log.Level() == btclog.DebugLvl || log.Level() == btclog.TraceLvl {
-		dbgStr, err := debugAccountAddrGapsString(lastUsed+debugAddrScanLength,
-			account, branch, w)
+	if log.Level() <= btclog.DebugLvl {
+		dbgStr, err := debugAccountAddrGapsString(ctx.chainClient,
+			lastUsed+debugAddrScanLength, account, branch, w)
 		if err != nil {
 			log.Debugf("Failed to debug address gaps for account %v, "+
 				"branch %v: %v", account, branch, err)
@@ -442,9 +443,8 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 	// we have found is correct.
 	if lastUsed != 0 {
 		start := lastUsed
-		end := lastUsed + w.addrIdxScanLen
-		exists, idx, err := w.scanAddressRange(account, branch, start, end,
-			chainClient)
+		end := lastUsed + uint32(w.addrIdxScanLen)
+		exists, idx, err := w.scanAddressRange(ctx, account, branch, start, end)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -456,13 +456,13 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 				var err error
 				addr, err = w.Manager.AddressDerivedFromDbAcct(addrmgrNs,
-					uint32(lastUsed), account, branch)
+					lastUsed, account, branch)
 				return err
 			})
 			if err != nil {
 				return 0, nil, err
 			}
-			return uint32(lastUsed), addr, nil
+			return lastUsed, addr, nil
 		}
 	}
 
@@ -484,10 +484,10 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 			return 0, nil, err
 		}
 
-		exists, err := chainClient.ExistsAddress(addr)
+		exists, err := ctx.chainClient.ExistsAddress(addr)
 		if err != nil {
 			return 0, nil, fmt.Errorf("failed to access chain server: %v",
-				err.Error())
+				err)
 		}
 
 		if exists {
@@ -500,28 +500,38 @@ func (w *Wallet) scanAddressIndex(start int, end int, account uint32,
 	return 0, nil, nil
 }
 
-// discoverActiveAddresses accesses the daemon to discover all the addresses that
-// have been used by an HD keychain stemming from this wallet in the default
-// account.
-func (w *Wallet) discoverActiveAddresses() error {
+// discoverActiveAddresses accesses the consensus RPC server to discover all the
+// addresses that have been used by an HD keychain stemming from this wallet in
+// the default account.
+func (w *Wallet) discoverActiveAddresses(chainClient *chain.RPCClient, discoverAccts bool) error {
 	log.Infof("Beginning a rescan of active addresses using the daemon. " +
 		"This may take a while.")
+
+	// Search external branch then internal branch for a used address. We need
+	// to set the address function to use based on whether or not this is the
+	// initial sync. The function AddressDerivedFromCointype is able to see
+	// addresses that exists in accounts that have not yet been created, while
+	// AddressDerivedFromDbAcct can not.
+	derive := w.Manager.AddressDerivedFromDbAcct
+	if discoverAccts {
+		derive = w.Manager.AddressDerivedFromCointype
+	}
+
+	ctx := &discoveryContext{chainClient: chainClient, deriveAddr: derive}
 
 	// Start by rescanning the accounts and determining what the
 	// current account index is. This scan should only ever be
 	// performed if we're restoring our wallet from seed.
-	lastAcct := uint32(0)
-	var err error
+	var lastAcct uint32
 	if w.initiallyUnlocked {
-		min := 0
-		max := waddrmgr.MaxAccountNum
-		lastAcct, err = w.scanAccountIndex(min, max)
+		var err error
+		lastAcct, err = w.scanAccountIndex(ctx, 0, waddrmgr.MaxAccountNum)
 		if err != nil {
 			return err
 		}
 	}
 
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		lastAcctMgr, err := w.Manager.LastAccount(addrmgrNs)
 		if err != nil {
@@ -563,12 +573,11 @@ func (w *Wallet) discoverActiveAddresses() error {
 	// the respective account and initialize it.
 	for acct := uint32(0); acct <= lastAcct; acct++ {
 		var extIdx, intIdx uint32
-		min := 0
-		max := waddrmgr.MaxAddressesPerAccount
 
 		// Do this for both external (0) and internal (1) branches.
 		for branch := uint32(0); branch < 2; branch++ {
-			idx, lastAddr, err := w.scanAddressIndex(min, max, acct, branch)
+			idx, lastAddr, err := w.scanAddressIndex(ctx, 0,
+				waddrmgr.MaxAddressesPerAccount, acct, branch)
 			if err != nil {
 				return err
 			}
@@ -590,8 +599,8 @@ func (w *Wallet) discoverActiveAddresses() error {
 						if !ok || errWaddrmgr.ErrorCode != waddrmgr.ErrSyncToIndex {
 							return fmt.Errorf("failed to create initial waddrmgr "+
 								"address buffer for the address pool, "+
-								"account %v, branch %v: %s", acct, branch,
-								err.Error())
+								"account %v, branch %v: %v", acct, branch,
+								err)
 						}
 					}
 				}
@@ -641,8 +650,8 @@ func (w *Wallet) discoverActiveAddresses() error {
 					addrmgrNs, nextToUseIdx, acct, branch)
 				if err != nil {
 					return fmt.Errorf("failed to derive next address for "+
-						"account %v, branch %v: %s", acct, branch,
-						err.Error())
+						"account %v, branch %v: %v", acct, branch,
+						err)
 				}
 
 				// Save these for the address pool startup later.
@@ -664,7 +673,7 @@ func (w *Wallet) discoverActiveAddresses() error {
 					errWaddrmgr, ok := err.(waddrmgr.ManagerError)
 					if !ok || errWaddrmgr.ErrorCode != waddrmgr.ErrSyncToIndex {
 						return fmt.Errorf("couldn't sync %s addresses in "+
-							"address manager: %v", branchString, err.Error())
+							"address manager: %v", branchString, err)
 					}
 				}
 
