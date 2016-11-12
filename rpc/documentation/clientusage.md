@@ -326,12 +326,8 @@ namespace Example
 
 ## Node.js
 
-First, install gRPC (either by building the latest source release, or
-by installing a gRPC binary development package through your operating
-system's package manager).  This is required to install the npm module
-as it wraps the native C library (gRPC Core) with C++ bindings.
-Installing the [grpc module](https://www.npmjs.com/package/grpc) to
-your project can then be done by executing:
+First, install the gRPC `npm` package, which includes a pre-compiled gRPC Core
+native library and the bindings for Node.js clients:
 
 ```
 npm install grpc
@@ -386,10 +382,12 @@ client.balance(request, function(err, response) {
 
 **Note:** gRPC requires Python 2.7.
 
-After installing gRPC Core and Python development headers, `pip`
-should be used to install the `grpc` module and its dependencies.
-Full instructions for this procedure can be found
-[here](https://github.com/grpc/grpc/blob/master/src/python/README.md).
+First, install the gRPC `pip` package, which includes a pre-compiled gRPC Core
+native library and the bindings for Python clients:
+
+```
+pip install grpcio
+```
 
 Generate Python stubs from the `.proto`:
 
