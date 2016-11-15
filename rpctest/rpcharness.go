@@ -368,7 +368,7 @@ func (h *Harness) connectRPCClient() error {
 	}
 
 	if client == nil {
-		return fmt.Errorf("Connection timedout, err: %v\n", err)
+		return fmt.Errorf("connection timed out: %v", err)
 	}
 
 	err = client.NotifyBlocks()
