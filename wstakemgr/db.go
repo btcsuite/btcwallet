@@ -203,7 +203,7 @@ func deserializeSStxRecord(serializedSStxRecord []byte) (*sstxRecord, error) {
 	// Create and save the dcrutil.Tx of the read MsgTx and set its index.
 	tx := dcrutil.NewTx((*wire.MsgTx)(msgTx))
 	tx.SetIndex(dcrutil.TxIndexUnknown)
-	tx.SetTree(dcrutil.TxTreeStake)
+	tx.SetTree(wire.TxTreeStake)
 	record.tx = tx
 
 	// Read received unix time (int64).

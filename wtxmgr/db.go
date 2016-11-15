@@ -1850,7 +1850,7 @@ func valueMultisigOut(sh [ripemd160.Size]byte, m uint8, n uint8,
 		v[22] |= 1 << 0
 	}
 
-	if tree == dcrutil.TxTreeStake {
+	if tree == wire.TxTreeStake {
 		v[22] |= 1 << 1
 	}
 
@@ -1884,7 +1884,7 @@ func fetchMultisigOut(k, v []byte) (*MultisigOut, error) {
 		return nil, err
 	}
 	mso.OutPoint = &op
-	mso.OutPoint.Tree = dcrutil.TxTreeRegular
+	mso.OutPoint.Tree = wire.TxTreeRegular
 
 	copy(mso.ScriptHash[0:20], v[0:20])
 
@@ -1927,9 +1927,9 @@ func fetchMultisigOutSpent(v []byte) bool {
 
 func fetchMultisigOutTree(v []byte) int8 {
 	isStakeTree := v[22]&(1<<1) != 0
-	tree := dcrutil.TxTreeRegular
+	tree := wire.TxTreeRegular
 	if isStakeTree {
-		tree = dcrutil.TxTreeStake
+		tree = wire.TxTreeStake
 	}
 
 	return tree

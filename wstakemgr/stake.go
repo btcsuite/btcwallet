@@ -715,7 +715,7 @@ func (s *StakeStore) generateVote(ns walletdb.ReadWriteBucket, waddrmgrNs wallet
 	// Stakebase.
 	stakeBaseOutPoint := wire.NewOutPoint(&chainhash.Hash{},
 		uint32(0xFFFFFFFF),
-		dcrutil.TxTreeRegular)
+		wire.TxTreeRegular)
 	txInStakeBase := wire.NewTxIn(stakeBaseOutPoint, []byte{})
 	msgTx.AddTxIn(txInStakeBase)
 

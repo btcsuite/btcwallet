@@ -1012,7 +1012,7 @@ func getMultisigOutInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	op := &wire.OutPoint{
 		Hash:  *hash,
 		Index: cmd.Index,
-		Tree:  dcrutil.TxTreeRegular,
+		Tree:  wire.TxTreeRegular,
 	}
 
 	p2shOutput, err := w.FetchP2SHMultiSigOutput(op)

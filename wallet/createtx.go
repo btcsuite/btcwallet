@@ -1200,7 +1200,7 @@ func (w *Wallet) purchaseTicketsInternal(dbtx walletdb.ReadWriteTx, req purchase
 				op: &wire.OutPoint{
 					Hash:  splitTx.Tx.TxSha(),
 					Index: uint32(i),
-					Tree:  dcrutil.TxTreeRegular,
+					Tree:  wire.TxTreeRegular,
 				},
 				amt:      txOut.Value,
 				pkScript: txOut.PkScript,
@@ -1215,7 +1215,7 @@ func (w *Wallet) purchaseTicketsInternal(dbtx walletdb.ReadWriteTx, req purchase
 				op: &wire.OutPoint{
 					Hash:  splitTx.Tx.TxSha(),
 					Index: uint32(poolIdx),
-					Tree:  dcrutil.TxTreeRegular,
+					Tree:  wire.TxTreeRegular,
 				},
 				amt:      poolTxOut.Value,
 				pkScript: poolTxOut.PkScript,
@@ -1224,7 +1224,7 @@ func (w *Wallet) purchaseTicketsInternal(dbtx walletdb.ReadWriteTx, req purchase
 				op: &wire.OutPoint{
 					Hash:  splitTx.Tx.TxSha(),
 					Index: uint32(userIdx),
-					Tree:  dcrutil.TxTreeRegular,
+					Tree:  wire.TxTreeRegular,
 				},
 				amt:      txOut.Value,
 				pkScript: txOut.PkScript,
@@ -1423,8 +1423,8 @@ func (w *Wallet) txToSStxInternal(dbtx walletdb.ReadWriteTx, pair map[string]dcr
 			}
 		}
 
-		if !(int8(input.Tree) == dcrutil.TxTreeRegular ||
-			int8(input.Tree) == dcrutil.TxTreeStake) {
+		if !(int8(input.Tree) == wire.TxTreeRegular ||
+			int8(input.Tree) == wire.TxTreeStake) {
 			return nil, dcrjson.Error{
 				Code:    dcrjson.ErrInvalidParameter.Code,
 				Message: "Invalid parameter, tx tree must be regular or stake",

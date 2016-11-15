@@ -1749,7 +1749,7 @@ func (s *Store) addMultisigOut(ns walletdb.ReadWriteBucket, rec *TxRecord,
 	p2shScript := rec.MsgTx.TxOut[index].PkScript
 	class, _, _, err := txscript.ExtractPkScriptAddrs(
 		rec.MsgTx.TxOut[index].Version, p2shScript, s.chainParams)
-	tree := dcrutil.TxTreeRegular
+	tree := wire.TxTreeRegular
 	isStakeType := class == txscript.StakeSubmissionTy ||
 		class == txscript.StakeSubChangeTy ||
 		class == txscript.StakeGenTy ||
@@ -1760,7 +1760,7 @@ func (s *Store) addMultisigOut(ns walletdb.ReadWriteBucket, rec *TxRecord,
 			str := "unknown stake output subclass encountered"
 			return storeError(ErrInput, str, nil)
 		}
-		tree = dcrutil.TxTreeStake
+		tree = wire.TxTreeStake
 	}
 	if class != txscript.ScriptHashTy {
 		str := "transaction output is wrong type (not p2sh)"
@@ -1937,7 +1937,7 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, addrmgrNs walletdb.ReadBuc
 					coinBaseCredits = append(coinBaseCredits, wire.OutPoint{
 						Hash:  rec.Hash,
 						Index: uint32(i),
-						Tree:  dcrutil.TxTreeRegular,
+						Tree:  wire.TxTreeRegular,
 					})
 
 					outPointKey := canonicalOutPoint(&rec.Hash, uint32(i))
@@ -2303,9 +2303,9 @@ func (s *Store) outputCreditInfo(ns walletdb.ReadBucket, op wire.OutPoint,
 		}
 	}
 
-	op.Tree = dcrutil.TxTreeRegular
+	op.Tree = wire.TxTreeRegular
 	if opCode != OP_NONSTAKE {
-		op.Tree = dcrutil.TxTreeStake
+		op.Tree = wire.TxTreeStake
 	}
 
 	var blockTime time.Time
@@ -2447,9 +2447,9 @@ func (s *Store) UnspentOutpoints(ns walletdb.ReadBucket) ([]wire.OutPoint, error
 		kC := keyCredit(&op.Hash, op.Index, block)
 		vC := existsRawCredit(ns, kC)
 		opCode := fetchRawCreditTagOpCode(vC)
-		op.Tree = dcrutil.TxTreeRegular
+		op.Tree = wire.TxTreeRegular
 		if opCode != OP_NONSTAKE {
-			op.Tree = dcrutil.TxTreeStake
+			op.Tree = wire.TxTreeStake
 		}
 
 		unspent = append(unspent, op)
@@ -2478,9 +2478,9 @@ func (s *Store) UnspentOutpoints(ns walletdb.ReadBucket) ([]wire.OutPoint, error
 		}
 
 		opCode := fetchRawUnminedCreditTagOpcode(v)
-		op.Tree = dcrutil.TxTreeRegular
+		op.Tree = wire.TxTreeRegular
 		if opCode != OP_NONSTAKE {
-			op.Tree = dcrutil.TxTreeStake
+			op.Tree = wire.TxTreeStake
 		}
 
 		unspentZC = append(unspentZC, op)
@@ -3062,9 +3062,9 @@ func (s *Store) unspentOutputsForAmount(ns, addrmgrNs walletdb.ReadBucket, neede
 
 		// Determine the txtree for the outpoint by whether or not it's
 		// using stake tagged outputs.
-		tree := dcrutil.TxTreeRegular
+		tree := wire.TxTreeRegular
 		if opcode != OP_NONSTAKE {
-			tree = dcrutil.TxTreeStake
+			tree = wire.TxTreeStake
 		}
 
 		mc := &minimalCredit{
@@ -3139,9 +3139,9 @@ func (s *Store) unspentOutputsForAmount(ns, addrmgrNs walletdb.ReadBucket, neede
 
 			// Determine the txtree for the outpoint by whether or not it's
 			// using stake tagged outputs.
-			tree := dcrutil.TxTreeRegular
+			tree := wire.TxTreeRegular
 			if opcode != OP_NONSTAKE {
-				tree = dcrutil.TxTreeStake
+				tree = wire.TxTreeStake
 			}
 
 			localOp := new(wire.OutPoint)
@@ -3338,9 +3338,9 @@ func (s *Store) MakeInputSource(ns, addrmgrNs walletdb.ReadBucket, account uint3
 
 			// Determine the txtree for the outpoint by whether or not it's
 			// using stake tagged outputs.
-			tree := dcrutil.TxTreeRegular
+			tree := wire.TxTreeRegular
 			if opcode != OP_NONSTAKE {
-				tree = dcrutil.TxTreeStake
+				tree = wire.TxTreeStake
 			}
 
 			var op wire.OutPoint
@@ -3418,9 +3418,9 @@ func (s *Store) MakeInputSource(ns, addrmgrNs walletdb.ReadBucket, account uint3
 
 			// Determine the txtree for the outpoint by whether or not it's
 			// using stake tagged outputs.
-			tree := dcrutil.TxTreeRegular
+			tree := wire.TxTreeRegular
 			if opcode != OP_NONSTAKE {
-				tree = dcrutil.TxTreeStake
+				tree = wire.TxTreeStake
 			}
 
 			var op wire.OutPoint
