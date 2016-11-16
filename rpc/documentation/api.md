@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 2.5.0
+Version: 3.0.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -88,6 +88,7 @@ dependencies and is always running.
 - [`OpenWallet`](#openwallet)
 - [`CloseWallet`](#closewallet)
 - [`StartConsensusRpc`](#startconsensusrpc)
+- [`DiscoverAddresses`](#discoveraddresses)
 
 **Shared messages:**
 
@@ -124,6 +125,9 @@ not saved in the wallet database and clients should make their users backup the
 seed, it needs to be passed as part of the request.
 
 After creating a wallet, the `WalletService` service begins running.
+
+Since API version 3.0.0, creating the wallet no longer automatically
+synchronizes the wallet to the consensus server if it was previously loaded.
 
 **Request:** `CreateWalletRequest`
 
@@ -163,6 +167,9 @@ wallet is protected by a public passphrase, it can not be successfully opened if
 the public passphrase parameter is missing or incorrect.
 
 After opening a wallet, the `WalletService` service begins running.
+
+Since API version 3.0.0, creating the wallet no longer automatically
+synchronizes the wallet to the consensus server if it was previously loaded.
 
 **Request:** `OpenWalletRequest`
 
@@ -210,9 +217,12 @@ ___
 
 #### `StartConsensusRpc`
 
-The `StartConsensusRpc` method is used to provide clients the ability to dynamically
-start the dcrd RPC client.  This RPC client is used for wallet syncing and
-publishing transactions to the Decred network.
+The `StartConsensusRpc` method is used to provide clients the ability to
+dynamically start the dcrd RPC client.  This RPC client is used for wallet
+syncing and publishing transactions to the Decred network.
+
+Since API version 3.0.0, starting the consensus server no longer automatically
+synchronizes the wallet to the consensus server if it was previously loaded.
 
 **Request:** `StartConsensusRpcRequest`
 
@@ -249,6 +259,83 @@ publishing transactions to the Decred network.
 
 **Stability:** Unstable: It is unknown if the consensus RPC client will remain
   used after the project gains SPV support.
+
+___
+
+#### `DiscoverAddresses`
+
+The `DiscoverAddresses` method performs BIP0044 address discovery for the wallet
+with optional account discovery using the loaded consensus RPC server (required
+for querying for known used addresses).  Account discovery requires the wallet
+to be unlocked in order to derive account hardened extended pubkeys, and thus
+the private passphrase must be passed as a parameter when performing this
+action.  Account discovery is typically only required when reseeding a wallet.
+
+**Request:** `DiscoverAddressesRequest`
+
+- `bool discover_accounts`: In addition to syncing addresses for already derived
+  accounts, also look ahead for other used accounts.
+
+- `bytes private_passphrase`: The private passphrase to unlock the wallet when
+  account discovery is enabled.
+
+**Response:** `DiscoverAddressesResponse`
+
+**Expected Errors:**
+
+- `FailedPrecondition`: The wallet or consensus RPC server has not been opened.
+
+- `InvalidArgument`: A zero length passphrase passphrase was specified when
+  account discovery was enabled, or the passphrase was incorrect.
+
+**Stability:** Unstable
+
+___
+
+#### `SubscribeToBlockNotifications`
+
+The `SubscribeToBlockNotifications` method associates the wallet with the
+consensus RPC server, subscribes the wallet for attached block and chain switch
+notifications, and causes the wallet to process these notifications in the
+background.
+
+**Request:** `SubscribeToBlockNotificationsRequest`
+
+**Response:** `SubscribeToBlockNotificationsResponse`
+
+**Expected Errors:**
+
+- `FailedPrecondition`: The wallet or consensus RPC server has not been opened.
+
+**Stability:** Unstable
+
+___
+
+#### `FetchHeaders`
+
+The `FetchHeaders` method fetches main chain block headers from the opened
+consensus server client.  The response includes the hash and height of the first
+new block added to the main chain, if any.  This is the block that a rescan
+should begin at.
+
+**Request:** `FetchHeadersRequest`
+
+**Response:** `FetchHeadersResponse`
+
+- `uint32 fetched_headers_count`: The number of new headers attached to the main
+  chain.
+
+- `bytes first_new_block_hash`: The hash of the first new block added to the
+  main chain.  Only non-null when `fetched_headers_count` is not zero.
+
+- `int32 first_new_block_height`: The height of the first new block added to the
+  main chain.  Only non-zero when `fetched_headers_count` is not zero.
+
+**Expected errors:**
+
+- `FailedPrecondition`: The wallet or consensus RPC server has not been opened.
+
+**Stability:** Unstable
 
 ## `WalletService`
 
@@ -1011,6 +1098,24 @@ these issues should disappear. They include the stake difficulty changing from t
 time it is queried, to the time the ticket is attempted to be purchased, to the 
 time the ticket hits the daemon mempool and out of date stake difficulties queried 
 from the daemon.
+
+___
+
+#### `LoadActiveDataFilters`
+
+The `LoadActiveDataFilters` method loads a transaction filter with the
+associated consensus RPC server for all active addresses and watched outpoints.
+
+**Request:** `LoadActiveDataFiltersRequest`
+
+**Response:** `LoadActiveDataFiltersResponse`
+
+**Expected errors:**
+
+- `FailedPrecondition`: There is no consensus server associated with the wallet.
+
+**Stability:** Unstable: this method requires an associated consensus server RPC
+client and functionality might move for any future SPV support.
 
 ___
 

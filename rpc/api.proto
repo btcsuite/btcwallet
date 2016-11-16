@@ -44,6 +44,7 @@ service WalletService {
 	rpc SignTransaction (SignTransactionRequest) returns (SignTransactionResponse);
 	rpc PublishTransaction (PublishTransactionRequest) returns (PublishTransactionResponse);
 	rpc PurchaseTickets(PurchaseTicketsRequest) returns (PurchaseTicketsResponse);
+	rpc LoadActiveDataFilters(LoadActiveDataFiltersRequest) returns (LoadActiveDataFiltersResponse);
 }
 
 service WalletLoaderService {
@@ -52,6 +53,9 @@ service WalletLoaderService {
 	rpc OpenWallet (OpenWalletRequest) returns (OpenWalletResponse);
 	rpc CloseWallet (CloseWalletRequest) returns (CloseWalletResponse);
 	rpc StartConsensusRpc (StartConsensusRpcRequest) returns (StartConsensusRpcResponse);
+	rpc DiscoverAddresses (DiscoverAddressesRequest) returns (DiscoverAddressesResponse);
+	rpc SubscribeToBlockNotifications (SubscribeToBlockNotificationsRequest) returns (SubscribeToBlockNotificationsResponse);
+	rpc FetchHeaders(FetchHeadersRequest) returns (FetchHeadersResponse);
 }
 
 message TransactionDetails {
@@ -305,6 +309,9 @@ message PurchaseTicketsResponse {
 	repeated bytes ticket_hashes = 1;
 }
 
+message LoadActiveDataFiltersRequest {}
+message LoadActiveDataFiltersResponse {}
+
 message TransactionNotificationsRequest {}
 message TransactionNotificationsResponse {
 	// Sorted by increasing height.  This is a repeated field so many new blocks
@@ -380,3 +387,19 @@ message StartConsensusRpcRequest {
 	bytes certificate = 4;
 }
 message StartConsensusRpcResponse {}
+
+message DiscoverAddressesRequest {
+	bool discover_accounts = 1;
+	bytes private_passphrase = 2;
+}
+message DiscoverAddressesResponse {}
+
+message SubscribeToBlockNotificationsRequest {}
+message SubscribeToBlockNotificationsResponse {}
+
+message FetchHeadersRequest {}
+message FetchHeadersResponse {
+	uint32 fetched_headers_count = 1;
+	bytes first_new_block_hash = 2;
+	int32 first_new_block_height = 3;
+}

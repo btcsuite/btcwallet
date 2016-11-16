@@ -46,9 +46,9 @@ import (
 
 // Public API version constants
 const (
-	semverString = "2.5.0"
-	semverMajor  = 2
-	semverMinor  = 5
+	semverString = "3.0.0"
+	semverMajor  = 3
+	semverMinor  = 0
 	semverPatch  = 0
 )
 
@@ -150,6 +150,17 @@ func StartWalletService(server *grpc.Server, wallet *wallet.Wallet) {
 	pb.RegisterWalletServiceServer(server, service)
 }
 
+// requireChainClient checks whether the wallet has been associated with the
+// consensus server RPC client, returning a gRPC error when it is not.
+func (s *walletServer) requireChainClient() (*chain.RPCClient, error) {
+	chainClient := s.wallet.ChainClient()
+	if chainClient == nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition,
+			"wallet is not associated with a consensus server RPC client")
+	}
+	return chainClient, nil
+}
+
 func (s *walletServer) Ping(ctx context.Context, req *pb.PingRequest) (*pb.PingResponse, error) {
 	return &pb.PingResponse{}, nil
 }
@@ -209,10 +220,9 @@ func (s *walletServer) RenameAccount(ctx context.Context, req *pb.RenameAccountR
 }
 
 func (s *walletServer) Rescan(req *pb.RescanRequest, svr pb.WalletService_RescanServer) error {
-	chainClient := s.wallet.ChainClient()
-	if chainClient == nil {
-		return grpc.Errorf(codes.FailedPrecondition,
-			"wallet is not associated with a consensus server RPC client")
+	chainClient, err := s.requireChainClient()
+	if err != nil {
+		return err
 	}
 
 	if req.BeginHeight < 0 {
@@ -354,10 +364,9 @@ func (s *walletServer) ImportPrivateKey(ctx context.Context, req *pb.ImportPriva
 			"Passed a rescan height without rescan set")
 	}
 
-	chainClient := s.wallet.ChainClient()
-	if req.Rescan && chainClient == nil {
-		return nil, grpc.Errorf(codes.FailedPrecondition,
-			"Cannot rescan without an associated consensus server RPC client")
+	chainClient, err := s.requireChainClient()
+	if err != nil {
+		return nil, err
 	}
 
 	_, err = s.wallet.ImportPrivateKey(wif)
@@ -396,10 +405,9 @@ func (s *walletServer) ImportScript(ctx context.Context,
 			"Passed a rescan height without rescan set")
 	}
 
-	chainClient := s.wallet.ChainClient()
-	if req.Rescan && chainClient == nil {
-		return nil, grpc.Errorf(codes.FailedPrecondition,
-			"Cannot rescan without an associated consensus server RPC client")
+	chainClient, err := s.requireChainClient()
+	if err != nil {
+		return nil, err
 	}
 
 	err = s.wallet.ImportScript(req.Script)
@@ -436,13 +444,19 @@ func (s *walletServer) Balance(ctx context.Context, req *pb.BalanceRequest) (
 
 func (s *walletServer) TicketPrice(ctx context.Context,
 	req *pb.TicketPriceRequest) (*pb.TicketPriceResponse, error) {
+
+	chainClient, err := s.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
 	tp, err := s.wallet.StakeDifficulty()
 	if err != nil {
 		return nil, grpc.Errorf(codes.FailedPrecondition,
 			"Failed to query stake difficulty: %s", err.Error())
 	}
 
-	_, blockHeight, err := s.wallet.ChainClient().GetBestBlock()
+	_, blockHeight, err := chainClient.GetBestBlock()
 	if err != nil {
 		return nil, grpc.Errorf(codes.FailedPrecondition,
 			"Failed to query block height: %s", err.Error())
@@ -800,6 +814,22 @@ func (s *walletServer) PurchaseTickets(ctx context.Context,
 	return &pb.PurchaseTicketsResponse{TicketHashes: hashes}, nil
 }
 
+func (s *walletServer) LoadActiveDataFilters(ctx context.Context, req *pb.LoadActiveDataFiltersRequest) (
+	*pb.LoadActiveDataFiltersResponse, error) {
+
+	chainClient, err := s.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.wallet.LoadActiveDataFilters(chainClient)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	return &pb.LoadActiveDataFiltersResponse{}, nil
+}
+
 func marshalTransactionInputs(v []wallet.TransactionSummaryInput) []*pb.TransactionDetails_Input {
 	inputs := make([]*pb.TransactionDetails_Input, len(v))
 	for i := range v {
@@ -995,16 +1025,10 @@ func (s *loaderServer) CreateWallet(ctx context.Context, req *pb.CreateWalletReq
 		pubPassphrase = []byte(wallet.InsecurePubPassphrase)
 	}
 
-	wallet, err := s.loader.CreateNewWallet(pubPassphrase, req.PrivatePassphrase, req.Seed)
+	_, err := s.loader.CreateNewWallet(pubPassphrase, req.PrivatePassphrase, req.Seed)
 	if err != nil {
 		return nil, translateError(err)
 	}
-
-	s.mu.Lock()
-	if s.rpcClient != nil {
-		wallet.SynchronizeRPC(s.rpcClient)
-	}
-	s.mu.Unlock()
 
 	return &pb.CreateWalletResponse{}, nil
 }
@@ -1018,16 +1042,10 @@ func (s *loaderServer) OpenWallet(ctx context.Context, req *pb.OpenWalletRequest
 		pubPassphrase = []byte(wallet.InsecurePubPassphrase)
 	}
 
-	wallet, err := s.loader.OpenExistingWallet(pubPassphrase, false)
+	_, err := s.loader.OpenExistingWallet(pubPassphrase, false)
 	if err != nil {
 		return nil, translateError(err)
 	}
-
-	s.mu.Lock()
-	if s.rpcClient != nil {
-		wallet.SynchronizeRPC(s.rpcClient)
-	}
-	s.mu.Unlock()
 
 	return &pb.OpenWalletResponse{}, nil
 }
@@ -1100,9 +1118,99 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, req *pb.StartConse
 
 	s.rpcClient = rpcClient
 
-	if walletLoaded {
-		wallet.SynchronizeRPC(rpcClient)
+	return &pb.StartConsensusRpcResponse{}, nil
+}
+
+func (s *loaderServer) DiscoverAddresses(ctx context.Context, req *pb.DiscoverAddressesRequest) (
+	*pb.DiscoverAddressesResponse, error) {
+
+	wallet, ok := s.loader.LoadedWallet()
+	if !ok {
+		return nil, grpc.Errorf(codes.FailedPrecondition, "wallet has not been loaded")
 	}
 
-	return &pb.StartConsensusRpcResponse{}, nil
+	s.mu.Lock()
+	chainClient := s.rpcClient
+	s.mu.Unlock()
+	if chainClient == nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition, "consensus server RPC client has not been loaded")
+	}
+
+	if req.DiscoverAccounts && len(req.PrivatePassphrase) == 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument, "private passphrase is required for discovering accounts")
+	}
+
+	if req.DiscoverAccounts {
+		lock := make(chan time.Time, 1)
+		defer func() {
+			lock <- time.Time{}
+			zero.Bytes(req.PrivatePassphrase)
+		}()
+		err := wallet.Unlock(req.PrivatePassphrase, lock)
+		if err != nil {
+			return nil, translateError(err)
+		}
+	}
+
+	err := wallet.DiscoverActiveAddresses(chainClient, req.DiscoverAccounts)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	return &pb.DiscoverAddressesResponse{}, nil
+}
+
+func (s *loaderServer) SubscribeToBlockNotifications(ctx context.Context, req *pb.SubscribeToBlockNotificationsRequest) (
+	*pb.SubscribeToBlockNotificationsResponse, error) {
+
+	wallet, ok := s.loader.LoadedWallet()
+	if !ok {
+		return nil, grpc.Errorf(codes.FailedPrecondition, "wallet has not been loaded")
+	}
+
+	s.mu.Lock()
+	chainClient := s.rpcClient
+	s.mu.Unlock()
+	if chainClient == nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition, "consensus server RPC client has not been loaded")
+	}
+
+	err := chainClient.NotifyBlocks()
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	wallet.AssociateConsensusRPC(chainClient)
+
+	return &pb.SubscribeToBlockNotificationsResponse{}, nil
+}
+
+func (s *loaderServer) FetchHeaders(ctx context.Context, req *pb.FetchHeadersRequest) (
+	*pb.FetchHeadersResponse, error) {
+
+	wallet, ok := s.loader.LoadedWallet()
+	if !ok {
+		return nil, grpc.Errorf(codes.FailedPrecondition, "wallet has not been loaded")
+	}
+
+	s.mu.Lock()
+	chainClient := s.rpcClient
+	s.mu.Unlock()
+	if chainClient == nil {
+		return nil, grpc.Errorf(codes.FailedPrecondition, "consensus server RPC client has not been loaded")
+	}
+
+	fetchedHeaderCount, rescanFrom, rescanFromHeight, err := wallet.FetchHeaders(chainClient)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	res := &pb.FetchHeadersResponse{
+		FetchedHeadersCount: uint32(fetchedHeaderCount),
+	}
+	if fetchedHeaderCount > 0 {
+		res.FirstNewBlockHash = rescanFrom[:]
+		res.FirstNewBlockHeight = rescanFromHeight
+	}
+	return res, nil
 }

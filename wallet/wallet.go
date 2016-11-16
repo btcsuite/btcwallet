@@ -439,8 +439,8 @@ func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 	// make changes from the RPC client) and not have to stop and
 	// restart them each time the client disconnects and reconnets.
 	w.wg.Add(2)
-	go w.handleChainNotifications()
-	go w.handleChainVotingNotifications()
+	go w.handleChainNotifications(chainClient)
+	go w.handleChainVotingNotifications(chainClient)
 
 	// Request notifications for winning tickets.
 	err := chainClient.NotifyWinningTickets()
@@ -633,6 +633,29 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]dcrutil.Address, []wire.Out
 	return addrs, unspent, err
 }
 
+// LoadActiveDataFilters loads the consensus RPC server's websocket client
+// transaction filter with all active addresses and unspent outpoints for this
+// wallet.
+func (w *Wallet) LoadActiveDataFilters(chainClient *chain.RPCClient) error {
+	log.Infof("Loading active addresses and unspent outputs...")
+	var (
+		addrs   []dcrutil.Address
+		unspent []wire.OutPoint
+	)
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		var err error
+		addrs, unspent, err = w.activeData(dbtx)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Registering for transaction notifications for %v address(es) "+
+		"and %v output(s)", len(addrs), len(unspent))
+	return chainClient.LoadTxFilter(true, addrs, unspent)
+}
+
 // createHeaderData creates the header data to process from hex-encoded
 // serialized block headers.
 func createHeaderData(headers []string) ([]wtxmgr.BlockHeaderData, error) {
@@ -706,51 +729,13 @@ func (w *Wallet) fetchHeaders(chainClient *chain.RPCClient) (int, error) {
 	}
 }
 
-// syncWithChain brings the wallet up to date with the current chain server
-// connection.  It creates a rescan request and blocks until the rescan has
-// finished.
-func (w *Wallet) syncWithChain() error {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return err
-	}
-
-	// Request notifications for connected and disconnected blocks.
-	err = chainClient.NotifyBlocks()
-	if err != nil {
-		return err
-	}
-
-	// Discover any addresses for this wallet that have not yet been created.
-	err = w.discoverActiveAddresses(chainClient, w.initiallyUnlocked)
-	if err != nil {
-		return err
-	}
-
-	log.Infof("Loading active addresses and unspent outputs...")
-	var (
-		startHash   chainhash.Hash
-		startHeight int32
-		addrs       []dcrutil.Address
-		unspent     []wire.OutPoint
-	)
-	err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
-		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
-		startHash, startHeight = w.TxStore.MainChainTip(txmgrNs)
-		var err error
-		addrs, unspent, err = w.activeData(dbtx)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-
-	log.Infof("Registering for transaction notifications for %v address(es) "+
-		"and %v output(s)", len(addrs), len(unspent))
-	err = chainClient.LoadTxFilter(true, addrs, unspent)
-	if err != nil {
-		return err
-	}
+// FetchHeaders fetches headers from the consensus RPC server and updates the
+// main chain tip with the latest block.  The number of new headers fetched is
+// returned, along with the hash of the first previously-unseen block hash now
+// in the main chain.  This is the block a rescan should begin at (inclusive),
+// and is only relevant when the number of fetched headers is not zero.
+func (w *Wallet) FetchHeaders(chainClient *chain.RPCClient) (count int,
+	rescanFrom chainhash.Hash, rescanFromHeight int32, err error) {
 
 	// Unfortunately, getheaders is broken and needs a workaround when wallet's
 	// previous main chain is now a side chain.  Until this is fixed, do what
@@ -760,11 +745,16 @@ func (w *Wallet) syncWithChain() error {
 	//
 	// See https://github.com/decred/dcrd/issues/427 for details.  This hack
 	// should be dumped once fixed.
+	var (
+		commonAncestor       chainhash.Hash
+		commonAncestorHeight int32
+	)
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		hash, height := w.TxStore.MainChainTip(txmgrNs)
-		oldHeight := height
+
+		commonAncestor, commonAncestorHeight = w.TxStore.MainChainTip(txmgrNs)
+		hash, height := commonAncestor, commonAncestorHeight
 
 		for height != 0 {
 			mainChainHash, err := chainClient.GetBlockHash(int64(height))
@@ -781,7 +771,7 @@ func (w *Wallet) syncWithChain() error {
 		}
 
 		// No rollback necessary when already on the main chain.
-		if height == oldHeight {
+		if height == commonAncestorHeight {
 			return nil
 		}
 
@@ -791,15 +781,18 @@ func (w *Wallet) syncWithChain() error {
 		return w.TxStore.Rollback(txmgrNs, addrmgrNs, height+1)
 	})
 	if err != nil {
-		return err
+		return
 	}
 
 	log.Infof("Fetching headers")
 	fetchedHeaderCount, err := w.fetchHeaders(chainClient)
 	if err != nil {
-		return err
+		return
 	}
 	log.Infof("Fetched %v new header(s)", fetchedHeaderCount)
+
+	var rescanStart chainhash.Hash
+	var rescanStartHeight int32
 
 	if fetchedHeaderCount != 0 {
 		// Find the common ancestor of the previous tip before fetching headers,
@@ -810,27 +803,67 @@ func (w *Wallet) syncWithChain() error {
 			txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 			for {
 				hash, err := w.TxStore.GetMainChainBlockHashForHeight(
-					txmgrNs, startHeight)
+					txmgrNs, commonAncestorHeight)
 				if err != nil {
 					return err
 				}
-				if startHash == hash {
-					return nil
+				if commonAncestor == hash {
+					break
 				}
 				header, err := w.TxStore.GetSerializedBlockHeader(
-					txmgrNs, &startHash)
+					txmgrNs, &commonAncestor)
 				if err != nil {
 					return err
 				}
-				copy(startHash[:], wtxmgr.ExtractBlockHeaderParentHash(header))
-				startHeight--
+				copy(commonAncestor[:], wtxmgr.ExtractBlockHeaderParentHash(header))
+				commonAncestorHeight--
 			}
+
+			rescanStartHeight = commonAncestorHeight + 1
+			rescanStart, err = w.TxStore.GetMainChainBlockHashForHeight(
+				txmgrNs, rescanStartHeight)
+			return err
 		})
 		if err != nil {
-			return err
+			return
 		}
+	}
 
-		err = <-w.Rescan(chainClient, &startHash)
+	return fetchedHeaderCount, rescanStart, rescanStartHeight, nil
+}
+
+// syncWithChain brings the wallet up to date with the current chain server
+// connection.  It creates a rescan request and blocks until the rescan has
+// finished.
+func (w *Wallet) syncWithChain(chainClient *chain.RPCClient) error {
+	// Request notifications for connected and disconnected blocks.
+	err := chainClient.NotifyBlocks()
+	if err != nil {
+		return err
+	}
+
+	// Discover any addresses for this wallet that have not yet been created.
+	err = w.DiscoverActiveAddresses(chainClient, w.initiallyUnlocked)
+	if err != nil {
+		return err
+	}
+
+	// Load transaction filters with all active addresses and watched outpoints.
+	err = w.LoadActiveDataFilters(chainClient)
+	if err != nil {
+		return err
+	}
+
+	// Fetch headers for unseen blocks in the main chain, determine whether a
+	// rescan is necessary, and when to begin it.
+	fetchedHeaderCount, rescanStart, _, err := w.FetchHeaders(chainClient)
+	if err != nil {
+		return err
+	}
+
+	// Rescan when necessary.
+	if fetchedHeaderCount != 0 {
+		err = <-w.Rescan(chainClient, &rescanStart)
 		if err != nil {
 			return err
 		}

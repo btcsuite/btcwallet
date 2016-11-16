@@ -500,10 +500,20 @@ func (w *Wallet) scanAddressIndex(ctx *discoveryContext, start, end uint32,
 	return 0, nil, nil
 }
 
-// discoverActiveAddresses accesses the consensus RPC server to discover all the
-// addresses that have been used by an HD keychain stemming from this wallet in
-// the default account.
-func (w *Wallet) discoverActiveAddresses(chainClient *chain.RPCClient, discoverAccts bool) error {
+// DiscoverActiveAddresses accesses the consensus RPC server to discover all the
+// addresses that have been used by an HD keychain stemming from this wallet. If
+// discoverAccts is true, used accounts will be discovered as well.  This
+// feature requires the wallet to be unlocked in order to derive hardened
+// account extended pubkeys.
+//
+// A transaction filter (re)load and rescan should be performed after discovery.
+//
+// BUG(jrick): This function reassigns address pools, and if called multiple
+// times it would not be unlikely to see address reuse due to losing the address
+// pool's derivation index.  I am punting on this for now.  In the future,
+// address pools should be removed and all derivation should be done solely by
+// waddrmgr.  Use with caution.
+func (w *Wallet) DiscoverActiveAddresses(chainClient *chain.RPCClient, discoverAccts bool) error {
 	log.Infof("Beginning a rescan of active addresses using the daemon. " +
 		"This may take a while.")
 

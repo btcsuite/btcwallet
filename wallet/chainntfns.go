@@ -25,25 +25,7 @@ import (
 	"github.com/decred/dcrwallet/wtxmgr"
 )
 
-// handleChainNotifications is the major chain notification handler that
-// receives websocket notifications about the blockchain.
-func (w *Wallet) handleChainNotifications() {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		log.Errorf("handleChainNotifications called without RPC client")
-		w.wg.Done()
-		return
-	}
-
-	// At the moment there is no recourse if the rescan fails for
-	// some reason, however, the wallet will not be marked synced
-	// and many methods will error early since the wallet is known
-	// to be out of date.
-	err = w.syncWithChain()
-	if err != nil && !w.ShuttingDown() {
-		log.Warnf("Unable to synchronize wallet to chain: %v", err)
-	}
-
+func (w *Wallet) handleConsensusRPCNotifications(chainClient *chain.RPCClient) {
 	for n := range chainClient.Notifications() {
 		var notificationName string
 		var err error
@@ -70,6 +52,43 @@ func (w *Wallet) handleChainNotifications() {
 				"(name: `%s`, detail: `%v`)", notificationName, err)
 		}
 	}
+}
+
+// AssociateConsensusRPC associates the wallet with the consensus JSON-RPC
+// server and begins handling all notifications in a background goroutine.  Any
+// previously associated client, if it is a different instance than the passed
+// client, is stopped.
+func (w *Wallet) AssociateConsensusRPC(chainClient *chain.RPCClient) {
+	w.chainClientLock.Lock()
+	defer w.chainClientLock.Unlock()
+	if w.chainClient != nil {
+		if w.chainClient != chainClient {
+			w.chainClient.Stop()
+		}
+	}
+
+	w.chainClient = chainClient
+
+	w.wg.Add(1)
+	go func() {
+		w.handleConsensusRPCNotifications(chainClient)
+		w.wg.Done()
+	}()
+}
+
+// handleChainNotifications is the major chain notification handler that
+// receives websocket notifications about the blockchain.
+func (w *Wallet) handleChainNotifications(chainClient *chain.RPCClient) {
+	// At the moment there is no recourse if the rescan fails for
+	// some reason, however, the wallet will not be marked synced
+	// and many methods will error early since the wallet is known
+	// to be out of date.
+	err := w.syncWithChain(chainClient)
+	if err != nil && !w.ShuttingDown() {
+		log.Warnf("Unable to synchronize wallet to chain: %v", err)
+	}
+
+	w.handleConsensusRPCNotifications(chainClient)
 	w.wg.Done()
 }
 
@@ -861,13 +880,7 @@ func (w *Wallet) processTransaction(dbtx walletdb.ReadWriteTx, serializedTx []by
 	return nil
 }
 
-func (w *Wallet) handleChainVotingNotifications() {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		log.Error(err)
-		w.wg.Done()
-		return
-	}
+func (w *Wallet) handleChainVotingNotifications(chainClient *chain.RPCClient) {
 	for n := range chainClient.NotificationsVoting() {
 		var err error
 		strErrType := ""
