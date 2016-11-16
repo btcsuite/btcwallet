@@ -306,7 +306,7 @@ func (w *Wallet) onBlockConnected(dbtx walletdb.ReadWriteTx, serializedBlockHead
 		log.Debugf("Insufficient funds to auto-purchase maximum number " +
 			"of tickets")
 	default:
-		log.Errorf("Failed to perform automatic picket purchasing: %v", err)
+		log.Errorf("Failed to perform automatic ticket purchasing: %v", err)
 	}
 
 	// Prune all expired transactions and all stake tickets that no longer
