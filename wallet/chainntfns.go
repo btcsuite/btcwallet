@@ -318,6 +318,8 @@ func (w *Wallet) onBlockConnected(dbtx walletdb.ReadWriteTx, serializedBlockHead
 			"connecting block height %v: %s", height, err.Error())
 	}
 
+	w.NtfnServer.sendAttachedBlockNotification(dbtx)
+
 	return nil
 }
 

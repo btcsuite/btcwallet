@@ -33,8 +33,10 @@ import (
 // order wallet created them, but there is no guaranteed synchronization between
 // different clients.
 type NotificationServer struct {
-	transactions   []chan *TransactionNotifications
-	currentTxNtfn  *TransactionNotifications // coalesce this since wallet does not add mined txs together
+	transactions []chan *TransactionNotifications
+	// Coalesce transaction notifications since wallet previously did not add
+	// mined txs together.  Now it does and this can be rewritten.
+	currentTxNtfn  *TransactionNotifications
 	spentness      map[uint32][]chan *SpentnessNotifications
 	accountClients []chan *AccountNotification
 	mu             sync.Mutex // Only protects registered client channels
@@ -245,16 +247,10 @@ func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx, detail
 	}
 	n := len(s.currentTxNtfn.AttachedBlocks)
 	if n == 0 || *s.currentTxNtfn.AttachedBlocks[n-1].Hash != block.Hash {
-		s.currentTxNtfn.AttachedBlocks = append(s.currentTxNtfn.AttachedBlocks, Block{
-			Hash:      &block.Hash,
-			Height:    block.Height,
-			Timestamp: block.Time.Unix(),
-		})
-		n++
+		return
 	}
-	txs := s.currentTxNtfn.AttachedBlocks[n-1].Transactions
-	s.currentTxNtfn.AttachedBlocks[n-1].Transactions =
-		append(txs, makeTxSummary(dbtx, s.wallet, details))
+	txs := &s.currentTxNtfn.AttachedBlocks[n-1].Transactions
+	*txs = append(*txs, makeTxSummary(dbtx, s.wallet, details))
 }
 
 func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wire.BlockHeader, blockHash *chainhash.Hash) {
@@ -272,21 +268,9 @@ func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wi
 			Timestamp: block.Timestamp.Unix(),
 		})
 	}
+}
 
-	// For now (until notification coalescing isn't necessary) just use
-	// chain length to determine if this is the new best block.
-	if len(s.currentTxNtfn.DetachedBlocks) >= len(s.currentTxNtfn.AttachedBlocks) {
-		return
-	}
-
-	defer s.mu.Unlock()
-	s.mu.Lock()
-	clients := s.transactions
-	if len(clients) == 0 {
-		s.currentTxNtfn = nil
-		return
-	}
-
+func (s *NotificationServer) sendAttachedBlockNotification(dbtx walletdb.ReadTx) {
 	// The UnminedTransactions field is intentionally not set.  Since the
 	// hashes of all detached blocks are reported, and all transactions
 	// moved from a mined block back to unconfirmed are either in the
@@ -313,7 +297,9 @@ func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wi
 	}
 	s.currentTxNtfn.NewBalances = flattenBalanceMap(bals)
 
-	for _, c := range clients {
+	defer s.mu.Unlock()
+	s.mu.Lock()
+	for _, c := range s.transactions {
 		c <- s.currentTxNtfn
 	}
 	s.currentTxNtfn = nil
