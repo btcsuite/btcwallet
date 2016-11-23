@@ -17,10 +17,9 @@ import (
 // DefaultRelayFeePerKb is the default minimum relay fee policy for a mempool.
 const DefaultRelayFeePerKb btcutil.Amount = 1e3
 
-// IsDustAmount determines whether a transaction output value and script length would
-// cause the output to be considered dust.  Transactions with dust outputs are
-// not standard and are rejected by mempools with default policies.
-func IsDustAmount(amount btcutil.Amount, scriptSize int, relayFeePerKb btcutil.Amount) bool {
+// GetDustThreshold is used to define the amount below which output will be
+// determined as dust. Threshold is determined as 3 times the relay fee.
+func GetDustThreshold(scriptSize int, relayFeePerKb btcutil.Amount) btcutil.Amount {
 	// Calculate the total (estimated) cost to the network.  This is
 	// calculated using the serialize size of the output plus the serial
 	// size of a transaction input which redeems it.  The output is assumed
@@ -30,9 +29,16 @@ func IsDustAmount(amount btcutil.Amount, scriptSize int, relayFeePerKb btcutil.A
 	totalSize := 8 + wire.VarIntSerializeSize(uint64(scriptSize)) +
 		scriptSize + 148
 
-	// Dust is defined as an output value where the total cost to the network
-	// (output size + input size) is greater than 1/3 of the relay fee.
-	return int64(amount)*1000/(3*int64(totalSize)) < int64(relayFeePerKb)
+	byteFee := relayFeePerKb / 1000
+	relayFee := btcutil.Amount(totalSize) * byteFee
+	return 3 * relayFee
+}
+
+// IsDustAmount determines whether a transaction output value and script length would
+// cause the output to be considered dust.  Transactions with dust outputs are
+// not standard and are rejected by mempools with default policies.
+func IsDustAmount(amount btcutil.Amount, scriptSize int, relayFeePerKb btcutil.Amount) bool {
+	return amount < GetDustThreshold(scriptSize, relayFeePerKb)
 }
 
 // IsDustOutput determines whether a transaction output is considered dust.
