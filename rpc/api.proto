@@ -23,7 +23,7 @@ service WalletService {
 	rpc AccountNumber (AccountNumberRequest) returns (AccountNumberResponse);
 	rpc Accounts (AccountsRequest) returns (AccountsResponse);
 	rpc Balance (BalanceRequest) returns (BalanceResponse);
-	rpc GetTransactions (GetTransactionsRequest) returns (GetTransactionsResponse);
+	rpc GetTransactions (GetTransactionsRequest) returns (stream GetTransactionsResponse);
 	rpc TicketPrice (TicketPriceRequest) returns (TicketPriceResponse);
 	rpc StakeInfo (StakeInfoRequest) returns (StakeInfoResponse);
 
@@ -209,7 +209,7 @@ message GetTransactionsRequest {
 	// TODO: limit max number of txs?
 }
 message GetTransactionsResponse {
-	repeated BlockDetails mined_transactions = 1;
+	BlockDetails mined_transactions = 1;
 	repeated TransactionDetails unmined_transactions = 2;
 }
 

@@ -18,7 +18,6 @@ package rpcserver
 
 import (
 	"bytes"
-	"errors"
 	"sync"
 	"time"
 
@@ -46,10 +45,10 @@ import (
 
 // Public API version constants
 const (
-	semverString = "3.0.1"
-	semverMajor  = 3
+	semverString = "4.0.0"
+	semverMajor  = 4
 	semverMinor  = 0
-	semverPatch  = 1
+	semverPatch  = 0
 )
 
 // translateError creates a new gRPC error with an appropiate error code for
@@ -559,30 +558,20 @@ func (s *walletServer) FundTransaction(ctx context.Context, req *pb.FundTransact
 	}, nil
 }
 
-func marshalGetTransactionsResult(wresp *wallet.GetTransactionsResult) (
-	*pb.GetTransactionsResponse, error) {
-
-	resp := &pb.GetTransactionsResponse{
-		MinedTransactions:   marshalBlocks(wresp.MinedTransactions),
-		UnminedTransactions: marshalTransactionDetails(wresp.UnminedTransactions),
-	}
-	return resp, nil
-}
-
 // BUGS:
 // - MinimumRecentTransactions is ignored.
 // - Wrong error codes when a block height or hash is not recognized
-func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransactionsRequest) (
-	resp *pb.GetTransactionsResponse, err error) {
+func (s *walletServer) GetTransactions(req *pb.GetTransactionsRequest,
+	server pb.WalletService_GetTransactionsServer) error {
 
 	var startBlock, endBlock *wallet.BlockIdentifier
 	if req.StartingBlockHash != nil && req.StartingBlockHeight != 0 {
-		return nil, errors.New(
+		return grpc.Errorf(codes.InvalidArgument,
 			"starting block hash and height may not be specified simultaneously")
 	} else if req.StartingBlockHash != nil {
 		startBlockHash, err := chainhash.NewHash(req.StartingBlockHash)
 		if err != nil {
-			return nil, grpc.Errorf(codes.InvalidArgument, "%s", err.Error())
+			return grpc.Errorf(codes.InvalidArgument, "%s", err.Error())
 		}
 		startBlock = wallet.NewBlockIdentifierFromHash(startBlockHash)
 	} else if req.StartingBlockHeight != 0 {
@@ -590,12 +579,12 @@ func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransacti
 	}
 
 	if req.EndingBlockHash != nil && req.EndingBlockHeight != 0 {
-		return nil, grpc.Errorf(codes.InvalidArgument,
+		return grpc.Errorf(codes.InvalidArgument,
 			"ending block hash and height may not be specified simultaneously")
 	} else if req.EndingBlockHash != nil {
 		endBlockHash, err := chainhash.NewHash(req.EndingBlockHash)
 		if err != nil {
-			return nil, grpc.Errorf(codes.InvalidArgument, "%s", err.Error())
+			return grpc.Errorf(codes.InvalidArgument, "%s", err.Error())
 		}
 		endBlock = wallet.NewBlockIdentifierFromHash(endBlockHash)
 	} else if req.EndingBlockHeight != 0 {
@@ -605,24 +594,42 @@ func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransacti
 	var minRecentTxs int
 	if req.MinimumRecentTransactions != 0 {
 		if endBlock != nil {
-			return nil, grpc.Errorf(codes.InvalidArgument,
+			return grpc.Errorf(codes.InvalidArgument,
 				"ending block and minimum number of recent transactions "+
 					"may not be specified simultaneously")
 		}
 		minRecentTxs = int(req.MinimumRecentTransactions)
 		if minRecentTxs < 0 {
-			return nil, grpc.Errorf(codes.InvalidArgument,
+			return grpc.Errorf(codes.InvalidArgument,
 				"minimum number of recent transactions may not be negative")
 		}
 	}
 
 	_ = minRecentTxs
 
-	gtr, err := s.wallet.GetTransactions(startBlock, endBlock, ctx.Done())
+	gtr, err := s.wallet.GetTransactions(startBlock, endBlock, server.Context().Done())
 	if err != nil {
-		return nil, translateError(err)
+		return translateError(err)
 	}
-	return marshalGetTransactionsResult(gtr)
+	for i := range gtr.MinedTransactions {
+		resp := &pb.GetTransactionsResponse{
+			MinedTransactions: marshalBlock(&gtr.MinedTransactions[i]),
+		}
+		err = server.Send(resp)
+		if err != nil {
+			return err
+		}
+	}
+	if len(gtr.UnminedTransactions) > 0 {
+		resp := &pb.GetTransactionsResponse{
+			UnminedTransactions: marshalTransactionDetails(gtr.UnminedTransactions),
+		}
+		err = server.Send(resp)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *walletServer) ChangePassphrase(ctx context.Context, req *pb.ChangePassphraseRequest) (
@@ -872,16 +879,19 @@ func marshalTransactionDetails(v []wallet.TransactionSummary) []*pb.TransactionD
 	return txs
 }
 
+func marshalBlock(v *wallet.Block) *pb.BlockDetails {
+	return &pb.BlockDetails{
+		Hash:         v.Hash[:],
+		Height:       v.Height,
+		Timestamp:    v.Timestamp,
+		Transactions: marshalTransactionDetails(v.Transactions),
+	}
+}
+
 func marshalBlocks(v []wallet.Block) []*pb.BlockDetails {
 	blocks := make([]*pb.BlockDetails, len(v))
 	for i := range v {
-		block := &v[i]
-		blocks[i] = &pb.BlockDetails{
-			Hash:         block.Hash[:],
-			Height:       block.Height,
-			Timestamp:    block.Timestamp,
-			Transactions: marshalTransactionDetails(block.Transactions),
-		}
+		blocks[i] = marshalBlock(&v[i])
 	}
 	return blocks
 }

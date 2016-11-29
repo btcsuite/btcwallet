@@ -1,6 +1,6 @@
 # RPC API Specification
 
-Version: 3.0.1
+Version: 4.0.0
 
 **Note:** This document assumes the reader is familiar with gRPC concepts.
 Refer to the [gRPC Concepts documentation](http://www.grpc.io/docs/guides/concepts.html)
@@ -515,6 +515,11 @@ hashes of the minimum and maximum block.  Transaction results are grouped
 grouped by the block they are mined in, or grouped together with other unmined
 transactions.
 
+To avoid exceeding the maximum message size with the return result, a stream is
+used to break up the response into several messages.  A single message will have
+results of a single block and no unmined transactions, or only unmined
+transactions (and no mined transactions).
+
 **Request:** `GetTransactionsRequest`
 
 - `bytes starting_block_hash`: The block hash of the block to begin including
@@ -540,9 +545,9 @@ transactions.
   used and transactions through the best block and all unmined transactions are
   included.
 
-**Response:** `GetTransactionsResponse`
+**Response:** `stream GetTransactionsResponse`
 
-- `repeated BlockDetails mined_transactions`: All mined transactions, organized
+- `BlockDetails mined_transactions`: All mined transactions, organized
   by blocks in the order they appear in the blockchain.
 
   The `BlockDetails` message is used by other methods and is documented
