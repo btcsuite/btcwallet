@@ -173,7 +173,10 @@ func (w *Wallet) extendMainChain(dbtx walletdb.ReadWriteTx, block *wtxmgr.BlockH
 
 	// Notify interested clients of the connected block.
 	var header wire.BlockHeader
-	header.Deserialize(bytes.NewReader(block.SerializedHeader[:]))
+	err = header.Deserialize(bytes.NewReader(block.SerializedHeader[:]))
+	if err != nil {
+		return err
+	}
 	w.NtfnServer.notifyAttachedBlock(dbtx, &header, &block.BlockHash)
 
 	blockMeta, err := w.TxStore.GetBlockMetaForHash(txmgrNs, &block.BlockHash)
@@ -542,11 +545,14 @@ func (w *Wallet) processTransaction(dbtx walletdb.ReadWriteTx, serializedTx []by
 		if serializedHeader != nil {
 			txInHash := tx.MsgTx().TxIn[1].PreviousOutPoint.Hash
 			if w.StakeMgr.CheckHashInStore(&txInHash) {
-				w.StakeMgr.InsertSSGen(stakemgrNs, &blockMeta.Block.Hash,
+				err = w.StakeMgr.InsertSSGen(stakemgrNs, &blockMeta.Block.Hash,
 					int64(height),
 					&txHash,
 					w.VoteBits.Bits,
 					&txInHash)
+				if err != nil {
+					return err
+				}
 			}
 
 			// If we're running as a stake pool, insert
@@ -594,10 +600,13 @@ func (w *Wallet) processTransaction(dbtx walletdb.ReadWriteTx, serializedTx []by
 			txInHash := tx.MsgTx().TxIn[0].PreviousOutPoint.Hash
 
 			if w.StakeMgr.CheckHashInStore(&txInHash) {
-				w.StakeMgr.InsertSSRtx(stakemgrNs, &blockMeta.Hash,
+				err = w.StakeMgr.InsertSSRtx(stakemgrNs, &blockMeta.Hash,
 					int64(height),
 					&txHash,
 					&txInHash)
+				if err != nil {
+					return err
+				}
 			}
 
 			// If we're running as a stake pool, insert

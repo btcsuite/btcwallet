@@ -2138,15 +2138,23 @@ func upgradeToVersion3(ns walletdb.ReadWriteBucket, chainParams *chaincfg.Params
 	type kvpair struct{ k, v []byte }
 	var blockRecsToUpgrade []kvpair
 	blockRecordsBucket := ns.NestedReadWriteBucket(bucketBlocks)
-	blockRecordsBucket.ForEach(func(k, v []byte) error {
+	err = blockRecordsBucket.ForEach(func(k, v []byte) error {
 		blockRecsToUpgrade = append(blockRecsToUpgrade, kvpair{k, v})
 		return nil
 	})
+	if err != nil {
+		const str = "failed to iterate block records bucket"
+		return storeError(ErrDatabase, str, err)
+	}
 	for _, kvp := range blockRecsToUpgrade {
 		v := make([]byte, len(kvp.v)+1)
 		copy(v, kvp.v[:42])
 		copy(v[43:], kvp.v[42:])
-		blockRecordsBucket.Put(kvp.k, v)
+		err = blockRecordsBucket.Put(kvp.k, v)
+		if err != nil {
+			const str = "failed to update block record value"
+			return storeError(ErrDatabase, str, err)
+		}
 	}
 
 	// Insert the genesis block header.

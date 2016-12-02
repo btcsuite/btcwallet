@@ -1733,8 +1733,7 @@ func (s *Store) addMultisigOut(ns walletdb.ReadWriteBucket, rec *TxRecord,
 		if blockHashV.IsEqual(empty) {
 			setMultisigOutMined(val, block.Block.Hash,
 				uint32(block.Block.Height))
-			putMultisigOutRawValues(ns, key, val)
-			return nil
+			return putMultisigOutRawValues(ns, key, val)
 		}
 		str := "tried to update a mined multisig out's mined information"
 		return storeError(ErrDatabase, str, nil)

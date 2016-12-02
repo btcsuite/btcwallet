@@ -532,15 +532,14 @@ func (w *Wallet) quitChan() <-chan struct{} {
 }
 
 // CloseDatabases triggers the wallet databases to shut down.
-func (w *Wallet) CloseDatabases() {
-	walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+func (w *Wallet) CloseDatabases() error {
+	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// Store the current address pool last addresses.
 		w.CloseAddressPools(addrmgrNs)
 
-		w.StakeMgr.Close()
-		return nil
+		return w.StakeMgr.Close()
 	})
 }
 
@@ -600,6 +599,10 @@ func (w *Wallet) SynchronizingToNetwork() bool {
 // MainChainTip returns the hash and height of the tip-most block in the main
 // chain that the wallet is synchronized to.
 func (w *Wallet) MainChainTip() (hash chainhash.Hash, height int32) {
+	// TODO: after the main chain tip is successfully updated in the db, it
+	// should be saved in memory.  This will speed up access to it, and means
+	// there won't need to be an ignored error here for ergonomic access to the
+	// hash and height.
 	walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 		hash, height = w.TxStore.MainChainTip(txmgrNs)
