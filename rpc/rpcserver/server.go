@@ -45,10 +45,10 @@ import (
 
 // Public API version constants
 const (
-	semverString = "4.0.0"
+	semverString = "4.0.1"
 	semverMajor  = 4
 	semverMinor  = 0
-	semverPatch  = 0
+	semverPatch  = 1
 )
 
 // translateError creates a new gRPC error with an appropiate error code for
@@ -1033,6 +1033,11 @@ func (s *loaderServer) CreateWallet(ctx context.Context, req *pb.CreateWalletReq
 	pubPassphrase := req.PublicPassphrase
 	if len(pubPassphrase) == 0 {
 		pubPassphrase = []byte(wallet.InsecurePubPassphrase)
+	}
+
+	// Seed is required.
+	if len(req.Seed) == 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument, "seed is a required parameter")
 	}
 
 	_, err := s.loader.CreateNewWallet(pubPassphrase, req.PrivatePassphrase, req.Seed)
