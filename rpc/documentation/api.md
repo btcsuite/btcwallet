@@ -36,7 +36,7 @@ is not running and the Loader service must be used to create a new or load an
 existing wallet.
 
 - [`VersionService`](#versionservice)
-- [`LoaderService`](#loaderservice)
+- [`WalletLoaderService`](#walletloaderservice)
 - [`WalletService`](#walletservice)
 
 ## `VersionService`
@@ -75,11 +75,11 @@ rules of Semantic Versioning (SemVer) 2.0.0.
 
 **Stability:** Stable
 
-## `LoaderService`
+## `WalletLoaderService`
 
-The `LoaderService` service provides the caller with functions related to the
-management of the wallet and its connection to the Decred network.  It has no
-dependencies and is always running.
+The `WalletLoaderService` service provides the caller with functions related to
+the management of the wallet and its connection to the Decred network.  It has
+no dependencies and is always running.
 
 **Methods:**
 
@@ -210,8 +210,8 @@ unusable.
 **Stability:** Unstable: It would be preferable to stop the `WalletService`
   after closing, but there does not appear to be any way to do so currently.  It
   may also be a good idea to limit under what conditions a wallet can be closed,
-  such as only closing wallets loaded by `LoaderService` and/or using a secret
-  to authenticate the operation.
+  such as only closing wallets loaded by `WalletLoaderService` and/or using a
+  secret to authenticate the operation.
 
 ___
 
@@ -250,7 +250,7 @@ synchronizes the wallet to the consensus server if it was previously loaded.
   valid IP address.
 
 - `NotFound`: The consensus RPC server is unreachable.  This condition may not
-  return `Unavailable` as that refers to `LoaderService` itself being
+  return `Unavailable` as that refers to `WalletLoaderService` itself being
   unavailable.
 
 - `InvalidArgument`: The username, password, or certificate are invalid.  This
