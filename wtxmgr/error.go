@@ -59,6 +59,14 @@ const (
 
 	// ErrIsClosed indicates that the transaction manager is closed.
 	ErrIsClosed
+
+	// ErrDuplicate describes an error inserting an item into the store due to
+	// the data already existing.
+	//
+	// This error code is a late addition to the API and at the moment only a
+	// select number of APIs use it.  Methods that might return this error
+	// documents the behavior in a doc comment.
+	ErrDuplicate
 )
 
 var errStrs = [...]string{
@@ -71,6 +79,7 @@ var errStrs = [...]string{
 	ErrDoubleSpend:    "ErrDoubleSpend",
 	ErrUnknownVersion: "ErrUnknownVersion",
 	ErrIsClosed:       "ErrIsClosed",
+	ErrDuplicate:      "ErrDuplicate",
 }
 
 // String returns the ErrorCode as a human-readable name.
@@ -106,4 +115,10 @@ func storeError(c ErrorCode, desc string, err error) Error {
 func IsNoExists(err error) bool {
 	serr, ok := err.(Error)
 	return ok && serr.Code == ErrNoExists
+}
+
+// IsError returns whether err is an Error with a matching error code.
+func IsError(err error, code ErrorCode) bool {
+	e, ok := err.(Error)
+	return ok && e.Code == code
 }

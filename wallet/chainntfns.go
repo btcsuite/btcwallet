@@ -164,7 +164,11 @@ func (w *Wallet) extendMainChain(dbtx walletdb.ReadWriteTx, block *wtxmgr.BlockH
 
 	err := w.TxStore.ExtendMainChain(txmgrNs, block)
 	if err != nil {
-		return err
+		// Propagate the error unless this block is already included in the main
+		// chain.
+		if !wtxmgr.IsError(err, wtxmgr.ErrDuplicate) {
+			return err
+		}
 	}
 
 	// Notify interested clients of the connected block.

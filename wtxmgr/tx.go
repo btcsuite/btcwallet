@@ -453,6 +453,9 @@ func (s *Store) MainChainTip(ns walletdb.ReadBucket) (chainhash.Hash, int32) {
 
 // ExtendMainChain inserts a block header into the database.  It must connect to
 // the existing tip block.
+//
+// If the block is already inserted and part of the main chain, an error with
+// code ErrDuplicate is returned.
 func (s *Store) ExtendMainChain(ns walletdb.ReadWriteBucket, header *BlockHeaderData) error {
 	height := header.SerializedHeader.Height()
 	if height < 1 {
@@ -465,6 +468,14 @@ func (s *Store) ExtendMainChain(ns walletdb.ReadWriteBucket, header *BlockHeader
 	headerParent := extractBlockHeaderParentHash(header.SerializedHeader[:])
 	currentTipHash := ns.Get(rootTipBlock)
 	if !bytes.Equal(headerParent, currentTipHash) {
+		// Return a special error if it is a duplicate of an existing block in
+		// the main chain (NOT the headers bucket, since headers are never
+		// pruned).
+		_, v := existsBlockRecord(ns, height)
+		if v != nil && bytes.Equal(extractRawBlockRecordHash(v), header.BlockHash[:]) {
+			const str = "block already recorded in the main chain"
+			return storeError(ErrDuplicate, str, nil)
+		}
 		const str = "header is not a direct child of the current tip block"
 		return storeError(ErrInput, str, nil)
 	}
