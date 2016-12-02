@@ -121,7 +121,7 @@ func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
 // CreateNewWallet creates a new wallet using the provided public and private
 // passphrases.  The seed is optional.  If non-nil, addresses are derived from
 // this seed.  If nil, a secure random seed is generated.
-func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*Wallet, error) {
+func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (w *Wallet, err error) {
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
@@ -147,6 +147,12 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 	if err != nil {
 		return nil, err
 	}
+	// Attempt to remove database file if this function errors.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(dbPath)
+		}
+	}()
 
 	// Initialize the newly created database for the wallet before opening.
 	err = Create(db, pubPassphrase, privPassphrase, seed, l.chainParams,
@@ -157,7 +163,7 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 
 	// Open the newly-created wallet.
 	so := l.stakeOptions
-	w, err := Open(db, pubPassphrase, nil, so.VoteBits, so.VoteBitsExtended,
+	w, err = Open(db, pubPassphrase, nil, so.VoteBits, so.VoteBitsExtended,
 		so.StakeMiningEnabled, so.BalanceToMaintain, so.AddressReuse,
 		so.PruneTickets, so.TicketAddress, so.TicketMaxPrice,
 		so.TicketBuyFreq, so.PoolAddress, so.PoolFees, so.TicketFee,
