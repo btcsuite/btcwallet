@@ -90,7 +90,7 @@ no dependencies and is always running.
 - [`StartConsensusRpc`](#startconsensusrpc)
 - [`DiscoverAddresses`](#discoveraddresses)
 - [`SubscribeToBlockNotifications`](#subscribetoblocknotifications)
-- [`FetchHeaders`](#fetchheader)
+- [`FetchHeaders`](#fetchheaders)
 
 **Shared messages:**
 
