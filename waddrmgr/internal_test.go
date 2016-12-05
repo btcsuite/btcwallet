@@ -18,10 +18,6 @@ import (
 	"github.com/decred/dcrwallet/snacl"
 )
 
-// TstMaxRecentHashes makes the unexported maxRecentHashes constant available
-// when tests are run.
-var TstMaxRecentHashes = maxRecentHashes
-
 // TstLatestMgrVersion makes the unexported latestMgrVersion variable available
 // for change when the tests are run.
 var TstLatestMgrVersion = &latestMgrVersion

@@ -3,6 +3,9 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
+// Test must be updated for API changes.
+//+build disabled
+
 package bdb_test
 
 import (

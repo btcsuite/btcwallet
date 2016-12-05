@@ -6,6 +6,7 @@ package rpctest
 import (
 	"bytes"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -99,6 +100,14 @@ func funcName(tc rpcTestCase) string {
 // TestMain manages the test harnesses and runs the tests instead of go test
 // running the tests directly.
 func TestMain(m *testing.M) {
+	flag.Parse()
+	if testing.Short() {
+		// Begin tests without any setup/teardown.  All tests are disabled in
+		// short mode.
+		m.Run()
+		return
+	}
+
 	// For timing of block generation, create an OnBlockConnected notification
 	ntfnHandlersNode := dcrrpcclient.NotificationHandlers{
 		OnBlockConnected: func(blockHeader []byte, transactions [][]byte) {},
@@ -170,6 +179,11 @@ func TestMain(m *testing.M) {
 }
 
 func TestRpcServer(t *testing.T) {
+	// Skip tests when running with -short
+	if testing.Short() {
+		t.Skip("Skipping RPC harness tests in short mode")
+	}
+
 	for _, testCase := range rpcTestCases {
 		testName := funcName(testCase)
 		// fmt.Printf("Starting test %s\n", testName)

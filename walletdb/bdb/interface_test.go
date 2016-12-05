@@ -11,6 +11,9 @@
 // NOTE: When copying this file into the backend driver folder, the package name
 // will need to be changed accordingly.
 
+// Test must be updated for API changes.
+//+build disabled
+
 package bdb_test
 
 import (
