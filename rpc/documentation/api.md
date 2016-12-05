@@ -89,6 +89,8 @@ no dependencies and is always running.
 - [`CloseWallet`](#closewallet)
 - [`StartConsensusRpc`](#startconsensusrpc)
 - [`DiscoverAddresses`](#discoveraddresses)
+- [`SubscribeToBlockNotifications`](#subscribetoblocknotifications)
+- [`FetchHeaders`](#fetchheader)
 
 **Shared messages:**
 
