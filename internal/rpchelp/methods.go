@@ -96,6 +96,7 @@ var Methods = []struct {
 	{"getticketvotebits", []interface{}{(*dcrjson.GetTicketVoteBitsResult)(nil)}},
 	{"getticketsvotebits", []interface{}{(*dcrjson.GetTicketsVoteBitsResult)(nil)}},
 	{"setticketvotebits", nil},
+	{"setticketsvotebits", nil},
 	{"getstakeinfo", []interface{}{(*dcrjson.GetStakeInfoResult)(nil)}},
 	{"getticketfee", returnsNumber},
 	{"setticketfee", returnsBool},

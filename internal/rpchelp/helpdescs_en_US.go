@@ -141,7 +141,8 @@ var helpDescsEnUS = map[string]string{
 	"getstakeinforesult-totalsubsidy":     "Total amount of coins earned by stake mining",
 	"getstakeinforesult-missed":           "Number of missed tickets (failing to vote or expired)",
 	"getstakeinforesult-proportionmissed": "(Missed / (Missed + Voted))",
-	"getstakeinforesult-revoked":          " Number of missed tickets that were missed and then revoked",
+	"getstakeinforesult-revoked":          "Number of missed tickets that were missed and then revoked",
+	"getstakeinforesult-expired":          "Number of tickets that have expired",
 
 	// GetTickets help.
 	"gettickets--synopsis":       "Returning the hashes of the tickets currently owned by wallet.",
@@ -430,6 +431,11 @@ var helpDescsEnUS = map[string]string{
 	"setticketvotebits-txhash":      "The hash of the ticket",
 	"setticketvotebits-votebits":    "The voteBits to set for the ticket",
 	"setticketvotebits-votebitsext": "The extended voteBits to set for the ticket",
+
+	// SetTicketsVoteBits help.
+	"setticketsvotebits--synopsis":     "Set the vote bits for several tickets",
+	"setticketsvotebits-txhashes":      "The non-byte-reversed transaction hashes of each ticket being set, concatenated into a single hex string",
+	"setticketsvotebits-votebitsbytes": "Hexadecimal encodings of a custom binary vote bits encoding for each ticket hash, concatenated together into a single hex string",
 
 	// SetTxFeeCmd help.
 	"settxfee--synopsis": "Modify the fee per kB of the serialized tx size used each time more fee is required for an authored transaction.",
