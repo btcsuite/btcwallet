@@ -112,11 +112,26 @@ type withdrawalInfo struct {
 	status        WithdrawalStatus
 }
 
-// TxSigs is list of raw signatures (one for every pubkey in the multi-sig
+// TxSigs is a slice containing one element for each input of a given
+// transaction.
+type TxSigs []TxInSigs
+
+// TxInSigs represents the raw signatures (one for every pubkey in the multi-sig
 // script) for a given transaction input. They should match the order of pubkeys
 // in the script and an empty RawSig should be used when the private key for a
 // pubkey is not known.
-type TxSigs [][]RawSig
+type TxInSigs struct {
+	Required uint32
+	Sigs     []RawSig
+}
+
+func newTxInSigs(reqSigs uint32, length int) TxInSigs {
+	sigs := make([]RawSig, length)
+	for i := range sigs {
+		sigs[i] = RawSig{}
+	}
+	return TxInSigs{Required: reqSigs, Sigs: sigs}
+}
 
 // RawSig represents one of the signatures included in the unlocking script of
 // inputs spending from P2SH UTXOs.
@@ -866,7 +881,7 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 			if err != nil {
 				return nil, err
 			}
-			txInSigs := make([]RawSig, len(pubKeys))
+			txInSigs := newTxInSigs(series.reqSigs, len(pubKeys))
 			for i, pubKey := range pubKeys {
 				var sig RawSig
 				privKey, err := series.getPrivKeyFor(pubKey)
@@ -894,7 +909,7 @@ func getRawSigs(transactions []*withdrawalTx) (map[Ntxid]TxSigs, error) {
 						"for %s is not available: %v", inputIdx, ntxid, pubKey.String(), err)
 					sig = []byte{}
 				}
-				txInSigs[i] = sig
+				txInSigs.Sigs[i] = sig
 			}
 			txSigs[inputIdx] = txInSigs
 		}
@@ -943,7 +958,7 @@ func getRedeemScript(mgr *waddrmgr.Manager, addr *btcutil.AddressScriptHash) ([]
 // The order of the signatures must match that of the public keys in the multi-sig
 // script as OP_CHECKMULTISIG expects that.
 // This function must be called with the manager unlocked.
-func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript []byte, sigs []RawSig) error {
+func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript []byte, sigs TxInSigs) error {
 	class, addresses, _, err := txscript.ExtractPkScriptAddrs(pkScript, mgr.ChainParams())
 	if err != nil {
 		return newError(ErrTxSigning, "unparseable pkScript", err)
@@ -963,16 +978,16 @@ func signMultiSigUTXO(mgr *waddrmgr.Manager, tx *wire.MsgTx, idx int, pkScript [
 	if class != txscript.MultiSigTy {
 		return newError(ErrTxSigning, fmt.Sprintf("redeem script is not multi-sig: %v", class), nil)
 	}
-	if len(sigs) < nRequired {
+	if len(sigs.Sigs) < nRequired {
 		errStr := fmt.Sprintf("not enough signatures; need %d but got only %d", nRequired,
-			len(sigs))
+			len(sigs.Sigs))
 		return newError(ErrTxSigning, errStr, nil)
 	}
 
 	// Construct the unlocking script.
 	// Start with an OP_0 because of the bug in bitcoind, then add nRequired signatures.
 	unlockingScript := txscript.NewScriptBuilder().AddOp(txscript.OP_FALSE)
-	for _, sig := range sigs[:nRequired] {
+	for _, sig := range sigs.Sigs[:nRequired] {
 		unlockingScript.AddData(sig)
 	}
 
