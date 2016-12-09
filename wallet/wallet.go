@@ -390,6 +390,7 @@ func (w *Wallet) syncWithChain() error {
 		syncBlock = bs
 		break
 	}
+
 	if rollback {
 		err = w.Manager.SetSyncedTo(&syncBlock)
 		if err != nil {
@@ -1137,7 +1138,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 			if chainClient == nil {
 				return nil, errors.New("no chain server client")
 			}
-			startResp = chainClient.GetBlockVerboseAsync(startBlock.hash)
+			startResp = chainClient.GetBlockVerboseTxAsync(startBlock.hash)
 		}
 	}
 	if endBlock != nil {
@@ -1147,7 +1148,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 			if chainClient == nil {
 				return nil, errors.New("no chain server client")
 			}
-			endResp = chainClient.GetBlockVerboseAsync(endBlock.hash)
+			endResp = chainClient.GetBlockVerboseTxAsync(endBlock.hash)
 		}
 	}
 	if startResp != nil {
