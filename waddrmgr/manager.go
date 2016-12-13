@@ -361,9 +361,13 @@ func (m *Manager) zeroSensitivePublicData() {
 // Close cleanly shuts down the manager.  It makes a best try effort to remove
 // and zero all private key and sensitive public key material associated with
 // the address manager from memory.
-func (m *Manager) Close() error {
+func (m *Manager) Close() {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
+
+	if m.closed {
+		return
+	}
 
 	// Attempt to clear private key material from memory.
 	if !m.watchingOnly && !m.locked {
@@ -374,7 +378,7 @@ func (m *Manager) Close() error {
 	m.zeroSensitivePublicData()
 
 	m.closed = true
-	return nil
+	return
 }
 
 // keyToManaged returns a new managed address for the provided derived key and
