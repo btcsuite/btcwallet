@@ -21,6 +21,7 @@ import (
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
 	"github.com/jessevdk/go-flags"
 	"github.com/roasbeef/btcwallet/internal/cfgutil"
+	"golang.org/x/crypto/ssh/terminal"
 )
 
 var (
