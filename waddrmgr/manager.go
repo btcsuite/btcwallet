@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/fastsha256"
 )
 
 const (
@@ -702,9 +703,13 @@ func (m *Manager) rowInterfaceToManaged(rowInterface interface{}) (ManagedAddres
 func (m *Manager) loadAndCacheAddress(address btcutil.Address) (ManagedAddress, error) {
 	// Attempt to load the raw address information from the database.
 	var rowInterface interface{}
-	err := m.namespace.View(func(tx walletdb.Tx) error {
+	addressKey, err := m.addressKey(address)
+	if err != nil {
+		return nil, err
+	}
+	err = m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
-		rowInterface, err = fetchAddress(tx, address.ScriptAddress())
+		rowInterface, err = fetchAddressByHash(tx, addressKey)
 		return err
 	})
 	if err != nil {
@@ -766,9 +771,13 @@ func (m *Manager) Address(address btcutil.Address) (ManagedAddress, error) {
 // AddrAccount returns the account to which the given address belongs.
 func (m *Manager) AddrAccount(address btcutil.Address) (uint32, error) {
 	var account uint32
-	err := m.namespace.View(func(tx walletdb.Tx) error {
+	addressKey, err := m.addressKey(address)
+	if err != nil {
+		return 0, err
+	}
+	err = m.namespace.View(func(tx walletdb.Tx) error {
 		var err error
-		account, err = fetchAddrAccount(tx, address.ScriptAddress())
+		account, err = fetchAddrAccount(tx, addressKey)
 		return err
 	})
 	if err != nil {
@@ -1024,16 +1033,21 @@ func (m *Manager) ConvertToWatchingOnly() error {
 // address manager.
 //
 // This function MUST be called with the manager lock held for reads.
-func (m *Manager) existsAddress(addressID []byte) (bool, error) {
+func (m *Manager) existsAddress(address btcutil.Address) (bool, error) {
 	// Check the in-memory map first since it's faster than a db access.
-	if _, ok := m.addrs[addrKey(addressID)]; ok {
+	if _, ok := m.addrs[addrKey(address.ScriptAddress())]; ok {
 		return true, nil
+	}
+
+	addressKey, err := m.addressKey(address)
+	if err != nil {
+		return false, err
 	}
 
 	// Check the database if not already found above.
 	var exists bool
-	err := m.namespace.View(func(tx walletdb.Tx) error {
-		exists = existsAddress(tx, addressID)
+	err = m.namespace.View(func(tx walletdb.Tx) error {
+		exists = existsAddress(tx, addressKey)
 		return nil
 	})
 	if err != nil {
@@ -1081,7 +1095,13 @@ func (m *Manager) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (ManagedPub
 	// Prevent duplicates.
 	serializedPubKey := wif.SerializePubKey()
 	pubKeyHash := btcutil.Hash160(serializedPubKey)
-	alreadyExists, err := m.existsAddress(pubKeyHash)
+	addr, err := btcutil.NewAddressPubKeyHash(pubKeyHash,
+		m.chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	alreadyExists, err := m.existsAddress(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -1118,8 +1138,12 @@ func (m *Manager) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (ManagedPub
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
+	addressKey, err := m.addressKey(addr)
+	if err != nil {
+		return nil, err
+	}
 	err = m.namespace.Update(func(tx walletdb.Tx) error {
-		err := putImportedAddress(tx, pubKeyHash, ImportedAddrAccount,
+		err := putImportedAddress(tx, addressKey, ImportedAddrAccount,
 			ssNone, encryptedPubKey, encryptedPrivKey)
 		if err != nil {
 			return err
@@ -1185,7 +1209,13 @@ func (m *Manager) ImportScript(script []byte, bs *BlockStamp) (ManagedScriptAddr
 
 	// Prevent duplicates.
 	scriptHash := btcutil.Hash160(script)
-	alreadyExists, err := m.existsAddress(scriptHash)
+	addr, err := btcutil.NewAddressScriptHash(script,
+		m.chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	alreadyExists, err := m.existsAddress(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -1225,8 +1255,13 @@ func (m *Manager) ImportScript(script []byte, bs *BlockStamp) (ManagedScriptAddr
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
+	addressKey, err := m.addressKey(addr)
+	if err != nil {
+		return nil, err
+	}
+
 	err = m.namespace.Update(func(tx walletdb.Tx) error {
-		err := putScriptAddress(tx, scriptHash, ImportedAddrAccount,
+		err := putScriptAddress(tx, addressKey, ImportedAddrAccount,
 			ssNone, encryptedHash, encryptedScript)
 		if err != nil {
 			return err
@@ -1440,11 +1475,23 @@ func (m *Manager) Unlock(passphrase []byte) error {
 	return nil
 }
 
+// addressKey returns a byte slice to be used as the key for storing an address
+// Key is sha256(sha256(script address) + cryptoKeyPub)
+func (m *Manager) addressKey(address btcutil.Address) ([]byte, error) {
+	key := fastsha256.Sum256(address.ScriptAddress())
+	key = fastsha256.Sum256(append(key[:], m.cryptoKeyPub.Bytes()...))
+	return key[:], nil
+}
+
 // fetchUsed returns true if the provided address id was flagged used.
-func (m *Manager) fetchUsed(addressID []byte) (bool, error) {
+func (m *Manager) fetchUsed(address btcutil.Address) (bool, error) {
 	var used bool
-	err := m.namespace.View(func(tx walletdb.Tx) error {
-		used = fetchAddressUsed(tx, addressID)
+	addressKey, err := m.addressKey(address)
+	if err != nil {
+		return false, err
+	}
+	err = m.namespace.View(func(tx walletdb.Tx) error {
+		used = fetchAddressUsed(tx, addressKey)
 		return nil
 	})
 	return used, err
@@ -1452,16 +1499,19 @@ func (m *Manager) fetchUsed(addressID []byte) (bool, error) {
 
 // MarkUsed updates the used flag for the provided address.
 func (m *Manager) MarkUsed(address btcutil.Address) error {
-	addressID := address.ScriptAddress()
-	err := m.namespace.Update(func(tx walletdb.Tx) error {
-		return markAddressUsed(tx, addressID)
+	addressKey, err := m.addressKey(address)
+	if err != nil {
+		return err
+	}
+	err = m.namespace.Update(func(tx walletdb.Tx) error {
+		return markAddressUsed(tx, addressKey)
 	})
 	if err != nil {
 		return maybeConvertDbError(err)
 	}
 	// Clear caches which might have stale entries for used addresses
 	m.mtx.Lock()
-	delete(m.addrs, addrKey(addressID))
+	delete(m.addrs, addrKey(address.ScriptAddress()))
 	m.mtx.Unlock()
 	return nil
 }
@@ -1573,8 +1623,11 @@ func (m *Manager) nextAddresses(account uint32, numAddresses uint32, internal bo
 	err = m.namespace.Update(func(tx walletdb.Tx) error {
 		for _, info := range addressInfo {
 			ma := info.managedAddr
-			addressID := ma.Address().ScriptAddress()
-			err := putChainedAddress(tx, addressID, account, ssFull,
+			addressKey, err := m.addressKey(ma.Address())
+			if err != nil {
+				return err
+			}
+			err = putChainedAddress(tx, addressKey, account, ssFull,
 				info.branch, info.index)
 			if err != nil {
 				return err

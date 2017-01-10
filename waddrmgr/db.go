@@ -13,13 +13,15 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
+
 	"github.com/btcsuite/fastsha256"
 )
 
 const (
 	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 4
+	LatestMgrVersion = 5
 )
 
 var (
@@ -703,11 +705,11 @@ func putAccountIDIndex(tx walletdb.Tx, account uint32, name string) error {
 }
 
 // putAddrAccountIndex stores the given key to the address account index of the database.
-func putAddrAccountIndex(tx walletdb.Tx, account uint32, addrHash []byte) error {
+func putAddrAccountIndex(tx walletdb.Tx, account uint32, addressKey []byte) error {
 	bucket := tx.RootBucket().Bucket(addrAcctIdxBucketName)
 
 	// Write account keyed by address hash
-	err := bucket.Put(addrHash, uint32ToBytes(account))
+	err := bucket.Put(addressKey, uint32ToBytes(account))
 	if err != nil {
 		return nil
 	}
@@ -717,9 +719,9 @@ func putAddrAccountIndex(tx walletdb.Tx, account uint32, addrHash []byte) error 
 		return err
 	}
 	// In account bucket, write a null value keyed by the address hash
-	err = bucket.Put(addrHash, nullVal)
+	err = bucket.Put(addressKey, nullVal)
 	if err != nil {
-		str := fmt.Sprintf("failed to store address account index key %s", addrHash)
+		str := fmt.Sprintf("failed to store address account index key %s", addressKey)
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil
@@ -975,12 +977,12 @@ func serializeScriptAddress(encryptedHash, encryptedScript []byte) []byte {
 // specific address type.  The caller should use type assertions to ascertain
 // the type.  The caller should prefix the error message with the address hash
 // which caused the failure.
-func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
+func fetchAddressByHash(tx walletdb.Tx, addressKey []byte) (interface{}, error) {
 	bucket := tx.RootBucket().Bucket(addrBucketName)
 
-	serializedRow := bucket.Get(addrHash[:])
+	serializedRow := bucket.Get(addressKey)
 	if serializedRow == nil {
-		str := "address not found"
+		str := fmt.Sprintf("address %s not found", addressKey)
 		return nil, managerError(ErrAddressNotFound, str, nil)
 	}
 
@@ -1003,61 +1005,48 @@ func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
 }
 
 // fetchAddressUsed returns true if the provided address id was flagged as used.
-func fetchAddressUsed(tx walletdb.Tx, addressID []byte) bool {
+func fetchAddressUsed(tx walletdb.Tx, addressKey []byte) bool {
 	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
-	return bucket.Get(addrHash[:]) != nil
+	return bucket.Get(addressKey) != nil
 }
 
 // markAddressUsed flags the provided address id as used in the database.
-func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
+func markAddressUsed(tx walletdb.Tx, addressKey []byte) error {
 	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
-	val := bucket.Get(addrHash[:])
+	val := bucket.Get(addressKey)
 	if val != nil {
 		return nil
 	}
-	err := bucket.Put(addrHash[:], []byte{0})
+	err := bucket.Put(addressKey, []byte{0})
 	if err != nil {
-		str := fmt.Sprintf("failed to mark address used %x", addressID)
+		str := fmt.Sprintf("failed to mark address used %x", addressKey)
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil
 }
 
-// fetchAddress loads address information for the provided address id from the
-// database.  The returned value is one of the address rows for the specific
-// address type.  The caller should use type assertions to ascertain the type.
-// The caller should prefix the error message with the address which caused the
-// failure.
-func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
-	addrHash := fastsha256.Sum256(addressID)
-	return fetchAddressByHash(tx, addrHash[:])
-}
-
 // putAddress stores the provided address information to the database.  This
 // is used a common base for storing the various address types.
-func putAddress(tx walletdb.Tx, addressID []byte, row *dbAddressRow) error {
+func putAddress(tx walletdb.Tx, addressKey []byte, row *dbAddressRow) error {
 	bucket := tx.RootBucket().Bucket(addrBucketName)
 
 	// Write the serialized value keyed by the hash of the address.  The
 	// additional hash is used to conceal the actual address while still
 	// allowed keyed lookups.
-	addrHash := fastsha256.Sum256(addressID)
-	err := bucket.Put(addrHash[:], serializeAddressRow(row))
+	err := bucket.Put(addressKey, serializeAddressRow(row))
 	if err != nil {
-		str := fmt.Sprintf("failed to store address %x", addressID)
+		str := fmt.Sprintf("failed to store address %x", addressKey)
 		return managerError(ErrDatabase, str, err)
 	}
 	// Update address account index
-	return putAddrAccountIndex(tx, row.account, addrHash[:])
+	return putAddrAccountIndex(tx, row.account, addressKey)
 }
 
 // putChainedAddress stores the provided chained address information to the
 // database.
-func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
+func putChainedAddress(tx walletdb.Tx, addressKey []byte, account uint32,
 	status syncStatus, branch, index uint32) error {
 
 	addrRow := dbAddressRow{
@@ -1067,7 +1056,7 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    serializeChainedAddress(branch, index),
 	}
-	if err := putAddress(tx, addressID, &addrRow); err != nil {
+	if err := putAddress(tx, addressKey, &addrRow); err != nil {
 		return err
 	}
 
@@ -1105,7 +1094,7 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 	err = bucket.Put(accountID, serializeAccountRow(row))
 	if err != nil {
 		str := fmt.Sprintf("failed to update next index for "+
-			"address %x, account %d", addressID, account)
+			"address %x, account %d", addressKey, account)
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil
@@ -1113,7 +1102,7 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 
 // putImportedAddress stores the provided imported address information to the
 // database.
-func putImportedAddress(tx walletdb.Tx, addressID []byte, account uint32,
+func putImportedAddress(tx walletdb.Tx, addressKey []byte, account uint32,
 	status syncStatus, encryptedPubKey, encryptedPrivKey []byte) error {
 
 	rawData := serializeImportedAddress(encryptedPubKey, encryptedPrivKey)
@@ -1124,12 +1113,12 @@ func putImportedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    rawData,
 	}
-	return putAddress(tx, addressID, &addrRow)
+	return putAddress(tx, addressKey, &addrRow)
 }
 
 // putScriptAddress stores the provided script address information to the
 // database.
-func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
+func putScriptAddress(tx walletdb.Tx, addressKey []byte, account uint32,
 	status syncStatus, encryptedHash, encryptedScript []byte) error {
 
 	rawData := serializeScriptAddress(encryptedHash, encryptedScript)
@@ -1140,7 +1129,7 @@ func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    rawData,
 	}
-	if err := putAddress(tx, addressID, &addrRow); err != nil {
+	if err := putAddress(tx, addressKey, &addrRow); err != nil {
 		return err
 	}
 
@@ -1148,23 +1137,21 @@ func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
 }
 
 // existsAddress returns whether or not the address id exists in the database.
-func existsAddress(tx walletdb.Tx, addressID []byte) bool {
+func existsAddress(tx walletdb.Tx, addressKey []byte) bool {
 	bucket := tx.RootBucket().Bucket(addrBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
-	return bucket.Get(addrHash[:]) != nil
+	return bucket.Get(addressKey) != nil
 }
 
 // fetchAddrAccount returns the account to which the given address belongs to.
 // It looks up the account using the addracctidx index which maps the address
 // hash to its corresponding account id.
-func fetchAddrAccount(tx walletdb.Tx, addressID []byte) (uint32, error) {
+func fetchAddrAccount(tx walletdb.Tx, addressKey []byte) (uint32, error) {
 	bucket := tx.RootBucket().Bucket(addrAcctIdxBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
-	val := bucket.Get(addrHash[:])
+	val := bucket.Get(addressKey)
 	if val == nil {
-		str := "address not found"
+		str := fmt.Sprintf("address %s not found", addressKey)
 		return 0, managerError(ErrAddressNotFound, str, nil)
 	}
 	return binary.LittleEndian.Uint32(val), nil
@@ -1720,6 +1707,15 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 		version = 4
 	}
 
+	if version < 5 {
+		if err := upgradeToVersion5(namespace, pubPassPhrase, chainParams); err != nil {
+			return err
+		}
+
+		// The manager is now at version 5.
+		version = 5
+	}
+
 	// Ensure the manager is upraded to the latest version.  This check is
 	// to intentionally cause a failure if the manager version is updated
 	// without writing code to handle the upgrade.
@@ -1934,6 +1930,52 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		merr, ok := err.(ManagerError)
 		if !ok || merr.ErrorCode != ErrAccountNotFound {
 			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	return nil
+}
+
+// upgradeToVersion5 upgrades the database from version 4 to version 5.
+// Keys for the address buckets were re-hashed with cryptoKeyPub to
+// prevent leaking the information that a given address was present in
+// the db.
+func upgradeToVersion5(namespace walletdb.Namespace, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
+	err := namespace.Update(func(tx walletdb.Tx) error {
+		// Write new manager version.
+		err := putManagerVersion(tx, 5)
+		if err != nil {
+			return err
+		}
+		addrBuckets := []walletdb.Bucket{
+			tx.RootBucket().Bucket(addrBucketName),
+			tx.RootBucket().Bucket(addrAcctIdxBucketName),
+		}
+
+		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams)
+		if err != nil {
+			return err
+		}
+		defer woMgr.Close()
+
+		cryptoKeyPub := woMgr.cryptoKeyPub
+		// For all buckets keyed by addr hash, add cryptoKeyPub and re-hash
+		// and write the new key
+		for _, bucket := range addrBuckets {
+			err := bucket.ForEach(func(k, v []byte) error {
+				hash := make([]byte, len(k)+snacl.KeySize)
+				copy(hash, k)
+				copy(hash[len(k):], cryptoKeyPub.Bytes())
+				key := fastsha256.Sum256(hash)
+				return bucket.Put(key[:], v)
+			})
+			if err != nil {
+				return err
+			}
 		}
 
 		return nil

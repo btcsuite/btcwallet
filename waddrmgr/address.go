@@ -180,7 +180,7 @@ func (a *managedAddress) Compressed() bool {
 //
 // This is part of the ManagedAddress interface implementation.
 func (a *managedAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+	return a.manager.fetchUsed(a.Address())
 }
 
 // PubKey returns the public key associated with the address.
@@ -445,7 +445,7 @@ func (a *scriptAddress) Compressed() bool {
 //
 // This is part of the ManagedAddress interface implementation.
 func (a *scriptAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+	return a.manager.fetchUsed(a.Address())
 }
 
 // Script returns the script associated with the address.
