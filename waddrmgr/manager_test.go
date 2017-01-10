@@ -905,81 +905,6 @@ func testImportScript(tc *testContext) bool {
 	return true
 }
 
-// testMarkUsed ensures used addresses are flagged as such.
-func testMarkUsed(tc *testContext) bool {
-	tests := []struct {
-		name string
-		typ  addrType
-		in   []byte
-	}{
-		{
-			name: "managed address",
-			typ:  addrPubKeyHash,
-			in:   hexToBytes("2ef94abb9ee8f785d087c3ec8d6ee467e92d0d0a"),
-		},
-		{
-			name: "script address",
-			typ:  addrScriptHash,
-			in:   hexToBytes("da6e6a632d96dc5530d7b3c9f3017725d023093e"),
-		},
-	}
-
-	prefix := "MarkUsed"
-	chainParams := tc.manager.ChainParams()
-	for i, test := range tests {
-		addrHash := test.in
-
-		var addr btcutil.Address
-		var err error
-		switch test.typ {
-		case addrPubKeyHash:
-			addr, err = btcutil.NewAddressPubKeyHash(addrHash, chainParams)
-		case addrScriptHash:
-			addr, err = btcutil.NewAddressScriptHashFromHash(addrHash, chainParams)
-		default:
-			panic("unreachable")
-		}
-		if err != nil {
-			tc.t.Errorf("%s #%d: NewAddress unexpected error: %v", prefix, i, err)
-			continue
-		}
-
-		maddr, err := tc.manager.Address(addr)
-		if err != nil {
-			tc.t.Errorf("%s #%d: Address unexpected error: %v", prefix, i, err)
-			continue
-		}
-		if tc.create {
-			// Test that initially the address is not flagged as used
-			used, err := maddr.Used()
-			if err != nil {
-				tc.t.Errorf("%s #%d: Used unexpected error: %v", prefix, i, err)
-				continue
-			}
-			if used != false {
-				tc.t.Errorf("%s #%d: unexpected used flag -- got "+
-					"%v, want %v", prefix, i, used, false)
-			}
-		}
-		err = tc.manager.MarkUsed(addr)
-		if err != nil {
-			tc.t.Errorf("%s #%d: unexpected error: %v", prefix, i, err)
-			continue
-		}
-		used, err := maddr.Used()
-		if err != nil {
-			tc.t.Errorf("%s #%d: Used unexpected error: %v", prefix, i, err)
-			continue
-		}
-		if used != true {
-			tc.t.Errorf("%s #%d: unexpected used flag -- got "+
-				"%v, want %v", prefix, i, used, true)
-		}
-	}
-
-	return true
-}
-
 // testChangePassphrase ensures changes both the public and privte passphrases
 // works as intended.
 func testChangePassphrase(tc *testContext) bool {
@@ -1081,6 +1006,43 @@ func testChangePassphrase(tc *testContext) bool {
 	}
 	tc.unlocked = false
 
+	return true
+}
+
+// testMarkUsed ensures that used address are flagged correctly.
+func testMarkUsed(tc *testContext) bool {
+	// Once flagged, the address remains used, so just test this on create
+	if tc.create {
+		var maddrs []waddrmgr.ManagedAddress
+		err := tc.manager.ForEachAccountAddress(waddrmgr.DefaultAccountNum,
+			func(maddr waddrmgr.ManagedAddress) error {
+				maddrs = append(maddrs, maddr)
+				return nil
+			})
+		if err != nil {
+			tc.t.Errorf("ForEachAccountAddress: unexpected error: %v", err)
+			return false
+		}
+		for i, maddr := range maddrs {
+			if maddr.Used() != false {
+				tc.t.Errorf("Used #%d %s: expected false, got true", i, maddr.Address())
+				return false
+			}
+			if err := tc.manager.MarkUsed(maddr.Address()); err != nil {
+				tc.t.Errorf("MarkUsed #%d: unexpected error: %v", i, err)
+				return false
+			}
+			maddr, err = tc.manager.Address(maddr.Address())
+			if err != nil {
+				tc.t.Errorf("Address #%d: unexpected error: %v", i, err)
+				return false
+			}
+			if maddr.Used() != true {
+				tc.t.Errorf("Used #%d %s: expected true, got false", i, maddr.Address())
+				return false
+			}
+		}
+	}
 	return true
 }
 

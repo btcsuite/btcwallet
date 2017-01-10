@@ -630,22 +630,18 @@ func (w *Wallet) ChangePassphrase(old, new []byte) error {
 // used and false if no address in the account was used.
 func (w *Wallet) AccountUsed(account uint32) (bool, error) {
 	var used bool
-	var err error
-	merr := w.Manager.ForEachAccountAddress(account,
+	err := w.Manager.ForEachAccountAddress(account,
 		func(maddr waddrmgr.ManagedAddress) error {
-			used, err = maddr.Used()
-			if err != nil {
-				return err
-			}
+			used := maddr.Used()
 			if used {
 				return waddrmgr.Break
 			}
 			return nil
 		})
-	if merr == waddrmgr.Break {
-		merr = nil
+	if err == waddrmgr.Break {
+		err = nil
 	}
-	return used, merr
+	return used, err
 }
 
 // CalculateBalance sums the amounts of all unspent transaction
@@ -725,11 +721,7 @@ func (w *Wallet) CurrentAddress(account uint32) (btcutil.Address, error) {
 	}
 
 	// Get next chained address if the last one has already been used.
-	used, err := addr.Used()
-	if err != nil {
-		return nil, err
-	}
-	if used {
+	if addr.Used() {
 		return w.NewAddress(account)
 	}
 

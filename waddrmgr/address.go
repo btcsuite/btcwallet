@@ -41,7 +41,7 @@ type ManagedAddress interface {
 	Compressed() bool
 
 	// Used returns true if the backing address has been used in a transaction.
-	Used() (bool, error)
+	Used() bool
 }
 
 // ManagedPubKeyAddress extends ManagedAddress and additionally provides the
@@ -179,8 +179,8 @@ func (a *managedAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *managedAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+func (a *managedAddress) Used() bool {
+	return a.used
 }
 
 // PubKey returns the public key associated with the address.
@@ -444,8 +444,8 @@ func (a *scriptAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *scriptAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+func (a *scriptAddress) Used() bool {
+	return a.used
 }
 
 // Script returns the script associated with the address.
