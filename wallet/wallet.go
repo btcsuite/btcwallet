@@ -700,11 +700,9 @@ func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balan
 		}
 
 		bals.Total += output.Amount
-		if output.FromCoinBase {
-			target := int32(w.chainParams.CoinbaseMaturity)
-			if !confirmed(target, output.Height, syncBlock.Height) {
-				bals.ImmatureReward += output.Amount
-			}
+		if output.FromCoinBase && !confirmed(int32(w.chainParams.CoinbaseMaturity),
+			output.Height, syncBlock.Height) {
+			bals.ImmatureReward += output.Amount
 		} else if confirmed(confirms, output.Height, syncBlock.Height) {
 			bals.Spendable += output.Amount
 		}
