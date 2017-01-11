@@ -1,10 +1,10 @@
-hash: 5efa5cef5495a0b5256f45ecb2456ea21101934ed56e780a46b1c16e30177ebc
-updated: 2016-10-27T11:54:19.492811-05:00
+hash: d945622a1e24954b5ffe2855e922e687132ccc13fb1a1bc5d57c15c72603948a
+updated: 2017-01-11T20:24:15.024651319-05:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
 - name: github.com/btcsuite/btcd
-  version: f6ad7eb2c963151c71de2bd37d04d9af644a891d
+  version: 7c0fd83c87b2d2be405489cff522e0110328cd1e
   subpackages:
   - blockchain
   - btcec
@@ -17,16 +17,14 @@ imports:
 - name: github.com/btcsuite/btclog
   version: 73889fb79bd687870312b6e40effcecffbd57d30
 - name: github.com/btcsuite/btcrpcclient
-  version: 2b780d16b042054d07aa322146194118fd7f7b81
+  version: 5ce0ed600997eafaed25ad4936c1d84ec6ad2b5a
 - name: github.com/btcsuite/btcutil
-  version: 9b9ce80a2edafc6198569550fcc01df11d214425
+  version: 86346b5a958c0cf94186b87855469ae991be501c
   subpackages:
   - base58
   - hdkeychain
-- name: github.com/btcsuite/fastsha256
-  version: 637e656429416087660c84436a2a035d69d54e2e
 - name: github.com/btcsuite/go-socks
-  version: cfe8b59e565c1a5bd4e2005d77cd9aa8b2e14524
+  version: 4720035b7bfd2a9bb130b1c184f8bbe41b6f0d0f
   subpackages:
   - socks
 - name: github.com/btcsuite/golangcrypto
@@ -44,13 +42,13 @@ imports:
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/golang/protobuf
-  version: 98fa357170587e470c5f27d3c3ea0947b71eb455
+  version: 8ee79997227bf9b34611aee7946ae64735e6fd93
   subpackages:
   - proto
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 - name: golang.org/x/net
-  version: c46f265c325130a7a6c7b27db8c6fe14b64f1a68
+  version: 60c41d1de8da134c05b7b40154a9a82bf5b7edb9
   subpackages:
   - context
   - http2
@@ -60,9 +58,16 @@ imports:
   - lex/httplex
   - trace
 - name: golang.org/x/sys
-  version: c200b10b5d5e122be351b67af224adc6128af5bf
+  version: d75a52659825e75fff6158388dddc6a5b04f9ba5
   subpackages:
   - unix
+- name: golang.org/x/text
+  version: 44f4f658a783b0cee41fe0a23b8fc91d9c120558
+  subpackages:
+  - secure/bidirule
+  - transform
+  - unicode/bidi
+  - unicode/norm
 - name: google.golang.org/grpc
   version: b7f1379d3cbbbeb2ca3405852012e237aa05459e
   subpackages:
@@ -76,6 +81,6 @@ imports:
   - transport
 testImports:
 - name: github.com/davecgh/go-spew
-  version: 6d212800a42e8ab5c146b8ace3490ee17e5225f9
+  version: 346938d642f2ec3594ed81d874461961cd0faa76
   subpackages:
   - spew

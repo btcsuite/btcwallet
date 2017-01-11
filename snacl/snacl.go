@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015 The btcsuite developers
+// Copyright (c) 2014-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -6,6 +6,7 @@ package snacl
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
@@ -13,7 +14,6 @@ import (
 	"runtime/debug"
 
 	"github.com/btcsuite/btcwallet/internal/zero"
-	"github.com/btcsuite/fastsha256"
 	"github.com/btcsuite/golangcrypto/nacl/secretbox"
 	"github.com/btcsuite/golangcrypto/scrypt"
 )
@@ -96,7 +96,7 @@ func GenerateCryptoKey() (*CryptoKey, error) {
 // Parameters are not secret and can be stored in plain text.
 type Parameters struct {
 	Salt   [KeySize]byte
-	Digest [fastsha256.Size]byte
+	Digest [sha256.Size]byte
 	N      int
 	R      int
 	P      int
@@ -141,14 +141,14 @@ func (sk *SecretKey) Marshal() []byte {
 	// The marshalled format for the the params is as follows:
 	//   <salt><digest><N><R><P>
 	//
-	// KeySize + fastsha256.Size + N (8 bytes) + R (8 bytes) + P (8 bytes)
-	marshalled := make([]byte, KeySize+fastsha256.Size+24)
+	// KeySize + sha256.Size + N (8 bytes) + R (8 bytes) + P (8 bytes)
+	marshalled := make([]byte, KeySize+sha256.Size+24)
 
 	b := marshalled
 	copy(b[:KeySize], params.Salt[:])
 	b = b[KeySize:]
-	copy(b[:fastsha256.Size], params.Digest[:])
-	b = b[fastsha256.Size:]
+	copy(b[:sha256.Size], params.Digest[:])
+	b = b[sha256.Size:]
 	binary.LittleEndian.PutUint64(b[:8], uint64(params.N))
 	b = b[8:]
 	binary.LittleEndian.PutUint64(b[:8], uint64(params.R))
@@ -168,16 +168,16 @@ func (sk *SecretKey) Unmarshal(marshalled []byte) error {
 	// The marshalled format for the the params is as follows:
 	//   <salt><digest><N><R><P>
 	//
-	// KeySize + fastsha256.Size + N (8 bytes) + R (8 bytes) + P (8 bytes)
-	if len(marshalled) != KeySize+fastsha256.Size+24 {
+	// KeySize + sha256.Size + N (8 bytes) + R (8 bytes) + P (8 bytes)
+	if len(marshalled) != KeySize+sha256.Size+24 {
 		return ErrMalformed
 	}
 
 	params := &sk.Parameters
 	copy(params.Salt[:], marshalled[:KeySize])
 	marshalled = marshalled[KeySize:]
-	copy(params.Digest[:], marshalled[:fastsha256.Size])
-	marshalled = marshalled[fastsha256.Size:]
+	copy(params.Digest[:], marshalled[:sha256.Size])
+	marshalled = marshalled[sha256.Size:]
 	params.N = int(binary.LittleEndian.Uint64(marshalled[:8]))
 	marshalled = marshalled[8:]
 	params.R = int(binary.LittleEndian.Uint64(marshalled[:8]))
@@ -203,7 +203,7 @@ func (sk *SecretKey) DeriveKey(password *[]byte) error {
 	}
 
 	// verify password
-	digest := fastsha256.Sum256(sk.Key[:])
+	digest := sha256.Sum256(sk.Key[:])
 	if subtle.ConstantTimeCompare(digest[:], sk.Parameters.Digest[:]) != 1 {
 		return ErrInvalidPassword
 	}
@@ -242,7 +242,7 @@ func NewSecretKey(password *[]byte, N, r, p int) (*SecretKey, error) {
 	}
 
 	// store digest
-	sk.Parameters.Digest = fastsha256.Sum256(sk.Key[:])
+	sk.Parameters.Digest = sha256.Sum256(sk.Key[:])
 
 	return &sk, nil
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 The btcsuite developers
+ * Copyright (c) 2014-2017 The btcsuite developers
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -203,7 +203,7 @@ func Example_startWithdrawal() {
 	addr, _ := btcutil.DecodeAddress("1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX", mgr.ChainParams())
 	pkScript, _ := txscript.PayToAddrScript(addr)
 	requests := []votingpool.OutputRequest{
-		votingpool.OutputRequest{
+		{
 			PkScript:    pkScript,
 			Address:     addr,
 			Amount:      1e6,
