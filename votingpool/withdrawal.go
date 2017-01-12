@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2016 The btcsuite developers
+// Copyright (c) 2015-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -6,6 +6,7 @@ package votingpool
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"reflect"
@@ -19,7 +20,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
-	"github.com/btcsuite/fastsha256"
 )
 
 // Maximum tx size (in bytes). This should be the same as bitcoind's
@@ -212,7 +212,7 @@ func (r OutputRequest) outBailmentIDHash() []byte {
 		return r.cachedHash
 	}
 	str := r.Server + strconv.Itoa(int(r.Transaction))
-	hasher := fastsha256.New()
+	hasher := sha256.New()
 	// hasher.Write() always returns nil as the error, so it's safe to ignore it here.
 	_, _ = hasher.Write([]byte(str))
 	id := hasher.Sum(nil)

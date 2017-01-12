@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2016 The btcsuite developers
+// Copyright (c) 2015-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -264,9 +264,9 @@ func TestCreditSortingByAddress(t *testing.T) {
 	c6 := newDummyCredit(t, pool, 2, 0, 0, shaHash0, 0)
 
 	randomCredits := [][]credit{
-		[]credit{c6, c5, c4, c3, c2, c1, c0},
-		[]credit{c2, c1, c0, c6, c5, c4, c3},
-		[]credit{c6, c4, c5, c2, c3, c0, c1},
+		{c6, c5, c4, c3, c2, c1, c0},
+		{c2, c1, c0, c6, c5, c4, c3},
+		{c6, c4, c5, c2, c3, c0, c1},
 	}
 
 	want := []credit{c0, c1, c2, c3, c4, c5, c6}

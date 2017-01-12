@@ -1,4 +1,4 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -413,14 +413,14 @@ func TestRollbackLastOutputWhenNewOutputAdded(t *testing.T) {
 	firstTx := w.transactions[0]
 	req1 := requests[0]
 	checkTxOutputs(t, firstTx,
-		[]*withdrawalTxOut{&withdrawalTxOut{request: req1, amount: req1.Amount}})
+		[]*withdrawalTxOut{{request: req1, amount: req1.Amount}})
 	checkTxChangeAmount(t, firstTx, btcutil.Amount(4))
 
 	// Second tx should have one output with 2 and one changeoutput with 3 satoshis.
 	secondTx := w.transactions[1]
 	req2 := requests[1]
 	checkTxOutputs(t, secondTx,
-		[]*withdrawalTxOut{&withdrawalTxOut{request: req2, amount: req2.Amount}})
+		[]*withdrawalTxOut{{request: req2, amount: req2.Amount}})
 	checkTxChangeAmount(t, secondTx, btcutil.Amount(3))
 }
 
@@ -469,7 +469,7 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	firstTx := w.transactions[0]
 	req1 := requests[0]
 	checkTxOutputs(t, firstTx,
-		[]*withdrawalTxOut{&withdrawalTxOut{request: req1, amount: req1.Amount}})
+		[]*withdrawalTxOut{{request: req1, amount: req1.Amount}})
 	checkTxInputs(t, firstTx, eligible[5:6])
 
 	// Second tx should have outputs for the two last requests (in the same
@@ -478,8 +478,8 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 	// that's how fulfillRequests() consumes them) and no change output.
 	secondTx := w.transactions[1]
 	wantOutputs := []*withdrawalTxOut{
-		&withdrawalTxOut{request: requests[1], amount: requests[1].Amount},
-		&withdrawalTxOut{request: requests[2], amount: requests[2].Amount}}
+		{request: requests[1], amount: requests[1].Amount},
+		{request: requests[2], amount: requests[2].Amount}}
 	checkTxOutputs(t, secondTx, wantOutputs)
 	wantInputs := []credit{eligible[4], eligible[3], eligible[2]}
 	checkTxInputs(t, secondTx, wantInputs)
@@ -804,7 +804,7 @@ func TestSignMultiSigUTXOUnparseablePkScript(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	unparseablePkScript := []byte{0x01}
-	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, []RawSig{{}})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -819,7 +819,7 @@ func TestSignMultiSigUTXOPkScriptNotP2SH(t *testing.T) {
 	pubKeyHashPkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressPubKeyHash))
 	msgtx := tx.toMsgTx()
 
-	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, []RawSig{{}})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -839,7 +839,7 @@ func TestSignMultiSigUTXORedeemScriptNotFound(t *testing.T) {
 	msgtx := tx.toMsgTx()
 
 	pkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressScriptHash))
-	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, []RawSig{RawSig{}})
+	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, []RawSig{{}})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
@@ -875,7 +875,7 @@ func TestSignMultiSigUTXOWrongRawSigs(t *testing.T) {
 
 	mgr := pool.Manager()
 	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
-	sigs := []RawSig{RawSig{0x00}, RawSig{0x01}}
+	sigs := []RawSig{{0x00}, {0x01}}
 
 	idx := 0 // The index of the tx input we're going to sign.
 	pkScript := tx.inputs[idx].PkScript

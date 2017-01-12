@@ -1,10 +1,11 @@
-// Copyright (c) 2013-2015 The btcsuite developers
+// Copyright (c) 2013-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package legacyrpc
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -21,7 +22,6 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/fastsha256"
 	"github.com/btcsuite/websocket"
 )
 
@@ -66,7 +66,7 @@ type Server struct {
 	handlerMu     sync.Mutex
 
 	listeners []net.Listener
-	authsha   [fastsha256.Size]byte
+	authsha   [sha256.Size]byte
 	upgrader  websocket.Upgrader
 
 	maxPostClients      int64 // Max concurrent HTTP POST clients.
@@ -105,7 +105,7 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 		listeners:           listeners,
 		// A hash of the HTTP basic auth string is used for a constant
 		// time comparison.
-		authsha: fastsha256.Sum256(httpBasicAuth(opts.Username, opts.Password)),
+		authsha: sha256.Sum256(httpBasicAuth(opts.Username, opts.Password)),
 		upgrader: websocket.Upgrader{
 			// Allow all origins.
 			CheckOrigin: func(r *http.Request) bool { return true },
@@ -301,7 +301,7 @@ func (s *Server) checkAuthHeader(r *http.Request) error {
 		return ErrNoAuth
 	}
 
-	authsha := fastsha256.Sum256([]byte(authhdr[0]))
+	authsha := sha256.Sum256([]byte(authhdr[0]))
 	cmp := subtle.ConstantTimeCompare(authsha[:], s.authsha[:])
 	if cmp != 1 {
 		return errors.New("bad auth")
@@ -378,7 +378,7 @@ func (s *Server) invalidAuth(req *btcjson.Request) bool {
 	// Check credentials.
 	login := authCmd.Username + ":" + authCmd.Passphrase
 	auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(login))
-	authSha := fastsha256.Sum256([]byte(auth))
+	authSha := sha256.Sum256([]byte(auth))
 	return subtle.ConstantTimeCompare(authSha[:], s.authsha[:]) != 1
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2016 The btcsuite developers
+// Copyright (c) 2014-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -6,6 +6,7 @@ package waddrmgr
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -14,7 +15,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/fastsha256"
 )
 
 const (
@@ -1006,7 +1006,7 @@ func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
 func fetchAddressUsed(tx walletdb.Tx, addressID []byte) bool {
 	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
+	addrHash := sha256.Sum256(addressID)
 	return bucket.Get(addrHash[:]) != nil
 }
 
@@ -1014,7 +1014,7 @@ func fetchAddressUsed(tx walletdb.Tx, addressID []byte) bool {
 func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
 	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
+	addrHash := sha256.Sum256(addressID)
 	val := bucket.Get(addrHash[:])
 	if val != nil {
 		return nil
@@ -1033,7 +1033,7 @@ func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
 // The caller should prefix the error message with the address which caused the
 // failure.
 func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
-	addrHash := fastsha256.Sum256(addressID)
+	addrHash := sha256.Sum256(addressID)
 	return fetchAddressByHash(tx, addrHash[:])
 }
 
@@ -1045,7 +1045,7 @@ func putAddress(tx walletdb.Tx, addressID []byte, row *dbAddressRow) error {
 	// Write the serialized value keyed by the hash of the address.  The
 	// additional hash is used to conceal the actual address while still
 	// allowed keyed lookups.
-	addrHash := fastsha256.Sum256(addressID)
+	addrHash := sha256.Sum256(addressID)
 	err := bucket.Put(addrHash[:], serializeAddressRow(row))
 	if err != nil {
 		str := fmt.Sprintf("failed to store address %x", addressID)
@@ -1151,7 +1151,7 @@ func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
 func existsAddress(tx walletdb.Tx, addressID []byte) bool {
 	bucket := tx.RootBucket().Bucket(addrBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
+	addrHash := sha256.Sum256(addressID)
 	return bucket.Get(addrHash[:]) != nil
 }
 
@@ -1161,7 +1161,7 @@ func existsAddress(tx walletdb.Tx, addressID []byte) bool {
 func fetchAddrAccount(tx walletdb.Tx, addressID []byte) (uint32, error) {
 	bucket := tx.RootBucket().Bucket(addrAcctIdxBucketName)
 
-	addrHash := fastsha256.Sum256(addressID)
+	addrHash := sha256.Sum256(addressID)
 	val := bucket.Get(addrHash[:])
 	if val == nil {
 		str := "address not found"

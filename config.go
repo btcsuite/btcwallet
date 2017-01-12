@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (c) 2013-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -500,9 +500,9 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	localhostListeners := map[string]struct{}{
-		"localhost": struct{}{},
-		"127.0.0.1": struct{}{},
-		"::1":       struct{}{},
+		"localhost": {},
+		"127.0.0.1": {},
+		"::1":       {},
 	}
 	RPCHost, _, err := net.SplitHostPort(cfg.RPCConnect)
 	if err != nil {

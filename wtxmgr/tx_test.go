@@ -1,4 +1,4 @@
-// Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (c) 2013-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -606,7 +606,7 @@ func TestFindingSpentCredits(t *testing.T) {
 func newCoinBase(outputValues ...int64) *wire.MsgTx {
 	tx := wire.MsgTx{
 		TxIn: []*wire.TxIn{
-			&wire.TxIn{
+			{
 				PreviousOutPoint: wire.OutPoint{Index: ^uint32(0)},
 			},
 		},
@@ -620,7 +620,7 @@ func newCoinBase(outputValues ...int64) *wire.MsgTx {
 func spendOutput(txHash *chainhash.Hash, index uint32, outputValues ...int64) *wire.MsgTx {
 	tx := wire.MsgTx{
 		TxIn: []*wire.TxIn{
-			&wire.TxIn{
+			{
 				PreviousOutPoint: wire.OutPoint{Hash: *txHash, Index: index},
 			},
 		},
