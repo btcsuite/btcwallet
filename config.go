@@ -317,9 +317,15 @@ func loadConfig() (*config, []string, error) {
 
 	// Warn about missing config file after the final command line parse
 	// succeeds.  This prevents the warning on help messages and invalid
-	// options.
+	// options.  This can not write to the logger as it has not yet been
+	// initialized.  It is not written to the logger after initialization
+	// since a missing config file is the first thing that should be warned,
+	// and it would be wrong to error elsewhere in this function due to
+	// options left unspecified because of an incorrect config file passed
+	// as a command line argument.
 	if configFileError != nil {
-		log.Warnf("%v", configFileError)
+		fmt.Fprintf(os.Stderr, "failed to read configuration file: %v\n",
+			configFileError)
 	}
 
 	// Check deprecated aliases.  The new options receive priority when both
