@@ -9,31 +9,47 @@ package walletdb
 
 import "io"
 
-// Bucket represents a collection of key/value pairs.
-type Bucket interface {
-	// Bucket retrieves a nested bucket with the given key.  Returns nil if
-	// the bucket does not exist.
-	Bucket(key []byte) Bucket
+// ReadTx represents a database transaction that can only be used for reads.  If
+// a database update must occur, use a ReadWriteTx.
+type ReadTx interface {
+	// ReadBucket opens the root bucket for read only access.  If the bucket
+	// described by the key does not exist, nil is returned.
+	ReadBucket(key []byte) ReadBucket
 
-	// CreateBucket creates and returns a new nested bucket with the given
-	// key.  Returns ErrBucketExists if the bucket already exists,
-	// ErrBucketNameRequired if the key is empty, or ErrIncompatibleValue
-	// if the key value is otherwise invalid for the particular database
-	// implementation.  Other errors are possible depending on the
-	// implementation.
-	CreateBucket(key []byte) (Bucket, error)
+	// Rollback closes the transaction, discarding changes (if any) if the
+	// database was modified by a write transaction.
+	Rollback() error
+}
 
-	// CreateBucketIfNotExists creates and returns a new nested bucket with
-	// the given key if it does not already exist.  Returns
-	// ErrBucketNameRequired if the key is empty or ErrIncompatibleValue
-	// if the key value is otherwise invalid for the particular database
-	// backend.  Other errors are possible depending on the implementation.
-	CreateBucketIfNotExists(key []byte) (Bucket, error)
+// ReadWriteTx represents a database transaction that can be used for both reads
+// and writes.  When only reads are necessary, consider using a ReadTx instead.
+type ReadWriteTx interface {
+	ReadTx
 
-	// DeleteBucket removes a nested bucket with the given key.  Returns
-	// ErrTxNotWritable if attempted against a read-only transaction and
-	// ErrBucketNotFound if the specified bucket does not exist.
-	DeleteBucket(key []byte) error
+	// ReadWriteBucket opens the root bucket for read/write access.  If the
+	// bucket described by the key does not exist, nil is returned.
+	ReadWriteBucket(key []byte) ReadWriteBucket
+
+	// CreateTopLevelBucket creates the top level bucket for a key if it
+	// does not exist.  The newly-created bucket it returned.
+	CreateTopLevelBucket(key []byte) (ReadWriteBucket, error)
+
+	// DeleteTopLevelBucket deletes the top level bucket for a key.  This
+	// errors if the bucket can not be found or the key keys a single value
+	// instead of a bucket.
+	DeleteTopLevelBucket(key []byte) error
+
+	// Commit commits all changes that have been on the transaction's root
+	// buckets and all of their sub-buckets to persistent storage.
+	Commit() error
+}
+
+// ReadBucket represents a bucket (a hierarchical structure within the database)
+// that is only allowed to perform read operations.
+type ReadBucket interface {
+	// NestedReadBucket retrieves a nested bucket with the given key.
+	// Returns nil if the bucket does not exist.
+	NestedReadBucket(key []byte) ReadBucket
 
 	// ForEach invokes the passed function with every key/value pair in
 	// the bucket.  This includes nested buckets, in which case the value
@@ -47,15 +63,6 @@ type Bucket interface {
 	// implementations.
 	ForEach(func(k, v []byte) error) error
 
-	// Writable returns whether or not the bucket is writable.
-	Writable() bool
-
-	// Put saves the specified key/value pair to the bucket.  Keys that do
-	// not already exist are added and keys that already exist are
-	// overwritten.  Returns ErrTxNotWritable if attempted against a
-	// read-only transaction.
-	Put(key, value []byte) error
-
 	// Get returns the value for the given key.  Returns nil if the key does
 	// not exist in this bucket (or nested buckets).
 	//
@@ -66,6 +73,44 @@ type Bucket interface {
 	// implementations.
 	Get(key []byte) []byte
 
+	ReadCursor() ReadCursor
+}
+
+// ReadWriteBucket represents a bucket (a hierarchical structure within the
+// database) that is allowed to perform both read and write operations.
+type ReadWriteBucket interface {
+	ReadBucket
+
+	// NestedReadWriteBucket retrieves a nested bucket with the given key.
+	// Returns nil if the bucket does not exist.
+	NestedReadWriteBucket(key []byte) ReadWriteBucket
+
+	// CreateBucket creates and returns a new nested bucket with the given
+	// key.  Returns ErrBucketExists if the bucket already exists,
+	// ErrBucketNameRequired if the key is empty, or ErrIncompatibleValue
+	// if the key value is otherwise invalid for the particular database
+	// implementation.  Other errors are possible depending on the
+	// implementation.
+	CreateBucket(key []byte) (ReadWriteBucket, error)
+
+	// CreateBucketIfNotExists creates and returns a new nested bucket with
+	// the given key if it does not already exist.  Returns
+	// ErrBucketNameRequired if the key is empty or ErrIncompatibleValue
+	// if the key value is otherwise invalid for the particular database
+	// backend.  Other errors are possible depending on the implementation.
+	CreateBucketIfNotExists(key []byte) (ReadWriteBucket, error)
+
+	// DeleteNestedBucket removes a nested bucket with the given key.
+	// Returns ErrTxNotWritable if attempted against a read-only transaction
+	// and ErrBucketNotFound if the specified bucket does not exist.
+	DeleteNestedBucket(key []byte) error
+
+	// Put saves the specified key/value pair to the bucket.  Keys that do
+	// not already exist are added and keys that already exist are
+	// overwritten.  Returns ErrTxNotWritable if attempted against a
+	// read-only transaction.
+	Put(key, value []byte) error
+
 	// Delete removes the specified key from the bucket.  Deleting a key
 	// that does not exist does not return an error.  Returns
 	// ErrTxNotWritable if attempted against a read-only transaction.
@@ -73,26 +118,13 @@ type Bucket interface {
 
 	// Cursor returns a new cursor, allowing for iteration over the bucket's
 	// key/value pairs and nested buckets in forward or backward order.
-	Cursor() Cursor
+	ReadWriteCursor() ReadWriteCursor
 }
 
-// Cursor represents a cursor over key/value pairs and nested buckets of a
-// bucket.
-//
-// Note that open cursors are not tracked on bucket changes and any
-// modifications to the bucket, with the exception of Cursor.Delete, invalidate
-// the cursor.  After invalidation, the cursor must be repositioned, or the keys
-// and values returned may be unpredictable.
-type Cursor interface {
-	// Bucket returns the bucket the cursor was created for.
-	Bucket() Bucket
-
-	// Delete removes the current key/value pair the cursor is at without
-	// invalidating the cursor.  Returns ErrTxNotWritable if attempted on a
-	// read-only transaction, or ErrIncompatibleValue if attempted when the
-	// cursor points to a nested bucket.
-	Delete() error
-
+// ReadCursor represents a bucket cursor that can be positioned at the start or
+// end of the bucket's key/value pairs and iterate over pairs in the bucket.
+// This type is only allowed to perform database read operations.
+type ReadCursor interface {
 	// First positions the cursor at the first key/value pair and returns
 	// the pair.
 	First() (key, value []byte)
@@ -115,88 +147,34 @@ type Cursor interface {
 	Seek(seek []byte) (key, value []byte)
 }
 
-// Tx represents a database transaction.  It can either by read-only or
-// read-write.  The transaction provides a root bucket against which all read
-// and writes occur.
-//
-// As would be expected with a transaction, no changes will be saved to the
-// database until it has been committed.  The transaction will only provide a
-// view of the database at the time it was created.  Transactions should not be
-// long running operations.
-type Tx interface {
-	// RootBucket returns the top-most bucket for the namespace the
-	// transaction was created from.
-	RootBucket() Bucket
+// ReadWriteCursor represents a bucket cursor that can be positioned at the
+// start or end of the bucket's key/value pairs and iterate over pairs in the
+// bucket.  This abstraction is allowed to perform both database read and write
+// operations.
+type ReadWriteCursor interface {
+	ReadCursor
 
-	// Commit commits all changes that have been made through the root
-	// bucket and all of its sub-buckets to persistent storage.
-	Commit() error
-
-	// Rollback undoes all changes that have been made to the root bucket
-	// and all of its sub-buckets.
-	Rollback() error
+	// Delete removes the current key/value pair the cursor is at without
+	// invalidating the cursor.  Returns ErrIncompatibleValue if attempted
+	// when the cursor points to a nested bucket.
+	Delete() error
 }
 
-// Namespace represents a database namespace that is inteded to support the
-// concept of a single entity that controls the opening, creating, and closing
-// of a database while providing other entities their own namespace to work in.
-type Namespace interface {
-	// Begin starts a transaction which is either read-only or read-write
-	// depending on the specified flag.  Multiple read-only transactions
-	// can be started simultaneously while only a single read-write
-	// transaction can be started at a time.  The call will block when
-	// starting a read-write transaction when one is already open.
-	//
-	// NOTE: The transaction must be closed by calling Rollback or Commit on
-	// it when it is no longer needed.  Failure to do so can result in
-	// unclaimed memory depending on the specific database implementation.
-	Begin(writable bool) (Tx, error)
-
-	// View invokes the passed function in the context of a managed
-	// read-only transaction.  Any errors returned from the user-supplied
-	// function are returned from this function.
-	//
-	// Calling Rollback on the transaction passed to the user-supplied
-	// function will result in a panic.
-	View(fn func(Tx) error) error
-
-	// Update invokes the passed function in the context of a managed
-	// read-write transaction.  Any errors returned from the user-supplied
-	// function will cause the transaction to be rolled back and are
-	// returned from this function.  Otherwise, the transaction is commited
-	// when the user-supplied function returns a nil error.
-	//
-	// Calling Rollback on the transaction passed to the user-supplied
-	// function will result in a panic.
-	Update(fn func(Tx) error) error
+// BucketIsEmpty returns whether the bucket is empty, that is, whether there are
+// no key/value pairs or nested buckets.
+func BucketIsEmpty(bucket ReadBucket) bool {
+	k, v := bucket.ReadCursor().First()
+	return k == nil && v == nil
 }
 
-// NamespaceIsEmpty returns whether the namespace is empty, that is, whether there
-// are no key/value pairs or nested buckets.
-func NamespaceIsEmpty(namespace Namespace) (bool, error) {
-	var empty bool
-	err := namespace.View(func(tx Tx) error {
-		k, v := tx.RootBucket().Cursor().First()
-		empty = k == nil && v == nil
-		return nil
-	})
-	return empty, err
-}
-
-// DB represents a collection of namespaces which are persisted.  All database
-// access is performed through transactions which are obtained through the
-// specific Namespace.
+// DB represents an ACID database.  All database access is performed through
+// read or read+write transactions.
 type DB interface {
-	// Namespace returns a Namespace interface for the provided key.  See
-	// the Namespace interface documentation for more details.  Attempting
-	// to access a Namespace on a database that is not open yet or has been
-	// closed will result in ErrDbNotOpen.  Namespaces are created in the
-	// database on first access.
-	Namespace(key []byte) (Namespace, error)
+	// BeginReadTx opens a database read transaction.
+	BeginReadTx() (ReadTx, error)
 
-	// DeleteNamespace deletes the namespace for the passed key.
-	// ErrBucketNotFound will be returned if the namespace does not exist.
-	DeleteNamespace(key []byte) error
+	// BeginReadWriteTx opens a database read+write transaction.
+	BeginReadWriteTx() (ReadWriteTx, error)
 
 	// Copy writes a copy of the database to the provided writer.  This
 	// call will start a read-only transaction to perform all operations.
@@ -204,6 +182,47 @@ type DB interface {
 
 	// Close cleanly shuts down the database and syncs all data.
 	Close() error
+}
+
+// View opens a database read transaction and executes the function f with the
+// transaction passed as a parameter.  After f exits, the transaction is rolled
+// back.  If f errors, its error is returned, not a rollback error (if any
+// occur).
+func View(db DB, f func(tx ReadTx) error) error {
+	tx, err := db.BeginReadTx()
+	if err != nil {
+		return err
+	}
+	err = f(tx)
+	rollbackErr := tx.Rollback()
+	if err != nil {
+		return err
+	}
+	if rollbackErr != nil {
+		return rollbackErr
+	}
+	return nil
+}
+
+// Update opens a database read/write transaction and executes the function f
+// with the transaction passed as a parameter.  After f exits, if f did not
+// error, the transaction is committed.  Otherwise, if f did error, the
+// transaction is rolled back.  If the rollback fails, the original error
+// returned by f is still returned.  If the commit fails, the commit error is
+// returned.
+func Update(db DB, f func(tx ReadWriteTx) error) error {
+	tx, err := db.BeginReadWriteTx()
+	if err != nil {
+		return err
+	}
+	err = f(tx)
+	if err != nil {
+		// Want to return the original error, not a rollback error if
+		// any occur.
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // Driver defines a structure for backend drivers to use when they registered

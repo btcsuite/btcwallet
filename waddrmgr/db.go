@@ -1,4 +1,5 @@
 // Copyright (c) 2014-2017 The btcsuite developers
+// Copyright (c) 2015 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -231,8 +232,8 @@ func stringToBytes(s string) []byte {
 }
 
 // fetchManagerVersion fetches the current manager version from the database.
-func fetchManagerVersion(tx walletdb.Tx) (uint32, error) {
-	mainBucket := tx.RootBucket().Bucket(mainBucketName)
+func fetchManagerVersion(ns walletdb.ReadBucket) (uint32, error) {
+	mainBucket := ns.NestedReadBucket(mainBucketName)
 	verBytes := mainBucket.Get(mgrVersionName)
 	if verBytes == nil {
 		str := "required version number not stored in database"
@@ -243,8 +244,8 @@ func fetchManagerVersion(tx walletdb.Tx) (uint32, error) {
 }
 
 // putManagerVersion stores the provided version to the database.
-func putManagerVersion(tx walletdb.Tx, version uint32) error {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func putManagerVersion(ns walletdb.ReadWriteBucket, version uint32) error {
+	bucket := ns.NestedReadWriteBucket(mainBucketName)
 
 	verBytes := uint32ToBytes(version)
 	err := bucket.Put(mgrVersionName, verBytes)
@@ -259,8 +260,8 @@ func putManagerVersion(tx walletdb.Tx, version uint32) error {
 // (when given the correct user-supplied passphrase) from the database.  Either
 // returned value can be nil, but in practice only the private key params will
 // be nil for a watching-only database.
-func fetchMasterKeyParams(tx walletdb.Tx) ([]byte, []byte, error) {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func fetchMasterKeyParams(ns walletdb.ReadBucket) ([]byte, []byte, error) {
+	bucket := ns.NestedReadBucket(mainBucketName)
 
 	// Load the master public key parameters.  Required.
 	val := bucket.Get(masterPubKeyName)
@@ -286,8 +287,8 @@ func fetchMasterKeyParams(tx walletdb.Tx) ([]byte, []byte, error) {
 // putMasterKeyParams stores the master key parameters needed to derive them
 // to the database.  Either parameter can be nil in which case no value is
 // written for the parameter.
-func putMasterKeyParams(tx walletdb.Tx, pubParams, privParams []byte) error {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func putMasterKeyParams(ns walletdb.ReadWriteBucket, pubParams, privParams []byte) error {
+	bucket := ns.NestedReadWriteBucket(mainBucketName)
 
 	if privParams != nil {
 		err := bucket.Put(masterPrivKeyName, privParams)
@@ -310,8 +311,8 @@ func putMasterKeyParams(tx walletdb.Tx, pubParams, privParams []byte) error {
 
 // fetchCoinTypeKeys loads the encrypted cointype keys which are in turn used to
 // derive the extended keys for all accounts.
-func fetchCoinTypeKeys(tx walletdb.Tx) ([]byte, []byte, error) {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func fetchCoinTypeKeys(ns walletdb.ReadBucket) ([]byte, []byte, error) {
+	bucket := ns.NestedReadBucket(mainBucketName)
 
 	coinTypePubKeyEnc := bucket.Get(coinTypePubKeyName)
 	if coinTypePubKeyEnc == nil {
@@ -330,8 +331,8 @@ func fetchCoinTypeKeys(tx walletdb.Tx) ([]byte, []byte, error) {
 // putCoinTypeKeys stores the encrypted cointype keys which are in turn used to
 // derive the extended keys for all accounts.  Either parameter can be nil in which
 // case no value is written for the parameter.
-func putCoinTypeKeys(tx walletdb.Tx, coinTypePubKeyEnc []byte, coinTypePrivKeyEnc []byte) error {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func putCoinTypeKeys(ns walletdb.ReadWriteBucket, coinTypePubKeyEnc []byte, coinTypePrivKeyEnc []byte) error {
+	bucket := ns.NestedReadWriteBucket(mainBucketName)
 
 	if coinTypePubKeyEnc != nil {
 		err := bucket.Put(coinTypePubKeyName, coinTypePubKeyEnc)
@@ -356,8 +357,8 @@ func putCoinTypeKeys(tx walletdb.Tx, coinTypePubKeyEnc []byte, coinTypePrivKeyEn
 // protect the extended keys, imported keys, and scripts.  Any of the returned
 // values can be nil, but in practice only the crypto private and script keys
 // will be nil for a watching-only database.
-func fetchCryptoKeys(tx walletdb.Tx) ([]byte, []byte, []byte, error) {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func fetchCryptoKeys(ns walletdb.ReadBucket) ([]byte, []byte, []byte, error) {
+	bucket := ns.NestedReadBucket(mainBucketName)
 
 	// Load the crypto public key parameters.  Required.
 	val := bucket.Get(cryptoPubKeyName)
@@ -390,8 +391,8 @@ func fetchCryptoKeys(tx walletdb.Tx) ([]byte, []byte, []byte, error) {
 // putCryptoKeys stores the encrypted crypto keys which are in turn used to
 // protect the extended and imported keys.  Either parameter can be nil in which
 // case no value is written for the parameter.
-func putCryptoKeys(tx walletdb.Tx, pubKeyEncrypted, privKeyEncrypted, scriptKeyEncrypted []byte) error {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func putCryptoKeys(ns walletdb.ReadWriteBucket, pubKeyEncrypted, privKeyEncrypted, scriptKeyEncrypted []byte) error {
+	bucket := ns.NestedReadWriteBucket(mainBucketName)
 
 	if pubKeyEncrypted != nil {
 		err := bucket.Put(cryptoPubKeyName, pubKeyEncrypted)
@@ -421,8 +422,8 @@ func putCryptoKeys(tx walletdb.Tx, pubKeyEncrypted, privKeyEncrypted, scriptKeyE
 }
 
 // fetchWatchingOnly loads the watching-only flag from the database.
-func fetchWatchingOnly(tx walletdb.Tx) (bool, error) {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func fetchWatchingOnly(ns walletdb.ReadBucket) (bool, error) {
+	bucket := ns.NestedReadBucket(mainBucketName)
 
 	buf := bucket.Get(watchingOnlyName)
 	if len(buf) != 1 {
@@ -434,8 +435,8 @@ func fetchWatchingOnly(tx walletdb.Tx) (bool, error) {
 }
 
 // putWatchingOnly stores the watching-only flag to the database.
-func putWatchingOnly(tx walletdb.Tx, watchingOnly bool) error {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func putWatchingOnly(ns walletdb.ReadWriteBucket, watchingOnly bool) error {
+	bucket := ns.NestedReadWriteBucket(mainBucketName)
 
 	var encoded byte
 	if watchingOnly {
@@ -567,8 +568,8 @@ func serializeBIP0044AccountRow(encryptedPubKey,
 
 // forEachAccount calls the given function with each account stored in
 // the manager, breaking early on error.
-func forEachAccount(tx walletdb.Tx, fn func(account uint32) error) error {
-	bucket := tx.RootBucket().Bucket(acctBucketName)
+func forEachAccount(ns walletdb.ReadBucket, fn func(account uint32) error) error {
+	bucket := ns.NestedReadBucket(acctBucketName)
 
 	return bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
@@ -580,8 +581,8 @@ func forEachAccount(tx walletdb.Tx, fn func(account uint32) error) error {
 }
 
 // fetchLastAccount retreives the last account from the database.
-func fetchLastAccount(tx walletdb.Tx) (uint32, error) {
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+func fetchLastAccount(ns walletdb.ReadBucket) (uint32, error) {
+	bucket := ns.NestedReadBucket(metaBucketName)
 
 	val := bucket.Get(lastAccountName)
 	if len(val) != 4 {
@@ -595,8 +596,8 @@ func fetchLastAccount(tx walletdb.Tx) (uint32, error) {
 
 // fetchAccountName retreives the account name given an account number from
 // the database.
-func fetchAccountName(tx walletdb.Tx, account uint32) (string, error) {
-	bucket := tx.RootBucket().Bucket(acctIDIdxBucketName)
+func fetchAccountName(ns walletdb.ReadBucket, account uint32) (string, error) {
+	bucket := ns.NestedReadBucket(acctIDIdxBucketName)
 
 	val := bucket.Get(uint32ToBytes(account))
 	if val == nil {
@@ -612,8 +613,8 @@ func fetchAccountName(tx walletdb.Tx, account uint32) (string, error) {
 
 // fetchAccountByName retreives the account number given an account name
 // from the database.
-func fetchAccountByName(tx walletdb.Tx, name string) (uint32, error) {
-	bucket := tx.RootBucket().Bucket(acctNameIdxBucketName)
+func fetchAccountByName(ns walletdb.ReadBucket, name string) (uint32, error) {
+	bucket := ns.NestedReadBucket(acctNameIdxBucketName)
 
 	val := bucket.Get(stringToBytes(name))
 	if val == nil {
@@ -626,8 +627,8 @@ func fetchAccountByName(tx walletdb.Tx, name string) (uint32, error) {
 
 // fetchAccountInfo loads information about the passed account from the
 // database.
-func fetchAccountInfo(tx walletdb.Tx, account uint32) (interface{}, error) {
-	bucket := tx.RootBucket().Bucket(acctBucketName)
+func fetchAccountInfo(ns walletdb.ReadBucket, account uint32) (interface{}, error) {
+	bucket := ns.NestedReadBucket(acctBucketName)
 
 	accountID := uint32ToBytes(account)
 	serializedRow := bucket.Get(accountID)
@@ -651,8 +652,8 @@ func fetchAccountInfo(tx walletdb.Tx, account uint32) (interface{}, error) {
 }
 
 // deleteAccountNameIndex deletes the given key from the account name index of the database.
-func deleteAccountNameIndex(tx walletdb.Tx, name string) error {
-	bucket := tx.RootBucket().Bucket(acctNameIdxBucketName)
+func deleteAccountNameIndex(ns walletdb.ReadWriteBucket, name string) error {
+	bucket := ns.NestedReadWriteBucket(acctNameIdxBucketName)
 
 	// Delete the account name key
 	err := bucket.Delete(stringToBytes(name))
@@ -664,8 +665,8 @@ func deleteAccountNameIndex(tx walletdb.Tx, name string) error {
 }
 
 // deleteAccounIdIndex deletes the given key from the account id index of the database.
-func deleteAccountIDIndex(tx walletdb.Tx, account uint32) error {
-	bucket := tx.RootBucket().Bucket(acctIDIdxBucketName)
+func deleteAccountIDIndex(ns walletdb.ReadWriteBucket, account uint32) error {
+	bucket := ns.NestedReadWriteBucket(acctIDIdxBucketName)
 
 	// Delete the account id key
 	err := bucket.Delete(uint32ToBytes(account))
@@ -677,8 +678,8 @@ func deleteAccountIDIndex(tx walletdb.Tx, account uint32) error {
 }
 
 // putAccountNameIndex stores the given key to the account name index of the database.
-func putAccountNameIndex(tx walletdb.Tx, account uint32, name string) error {
-	bucket := tx.RootBucket().Bucket(acctNameIdxBucketName)
+func putAccountNameIndex(ns walletdb.ReadWriteBucket, account uint32, name string) error {
+	bucket := ns.NestedReadWriteBucket(acctNameIdxBucketName)
 
 	// Write the account number keyed by the account name.
 	err := bucket.Put(stringToBytes(name), uint32ToBytes(account))
@@ -690,8 +691,8 @@ func putAccountNameIndex(tx walletdb.Tx, account uint32, name string) error {
 }
 
 // putAccountIDIndex stores the given key to the account id index of the database.
-func putAccountIDIndex(tx walletdb.Tx, account uint32, name string) error {
-	bucket := tx.RootBucket().Bucket(acctIDIdxBucketName)
+func putAccountIDIndex(ns walletdb.ReadWriteBucket, account uint32, name string) error {
+	bucket := ns.NestedReadWriteBucket(acctIDIdxBucketName)
 
 	// Write the account number keyed by the account id.
 	err := bucket.Put(uint32ToBytes(account), stringToBytes(name))
@@ -703,8 +704,8 @@ func putAccountIDIndex(tx walletdb.Tx, account uint32, name string) error {
 }
 
 // putAddrAccountIndex stores the given key to the address account index of the database.
-func putAddrAccountIndex(tx walletdb.Tx, account uint32, addrHash []byte) error {
-	bucket := tx.RootBucket().Bucket(addrAcctIdxBucketName)
+func putAddrAccountIndex(ns walletdb.ReadWriteBucket, account uint32, addrHash []byte) error {
+	bucket := ns.NestedReadWriteBucket(addrAcctIdxBucketName)
 
 	// Write account keyed by address hash
 	err := bucket.Put(addrHash, uint32ToBytes(account))
@@ -727,8 +728,8 @@ func putAddrAccountIndex(tx walletdb.Tx, account uint32, addrHash []byte) error 
 
 // putAccountRow stores the provided account information to the database.  This
 // is used a common base for storing the various account types.
-func putAccountRow(tx walletdb.Tx, account uint32, row *dbAccountRow) error {
-	bucket := tx.RootBucket().Bucket(acctBucketName)
+func putAccountRow(ns walletdb.ReadWriteBucket, account uint32, row *dbAccountRow) error {
+	bucket := ns.NestedReadWriteBucket(acctBucketName)
 
 	// Write the serialized value keyed by the account number.
 	err := bucket.Put(uint32ToBytes(account), serializeAccountRow(row))
@@ -740,7 +741,7 @@ func putAccountRow(tx walletdb.Tx, account uint32, row *dbAccountRow) error {
 }
 
 // putAccountInfo stores the provided account information to the database.
-func putAccountInfo(tx walletdb.Tx, account uint32, encryptedPubKey,
+func putAccountInfo(ns walletdb.ReadWriteBucket, account uint32, encryptedPubKey,
 	encryptedPrivKey []byte, nextExternalIndex, nextInternalIndex uint32,
 	name string) error {
 
@@ -751,15 +752,15 @@ func putAccountInfo(tx walletdb.Tx, account uint32, encryptedPubKey,
 		acctType: actBIP0044,
 		rawData:  rawData,
 	}
-	if err := putAccountRow(tx, account, &acctRow); err != nil {
+	if err := putAccountRow(ns, account, &acctRow); err != nil {
 		return err
 	}
 	// Update account id index
-	if err := putAccountIDIndex(tx, account, name); err != nil {
+	if err := putAccountIDIndex(ns, account, name); err != nil {
 		return err
 	}
 	// Update account name index
-	if err := putAccountNameIndex(tx, account, name); err != nil {
+	if err := putAccountNameIndex(ns, account, name); err != nil {
 		return err
 	}
 
@@ -767,8 +768,8 @@ func putAccountInfo(tx walletdb.Tx, account uint32, encryptedPubKey,
 }
 
 // putLastAccount stores the provided metadata - last account - to the database.
-func putLastAccount(tx walletdb.Tx, account uint32) error {
-	bucket := tx.RootBucket().Bucket(metaBucketName)
+func putLastAccount(ns walletdb.ReadWriteBucket, account uint32) error {
+	bucket := ns.NestedReadWriteBucket(metaBucketName)
 
 	err := bucket.Put(lastAccountName, uint32ToBytes(account))
 	if err != nil {
@@ -975,8 +976,8 @@ func serializeScriptAddress(encryptedHash, encryptedScript []byte) []byte {
 // specific address type.  The caller should use type assertions to ascertain
 // the type.  The caller should prefix the error message with the address hash
 // which caused the failure.
-func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
-	bucket := tx.RootBucket().Bucket(addrBucketName)
+func fetchAddressByHash(ns walletdb.ReadBucket, addrHash []byte) (interface{}, error) {
+	bucket := ns.NestedReadBucket(addrBucketName)
 
 	serializedRow := bucket.Get(addrHash[:])
 	if serializedRow == nil {
@@ -1003,16 +1004,16 @@ func fetchAddressByHash(tx walletdb.Tx, addrHash []byte) (interface{}, error) {
 }
 
 // fetchAddressUsed returns true if the provided address id was flagged as used.
-func fetchAddressUsed(tx walletdb.Tx, addressID []byte) bool {
-	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
+func fetchAddressUsed(ns walletdb.ReadBucket, addressID []byte) bool {
+	bucket := ns.NestedReadBucket(usedAddrBucketName)
 
 	addrHash := sha256.Sum256(addressID)
 	return bucket.Get(addrHash[:]) != nil
 }
 
 // markAddressUsed flags the provided address id as used in the database.
-func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
-	bucket := tx.RootBucket().Bucket(usedAddrBucketName)
+func markAddressUsed(ns walletdb.ReadWriteBucket, addressID []byte) error {
+	bucket := ns.NestedReadWriteBucket(usedAddrBucketName)
 
 	addrHash := sha256.Sum256(addressID)
 	val := bucket.Get(addrHash[:])
@@ -1032,15 +1033,15 @@ func markAddressUsed(tx walletdb.Tx, addressID []byte) error {
 // address type.  The caller should use type assertions to ascertain the type.
 // The caller should prefix the error message with the address which caused the
 // failure.
-func fetchAddress(tx walletdb.Tx, addressID []byte) (interface{}, error) {
+func fetchAddress(ns walletdb.ReadBucket, addressID []byte) (interface{}, error) {
 	addrHash := sha256.Sum256(addressID)
-	return fetchAddressByHash(tx, addrHash[:])
+	return fetchAddressByHash(ns, addrHash[:])
 }
 
 // putAddress stores the provided address information to the database.  This
 // is used a common base for storing the various address types.
-func putAddress(tx walletdb.Tx, addressID []byte, row *dbAddressRow) error {
-	bucket := tx.RootBucket().Bucket(addrBucketName)
+func putAddress(ns walletdb.ReadWriteBucket, addressID []byte, row *dbAddressRow) error {
+	bucket := ns.NestedReadWriteBucket(addrBucketName)
 
 	// Write the serialized value keyed by the hash of the address.  The
 	// additional hash is used to conceal the actual address while still
@@ -1052,12 +1053,12 @@ func putAddress(tx walletdb.Tx, addressID []byte, row *dbAddressRow) error {
 		return managerError(ErrDatabase, str, err)
 	}
 	// Update address account index
-	return putAddrAccountIndex(tx, row.account, addrHash[:])
+	return putAddrAccountIndex(ns, row.account, addrHash[:])
 }
 
 // putChainedAddress stores the provided chained address information to the
 // database.
-func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
+func putChainedAddress(ns walletdb.ReadWriteBucket, addressID []byte, account uint32,
 	status syncStatus, branch, index uint32) error {
 
 	addrRow := dbAddressRow{
@@ -1067,14 +1068,14 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    serializeChainedAddress(branch, index),
 	}
-	if err := putAddress(tx, addressID, &addrRow); err != nil {
+	if err := putAddress(ns, addressID, &addrRow); err != nil {
 		return err
 	}
 
 	// Update the next index for the appropriate internal or external
 	// branch.
 	accountID := uint32ToBytes(account)
-	bucket := tx.RootBucket().Bucket(acctBucketName)
+	bucket := ns.NestedReadWriteBucket(acctBucketName)
 	serializedAccount := bucket.Get(accountID)
 
 	// Deserialize the account row.
@@ -1113,7 +1114,7 @@ func putChainedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 
 // putImportedAddress stores the provided imported address information to the
 // database.
-func putImportedAddress(tx walletdb.Tx, addressID []byte, account uint32,
+func putImportedAddress(ns walletdb.ReadWriteBucket, addressID []byte, account uint32,
 	status syncStatus, encryptedPubKey, encryptedPrivKey []byte) error {
 
 	rawData := serializeImportedAddress(encryptedPubKey, encryptedPrivKey)
@@ -1124,12 +1125,12 @@ func putImportedAddress(tx walletdb.Tx, addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    rawData,
 	}
-	return putAddress(tx, addressID, &addrRow)
+	return putAddress(ns, addressID, &addrRow)
 }
 
 // putScriptAddress stores the provided script address information to the
 // database.
-func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
+func putScriptAddress(ns walletdb.ReadWriteBucket, addressID []byte, account uint32,
 	status syncStatus, encryptedHash, encryptedScript []byte) error {
 
 	rawData := serializeScriptAddress(encryptedHash, encryptedScript)
@@ -1140,7 +1141,7 @@ func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
 		syncStatus: status,
 		rawData:    rawData,
 	}
-	if err := putAddress(tx, addressID, &addrRow); err != nil {
+	if err := putAddress(ns, addressID, &addrRow); err != nil {
 		return err
 	}
 
@@ -1148,8 +1149,8 @@ func putScriptAddress(tx walletdb.Tx, addressID []byte, account uint32,
 }
 
 // existsAddress returns whether or not the address id exists in the database.
-func existsAddress(tx walletdb.Tx, addressID []byte) bool {
-	bucket := tx.RootBucket().Bucket(addrBucketName)
+func existsAddress(ns walletdb.ReadBucket, addressID []byte) bool {
+	bucket := ns.NestedReadBucket(addrBucketName)
 
 	addrHash := sha256.Sum256(addressID)
 	return bucket.Get(addrHash[:]) != nil
@@ -1158,8 +1159,8 @@ func existsAddress(tx walletdb.Tx, addressID []byte) bool {
 // fetchAddrAccount returns the account to which the given address belongs to.
 // It looks up the account using the addracctidx index which maps the address
 // hash to its corresponding account id.
-func fetchAddrAccount(tx walletdb.Tx, addressID []byte) (uint32, error) {
-	bucket := tx.RootBucket().Bucket(addrAcctIdxBucketName)
+func fetchAddrAccount(ns walletdb.ReadBucket, addressID []byte) (uint32, error) {
+	bucket := ns.NestedReadBucket(addrAcctIdxBucketName)
 
 	addrHash := sha256.Sum256(addressID)
 	val := bucket.Get(addrHash[:])
@@ -1172,9 +1173,9 @@ func fetchAddrAccount(tx walletdb.Tx, addressID []byte) (uint32, error) {
 
 // forEachAccountAddress calls the given function with each address of
 // the given account stored in the manager, breaking early on error.
-func forEachAccountAddress(tx walletdb.Tx, account uint32, fn func(rowInterface interface{}) error) error {
-	bucket := tx.RootBucket().Bucket(addrAcctIdxBucketName).
-		Bucket(uint32ToBytes(account))
+func forEachAccountAddress(ns walletdb.ReadBucket, account uint32, fn func(rowInterface interface{}) error) error {
+	bucket := ns.NestedReadBucket(addrAcctIdxBucketName).
+		NestedReadBucket(uint32ToBytes(account))
 	// if index bucket is missing the account, there hasn't been any address
 	// entries yet
 	if bucket == nil {
@@ -1186,7 +1187,7 @@ func forEachAccountAddress(tx walletdb.Tx, account uint32, fn func(rowInterface 
 		if v == nil {
 			return nil
 		}
-		addrRow, err := fetchAddressByHash(tx, k)
+		addrRow, err := fetchAddressByHash(ns, k)
 		if err != nil {
 			if merr, ok := err.(*ManagerError); ok {
 				desc := fmt.Sprintf("failed to fetch address hash '%s': %v",
@@ -1207,8 +1208,8 @@ func forEachAccountAddress(tx walletdb.Tx, account uint32, fn func(rowInterface 
 
 // forEachActiveAddress calls the given function with each active address
 // stored in the manager, breaking early on error.
-func forEachActiveAddress(tx walletdb.Tx, fn func(rowInterface interface{}) error) error {
-	bucket := tx.RootBucket().Bucket(addrBucketName)
+func forEachActiveAddress(ns walletdb.ReadBucket, fn func(rowInterface interface{}) error) error {
+	bucket := ns.NestedReadBucket(addrBucketName)
 
 	err := bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
@@ -1218,7 +1219,7 @@ func forEachActiveAddress(tx walletdb.Tx, fn func(rowInterface interface{}) erro
 
 		// Deserialize the address row first to determine the field
 		// values.
-		addrRow, err := fetchAddressByHash(tx, k)
+		addrRow, err := fetchAddressByHash(ns, k)
 		if merr, ok := err.(*ManagerError); ok {
 			desc := fmt.Sprintf("failed to fetch address hash '%s': %v",
 				k, merr.Description)
@@ -1244,8 +1245,8 @@ func forEachActiveAddress(tx walletdb.Tx, fn func(rowInterface interface{}) erro
 // keys from the main database without also marking it watching-only will result
 // in an unusable database.  It will also make any imported scripts and private
 // keys unrecoverable unless there is a backup copy available.
-func deletePrivateKeys(tx walletdb.Tx) error {
-	bucket := tx.RootBucket().Bucket(mainBucketName)
+func deletePrivateKeys(ns walletdb.ReadWriteBucket) error {
+	bucket := ns.NestedReadWriteBucket(mainBucketName)
 
 	// Delete the master private key params and the crypto private and
 	// script keys.
@@ -1267,7 +1268,7 @@ func deletePrivateKeys(tx walletdb.Tx) error {
 	}
 
 	// Delete the account extended private key for all accounts.
-	bucket = tx.RootBucket().Bucket(acctBucketName)
+	bucket = ns.NestedReadWriteBucket(acctBucketName)
 	err := bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil {
@@ -1307,7 +1308,7 @@ func deletePrivateKeys(tx walletdb.Tx) error {
 	}
 
 	// Delete the private key for all imported addresses.
-	bucket = tx.RootBucket().Bucket(addrBucketName)
+	bucket = ns.NestedReadWriteBucket(addrBucketName)
 	err = bucket.ForEach(func(k, v []byte) error {
 		// Skip buckets.
 		if v == nil {
@@ -1366,8 +1367,8 @@ func deletePrivateKeys(tx walletdb.Tx) error {
 
 // fetchSyncedTo loads the block stamp the manager is synced to from the
 // database.
-func fetchSyncedTo(tx walletdb.Tx) (*BlockStamp, error) {
-	bucket := tx.RootBucket().Bucket(syncBucketName)
+func fetchSyncedTo(ns walletdb.ReadBucket) (*BlockStamp, error) {
+	bucket := ns.NestedReadBucket(syncBucketName)
 
 	// The serialized synced to format is:
 	//   <blockheight><blockhash>
@@ -1386,8 +1387,8 @@ func fetchSyncedTo(tx walletdb.Tx) (*BlockStamp, error) {
 }
 
 // putSyncedTo stores the provided synced to blockstamp to the database.
-func putSyncedTo(tx walletdb.Tx, bs *BlockStamp) error {
-	bucket := tx.RootBucket().Bucket(syncBucketName)
+func putSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
+	bucket := ns.NestedReadWriteBucket(syncBucketName)
 
 	// The serialized synced to format is:
 	//   <blockheight><blockhash>
@@ -1407,8 +1408,8 @@ func putSyncedTo(tx walletdb.Tx, bs *BlockStamp) error {
 
 // fetchStartBlock loads the start block stamp for the manager from the
 // database.
-func fetchStartBlock(tx walletdb.Tx) (*BlockStamp, error) {
-	bucket := tx.RootBucket().Bucket(syncBucketName)
+func fetchStartBlock(ns walletdb.ReadBucket) (*BlockStamp, error) {
+	bucket := ns.NestedReadBucket(syncBucketName)
 
 	// The serialized start block format is:
 	//   <blockheight><blockhash>
@@ -1427,8 +1428,8 @@ func fetchStartBlock(tx walletdb.Tx) (*BlockStamp, error) {
 }
 
 // putStartBlock stores the provided start block stamp to the database.
-func putStartBlock(tx walletdb.Tx, bs *BlockStamp) error {
-	bucket := tx.RootBucket().Bucket(syncBucketName)
+func putStartBlock(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
+	bucket := ns.NestedReadWriteBucket(syncBucketName)
 
 	// The serialized start block format is:
 	//   <blockheight><blockhash>
@@ -1448,8 +1449,8 @@ func putStartBlock(tx walletdb.Tx, bs *BlockStamp) error {
 
 // fetchRecentBlocks returns the height of the most recent block height and
 // hashes of the most recent blocks.
-func fetchRecentBlocks(tx walletdb.Tx) (int32, []chainhash.Hash, error) {
-	bucket := tx.RootBucket().Bucket(syncBucketName)
+func fetchRecentBlocks(ns walletdb.ReadBucket) (int32, []chainhash.Hash, error) {
+	bucket := ns.NestedReadBucket(syncBucketName)
 
 	// The serialized recent blocks format is:
 	//   <blockheight><numhashes><blockhashes>
@@ -1478,8 +1479,8 @@ func fetchRecentBlocks(tx walletdb.Tx) (int32, []chainhash.Hash, error) {
 }
 
 // putRecentBlocks stores the provided start block stamp to the database.
-func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []chainhash.Hash) error {
-	bucket := tx.RootBucket().Bucket(syncBucketName)
+func putRecentBlocks(ns walletdb.ReadWriteBucket, recentHeight int32, recentHashes []chainhash.Hash) error {
+	bucket := ns.NestedReadWriteBucket(syncBucketName)
 
 	// The serialized recent blocks format is:
 	//   <blockheight><numhashes><blockhashes>
@@ -1506,102 +1507,87 @@ func putRecentBlocks(tx walletdb.Tx, recentHeight int32, recentHashes []chainhas
 
 // managerExists returns whether or not the manager has already been created
 // in the given database namespace.
-func managerExists(namespace walletdb.Namespace) (bool, error) {
-	var exists bool
-	err := namespace.View(func(tx walletdb.Tx) error {
-		mainBucket := tx.RootBucket().Bucket(mainBucketName)
-		exists = mainBucket != nil
-		return nil
-	})
-	if err != nil {
-		str := fmt.Sprintf("failed to obtain database view: %v", err)
-		return false, managerError(ErrDatabase, str, err)
+func managerExists(ns walletdb.ReadBucket) bool {
+	if ns == nil {
+		return false
 	}
-	return exists, nil
+	mainBucket := ns.NestedReadBucket(mainBucketName)
+	return mainBucket != nil
 }
 
 // createManagerNS creates the initial namespace structure needed for all of the
 // manager data.  This includes things such as all of the buckets as well as the
 // version and creation date.
-func createManagerNS(namespace walletdb.Namespace) error {
-	err := namespace.Update(func(tx walletdb.Tx) error {
-		rootBucket := tx.RootBucket()
-		mainBucket, err := rootBucket.CreateBucket(mainBucketName)
-		if err != nil {
-			str := "failed to create main bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(addrBucketName)
-		if err != nil {
-			str := "failed to create address bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(acctBucketName)
-		if err != nil {
-			str := "failed to create account bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(addrAcctIdxBucketName)
-		if err != nil {
-			str := "failed to create address index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(syncBucketName)
-		if err != nil {
-			str := "failed to create sync bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		// usedAddrBucketName bucket was added after manager version 1 release
-		_, err = rootBucket.CreateBucket(usedAddrBucketName)
-		if err != nil {
-			str := "failed to create used addresses bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(acctNameIdxBucketName)
-		if err != nil {
-			str := "failed to create an account name index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(acctIDIdxBucketName)
-		if err != nil {
-			str := "failed to create an account id index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = rootBucket.CreateBucket(metaBucketName)
-		if err != nil {
-			str := "failed to create a meta bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		if err := putLastAccount(tx, DefaultAccountNum); err != nil {
-			return err
-		}
-
-		if err := putManagerVersion(tx, latestMgrVersion); err != nil {
-			return err
-		}
-
-		createDate := uint64(time.Now().Unix())
-		var dateBytes [8]byte
-		binary.LittleEndian.PutUint64(dateBytes[:], createDate)
-		err = mainBucket.Put(mgrCreateDateName, dateBytes[:])
-		if err != nil {
-			str := "failed to store database creation time"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		return nil
-	})
+func createManagerNS(ns walletdb.ReadWriteBucket) error {
+	mainBucket, err := ns.CreateBucket(mainBucketName)
 	if err != nil {
-		str := "failed to update database"
+		str := "failed to create main bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(addrBucketName)
+	if err != nil {
+		str := "failed to create address bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(acctBucketName)
+	if err != nil {
+		str := "failed to create account bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(addrAcctIdxBucketName)
+	if err != nil {
+		str := "failed to create address index bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(syncBucketName)
+	if err != nil {
+		str := "failed to create sync bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	// usedAddrBucketName bucket was added after manager version 1 release
+	_, err = ns.CreateBucket(usedAddrBucketName)
+	if err != nil {
+		str := "failed to create used addresses bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(acctNameIdxBucketName)
+	if err != nil {
+		str := "failed to create an account name index bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(acctIDIdxBucketName)
+	if err != nil {
+		str := "failed to create an account id index bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = ns.CreateBucket(metaBucketName)
+	if err != nil {
+		str := "failed to create a meta bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	if err := putLastAccount(ns, DefaultAccountNum); err != nil {
+		return err
+	}
+
+	if err := putManagerVersion(ns, latestMgrVersion); err != nil {
+		return err
+	}
+
+	createDate := uint64(time.Now().Unix())
+	var dateBytes [8]byte
+	binary.LittleEndian.PutUint64(dateBytes[:], createDate)
+	err = mainBucket.Put(mgrCreateDateName, dateBytes[:])
+	if err != nil {
+		str := "failed to store database creation time"
 		return managerError(ErrDatabase, str, err)
 	}
 
@@ -1611,36 +1597,28 @@ func createManagerNS(namespace walletdb.Namespace) error {
 // upgradeToVersion2 upgrades the database from version 1 to version 2
 // 'usedAddrBucketName' a bucket for storing addrs flagged as marked is
 // initialized and it will be updated on the next rescan.
-func upgradeToVersion2(namespace walletdb.Namespace) error {
-	err := namespace.Update(func(tx walletdb.Tx) error {
-		currentMgrVersion := uint32(2)
-		rootBucket := tx.RootBucket()
+func upgradeToVersion2(ns walletdb.ReadWriteBucket) error {
+	currentMgrVersion := uint32(2)
 
-		_, err := rootBucket.CreateBucket(usedAddrBucketName)
-		if err != nil {
-			str := "failed to create used addresses bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
-			return err
-		}
-
-		return nil
-	})
+	_, err := ns.CreateBucketIfNotExists(usedAddrBucketName)
 	if err != nil {
-		return maybeConvertDbError(err)
+		str := "failed to create used addresses bucket"
+		return managerError(ErrDatabase, str, err)
 	}
-	return nil
+
+	return putManagerVersion(ns, currentMgrVersion)
 }
 
 // upgradeManager upgrades the data in the provided manager namespace to newer
 // versions as neeeded.
-func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainParams *chaincfg.Params, cbs *OpenCallbacks) error {
+func upgradeManager(db walletdb.DB, namespaceKey []byte, pubPassPhrase []byte,
+	chainParams *chaincfg.Params, cbs *OpenCallbacks) error {
+
 	var version uint32
-	err := namespace.View(func(tx walletdb.Tx) error {
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(namespaceKey)
 		var err error
-		version, err = fetchManagerVersion(tx)
+		version, err = fetchManagerVersion(ns)
 		return err
 	})
 	if err != nil {
@@ -1680,7 +1658,11 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 
 	if version < 2 {
 		// Upgrade from version 1 to 2.
-		if err := upgradeToVersion2(namespace); err != nil {
+		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(namespaceKey)
+			return upgradeToVersion2(ns)
+		})
+		if err != nil {
 			return err
 		}
 
@@ -1702,8 +1684,11 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 		if err != nil {
 			return err
 		}
-		// Upgrade from version 2 to 3.
-		if err := upgradeToVersion3(namespace, seed, privPassPhrase, pubPassPhrase, chainParams); err != nil {
+		err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(namespaceKey)
+			return upgradeToVersion3(ns, seed, privPassPhrase, pubPassPhrase, chainParams)
+		})
+		if err != nil {
 			return err
 		}
 
@@ -1712,7 +1697,11 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 	}
 
 	if version < 4 {
-		if err := upgradeToVersion4(namespace, pubPassPhrase); err != nil {
+		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(namespaceKey)
+			return upgradeToVersion4(ns, pubPassPhrase)
+		})
+		if err != nil {
 			return err
 		}
 
@@ -1738,18 +1727,17 @@ func upgradeManager(namespace walletdb.Namespace, pubPassPhrase []byte, chainPar
 // * acctNameIdxBucketName
 // * acctIDIdxBucketName
 // * metaBucketName
-func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
-	err := namespace.Update(func(tx walletdb.Tx) error {
+func upgradeToVersion3(ns walletdb.ReadWriteBucket, seed, privPassPhrase, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
+	err := func() error {
 		currentMgrVersion := uint32(3)
-		rootBucket := tx.RootBucket()
 
-		woMgr, err := loadManager(namespace, pubPassPhrase, chainParams)
+		woMgr, err := loadManager(ns, pubPassPhrase, chainParams)
 		if err != nil {
 			return err
 		}
 		defer woMgr.Close()
 
-		err = woMgr.Unlock(privPassPhrase)
+		err = woMgr.Unlock(ns, privPassPhrase)
 		if err != nil {
 			return err
 		}
@@ -1788,57 +1776,57 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 		}
 
 		// Save the encrypted cointype keys to the database.
-		err = putCoinTypeKeys(tx, coinTypePubEnc, coinTypePrivEnc)
+		err = putCoinTypeKeys(ns, coinTypePubEnc, coinTypePrivEnc)
 		if err != nil {
 			return err
 		}
 
-		_, err = rootBucket.CreateBucket(acctNameIdxBucketName)
+		_, err = ns.CreateBucketIfNotExists(acctNameIdxBucketName)
 		if err != nil {
 			str := "failed to create an account name index bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucket(acctIDIdxBucketName)
+		_, err = ns.CreateBucketIfNotExists(acctIDIdxBucketName)
 		if err != nil {
 			str := "failed to create an account id index bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
-		_, err = rootBucket.CreateBucket(metaBucketName)
+		_, err = ns.CreateBucketIfNotExists(metaBucketName)
 		if err != nil {
 			str := "failed to create a meta bucket"
 			return managerError(ErrDatabase, str, err)
 		}
 
 		// Initialize metadata for all keys
-		if err := putLastAccount(tx, DefaultAccountNum); err != nil {
+		if err := putLastAccount(ns, DefaultAccountNum); err != nil {
 			return err
 		}
 
 		// Update default account indexes
-		if err := putAccountIDIndex(tx, DefaultAccountNum, defaultAccountName); err != nil {
+		if err := putAccountIDIndex(ns, DefaultAccountNum, defaultAccountName); err != nil {
 			return err
 		}
-		if err := putAccountNameIndex(tx, DefaultAccountNum, defaultAccountName); err != nil {
+		if err := putAccountNameIndex(ns, DefaultAccountNum, defaultAccountName); err != nil {
 			return err
 		}
 		// Update imported account indexes
-		if err := putAccountIDIndex(tx, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
+		if err := putAccountIDIndex(ns, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
 			return err
 		}
-		if err := putAccountNameIndex(tx, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
+		if err := putAccountNameIndex(ns, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
 			return err
 		}
 
 		// Write current manager version
-		if err := putManagerVersion(tx, currentMgrVersion); err != nil {
+		if err := putManagerVersion(ns, currentMgrVersion); err != nil {
 			return err
 		}
 
 		// Save "" alias for default account name for backward compat
-		return putAccountNameIndex(tx, DefaultAccountNum, "")
-	})
+		return putAccountNameIndex(ns, DefaultAccountNum, "")
+	}()
 	if err != nil {
 		return maybeConvertDbError(err)
 	}
@@ -1848,17 +1836,17 @@ func upgradeToVersion3(namespace walletdb.Namespace, seed, privPassPhrase, pubPa
 // upgradeToVersion4 upgrades the database from version 3 to version 4.  The
 // default account remains unchanged (even if it was modified by the user), but
 // the empty string alias to the default account is removed.
-func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error {
-	err := namespace.Update(func(tx walletdb.Tx) error {
+func upgradeToVersion4(ns walletdb.ReadWriteBucket, pubPassPhrase []byte) error {
+	err := func() error {
 		// Write new manager version.
-		err := putManagerVersion(tx, 4)
+		err := putManagerVersion(ns, 4)
 		if err != nil {
 			return err
 		}
 
 		// Lookup the old account info to determine the real name of the
 		// default account.  All other names will be removed.
-		acctInfoIface, err := fetchAccountInfo(tx, DefaultAccountNum)
+		acctInfoIface, err := fetchAccountInfo(ns, DefaultAccountNum)
 		if err != nil {
 			return err
 		}
@@ -1871,7 +1859,7 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		var oldName string
 
 		// Delete any other names for the default account.
-		c := tx.RootBucket().Bucket(acctNameIdxBucketName).Cursor()
+		c := ns.NestedReadWriteBucket(acctNameIdxBucketName).ReadWriteCursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			// Skip nested buckets.
 			if v == nil {
@@ -1898,7 +1886,7 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		// The account number to name index may map to the wrong name,
 		// so rewrite the entry with the true name from the account row
 		// instead of leaving it set to an incorrect alias.
-		err = putAccountIDIndex(tx, DefaultAccountNum, acctInfo.name)
+		err = putAccountIDIndex(ns, DefaultAccountNum, acctInfo.name)
 		if err != nil {
 			const str = "account number to name index could not be " +
 				"rewritten with actual account name"
@@ -1907,7 +1895,7 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 
 		// Ensure that the true name for the default account maps
 		// forwards and backwards to the default account number.
-		name, err := fetchAccountName(tx, DefaultAccountNum)
+		name, err := fetchAccountName(ns, DefaultAccountNum)
 		if err != nil {
 			return err
 		}
@@ -1915,7 +1903,7 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 			const str = "account name index does not map default account number to correct name"
 			return managerError(ErrUpgrade, str, nil)
 		}
-		acct, err := fetchAccountByName(tx, acctInfo.name)
+		acct, err := fetchAccountByName(ns, acctInfo.name)
 		if err != nil {
 			return err
 		}
@@ -1926,7 +1914,7 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 
 		// Ensure that looking up the default account by the old name
 		// cannot succeed.
-		_, err = fetchAccountByName(tx, oldName)
+		_, err = fetchAccountByName(ns, oldName)
 		if err == nil {
 			const str = "default account exists under old name"
 			return managerError(ErrUpgrade, str, nil)
@@ -1937,7 +1925,7 @@ func upgradeToVersion4(namespace walletdb.Namespace, pubPassPhrase []byte) error
 		}
 
 		return nil
-	})
+	}()
 	if err != nil {
 		return maybeConvertDbError(err)
 	}

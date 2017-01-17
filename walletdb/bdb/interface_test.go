@@ -45,7 +45,7 @@ func rollbackValues(values map[string]string) map[string]string {
 // testGetValues checks that all of the provided key/value pairs can be
 // retrieved from the database and the retrieved values match the provided
 // values.
-func testGetValues(tc *testContext, bucket walletdb.Bucket, values map[string]string) bool {
+func testGetValues(tc *testContext, bucket walletdb.ReadWriteBucket, values map[string]string) bool {
 	for k, v := range values {
 		var vBytes []byte
 		if v != "" {
@@ -65,7 +65,7 @@ func testGetValues(tc *testContext, bucket walletdb.Bucket, values map[string]st
 
 // testPutValues stores all of the provided key/value pairs in the provided
 // bucket while checking for errors.
-func testPutValues(tc *testContext, bucket walletdb.Bucket, values map[string]string) bool {
+func testPutValues(tc *testContext, bucket walletdb.ReadWriteBucket, values map[string]string) bool {
 	for k, v := range values {
 		var vBytes []byte
 		if v != "" {
@@ -82,7 +82,7 @@ func testPutValues(tc *testContext, bucket walletdb.Bucket, values map[string]st
 
 // testDeleteValues removes all of the provided key/value pairs from the
 // provided bucket.
-func testDeleteValues(tc *testContext, bucket walletdb.Bucket, values map[string]string) bool {
+func testDeleteValues(tc *testContext, bucket walletdb.ReadWriteBucket, values map[string]string) bool {
 	for k := range values {
 		if err := bucket.Delete([]byte(k)); err != nil {
 			tc.t.Errorf("Delete: unexpected error: %v", err)
@@ -95,7 +95,7 @@ func testDeleteValues(tc *testContext, bucket walletdb.Bucket, values map[string
 
 // testNestedBucket reruns the testBucketInterface against a nested bucket along
 // with a counter to only test a couple of level deep.
-func testNestedBucket(tc *testContext, testBucket walletdb.Bucket) bool {
+func testNestedBucket(tc *testContext, testBucket walletdb.ReadWriteBucket) bool {
 	// Don't go more than 2 nested level deep.
 	if tc.bucketDepth > 1 {
 		return true
@@ -114,7 +114,7 @@ func testNestedBucket(tc *testContext, testBucket walletdb.Bucket) bool {
 
 // testBucketInterface ensures the bucket interface is working properly by
 // exercising all of its functions.
-func testBucketInterface(tc *testContext, bucket walletdb.Bucket) bool {
+func testBucketInterface(tc *testContext, bucket walletdb.ReadWriteBucket) bool {
 	if bucket.Writable() != tc.isWritable {
 		tc.t.Errorf("Bucket writable state does not match.")
 		return false
@@ -210,7 +210,7 @@ func testBucketInterface(tc *testContext, bucket walletdb.Bucket) bool {
 		}
 
 		// Ensure retrieving and existing bucket works as expected.
-		testBucket = bucket.Bucket(testBucketName)
+		testBucket = bucket.ReadWriteBucket(testBucketName)
 		if !testNestedBucket(tc, testBucket) {
 			return false
 		}
@@ -220,7 +220,7 @@ func testBucketInterface(tc *testContext, bucket walletdb.Bucket) bool {
 			tc.t.Errorf("DeleteBucket: unexpected error: %v", err)
 			return false
 		}
-		if b := bucket.Bucket(testBucketName); b != nil {
+		if b := bucket.ReadWriteBucket(testBucketName); b != nil {
 			tc.t.Errorf("DeleteBucket: bucket '%s' still exists",
 				testBucketName)
 			return false
@@ -253,7 +253,7 @@ func testBucketInterface(tc *testContext, bucket walletdb.Bucket) bool {
 			tc.t.Errorf("DeleteBucket: unexpected error: %v", err)
 			return false
 		}
-		if b := bucket.Bucket(testBucketName); b != nil {
+		if b := bucket.ReadWriteBucket(testBucketName); b != nil {
 			tc.t.Errorf("DeleteBucket: bucket '%s' still exists",
 				testBucketName)
 			return false
