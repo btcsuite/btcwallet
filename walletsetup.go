@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/roasbeef/btcd/btcec"
 	"github.com/roasbeef/btcd/chaincfg"
@@ -42,7 +43,7 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 // convertLegacyKeystore converts all of the addresses in the passed legacy
 // key store to the new waddrmgr.Manager format.  Both the legacy keystore and
 // the new manager must be unlocked.
-func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Manager) error {
+func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) error {
 	netParams := legacyKeyStore.Net()
 	blockStamp := waddrmgr.BlockStamp{
 		Height: 0,
@@ -68,7 +69,7 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 				continue
 			}
 
-			_, err = manager.ImportPrivateKey(wif, &blockStamp)
+			_, err = w.ImportPrivateKey(wif, &blockStamp, false)
 			if err != nil {
 				fmt.Printf("WARN: Failed to import private "+
 					"key for address %v: %v\n",
@@ -77,7 +78,7 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, manager *waddrmgr.Man
 			}
 
 		case keystore.ScriptAddress:
-			_, err := manager.ImportScript(addr.Script(), &blockStamp)
+			_, err := w.ImportP2SHRedeemScript(addr.Script())
 			if err != nil {
 				fmt.Printf("WARN: Failed to import "+
 					"pay-to-script-hash script for "+
@@ -146,15 +147,18 @@ func createWallet(cfg *config) error {
 
 			fmt.Println("Importing addresses from existing wallet...")
 
-			err := w.Manager.Unlock(privPass)
+			lockChan := make(chan time.Time, 1)
+			defer func() {
+				lockChan <- time.Time{}
+			}()
+			err := w.Unlock(privPass, lockChan)
 			if err != nil {
 				fmt.Printf("ERR: Failed to unlock new wallet "+
 					"during old wallet key import: %v", err)
 				return
 			}
-			defer w.Manager.Lock()
 
-			err = convertLegacyKeystore(legacyKeyStore, w.Manager)
+			err = convertLegacyKeystore(legacyKeyStore, w)
 			if err != nil {
 				fmt.Printf("ERR: Failed to import keys from old "+
 					"wallet format: %v", err)
