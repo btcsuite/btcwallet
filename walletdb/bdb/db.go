@@ -48,25 +48,79 @@ func convertErr(err error) error {
 	return err
 }
 
-// bucket is an internal type used to represent a collection of key/value pairs
-// and implements the walletdb.Bucket interface.
-type bucket bolt.Bucket
+// transaction represents a database transaction.  It can either by read-only or
+// read-write and implements the walletdb Tx interfaces.  The transaction
+// provides a root bucket against which all read and writes occur.
+type transaction struct {
+	boltTx *bolt.Tx
+}
 
-// Enforce bucket implements the walletdb.Bucket interface.
-var _ walletdb.Bucket = (*bucket)(nil)
+func (tx *transaction) ReadBucket(key []byte) walletdb.ReadBucket {
+	return tx.ReadWriteBucket(key)
+}
 
-// Bucket retrieves a nested bucket with the given key.  Returns nil if
-// the bucket does not exist.
-//
-// This function is part of the walletdb.Bucket interface implementation.
-func (b *bucket) Bucket(key []byte) walletdb.Bucket {
-	// This nil check is intentional so the return value can be checked
-	// against nil directly.
-	boltBucket := (*bolt.Bucket)(b).Bucket(key)
+func (tx *transaction) ReadWriteBucket(key []byte) walletdb.ReadWriteBucket {
+	boltBucket := tx.boltTx.Bucket(key)
 	if boltBucket == nil {
 		return nil
 	}
 	return (*bucket)(boltBucket)
+}
+
+func (tx *transaction) CreateTopLevelBucket(key []byte) (walletdb.ReadWriteBucket, error) {
+	boltBucket, err := tx.boltTx.CreateBucket(key)
+	if err != nil {
+		return nil, convertErr(err)
+	}
+	return (*bucket)(boltBucket), nil
+}
+
+func (tx *transaction) DeleteTopLevelBucket(key []byte) error {
+	err := tx.boltTx.DeleteBucket(key)
+	if err != nil {
+		return convertErr(err)
+	}
+	return nil
+}
+
+// Commit commits all changes that have been made through the root bucket and
+// all of its sub-buckets to persistent storage.
+//
+// This function is part of the walletdb.Tx interface implementation.
+func (tx *transaction) Commit() error {
+	return convertErr(tx.boltTx.Commit())
+}
+
+// Rollback undoes all changes that have been made to the root bucket and all of
+// its sub-buckets.
+//
+// This function is part of the walletdb.Tx interface implementation.
+func (tx *transaction) Rollback() error {
+	return convertErr(tx.boltTx.Rollback())
+}
+
+// bucket is an internal type used to represent a collection of key/value pairs
+// and implements the walletdb Bucket interfaces.
+type bucket bolt.Bucket
+
+// Enforce bucket implements the walletdb Bucket interfaces.
+var _ walletdb.ReadWriteBucket = (*bucket)(nil)
+
+// NestedReadWriteBucket retrieves a nested bucket with the given key.  Returns
+// nil if the bucket does not exist.
+//
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
+func (b *bucket) NestedReadWriteBucket(key []byte) walletdb.ReadWriteBucket {
+	boltBucket := (*bolt.Bucket)(b).Bucket(key)
+	// Don't return a non-nil interface to a nil pointer.
+	if boltBucket == nil {
+		return nil
+	}
+	return (*bucket)(boltBucket)
+}
+
+func (b *bucket) NestedReadBucket(key []byte) walletdb.ReadBucket {
+	return b.NestedReadWriteBucket(key)
 }
 
 // CreateBucket creates and returns a new nested bucket with the given key.
@@ -75,7 +129,7 @@ func (b *bucket) Bucket(key []byte) walletdb.Bucket {
 // invalid.
 //
 // This function is part of the walletdb.Bucket interface implementation.
-func (b *bucket) CreateBucket(key []byte) (walletdb.Bucket, error) {
+func (b *bucket) CreateBucket(key []byte) (walletdb.ReadWriteBucket, error) {
 	boltBucket, err := (*bolt.Bucket)(b).CreateBucket(key)
 	if err != nil {
 		return nil, convertErr(err)
@@ -88,7 +142,7 @@ func (b *bucket) CreateBucket(key []byte) (walletdb.Bucket, error) {
 // key is empty or ErrIncompatibleValue if the key value is otherwise invalid.
 //
 // This function is part of the walletdb.Bucket interface implementation.
-func (b *bucket) CreateBucketIfNotExists(key []byte) (walletdb.Bucket, error) {
+func (b *bucket) CreateBucketIfNotExists(key []byte) (walletdb.ReadWriteBucket, error) {
 	boltBucket, err := (*bolt.Bucket)(b).CreateBucketIfNotExists(key)
 	if err != nil {
 		return nil, convertErr(err)
@@ -96,12 +150,12 @@ func (b *bucket) CreateBucketIfNotExists(key []byte) (walletdb.Bucket, error) {
 	return (*bucket)(boltBucket), nil
 }
 
-// DeleteBucket removes a nested bucket with the given key.  Returns
+// DeleteNestedBucket removes a nested bucket with the given key.  Returns
 // ErrTxNotWritable if attempted against a read-only transaction and
 // ErrBucketNotFound if the specified bucket does not exist.
 //
 // This function is part of the walletdb.Bucket interface implementation.
-func (b *bucket) DeleteBucket(key []byte) error {
+func (b *bucket) DeleteNestedBucket(key []byte) error {
 	return convertErr((*bolt.Bucket)(b).DeleteBucket(key))
 }
 
@@ -116,13 +170,6 @@ func (b *bucket) DeleteBucket(key []byte) error {
 // This function is part of the walletdb.Bucket interface implementation.
 func (b *bucket) ForEach(fn func(k, v []byte) error) error {
 	return convertErr((*bolt.Bucket)(b).ForEach(fn))
-}
-
-// Writable returns whether or not the bucket is writable.
-//
-// This function is part of the walletdb.Bucket interface implementation.
-func (b *bucket) Writable() bool {
-	return (*bolt.Bucket)(b).Writable()
 }
 
 // Put saves the specified key/value pair to the bucket.  Keys that do not
@@ -155,11 +202,15 @@ func (b *bucket) Delete(key []byte) error {
 	return convertErr((*bolt.Bucket)(b).Delete(key))
 }
 
-// Cursor returns a new cursor, allowing for iteration over the bucket's
+func (b *bucket) ReadCursor() walletdb.ReadCursor {
+	return b.ReadWriteCursor()
+}
+
+// ReadWriteCursor returns a new cursor, allowing for iteration over the bucket's
 // key/value pairs and nested buckets in forward or backward order.
 //
 // This function is part of the walletdb.Bucket interface implementation.
-func (b *bucket) Cursor() walletdb.Cursor {
+func (b *bucket) ReadWriteCursor() walletdb.ReadWriteCursor {
 	return (*cursor)((*bolt.Bucket)(b).Cursor())
 }
 
@@ -171,13 +222,6 @@ func (b *bucket) Cursor() walletdb.Cursor {
 // the cursor. After invalidation, the cursor must be repositioned, or the keys
 // and values returned may be unpredictable.
 type cursor bolt.Cursor
-
-// Bucket returns the bucket the cursor was created for.
-//
-// This function is part of the walletdb.Cursor interface implementation.
-func (c *cursor) Bucket() walletdb.Bucket {
-	return (*bucket)((*bolt.Cursor)(c).Bucket())
-}
 
 // Delete removes the current key/value pair the cursor is at without
 // invalidating the cursor. Returns ErrTxNotWritable if attempted on a read-only
@@ -225,118 +269,6 @@ func (c *cursor) Seek(seek []byte) (key, value []byte) {
 	return (*bolt.Cursor)(c).Seek(seek)
 }
 
-// transaction represents a database transaction.  It can either by read-only or
-// read-write and implements the walletdb.Bucket interface.  The transaction
-// provides a root bucket against which all read and writes occur.
-type transaction struct {
-	boltTx     *bolt.Tx
-	rootBucket *bolt.Bucket
-}
-
-// Enforce transaction implements the walletdb.Tx interface.
-var _ walletdb.Tx = (*transaction)(nil)
-
-// RootBucket returns the top-most bucket for the namespace the transaction was
-// created from.
-//
-// This function is part of the walletdb.Tx interface implementation.
-func (tx *transaction) RootBucket() walletdb.Bucket {
-	return (*bucket)(tx.rootBucket)
-}
-
-// Commit commits all changes that have been made through the root bucket and
-// all of its sub-buckets to persistent storage.
-//
-// This function is part of the walletdb.Tx interface implementation.
-func (tx *transaction) Commit() error {
-	return convertErr(tx.boltTx.Commit())
-}
-
-// Rollback undoes all changes that have been made to the root bucket and all of
-// its sub-buckets.
-//
-// This function is part of the walletdb.Tx interface implementation.
-func (tx *transaction) Rollback() error {
-	return convertErr(tx.boltTx.Rollback())
-}
-
-// namespace represents a database namespace that is inteded to support the
-// concept of a single entity that controls the opening, creating, and closing
-// of a database while providing other entities their own namespace to work in.
-// It implements the walletdb.Namespace interface.
-type namespace struct {
-	db  *bolt.DB
-	key []byte
-}
-
-// Enforce namespace implements the walletdb.Namespace interface.
-var _ walletdb.Namespace = (*namespace)(nil)
-
-// Begin starts a transaction which is either read-only or read-write depending
-// on the specified flag.  Multiple read-only transactions can be started
-// simultaneously while only a single read-write transaction can be started at a
-// time.  The call will block when starting a read-write transaction when one is
-// already open.
-//
-// NOTE: The transaction must be closed by calling Rollback or Commit on it when
-// it is no longer needed.  Failure to do so will result in unclaimed memory.
-//
-// This function is part of the walletdb.Namespace interface implementation.
-func (ns *namespace) Begin(writable bool) (walletdb.Tx, error) {
-	boltTx, err := ns.db.Begin(writable)
-	if err != nil {
-		return nil, convertErr(err)
-	}
-
-	bucket := boltTx.Bucket(ns.key)
-	if bucket == nil {
-		boltTx.Rollback()
-		return nil, walletdb.ErrBucketNotFound
-	}
-
-	return &transaction{boltTx: boltTx, rootBucket: bucket}, nil
-}
-
-// View invokes the passed function in the context of a managed read-only
-// transaction.  Any errors returned from the user-supplied function are
-// returned from this function.
-//
-// Calling Rollback on the transaction passed to the user-supplied function will
-// result in a panic.
-//
-// This function is part of the walletdb.Namespace interface implementation.
-func (ns *namespace) View(fn func(walletdb.Tx) error) error {
-	return convertErr(ns.db.View(func(boltTx *bolt.Tx) error {
-		bucket := boltTx.Bucket(ns.key)
-		if bucket == nil {
-			return walletdb.ErrBucketNotFound
-		}
-
-		return fn(&transaction{boltTx: boltTx, rootBucket: bucket})
-	}))
-}
-
-// Update invokes the passed function in the context of a managed read-write
-// transaction.  Any errors returned from the user-supplied function will cause
-// the transaction to be rolled back and are returned from this function.
-// Otherwise, the transaction is commited when the user-supplied function
-// returns a nil error.
-//
-// Calling Rollback on the transaction passed to the user-supplied function will
-// result in a panic.
-//
-// This function is part of the walletdb.Namespace interface implementation.
-func (ns *namespace) Update(fn func(walletdb.Tx) error) error {
-	return convertErr(ns.db.Update(func(boltTx *bolt.Tx) error {
-		bucket := boltTx.Bucket(ns.key)
-		if bucket == nil {
-			return walletdb.ErrBucketNotFound
-		}
-
-		return fn(&transaction{boltTx: boltTx, rootBucket: bucket})
-	}))
-}
-
 // db represents a collection of namespaces which are persisted and implements
 // the walletdb.Db interface.  All database access is performed through
 // transactions which are obtained through the specific Namespace.
@@ -345,51 +277,20 @@ type db bolt.DB
 // Enforce db implements the walletdb.Db interface.
 var _ walletdb.DB = (*db)(nil)
 
-// Namespace returns a Namespace interface for the provided key.  See the
-// Namespace interface documentation for more details.  Attempting to access a
-// Namespace on a database that is not open yet or has been closed will result
-// in ErrDbNotOpen.  Namespaces are created in the database on first access.
-//
-// This function is part of the walletdb.Db interface implementation.
-func (db *db) Namespace(key []byte) (walletdb.Namespace, error) {
-	// Check if the namespace needs to be created using a read-only
-	// transaction.  This is done because read-only transactions are faster
-	// and don't block like write transactions.
-	var doCreate bool
-	err := (*bolt.DB)(db).View(func(tx *bolt.Tx) error {
-		boltBucket := tx.Bucket(key)
-		if boltBucket == nil {
-			doCreate = true
-		}
-		return nil
-	})
+func (db *db) beginTx(writable bool) (*transaction, error) {
+	boltTx, err := (*bolt.DB)(db).Begin(writable)
 	if err != nil {
 		return nil, convertErr(err)
 	}
-
-	// Create the namespace if needed by using an writable update
-	// transaction.
-	if doCreate {
-		err := (*bolt.DB)(db).Update(func(tx *bolt.Tx) error {
-			_, err := tx.CreateBucket(key)
-			return err
-		})
-		if err != nil {
-			return nil, convertErr(err)
-		}
-	}
-
-	return &namespace{db: (*bolt.DB)(db), key: key}, nil
+	return &transaction{boltTx: boltTx}, nil
 }
 
-// DeleteNamespace deletes the namespace for the passed key.  ErrBucketNotFound
-// will be returned if the namespace does not exist.
-//
-// This function is part of the walletdb.Db interface implementation.
-func (db *db) DeleteNamespace(key []byte) error {
-	return convertErr((*bolt.DB)(db).Update(func(tx *bolt.Tx) error {
-		return tx.DeleteBucket(key)
-	}))
+func (db *db) BeginReadTx() (walletdb.ReadTx, error) {
+	return db.beginTx(false)
+}
+
+func (db *db) BeginReadWriteTx() (walletdb.ReadWriteTx, error) {
+	return db.beginTx(true)
 }
 
 // Copy writes a copy of the database to the provided writer.  This call will

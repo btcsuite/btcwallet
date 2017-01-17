@@ -9,11 +9,12 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/roasbeef/btcd/btcec"
-	"github.com/roasbeef/btcd/txscript"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcutil/hdkeychain"
-	"github.com/roasbeef/btcwallet/internal/zero"
+	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/zero"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 // AddressType represents the various address types waddrmgr is currently able
@@ -77,7 +78,7 @@ type ManagedAddress interface {
 	Compressed() bool
 
 	// Used returns true if the backing address has been used in a transaction.
-	Used() (bool, error)
+	Used(ns walletdb.ReadBucket) bool
 }
 
 // ManagedPubKeyAddress extends ManagedAddress and additionally provides the
@@ -234,8 +235,8 @@ func (a *managedAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *managedAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+func (a *managedAddress) Used(ns walletdb.ReadBucket) bool {
+	return a.manager.fetchUsed(ns, a.AddrHash())
 }
 
 // PubKey returns the public key associated with the address.
@@ -558,8 +559,8 @@ func (a *scriptAddress) Compressed() bool {
 // Used returns true if the address has been used in a transaction.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *scriptAddress) Used() (bool, error) {
-	return a.manager.fetchUsed(a.AddrHash())
+func (a *scriptAddress) Used(ns walletdb.ReadBucket) bool {
+	return a.manager.fetchUsed(ns, a.AddrHash())
 }
 
 // Script returns the script associated with the address.

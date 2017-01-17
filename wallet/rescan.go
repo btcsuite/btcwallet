@@ -1,15 +1,16 @@
-// Copyright (c) 2013-2014 The btcsuite developers
+// Copyright (c) 2013-2017 The btcsuite developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package wallet
 
 import (
-	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcwallet/chain"
-	"github.com/roasbeef/btcwallet/waddrmgr"
-	"github.com/roasbeef/btcwallet/wtxmgr"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // RescanProgressMsg reports the current progress made by a rescan for a
@@ -178,7 +179,11 @@ out:
 				Hash:   *n.Hash,
 				Height: n.Height,
 			}
-			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				return w.Manager.SetSyncedTo(ns, &bs)
+			})
+			if err != nil {
 				log.Errorf("Failed to update address manager "+
 					"sync state for hash %v (height %d): %v",
 					n.Hash, n.Height, err)
@@ -191,15 +196,24 @@ out:
 			log.Infof("Finished rescan for %d %s (synced to block "+
 				"%s, height %d)", len(addrs), noun, n.Hash,
 				n.Height)
-			bs := waddrmgr.BlockStamp{Height: n.Height, Hash: *n.Hash}
-			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+
+			bs := waddrmgr.BlockStamp{
+				Height: n.Height,
+				Hash:   *n.Hash,
+			}
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				return w.Manager.SetSyncedTo(ns, &bs)
+			})
+			if err != nil {
 				log.Errorf("Failed to update address manager "+
 					"sync state for hash %v (height %d): %v",
 					n.Hash, n.Height, err)
+				continue
 			}
-			w.SetChainSynced(true)
 
-			go w.ResendUnminedTxs()
+			w.SetChainSynced(true)
+			go w.resendUnminedTxs()
 
 		case <-quit:
 			break out

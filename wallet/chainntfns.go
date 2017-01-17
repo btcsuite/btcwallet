@@ -5,10 +5,11 @@
 package wallet
 
 import (
-	"github.com/roasbeef/btcd/txscript"
-	"github.com/roasbeef/btcwallet/chain"
-	"github.com/roasbeef/btcwallet/waddrmgr"
-	"github.com/roasbeef/btcwallet/wtxmgr"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 func (w *Wallet) handleChainNotifications() {
@@ -31,16 +32,26 @@ func (w *Wallet) handleChainNotifications() {
 	}
 
 	for n := range chainClient.Notifications() {
+		var notificationName string
 		var err error
 		switch n := n.(type) {
 		case chain.ClientConnected:
 			go sync(w)
 		case chain.BlockConnected:
-			w.connectBlock(wtxmgr.BlockMeta(n))
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.connectBlock(tx, wtxmgr.BlockMeta(n))
+			})
+			notificationName = "blockconnected"
 		case chain.BlockDisconnected:
-			err = w.disconnectBlock(wtxmgr.BlockMeta(n))
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.disconnectBlock(tx, wtxmgr.BlockMeta(n))
+			})
+			notificationName = "blockdisconnected"
 		case chain.RelevantTx:
-			err = w.addRelevantTx(n.TxRecord, n.Block)
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.addRelevantTx(tx, n.TxRecord, n.Block)
+			})
+			notificationName = "recvtx/redeemingtx"
 
 		// The following are handled by the wallet's rescan
 		// goroutines, so just pass them there.
@@ -48,8 +59,8 @@ func (w *Wallet) handleChainNotifications() {
 			w.rescanNotifications <- n
 		}
 		if err != nil {
-			log.Errorf("Cannot handle chain server "+
-				"notification: %v", err)
+			log.Errorf("Failed to process consensus server notification "+
+				"(name: `%s`, detail: `%v`)", notificationName, err)
 		}
 	}
 	w.wg.Done()
@@ -58,25 +69,32 @@ func (w *Wallet) handleChainNotifications() {
 // connectBlock handles a chain server notification by marking a wallet
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
-func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
+func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+
 	bs := waddrmgr.BlockStamp{
 		Height: b.Height,
 		Hash:   b.Hash,
 	}
-	if err := w.Manager.SetSyncedTo(&bs); err != nil {
-		log.Errorf("Failed to update address manager sync state in "+
-			"connect block for hash %v (height %d): %v", b.Hash,
-			b.Height, err)
+	err := w.Manager.SetSyncedTo(addrmgrNs, &bs)
+	if err != nil {
+		return err
 	}
 
 	// Notify interested clients of the connected block.
-	w.NtfnServer.notifyAttachedBlock(&b)
+	//
+	// TODO: move all notifications outside of the database transaction.
+	w.NtfnServer.notifyAttachedBlock(dbtx, &b)
+	return nil
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
 // block history from the reorged block for a wallet in-sync with the chain
 // server.
-func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
+func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
+
 	if !w.ChainSynced() {
 		return nil
 	}
@@ -87,8 +105,8 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 	if iter != nil && iter.BlockStamp().Hash == b.Hash {
 		if iter.Prev() {
 			prev := iter.BlockStamp()
-			w.Manager.SetSyncedTo(&prev)
-			err := w.TxStore.Rollback(prev.Height + 1)
+			w.Manager.SetSyncedTo(addrmgrNs, &prev)
+			err := w.TxStore.Rollback(txmgrNs, prev.Height+1)
 			if err != nil {
 				return err
 			}
@@ -98,9 +116,9 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 			// will in turn lead to a rescan from either the
 			// earliest blockstamp the addresses in the manager are
 			// known to have been created.
-			w.Manager.SetSyncedTo(nil)
+			w.Manager.SetSyncedTo(addrmgrNs, nil)
 			// Rollback everything but the genesis block.
-			err := w.TxStore.Rollback(1)
+			err := w.TxStore.Rollback(txmgrNs, 1)
 			if err != nil {
 				return err
 			}
@@ -113,45 +131,15 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 	return nil
 }
 
-func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) error {
-	// TODO: The transaction store and address manager need to be updated
-	// together, but each operate under different namespaces and are changed
-	// under new transactions.  This is not error safe as we lose
-	// transaction semantics.
-	//
-	// I'm unsure of the best way to solve this.  Some possible solutions
-	// and drawbacks:
-	//
-	//   1. Open write transactions here and pass the handle to every
-	//      waddrmr and wtxmgr method.  This complicates the caller code
-	//      everywhere, however.
-	//
-	//   2. Move the wtxmgr namespace into the waddrmgr namespace, likely
-	//      under its own bucket.  This entire function can then be moved
-	//      into the waddrmgr package, which updates the nested wtxmgr.
-	//      This removes some of separation between the components.
-	//
-	//   3. Use multiple wtxmgrs, one for each account, nested in the
-	//      waddrmgr namespace.  This still provides some sort of logical
-	//      separation (transaction handling remains in another package, and
-	//      is simply used by waddrmgr), but may result in duplicate
-	//      transactions being saved if they are relevant to multiple
-	//      accounts.
-	//
-	//   4. Store wtxmgr-related details under the waddrmgr namespace, but
-	//      solve the drawback of #3 by splitting wtxmgr to save entire
-	//      transaction records globally for all accounts, with
-	//      credit/debit/balance tracking per account.  Each account would
-	//      also save the relevant transaction hashes and block incidence so
-	//      the full transaction can be loaded from the waddrmgr
-	//      transactions bucket.  This currently seems like the best
-	//      solution.
+func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) error {
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 	// At the moment all notified transactions are assumed to actually be
 	// relevant.  This assumption will not hold true when SPV support is
 	// added, but until then, simply insert the transaction because there
 	// should either be one or more relevant inputs or outputs.
-	err := w.TxStore.InsertTx(rec, block)
+	err := w.TxStore.InsertTx(txmgrNs, rec, block)
 	if err != nil {
 		return err
 	}
@@ -166,17 +154,17 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) er
 			continue
 		}
 		for _, addr := range addrs {
-			ma, err := w.Manager.Address(addr)
+			ma, err := w.Manager.Address(addrmgrNs, addr)
 			if err == nil {
 				// TODO: Credits should be added with the
 				// account they belong to, so wtxmgr is able to
 				// track per-account balances.
-				err = w.TxStore.AddCredit(rec, block, uint32(i),
+				err = w.TxStore.AddCredit(txmgrNs, rec, block, uint32(i),
 					ma.Internal())
 				if err != nil {
 					return err
 				}
-				err = w.Manager.MarkUsed(addr)
+				err = w.Manager.MarkUsed(addrmgrNs, addr)
 				if err != nil {
 					return err
 				}
@@ -197,18 +185,18 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) er
 	//
 	// TODO: Avoid the extra db hits.
 	if block == nil {
-		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, nil)
+		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, nil)
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notifiation: %v", err)
 		} else {
-			w.NtfnServer.notifyUnminedTransaction(details)
+			w.NtfnServer.notifyUnminedTransaction(dbtx, details)
 		}
 	} else {
-		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, &block.Block)
+		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, &block.Block)
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notifiation: %v", err)
 		} else {
-			w.NtfnServer.notifyMinedTransaction(details, block)
+			w.NtfnServer.notifyMinedTransaction(dbtx, details, block)
 		}
 	}
 
