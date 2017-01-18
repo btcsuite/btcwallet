@@ -117,10 +117,10 @@ func getUsedAddrBucketID(seriesID uint32, branch Branch) []byte {
 
 // putUsedAddrHash adds an entry (key==index, value==encryptedHash) to the used
 // addresses bucket of the given pool, series and branch.
-func putUsedAddrHash(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Branch,
+func putUsedAddrHash(ns walletdb.ReadWriteBucket, poolID []byte, seriesID uint32, branch Branch,
 	index Index, encryptedHash []byte) error {
 
-	usedAddrs := tx.RootBucket().Bucket(poolID).Bucket(usedAddrsBucketName)
+	usedAddrs := ns.NestedReadWriteBucket(poolID).NestedReadWriteBucket(usedAddrsBucketName)
 	bucket, err := usedAddrs.CreateBucketIfNotExists(getUsedAddrBucketID(seriesID, branch))
 	if err != nil {
 		return newError(ErrDatabase, "failed to store used address hash", err)
@@ -130,11 +130,11 @@ func putUsedAddrHash(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Bran
 
 // getUsedAddrHash returns the addr hash with the given index from the used
 // addresses bucket of the given pool, series and branch.
-func getUsedAddrHash(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Branch,
+func getUsedAddrHash(ns walletdb.ReadBucket, poolID []byte, seriesID uint32, branch Branch,
 	index Index) []byte {
 
-	usedAddrs := tx.RootBucket().Bucket(poolID).Bucket(usedAddrsBucketName)
-	bucket := usedAddrs.Bucket(getUsedAddrBucketID(seriesID, branch))
+	usedAddrs := ns.NestedReadBucket(poolID).NestedReadBucket(usedAddrsBucketName)
+	bucket := usedAddrs.NestedReadBucket(getUsedAddrBucketID(seriesID, branch))
 	if bucket == nil {
 		return nil
 	}
@@ -143,10 +143,10 @@ func getUsedAddrHash(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Bran
 
 // getMaxUsedIdx returns the highest used index from the used addresses bucket
 // of the given pool, series and branch.
-func getMaxUsedIdx(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Branch) (Index, error) {
+func getMaxUsedIdx(ns walletdb.ReadBucket, poolID []byte, seriesID uint32, branch Branch) (Index, error) {
 	maxIdx := Index(0)
-	usedAddrs := tx.RootBucket().Bucket(poolID).Bucket(usedAddrsBucketName)
-	bucket := usedAddrs.Bucket(getUsedAddrBucketID(seriesID, branch))
+	usedAddrs := ns.NestedReadBucket(poolID).NestedReadBucket(usedAddrsBucketName)
+	bucket := usedAddrs.NestedReadBucket(getUsedAddrBucketID(seriesID, branch))
 	if bucket == nil {
 		return maxIdx, nil
 	}
@@ -173,8 +173,8 @@ func getMaxUsedIdx(tx walletdb.Tx, poolID []byte, seriesID uint32, branch Branch
 // putPool stores a voting pool in the database, creating a bucket named
 // after the voting pool id and two other buckets inside it to store series and
 // used addresses for that pool.
-func putPool(tx walletdb.Tx, poolID []byte) error {
-	poolBucket, err := tx.RootBucket().CreateBucket(poolID)
+func putPool(ns walletdb.ReadWriteBucket, poolID []byte) error {
+	poolBucket, err := ns.CreateBucket(poolID)
 	if err != nil {
 		return newError(ErrDatabase, fmt.Sprintf("cannot create pool %v", poolID), err)
 	}
@@ -198,8 +198,8 @@ func putPool(tx walletdb.Tx, poolID []byte) error {
 
 // loadAllSeries returns a map of all the series stored inside a voting pool
 // bucket, keyed by id.
-func loadAllSeries(tx walletdb.Tx, poolID []byte) (map[uint32]*dbSeriesRow, error) {
-	bucket := tx.RootBucket().Bucket(poolID).Bucket(seriesBucketName)
+func loadAllSeries(ns walletdb.ReadBucket, poolID []byte) (map[uint32]*dbSeriesRow, error) {
+	bucket := ns.NestedReadBucket(poolID).NestedReadBucket(seriesBucketName)
 	allSeries := make(map[uint32]*dbSeriesRow)
 	err := bucket.ForEach(
 		func(k, v []byte) error {
@@ -219,14 +219,14 @@ func loadAllSeries(tx walletdb.Tx, poolID []byte) (map[uint32]*dbSeriesRow, erro
 
 // existsPool checks the existence of a bucket named after the given
 // voting pool id.
-func existsPool(tx walletdb.Tx, poolID []byte) bool {
-	bucket := tx.RootBucket().Bucket(poolID)
+func existsPool(ns walletdb.ReadBucket, poolID []byte) bool {
+	bucket := ns.NestedReadBucket(poolID)
 	return bucket != nil
 }
 
 // putSeries stores the given series inside a voting pool bucket named after
 // poolID. The voting pool bucket does not need to be created beforehand.
-func putSeries(tx walletdb.Tx, poolID []byte, version, ID uint32, active bool, reqSigs uint32, pubKeysEncrypted, privKeysEncrypted [][]byte) error {
+func putSeries(ns walletdb.ReadWriteBucket, poolID []byte, version, ID uint32, active bool, reqSigs uint32, pubKeysEncrypted, privKeysEncrypted [][]byte) error {
 	row := &dbSeriesRow{
 		version:           version,
 		active:            active,
@@ -234,19 +234,22 @@ func putSeries(tx walletdb.Tx, poolID []byte, version, ID uint32, active bool, r
 		pubKeysEncrypted:  pubKeysEncrypted,
 		privKeysEncrypted: privKeysEncrypted,
 	}
-	return putSeriesRow(tx, poolID, ID, row)
+	return putSeriesRow(ns, poolID, ID, row)
 }
 
 // putSeriesRow stores the given series row inside a voting pool bucket named
 // after poolID. The voting pool bucket does not need to be created
 // beforehand.
-func putSeriesRow(tx walletdb.Tx, poolID []byte, ID uint32, row *dbSeriesRow) error {
-	bucket, err := tx.RootBucket().CreateBucketIfNotExists(poolID)
+func putSeriesRow(ns walletdb.ReadWriteBucket, poolID []byte, ID uint32, row *dbSeriesRow) error {
+	bucket, err := ns.CreateBucketIfNotExists(poolID)
 	if err != nil {
 		str := fmt.Sprintf("cannot create bucket %v", poolID)
 		return newError(ErrDatabase, str, err)
 	}
-	bucket = bucket.Bucket(seriesBucketName)
+	bucket, err = bucket.CreateBucketIfNotExists(seriesBucketName)
+	if err != nil {
+		return err
+	}
 	serialized, err := serializeSeriesRow(row)
 	if err != nil {
 		return err
@@ -473,7 +476,7 @@ func serializeWithdrawal(requests []OutputRequest, startAddress WithdrawalAddres
 // deserializeWithdrawal deserializes the given byte slice into a dbWithdrawalRow,
 // converts it into an withdrawalInfo and returns it. This function must run
 // with the address manager unlocked.
-func deserializeWithdrawal(p *Pool, serialized []byte) (*withdrawalInfo, error) {
+func deserializeWithdrawal(p *Pool, ns, addrmgrNs walletdb.ReadBucket, serialized []byte) (*withdrawalInfo, error) {
 	var row dbWithdrawalRow
 	if err := gob.NewDecoder(bytes.NewReader(serialized)).Decode(&row); err != nil {
 		return nil, newError(ErrWithdrawalStorage, "cannot deserialize withdrawal information",
@@ -509,7 +512,7 @@ func deserializeWithdrawal(p *Pool, serialized []byte) (*withdrawalInfo, error) 
 		requestsByOID[request.outBailmentID()] = request
 	}
 	startAddr := row.StartAddress
-	wAddr, err := p.WithdrawalAddress(startAddr.SeriesID, startAddr.Branch, startAddr.Index)
+	wAddr, err := p.WithdrawalAddress(ns, addrmgrNs, startAddr.SeriesID, startAddr.Branch, startAddr.Index)
 	if err != nil {
 		return nil, newError(ErrWithdrawalStorage, "cannot deserialize startAddress", err)
 	}
@@ -564,13 +567,13 @@ func deserializeWithdrawal(p *Pool, serialized []byte) (*withdrawalInfo, error) 
 	return wInfo, nil
 }
 
-func putWithdrawal(tx walletdb.Tx, poolID []byte, roundID uint32, serialized []byte) error {
-	bucket := tx.RootBucket().Bucket(poolID)
+func putWithdrawal(ns walletdb.ReadWriteBucket, poolID []byte, roundID uint32, serialized []byte) error {
+	bucket := ns.NestedReadWriteBucket(poolID)
 	return bucket.Put(uint32ToBytes(roundID), serialized)
 }
 
-func getWithdrawal(tx walletdb.Tx, poolID []byte, roundID uint32) []byte {
-	bucket := tx.RootBucket().Bucket(poolID)
+func getWithdrawal(ns walletdb.ReadBucket, poolID []byte, roundID uint32) []byte {
+	bucket := ns.NestedReadBucket(poolID)
 	return bucket.Get(uint32ToBytes(roundID))
 }
 
