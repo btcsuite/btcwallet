@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -98,7 +99,7 @@ func (c byAddress) Less(i, j int) bool {
 // getEligibleInputs returns eligible inputs with addresses between startAddress
 // and the last used address of lastSeriesID. They're reverse ordered based on
 // their address.
-func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAddress,
+func (p *Pool) getEligibleInputs(ns, addrmgrNs walletdb.ReadBucket, store *wtxmgr.Store, txmgrNs walletdb.ReadBucket, startAddress WithdrawalAddress,
 	lastSeriesID uint32, dustThreshold btcutil.Amount, chainHeight int32,
 	minConf int) ([]credit, error) {
 
@@ -106,7 +107,7 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 		str := fmt.Sprintf("lastSeriesID (%d) does not exist", lastSeriesID)
 		return nil, newError(ErrSeriesNotExists, str, nil)
 	}
-	unspents, err := store.UnspentOutputs()
+	unspents, err := store.UnspentOutputs(txmgrNs)
 	if err != nil {
 		return nil, newError(ErrInputSelection, "failed to get unspent outputs", err)
 	}
@@ -128,7 +129,7 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 			}
 			inputs = append(inputs, eligibles...)
 		}
-		nAddr, err := nextAddr(p, address.seriesID, address.branch, address.index, lastSeriesID+1)
+		nAddr, err := nextAddr(p, ns, addrmgrNs, address.seriesID, address.branch, address.index, lastSeriesID+1)
 		if err != nil {
 			return nil, newError(ErrInputSelection, "failed to get next withdrawal address", err)
 		} else if nAddr == nil {
@@ -144,7 +145,7 @@ func (p *Pool) getEligibleInputs(store *wtxmgr.Store, startAddress WithdrawalAdd
 // nextAddr returns the next WithdrawalAddress according to the input selection
 // rules: http://opentransactions.org/wiki/index.php/Input_Selection_Algorithm_(voting_pools)
 // It returns nil if the new address' seriesID is >= stopSeriesID.
-func nextAddr(p *Pool, seriesID uint32, branch Branch, index Index, stopSeriesID uint32) (
+func nextAddr(p *Pool, ns, addrmgrNs walletdb.ReadBucket, seriesID uint32, branch Branch, index Index, stopSeriesID uint32) (
 	*WithdrawalAddress, error) {
 	series := p.Series(seriesID)
 	if series == nil {
@@ -152,7 +153,7 @@ func nextAddr(p *Pool, seriesID uint32, branch Branch, index Index, stopSeriesID
 	}
 	branch++
 	if int(branch) > len(series.publicKeys) {
-		highestIdx, err := p.highestUsedSeriesIndex(seriesID)
+		highestIdx, err := p.highestUsedSeriesIndex(ns, seriesID)
 		if err != nil {
 			return nil, err
 		}
@@ -171,14 +172,14 @@ func nextAddr(p *Pool, seriesID uint32, branch Branch, index Index, stopSeriesID
 		return nil, nil
 	}
 
-	addr, err := p.WithdrawalAddress(seriesID, branch, index)
+	addr, err := p.WithdrawalAddress(ns, addrmgrNs, seriesID, branch, index)
 	if err != nil && err.(Error).ErrorCode == ErrWithdrawFromUnusedAddr {
 		// The used indices will vary between branches so sometimes we'll try to
 		// get a WithdrawalAddress that hasn't been used before, and in such
 		// cases we just need to move on to the next one.
 		log.Debugf("nextAddr(): skipping addr (series #%d, branch #%d, index #%d) as it hasn't "+
 			"been used before", seriesID, branch, index)
-		return nextAddr(p, seriesID, branch, index, stopSeriesID)
+		return nextAddr(p, ns, addrmgrNs, seriesID, branch, index, stopSeriesID)
 	}
 	return addr, err
 }
@@ -186,7 +187,7 @@ func nextAddr(p *Pool, seriesID uint32, branch Branch, index Index, stopSeriesID
 // highestUsedSeriesIndex returns the highest index among all of this Pool's
 // used addresses for the given seriesID. It returns 0 if there are no used
 // addresses with the given seriesID.
-func (p *Pool) highestUsedSeriesIndex(seriesID uint32) (Index, error) {
+func (p *Pool) highestUsedSeriesIndex(ns walletdb.ReadBucket, seriesID uint32) (Index, error) {
 	maxIdx := Index(0)
 	series := p.Series(seriesID)
 	if series == nil {
@@ -194,7 +195,7 @@ func (p *Pool) highestUsedSeriesIndex(seriesID uint32) (Index, error) {
 			newError(ErrSeriesNotExists, fmt.Sprintf("unknown seriesID: %d", seriesID), nil)
 	}
 	for i := range series.publicKeys {
-		idx, err := p.highestUsedIndexFor(seriesID, Branch(i))
+		idx, err := p.highestUsedIndexFor(ns, seriesID, Branch(i))
 		if err != nil {
 			return Index(0), err
 		}
