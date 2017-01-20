@@ -126,20 +126,20 @@ func testReadWriteBucketInterface(tc *testContext, bucket walletdb.ReadWriteBuck
 	// stored values are the expected values.
 	keysFound := make(map[string]struct{}, len(keyValues))
 	err := bucket.ForEach(func(k, v []byte) error {
-		kString := string(k)
-		wantV, ok := keyValues[kString]
+		ks := string(k)
+		wantV, ok := keyValues[ks]
 		if !ok {
 			return fmt.Errorf("ForEach: key '%s' should "+
-				"exist", kString)
+				"exist", ks)
 		}
 
 		if !reflect.DeepEqual(v, []byte(wantV)) {
 			return fmt.Errorf("ForEach: value for key '%s' "+
 				"does not match - got %s, want %s",
-				kString, v, wantV)
+				ks, v, wantV)
 		}
 
-		keysFound[kString] = struct{}{}
+		keysFound[ks] = struct{}{}
 		return nil
 	})
 	if err != nil {
