@@ -60,8 +60,8 @@ func exampleLoadDB() (walletdb.DB, func(), error) {
 	return db, teardownFunc, err
 }
 
-// This example demonstrates creating a new namespace.
-func ExampleDB_namespace() {
+// This example demonstrates creating a new top level bucket.
+func ExampleDB_createTopLevelBucket() {
 	// Load a database for the purposes of this example and schedule it to
 	// be closed and removed on exit. See the Create example for more
 	// details on what this step is doing.
@@ -72,19 +72,25 @@ func ExampleDB_namespace() {
 	}
 	defer teardownFunc()
 
-	// Get or create a namespace in the database as needed.  This namespace
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer dbtx.Commit()
+
+	// Get or create a bucket in the database as needed.  This bucket
 	// is what is typically passed to specific sub-packages so they have
 	// their own area to work in without worrying about conflicting keys.
-	namespaceKey := []byte("walletsubpackage")
-	namespace, err := db.Namespace(namespaceKey)
+	bucketKey := []byte("walletsubpackage")
+	bucket, err := dbtx.CreateTopLevelBucket(bucketKey)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	// Prevent unused error.  Ordinarily the namespace would be used at this
-	// point to start a managed or manual transaction.
-	_ = namespace
+	// Prevent unused error.
+	_ = bucket
 
 	// Output:
 }
@@ -113,11 +119,20 @@ func Example_basicUsage() {
 	defer os.Remove(dbPath)
 	defer db.Close()
 
-	// Get or create a namespace in the database as needed.  This namespace
+	// Get or create a bucket in the database as needed.  This bucket
 	// is what is typically passed to specific sub-packages so they have
 	// their own area to work in without worrying about conflicting keys.
-	namespaceKey := []byte("walletsubpackage")
-	namespace, err := db.Namespace(namespaceKey)
+	bucketKey := []byte("walletsubpackage")
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		bucket := tx.ReadWriteBucket(bucketKey)
+		if bucket == nil {
+			_, err = tx.CreateTopLevelBucket(bucketKey)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -126,13 +141,13 @@ func Example_basicUsage() {
 	// Use the Update function of the namespace to perform a managed
 	// read-write transaction.  The transaction will automatically be rolled
 	// back if the supplied inner function returns a non-nil error.
-	err = namespace.Update(func(tx walletdb.Tx) error {
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		// All data is stored against the root bucket of the namespace,
 		// or nested buckets of the root bucket.  It's not really
 		// necessary to store it in a separate variable like this, but
 		// it has been done here for the purposes of the example to
 		// illustrate.
-		rootBucket := tx.RootBucket()
+		rootBucket := tx.ReadWriteBucket(bucketKey)
 
 		// Store a key/value pair directly in the root bucket.
 		key := []byte("mykey")
