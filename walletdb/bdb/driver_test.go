@@ -81,7 +81,7 @@ func TestCreateOpenFail(t *testing.T) {
 	db.Close()
 
 	wantErr = walletdb.ErrDbNotOpen
-	if _, err := db.Namespace([]byte("ns1")); err != wantErr {
+	if _, err := db.BeginReadTx(); err != wantErr {
 		t.Errorf("Namespace: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
 		return
@@ -109,19 +109,14 @@ func TestPersistence(t *testing.T) {
 		"ns1key3": "foo3",
 	}
 	ns1Key := []byte("ns1")
-	ns1, err := db.Namespace(ns1Key)
-	if err != nil {
-		t.Errorf("Namespace: unexpected error: %v", err)
-		return
-	}
-	err = ns1.Update(func(tx walletdb.Tx) error {
-		rootBucket := tx.RootBucket()
-		if rootBucket == nil {
-			return fmt.Errorf("RootBucket: unexpected nil root bucket")
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns1, err := tx.CreateTopLevelBucket(ns1Key)
+		if err != nil {
+			return err
 		}
 
 		for k, v := range storeValues {
-			if err := rootBucket.Put([]byte(k), []byte(v)); err != nil {
+			if err := ns1.Put([]byte(k), []byte(v)); err != nil {
 				return fmt.Errorf("Put: unexpected error: %v", err)
 			}
 		}
@@ -144,19 +139,14 @@ func TestPersistence(t *testing.T) {
 
 	// Ensure the values previously stored in the 3rd namespace still exist
 	// and are correct.
-	ns1, err = db.Namespace(ns1Key)
-	if err != nil {
-		t.Errorf("Namespace: unexpected error: %v", err)
-		return
-	}
-	err = ns1.View(func(tx walletdb.Tx) error {
-		rootBucket := tx.RootBucket()
-		if rootBucket == nil {
-			return fmt.Errorf("RootBucket: unexpected nil root bucket")
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns1 := tx.ReadBucket(ns1Key)
+		if ns1 == nil {
+			return fmt.Errorf("ReadTx.ReadBucket: unexpected nil root bucket")
 		}
 
 		for k, v := range storeValues {
-			gotVal := rootBucket.Get([]byte(k))
+			gotVal := ns1.Get([]byte(k))
 			if !reflect.DeepEqual(gotVal, []byte(v)) {
 				return fmt.Errorf("Get: key '%s' does not "+
 					"match expected value - got %s, want %s",
@@ -170,20 +160,4 @@ func TestPersistence(t *testing.T) {
 		t.Errorf("ns1 View: unexpected error: %v", err)
 		return
 	}
-}
-
-// TestInterface performs all interfaces tests for this database driver.
-func TestInterface(t *testing.T) {
-	// Create a new database to run tests against.
-	dbPath := "interfacetest.db"
-	db, err := walletdb.Create(dbType, dbPath)
-	if err != nil {
-		t.Errorf("Failed to create test database (%s) %v", dbType, err)
-		return
-	}
-	defer os.Remove(dbPath)
-	defer db.Close()
-
-	// Run all of the interface tests against the database.
-	testInterface(t, db)
 }
