@@ -197,18 +197,26 @@ func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, 
 		return err
 	}
 
-	// For all mined transactions with unspent credits spent by this
-	// transaction, mark each spent, remove from the unspents map, and
-	// insert a debit record for the spent credit.
+	// For all transaction inputs, remove the previous output marker from the
+	// unmined inputs bucket.  For any mined transactions with unspent credits
+	// spent by this transaction, mark each spent, remove from the unspents map,
+	// and insert a debit record for the spent credit.
 	debitIncidence := indexedIncidence{
 		incidence: incidence{txHash: rec.Hash, block: block.Block},
 		// index set for each rec input below.
 	}
 	for i, input := range rec.MsgTx.TxIn {
 		unspentKey, credKey := existsUnspent(ns, &input.PreviousOutPoint)
+
+		err = deleteRawUnminedInput(ns, unspentKey)
+		if err != nil {
+			return err
+		}
+
 		if credKey == nil {
 			continue
 		}
+
 		debitIncidence.index = uint32(i)
 		amt, err := spendCredit(ns, credKey, &debitIncidence)
 		if err != nil {
@@ -221,11 +229,6 @@ func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, 
 		}
 
 		err = putDebit(ns, &rec.Hash, uint32(i), amt, &block.Block, credKey)
-		if err != nil {
-			return err
-		}
-
-		err = deleteRawUnminedInput(ns, unspentKey)
 		if err != nil {
 			return err
 		}
@@ -260,10 +263,6 @@ func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, 
 		cred.amount = amount
 		cred.change = change
 
-		err = it.delete()
-		if err != nil {
-			return err
-		}
 		err = putUnspentCredit(ns, &cred)
 		if err != nil {
 			return err
@@ -272,10 +271,31 @@ func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, 
 		if err != nil {
 			return err
 		}
+
+		// reposition cursor before deleting, since the above puts have
+		// invalidated the cursor.
+		it.reposition(&rec.Hash, index)
+
+		// Avoid cursor deletion until bolt issue #620 is resolved.
+		// err = it.delete()
+		// if err != nil {
+		// 	return err
+		// }
+
 		minedBalance += amount
 	}
 	if it.err != nil {
 		return it.err
+	}
+
+	// Delete all possible credits outside of the iteration since the cursor
+	// deletion is broken.
+	for i := 0; i < len(rec.MsgTx.TxOut); i++ {
+		k := canonicalOutPoint(&rec.Hash, uint32(i))
+		err = deleteRawUnminedCredit(ns, k)
+		if err != nil {
+			return err
+		}
 	}
 
 	err = putMinedBalance(ns, minedBalance)
@@ -501,10 +521,16 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 	// It is necessary to keep these in memory and fix the unmined
 	// transactions later since blocks are removed in increasing order.
 	var coinBaseCredits []wire.OutPoint
+	var heightsToRemove []int32
 
-	it := makeBlockIterator(ns, height)
-	for it.next() {
+	it := makeReverseBlockIterator(ns)
+	for it.prev() {
 		b := &it.elem
+		if it.elem.Height < height {
+			break
+		}
+
+		heightsToRemove = append(heightsToRemove, it.elem.Height)
 
 		log.Infof("Rolling back %d transactions from block %v height %d",
 			len(b.transactions), b.Hash, b.Height)
@@ -664,13 +690,27 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 			}
 		}
 
-		err = it.delete()
-		if err != nil {
-			return err
-		}
+		// reposition cursor before deleting this k/v pair and advancing to the
+		// previous.
+		it.reposition(it.elem.Height)
+
+		// Avoid cursor deletion until bolt issue #620 is resolved.
+		// err = it.delete()
+		// if err != nil {
+		// 	return err
+		// }
 	}
 	if it.err != nil {
 		return it.err
+	}
+
+	// Delete the block records outside of the iteration since cursor deletion
+	// is broken.
+	for _, h := range heightsToRemove {
+		err = deleteBlockRecord(ns, h)
+		if err != nil {
+			return err
+		}
 	}
 
 	for _, op := range coinBaseCredits {

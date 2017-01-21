@@ -341,13 +341,23 @@ func (it *blockIterator) prev() bool {
 	return true
 }
 
-func (it *blockIterator) delete() error {
-	err := it.c.Delete()
-	if err != nil {
-		str := "failed to delete block record"
-		storeError(ErrDatabase, str, err)
-	}
-	return nil
+// unavailable until https://github.com/boltdb/bolt/issues/620 is fixed.
+// func (it *blockIterator) delete() error {
+// 	err := it.c.Delete()
+// 	if err != nil {
+// 		str := "failed to delete block record"
+// 		storeError(ErrDatabase, str, err)
+// 	}
+// 	return nil
+// }
+
+func (it *blockIterator) reposition(height int32) {
+	it.c.Seek(keyBlockRecord(height))
+}
+
+func deleteBlockRecord(ns walletdb.ReadWriteBucket, height int32) error {
+	k := keyBlockRecord(height)
+	return ns.NestedReadWriteBucket(bucketBlocks).Delete(k)
 }
 
 // Transaction records are keyed as such:
@@ -1177,13 +1187,18 @@ func (it *unminedCreditIterator) next() bool {
 	return true
 }
 
-func (it *unminedCreditIterator) delete() error {
-	err := it.c.Delete()
-	if err != nil {
-		str := "failed to delete unmined credit"
-		return storeError(ErrDatabase, str, err)
-	}
-	return nil
+// unavailable until https://github.com/boltdb/bolt/issues/620 is fixed.
+// func (it *unminedCreditIterator) delete() error {
+// 	err := it.c.Delete()
+// 	if err != nil {
+// 		str := "failed to delete unmined credit"
+// 		return storeError(ErrDatabase, str, err)
+// 	}
+// 	return nil
+// }
+
+func (it *unminedCreditIterator) reposition(txHash *chainhash.Hash, index uint32) {
+	it.c.Seek(canonicalOutPoint(txHash, index))
 }
 
 // Outpoints spent by unmined transactions are saved in the unmined inputs

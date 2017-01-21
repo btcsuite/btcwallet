@@ -56,32 +56,38 @@ func testDB() (walletdb.DB, func(), error) {
 	return db, func() { os.RemoveAll(tmpDir) }, err
 }
 
-func testStore() (*Store, func(), error) {
+var namespaceKey = []byte("txstore")
+
+func testStore() (*Store, walletdb.DB, func(), error) {
 	tmpDir, err := ioutil.TempDir("", "wtxmgr_test")
 	if err != nil {
-		return nil, func() {}, err
+		return nil, nil, func() {}, err
 	}
 	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"))
 	if err != nil {
 		teardown := func() {
 			os.RemoveAll(tmpDir)
 		}
-		return nil, teardown, err
+		return nil, nil, teardown, err
 	}
 	teardown := func() {
 		db.Close()
 		os.RemoveAll(tmpDir)
 	}
-	ns, err := db.Namespace([]byte("txstore"))
-	if err != nil {
-		return nil, teardown, err
-	}
-	err = Create(ns)
-	if err != nil {
-		return nil, teardown, err
-	}
-	s, err := Open(ns, &chaincfg.TestNet3Params)
-	return s, teardown, err
+	var s *Store
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(namespaceKey)
+		if err != nil {
+			return err
+		}
+		err = Create(ns)
+		if err != nil {
+			return err
+		}
+		s, err = Open(ns, &chaincfg.TestNet3Params)
+		return err
+	})
+	return s, db, teardown, err
 }
 
 func serializeTx(tx *btcutil.Tx) []byte {
@@ -122,14 +128,14 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		f        func(*Store) (*Store, error)
+		f        func(*Store, walletdb.ReadWriteBucket) (*Store, error)
 		bal, unc btcutil.Amount
 		unspents map[wire.OutPoint]struct{}
 		unmined  map[chainhash.Hash]struct{}
 	}{
 		{
 			name: "new store",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				return s, nil
 			},
 			bal:      0,
@@ -139,17 +145,17 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "txout insert",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstRecvSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, nil)
+				err = s.InsertTx(ns, rec, nil)
 				if err != nil {
 					return nil, err
 				}
 
-				err = s.AddCredit(rec, nil, 0, false)
+				err = s.AddCredit(ns, rec, nil, 0, false)
 				return s, err
 			},
 			bal: 0,
@@ -166,17 +172,17 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert duplicate unconfirmed",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstRecvSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, nil)
+				err = s.InsertTx(ns, rec, nil)
 				if err != nil {
 					return nil, err
 				}
 
-				err = s.AddCredit(rec, nil, 0, false)
+				err = s.AddCredit(ns, rec, nil, 0, false)
 				return s, err
 			},
 			bal: 0,
@@ -193,17 +199,17 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "confirmed txout insert",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstRecvSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, TstRecvTxBlockDetails)
+				err = s.InsertTx(ns, rec, TstRecvTxBlockDetails)
 				if err != nil {
 					return nil, err
 				}
 
-				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
+				err = s.AddCredit(ns, rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
 			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
@@ -218,17 +224,17 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert duplicate confirmed",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstRecvSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, TstRecvTxBlockDetails)
+				err = s.InsertTx(ns, rec, TstRecvTxBlockDetails)
 				if err != nil {
 					return nil, err
 				}
 
-				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
+				err = s.AddCredit(ns, rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
 			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
@@ -243,8 +249,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "rollback confirmed credit",
-			f: func(s *Store) (*Store, error) {
-				err := s.Rollback(TstRecvTxBlockDetails.Height)
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
+				err := s.Rollback(ns, TstRecvTxBlockDetails.Height)
 				return s, err
 			},
 			bal: 0,
@@ -261,17 +267,17 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert confirmed double spend",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstDoubleSpendSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, TstRecvTxBlockDetails)
+				err = s.InsertTx(ns, rec, TstRecvTxBlockDetails)
 				if err != nil {
 					return nil, err
 				}
 
-				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
+				err = s.AddCredit(ns, rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
 			bal: btcutil.Amount(TstDoubleSpendTx.MsgTx().TxOut[0].Value),
@@ -286,12 +292,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert unconfirmed debit",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstSpendingSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, nil)
+				err = s.InsertTx(ns, rec, nil)
 				return s, err
 			},
 			bal:      0,
@@ -303,12 +309,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert unconfirmed debit again",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstDoubleSpendSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, TstRecvTxBlockDetails)
+				err = s.InsertTx(ns, rec, TstRecvTxBlockDetails)
 				return s, err
 			},
 			bal:      0,
@@ -320,17 +326,17 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert change (index 0)",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstSpendingSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, nil)
+				err = s.InsertTx(ns, rec, nil)
 				if err != nil {
 					return nil, err
 				}
 
-				err = s.AddCredit(rec, nil, 0, true)
+				err = s.AddCredit(ns, rec, nil, 0, true)
 				return s, err
 			},
 			bal: 0,
@@ -347,16 +353,16 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert output back to this own wallet (index 1)",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstSpendingSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, nil)
+				err = s.InsertTx(ns, rec, nil)
 				if err != nil {
 					return nil, err
 				}
-				err = s.AddCredit(rec, nil, 1, true)
+				err = s.AddCredit(ns, rec, nil, 1, true)
 				return s, err
 			},
 			bal: 0,
@@ -377,12 +383,12 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "confirm signed tx",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstSpendingSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, TstSignedTxBlockDetails)
+				err = s.InsertTx(ns, rec, TstSignedTxBlockDetails)
 				return s, err
 			},
 			bal: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
@@ -401,8 +407,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "rollback after spending tx",
-			f: func(s *Store) (*Store, error) {
-				err := s.Rollback(TstSignedTxBlockDetails.Height + 1)
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
+				err := s.Rollback(ns, TstSignedTxBlockDetails.Height+1)
 				return s, err
 			},
 			bal: btcutil.Amount(TstSpendingTx.MsgTx().TxOut[0].Value + TstSpendingTx.MsgTx().TxOut[1].Value),
@@ -421,8 +427,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "rollback spending tx block",
-			f: func(s *Store) (*Store, error) {
-				err := s.Rollback(TstSignedTxBlockDetails.Height)
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
+				err := s.Rollback(ns, TstSignedTxBlockDetails.Height)
 				return s, err
 			},
 			bal: 0,
@@ -443,8 +449,8 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "rollback double spend tx block",
-			f: func(s *Store) (*Store, error) {
-				err := s.Rollback(TstRecvTxBlockDetails.Height)
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
+				err := s.Rollback(ns, TstRecvTxBlockDetails.Height)
 				return s, err
 			},
 			bal: 0,
@@ -460,16 +466,16 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 		{
 			name: "insert original recv txout",
-			f: func(s *Store) (*Store, error) {
+			f: func(s *Store, ns walletdb.ReadWriteBucket) (*Store, error) {
 				rec, err := NewTxRecord(TstRecvSerializedTx, time.Now())
 				if err != nil {
 					return nil, err
 				}
-				err = s.InsertTx(rec, TstRecvTxBlockDetails)
+				err = s.InsertTx(ns, rec, TstRecvTxBlockDetails)
 				if err != nil {
 					return nil, err
 				}
-				err = s.AddCredit(rec, TstRecvTxBlockDetails, 0, false)
+				err = s.AddCredit(ns, rec, TstRecvTxBlockDetails, 0, false)
 				return s, err
 			},
 			bal: btcutil.Amount(TstRecvTx.MsgTx().TxOut[0].Value),
@@ -481,76 +487,89 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 		},
 	}
 
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for _, test := range tests {
-		tmpStore, err := test.f(s)
-		if err != nil {
-			t.Fatalf("%s: got error: %v", test.name, err)
-		}
-		s = tmpStore
-		bal, err := s.Balance(1, TstRecvCurrentHeight)
-		if err != nil {
-			t.Fatalf("%s: Confirmed Balance failed: %v", test.name, err)
-		}
-		if bal != test.bal {
-			t.Fatalf("%s: balance mismatch: expected: %d, got: %d", test.name, test.bal, bal)
-		}
-		unc, err := s.Balance(0, TstRecvCurrentHeight)
-		if err != nil {
-			t.Fatalf("%s: Unconfirmed Balance failed: %v", test.name, err)
-		}
-		unc -= bal
-		if unc != test.unc {
-			t.Fatalf("%s: unconfirmed balance mismatch: expected %d, got %d", test.name, test.unc, unc)
-		}
-
-		// Check that unspent outputs match expected.
-		unspent, err := s.UnspentOutputs()
-		if err != nil {
-			t.Fatalf("%s: failed to fetch unspent outputs: %v", test.name, err)
-		}
-		for _, cred := range unspent {
-			if _, ok := test.unspents[cred.OutPoint]; !ok {
-				t.Errorf("%s: unexpected unspent output: %v", test.name, cred.OutPoint)
+		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(namespaceKey)
+			tmpStore, err := test.f(s, ns)
+			if err != nil {
+				t.Fatalf("%s: got error: %v", test.name, err)
 			}
-			delete(test.unspents, cred.OutPoint)
-		}
-		if len(test.unspents) != 0 {
-			t.Fatalf("%s: missing expected unspent output(s)", test.name)
-		}
-
-		// Check that unmined txs match expected.
-		unmined, err := s.UnminedTxs()
-		if err != nil {
-			t.Fatalf("%s: cannot load unmined transactions: %v", test.name, err)
-		}
-		for _, tx := range unmined {
-			txHash := tx.TxHash()
-			if _, ok := test.unmined[txHash]; !ok {
-				t.Fatalf("%s: unexpected unmined tx: %v", test.name, txHash)
+			s = tmpStore
+			bal, err := s.Balance(ns, 1, TstRecvCurrentHeight)
+			if err != nil {
+				t.Fatalf("%s: Confirmed Balance failed: %v", test.name, err)
 			}
-			delete(test.unmined, txHash)
-		}
-		if len(test.unmined) != 0 {
-			t.Fatalf("%s: missing expected unmined tx(s)", test.name)
-		}
+			if bal != test.bal {
+				t.Fatalf("%s: balance mismatch: expected: %d, got: %d", test.name, test.bal, bal)
+			}
+			unc, err := s.Balance(ns, 0, TstRecvCurrentHeight)
+			if err != nil {
+				t.Fatalf("%s: Unconfirmed Balance failed: %v", test.name, err)
+			}
+			unc -= bal
+			if unc != test.unc {
+				t.Fatalf("%s: unconfirmed balance mismatch: expected %d, got %d", test.name, test.unc, unc)
+			}
 
+			// Check that unspent outputs match expected.
+			unspent, err := s.UnspentOutputs(ns)
+			if err != nil {
+				t.Fatalf("%s: failed to fetch unspent outputs: %v", test.name, err)
+			}
+			for _, cred := range unspent {
+				if _, ok := test.unspents[cred.OutPoint]; !ok {
+					t.Errorf("%s: unexpected unspent output: %v", test.name, cred.OutPoint)
+				}
+				delete(test.unspents, cred.OutPoint)
+			}
+			if len(test.unspents) != 0 {
+				t.Fatalf("%s: missing expected unspent output(s)", test.name)
+			}
+
+			// Check that unmined txs match expected.
+			unmined, err := s.UnminedTxs(ns)
+			if err != nil {
+				t.Fatalf("%s: cannot load unmined transactions: %v", test.name, err)
+			}
+			for _, tx := range unmined {
+				txHash := tx.TxHash()
+				if _, ok := test.unmined[txHash]; !ok {
+					t.Fatalf("%s: unexpected unmined tx: %v", test.name, txHash)
+				}
+				delete(test.unmined, txHash)
+			}
+			if len(test.unmined) != 0 {
+				t.Fatalf("%s: missing expected unmined tx(s)", test.name)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func TestFindingSpentCredits(t *testing.T) {
 	t.Parallel()
 
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns := dbtx.ReadWriteBucket(namespaceKey)
 
 	// Insert transaction and credit which will be spent.
 	recvRec, err := NewTxRecord(TstRecvSerializedTx, time.Now())
@@ -558,11 +577,11 @@ func TestFindingSpentCredits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = s.InsertTx(recvRec, TstRecvTxBlockDetails)
+	err = s.InsertTx(ns, recvRec, TstRecvTxBlockDetails)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(recvRec, TstRecvTxBlockDetails, 0, false)
+	err = s.AddCredit(ns, recvRec, TstRecvTxBlockDetails, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,16 +592,16 @@ func TestFindingSpentCredits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = s.InsertTx(spendingRec, TstSignedTxBlockDetails)
+	err = s.InsertTx(ns, spendingRec, TstSignedTxBlockDetails)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(spendingRec, TstSignedTxBlockDetails, 0, false)
+	err = s.AddCredit(ns, spendingRec, TstSignedTxBlockDetails, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	bal, err := s.Balance(1, TstSignedTxBlockDetails.Height)
+	bal, err := s.Balance(ns, 1, TstSignedTxBlockDetails.Height)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +609,7 @@ func TestFindingSpentCredits(t *testing.T) {
 	if bal != expectedBal {
 		t.Fatalf("bad balance: %v != %v", bal, expectedBal)
 	}
-	unspents, err := s.UnspentOutputs()
+	unspents, err := s.UnspentOutputs(ns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,11 +653,18 @@ func spendOutput(txHash *chainhash.Hash, index uint32, outputValues ...int64) *w
 func TestCoinbases(t *testing.T) {
 	t.Parallel()
 
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns := dbtx.ReadWriteBucket(namespaceKey)
 
 	b100 := BlockMeta{
 		Block: Block{Height: 100},
@@ -652,15 +678,15 @@ func TestCoinbases(t *testing.T) {
 	}
 
 	// Insert coinbase and mark outputs 0 and 2 as credits.
-	err = s.InsertTx(cbRec, &b100)
+	err = s.InsertTx(ns, cbRec, &b100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(cbRec, &b100, 0, false)
+	err = s.AddCredit(ns, cbRec, &b100, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(cbRec, &b100, 2, false)
+	err = s.AddCredit(ns, cbRec, &b100, 2, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +772,7 @@ func TestCoinbases(t *testing.T) {
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(ns, tst.minConf, tst.height)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -766,11 +792,11 @@ func TestCoinbases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.InsertTx(spenderARec, nil)
+	err = s.InsertTx(ns, spenderARec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(spenderARec, nil, 0, false)
+	err = s.AddCredit(ns, spenderARec, nil, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,7 +853,7 @@ func TestCoinbases(t *testing.T) {
 	}
 	balTestsBeforeMaturity := balTests
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(ns, tst.minConf, tst.height)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -844,7 +870,7 @@ func TestCoinbases(t *testing.T) {
 		Block: Block{Height: b100.Height + coinbaseMaturity},
 		Time:  time.Now(),
 	}
-	err = s.InsertTx(spenderARec, &bMaturity)
+	err = s.InsertTx(ns, spenderARec, &bMaturity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -910,7 +936,7 @@ func TestCoinbases(t *testing.T) {
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(ns, tst.minConf, tst.height)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -934,16 +960,16 @@ func TestCoinbases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.InsertTx(spenderBRec, &bMaturity)
+	err = s.InsertTx(ns, spenderBRec, &bMaturity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(spenderBRec, &bMaturity, 0, false)
+	err = s.AddCredit(ns, spenderBRec, &bMaturity, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(ns, tst.minConf, tst.height)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -957,13 +983,13 @@ func TestCoinbases(t *testing.T) {
 
 	// Reorg out the block that matured the coinbase and check balances
 	// again.
-	err = s.Rollback(bMaturity.Height)
+	err = s.Rollback(ns, bMaturity.Height)
 	if err != nil {
 		t.Fatal(err)
 	}
 	balTests = balTestsBeforeMaturity
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(ns, tst.minConf, tst.height)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -979,7 +1005,7 @@ func TestCoinbases(t *testing.T) {
 	// more transactions in the store (since the previous outputs referenced
 	// by the spending tx no longer exist), and the balance will always be
 	// zero.
-	err = s.Rollback(b100.Height)
+	err = s.Rollback(ns, b100.Height)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1009,7 +1035,7 @@ func TestCoinbases(t *testing.T) {
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(ns, tst.minConf, tst.height)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -1020,7 +1046,7 @@ func TestCoinbases(t *testing.T) {
 	if t.Failed() {
 		t.Fatal("Failed balance checks after reorging coinbase block")
 	}
-	unminedTxs, err := s.UnminedTxs()
+	unminedTxs, err := s.UnminedTxs(ns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1033,11 +1059,18 @@ func TestCoinbases(t *testing.T) {
 func TestMoveMultipleToSameBlock(t *testing.T) {
 	t.Parallel()
 
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns := dbtx.ReadWriteBucket(namespaceKey)
 
 	b100 := BlockMeta{
 		Block: Block{Height: 100},
@@ -1051,15 +1084,15 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 	}
 
 	// Insert coinbase and mark both outputs as credits.
-	err = s.InsertTx(cbRec, &b100)
+	err = s.InsertTx(ns, cbRec, &b100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(cbRec, &b100, 0, false)
+	err = s.AddCredit(ns, cbRec, &b100, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(cbRec, &b100, 1, false)
+	err = s.AddCredit(ns, cbRec, &b100, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1072,15 +1105,15 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.InsertTx(spenderARec, nil)
+	err = s.InsertTx(ns, spenderARec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(spenderARec, nil, 0, false)
+	err = s.AddCredit(ns, spenderARec, nil, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(spenderARec, nil, 1, false)
+	err = s.AddCredit(ns, spenderARec, nil, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1090,15 +1123,15 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.InsertTx(spenderBRec, nil)
+	err = s.InsertTx(ns, spenderBRec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(spenderBRec, nil, 0, false)
+	err = s.AddCredit(ns, spenderBRec, nil, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.AddCredit(spenderBRec, nil, 1, false)
+	err = s.AddCredit(ns, spenderBRec, nil, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1110,24 +1143,24 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 		Block: Block{Height: b100.Height + coinbaseMaturity},
 		Time:  time.Now(),
 	}
-	err = s.InsertTx(spenderARec, &bMaturity)
+	err = s.InsertTx(ns, spenderARec, &bMaturity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.InsertTx(spenderBRec, &bMaturity)
+	err = s.InsertTx(ns, spenderBRec, &bMaturity)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Check that both transactions can be queried at the maturity block.
-	detailsA, err := s.UniqueTxDetails(&spenderARec.Hash, &bMaturity.Block)
+	detailsA, err := s.UniqueTxDetails(ns, &spenderARec.Hash, &bMaturity.Block)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if detailsA == nil {
 		t.Fatal("No details found for first spender")
 	}
-	detailsB, err := s.UniqueTxDetails(&spenderBRec.Hash, &bMaturity.Block)
+	detailsB, err := s.UniqueTxDetails(ns, &spenderBRec.Hash, &bMaturity.Block)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1177,7 +1210,7 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 		},
 	}
 	for i, tst := range balTests {
-		bal, err := s.Balance(tst.minConf, tst.height)
+		bal, err := s.Balance(ns, tst.minConf, tst.height)
 		if err != nil {
 			t.Fatalf("Balance test %d: Store.Balance failed: %v", i, err)
 		}
@@ -1188,7 +1221,7 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 	if t.Failed() {
 		t.Fatal("Failed balance checks after moving both coinbase spenders")
 	}
-	unminedTxs, err := s.UnminedTxs()
+	unminedTxs, err := s.UnminedTxs(ns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1203,11 +1236,18 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 func TestInsertUnserializedTx(t *testing.T) {
 	t.Parallel()
 
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns := dbtx.ReadWriteBucket(namespaceKey)
 
 	tx := newCoinBase(50e8)
 	rec, err := NewTxRecordFromMsgTx(tx, timeNow())
@@ -1215,13 +1255,13 @@ func TestInsertUnserializedTx(t *testing.T) {
 		t.Fatal(err)
 	}
 	b100 := makeBlockMeta(100)
-	err = s.InsertTx(stripSerializedTx(rec), &b100)
+	err = s.InsertTx(ns, stripSerializedTx(rec), &b100)
 	if err != nil {
 		t.Fatalf("Insert for stripped TxRecord failed: %v", err)
 	}
 
 	// Ensure it can be retreived successfully.
-	details, err := s.UniqueTxDetails(&rec.Hash, &b100.Block)
+	details, err := s.UniqueTxDetails(ns, &rec.Hash, &b100.Block)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1239,11 +1279,11 @@ func TestInsertUnserializedTx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.InsertTx(rec, nil)
+	err = s.InsertTx(ns, rec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	details, err = s.UniqueTxDetails(&rec.Hash, nil)
+	details, err = s.UniqueTxDetails(ns, &rec.Hash, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
