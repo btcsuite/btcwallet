@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -44,7 +45,7 @@ var exampleBlock100 = makeBlockMeta(100)
 // This example demonstrates reporting the Store balance given an unmined and
 // mined transaction given 0, 1, and 6 block confirmations.
 func ExampleStore_Balance() {
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		fmt.Println(err)
@@ -54,17 +55,24 @@ func ExampleStore_Balance() {
 	// Prints balances for 0 block confirmations, 1 confirmation, and 6
 	// confirmations.
 	printBalances := func(syncHeight int32) {
-		zeroConfBal, err := s.Balance(0, syncHeight)
+		dbtx, err := db.BeginReadTx()
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		oneConfBal, err := s.Balance(1, syncHeight)
+		defer dbtx.Rollback()
+		ns := dbtx.ReadBucket(namespaceKey)
+		zeroConfBal, err := s.Balance(ns, 0, syncHeight)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		sixConfBal, err := s.Balance(6, syncHeight)
+		oneConfBal, err := s.Balance(ns, 1, syncHeight)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		sixConfBal, err := s.Balance(ns, 6, syncHeight)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -74,12 +82,14 @@ func ExampleStore_Balance() {
 
 	// Insert a transaction which outputs 10 BTC unmined and mark the output
 	// as a credit.
-	err = s.InsertTx(exampleTxRecordA, nil)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	err = s.AddCredit(exampleTxRecordA, nil, 0, false)
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(namespaceKey)
+		err := s.InsertTx(ns, exampleTxRecordA, nil)
+		if err != nil {
+			return err
+		}
+		return s.AddCredit(ns, exampleTxRecordA, nil, 0, false)
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -88,7 +98,10 @@ func ExampleStore_Balance() {
 
 	// Mine the transaction in block 100 and print balances again with a
 	// sync height of 100 and 105 blocks.
-	err = s.InsertTx(exampleTxRecordA, &exampleBlock100)
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(namespaceKey)
+		return s.InsertTx(ns, exampleTxRecordA, &exampleBlock100)
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -103,38 +116,43 @@ func ExampleStore_Balance() {
 }
 
 func ExampleStore_Rollback() {
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	// Insert a transaction which outputs 10 BTC in a block at height 100.
-	err = s.InsertTx(exampleTxRecordA, &exampleBlock100)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(namespaceKey)
 
-	// Rollback everything from block 100 onwards.
-	err = s.Rollback(100)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+		// Insert a transaction which outputs 10 BTC in a block at height 100.
+		err := s.InsertTx(ns, exampleTxRecordA, &exampleBlock100)
+		if err != nil {
+			return err
+		}
 
-	// Assert that the transaction is now unmined.
-	details, err := s.TxDetails(&exampleTxRecordA.Hash)
+		// Rollback everything from block 100 onwards.
+		err = s.Rollback(ns, 100)
+		if err != nil {
+			return err
+		}
+
+		// Assert that the transaction is now unmined.
+		details, err := s.TxDetails(ns, &exampleTxRecordA.Hash)
+		if err != nil {
+			return err
+		}
+		if details == nil {
+			return fmt.Errorf("no details found")
+		}
+		fmt.Println(details.Block.Height)
+		return nil
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	if details == nil {
-		fmt.Println("No details found")
-		return
-	}
-	fmt.Println(details.Block.Height)
 
 	// Output:
 	// -1
@@ -149,20 +167,28 @@ func Example_basicUsage() {
 		return
 	}
 
-	// Create or open a db namespace for the transaction store.
-	ns, err := db.Namespace([]byte("txstore"))
+	// Open a read-write transaction to operate on the database.
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer dbtx.Commit()
+
+	// Create a bucket for the transaction store.
+	b, err := dbtx.CreateTopLevelBucket([]byte("txstore"))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	// Create (or open) the transaction store in the provided namespace.
-	err = wtxmgr.Create(ns)
+	// Create and open the transaction store in the provided namespace.
+	err = wtxmgr.Create(b)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	s, err := wtxmgr.Open(ns, &chaincfg.TestNet3Params)
+	s, err := wtxmgr.Open(b, &chaincfg.TestNet3Params)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -170,12 +196,12 @@ func Example_basicUsage() {
 
 	// Insert an unmined transaction that outputs 10 BTC to a wallet address
 	// at output 0.
-	err = s.InsertTx(exampleTxRecordA, nil)
+	err = s.InsertTx(b, exampleTxRecordA, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	err = s.AddCredit(exampleTxRecordA, nil, 0, false)
+	err = s.AddCredit(b, exampleTxRecordA, nil, 0, false)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -183,31 +209,31 @@ func Example_basicUsage() {
 
 	// Insert a second transaction which spends the output, and creates two
 	// outputs.  Mark the second one (5 BTC) as wallet change.
-	err = s.InsertTx(exampleTxRecordB, nil)
+	err = s.InsertTx(b, exampleTxRecordB, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	err = s.AddCredit(exampleTxRecordB, nil, 1, true)
+	err = s.AddCredit(b, exampleTxRecordB, nil, 1, true)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
 	// Mine each transaction in a block at height 100.
-	err = s.InsertTx(exampleTxRecordA, &exampleBlock100)
+	err = s.InsertTx(b, exampleTxRecordA, &exampleBlock100)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	err = s.InsertTx(exampleTxRecordB, &exampleBlock100)
+	err = s.InsertTx(b, exampleTxRecordB, &exampleBlock100)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
 	// Print the one confirmation balance.
-	bal, err := s.Balance(1, 100)
+	bal, err := s.Balance(b, 1, 100)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -215,7 +241,7 @@ func Example_basicUsage() {
 	fmt.Println(bal)
 
 	// Fetch unspent outputs.
-	utxos, err := s.UnspentOutputs()
+	utxos, err := s.UnspentOutputs(b)
 	if err != nil {
 		fmt.Println(err)
 	}
