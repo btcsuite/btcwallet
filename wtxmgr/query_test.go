@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/walletdb"
 	. "github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -63,7 +64,7 @@ func deepCopyTxDetails(d *TxDetails) *TxDetails {
 	return &cpy
 }
 
-func (q *queryState) compare(t *testing.T, s *Store, changeDesc string) {
+func (q *queryState) compare(t *testing.T, s *Store, ns walletdb.ReadBucket, changeDesc string) {
 	defer func() {
 		if t.Failed() {
 			t.Fatalf("Store state queries failed after '%s'", changeDesc)
@@ -95,11 +96,11 @@ func (q *queryState) compare(t *testing.T, s *Store, changeDesc string) {
 			return false, nil
 		}
 	}
-	err := s.RangeTransactions(0, -1, checkBlock(fwdBlocks))
+	err := s.RangeTransactions(ns, 0, -1, checkBlock(fwdBlocks))
 	if err != nil {
 		t.Fatalf("Failed in RangeTransactions (forwards iteration): %v", err)
 	}
-	err = s.RangeTransactions(-1, 0, checkBlock(revBlocks))
+	err = s.RangeTransactions(ns, -1, 0, checkBlock(revBlocks))
 	if err != nil {
 		t.Fatalf("Failed in RangeTransactions (reverse iteration): %v", err)
 	}
@@ -110,7 +111,7 @@ func (q *queryState) compare(t *testing.T, s *Store, changeDesc string) {
 			if blk.Height == -1 {
 				blk = nil
 			}
-			d, err := s.UniqueTxDetails(&txHash, blk)
+			d, err := s.UniqueTxDetails(ns, &txHash, blk)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -128,7 +129,7 @@ func (q *queryState) compare(t *testing.T, s *Store, changeDesc string) {
 		// TxDetails (not looking up a tx at any particular
 		// height) matches the last.
 		detail := &details[len(details)-1]
-		d, err := s.TxDetails(&txHash)
+		d, err := s.TxDetails(ns, &txHash)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,13 +238,13 @@ func TestStoreQueries(t *testing.T) {
 
 	type queryTest struct {
 		desc    string
-		updates func() // Unwinds from t.Fatal if the update errors.
+		updates func(ns walletdb.ReadWriteBucket) // Unwinds from t.Fatal if the update errors.
 		state   *queryState
 	}
 	var tests []queryTest
 
 	// Create the store and test initial state.
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		t.Fatal(err)
@@ -251,19 +252,19 @@ func TestStoreQueries(t *testing.T) {
 	lastState := newQueryState()
 	tests = append(tests, queryTest{
 		desc:    "initial store",
-		updates: func() {},
+		updates: func(walletdb.ReadWriteBucket) {},
 		state:   lastState,
 	})
 
 	// simplify error handling
-	insertTx := func(rec *TxRecord, block *BlockMeta) {
-		err := s.InsertTx(rec, block)
+	insertTx := func(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta) {
+		err := s.InsertTx(ns, rec, block)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	addCredit := func(s *Store, rec *TxRecord, block *BlockMeta, index uint32, change bool) {
-		err := s.AddCredit(rec, block, index, change)
+	addCredit := func(s *Store, ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta, index uint32, change bool) {
+		err := s.AddCredit(ns, rec, block, index, change)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,8 +276,8 @@ func TestStoreQueries(t *testing.T) {
 		}
 		return rec
 	}
-	rollback := func(height int32) {
-		err := s.Rollback(height)
+	rollback := func(ns walletdb.ReadWriteBucket, height int32) {
+		err := s.Rollback(ns, height)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -300,7 +301,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "insert tx A unmined",
-		updates: func() { insertTx(recA, nil) },
+		updates: func(ns walletdb.ReadWriteBucket) { insertTx(ns, recA, nil) },
 		state:   newState,
 	})
 
@@ -318,7 +319,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "mark unconfirmed txA:0 as credit",
-		updates: func() { addCredit(s, recA, nil, 0, true) },
+		updates: func(ns walletdb.ReadWriteBucket) { addCredit(s, ns, recA, nil, 0, true) },
 		state:   newState,
 	})
 
@@ -343,7 +344,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "insert tx B unmined",
-		updates: func() { insertTx(recB, nil) },
+		updates: func(ns walletdb.ReadWriteBucket) { insertTx(ns, recB, nil) },
 		state:   newState,
 	})
 	newState = lastState.deepCopy()
@@ -359,7 +360,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "mark txB:0 as non-change credit",
-		updates: func() { addCredit(s, recB, nil, 0, false) },
+		updates: func(ns walletdb.ReadWriteBucket) { addCredit(s, ns, recB, nil, 0, false) },
 		state:   newState,
 	})
 
@@ -373,7 +374,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "mine tx A",
-		updates: func() { insertTx(recA, &b100) },
+		updates: func(ns walletdb.ReadWriteBucket) { insertTx(ns, recA, &b100) },
 		state:   newState,
 	})
 
@@ -385,13 +386,20 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "mine tx B",
-		updates: func() { insertTx(recB, &b101) },
+		updates: func(ns walletdb.ReadWriteBucket) { insertTx(ns, recB, &b101) },
 		state:   newState,
 	})
 
 	for _, tst := range tests {
-		tst.updates()
-		tst.state.compare(t, s, tst.desc)
+		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(namespaceKey)
+			tst.updates(ns)
+			tst.state.compare(t, s, ns, tst.desc)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Run some additional query tests with the current store's state:
@@ -402,62 +410,70 @@ func TestStoreQueries(t *testing.T) {
 	//   - Verify that breaking early on RangeTransactions stops further
 	//     iteration.
 
-	missingTx := spendOutput(&recB.Hash, 0, 40e8)
-	missingRec := newTxRecordFromMsgTx(missingTx, timeNow())
-	missingBlock := makeBlockMeta(102)
-	missingDetails, err := s.TxDetails(&missingRec.Hash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if missingDetails != nil {
-		t.Errorf("Expected no details, found details for tx %v", missingDetails.Hash)
-	}
-	missingUniqueTests := []struct {
-		hash  *chainhash.Hash
-		block *Block
-	}{
-		{&missingRec.Hash, &b100.Block},
-		{&missingRec.Hash, &missingBlock.Block},
-		{&missingRec.Hash, nil},
-		{&recB.Hash, &b100.Block},
-		{&recB.Hash, &missingBlock.Block},
-		{&recB.Hash, nil},
-	}
-	for _, tst := range missingUniqueTests {
-		missingDetails, err = s.UniqueTxDetails(tst.hash, tst.block)
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(namespaceKey)
+
+		missingTx := spendOutput(&recB.Hash, 0, 40e8)
+		missingRec := newTxRecordFromMsgTx(missingTx, timeNow())
+		missingBlock := makeBlockMeta(102)
+		missingDetails, err := s.TxDetails(ns, &missingRec.Hash)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if missingDetails != nil {
 			t.Errorf("Expected no details, found details for tx %v", missingDetails.Hash)
 		}
-	}
+		missingUniqueTests := []struct {
+			hash  *chainhash.Hash
+			block *Block
+		}{
+			{&missingRec.Hash, &b100.Block},
+			{&missingRec.Hash, &missingBlock.Block},
+			{&missingRec.Hash, nil},
+			{&recB.Hash, &b100.Block},
+			{&recB.Hash, &missingBlock.Block},
+			{&recB.Hash, nil},
+		}
+		for _, tst := range missingUniqueTests {
+			missingDetails, err = s.UniqueTxDetails(ns, tst.hash, tst.block)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if missingDetails != nil {
+				t.Errorf("Expected no details, found details for tx %v", missingDetails.Hash)
+			}
+		}
 
-	iterations := 0
-	err = s.RangeTransactions(0, -1, func([]TxDetails) (bool, error) {
-		iterations++
-		return true, nil
+		iterations := 0
+		err = s.RangeTransactions(ns, 0, -1, func([]TxDetails) (bool, error) {
+			iterations++
+			return true, nil
+		})
+		if iterations != 1 {
+			t.Errorf("RangeTransactions (forwards) ran func %d times", iterations)
+		}
+		iterations = 0
+		err = s.RangeTransactions(ns, -1, 0, func([]TxDetails) (bool, error) {
+			iterations++
+			return true, nil
+		})
+		if iterations != 1 {
+			t.Errorf("RangeTransactions (reverse) ran func %d times", iterations)
+		}
+		// Make sure it also breaks early after one iteration through unmined transactions.
+		rollback(ns, b101.Height)
+		iterations = 0
+		err = s.RangeTransactions(ns, -1, 0, func([]TxDetails) (bool, error) {
+			iterations++
+			return true, nil
+		})
+		if iterations != 1 {
+			t.Errorf("RangeTransactions (reverse) ran func %d times", iterations)
+		}
+		return nil
 	})
-	if iterations != 1 {
-		t.Errorf("RangeTransactions (forwards) ran func %d times", iterations)
-	}
-	iterations = 0
-	err = s.RangeTransactions(-1, 0, func([]TxDetails) (bool, error) {
-		iterations++
-		return true, nil
-	})
-	if iterations != 1 {
-		t.Errorf("RangeTransactions (reverse) ran func %d times", iterations)
-	}
-	// Make sure it also breaks early after one iteration through unmined transactions.
-	rollback(b101.Height)
-	iterations = 0
-	err = s.RangeTransactions(-1, 0, func([]TxDetails) (bool, error) {
-		iterations++
-		return true, nil
-	})
-	if iterations != 1 {
-		t.Errorf("RangeTransactions (reverse) ran func %d times", iterations)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// None of the above tests have tested RangeTransactions with multiple
@@ -472,7 +488,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests[:0:0], queryTest{
 		desc:    "move tx B to block 100",
-		updates: func() { insertTx(recB, &b100) },
+		updates: func(ns walletdb.ReadWriteBucket) { insertTx(ns, recB, &b100) },
 		state:   newState,
 	})
 	newState = lastState.deepCopy()
@@ -483,7 +499,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "rollback block 100",
-		updates: func() { rollback(b100.Height) },
+		updates: func(ns walletdb.ReadWriteBucket) { rollback(ns, b100.Height) },
 		state:   newState,
 	})
 
@@ -510,7 +526,7 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "insert duplicate tx A",
-		updates: func() { insertTx(recA, &b100); insertTx(recA, nil) },
+		updates: func(ns walletdb.ReadWriteBucket) { insertTx(ns, recA, &b100); insertTx(ns, recA, nil) },
 		state:   newState,
 	})
 	newState = lastState.deepCopy()
@@ -524,20 +540,27 @@ func TestStoreQueries(t *testing.T) {
 	lastState = newState
 	tests = append(tests, queryTest{
 		desc:    "mine duplicate tx A",
-		updates: func() { insertTx(recA, &b101) },
+		updates: func(ns walletdb.ReadWriteBucket) { insertTx(ns, recA, &b101) },
 		state:   newState,
 	})
 
 	for _, tst := range tests {
-		tst.updates()
-		tst.state.compare(t, s, tst.desc)
+		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(namespaceKey)
+			tst.updates(ns)
+			tst.state.compare(t, s, ns, tst.desc)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func TestPreviousPkScripts(t *testing.T) {
 	t.Parallel()
 
-	s, teardown, err := testStore()
+	s, db, teardown, err := testStore()
 	defer teardown()
 	if err != nil {
 		t.Fatal(err)
@@ -593,14 +616,14 @@ func TestPreviousPkScripts(t *testing.T) {
 		recD = newTxRecordFromMsgTx(txD)
 	)
 
-	insertTx := func(rec *TxRecord, block *BlockMeta) {
-		err := s.InsertTx(rec, block)
+	insertTx := func(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta) {
+		err := s.InsertTx(ns, rec, block)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	addCredit := func(rec *TxRecord, block *BlockMeta, index uint32) {
-		err := s.AddCredit(rec, block, index, false)
+	addCredit := func(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta, index uint32) {
+		err := s.AddCredit(ns, rec, block, index, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -611,8 +634,8 @@ func TestPreviousPkScripts(t *testing.T) {
 		block   *Block
 		scripts [][]byte
 	}
-	runTest := func(tst *scriptTest) {
-		scripts, err := s.PreviousPkScripts(tst.rec, tst.block)
+	runTest := func(ns walletdb.ReadWriteBucket, tst *scriptTest) {
+		scripts, err := s.PreviousPkScripts(ns, tst.rec, tst.block)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -634,12 +657,19 @@ func TestPreviousPkScripts(t *testing.T) {
 		}
 	}
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns := dbtx.ReadWriteBucket(namespaceKey)
+
 	// Insert transactions A-C unmined, but mark no credits yet.  Until
 	// these are marked as credits, PreviousPkScripts should not return
 	// them.
-	insertTx(recA, nil)
-	insertTx(recB, nil)
-	insertTx(recC, nil)
+	insertTx(ns, recA, nil)
+	insertTx(ns, recB, nil)
+	insertTx(ns, recC, nil)
 
 	b100 := makeBlockMeta(100)
 	b101 := makeBlockMeta(101)
@@ -653,7 +683,7 @@ func TestPreviousPkScripts(t *testing.T) {
 		{recC, &b100.Block, nil},
 	}
 	for _, tst := range tests {
-		runTest(&tst)
+		runTest(ns, &tst)
 	}
 	if t.Failed() {
 		t.Fatal("Failed after unmined tx inserts")
@@ -662,11 +692,11 @@ func TestPreviousPkScripts(t *testing.T) {
 	// Mark credits.  Tx C output 1 not marked as a credit: tx D will spend
 	// both later but when C is mined, output 1's script should not be
 	// returned.
-	addCredit(recA, nil, 0)
-	addCredit(recA, nil, 1)
-	addCredit(recB, nil, 0)
-	addCredit(recB, nil, 1)
-	addCredit(recC, nil, 0)
+	addCredit(ns, recA, nil, 0)
+	addCredit(ns, recA, nil, 1)
+	addCredit(ns, recB, nil, 0)
+	addCredit(ns, recB, nil, 1)
+	addCredit(ns, recC, nil, 0)
 	tests = []scriptTest{
 		{recA, nil, nil},
 		{recA, &b100.Block, nil},
@@ -676,23 +706,23 @@ func TestPreviousPkScripts(t *testing.T) {
 		{recC, &b100.Block, nil},
 	}
 	for _, tst := range tests {
-		runTest(&tst)
+		runTest(ns, &tst)
 	}
 	if t.Failed() {
 		t.Fatal("Failed after marking unmined credits")
 	}
 
 	// Mine tx A in block 100.  Test results should be identical.
-	insertTx(recA, &b100)
+	insertTx(ns, recA, &b100)
 	for _, tst := range tests {
-		runTest(&tst)
+		runTest(ns, &tst)
 	}
 	if t.Failed() {
 		t.Fatal("Failed after mining tx A")
 	}
 
 	// Mine tx B in block 101.
-	insertTx(recB, &b101)
+	insertTx(ns, recB, &b101)
 	tests = []scriptTest{
 		{recA, nil, nil},
 		{recA, &b100.Block, nil},
@@ -702,7 +732,7 @@ func TestPreviousPkScripts(t *testing.T) {
 		{recC, &b101.Block, nil},
 	}
 	for _, tst := range tests {
-		runTest(&tst)
+		runTest(ns, &tst)
 	}
 	if t.Failed() {
 		t.Fatal("Failed after mining tx B")
@@ -710,7 +740,7 @@ func TestPreviousPkScripts(t *testing.T) {
 
 	// Mine tx C in block 101 (same block as tx B) to test debits from the
 	// same block.
-	insertTx(recC, &b101)
+	insertTx(ns, recC, &b101)
 	tests = []scriptTest{
 		{recA, nil, nil},
 		{recA, &b100.Block, nil},
@@ -720,7 +750,7 @@ func TestPreviousPkScripts(t *testing.T) {
 		{recC, &b101.Block, [][]byte{scriptB0, scriptB1}},
 	}
 	for _, tst := range tests {
-		runTest(&tst)
+		runTest(ns, &tst)
 	}
 	if t.Failed() {
 		t.Fatal("Failed after mining tx C")
@@ -728,11 +758,11 @@ func TestPreviousPkScripts(t *testing.T) {
 
 	// Insert tx D, which spends C:0 and C:1.  However, only C:0 is marked
 	// as a credit, and only that output script should be returned.
-	insertTx(recD, nil)
+	insertTx(ns, recD, nil)
 	tests = append(tests, scriptTest{recD, nil, [][]byte{scriptC0}})
 	tests = append(tests, scriptTest{recD, &b101.Block, nil})
 	for _, tst := range tests {
-		runTest(&tst)
+		runTest(ns, &tst)
 	}
 	if t.Failed() {
 		t.Fatal("Failed after inserting tx D")
