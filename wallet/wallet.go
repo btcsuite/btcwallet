@@ -1514,22 +1514,58 @@ func (w *Wallet) AccountBalances(requiredConfs int32) ([]AccountBalanceResult, e
 
 		syncBlock := w.Manager.SyncedTo()
 
-		return w.Manager.ForEachAccount(addrmgrNs, func(account uint32) error {
-			accountName, err := w.Manager.AccountName(addrmgrNs, account)
+		// Fill out all account info except for the balances.
+		lastAcct, err := w.Manager.LastAccount(addrmgrNs)
+		if err != nil {
+			return err
+		}
+		results = make([]AccountBalanceResult, lastAcct+2)
+		for i := range results[:len(results)-1] {
+			accountName, err := w.Manager.AccountName(addrmgrNs, uint32(i))
 			if err != nil {
 				return err
 			}
-			balance, err := w.TxStore.Balance(txmgrNs, requiredConfs, syncBlock.Height)
-			if err != nil {
-				return err
+			results[i].AccountNumber = uint32(i)
+			results[i].AccountName = accountName
+		}
+		results[len(results)-1].AccountNumber = waddrmgr.ImportedAddrAccount
+		results[len(results)-1].AccountName = waddrmgr.ImportedAddrAccountName
+
+		// Fetch all unspent outputs, and iterate over them tallying each
+		// account's balance where the output script pays to an account address
+		// and the required number of confirmations is met.
+		unspentOutputs, err := w.TxStore.UnspentOutputs(txmgrNs)
+		if err != nil {
+			return err
+		}
+		for i := range unspentOutputs {
+			output := &unspentOutputs[i]
+			if !confirmed(requiredConfs, output.Height, syncBlock.Height) {
+				continue
 			}
-			results = append(results, AccountBalanceResult{
-				AccountNumber:  account,
-				AccountName:    accountName,
-				AccountBalance: balance,
-			})
-			return nil
-		})
+			if output.FromCoinBase && !confirmed(int32(w.ChainParams().CoinbaseMaturity),
+				output.Height, syncBlock.Height) {
+				continue
+			}
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(output.PkScript, w.chainParams)
+			if err != nil || len(addrs) == 0 {
+				continue
+			}
+			outputAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+			if err != nil {
+				continue
+			}
+			switch {
+			case outputAcct == waddrmgr.ImportedAddrAccount:
+				results[len(results)-1].AccountBalance += output.Amount
+			case outputAcct > lastAcct:
+				return errors.New("waddrmgr.Manager.AddrAccount returned account " +
+					"beyond recorded last account")
+			default:
+				results[outputAcct].AccountBalance += output.Amount
+			}
+		}
+		return nil
 	})
 	return results, err
 }
