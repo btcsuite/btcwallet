@@ -23,6 +23,7 @@ service WalletService {
 	rpc AccountNumber (AccountNumberRequest) returns (AccountNumberResponse);
 	rpc Accounts (AccountsRequest) returns (AccountsResponse);
 	rpc Balance (BalanceRequest) returns (BalanceResponse);
+	rpc ReceivedForAddress (ReceivedForAddressRequest) returns (ReceivedForAddressResponse);
 	rpc GetTransactions (GetTransactionsRequest) returns (GetTransactionsResponse);
 
 	// Notifications
@@ -153,6 +154,14 @@ message BalanceResponse {
 	int64 total = 1;
 	int64 spendable = 2;
 	int64 immature_reward = 3;
+}
+
+message ReceivedForAddressRequest {
+	string address = 1;
+	int32 required_confirmations = 2;
+}
+message ReceivedForAddressResponse {
+	float total = 1;
 }
 
 message GetTransactionsRequest {
