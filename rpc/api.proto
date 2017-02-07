@@ -161,7 +161,7 @@ message ReceivedForAddressRequest {
 	int32 required_confirmations = 2;
 }
 message ReceivedForAddressResponse {
-	float total = 1;
+	int64 total = 1;
 }
 
 message GetTransactionsRequest {

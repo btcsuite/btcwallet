@@ -308,13 +308,13 @@ func (s *walletServer) ReceivedForAddress(ctx context.Context, req *pb.ReceivedF
 	}
 
 	reqConfs := req.RequiredConfirmations
-	balance, err := s.wallet.TotalReceivedForAddr(address, reqConfs)
+	totalReceived, err := s.wallet.TotalReceivedForAddr(address, reqConfs)
 	if err != nil {
 		return nil, translateError(err)
 	}
 
 	resp := &pb.ReceivedForAddressResponse{
-		Total: float32(balance.ToUnit(btcutil.AmountBTC)),
+		Total: int64(totalReceived),
 	}
 	return resp, nil
 }
