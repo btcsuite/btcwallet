@@ -55,7 +55,7 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 			User:                 user,
 			Pass:                 pass,
 			Certificates:         certs,
-			DisableAutoReconnect: true,
+			DisableAutoReconnect: false,
 			DisableConnectOnNew:  true,
 			DisableTLS:           disableTLS,
 		},
