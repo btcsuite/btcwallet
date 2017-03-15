@@ -616,6 +616,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// previous and that checkpoints match.
 	receivedCheckpoint := false
 	var finalHash *chainhash.Hash
+	var finalHeight int32
 	for _, blockHeader := range msg.Headers {
 		blockHash := blockHeader.BlockHash()
 		finalHash = &blockHash
@@ -656,6 +657,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				return
 			}
 			node.height = prevNode.height + 1
+			finalHeight = node.height
 			err = b.server.putBlock(*blockHeader,
 				uint32(node.height))
 			if err != nil {
@@ -704,6 +706,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// When this header is a checkpoint, switch to fetching the blocks for
 	// all of the headers since the last checkpoint.
 	if receivedCheckpoint {
+		// TODO - aakselrod - fix this completely and start getting
+		// committed filter headers for the known block headers
 		// Since the first entry of the list is always the final block
 		// that is already in the database and is only used to ensure
 		// the next header links properly, it must be removed before
@@ -712,13 +716,13 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		log.Infof("Received %v block headers: Fetching blocks",
 			b.headerList.Len())
 		b.progressLogger.SetLastLogTime(time.Now())
+		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
 		//b.fetchHeaderBlocks()
-		return
+		//return
 	}
 
-	// This header is not a checkpoint, so request the next batch of
-	// headers starting from the latest known header and ending with the
-	// next checkpoint.
+	// Request the next batch of headers starting from the latest known
+	// header and ending with the next checkpoint.
 	locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 	nextHash := zeroHash
 	if b.nextCheckpoint != nil {
