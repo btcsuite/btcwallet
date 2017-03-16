@@ -28,6 +28,10 @@ const (
 	// maxRequestedBlocks is the maximum number of requested block
 	// hashes to store in memory.
 	maxRequestedBlocks = wire.MaxInvPerMsg
+
+	// maxTimeOffset is the maximum duration a block time is allowed to be
+	// ahead of the curent time. This is currently 2 hours.
+	maxTimeOffset = 2 * time.Hour
 )
 
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
@@ -340,11 +344,10 @@ func (b *blockManager) isSyncCandidate(sp *serverPeer) bool {
 
 // findNextHeaderCheckpoint returns the next checkpoint after the passed height.
 // It returns nil when there is not one either because the height is already
-// later than the final checkpoint or some other reason such as disabled
-// checkpoints.
+// later than the final checkpoint or there are none for the current network.
 func (b *blockManager) findNextHeaderCheckpoint(height int32) *chaincfg.Checkpoint {
-	// There is no next checkpoint if checkpoints are disabled or there are
-	// none for this current network.
+	// There is no next checkpoint if there are none for this current
+	// network.
 	checkpoints := b.server.chainParams.Checkpoints
 	if len(checkpoints) == 0 {
 		return nil
@@ -366,6 +369,31 @@ func (b *blockManager) findNextHeaderCheckpoint(height int32) *chaincfg.Checkpoi
 		nextCheckpoint = &checkpoints[i]
 	}
 	return nextCheckpoint
+}
+
+// findPreviousHeaderCheckpoint returns the last checkpoint before the passed
+// height. It returns a checkpoint matching the genesis block when the height
+// is earlier than the first checkpoint or there are no checkpoints for the
+// current network. This is used for resettng state when a malicious peer sends
+// us headers that don't lead up to a known checkpoint.
+func (b *blockManager) findPreviousHeaderCheckpoint(height int32) *chaincfg.Checkpoint {
+	// Start with the genesis block - earliest checkpoint to which our
+	// code will want to reset
+	prevCheckpoint := &chaincfg.Checkpoint{
+		Height: 0,
+		Hash:   b.server.chainParams.GenesisHash,
+	}
+
+	// Find the latest checkpoint lower than height or return genesis block
+	// if there are none.
+	checkpoints := b.server.chainParams.Checkpoints
+	for _, ckpt := range checkpoints {
+		if height <= ckpt.Height {
+			break
+		}
+		prevCheckpoint = &ckpt
+	}
+	return prevCheckpoint
 }
 
 // resetHeaderState sets the headers-first mode state to values appropriate for
@@ -612,6 +640,11 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		return
 	}
 
+	// For checking to make sure blocks aren't too far in the
+	// future as of the time we receive the headers message.
+	maxTimestamp := b.server.timeSource.AdjustedTime().
+		Add(maxTimeOffset)
+
 	// Process all of the received headers ensuring each one connects to the
 	// previous and that checkpoints match.
 	receivedCheckpoint := false
@@ -630,8 +663,10 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			return
 		}
 
-		// Ensure the header properly connects to the previous one and
-		// the proof of work is good, and add it to the list of headers.
+		// Ensure the header properly connects to the previous one,
+		// that the proof of work is good, and that the header's
+		// timestamp isn't too far in the future, and add it to the
+		// list of headers.
 		node := headerNode{header: blockHeader}
 		prevNode := prevNodeEl.Value.(*headerNode)
 		prevHash := prevNode.header.BlockHash()
@@ -653,6 +688,13 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				log.Warnf("Received header doesn't match "+
 					"required difficulty: %v -- "+
 					"disconnecting peer", err)
+				hmsg.peer.Disconnect()
+				return
+			}
+			// Ensure the block time is not too far in the future.
+			if blockHeader.Timestamp.After(maxTimestamp) {
+				log.Warnf("block timestamp of %v is too far in"+
+					" the future", blockHeader.Timestamp)
 				hmsg.peer.Disconnect()
 				return
 			}
@@ -696,6 +738,13 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					"disconnecting", node.height,
 					nodeHash, hmsg.peer.Addr(),
 					b.nextCheckpoint.Hash)
+				prevCheckpoint := b.findPreviousHeaderCheckpoint(node.height)
+				log.Infof("Rolling back to previous validated "+
+					"checkpoint at height %d/hash %s",
+					prevCheckpoint.Height,
+					prevCheckpoint.Hash)
+				b.server.putMaxBlockHeight(uint32(
+					prevCheckpoint.Height))
 				hmsg.peer.Disconnect()
 				return
 			}
@@ -884,20 +933,11 @@ func (b *blockManager) findPrevTestNetDifficulty() (uint32, error) {
 
 /*
 import (
-	"container/list"
 	"os"
 	"path/filepath"
 	"sort"
-	"sync"
-	"sync/atomic"
-	"time"
 
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/database"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 )
 
 // handleBlockMsg handles block messages from all peers.
