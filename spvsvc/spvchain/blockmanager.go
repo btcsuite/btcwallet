@@ -601,7 +601,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 
 	// If this is the sync peer and we're not current, get the headers
 	// for the announced blocks and update the last announced block.
-	if lastBlock != -1 && imsg.peer == b.syncPeer && !b.current() {
+	if lastBlock != -1 && imsg.peer == b.syncPeer /*&& !b.current()*/ {
 		// Make a locator starting from the latest known header we've
 		// processed.
 		locator := make(blockchain.BlockLocator, 0,
