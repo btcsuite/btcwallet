@@ -162,10 +162,10 @@ func TestSetup(t *testing.T) {
 
 	// Connect/sync/disconnect the other nodes to make them reorg to the h1
 	// chain.
-	err = csd([]*rpctest.Harness{h1, h2, h3})
+	/*err = csd([]*rpctest.Harness{h1, h2, h3})
 	if err != nil {
 		t.Fatalf("Couldn't sync h2 and h3 to h1: %v", err)
-	}
+	}*/
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
