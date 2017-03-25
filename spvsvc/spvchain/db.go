@@ -191,6 +191,29 @@ func putExtHeader(tx walletdb.Tx, blockHash chainhash.Hash,
 	return putHeader(tx, blockHash, extHeaderBucketName, filterTip)
 }
 
+// rollbackLastBlock rolls back the last known block and returns the BlockStamp
+// representing the new last known block.
+func rollbackLastBlock(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
+	bs, err := SyncedTo(tx)
+	if err != nil {
+		return nil, err
+	}
+	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
+	err = bucket.Delete(bs.Hash[:])
+	if err != nil {
+		return nil, err
+	}
+	err = bucket.Delete(uint32ToBytes(uint32(bs.Height)))
+	if err != nil {
+		return nil, err
+	}
+	err = putMaxBlockHeight(tx, uint32(bs.Height-1))
+	if err != nil {
+		return nil, err
+	}
+	return SyncedTo(tx)
+}
+
 // GetBlockByHash retrieves the block header, filter, and filter tip, based on
 // the provided block hash, from the database.
 func GetBlockByHash(tx walletdb.Tx, blockHash chainhash.Hash) (wire.BlockHeader,
