@@ -387,11 +387,11 @@ func (b *blockManager) findPreviousHeaderCheckpoint(height int32) *chaincfg.Chec
 	// Find the latest checkpoint lower than height or return genesis block
 	// if there are none.
 	checkpoints := b.server.chainParams.Checkpoints
-	for _, ckpt := range checkpoints {
-		if height <= ckpt.Height {
+	for i := 0; i < len(checkpoints); i++ {
+		if height <= checkpoints[i].Height {
 			break
 		}
-		prevCheckpoint = &ckpt
+		prevCheckpoint = &checkpoints[i]
 	}
 	return prevCheckpoint
 }
@@ -716,6 +716,55 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				b.startHeader = e
 			}
 		} else {
+			// The block doesn't connect to the last block we know.
+			// We will need to do some additional checks to process
+			// possible reorganizations or incorrect chain on either
+			// our or the peer's side.
+			// If we got these headers from a peer that's not our
+			// sync peer, they might not be aligned correctly or
+			// even on the right chain. Just ignore the rest of the
+			// message.
+			if hmsg.peer != b.syncPeer {
+				return
+			}
+			// Check if this block is known. If so, we continue to
+			// the next one.
+			_, _, err := b.server.GetBlockByHash(
+				blockHeader.BlockHash())
+			if err == nil {
+				continue
+			}
+			// Check if the previous block is known. If it is, this
+			// is probably a reorg based on the estimated latest
+			// block that matches between us and the sync peer as
+			// derived from the block locator we sent to request
+			// these headers. Otherwise, the headers don't connect
+			// to anything we know and we should disconnect the
+			// peer.
+			_, backHeight, err := b.server.GetBlockByHash(
+				blockHeader.PrevBlock)
+			if err != nil {
+				log.Errorf("Couldn't get block by hash from "+
+					"the database (%v) -- disconnecting "+
+					"peer %s", err, hmsg.peer.Addr())
+				hmsg.peer.Disconnect()
+				return
+			}
+			// We've found a branch we weren't aware of. If the
+			// branch is earlier than the latest synchronized
+			// checkpoint, it's invalid and we need to disconnect
+			// the reporting peer.
+			prevCheckpoint := b.findPreviousHeaderCheckpoint(
+				prevNode.height)
+			if backHeight < uint32(prevCheckpoint.Height) {
+				log.Errorf("Attempt at a reorg earlier (%v) than a "+
+					"checkpoint (%v) past which we've already "+
+					"synchronized -- disconnecting peer "+
+					"%s", backHeight, prevCheckpoint.Height, hmsg.peer.Addr())
+				hmsg.peer.Disconnect()
+				return
+			}
+			// TODO: Add real reorg handling here
 			log.Warnf("Received block header that does not "+
 				"properly connect to the chain from peer %s "+
 				"-- disconnecting", hmsg.peer.Addr())
@@ -743,7 +792,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					"checkpoint at height %d/hash %s",
 					prevCheckpoint.Height,
 					prevCheckpoint.Hash)
-				b.server.putMaxBlockHeight(uint32(
+				b.server.rollbackToHeight(uint32(
 					prevCheckpoint.Height))
 				hmsg.peer.Disconnect()
 				return
@@ -762,9 +811,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		// the next header links properly, it must be removed before
 		// fetching the blocks.
 		b.headerList.Remove(b.headerList.Front())
-		log.Infof("Received %v block headers: Fetching blocks",
-			b.headerList.Len())
-		b.progressLogger.SetLastLogTime(time.Now())
+		//log.Infof("Received %v block headers: Fetching blocks",
+		//	b.headerList.Len())
+		//b.progressLogger.SetLastLogTime(time.Now())
 		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
 		//b.fetchHeaderBlocks()
 		//return

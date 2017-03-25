@@ -278,8 +278,8 @@ func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 // used to examine the inventory being advertised by the remote peer and react
 // accordingly.  We pass the message down to blockmanager which will call
 // QueueMessage with any appropriate responses.
-func (sp *serverPeer) OnInv(_ *peer.Peer, msg *wire.MsgInv) {
-	log.Tracef("Got inv with %v items", len(msg.InvList))
+func (sp *serverPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
+	log.Tracef("Got inv with %d items from %s", len(msg.InvList), p.Addr())
 	newInv := wire.NewMsgInvSizeHint(uint(len(msg.InvList)))
 	for _, invVect := range msg.InvList {
 		if invVect.Type == wire.InvTypeTx {
@@ -307,8 +307,9 @@ func (sp *serverPeer) OnInv(_ *peer.Peer, msg *wire.MsgInv) {
 
 // OnHeaders is invoked when a peer receives a headers bitcoin
 // message.  The message is passed down to the block manager.
-func (sp *serverPeer) OnHeaders(_ *peer.Peer, msg *wire.MsgHeaders) {
-	log.Tracef("Got headers with %v items", len(msg.Headers))
+func (sp *serverPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
+	log.Tracef("Got headers with %d items from %s", len(msg.Headers),
+		p.Addr())
 	sp.server.blockManager.QueueHeaders(msg, sp)
 }
 
@@ -1370,4 +1371,39 @@ func (s *ChainService) putMaxBlockHeight(maxBlockHeight uint32) error {
 	return s.namespace.Update(func(dbTx walletdb.Tx) error {
 		return putMaxBlockHeight(dbTx, maxBlockHeight)
 	})
+}
+
+func (s *ChainService) rollbackLastBlock() (*waddrmgr.BlockStamp, error) {
+	var bs *waddrmgr.BlockStamp
+	var err error
+	err = s.namespace.Update(func(dbTx walletdb.Tx) error {
+		bs, err = rollbackLastBlock(dbTx)
+		return err
+	})
+	return bs, err
+}
+
+func (s *ChainService) rollbackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
+	var bs *waddrmgr.BlockStamp
+	var err error
+	err = s.namespace.Update(func(dbTx walletdb.Tx) error {
+		bs, err = SyncedTo(dbTx)
+		if err != nil {
+			return err
+		}
+		for uint32(bs.Height) > height {
+			bs, err = rollbackLastBlock(dbTx)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return bs, err
+}
+
+// IsCurrent lets the caller know whether the chain service's block manager
+// thinks its view of the network is current.
+func (s *ChainService) IsCurrent() bool {
+	return s.blockManager.IsCurrent()
 }
