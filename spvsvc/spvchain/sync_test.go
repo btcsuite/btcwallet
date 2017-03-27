@@ -152,20 +152,38 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %v", err)
 	}
 
-	// Generate 150 blocks on h1 to make sure it reorgs the other nodes.
+	// Generate 125 blocks on h1 to make sure it reorgs the other nodes.
 	// Ensure the ChainService instance stays caught up.
-	h1.Node.Generate(150)
+	h1.Node.Generate(125)
 	err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %v", err)
 	}
 
-	// Connect/sync/disconnect the other nodes to make them reorg to the h1
-	// chain.
-	/*err = csd([]*rpctest.Harness{h1, h2, h3})
+	// Connect/sync/disconnect h2 to make it reorg to the h1 chain.
+	err = csd([]*rpctest.Harness{h1, h2})
 	if err != nil {
-		t.Fatalf("Couldn't sync h2 and h3 to h1: %v", err)
-	}*/
+		t.Fatalf("Couldn't sync h2 to h1: %v", err)
+	}
+
+	// Generate 3 blocks on h1, one at a time, to make sure the
+	// ChainService instance stays caught up.
+	for i := 0; i < 3; i++ {
+		h1.Node.Generate(1)
+		err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
+		if err != nil {
+			t.Fatalf("Couldn't sync ChainService: %v", err)
+		}
+	}
+
+	// Generate 5 blocks on h2.
+	h2.Node.Generate(5)
+
+	// Wait for ChainService to sync to the newly-best chain on h12
+	err = waitForSync(t, svc, h2, time.Second, 30*time.Second)
+	if err != nil {
+		t.Fatalf("Couldn't sync ChainService: %v", err)
+	}
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
