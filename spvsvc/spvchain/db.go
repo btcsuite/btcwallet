@@ -292,6 +292,36 @@ func LatestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
 	return header, height, nil
 }
 
+// CheckConnectivity cycles through all of the block headers, from last to
+// first, and makes sure they all connect to each other.
+func CheckConnectivity(tx walletdb.Tx) error {
+	header, height, err := LatestBlock(tx)
+	if err != nil {
+		return fmt.Errorf("Couldn't retrieve latest block: %s", err)
+	}
+	for height > 0 {
+		newheader, newheight, err := GetBlockByHash(tx,
+			header.PrevBlock)
+		if err != nil {
+			return fmt.Errorf("Couldn't retrieve block %s: %s",
+				header.PrevBlock, err)
+		}
+		if newheader.BlockHash() != header.PrevBlock {
+			return fmt.Errorf("Block %s doesn't match block %s's "+
+				"PrevBlock (%s)", newheader.BlockHash(),
+				header.BlockHash(), header.PrevBlock)
+		}
+		if newheight != height-1 {
+			return fmt.Errorf("Block %s doesn't have correct "+
+				"height: want %d, got %d",
+				newheader.BlockHash(), height-1, newheight)
+		}
+		header = newheader
+		height = newheight
+	}
+	return nil
+}
+
 // BlockLocatorFromHash returns a block locator based on the provided hash.
 func BlockLocatorFromHash(tx walletdb.Tx, hash chainhash.Hash) blockchain.BlockLocator {
 	locator := make(blockchain.BlockLocator, 0, wire.MaxBlockLocatorsPerMsg)
