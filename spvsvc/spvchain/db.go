@@ -3,6 +3,7 @@ package spvchain
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -62,8 +63,8 @@ func fetchDBVersion(tx walletdb.Tx) (uint32, error) {
 	bucket := tx.RootBucket().Bucket(spvBucketName)
 	verBytes := bucket.Get(dbVersionName)
 	if verBytes == nil {
-		str := "required version number not stored in database"
-		return 0, log.Error(str)
+		return 0, fmt.Errorf("required version number not stored in " +
+			"database")
 	}
 	version := binary.LittleEndian.Uint32(verBytes)
 	return version, nil
@@ -74,12 +75,7 @@ func putDBVersion(tx walletdb.Tx, version uint32) error {
 	bucket := tx.RootBucket().Bucket(spvBucketName)
 
 	verBytes := uint32ToBytes(version)
-	err := bucket.Put(dbVersionName, verBytes)
-	if err != nil {
-		str := "failed to store version: %v"
-		return log.Errorf(str, err)
-	}
-	return nil
+	return bucket.Put(dbVersionName, verBytes)
 }
 
 // putMaxBlockHeight stores the max block height to the database.
@@ -89,8 +85,7 @@ func putMaxBlockHeight(tx walletdb.Tx, maxBlockHeight uint32) error {
 	maxBlockHeightBytes := uint32ToBytes(maxBlockHeight)
 	err := bucket.Put(maxBlockHeightName, maxBlockHeightBytes)
 	if err != nil {
-		str := "failed to store max block height: %v"
-		return log.Errorf(str, err)
+		return fmt.Errorf("failed to store max block height: %s", err)
 	}
 	return nil
 }
@@ -113,14 +108,12 @@ func putBlock(tx walletdb.Tx, header wire.BlockHeader, height uint32) error {
 
 	err = bucket.Put(blockHash[:], buf.Bytes())
 	if err != nil {
-		str := "failed to store SPV block info: %v"
-		return log.Errorf(str, err)
+		return fmt.Errorf("failed to store SPV block info: %s", err)
 	}
 
 	err = bucket.Put(uint32ToBytes(height), blockHash[:])
 	if err != nil {
-		str := "failed to store block height info: %v"
-		return log.Errorf(str, err)
+		return fmt.Errorf("failed to store block height info: %s", err)
 	}
 
 	return nil
@@ -140,8 +133,7 @@ func putFilter(tx walletdb.Tx, blockHash chainhash.Hash, bucketName []byte,
 
 	err = bucket.Put(blockHash[:], buf.Bytes())
 	if err != nil {
-		str := "failed to store filter: %v"
-		return log.Errorf(str, err)
+		return fmt.Errorf("failed to store filter: %s", err)
 	}
 
 	return nil
@@ -170,8 +162,7 @@ func putHeader(tx walletdb.Tx, blockHash chainhash.Hash, bucketName []byte,
 
 	err := bucket.Put(blockHash[:], filterTip[:])
 	if err != nil {
-		str := "failed to store filter header: %v"
-		return log.Errorf(str, err)
+		return fmt.Errorf("failed to store filter header: %s", err)
 	}
 
 	return nil
@@ -222,19 +213,22 @@ func GetBlockByHash(tx walletdb.Tx, blockHash chainhash.Hash) (wire.BlockHeader,
 	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
 	blockBytes := bucket.Get(blockHash[:])
 	if len(blockBytes) == 0 {
-		str := "failed to retrieve block info for hash: %s"
-		return wire.BlockHeader{}, 0, log.Errorf(str, blockHash)
+		return wire.BlockHeader{}, 0,
+			fmt.Errorf("failed to retrieve block info for hash: %s",
+				blockHash)
 	}
 
 	buf := bytes.NewReader(blockBytes[:wire.MaxBlockHeaderPayload])
 	var header wire.BlockHeader
 	err := header.Deserialize(buf)
 	if err != nil {
-		str := "failed to deserialize block header for hash: %s"
-		return wire.BlockHeader{}, 0, log.Errorf(str, blockHash)
+		return wire.BlockHeader{}, 0,
+			fmt.Errorf("failed to deserialize block header for "+
+				"hash: %s", blockHash)
 	}
 
-	height := binary.LittleEndian.Uint32(blockBytes[wire.MaxBlockHeaderPayload : wire.MaxBlockHeaderPayload+4])
+	height := binary.LittleEndian.Uint32(
+		blockBytes[wire.MaxBlockHeaderPayload : wire.MaxBlockHeaderPayload+4])
 
 	return header, height, nil
 }
@@ -246,8 +240,7 @@ func GetBlockHashByHeight(tx walletdb.Tx, height uint32) (chainhash.Hash,
 	var hash chainhash.Hash
 	hashBytes := bucket.Get(uint32ToBytes(height))
 	if hashBytes == nil {
-		str := "no block hash for height %v"
-		return hash, log.Errorf(str, height)
+		return hash, fmt.Errorf("no block hash for height %d", height)
 	}
 	hash.SetBytes(hashBytes)
 	return hash, nil
@@ -283,8 +276,8 @@ func LatestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
 
 	maxBlockHeightBytes := bucket.Get(maxBlockHeightName)
 	if maxBlockHeightBytes == nil {
-		str := "no max block height stored"
-		return wire.BlockHeader{}, 0, log.Error(str)
+		return wire.BlockHeader{}, 0,
+			fmt.Errorf("no max block height stored")
 	}
 
 	maxBlockHeight := binary.LittleEndian.Uint32(maxBlockHeightBytes)
@@ -293,8 +286,8 @@ func LatestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
 		return wire.BlockHeader{}, 0, err
 	}
 	if height != maxBlockHeight {
-		str := "max block height inconsistent"
-		return wire.BlockHeader{}, 0, log.Error(str)
+		return wire.BlockHeader{}, 0,
+			fmt.Errorf("max block height inconsistent")
 	}
 	return header, height, nil
 }
@@ -341,47 +334,47 @@ func createSPVNS(namespace walletdb.Namespace, params *chaincfg.Params) error {
 		rootBucket := tx.RootBucket()
 		spvBucket, err := rootBucket.CreateBucketIfNotExists(spvBucketName)
 		if err != nil {
-			str := "failed to create main bucket: %v"
-			return log.Errorf(str, err)
+			return fmt.Errorf("failed to create main bucket: %s",
+				err)
 		}
 
 		_, err = spvBucket.CreateBucketIfNotExists(blockHeaderBucketName)
 		if err != nil {
-			str := "failed to create block header bucket: %v"
-			return log.Errorf(str, err)
+			return fmt.Errorf("failed to create block header "+
+				"bucket: %s", err)
 		}
 
 		_, err = spvBucket.CreateBucketIfNotExists(basicFilterBucketName)
 		if err != nil {
-			str := "failed to create basic filter bucket: %v"
-			return log.Errorf(str, err)
+			return fmt.Errorf("failed to create basic filter "+
+				"bucket: %s", err)
 		}
 
 		_, err = spvBucket.CreateBucketIfNotExists(basicHeaderBucketName)
 		if err != nil {
-			str := "failed to create basic header bucket: %v"
-			return log.Errorf(str, err)
+			return fmt.Errorf("failed to create basic header "+
+				"bucket: %s", err)
 		}
 
 		_, err = spvBucket.CreateBucketIfNotExists(extFilterBucketName)
 		if err != nil {
-			str := "failed to create extended filter bucket: %v"
-			return log.Errorf(str, err)
+			return fmt.Errorf("failed to create extended filter "+
+				"bucket: %s", err)
 		}
 
 		_, err = spvBucket.CreateBucketIfNotExists(extHeaderBucketName)
 		if err != nil {
-			str := "failed to create extended header bucket: %v"
-			return log.Errorf(str, err)
+			return fmt.Errorf("failed to create extended header "+
+				"bucket: %s", err)
 		}
 
 		createDate := spvBucket.Get(dbCreateDateName)
 		if createDate != nil {
-			log.Infof("Wallet SPV namespace already created.")
+			log.Info("Wallet SPV namespace already created.")
 			return nil
 		}
 
-		log.Infof("Creating wallet SPV namespace.")
+		log.Info("Creating wallet SPV namespace.")
 
 		basicFilter, err := buildBasicFilter(params.GenesisBlock)
 		if err != nil {
@@ -437,15 +430,14 @@ func createSPVNS(namespace walletdb.Namespace, params *chaincfg.Params) error {
 		err = spvBucket.Put(dbCreateDateName,
 			uint64ToBytes(uint64(time.Now().Unix())))
 		if err != nil {
-			str := "failed to store database creation time: %v"
-			return log.Errorf(str, err)
+			return fmt.Errorf("failed to store database creation "+
+				"time: %s", err)
 		}
 
 		return nil
 	})
 	if err != nil {
-		str := "failed to update database: %v"
-		return log.Errorf(str, err)
+		return fmt.Errorf("failed to update database: %s", err)
 	}
 
 	return nil

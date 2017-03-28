@@ -250,7 +250,7 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 // OnBlock is invoked when a peer receives a block bitcoin message.  It
 // blocks until the bitcoin block has been fully processed.
 func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
-	log.Tracef("got block %v", msg.BlockHash())
+	log.Tracef("got block %s", msg.BlockHash())
 	// Convert the raw MsgBlock to a btcutil.Block which provides some
 	// convenience methods and things such as hash caching.
 	block := btcutil.NewBlockFromBlockAndBytes(msg, buf)
@@ -283,7 +283,7 @@ func (sp *serverPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 	newInv := wire.NewMsgInvSizeHint(uint(len(msg.InvList)))
 	for _, invVect := range msg.InvList {
 		if invVect.Type == wire.InvTypeTx {
-			log.Tracef("Ignoring tx %v in inv from %v -- "+
+			log.Tracef("Ignoring tx %s in inv from %v -- "+
 				"SPV mode", invVect.Hash, sp)
 			if sp.ProtocolVersion() >= wire.BIP0037Version {
 				log.Infof("Peer %v is announcing "+
@@ -295,7 +295,7 @@ func (sp *serverPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 		}
 		err := newInv.AddInvVect(invVect)
 		if err != nil {
-			log.Errorf("Failed to add inventory vector: %v", err)
+			log.Errorf("Failed to add inventory vector: %s", err)
 			break
 		}
 	}
@@ -882,7 +882,7 @@ func (s *ChainService) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 	// Disconnect banned peers.
 	host, _, err := net.SplitHostPort(sp.Addr())
 	if err != nil {
-		log.Debugf("can't split hostport %v", err)
+		log.Debugf("can't split host/port: %s", err)
 		sp.Disconnect()
 		return false
 	}
@@ -962,7 +962,7 @@ func (s *ChainService) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 func (s *ChainService) handleBanPeerMsg(state *peerState, sp *serverPeer) {
 	host, _, err := net.SplitHostPort(sp.Addr())
 	if err != nil {
-		log.Debugf("can't split ban peer %s %v", sp.Addr(), err)
+		log.Debugf("can't split ban peer %s: %s", sp.Addr(), err)
 		return
 	}
 	log.Infof("Banned peer %s for %v", host, BanDuration)
@@ -1096,7 +1096,7 @@ func (s *ChainService) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) 
 	sp := newServerPeer(s, c.Permanent)
 	p, err := peer.NewOutboundPeer(newPeerConfig(sp), c.Addr.String())
 	if err != nil {
-		log.Debugf("Cannot create outbound peer %s: %v", c.Addr, err)
+		log.Debugf("Cannot create outbound peer %s: %s", c.Addr, err)
 		s.connManager.Disconnect(c.ID())
 	}
 	sp.Peer = p
