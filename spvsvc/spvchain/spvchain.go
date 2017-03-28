@@ -212,6 +212,23 @@ func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 	return nil
 }
 
+// pushSendHeadersMsg sends a sendheaders message to the connected peer.
+func (sp *serverPeer) pushSendHeadersMsg() error {
+	if sp.VersionKnown() {
+		if sp.ProtocolVersion() > wire.SendHeadersVersion {
+			sp.QueueMessage(wire.NewMsgSendHeaders(), nil)
+		}
+	}
+	return nil
+}
+
+// OnVerAck is invoked when a peer receives a verack bitcoin message and is used
+// to send the "sendheaders" command to peers that are of a sufficienty new
+// protocol version.
+func (sp *serverPeer) OnVerAck(_ *peer.Peer, msg *wire.MsgVerAck) {
+	sp.pushSendHeadersMsg()
+}
+
 // OnVersion is invoked when a peer receives a version bitcoin message
 // and is used to negotiate the protocol version details as well as kick start
 // the communications.
@@ -1057,7 +1074,8 @@ func (s *ChainService) AnnounceNewTransactions( /*newTxs []*mempool.TxDesc*/ ) {
 func newPeerConfig(sp *serverPeer) *peer.Config {
 	return &peer.Config{
 		Listeners: peer.MessageListeners{
-			OnVersion:   sp.OnVersion,
+			OnVersion: sp.OnVersion,
+			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
 			OnBlock:     sp.OnBlock,
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
