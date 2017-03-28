@@ -2,6 +2,7 @@ package spvchain
 
 import (
 	"container/list"
+	"fmt"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -127,6 +128,7 @@ type blockManager struct {
 	quit            chan struct{}
 
 	headerList     *list.List
+	reorgList      *list.List
 	startHeader    *list.Element
 	nextCheckpoint *chaincfg.Checkpoint
 
@@ -148,6 +150,7 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		progressLogger:      newBlockProgressLogger("Processed", log),
 		msgChan:             make(chan interface{}, MaxPeers*3),
 		headerList:          list.New(),
+		reorgList:           list.New(),
 		quit:                make(chan struct{}),
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
@@ -258,8 +261,7 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *serverPeer) {
 	}
 
 	// Attempt to find a new peer to sync from if the quitting peer is the
-	// sync peer.  Also, reset the headers-first state if in headers-first
-	// mode so
+	// sync peer.  Also, reset the header state.
 	if b.syncPeer != nil && b.syncPeer == sp {
 		b.syncPeer = nil
 		header, height, err := b.server.LatestBlock()
@@ -423,7 +425,7 @@ func (b *blockManager) startSync(peers *list.List) {
 	best, err := b.server.BestSnapshot()
 	if err != nil {
 		log.Errorf("Failed to get hash and height for the "+
-			"latest block: %v", err)
+			"latest block: %s", err)
 		return
 	}
 	var bestPeer *serverPeer
@@ -460,11 +462,11 @@ func (b *blockManager) startSync(peers *list.List) {
 		locator, err := b.server.LatestBlockLocator()
 		if err != nil {
 			log.Errorf("Failed to get block locator for the "+
-				"latest block: %v", err)
+				"latest block: %s", err)
 			return
 		}
 
-		log.Infof("Syncing to block height %d from peer %v",
+		log.Infof("Syncing to block height %d from peer %s",
 			bestPeer.LastBlock(), bestPeer.Addr())
 
 		// When the current height is less than a known checkpoint we
@@ -599,9 +601,9 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 		}
 	}
 
-	// If this is the sync peer and we're not current, get the headers
+	// If this is the sync peer or we're current, get the headers
 	// for the announced blocks and update the last announced block.
-	if lastBlock != -1 && imsg.peer == b.syncPeer /*&& !b.current()*/ {
+	if lastBlock != -1 && (imsg.peer == b.syncPeer || b.current()) {
 		// Make a locator starting from the latest known header we've
 		// processed.
 		locator := make(blockchain.BlockLocator, 0,
@@ -614,7 +616,7 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 			locator = append(locator, knownLocator...)
 		}
 		// Get headers based on locator.
-		b.syncPeer.PushGetHeadersMsg(locator, &invVects[lastBlock].Hash)
+		imsg.peer.PushGetHeadersMsg(locator, &invVects[lastBlock].Hash)
 	}
 }
 
@@ -650,7 +652,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	receivedCheckpoint := false
 	var finalHash *chainhash.Hash
 	var finalHeight int32
-	for _, blockHeader := range msg.Headers {
+	for i, blockHeader := range msg.Headers {
 		blockHash := blockHeader.BlockHash()
 		finalHash = &blockHash
 
@@ -671,30 +673,11 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		prevNode := prevNodeEl.Value.(*headerNode)
 		prevHash := prevNode.header.BlockHash()
 		if prevHash.IsEqual(&blockHeader.PrevBlock) {
-			diff, err := b.calcNextRequiredDifficulty(
-				blockHeader.Timestamp)
+			err := b.checkHeaderSanity(blockHeader, maxTimestamp,
+				false)
 			if err != nil {
-				log.Warnf("Unable to calculate next difficulty"+
-					": %v -- disconnecting peer", err)
-				hmsg.peer.Disconnect()
-				return
-			}
-			stubBlock := btcutil.NewBlock(&wire.MsgBlock{
-				Header: *blockHeader,
-			})
-			err = blockchain.CheckProofOfWork(stubBlock,
-				blockchain.CompactToBig(diff))
-			if err != nil {
-				log.Warnf("Received header doesn't match "+
-					"required difficulty: %v -- "+
-					"disconnecting peer", err)
-				hmsg.peer.Disconnect()
-				return
-			}
-			// Ensure the block time is not too far in the future.
-			if blockHeader.Timestamp.After(maxTimestamp) {
-				log.Warnf("block timestamp of %v is too far in"+
-					" the future", blockHeader.Timestamp)
+				log.Warnf("Header doesn't pass sanity check: "+
+					"%s -- disconnecting peer", err)
 				hmsg.peer.Disconnect()
 				return
 			}
@@ -704,13 +687,16 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 				uint32(node.height))
 			if err != nil {
 				log.Criticalf("Couldn't write block to "+
-					"database: %v", err)
+					"database: %s", err)
+				// Should we panic here?
 			}
 			err = b.server.putMaxBlockHeight(uint32(node.height))
 			if err != nil {
 				log.Criticalf("Couldn't write max block height"+
-					" to database: %v", err)
+					" to database: %s", err)
+				// Should we panic here?
 			}
+			hmsg.peer.UpdateLastBlockHeight(node.height)
 			e := b.headerList.PushBack(&node)
 			if b.startHeader == nil {
 				b.startHeader = e
@@ -723,30 +709,33 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// If we got these headers from a peer that's not our
 			// sync peer, they might not be aligned correctly or
 			// even on the right chain. Just ignore the rest of the
-			// message.
-			if hmsg.peer != b.syncPeer {
+			// message. However, if we're current, this might be a
+			// reorg, in which case we'll either change our sync
+			// peer or disconnect the peer that sent us these
+			// bad headers.
+			if hmsg.peer != b.syncPeer && !b.current() {
 				return
 			}
 			// Check if this block is known. If so, we continue to
 			// the next one.
-			_, _, err := b.server.GetBlockByHash(
-				blockHeader.BlockHash())
+			_, _, err := b.server.GetBlockByHash(blockHash)
 			if err == nil {
 				continue
 			}
 			// Check if the previous block is known. If it is, this
 			// is probably a reorg based on the estimated latest
-			// block that matches between us and the sync peer as
+			// block that matches between us and the peer as
 			// derived from the block locator we sent to request
 			// these headers. Otherwise, the headers don't connect
 			// to anything we know and we should disconnect the
 			// peer.
-			_, backHeight, err := b.server.GetBlockByHash(
+			backHead, backHeight, err := b.server.GetBlockByHash(
 				blockHeader.PrevBlock)
 			if err != nil {
-				log.Errorf("Couldn't get block by hash from "+
-					"the database (%v) -- disconnecting "+
-					"peer %s", err, hmsg.peer.Addr())
+				log.Warnf("Received block header that does not"+
+					" properly connect to the chain from"+
+					" peer %s (%s) -- disconnecting",
+					hmsg.peer.Addr(), err)
 				hmsg.peer.Disconnect()
 				return
 			}
@@ -757,19 +746,90 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			prevCheckpoint := b.findPreviousHeaderCheckpoint(
 				prevNode.height)
 			if backHeight < uint32(prevCheckpoint.Height) {
-				log.Errorf("Attempt at a reorg earlier (%v) than a "+
-					"checkpoint (%v) past which we've already "+
+				log.Errorf("Attempt at a reorg earlier than a "+
+					"checkpoint past which we've already "+
 					"synchronized -- disconnecting peer "+
-					"%s", backHeight, prevCheckpoint.Height, hmsg.peer.Addr())
+					"%s", hmsg.peer.Addr())
 				hmsg.peer.Disconnect()
 				return
 			}
-			// TODO: Add real reorg handling here
-			log.Warnf("Received block header that does not "+
-				"properly connect to the chain from peer %s "+
-				"-- disconnecting", hmsg.peer.Addr())
-			hmsg.peer.Disconnect()
-			return
+			// Check the sanity of the new branch. If any of the
+			// blocks don't pass sanity checks, disconnect the peer.
+			// We also keep track of the work represented by these
+			// headers so we can compare it to the work in the known
+			// good chain.
+			b.reorgList.Init()
+			b.reorgList.PushBack(&headerNode{
+				header: &backHead,
+				height: int32(backHeight),
+			})
+			totalWork := big.NewInt(0)
+			for _, reorgHeader := range msg.Headers[i:] {
+				err = b.checkHeaderSanity(reorgHeader,
+					maxTimestamp, true)
+				if err != nil {
+					log.Warnf("Header doesn't pass sanity"+
+						" check: %s -- disconnecting "+
+						"peer", err)
+					hmsg.peer.Disconnect()
+					return
+				}
+				totalWork.Add(totalWork,
+					blockchain.CalcWork(reorgHeader.Bits))
+			}
+			log.Tracef("Sane reorg attempted. Total work from "+
+				"reorg chain: %v", totalWork)
+			// All the headers pass sanity checks. Now we calculate
+			// the total work for the known chain.
+			knownWork := big.NewInt(0)
+			// This should NEVER be nil because the most recent
+			// block is always pushed back by resetHeaderState
+			knownEl := b.headerList.Back()
+			var knownHead wire.BlockHeader
+			for j := uint32(prevNode.height); j > backHeight; j-- {
+				if knownEl != nil {
+					knownHead = *knownEl.Value.(*headerNode).header
+					knownEl = knownEl.Prev()
+				} else {
+					knownHead, _, err = b.server.GetBlockByHash(
+						knownHead.PrevBlock)
+					if err != nil {
+						log.Criticalf("Can't get block"+
+							"header for hash %s: "+
+							"%v",
+							knownHead.PrevBlock,
+							err)
+						// Should we panic here?
+					}
+				}
+				knownWork.Add(knownWork,
+					blockchain.CalcWork(knownHead.Bits))
+			}
+			log.Tracef("Total work from known chain: %v", knownWork)
+			// Compare the two work totals and reject the new chain
+			// if it doesn't have more work than the previously
+			// known chain.
+			if knownWork.Cmp(totalWork) >= 0 {
+				log.Warnf("Reorg attempt that does not have "+
+					"more work than known chain from peer "+
+					"%s -- disconnecting", hmsg.peer.Addr())
+				hmsg.peer.Disconnect()
+				return
+			}
+			// At this point, we have a valid reorg, so we roll
+			// back the existing chain and add the new block header.
+			// We also change the sync peer. Then we can continue
+			// with the rest of the headers in the message as if
+			// nothing has happened.
+			b.syncPeer = hmsg.peer
+			b.server.rollbackToHeight(backHeight)
+			b.server.putBlock(*blockHeader, backHeight+1)
+			b.server.putMaxBlockHeight(backHeight + 1)
+			b.resetHeaderState(&backHead, int32(backHeight))
+			b.headerList.PushBack(&headerNode{
+				header: blockHeader,
+				height: int32(backHeight + 1),
+			})
 		}
 
 		// Verify the header at the next checkpoint height matches.
@@ -792,8 +852,13 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					"checkpoint at height %d/hash %s",
 					prevCheckpoint.Height,
 					prevCheckpoint.Hash)
-				b.server.rollbackToHeight(uint32(
+				_, err := b.server.rollbackToHeight(uint32(
 					prevCheckpoint.Height))
+				if err != nil {
+					log.Criticalf("Rollback failed: %s",
+						err)
+					// Should we panic here?
+				}
 				hmsg.peer.Disconnect()
 				return
 			}
@@ -829,16 +894,46 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	err := hmsg.peer.PushGetHeadersMsg(locator, &nextHash)
 	if err != nil {
 		log.Warnf("Failed to send getheaders message to "+
-			"peer %s: %v", hmsg.peer.Addr(), err)
+			"peer %s: %s", hmsg.peer.Addr(), err)
 		return
 	}
 }
 
+// checkHeaderSanity checks the PoW, and timestamp of a block header.
+func (b *blockManager) checkHeaderSanity(blockHeader *wire.BlockHeader,
+	maxTimestamp time.Time, reorgAttempt bool) error {
+	diff, err := b.calcNextRequiredDifficulty(
+		blockHeader.Timestamp, reorgAttempt)
+	if err != nil {
+		return err
+	}
+	stubBlock := btcutil.NewBlock(&wire.MsgBlock{
+		Header: *blockHeader,
+	})
+	err = blockchain.CheckProofOfWork(stubBlock,
+		blockchain.CompactToBig(diff))
+	if err != nil {
+		return err
+	}
+	// Ensure the block time is not too far in the future.
+	if blockHeader.Timestamp.After(maxTimestamp) {
+		return fmt.Errorf("block timestamp of %v is too far in the "+
+			"future", blockHeader.Timestamp)
+	}
+	return nil
+}
+
 // calcNextRequiredDifficulty calculates the required difficulty for the block
 // after the passed previous block node based on the difficulty retarget rules.
-func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time) (uint32, error) {
+func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
+	reorgAttempt bool) (uint32, error) {
 
-	lastNodeEl := b.headerList.Back()
+	hList := b.headerList
+	if reorgAttempt {
+		hList = b.reorgList
+	}
+
+	lastNodeEl := hList.Back()
 
 	// Genesis block.
 	if lastNodeEl == nil {
@@ -868,7 +963,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time) (uint3
 			// The block was mined within the desired timeframe, so
 			// return the difficulty for the last block which did
 			// not have the special minimum difficulty rule applied.
-			prevBits, err := b.findPrevTestNetDifficulty()
+			prevBits, err := b.findPrevTestNetDifficulty(hList)
 			if err != nil {
 				return 0, err
 			}
@@ -934,8 +1029,8 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time) (uint3
 
 // findPrevTestNetDifficulty returns the difficulty of the previous block which
 // did not have the special testnet minimum difficulty rule applied.
-func (b *blockManager) findPrevTestNetDifficulty() (uint32, error) {
-	startNodeEl := b.headerList.Back()
+func (b *blockManager) findPrevTestNetDifficulty(hList *list.List) (uint32, error) {
+	startNodeEl := hList.Back()
 
 	// Genesis block.
 	if startNodeEl == nil {
@@ -964,7 +1059,7 @@ func (b *blockManager) findPrevTestNetDifficulty() (uint32, error) {
 		} else {
 			node, _, err := b.server.GetBlockByHeight(uint32(iterHeight))
 			if err != nil {
-				log.Errorf("GetBlockByHeight: %v", err)
+				log.Errorf("GetBlockByHeight: %s", err)
 				return 0, err
 			}
 			iterNode = &node
