@@ -104,6 +104,15 @@ func (ps *peerState) forAllPeers(closure func(sp *serverPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
+// cfhRequest records which cfheaders we've requested, and the order in which
+// we've requested them. Since there's no way to associate the cfheaders to the
+// actual block hashes based on the cfheaders message to keep it compact, we
+// track it this way.
+type cfhRequest struct {
+	extended bool
+	stopHash chainhash.Hash
+}
+
 // serverPeer extends the peer to maintain state shared by the server and
 // the blockmanager.
 type serverPeer struct {
@@ -112,17 +121,18 @@ type serverPeer struct {
 
 	*peer.Peer
 
-	connReq          *connmgr.ConnReq
-	server           *ChainService
-	persistent       bool
-	continueHash     *chainhash.Hash
-	relayMtx         sync.Mutex
-	requestQueue     []*wire.InvVect
-	requestedFilters map[chainhash.Hash]bool
-	requestedBlocks  map[chainhash.Hash]struct{}
-	knownAddresses   map[string]struct{}
-	banScore         connmgr.DynamicBanScore
-	quit             chan struct{}
+	connReq            *connmgr.ConnReq
+	server             *ChainService
+	persistent         bool
+	continueHash       *chainhash.Hash
+	relayMtx           sync.Mutex
+	requestQueue       []*wire.InvVect
+	requestedCFilters  map[chainhash.Hash]bool
+	requestedCFHeaders map[cfhRequest]int
+	requestedBlocks    map[chainhash.Hash]struct{}
+	knownAddresses     map[string]struct{}
+	banScore           connmgr.DynamicBanScore
+	quit               chan struct{}
 	// The following chans are used to sync blockmanager and server.
 	blockProcessed chan struct{}
 }
@@ -131,13 +141,14 @@ type serverPeer struct {
 // the caller.
 func newServerPeer(s *ChainService, isPersistent bool) *serverPeer {
 	return &serverPeer{
-		server:           s,
-		persistent:       isPersistent,
-		requestedFilters: make(map[chainhash.Hash]bool),
-		requestedBlocks:  make(map[chainhash.Hash]struct{}),
-		knownAddresses:   make(map[string]struct{}),
-		quit:             make(chan struct{}),
-		blockProcessed:   make(chan struct{}, 1),
+		server:             s,
+		persistent:         isPersistent,
+		requestedCFilters:  make(map[chainhash.Hash]bool),
+		requestedBlocks:    make(map[chainhash.Hash]struct{}),
+		requestedCFHeaders: make(map[cfhRequest]int),
+		knownAddresses:     make(map[string]struct{}),
+		quit:               make(chan struct{}),
+		blockProcessed:     make(chan struct{}, 1),
 	}
 }
 
@@ -199,7 +210,7 @@ func (sp *serverPeer) addBanScore(persistent, transient uint32, reason string) {
 // pushGetCFHeadersMsg sends a getcfheaders message for the provided block
 // locator and stop hash to the connected peer.
 func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
-	stopHash *chainhash.Hash) error {
+	stopHash *chainhash.Hash, ext bool) error {
 	msg := wire.NewMsgGetCFHeaders()
 	msg.HashStop = *stopHash
 	for _, hash := range locator {
@@ -208,6 +219,7 @@ func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 			return err
 		}
 	}
+	msg.Extended = ext
 	sp.QueueMessage(msg, nil)
 	return nil
 }
@@ -424,14 +436,17 @@ func (sp *serverPeer) OnReject(_ *peer.Peer, msg *wire.MsgReject) {
 
 // OnCFHeaders is invoked when a peer receives a cfheaders bitcoin message and
 // is used to notify the server about a list of committed filter headers.
-func (sp *serverPeer) OnCFHeaders(_ *peer.Peer, msg *wire.MsgCFHeaders) {
-	log.Trace("Got cfheaders message!")
+func (sp *serverPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
+	log.Tracef("Got cfheaders message with %d items from %s",
+		len(msg.HeaderHashes), p.Addr())
+	sp.server.blockManager.QueueCFHeaders(msg, sp)
 }
 
 // OnCFilter is invoked when a peer receives a cfilter bitcoin message and is
 // used to notify the server about a committed filter.
-func (sp *serverPeer) OnCFilter(_ *peer.Peer, msg *wire.MsgCFilter) {
-
+func (sp *serverPeer) OnCFilter(p *peer.Peer, msg *wire.MsgCFilter) {
+	log.Tracef("Got cfilter message from %s", p.Addr())
+	sp.server.blockManager.QueueCFilter(msg, sp)
 }
 
 // OnAddr is invoked when a peer receives an addr bitcoin message and is
@@ -534,7 +549,7 @@ func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
 	var best *waddrmgr.BlockStamp
 	var err error
 	err = s.namespace.View(func(tx walletdb.Tx) error {
-		best, err = SyncedTo(tx)
+		best, err = syncedTo(tx)
 		return err
 	})
 	if err != nil {
@@ -549,11 +564,11 @@ func (s *ChainService) LatestBlockLocator() (blockchain.BlockLocator, error) {
 	var locator blockchain.BlockLocator
 	var err error
 	err = s.namespace.View(func(tx walletdb.Tx) error {
-		best, err := SyncedTo(tx)
+		best, err := syncedTo(tx)
 		if err != nil {
 			return err
 		}
-		locator = BlockLocatorFromHash(tx, best.Hash)
+		locator = blockLocatorFromHash(tx, best.Hash)
 		return nil
 	})
 	if err != nil {
@@ -1236,6 +1251,16 @@ func (s *ChainService) ConnectNode(addr string, permanent bool) error {
 	return <-replyChan
 }
 
+// ForAllPeers runs a closure over all peers (outbound and persistent) to which
+// the ChainService is connected. Nothing is returned because the peerState's
+// ForAllPeers method doesn't return anything as the closure passed to it
+// doesn't return anything.
+func (s *ChainService) ForAllPeers(closure func(sp *serverPeer)) {
+	s.query <- forAllPeersMsg{
+		closure: closure,
+	}
+}
+
 // UpdatePeerHeights updates the heights of all peers who have have announced
 // the latest connected main chain block, or a recognized orphan. These height
 // updates allow us to dynamically refresh peer heights, ensuring sync peer
@@ -1295,14 +1320,14 @@ out:
 
 	// Drain channels before exiting so nothing is left waiting around
 	// to send.
-cleanup:
+	/*cleanup:
 	for {
 		select {
 		//case <-s.modifyRebroadcastInv:
 		default:
 			break cleanup
 		}
-	}
+	}*/
 	s.wg.Done()
 }
 
@@ -1343,7 +1368,7 @@ func (s *ChainService) GetBlockByHeight(height uint32) (wire.BlockHeader,
 	var h uint32
 	var err error
 	err = s.namespace.View(func(dbTx walletdb.Tx) error {
-		bh, h, err = GetBlockByHeight(dbTx, height)
+		bh, h, err = getBlockByHeight(dbTx, height)
 		return err
 	})
 	return bh, h, err
@@ -1357,7 +1382,7 @@ func (s *ChainService) GetBlockByHash(hash chainhash.Hash) (wire.BlockHeader,
 	var h uint32
 	var err error
 	err = s.namespace.View(func(dbTx walletdb.Tx) error {
-		bh, h, err = GetBlockByHash(dbTx, hash)
+		bh, h, err = getBlockByHash(dbTx, hash)
 		return err
 	})
 	return bh, h, err
@@ -1370,7 +1395,7 @@ func (s *ChainService) LatestBlock() (wire.BlockHeader, uint32, error) {
 	var h uint32
 	var err error
 	err = s.namespace.View(func(dbTx walletdb.Tx) error {
-		bh, h, err = LatestBlock(dbTx)
+		bh, h, err = latestBlock(dbTx)
 		return err
 	})
 	return bh, h, err
@@ -1382,6 +1407,50 @@ func (s *ChainService) putBlock(header wire.BlockHeader, height uint32) error {
 	return s.namespace.Update(func(dbTx walletdb.Tx) error {
 		return putBlock(dbTx, header, height)
 	})
+}
+
+// putBasicHeader puts a verified basic filter header in the ChainService
+// database.
+func (s *ChainService) putBasicHeader(blockHash chainhash.Hash,
+	filterTip chainhash.Hash) error {
+	return s.namespace.Update(func(dbTx walletdb.Tx) error {
+		return putBasicHeader(dbTx, blockHash, filterTip)
+	})
+}
+
+// putExtHeader puts a verified extended filter header in the ChainService
+// database.
+func (s *ChainService) putExtHeader(blockHash chainhash.Hash,
+	filterTip chainhash.Hash) error {
+	return s.namespace.Update(func(dbTx walletdb.Tx) error {
+		return putExtHeader(dbTx, blockHash, filterTip)
+	})
+}
+
+// GetBasicHeader gets a verified basic filter header from the ChainService
+// database.
+func (s *ChainService) GetBasicHeader(blockHash chainhash.Hash) (*chainhash.Hash,
+	error) {
+	var filterTip *chainhash.Hash
+	var err error
+	err = s.namespace.View(func(dbTx walletdb.Tx) error {
+		filterTip, err = getBasicHeader(dbTx, blockHash)
+		return err
+	})
+	return filterTip, err
+}
+
+// GetExtHeader gets a verified extended filter header from the ChainService
+// database.
+func (s *ChainService) GetExtHeader(blockHash chainhash.Hash) (*chainhash.Hash,
+	error) {
+	var filterTip *chainhash.Hash
+	var err error
+	err = s.namespace.View(func(dbTx walletdb.Tx) error {
+		filterTip, err = getExtHeader(dbTx, blockHash)
+		return err
+	})
+	return filterTip, err
 }
 
 // putMaxBlockHeight puts the max block height to the ChainService database.
@@ -1405,7 +1474,7 @@ func (s *ChainService) rollbackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 	var bs *waddrmgr.BlockStamp
 	var err error
 	err = s.namespace.Update(func(dbTx walletdb.Tx) error {
-		bs, err = SyncedTo(dbTx)
+		bs, err = syncedTo(dbTx)
 		if err != nil {
 			return err
 		}

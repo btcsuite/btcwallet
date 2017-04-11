@@ -182,10 +182,40 @@ func putExtHeader(tx walletdb.Tx, blockHash chainhash.Hash,
 	return putHeader(tx, blockHash, extHeaderBucketName, filterTip)
 }
 
+// getHeader retrieves the provided filter, keyed to the block hash, from the
+// appropriate filter bucket in the database.
+func getHeader(tx walletdb.Tx, blockHash chainhash.Hash,
+	bucketName []byte) (*chainhash.Hash, error) {
+
+	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(bucketName)
+
+	filterTip := bucket.Get(blockHash[:])
+	if len(filterTip) == 0 {
+		return &chainhash.Hash{},
+			fmt.Errorf("failed to get filter header")
+	}
+
+	return chainhash.NewHash(filterTip)
+}
+
+// getBasicHeader retrieves the provided filter, keyed to the block hash, from
+// the basic filter bucket in the database.
+func getBasicHeader(tx walletdb.Tx, blockHash chainhash.Hash) (*chainhash.Hash,
+	error) {
+	return getHeader(tx, blockHash, basicHeaderBucketName)
+}
+
+// getExtHeader retrieves the provided filter, keyed to the block hash, from the
+// extended filter bucket in the database.
+func getExtHeader(tx walletdb.Tx, blockHash chainhash.Hash) (*chainhash.Hash,
+	error) {
+	return getHeader(tx, blockHash, extHeaderBucketName)
+}
+
 // rollbackLastBlock rolls back the last known block and returns the BlockStamp
 // representing the new last known block.
 func rollbackLastBlock(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
-	bs, err := SyncedTo(tx)
+	bs, err := syncedTo(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -202,12 +232,12 @@ func rollbackLastBlock(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
 	if err != nil {
 		return nil, err
 	}
-	return SyncedTo(tx)
+	return syncedTo(tx)
 }
 
-// GetBlockByHash retrieves the block header, filter, and filter tip, based on
+// getBlockByHash retrieves the block header, filter, and filter tip, based on
 // the provided block hash, from the database.
-func GetBlockByHash(tx walletdb.Tx, blockHash chainhash.Hash) (wire.BlockHeader,
+func getBlockByHash(tx walletdb.Tx, blockHash chainhash.Hash) (wire.BlockHeader,
 	uint32, error) {
 	//chainhash.Hash, chainhash.Hash,
 	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
@@ -233,8 +263,8 @@ func GetBlockByHash(tx walletdb.Tx, blockHash chainhash.Hash) (wire.BlockHeader,
 	return header, height, nil
 }
 
-// GetBlockHashByHeight retrieves the hash of a block by its height.
-func GetBlockHashByHeight(tx walletdb.Tx, height uint32) (chainhash.Hash,
+// getBlockHashByHeight retrieves the hash of a block by its height.
+func getBlockHashByHeight(tx walletdb.Tx, height uint32) (chainhash.Hash,
 	error) {
 	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
 	var hash chainhash.Hash
@@ -246,21 +276,21 @@ func GetBlockHashByHeight(tx walletdb.Tx, height uint32) (chainhash.Hash,
 	return hash, nil
 }
 
-// GetBlockByHeight retrieves a block's information by its height.
-func GetBlockByHeight(tx walletdb.Tx, height uint32) (wire.BlockHeader, uint32,
+// getBlockByHeight retrieves a block's information by its height.
+func getBlockByHeight(tx walletdb.Tx, height uint32) (wire.BlockHeader, uint32,
 	error) {
 	// chainhash.Hash, chainhash.Hash
-	blockHash, err := GetBlockHashByHeight(tx, height)
+	blockHash, err := getBlockHashByHeight(tx, height)
 	if err != nil {
 		return wire.BlockHeader{}, 0, err
 	}
 
-	return GetBlockByHash(tx, blockHash)
+	return getBlockByHash(tx, blockHash)
 }
 
-// SyncedTo retrieves the most recent block's height and hash.
-func SyncedTo(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
-	header, height, err := LatestBlock(tx)
+// syncedTo retrieves the most recent block's height and hash.
+func syncedTo(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
+	header, height, err := latestBlock(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -270,8 +300,8 @@ func SyncedTo(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
 	return &blockStamp, nil
 }
 
-// LatestBlock retrieves all the info about the latest stored block.
-func LatestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
+// latestBlock retrieves all the info about the latest stored block.
+func latestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
 	bucket := tx.RootBucket().Bucket(spvBucketName)
 
 	maxBlockHeightBytes := bucket.Get(maxBlockHeightName)
@@ -281,7 +311,7 @@ func LatestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
 	}
 
 	maxBlockHeight := binary.LittleEndian.Uint32(maxBlockHeightBytes)
-	header, height, err := GetBlockByHeight(tx, maxBlockHeight)
+	header, height, err := getBlockByHeight(tx, maxBlockHeight)
 	if err != nil {
 		return wire.BlockHeader{}, 0, err
 	}
@@ -295,12 +325,12 @@ func LatestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
 // CheckConnectivity cycles through all of the block headers, from last to
 // first, and makes sure they all connect to each other.
 func CheckConnectivity(tx walletdb.Tx) error {
-	header, height, err := LatestBlock(tx)
+	header, height, err := latestBlock(tx)
 	if err != nil {
 		return fmt.Errorf("Couldn't retrieve latest block: %s", err)
 	}
 	for height > 0 {
-		newheader, newheight, err := GetBlockByHash(tx,
+		newheader, newheight, err := getBlockByHash(tx,
 			header.PrevBlock)
 		if err != nil {
 			return fmt.Errorf("Couldn't retrieve block %s: %s",
@@ -322,14 +352,14 @@ func CheckConnectivity(tx walletdb.Tx) error {
 	return nil
 }
 
-// BlockLocatorFromHash returns a block locator based on the provided hash.
-func BlockLocatorFromHash(tx walletdb.Tx, hash chainhash.Hash) blockchain.BlockLocator {
+// blockLocatorFromHash returns a block locator based on the provided hash.
+func blockLocatorFromHash(tx walletdb.Tx, hash chainhash.Hash) blockchain.BlockLocator {
 	locator := make(blockchain.BlockLocator, 0, wire.MaxBlockLocatorsPerMsg)
 	locator = append(locator, &hash)
 
 	// If hash isn't found in DB or this is the genesis block, return
 	// the locator as is
-	_, height, err := GetBlockByHash(tx, hash)
+	_, height, err := getBlockByHash(tx, hash)
 	if (err != nil) || (height == 0) {
 		return locator
 	}
@@ -346,7 +376,7 @@ func BlockLocatorFromHash(tx walletdb.Tx, hash chainhash.Hash) blockchain.BlockL
 		} else {
 			height -= decrement
 		}
-		blockHash, err := GetBlockHashByHeight(tx, height)
+		blockHash, err := getBlockHashByHeight(tx, height)
 		if err != nil {
 			return locator
 		}
