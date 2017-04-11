@@ -7,14 +7,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aakselrod/btctestlog"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/rpctest"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
+
+var logLevel = btclog.TraceLvl
 
 func TestSetup(t *testing.T) {
 	// Create a btcd SimNet node and generate 500 blocks
@@ -129,14 +133,15 @@ func TestSetup(t *testing.T) {
 
 	spvchain.Services = 0
 	spvchain.MaxPeers = 3
+	spvchain.BanDuration = 5 * time.Second
 	spvchain.RequiredServices = wire.SFNodeNetwork
-	/*logger, err := btctestlog.NewTestLogger(t)
+	logger, err := btctestlog.NewTestLogger(t)
 	if err != nil {
 		t.Fatalf("Could not set up logger: %s", err)
 	}
 	chainLogger := btclog.NewSubsystemLogger(logger, "CHAIN: ")
-	chainLogger.SetLevel(btclog.InfoLvl)
-	spvchain.UseLogger(chainLogger) //*/
+	chainLogger.SetLevel(logLevel)
+	spvchain.UseLogger(chainLogger)
 	svc, err := spvchain.NewChainService(config)
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
@@ -223,7 +228,9 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 	if err != nil {
 		return err
 	}
-	//t.Logf("Syncing to %d (%s)", knownBestHeight, knownBestHash)
+	if logLevel != btclog.Off {
+		t.Logf("Syncing to %d (%s)", knownBestHeight, knownBestHash)
+	}
 	var haveBest *waddrmgr.BlockStamp
 	haveBest, err = svc.BestSnapshot()
 	if err != nil {
@@ -244,7 +251,10 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 			return fmt.Errorf("Couldn't get best snapshot from "+
 				"ChainService: %s", err)
 		}
-		//t.Logf("Synced to %d (%s)", haveBest.Height, haveBest.Hash)
+		if logLevel != btclog.Off {
+			t.Logf("Synced to %d (%s)", haveBest.Height,
+				haveBest.Hash)
+		}
 	}
 	// Check if we're current
 	if !svc.IsCurrent() {

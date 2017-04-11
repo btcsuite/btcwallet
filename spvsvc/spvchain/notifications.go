@@ -44,6 +44,10 @@ type removeNodeMsg struct {
 	reply chan error
 }
 
+type forAllPeersMsg struct {
+	closure func(*serverPeer)
+}
+
 // handleQuery is the central handler for all queries and commands from other
 // goroutines related to peer state.
 func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
@@ -145,5 +149,11 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		}
 
 		msg.reply <- errors.New("peer not found")
+	case forAllPeersMsg:
+		// Run the closure on all peers in the passed state.
+		state.forAllPeers(msg.closure)
+		// Even though this is a query, there's no reply channel as the
+		// forAllPeers method doesn't return anything. An error might be
+		// useful in the future.
 	}
 }

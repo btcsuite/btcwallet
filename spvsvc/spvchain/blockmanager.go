@@ -64,6 +64,30 @@ type headersMsg struct {
 	peer    *serverPeer
 }
 
+// cfheadersMsg packages a bitcoin cfheaders message and the peer it came from
+// together so the block handler has access to that information.
+type cfheadersMsg struct {
+	cfheaders *wire.MsgCFHeaders
+	peer      *serverPeer
+}
+
+// cfheadersProcessedMsg tells the block manager to try to see if there are
+// enough samples of cfheaders messages to process the committed filter header
+// chain. This is kind of a hack until these get soft-forked in, but we do
+// verification to avoid getting bamboozled by malicious nodes.
+type processCFHeadersMsg struct {
+	earliestNode *headerNode
+	stopHash     chainhash.Hash
+	extended     bool
+}
+
+// cfilterMsg packages a bitcoin cfilter message and the peer it came from
+// together so the block handler has access to that information.
+type cfilterMsg struct {
+	cfilter *wire.MsgCFilter
+	peer    *serverPeer
+}
+
 // donePeerMsg signifies a newly disconnected peer to the block handler.
 type donePeerMsg struct {
 	peer *serverPeer
@@ -133,6 +157,10 @@ type blockManager struct {
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
+	basicHeaders     map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
+	extendedHeaders  map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
+	lastFilterHeight int32
+
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
 	blocksPerRetarget   int32 // target timespan / target time per block
@@ -156,6 +184,12 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		blocksPerRetarget:   int32(targetTimespan / targetTimePerBlock),
 		minRetargetTimespan: targetTimespan / adjustmentFactor,
 		maxRetargetTimespan: targetTimespan * adjustmentFactor,
+		basicHeaders: make(
+			map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+		),
+		extendedHeaders: make(
+			map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+		),
 	}
 
 	// Initialize the next checkpoint based on the current height.
@@ -300,8 +334,17 @@ out:
 			case *headersMsg:
 				b.handleHeadersMsg(msg)
 
+			case *cfheadersMsg:
+				b.handleCFHeadersMsg(msg)
+
+			case *cfilterMsg:
+				b.handleCFilterMsg(msg)
+
 			case *donePeerMsg:
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
+
+			case *processCFHeadersMsg:
+				b.handleProcessCFHeadersMsg(msg)
 
 			case getSyncPeerMsg:
 				msg.reply <- b.syncPeer
@@ -405,12 +448,24 @@ func (b *blockManager) resetHeaderState(newestHeader *wire.BlockHeader,
 	newestHeight int32) {
 	b.headerList.Init()
 	b.startHeader = nil
+	b.basicHeaders = make(
+		map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+	)
+	b.extendedHeaders = make(
+		map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
+	)
 
 	// Add an entry for the latest known block into the header pool.
 	// This allows the next downloaded header to prove it links to the chain
 	// properly.
 	node := headerNode{header: newestHeader, height: newestHeight}
 	b.headerList.PushBack(&node)
+	b.basicHeaders[newestHeader.BlockHash()] = make(
+		map[chainhash.Hash][]*serverPeer,
+	)
+	b.extendedHeaders[newestHeader.BlockHash()] = make(
+		map[chainhash.Hash][]*serverPeer,
+	)
 }
 
 // startSync will choose the best peer among the available candidate peers to
@@ -605,10 +660,14 @@ func (b *blockManager) handleInvMsg(imsg *invMsg) {
 	// If this is the sync peer or we're current, get the headers
 	// for the announced blocks and update the last announced block.
 	if lastBlock != -1 && (imsg.peer == b.syncPeer || b.current()) {
-		lastHash := b.headerList.Back().Value.(*headerNode).header.BlockHash()
+		lastEl := b.headerList.Back()
+		var lastHash chainhash.Hash
+		if lastEl != nil {
+			lastHash = lastEl.Value.(*headerNode).header.BlockHash()
+		}
 		// Only send getheaders if we don't already know about the last
 		// block hash being announced.
-		if lastHash != invVects[lastBlock].Hash &&
+		if lastHash != invVects[lastBlock].Hash && lastEl != nil &&
 			b.lastRequested != invVects[lastBlock].Hash {
 			// Make a locator starting from the latest known header
 			// we've processed.
@@ -711,6 +770,12 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			}
 			hmsg.peer.UpdateLastBlockHeight(node.height)
 			e := b.headerList.PushBack(&node)
+			b.basicHeaders[node.header.BlockHash()] = make(
+				map[chainhash.Hash][]*serverPeer,
+			)
+			b.extendedHeaders[node.header.BlockHash()] = make(
+				map[chainhash.Hash][]*serverPeer,
+			)
 			if b.startHeader == nil {
 				b.startHeader = e
 			}
@@ -849,9 +914,16 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// We also change the sync peer. Then we can continue
 			// with the rest of the headers in the message as if
 			// nothing has happened.
+			// TODO: Error handling, duh!
 			b.syncPeer = hmsg.peer
 			b.server.rollbackToHeight(backHeight)
 			b.server.putBlock(*blockHeader, backHeight+1)
+			b.basicHeaders[node.header.BlockHash()] = make(
+				map[chainhash.Hash][]*serverPeer,
+			)
+			b.extendedHeaders[node.header.BlockHash()] = make(
+				map[chainhash.Hash][]*serverPeer,
+			)
 			b.server.putMaxBlockHeight(backHeight + 1)
 			b.resetHeaderState(&backHead, int32(backHeight))
 			b.headerList.PushBack(&headerNode{
@@ -912,9 +984,34 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		//return
 	}
 
+	// Send getcfheaders to each peer based on these headers.
+	cfhLocator := blockchain.BlockLocator([]*chainhash.Hash{
+		&msg.Headers[0].PrevBlock,
+	})
+	cfhStopHash := msg.Headers[len(msg.Headers)-1].BlockHash()
+	cfhCount := len(msg.Headers)
+	cfhReqB := cfhRequest{
+		extended: false,
+		stopHash: cfhStopHash,
+	}
+	cfhReqE := cfhRequest{
+		extended: true,
+		stopHash: cfhStopHash,
+	}
+	b.server.ForAllPeers(func(sp *serverPeer) {
+		// Should probably use better isolation for this but we're in
+		// the same package. One of the things to clean up when we do
+		// more general cleanup.
+		sp.requestedCFHeaders[cfhReqB] = cfhCount
+		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, false)
+		sp.requestedCFHeaders[cfhReqE] = cfhCount
+		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, true)
+	})
+
 	// If not current, request the next batch of headers starting from the
 	// latest known header and ending with the next checkpoint.
-	if !b.current() {
+	if !b.current() || b.server.chainParams.Net ==
+		chaincfg.SimNetParams.Net {
 		locator := blockchain.BlockLocator([]*chainhash.Hash{finalHash})
 		nextHash := zeroHash
 		if b.nextCheckpoint != nil {
@@ -924,9 +1021,199 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		if err != nil {
 			log.Warnf("Failed to send getheaders message to "+
 				"peer %s: %s", hmsg.peer.Addr(), err)
+			// Unnecessary but we might put other code after this
+			// eventually.
 			return
 		}
 	}
+}
+
+// QueueCFHeaders adds the passed headers message and peer to the block handling
+// queue.
+func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
+	sp *serverPeer) {
+	// No channel handling here because peers do not need to block on
+	// cfheaders messages.
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
+	b.msgChan <- &cfheadersMsg{cfheaders: cfheaders, peer: sp}
+}
+
+// handleCFHeadersMsg handles cfheaders messages from all peers.
+func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
+	// Grab the matching request we sent, as this message should correspond
+	// to that, and delete it from the map on return as we're now handling
+	// it.
+	req := cfhRequest{
+		extended: cfhmsg.cfheaders.Extended,
+		stopHash: cfhmsg.cfheaders.StopHash,
+	}
+	defer delete(cfhmsg.peer.requestedCFHeaders, req)
+	// Check that the count is correct. This works even when the map lookup
+	// fails as it returns 0 in that case.
+	headerList := cfhmsg.cfheaders.HeaderHashes
+	respLen := len(headerList)
+	if cfhmsg.peer.requestedCFHeaders[req] != respLen {
+		log.Warnf("Received cfheaders message doesn't match any "+
+			"getcfheaders request. Peer %s is probably on a "+
+			"different chain -- ignoring", cfhmsg.peer.Addr())
+		return
+	}
+	if respLen == 0 {
+		return
+	}
+	// Find the block header matching the last filter header, if any.
+	el := b.headerList.Back()
+	for el != nil {
+		if el.Value.(*headerNode).header.BlockHash() == req.stopHash {
+			break
+		}
+		el = el.Prev()
+	}
+	// If nothing matched, there's nothing more to do.
+	if el == nil {
+		return
+	}
+	// Cycle through the filter header hashes and process them.
+	filterMap := b.basicHeaders
+	if req.extended {
+		filterMap = b.extendedHeaders
+	}
+	var node *headerNode
+	var hash chainhash.Hash
+	for i := respLen - 1; i >= 0 && el != nil; i-- {
+		// If there's no map for this header, the header is either no
+		// longer valid or has already been processed and committed to
+		// the database. Either way, break processing.
+		node = el.Value.(*headerNode)
+		hash = node.header.BlockHash()
+		if _, ok := filterMap[hash]; !ok {
+			break
+		}
+		// Process this header and set up the next iteration.
+		filterMap[hash][*headerList[i]] = append(
+			filterMap[hash][*headerList[i]], cfhmsg.peer,
+		)
+		el = el.Prev()
+	}
+	b.msgChan <- &processCFHeadersMsg{
+		earliestNode: node,
+		stopHash:     req.stopHash,
+		extended:     req.extended,
+	}
+	log.Tracef("Processed cfheaders starting at %s, ending at %s",
+		node.header.BlockHash(), req.stopHash)
+}
+
+// handleProcessCFHeadersMsg checks to see if we have enough cfheaders to make
+// a decision about what the correct headers are, makes that decision if
+// possible, and downloads any cfilters and blocks necessary to make that
+// decision.
+func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
+	// Assume we aren't ready to make a decision about correct headers yet.
+	ready := false
+
+	// If we have started receiving cfheaders messages for blocks farther
+	// than the last set we haven't made a decision on, it's time to make
+	// a decision.
+	if msg.earliestNode.height > b.lastFilterHeight {
+		if b.lastFilterHeight != 0 {
+			ready = true
+		}
+		b.lastFilterHeight = msg.earliestNode.height
+	}
+
+	// If there are no other messages left, we should go ahead and make a
+	// decision because we have all the info we're going to get.
+	// TODO: Instead of using just a channel to queue messages, create
+	// another goroutine that reads the channel and appends the messages to
+	// a slice. Then we can check the slice for only cfheaders messages. We
+	// might need to add DoS protection for that.
+	if len(b.msgChan) == 0 {
+		ready = true
+	}
+
+	// Do nothing if we're not ready to make a decision yet.
+	if !ready {
+		return
+	}
+
+	// At this point, we've got all the cfheaders messages we're going to
+	// get for the range of headers described by the passed message. We now
+	// iterate through all of those headers, looking for conflicts. If we
+	// find a conflict, we have to do additional checks; otherwise, we write
+	// the filter header to the database.
+	el := b.headerList.Front()
+	filterMap := b.basicHeaders
+	writeFunc := b.server.putBasicHeader
+	readFunc := b.server.GetBasicHeader
+	if msg.extended {
+		filterMap = b.extendedHeaders
+		writeFunc = b.server.putExtHeader
+		readFunc = b.server.GetExtHeader
+	}
+	for el != nil {
+		node := el.Value.(*headerNode)
+		hash := node.header.BlockHash()
+		if node.height >= msg.earliestNode.height {
+			blockMap := filterMap[hash]
+			switch len(blockMap) {
+			// This should only happen if the filter has already
+			// been written to the database or if there's a reorg.
+			case 0:
+				if _, err := readFunc(hash); err != nil {
+					// We don't have the filter stored in
+					// the DB, there's been a reorg.
+					log.Warnf("Somehow we have 0 cfheaders"+
+						" for block %d (%s)",
+						node.height, hash)
+					return
+				}
+			// This is the normal case when nobody's trying to
+			// bamboozle us (or ALL our peers are).
+			case 1:
+				// This will only cycle once
+				for filterHash := range blockMap {
+					writeFunc(hash, filterHash)
+				}
+			// This is when we have conflicting information from
+			// multiple peers.
+			// TODO: Handle this case.
+			default:
+			}
+		}
+
+		//elToRemove := el
+		el = el.Next()
+		//b.headerList.Remove(elToRemove)
+		//b.startHeader = el
+
+		// If we've reached the end, we can return
+		if hash == msg.stopHash {
+			log.Tracef("Finished processing cfheaders messages up "+
+				"to height %d/hash %s", node.height, hash)
+			return
+		}
+	}
+}
+
+// QueueCFilter adds the passed cfilter message and peer to the block handling
+// queue.
+func (b *blockManager) QueueCFilter(cfilter *wire.MsgCFilter, sp *serverPeer) {
+	// No channel handling here because peers do not need to block on
+	// headers messages.
+	if atomic.LoadInt32(&b.shutdown) != 0 {
+		return
+	}
+
+	b.msgChan <- &cfilterMsg{cfilter: cfilter, peer: sp}
+}
+
+// handleCFilterMsg handles cfilter messages from all peers.
+func (b *blockManager) handleCFilterMsg(cfmsg *cfilterMsg) {
+
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
