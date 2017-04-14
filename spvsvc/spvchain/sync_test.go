@@ -181,7 +181,7 @@ func TestSetup(t *testing.T) {
 
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
 	// newly-best chain on h2.
-	h2.Node.Generate(5)
+	/*h2.Node.Generate(5)
 	err = waitForSync(t, svc, h2, time.Second, 30*time.Second)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
@@ -189,7 +189,7 @@ func TestSetup(t *testing.T) {
 
 	// Generate 7 blocks on h1 and wait for ChainService to sync to the
 	// newly-best chain on h1.
-	/*h1.Node.Generate(7)
+	h1.Node.Generate(7)
 	err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
@@ -280,12 +280,16 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 		total += checkInterval
 		haveBasicHeader, err := svc.GetBasicHeader(*knownBestHash)
 		if err != nil {
-			t.Logf("Basic header unknown.")
+			if logLevel != btclog.Off {
+				t.Logf("Basic header unknown.")
+			}
 			continue
 		}
 		haveExtHeader, err := svc.GetExtHeader(*knownBestHash)
 		if err != nil {
-			t.Logf("Extended header unknown.")
+			if logLevel != btclog.Off {
+				t.Logf("Extended header unknown.")
+			}
 			continue
 		}
 		if *knownBasicHeader.HeaderHashes[0] != *haveBasicHeader {
@@ -301,8 +305,67 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 				"has. Known: %s, ChainService: %s",
 				knownExtHeader.HeaderHashes[0], haveExtHeader)
 		}
-		t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
-			haveBest.Hash)
+		// At this point, we know the latest cfheader is stored in the
+		// ChainService database. We now compare each cfheader the
+		// harness knows about to what's stored in the ChainService
+		// database to see if we've missed anything or messed anything
+		// up.
+		for i := int32(0); i <= haveBest.Height; i++ {
+			head, _, err := svc.GetBlockByHeight(uint32(i))
+			if err != nil {
+				return fmt.Errorf("Couldn't read block by "+
+					"height: %s", err)
+			}
+			hash := head.BlockHash()
+			haveBasicHeader, err := svc.GetBasicHeader(hash)
+			if err != nil {
+				return fmt.Errorf("Couldn't get basic header "+
+					"for %d (%s) from DB", i, hash)
+			}
+			haveExtHeader, err := svc.GetExtHeader(hash)
+			if err != nil {
+				return fmt.Errorf("Couldn't get extended "+
+					"header for %d (%s) from DB", i, hash)
+			}
+			knownBasicHeader, err :=
+				correctSyncNode.Node.GetCFilterHeader(&hash,
+					false)
+			if err != nil {
+				return fmt.Errorf("Couldn't get basic header "+
+					"for %d (%s) from node %s", i, hash,
+					correctSyncNode.P2PAddress())
+			}
+			knownExtHeader, err :=
+				correctSyncNode.Node.GetCFilterHeader(&hash,
+					true)
+			if err != nil {
+				return fmt.Errorf("Couldn't get extended "+
+					"header for %d (%s) from node %s", i,
+					hash, correctSyncNode.P2PAddress())
+			}
+			if *haveBasicHeader !=
+				*knownBasicHeader.HeaderHashes[0] {
+				return fmt.Errorf("Basic header for %d (%s) "+
+					"doesn't match node %s. DB: %s, node: "+
+					"%s", i, hash,
+					correctSyncNode.P2PAddress(),
+					haveBasicHeader,
+					knownBasicHeader.HeaderHashes[0])
+			}
+			if *haveExtHeader !=
+				*knownExtHeader.HeaderHashes[0] {
+				return fmt.Errorf("Extended header for %d (%s)"+
+					" doesn't match node %s. DB: %s, node:"+
+					" %s", i, hash,
+					correctSyncNode.P2PAddress(),
+					haveExtHeader,
+					knownExtHeader.HeaderHashes[0])
+			}
+		}
+		if logLevel != btclog.Off {
+			t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
+				haveBest.Hash)
+		}
 		return nil
 	}
 	return fmt.Errorf("Timeout waiting for cfheaders synchronization after"+

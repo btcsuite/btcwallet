@@ -164,6 +164,7 @@ type blockManager struct {
 	lastBasicCFHeaderHeight int32
 	extendedHeaders         map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
 	lastExtCFHeaderHeight   int32
+	mapMutex                sync.Mutex
 
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
@@ -468,24 +469,28 @@ func (b *blockManager) resetHeaderState(newestHeader *wire.BlockHeader,
 	newestHeight int32) {
 	b.headerList.Init()
 	b.startHeader = nil
+	b.mapMutex.Lock()
 	b.basicHeaders = make(
 		map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
 	)
 	b.extendedHeaders = make(
 		map[chainhash.Hash]map[chainhash.Hash][]*serverPeer,
 	)
+	b.mapMutex.Unlock()
 
 	// Add an entry for the latest known block into the header pool.
 	// This allows the next downloaded header to prove it links to the chain
 	// properly.
 	node := headerNode{header: newestHeader, height: newestHeight}
 	b.headerList.PushBack(&node)
+	b.mapMutex.Lock()
 	b.basicHeaders[newestHeader.BlockHash()] = make(
 		map[chainhash.Hash][]*serverPeer,
 	)
 	b.extendedHeaders[newestHeader.BlockHash()] = make(
 		map[chainhash.Hash][]*serverPeer,
 	)
+	b.mapMutex.Unlock()
 }
 
 // startSync will choose the best peer among the available candidate peers to
@@ -790,12 +795,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			}
 			hmsg.peer.UpdateLastBlockHeight(node.height)
 			e := b.headerList.PushBack(&node)
+			b.mapMutex.Lock()
 			b.basicHeaders[node.header.BlockHash()] = make(
 				map[chainhash.Hash][]*serverPeer,
 			)
 			b.extendedHeaders[node.header.BlockHash()] = make(
 				map[chainhash.Hash][]*serverPeer,
 			)
+			b.mapMutex.Unlock()
 			if b.startHeader == nil {
 				b.startHeader = e
 			}
@@ -938,12 +945,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			b.syncPeer = hmsg.peer
 			b.server.rollbackToHeight(backHeight)
 			b.server.putBlock(*blockHeader, backHeight+1)
+			b.mapMutex.Lock()
 			b.basicHeaders[node.header.BlockHash()] = make(
 				map[chainhash.Hash][]*serverPeer,
 			)
 			b.extendedHeaders[node.header.BlockHash()] = make(
 				map[chainhash.Hash][]*serverPeer,
 			)
+			b.mapMutex.Unlock()
 			b.server.putMaxBlockHeight(backHeight + 1)
 			b.resetHeaderState(&backHead, int32(backHeight))
 			b.headerList.PushBack(&headerNode{
@@ -1113,9 +1122,11 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 			break
 		}
 		// Process this header and set up the next iteration.
+		b.mapMutex.Lock()
 		filterMap[hash][*headerList[i]] = append(
 			filterMap[hash][*headerList[i]], cfhmsg.peer,
 		)
+		b.mapMutex.Unlock()
 		el = el.Prev()
 	}
 	b.intChan <- &processCFHeadersMsg{
@@ -1178,6 +1189,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		node := el.Value.(*headerNode)
 		hash := node.header.BlockHash()
 		if node.height >= msg.earliestNode.height {
+			b.mapMutex.Lock()
 			blockMap := filterMap[hash]
 			switch len(blockMap) {
 			// This should only happen if the filter has already
@@ -1203,6 +1215,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 			// TODO: Handle this case.
 			default:
 			}
+			b.mapMutex.Unlock()
 		}
 
 		//elToRemove := el
