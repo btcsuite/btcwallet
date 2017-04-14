@@ -147,9 +147,12 @@ type blockManager struct {
 	requestedBlocks map[chainhash.Hash]struct{}
 	progressLogger  *blockProgressLogger
 	syncPeer        *serverPeer
-	msgChan         chan interface{}
-	wg              sync.WaitGroup
-	quit            chan struct{}
+	// Channel for messages that come from peers
+	peerChan chan interface{}
+	// Channel for messages that come from internal commands
+	intChan chan interface{}
+	wg      sync.WaitGroup
+	quit    chan struct{}
 
 	headerList     *list.List
 	reorgList      *list.List
@@ -157,9 +160,10 @@ type blockManager struct {
 	nextCheckpoint *chaincfg.Checkpoint
 	lastRequested  chainhash.Hash
 
-	basicHeaders     map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
-	extendedHeaders  map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
-	lastFilterHeight int32
+	basicHeaders            map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
+	lastBasicCFHeaderHeight int32
+	extendedHeaders         map[chainhash.Hash]map[chainhash.Hash][]*serverPeer
+	lastExtCFHeaderHeight   int32
 
 	minRetargetTimespan int64 // target timespan / adjustment factor
 	maxRetargetTimespan int64 // target timespan * adjustment factor
@@ -177,7 +181,8 @@ func newBlockManager(s *ChainService) (*blockManager, error) {
 		server:              s,
 		requestedBlocks:     make(map[chainhash.Hash]struct{}),
 		progressLogger:      newBlockProgressLogger("Processed", log),
-		msgChan:             make(chan interface{}, MaxPeers*3),
+		peerChan:            make(chan interface{}, MaxPeers*3),
+		intChan:             make(chan interface{}, 1),
 		headerList:          list.New(),
 		reorgList:           list.New(),
 		quit:                make(chan struct{}),
@@ -236,7 +241,7 @@ func (b *blockManager) NewPeer(sp *serverPeer) {
 	if atomic.LoadInt32(&b.shutdown) != 0 {
 		return
 	}
-	b.msgChan <- &newPeerMsg{peer: sp}
+	b.peerChan <- &newPeerMsg{peer: sp}
 }
 
 // handleNewPeerMsg deals with new peers that have signalled they may
@@ -269,7 +274,7 @@ func (b *blockManager) DonePeer(sp *serverPeer) {
 		return
 	}
 
-	b.msgChan <- &donePeerMsg{peer: sp}
+	b.peerChan <- &donePeerMsg{peer: sp}
 }
 
 // handleDonePeerMsg deals with peers that have signalled they are done.  It
@@ -318,8 +323,23 @@ func (b *blockManager) blockHandler() {
 	candidatePeers := list.New()
 out:
 	for {
+		// Check internal messages channel first and continue if there's
+		// nothing to process.
 		select {
-		case m := <-b.msgChan:
+		case m := <-b.intChan:
+			switch msg := m.(type) {
+			case *processCFHeadersMsg:
+				b.handleProcessCFHeadersMsg(msg)
+
+			default:
+				log.Warnf("Invalid message type in block "+
+					"handler: %T", msg)
+			}
+		default:
+		}
+		// Now check peer messages and quit channels.
+		select {
+		case m := <-b.peerChan:
 			switch msg := m.(type) {
 			case *newPeerMsg:
 				b.handleNewPeerMsg(candidatePeers, msg.peer)
@@ -342,9 +362,6 @@ out:
 
 			case *donePeerMsg:
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
-
-			case *processCFHeadersMsg:
-				b.handleProcessCFHeadersMsg(msg)
 
 			case getSyncPeerMsg:
 				msg.reply <- b.syncPeer
@@ -380,6 +397,9 @@ out:
 	b.wg.Done()
 	log.Trace("Block handler done")
 }
+
+// queueHandler reads the message channel and queues the message. This allows
+// lookahead checks in
 
 // isSyncCandidate returns whether or not the peer is a candidate to consider
 // syncing from.
@@ -597,7 +617,7 @@ func (b *blockManager) current() bool {
 // the connected peers.
 func (b *blockManager) IsCurrent() bool {
 	reply := make(chan bool)
-	b.msgChan <- isCurrentMsg{reply: reply}
+	b.peerChan <- isCurrentMsg{reply: reply}
 	return <-reply
 }
 
@@ -609,7 +629,7 @@ func (b *blockManager) QueueInv(inv *wire.MsgInv, sp *serverPeer) {
 		return
 	}
 
-	b.msgChan <- &invMsg{inv: inv, peer: sp}
+	b.peerChan <- &invMsg{inv: inv, peer: sp}
 }
 
 // handleInvMsg handles inv messages from all peers.
@@ -701,7 +721,7 @@ func (b *blockManager) QueueHeaders(headers *wire.MsgHeaders, sp *serverPeer) {
 		return
 	}
 
-	b.msgChan <- &headersMsg{headers: headers, peer: sp}
+	b.peerChan <- &headersMsg{headers: headers, peer: sp}
 }
 
 // handleHeadersMsg handles headers messages from all peers.
@@ -1038,7 +1058,7 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 		return
 	}
 
-	b.msgChan <- &cfheadersMsg{cfheaders: cfheaders, peer: sp}
+	b.peerChan <- &cfheadersMsg{cfheaders: cfheaders, peer: sp}
 }
 
 // handleCFHeadersMsg handles cfheaders messages from all peers.
@@ -1098,13 +1118,14 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 		)
 		el = el.Prev()
 	}
-	b.msgChan <- &processCFHeadersMsg{
+	b.intChan <- &processCFHeadersMsg{
 		earliestNode: node,
 		stopHash:     req.stopHash,
 		extended:     req.extended,
 	}
-	log.Tracef("Processed cfheaders starting at %s, ending at %s",
-		node.header.BlockHash(), req.stopHash)
+	log.Tracef("Processed cfheaders starting at %s, ending at %s, from "+
+		"peer %s, extended: %t", node.header.BlockHash(), req.stopHash,
+		cfhmsg.peer.Addr(), req.extended)
 }
 
 // handleProcessCFHeadersMsg checks to see if we have enough cfheaders to make
@@ -1115,23 +1136,30 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 	// Assume we aren't ready to make a decision about correct headers yet.
 	ready := false
 
+	filterMap := b.basicHeaders
+	writeFunc := b.server.putBasicHeader
+	readFunc := b.server.GetBasicHeader
+	lastCFHeaderHeight := &b.lastBasicCFHeaderHeight
+	if msg.extended {
+		filterMap = b.extendedHeaders
+		writeFunc = b.server.putExtHeader
+		readFunc = b.server.GetExtHeader
+		lastCFHeaderHeight = &b.lastExtCFHeaderHeight
+	}
+
 	// If we have started receiving cfheaders messages for blocks farther
 	// than the last set we haven't made a decision on, it's time to make
 	// a decision.
-	if msg.earliestNode.height > b.lastFilterHeight {
-		if b.lastFilterHeight != 0 {
+	if msg.earliestNode.height > *lastCFHeaderHeight {
+		if *lastCFHeaderHeight != 0 {
 			ready = true
 		}
-		b.lastFilterHeight = msg.earliestNode.height
+		*lastCFHeaderHeight = msg.earliestNode.height
 	}
 
 	// If there are no other messages left, we should go ahead and make a
 	// decision because we have all the info we're going to get.
-	// TODO: Instead of using just a channel to queue messages, create
-	// another goroutine that reads the channel and appends the messages to
-	// a slice. Then we can check the slice for only cfheaders messages. We
-	// might need to add DoS protection for that.
-	if len(b.msgChan) == 0 {
+	if len(b.peerChan) == 0 {
 		ready = true
 	}
 
@@ -1146,14 +1174,6 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 	// find a conflict, we have to do additional checks; otherwise, we write
 	// the filter header to the database.
 	el := b.headerList.Front()
-	filterMap := b.basicHeaders
-	writeFunc := b.server.putBasicHeader
-	readFunc := b.server.GetBasicHeader
-	if msg.extended {
-		filterMap = b.extendedHeaders
-		writeFunc = b.server.putExtHeader
-		readFunc = b.server.GetExtHeader
-	}
 	for el != nil {
 		node := el.Value.(*headerNode)
 		hash := node.header.BlockHash()
@@ -1193,7 +1213,8 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		// If we've reached the end, we can return
 		if hash == msg.stopHash {
 			log.Tracef("Finished processing cfheaders messages up "+
-				"to height %d/hash %s", node.height, hash)
+				"to height %d/hash %s, extended: %t",
+				node.height, hash, msg.extended)
 			return
 		}
 	}
@@ -1208,7 +1229,7 @@ func (b *blockManager) QueueCFilter(cfilter *wire.MsgCFilter, sp *serverPeer) {
 		return
 	}
 
-	b.msgChan <- &cfilterMsg{cfilter: cfilter, peer: sp}
+	b.peerChan <- &cfilterMsg{cfilter: cfilter, peer: sp}
 }
 
 // handleCFilterMsg handles cfilter messages from all peers.
