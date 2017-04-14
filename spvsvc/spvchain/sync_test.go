@@ -189,11 +189,11 @@ func TestSetup(t *testing.T) {
 
 	// Generate 7 blocks on h1 and wait for ChainService to sync to the
 	// newly-best chain on h1.
-	h1.Node.Generate(7)
+	/*h1.Node.Generate(7)
 	err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
-	}
+	}*/
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
@@ -234,12 +234,14 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 	var haveBest *waddrmgr.BlockStamp
 	haveBest, err = svc.BestSnapshot()
 	if err != nil {
-		return err
+		return fmt.Errorf("Couldn't get best snapshot from "+
+			"ChainService: %s", err)
 	}
 	var total time.Duration
 	for haveBest.Hash != *knownBestHash {
 		if total > timeout {
-			return fmt.Errorf("Timed out after %v.", timeout)
+			return fmt.Errorf("Timed out after %v waiting for "+
+				"header synchronization.", timeout)
 		}
 		if haveBest.Height > knownBestHeight {
 			return fmt.Errorf("Synchronized to the wrong chain.")
@@ -256,9 +258,53 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 				haveBest.Hash)
 		}
 	}
-	// Check if we're current
+	// Check if we're current.
 	if !svc.IsCurrent() {
 		return fmt.Errorf("ChainService doesn't see itself as current!")
 	}
-	return nil
+	// Check if we have all of the cfheaders.
+	knownBasicHeader, err := correctSyncNode.Node.GetCFilterHeader(
+		knownBestHash, false)
+	if err != nil {
+		return fmt.Errorf("Couldn't get latest basic header from "+
+			"%s: %s", correctSyncNode.P2PAddress(), err)
+	}
+	knownExtHeader, err := correctSyncNode.Node.GetCFilterHeader(
+		knownBestHash, true)
+	if err != nil {
+		return fmt.Errorf("Couldn't get latest extended header from "+
+			"%s: %s", correctSyncNode.P2PAddress(), err)
+	}
+	for total <= timeout {
+		time.Sleep(checkInterval)
+		total += checkInterval
+		haveBasicHeader, err := svc.GetBasicHeader(*knownBestHash)
+		if err != nil {
+			t.Logf("Basic header unknown.")
+			continue
+		}
+		haveExtHeader, err := svc.GetExtHeader(*knownBestHash)
+		if err != nil {
+			t.Logf("Extended header unknown.")
+			continue
+		}
+		if *knownBasicHeader.HeaderHashes[0] != *haveBasicHeader {
+			return fmt.Errorf("Known basic header doesn't match "+
+				"the basic header the ChainService has. Known:"+
+				" %s, ChainService: %s",
+				knownBasicHeader.HeaderHashes[0],
+				haveBasicHeader)
+		}
+		if *knownExtHeader.HeaderHashes[0] != *haveExtHeader {
+			return fmt.Errorf("Known extended header doesn't "+
+				"match the extended header the ChainService "+
+				"has. Known: %s, ChainService: %s",
+				knownExtHeader.HeaderHashes[0], haveExtHeader)
+		}
+		t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
+			haveBest.Hash)
+		return nil
+	}
+	return fmt.Errorf("Timeout waiting for cfheaders synchronization after"+
+		" %v", timeout)
 }
