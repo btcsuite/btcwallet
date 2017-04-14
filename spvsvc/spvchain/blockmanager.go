@@ -1006,7 +1006,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		// that is already in the database and is only used to ensure
 		// the next header links properly, it must be removed before
 		// fetching the blocks.
-		b.headerList.Remove(b.headerList.Front())
+		// b.headerList.Remove(b.headerList.Front())
 		//log.Infof("Received %v block headers: Fetching blocks",
 		//	b.headerList.Len())
 		//b.progressLogger.SetLastLogTime(time.Now())
@@ -1069,6 +1069,23 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 		return
 	}
 
+	// Ignore messages with 0 headers.
+	if len(cfheaders.HeaderHashes) == 0 {
+		return
+	}
+
+	// Check that the count is correct. This works even when the map lookup
+	// fails as it returns 0 in that case.
+	if sp.requestedCFHeaders[cfhRequest{
+		extended: cfheaders.Extended,
+		stopHash: cfheaders.StopHash,
+	}] != len(cfheaders.HeaderHashes) {
+		log.Warnf("Received cfheaders message doesn't match any "+
+			"getcfheaders request. Peer %s is probably on a "+
+			"different chain -- ignoring", sp.Addr())
+		return
+	}
+
 	// Track number of pending cfheaders messsages for both basic and
 	// extended filters.
 	pendingMsgs := &b.numBasicCFHeadersMsgs
@@ -1095,20 +1112,9 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 		pendingMsgs = &b.numExtCFHeadersMsgs
 	}
 	defer delete(cfhmsg.peer.requestedCFHeaders, req)
-	defer atomic.AddInt32(pendingMsgs, -1)
-	// Check that the count is correct. This works even when the map lookup
-	// fails as it returns 0 in that case.
+	atomic.AddInt32(pendingMsgs, -1)
 	headerList := cfhmsg.cfheaders.HeaderHashes
 	respLen := len(headerList)
-	if cfhmsg.peer.requestedCFHeaders[req] != respLen {
-		log.Warnf("Received cfheaders message doesn't match any "+
-			"getcfheaders request. Peer %s is probably on a "+
-			"different chain -- ignoring", cfhmsg.peer.Addr())
-		return
-	}
-	if respLen == 0 {
-		return
-	}
 	// Find the block header matching the last filter header, if any.
 	el := b.headerList.Back()
 	for el != nil {
@@ -1132,6 +1138,7 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 		hash = node.header.BlockHash()
 		b.mapMutex.Lock()
 		if _, ok := headerMap[hash]; !ok {
+			b.mapMutex.Unlock()
 			break
 		}
 		// Process this header and set up the next iteration.
@@ -1146,9 +1153,9 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 		stopHash:     req.stopHash,
 		extended:     req.extended,
 	}
-	log.Tracef("Processed cfheaders starting at %s, ending at %s, from "+
-		"peer %s, extended: %t", node.header.BlockHash(), req.stopHash,
-		cfhmsg.peer.Addr(), req.extended)
+	log.Tracef("Processed cfheaders starting at %d(%s), ending at %s, from"+
+		" peer %s, extended: %t", node.height, node.header.BlockHash(),
+		req.stopHash, cfhmsg.peer.Addr(), req.extended)
 }
 
 // handleProcessCFHeadersMsg checks to see if we have enough cfheaders to make
@@ -1196,8 +1203,6 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 	// iterate through all of those headers, looking for conflicts. If we
 	// find a conflict, we have to do additional checks; otherwise, we write
 	// the filter header to the database.
-	log.Tracef("Begin processing cfheaders messages starting at %d (%s)",
-		msg.earliestNode.height, msg.earliestNode.header.BlockHash())
 	el := b.headerList.Front()
 	for el != nil {
 		node := el.Value.(*headerNode)
