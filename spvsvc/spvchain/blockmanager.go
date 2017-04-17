@@ -35,6 +35,13 @@ const (
 	maxTimeOffset = 2 * time.Hour
 )
 
+var (
+	// WaitForMoreCFHeaders is a configurable time to wait for CFHeaders
+	// messages from peers. It defaults to 3 seconds but can be increased
+	// for higher security and decreased for faster synchronization.
+	WaitForMoreCFHeaders = 3 * time.Second
+)
+
 // zeroHash is the zero value hash (all zeros).  It is defined as a convenience.
 var zeroHash chainhash.Hash
 
@@ -947,20 +954,26 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			b.syncPeer = hmsg.peer
 			b.server.rollbackToHeight(backHeight)
 			b.server.putBlock(*blockHeader, backHeight+1)
-			b.mapMutex.Lock()
-			b.basicHeaders[node.header.BlockHash()] = make(
-				map[chainhash.Hash][]*serverPeer,
-			)
-			b.extendedHeaders[node.header.BlockHash()] = make(
-				map[chainhash.Hash][]*serverPeer,
-			)
-			b.mapMutex.Unlock()
 			b.server.putMaxBlockHeight(backHeight + 1)
 			b.resetHeaderState(&backHead, int32(backHeight))
 			b.headerList.PushBack(&headerNode{
 				header: blockHeader,
 				height: int32(backHeight + 1),
 			})
+			b.mapMutex.Lock()
+			b.basicHeaders[blockHeader.BlockHash()] = make(
+				map[chainhash.Hash][]*serverPeer,
+			)
+			b.extendedHeaders[blockHeader.BlockHash()] = make(
+				map[chainhash.Hash][]*serverPeer,
+			)
+			b.mapMutex.Unlock()
+			if b.lastBasicCFHeaderHeight > int32(backHeight) {
+				b.lastBasicCFHeaderHeight = int32(backHeight)
+			}
+			if b.lastExtCFHeaderHeight > int32(backHeight) {
+				b.lastExtCFHeaderHeight = int32(backHeight)
+			}
 		}
 
 		// Verify the header at the next checkpoint height matches.
@@ -1139,6 +1152,7 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 		b.mapMutex.Lock()
 		if _, ok := headerMap[hash]; !ok {
 			b.mapMutex.Unlock()
+			log.Tracef("Breaking at %d (%s)", node.height, hash)
 			break
 		}
 		// Process this header and set up the next iteration.
@@ -1179,6 +1193,8 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		pendingMsgs = &b.numExtCFHeadersMsgs
 	}
 
+	stopHash := msg.earliestNode.header.PrevBlock
+
 	// If we have started receiving cfheaders messages for blocks farther
 	// than the last set we haven't made a decision on, it's time to make
 	// a decision.
@@ -1186,11 +1202,33 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		ready = true
 	}
 
+	// If we have fewer processed cfheaders messages for the earliest node
+	// than the number of connected peers, give the other peers some time to
+	// catch up before checking if we've processed all of the queued
+	// cfheaders messages.
+	numHeaders := 0
+	blockMap := headerMap[msg.earliestNode.header.BlockHash()]
+	for headerHash := range blockMap {
+		numHeaders += len(blockMap[headerHash])
+	}
+	// Sleep for a bit if we have more peers than cfheaders messages for the
+	// earliest node for which we're trying to get cfheaders. This lets us
+	// wait for other peers to send cfheaders messages before making any
+	// decisions about whether we should write the headers in this message.
+	connCount := int(b.server.ConnectedCount())
+	log.Tracef("Number of peers for which we've processed a cfheaders for "+
+		"block %s: %d of %d", msg.earliestNode.header.BlockHash(),
+		numHeaders, connCount)
+	if numHeaders <= connCount {
+		time.Sleep(WaitForMoreCFHeaders)
+	}
+
 	// If there are no other cfheaders messages left for this type (basic vs
 	// extended), we should go ahead and make a decision because we have all
 	// the info we're going to get.
 	if atomic.LoadInt32(pendingMsgs) == 0 {
 		ready = true
+		stopHash = msg.stopHash
 	}
 
 	// Do nothing if we're not ready to make a decision yet.
@@ -1220,6 +1258,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 					log.Warnf("Somehow we have 0 cfheaders"+
 						" for block %d (%s)",
 						node.height, hash)
+					b.mapMutex.Unlock()
 					return
 				}
 			// This is the normal case when nobody's trying to
@@ -1252,7 +1291,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 		//b.startHeader = el
 
 		// If we've reached the end, we can return
-		if hash == msg.stopHash {
+		if hash == stopHash {
 			log.Tracef("Finished processing cfheaders messages up "+
 				"to height %d/hash %s, extended: %t",
 				node.height, hash, msg.extended)
