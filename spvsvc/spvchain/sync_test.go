@@ -18,7 +18,11 @@ import (
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
 
-var logLevel = btclog.TraceLvl
+const (
+	logLevel    = btclog.TraceLvl
+	syncTimeout = 30 * time.Second
+	syncUpdate  = time.Second
+)
 
 func TestSetup(t *testing.T) {
 	// Create a btcd SimNet node and generate 500 blocks
@@ -135,6 +139,7 @@ func TestSetup(t *testing.T) {
 	spvchain.MaxPeers = 3
 	spvchain.BanDuration = 5 * time.Second
 	spvchain.RequiredServices = wire.SFNodeNetwork
+	spvchain.WaitForMoreCFHeaders = time.Second
 	logger, err := btctestlog.NewTestLogger(t)
 	if err != nil {
 		t.Fatalf("Could not set up logger: %s", err)
@@ -150,7 +155,7 @@ func TestSetup(t *testing.T) {
 	defer svc.Stop()
 
 	// Make sure the client synchronizes with the correct node
-	err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
+	err = waitForSync(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
@@ -158,7 +163,7 @@ func TestSetup(t *testing.T) {
 	// Generate 125 blocks on h1 to make sure it reorgs the other nodes.
 	// Ensure the ChainService instance stays caught up.
 	h1.Node.Generate(125)
-	err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
+	err = waitForSync(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
@@ -173,7 +178,7 @@ func TestSetup(t *testing.T) {
 	// ChainService instance stays caught up.
 	for i := 0; i < 3; i++ {
 		h1.Node.Generate(1)
-		err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
+		err = waitForSync(t, svc, h1)
 		if err != nil {
 			t.Fatalf("Couldn't sync ChainService: %s", err)
 		}
@@ -181,8 +186,8 @@ func TestSetup(t *testing.T) {
 
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
 	// newly-best chain on h2.
-	/*h2.Node.Generate(5)
-	err = waitForSync(t, svc, h2, time.Second, 30*time.Second)
+	h2.Node.Generate(5)
+	err = waitForSync(t, svc, h2)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
@@ -190,10 +195,10 @@ func TestSetup(t *testing.T) {
 	// Generate 7 blocks on h1 and wait for ChainService to sync to the
 	// newly-best chain on h1.
 	h1.Node.Generate(7)
-	err = waitForSync(t, svc, h1, time.Second, 30*time.Second)
+	err = waitForSync(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
-	}*/
+	}
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
@@ -221,8 +226,7 @@ func csd(harnesses []*rpctest.Harness) error {
 
 // waitForSync waits for the ChainService to sync to the current chain state.
 func waitForSync(t *testing.T, svc *spvchain.ChainService,
-	correctSyncNode *rpctest.Harness, checkInterval,
-	timeout time.Duration) error {
+	correctSyncNode *rpctest.Harness) error {
 	knownBestHash, knownBestHeight, err :=
 		correctSyncNode.Node.GetBestBlock()
 	if err != nil {
@@ -239,15 +243,15 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 	}
 	var total time.Duration
 	for haveBest.Hash != *knownBestHash {
-		if total > timeout {
+		if total > syncTimeout {
 			return fmt.Errorf("Timed out after %v waiting for "+
-				"header synchronization.", timeout)
+				"header synchronization.", syncTimeout)
 		}
 		if haveBest.Height > knownBestHeight {
 			return fmt.Errorf("Synchronized to the wrong chain.")
 		}
-		time.Sleep(checkInterval)
-		total += checkInterval
+		time.Sleep(syncUpdate)
+		total += syncUpdate
 		haveBest, err = svc.BestSnapshot()
 		if err != nil {
 			return fmt.Errorf("Couldn't get best snapshot from "+
@@ -275,9 +279,9 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 		return fmt.Errorf("Couldn't get latest extended header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
-	for total <= timeout {
-		time.Sleep(checkInterval)
-		total += checkInterval
+	for total <= syncTimeout {
+		time.Sleep(syncUpdate)
+		total += syncUpdate
 		haveBasicHeader, err := svc.GetBasicHeader(*knownBestHash)
 		if err != nil {
 			if logLevel != btclog.Off {
@@ -369,5 +373,5 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 		return nil
 	}
 	return fmt.Errorf("Timeout waiting for cfheaders synchronization after"+
-		" %v", timeout)
+		" %v", syncTimeout)
 }
