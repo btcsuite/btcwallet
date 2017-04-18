@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/connmgr"
+	"github.com/btcsuite/btcutil/gcs"
 )
 
 type getConnCountMsg struct {
@@ -46,6 +47,11 @@ type removeNodeMsg struct {
 
 type forAllPeersMsg struct {
 	closure func(*serverPeer)
+}
+
+type processCFilterMsg struct {
+	filter   *gcs.Filter
+	extended bool
 }
 
 // handleQuery is the central handler for all queries and commands from other
@@ -156,4 +162,6 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// forAllPeers method doesn't return anything. An error might be
 		// useful in the future.
 	}
+	//case processCFilterMsg:
+	// TODO: make this work
 }

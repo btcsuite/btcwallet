@@ -13,6 +13,8 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs"
+	"github.com/btcsuite/btcutil/gcs/builder"
 )
 
 const (
@@ -1091,15 +1093,17 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 
 	// Check that the count is correct. This works even when the map lookup
 	// fails as it returns 0 in that case.
-	if sp.requestedCFHeaders[cfhRequest{
+	req := cfhRequest{
 		extended: cfheaders.Extended,
 		stopHash: cfheaders.StopHash,
-	}] != len(cfheaders.HeaderHashes) {
+	}
+	if sp.requestedCFHeaders[req] != len(cfheaders.HeaderHashes) {
 		log.Warnf("Received cfheaders message doesn't match any "+
 			"getcfheaders request. Peer %s is probably on a "+
 			"different chain -- ignoring", sp.Addr())
 		return
 	}
+	delete(sp.requestedCFHeaders, req)
 
 	// Track number of pending cfheaders messsages for both basic and
 	// extended filters.
@@ -1116,24 +1120,20 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 	// Grab the matching request we sent, as this message should correspond
 	// to that, and delete it from the map on return as we're now handling
 	// it.
-	req := cfhRequest{
-		extended: cfhmsg.cfheaders.Extended,
-		stopHash: cfhmsg.cfheaders.StopHash,
-	}
 	headerMap := b.basicHeaders
 	pendingMsgs := &b.numBasicCFHeadersMsgs
-	if req.extended {
+	if cfhmsg.cfheaders.Extended {
 		headerMap = b.extendedHeaders
 		pendingMsgs = &b.numExtCFHeadersMsgs
 	}
-	defer delete(cfhmsg.peer.requestedCFHeaders, req)
 	atomic.AddInt32(pendingMsgs, -1)
 	headerList := cfhmsg.cfheaders.HeaderHashes
 	respLen := len(headerList)
 	// Find the block header matching the last filter header, if any.
 	el := b.headerList.Back()
 	for el != nil {
-		if el.Value.(*headerNode).header.BlockHash() == req.stopHash {
+		if el.Value.(*headerNode).header.BlockHash() ==
+			cfhmsg.cfheaders.StopHash {
 			break
 		}
 		el = el.Prev()
@@ -1166,12 +1166,13 @@ func (b *blockManager) handleCFHeadersMsg(cfhmsg *cfheadersMsg) {
 	}
 	b.intChan <- &processCFHeadersMsg{
 		earliestNode: node,
-		stopHash:     req.stopHash,
-		extended:     req.extended,
+		stopHash:     cfhmsg.cfheaders.StopHash,
+		extended:     cfhmsg.cfheaders.Extended,
 	}
 	log.Tracef("Processed cfheaders starting at %d(%s), ending at %s, from"+
 		" peer %s, extended: %t", node.height, node.header.BlockHash(),
-		req.stopHash, cfhmsg.peer.Addr(), req.extended)
+		cfhmsg.cfheaders.StopHash, cfhmsg.peer.Addr(),
+		cfhmsg.cfheaders.Extended)
 }
 
 // handleProcessCFHeadersMsg checks to see if we have enough cfheaders to make
@@ -1278,7 +1279,7 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 				*lastCFHeaderHeight = node.height
 			// This is when we have conflicting information from
 			// multiple peers.
-			// TODO: Handle this case.
+			// TODO: Handle this case as an adversarial condition.
 			default:
 				log.Warnf("Got more than 1 possible filter "+
 					"header for block %d (%s)", node.height,
@@ -1311,12 +1312,77 @@ func (b *blockManager) QueueCFilter(cfilter *wire.MsgCFilter, sp *serverPeer) {
 		return
 	}
 
+	// Make sure we've actually requested this message.
+	req := cfRequest{
+		extended:  cfilter.Extended,
+		blockHash: cfilter.BlockHash,
+	}
+	if _, ok := sp.requestedCFilters[req]; !ok {
+		return
+	}
+	delete(sp.requestedCFilters, req)
+
 	b.peerChan <- &cfilterMsg{cfilter: cfilter, peer: sp}
 }
 
 // handleCFilterMsg handles cfilter messages from all peers.
+// TODO: Refactor for checking adversarial conditions.
 func (b *blockManager) handleCFilterMsg(cfmsg *cfilterMsg) {
-
+	readFunc := b.server.GetBasicHeader
+	putFunc := b.server.putBasicFilter
+	if cfmsg.cfilter.Extended {
+		readFunc = b.server.GetExtHeader
+		putFunc = b.server.putExtFilter
+	}
+	// Check that the cfilter we received fits correctly into the filter
+	// chain.
+	blockHeader, _, err := b.server.GetBlockByHash(cfmsg.cfilter.BlockHash)
+	if err != nil {
+		log.Warnf("Received cfilter for unknown block: %s, extended: "+
+			"%t", cfmsg.cfilter.BlockHash, cfmsg.cfilter.Extended)
+		return
+	}
+	cfHeader, err := readFunc(cfmsg.cfilter.BlockHash)
+	if err != nil {
+		log.Warnf("Received cfilter for block with unknown cfheader: "+
+			"%s, extended: %t", cfmsg.cfilter.BlockHash,
+			cfmsg.cfilter.Extended)
+		return
+	}
+	cfPrevHeader, err := readFunc(blockHeader.PrevBlock)
+	if err != nil {
+		log.Warnf("Received cfilter for block with unknown previous "+
+			"cfheader: %s, extended: %t", blockHeader.PrevBlock,
+			cfmsg.cfilter.Extended)
+		return
+	}
+	filter, err := gcs.FromNBytes(builder.DefaultP, cfmsg.cfilter.Data)
+	if err != nil {
+		log.Warnf("Couldn't parse cfilter data for block: %s, "+
+			"extended: %t", cfmsg.cfilter.BlockHash,
+			cfmsg.cfilter.Extended)
+		return
+	}
+	if makeHeaderForFilter(filter, *cfPrevHeader) != *cfHeader {
+		log.Warnf("Got cfilter that doesn't match cfheader chain for "+
+			"block: %s, extended: %t", cfmsg.cfilter.BlockHash,
+			cfmsg.cfilter.Extended)
+		return
+	}
+	// Save the cfilter we received into the database.
+	err = putFunc(cfmsg.cfilter.BlockHash, filter)
+	if err != nil {
+		log.Warnf("Couldn't write cfilter to database for block: %s, "+
+			"extended: %t", cfmsg.cfilter.BlockHash,
+			cfmsg.cfilter.Extended)
+		// Should we panic here?
+		return
+	}
+	// Notify the ChainService of the newly-found filter.
+	b.server.query <- processCFilterMsg{
+		filter:   filter,
+		extended: cfmsg.cfilter.Extended,
+	}
 }
 
 // checkHeaderSanity checks the PoW, and timestamp of a block header.
