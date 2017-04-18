@@ -950,11 +950,25 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// We also change the sync peer. Then we can continue
 			// with the rest of the headers in the message as if
 			// nothing has happened.
-			// TODO: Error handling, duh!
 			b.syncPeer = hmsg.peer
-			b.server.rollbackToHeight(backHeight)
-			b.server.putBlock(*blockHeader, backHeight+1)
-			b.server.putMaxBlockHeight(backHeight + 1)
+			_, err = b.server.rollbackToHeight(backHeight)
+			if err != nil {
+				log.Criticalf("Rollback failed: %s",
+					err)
+				// Should we panic here?
+			}
+			err = b.server.putBlock(*blockHeader, backHeight+1)
+			if err != nil {
+				log.Criticalf("Couldn't write block to "+
+					"database: %s", err)
+				// Should we panic here?
+			}
+			err = b.server.putMaxBlockHeight(backHeight + 1)
+			if err != nil {
+				log.Criticalf("Couldn't write max block height"+
+					" to database: %s", err)
+				// Should we panic here?
+			}
 			b.resetHeaderState(&backHead, int32(backHeight))
 			b.headerList.PushBack(&headerNode{
 				header: blockHeader,
@@ -1013,19 +1027,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 	// When this header is a checkpoint, switch to fetching the blocks for
 	// all of the headers since the last checkpoint.
 	if receivedCheckpoint {
-		// TODO - aakselrod - fix this completely and start getting
-		// committed filter headers for the known block headers
-		// Since the first entry of the list is always the final block
-		// that is already in the database and is only used to ensure
-		// the next header links properly, it must be removed before
-		// fetching the blocks.
-		// b.headerList.Remove(b.headerList.Front())
-		//log.Infof("Received %v block headers: Fetching blocks",
-		//	b.headerList.Len())
-		//b.progressLogger.SetLastLogTime(time.Now())
 		b.nextCheckpoint = b.findNextHeaderCheckpoint(finalHeight)
-		//b.fetchHeaderBlocks()
-		//return
 	}
 
 	// Send getcfheaders to each peer based on these headers.
@@ -1250,11 +1252,11 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 			blockMap := headerMap[hash]
 			switch len(blockMap) {
 			// This should only happen if the filter has already
-			// been written to the database or if there's a reorg.
+			// been written to the database.
 			case 0:
 				if _, err := readFunc(hash); err != nil {
 					// We don't have the filter stored in
-					// the DB, there's been a reorg.
+					// the DB, there's something wrong.
 					log.Warnf("Somehow we have 0 cfheaders"+
 						" for block %d (%s)",
 						node.height, hash)
