@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
+	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -153,8 +154,8 @@ func putExtFilter(tx walletdb.Tx, blockHash chainhash.Hash,
 	return putFilter(tx, blockHash, extFilterBucketName, filter)
 }
 
-// putHeader stores the provided filter, keyed to the block hash, in the
-// appropriate filter bucket in the database.
+// putHeader stores the provided header, keyed to the block hash, in the
+// appropriate filter header bucket in the database.
 func putHeader(tx walletdb.Tx, blockHash chainhash.Hash, bucketName []byte,
 	filterTip chainhash.Hash) error {
 
@@ -168,22 +169,50 @@ func putHeader(tx walletdb.Tx, blockHash chainhash.Hash, bucketName []byte,
 	return nil
 }
 
-// putBasicHeader stores the provided filter, keyed to the block hash, in the
-// basic filter bucket in the database.
+// putBasicHeader stores the provided header, keyed to the block hash, in the
+// basic filter header bucket in the database.
 func putBasicHeader(tx walletdb.Tx, blockHash chainhash.Hash,
 	filterTip chainhash.Hash) error {
 	return putHeader(tx, blockHash, basicHeaderBucketName, filterTip)
 }
 
-// putExtHeader stores the provided filter, keyed to the block hash, in the
-// extended filter bucket in the database.
+// putExtHeader stores the provided header, keyed to the block hash, in the
+// extended filter header bucket in the database.
 func putExtHeader(tx walletdb.Tx, blockHash chainhash.Hash,
 	filterTip chainhash.Hash) error {
 	return putHeader(tx, blockHash, extHeaderBucketName, filterTip)
 }
 
-// getHeader retrieves the provided filter, keyed to the block hash, from the
+// getFilter retreives the filter, keyed to the provided block hash, from the
 // appropriate filter bucket in the database.
+func getFilter(tx walletdb.Tx, blockHash chainhash.Hash,
+	bucketName []byte) (*gcs.Filter, error) {
+	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(bucketName)
+
+	filterBytes := bucket.Get(blockHash[:])
+	if len(filterBytes) == 0 {
+		return nil, fmt.Errorf("failed to get filter")
+	}
+
+	return gcs.FromNBytes(builder.DefaultP, filterBytes)
+}
+
+// getBasicFilter retrieves the filter, keyed to the provided block hash, from
+// the basic filter bucket in the database.
+func getBasicFilter(tx walletdb.Tx, blockHash chainhash.Hash) (*gcs.Filter,
+	error) {
+	return getFilter(tx, blockHash, basicFilterBucketName)
+}
+
+// getExtFilter retrieves the filter, keyed to the provided block hash, from
+// the extended filter bucket in the database.
+func getExtFilter(tx walletdb.Tx, blockHash chainhash.Hash) (*gcs.Filter,
+	error) {
+	return getFilter(tx, blockHash, extFilterBucketName)
+}
+
+// getHeader retrieves the header, keyed to the provided block hash, from the
+// appropriate filter header bucket in the database.
 func getHeader(tx walletdb.Tx, blockHash chainhash.Hash,
 	bucketName []byte) (*chainhash.Hash, error) {
 
@@ -191,22 +220,21 @@ func getHeader(tx walletdb.Tx, blockHash chainhash.Hash,
 
 	filterTip := bucket.Get(blockHash[:])
 	if len(filterTip) == 0 {
-		return &chainhash.Hash{},
-			fmt.Errorf("failed to get filter header")
+		return nil, fmt.Errorf("failed to get filter header")
 	}
 
 	return chainhash.NewHash(filterTip)
 }
 
-// getBasicHeader retrieves the provided filter, keyed to the block hash, from
-// the basic filter bucket in the database.
+// getBasicHeader retrieves the header, keyed to the provided block hash, from
+// the basic filter header bucket in the database.
 func getBasicHeader(tx walletdb.Tx, blockHash chainhash.Hash) (*chainhash.Hash,
 	error) {
 	return getHeader(tx, blockHash, basicHeaderBucketName)
 }
 
-// getExtHeader retrieves the provided filter, keyed to the block hash, from the
-// extended filter bucket in the database.
+// getExtHeader retrieves the header, keyed to the provided block hash, from the
+// extended filter header bucket in the database.
 func getExtHeader(tx walletdb.Tx, blockHash chainhash.Hash) (*chainhash.Hash,
 	error) {
 	return getHeader(tx, blockHash, extHeaderBucketName)

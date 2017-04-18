@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -113,6 +114,12 @@ type cfhRequest struct {
 	stopHash chainhash.Hash
 }
 
+// cfRequest records which cfilters we've requested.
+type cfRequest struct {
+	extended  bool
+	blockHash chainhash.Hash
+}
+
 // serverPeer extends the peer to maintain state shared by the server and
 // the blockmanager.
 type serverPeer struct {
@@ -127,7 +134,7 @@ type serverPeer struct {
 	continueHash       *chainhash.Hash
 	relayMtx           sync.Mutex
 	requestQueue       []*wire.InvVect
-	requestedCFilters  map[chainhash.Hash]bool
+	requestedCFilters  map[cfRequest]struct{}
 	requestedCFHeaders map[cfhRequest]int
 	requestedBlocks    map[chainhash.Hash]struct{}
 	knownAddresses     map[string]struct{}
@@ -143,7 +150,7 @@ func newServerPeer(s *ChainService, isPersistent bool) *serverPeer {
 	return &serverPeer{
 		server:             s,
 		persistent:         isPersistent,
-		requestedCFilters:  make(map[chainhash.Hash]bool),
+		requestedCFilters:  make(map[cfRequest]struct{}),
 		requestedBlocks:    make(map[chainhash.Hash]struct{}),
 		requestedCFHeaders: make(map[cfhRequest]int),
 		knownAddresses:     make(map[string]struct{}),
@@ -220,6 +227,20 @@ func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 		}
 	}
 	msg.Extended = ext
+	sp.QueueMessage(msg, nil)
+	return nil
+}
+
+// pushGetCFilterMsg sends a getcfilter message for the provided block hash to
+// the connected peer.
+func (sp *serverPeer) pushGetCFilterMsg(blockHash *chainhash.Hash,
+	ext bool) error {
+	req := cfRequest{
+		extended:  ext,
+		blockHash: *blockHash,
+	}
+	sp.requestedCFilters[req] = struct{}{}
+	msg := wire.NewMsgGetCFilter(blockHash, ext)
 	sp.QueueMessage(msg, nil)
 	return nil
 }
@@ -1451,6 +1472,46 @@ func (s *ChainService) GetExtHeader(blockHash chainhash.Hash) (*chainhash.Hash,
 		return err
 	})
 	return filterTip, err
+}
+
+// putBasicFilter puts a verified basic filter in the ChainService database.
+func (s *ChainService) putBasicFilter(blockHash chainhash.Hash,
+	filter *gcs.Filter) error {
+	return s.namespace.Update(func(dbTx walletdb.Tx) error {
+		return putBasicFilter(dbTx, blockHash, filter)
+	})
+}
+
+// putExtFilter puts a verified extended filter in the ChainService database.
+func (s *ChainService) putExtFilter(blockHash chainhash.Hash,
+	filter *gcs.Filter) error {
+	return s.namespace.Update(func(dbTx walletdb.Tx) error {
+		return putExtFilter(dbTx, blockHash, filter)
+	})
+}
+
+// GetBasicFilter gets a verified basic filter from the ChainService database.
+func (s *ChainService) GetBasicFilter(blockHash chainhash.Hash) (*gcs.Filter,
+	error) {
+	var filter *gcs.Filter
+	var err error
+	err = s.namespace.View(func(dbTx walletdb.Tx) error {
+		filter, err = getBasicFilter(dbTx, blockHash)
+		return err
+	})
+	return filter, err
+}
+
+// GetExtFilter gets a verified extended filter from the ChainService database.
+func (s *ChainService) GetExtFilter(blockHash chainhash.Hash) (*gcs.Filter,
+	error) {
+	var filter *gcs.Filter
+	var err error
+	err = s.namespace.View(func(dbTx walletdb.Tx) error {
+		filter, err = getExtFilter(dbTx, blockHash)
+		return err
+	})
+	return filter, err
 }
 
 // putMaxBlockHeight puts the max block height to the ChainService database.
