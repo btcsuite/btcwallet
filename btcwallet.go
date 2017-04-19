@@ -86,7 +86,7 @@ func walletMain() error {
 	if !cfg.NoInitialLoad {
 		// Load the wallet database.  It must have been created already
 		// or this will return an appropriate error.
-		_, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+		_, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), !cfg.NoPass)
 		if err != nil {
 			log.Error(err)
 			return err

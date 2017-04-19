@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,9 +126,14 @@ func createWallet(cfg *config) error {
 	// existing keystore, the user will be promped for that passphrase,
 	// otherwise they will be prompted for a new one.
 	reader := bufio.NewReader(os.Stdin)
-	privPass, err := prompt.PrivatePass(reader, legacyKeyStore)
-	if err != nil {
-		return err
+	var privPass []byte
+	if cfg.NoPass {
+		privPass = []byte(wallet.InsecurePrivPassphrase)
+	} else {
+		privPass, err = prompt.PrivatePass(reader, legacyKeyStore)
+		if err != nil {
+			return err
+		}
 	}
 
 	// When there exists a legacy keystore, unlock it now and set up a
@@ -173,16 +179,26 @@ func createWallet(cfg *config) error {
 	// Ascertain the public passphrase.  This will either be a value
 	// specified by the user or the default hard-coded public passphrase if
 	// the user does not want the additional public data encryption.
-	pubPass, err := prompt.PublicPass(reader, privPass,
-		[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
-	if err != nil {
-		return err
+	var pubPass []byte
+	if cfg.NoPass {
+		pubPass = []byte(wallet.InsecurePubPassphrase)
+	} else {
+		pubPass, err = prompt.PublicPass(reader, privPass,
+			[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
+		if err != nil {
+			return err
+		}
 	}
 
 	// Ascertain the wallet generation seed.  This will either be an
-	// automatically generated value the user has already confirmed or a
-	// value the user has entered which has already been validated.
-	seed, err := prompt.Seed(reader)
+	// automatically generated value the user will confirm or a
+	// value the user will enter which has already been validated.
+	var seed []byte
+	if cfg.Seed != nil {
+		seed, err = hex.DecodeString(*cfg.Seed)
+	} else {
+		seed, err = prompt.Seed(reader)
+	}
 	if err != nil {
 		return err
 	}
