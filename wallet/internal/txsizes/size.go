@@ -52,7 +52,41 @@ const (
 	//   - 25 bytes P2PKH output script
 	P2PKHOutputSize = 8 + 1 + P2PKHPkScriptSize
 
-	// TODO(roasbeef): add estimates for nested p2wkh and p2pkh
+	// RedeemP2WPKHScriptSize is the worst case (largest) serialize size of
+	// a transaction input script redeeming a compressed P2WKH output. It
+	// is calculated as:
+	//
+	//   - 72 bytes DER signature + 1 byte sighash
+	//   - 33 bytes serialized compressed pubkey
+	RedeemP2WPKHScriptSize = 73 + 33
+
+	// P2WKHScriptSize is the size of a transaction output script that pays
+	// to a compressed witness pubkey hash.  It is calculated as:
+	//
+	//	- OP_0: 1 byte
+	//	- OP_DATA: 1 byte (PublicKeyHASH160 length)
+	//	- PublicKeyHASH160: 20 bytes
+	P2WPKHScriptSize = 1 + 1 + 20
+
+	// RedeemP2WKHInputSize is the worst case (largest) serialize size of a
+	// transaction input redeeming a compressed P2WKH output.  It is
+	// calculated as:
+	//
+	//   - 32 bytes previous tx
+	//   - 4 bytes output index
+	//   - 1 byte number of witness elements
+	//   - 2 bytes for both witness element lengths
+	//   - 106 bytes witness
+	//  - 4 bytes sequence
+	RedeemP2WKHInputSize = 32 + 4 + 1 + RedeemP2WPKHScriptSize + 4
+
+	// P2WKHOutputSize is the serialize size of a transaction output with a
+	// P2WKH output script.  It is calculated as:
+	//
+	//   - 8 bytes output value
+	//   - 1 byte compact int encoding value 25
+	//   - 22 bytes P2PKH output script
+	P2WKHOutputSize = 8 + 1 + P2WPKHScriptSize
 )
 
 // EstimateSerializeSize returns a worst case serialize size estimate for a
