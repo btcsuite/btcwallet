@@ -790,7 +790,7 @@ func (w *Wallet) CurrentAddress(account uint32) (btcutil.Address, error) {
 
 		// Get next chained address if the last one has already been used.
 		if maddr.Used(addrmgrNs) {
-			addr, err = w.newAddress(addrmgrNs, account)
+			addr, err = w.newAddress(addrmgrNs, account, waddrmgr.WitnessPubKey)
 			return err
 		}
 
@@ -2359,7 +2359,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 			// Either it was already signed or we just signed it.
 			// Find out if it is completely satisfied or still needs more.
 			vm, err := txscript.NewEngine(prevOutScript, tx, i,
-				txscript.StandardVerifyFlags, nil)
+				txscript.StandardVerifyFlags, nil, nil, 0)
 			if err == nil {
 				err = vm.Execute()
 			}
