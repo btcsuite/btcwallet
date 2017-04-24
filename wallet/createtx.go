@@ -107,8 +107,8 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		return nil, err
 	}
 
-	err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
-		addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+		addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// Get current block's height and hash.
 		bs, err := chainClient.BlockStamp()
@@ -128,9 +128,9 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 			var changeAddr btcutil.Address
 			var err error
 			if account == waddrmgr.ImportedAddrAccount {
-				changeAddr, err = w.NewChangeAddress(0)
+				changeAddr, err = w.newChangeAddress(addrmgrNs, 0, waddrmgr.WitnessPubKey)
 			} else {
-				changeAddr, err = w.NewChangeAddress(account)
+				changeAddr, err = w.newChangeAddress(addrmgrNs, account, waddrmgr.WitnessPubKey)
 			}
 			if err != nil {
 				return nil, err
