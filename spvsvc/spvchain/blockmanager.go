@@ -13,8 +13,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
 )
 
 const (
@@ -89,13 +87,6 @@ type processCFHeadersMsg struct {
 	earliestNode *headerNode
 	stopHash     chainhash.Hash
 	extended     bool
-}
-
-// cfilterMsg packages a bitcoin cfilter message and the peer it came from
-// together so the block handler has access to that information.
-type cfilterMsg struct {
-	cfilter *wire.MsgCFilter
-	peer    *serverPeer
 }
 
 // donePeerMsg signifies a newly disconnected peer to the block handler.
@@ -305,14 +296,6 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *serverPeer) {
 
 	log.Infof("Lost peer %s", sp)
 
-	// Remove requested blocks from the global map so that they will be
-	// fetched from elsewhere next time we get an inv.
-	// TODO: we could possibly here check which peers have these blocks
-	// and request them now to speed things up a little.
-	for k := range sp.requestedBlocks {
-		delete(b.requestedBlocks, k)
-	}
-
 	// Attempt to find a new peer to sync from if the quitting peer is the
 	// sync peer.  Also, reset the header state.
 	if b.syncPeer != nil && b.syncPeer == sp {
@@ -369,9 +352,6 @@ out:
 
 			case *cfheadersMsg:
 				b.handleCFHeadersMsg(msg)
-
-			case *cfilterMsg:
-				b.handleCFilterMsg(msg)
 
 			case *donePeerMsg:
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
@@ -1301,91 +1281,6 @@ func (b *blockManager) handleProcessCFHeadersMsg(msg *processCFHeadersMsg) {
 				node.height, hash, msg.extended)
 			return
 		}
-	}
-}
-
-// QueueCFilter adds the passed cfilter message and peer to the block handling
-// queue.
-func (b *blockManager) QueueCFilter(cfilter *wire.MsgCFilter, sp *serverPeer) {
-	// No channel handling here because peers do not need to block on
-	// headers messages.
-	if atomic.LoadInt32(&b.shutdown) != 0 {
-		return
-	}
-
-	// Make sure we've actually requested this message.
-	req := cfRequest{
-		extended:  cfilter.Extended,
-		blockHash: cfilter.BlockHash,
-	}
-	if _, ok := sp.requestedCFilters[req]; !ok {
-		return
-	}
-	delete(sp.requestedCFilters, req)
-
-	b.peerChan <- &cfilterMsg{cfilter: cfilter, peer: sp}
-}
-
-// handleCFilterMsg handles cfilter messages from all peers.
-// TODO: Refactor for checking adversarial conditions.
-func (b *blockManager) handleCFilterMsg(cfmsg *cfilterMsg) {
-	readFunc := b.server.GetBasicHeader
-	putFunc := b.server.putBasicFilter
-	if cfmsg.cfilter.Extended {
-		readFunc = b.server.GetExtHeader
-		putFunc = b.server.putExtFilter
-	}
-	// Check that the cfilter we received fits correctly into the filter
-	// chain.
-	blockHeader, _, err := b.server.GetBlockByHash(cfmsg.cfilter.BlockHash)
-	if err != nil {
-		log.Warnf("Received cfilter for unknown block: %s, extended: "+
-			"%t", cfmsg.cfilter.BlockHash, cfmsg.cfilter.Extended)
-		return
-	}
-	cfHeader, err := readFunc(cfmsg.cfilter.BlockHash)
-	if err != nil {
-		log.Warnf("Received cfilter for block with unknown cfheader: "+
-			"%s, extended: %t", cfmsg.cfilter.BlockHash,
-			cfmsg.cfilter.Extended)
-		return
-	}
-	cfPrevHeader, err := readFunc(blockHeader.PrevBlock)
-	if err != nil {
-		log.Warnf("Received cfilter for block with unknown previous "+
-			"cfheader: %s, extended: %t", blockHeader.PrevBlock,
-			cfmsg.cfilter.Extended)
-		return
-	}
-	filter, err := gcs.FromNBytes(builder.DefaultP, cfmsg.cfilter.Data)
-	if err != nil {
-		log.Warnf("Couldn't parse cfilter data for block: %s, "+
-			"extended: %t", cfmsg.cfilter.BlockHash,
-			cfmsg.cfilter.Extended)
-		return
-	}
-	if makeHeaderForFilter(filter, *cfPrevHeader) != *cfHeader {
-		log.Warnf("Got cfilter that doesn't match cfheader chain for "+
-			"block: %s, extended: %t", cfmsg.cfilter.BlockHash,
-			cfmsg.cfilter.Extended)
-		return
-	}
-	// Save the cfilter we received into the database.
-	err = putFunc(cfmsg.cfilter.BlockHash, filter)
-	if err != nil {
-		log.Warnf("Couldn't write cfilter to database for block: %s, "+
-			"extended: %t", cfmsg.cfilter.BlockHash,
-			cfmsg.cfilter.Extended)
-		// Should we panic here?
-		return
-	}
-	// Notify the ChainService of the newly-found filter.
-	b.server.query <- processCFilterMsg{
-		cfRequest: cfRequest{
-			blockHash: cfmsg.cfilter.BlockHash,
-			extended:  cfmsg.cfilter.Extended,
-		},
-		filter: filter,
 	}
 }
 

@@ -7,7 +7,10 @@ import (
 	"github.com/btcsuite/btcutil/gcs/builder"
 )
 
-func buildBasicFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+// TODO: Move these functions into github.com/btcsuite/btcutil/gcs/builder.
+
+// BuildBasicFilter will be factored out into gcs.builder
+func BuildBasicFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 	blockHash := block.BlockHash()
 	b := builder.WithKeyHash(&blockHash)
 	_, err := b.Key()
@@ -34,7 +37,8 @@ func buildBasicFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 	return f, nil
 }
 
-func buildExtFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
+// BuildExtFilter will be factored out into gcs.builder
+func BuildExtFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 	blockHash := block.BlockHash()
 	b := builder.WithKeyHash(&blockHash)
 	_, err := b.Key()
@@ -60,13 +64,15 @@ func buildExtFilter(block *wire.MsgBlock) (*gcs.Filter, error) {
 	return f, nil
 }
 
-func getFilterHash(filter *gcs.Filter) chainhash.Hash {
+// GetFilterHash will be factored out into gcs.builder
+func GetFilterHash(filter *gcs.Filter) chainhash.Hash {
 	return chainhash.HashH(filter.NBytes())
 }
 
-func makeHeaderForFilter(filter *gcs.Filter, prevHeader chainhash.Hash) chainhash.Hash {
+// MakeHeaderForFilter will be factored out into gcs.builder
+func MakeHeaderForFilter(filter *gcs.Filter, prevHeader chainhash.Hash) chainhash.Hash {
 	filterTip := make([]byte, 2*chainhash.HashSize)
-	filterHash := getFilterHash(filter)
+	filterHash := GetFilterHash(filter)
 	copy(filterTip, filterHash[:])
 	copy(filterTip[chainhash.HashSize:], prevHeader[:])
 	return chainhash.HashH(filterTip)

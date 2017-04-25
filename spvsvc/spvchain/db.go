@@ -464,20 +464,20 @@ func createSPVNS(namespace walletdb.Namespace, params *chaincfg.Params) error {
 
 		log.Info("Creating wallet SPV namespace.")
 
-		basicFilter, err := buildBasicFilter(params.GenesisBlock)
+		basicFilter, err := BuildBasicFilter(params.GenesisBlock)
 		if err != nil {
 			return err
 		}
 
-		basicFilterTip := makeHeaderForFilter(basicFilter,
+		basicFilterTip := MakeHeaderForFilter(basicFilter,
 			params.GenesisBlock.Header.PrevBlock)
 
-		extFilter, err := buildExtFilter(params.GenesisBlock)
+		extFilter, err := BuildExtFilter(params.GenesisBlock)
 		if err != nil {
 			return err
 		}
 
-		extFilterTip := makeHeaderForFilter(extFilter,
+		extFilterTip := MakeHeaderForFilter(extFilter,
 			params.GenesisBlock.Header.PrevBlock)
 
 		err = putBlock(tx, params.GenesisBlock.Header, 0)
