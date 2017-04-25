@@ -37,6 +37,7 @@ const (
 	maxTimeOffset = 2 * time.Hour
 )
 
+// TODO: Redo this using query API.
 var (
 	// WaitForMoreCFHeaders is a configurable time to wait for CFHeaders
 	// messages from peers. It defaults to 3 seconds but can be increased
@@ -1380,8 +1381,11 @@ func (b *blockManager) handleCFilterMsg(cfmsg *cfilterMsg) {
 	}
 	// Notify the ChainService of the newly-found filter.
 	b.server.query <- processCFilterMsg{
-		filter:   filter,
-		extended: cfmsg.cfilter.Extended,
+		cfRequest: cfRequest{
+			blockHash: cfmsg.cfilter.BlockHash,
+			extended:  cfmsg.cfilter.Extended,
+		},
+		filter: filter,
 	}
 }
 
