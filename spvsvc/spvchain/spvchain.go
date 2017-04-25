@@ -24,6 +24,8 @@ import (
 )
 
 // These are exported variables so they can be changed by users.
+// TODO: Export functional options for these as much as possible so they can be
+// changed call-to-call.
 var (
 	// ConnectionRetryInterval is the base amount of time to wait in between
 	// retries when connecting to persistent peers.  It is adjusted by the
@@ -60,6 +62,9 @@ var (
 	// DisableDNSSeed disables getting initial addresses for Bitcoin nodes
 	// from DNS.
 	DisableDNSSeed = false
+
+	// Timeout specifies how long to wait for a peer to answer a query.
+	Timeout = time.Second * 5
 )
 
 // updatePeerHeightsMsg is a message sent from the blockmanager to the server
@@ -105,6 +110,132 @@ func (ps *peerState) forAllPeers(closure func(sp *serverPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
+// Query options can be modified per-query, unlike global options.
+// TODO: Make more query options that override global options.
+type queryOptions struct {
+	// queryTimeout lets the query know how long to wait for a peer to
+	// answer the query before moving onto the next peer.
+	queryTimeout time.Duration
+}
+
+// defaultQueryOptions returns a queryOptions set to package-level defaults.
+func defaultQueryOptions() *queryOptions {
+	return &queryOptions{
+		queryTimeout: Timeout,
+	}
+}
+
+// QueryTimeout is a query option that lets the query know to ask each peer we're
+// connected to for its opinion, if any. By default, we only ask peers until one
+// gives us a valid response.
+func QueryTimeout(timeout time.Duration) func(*queryOptions) {
+	return func(qo *queryOptions) {
+		qo.queryTimeout = timeout
+	}
+}
+
+type spMsg struct {
+	sp  *serverPeer
+	msg wire.Message
+}
+
+// queryPeers is a helper function that sends a query to one or more peers and
+// waits for an answer. The timeout for queries is set by the QueryTimeout
+// package-level variable.
+func (ps *peerState) queryPeers(
+	// selectPeer is a closure which decides whether or not to send the
+	// query to the peer.
+	selectPeer func(sp *serverPeer) bool,
+	// queryMsg is the message to send to each peer selected by selectPeer.
+	queryMsg wire.Message,
+	// checkResponse is caled for every message within the timeout period.
+	// The quit channel lets the query know to terminate because the
+	// required response has been found. This is done by closing the
+	// channel.
+	checkResponse func(sp *serverPeer, resp wire.Message,
+		quit chan<- struct{}),
+	// options takes functional options for executing the query.
+	options ...func(*queryOptions),
+) {
+	qo := defaultQueryOptions()
+	for _, option := range options {
+		option(qo)
+	}
+	// This will be shared state between the per-peer goroutines.
+	quit := make(chan struct{})
+	startQuery := make(chan struct{})
+	var wg sync.WaitGroup
+	channel := make(chan spMsg)
+
+	// This goroutine will monitor all messages from all peers until the
+	// peer goroutines all exit.
+	go func() {
+		for {
+			select {
+			case <-quit:
+				close(channel)
+				ps.forAllPeers(
+					func(sp *serverPeer) {
+						sp.unsubscribeRecvMsgs(channel)
+					})
+				return
+			case sm := <-channel:
+				// TODO: This will get stuck if checkResponse
+				// gets stuck.
+				checkResponse(sm.sp, sm.msg, quit)
+			}
+		}
+	}()
+
+	// Start a goroutine for each peer that potentially queries each peer
+	ps.forAllPeers(func(sp *serverPeer) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !selectPeer(sp) {
+				return
+			}
+			timeout := make(<-chan time.Time)
+			for {
+				select {
+				case <-timeout:
+					// After timeout, we return and notify
+					// another goroutine that we've done so.
+					// We only send if there's someone left
+					// to receive.
+					startQuery <- struct{}{}
+					return
+				case <-quit:
+					// After we're told to quit, we return.
+					return
+				case <-startQuery:
+					// We're the lucky peer whose turn it is
+					// to try to answer the current query.
+					// TODO: Fix this to support multiple
+					// queries at once. For now, we're
+					// relying on the  query handling loop
+					// to make sure we don't interrupt
+					// another query. We need broadcast
+					// support in OnRead to do this right.
+					sp.subscribeRecvMsg(channel)
+					sp.QueueMessage(queryMsg, nil)
+					timeout = time.After(qo.queryTimeout)
+				default:
+				}
+			}
+		}()
+	})
+	startQuery <- struct{}{}
+	wg.Wait()
+	// If we timed out and didn't quit, make sure our response monitor
+	// goroutine knows to quit.
+	select {
+	case <-quit:
+	default:
+		close(quit)
+	}
+}
+
 // cfhRequest records which cfheaders we've requested, and the order in which
 // we've requested them. Since there's no way to associate the cfheaders to the
 // actual block hashes based on the cfheaders message to keep it compact, we
@@ -142,6 +273,14 @@ type serverPeer struct {
 	quit               chan struct{}
 	// The following chans are used to sync blockmanager and server.
 	blockProcessed chan struct{}
+	// The following slice of channels is used to subscribe to messages from
+	// the peer. This allows broadcast to multiple subscribers at once,
+	// allowing for multiple queries to be going to multiple peers at any
+	// one time. The mutex is for subscribe/unsubscribe functionality.
+	// The sends on these channels WILL NOT block; any messages the channel
+	// can't accept will be dropped silently.
+	recvSubscribers []chan<- spMsg
+	mtxSubscribers  sync.RWMutex
 }
 
 // newServerPeer returns a new serverPeer instance. The peer needs to be set by
@@ -522,8 +661,46 @@ func (sp *serverPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 
 // OnRead is invoked when a peer receives a message and it is used to update
 // the bytes received by the server.
-func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message, err error) {
+func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
+	err error) {
 	sp.server.AddBytesReceived(uint64(bytesRead))
+	// Try to send a message to the subscriber channel if it isn't nil, but
+	// don't block on failure.
+	sp.mtxSubscribers.RLock()
+	defer sp.mtxSubscribers.RUnlock()
+	for _, channel := range sp.recvSubscribers {
+		if channel != nil {
+			select {
+			case channel <- spMsg{
+				sp:  sp,
+				msg: msg,
+			}:
+			default:
+			}
+		}
+	}
+}
+
+// subscribeRecvMsg handles adding OnRead subscriptions to the server peer.
+func (sp *serverPeer) subscribeRecvMsg(channel chan<- spMsg) {
+	sp.mtxSubscribers.Lock()
+	defer sp.mtxSubscribers.Unlock()
+	sp.recvSubscribers = append(sp.recvSubscribers, channel)
+}
+
+// unsubscribeRecvMsgs handles removing OnRead subscriptions from the server
+// peer.
+func (sp *serverPeer) unsubscribeRecvMsgs(channel chan<- spMsg) {
+	sp.mtxSubscribers.Lock()
+	defer sp.mtxSubscribers.Unlock()
+	var updatedSubscribers []chan<- spMsg
+	for _, candidate := range sp.recvSubscribers {
+		if candidate != channel {
+			updatedSubscribers = append(updatedSubscribers,
+				candidate)
+		}
+	}
+	sp.recvSubscribers = updatedSubscribers
 }
 
 // OnWrite is invoked when a peer sends a message and it is used to update
@@ -555,6 +732,9 @@ type ChainService struct {
 	quit              chan struct{}
 	timeSource        blockchain.MedianTimeSource
 	services          wire.ServiceFlag
+
+	cfilterRequests  map[cfRequest][]chan *gcs.Filter
+	cfRequestHeaders map[cfRequest][2]*chainhash.Hash
 
 	userAgentName    string
 	userAgentVersion string
@@ -764,6 +944,8 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		services:          Services,
 		userAgentName:     UserAgentName,
 		userAgentVersion:  UserAgentVersion,
+		cfilterRequests:   make(map[cfRequest][]chan *gcs.Filter),
+		cfRequestHeaders:  make(map[cfRequest][2]*chainhash.Hash),
 	}
 
 	err := createSPVNS(s.namespace, &s.chainParams)
@@ -1554,4 +1736,51 @@ func (s *ChainService) rollbackToHeight(height uint32) (*waddrmgr.BlockStamp, er
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
 	return s.blockManager.IsCurrent()
+}
+
+// GetCFilter gets a cfilter from the database. Failing that, it requests the
+// cfilter from the network and writes it to the database.
+func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
+	extended bool) *gcs.Filter {
+	getFilter := s.GetBasicFilter
+	getHeader := s.GetBasicHeader
+	putFilter := s.putBasicFilter
+	if extended {
+		getFilter = s.GetExtFilter
+		getHeader = s.GetExtHeader
+		putFilter = s.putExtFilter
+	}
+	filter, err := getFilter(blockHash)
+	if err == nil && filter != nil {
+		return filter
+	}
+	block, _, err := s.GetBlockByHash(blockHash)
+	if err != nil || block.BlockHash() != blockHash {
+		return nil
+	}
+	curHeader, err := getHeader(blockHash)
+	if err != nil {
+		return nil
+	}
+	prevHeader, err := getHeader(block.PrevBlock)
+	if err != nil {
+		return nil
+	}
+	replyChan := make(chan *gcs.Filter)
+	s.query <- getCFilterMsg{
+		cfRequest: cfRequest{
+			blockHash: blockHash,
+			extended:  extended,
+		},
+		prevHeader: prevHeader,
+		curHeader:  curHeader,
+		reply:      replyChan,
+	}
+	filter = <-replyChan
+	if filter != nil {
+		putFilter(blockHash, filter)
+		log.Tracef("Wrote filter for block %s, extended: %t",
+			blockHash, extended)
+	}
+	return filter
 }

@@ -8,8 +8,11 @@ import (
 	"errors"
 
 	"github.com/btcsuite/btcd/addrmgr"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/connmgr"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
+	"github.com/btcsuite/btcutil/gcs/builder"
 )
 
 type getConnCountMsg struct {
@@ -49,10 +52,20 @@ type forAllPeersMsg struct {
 	closure func(*serverPeer)
 }
 
-type processCFilterMsg struct {
-	filter   *gcs.Filter
-	extended bool
+type getCFilterMsg struct {
+	cfRequest
+	prevHeader *chainhash.Hash
+	curHeader  *chainhash.Hash
+	reply      chan *gcs.Filter
 }
+
+type processCFilterMsg struct {
+	cfRequest
+	filter *gcs.Filter
+}
+
+// TODO: General - abstract out more of blockmanager into queries. It'll make
+// this way more maintainable and usable.
 
 // handleQuery is the central handler for all queries and commands from other
 // goroutines related to peer state.
@@ -161,7 +174,107 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		// Even though this is a query, there's no reply channel as the
 		// forAllPeers method doesn't return anything. An error might be
 		// useful in the future.
+	case getCFilterMsg:
+		found := false
+		state.queryPeers(
+			// Should we query this peer?
+			func(sp *serverPeer) bool {
+				// Don't send requests to disconnected peers.
+				return sp.Connected()
+			},
+			// Send a wire.GetCFilterMsg
+			wire.NewMsgGetCFilter(&msg.blockHash, msg.extended),
+			// Check responses and if we get one that matches,
+			// end the query early.
+			func(sp *serverPeer, resp wire.Message,
+				quit chan<- struct{}) {
+				switch response := resp.(type) {
+				// We're only interested in "cfilter" messages.
+				case *wire.MsgCFilter:
+					if len(response.Data) < 4 {
+						// Filter data is too short.
+						// Ignore this message.
+						return
+					}
+					filter, err :=
+						gcs.FromNBytes(builder.DefaultP,
+							response.Data)
+					if err != nil {
+						// Malformed filter data. We
+						// can ignore this message.
+						return
+					}
+					if makeHeaderForFilter(filter,
+						*msg.prevHeader) !=
+						*msg.curHeader {
+						// Filter data doesn't match
+						// the headers we know about.
+						// Ignore this response.
+						return
+					}
+					// At this point, the filter matches
+					// what we know about it and we declare
+					// it sane. We can kill the query and
+					// pass the response back to the caller.
+					found = true
+					close(quit)
+					msg.reply <- filter
+				default:
+				}
+			},
+		)
+		// We timed out without finding a correct answer to our query.
+		if !found {
+			msg.reply <- nil
+		}
+		/*sent := false
+		state.forAllPeers(func(sp *serverPeer) {
+			// Send to one peer at a time. No use flooding the
+			// network.
+			if sent {
+				return
+			}
+			// Don't send to a peer that's not connected.
+			if !sp.Connected() {
+				return
+			}
+			// Don't send to any peer from which we've already
+			// requested this cfilter.
+			if _, ok := sp.requestedCFilters[msg.cfRequest]; ok {
+				return
+			}
+			// Request a cfilter from the peer and mark sent as
+			// true so we don't ask any other peers unless
+			// necessary.
+			err := sp.pushGetCFilterMsg(
+				&msg.cfRequest.blockHash,
+				msg.cfRequest.extended)
+			if err == nil {
+				sent = true
+			}
+
+		})
+		if !sent {
+			msg.reply <- nil
+			s.signalAllCFilters(msg.cfRequest, nil)
+			return
+		}
+		// Record the required header information against which to check
+		// the cfilter.
+		s.cfRequestHeaders[msg.cfRequest] = [2]*chainhash.Hash{
+			msg.prevHeader,
+			msg.curHeader,
+		}*/
+	case processCFilterMsg:
+		s.signalAllCFilters(msg.cfRequest, msg.filter)
 	}
-	//case processCFilterMsg:
-	// TODO: make this work
+}
+
+func (s *ChainService) signalAllCFilters(req cfRequest, filter *gcs.Filter) {
+	go func() {
+		for _, replyChan := range s.cfilterRequests[req] {
+			replyChan <- filter
+		}
+		s.cfilterRequests[req] = make([]chan *gcs.Filter, 0)
+	}()
 }

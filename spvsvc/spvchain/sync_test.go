@@ -1,17 +1,21 @@
 package spvchain_test
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/aakselrod/btctestlog"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpctest"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -147,6 +151,9 @@ func TestSetup(t *testing.T) {
 	chainLogger := btclog.NewSubsystemLogger(logger, "CHAIN: ")
 	chainLogger.SetLevel(logLevel)
 	spvchain.UseLogger(chainLogger)
+	rpcLogger := btclog.NewSubsystemLogger(logger, "RPCC: ")
+	rpcLogger.SetLevel(logLevel)
+	btcrpcclient.UseLogger(rpcLogger)
 	svc, err := spvchain.NewChainService(config)
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
@@ -279,99 +286,122 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 		return fmt.Errorf("Couldn't get latest extended header from "+
 			"%s: %s", correctSyncNode.P2PAddress(), err)
 	}
-	for total <= syncTimeout {
+	haveBasicHeader := &chainhash.Hash{}
+	haveExtHeader := &chainhash.Hash{}
+	for (*knownBasicHeader.HeaderHashes[0] != *haveBasicHeader) &&
+		(*knownExtHeader.HeaderHashes[0] != *haveExtHeader) {
+		if total > syncTimeout {
+			return fmt.Errorf("Timed out after %v waiting for "+
+				"cfheaders synchronization.", syncTimeout)
+		}
+		haveBasicHeader, _ = svc.GetBasicHeader(*knownBestHash)
+		haveExtHeader, _ = svc.GetExtHeader(*knownBestHash)
 		time.Sleep(syncUpdate)
 		total += syncUpdate
-		haveBasicHeader, err := svc.GetBasicHeader(*knownBestHash)
-		if err != nil {
-			if logLevel != btclog.Off {
-				t.Logf("Basic header unknown.")
-			}
-			continue
-		}
-		haveExtHeader, err := svc.GetExtHeader(*knownBestHash)
-		if err != nil {
-			if logLevel != btclog.Off {
-				t.Logf("Extended header unknown.")
-			}
-			continue
-		}
-		if *knownBasicHeader.HeaderHashes[0] != *haveBasicHeader {
-			return fmt.Errorf("Known basic header doesn't match "+
-				"the basic header the ChainService has. Known:"+
-				" %s, ChainService: %s",
-				knownBasicHeader.HeaderHashes[0],
-				haveBasicHeader)
-		}
-		if *knownExtHeader.HeaderHashes[0] != *haveExtHeader {
-			return fmt.Errorf("Known extended header doesn't "+
-				"match the extended header the ChainService "+
-				"has. Known: %s, ChainService: %s",
-				knownExtHeader.HeaderHashes[0], haveExtHeader)
-		}
-		// At this point, we know the latest cfheader is stored in the
-		// ChainService database. We now compare each cfheader the
-		// harness knows about to what's stored in the ChainService
-		// database to see if we've missed anything or messed anything
-		// up.
-		for i := int32(0); i <= haveBest.Height; i++ {
-			head, _, err := svc.GetBlockByHeight(uint32(i))
-			if err != nil {
-				return fmt.Errorf("Couldn't read block by "+
-					"height: %s", err)
-			}
-			hash := head.BlockHash()
-			haveBasicHeader, err := svc.GetBasicHeader(hash)
-			if err != nil {
-				return fmt.Errorf("Couldn't get basic header "+
-					"for %d (%s) from DB", i, hash)
-			}
-			haveExtHeader, err := svc.GetExtHeader(hash)
-			if err != nil {
-				return fmt.Errorf("Couldn't get extended "+
-					"header for %d (%s) from DB", i, hash)
-			}
-			knownBasicHeader, err :=
-				correctSyncNode.Node.GetCFilterHeader(&hash,
-					false)
-			if err != nil {
-				return fmt.Errorf("Couldn't get basic header "+
-					"for %d (%s) from node %s", i, hash,
-					correctSyncNode.P2PAddress())
-			}
-			knownExtHeader, err :=
-				correctSyncNode.Node.GetCFilterHeader(&hash,
-					true)
-			if err != nil {
-				return fmt.Errorf("Couldn't get extended "+
-					"header for %d (%s) from node %s", i,
-					hash, correctSyncNode.P2PAddress())
-			}
-			if *haveBasicHeader !=
-				*knownBasicHeader.HeaderHashes[0] {
-				return fmt.Errorf("Basic header for %d (%s) "+
-					"doesn't match node %s. DB: %s, node: "+
-					"%s", i, hash,
-					correctSyncNode.P2PAddress(),
-					haveBasicHeader,
-					knownBasicHeader.HeaderHashes[0])
-			}
-			if *haveExtHeader !=
-				*knownExtHeader.HeaderHashes[0] {
-				return fmt.Errorf("Extended header for %d (%s)"+
-					" doesn't match node %s. DB: %s, node:"+
-					" %s", i, hash,
-					correctSyncNode.P2PAddress(),
-					haveExtHeader,
-					knownExtHeader.HeaderHashes[0])
-			}
-		}
-		if logLevel != btclog.Off {
-			t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
-				haveBest.Hash)
-		}
-		return nil
 	}
-	return fmt.Errorf("Timeout waiting for cfheaders synchronization after"+
-		" %v", syncTimeout)
+	if logLevel != btclog.Off {
+		t.Logf("Synced cfheaders to %d (%s)", haveBest.Height,
+			haveBest.Hash)
+	}
+	// At this point, we know the latest cfheader is stored in the
+	// ChainService database. We now compare each cfheader the
+	// harness knows about to what's stored in the ChainService
+	// database to see if we've missed anything or messed anything
+	// up.
+	for i := int32(0); i <= haveBest.Height; i++ {
+		head, _, err := svc.GetBlockByHeight(uint32(i))
+		if err != nil {
+			return fmt.Errorf("Couldn't read block by "+
+				"height: %s", err)
+		}
+		hash := head.BlockHash()
+		haveBasicHeader, err = svc.GetBasicHeader(hash)
+		if err != nil {
+			return fmt.Errorf("Couldn't get basic header "+
+				"for %d (%s) from DB", i, hash)
+		}
+		haveExtHeader, err = svc.GetExtHeader(hash)
+		if err != nil {
+			return fmt.Errorf("Couldn't get extended "+
+				"header for %d (%s) from DB", i, hash)
+		}
+		knownBasicHeader, err =
+			correctSyncNode.Node.GetCFilterHeader(&hash,
+				false)
+		if err != nil {
+			return fmt.Errorf("Couldn't get basic header "+
+				"for %d (%s) from node %s", i, hash,
+				correctSyncNode.P2PAddress())
+		}
+		knownExtHeader, err =
+			correctSyncNode.Node.GetCFilterHeader(&hash,
+				true)
+		if err != nil {
+			return fmt.Errorf("Couldn't get extended "+
+				"header for %d (%s) from node %s", i,
+				hash, correctSyncNode.P2PAddress())
+		}
+		if *haveBasicHeader !=
+			*knownBasicHeader.HeaderHashes[0] {
+			return fmt.Errorf("Basic header for %d (%s) "+
+				"doesn't match node %s. DB: %s, node: "+
+				"%s", i, hash,
+				correctSyncNode.P2PAddress(),
+				haveBasicHeader,
+				knownBasicHeader.HeaderHashes[0])
+		}
+		if *haveExtHeader !=
+			*knownExtHeader.HeaderHashes[0] {
+			return fmt.Errorf("Extended header for %d (%s)"+
+				" doesn't match node %s. DB: %s, node:"+
+				" %s", i, hash,
+				correctSyncNode.P2PAddress(),
+				haveExtHeader,
+				knownExtHeader.HeaderHashes[0])
+		}
+	}
+	// Test getting 15 random filters.
+	heights := rand.Perm(int(haveBest.Height))
+	for i := 0; i < 15; i++ {
+		height := uint32(heights[i])
+		block, _, err := svc.GetBlockByHeight(height)
+		if err != nil {
+			return fmt.Errorf("Get block by height %d:"+
+				" %s", height, err)
+		}
+		blockHash := block.BlockHash()
+		haveFilter := svc.GetCFilter(blockHash, false)
+		if haveFilter == nil {
+			return fmt.Errorf("Couldn't get basic "+
+				"filter for block %d", height)
+		}
+		t.Logf("%x", haveFilter.NBytes())
+		wantFilter, err := correctSyncNode.Node.GetCFilter(&blockHash,
+			false)
+		if err != nil {
+			return fmt.Errorf("Couldn't get basic filter for "+
+				"block %d via RPC: %s", height, err)
+		}
+		if !bytes.Equal(haveFilter.NBytes(), wantFilter.Data) {
+			return fmt.Errorf("Basic filter from P2P network/DB"+
+				" doesn't match RPC value for block %d", height)
+		}
+		haveFilter = svc.GetCFilter(blockHash, true)
+		if haveFilter == nil {
+			return fmt.Errorf("Couldn't get extended "+
+				"filter for block %d", height)
+		}
+		t.Logf("%x", haveFilter.NBytes())
+		wantFilter, err = correctSyncNode.Node.GetCFilter(&blockHash,
+			true)
+		if err != nil {
+			return fmt.Errorf("Couldn't get extended filter for "+
+				"block %d via RPC: %s", height, err)
+		}
+		if !bytes.Equal(haveFilter.NBytes(), wantFilter.Data) {
+			return fmt.Errorf("Extended filter from P2P network/DB"+
+				" doesn't match RPC value for block %d", height)
+		}
+	}
+	return nil
 }
