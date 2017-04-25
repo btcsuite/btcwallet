@@ -217,6 +217,11 @@ func (ps *peerState) queryPeers(
 					// to make sure we don't interrupt
 					// another query. We need broadcast
 					// support in OnRead to do this right.
+					// TODO: Fix this to support either
+					// querying *all* peers simultaneously
+					// to avoid timeout delays, or starting
+					// with the syncPeer when not querying
+					// *all* peers.
 					sp.subscribeRecvMsg(channel)
 					sp.QueueMessage(queryMsg, nil)
 					timeout = time.After(qo.queryTimeout)
@@ -265,14 +270,10 @@ type serverPeer struct {
 	continueHash       *chainhash.Hash
 	relayMtx           sync.Mutex
 	requestQueue       []*wire.InvVect
-	requestedCFilters  map[cfRequest]struct{}
 	requestedCFHeaders map[cfhRequest]int
-	requestedBlocks    map[chainhash.Hash]struct{}
 	knownAddresses     map[string]struct{}
 	banScore           connmgr.DynamicBanScore
 	quit               chan struct{}
-	// The following chans are used to sync blockmanager and server.
-	blockProcessed chan struct{}
 	// The following slice of channels is used to subscribe to messages from
 	// the peer. This allows broadcast to multiple subscribers at once,
 	// allowing for multiple queries to be going to multiple peers at any
@@ -289,12 +290,9 @@ func newServerPeer(s *ChainService, isPersistent bool) *serverPeer {
 	return &serverPeer{
 		server:             s,
 		persistent:         isPersistent,
-		requestedCFilters:  make(map[cfRequest]struct{}),
-		requestedBlocks:    make(map[chainhash.Hash]struct{}),
 		requestedCFHeaders: make(map[cfhRequest]int),
 		knownAddresses:     make(map[string]struct{}),
 		quit:               make(chan struct{}),
-		blockProcessed:     make(chan struct{}, 1),
 	}
 }
 
@@ -370,20 +368,6 @@ func (sp *serverPeer) pushGetCFHeadersMsg(locator blockchain.BlockLocator,
 	return nil
 }
 
-// pushGetCFilterMsg sends a getcfilter message for the provided block hash to
-// the connected peer.
-func (sp *serverPeer) pushGetCFilterMsg(blockHash *chainhash.Hash,
-	ext bool) error {
-	req := cfRequest{
-		extended:  ext,
-		blockHash: *blockHash,
-	}
-	sp.requestedCFilters[req] = struct{}{}
-	msg := wire.NewMsgGetCFilter(blockHash, ext)
-	sp.QueueMessage(msg, nil)
-	return nil
-}
-
 // pushSendHeadersMsg sends a sendheaders message to the connected peer.
 func (sp *serverPeer) pushSendHeadersMsg() error {
 	if sp.VersionKnown() {
@@ -434,33 +418,6 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 
 	// Add valid peer to the server.
 	sp.server.AddPeer(sp)
-}
-
-// OnBlock is invoked when a peer receives a block bitcoin message.  It
-// blocks until the bitcoin block has been fully processed.
-func (sp *serverPeer) OnBlock(_ *peer.Peer, msg *wire.MsgBlock, buf []byte) {
-	log.Tracef("got block %s", msg.BlockHash())
-	// Convert the raw MsgBlock to a btcutil.Block which provides some
-	// convenience methods and things such as hash caching.
-	block := btcutil.NewBlockFromBlockAndBytes(msg, buf)
-
-	// Add the block to the known inventory for the peer.
-	iv := wire.NewInvVect(wire.InvTypeBlock, block.Hash())
-	sp.AddKnownInventory(iv)
-
-	// Queue the block up to be handled by the block
-	// manager and intentionally block further receives
-	// until the bitcoin block is fully processed and known
-	// good or bad.  This helps prevent a malicious peer
-	// from queuing up a bunch of bad blocks before
-	// disconnecting (or being disconnected) and wasting
-	// memory.  Additionally, this behavior is depended on
-	// by at least the block acceptance test tool as the
-	// reference implementation processes blocks in the same
-	// thread and therefore blocks further messages until
-	// the bitcoin block has been fully processed.
-	//sp.server.blockManager.QueueBlock(block, sp)
-	<-sp.blockProcessed
 }
 
 // OnInv is invoked when a peer receives an inv bitcoin message and is
@@ -600,13 +557,6 @@ func (sp *serverPeer) OnCFHeaders(p *peer.Peer, msg *wire.MsgCFHeaders) {
 	log.Tracef("Got cfheaders message with %d items from %s",
 		len(msg.HeaderHashes), p.Addr())
 	sp.server.blockManager.QueueCFHeaders(msg, sp)
-}
-
-// OnCFilter is invoked when a peer receives a cfilter bitcoin message and is
-// used to notify the server about a committed filter.
-func (sp *serverPeer) OnCFilter(p *peer.Peer, msg *wire.MsgCFilter) {
-	log.Tracef("Got cfilter message from %s", p.Addr())
-	sp.server.blockManager.QueueCFilter(msg, sp)
 }
 
 // OnAddr is invoked when a peer receives an addr bitcoin message and is
@@ -1294,11 +1244,9 @@ func newPeerConfig(sp *serverPeer) *peer.Config {
 		Listeners: peer.MessageListeners{
 			OnVersion: sp.OnVersion,
 			//OnVerAck:    sp.OnVerAck, // Don't use sendheaders yet
-			OnBlock:     sp.OnBlock,
 			OnInv:       sp.OnInv,
 			OnHeaders:   sp.OnHeaders,
 			OnCFHeaders: sp.OnCFHeaders,
-			OnCFilter:   sp.OnCFilter,
 			OnGetData:   sp.OnGetData,
 			OnReject:    sp.OnReject,
 			OnFeeFilter: sp.OnFeeFilter,
@@ -1783,4 +1731,25 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			blockHash, extended)
 	}
 	return filter
+}
+
+// GetBlockFromNetwork gets a block by requesting it from the network, one peer
+// at a time, until one answers.
+func (s *ChainService) GetBlockFromNetwork(
+	blockHash chainhash.Hash) *btcutil.Block {
+	blockHeader, height, err := s.GetBlockByHash(blockHash)
+	if err != nil || blockHeader.BlockHash() != blockHash {
+		return nil
+	}
+	replyChan := make(chan *btcutil.Block)
+	s.query <- getBlockMsg{
+		blockHeader: &blockHeader,
+		height:      height,
+		reply:       replyChan,
+	}
+	block := <-replyChan
+	if block != nil {
+		log.Tracef("Got block %s from network", blockHash)
+	}
+	return block
 }

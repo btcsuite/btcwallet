@@ -8,9 +8,11 @@ import (
 	"errors"
 
 	"github.com/btcsuite/btcd/addrmgr"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 )
@@ -59,9 +61,10 @@ type getCFilterMsg struct {
 	reply      chan *gcs.Filter
 }
 
-type processCFilterMsg struct {
-	cfRequest
-	filter *gcs.Filter
+type getBlockMsg struct {
+	blockHeader *wire.BlockHeader
+	height      uint32
+	reply       chan *btcutil.Block
 }
 
 // TODO: General - abstract out more of blockmanager into queries. It'll make
@@ -204,7 +207,7 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 						// can ignore this message.
 						return
 					}
-					if makeHeaderForFilter(filter,
+					if MakeHeaderForFilter(filter,
 						*msg.prevHeader) !=
 						*msg.curHeader {
 						// Filter data doesn't match
@@ -227,54 +230,70 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 		if !found {
 			msg.reply <- nil
 		}
-		/*sent := false
-		state.forAllPeers(func(sp *serverPeer) {
-			// Send to one peer at a time. No use flooding the
-			// network.
-			if sent {
-				return
-			}
-			// Don't send to a peer that's not connected.
-			if !sp.Connected() {
-				return
-			}
-			// Don't send to any peer from which we've already
-			// requested this cfilter.
-			if _, ok := sp.requestedCFilters[msg.cfRequest]; ok {
-				return
-			}
-			// Request a cfilter from the peer and mark sent as
-			// true so we don't ask any other peers unless
-			// necessary.
-			err := sp.pushGetCFilterMsg(
-				&msg.cfRequest.blockHash,
-				msg.cfRequest.extended)
-			if err == nil {
-				sent = true
-			}
-
-		})
-		if !sent {
+	case getBlockMsg:
+		found := false
+		getData := wire.NewMsgGetData()
+		blockHash := msg.blockHeader.BlockHash()
+		getData.AddInvVect(wire.NewInvVect(wire.InvTypeBlock,
+			&blockHash))
+		state.queryPeers(
+			// Should we query this peer?
+			func(sp *serverPeer) bool {
+				// Don't send requests to disconnected peers.
+				return sp.Connected()
+			},
+			// Send a wire.GetCFilterMsg
+			getData,
+			// Check responses and if we get one that matches,
+			// end the query early.
+			func(sp *serverPeer, resp wire.Message,
+				quit chan<- struct{}) {
+				switch response := resp.(type) {
+				// We're only interested in "block" messages.
+				case *wire.MsgBlock:
+					// If this isn't our block, ignore it.
+					if response.BlockHash() !=
+						blockHash {
+						return
+					}
+					block := btcutil.NewBlock(response)
+					// Only set height if btcutil hasn't
+					// automagically put one in.
+					if block.Height() ==
+						btcutil.BlockHeightUnknown {
+						block.SetHeight(
+							int32(msg.height))
+					}
+					// If this claims our block but doesn't
+					// pass the sanity check, the peer is
+					// trying to bamboozle us. Disconnect
+					// it.
+					if err := blockchain.CheckBlockSanity(
+						block,
+						// We don't need to check PoW
+						// because by the time we get
+						// here, it's been checked
+						// during header synchronization
+						s.chainParams.PowLimit,
+						s.timeSource,
+					); err != nil {
+						log.Warnf("Invalid block for "+
+							"%s received from %s "+
+							"-- disconnecting peer",
+							blockHash, sp.Addr())
+						sp.Disconnect()
+						return
+					}
+					found = true
+					close(quit)
+					msg.reply <- block
+				default:
+				}
+			},
+		)
+		// We timed out without finding a correct answer to our query.
+		if !found {
 			msg.reply <- nil
-			s.signalAllCFilters(msg.cfRequest, nil)
-			return
 		}
-		// Record the required header information against which to check
-		// the cfilter.
-		s.cfRequestHeaders[msg.cfRequest] = [2]*chainhash.Hash{
-			msg.prevHeader,
-			msg.curHeader,
-		}*/
-	case processCFilterMsg:
-		s.signalAllCFilters(msg.cfRequest, msg.filter)
 	}
-}
-
-func (s *ChainService) signalAllCFilters(req cfRequest, filter *gcs.Filter) {
-	go func() {
-		for _, replyChan := range s.cfilterRequests[req] {
-			replyChan <- filter
-		}
-		s.cfilterRequests[req] = make([]chan *gcs.Filter, 0)
-	}()
 }
