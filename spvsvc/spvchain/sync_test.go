@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
 	"os"
 	"reflect"
 	"sync"
@@ -24,14 +23,32 @@ import (
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
 
-const (
-	logLevel      = btclog.TraceLvl
-	syncTimeout   = 30 * time.Second
-	syncUpdate    = time.Second
-	numTestBlocks = 50
+var (
+	logLevel    = btclog.TraceLvl
+	syncTimeout = 30 * time.Second
+	syncUpdate  = time.Second
+	// Don't set this too high for your platform, or the tests will miss
+	// messages.
+	// TODO: Make this a benchmark instead.
+	numQueryThreads = 50
+	queryOptions    = []spvchain.QueryOption{
+	//spvchain.NumRetries(5),
+	}
 )
 
 func TestSetup(t *testing.T) {
+	// Set up logging.
+	logger, err := btctestlog.NewTestLogger(t)
+	if err != nil {
+		t.Fatalf("Could not set up logger: %s", err)
+	}
+	chainLogger := btclog.NewSubsystemLogger(logger, "CHAIN: ")
+	chainLogger.SetLevel(logLevel)
+	spvchain.UseLogger(chainLogger)
+	rpcLogger := btclog.NewSubsystemLogger(logger, "RPCC: ")
+	rpcLogger.SetLevel(logLevel)
+	btcrpcclient.UseLogger(rpcLogger)
+
 	// Create a btcd SimNet node and generate 500 blocks
 	h1, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
 	if err != nil {
@@ -147,16 +164,6 @@ func TestSetup(t *testing.T) {
 	spvchain.BanDuration = 5 * time.Second
 	spvchain.RequiredServices = wire.SFNodeNetwork
 	spvchain.WaitForMoreCFHeaders = time.Second
-	logger, err := btctestlog.NewTestLogger(t)
-	if err != nil {
-		t.Fatalf("Could not set up logger: %s", err)
-	}
-	chainLogger := btclog.NewSubsystemLogger(logger, "CHAIN: ")
-	chainLogger.SetLevel(logLevel)
-	spvchain.UseLogger(chainLogger)
-	rpcLogger := btclog.NewSubsystemLogger(logger, "RPCC: ")
-	rpcLogger.SetLevel(logLevel)
-	btcrpcclient.UseLogger(rpcLogger)
 	svc, err := spvchain.NewChainService(config)
 	if err != nil {
 		t.Fatalf("Error creating ChainService: %s", err)
@@ -168,6 +175,13 @@ func TestSetup(t *testing.T) {
 	err = waitForSync(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
+	}
+
+	// Test that we can get blocks and cfilters via P2P and decide which are
+	// valid and which aren't.
+	err = testRandomBlocks(t, svc, h1)
+	if err != nil {
+		t.Fatalf("Testing blocks and cfilters failed: %s", err)
 	}
 
 	// Generate 125 blocks on h1 to make sure it reorgs the other nodes.
@@ -208,13 +222,6 @@ func TestSetup(t *testing.T) {
 	err = waitForSync(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
-	}
-
-	// Test that we can get blocks and cfilters via P2P and decide which are
-	// valid and which aren't.
-	err = testRandomBlocks(t, svc, h1)
-	if err != nil {
-		t.Fatalf("Testing blocks and cfilters failed: %s", err)
 	}
 }
 
@@ -377,7 +384,7 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 // can correctly get filters from them. We don't go through *all* the blocks
 // because it can be a little slow, but we'll improve that soon-ish hopefully
 // to the point where we can do it.
-// TODO: Improve concurrency on framework side.
+// TODO: Make this a benchmark instead.
 func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 	correctSyncNode *rpctest.Harness) error {
 	var haveBest *waddrmgr.BlockStamp
@@ -386,180 +393,200 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 		return fmt.Errorf("Couldn't get best snapshot from "+
 			"ChainService: %s", err)
 	}
-	// Keep track of an error channel
-	errChan := make(chan error)
-	var lastErr error
-	go func() {
-		for err := range errChan {
-			if err != nil {
-				t.Errorf("%s", err)
-				lastErr = fmt.Errorf("Couldn't validate all " +
-					"blocks, filters, and filter headers.")
-			}
-		}
-	}()
-	// Test getting numTestBlocks random blocks and filters.
+	// Keep track of an error channel with enough buffer space to track one
+	// error per block.
+	errChan := make(chan error, haveBest.Height)
+	// Test getting all of the blocks and filters.
 	var wg sync.WaitGroup
-	heights := rand.Perm(int(haveBest.Height))
-	for i := 0; i < numTestBlocks; i++ {
+	workerQueue := make(chan struct{}, numQueryThreads)
+	for i := int32(1); i <= haveBest.Height; i++ {
 		wg.Add(1)
-		height := uint32(heights[i])
+		height := uint32(i)
+		// Wait until there's room in the worker queue.
+		workerQueue <- struct{}{}
 		go func() {
+			// On exit, open a spot in workerQueue and tell the
+			// wait group we're done.
+			defer func() {
+				<-workerQueue
+			}()
 			defer wg.Done()
 			// Get block header from database.
-			blockHeader, blockHeight, err := svc.GetBlockByHeight(height)
+			blockHeader, blockHeight, err := svc.GetBlockByHeight(
+				height)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get block "+
 					"header by height %d: %s", height, err)
 				return
 			}
 			if blockHeight != height {
-				errChan <- fmt.Errorf("Block height retrieved from DB "+
-					"doesn't match expected height. Want: %d, "+
-					"have: %d", height, blockHeight)
+				errChan <- fmt.Errorf("Block height retrieved "+
+					"from DB doesn't match expected "+
+					"height. Want: %d, have: %d", height,
+					blockHeight)
 				return
 			}
 			blockHash := blockHeader.BlockHash()
 			// Get block via RPC.
-			wantBlock, err := correctSyncNode.Node.GetBlock(&blockHash)
+			wantBlock, err := correctSyncNode.Node.GetBlock(
+				&blockHash)
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get block %d (%s) by RPC",
-					height, blockHash)
+				errChan <- fmt.Errorf("Couldn't get block %d "+
+					"(%s) by RPC", height, blockHash)
 				return
 			}
 			// Get block from network.
-			haveBlock := svc.GetBlockFromNetwork(blockHash)
+			haveBlock := svc.GetBlockFromNetwork(blockHash,
+				queryOptions...)
 			if haveBlock == nil {
-				errChan <- fmt.Errorf("Couldn't get block %d (%s) from"+
-					"network", height, blockHash)
+				errChan <- fmt.Errorf("Couldn't get block %d "+
+					"(%s) from network", height, blockHash)
 				return
 			}
 			// Check that network and RPC blocks match.
-			if !reflect.DeepEqual(*haveBlock.MsgBlock(), *wantBlock) {
-				errChan <- fmt.Errorf("Block from network doesn't match "+
-					"block from RPC. Want: %s, RPC: %s, network: "+
-					"%s", blockHash, wantBlock.BlockHash(),
+			if !reflect.DeepEqual(*haveBlock.MsgBlock(),
+				*wantBlock) {
+				errChan <- fmt.Errorf("Block from network "+
+					"doesn't match block from RPC. Want: "+
+					"%s, RPC: %s, network: %s", blockHash,
+					wantBlock.BlockHash(),
 					haveBlock.MsgBlock().BlockHash())
 				return
 			}
 			// Check that block height matches what we have.
 			if int32(blockHeight) != haveBlock.Height() {
-				errChan <- fmt.Errorf("Block height from network doesn't "+
-					"match expected height. Want: %s, network: %s",
+				errChan <- fmt.Errorf("Block height from "+
+					"network doesn't match expected "+
+					"height. Want: %s, network: %s",
 					blockHeight, haveBlock.Height())
 				return
 			}
 			// Get basic cfilter from network.
-			haveFilter := svc.GetCFilter(blockHash, false)
+			haveFilter := svc.GetCFilter(blockHash, false,
+				queryOptions...)
 			if haveFilter == nil {
 				errChan <- fmt.Errorf("Couldn't get basic "+
 					"filter for block %d", height)
 				return
 			}
 			// Get basic cfilter from RPC.
-			wantFilter, err := correctSyncNode.Node.GetCFilter(&blockHash,
-				false)
+			wantFilter, err := correctSyncNode.Node.GetCFilter(
+				&blockHash, false)
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get basic filter for "+
-					"block %d via RPC: %s", height, err)
+				errChan <- fmt.Errorf("Couldn't get basic "+
+					"filter for block %d via RPC: %s",
+					height, err)
 				return
 			}
 			// Check that network and RPC cfilters match.
 			if !bytes.Equal(haveFilter.NBytes(), wantFilter.Data) {
-				errChan <- fmt.Errorf("Basic filter from P2P network/DB"+
-					" doesn't match RPC value for block %d", height)
+				errChan <- fmt.Errorf("Basic filter from P2P "+
+					"network/DB doesn't match RPC value "+
+					"for block %d", height)
 				return
 			}
 			// Calculate basic filter from block.
 			calcFilter, err := spvchain.BuildBasicFilter(
 				haveBlock.MsgBlock())
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't build basic filter for "+
-					"block %d (%s): %s", height, blockHash, err)
+				errChan <- fmt.Errorf("Couldn't build basic "+
+					"filter for block %d (%s): %s", height,
+					blockHash, err)
 				return
 			}
-			// Check that the network value matches the calculated value
-			// from the block.
+			// Check that the network value matches the calculated
+			// value from the block.
 			if !reflect.DeepEqual(*haveFilter, *calcFilter) {
-				errChan <- fmt.Errorf("Basic filter from P2P network/DB "+
-					"doesn't match calculated value for block %d",
-					height)
+				errChan <- fmt.Errorf("Basic filter from P2P "+
+					"network/DB doesn't match calculated "+
+					"value for block %d", height)
 				return
 			}
 			// Get previous basic filter header from the database.
-			prevHeader, err := svc.GetBasicHeader(blockHeader.PrevBlock)
+			prevHeader, err := svc.GetBasicHeader(
+				blockHeader.PrevBlock)
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get basic filter header "+
-					"for block %d (%s) from DB: %s", height-1,
+				errChan <- fmt.Errorf("Couldn't get basic "+
+					"filter header for block %d (%s) from "+
+					"DB: %s", height-1,
 					blockHeader.PrevBlock, err)
 				return
 			}
 			// Get current basic filter header from the database.
 			curHeader, err := svc.GetBasicHeader(blockHash)
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get basic filter header "+
-					"for block %d (%s) from DB: %s", height-1,
-					blockHash, err)
+				errChan <- fmt.Errorf("Couldn't get basic "+
+					"filter header for block %d (%s) from "+
+					"DB: %s", height-1, blockHash, err)
 				return
 			}
 			// Check that the filter and header line up.
 			calcHeader := spvchain.MakeHeaderForFilter(calcFilter,
 				*prevHeader)
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
-				errChan <- fmt.Errorf("Filter header doesn't match. Want: "+
-					"%s, got: %s", curHeader, calcHeader)
+				errChan <- fmt.Errorf("Filter header doesn't "+
+					"match. Want: %s, got: %s", curHeader,
+					calcHeader)
 				return
 			}
 			// Get extended cfilter from network
-			haveFilter = svc.GetCFilter(blockHash, true)
+			haveFilter = svc.GetCFilter(blockHash, true,
+				queryOptions...)
 			if haveFilter == nil {
 				errChan <- fmt.Errorf("Couldn't get extended "+
 					"filter for block %d", height)
 				return
 			}
 			// Get extended cfilter from RPC
-			wantFilter, err = correctSyncNode.Node.GetCFilter(&blockHash,
-				true)
+			wantFilter, err = correctSyncNode.Node.GetCFilter(
+				&blockHash, true)
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get extended filter for "+
-					"block %d via RPC: %s", height, err)
+				errChan <- fmt.Errorf("Couldn't get extended "+
+					"filter for block %d via RPC: %s",
+					height, err)
 				return
 			}
 			// Check that network and RPC cfilters match
 			if !bytes.Equal(haveFilter.NBytes(), wantFilter.Data) {
-				errChan <- fmt.Errorf("Extended filter from P2P network/DB"+
-					" doesn't match RPC value for block %d", height)
+				errChan <- fmt.Errorf("Extended filter from "+
+					"P2P network/DB doesn't match RPC "+
+					"value for block %d", height)
 				return
 			}
 			// Calculate extended filter from block
 			calcFilter, err = spvchain.BuildExtFilter(
 				haveBlock.MsgBlock())
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't build extended filter for "+
-					"block %d (%s): %s", height, blockHash, err)
+				errChan <- fmt.Errorf("Couldn't build extended"+
+					" filter for block %d (%s): %s", height,
+					blockHash, err)
 				return
 			}
-			// Check that the network value matches the calculated value
-			// from the block.
+			// Check that the network value matches the calculated
+			// value from the block.
 			if !reflect.DeepEqual(*haveFilter, *calcFilter) {
-				errChan <- fmt.Errorf("Extended filter from P2P network/DB"+
-					" doesn't match calculated value for block %d",
-					height)
+				errChan <- fmt.Errorf("Extended filter from "+
+					"P2P network/DB doesn't match "+
+					"calculated value for block %d", height)
 				return
 			}
-			// Get previous extended filter header from the database.
-			prevHeader, err = svc.GetExtHeader(blockHeader.PrevBlock)
+			// Get previous extended filter header from the
+			// database.
+			prevHeader, err = svc.GetExtHeader(
+				blockHeader.PrevBlock)
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get extended filter header"+
-					" for block %d (%s) from DB: %s", height-1,
+				errChan <- fmt.Errorf("Couldn't get extended "+
+					"filter header for block %d (%s) from "+
+					"DB: %s", height-1,
 					blockHeader.PrevBlock, err)
 				return
 			}
 			// Get current basic filter header from the database.
 			curHeader, err = svc.GetExtHeader(blockHash)
 			if err != nil {
-				errChan <- fmt.Errorf("Couldn't get extended filter header"+
-					" for block %d (%s) from DB: %s", height-1,
+				errChan <- fmt.Errorf("Couldn't get extended "+
+					"filter header for block %d (%s) from "+
+					"DB: %s", height-1,
 					blockHash, err)
 				return
 			}
@@ -567,20 +594,29 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 			calcHeader = spvchain.MakeHeaderForFilter(calcFilter,
 				*prevHeader)
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
-				errChan <- fmt.Errorf("Filter header doesn't match. Want: "+
-					"%s, got: %s", curHeader, calcHeader)
+				errChan <- fmt.Errorf("Filter header doesn't "+
+					"match. Want: %s, got: %s", curHeader,
+					calcHeader)
 				return
 			}
 		}()
 	}
 	// Wait for all queries to finish.
 	wg.Wait()
-	if logLevel != btclog.Off {
-		t.Logf("Finished checking %d blocks and their cfilters",
-			numTestBlocks)
-	}
 	// Close the error channel to make the error monitoring goroutine
 	// finish.
 	close(errChan)
+	var lastErr error
+	for err := range errChan {
+		if err != nil {
+			t.Errorf("%s", err)
+			lastErr = fmt.Errorf("Couldn't validate all " +
+				"blocks, filters, and filter headers.")
+		}
+	}
+	if logLevel != btclog.Off {
+		t.Logf("Finished checking %d blocks and their cfilters",
+			haveBest.Height)
+	}
 	return lastErr
 }
