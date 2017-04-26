@@ -1031,9 +1031,11 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		// Should probably use better isolation for this but we're in
 		// the same package. One of the things to clean up when we do
 		// more general cleanup.
+		sp.mtxReqCFH.Lock()
 		sp.requestedCFHeaders[cfhReqB] = cfhCount
-		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, false)
 		sp.requestedCFHeaders[cfhReqE] = cfhCount
+		sp.mtxReqCFH.Unlock()
+		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, false)
 		sp.pushGetCFHeadersMsg(cfhLocator, &cfhStopHash, true)
 	})
 
@@ -1078,13 +1080,20 @@ func (b *blockManager) QueueCFHeaders(cfheaders *wire.MsgCFHeaders,
 		extended: cfheaders.Extended,
 		stopHash: cfheaders.StopHash,
 	}
-	if sp.requestedCFHeaders[req] != len(cfheaders.HeaderHashes) {
+	// TODO: Get rid of this by refactoring all of this using the query API
+	sp.mtxReqCFH.Lock()
+	expLen := sp.requestedCFHeaders[req]
+	sp.mtxReqCFH.Unlock()
+	if expLen != len(cfheaders.HeaderHashes) {
 		log.Warnf("Received cfheaders message doesn't match any "+
 			"getcfheaders request. Peer %s is probably on a "+
 			"different chain -- ignoring", sp.Addr())
 		return
 	}
+	// TODO: Remove this by refactoring this section into a query client.
+	sp.mtxReqCFH.Lock()
 	delete(sp.requestedCFHeaders, req)
+	sp.mtxReqCFH.Unlock()
 
 	// Track number of pending cfheaders messsages for both basic and
 	// extended filters.

@@ -8,13 +8,7 @@ import (
 	"errors"
 
 	"github.com/btcsuite/btcd/addrmgr"
-	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/connmgr"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/gcs"
-	"github.com/btcsuite/btcutil/gcs/builder"
 )
 
 type getConnCountMsg struct {
@@ -52,19 +46,6 @@ type removeNodeMsg struct {
 
 type forAllPeersMsg struct {
 	closure func(*serverPeer)
-}
-
-type getCFilterMsg struct {
-	cfRequest
-	prevHeader *chainhash.Hash
-	curHeader  *chainhash.Hash
-	reply      chan *gcs.Filter
-}
-
-type getBlockMsg struct {
-	blockHeader *wire.BlockHeader
-	height      uint32
-	reply       chan *btcutil.Block
 }
 
 // TODO: General - abstract out more of blockmanager into queries. It'll make
@@ -172,128 +153,12 @@ func (s *ChainService) handleQuery(state *peerState, querymsg interface{}) {
 
 		msg.reply <- errors.New("peer not found")
 	case forAllPeersMsg:
+		// TODO: Remove this when it's unnecessary due to wider use of
+		// queryPeers.
 		// Run the closure on all peers in the passed state.
 		state.forAllPeers(msg.closure)
 		// Even though this is a query, there's no reply channel as the
 		// forAllPeers method doesn't return anything. An error might be
 		// useful in the future.
-	case getCFilterMsg:
-		found := false
-		state.queryPeers(
-			// Should we query this peer?
-			func(sp *serverPeer) bool {
-				// Don't send requests to disconnected peers.
-				return sp.Connected()
-			},
-			// Send a wire.GetCFilterMsg
-			wire.NewMsgGetCFilter(&msg.blockHash, msg.extended),
-			// Check responses and if we get one that matches,
-			// end the query early.
-			func(sp *serverPeer, resp wire.Message,
-				quit chan<- struct{}) {
-				switch response := resp.(type) {
-				// We're only interested in "cfilter" messages.
-				case *wire.MsgCFilter:
-					if len(response.Data) < 4 {
-						// Filter data is too short.
-						// Ignore this message.
-						return
-					}
-					filter, err :=
-						gcs.FromNBytes(builder.DefaultP,
-							response.Data)
-					if err != nil {
-						// Malformed filter data. We
-						// can ignore this message.
-						return
-					}
-					if MakeHeaderForFilter(filter,
-						*msg.prevHeader) !=
-						*msg.curHeader {
-						// Filter data doesn't match
-						// the headers we know about.
-						// Ignore this response.
-						return
-					}
-					// At this point, the filter matches
-					// what we know about it and we declare
-					// it sane. We can kill the query and
-					// pass the response back to the caller.
-					found = true
-					close(quit)
-					msg.reply <- filter
-				default:
-				}
-			},
-		)
-		// We timed out without finding a correct answer to our query.
-		if !found {
-			msg.reply <- nil
-		}
-	case getBlockMsg:
-		found := false
-		getData := wire.NewMsgGetData()
-		blockHash := msg.blockHeader.BlockHash()
-		getData.AddInvVect(wire.NewInvVect(wire.InvTypeBlock,
-			&blockHash))
-		state.queryPeers(
-			// Should we query this peer?
-			func(sp *serverPeer) bool {
-				// Don't send requests to disconnected peers.
-				return sp.Connected()
-			},
-			// Send a wire.GetCFilterMsg
-			getData,
-			// Check responses and if we get one that matches,
-			// end the query early.
-			func(sp *serverPeer, resp wire.Message,
-				quit chan<- struct{}) {
-				switch response := resp.(type) {
-				// We're only interested in "block" messages.
-				case *wire.MsgBlock:
-					// If this isn't our block, ignore it.
-					if response.BlockHash() !=
-						blockHash {
-						return
-					}
-					block := btcutil.NewBlock(response)
-					// Only set height if btcutil hasn't
-					// automagically put one in.
-					if block.Height() ==
-						btcutil.BlockHeightUnknown {
-						block.SetHeight(
-							int32(msg.height))
-					}
-					// If this claims our block but doesn't
-					// pass the sanity check, the peer is
-					// trying to bamboozle us. Disconnect
-					// it.
-					if err := blockchain.CheckBlockSanity(
-						block,
-						// We don't need to check PoW
-						// because by the time we get
-						// here, it's been checked
-						// during header synchronization
-						s.chainParams.PowLimit,
-						s.timeSource,
-					); err != nil {
-						log.Warnf("Invalid block for "+
-							"%s received from %s "+
-							"-- disconnecting peer",
-							blockHash, sp.Addr())
-						sp.Disconnect()
-						return
-					}
-					found = true
-					close(quit)
-					msg.reply <- block
-				default:
-				}
-			},
-		)
-		// We timed out without finding a correct answer to our query.
-		if !found {
-			msg.reply <- nil
-		}
 	}
 }
