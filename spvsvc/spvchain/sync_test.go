@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcrpcclient"
+	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -486,7 +487,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Calculate basic filter from block.
-			calcFilter, err := spvchain.BuildBasicFilter(
+			calcFilter, err := builder.BuildBasicFilter(
 				haveBlock.MsgBlock())
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't build basic "+
@@ -521,7 +522,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Check that the filter and header line up.
-			calcHeader := spvchain.MakeHeaderForFilter(calcFilter,
+			calcHeader := builder.MakeHeaderForFilter(calcFilter,
 				*prevHeader)
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
 				errChan <- fmt.Errorf("Filter header doesn't "+
@@ -554,7 +555,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Calculate extended filter from block
-			calcFilter, err = spvchain.BuildExtFilter(
+			calcFilter, err = builder.BuildExtFilter(
 				haveBlock.MsgBlock())
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't build extended"+
@@ -591,7 +592,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Check that the filter and header line up.
-			calcHeader = spvchain.MakeHeaderForFilter(calcFilter,
+			calcHeader = builder.MakeHeaderForFilter(calcFilter,
 				*prevHeader)
 			if !bytes.Equal(curHeader[:], calcHeader[:]) {
 				errChan <- fmt.Errorf("Filter header doesn't "+
