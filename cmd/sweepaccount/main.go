@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/crypto/ssh/terminal"
+
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
@@ -21,8 +23,6 @@ import (
 	"github.com/btcsuite/golangcrypto/ssh/terminal"
 	"github.com/jessevdk/go-flags"
 	"github.com/roasbeef/btcwallet/internal/cfgutil"
-
-	"golang.org/x/crypto/ssh/terminal"
 )
 
 var (
@@ -171,7 +171,7 @@ func makeInputSource(outputs []btcjson.ListUnspentResult) txauthor.InputSource {
 			break
 		}
 
-		inputs = append(inputs, wire.NewTxIn(&previousOutPoint, nil))
+		inputs = append(inputs, wire.NewTxIn(&previousOutPoint, nil, nil))
 	}
 
 	if sourceErr == nil && totalInputValue == 0 {

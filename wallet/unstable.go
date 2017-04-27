@@ -6,9 +6,9 @@
 package wallet
 
 import (
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcwallet/walletdb"
-	"github.com/roasbeef/btcwallet/wtxmgr"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 type unstableAPI struct {
