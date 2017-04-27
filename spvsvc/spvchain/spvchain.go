@@ -488,9 +488,9 @@ func (sp *serverPeer) OnAddr(_ *peer.Peer, msg *wire.MsgAddr) {
 func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message,
 	err error) {
 	sp.server.AddBytesReceived(uint64(bytesRead))
-	// Try to send a message to the subscriber channel if it isn't nil, but
-	// don't block on failure. Do this inside a goroutine to prevent the
-	// server from slowing down too fast.
+	// Send a message to each subscriber. Each message gets its own
+	// goroutine to prevent blocking on the mutex lock.
+	// TODO: Flood control.
 	sp.mtxSubscribers.RLock()
 	defer sp.mtxSubscribers.RUnlock()
 	for subscription := range sp.recvSubscribers {
@@ -1835,7 +1835,7 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 					// can ignore this message.
 					return
 				}
-				if MakeHeaderForFilter(gotFilter,
+				if builder.MakeHeaderForFilter(gotFilter,
 					*prevHeader) !=
 					*curHeader {
 					// Filter data doesn't match
