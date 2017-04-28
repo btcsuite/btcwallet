@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	logLevel    = btclog.TraceLvl
+	logLevel    = btclog.Off
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
 	// Don't set this too high for your platform, or the tests will miss
@@ -145,13 +145,12 @@ func TestSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error opening DB: %s\n", err)
 	}
-	ns, err := db.Namespace([]byte("weks"))
 	if err != nil {
 		t.Fatalf("Error geting namespace: %s\n", err)
 	}
 	config := spvchain.Config{
 		DataDir:     tempDir,
-		Namespace:   ns,
+		Database:    db,
 		ChainParams: modParams,
 		AddPeers: []string{
 			h3.P2PAddress(),
@@ -327,7 +326,7 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 	// database to see if we've missed anything or messed anything
 	// up.
 	for i := int32(0); i <= haveBest.Height; i++ {
-		head, _, err := svc.GetBlockByHeight(uint32(i))
+		head, err := svc.GetBlockByHeight(uint32(i))
 		if err != nil {
 			return fmt.Errorf("Couldn't read block by "+
 				"height: %s", err)
@@ -413,18 +412,10 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 			}()
 			defer wg.Done()
 			// Get block header from database.
-			blockHeader, blockHeight, err := svc.GetBlockByHeight(
-				height)
+			blockHeader, err := svc.GetBlockByHeight(height)
 			if err != nil {
 				errChan <- fmt.Errorf("Couldn't get block "+
 					"header by height %d: %s", height, err)
-				return
-			}
-			if blockHeight != height {
-				errChan <- fmt.Errorf("Block height retrieved "+
-					"from DB doesn't match expected "+
-					"height. Want: %d, have: %d", height,
-					blockHeight)
 				return
 			}
 			blockHash := blockHeader.BlockHash()
@@ -455,11 +446,11 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Check that block height matches what we have.
-			if int32(blockHeight) != haveBlock.Height() {
+			if int32(height) != haveBlock.Height() {
 				errChan <- fmt.Errorf("Block height from "+
 					"network doesn't match expected "+
 					"height. Want: %s, network: %s",
-					blockHeight, haveBlock.Height())
+					height, haveBlock.Height())
 				return
 			}
 			// Get basic cfilter from network.

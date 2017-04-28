@@ -934,7 +934,7 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// with the rest of the headers in the message as if
 			// nothing has happened.
 			b.syncPeer = hmsg.peer
-			_, err = b.server.rollbackToHeight(backHeight)
+			_, err = b.server.rollBackToHeight(backHeight)
 			if err != nil {
 				log.Criticalf("Rollback failed: %s",
 					err)
@@ -974,7 +974,8 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 		}
 
 		// Verify the header at the next checkpoint height matches.
-		if b.nextCheckpoint != nil && node.height == b.nextCheckpoint.Height {
+		if b.nextCheckpoint != nil &&
+			node.height == b.nextCheckpoint.Height {
 			nodeHash := node.header.BlockHash()
 			if nodeHash.IsEqual(b.nextCheckpoint.Hash) {
 				receivedCheckpoint = true
@@ -988,12 +989,14 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 					"disconnecting", node.height,
 					nodeHash, hmsg.peer.Addr(),
 					b.nextCheckpoint.Hash)
-				prevCheckpoint := b.findPreviousHeaderCheckpoint(node.height)
+				prevCheckpoint :=
+					b.findPreviousHeaderCheckpoint(
+						node.height)
 				log.Infof("Rolling back to previous validated "+
 					"checkpoint at height %d/hash %s",
 					prevCheckpoint.Height,
 					prevCheckpoint.Hash)
-				_, err := b.server.rollbackToHeight(uint32(
+				_, err := b.server.rollBackToHeight(uint32(
 					prevCheckpoint.Height))
 				if err != nil {
 					log.Criticalf("Rollback failed: %s",
@@ -1371,7 +1374,7 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 
 	// Get the block node at the previous retarget (targetTimespan days
 	// worth of blocks).
-	firstNode, _, err := b.server.GetBlockByHeight(
+	firstNode, err := b.server.GetBlockByHeight(
 		uint32(lastNode.height + 1 - b.blocksPerRetarget))
 	if err != nil {
 		return 0, err
@@ -1451,7 +1454,8 @@ func (b *blockManager) findPrevTestNetDifficulty(hList *list.List) (uint32, erro
 		if el != nil {
 			iterNode = el.Value.(*headerNode).header
 		} else {
-			node, _, err := b.server.GetBlockByHeight(uint32(iterHeight))
+			node, err := b.server.GetBlockByHeight(
+				uint32(iterHeight))
 			if err != nil {
 				log.Errorf("GetBlockByHeight: %s", err)
 				return 0, err
