@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil/gcs"
@@ -30,7 +29,7 @@ var (
 // Key names for various database fields.
 var (
 	// Bucket names.
-	spvBucketName         = []byte("spv")
+	spvBucketName         = []byte("spvchain")
 	blockHeaderBucketName = []byte("bh")
 	basicHeaderBucketName = []byte("bfh")
 	basicFilterBucketName = []byte("bf")
@@ -59,475 +58,725 @@ func uint64ToBytes(number uint64) []byte {
 	return buf
 }
 
+// dbUpdateOption is a function type for the kind of DB update to be done.
+// These can call each other and dbViewOption functions; however, they cannot
+// be called by dbViewOption functions.
+type dbUpdateOption func(bucket walletdb.ReadWriteBucket) error
+
+// dbViewOption is a funciton type for the kind of data to be fetched from DB.
+// These can call each other and can be called by dbUpdateOption functions;
+// however, they cannot call dbUpdateOption functions.
+type dbViewOption func(bucket walletdb.ReadBucket) error
+
 // fetchDBVersion fetches the current manager version from the database.
-func fetchDBVersion(tx walletdb.Tx) (uint32, error) {
-	bucket := tx.RootBucket().Bucket(spvBucketName)
-	verBytes := bucket.Get(dbVersionName)
-	if verBytes == nil {
-		return 0, fmt.Errorf("required version number not stored in " +
-			"database")
+func (s *ChainService) fetchDBVersion() (uint32, error) {
+	var version uint32
+	err := s.dbView(fetchDBVersion(&version))
+	return version, err
+}
+
+func fetchDBVersion(version *uint32) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		verBytes := bucket.Get(dbVersionName)
+		if verBytes == nil {
+			return fmt.Errorf("required version number not " +
+				"stored in database")
+		}
+		*version = binary.LittleEndian.Uint32(verBytes)
+		return nil
 	}
-	version := binary.LittleEndian.Uint32(verBytes)
-	return version, nil
 }
 
 // putDBVersion stores the provided version to the database.
-func putDBVersion(tx walletdb.Tx, version uint32) error {
-	bucket := tx.RootBucket().Bucket(spvBucketName)
+func (s *ChainService) putDBVersion(version uint32) error {
+	return s.dbUpdate(putDBVersion(version))
+}
 
-	verBytes := uint32ToBytes(version)
-	return bucket.Put(dbVersionName, verBytes)
+func putDBVersion(version uint32) dbUpdateOption {
+	return func(bucket walletdb.ReadWriteBucket) error {
+		verBytes := uint32ToBytes(version)
+		return bucket.Put(dbVersionName, verBytes)
+	}
 }
 
 // putMaxBlockHeight stores the max block height to the database.
-func putMaxBlockHeight(tx walletdb.Tx, maxBlockHeight uint32) error {
-	bucket := tx.RootBucket().Bucket(spvBucketName)
+func (s *ChainService) putMaxBlockHeight(maxBlockHeight uint32) error {
+	return s.dbUpdate(putMaxBlockHeight(maxBlockHeight))
+}
 
-	maxBlockHeightBytes := uint32ToBytes(maxBlockHeight)
-	err := bucket.Put(maxBlockHeightName, maxBlockHeightBytes)
-	if err != nil {
-		return fmt.Errorf("failed to store max block height: %s", err)
+func putMaxBlockHeight(maxBlockHeight uint32) dbUpdateOption {
+	return func(bucket walletdb.ReadWriteBucket) error {
+		maxBlockHeightBytes := uint32ToBytes(maxBlockHeight)
+		err := bucket.Put(maxBlockHeightName, maxBlockHeightBytes)
+		if err != nil {
+			return fmt.Errorf("failed to store max block height: %s", err)
+		}
+		return nil
 	}
-	return nil
 }
 
 // putBlock stores the provided block header and height, keyed to the block
 // hash, in the database.
-func putBlock(tx walletdb.Tx, header wire.BlockHeader, height uint32) error {
-	var buf bytes.Buffer
-	err := header.Serialize(&buf)
-	if err != nil {
-		return err
-	}
-	_, err = buf.Write(uint32ToBytes(height))
-	if err != nil {
-		return err
-	}
+func (s *ChainService) putBlock(header wire.BlockHeader, height uint32) error {
+	return s.dbUpdate(putBlock(header, height))
+}
 
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
-	blockHash := header.BlockHash()
-
-	err = bucket.Put(blockHash[:], buf.Bytes())
-	if err != nil {
-		return fmt.Errorf("failed to store SPV block info: %s", err)
+func putBlock(header wire.BlockHeader, height uint32) dbUpdateOption {
+	return func(bucket walletdb.ReadWriteBucket) error {
+		var buf bytes.Buffer
+		err := header.Serialize(&buf)
+		if err != nil {
+			return err
+		}
+		_, err = buf.Write(uint32ToBytes(height))
+		if err != nil {
+			return err
+		}
+		blockHash := header.BlockHash()
+		bhBucket := bucket.NestedReadWriteBucket(blockHeaderBucketName)
+		err = bhBucket.Put(blockHash[:], buf.Bytes())
+		if err != nil {
+			return fmt.Errorf("failed to store SPV block info: %s",
+				err)
+		}
+		err = bhBucket.Put(uint32ToBytes(height), blockHash[:])
+		if err != nil {
+			return fmt.Errorf("failed to store block height info:"+
+				" %s", err)
+		}
+		return nil
 	}
-
-	err = bucket.Put(uint32ToBytes(height), blockHash[:])
-	if err != nil {
-		return fmt.Errorf("failed to store block height info: %s", err)
-	}
-
-	return nil
 }
 
 // putFilter stores the provided filter, keyed to the block hash, in the
 // appropriate filter bucket in the database.
-func putFilter(tx walletdb.Tx, blockHash chainhash.Hash, bucketName []byte,
+func (s *ChainService) putFilter(blockHash chainhash.Hash, bucketName []byte,
 	filter *gcs.Filter) error {
-	var buf bytes.Buffer
-	_, err := buf.Write(filter.NBytes())
-	if err != nil {
-		return err
+	return s.dbUpdate(putFilter(blockHash, bucketName, filter))
+}
+
+func putFilter(blockHash chainhash.Hash, bucketName []byte,
+	filter *gcs.Filter) dbUpdateOption {
+	return func(bucket walletdb.ReadWriteBucket) error {
+		var buf bytes.Buffer
+		_, err := buf.Write(filter.NBytes())
+		if err != nil {
+			return err
+		}
+		filterBucket := bucket.NestedReadWriteBucket(bucketName)
+		err = filterBucket.Put(blockHash[:], buf.Bytes())
+		if err != nil {
+			return fmt.Errorf("failed to store filter: %s", err)
+		}
+		return nil
 	}
-
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(bucketName)
-
-	err = bucket.Put(blockHash[:], buf.Bytes())
-	if err != nil {
-		return fmt.Errorf("failed to store filter: %s", err)
-	}
-
-	return nil
 }
 
 // putBasicFilter stores the provided filter, keyed to the block hash, in the
 // basic filter bucket in the database.
-func putBasicFilter(tx walletdb.Tx, blockHash chainhash.Hash,
+func (s *ChainService) putBasicFilter(blockHash chainhash.Hash,
 	filter *gcs.Filter) error {
-	return putFilter(tx, blockHash, basicFilterBucketName, filter)
+	return s.dbUpdate(putBasicFilter(blockHash, filter))
+}
+
+func putBasicFilter(blockHash chainhash.Hash,
+	filter *gcs.Filter) dbUpdateOption {
+	return putFilter(blockHash, basicFilterBucketName, filter)
 }
 
 // putExtFilter stores the provided filter, keyed to the block hash, in the
 // extended filter bucket in the database.
-func putExtFilter(tx walletdb.Tx, blockHash chainhash.Hash,
+func (s *ChainService) putExtFilter(blockHash chainhash.Hash,
 	filter *gcs.Filter) error {
-	return putFilter(tx, blockHash, extFilterBucketName, filter)
+	return s.dbUpdate(putExtFilter(blockHash, filter))
+}
+
+func putExtFilter(blockHash chainhash.Hash,
+	filter *gcs.Filter) dbUpdateOption {
+	return putFilter(blockHash, extFilterBucketName, filter)
 }
 
 // putHeader stores the provided header, keyed to the block hash, in the
 // appropriate filter header bucket in the database.
-func putHeader(tx walletdb.Tx, blockHash chainhash.Hash, bucketName []byte,
+func (s *ChainService) putHeader(blockHash chainhash.Hash, bucketName []byte,
 	filterTip chainhash.Hash) error {
+	return s.dbUpdate(putHeader(blockHash, bucketName, filterTip))
+}
 
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(bucketName)
-
-	err := bucket.Put(blockHash[:], filterTip[:])
-	if err != nil {
-		return fmt.Errorf("failed to store filter header: %s", err)
+func putHeader(blockHash chainhash.Hash, bucketName []byte,
+	filterTip chainhash.Hash) dbUpdateOption {
+	return func(bucket walletdb.ReadWriteBucket) error {
+		headerBucket := bucket.NestedReadWriteBucket(bucketName)
+		err := headerBucket.Put(blockHash[:], filterTip[:])
+		if err != nil {
+			return fmt.Errorf("failed to store filter header: %s", err)
+		}
+		return nil
 	}
-
-	return nil
 }
 
 // putBasicHeader stores the provided header, keyed to the block hash, in the
 // basic filter header bucket in the database.
-func putBasicHeader(tx walletdb.Tx, blockHash chainhash.Hash,
+func (s *ChainService) putBasicHeader(blockHash chainhash.Hash,
 	filterTip chainhash.Hash) error {
-	return putHeader(tx, blockHash, basicHeaderBucketName, filterTip)
+	return s.dbUpdate(putBasicHeader(blockHash, filterTip))
+}
+
+func putBasicHeader(blockHash chainhash.Hash,
+	filterTip chainhash.Hash) dbUpdateOption {
+	return putHeader(blockHash, basicHeaderBucketName, filterTip)
 }
 
 // putExtHeader stores the provided header, keyed to the block hash, in the
 // extended filter header bucket in the database.
-func putExtHeader(tx walletdb.Tx, blockHash chainhash.Hash,
+func (s *ChainService) putExtHeader(blockHash chainhash.Hash,
 	filterTip chainhash.Hash) error {
-	return putHeader(tx, blockHash, extHeaderBucketName, filterTip)
+	return s.dbUpdate(putExtHeader(blockHash, filterTip))
+}
+
+func putExtHeader(blockHash chainhash.Hash,
+	filterTip chainhash.Hash) dbUpdateOption {
+	return putHeader(blockHash, extHeaderBucketName, filterTip)
 }
 
 // getFilter retreives the filter, keyed to the provided block hash, from the
 // appropriate filter bucket in the database.
-func getFilter(tx walletdb.Tx, blockHash chainhash.Hash,
+func (s *ChainService) getFilter(blockHash chainhash.Hash,
 	bucketName []byte) (*gcs.Filter, error) {
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(bucketName)
+	var filter gcs.Filter
+	err := s.dbView(getFilter(blockHash, bucketName, &filter))
+	return &filter, err
+}
 
-	filterBytes := bucket.Get(blockHash[:])
-	if len(filterBytes) == 0 {
-		return nil, fmt.Errorf("failed to get filter")
+func getFilter(blockHash chainhash.Hash, bucketName []byte,
+	filter *gcs.Filter) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		filterBucket := bucket.NestedReadBucket(bucketName)
+		filterBytes := filterBucket.Get(blockHash[:])
+		if len(filterBytes) == 0 {
+			return fmt.Errorf("failed to get filter")
+		}
+		calcFilter, err := gcs.FromNBytes(builder.DefaultP, filterBytes)
+		if calcFilter != nil {
+			*filter = *calcFilter
+		}
+		return err
 	}
-
-	return gcs.FromNBytes(builder.DefaultP, filterBytes)
 }
 
-// getBasicFilter retrieves the filter, keyed to the provided block hash, from
+// GetBasicFilter retrieves the filter, keyed to the provided block hash, from
 // the basic filter bucket in the database.
-func getBasicFilter(tx walletdb.Tx, blockHash chainhash.Hash) (*gcs.Filter,
+func (s *ChainService) GetBasicFilter(blockHash chainhash.Hash) (*gcs.Filter,
 	error) {
-	return getFilter(tx, blockHash, basicFilterBucketName)
+	var filter gcs.Filter
+	err := s.dbView(getBasicFilter(blockHash, &filter))
+	return &filter, err
 }
 
-// getExtFilter retrieves the filter, keyed to the provided block hash, from
+func getBasicFilter(blockHash chainhash.Hash, filter *gcs.Filter) dbViewOption {
+	return getFilter(blockHash, basicFilterBucketName, filter)
+}
+
+// GetExtFilter retrieves the filter, keyed to the provided block hash, from
 // the extended filter bucket in the database.
-func getExtFilter(tx walletdb.Tx, blockHash chainhash.Hash) (*gcs.Filter,
+func (s *ChainService) GetExtFilter(blockHash chainhash.Hash) (*gcs.Filter,
 	error) {
-	return getFilter(tx, blockHash, extFilterBucketName)
+	var filter gcs.Filter
+	err := s.dbView(getExtFilter(blockHash, &filter))
+	return &filter, err
+}
+
+func getExtFilter(blockHash chainhash.Hash, filter *gcs.Filter) dbViewOption {
+	return getFilter(blockHash, extFilterBucketName, filter)
 }
 
 // getHeader retrieves the header, keyed to the provided block hash, from the
 // appropriate filter header bucket in the database.
-func getHeader(tx walletdb.Tx, blockHash chainhash.Hash,
+func (s *ChainService) getHeader(blockHash chainhash.Hash,
 	bucketName []byte) (*chainhash.Hash, error) {
-
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(bucketName)
-
-	filterTip := bucket.Get(blockHash[:])
-	if len(filterTip) == 0 {
-		return nil, fmt.Errorf("failed to get filter header")
-	}
-
-	return chainhash.NewHash(filterTip)
+	var filterTip chainhash.Hash
+	err := s.dbView(getHeader(blockHash, bucketName, &filterTip))
+	return &filterTip, err
 }
 
-// getBasicHeader retrieves the header, keyed to the provided block hash, from
+func getHeader(blockHash chainhash.Hash, bucketName []byte,
+	filterTip *chainhash.Hash) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		headerBucket := bucket.NestedReadBucket(bucketName)
+		headerBytes := headerBucket.Get(blockHash[:])
+		if len(filterTip) == 0 {
+			return fmt.Errorf("failed to get filter header")
+		}
+		calcFilterTip, err := chainhash.NewHash(headerBytes)
+		if calcFilterTip != nil {
+			*filterTip = *calcFilterTip
+		}
+		return err
+	}
+}
+
+// GetBasicHeader retrieves the header, keyed to the provided block hash, from
 // the basic filter header bucket in the database.
-func getBasicHeader(tx walletdb.Tx, blockHash chainhash.Hash) (*chainhash.Hash,
-	error) {
-	return getHeader(tx, blockHash, basicHeaderBucketName)
+func (s *ChainService) GetBasicHeader(blockHash chainhash.Hash) (
+	*chainhash.Hash, error) {
+	var filterTip chainhash.Hash
+	err := s.dbView(getBasicHeader(blockHash, &filterTip))
+	return &filterTip, err
 }
 
-// getExtHeader retrieves the header, keyed to the provided block hash, from the
+func getBasicHeader(blockHash chainhash.Hash,
+	filterTip *chainhash.Hash) dbViewOption {
+	return getHeader(blockHash, basicHeaderBucketName, filterTip)
+}
+
+// GetExtHeader retrieves the header, keyed to the provided block hash, from the
 // extended filter header bucket in the database.
-func getExtHeader(tx walletdb.Tx, blockHash chainhash.Hash) (*chainhash.Hash,
+func (s *ChainService) GetExtHeader(blockHash chainhash.Hash) (*chainhash.Hash,
 	error) {
-	return getHeader(tx, blockHash, extHeaderBucketName)
+	var filterTip chainhash.Hash
+	err := s.dbView(getExtHeader(blockHash, &filterTip))
+	return &filterTip, err
 }
 
-// rollbackLastBlock rolls back the last known block and returns the BlockStamp
+func getExtHeader(blockHash chainhash.Hash,
+	filterTip *chainhash.Hash) dbViewOption {
+	return getHeader(blockHash, extHeaderBucketName, filterTip)
+}
+
+// rollBackLastBlock rolls back the last known block and returns the BlockStamp
 // representing the new last known block.
-func rollbackLastBlock(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
-	bs, err := syncedTo(tx)
-	if err != nil {
-		return nil, err
-	}
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
-	err = bucket.Delete(bs.Hash[:])
-	if err != nil {
-		return nil, err
-	}
-	err = bucket.Delete(uint32ToBytes(uint32(bs.Height)))
-	if err != nil {
-		return nil, err
-	}
-	err = putMaxBlockHeight(tx, uint32(bs.Height-1))
-	if err != nil {
-		return nil, err
-	}
-	return syncedTo(tx)
+func (s *ChainService) rollBackLastBlock() (*waddrmgr.BlockStamp, error) {
+	var bs waddrmgr.BlockStamp
+	err := s.dbUpdate(rollBackLastBlock(&bs))
+	return &bs, err
 }
 
-// getBlockByHash retrieves the block header, filter, and filter tip, based on
+func rollBackLastBlock(bs *waddrmgr.BlockStamp) dbUpdateOption {
+	return func(bucket walletdb.ReadWriteBucket) error {
+		headerBucket := bucket.NestedReadWriteBucket(
+			blockHeaderBucketName)
+		var sync waddrmgr.BlockStamp
+		err := syncedTo(&sync)(bucket)
+		if err != nil {
+			return err
+		}
+		err = headerBucket.Delete(sync.Hash[:])
+		if err != nil {
+			return err
+		}
+		err = headerBucket.Delete(uint32ToBytes(uint32(sync.Height)))
+		if err != nil {
+			return err
+		}
+		err = putMaxBlockHeight(uint32(sync.Height - 1))(bucket)
+		if err != nil {
+			return err
+		}
+		sync = waddrmgr.BlockStamp{}
+		err = syncedTo(&sync)(bucket)
+		if sync != (waddrmgr.BlockStamp{}) {
+			*bs = sync
+		}
+		return err
+	}
+}
+
+// rollBackToHeight rolls back all blocks until it hits the specified height.
+func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
+	var bs waddrmgr.BlockStamp
+	err := s.dbUpdate(rollBackToHeight(height, &bs))
+	return &bs, err
+}
+
+func rollBackToHeight(height uint32, bs *waddrmgr.BlockStamp) dbUpdateOption {
+	return func(bucket walletdb.ReadWriteBucket) error {
+		err := syncedTo(bs)(bucket)
+		if err != nil {
+			return err
+		}
+		for uint32(bs.Height) > height {
+			err = rollBackLastBlock(bs)(bucket)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// GetBlockByHash retrieves the block header, filter, and filter tip, based on
 // the provided block hash, from the database.
-func getBlockByHash(tx walletdb.Tx, blockHash chainhash.Hash) (wire.BlockHeader,
-	uint32, error) {
-	//chainhash.Hash, chainhash.Hash,
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
-	blockBytes := bucket.Get(blockHash[:])
-	if len(blockBytes) == 0 {
-		return wire.BlockHeader{}, 0,
-			fmt.Errorf("failed to retrieve block info for hash: %s",
-				blockHash)
-	}
-
-	buf := bytes.NewReader(blockBytes[:wire.MaxBlockHeaderPayload])
+func (s *ChainService) GetBlockByHash(blockHash chainhash.Hash) (
+	wire.BlockHeader, uint32, error) {
 	var header wire.BlockHeader
-	err := header.Deserialize(buf)
-	if err != nil {
-		return wire.BlockHeader{}, 0,
-			fmt.Errorf("failed to deserialize block header for "+
-				"hash: %s", blockHash)
-	}
-
-	height := binary.LittleEndian.Uint32(
-		blockBytes[wire.MaxBlockHeaderPayload : wire.MaxBlockHeaderPayload+4])
-
-	return header, height, nil
+	var height uint32
+	err := s.dbView(getBlockByHash(blockHash, &header, &height))
+	return header, height, err
 }
 
-// getBlockHashByHeight retrieves the hash of a block by its height.
-func getBlockHashByHeight(tx walletdb.Tx, height uint32) (chainhash.Hash,
+func getBlockByHash(blockHash chainhash.Hash, header *wire.BlockHeader,
+	height *uint32) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		headerBucket := bucket.NestedReadBucket(blockHeaderBucketName)
+		blockBytes := headerBucket.Get(blockHash[:])
+		if len(blockBytes) < wire.MaxBlockHeaderPayload+4 {
+			return fmt.Errorf("failed to retrieve block info for"+
+				" hash %s: want %d bytes, got %d.", blockHash,
+				wire.MaxBlockHeaderPayload+4, len(blockBytes))
+		}
+		buf := bytes.NewReader(blockBytes[:wire.MaxBlockHeaderPayload])
+		err := header.Deserialize(buf)
+		if err != nil {
+			return fmt.Errorf("failed to deserialize block header "+
+				"for hash: %s", blockHash)
+		}
+		*height = binary.LittleEndian.Uint32(
+			blockBytes[wire.MaxBlockHeaderPayload : wire.MaxBlockHeaderPayload+4])
+		return nil
+	}
+}
+
+// GetBlockHashByHeight retrieves the hash of a block by its height.
+func (s *ChainService) GetBlockHashByHeight(height uint32) (chainhash.Hash,
 	error) {
-	bucket := tx.RootBucket().Bucket(spvBucketName).Bucket(blockHeaderBucketName)
-	var hash chainhash.Hash
-	hashBytes := bucket.Get(uint32ToBytes(height))
-	if hashBytes == nil {
-		return hash, fmt.Errorf("no block hash for height %d", height)
-	}
-	hash.SetBytes(hashBytes)
-	return hash, nil
+	var blockHash chainhash.Hash
+	err := s.dbView(getBlockHashByHeight(height, &blockHash))
+	return blockHash, err
 }
 
-// getBlockByHeight retrieves a block's information by its height.
-func getBlockByHeight(tx walletdb.Tx, height uint32) (wire.BlockHeader, uint32,
+func getBlockHashByHeight(height uint32,
+	blockHash *chainhash.Hash) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		headerBucket := bucket.NestedReadBucket(blockHeaderBucketName)
+		hashBytes := headerBucket.Get(uint32ToBytes(height))
+		if hashBytes == nil {
+			return fmt.Errorf("no block hash for height %d", height)
+		}
+		blockHash.SetBytes(hashBytes)
+		return nil
+	}
+}
+
+// GetBlockByHeight retrieves a block's information by its height.
+func (s *ChainService) GetBlockByHeight(height uint32) (wire.BlockHeader,
 	error) {
-	// chainhash.Hash, chainhash.Hash
-	blockHash, err := getBlockHashByHeight(tx, height)
-	if err != nil {
-		return wire.BlockHeader{}, 0, err
-	}
-
-	return getBlockByHash(tx, blockHash)
+	var header wire.BlockHeader
+	err := s.dbView(getBlockByHeight(height, &header))
+	return header, err
 }
 
-// syncedTo retrieves the most recent block's height and hash.
-func syncedTo(tx walletdb.Tx) (*waddrmgr.BlockStamp, error) {
-	header, height, err := latestBlock(tx)
-	if err != nil {
-		return nil, err
+func getBlockByHeight(height uint32, header *wire.BlockHeader) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		var blockHash chainhash.Hash
+		err := getBlockHashByHeight(height, &blockHash)(bucket)
+		if err != nil {
+			return err
+		}
+		var gotHeight uint32
+		err = getBlockByHash(blockHash, header, &gotHeight)(bucket)
+		if err != nil {
+			return err
+		}
+		if gotHeight != height {
+			return fmt.Errorf("Got height %d for block at "+
+				"requested height %d", gotHeight, height)
+		}
+		return nil
 	}
-	var blockStamp waddrmgr.BlockStamp
-	blockStamp.Hash = header.BlockHash()
-	blockStamp.Height = int32(height)
-	return &blockStamp, nil
 }
 
-// latestBlock retrieves all the info about the latest stored block.
-func latestBlock(tx walletdb.Tx) (wire.BlockHeader, uint32, error) {
-	bucket := tx.RootBucket().Bucket(spvBucketName)
+// BestSnapshot is a synonym for SyncedTo
+func (s *ChainService) BestSnapshot() (*waddrmgr.BlockStamp, error) {
+	return s.SyncedTo()
+}
 
-	maxBlockHeightBytes := bucket.Get(maxBlockHeightName)
-	if maxBlockHeightBytes == nil {
-		return wire.BlockHeader{}, 0,
-			fmt.Errorf("no max block height stored")
-	}
+// SyncedTo retrieves the most recent block's height and hash.
+func (s *ChainService) SyncedTo() (*waddrmgr.BlockStamp, error) {
+	var bs waddrmgr.BlockStamp
+	err := s.dbView(syncedTo(&bs))
+	return &bs, err
+}
 
-	maxBlockHeight := binary.LittleEndian.Uint32(maxBlockHeightBytes)
-	header, height, err := getBlockByHeight(tx, maxBlockHeight)
-	if err != nil {
-		return wire.BlockHeader{}, 0, err
+func syncedTo(bs *waddrmgr.BlockStamp) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		var header wire.BlockHeader
+		var height uint32
+		err := latestBlock(&header, &height)(bucket)
+		if err != nil {
+			return err
+		}
+		bs.Hash = header.BlockHash()
+		bs.Height = int32(height)
+		return nil
 	}
-	if height != maxBlockHeight {
-		return wire.BlockHeader{}, 0,
-			fmt.Errorf("max block height inconsistent")
+}
+
+// LatestBlock retrieves latest stored block's header and height.
+func (s *ChainService) LatestBlock() (wire.BlockHeader, uint32, error) {
+	var bh wire.BlockHeader
+	var h uint32
+	err := s.dbView(latestBlock(&bh, &h))
+	return bh, h, err
+}
+
+func latestBlock(header *wire.BlockHeader, height *uint32) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		maxBlockHeightBytes := bucket.Get(maxBlockHeightName)
+		if maxBlockHeightBytes == nil {
+			return fmt.Errorf("no max block height stored")
+		}
+		*height = binary.LittleEndian.Uint32(maxBlockHeightBytes)
+		return getBlockByHeight(*height, header)(bucket)
 	}
-	return header, height, nil
+}
+
+// BlockLocatorFromHash returns a block locator based on the provided hash.
+func (s *ChainService) BlockLocatorFromHash(hash chainhash.Hash) (
+	blockchain.BlockLocator, error) {
+	var locator blockchain.BlockLocator
+	err := s.dbView(blockLocatorFromHash(hash, &locator))
+	return locator, err
+}
+
+func blockLocatorFromHash(hash chainhash.Hash,
+	locator *blockchain.BlockLocator) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		// Append the initial hash
+		*locator = append(*locator, &hash)
+		// If hash isn't found in DB or this is the genesis block, return
+		// the locator as is
+		var header wire.BlockHeader
+		var height uint32
+		err := getBlockByHash(hash, &header, &height)(bucket)
+		if (err != nil) || (height == 0) {
+			return nil
+		}
+
+		decrement := uint32(1)
+		for (height > 0) && (len(*locator) < wire.MaxBlockLocatorsPerMsg) {
+			// Decrement by 1 for the first 10 blocks, then double the
+			// jump until we get to the genesis hash
+			if len(*locator) > 10 {
+				decrement *= 2
+			}
+			if decrement > height {
+				height = 0
+			} else {
+				height -= decrement
+			}
+			var blockHash chainhash.Hash
+			err := getBlockHashByHeight(height, &blockHash)(bucket)
+			if err != nil {
+				return nil
+			}
+			*locator = append(*locator, &blockHash)
+		}
+		return nil
+	}
+}
+
+// LatestBlockLocator returns the block locator for the latest known block
+// stored in the database.
+func (s *ChainService) LatestBlockLocator() (blockchain.BlockLocator, error) {
+	var locator blockchain.BlockLocator
+	err := s.dbView(latestBlockLocator(&locator))
+	return locator, err
+}
+
+func latestBlockLocator(locator *blockchain.BlockLocator) dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		var best waddrmgr.BlockStamp
+		err := syncedTo(&best)(bucket)
+		if err != nil {
+			return err
+		}
+		return blockLocatorFromHash(best.Hash, locator)(bucket)
+	}
 }
 
 // CheckConnectivity cycles through all of the block headers, from last to
 // first, and makes sure they all connect to each other.
-func CheckConnectivity(tx walletdb.Tx) error {
-	header, height, err := latestBlock(tx)
-	if err != nil {
-		return fmt.Errorf("Couldn't retrieve latest block: %s", err)
-	}
-	for height > 0 {
-		newheader, newheight, err := getBlockByHash(tx,
-			header.PrevBlock)
-		if err != nil {
-			return fmt.Errorf("Couldn't retrieve block %s: %s",
-				header.PrevBlock, err)
-		}
-		if newheader.BlockHash() != header.PrevBlock {
-			return fmt.Errorf("Block %s doesn't match block %s's "+
-				"PrevBlock (%s)", newheader.BlockHash(),
-				header.BlockHash(), header.PrevBlock)
-		}
-		if newheight != height-1 {
-			return fmt.Errorf("Block %s doesn't have correct "+
-				"height: want %d, got %d",
-				newheader.BlockHash(), height-1, newheight)
-		}
-		header = newheader
-		height = newheight
-	}
-	return nil
+func (s *ChainService) CheckConnectivity() error {
+	return s.dbView(checkConnectivity())
 }
 
-// blockLocatorFromHash returns a block locator based on the provided hash.
-func blockLocatorFromHash(tx walletdb.Tx, hash chainhash.Hash) blockchain.BlockLocator {
-	locator := make(blockchain.BlockLocator, 0, wire.MaxBlockLocatorsPerMsg)
-	locator = append(locator, &hash)
-
-	// If hash isn't found in DB or this is the genesis block, return
-	// the locator as is
-	_, height, err := getBlockByHash(tx, hash)
-	if (err != nil) || (height == 0) {
-		return locator
-	}
-
-	decrement := uint32(1)
-	for (height > 0) && (len(locator) < wire.MaxBlockLocatorsPerMsg) {
-		// Decrement by 1 for the first 10 blocks, then double the
-		// jump until we get to the genesis hash
-		if len(locator) > 10 {
-			decrement *= 2
-		}
-		if decrement > height {
-			height = 0
-		} else {
-			height -= decrement
-		}
-		blockHash, err := getBlockHashByHeight(tx, height)
+func checkConnectivity() dbViewOption {
+	return func(bucket walletdb.ReadBucket) error {
+		var header wire.BlockHeader
+		var height uint32
+		err := latestBlock(&header, &height)(bucket)
 		if err != nil {
-			return locator
+			return fmt.Errorf("Couldn't retrieve latest block: %s",
+				err)
 		}
-		locator = append(locator, &blockHash)
+		for height > 0 {
+			var newHeader wire.BlockHeader
+			var newHeight uint32
+			err := getBlockByHash(header.PrevBlock, &newHeader,
+				&newHeight)(bucket)
+			if err != nil {
+				return fmt.Errorf("Couldn't retrieve block %s:"+
+					" %s", header.PrevBlock, err)
+			}
+			if newHeader.BlockHash() != header.PrevBlock {
+				return fmt.Errorf("Block %s doesn't match "+
+					"block %s's PrevBlock (%s)",
+					newHeader.BlockHash(),
+					header.BlockHash(), header.PrevBlock)
+			}
+			if newHeight != height-1 {
+				return fmt.Errorf("Block %s doesn't have "+
+					"correct height: want %d, got %d",
+					newHeader.BlockHash(), height-1,
+					newHeight)
+			}
+			header = newHeader
+			height = newHeight
+		}
+		return nil
 	}
-
-	return locator
 }
 
 // createSPVNS creates the initial namespace structure needed for all of the
 // SPV-related data.  This includes things such as all of the buckets as well as
 // the version and creation date.
-func createSPVNS(namespace walletdb.Namespace, params *chaincfg.Params) error {
-	err := namespace.Update(func(tx walletdb.Tx) error {
-		rootBucket := tx.RootBucket()
-		spvBucket, err := rootBucket.CreateBucketIfNotExists(spvBucketName)
-		if err != nil {
-			return fmt.Errorf("failed to create main bucket: %s",
-				err)
-		}
-
-		_, err = spvBucket.CreateBucketIfNotExists(blockHeaderBucketName)
-		if err != nil {
-			return fmt.Errorf("failed to create block header "+
-				"bucket: %s", err)
-		}
-
-		_, err = spvBucket.CreateBucketIfNotExists(basicFilterBucketName)
-		if err != nil {
-			return fmt.Errorf("failed to create basic filter "+
-				"bucket: %s", err)
-		}
-
-		_, err = spvBucket.CreateBucketIfNotExists(basicHeaderBucketName)
-		if err != nil {
-			return fmt.Errorf("failed to create basic header "+
-				"bucket: %s", err)
-		}
-
-		_, err = spvBucket.CreateBucketIfNotExists(extFilterBucketName)
-		if err != nil {
-			return fmt.Errorf("failed to create extended filter "+
-				"bucket: %s", err)
-		}
-
-		_, err = spvBucket.CreateBucketIfNotExists(extHeaderBucketName)
-		if err != nil {
-			return fmt.Errorf("failed to create extended header "+
-				"bucket: %s", err)
-		}
-
-		createDate := spvBucket.Get(dbCreateDateName)
-		if createDate != nil {
-			log.Info("Wallet SPV namespace already created.")
-			return nil
-		}
-
-		log.Info("Creating wallet SPV namespace.")
-
-		basicFilter, err := builder.BuildBasicFilter(
-			params.GenesisBlock)
-		if err != nil {
-			return err
-		}
-
-		basicFilterTip := builder.MakeHeaderForFilter(basicFilter,
-			params.GenesisBlock.Header.PrevBlock)
-
-		extFilter, err := builder.BuildExtFilter(params.GenesisBlock)
-		if err != nil {
-			return err
-		}
-
-		extFilterTip := builder.MakeHeaderForFilter(extFilter,
-			params.GenesisBlock.Header.PrevBlock)
-
-		err = putBlock(tx, params.GenesisBlock.Header, 0)
-		if err != nil {
-			return err
-		}
-
-		err = putBasicFilter(tx, *params.GenesisHash, basicFilter)
-		if err != nil {
-			return err
-		}
-
-		err = putBasicHeader(tx, *params.GenesisHash, basicFilterTip)
-		if err != nil {
-			return err
-		}
-
-		err = putExtFilter(tx, *params.GenesisHash, extFilter)
-		if err != nil {
-			return err
-		}
-
-		err = putExtHeader(tx, *params.GenesisHash, extFilterTip)
-		if err != nil {
-			return err
-		}
-
-		err = putDBVersion(tx, latestDBVersion)
-		if err != nil {
-			return err
-		}
-
-		err = putMaxBlockHeight(tx, 0)
-		if err != nil {
-			return err
-		}
-
-		err = spvBucket.Put(dbCreateDateName,
-			uint64ToBytes(uint64(time.Now().Unix())))
-		if err != nil {
-			return fmt.Errorf("failed to store database creation "+
-				"time: %s", err)
-		}
-
-		return nil
-	})
+func (s *ChainService) createSPVNS() error {
+	tx, err := s.db.BeginReadWriteTx()
 	if err != nil {
-		return fmt.Errorf("failed to update database: %s", err)
+		return err
 	}
 
-	return nil
+	spvBucket, err := tx.CreateTopLevelBucket(spvBucketName)
+	if err != nil {
+		return fmt.Errorf("failed to create main bucket: %s", err)
+	}
+
+	_, err = spvBucket.CreateBucketIfNotExists(blockHeaderBucketName)
+	if err != nil {
+		return fmt.Errorf("failed to create block header bucket: %s",
+			err)
+	}
+
+	_, err = spvBucket.CreateBucketIfNotExists(basicFilterBucketName)
+	if err != nil {
+		return fmt.Errorf("failed to create basic filter "+
+			"bucket: %s", err)
+	}
+
+	_, err = spvBucket.CreateBucketIfNotExists(basicHeaderBucketName)
+	if err != nil {
+		return fmt.Errorf("failed to create basic header "+
+			"bucket: %s", err)
+	}
+
+	_, err = spvBucket.CreateBucketIfNotExists(extFilterBucketName)
+	if err != nil {
+		return fmt.Errorf("failed to create extended filter "+
+			"bucket: %s", err)
+	}
+
+	_, err = spvBucket.CreateBucketIfNotExists(extHeaderBucketName)
+	if err != nil {
+		return fmt.Errorf("failed to create extended header "+
+			"bucket: %s", err)
+	}
+
+	createDate := spvBucket.Get(dbCreateDateName)
+	if createDate != nil {
+		log.Info("Wallet SPV namespace already created.")
+		return nil
+	}
+
+	log.Info("Creating wallet SPV namespace.")
+
+	basicFilter, err := builder.BuildBasicFilter(
+		s.chainParams.GenesisBlock)
+	if err != nil {
+		return err
+	}
+
+	basicFilterTip := builder.MakeHeaderForFilter(basicFilter,
+		s.chainParams.GenesisBlock.Header.PrevBlock)
+
+	extFilter, err := builder.BuildExtFilter(
+		s.chainParams.GenesisBlock)
+	if err != nil {
+		return err
+	}
+
+	extFilterTip := builder.MakeHeaderForFilter(extFilter,
+		s.chainParams.GenesisBlock.Header.PrevBlock)
+
+	err = putBlock(s.chainParams.GenesisBlock.Header, 0)(spvBucket)
+	if err != nil {
+		return err
+	}
+
+	err = putBasicFilter(*s.chainParams.GenesisHash, basicFilter)(spvBucket)
+	if err != nil {
+		return err
+	}
+
+	err = putBasicHeader(*s.chainParams.GenesisHash, basicFilterTip)(
+		spvBucket)
+	if err != nil {
+		return err
+	}
+
+	err = putExtFilter(*s.chainParams.GenesisHash, extFilter)(spvBucket)
+	if err != nil {
+		return err
+	}
+
+	err = putExtHeader(*s.chainParams.GenesisHash, extFilterTip)(spvBucket)
+	if err != nil {
+		return err
+	}
+
+	err = putDBVersion(latestDBVersion)(spvBucket)
+	if err != nil {
+		return err
+	}
+
+	err = putMaxBlockHeight(0)(spvBucket)
+	if err != nil {
+		return err
+	}
+
+	err = spvBucket.Put(dbCreateDateName,
+		uint64ToBytes(uint64(time.Now().Unix())))
+	if err != nil {
+		return fmt.Errorf("failed to store database creation "+
+			"time: %s", err)
+	}
+
+	return tx.Commit()
+}
+
+// dbUpdate allows the passed function to update the ChainService DB bucket.
+func (s *ChainService) dbUpdate(updateFunc dbUpdateOption) error {
+	tx, err := s.db.BeginReadWriteTx()
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	bucket := tx.ReadWriteBucket(spvBucketName)
+	err = updateFunc(bucket)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// dbView allows the passed function to read the ChainService DB bucket.
+func (s *ChainService) dbView(viewFunc dbViewOption) error {
+	tx, err := s.db.BeginReadTx()
+	defer tx.Rollback()
+	if err != nil {
+		return err
+	}
+	bucket := tx.ReadBucket(spvBucketName)
+	return viewFunc(bucket)
+
 }
