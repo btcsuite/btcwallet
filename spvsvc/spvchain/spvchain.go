@@ -1,3 +1,6 @@
+// NOTE: THIS API IS UNSTABLE RIGHT NOW.
+// TODO: Add functional options to ChainService instantiation.
+
 package spvchain
 
 import (
@@ -17,6 +20,7 @@ import (
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -517,6 +521,15 @@ func (sp *serverPeer) OnWrite(_ *peer.Peer, bytesWritten int, msg wire.Message, 
 	sp.server.AddBytesSent(uint64(bytesWritten))
 }
 
+// blockSubscription allows a client to subscribe to and unsubscribe from block
+// connect and disconnect notifications.
+type blockSubscription struct {
+	onConnectBasic chan<- wire.BlockHeader
+	onConnectExt   chan<- wire.BlockHeader
+	onDisconnect   chan<- wire.BlockHeader
+	quit           <-chan struct{}
+}
+
 // ChainService is instantiated with functional options
 type ChainService struct {
 	// The following variables must only be used atomically.
@@ -540,6 +553,8 @@ type ChainService struct {
 	quit              chan struct{}
 	timeSource        blockchain.MedianTimeSource
 	services          wire.ServiceFlag
+	blockSubscribers  map[blockSubscription]struct{}
+	mtxSubscribers    sync.RWMutex
 
 	userAgentName    string
 	userAgentVersion string
@@ -599,6 +614,43 @@ func (s *ChainService) pushTxMsg(sp *serverPeer, hash *chainhash.Hash, doneChan 
 		sp.QueueMessage(tx.MsgTx(), doneChan) */
 
 	return nil
+}
+
+// rollBackToHeight rolls back all blocks until it hits the specified height.
+// It sends notifications along the way.
+func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp,
+	error) {
+	bs, err := s.SyncedTo()
+	if err != nil {
+		return nil, err
+	}
+	for uint32(bs.Height) > height {
+		header, _, err := s.GetBlockByHash(bs.Hash)
+		if err != nil {
+			return nil, err
+		}
+		bs, err = s.rollBackLastBlock()
+		if err != nil {
+			return nil, err
+		}
+		// Now we send the block disconnected notifications.
+		// TODO: Rethink this so we don't send notifications
+		// outside the package directly from here, and so we
+		// don't end up halting in the middle of processing
+		// blocks if a client mishandles a channel while still
+		// guaranteeing in-order delivery.
+		s.mtxSubscribers.RLock()
+		for sub := range s.blockSubscribers {
+			if sub.onDisconnect != nil {
+				select {
+				case sub.onDisconnect <- header:
+				case <-sub.quit:
+				}
+			}
+		}
+		s.mtxSubscribers.RUnlock()
+	}
+	return bs, nil
 }
 
 // peerHandler is used to handle peer operations such as adding and removing
@@ -1194,6 +1246,11 @@ out:
 	s.wg.Done()
 }
 
+// ChainParams returns a copy of the ChainService's chaincfg.Params.
+func (s *ChainService) ChainParams() chaincfg.Params {
+	return s.chainParams
+}
+
 // Start begins connecting to peers and syncing the blockchain.
 func (s *ChainService) Start() {
 	// Already started?
@@ -1227,4 +1284,20 @@ func (s *ChainService) Stop() error {
 // thinks its view of the network is current.
 func (s *ChainService) IsCurrent() bool {
 	return s.blockManager.IsCurrent()
+}
+
+// subscribeBlockMsg handles adding block subscriptions to the ChainService.
+// TODO: Rethink this.
+func (s *ChainService) subscribeBlockMsg(subscription blockSubscription) {
+	s.mtxSubscribers.Lock()
+	defer s.mtxSubscribers.Unlock()
+	s.blockSubscribers[subscription] = struct{}{}
+}
+
+// unsubscribeBlockMsgs handles removing block subscriptions from the
+// ChainService.
+func (s *ChainService) unsubscribeBlockMsgs(subscription blockSubscription) {
+	s.mtxSubscribers.Lock()
+	defer s.mtxSubscribers.Unlock()
+	delete(s.blockSubscribers, subscription)
 }

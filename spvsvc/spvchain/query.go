@@ -1,3 +1,5 @@
+// NOTE: THIS API IS UNSTABLE RIGHT NOW.
+
 package spvchain
 
 import (
@@ -41,7 +43,8 @@ type queryOptions struct {
 
 // QueryOption is a functional option argument to any of the network query
 // methods, such as GetBlockFromNetwork and GetCFilter (when that resorts to a
-// network query).
+// network query). These are always processed in order, with later options
+// overriding earlier ones.
 type QueryOption func(*queryOptions)
 
 // defaultQueryOptions returns a queryOptions set to package-level defaults.

@@ -2,6 +2,8 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
+// NOTE: THIS API IS UNSTABLE RIGHT NOW.
+
 package spvchain
 
 import (
