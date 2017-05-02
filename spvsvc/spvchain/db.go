@@ -1,3 +1,5 @@
+// NOTE: THIS API IS UNSTABLE RIGHT NOW.
+
 package spvchain
 
 import (
@@ -378,29 +380,6 @@ func rollBackLastBlock(bs *waddrmgr.BlockStamp) dbUpdateOption {
 			*bs = sync
 		}
 		return err
-	}
-}
-
-// rollBackToHeight rolls back all blocks until it hits the specified height.
-func (s *ChainService) rollBackToHeight(height uint32) (*waddrmgr.BlockStamp, error) {
-	var bs waddrmgr.BlockStamp
-	err := s.dbUpdate(rollBackToHeight(height, &bs))
-	return &bs, err
-}
-
-func rollBackToHeight(height uint32, bs *waddrmgr.BlockStamp) dbUpdateOption {
-	return func(bucket walletdb.ReadWriteBucket) error {
-		err := syncedTo(bs)(bucket)
-		if err != nil {
-			return err
-		}
-		for uint32(bs.Height) > height {
-			err = rollBackLastBlock(bs)(bucket)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
 	}
 }
 

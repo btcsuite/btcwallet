@@ -1,3 +1,5 @@
+// TODO: Break up tests into bite-sized pieces.
+
 package spvchain_test
 
 import (
@@ -11,12 +13,15 @@ import (
 	"time"
 
 	"github.com/aakselrod/btctestlog"
+	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpctest"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcrpcclient"
+	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -31,10 +36,43 @@ var (
 	// Don't set this too high for your platform, or the tests will miss
 	// messages.
 	// TODO: Make this a benchmark instead.
+	// TODO: Implement load limiting for both outgoing and incoming
+	// messages.
 	numQueryThreads = 50
 	queryOptions    = []spvchain.QueryOption{
 	//spvchain.NumRetries(5),
 	}
+	// The sequence of connecting blocks.
+	conn = func() []int32 {
+		blocks := []int32{}
+		for i := 801; i <= 928; i++ {
+			blocks = append(blocks, int32(i))
+		}
+		for i := 926; i <= 930; i++ {
+			blocks = append(blocks, int32(i))
+		}
+		for i := 926; i <= 935; i++ {
+			blocks = append(blocks, int32(i))
+		}
+		return blocks
+	}
+	// The sequence of disconnecting blocks.
+	dconn = func() []int32 {
+		blocks := []int32{}
+		for i := 928; i >= 926; i-- {
+			blocks = append(blocks, int32(i))
+		}
+		for i := 930; i >= 926; i-- {
+			blocks = append(blocks, int32(i))
+		}
+		return blocks
+	}
+	// Blocks with relevant transactions
+	relevant = []int32{801, 929, 930}
+	// Blocks with receive transactions
+	receive = []int32{801}
+	// Blocks with redeeming transactions
+	redeem = []int32{929, 930}
 )
 
 func TestSetup(t *testing.T) {
@@ -184,9 +222,49 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Testing blocks and cfilters failed: %s", err)
 	}
 
-	// Generate 125 blocks on h1 to make sure it reorgs the other nodes.
+	// Generate an address and send it some coins on the h1 chain. We use
+	// this to test rescans and notifications.
+	privKey, err := btcec.NewPrivateKey(btcec.S256())
+	if err != nil {
+		t.Fatalf("Couldn't generate private key: %s", err)
+	}
+	pubKeyHash := btcutil.Hash160(privKey.PubKey().SerializeCompressed())
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(pubKeyHash, &modParams)
+	if err != nil {
+		t.Fatalf("Couldn't create address from key: %s", err)
+	}
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("Couldn't create script from address: %s", err)
+	}
+	out := wire.TxOut{
+		PkScript: script,
+		Value:    1000000000,
+	}
+	tx1, err := h1.CreateTransaction([]*wire.TxOut{&out}, 1000)
+	if err != nil {
+		t.Fatalf("Couldn't create transaction from script: %s", err)
+	}
+	utx1 := btcutil.NewTx(tx1)
+	utx1.SetIndex(1)
+	tx2, err := h1.CreateTransaction([]*wire.TxOut{&out}, 1000)
+	if err != nil {
+		t.Fatalf("Couldn't create transaction from script: %s", err)
+	}
+	utx2 := btcutil.NewTx(tx2)
+	utx2.SetIndex(2)
+	if tx1.TxHash() == tx2.TxHash() {
+		t.Fatalf("Created two identical transactions")
+	}
+	_, err = h1.GenerateAndSubmitBlock([]*btcutil.Tx{utx1, utx2},
+		-1, time.Time{})
+	if err != nil {
+		t.Fatalf("Couldn't generate/submit block: %s")
+	}
+
+	// Generate 124 blocks on h1 to make sure it reorgs the other nodes.
 	// Ensure the ChainService instance stays caught up.
-	h1.Node.Generate(125)
+	h1.Node.Generate(124)
 	err = waitForSync(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
@@ -196,6 +274,41 @@ func TestSetup(t *testing.T) {
 	err = csd([]*rpctest.Harness{h1, h2})
 	if err != nil {
 		t.Fatalf("Couldn't sync h2 to h1: %s", err)
+	}
+
+	// Spend the outputs we sent ourselves.
+	_ = func(tx wire.MsgTx) func(target btcutil.Amount) (
+		total btcutil.Amount, inputs []*wire.TxIn,
+		inputValues []btcutil.Amount, scripts [][]byte, err error) {
+		ourIndex := 1 << 30 // Should work on 32-bit systems
+		for i, txo := range tx.TxOut {
+			if bytes.Equal(txo.PkScript, script) {
+				ourIndex = i
+			}
+		}
+		return func(target btcutil.Amount) (total btcutil.Amount,
+			inputs []*wire.TxIn, inputValues []btcutil.Amount,
+			scripts [][]byte, err error) {
+			if ourIndex == 1<<30 {
+				err = fmt.Errorf("Couldn't find our address " +
+					"in the passed transaction's outputs.")
+				return
+			}
+			total = target
+			inputs = []*wire.TxIn{
+				&wire.TxIn{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  tx.TxHash(),
+						Index: uint32(ourIndex),
+					},
+				},
+			}
+			inputValues = []btcutil.Amount{
+				btcutil.Amount(tx.TxOut[ourIndex].Value)}
+			scripts = [][]byte{tx.TxOut[ourIndex].PkScript}
+			err = nil
+			return
+		}
 	}
 
 	// Generate 3 blocks on h1, one at a time, to make sure the
