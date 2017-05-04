@@ -32,6 +32,11 @@ import (
 )
 
 var (
+	// Try btclog.InfoLvl for output like you'd see in normal operation, or
+	// btclog.TraceLvl to help debug code. Anything but btclog.Off turns on
+	// log messages from the tests themselves as well. Keep in mind some
+	// log messages may not appear in order due to use of multiple query
+	// goroutines in the tests.
 	logLevel    = btclog.Off
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
