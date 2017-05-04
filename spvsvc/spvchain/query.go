@@ -292,6 +292,9 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	if err == nil && filter != nil {
 		return filter
 	}
+	// We didn't get the filter from the DB, so we'll set it to nil and try
+	// to get it from the network.
+	filter = nil
 	block, _, err := s.GetBlockByHash(blockHash)
 	if err != nil || block.BlockHash() != blockHash {
 		return nil
@@ -314,6 +317,12 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 			switch response := resp.(type) {
 			// We're only interested in "cfilter" messages.
 			case *wire.MsgCFilter:
+				// Only keep this going if we haven't already
+				// found a filter, or we risk closing an already
+				// closed channel.
+				if filter != nil {
+					return
+				}
 				if len(response.Data) < 4 {
 					// Filter data is too short.
 					// Ignore this message.
@@ -324,17 +333,15 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 					// request. Ignore this message.
 					return
 				}
-				gotFilter, err :=
-					gcs.FromNBytes(builder.DefaultP,
-						response.Data)
+				gotFilter, err := gcs.FromNBytes(
+					builder.DefaultP, response.Data)
 				if err != nil {
 					// Malformed filter data. We
 					// can ignore this message.
 					return
 				}
 				if builder.MakeHeaderForFilter(gotFilter,
-					*prevHeader) !=
-					*curHeader {
+					*prevHeader) != *curHeader {
 					// Filter data doesn't match
 					// the headers we know about.
 					// Ignore this response.
@@ -386,9 +393,14 @@ func (s *ChainService) GetBlockFromNetwork(
 			switch response := resp.(type) {
 			// We're only interested in "block" messages.
 			case *wire.MsgBlock:
+				// Only keep this going if we haven't already
+				// found a block, or we risk closing an already
+				// closed channel.
+				if foundBlock != nil {
+					return
+				}
 				// If this isn't our block, ignore it.
-				if response.BlockHash() !=
-					blockHash {
+				if response.BlockHash() != blockHash {
 					return
 				}
 				block := btcutil.NewBlock(response)
@@ -396,8 +408,7 @@ func (s *ChainService) GetBlockFromNetwork(
 				// automagically put one in.
 				if block.Height() ==
 					btcutil.BlockHeightUnknown {
-					block.SetHeight(
-						int32(height))
+					block.SetHeight(int32(height))
 				}
 				// If this claims our block but doesn't
 				// pass the sanity check, the peer is
