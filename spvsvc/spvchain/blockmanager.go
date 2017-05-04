@@ -103,30 +103,6 @@ type txMsg struct {
 	peer *serverPeer
 }
 
-// getSyncPeerMsg is a message type to be sent across the message channel for
-// retrieving the current sync peer.
-type getSyncPeerMsg struct {
-	reply chan *serverPeer
-}
-
-// processBlockResponse is a response sent to the reply channel of a
-// processBlockMsg.
-type processBlockResponse struct {
-	isOrphan bool
-	err      error
-}
-
-// processBlockMsg is a message type to be sent across the message channel
-// for requested a block is processed.  Note this call differs from blockMsg
-// above in that blockMsg is intended for blocks that came from peers and have
-// extra handling whereas this message essentially is just a concurrent safe
-// way to call ProcessBlock on the internal block chain instance.
-type processBlockMsg struct {
-	block *btcutil.Block
-	flags blockchain.BehaviorFlags
-	reply chan processBlockResponse
-}
-
 // isCurrentMsg is a message type to be sent across the message channel for
 // requesting whether or not the block manager believes it is synced with
 // the currently connected peers.
@@ -150,6 +126,7 @@ type blockManager struct {
 	requestedBlocks map[chainhash.Hash]struct{}
 	progressLogger  *blockProgressLogger
 	syncPeer        *serverPeer
+	syncPeerMutex   sync.Mutex
 	// Channel for messages that come from peers
 	peerChan chan interface{}
 	// Channel for messages that come from internal commands
@@ -301,7 +278,9 @@ func (b *blockManager) handleDonePeerMsg(peers *list.List, sp *serverPeer) {
 	// Attempt to find a new peer to sync from if the quitting peer is the
 	// sync peer.  Also, reset the header state.
 	if b.syncPeer != nil && b.syncPeer == sp {
+		b.syncPeerMutex.Lock()
 		b.syncPeer = nil
+		b.syncPeerMutex.Unlock()
 		header, height, err := b.server.LatestBlock()
 		if err != nil {
 			return
@@ -342,10 +321,6 @@ out:
 			case *newPeerMsg:
 				b.handleNewPeerMsg(candidatePeers, msg.peer)
 
-			/*case *blockMsg:
-			b.handleBlockMsg(msg)
-			msg.peer.blockProcessed <- struct{}{}*/
-
 			case *invMsg:
 				b.handleInvMsg(msg)
 
@@ -357,24 +332,6 @@ out:
 
 			case *donePeerMsg:
 				b.handleDonePeerMsg(candidatePeers, msg.peer)
-
-			case getSyncPeerMsg:
-				msg.reply <- b.syncPeer
-
-			/*case processBlockMsg:
-			_, isOrphan, err := b.chain.ProcessBlock(
-				msg.block, msg.flags)
-			if err != nil {
-				msg.reply <- processBlockResponse{
-					isOrphan: false,
-					err:      err,
-				}
-			}
-
-			msg.reply <- processBlockResponse{
-				isOrphan: isOrphan,
-				err:      nil,
-			}*/
 
 			case isCurrentMsg:
 				msg.reply <- b.current()
@@ -393,8 +350,12 @@ out:
 	log.Trace("Block handler done")
 }
 
-// queueHandler reads the message channel and queues the message. This allows
-// lookahead checks in
+// SyncPeer returns the current sync peer.
+func (b *blockManager) SyncPeer() *serverPeer {
+	b.syncPeerMutex.Lock()
+	defer b.syncPeerMutex.Unlock()
+	return b.syncPeer
+}
 
 // isSyncCandidate returns whether or not the peer is a candidate to consider
 // syncing from.
@@ -561,7 +522,9 @@ func (b *blockManager) startSync(peers *list.List) {
 		// and fully validate them.  Finally, regression test mode does
 		// not support the headers-first approach so do normal block
 		// downloads when in regression test mode.
+		b.syncPeerMutex.Lock()
 		b.syncPeer = bestPeer
+		b.syncPeerMutex.Unlock()
 		if b.nextCheckpoint != nil &&
 			best.Height < b.nextCheckpoint.Height {
 
@@ -935,7 +898,9 @@ func (b *blockManager) handleHeadersMsg(hmsg *headersMsg) {
 			// We also change the sync peer. Then we can continue
 			// with the rest of the headers in the message as if
 			// nothing has happened.
+			b.syncPeerMutex.Lock()
 			b.syncPeer = hmsg.peer
+			b.syncPeerMutex.Unlock()
 			_, err = b.server.rollBackToHeight(backHeight)
 			if err != nil {
 				log.Criticalf("Rollback failed: %s",

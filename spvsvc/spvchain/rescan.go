@@ -198,6 +198,8 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 			}
 		}
 	}
+	log.Tracef("Starting rescan from known block %d (%s)", curStamp.Height,
+		curStamp.Hash)
 
 	// Listen for notifications.
 	blockConnected := make(chan wire.BlockHeader)
@@ -244,10 +246,9 @@ rescanLoop:
 					if ro.ntfn.
 						OnFilteredBlockDisconnected !=
 						nil {
-						ro.ntfn.
-							OnFilteredBlockDisconnected(
-								curStamp.Height,
-								&curHeader)
+						ro.ntfn.OnFilteredBlockDisconnected(
+							curStamp.Height,
+							&curHeader)
 					}
 					if ro.ntfn.OnBlockDisconnected != nil {
 						ro.ntfn.OnBlockDisconnected(
@@ -273,6 +274,9 @@ rescanLoop:
 			header, err := s.GetBlockByHeight(uint32(
 				curStamp.Height + 1))
 			if err != nil {
+				log.Tracef("Rescan became current at %d (%s), "+
+					"subscribing to block notifications",
+					curStamp.Height, curStamp.Hash)
 				current = true
 				// Subscribe to block notifications.
 				s.subscribeBlockMsg(subscription)
@@ -316,17 +320,15 @@ rescanLoop:
 				}
 				relevantTxs, err = notifyBlock(block, filter,
 					&ro.watchOutPoints, ro.watchAddrs,
-					ro.ntfn)
+					&watchList, ro.ntfn)
 				if err != nil {
 					return err
 				}
 			}
 		}
 		if ro.ntfn.OnFilteredBlockConnected != nil {
-			ro.ntfn.OnFilteredBlockConnected(
-				block.Height(),
-				&(block.MsgBlock().Header),
-				relevantTxs)
+			ro.ntfn.OnFilteredBlockConnected(curStamp.Height,
+				&curHeader, relevantTxs)
 		}
 	}
 }
@@ -336,7 +338,8 @@ rescanLoop:
 // matched addresses.
 func notifyBlock(block *btcutil.Block, filter *gcs.Filter,
 	outPoints *[]wire.OutPoint, addrs []btcutil.Address,
-	ntfn btcrpcclient.NotificationHandlers) ([]*btcutil.Tx, error) {
+	watchList *[][]byte, ntfn btcrpcclient.NotificationHandlers) (
+	[]*btcutil.Tx, error) {
 	var relevantTxs []*btcutil.Tx
 	blockHeader := block.MsgBlock().Header
 	details := btcjson.BlockDetails{
@@ -353,23 +356,17 @@ func notifyBlock(block *btcutil.Block, filter *gcs.Filter,
 				break
 			}
 			for _, op := range *outPoints {
-				if in.PreviousOutPoint ==
-					op {
+				if in.PreviousOutPoint == op {
 					relevant = true
 					if ntfn.OnRedeemingTx != nil {
-						ntfn.OnRedeemingTx(
-							tx,
-							&txDetails,
-						)
+						ntfn.OnRedeemingTx(tx,
+							&txDetails)
 					}
 					break
 				}
 			}
 		}
 		for outIdx, out := range tx.MsgTx().TxOut {
-			if relevant {
-				break
-			}
 			pushedData, err :=
 				txscript.PushedData(
 					out.PkScript)
@@ -384,27 +381,22 @@ func notifyBlock(block *btcutil.Block, filter *gcs.Filter,
 					if bytes.Equal(data,
 						addr.ScriptAddress()) {
 						relevant = true
-						hash :=
-							tx.Hash()
+						hash := tx.Hash()
 						outPoint := wire.OutPoint{
 							Hash:  *hash,
 							Index: uint32(outIdx),
 						}
-						*outPoints =
-							append(
-								*outPoints,
-								outPoint,
-							)
+						*outPoints = append(*outPoints,
+							outPoint)
+						*watchList = append(*watchList,
+							builder.OutPointToFilterEntry(
+								outPoint))
 						if ntfn.OnRecvTx != nil {
-							ntfn.OnRecvTx(
-								tx,
-								&txDetails,
-							)
+							ntfn.OnRecvTx(tx,
+								&txDetails)
 						}
-						break
 					}
 				}
-
 			}
 		}
 		if relevant {

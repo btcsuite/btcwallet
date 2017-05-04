@@ -4,6 +4,7 @@ package spvchain
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -114,12 +115,14 @@ func (s *ChainService) queryPeers(
 	// in a single thread. This is the only part of the query framework that
 	// requires access to peerState, so it's done once per query.
 	peers := s.Peers()
+	syncPeer := s.blockManager.SyncPeer()
 
 	// This will be shared state between the per-peer goroutines.
 	quit := make(chan struct{})
 	allQuit := make(chan struct{})
 	startQuery := make(chan struct{})
 	var wg sync.WaitGroup
+	var syncPeerTries uint32
 	// Increase this number to be able to handle more queries at once as
 	// each channel gets results for all queries, otherwise messages can
 	// get mixed and there's a vicious cycle of retries causing a bigger
@@ -146,6 +149,7 @@ func (s *ChainService) queryPeers(
 				return
 			}
 			timeout := make(<-chan time.Time)
+		queryLoop:
 			for {
 				select {
 				case <-timeout:
@@ -175,11 +179,29 @@ func (s *ChainService) queryPeers(
 				case <-startQuery:
 					// We're the lucky peer whose turn it is
 					// to try to answer the current query.
-					// TODO: Fix this to support either
-					// querying *all* peers simultaneously
-					// to avoid timeout delays, or starting
-					// with the syncPeer when not querying
-					// *all* peers.
+					// TODO: Add support for querying *all*
+					// peers simultaneously to avoid timeout
+					// delays.
+					// If the sync peer hasn't tried yet and
+					// we aren't the sync peer, don't do
+					// anything but forward the message down
+					// the startQuery channel until the
+					// sync peer gets a shot.
+					if sp == syncPeer {
+						atomic.StoreUint32(
+							&syncPeerTries, 1)
+					}
+					if atomic.LoadUint32(&syncPeerTries) ==
+						0 {
+						select {
+						case startQuery <- struct{}{}:
+						case <-quit:
+							return
+						case <-allQuit:
+							return
+						}
+						continue queryLoop
+					}
 					sp.subscribeRecvMsg(subscription)
 					// Don't want the peer hanging on send
 					// to the channel if we quit before
