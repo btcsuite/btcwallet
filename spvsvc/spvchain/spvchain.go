@@ -769,6 +769,7 @@ func NewChainService(cfg Config) (*ChainService, error) {
 		services:          Services,
 		userAgentName:     UserAgentName,
 		userAgentVersion:  UserAgentVersion,
+		blockSubscribers:  make(map[blockSubscription]struct{}),
 	}
 
 	err := s.createSPVNS()
