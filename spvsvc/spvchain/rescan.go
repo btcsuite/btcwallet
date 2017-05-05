@@ -563,20 +563,20 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 						Index], nil
 				}
 			}
-			// Otherwise, iterate backwards until we've gone too
-			// far.
-			curStamp.Height--
-			if curStamp.Height < ro.startBlock.Height {
-				return nil, fmt.Errorf("Couldn't find "+
-					"transaction %s",
-					ro.watchOutPoints[0].Hash)
-			}
-			header, err := s.GetBlockByHeight(
-				uint32(curStamp.Height))
-			if err != nil {
-				return nil, err
-			}
-			curStamp.Hash = header.BlockHash()
 		}
+		// Otherwise, iterate backwards until we've gone too
+		// far.
+		curStamp.Height--
+		if curStamp.Height < ro.startBlock.Height {
+			return nil, fmt.Errorf("Couldn't find "+
+				"transaction %s",
+				ro.watchOutPoints[0].Hash)
+		}
+		header, err := s.GetBlockByHeight(
+			uint32(curStamp.Height))
+		if err != nil {
+			return nil, err
+		}
+		curStamp.Hash = header.BlockHash()
 	}
 }
