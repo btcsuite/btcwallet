@@ -635,6 +635,16 @@ func TestSetup(t *testing.T) {
 		}
 	}
 
+	// Check and make sure the previous UTXO is now spent.
+	_, err = svc.GetUtxo(
+		spvchain.WatchOutPoints(ourOutPoint),
+		spvchain.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+	)
+	if err.Error() != fmt.Sprintf("OutPoint %s has been spent",
+		ourOutPoint) {
+		t.Fatalf("UTXO %s not seen as spent: %s", ourOutPoint, err)
+	}
+
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
 	// newly-best chain on h2.
 	_, err = h2.Node.Generate(5)
@@ -672,18 +682,6 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Rescan event logs incorrect.\nWant: %s\nGot:  %s\n",
 			wantLog, gotLog)
 	}
-
-	// Check and make sure the previous UTXO is now spent.
-	// TODO: Uncomment this (right now it causes a deadlock.)
-	/*_, err = svc.GetUtxo(
-		spvchain.WatchOutPoints(ourOutPoint),
-		spvchain.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
-	)
-	if err.Error() != fmt.Sprintf("OutPoint %s has been spent",
-		ourOutPoint) {
-		t.Fatalf("UTXO %s not seen as spent: %s", ourOutPoint, err)
-	}*/
-
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
