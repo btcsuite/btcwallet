@@ -45,7 +45,7 @@ var (
 	// TODO: Make this a benchmark instead.
 	// TODO: Implement load limiting for both outgoing and incoming
 	// messages.
-	numQueryThreads = 50
+	numQueryThreads = 20
 	queryOptions    = []spvchain.QueryOption{
 	//spvchain.NumRetries(5),
 	}
@@ -343,12 +343,11 @@ func TestSetup(t *testing.T) {
 
 	// Test that we can get blocks and cfilters via P2P and decide which are
 	// valid and which aren't.
-	// TODO: This test is disabled until I factor it out into a benchmark.
-	// Otherwise, it takes too long.
-	/*err = testRandomBlocks(t, svc, h1)
+	// TODO: Split this out into a benchmark.
+	err = testRandomBlocks(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Testing blocks and cfilters failed: %s", err)
-	}*/
+	}
 
 	// Generate an address and send it some coins on the h1 chain. We use
 	// this to test rescans and notifications.
