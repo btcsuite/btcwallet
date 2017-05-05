@@ -28,6 +28,7 @@ type rescanOptions struct {
 	endBlock       *waddrmgr.BlockStamp
 	watchAddrs     []btcutil.Address
 	watchOutPoints []wire.OutPoint
+	watchTXIDs     []chainhash.Hash
 	quit           <-chan struct{}
 }
 
@@ -68,12 +69,13 @@ func StartBlock(startBlock *waddrmgr.BlockStamp) RescanOption {
 
 // EndBlock specifies the end block. The hash is checked first; if there's no
 // such hash (zero hash avoids lookup), the height is checked next. If the
-// height is 0 or the end block isn't specified, the quit channel MUST be
-// specified as Rescan will sync to the tip of the blockchain and continue to
-// stay in sync and pass notifications. This is enforced at runtime.
-func EndBlock(startBlock *waddrmgr.BlockStamp) RescanOption {
+// height is 0 or in the future or the end block isn't specified, the quit
+// channel MUST be specified as Rescan will sync to the tip of the blockchain
+// and continue to stay in sync and pass notifications. This is enforced at
+// runtime.
+func EndBlock(endBlock *waddrmgr.BlockStamp) RescanOption {
 	return func(ro *rescanOptions) {
-		ro.startBlock = startBlock
+		ro.endBlock = endBlock
 	}
 }
 
@@ -93,6 +95,15 @@ func WatchAddrs(watchAddrs ...btcutil.Address) RescanOption {
 func WatchOutPoints(watchOutPoints ...wire.OutPoint) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.watchOutPoints = append(ro.watchOutPoints, watchOutPoints...)
+	}
+}
+
+// WatchTXIDs specifies the outpoints to watch for on-chain spends. Each
+// call to this function adds to the list of outpoints being watched rather
+// than replacing the list.
+func WatchTXIDs(watchTXIDs ...chainhash.Hash) RescanOption {
+	return func(ro *rescanOptions) {
+		ro.watchTXIDs = append(ro.watchTXIDs, watchTXIDs...)
 	}
 }
 
@@ -120,41 +131,39 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 
 	var watchList [][]byte
 	// If we have something to watch, create a watch list.
-	if len(ro.watchAddrs) != 0 || len(ro.watchOutPoints) != 0 {
-		for _, addr := range ro.watchAddrs {
-			watchList = append(watchList, addr.ScriptAddress())
-		}
-		for _, op := range ro.watchOutPoints {
-			watchList = append(watchList,
-				builder.OutPointToFilterEntry(op))
-		}
-	} else {
+	for _, addr := range ro.watchAddrs {
+		watchList = append(watchList, addr.ScriptAddress())
+	}
+	for _, op := range ro.watchOutPoints {
+		watchList = append(watchList,
+			builder.OutPointToFilterEntry(op))
+	}
+	for _, txid := range ro.watchTXIDs {
+		watchList = append(watchList, txid[:])
+	}
+	if len(watchList) == 0 {
 		return fmt.Errorf("Rescan must specify addresses and/or " +
-			"outpoints to watch")
+			"outpoints and/or TXIDs to watch")
 	}
 
 	// Check that we have either an end block or a quit channel.
 	if ro.endBlock != nil {
-		if (ro.endBlock.Hash == chainhash.Hash{}) {
-			ro.endBlock.Height = 0
-		} else {
-			_, height, err := s.GetBlockByHash(
-				ro.endBlock.Hash)
+		if (ro.endBlock.Hash != chainhash.Hash{}) {
+			_, height, err := s.GetBlockByHash(ro.endBlock.Hash)
 			if err != nil {
-				ro.endBlock.Height = int32(height)
+				ro.endBlock.Hash = chainhash.Hash{}
 			} else {
-				if height == 0 {
-					ro.endBlock.Hash = chainhash.Hash{}
+				ro.endBlock.Height = int32(height)
+			}
+		}
+		if (ro.endBlock.Hash == chainhash.Hash{}) {
+			if ro.endBlock.Height != 0 {
+				header, err := s.GetBlockByHeight(
+					uint32(ro.endBlock.Height))
+				if err == nil {
+					ro.endBlock.Hash = header.BlockHash()
 				} else {
-					header, err :=
-						s.GetBlockByHeight(height)
-					if err == nil {
-						ro.endBlock.Hash =
-							header.BlockHash()
-					} else {
-						ro.endBlock =
-							&waddrmgr.BlockStamp{}
-					}
+					ro.endBlock = &waddrmgr.BlockStamp{}
 				}
 			}
 		}
@@ -298,37 +307,56 @@ rescanLoop:
 		// get the basic filter from the DB or network.
 		var block *btcutil.Block
 		var relevantTxs []*btcutil.Tx
-		filter := s.GetCFilter(curStamp.Hash, false)
-		// If we have no transactions, we send a notification
-		if filter != nil && filter.N() != 0 {
+		var bFilter, eFilter *gcs.Filter
+		var err error
+		key := builder.DeriveKey(&curStamp.Hash)
+		matched := false
+		bFilter = s.GetCFilter(curStamp.Hash, false)
+		if bFilter != nil && bFilter.N() != 0 {
 			// We see if any relevant transactions match.
-			key := builder.DeriveKey(&curStamp.Hash)
-			matched, err := filter.MatchAny(key, watchList)
+			matched, err = bFilter.MatchAny(key, watchList)
 			if err != nil {
 				return err
 			}
-			if matched {
-				// We've matched. Now we actually get the block
-				// and cycle through the transactions to see
-				// which ones are relevant.
-				block = s.GetBlockFromNetwork(
-					curStamp.Hash, ro.queryOptions...)
-				if block == nil {
-					return fmt.Errorf("Couldn't get block "+
-						"%d (%s)", curStamp.Height,
-						curStamp.Hash)
-				}
-				relevantTxs, err = notifyBlock(block, filter,
-					&ro.watchOutPoints, ro.watchAddrs,
-					&watchList, ro.ntfn)
-				if err != nil {
-					return err
-				}
+		}
+		if len(ro.watchTXIDs) > 0 {
+			eFilter = s.GetCFilter(curStamp.Hash, true)
+		}
+		if eFilter != nil && eFilter.N() != 0 {
+			// We see if any relevant transactions match.
+			matched, err = eFilter.MatchAny(key, watchList)
+			if err != nil {
+				return err
+			}
+		}
+		// If we have no transactions, we just send an
+		// OnFilteredBlockConnected notification with  no relevant
+		// transactions.
+		if matched {
+			// We've matched. Now we actually get the block
+			// and cycle through the transactions to see
+			// which ones are relevant.
+			block = s.GetBlockFromNetwork(
+				curStamp.Hash, ro.queryOptions...)
+			if block == nil {
+				return fmt.Errorf("Couldn't get block "+
+					"%d (%s)", curStamp.Height,
+					curStamp.Hash)
+			}
+			relevantTxs, err = notifyBlock(block,
+				&ro.watchOutPoints, ro.watchAddrs,
+				ro.watchTXIDs, &watchList, ro.ntfn)
+			if err != nil {
+				return err
 			}
 		}
 		if ro.ntfn.OnFilteredBlockConnected != nil {
 			ro.ntfn.OnFilteredBlockConnected(curStamp.Height,
 				&curHeader, relevantTxs)
+		}
+		if curStamp.Hash == ro.endBlock.Hash || curStamp.Height ==
+			ro.endBlock.Height {
+			return nil
 		}
 	}
 }
@@ -336,10 +364,9 @@ rescanLoop:
 // notifyBlock notifies listeners based on the block filter. It writes back to
 // the outPoints argument the updated list of outpoints to monitor based on
 // matched addresses.
-func notifyBlock(block *btcutil.Block, filter *gcs.Filter,
-	outPoints *[]wire.OutPoint, addrs []btcutil.Address,
-	watchList *[][]byte, ntfn btcrpcclient.NotificationHandlers) (
-	[]*btcutil.Tx, error) {
+func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
+	addrs []btcutil.Address, txids []chainhash.Hash, watchList *[][]byte,
+	ntfn btcrpcclient.NotificationHandlers) ([]*btcutil.Tx, error) {
 	var relevantTxs []*btcutil.Tx
 	blockHeader := block.MsgBlock().Header
 	details := btcjson.BlockDetails{
@@ -351,6 +378,12 @@ func notifyBlock(block *btcutil.Block, filter *gcs.Filter,
 		relevant := false
 		txDetails := details
 		txDetails.Index = txIdx
+		for _, hash := range txids {
+			if hash == *(tx.Hash()) {
+				relevant = true
+				break
+			}
+		}
 		for _, in := range tx.MsgTx().TxIn {
 			if relevant {
 				break
