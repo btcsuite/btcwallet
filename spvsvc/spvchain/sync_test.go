@@ -343,10 +343,12 @@ func TestSetup(t *testing.T) {
 
 	// Test that we can get blocks and cfilters via P2P and decide which are
 	// valid and which aren't.
-	err = testRandomBlocks(t, svc, h1)
+	// TODO: This test is disabled until I factor it out into a benchmark.
+	// Otherwise, it takes too long.
+	/*err = testRandomBlocks(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Testing blocks and cfilters failed: %s", err)
-	}
+	}*/
 
 	// Generate an address and send it some coins on the h1 chain. We use
 	// this to test rescans and notifications.
@@ -389,13 +391,54 @@ func TestSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit block: %s", err)
 	}
+	err = waitForSync(t, svc, h1)
+	if err != nil {
+		t.Fatalf("Couldn't sync ChainService: %s", err)
+	}
 
+	// Do a rescan that searches only for a specific TXID
+	startBlock := waddrmgr.BlockStamp{Height: 795}
+	endBlock := waddrmgr.BlockStamp{Height: 801}
+	var foundTx *btcutil.Tx
+	err = svc.Rescan(
+		spvchain.StartBlock(&startBlock),
+		spvchain.EndBlock(&endBlock),
+		spvchain.WatchTXIDs(tx1.TxHash()),
+		spvchain.NotificationHandlers(btcrpcclient.NotificationHandlers{
+			OnFilteredBlockConnected: func(height int32,
+				header *wire.BlockHeader,
+				relevantTxs []*btcutil.Tx) {
+				if height == 801 {
+					if len(relevantTxs) != 1 {
+						t.Fatalf("Didn't get expected "+
+							"number of relevant "+
+							"transactions from "+
+							"rescan: want 1, got "+
+							"%d", len(relevantTxs))
+					}
+					if *(relevantTxs[0].Hash()) !=
+						tx1.TxHash() {
+						t.Fatalf("Didn't get expected "+
+							"relevant transaction:"+
+							" want %s, got %s",
+							tx1.TxHash(),
+							relevantTxs[0].Hash())
+					}
+					foundTx = relevantTxs[0]
+				}
+			},
+		}),
+	)
+	if err != nil || foundTx == nil || *(foundTx.Hash()) != tx1.TxHash() {
+		t.Fatalf("Couldn't rescan chain for transaction %s: %s",
+			tx1.TxHash(), err)
+	}
 	// Start a rescan with notifications in another goroutine. We'll kill
 	// it with a quit channel at the end and make sure we got the expected
 	// results.
 	quitRescan := make(chan struct{})
-	startBlock := &waddrmgr.BlockStamp{Height: 795}
-	err = startRescan(t, svc, addr1, startBlock, quitRescan)
+	startBlock = waddrmgr.BlockStamp{Height: 795}
+	err = startRescan(t, svc, addr1, &startBlock, quitRescan)
 	if err != nil {
 		t.Fatalf("Couldn't start a rescan for %s: %s", addr1, err)
 	}
@@ -656,10 +699,6 @@ func waitForSync(t *testing.T, svc *spvchain.ChainService,
 		if err != nil {
 			return fmt.Errorf("Couldn't get best snapshot from "+
 				"ChainService: %s", err)
-		}
-		if logLevel != btclog.Off {
-			t.Logf("Synced to %d (%s)", haveBest.Height,
-				haveBest.Hash)
 		}
 	}
 	// Check if we're current.
