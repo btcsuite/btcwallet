@@ -29,6 +29,7 @@ type rescanOptions struct {
 	watchAddrs     []btcutil.Address
 	watchOutPoints []wire.OutPoint
 	watchTXIDs     []chainhash.Hash
+	txIdx          uint32
 	quit           <-chan struct{}
 }
 
@@ -104,6 +105,14 @@ func WatchOutPoints(watchOutPoints ...wire.OutPoint) RescanOption {
 func WatchTXIDs(watchTXIDs ...chainhash.Hash) RescanOption {
 	return func(ro *rescanOptions) {
 		ro.watchTXIDs = append(ro.watchTXIDs, watchTXIDs...)
+	}
+}
+
+// TxIdx specifies a hint transaction index into the block in which the UTXO
+// is created (eg, coinbase is 0, next transaction is 1, etc.)
+func TxIdx(txIdx uint32) RescanOption {
+	return func(ro *rescanOptions) {
+		ro.txIdx = txIdx
 	}
 }
 
@@ -437,4 +446,137 @@ func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
 		}
 	}
 	return relevantTxs, nil
+}
+
+// GetUtxo gets the appropriate TxOut or errors if it's spent. The option
+// WatchOutPoints (with a single outpoint) is required. StartBlock can be used
+// to give a hint about which block the transaction is in, and TxIdx can be used
+// to give a hint of which transaction in the block matches it (coinbase is 0,
+// first normal transaction is 1, etc.).
+func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
+	ro := defaultRescanOptions()
+	ro.startBlock = &waddrmgr.BlockStamp{
+		Hash:   *s.chainParams.GenesisHash,
+		Height: 0,
+	}
+	for _, option := range options {
+		option(ro)
+	}
+	if len(ro.watchOutPoints) != 1 {
+		return nil, fmt.Errorf("Must pass exactly one OutPoint.")
+	}
+	watchList := [][]byte{
+		builder.OutPointToFilterEntry(ro.watchOutPoints[0]),
+		ro.watchOutPoints[0].Hash[:],
+	}
+	// Track our position in the chain.
+	curHeader, curHeight, err := s.LatestBlock()
+	curStamp := &waddrmgr.BlockStamp{
+		Hash:   curHeader.BlockHash(),
+		Height: int32(curHeight),
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Find our earliest possible block.
+	if (ro.startBlock.Hash != chainhash.Hash{}) {
+		_, height, err := s.GetBlockByHash(ro.startBlock.Hash)
+		if err == nil {
+			ro.startBlock.Height = int32(height)
+		} else {
+			ro.startBlock.Hash = chainhash.Hash{}
+		}
+	}
+	if (ro.startBlock.Hash == chainhash.Hash{}) {
+		if ro.startBlock.Height == 0 {
+			ro.startBlock.Hash = *s.chainParams.GenesisHash
+		} else {
+			header, err := s.GetBlockByHeight(
+				uint32(ro.startBlock.Height))
+			if err == nil {
+				ro.startBlock.Hash = header.BlockHash()
+			} else {
+				ro.startBlock.Hash = *s.chainParams.GenesisHash
+				ro.startBlock.Height = 0
+			}
+		}
+	}
+	log.Tracef("Starting scan for output spend from known block %d (%s) "+
+		"back to block %d (%s)", curStamp.Height, curStamp.Hash)
+
+	for {
+		// Check the basic filter for the spend and the extended filter
+		// for the transaction in which the outpout is funded.
+		filter := s.GetCFilter(curStamp.Hash, false,
+			ro.queryOptions...)
+		if filter == nil {
+			return nil, fmt.Errorf("Couldn't get basic filter for "+
+				"block %d (%s)", curStamp.Height, curStamp.Hash)
+		}
+		matched, err := filter.MatchAny(builder.DeriveKey(
+			&curStamp.Hash), watchList)
+		if err != nil {
+			return nil, err
+		}
+		if !matched {
+			filter = s.GetCFilter(curStamp.Hash, true,
+				ro.queryOptions...)
+			if filter == nil {
+				return nil, fmt.Errorf("Couldn't get extended "+
+					"filter for block %d (%s)",
+					curStamp.Height, curStamp.Hash)
+			}
+			matched, err = filter.MatchAny(builder.DeriveKey(
+				&curStamp.Hash), watchList)
+		}
+		// If either is matched, download the block and check to see
+		// what we have.
+		if matched {
+			block := s.GetBlockFromNetwork(curStamp.Hash,
+				ro.queryOptions...)
+			if block == nil {
+				return nil, fmt.Errorf("Couldn't get "+
+					"block %d (%s)",
+					curStamp.Height, curStamp.Hash)
+			}
+			// If we've spent the output in this block, return an
+			// error stating that the output is spent.
+			for _, tx := range block.Transactions() {
+				for _, ti := range tx.MsgTx().TxIn {
+					if ti.PreviousOutPoint ==
+						ro.watchOutPoints[0] {
+						return nil, fmt.Errorf(
+							"OutPoint %s has been "+
+								"spent",
+							ro.watchOutPoints[0])
+					}
+				}
+			}
+			// If we found the transaction that created the output,
+			// then it's not spent and we can return the TxOut.
+			for _, tx := range block.Transactions() {
+				if *(tx.Hash()) ==
+					ro.watchOutPoints[0].Hash {
+					return tx.MsgTx().
+						TxOut[ro.watchOutPoints[0].
+						Index], nil
+				}
+			}
+			// Otherwise, iterate backwards until we've gone too
+			// far.
+			curStamp.Height--
+			if curStamp.Height < ro.startBlock.Height {
+				return nil, fmt.Errorf("Couldn't find "+
+					"transaction %s",
+					ro.watchOutPoints[0].Hash)
+			}
+			header, err := s.GetBlockByHeight(
+				uint32(curStamp.Height))
+			if err != nil {
+				return nil, err
+			}
+			curStamp.Hash = header.BlockHash()
+		}
+	}
 }

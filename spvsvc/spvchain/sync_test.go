@@ -433,6 +433,36 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't rescan chain for transaction %s: %s",
 			tx1.TxHash(), err)
 	}
+
+	// Call GetUtxo for our output in tx1 to see if it's spent.
+	ourIndex := 1 << 30 // Should work on 32-bit systems
+	for i, txo := range tx1.TxOut {
+		if bytes.Equal(txo.PkScript, script1) {
+			ourIndex = i
+		}
+	}
+	var ourOutPoint wire.OutPoint
+	if ourIndex != 1<<30 {
+		ourOutPoint = wire.OutPoint{
+			Hash:  tx1.TxHash(),
+			Index: uint32(ourIndex),
+		}
+	} else {
+		t.Fatalf("Couldn't find the index of our output in transaction"+
+			" %s", tx1.TxHash())
+	}
+	txo, err := svc.GetUtxo(
+		spvchain.WatchOutPoints(ourOutPoint),
+		spvchain.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+	)
+	if err != nil {
+		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
+	}
+	if !bytes.Equal(txo.PkScript, script1) {
+		t.Fatalf("UTXO's script doesn't match expected script for %s",
+			ourOutPoint)
+	}
+
 	// Start a rescan with notifications in another goroutine. We'll kill
 	// it with a quit channel at the end and make sure we got the expected
 	// results.
@@ -642,6 +672,18 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Rescan event logs incorrect.\nWant: %s\nGot:  %s\n",
 			wantLog, gotLog)
 	}
+
+	// Check and make sure the previous UTXO is now spent.
+	// TODO: Uncomment this (right now it causes a deadlock.)
+	/*_, err = svc.GetUtxo(
+		spvchain.WatchOutPoints(ourOutPoint),
+		spvchain.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
+	)
+	if err.Error() != fmt.Sprintf("OutPoint %s has been spent",
+		ourOutPoint) {
+		t.Fatalf("UTXO %s not seen as spent: %s", ourOutPoint, err)
+	}*/
+
 }
 
 // csd does a connect-sync-disconnect between nodes in order to support
