@@ -21,7 +21,6 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -43,11 +42,11 @@ var (
 	UserAgentVersion = "0.0.1-alpha"
 
 	// Services describes the services that are supported by the server.
-	Services = wire.SFNodeCF
+	Services = wire.SFNodeWitness | wire.SFNodeCF
 
 	// RequiredServices describes the services that are required to be
 	// supported by outbound peers.
-	RequiredServices = wire.SFNodeNetwork | wire.SFNodeCF
+	RequiredServices = wire.SFNodeNetwork | wire.SFNodeWitness | wire.SFNodeCF
 
 	// BanThreshold is the maximum ban score before a peer is banned.
 	BanThreshold = uint32(100)
@@ -1052,64 +1051,12 @@ func disconnectPeer(peerList map[int32]*serverPeer, compareFunc func(*serverPeer
 	return false
 }
 
-// sendUnminedTxs iterates through all transactions that spend from wallet
-// credits that are not known to have been mined into a block, and attempts to
-// send each to the chain server for relay.
-//
-// TODO: This should return an error if any of these lookups or sends fail, but
-// since send errors due to double spends need to be handled gracefully and this
-// isn't done yet, all sending errors are simply logged.
-func (s *ChainService) sendUnminedTxs(w *wallet.Wallet) error {
-	/*txs, err := w.TxStore.UnminedTxs()
-	if err != nil {
-		return err
-	}
-	rpcClient := s.rpcClient
-	for _, tx := range txs {
-		resp, err := rpcClient.SendRawTransaction(tx, false)
-		if err != nil {
-			// TODO(jrick): Check error for if this tx is a double spend,
-			// remove it if so.
-			log.Debugf("Could not resend transaction %v: %v",
-				tx.TxHash(), err)
-			continue
-		}
-		log.Debugf("Resent unmined transaction %v", resp)
-	}*/
-	return nil
-}
-
 // PublishTransaction sends the transaction to the consensus RPC server so it
 // can be propigated to other nodes and eventually mined.
 func (s *ChainService) PublishTransaction(tx *wire.MsgTx) error {
 	/*_, err := s.rpcClient.SendRawTransaction(tx, false)
 	return err*/
 	return nil
-}
-
-// AnnounceNewTransactions generates and relays inventory vectors and notifies
-// both websocket and getblocktemplate long poll clients of the passed
-// transactions.  This function should be called whenever new transactions
-// are added to the mempool.
-func (s *ChainService) AnnounceNewTransactions( /*newTxs []*mempool.TxDesc*/ ) {
-	// Generate and relay inventory vectors for all newly accepted
-	// transactions into the memory pool due to the original being
-	// accepted.
-	/*for _, txD := range newTxs {
-		// Generate the inventory vector and relay it.
-		iv := wire.NewInvVect(wire.InvTypeTx, txD.Tx.Hash())
-		s.RelayInventory(iv, txD)
-
-		if s.rpcServer != nil {
-			// Notify websocket clients about mempool transactions.
-			s.rpcServer.ntfnMgr.NotifyMempoolTx(txD.Tx, true)
-
-			// Potentially notify any getblocktemplate long poll clients
-			// about stale block templates due to the new transaction.
-			s.rpcServer.gbtWorkState.NotifyMempoolTx(
-				s.txMemPool.LastUpdated())
-		}
-	}*/
 }
 
 // newPeerConfig returns the configuration for the given serverPeer.
@@ -1189,64 +1136,6 @@ func (s *ChainService) UpdatePeerHeights(latestBlkHash *chainhash.Hash, latestHe
 	}
 }
 
-// rebroadcastHandler keeps track of user submitted inventories that we have
-// sent out but have not yet made it into a block. We periodically rebroadcast
-// them in case our peers restarted or otherwise lost track of them.
-func (s *ChainService) rebroadcastHandler() {
-	// Wait 5 min before first tx rebroadcast.
-	timer := time.NewTimer(5 * time.Minute)
-	//pendingInvs := make(map[wire.InvVect]interface{})
-
-out:
-	for {
-		select {
-		/*case riv := <-s.modifyRebroadcastInv:
-		switch msg := riv.(type) {
-		// Incoming InvVects are added to our map of RPC txs.
-		case broadcastInventoryAdd:
-			pendingInvs[*msg.invVect] = msg.data
-
-		// When an InvVect has been added to a block, we can
-		// now remove it, if it was present.
-		case broadcastInventoryDel:
-			if _, ok := pendingInvs[*msg]; ok {
-				delete(pendingInvs, *msg)
-			}
-		}*/
-
-		case <-timer.C: /*
-				// Any inventory we have has not made it into a block
-				// yet. We periodically resubmit them until they have.
-				for iv, data := range pendingInvs {
-					ivCopy := iv
-					s.RelayInventory(&ivCopy, data)
-				}
-
-				// Process at a random time up to 30mins (in seconds)
-				// in the future.
-				timer.Reset(time.Second *
-					time.Duration(randomUint16Number(1800))) */
-
-		case <-s.quit:
-			break out
-		}
-	}
-
-	timer.Stop()
-
-	// Drain channels before exiting so nothing is left waiting around
-	// to send.
-	/*cleanup:
-	for {
-		select {
-		//case <-s.modifyRebroadcastInv:
-		default:
-			break cleanup
-		}
-	}*/
-	s.wg.Done()
-}
-
 // ChainParams returns a copy of the ChainService's chaincfg.Params.
 func (s *ChainService) ChainParams() chaincfg.Params {
 	return s.chainParams
@@ -1261,10 +1150,8 @@ func (s *ChainService) Start() {
 
 	// Start the peer handler which in turn starts the address and block
 	// managers.
-	s.wg.Add(2)
+	s.wg.Add(1)
 	go s.peerHandler()
-	go s.rebroadcastHandler()
-
 }
 
 // Stop gracefully shuts down the server by stopping and disconnecting all

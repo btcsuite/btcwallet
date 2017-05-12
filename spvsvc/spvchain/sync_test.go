@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcrpcclient"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -37,7 +38,7 @@ var (
 	// log messages from the tests themselves as well. Keep in mind some
 	// log messages may not appear in order due to use of multiple query
 	// goroutines in the tests.
-	logLevel    = btclog.Off
+	logLevel    = btclog.TraceLvl
 	syncTimeout = 30 * time.Second
 	syncUpdate  = time.Second
 	// Don't set this too high for your platform, or the tests will miss
@@ -323,10 +324,8 @@ func TestSetup(t *testing.T) {
 		},
 	}
 
-	spvchain.Services = 0
 	spvchain.MaxPeers = 3
 	spvchain.BanDuration = 5 * time.Second
-	spvchain.RequiredServices = wire.SFNodeNetwork
 	spvchain.WaitForMoreCFHeaders = time.Second
 	svc, err := spvchain.NewChainService(config)
 	if err != nil {
@@ -339,14 +338,6 @@ func TestSetup(t *testing.T) {
 	err = waitForSync(t, svc, h1)
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
-	}
-
-	// Test that we can get blocks and cfilters via P2P and decide which are
-	// valid and which aren't.
-	// TODO: Split this out into a benchmark.
-	err = testRandomBlocks(t, svc, h1)
-	if err != nil {
-		t.Fatalf("Testing blocks and cfilters failed: %s", err)
 	}
 
 	// Generate an address and send it some coins on the h1 chain. We use
@@ -568,9 +559,10 @@ func TestSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
-	_, err = h1.Node.SendRawTransaction(authTx1.Tx, true)
+	banPeer(svc, h2)
+	err = svc.SendTransaction(authTx1.Tx, queryOptions...)
 	if err != nil {
-		t.Fatalf("Unable to send raw transaction to node: %s", err)
+		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
 	_, err = h1.Node.Generate(1)
 	if err != nil {
@@ -604,9 +596,10 @@ func TestSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sign transaction: %s", err)
 	}
-	_, err = h1.Node.SendRawTransaction(authTx2.Tx, true)
+	banPeer(svc, h2)
+	err = svc.SendTransaction(authTx2.Tx, queryOptions...)
 	if err != nil {
-		t.Fatalf("Unable to send raw transaction to node: %s", err)
+		t.Fatalf("Unable to send transaction to network: %s", err)
 	}
 	_, err = h1.Node.Generate(1)
 	if err != nil {
@@ -621,17 +614,20 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
 			" %d", numTXs)
 	}
-	// Generate 1 blocks on h1, one at a time, to make sure the
-	// ChainService instance stays caught up.
-	for i := 0; i < 1; i++ {
-		_, err = h1.Node.Generate(1)
-		if err != nil {
-			t.Fatalf("Couldn't generate/submit block: %s", err)
-		}
-		err = waitForSync(t, svc, h1)
-		if err != nil {
-			t.Fatalf("Couldn't sync ChainService: %s", err)
-		}
+	// Generate a block with a nonstandard coinbase to generate a basic
+	// filter with 0 entries.
+	_, err = h1.GenerateAndSubmitBlockWithCustomCoinbaseOutputs(
+		[]*btcutil.Tx{}, rpctest.BlockVersion, time.Time{},
+		[]wire.TxOut{{
+			Value:    0,
+			PkScript: []byte{},
+		}})
+	if err != nil {
+		t.Fatalf("Couldn't generate/submit block: %s", err)
+	}
+	err = waitForSync(t, svc, h1)
+	if err != nil {
+		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 
 	// Check and make sure the previous UTXO is now spent.
@@ -644,8 +640,17 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("UTXO %s not seen as spent: %s", ourOutPoint, err)
 	}
 
+	// Test that we can get blocks and cfilters via P2P and decide which are
+	// valid and which aren't.
+	// TODO: Split this out into a benchmark.
+	err = testRandomBlocks(t, svc, h1)
+	if err != nil {
+		t.Fatalf("Testing blocks and cfilters failed: %s", err)
+	}
+
 	// Generate 5 blocks on h2 and wait for ChainService to sync to the
-	// newly-best chain on h2.
+	// newly-best chain on h2. This includes the transactions sent via
+	// svc.SendTransaction earlier, so we'll have to
 	_, err = h2.Node.Generate(5)
 	if err != nil {
 		t.Fatalf("Couldn't generate/submit blocks: %s", err)
@@ -913,8 +918,12 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Get block from network.
-			haveBlock := svc.GetBlockFromNetwork(blockHash,
+			haveBlock, err := svc.GetBlockFromNetwork(blockHash,
 				queryOptions...)
+			if err != nil {
+				errChan <- err
+				return
+			}
 			if haveBlock == nil {
 				errChan <- fmt.Errorf("Couldn't get block %d "+
 					"(%s) from network", height, blockHash)
@@ -939,11 +948,10 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Get basic cfilter from network.
-			haveFilter := svc.GetCFilter(blockHash, false,
+			haveFilter, err := svc.GetCFilter(blockHash, false,
 				queryOptions...)
-			if haveFilter == nil {
-				errChan <- fmt.Errorf("Couldn't get basic "+
-					"filter for block %d", height)
+			if err != nil {
+				errChan <- err
 				return
 			}
 			// Get basic cfilter from RPC.
@@ -956,7 +964,11 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Check that network and RPC cfilters match.
-			if !bytes.Equal(haveFilter.NBytes(), wantFilter.Data) {
+			var haveBytes []byte
+			if haveFilter != nil {
+				haveBytes = haveFilter.NBytes()
+			}
+			if !bytes.Equal(haveBytes, wantFilter.Data) {
 				errChan <- fmt.Errorf("Basic filter from P2P "+
 					"network/DB doesn't match RPC value "+
 					"for block %d", height)
@@ -965,7 +977,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 			// Calculate basic filter from block.
 			calcFilter, err := builder.BuildBasicFilter(
 				haveBlock.MsgBlock())
-			if err != nil {
+			if err != nil && err != gcs.ErrNoData {
 				errChan <- fmt.Errorf("Couldn't build basic "+
 					"filter for block %d (%s): %s", height,
 					blockHash, err)
@@ -973,7 +985,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 			}
 			// Check that the network value matches the calculated
 			// value from the block.
-			if !reflect.DeepEqual(*haveFilter, *calcFilter) {
+			if !reflect.DeepEqual(haveFilter, calcFilter) {
 				errChan <- fmt.Errorf("Basic filter from P2P "+
 					"network/DB doesn't match calculated "+
 					"value for block %d", height)
@@ -1007,11 +1019,10 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Get extended cfilter from network
-			haveFilter = svc.GetCFilter(blockHash, true,
+			haveFilter, err = svc.GetCFilter(blockHash, true,
 				queryOptions...)
-			if haveFilter == nil {
-				errChan <- fmt.Errorf("Couldn't get extended "+
-					"filter for block %d", height)
+			if err != nil {
+				errChan <- err
 				return
 			}
 			// Get extended cfilter from RPC
@@ -1024,7 +1035,10 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 				return
 			}
 			// Check that network and RPC cfilters match
-			if !bytes.Equal(haveFilter.NBytes(), wantFilter.Data) {
+			if haveFilter != nil {
+				haveBytes = haveFilter.NBytes()
+			}
+			if !bytes.Equal(haveBytes, wantFilter.Data) {
 				errChan <- fmt.Errorf("Extended filter from "+
 					"P2P network/DB doesn't match RPC "+
 					"value for block %d", height)
@@ -1033,7 +1047,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 			// Calculate extended filter from block
 			calcFilter, err = builder.BuildExtFilter(
 				haveBlock.MsgBlock())
-			if err != nil {
+			if err != nil && err != gcs.ErrNoData {
 				errChan <- fmt.Errorf("Couldn't build extended"+
 					" filter for block %d (%s): %s", height,
 					blockHash, err)
@@ -1041,7 +1055,7 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 			}
 			// Check that the network value matches the calculated
 			// value from the block.
-			if !reflect.DeepEqual(*haveFilter, *calcFilter) {
+			if !reflect.DeepEqual(haveFilter, calcFilter) {
 				errChan <- fmt.Errorf("Extended filter from "+
 					"P2P network/DB doesn't match "+
 					"calculated value for block %d", height)
@@ -1104,76 +1118,108 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 // notifications continue until the `quit` channel is closed.
 func startRescan(t *testing.T, svc *spvchain.ChainService, addr btcutil.Address,
 	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) error {
-	go svc.Rescan(
-		spvchain.QuitChan(quit),
-		spvchain.WatchAddrs(addr),
-		spvchain.StartBlock(startBlock),
-		spvchain.NotificationHandlers(btcrpcclient.NotificationHandlers{
-			OnBlockConnected: func(hash *chainhash.Hash,
-				height int32, time time.Time) {
-				rescanMtx.Lock()
-				gotLog = append(gotLog, []byte("bc")...)
-				curBlockHeight = height
-				rescanMtx.Unlock()
-			},
-			OnBlockDisconnected: func(hash *chainhash.Hash,
-				height int32, time time.Time) {
-				rescanMtx.Lock()
-				delete(ourKnownTxsByBlock, *hash)
-				gotLog = append(gotLog, []byte("bd")...)
-				curBlockHeight = height - 1
-				rescanMtx.Unlock()
-			},
-			OnRecvTx: func(tx *btcutil.Tx,
-				details *btcjson.BlockDetails) {
-				rescanMtx.Lock()
-				hash, err := chainhash.NewHashFromStr(
-					details.Hash)
-				if err != nil {
-					t.Errorf("Couldn't decode hash %s: %s",
-						details.Hash, err)
-				}
-				ourKnownTxsByBlock[*hash] = append(
-					ourKnownTxsByBlock[*hash], tx)
-				gotLog = append(gotLog, []byte("rv")...)
-				rescanMtx.Unlock()
-			},
-			OnRedeemingTx: func(tx *btcutil.Tx,
-				details *btcjson.BlockDetails) {
-				rescanMtx.Lock()
-				hash, err := chainhash.NewHashFromStr(
-					details.Hash)
-				if err != nil {
-					t.Errorf("Couldn't decode hash %s: %s",
-						details.Hash, err)
-				}
-				ourKnownTxsByBlock[*hash] = append(
-					ourKnownTxsByBlock[*hash], tx)
-				gotLog = append(gotLog, []byte("rd")...)
-				rescanMtx.Unlock()
-			},
-			OnFilteredBlockConnected: func(height int32,
-				header *wire.BlockHeader,
-				relevantTxs []*btcutil.Tx) {
-				rescanMtx.Lock()
-				ourKnownTxsByFilteredBlock[header.BlockHash()] =
-					relevantTxs
-				gotLog = append(gotLog, []byte("fc")...)
-				gotLog = append(gotLog, uint8(len(relevantTxs)))
-				curFilteredBlockHeight = height
-				rescanMtx.Unlock()
-			},
-			OnFilteredBlockDisconnected: func(height int32,
-				header *wire.BlockHeader) {
-				rescanMtx.Lock()
-				delete(ourKnownTxsByFilteredBlock,
-					header.BlockHash())
-				gotLog = append(gotLog, []byte("fd")...)
-				curFilteredBlockHeight = height - 1
-				rescanMtx.Unlock()
-			},
-		}),
-	)
+	go func() {
+		err := svc.Rescan(
+			spvchain.QuitChan(quit),
+			spvchain.WatchAddrs(addr),
+			spvchain.StartBlock(startBlock),
+			spvchain.NotificationHandlers(
+				btcrpcclient.NotificationHandlers{
+					OnBlockConnected: func(
+						hash *chainhash.Hash,
+						height int32, time time.Time) {
+						rescanMtx.Lock()
+						gotLog = append(gotLog,
+							[]byte("bc")...)
+						curBlockHeight = height
+						rescanMtx.Unlock()
+					},
+					OnBlockDisconnected: func(
+						hash *chainhash.Hash,
+						height int32, time time.Time) {
+						rescanMtx.Lock()
+						delete(ourKnownTxsByBlock, *hash)
+						gotLog = append(gotLog,
+							[]byte("bd")...)
+						curBlockHeight = height - 1
+						rescanMtx.Unlock()
+					},
+					OnRecvTx: func(tx *btcutil.Tx,
+						details *btcjson.BlockDetails) {
+						rescanMtx.Lock()
+						hash, err := chainhash.
+							NewHashFromStr(
+								details.Hash)
+						if err != nil {
+							t.Errorf("Couldn't "+
+								"decode hash "+
+								"%s: %s",
+								details.Hash,
+								err)
+						}
+						ourKnownTxsByBlock[*hash] = append(
+							ourKnownTxsByBlock[*hash],
+							tx)
+						gotLog = append(gotLog,
+							[]byte("rv")...)
+						rescanMtx.Unlock()
+					},
+					OnRedeemingTx: func(tx *btcutil.Tx,
+						details *btcjson.BlockDetails) {
+						rescanMtx.Lock()
+						hash, err := chainhash.
+							NewHashFromStr(
+								details.Hash)
+						if err != nil {
+							t.Errorf("Couldn't "+
+								"decode hash "+
+								"%s: %s",
+								details.Hash,
+								err)
+						}
+						ourKnownTxsByBlock[*hash] = append(
+							ourKnownTxsByBlock[*hash],
+							tx)
+						gotLog = append(gotLog,
+							[]byte("rd")...)
+						rescanMtx.Unlock()
+					},
+					OnFilteredBlockConnected: func(
+						height int32,
+						header *wire.BlockHeader,
+						relevantTxs []*btcutil.Tx) {
+						rescanMtx.Lock()
+						ourKnownTxsByFilteredBlock[header.BlockHash()] =
+							relevantTxs
+						gotLog = append(gotLog,
+							[]byte("fc")...)
+						gotLog = append(gotLog,
+							uint8(len(relevantTxs)))
+						curFilteredBlockHeight = height
+						rescanMtx.Unlock()
+					},
+					OnFilteredBlockDisconnected: func(
+						height int32,
+						header *wire.BlockHeader) {
+						rescanMtx.Lock()
+						delete(ourKnownTxsByFilteredBlock,
+							header.BlockHash())
+						gotLog = append(gotLog,
+							[]byte("fd")...)
+						curFilteredBlockHeight =
+							height - 1
+						rescanMtx.Unlock()
+					},
+				}),
+		)
+		if logLevel != btclog.Off {
+			if err != nil {
+				t.Logf("Rescan ended: %s", err)
+			} else {
+				t.Logf("Rescan ended successfully")
+			}
+		}
+	}()
 	return nil
 }
 
@@ -1202,4 +1248,16 @@ func checkRescanStatus() (int, int32, error) {
 			"notifications.")
 	}
 	return txCount[0], curBlockHeight, nil
+}
+
+// banPeer bans and disconnects the requested harness from the ChainService
+// instance for BanDuration seconds.
+func banPeer(svc *spvchain.ChainService, harness *rpctest.Harness) {
+	peers := svc.Peers()
+	for _, peer := range peers {
+		if peer.Addr() == harness.P2PAddress() {
+			svc.BanPeer(peer)
+			peer.Disconnect()
+		}
+	}
 }
