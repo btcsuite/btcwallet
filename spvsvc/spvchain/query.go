@@ -3,6 +3,8 @@
 package spvchain
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,7 +209,8 @@ func (s *ChainService) queryPeers(
 					// to the channel if we quit before
 					// reading the channel.
 					sentChan := make(chan struct{}, 1)
-					sp.QueueMessage(queryMsg, sentChan)
+					sp.QueueMessageWithEncoding(queryMsg,
+						sentChan, wire.WitnessEncoding)
 					select {
 					case <-sentChan:
 					case <-quit:
@@ -279,7 +282,7 @@ checkResponses:
 // GetCFilter gets a cfilter from the database. Failing that, it requests the
 // cfilter from the network and writes it to the database.
 func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
-	extended bool, options ...QueryOption) *gcs.Filter {
+	extended bool, options ...QueryOption) (*gcs.Filter, error) {
 	getFilter := s.GetBasicFilter
 	getHeader := s.GetBasicHeader
 	putFilter := s.putBasicFilter
@@ -290,22 +293,34 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 	}
 	filter, err := getFilter(blockHash)
 	if err == nil && filter != nil {
-		return filter
+		return filter, nil
 	}
 	// We didn't get the filter from the DB, so we'll set it to nil and try
 	// to get it from the network.
 	filter = nil
 	block, _, err := s.GetBlockByHash(blockHash)
-	if err != nil || block.BlockHash() != blockHash {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if block.BlockHash() != blockHash {
+		return nil, fmt.Errorf("Couldn't get header for block %s "+
+			"from database", blockHash)
 	}
 	curHeader, err := getHeader(blockHash)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
+			"from database", blockHash)
 	}
 	prevHeader, err := getHeader(block.PrevBlock)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("Couldn't get cfheader for block %s "+
+			"from database", blockHash)
+	}
+	// If we're expecting a zero filter, just return a nil filter and don't
+	// bother trying to get it from the network. The caller will know
+	// there's no error because we're also returning a nil error.
+	if builder.MakeHeaderForFilter(nil, *prevHeader) == *curHeader {
+		return nil, nil
 	}
 	s.queryPeers(
 		// Send a wire.GetCFilterMsg
@@ -364,19 +379,21 @@ func (s *ChainService) GetCFilter(blockHash chainhash.Hash,
 		log.Tracef("Wrote filter for block %s, extended: %t",
 			blockHash, extended)
 	}
-	return filter
+	return filter, nil
 }
 
 // GetBlockFromNetwork gets a block by requesting it from the network, one peer
 // at a time, until one answers.
 func (s *ChainService) GetBlockFromNetwork(
-	blockHash chainhash.Hash, options ...QueryOption) *btcutil.Block {
+	blockHash chainhash.Hash, options ...QueryOption) (*btcutil.Block,
+	error) {
 	blockHeader, height, err := s.GetBlockByHash(blockHash)
 	if err != nil || blockHeader.BlockHash() != blockHash {
-		return nil
+		return nil, fmt.Errorf("Couldn't get header for block %s "+
+			"from database", blockHash)
 	}
 	getData := wire.NewMsgGetData()
-	getData.AddInvVect(wire.NewInvVect(wire.InvTypeBlock,
+	getData.AddInvVect(wire.NewInvVect(wire.InvTypeWitnessBlock,
 		&blockHash))
 	// The block is only updated from the checkResponse function argument,
 	// which is always called single-threadedly. We don't check the block
@@ -441,5 +458,37 @@ func (s *ChainService) GetBlockFromNetwork(
 		},
 		options...,
 	)
-	return foundBlock
+	if foundBlock == nil {
+		return nil, fmt.Errorf("Couldn't retrieve block %s from "+
+			"network", blockHash)
+	}
+	return foundBlock, nil
+}
+
+// SendTransaction sends a transaction to each peer. It returns an error if any
+// peer rejects the transaction for any reason than that it's already known.
+// TODO: Better privacy by sending to only one random peer and watching
+// propagation, requires better peer selection support in query API.
+func (s *ChainService) SendTransaction(tx *wire.MsgTx,
+	options ...QueryOption) error {
+	var err error
+	s.queryPeers(
+		tx,
+		func(sp *serverPeer, resp wire.Message, quit chan<- struct{}) {
+			switch response := resp.(type) {
+			case *wire.MsgReject:
+				if response.Hash == tx.TxHash() &&
+					!strings.Contains(response.Reason,
+						"already have transaction") {
+					err = log.Errorf("Transaction %s "+
+						"rejected by %s: %s",
+						tx.TxHash(), sp.Addr(),
+						response.Reason)
+					close(quit)
+				}
+			}
+		},
+		options...,
+	)
+	return err
 }

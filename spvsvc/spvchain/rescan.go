@@ -320,7 +320,10 @@ rescanLoop:
 		var err error
 		key := builder.DeriveKey(&curStamp.Hash)
 		matched := false
-		bFilter = s.GetCFilter(curStamp.Hash, false)
+		bFilter, err = s.GetCFilter(curStamp.Hash, false)
+		if err != nil {
+			return err
+		}
 		if bFilter != nil && bFilter.N() != 0 {
 			// We see if any relevant transactions match.
 			matched, err = bFilter.MatchAny(key, watchList)
@@ -329,7 +332,10 @@ rescanLoop:
 			}
 		}
 		if len(ro.watchTXIDs) > 0 {
-			eFilter = s.GetCFilter(curStamp.Hash, true)
+			eFilter, err = s.GetCFilter(curStamp.Hash, true)
+			if err != nil {
+				return err
+			}
 		}
 		if eFilter != nil && eFilter.N() != 0 {
 			// We see if any relevant transactions match.
@@ -345,11 +351,14 @@ rescanLoop:
 			// We've matched. Now we actually get the block
 			// and cycle through the transactions to see
 			// which ones are relevant.
-			block = s.GetBlockFromNetwork(
+			block, err = s.GetBlockFromNetwork(
 				curStamp.Hash, ro.queryOptions...)
+			if err != nil {
+				return err
+			}
 			if block == nil {
-				return fmt.Errorf("Couldn't get block "+
-					"%d (%s)", curStamp.Height,
+				return fmt.Errorf("Couldn't get block %d "+
+					"(%s) from network", curStamp.Height,
 					curStamp.Hash)
 			}
 			relevantTxs, err = notifyBlock(block,
@@ -409,9 +418,7 @@ func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
 			}
 		}
 		for outIdx, out := range tx.MsgTx().TxOut {
-			pushedData, err :=
-				txscript.PushedData(
-					out.PkScript)
+			pushedData, err := txscript.PushedData(out.PkScript)
 			if err != nil {
 				continue
 			}
@@ -503,42 +510,51 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 		}
 	}
 	log.Tracef("Starting scan for output spend from known block %d (%s) "+
-		"back to block %d (%s)", curStamp.Height, curStamp.Hash)
+		"back to block %d (%s)", curStamp.Height, curStamp.Hash,
+		ro.startBlock.Height, ro.startBlock.Hash)
 
 	for {
 		// Check the basic filter for the spend and the extended filter
 		// for the transaction in which the outpout is funded.
-		filter := s.GetCFilter(curStamp.Hash, false,
+		filter, err := s.GetCFilter(curStamp.Hash, false,
 			ro.queryOptions...)
-		if filter == nil {
+		if err != nil {
 			return nil, fmt.Errorf("Couldn't get basic filter for "+
 				"block %d (%s)", curStamp.Height, curStamp.Hash)
 		}
-		matched, err := filter.MatchAny(builder.DeriveKey(
-			&curStamp.Hash), watchList)
+		matched := false
+		if filter != nil {
+			matched, err = filter.MatchAny(builder.DeriveKey(
+				&curStamp.Hash), watchList)
+		}
 		if err != nil {
 			return nil, err
 		}
 		if !matched {
-			filter = s.GetCFilter(curStamp.Hash, true,
+			filter, err = s.GetCFilter(curStamp.Hash, true,
 				ro.queryOptions...)
-			if filter == nil {
+			if err != nil {
 				return nil, fmt.Errorf("Couldn't get extended "+
 					"filter for block %d (%s)",
 					curStamp.Height, curStamp.Hash)
 			}
-			matched, err = filter.MatchAny(builder.DeriveKey(
-				&curStamp.Hash), watchList)
+			if filter != nil {
+				matched, err = filter.MatchAny(
+					builder.DeriveKey(&curStamp.Hash),
+					watchList)
+			}
 		}
 		// If either is matched, download the block and check to see
 		// what we have.
 		if matched {
-			block := s.GetBlockFromNetwork(curStamp.Hash,
+			block, err := s.GetBlockFromNetwork(curStamp.Hash,
 				ro.queryOptions...)
+			if err != nil {
+				return nil, err
+			}
 			if block == nil {
-				return nil, fmt.Errorf("Couldn't get "+
-					"block %d (%s)",
-					curStamp.Height, curStamp.Hash)
+				return nil, fmt.Errorf("Couldn't get block %d "+
+					"(%s)", curStamp.Height, curStamp.Hash)
 			}
 			// If we've spent the output in this block, return an
 			// error stating that the output is spent.
