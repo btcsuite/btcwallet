@@ -174,7 +174,7 @@ func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
 // consensus RPC server is set.  This function and all functions that call it
 // are unstable and will need to be moved when the syncing code is moved out of
 // the wallet.
-func (w *Wallet) requireChainClient() (*chain.RPCClient, error) {
+func (w *Wallet) requireChainClient() (chain.Interface, error) {
 	w.chainClientLock.Lock()
 	chainClient := w.chainClient
 	w.chainClientLock.Unlock()
@@ -189,7 +189,7 @@ func (w *Wallet) requireChainClient() (*chain.RPCClient, error) {
 //
 // This function is unstable and will be removed once sync logic is moved out of
 // the wallet.
-func (w *Wallet) ChainClient() *chain.RPCClient {
+func (w *Wallet) ChainClient() chain.Interface {
 	w.chainClientLock.Lock()
 	chainClient := w.chainClient
 	w.chainClientLock.Unlock()

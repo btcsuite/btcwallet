@@ -61,7 +61,7 @@ type Server struct {
 	httpServer    http.Server
 	wallet        *wallet.Wallet
 	walletLoader  *wallet.Loader
-	chainClient   *chain.RPCClient
+	chainClient   chain.Interface
 	handlerLookup func(string) (requestHandler, bool)
 	handlerMu     sync.Mutex
 

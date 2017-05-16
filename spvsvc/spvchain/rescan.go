@@ -5,6 +5,7 @@ package spvchain
 import (
 	"bytes"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -22,14 +23,17 @@ var ()
 
 // Functional parameters for Rescan
 type rescanOptions struct {
+	chain          *ChainService
 	queryOptions   []QueryOption
 	ntfn           btcrpcclient.NotificationHandlers
 	startBlock     *waddrmgr.BlockStamp
 	endBlock       *waddrmgr.BlockStamp
 	watchAddrs     []btcutil.Address
 	watchOutPoints []wire.OutPoint
-	watchTXIDs     []chainhash.Hash
+	watchTxIDs     []chainhash.Hash
+	watchList      [][]byte
 	txIdx          uint32
+	update         <-chan *updateOptions
 	quit           <-chan struct{}
 }
 
@@ -99,12 +103,12 @@ func WatchOutPoints(watchOutPoints ...wire.OutPoint) RescanOption {
 	}
 }
 
-// WatchTXIDs specifies the outpoints to watch for on-chain spends. Each
+// WatchTxIDs specifies the outpoints to watch for on-chain spends. Each
 // call to this function adds to the list of outpoints being watched rather
 // than replacing the list.
-func WatchTXIDs(watchTXIDs ...chainhash.Hash) RescanOption {
+func WatchTxIDs(watchTxIDs ...chainhash.Hash) RescanOption {
 	return func(ro *rescanOptions) {
-		ro.watchTXIDs = append(ro.watchTXIDs, watchTXIDs...)
+		ro.watchTxIDs = append(ro.watchTxIDs, watchTxIDs...)
 	}
 }
 
@@ -126,6 +130,14 @@ func QuitChan(quit <-chan struct{}) RescanOption {
 	}
 }
 
+// updateChan specifies an update channel. This is for internal use by the
+// Rescan.Update functionality.
+func updateChan(update <-chan *updateOptions) RescanOption {
+	return func(ro *rescanOptions) {
+		ro.update = update
+	}
+}
+
 // Rescan is a single-threaded function that uses headers from the database and
 // functional options as arguments.
 func (s *ChainService) Rescan(options ...RescanOption) error {
@@ -137,20 +149,20 @@ func (s *ChainService) Rescan(options ...RescanOption) error {
 	for _, option := range options {
 		option(ro)
 	}
+	ro.chain = s
 
-	var watchList [][]byte
 	// If we have something to watch, create a watch list.
 	for _, addr := range ro.watchAddrs {
-		watchList = append(watchList, addr.ScriptAddress())
+		ro.watchList = append(ro.watchList, addr.ScriptAddress())
 	}
 	for _, op := range ro.watchOutPoints {
-		watchList = append(watchList,
+		ro.watchList = append(ro.watchList,
 			builder.OutPointToFilterEntry(op))
 	}
-	for _, txid := range ro.watchTXIDs {
-		watchList = append(watchList, txid[:])
+	for _, txid := range ro.watchTxIDs {
+		ro.watchList = append(ro.watchList, txid[:])
 	}
-	if len(watchList) == 0 {
+	if len(ro.watchList) == 0 {
 		return fmt.Errorf("Rescan must specify addresses and/or " +
 			"outpoints and/or TXIDs to watch")
 	}
@@ -244,6 +256,15 @@ rescanLoop:
 			case <-ro.quit:
 				s.unsubscribeBlockMsgs(subscription)
 				return nil
+			case update := <-ro.update:
+				rewound, err := ro.updateFilter(update,
+					&curStamp, &curHeader)
+				if err != nil {
+					return err
+				}
+				if rewound {
+					current = false
+				}
 			case header := <-blockConnected:
 				// Only deal with the next block from what we
 				// know about. Otherwise, it's in the future.
@@ -326,12 +347,12 @@ rescanLoop:
 		}
 		if bFilter != nil && bFilter.N() != 0 {
 			// We see if any relevant transactions match.
-			matched, err = bFilter.MatchAny(key, watchList)
+			matched, err = bFilter.MatchAny(key, ro.watchList)
 			if err != nil {
 				return err
 			}
 		}
-		if len(ro.watchTXIDs) > 0 {
+		if len(ro.watchTxIDs) > 0 {
 			eFilter, err = s.GetCFilter(curStamp.Hash, true)
 			if err != nil {
 				return err
@@ -339,7 +360,7 @@ rescanLoop:
 		}
 		if eFilter != nil && eFilter.N() != 0 {
 			// We see if any relevant transactions match.
-			matched, err = eFilter.MatchAny(key, watchList)
+			matched, err = eFilter.MatchAny(key, ro.watchList)
 			if err != nil {
 				return err
 			}
@@ -361,9 +382,7 @@ rescanLoop:
 					"(%s) from network", curStamp.Height,
 					curStamp.Hash)
 			}
-			relevantTxs, err = notifyBlock(block,
-				&ro.watchOutPoints, ro.watchAddrs,
-				ro.watchTXIDs, &watchList, ro.ntfn)
+			relevantTxs, err = ro.notifyBlock(block)
 			if err != nil {
 				return err
 			}
@@ -376,15 +395,84 @@ rescanLoop:
 			ro.endBlock.Height {
 			return nil
 		}
+		select {
+		case update := <-ro.update:
+			rewound, err := ro.updateFilter(update, &curStamp,
+				&curHeader)
+			if err != nil {
+				return err
+			}
+			if rewound {
+				current = false
+			}
+		default:
+		}
 	}
+}
+
+// updateFilter atomically updates the filter and rewinds to the specified
+// height if not 0.
+func (ro *rescanOptions) updateFilter(update *updateOptions,
+	curStamp *waddrmgr.BlockStamp, curHeader *wire.BlockHeader) (bool,
+	error) {
+	ro.watchAddrs = append(ro.watchAddrs,
+		update.addrs...)
+	ro.watchOutPoints = append(ro.watchOutPoints,
+		update.outPoints...)
+	ro.watchTxIDs = append(ro.watchTxIDs,
+		update.txIDs...)
+	for _, addr := range update.addrs {
+		ro.watchList = append(ro.watchList, addr.ScriptAddress())
+	}
+	for _, op := range update.outPoints {
+		ro.watchList = append(ro.watchList,
+			builder.OutPointToFilterEntry(op))
+	}
+	for _, txid := range update.txIDs {
+		ro.watchList = append(ro.watchList, txid[:])
+	}
+	// Rewind if requested
+	if update.rewind == 0 {
+		return false, nil
+	}
+	var header wire.BlockHeader
+	var height uint32
+	var rewound bool
+	var err error
+	for curStamp.Height > int32(update.rewind) {
+		if ro.ntfn.OnBlockDisconnected != nil {
+			ro.ntfn.OnBlockDisconnected(&curStamp.Hash,
+				curStamp.Height, curHeader.Timestamp)
+		}
+		if ro.ntfn.OnFilteredBlockDisconnected != nil {
+			ro.ntfn.OnFilteredBlockDisconnected(curStamp.Height,
+				curHeader)
+		}
+		// Don't rewind past the last block we need to disconnect,
+		// because otherwise we connect the last known good block
+		// without ever disconnecting it.
+		if curStamp.Height == int32(update.rewind+1) {
+			break
+		}
+		// Rewind and continue.
+		header, height, err =
+			ro.chain.GetBlockByHash(curHeader.PrevBlock)
+		if err != nil {
+			return rewound, err
+		}
+		*curHeader = header
+		curStamp.Height = int32(height)
+		curStamp.Hash = curHeader.BlockHash()
+		rewound = true
+	}
+	return rewound, nil
 }
 
 // notifyBlock notifies listeners based on the block filter. It writes back to
 // the outPoints argument the updated list of outpoints to monitor based on
 // matched addresses.
-func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
-	addrs []btcutil.Address, txids []chainhash.Hash, watchList *[][]byte,
-	ntfn btcrpcclient.NotificationHandlers) ([]*btcutil.Tx, error) {
+func (ro *rescanOptions) notifyBlock(block *btcutil.Block) ([]*btcutil.Tx,
+	error) {
 	var relevantTxs []*btcutil.Tx
 	blockHeader := block.MsgBlock().Header
 	details := btcjson.BlockDetails{
@@ -396,7 +484,7 @@ func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
 		relevant := false
 		txDetails := details
 		txDetails.Index = txIdx
-		for _, hash := range txids {
+		for _, hash := range ro.watchTxIDs {
 			if hash == *(tx.Hash()) {
 				relevant = true
 				break
@@ -406,11 +494,11 @@ func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
 			if relevant {
 				break
 			}
-			for _, op := range *outPoints {
+			for _, op := range ro.watchOutPoints {
 				if in.PreviousOutPoint == op {
 					relevant = true
-					if ntfn.OnRedeemingTx != nil {
-						ntfn.OnRedeemingTx(tx,
+					if ro.ntfn.OnRedeemingTx != nil {
+						ro.ntfn.OnRedeemingTx(tx,
 							&txDetails)
 					}
 					break
@@ -422,7 +510,7 @@ func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
 			if err != nil {
 				continue
 			}
-			for _, addr := range addrs {
+			for _, addr := range ro.watchAddrs {
 				if relevant {
 					break
 				}
@@ -435,13 +523,15 @@ func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
 							Hash:  *hash,
 							Index: uint32(outIdx),
 						}
-						*outPoints = append(*outPoints,
+						ro.watchOutPoints = append(
+							ro.watchOutPoints,
 							outPoint)
-						*watchList = append(*watchList,
+						ro.watchList = append(
+							ro.watchList,
 							builder.OutPointToFilterEntry(
 								outPoint))
-						if ntfn.OnRecvTx != nil {
-							ntfn.OnRecvTx(tx,
+						if ro.ntfn.OnRecvTx != nil {
+							ro.ntfn.OnRecvTx(tx,
 								&txDetails)
 						}
 					}
@@ -455,12 +545,102 @@ func notifyBlock(block *btcutil.Block, outPoints *[]wire.OutPoint,
 	return relevantTxs, nil
 }
 
+// Rescan is an object that represents a long-running rescan/notification
+// client with updateable filters. It's meant to be close to a drop-in
+// replacement for the btcd rescan and notification functionality used in
+// wallets. It only contains information about whether a goroutine is running.
+type Rescan struct {
+	running    uint32
+	updateChan chan<- *updateOptions
+}
+
+// NewRescan returns a rescan object that runs in another goroutine and has an
+// updateable filter. It returns the long-running rescan object, and a channel
+// which returns any error on termination of the rescan process.
+func (s *ChainService) NewRescan(options ...RescanOption) (Rescan,
+	<-chan error) {
+	updChan := make(chan *updateOptions)
+	errChan := make(chan error)
+	rescan := Rescan{
+		running:    1,
+		updateChan: updChan,
+	}
+	go func() {
+		err := s.Rescan(append(options, updateChan(updChan))...)
+		atomic.StoreUint32(&rescan.running, 0)
+		errChan <- err
+	}()
+	return rescan, errChan
+}
+
+// Functional parameters for Update.
+type updateOptions struct {
+	addrs     []btcutil.Address
+	outPoints []wire.OutPoint
+	txIDs     []chainhash.Hash
+	rewind    uint32
+}
+
+// UpdateOption is a functional option argument for the Rescan.Update method.
+type UpdateOption func(uo *updateOptions)
+
+func defaultUpdateOptions() *updateOptions {
+	return &updateOptions{}
+}
+
+// AddAddrs adds addresses to the filter.
+func AddAddrs(addrs ...btcutil.Address) UpdateOption {
+	return func(uo *updateOptions) {
+		uo.addrs = append(uo.addrs, addrs...)
+	}
+}
+
+// AddOutPoints adds outpoints to the filter.
+func AddOutPoints(outPoints ...wire.OutPoint) UpdateOption {
+	return func(uo *updateOptions) {
+		uo.outPoints = append(uo.outPoints, outPoints...)
+	}
+}
+
+// AddTxIDs adds TxIDs to the filter.
+func AddTxIDs(txIDs ...chainhash.Hash) UpdateOption {
+	return func(uo *updateOptions) {
+		uo.txIDs = append(uo.txIDs, txIDs...)
+	}
+}
+
+// Rewind rewinds the rescan to the specified height (meaning, disconnects down
+// to the block immediately after the specified height) and restarts it from
+// that point with the (possibly) newly expanded filter. Especially useful when
+// called in the same Update() as one of the previous three options.
+func Rewind(height uint32) UpdateOption {
+	return func(uo *updateOptions) {
+		uo.rewind = height
+	}
+}
+
+// Update sends an update to a long-running rescan/notification goroutine.
+func (r *Rescan) Update(options ...UpdateOption) error {
+	running := atomic.LoadUint32(&r.running)
+	if running != 1 {
+		return fmt.Errorf("Rescan is already done and cannot be " +
+			"updated.")
+	}
+	uo := defaultUpdateOptions()
+	for _, option := range options {
+		option(uo)
+	}
+	r.updateChan <- uo
+	return nil
+}
+
 // GetUtxo gets the appropriate TxOut or errors if it's spent. The option
 // WatchOutPoints (with a single outpoint) is required. StartBlock can be used
 // to give a hint about which block the transaction is in, and TxIdx can be used
 // to give a hint of which transaction in the block matches it (coinbase is 0,
 // first normal transaction is 1, etc.).
-func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
+func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut,
+	*wire.MsgTx, error) {
 	ro := defaultRescanOptions()
 	ro.startBlock = &waddrmgr.BlockStamp{
 		Hash:   *s.chainParams.GenesisHash,
@@ -470,7 +650,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 		option(ro)
 	}
 	if len(ro.watchOutPoints) != 1 {
-		return nil, fmt.Errorf("Must pass exactly one OutPoint.")
+		return nil, nil, fmt.Errorf("Must pass exactly one OutPoint.")
 	}
 	watchList := [][]byte{
 		builder.OutPointToFilterEntry(ro.watchOutPoints[0]),
@@ -483,7 +663,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 		Height: int32(curHeight),
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Find our earliest possible block.
@@ -519,8 +699,9 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 		filter, err := s.GetCFilter(curStamp.Hash, false,
 			ro.queryOptions...)
 		if err != nil {
-			return nil, fmt.Errorf("Couldn't get basic filter for "+
-				"block %d (%s)", curStamp.Height, curStamp.Hash)
+			return nil, nil, fmt.Errorf("Couldn't get basic "+
+				"filter for block %d (%s)", curStamp.Height,
+				curStamp.Hash)
 		}
 		matched := false
 		if filter != nil {
@@ -528,14 +709,14 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 				&curStamp.Hash), watchList)
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !matched {
 			filter, err = s.GetCFilter(curStamp.Hash, true,
 				ro.queryOptions...)
 			if err != nil {
-				return nil, fmt.Errorf("Couldn't get extended "+
-					"filter for block %d (%s)",
+				return nil, nil, fmt.Errorf("Couldn't get "+
+					"extended filter for block %d (%s)",
 					curStamp.Height, curStamp.Hash)
 			}
 			if filter != nil {
@@ -550,11 +731,12 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 			block, err := s.GetBlockFromNetwork(curStamp.Hash,
 				ro.queryOptions...)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if block == nil {
-				return nil, fmt.Errorf("Couldn't get block %d "+
-					"(%s)", curStamp.Height, curStamp.Hash)
+				return nil, nil, fmt.Errorf("Couldn't get "+
+					"block %d (%s)", curStamp.Height,
+					curStamp.Hash)
 			}
 			// If we've spent the output in this block, return an
 			// error stating that the output is spent.
@@ -562,10 +744,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 				for _, ti := range tx.MsgTx().TxIn {
 					if ti.PreviousOutPoint ==
 						ro.watchOutPoints[0] {
-						return nil, fmt.Errorf(
-							"OutPoint %s has been "+
-								"spent",
-							ro.watchOutPoints[0])
+						return nil, tx.MsgTx(), nil
 					}
 				}
 			}
@@ -576,7 +755,7 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 					ro.watchOutPoints[0].Hash {
 					return tx.MsgTx().
 						TxOut[ro.watchOutPoints[0].
-						Index], nil
+						Index], nil, nil
 				}
 			}
 		}
@@ -584,14 +763,14 @@ func (s *ChainService) GetUtxo(options ...RescanOption) (*wire.TxOut, error) {
 		// far.
 		curStamp.Height--
 		if curStamp.Height < ro.startBlock.Height {
-			return nil, fmt.Errorf("Couldn't find "+
+			return nil, nil, fmt.Errorf("Couldn't find "+
 				"transaction %s",
 				ro.watchOutPoints[0].Hash)
 		}
 		header, err := s.GetBlockByHeight(
 			uint32(curStamp.Height))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		curStamp.Hash = header.BlockHash()
 	}
