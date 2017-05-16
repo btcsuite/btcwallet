@@ -165,7 +165,7 @@ type lazyHandler func() (interface{}, *btcjson.RPCError)
 // returning a closure that will execute it with the (required) wallet and
 // (optional) consensus RPC server.  If no handlers are found and the
 // chainClient is not nil, the returned handler performs RPC passthrough.
-func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient *chain.RPCClient) lazyHandler {
+func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient chain.Interface) lazyHandler {
 	handlerData, ok := rpcHandlers[request.Method]
 	if ok && handlerData.handlerWithChain != nil && w != nil && chainClient != nil {
 		return func() (interface{}, *btcjson.RPCError) {
@@ -173,11 +173,20 @@ func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient *c
 			if err != nil {
 				return nil, btcjson.ErrRPCInvalidRequest
 			}
-			resp, err := handlerData.handlerWithChain(cmd, w, chainClient)
-			if err != nil {
-				return nil, jsonError(err)
+			switch client := chainClient.(type) {
+			case *chain.RPCClient:
+				resp, err := handlerData.handlerWithChain(cmd,
+					w, client)
+				if err != nil {
+					return nil, jsonError(err)
+				}
+				return resp, nil
+			default:
+				return nil, &btcjson.RPCError{
+					Code:    -1,
+					Message: "Chain RPC is inactive",
+				}
 			}
-			return resp, nil
 		}
 	}
 	if ok && handlerData.handler != nil && w != nil {
@@ -202,11 +211,20 @@ func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient *c
 				Message: "Chain RPC is inactive",
 			}
 		}
-		resp, err := chainClient.RawRequest(request.Method, request.Params)
-		if err != nil {
-			return nil, jsonError(err)
+		switch client := chainClient.(type) {
+		case *chain.RPCClient:
+			resp, err := client.RawRequest(request.Method,
+				request.Params)
+			if err != nil {
+				return nil, jsonError(err)
+			}
+			return &resp, nil
+		default:
+			return nil, &btcjson.RPCError{
+				Code:    -1,
+				Message: "Chain RPC is inactive",
+			}
 		}
-		return &resp, nil
 	}
 }
 

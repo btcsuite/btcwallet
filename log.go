@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
+	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/jrick/logrotate/rotator"
@@ -72,6 +73,7 @@ var subsystemLoggers = map[string]btclog.Logger{
 	"CHNS": chainLog,
 	"GRPC": grpcLog,
 	"RPCS": legacyRPCLog,
+	"SPVC": spvchainLog,
 }
 
 // initLogRotator initializes the logging rotater to write logs to logFile and
@@ -83,6 +85,53 @@ func initLogRotator(logFile string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create log directory: %v\n", err)
 		os.Exit(1)
+=======
+// logClosure is used to provide a closure over expensive logging operations
+// so don't have to be performed when the logging level doesn't warrant it.
+type logClosure func() string
+
+// String invokes the underlying function and returns the result.
+func (c logClosure) String() string {
+	return c()
+}
+
+// newLogClosure returns a new closure over a function that returns a string
+// which itself provides a Stringer interface so that it can be used with the
+// logging system.
+func newLogClosure(c func() string) logClosure {
+	return logClosure(c)
+}
+
+// useLogger updates the logger references for subsystemID to logger.  Invalid
+// subsystems are ignored.
+func useLogger(subsystemID string, logger btclog.Logger) {
+	if _, ok := subsystemLoggers[subsystemID]; !ok {
+		return
+	}
+	subsystemLoggers[subsystemID] = logger
+
+	switch subsystemID {
+	case "BTCW":
+		log = logger
+	case "WLLT":
+		walletLog = logger
+		wallet.UseLogger(logger)
+	case "TXST":
+		txmgrLog = logger
+		wtxmgr.UseLogger(logger)
+	case "CHNS":
+		chainLog = logger
+		chain.UseLogger(logger)
+		btcrpcclient.UseLogger(logger)
+	case "GRPC":
+		grpcLog = logger
+		rpcserver.UseLogger(logger)
+	case "RPCS":
+		legacyRPCLog = logger
+		legacyrpc.UseLogger(logger)
+	case "SPVC":
+		spvchainLog = logger
+		spvchain.UseLogger(logger)
 	}
 	r, err := rotator.New(logFile, 10*1024, false, 3)
 	if err != nil {

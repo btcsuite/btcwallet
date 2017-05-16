@@ -66,6 +66,33 @@ var (
 			// 0 relevant TXs
 			log = append(log, 0x00)
 		}
+		// Block with one relevant (receive) transaction
+		log = append(log, []byte("bcrvfc")...)
+		log = append(log, 0x01)
+		// 124 blocks with nothing
+		for i := 802; i <= 925; i++ {
+			log = append(log, []byte("bcfc")...)
+			log = append(log, 0x00)
+		}
+		// Block with 1 redeeming transaction
+		log = append(log, []byte("bcrdfc")...)
+		log = append(log, 0x01)
+		// Block with nothing
+		log = append(log, []byte("bcfc")...)
+		log = append(log, 0x00)
+		// Update with rewind - rewind back to 795, add another address,
+		// and see more interesting transactions.
+		for i := 927; i >= 796; i-- {
+			// BlockDisconnected and FilteredBlockDisconnected
+			log = append(log, []byte("bdfd")...)
+		}
+		// Forward to 800
+		for i := 796; i <= 800; i++ {
+			// BlockConnected and FilteredBlockConnected
+			log = append(log, []byte("bcfc")...)
+			// 0 relevant TXs
+			log = append(log, 0x00)
+		}
 		// Block with two relevant (receive) transactions
 		log = append(log, []byte("bcrvrvfc")...)
 		log = append(log, 0x02)
@@ -368,8 +395,24 @@ func TestSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unable to send raw transaction to node: %s", err)
 	}
+	privKey2, err := btcec.NewPrivateKey(btcec.S256())
+	if err != nil {
+		t.Fatalf("Couldn't generate private key: %s", err)
+	}
+	addr2, err := secSrc.add(privKey2)
+	if err != nil {
+		t.Fatalf("Couldn't create address from key: %s", err)
+	}
+	script2, err := secSrc.GetScript(addr2)
+	if err != nil {
+		t.Fatalf("Couldn't create script from address: %s", err)
+	}
+	out2 := wire.TxOut{
+		PkScript: script2,
+		Value:    1000000000,
+	}
 	// Fee rate is satoshis per byte
-	tx2, err := h1.CreateTransaction([]*wire.TxOut{&out1}, 1000)
+	tx2, err := h1.CreateTransaction([]*wire.TxOut{&out2}, 1000)
 	if err != nil {
 		t.Fatalf("Couldn't create transaction from script: %s", err)
 	}
@@ -393,7 +436,7 @@ func TestSetup(t *testing.T) {
 	err = svc.Rescan(
 		spvchain.StartBlock(&startBlock),
 		spvchain.EndBlock(&endBlock),
-		spvchain.WatchTXIDs(tx1.TxHash()),
+		spvchain.WatchTxIDs(tx1.TxHash()),
 		spvchain.NotificationHandlers(btcrpcclient.NotificationHandlers{
 			OnFilteredBlockConnected: func(height int32,
 				header *wire.BlockHeader,
@@ -441,7 +484,7 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't find the index of our output in transaction"+
 			" %s", tx1.TxHash())
 	}
-	txo, err := svc.GetUtxo(
+	txo, redeemingTx, err := svc.GetUtxo(
 		spvchain.WatchOutPoints(ourOutPoint),
 		spvchain.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
 	)
@@ -458,7 +501,7 @@ func TestSetup(t *testing.T) {
 	// results.
 	quitRescan := make(chan struct{})
 	startBlock = waddrmgr.BlockStamp{Height: 795}
-	err = startRescan(t, svc, addr1, &startBlock, quitRescan)
+	rescan, errChan := startRescan(t, svc, addr1, &startBlock, quitRescan)
 	if err != nil {
 		t.Fatalf("Couldn't start a rescan for %s: %s", addr1, err)
 	}
@@ -466,10 +509,9 @@ func TestSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
-
 	numTXs, _, err := checkRescanStatus()
-	if numTXs != 2 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
+	if numTXs != 1 {
+		t.Fatalf("Wrong number of relevant transactions. Want: 1, got:"+
 			" %d", numTXs)
 	}
 
@@ -493,7 +535,8 @@ func TestSetup(t *testing.T) {
 		inputValues []btcutil.Amount, scripts [][]byte, err error) {
 		ourIndex := 1 << 30 // Should work on 32-bit systems
 		for i, txo := range tx.TxOut {
-			if bytes.Equal(txo.PkScript, script1) {
+			if bytes.Equal(txo.PkScript, script1) ||
+				bytes.Equal(txo.PkScript, script2) {
 				ourIndex = i
 			}
 		}
@@ -524,32 +567,32 @@ func TestSetup(t *testing.T) {
 	// Create another address to send to so we don't trip the rescan with
 	// the old address and we can test monitoring both OutPoint usage and
 	// receipt by addresses.
-	privKey2, err := btcec.NewPrivateKey(btcec.S256())
+	privKey3, err := btcec.NewPrivateKey(btcec.S256())
 	if err != nil {
 		t.Fatalf("Couldn't generate private key: %s", err)
 	}
-	addr2, err := secSrc.add(privKey2)
+	addr3, err := secSrc.add(privKey3)
 	if err != nil {
 		t.Fatalf("Couldn't create address from key: %s", err)
 	}
-	script2, err := secSrc.GetScript(addr2)
+	script3, err := secSrc.GetScript(addr3)
 	if err != nil {
 		t.Fatalf("Couldn't create script from address: %s", err)
 	}
-	out2 := wire.TxOut{
-		PkScript: script2,
+	out3 := wire.TxOut{
+		PkScript: script3,
 		Value:    500000000,
 	}
 	// Spend the first transaction and mine a block.
 	authTx1, err := txauthor.NewUnsignedTransaction(
 		[]*wire.TxOut{
-			&out2,
+			&out3,
 		},
 		// Fee rate is satoshis per kilobyte
 		1024000,
 		inSrc(*tx1),
 		func() ([]byte, error) {
-			return script2, nil
+			return script3, nil
 		},
 	)
 	if err != nil {
@@ -573,20 +616,20 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
-	if numTXs != 3 {
-		t.Fatalf("Wrong number of relevant transactions. Want: 3, got:"+
+	if numTXs != 2 {
+		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
 			" %d", numTXs)
 	}
 	// Spend the second transaction and mine a block.
 	authTx2, err := txauthor.NewUnsignedTransaction(
 		[]*wire.TxOut{
-			&out2,
+			&out3,
 		},
 		// Fee rate is satoshis per kilobyte
 		1024000,
 		inSrc(*tx2),
 		func() ([]byte, error) {
-			return script2, nil
+			return script3, nil
 		},
 	)
 	if err != nil {
@@ -610,10 +653,27 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("Couldn't sync ChainService: %s", err)
 	}
 	numTXs, _, err = checkRescanStatus()
+	if numTXs != 2 {
+		t.Fatalf("Wrong number of relevant transactions. Want: 2, got:"+
+			" %d", numTXs)
+	}
+
+	// Update the filter with the second address, and we should have 2 more
+	// relevant transactions.
+	err = rescan.Update(spvchain.AddAddrs(addr2), spvchain.Rewind(795))
+	if err != nil {
+		t.Fatalf("Couldn't update the rescan filter: %s", err)
+	}
+	err = waitForSync(t, svc, h1)
+	if err != nil {
+		t.Fatalf("Couldn't sync ChainService: %s", err)
+	}
+	numTXs, _, err = checkRescanStatus()
 	if numTXs != 4 {
 		t.Fatalf("Wrong number of relevant transactions. Want: 4, got:"+
 			" %d", numTXs)
 	}
+
 	// Generate a block with a nonstandard coinbase to generate a basic
 	// filter with 0 entries.
 	_, err = h1.GenerateAndSubmitBlockWithCustomCoinbaseOutputs(
@@ -631,13 +691,17 @@ func TestSetup(t *testing.T) {
 	}
 
 	// Check and make sure the previous UTXO is now spent.
-	_, err = svc.GetUtxo(
+	txo, redeemingTx, err = svc.GetUtxo(
 		spvchain.WatchOutPoints(ourOutPoint),
 		spvchain.StartBlock(&waddrmgr.BlockStamp{Height: 801}),
 	)
-	if err.Error() != fmt.Sprintf("OutPoint %s has been spent",
-		ourOutPoint) {
-		t.Fatalf("UTXO %s not seen as spent: %s", ourOutPoint, err)
+	if err != nil {
+		t.Fatalf("Couldn't get UTXO %s: %s", ourOutPoint, err)
+	}
+	if redeemingTx.TxHash() != authTx1.Tx.TxHash() {
+		t.Fatalf("Redeeming transaction doesn't match expected "+
+			"transaction: want %s, got %s", authTx1.Tx.TxHash(),
+			redeemingTx.TxHash())
 	}
 
 	// Test that we can get blocks and cfilters via P2P and decide which are
@@ -682,9 +746,26 @@ func TestSetup(t *testing.T) {
 	}
 
 	close(quitRescan)
+	err = <-errChan
+	if err != nil {
+		t.Fatalf("Rescan ended with error: %s", err)
+	}
 	if !bytes.Equal(wantLog, gotLog) {
-		t.Fatalf("Rescan event logs incorrect.\nWant: %s\nGot:  %s\n",
-			wantLog, gotLog)
+		leastBytes := len(wantLog)
+		if len(gotLog) < leastBytes {
+			leastBytes = len(gotLog)
+		}
+		diffIndex := 0
+		for i := 0; i < leastBytes; i++ {
+			if wantLog[i] != gotLog[i] {
+				diffIndex = i
+				break
+			}
+		}
+		t.Fatalf("Rescan event logs differ starting at %d.\nWant: %s\n"+
+			"Got:  %s\nDifference - want: %s\nDifference -- got: "+
+			"%s", diffIndex, wantLog, gotLog, wantLog[diffIndex:],
+			gotLog[diffIndex:])
 	}
 }
 
@@ -1117,110 +1198,102 @@ func testRandomBlocks(t *testing.T, svc *spvchain.ChainService,
 // on the flow of the test. The rescan starts at the genesis block and the
 // notifications continue until the `quit` channel is closed.
 func startRescan(t *testing.T, svc *spvchain.ChainService, addr btcutil.Address,
-	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) error {
-	go func() {
-		err := svc.Rescan(
-			spvchain.QuitChan(quit),
-			spvchain.WatchAddrs(addr),
-			spvchain.StartBlock(startBlock),
-			spvchain.NotificationHandlers(
-				btcrpcclient.NotificationHandlers{
-					OnBlockConnected: func(
-						hash *chainhash.Hash,
-						height int32, time time.Time) {
-						rescanMtx.Lock()
-						gotLog = append(gotLog,
-							[]byte("bc")...)
-						curBlockHeight = height
-						rescanMtx.Unlock()
-					},
-					OnBlockDisconnected: func(
-						hash *chainhash.Hash,
-						height int32, time time.Time) {
-						rescanMtx.Lock()
-						delete(ourKnownTxsByBlock, *hash)
-						gotLog = append(gotLog,
-							[]byte("bd")...)
-						curBlockHeight = height - 1
-						rescanMtx.Unlock()
-					},
-					OnRecvTx: func(tx *btcutil.Tx,
-						details *btcjson.BlockDetails) {
-						rescanMtx.Lock()
-						hash, err := chainhash.
-							NewHashFromStr(
-								details.Hash)
-						if err != nil {
-							t.Errorf("Couldn't "+
-								"decode hash "+
-								"%s: %s",
-								details.Hash,
-								err)
-						}
-						ourKnownTxsByBlock[*hash] = append(
-							ourKnownTxsByBlock[*hash],
-							tx)
-						gotLog = append(gotLog,
-							[]byte("rv")...)
-						rescanMtx.Unlock()
-					},
-					OnRedeemingTx: func(tx *btcutil.Tx,
-						details *btcjson.BlockDetails) {
-						rescanMtx.Lock()
-						hash, err := chainhash.
-							NewHashFromStr(
-								details.Hash)
-						if err != nil {
-							t.Errorf("Couldn't "+
-								"decode hash "+
-								"%s: %s",
-								details.Hash,
-								err)
-						}
-						ourKnownTxsByBlock[*hash] = append(
-							ourKnownTxsByBlock[*hash],
-							tx)
-						gotLog = append(gotLog,
-							[]byte("rd")...)
-						rescanMtx.Unlock()
-					},
-					OnFilteredBlockConnected: func(
-						height int32,
-						header *wire.BlockHeader,
-						relevantTxs []*btcutil.Tx) {
-						rescanMtx.Lock()
-						ourKnownTxsByFilteredBlock[header.BlockHash()] =
-							relevantTxs
-						gotLog = append(gotLog,
-							[]byte("fc")...)
-						gotLog = append(gotLog,
-							uint8(len(relevantTxs)))
-						curFilteredBlockHeight = height
-						rescanMtx.Unlock()
-					},
-					OnFilteredBlockDisconnected: func(
-						height int32,
-						header *wire.BlockHeader) {
-						rescanMtx.Lock()
-						delete(ourKnownTxsByFilteredBlock,
-							header.BlockHash())
-						gotLog = append(gotLog,
-							[]byte("fd")...)
-						curFilteredBlockHeight =
-							height - 1
-						rescanMtx.Unlock()
-					},
-				}),
-		)
-		if logLevel != btclog.Off {
-			if err != nil {
-				t.Logf("Rescan ended: %s", err)
-			} else {
-				t.Logf("Rescan ended successfully")
-			}
-		}
-	}()
-	return nil
+	startBlock *waddrmgr.BlockStamp, quit <-chan struct{}) (spvchain.Rescan,
+	<-chan error) {
+	rescan, errChan := svc.NewRescan(
+		spvchain.QuitChan(quit),
+		spvchain.WatchAddrs(addr),
+		spvchain.StartBlock(startBlock),
+		spvchain.NotificationHandlers(
+			btcrpcclient.NotificationHandlers{
+				OnBlockConnected: func(
+					hash *chainhash.Hash,
+					height int32, time time.Time) {
+					rescanMtx.Lock()
+					gotLog = append(gotLog,
+						[]byte("bc")...)
+					curBlockHeight = height
+					rescanMtx.Unlock()
+				},
+				OnBlockDisconnected: func(
+					hash *chainhash.Hash,
+					height int32, time time.Time) {
+					rescanMtx.Lock()
+					delete(ourKnownTxsByBlock, *hash)
+					gotLog = append(gotLog,
+						[]byte("bd")...)
+					curBlockHeight = height - 1
+					rescanMtx.Unlock()
+				},
+				OnRecvTx: func(tx *btcutil.Tx,
+					details *btcjson.BlockDetails) {
+					rescanMtx.Lock()
+					hash, err := chainhash.
+						NewHashFromStr(
+							details.Hash)
+					if err != nil {
+						t.Errorf("Couldn't "+
+							"decode hash "+
+							"%s: %s",
+							details.Hash,
+							err)
+					}
+					ourKnownTxsByBlock[*hash] = append(
+						ourKnownTxsByBlock[*hash],
+						tx)
+					gotLog = append(gotLog,
+						[]byte("rv")...)
+					rescanMtx.Unlock()
+				},
+				OnRedeemingTx: func(tx *btcutil.Tx,
+					details *btcjson.BlockDetails) {
+					rescanMtx.Lock()
+					hash, err := chainhash.
+						NewHashFromStr(
+							details.Hash)
+					if err != nil {
+						t.Errorf("Couldn't "+
+							"decode hash "+
+							"%s: %s",
+							details.Hash,
+							err)
+					}
+					ourKnownTxsByBlock[*hash] = append(
+						ourKnownTxsByBlock[*hash],
+						tx)
+					gotLog = append(gotLog,
+						[]byte("rd")...)
+					rescanMtx.Unlock()
+				},
+				OnFilteredBlockConnected: func(
+					height int32,
+					header *wire.BlockHeader,
+					relevantTxs []*btcutil.Tx) {
+					rescanMtx.Lock()
+					ourKnownTxsByFilteredBlock[header.BlockHash()] =
+						relevantTxs
+					gotLog = append(gotLog,
+						[]byte("fc")...)
+					gotLog = append(gotLog,
+						uint8(len(relevantTxs)))
+					curFilteredBlockHeight = height
+					rescanMtx.Unlock()
+				},
+				OnFilteredBlockDisconnected: func(
+					height int32,
+					header *wire.BlockHeader) {
+					rescanMtx.Lock()
+					delete(ourKnownTxsByFilteredBlock,
+						header.BlockHash())
+					gotLog = append(gotLog,
+						[]byte("fd")...)
+					curFilteredBlockHeight =
+						height - 1
+					rescanMtx.Unlock()
+				},
+			}),
+	)
+	return rescan, errChan
 }
 
 // checkRescanStatus returns the number of relevant transactions we currently
