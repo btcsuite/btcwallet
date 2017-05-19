@@ -138,47 +138,6 @@ func (c *RPCClient) WaitForShutdown() {
 	c.wg.Wait()
 }
 
-// Notification types.  These are defined here and processed from from reading
-// a notificationChan to avoid handling these notifications directly in
-// btcrpcclient callbacks, which isn't very Go-like and doesn't allow
-// blocking client calls.
-type (
-	// ClientConnected is a notification for when a client connection is
-	// opened or reestablished to the chain server.
-	ClientConnected struct{}
-
-	// BlockConnected is a notification for a newly-attached block to the
-	// best chain.
-	BlockConnected wtxmgr.BlockMeta
-
-	// BlockDisconnected is a notifcation that the block described by the
-	// BlockStamp was reorganized out of the best chain.
-	BlockDisconnected wtxmgr.BlockMeta
-
-	// RelevantTx is a notification for a transaction which spends wallet
-	// inputs or pays to a watched address.
-	RelevantTx struct {
-		TxRecord *wtxmgr.TxRecord
-		Block    *wtxmgr.BlockMeta // nil if unmined
-	}
-
-	// RescanProgress is a notification describing the current status
-	// of an in-progress rescan.
-	RescanProgress struct {
-		Hash   *chainhash.Hash
-		Height int32
-		Time   time.Time
-	}
-
-	// RescanFinished is a notification that a previous rescan request
-	// has finished.
-	RescanFinished struct {
-		Hash   *chainhash.Hash
-		Height int32
-		Time   time.Time
-	}
-)
-
 // Notifications returns a channel of parsed notifications sent by the remote
 // bitcoin RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for

@@ -1,28 +1,55 @@
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
+=======
+hash: a567152c861b11d05c72b812d894a657b95ae39d08f85c0b7cbf1a235dd8a1a7
+updated: 2017-05-18T20:28:25.480256291-06:00
+>>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
 imports:
+- name: github.com/aead/siphash
+  version: e404fcfc888570cadd1610538e2dbc89f66af814
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
 - name: github.com/btcsuite/btcd
+<<<<<<< HEAD
   version: 47885ab8702485be6b6f87a03d4f3be0bc5c982c
+=======
+  version: 58668c182103a00c5038c7130d7a23fad3a3bd34
+  repo: git@github.com:companyzero/btcdln
+>>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
   subpackages:
+  - addrmgr
   - blockchain
   - btcec
   - btcjson
   - chaincfg
   - chaincfg/chainhash
+  - connmgr
   - database
+  - peer
   - txscript
   - wire
 - name: github.com/btcsuite/btclog
   version: 84c8d2346e9fc8c7b947e243b9c24e6df9fd206a
 - name: github.com/btcsuite/btcrpcclient
+<<<<<<< HEAD
   version: c72658166ae09457e6beb14e9112241e352ebd35
 - name: github.com/btcsuite/btcutil
   version: 5ffa719c3882fd2ec1e8b9f4978066701c31a343
+=======
+  version: e15bd09b466511d8836c4017bc4cbc2e0ff05f82
+  repo: git@github.com:companyzero/btcrpcclientln
+- name: github.com/btcsuite/btcutil
+  version: f814b35f15362b1122f55bd9034b6275552cc2f7
+  repo: git@github.com:companyzero/btcutilln
+>>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
   subpackages:
   - base58
+  - gcs
+  - gcs/builder
   - hdkeychain
+- name: github.com/btcsuite/fastsha256
+  version: 637e656429416087660c84436a2a035d69d54e2e
 - name: github.com/btcsuite/go-socks
   version: 4720035b7bfd2a9bb130b1c184f8bbe41b6f0d0f
   subpackages:
@@ -37,8 +64,17 @@ imports:
   - salsa20/salsa
   - scrypt
   - ssh/terminal
+<<<<<<< HEAD
+=======
+- name: github.com/btcsuite/seelog
+  version: ae8891d029dd3c269dcfd6f261ad23e761acd99f
+>>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
+- name: github.com/davecgh/go-spew
+  version: 346938d642f2ec3594ed81d874461961cd0faa76
+  subpackages:
+  - spew
 - name: github.com/golang/protobuf
   version: fec3b39b059c0f88fa6b20f5ed012b1aa203a8b4
   subpackages:
@@ -46,6 +82,7 @@ imports:
   - ptypes/any
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
+<<<<<<< HEAD
 - name: github.com/jrick/logrotate
   version: a93b200c26cbae3bb09dd0dc2c7c7fe1468a034a
   subpackages:
@@ -56,6 +93,19 @@ imports:
   - ripemd160
 - name: golang.org/x/net
   version: 8663ed5da4fd087c3cfb99a996e628b72e2f0948
+=======
+- name: github.com/kkdai/bstream
+  version: f391b8402d23024e7c0f624b31267a89998fca95
+- name: github.com/lightninglabs/neutrino
+  version: 3a3b87d375c492f22de128f4f5df889e0340bd35
+  repo: git@github.com:lightninglabs/neutrino
+- name: golang.org/x/crypto
+  version: 0fe963104e9d1877082f8fb38f816fcd97eb1d10
+  subpackages:
+  - ssh/terminal
+- name: golang.org/x/net
+  version: 513929065c19401a1c7b76ecd942f9f86a0c061b
+>>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
   subpackages:
   - context
   - http2
@@ -65,11 +115,19 @@ imports:
   - lex/httplex
   - trace
 - name: golang.org/x/sys
+<<<<<<< HEAD
   version: cd2c276457edda6df7fb04895d3fd6a6add42926
   subpackages:
   - unix
 - name: golang.org/x/text
   version: 6353ef0f924300eea566d3438817aa4d3374817e
+=======
+  version: e62c3de784db939836898e5c19ffd41bece347da
+  subpackages:
+  - unix
+- name: golang.org/x/text
+  version: 19e51611da83d6be54ddafce4a4af510cb3e9ea4
+>>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
   subpackages:
   - secure/bidirule
   - transform
@@ -95,8 +153,4 @@ imports:
   - status
   - tap
   - transport
-testImports:
-- name: github.com/davecgh/go-spew
-  version: 346938d642f2ec3594ed81d874461961cd0faa76
-  subpackages:
-  - spew
+testImports: []
