@@ -19,9 +19,9 @@ import (
 	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	"github.com/btcsuite/btcwallet/netparams"
-	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/wallet"
 	flags "github.com/jessevdk/go-flags"
+	"github.com/lightninglabs/neutrino"
 )
 
 const (
@@ -270,9 +270,9 @@ func loadConfig() (*config, []string, error) {
 		UseSPV:                 false,
 		AddPeers:               []string{},
 		ConnectPeers:           []string{},
-		MaxPeers:               spvchain.MaxPeers,
-		BanDuration:            spvchain.BanDuration,
-		BanThreshold:           spvchain.BanThreshold,
+		MaxPeers:               neutrino.MaxPeers,
+		BanDuration:            neutrino.BanDuration,
+		BanThreshold:           neutrino.BanThreshold,
 	}
 
 	// Pre-parse the command line options to see if an alternative config

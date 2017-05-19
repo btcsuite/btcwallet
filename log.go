@@ -13,7 +13,6 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
-	"github.com/btcsuite/btcwallet/spvsvc/spvchain"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/jrick/logrotate/rotator"
@@ -73,7 +72,7 @@ var subsystemLoggers = map[string]btclog.Logger{
 	"CHNS": chainLog,
 	"GRPC": grpcLog,
 	"RPCS": legacyRPCLog,
-	"SPVC": spvchainLog,
+	"BTCN": btcnLog,
 }
 
 // initLogRotator initializes the logging rotater to write logs to logFile and
@@ -129,9 +128,9 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	case "RPCS":
 		legacyRPCLog = logger
 		legacyrpc.UseLogger(logger)
-	case "SPVC":
-		spvchainLog = logger
-		spvchain.UseLogger(logger)
+	case "BTCN":
+		btcnLog = logger
+		neutrino.UseLogger(logger)
 	}
 	r, err := rotator.New(logFile, 10*1024, false, 3)
 	if err != nil {
