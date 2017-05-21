@@ -52,6 +52,21 @@ func (w *Wallet) handleChainNotifications() {
 				return w.addRelevantTx(tx, n.TxRecord, n.Block)
 			})
 			notificationName = "recvtx/redeemingtx"
+		case chain.FilteredBlockConnected:
+			// Atomically update for the whole block.
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				err := w.connectBlock(tx, *n.Block)
+				if err != nil {
+					return err
+				}
+				for _, rec := range n.RelevantTxs {
+					err := w.addRelevantTx(tx, rec, n.Block)
+					if err != nil {
+						return err
+					}
+				}
+				return nil
+			})
 
 		// The following are handled by the wallet's rescan
 		// goroutines, so just pass them there.

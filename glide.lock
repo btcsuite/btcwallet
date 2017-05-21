@@ -97,7 +97,7 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: 3a3b87d375c492f22de128f4f5df889e0340bd35
+  version: 7306107b67bb4eea6f70bc598d28049ea00ac442
   repo: git@github.com:lightninglabs/neutrino
 - name: golang.org/x/crypto
   version: 0fe963104e9d1877082f8fb38f816fcd97eb1d10
