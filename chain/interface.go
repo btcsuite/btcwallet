@@ -40,6 +40,14 @@ type (
 	// best chain.
 	BlockConnected wtxmgr.BlockMeta
 
+	// FilteredBlockConnected is an alternate notification that contains
+	// both block and relevant transaction information in one struct, which
+	// allows atomic updates.
+	FilteredBlockConnected struct {
+		Block       *wtxmgr.BlockMeta
+		RelevantTxs []*wtxmgr.TxRecord
+	}
+
 	// BlockDisconnected is a notifcation that the block described by the
 	// BlockStamp was reorganized out of the best chain.
 	BlockDisconnected wtxmgr.BlockMeta
