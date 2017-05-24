@@ -70,7 +70,7 @@ func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
 	}
 
 	// Notify interested clients of the connected block.
-	w.NtfnServer.notifyAttachedBlock(&b)
+	w.NtfnServer.notifyAttachedBlock(w, &b)
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
@@ -201,14 +201,14 @@ func (w *Wallet) addRelevantTx(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) er
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notifiation: %v", err)
 		} else {
-			w.NtfnServer.notifyUnminedTransaction(details)
+			w.NtfnServer.notifyUnminedTransaction(w, details)
 		}
 	} else {
 		details, err := w.TxStore.UniqueTxDetails(&rec.Hash, &block.Block)
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notifiation: %v", err)
 		} else {
-			w.NtfnServer.notifyMinedTransaction(details, block)
+			w.NtfnServer.notifyMinedTransaction(w, details, block)
 		}
 	}
 
