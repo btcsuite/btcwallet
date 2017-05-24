@@ -244,7 +244,7 @@ func (s *NotificationServer) notifyMinedTransaction(wallet *Wallet, details *wtx
 	s.currentTxNtfn.AttachedBlocks[n-1].Transactions = append(txs, makeTxSummary(wallet, details))
 }
 
-func (s *NotificationServer) notifyAttachedBlock(wallet *Wallet, block *wtxmgr.BlockMeta) {
+func (s *NotificationServer) notifyAttachedBlock(session *Session, block *wtxmgr.BlockMeta) {
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
@@ -262,7 +262,7 @@ func (s *NotificationServer) notifyAttachedBlock(wallet *Wallet, block *wtxmgr.B
 
 	// For now (until notification coalescing isn't necessary) just use
 	// chain length to determine if this is the new best block.
-	if wallet.ChainSynced() {
+	if session.ChainSynced() {
 		if len(s.currentTxNtfn.DetachedBlocks) >= len(s.currentTxNtfn.AttachedBlocks) {
 			return
 		}
@@ -283,7 +283,7 @@ func (s *NotificationServer) notifyAttachedBlock(wallet *Wallet, block *wtxmgr.B
 	// a mined transaction in the new best chain, there is no possiblity of
 	// a new, previously unseen transaction appearing in unconfirmed.
 
-	unminedHashes, err := wallet.TxStore.UnminedTxHashes()
+	unminedHashes, err := session.Wallet.TxStore.UnminedTxHashes()
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
 		return
@@ -292,9 +292,9 @@ func (s *NotificationServer) notifyAttachedBlock(wallet *Wallet, block *wtxmgr.B
 
 	bals := make(map[uint32]btcutil.Amount)
 	for _, b := range s.currentTxNtfn.AttachedBlocks {
-		relevantAccounts(wallet, bals, b.Transactions)
+		relevantAccounts(session.Wallet, bals, b.Transactions)
 	}
-	err = totalBalances(wallet, bals)
+	err = totalBalances(session.Wallet, bals)
 	if err != nil {
 		log.Errorf("Cannot determine balances for relevant accounts: %v", err)
 		return

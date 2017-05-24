@@ -96,28 +96,23 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 // UTXO set and minconf policy. An additional output may be added to return
 // change to the wallet.  An appropriate fee is included based on the wallet's
 // current relay fee.  The wallet must be unlocked to create the transaction.
-func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32) (*txauthor.AuthoredTx, error) {
+func (s *Session) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32) (*txauthor.AuthoredTx, error) {
 	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
 	// error if already locked.
-	heldUnlock, err := w.HoldUnlock()
+	heldUnlock, err := s.Wallet.HoldUnlock()
 	if err != nil {
 		return nil, err
 	}
 	defer heldUnlock.Release()
 
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
-
 	// Get current block's height and hash.
-	bs, err := chainClient.BlockStamp()
+	bs, err := s.chainClient.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
 
-	eligible, err := w.findEligibleOutputs(account, minconf, bs)
+	eligible, err := s.Wallet.findEligibleOutputs(account, minconf, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -128,16 +123,16 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		// the imported account, change addresses are created from account 0.
 		var changeAddr btcutil.Address
 		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.NewChangeAddress(0)
+			changeAddr, err = s.NewChangeAddress(0)
 		} else {
-			changeAddr, err = w.NewChangeAddress(account)
+			changeAddr, err = s.NewChangeAddress(account)
 		}
 		if err != nil {
 			return nil, err
 		}
 		return txscript.PayToAddrScript(changeAddr)
 	}
-	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
+	tx, err := txauthor.NewUnsignedTransaction(outputs, s.Wallet.RelayFee(),
 		inputSource, changeSource)
 	if err != nil {
 		return nil, err
@@ -150,7 +145,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		tx.RandomizeChangePosition()
 	}
 
-	err = tx.AddAllInputScripts(secretSource{w.Manager})
+	err = tx.AddAllInputScripts(secretSource{s.Wallet.Manager})
 	if err != nil {
 		return nil, err
 	}

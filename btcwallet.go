@@ -14,6 +14,8 @@ import (
 
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -66,28 +68,43 @@ func walletMain() error {
 	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 	loader := wallet.NewLoader(activeNet.Params, dbDir)
 
-	// Create and start HTTP server to serve wallet client connections.
-	// This will be updated with the wallet and chain server RPC client
-	// created below after each is created.
-	rpcs, legacyRPCServer, err := startRPCServers(loader)
-	if err != nil {
-		log.Errorf("Unable to create RPC servers: %v", err)
-		return err
+	if !cfg.NoInitialLoad {
+		// Load the wallet database.  It must have been created already
+		// or this will return an appropriate error.
+		_, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+		if err != nil {
+			log.Error(err)
+			return err
+		}
+	}
+	
+	var rpcs *grpc.Server 
+	var legacyRPCServer *legacyrpc.Server
+	
+	lifecycle := func(ws *wallet.Session) error {
+		// All running rpc services are notified of the session's existence.
+		startWalletRPCServices(ws, rpcs, legacyRPCServer)
+
+		// The session will be shut down by the rpc service or by the
+		// interrupt handler.
+		return ws.Wallet.WaitForShutdown()
 	}
 
-	certs := readCAFile()
-	chainClient, err := startChainRPC(certs)
+	// Attempt to dial into btcd.
+	chainClient, err := rpcClientDial()
 	if err != nil {
 		log.Errorf("Failed to create rpc connection to btcd: %v", err)
 		return err
 	}
 
-	loader.RunAfterLoad(func(w *wallet.Wallet) {
-		startWalletRPCServices(w, rpcs, legacyRPCServer)
-		if legacyRPCServer != nil {
-			legacyRPCServer.SetChainServer(chainClient)
-		}
-	})
+	// Create and start HTTP server to serve wallet client connections.
+	// This will be updated with the wallet and chain server RPC client
+	// created below after each is created.
+	rpcs, legacyRPCServer, err = startRPCServers(loader, chainClient, lifecycle)
+	if err != nil {
+		log.Errorf("Unable to create RPC servers: %v", err)
+		return err
+	}
 
 	if !cfg.NoInitialLoad {
 		// Load the wallet database.  It must have been created already
@@ -133,6 +150,10 @@ func walletMain() error {
 	<-interruptHandlersDone
 	log.Info("Shutdown complete")
 	return nil
+}
+
+func rpcClientDial() (*chain.RPCClient, error) {
+	return startChainRPC(readCAFile())
 }
 
 func readCAFile() []byte {

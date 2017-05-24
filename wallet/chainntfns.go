@@ -11,84 +11,91 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-func (w *Wallet) handleChainNotifications() {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		log.Errorf("handleChainNotifications called without RPC client")
-		w.wg.Done()
-		return
-	}
-
-	sync := func(w *Wallet) {
+func (s *Session) handleChainNotifications() {
+	defer s.Wallet.wg.Done()
+	
+	sync := func(s *Session) {
 		// At the moment there is no recourse if the rescan fails for
 		// some reason, however, the wallet will not be marked synced
 		// and many methods will error early since the wallet is known
 		// to be out of date.
-		err := w.syncWithChain()
-		if err != nil && !w.ShuttingDown() {
+		err := s.syncWithChain()
+		if err != nil && !s.ShuttingDown() {
 			log.Warnf("Unable to synchronize wallet to chain: %v", err)
 		}
 	}
 
-	for n := range chainClient.Notifications() {
-		var err error
-		switch n := n.(type) {
-		case chain.ClientConnected:
-			go sync(w)
-		case chain.BlockConnected:
-			w.connectBlock(wtxmgr.BlockMeta(n))
-		case chain.BlockDisconnected:
-			err = w.disconnectBlock(wtxmgr.BlockMeta(n))
-		case chain.RelevantTx:
-			err = w.addRelevantTx(n.TxRecord, n.Block)
+	notifications := s.chainClient.Notifications()
+	for {
+		select {
+		// If the wallet session is closed, end the function.
+		case <-s.quit:
+			return
+		case n, ok := <-notifications:
+			if !ok {
+				// If the notification channel is closed, turn off the wallet.
+				s.Stop()
+				return
+			}
 
-		// The following are handled by the wallet's rescan
-		// goroutines, so just pass them there.
-		case *chain.RescanProgress, *chain.RescanFinished:
-			w.rescanNotifications <- n
-		}
-		if err != nil {
-			log.Errorf("Cannot handle chain server "+
-				"notification: %v", err)
+			var err error
+			switch n := n.(type) {
+			case chain.ClientConnected:
+				go sync(s)
+			case chain.BlockConnected:
+				s.connectBlock(wtxmgr.BlockMeta(n))
+			case chain.BlockDisconnected:
+				err = s.disconnectBlock(wtxmgr.BlockMeta(n))
+			case chain.RelevantTx:
+				err = s.Wallet.addRelevantTx(n.TxRecord, n.Block)
+
+			// The following are handled by the wallet's rescan
+			// goroutines, so just pass them there.
+			case *chain.RescanProgress, *chain.RescanFinished:
+				s.Wallet.rescanNotifications <- n
+			}
+			if err != nil {
+				log.Errorf("Cannot handle chain server "+
+					"notification: %v", err)
+			}
 		}
 	}
-	w.wg.Done()
 }
 
 // connectBlock handles a chain server notification by marking a wallet
 // that's currently in-sync with the chain server as being synced up to
 // the passed block.
-func (w *Wallet) connectBlock(b wtxmgr.BlockMeta) {
+func (s *Session) connectBlock(b wtxmgr.BlockMeta) {
 	bs := waddrmgr.BlockStamp{
 		Height: b.Height,
 		Hash:   b.Hash,
 	}
-	if err := w.Manager.SetSyncedTo(&bs); err != nil {
+	if err := s.Wallet.Manager.SetSyncedTo(&bs); err != nil {
 		log.Errorf("Failed to update address manager sync state in "+
 			"connect block for hash %v (height %d): %v", b.Hash,
 			b.Height, err)
 	}
 
 	// Notify interested clients of the connected block.
-	w.NtfnServer.notifyAttachedBlock(w, &b)
+	s.Wallet.NtfnServer.notifyAttachedBlock(s, &b)
 }
 
 // disconnectBlock handles a chain server reorganize by rolling back all
 // block history from the reorged block for a wallet in-sync with the chain
 // server.
-func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
-	if !w.ChainSynced() {
+func (s *Session) disconnectBlock(b wtxmgr.BlockMeta) error {
+	if !s.ChainSynced() {
 		return nil
 	}
 
 	// Disconnect the last seen block from the manager if it matches the
 	// removed block.
-	iter := w.Manager.NewIterateRecentBlocks()
+	iter := s.Wallet.Manager.NewIterateRecentBlocks()
 	if iter != nil && iter.BlockStamp().Hash == b.Hash {
 		if iter.Prev() {
 			prev := iter.BlockStamp()
-			w.Manager.SetSyncedTo(&prev)
-			err := w.TxStore.Rollback(prev.Height + 1)
+			s.Wallet.Manager.SetSyncedTo(&prev)
+			err := s.Wallet.TxStore.Rollback(prev.Height + 1)
 			if err != nil {
 				return err
 			}
@@ -98,9 +105,9 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 			// will in turn lead to a rescan from either the
 			// earliest blockstamp the addresses in the manager are
 			// known to have been created.
-			w.Manager.SetSyncedTo(nil)
+			s.Wallet.Manager.SetSyncedTo(nil)
 			// Rollback everything but the genesis block.
-			err := w.TxStore.Rollback(1)
+			err := s.Wallet.TxStore.Rollback(1)
 			if err != nil {
 				return err
 			}
@@ -108,7 +115,7 @@ func (w *Wallet) disconnectBlock(b wtxmgr.BlockMeta) error {
 	}
 
 	// Notify interested clients of the disconnected block.
-	w.NtfnServer.notifyDetachedBlock(&b.Hash)
+	s.Wallet.NtfnServer.notifyDetachedBlock(&b.Hash)
 
 	return nil
 }

@@ -59,7 +59,7 @@ func (c *websocketClient) send(b []byte) error {
 // config, shutdown, etc.)
 type Server struct {
 	httpServer    http.Server
-	wallet        *wallet.Wallet
+	session       *wallet.Session
 	walletLoader  *wallet.Loader
 	chainClient   *chain.RPCClient
 	handlerLookup func(string) (requestHandler, bool)
@@ -87,7 +87,7 @@ func jsonAuthFail(w http.ResponseWriter) {
 
 // NewServer creates a new server for serving legacy RPC client connections,
 // both HTTP POST and websocket.
-func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Listener) *Server {
+func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Listener, chainClient *chain.RPCClient) *Server {
 	serveMux := http.NewServeMux()
 	const rpcAuthTimeoutSeconds = 10
 
@@ -99,6 +99,7 @@ func NewServer(opts *Options, walletLoader *wallet.Loader, listeners []net.Liste
 			// handshake within the allowed timeframe.
 			ReadTimeout: time.Second * rpcAuthTimeoutSeconds,
 		},
+		chainClient: chainClient, 
 		walletLoader:        walletLoader,
 		maxPostClients:      opts.MaxPOSTClients,
 		maxWebsocketClients: opts.MaxWebsocketClients,
@@ -198,9 +199,9 @@ func (s *Server) serve(lis net.Listener) {
 
 // RegisterWallet associates the legacy RPC server with the wallet.  This
 // function must be called before any wallet RPCs can be called by clients.
-func (s *Server) RegisterWallet(w *wallet.Wallet) {
+func (s *Server) RegisterWallet(session *wallet.Session) {
 	s.handlerMu.Lock()
-	s.wallet = w
+	s.session = session
 	s.handlerMu.Unlock()
 }
 
@@ -218,14 +219,11 @@ func (s *Server) Stop() {
 
 	// Stop the connected wallet and chain server, if any.
 	s.handlerMu.Lock()
-	wallet := s.wallet
-	chainClient := s.chainClient
+	session := s.session
 	s.handlerMu.Unlock()
-	if wallet != nil {
-		wallet.Stop()
-	}
-	if chainClient != nil {
-		chainClient.Stop()
+
+	if session == nil {
+		return
 	}
 
 	// Stop all the listeners.
@@ -243,25 +241,10 @@ func (s *Server) Stop() {
 
 	// First wait for the wallet and chain server to stop, if they
 	// were ever set.
-	if wallet != nil {
-		wallet.WaitForShutdown()
-	}
-	if chainClient != nil {
-		chainClient.WaitForShutdown()
-	}
+	session.Wallet.WaitForShutdown()
 
 	// Wait for all remaining goroutines to exit.
 	s.wg.Wait()
-}
-
-// SetChainServer sets the chain server client component needed to run a fully
-// functional bitcoin wallet RPC server.  This can be called to enable RPC
-// passthrough even before a loaded wallet is set, but the wallet's RPC client
-// is preferred.
-func (s *Server) SetChainServer(chainClient *chain.RPCClient) {
-	s.handlerMu.Lock()
-	s.chainClient = chainClient
-	s.handlerMu.Unlock()
 }
 
 // handlerClosure creates a closure function for handling requests of the given
@@ -274,15 +257,10 @@ func (s *Server) SetChainServer(chainClient *chain.RPCClient) {
 func (s *Server) handlerClosure(request *btcjson.Request) lazyHandler {
 	s.handlerMu.Lock()
 	// With the lock held, make copies of these pointers for the closure.
-	wallet := s.wallet
-	chainClient := s.chainClient
-	if wallet != nil && chainClient == nil {
-		chainClient = wallet.ChainClient()
-		s.chainClient = chainClient
-	}
+	session := s.session
 	s.handlerMu.Unlock()
 
-	return lazyApplyHandler(request, wallet, chainClient)
+	return lazyApplyHandler(request, session.Wallet, session)
 }
 
 // ErrNoAuth represents an error where authentication could not succeed

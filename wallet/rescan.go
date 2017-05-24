@@ -97,19 +97,18 @@ func (b *rescanBatch) done(err error) {
 // rescanBatchHandler handles incoming rescan request, serializing rescan
 // submissions, and possibly batching many waiting requests together so they
 // can be handled by a single rescan after the current one completes.
-func (w *Wallet) rescanBatchHandler() {
+func (s *Session) rescanBatchHandler() {
 	var curBatch, nextBatch *rescanBatch
-	quit := w.quitChan()
 
 out:
 	for {
 		select {
-		case job := <-w.rescanAddJob:
+		case job := <-s.Wallet.rescanAddJob:
 			if curBatch == nil {
 				// Set current batch as this job and send
 				// request.
 				curBatch = job.batch()
-				w.rescanBatch <- curBatch
+				s.Wallet.rescanBatch <- curBatch
 			} else {
 				// Create next batch if it doesn't exist, or
 				// merge the job.
@@ -120,10 +119,10 @@ out:
 				}
 			}
 
-		case n := <-w.rescanNotifications:
+		case n := <-s.Wallet.rescanNotifications:
 			switch n := n.(type) {
 			case *chain.RescanProgress:
-				w.rescanProgress <- &RescanProgressMsg{
+				s.Wallet.rescanProgress <- &RescanProgressMsg{
 					Addresses:    curBatch.addrs,
 					Notification: n,
 				}
@@ -135,7 +134,7 @@ out:
 						"currently running")
 					continue
 				}
-				w.rescanFinished <- &RescanFinishedMsg{
+				s.Wallet.rescanFinished <- &RescanFinishedMsg{
 					Addresses:    curBatch.addrs,
 					Notification: n,
 				}
@@ -143,7 +142,7 @@ out:
 				curBatch, nextBatch = nextBatch, nil
 
 				if curBatch != nil {
-					w.rescanBatch <- curBatch
+					s.Wallet.rescanBatch <- curBatch
 				}
 
 			default:
@@ -151,25 +150,24 @@ out:
 				panic(n)
 			}
 
-		case <-quit:
+		case <-s.quit:
 			break out
 		}
 	}
 
-	w.wg.Done()
+	s.Wallet.wg.Done()
 }
 
 // rescanProgressHandler handles notifications for partially and fully completed
 // rescans by marking each rescanned address as partially or fully synced.
-func (w *Wallet) rescanProgressHandler() {
-	quit := w.quitChan()
+func (s *Session) rescanProgressHandler() {
 out:
 	for {
 		// These can't be processed out of order since both chans are
 		// unbuffured and are sent from same context (the batch
 		// handler).
 		select {
-		case msg := <-w.rescanProgress:
+		case msg := <-s.Wallet.rescanProgress:
 			n := msg.Notification
 			log.Infof("Rescanned through block %v (height %d)",
 				n.Hash, n.Height)
@@ -178,13 +176,13 @@ out:
 				Hash:   *n.Hash,
 				Height: n.Height,
 			}
-			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+			if err := s.Wallet.Manager.SetSyncedTo(&bs); err != nil {
 				log.Errorf("Failed to update address manager "+
 					"sync state for hash %v (height %d): %v",
 					n.Hash, n.Height, err)
 			}
 
-		case msg := <-w.rescanFinished:
+		case msg := <-s.Wallet.rescanFinished:
 			n := msg.Notification
 			addrs := msg.Addresses
 			noun := pickNoun(len(addrs), "address", "addresses")
@@ -192,65 +190,57 @@ out:
 				"%s, height %d)", len(addrs), noun, n.Hash,
 				n.Height)
 			bs := waddrmgr.BlockStamp{Height: n.Height, Hash: *n.Hash}
-			if err := w.Manager.SetSyncedTo(&bs); err != nil {
+			if err := s.Wallet.Manager.SetSyncedTo(&bs); err != nil {
 				log.Errorf("Failed to update address manager "+
 					"sync state for hash %v (height %d): %v",
 					n.Hash, n.Height, err)
 			}
-			w.SetChainSynced(true)
+			s.setChainSynced(true)
 
-			go w.ResendUnminedTxs()
+			go s.ResendUnminedTxs()
 
-		case <-quit:
+		case <-s.quit:
 			break out
 		}
 	}
-	w.wg.Done()
+	
+	s.Wallet.wg.Done()
 }
 
 // rescanRPCHandler reads batch jobs sent by rescanBatchHandler and sends the
 // RPC requests to perform a rescan.  New jobs are not read until a rescan
 // finishes.
-func (w *Wallet) rescanRPCHandler() {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		log.Errorf("rescanRPCHandler called without an RPC client")
-		w.wg.Done()
-		return
-	}
-
-	quit := w.quitChan()
-
+func (s *Session) rescanRPCHandler() {
 out:
 	for {
 		select {
-		case batch := <-w.rescanBatch:
+		case batch := <-s.Wallet.rescanBatch:
 			// Log the newly-started rescan.
 			numAddrs := len(batch.addrs)
 			noun := pickNoun(numAddrs, "address", "addresses")
 			log.Infof("Started rescan from block %v (height %d) for %d %s",
 				batch.bs.Hash, batch.bs.Height, numAddrs, noun)
 
-			err := chainClient.Rescan(&batch.bs.Hash, batch.addrs,
+			err := s.chainClient.Rescan(&batch.bs.Hash, batch.addrs,
 				batch.outpoints)
 			if err != nil {
 				log.Errorf("Rescan for %d %s failed: %v", numAddrs,
 					noun, err)
 			}
 			batch.done(err)
-		case <-quit:
+		case <-s.quit:
 			break out
 		}
 	}
 
-	w.wg.Done()
+	s.Wallet.wg.Done()
 }
 
 // Rescan begins a rescan for all active addresses and unspent outputs of
 // a wallet.  This is intended to be used to sync a wallet back up to the
 // current best block in the main chain, and is considered an initial sync
 // rescan.
-func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error {
+func (s *Session) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error {
 	outpoints := make([]*wire.OutPoint, len(unspent))
 	for i, output := range unspent {
 		outpoints[i] = &output.OutPoint
@@ -260,9 +250,9 @@ func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error 
 		InitialSync: true,
 		Addrs:       addrs,
 		OutPoints:   outpoints,
-		BlockStamp:  w.Manager.SyncedTo(),
+		BlockStamp:  s.Wallet.Manager.SyncedTo(),
 	}
 
 	// Submit merged job and block until rescan completes.
-	return <-w.SubmitRescan(job)
+	return <-s.Wallet.SubmitRescan(job)
 }

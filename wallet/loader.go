@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -32,6 +33,21 @@ var (
 	// ErrExists describes the error condition of attempting to create a new
 	// wallet when one exists already.
 	ErrExists = errors.New("wallet already exists")
+
+	ErrErrorState = errors.New("Loader has entered an error state.")
+
+	ErrRunning = errors.New("Loader is running.")
+
+	ErrNotRunning = errors.New("Loader is not running.")
+)
+
+type LoaderState uint32
+
+const (
+	LoaderError   LoaderState = LoaderState(0)
+	LoaderEmpty   LoaderState = LoaderState(1)
+	LoaderLoaded  LoaderState = LoaderState(2)
+	LoaderRunning LoaderState = LoaderState(3)
 )
 
 // Loader implements the creating of new and opening of existing wallets, while
@@ -42,94 +58,73 @@ var (
 //
 // Loader is safe for concurrent access.
 type Loader struct {
-	callbacks   []func(*Wallet)
+	mu          sync.Mutex
+	state       LoaderState
 	chainParams *chaincfg.Params
 	dbDirPath   string
-	wallet      *Wallet
 	db          walletdb.DB
-	mu          sync.Mutex
+	wallet      *Wallet
+	session     *Session
 }
 
 // NewLoader constructs a Loader.
 func NewLoader(chainParams *chaincfg.Params, dbDirPath string) *Loader {
 	return &Loader{
+		state:       LoaderEmpty,
 		chainParams: chainParams,
 		dbDirPath:   dbDirPath,
-	}
-}
-
-// onLoaded executes each added callback and prevents loader from loading any
-// additional wallets.  Requires mutex to be locked.
-func (l *Loader) onLoaded(w *Wallet, db walletdb.DB) {
-	for _, fn := range l.callbacks {
-		fn(w)
-	}
-
-	l.wallet = w
-	l.db = db
-	l.callbacks = nil // not needed anymore
-}
-
-// RunAfterLoad adds a function to be executed when the loader creates or opens
-// a wallet.  Functions are executed in a single goroutine in the order they are
-// added.
-func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
-	l.mu.Lock()
-	if l.wallet != nil {
-		w := l.wallet
-		l.mu.Unlock()
-		fn(w)
-	} else {
-		l.callbacks = append(l.callbacks, fn)
-		l.mu.Unlock()
 	}
 }
 
 // CreateNewWallet creates a new wallet using the provided public and private
 // passphrases.  The seed is optional.  If non-nil, addresses are derived from
 // this seed.  If nil, a secure random seed is generated.
-func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*Wallet, error) {
+func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (LoaderState, error) {
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
-	if l.wallet != nil {
-		return nil, ErrLoaded
+	switch l.state {
+	case LoaderError:
+		return LoaderError, ErrErrorState
+	case LoaderRunning:
+		return LoaderRunning, ErrRunning
+	case LoaderLoaded:
+		return LoaderLoaded, ErrLoaded
 	}
 
 	dbPath := filepath.Join(l.dbDirPath, walletDbName)
 	exists, err := fileExists(dbPath)
 	if err != nil {
-		return nil, err
+		return l.state, err
 	}
 	if exists {
-		return nil, ErrExists
+		return l.state, ErrExists
 	}
 
 	// Create the wallet database backed by bolt db.
 	err = os.MkdirAll(l.dbDirPath, 0700)
 	if err != nil {
-		return nil, err
+		return l.state, err
 	}
 	db, err := walletdb.Create("bdb", dbPath)
 	if err != nil {
-		return nil, err
+		return l.state, err
 	}
 
 	// Initialize the newly created database for the wallet before opening.
 	err = Create(db, pubPassphrase, privPassphrase, seed, l.chainParams)
 	if err != nil {
-		return nil, err
+		return l.state, err
 	}
 
 	// Open the newly-created wallet.
 	w, err := Open(db, pubPassphrase, nil, l.chainParams)
 	if err != nil {
-		return nil, err
+		return l.state, err
 	}
-	w.Start()
-
-	l.onLoaded(w, db)
-	return w, nil
+	l.wallet = w
+	l.state = LoaderLoaded
+	return LoaderLoaded, nil
 }
 
 var errNoConsole = errors.New("db upgrade requires console access for additional input")
@@ -142,17 +137,22 @@ func noConsole() ([]byte, error) {
 // and the public passphrase.  If the loader is being called by a context where
 // standard input prompts may be used during wallet upgrades, setting
 // canConsolePrompt will enables these prompts.
-func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool) (*Wallet, error) {
+func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool) (LoaderState, error) {
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
-	if l.wallet != nil {
-		return nil, ErrLoaded
+	switch l.state {
+	case LoaderError:
+		return LoaderError, ErrErrorState
+	case LoaderRunning:
+		return LoaderRunning, ErrRunning
+	case LoaderLoaded:
+		return LoaderLoaded, ErrLoaded
 	}
 
 	// Ensure that the network directory exists.
 	if err := checkCreateDir(l.dbDirPath); err != nil {
-		return nil, err
+		return l.state, err
 	}
 
 	// Open the database using the boltdb backend.
@@ -160,7 +160,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	db, err := walletdb.Open("bdb", dbPath)
 	if err != nil {
 		log.Errorf("Failed to open database: %v", err)
-		return nil, err
+		return l.state, err
 	}
 
 	var cbs *waddrmgr.OpenCallbacks
@@ -177,12 +177,11 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	}
 	w, err := Open(db, pubPassphrase, cbs, l.chainParams)
 	if err != nil {
-		return nil, err
+		return l.state, err
 	}
-	w.Start()
-
-	l.onLoaded(w, db)
-	return w, nil
+	l.wallet = w
+	l.state = LoaderLoaded
+	return LoaderLoaded, nil
 }
 
 // WalletExists returns whether a file exists at the loader's database path.
@@ -192,14 +191,79 @@ func (l *Loader) WalletExists() (bool, error) {
 	return fileExists(dbPath)
 }
 
-// LoadedWallet returns the loaded wallet, if any, and a bool for whether the
-// wallet has been loaded or not.  If true, the wallet pointer should be safe to
-// dereference.
-func (l *Loader) LoadedWallet() (*Wallet, bool) {
+// LoadedWallet returns the loaded wallet, if any, and an error if no
+// wallet was found.
+func (l *Loader) LoadedWallet() (*Wallet, error) {
 	l.mu.Lock()
-	w := l.wallet
-	l.mu.Unlock()
-	return w, w != nil
+	defer l.mu.Unlock()
+
+	switch l.state {
+	case LoaderError:
+		return nil, ErrErrorState
+	case LoaderEmpty:
+		return nil, ErrNotLoaded
+	default:
+		return l.wallet, nil
+	}
+}
+
+func (l *Loader) Session(client *chain.RPCClient, lifecycle func(*Session) error) (LoaderState, error) {
+	defer l.mu.Unlock()
+	l.mu.Lock()
+
+	switch l.state {
+	case LoaderError:
+		return LoaderError, ErrErrorState
+	case LoaderRunning:
+		return LoaderRunning, ErrRunning
+	case LoaderEmpty:
+		return LoaderEmpty, ErrNotLoaded
+	}
+
+	connected := make(chan struct{})
+
+	go func() {
+		err := l.wallet.synchronizeRPC(client, func(s *Session) error {
+			// Because func Session does not close until chan connected is
+			// closed, we know that the lock is still locked.
+			l.session = s
+
+			l.state = LoaderRunning
+
+			// By the time this is run, the wallet has started synchronizing.
+			// Now the Session function can close and the wallet's normal
+			// lifecycle can begin.
+			connected <- struct{}{}
+
+			err := lifecycle(s)
+
+			// The session has stopped, so we need to change the state
+			// of the Loader.
+			l.mu.Lock()
+			if err != nil {
+				l.state = LoaderError
+			} else {
+				l.state = LoaderLoaded
+			}
+			l.mu.Unlock()
+
+			return err
+		})
+
+		if err != nil {
+			log.Errorf("Session crashed: %s", err)
+		}
+
+		// close the channel again in case anything went wrong when
+		// we tried to sync the wallet. In other words, if an error
+		// was returned by synchronieRPC before before lifecycle even
+		// started running.
+		close(connected)
+	}()
+
+	//
+	<-connected
+	return l.state, nil
 }
 
 // UnloadWallet stops the loaded wallet, if any, and closes the wallet database.
@@ -214,8 +278,10 @@ func (l *Loader) UnloadWallet() error {
 		return ErrNotLoaded
 	}
 
-	l.wallet.Stop()
-	l.wallet.WaitForShutdown()
+	if l.session != nil {
+		l.session.Stop()
+		l.wallet.WaitForShutdown()
+	}
 	err := l.db.Close()
 	if err != nil {
 		return err

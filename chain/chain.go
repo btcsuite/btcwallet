@@ -91,14 +91,15 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
 func (c *RPCClient) Start() error {
+	c.quitMtx.Lock()
+	defer c.quitMtx.Unlock()
+	
 	err := c.connect()
 	if err != nil {
 		return err
 	}
 
-	c.quitMtx.Lock()
 	c.started = true
-	c.quitMtx.Unlock()
 
 	c.wg.Add(1)
 	go func() {
@@ -120,6 +121,8 @@ func (c *RPCClient) Stop() {
 		close(c.quit)
 		c.Client.Shutdown()
 
+		// If the RPCClient was started, then dequeueNotification is 
+		// closed when handler returns. 
 		if !c.started {
 			close(c.dequeueNotification)
 		}
