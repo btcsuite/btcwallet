@@ -17,7 +17,7 @@ import (
 
 // SPVChain is an implementation of the btcwalet chain.Interface interface.
 type SPVChain struct {
-	cs *neutrino.ChainService
+	CS *neutrino.ChainService
 
 	// We currently support one rescan/notifiction goroutine per client
 	rescan neutrino.Rescan
@@ -39,12 +39,12 @@ type SPVChain struct {
 
 // NewSPVChain creates a new SPVChain struct with a backing ChainService
 func NewSPVChain(chainService *neutrino.ChainService) *SPVChain {
-	return &SPVChain{cs: chainService}
+	return &SPVChain{CS: chainService}
 }
 
 // Start replicates the RPC client's Start method.
 func (s *SPVChain) Start() error {
-	s.cs.Start()
+	s.CS.Start()
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {
@@ -87,7 +87,7 @@ func (s *SPVChain) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 	// TODO(roasbeef): add a block cache?
 	//  * which evication strategy? depends on use case
 	//  Should the block cache be INSIDE neutrino instead of in btcwallet?
-	block, err := s.cs.GetBlockFromNetwork(*hash)
+	block, err := s.CS.GetBlockFromNetwork(*hash)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func (s *SPVChain) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 // since we can't actually return a FutureGetBlockVerboseResult because the
 // underlying type is private to btcrpcclient.
 func (s *SPVChain) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
-	_, height, err := s.cs.GetBlockByHash(*hash)
+	_, height, err := s.CS.GetBlockByHash(*hash)
 	if err != nil {
 		return 0, err
 	}
@@ -108,7 +108,7 @@ func (s *SPVChain) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 
 // GetBestBlock replicates the RPC client's GetBestBlock command.
 func (s *SPVChain) GetBestBlock() (*chainhash.Hash, int32, error) {
-	header, height, err := s.cs.LatestBlock()
+	header, height, err := s.CS.LatestBlock()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -130,7 +130,7 @@ func (s *SPVChain) BlockStamp() (*waddrmgr.BlockStamp, error) {
 // SendRawTransaction replicates the RPC client's SendRawTransaction command.
 func (s *SPVChain) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 	*chainhash.Hash, error) {
-	err := s.cs.SendTransaction(tx)
+	err := s.CS.SendTransaction(tx)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +159,7 @@ func (s *SPVChain) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	for _, op := range outPoints {
 		watchOutPoints = append(watchOutPoints, *op)
 	}
-	s.rescan = s.cs.NewRescan(
+	s.rescan = s.CS.NewRescan(
 		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
 			OnBlockDisconnected:      s.onBlockDisconnected,
@@ -201,7 +201,7 @@ func (s *SPVChain) NotifyReceived(addrs []btcutil.Address) error {
 	s.finished = true
 	s.clientMtx.Unlock()
 	// Rescan with just the specified addresses.
-	s.rescan = s.cs.NewRescan(
+	s.rescan = s.CS.NewRescan(
 		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
 			OnBlockDisconnected:      s.onBlockDisconnected,
@@ -249,7 +249,7 @@ func (s *SPVChain) onFilteredBlockConnected(height int32,
 	case <-s.rescanQuit:
 		return
 	}
-	bs, err := s.cs.SyncedTo()
+	bs, err := s.CS.SyncedTo()
 	if err != nil {
 		log.Errorf("Can't get chain service's best block: %s", err)
 		return
