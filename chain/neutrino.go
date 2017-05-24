@@ -28,6 +28,7 @@ type SPVChain struct {
 
 	quit       chan struct{}
 	rescanQuit chan struct{}
+	rescanErr  <-chan error
 	wg         sync.WaitGroup
 	started    bool
 	scanning   bool
@@ -53,6 +54,13 @@ func (s *SPVChain) Start() error {
 		s.quit = make(chan struct{})
 		s.started = true
 		s.wg.Add(1)
+		go func() {
+			select {
+			case s.enqueueNotification <- ClientConnected{}:
+			case <-s.quit:
+				return
+			}
+		}()
 		go s.notificationHandler()
 	}
 	return nil
@@ -156,22 +164,25 @@ func (s *SPVChain) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
 			OnBlockDisconnected:      s.onBlockDisconnected,
 		}),
+		neutrino.StartBlock(&waddrmgr.BlockStamp{Hash: *startHash}),
 		neutrino.QuitChan(s.rescanQuit),
 		neutrino.WatchAddrs(addrs...),
 		neutrino.WatchOutPoints(watchOutPoints...),
 	)
+	s.rescanErr = s.rescan.Start()
 	return nil
 }
 
 // NotifyBlocks replicates the RPC client's NotifyBlocks command.
 func (s *SPVChain) NotifyBlocks() error {
 	s.clientMtx.Lock()
-	defer s.clientMtx.Unlock()
 	// If we're scanning, we're already notifying on blocks. Otherwise,
 	// start a rescan without watching any addresses.
 	if !s.scanning {
+		s.clientMtx.Unlock()
 		return s.NotifyReceived([]btcutil.Address{})
 	}
+	s.clientMtx.Unlock()
 	return nil
 }
 
@@ -198,6 +209,7 @@ func (s *SPVChain) NotifyReceived(addrs []btcutil.Address) error {
 		neutrino.QuitChan(s.rescanQuit),
 		neutrino.WatchAddrs(addrs...),
 	)
+	s.rescanErr = s.rescan.Start()
 	return nil
 }
 
@@ -348,6 +360,11 @@ out:
 					break out
 				}
 				dequeue = nil
+			}
+
+		case err := <-s.rescanErr:
+			if err != nil {
+				log.Errorf("Neutrino rescan ended with error: %s", err)
 			}
 
 		case s.currentBlock <- bs:
