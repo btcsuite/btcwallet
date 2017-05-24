@@ -2155,7 +2155,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *c
 		chainParams:         params,
 		quit:                make(chan struct{}),
 	}
-	w.NtfnServer = newNotificationServer(w)
+	w.NtfnServer = newNotificationServer()
 	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
