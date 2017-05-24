@@ -78,11 +78,24 @@ func (s *SPVChain) WaitForShutdown() {
 func (s *SPVChain) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 	// TODO(roasbeef): add a block cache?
 	//  * which evication strategy? depends on use case
+	//  Should the block cache be INSIDE neutrino instead of in btcwallet?
 	block, err := s.cs.GetBlockFromNetwork(*hash)
 	if err != nil {
 		return nil, err
 	}
 	return block.MsgBlock(), nil
+}
+
+// GetBlockHeight gets the height of a block by its hash. It serves as a
+// replacement for the use of GetBlockVerboseTxAsync for the wallet package
+// since we can't actually return a FutureGetBlockVerboseResult because the
+// underlying type is private to btcrpcclient.
+func (s *SPVChain) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
+	_, height, err := s.cs.GetBlockByHash(*hash)
+	if err != nil {
+		return 0, err
+	}
+	return int32(height), nil
 }
 
 // GetBestBlock replicates the RPC client's GetBestBlock command.

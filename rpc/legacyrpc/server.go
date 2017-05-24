@@ -258,7 +258,7 @@ func (s *Server) Stop() {
 // functional bitcoin wallet RPC server.  This can be called to enable RPC
 // passthrough even before a loaded wallet is set, but the wallet's RPC client
 // is preferred.
-func (s *Server) SetChainServer(chainClient *chain.RPCClient) {
+func (s *Server) SetChainServer(chainClient chain.Interface) {
 	s.handlerMu.Lock()
 	s.chainClient = chainClient
 	s.handlerMu.Unlock()
