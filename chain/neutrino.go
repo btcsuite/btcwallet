@@ -264,7 +264,7 @@ func (s *SPVChain) onFilteredBlockConnected(height int32,
 		s.finished = true
 		s.clientMtx.Unlock()
 		select {
-		case s.enqueueNotification <- RescanFinished{
+		case s.enqueueNotification <- &RescanFinished{
 			Hash:   &bs.Hash,
 			Height: bs.Height,
 			Time:   header.Timestamp,
