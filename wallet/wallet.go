@@ -67,7 +67,7 @@ type Wallet struct {
 	Manager *waddrmgr.Manager
 	TxStore *wtxmgr.Store
 
-	chainClient        *chain.RPCClient
+	chainClient        chain.Interface
 	chainClientLock    sync.Mutex
 	chainClientSynced  bool
 	chainClientSyncMtx sync.Mutex
@@ -139,7 +139,7 @@ func (w *Wallet) Start() {
 //
 // This method is unstable and will be removed when all syncing logic is moved
 // outside of the wallet package.
-func (w *Wallet) SynchronizeRPC(chainClient *chain.RPCClient) {
+func (w *Wallet) SynchronizeRPC(chainClient chain.Interface) {
 	w.quitMu.Lock()
 	select {
 	case <-w.quit:
@@ -1349,7 +1349,16 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 			if chainClient == nil {
 				return nil, errors.New("no chain server client")
 			}
-			startResp = chainClient.GetBlockVerboseTxAsync(startBlock.hash)
+			switch client := chainClient.(type) {
+			case *chain.RPCClient:
+				startResp = client.GetBlockVerboseTxAsync(startBlock.hash)
+			case *chain.SPVChain:
+				var err error
+				start, err = client.GetBlockHeight(startBlock.hash)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	if endBlock != nil {
@@ -1359,7 +1368,16 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 			if chainClient == nil {
 				return nil, errors.New("no chain server client")
 			}
-			endResp = chainClient.GetBlockVerboseTxAsync(endBlock.hash)
+			switch client := chainClient.(type) {
+			case *chain.RPCClient:
+				endResp = client.GetBlockVerboseTxAsync(endBlock.hash)
+			case *chain.SPVChain:
+				var err error
+				end, err = client.GetBlockHeight(endBlock.hash)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	if startResp != nil {
