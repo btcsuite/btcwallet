@@ -142,8 +142,8 @@ func (s *SPVChain) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 func (s *SPVChain) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	outPoints []*wire.OutPoint) error {
 	s.clientMtx.Lock()
+	defer s.clientMtx.Unlock()
 	if !s.started {
-		s.clientMtx.Unlock()
 		return fmt.Errorf("can't do a rescan when the chain client " +
 			"is not started")
 	}
@@ -154,10 +154,27 @@ func (s *SPVChain) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	s.rescanQuit = make(chan struct{})
 	s.scanning = true
 	s.finished = false
-	s.clientMtx.Unlock()
 	watchOutPoints := make([]wire.OutPoint, 0, len(outPoints))
 	for _, op := range outPoints {
 		watchOutPoints = append(watchOutPoints, *op)
+	}
+	header, height, err := s.CS.LatestBlock()
+	if err != nil {
+		return fmt.Errorf("Can't get chain service's best block: %s", err)
+	}
+	if header.BlockHash() == *startHash {
+		s.finished = true
+		select {
+		case s.enqueueNotification <- &RescanFinished{
+			Hash:   startHash,
+			Height: int32(height),
+			Time:   header.Timestamp,
+		}:
+		case <-s.quit:
+			return nil
+		case <-s.rescanQuit:
+			return nil
+		}
 	}
 	s.rescan = s.CS.NewRescan(
 		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
@@ -273,7 +290,6 @@ func (s *SPVChain) onFilteredBlockConnected(height int32,
 			return
 		case <-s.rescanQuit:
 			return
-
 		}
 	}
 }
