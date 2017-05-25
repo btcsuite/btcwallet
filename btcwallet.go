@@ -179,10 +179,10 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 				log.Errorf("Couldn't create Neutrino ChainService: %s", err)
 				continue
 			}
-			chainClient = chain.NewSPVChain(chainService)
+			chainClient = chain.NewNeutrinoClient(chainService)
 			err = chainClient.Start()
 			if err != nil {
-				log.Errorf("Couldn't start SPVChain: %s", err)
+				log.Errorf("Couldn't start Neutrino client: %s", err)
 			}
 		} else {
 			chainClient, err = startChainRPC(certs)
