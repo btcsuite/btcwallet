@@ -15,8 +15,8 @@ import (
 	"github.com/lightninglabs/neutrino"
 )
 
-// SPVChain is an implementation of the btcwalet chain.Interface interface.
-type SPVChain struct {
+// NeutrinoClient is an implementation of the btcwalet chain.Interface interface.
+type NeutrinoClient struct {
 	CS *neutrino.ChainService
 
 	// We currently support one rescan/notifiction goroutine per client
@@ -37,13 +37,14 @@ type SPVChain struct {
 	clientMtx sync.Mutex
 }
 
-// NewSPVChain creates a new SPVChain struct with a backing ChainService
-func NewSPVChain(chainService *neutrino.ChainService) *SPVChain {
-	return &SPVChain{CS: chainService}
+// NewNeutrinoClient creates a new NeutrinoClient struct with a backing
+// ChainService.
+func NewNeutrinoClient(chainService *neutrino.ChainService) *NeutrinoClient {
+	return &NeutrinoClient{CS: chainService}
 }
 
 // Start replicates the RPC client's Start method.
-func (s *SPVChain) Start() error {
+func (s *NeutrinoClient) Start() error {
 	s.CS.Start()
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
@@ -67,7 +68,7 @@ func (s *SPVChain) Start() error {
 }
 
 // Stop replicates the RPC client's Stop method.
-func (s *SPVChain) Stop() {
+func (s *NeutrinoClient) Stop() {
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {
@@ -78,12 +79,12 @@ func (s *SPVChain) Stop() {
 }
 
 // WaitForShutdown replicates the RPC client's WaitForShutdown method.
-func (s *SPVChain) WaitForShutdown() {
+func (s *NeutrinoClient) WaitForShutdown() {
 	s.wg.Wait()
 }
 
 // GetBlock replicates the RPC client's GetBlock command.
-func (s *SPVChain) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
+func (s *NeutrinoClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 	// TODO(roasbeef): add a block cache?
 	//  * which evication strategy? depends on use case
 	//  Should the block cache be INSIDE neutrino instead of in btcwallet?
@@ -98,7 +99,7 @@ func (s *SPVChain) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 // replacement for the use of GetBlockVerboseTxAsync for the wallet package
 // since we can't actually return a FutureGetBlockVerboseResult because the
 // underlying type is private to btcrpcclient.
-func (s *SPVChain) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
+func (s *NeutrinoClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 	_, height, err := s.CS.GetBlockByHash(*hash)
 	if err != nil {
 		return 0, err
@@ -107,7 +108,7 @@ func (s *SPVChain) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 }
 
 // GetBestBlock replicates the RPC client's GetBestBlock command.
-func (s *SPVChain) GetBestBlock() (*chainhash.Hash, int32, error) {
+func (s *NeutrinoClient) GetBestBlock() (*chainhash.Hash, int32, error) {
 	header, height, err := s.CS.LatestBlock()
 	if err != nil {
 		return nil, 0, err
@@ -118,7 +119,7 @@ func (s *SPVChain) GetBestBlock() (*chainhash.Hash, int32, error) {
 
 // BlockStamp returns the latest block notified by the client, or an error
 // if the client has been shut down.
-func (s *SPVChain) BlockStamp() (*waddrmgr.BlockStamp, error) {
+func (s *NeutrinoClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
 	case bs := <-s.currentBlock:
 		return bs, nil
@@ -128,7 +129,7 @@ func (s *SPVChain) BlockStamp() (*waddrmgr.BlockStamp, error) {
 }
 
 // SendRawTransaction replicates the RPC client's SendRawTransaction command.
-func (s *SPVChain) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
+func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 	*chainhash.Hash, error) {
 	err := s.CS.SendTransaction(tx)
 	if err != nil {
@@ -139,7 +140,7 @@ func (s *SPVChain) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 }
 
 // Rescan replicates the RPC client's Rescan command.
-func (s *SPVChain) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
+func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	outPoints []*wire.OutPoint) error {
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
@@ -191,7 +192,7 @@ func (s *SPVChain) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 }
 
 // NotifyBlocks replicates the RPC client's NotifyBlocks command.
-func (s *SPVChain) NotifyBlocks() error {
+func (s *NeutrinoClient) NotifyBlocks() error {
 	s.clientMtx.Lock()
 	// If we're scanning, we're already notifying on blocks. Otherwise,
 	// start a rescan without watching any addresses.
@@ -204,7 +205,7 @@ func (s *SPVChain) NotifyBlocks() error {
 }
 
 // NotifyReceived replicates the RPC client's NotifyReceived command.
-func (s *SPVChain) NotifyReceived(addrs []btcutil.Address) error {
+func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	// If we have a rescan running, we just need to add the appropriate
 	// addresses to the watch list.
 	s.clientMtx.Lock()
@@ -231,13 +232,13 @@ func (s *SPVChain) NotifyReceived(addrs []btcutil.Address) error {
 }
 
 // Notifications replicates the RPC client's Notifications method.
-func (s *SPVChain) Notifications() <-chan interface{} {
+func (s *NeutrinoClient) Notifications() <-chan interface{} {
 	return s.dequeueNotification
 }
 
 // onFilteredBlockConnected sends appropriate notifications to the notification
 // channel.
-func (s *SPVChain) onFilteredBlockConnected(height int32,
+func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
 	header *wire.BlockHeader, relevantTxs []*btcutil.Tx) {
 	ntfn := FilteredBlockConnected{
 		Block: &wtxmgr.BlockMeta{
@@ -296,7 +297,7 @@ func (s *SPVChain) onFilteredBlockConnected(height int32,
 
 // onBlockDisconnected sends appropriate notifications to the notification
 // channel.
-func (s *SPVChain) onBlockDisconnected(hash *chainhash.Hash, height int32,
+func (s *NeutrinoClient) onBlockDisconnected(hash *chainhash.Hash, height int32,
 	t time.Time) {
 	select {
 	case s.enqueueNotification <- BlockDisconnected{
@@ -314,7 +315,7 @@ func (s *SPVChain) onBlockDisconnected(hash *chainhash.Hash, height int32,
 // notificationHandler queues and dequeues notifications. There are currently
 // no bounds on the queue, so the dequeue channel should be read continually to
 // avoid running out of memory.
-func (s *SPVChain) notificationHandler() {
+func (s *NeutrinoClient) notificationHandler() {
 	hash, height, err := s.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to get best block from chain service: %s",
