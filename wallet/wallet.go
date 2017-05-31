@@ -230,12 +230,6 @@ func (w *Wallet) Stop() {
 	case <-quit:
 	default:
 		close(quit)
-		w.chainClientLock.Lock()
-		if w.chainClient != nil {
-			w.chainClient.Stop()
-			w.chainClient = nil
-		}
-		w.chainClientLock.Unlock()
 	}
 }
 

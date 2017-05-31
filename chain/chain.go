@@ -6,6 +6,7 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -90,20 +91,9 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
 func (c *RPCClient) Start() error {
-	err := c.Connect(c.reconnectAttempts)
+	err := c.connect()
 	if err != nil {
 		return err
-	}
-
-	// Verify that the server is running on the expected network.
-	net, err := c.GetCurrentNet()
-	if err != nil {
-		c.Disconnect()
-		return err
-	}
-	if net != c.chainParams.Net {
-		c.Disconnect()
-		return errors.New("mismatched networks")
 	}
 
 	c.quitMtx.Lock()
@@ -111,7 +101,12 @@ func (c *RPCClient) Start() error {
 	c.quitMtx.Unlock()
 
 	c.wg.Add(1)
-	go c.handler()
+	go func() {
+		err := c.reconnectHandler()
+		if err != nil {
+			log.Errorf("RPCClient failed with error: %v", err)
+		}
+	}()
 	return nil
 }
 
@@ -310,13 +305,10 @@ func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
-func (c *RPCClient) handler() {
+func (c *RPCClient) handler() error {
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
-		log.Errorf("Failed to receive best block from chain server: %v", err)
-		c.Stop()
-		c.wg.Done()
-		return
+		return err
 	}
 
 	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
@@ -340,7 +332,7 @@ func (c *RPCClient) handler() {
 	var dequeue chan Notification
 	var next Notification
 	pingChan := time.After(pingInterval)
-out:
+
 	for {
 		select {
 		case n, ok := <-enqueue:
@@ -348,17 +340,23 @@ out:
 				// If no notifications are queued for handling,
 				// the queue is finished.
 				if len(notifications) == 0 {
-					break out
+					return nil
 				}
 				// nil channel so no more reads can occur.
 				enqueue = nil
 				continue
 			}
+
 			if len(notifications) == 0 {
 				next = n
-				dequeue = c.dequeueNotification
+			} else {
+				next = notifications[0]
+				notifications[0] = nil
+				notifications = notifications[1:]
+				notifications = append(notifications, n)
 			}
-			notifications = append(notifications, n)
+
+			dequeue = c.dequeueNotification
 
 			// We have received a notification, so reset the timer.
 			pingChan = time.After(pingTimeout)
@@ -371,15 +369,15 @@ out:
 				}
 			}
 
-			notifications[0] = nil
-			notifications = notifications[1:]
 			if len(notifications) != 0 {
 				next = notifications[0]
+				notifications[0] = nil
+				notifications = notifications[1:]
 			} else {
 				// If no more notifications can be enqueued, the
 				// queue is finished.
 				if enqueue == nil {
-					break out
+					return nil
 				}
 				dequeue = nil
 			}
@@ -400,29 +398,70 @@ out:
 			select {
 			case resp := <-sessionResponse:
 				if resp.err != nil {
-					log.Errorf("Failed to receive session "+
+					return fmt.Errorf("Failed to receive session "+
 						"result: %v", resp.err)
-					c.Stop()
-					break out
 				}
 				pingChan = time.After(pingInterval)
 
 			case <-time.After(pingTimeout):
-				log.Errorf("Timeout waiting for session RPC")
-				c.Stop()
-				break out
+				return errors.New("Timeout waiting for session RPC")
 			}
 
 		case c.currentBlock <- bs:
 
 		case <-c.quit:
-			break out
+			return nil
 		}
 	}
+}
 
-	c.Stop()
-	close(c.dequeueNotification)
-	c.wg.Done()
+func (c *RPCClient) connect() error {
+	err := c.Connect(c.reconnectAttempts)
+	if err != nil {
+		return err
+	}
+
+	// Verify that the server is running on the expected network.
+	net, err := c.GetCurrentNet()
+	if err != nil {
+		c.Disconnect()
+		return err
+	}
+	if net != c.chainParams.Net {
+		c.Disconnect()
+		return errors.New("mismatched networks")
+	}
+
+	return nil
+}
+
+func (c *RPCClient) reconnectHandler() error {
+	defer func() {
+		c.Stop()
+		close(c.dequeueNotification)
+		c.wg.Done()
+	}()
+
+	for {
+		// We already connected in Start().
+		err := c.handler()
+		if err != nil {
+			return err
+		}
+
+		// Ensure that we have not already quit.
+		select {
+		case <-c.quit:
+			// The quit channel has been closed, so return nil.
+			return nil
+		default:
+		}
+
+		err = c.connect()
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // POSTClient creates the equivalent HTTP POST rpcclient.Client.
