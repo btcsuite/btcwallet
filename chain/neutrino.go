@@ -100,7 +100,7 @@ func (s *NeutrinoClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) 
 // since we can't actually return a FutureGetBlockVerboseResult because the
 // underlying type is private to btcrpcclient.
 func (s *NeutrinoClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
-	_, height, err := s.CS.GetBlockByHash(*hash)
+	_, height, err := s.CS.BlockHeaders.FetchHeader(hash)
 	if err != nil {
 		return 0, err
 	}
@@ -109,12 +109,12 @@ func (s *NeutrinoClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 
 // GetBestBlock replicates the RPC client's GetBestBlock command.
 func (s *NeutrinoClient) GetBestBlock() (*chainhash.Hash, int32, error) {
-	header, height, err := s.CS.LatestBlock()
+	chainTip, err := s.CS.BestSnapshot()
 	if err != nil {
 		return nil, 0, err
 	}
-	hash := header.BlockHash()
-	return &hash, int32(height), nil
+
+	return &chainTip.Hash, chainTip.Height, nil
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
@@ -159,7 +159,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	for _, op := range outPoints {
 		watchOutPoints = append(watchOutPoints, *op)
 	}
-	header, height, err := s.CS.LatestBlock()
+	header, height, err := s.CS.BlockHeaders.ChainTip()
 	if err != nil {
 		return fmt.Errorf("Can't get chain service's best block: %s", err)
 	}
@@ -267,7 +267,7 @@ func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
 	case <-s.rescanQuit:
 		return
 	}
-	bs, err := s.CS.SyncedTo()
+	bs, err := s.CS.BestSnapshot()
 	if err != nil {
 		log.Errorf("Can't get chain service's best block: %s", err)
 		return
