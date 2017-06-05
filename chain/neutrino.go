@@ -228,6 +228,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	// Rescan with just the specified addresses.
 	s.rescan = s.CS.NewRescan(
 		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
+			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
 			OnBlockDisconnected:      s.onBlockDisconnected,
 		}),
