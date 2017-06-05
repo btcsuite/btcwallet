@@ -163,6 +163,10 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	if err != nil {
 		return fmt.Errorf("Can't get chain service's best block: %s", err)
 	}
+
+	// If the wallet is already fully caught up, or the rescan has started
+	// with state that indicates a "fresh" wallet, we'll send a
+	// notification indicating the rescan has "finished".
 	if header.BlockHash() == *startHash {
 		s.finished = true
 		select {
@@ -177,8 +181,10 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 			return nil
 		}
 	}
+
 	s.rescan = s.CS.NewRescan(
 		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
+			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
 			OnBlockDisconnected:      s.onBlockDisconnected,
 		}),
@@ -188,6 +194,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		neutrino.WatchOutPoints(watchOutPoints...),
 	)
 	s.rescanErr = s.rescan.Start()
+
 	return nil
 }
 
@@ -306,6 +313,22 @@ func (s *NeutrinoClient) onBlockDisconnected(hash *chainhash.Hash, height int32,
 			Height: height,
 		},
 		Time: t,
+	}:
+	case <-s.quit:
+	case <-s.rescanQuit:
+	}
+}
+
+func (s *NeutrinoClient) onBlockConnected(hash *chainhash.Hash, height int32,
+	time time.Time) {
+
+	select {
+	case s.enqueueNotification <- BlockConnected{
+		Block: wtxmgr.Block{
+			Hash:   *hash,
+			Height: height,
+		},
+		Time: time,
 	}:
 	case <-s.quit:
 	case <-s.rescanQuit:
