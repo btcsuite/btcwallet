@@ -6,12 +6,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcrpcclient"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcd/wire"
+	"github.com/roasbeef/btcrpcclient"
+	"github.com/roasbeef/btcutil"
+	"github.com/roasbeef/btcwallet/waddrmgr"
+	"github.com/roasbeef/btcwallet/wtxmgr"
 	"github.com/lightninglabs/neutrino"
 )
 

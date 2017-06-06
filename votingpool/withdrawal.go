@@ -14,12 +14,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/roasbeef/btcd/txscript"
+	"github.com/roasbeef/btcd/wire"
+	"github.com/roasbeef/btcutil"
+	"github.com/roasbeef/btcwallet/waddrmgr"
+	"github.com/roasbeef/btcwallet/walletdb"
+	"github.com/roasbeef/btcwallet/wtxmgr"
 )
 
 // Maximum tx size (in bytes). This should be the same as bitcoind's

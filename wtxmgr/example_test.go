@@ -7,11 +7,11 @@ package wtxmgr_test
 import (
 	"fmt"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/roasbeef/btcd/chaincfg"
+	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcd/wire"
+	"github.com/roasbeef/btcwallet/walletdb"
+	"github.com/roasbeef/btcwallet/wtxmgr"
 )
 
 var (

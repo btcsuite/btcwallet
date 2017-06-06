@@ -40,7 +40,7 @@ drop the wallet transaction manager (wtxmgr) history from a wallet database.
 The tool may already be installed in your PATH, but if not, installing it is easy:
 
 ```
-$ cd $GOPATH/src/github.com/btcsuite/btcwallet/cmd/dropwtxmgr
+$ cd $GOPATH/src/github.com/roasbeef/btcwallet/cmd/dropwtxmgr
 $ go get
 ```
 

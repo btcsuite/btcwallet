@@ -7,8 +7,8 @@ package waddrmgr
 import (
 	"sync"
 
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcwallet/walletdb"
 )
 
 const (

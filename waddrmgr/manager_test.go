@@ -11,11 +11,11 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/roasbeef/btcd/chaincfg"
+	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcutil"
+	"github.com/roasbeef/btcwallet/waddrmgr"
+	"github.com/roasbeef/btcwallet/walletdb"
 )
 
 // newHash converts the passed big-endian hex string into a chainhash.Hash.

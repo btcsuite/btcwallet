@@ -16,7 +16,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/btcsuite/btcwallet/walletdb/walletdbtest"
+	"github.com/roasbeef/btcwallet/walletdb/walletdbtest"
 )
 
 // TestInterface performs all interfaces tests for this database driver.
