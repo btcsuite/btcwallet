@@ -1,10 +1,9 @@
-package: github.com/btcsuite/btcwallet
+package: github.com/roasbeef/btcwallet
 import:
 - package: github.com/boltdb/bolt
   version: ^1.3.0
-- package: github.com/btcsuite/btcd
-  repo: git@github.com:companyzero/btcdln
-  version: segwit-cbf
+- package: github.com/roasbeef/btcd
+  version: 4d38357cee3ed3843cd81a347e1573f037e0301e
   subpackages:
   - blockchain
   - btcec
@@ -14,16 +13,14 @@ import:
   - txscript
   - wire
 - package: github.com/btcsuite/btclog
-- package: github.com/btcsuite/btcrpcclient
-  repo: git@github.com:companyzero/btcrpcclientln
-  version: pedro_cbf
-- package: github.com/btcsuite/btcutil
-  repo: git@github.com:companyzero/btcutilln
-  version: gcs
+- package: github.com/roasbeef/btcrpcclient
+  version: 9a7826550df8071460e2f5dd6ed9139dcbf260b8
+- package: github.com/roasbeef/btcutil
+  version: a259eaf2ec1b54653cdd67848a41867f280797ee
   subpackages:
   - hdkeychain
 - package: github.com/lightninglabs/neutrino
-  repo: git@github.com:lightninglabs/neutrino
+  version: 2f6910cce3055c11361bffc02e0c653dd9be087e
 - package: github.com/btcsuite/golangcrypto
   subpackages:
   - nacl/secretbox
