@@ -6,13 +6,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lightninglabs/neutrino"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcrpcclient"
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcwallet/waddrmgr"
 	"github.com/roasbeef/btcwallet/wtxmgr"
-	"github.com/lightninglabs/neutrino"
 )
 
 // NeutrinoClient is an implementation of the btcwalet chain.Interface interface.
@@ -151,6 +151,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	if s.scanning {
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
+		s.rescan.WaitForShutdown()
 	}
 	s.rescanQuit = make(chan struct{})
 	s.scanning = true
@@ -213,18 +214,22 @@ func (s *NeutrinoClient) NotifyBlocks() error {
 
 // NotifyReceived replicates the RPC client's NotifyReceived command.
 func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
+	s.clientMtx.Lock()
+	defer s.clientMtx.Unlock()
+
 	// If we have a rescan running, we just need to add the appropriate
 	// addresses to the watch list.
-	s.clientMtx.Lock()
 	if s.scanning {
 		s.clientMtx.Unlock()
 		return s.rescan.Update(neutrino.AddAddrs(addrs...))
 	}
+
 	s.rescanQuit = make(chan struct{})
 	s.scanning = true
+
 	// Don't need RescanFinished notifications.
 	s.finished = true
-	s.clientMtx.Unlock()
+
 	// Rescan with just the specified addresses.
 	s.rescan = s.CS.NewRescan(
 		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
