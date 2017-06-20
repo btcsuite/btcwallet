@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -295,6 +296,25 @@ func (s *walletServer) Balance(ctx context.Context, req *pb.BalanceRequest) (
 		Total:          int64(bals.Total),
 		Spendable:      int64(bals.Spendable),
 		ImmatureReward: int64(bals.ImmatureReward),
+	}
+	return resp, nil
+}
+
+func (s *walletServer) ReceivedForAddress(ctx context.Context, req *pb.ReceivedForAddressRequest) (
+	*pb.ReceivedForAddressResponse, error) {
+	address, err := btcutil.DecodeAddress(req.Address, &chaincfg.MainNetParams)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	reqConfs := req.RequiredConfirmations
+	totalReceived, err := s.wallet.TotalReceivedForAddr(address, reqConfs)
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	resp := &pb.ReceivedForAddressResponse{
+		Total: int64(totalReceived),
 	}
 	return resp, nil
 }
