@@ -232,7 +232,6 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	// If we have a rescan running, we just need to add the appropriate
 	// addresses to the watch list.
 	if s.scanning {
-		s.clientMtx.Unlock()
 		return s.rescan.Update(neutrino.AddAddrs(addrs...))
 	}
 
