@@ -45,7 +45,11 @@ func walletMain() error {
 		return err
 	}
 	cfg = tcfg
-	defer backendLog.Flush()
+	defer func() {
+		if logRotator != nil {
+			logRotator.Close()
+		}
+	}()
 
 	// Show version at startup.
 	log.Infof("Version %s", version())

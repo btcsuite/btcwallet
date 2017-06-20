@@ -315,13 +315,6 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
-	// Warn about missing config file after the final command line parse
-	// succeeds.  This prevents the warning on help messages and invalid
-	// options.
-	if configFileError != nil {
-		log.Warnf("%v", configFileError)
-	}
-
 	// Check deprecated aliases.  The new options receive priority when both
 	// are changed from the default.
 	if cfg.DataDir.ExplicitlySet() {
@@ -376,9 +369,9 @@ func loadConfig() (*config, []string, error) {
 		os.Exit(0)
 	}
 
-	// Initialize logging at the default logging level.
-	initSeelogLogger(filepath.Join(cfg.LogDir, defaultLogFilename))
-	setLogLevels(defaultLogLevel)
+	// Initialize log rotation.  After log rotation has been initialized, the
+	// logger variables may be used.
+	initLogRotator(filepath.Join(cfg.LogDir, defaultLogFilename))
 
 	// Parse, validate, and set debug log level(s).
 	if err := parseAndSetDebugLevels(cfg.DebugLevel); err != nil {
@@ -639,6 +632,13 @@ func loadConfig() (*config, []string, error) {
 	}
 	if cfg.BtcdPassword == "" {
 		cfg.BtcdPassword = cfg.Password
+	}
+
+	// Warn about missing config file after the final command line parse
+	// succeeds.  This prevents the warning on help messages and invalid
+	// options.
+	if configFileError != nil {
+		log.Warnf("%v", configFileError)
 	}
 
 	return &cfg, remainingArgs, nil

@@ -5,7 +5,6 @@
 package votingpool
 
 import (
-	"fmt"
 	"os"
 	"reflect"
 	"runtime"
@@ -19,11 +18,8 @@ func init() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	// Enable logging (Debug level) to aid debugging failing tests.
-	logger, err := btclog.NewLoggerFromWriter(os.Stdout, btclog.DebugLvl)
-	if err != nil {
-		fmt.Printf("Failed to initialize stdout logger: %v\n", err)
-		os.Exit(1)
-	}
+	logger := btclog.NewBackend(os.Stdout).Logger("TEST")
+	logger.SetLevel(btclog.LevelDebug)
 	UseLogger(logger)
 }
 

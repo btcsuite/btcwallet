@@ -22,7 +22,6 @@ import:
   - ripemd160
   - scrypt
   - ssh/terminal
-- package: github.com/btcsuite/seelog
 - package: github.com/btcsuite/websocket
 - package: github.com/golang/protobuf
   subpackages:
@@ -38,6 +37,9 @@ import:
   - codes
   - credentials
   - grpclog
+- package: github.com/jrick/logrotate
+  subpackages:
+  - rotator
 testImport:
 - package: github.com/davecgh/go-spew
   version: ^1.1.0

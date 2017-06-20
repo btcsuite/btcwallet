@@ -1,10 +1,10 @@
-hash: d945622a1e24954b5ffe2855e922e687132ccc13fb1a1bc5d57c15c72603948a
-updated: 2017-01-11T20:24:15.024651319-05:00
+hash: 53f612188086bdf9b593439146ad12259c3cf85c21f568a1d0ea3076e81b2eca
+updated: 2017-06-20T09:17:18.9767533-04:00
 imports:
 - name: github.com/boltdb/bolt
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
 - name: github.com/btcsuite/btcd
-  version: 7c0fd83c87b2d2be405489cff522e0110328cd1e
+  version: a6965d493fdfb833b6b3a83c3958ab18968fe24e
   subpackages:
   - blockchain
   - btcec
@@ -15,11 +15,11 @@ imports:
   - txscript
   - wire
 - name: github.com/btcsuite/btclog
-  version: 73889fb79bd687870312b6e40effcecffbd57d30
+  version: 266a29b6e5ad061d4c055cec1c0049e4aae47092
 - name: github.com/btcsuite/btcrpcclient
-  version: 5ce0ed600997eafaed25ad4936c1d84ec6ad2b5a
+  version: 45b9cb481d2aead4e80aab32d7aa86db386430ab
 - name: github.com/btcsuite/btcutil
-  version: 86346b5a958c0cf94186b87855469ae991be501c
+  version: 61ec18f9c8a4552c209416ce363592e35e416997
   subpackages:
   - base58
   - hdkeychain
@@ -37,8 +37,6 @@ imports:
   - salsa20/salsa
   - scrypt
   - ssh/terminal
-- name: github.com/btcsuite/seelog
-  version: 313961b101eb55f65ae0f03ddd4e322731763b6c
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/golang/protobuf
@@ -47,8 +45,16 @@ imports:
   - proto
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
+- name: github.com/jrick/logrotate
+  version: 4ed05ed86ef17d10ff99cce77481e0fcf6f2c7b0
+  subpackages:
+  - rotator
+- name: golang.org/x/crypto
+  version: adbae1b6b6fb4b02448a0fc0dbbc9ba2b95b294d
+  subpackages:
+  - ripemd160
 - name: golang.org/x/net
-  version: 60c41d1de8da134c05b7b40154a9a82bf5b7edb9
+  version: fe686d45ea04bc1bd4eff6a52865ce8757320325
   subpackages:
   - context
   - http2
@@ -58,11 +64,11 @@ imports:
   - lex/httplex
   - trace
 - name: golang.org/x/sys
-  version: d75a52659825e75fff6158388dddc6a5b04f9ba5
+  version: fb4cac33e3196ff7f507ab9b2d2a44b0142f5b5a
   subpackages:
   - unix
 - name: golang.org/x/text
-  version: 44f4f658a783b0cee41fe0a23b8fc91d9c120558
+  version: 4e9ab9ee170f2a39bd66c92b3e0a47ff47a4bc77
   subpackages:
   - secure/bidirule
   - transform
