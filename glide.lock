@@ -1,5 +1,6 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -10,6 +11,10 @@ updated: 2017-05-18T20:28:25.480256291-06:00
 hash: 59de122918c56a47f9987706a303d54c95929728a1dd74e2f17f38b03274366e
 updated: 2017-06-05T18:12:20.300008456-07:00
 >>>>>>> afb1cbf... build: update glide files to point to roasbeef+neutrino proper
+=======
+hash: 8f57e2b090be9737f3c4d3157b3675ff5df4a9182928089f48c68593fdc80776
+updated: 2017-06-29T21:02:00.000000000-07:00
+>>>>>>> 249dae0... log: update to new logging API
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -56,8 +61,12 @@ imports:
   - hdkeychain
 =======
 - name: github.com/btcsuite/btclog
+<<<<<<< HEAD
   version: 73889fb79bd687870312b6e40effcecffbd57d30
 >>>>>>> afb1cbf... build: update glide files to point to roasbeef+neutrino proper
+=======
+  version: 266a29b6e5ad061d4c055cec1c0049e4aae47092
+>>>>>>> 249dae0... log: update to new logging API
 - name: github.com/btcsuite/fastsha256
   version: 637e656429416087660c84436a2a035d69d54e2e
 - name: github.com/btcsuite/go-socks
@@ -75,10 +84,13 @@ imports:
   - scrypt
   - ssh/terminal
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 - name: github.com/btcsuite/seelog
   version: ae8891d029dd3c269dcfd6f261ad23e761acd99f
 >>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
+=======
+>>>>>>> 249dae0... log: update to new logging API
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/davecgh/go-spew
@@ -107,12 +119,12 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: f0bdd0ea5a1b453e1e323bfbb454b0cecbcfe2fa
+  version: ccfa94a1c213e5df752c08c7edc30cb0a56d4dcf
   subpackages:
   - filterdb
   - headerfs
 - name: github.com/roasbeef/btcd
-  version: 4d38357cee3ed3843cd81a347e1573f037e0301e
+  version: 34fdda7d41cc47d9456550fd1147a77db89f601a
   subpackages:
   - addrmgr
   - blockchain
@@ -125,8 +137,12 @@ imports:
   - peer
   - txscript
   - wire
+- name: github.com/jrick/logrotate
+  version: 4ed05ed86ef17d10ff99cce77481e0fcf6f2c7b0
+  subpackages:
+  - rotator
 - name: github.com/roasbeef/btcrpcclient
-  version: 9a7826550df8071460e2f5dd6ed9139dcbf260b8
+  version: d0f4db8b4dad0ca3d569b804f21247c3dd96acbb
 - name: github.com/roasbeef/btcutil
   version: a259eaf2ec1b54653cdd67848a41867f280797ee
   subpackages:

@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -52,6 +53,7 @@ var (
 	chainLog     = backendLog.Logger("CHNS")
 	grpcLog      = backendLog.Logger("GRPC")
 	legacyRPCLog = backendLog.Logger("RPCS")
+	btcnLog      = backendLog.Logger("BTCN")
 )
 
 // Initialize package-global logger variables.
@@ -62,6 +64,7 @@ func init() {
 	btcrpcclient.UseLogger(chainLog)
 	rpcserver.UseLogger(grpcLog)
 	legacyrpc.UseLogger(legacyRPCLog)
+	neutrino.UseLogger(btcnLog)
 }
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
@@ -84,7 +87,6 @@ func initLogRotator(logFile string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create log directory: %v\n", err)
 		os.Exit(1)
-=======
 // logClosure is used to provide a closure over expensive logging operations
 // so don't have to be performed when the logging level doesn't warrant it.
 type logClosure func() string
@@ -133,6 +135,11 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 		neutrino.UseLogger(logger)
 	}
 	r, err := rotator.New(logFile, 10*1024, false, 3)
+=======
+	}
+	pr, pw := io.Pipe()
+	r, err := rotator.New(pr, logFile, 10*1024, false, 3)
+>>>>>>> 249dae0... log: update to new logging API
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create file rotator: %v\n", err)
 		os.Exit(1)
