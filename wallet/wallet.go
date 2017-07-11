@@ -6,6 +6,7 @@
 package wallet
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -325,19 +326,6 @@ func (w *Wallet) syncWithChain() error {
 		return err
 	}
 
-	// Request notifications for connected and disconnected blocks.
-	//
-	// TODO(jrick): Either request this notification only once, or when
-	// btcrpcclient is modified to allow some notification request to not
-	// automatically resent on reconnect, include the notifyblocks request
-	// as well.  I am leaning towards allowing off all btcrpcclient
-	// notification re-registrations, in which case the code here should be
-	// left as is.
-	err = chainClient.NotifyBlocks()
-	if err != nil {
-		return err
-	}
-
 	// Request notifications for transactions sending to all wallet
 	// addresses.
 	var (
@@ -363,64 +351,83 @@ func (w *Wallet) syncWithChain() error {
 	// addresses ever created, including those that don't need to be watched
 	// anymore.  This code should be updated when this assumption is no
 	// longer true, but worst case would result in an unnecessary rescan.
-	if len(addrs) == 0 && len(unspent) == 0 {
-		// TODO: It would be ideal if on initial sync wallet saved the
-		// last several recent blocks rather than just one.  This would
-		// avoid a full rescan for a one block reorg of the current
-		// chain tip.
-		hash, height, err := chainClient.GetBestBlock()
+	if len(addrs) == 0 && len(unspent) == 0 && w.Manager.SyncedTo().Height == 0 {
+		_, bestHeight, err := chainClient.GetBestBlock()
 		if err != nil {
 			return err
 		}
-		return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			return w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
-				Hash:   *hash,
-				Height: height,
+		for height := int32(1); height <= bestHeight; height++ {
+			hash, err := chainClient.GetBlockHash(int64(height))
+			if err != nil {
+				return err
+			}
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				return w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+					Hash:   *hash,
+					Height: height,
+				})
 			})
-		})
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	// Compare previously-seen blocks against the chain server.  If any of
 	// these blocks no longer exist, rollback all of the missing blocks
 	// before catching up with the rescan.
-	iter := w.Manager.NewIterateRecentBlocks()
-	rollback := iter == nil
-	syncBlock := waddrmgr.BlockStamp{
-		Hash:   *w.chainParams.GenesisHash,
-		Height: 0,
-	}
-	for cont := iter != nil; cont; cont = iter.Prev() {
-		bs := iter.BlockStamp()
-		log.Debugf("Checking for previous saved block with height %v hash %v",
-			bs.Height, bs.Hash)
-		_, err = chainClient.GetBlock(&bs.Hash)
-		if err != nil {
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		rollback := false
+		rollbackStamp := w.Manager.SyncedTo()
+		for height := rollbackStamp.Height; true; height-- {
+			hash, err := w.Manager.BlockHash(addrmgrNs, height)
+			if err != nil {
+				return err
+			}
+			chainHash, err := chainClient.GetBlockHash(int64(height))
+			if err != nil {
+				return err
+			}
+			rollbackStamp.Hash = *chainHash
+			rollbackStamp.Height = height
+			if bytes.Equal(hash[:], chainHash[:]) {
+				break
+			}
 			rollback = true
-			continue
 		}
-
-		log.Debug("Found matching block.")
-		syncBlock = bs
-		break
-	}
-
-	if rollback {
-		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-			err := w.Manager.SetSyncedTo(addrmgrNs, &syncBlock)
+		if rollback {
+			err := w.Manager.SetSyncedTo(addrmgrNs, &rollbackStamp)
 			if err != nil {
 				return err
 			}
 			// Rollback unconfirms transactions at and beyond the passed
 			// height, so add one to the new synced-to height to prevent
 			// unconfirming txs from the synced-to block.
-			return w.TxStore.Rollback(txmgrNs, syncBlock.Height+1)
-		})
-		if err != nil {
-			return err
+			err = w.TxStore.Rollback(txmgrNs, rollbackStamp.Height+1)
+			if err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Request notifications for connected and disconnected blocks.
+	//
+	// TODO(jrick): Either request this notification only once, or when
+	// btcrpcclient is modified to allow some notification request to not
+	// automatically resent on reconnect, include the notifyblocks request
+	// as well.  I am leaning towards allowing off all btcrpcclient
+	// notification re-registrations, in which case the code here should be
+	// left as is.
+	err = chainClient.NotifyBlocks()
+	if err != nil {
+		return err
 	}
 
 	return w.Rescan(addrs, unspent)

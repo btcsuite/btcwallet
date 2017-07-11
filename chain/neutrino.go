@@ -128,6 +128,18 @@ func (s *NeutrinoClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	}
 }
 
+// GetBlockHash returns the block hash for the given height, or an error if the
+// client has been shut down or the hash at the block height doesn't exist or
+// is unknown.
+func (s *NeutrinoClient) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	header, err := s.CS.BlockHeaders.FetchHeaderByHeight(uint32(height))
+	if err != nil {
+		return nil, err
+	}
+	hash := header.BlockHash()
+	return &hash, nil
+}
+
 // SendRawTransaction replicates the RPC client's SendRawTransaction command.
 func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 	*chainhash.Hash, error) {
