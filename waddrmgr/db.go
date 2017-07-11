@@ -192,9 +192,8 @@ var (
 	watchingOnlyName    = []byte("watchonly")
 
 	// Sync related key names (sync bucket).
-	syncedToName     = []byte("syncedto")
-	startBlockName   = []byte("startblock")
-	recentBlocksName = []byte("recentblocks")
+	syncedToName   = []byte("syncedto")
+	startBlockName = []byte("startblock")
 
 	// Account related key names (account bucket).
 	acctNumAcctsName = []byte("numaccts")
@@ -1394,6 +1393,25 @@ func fetchSyncedTo(ns walletdb.ReadBucket) (*BlockStamp, error) {
 // putSyncedTo stores the provided synced to blockstamp to the database.
 func putSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	bucket := ns.NestedReadWriteBucket(syncBucketName)
+	errStr := fmt.Sprintf("failed to store sync information %v", bs.Hash)
+
+	// If the block height is greater than zero, check that the previous
+	// block height exists. This prevents reorg issues in the future.
+	// We use BigEndian so that keys/values are added to the bucket in
+	// order, making writes more efficient for some database backends.
+	if bs.Height > 0 {
+		if _, err := fetchBlockHash(ns, bs.Height-1); err != nil {
+			return managerError(ErrDatabase, errStr, err)
+		}
+	}
+
+	// Store the block hash by block height.
+	height := make([]byte, 4)
+	binary.BigEndian.PutUint32(height, uint32(bs.Height))
+	err := bucket.Put(height, bs.Hash[0:32])
+	if err != nil {
+		return managerError(ErrDatabase, errStr, err)
+	}
 
 	// The serialized synced to format is:
 	//   <blockheight><blockhash>
@@ -1403,12 +1421,31 @@ func putSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(bs.Height))
 	copy(buf[4:36], bs.Hash[0:32])
 
-	err := bucket.Put(syncedToName, buf)
+	err = bucket.Put(syncedToName, buf)
 	if err != nil {
-		str := fmt.Sprintf("failed to store sync information %v", bs.Hash)
-		return managerError(ErrDatabase, str, err)
+		return managerError(ErrDatabase, errStr, err)
 	}
 	return nil
+}
+
+// fetchBlockHash loads the block hash for the provided height from the
+// database.
+func fetchBlockHash(ns walletdb.ReadBucket, height int32) (*chainhash.Hash, error) {
+	bucket := ns.NestedReadBucket(syncBucketName)
+	errStr := fmt.Sprintf("failed to fetch block hash for height %d", height)
+
+	heightBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(heightBytes, uint32(height))
+	hashBytes := bucket.Get(heightBytes)
+	if len(hashBytes) != 32 {
+		err := fmt.Errorf("couldn't get hash from database")
+		return nil, managerError(ErrDatabase, errStr, err)
+	}
+	var hash chainhash.Hash
+	if err := hash.SetBytes(hashBytes); err != nil {
+		return nil, managerError(ErrDatabase, errStr, err)
+	}
+	return &hash, nil
 }
 
 // fetchStartBlock loads the start block stamp for the manager from the
@@ -1447,64 +1484,6 @@ func putStartBlock(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	err := bucket.Put(startBlockName, buf)
 	if err != nil {
 		str := fmt.Sprintf("failed to store start block %v", bs.Hash)
-		return managerError(ErrDatabase, str, err)
-	}
-	return nil
-}
-
-// fetchRecentBlocks returns the height of the most recent block height and
-// hashes of the most recent blocks.
-func fetchRecentBlocks(ns walletdb.ReadBucket) (int32, []chainhash.Hash, error) {
-	bucket := ns.NestedReadBucket(syncBucketName)
-
-	// The serialized recent blocks format is:
-	//   <blockheight><numhashes><blockhashes>
-	//
-	// 4 bytes recent block height + 4 bytes number of hashes + raw hashes
-	// at 32 bytes each.
-
-	// Given the above, the length of the entry must be at a minimum
-	// the constant value sizes.
-	buf := bucket.Get(recentBlocksName)
-	if len(buf) < 8 {
-		str := "malformed recent blocks stored in database"
-		return 0, nil, managerError(ErrDatabase, str, nil)
-	}
-
-	recentHeight := int32(binary.LittleEndian.Uint32(buf[0:4]))
-	numHashes := binary.LittleEndian.Uint32(buf[4:8])
-	recentHashes := make([]chainhash.Hash, numHashes)
-	offset := 8
-	for i := uint32(0); i < numHashes; i++ {
-		copy(recentHashes[i][:], buf[offset:offset+32])
-		offset += 32
-	}
-
-	return recentHeight, recentHashes, nil
-}
-
-// putRecentBlocks stores the provided start block stamp to the database.
-func putRecentBlocks(ns walletdb.ReadWriteBucket, recentHeight int32, recentHashes []chainhash.Hash) error {
-	bucket := ns.NestedReadWriteBucket(syncBucketName)
-
-	// The serialized recent blocks format is:
-	//   <blockheight><numhashes><blockhashes>
-	//
-	// 4 bytes recent block height + 4 bytes number of hashes + raw hashes
-	// at 32 bytes each.
-	numHashes := uint32(len(recentHashes))
-	buf := make([]byte, 8+(numHashes*32))
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(recentHeight))
-	binary.LittleEndian.PutUint32(buf[4:8], numHashes)
-	offset := 8
-	for i := uint32(0); i < numHashes; i++ {
-		copy(buf[offset:offset+32], recentHashes[i][:])
-		offset += 32
-	}
-
-	err := bucket.Put(recentBlocksName, buf)
-	if err != nil {
-		str := "failed to store recent blocks"
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil

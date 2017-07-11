@@ -5,16 +5,8 @@
 package waddrmgr
 
 import (
-	"sync"
-
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcwallet/walletdb"
-)
-
-const (
-	// maxRecentHashes is the maximum number of hashes to keep in history
-	// for the purposes of rollbacks.
-	maxRecentHashes = 20
 )
 
 // BlockStamp defines a block (by height and a unique hash) and is
@@ -36,99 +28,15 @@ type syncState struct {
 	// syncedTo is the current block the addresses in the manager are known
 	// to be synced against.
 	syncedTo BlockStamp
-
-	// recentHeight is the most recently seen sync height.
-	recentHeight int32
-
-	// recentHashes is a list of the last several seen block hashes.
-	recentHashes []chainhash.Hash
-}
-
-// iter returns a BlockIterator that can be used to iterate over the recently
-// seen blocks in the sync state.
-func (s *syncState) iter(mtx *sync.RWMutex) *BlockIterator {
-	if s.recentHeight == -1 || len(s.recentHashes) == 0 {
-		return nil
-	}
-	return &BlockIterator{
-		mtx:      mtx,
-		height:   s.recentHeight,
-		index:    len(s.recentHashes) - 1,
-		syncInfo: s,
-	}
 }
 
 // newSyncState returns a new sync state with the provided parameters.
-func newSyncState(startBlock, syncedTo *BlockStamp, recentHeight int32,
-	recentHashes []chainhash.Hash) *syncState {
+func newSyncState(startBlock, syncedTo *BlockStamp) *syncState {
 
 	return &syncState{
-		startBlock:   *startBlock,
-		syncedTo:     *syncedTo,
-		recentHeight: recentHeight,
-		recentHashes: recentHashes,
+		startBlock: *startBlock,
+		syncedTo:   *syncedTo,
 	}
-}
-
-// BlockIterator allows for the forwards and backwards iteration of recently
-// seen blocks.
-type BlockIterator struct {
-	mtx      *sync.RWMutex
-	height   int32
-	index    int
-	syncInfo *syncState
-}
-
-// Next returns the next recently seen block or false if there is not one.
-func (it *BlockIterator) Next() bool {
-	it.mtx.RLock()
-	defer it.mtx.RUnlock()
-
-	if it.index+1 >= len(it.syncInfo.recentHashes) {
-		return false
-	}
-	it.index++
-	return true
-}
-
-// Prev returns the previous recently seen block or false if there is not one.
-func (it *BlockIterator) Prev() bool {
-	it.mtx.RLock()
-	defer it.mtx.RUnlock()
-
-	if it.index-1 < 0 {
-		return false
-	}
-	it.index--
-	return true
-}
-
-// BlockStamp returns the block stamp associated with the recently seen block
-// the iterator is currently pointing to.
-func (it *BlockIterator) BlockStamp() BlockStamp {
-	it.mtx.RLock()
-	defer it.mtx.RUnlock()
-
-	return BlockStamp{
-		Height: it.syncInfo.recentHeight -
-			int32(len(it.syncInfo.recentHashes)-1-it.index),
-		Hash: it.syncInfo.recentHashes[it.index],
-	}
-}
-
-// NewIterateRecentBlocks returns an iterator for recently-seen blocks.
-// The iterator starts at the most recently-added block, and Prev should
-// be used to access earlier blocks.
-//
-// NOTE: Ideally this should not really be a part of the address manager as it
-// is intended for syncing purposes.   It is being exposed here for now to go
-// with the other syncing code.  Ultimately, all syncing code should probably
-// go into its own package and share the data store.
-func (m *Manager) NewIterateRecentBlocks() *BlockIterator {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-
-	return m.syncState.iter(&m.mtx)
 }
 
 // SetSyncedTo marks the address manager to be in sync with the recently-seen
@@ -141,61 +49,10 @@ func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
-	// Update the recent history.
-	//
-	// NOTE: The values in the memory sync state aren't directly modified
-	// here in case the forthcoming db update fails.  The memory sync state
-	// is updated with these values as needed after the db updates.
-	recentHeight := m.syncState.recentHeight
-	recentHashes := m.syncState.recentHashes
+	// Use the stored start blockstamp and reset recent hashes and height
+	// when the provided blockstamp is nil.
 	if bs == nil {
-		// Use the stored start blockstamp and reset recent hashes and
-		// height when the provided blockstamp is nil.
 		bs = &m.syncState.startBlock
-		recentHeight = m.syncState.startBlock.Height
-		recentHashes = nil
-
-	} else if bs.Height < recentHeight {
-		// When the new block stamp height is prior to the most recently
-		// seen height, a rollback is being performed.  Thus, when the
-		// previous block stamp is already saved, remove anything after
-		// it.  Otherwise, the rollback must be too far in history, so
-		// clear the recent hashes and set the recent height to the
-		// current block stamp height.
-		numHashes := len(recentHashes)
-		idx := numHashes - 1 - int(recentHeight-bs.Height)
-		if idx >= 0 && idx < numHashes && recentHashes[idx] == bs.Hash {
-			// subslice out the removed hashes.
-			recentHeight = bs.Height
-			recentHashes = recentHashes[:idx]
-		} else {
-			recentHeight = bs.Height
-			recentHashes = nil
-		}
-
-	} else if bs.Height != recentHeight+1 {
-		// At this point the new block stamp height is after the most
-		// recently seen block stamp, so it should be the next height in
-		// sequence.  When this is not the case, the recent history is
-		// no longer valid, so clear the recent hashes and set the
-		// recent height to the current block stamp height.
-		recentHeight = bs.Height
-		recentHashes = nil
-	} else {
-		// The only case left is when the new block stamp height is the
-		// next height in sequence after the most recently seen block
-		// stamp, so update it accordingly.
-		recentHeight = bs.Height
-	}
-
-	// Enforce maximum number of recent hashes.
-	if len(recentHashes) == maxRecentHashes {
-		// Shift everything down one position and add the new hash in
-		// the last position.
-		copy(recentHashes, recentHashes[1:])
-		recentHashes[maxRecentHashes-1] = bs.Hash
-	} else {
-		recentHashes = append(recentHashes, bs.Hash)
 	}
 
 	// Update the database.
@@ -203,15 +60,9 @@ func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 	if err != nil {
 		return err
 	}
-	err = putRecentBlocks(ns, recentHeight, recentHashes)
-	if err != nil {
-		return err
-	}
 
 	// Update memory now that the database is updated.
 	m.syncState.syncedTo = *bs
-	m.syncState.recentHashes = recentHashes
-	m.syncState.recentHeight = recentHeight
 	return nil
 }
 
@@ -224,4 +75,15 @@ func (m *Manager) SyncedTo() BlockStamp {
 	defer m.mtx.Unlock()
 
 	return m.syncState.syncedTo
+}
+
+// BlockHash returns the block hash at a particular block height. This
+// information is useful for comparing against the chain back-end to see if a
+// reorg is taking place and how far back it goes.
+func (m *Manager) BlockHash(ns walletdb.ReadBucket, height int32) (
+	*chainhash.Hash, error) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	return fetchBlockHash(ns, height)
 }

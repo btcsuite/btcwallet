@@ -175,13 +175,41 @@ out:
 			log.Infof("Rescanned through block %v (height %d)",
 				n.Hash, n.Height)
 
-			bs := waddrmgr.BlockStamp{
-				Hash:   *n.Hash,
-				Height: n.Height,
-			}
+			client := w.ChainClient()
+			// Since btcd rescans don't send blockconnected
+			// notifications, we need to cycle through all of the
+			// rescanned blocks and write the hashes to the
+			// database. Neutrino rescans do send the notifications,
+			// which means this loop won't actually cycle.
+			//
+			// TODO(aakselrod): There's a race conditon here, which
+			// happens when a reorg occurs between the
+			// rescanProgress notification and the last GetBlockHash
+			// call. The solution when using btcd is to make btcd
+			// send blockconnected notifications with each block
+			// the way Neutrino does, and get rid of the loop. The
+			// other alternative is to check the final hash and,
+			// if it doesn't match the original hash returned by
+			// the notification, to roll back and restart the
+			// rescan.
 			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				return w.Manager.SetSyncedTo(ns, &bs)
+				startBlock := w.Manager.SyncedTo()
+				for i := startBlock.Height + 1; i <= n.Height; i++ {
+					hash, err := client.GetBlockHash(int64(i))
+					if err != nil {
+						return err
+					}
+					bs := waddrmgr.BlockStamp{
+						Height: i,
+						Hash:   *hash,
+					}
+					err = w.Manager.SetSyncedTo(ns, &bs)
+					if err != nil {
+						return err
+					}
+				}
+				return nil
 			})
 			if err != nil {
 				log.Errorf("Failed to update address manager "+
@@ -197,13 +225,41 @@ out:
 				"%s, height %d)", len(addrs), noun, n.Hash,
 				n.Height)
 
-			bs := waddrmgr.BlockStamp{
-				Height: n.Height,
-				Hash:   *n.Hash,
-			}
+			client := w.ChainClient()
+			// Since btcd rescans don't send blockconnected
+			// notifications, we need to cycle through all of the
+			// rescanned blocks and write the hashes to the
+			// database. Neutrino rescans do send the notifications,
+			// which means this loop won't actually cycle.
+			//
+			// TODO(aakselrod): There's a race conditon here, which
+			// happens when a reorg occurs between the
+			// rescanFinished notification and the last GetBlockHash
+			// call. The solution when using btcd is to make btcd
+			// send blockconnected notifications with each block
+			// the way Neutrino does, and get rid of the loop. The
+			// other alternative is to check the final hash and,
+			// if it doesn't match the original hash returned by
+			// the notification, to roll back and restart the
+			// rescan.
 			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				return w.Manager.SetSyncedTo(ns, &bs)
+				startBlock := w.Manager.SyncedTo()
+				for i := startBlock.Height + 1; i <= n.Height; i++ {
+					hash, err := client.GetBlockHash(int64(i))
+					if err != nil {
+						return err
+					}
+					bs := waddrmgr.BlockStamp{
+						Height: i,
+						Hash:   *hash,
+					}
+					err = w.Manager.SetSyncedTo(ns, &bs)
+					if err != nil {
+						return err
+					}
+				}
+				return nil
 			})
 			if err != nil {
 				log.Errorf("Failed to update address manager "+

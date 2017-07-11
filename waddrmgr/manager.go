@@ -12,7 +12,6 @@ import (
 
 	"github.com/roasbeef/btcd/btcec"
 	"github.com/roasbeef/btcd/chaincfg"
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcutil/hdkeychain"
 	"github.com/roasbeef/btcwallet/internal/zero"
@@ -2126,11 +2125,6 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte, chainParams *chai
 		return nil, maybeConvertDbError(err)
 	}
 
-	recentHeight, recentHashes, err := fetchRecentBlocks(ns)
-	if err != nil {
-		return nil, maybeConvertDbError(err)
-	}
-
 	// When not a watching-only manager, set the master private key params,
 	// but don't derive it now since the manager starts off locked.
 	var masterKeyPriv snacl.SecretKey
@@ -2165,7 +2159,7 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte, chainParams *chai
 	zero.Bytes(cryptoKeyPubCT)
 
 	// Create the sync state struct.
-	syncInfo := newSyncState(startBlock, syncedTo, recentHeight, recentHashes)
+	syncInfo := newSyncState(startBlock, syncedTo)
 
 	// Generate private passphrase salt.
 	var privPassphraseSalt [saltSize]byte
@@ -2405,9 +2399,7 @@ func Create(ns walletdb.ReadWriteBucket, seed, pubPassphrase, privPassphrase []b
 		createdAt := &BlockStamp{Hash: *chainParams.GenesisHash, Height: 0}
 
 		// Create the initial sync state.
-		recentHashes := []chainhash.Hash{createdAt.Hash}
-		recentHeight := createdAt.Height
-		syncInfo := newSyncState(createdAt, createdAt, recentHeight, recentHashes)
+		syncInfo := newSyncState(createdAt, createdAt)
 
 		// Save the master key params to the database.
 		pubParams := masterKeyPub.Marshal()
@@ -2443,12 +2435,6 @@ func Create(ns walletdb.ReadWriteBucket, seed, pubPassphrase, privPassphrase []b
 			return err
 		}
 		err = putStartBlock(ns, &syncInfo.startBlock)
-		if err != nil {
-			return err
-		}
-
-		// Save the initial recent blocks state.
-		err = putRecentBlocks(ns, recentHeight, recentHashes)
 		if err != nil {
 			return err
 		}

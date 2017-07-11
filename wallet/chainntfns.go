@@ -5,6 +5,8 @@
 package wallet
 
 import (
+	"bytes"
+
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcwallet/chain"
 	"github.com/roasbeef/btcwallet/waddrmgr"
@@ -111,29 +113,27 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 		return nil
 	}
 
-	// Disconnect the last seen block from the manager if it matches the
-	// removed block.
-	iter := w.Manager.NewIterateRecentBlocks()
-	if iter != nil && iter.BlockStamp().Hash == b.Hash {
-		if iter.Prev() {
-			prev := iter.BlockStamp()
-			w.Manager.SetSyncedTo(addrmgrNs, &prev)
-			err := w.TxStore.Rollback(txmgrNs, prev.Height+1)
+	// Disconnect the removed block and all blocks after it if we know about
+	// the disconnected block. Otherwise, the block is in the future.
+	if b.Height <= w.Manager.SyncedTo().Height {
+		hash, err := w.Manager.BlockHash(addrmgrNs, b.Height)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(hash[:], b.Hash[:]) {
+			bs := waddrmgr.BlockStamp{
+				Height: b.Height - 1,
+			}
+			hash, err = w.Manager.BlockHash(addrmgrNs, bs.Height)
 			if err != nil {
 				return err
 			}
-		} else {
-			// The reorg is farther back than the recently-seen list
-			// of blocks has recorded, so set it to unsynced which
-			// will in turn lead to a rescan from either the
-			// earliest blockstamp the addresses in the manager are
-			// known to have been created.
-			w.Manager.SetSyncedTo(addrmgrNs, nil)
-			// Rollback everything but the genesis block.
-			err := w.TxStore.Rollback(txmgrNs, 1)
+			b.Hash = *hash
+			err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
 			if err != nil {
 				return err
 			}
+			err = w.TxStore.Rollback(txmgrNs, b.Height)
 		}
 	}
 
