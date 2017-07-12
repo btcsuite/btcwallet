@@ -356,6 +356,8 @@ func (w *Wallet) syncWithChain() error {
 		if err != nil {
 			return err
 		}
+		log.Infof("Catching up block hashes to height %d, this will "+
+			"take a while...", bestHeight)
 		// Initialize the first database transaction.
 		tx, err := w.db.BeginReadWriteTx()
 		if err != nil {
@@ -383,6 +385,7 @@ func (w *Wallet) syncWithChain() error {
 					tx.Rollback()
 					return err
 				}
+				log.Infof("Caught up to height %d", height)
 				tx, err = w.db.BeginReadWriteTx()
 				if err != nil {
 					return err
@@ -396,6 +399,7 @@ func (w *Wallet) syncWithChain() error {
 			tx.Rollback()
 			return err
 		}
+		log.Info("Done catching up block hashes")
 	}
 
 	// Compare previously-seen blocks against the chain server.  If any of
