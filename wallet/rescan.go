@@ -192,6 +192,8 @@ out:
 			// if it doesn't match the original hash returned by
 			// the notification, to roll back and restart the
 			// rescan.
+			log.Infof("Catching up block hashes to height %d, this"+
+				" might take a while", n.Height)
 			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 				startBlock := w.Manager.SyncedTo()
@@ -216,6 +218,7 @@ out:
 					"sync state for hash %v (height %d): %v",
 					n.Hash, n.Height, err)
 			}
+			log.Info("Done catching up block hashes")
 
 		case msg := <-w.rescanFinished:
 			n := msg.Notification
@@ -242,6 +245,8 @@ out:
 			// if it doesn't match the original hash returned by
 			// the notification, to roll back and restart the
 			// rescan.
+			log.Infof("Catching up block hashes to height %d, this"+
+				" might take a while", n.Height)
 			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 				startBlock := w.Manager.SyncedTo()
@@ -269,6 +274,7 @@ out:
 			}
 
 			w.SetChainSynced(true)
+			log.Info("Done catching up block hashes")
 			go w.resendUnminedTxs()
 
 		case <-quit:
