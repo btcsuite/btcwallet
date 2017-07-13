@@ -356,21 +356,45 @@ func (w *Wallet) syncWithChain() error {
 		if err != nil {
 			return err
 		}
+		// Initialize the first database transaction.
+		tx, err := w.db.BeginReadWriteTx()
+		if err != nil {
+			return err
+		}
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		for height := int32(1); height <= bestHeight; height++ {
 			hash, err := chainClient.GetBlockHash(int64(height))
 			if err != nil {
+				tx.Rollback()
 				return err
 			}
-			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				return w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
-					Hash:   *hash,
-					Height: height,
-				})
+			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+				Hash:   *hash,
+				Height: height,
 			})
 			if err != nil {
+				tx.Rollback()
 				return err
 			}
+			// Every 10K blocks, commit and start a new database TX.
+			if height%10000 == 0 {
+				err = tx.Commit()
+				if err != nil {
+					tx.Rollback()
+					return err
+				}
+				tx, err = w.db.BeginReadWriteTx()
+				if err != nil {
+					return err
+				}
+				ns = tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			}
+		}
+		// Commit (or roll back) the final database transaction.
+		err = tx.Commit()
+		if err != nil {
+			tx.Rollback()
+			return err
 		}
 	}
 
