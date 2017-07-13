@@ -352,12 +352,27 @@ func (w *Wallet) syncWithChain() error {
 	// anymore.  This code should be updated when this assumption is no
 	// longer true, but worst case would result in an unnecessary rescan.
 	if len(addrs) == 0 && len(unspent) == 0 && w.Manager.SyncedTo().Height == 0 {
+		// Find the latest checkpoint's height. This lets us catch up to
+		// at least that checkpoint, since we're synchronizing from
+		// scratch, and lets us avoid a bunch of costly DB transactions
+		// in the case when we're using BDB for the walletdb backend and
+		// Neutrino for the chain.Interface backend, and the chain
+		// backend starts synchronizing at the same time as the wallet.
 		_, bestHeight, err := chainClient.GetBestBlock()
 		if err != nil {
 			return err
 		}
+		checkHeight := bestHeight
+		if len(w.chainParams.Checkpoints) > 0 {
+			checkHeight = w.chainParams.Checkpoints[len(
+				w.chainParams.Checkpoints)-1].Height
+		}
+		logHeight := checkHeight
+		if bestHeight > logHeight {
+			logHeight = bestHeight
+		}
 		log.Infof("Catching up block hashes to height %d, this will "+
-			"take a while...", bestHeight)
+			"take a while...", logHeight)
 		// Initialize the first database transaction.
 		tx, err := w.db.BeginReadWriteTx()
 		if err != nil {
@@ -369,6 +384,36 @@ func (w *Wallet) syncWithChain() error {
 			if err != nil {
 				tx.Rollback()
 				return err
+			}
+			// If we've found the best height the backend knows
+			// about, but we haven't reached the last checkpoint, we
+			// know the backend is still synchronizing. We can give
+			// it a little bit of time to synchronize further before
+			// updating the best height based on the backend. Once
+			// we see that the backend has advanced, we can catch
+			// up to it.
+			for height == bestHeight && bestHeight < checkHeight {
+				time.Sleep(100 * time.Millisecond)
+				_, bestHeight, err = chainClient.GetBestBlock()
+				if err != nil {
+					tx.Rollback()
+					return err
+				}
+				// If we're using the Neutrino backend, we can
+				// check if it's current or not. If it's not and
+				// we've exceeded the original checkHeight, we
+				// can keep the loop going by increasing the
+				// checkHeight to be greater than the bestHeight
+				// and if it is, we can set checkHeight to the
+				// same as the bestHeight so the loop exits.
+				switch c := chainClient.(type) {
+				case *chain.NeutrinoClient:
+					if c.CS.IsCurrent() {
+						checkHeight = bestHeight
+					} else if checkHeight < bestHeight+1 {
+						checkHeight = bestHeight + 1
+					}
+				}
 			}
 			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
 				Hash:   *hash,
