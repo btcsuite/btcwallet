@@ -14,8 +14,17 @@ import (
 )
 
 func TestStartWithdrawal(t *testing.T) {
-	tearDown, pool, store := vp.TstCreatePoolAndTxStore(t)
+	tearDown, db, pool, store := vp.TstCreatePoolAndTxStore(t)
 	defer tearDown()
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns, addrmgrNs := vp.TstRWNamespaces(dbtx)
+	txmgrNs := vp.TstTxStoreRWNamespace(dbtx)
+
 	mgr := pool.Manager()
 
 	masters := []*hdkeychain.ExtendedKey{
@@ -23,9 +32,9 @@ func TestStartWithdrawal(t *testing.T) {
 		vp.TstCreateMasterKey(t, bytes.Repeat([]byte{0x02, 0x01}, 16)),
 		vp.TstCreateMasterKey(t, bytes.Repeat([]byte{0x03, 0x01}, 16))}
 	def := vp.TstCreateSeriesDef(t, pool, 2, masters)
-	vp.TstCreateSeries(t, pool, []vp.TstSeriesDef{def})
+	vp.TstCreateSeries(t, dbtx, pool, []vp.TstSeriesDef{def})
 	// Create eligible inputs and the list of outputs we need to fulfil.
-	vp.TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, []int64{5e6, 4e6}, store)
+	vp.TstCreateSeriesCreditsOnStore(t, dbtx, pool, def.SeriesID, []int64{5e6, 4e6}, store)
 	address1 := "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6"
 	address2 := "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG"
 	requests := []vp.OutputRequest{
@@ -34,15 +43,14 @@ func TestStartWithdrawal(t *testing.T) {
 	}
 	changeStart := vp.TstNewChangeAddress(t, pool, def.SeriesID, 0)
 
-	startAddr := vp.TstNewWithdrawalAddress(t, pool, def.SeriesID, 0, 0)
+	startAddr := vp.TstNewWithdrawalAddress(t, dbtx, pool, def.SeriesID, 0, 0)
 	lastSeriesID := def.SeriesID
 	dustThreshold := btcutil.Amount(1e4)
 	currentBlock := int32(vp.TstInputsBlock + vp.TstEligibleInputMinConfirmations + 1)
 	var status *vp.WithdrawalStatus
-	var err error
-	vp.TstRunWithManagerUnlocked(t, mgr, func() {
-		status, err = pool.StartWithdrawal(0, requests, *startAddr, lastSeriesID, *changeStart,
-			store, currentBlock, dustThreshold)
+	vp.TstRunWithManagerUnlocked(t, mgr, addrmgrNs, func() {
+		status, err = pool.StartWithdrawal(ns, addrmgrNs, 0, requests, *startAddr, lastSeriesID, *changeStart,
+			store, txmgrNs, currentBlock, dustThreshold)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -79,8 +87,8 @@ func TestStartWithdrawal(t *testing.T) {
 	// signatures).  Must unlock the manager as signing involves looking up the
 	// redeem script, which is stored encrypted.
 	msgtx := status.TstGetMsgTx(ntxid)
-	vp.TstRunWithManagerUnlocked(t, mgr, func() {
-		if err = vp.SignTx(msgtx, txSigs, mgr, store); err != nil {
+	vp.TstRunWithManagerUnlocked(t, mgr, addrmgrNs, func() {
+		if err = vp.SignTx(msgtx, txSigs, mgr, addrmgrNs, store, txmgrNs); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -88,9 +96,9 @@ func TestStartWithdrawal(t *testing.T) {
 	// Any subsequent StartWithdrawal() calls with the same parameters will
 	// return the previously stored WithdrawalStatus.
 	var status2 *vp.WithdrawalStatus
-	vp.TstRunWithManagerUnlocked(t, mgr, func() {
-		status2, err = pool.StartWithdrawal(0, requests, *startAddr, lastSeriesID, *changeStart,
-			store, currentBlock, dustThreshold)
+	vp.TstRunWithManagerUnlocked(t, mgr, addrmgrNs, func() {
+		status2, err = pool.StartWithdrawal(ns, addrmgrNs, 0, requests, *startAddr, lastSeriesID, *changeStart,
+			store, txmgrNs, currentBlock, dustThreshold)
 	})
 	if err != nil {
 		t.Fatal(err)

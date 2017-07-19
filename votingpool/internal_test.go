@@ -16,37 +16,24 @@ var TstLastErr = lastErr
 const TstEligibleInputMinConfirmations = eligibleInputMinConfirmations
 
 // TstPutSeries transparently wraps the voting pool putSeries method.
-func (vp *Pool) TstPutSeries(version, seriesID, reqSigs uint32, inRawPubKeys []string) error {
-	return vp.putSeries(version, seriesID, reqSigs, inRawPubKeys)
+func (vp *Pool) TstPutSeries(ns walletdb.ReadWriteBucket, version, seriesID, reqSigs uint32, inRawPubKeys []string) error {
+	return vp.putSeries(ns, version, seriesID, reqSigs, inRawPubKeys)
 }
 
 var TstBranchOrder = branchOrder
 
 // TstExistsSeries checks whether a series is stored in the database.
-func (vp *Pool) TstExistsSeries(seriesID uint32) (bool, error) {
-	var exists bool
-	err := vp.namespace.View(
-		func(tx walletdb.Tx) error {
-			poolBucket := tx.RootBucket().Bucket(vp.ID)
-			if poolBucket == nil {
-				return nil
-			}
-			bucket := poolBucket.Bucket(seriesBucketName)
-			if bucket == nil {
-				return nil
-			}
-			exists = bucket.Get(uint32ToBytes(seriesID)) != nil
-			return nil
-		})
-	if err != nil {
-		return false, err
+func (vp *Pool) TstExistsSeries(dbtx walletdb.ReadTx, seriesID uint32) (bool, error) {
+	ns, _ := TstRNamespaces(dbtx)
+	poolBucket := ns.NestedReadBucket(vp.ID)
+	if poolBucket == nil {
+		return false, nil
 	}
-	return exists, nil
-}
-
-// TstNamespace exposes the Pool's namespace as it's needed in some tests.
-func (vp *Pool) TstNamespace() walletdb.Namespace {
-	return vp.namespace
+	bucket := poolBucket.NestedReadBucket(seriesBucketName)
+	if bucket == nil {
+		return false, nil
+	}
+	return bucket.Get(uint32ToBytes(seriesID)) != nil, nil
 }
 
 // TstGetRawPublicKeys gets a series public keys in string format.

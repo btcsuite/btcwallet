@@ -1,4 +1,5 @@
-// Copyright (c) 2015 The btcsuite developers
+// Copyright (c) 2015-2017 The btcsuite developers
+// Copyright (c) 2015-2016 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -40,6 +41,10 @@ const (
 	// handled by creating a new store.
 	ErrNoExists
 
+	// ErrNeedsUpgrade describes an error during store opening where the
+	// database contains an older version of the store.
+	ErrNeedsUpgrade
+
 	// ErrUnknownVersion describes an error where the store already exists
 	// but the database version is newer than latest version known to this
 	// software.  This likely indicates an outdated binary.
@@ -52,6 +57,7 @@ var errStrs = [...]string{
 	ErrInput:          "ErrInput",
 	ErrAlreadyExists:  "ErrAlreadyExists",
 	ErrNoExists:       "ErrNoExists",
+	ErrNeedsUpgrade:   "ErrNeedsUpgrade",
 	ErrUnknownVersion: "ErrUnknownVersion",
 }
 

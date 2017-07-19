@@ -23,8 +23,14 @@ import (
 // TestOutputSplittingNotEnoughInputs checks that an output will get split if we
 // don't have enough inputs to fulfil it.
 func TestOutputSplittingNotEnoughInputs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
 
 	net := pool.Manager().ChainParams()
 	output1Amount := btcutil.Amount(2)
@@ -36,7 +42,7 @@ func TestOutputSplittingNotEnoughInputs(t *testing.T) {
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", output1Amount, net),
 		TstNewOutputRequest(t, 2, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", output2Amount, net),
 	}
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{7})
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, dbtx, pool, []int64{7})
 	w := newWithdrawal(0, requests, eligible, *TstNewChangeAddress(t, pool, seriesID, 0))
 	w.txOptions = func(tx *withdrawalTx) {
 		// Trigger an output split because of lack of inputs by forcing a high fee.
@@ -71,15 +77,21 @@ func TestOutputSplittingNotEnoughInputs(t *testing.T) {
 }
 
 func TestOutputSplittingOversizeTx(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
 
 	requestAmount := btcutil.Amount(5)
 	bigInput := int64(3)
 	smallInput := int64(2)
 	request := TstNewOutputRequest(
 		t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", requestAmount, pool.Manager().ChainParams())
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{smallInput, bigInput})
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, dbtx, pool, []int64{smallInput, bigInput})
 	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
 	w := newWithdrawal(0, []OutputRequest{request}, eligible, *changeStart)
 	w.txOptions = func(tx *withdrawalTx) {
@@ -129,13 +141,19 @@ func TestOutputSplittingOversizeTx(t *testing.T) {
 }
 
 func TestSplitLastOutputNoOutputs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	w := newWithdrawal(0, []OutputRequest{}, []credit{}, ChangeAddress{})
-	w.current = createWithdrawalTx(t, pool, []int64{}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
 
-	err := w.splitLastOutput()
+	w := newWithdrawal(0, []OutputRequest{}, []credit{}, ChangeAddress{})
+	w.current = createWithdrawalTx(t, dbtx, pool, []int64{}, []int64{})
+
+	err = w.splitLastOutput()
 
 	TstCheckError(t, "", err, ErrPreconditionNotMet)
 }
@@ -143,12 +161,19 @@ func TestSplitLastOutputNoOutputs(t *testing.T) {
 // Check that all outputs requested in a withdrawal match the outputs of the generated
 // transaction(s).
 func TestWithdrawalTxOutputs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
 	net := pool.Manager().ChainParams()
 
 	// Create eligible inputs and the list of outputs we need to fulfil.
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, dbtx, pool, []int64{2e6, 4e6})
 	outputs := []OutputRequest{
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 3e6, net),
 		TstNewOutputRequest(t, 2, "3PbExiaztsSYgh6zeMswC49hLUwhTQ86XG", 2e6, net),
@@ -178,10 +203,16 @@ func TestWithdrawalTxOutputs(t *testing.T) {
 // Check that withdrawal.status correctly states that no outputs were fulfilled when we
 // don't have enough eligible credits for any of them.
 func TestFulfillRequestsNoSatisfiableOutputs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{1e6})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, dbtx, pool, []int64{1e6})
 	request := TstNewOutputRequest(
 		t, 1, "3Qt1EaKRD9g9FeL2DGkLLswhK1AKmmXFSe", btcutil.Amount(3e6), pool.Manager().ChainParams())
 	changeStart := TstNewChangeAddress(t, pool, seriesID, 0)
@@ -210,12 +241,19 @@ func TestFulfillRequestsNoSatisfiableOutputs(t *testing.T) {
 // Check that some requested outputs are not fulfilled when we don't have credits for all
 // of them.
 func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
 	net := pool.Manager().ChainParams()
 
 	// Create eligible inputs and the list of outputs we need to fulfil.
-	seriesID, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{2e6, 4e6})
+	seriesID, eligible := TstCreateCreditsOnNewSeries(t, dbtx, pool, []int64{2e6, 4e6})
 	out1 := TstNewOutputRequest(
 		t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", btcutil.Amount(3e6), net)
 	out2 := TstNewOutputRequest(
@@ -261,10 +299,16 @@ func TestFulfillRequestsNotEnoughCreditsForAllRequests(t *testing.T) {
 // TestRollbackLastOutput tests the case where we rollback one output
 // and one input, such that sum(in) >= sum(out) + fee.
 func TestRollbackLastOutput(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{3, 3, 2, 1, 3}, []int64{3, 3, 2, 2})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{3, 3, 2, 1, 3}, []int64{3, 3, 2, 2})
 	initialInputs := tx.inputs
 	initialOutputs := tx.outputs
 
@@ -295,12 +339,18 @@ func TestRollbackLastOutput(t *testing.T) {
 }
 
 func TestRollbackLastOutputMultipleInputsRolledBack(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
 
 	// This tx will need the 3 last inputs to fulfill the second output, so they
 	// should all be rolled back and returned in the reverse order they were added.
-	tx := createWithdrawalTx(t, pool, []int64{1, 2, 3, 4}, []int64{1, 8})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{1, 2, 3, 4}, []int64{1, 8})
 	initialInputs := tx.inputs
 	initialOutputs := tx.outputs
 
@@ -328,10 +378,16 @@ func TestRollbackLastOutputMultipleInputsRolledBack(t *testing.T) {
 // TestRollbackLastOutputNoInputsRolledBack tests the case where we roll back
 // one output but don't need to roll back any inputs.
 func TestRollbackLastOutputNoInputsRolledBack(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{4}, []int64{2, 3})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{4}, []int64{2, 3})
 	initialInputs := tx.inputs
 	initialOutputs := tx.outputs
 
@@ -375,11 +431,17 @@ func TestRollBackLastOutputInsufficientOutputs(t *testing.T) {
 // TestRollbackLastOutputWhenNewOutputAdded checks that we roll back the last
 // output if a tx becomes too big right after we add a new output to it.
 func TestRollbackLastOutputWhenNewOutputAdded(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
 	net := pool.Manager().ChainParams()
-	series, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{5, 5})
+	series, eligible := TstCreateCreditsOnNewSeries(t, dbtx, pool, []int64{5, 5})
 	requests := []OutputRequest{
 		// This is ordered by bailment ID
 		TstNewOutputRequest(t, 1, "34eVkREKgvvGASZW7hkgE2uNc1yycntMK6", 1, net),
@@ -427,11 +489,17 @@ func TestRollbackLastOutputWhenNewOutputAdded(t *testing.T) {
 // TestRollbackLastOutputWhenNewInputAdded checks that we roll back the last
 // output if a tx becomes too big right after we add a new input to it.
 func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
 	net := pool.Manager().ChainParams()
-	series, eligible := TstCreateCreditsOnNewSeries(t, pool, []int64{6, 5, 4, 3, 2, 1})
+	series, eligible := TstCreateCreditsOnNewSeries(t, dbtx, pool, []int64{6, 5, 4, 3, 2, 1})
 	requests := []OutputRequest{
 		// This is manually ordered by outBailmentIDHash, which is the order in
 		// which they're going to be fulfilled by w.fulfillRequests().
@@ -486,10 +554,16 @@ func TestRollbackLastOutputWhenNewInputAdded(t *testing.T) {
 }
 
 func TestWithdrawalTxRemoveOutput(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{}, []int64{1, 2})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{}, []int64{1, 2})
 	outputs := tx.outputs
 	// Make sure we have created the transaction with the expected
 	// outputs.
@@ -514,10 +588,16 @@ func TestWithdrawalTxRemoveOutput(t *testing.T) {
 }
 
 func TestWithdrawalTxRemoveInput(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{1, 2}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{1, 2}, []int64{})
 	inputs := tx.inputs
 	// Make sure we have created the transaction with the expected inputs
 	checkTxInputs(t, tx, inputs)
@@ -540,11 +620,17 @@ func TestWithdrawalTxRemoveInput(t *testing.T) {
 }
 
 func TestWithdrawalTxAddChange(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
 	input, output, fee := int64(4e6), int64(3e6), int64(10)
-	tx := createWithdrawalTx(t, pool, []int64{input}, []int64{output})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{input}, []int64{output})
 	tx.calculateFee = TstConstantFee(btcutil.Amount(fee))
 
 	if !tx.addChange([]byte{}) {
@@ -566,11 +652,17 @@ func TestWithdrawalTxAddChange(t *testing.T) {
 // add a change output when there's no satoshis left after paying all
 // outputs+fees.
 func TestWithdrawalTxAddChangeNoChange(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
 	input, output, fee := int64(4e6), int64(4e6), int64(0)
-	tx := createWithdrawalTx(t, pool, []int64{input}, []int64{output})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{input}, []int64{output})
 	tx.calculateFee = TstConstantFee(btcutil.Amount(fee))
 
 	if tx.addChange([]byte{}) {
@@ -583,20 +675,32 @@ func TestWithdrawalTxAddChangeNoChange(t *testing.T) {
 }
 
 func TestWithdrawalTxToMsgTxNoInputsOrOutputsOrChange(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{}, []int64{})
 	msgtx := tx.toMsgTx()
 	compareMsgTxAndWithdrawalTxOutputs(t, msgtx, tx)
 	compareMsgTxAndWithdrawalTxInputs(t, msgtx, tx)
 }
 
 func TestWithdrawalTxToMsgTxNoInputsOrOutputsWithChange(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{}, []int64{})
 	tx.changeOutput = wire.NewTxOut(int64(1), []byte{})
 
 	msgtx := tx.toMsgTx()
@@ -606,10 +710,16 @@ func TestWithdrawalTxToMsgTxNoInputsOrOutputsWithChange(t *testing.T) {
 }
 
 func TestWithdrawalTxToMsgTxWithInputButNoOutputsWithChange(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{1}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{1}, []int64{})
 	tx.changeOutput = wire.NewTxOut(int64(1), []byte{})
 
 	msgtx := tx.toMsgTx()
@@ -619,11 +729,16 @@ func TestWithdrawalTxToMsgTxWithInputButNoOutputsWithChange(t *testing.T) {
 }
 
 func TestWithdrawalTxToMsgTxWithInputOutputsAndChange(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
-
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{1, 2, 3}, []int64{4, 5, 6})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{1, 2, 3}, []int64{4, 5, 6})
 	tx.changeOutput = wire.NewTxOut(int64(7), []byte{})
 
 	msgtx := tx.toMsgTx()
@@ -633,10 +748,16 @@ func TestWithdrawalTxToMsgTxWithInputOutputsAndChange(t *testing.T) {
 }
 
 func TestWithdrawalTxInputTotal(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{5}, []int64{})
 
 	if tx.inputTotal() != btcutil.Amount(5) {
 		t.Fatalf("Wrong total output; got %v, want %v", tx.outputTotal(), btcutil.Amount(5))
@@ -644,10 +765,16 @@ func TestWithdrawalTxInputTotal(t *testing.T) {
 }
 
 func TestWithdrawalTxOutputTotal(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{}, []int64{4})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{}, []int64{4})
 	tx.changeOutput = wire.NewTxOut(int64(1), []byte{})
 
 	if tx.outputTotal() != btcutil.Amount(4) {
@@ -656,18 +783,24 @@ func TestWithdrawalTxOutputTotal(t *testing.T) {
 }
 
 func TestWithdrawalInfoMatch(t *testing.T) {
-	tearDown, _, pool := TstCreatePool(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
 	roundID := uint32(0)
-	wi := createAndFulfillWithdrawalRequests(t, pool, roundID)
+	wi := createAndFulfillWithdrawalRequests(t, dbtx, pool, roundID)
 
 	// Use freshly created values for requests, startAddress and changeStart
 	// to simulate what would happen if we had recreated them from the
 	// serialized data in the DB.
 	requestsCopy := make([]OutputRequest, len(wi.requests))
 	copy(requestsCopy, wi.requests)
-	startAddr := TstNewWithdrawalAddress(t, pool, wi.startAddress.seriesID, wi.startAddress.branch,
+	startAddr := TstNewWithdrawalAddress(t, dbtx, pool, wi.startAddress.seriesID, wi.startAddress.branch,
 		wi.startAddress.index)
 	changeStart := TstNewChangeAddress(t, pool, wi.changeStart.seriesID, wi.changeStart.index)
 
@@ -708,7 +841,7 @@ func TestWithdrawalInfoMatch(t *testing.T) {
 	}
 
 	// It should not match when startAddress is not equal.
-	diffStartAddr := TstNewWithdrawalAddress(t, pool, startAddr.seriesID, startAddr.branch+1,
+	diffStartAddr := TstNewWithdrawalAddress(t, dbtx, pool, startAddr.seriesID, startAddr.branch+1,
 		startAddr.index)
 	matches = wi.match(requestsCopy, *diffStartAddr, wi.lastSeriesID, *changeStart,
 		wi.dustThreshold)
@@ -726,29 +859,33 @@ func TestWithdrawalInfoMatch(t *testing.T) {
 }
 
 func TestGetWithdrawalStatus(t *testing.T) {
-	tearDown, _, pool := TstCreatePool(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns, addrmgrNs := TstRWNamespaces(dbtx)
+
 	roundID := uint32(0)
-	wi := createAndFulfillWithdrawalRequests(t, pool, roundID)
+	wi := createAndFulfillWithdrawalRequests(t, dbtx, pool, roundID)
 
 	serialized, err := serializeWithdrawal(wi.requests, wi.startAddress, wi.lastSeriesID,
 		wi.changeStart, wi.dustThreshold, wi.status)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = pool.namespace.Update(
-		func(tx walletdb.Tx) error {
-			return putWithdrawal(tx, pool.ID, roundID, serialized)
-		})
+	err = putWithdrawal(ns, pool.ID, roundID, serialized)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Here we should get a WithdrawalStatus that matches wi.status.
 	var status *WithdrawalStatus
-	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
-		status, err = getWithdrawalStatus(pool, roundID, wi.requests, wi.startAddress,
+	TstRunWithManagerUnlocked(t, pool.Manager(), addrmgrNs, func() {
+		status, err = getWithdrawalStatus(pool, ns, addrmgrNs, roundID, wi.requests, wi.startAddress,
 			wi.lastSeriesID, wi.changeStart, wi.dustThreshold)
 	})
 	if err != nil {
@@ -759,8 +896,8 @@ func TestGetWithdrawalStatus(t *testing.T) {
 	// Here we should get a nil WithdrawalStatus because the parameters are not
 	// identical to those of the stored WithdrawalStatus with this roundID.
 	dustThreshold := wi.dustThreshold + 1
-	TstRunWithManagerUnlocked(t, pool.Manager(), func() {
-		status, err = getWithdrawalStatus(pool, roundID, wi.requests, wi.startAddress,
+	TstRunWithManagerUnlocked(t, pool.Manager(), addrmgrNs, func() {
+		status, err = getWithdrawalStatus(pool, ns, addrmgrNs, roundID, wi.requests, wi.startAddress,
 			wi.lastSeriesID, wi.changeStart, dustThreshold)
 	})
 	if err != nil {
@@ -772,12 +909,19 @@ func TestGetWithdrawalStatus(t *testing.T) {
 }
 
 func TestSignMultiSigUTXO(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
 
 	// Create a new tx with a single input that we're going to sign.
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{4e6})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{4e6}, []int64{4e6})
 	sigs, err := getRawSigs([]*withdrawalTx{tx})
 	if err != nil {
 		t.Fatal(err)
@@ -788,68 +932,96 @@ func TestSignMultiSigUTXO(t *testing.T) {
 
 	idx := 0 // The index of the tx input we're going to sign.
 	pkScript := tx.inputs[idx].PkScript
-	TstRunWithManagerUnlocked(t, mgr, func() {
-		if err = signMultiSigUTXO(mgr, msgtx, idx, pkScript, txSigs[idx]); err != nil {
+	TstRunWithManagerUnlocked(t, mgr, addrmgrNs, func() {
+		if err = signMultiSigUTXO(mgr, addrmgrNs, msgtx, idx, pkScript, txSigs[idx]); err != nil {
 			t.Fatal(err)
 		}
 	})
 }
 
 func TestSignMultiSigUTXOUnparseablePkScript(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
+
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{4e6}, []int64{})
 	msgtx := tx.toMsgTx()
 
 	unparseablePkScript := []byte{0x01}
-	err := signMultiSigUTXO(mgr, msgtx, 0, unparseablePkScript, []RawSig{{}})
+	err = signMultiSigUTXO(mgr, addrmgrNs, msgtx, 0, unparseablePkScript, []RawSig{{}})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestSignMultiSigUTXOPkScriptNotP2SH(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
+
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{4e6}, []int64{})
 	addr, _ := btcutil.DecodeAddress("1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX", mgr.ChainParams())
 	pubKeyHashPkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressPubKeyHash))
 	msgtx := tx.toMsgTx()
 
-	err := signMultiSigUTXO(mgr, msgtx, 0, pubKeyHashPkScript, []RawSig{{}})
+	err = signMultiSigUTXO(mgr, addrmgrNs, msgtx, 0, pubKeyHashPkScript, []RawSig{{}})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestSignMultiSigUTXORedeemScriptNotFound(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
+
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{4e6}, []int64{})
 	// This is a P2SH address for which the addr manager doesn't have the redeem
 	// script.
 	addr, _ := btcutil.DecodeAddress("3Hb4xcebcKg4DiETJfwjh8sF4uDw9rqtVC", mgr.ChainParams())
-	if _, err := mgr.Address(addr); err == nil {
+	if _, err := mgr.Address(addrmgrNs, addr); err == nil {
 		t.Fatalf("Address %s found in manager when it shouldn't", addr)
 	}
 	msgtx := tx.toMsgTx()
 
 	pkScript, _ := txscript.PayToAddrScript(addr.(*btcutil.AddressScriptHash))
-	err := signMultiSigUTXO(mgr, msgtx, 0, pkScript, []RawSig{{}})
+	err = signMultiSigUTXO(mgr, addrmgrNs, msgtx, 0, pkScript, []RawSig{{}})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestSignMultiSigUTXONotEnoughSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
+
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{4e6}, []int64{})
 	sigs, err := getRawSigs([]*withdrawalTx{tx})
 	if err != nil {
 		t.Fatal(err)
@@ -862,36 +1034,49 @@ func TestSignMultiSigUTXONotEnoughSigs(t *testing.T) {
 	reqSigs := tx.inputs[idx].addr.series().TstGetReqSigs()
 	txInSigs := txSigs[idx][:reqSigs-1]
 	pkScript := tx.inputs[idx].PkScript
-	TstRunWithManagerUnlocked(t, mgr, func() {
-		err = signMultiSigUTXO(mgr, msgtx, idx, pkScript, txInSigs)
+	TstRunWithManagerUnlocked(t, mgr, addrmgrNs, func() {
+		err = signMultiSigUTXO(mgr, addrmgrNs, msgtx, idx, pkScript, txInSigs)
 	})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestSignMultiSigUTXOWrongRawSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
+
 	mgr := pool.Manager()
-	tx := createWithdrawalTx(t, pool, []int64{4e6}, []int64{})
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{4e6}, []int64{})
 	sigs := []RawSig{{0x00}, {0x01}}
 
 	idx := 0 // The index of the tx input we're going to sign.
 	pkScript := tx.inputs[idx].PkScript
-	var err error
-	TstRunWithManagerUnlocked(t, mgr, func() {
-		err = signMultiSigUTXO(mgr, tx.toMsgTx(), idx, pkScript, sigs)
+	TstRunWithManagerUnlocked(t, mgr, addrmgrNs, func() {
+		err = signMultiSigUTXO(mgr, addrmgrNs, tx.toMsgTx(), idx, pkScript, sigs)
 	})
 
 	TstCheckError(t, "", err, ErrTxSigning)
 }
 
 func TestGetRawSigs(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{5e6, 4e6}, []int64{})
 
 	sigs, err := getRawSigs([]*withdrawalTx{tx})
 	if err != nil {
@@ -908,14 +1093,20 @@ func TestGetRawSigs(t *testing.T) {
 	// Since we have all the necessary signatures (m-of-n), we construct the
 	// sigsnature scripts and execute them to make sure the raw signatures are
 	// valid.
-	signTxAndValidate(t, pool.Manager(), msgtx, txSigs, tx.inputs)
+	signTxAndValidate(t, pool.Manager(), addrmgrNs, msgtx, txSigs, tx.inputs)
 }
 
 func TestGetRawSigsOnlyOnePrivKeyAvailable(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{5e6, 4e6}, []int64{})
 	// Remove all private keys but the first one from the credit's series.
 	series := tx.inputs[0].addr.series()
 	for i := range series.privateKeys[1:] {
@@ -936,29 +1127,41 @@ func TestGetRawSigsOnlyOnePrivKeyAvailable(t *testing.T) {
 }
 
 func TestGetRawSigsUnparseableRedeemScript(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{5e6, 4e6}, []int64{})
 	// Change the redeem script for one of our tx inputs, to force an error in
 	// getRawSigs().
 	tx.inputs[0].addr.script = []byte{0x01}
 
-	_, err := getRawSigs([]*withdrawalTx{tx})
+	_, err = getRawSigs([]*withdrawalTx{tx})
 
 	TstCheckError(t, "", err, ErrRawSigning)
 }
 
 func TestGetRawSigsInvalidAddrBranch(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5e6, 4e6}, []int64{})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{5e6, 4e6}, []int64{})
 	// Change the branch of our input's address to an invalid value, to force
 	// an error in getRawSigs().
 	tx.inputs[0].addr.branch = Branch(999)
 
-	_, err := getRawSigs([]*withdrawalTx{tx})
+	_, err = getRawSigs([]*withdrawalTx{tx})
 
 	TstCheckError(t, "", err, ErrInvalidBranch)
 }
@@ -982,10 +1185,16 @@ func TestOutBailmentIDSort(t *testing.T) {
 }
 
 func TestTxTooBig(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{5}, []int64{1})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{5}, []int64{1})
 
 	tx.calculateSize = func() int { return txMaxSize - 1 }
 	if tx.isTooBig() {
@@ -1008,10 +1217,17 @@ func TestTxTooBig(t *testing.T) {
 }
 
 func TestTxSizeCalculation(t *testing.T) {
-	tearDown, pool, _ := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool := TstCreatePool(t)
 	defer tearDown()
 
-	tx := createWithdrawalTx(t, pool, []int64{1, 5}, []int64{2})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	_, addrmgrNs := TstRWNamespaces(dbtx)
+
+	tx := createWithdrawalTx(t, dbtx, pool, []int64{1, 5}, []int64{2})
 
 	size := tx.calculateSize()
 
@@ -1027,7 +1243,7 @@ func TestTxSizeCalculation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signTxAndValidate(t, pool.Manager(), msgtx, sigs[tx.ntxid()], tx.inputs)
+	signTxAndValidate(t, pool.Manager(), addrmgrNs, msgtx, sigs[tx.ntxid()], tx.inputs)
 
 	// ECDSA signatures have variable length (71-73 bytes) but in
 	// calculateSize() we use a dummy signature for the worst-case scenario (73
@@ -1080,16 +1296,23 @@ func TestTxFeeEstimationForLargeTx(t *testing.T) {
 }
 
 func TestStoreTransactionsWithoutChangeOutput(t *testing.T) {
-	tearDown, pool, store := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	wtx := createWithdrawalTxWithStoreCredits(t, store, pool, []int64{4e6}, []int64{3e6})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	txmgrNs := dbtx.ReadWriteBucket(txmgrNamespaceKey)
+
+	wtx := createWithdrawalTxWithStoreCredits(t, dbtx, store, pool, []int64{4e6}, []int64{3e6})
 	tx := &changeAwareTx{MsgTx: wtx.toMsgTx(), changeIdx: int32(-1)}
-	if err := storeTransactions(store, []*changeAwareTx{tx}); err != nil {
+	if err := storeTransactions(store, txmgrNs, []*changeAwareTx{tx}); err != nil {
 		t.Fatal(err)
 	}
 
-	credits, err := store.UnspentOutputs()
+	credits, err := store.UnspentOutputs(txmgrNs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1099,20 +1322,27 @@ func TestStoreTransactionsWithoutChangeOutput(t *testing.T) {
 }
 
 func TestStoreTransactionsWithChangeOutput(t *testing.T) {
-	tearDown, pool, store := TstCreatePoolAndTxStore(t)
+	tearDown, db, pool, store := TstCreatePoolAndTxStore(t)
 	defer tearDown()
 
-	wtx := createWithdrawalTxWithStoreCredits(t, store, pool, []int64{5e6}, []int64{1e6, 1e6})
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	txmgrNs := dbtx.ReadWriteBucket(txmgrNamespaceKey)
+
+	wtx := createWithdrawalTxWithStoreCredits(t, dbtx, store, pool, []int64{5e6}, []int64{1e6, 1e6})
 	wtx.changeOutput = wire.NewTxOut(int64(3e6), []byte{})
 	msgtx := wtx.toMsgTx()
 	tx := &changeAwareTx{MsgTx: msgtx, changeIdx: int32(len(msgtx.TxOut) - 1)}
 
-	if err := storeTransactions(store, []*changeAwareTx{tx}); err != nil {
+	if err := storeTransactions(store, txmgrNs, []*changeAwareTx{tx}); err != nil {
 		t.Fatal(err)
 	}
 
 	hash := msgtx.TxHash()
-	txDetails, err := store.TxDetails(&hash)
+	txDetails, err := store.TxDetails(txmgrNs, &hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1139,7 +1369,7 @@ func TestStoreTransactionsWithChangeOutput(t *testing.T) {
 		t.Fatalf("Unexpected input amount; got %v, want %v", inputTotal, btcutil.Amount(5e6))
 	}
 
-	credits, err := store.UnspentOutputs()
+	credits, err := store.UnspentOutputs(txmgrNs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1156,7 +1386,7 @@ func TestStoreTransactionsWithChangeOutput(t *testing.T) {
 // createWithdrawalTxWithStoreCredits creates a new Credit in the given store
 // for each entry in inputAmounts, and uses them to construct a withdrawalTx
 // with one output for every entry in outputAmounts.
-func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool *Pool,
+func createWithdrawalTxWithStoreCredits(t *testing.T, dbtx walletdb.ReadWriteTx, store *wtxmgr.Store, pool *Pool,
 	inputAmounts []int64, outputAmounts []int64) *withdrawalTx {
 	masters := []*hdkeychain.ExtendedKey{
 		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
@@ -1164,10 +1394,10 @@ func createWithdrawalTxWithStoreCredits(t *testing.T, store *wtxmgr.Store, pool 
 		TstCreateMasterKey(t, bytes.Repeat(uint32ToBytes(getUniqueID()), 4)),
 	}
 	def := TstCreateSeriesDef(t, pool, 2, masters)
-	TstCreateSeries(t, pool, []TstSeriesDef{def})
+	TstCreateSeries(t, dbtx, pool, []TstSeriesDef{def})
 	net := pool.Manager().ChainParams()
 	tx := newWithdrawalTx(defaultTxOptions)
-	for _, c := range TstCreateSeriesCreditsOnStore(t, pool, def.SeriesID, inputAmounts, store) {
+	for _, c := range TstCreateSeriesCreditsOnStore(t, dbtx, pool, def.SeriesID, inputAmounts, store) {
 		tx.addInput(c)
 	}
 	for i, amount := range outputAmounts {
@@ -1252,12 +1482,12 @@ func checkTxInputs(t *testing.T, tx *withdrawalTx, inputs []credit) {
 // signTxAndValidate will construct the signature script for each input of the given
 // transaction (using the given raw signatures and the pkScripts from credits) and execute
 // those scripts to validate them.
-func signTxAndValidate(t *testing.T, mgr *waddrmgr.Manager, tx *wire.MsgTx, txSigs TxSigs,
+func signTxAndValidate(t *testing.T, mgr *waddrmgr.Manager, addrmgrNs walletdb.ReadBucket, tx *wire.MsgTx, txSigs TxSigs,
 	credits []credit) {
 	for i := range tx.TxIn {
 		pkScript := credits[i].PkScript
-		TstRunWithManagerUnlocked(t, mgr, func() {
-			if err := signMultiSigUTXO(mgr, tx, i, pkScript, txSigs[i]); err != nil {
+		TstRunWithManagerUnlocked(t, mgr, addrmgrNs, func() {
+			if err := signMultiSigUTXO(mgr, addrmgrNs, tx, i, pkScript, txSigs[i]); err != nil {
 				t.Fatal(err)
 			}
 		})

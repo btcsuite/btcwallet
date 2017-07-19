@@ -12,6 +12,7 @@ import (
 
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 func init() {
@@ -39,8 +40,8 @@ func TstCheckError(t *testing.T, testName string, gotErr error, wantErrCode Erro
 
 // TstRunWithManagerUnlocked calls the given callback with the manager unlocked,
 // and locks it again before returning.
-func TstRunWithManagerUnlocked(t *testing.T, mgr *waddrmgr.Manager, callback func()) {
-	if err := mgr.Unlock(privPassphrase); err != nil {
+func TstRunWithManagerUnlocked(t *testing.T, mgr *waddrmgr.Manager, addrmgrNs walletdb.ReadBucket, callback func()) {
+	if err := mgr.Unlock(addrmgrNs, privPassphrase); err != nil {
 		t.Fatal(err)
 	}
 	defer mgr.Lock()

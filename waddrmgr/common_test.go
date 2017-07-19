@@ -184,43 +184,27 @@ func hexToBytes(origHex string) []byte {
 	return buf
 }
 
-// createDbNamespace creates a new wallet database at the provided path and
-// returns it along with the address manager namespace.
-func createDbNamespace(dbPath string) (walletdb.DB, walletdb.Namespace, error) {
-	db, err := walletdb.Create("bdb", dbPath)
+func emptyDB(t *testing.T) (tearDownFunc func(), db walletdb.DB) {
+	dirName, err := ioutil.TempDir("", "mgrtest")
 	if err != nil {
-		return nil, nil, err
+		t.Fatalf("Failed to create db temp dir: %v", err)
 	}
-
-	namespace, err := db.Namespace(waddrmgrNamespaceKey)
+	dbPath := filepath.Join(dirName, "mgrtest.db")
+	db, err = walletdb.Create("bdb", dbPath)
 	if err != nil {
+		_ = os.RemoveAll(dirName)
+		t.Fatalf("createDbNamespace: unexpected error: %v", err)
+	}
+	tearDownFunc = func() {
 		db.Close()
-		return nil, nil, err
+		_ = os.RemoveAll(dirName)
 	}
-
-	return db, namespace, nil
-}
-
-// openDbNamespace opens wallet database at the provided path and returns it
-// along with the address manager namespace.
-func openDbNamespace(dbPath string) (walletdb.DB, walletdb.Namespace, error) {
-	db, err := walletdb.Open("bdb", dbPath)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	namespace, err := db.Namespace(waddrmgrNamespaceKey)
-	if err != nil {
-		db.Close()
-		return nil, nil, err
-	}
-
-	return db, namespace, nil
+	return
 }
 
 // setupManager creates a new address manager and returns a teardown function
 // that should be invoked to ensure it is closed and removed upon completion.
-func setupManager(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
+func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *waddrmgr.Manager) {
 	t.Parallel()
 
 	// Create a new manager in a temp directory.
@@ -229,17 +213,24 @@ func setupManager(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
 		t.Fatalf("Failed to create db temp dir: %v", err)
 	}
 	dbPath := filepath.Join(dirName, "mgrtest.db")
-	db, namespace, err := createDbNamespace(dbPath)
+	db, err = walletdb.Create("bdb", dbPath)
 	if err != nil {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)
 	}
-	err = waddrmgr.Create(namespace, seed, pubPassphrase,
-		privPassphrase, &chaincfg.MainNetParams, fastScrypt)
-	if err == nil {
-		mgr, err = waddrmgr.Open(namespace, pubPassphrase,
-			&chaincfg.MainNetParams, nil)
-	}
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = waddrmgr.Create(ns, seed, pubPassphrase,
+			privPassphrase, &chaincfg.MainNetParams, fastScrypt)
+		if err != nil {
+			return err
+		}
+		mgr, err = waddrmgr.Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		return err
+	})
 	if err != nil {
 		db.Close()
 		_ = os.RemoveAll(dirName)
@@ -250,5 +241,5 @@ func setupManager(t *testing.T) (tearDownFunc func(), mgr *waddrmgr.Manager) {
 		db.Close()
 		_ = os.RemoveAll(dirName)
 	}
-	return tearDownFunc, mgr
+	return tearDownFunc, db, mgr
 }

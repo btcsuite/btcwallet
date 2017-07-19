@@ -40,13 +40,13 @@ var (
 	fastScrypt     = &waddrmgr.ScryptOptions{N: 16, R: 8, P: 1}
 )
 
-func createWaddrmgr(ns walletdb.Namespace, params *chaincfg.Params) (*waddrmgr.Manager, error) {
+func createWaddrmgr(ns walletdb.ReadWriteBucket, params *chaincfg.Params) (*waddrmgr.Manager, error) {
 	err := waddrmgr.Create(ns, seed, pubPassphrase, privPassphrase, params,
 		fastScrypt)
 	if err != nil {
 		return nil, err
 	}
-	return waddrmgr.Open(ns, pubPassphrase, params, nil)
+	return waddrmgr.Open(ns, pubPassphrase, params)
 }
 
 func ExampleCreate() {
@@ -59,8 +59,15 @@ func ExampleCreate() {
 	}
 	defer dbTearDown()
 
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer dbtx.Commit()
+
 	// Create a new walletdb namespace for the address manager.
-	mgrNamespace, err := db.Namespace([]byte("waddrmgr"))
+	mgrNamespace, err := dbtx.CreateTopLevelBucket([]byte("waddrmgr"))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -74,7 +81,7 @@ func ExampleCreate() {
 	}
 
 	// Create a walletdb namespace for votingpools.
-	vpNamespace, err := db.Namespace([]byte("votingpool"))
+	vpNamespace, err := dbtx.CreateTopLevelBucket([]byte("votingpool"))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -96,41 +103,43 @@ func ExampleCreate() {
 func Example_depositAddress() {
 	// Create the address manager and votingpool DB namespace. See the example
 	// for the Create() function for more info on how this is done.
-	mgr, vpNamespace, tearDownFunc, err := exampleCreateMgrAndDBNamespace()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer tearDownFunc()
+	teardown, db, mgr := exampleCreateDBAndMgr()
+	defer teardown()
 
-	// Create the voting pool.
-	pool, err := votingpool.Create(vpNamespace, mgr, []byte{0x00})
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := votingpoolNamespace(tx)
 
-	// Create a 2-of-3 series.
-	seriesID := uint32(1)
-	requiredSignatures := uint32(2)
-	pubKeys := []string{
-		"xpub661MyMwAqRbcFDDrR5jY7LqsRioFDwg3cLjc7tML3RRcfYyhXqqgCH5SqMSQdpQ1Xh8EtVwcfm8psD8zXKPcRaCVSY4GCqbb3aMEs27GitE",
-		"xpub661MyMwAqRbcGsxyD8hTmJFtpmwoZhy4NBBVxzvFU8tDXD2ME49A6JjQCYgbpSUpHGP1q4S2S1Pxv2EqTjwfERS5pc9Q2yeLkPFzSgRpjs9",
-		"xpub661MyMwAqRbcEbc4uYVXvQQpH9L3YuZLZ1gxCmj59yAhNy33vXxbXadmRpx5YZEupNSqWRrR7PqU6duS2FiVCGEiugBEa5zuEAjsyLJjKCh",
-	}
-	err = pool.CreateSeries(votingpool.CurrentVersion, seriesID, requiredSignatures, pubKeys)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+		// Create the voting pool.
+		pool, err := votingpool.Create(ns, mgr, []byte{0x00})
+		if err != nil {
+			return err
+		}
 
-	// Create a deposit address.
-	addr, err := pool.DepositScriptAddress(seriesID, votingpool.Branch(0), votingpool.Index(1))
+		// Create a 2-of-3 series.
+		seriesID := uint32(1)
+		requiredSignatures := uint32(2)
+		pubKeys := []string{
+			"xpub661MyMwAqRbcFDDrR5jY7LqsRioFDwg3cLjc7tML3RRcfYyhXqqgCH5SqMSQdpQ1Xh8EtVwcfm8psD8zXKPcRaCVSY4GCqbb3aMEs27GitE",
+			"xpub661MyMwAqRbcGsxyD8hTmJFtpmwoZhy4NBBVxzvFU8tDXD2ME49A6JjQCYgbpSUpHGP1q4S2S1Pxv2EqTjwfERS5pc9Q2yeLkPFzSgRpjs9",
+			"xpub661MyMwAqRbcEbc4uYVXvQQpH9L3YuZLZ1gxCmj59yAhNy33vXxbXadmRpx5YZEupNSqWRrR7PqU6duS2FiVCGEiugBEa5zuEAjsyLJjKCh",
+		}
+		err = pool.CreateSeries(ns, votingpool.CurrentVersion, seriesID, requiredSignatures, pubKeys)
+		if err != nil {
+			return err
+		}
+
+		// Create a deposit address.
+		addr, err := pool.DepositScriptAddress(seriesID, votingpool.Branch(0), votingpool.Index(1))
+		if err != nil {
+			return err
+		}
+		fmt.Println("Generated deposit address:", addr.EncodeAddress())
+		return nil
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println("Generated deposit address:", addr.EncodeAddress())
 
 	// Output:
 	// Generated deposit address: 3QTzpc9d3tTbNLJLB7xwt87nWM38boAhAw
@@ -141,30 +150,27 @@ func Example_depositAddress() {
 func Example_empowerSeries() {
 	// Create the address manager and votingpool DB namespace. See the example
 	// for the Create() function for more info on how this is done.
-	mgr, vpNamespace, tearDownFunc, err := exampleCreateMgrAndDBNamespace()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer tearDownFunc()
+	teardown, db, mgr := exampleCreateDBAndMgr()
+	defer teardown()
 
 	// Create a pool and a series. See the DepositAddress example for more info
 	// on how this is done.
-	pool, seriesID, err := exampleCreatePoolAndSeries(mgr, vpNamespace)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	pool, seriesID := exampleCreatePoolAndSeries(db, mgr)
 
-	// Now empower the series with one of its private keys. Notice that in order
-	// to do that we need to unlock the address manager.
-	if err := mgr.Unlock(privPassphrase); err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer mgr.Lock()
-	privKey := "xprv9s21ZrQH143K2j9PK4CXkCu8sgxkpUxCF7p1KVwiV5tdnkeYzJXReUkxz5iB2FUzTXC1L15abCDG4RMxSYT5zhm67uvsnLYxuDhZfoFcB6a"
-	err = pool.EmpowerSeries(seriesID, privKey)
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := votingpoolNamespace(tx)
+		addrmgrNs := addrmgrNamespace(tx)
+
+		// Now empower the series with one of its private keys. Notice that in order
+		// to do that we need to unlock the address manager.
+		err := mgr.Unlock(addrmgrNs, privPassphrase)
+		if err != nil {
+			return err
+		}
+		defer mgr.Lock()
+		privKey := "xprv9s21ZrQH143K2j9PK4CXkCu8sgxkpUxCF7p1KVwiV5tdnkeYzJXReUkxz5iB2FUzTXC1L15abCDG4RMxSYT5zhm67uvsnLYxuDhZfoFcB6a"
+		return pool.EmpowerSeries(ns, seriesID, privKey)
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -178,69 +184,66 @@ func Example_empowerSeries() {
 func Example_startWithdrawal() {
 	// Create the address manager and votingpool DB namespace. See the example
 	// for the Create() function for more info on how this is done.
-	mgr, vpNamespace, tearDownFunc, err := exampleCreateMgrAndDBNamespace()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer tearDownFunc()
+	teardown, db, mgr := exampleCreateDBAndMgr()
+	defer teardown()
 
 	// Create a pool and a series. See the DepositAddress example for more info
 	// on how this is done.
-	pool, seriesID, err := exampleCreatePoolAndSeries(mgr, vpNamespace)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
+	pool, seriesID := exampleCreatePoolAndSeries(db, mgr)
 
-	// Unlock the manager
-	if err := mgr.Unlock(privPassphrase); err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer mgr.Lock()
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := votingpoolNamespace(tx)
+		addrmgrNs := addrmgrNamespace(tx)
+		txmgrNs := txmgrNamespace(tx)
 
-	addr, _ := btcutil.DecodeAddress("1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX", mgr.ChainParams())
-	pkScript, _ := txscript.PayToAddrScript(addr)
-	requests := []votingpool.OutputRequest{
-		{
-			PkScript:    pkScript,
-			Address:     addr,
-			Amount:      1e6,
-			Server:      "server-id",
-			Transaction: 123},
-	}
-	changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(0))
+		// Create the transaction store for later use.
+		txstore := exampleCreateTxStore(txmgrNs)
+
+		// Unlock the manager
+		err := mgr.Unlock(addrmgrNs, privPassphrase)
+		if err != nil {
+			return err
+		}
+		defer mgr.Lock()
+
+		addr, _ := btcutil.DecodeAddress("1MirQ9bwyQcGVJPwKUgapu5ouK2E2Ey4gX", mgr.ChainParams())
+		pkScript, _ := txscript.PayToAddrScript(addr)
+		requests := []votingpool.OutputRequest{
+			{
+				PkScript:    pkScript,
+				Address:     addr,
+				Amount:      1e6,
+				Server:      "server-id",
+				Transaction: 123,
+			},
+		}
+		changeStart, err := pool.ChangeAddress(seriesID, votingpool.Index(0))
+		if err != nil {
+			return err
+		}
+		// This is only needed because we have not used any deposit addresses from
+		// the series, and we cannot create a WithdrawalAddress for an unused
+		// branch/idx pair.
+		err = pool.EnsureUsedAddr(ns, addrmgrNs, seriesID, votingpool.Branch(1), votingpool.Index(0))
+		if err != nil {
+			return err
+		}
+		startAddr, err := pool.WithdrawalAddress(ns, addrmgrNs, seriesID, votingpool.Branch(1), votingpool.Index(0))
+		if err != nil {
+			return err
+		}
+		lastSeriesID := seriesID
+		dustThreshold := btcutil.Amount(1e4)
+		currentBlock := int32(19432)
+		roundID := uint32(0)
+		_, err = pool.StartWithdrawal(ns, addrmgrNs,
+			roundID, requests, *startAddr, lastSeriesID, *changeStart, txstore, txmgrNs, currentBlock,
+			dustThreshold)
+		return err
+	})
 	if err != nil {
 		fmt.Println(err)
 		return
-	}
-	// This is only needed because we have not used any deposit addresses from
-	// the series, and we cannot create a WithdrawalAddress for an unused
-	// branch/idx pair.
-	if err = pool.EnsureUsedAddr(seriesID, votingpool.Branch(1), votingpool.Index(0)); err != nil {
-		fmt.Println(err)
-		return
-	}
-	startAddr, err := pool.WithdrawalAddress(seriesID, votingpool.Branch(1), votingpool.Index(0))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	lastSeriesID := seriesID
-	dustThreshold := btcutil.Amount(1e4)
-	currentBlock := int32(19432)
-	roundID := uint32(0)
-	txstore, tearDownFunc, err := exampleCreateTxStore()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	_, err = pool.StartWithdrawal(
-		roundID, requests, *startAddr, lastSeriesID, *changeStart, txstore, currentBlock,
-		dustThreshold)
-	if err != nil {
-		fmt.Println(err)
 	}
 
 	// Output:
@@ -263,86 +266,100 @@ func createWalletDB() (walletdb.DB, func(), error) {
 	return db, dbTearDown, nil
 }
 
-func exampleCreateMgrAndDBNamespace() (*waddrmgr.Manager, walletdb.Namespace, func(), error) {
+var (
+	addrmgrNamespaceKey    = []byte("addrmgr")
+	txmgrNamespaceKey      = []byte("txmgr")
+	votingpoolNamespaceKey = []byte("votingpool")
+)
+
+func addrmgrNamespace(dbtx walletdb.ReadWriteTx) walletdb.ReadWriteBucket {
+	return dbtx.ReadWriteBucket(addrmgrNamespaceKey)
+}
+
+func txmgrNamespace(dbtx walletdb.ReadWriteTx) walletdb.ReadWriteBucket {
+	return dbtx.ReadWriteBucket(txmgrNamespaceKey)
+}
+
+func votingpoolNamespace(dbtx walletdb.ReadWriteTx) walletdb.ReadWriteBucket {
+	return dbtx.ReadWriteBucket(votingpoolNamespaceKey)
+}
+
+func exampleCreateDBAndMgr() (teardown func(), db walletdb.DB, mgr *waddrmgr.Manager) {
 	db, dbTearDown, err := createWalletDB()
 	if err != nil {
-		return nil, nil, nil, err
+		dbTearDown()
+		panic(err)
 	}
 
 	// Create a new walletdb namespace for the address manager.
-	mgrNamespace, err := db.Namespace([]byte("waddrmgr"))
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs, err := tx.CreateTopLevelBucket(addrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		_, err = tx.CreateTopLevelBucket(votingpoolNamespaceKey)
+		if err != nil {
+			return err
+		}
+		_, err = tx.CreateTopLevelBucket(txmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		// Create the address manager
+		mgr, err = createWaddrmgr(addrmgrNs, &chaincfg.MainNetParams)
+		return err
+	})
 	if err != nil {
 		dbTearDown()
-		return nil, nil, nil, err
+		panic(err)
 	}
 
-	// Create the address manager
-	mgr, err := createWaddrmgr(mgrNamespace, &chaincfg.MainNetParams)
-	if err != nil {
-		dbTearDown()
-		return nil, nil, nil, err
-	}
-
-	tearDownFunc := func() {
+	teardown = func() {
 		mgr.Close()
 		dbTearDown()
 	}
 
-	// Create a walletdb namespace for votingpools.
-	vpNamespace, err := db.Namespace([]byte("votingpool"))
-	if err != nil {
-		tearDownFunc()
-		return nil, nil, nil, err
-	}
-	return mgr, vpNamespace, tearDownFunc, nil
+	return teardown, db, mgr
 }
 
-func exampleCreatePoolAndSeries(mgr *waddrmgr.Manager, vpNamespace walletdb.Namespace) (
-	*votingpool.Pool, uint32, error) {
-	pool, err := votingpool.Create(vpNamespace, mgr, []byte{0x00})
+func exampleCreatePoolAndSeries(db walletdb.DB, mgr *waddrmgr.Manager) (pool *votingpool.Pool, seriesID uint32) {
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := votingpoolNamespace(tx)
+		var err error
+		pool, err = votingpool.Create(ns, mgr, []byte{0x00})
+		if err != nil {
+			return err
+		}
+
+		// Create a 2-of-3 series.
+		seriesID = uint32(1)
+		requiredSignatures := uint32(2)
+		pubKeys := []string{
+			"xpub661MyMwAqRbcFDDrR5jY7LqsRioFDwg3cLjc7tML3RRcfYyhXqqgCH5SqMSQdpQ1Xh8EtVwcfm8psD8zXKPcRaCVSY4GCqbb3aMEs27GitE",
+			"xpub661MyMwAqRbcGsxyD8hTmJFtpmwoZhy4NBBVxzvFU8tDXD2ME49A6JjQCYgbpSUpHGP1q4S2S1Pxv2EqTjwfERS5pc9Q2yeLkPFzSgRpjs9",
+			"xpub661MyMwAqRbcEbc4uYVXvQQpH9L3YuZLZ1gxCmj59yAhNy33vXxbXadmRpx5YZEupNSqWRrR7PqU6duS2FiVCGEiugBEa5zuEAjsyLJjKCh",
+		}
+		err = pool.CreateSeries(ns, votingpool.CurrentVersion, seriesID, requiredSignatures, pubKeys)
+		if err != nil {
+			return err
+		}
+		return pool.ActivateSeries(ns, seriesID)
+	})
 	if err != nil {
-		return nil, 0, err
+		panic(err)
 	}
 
-	// Create a 2-of-3 series.
-	seriesID := uint32(1)
-	requiredSignatures := uint32(2)
-	pubKeys := []string{
-		"xpub661MyMwAqRbcFDDrR5jY7LqsRioFDwg3cLjc7tML3RRcfYyhXqqgCH5SqMSQdpQ1Xh8EtVwcfm8psD8zXKPcRaCVSY4GCqbb3aMEs27GitE",
-		"xpub661MyMwAqRbcGsxyD8hTmJFtpmwoZhy4NBBVxzvFU8tDXD2ME49A6JjQCYgbpSUpHGP1q4S2S1Pxv2EqTjwfERS5pc9Q2yeLkPFzSgRpjs9",
-		"xpub661MyMwAqRbcEbc4uYVXvQQpH9L3YuZLZ1gxCmj59yAhNy33vXxbXadmRpx5YZEupNSqWRrR7PqU6duS2FiVCGEiugBEa5zuEAjsyLJjKCh",
-	}
-	err = pool.CreateSeries(votingpool.CurrentVersion, seriesID, requiredSignatures, pubKeys)
-	if err != nil {
-		return nil, 0, err
-	}
-	err = pool.ActivateSeries(seriesID)
-	if err != nil {
-		return nil, 0, err
-	}
-	return pool, seriesID, nil
+	return pool, seriesID
 }
 
-func exampleCreateTxStore() (*wtxmgr.Store, func(), error) {
-	dir, err := ioutil.TempDir("", "pool_test_txstore")
+func exampleCreateTxStore(ns walletdb.ReadWriteBucket) *wtxmgr.Store {
+	err := wtxmgr.Create(ns)
 	if err != nil {
-		return nil, nil, err
+		panic(err)
 	}
-	db, err := walletdb.Create("bdb", filepath.Join(dir, "txstore.db"))
+	s, err := wtxmgr.Open(ns, &chaincfg.MainNetParams)
 	if err != nil {
-		return nil, nil, err
+		panic(err)
 	}
-	wtxmgrNamespace, err := db.Namespace([]byte("testtxstore"))
-	if err != nil {
-		return nil, nil, err
-	}
-	err = wtxmgr.Create(wtxmgrNamespace)
-	if err != nil {
-		return nil, nil, err
-	}
-	s, err := wtxmgr.Open(wtxmgrNamespace, &chaincfg.MainNetParams)
-	if err != nil {
-		return nil, nil, err
-	}
-	return s, func() { os.RemoveAll(dir) }, nil
+	return s
 }
