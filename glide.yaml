@@ -3,7 +3,7 @@ import:
 - package: github.com/boltdb/bolt
   version: ^1.3.0
 - package: github.com/roasbeef/btcd
-  version: 4d38357cee3ed3843cd81a347e1573f037e0301e
+  version: ee68739ba4ed83f244b115bec0e176f5711b3e7a
   subpackages:
   - blockchain
   - btcec
@@ -13,14 +13,12 @@ import:
   - txscript
   - wire
 - package: github.com/btcsuite/btclog
-- package: github.com/roasbeef/btcrpcclient
-  version: 9a7826550df8071460e2f5dd6ed9139dcbf260b8
 - package: github.com/roasbeef/btcutil
-  version: a259eaf2ec1b54653cdd67848a41867f280797ee
+  version: 4675c7e1e02d8fe1f40d1e40a71d31922e62e605
   subpackages:
   - hdkeychain
 - package: github.com/lightninglabs/neutrino
-  version: f0bdd0ea5a1b453e1e323bfbb454b0cecbcfe2fa
+  version: a6610537e8121fdc82c46af04e8c79b78075cd03
 - package: github.com/btcsuite/golangcrypto
   subpackages:
   - nacl/secretbox

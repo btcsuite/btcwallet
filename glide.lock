@@ -1,6 +1,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -15,10 +16,15 @@ updated: 2017-06-05T18:12:20.300008456-07:00
 hash: 8f57e2b090be9737f3c4d3157b3675ff5df4a9182928089f48c68593fdc80776
 updated: 2017-06-29T21:02:00.000000000-07:00
 >>>>>>> 249dae0... log: update to new logging API
+=======
+hash: ec2fde7c4ec4cd438d8c53646a41743440355e53bdd417192a9e9f1db49f19a2
+updated: 2017-08-24T17:24:41.5846735-07:00
+>>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
 - name: github.com/boltdb/bolt
+<<<<<<< HEAD
   version: 583e8937c61f1af6513608ccc75c97b6abdf4ff9
 <<<<<<< HEAD
 - name: github.com/btcsuite/btcd
@@ -69,6 +75,11 @@ imports:
 >>>>>>> 249dae0... log: update to new logging API
 - name: github.com/btcsuite/fastsha256
   version: 637e656429416087660c84436a2a035d69d54e2e
+=======
+  version: 2f1ce7a837dcb8da3ec595b1dac9d0632f0f99e8
+- name: github.com/btcsuite/btclog
+  version: 84c8d2346e9fc8c7b947e243b9c24e6df9fd206a
+>>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
 - name: github.com/btcsuite/go-socks
   version: 4720035b7bfd2a9bb130b1c184f8bbe41b6f0d0f
   subpackages:
@@ -94,21 +105,25 @@ imports:
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/davecgh/go-spew
-  version: 346938d642f2ec3594ed81d874461961cd0faa76
+  version: adab96458c51a58dc1783b3335dcce5461522e75
   subpackages:
   - spew
 - name: github.com/golang/protobuf
-  version: fec3b39b059c0f88fa6b20f5ed012b1aa203a8b4
+  version: ab9f9a6dab164b7d1246e0e688b0ab7b94d8553e
   subpackages:
   - proto
   - ptypes/any
 - name: github.com/jessevdk/go-flags
   version: 1679536dcc895411a9f5848d9a0250be7856448c
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
 - name: github.com/jrick/logrotate
   version: a93b200c26cbae3bb09dd0dc2c7c7fe1468a034a
   subpackages:
   - rotator
+<<<<<<< HEAD
 - name: golang.org/x/crypto
   version: 84f24dfdf3c414ed893ca1b318d0045ef5a1f607
   subpackages:
@@ -116,15 +131,17 @@ imports:
 - name: golang.org/x/net
   version: 8663ed5da4fd087c3cfb99a996e628b72e2f0948
 =======
+=======
+>>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: 4adef705d073ee1337f1fe980a282abd03e0ba68
+  version: a6610537e8121fdc82c46af04e8c79b78075cd03
   subpackages:
   - filterdb
   - headerfs
 - name: github.com/roasbeef/btcd
-  version: 34fdda7d41cc47d9456550fd1147a77db89f601a
+  version: ee68739ba4ed83f244b115bec0e176f5711b3e7a
   subpackages:
   - addrmgr
   - blockchain
@@ -135,28 +152,29 @@ imports:
   - connmgr
   - database
   - peer
+  - rpcclient
   - txscript
   - wire
-- name: github.com/jrick/logrotate
-  version: 4ed05ed86ef17d10ff99cce77481e0fcf6f2c7b0
-  subpackages:
-  - rotator
-- name: github.com/roasbeef/btcrpcclient
-  version: d0f4db8b4dad0ca3d569b804f21247c3dd96acbb
 - name: github.com/roasbeef/btcutil
-  version: a259eaf2ec1b54653cdd67848a41867f280797ee
+  version: 4675c7e1e02d8fe1f40d1e40a71d31922e62e605
   subpackages:
   - base58
+  - bech32
   - gcs
   - gcs/builder
   - hdkeychain
 - name: golang.org/x/crypto
-  version: 0fe963104e9d1877082f8fb38f816fcd97eb1d10
+  version: eb71ad9bd329b5ac0fd0148dd99bd62e8be8e035
   subpackages:
+  - ripemd160
   - ssh/terminal
 - name: golang.org/x/net
+<<<<<<< HEAD
   version: 513929065c19401a1c7b76ecd942f9f86a0c061b
 >>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
+=======
+  version: 57efc9c3d9f91fb3277f8da1cff370539c4d3dc5
+>>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
   subpackages:
   - context
   - http2
@@ -167,6 +185,7 @@ imports:
   - trace
 - name: golang.org/x/sys
 <<<<<<< HEAD
+<<<<<<< HEAD
   version: cd2c276457edda6df7fb04895d3fd6a6add42926
   subpackages:
   - unix
@@ -174,11 +193,19 @@ imports:
   version: 6353ef0f924300eea566d3438817aa4d3374817e
 =======
   version: e62c3de784db939836898e5c19ffd41bece347da
+=======
+  version: 07c182904dbd53199946ba614a412c61d3c548f5
+>>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
   subpackages:
   - unix
+  - windows
 - name: golang.org/x/text
+<<<<<<< HEAD
   version: 19e51611da83d6be54ddafce4a4af510cb3e9ea4
 >>>>>>> 4d479d4... Move spvchain into neutrino and start integration w/btcwallet
+=======
+  version: cc24f0397b10b6321b1a1322b6bd592984fdabf2
+>>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
   subpackages:
   - secure/bidirule
   - transform
