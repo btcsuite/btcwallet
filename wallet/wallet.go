@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 
@@ -287,7 +288,7 @@ func (w *Wallet) ChainSynced() bool {
 // SetChainSynced marks whether the wallet is connected to and currently in sync
 // with the latest block notified by the chain server.
 //
-// NOTE: Due to an API limitation with btcrpcclient, this may return true after
+// NOTE: Due to an API limitation with rpcclient, this may return true after
 // the client disconnected (and is attempting a reconnect).  This will be unknown
 // until the reconnect notification is received, at which point the wallet can be
 // marked out of sync again until after the next rescan completes.
@@ -493,9 +494,9 @@ func (w *Wallet) syncWithChain() error {
 	// Request notifications for connected and disconnected blocks.
 	//
 	// TODO(jrick): Either request this notification only once, or when
-	// btcrpcclient is modified to allow some notification request to not
+	// rpcclient is modified to allow some notification request to not
 	// automatically resent on reconnect, include the notifyblocks request
-	// as well.  I am leaning towards allowing off all btcrpcclient
+	// as well.  I am leaning towards allowing off all rpcclient
 	// notification re-registrations, in which case the code here should be
 	// left as is.
 	err = chainClient.NotifyBlocks()
@@ -1421,7 +1422,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 	// TODO: Fetching block heights by their hashes is inherently racy
 	// because not all block headers are saved but when they are for SPV the
 	// db can be queried directly without this.
-	var startResp, endResp btcrpcclient.FutureGetBlockVerboseResult
+	var startResp, endResp rpcclient.FutureGetBlockVerboseResult
 	if startBlock != nil {
 		if startBlock.hash == nil {
 			start = startBlock.height
@@ -1807,7 +1808,9 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32, addresses map[string]struct
 				spendable = true
 			case txscript.PubKeyTy:
 				spendable = true
-			case txscript.ScriptHashTy:
+			case txscript.WitnessV0ScriptHashTy:
+				spendable = true
+			case txscript.WitnessV0PubKeyHashTy:
 				spendable = true
 			case txscript.MultiSigTy:
 				for _, a := range addrs {

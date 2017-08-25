@@ -30,7 +30,7 @@ type Interface interface {
 
 // Notification types.  These are defined here and processed from from reading
 // a notificationChan to avoid handling these notifications directly in
-// btcrpcclient callbacks, which isn't very Go-like and doesn't allow
+// rpcclient callbacks, which isn't very Go-like and doesn't allow
 // blocking client calls.
 type (
 	// ClientConnected is a notification for when a client connection is
