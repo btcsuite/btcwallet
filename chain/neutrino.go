@@ -8,8 +8,8 @@ import (
 
 	"github.com/lightninglabs/neutrino"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcd/rpcclient"
 	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcrpcclient"
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcwallet/waddrmgr"
 	"github.com/roasbeef/btcwallet/wtxmgr"
@@ -98,7 +98,7 @@ func (s *NeutrinoClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) 
 // GetBlockHeight gets the height of a block by its hash. It serves as a
 // replacement for the use of GetBlockVerboseTxAsync for the wallet package
 // since we can't actually return a FutureGetBlockVerboseResult because the
-// underlying type is private to btcrpcclient.
+// underlying type is private to rpcclient.
 func (s *NeutrinoClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 	_, height, err := s.CS.BlockHeaders.FetchHeader(hash)
 	if err != nil {
@@ -196,7 +196,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	}
 
 	s.rescan = s.CS.NewRescan(
-		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
+		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
 			OnBlockDisconnected:      s.onBlockDisconnected,
@@ -243,7 +243,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 
 	// Rescan with just the specified addresses.
 	s.rescan = s.CS.NewRescan(
-		neutrino.NotificationHandlers(btcrpcclient.NotificationHandlers{
+		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
 			OnBlockDisconnected:      s.onBlockDisconnected,

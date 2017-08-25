@@ -12,17 +12,17 @@ import (
 
 	"golang.org/x/crypto/ssh/terminal"
 
-	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcwallet/netparams"
-	"github.com/btcsuite/btcwallet/wallet/txauthor"
-	"github.com/btcsuite/btcwallet/wallet/txrules"
-	"github.com/btcsuite/golangcrypto/ssh/terminal"
 	"github.com/jessevdk/go-flags"
+	"github.com/roasbeef/btcd/btcjson"
+	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcd/rpcclient"
+	"github.com/roasbeef/btcd/txscript"
+	"github.com/roasbeef/btcd/wire"
+	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcwallet/internal/cfgutil"
+	"github.com/roasbeef/btcwallet/netparams"
+	"github.com/roasbeef/btcwallet/wallet/txauthor"
+	"github.com/roasbeef/btcwallet/wallet/txrules"
 )
 
 var (
@@ -186,7 +186,7 @@ func makeInputSource(outputs []btcjson.ListUnspentResult) txauthor.InputSource {
 // makeDestinationScriptSource creates a ChangeSource which is used to receive
 // all correlated previous input value.  A non-change address is created by this
 // function.
-func makeDestinationScriptSource(rpcClient *btcrpcclient.Client, accountName string) txauthor.ChangeSource {
+func makeDestinationScriptSource(rpcClient *rpcclient.Client, accountName string) txauthor.ChangeSource {
 	return func() ([]byte, error) {
 		destinationAddress, err := rpcClient.GetNewAddress(accountName)
 		if err != nil {
@@ -214,7 +214,7 @@ func sweep() error {
 	if err != nil {
 		return errContext(err, "failed to read RPC certificate")
 	}
-	rpcClient, err := btcrpcclient.New(&btcrpcclient.ConnConfig{
+	rpcClient, err := rpcclient.New(&rpcclient.ConnConfig{
 		Host:         opts.RPCConnect,
 		User:         opts.RPCUsername,
 		Pass:         rpcPassword,

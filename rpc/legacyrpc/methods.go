@@ -19,9 +19,9 @@ import (
 	"github.com/roasbeef/btcd/btcjson"
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
+	"github.com/roasbeef/btcd/rpcclient"
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcrpcclient"
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcwallet/chain"
 	"github.com/roasbeef/btcwallet/waddrmgr"
@@ -970,7 +970,7 @@ func help(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (int
 	//
 	// This is hacky and is probably better handled by exposing help usage
 	// texts in a non-internal btcd package.
-	postClient := func() *btcrpcclient.Client {
+	postClient := func() *rpcclient.Client {
 		if chainClient == nil {
 			return nil
 		}
@@ -1649,7 +1649,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	// querying btcd with getrawtransaction. We queue up a bunch of async
 	// requests and will wait for replies after we have checked the rest of
 	// the arguments.
-	requested := make(map[wire.OutPoint]btcrpcclient.FutureGetTxOutResult)
+	requested := make(map[wire.OutPoint]rpcclient.FutureGetTxOutResult)
 	for _, txIn := range tx.TxIn {
 		// Did we get this outpoint from the arguments?
 		if _, ok := inputs[txIn.PreviousOutPoint]; ok {

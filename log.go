@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/jrick/logrotate/rotator"
+	"github.com/lightninglabs/neutrino"
 )
 
 // logWriter implements an io.Writer that outputs to both standard output and
@@ -61,7 +62,7 @@ func init() {
 	wallet.UseLogger(walletLog)
 	wtxmgr.UseLogger(txmgrLog)
 	chain.UseLogger(chainLog)
-	btcrpcclient.UseLogger(chainLog)
+	rpcclient.UseLogger(chainLog)
 	rpcserver.UseLogger(grpcLog)
 	legacyrpc.UseLogger(legacyRPCLog)
 	neutrino.UseLogger(btcnLog)
@@ -134,16 +135,15 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 		btcnLog = logger
 		neutrino.UseLogger(logger)
 	}
+
 	r, err := rotator.New(logFile, 10*1024, false, 3)
-=======
-	}
-	pr, pw := io.Pipe()
-	r, err := rotator.New(pr, logFile, 10*1024, false, 3)
->>>>>>> 249dae0... log: update to new logging API
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create file rotator: %v\n", err)
 		os.Exit(1)
 	}
+
+	pr, pw := io.Pipe()
+	go r.Run(pr)
 
 	logRotator = r
 }
