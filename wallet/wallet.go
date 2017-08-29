@@ -1927,6 +1927,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 
 	var signErrors []SignatureError
 	for i, txIn := range tx.TxIn {
+		var prevAmount int64
 		prevOutScript, ok := additionalPrevScripts[txIn.PreviousOutPoint]
 		if !ok {
 			prevHash := &txIn.PreviousOutPoint.Hash
@@ -2024,7 +2025,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 		// Either it was already signed or we just signed it.
 		// Find out if it is completely satisfied or still needs more.
 		vm, err := txscript.NewEngine(prevOutScript, tx, i,
-			txscript.StandardVerifyFlags, nil)
+			txscript.StandardVerifyFlags, nil, nil, prevAmount)
 		if err == nil {
 			err = vm.Execute()
 		}

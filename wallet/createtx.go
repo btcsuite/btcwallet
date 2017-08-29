@@ -34,16 +34,20 @@ func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 	// returned input source and reused across multiple calls.
 	currentTotal := btcutil.Amount(0)
 	currentInputs := make([]*wire.TxIn, 0, len(eligible))
-	currentScripts := make([][]byte, 0, len(eligible))
+	currentScripts := make([]*wire.TxOut, 0, len(eligible))
 
-	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn, [][]byte, error) {
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn, []*wire.TxOut, error) {
 		for currentTotal < target && len(eligible) != 0 {
 			nextCredit := &eligible[0]
 			eligible = eligible[1:]
-			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil)
+			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil, nil)
 			currentTotal += nextCredit.Amount
 			currentInputs = append(currentInputs, nextInput)
-			currentScripts = append(currentScripts, nextCredit.PkScript)
+			currentScripts = append(currentScripts,
+				&wire.TxOut{
+					PkScript: nextCredit.PkScript,
+					Value:    int64(nextCredit.Amount),
+				})
 		}
 		return currentTotal, currentInputs, currentScripts, nil
 	}
@@ -221,10 +225,10 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32, bs *waddrmgr
 // validateMsgTx verifies transaction input scripts for tx.  All previous output
 // scripts from outputs redeemed by the transaction, in the same order they are
 // spent, must be passed in the prevScripts slice.
-func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte) error {
+func validateMsgTx(tx *wire.MsgTx, prevScripts []*wire.TxOut) error {
 	for i, prevScript := range prevScripts {
-		vm, err := txscript.NewEngine(prevScript, tx, i,
-			txscript.StandardVerifyFlags, nil)
+		vm, err := txscript.NewEngine(prevScript.PkScript, tx, i,
+			txscript.StandardVerifyFlags, nil, nil, prevScript.Value)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}

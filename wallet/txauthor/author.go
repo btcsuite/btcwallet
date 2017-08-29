@@ -23,7 +23,7 @@ import (
 // can not be satisified, this can be signaled by returning a total amount less
 // than the target or by returning a more detailed error implementing
 // InputSourceError.
-type InputSource func(target btcutil.Amount) (total btcutil.Amount, inputs []*wire.TxIn, scripts [][]byte, err error)
+type InputSource func(target btcutil.Amount) (total btcutil.Amount, inputs []*wire.TxIn, scripts []*wire.TxOut, err error)
 
 // InputSourceError describes the failure to provide enough input value from
 // unspent transaction outputs to meet a target amount.  A typed error is used
@@ -47,7 +47,7 @@ func (insufficientFundsError) Error() string {
 // output (if one was added).
 type AuthoredTx struct {
 	Tx          *wire.MsgTx
-	PrevScripts [][]byte
+	PrevScripts []*wire.TxOut
 	TotalInput  btcutil.Amount
 	ChangeIndex int // negative if no change
 }
@@ -169,7 +169,7 @@ type SecretsSource interface {
 // prevPkScripts and the slice length must match the number of inputs.  Private
 // keys and redeem scripts are looked up using a SecretsSource based on the
 // previous output script.
-func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte, secrets SecretsSource) error {
+func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts []*wire.TxOut, secrets SecretsSource) error {
 	inputs := tx.TxIn
 	chainParams := secrets.ChainParams()
 
@@ -179,7 +179,7 @@ func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte, secrets SecretsS
 	}
 
 	for i := range inputs {
-		pkScript := prevPkScripts[i]
+		pkScript := prevPkScripts[i].PkScript
 		sigScript := inputs[i].SignatureScript
 		script, err := txscript.SignTxOutput(chainParams, tx, i,
 			pkScript, txscript.SigHashAll, secrets, secrets,
