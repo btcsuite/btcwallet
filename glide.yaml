@@ -18,7 +18,7 @@ import:
   subpackages:
   - hdkeychain
 - package: github.com/lightninglabs/neutrino
-  version: 786bf194ce45d2619f23d7eafe90f23faf01b2f9
+  version: ebfb49168248d483e0a33580bb5eeafc5c52f19a
 - package: github.com/btcsuite/golangcrypto
   subpackages:
   - nacl/secretbox
