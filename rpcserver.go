@@ -111,8 +111,34 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 		err          error
 	)
 	if cfg.DisableServerTLS {
-		log.Info("Server TLS is disabled.  Only legacy RPC may be used")
+
+		// Bullshit.  :)  I'm going to add this ability because I want it for unit tests
+		// among other reasons.
+		// log.Info("Server TLS is disabled.  Only legacy RPC may be used")
+		log.Infof("INSECURE GRPC SERVICE.  NOT TO BE USED IN PRODUCTION")
+
+		listeners := makeListeners(cfg.ExperimentalRPCListeners, net.Listen)
+		if len(listeners) == 0 {
+			err := errors.New("failed to create listeners for RPC server")
+			return nil, nil, err
+		}
+
+		server = grpc.NewServer()
+		rpcserver.StartVersionService(server)
+		rpcserver.StartWalletLoaderService(server, walletLoader, activeNet)
+		for _, lis := range listeners {
+			lis := lis
+			go func() {
+				log.Infof("Experimental RPC server listening on %s",
+					lis.Addr())
+				err := server.Serve(lis)
+				log.Tracef("Finished serving expimental RPC: %v",
+					err)
+			}()
+		}
+
 	} else {
+		/* SECURE SERVICE IMPLEMENTATION */
 		keyPair, err = openRPCKeyPair()
 		if err != nil {
 			return nil, nil, err
