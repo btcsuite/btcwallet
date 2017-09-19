@@ -9,6 +9,7 @@ import (
 	"crypto/sha512"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/roasbeef/btcd/btcec"
 	"github.com/roasbeef/btcd/chaincfg"
@@ -249,6 +250,7 @@ type Manager struct {
 	chainParams  *chaincfg.Params
 	addrs        map[addrKey]ManagedAddress
 	syncState    syncState
+	birthday     time.Time
 	watchingOnly bool
 	locked       bool
 	closed       bool
@@ -1985,12 +1987,13 @@ func (m *Manager) Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error) {
 func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 	masterKeyPriv *snacl.SecretKey, cryptoKeyPub EncryptorDecryptor,
 	cryptoKeyPrivEncrypted, cryptoKeyScriptEncrypted []byte, syncInfo *syncState,
-	privPassphraseSalt [saltSize]byte) *Manager {
+	birthday time.Time, privPassphraseSalt [saltSize]byte) *Manager {
 
 	return &Manager{
 		chainParams:              chainParams,
 		addrs:                    make(map[addrKey]ManagedAddress),
 		syncState:                *syncInfo,
+		birthday:                 birthday,
 		locked:                   true,
 		acctInfo:                 make(map[uint32]*accountInfo),
 		masterKeyPub:             masterKeyPub,
@@ -2124,6 +2127,10 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte, chainParams *chai
 	if err != nil {
 		return nil, maybeConvertDbError(err)
 	}
+	birthday, err := fetchBirthday(ns)
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
 
 	// When not a watching-only manager, set the master private key params,
 	// but don't derive it now since the manager starts off locked.
@@ -2174,7 +2181,7 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte, chainParams *chai
 	// call to new with the values loaded from the database.
 	mgr := newManager(chainParams, &masterKeyPub, &masterKeyPriv,
 		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
-		privPassphraseSalt)
+		birthday, privPassphraseSalt)
 	mgr.watchingOnly = watchingOnly
 	return mgr, nil
 }
@@ -2435,6 +2442,11 @@ func Create(ns walletdb.ReadWriteBucket, seed, pubPassphrase, privPassphrase []b
 			return err
 		}
 		err = putStartBlock(ns, &syncInfo.startBlock)
+		if err != nil {
+			return err
+		}
+		// Use 48 hours as margin of safety for wallet birthday.
+		err = putBirthday(ns, time.Now().Add(-48*time.Hour))
 		if err != nil {
 			return err
 		}

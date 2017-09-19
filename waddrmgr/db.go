@@ -194,6 +194,7 @@ var (
 	// Sync related key names (sync bucket).
 	syncedToName   = []byte("syncedto")
 	startBlockName = []byte("startblock")
+	birthdayName   = []byte("birthday")
 
 	// Account related key names (account bucket).
 	acctNumAcctsName = []byte("numaccts")
@@ -1484,6 +1485,37 @@ func putStartBlock(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	err := bucket.Put(startBlockName, buf)
 	if err != nil {
 		str := fmt.Sprintf("failed to store start block %v", bs.Hash)
+		return managerError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// fetchBirthday loads the manager's bithday timestamp from the database.
+func fetchBirthday(ns walletdb.ReadBucket) (time.Time, error) {
+	bucket := ns.NestedReadBucket(syncBucketName)
+
+	var t time.Time
+
+	buf := bucket.Get(birthdayName)
+	if len(buf) != 8 {
+		str := "malformed birthday stored in database"
+		return t, managerError(ErrDatabase, str, nil)
+	}
+
+	t = time.Unix(int64(binary.BigEndian.Uint64(buf)), 0)
+	return t, nil
+}
+
+// putBirthday stores the provided birthday timestamp to the database.
+func putBirthday(ns walletdb.ReadWriteBucket, t time.Time) error {
+	bucket := ns.NestedReadWriteBucket(syncBucketName)
+
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(t.Unix()))
+
+	err := bucket.Put(birthdayName, buf)
+	if err != nil {
+		str := "failed to store birthday"
 		return managerError(ErrDatabase, str, err)
 	}
 	return nil

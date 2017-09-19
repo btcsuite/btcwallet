@@ -5,6 +5,8 @@
 package waddrmgr
 
 import (
+	"time"
+
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcwallet/walletdb"
 )
@@ -86,4 +88,24 @@ func (m *Manager) BlockHash(ns walletdb.ReadBucket, height int32) (
 	defer m.mtx.Unlock()
 
 	return fetchBlockHash(ns, height)
+}
+
+// Birthday returns the birthday, or earliest time a key could have been used,
+// for the manager.
+func (m *Manager) Birthday() time.Time {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	return m.birthday
+}
+
+// SetBirthday sets the birthday, or earliest time a key could have been used,
+// for the manager.
+func (m *Manager) SetBirthday(ns walletdb.ReadWriteBucket,
+	birthday time.Time) error {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	m.birthday = birthday
+	return putBirthday(ns, birthday)
 }
