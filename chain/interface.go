@@ -20,6 +20,7 @@ type Interface interface {
 	GetBestBlock() (*chainhash.Hash, int32, error)
 	GetBlock(*chainhash.Hash) (*wire.MsgBlock, error)
 	GetBlockHash(int64) (*chainhash.Hash, error)
+	GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
 	Rescan(*chainhash.Hash, []btcutil.Address, []*wire.OutPoint) error
