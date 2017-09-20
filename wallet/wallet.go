@@ -159,6 +159,13 @@ func (w *Wallet) SynchronizeRPC(chainClient chain.Interface) {
 		return
 	}
 	w.chainClient = chainClient
+
+	// If the chain client is a NeutrinoClient instance, set a birthday so
+	// we don't download all the filters as we go.
+	switch cc := chainClient.(type) {
+	case *chain.NeutrinoClient:
+		cc.SetStartTime(w.Manager.Birthday())
+	}
 	w.chainClientLock.Unlock()
 
 	// TODO: It would be preferable to either run these goroutines
@@ -1918,10 +1925,18 @@ func (w *Wallet) ImportPrivateKey(wif *btcutil.WIF, bs *waddrmgr.BlockStamp,
 
 	// The starting block for the key is the genesis block unless otherwise
 	// specified.
+	var newBirthday time.Time
 	if bs == nil {
 		bs = &waddrmgr.BlockStamp{
 			Hash:   *w.chainParams.GenesisHash,
 			Height: 0,
+		}
+	} else {
+		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
+		// Only update the new birthday time from default value if we
+		// actually have timestamp info in the header.
+		if err == nil {
+			newBirthday = header.Timestamp
 		}
 	}
 
@@ -1931,12 +1946,16 @@ func (w *Wallet) ImportPrivateKey(wif *btcutil.WIF, bs *waddrmgr.BlockStamp,
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		maddr, err := w.Manager.ImportPrivateKey(addrmgrNs, wif, bs)
-		if err == nil {
-			addr = maddr.Address()
-			props, err = w.Manager.AccountProperties(
-				addrmgrNs, waddrmgr.ImportedAddrAccount)
+		if err != nil {
+			return err
 		}
-		return err
+		addr = maddr.Address()
+		props, err = w.Manager.AccountProperties(
+			addrmgrNs, waddrmgr.ImportedAddrAccount)
+		if err != nil {
+			return err
+		}
+		return w.Manager.SetBirthday(addrmgrNs, newBirthday)
 	})
 	if err != nil {
 		return "", err
