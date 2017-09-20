@@ -143,6 +143,14 @@ func (s *NeutrinoClient) GetBlockHash(height int64) (*chainhash.Hash, error) {
 	return &hash, nil
 }
 
+// GetBlockHeader returns the block header for the given block hash, or an error
+// if the client has been shut down or the hash doesn't exist or is unknown.
+func (s *NeutrinoClient) GetBlockHeader(
+	blockHash *chainhash.Hash) (*wire.BlockHeader, error) {
+	header, _, err := s.CS.BlockHeaders.FetchHeader(blockHash)
+	return header, err
+}
+
 // SendRawTransaction replicates the RPC client's SendRawTransaction command.
 func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 	*chainhash.Hash, error) {
