@@ -123,6 +123,12 @@ out:
 		case n := <-w.rescanNotifications:
 			switch n := n.(type) {
 			case *chain.RescanProgress:
+				if curBatch == nil {
+					log.Warnf("Received rescan progress " +
+						"notification but no rescan " +
+						"currently running")
+					continue
+				}
 				w.rescanProgress <- &RescanProgressMsg{
 					Addresses:    curBatch.addrs,
 					Notification: n,
