@@ -33,6 +33,47 @@ func (w *Wallet) handleChainNotifications() {
 		}
 	}
 
+	catchUpHashes := func(w *Wallet, client chain.Interface,
+		height int32) error {
+		// TODO(aakselrod): There's a race conditon here, which
+		// happens when a reorg occurs between the
+		// rescanProgress notification and the last GetBlockHash
+		// call. The solution when using btcd is to make btcd
+		// send blockconnected notifications with each block
+		// the way Neutrino does, and get rid of the loop. The
+		// other alternative is to check the final hash and,
+		// if it doesn't match the original hash returned by
+		// the notification, to roll back and restart the
+		// rescan.
+		log.Infof("Catching up block hashes to height %d, this"+
+			" might take a while", height)
+		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			startBlock := w.Manager.SyncedTo()
+			for i := startBlock.Height + 1; i <= height; i++ {
+				hash, err := client.GetBlockHash(int64(i))
+				if err != nil {
+					return err
+				}
+				bs := waddrmgr.BlockStamp{
+					Height: i,
+					Hash:   *hash,
+				}
+				err = w.Manager.SetSyncedTo(ns, &bs)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Errorf("Failed to update address manager "+
+				"sync state for height %d: %v", height, err)
+		}
+		log.Info("Done catching up block hashes")
+		return err
+	}
+
 	for n := range chainClient.Notifications() {
 		var notificationName string
 		var err error
@@ -72,9 +113,16 @@ func (w *Wallet) handleChainNotifications() {
 			}
 			notificationName = "filteredblockconnected"
 
-		// The following are handled by the wallet's rescan
-		// goroutines, so just pass them there.
-		case *chain.RescanProgress, *chain.RescanFinished:
+		// The following require some database maintenance, but also
+		// need to be reported to the wallet's rescan goroutine.
+		case *chain.RescanProgress:
+			err = catchUpHashes(w, chainClient, n.Height)
+			notificationName = "rescanprogress"
+			w.rescanNotifications <- n
+		case *chain.RescanFinished:
+			err = catchUpHashes(w, chainClient, n.Height)
+			notificationName = "rescanprogress"
+			w.SetChainSynced(true)
 			w.rescanNotifications <- n
 		}
 		if err != nil {
