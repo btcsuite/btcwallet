@@ -453,6 +453,19 @@ func (w *Wallet) syncWithChain() error {
 			return err
 		}
 		log.Info("Done catching up block hashes")
+
+		// Since we've spent some time catching up block hashes, we
+		// might have new addresses waiting for us that were requested
+		// during initial sync. Make sure we have those before we
+		// request a rescan later on.
+		err = walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+			var err error
+			addrs, unspent, err = w.activeData(dbtx)
+			return err
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Compare previously-seen blocks against the chain server.  If any of
