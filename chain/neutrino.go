@@ -62,7 +62,6 @@ func (s *NeutrinoClient) Start() error {
 			select {
 			case s.enqueueNotification <- ClientConnected{}:
 			case <-s.quit:
-				return
 			}
 		}()
 		go s.notificationHandler()
@@ -174,7 +173,9 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	if s.scanning {
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
+		s.clientMtx.Unlock()
 		s.rescan.WaitForShutdown()
+		s.clientMtx.Lock()
 	}
 	s.rescanQuit = make(chan struct{})
 	s.scanning = true
@@ -195,6 +196,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	// notification indicating the rescan has "finished".
 	if header.BlockHash() == *startHash {
 		s.finished = true
+		s.clientMtx.Unlock()
 		select {
 		case s.enqueueNotification <- &RescanFinished{
 			Hash:   startHash,
@@ -206,6 +208,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		case <-s.rescanQuit:
 			return nil
 		}
+		s.clientMtx.Lock()
 	}
 
 	s.rescan = s.CS.NewRescan(
