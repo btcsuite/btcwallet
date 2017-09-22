@@ -4,6 +4,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -29,6 +30,10 @@ hash: a7b6593b62ad571ed749736405aa456bf2b6163f5d54e61241be56a7baaad6bd
 >>>>>>> a9231df... build: use neutrino with StartTime rescan option
 updated: 2017-08-29T15:22:10.322166424-07:00
 >>>>>>> e4e29cf... build: update glide files to point to latest btcd+neutrino
+=======
+hash: c781beec4754f9e6c48a9521115015d060430c78dae18d419089ef1dff0f3bde
+updated: 2017-09-21T18:16:37.809204283-06:00
+>>>>>>> 24684c8... build: update glide for new neutrino version
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -145,7 +150,7 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: 68d076d252d5b32b514d2e7c86adbd31b01561b6
+  version: f03626bcc913dd710b2f7d02c08b2d95cb4e9534
   subpackages:
   - filterdb
   - headerfs
