@@ -5,6 +5,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -34,6 +35,10 @@ updated: 2017-08-29T15:22:10.322166424-07:00
 hash: c781beec4754f9e6c48a9521115015d060430c78dae18d419089ef1dff0f3bde
 updated: 2017-09-21T18:16:37.809204283-06:00
 >>>>>>> 24684c8... build: update glide for new neutrino version
+=======
+hash: 63c716f4c97cabee9b5a1c8cecd5c026550da120b23cfdcb3611492fde5b31bf
+updated: 2017-10-01T14:31:37.016793293-07:00
+>>>>>>> 30ed6c8... build: update glide files to point to latest neutrino+btcutil
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -150,7 +155,7 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: f03626bcc913dd710b2f7d02c08b2d95cb4e9534
+  version: 931d977b023e7543b74599e9d7b8623dbba8507a
   subpackages:
   - filterdb
   - headerfs
@@ -170,7 +175,7 @@ imports:
   - txscript
   - wire
 - name: github.com/roasbeef/btcutil
-  version: 4675c7e1e02d8fe1f40d1e40a71d31922e62e605
+  version: 1584022350b4400b511beab6a013f0189adeef40
   subpackages:
   - base58
   - bech32
