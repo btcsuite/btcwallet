@@ -2510,7 +2510,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 }
 
 // PublishTransaction sends the transaction to the consensus RPC server so it
-// can be propigated to other nodes and eventually mined.
+// can be propagated to other nodes and eventually mined.
 //
 // This function is unstable and will be removed once syncing code is moved out
 // of the wallet.
@@ -2518,6 +2518,28 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	server, err := w.requireChainClient()
 	if err != nil {
 		return err
+	}
+
+	switch server.(type) {
+	// If our chain backend is neutrino, then we'll add this as an
+	// unconfirmed transaction into the transaction store. Otherwise, we
+	// won't eve be notified of it's acceptance, meaning we won't attempt
+	// to re-broadcast.
+	case *chain.NeutrinoClient:
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(
+			tx, time.Now(),
+		)
+		if err != nil {
+			return err
+		}
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+			return w.TxStore.InsertTx(txmgrNs, rec, nil)
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	_, err = server.SendRawTransaction(tx, false)
