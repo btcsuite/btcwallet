@@ -14,11 +14,11 @@ import:
   - wire
 - package: github.com/btcsuite/btclog
 - package: github.com/roasbeef/btcutil
-  version: 4675c7e1e02d8fe1f40d1e40a71d31922e62e605
+  version: 1584022350b4400b511beab6a013f0189adeef40
   subpackages:
   - hdkeychain
 - package: github.com/lightninglabs/neutrino
-  version: f03626bcc913dd710b2f7d02c08b2d95cb4e9534
+  version: 931d977b023e7543b74599e9d7b8623dbba8507a
 - package: github.com/btcsuite/golangcrypto
   subpackages:
   - nacl/secretbox
