@@ -177,6 +177,13 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	}
 	w, err := Open(db, pubPassphrase, cbs, l.chainParams)
 	if err != nil {
+		// If opening the wallet fails (e.g. because of wrong
+		// passphrase), we must close the backing database to
+		// allow future calls to walletdb.Open().
+		e := db.Close()
+		if e != nil {
+			log.Warnf("Error closing database: %v", e)
+		}
 		return nil, err
 	}
 	w.Start()
