@@ -6,6 +6,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -39,6 +40,10 @@ updated: 2017-09-21T18:16:37.809204283-06:00
 hash: 63c716f4c97cabee9b5a1c8cecd5c026550da120b23cfdcb3611492fde5b31bf
 updated: 2017-10-01T14:31:37.016793293-07:00
 >>>>>>> 30ed6c8... build: update glide files to point to latest neutrino+btcutil
+=======
+hash: e472a40c67ce1626e80d8d89631dde8e214903214a72d3a0e8d96e04bcaabd06
+updated: 2017-11-02T19:08:54.780005689-07:00
+>>>>>>> ba1ef88... build: update glide files for latest btcutil, btcd, and neutrino
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -124,11 +129,11 @@ imports:
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
 - name: github.com/davecgh/go-spew
-  version: a476722483882dd40b8111f0eb64e1d7f43f56e4
+  version: ecdeabc65495df2dec95d7c4a4c3e021903035e5
   subpackages:
   - spew
 - name: github.com/golang/protobuf
-  version: ab9f9a6dab164b7d1246e0e688b0ab7b94d8553e
+  version: 130e6b02ab059e7b717a096f397c5b60111cae74
   subpackages:
   - proto
   - ptypes/any
@@ -155,12 +160,12 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: 931d977b023e7543b74599e9d7b8623dbba8507a
+  version: 2fb43209a6f54fbf78ba71b50623503db611c371
   subpackages:
   - filterdb
   - headerfs
 - name: github.com/roasbeef/btcd
-  version: 4b411f0e78f1faa96ae650d886170d018c1835bf
+  version: be2fceadae0af7355eca1eb3716c6f9c88d4fc20
   subpackages:
   - addrmgr
   - blockchain
@@ -175,7 +180,7 @@ imports:
   - txscript
   - wire
 - name: github.com/roasbeef/btcutil
-  version: 1584022350b4400b511beab6a013f0189adeef40
+  version: c4646eb27366f887b9e034ce91510fe720a31201
   subpackages:
   - base58
   - bech32
@@ -183,11 +188,12 @@ imports:
   - gcs/builder
   - hdkeychain
 - name: golang.org/x/crypto
-  version: 81e90905daefcd6fd217b62423c0908922eadb30
+  version: 9419663f5a44be8b34ca85f08abc5fe1be11f8a3
   subpackages:
   - ripemd160
   - ssh/terminal
 - name: golang.org/x/net
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
   version: 513929065c19401a1c7b76ecd942f9f86a0c061b
@@ -198,6 +204,9 @@ imports:
 =======
   version: 66aacef3dd8a676686c7ae3716979581e8b03c47
 >>>>>>> e4e29cf... build: update glide files to point to latest btcd+neutrino
+=======
+  version: 1087133bc4af3073e18add999345c6ae75918503
+>>>>>>> ba1ef88... build: update glide files for latest btcutil, btcd, and neutrino
   subpackages:
   - context
   - http2
@@ -207,6 +216,7 @@ imports:
   - lex/httplex
   - trace
 - name: golang.org/x/sys
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
@@ -223,10 +233,14 @@ imports:
 =======
   version: ab9e364efd8b52800ff7ee48a9ffba4e0ed78dfb
 >>>>>>> e4e29cf... build: update glide files to point to latest btcd+neutrino
+=======
+  version: 686000749eaec0b8855b8eef5336cf63899fe51d
+>>>>>>> ba1ef88... build: update glide files for latest btcutil, btcd, and neutrino
   subpackages:
   - unix
   - windows
 - name: golang.org/x/text
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
   version: 19e51611da83d6be54ddafce4a4af510cb3e9ea4
@@ -237,6 +251,9 @@ imports:
 =======
   version: 18c65dde6afd36dbc39197ca72008895b8dfbfb6
 >>>>>>> e4e29cf... build: update glide files to point to latest btcd+neutrino
+=======
+  version: c01e4764d870b77f8abe5096ee19ad20d80e8075
+>>>>>>> ba1ef88... build: update glide files for latest btcutil, btcd, and neutrino
   subpackages:
   - secure/bidirule
   - transform
