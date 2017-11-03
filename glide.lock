@@ -7,6 +7,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -44,6 +45,10 @@ updated: 2017-10-01T14:31:37.016793293-07:00
 hash: e472a40c67ce1626e80d8d89631dde8e214903214a72d3a0e8d96e04bcaabd06
 updated: 2017-11-02T19:08:54.780005689-07:00
 >>>>>>> ba1ef88... build: update glide files for latest btcutil, btcd, and neutrino
+=======
+hash: 9c53c13264c73f55b38f70bc6075962334438be3877fa92e51f6d35f90fe1f1a
+updated: 2017-11-03T12:30:39.76652975-07:00
+>>>>>>> 80e2080... build: update to latest btcd+btcutil+neutrino
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -160,12 +165,12 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: 2fb43209a6f54fbf78ba71b50623503db611c371
+  version: 58df9631183049cdee3d29ca6950a75834b23dd7
   subpackages:
   - filterdb
   - headerfs
 - name: github.com/roasbeef/btcd
-  version: be2fceadae0af7355eca1eb3716c6f9c88d4fc20
+  version: 2cabbb06420ead94822468af58c0cb82e9e17ffc
   subpackages:
   - addrmgr
   - blockchain
@@ -180,7 +185,7 @@ imports:
   - txscript
   - wire
 - name: github.com/roasbeef/btcutil
-  version: c4646eb27366f887b9e034ce91510fe720a31201
+  version: c3ff179366044979fb9856c2feb79bd4c2184c7a
   subpackages:
   - base58
   - bech32
