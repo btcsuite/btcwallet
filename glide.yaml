@@ -43,6 +43,7 @@ import:
 - package: github.com/jrick/logrotate
   subpackages:
   - rotator
+- package: github.com/pebbe/zmq4
 testImport:
 - package: github.com/davecgh/go-spew
   subpackages:

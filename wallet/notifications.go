@@ -198,7 +198,8 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx, deta
 	// Sanity check: should not be currently coalescing a notification for
 	// mined transactions at the same time that an unmined tx is notified.
 	if s.currentTxNtfn != nil {
-		log.Errorf("Notifying unmined tx notification while creating notification for blocks")
+		log.Errorf("Notifying unmined tx notification (%s) while creating notification for blocks",
+			details.Hash)
 	}
 
 	defer s.mu.Unlock()

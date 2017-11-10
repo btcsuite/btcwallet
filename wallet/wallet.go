@@ -163,6 +163,8 @@ func (w *Wallet) SynchronizeRPC(chainClient chain.Interface) {
 	switch cc := chainClient.(type) {
 	case *chain.NeutrinoClient:
 		cc.SetStartTime(w.Manager.Birthday())
+	case *chain.BitcoindClient:
+		cc.SetStartTime(w.Manager.Birthday())
 	}
 	w.chainClientLock.Unlock()
 
@@ -1436,6 +1438,12 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <
 			switch client := chainClient.(type) {
 			case *chain.RPCClient:
 				startResp = client.GetBlockVerboseTxAsync(startBlock.hash)
+			case *chain.BitcoindClient:
+				var err error
+				start, err = client.GetBlockHeight(startBlock.hash)
+				if err != nil {
+					return nil, err
+				}
 			case *chain.NeutrinoClient:
 				var err error
 				start, err = client.GetBlockHeight(startBlock.hash)

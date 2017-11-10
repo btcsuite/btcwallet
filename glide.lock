@@ -9,6 +9,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -54,6 +55,10 @@ updated: 2017-11-03T12:30:39.76652975-07:00
 hash: 8217b51c2a5fc4df53200de6315f4c1f4a084a516f38c77b815e0a02ac71e332
 updated: 2017-11-18T15:17:20.95646706-08:00
 >>>>>>> dc5f652... build: update to latest btcd and neutrino
+=======
+hash: 83bb1c0a0f5c6396d2387746544592662898af52596d5cdca898b6fbfaa60841
+updated: 2017-11-29T14:42:36.82153259-06:00
+>>>>>>> 7a32017... multi: add bitcoind back-end (only for API use for now)
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -174,6 +179,8 @@ imports:
   subpackages:
   - filterdb
   - headerfs
+- name: github.com/pebbe/zmq4
+  version: 90d69e412a09549f2e90bac70fbb449081f1e5c1
 - name: github.com/roasbeef/btcd
   version: 5d9e4e1fa749fa2f1675802a4c9f10ef0ada04d1
   subpackages:

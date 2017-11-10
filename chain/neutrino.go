@@ -46,6 +46,11 @@ func NewNeutrinoClient(chainService *neutrino.ChainService) *NeutrinoClient {
 	return &NeutrinoClient{CS: chainService}
 }
 
+// BackEnd returns the name of the driver.
+func (s *NeutrinoClient) BackEnd() string {
+	return "neutrino"
+}
+
 // Start replicates the RPC client's Start method.
 func (s *NeutrinoClient) Start() error {
 	s.CS.Start()

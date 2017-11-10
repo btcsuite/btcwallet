@@ -84,6 +84,11 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 	return client, nil
 }
 
+// BackEnd returns the name of the driver.
+func (c *RPCClient) BackEnd() string {
+	return "btcd"
+}
+
 // Start attempts to establish a client connection with the remote server.
 // If successful, handler goroutines are started to process notifications
 // sent by the server.  After a limited number of connection attempts, this

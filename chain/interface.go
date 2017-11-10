@@ -10,6 +10,16 @@ import (
 	"github.com/roasbeef/btcwallet/wtxmgr"
 )
 
+// BackEnds returns a list of the available back ends.
+// TODO: Refactor each into a driver and use dynamic registration.
+func BackEnds() []string {
+	return []string{
+		"bitcoind",
+		"btcd",
+		"neutrino",
+	}
+}
+
 // Interface allows more than one backing blockchain source, such as a
 // btcd RPC chain server, or an SPV library, as long as we write a driver for
 // it.
@@ -27,6 +37,7 @@ type Interface interface {
 	NotifyReceived([]btcutil.Address) error
 	NotifyBlocks() error
 	Notifications() <-chan interface{}
+	BackEnd() string
 }
 
 // Notification types.  These are defined here and processed from from reading
