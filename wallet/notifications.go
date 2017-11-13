@@ -36,13 +36,11 @@ type NotificationServer struct {
 	spentness      map[uint32][]chan *SpentnessNotifications
 	accountClients []chan *AccountNotification
 	mu             sync.Mutex // Only protects registered client channels
-	wallet         *Wallet    // smells like hacks
 }
 
-func newNotificationServer(wallet *Wallet) *NotificationServer {
+func newNotificationServer() *NotificationServer {
 	return &NotificationServer{
 		spentness: make(map[uint32][]chan *SpentnessNotifications),
-		wallet:    wallet,
 	}
 }
 
@@ -185,7 +183,7 @@ func relevantAccounts(w *Wallet, m map[uint32]btcutil.Amount, txs []TransactionS
 	}
 }
 
-func (s *NotificationServer) notifyUnminedTransaction(details *wtxmgr.TxDetails) {
+func (s *NotificationServer) notifyUnminedTransaction(wallet *Wallet, details *wtxmgr.TxDetails) {
 	// Sanity check: should not be currently coalescing a notification for
 	// mined transactions at the same time that an unmined tx is notified.
 	if s.currentTxNtfn != nil {
@@ -199,15 +197,15 @@ func (s *NotificationServer) notifyUnminedTransaction(details *wtxmgr.TxDetails)
 		return
 	}
 
-	unminedTxs := []TransactionSummary{makeTxSummary(s.wallet, details)}
-	unminedHashes, err := s.wallet.TxStore.UnminedTxHashes()
+	unminedTxs := []TransactionSummary{makeTxSummary(wallet, details)}
+	unminedHashes, err := wallet.TxStore.UnminedTxHashes()
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
 		return
 	}
 	bals := make(map[uint32]btcutil.Amount)
-	relevantAccounts(s.wallet, bals, unminedTxs)
-	err = totalBalances(s.wallet, bals)
+	relevantAccounts(wallet, bals, unminedTxs)
+	err = totalBalances(wallet, bals)
 	if err != nil {
 		log.Errorf("Cannot determine balances for relevant accounts: %v", err)
 		return
@@ -229,7 +227,7 @@ func (s *NotificationServer) notifyDetachedBlock(hash *chainhash.Hash) {
 	s.currentTxNtfn.DetachedBlocks = append(s.currentTxNtfn.DetachedBlocks, hash)
 }
 
-func (s *NotificationServer) notifyMinedTransaction(details *wtxmgr.TxDetails, block *wtxmgr.BlockMeta) {
+func (s *NotificationServer) notifyMinedTransaction(wallet *Wallet, details *wtxmgr.TxDetails, block *wtxmgr.BlockMeta) {
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
@@ -243,10 +241,10 @@ func (s *NotificationServer) notifyMinedTransaction(details *wtxmgr.TxDetails, b
 		n++
 	}
 	txs := s.currentTxNtfn.AttachedBlocks[n-1].Transactions
-	s.currentTxNtfn.AttachedBlocks[n-1].Transactions = append(txs, makeTxSummary(s.wallet, details))
+	s.currentTxNtfn.AttachedBlocks[n-1].Transactions = append(txs, makeTxSummary(wallet, details))
 }
 
-func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
+func (s *NotificationServer) notifyAttachedBlock(wallet *Wallet, block *wtxmgr.BlockMeta) {
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
@@ -264,7 +262,7 @@ func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
 
 	// For now (until notification coalescing isn't necessary) just use
 	// chain length to determine if this is the new best block.
-	if s.wallet.ChainSynced() {
+	if wallet.ChainSynced() {
 		if len(s.currentTxNtfn.DetachedBlocks) >= len(s.currentTxNtfn.AttachedBlocks) {
 			return
 		}
@@ -285,7 +283,7 @@ func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
 	// a mined transaction in the new best chain, there is no possiblity of
 	// a new, previously unseen transaction appearing in unconfirmed.
 
-	unminedHashes, err := s.wallet.TxStore.UnminedTxHashes()
+	unminedHashes, err := wallet.TxStore.UnminedTxHashes()
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
 		return
@@ -294,9 +292,9 @@ func (s *NotificationServer) notifyAttachedBlock(block *wtxmgr.BlockMeta) {
 
 	bals := make(map[uint32]btcutil.Amount)
 	for _, b := range s.currentTxNtfn.AttachedBlocks {
-		relevantAccounts(s.wallet, bals, b.Transactions)
+		relevantAccounts(wallet, bals, b.Transactions)
 	}
-	err = totalBalances(s.wallet, bals)
+	err = totalBalances(wallet, bals)
 	if err != nil {
 		log.Errorf("Cannot determine balances for relevant accounts: %v", err)
 		return
