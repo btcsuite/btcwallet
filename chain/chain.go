@@ -313,11 +313,18 @@ func (c *RPCClient) handler() {
 	// need to process earlier blockconnected notifications still waiting
 	// here.
 
+	// The time we wait without hearing anything from the server before we
+	// ping it to make sure it's still active.
+	pingInterval := time.Minute
+
+	// The time we wait to hear back from the server after we ping it.
+	pingTimeout := 3 * time.Second
+
 	var notifications []interface{}
 	enqueue := c.enqueueNotification
 	var dequeue chan interface{}
 	var next interface{}
-	pingChan := time.After(time.Minute)
+	pingChan := time.After(pingInterval)
 out:
 	for {
 		select {
@@ -337,7 +344,9 @@ out:
 				dequeue = c.dequeueNotification
 			}
 			notifications = append(notifications, n)
-			pingChan = time.After(time.Minute)
+
+			// We have received a notification, so reset the timer.
+			pingChan = time.After(pingTimeout)
 
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
@@ -364,13 +373,6 @@ out:
 			// No notifications were received in the last 60s.
 			// Ensure the connection is still active by making a new
 			// request to the server.
-			// TODO: A minute timeout is used to prevent the handler
-			// loop from blocking here forever, but this is much larger
-			// than it needs to be due to btcd processing websocket
-			// requests synchronously (see
-			// https://github.com/btcsuite/btcd/issues/504).  Decrease
-			// this to something saner like 3s when the above issue is
-			// fixed.
 			type sessionResult struct {
 				err error
 			}
@@ -388,9 +390,9 @@ out:
 					c.Stop()
 					break out
 				}
-				pingChan = time.After(time.Minute)
+				pingChan = time.After(pingInterval)
 
-			case <-time.After(time.Minute):
+			case <-time.After(pingTimeout):
 				log.Errorf("Timeout waiting for session RPC")
 				c.Stop()
 				break out
