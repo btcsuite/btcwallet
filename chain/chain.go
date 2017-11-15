@@ -26,8 +26,8 @@ type RPCClient struct {
 	chainParams       *chaincfg.Params
 	reconnectAttempts int
 
-	enqueueNotification chan interface{}
-	dequeueNotification chan interface{}
+	enqueueNotification chan Notification
+	dequeueNotification chan Notification
 	currentBlock        chan *waddrmgr.BlockStamp
 
 	quit    chan struct{}
@@ -62,8 +62,8 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		},
 		chainParams:         chainParams,
 		reconnectAttempts:   reconnectAttempts,
-		enqueueNotification: make(chan interface{}),
-		dequeueNotification: make(chan interface{}),
+		enqueueNotification: make(chan Notification),
+		dequeueNotification: make(chan Notification),
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
@@ -139,11 +139,18 @@ func (c *RPCClient) WaitForShutdown() {
 	c.wg.Wait()
 }
 
-// Notification types.  These are defined here and processed from from reading
+// Notification types.  These are defined here and processed from reading
 // a notificationChan to avoid handling these notifications directly in
 // btcrpcclient callbacks, which isn't very Go-like and doesn't allow
 // blocking client calls.
 type (
+	// Notification is an abstract type representing any notification.
+	// It contains an exported function that doesn't do anything to ensure
+	// that only those types defined here can be notification types.
+	Notification interface {
+		isChainNotification()
+	}
+
 	// ClientConnected is a notification for when a client connection is
 	// opened or reestablished to the chain server.
 	ClientConnected struct{}
@@ -180,11 +187,19 @@ type (
 	}
 )
 
+// Define isChanNotification for each notification type.
+func (x ClientConnected) isChainNotification()   {}
+func (x BlockConnected) isChainNotification()    {}
+func (x BlockDisconnected) isChainNotification() {}
+func (x RelevantTx) isChainNotification()        {}
+func (x RescanProgress) isChainNotification()    {}
+func (x RescanFinished) isChainNotification()    {}
+
 // Notifications returns a channel of parsed notifications sent by the remote
 // bitcoin RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for
 // later reads.
-func (c *RPCClient) Notifications() <-chan interface{} {
+func (c *RPCClient) Notifications() <-chan Notification {
 	return c.dequeueNotification
 }
 
@@ -313,10 +328,10 @@ func (c *RPCClient) handler() {
 	// need to process earlier blockconnected notifications still waiting
 	// here.
 
-	var notifications []interface{}
+	var notifications []Notification
 	enqueue := c.enqueueNotification
-	var dequeue chan interface{}
-	var next interface{}
+	var dequeue chan Notification
+	var next Notification
 	pingChan := time.After(time.Minute)
 out:
 	for {
