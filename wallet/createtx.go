@@ -34,16 +34,20 @@ func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 	// returned input source and reused across multiple calls.
 	currentTotal := btcutil.Amount(0)
 	currentInputs := make([]*wire.TxIn, 0, len(eligible))
-	currentScripts := make([][]byte, 0, len(eligible))
+	currentScripts := make([]*wire.TxOut, 0, len(eligible))
 
-	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn, [][]byte, error) {
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn, []*wire.TxOut, error) {
 		for currentTotal < target && len(eligible) != 0 {
 			nextCredit := &eligible[0]
 			eligible = eligible[1:]
-			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil)
+			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil, nil)
 			currentTotal += nextCredit.Amount
 			currentInputs = append(currentInputs, nextInput)
-			currentScripts = append(currentScripts, nextCredit.PkScript)
+			currentScripts = append(currentScripts,
+				&wire.TxOut{
+					PkScript: nextCredit.PkScript,
+					Value:    int64(nextCredit.Amount),
+				})
 		}
 		return currentTotal, currentInputs, currentScripts, nil
 	}
@@ -92,28 +96,23 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 // UTXO set and minconf policy. An additional output may be added to return
 // change to the wallet.  An appropriate fee is included based on the wallet's
 // current relay fee.  The wallet must be unlocked to create the transaction.
-func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32) (*txauthor.AuthoredTx, error) {
+func (s *Session) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32) (*txauthor.AuthoredTx, error) {
 	// Address manager must be unlocked to compose transaction.  Grab
 	// the unlock if possible (to prevent future unlocks), or return the
 	// error if already locked.
-	heldUnlock, err := w.HoldUnlock()
+	heldUnlock, err := s.Wallet.HoldUnlock()
 	if err != nil {
 		return nil, err
 	}
 	defer heldUnlock.Release()
 
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
-
 	// Get current block's height and hash.
-	bs, err := chainClient.BlockStamp()
+	bs, err := s.chainClient.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
 
-	eligible, err := w.findEligibleOutputs(account, minconf, bs)
+	eligible, err := s.Wallet.findEligibleOutputs(account, minconf, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -124,16 +123,16 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		// the imported account, change addresses are created from account 0.
 		var changeAddr btcutil.Address
 		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.NewChangeAddress(0)
+			changeAddr, err = s.NewChangeAddress(0)
 		} else {
-			changeAddr, err = w.NewChangeAddress(account)
+			changeAddr, err = s.NewChangeAddress(account)
 		}
 		if err != nil {
 			return nil, err
 		}
 		return txscript.PayToAddrScript(changeAddr)
 	}
-	tx, err := txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
+	tx, err := txauthor.NewUnsignedTransaction(outputs, s.Wallet.RelayFee(),
 		inputSource, changeSource)
 	if err != nil {
 		return nil, err
@@ -146,7 +145,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 		tx.RandomizeChangePosition()
 	}
 
-	err = tx.AddAllInputScripts(secretSource{w.Manager})
+	err = tx.AddAllInputScripts(secretSource{s.Wallet.Manager})
 	if err != nil {
 		return nil, err
 	}
@@ -221,10 +220,10 @@ func (w *Wallet) findEligibleOutputs(account uint32, minconf int32, bs *waddrmgr
 // validateMsgTx verifies transaction input scripts for tx.  All previous output
 // scripts from outputs redeemed by the transaction, in the same order they are
 // spent, must be passed in the prevScripts slice.
-func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte) error {
+func validateMsgTx(tx *wire.MsgTx, prevScripts []*wire.TxOut) error {
 	for i, prevScript := range prevScripts {
-		vm, err := txscript.NewEngine(prevScript, tx, i,
-			txscript.StandardVerifyFlags, nil)
+		vm, err := txscript.NewEngine(prevScript.PkScript, tx, i,
+			txscript.StandardVerifyFlags, nil, nil, prevScript.Value)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}

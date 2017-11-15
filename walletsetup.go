@@ -130,46 +130,6 @@ func createWallet(cfg *config) error {
 		return err
 	}
 
-	// When there exists a legacy keystore, unlock it now and set up a
-	// callback to import all keystore keys into the new walletdb
-	// wallet
-	if legacyKeyStore != nil {
-		err = legacyKeyStore.Unlock(privPass)
-		if err != nil {
-			return err
-		}
-
-		// Import the addresses in the legacy keystore to the new wallet if
-		// any exist, locking each wallet again when finished.
-		loader.RunAfterLoad(func(w *wallet.Wallet) {
-			defer legacyKeyStore.Lock()
-
-			fmt.Println("Importing addresses from existing wallet...")
-
-			err := w.Manager.Unlock(privPass)
-			if err != nil {
-				fmt.Printf("ERR: Failed to unlock new wallet "+
-					"during old wallet key import: %v", err)
-				return
-			}
-			defer w.Manager.Lock()
-
-			err = convertLegacyKeystore(legacyKeyStore, w.Manager)
-			if err != nil {
-				fmt.Printf("ERR: Failed to import keys from old "+
-					"wallet format: %v", err)
-				return
-			}
-
-			// Remove the legacy key store.
-			err = os.Remove(keystorePath)
-			if err != nil {
-				fmt.Printf("WARN: Failed to remove legacy wallet "+
-					"from'%s'\n", keystorePath)
-			}
-		})
-	}
-
 	// Ascertain the public passphrase.  This will either be a value
 	// specified by the user or the default hard-coded public passphrase if
 	// the user does not want the additional public data encryption.
@@ -188,12 +148,55 @@ func createWallet(cfg *config) error {
 	}
 
 	fmt.Println("Creating the wallet...")
-	w, err := loader.CreateNewWallet(pubPass, privPass, seed)
+	_, err = loader.CreateNewWallet(pubPass, privPass, seed)
 	if err != nil {
 		return err
 	}
 
-	w.Manager.Close()
+	w, err := loader.LoadedWallet()
+	if err != nil {
+		return err
+	}
+
+	// When there exists a legacy keystore, unlock it now and set up a
+	// callback to import all keystore keys into the new walletdb
+	// wallet
+	if legacyKeyStore != nil {
+		err = legacyKeyStore.Unlock(privPass)
+		if err != nil {
+			return err
+		}
+
+		// Import the addresses in the legacy keystore to the new wallet if
+		// any exist, locking each wallet again when finished.
+		fmt.Println("Importing addresses from existing wallet...")
+
+		err := w.Manager.Unlock(privPass)
+		if err != nil {
+			fmt.Printf("ERR: Failed to unlock new wallet "+
+				"during old wallet key import: %v", err)
+			return err
+		}
+
+		err = convertLegacyKeystore(legacyKeyStore, w.Manager)
+		if err != nil {
+			fmt.Printf("ERR: Failed to import keys from old "+
+				"wallet format: %v", err)
+			return err
+		}
+
+		// Remove the legacy key store.
+		err = os.Remove(keystorePath)
+		if err != nil {
+			fmt.Printf("WARN: Failed to remove legacy wallet "+
+				"from'%s'\n", keystorePath)
+		}
+
+		// Lock the wallets up again.
+		legacyKeyStore.Lock()
+		w.Manager.Lock()
+	}
+
 	fmt.Println("The wallet has been created successfully.")
 	return nil
 }

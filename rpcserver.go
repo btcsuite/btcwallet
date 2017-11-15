@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -102,7 +103,9 @@ func generateRPCKeyPair(writeKey bool) (tls.Certificate, error) {
 	return keyPair, nil
 }
 
-func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Server, error) {
+func startRPCServers(walletLoader *wallet.Loader,
+	chainClient *chain.RPCClient,
+	lifecycle func(*wallet.Session) error) (*grpc.Server, *legacyrpc.Server, error) {
 	var (
 		server       *grpc.Server
 		legacyServer *legacyrpc.Server
@@ -137,7 +140,7 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 			creds := credentials.NewServerTLSFromCert(&keyPair)
 			server = grpc.NewServer(grpc.Creds(creds))
 			rpcserver.StartVersionService(server)
-			rpcserver.StartWalletLoaderService(server, walletLoader, activeNet)
+			rpcserver.StartWalletLoaderService(server, walletLoader, activeNet, chainClient, lifecycle)
 			for _, lis := range listeners {
 				lis := lis
 				go func() {
@@ -165,7 +168,7 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 			MaxPOSTClients:      cfg.LegacyRPCMaxClients,
 			MaxWebsocketClients: cfg.LegacyRPCMaxWebsockets,
 		}
-		legacyServer = legacyrpc.NewServer(&opts, walletLoader, listeners)
+		legacyServer = legacyrpc.NewServer(&opts, walletLoader, listeners, chainClient)
 	}
 
 	// Error when neither the GRPC nor legacy RPC servers can be started.
@@ -244,11 +247,11 @@ func makeListeners(normalizedListenAddrs []string, listen listenFunc) []net.List
 // with a wallet to enable remote wallet access.  For the GRPC server, this
 // registers the WalletService service, and for the legacy JSON-RPC server it
 // enables methods that require a loaded wallet.
-func startWalletRPCServices(wallet *wallet.Wallet, server *grpc.Server, legacyServer *legacyrpc.Server) {
+func startWalletRPCServices(walletSession *wallet.Session, server *grpc.Server, legacyServer *legacyrpc.Server) {
 	if server != nil {
-		rpcserver.StartWalletService(server, wallet)
+		rpcserver.StartWalletService(server, walletSession)
 	}
 	if legacyServer != nil {
-		legacyServer.RegisterWallet(wallet)
+		legacyServer.RegisterWallet(walletSession)
 	}
 }

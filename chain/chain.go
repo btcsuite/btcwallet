@@ -6,13 +6,14 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcrpcclient"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -21,13 +22,13 @@ import (
 // RPCClient represents a persistent client connection to a bitcoin RPC server
 // for information regarding the current best block chain.
 type RPCClient struct {
-	*btcrpcclient.Client
-	connConfig        *btcrpcclient.ConnConfig // Work around unexported field
+	*rpcclient.Client
+	connConfig        *rpcclient.ConnConfig // Work around unexported field
 	chainParams       *chaincfg.Params
 	reconnectAttempts int
 
-	enqueueNotification chan interface{}
-	dequeueNotification chan interface{}
+	enqueueNotification chan Notification
+	dequeueNotification chan Notification
 	currentBlock        chan *waddrmgr.BlockStamp
 
 	quit    chan struct{}
@@ -50,7 +51,7 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 	}
 
 	client := &RPCClient{
-		connConfig: &btcrpcclient.ConnConfig{
+		connConfig: &rpcclient.ConnConfig{
 			Host:                 connect,
 			Endpoint:             "ws",
 			User:                 user,
@@ -62,12 +63,12 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		},
 		chainParams:         chainParams,
 		reconnectAttempts:   reconnectAttempts,
-		enqueueNotification: make(chan interface{}),
-		dequeueNotification: make(chan interface{}),
+		enqueueNotification: make(chan Notification),
+		dequeueNotification: make(chan Notification),
 		currentBlock:        make(chan *waddrmgr.BlockStamp),
 		quit:                make(chan struct{}),
 	}
-	ntfnCallbacks := &btcrpcclient.NotificationHandlers{
+	ntfnCallbacks := &rpcclient.NotificationHandlers{
 		OnClientConnected:   client.onClientConnect,
 		OnBlockConnected:    client.onBlockConnected,
 		OnBlockDisconnected: client.onBlockDisconnected,
@@ -76,7 +77,7 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 		OnRescanFinished:    client.onRescanFinished,
 		OnRescanProgress:    client.onRescanProgress,
 	}
-	rpcClient, err := btcrpcclient.New(client.connConfig, ntfnCallbacks)
+	rpcClient, err := rpcclient.New(client.connConfig, ntfnCallbacks)
 	if err != nil {
 		return nil, err
 	}
@@ -90,28 +91,23 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
 func (c *RPCClient) Start() error {
-	err := c.Connect(c.reconnectAttempts)
-	if err != nil {
-		return err
-	}
-
-	// Verify that the server is running on the expected network.
-	net, err := c.GetCurrentNet()
-	if err != nil {
-		c.Disconnect()
-		return err
-	}
-	if net != c.chainParams.Net {
-		c.Disconnect()
-		return errors.New("mismatched networks")
-	}
-
 	c.quitMtx.Lock()
+	defer c.quitMtx.Unlock()
+	
+	err := c.connect()
+	if err != nil {
+		return err
+	}
+
 	c.started = true
-	c.quitMtx.Unlock()
 
 	c.wg.Add(1)
-	go c.handler()
+	go func() {
+		err := c.reconnectHandler()
+		if err != nil {
+			log.Errorf("RPCClient failed with error: %v", err)
+		}
+	}()
 	return nil
 }
 
@@ -125,6 +121,8 @@ func (c *RPCClient) Stop() {
 		close(c.quit)
 		c.Client.Shutdown()
 
+		// If the RPCClient was started, then dequeueNotification is 
+		// closed when handler returns. 
 		if !c.started {
 			close(c.dequeueNotification)
 		}
@@ -139,11 +137,18 @@ func (c *RPCClient) WaitForShutdown() {
 	c.wg.Wait()
 }
 
-// Notification types.  These are defined here and processed from from reading
+// Notification types.  These are defined here and processed from reading
 // a notificationChan to avoid handling these notifications directly in
-// btcrpcclient callbacks, which isn't very Go-like and doesn't allow
+// rpcclient callbacks, which isn't very Go-like and doesn't allow
 // blocking client calls.
 type (
+	// Notification is an abstract type representing any notification.
+	// It contains an exported function that doesn't do anything to ensure
+	// that only those types defined here can be notification types.
+	Notification interface {
+		isChainNotification()
+	}
+
 	// ClientConnected is a notification for when a client connection is
 	// opened or reestablished to the chain server.
 	ClientConnected struct{}
@@ -180,11 +185,19 @@ type (
 	}
 )
 
+// Define isChanNotification for each notification type.
+func (x ClientConnected) isChainNotification()   {}
+func (x BlockConnected) isChainNotification()    {}
+func (x BlockDisconnected) isChainNotification() {}
+func (x RelevantTx) isChainNotification()        {}
+func (x RescanProgress) isChainNotification()    {}
+func (x RescanFinished) isChainNotification()    {}
+
 // Notifications returns a channel of parsed notifications sent by the remote
 // bitcoin RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for
 // later reads.
-func (c *RPCClient) Notifications() <-chan interface{} {
+func (c *RPCClient) Notifications() <-chan Notification {
 	return c.dequeueNotification
 }
 
@@ -201,7 +214,7 @@ func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 
 // parseBlock parses a btcws definition of the block a tx is mined it to the
 // Block structure of the wtxmgr package, and the block index.  This is done
-// here since btcrpcclient doesn't parse this nicely for us.
+// here since rpcclient doesn't parse this nicely for us.
 func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	if block == nil {
 		return nil, nil
@@ -295,13 +308,10 @@ func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
-func (c *RPCClient) handler() {
+func (c *RPCClient) handler() error {
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
-		log.Errorf("Failed to receive best block from chain server: %v", err)
-		c.Stop()
-		c.wg.Done()
-		return
+		return err
 	}
 
 	bs := &waddrmgr.BlockStamp{Hash: *hash, Height: height}
@@ -313,12 +323,19 @@ func (c *RPCClient) handler() {
 	// need to process earlier blockconnected notifications still waiting
 	// here.
 
-	var notifications []interface{}
+	// The time we wait without hearing anything from the server before we
+	// ping it to make sure it's still active.
+	pingInterval := time.Minute
+
+	// The time we wait to hear back from the server after we ping it.
+	pingTimeout := 3 * time.Second
+
+	var notifications []Notification
 	enqueue := c.enqueueNotification
-	var dequeue chan interface{}
-	var next interface{}
-	pingChan := time.After(time.Minute)
-out:
+	var dequeue chan Notification
+	var next Notification
+	pingChan := time.After(pingInterval)
+
 	for {
 		select {
 		case n, ok := <-enqueue:
@@ -326,18 +343,26 @@ out:
 				// If no notifications are queued for handling,
 				// the queue is finished.
 				if len(notifications) == 0 {
-					break out
+					return nil
 				}
 				// nil channel so no more reads can occur.
 				enqueue = nil
 				continue
 			}
+
 			if len(notifications) == 0 {
 				next = n
-				dequeue = c.dequeueNotification
+			} else {
+				next = notifications[0]
+				notifications[0] = nil
+				notifications = notifications[1:]
+				notifications = append(notifications, n)
 			}
-			notifications = append(notifications, n)
-			pingChan = time.After(time.Minute)
+
+			dequeue = c.dequeueNotification
+
+			// We have received a notification, so reset the timer.
+			pingChan = time.After(pingTimeout)
 
 		case dequeue <- next:
 			if n, ok := next.(BlockConnected); ok {
@@ -347,15 +372,15 @@ out:
 				}
 			}
 
-			notifications[0] = nil
-			notifications = notifications[1:]
 			if len(notifications) != 0 {
 				next = notifications[0]
+				notifications[0] = nil
+				notifications = notifications[1:]
 			} else {
 				// If no more notifications can be enqueued, the
 				// queue is finished.
 				if enqueue == nil {
-					break out
+					return nil
 				}
 				dequeue = nil
 			}
@@ -364,13 +389,6 @@ out:
 			// No notifications were received in the last 60s.
 			// Ensure the connection is still active by making a new
 			// request to the server.
-			// TODO: A minute timeout is used to prevent the handler
-			// loop from blocking here forever, but this is much larger
-			// than it needs to be due to btcd processing websocket
-			// requests synchronously (see
-			// https://github.com/btcsuite/btcd/issues/504).  Decrease
-			// this to something saner like 3s when the above issue is
-			// fixed.
 			type sessionResult struct {
 				err error
 			}
@@ -383,34 +401,75 @@ out:
 			select {
 			case resp := <-sessionResponse:
 				if resp.err != nil {
-					log.Errorf("Failed to receive session "+
+					return fmt.Errorf("Failed to receive session "+
 						"result: %v", resp.err)
-					c.Stop()
-					break out
 				}
-				pingChan = time.After(time.Minute)
+				pingChan = time.After(pingInterval)
 
-			case <-time.After(time.Minute):
-				log.Errorf("Timeout waiting for session RPC")
-				c.Stop()
-				break out
+			case <-time.After(pingTimeout):
+				return errors.New("Timeout waiting for session RPC")
 			}
 
 		case c.currentBlock <- bs:
 
 		case <-c.quit:
-			break out
+			return nil
 		}
 	}
-
-	c.Stop()
-	close(c.dequeueNotification)
-	c.wg.Done()
 }
 
-// POSTClient creates the equivalent HTTP POST btcrpcclient.Client.
-func (c *RPCClient) POSTClient() (*btcrpcclient.Client, error) {
+func (c *RPCClient) connect() error {
+	err := c.Connect(c.reconnectAttempts)
+	if err != nil {
+		return err
+	}
+
+	// Verify that the server is running on the expected network.
+	net, err := c.GetCurrentNet()
+	if err != nil {
+		c.Disconnect()
+		return err
+	}
+	if net != c.chainParams.Net {
+		c.Disconnect()
+		return errors.New("mismatched networks")
+	}
+
+	return nil
+}
+
+func (c *RPCClient) reconnectHandler() error {
+	defer func() {
+		c.Stop()
+		close(c.dequeueNotification)
+		c.wg.Done()
+	}()
+
+	for {
+		// We already connected in Start().
+		err := c.handler()
+		if err != nil {
+			return err
+		}
+
+		// Ensure that we have not already quit.
+		select {
+		case <-c.quit:
+			// The quit channel has been closed, so return nil.
+			return nil
+		default:
+		}
+
+		err = c.connect()
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// POSTClient creates the equivalent HTTP POST rpcclient.Client.
+func (c *RPCClient) POSTClient() (*rpcclient.Client, error) {
 	configCopy := *c.connConfig
 	configCopy.HTTPPostMode = true
-	return btcrpcclient.New(&configCopy, nil)
+	return rpcclient.New(&configCopy, nil)
 }

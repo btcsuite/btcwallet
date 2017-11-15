@@ -11,11 +11,11 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"runtime"
-	"sync"
 
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
+	"google.golang.org/grpc"
 )
 
 var (
@@ -68,24 +68,43 @@ func walletMain() error {
 	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 	loader := wallet.NewLoader(activeNet.Params, dbDir)
 
+	if !cfg.NoInitialLoad {
+		// Load the wallet database.  It must have been created already
+		// or this will return an appropriate error.
+		_, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+		if err != nil {
+			log.Error(err)
+			return err
+		}
+	}
+	
+	var rpcs *grpc.Server 
+	var legacyRPCServer *legacyrpc.Server
+	
+	lifecycle := func(ws *wallet.Session) error {
+		// All running rpc services are notified of the session's existence.
+		startWalletRPCServices(ws, rpcs, legacyRPCServer)
+
+		// The session will be shut down by the rpc service or by the
+		// interrupt handler.
+		return ws.Wallet.WaitForShutdown()
+	}
+
+	// Attempt to dial into btcd.
+	chainClient, err := rpcClientDial()
+	if err != nil {
+		log.Errorf("Failed to create rpc connection to btcd: %v", err)
+		return err
+	}
+
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client
 	// created below after each is created.
-	rpcs, legacyRPCServer, err := startRPCServers(loader)
+	rpcs, legacyRPCServer, err = startRPCServers(loader, chainClient, lifecycle)
 	if err != nil {
 		log.Errorf("Unable to create RPC servers: %v", err)
 		return err
 	}
-
-	// Create and start chain RPC client so it's ready to connect to
-	// the wallet when loaded later.
-	if !cfg.NoInitialLoad {
-		go rpcClientConnectLoop(legacyRPCServer, loader)
-	}
-
-	loader.RunAfterLoad(func(w *wallet.Wallet) {
-		startWalletRPCServices(w, rpcs, legacyRPCServer)
-	})
 
 	if !cfg.NoInitialLoad {
 		// Load the wallet database.  It must have been created already
@@ -105,6 +124,7 @@ func walletMain() error {
 		if err != nil && err != wallet.ErrNotLoaded {
 			log.Errorf("Failed to close wallet: %v", err)
 		}
+		chainClient.Stop()
 	})
 	if rpcs != nil {
 		addInterruptHandler(func() {
@@ -132,68 +152,8 @@ func walletMain() error {
 	return nil
 }
 
-// rpcClientConnectLoop continuously attempts a connection to the consensus RPC
-// server.  When a connection is established, the client is used to sync the
-// loaded wallet, either immediately or when loaded at a later time.
-//
-// The legacy RPC is optional.  If set, the connected RPC client will be
-// associated with the server for RPC passthrough and to enable additional
-// methods.
-func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Loader) {
-	certs := readCAFile()
-
-	for {
-		chainClient, err := startChainRPC(certs)
-		if err != nil {
-			log.Errorf("Unable to open connection to consensus RPC server: %v", err)
-			continue
-		}
-
-		// Rather than inlining this logic directly into the loader
-		// callback, a function variable is used to avoid running any of
-		// this after the client disconnects by setting it to nil.  This
-		// prevents the callback from associating a wallet loaded at a
-		// later time with a client that has already disconnected.  A
-		// mutex is used to make this concurrent safe.
-		associateRPCClient := func(w *wallet.Wallet) {
-			w.SynchronizeRPC(chainClient)
-			if legacyRPCServer != nil {
-				legacyRPCServer.SetChainServer(chainClient)
-			}
-		}
-		mu := new(sync.Mutex)
-		loader.RunAfterLoad(func(w *wallet.Wallet) {
-			mu.Lock()
-			associate := associateRPCClient
-			mu.Unlock()
-			if associate != nil {
-				associate(w)
-			}
-		})
-
-		chainClient.WaitForShutdown()
-
-		mu.Lock()
-		associateRPCClient = nil
-		mu.Unlock()
-
-		loadedWallet, ok := loader.LoadedWallet()
-		if ok {
-			// Do not attempt a reconnect when the wallet was
-			// explicitly stopped.
-			if loadedWallet.ShuttingDown() {
-				return
-			}
-
-			loadedWallet.SetChainSynced(false)
-
-			// TODO: Rework the wallet so changing the RPC client
-			// does not require stopping and restarting everything.
-			loadedWallet.Stop()
-			loadedWallet.WaitForShutdown()
-			loadedWallet.Start()
-		}
-	}
+func rpcClientDial() (*chain.RPCClient, error) {
+	return startChainRPC(readCAFile())
 }
 
 func readCAFile() []byte {
