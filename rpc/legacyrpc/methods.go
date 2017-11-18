@@ -506,7 +506,7 @@ func getInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (
 	// to using the manager version.
 	info.WalletVersion = int32(waddrmgr.LatestMgrVersion)
 	info.Balance = bal.ToBTC()
-	info.PaytxFee = w.RelayFee().ToBTC()
+	info.PaytxFee = float64(txrules.DefaultRelayFeePerKb)
 	// We don't set the following since they don't make much sense in the
 	// wallet architecture:
 	//  - unlocked_until
@@ -1368,12 +1368,13 @@ func makeOutputs(pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) 
 // It returns the transaction hash in string format upon success
 // All errors are returned in btcjson.RPCError format
 func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
-	account uint32, minconf int32) (string, error) {
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount) (string, error) {
+
 	outputs, err := makeOutputs(amounts, w.ChainParams())
 	if err != nil {
 		return "", err
 	}
-	txHash, err := w.SendOutputs(outputs, account, minconf)
+	txHash, err := w.SendOutputs(outputs, account, minconf, feeSatPerKb)
 	if err != nil {
 		if err == txrules.ErrAmountNegative {
 			return "", ErrNeedPositiveAmount
@@ -1440,7 +1441,8 @@ func sendFrom(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) 
 		cmd.ToAddress: amt,
 	}
 
-	return sendPairs(w, pairs, account, minConf)
+	return sendPairs(w, pairs, account, minConf,
+		txrules.DefaultRelayFeePerKb)
 }
 
 // sendMany handles a sendmany RPC request by creating a new transaction
@@ -1481,7 +1483,7 @@ func sendMany(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		pairs[k] = amt
 	}
 
-	return sendPairs(w, pairs, account, minConf)
+	return sendPairs(w, pairs, account, minConf, txrules.DefaultRelayFeePerKb)
 }
 
 // sendToAddress handles a sendtoaddress RPC request by creating a new
@@ -1517,7 +1519,8 @@ func sendToAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 
 	// sendtoaddress always spends from the default account, this matches bitcoind
-	return sendPairs(w, pairs, waddrmgr.DefaultAccountNum, 1)
+	return sendPairs(w, pairs, waddrmgr.DefaultAccountNum, 1,
+		txrules.DefaultRelayFeePerKb)
 }
 
 // setTxFee sets the transaction fee per kilobyte added to transactions.
@@ -1528,12 +1531,6 @@ func setTxFee(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if cmd.Amount < 0 {
 		return nil, ErrNeedPositiveAmount
 	}
-
-	relayFee, err := btcutil.NewAmount(cmd.Amount)
-	if err != nil {
-		return nil, err
-	}
-	w.SetRelayFee(relayFee)
 
 	// A boolean true result is returned upon success.
 	return true, nil
