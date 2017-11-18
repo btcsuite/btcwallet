@@ -75,8 +75,6 @@ type Wallet struct {
 	chainClientSyncMtx sync.Mutex
 
 	lockedOutpoints map[wire.OutPoint]struct{}
-	relayFee        btcutil.Amount
-	relayFeeMu      sync.Mutex
 
 	// Channels for rescan processing.  Requests are added and merged with
 	// any waiting requests, before being sent to another goroutine to
@@ -203,23 +201,6 @@ func (w *Wallet) ChainClient() chain.Interface {
 	chainClient := w.chainClient
 	w.chainClientLock.Unlock()
 	return chainClient
-}
-
-// RelayFee returns the current minimum relay fee (per kB of serialized
-// transaction) used when constructing transactions.
-func (w *Wallet) RelayFee() btcutil.Amount {
-	w.relayFeeMu.Lock()
-	relayFee := w.relayFee
-	w.relayFeeMu.Unlock()
-	return relayFee
-}
-
-// SetRelayFee sets a new minimum relay fee (per kB of serialized
-// transaction) used when constructing transactions.
-func (w *Wallet) SetRelayFee(relayFee btcutil.Amount) {
-	w.relayFeeMu.Lock()
-	w.relayFee = relayFee
-	w.relayFeeMu.Unlock()
 }
 
 // quitChan atomically reads the quit channel.
@@ -529,10 +510,11 @@ func (w *Wallet) syncWithChain() error {
 
 type (
 	createTxRequest struct {
-		account uint32
-		outputs []*wire.TxOut
-		minconf int32
-		resp    chan createTxResponse
+		account     uint32
+		outputs     []*wire.TxOut
+		minconf     int32
+		feeSatPerKB btcutil.Amount
+		resp        chan createTxResponse
 	}
 	createTxResponse struct {
 		tx  *txauthor.AuthoredTx
@@ -562,7 +544,7 @@ out:
 				continue
 			}
 			tx, err := w.txToOutputs(txr.outputs, txr.account,
-				txr.minconf)
+				txr.minconf, txr.feeSatPerKB)
 			heldUnlock.release()
 			txr.resp <- createTxResponse{tx, err}
 		case <-quit:
@@ -2318,16 +2300,15 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 // SendOutputs creates and sends payment transactions. It returns the
 // transaction hash upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32) (*chainhash.Hash, error) {
+	minconf int32, satPerKb btcutil.Amount) (*chainhash.Hash, error) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return nil, err
 	}
 
-	relayFee := w.RelayFee()
 	for _, output := range outputs {
-		err = txrules.CheckOutput(output, relayFee)
+		err = txrules.CheckOutput(output, satPerKb)
 		if err != nil {
 			return nil, err
 		}
@@ -2658,7 +2639,6 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *c
 		Manager:             addrMgr,
 		TxStore:             txMgr,
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
-		relayFee:            txrules.DefaultRelayFeePerKb,
 		rescanAddJob:        make(chan *RescanJob),
 		rescanBatch:         make(chan *rescanBatch),
 		rescanNotifications: make(chan interface{}),

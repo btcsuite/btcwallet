@@ -101,7 +101,9 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 // UTXO set and minconf policy. An additional output may be added to return
 // change to the wallet.  An appropriate fee is included based on the wallet's
 // current relay fee.  The wallet must be unlocked to create the transaction.
-func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int32) (tx *txauthor.AuthoredTx, err error) {
+func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
+	minconf int32, feeSatPerKb btcutil.Amount) (tx *txauthor.AuthoredTx, err error) {
+
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return nil, err
@@ -137,7 +139,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32, minconf int3
 			}
 			return txscript.PayToAddrScript(changeAddr)
 		}
-		tx, err = txauthor.NewUnsignedTransaction(outputs, w.RelayFee(),
+		tx, err = txauthor.NewUnsignedTransaction(outputs, feeSatPerKb,
 			inputSource, changeSource)
 		if err != nil {
 			return err
