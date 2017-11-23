@@ -561,13 +561,14 @@ out:
 // function is serialized to prevent the creation of many transactions which
 // spend the same outputs.
 func (w *Wallet) CreateSimpleTx(account uint32, outputs []*wire.TxOut,
-	minconf int32) (*txauthor.AuthoredTx, error) {
+	minconf int32, satPerKb btcutil.Amount) (*txauthor.AuthoredTx, error) {
 
 	req := createTxRequest{
-		account: account,
-		outputs: outputs,
-		minconf: minconf,
-		resp:    make(chan createTxResponse),
+		account:     account,
+		outputs:     outputs,
+		minconf:     minconf,
+		feeSatPerKB: satPerKb,
+		resp:        make(chan createTxResponse),
 	}
 	w.createTxRequests <- req
 	resp := <-req.resp
@@ -2316,7 +2317,7 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 
 	// Create transaction, replying with an error if the creation
 	// was not successful.
-	createdTx, err := w.CreateSimpleTx(account, outputs, minconf)
+	createdTx, err := w.CreateSimpleTx(account, outputs, minconf, satPerKb)
 	if err != nil {
 		return nil, err
 	}
