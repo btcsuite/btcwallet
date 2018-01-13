@@ -5,10 +5,11 @@ import (
 	"container/list"
 	"encoding/hex"
 	"errors"
+	"net"
 	"sync"
 	"time"
 
-	"github.com/pebbe/zmq4"
+	"github.com/lightninglabs/gozmq"
 	"github.com/roasbeef/btcd/btcjson"
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
@@ -511,44 +512,13 @@ func (c *BitcoindClient) socketHandler() {
 	defer c.wg.Done()
 
 	// Connect a ZMQ socket for block notifications
-	zmqCtx, err := zmq4.NewContext()
+	zmqClient, err := gozmq.Subscribe(c.zmqConnect, []string{"rawblock",
+		"rawtx"}, c.zmqPollInterval)
 	if err != nil {
 		log.Error(err)
 		return
 	}
-	defer func() {
-		if zmqCtx != nil {
-			err = zmqCtx.Term()
-			log.Infof("ZMQ context terminated: %v\n", err)
-		}
-	}()
-	zmqClient, err := zmqCtx.NewSocket(zmq4.SUB)
-	if err != nil {
-		log.Error(err)
-		return
-	}
-	defer func() {
-		if zmqClient != nil {
-			err = zmqClient.Close()
-			log.Infof("ZMQ socket closed: %v\n", err)
-		}
-	}()
-	err = zmqClient.SetSubscribe("rawblock")
-	if err != nil {
-		log.Error(err)
-		return
-	}
-	err = zmqClient.SetSubscribe("rawtx")
-	if err != nil {
-		log.Error(err)
-		return
-	}
-	err = zmqClient.SetRcvtimeo(c.zmqPollInterval)
-	err = zmqClient.Connect(c.zmqConnect)
-	if err != nil {
-		log.Error(err)
-		return
-	}
+	defer zmqClient.Close()
 	log.Infof("Started listening for blocks via ZMQ on %s", c.zmqConnect)
 	c.onClientConnect()
 
@@ -635,12 +605,16 @@ mainLoop:
 		}
 
 		// Now, poll events from bitcoind.
-		msgBytes, err := zmqClient.RecvMessageBytes(0)
-		if err == zmq4.Errno(0xb) { // EAGAIN - timeout on recv
-			continue mainLoop
-		}
+		msgBytes, err := zmqClient.Receive()
 		if err != nil {
-			log.Error(err)
+			switch e := err.(type) {
+			case net.Error:
+				if !e.Timeout() {
+					log.Error(err)
+				}
+			default:
+				log.Error(err)
+			}
 			continue mainLoop
 		}
 
