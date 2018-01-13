@@ -10,6 +10,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -59,6 +60,10 @@ updated: 2017-11-18T15:17:20.95646706-08:00
 hash: 83bb1c0a0f5c6396d2387746544592662898af52596d5cdca898b6fbfaa60841
 updated: 2017-11-29T14:42:36.82153259-06:00
 >>>>>>> 7a32017... multi: add bitcoind back-end (only for API use for now)
+=======
+hash: 8fdbf966a888ff626d377d985e34c32518f81e96dc661433184ce011bad062b2
+updated: 2018-01-12T18:42:39.220877425-07:00
+>>>>>>> 6c1491e... build+chain: replace pebbe/zmq4 with lightninglabs/gozmq (native Go)
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -179,8 +184,8 @@ imports:
   subpackages:
   - filterdb
   - headerfs
-- name: github.com/pebbe/zmq4
-  version: 90d69e412a09549f2e90bac70fbb449081f1e5c1
+- name: github.com/lightninglabs/gozmq
+  version: b0bbb30a99d00b25c3304994d20aac68607b75c0
 - name: github.com/roasbeef/btcd
   version: 5d9e4e1fa749fa2f1675802a4c9f10ef0ada04d1
   subpackages:
