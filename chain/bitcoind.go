@@ -359,13 +359,20 @@ func (c *BitcoindClient) Start() error {
 		return errors.New("mismatched networks")
 	}
 
+	// Connect a ZMQ socket for block notifications
+	zmqClient, err := gozmq.Subscribe(c.zmqConnect, []string{"rawblock",
+		"rawtx"}, c.zmqPollInterval)
+	if err != nil {
+		return err
+	}
+
 	c.quitMtx.Lock()
 	c.started = true
 	c.quitMtx.Unlock()
 
 	c.wg.Add(2)
 	go c.handler()
-	go c.socketHandler()
+	go c.socketHandler(zmqClient)
 	return nil
 }
 
@@ -508,17 +515,10 @@ func (c *BitcoindClient) onRescanFinished(hash *chainhash.Hash, height int32, bl
 
 // socketHandler reads events from the ZMQ socket, processes them as
 // appropriate, and queues them as btcd or neutrino would.
-func (c *BitcoindClient) socketHandler() {
+func (c *BitcoindClient) socketHandler(zmqClient *gozmq.Conn) {
 	defer c.wg.Done()
-
-	// Connect a ZMQ socket for block notifications
-	zmqClient, err := gozmq.Subscribe(c.zmqConnect, []string{"rawblock",
-		"rawtx"}, c.zmqPollInterval)
-	if err != nil {
-		log.Error(err)
-		return
-	}
 	defer zmqClient.Close()
+
 	log.Infof("Started listening for blocks via ZMQ on %s", c.zmqConnect)
 	c.onClientConnect()
 
