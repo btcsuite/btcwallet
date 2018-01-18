@@ -11,6 +11,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -64,6 +65,10 @@ updated: 2017-11-29T14:42:36.82153259-06:00
 hash: 8fdbf966a888ff626d377d985e34c32518f81e96dc661433184ce011bad062b2
 updated: 2018-01-12T18:42:39.220877425-07:00
 >>>>>>> 6c1491e... build+chain: replace pebbe/zmq4 with lightninglabs/gozmq (native Go)
+=======
+hash: 7ff104fae6ac78353955c2ef70405dce8a8c0f071111beaf0fc6ea392c5d9bbd
+updated: 2018-01-17T18:11:30.867494300-07:00
+>>>>>>> de6548c... build: update glide to latest btcd, neutrino, and gozmq
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -180,14 +185,14 @@ imports:
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/neutrino
-  version: 36dd930b83e6db89495e74fa7516a9fbe5ecfd60
+  version: 2241200df496ac8fbbe3ffac5be0f1866ad4330c
   subpackages:
   - filterdb
   - headerfs
 - name: github.com/lightninglabs/gozmq
-  version: b0bbb30a99d00b25c3304994d20aac68607b75c0
+  version: 0d266ba6d55ea65c18c7a02d8992c89355149e80
 - name: github.com/roasbeef/btcd
-  version: 5d9e4e1fa749fa2f1675802a4c9f10ef0ada04d1
+  version: 9978b939c33973be19b932fa7b936079bb7ba38d
   subpackages:
   - addrmgr
   - blockchain
