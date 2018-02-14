@@ -151,7 +151,7 @@ func (s *walletServer) Network(ctx context.Context, req *pb.NetworkRequest) (
 func (s *walletServer) AccountNumber(ctx context.Context, req *pb.AccountNumberRequest) (
 	*pb.AccountNumberResponse, error) {
 
-	accountNum, err := s.wallet.AccountNumber(req.AccountName)
+	accountNum, err := s.wallet.AccountNumber(waddrmgr.KeyScopeBIP0044, req.AccountName)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -162,7 +162,7 @@ func (s *walletServer) AccountNumber(ctx context.Context, req *pb.AccountNumberR
 func (s *walletServer) Accounts(ctx context.Context, req *pb.AccountsRequest) (
 	*pb.AccountsResponse, error) {
 
-	resp, err := s.wallet.Accounts()
+	resp, err := s.wallet.Accounts(waddrmgr.KeyScopeBIP0044)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -188,7 +188,7 @@ func (s *walletServer) Accounts(ctx context.Context, req *pb.AccountsRequest) (
 func (s *walletServer) RenameAccount(ctx context.Context, req *pb.RenameAccountRequest) (
 	*pb.RenameAccountResponse, error) {
 
-	err := s.wallet.RenameAccount(req.AccountNumber, req.NewName)
+	err := s.wallet.RenameAccount(waddrmgr.KeyScopeBIP0044, req.AccountNumber, req.NewName)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -214,7 +214,7 @@ func (s *walletServer) NextAccount(ctx context.Context, req *pb.NextAccountReque
 		return nil, translateError(err)
 	}
 
-	account, err := s.wallet.NextAccount(req.AccountName)
+	account, err := s.wallet.NextAccount(waddrmgr.KeyScopeBIP0044, req.AccountName)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -231,9 +231,9 @@ func (s *walletServer) NextAddress(ctx context.Context, req *pb.NextAddressReque
 	)
 	switch req.Kind {
 	case pb.NextAddressRequest_BIP0044_EXTERNAL:
-		addr, err = s.wallet.NewAddress(req.Account, waddrmgr.PubKeyHash)
+		addr, err = s.wallet.NewAddress(req.Account, waddrmgr.KeyScopeBIP0044)
 	case pb.NextAddressRequest_BIP0044_INTERNAL:
-		addr, err = s.wallet.NewChangeAddress(req.Account, waddrmgr.PubKeyHash)
+		addr, err = s.wallet.NewChangeAddress(req.Account, waddrmgr.KeyScopeBIP0044)
 	default:
 		return nil, grpc.Errorf(codes.InvalidArgument, "kind=%v", req.Kind)
 	}
@@ -271,7 +271,7 @@ func (s *walletServer) ImportPrivateKey(ctx context.Context, req *pb.ImportPriva
 			"Only the imported account accepts private key imports")
 	}
 
-	_, err = s.wallet.ImportPrivateKey(wif, nil, req.Rescan)
+	_, err = s.wallet.ImportPrivateKey(waddrmgr.KeyScopeBIP0044, wif, nil, req.Rescan)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -349,7 +349,7 @@ func (s *walletServer) FundTransaction(ctx context.Context, req *pb.FundTransact
 
 	var changeScript []byte
 	if req.IncludeChangeScript && totalAmount > btcutil.Amount(req.TargetAmount) {
-		changeAddr, err := s.wallet.NewChangeAddress(req.Account, waddrmgr.PubKeyHash)
+		changeAddr, err := s.wallet.NewChangeAddress(req.Account, waddrmgr.KeyScopeBIP0044)
 		if err != nil {
 			return nil, translateError(err)
 		}
