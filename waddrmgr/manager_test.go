@@ -1943,3 +1943,457 @@ func TestEncryptDecrypt(t *testing.T) {
 		}
 	}
 }
+
+// TestScopedKeyManagerManagement tests that callers are able to properly
+// create, retrieve, and utilize new scoped managers outside the set of default
+// created scopes.
+func TestScopedKeyManagerManagement(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *waddrmgr.Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = waddrmgr.Create(
+			ns, seed, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt,
+		)
+		if err != nil {
+			return err
+		}
+
+		mgr, err = waddrmgr.Open(
+			ns, pubPassphrase, &chaincfg.MainNetParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	if err != nil {
+		t.Fatalf("create/open: unexpected error: %v", err)
+	}
+
+	// All the default scopes should have been created and loaded into
+	// memory upon initial opening.
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		_, err := mgr.FetchScopedKeyManager(scope)
+		if err != nil {
+			t.Fatalf("unable to fetch scope %v: %v", scope, err)
+		}
+	}
+
+	// Next, ensure that if we create an internal and external addrs for
+	// each of the default scope types, then they're derived according to
+	// their schema.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		for _, scope := range waddrmgr.DefaultKeyScopes {
+			sMgr, err := mgr.FetchScopedKeyManager(scope)
+			if err != nil {
+				t.Fatalf("unable to fetch scope %v: %v", scope, err)
+			}
+
+			externalAddr, err := sMgr.NextExternalAddresses(
+				ns, waddrmgr.DefaultAccountNum, 1,
+			)
+			if err != nil {
+				t.Fatalf("unable to derive external addr: %v", err)
+			}
+
+			// The external address should match the prescribed
+			// addr schema for this scoped key manager.
+			if externalAddr[0].AddrType() != waddrmgr.ScopeAddrMap[scope].ExternalAddrType {
+				t.Fatalf("addr type mismatch: expected %v, got %v",
+					externalAddr[0].AddrType(),
+					waddrmgr.ScopeAddrMap[scope].ExternalAddrType)
+			}
+
+			internalAddr, err := sMgr.NextInternalAddresses(
+				ns, waddrmgr.DefaultAccountNum, 1,
+			)
+			if err != nil {
+				t.Fatalf("unable to derive internal addr: %v", err)
+			}
+
+			// Similarly, the internal address should match the
+			// prescribed addr schema for this scoped key manager.
+			if internalAddr[0].AddrType() != waddrmgr.ScopeAddrMap[scope].InternalAddrType {
+				t.Fatalf("addr type mismatch: expected %v, got %v",
+					internalAddr[0].AddrType(),
+					waddrmgr.ScopeAddrMap[scope].InternalAddrType)
+			}
+		}
+
+		return err
+	})
+	if err != nil {
+		t.Fatalf("unable to read db: %v", err)
+	}
+
+	// Now that the manager is open, we'll create a "test" scope that we'll
+	// be utilizing for the remainder of the test.
+	testScope := waddrmgr.KeyScope{
+		Purpose: 99,
+		Coin:    0,
+	}
+	addrSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+		InternalAddrType: waddrmgr.WitnessPubKey,
+	}
+	var scopedMgr *waddrmgr.ScopedKeyManager
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		scopedMgr, err = mgr.NewScopedKeyManager(ns, testScope, addrSchema)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unable to read db: %v", err)
+	}
+
+	// The manager was just created, we should be able to look it up within
+	// the root manager.
+	if _, err := mgr.FetchScopedKeyManager(testScope); err != nil {
+		t.Fatalf("attempt to read created mgr failed: %v", err)
+	}
+
+	var externalAddr, internalAddr []waddrmgr.ManagedAddress
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		// We'll now create a new external address to ensure we
+		// retrieve the proper type.
+		externalAddr, err = scopedMgr.NextExternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, 1,
+		)
+		if err != nil {
+			t.Fatalf("unable to derive external addr: %v", err)
+		}
+
+		internalAddr, err = scopedMgr.NextInternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, 1,
+		)
+		if err != nil {
+			t.Fatalf("unable to derive internal addr: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("open: unexpected error: %v", err)
+	}
+
+	// Ensure that the type of the address matches as expected.
+	if externalAddr[0].AddrType() != waddrmgr.NestedWitnessPubKey {
+		t.Fatalf("addr type mismatch: expected %v, got %v",
+			waddrmgr.NestedWitnessPubKey, externalAddr[0].AddrType())
+	}
+	_, ok := externalAddr[0].Address().(*btcutil.AddressScriptHash)
+	if !ok {
+		t.Fatalf("wrong type: %T", externalAddr[0].Address())
+	}
+
+	// We'll also create an internal address and ensure that the types
+	// match up properly.
+	if internalAddr[0].AddrType() != waddrmgr.WitnessPubKey {
+		t.Fatalf("addr type mismatch: expected %v, got %v",
+			waddrmgr.WitnessPubKey, internalAddr[0].AddrType())
+	}
+	_, ok = internalAddr[0].Address().(*btcutil.AddressWitnessPubKeyHash)
+	if !ok {
+		t.Fatalf("wrong type: %T", externalAddr[0].Address())
+	}
+
+	// We'll now simulate a restart by closing, then restarting the
+	// manager.
+	mgr.Close()
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		var err error
+		mgr, err = waddrmgr.Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	if err != nil {
+		t.Fatalf("open: unexpected error: %v", err)
+	}
+	defer mgr.Close()
+
+	// We should be able to retrieve the new scoped manager that we just
+	// created.
+	scopedMgr, err = mgr.FetchScopedKeyManager(testScope)
+	if err != nil {
+		t.Fatalf("attempt to read created mgr failed: %v", err)
+	}
+
+	// If we fetch the last generated external address, it should map
+	// exactly to the address that we just generated.
+	var lastAddr waddrmgr.ManagedAddress
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		lastAddr, err = scopedMgr.LastExternalAddress(
+			ns, waddrmgr.DefaultAccountNum,
+		)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("open: unexpected error: %v", err)
+	}
+	if !bytes.Equal(lastAddr.AddrHash(), externalAddr[0].AddrHash()) {
+		t.Fatalf("mismatch addr hashes: expected %x, got %x",
+			externalAddr[0].AddrHash(), lastAddr.AddrHash())
+	}
+
+	// After the restart, all the default scopes should be been re-loaded.
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		_, err := mgr.FetchScopedKeyManager(scope)
+		if err != nil {
+			t.Fatalf("unable to fetch scope %v: %v", scope, err)
+		}
+	}
+
+	// Finally, if we attempt to query the root manager for this last
+	// address, it should be able to locate the private key, etc.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		_, err := mgr.Address(ns, lastAddr.Address())
+		if err != nil {
+			return fmt.Errorf("unable to find addr: %v", err)
+		}
+
+		err = mgr.MarkUsed(ns, lastAddr.Address())
+		if err != nil {
+			return fmt.Errorf("unable to mark addr as "+
+				"used: %v", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unable to find addr: %v", err)
+	}
+}
+
+// TestRootHDKeyNeutering tests that callers are unable to create new scoped
+// managers once the root HD key has been deleted from the database.
+func TestRootHDKeyNeutering(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *waddrmgr.Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = waddrmgr.Create(
+			ns, seed, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt,
+		)
+		if err != nil {
+			return err
+		}
+
+		mgr, err = waddrmgr.Open(
+			ns, pubPassphrase, &chaincfg.MainNetParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	if err != nil {
+		t.Fatalf("create/open: unexpected error: %v", err)
+	}
+	defer mgr.Close()
+
+	// With the root manager open, we'll now create a new scoped manager
+	// for usage within this test.
+	testScope := waddrmgr.KeyScope{
+		Purpose: 99,
+		Coin:    0,
+	}
+	addrSchema := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+		InternalAddrType: waddrmgr.WitnessPubKey,
+	}
+	var scopedMgr *waddrmgr.ScopedKeyManager
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		scopedMgr, err = mgr.NewScopedKeyManager(ns, testScope, addrSchema)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unable to read db: %v", err)
+	}
+
+	// With the manager created, we'll now neuter the root HD private key.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		return mgr.NeuterRootKey(ns)
+	})
+	if err != nil {
+		t.Fatalf("unable to read db: %v", err)
+	}
+
+	// If we try to create *another* scope, this should fail, as the root
+	// key is no longer in the database.
+	testScope = waddrmgr.KeyScope{
+		Purpose: 100,
+		Coin:    0,
+	}
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		scopedMgr, err = mgr.NewScopedKeyManager(ns, testScope, addrSchema)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err == nil {
+		t.Fatalf("new scoped manager creation should have failed")
+	}
+}
+
+// TestNewRawAccount tests that callers are able to properly create, and use
+// raw accounts created with only an account number, and not a string which is
+// eventually mapped to an account number.
+func TestNewRawAccount(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *waddrmgr.Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = waddrmgr.Create(
+			ns, seed, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt,
+		)
+		if err != nil {
+			return err
+		}
+
+		mgr, err = waddrmgr.Open(
+			ns, pubPassphrase, &chaincfg.MainNetParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	if err != nil {
+		t.Fatalf("create/open: unexpected error: %v", err)
+	}
+	defer mgr.Close()
+
+	// Now that we have the manager created, we'll fetch one of the default
+	// scopes for usage within this test.
+	scopedMgr, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+	if err != nil {
+		t.Fatalf("unable to fetch scope %v: %v", waddrmgr.KeyScopeBIP0084, err)
+	}
+
+	// With the scoped manager retrieved, we'll attempt to create a new raw
+	// account by number.
+	const accountNum = 1000
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return scopedMgr.NewRawAccount(ns, accountNum)
+	})
+	if err != nil {
+		t.Fatalf("unable to create new account: %v", err)
+	}
+
+	// With the account created, we should be able to derive new addresses
+	// from the account.
+	var accountAddrNext waddrmgr.ManagedAddress
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		addrs, err := scopedMgr.NextExternalAddresses(
+			ns, accountNum, 1,
+		)
+		if err != nil {
+			return err
+		}
+
+		accountAddrNext = addrs[0]
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unable to create addr: %v", err)
+	}
+
+	// Additionally, we should be able to manually derive specific target
+	// keys.
+	var accountTargetAddr waddrmgr.ManagedAddress
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		keyPath := waddrmgr.DerivationPath{
+			Account: accountNum,
+			Branch:  0,
+			Index:   0,
+		}
+		accountTargetAddr, err = scopedMgr.DeriveFromKeyPath(
+			ns, keyPath,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("unable to derive addr: %v", err)
+	}
+
+	// The two keys we just derived should match up perfectly.
+	if accountAddrNext.AddrType() != accountTargetAddr.AddrType() {
+		t.Fatalf("wrong addr type: %v vs %v",
+			accountAddrNext.AddrType(), accountTargetAddr.AddrType())
+	}
+	if !bytes.Equal(accountAddrNext.AddrHash(), accountTargetAddr.AddrHash()) {
+		t.Fatalf("wrong pubkey hash: %x vs %x", accountAddrNext.AddrHash(),
+			accountTargetAddr.AddrHash())
+	}
+}
