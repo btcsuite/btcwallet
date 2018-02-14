@@ -53,8 +53,8 @@ type syncStatus uint8
 
 // These constants define the various supported sync status types.
 //
-// NOTE: These are currently unused but are being defined for the possibility of
-// supporting sync status on a per-address basis.
+// NOTE: These are currently unused but are being defined for the possibility
+// of supporting sync status on a per-address basis.
 const (
 	ssNone    syncStatus = 0 // not iota as they need to be stable for db
 	ssPartial syncStatus = 1
@@ -66,11 +66,9 @@ type addressType uint8
 
 // These constants define the various supported address types.
 const (
-	adtChain              addressType = 0 // not iota as they need to be stable for db
-	adtImport             addressType = 1
-	adtScript             addressType = 2
-	adtChainWitness       addressType = 3
-	adtChainNestedWitness addressType = 4
+	adtChain  addressType = 0
+	adtImport addressType = 1 // not iota as they need to be stable for db
+	adtScript addressType = 2
 )
 
 // accountType represents a type of address stored in the database.
