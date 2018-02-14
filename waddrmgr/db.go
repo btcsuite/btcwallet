@@ -1973,67 +1973,121 @@ func managerExists(ns walletdb.ReadBucket) bool {
 	return mainBucket != nil
 }
 
-// createManagerNS creates the initial namespace structure needed for all of the
-// manager data.  This includes things such as all of the buckets as well as the
-// version and creation date.
-func createManagerNS(ns walletdb.ReadWriteBucket) error {
-	mainBucket, err := ns.CreateBucket(mainBucketName)
+// createScopedManagerNS creates the namespace buckets for a new registered
+// manager scope within the top level bucket. All relevant sub-buckets that a
+// ScopedManager needs to perform its duties are also created.
+func createScopedManagerNS(ns walletdb.ReadWriteBucket, scope *KeyScope) error {
+	// First, we'll create the scope bucket itself for this particular
+	// scope.
+	scopeKey := scopeToBytes(scope)
+	scopeBucket, err := ns.CreateBucket(scopeKey[:])
 	if err != nil {
-		str := "failed to create main bucket"
+		str := "failed to create sync bucket"
 		return managerError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(addrBucketName)
-	if err != nil {
-		str := "failed to create address bucket"
-		return managerError(ErrDatabase, str, err)
-	}
-
-	_, err = ns.CreateBucket(acctBucketName)
+	_, err = scopeBucket.CreateBucket(acctBucketName)
 	if err != nil {
 		str := "failed to create account bucket"
 		return managerError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(addrAcctIdxBucketName)
+	_, err = scopeBucket.CreateBucket(addrBucketName)
+	if err != nil {
+		str := "failed to create address bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	// usedAddrBucketName bucket was added after manager version 1 release
+	_, err = scopeBucket.CreateBucket(usedAddrBucketName)
+	if err != nil {
+		str := "failed to create used addresses bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = scopeBucket.CreateBucket(addrAcctIdxBucketName)
 	if err != nil {
 		str := "failed to create address index bucket"
 		return managerError(ErrDatabase, str, err)
 	}
 
+	_, err = scopeBucket.CreateBucket(acctNameIdxBucketName)
+	if err != nil {
+		str := "failed to create an account name index bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = scopeBucket.CreateBucket(acctIDIdxBucketName)
+	if err != nil {
+		str := "failed to create an account id index bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	_, err = scopeBucket.CreateBucket(metaBucketName)
+	if err != nil {
+		str := "failed to create a meta bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	return nil
+}
+
+// createManagerNS creates the initial namespace structure needed for all of
+// the manager data.  This includes things such as all of the buckets as well
+// as the version and creation date. In addition to creating the key space for
+// the root address manager, we'll also create internal scopes for all the
+// default manager scope types.
+func createManagerNS(ns walletdb.ReadWriteBucket,
+	defaultScopes map[KeyScope]ScopeAddrSchema) error {
+
+	// First, we'll create all the relevant buckets that stem off of the
+	// main bucket.
+	mainBucket, err := ns.CreateBucket(mainBucketName)
+	if err != nil {
+		str := "failed to create main bucket"
+		return managerError(ErrDatabase, str, err)
+	}
 	_, err = ns.CreateBucket(syncBucketName)
 	if err != nil {
 		str := "failed to create sync bucket"
 		return managerError(ErrDatabase, str, err)
 	}
 
-	// usedAddrBucketName bucket was added after manager version 1 release
-	_, err = ns.CreateBucket(usedAddrBucketName)
+	// We'll also create the two top-level scope related buckets as
+	// preparation for the operations below.
+	scopeBucket, err := ns.CreateBucket(scopeBucketName)
 	if err != nil {
-		str := "failed to create used addresses bucket"
+		str := "failed to create scope bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+	scopeSchemas, err := ns.CreateBucket(scopeSchemaBucketName)
+	if err != nil {
+		str := "failed to create scope schema bucket"
 		return managerError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(acctNameIdxBucketName)
-	if err != nil {
-		str := "failed to create an account name index bucket"
-		return managerError(ErrDatabase, str, err)
-	}
+	// Next, we'll create the namespace for each of the relevant default
+	// manager scopes.
+	for scope, scopeSchema := range defaultScopes {
+		// Before we create the entire namespace of this scope, we'll
+		// update the schema mapping to note what types of addresses it
+		// prefers.
+		scopeKey := scopeToBytes(&scope)
+		schemaBytes := scopeSchemaToBytes(&scopeSchema)
+		err := scopeSchemas.Put(scopeKey[:], schemaBytes)
+		if err != nil {
+			return err
+		}
 
-	_, err = ns.CreateBucket(acctIDIdxBucketName)
-	if err != nil {
-		str := "failed to create an account id index bucket"
-		return managerError(ErrDatabase, str, err)
-	}
+		err = createScopedManagerNS(scopeBucket, &scope)
+		if err != nil {
+			return err
+		}
 
-	_, err = ns.CreateBucket(metaBucketName)
-	if err != nil {
-		str := "failed to create a meta bucket"
-		return managerError(ErrDatabase, str, err)
-	}
-
-	if err := putLastAccount(ns, DefaultAccountNum); err != nil {
-		return err
+		err = putLastAccount(ns, &scope, DefaultAccountNum)
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := putManagerVersion(ns, latestMgrVersion); err != nil {
