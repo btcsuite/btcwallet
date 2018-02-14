@@ -19,11 +19,22 @@ import (
 
 // AddressType represents the various address types waddrmgr is currently able
 // to generate, and maintain.
+//
+// NOTE: These MUST be stable as they're used for scope address schema
+// recognition within the database.
 type AddressType uint8
 
 const (
 	// PubKeyHash is a regular p2pkh address.
-	PubKeyHash AddressType = 1 << iota
+	PubKeyHash AddressType = iota
+
+	// Script reprints a raw script address.
+	Script
+
+	// RawPubKey is just raw public key to be used within scripts, This
+	// type indicates that a scoped manager with this address type
+	// shouldn't be consulted during historical rescans.
+	RawPubKey
 
 	// NestedWitnessPubKey represents a p2wkh output nested within a p2sh
 	// output. Using this address type, the wallet can receive funds from
@@ -33,24 +44,10 @@ const (
 	// compatible manner.
 	NestedWitnessPubKey
 
-	// WitnessPubKey represents a p2wkh (pay-to-witness-key-hash) address type.
+	// WitnessPubKey represents a p2wkh (pay-to-witness-key-hash) address
+	// type.
 	WitnessPubKey
 )
-
-// addressTypeToInternal converts the publicly exported address type to the
-// internal address type recognized by the database.
-func addressTypeToInternal(t AddressType) addressType {
-	switch t {
-	case PubKeyHash:
-		return adtChain
-	case NestedWitnessPubKey:
-		return adtChainNestedWitness
-	case WitnessPubKey:
-		return adtChainWitness
-	}
-
-	return adtChain
-}
 
 // ManagedAddress is an interface that provides acces to information regarding
 // an address managed by an address manager. Concrete implementations of this
