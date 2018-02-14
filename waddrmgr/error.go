@@ -127,6 +127,10 @@ const (
 	// ErrEmptyPassphrase indicates that the private passphrase was refused
 	// due to being empty.
 	ErrEmptyPassphrase
+
+	// ErrScopeNotFound is returned when a target scope cannot be found
+	// within the database.
+	ErrScopeNotFound
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
@@ -152,6 +156,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrWrongNet:          "ErrWrongNet",
 	ErrCallBackBreak:     "ErrCallBackBreak",
 	ErrEmptyPassphrase:   "ErrEmptyPassphrase",
+	ErrScopeNotFound:     "ErrScopeNotFound",
 }
 
 // String returns the ErrorCode as a human-readable name.
