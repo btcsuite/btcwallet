@@ -76,7 +76,10 @@ type accountType uint8
 
 // These constants define the various supported account types.
 const (
-	actBIP0044 accountType = 0 // not iota as they need to be stable for db
+	// accountDefault is the current "default" account type within the
+	// database. This is an account that re-uses the key derivation schema
+	// of BIP0044-like accounts.
+	accountDefault accountType = 0 // not iota as they need to be stable
 )
 
 // dbAccountRow houses information stored about an account in the database.
@@ -85,9 +88,9 @@ type dbAccountRow struct {
 	rawData  []byte // Varies based on account type field.
 }
 
-// dbBIP0044AccountRow houses additional information stored about a BIP0044
-// account in the database.
-type dbBIP0044AccountRow struct {
+// dbDefaultAccountRow houses additional information stored about a default
+// BIP0044-like account in the database.
+type dbDefaultAccountRow struct {
 	dbAccountRow
 	pubKeyEncrypted   []byte
 	privKeyEncrypted  []byte
@@ -284,8 +287,8 @@ func fetchMasterKeyParams(ns walletdb.ReadBucket) ([]byte, []byte, error) {
 	return pubParams, privParams, nil
 }
 
-// putMasterKeyParams stores the master key parameters needed to derive them
-// to the database.  Either parameter can be nil in which case no value is
+// putMasterKeyParams stores the master key parameters needed to derive them to
+// the database.  Either parameter can be nil in which case no value is
 // written for the parameter.
 func putMasterKeyParams(ns walletdb.ReadWriteBucket, pubParams, privParams []byte) error {
 	bucket := ns.NestedReadWriteBucket(mainBucketName)
@@ -490,9 +493,9 @@ func serializeAccountRow(row *dbAccountRow) []byte {
 	return buf
 }
 
-// deserializeBIP0044AccountRow deserializes the raw data from the passed
-// account row as a BIP0044 account.
-func deserializeBIP0044AccountRow(accountID []byte, row *dbAccountRow) (*dbBIP0044AccountRow, error) {
+// deserializeDefaultAccountRow deserializes the raw data from the passed
+// account row as a BIP0044-like account.
+func deserializeDefaultAccountRow(accountID []byte, row *dbAccountRow) (*dbDefaultAccountRow, error) {
 	// The serialized BIP0044 account raw data format is:
 	//   <encpubkeylen><encpubkey><encprivkeylen><encprivkey><nextextidx>
 	//   <nextintidx><namelen><name>
@@ -509,7 +512,7 @@ func deserializeBIP0044AccountRow(accountID []byte, row *dbAccountRow) (*dbBIP00
 		return nil, managerError(ErrDatabase, str, nil)
 	}
 
-	retRow := dbBIP0044AccountRow{
+	retRow := dbDefaultAccountRow{
 		dbAccountRow: *row,
 	}
 
@@ -533,11 +536,11 @@ func deserializeBIP0044AccountRow(accountID []byte, row *dbAccountRow) (*dbBIP00
 	return &retRow, nil
 }
 
-// serializeBIP0044AccountRow returns the serialization of the raw data field
-// for a BIP0044 account.
-func serializeBIP0044AccountRow(encryptedPubKey,
-	encryptedPrivKey []byte, nextExternalIndex, nextInternalIndex uint32,
-	name string) []byte {
+// serializeDefaultAccountRow returns the serialization of the raw data field
+// for a BIP0044-like account.
+func serializeDefaultAccountRow(encryptedPubKey, encryptedPrivKey []byte,
+	nextExternalIndex, nextInternalIndex uint32, name string) []byte {
+
 	// The serialized BIP0044 account raw data format is:
 	//   <encpubkeylen><encpubkey><encprivkeylen><encprivkey><nextextidx>
 	//   <nextintidx><namelen><name>
@@ -749,7 +752,7 @@ func putAccountInfo(ns walletdb.ReadWriteBucket, account uint32, encryptedPubKey
 		nextExternalIndex, nextInternalIndex, name)
 
 	acctRow := dbAccountRow{
-		acctType: actBIP0044,
+		acctType: accountDefault,
 		rawData:  rawData,
 	}
 	if err := putAccountRow(ns, account, &acctRow); err != nil {
@@ -779,13 +782,9 @@ func putLastAccount(ns walletdb.ReadWriteBucket, account uint32) error {
 	return nil
 }
 
-// fetchAddressRow loads address information for the provided address id from
-// the database.  This is used as a common base for the various address types
-// to load the common information.
-
-// deserializeAddressRow deserializes the passed serialized address information.
-// This is used as a common base for the various address types to deserialize
-// the common parts.
+// deserializeAddressRow deserializes the passed serialized address
+// information.  This is used as a common base for the various address types to
+// deserialize the common parts.
 func deserializeAddressRow(serializedAddress []byte) (*dbAddressRow, error) {
 	// The serialized address format is:
 	//   <addrType><account><addedTime><syncStatus><rawdata>
@@ -991,10 +990,6 @@ func fetchAddressByHash(ns walletdb.ReadBucket, addrHash []byte) (interface{}, e
 	}
 
 	switch row.addrType {
-	case adtChainWitness:
-		fallthrough
-	case adtChainNestedWitness:
-		fallthrough
 	case adtChain:
 		return deserializeChainedAddress(row)
 	case adtImport:
@@ -1087,7 +1082,7 @@ func putChainedAddress(ns walletdb.ReadWriteBucket, addressID []byte, account ui
 	if err != nil {
 		return err
 	}
-	arow, err := deserializeBIP0044AccountRow(accountID, row)
+	arow, err := deserializeDefaultAccountRow(accountID, row)
 	if err != nil {
 		return err
 	}
@@ -1103,9 +1098,10 @@ func putChainedAddress(ns walletdb.ReadWriteBucket, addressID []byte, account ui
 	}
 
 	// Reserialize the account with the updated index and store it.
-	row.rawData = serializeBIP0044AccountRow(arow.pubKeyEncrypted,
-		arow.privKeyEncrypted, nextExternalIndex, nextInternalIndex,
-		arow.name)
+	row.rawData = serializeDefaultAccountRow(
+		arow.pubKeyEncrypted, arow.privKeyEncrypted, nextExternalIndex,
+		nextInternalIndex, arow.name,
+	)
 	err = bucket.Put(accountID, serializeAccountRow(row))
 	if err != nil {
 		str := fmt.Sprintf("failed to update next index for "+
