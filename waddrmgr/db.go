@@ -229,6 +229,17 @@ var (
 	// flag, the master private key (encrypted), the master HD private key
 	// (encrypted), and also versioning information.
 	mainBucketName = []byte("main")
+
+	// masterHDPrivName is the name of the key that stores the master HD
+	// private key. This key is encrypted with the master private crypto
+	// encryption key. This resides under the main bucket.
+	masterHDPrivName = []byte("mhdpriv")
+
+	// masterHDPubName is the name of the key that stores the master HD
+	// public key. This key is encrypted with the master public crypto
+	// encryption key. This reside under the main bucket.
+	masterHDPubName = []byte("mhdpub")
+
 	// syncBucketName is the name of the bucket that stores the current
 	// sync state of the root manager.
 	syncBucketName = []byte("sync")
@@ -520,6 +531,62 @@ func putCoinTypeKeys(ns walletdb.ReadWriteBucket, scope *KeyScope,
 	}
 
 	return nil
+}
+
+// putMasterHDKeys stores the encrypted master HD keys in the top level main
+// bucket. These are required in order to create any new manager scopes, as
+// those are created via hardened derivation of the children of this key.
+func putMasterHDKeys(ns walletdb.ReadWriteBucket, masterHDPrivEnc, masterHDPubEnc []byte) error {
+	// As this is the key for the root manager, we don't need to fetch any
+	// particular scope, and can insert directly within the main bucket.
+	bucket := ns.NestedReadWriteBucket(mainBucketName)
+
+	// Now that we have the main bucket, we can directly store each of the
+	// relevant keys. If we're in watch only mode, then some or all of
+	// these keys might not be available.
+	if masterHDPrivEnc != nil {
+		err := bucket.Put(masterHDPrivName, masterHDPrivEnc)
+		if err != nil {
+			str := "failed to store encrypted master HD private key"
+			return managerError(ErrDatabase, str, err)
+		}
+	}
+
+	if masterHDPubEnc != nil {
+		err := bucket.Put(masterHDPubName, masterHDPubEnc)
+		if err != nil {
+			str := "failed to store encrypted master HD public key"
+			return managerError(ErrDatabase, str, err)
+		}
+	}
+
+	return nil
+}
+
+// fetchMasterHDKeys attempts to fetch both the master HD private and public
+// keys from the database. If this is a watch only wallet, then it's possible
+// that the master private key isn't stored.
+func fetchMasterHDKeys(ns walletdb.ReadBucket) ([]byte, []byte, error) {
+	bucket := ns.NestedReadBucket(mainBucketName)
+
+	var masterHDPrivEnc, masterHDPubEnc []byte
+
+	// First, we'll try to fetch the master private key. If this database
+	// is watch only, or the master has been neutered, then this won't be
+	// found on disk.
+	key := bucket.Get(masterHDPrivName)
+	if key != nil {
+		masterHDPrivEnc = make([]byte, len(key))
+		copy(masterHDPrivEnc[:], key)
+	}
+
+	key = bucket.Get(masterHDPubName)
+	if key != nil {
+		masterHDPubEnc = make([]byte, len(key))
+		copy(masterHDPubEnc[:], key)
+	}
+
+	return masterHDPrivEnc, masterHDPubEnc, nil
 }
 
 // fetchCryptoKeys loads the encrypted crypto keys which are in turn used to
