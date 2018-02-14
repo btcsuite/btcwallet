@@ -125,14 +125,15 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 
 		inputSource := makeInputSource(eligible)
 		changeSource := func() ([]byte, error) {
-			// Derive the change output script.  As a hack to allow spending from
-			// the imported account, change addresses are created from account 0.
+			// Derive the change output script.  As a hack to allow
+			// spending from the imported account, change addresses
+			// are created from account 0.
 			var changeAddr btcutil.Address
 			var err error
 			if account == waddrmgr.ImportedAddrAccount {
-				changeAddr, err = w.newChangeAddress(addrmgrNs, 0, waddrmgr.WitnessPubKey)
+				changeAddr, err = w.newChangeAddress(addrmgrNs, 0)
 			} else {
-				changeAddr, err = w.newChangeAddress(addrmgrNs, account, waddrmgr.WitnessPubKey)
+				changeAddr, err = w.newChangeAddress(addrmgrNs, account)
 			}
 			if err != nil {
 				return nil, err
@@ -145,9 +146,9 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 			return err
 		}
 
-		// Randomize change position, if change exists, before signing.  This
-		// doesn't affect the serialize size, so the change amount will still be
-		// valid.
+		// Randomize change position, if change exists, before signing.
+		// This doesn't affect the serialize size, so the change amount
+		// will still be valid.
 		if tx.ChangeIndex >= 0 {
 			tx.RandomizeChangePosition()
 		}
@@ -218,7 +219,7 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx, account uint32, minco
 		if err != nil || len(addrs) != 1 {
 			continue
 		}
-		addrAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+		_, addrAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
 		if err != nil || addrAcct != account {
 			continue
 		}

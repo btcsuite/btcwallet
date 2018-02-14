@@ -252,14 +252,14 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord, 
 	if block == nil {
 		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, nil)
 		if err != nil {
-			log.Errorf("Cannot query transaction details for notifiation: %v", err)
+			log.Errorf("Cannot query transaction details for notification: %v", err)
 		} else {
 			w.NtfnServer.notifyUnminedTransaction(dbtx, details)
 		}
 	} else {
 		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, &block.Block)
 		if err != nil {
-			log.Errorf("Cannot query transaction details for notifiation: %v", err)
+			log.Errorf("Cannot query transaction details for notification: %v", err)
 		} else {
 			w.NtfnServer.notifyMinedTransaction(dbtx, details, block)
 		}
