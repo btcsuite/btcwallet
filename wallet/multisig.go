@@ -83,7 +83,16 @@ func (w *Wallet) ImportP2SHRedeemScript(script []byte) (*btcutil.AddressScriptHa
 			Height: 0,
 		}
 
-		addrInfo, err := w.Manager.ImportScript(addrmgrNs, script, bs)
+		// As this is a regular P2SH script, we'll import this into the
+		// BIP0044 scope.
+		bip44Mgr, err := w.Manager.FetchScopedKeyManager(
+			waddrmgr.KeyScopeBIP0084,
+		)
+		if err != nil {
+			return err
+		}
+
+		addrInfo, err := bip44Mgr.ImportScript(addrmgrNs, script, bs)
 		if err != nil {
 			// Don't care if it's already there, but still have to
 			// set the p2shAddr since the address manager didn't

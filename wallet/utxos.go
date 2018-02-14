@@ -56,7 +56,7 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 				// per output.
 				continue
 			}
-			outputAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+			_, outputAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
 			if err != nil {
 				return err
 			}
