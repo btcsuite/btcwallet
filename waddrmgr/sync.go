@@ -11,8 +11,8 @@ import (
 	"github.com/roasbeef/btcwallet/walletdb"
 )
 
-// BlockStamp defines a block (by height and a unique hash) and is
-// used to mark a point in the blockchain that an address manager element is
+// BlockStamp defines a block (by height and a unique hash) and is used to mark
+// a point in the blockchain that an address manager element is
 // synced to.
 type BlockStamp struct {
 	Height    int32
@@ -24,8 +24,8 @@ type BlockStamp struct {
 // seen blocks as height, as well as the start and current sync block stamps.
 type syncState struct {
 	// startBlock is the first block that can be safely used to start a
-	// rescan.  It is either the block the manager was created with, or
-	// the earliest block provided with imported addresses or scripts.
+	// rescan.  It is either the block the manager was created with, or the
+	// earliest block provided with imported addresses or scripts.
 	startBlock BlockStamp
 
 	// syncedTo is the current block the addresses in the manager are known
@@ -43,8 +43,8 @@ func newSyncState(startBlock, syncedTo *BlockStamp) *syncState {
 }
 
 // SetSyncedTo marks the address manager to be in sync with the recently-seen
-// block described by the blockstamp.  When the provided blockstamp is nil,
-// the oldest blockstamp of the block the manager was created at and of all
+// block described by the blockstamp.  When the provided blockstamp is nil, the
+// oldest blockstamp of the block the manager was created at and of all
 // imported addresses will be used.  This effectively allows the manager to be
 // marked as unsynced back to the oldest known point any of the addresses have
 // appeared in the block chain.
