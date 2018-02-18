@@ -69,7 +69,8 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) err
 				continue
 			}
 
-			_, err = w.ImportPrivateKey(wif, &blockStamp, false)
+			_, err = w.ImportPrivateKey(waddrmgr.KeyScopeBIP0044,
+				wif, &blockStamp, false)
 			if err != nil {
 				fmt.Printf("WARN: Failed to import private "+
 					"key for address %v: %v\n",

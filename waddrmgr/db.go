@@ -6,7 +6,6 @@
 package waddrmgr
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcutil/hdkeychain"
 	"github.com/roasbeef/btcwallet/walletdb"
 )
 
@@ -2138,87 +2136,17 @@ func upgradeManager(db walletdb.DB, namespaceKey []byte, pubPassPhrase []byte,
 		return managerError(ErrDatabase, str, err)
 	}
 
-	// NOTE: There are currently no upgrades, but this is provided here as a
-	// template for how to properly do upgrades.  Each function to upgrade
-	// to the next version must include serializing the new version as a
-	// part of the same transaction so any failures in upgrades to later
-	// versions won't leave the database in an inconsistent state.  The
-	// putManagerVersion function provides a convenient mechanism for that
-	// purpose.
-	//
-	// Upgrade one version at a time so it is possible to upgrade across
-	// an aribtary number of versions without needing to write a bunch of
-	// additional code to go directly from version X to Y.
-	// if version < 2 {
-	// 	// Upgrade from version 1 to 2.
-	//	if err := upgradeToVersion2(namespace); err != nil {
-	//		return err
-	//	}
-	//
-	//	// The manager is now at version 2.
-	//	version = 2
-	// }
-	// if version < 3 {
-	// 	// Upgrade from version 2 to 3.
-	//	if err := upgradeToVersion3(namespace); err != nil {
-	//		return err
-	//	}
-	//
-	//	// The manager is now at version 3.
-	//	version = 3
-	// }
-
-	if version < 2 {
-		// Upgrade from version 1 to 2.
+	if version < 5 {
 		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(namespaceKey)
-			return upgradeToVersion2(ns)
+			return upgradeToVersion5(ns, pubPassPhrase)
 		})
 		if err != nil {
 			return err
 		}
 
-		// The manager is now at version 2.
-		version = 2
-	}
-
-	if version < 3 {
-		if cbs == nil || cbs.ObtainSeed == nil || cbs.ObtainPrivatePass == nil {
-			str := "failed to obtain seed and private passphrase required for upgrade"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		seed, err := cbs.ObtainSeed()
-		if err != nil {
-			return err
-		}
-		privPassPhrase, err := cbs.ObtainPrivatePass()
-		if err != nil {
-			return err
-		}
-		err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(namespaceKey)
-			return upgradeToVersion3(ns, seed, privPassPhrase, pubPassPhrase, chainParams)
-		})
-		if err != nil {
-			return err
-		}
-
-		// The manager is now at version 3.
-		version = 3
-	}
-
-	if version < 4 {
-		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(namespaceKey)
-			return upgradeToVersion4(ns, pubPassPhrase)
-		})
-		if err != nil {
-			return err
-		}
-
-		// The manager is now at version 4.
-		version = 4
+		// The manager is now at version 5.
+		version = 5
 	}
 
 	// Ensure the manager is upraded to the latest version.  This check is
@@ -2234,224 +2162,154 @@ func upgradeManager(db walletdb.DB, namespaceKey []byte, pubPassPhrase []byte,
 	return nil
 }
 
-// upgradeToVersion3 upgrades the database from version 2 to version 3
-// The following buckets were introduced in version 3 to support account names:
-// * acctNameIdxBucketName
-// * acctIDIdxBucketName
-// * metaBucketName
-func upgradeToVersion3(ns walletdb.ReadWriteBucket, seed, privPassPhrase, pubPassPhrase []byte, chainParams *chaincfg.Params) error {
-	priorScope := &KeyScope{
-		Purpose: 44,
-		Coin:    chainParams.HDCoinType,
-	}
-
-	err := func() error {
-		currentMgrVersion := uint32(3)
-
-		woMgr, err := loadManager(ns, pubPassPhrase, chainParams)
-		if err != nil {
-			return err
-		}
-		defer woMgr.Close()
-
-		err = woMgr.Unlock(ns, privPassPhrase)
-		if err != nil {
-			return err
-		}
-
-		// Derive the master extended key from the seed.
-		root, err := hdkeychain.NewMaster(seed, chainParams)
-		if err != nil {
-			str := "failed to derive master extended key"
-			return managerError(ErrKeyChain, str, err)
-		}
-
-		// Derive the cointype key according to BIP0044.
-		coinTypeKeyPriv, err := deriveCoinTypeKey(
-			root, *priorScope,
-		)
-		if err != nil {
-			str := "failed to derive cointype extended key"
-			return managerError(ErrKeyChain, str, err)
-		}
-
-		cryptoKeyPub := woMgr.cryptoKeyPub
-		cryptoKeyPriv := woMgr.cryptoKeyPriv
-		// Encrypt the cointype keys with the associated crypto keys.
-		coinTypeKeyPub, err := coinTypeKeyPriv.Neuter()
-		if err != nil {
-			str := "failed to convert cointype private key"
-			return managerError(ErrKeyChain, str, err)
-		}
-		coinTypePubEnc, err := cryptoKeyPub.Encrypt([]byte(coinTypeKeyPub.String()))
-		if err != nil {
-			str := "failed to encrypt cointype public key"
-			return managerError(ErrCrypto, str, err)
-		}
-		coinTypePrivEnc, err := cryptoKeyPriv.Encrypt([]byte(coinTypeKeyPriv.String()))
-		if err != nil {
-			str := "failed to encrypt cointype private key"
-			return managerError(ErrCrypto, str, err)
-		}
-
-		// Save the encrypted cointype keys to the database.
-		err = putCoinTypeKeys(ns, priorScope, coinTypePubEnc, coinTypePrivEnc)
-		if err != nil {
-			return err
-		}
-
-		_, err = ns.CreateBucketIfNotExists(acctNameIdxBucketName)
-		if err != nil {
-			str := "failed to create an account name index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = ns.CreateBucketIfNotExists(acctIDIdxBucketName)
-		if err != nil {
-			str := "failed to create an account id index bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		_, err = ns.CreateBucketIfNotExists(metaBucketName)
-		if err != nil {
-			str := "failed to create a meta bucket"
-			return managerError(ErrDatabase, str, err)
-		}
-
-		// Initialize metadata for all keys
-		if err := putLastAccount(ns, priorScope, DefaultAccountNum); err != nil {
-			return err
-		}
-
-		// Update default account indexes
-		if err := putAccountIDIndex(ns, priorScope, DefaultAccountNum, defaultAccountName); err != nil {
-			return err
-		}
-		if err := putAccountNameIndex(ns, priorScope, DefaultAccountNum, defaultAccountName); err != nil {
-			return err
-		}
-		// Update imported account indexes
-		if err := putAccountIDIndex(ns, priorScope, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
-			return err
-		}
-		if err := putAccountNameIndex(ns, priorScope, ImportedAddrAccount, ImportedAddrAccountName); err != nil {
-			return err
-		}
-
-		// Write current manager version
-		if err := putManagerVersion(ns, currentMgrVersion); err != nil {
-			return err
-		}
-
-		// Save "" alias for default account name for backward compat
-		return putAccountNameIndex(ns, priorScope, DefaultAccountNum, "")
-	}()
+// upgradeToVersion5 upgrades the database from version 4 to version 5. After
+// this update, the new ScopedKeyManager features cannot be used. This is due
+// to the fact that in version 5, we now store the encrypted master private
+// keys on disk. However, using the BIP0044 key scope, users will still be able
+// to create old p2pkh addresses.
+func upgradeToVersion5(ns walletdb.ReadWriteBucket, pubPassPhrase []byte) error {
+	// First, we'll check if there are any existing segwit addresses, which
+	// can't be upgraded to the new version. If so, we abort and warn the
+	// user.
+	err := ns.NestedReadBucket(addrBucketName).ForEach(
+		func(k []byte, v []byte) error {
+			row, err := deserializeAddressRow(v)
+			if err != nil {
+				return err
+			}
+			if row.addrType > adtScript {
+				return fmt.Errorf("segwit address exists in " +
+					"wallet, can't upgrade from v4 to " +
+					"v5: well, we tried  ¯\\_(ツ)_/¯")
+			}
+			return nil
+		})
 	if err != nil {
-		return maybeConvertDbError(err)
+		return err
 	}
+
+	// Next, we'll write out the new database version.
+	if err := putManagerVersion(ns, 5); err != nil {
+		return err
+	}
+
+	// First, we'll need to create the new buckets that are used in the new
+	// database version.
+	scopeBucket, err := ns.CreateBucket(scopeBucketName)
+	if err != nil {
+		str := "failed to create scope bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+	scopeSchemas, err := ns.CreateBucket(scopeSchemaBucketName)
+	if err != nil {
+		str := "failed to create scope schema bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	// With the buckets created, we can now create the default BIP0044
+	// scope which will be the only scope usable in the database after this
+	// update.
+	scopeKey := scopeToBytes(&KeyScopeBIP0044)
+	scopeSchema := ScopeAddrMap[KeyScopeBIP0044]
+	schemaBytes := scopeSchemaToBytes(&scopeSchema)
+	if err := scopeSchemas.Put(scopeKey[:], schemaBytes); err != nil {
+		return err
+	}
+	if err := createScopedManagerNS(scopeBucket, &KeyScopeBIP0044); err != nil {
+		return err
+	}
+
+	bip44Bucket := scopeBucket.NestedReadWriteBucket(scopeKey[:])
+
+	// With the buckets created, we now need to port over *each* item in
+	// the prior main bucket, into the new default scope.
+	mainBucket := ns.NestedReadWriteBucket(mainBucketName)
+
+	// First, we'll move over the encrypted coin type private and public
+	// keys to the new sub-bucket.
+	encCoinPrivKeys := mainBucket.Get(coinTypePrivKeyName)
+	encCoinPubKeys := mainBucket.Get(coinTypePubKeyName)
+
+	err = bip44Bucket.Put(coinTypePrivKeyName, encCoinPrivKeys)
+	if err != nil {
+		return err
+	}
+	err = bip44Bucket.Put(coinTypePubKeyName, encCoinPubKeys)
+	if err != nil {
+		return err
+	}
+
+	if err := mainBucket.Delete(coinTypePrivKeyName); err != nil {
+		return err
+	}
+	if err := mainBucket.Delete(coinTypePubKeyName); err != nil {
+		return err
+	}
+
+	// Next, we'll move over everything that was in the meta bucket to the
+	// meta bucket within the new scope.
+	metaBucket := ns.NestedReadWriteBucket(metaBucketName)
+	lastAccount := metaBucket.Get(lastAccountName)
+	if err := metaBucket.Delete(lastAccountName); err != nil {
+		return err
+	}
+
+	scopedMetaBucket := bip44Bucket.NestedReadWriteBucket(metaBucketName)
+	err = scopedMetaBucket.Put(lastAccountName, lastAccount)
+	if err != nil {
+		return err
+	}
+
+	// Finally, we'll recursively move over a set of keys which were
+	// formerly under the main bucket, into the new scoped buckets. We'll
+	// do so by obtaining a slice of all the keys that we need to modify
+	// and then recursing through each of them, moving both nested buckets
+	// and key/value pairs.
+	keysToMigrate := [][]byte{
+		acctBucketName, addrBucketName, usedAddrBucketName,
+		addrAcctIdxBucketName, acctNameIdxBucketName, acctIDIdxBucketName,
+	}
+
+	// Migrate each bucket recursively.
+	for _, bucketKey := range keysToMigrate {
+		err := migrateRecursively(ns, bip44Bucket, bucketKey)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
-// upgradeToVersion4 upgrades the database from version 3 to version 4.  The
-// default account remains unchanged (even if it was modified by the user), but
-// the empty string alias to the default account is removed.
-func upgradeToVersion4(ns walletdb.ReadWriteBucket, pubPassPhrase []byte) error {
-	priorScope := &KeyScope{
-		Purpose: 44,
-		Coin:    0,
-	}
-
-	err := func() error {
-		// Write new manager version.
-		err := putManagerVersion(ns, 4)
-		if err != nil {
-			return err
-		}
-
-		// Lookup the old account info to determine the real name of the
-		// default account.  All other names will be removed.
-		acctInfoIface, err := fetchAccountInfo(ns, priorScope, DefaultAccountNum)
-		if err != nil {
-			return err
-		}
-		acctInfo, ok := acctInfoIface.(*dbDefaultAccountRow)
-		if !ok {
-			str := fmt.Sprintf("unsupported account type %T", acctInfoIface)
-			return managerError(ErrDatabase, str, nil)
-		}
-
-		var oldName string
-
-		// Delete any other names for the default account.
-		c := ns.NestedReadWriteBucket(acctNameIdxBucketName).ReadWriteCursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			// Skip nested buckets.
-			if v == nil {
-				continue
-			}
-
-			// Skip account names which aren't for the default account.
-			account := binary.LittleEndian.Uint32(v)
-			if account != DefaultAccountNum {
-				continue
-			}
-
-			if !bytes.Equal(k[4:], []byte(acctInfo.name)) {
-				err := c.Delete()
-				if err != nil {
-					const str = "error deleting default account alias"
-					return managerError(ErrUpgrade, str, err)
-				}
-				oldName = string(k[4:])
-				break
-			}
-		}
-
-		// The account number to name index may map to the wrong name,
-		// so rewrite the entry with the true name from the account row
-		// instead of leaving it set to an incorrect alias.
-		err = putAccountIDIndex(ns, priorScope, DefaultAccountNum, acctInfo.name)
-		if err != nil {
-			const str = "account number to name index could not be " +
-				"rewritten with actual account name"
-			return managerError(ErrUpgrade, str, err)
-		}
-
-		// Ensure that the true name for the default account maps
-		// forwards and backwards to the default account number.
-		name, err := fetchAccountName(ns, priorScope, DefaultAccountNum)
-		if err != nil {
-			return err
-		}
-		if name != acctInfo.name {
-			const str = "account name index does not map default account number to correct name"
-			return managerError(ErrUpgrade, str, nil)
-		}
-		acct, err := fetchAccountByName(ns, priorScope, acctInfo.name)
-		if err != nil {
-			return err
-		}
-		if acct != DefaultAccountNum {
-			const str = "default account not accessible under correct name"
-			return managerError(ErrUpgrade, str, nil)
-		}
-
-		// Ensure that looking up the default account by the old name
-		// cannot succeed.
-		_, err = fetchAccountByName(ns, priorScope, oldName)
-		if err == nil {
-			const str = "default account exists under old name"
-			return managerError(ErrUpgrade, str, nil)
-		}
-		merr, ok := err.(ManagerError)
-		if !ok || merr.ErrorCode != ErrAccountNotFound {
-			return err
-		}
-
-		return nil
-	}()
+// migrateRecursively moves a nested bucket from one bucket to another,
+// recursing into nested buckets as required.
+func migrateRecursively(src, dst walletdb.ReadWriteBucket,
+	bucketKey []byte) error {
+	// Within this bucket key, we'll migrate over, then delete each key.
+	bucketToMigrate := src.NestedReadWriteBucket(bucketKey)
+	newBucket, err := dst.CreateBucketIfNotExists(bucketKey)
 	if err != nil {
-		return maybeConvertDbError(err)
+		return err
+	}
+	err = bucketToMigrate.ForEach(func(k, v []byte) error {
+		if nestedBucket := bucketToMigrate.
+			NestedReadBucket(k); nestedBucket != nil {
+			// We have a nested bucket, so recurse into it.
+			return migrateRecursively(bucketToMigrate, newBucket, k)
+		}
+
+		if err := newBucket.Put(k, v); err != nil {
+			return err
+		}
+
+		return bucketToMigrate.Delete(k)
+	})
+	if err != nil {
+		return err
+	}
+	// Finally, we'll delete the bucket itself.
+	if err := src.DeleteNestedBucket(bucketKey); err != nil {
+		return err
 	}
 	return nil
 }
