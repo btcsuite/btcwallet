@@ -66,11 +66,12 @@ func TestEstimateSerializeSize(t *testing.T) {
 func TestEstimateVirtualSize(t *testing.T) {
 
 	type estimateVSizeTest struct {
-		tx             func() (*wire.MsgTx, error)
-		p2wkhIns       int
-		nestedP2wkhIns int
-		change         bool
-		result         int
+		tx              func() (*wire.MsgTx, error)
+		p2wpkhIns       int
+		nestedp2wpkhIns int
+		p2pkhIns        int
+		change          bool
+		result          int
 	}
 
 	// TODO(halseth): add tests for more combination out inputs/outputs.
@@ -91,8 +92,8 @@ func TestEstimateVirtualSize(t *testing.T) {
 
 				return tx, nil
 			},
-			p2wkhIns: 1,
-			result:   147,
+			p2wpkhIns: 1,
+			result:    147,
 		},
 		{
 			// Spending P2SH-P2WPKH to two outputs. Example adapted from example in BIP-143.
@@ -110,8 +111,8 @@ func TestEstimateVirtualSize(t *testing.T) {
 
 				return tx, nil
 			},
-			nestedP2wkhIns: 1,
-			result:         170,
+			nestedp2wpkhIns: 1,
+			result:          170,
 		},
 		{
 			// Spendin P2WPKH to on output, adding one change output. We reuse
@@ -132,9 +133,28 @@ func TestEstimateVirtualSize(t *testing.T) {
 				tx.TxOut = []*wire.TxOut{tx.TxOut[0]}
 				return tx, nil
 			},
-			p2wkhIns: 1,
-			change:   true,
-			result:   144,
+			p2wpkhIns: 1,
+			change:    true,
+			result:    144,
+		},
+		{
+			// Spending one P2PKH to two P2PKH outputs (no witness data).
+			tx: func() (*wire.MsgTx, error) {
+				txHex := "0100000001a4c91c9720157a5ee582a7966471d9c70d0a860fa7757b4c42a535a12054a4c9000000006c493046022100d49c452a00e5b1213ac84d92269510a05a584a4d0949bd7d0ad4e3408ac8e80a022100bf98707ffaf1eb9dff146f7da54e68651c0a27e3653ec3882b7a95202328579c01210332d98672a4246fe917b9c724c339e757d46b1ffde3fb27fdc680b4bb29b6ad59ffffffff02a0860100000000001976a9144fb55ee0524076acd4c14e7773561e4c298c8e2788ac20688a0b000000001976a914cb7f6bb8e95a2cd06423932cfbbce73d16a18df088ac00000000"
+				b, err := hex.DecodeString(txHex)
+				if err != nil {
+					return nil, err
+				}
+				tx := &wire.MsgTx{}
+				err = tx.Deserialize(bytes.NewReader(b))
+				if err != nil {
+					return nil, err
+				}
+
+				return tx, nil
+			},
+			p2pkhIns: 1,
+			result:   227,
 		},
 	}
 
@@ -144,8 +164,8 @@ func TestEstimateVirtualSize(t *testing.T) {
 			t.Fatalf("unable to get test tx: %v", err)
 		}
 
-		est := EstimateVirtualSize(0, test.p2wkhIns,
-			test.nestedP2wkhIns, tx.TxOut, test.change)
+		est := EstimateVirtualSize(test.p2pkhIns, test.p2wpkhIns,
+			test.nestedp2wpkhIns, tx.TxOut, test.change)
 
 		if est != test.result {
 			t.Fatalf("expected estimated vsize to be %d, "+
