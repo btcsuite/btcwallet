@@ -686,8 +686,8 @@ func (m *Manager) ForEachActiveAccountAddress(ns walletdb.ReadBucket,
 // ForEachActiveAddress calls the given function with each active address
 // stored in the manager, breaking early on error.
 func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket, fn func(addr btcutil.Address) error) error {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
 
 	for _, scopedMgr := range m.scopedManagers {
 		err := scopedMgr.ForEachActiveAddress(ns, fn)
@@ -704,8 +704,8 @@ func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket, fn func(addr btcu
 func (m *Manager) ForEachAccountAddress(ns walletdb.ReadBucket, account uint32,
 	fn func(maddr ManagedAddress) error) error {
 
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
 
 	for _, scopedMgr := range m.scopedManagers {
 		err := scopedMgr.ForEachAccountAddress(ns, account, fn)
