@@ -19,6 +19,7 @@ import (
 	"github.com/roasbeef/btcutil"
 	"github.com/roasbeef/btcwallet/walletdb"
 	_ "github.com/roasbeef/btcwallet/walletdb/bdb"
+	"github.com/roasbeef/btcwallet/wtxmgr"
 	. "github.com/roasbeef/btcwallet/wtxmgr"
 )
 
@@ -1293,5 +1294,73 @@ func TestInsertUnserializedTx(t *testing.T) {
 	}
 	if !bytes.Equal(rec.SerializedTx, rec2.SerializedTx) {
 		t.Fatal("Serialized txs for coinbase spender do not match")
+	}
+}
+
+// TestRemoveUnminedTx tests that if we add an umined transaction, then we're
+// able to remove that unmined transaction later along with any of its
+// descendants. Any balance modifications due to the unmined transaction should
+// be revered.
+func TestRemoveUnminedTx(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	defer teardown()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+	ns := dbtx.ReadWriteBucket(namespaceKey)
+
+	// We'll start off by adding an unconfirmed transaction to the
+	// transaction store.
+	tx := TstRecvTx
+	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx(), time.Now())
+	if err != nil {
+		t.Fatalf("unable to create unmined txns: %v", err)
+	}
+	if err := store.InsertTx(ns, txRec, nil); err != nil {
+		t.Fatalf("unable to insert transaction: %v", err)
+	}
+
+	// With the transaction inserted, ensure that it's reflected in the set
+	// of unmined transactions.
+	unminedTxns, err := store.UnminedTxs(ns)
+	if err != nil {
+		t.Fatalf("unable to query for unmined txns: %v", err)
+	}
+	if len(unminedTxns) != 1 {
+		t.Fatalf("expected 1 mined tx, instead got %v",
+			len(unminedTxns))
+	}
+	unminedTxHash := unminedTxns[0].TxHash()
+	txHash := tx.MsgTx().TxHash()
+	if !unminedTxHash.IsEqual(&txHash) {
+		t.Fatalf("mismatch tx hashes: expected %v, got %v",
+			tx.MsgTx().TxHash(), unminedTxHash)
+	}
+
+	// Next, we'll delete the unmined transaction in order to simulate an
+	// encountered conflict.
+	if err := store.RemoveUnminedTx(ns, txRec); err != nil {
+		t.Fatalf("unable to remove unmined txns: %v", err)
+	}
+
+	// If we query again for the set of unconfirmed transactions, then we
+	// should get an empty slice.
+	// With the transaction inserted, ensure that it's reflected in the set
+	// of unmined transactions.
+	unminedTxns, err = store.UnminedTxs(ns)
+	if err != nil {
+		t.Fatalf("unable to query for unmined txns: %v", err)
+	}
+	if len(unminedTxns) != 0 {
+		t.Fatalf("expected zero unmined txns, instead have %v",
+			len(unminedTxns))
 	}
 }
