@@ -2540,26 +2540,20 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 		return err
 	}
 
-	switch server.(type) {
-	// If our chain backend is neutrino, then we'll add this as an
-	// unconfirmed transaction into the transaction store. Otherwise, we
-	// won't eve be notified of it's acceptance, meaning we won't attempt
-	// to re-broadcast.
-	case *chain.NeutrinoClient:
-		rec, err := wtxmgr.NewTxRecordFromMsgTx(
-			tx, time.Now(),
-		)
-		if err != nil {
-			return err
-		}
-		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-			txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-			return w.TxStore.InsertTx(txmgrNs, rec, nil)
-		})
-		if err != nil {
-			return err
-		}
+	// As we aim for this to be general reliable transaction broadcast API,
+	// we'll write this tx to disk as an unconfirmed transaction. This way,
+	// upon restarts, we'll always rebroadcast it, and also add it to our
+	// set of records.
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	if err != nil {
+		return err
+	}
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		return w.TxStore.InsertTx(txmgrNs, rec, nil)
+	})
+	if err != nil {
+		return err
 	}
 
 	_, err = server.SendRawTransaction(tx, false)
