@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/davecgh/go-spew/spew"
 
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
@@ -2062,10 +2063,39 @@ func (w *Wallet) resendUnminedTxs() {
 	for _, tx := range txs {
 		resp, err := chainClient.SendRawTransaction(tx, false)
 		if err != nil {
-			// TODO(jrick): Check error for if this tx is a double spend,
-			// remove it if so.
 			log.Debugf("Could not resend transaction %v: %v",
 				tx.TxHash(), err)
+
+			// As the transaction was rejected, we'll attempt to
+			// remove the unmined transaction all together.
+			// Otherwise, we'll keep attempting to rebroadcast
+			// this, and we may be computing our balance
+			// incorrectly if this tx credits or debits to us.
+			err := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+				txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+				txRec, err := wtxmgr.NewTxRecordFromMsgTx(
+					tx, time.Now(),
+				)
+				if err != nil {
+					return err
+				}
+
+				err = w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
+				if err != nil {
+					return err
+				}
+
+				return err
+			})
+			if err != nil {
+				log.Warnf("unable to remove conflicting "+
+					"tx %v: %v", tx.TxHash(), err)
+				continue
+			}
+
+			log.Infof("Removed conflicting tx: %v", spew.Sdump(tx))
+
 			continue
 		}
 		log.Debugf("Resent unmined transaction %v", resp)
