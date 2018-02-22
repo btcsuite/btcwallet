@@ -317,6 +317,19 @@ func (s *Store) InsertTx(ns walletdb.ReadWriteBucket, rec *TxRecord, block *Bloc
 	return s.insertMinedTx(ns, rec, block)
 }
 
+// RemoveUnminedTx attempts to remove an unmined transaction from the
+// transaction store. This is to be used in the scenario that a transaction
+// that we attempt to rebroadcast, turns out to double spend one of our
+// existing inputs. This function we remove the conflicting transaction
+// identified by the tx record, and also recursively remove all transactions
+// that depend on it.
+func (s *Store) RemoveUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
+	// As we already have a tx record, we can directly call the
+	// removeConflict method. This will do the job of recursively removing
+	// this unmined transaction, and any transactions that depend on it.
+	return s.removeConflict(ns, rec)
+}
+
 // insertMinedTx inserts a new transaction record for a mined transaction into
 // the database.  It is expected that the exact transation does not already
 // exist in the unmined buckets, but unmined double spends (including mutations)
