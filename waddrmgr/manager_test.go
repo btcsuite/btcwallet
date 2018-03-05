@@ -11,6 +11,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
@@ -1699,8 +1700,9 @@ func testSync(tc *testContext) bool {
 		return false
 	}
 	blockStamp = waddrmgr.BlockStamp{
-		Height: 1,
-		Hash:   *latestHash,
+		Height:    1,
+		Hash:      *latestHash,
+		Timestamp: time.Unix(1234, 0),
 	}
 	err = walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
