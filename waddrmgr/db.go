@@ -1376,11 +1376,11 @@ func fetchSyncedTo(ns walletdb.ReadBucket) (*BlockStamp, error) {
 	bucket := ns.NestedReadBucket(syncBucketName)
 
 	// The serialized synced to format is:
-	//   <blockheight><blockhash>
+	//   <blockheight><blockhash><timestamp>
 	//
 	// 4 bytes block height + 32 bytes hash length
 	buf := bucket.Get(syncedToName)
-	if len(buf) != 36 {
+	if len(buf) < 36 {
 		str := "malformed sync information stored in database"
 		return nil, managerError(ErrDatabase, str, nil)
 	}
@@ -1388,6 +1388,13 @@ func fetchSyncedTo(ns walletdb.ReadBucket) (*BlockStamp, error) {
 	var bs BlockStamp
 	bs.Height = int32(binary.LittleEndian.Uint32(buf[0:4]))
 	copy(bs.Hash[:], buf[4:36])
+
+	if len(buf) == 40 {
+		bs.Timestamp = time.Unix(
+			int64(binary.LittleEndian.Uint32(buf[36:])), 0,
+		)
+	}
+
 	return &bs, nil
 }
 
@@ -1415,12 +1422,13 @@ func putSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	}
 
 	// The serialized synced to format is:
-	//   <blockheight><blockhash>
+	//   <blockheight><blockhash><timestamp>
 	//
-	// 4 bytes block height + 32 bytes hash length
-	buf := make([]byte, 36)
+	// 4 bytes block height + 32 bytes hash length + 4 byte timestamp length
+	buf := make([]byte, 40)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(bs.Height))
 	copy(buf[4:36], bs.Hash[0:32])
+	binary.LittleEndian.PutUint32(buf[36:], uint32(bs.Timestamp.Unix()))
 
 	err = bucket.Put(syncedToName, buf)
 	if err != nil {

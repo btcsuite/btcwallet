@@ -15,8 +15,9 @@ import (
 // used to mark a point in the blockchain that an address manager element is
 // synced to.
 type BlockStamp struct {
-	Height int32
-	Hash   chainhash.Hash
+	Height    int32
+	Hash      chainhash.Hash
+	Timestamp time.Time
 }
 
 // syncState houses the sync state of the manager.  It consists of the recently
