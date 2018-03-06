@@ -140,8 +140,9 @@ func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) err
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 	bs := waddrmgr.BlockStamp{
-		Height: b.Height,
-		Hash:   b.Hash,
+		Height:    b.Height,
+		Hash:      b.Hash,
+		Timestamp: b.Time,
 	}
 	err := w.Manager.SetSyncedTo(addrmgrNs, &bs)
 	if err != nil {
@@ -182,6 +183,15 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 				return err
 			}
 			b.Hash = *hash
+
+			client := w.ChainClient()
+			header, err := client.GetBlockHeader(hash)
+			if err != nil {
+				return err
+			}
+
+			bs.Timestamp = header.Timestamp
+
 			err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
 			if err != nil {
 				return err
