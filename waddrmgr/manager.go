@@ -300,14 +300,6 @@ type Manager struct {
 	hashedPrivPassphrase [sha512.Size]byte
 }
 
-// Locked returns true if the root manager is locked, and false otherwise.
-func (m *Manager) Locked() bool {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-
-	return m.locked
-}
-
 // WatchOnly returns true if the root manager is in watch only mode, and false
 // otherwise.
 func (m *Manager) WatchOnly() bool {
@@ -977,6 +969,15 @@ func (m *Manager) IsLocked() bool {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
+	return m.isLocked()
+}
+
+// isLocked is an internal method returning whether or not the address manager
+// is locked via an unprotected read.
+//
+// NOTE: The caller *MUST* acquire the Manager's mutex before invocation to
+// avoid data races.
+func (m *Manager) isLocked() bool {
 	return m.locked
 }
 
