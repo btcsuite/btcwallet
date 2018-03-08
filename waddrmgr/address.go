@@ -280,7 +280,7 @@ func (a *managedAddress) PrivKey() (*btcec.PrivateKey, error) {
 	defer a.manager.mtx.Unlock()
 
 	// Account manager must be unlocked to decrypt the private key.
-	if a.manager.rootManager.Locked() {
+	if a.manager.rootManager.IsLocked() {
 		return nil, managerError(ErrLocked, errLocked, nil)
 	}
 
@@ -586,7 +586,7 @@ func (a *scriptAddress) Script() ([]byte, error) {
 	defer a.manager.mtx.Unlock()
 
 	// Account manager must be unlocked to decrypt the script.
-	if a.manager.rootManager.Locked() {
+	if a.manager.rootManager.IsLocked() {
 		return nil, managerError(ErrLocked, errLocked, nil)
 	}
 
