@@ -828,47 +828,55 @@ func (c *BitcoindClient) rescan(hash *chainhash.Hash) error {
 			}
 		}
 
-		if block.Header.PrevBlock.String() != lastHeader.Hash {
-			// We've been reorganized, maybe. We now walk backwards
-			// to a known block. If we go back past the passed
-			// block, we return an error. The initialization logic
-			// of the wallet should prevent that from happening.
-			for j := i - 1; j > firstHeader.Height; j-- {
-				hash, err = c.GetBlockHash(int64(j))
-				if err != nil {
-					return err
-				}
+		for block.Header.PrevBlock.String() != lastHeader.Hash {
+			// If we're in this for loop, it looks like we've been
+			// reorganized. We now walk backwards to the common
+			// ancestor between the best chain and the known chain.
+			//
+			// First, we signal a disconnected block to rewind the
+			// rescan state.
+			c.onBlockDisconnected(lastHash, lastHeader.Height,
+				time.Unix(lastHeader.Time, 0))
 
-				// If we've found a matching hash, we can move
-				// forward from there.
-				if hash.String() == lastHeader.Hash {
-					i = j + 1
-					block, err = c.GetBlock(hash)
+			// Next, we get the previous block of the best chain.
+			hash, err = c.GetBlockHash(int64(i - 1))
+			if err != nil {
+				return err
+			}
+
+			block, err = c.GetBlock(hash)
+			if err != nil {
+				return err
+			}
+
+			// Then, we get the previous header for the known chain.
+			if headers.Back() != nil {
+				// If it's already in the headers list, we can
+				// just get it from there and remove the
+				// current hash).
+				headers.Remove(headers.Back())
+				if headers.Back() != nil {
+					lastHeader = headers.Back().
+						Value.(*btcjson.
+						GetBlockHeaderVerboseResult)
+					lastHash, err = chainhash.
+						NewHashFromStr(lastHeader.Hash)
 					if err != nil {
 						return err
 					}
-					break
 				}
-
-				// Rewind the rescan state.
-				c.onBlockDisconnected(lastHash,
-					lastHeader.Height,
-					time.Unix(lastHeader.Time, 0))
-				headers.Remove(headers.Back())
-				lastHeader = headers.Back().Value.(*btcjson.
-					GetBlockHeaderVerboseResult)
+			} else {
+				// Otherwise, we get it from bitcoind.
 				lastHash, err = chainhash.NewHashFromStr(
-					lastHeader.Hash)
+					lastHeader.PreviousHash)
 				if err != nil {
 					return err
 				}
-			}
-
-			// Check again and make sure we're at the start of the
-			// reorg.
-			if block.Header.PrevBlock.String() != lastHeader.Hash {
-				return errors.New("reorg during rescan went " +
-					"too far back")
+				lastHeader, err = c.GetBlockHeaderVerbose(
+					lastHash)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
