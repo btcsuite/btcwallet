@@ -12,6 +12,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 hash: 2fe59efc96b0a2839297653da88cde89208f8f8cf4ced2bb1e828def57e3611b
 updated: 2017-07-19T11:33:58.0769452-04:00
 =======
@@ -126,6 +127,13 @@ imports:
   version: 637e656429416087660c84436a2a035d69d54e2e
 =======
   version: 2f1ce7a837dcb8da3ec595b1dac9d0632f0f99e8
+=======
+hash: 7513f0ab812dca7cbcb30de742d99b5d1f51b246a7ed9f83ccc7e705dd2d4665
+updated: 2018-03-10T18:35:25.074565861-08:00
+imports:
+- name: github.com/aead/siphash
+  version: e404fcfc888570cadd1610538e2dbc89f66af814
+>>>>>>> 46f7390... build: switch from bolt to bbolt
 - name: github.com/btcsuite/btclog
   version: 84c8d2346e9fc8c7b947e243b9c24e6df9fd206a
 >>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
@@ -153,8 +161,10 @@ imports:
 >>>>>>> 249dae0... log: update to new logging API
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
+- name: github.com/coreos/bbolt
+  version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - name: github.com/davecgh/go-spew
-  version: ecdeabc65495df2dec95d7c4a4c3e021903035e5
+  version: 346938d642f2ec3594ed81d874461961cd0faa76
   subpackages:
   - spew
 - name: github.com/golang/protobuf
@@ -184,13 +194,13 @@ imports:
 >>>>>>> ea0c0b9... build: update glide files to point to latest btcsuite/btcd commits
 - name: github.com/kkdai/bstream
   version: f391b8402d23024e7c0f624b31267a89998fca95
+- name: github.com/lightninglabs/gozmq
+  version: 0d266ba6d55ea65c18c7a02d8992c89355149e80
 - name: github.com/lightninglabs/neutrino
   version: 2241200df496ac8fbbe3ffac5be0f1866ad4330c
   subpackages:
   - filterdb
   - headerfs
-- name: github.com/lightninglabs/gozmq
-  version: 0d266ba6d55ea65c18c7a02d8992c89355149e80
 - name: github.com/roasbeef/btcd
   version: 9978b939c33973be19b932fa7b936079bb7ba38d
   subpackages:
@@ -215,7 +225,7 @@ imports:
   - gcs/builder
   - hdkeychain
 - name: golang.org/x/crypto
-  version: 9419663f5a44be8b34ca85f08abc5fe1be11f8a3
+  version: 49796115aa4b964c318aad4f3084fdb41e9aa067
   subpackages:
   - ripemd160
   - ssh/terminal
