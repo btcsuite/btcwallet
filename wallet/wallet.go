@@ -355,29 +355,35 @@ func (w *Wallet) syncWithChain() error {
 		if err != nil {
 			return err
 		}
+
 		checkHeight := bestHeight
 		if len(w.chainParams.Checkpoints) > 0 {
 			checkHeight = w.chainParams.Checkpoints[len(
 				w.chainParams.Checkpoints)-1].Height
 		}
+
 		logHeight := checkHeight
 		if bestHeight > logHeight {
 			logHeight = bestHeight
 		}
+
 		log.Infof("Catching up block hashes to height %d, this will "+
 			"take a while...", logHeight)
+
 		// Initialize the first database transaction.
 		tx, err := w.db.BeginReadWriteTx()
 		if err != nil {
 			return err
 		}
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
 		for height := int32(1); height <= bestHeight; height++ {
 			hash, err := chainClient.GetBlockHash(int64(height))
 			if err != nil {
 				tx.Rollback()
 				return err
 			}
+
 			// If we've found the best height the backend knows
 			// about, but we haven't reached the last checkpoint, we
 			// know the backend is still synchronizing. We can give
@@ -392,6 +398,7 @@ func (w *Wallet) syncWithChain() error {
 					tx.Rollback()
 					return err
 				}
+
 				// If we're using the Neutrino backend, we can
 				// check if it's current or not. If it's not and
 				// we've exceeded the original checkHeight, we
@@ -408,14 +415,22 @@ func (w *Wallet) syncWithChain() error {
 					}
 				}
 			}
+
+			header, err := chainClient.GetBlockHeader(hash)
+			if err != nil {
+				return err
+			}
+
 			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
-				Hash:   *hash,
-				Height: height,
+				Hash:      *hash,
+				Height:    height,
+				Timestamp: header.Timestamp,
 			})
 			if err != nil {
 				tx.Rollback()
 				return err
 			}
+
 			// Every 10K blocks, commit and start a new database TX.
 			if height%10000 == 0 {
 				err = tx.Commit()
@@ -423,14 +438,18 @@ func (w *Wallet) syncWithChain() error {
 					tx.Rollback()
 					return err
 				}
+
 				log.Infof("Caught up to height %d", height)
+
 				tx, err = w.db.BeginReadWriteTx()
 				if err != nil {
 					return err
 				}
+
 				ns = tx.ReadWriteBucket(waddrmgrNamespaceKey)
 			}
 		}
+
 		// Commit (or roll back) the final database transaction.
 		err = tx.Commit()
 		if err != nil {
@@ -470,8 +489,15 @@ func (w *Wallet) syncWithChain() error {
 			if err != nil {
 				return err
 			}
+			header, err := chainClient.GetBlockHeader(hash)
+			if err != nil {
+				return err
+			}
+
 			rollbackStamp.Hash = *chainHash
 			rollbackStamp.Height = height
+			rollbackStamp.Timestamp = header.Timestamp
+
 			if bytes.Equal(hash[:], chainHash[:]) {
 				break
 			}
@@ -1986,9 +2012,9 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 			Height: 0,
 		}
 	} else {
-		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
 		// Only update the new birthday time from default value if we
 		// actually have timestamp info in the header.
+		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
 		if err == nil {
 			newBirthday = header.Timestamp
 		}
