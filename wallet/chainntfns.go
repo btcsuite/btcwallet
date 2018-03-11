@@ -49,15 +49,23 @@ func (w *Wallet) handleChainNotifications() {
 			" might take a while", height)
 		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
 			startBlock := w.Manager.SyncedTo()
+
 			for i := startBlock.Height + 1; i <= height; i++ {
 				hash, err := client.GetBlockHash(int64(i))
 				if err != nil {
 					return err
 				}
+				header, err := chainClient.GetBlockHeader(hash)
+				if err != nil {
+					return err
+				}
+
 				bs := waddrmgr.BlockStamp{
-					Height: i,
-					Hash:   *hash,
+					Height:    i,
+					Hash:      *hash,
+					Timestamp: header.Timestamp,
 				}
 				err = w.Manager.SetSyncedTo(ns, &bs)
 				if err != nil {
@@ -70,6 +78,7 @@ func (w *Wallet) handleChainNotifications() {
 			log.Errorf("Failed to update address manager "+
 				"sync state for height %d: %v", height, err)
 		}
+
 		log.Info("Done catching up block hashes")
 		return err
 	}
