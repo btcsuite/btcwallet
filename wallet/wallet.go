@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -2114,6 +2115,21 @@ func (w *Wallet) resendUnminedTxs() {
 		if err != nil {
 			log.Debugf("Could not resend transaction %v: %v",
 				tx.TxHash(), err)
+
+			// We'll only stop broadcasting transactions if we
+			// detect that the output has already been fully spent,
+			// is an orphan, or is conflicting with another
+			// transaction.
+			switch {
+			case strings.Contains(err.Error(), "spent"):
+
+			case strings.Contains(err.Error(), "orphan"):
+
+			case strings.Contains(err.Error(), "conflict"):
+
+			default:
+				continue
+			}
 
 			// As the transaction was rejected, we'll attempt to
 			// remove the unmined transaction all together.
