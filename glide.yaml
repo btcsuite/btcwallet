@@ -1,7 +1,7 @@
 package: github.com/roasbeef/btcwallet
 import:
-- package: github.com/boltdb/bolt
-  version: ^1.3.0
+- package: github.com/coreos/bbolt
+  version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - package: github.com/roasbeef/btcd
   version: 9978b939c33973be19b932fa7b936079bb7ba38d
   subpackages:
