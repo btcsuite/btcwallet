@@ -787,9 +787,18 @@ func (c *BitcoindClient) rescan(hash *chainhash.Hash) error {
 	// catch by testing connectivity from known blocks to the previous
 	// block.
 	log.Infof("Starting rescan from block %s", hash)
-	bestBlock, err := c.BlockStamp()
+	bestHash, bestHeight, err := c.GetBestBlock()
 	if err != nil {
 		return err
+	}
+	bestHeader, err := c.GetBlockHeaderVerbose(bestHash)
+	if err != nil {
+		return err
+	}
+	bestBlock := &waddrmgr.BlockStamp{
+		Hash:      *bestHash,
+		Height:    bestHeight,
+		Timestamp: time.Unix(bestHeader.Time, 0),
 	}
 	lastHeader, err := c.GetBlockHeaderVerbose(hash)
 	if err != nil {
@@ -805,8 +814,10 @@ func (c *BitcoindClient) rescan(hash *chainhash.Hash) error {
 	headers.PushBack(lastHeader)
 
 	// We always send a RescanFinished message when we're done.
-	defer c.onRescanFinished(lastHash, lastHeader.Height, time.Unix(
-		lastHeader.Time, 0))
+	defer func() {
+		c.onRescanFinished(lastHash, lastHeader.Height, time.Unix(
+			lastHeader.Time, 0))
+	}()
 
 	// Cycle through all of the blocks known to bitcoind, being mindful of
 	// reorgs.
@@ -924,6 +935,26 @@ func (c *BitcoindClient) rescan(hash *chainhash.Hash) error {
 
 		if i%10000 == 0 {
 			c.onRescanProgress(lastHash, i, block.Header.Timestamp)
+		}
+
+		// If we've reached the previously best-known block, check to
+		// make sure the underlying node hasn't synchronized additional
+		// blocks. If it has, update the best-known block and continue
+		// to rescan to that point.
+		if i == bestBlock.Height {
+			bestHash, bestHeight, err = c.GetBestBlock()
+			if err != nil {
+				return err
+			}
+			bestHeader, err = c.GetBlockHeaderVerbose(bestHash)
+			if err != nil {
+				return err
+			}
+			bestBlock = &waddrmgr.BlockStamp{
+				Hash:      *bestHash,
+				Height:    bestHeight,
+				Timestamp: time.Unix(bestHeader.Time, 0),
+			}
 		}
 	}
 
