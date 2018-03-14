@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"strings"
 
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcwallet/chain"
@@ -135,8 +136,17 @@ func (w *Wallet) handleChainNotifications() {
 			w.rescanNotifications <- n
 		}
 		if err != nil {
-			log.Errorf("Failed to process consensus server notification "+
-				"(name: `%s`, detail: `%v`)", notificationName, err)
+			// On out-of-sync blockconnected notifications, only
+			// send a debug message.
+			errStr := "Failed to process consensus server " +
+				"notification (name: `%s`, detail: `%v`)"
+			if notificationName == "blockconnected" &&
+				strings.Contains(err.Error(),
+					"couldn't get hash from database") {
+				log.Debugf(errStr, notificationName, err)
+			} else {
+				log.Errorf(errStr, notificationName, err)
+			}
 		}
 	}
 	w.wg.Done()
