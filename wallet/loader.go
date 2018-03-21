@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcwallet/internal/prompt"
@@ -36,25 +37,31 @@ var (
 
 // Loader implements the creating of new and opening of existing wallets, while
 // providing a callback system for other subsystems to handle the loading of a
-// wallet.  This is primarely intended for use by the RPC servers, to enable
+// wallet.  This is primarily intended for use by the RPC servers, to enable
 // methods and services which require the wallet when the wallet is loaded by
 // another subsystem.
 //
 // Loader is safe for concurrent access.
 type Loader struct {
-	callbacks   []func(*Wallet)
-	chainParams *chaincfg.Params
-	dbDirPath   string
-	wallet      *Wallet
-	db          walletdb.DB
-	mu          sync.Mutex
+	callbacks      []func(*Wallet)
+	chainParams    *chaincfg.Params
+	dbDirPath      string
+	recoveryWindow uint32
+	wallet         *Wallet
+	db             walletdb.DB
+	mu             sync.Mutex
 }
 
-// NewLoader constructs a Loader.
-func NewLoader(chainParams *chaincfg.Params, dbDirPath string) *Loader {
+// NewLoader constructs a Loader with an optional recovery window. If the
+// recovery window is non-zero, the wallet will attempt to recovery addresses
+// starting from the last SyncedTo height.
+func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
+	recoveryWindow uint32) *Loader {
+
 	return &Loader{
-		chainParams: chainParams,
-		dbDirPath:   dbDirPath,
+		chainParams:    chainParams,
+		dbDirPath:      dbDirPath,
+		recoveryWindow: recoveryWindow,
 	}
 }
 
@@ -88,7 +95,9 @@ func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
 // CreateNewWallet creates a new wallet using the provided public and private
 // passphrases.  The seed is optional.  If non-nil, addresses are derived from
 // this seed.  If nil, a secure random seed is generated.
-func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*Wallet, error) {
+func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte,
+	bday time.Time) (*Wallet, error) {
+
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
@@ -116,13 +125,15 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte) (*W
 	}
 
 	// Initialize the newly created database for the wallet before opening.
-	err = Create(db, pubPassphrase, privPassphrase, seed, l.chainParams)
+	err = Create(
+		db, pubPassphrase, privPassphrase, seed, l.chainParams, bday,
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	// Open the newly-created wallet.
-	w, err := Open(db, pubPassphrase, nil, l.chainParams)
+	w, err := Open(db, pubPassphrase, nil, l.chainParams, l.recoveryWindow)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +186,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 			ObtainPrivatePass: noConsole,
 		}
 	}
-	w, err := Open(db, pubPassphrase, cbs, l.chainParams)
+	w, err := Open(db, pubPassphrase, cbs, l.chainParams, l.recoveryWindow)
 	if err != nil {
 		// If opening the wallet fails (e.g. because of wrong
 		// passphrase), we must close the backing database to
