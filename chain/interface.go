@@ -31,6 +31,7 @@ type Interface interface {
 	GetBlock(*chainhash.Hash) (*wire.MsgBlock, error)
 	GetBlockHash(int64) (*chainhash.Hash, error)
 	GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader, error)
+	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
 	Rescan(*chainhash.Hash, []btcutil.Address, []*wire.OutPoint) error
@@ -59,6 +60,33 @@ type (
 	FilteredBlockConnected struct {
 		Block       *wtxmgr.BlockMeta
 		RelevantTxs []*wtxmgr.TxRecord
+	}
+
+	// FilterBlocksRequest specifies a range of blocks and the set of
+	// internal and external addresses of interest, indexed by corresponding
+	// scoped-index of the child address. A global set of watched outpoints
+	// is also included to monitor for spends.
+	FilterBlocksRequest struct {
+		Blocks           []wtxmgr.BlockMeta
+		ExternalAddrs    map[waddrmgr.ScopedIndex]btcutil.Address
+		InternalAddrs    map[waddrmgr.ScopedIndex]btcutil.Address
+		WatchedOutPoints map[wire.OutPoint]struct{}
+	}
+
+	// FilterBlocksResponse reports the set of all internal and external
+	// addresses found in response to a FilterBlockRequest, any outpoints
+	// found that correspond to those addresses, as well as the relevant
+	// transactions that can modify the wallet's balance. The index of the
+	// block within the FilterBlocksRequest is returned, such that the
+	// caller can reinitiate a request for the subsequent block after
+	// updating the addresses of interest.
+	FilterBlocksResponse struct {
+		BatchIndex         uint32
+		BlockMeta          wtxmgr.BlockMeta
+		FoundExternalAddrs map[waddrmgr.KeyScope]map[uint32]struct{}
+		FoundInternalAddrs map[waddrmgr.KeyScope]map[uint32]struct{}
+		FoundOutPoints     map[wire.OutPoint]struct{}
+		RelevantTxns       []*wire.MsgTx
 	}
 
 	// BlockDisconnected is a notifcation that the block described by the
