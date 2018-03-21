@@ -7,10 +7,14 @@ import (
 	"time"
 
 	"github.com/lightninglabs/neutrino"
+	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
 	"github.com/roasbeef/btcd/rpcclient"
+	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcutil"
+	"github.com/roasbeef/btcutil/gcs"
+	"github.com/roasbeef/btcutil/gcs/builder"
 	"github.com/roasbeef/btcwallet/waddrmgr"
 	"github.com/roasbeef/btcwallet/wtxmgr"
 )
@@ -18,6 +22,8 @@ import (
 // NeutrinoClient is an implementation of the btcwalet chain.Interface interface.
 type NeutrinoClient struct {
 	CS *neutrino.ChainService
+
+	chainParams *chaincfg.Params
 
 	// We currently support one rescan/notifiction goroutine per client
 	rescan *neutrino.Rescan
@@ -42,8 +48,13 @@ type NeutrinoClient struct {
 
 // NewNeutrinoClient creates a new NeutrinoClient struct with a backing
 // ChainService.
-func NewNeutrinoClient(chainService *neutrino.ChainService) *NeutrinoClient {
-	return &NeutrinoClient{CS: chainService}
+func NewNeutrinoClient(chainParams *chaincfg.Params,
+	chainService *neutrino.ChainService) *NeutrinoClient {
+
+	return &NeutrinoClient{
+		CS:          chainService,
+		chainParams: chainParams,
+	}
 }
 
 // BackEnd returns the name of the driver.
@@ -164,6 +175,152 @@ func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) 
 	}
 	hash := tx.TxHash()
 	return &hash, nil
+}
+
+// FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
+// addresses of interest. For each requested block, the corresponding compact
+// filter will first be checked for matches, skipping those that do not report
+// anything. If the filter returns a postive match, the full block will be
+// fetched and filtered. This method returns a FilterBlocksReponse for the first
+// block containing a matching address. If no matches are found in the range of
+// blocks requested, the returned response will be nil.
+func (s *NeutrinoClient) FilterBlocks(
+	req *FilterBlocksRequest) (*FilterBlocksResponse, error) {
+
+	blockFilterer := NewBlockFilterer(s.chainParams, req)
+
+	// Construct the watchlist using the addresses and outpoints contained
+	// in the filter blocks request.
+	watchList, err := buildFilterBlocksWatchList(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Iterate over the requested blocks, fetching the compact filter for
+	// each one, and matching it against the watchlist generated above. If
+	// the filter returns a positive match, the full block is then requested
+	// and scanned for addresses using the block filterer.
+	for i, blk := range req.Blocks {
+		filter, err := s.pollCFilter(&blk.Hash)
+		if err != nil {
+			return nil, err
+		}
+
+		// Skip any empty filters.
+		if filter == nil || filter.N() == 0 {
+			continue
+		}
+
+		key := builder.DeriveKey(&blk.Hash)
+		matched, err := filter.MatchAny(key, watchList)
+		if err != nil {
+			return nil, err
+		} else if !matched {
+			continue
+		}
+
+		log.Infof("Fetching block height=%d hash=%v",
+			blk.Height, blk.Hash)
+
+		// TODO(conner): can optimize bandwidth by only fetching
+		// stripped blocks
+		rawBlock, err := s.GetBlock(&blk.Hash)
+		if err != nil {
+			return nil, err
+		}
+
+		if !blockFilterer.FilterBlock(rawBlock) {
+			continue
+		}
+
+		// If any external or internal addresses were detected in this
+		// block, we return them to the caller so that the rescan
+		// windows can widened with subsequent addresses. The
+		// `BatchIndex` is returned so that the caller can compute the
+		// *next* block from which to begin again.
+		resp := &FilterBlocksResponse{
+			BatchIndex:         uint32(i),
+			BlockMeta:          blk,
+			FoundExternalAddrs: blockFilterer.FoundExternal,
+			FoundInternalAddrs: blockFilterer.FoundInternal,
+			FoundOutPoints:     blockFilterer.FoundOutPoints,
+			RelevantTxns:       blockFilterer.RelevantTxns,
+		}
+
+		return resp, nil
+	}
+
+	// No addresses were found for this range.
+	return nil, nil
+}
+
+// buildFilterBlocksWatchList constructs a watchlist used for matching against a
+// cfilter from a FilterBlocksRequest. The watchlist will be populated with all
+// external addresses, internal addresses, and outpoints contained in the
+// request.
+func buildFilterBlocksWatchList(req *FilterBlocksRequest) ([][]byte, error) {
+	// Construct a watch list containing the script addresses of all
+	// internal and external addresses that were requested, in addition to
+	// the set of outpoints currently being watched.
+	watchListSize := len(req.ExternalAddrs) +
+		len(req.InternalAddrs) +
+		len(req.WatchedOutPoints)
+
+	watchList := make([][]byte, 0, watchListSize)
+
+	for _, addr := range req.ExternalAddrs {
+		p2shAddr, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		watchList = append(watchList, p2shAddr)
+	}
+
+	for _, addr := range req.InternalAddrs {
+		p2shAddr, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		watchList = append(watchList, p2shAddr)
+	}
+
+	for outPoint := range req.WatchedOutPoints {
+		watchList = append(watchList,
+			builder.OutPointToFilterEntry(outPoint),
+		)
+	}
+
+	return watchList, nil
+}
+
+// pollCFilter attempts to fetch a CFilter from the neutrino client. This is
+// used to get around the fact that the filter headers may lag behind the
+// highest known block header.
+func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) {
+	var (
+		filter *gcs.Filter
+		err    error
+		count  int
+	)
+
+	const maxFilterRetries = 50
+	for count < maxFilterRetries {
+		if count > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		filter, err = s.CS.GetCFilter(*hash, wire.GCSFilterRegular)
+		if err != nil {
+			count++
+			continue
+		}
+
+		return filter, nil
+	}
+
+	return nil, err
 }
 
 // Rescan replicates the RPC client's Rescan command.
