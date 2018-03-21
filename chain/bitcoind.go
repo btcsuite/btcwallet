@@ -776,6 +776,52 @@ func (c *BitcoindClient) reorg(bs *waddrmgr.BlockStamp, block *wire.MsgBlock) er
 	return nil
 }
 
+// FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
+// addresses of interest. Each block will be fetched and filtered sequentially,
+// returning a FilterBlocksReponse for the first block containing a matching
+// address. If no matches are found in the range of blocks requested, the
+// returned response will be nil.
+func (c *BitcoindClient) FilterBlocks(
+	req *FilterBlocksRequest) (*FilterBlocksResponse, error) {
+
+	blockFilterer := NewBlockFilterer(c.chainParams, req)
+
+	// Iterate over the requested blocks, fetching each from the rpc client.
+	// Each block will scanned using the reverse addresses indexes generated
+	// above, breaking out early if any addresses are found.
+	for i, block := range req.Blocks {
+		// TODO(conner): add prefetching, since we already know we'll be
+		// fetching *every* block
+		rawBlock, err := c.client.GetBlock(&block.Hash)
+		if err != nil {
+			return nil, err
+		}
+
+		if !blockFilterer.FilterBlock(rawBlock) {
+			continue
+		}
+
+		// If any external or internal addresses were detected in this
+		// block, we return them to the caller so that the rescan
+		// windows can widened with subsequent addresses. The
+		// `BatchIndex` is returned so that the caller can compute the
+		// *next* block from which to begin again.
+		resp := &FilterBlocksResponse{
+			BatchIndex:         uint32(i),
+			BlockMeta:          block,
+			FoundExternalAddrs: blockFilterer.FoundExternal,
+			FoundInternalAddrs: blockFilterer.FoundInternal,
+			FoundOutPoints:     blockFilterer.FoundOutPoints,
+			RelevantTxns:       blockFilterer.RelevantTxns,
+		}
+
+		return resp, nil
+	}
+
+	// No addresses were found for this range.
+	return nil, nil
+}
+
 // rescan performs a rescan of the chain using a bitcoind back-end, from the
 // specified hash to the best-known hash, while watching out for reorgs that
 // happen during the rescan. It uses the addresses and outputs being tracked
