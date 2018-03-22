@@ -1477,7 +1477,7 @@ func putChainedAddress(ns walletdb.ReadWriteBucket, scope *KeyScope,
 	// is internal or external.
 	nextExternalIndex := arow.nextExternalIndex
 	nextInternalIndex := arow.nextInternalIndex
-	if branch == internalBranch {
+	if branch == InternalBranch {
 		nextInternalIndex = index + 1
 	} else {
 		nextExternalIndex = index + 1
