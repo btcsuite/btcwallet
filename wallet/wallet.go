@@ -96,6 +96,7 @@ type Wallet struct {
 	holdUnlockRequests chan chan heldUnlock
 	lockState          chan bool
 	changePassphrase   chan changePassphraseRequest
+	changePassphrases  chan changePassphrasesRequest
 
 	// Information for reorganization handling.
 	reorganizingLock sync.Mutex
@@ -614,7 +615,14 @@ type (
 
 	changePassphraseRequest struct {
 		old, new []byte
+		private  bool
 		err      chan error
+	}
+
+	changePassphrasesRequest struct {
+		publicOld, publicNew   []byte
+		privateOld, privateNew []byte
+		err                    chan error
 	}
 
 	// heldUnlock is a tool to prevent the wallet from automatically
@@ -654,8 +662,29 @@ out:
 		case req := <-w.changePassphrase:
 			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				return w.Manager.ChangePassphrase(addrmgrNs, req.old,
-					req.new, true, &waddrmgr.DefaultScryptOptions)
+				return w.Manager.ChangePassphrase(
+					addrmgrNs, req.old, req.new, req.private,
+					&waddrmgr.DefaultScryptOptions,
+				)
+			})
+			req.err <- err
+			continue
+
+		case req := <-w.changePassphrases:
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				err := w.Manager.ChangePassphrase(
+					addrmgrNs, req.publicOld, req.publicNew,
+					false, &waddrmgr.DefaultScryptOptions,
+				)
+				if err != nil {
+					return err
+				}
+
+				return w.Manager.ChangePassphrase(
+					addrmgrNs, req.privateOld, req.privateNew,
+					true, &waddrmgr.DefaultScryptOptions,
+				)
 			})
 			req.err <- err
 			continue
@@ -764,20 +793,40 @@ func (c heldUnlock) release() {
 func (w *Wallet) ChangePrivatePassphrase(old, new []byte) error {
 	err := make(chan error, 1)
 	w.changePassphrase <- changePassphraseRequest{
-		old: old,
-		new: new,
-		err: err,
+		old:     old,
+		new:     new,
+		private: true,
+		err:     err,
 	}
 	return <-err
 }
 
 // ChangePublicPassphrase modifies the public passphrase of the wallet.
 func (w *Wallet) ChangePublicPassphrase(old, new []byte) error {
-	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		return w.Manager.ChangePassphrase(addrmgrNs, old, new, false,
-			&waddrmgr.DefaultScryptOptions)
-	})
+	err := make(chan error, 1)
+	w.changePassphrase <- changePassphraseRequest{
+		old:     old,
+		new:     new,
+		private: false,
+		err:     err,
+	}
+	return <-err
+}
+
+// ChangePassphrases modifies the public and private passphrase of the wallet
+// atomically.
+func (w *Wallet) ChangePassphrases(publicOld, publicNew, privateOld,
+	privateNew []byte) error {
+
+	err := make(chan error, 1)
+	w.changePassphrases <- changePassphrasesRequest{
+		publicOld:  publicOld,
+		publicNew:  publicNew,
+		privateOld: privateOld,
+		privateNew: privateNew,
+		err:        err,
+	}
+	return <-err
 }
 
 // accountUsed returns whether there are any recorded transactions spending to
@@ -2800,6 +2849,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks, params *c
 		holdUnlockRequests:  make(chan chan heldUnlock),
 		lockState:           make(chan bool),
 		changePassphrase:    make(chan changePassphraseRequest),
+		changePassphrases:   make(chan changePassphrasesRequest),
 		chainParams:         params,
 		quit:                make(chan struct{}),
 	}
