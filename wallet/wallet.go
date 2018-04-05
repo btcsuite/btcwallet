@@ -489,7 +489,7 @@ func (w *Wallet) syncWithChain() error {
 			if err != nil {
 				return err
 			}
-			header, err := chainClient.GetBlockHeader(hash)
+			header, err := chainClient.GetBlockHeader(chainHash)
 			if err != nil {
 				return err
 			}
