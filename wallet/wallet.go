@@ -2195,12 +2195,21 @@ func (w *Wallet) resendUnminedTxs() {
 			// detect that the output has already been fully spent,
 			// is an orphan, or is conflicting with another
 			// transaction.
+			//
+			// TODO(roasbeef): SendRawTransaction needs to return
+			// concrete error types, no need for string matching
 			switch {
+			// The following are errors returned from btcd's
+			// mempool.
 			case strings.Contains(err.Error(), "spent"):
-
 			case strings.Contains(err.Error(), "orphan"):
-
 			case strings.Contains(err.Error(), "conflict"):
+
+			// The following errors are returned from bitcoind's
+			// mempool.
+			case strings.Contains(err.Error(), "Missing inputs"):
+			case strings.Contains(err.Error(), "already in block chain"):
+			case strings.Contains(err.Error(), "fee not met"):
 
 			default:
 				continue
@@ -2221,12 +2230,7 @@ func (w *Wallet) resendUnminedTxs() {
 					return err
 				}
 
-				err = w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
-				if err != nil {
-					return err
-				}
-
-				return err
+				return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
 			})
 			if err != nil {
 				log.Warnf("unable to remove conflicting "+
