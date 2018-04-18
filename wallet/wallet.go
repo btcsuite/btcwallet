@@ -2714,20 +2714,54 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	// we'll write this tx to disk as an unconfirmed transaction. This way,
 	// upon restarts, we'll always rebroadcast it, and also add it to our
 	// set of records.
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 	if err != nil {
 		return err
 	}
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		return w.TxStore.InsertTx(txmgrNs, rec, nil)
+		return w.TxStore.InsertTx(txmgrNs, txRec, nil)
 	})
 	if err != nil {
 		return err
 	}
 
 	_, err = server.SendRawTransaction(tx, false)
-	return err
+	switch {
+	// The following are errors returned from btcd's mempool.
+	case strings.Contains(err.Error(), "spent"):
+		fallthrough
+	case strings.Contains(err.Error(), "orphan"):
+		fallthrough
+	case strings.Contains(err.Error(), "conflict"):
+		fallthrough
+
+	// The following errors are returned from bitcoind's mempool.
+	case strings.Contains(err.Error(), "fee not met"):
+		fallthrough
+	case strings.Contains(err.Error(), "Missing inputs"):
+		fallthrough
+	case strings.Contains(err.Error(), "already in block chain"):
+
+		// If the transaction was rejected, then we'll remove it from
+		// the txstore, as otherwise, we'll attempt to continually
+		// re-broadcast it, and the utxo state of the wallet won't be
+		// accurate.
+		dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+			return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
+		})
+		if dbErr != nil {
+			return fmt.Errorf("unable to broadcast tx: %v, "+
+				"unable to remove invalid tx: %v", err, dbErr)
+		}
+
+		return err
+
+	default:
+		return err
+	}
 }
 
 // ChainParams returns the network parameters for the blockchain the wallet
