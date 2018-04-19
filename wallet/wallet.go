@@ -2728,6 +2728,9 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 
 	_, err = server.SendRawTransaction(tx, false)
 	switch {
+	case err == nil:
+		return nil
+
 	// The following are errors returned from btcd's mempool.
 	case strings.Contains(err.Error(), "spent"):
 		fallthrough
