@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/roasbeef/btcd/chaincfg"
 	"github.com/roasbeef/btcwallet/waddrmgr"
@@ -223,8 +224,10 @@ func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *waddr
 		if err != nil {
 			return err
 		}
-		err = waddrmgr.Create(ns, seed, pubPassphrase,
-			privPassphrase, &chaincfg.MainNetParams, fastScrypt)
+		err = waddrmgr.Create(
+			ns, seed, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
 		if err != nil {
 			return err
 		}
