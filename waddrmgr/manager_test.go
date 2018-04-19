@@ -1749,8 +1749,10 @@ func TestManager(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		err = waddrmgr.Create(ns, seed, pubPassphrase, privPassphrase,
-			&chaincfg.MainNetParams, fastScrypt)
+		err = waddrmgr.Create(
+			ns, seed, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
 		if err != nil {
 			return err
 		}
@@ -1770,7 +1772,7 @@ func TestManager(t *testing.T) {
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		return waddrmgr.Create(ns, seed, pubPassphrase, privPassphrase,
-			&chaincfg.MainNetParams, fastScrypt)
+			&chaincfg.MainNetParams, fastScrypt, time.Time{})
 	})
 	if !checkManagerError(t, "Create existing", err, waddrmgr.ErrAlreadyExists) {
 		mgr.Close()
@@ -1965,7 +1967,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 		}
 		err = waddrmgr.Create(
 			ns, seed, pubPassphrase, privPassphrase,
-			&chaincfg.MainNetParams, fastScrypt,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
 			return err
@@ -2216,7 +2218,7 @@ func TestRootHDKeyNeutering(t *testing.T) {
 		}
 		err = waddrmgr.Create(
 			ns, seed, pubPassphrase, privPassphrase,
-			&chaincfg.MainNetParams, fastScrypt,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
 			return err
@@ -2311,7 +2313,7 @@ func TestNewRawAccount(t *testing.T) {
 		}
 		err = waddrmgr.Create(
 			ns, seed, pubPassphrase, privPassphrase,
-			&chaincfg.MainNetParams, fastScrypt,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
 			return err
