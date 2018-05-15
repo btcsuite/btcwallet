@@ -1060,63 +1060,66 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 
 	// Use the crypto private key to decrypt all of the account private
 	// extended keys.
-	for account, acctInfo := range m.acctInfo {
-		decrypted, err := m.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
-		if err != nil {
-			m.lock()
-			str := fmt.Sprintf("failed to decrypt account %d "+
-				"private key", account)
-			return managerError(ErrCrypto, str, err)
+	for _, manager := range m.scopedManagers {
+		for account, acctInfo := range manager.acctInfo {
+			decrypted, err := m.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
+			if err != nil {
+				m.lock()
+				str := fmt.Sprintf("failed to decrypt account %d "+
+					"private key", account)
+				return managerError(ErrCrypto, str, err)
+			}
+
+			acctKeyPriv, err := hdkeychain.NewKeyFromString(string(decrypted))
+			zero.Bytes(decrypted)
+			if err != nil {
+				m.lock()
+				str := fmt.Sprintf("failed to regenerate account %d "+
+					"extended key", account)
+				return managerError(ErrKeyChain, str, err)
+			}
+			acctInfo.acctKeyPriv = acctKeyPriv
 		}
 
-		acctKeyPriv, err := hdkeychain.NewKeyFromString(string(decrypted))
-		zero.Bytes(decrypted)
-		if err != nil {
-			m.lock()
-			str := fmt.Sprintf("failed to regenerate account %d "+
-				"extended key", account)
-			return managerError(ErrKeyChain, str, err)
+		// We'll also derive any private keys that are pending due to
+		// them being created while the address manager was locked.
+		for _, info := range manager.deriveOnUnlock {
+			addressKey, err := manager.deriveKeyFromPath(
+				ns, info.managedAddr.Account(), info.branch,
+				info.index, true,
+			)
+			if err != nil {
+				m.lock()
+				return err
+			}
+
+			// It's ok to ignore the error here since it can only
+			// fail if the extended key is not private, however it
+			// was just derived as a private key.
+			privKey, _ := addressKey.ECPrivKey()
+			addressKey.Zero()
+
+			privKeyBytes := privKey.Serialize()
+			privKeyEncrypted, err := m.cryptoKeyPriv.Encrypt(privKeyBytes)
+			zero.BigInt(privKey.D)
+			if err != nil {
+				m.lock()
+				str := fmt.Sprintf("failed to encrypt private key for "+
+					"address %s", info.managedAddr.Address())
+				return managerError(ErrCrypto, str, err)
+			}
+
+			switch a := info.managedAddr.(type) {
+			case *managedAddress:
+				a.privKeyEncrypted = privKeyEncrypted
+				a.privKeyCT = privKeyBytes
+			case *scriptAddress:
+			}
+
+			// Avoid re-deriving this key on subsequent unlocks.
+			manager.deriveOnUnlock[0] = nil
+			manager.deriveOnUnlock = manager.deriveOnUnlock[1:]
 		}
-		acctInfo.acctKeyPriv = acctKeyPriv
-	}
-
-	// Derive any private keys that are pending due to them being created
-	// while the address manager was locked.
-	for _, info := range m.deriveOnUnlock {
-		addressKey, err := m.deriveKeyFromPath(ns, info.managedAddr.account,
-			info.branch, info.index, true)
-		if err != nil {
-			m.lock()
-			return err
-		}
-
-		// It's ok to ignore the error here since it can only fail if
-		// the extended key is not private, however it was just derived
-		// as a private key.
-		privKey, _ := addressKey.ECPrivKey()
-		addressKey.Zero()
-
-		privKeyBytes := privKey.Serialize()
-		privKeyEncrypted, err := m.cryptoKeyPriv.Encrypt(privKeyBytes)
-		zero.BigInt(privKey.D)
-		if err != nil {
-			m.lock()
-			str := fmt.Sprintf("failed to encrypt private key for "+
-				"address %s", info.managedAddr.Address())
-			return managerError(ErrCrypto, str, err)
-		}
-
-		// TODO(roasbeef): don't need to do anythign further?
-		switch a := info.managedAddr.(type) {
-		case *managedAddress:
-			a.privKeyEncrypted = privKeyEncrypted
-			a.privKeyCT = privKeyBytes
-		case *scriptAddress:
-		}
-
-		// Avoid re-deriving this key on subsequent unlocks.
-		m.deriveOnUnlock[0] = nil
-		m.deriveOnUnlock = m.deriveOnUnlock[1:]
 	}
 
 	m.locked = false
