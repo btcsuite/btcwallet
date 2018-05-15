@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/roasbeef/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
 // TestErrorCodeStringer tests the stringized output for the ErrorCode type.

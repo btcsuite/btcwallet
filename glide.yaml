@@ -1,9 +1,8 @@
-package: github.com/roasbeef/btcwallet
+package: github.com/btcsuite/btcwallet
 import:
 - package: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
-- package: github.com/roasbeef/btcd
-  version: 9978b939c33973be19b932fa7b936079bb7ba38d
+- package: github.com/btcsuite/btcd
   subpackages:
   - blockchain
   - btcec
@@ -13,8 +12,7 @@ import:
   - txscript
   - wire
 - package: github.com/btcsuite/btclog
-- package: github.com/roasbeef/btcutil
-  version: c3ff179366044979fb9856c2feb79bd4c2184c7a
+- package: github.com/btcsuite/btcutil
   subpackages:
   - hdkeychain
 - package: github.com/lightninglabs/neutrino

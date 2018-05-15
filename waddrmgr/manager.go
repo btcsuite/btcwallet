@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/roasbeef/btcd/chaincfg"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcutil/hdkeychain"
-	"github.com/roasbeef/btcwallet/internal/zero"
-	"github.com/roasbeef/btcwallet/snacl"
-	"github.com/roasbeef/btcwallet/walletdb"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/zero"
+	"github.com/btcsuite/btcwallet/snacl"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 const (

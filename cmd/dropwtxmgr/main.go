@@ -12,10 +12,10 @@ import (
 	"path/filepath"
 
 	"github.com/jessevdk/go-flags"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcwallet/walletdb"
-	_ "github.com/roasbeef/btcwallet/walletdb/bdb"
-	"github.com/roasbeef/btcwallet/wtxmgr"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 const defaultNet = "mainnet"

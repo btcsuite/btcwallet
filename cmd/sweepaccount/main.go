@@ -13,16 +13,16 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 
 	"github.com/jessevdk/go-flags"
-	"github.com/roasbeef/btcd/btcjson"
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/rpcclient"
-	"github.com/roasbeef/btcd/txscript"
-	"github.com/roasbeef/btcd/wire"
-	"github.com/roasbeef/btcutil"
-	"github.com/roasbeef/btcwallet/internal/cfgutil"
-	"github.com/roasbeef/btcwallet/netparams"
-	"github.com/roasbeef/btcwallet/wallet/txauthor"
-	"github.com/roasbeef/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/internal/cfgutil"
+	"github.com/btcsuite/btcwallet/netparams"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wallet/txrules"
 )
 
 var (

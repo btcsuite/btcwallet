@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/roasbeef/btcd/chaincfg"
-	"github.com/roasbeef/btcwallet/waddrmgr"
-	"github.com/roasbeef/btcwallet/walletdb"
-	_ "github.com/roasbeef/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
 
 var (
