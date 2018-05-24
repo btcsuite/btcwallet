@@ -368,7 +368,7 @@ func (tx *withdrawalTx) toMsgTx() *wire.MsgTx {
 	}
 
 	for _, i := range tx.inputs {
-		msgtx.AddTxIn(wire.NewTxIn(&i.OutPoint, []byte{}))
+		msgtx.AddTxIn(wire.NewTxIn(&i.OutPoint, []byte{}, nil))
 	}
 	return msgtx
 }
@@ -983,7 +983,7 @@ func signMultiSigUTXO(mgr *waddrmgr.Manager, addrmgrNs walletdb.ReadBucket, tx *
 // given index, returning an error if it fails.
 func validateSigScript(msgtx *wire.MsgTx, idx int, pkScript []byte) error {
 	vm, err := txscript.NewEngine(pkScript, msgtx, idx,
-		txscript.StandardVerifyFlags, nil)
+		txscript.StandardVerifyFlags, nil, nil, 0)
 	if err != nil {
 		return newError(ErrTxSigning, "cannot create script engine", err)
 	}

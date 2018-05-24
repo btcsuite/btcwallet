@@ -14,11 +14,11 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/lightninglabs/neutrino"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino"
 )
 
 var (
@@ -69,7 +69,7 @@ func walletMain() error {
 	}
 
 	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
-	loader := wallet.NewLoader(activeNet.Params, dbDir)
+	loader := wallet.NewLoader(activeNet.Params, dbDir, 250)
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client
@@ -179,7 +179,7 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 				log.Errorf("Couldn't create Neutrino ChainService: %s", err)
 				continue
 			}
-			chainClient = chain.NewNeutrinoClient(chainService)
+			chainClient = chain.NewNeutrinoClient(activeNet.Params, chainService)
 			err = chainClient.Start()
 			if err != nil {
 				log.Errorf("Couldn't start Neutrino client: %s", err)
