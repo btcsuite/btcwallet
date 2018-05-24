@@ -1783,7 +1783,7 @@ func TestManager(t *testing.T) {
 	// manager after they've completed
 	scopedMgr, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0044)
 	if err != nil {
-		t.Fatal("unable to fetch default scope: %v", err)
+		t.Fatalf("unable to fetch default scope: %v", err)
 	}
 	testManagerAPI(&testContext{
 		t:            t,
@@ -1825,7 +1825,7 @@ func TestManager(t *testing.T) {
 
 	scopedMgr, err = mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0044)
 	if err != nil {
-		t.Fatal("unable to fetch default scope: %v", err)
+		t.Fatalf("unable to fetch default scope: %v", err)
 	}
 	tc := &testContext{
 		t:            t,
@@ -2248,11 +2248,10 @@ func TestRootHDKeyNeutering(t *testing.T) {
 		ExternalAddrType: waddrmgr.NestedWitnessPubKey,
 		InternalAddrType: waddrmgr.WitnessPubKey,
 	}
-	var scopedMgr *waddrmgr.ScopedKeyManager
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-		scopedMgr, err = mgr.NewScopedKeyManager(ns, testScope, addrSchema)
+		_, err := mgr.NewScopedKeyManager(ns, testScope, addrSchema)
 		if err != nil {
 			return err
 		}
@@ -2282,7 +2281,7 @@ func TestRootHDKeyNeutering(t *testing.T) {
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-		scopedMgr, err = mgr.NewScopedKeyManager(ns, testScope, addrSchema)
+		_, err := mgr.NewScopedKeyManager(ns, testScope, addrSchema)
 		if err != nil {
 			return err
 		}
