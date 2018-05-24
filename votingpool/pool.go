@@ -735,7 +735,11 @@ func (p *Pool) addUsedAddr(ns, addrmgrNs walletdb.ReadWriteBucket, seriesID uint
 	// to have it in the used addresses DB but not in the address manager.
 	// TODO: Decide how far back we want the addr manager to rescan and set the
 	// BlockStamp height according to that.
-	_, err = p.manager.ImportScript(addrmgrNs, script, &waddrmgr.BlockStamp{})
+	manager, err := p.manager.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0044)
+	if err != nil {
+		return err
+	}
+	_, err = manager.ImportScript(addrmgrNs, script, &waddrmgr.BlockStamp{})
 	if err != nil && err.(waddrmgr.ManagerError).ErrorCode != waddrmgr.ErrDuplicateAddress {
 		return err
 	}

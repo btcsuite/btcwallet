@@ -722,7 +722,9 @@ func (s *loaderServer) CreateWallet(ctx context.Context, req *pb.CreateWalletReq
 		pubPassphrase = []byte(wallet.InsecurePubPassphrase)
 	}
 
-	wallet, err := s.loader.CreateNewWallet(pubPassphrase, req.PrivatePassphrase, req.Seed)
+	wallet, err := s.loader.CreateNewWallet(
+		pubPassphrase, req.PrivatePassphrase, req.Seed, time.Now(),
+	)
 	if err != nil {
 		return nil, translateError(err)
 	}

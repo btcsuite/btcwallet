@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
@@ -26,7 +27,7 @@ type logWriter struct{}
 
 func (logWriter) Write(p []byte) (n int, err error) {
 	os.Stdout.Write(p)
-	logRotator.Write(p)
+	logRotatorPipe.Write(p)
 	return len(p), nil
 }
 
@@ -47,6 +48,10 @@ var (
 	// logRotator is one of the logging outputs.  It should be closed on
 	// application shutdown.
 	logRotator *rotator.Rotator
+
+	// logRotatorPipe is the write-end pipe for writing to the log rotator.  It
+	// is written to by the Write method of the logWriter type.
+	logRotatorPipe *io.PipeWriter
 
 	log          = backendLog.Logger("BTCW")
 	walletLog    = backendLog.Logger("WLLT")
@@ -88,54 +93,7 @@ func initLogRotator(logFile string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create log directory: %v\n", err)
 		os.Exit(1)
-// logClosure is used to provide a closure over expensive logging operations
-// so don't have to be performed when the logging level doesn't warrant it.
-type logClosure func() string
-
-// String invokes the underlying function and returns the result.
-func (c logClosure) String() string {
-	return c()
-}
-
-// newLogClosure returns a new closure over a function that returns a string
-// which itself provides a Stringer interface so that it can be used with the
-// logging system.
-func newLogClosure(c func() string) logClosure {
-	return logClosure(c)
-}
-
-// useLogger updates the logger references for subsystemID to logger.  Invalid
-// subsystems are ignored.
-func useLogger(subsystemID string, logger btclog.Logger) {
-	if _, ok := subsystemLoggers[subsystemID]; !ok {
-		return
 	}
-	subsystemLoggers[subsystemID] = logger
-
-	switch subsystemID {
-	case "BTCW":
-		log = logger
-	case "WLLT":
-		walletLog = logger
-		wallet.UseLogger(logger)
-	case "TXST":
-		txmgrLog = logger
-		wtxmgr.UseLogger(logger)
-	case "CHNS":
-		chainLog = logger
-		chain.UseLogger(logger)
-		btcrpcclient.UseLogger(logger)
-	case "GRPC":
-		grpcLog = logger
-		rpcserver.UseLogger(logger)
-	case "RPCS":
-		legacyRPCLog = logger
-		legacyrpc.UseLogger(logger)
-	case "BTCN":
-		btcnLog = logger
-		neutrino.UseLogger(logger)
-	}
-
 	r, err := rotator.New(logFile, 10*1024, false, 3)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create file rotator: %v\n", err)
@@ -146,6 +104,7 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	go r.Run(pr)
 
 	logRotator = r
+	logRotatorPipe = pw
 }
 
 // setLogLevel sets the logging level for provided subsystem.  Invalid
