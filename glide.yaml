@@ -3,7 +3,7 @@ import:
 - package: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - package: github.com/btcsuite/btcd
-  version: d52471044ab259b656083399c4304ce6672308fd
+  version: bc0944904505aab55e089371a892be2f87883161
   subpackages:
   - blockchain
   - btcec
@@ -14,7 +14,7 @@ import:
   - wire
 - package: github.com/btcsuite/btclog
 - package: github.com/btcsuite/btcutil
-  version: 45edb4b6e59ef7890c7f4be92da61d5ebfa50b65
+  version: d4cc87b860166d00d6b5b9e0d3b3d71d6088d4d4
   subpackages:
   - hdkeychain
 - package: github.com/lightninglabs/neutrino
