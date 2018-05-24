@@ -3,6 +3,7 @@ import:
 - package: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - package: github.com/btcsuite/btcd
+  version: d52471044ab259b656083399c4304ce6672308fd
   subpackages:
   - blockchain
   - btcec
@@ -13,10 +14,11 @@ import:
   - wire
 - package: github.com/btcsuite/btclog
 - package: github.com/btcsuite/btcutil
+  version: 45edb4b6e59ef7890c7f4be92da61d5ebfa50b65
   subpackages:
   - hdkeychain
 - package: github.com/lightninglabs/neutrino
-  version: 2241200df496ac8fbbe3ffac5be0f1866ad4330c
+  version: 647edd9b0e8ebd3bf1e0ea06e8cc616a15b9ed37
 - package: github.com/btcsuite/golangcrypto
   subpackages:
   - nacl/secretbox
@@ -33,7 +35,7 @@ import:
   subpackages:
   - context
 - package: google.golang.org/grpc
-  version: ^1.0.3
+  version: 41344da2231b913fa3d983840a57a6b1b7b631a1
   subpackages:
   - codes
   - credentials
