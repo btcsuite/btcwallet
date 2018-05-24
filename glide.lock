@@ -1,10 +1,10 @@
-hash: 7236392cb21dfdf1c5f8699b410a6c3231ad9dde6e0c7767fb796bd599f1867d
-updated: 2018-05-23T17:00:22.163799009-07:00
+hash: 9c2b44923522db0619fde4bafd11c1b3209f5f978201ea7fbd30ae2ff929c388
+updated: 2018-05-23T20:53:02.17971318-07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
 - name: github.com/btcsuite/btcd
-  version: d52471044ab259b656083399c4304ce6672308fd
+  version: bc0944904505aab55e089371a892be2f87883161
   subpackages:
   - addrmgr
   - blockchain
@@ -21,7 +21,7 @@ imports:
 - name: github.com/btcsuite/btclog
   version: 84c8d2346e9fc8c7b947e243b9c24e6df9fd206a
 - name: github.com/btcsuite/btcutil
-  version: 45edb4b6e59ef7890c7f4be92da61d5ebfa50b65
+  version: d4cc87b860166d00d6b5b9e0d3b3d71d6088d4d4
   subpackages:
   - base58
   - bech32
