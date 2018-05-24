@@ -524,7 +524,7 @@ func (m *Manager) ActiveScopedKeyManagers() []*ScopedKeyManager {
 	return scopedManagers
 }
 
-// ScopesForExternalAddrTypes returns the set of key scopes that are able to
+// ScopesForExternalAddrType returns the set of key scopes that are able to
 // produce the target address type as external addresses.
 func (m *Manager) ScopesForExternalAddrType(addrType AddressType) []KeyScope {
 	m.mtx.RLock()

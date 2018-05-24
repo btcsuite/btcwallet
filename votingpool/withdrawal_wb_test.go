@@ -329,7 +329,7 @@ func TestRollbackLastOutput(t *testing.T) {
 	}
 	lastInput := initialInputs[len(initialInputs)-1]
 	if !reflect.DeepEqual(removedInputs[0], lastInput) {
-		t.Fatalf("Wrong rolled back input; got %s want %s", removedInputs[0], lastInput)
+		t.Fatalf("Wrong rolled back input; got %v want %v", removedInputs[0], lastInput)
 	}
 
 	// Now check that the inputs and outputs left in the tx match what we
@@ -1474,7 +1474,7 @@ func checkTxInputs(t *testing.T, tx *withdrawalTx, inputs []credit) {
 	}
 	for i, input := range tx.inputs {
 		if !reflect.DeepEqual(input, inputs[i]) {
-			t.Fatalf("Unexpected input; got %s, want %s", input, inputs[i])
+			t.Fatalf("Unexpected input; got %v, want %v", input, inputs[i])
 		}
 	}
 }
