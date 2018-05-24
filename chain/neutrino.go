@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lightninglabs/neutrino"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -17,6 +16,7 @@ import (
 	"github.com/btcsuite/btcutil/gcs/builder"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/lightninglabs/neutrino"
 )
 
 // NeutrinoClient is an implementation of the btcwalet chain.Interface interface.
