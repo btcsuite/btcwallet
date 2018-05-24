@@ -12,7 +12,6 @@ import (
 
 	"golang.org/x/crypto/ssh/terminal"
 
-	"github.com/jessevdk/go-flags"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -23,6 +22,7 @@ import (
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/jessevdk/go-flags"
 )
 
 var (
@@ -142,6 +142,7 @@ func makeInputSource(outputs []btcjson.ListUnspentResult) txauthor.InputSource {
 	var (
 		totalInputValue btcutil.Amount
 		inputs          = make([]*wire.TxIn, 0, len(outputs))
+		inputValues     = make([]btcutil.Amount, 0, len(outputs))
 		sourceErr       error
 	)
 	for _, output := range outputs {
@@ -172,14 +173,15 @@ func makeInputSource(outputs []btcjson.ListUnspentResult) txauthor.InputSource {
 		}
 
 		inputs = append(inputs, wire.NewTxIn(&previousOutPoint, nil, nil))
+		inputValues = append(inputValues, outputAmount)
 	}
 
 	if sourceErr == nil && totalInputValue == 0 {
 		sourceErr = noInputValue{}
 	}
 
-	return func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn, [][]byte, error) {
-		return totalInputValue, inputs, nil, sourceErr
+	return func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn, []btcutil.Amount, [][]byte, error) {
+		return totalInputValue, inputs, inputValues, nil, sourceErr
 	}
 }
 
