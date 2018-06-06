@@ -6,6 +6,8 @@
 package wtxmgr
 
 import (
+	"bytes"
+
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -18,6 +20,17 @@ func (s *Store) insertMemPoolTx(ns walletdb.ReadWriteBucket, rec *TxRecord) erro
 	if v != nil {
 		// TODO: compare serialized txs to ensure this isn't a hash collision?
 		return nil
+	}
+
+	// Before inserting this transaction, we'll make sure it's not double
+	// spending any outpoints from another unconfirmed transaction, like in
+	// the case of RBF.
+	if isRBFTx(ns, rec.MsgTx) {
+		if err := s.removeDoubleSpends(ns, rec); err != nil {
+			log.Errorf("Unable to remove conflicting transactions "+
+				"for %v: %v", rec.Hash, err)
+			return err
+		}
 	}
 
 	log.Infof("Inserting unconfirmed transaction %v", rec.Hash)
@@ -43,6 +56,41 @@ func (s *Store) insertMemPoolTx(ns walletdb.ReadWriteBucket, rec *TxRecord) erro
 	// here currently).
 
 	return nil
+}
+
+// isRBFTx determines whether a transaction signals that it can be replaced.
+// A transaction can signal that it is replaceable by two ways: explicit
+// signaling and inherited signaling. It is explicit if any of its inputs have
+// a nSequence number less than (0xffffffff - 1). Otherwise, it can do so by
+// inheretance if any of its ancestors signal replaceability.
+func isRBFTx(ns walletdb.ReadWriteBucket, tx wire.MsgTx) bool {
+	inputs := tx.TxIn
+	for _, input := range inputs {
+		if input.Sequence < 0xffffffff-1 {
+			return true
+		}
+
+		// Check if the transaction containing the output being spent
+		// is still in the mempool.
+		ancestorHash := input.PreviousOutPoint.Hash
+		unconfirmedAncestor := existsRawUnmined(ns, ancestorHash[:])
+		if unconfirmedAncestor == nil {
+			continue
+		}
+
+		// If it is, we'll attempt to retrieve this transaction and
+		// check if it's also signaling RBF.
+		buf := bytes.NewBuffer(unconfirmedAncestor[8:])
+		var unconfirmedAncestorTx wire.MsgTx
+		if err := unconfirmedAncestorTx.Deserialize(buf); err != nil {
+			log.Errorf("Unable to deserialize ancestor "+
+				"transaction %v: %v", ancestorHash, err)
+			return false
+		}
+		return isRBFTx(ns, unconfirmedAncestorTx)
+	}
+
+	return false
 }
 
 // removeDoubleSpends checks for any unmined transactions which would introduce

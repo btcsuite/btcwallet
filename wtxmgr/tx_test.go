@@ -1364,3 +1364,90 @@ func TestRemoveUnminedTx(t *testing.T) {
 			len(unminedTxns))
 	}
 }
+
+// TestRBFTx tests that when a transaction is replaced with a higher fee, we
+// detect the new transaction as the main one and remove all previous versions
+// of the transaction.
+func TestRBFTx(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	defer teardown()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dbtx, err := db.BeginReadWriteTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbtx.Commit()
+
+	ns := dbtx.ReadWriteBucket(namespaceKey)
+
+	// We'll start off by creating an unconfirmed transaction that signals
+	// RBF and inserting it into the store.
+	serializedTx, err := hex.DecodeString("0200000001bcb23d64c3e1b227baafe7a16188f8f38b4797ba7b2d037a83f2a0380a97c3510000000049483045022100dccb6b2b1a7485998ce95253b2d1b1250426e8085ddd3a24d2ad78a2da0fb75202203dca09a5435bfe777e0f9638461a338681923d933a6f4cde6bfb8a2c77ddd30b01fdffffff0200e1f50500000000160014905d7e9cfc5a20df1d5b1ffd8379c2afa9cbb6c4f88c8b4400000000160014fe34a42cf9762e0666fc01f9f1c6f6cb5b4d3e1f93010000")
+	if err != nil {
+		t.Fatalf("unable to decode serialized tx: %v", err)
+	}
+	tx, err := btcutil.NewTxFromBytes(serializedTx)
+	if err != nil {
+		t.Fatalf("unable to deserialize tx: %v", err)
+	}
+	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx(), time.Now())
+	if err != nil {
+		t.Fatalf("unable to create unmined tx: %v", err)
+	}
+	if err := store.InsertTx(ns, txRec, nil); err != nil {
+		t.Fatalf("unable to insert tx: %v", err)
+	}
+
+	// With the transaction inserted, ensure that it's reflected in the set
+	// of unmined transactions.
+	unminedTxns, err := store.UnminedTxs(ns)
+	if err != nil {
+		t.Fatalf("unable to query for unmined txns: %v", err)
+	}
+	if len(unminedTxns) != 1 {
+		t.Fatalf("expected 1 mined tx, instead got %v",
+			len(unminedTxns))
+	}
+	unminedTxHash := unminedTxns[0].TxHash()
+	txHash := tx.MsgTx().TxHash()
+	if !unminedTxHash.IsEqual(&txHash) {
+		t.Fatalf("mismatch tx hashes: expected %v, got %v",
+			tx.MsgTx().TxHash(), unminedTxHash)
+	}
+
+	// Now, we'll create a new transaction which should replace the existing
+	// transaction due to double spending the outputs and using a higher fee
+	// (RBF). We do this by lowering the value of the change output of the
+	// original transaction by 1337 satoshis.
+	rbfTx := tx.MsgTx().Copy()
+	changeOut := rbfTx.TxOut[1]
+	changeOut.Value -= 1337
+
+	rbfTxRec, err := wtxmgr.NewTxRecordFromMsgTx(rbfTx, time.Now())
+	if err != nil {
+		t.Fatalf("unable to create unmined tx: %v", err)
+	}
+	if err := store.InsertTx(ns, rbfTxRec, nil); err != nil {
+		t.Fatalf("unable to insert tx: %v", err)
+	}
+
+	unminedTxns, err = store.UnminedTxs(ns)
+	if err != nil {
+		t.Fatalf("unable to query for unmined txns: %v", err)
+	}
+	if len(unminedTxns) != 1 {
+		t.Fatalf("expected 1 mined tx, instead got %v",
+			len(unminedTxns))
+	}
+	unminedTxHash = unminedTxns[0].TxHash()
+	rbfTxHash := rbfTx.TxHash()
+	if !unminedTxHash.IsEqual(&rbfTxHash) {
+		t.Fatalf("mismatch tx hashes: expected %v, got %v", rbfTxHash,
+			unminedTxHash)
+	}
+}
