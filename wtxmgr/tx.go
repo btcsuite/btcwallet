@@ -664,11 +664,21 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 
 	for _, op := range coinBaseCredits {
 		opKey := canonicalOutPoint(&op.Hash, op.Index)
-		unminedKey := existsRawUnminedInput(ns, opKey)
-		if unminedKey != nil {
-			unminedVal := existsRawUnmined(ns, unminedKey)
+		unminedSpendTxHashKeys := fetchUnminedInputSpendTxHashes(ns, opKey)
+		for _, unminedSpendTxHashKey := range unminedSpendTxHashKeys {
+			unminedVal := existsRawUnmined(ns, unminedSpendTxHashKey[:])
+
+			// If the spending transaction spends multiple outputs
+			// from the same transaction, we'll find duplicate
+			// entries within the store, so it's possible we're
+			// unable to find it if the conflicts have already been
+			// removed in a previous iteration.
+			if unminedVal == nil {
+				continue
+			}
+
 			var unminedRec TxRecord
-			copy(unminedRec.Hash[:], unminedKey) // Silly but need an array
+			unminedRec.Hash = unminedSpendTxHashKey
 			err = readRawTxRecord(&unminedRec.Hash, unminedVal, &unminedRec)
 			if err != nil {
 				return err
