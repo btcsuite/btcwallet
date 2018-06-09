@@ -169,70 +169,16 @@ func Create(ns walletdb.ReadWriteBucket) error {
 
 // moveMinedTx moves a transaction record from the unmined buckets to block
 // buckets.
-func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, recVal []byte, block *BlockMeta) error {
+func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	block *BlockMeta) error {
+
 	log.Infof("Marking unconfirmed transaction %v mined in block %d",
 		&rec.Hash, block.Height)
 
-	// Insert block record as needed.
-	blockKey, blockVal := existsBlockRecord(ns, block.Height)
-	var err error
-	if blockVal == nil {
-		blockVal = valueBlockRecord(block, &rec.Hash)
-	} else {
-		blockVal, err = appendRawBlockRecord(blockVal, &rec.Hash)
-		if err != nil {
-			return err
-		}
-	}
-	err = putRawBlockRecord(ns, blockKey, blockVal)
-	if err != nil {
-		return err
-	}
-
-	err = putRawTxRecord(ns, recKey, recVal)
-	if err != nil {
-		return err
-	}
+	// Fetch the mined balance in case we need to update it.
 	minedBalance, err := fetchMinedBalance(ns)
 	if err != nil {
 		return err
-	}
-
-	// For all transaction inputs, remove the previous output marker from the
-	// unmined inputs bucket.  For any mined transactions with unspent credits
-	// spent by this transaction, mark each spent, remove from the unspents map,
-	// and insert a debit record for the spent credit.
-	debitIncidence := indexedIncidence{
-		incidence: incidence{txHash: rec.Hash, block: block.Block},
-		// index set for each rec input below.
-	}
-	for i, input := range rec.MsgTx.TxIn {
-		unspentKey, credKey := existsUnspent(ns, &input.PreviousOutPoint)
-
-		err = deleteRawUnminedInput(ns, unspentKey)
-		if err != nil {
-			return err
-		}
-
-		if credKey == nil {
-			continue
-		}
-
-		debitIncidence.index = uint32(i)
-		amt, err := spendCredit(ns, credKey, &debitIncidence)
-		if err != nil {
-			return err
-		}
-		minedBalance -= amt
-		err = deleteRawUnspent(ns, unspentKey)
-		if err != nil {
-			return err
-		}
-
-		err = putDebit(ns, &rec.Hash, uint32(i), amt, &block.Block, credKey)
-		if err != nil {
-			return err
-		}
 	}
 
 	// For each output of the record that is marked as a credit, if the
@@ -246,6 +192,8 @@ func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, 
 		block:    block.Block,
 		spentBy:  indexedIncidence{index: ^uint32(0)},
 	}
+
+	newMinedBalance := minedBalance
 	it := makeUnminedCreditIterator(ns, &rec.Hash)
 	for it.next() {
 		// TODO: This should use the raw apis.  The credit value (it.cv)
@@ -260,12 +208,12 @@ func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, 
 		if err != nil {
 			return err
 		}
+
 		cred.outPoint.Index = index
 		cred.amount = amount
 		cred.change = change
 
-		err = putUnspentCredit(ns, &cred)
-		if err != nil {
+		if err := putUnspentCredit(ns, &cred); err != nil {
 			return err
 		}
 		err = putUnspent(ns, &cred.outPoint, &block.Block)
@@ -273,37 +221,30 @@ func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, recKey, 
 			return err
 		}
 
-		// reposition cursor before deleting, since the above puts have
-		// invalidated the cursor.
-		it.reposition(&rec.Hash, index)
-
-		// Avoid cursor deletion until bolt issue #620 is resolved.
-		// err = it.delete()
-		// if err != nil {
-		// 	return err
-		// }
-
-		minedBalance += amount
+		newMinedBalance += amount
 	}
 	if it.err != nil {
 		return it.err
 	}
 
-	// Delete all possible credits outside of the iteration since the cursor
-	// deletion is broken.
-	for i := 0; i < len(rec.MsgTx.TxOut); i++ {
-		k := canonicalOutPoint(&rec.Hash, uint32(i))
-		err = deleteRawUnminedCredit(ns, k)
-		if err != nil {
+	// Update the balance if it has changed.
+	if newMinedBalance != minedBalance {
+		if err := putMinedBalance(ns, newMinedBalance); err != nil {
 			return err
 		}
 	}
 
-	err = putMinedBalance(ns, minedBalance)
-	if err != nil {
-		return err
+	// Delete all the *now* confirmed credits from the unmined credits
+	// bucket. We do this outside of the iteration since the cursor deletion
+	// is broken within boltdb.
+	for i := range rec.MsgTx.TxOut {
+		k := canonicalOutPoint(&rec.Hash, uint32(i))
+		if err := deleteRawUnminedCredit(ns, k); err != nil {
+			return err
+		}
 	}
 
+	// Finally, we'll remove the transaction from the unconfirmed bucket.
 	return deleteRawUnmined(ns, rec.Hash[:])
 }
 
@@ -331,24 +272,57 @@ func (s *Store) RemoveUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) erro
 }
 
 // insertMinedTx inserts a new transaction record for a mined transaction into
-// the database.  It is expected that the exact transation does not already
-// exist in the unmined buckets, but unmined double spends (including mutations)
-// are removed.
-func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta) error {
+// the database under the confirmed bucket. It guarantees that, if the
+// tranasction was previously unconfirmed, then it will take care of cleaning up
+// the unconfirmed state. All other unconfirmed double spend attempts will be
+// removed as well.
+func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	block *BlockMeta) error {
+
+	// If a transaction record for this hash and block already exists, we
+	// can exit early.
+	if _, v := existsTxRecord(ns, &rec.Hash, &block.Block); v != nil {
+		return nil
+	}
+
+	// If a block record does not yet exist for any transactions from this
+	// block, insert a block record first. Otherwise, update it by adding
+	// the transaction hash to the set of transactions from this block.
+	var err error
+	blockKey, blockValue := existsBlockRecord(ns, block.Height)
+	if blockValue == nil {
+		err = putBlockRecord(ns, block, &rec.Hash)
+	} else {
+		blockValue, err = appendRawBlockRecord(blockValue, &rec.Hash)
+		if err != nil {
+			return err
+		}
+		err = putRawBlockRecord(ns, blockKey, blockValue)
+	}
+	if err != nil {
+		return err
+	}
+
+	if err := putTxRecord(ns, rec, &block.Block); err != nil {
+		return err
+	}
+
 	// Fetch the mined balance in case we need to update it.
 	minedBalance, err := fetchMinedBalance(ns)
 	if err != nil {
 		return err
 	}
 
-	// Add a debit record for each unspent credit spent by this tx.
+	// Add a debit record for each unspent credit spent by this transaction.
+	// The index is set in each iteration below.
 	spender := indexedIncidence{
 		incidence: incidence{
 			txHash: rec.Hash,
 			block:  block.Block,
 		},
-		// index set for each iteration below
 	}
+
+	newMinedBalance := minedBalance
 	for i, input := range rec.MsgTx.TxIn {
 		unspentKey, credKey := existsUnspent(ns, &input.PreviousOutPoint)
 		if credKey == nil {
@@ -370,44 +344,38 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, block 
 			// implementation is currently used.
 			continue
 		}
+
+		// If this output is relevant to us, we'll mark the it as spent
+		// and remove its amount from the store.
 		spender.index = uint32(i)
 		amt, err := spendCredit(ns, credKey, &spender)
 		if err != nil {
 			return err
 		}
-		err = putDebit(ns, &rec.Hash, uint32(i), amt, &block.Block,
-			credKey)
+		err = putDebit(
+			ns, &rec.Hash, uint32(i), amt, &block.Block, credKey,
+		)
 		if err != nil {
 			return err
 		}
+		if err := deleteRawUnspent(ns, unspentKey); err != nil {
+			return err
+		}
 
-		minedBalance -= amt
+		newMinedBalance -= amt
+	}
 
-		err = deleteRawUnspent(ns, unspentKey)
-		if err != nil {
+	// Update the balance if it has changed.
+	if newMinedBalance != minedBalance {
+		if err := putMinedBalance(ns, newMinedBalance); err != nil {
 			return err
 		}
 	}
 
-	// TODO only update if we actually modified the
-	// mined balance.
-	err = putMinedBalance(ns, minedBalance)
-	if err != nil {
-		return nil
-	}
-
-	// If a transaction record for this tx hash and block already exist,
-	// there is nothing left to do.
-	k, v := existsTxRecord(ns, &rec.Hash, &block.Block)
-	if v != nil {
-		return nil
-	}
-
-	// If the exact tx (not a double spend) is already included but
-	// unconfirmed, move it to a block.
-	v = existsRawUnmined(ns, rec.Hash[:])
-	if v != nil {
-		return s.moveMinedTx(ns, rec, k, v, block)
+	// If this transaction previously existed within the store as
+	// unconfirmed, we'll need to move it to the confirmed bucket.
+	if v := existsRawUnmined(ns, rec.Hash[:]); v != nil {
+		return s.moveMinedTx(ns, rec, block)
 	}
 
 	// As there may be unconfirmed transactions that are invalidated by this
@@ -415,34 +383,7 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord, block 
 	// from the unconfirmed set.  This also handles removing unconfirmed
 	// transaction spend chains if any other unconfirmed transactions spend
 	// outputs of the removed double spend.
-	err = s.removeDoubleSpends(ns, rec)
-	if err != nil {
-		return err
-	}
-
-	// If a block record does not yet exist for any transactions from this
-	// block, insert the record.  Otherwise, update it by adding the
-	// transaction hash to the set of transactions from this block.
-	blockKey, blockValue := existsBlockRecord(ns, block.Height)
-	if blockValue == nil {
-		err = putBlockRecord(ns, block, &rec.Hash)
-	} else {
-		blockValue, err = appendRawBlockRecord(blockValue, &rec.Hash)
-		if err != nil {
-			return err
-		}
-		err = putRawBlockRecord(ns, blockKey, blockValue)
-	}
-	if err != nil {
-		return err
-	}
-
-	err = putTxRecord(ns, rec, &block.Block)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return s.removeDoubleSpends(ns, rec)
 }
 
 // AddCredit marks a transaction record as containing a transaction output
