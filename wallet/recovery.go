@@ -3,7 +3,9 @@ package wallet
 import (
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
@@ -29,15 +31,22 @@ type RecoveryManager struct {
 	// state encapsulates and allocates the necessary recovery state for all
 	// key scopes and subsidiary derivation paths.
 	state *RecoveryState
+
+	// chainParams are the parameters that describe the chain we're trying
+	// to recover funds on.
+	chainParams *chaincfg.Params
 }
 
 // NewRecoveryManager initializes a new RecoveryManager with a derivation
 // look-ahead of `recoveryWindow` child indexes, and pre-allocates a backing
 // array for `batchSize` blocks to scan at once.
-func NewRecoveryManager(recoveryWindow, batchSize uint32) *RecoveryManager {
+func NewRecoveryManager(recoveryWindow, batchSize uint32,
+	chainParams *chaincfg.Params) *RecoveryManager {
+
 	return &RecoveryManager{
 		recoveryWindow: recoveryWindow,
 		blockBatch:     make([]wtxmgr.BlockMeta, 0, batchSize),
+		chainParams:    chainParams,
 		state:          NewRecoveryState(recoveryWindow),
 	}
 }
@@ -121,7 +130,14 @@ func (rm *RecoveryManager) Resurrect(ns walletdb.ReadBucket,
 	// to our global set of watched outpoints, so that we can watch them for
 	// spends.
 	for _, credit := range credits {
-		rm.state.AddWatchedOutPoint(&credit.OutPoint)
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			credit.PkScript, rm.chainParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		rm.state.AddWatchedOutPoint(&credit.OutPoint, addrs[0])
 	}
 
 	return nil
@@ -191,7 +207,7 @@ type RecoveryState struct {
 	// watchedOutPoints contains the set of all outpoints known to the
 	// wallet. This is updated iteratively as new outpoints are found during
 	// a rescan.
-	watchedOutPoints map[wire.OutPoint]struct{}
+	watchedOutPoints map[wire.OutPoint]btcutil.Address
 }
 
 // NewRecoveryState creates a new RecoveryState using the provided
@@ -203,7 +219,7 @@ func NewRecoveryState(recoveryWindow uint32) *RecoveryState {
 	return &RecoveryState{
 		recoveryWindow:   recoveryWindow,
 		scopes:           scopes,
-		watchedOutPoints: make(map[wire.OutPoint]struct{}),
+		watchedOutPoints: make(map[wire.OutPoint]btcutil.Address),
 	}
 }
 
@@ -227,14 +243,16 @@ func (rs *RecoveryState) StateForScope(
 
 // WatchedOutPoints returns the global set of outpoints that are known to belong
 // to the wallet during recovery.
-func (rs *RecoveryState) WatchedOutPoints() map[wire.OutPoint]struct{} {
+func (rs *RecoveryState) WatchedOutPoints() map[wire.OutPoint]btcutil.Address {
 	return rs.watchedOutPoints
 }
 
 // AddWatchedOutPoint updates the recovery state's set of known outpoints that
 // we will monitor for spends during recovery.
-func (rs *RecoveryState) AddWatchedOutPoint(outPoint *wire.OutPoint) {
-	rs.watchedOutPoints[*outPoint] = struct{}{}
+func (rs *RecoveryState) AddWatchedOutPoint(outPoint *wire.OutPoint,
+	addr btcutil.Address) {
+
+	rs.watchedOutPoints[*outPoint] = addr
 }
 
 // ScopeRecoveryState is used to manage the recovery of addresses generated
