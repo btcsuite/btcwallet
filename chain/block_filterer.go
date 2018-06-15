@@ -42,7 +42,7 @@ type BlockFilterer struct {
 	// WathcedOutPoints is a global set of outpoints being tracked by the
 	// wallet. This allows the block filterer to check for spends from an
 	// outpoint we own.
-	WatchedOutPoints map[wire.OutPoint]struct{}
+	WatchedOutPoints map[wire.OutPoint]btcutil.Address
 
 	// FoundExternal is a two-layer map recording the scope and index of
 	// external addresses found in a single block.
@@ -54,7 +54,7 @@ type BlockFilterer struct {
 
 	// FoundOutPoints is a set of outpoints found in a single block whose
 	// address belongs to the wallet.
-	FoundOutPoints map[wire.OutPoint]struct{}
+	FoundOutPoints map[wire.OutPoint]btcutil.Address
 
 	// RelevantTxns records the transactions found in a particular block
 	// that contained matches from an address in either ExReverseFilter or
@@ -87,7 +87,7 @@ func NewBlockFilterer(params *chaincfg.Params,
 
 	foundExternal := make(map[waddrmgr.KeyScope]map[uint32]struct{})
 	foundInternal := make(map[waddrmgr.KeyScope]map[uint32]struct{})
-	foundOutPoints := make(map[wire.OutPoint]struct{})
+	foundOutPoints := make(map[wire.OutPoint]btcutil.Address)
 
 	return &BlockFilterer{
 		Params:           params,
@@ -168,7 +168,7 @@ func (bf *BlockFilterer) FilterTx(tx *wire.MsgTx) bool {
 			Index: uint32(i),
 		}
 
-		bf.FoundOutPoints[outPoint] = struct{}{}
+		bf.FoundOutPoints[outPoint] = addrs[0]
 	}
 
 	return isRelevant
