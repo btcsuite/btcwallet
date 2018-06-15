@@ -140,6 +140,21 @@ func (c *RPCClient) Stop() {
 	c.quitMtx.Unlock()
 }
 
+// Rescan wraps the normal Rescan command with an additional paramter that
+// allows us to map an oupoint to the address in the chain that it pays to.
+// This is useful when using BIP 158 filters as they include the prev pkScript
+// rather than the full outpoint.
+func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
+	outPoints map[wire.OutPoint]btcutil.Address) error {
+
+	flatOutpoints := make([]*wire.OutPoint, 0, len(outPoints))
+	for ops := range outPoints {
+		flatOutpoints = append(flatOutpoints, &ops)
+	}
+
+	return c.Client.Rescan(startHash, addrs, flatOutpoints)
+}
+
 // WaitForShutdown blocks until both the client has finished disconnecting
 // and all handlers have exited.
 func (c *RPCClient) WaitForShutdown() {
@@ -200,7 +215,9 @@ func (c *RPCClient) FilterBlocks(
 			continue
 		}
 
-		filter, err := gcs.FromNBytes(builder.DefaultP, rawFilter.Data)
+		filter, err := gcs.FromNBytes(
+			builder.DefaultP, builder.DefaultM, rawFilter.Data,
+		)
 		if err != nil {
 			return nil, err
 		}
