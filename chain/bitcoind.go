@@ -313,7 +313,7 @@ func (c *BitcoindClient) RescanBlocks(blockHashes []chainhash.Hash) (
 // Rescan rescans from the block with the given hash until the current block,
 // after adding the passed addresses and outpoints to the client's watch list.
 func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
-	addrs []btcutil.Address, outPoints []*wire.OutPoint) error {
+	addrs []btcutil.Address, outPoints map[wire.OutPoint]btcutil.Address) error {
 
 	if blockHash == nil {
 		return errors.New("rescan requires a starting block hash")
@@ -592,10 +592,10 @@ mainLoop:
 						c.watchOutPoints[*op] = struct{}{}
 					}
 					c.clientMtx.Unlock()
-				case []wire.OutPoint:
+				case map[wire.OutPoint]btcutil.Address:
 					// We're updating monitored outpoints.
 					c.clientMtx.Lock()
-					for _, op := range e {
+					for op := range e {
 						c.watchOutPoints[op] = struct{}{}
 					}
 					c.clientMtx.Unlock()
