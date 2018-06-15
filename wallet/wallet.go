@@ -403,6 +403,7 @@ func (w *Wallet) syncWithChain() error {
 			// size of 2000.
 			recoveryMgr = NewRecoveryManager(
 				w.recoveryWindow, recoveryBatchSize,
+				w.chainParams,
 			)
 
 			// In the event that this recovery is being resumed, we
@@ -743,8 +744,8 @@ expandHorizons:
 
 	// Update the global set of watched outpoints with any that were found
 	// in the block.
-	for outPoint := range filterResp.FoundOutPoints {
-		recoveryState.AddWatchedOutPoint(&outPoint)
+	for outPoint, addr := range filterResp.FoundOutPoints {
+		recoveryState.AddWatchedOutPoint(&outPoint, addr)
 	}
 
 	// Finally, record all of the relevant transactions that were returned
