@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,13 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/lightninglabs/gozmq"
+)
+
+var (
+	// ErrBitcoindClientShuttingDown is an error returned when we attempt
+	// to receive a notification for a specific item and the bitcoind client
+	// is in the middle of shutting down.
+	ErrBitcoindClientShuttingDown = errors.New("client is shutting down")
 )
 
 // BitcoindClient represents a persistent client connection to a bitcoind server
@@ -191,7 +199,9 @@ func (c *BitcoindClient) NotifyReceived(addrs []btcutil.Address) error {
 	select {
 	case c.rescanUpdate <- addrs:
 	case <-c.quit:
+		return ErrBitcoindClientShuttingDown
 	}
+
 	return nil
 }
 
@@ -201,7 +211,9 @@ func (c *BitcoindClient) NotifySpent(outPoints []*wire.OutPoint) error {
 	select {
 	case c.rescanUpdate <- outPoints:
 	case <-c.quit:
+		return ErrBitcoindClientShuttingDown
 	}
+
 	return nil
 }
 
@@ -211,7 +223,9 @@ func (c *BitcoindClient) NotifyTxIDs(txids []chainhash.Hash) error {
 	select {
 	case c.rescanUpdate <- txids:
 	case <-c.quit:
+		return ErrBitcoindClientShuttingDown
 	}
+
 	return nil
 }
 
@@ -238,45 +252,54 @@ func (c *BitcoindClient) LoadTxFilter(reset bool,
 		select {
 		case c.rescanUpdate <- struct{}{}:
 		case <-c.quit:
-			return nil
+			return ErrBitcoindClientShuttingDown
 		}
 	}
 
 	// This helper function will send an update to the filter. If the quit
 	// channel is closed, it will allow the outer loop below to finish,
 	// but skip over any updates as the quit case is triggered each time.
-	sendList := func(list interface{}) {
+	sendList := func(list interface{}) error {
 		select {
 		case c.rescanUpdate <- list:
 		case <-c.quit:
+			return ErrBitcoindClientShuttingDown
 		}
+
+		return nil
 	}
 
+	var err error
 	for _, watchList := range watchLists {
 		switch list := watchList.(type) {
 
 		case map[wire.OutPoint]btcutil.Address:
-			sendList(list)
+			err = sendList(list)
 
 		case []wire.OutPoint:
-			sendList(list)
+			err = sendList(list)
 
 		case []*wire.OutPoint:
-			sendList(list)
+			err = sendList(list)
 
 		case []btcutil.Address:
-			sendList(list)
+			err = sendList(list)
 
 		case []chainhash.Hash:
-			sendList(list)
+			err = sendList(list)
 
 		case []*chainhash.Hash:
-			sendList(list)
+			err = sendList(list)
 
 		default:
-			log.Warnf("Couldn't add item to filter: unknown type")
+			return fmt.Errorf("unable to update filter: unknown "+
+				"type %T", list)
+		}
+		if err != nil {
+			return err
 		}
 	}
+
 	return nil
 }
 
@@ -332,21 +355,21 @@ func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 	select {
 	case c.rescanUpdate <- addrs:
 	case <-c.quit:
-		return nil
+		return ErrBitcoindClientShuttingDown
 	}
 
 	// Update outpoints.
 	select {
 	case c.rescanUpdate <- outPoints:
 	case <-c.quit:
-		return nil
+		return ErrBitcoindClientShuttingDown
 	}
 
 	// Kick off the rescan with the starting block hash.
 	select {
 	case c.rescanUpdate <- blockHash:
 	case <-c.quit:
-		return nil
+		return ErrBitcoindClientShuttingDown
 	}
 
 	return nil
