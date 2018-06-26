@@ -236,7 +236,7 @@ func (c *BitcoindClient) LoadTxFilter(reset bool,
 	// If we reset, signal that.
 	if reset {
 		select {
-		case c.rescanUpdate <- reset:
+		case c.rescanUpdate <- struct{}{}:
 		case <-c.quit:
 			return nil
 		}
