@@ -25,6 +25,9 @@ import (
 // BitcoindClient represents a persistent client connection to a bitcoind server
 // for information regarding the current best block chain.
 type BitcoindClient struct {
+	started int32 // To be used atomically.
+	stopped int32 // To be used atomically.
+
 	client      *rpcclient.Client
 	connConfig  *rpcclient.ConnConfig // Work around unexported field
 	chainParams *chaincfg.Params
@@ -45,13 +48,11 @@ type BitcoindClient struct {
 	watchTxIDs     map[chainhash.Hash]struct{}
 	notify         uint32
 
-	quit    chan struct{}
-	wg      sync.WaitGroup
-	started bool
-	quitMtx sync.Mutex
-
 	memPool    map[chainhash.Hash]struct{}
 	memPoolExp map[int32]map[chainhash.Hash]struct{}
+
+	quit chan struct{}
+	wg   sync.WaitGroup
 }
 
 // NewBitcoindClient creates a client connection to the server described by the
@@ -364,6 +365,10 @@ func (c *BitcoindClient) SendRawTransaction(tx *wire.MsgTx,
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
 func (c *BitcoindClient) Start() error {
+	if !atomic.CompareAndSwapInt32(&c.started, 0, 1) {
+		return nil
+	}
+
 	// Verify that the server is running on the expected network.
 	net, err := c.GetCurrentNet()
 	if err != nil {
@@ -397,10 +402,6 @@ func (c *BitcoindClient) Start() error {
 		return err
 	}
 
-	c.quitMtx.Lock()
-	c.started = true
-	c.quitMtx.Unlock()
-
 	c.wg.Add(2)
 	go c.socketHandler(zmqClient)
 	return nil
@@ -409,15 +410,13 @@ func (c *BitcoindClient) Start() error {
 // Stop disconnects the client and signals the shutdown of all goroutines
 // started by Start.
 func (c *BitcoindClient) Stop() {
-	c.quitMtx.Lock()
-	select {
-	case <-c.quit:
-	default:
-		close(c.quit)
-		c.client.Shutdown()
-		c.notificationQueue.Stop()
+	if !atomic.CompareAndSwapInt32(&c.stopped, 0, 1) {
+		return
 	}
-	c.quitMtx.Unlock()
+
+	close(c.quit)
+	c.client.Shutdown()
+	c.notificationQueue.Stop()
 }
 
 // WaitForShutdown blocks until both the client has finished disconnecting
