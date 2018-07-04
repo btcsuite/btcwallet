@@ -128,12 +128,20 @@ func (w *Wallet) handleChainNotifications() {
 		case *chain.RescanProgress:
 			err = catchUpHashes(w, chainClient, n.Height)
 			notificationName = "rescanprogress"
-			w.rescanNotifications <- n
+			select {
+			case w.rescanNotifications <- n:
+			case <-w.quitChan():
+				return
+			}
 		case *chain.RescanFinished:
 			err = catchUpHashes(w, chainClient, n.Height)
 			notificationName = "rescanprogress"
 			w.SetChainSynced(true)
-			w.rescanNotifications <- n
+			select {
+			case w.rescanNotifications <- n:
+			case <-w.quitChan():
+				return
+			}
 		}
 		if err != nil {
 			// On out-of-sync blockconnected notifications, only
