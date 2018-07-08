@@ -3224,6 +3224,15 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	_, err = server.SendRawTransaction(tx, false)
 	switch {
 	case err == nil:
+		switch w.chainClient.(type) {
+		// For neutrino we need to trigger adding relevant tx manually
+		// because for spv client - tx data isn't received from sync peer.
+		case *chain.NeutrinoClient:
+			return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.addRelevantTx(tx, txRec, nil)
+			})
+		}
+
 		return nil
 
 	// The following are errors returned from btcd's mempool.
