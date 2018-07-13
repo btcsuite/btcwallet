@@ -167,145 +167,10 @@ func Create(ns walletdb.ReadWriteBucket) error {
 	return createStore(ns)
 }
 
-// moveMinedTx moves a transaction record from the unmined buckets to block
-// buckets.
-func (s *Store) moveMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+// updateMinedBalance updates the mined balance within the store, if changed,
+// after processing the given transaction record.
+func (s *Store) updateMinedBalance(ns walletdb.ReadWriteBucket, rec *TxRecord,
 	block *BlockMeta) error {
-
-	log.Infof("Marking unconfirmed transaction %v mined in block %d",
-		&rec.Hash, block.Height)
-
-	// Fetch the mined balance in case we need to update it.
-	minedBalance, err := fetchMinedBalance(ns)
-	if err != nil {
-		return err
-	}
-
-	// For each output of the record that is marked as a credit, if the
-	// output is marked as a credit by the unconfirmed store, remove the
-	// marker and mark the output as a credit in the db.
-	//
-	// Moved credits are added as unspents, even if there is another
-	// unconfirmed transaction which spends them.
-	cred := credit{
-		outPoint: wire.OutPoint{Hash: rec.Hash},
-		block:    block.Block,
-		spentBy:  indexedIncidence{index: ^uint32(0)},
-	}
-
-	newMinedBalance := minedBalance
-	it := makeUnminedCreditIterator(ns, &rec.Hash)
-	for it.next() {
-		// TODO: This should use the raw apis.  The credit value (it.cv)
-		// can be moved from unmined directly to the credits bucket.
-		// The key needs a modification to include the block
-		// height/hash.
-		index, err := fetchRawUnminedCreditIndex(it.ck)
-		if err != nil {
-			return err
-		}
-		amount, change, err := fetchRawUnminedCreditAmountChange(it.cv)
-		if err != nil {
-			return err
-		}
-
-		cred.outPoint.Index = index
-		cred.amount = amount
-		cred.change = change
-
-		if err := putUnspentCredit(ns, &cred); err != nil {
-			return err
-		}
-		err = putUnspent(ns, &cred.outPoint, &block.Block)
-		if err != nil {
-			return err
-		}
-
-		newMinedBalance += amount
-	}
-	if it.err != nil {
-		return it.err
-	}
-
-	// Update the balance if it has changed.
-	if newMinedBalance != minedBalance {
-		if err := putMinedBalance(ns, newMinedBalance); err != nil {
-			return err
-		}
-	}
-
-	// Delete all the *now* confirmed credits from the unmined credits
-	// bucket. We do this outside of the iteration since the cursor deletion
-	// is broken within boltdb.
-	for i := range rec.MsgTx.TxOut {
-		k := canonicalOutPoint(&rec.Hash, uint32(i))
-		if err := deleteRawUnminedCredit(ns, k); err != nil {
-			return err
-		}
-	}
-
-	// Finally, we'll remove the transaction from the unconfirmed bucket.
-	return deleteRawUnmined(ns, rec.Hash[:])
-}
-
-// InsertTx records a transaction as belonging to a wallet's transaction
-// history.  If block is nil, the transaction is considered unspent, and the
-// transaction's index must be unset.
-func (s *Store) InsertTx(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta) error {
-	if block == nil {
-		return s.insertMemPoolTx(ns, rec)
-	}
-	return s.insertMinedTx(ns, rec, block)
-}
-
-// RemoveUnminedTx attempts to remove an unmined transaction from the
-// transaction store. This is to be used in the scenario that a transaction
-// that we attempt to rebroadcast, turns out to double spend one of our
-// existing inputs. This function we remove the conflicting transaction
-// identified by the tx record, and also recursively remove all transactions
-// that depend on it.
-func (s *Store) RemoveUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
-	// As we already have a tx record, we can directly call the
-	// removeConflict method. This will do the job of recursively removing
-	// this unmined transaction, and any transactions that depend on it.
-	return s.removeConflict(ns, rec)
-}
-
-// insertMinedTx inserts a new transaction record for a mined transaction into
-// the database under the confirmed bucket. It guarantees that, if the
-// tranasction was previously unconfirmed, then it will take care of cleaning up
-// the unconfirmed state. All other unconfirmed double spend attempts will be
-// removed as well.
-func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
-	block *BlockMeta) error {
-
-	// If a transaction record for this hash and block already exists, we
-	// can exit early.
-	if _, v := existsTxRecord(ns, &rec.Hash, &block.Block); v != nil {
-		return nil
-	}
-
-	// If a block record does not yet exist for any transactions from this
-	// block, insert a block record first. Otherwise, update it by adding
-	// the transaction hash to the set of transactions from this block.
-	var err error
-	blockKey, blockValue := existsBlockRecord(ns, block.Height)
-	if blockValue == nil {
-		err = putBlockRecord(ns, block, &rec.Hash)
-	} else {
-		blockValue, err = appendRawBlockRecord(blockValue, &rec.Hash)
-		if err != nil {
-			return err
-		}
-		err = putRawBlockRecord(ns, blockKey, blockValue)
-	}
-	if err != nil {
-		return err
-	}
-
-	if err := putTxRecord(ns, rec, &block.Block); err != nil {
-		return err
-	}
 
 	// Fetch the mined balance in case we need to update it.
 	minedBalance, err := fetchMinedBalance(ns)
@@ -365,17 +230,146 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 		newMinedBalance -= amt
 	}
 
+	// For each output of the record that is marked as a credit, if the
+	// output is marked as a credit by the unconfirmed store, remove the
+	// marker and mark the output as a credit in the db.
+	//
+	// Moved credits are added as unspents, even if there is another
+	// unconfirmed transaction which spends them.
+	cred := credit{
+		outPoint: wire.OutPoint{Hash: rec.Hash},
+		block:    block.Block,
+		spentBy:  indexedIncidence{index: ^uint32(0)},
+	}
+
+	it := makeUnminedCreditIterator(ns, &rec.Hash)
+	for it.next() {
+		// TODO: This should use the raw apis.  The credit value (it.cv)
+		// can be moved from unmined directly to the credits bucket.
+		// The key needs a modification to include the block
+		// height/hash.
+		index, err := fetchRawUnminedCreditIndex(it.ck)
+		if err != nil {
+			return err
+		}
+		amount, change, err := fetchRawUnminedCreditAmountChange(it.cv)
+		if err != nil {
+			return err
+		}
+
+		cred.outPoint.Index = index
+		cred.amount = amount
+		cred.change = change
+
+		if err := putUnspentCredit(ns, &cred); err != nil {
+			return err
+		}
+		err = putUnspent(ns, &cred.outPoint, &block.Block)
+		if err != nil {
+			return err
+		}
+
+		newMinedBalance += amount
+	}
+	if it.err != nil {
+		return it.err
+	}
+
 	// Update the balance if it has changed.
 	if newMinedBalance != minedBalance {
-		if err := putMinedBalance(ns, newMinedBalance); err != nil {
+		return putMinedBalance(ns, newMinedBalance)
+	}
+
+	return nil
+}
+
+// deleteUnminedTx deletes an unmined transaction from the store.
+//
+// NOTE: This should only be used once the transaction has been mined.
+func (s *Store) deleteUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
+	for i := range rec.MsgTx.TxOut {
+		k := canonicalOutPoint(&rec.Hash, uint32(i))
+		if err := deleteRawUnminedCredit(ns, k); err != nil {
 			return err
 		}
 	}
 
-	// If this transaction previously existed within the store as
-	// unconfirmed, we'll need to move it to the confirmed bucket.
+	return deleteRawUnmined(ns, rec.Hash[:])
+}
+
+// InsertTx records a transaction as belonging to a wallet's transaction
+// history.  If block is nil, the transaction is considered unspent, and the
+// transaction's index must be unset.
+func (s *Store) InsertTx(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta) error {
+	if block == nil {
+		return s.insertMemPoolTx(ns, rec)
+	}
+	return s.insertMinedTx(ns, rec, block)
+}
+
+// RemoveUnminedTx attempts to remove an unmined transaction from the
+// transaction store. This is to be used in the scenario that a transaction
+// that we attempt to rebroadcast, turns out to double spend one of our
+// existing inputs. This function we remove the conflicting transaction
+// identified by the tx record, and also recursively remove all transactions
+// that depend on it.
+func (s *Store) RemoveUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
+	// As we already have a tx record, we can directly call the
+	// removeConflict method. This will do the job of recursively removing
+	// this unmined transaction, and any transactions that depend on it.
+	return s.removeConflict(ns, rec)
+}
+
+// insertMinedTx inserts a new transaction record for a mined transaction into
+// the database under the confirmed bucket. It guarantees that, if the
+// tranasction was previously unconfirmed, then it will take care of cleaning up
+// the unconfirmed state. All other unconfirmed double spend attempts will be
+// removed as well.
+func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	block *BlockMeta) error {
+
+	// If a transaction record for this hash and block already exists, we
+	// can exit early.
+	if _, v := existsTxRecord(ns, &rec.Hash, &block.Block); v != nil {
+		return nil
+	}
+
+	// If a block record does not yet exist for any transactions from this
+	// block, insert a block record first. Otherwise, update it by adding
+	// the transaction hash to the set of transactions from this block.
+	var err error
+	blockKey, blockValue := existsBlockRecord(ns, block.Height)
+	if blockValue == nil {
+		err = putBlockRecord(ns, block, &rec.Hash)
+	} else {
+		blockValue, err = appendRawBlockRecord(blockValue, &rec.Hash)
+		if err != nil {
+			return err
+		}
+		err = putRawBlockRecord(ns, blockKey, blockValue)
+	}
+	if err != nil {
+		return err
+	}
+	if err := putTxRecord(ns, rec, &block.Block); err != nil {
+		return err
+	}
+
+	// Determine if this transaction has affected our balance, and if so,
+	// update it.
+	if err := s.updateMinedBalance(ns, rec, block); err != nil {
+		return err
+	}
+
+	// If this transaction previously existed within the store as unmined,
+	// we'll need to remove it from the unmined bucket.
 	if v := existsRawUnmined(ns, rec.Hash[:]); v != nil {
-		return s.moveMinedTx(ns, rec, block)
+		log.Infof("Marking unconfirmed transaction %v mined in block %d",
+			&rec.Hash, block.Height)
+
+		if err := s.deleteUnminedTx(ns, rec); err != nil {
+			return err
+		}
 	}
 
 	// As there may be unconfirmed transactions that are invalidated by this
