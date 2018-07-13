@@ -385,7 +385,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		neutrino.WatchAddrs(addrs...),
 		neutrino.WatchOutPoints(watchOutPoints...),
 	)
-	s.rescan = &newRescan
+	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
 
 	return nil
@@ -433,7 +433,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 		neutrino.QuitChan(s.rescanQuit),
 		neutrino.WatchAddrs(addrs...),
 	)
-	s.rescan = &newRescan
+	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
 	s.clientMtx.Unlock()
 	return nil
