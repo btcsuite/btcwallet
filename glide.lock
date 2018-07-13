@@ -1,10 +1,10 @@
-hash: 9c2b44923522db0619fde4bafd11c1b3209f5f978201ea7fbd30ae2ff929c388
-updated: 2018-05-23T20:53:02.17971318-07:00
+hash: bf4995932938ecadf07df881693930a34d975fce4e87c1181a03378af7613f63
+updated: 2018-07-13T16:43:56.234399716-07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
 - name: github.com/btcsuite/btcd
-  version: bc0944904505aab55e089371a892be2f87883161
+  version: 991d32e72fe84d5fbf9c47cd604d793a0cd3a072
   subpackages:
   - addrmgr
   - blockchain
@@ -47,11 +47,11 @@ imports:
 - name: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - name: github.com/davecgh/go-spew
-  version: 8991bc29aa16c548c550c7ff78260e27b9ab7c73
+  version: ecdeabc65495df2dec95d7c4a4c3e021903035e5
   subpackages:
   - spew
 - name: github.com/golang/protobuf
-  version: 3a3da3a4e26776cc22a79ef46d5d58477532dede
+  version: 70b3af33377e7aa25ae42977bed93cc6b90f0373
   subpackages:
   - proto
   - ptypes
@@ -65,21 +65,21 @@ imports:
   subpackages:
   - rotator
 - name: github.com/kkdai/bstream
-  version: f71540b9dfdcfe64dbf2818e9b66423c6aafcacd
+  version: f391b8402d23024e7c0f624b31267a89998fca95
 - name: github.com/lightninglabs/gozmq
   version: 462a8a75388506b68f76661af8d649f0b88e5301
 - name: github.com/lightninglabs/neutrino
-  version: 647edd9b0e8ebd3bf1e0ea06e8cc616a15b9ed37
+  version: 03f4c660ea0d1586331f32561185d45eab1ba4c9
   subpackages:
   - filterdb
   - headerfs
 - name: golang.org/x/crypto
-  version: 75e913eb8a8e3d31a97b216de09de106a7b07681
+  version: 9419663f5a44be8b34ca85f08abc5fe1be11f8a3
   subpackages:
   - ripemd160
   - ssh/terminal
 - name: golang.org/x/net
-  version: 9ef9f5bb98a1fdc41f8cf6c250a4404b4085e389
+  version: d0887baf81f4598189d4e12a37c6da86f0bba4d0
   subpackages:
   - context
   - http/httpguts
@@ -89,19 +89,19 @@ imports:
   - internal/timeseries
   - trace
 - name: golang.org/x/sys
-  version: 77b0e4315053a57ed2962443614bdb28db152054
+  version: 1b2967e3c290b7c545b3db0deeda16e9be4f98a2
   subpackages:
   - unix
   - windows
 - name: golang.org/x/text
-  version: 5c1cf69b5978e5a34c5f9ba09a83e56acc4b7877
+  version: 0605a8320aceb4207a5fb3521281e17ec2075476
   subpackages:
   - secure/bidirule
   - transform
   - unicode/bidi
   - unicode/norm
 - name: google.golang.org/genproto
-  version: 694d95ba50e67b2e363f3483057db5d4910c18f9
+  version: e92b116572682a5b432ddd840aeaba2a559eeff1
   subpackages:
   - googleapis/rpc/status
 - name: google.golang.org/grpc
