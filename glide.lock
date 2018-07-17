@@ -1,10 +1,10 @@
-hash: bf4995932938ecadf07df881693930a34d975fce4e87c1181a03378af7613f63
-updated: 2018-07-13T16:43:56.234399716-07:00
+hash: a3732c6a9a04a851beea6fb11c77d593c8297e37efcbab29190cb57edb5cae2b
+updated: 2018-07-16T19:02:33.363613705-07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
 - name: github.com/btcsuite/btcd
-  version: 991d32e72fe84d5fbf9c47cd604d793a0cd3a072
+  version: fdfc19097e7ac6b57035062056f5b7b4638b8898
   subpackages:
   - addrmgr
   - blockchain
@@ -21,7 +21,7 @@ imports:
 - name: github.com/btcsuite/btclog
   version: 84c8d2346e9fc8c7b947e243b9c24e6df9fd206a
 - name: github.com/btcsuite/btcutil
-  version: d4cc87b860166d00d6b5b9e0d3b3d71d6088d4d4
+  version: ab6388e0c60ae4834a1f57511e20c17b5f78be4b
   subpackages:
   - base58
   - bech32
@@ -51,7 +51,7 @@ imports:
   subpackages:
   - spew
 - name: github.com/golang/protobuf
-  version: 70b3af33377e7aa25ae42977bed93cc6b90f0373
+  version: 14aad3d5ea4c323bcd7a2137e735da24a76e814c
   subpackages:
   - proto
   - ptypes
@@ -69,7 +69,7 @@ imports:
 - name: github.com/lightninglabs/gozmq
   version: 462a8a75388506b68f76661af8d649f0b88e5301
 - name: github.com/lightninglabs/neutrino
-  version: 03f4c660ea0d1586331f32561185d45eab1ba4c9
+  version: 8401b99f3f0698bc6aa26c3d702dd583e51f70c2
   subpackages:
   - filterdb
   - headerfs
@@ -89,7 +89,7 @@ imports:
   - internal/timeseries
   - trace
 - name: golang.org/x/sys
-  version: 1b2967e3c290b7c545b3db0deeda16e9be4f98a2
+  version: ac767d655b305d4e9612f5f6e33120b9176c4ad4
   subpackages:
   - unix
   - windows
@@ -101,7 +101,7 @@ imports:
   - unicode/bidi
   - unicode/norm
 - name: google.golang.org/genproto
-  version: e92b116572682a5b432ddd840aeaba2a559eeff1
+  version: 2731d4fa720b67f9fe38e9051a2a9b38e4609260
   subpackages:
   - googleapis/rpc/status
 - name: google.golang.org/grpc

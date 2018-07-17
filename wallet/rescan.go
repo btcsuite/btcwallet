@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
@@ -34,7 +35,7 @@ type RescanFinishedMsg struct {
 type RescanJob struct {
 	InitialSync bool
 	Addrs       []btcutil.Address
-	OutPoints   []*wire.OutPoint
+	OutPoints   map[wire.OutPoint]btcutil.Address
 	BlockStamp  waddrmgr.BlockStamp
 	err         chan error
 }
@@ -44,7 +45,7 @@ type RescanJob struct {
 type rescanBatch struct {
 	initialSync bool
 	addrs       []btcutil.Address
-	outpoints   []*wire.OutPoint
+	outpoints   map[wire.OutPoint]btcutil.Address
 	bs          waddrmgr.BlockStamp
 	errChans    []chan error
 }
@@ -78,7 +79,11 @@ func (b *rescanBatch) merge(job *RescanJob) {
 		b.initialSync = true
 	}
 	b.addrs = append(b.addrs, job.Addrs...)
-	b.outpoints = append(b.outpoints, job.OutPoints...)
+
+	for op, addr := range job.OutPoints {
+		b.outpoints[op] = addr
+	}
+
 	if job.BlockStamp.Height < b.bs.Height {
 		b.bs = job.BlockStamp
 	}
@@ -240,9 +245,16 @@ out:
 // current best block in the main chain, and is considered an initial sync
 // rescan.
 func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error {
-	outpoints := make([]*wire.OutPoint, len(unspent))
-	for i, output := range unspent {
-		outpoints[i] = &output.OutPoint
+	outpoints := make(map[wire.OutPoint]btcutil.Address, len(unspent))
+	for _, output := range unspent {
+		_, outputAddrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, w.chainParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		outpoints[output.OutPoint] = outputAddrs[0]
 	}
 
 	job := &RescanJob{

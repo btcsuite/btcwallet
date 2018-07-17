@@ -286,10 +286,13 @@ func buildFilterBlocksWatchList(req *FilterBlocksRequest) ([][]byte, error) {
 		watchList = append(watchList, p2shAddr)
 	}
 
-	for outPoint := range req.WatchedOutPoints {
-		watchList = append(watchList,
-			builder.OutPointToFilterEntry(outPoint),
-		)
+	for _, addr := range req.WatchedOutPoints {
+		addr, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		watchList = append(watchList, addr)
 	}
 
 	return watchList, nil
@@ -325,7 +328,8 @@ func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) 
 
 // Rescan replicates the RPC client's Rescan command.
 func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
-	outPoints []*wire.OutPoint) error {
+	outPoints map[wire.OutPoint]btcutil.Address) error {
+
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {
@@ -346,10 +350,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	s.finished = false
 	s.lastProgressSent = false
 	s.isRescan = true
-	watchOutPoints := make([]wire.OutPoint, 0, len(outPoints))
-	for _, op := range outPoints {
-		watchOutPoints = append(watchOutPoints, *op)
-	}
+
 	header, height, err := s.CS.BlockHeaders.ChainTip()
 	if err != nil {
 		return fmt.Errorf("Can't get chain service's best block: %s", err)
@@ -373,6 +374,18 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		}
 	}
 
+	var inputsToWatch []neutrino.InputWithScript
+	for op, addr := range outPoints {
+		addrScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+		}
+
+		inputsToWatch = append(inputsToWatch, neutrino.InputWithScript{
+			OutPoint: op,
+			PkScript: addrScript,
+		})
+	}
+
 	newRescan := s.CS.NewRescan(
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
@@ -383,7 +396,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		neutrino.StartTime(s.startTime),
 		neutrino.QuitChan(s.rescanQuit),
 		neutrino.WatchAddrs(addrs...),
-		neutrino.WatchOutPoints(watchOutPoints...),
+		neutrino.WatchInputs(inputsToWatch...),
 	)
 	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
