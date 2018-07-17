@@ -255,9 +255,6 @@ func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error 
 		}
 
 		outpoints[output.OutPoint] = outputAddrs[0]
-		if err != nil {
-			return err
-		}
 	}
 
 	job := &RescanJob{
