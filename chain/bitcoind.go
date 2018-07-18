@@ -229,7 +229,8 @@ func (c *BitcoindClient) notifying() bool {
 
 // LoadTxFilter updates the transaction watchlists for the client. Acceptable
 // arguments after `reset` are any combination of []btcutil.Address,
-// []wire.OutPoint, []*wire.OutPoint, []chainhash.Hash, and []*chainhash.Hash.
+// []wire.OutPoint, []*wire.OutPoint, []chainhash.Hash,
+// map[wire.OutPoint]btcutil.Address, and []*chainhash.Hash.
 func (c *BitcoindClient) LoadTxFilter(reset bool,
 	watchLists ...interface{}) error {
 
@@ -254,16 +255,25 @@ func (c *BitcoindClient) LoadTxFilter(reset bool,
 
 	for _, watchList := range watchLists {
 		switch list := watchList.(type) {
+
+		case map[wire.OutPoint]btcutil.Address:
+			sendList(list)
+
 		case []wire.OutPoint:
 			sendList(list)
+
 		case []*wire.OutPoint:
 			sendList(list)
+
 		case []btcutil.Address:
 			sendList(list)
+
 		case []chainhash.Hash:
 			sendList(list)
+
 		case []*chainhash.Hash:
 			sendList(list)
+
 		default:
 			log.Warnf("Couldn't add item to filter: unknown type")
 		}
@@ -568,55 +578,65 @@ mainLoop:
 			// Update our monitored watchlists or do a rescan.
 			case event := <-c.rescanUpdate:
 				switch e := event.(type) {
+
+				// We're clearing the watchlists.
 				case struct{}:
-					// We're clearing the watchlists.
 					c.clientMtx.Lock()
 					c.watchAddrs = make(map[string]struct{})
 					c.watchTxIDs = make(map[chainhash.Hash]struct{})
 					c.watchOutPoints =
 						make(map[wire.OutPoint]struct{})
 					c.clientMtx.Unlock()
+
+				// We're updating monitored addresses.
 				case []btcutil.Address:
-					// We're updating monitored addresses.
 					c.clientMtx.Lock()
 					for _, addr := range e {
 						c.watchAddrs[addr.EncodeAddress()] =
 							struct{}{}
 					}
 					c.clientMtx.Unlock()
+
+				// We're updating monitored outpoints from
+				// pointers.
 				case []*wire.OutPoint:
-					// We're updating monitored outpoints
-					// from pointers.
 					c.clientMtx.Lock()
 					for _, op := range e {
 						c.watchOutPoints[*op] = struct{}{}
 					}
 					c.clientMtx.Unlock()
+				case []wire.OutPoint:
+					c.clientMtx.Lock()
+					for _, op := range e {
+						c.watchOutPoints[op] = struct{}{}
+					}
+					c.clientMtx.Unlock()
+
+				// We're updating monitored outpoints that map
+				// to the scripts that we should scan for.
 				case map[wire.OutPoint]btcutil.Address:
-					// We're updating monitored outpoints.
 					c.clientMtx.Lock()
 					for op := range e {
 						c.watchOutPoints[op] = struct{}{}
 					}
 					c.clientMtx.Unlock()
+
+				// We're adding monitored TXIDs.
 				case []*chainhash.Hash:
-					// We're adding monitored TXIDs from
-					// pointers.
 					c.clientMtx.Lock()
 					for _, txid := range e {
 						c.watchTxIDs[*txid] = struct{}{}
 					}
 					c.clientMtx.Unlock()
 				case []chainhash.Hash:
-					// We're adding monitored TXIDs.
 					c.clientMtx.Lock()
 					for _, txid := range e {
 						c.watchTxIDs[txid] = struct{}{}
 					}
 					c.clientMtx.Unlock()
+
+				// We're rescanning from the passed hash.
 				case *chainhash.Hash:
-					// We're rescanning from the passed
-					// hash.
 					err = c.rescan(e)
 					if err != nil {
 						log.Errorf("rescan failed: %s",
