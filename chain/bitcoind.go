@@ -229,7 +229,8 @@ func (c *BitcoindClient) notifying() bool {
 
 // LoadTxFilter updates the transaction watchlists for the client. Acceptable
 // arguments after `reset` are any combination of []btcutil.Address,
-// []wire.OutPoint, []*wire.OutPoint, []chainhash.Hash, and []*chainhash.Hash.
+// []wire.OutPoint, []*wire.OutPoint, []chainhash.Hash,
+// map[wire.OutPoint]btcutil.Address, and []*chainhash.Hash.
 func (c *BitcoindClient) LoadTxFilter(reset bool,
 	watchLists ...interface{}) error {
 
@@ -254,16 +255,25 @@ func (c *BitcoindClient) LoadTxFilter(reset bool,
 
 	for _, watchList := range watchLists {
 		switch list := watchList.(type) {
+
+		case map[wire.OutPoint]btcutil.Address:
+			sendList(list)
+
 		case []wire.OutPoint:
 			sendList(list)
+
 		case []*wire.OutPoint:
 			sendList(list)
+
 		case []btcutil.Address:
 			sendList(list)
+
 		case []chainhash.Hash:
 			sendList(list)
+
 		case []*chainhash.Hash:
 			sendList(list)
+
 		default:
 			log.Warnf("Couldn't add item to filter: unknown type")
 		}
