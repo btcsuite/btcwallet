@@ -206,8 +206,6 @@ func emptyDB(t *testing.T) (tearDownFunc func(), db walletdb.DB) {
 // setupManager creates a new address manager and returns a teardown function
 // that should be invoked to ensure it is closed and removed upon completion.
 func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *waddrmgr.Manager) {
-	t.Parallel()
-
 	// Create a new manager in a temp directory.
 	dirName, err := ioutil.TempDir("", "mgrtest")
 	if err != nil {

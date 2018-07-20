@@ -1859,6 +1859,8 @@ func TestManager(t *testing.T) {
 // TestEncryptDecryptErrors ensures that errors which occur while encrypting and
 // decrypting data return the expected errors.
 func TestEncryptDecryptErrors(t *testing.T) {
+	t.Parallel()
+
 	teardown, db, mgr := setupManager(t)
 	defer teardown()
 
@@ -1911,6 +1913,8 @@ func TestEncryptDecryptErrors(t *testing.T) {
 // TestEncryptDecrypt ensures that encrypting and decrypting data with the
 // the various crypto key types works as expected.
 func TestEncryptDecrypt(t *testing.T) {
+	t.Parallel()
+
 	teardown, db, mgr := setupManager(t)
 	defer teardown()
 
