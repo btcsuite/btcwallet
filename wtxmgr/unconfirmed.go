@@ -53,25 +53,37 @@ func (s *Store) removeDoubleSpends(ns walletdb.ReadWriteBucket, rec *TxRecord) e
 	for _, input := range rec.MsgTx.TxIn {
 		prevOut := &input.PreviousOutPoint
 		prevOutKey := canonicalOutPoint(&prevOut.Hash, prevOut.Index)
-		doubleSpendHash := existsRawUnminedInput(ns, prevOutKey)
-		if doubleSpendHash != nil {
+
+		doubleSpendHashes := fetchUnminedInputSpendTxHashes(ns, prevOutKey)
+		for _, doubleSpendHash := range doubleSpendHashes {
+			doubleSpendVal := existsRawUnmined(ns, doubleSpendHash[:])
+
+			// If the spending transaction spends multiple outputs
+			// from the same transaction, we'll find duplicate
+			// entries within the store, so it's possible we're
+			// unable to find it if the conflicts have already been
+			// removed in a previous iteration.
+			if doubleSpendVal == nil {
+				continue
+			}
+
 			var doubleSpend TxRecord
-			doubleSpendVal := existsRawUnmined(ns, doubleSpendHash)
-			copy(doubleSpend.Hash[:], doubleSpendHash) // Silly but need an array
-			err := readRawTxRecord(&doubleSpend.Hash, doubleSpendVal,
-				&doubleSpend)
+			doubleSpend.Hash = doubleSpendHash
+			err := readRawTxRecord(
+				&doubleSpend.Hash, doubleSpendVal, &doubleSpend,
+			)
 			if err != nil {
 				return err
 			}
 
 			log.Debugf("Removing double spending transaction %v",
 				doubleSpend.Hash)
-			err = s.removeConflict(ns, &doubleSpend)
-			if err != nil {
+			if err := s.removeConflict(ns, &doubleSpend); err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -83,14 +95,23 @@ func (s *Store) removeConflict(ns walletdb.ReadWriteBucket, rec *TxRecord) error
 	// For each potential credit for this record, each spender (if any) must
 	// be recursively removed as well.  Once the spenders are removed, the
 	// credit is deleted.
-	numOuts := uint32(len(rec.MsgTx.TxOut))
-	for i := uint32(0); i < numOuts; i++ {
-		k := canonicalOutPoint(&rec.Hash, i)
-		spenderHash := existsRawUnminedInput(ns, k)
-		if spenderHash != nil {
+	for i := range rec.MsgTx.TxOut {
+		k := canonicalOutPoint(&rec.Hash, uint32(i))
+		spenderHashes := fetchUnminedInputSpendTxHashes(ns, k)
+		for _, spenderHash := range spenderHashes {
+			spenderVal := existsRawUnmined(ns, spenderHash[:])
+
+			// If the spending transaction spends multiple outputs
+			// from the same transaction, we'll find duplicate
+			// entries within the store, so it's possible we're
+			// unable to find it if the conflicts have already been
+			// removed in a previous iteration.
+			if spenderVal == nil {
+				continue
+			}
+
 			var spender TxRecord
-			spenderVal := existsRawUnmined(ns, spenderHash)
-			copy(spender.Hash[:], spenderHash) // Silly but need an array
+			spender.Hash = spenderHash
 			err := readRawTxRecord(&spender.Hash, spenderVal, &spender)
 			if err != nil {
 				return err
@@ -98,13 +119,11 @@ func (s *Store) removeConflict(ns walletdb.ReadWriteBucket, rec *TxRecord) error
 
 			log.Debugf("Transaction %v is part of a removed conflict "+
 				"chain -- removing as well", spender.Hash)
-			err = s.removeConflict(ns, &spender)
-			if err != nil {
+			if err := s.removeConflict(ns, &spender); err != nil {
 				return err
 			}
 		}
-		err := deleteRawUnminedCredit(ns, k)
-		if err != nil {
+		if err := deleteRawUnminedCredit(ns, k); err != nil {
 			return err
 		}
 	}
@@ -115,8 +134,7 @@ func (s *Store) removeConflict(ns walletdb.ReadWriteBucket, rec *TxRecord) error
 	for _, input := range rec.MsgTx.TxIn {
 		prevOut := &input.PreviousOutPoint
 		k := canonicalOutPoint(&prevOut.Hash, prevOut.Index)
-		err := deleteRawUnminedInput(ns, k)
-		if err != nil {
+		if err := deleteRawUnminedInput(ns, k); err != nil {
 			return err
 		}
 	}

@@ -1214,17 +1214,43 @@ func (it *unminedCreditIterator) reposition(txHash *chainhash.Hash, index uint32
 //
 //   [0:32]   Transaction hash (32 bytes)
 
+// putRawUnminedInput maintains a list of unmined transaction hashes that have
+// spent an outpoint. Each entry in the bucket is keyed by the outpoint being
+// spent.
 func putRawUnminedInput(ns walletdb.ReadWriteBucket, k, v []byte) error {
-	err := ns.NestedReadWriteBucket(bucketUnminedInputs).Put(k, v)
+	spendTxHashes := ns.NestedReadBucket(bucketUnminedInputs).Get(k)
+	spendTxHashes = append(spendTxHashes, v...)
+	err := ns.NestedReadWriteBucket(bucketUnminedInputs).Put(k, spendTxHashes)
 	if err != nil {
 		str := "failed to put unmined input"
 		return storeError(ErrDatabase, str, err)
 	}
+
 	return nil
 }
 
 func existsRawUnminedInput(ns walletdb.ReadBucket, k []byte) (v []byte) {
 	return ns.NestedReadBucket(bucketUnminedInputs).Get(k)
+}
+
+// fetchUnminedInputSpendTxHashes fetches the list of unmined transactions that
+// spend the serialized outpoint.
+func fetchUnminedInputSpendTxHashes(ns walletdb.ReadBucket, k []byte) []chainhash.Hash {
+	rawSpendTxHashes := ns.NestedReadBucket(bucketUnminedInputs).Get(k)
+	if rawSpendTxHashes == nil {
+		return nil
+	}
+
+	// Each transaction hash is 32 bytes.
+	spendTxHashes := make([]chainhash.Hash, 0, len(rawSpendTxHashes)/32)
+	for len(rawSpendTxHashes) > 0 {
+		var spendTxHash chainhash.Hash
+		copy(spendTxHash[:], rawSpendTxHashes[:32])
+		spendTxHashes = append(spendTxHashes, spendTxHash)
+		rawSpendTxHashes = rawSpendTxHashes[32:]
+	}
+
+	return spendTxHashes
 }
 
 func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
