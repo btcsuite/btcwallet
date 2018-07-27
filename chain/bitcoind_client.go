@@ -1217,6 +1217,14 @@ func (c *BitcoindClient) filterTx(tx *wire.MsgTx,
 	}
 
 	// If the transaction didn't pay to any of our watched addresses, we'll
+	// check if we're currently watching for the hash of this transaction.
+	if !isRelevant {
+		if _, ok := c.watchedTxs[tx.TxHash()]; ok {
+			isRelevant = true
+		}
+	}
+
+	// If the transaction didn't pay to any of our watched hashes, we'll
 	// check if it spends any of our watched outpoints.
 	if !isRelevant {
 		for _, in := range tx.TxIn {
