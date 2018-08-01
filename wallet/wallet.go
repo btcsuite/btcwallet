@@ -173,8 +173,6 @@ func (w *Wallet) SynchronizeRPC(chainClient chain.Interface) {
 	switch cc := chainClient.(type) {
 	case *chain.NeutrinoClient:
 		cc.SetStartTime(w.Manager.Birthday())
-	case *chain.BitcoindClient:
-		cc.SetStartTime(w.Manager.Birthday())
 	}
 	w.chainClientLock.Unlock()
 
