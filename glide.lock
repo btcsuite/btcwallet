@@ -1,5 +1,5 @@
-hash: a3732c6a9a04a851beea6fb11c77d593c8297e37efcbab29190cb57edb5cae2b
-updated: 2018-07-16T19:02:33.363613705-07:00
+hash: dbf6169472218bf09d3f58294b2df4df26a92c15648fcea1a0f1753a4475c850
+updated: 2018-08-02T14:18:19.1529895+07:00
 imports:
 - name: github.com/aead/siphash
   version: e404fcfc888570cadd1610538e2dbc89f66af814
@@ -69,7 +69,7 @@ imports:
 - name: github.com/lightninglabs/gozmq
   version: 462a8a75388506b68f76661af8d649f0b88e5301
 - name: github.com/lightninglabs/neutrino
-  version: 8401b99f3f0698bc6aa26c3d702dd583e51f70c2
+  version: f3b89d2de9065a91b5e26e46128e8c7f961cdd68
   subpackages:
   - filterdb
   - headerfs
