@@ -103,6 +103,12 @@ type ManagedPubKeyAddress interface {
 	// ExportPrivKey returns the private key associated with the address
 	// serialized as Wallet Import Format (WIF).
 	ExportPrivKey() (*btcutil.WIF, error)
+
+	// DerivationInfo contains the information required to derive the key
+	// that backs the address via traditional methods from the HD root. For
+	// imported keys, the first value will be set to false to indicate that
+	// we don't know exactly how the key was derived.
+	DerivationInfo() (bool, KeyScope, DerivationPath)
 }
 
 // ManagedScriptAddress extends ManagedAddress and represents a pay-to-script-hash
