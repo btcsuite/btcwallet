@@ -227,12 +227,15 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 			}
 
 			bs.Timestamp = header.Timestamp
-
 			err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
 			if err != nil {
 				return err
 			}
+
 			err = w.TxStore.Rollback(txmgrNs, b.Height)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
