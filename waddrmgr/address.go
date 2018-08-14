@@ -108,7 +108,7 @@ type ManagedPubKeyAddress interface {
 	// that backs the address via traditional methods from the HD root. For
 	// imported keys, the first value will be set to false to indicate that
 	// we don't know exactly how the key was derived.
-	DerivationInfo() (bool, KeyScope, DerivationPath)
+	DerivationInfo() (KeyScope, DerivationPath, bool)
 }
 
 // ManagedScriptAddress extends ManagedAddress and represents a pay-to-script-hash
@@ -125,7 +125,7 @@ type ManagedScriptAddress interface {
 // the private key associated with the public key.
 type managedAddress struct {
 	manager          *ScopedKeyManager
-	account          uint32
+	derivationPath   DerivationPath
 	address          btcutil.Address
 	imported         bool
 	internal         bool
@@ -181,7 +181,7 @@ func (a *managedAddress) lock() {
 //
 // This is part of the ManagedAddress interface implementation.
 func (a *managedAddress) Account() uint32 {
-	return a.account
+	return a.derivationPath.Account
 }
 
 // AddrType returns the address type of the managed address. This can be used
@@ -316,11 +316,33 @@ func (a *managedAddress) ExportPrivKey() (*btcutil.WIF, error) {
 	return btcutil.NewWIF(pk, a.manager.rootManager.chainParams, a.compressed)
 }
 
+// Derivationinfo contains the information required to derive the key that
+// backs the address via traditional methods from the HD root. For imported
+// keys, the first value will be set to false to indicate that we don't know
+// exactly how the key was derived.
+//
+// This is part of the ManagedPubKeyAddress interface implementation.
+func (a *managedAddress) DerivationInfo() (KeyScope, DerivationPath, bool) {
+	var (
+		scope KeyScope
+		path  DerivationPath
+	)
+
+	// If this key is imported, then we can't return any information as we
+	// don't know precisely how the key was derived.
+	if a.imported {
+		return scope, path, false
+	}
+
+	return a.manager.Scope(), a.derivationPath, true
+}
+
 // newManagedAddressWithoutPrivKey returns a new managed address based on the
 // passed account, public key, and whether or not the public key should be
 // compressed.
-func newManagedAddressWithoutPrivKey(m *ScopedKeyManager, account uint32, pubKey *btcec.PublicKey,
-	compressed bool, addrType AddressType) (*managedAddress, error) {
+func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
+	derivationPath DerivationPath, pubKey *btcec.PublicKey, compressed bool,
+	addrType AddressType) (*managedAddress, error) {
 
 	// Create a pay-to-pubkey-hash address from the public key.
 	var pubKeyHash []byte
@@ -387,7 +409,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager, account uint32, pubKey
 	return &managedAddress{
 		manager:          m,
 		address:          address,
-		account:          account,
+		derivationPath:   derivationPath,
 		imported:         false,
 		internal:         false,
 		addrType:         addrType,
@@ -401,8 +423,9 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager, account uint32, pubKey
 // newManagedAddress returns a new managed address based on the passed account,
 // private key, and whether or not the public key is compressed.  The managed
 // address will have access to the private and public keys.
-func newManagedAddress(s *ScopedKeyManager, account uint32, privKey *btcec.PrivateKey,
-	compressed bool, addrType AddressType) (*managedAddress, error) {
+func newManagedAddress(s *ScopedKeyManager, derivationPath DerivationPath,
+	privKey *btcec.PrivateKey, compressed bool,
+	addrType AddressType) (*managedAddress, error) {
 
 	// Encrypt the private key.
 	//
@@ -419,7 +442,7 @@ func newManagedAddress(s *ScopedKeyManager, account uint32, privKey *btcec.Priva
 	// and then add the private key to it.
 	ecPubKey := (*btcec.PublicKey)(&privKey.PublicKey)
 	managedAddr, err := newManagedAddressWithoutPrivKey(
-		s, account, ecPubKey, compressed, addrType,
+		s, derivationPath, ecPubKey, compressed, addrType,
 	)
 	if err != nil {
 		return nil, err
@@ -434,8 +457,9 @@ func newManagedAddress(s *ScopedKeyManager, account uint32, privKey *btcec.Priva
 // account and extended key.  The managed address will have access to the
 // private and public keys if the provided extended key is private, otherwise it
 // will only have access to the public key.
-func newManagedAddressFromExtKey(s *ScopedKeyManager, account uint32,
-	key *hdkeychain.ExtendedKey, addrType AddressType) (*managedAddress, error) {
+func newManagedAddressFromExtKey(s *ScopedKeyManager,
+	derivationPath DerivationPath, key *hdkeychain.ExtendedKey,
+	addrType AddressType) (*managedAddress, error) {
 
 	// Create a new managed address based on the public or private key
 	// depending on whether the generated key is private.
@@ -446,9 +470,10 @@ func newManagedAddressFromExtKey(s *ScopedKeyManager, account uint32,
 			return nil, err
 		}
 
-		// Ensure the temp private key big integer is cleared after use.
+		// Ensure the temp private key big integer is cleared after
+		// use.
 		managedAddr, err = newManagedAddress(
-			s, account, privKey, true, addrType,
+			s, derivationPath, privKey, true, addrType,
 		)
 		if err != nil {
 			return nil, err
@@ -460,7 +485,8 @@ func newManagedAddressFromExtKey(s *ScopedKeyManager, account uint32,
 		}
 
 		managedAddr, err = newManagedAddressWithoutPrivKey(
-			s, account, pubKey, true, addrType,
+			s, derivationPath, pubKey, true,
+			addrType,
 		)
 		if err != nil {
 			return nil, err
