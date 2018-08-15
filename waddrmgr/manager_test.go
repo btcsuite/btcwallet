@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/davecgh/go-spew/spew"
 )
 
 // newHash converts the passed big-endian hex string into a chainhash.Hash.
@@ -62,16 +63,17 @@ const (
 // expectedAddr is used to house the expected return values from a managed
 // address.  Not all fields for used for all managed address types.
 type expectedAddr struct {
-	address     string
-	addressHash []byte
-	internal    bool
-	compressed  bool
-	used        bool
-	imported    bool
-	pubKey      []byte
-	privKey     []byte
-	privKeyWIF  string
-	script      []byte
+	address        string
+	addressHash    []byte
+	internal       bool
+	compressed     bool
+	used           bool
+	imported       bool
+	pubKey         []byte
+	privKey        []byte
+	privKeyWIF     string
+	script         []byte
+	derivationInfo waddrmgr.DerivationPath
 }
 
 // testNamePrefix is a helper to return a prefix to show for test errors based
@@ -115,6 +117,22 @@ func testManagedPubKeyAddress(tc *testContext, prefix string,
 	if gpubHex != wantPubHex {
 		tc.t.Errorf("%s ExportPubKey: unexpected public key - got %s, "+
 			"want %s", prefix, gpubHex, wantPubHex)
+		return false
+	}
+
+	// Ensure that the derivation path has been properly re-set after the
+	// address was read from disk.
+	_, gotAddrPath, ok := gotAddr.DerivationInfo()
+	if !ok && !gotAddr.Imported() {
+		tc.t.Errorf("%s PubKey: non-imported address has empty "+
+			"derivation info", prefix)
+		return false
+	}
+	expectedDerivationInfo := wantAddr.derivationInfo
+	if gotAddrPath != expectedDerivationInfo {
+		tc.t.Errorf("%s PubKey: wrong derivation info: expected %v, "+
+			"got %v", prefix, spew.Sdump(gotAddrPath),
+			spew.Sdump(expectedDerivationInfo))
 		return false
 	}
 
@@ -179,6 +197,12 @@ func testManagedPubKeyAddress(tc *testContext, prefix string,
 		if !checkManagerError(tc.t, testName, err, waddrmgr.ErrLocked) {
 			return false
 		}
+	}
+
+	// Imported addresses should return a nil derivation info.
+	if _, _, ok := gotAddr.DerivationInfo(); gotAddr.Imported() && ok {
+		tc.t.Errorf("%s Imported: expected nil derivation info", prefix)
+		return false
 	}
 
 	return true

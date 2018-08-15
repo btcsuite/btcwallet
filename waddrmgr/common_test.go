@@ -55,6 +55,11 @@ var (
 			pubKey:      hexToBytes("02d8f88468c5a2e8e1815faf555f59cbd1979e3dbdf823f80c271b6fb70d2d519b"),
 			privKey:     hexToBytes("c27d6581b92785834b381fa697c4b0ffc4574b495743722e0acb7601b1b68b99"),
 			privKeyWIF:  "L3jmpy54Pc7MLXTN2mL8Xas7BJziwKaUGmgnXXzgGbVRdiAniXZk",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  0,
+				Index:   0,
+			},
 		},
 		{
 			address:     "1N3D8jy2aQuUsKBsDgZ6ZPTVR9VhHgJYpE",
@@ -65,6 +70,11 @@ var (
 			pubKey:      hexToBytes("02b9c175b908624f8a8eaac227d0e8c77c0eec327b8c512ad1b8b7a4b5b676971f"),
 			privKey:     hexToBytes("18f3b191019e83878a81557abebb2afda199e31d22e150d8bf4df4561671be6c"),
 			privKeyWIF:  "Kx4DNid19W8sjNFN3uPqQE7UYnCqyEp7unCvdkf2LrVUFpnDtwpB",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  0,
+				Index:   1,
+			},
 		},
 		{
 			address:     "1VTfwD4iHre2bMrR9qGiJMwoiZGQZ8e6s",
@@ -75,6 +85,11 @@ var (
 			pubKey:      hexToBytes("0329faddf1254d490d6add49e2b08cf52b561038c72baec0edb3cfacff71ff1021"),
 			privKey:     hexToBytes("ccb8f6305b73136b363644b647f6efc0fd27b6b7d9c11c7e560662ed38db7b34"),
 			privKeyWIF:  "L45fWF6Yd736fDohuB97vwRRLdQQJr3ZGvbokk9ubiT7aNrg7tTn",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  0,
+				Index:   2,
+			},
 		},
 		{
 			address:     "13TdEj4ehUuYFiSaB47eLVBwM2XhAhrK2J",
@@ -85,6 +100,11 @@ var (
 			pubKey:      hexToBytes("03d738324e2f0ce42e46975d7f8c7117c1670e3d7912b0291aea452add99674774"),
 			privKey:     hexToBytes("d6bc8ff768814fede2adcdb74826bd846924341b3862e3b6e31cdc084e992940"),
 			privKeyWIF:  "L4R8XyxYQyPSpTwj8w96tM86a6j3QA9jbRPj3RA7DVTVWk71ndeP",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  0,
+				Index:   3,
+			},
 		},
 		{
 			address:     "1LTjSghkBecT59VjEKke331HxVdqcFwUDa",
@@ -95,6 +115,11 @@ var (
 			pubKey:      hexToBytes("03a917acd5cd5b6f544b43f1921a35677e4d5320e5d2add2056039b4b44fdf905e"),
 			privKey:     hexToBytes("8563ade061110e03aee50695ffc5cb1c06c8310bde0a3674257c853c966968c0"),
 			privKeyWIF:  "L1h16Hunxomww4FrpyQP2iFmWNgG7U1u3awp6Vd3s2uGf7v5VU8c",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  0,
+				Index:   4,
+			},
 		},
 		{
 			address:     "15HNivzKhsLaMs1qRdQN1ifoJYUnJ2xW9z",
@@ -105,6 +130,11 @@ var (
 			pubKey:      hexToBytes("020a1290b997c0a234a95213962e7edcb761c7360f0230f698a1a3e71c37047bb0"),
 			privKey:     hexToBytes("fe4f855fcf059ec6ddf7b25f63b19aa49c771d1fcb9850b68ae3d65e20657a60"),
 			privKeyWIF:  "L5k4HivqXvohxBMpuwD38iUgi6uewffwZny91ZNYfM39RXH2x3QR",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  1,
+				Index:   0,
+			},
 		},
 		{
 			address:     "1LJpGrAP1vWHuvfHqmUutQqFVYca2qwxhy",
@@ -115,6 +145,11 @@ var (
 			pubKey:      hexToBytes("03f79bbde32af42dde98195f011d95982602fcd0dab657fe4a1f49f9d5ada1e02d"),
 			privKey:     hexToBytes("bfef521317c65b018ae7e6d7ecc3aa700d5d0f7ea84d567be9270382d0b5e3e6"),
 			privKeyWIF:  "L3eomUajnTDM3Pc8GU47qqXUFuCjvpqY7NYN9mH3x1ZFjDgiY4BU",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  1,
+				Index:   1,
+			},
 		},
 		{
 			address:     "13NhXy2nCLMwNug1TZ6uwaWnxp3uTqdDQq",
@@ -125,6 +160,11 @@ var (
 			pubKey:      hexToBytes("023ded84afe4fe91b52b45c3deb26fd263f749cbc27747dc964dae9e0739cbc579"),
 			privKey:     hexToBytes("f506dffd4494c24006df7a35f3291f7ca0297a1a431557a1339bfed6f48738ca"),
 			privKeyWIF:  "L5S1bVQUPqQb1Su82fLoSpnGCjcPfdAQE1pJxWRopJSBdYNDHESv",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  1,
+				Index:   2,
+			},
 		},
 		{
 			address:     "1AY6yAHvojvpFcevAichLMnJfxgE8eSe4N",
@@ -135,6 +175,11 @@ var (
 			pubKey:      hexToBytes("030f1e79f06824e10a259914ec310528bb2d5b8d6356341fe9dff55498591af6af"),
 			privKey:     hexToBytes("b3629de8ef6a275b4ffae41aa2bbbc2952eb92282ea6402435abbb010ecc1fb8"),
 			privKeyWIF:  "L3EQsGeEnyXmKaux54cG4DQeCSQDvGuvEuy3W2ss4geum7AtWaHw",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  1,
+				Index:   3,
+			},
 		},
 		{
 			address:     "1Jc7An3JqjzRQULVr6Wh3iYR7miB6WPJCD",
@@ -145,6 +190,11 @@ var (
 			pubKey:      hexToBytes("0317d7182e26b6ca3e0f3db531c474b9cab7a763a75eabff2e14ac92f62a793238"),
 			privKey:     hexToBytes("ca747a7ef815ea0dbe68655272cecbfbd65f2a109019a9ed28e0d3dcaffe05c3"),
 			privKeyWIF:  "L41Frac75RPbTELKzw1EGC2qCkdveiVumpmsyX4daAvyyCMxit1W",
+			derivationInfo: waddrmgr.DerivationPath{
+				Account: 0,
+				Branch:  1,
+				Index:   4,
+			},
 		},
 	}
 
