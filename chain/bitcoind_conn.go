@@ -221,6 +221,14 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 			}
 			c.rescanClientsMtx.Unlock()
 		default:
+			// It's possible that the message wasn't fully read if
+			// bitcoind shuts down, which will produce an unreadable
+			// event type. To prevent from logging it, we'll make
+			// sure it conforms to the ASCII standard.
+			if !isASCII(eventType) {
+				continue
+			}
+
 			log.Warnf("Received unexpected event type from "+
 				"rawblock subscription: %v", eventType)
 		}
@@ -363,4 +371,15 @@ func (c *BitcoindConn) RemoveClient(id uint64) {
 	defer c.rescanClientsMtx.Unlock()
 
 	delete(c.rescanClients, id)
+}
+
+// isASCII is a helper method that checks whether all bytes in `data` would be
+// printable ASCII characters if interpreted as a string.
+func isASCII(s string) bool {
+	for _, c := range s {
+		if c < 32 || c > 126 {
+			return false
+		}
+	}
+	return true
 }
