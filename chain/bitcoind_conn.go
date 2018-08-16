@@ -168,7 +168,7 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 	defer c.wg.Done()
 	defer conn.Close()
 
-	log.Info("Started listening for bitcoind block notifications via ZMQ ",
+	log.Info("Started listening for bitcoind block notifications via ZMQ "+
 		"on", c.zmqBlockHost)
 
 	for {
@@ -180,16 +180,18 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 		default:
 		}
 
-		// Poll an event from the ZMQ socket. It's possible that the
-		// connection to the socket continuously times out, so we'll
-		// prevent logging this error to prevent spamming the logs.
+		// Poll an event from the ZMQ socket.
 		msgBytes, err := conn.Receive()
 		if err != nil {
-			err, ok := err.(net.Error)
-			if !ok || !err.Timeout() {
-				log.Error(err)
+			// It's possible that the connection to the socket
+			// continuously times out, so we'll prevent logging this
+			// error to prevent spamming the logs.
+			netErr, ok := err.(net.Error)
+			if ok && netErr.Timeout() {
+				continue
 			}
 
+			log.Errorf("Unable to receive ZMQ message: %v", err)
 			continue
 		}
 
@@ -234,7 +236,7 @@ func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
 	defer conn.Close()
 
 	log.Info("Started listening for bitcoind transaction notifications "+
-		"via ZMQ on ", c.zmqTxHost)
+		"via ZMQ on", c.zmqTxHost)
 
 	for {
 		// Before attempting to read from the ZMQ socket, we'll make
@@ -245,16 +247,18 @@ func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
 		default:
 		}
 
-		// Poll an event from the ZMQ socket. It's possible that the
-		// connection to the socket continuously times out, so we'll
-		// prevent logging this error to prevent spamming the logs.
+		// Poll an event from the ZMQ socket.
 		msgBytes, err := conn.Receive()
 		if err != nil {
-			err, ok := err.(net.Error)
-			if !ok || !err.Timeout() {
-				log.Error(err)
+			// It's possible that the connection to the socket
+			// continuously times out, so we'll prevent logging this
+			// error to prevent spamming the logs.
+			netErr, ok := err.(net.Error)
+			if ok && netErr.Timeout() {
+				continue
 			}
 
+			log.Errorf("Unable to receive ZMQ message: %v", err)
 			continue
 		}
 
