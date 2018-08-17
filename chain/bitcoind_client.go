@@ -549,7 +549,8 @@ func (c *BitcoindClient) ntfnHandler() {
 		select {
 		case tx := <-c.zmqTxNtfns:
 			if _, _, err := c.filterTx(tx, nil, true); err != nil {
-				log.Error(err)
+				log.Errorf("Unable to filter transaction %v: %v",
+					tx.TxHash(), err)
 			}
 		case newBlock := <-c.zmqBlockNtfns:
 			// If the new block's previous hash matches the best
@@ -566,7 +567,8 @@ func (c *BitcoindClient) ntfnHandler() {
 					newBlock, newBlockHeight, true,
 				)
 				if err != nil {
-					log.Error(err)
+					log.Errorf("Unable to filter block %v: %v",
+						newBlock.BlockHash(), err)
 					continue
 				}
 

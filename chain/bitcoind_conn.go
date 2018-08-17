@@ -168,7 +168,7 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 	defer c.wg.Done()
 	defer conn.Close()
 
-	log.Info("Started listening for bitcoind block notifications via ZMQ ",
+	log.Info("Started listening for bitcoind block notifications via ZMQ "+
 		"on", c.zmqBlockHost)
 
 	for {
@@ -180,16 +180,18 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 		default:
 		}
 
-		// Poll an event from the ZMQ socket. It's possible that the
-		// connection to the socket continuously times out, so we'll
-		// prevent logging this error to prevent spamming the logs.
+		// Poll an event from the ZMQ socket.
 		msgBytes, err := conn.Receive()
 		if err != nil {
-			err, ok := err.(net.Error)
-			if !ok || !err.Timeout() {
-				log.Error(err)
+			// It's possible that the connection to the socket
+			// continuously times out, so we'll prevent logging this
+			// error to prevent spamming the logs.
+			netErr, ok := err.(net.Error)
+			if ok && netErr.Timeout() {
+				continue
 			}
 
+			log.Errorf("Unable to receive ZMQ message: %v", err)
 			continue
 		}
 
@@ -219,6 +221,14 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 			}
 			c.rescanClientsMtx.Unlock()
 		default:
+			// It's possible that the message wasn't fully read if
+			// bitcoind shuts down, which will produce an unreadable
+			// event type. To prevent from logging it, we'll make
+			// sure it conforms to the ASCII standard.
+			if !isASCII(eventType) {
+				continue
+			}
+
 			log.Warnf("Received unexpected event type from "+
 				"rawblock subscription: %v", eventType)
 		}
@@ -234,7 +244,7 @@ func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
 	defer conn.Close()
 
 	log.Info("Started listening for bitcoind transaction notifications "+
-		"via ZMQ on ", c.zmqTxHost)
+		"via ZMQ on", c.zmqTxHost)
 
 	for {
 		// Before attempting to read from the ZMQ socket, we'll make
@@ -245,16 +255,18 @@ func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
 		default:
 		}
 
-		// Poll an event from the ZMQ socket. It's possible that the
-		// connection to the socket continuously times out, so we'll
-		// prevent logging this error to prevent spamming the logs.
+		// Poll an event from the ZMQ socket.
 		msgBytes, err := conn.Receive()
 		if err != nil {
-			err, ok := err.(net.Error)
-			if !ok || !err.Timeout() {
-				log.Error(err)
+			// It's possible that the connection to the socket
+			// continuously times out, so we'll prevent logging this
+			// error to prevent spamming the logs.
+			netErr, ok := err.(net.Error)
+			if ok && netErr.Timeout() {
+				continue
 			}
 
+			log.Errorf("Unable to receive ZMQ message: %v", err)
 			continue
 		}
 
@@ -359,4 +371,15 @@ func (c *BitcoindConn) RemoveClient(id uint64) {
 	defer c.rescanClientsMtx.Unlock()
 
 	delete(c.rescanClients, id)
+}
+
+// isASCII is a helper method that checks whether all bytes in `data` would be
+// printable ASCII characters if interpreted as a string.
+func isASCII(s string) bool {
+	for _, c := range s {
+		if c < 32 || c > 126 {
+			return false
+		}
+	}
+	return true
 }
