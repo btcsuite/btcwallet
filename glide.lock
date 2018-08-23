@@ -1,10 +1,10 @@
-hash: a3732c6a9a04a851beea6fb11c77d593c8297e37efcbab29190cb57edb5cae2b
-updated: 2018-07-16T19:02:33.363613705-07:00
+hash: b1db66b8a8a0efd622b44de1299cf86ed6ea9333e73c1c9b1fcdaa9d589065fa
+updated: 2018-08-22T20:11:48.978564284-07:00
 imports:
 - name: github.com/aead/siphash
-  version: e404fcfc888570cadd1610538e2dbc89f66af814
+  version: 83563a290f60225eb120d724600b9690c3fb536f
 - name: github.com/btcsuite/btcd
-  version: fdfc19097e7ac6b57035062056f5b7b4638b8898
+  version: d81d8877b8f327112e94e814937143a71d1692a7
   subpackages:
   - addrmgr
   - blockchain
@@ -51,7 +51,7 @@ imports:
   subpackages:
   - spew
 - name: github.com/golang/protobuf
-  version: 14aad3d5ea4c323bcd7a2137e735da24a76e814c
+  version: b27b920f9e71b439b873b17bf99f56467623814a
   subpackages:
   - proto
   - ptypes
@@ -69,17 +69,20 @@ imports:
 - name: github.com/lightninglabs/gozmq
   version: 462a8a75388506b68f76661af8d649f0b88e5301
 - name: github.com/lightninglabs/neutrino
-  version: 8401b99f3f0698bc6aa26c3d702dd583e51f70c2
+  version: 31332f9c7a241da72835ad33ff340c3998e30de8
   subpackages:
+  - cache
+  - cache/lru
   - filterdb
   - headerfs
+  - headerlist
 - name: golang.org/x/crypto
   version: 9419663f5a44be8b34ca85f08abc5fe1be11f8a3
   subpackages:
   - ripemd160
   - ssh/terminal
 - name: golang.org/x/net
-  version: d0887baf81f4598189d4e12a37c6da86f0bba4d0
+  version: 922f4815f713f213882e8ef45e0d315b164d705c
   subpackages:
   - context
   - http/httpguts
@@ -89,19 +92,19 @@ imports:
   - internal/timeseries
   - trace
 - name: golang.org/x/sys
-  version: ac767d655b305d4e9612f5f6e33120b9176c4ad4
+  version: 3b58ed4ad3395d483fc92d5d14123ce2c3581fec
   subpackages:
   - unix
   - windows
 - name: golang.org/x/text
-  version: 0605a8320aceb4207a5fb3521281e17ec2075476
+  version: 6e3c4e7365ddcc329f090f96e4348398f6310088
   subpackages:
   - secure/bidirule
   - transform
   - unicode/bidi
   - unicode/norm
 - name: google.golang.org/genproto
-  version: 2731d4fa720b67f9fe38e9051a2a9b38e4609260
+  version: c66870c02cf823ceb633bcd05be3c7cda29976f4
   subpackages:
   - googleapis/rpc/status
 - name: google.golang.org/grpc
