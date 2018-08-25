@@ -501,9 +501,6 @@ func (net *netParams) WriteTo(w io.Writer) (int64, error) {
 
 // Stringified byte slices for use as map lookup keys.
 type addressKey string
-type transactionHashKey string
-
-type comment []byte
 
 func getAddressKey(addr btcutil.Address) addressKey {
 	return addressKey(addr.ScriptAddress())
