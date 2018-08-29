@@ -14,10 +14,23 @@ import (
 // insertMemPoolTx inserts the unmined transaction record.  It also marks
 // previous outputs referenced by the inputs as spent.
 func (s *Store) insertMemPoolTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
-	v := existsRawUnmined(ns, rec.Hash[:])
-	if v != nil {
-		// TODO: compare serialized txs to ensure this isn't a hash collision?
+	// Check whether the transaction has already been added to the
+	// unconfirmed bucket.
+	if existsRawUnmined(ns, rec.Hash[:]) != nil {
+		// TODO: compare serialized txs to ensure this isn't a hash
+		// collision?
 		return nil
+	}
+
+	// Since transaction records within the store are keyed by their
+	// transaction _and_ block confirmation, we'll iterate through the
+	// transaction's outputs to determine if we've already seen them to
+	// prevent from adding this transaction to the unconfirmed bucket.
+	for i := range rec.MsgTx.TxOut {
+		k := canonicalOutPoint(&rec.Hash, uint32(i))
+		if existsRawUnspent(ns, k) != nil {
+			return nil
+		}
 	}
 
 	log.Infof("Inserting unconfirmed transaction %v", rec.Hash)
