@@ -512,38 +512,6 @@ func TestStoreQueries(t *testing.T) {
 		state: newState,
 	})
 
-	// None of the above tests have tested transactions with colliding
-	// hashes, so mine tx A in block 100, and then insert tx A again
-	// unmined.  Also mine tx A in block 101 (this moves it from unmined).
-	// This is a valid test because the store does not perform signature
-	// validation or keep a full utxo set, and duplicated transaction hashes
-	// from different blocks are allowed so long as all previous outputs are
-	// spent.
-	newState = lastState.deepCopy()
-	newState.blocks = append(newState.blocks, newState.blocks[0][1:])
-	newState.blocks[0] = newState.blocks[0][:1:1]
-	newState.blocks[0][0].Block = b100
-	newState.blocks[1] = []TxDetails{
-		{
-			TxRecord: *stripSerializedTx(recA),
-			Block:    makeBlockMeta(-1),
-		},
-		newState.blocks[1][0],
-	}
-	newState.txDetails[recA.Hash][0].Block = b100
-	newState.txDetails[recA.Hash] = append(newState.txDetails[recA.Hash], newState.blocks[1][0])
-	lastState = newState
-	tests = append(tests, queryTest{
-		desc: "insert duplicate tx A",
-		updates: func(ns walletdb.ReadWriteBucket) error {
-			if err := s.InsertTx(ns, recA, &b100); err != nil {
-				return err
-			}
-			return s.InsertTx(ns, recA, nil)
-		},
-		state: newState,
-	})
-
 	for _, tst := range tests {
 		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(namespaceKey)
