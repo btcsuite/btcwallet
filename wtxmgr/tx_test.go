@@ -1728,3 +1728,137 @@ func TestInsertConfirmedDoubleSpendTx(t *testing.T) {
 		}
 	})
 }
+
+// TestAddDuplicateCreditAfterConfirm aims to test the case where a duplicate
+// unconfirmed credit is added to the store after the intial credit has already
+// confirmed. This can lead to outputs being duplicated in the store, which can
+// lead to creating double spends when querying the wallet's UTXO set.
+func TestAddDuplicateCreditAfterConfirm(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+
+	// In order to reproduce real-world scenarios, we'll use a new database
+	// transaction for each interaction with the wallet.
+	//
+	// We'll start off the test by creating a new coinbase output at height
+	// 100 and inserting it into the store.
+	b100 := &BlockMeta{
+		Block: Block{Height: 100},
+		Time:  time.Now(),
+	}
+	cb := newCoinBase(1e8)
+	cbRec, err := NewTxRecordFromMsgTx(cb, b100.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, cbRec, b100); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, cbRec, b100, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// We'll confirm that there is one unspent output in the store, which
+	// should be the coinbase output created above.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		minedTxs, err := store.UnspentOutputs(ns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(minedTxs) != 1 {
+			t.Fatalf("expected 1 mined tx, got %v", len(minedTxs))
+		}
+		if !minedTxs[0].Hash.IsEqual(&cbRec.Hash) {
+			t.Fatalf("expected tx hash %v, got %v", cbRec.Hash,
+				minedTxs[0].Hash)
+		}
+	})
+
+	// Then, we'll create an unconfirmed spend for the coinbase output.
+	b101 := &BlockMeta{
+		Block: Block{Height: 101},
+		Time:  time.Now(),
+	}
+	spendTx := spendOutput(&cbRec.Hash, 0, 5e7, 4e7)
+	spendTxRec, err := NewTxRecordFromMsgTx(spendTx, b101.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, spendTxRec, nil); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, spendTxRec, nil, 1, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// Confirm the spending transaction at the next height.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, spendTxRec, b101); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, spendTxRec, b101, 1, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// We should see one unspent output within the store once again, this
+	// time being the change output of the spending transaction.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		minedTxs, err := store.UnspentOutputs(ns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(minedTxs) != 1 {
+			t.Fatalf("expected 1 mined txs, got %v", len(minedTxs))
+		}
+		if !minedTxs[0].Hash.IsEqual(&spendTxRec.Hash) {
+			t.Fatalf("expected tx hash %v, got %v", spendTxRec.Hash,
+				minedTxs[0].Hash)
+		}
+	})
+
+	// Now, we'll insert the spending transaction once again, this time as
+	// unconfirmed. This can happen if the backend happens to forward an
+	// unconfirmed chain.RelevantTx notification to the client even after it
+	// has confirmed, which results in us adding it to the store once again.
+	//
+	// TODO(wilmer): ideally this shouldn't happen, so we should identify
+	// the real reason for this.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, spendTxRec, nil); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, spendTxRec, nil, 1, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// Finally, we'll ensure the change output is still the only unspent
+	// output within the store.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		minedTxs, err := store.UnspentOutputs(ns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(minedTxs) != 1 {
+			t.Fatalf("expected 1 mined txs, got %v", len(minedTxs))
+		}
+		if !minedTxs[0].Hash.IsEqual(&spendTxRec.Hash) {
+			t.Fatalf("expected tx hash %v, got %v", spendTxRec.Hash,
+				minedTxs[0].Hash)
+		}
+	})
+}
