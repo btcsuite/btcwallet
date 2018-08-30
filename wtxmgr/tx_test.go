@@ -64,17 +64,18 @@ func testStore() (*Store, walletdb.DB, func(), error) {
 	if err != nil {
 		return nil, nil, func() {}, err
 	}
+
 	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"))
 	if err != nil {
-		teardown := func() {
-			os.RemoveAll(tmpDir)
-		}
-		return nil, nil, teardown, err
+		os.RemoveAll(tmpDir)
+		return nil, nil, nil, err
 	}
+
 	teardown := func() {
 		db.Close()
 		os.RemoveAll(tmpDir)
 	}
+
 	var s *Store
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns, err := tx.CreateTopLevelBucket(namespaceKey)
@@ -88,6 +89,7 @@ func testStore() (*Store, walletdb.DB, func(), error) {
 		s, err = Open(ns, &chaincfg.TestNet3Params)
 		return err
 	})
+
 	return s, db, teardown, err
 }
 
@@ -489,10 +491,10 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 	}
 
 	s, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	for _, test := range tests {
 		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
@@ -560,10 +562,10 @@ func TestFindingSpentCredits(t *testing.T) {
 	t.Parallel()
 
 	s, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	dbtx, err := db.BeginReadWriteTx()
 	if err != nil {
@@ -667,10 +669,10 @@ func TestCoinbases(t *testing.T) {
 	t.Parallel()
 
 	s, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	dbtx, err := db.BeginReadWriteTx()
 	if err != nil {
@@ -1073,10 +1075,10 @@ func TestMoveMultipleToSameBlock(t *testing.T) {
 	t.Parallel()
 
 	s, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	dbtx, err := db.BeginReadWriteTx()
 	if err != nil {
@@ -1250,10 +1252,10 @@ func TestInsertUnserializedTx(t *testing.T) {
 	t.Parallel()
 
 	s, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	dbtx, err := db.BeginReadWriteTx()
 	if err != nil {
@@ -1317,10 +1319,10 @@ func TestRemoveUnminedTx(t *testing.T) {
 	t.Parallel()
 
 	store, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	dbtx, err := db.BeginReadWriteTx()
 	if err != nil {
@@ -1382,6 +1384,8 @@ func TestRemoveUnminedTx(t *testing.T) {
 func commitDBTx(t *testing.T, store *Store, db walletdb.DB,
 	f func(walletdb.ReadWriteBucket)) {
 
+	t.Helper()
+
 	dbTx, err := db.BeginReadWriteTx()
 	if err != nil {
 		t.Fatal(err)
@@ -1401,10 +1405,10 @@ func commitDBTx(t *testing.T, store *Store, db walletdb.DB,
 // removed from the wallet's store.
 func testInsertMempoolDoubleSpendTx(t *testing.T, first bool) {
 	store, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	// In order to reproduce real-world scenarios, we'll use a new database
 	// transaction for each interaction with the wallet.
@@ -1559,10 +1563,10 @@ func TestInsertConfirmedDoubleSpendTx(t *testing.T) {
 	t.Parallel()
 
 	store, db, teardown, err := testStore()
-	defer teardown()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer teardown()
 
 	// In order to reproduce real-world scenarios, we'll use a new database
 	// transaction for each interaction with the wallet.
