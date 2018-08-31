@@ -174,15 +174,46 @@ type unlockDeriveInfo struct {
 	index       uint32
 }
 
+// SecretKeyGenerator is the function signature of a method that can generate
+// secret keys for the address manager.
+type SecretKeyGenerator func(
+	passphrase *[]byte, config *ScryptOptions) (*snacl.SecretKey, error)
+
 // defaultNewSecretKey returns a new secret key.  See newSecretKey.
-func defaultNewSecretKey(passphrase *[]byte, config *ScryptOptions) (*snacl.SecretKey, error) {
+func defaultNewSecretKey(passphrase *[]byte,
+	config *ScryptOptions) (*snacl.SecretKey, error) {
 	return snacl.NewSecretKey(passphrase, config.N, config.R, config.P)
 }
 
-// newSecretKey is used as a way to replace the new secret key generation
-// function used so tests can provide a version that fails for testing error
-// paths.
-var newSecretKey = defaultNewSecretKey
+var (
+	// secretKeyGen is the inner method that is executed when calling
+	// newSecretKey.
+	secretKeyGen = defaultNewSecretKey
+
+	// secretKeyGenMtx protects access to secretKeyGen, so that it can be
+	// replaced in testing.
+	secretKeyGenMtx sync.RWMutex
+)
+
+// SetSecretKeyGen replaces the existing secret key generator, and returns the
+// previous generator.
+func SetSecretKeyGen(keyGen SecretKeyGenerator) SecretKeyGenerator {
+	secretKeyGenMtx.Lock()
+	oldKeyGen := secretKeyGen
+	secretKeyGen = keyGen
+	secretKeyGenMtx.Unlock()
+
+	return oldKeyGen
+}
+
+// newSecretKey generates a new secret key using the active secretKeyGen.
+func newSecretKey(passphrase *[]byte,
+	config *ScryptOptions) (*snacl.SecretKey, error) {
+
+	secretKeyGenMtx.RLock()
+	defer secretKeyGenMtx.RUnlock()
+	return secretKeyGen(passphrase, config)
+}
 
 // EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that
 // our tests can use dependency injection to force the behaviour they need.
