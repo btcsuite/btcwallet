@@ -191,7 +191,8 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 				continue
 			}
 
-			log.Errorf("Unable to receive ZMQ message: %v", err)
+			log.Errorf("Unable to receive ZMQ rawblock message: %v",
+				err)
 			continue
 		}
 
@@ -225,7 +226,7 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 			// bitcoind shuts down, which will produce an unreadable
 			// event type. To prevent from logging it, we'll make
 			// sure it conforms to the ASCII standard.
-			if !isASCII(eventType) {
+			if eventType == "" || !isASCII(eventType) {
 				continue
 			}
 
@@ -266,7 +267,8 @@ func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
 				continue
 			}
 
-			log.Errorf("Unable to receive ZMQ message: %v", err)
+			log.Errorf("Unable to receive ZMQ rawtx message: %v",
+				err)
 			continue
 		}
 
@@ -296,6 +298,14 @@ func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
 			}
 			c.rescanClientsMtx.Unlock()
 		default:
+			// It's possible that the message wasn't fully read if
+			// bitcoind shuts down, which will produce an unreadable
+			// event type. To prevent from logging it, we'll make
+			// sure it conforms to the ASCII standard.
+			if eventType == "" || !isASCII(eventType) {
+				continue
+			}
+
 			log.Warnf("Received unexpected event type from rawtx "+
 				"subscription: %v", eventType)
 		}
