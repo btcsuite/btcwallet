@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
@@ -31,6 +32,13 @@ func newHash(hexStr string) *chainhash.Hash {
 		panic(err)
 	}
 	return hash
+}
+
+// failingSecretKeyGen is a waddrmgr.SecretKeyGenerator that always returns
+// snacl.ErrDecryptFailed.
+func failingSecretKeyGen(passphrase *[]byte,
+	config *waddrmgr.ScryptOptions) (*snacl.SecretKey, error) {
+	return nil, snacl.ErrDecryptFailed
 }
 
 // testContext is used to store context information about a running test which
@@ -1099,14 +1107,12 @@ func testChangePassphrase(tc *testContext) bool {
 	// that intentionally errors.
 	testName := "ChangePassphrase (public) with invalid new secret key"
 
-	var err error
-	waddrmgr.TstRunWithReplacedNewSecretKey(func() {
-		err = walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			return tc.rootManager.ChangePassphrase(
-				ns, pubPassphrase, pubPassphrase2, false, fastScrypt,
-			)
-		})
+	oldKeyGen := waddrmgr.SetSecretKeyGen(failingSecretKeyGen)
+	err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return tc.rootManager.ChangePassphrase(
+			ns, pubPassphrase, pubPassphrase2, false, fastScrypt,
+		)
 	})
 	if !checkManagerError(tc.t, testName, err, waddrmgr.ErrCrypto) {
 		return false
@@ -1114,6 +1120,7 @@ func testChangePassphrase(tc *testContext) bool {
 
 	// Attempt to change public passphrase with invalid old passphrase.
 	testName = "ChangePassphrase (public) with invalid old passphrase"
+	waddrmgr.SetSecretKeyGen(oldKeyGen)
 	err = walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		return tc.rootManager.ChangePassphrase(
