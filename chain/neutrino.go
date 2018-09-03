@@ -336,15 +336,35 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		return fmt.Errorf("can't do a rescan when the chain client " +
 			"is not started")
 	}
-	if s.scanning {
-		// Restart the rescan by killing the existing rescan.
-		close(s.rescanQuit)
-		s.clientMtx.Unlock()
-		s.rescan.WaitForShutdown()
-		s.clientMtx.Lock()
-		s.rescan = nil
-		s.rescanErr = nil
+
+	var inputsToWatch []neutrino.InputWithScript
+	for op, addr := range outPoints {
+		addrScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+		}
+
+		inputsToWatch = append(inputsToWatch, neutrino.InputWithScript{
+			OutPoint: op,
+			PkScript: addrScript,
+		})
 	}
+
+	// If we already have a rescan running, we can add the set of addresses
+	// and inputs to it.
+	if s.scanning {
+		height, err := s.CS.BlockHeaders.HeightFromHash(startHash)
+		if err != nil {
+			return fmt.Errorf("couldn't get height for block "+
+				"hash %v", startHash)
+		}
+
+		return s.rescan.Update(
+			neutrino.Rewind(height),
+			neutrino.AddAddrs(addrs...),
+			neutrino.AddInputs(inputsToWatch...),
+		)
+	}
+
 	s.rescanQuit = make(chan struct{})
 	s.scanning = true
 	s.finished = false
@@ -353,7 +373,8 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 
 	header, height, err := s.CS.BlockHeaders.ChainTip()
 	if err != nil {
-		return fmt.Errorf("Can't get chain service's best block: %s", err)
+		return fmt.Errorf("Can't get chain service's best block: %s",
+			err)
 	}
 
 	// If the wallet is already fully caught up, or the rescan has started
@@ -372,18 +393,6 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		case <-s.rescanQuit:
 			return nil
 		}
-	}
-
-	var inputsToWatch []neutrino.InputWithScript
-	for op, addr := range outPoints {
-		addrScript, err := txscript.PayToAddrScript(addr)
-		if err != nil {
-		}
-
-		inputsToWatch = append(inputsToWatch, neutrino.InputWithScript{
-			OutPoint: op,
-			PkScript: addrScript,
-		})
 	}
 
 	newRescan := s.CS.NewRescan(
