@@ -245,6 +245,14 @@ out:
 // current best block in the main chain, and is considered an initial sync
 // rescan.
 func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error {
+	return w.rescanWithTarget(addrs, unspent, nil)
+}
+
+// rescanWithTarget performs a rescan starting at the optional startStamp. If
+// none is provided, the rescan will begin from the manager's sync tip.
+func (w *Wallet) rescanWithTarget(addrs []btcutil.Address,
+	unspent []wtxmgr.Credit, startStamp *waddrmgr.BlockStamp) error {
+
 	outpoints := make(map[wire.OutPoint]btcutil.Address, len(unspent))
 	for _, output := range unspent {
 		_, outputAddrs, _, err := txscript.ExtractPkScriptAddrs(
@@ -257,11 +265,18 @@ func (w *Wallet) Rescan(addrs []btcutil.Address, unspent []wtxmgr.Credit) error 
 		outpoints[output.OutPoint] = outputAddrs[0]
 	}
 
+	// If a start block stamp was provided, we will use that as the initial
+	// starting point for the rescan.
+	if startStamp == nil {
+		startStamp = &waddrmgr.BlockStamp{}
+		*startStamp = w.Manager.SyncedTo()
+	}
+
 	job := &RescanJob{
 		InitialSync: true,
 		Addrs:       addrs,
 		OutPoints:   outpoints,
-		BlockStamp:  w.Manager.SyncedTo(),
+		BlockStamp:  *startStamp,
 	}
 
 	// Submit merged job and block until rescan completes.

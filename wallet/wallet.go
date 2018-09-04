@@ -345,6 +345,13 @@ func (w *Wallet) syncWithChain() error {
 	isRecovery := w.recoveryWindow > 0
 	isInitialSync := len(addrs) == 0 && len(unspent) == 0 &&
 		startHeight == 0
+	birthday := w.Manager.Birthday()
+
+	// If an initial sync is attempted, we will try and find the block stamp
+	// of the first block past our birthday. This will be fed into the
+	// rescan to ensure we catch transactions that are sent while performing
+	// the initial sync.
+	var birthdayStamp *waddrmgr.BlockStamp
 
 	// TODO(jrick): How should this handle a synced height earlier than
 	// the chain server best block?
@@ -470,14 +477,36 @@ func (w *Wallet) syncWithChain() error {
 			}
 
 			// Check to see if this header's timestamp has surpassed
-			// our birthday. If we are in recovery mode and the
-			// check passes, we will add this block to our list of
-			// blocks to scan for recovered addresses.
+			// our birthday or if we've surpassed one previously.
 			timestamp := header.Timestamp
-			if isRecovery && timestamp.After(w.Manager.Birthday()) {
-				recoveryMgr.AddToBlockBatch(
-					hash, height, timestamp,
-				)
+			if timestamp.After(birthday) || birthdayStamp != nil {
+				// If this is the first block past our birthday,
+				// record the block stamp so that we can use
+				// this as the starting point for the rescan.
+				// This will ensure we don't miss transactions
+				// that are sent to the wallet during an initial
+				// sync.
+				//
+				// NOTE: The birthday persisted by the wallet is
+				// two days before the actual wallet birthday,
+				// to deal with potentially inaccurate header
+				// timestamps.
+				if birthdayStamp == nil {
+					birthdayStamp = &waddrmgr.BlockStamp{
+						Height:    height,
+						Hash:      *hash,
+						Timestamp: timestamp,
+					}
+				}
+
+				// If we are in recovery mode and the check
+				// passes, we will add this block to our list of
+				// blocks to scan for recovered addresses.
+				if isRecovery {
+					recoveryMgr.AddToBlockBatch(
+						hash, height, timestamp,
+					)
+				}
 			}
 
 			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
@@ -566,11 +595,11 @@ func (w *Wallet) syncWithChain() error {
 	// Compare previously-seen blocks against the chain server.  If any of
 	// these blocks no longer exist, rollback all of the missing blocks
 	// before catching up with the rescan.
+	rollback := false
+	rollbackStamp := w.Manager.SyncedTo()
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		rollback := false
-		rollbackStamp := w.Manager.SyncedTo()
 		for height := rollbackStamp.Height; true; height-- {
 			hash, err := w.Manager.BlockHash(addrmgrNs, height)
 			if err != nil {
@@ -594,14 +623,15 @@ func (w *Wallet) syncWithChain() error {
 			}
 			rollback = true
 		}
+
 		if rollback {
 			err := w.Manager.SetSyncedTo(addrmgrNs, &rollbackStamp)
 			if err != nil {
 				return err
 			}
-			// Rollback unconfirms transactions at and beyond the passed
-			// height, so add one to the new synced-to height to prevent
-			// unconfirming txs from the synced-to block.
+			// Rollback unconfirms transactions at and beyond the
+			// passed height, so add one to the new synced-to height
+			// to prevent unconfirming txs from the synced-to block.
 			err = w.TxStore.Rollback(txmgrNs, rollbackStamp.Height+1)
 			if err != nil {
 				return err
@@ -611,6 +641,13 @@ func (w *Wallet) syncWithChain() error {
 	})
 	if err != nil {
 		return err
+	}
+
+	// If a birthday stamp was found during the initial sync and the
+	// rollback causes us to revert it, update the birthday stamp so that it
+	// points at the new tip.
+	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
+		birthdayStamp = &rollbackStamp
 	}
 
 	// Request notifications for connected and disconnected blocks.
@@ -626,7 +663,7 @@ func (w *Wallet) syncWithChain() error {
 		return err
 	}
 
-	return w.Rescan(addrs, unspent)
+	return w.rescanWithTarget(addrs, unspent, birthdayStamp)
 }
 
 // defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
