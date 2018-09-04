@@ -1434,33 +1434,62 @@ func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balan
 // been used (there is at least one transaction spending to it in the
 // blockchain or btcd mempool), the next chained address is returned.
 func (w *Wallet) CurrentAddress(account uint32, scope waddrmgr.KeyScope) (btcutil.Address, error) {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
 	manager, err := w.Manager.FetchScopedKeyManager(scope)
 	if err != nil {
 		return nil, err
 	}
 
-	var addr btcutil.Address
+	var (
+		addr  btcutil.Address
+		props *waddrmgr.AccountProperties
+	)
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		maddr, err := manager.LastExternalAddress(addrmgrNs, account)
 		if err != nil {
-			// If no address exists yet, create the first external address
+			// If no address exists yet, create the first external
+			// address.
 			if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
-				addr, err = w.newAddress(addrmgrNs, account, scope)
+				addr, props, err = w.newAddress(
+					addrmgrNs, account, scope,
+				)
 			}
 			return err
 		}
 
-		// Get next chained address if the last one has already been used.
+		// Get next chained address if the last one has already been
+		// used.
 		if maddr.Used(addrmgrNs) {
-			addr, err = w.newAddress(addrmgrNs, account, scope)
+			addr, props, err = w.newAddress(
+				addrmgrNs, account, scope,
+			)
 			return err
 		}
 
 		addr = maddr.Address()
 		return nil
 	})
-	return addr, err
+	if err != nil {
+		return nil, err
+	}
+
+	// If the props have been initially, then we had to create a new address
+	// to satisfy the query. Notify the rpc server about the new address.
+	if props != nil {
+		err = chainClient.NotifyReceived([]btcutil.Address{addr})
+		if err != nil {
+			return nil, err
+		}
+
+		w.NtfnServer.notifyAccountProperties(props)
+	}
+
+	return addr, nil
 }
 
 // PubKeyForAddress looks up the associated public key for a P2PKH address.
@@ -2763,69 +2792,94 @@ func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
 
 // NewAddress returns the next external chained address for a wallet.
 func (w *Wallet) NewAddress(account uint32,
-	scope waddrmgr.KeyScope) (addr btcutil.Address, err error) {
+	scope waddrmgr.KeyScope) (btcutil.Address, error) {
 
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		addr  btcutil.Address
+		props *waddrmgr.AccountProperties
+	)
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		var err error
-		addr, err = w.newAddress(addrmgrNs, account, scope)
+		addr, props, err = w.newAddress(addrmgrNs, account, scope)
 		return err
 	})
-	return
+	if err != nil {
+		return nil, err
+	}
+
+	// Notify the rpc server about the newly created address.
+	err = chainClient.NotifyReceived([]btcutil.Address{addr})
+	if err != nil {
+		return nil, err
+	}
+
+	w.NtfnServer.notifyAccountProperties(props)
+
+	return addr, nil
 }
 
 func (w *Wallet) newAddress(addrmgrNs walletdb.ReadWriteBucket, account uint32,
-	scope waddrmgr.KeyScope) (btcutil.Address, error) {
+	scope waddrmgr.KeyScope) (btcutil.Address, *waddrmgr.AccountProperties, error) {
 
 	manager, err := w.Manager.FetchScopedKeyManager(scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Get next address from wallet.
 	addrs, err := manager.NextExternalAddresses(addrmgrNs, account, 1)
 	if err != nil {
-		return nil, err
-	}
-
-	// Request updates from btcd for new transactions sent to this address.
-	utilAddrs := make([]btcutil.Address, len(addrs))
-	for i, addr := range addrs {
-		utilAddrs[i] = addr.Address()
-	}
-	w.chainClientLock.Lock()
-	chainClient := w.chainClient
-	w.chainClientLock.Unlock()
-	if chainClient != nil {
-		err := chainClient.NotifyReceived(utilAddrs)
-		if err != nil {
-			return nil, err
-		}
+		return nil, nil, err
 	}
 
 	props, err := manager.AccountProperties(addrmgrNs, account)
 	if err != nil {
 		log.Errorf("Cannot fetch account properties for notification "+
 			"after deriving next external address: %v", err)
-	} else {
-		w.NtfnServer.notifyAccountProperties(props)
+		return nil, nil, err
 	}
 
-	return utilAddrs[0], nil
+	return addrs[0].Address(), props, nil
 }
 
 // NewChangeAddress returns a new change address for a wallet.
-func (w *Wallet) NewChangeAddress(account uint32, scope waddrmgr.KeyScope) (addr btcutil.Address, err error) {
+func (w *Wallet) NewChangeAddress(account uint32,
+	scope waddrmgr.KeyScope) (btcutil.Address, error) {
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	var addr btcutil.Address
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		var err error
 		addr, err = w.newChangeAddress(addrmgrNs, account)
 		return err
 	})
-	return
+	if err != nil {
+		return nil, err
+	}
+
+	// Notify the rpc server about the newly created address.
+	err = chainClient.NotifyReceived([]btcutil.Address{addr})
+	if err != nil {
+		return nil, err
+	}
+
+	return addr, nil
 }
 
-func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket, account uint32) (btcutil.Address, error) {
+func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket,
+	account uint32) (btcutil.Address, error) {
+
 	// As we're making a change address, we'll fetch the type of manager
 	// that is able to make p2wkh output as they're the most efficient.
 	scopes := w.Manager.ScopesForExternalAddrType(
@@ -2842,21 +2896,7 @@ func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket, account ui
 		return nil, err
 	}
 
-	// Request updates from btcd for new transactions sent to this address.
-	utilAddrs := make([]btcutil.Address, len(addrs))
-	for i, addr := range addrs {
-		utilAddrs[i] = addr.Address()
-	}
-
-	chainClient, err := w.requireChainClient()
-	if err == nil {
-		err = chainClient.NotifyReceived(utilAddrs)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return utilAddrs[0], nil
+	return addrs[0].Address(), nil
 }
 
 // confirmed checks whether a transaction at height txHeight has met minconf

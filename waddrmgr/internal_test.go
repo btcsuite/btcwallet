@@ -21,20 +21,6 @@ import (
 // for change when the tests are run.
 var TstLatestMgrVersion = &latestMgrVersion
 
-// Replace the Manager.newSecretKey function with the given one and calls
-// the callback function. Afterwards the original newSecretKey
-// function will be restored.
-func TstRunWithReplacedNewSecretKey(callback func()) {
-	orig := newSecretKey
-	defer func() {
-		newSecretKey = orig
-	}()
-	newSecretKey = func(passphrase *[]byte, config *ScryptOptions) (*snacl.SecretKey, error) {
-		return nil, snacl.ErrDecryptFailed
-	}
-	callback()
-}
-
 // TstCheckPublicPassphrase returns true if the provided public passphrase is
 // correct for the manager.
 func (m *Manager) TstCheckPublicPassphrase(pubPassphrase []byte) bool {
