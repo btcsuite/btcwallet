@@ -405,8 +405,14 @@ func (s *Store) AddCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *Blo
 // duplicate (false).
 func (s *Store) addCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta, index uint32, change bool) (bool, error) {
 	if block == nil {
+		// If the outpoint that we should mark as credit already exists
+		// within the store, either as unconfirmed or confirmed, then we
+		// have nothing left to do and can exit.
 		k := canonicalOutPoint(&rec.Hash, index)
 		if existsRawUnminedCredit(ns, k) != nil {
+			return false, nil
+		}
+		if existsRawUnspent(ns, k) != nil {
 			return false, nil
 		}
 		v := valueUnminedCredit(btcutil.Amount(rec.MsgTx.TxOut[index].Value), change)
