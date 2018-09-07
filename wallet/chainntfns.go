@@ -302,14 +302,27 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord, 
 		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, nil)
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notification: %v", err)
-		} else {
+		}
+
+		// It's possible that the transaction was not found within the
+		// wallet's set of unconfirmed transactions due to it already
+		// being confirmed, so we'll avoid notifying it.
+		//
+		// TODO(wilmer): ideally we should find the culprit to why we're
+		// receiving an additional unconfirmed chain.RelevantTx
+		// notification from the chain backend.
+		if details != nil {
 			w.NtfnServer.notifyUnminedTransaction(dbtx, details)
 		}
 	} else {
 		details, err := w.TxStore.UniqueTxDetails(txmgrNs, &rec.Hash, &block.Block)
 		if err != nil {
 			log.Errorf("Cannot query transaction details for notification: %v", err)
-		} else {
+		}
+
+		// We'll only notify the transaction if it was found within the
+		// wallet's set of confirmed transactions.
+		if details != nil {
 			w.NtfnServer.notifyMinedTransaction(dbtx, details, block)
 		}
 	}
