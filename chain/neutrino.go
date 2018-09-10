@@ -118,16 +118,12 @@ func (s *NeutrinoClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) 
 // since we can't actually return a FutureGetBlockVerboseResult because the
 // underlying type is private to rpcclient.
 func (s *NeutrinoClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
-	_, height, err := s.CS.BlockHeaders.FetchHeader(hash)
-	if err != nil {
-		return 0, err
-	}
-	return int32(height), nil
+	return s.CS.GetBlockHeight(hash)
 }
 
 // GetBestBlock replicates the RPC client's GetBestBlock command.
 func (s *NeutrinoClient) GetBestBlock() (*chainhash.Hash, int32, error) {
-	chainTip, err := s.CS.BestSnapshot()
+	chainTip, err := s.CS.BestBlock()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -150,20 +146,14 @@ func (s *NeutrinoClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 // client has been shut down or the hash at the block height doesn't exist or
 // is unknown.
 func (s *NeutrinoClient) GetBlockHash(height int64) (*chainhash.Hash, error) {
-	header, err := s.CS.BlockHeaders.FetchHeaderByHeight(uint32(height))
-	if err != nil {
-		return nil, err
-	}
-	hash := header.BlockHash()
-	return &hash, nil
+	return s.CS.GetBlockHash(height)
 }
 
 // GetBlockHeader returns the block header for the given block hash, or an error
 // if the client has been shut down or the hash doesn't exist or is unknown.
 func (s *NeutrinoClient) GetBlockHeader(
 	blockHash *chainhash.Hash) (*wire.BlockHeader, error) {
-	header, _, err := s.CS.BlockHeaders.FetchHeader(blockHash)
-	return header, err
+	return s.CS.GetBlockHeader(blockHash)
 }
 
 // SendRawTransaction replicates the RPC client's SendRawTransaction command.
@@ -351,9 +341,14 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	s.lastProgressSent = false
 	s.isRescan = true
 
-	header, height, err := s.CS.BlockHeaders.ChainTip()
+	bestBlock, err := s.CS.BestBlock()
 	if err != nil {
 		return fmt.Errorf("Can't get chain service's best block: %s", err)
+	}
+	header, err := s.CS.GetBlockHeader(&bestBlock.Hash)
+	if err != nil {
+		return fmt.Errorf("Can't get block header for hash %v: %s",
+			bestBlock.Hash, err)
 	}
 
 	// If the wallet is already fully caught up, or the rescan has started
@@ -364,7 +359,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		select {
 		case s.enqueueNotification <- &RescanFinished{
 			Hash:   startHash,
-			Height: int32(height),
+			Height: int32(bestBlock.Height),
 			Time:   header.Timestamp,
 		}:
 		case <-s.quit:
@@ -503,7 +498,7 @@ func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
 	}
 
 	// Handle RescanFinished notification if required.
-	bs, err := s.CS.BestSnapshot()
+	bs, err := s.CS.BestBlock()
 	if err != nil {
 		log.Errorf("Can't get chain service's best block: %s", err)
 		return
