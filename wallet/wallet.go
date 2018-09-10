@@ -443,35 +443,30 @@ func (w *Wallet) syncWithChain() error {
 				return err
 			}
 
+			// If we're using the Neutrino backend, we can check if
+			// it's current or not. For other backends we'll assume
+			// it is current if the best height has reached the
+			// last checkpoint.
+			isCurrent := func(bestHeight int32) bool {
+				switch c := chainClient.(type) {
+				case *chain.NeutrinoClient:
+					return c.CS.IsCurrent()
+				}
+				return bestHeight >= checkHeight
+			}
+
 			// If we've found the best height the backend knows
-			// about, but we haven't reached the last checkpoint, we
-			// know the backend is still synchronizing. We can give
-			// it a little bit of time to synchronize further before
-			// updating the best height based on the backend. Once
-			// we see that the backend has advanced, we can catch
-			// up to it.
-			for height == bestHeight && bestHeight < checkHeight {
+			// about, and the backend is still synchronizing, we'll
+			// wait. We can give it a little bit of time to
+			// synchronize further before updating the best height
+			// based on the backend. Once we see that the backend
+			// has advanced, we can catch up to it.
+			for height == bestHeight && !isCurrent(bestHeight) {
 				time.Sleep(100 * time.Millisecond)
 				_, bestHeight, err = chainClient.GetBestBlock()
 				if err != nil {
 					tx.Rollback()
 					return err
-				}
-
-				// If we're using the Neutrino backend, we can
-				// check if it's current or not. If it's not and
-				// we've exceeded the original checkHeight, we
-				// can keep the loop going by increasing the
-				// checkHeight to be greater than the bestHeight
-				// and if it is, we can set checkHeight to the
-				// same as the bestHeight so the loop exits.
-				switch c := chainClient.(type) {
-				case *chain.NeutrinoClient:
-					if c.CS.IsCurrent() {
-						checkHeight = bestHeight
-					} else if checkHeight < bestHeight+1 {
-						checkHeight = bestHeight + 1
-					}
 				}
 			}
 
