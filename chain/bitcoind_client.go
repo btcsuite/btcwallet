@@ -108,6 +108,10 @@ type BitcoindClient struct {
 	wg   sync.WaitGroup
 }
 
+// A compile-time check to ensure that BitcoindClient satisfies the
+// chain.Interface interface.
+var _ Interface = (*BitcoindClient)(nil)
+
 // BackEnd returns the name of the driver.
 func (c *BitcoindClient) BackEnd() string {
 	return "bitcoind"
@@ -594,6 +598,14 @@ func (c *BitcoindClient) ntfnHandler() {
 			return
 		}
 	}
+}
+
+// SetBirthday sets the birthday of the bitcoind rescan client.
+//
+// NOTE: This should be done before the client has been started in order for it
+// to properly carry its duties.
+func (c *BitcoindClient) SetBirthday(t time.Time) {
+	c.birthday = t
 }
 
 // BlockStamp returns the latest block notified by the client, or an error

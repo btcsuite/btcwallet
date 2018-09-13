@@ -333,15 +333,13 @@ func (c *BitcoindConn) getCurrentNet() (wire.BitcoinNet, error) {
 
 // NewBitcoindClient returns a bitcoind client using the current bitcoind
 // connection. This allows us to share the same connection using multiple
-// clients. The birthday signifies the earliest time for which we should begin
-// scanning the chain.
-func (c *BitcoindConn) NewBitcoindClient(birthday time.Time) *BitcoindClient {
+// clients.
+func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 	return &BitcoindClient{
 		quit: make(chan struct{}),
 
 		id: atomic.AddUint64(&c.rescanClientCounter, 1),
 
-		birthday:    birthday,
 		chainParams: c.chainParams,
 		chainConn:   c,
 
