@@ -3132,7 +3132,26 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 
 	// TODO: The record already has the serialized tx, so no need to
 	// serialize it again.
-	return chainClient.SendRawTransaction(&rec.MsgTx, false)
+	txid, err := chainClient.SendRawTransaction(&rec.MsgTx, false)
+	switch {
+	case err == nil:
+		switch w.chainClient.(type) {
+		// For neutrino we need to trigger adding relevant tx manually
+		// because for spv client - tx data isn't received from sync peer.
+		case *chain.NeutrinoClient:
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				return w.addRelevantTx(tx, rec, nil)
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// TODO(roasbeef): properly act on rest of mapped errors
+		return txid, nil
+	default:
+		return nil, err
+	}
 }
 
 // SignatureError records the underlying error when validating a transaction
