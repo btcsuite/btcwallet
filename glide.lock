@@ -44,8 +44,8 @@ imports:
   - ssh/terminal
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
-- name: github.com/coreos/bbolt
-  version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
+- name: github.com/etcd-io/bbolt
+  version: 7ee3ded59d4835e10f3e7d0f7603c42aa5e83820
 - name: github.com/davecgh/go-spew
   version: ecdeabc65495df2dec95d7c4a4c3e021903035e5
   subpackages:
