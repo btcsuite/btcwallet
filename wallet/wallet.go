@@ -3312,9 +3312,8 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	if err != nil {
 		return err
 	}
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		return w.TxStore.InsertTx(txmgrNs, txRec, nil)
+	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+		return w.addRelevantTx(dbTx, txRec, nil)
 	})
 	if err != nil {
 		return err
@@ -3323,15 +3322,6 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	_, err = server.SendRawTransaction(tx, false)
 	switch {
 	case err == nil:
-		switch w.chainClient.(type) {
-		// For neutrino we need to trigger adding relevant tx manually
-		// because for spv client - tx data isn't received from sync peer.
-		case *chain.NeutrinoClient:
-			return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				return w.addRelevantTx(tx, txRec, nil)
-			})
-		}
-
 		return nil
 
 	// The following are errors returned from btcd's mempool.
@@ -3348,14 +3338,12 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	case strings.Contains(err.Error(), "Missing inputs"):
 		fallthrough
 	case strings.Contains(err.Error(), "already in block chain"):
-
 		// If the transaction was rejected, then we'll remove it from
 		// the txstore, as otherwise, we'll attempt to continually
 		// re-broadcast it, and the utxo state of the wallet won't be
 		// accurate.
 		dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-
 			return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
 		})
 		if dbErr != nil {
