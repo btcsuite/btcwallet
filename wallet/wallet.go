@@ -3299,9 +3299,14 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 // This function is unstable and will be removed once syncing code is moved out
 // of the wallet.
 func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
+	_, err := w.publishTransaction(tx)
+	return err
+}
+
+func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	server, err := w.requireChainClient()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// As we aim for this to be general reliable transaction broadcast API,
@@ -3310,19 +3315,19 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	// set of records.
 	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 		return w.addRelevantTx(dbTx, txRec, nil)
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	_, err = server.SendRawTransaction(tx, false)
+	txid, err := server.SendRawTransaction(tx, false)
 	switch {
 	case err == nil:
-		return nil
+		return txid, nil
 
 	// The following are errors returned from btcd's mempool.
 	case strings.Contains(err.Error(), "spent"):
@@ -3347,14 +3352,14 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 			return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
 		})
 		if dbErr != nil {
-			return fmt.Errorf("unable to broadcast tx: %v, "+
+			return nil, fmt.Errorf("unable to broadcast tx: %v, "+
 				"unable to remove invalid tx: %v", err, dbErr)
 		}
 
-		return err
+		return nil, err
 
 	default:
-		return err
+		return nil, err
 	}
 }
 
