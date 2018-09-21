@@ -3086,74 +3086,24 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 	minconf int32, satPerKb btcutil.Amount) (*chainhash.Hash, error) {
 
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
-
+	// Ensure the outputs to be created adhere to the network's consensus
+	// rules.
 	for _, output := range outputs {
-		err = txrules.CheckOutput(output, satPerKb)
-		if err != nil {
+		if err := txrules.CheckOutput(output, satPerKb); err != nil {
 			return nil, err
 		}
 	}
 
-	// Create transaction, replying with an error if the creation
-	// was not successful.
+	// Create the transaction and broadcast it to the network. The
+	// transaction will be added to the database in order to ensure that we
+	// continue to re-broadcast the transaction upon restarts until it has
+	// been confirmed.
 	createdTx, err := w.CreateSimpleTx(account, outputs, minconf, satPerKb)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create transaction record and insert into the db.
-	rec, err := wtxmgr.NewTxRecordFromMsgTx(createdTx.Tx, time.Now())
-	if err != nil {
-		log.Errorf("Cannot create record for created transaction: %v", err)
-		return nil, err
-	}
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		err := w.TxStore.InsertTx(txmgrNs, rec, nil)
-		if err != nil {
-			return err
-		}
-
-		if createdTx.ChangeIndex >= 0 {
-			err = w.TxStore.AddCredit(txmgrNs, rec, nil, uint32(createdTx.ChangeIndex), true)
-			if err != nil {
-				log.Errorf("Error adding change address for sent "+
-					"tx: %v", err)
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: The record already has the serialized tx, so no need to
-	// serialize it again.
-	txid, err := chainClient.SendRawTransaction(&rec.MsgTx, false)
-	switch {
-	case err == nil:
-		switch w.chainClient.(type) {
-		// For neutrino we need to trigger adding relevant tx manually
-		// because for spv client - tx data isn't received from sync peer.
-		case *chain.NeutrinoClient:
-			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				return w.addRelevantTx(tx, rec, nil)
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		// TODO(roasbeef): properly act on rest of mapped errors
-		return txid, nil
-	default:
-		return nil, err
-	}
+	return w.publishTransaction(createdTx.Tx)
 }
 
 // SignatureError records the underlying error when validating a transaction
