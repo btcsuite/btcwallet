@@ -320,7 +320,6 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 // syncWithChain brings the wallet up to date with the current chain server
 // connection.  It creates a rescan request and blocks until the rescan has
 // finished.
-//
 func (w *Wallet) syncWithChain() error {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -344,9 +343,12 @@ func (w *Wallet) syncWithChain() error {
 
 	startHeight := w.Manager.SyncedTo().Height
 
+	// We'll mark this as our first sync if we don't have any unspent
+	// outputs as known by the wallet. This'll allow us to skip a full
+	// rescan at this height, and instead wait for the backend to catch up.
+	isInitialSync := len(unspent) == 0
+
 	isRecovery := w.recoveryWindow > 0
-	isInitialSync := len(addrs) == 0 && len(unspent) == 0 &&
-		startHeight == 0
 	birthday := w.Manager.Birthday()
 
 	// If an initial sync is attempted, we will try and find the block stamp
@@ -3253,6 +3255,11 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	return err
 }
 
+// publishTransaction is the private version of PublishTransaction which
+// contains the primary logic required for publishing a transaction, updating
+// the relevant database state, and finally possible removing the transaction
+// from the database (along with cleaning up all inputs used, and outputs
+// created) if the transaction is rejected by the back end.
 func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	server, err := w.requireChainClient()
 	if err != nil {
