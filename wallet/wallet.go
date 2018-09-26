@@ -3255,6 +3255,11 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 	return err
 }
 
+// publishTransaction is the private version of PublishTransaction which
+// contains the primary logic required for publishing a transaction, updating
+// the relevant database state, and finally possible removing the transaction
+// from the database (along with cleaning up all inputs used, and outputs
+// created) if the transaction is rejected by the back end.
 func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	server, err := w.requireChainClient()
 	if err != nil {
