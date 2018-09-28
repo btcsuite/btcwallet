@@ -19,6 +19,10 @@ import (
 const (
 	// LatestMgrVersion is the most recent manager version.
 	LatestMgrVersion = 5
+
+	// maxReorgDepth is the maximum number of block hashes we will store to
+	// handle reorgs.
+	maxReorgDepth = 10000
 )
 
 var (
@@ -1866,6 +1870,17 @@ func putSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	if err != nil {
 		return managerError(ErrDatabase, errStr, err)
 	}
+
+	// Finally we delete any hashes for heights below our max reorg depth.
+	forgetHeight := bs.Height - maxReorgDepth
+	if forgetHeight > 0 {
+		height := make([]byte, 4)
+		binary.BigEndian.PutUint32(height, uint32(forgetHeight))
+		if err := bucket.Delete(height); err != nil {
+			return managerError(ErrDatabase, errStr, err)
+		}
+	}
+
 	return nil
 }
 
