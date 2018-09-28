@@ -350,12 +350,7 @@ func (w *Wallet) syncWithChain() error {
 
 	isRecovery := w.recoveryWindow > 0
 	birthday := w.Manager.Birthday()
-
-	// If an initial sync is attempted, we will try and find the block stamp
-	// of the first block past our birthday. This will be fed into the
-	// rescan to ensure we catch transactions that are sent while performing
-	// the initial sync.
-	var birthdayStamp *waddrmgr.BlockStamp
+	birthdayPassed := false
 
 	// TODO(jrick): How should this handle a synced height earlier than
 	// the chain server best block?
@@ -483,25 +478,16 @@ func (w *Wallet) syncWithChain() error {
 			// Check to see if this header's timestamp has surpassed
 			// our birthday or if we've surpassed one previously.
 			timestamp := header.Timestamp
-			if timestamp.After(birthday) || birthdayStamp != nil {
-				// If this is the first block past our birthday,
-				// record the block stamp so that we can use
-				// this as the starting point for the rescan.
-				// This will ensure we don't miss transactions
-				// that are sent to the wallet during an initial
-				// sync.
+			if timestamp.After(birthday) || birthdayPassed {
+				// Mark the birthday passed, to make sure we
+				// revisit all following blocks, even if their
+				// timestamp decreases.
 				//
 				// NOTE: The birthday persisted by the wallet is
 				// two days before the actual wallet birthday,
 				// to deal with potentially inaccurate header
 				// timestamps.
-				if birthdayStamp == nil {
-					birthdayStamp = &waddrmgr.BlockStamp{
-						Height:    height,
-						Hash:      *hash,
-						Timestamp: timestamp,
-					}
-				}
+				birthdayPassed = true
 
 				// If we are in recovery mode and the check
 				// passes, we will add this block to our list of
@@ -511,16 +497,6 @@ func (w *Wallet) syncWithChain() error {
 						hash, height, timestamp,
 					)
 				}
-			}
-
-			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
-				Hash:      *hash,
-				Height:    height,
-				Timestamp: timestamp,
-			})
-			if err != nil {
-				tx.Rollback()
-				return err
 			}
 
 			// If we are in recovery mode, attempt a recovery on
@@ -559,6 +535,17 @@ func (w *Wallet) syncWithChain() error {
 
 				ns = tx.ReadWriteBucket(waddrmgrNamespaceKey)
 			}
+
+			err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+				Height:    height,
+				Hash:      *hash,
+				Timestamp: timestamp,
+			})
+			if err != nil {
+				tx.Rollback()
+				return err
+			}
+
 		}
 
 		// Perform one last recovery attempt for all blocks that were
@@ -647,12 +634,8 @@ func (w *Wallet) syncWithChain() error {
 		return err
 	}
 
-	// If a birthday stamp was found during the initial sync and the
-	// rollback causes us to revert it, update the birthday stamp so that it
-	// points at the new tip.
-	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
-		birthdayStamp = &rollbackStamp
-	}
+	// Fetch the current sync heigh before requesting chain notifications.
+	current := w.Manager.SyncedTo()
 
 	// Request notifications for connected and disconnected blocks.
 	//
@@ -667,7 +650,8 @@ func (w *Wallet) syncWithChain() error {
 		return err
 	}
 
-	return w.rescanWithTarget(addrs, unspent, birthdayStamp)
+	// Start a rescan from the current sync stamp.
+	return w.rescanWithTarget(addrs, unspent, &current)
 }
 
 // defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
