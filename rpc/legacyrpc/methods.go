@@ -101,6 +101,7 @@ var rpcHandlers = map[string]struct {
 	"lockunspent":            {handler: lockUnspent},
 	"sendfrom":               {handlerWithChain: sendFrom},
 	"sendmany":               {handler: sendMany},
+	"transferTransaction":    {handler: transferTransaction},
 	"sendtoaddress":          {handler: sendToAddress},
 	"settxfee":               {handler: setTxFee},
 	"signmessage":            {handler: signMessage},
@@ -1368,6 +1369,14 @@ func makeOutputs(pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) 
 	return outputs, nil
 }
 
+func transferToAddress(w *wallet.Wallet, addrStr string, txId string,
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount) (string, error) {
+
+	// TODO : return tx hash
+	w.TransferTx(addrStr, txId, account, minconf, feeSatPerKb)
+	return "", nil
+}
+
 // sendPairs creates and sends payment transactions.
 // It returns the transaction hash in string format upon success
 // All errors are returned in btcjson.RPCError format
@@ -1490,6 +1499,14 @@ func sendMany(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 
 	return sendPairs(w, pairs, account, minConf, txrules.DefaultRelayFeePerKb)
+}
+
+func transferTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
+	cmd := icmd.(*btcjson.TransferTransactionCmd)
+
+	return transferToAddress(w,
+		cmd.Address, cmd.TxId,
+		waddrmgr.DefaultAccountNum, 1, txrules.DefaultRelayFeePerKb)
 }
 
 // sendToAddress handles a sendtoaddress RPC request by creating a new
