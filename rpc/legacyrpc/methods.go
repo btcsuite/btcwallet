@@ -1369,32 +1369,12 @@ func makeOutputs(pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) 
 	return outputs, nil
 }
 
-func transferToAddress(
-	w *wallet.Wallet,
-	addrStr string, txId string,
-	account uint32,
-	minconf int32, feeSatPerKb btcutil.Amount) (string, error) {
+func transferToAddress(w *wallet.Wallet, addrStr string, txId string,
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount) (string, error) {
 
-	//Find transaction
-
-	//Create output
-	chainParams := w.ChainParams()
-	addr, err := btcutil.DecodeAddress(addrStr, chainParams)
-	if err != nil {
-		return "", fmt.Errorf("cannot decode address: %s", err)
-	}
-
-	pkScript, err := txscript.PayToAddrScript(addr)
-	if err != nil {
-		return "", fmt.Errorf("cannot create txout script: %s", err)
-	}
-
-	output := wire.NewTxOut(int64(amt), pkScript)
-
-	if err := txrules.CheckOutput(output, feeSatPerKb); err != nil {
-		return "", err
-	}
-
+	// TODO : return tx hash
+	w.TransferTx(addrStr, txId, account, minconf, feeSatPerKb)
+	return "", nil
 }
 
 // sendPairs creates and sends payment transactions.
