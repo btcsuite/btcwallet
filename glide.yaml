@@ -2,21 +2,6 @@ package: github.com/btcsuite/btcwallet
 import:
 - package: github.com/coreos/bbolt
   version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
-- package: github.com/btcsuite/btcd
-  version: d81d8877b8f327112e94e814937143a71d1692a7
-  subpackages:
-  - blockchain
-  - btcec
-  - btcjson
-  - chaincfg
-  - chaincfg/chainhash
-  - txscript
-  - wire
-- package: github.com/btcsuite/btclog
-- package: github.com/btcsuite/btcutil
-  version: ab6388e0c60ae4834a1f57511e20c17b5f78be4b
-  subpackages:
-  - hdkeychain
 - package: github.com/lightninglabs/neutrino
   version: 31332f9c7a241da72835ad33ff340c3998e30de8
 - package: github.com/btcsuite/golangcrypto
