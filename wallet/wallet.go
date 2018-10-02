@@ -97,6 +97,9 @@ type Wallet struct {
 	// Channel for transaction creation requests.
 	createTxRequests chan createTxRequest
 
+	// Channel for transaction transfer requests
+	createTxTransferRequests chan createTxTransferRequest
+
 	// Channels for the manager locker.
 	unlockRequests     chan unlockRequest
 	lockRequests       chan struct{}
@@ -140,6 +143,7 @@ func (w *Wallet) Start() {
 
 	w.wg.Add(2)
 	go w.txCreator()
+	go w.txTransferCreator()
 	go w.walletLocker()
 }
 
@@ -1075,6 +1079,21 @@ func logFilterBlocksResp(block wtxmgr.BlockMeta,
 }
 
 type (
+	createTxTransferRequest struct {
+		account     uint32
+		address		string
+		txId 		string
+		minconf     int32
+		feeSatPerKB btcutil.Amount
+		resp        chan createTxTransferResponse
+	}
+	createTxTransferResponse struct {
+		tx  *txauthor.AuthoredTx
+		err error
+	}
+)
+
+type (
 	createTxRequest struct {
 		account     uint32
 		outputs     []*wire.TxOut
@@ -1118,6 +1137,43 @@ out:
 		}
 	}
 	w.wg.Done()
+}
+
+func (w *Wallet) txTransferCreator(){
+	quit := w.quitChan()
+out:
+	for {
+		select {
+		case txr := <-w.createTxTransferRequests:
+			heldUnlock, err := w.holdUnlock()
+			if err != nil {
+				txr.resp <- createTxTransferResponse{nil, err}
+				continue
+			}
+			tx, err := w.txTransferToOutputs(txr.address, txr.txId, txr.account,
+				txr.minconf, txr.feeSatPerKB)
+			heldUnlock.release()
+			txr.resp <- createTxTransferResponse{tx, err}
+		case <-quit:
+			break out
+		}
+	}
+	w.wg.Done()
+}
+
+func (w *Wallet) CreateSimpleTxTransfer(account uint32, address string, txId string, minconf int32, feeSatPerKb btcutil.Amount) (*txauthor.AuthoredTx, error) {
+	req := createTxTransferRequest{
+		account:     account,
+		address:address,
+		txId:txId,
+		minconf:     minconf,
+		feeSatPerKB: feeSatPerKb,
+		resp:        make(chan createTxTransferResponse),
+	}
+
+	w.createTxTransferRequests <- req
+	resp := <-req.resp
+	return resp.tx, resp.err
 }
 
 // CreateSimpleTx creates a new signed transaction spending unspent P2PKH
@@ -3081,6 +3137,22 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 		return w.TxStore.RangeTransactions(txmgrNs, 0, stopHeight, rangeFn)
 	})
 	return amount, err
+}
+
+
+func (w *Wallet) TransferTx(address string, txId string, account uint32, minconf int32, feeSatPerKb btcutil.Amount) (*chainhash.Hash, error) {
+	_, err := w.CreateSimpleTxTransfer(account, address, txId, minconf, feeSatPerKb)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO : Use below code block inside CreateSimpleTxTransfer
+	/* for _, output := range outputs {
+		if err := txrules.CheckOutput(output, satPerKb); err != nil {
+			return nil, err
+		}
+	} */
+	return nil, nil
 }
 
 // SendOutputs creates and sends payment transactions. It returns the

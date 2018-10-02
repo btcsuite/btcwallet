@@ -96,6 +96,13 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 	return msa.Script()
 }
 
+func (w *Wallet) txTransferToOutputs(address string, txId string, account uint32,
+	minconf int32, feeSatPerKB btcutil.Amount) (tx *txauthor.AuthoredTx, err error) {
+
+	//TODO : Implement this
+	return nil, nil
+}
+
 // txToOutputs creates a signed transaction which includes each output from
 // outputs.  Previous outputs to reedeem are chosen from the passed account's
 // UTXO set and minconf policy. An additional output may be added to return
