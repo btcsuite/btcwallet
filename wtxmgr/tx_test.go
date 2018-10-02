@@ -1324,59 +1324,142 @@ func TestRemoveUnminedTx(t *testing.T) {
 	}
 	defer teardown()
 
-	dbtx, err := db.BeginReadWriteTx()
+	// In order to reproduce real-world scenarios, we'll use a new database
+	// transaction for each interaction with the wallet.
+	//
+	// We'll start off the test by creating a new coinbase output at height
+	// 100 and inserting it into the store.
+	b100 := &BlockMeta{
+		Block: Block{Height: 100},
+		Time:  time.Now(),
+	}
+	initialBalance := int64(1e8)
+	cb := newCoinBase(initialBalance)
+	cbRec, err := NewTxRecordFromMsgTx(cb, b100.Time)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dbtx.Commit()
-	ns := dbtx.ReadWriteBucket(namespaceKey)
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, cbRec, b100); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, cbRec, b100, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 
-	// We'll start off by adding an unconfirmed transaction to the
-	// transaction store.
-	tx := TstRecvTx
-	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx(), time.Now())
+	// Determine the maturity height for the coinbase output created.
+	coinbaseMaturity := int32(chaincfg.TestNet3Params.CoinbaseMaturity)
+	maturityHeight := b100.Block.Height + coinbaseMaturity
+
+	// checkBalance is a helper function that compares the balance of the
+	// store with the expected value. The includeUnconfirmed boolean can be
+	// used to include the unconfirmed balance as a part of the total
+	// balance.
+	checkBalance := func(expectedBalance btcutil.Amount,
+		includeUnconfirmed bool) {
+
+		t.Helper()
+
+		minConfs := int32(1)
+		if includeUnconfirmed {
+			minConfs = 0
+		}
+
+		commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+			t.Helper()
+
+			b, err := store.Balance(ns, minConfs, maturityHeight)
+			if err != nil {
+				t.Fatalf("unable to retrieve balance: %v", err)
+			}
+			if b != expectedBalance {
+				t.Fatalf("expected balance of %d, got %d",
+					expectedBalance, b)
+			}
+		})
+	}
+
+	// Since we don't have any unconfirmed transactions within the store,
+	// the total balance reflecting confirmed and unconfirmed outputs should
+	// match the initial balance.
+	checkBalance(btcutil.Amount(initialBalance), false)
+	checkBalance(btcutil.Amount(initialBalance), true)
+
+	// Then, we'll create an unconfirmed spend for the coinbase output and
+	// insert it into the store.
+	b101 := &BlockMeta{
+		Block: Block{Height: 201},
+		Time:  time.Now(),
+	}
+	changeAmount := int64(4e7)
+	spendTx := spendOutput(&cbRec.Hash, 0, 5e7, changeAmount)
+	spendTxRec, err := NewTxRecordFromMsgTx(spendTx, b101.Time)
 	if err != nil {
-		t.Fatalf("unable to create unmined txns: %v", err)
+		t.Fatal(err)
 	}
-	if err := store.InsertTx(ns, txRec, nil); err != nil {
-		t.Fatalf("unable to insert transaction: %v", err)
-	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, spendTxRec, nil); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, spendTxRec, nil, 1, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 
-	// With the transaction inserted, ensure that it's reflected in the set
-	// of unmined transactions.
-	unminedTxns, err := store.UnminedTxs(ns)
-	if err != nil {
-		t.Fatalf("unable to query for unmined txns: %v", err)
-	}
-	if len(unminedTxns) != 1 {
-		t.Fatalf("expected 1 mined tx, instead got %v",
-			len(unminedTxns))
-	}
-	unminedTxHash := unminedTxns[0].TxHash()
-	txHash := tx.MsgTx().TxHash()
-	if !unminedTxHash.IsEqual(&txHash) {
-		t.Fatalf("mismatch tx hashes: expected %v, got %v",
-			tx.MsgTx().TxHash(), unminedTxHash)
-	}
+	// With the unconfirmed spend inserted into the store, we'll query it
+	// for its unconfirmed tranasctions to ensure it was properly added.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		unminedTxs, err := store.UnminedTxs(ns)
+		if err != nil {
+			t.Fatalf("unable to query for unmined txs: %v", err)
+		}
+		if len(unminedTxs) != 1 {
+			t.Fatalf("expected 1 mined tx, instead got %v",
+				len(unminedTxs))
+		}
+		unminedTxHash := unminedTxs[0].TxHash()
+		spendTxHash := spendTx.TxHash()
+		if !unminedTxHash.IsEqual(&spendTxHash) {
+			t.Fatalf("mismatch tx hashes: expected %v, got %v",
+				spendTxHash, unminedTxHash)
+		}
+	})
 
-	// Next, we'll delete the unmined transaction in order to simulate an
-	// encountered conflict.
-	if err := store.RemoveUnminedTx(ns, txRec); err != nil {
-		t.Fatalf("unable to remove unmined txns: %v", err)
-	}
+	// Now that an unconfirmed spend exists, there should no longer be any
+	// confirmed balance. The total balance should now all be unconfirmed
+	// and it should match the change amount of the unconfirmed spend
+	// tranasction.
+	checkBalance(0, false)
+	checkBalance(btcutil.Amount(changeAmount), true)
 
-	// If we query again for the set of unconfirmed transactions, then we
-	// should get an empty slice.
-	// With the transaction inserted, ensure that it's reflected in the set
-	// of unmined transactions.
-	unminedTxns, err = store.UnminedTxs(ns)
-	if err != nil {
-		t.Fatalf("unable to query for unmined txns: %v", err)
-	}
-	if len(unminedTxns) != 0 {
-		t.Fatalf("expected zero unmined txns, instead have %v",
-			len(unminedTxns))
-	}
+	// Now, we'll remove the unconfirmed spend tranaction from the store.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.RemoveUnminedTx(ns, spendTxRec); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// We'll query the store one last time for its unconfirmed transactions
+	// to ensure the unconfirmed spend was properly removed above.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		unminedTxs, err := store.UnminedTxs(ns)
+		if err != nil {
+			t.Fatalf("unable to query for unmined txs: %v", err)
+		}
+		if len(unminedTxs) != 0 {
+			t.Fatalf("expected 0 mined txs, instead got %v",
+				len(unminedTxs))
+		}
+	})
+
+	// Finally, the total balance (including confirmed and unconfirmed)
+	// should once again match the initial balance, as the uncofirmed spend
+	// has already been removed.
+	checkBalance(btcutil.Amount(initialBalance), false)
+	checkBalance(btcutil.Amount(initialBalance), true)
 }
 
 // commitDBTx is a helper function that allows us to perform multiple operations
