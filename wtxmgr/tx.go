@@ -227,7 +227,8 @@ func (s *Store) updateMinedBalance(ns walletdb.ReadWriteBucket, rec *TxRecord,
 
 	newMinedBalance := minedBalance
 	for i, input := range rec.MsgTx.TxIn {
-		unspentKey, credKey := existsUnspent(ns, &input.PreviousOutPoint)
+		prevOut := &input.PreviousOutPoint
+		unspentKey, credKey := existsUnspent(ns, prevOut)
 		if credKey == nil {
 			// Debits for unmined transactions are not explicitly
 			// tracked.  Instead, all previous outputs spent by any
@@ -257,6 +258,12 @@ func (s *Store) updateMinedBalance(ns walletdb.ReadWriteBucket, rec *TxRecord,
 		}
 		err = putDebit(
 			ns, &rec.Hash, uint32(i), amt, &block.Block, credKey,
+		)
+		if err != nil {
+			return err
+		}
+		err = putMinedInput(
+			ns, prevOut, &rec.Hash, uint32(i), &block.Block,
 		)
 		if err != nil {
 			return err
