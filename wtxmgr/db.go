@@ -68,6 +68,23 @@ var (
 	bucketUnmined        = []byte("m")
 	bucketUnminedCredits = []byte("mc")
 	bucketUnminedInputs  = []byte("mi")
+
+	// bucketMinedInputs is a bucket responsible for storing information
+	// about the input of the spending transaction for an output.
+	//
+	// The bucket provides the following mapping:
+	//  * Keys are serialized outpoints of the form:
+	//    [0:32]  Transaction hash (32 bytes)
+	//    [32:36] Output index     (4 bytes)
+	//  * Values are a combination of the transaction hash spending the
+	//  output used as the key above, followed by the block it was confirmed
+	//  in, followed by the input index spending the output. Values are
+	//  serialized as follows:
+	//    [0:32]  Transaction hash        (32 bytes)
+	//    [32:36] Block height            (4 bytes)
+	//    [36:68] Block hash              (32 bytes)
+	//    [68:72] Transaction input index (4 bytes)
+	bucketMinedInputs = []byte("mined-inputs")
 )
 
 // Root (namespace) bucket keys
@@ -1255,6 +1272,55 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
 	return nil
 }
 
+// putRawMinedInput inserts an entry into bucketMinedInputs that maps an output
+// to the transaction input spending it. The output will be used as the key of
+// the entry, while the transaction spending it will be used as the value.
+func putMinedInput(ns walletdb.ReadWriteBucket, prevOut *wire.OutPoint,
+	spendTxHash *chainhash.Hash, spendTxInputIndex uint32,
+	spendTxBlock *Block) error {
+
+	k := canonicalOutPoint(&prevOut.Hash, prevOut.Index)
+	v := make([]byte, 32+4+32+4)
+	copy(v[:32], spendTxHash[:])
+	byteOrder.PutUint32(v[32:36], uint32(spendTxBlock.Height))
+	copy(v[36:], spendTxBlock.Hash[:])
+	byteOrder.PutUint32(v[68:72], spendTxInputIndex)
+
+	return putRawMinedInput(ns, k, v)
+}
+
+// putRawMinedInput inserts an entry into bucketMinedInputs that maps an output
+// to the transaction input spending it. The output will be used as the key of
+// the entry, while the transaction spending it will be used as the value. The
+// key/value slice pairs should match the expected serialization of the bucket.
+func putRawMinedInput(ns walletdb.ReadWriteBucket, k, v []byte) error {
+	err := ns.NestedReadWriteBucket(bucketMinedInputs).Put(k, v)
+	if err != nil {
+		str := "failed to put mined input"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	return nil
+}
+
+// existsRawMinedInput determines whether there exists a confirmed spend for an
+// output.
+func existsRawMinedInput(ns walletdb.ReadBucket, k []byte) (v []byte) {
+	return ns.NestedReadBucket(bucketMinedInputs).Get(k)
+}
+
+// deleteRawMinedInput removes the entry of an output within bucketMinedInputs.
+// This should ideally be used when a reorg of the chain has occurred,
+// invalidating the spending transaction of an output.
+func deleteRawMinedInput(ns walletdb.ReadWriteBucket, k []byte) error {
+	err := ns.NestedReadWriteBucket(bucketMinedInputs).Delete(k)
+	if err != nil {
+		str := "failed to delete mined input"
+		return storeError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
 // openStore opens an existing transaction store from the passed namespace.
 func openStore(ns walletdb.ReadBucket) error {
 	version, err := fetchVersion(ns)
@@ -1295,67 +1361,62 @@ func createStore(ns walletdb.ReadWriteBucket) error {
 	}
 
 	// Save the creation date of the store.
-	v = make([]byte, 8)
+	v := make([]byte, 8)
 	byteOrder.PutUint64(v, uint64(time.Now().Unix()))
-	err = ns.Put(rootCreateDate, v)
-	if err != nil {
+	if err := ns.Put(rootCreateDate, v); err != nil {
 		str := "failed to store database creation time"
 		return storeError(ErrDatabase, str, err)
 	}
 
 	// Write a zero balance.
 	v = make([]byte, 8)
-	err = ns.Put(rootMinedBalance, v)
-	if err != nil {
+	if err := ns.Put(rootMinedBalance, v); err != nil {
 		str := "failed to write zero balance"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketBlocks)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketBlocks); err != nil {
 		str := "failed to create blocks bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketTxRecords)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketTxRecords); err != nil {
 		str := "failed to create tx records bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketCredits)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketCredits); err != nil {
 		str := "failed to create credits bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketDebits)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketDebits); err != nil {
 		str := "failed to create debits bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketUnspent)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnspent); err != nil {
 		str := "failed to create unspent bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketUnmined)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnmined); err != nil {
 		str := "failed to create unmined bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketUnminedCredits)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnminedCredits); err != nil {
 		str := "failed to create unmined credits bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketUnminedInputs)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnminedInputs); err != nil {
 		str := "failed to create unmined inputs bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	if _, err := ns.CreateBucket(bucketMinedInputs); err != nil {
+		str := "failed to create mined inputs bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
