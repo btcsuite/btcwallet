@@ -631,6 +631,10 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 				if err != nil {
 					return err
 				}
+				err = deleteRawMinedInput(ns, prevOutKey)
+				if err != nil {
+					return err
+				}
 
 				// If the credit was previously removed in the
 				// rollback, the credit amount is zero.  Only
