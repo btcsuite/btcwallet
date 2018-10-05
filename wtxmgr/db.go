@@ -1264,12 +1264,10 @@ func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
 
 // openStore opens an existing transaction store from the passed namespace.
 func openStore(ns walletdb.ReadBucket) error {
-	v := ns.Get(rootVersion)
-	if len(v) != 4 {
-		str := "no transaction store exists in namespace"
-		return storeError(ErrNoExists, str, nil)
+	version, err := fetchVersion(ns)
+	if err != nil {
+		return err
 	}
-	version := byteOrder.Uint32(v)
 
 	if version < LatestVersion {
 		str := fmt.Sprintf("a database upgrade is required to upgrade "+
@@ -1279,23 +1277,10 @@ func openStore(ns walletdb.ReadBucket) error {
 	}
 
 	if version > LatestVersion {
-		str := fmt.Sprintf("version recorded version %d is newer that latest "+
-			"understood version %d", version, LatestVersion)
+		str := fmt.Sprintf("version recorded version %d is newer that "+
+			"latest understood version %d", version, LatestVersion)
 		return storeError(ErrUnknownVersion, str, nil)
 	}
-
-	// Upgrade the tx store as needed, one version at a time, until
-	// LatestVersion is reached.  Versions are not skipped when performing
-	// database upgrades, and each upgrade is done in its own transaction.
-	//
-	// No upgrades yet.
-	//if version < LatestVersion {
-	//	err := scopedUpdate(namespace, func(ns walletdb.Bucket) error {
-	//	})
-	//	if err != nil {
-	//		// Handle err
-	//	}
-	//}
 
 	return nil
 }
@@ -1311,12 +1296,8 @@ func createStore(ns walletdb.ReadWriteBucket) error {
 	}
 
 	// Write the latest store version.
-	v := make([]byte, 4)
-	byteOrder.PutUint32(v, LatestVersion)
-	err := ns.Put(rootVersion, v)
-	if err != nil {
-		str := "failed to store latest database version"
-		return storeError(ErrDatabase, str, err)
+	if err := putVersion(ns, LatestVersion); err != nil {
+		return err
 	}
 
 	// Save the creation date of the store.
@@ -1385,6 +1366,30 @@ func createStore(ns walletdb.ReadWriteBucket) error {
 	}
 
 	return nil
+}
+
+// putVersion modifies the version of the store to reflect the given version
+// number.
+func putVersion(ns walletdb.ReadWriteBucket, version uint32) error {
+	v := make([]byte, 4)
+	byteOrder.PutUint32(v, version)
+	if err := ns.Put(rootVersion, v); err != nil {
+		str := "failed to store database version"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	return nil
+}
+
+// fetchVersion fetches the current version of the store.
+func fetchVersion(ns walletdb.ReadBucket) (uint32, error) {
+	v := ns.Get(rootVersion)
+	if len(v) != 4 {
+		str := "no transaction store exists in namespace"
+		return 0, storeError(ErrNoExists, str, nil)
+	}
+
+	return byteOrder.Uint32(v), nil
 }
 
 func scopedUpdate(db walletdb.DB, namespaceKey []byte, f func(walletdb.ReadWriteBucket) error) error {
