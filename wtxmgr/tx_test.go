@@ -1945,3 +1945,117 @@ func TestAddDuplicateCreditAfterConfirm(t *testing.T) {
 		}
 	})
 }
+
+// TestHasSpendingTx ensures that the store can properly detect whether there
+// exists a spending transaction for an output within it.
+func TestHasSpendingTx(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+
+	// In order to reproduce real-world scenarios, we'll use a new database
+	// transaction for each interaction with the wallet.
+	//
+	// We'll start off the test by creating a new coinbase output at height
+	// 100 and inserting it into the store.
+	block100 := &BlockMeta{
+		Block: Block{Height: 100},
+		Time:  time.Now(),
+	}
+	cb := newCoinBase(1e8)
+	cbRec, err := NewTxRecordFromMsgTx(cb, block100.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, cbRec, block100); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, cbRec, block100, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// Construct the outpoint for which we'll determine whether we have a
+	// spending transaction for it within the store.
+	cbOutpoint := wire.OutPoint{Hash: cbRec.Hash, Index: 0}
+
+	// Since the outpoint has not been spent, there shouldn't exist a
+	// spending transaction for it.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		spendTx, err := store.GetSpendingTx(ns, cbOutpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spendTx != nil {
+			t.Fatal("expected store to not have a spending tx")
+		}
+	})
+
+	// checkSpendTx is a helper closure that will assert that the store
+	// retrieves a spending transaction with a hash that matches the
+	// expected one.
+	checkSpendTx := func(expectedHash *chainhash.Hash) {
+		commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+			spendTx, err := store.GetSpendingTx(ns, cbOutpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spendTx == nil {
+				t.Fatal("expected store to have a spending tx")
+			}
+
+			gotHash := spendTx.TxHash()
+			if !gotHash.IsEqual(expectedHash) {
+				t.Fatalf("expected spending tx %v, got %v",
+					expectedHash, gotHash)
+			}
+		})
+	}
+
+	// Next, we'll insert an unconfirmed spending transaction and ensure
+	// that we can recognize that it exists.
+	unconfirmedSpendTx := spendOutput(&cbRec.Hash, 0, 5e7, 4e7)
+	unconfirmedSpendTxRec, err := NewTxRecordFromMsgTx(
+		unconfirmedSpendTx, time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		err := store.InsertTx(ns, unconfirmedSpendTxRec, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkSpendTx(&unconfirmedSpendTxRec.Hash)
+
+	// Finally, we'll insert a different spending transaction, but this time
+	// it'll be confirmed. This should remove the unconfirmed one. The store
+	// properly detect that the outpoint now has a confirmed spending
+	// transaction.
+	coinbaseMaturity := int32(chaincfg.TestNet3Params.CoinbaseMaturity)
+	maturityBlock := &BlockMeta{
+		Block: Block{Height: block100.Height + coinbaseMaturity},
+		Time:  time.Now(),
+	}
+	confirmedSpend := spendOutput(&cbRec.Hash, 0, 3e7)
+	confirmedSpendRec, err := NewTxRecordFromMsgTx(
+		confirmedSpend, maturityBlock.Time,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		err := store.InsertTx(ns, confirmedSpendRec, maturityBlock)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkSpendTx(&confirmedSpendRec.Hash)
+}

@@ -7,6 +7,7 @@ package wtxmgr
 
 import (
 	"bytes"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -979,4 +980,123 @@ func (s *Store) Balance(ns walletdb.ReadBucket, minConf int32, syncHeight int32)
 	}
 
 	return bal, nil
+}
+
+// GetSpendingTx determines whether the store contains a spending transaction
+// for the given outpoint. This transaction can be either confirmed or
+// unconfirmed.
+//
+// NOTE: It's possible for there not to be a spending transaction for this
+// outpoint, therefore a nil check must be used to guarantee safety to the
+// caller.
+func (s *Store) GetSpendingTx(ns walletdb.ReadBucket,
+	outpoint wire.OutPoint) (*wire.MsgTx, error) {
+
+	var rawSpendTx []byte
+
+	// We'll start by checking if there is an unconfirmed spending
+	// transaction within the store for the given outpoint.
+	k := canonicalOutPoint(&outpoint.Hash, outpoint.Index)
+	unconfirmedSpend, err := s.getUnconfirmedSpendingTx(ns, k)
+	if err != nil {
+		// TODO(wilmer): check confirmed?
+		return nil, err
+	}
+
+	// If there wasn't an unconfirmed spending transaction, we'll check to
+	// see if there is a confirmed one.
+	if unconfirmedSpend == nil {
+		confirmedSpend, err := getConfirmedSpendingTx(ns, k)
+		if err != nil {
+			return nil, err
+		}
+
+		// If there isn't a confirmed spending transaction either, then
+		// we can guarantee that this outpoint is still unspent and can
+		// return to the caller.
+		if confirmedSpend == nil {
+			return nil, nil
+		}
+
+		// Otherwise, we'll set the correct serialized transaction.
+		rawSpendTx = confirmedSpend
+	} else {
+		rawSpendTx = unconfirmedSpend
+	}
+
+	// At this point, we can guarantee that a spending transaction exists
+	// for this outpoint (whether unconfirmed or not), so we can proceed to
+	// deserialize it from its raw bytes representation and return to the
+	// caller.
+	spendTx := new(wire.MsgTx)
+	if err := spendTx.Deserialize(bytes.NewReader(rawSpendTx)); err != nil {
+		return nil, err
+	}
+
+	return spendTx, nil
+}
+
+// getUnconfirmedSpendingTx determines whether there exists an unconfirmed
+// spending transaction for the given outpoint in its serialized form.
+func (s *Store) getUnconfirmedSpendingTx(ns walletdb.ReadBucket,
+	outpointKey []byte) ([]byte, error) {
+
+	// To determine if there exists an unconfirmed spending transaction,
+	// we'll need to look at bucketUnminedInputs.
+	unminedSpendTxKeys := fetchUnminedInputSpendTxHashes(ns, outpointKey)
+
+	// If there doesn't exist an entry for this outpoint in the bucket, then
+	// the outpoint doesn't have an unconfirmed spending transaction, so we
+	// can return to the caller.
+	if len(unminedSpendTxKeys) == 0 {
+		return nil, nil
+	}
+
+	// Otherwise, an unconfirmed spending transaction does exist, so we'll
+	// attempt to fetch it.
+	unminedSpendTxKey := unminedSpendTxKeys[0]
+	unminedSpendTx := existsRawUnmined(ns, unminedSpendTxKey[:])
+	if unminedSpendTx == nil {
+		return nil, fmt.Errorf("expected to find unconfirmed "+
+			"transaction with hash %v, but didn't", unminedSpendTxKey)
+	}
+
+	// The value of the key/value pair above represents the time received
+	// (first 8 bytes) followed by the serialized transaction. We're only
+	// interested in the serialized transaction, so we'll slice off the time
+	// received.
+	return unminedSpendTx[8:], nil
+}
+
+// getConfirmedSpendingTx determines whether there exists a confirmed spending
+// transaction for the given outpoint in its serialized form.
+func getConfirmedSpendingTx(ns walletdb.ReadBucket,
+	outpointKey []byte) ([]byte, error) {
+
+	// To determine if there exists a confirmed spending transaction, we'll
+	// need to look at bucketMinedInputs.
+	spendTxKey := existsRawMinedInput(ns, outpointKey)
+
+	// If there doesn't exist an entry for this outpoint in the bucket, then
+	// the outpoint doesn't have a confirmed spending transaction, so we
+	// can return to the caller.
+	if spendTxKey == nil {
+		return nil, nil
+	}
+
+	// Otherwise, a confirmed spending transaction does exist, so we'll
+	// attempt to fetch it. spendTxKey also includes the input index of the
+	// transaction spending the output, which we'll be discarding as it's
+	// not needed in this case.
+	spendTx := existsRawTxRecord(ns, spendTxKey[:68])
+	if spendTx == nil {
+		return nil, fmt.Errorf("expected to find confirmed spending "+
+			"transaction with hash %v, but didn't", spendTx[:32])
+	}
+
+	// The value of the key/value pair represents the time received
+	// (first 8 bytes) followed by the serialized transaction. We're
+	// only interested in the serialized transaction, so we'll slice
+	// off the time received.
+	return spendTx[8:], nil
 }
