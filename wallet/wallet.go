@@ -23,8 +23,6 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/davecgh/go-spew/spew"
-
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/chain"
@@ -33,6 +31,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/davecgh/go-spew/spew"
 )
 
 const (
@@ -3313,6 +3312,27 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	default:
 		return nil, err
 	}
+}
+
+// GetSpendingTx determines whether the store contains a spending transaction
+// for the given outpoint. This transaction can be either confirmed or
+// unconfirmed.
+//
+// NOTE: It's possible for there not to be a spending transaction for this
+// outpoint, therefore a nil check must be used to guarantee safety to the
+// caller.
+func (w *Wallet) GetSpendingTx(op wire.OutPoint) (*wire.MsgTx, error) {
+	var (
+		spendTx *wire.MsgTx
+		err     error
+	)
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		spendTx, err = w.TxStore.GetSpendingTx(ns, op)
+		return err
+	})
+
+	return spendTx, err
 }
 
 // ChainParams returns the network parameters for the blockchain the wallet
