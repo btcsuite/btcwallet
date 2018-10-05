@@ -144,7 +144,45 @@ type Store struct {
 // contained in the wallet database, namespaced by the top level bucket key
 // namespaceKey.
 func DoUpgrades(db walletdb.DB, namespaceKey []byte) error {
-	// No upgrades
+	// We'll start by retrieving the current version of the store.
+	var version uint32
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(namespaceKey)
+		var err error
+		version, err = fetchVersion(ns)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	// With the version retrieved, we'll determine whether we have any
+	// migrations that need to be applied. If we do, they'll each be ran as
+	// their own database transaction to ensure that if each migration is
+	// atomic.
+	dbVersions := getMigrationsToApply(version)
+	for _, dbVersion := range dbVersions {
+		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			log.Infof("Applying wallet transaction database "+
+				"migration #%d", dbVersion.version)
+
+			ns := tx.ReadWriteBucket(namespaceKey)
+			if dbVersion.migration != nil {
+				if err := dbVersion.migration(ns); err != nil {
+					return err
+				}
+			}
+
+			// With the migration applied, update the store's
+			// version to reflect the version of the migration.
+			return putVersion(ns, dbVersion.version)
+		})
+		if err != nil {
+			return fmt.Errorf("unable to apply migration #%d: %v",
+				dbVersion.version, err)
+		}
+	}
+
 	return nil
 }
 
