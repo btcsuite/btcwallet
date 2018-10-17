@@ -1,5 +1,5 @@
-hash: b1db66b8a8a0efd622b44de1299cf86ed6ea9333e73c1c9b1fcdaa9d589065fa
-updated: 2018-08-22T20:11:48.978564284-07:00
+hash: fd238231109616b821cfb40783aab5b96fa5d9026de065411507b5c3431166e5
+updated: 2018-10-16T18:17:51.368476548-07:00
 imports:
 - name: github.com/aead/siphash
   version: 83563a290f60225eb120d724600b9690c3fb536f
@@ -69,7 +69,7 @@ imports:
 - name: github.com/lightninglabs/gozmq
   version: 462a8a75388506b68f76661af8d649f0b88e5301
 - name: github.com/lightninglabs/neutrino
-  version: 31332f9c7a241da72835ad33ff340c3998e30de8
+  version: 4d60692991302a44509d1a9234ccd51373c120b4
   subpackages:
   - cache
   - cache/lru
