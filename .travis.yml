@@ -12,7 +12,7 @@ before_install:
 install:
   - go install -v $(glide novendor)
   - go get -v golang.org/x/tools/cmd/cover
-  - go get -v github.com/golang/lint/golint
+  - go get -v golang.org/x/lint/golint
   - go get -v github.com/davecgh/go-spew/spew
 script:
   - export PATH=$PATH:$HOME/gopath/bin
