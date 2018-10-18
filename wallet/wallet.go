@@ -461,7 +461,16 @@ func (w *Wallet) syncWithChain() error {
 			// synchronize further before updating the best height
 			// based on the backend. Once we see that the backend
 			// has advanced, we can catch up to it.
+			shouldLog := 0
 			for height == bestHeight && !isCurrent(bestHeight) {
+				// Log every 10 seconds.
+				if shouldLog%100 == 0 {
+					log.Debugf("Chain backend (at "+
+						"height=%d) not current, "+
+						"waiting...", height)
+					shouldLog++
+				}
+
 				time.Sleep(100 * time.Millisecond)
 				_, bestHeight, err = chainClient.GetBestBlock()
 				if err != nil {
