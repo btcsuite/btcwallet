@@ -24,17 +24,6 @@ func (w *Wallet) handleChainNotifications() {
 		return
 	}
 
-	sync := func(w *Wallet) {
-		// At the moment there is no recourse if the rescan fails for
-		// some reason, however, the wallet will not be marked synced
-		// and many methods will error early since the wallet is known
-		// to be out of date.
-		err := w.syncWithChain()
-		if err != nil && !w.ShuttingDown() {
-			log.Warnf("Unable to synchronize wallet to chain: %v", err)
-		}
-	}
-
 	catchUpHashes := func(w *Wallet, client chain.Interface,
 		height int32) error {
 		// TODO(aakselrod): There's a race conditon here, which
@@ -96,7 +85,7 @@ func (w *Wallet) handleChainNotifications() {
 			var err error
 			switch n := n.(type) {
 			case chain.ClientConnected:
-				go sync(w)
+				w.onClientConnected()
 			case chain.BlockConnected:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 					return w.connectBlock(tx, wtxmgr.BlockMeta(n))
