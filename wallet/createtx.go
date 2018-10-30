@@ -170,6 +170,21 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 			" %v from imported account into default account.", changeAmount)
 	}
 
+	// Finally, we'll request the backend to notify us of the transaction
+	// that pays to the change address, if there is one, when it confirms.
+	if tx.ChangeIndex >= 0 {
+		changePkScript := tx.Tx.TxOut[tx.ChangeIndex].PkScript
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			changePkScript, w.chainParams,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := chainClient.NotifyReceived(addrs); err != nil {
+			return nil, err
+		}
+	}
+
 	return tx, nil
 }
 
