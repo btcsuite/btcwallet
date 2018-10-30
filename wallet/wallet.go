@@ -2786,6 +2786,15 @@ func (w *Wallet) resendUnminedTxs() {
 	for _, tx := range txs {
 		resp, err := chainClient.SendRawTransaction(tx, false)
 		if err != nil {
+			// If the transaction has already been accepted into the
+			// mempool, we can continue without logging the error.
+			switch {
+			case strings.Contains(err.Error(), "already have transaction"):
+				fallthrough
+			case strings.Contains(err.Error(), "txn-already-known"):
+				continue
+			}
+
 			log.Debugf("Could not resend transaction %v: %v",
 				tx.TxHash(), err)
 
@@ -2817,9 +2826,12 @@ func (w *Wallet) resendUnminedTxs() {
 
 			// As the transaction was rejected, we'll attempt to
 			// remove the unmined transaction all together.
-			// Otherwise, we'll keep attempting to rebroadcast
-			// this, and we may be computing our balance
-			// incorrectly if this tx credits or debits to us.
+			// Otherwise, we'll keep attempting to rebroadcast this,
+			// and we may be computing our balance incorrectly if
+			// this transaction credits or debits to us.
+			//
+			// TODO(wilmer): if already confirmed, move to mined
+			// bucket - need to determine the confirmation block.
 			err := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 				txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
 
