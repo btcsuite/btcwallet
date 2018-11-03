@@ -1,6 +1,8 @@
 package waddrmgr
 
 import (
+	"fmt"
+
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 )
@@ -84,4 +86,171 @@ func (m *MigrationManager) SetVersion(ns walletdb.ReadWriteBucket,
 // NOTE: This method is part of the migration.Manager interface.
 func (m *MigrationManager) Versions() []migration.Version {
 	return versions
+}
+
+// upgradeToVersion2 upgrades the database from version 1 to version 2
+// 'usedAddrBucketName' a bucket for storing addrs flagged as marked is
+// initialized and it will be updated on the next rescan.
+func upgradeToVersion2(ns walletdb.ReadWriteBucket) error {
+	currentMgrVersion := uint32(2)
+
+	_, err := ns.CreateBucketIfNotExists(usedAddrBucketName)
+	if err != nil {
+		str := "failed to create used addresses bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	return putManagerVersion(ns, currentMgrVersion)
+}
+
+// upgradeToVersion5 upgrades the database from version 4 to version 5. After
+// this update, the new ScopedKeyManager features cannot be used. This is due
+// to the fact that in version 5, we now store the encrypted master private
+// keys on disk. However, using the BIP0044 key scope, users will still be able
+// to create old p2pkh addresses.
+func upgradeToVersion5(ns walletdb.ReadWriteBucket) error {
+	// First, we'll check if there are any existing segwit addresses, which
+	// can't be upgraded to the new version. If so, we abort and warn the
+	// user.
+	err := ns.NestedReadBucket(addrBucketName).ForEach(
+		func(k []byte, v []byte) error {
+			row, err := deserializeAddressRow(v)
+			if err != nil {
+				return err
+			}
+			if row.addrType > adtScript {
+				return fmt.Errorf("segwit address exists in " +
+					"wallet, can't upgrade from v4 to " +
+					"v5: well, we tried  ¯\\_(ツ)_/¯")
+			}
+			return nil
+		})
+	if err != nil {
+		return err
+	}
+
+	// Next, we'll write out the new database version.
+	if err := putManagerVersion(ns, 5); err != nil {
+		return err
+	}
+
+	// First, we'll need to create the new buckets that are used in the new
+	// database version.
+	scopeBucket, err := ns.CreateBucket(scopeBucketName)
+	if err != nil {
+		str := "failed to create scope bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+	scopeSchemas, err := ns.CreateBucket(scopeSchemaBucketName)
+	if err != nil {
+		str := "failed to create scope schema bucket"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	// With the buckets created, we can now create the default BIP0044
+	// scope which will be the only scope usable in the database after this
+	// update.
+	scopeKey := scopeToBytes(&KeyScopeBIP0044)
+	scopeSchema := ScopeAddrMap[KeyScopeBIP0044]
+	schemaBytes := scopeSchemaToBytes(&scopeSchema)
+	if err := scopeSchemas.Put(scopeKey[:], schemaBytes); err != nil {
+		return err
+	}
+	if err := createScopedManagerNS(scopeBucket, &KeyScopeBIP0044); err != nil {
+		return err
+	}
+
+	bip44Bucket := scopeBucket.NestedReadWriteBucket(scopeKey[:])
+
+	// With the buckets created, we now need to port over *each* item in
+	// the prior main bucket, into the new default scope.
+	mainBucket := ns.NestedReadWriteBucket(mainBucketName)
+
+	// First, we'll move over the encrypted coin type private and public
+	// keys to the new sub-bucket.
+	encCoinPrivKeys := mainBucket.Get(coinTypePrivKeyName)
+	encCoinPubKeys := mainBucket.Get(coinTypePubKeyName)
+
+	err = bip44Bucket.Put(coinTypePrivKeyName, encCoinPrivKeys)
+	if err != nil {
+		return err
+	}
+	err = bip44Bucket.Put(coinTypePubKeyName, encCoinPubKeys)
+	if err != nil {
+		return err
+	}
+
+	if err := mainBucket.Delete(coinTypePrivKeyName); err != nil {
+		return err
+	}
+	if err := mainBucket.Delete(coinTypePubKeyName); err != nil {
+		return err
+	}
+
+	// Next, we'll move over everything that was in the meta bucket to the
+	// meta bucket within the new scope.
+	metaBucket := ns.NestedReadWriteBucket(metaBucketName)
+	lastAccount := metaBucket.Get(lastAccountName)
+	if err := metaBucket.Delete(lastAccountName); err != nil {
+		return err
+	}
+
+	scopedMetaBucket := bip44Bucket.NestedReadWriteBucket(metaBucketName)
+	err = scopedMetaBucket.Put(lastAccountName, lastAccount)
+	if err != nil {
+		return err
+	}
+
+	// Finally, we'll recursively move over a set of keys which were
+	// formerly under the main bucket, into the new scoped buckets. We'll
+	// do so by obtaining a slice of all the keys that we need to modify
+	// and then recursing through each of them, moving both nested buckets
+	// and key/value pairs.
+	keysToMigrate := [][]byte{
+		acctBucketName, addrBucketName, usedAddrBucketName,
+		addrAcctIdxBucketName, acctNameIdxBucketName, acctIDIdxBucketName,
+	}
+
+	// Migrate each bucket recursively.
+	for _, bucketKey := range keysToMigrate {
+		err := migrateRecursively(ns, bip44Bucket, bucketKey)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// migrateRecursively moves a nested bucket from one bucket to another,
+// recursing into nested buckets as required.
+func migrateRecursively(src, dst walletdb.ReadWriteBucket,
+	bucketKey []byte) error {
+	// Within this bucket key, we'll migrate over, then delete each key.
+	bucketToMigrate := src.NestedReadWriteBucket(bucketKey)
+	newBucket, err := dst.CreateBucketIfNotExists(bucketKey)
+	if err != nil {
+		return err
+	}
+	err = bucketToMigrate.ForEach(func(k, v []byte) error {
+		if nestedBucket := bucketToMigrate.
+			NestedReadBucket(k); nestedBucket != nil {
+			// We have a nested bucket, so recurse into it.
+			return migrateRecursively(bucketToMigrate, newBucket, k)
+		}
+
+		if err := newBucket.Put(k, v); err != nil {
+			return err
+		}
+
+		return bucketToMigrate.Delete(k)
+	})
+	if err != nil {
+		return err
+	}
+	// Finally, we'll delete the bucket itself.
+	if err := src.DeleteNestedBucket(bucketKey); err != nil {
+		return err
+	}
+	return nil
 }
