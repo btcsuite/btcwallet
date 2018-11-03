@@ -52,13 +52,6 @@ import (
 // keys iterating in order.
 var byteOrder = binary.BigEndian
 
-// Database versions.  Versions start at 1 and increment for each database
-// change.
-const (
-	// LatestVersion is the most recent store version.
-	LatestVersion = 1
-)
-
 // This package makes assumptions that the width of a chainhash.Hash is always
 // 32 bytes.  If this is ever changed (unlikely for bitcoin, possible for alts),
 // offsets have to be rewritten.  Use a compile-time assertion that this
@@ -1269,14 +1262,15 @@ func openStore(ns walletdb.ReadBucket) error {
 		return err
 	}
 
-	if version < LatestVersion {
+	latestVersion := getLatestVersion()
+	if version < latestVersion {
 		str := fmt.Sprintf("a database upgrade is required to upgrade "+
 			"wtxmgr from recorded version %d to the latest version %d",
-			version, LatestVersion)
+			version, latestVersion)
 		return storeError(ErrNeedsUpgrade, str, nil)
 	}
 
-	if version > LatestVersion {
+	if version > latestVersion {
 		str := fmt.Sprintf("version recorded version %d is newer that "+
 			"latest understood version %d", version, latestVersion)
 		return storeError(ErrUnknownVersion, str, nil)
