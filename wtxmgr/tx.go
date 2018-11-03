@@ -140,14 +140,6 @@ type Store struct {
 	NotifyUnspent func(hash *chainhash.Hash, index uint32)
 }
 
-// DoUpgrades performs any necessary upgrades to the transaction history
-// contained in the wallet database, namespaced by the top level bucket key
-// namespaceKey.
-func DoUpgrades(db walletdb.DB, namespaceKey []byte) error {
-	// No upgrades
-	return nil
-}
-
 // Open opens the wallet transaction store from a walletdb namespace.  If the
 // store does not exist, ErrNoExist is returned.
 func Open(ns walletdb.ReadBucket, chainParams *chaincfg.Params) (*Store, error) {
