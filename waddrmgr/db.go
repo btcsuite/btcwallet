@@ -16,15 +16,13 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-const (
-	// LatestMgrVersion is the most recent manager version.
-	LatestMgrVersion = 5
-)
-
 var (
+	// LatestMgrVersion is the most recent manager version.
+	LatestMgrVersion = getLatestVersion()
+
 	// latestMgrVersion is the most recent manager version as a variable so
 	// the tests can change it to force errors.
-	latestMgrVersion uint32 = LatestMgrVersion
+	latestMgrVersion = LatestMgrVersion
 )
 
 // ObtainUserInputFunc is a function that reads a user input and returns it as
