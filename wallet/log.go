@@ -4,7 +4,10 @@
 
 package wallet
 
-import "github.com/btcsuite/btclog"
+import (
+	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btcwallet/walletdb/migration"
+)
 
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
@@ -19,7 +22,7 @@ func init() {
 // DisableLog disables all library log output.  Logging output is disabled
 // by default until either UseLogger or SetLogWriter are called.
 func DisableLog() {
-	log = btclog.Disabled
+	UseLogger(btclog.Disabled)
 }
 
 // UseLogger uses a specified Logger to output package logging info.
@@ -27,6 +30,8 @@ func DisableLog() {
 // using btclog.
 func UseLogger(logger btclog.Logger) {
 	log = logger
+
+	migration.UseLogger(logger)
 }
 
 // LogClosure is a closure that can be printed with %v to be used to
