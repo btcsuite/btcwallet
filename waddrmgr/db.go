@@ -2139,7 +2139,7 @@ func upgradeManager(db walletdb.DB, namespaceKey []byte, pubPassPhrase []byte,
 	if version < 5 {
 		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(namespaceKey)
-			return upgradeToVersion5(ns, pubPassPhrase)
+			return upgradeToVersion5(ns)
 		})
 		if err != nil {
 			return err
@@ -2167,7 +2167,7 @@ func upgradeManager(db walletdb.DB, namespaceKey []byte, pubPassPhrase []byte,
 // to the fact that in version 5, we now store the encrypted master private
 // keys on disk. However, using the BIP0044 key scope, users will still be able
 // to create old p2pkh addresses.
-func upgradeToVersion5(ns walletdb.ReadWriteBucket, pubPassPhrase []byte) error {
+func upgradeToVersion5(ns walletdb.ReadWriteBucket) error {
 	// First, we'll check if there are any existing segwit addresses, which
 	// can't be upgraded to the new version. If so, we abort and warn the
 	// user.
