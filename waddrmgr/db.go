@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -2097,49 +2096,6 @@ func createManagerNS(ns walletdb.ReadWriteBucket,
 	if err != nil {
 		str := "failed to store database creation time"
 		return managerError(ErrDatabase, str, err)
-	}
-
-	return nil
-}
-
-// upgradeManager upgrades the data in the provided manager namespace to newer
-// versions as neeeded.
-func upgradeManager(db walletdb.DB, namespaceKey []byte, pubPassPhrase []byte,
-	chainParams *chaincfg.Params, cbs *OpenCallbacks) error {
-
-	var version uint32
-	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(namespaceKey)
-		var err error
-		version, err = fetchManagerVersion(ns)
-		return err
-	})
-	if err != nil {
-		str := "failed to fetch version for update"
-		return managerError(ErrDatabase, str, err)
-	}
-
-	if version < 5 {
-		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(namespaceKey)
-			return upgradeToVersion5(ns)
-		})
-		if err != nil {
-			return err
-		}
-
-		// The manager is now at version 5.
-		version = 5
-	}
-
-	// Ensure the manager is upraded to the latest version.  This check is
-	// to intentionally cause a failure if the manager version is updated
-	// without writing code to handle the upgrade.
-	if version < latestMgrVersion {
-		str := fmt.Sprintf("the latest manager version is %d, but the "+
-			"current version after upgrades is only %d",
-			latestMgrVersion, version)
-		return managerError(ErrUpgrade, str, nil)
 	}
 
 	return nil
