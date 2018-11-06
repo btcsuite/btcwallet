@@ -8,6 +8,7 @@ package waddrmgr
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
@@ -1876,6 +1877,10 @@ func fetchBlockHash(ns walletdb.ReadBucket, height int32) (*chainhash.Hash, erro
 	heightBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(heightBytes, uint32(height))
 	hashBytes := bucket.Get(heightBytes)
+	if hashBytes == nil {
+		err := errors.New("block not found")
+		return nil, managerError(ErrBlockNotFound, errStr, err)
+	}
 	if len(hashBytes) != 32 {
 		err := fmt.Errorf("couldn't get hash from database")
 		return nil, managerError(ErrDatabase, errStr, err)
