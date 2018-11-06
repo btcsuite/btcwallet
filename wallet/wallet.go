@@ -318,9 +318,10 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 }
 
 // syncWithChain brings the wallet up to date with the current chain server
-// connection.  It creates a rescan request and blocks until the rescan has
-// finished.
-func (w *Wallet) syncWithChain() error {
+// connection. It creates a rescan request and blocks until the rescan has
+// finished. The birthday block can be passed in, if set, to ensure we can
+// properly detect if it gets rolled back.
+func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return err
@@ -350,12 +351,6 @@ func (w *Wallet) syncWithChain() error {
 
 	isRecovery := w.recoveryWindow > 0
 	birthday := w.Manager.Birthday()
-
-	// If an initial sync is attempted, we will try and find the block stamp
-	// of the first block past our birthday. This will be fed into the
-	// rescan to ensure we catch transactions that are sent while performing
-	// the initial sync.
-	var birthdayStamp *waddrmgr.BlockStamp
 
 	// TODO(jrick): How should this handle a synced height earlier than
 	// the chain server best block?
@@ -495,6 +490,19 @@ func (w *Wallet) syncWithChain() error {
 						Height:    height,
 						Hash:      *hash,
 						Timestamp: timestamp,
+					}
+
+					log.Debugf("Found birthday block: "+
+						"height=%d, hash=%v",
+						birthdayStamp.Height,
+						birthdayStamp.Hash)
+
+					err := w.Manager.SetBirthdayBlock(
+						ns, *birthdayStamp,
+					)
+					if err != nil {
+						tx.Rollback()
+						return err
 					}
 				}
 
@@ -647,6 +655,18 @@ func (w *Wallet) syncWithChain() error {
 	// points at the new tip.
 	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
 		birthdayStamp = &rollbackStamp
+
+		log.Debugf("Found new birthday block after rollback: "+
+			"height=%d, hash=%v", birthdayStamp.Height,
+			birthdayStamp.Hash)
+
+		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			return w.Manager.SetBirthdayBlock(ns, *birthdayStamp)
+		})
+		if err != nil {
+			return nil
+		}
 	}
 
 	// Request notifications for connected and disconnected blocks.
@@ -657,8 +677,7 @@ func (w *Wallet) syncWithChain() error {
 	// as well.  I am leaning towards allowing off all rpcclient
 	// notification re-registrations, in which case the code here should be
 	// left as is.
-	err = chainClient.NotifyBlocks()
-	if err != nil {
+	if err := chainClient.NotifyBlocks(); err != nil {
 		return err
 	}
 

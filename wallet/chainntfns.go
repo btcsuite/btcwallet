@@ -31,7 +31,7 @@ func (w *Wallet) handleChainNotifications() {
 		// some reason, however, the wallet will not be marked synced
 		// and many methods will error early since the wallet is known
 		// to be out of date.
-		err := w.syncWithChain()
+		err := w.syncWithChain(birthdayStamp)
 		if err != nil && !w.ShuttingDown() {
 			log.Warnf("Unable to synchronize wallet to chain: %v", err)
 		}
