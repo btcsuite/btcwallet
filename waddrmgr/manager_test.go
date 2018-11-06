@@ -7,6 +7,7 @@ package waddrmgr
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -20,6 +21,26 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
 )
+
+// failingCryptoKey is an implementation of the EncryptorDecryptor interface
+// with intentionally fails when attempting to encrypt or decrypt with it.
+type failingCryptoKey struct {
+	cryptoKey
+}
+
+// Encrypt intenionally returns a failure when invoked to test error paths.
+//
+// This is part of the EncryptorDecryptor interface implementation.
+func (c *failingCryptoKey) Encrypt(in []byte) ([]byte, error) {
+	return nil, errors.New("failed to encrypt")
+}
+
+// Decrypt intenionally returns a failure when invoked to test error paths.
+//
+// This is part of the EncryptorDecryptor interface implementation.
+func (c *failingCryptoKey) Decrypt(in []byte) ([]byte, error) {
+	return nil, errors.New("failed to decrypt")
+}
 
 // newHash converts the passed big-endian hex string into a chainhash.Hash.
 // It only differs from the one available in wire in that it panics on an
@@ -1147,8 +1168,11 @@ func testChangePassphrase(tc *testContext) bool {
 		return false
 	}
 
-	// Ensure the public passphrase was successfully changed.
-	if !tc.rootManager.TstCheckPublicPassphrase(pubPassphrase2) {
+	// Ensure the public passphrase was successfully changed. We do this by
+	// being able to re-derive the public key with the new passphrase.
+	secretKey := snacl.SecretKey{Key: &snacl.CryptoKey{}}
+	secretKey.Parameters = tc.rootManager.masterKeyPub.Parameters
+	if err := secretKey.DeriveKey(&pubPassphrase2); err != nil {
 		tc.t.Errorf("%s: passphrase does not match", testName)
 		return false
 	}
@@ -1352,7 +1376,7 @@ func testNewAccount(tc *testContext) bool {
 func testLookupAccount(tc *testContext) bool {
 	// Lookup accounts created earlier in testNewAccount
 	expectedAccounts := map[string]uint32{
-		TstDefaultAccountName:   DefaultAccountNum,
+		defaultAccountName:      DefaultAccountNum,
 		ImportedAddrAccountName: ImportedAddrAccount,
 	}
 	for acctName, expectedAccount := range expectedAccounts {
@@ -1980,16 +2004,15 @@ func TestEncryptDecryptErrors(t *testing.T) {
 		t.Fatal("Attempted to unlock the manager, but failed:", err)
 	}
 
-	// Make sure to cover the ErrCrypto error path in Encrypt.
-	TstRunWithFailingCryptoKeyPriv(mgr, func() {
-		_, err = mgr.Encrypt(CKTPrivate, []byte{})
-	})
+	// Make sure to cover the ErrCrypto error path in Encrypt and Decrypt.
+	// We'll use a mock private key that will fail upon running these
+	// methods.
+	mgr.cryptoKeyPriv = &failingCryptoKey{}
+
+	_, err = mgr.Encrypt(CKTPrivate, []byte{})
 	checkManagerError(t, "failed encryption", err, ErrCrypto)
 
-	// Make sure to cover the ErrCrypto error path in Decrypt.
-	TstRunWithFailingCryptoKeyPriv(mgr, func() {
-		_, err = mgr.Decrypt(CKTPrivate, []byte{})
-	})
+	_, err = mgr.Decrypt(CKTPrivate, []byte{})
 	checkManagerError(t, "failed decryption", err, ErrCrypto)
 }
 
