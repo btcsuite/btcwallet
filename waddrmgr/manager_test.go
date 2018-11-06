@@ -1835,19 +1835,6 @@ func TestManager(t *testing.T) {
 	})
 	mgr.Close()
 
-	// Ensure the expected error is returned if the latest manager version
-	// constant is bumped without writing code to actually do the upgrade.
-	*TstLatestMgrVersion++
-	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(waddrmgrNamespaceKey)
-		_, err := Open(ns, pubPassphrase, &chaincfg.MainNetParams)
-		return err
-	})
-	if !checkManagerError(t, "Upgrade needed", err, ErrUpgrade) {
-		return
-	}
-	*TstLatestMgrVersion--
-
 	// Open the manager and run all the tests again in open mode which
 	// avoids reinserting new addresses like the create mode tests do.
 	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
@@ -1892,6 +1879,63 @@ func TestManager(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("Unlock: unexpected error: %v", err)
+	}
+}
+
+// TestManagerIncorrectVersion ensures that that the manager cannot be accessed
+// if its version does not match the latest version.
+func TestManagerHigherVersion(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, _ := setupManager(t)
+	defer teardown()
+
+	// We'll update our manager's version to be one higher than the latest.
+	latestVersion := getLatestVersion()
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		if ns == nil {
+			return errors.New("top-level namespace does not exist")
+		}
+		return putManagerVersion(ns, latestVersion+1)
+	})
+	if err != nil {
+		t.Fatalf("unable to update manager version %v", err)
+	}
+
+	// Then, upon attempting to open it without performing an upgrade, we
+	// should expect to see the error ErrUpgrade.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		_, err := Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		return err
+	})
+	if !checkManagerError(t, "Upgrade needed", err, ErrUpgrade) {
+		t.Fatalf("expected error ErrUpgrade, got %v", err)
+	}
+
+	// We'll also update it so that it is one lower than the latest.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		if ns == nil {
+			return errors.New("top-level namespace does not exist")
+		}
+		return putManagerVersion(ns, latestVersion-1)
+	})
+	if err != nil {
+		t.Fatalf("unable to update manager version %v", err)
+	}
+
+	// Finally, upon attempting to open it without performing an upgrade to
+	// the latest version, we should also expect to see the error
+	// ErrUpgrade.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		_, err := Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		return err
+	})
+	if !checkManagerError(t, "Upgrade needed", err, ErrUpgrade) {
+		t.Fatalf("expected error ErrUpgrade, got %v", err)
 	}
 }
 

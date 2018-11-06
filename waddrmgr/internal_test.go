@@ -17,10 +17,6 @@ import (
 	"github.com/btcsuite/btcwallet/snacl"
 )
 
-// TstLatestMgrVersion makes the unexported latestMgrVersion variable available
-// for change when the tests are run.
-var TstLatestMgrVersion = &latestMgrVersion
-
 // TstCheckPublicPassphrase returns true if the provided public passphrase is
 // correct for the manager.
 func (m *Manager) TstCheckPublicPassphrase(pubPassphrase []byte) bool {
