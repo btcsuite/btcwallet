@@ -110,3 +110,17 @@ func (m *Manager) SetBirthday(ns walletdb.ReadWriteBucket,
 	m.birthday = birthday
 	return putBirthday(ns, birthday)
 }
+
+// BirthdayBlock returns the birthday block, or earliest block a key could have
+// been used, for the manager.
+func (m *Manager) BirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, error) {
+	return fetchBirthdayBlock(ns)
+}
+
+// SetBirthdayBlock sets the birthday block, or earliest time a key could have
+// been used, for the manager.
+func (m *Manager) SetBirthdayBlock(ns walletdb.ReadWriteBucket,
+	block BlockStamp) error {
+
+	return putBirthdayBlock(ns, block)
+}
