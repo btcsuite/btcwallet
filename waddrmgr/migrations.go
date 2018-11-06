@@ -2,7 +2,9 @@ package waddrmgr
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 )
@@ -19,6 +21,10 @@ var versions = []migration.Version{
 	{
 		Number:    5,
 		Migration: upgradeToVersion5,
+	},
+	{
+		Number:    6,
+		Migration: populateBirthdayBlock,
 	},
 }
 
@@ -253,4 +259,94 @@ func migrateRecursively(src, dst walletdb.ReadWriteBucket,
 		return err
 	}
 	return nil
+}
+
+// populateBirthdayBlock is a migration that attempts to populate the birthday
+// block of the wallet. This is needed so that in the event that we need to
+// perform a rescan of the wallet, we can do so starting from this block, rather
+// than from the genesis block.
+//
+// NOTE: This migration cannot guarantee the correctness of the birthday block
+// being set as we do not store block timestamps, so a sanity check must be done
+// upon starting the wallet to ensure we do not potentially miss any relevant
+// events when rescanning.
+func populateBirthdayBlock(ns walletdb.ReadWriteBucket) error {
+	// We'll need to jump through some hoops in order to determine the
+	// corresponding block height for our birthday timestamp. Since we do
+	// not store block timestamps, we'll need to estimate our height by
+	// looking at the genesis timestamp and assuming a block occurs every 10
+	// minutes. This can be unsafe, and cause us to actually miss on-chain
+	// events, so a sanity check is done before the wallet attempts to sync
+	// itself.
+	//
+	// We'll start by fetching our birthday timestamp.
+	birthdayTimestamp, err := fetchBirthday(ns)
+	if err != nil {
+		return fmt.Errorf("unable to fetch birthday timestamp: %v", err)
+	}
+
+	log.Infof("Setting the wallet's birthday block from timestamp=%v",
+		birthdayTimestamp)
+
+	// Now, we'll need to determine the timestamp of the genesis block for
+	// the corresponding chain.
+	genesisHash, err := fetchBlockHash(ns, 0)
+	if err != nil {
+		return fmt.Errorf("unable to fetch genesis block hash: %v", err)
+	}
+
+	var genesisTimestamp time.Time
+	switch *genesisHash {
+	case *chaincfg.MainNetParams.GenesisHash:
+		genesisTimestamp =
+			chaincfg.MainNetParams.GenesisBlock.Header.Timestamp
+
+	case *chaincfg.TestNet3Params.GenesisHash:
+		genesisTimestamp =
+			chaincfg.TestNet3Params.GenesisBlock.Header.Timestamp
+
+	case *chaincfg.RegressionNetParams.GenesisHash:
+		genesisTimestamp =
+			chaincfg.RegressionNetParams.GenesisBlock.Header.Timestamp
+
+	case *chaincfg.SimNetParams.GenesisHash:
+		genesisTimestamp =
+			chaincfg.SimNetParams.GenesisBlock.Header.Timestamp
+
+	default:
+		return fmt.Errorf("unknown genesis hash %v", genesisHash)
+	}
+
+	// With the timestamps retrieved, we can estimate a block height by
+	// taking the difference between them and dividing by the average block
+	// time (10 minutes).
+	birthdayHeight := int32((birthdayTimestamp.Sub(genesisTimestamp).Seconds() / 600))
+
+	// Now that we have the height estimate, we can fetch the corresponding
+	// block and set it as our birthday block.
+	birthdayHash, err := fetchBlockHash(ns, birthdayHeight)
+
+	// To ensure we record a height that is known to us from the chain,
+	// we'll make sure this height estimate can be found. Otherwise, we'll
+	// continue subtracting a day worth of blocks until we can find one.
+	for IsError(err, ErrBlockNotFound) {
+		birthdayHeight -= 144
+		if birthdayHeight < 0 {
+			birthdayHeight = 0
+		}
+		birthdayHash, err = fetchBlockHash(ns, birthdayHeight)
+	}
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Estimated birthday block from timestamp=%v: height=%d, "+
+		"hash=%v", birthdayTimestamp, birthdayHeight, birthdayHash)
+
+	// NOTE: The timestamp of the birthday block isn't set since we do not
+	// store each block's timestamp.
+	return putBirthdayBlock(ns, BlockStamp{
+		Height: birthdayHeight,
+		Hash:   *birthdayHash,
+	})
 }
