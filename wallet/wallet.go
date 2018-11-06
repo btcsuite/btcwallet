@@ -2603,6 +2603,9 @@ func (w *Wallet) DumpWIFPrivateKey(addr btcutil.Address) (string, error) {
 
 // ImportPrivateKey imports a private key to the wallet and writes the new
 // wallet to disk.
+//
+// NOTE: If a block stamp is not provided, then the wallet's birthday will be
+// set to the genesis block of the corresponding chain.
 func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 	bs *waddrmgr.BlockStamp, rescan bool) (string, error) {
 
@@ -2613,18 +2616,18 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 
 	// The starting block for the key is the genesis block unless otherwise
 	// specified.
-	var newBirthday time.Time
 	if bs == nil {
 		bs = &waddrmgr.BlockStamp{
-			Hash:   *w.chainParams.GenesisHash,
-			Height: 0,
+			Hash:      *w.chainParams.GenesisHash,
+			Height:    0,
+			Timestamp: w.chainParams.GenesisBlock.Header.Timestamp,
 		}
-	} else {
+	} else if bs.Timestamp.IsZero() {
 		// Only update the new birthday time from default value if we
 		// actually have timestamp info in the header.
 		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
 		if err == nil {
-			newBirthday = header.Timestamp
+			bs.Timestamp = header.Timestamp
 		}
 	}
 
@@ -2646,13 +2649,22 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		}
 
 		// We'll only update our birthday with the new one if it is
-		// before our current one. Otherwise, we won't rescan for
-		// potentially relevant chain events that occurred between them.
-		if newBirthday.After(w.Manager.Birthday()) {
+		// before our current one. Otherwise, if we do, we can
+		// potentially miss detecting relevant chain events that
+		// occurred between them while rescanning.
+		birthdayBlock, err := w.Manager.BirthdayBlock(addrmgrNs)
+		if err != nil {
+			return err
+		}
+		if bs.Height >= birthdayBlock.Height {
 			return nil
 		}
 
-		return w.Manager.SetBirthday(addrmgrNs, newBirthday)
+		err = w.Manager.SetBirthday(addrmgrNs, bs.Timestamp)
+		if err != nil {
+			return err
+		}
+		return w.Manager.SetBirthdayBlock(addrmgrNs, *bs)
 	})
 	if err != nil {
 		return "", err
