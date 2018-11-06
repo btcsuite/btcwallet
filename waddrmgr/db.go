@@ -252,9 +252,10 @@ var (
 	watchingOnlyName    = []byte("watchonly")
 
 	// Sync related key names (sync bucket).
-	syncedToName   = []byte("syncedto")
-	startBlockName = []byte("startblock")
-	birthdayName   = []byte("birthday")
+	syncedToName      = []byte("syncedto")
+	startBlockName    = []byte("startblock")
+	birthdayName      = []byte("birthday")
+	birthdayBlockName = []byte("birthdayblock")
 )
 
 // uint32ToBytes converts a 32 bit unsigned integer into a 4-byte slice in
@@ -1929,32 +1930,80 @@ func putStartBlock(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 
 // fetchBirthday loads the manager's bithday timestamp from the database.
 func fetchBirthday(ns walletdb.ReadBucket) (time.Time, error) {
-	bucket := ns.NestedReadBucket(syncBucketName)
-
 	var t time.Time
 
-	buf := bucket.Get(birthdayName)
-	if len(buf) != 8 {
+	bucket := ns.NestedReadBucket(syncBucketName)
+	birthdayTimestamp := bucket.Get(birthdayName)
+	if len(birthdayTimestamp) != 8 {
 		str := "malformed birthday stored in database"
 		return t, managerError(ErrDatabase, str, nil)
 	}
 
-	t = time.Unix(int64(binary.BigEndian.Uint64(buf)), 0)
+	t = time.Unix(int64(binary.BigEndian.Uint64(birthdayTimestamp)), 0)
+
 	return t, nil
 }
 
 // putBirthday stores the provided birthday timestamp to the database.
 func putBirthday(ns walletdb.ReadWriteBucket, t time.Time) error {
+	var birthdayTimestamp [8]byte
+	binary.BigEndian.PutUint64(birthdayTimestamp[:], uint64(t.Unix()))
+
 	bucket := ns.NestedReadWriteBucket(syncBucketName)
-
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(t.Unix()))
-
-	err := bucket.Put(birthdayName, buf)
-	if err != nil {
+	if err := bucket.Put(birthdayName, birthdayTimestamp[:]); err != nil {
 		str := "failed to store birthday"
 		return managerError(ErrDatabase, str, err)
 	}
+
+	return nil
+}
+
+// fetchBirthdayBlock retrieves the birthday block from the database.
+//
+// The block is serialized as follows:
+//   [0:4]   block height
+//   [4:36]  block hash
+//   [36:44] block timestamp
+func fetchBirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, error) {
+	var block BlockStamp
+
+	bucket := ns.NestedReadBucket(syncBucketName)
+	birthdayBlock := bucket.Get(birthdayBlockName)
+	if birthdayBlock == nil {
+		str := "birthday block not set"
+		return block, managerError(ErrBirthdayBlockNotSet, str, nil)
+	}
+	if len(birthdayBlock) != 44 {
+		str := "malformed birthday block stored in database"
+		return block, managerError(ErrDatabase, str, nil)
+	}
+
+	block.Height = int32(binary.BigEndian.Uint32(birthdayBlock[:4]))
+	copy(block.Hash[:], birthdayBlock[4:36])
+	t := int64(binary.BigEndian.Uint64(birthdayBlock[36:]))
+	block.Timestamp = time.Unix(t, 0)
+
+	return block, nil
+}
+
+// putBirthdayBlock stores the provided birthday block to the database.
+//
+// The block is serialized as follows:
+//   [0:4]   block height
+//   [4:36]  block hash
+//   [36:44] block timestamp
+func putBirthdayBlock(ns walletdb.ReadWriteBucket, block BlockStamp) error {
+	var birthdayBlock [44]byte
+	binary.BigEndian.PutUint32(birthdayBlock[:4], uint32(block.Height))
+	copy(birthdayBlock[4:36], block.Hash[:])
+	binary.BigEndian.PutUint64(birthdayBlock[36:], uint64(block.Timestamp.Unix()))
+
+	bucket := ns.NestedReadWriteBucket(syncBucketName)
+	if err := bucket.Put(birthdayBlockName, birthdayBlock[:]); err != nil {
+		str := "failed to store birthday block"
+		return managerError(ErrDatabase, str, err)
+	}
+
 	return nil
 }
 
