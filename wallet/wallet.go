@@ -23,8 +23,6 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/davecgh/go-spew/spew"
-
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/chain"
@@ -33,6 +31,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/davecgh/go-spew/spew"
 )
 
 const (
@@ -2644,6 +2643,14 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		if err != nil {
 			return err
 		}
+
+		// We'll only update our birthday with the new one if it is
+		// before our current one. Otherwise, we won't rescan for
+		// potentially relevant chain events that occurred between them.
+		if newBirthday.After(w.Manager.Birthday()) {
+			return nil
+		}
+
 		return w.Manager.SetBirthday(addrmgrNs, newBirthday)
 	})
 	if err != nil {
