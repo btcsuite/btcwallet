@@ -1311,51 +1311,82 @@ func createStore(ns walletdb.ReadWriteBucket) error {
 		return storeError(ErrDatabase, str, err)
 	}
 
-	_, err = ns.CreateBucket(bucketBlocks)
-	if err != nil {
+	// Finally, create all of our required descendant buckets.
+	return createBuckets(ns)
+}
+
+// createBuckets creates all of the descendants buckets required for the
+// transaction store to properly carry its duties.
+func createBuckets(ns walletdb.ReadWriteBucket) error {
+	if _, err := ns.CreateBucket(bucketBlocks); err != nil {
 		str := "failed to create blocks bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-
-	_, err = ns.CreateBucket(bucketTxRecords)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketTxRecords); err != nil {
 		str := "failed to create tx records bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-
-	_, err = ns.CreateBucket(bucketCredits)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketCredits); err != nil {
 		str := "failed to create credits bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-
-	_, err = ns.CreateBucket(bucketDebits)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketDebits); err != nil {
 		str := "failed to create debits bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-
-	_, err = ns.CreateBucket(bucketUnspent)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnspent); err != nil {
 		str := "failed to create unspent bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-
-	_, err = ns.CreateBucket(bucketUnmined)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnmined); err != nil {
 		str := "failed to create unmined bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-
-	_, err = ns.CreateBucket(bucketUnminedCredits)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnminedCredits); err != nil {
 		str := "failed to create unmined credits bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-
-	_, err = ns.CreateBucket(bucketUnminedInputs)
-	if err != nil {
+	if _, err := ns.CreateBucket(bucketUnminedInputs); err != nil {
 		str := "failed to create unmined inputs bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+
+	return nil
+}
+
+// deleteBuckets deletes all of the descendants buckets required for the
+// transaction store to properly carry its duties.
+func deleteBuckets(ns walletdb.ReadWriteBucket) error {
+	if err := ns.DeleteNestedBucket(bucketBlocks); err != nil {
+		str := "failed to delete blocks bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	if err := ns.DeleteNestedBucket(bucketTxRecords); err != nil {
+		str := "failed to delete tx records bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	if err := ns.DeleteNestedBucket(bucketCredits); err != nil {
+		str := "failed to delete credits bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	if err := ns.DeleteNestedBucket(bucketDebits); err != nil {
+		str := "failed to delete debits bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	if err := ns.DeleteNestedBucket(bucketUnspent); err != nil {
+		str := "failed to delete unspent bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	if err := ns.DeleteNestedBucket(bucketUnmined); err != nil {
+		str := "failed to delete unmined bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	if err := ns.DeleteNestedBucket(bucketUnminedCredits); err != nil {
+		str := "failed to delete unmined credits bucket"
+		return storeError(ErrDatabase, str, err)
+	}
+	if err := ns.DeleteNestedBucket(bucketUnminedInputs); err != nil {
+		str := "failed to delete unmined inputs bucket"
 		return storeError(ErrDatabase, str, err)
 	}
 
