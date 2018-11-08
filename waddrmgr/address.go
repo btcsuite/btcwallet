@@ -646,3 +646,154 @@ func newScriptAddress(m *ScopedKeyManager, account uint32, scriptHash,
 		scriptEncrypted: scriptEncrypted,
 	}, nil
 }
+
+// scriptAddress represents a pay-to-witness-script-hash address.
+type witnessScriptAddress struct {
+	manager         *ScopedKeyManager
+	account         uint32
+	address         *btcutil.AddressWitnessScriptHash
+	scriptEncrypted []byte
+	scriptCT        []byte
+	scriptMutex     sync.Mutex
+	used            bool
+}
+
+// Enforce scriptAddress satisfies the ManagedScriptAddress interface.
+var _ ManagedScriptAddress = (*witnessScriptAddress)(nil)
+
+// unlock decrypts and stores the associated script.  It will fail if the key is
+// invalid or the encrypted script is not available.  The returned clear text
+// script will always be a copy that may be safely used by the caller without
+// worrying about it being zeroed during an address lock.
+func (a *witnessScriptAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
+	// Protect concurrent access to clear text script.
+	a.scriptMutex.Lock()
+	defer a.scriptMutex.Unlock()
+
+	if len(a.scriptCT) == 0 {
+		script, err := key.Decrypt(a.scriptEncrypted)
+		if err != nil {
+			str := fmt.Sprintf("failed to decrypt script for %s",
+				a.address)
+			return nil, managerError(ErrCrypto, str, err)
+		}
+
+		a.scriptCT = script
+	}
+
+	scriptCopy := make([]byte, len(a.scriptCT))
+	copy(scriptCopy, a.scriptCT)
+	return scriptCopy, nil
+}
+
+// lock zeroes the associated clear text private key.
+func (a *witnessScriptAddress) lock() {
+	// Zero and nil the clear text script associated with this address.
+	a.scriptMutex.Lock()
+	zero.Bytes(a.scriptCT)
+	a.scriptCT = nil
+	a.scriptMutex.Unlock()
+}
+
+// Account returns the account the address is associated with.  This will always
+// be the ImportedAddrAccount constant for script addresses.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) Account() uint32 {
+	return a.account
+}
+
+// AddrType returns the address type of the managed address. This can be used
+// to quickly discern the address type without further processing
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) AddrType() AddressType {
+	return Script
+}
+
+// Address returns the btcutil.Address which represents the managed address.
+// This will be a pay-to-script-hash address.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) Address() btcutil.Address {
+	return a.address
+}
+
+// AddrHash returns the script hash for the address.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) AddrHash() []byte {
+	return a.address.ScriptAddress()
+}
+
+// Imported always returns true since script addresses are always imported
+// addresses and not part of any chain.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) Imported() bool {
+	return true
+}
+
+// Internal always returns false since script addresses are always imported
+// addresses and not part of any chain in order to be for internal use.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) Internal() bool {
+	return false
+}
+
+// Compressed returns false since script addresses are never compressed.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) Compressed() bool {
+	return false
+}
+
+// Used returns true if the address has been used in a transaction.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *witnessScriptAddress) Used(ns walletdb.ReadBucket) bool {
+	return a.manager.fetchUsed(ns, a.AddrHash())
+}
+
+// Script returns the script associated with the address.
+//
+// This implements the ScriptAddress interface.
+func (a *witnessScriptAddress) Script() ([]byte, error) {
+	// No script is available for a watching-only address manager.
+	if a.manager.rootManager.WatchOnly() {
+		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
+	a.manager.mtx.Lock()
+	defer a.manager.mtx.Unlock()
+
+	// Account manager must be unlocked to decrypt the script.
+	if a.manager.rootManager.IsLocked() {
+		return nil, managerError(ErrLocked, errLocked, nil)
+	}
+
+	// Decrypt the script as needed.  Also, make sure it's a copy since the
+	// script stored in memory can be cleared at any time.  Otherwise,
+	// the returned script could be invalidated from under the caller.
+	return a.unlock(a.manager.rootManager.cryptoKeyScript)
+}
+
+// newWitnessScriptAddress initializes and returns a new pay-to-script-hash address.
+func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptHash,
+	scriptEncrypted []byte) (*witnessScriptAddress, error) {
+
+	address, err := btcutil.NewAddressWitnessScriptHash(
+		scriptHash, m.rootManager.chainParams,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &witnessScriptAddress{
+		manager:         m,
+		account:         account,
+		address:         address,
+		scriptEncrypted: scriptEncrypted,
+	}, nil
+}

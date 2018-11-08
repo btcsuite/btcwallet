@@ -1,6 +1,7 @@
 package waddrmgr
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sync"
 
@@ -550,7 +551,9 @@ func (s *ScopedKeyManager) scriptAddressRowToManaged(row *dbScriptAddressRow) (M
 		str := "failed to decrypt imported script hash"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-
+	if len(scriptHash) == 32 {
+		return newWitnessScriptAddress(s, row.account, scriptHash, row.encryptedScript)
+	}
 	return newScriptAddress(s, row.account, scriptHash, row.encryptedScript)
 }
 
@@ -1607,6 +1610,117 @@ func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
 	scriptAddr, err := newScriptAddress(
+		s, ImportedAddrAccount, scriptHash, encryptedScript,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !s.rootManager.WatchOnly() {
+		scriptAddr.scriptCT = make([]byte, len(script))
+		copy(scriptAddr.scriptCT, script)
+	}
+
+	// Add the new managed address to the cache of recent addresses and
+	// return it.
+	s.addrs[addrKey(scriptHash)] = scriptAddr
+	return scriptAddr, nil
+}
+
+// ImportWitnessScript imports a user-provided script into the address manager.  The
+// imported script will act as a pay-to-witness-script-hash address.
+//
+// All imported script addresses will be part of the account defined by the
+// ImportedAddrAccount constant.
+//
+// When the address manager is watching-only, the script itself will not be
+// stored or available since it is considered private data.
+//
+// This function will return an error if the address manager is locked and not
+// watching-only, or the address already exists.  Any other errors returned are
+// generally unexpected.
+func (s *ScopedKeyManager) ImportWitnessScript(ns walletdb.ReadWriteBucket,
+	script []byte, bs *BlockStamp) (ManagedScriptAddress, error) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	// The manager must be unlocked to encrypt the imported script.
+	if s.rootManager.IsLocked() && !s.rootManager.WatchOnly() {
+		return nil, managerError(ErrLocked, errLocked, nil)
+	}
+
+	// Prevent duplicates.
+	sh := sha256.Sum256(script)
+	scriptHash := sh[:]
+	alreadyExists := s.existsAddress(ns, scriptHash)
+	if alreadyExists {
+		str := fmt.Sprintf("address for script hash %x already exists",
+			scriptHash)
+		return nil, managerError(ErrDuplicateAddress, str, nil)
+	}
+
+	// Encrypt the script hash using the crypto public key so it is
+	// accessible when the address manager is locked or watching-only.
+	encryptedHash, err := s.rootManager.cryptoKeyPub.Encrypt(scriptHash)
+	if err != nil {
+		str := fmt.Sprintf("failed to encrypt script hash %x",
+			scriptHash)
+		return nil, managerError(ErrCrypto, str, err)
+	}
+
+	// Encrypt the script for storage in database using the crypto script
+	// key when not a watching-only address manager.
+	var encryptedScript []byte
+	if !s.rootManager.WatchOnly() {
+		encryptedScript, err = s.rootManager.cryptoKeyScript.Encrypt(
+			script,
+		)
+		if err != nil {
+			str := fmt.Sprintf("failed to encrypt script for %x",
+				scriptHash)
+			return nil, managerError(ErrCrypto, str, err)
+		}
+	}
+
+	// The start block needs to be updated when the newly imported address
+	// is before the current one.
+	updateStartBlock := false
+	s.rootManager.mtx.Lock()
+	if bs.Height < s.rootManager.syncState.startBlock.Height {
+		updateStartBlock = true
+	}
+	s.rootManager.mtx.Unlock()
+
+	// Save the new imported address to the db and update start block (if
+	// needed) in a single transaction.
+	err = putScriptAddress(
+		ns, &s.scope, scriptHash, ImportedAddrAccount, ssNone,
+		encryptedHash, encryptedScript,
+	)
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
+
+	if updateStartBlock {
+		err := putStartBlock(ns, bs)
+		if err != nil {
+			return nil, maybeConvertDbError(err)
+		}
+	}
+
+	// Now that the database has been updated, update the start block in
+	// memory too if needed.
+	if updateStartBlock {
+		s.rootManager.mtx.Lock()
+		s.rootManager.syncState.startBlock = *bs
+		s.rootManager.mtx.Unlock()
+	}
+
+	// Create a new managed address based on the imported script.  Also,
+	// when not a watching-only address manager, make a copy of the script
+	// since it will be cleared on lock and the script the caller passed
+	// should not be cleared out from under the caller.
+	scriptAddr, err := newWitnessScriptAddress(
 		s, ImportedAddrAccount, scriptHash, encryptedScript,
 	)
 	if err != nil {
