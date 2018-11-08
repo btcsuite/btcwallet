@@ -215,3 +215,84 @@ func TestMigrationPopulateBirthdayBlockEstimateTooFar(t *testing.T) {
 		false,
 	)
 }
+
+// TestMigrationResetSyncedBlockToBirthday ensures that the wallet properly sees
+// its synced to block as the birthday block after resetting it.
+func TestMigrationResetSyncedBlockToBirthday(t *testing.T) {
+	t.Parallel()
+
+	var birthdayBlock BlockStamp
+	beforeMigration := func(ns walletdb.ReadWriteBucket) error {
+		// To test this migration, we'll assume we're synced to a chain
+		// of 100 blocks, with our birthday being the 50th block.
+		block := &BlockStamp{}
+		for i := int32(1); i < 100; i++ {
+			block.Height = i
+			blockHash := bytes.Repeat([]byte(string(i)), 32)
+			copy(block.Hash[:], blockHash)
+			if err := putSyncedTo(ns, block); err != nil {
+				return err
+			}
+		}
+
+		const birthdayHeight = 50
+		birthdayHash, err := fetchBlockHash(ns, birthdayHeight)
+		if err != nil {
+			return err
+		}
+
+		birthdayBlock = BlockStamp{
+			Hash: *birthdayHash, Height: birthdayHeight,
+		}
+
+		return putBirthdayBlock(ns, birthdayBlock)
+	}
+
+	afterMigration := func(ns walletdb.ReadWriteBucket) error {
+		// After the migration has succeeded, we should see that the
+		// database's synced block now reflects the birthday block.
+		syncedBlock, err := fetchSyncedTo(ns)
+		if err != nil {
+			return err
+		}
+
+		if syncedBlock.Height != birthdayBlock.Height {
+			return fmt.Errorf("expected synced block height %d, "+
+				"got %d", birthdayBlock.Height,
+				syncedBlock.Height)
+		}
+		if !syncedBlock.Hash.IsEqual(&birthdayBlock.Hash) {
+			return fmt.Errorf("expected synced block height %v, "+
+				"got %v", birthdayBlock.Hash, syncedBlock.Hash)
+		}
+
+		return nil
+	}
+
+	// We can now apply the migration and expect it not to fail.
+	applyMigration(
+		t, beforeMigration, afterMigration, resetSyncedBlockToBirthday,
+		false,
+	)
+}
+
+// TestMigrationResetSyncedBlockToBirthdayWithNoBirthdayBlock ensures that we
+// cannot reset our synced to block to our birthday block if one isn't
+// available.
+func TestMigrationResetSyncedBlockToBirthdayWithNoBirthdayBlock(t *testing.T) {
+	t.Parallel()
+
+	// To replicate the scenario where the database is not aware of a
+	// birthday block, we won't set one. This should cause the migration to
+	// fail.
+	beforeMigration := func(walletdb.ReadWriteBucket) error {
+		return nil
+	}
+	afterMigration := func(walletdb.ReadWriteBucket) error {
+		return nil
+	}
+	applyMigration(
+		t, beforeMigration, afterMigration, resetSyncedBlockToBirthday,
+		true,
+	)
+}
