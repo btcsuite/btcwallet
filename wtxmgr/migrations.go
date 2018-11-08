@@ -14,6 +14,10 @@ var versions = []migration.Version{
 		Number:    1,
 		Migration: nil,
 	},
+	{
+		Number:    2,
+		Migration: dropTransactionHistory,
+	},
 }
 
 // getLatestVersion returns the version number of the latest database version.
@@ -80,4 +84,27 @@ func (m *MigrationManager) SetVersion(ns walletdb.ReadWriteBucket,
 // NOTE: This method is part of the migration.Manager interface.
 func (m *MigrationManager) Versions() []migration.Version {
 	return versions
+}
+
+// dropTransactionHistory is a migration that attempts to recreate the
+// transaction store with a clean state.
+func dropTransactionHistory(ns walletdb.ReadWriteBucket) error {
+	log.Info("Dropping wallet transaction history")
+
+	// To drop the store's transaction history, we'll need to remove all of
+	// the relevant descendant buckets and key/value pairs.
+	if err := deleteBuckets(ns); err != nil {
+		return err
+	}
+	if err := ns.Delete(rootMinedBalance); err != nil {
+		return err
+	}
+
+	// With everything removed, we'll now recreate our buckets.
+	if err := createBuckets(ns); err != nil {
+		return err
+	}
+
+	// Finally, we'll insert a 0 value for our mined balance.
+	return putMinedBalance(ns, 0)
 }
