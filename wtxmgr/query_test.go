@@ -2,7 +2,7 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package wtxmgr_test
+package wtxmgr
 
 import (
 	"bytes"
@@ -16,7 +16,6 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/walletdb"
-	. "github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 type queryState struct {
