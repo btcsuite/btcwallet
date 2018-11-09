@@ -1,5 +1,5 @@
-hash: fd238231109616b821cfb40783aab5b96fa5d9026de065411507b5c3431166e5
-updated: 2018-10-16T18:17:51.368476548-07:00
+hash: 4253ce4dbd20b5170f949d7877a09454bde641a4b8031871fc4a987c04c2e872
+updated: 2018-11-09T21:14:21.635047911Z
 imports:
 - name: github.com/aead/siphash
   version: 83563a290f60225eb120d724600b9690c3fb536f
@@ -44,12 +44,12 @@ imports:
   - ssh/terminal
 - name: github.com/btcsuite/websocket
   version: 31079b6807923eb23992c421b114992b95131b55
-- name: github.com/coreos/bbolt
-  version: 4f5275f4ebbf6fe7cb772de987fa96ee674460a7
 - name: github.com/davecgh/go-spew
   version: ecdeabc65495df2dec95d7c4a4c3e021903035e5
   subpackages:
   - spew
+- name: github.com/etcd-io/bbolt
+  version: 7ee3ded59d4835e10f3e7d0f7603c42aa5e83820
 - name: github.com/golang/protobuf
   version: b27b920f9e71b439b873b17bf99f56467623814a
   subpackages:
