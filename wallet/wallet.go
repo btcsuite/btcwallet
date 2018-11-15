@@ -653,8 +653,10 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	// If a birthday stamp was found during the initial sync and the
 	// rollback causes us to revert it, update the birthday stamp so that it
 	// points at the new tip.
+	birthdayRollback := false
 	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
 		birthdayStamp = &rollbackStamp
+		birthdayRollback = true
 
 		log.Debugf("Found new birthday block after rollback: "+
 			"height=%d, hash=%v", birthdayStamp.Height,
@@ -681,7 +683,16 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		return err
 	}
 
-	return w.rescanWithTarget(addrs, unspent, birthdayStamp)
+	// If this was our initial sync, we're recovering from our seed, or our
+	// birthday was rolled back due to a chain reorg, we'll dispatch a
+	// rescan from our birthday block to ensure we detect all relevant
+	// on-chain events from this point.
+	if isInitialSync || isRecovery || birthdayRollback {
+		return w.rescanWithTarget(addrs, unspent, birthdayStamp)
+	}
+
+	// Otherwise, we'll rescan from tip.
+	return w.rescanWithTarget(addrs, unspent, nil)
 }
 
 // defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
