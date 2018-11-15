@@ -2786,6 +2786,15 @@ func (w *Wallet) resendUnminedTxs() {
 	for _, tx := range txs {
 		resp, err := chainClient.SendRawTransaction(tx, false)
 		if err != nil {
+			// If the transaction has already been accepted into the
+			// mempool, we can continue without logging the error.
+			switch {
+			case strings.Contains(err.Error(), "already have transaction"):
+				fallthrough
+			case strings.Contains(err.Error(), "txn-already-known"):
+				continue
+			}
+
 			log.Debugf("Could not resend transaction %v: %v",
 				tx.TxHash(), err)
 
@@ -2817,9 +2826,12 @@ func (w *Wallet) resendUnminedTxs() {
 
 			// As the transaction was rejected, we'll attempt to
 			// remove the unmined transaction all together.
-			// Otherwise, we'll keep attempting to rebroadcast
-			// this, and we may be computing our balance
-			// incorrectly if this tx credits or debits to us.
+			// Otherwise, we'll keep attempting to rebroadcast this,
+			// and we may be computing our balance incorrectly if
+			// this transaction credits or debits to us.
+			//
+			// TODO(wilmer): if already confirmed, move to mined
+			// bucket - need to determine the confirmation block.
 			err := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 				txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
 
@@ -2952,6 +2964,11 @@ func (w *Wallet) NewChangeAddress(account uint32,
 	return addr, nil
 }
 
+// newChangeAddress returns a new change address for the wallet.
+//
+// NOTE: This method requires the caller to use the backend's NotifyReceived
+// method in order to detect when an on-chain transaction pays to the address
+// being created.
 func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket,
 	account uint32) (btcutil.Address, error) {
 
@@ -3305,7 +3322,7 @@ func (w *Wallet) PublishTransaction(tx *wire.MsgTx) error {
 // from the database (along with cleaning up all inputs used, and outputs
 // created) if the transaction is rejected by the back end.
 func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
-	server, err := w.requireChainClient()
+	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return nil, err
 	}
@@ -3325,7 +3342,33 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		return nil, err
 	}
 
-	txid, err := server.SendRawTransaction(tx, false)
+	// We'll also ask to be notified of the transaction once it confirms
+	// on-chain. This is done outside of the database transaction to prevent
+	// backend interaction within it.
+	//
+	// NOTE: In some cases, it's possible that the transaction to be
+	// broadcast is not directly relevant to the user's wallet, e.g.,
+	// multisig. In either case, we'll still ask to be notified of when it
+	// confirms to maintain consistency.
+	//
+	// TODO(wilmer): import script as external if the address does not
+	// belong to the wallet to handle confs during restarts?
+	for _, txOut := range tx.TxOut {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			txOut.PkScript, w.chainParams,
+		)
+		if err != nil {
+			// Non-standard outputs can safely be skipped because
+			// they're not supported by the wallet.
+			continue
+		}
+
+		if err := chainClient.NotifyReceived(addrs); err != nil {
+			return nil, err
+		}
+	}
+
+	txid, err := chainClient.SendRawTransaction(tx, false)
 	switch {
 	case err == nil:
 		return txid, nil

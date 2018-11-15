@@ -1,6 +1,7 @@
 package waddrmgr
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,6 +26,10 @@ var versions = []migration.Version{
 	{
 		Number:    6,
 		Migration: populateBirthdayBlock,
+	},
+	{
+		Number:    7,
+		Migration: resetSyncedBlockToBirthday,
 	},
 }
 
@@ -349,4 +354,21 @@ func populateBirthdayBlock(ns walletdb.ReadWriteBucket) error {
 		Height: birthdayHeight,
 		Hash:   *birthdayHash,
 	})
+}
+
+// resetSyncedBlockToBirthday is a migration that resets the wallet's currently
+// synced block to its birthday block. This essentially serves as a migration to
+// force a rescan of the wallet.
+func resetSyncedBlockToBirthday(ns walletdb.ReadWriteBucket) error {
+	syncBucket := ns.NestedReadWriteBucket(syncBucketName)
+	if syncBucket == nil {
+		return errors.New("sync bucket does not exist")
+	}
+
+	birthdayBlock, err := fetchBirthdayBlock(ns)
+	if err != nil {
+		return err
+	}
+
+	return putSyncedTo(ns, &birthdayBlock)
 }

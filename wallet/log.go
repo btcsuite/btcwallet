@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // log is a logger that is initialized with no output filters.  This
@@ -34,6 +35,7 @@ func UseLogger(logger btclog.Logger) {
 
 	migration.UseLogger(logger)
 	waddrmgr.UseLogger(logger)
+	wtxmgr.UseLogger(logger)
 }
 
 // LogClosure is a closure that can be printed with %v to be used to
