@@ -131,6 +131,14 @@ const (
 	// ErrScopeNotFound is returned when a target scope cannot be found
 	// within the database.
 	ErrScopeNotFound
+
+	// ErrBirthdayBlockNotSet is returned when we attempt to retrieve the
+	// wallet's birthday but it has not been set yet.
+	ErrBirthdayBlockNotSet
+
+	// ErrBlockNotFound is returned when we attempt to retrieve the hash for
+	// a block that we do not know of.
+	ErrBlockNotFound
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
