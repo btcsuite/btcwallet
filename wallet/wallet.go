@@ -498,7 +498,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 						birthdayStamp.Hash)
 
 					err := w.Manager.SetBirthdayBlock(
-						ns, *birthdayStamp,
+						ns, *birthdayStamp, true,
 					)
 					if err != nil {
 						tx.Rollback()
@@ -664,7 +664,9 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 
 		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			return w.Manager.SetBirthdayBlock(ns, *birthdayStamp)
+			return w.Manager.SetBirthdayBlock(
+				ns, *birthdayStamp, true,
+			)
 		})
 		if err != nil {
 			return nil
