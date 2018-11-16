@@ -360,12 +360,15 @@ func (w *Wallet) birthdaySanityCheck() (*waddrmgr.BlockStamp, error) {
 	}
 
 	// We'll then fetch our wallet's birthday timestamp and block.
-	birthdayTimestamp := w.Manager.Birthday()
-	var birthdayBlock waddrmgr.BlockStamp
+	var (
+		birthdayTimestamp     = w.Manager.Birthday()
+		birthdayBlock         waddrmgr.BlockStamp
+		birthdayBlockVerified bool
+	)
 	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		var err error
 		ns := tx.ReadBucket(waddrmgrNamespaceKey)
-		birthdayBlock, err = w.Manager.BirthdayBlock(ns)
+		birthdayBlock, birthdayBlockVerified, err = w.Manager.BirthdayBlock(ns)
 		return err
 	})
 
@@ -378,6 +381,17 @@ func (w *Wallet) birthdaySanityCheck() (*waddrmgr.BlockStamp, error) {
 	// Otherwise, we'll return the error if there was one.
 	case err != nil:
 		return nil, err
+	}
+
+	// If the birthday block has already been verified to be correct, we can
+	// exit our sanity check to prevent potentially fetching a better
+	// candidate.
+	if birthdayBlockVerified {
+		log.Debugf("Birthday block has already been verified: "+
+			"height=%d, hash=%v", birthdayBlock.Height,
+			birthdayBlock.Hash)
+
+		return &birthdayBlock, nil
 	}
 
 	log.Debugf("Starting sanity check for the wallet's birthday block "+
@@ -505,21 +519,15 @@ func (w *Wallet) birthdaySanityCheck() (*waddrmgr.BlockStamp, error) {
 		timestampDelta = birthdayTimestamp.Sub(header.Timestamp)
 	}
 
-	// At this point, we've found a valid candidate that satisfies our
-	// conditions above. If this is our current birthday block, then we can
-	// exit to avoid the additional database transaction.
-	if candidate.Hash.IsEqual(&birthdayBlock.Hash) {
-		return &candidate, nil
-	}
-
-	// Otherwise, we have a new, better candidate, so we'll write it to
-	// disk.
+	// At this point, we've found a new, better candidate, so we'll write it
+	// to disk.
 	log.Debugf("Found a new valid wallet birthday block: height=%d, hash=%v",
 		candidate.Height, candidate.Hash)
 
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		if err := w.Manager.SetBirthdayBlock(ns, candidate); err != nil {
+		err := w.Manager.SetBirthdayBlock(ns, candidate, true)
+		if err != nil {
 			return err
 		}
 		return w.Manager.SetSyncedTo(ns, &candidate)

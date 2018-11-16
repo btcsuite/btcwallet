@@ -498,7 +498,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 						birthdayStamp.Hash)
 
 					err := w.Manager.SetBirthdayBlock(
-						ns, *birthdayStamp,
+						ns, *birthdayStamp, true,
 					)
 					if err != nil {
 						tx.Rollback()
@@ -653,8 +653,10 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	// If a birthday stamp was found during the initial sync and the
 	// rollback causes us to revert it, update the birthday stamp so that it
 	// points at the new tip.
+	birthdayRollback := false
 	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
 		birthdayStamp = &rollbackStamp
+		birthdayRollback = true
 
 		log.Debugf("Found new birthday block after rollback: "+
 			"height=%d, hash=%v", birthdayStamp.Height,
@@ -662,7 +664,9 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 
 		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			return w.Manager.SetBirthdayBlock(ns, *birthdayStamp)
+			return w.Manager.SetBirthdayBlock(
+				ns, *birthdayStamp, true,
+			)
 		})
 		if err != nil {
 			return nil
@@ -681,7 +685,16 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		return err
 	}
 
-	return w.rescanWithTarget(addrs, unspent, birthdayStamp)
+	// If this was our initial sync, we're recovering from our seed, or our
+	// birthday was rolled back due to a chain reorg, we'll dispatch a
+	// rescan from our birthday block to ensure we detect all relevant
+	// on-chain events from this point.
+	if isInitialSync || isRecovery || birthdayRollback {
+		return w.rescanWithTarget(addrs, unspent, birthdayStamp)
+	}
+
+	// Otherwise, we'll rescan from tip.
+	return w.rescanWithTarget(addrs, unspent, nil)
 }
 
 // defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
@@ -2671,7 +2684,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		// before our current one. Otherwise, if we do, we can
 		// potentially miss detecting relevant chain events that
 		// occurred between them while rescanning.
-		birthdayBlock, err := w.Manager.BirthdayBlock(addrmgrNs)
+		birthdayBlock, _, err := w.Manager.BirthdayBlock(addrmgrNs)
 		if err != nil {
 			return err
 		}
@@ -2683,7 +2696,11 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		if err != nil {
 			return err
 		}
-		return w.Manager.SetBirthdayBlock(addrmgrNs, *bs)
+
+		// To ensure this birthday block is correct, we'll mark it as
+		// unverified to prompt a sanity check at the next restart to
+		// ensure it is correct as it was provided by the caller.
+		return w.Manager.SetBirthdayBlock(addrmgrNs, *bs, false)
 	})
 	if err != nil {
 		return "", err
