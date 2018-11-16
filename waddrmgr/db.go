@@ -253,10 +253,11 @@ var (
 	watchingOnlyName    = []byte("watchonly")
 
 	// Sync related key names (sync bucket).
-	syncedToName      = []byte("syncedto")
-	startBlockName    = []byte("startblock")
-	birthdayName      = []byte("birthday")
-	birthdayBlockName = []byte("birthdayblock")
+	syncedToName              = []byte("syncedto")
+	startBlockName            = []byte("startblock")
+	birthdayName              = []byte("birthday")
+	birthdayBlockName         = []byte("birthdayblock")
+	birthdayBlockVerifiedName = []byte("birthdayblockverified")
 )
 
 // uint32ToBytes converts a 32 bit unsigned integer into a 4-byte slice in
@@ -2006,6 +2007,47 @@ func putBirthdayBlock(ns walletdb.ReadWriteBucket, block BlockStamp) error {
 	bucket := ns.NestedReadWriteBucket(syncBucketName)
 	if err := bucket.Put(birthdayBlockName, birthdayBlock[:]); err != nil {
 		str := "failed to store birthday block"
+		return managerError(ErrDatabase, str, err)
+	}
+
+	return nil
+}
+
+// fetchBirthdayBlockVerification retrieves the bit that determines whether the
+// wallet has verified that its birthday block is correct.
+func fetchBirthdayBlockVerification(ns walletdb.ReadBucket) bool {
+	bucket := ns.NestedReadBucket(syncBucketName)
+	verifiedValue := bucket.Get(birthdayBlockVerifiedName)
+
+	// If there is no verification status, we can assume it has not been
+	// verified yet.
+	if verifiedValue == nil {
+		return false
+	}
+
+	// Otherwise, we'll determine if it's verified by the value stored.
+	verified := binary.BigEndian.Uint16(verifiedValue[:])
+	return verified != 0
+}
+
+// putBirthdayBlockVerification stores a bit that determines whether the
+// birthday block has been verified by the wallet to be correct.
+func putBirthdayBlockVerification(ns walletdb.ReadWriteBucket, verified bool) error {
+	// Convert the boolean to an integer in its binary representation as
+	// there is no way to insert a boolean directly as a value of a
+	// key/value pair.
+	verifiedValue := uint16(0)
+	if verified {
+		verifiedValue = 1
+	}
+
+	var verifiedBytes [2]byte
+	binary.BigEndian.PutUint16(verifiedBytes[:], verifiedValue)
+
+	bucket := ns.NestedReadWriteBucket(syncBucketName)
+	err := bucket.Put(birthdayBlockVerifiedName, verifiedBytes[:])
+	if err != nil {
+		str := "failed to store birthday block verification"
 		return managerError(ErrDatabase, str, err)
 	}
 
