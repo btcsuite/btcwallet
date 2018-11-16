@@ -317,6 +317,22 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 	return addrs, unspent, err
 }
 
+// onClientConnected starts calls syncWithChain in a new go routine.
+// At the moment there is no recourse if the rescan fails for
+// some reason, however, the wallet will not be marked synced
+// and many methods will error early since the wallet is known
+// to be out of date.
+func (w *Wallet) onClientConnected(birthdayStamp *waddrmgr.BlockStamp) {
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		err := w.syncWithChain(birthdayStamp)
+		if err != nil && !w.ShuttingDown() {
+			log.Warnf("Unable to synchronize wallet to chain: %v", err)
+		}
+	}()
+}
+
 // syncWithChain brings the wallet up to date with the current chain server
 // connection. It creates a rescan request and blocks until the rescan has
 // finished. The birthday block can be passed in, if set, to ensure we can
