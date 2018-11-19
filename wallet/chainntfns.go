@@ -526,6 +526,7 @@ func birthdaySanityCheck(chainConn chainConn,
 		}
 
 		candidate.Hash = *hash
+		candidate.Height = int32(newCandidateHeight)
 		candidate.Timestamp = header.Timestamp
 
 		log.Debugf("Checking next birthday block candidate: "+
