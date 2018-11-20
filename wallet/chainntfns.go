@@ -118,7 +118,7 @@ func (w *Wallet) handleChainNotifications() {
 				birthdayBlock, err := birthdaySanityCheck(
 					chainClient, birthdayStore,
 				)
-				if err != nil {
+				if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
 					err := fmt.Errorf("unable to sanity "+
 						"check wallet birthday block: %v",
 						err)
@@ -450,20 +450,15 @@ func (s *walletBirthdayStore) SetBirthdayBlock(block waddrmgr.BlockStamp) error 
 // with the backend, but before it begins syncing. This is done as the second
 // part to the wallet's address manager migration where we populate the birthday
 // block to ensure we do not miss any relevant events throughout rescans.
+// waddrmgr.ErrBirthdayBlockNotSet is returned if the birthday block has not
+// been set yet.
 func birthdaySanityCheck(chainConn chainConn,
 	birthdayStore birthdayStore) (*waddrmgr.BlockStamp, error) {
 
 	// We'll start by fetching our wallet's birthday timestamp and block.
 	birthdayTimestamp := birthdayStore.Birthday()
 	birthdayBlock, birthdayBlockVerified, err := birthdayStore.BirthdayBlock()
-	switch {
-	// If our wallet's birthday block has not been set yet, then this is our
-	// initial sync, so we'll defer setting it until then.
-	case waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet):
-		return nil, nil
-
-	// Otherwise, we'll return the error if there was one.
-	case err != nil:
+	if err != nil {
 		return nil, err
 	}
 

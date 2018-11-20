@@ -147,8 +147,8 @@ func TestBirthdaySanityCheckEmptyBirthdayBlock(t *testing.T) {
 	birthdayStore := &mockBirthdayStore{}
 
 	birthdayBlock, err := birthdaySanityCheck(chainConn, birthdayStore)
-	if err != nil {
-		t.Fatalf("unable to sanity check birthday block: %v", err)
+	if !waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
+		t.Fatalf("expected ErrBirthdayBlockNotSet, got %v", err)
 	}
 
 	if birthdayBlock != nil {
