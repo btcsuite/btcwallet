@@ -7,12 +7,17 @@
 
 set -ex
 
+test_targets=$(go list ./...)
+
 # Automatic checks
-test -z "$(go fmt $(glide novendor) | tee /dev/stderr)"
+test -z "$(go fmt $test_targets | tee /dev/stderr)"
+
 # test -z "$(goimports -l -w . | tee /dev/stderr)"
-test -z "$(for package in $(glide novendor); do golint $package; done | grep -v 'ALL_CAPS\|OP_\|NewFieldVal\|RpcCommand\|RpcRawCommand\|RpcSend\|Dns\|api.pb.go\|StartConsensusRpc\|factory_test.go\|legacy\|UnstableAPI' | tee /dev/stderr)"
-test -z "$(go vet $(glide novendor) 2>&1 | grep -v '^exit status \|Example\|newestSha\| not a string in call to Errorf$' | tee /dev/stderr)"
-env GORACE="history_size=7 halt_on_errors=1" go test -race $(glide novendor)
+test -z "$(for package in $test_targets; do golint $package; done | grep -v 'ALL_CAPS\|OP_\|NewFieldVal\|RpcCommand\|RpcRawCommand\|RpcSend\|Dns\|api.pb.go\|StartConsensusRpc\|factory_test.go\|legacy\|UnstableAPI' | tee /dev/stderr)"
+
+test -z "$(go vet $test_targets 2>&1 | grep -v '^exit status \|Example\|newestSha\| not a string in call to Errorf$' | tee /dev/stderr)"
+
+env GORACE="history_size=7 halt_on_errors=1" go test -v -race $test_targets
 
 # Run test coverage on each subdirectories and merge the coverage profile.
 
