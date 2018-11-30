@@ -9,4 +9,5 @@ install:
   - GO111MODULE=off go get -v github.com/davecgh/go-spew/spew
 script:
   - export PATH=$PATH:$HOME/gopath/bin
+  - export GO111MODULE=on
   - ./goclean.sh

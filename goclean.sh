@@ -17,7 +17,7 @@ test -z "$(for package in $test_targets; do golint $package; done | grep -v 'ALL
 
 test -z "$(go vet $test_targets 2>&1 | grep -v '^exit status \|Example\|newestSha\| not a string in call to Errorf$' | tee /dev/stderr)"
 
-GO111MODULE=on env GORACE="history_size=7 halt_on_errors=1" go test -v -race $test_targets
+env GORACE="history_size=7 halt_on_errors=1" go test -v -race $test_targets
 
 # Run test coverage on each subdirectories and merge the coverage profile.
 
