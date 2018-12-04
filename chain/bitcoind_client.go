@@ -1205,16 +1205,47 @@ func (c *BitcoindClient) filterTx(tx *wire.MsgTx,
 	// to determine if this transaction is somehow relevant to the caller.
 	var isRelevant bool
 
-	// We'll start by cycling through its outputs to determine if it pays to
-	// any of the currently watched addresses. If an output matches, we'll
-	// add it to our watch list.
-	for i, out := range tx.TxOut {
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			out.PkScript, c.chainParams,
+	// We'll start by checking all inputs and determining whether it spends
+	// an existing outpoint or a pkScript encoded as an address in our watch
+	// list.
+	for _, txIn := range tx.TxIn {
+		// If it matches an outpoint in our watch list, we can exit our
+		// loop early.
+		if _, ok := c.watchedOutPoints[txIn.PreviousOutPoint]; ok {
+			isRelevant = true
+			break
+		}
+
+		// Otherwise, we'll check whether it matches a pkScript in our
+		// watch list encoded as an address. To do so, we'll re-derive
+		// the pkScript of the output the input is attempting to spend.
+		pkScript, err := txscript.ComputePkScript(
+			txIn.SignatureScript, txIn.Witness,
 		)
 		if err != nil {
-			log.Debugf("Unable to parse output script in %s:%d: %v",
-				tx.TxHash(), i, err)
+			// Non-standard outputs can be safely skipped.
+			continue
+		}
+		addr, err := pkScript.Address(c.chainParams)
+		if err != nil {
+			// Non-standard outputs can be safely skipped.
+			continue
+		}
+		if _, ok := c.watchedAddresses[addr.String()]; ok {
+			isRelevant = true
+			break
+		}
+	}
+
+	// We'll also cycle through its outputs to determine if it pays to
+	// any of the currently watched addresses. If an output matches, we'll
+	// add it to our watch list.
+	for i, txOut := range tx.TxOut {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			txOut.PkScript, c.chainParams,
+		)
+		if err != nil {
+			// Non-standard outputs can be safely skipped.
 			continue
 		}
 
@@ -1235,17 +1266,6 @@ func (c *BitcoindClient) filterTx(tx *wire.MsgTx,
 	if !isRelevant {
 		if _, ok := c.watchedTxs[tx.TxHash()]; ok {
 			isRelevant = true
-		}
-	}
-
-	// If the transaction didn't pay to any of our watched hashes, we'll
-	// check if it spends any of our watched outpoints.
-	if !isRelevant {
-		for _, in := range tx.TxIn {
-			if _, ok := c.watchedOutPoints[in.PreviousOutPoint]; ok {
-				isRelevant = true
-				break
-			}
 		}
 	}
 
