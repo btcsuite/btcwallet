@@ -42,6 +42,10 @@ type ReadWriteTx interface {
 	// Commit commits all changes that have been on the transaction's root
 	// buckets and all of their sub-buckets to persistent storage.
 	Commit() error
+
+	// OnCommit takes a function closure that will be executed when the
+	// transaction successfully gets committed.
+	OnCommit(func())
 }
 
 // ReadBucket represents a bucket (a hierarchical structure within the database)
@@ -119,6 +123,9 @@ type ReadWriteBucket interface {
 	// Cursor returns a new cursor, allowing for iteration over the bucket's
 	// key/value pairs and nested buckets in forward or backward order.
 	ReadWriteCursor() ReadWriteCursor
+
+	// Tx returns the bucket's transaction.
+	Tx() ReadWriteTx
 }
 
 // ReadCursor represents a bucket cursor that can be positioned at the start or

@@ -99,6 +99,14 @@ func (tx *transaction) Rollback() error {
 	return convertErr(tx.boltTx.Rollback())
 }
 
+// OnCommit takes a function closure that will be executed when the transaction
+// successfully gets committed.
+//
+// This function is part of the walletdb.ReadWriteTx interface implementation.
+func (tx *transaction) OnCommit(f func()) {
+	tx.boltTx.OnCommit(f)
+}
+
 // bucket is an internal type used to represent a collection of key/value pairs
 // and implements the walletdb Bucket interfaces.
 type bucket bbolt.Bucket
@@ -212,6 +220,15 @@ func (b *bucket) ReadCursor() walletdb.ReadCursor {
 // This function is part of the walletdb.ReadWriteBucket interface implementation.
 func (b *bucket) ReadWriteCursor() walletdb.ReadWriteCursor {
 	return (*cursor)((*bbolt.Bucket)(b).Cursor())
+}
+
+// Tx returns the bucket's transaction.
+//
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
+func (b *bucket) Tx() walletdb.ReadWriteTx {
+	return &transaction{
+		(*bbolt.Bucket)(b).Tx(),
+	}
 }
 
 // cursor represents a cursor over key/value pairs and nested buckets of a
