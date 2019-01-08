@@ -697,6 +697,164 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	return w.rescanWithTarget(addrs, unspent, nil)
 }
 
+// scanChain is a helper method that scans the chain from the starting height
+// until the tip of the chain. The onBlock callback can be used to perform
+// certain operations for every block that we process as we scan the chain.
+func (w *Wallet) scanChain(startHeight int32,
+	onBlock func(int32, *chainhash.Hash, *wire.BlockHeader) error) error {
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
+	// isCurrent is a helper function that we'll use to determine if the
+	// chain backend is currently synced. When running with a btcd or
+	// bitcoind backend, It will use the height of the latest checkpoint as
+	// its lower bound.
+	var latestCheckptHeight int32
+	if len(w.chainParams.Checkpoints) > 0 {
+		latestCheckptHeight = w.chainParams.
+			Checkpoints[len(w.chainParams.Checkpoints)-1].Height
+	}
+	isCurrent := func(bestHeight int32) bool {
+		switch c := chainClient.(type) {
+		case *chain.NeutrinoClient:
+			return c.CS.IsCurrent()
+		}
+		return bestHeight >= latestCheckptHeight
+	}
+
+	// Determine the latest height known to the chain backend and begin
+	// scanning the chain from the start height up until this point.
+	_, bestHeight, err := chainClient.GetBestBlock()
+	if err != nil {
+		return err
+	}
+
+	for height := startHeight; height <= bestHeight; height++ {
+		hash, err := chainClient.GetBlockHash(int64(height))
+		if err != nil {
+			return err
+		}
+		header, err := chainClient.GetBlockHeader(hash)
+		if err != nil {
+			return err
+		}
+
+		if err := onBlock(height, hash, header); err != nil {
+			return err
+		}
+
+		// If we've reached our best height and we're not current, we'll
+		// wait for blocks at tip to ensure we go through all existent
+		// blocks.
+		for height == bestHeight && !isCurrent(bestHeight) {
+			time.Sleep(100 * time.Millisecond)
+			_, bestHeight, err = chainClient.GetBestBlock()
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// syncToBirthday attempts to sync the wallet's point of view of the chain until
+// it finds the first block whose timestamp is above the wallet's birthday. The
+// wallet's birthday is already two days in the past of its actual birthday, so
+// this is relatively safe to do.
+func (w *Wallet) syncToBirthday() (*waddrmgr.BlockStamp, error) {
+	var birthdayStamp *waddrmgr.BlockStamp
+	birthday := w.Manager.Birthday()
+
+	tx, err := w.db.BeginReadWriteTx()
+	if err != nil {
+		return nil, err
+	}
+	ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+	// We'll begin scanning the chain from our last sync point until finding
+	// the first block with a timestamp greater than our birthday. We'll use
+	// this block to represent our birthday stamp. errDone is an error we'll
+	// use to signal that we've found it and no longer need to keep scanning
+	// the chain.
+	errDone := errors.New("done")
+	err = w.scanChain(w.Manager.SyncedTo().Height, func(height int32,
+		hash *chainhash.Hash, header *wire.BlockHeader) error {
+
+		if header.Timestamp.After(birthday) {
+			log.Debugf("Found birthday block: height=%d, hash=%v",
+				height, hash)
+
+			birthdayStamp = &waddrmgr.BlockStamp{
+				Hash:      *hash,
+				Height:    height,
+				Timestamp: header.Timestamp,
+			}
+
+			err := w.Manager.SetBirthdayBlock(
+				ns, *birthdayStamp, true,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		err = w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+			Hash:      *hash,
+			Height:    height,
+			Timestamp: header.Timestamp,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Checkpoint our state every 10K blocks.
+		if height%10000 == 0 {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+
+			log.Infof("Caught up to height %d", height)
+
+			tx, err = w.db.BeginReadWriteTx()
+			if err != nil {
+				return err
+			}
+			ns = tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		}
+
+		// If we've found our birthday, we can return errDone to signal
+		// that we should stop scanning the chain and persist our state.
+		if birthdayStamp != nil {
+			return errDone
+		}
+
+		return nil
+	})
+	if err != nil && err != errDone {
+		tx.Rollback()
+		return nil, err
+	}
+
+	// If a birthday stamp has yet to be found, we'll return an error
+	// indicating so.
+	if birthdayStamp == nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("did not find a suitable birthday "+
+			"block with a timestamp greater than %v", birthday)
+	}
+
+	if err := tx.Commit(); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	return birthdayStamp, nil
+}
+
 // defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
 // default set of key scopes.
 func (w *Wallet) defaultScopeManagers() (
