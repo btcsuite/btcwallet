@@ -322,11 +322,6 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 // finished. The birthday block can be passed in, if set, to ensure we can
 // properly detect if it gets rolled back.
 func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return err
-	}
-
 	// To start, if we've yet to find our birthday stamp, we'll do so now.
 	if birthdayStamp == nil {
 		var err error
@@ -352,14 +347,20 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		}
 	}
 
-	// Compare previously-seen blocks against the chain server.  If any of
+	// Compare previously-seen blocks against the current chain. If any of
 	// these blocks no longer exist, rollback all of the missing blocks
 	// before catching up with the rescan.
 	rollback := false
 	rollbackStamp := w.Manager.SyncedTo()
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
 		for height := rollbackStamp.Height; true; height-- {
 			hash, err := w.Manager.BlockHash(addrmgrNs, height)
 			if err != nil {
@@ -384,46 +385,39 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 			rollback = true
 		}
 
-		if rollback {
-			err := w.Manager.SetSyncedTo(addrmgrNs, &rollbackStamp)
-			if err != nil {
-				return err
-			}
-			// Rollback unconfirms transactions at and beyond the
-			// passed height, so add one to the new synced-to height
-			// to prevent unconfirming txs from the synced-to block.
-			err = w.TxStore.Rollback(txmgrNs, rollbackStamp.Height+1)
+		// If a rollback did not happen, we can proceed safely.
+		if !rollback {
+			return nil
+		}
+
+		// Otherwise, we'll mark this as our new synced height.
+		err := w.Manager.SetSyncedTo(addrmgrNs, &rollbackStamp)
+		if err != nil {
+			return err
+		}
+
+		// If the rollback happened to go beyond our birthday stamp,
+		// we'll need to find a new one by syncing with the chain again
+		// until finding one.
+		if rollbackStamp.Height <= birthdayStamp.Height &&
+			rollbackStamp.Hash != birthdayStamp.Hash {
+
+			err := w.Manager.SetBirthdayBlock(
+				addrmgrNs, rollbackStamp, true,
+			)
 			if err != nil {
 				return err
 			}
 		}
-		return nil
+
+		// Finally, we'll roll back our transaction store to reflect the
+		// stale state. `Rollback` unconfirms transactions at and beyond
+		// the passed height, so add one to the new synced-to height to
+		// prevent unconfirming transactions in the synced-to block.
+		return w.TxStore.Rollback(txmgrNs, rollbackStamp.Height+1)
 	})
 	if err != nil {
 		return err
-	}
-
-	// If a birthday stamp was found during the initial sync and the
-	// rollback causes us to revert it, update the birthday stamp so that it
-	// points at the new tip.
-	birthdayRollback := false
-	if birthdayStamp != nil && rollbackStamp.Height <= birthdayStamp.Height {
-		birthdayStamp = &rollbackStamp
-		birthdayRollback = true
-
-		log.Debugf("Found new birthday block after rollback: "+
-			"height=%d, hash=%v", birthdayStamp.Height,
-			birthdayStamp.Hash)
-
-		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			return w.Manager.SetBirthdayBlock(
-				ns, *birthdayStamp, true,
-			)
-		})
-		if err != nil {
-			return nil
-		}
 	}
 
 	// Request notifications for connected and disconnected blocks.
