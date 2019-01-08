@@ -59,7 +59,7 @@ func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 	}
 
 	// Update the database.
-	err := putSyncedTo(ns, bs)
+	err := PutSyncedTo(ns, bs)
 	if err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func (m *Manager) SetBirthday(ns walletdb.ReadWriteBucket,
 // been used, for the manager. A boolean is also returned to indicate whether
 // the birthday block has been verified as correct.
 func (m *Manager) BirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, bool, error) {
-	birthdayBlock, err := fetchBirthdayBlock(ns)
+	birthdayBlock, err := FetchBirthdayBlock(ns)
 	if err != nil {
 		return BlockStamp{}, false, err
 	}

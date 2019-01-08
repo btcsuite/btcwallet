@@ -1830,8 +1830,8 @@ func fetchSyncedTo(ns walletdb.ReadBucket) (*BlockStamp, error) {
 	return &bs, nil
 }
 
-// putSyncedTo stores the provided synced to blockstamp to the database.
-func putSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
+// PutSyncedTo stores the provided synced to blockstamp to the database.
+func PutSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	bucket := ns.NestedReadWriteBucket(syncBucketName)
 	errStr := fmt.Sprintf("failed to store sync information %v", bs.Hash)
 
@@ -1893,9 +1893,9 @@ func fetchBlockHash(ns walletdb.ReadBucket, height int32) (*chainhash.Hash, erro
 	return &hash, nil
 }
 
-// fetchStartBlock loads the start block stamp for the manager from the
+// FetchStartBlock loads the start block stamp for the manager from the
 // database.
-func fetchStartBlock(ns walletdb.ReadBucket) (*BlockStamp, error) {
+func FetchStartBlock(ns walletdb.ReadBucket) (*BlockStamp, error) {
 	bucket := ns.NestedReadBucket(syncBucketName)
 
 	// The serialized start block format is:
@@ -1964,13 +1964,13 @@ func putBirthday(ns walletdb.ReadWriteBucket, t time.Time) error {
 	return nil
 }
 
-// fetchBirthdayBlock retrieves the birthday block from the database.
+// FetchBirthdayBlock retrieves the birthday block from the database.
 //
 // The block is serialized as follows:
 //   [0:4]   block height
 //   [4:36]  block hash
 //   [36:44] block timestamp
-func fetchBirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, error) {
+func FetchBirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, error) {
 	var block BlockStamp
 
 	bucket := ns.NestedReadBucket(syncBucketName)

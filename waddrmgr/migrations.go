@@ -365,10 +365,10 @@ func resetSyncedBlockToBirthday(ns walletdb.ReadWriteBucket) error {
 		return errors.New("sync bucket does not exist")
 	}
 
-	birthdayBlock, err := fetchBirthdayBlock(ns)
+	birthdayBlock, err := FetchBirthdayBlock(ns)
 	if err != nil {
 		return err
 	}
 
-	return putSyncedTo(ns, &birthdayBlock)
+	return PutSyncedTo(ns, &birthdayBlock)
 }
