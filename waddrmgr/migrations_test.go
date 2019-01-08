@@ -81,7 +81,7 @@ func TestMigrationPopulateBirthdayBlock(t *testing.T) {
 			block.Height = i
 			blockHash := bytes.Repeat([]byte(string(i)), 32)
 			copy(block.Hash[:], blockHash)
-			if err := putSyncedTo(ns, block); err != nil {
+			if err := PutSyncedTo(ns, block); err != nil {
 				return err
 			}
 		}
@@ -100,7 +100,7 @@ func TestMigrationPopulateBirthdayBlock(t *testing.T) {
 
 		// Finally, since the migration has not yet started, we should
 		// not be able to find the birthday block within the database.
-		_, err := fetchBirthdayBlock(ns)
+		_, err := FetchBirthdayBlock(ns)
 		if !IsError(err, ErrBirthdayBlockNotSet) {
 			return fmt.Errorf("expected ErrBirthdayBlockNotSet, "+
 				"got %v", err)
@@ -112,7 +112,7 @@ func TestMigrationPopulateBirthdayBlock(t *testing.T) {
 	// After the migration has completed, we should see that the birthday
 	// block now exists and is set to the correct expected height.
 	afterMigration := func(ns walletdb.ReadWriteBucket) error {
-		birthdayBlock, err := fetchBirthdayBlock(ns)
+		birthdayBlock, err := FetchBirthdayBlock(ns)
 		if err != nil {
 			return err
 		}
@@ -151,7 +151,7 @@ func TestMigrationPopulateBirthdayBlockEstimateTooFar(t *testing.T) {
 			block.Height = i
 			blockHash := bytes.Repeat([]byte(string(i)), 32)
 			copy(block.Hash[:], blockHash)
-			if err := putSyncedTo(ns, block); err != nil {
+			if err := PutSyncedTo(ns, block); err != nil {
 				return err
 			}
 		}
@@ -184,7 +184,7 @@ func TestMigrationPopulateBirthdayBlockEstimateTooFar(t *testing.T) {
 
 		// Finally, since the migration has not yet started, we should
 		// not be able to find the birthday block within the database.
-		_, err := fetchBirthdayBlock(ns)
+		_, err := FetchBirthdayBlock(ns)
 		if !IsError(err, ErrBirthdayBlockNotSet) {
 			return fmt.Errorf("expected ErrBirthdayBlockNotSet, "+
 				"got %v", err)
@@ -196,7 +196,7 @@ func TestMigrationPopulateBirthdayBlockEstimateTooFar(t *testing.T) {
 	// After the migration has completed, we should see that the birthday
 	// block now exists and is set to the correct expected height.
 	afterMigration := func(ns walletdb.ReadWriteBucket) error {
-		birthdayBlock, err := fetchBirthdayBlock(ns)
+		birthdayBlock, err := FetchBirthdayBlock(ns)
 		if err != nil {
 			return err
 		}
@@ -230,7 +230,7 @@ func TestMigrationResetSyncedBlockToBirthday(t *testing.T) {
 			block.Height = i
 			blockHash := bytes.Repeat([]byte(string(i)), 32)
 			copy(block.Hash[:], blockHash)
-			if err := putSyncedTo(ns, block); err != nil {
+			if err := PutSyncedTo(ns, block); err != nil {
 				return err
 			}
 		}

@@ -1405,7 +1405,7 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 	if err != nil {
 		return nil, maybeConvertDbError(err)
 	}
-	startBlock, err := fetchStartBlock(ns)
+	startBlock, err := FetchStartBlock(ns)
 	if err != nil {
 		return nil, maybeConvertDbError(err)
 	}
@@ -1800,7 +1800,7 @@ func Create(ns walletdb.ReadWriteBucket, seed, pubPassphrase, privPassphrase []b
 	}
 
 	// Save the initial synced to state.
-	err = putSyncedTo(ns, &syncInfo.syncedTo)
+	err = PutSyncedTo(ns, &syncInfo.syncedTo)
 	if err != nil {
 		return maybeConvertDbError(err)
 	}

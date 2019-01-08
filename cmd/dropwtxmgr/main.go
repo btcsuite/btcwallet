@@ -6,12 +6,12 @@ package main
 
 import (
 	"bufio"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -40,14 +40,8 @@ func init() {
 
 var (
 	// Namespace keys.
-	syncBucketName    = []byte("sync")
 	waddrmgrNamespace = []byte("waddrmgr")
 	wtxmgrNamespace   = []byte("wtxmgr")
-
-	// Sync related key names (sync bucket).
-	syncedToName     = []byte("syncedto")
-	startBlockName   = []byte("startblock")
-	recentBlocksName = []byte("recentblocks")
 )
 
 func yes(s string) bool {
@@ -111,7 +105,9 @@ func mainInt() int {
 		return 1
 	}
 	defer db.Close()
-	fmt.Println("Dropping wtxmgr namespace")
+
+	fmt.Println("Dropping btcwallet transaction history")
+
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		err := tx.DeleteTopLevelBucket(wtxmgrNamespace)
 		if err != nil && err != walletdb.ErrBucketNotFound {
@@ -125,17 +121,21 @@ func mainInt() int {
 		if err != nil {
 			return err
 		}
-		ns = tx.ReadWriteBucket(waddrmgrNamespace).NestedReadWriteBucket(syncBucketName)
-		startBlock := ns.Get(startBlockName)
-		err = ns.Put(syncedToName, startBlock)
+
+		ns = tx.ReadWriteBucket(waddrmgrNamespace)
+		birthdayBlock, err := waddrmgr.FetchBirthdayBlock(ns)
 		if err != nil {
-			return err
+			fmt.Println("Wallet does not have a birthday block " +
+				"set, falling back to rescan from genesis")
+
+			startBlock, err := waddrmgr.FetchStartBlock(ns)
+			if err != nil {
+				return err
+			}
+			return waddrmgr.PutSyncedTo(ns, startBlock)
 		}
-		recentBlocks := make([]byte, 40)
-		copy(recentBlocks[0:4], startBlock[0:4])
-		copy(recentBlocks[8:], startBlock[4:])
-		binary.LittleEndian.PutUint32(recentBlocks[4:8], uint32(1))
-		return ns.Put(recentBlocksName, recentBlocks)
+
+		return waddrmgr.PutSyncedTo(ns, &birthdayBlock)
 	})
 	if err != nil {
 		fmt.Println("Failed to drop and re-create namespace:", err)
