@@ -657,15 +657,17 @@ func createNewAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, &ErrReservedAccountName
 	}
 
-	_, err := w.NextAccount(waddrmgr.KeyScopeBIP0044, cmd.Account)
-	if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
-		return nil, &btcjson.RPCError{
-			Code: btcjson.ErrRPCWalletUnlockNeeded,
-			Message: "Creating an account requires the wallet to be unlocked. " +
-				"Enter the wallet passphrase with walletpassphrase to unlock",
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		_, err := w.NextAccount(scope, cmd.Account)
+		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+			return nil, &btcjson.RPCError{
+				Code: btcjson.ErrRPCWalletUnlockNeeded,
+				Message: "Creating an account requires the wallet to be unlocked. " +
+					"Enter the wallet passphrase with walletpassphrase to unlock",
+			}
 		}
 	}
-	return nil, err
+	return nil, nil
 }
 
 // renameAccount handles a renameaccount request by renaming an account.
