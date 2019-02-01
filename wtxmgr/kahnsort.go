@@ -83,9 +83,9 @@ func graphRoots(graph hashGraph) []*wire.MsgTx {
 	return roots
 }
 
-// dependencySort topologically sorts a set of transactions by their dependency
+// DependencySort topologically sorts a set of transactions by their dependency
 // order. It is implemented using Kahn's algorithm.
-func dependencySort(txs map[chainhash.Hash]*wire.MsgTx) []*wire.MsgTx {
+func DependencySort(txs map[chainhash.Hash]*wire.MsgTx) []*wire.MsgTx {
 	graph := makeGraph(txs)
 	s := graphRoots(graph)
 

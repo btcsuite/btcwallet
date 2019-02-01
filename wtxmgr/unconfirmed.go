@@ -169,7 +169,7 @@ func (s *Store) UnminedTxs(ns walletdb.ReadBucket) ([]*wire.MsgTx, error) {
 		txSet[txHash] = &txRec.MsgTx
 	}
 
-	return dependencySort(txSet), nil
+	return DependencySort(txSet), nil
 }
 
 func (s *Store) unminedTxRecords(ns walletdb.ReadBucket) (map[chainhash.Hash]*TxRecord, error) {
