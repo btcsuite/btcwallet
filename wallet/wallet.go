@@ -471,6 +471,12 @@ func (w *Wallet) scanChain(startHeight int32,
 			Checkpoints[len(w.chainParams.Checkpoints)-1].Height
 	}
 	isCurrent := func(bestHeight int32) bool {
+		// If the best height is zero, we assume the chain backend
+		// still is looking for peers to sync to.
+		if bestHeight == 0 {
+			return false
+		}
+
 		switch c := chainClient.(type) {
 		case *chain.NeutrinoClient:
 			return c.CS.IsCurrent()
