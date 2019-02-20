@@ -77,28 +77,19 @@ Building or updating from source requires the following build dependencies:
     experiment by setting the `GO15VENDOREXPERIMENT` environment variable to
     `1`.  This step is not required for Go 1.6.
 
-- **Glide**
-
-  Glide is used to manage project dependencies and provide reproducible builds.
-  To install:
-
-  `go get -u github.com/Masterminds/glide`
-
-Unfortunately, the use of `glide` prevents a handy tool such as `go get` from
-automatically downloading, building, and installing the source in a single
-command.  Instead, the latest project and dependency sources must be first
-obtained manually with `git` and `glide`, and then `go` is used to build and
+Instead, the latest project and dependency sources must be first
+obtained manually with `git` and `go modules`, and then `go` is used to build and
 install the project.
 
 **Getting the source**:
 
 For a first time installation, the project and dependency sources can be
-obtained manually with `git` and `glide` (create directories as needed):
+obtained manually with `git` and `go modules` (create directories as needed):
 
 ```
 git clone https://github.com/btcsuite/btcwallet $GOPATH/src/github.com/btcsuite/btcwallet
 cd $GOPATH/src/github.com/btcsuite/btcwallet
-glide install
+GO111MODULE=on go install -v . ./cmd/...
 ```
 
 To update an existing source tree, pull the latest changes and install the
@@ -107,7 +98,7 @@ matching dependencies:
 ```
 cd $GOPATH/src/github.com/btcsuite/btcwallet
 git pull
-glide install
+GO111MODULE=on go install -v . ./cmd/...
 ```
 
 **Building/Installing**:
