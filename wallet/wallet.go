@@ -463,17 +463,19 @@ func (w *Wallet) scanChain(startHeight int32,
 
 	// isCurrent is a helper function that we'll use to determine if the
 	// chain backend is currently synced. When running with a btcd or
-	// bitcoind backend, It will use the height of the latest checkpoint as
+	// bitcoind backend. It will use the height of the latest checkpoint as
 	// its lower bound.
 	var latestCheckptHeight int32
 	if len(w.chainParams.Checkpoints) > 0 {
 		latestCheckptHeight = w.chainParams.
 			Checkpoints[len(w.chainParams.Checkpoints)-1].Height
 	}
+	isSimNet := w.ChainParams().Net == wire.SimNet
 	isCurrent := func(bestHeight int32) bool {
 		// If the best height is zero, we assume the chain backend
-		// still is looking for peers to sync to.
-		if bestHeight == 0 {
+		// still is looking for peers to sync to, unless we are on
+		// SimNet, in which case our bestHeight is assumed to be current.
+		if bestHeight == 0 && !isSimNet {
 			return false
 		}
 
