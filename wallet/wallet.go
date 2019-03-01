@@ -1148,6 +1148,7 @@ type (
 		outputs     []*wire.TxOut
 		minconf     int32
 		feeSatPerKB btcutil.Amount
+		dryRun      bool
 		resp        chan createTxResponse
 	}
 	createTxResponse struct {
@@ -1178,7 +1179,7 @@ out:
 				continue
 			}
 			tx, err := w.txToOutputs(txr.outputs, txr.account,
-				txr.minconf, txr.feeSatPerKB)
+				txr.minconf, txr.feeSatPerKB, txr.dryRun)
 			heldUnlock.release()
 			txr.resp <- createTxResponse{tx, err}
 		case <-quit:
@@ -1189,19 +1190,24 @@ out:
 }
 
 // CreateSimpleTx creates a new signed transaction spending unspent P2PKH
-// outputs with at laest minconf confirmations spending to any number of
+// outputs with at least minconf confirmations spending to any number of
 // address/amount pairs.  Change and an appropriate transaction fee are
 // automatically included, if necessary.  All transaction creation through this
 // function is serialized to prevent the creation of many transactions which
 // spend the same outputs.
+//
+// NOTE: The dryRun argument can be set true to create a tx that doesn't alter
+// the database. A tx created with this set to true SHOULD NOT be broadcasted.
 func (w *Wallet) CreateSimpleTx(account uint32, outputs []*wire.TxOut,
-	minconf int32, satPerKb btcutil.Amount) (*txauthor.AuthoredTx, error) {
+	minconf int32, satPerKb btcutil.Amount, dryRun bool) (
+	*txauthor.AuthoredTx, error) {
 
 	req := createTxRequest{
 		account:     account,
 		outputs:     outputs,
 		minconf:     minconf,
 		feeSatPerKB: satPerKb,
+		dryRun:      dryRun,
 		resp:        make(chan createTxResponse),
 	}
 	w.createTxRequests <- req
@@ -3209,7 +3215,9 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 	// transaction will be added to the database in order to ensure that we
 	// continue to re-broadcast the transaction upon restarts until it has
 	// been confirmed.
-	createdTx, err := w.CreateSimpleTx(account, outputs, minconf, satPerKb)
+	createdTx, err := w.CreateSimpleTx(
+		account, outputs, minconf, satPerKb, false,
+	)
 	if err != nil {
 		return nil, err
 	}

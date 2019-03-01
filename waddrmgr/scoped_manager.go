@@ -818,33 +818,46 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		}
 	}
 
-	// Finally update the next address tracking and add the addresses to
-	// the cache after the newly generated addresses have been successfully
-	// added to the db.
 	managedAddresses := make([]ManagedAddress, 0, len(addressInfo))
 	for _, info := range addressInfo {
 		ma := info.managedAddr
-		s.addrs[addrKey(ma.Address().ScriptAddress())] = ma
-
-		// Add the new managed address to the list of addresses that
-		// need their private keys derived when the address manager is
-		// next unlocked.
-		if s.rootManager.IsLocked() && !s.rootManager.WatchOnly() {
-			s.deriveOnUnlock = append(s.deriveOnUnlock, info)
-		}
-
 		managedAddresses = append(managedAddresses, ma)
 	}
 
-	// Set the last address and next address for tracking.
-	ma := addressInfo[len(addressInfo)-1].managedAddr
-	if internal {
-		acctInfo.nextInternalIndex = nextIndex
-		acctInfo.lastInternalAddr = ma
-	} else {
-		acctInfo.nextExternalIndex = nextIndex
-		acctInfo.lastExternalAddr = ma
+	// Finally, create a closure that will update the next address tracking
+	// and add the addresses to the cache after the newly generated
+	// addresses have been successfully committed to the db.
+	onCommit := func() {
+		// Since this closure will be called when the DB transaction
+		// gets committed, we won't longer be holding the manager's
+		// mutex at that point. We must therefore re-acquire it before
+		// continuing.
+		s.mtx.Lock()
+		defer s.mtx.Unlock()
+
+		for _, info := range addressInfo {
+			ma := info.managedAddr
+			s.addrs[addrKey(ma.Address().ScriptAddress())] = ma
+
+			// Add the new managed address to the list of addresses
+			// that need their private keys derived when the
+			// address manager is next unlocked.
+			if s.rootManager.IsLocked() && !s.rootManager.WatchOnly() {
+				s.deriveOnUnlock = append(s.deriveOnUnlock, info)
+			}
+		}
+
+		// Set the last address and next address for tracking.
+		ma := addressInfo[len(addressInfo)-1].managedAddr
+		if internal {
+			acctInfo.nextInternalIndex = nextIndex
+			acctInfo.lastInternalAddr = ma
+		} else {
+			acctInfo.nextExternalIndex = nextIndex
+			acctInfo.lastExternalAddr = ma
+		}
 	}
+	ns.Tx().OnCommit(onCommit)
 
 	return managedAddresses, nil
 }

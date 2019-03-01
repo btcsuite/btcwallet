@@ -101,66 +101,87 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 // UTXO set and minconf policy. An additional output may be added to return
 // change to the wallet.  An appropriate fee is included based on the wallet's
 // current relay fee.  The wallet must be unlocked to create the transaction.
+//
+// NOTE: The dryRun argument can be set true to create a tx that doesn't alter
+// the database. A tx created with this set to true will intentionally have no
+// input scripts added and SHOULD NOT be broadcasted.
 func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32, feeSatPerKb btcutil.Amount) (tx *txauthor.AuthoredTx, err error) {
+	minconf int32, feeSatPerKb btcutil.Amount, dryRun bool) (
+	tx *txauthor.AuthoredTx, err error) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
 		return nil, err
 	}
 
-	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
-		addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	dbtx, err := w.db.BeginReadWriteTx()
+	if err != nil {
+		return nil, err
+	}
+	defer dbtx.Rollback()
 
-		// Get current block's height and hash.
-		bs, err := chainClient.BlockStamp()
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+	// Get current block's height and hash.
+	bs, err := chainClient.BlockStamp()
+	if err != nil {
+		return nil, err
+	}
+
+	eligible, err := w.findEligibleOutputs(dbtx, account, minconf, bs)
+	if err != nil {
+		return nil, err
+	}
+
+	inputSource := makeInputSource(eligible)
+	changeSource := func() ([]byte, error) {
+		// Derive the change output script.  As a hack to allow
+		// spending from the imported account, change addresses are
+		// created from account 0.
+		var changeAddr btcutil.Address
+		var err error
+		if account == waddrmgr.ImportedAddrAccount {
+			changeAddr, err = w.newChangeAddress(addrmgrNs, 0)
+		} else {
+			changeAddr, err = w.newChangeAddress(addrmgrNs, account)
+		}
 		if err != nil {
-			return err
+			return nil, err
 		}
+		return txscript.PayToAddrScript(changeAddr)
+	}
+	tx, err = txauthor.NewUnsignedTransaction(outputs, feeSatPerKb,
+		inputSource, changeSource)
+	if err != nil {
+		return nil, err
+	}
 
-		eligible, err := w.findEligibleOutputs(dbtx, account, minconf, bs)
-		if err != nil {
-			return err
-		}
+	// Randomize change position, if change exists, before signing.  This
+	// doesn't affect the serialize size, so the change amount will still
+	// be valid.
+	if tx.ChangeIndex >= 0 {
+		tx.RandomizeChangePosition()
+	}
 
-		inputSource := makeInputSource(eligible)
-		changeSource := func() ([]byte, error) {
-			// Derive the change output script.  As a hack to allow
-			// spending from the imported account, change addresses
-			// are created from account 0.
-			var changeAddr btcutil.Address
-			var err error
-			if account == waddrmgr.ImportedAddrAccount {
-				changeAddr, err = w.newChangeAddress(addrmgrNs, 0)
-			} else {
-				changeAddr, err = w.newChangeAddress(addrmgrNs, account)
-			}
-			if err != nil {
-				return nil, err
-			}
-			return txscript.PayToAddrScript(changeAddr)
-		}
-		tx, err = txauthor.NewUnsignedTransaction(outputs, feeSatPerKb,
-			inputSource, changeSource)
-		if err != nil {
-			return err
-		}
+	// If a dry run was requested, we return now before adding the input
+	// scripts, and don't commit the database transaction. The DB will be
+	// rolled back when this method returns to ensure the dry run didn't
+	// alter the DB in any way.
+	if dryRun {
+		return tx, nil
+	}
 
-		// Randomize change position, if change exists, before signing.
-		// This doesn't affect the serialize size, so the change amount
-		// will still be valid.
-		if tx.ChangeIndex >= 0 {
-			tx.RandomizeChangePosition()
-		}
-
-		return tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
-	})
+	err = tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
 	if err != nil {
 		return nil, err
 	}
 
 	err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := dbtx.Commit(); err != nil {
 		return nil, err
 	}
 

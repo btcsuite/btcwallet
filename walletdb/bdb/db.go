@@ -86,7 +86,7 @@ func (tx *transaction) DeleteTopLevelBucket(key []byte) error {
 // Commit commits all changes that have been made through the root bucket and
 // all of its sub-buckets to persistent storage.
 //
-// This function is part of the walletdb.Tx interface implementation.
+// This function is part of the walletdb.ReadWriteTx interface implementation.
 func (tx *transaction) Commit() error {
 	return convertErr(tx.boltTx.Commit())
 }
@@ -94,9 +94,17 @@ func (tx *transaction) Commit() error {
 // Rollback undoes all changes that have been made to the root bucket and all of
 // its sub-buckets.
 //
-// This function is part of the walletdb.Tx interface implementation.
+// This function is part of the walletdb.ReadTx interface implementation.
 func (tx *transaction) Rollback() error {
 	return convertErr(tx.boltTx.Rollback())
+}
+
+// OnCommit takes a function closure that will be executed when the transaction
+// successfully gets committed.
+//
+// This function is part of the walletdb.ReadWriteTx interface implementation.
+func (tx *transaction) OnCommit(f func()) {
+	tx.boltTx.OnCommit(f)
 }
 
 // bucket is an internal type used to represent a collection of key/value pairs
@@ -128,7 +136,7 @@ func (b *bucket) NestedReadBucket(key []byte) walletdb.ReadBucket {
 // if the key is empty, or ErrIncompatibleValue if the key value is otherwise
 // invalid.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
 func (b *bucket) CreateBucket(key []byte) (walletdb.ReadWriteBucket, error) {
 	boltBucket, err := (*bbolt.Bucket)(b).CreateBucket(key)
 	if err != nil {
@@ -141,7 +149,7 @@ func (b *bucket) CreateBucket(key []byte) (walletdb.ReadWriteBucket, error) {
 // given key if it does not already exist.  Returns ErrBucketNameRequired if the
 // key is empty or ErrIncompatibleValue if the key value is otherwise invalid.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
 func (b *bucket) CreateBucketIfNotExists(key []byte) (walletdb.ReadWriteBucket, error) {
 	boltBucket, err := (*bbolt.Bucket)(b).CreateBucketIfNotExists(key)
 	if err != nil {
@@ -154,7 +162,7 @@ func (b *bucket) CreateBucketIfNotExists(key []byte) (walletdb.ReadWriteBucket, 
 // ErrTxNotWritable if attempted against a read-only transaction and
 // ErrBucketNotFound if the specified bucket does not exist.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
 func (b *bucket) DeleteNestedBucket(key []byte) error {
 	return convertErr((*bbolt.Bucket)(b).DeleteBucket(key))
 }
@@ -167,7 +175,7 @@ func (b *bucket) DeleteNestedBucket(key []byte) error {
 // transaction.  Attempting to access them after a transaction has ended will
 // likely result in an access violation.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadBucket interface implementation.
 func (b *bucket) ForEach(fn func(k, v []byte) error) error {
 	return convertErr((*bbolt.Bucket)(b).ForEach(fn))
 }
@@ -176,7 +184,7 @@ func (b *bucket) ForEach(fn func(k, v []byte) error) error {
 // already exist are added and keys that already exist are overwritten.  Returns
 // ErrTxNotWritable if attempted against a read-only transaction.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
 func (b *bucket) Put(key, value []byte) error {
 	return convertErr((*bbolt.Bucket)(b).Put(key, value))
 }
@@ -188,7 +196,7 @@ func (b *bucket) Put(key, value []byte) error {
 // transaction.  Attempting to access it after a transaction has ended
 // will likely result in an access violation.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadBucket interface implementation.
 func (b *bucket) Get(key []byte) []byte {
 	return (*bbolt.Bucket)(b).Get(key)
 }
@@ -197,7 +205,7 @@ func (b *bucket) Get(key []byte) []byte {
 // not exist does not return an error.  Returns ErrTxNotWritable if attempted
 // against a read-only transaction.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
 func (b *bucket) Delete(key []byte) error {
 	return convertErr((*bbolt.Bucket)(b).Delete(key))
 }
@@ -209,9 +217,18 @@ func (b *bucket) ReadCursor() walletdb.ReadCursor {
 // ReadWriteCursor returns a new cursor, allowing for iteration over the bucket's
 // key/value pairs and nested buckets in forward or backward order.
 //
-// This function is part of the walletdb.Bucket interface implementation.
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
 func (b *bucket) ReadWriteCursor() walletdb.ReadWriteCursor {
 	return (*cursor)((*bbolt.Bucket)(b).Cursor())
+}
+
+// Tx returns the bucket's transaction.
+//
+// This function is part of the walletdb.ReadWriteBucket interface implementation.
+func (b *bucket) Tx() walletdb.ReadWriteTx {
+	return &transaction{
+		(*bbolt.Bucket)(b).Tx(),
+	}
 }
 
 // cursor represents a cursor over key/value pairs and nested buckets of a
@@ -228,35 +245,35 @@ type cursor bbolt.Cursor
 // transaction, or ErrIncompatibleValue if attempted when the cursor points to a
 // nested bucket.
 //
-// This function is part of the walletdb.Cursor interface implementation.
+// This function is part of the walletdb.ReadWriteCursor interface implementation.
 func (c *cursor) Delete() error {
 	return convertErr((*bbolt.Cursor)(c).Delete())
 }
 
 // First positions the cursor at the first key/value pair and returns the pair.
 //
-// This function is part of the walletdb.Cursor interface implementation.
+// This function is part of the walletdb.ReadCursor interface implementation.
 func (c *cursor) First() (key, value []byte) {
 	return (*bbolt.Cursor)(c).First()
 }
 
 // Last positions the cursor at the last key/value pair and returns the pair.
 //
-// This function is part of the walletdb.Cursor interface implementation.
+// This function is part of the walletdb.ReadCursor interface implementation.
 func (c *cursor) Last() (key, value []byte) {
 	return (*bbolt.Cursor)(c).Last()
 }
 
 // Next moves the cursor one key/value pair forward and returns the new pair.
 //
-// This function is part of the walletdb.Cursor interface implementation.
+// This function is part of the walletdb.ReadCursor interface implementation.
 func (c *cursor) Next() (key, value []byte) {
 	return (*bbolt.Cursor)(c).Next()
 }
 
 // Prev moves the cursor one key/value pair backward and returns the new pair.
 //
-// This function is part of the walletdb.Cursor interface implementation.
+// This function is part of the walletdb.ReadCursor interface implementation.
 func (c *cursor) Prev() (key, value []byte) {
 	return (*bbolt.Cursor)(c).Prev()
 }
@@ -264,7 +281,7 @@ func (c *cursor) Prev() (key, value []byte) {
 // Seek positions the cursor at the passed seek key. If the key does not exist,
 // the cursor is moved to the next key after seek. Returns the new pair.
 //
-// This function is part of the walletdb.Cursor interface implementation.
+// This function is part of the walletdb.ReadCursor interface implementation.
 func (c *cursor) Seek(seek []byte) (key, value []byte) {
 	return (*bbolt.Cursor)(c).Seek(seek)
 }
