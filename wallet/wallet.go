@@ -732,8 +732,10 @@ func (w *Wallet) recovery(startHeight int32) error {
 		return err
 	}
 
-	log.Infof("Recovered addresses from blocks %d-%d", blockBatch[0].Height,
-		blockBatch[len(blockBatch)-1].Height)
+	if len(blockBatch) > 0 {
+		log.Infof("Recovered addresses from blocks %d-%d", blockBatch[0].Height,
+			blockBatch[len(blockBatch)-1].Height)
+	}
 
 	return nil
 }
