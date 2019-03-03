@@ -515,6 +515,17 @@ func (w *Wallet) scanChain(startHeight int32,
 				return err
 			}
 		}
+
+		// if we have reached our initial bestHeight then we might be in a case
+		// where isCurrent is true but we have an "old" bestHeight.
+		// Therefore, we refresh the bestHeight at this point to ensure we
+		// won't exit early the scan loop.
+		if height == bestHeight {
+			_, bestHeight, err = chainClient.GetBestBlock()
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
