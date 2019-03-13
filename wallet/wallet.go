@@ -518,14 +518,19 @@ func (w *Wallet) scanChain(startHeight int32,
 			return err
 		}
 
-		// If we've reached our best height and we're not current, we'll
-		// wait for blocks at tip to ensure we go through all existent
-		// blocks.
-		for height == bestHeight && !isCurrent(bestHeight) {
+		// If we've reached our best height, we'll wait for blocks at
+		// tip to ensure we go through all existent blocks in the chain.
+		// We'll update our bestHeight before checking if we're current
+		// with the chain to ensure we process any additional blocks
+		// that came in while we were scanning from our starting point.
+		for height == bestHeight {
 			time.Sleep(100 * time.Millisecond)
 			_, bestHeight, err = chainClient.GetBestBlock()
 			if err != nil {
 				return err
+			}
+			if isCurrent(bestHeight) {
+				break
 			}
 		}
 	}
