@@ -450,6 +450,18 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	return w.rescanWithTarget(addrs, unspent, nil)
 }
 
+// isDevEnv determines whether the wallet is currently under a local developer
+// environment, e.g. simnet or regtest.
+func (w *Wallet) isDevEnv() bool {
+	switch uint32(w.ChainParams().Net) {
+	case uint32(chaincfg.RegressionNetParams.Net):
+	case uint32(chaincfg.SimNetParams.Net):
+	default:
+		return false
+	}
+	return true
+}
+
 // scanChain is a helper method that scans the chain from the starting height
 // until the tip of the chain. The onBlock callback can be used to perform
 // certain operations for every block that we process as we scan the chain.
@@ -463,7 +475,7 @@ func (w *Wallet) scanChain(startHeight int32,
 
 	// isCurrent is a helper function that we'll use to determine if the
 	// chain backend is currently synced. When running with a btcd or
-	// bitcoind backend, It will use the height of the latest checkpoint as
+	// bitcoind backend, it will use the height of the latest checkpoint as
 	// its lower bound.
 	var latestCheckptHeight int32
 	if len(w.chainParams.Checkpoints) > 0 {
@@ -471,9 +483,10 @@ func (w *Wallet) scanChain(startHeight int32,
 			Checkpoints[len(w.chainParams.Checkpoints)-1].Height
 	}
 	isCurrent := func(bestHeight int32) bool {
-		// If the best height is zero, we assume the chain backend
-		// still is looking for peers to sync to.
-		if bestHeight == 0 {
+		// If the best height is zero, we assume the chain backend is
+		// still looking for peers to sync to in the case of a global
+		// network, e.g., testnet and mainnet.
+		if bestHeight == 0 && !w.isDevEnv() {
 			return false
 		}
 
