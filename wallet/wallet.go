@@ -612,11 +612,24 @@ func (w *Wallet) syncToBirthday() (*waddrmgr.BlockStamp, error) {
 	}
 
 	// If a birthday stamp has yet to be found, we'll return an error
-	// indicating so.
-	if birthdayStamp == nil {
+	// indicating so, but only if this is a live chain like it is the case
+	// with testnet and mainnet.
+	if birthdayStamp == nil && !w.isDevEnv() {
 		tx.Rollback()
 		return nil, fmt.Errorf("did not find a suitable birthday "+
 			"block with a timestamp greater than %v", birthday)
+	}
+
+	// Otherwise, if we're in a development environment and we've yet to
+	// find a birthday block due to the chain not being current, we'll
+	// use the last block we've synced to as our birthday to proceed.
+	if birthdayStamp == nil {
+		syncedTo := w.Manager.SyncedTo()
+		err := w.Manager.SetBirthdayBlock(ns, syncedTo, true)
+		if err != nil {
+			return nil, err
+		}
+		birthdayStamp = &syncedTo
 	}
 
 	if err := tx.Commit(); err != nil {
