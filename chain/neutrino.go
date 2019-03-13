@@ -381,7 +381,8 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		})
 	}
 
-	newRescan := s.CS.NewRescan(
+	newRescan := neutrino.NewRescan(
+		&neutrino.RescanChainSource{s.CS},
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
@@ -431,7 +432,8 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.lastProgressSent = true
 
 	// Rescan with just the specified addresses.
-	newRescan := s.CS.NewRescan(
+	newRescan := neutrino.NewRescan(
+		&neutrino.RescanChainSource{s.CS},
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
