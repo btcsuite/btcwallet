@@ -842,7 +842,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 			// Add the new managed address to the list of addresses
 			// that need their private keys derived when the
 			// address manager is next unlocked.
-			if s.rootManager.IsLocked() && !s.rootManager.WatchOnly() {
+			if s.rootManager.isLocked() && !s.rootManager.watchOnly() {
 				s.deriveOnUnlock = append(s.deriveOnUnlock, info)
 			}
 		}

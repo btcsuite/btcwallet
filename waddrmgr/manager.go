@@ -337,6 +337,14 @@ func (m *Manager) WatchOnly() bool {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
+	return m.watchOnly()
+}
+
+// watchOnly returns true if the root manager is in watch only mode, and false
+// otherwise.
+//
+// NOTE: This method requires the Manager's lock to be held.
+func (m *Manager) watchOnly() bool {
 	return m.watchingOnly
 }
 
