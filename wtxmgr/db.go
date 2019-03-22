@@ -1246,12 +1246,43 @@ func fetchUnminedInputSpendTxHashes(ns walletdb.ReadBucket, k []byte) []chainhas
 	return spendTxHashes
 }
 
-func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, k []byte) error {
-	err := ns.NestedReadWriteBucket(bucketUnminedInputs).Delete(k)
+// deleteRawUnminedInput removes a spending transaction entry from the list of
+// spending transactions for a given input.
+func deleteRawUnminedInput(ns walletdb.ReadWriteBucket, outPointKey []byte,
+	targetSpendHash chainhash.Hash) error {
+
+	// We'll start by fetching all of the possible spending transactions.
+	unminedInputs := ns.NestedReadWriteBucket(bucketUnminedInputs)
+	spendHashes := unminedInputs.Get(outPointKey)
+	if len(spendHashes) == 0 {
+		return nil
+	}
+
+	// We'll iterate through them and pick all the ones that don't match the
+	// specified spending transaction.
+	var newSpendHashes []byte
+	numHashes := len(spendHashes) / 32
+	for i, idx := 0, 0; i < numHashes; i, idx = i+1, idx+32 {
+		spendHash := spendHashes[idx : idx+32]
+		if !bytes.Equal(targetSpendHash[:], spendHash) {
+			newSpendHashes = append(newSpendHashes, spendHash...)
+		}
+	}
+
+	// If there aren't any entries left after filtering them, then we can
+	// remove the record completely. Otherwise, we'll store the filtered
+	// records.
+	var err error
+	if len(newSpendHashes) == 0 {
+		err = unminedInputs.Delete(outPointKey)
+	} else {
+		err = unminedInputs.Put(outPointKey, newSpendHashes)
+	}
 	if err != nil {
-		str := "failed to delete unmined input"
+		str := "failed to delete unmined input spend"
 		return storeError(ErrDatabase, str, err)
 	}
+
 	return nil
 }
 

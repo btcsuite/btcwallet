@@ -69,13 +69,19 @@ func (s *Store) removeDoubleSpends(ns walletdb.ReadWriteBucket, rec *TxRecord) e
 
 		doubleSpendHashes := fetchUnminedInputSpendTxHashes(ns, prevOutKey)
 		for _, doubleSpendHash := range doubleSpendHashes {
-			doubleSpendVal := existsRawUnmined(ns, doubleSpendHash[:])
+			// We'll make sure not to remove ourselves.
+			if rec.Hash == doubleSpendHash {
+				continue
+			}
 
 			// If the spending transaction spends multiple outputs
 			// from the same transaction, we'll find duplicate
 			// entries within the store, so it's possible we're
 			// unable to find it if the conflicts have already been
 			// removed in a previous iteration.
+			doubleSpendVal := existsRawUnmined(
+				ns, doubleSpendHash[:],
+			)
 			if doubleSpendVal == nil {
 				continue
 			}
@@ -91,6 +97,7 @@ func (s *Store) removeDoubleSpends(ns walletdb.ReadWriteBucket, rec *TxRecord) e
 
 			log.Debugf("Removing double spending transaction %v",
 				doubleSpend.Hash)
+
 			if err := s.removeConflict(ns, &doubleSpend); err != nil {
 				return err
 			}
@@ -112,13 +119,12 @@ func (s *Store) removeConflict(ns walletdb.ReadWriteBucket, rec *TxRecord) error
 		k := canonicalOutPoint(&rec.Hash, uint32(i))
 		spenderHashes := fetchUnminedInputSpendTxHashes(ns, k)
 		for _, spenderHash := range spenderHashes {
-			spenderVal := existsRawUnmined(ns, spenderHash[:])
-
 			// If the spending transaction spends multiple outputs
 			// from the same transaction, we'll find duplicate
 			// entries within the store, so it's possible we're
 			// unable to find it if the conflicts have already been
 			// removed in a previous iteration.
+			spenderVal := existsRawUnmined(ns, spenderHash[:])
 			if spenderVal == nil {
 				continue
 			}
@@ -147,7 +153,8 @@ func (s *Store) removeConflict(ns walletdb.ReadWriteBucket, rec *TxRecord) error
 	for _, input := range rec.MsgTx.TxIn {
 		prevOut := &input.PreviousOutPoint
 		k := canonicalOutPoint(&prevOut.Hash, prevOut.Index)
-		if err := deleteRawUnminedInput(ns, k); err != nil {
+		err := deleteRawUnminedInput(ns, k, rec.Hash)
+		if err != nil {
 			return err
 		}
 	}
