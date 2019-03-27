@@ -1460,6 +1460,120 @@ func TestRemoveUnminedTx(t *testing.T) {
 	checkBalance(btcutil.Amount(initialBalance), true)
 }
 
+// TestOutputsAfterRemoveDoubleSpend ensures that when we remove a transaction
+// that double spends an existing output within the wallet, it doesn't remove
+// any other spending transactions of the same output.
+func TestOutputsAfterRemoveDoubleSpend(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+
+	// In order to reproduce real-world scenarios, we'll use a new database
+	// transaction for each interaction with the wallet.
+	//
+	// We'll start off the test by creating a new coinbase output at height
+	// 100 and inserting it into the store.
+	b100 := BlockMeta{
+		Block: Block{Height: 100},
+		Time:  time.Now(),
+	}
+	cb := newCoinBase(1e8)
+	cbRec, err := NewTxRecordFromMsgTx(cb, b100.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, cbRec, &b100); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, cbRec, nil, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// We'll create three spending transactions for the same output and add
+	// them to the store.
+	const numSpendRecs = 3
+	spendRecs := make([]*TxRecord, 0, numSpendRecs)
+	for i := 0; i < numSpendRecs; i++ {
+		amt := int64((i + 1) * 1e7)
+		spend := spendOutput(&cbRec.Hash, 0, amt)
+		spendRec, err := NewTxRecordFromMsgTx(spend, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+			err := store.InsertTx(ns, spendRec, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.AddCredit(ns, spendRec, nil, 0, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+
+		spendRecs = append(spendRecs, spendRec)
+	}
+
+	// checkOutputs is a helper closure we'll use to ensure none of the
+	// other outputs from spending transactions have been removed from the
+	// store just because we removed one of the spending transactions.
+	checkOutputs := func(txs ...*TxRecord) {
+		t.Helper()
+
+		ops := make(map[wire.OutPoint]struct{})
+		for _, tx := range txs {
+			for i := range tx.MsgTx.TxOut {
+				ops[wire.OutPoint{
+					Hash:  tx.Hash,
+					Index: uint32(i),
+				}] = struct{}{}
+			}
+		}
+
+		commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+			t.Helper()
+
+			outputs, err := store.UnspentOutputs(ns)
+			if err != nil {
+				t.Fatalf("unable to get unspent outputs: %v", err)
+			}
+			if len(outputs) != len(ops) {
+				t.Fatalf("expected %d outputs, got %d", len(ops),
+					len(outputs))
+			}
+			for _, output := range outputs {
+				op := output.OutPoint
+				if _, ok := ops[op]; !ok {
+					t.Fatalf("found unexpected output %v", op)
+				}
+			}
+		})
+	}
+
+	// All of the outputs of our spending transactions should exist.
+	checkOutputs(spendRecs...)
+
+	// We'll then remove the last transaction we crafted from the store and
+	// check our outputs again to ensure they still exist.
+	spendToRemove := spendRecs[numSpendRecs-1]
+	spendRecs = spendRecs[:numSpendRecs-1]
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.RemoveUnminedTx(ns, spendToRemove); err != nil {
+			t.Fatalf("unable to remove unmined transaction: %v", err)
+		}
+	})
+
+	checkOutputs(spendRecs...)
+}
+
 // commitDBTx is a helper function that allows us to perform multiple operations
 // on a specific database's bucket as a single atomic operation.
 func commitDBTx(t *testing.T, store *Store, db walletdb.DB,
