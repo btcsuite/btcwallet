@@ -183,6 +183,7 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 			err = chainClient.Start()
 			if err != nil {
 				log.Errorf("Couldn't start Neutrino client: %s", err)
+				continue
 			}
 		} else {
 			chainClient, err = startChainRPC(certs)
