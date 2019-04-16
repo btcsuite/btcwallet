@@ -64,7 +64,6 @@ func (s *NeutrinoClient) BackEnd() string {
 
 // Start replicates the RPC client's Start method.
 func (s *NeutrinoClient) Start() error {
-	s.CS.Start()
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {

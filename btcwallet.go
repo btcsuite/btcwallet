@@ -172,6 +172,9 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 				err)
 			return
 		}
+
+		chainService.Start()
+		defer chainService.Stop()
 	} else {
 		certs = readCAFile()
 	}
