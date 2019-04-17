@@ -517,13 +517,15 @@ func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
 			s.clientMtx.Unlock()
 			return
 		}
+
 		// Only send the RescanFinished notification once the
 		// underlying chain service sees itself as current.
-		current := s.CS.IsCurrent() && s.lastProgressSent
+		current := s.CS.IsCurrent()
 		if current {
 			s.finished = true
 		}
 		s.clientMtx.Unlock()
+
 		if current {
 			select {
 			case s.enqueueNotification <- &RescanFinished{
