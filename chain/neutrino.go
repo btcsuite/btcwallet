@@ -587,6 +587,10 @@ func (s *NeutrinoClient) onBlockConnected(hash *chainhash.Hash, height int32,
 		case <-s.rescanQuit:
 		}
 	}
+
+	// Check if we're able to dispatch our final RescanFinished notification
+	// after processing this block.
+	s.dispatchRescanFinished()
 }
 
 // dispatchRescanFinished determines whether we're able to dispatch our final
