@@ -28,11 +28,12 @@ type NeutrinoClient struct {
 	// We currently support one rescan/notifiction goroutine per client
 	rescan *neutrino.Rescan
 
-	enqueueNotification chan interface{}
-	dequeueNotification chan interface{}
-	startTime           time.Time
-	lastProgressSent    bool
-	currentBlock        chan *waddrmgr.BlockStamp
+	enqueueNotification     chan interface{}
+	dequeueNotification     chan interface{}
+	startTime               time.Time
+	lastProgressSent        bool
+	lastFilteredBlockHeader *wire.BlockHeader
+	currentBlock            chan *waddrmgr.BlockStamp
 
 	quit       chan struct{}
 	rescanQuit chan struct{}
@@ -339,6 +340,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	s.scanning = true
 	s.finished = false
 	s.lastProgressSent = false
+	s.lastFilteredBlockHeader = nil
 	s.isRescan = true
 
 	bestBlock, err := s.CS.BestBlock()
@@ -432,6 +434,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	// Don't need RescanFinished or RescanProgress notifications.
 	s.finished = true
 	s.lastProgressSent = true
+	s.lastFilteredBlockHeader = nil
 
 	// Rescan with just the specified addresses.
 	newRescan := neutrino.NewRescan(
@@ -495,6 +498,7 @@ func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
 		}
 		ntfn.RelevantTxs = append(ntfn.RelevantTxs, rec)
 	}
+
 	select {
 	case s.enqueueNotification <- ntfn:
 	case <-s.quit:
@@ -502,6 +506,10 @@ func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
 	case <-s.rescanQuit:
 		return
 	}
+
+	s.clientMtx.Lock()
+	s.lastFilteredBlockHeader = header
+	s.clientMtx.Unlock()
 
 	// Handle RescanFinished notification if required.
 	bs, err := s.CS.BestBlock()
