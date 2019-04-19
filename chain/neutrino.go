@@ -512,40 +512,7 @@ func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
 	s.clientMtx.Unlock()
 
 	// Handle RescanFinished notification if required.
-	bs, err := s.CS.BestBlock()
-	if err != nil {
-		log.Errorf("Can't get chain service's best block: %s", err)
-		return
-	}
-
-	if bs.Hash == header.BlockHash() {
-		// Only send the RescanFinished notification once.
-		s.clientMtx.Lock()
-		if s.finished {
-			s.clientMtx.Unlock()
-			return
-		}
-		// Only send the RescanFinished notification once the
-		// underlying chain service sees itself as current.
-		current := s.CS.IsCurrent() && s.lastProgressSent
-		if current {
-			s.finished = true
-		}
-		s.clientMtx.Unlock()
-		if current {
-			select {
-			case s.enqueueNotification <- &RescanFinished{
-				Hash:   &bs.Hash,
-				Height: bs.Height,
-				Time:   header.Timestamp,
-			}:
-			case <-s.quit:
-				return
-			case <-s.rescanQuit:
-				return
-			}
-		}
-	}
+	s.dispatchRescanFinished()
 }
 
 // onBlockDisconnected sends appropriate notifications to the notification
@@ -619,6 +586,53 @@ func (s *NeutrinoClient) onBlockConnected(hash *chainhash.Hash, height int32,
 		case <-s.quit:
 		case <-s.rescanQuit:
 		}
+	}
+}
+
+// dispatchRescanFinished determines whether we're able to dispatch our final
+// RescanFinished notification in order to mark the wallet as synced with the
+// chain. If the notification has already been dispatched, then it won't be done
+// again.
+func (s *NeutrinoClient) dispatchRescanFinished() {
+	bs, err := s.CS.BestBlock()
+	if err != nil {
+		log.Errorf("Can't get chain service's best block: %s", err)
+		return
+	}
+
+	s.clientMtx.Lock()
+	if bs.Hash != s.lastFilteredBlockHeader.BlockHash() {
+		s.clientMtx.Unlock()
+		return
+	}
+
+	// Only send the RescanFinished notification once.
+	if s.finished {
+		s.clientMtx.Unlock()
+		return
+	}
+
+	// Only send the RescanFinished notification once the underlying chain
+	// service sees itself as current.
+	s.finished = s.CS.IsCurrent() && s.lastProgressSent
+	if !s.finished {
+		s.clientMtx.Unlock()
+		return
+	}
+
+	header := s.lastFilteredBlockHeader
+	s.clientMtx.Unlock()
+
+	select {
+	case s.enqueueNotification <- &RescanFinished{
+		Hash:   &bs.Hash,
+		Height: bs.Height,
+		Time:   header.Timestamp,
+	}:
+	case <-s.quit:
+		return
+	case <-s.rescanQuit:
+		return
 	}
 }
 
