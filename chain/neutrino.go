@@ -605,19 +605,19 @@ func (s *NeutrinoClient) dispatchRescanFinished() {
 	}
 
 	s.clientMtx.Lock()
-	if bs.Hash != s.lastFilteredBlockHeader.BlockHash() {
-		s.clientMtx.Unlock()
-		return
-	}
-
 	// Only send the RescanFinished notification once.
-	if s.finished {
+	if s.lastFilteredBlockHeader == nil || s.finished {
 		s.clientMtx.Unlock()
 		return
 	}
 
 	// Only send the RescanFinished notification once the underlying chain
 	// service sees itself as current.
+	if bs.Hash != s.lastFilteredBlockHeader.BlockHash() {
+		s.clientMtx.Unlock()
+		return
+	}
+
 	s.finished = s.CS.IsCurrent() && s.lastProgressSent
 	if !s.finished {
 		s.clientMtx.Unlock()
