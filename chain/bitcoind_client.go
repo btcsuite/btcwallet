@@ -945,13 +945,6 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 	}
 	headers.PushBack(previousHeader)
 
-	// Queue a RescanFinished notification to the caller with the last block
-	// processed throughout the rescan once done.
-	defer c.onRescanFinished(
-		previousHash, previousHeader.Height,
-		time.Unix(previousHeader.Time, 0),
-	)
-
 	// Cycle through all of the blocks known to bitcoind, being mindful of
 	// reorgs.
 	for i := previousHeader.Height + 1; i <= bestBlock.Height; i++ {
@@ -1088,6 +1081,8 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 			bestBlock.Timestamp = time.Unix(bestHeader.Time, 0)
 		}
 	}
+
+	c.onRescanFinished(bestHash, bestHeight, time.Unix(bestHeader.Time, 0))
 
 	return nil
 }
