@@ -3414,6 +3414,14 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	}
 
 	txid, err := chainClient.SendRawTransaction(tx, false)
+
+	// Determine if this was an RPC error thrown due to the transaction
+	// already confirming.
+	var rpcTxConfirmed bool
+	if rpcErr, ok := err.(*btcjson.RPCError); ok {
+		rpcTxConfirmed = rpcErr.Code == btcjson.ErrRPCTxAlreadyInChain
+	}
+
 	switch {
 	case err == nil:
 		return txid, nil
@@ -3425,12 +3433,16 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	//
 	// This error is returned when broadcasting/sending a transaction to a
 	// btcd node that already has it in their mempool.
-	case strings.Contains(err.Error(), "already have transaction"):
+	case strings.Contains(
+		strings.ToLower(err.Error()), "already have transaction",
+	):
 		fallthrough
 
 	// This error is returned when broadcasting a transaction to a bitcoind
 	// node that already has it in their mempool.
-	case strings.Contains(err.Error(), "txn-already-in-mempool"):
+	case strings.Contains(
+		strings.ToLower(err.Error()), "txn-already-in-mempool",
+	):
 		return txid, nil
 
 	// If the transaction has already confirmed, we can safely remove it
@@ -3438,19 +3450,21 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	// confirmed store. We'll avoid returning an error as the broadcast was
 	// in a sense successful.
 	//
-	// This error is returned when broadcasting/sending a transaction that
-	// has already confirmed to a btcd node.
-	case strings.Contains(err.Error(), "transaction already exists"):
+	// This error is returned when sending a transaction that has already
+	// confirmed to a btcd/bitcoind node over RPC.
+	case rpcTxConfirmed:
 		fallthrough
 
 	// This error is returned when broadcasting a transaction that has
-	// already confirmed to a bitcoind node.
-	case strings.Contains(err.Error(), "txn-already-known"):
+	// already confirmed to a btcd node over the P2P network.
+	case strings.Contains(
+		strings.ToLower(err.Error()), "transaction already exists",
+	):
 		fallthrough
 
-	// This error is returned when sending a transaction that has already
-	// confirmed to a bitcoind node over RPC.
-	case strings.Contains(err.Error(), "transaction already in block chain"):
+	// This error is returned when broadcasting a transaction that has
+	// already confirmed to a bitcoind node over the P2P network.
+	case strings.Contains(strings.ToLower(err.Error()), "txn-already-known"):
 		dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
 			txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
