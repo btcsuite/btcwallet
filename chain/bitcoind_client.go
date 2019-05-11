@@ -738,19 +738,22 @@ func (c *BitcoindClient) onRescanFinished(hash *chainhash.Hash, height int32,
 func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	reorgBlock *wire.MsgBlock) error {
 
-	log.Debugf("Possible reorg at block %s", reorgBlock.BlockHash())
-
 	// Retrieve the best known height based on the block which caused the
 	// reorg. This way, we can preserve the chain of blocks we need to
 	// retrieve.
 	bestHash := reorgBlock.BlockHash()
 	bestHeight, err := c.GetBlockHeight(&bestHash)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to get block height for %v: %v",
+			bestHash, err)
 	}
 
+	log.Debugf("Possible reorg at block: height=%v, hash=%s", bestHash,
+		bestHeight)
+
 	if bestHeight < currentBlock.Height {
-		log.Debug("Detected multiple reorgs")
+		log.Debugf("Detected multiple reorgs: best_height=%v below "+
+			"current_height=%v", bestHeight, currentBlock.Height)
 		return nil
 	}
 
@@ -763,7 +766,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	for i := bestHeight - 1; i >= currentBlock.Height; i-- {
 		block, err := c.GetBlock(&previousBlock)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to get block %v: %v",
+				previousBlock, err)
 		}
 		blocksToNotify.PushFront(block)
 		previousBlock = block.Header.PrevBlock
@@ -776,7 +780,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	// We'll start by retrieving the header to the best block known to us.
 	currentHeader, err := c.GetBlockHeader(&currentBlock.Hash)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to get block header for %v: %v",
+			currentBlock.Hash, err)
 	}
 
 	// Then, we'll walk backwards in the chain until we find our common
@@ -785,8 +790,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		// Since the previous hashes don't match, the current block has
 		// been reorged out of the chain, so we should send a
 		// BlockDisconnected notification for it.
-		log.Debugf("Disconnecting block %d (%v)", currentBlock.Height,
-			currentBlock.Hash)
+		log.Debugf("Disconnecting block: height=%v, hash=%v",
+			currentBlock.Height, currentBlock.Hash)
 
 		c.onBlockDisconnected(
 			&currentBlock.Hash, currentBlock.Height,
@@ -797,7 +802,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		// continue the common ancestor search.
 		currentHeader, err = c.GetBlockHeader(&currentHeader.PrevBlock)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to get block header for %v: %v",
+				currentHeader.PrevBlock, err)
 		}
 
 		currentBlock.Height--
@@ -808,7 +814,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		// once we've found our common ancestor.
 		block, err := c.GetBlock(&previousBlock)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to get block %v: %v",
+				previousBlock, err)
 		}
 		blocksToNotify.PushFront(block)
 		previousBlock = block.Header.PrevBlock
@@ -817,8 +824,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	// Disconnect the last block from the old chain. Since the previous
 	// block remains the same between the old and new chains, the tip will
 	// now be the last common ancestor.
-	log.Debugf("Disconnecting block %d (%v)", currentBlock.Height,
-		currentBlock.Hash)
+	log.Debugf("Disconnecting block: height=%v, hash=%v",
+		currentBlock.Height, currentBlock.Hash)
 
 	c.onBlockDisconnected(
 		&currentBlock.Hash, currentBlock.Height, currentHeader.Timestamp,
@@ -833,7 +840,8 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		nextHash := nextBlock.BlockHash()
 		nextHeader, err := c.GetBlockHeader(&nextHash)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to get block header for %v: %v",
+				nextHash, err)
 		}
 
 		_ = c.filterBlock(nextBlock, nextHeight, true)
@@ -906,8 +914,6 @@ func (c *BitcoindClient) FilterBlocks(
 // the client in the watch list. This is called only within a queue processing
 // loop.
 func (c *BitcoindClient) rescan(start chainhash.Hash) error {
-	log.Infof("Starting rescan from block %s", start)
-
 	// We start by getting the best already processed block. We only use
 	// the height, as the hash can change during a reorganization, which we
 	// catch by testing connectivity from known blocks to the previous
