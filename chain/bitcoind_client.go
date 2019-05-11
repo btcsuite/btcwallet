@@ -336,7 +336,7 @@ func (c *BitcoindClient) RescanBlocks(
 			continue
 		}
 
-		relevantTxs, err := c.filterBlock(block, header.Height, false)
+		relevantTxs := c.filterBlock(block, header.Height, false)
 		if len(relevantTxs) > 0 {
 			rescannedBlock := btcjson.RescannedBlock{
 				Hash: hash.String(),
@@ -567,14 +567,7 @@ func (c *BitcoindClient) ntfnHandler() {
 			c.bestBlockMtx.Unlock()
 			if newBlock.Header.PrevBlock == bestBlock.Hash {
 				newBlockHeight := bestBlock.Height + 1
-				_, err := c.filterBlock(
-					newBlock, newBlockHeight, true,
-				)
-				if err != nil {
-					log.Errorf("Unable to filter block %v: %v",
-						newBlock.BlockHash(), err)
-					continue
-				}
+				_ = c.filterBlock(newBlock, newBlockHeight, true)
 
 				// With the block succesfully filtered, we'll
 				// make it our new best block.
@@ -843,10 +836,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 			return err
 		}
 
-		_, err = c.filterBlock(nextBlock, nextHeight, true)
-		if err != nil {
-			return err
-		}
+		_ = c.filterBlock(nextBlock, nextHeight, true)
 
 		currentBlock.Height = nextHeight
 		currentBlock.Hash = nextHash
@@ -1065,9 +1055,7 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 		headers.PushBack(previousHeader)
 
 		// Notify the block and any of its relevant transacations.
-		if _, err = c.filterBlock(block, i, true); err != nil {
-			return err
-		}
+		_ = c.filterBlock(block, i, true)
 
 		if i%10000 == 0 {
 			c.onRescanProgress(
@@ -1101,12 +1089,12 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 // filterBlock filters a block for watched outpoints and addresses, and returns
 // any matching transactions, sending notifications along the way.
 func (c *BitcoindClient) filterBlock(block *wire.MsgBlock, height int32,
-	notify bool) ([]*wtxmgr.TxRecord, error) {
+	notify bool) []*wtxmgr.TxRecord {
 
 	// If this block happened before the client's birthday, then we'll skip
 	// it entirely.
 	if block.Header.Timestamp.Before(c.birthday) {
-		return nil, nil
+		return nil
 	}
 
 	if c.shouldNotifyBlocks() {
@@ -1162,7 +1150,7 @@ func (c *BitcoindClient) filterBlock(block *wire.MsgBlock, height int32,
 		c.onBlockConnected(&blockHash, height, block.Header.Timestamp)
 	}
 
-	return relevantTxs, nil
+	return relevantTxs
 }
 
 // filterTx determines whether a transaction is relevant to the client by
