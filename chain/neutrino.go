@@ -157,6 +157,12 @@ func (s *NeutrinoClient) GetBlockHeader(
 	return s.CS.GetBlockHeader(blockHash)
 }
 
+// IsCurrent returns whether the chain backend considers its view of the network
+// as "current".
+func (s *NeutrinoClient) IsCurrent() bool {
+	return s.CS.IsCurrent()
+}
+
 // SendRawTransaction replicates the RPC client's SendRawTransaction command.
 func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 	*chainhash.Hash, error) {

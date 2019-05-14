@@ -10,6 +10,11 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// isCurrentDelta is the delta duration we'll use from the present time to
+// determine if a backend is considered "current", i.e. synced to the tip of
+// the chain.
+const isCurrentDelta = 2 * time.Hour
+
 // BackEnds returns a list of the available back ends.
 // TODO: Refactor each into a driver and use dynamic registration.
 func BackEnds() []string {
@@ -31,6 +36,7 @@ type Interface interface {
 	GetBlock(*chainhash.Hash) (*wire.MsgBlock, error)
 	GetBlockHash(int64) (*chainhash.Hash, error)
 	GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader, error)
+	IsCurrent() bool
 	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)

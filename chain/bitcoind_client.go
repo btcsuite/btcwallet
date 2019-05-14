@@ -174,6 +174,20 @@ func (c *BitcoindClient) GetBlockHeaderVerbose(
 	return c.chainConn.client.GetBlockHeaderVerbose(hash)
 }
 
+// IsCurrent returns whether the chain backend considers its view of the network
+// as "current".
+func (c *BitcoindClient) IsCurrent() bool {
+	bestHash, _, err := c.GetBestBlock()
+	if err != nil {
+		return false
+	}
+	bestHeader, err := c.GetBlockHeader(bestHash)
+	if err != nil {
+		return false
+	}
+	return bestHeader.Timestamp.After(time.Now().Add(-isCurrentDelta))
+}
+
 // GetRawTransactionVerbose returns a transaction from the tx hash.
 func (c *BitcoindClient) GetRawTransactionVerbose(
 	hash *chainhash.Hash) (*btcjson.TxRawResult, error) {

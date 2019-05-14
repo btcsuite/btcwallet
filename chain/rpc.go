@@ -140,6 +140,20 @@ func (c *RPCClient) Stop() {
 	c.quitMtx.Unlock()
 }
 
+// IsCurrent returns whether the chain backend considers its view of the network
+// as "current".
+func (c *RPCClient) IsCurrent() bool {
+	bestHash, _, err := c.GetBestBlock()
+	if err != nil {
+		return false
+	}
+	bestHeader, err := c.GetBlockHeader(bestHash)
+	if err != nil {
+		return false
+	}
+	return bestHeader.Timestamp.After(time.Now().Add(-isCurrentDelta))
+}
+
 // Rescan wraps the normal Rescan command with an additional paramter that
 // allows us to map an oupoint to the address in the chain that it pays to.
 // This is useful when using BIP 158 filters as they include the prev pkScript
