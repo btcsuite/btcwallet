@@ -327,7 +327,22 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 // finished. The birthday block can be passed in, if set, to ensure we can
 // properly detect if it gets rolled back.
 func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
-	// To start, if we've yet to find our birthday stamp, we'll do so now.
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
+	// We'll wait until the backend is synced to ensure we get the latest
+	// MaxReorgDepth blocks to store. We don't do this for development
+	// environments as we can't guarantee a lively chain.
+	if !w.isDevEnv() {
+		log.Debug("Waiting for chain backend to sync to tip")
+		if err := w.waitUntilBackendSynced(chainClient); err != nil {
+			return err
+		}
+		log.Debug("Chain backend synced to tip!")
+	}
+
 	if birthdayStamp == nil {
 		var err error
 		birthdayStamp, err = w.syncToBirthday()
@@ -357,11 +372,6 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	// before catching up with the rescan.
 	rollback := false
 	rollbackStamp := w.Manager.SyncedTo()
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return err
-	}
-
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
@@ -465,6 +475,26 @@ func (w *Wallet) isDevEnv() bool {
 		return false
 	}
 	return true
+}
+
+// waitUntilBackendSynced blocks until the chain backend considers itself
+// "current".
+func (w *Wallet) waitUntilBackendSynced(chainClient chain.Interface) error {
+	// We'll poll every second to determine if our chain considers itself
+	// "current".
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C:
+			if chainClient.IsCurrent() {
+				return nil
+			}
+		case <-w.quitChan():
+			return ErrWalletShuttingDown
+		}
+	}
 }
 
 // scanChain is a helper method that scans the chain from the starting height
