@@ -35,17 +35,6 @@ func (w *Wallet) handleChainNotifications() {
 		return
 	}
 
-	sync := func(w *Wallet, birthdayStamp *waddrmgr.BlockStamp) {
-		// At the moment there is no recourse if the rescan fails for
-		// some reason, however, the wallet will not be marked synced
-		// and many methods will error early since the wallet is known
-		// to be out of date.
-		err := w.syncWithChain(birthdayStamp)
-		if err != nil && !w.ShuttingDown() {
-			log.Warnf("Unable to synchronize wallet to chain: %v", err)
-		}
-	}
-
 	catchUpHashes := func(w *Wallet, client chain.Interface,
 		height int32) error {
 		// TODO(aakselrod): There's a race conditon here, which
@@ -119,14 +108,16 @@ func (w *Wallet) handleChainNotifications() {
 					chainClient, birthdayStore,
 				)
 				if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
-					err := fmt.Errorf("unable to sanity "+
+					panic(fmt.Errorf("Unable to sanity "+
 						"check wallet birthday block: %v",
-						err)
-					log.Error(err)
-					panic(err)
+						err))
 				}
 
-				go sync(w, birthdayBlock)
+				err = w.syncWithChain(birthdayBlock)
+				if err != nil && !w.ShuttingDown() {
+					panic(fmt.Errorf("Unable to synchronize "+
+						"wallet to chain: %v", err))
+				}
 			case chain.BlockConnected:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 					return w.connectBlock(tx, wtxmgr.BlockMeta(n))

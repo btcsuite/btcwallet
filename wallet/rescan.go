@@ -56,7 +56,11 @@ type rescanBatch struct {
 func (w *Wallet) SubmitRescan(job *RescanJob) <-chan error {
 	errChan := make(chan error, 1)
 	job.err = errChan
-	w.rescanAddJob <- job
+	select {
+	case w.rescanAddJob <- job:
+	case <-w.quitChan():
+		errChan <- ErrWalletShuttingDown
+	}
 	return errChan
 }
 
@@ -103,10 +107,11 @@ func (b *rescanBatch) done(err error) {
 // submissions, and possibly batching many waiting requests together so they
 // can be handled by a single rescan after the current one completes.
 func (w *Wallet) rescanBatchHandler() {
+	defer w.wg.Done()
+
 	var curBatch, nextBatch *rescanBatch
 	quit := w.quitChan()
 
-out:
 	for {
 		select {
 		case job := <-w.rescanAddJob:
@@ -114,7 +119,12 @@ out:
 				// Set current batch as this job and send
 				// request.
 				curBatch = job.batch()
-				w.rescanBatch <- curBatch
+				select {
+				case w.rescanBatch <- curBatch:
+				case <-quit:
+					job.err <- ErrWalletShuttingDown
+					return
+				}
 			} else {
 				// Create next batch if it doesn't exist, or
 				// merge the job.
@@ -134,9 +144,16 @@ out:
 						"currently running")
 					continue
 				}
-				w.rescanProgress <- &RescanProgressMsg{
+				select {
+				case w.rescanProgress <- &RescanProgressMsg{
 					Addresses:    curBatch.addrs,
 					Notification: n,
+				}:
+				case <-quit:
+					for _, errChan := range curBatch.errChans {
+						errChan <- ErrWalletShuttingDown
+					}
+					return
 				}
 
 			case *chain.RescanFinished:
@@ -146,15 +163,29 @@ out:
 						"currently running")
 					continue
 				}
-				w.rescanFinished <- &RescanFinishedMsg{
+				select {
+				case w.rescanFinished <- &RescanFinishedMsg{
 					Addresses:    curBatch.addrs,
 					Notification: n,
+				}:
+				case <-quit:
+					for _, errChan := range curBatch.errChans {
+						errChan <- ErrWalletShuttingDown
+					}
+					return
 				}
 
 				curBatch, nextBatch = nextBatch, nil
 
 				if curBatch != nil {
-					w.rescanBatch <- curBatch
+					select {
+					case w.rescanBatch <- curBatch:
+					case <-quit:
+						for _, errChan := range curBatch.errChans {
+							errChan <- ErrWalletShuttingDown
+						}
+						return
+					}
 				}
 
 			default:
@@ -163,11 +194,9 @@ out:
 			}
 
 		case <-quit:
-			break out
+			return
 		}
 	}
-
-	w.wg.Done()
 }
 
 // rescanProgressHandler handles notifications for partially and fully completed
@@ -280,5 +309,10 @@ func (w *Wallet) rescanWithTarget(addrs []btcutil.Address,
 	}
 
 	// Submit merged job and block until rescan completes.
-	return <-w.SubmitRescan(job)
+	select {
+	case err := <-w.SubmitRescan(job):
+		return err
+	case <-w.quitChan():
+		return ErrWalletShuttingDown
+	}
 }

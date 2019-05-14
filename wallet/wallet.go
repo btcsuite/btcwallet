@@ -54,13 +54,18 @@ const (
 	recoveryBatchSize = 2000
 )
 
-// ErrNotSynced describes an error where an operation cannot complete
-// due wallet being out of sync (and perhaps currently syncing with)
-// the remote chain server.
-var ErrNotSynced = errors.New("wallet is not synchronized with the chain server")
-
-// Namespace bucket keys.
 var (
+	// ErrNotSynced describes an error where an operation cannot complete
+	// due wallet being out of sync (and perhaps currently syncing with)
+	// the remote chain server.
+	ErrNotSynced = errors.New("wallet is not synchronized with the chain server")
+
+	// ErrWalletShuttingDown is an error returned when we attempt to make a
+	// request to the wallet but it is in the process of or has already shut
+	// down.
+	ErrWalletShuttingDown = errors.New("wallet shutting down")
+
+	// Namespace bucket keys.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
