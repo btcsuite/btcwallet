@@ -367,16 +367,9 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	// If the wallet requested an on-chain recovery of its funds, we'll do
 	// so now.
 	if w.recoveryWindow > 0 {
-		// We'll start the recovery from our birthday unless we were
-		// in the middle of a previous recovery attempt. If that's the
-		// case, we'll resume from that point.
-		startHeight := birthdayStamp.Height
-		walletHeight := w.Manager.SyncedTo().Height
-		if walletHeight > startHeight {
-			startHeight = walletHeight
-		}
-		if err := w.recovery(startHeight); err != nil {
-			return err
+		if err := w.recovery(chainClient, birthdayStamp); err != nil {
+			return fmt.Errorf("unable to perform wallet recovery: "+
+				"%v", err)
 		}
 	}
 
@@ -460,9 +453,9 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		return err
 	}
 
-	// Finally, we'll trigger a wallet rescan from the currently synced tip
-	// and request notifications for transactions sending to all wallet
-	// addresses and spending all wallet UTXOs.
+	// Finally, we'll trigger a wallet rescan and request notifications for
+	// transactions sending to all wallet addresses and spending all wallet
+	// UTXOs.
 	var (
 		addrs   []btcutil.Address
 		unspent []wtxmgr.Credit
@@ -666,11 +659,11 @@ func (w *Wallet) scanChain(startHeight int32,
 }
 
 // recovery attempts to recover any unspent outputs that pay to any of our
-// addresses starting from the specified height.
-//
-// NOTE: The starting height must be at least the height of the wallet's
-// birthday or later.
-func (w *Wallet) recovery(startHeight int32) error {
+// addresses starting from our birthday, or the wallet's tip (if higher), which
+// would indicate resuming a recovery after a restart.
+func (w *Wallet) recovery(chainClient chain.Interface,
+	birthdayBlock *waddrmgr.BlockStamp) error {
+
 	log.Infof("RECOVERY MODE ENABLED -- rescanning for used addresses "+
 		"with recovery_window=%d", w.recoveryWindow)
 
@@ -687,108 +680,127 @@ func (w *Wallet) recovery(startHeight int32) error {
 	if err != nil {
 		return err
 	}
-	tx, err := w.db.BeginReadWriteTx()
-	if err != nil {
-		return err
-	}
-	txMgrNS := tx.ReadBucket(wtxmgrNamespaceKey)
-	credits, err := w.TxStore.UnspentOutputs(txMgrNS)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	addrMgrNS := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-	err = recoveryMgr.Resurrect(addrMgrNS, scopedMgrs, credits)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	// We'll also retrieve our chain backend client in order to filter the
-	// blocks as we go.
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	// We'll begin scanning the chain from the specified starting height.
-	// Since we assume that the lowest height we start with will at least be
-	// that of our birthday, we can just add every block we process from
-	// this point forward to the recovery batch.
-	err = w.scanChain(startHeight, func(height int32,
-		hash *chainhash.Hash, header *wire.BlockHeader) error {
-
-		recoveryMgr.AddToBlockBatch(hash, height, header.Timestamp)
-
-		// We'll checkpoint our current batch every 2K blocks, so we'll
-		// need to start a new database transaction. If our current
-		// batch is empty, then this will act as a NOP.
-		if height%recoveryBatchSize == 0 {
-			blockBatch := recoveryMgr.BlockBatch()
-			err := w.recoverDefaultScopes(
-				chainClient, tx, addrMgrNS, blockBatch,
-				recoveryMgr.State(),
-			)
-			if err != nil {
-				return err
-			}
-
-			// Clear the batch of all processed blocks.
-			recoveryMgr.ResetBlockBatch()
-
-			if err := tx.Commit(); err != nil {
-				return err
-			}
-
-			log.Infof("Recovered addresses from blocks %d-%d",
-				blockBatch[0].Height,
-				blockBatch[len(blockBatch)-1].Height)
-
-			tx, err = w.db.BeginReadWriteTx()
-			if err != nil {
-				return err
-			}
-			addrMgrNS = tx.ReadWriteBucket(waddrmgrNamespaceKey)
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		txMgrNS := tx.ReadBucket(wtxmgrNamespaceKey)
+		credits, err := w.TxStore.UnspentOutputs(txMgrNS)
+		if err != nil {
+			return err
 		}
+		addrMgrNS := tx.ReadBucket(waddrmgrNamespaceKey)
+		return recoveryMgr.Resurrect(addrMgrNS, scopedMgrs, credits)
+	})
+	if err != nil {
+		return err
+	}
 
-		// Since the recovery in a way acts as a rescan, we'll update
-		// the wallet's tip to point to the current block so that we
-		// don't unnecessarily rescan the same block again later on.
-		return w.Manager.SetSyncedTo(addrMgrNS, &waddrmgr.BlockStamp{
+	// We'll then need to determine the range of our recovery. This properly
+	// handles the case where we resume a previous recovery attempt after a
+	// restart.
+	startHeight, bestHeight, err := w.getSyncRange(chainClient, birthdayBlock)
+	if err != nil {
+		return err
+	}
+
+	// Now we can begin scanning the chain from the specified starting
+	// height. Since the recovery process itself acts as rescan, we'll also
+	// update our wallet's synced state along the way to reflect the blocks
+	// we process and prevent rescanning them later on.
+	//
+	// NOTE: We purposefully don't update our best height since we assume
+	// that a wallet rescan will be performed from the wallet's tip, which
+	// will be of bestHeight after completing the recovery process.
+	var blocks []*waddrmgr.BlockStamp
+	for height := startHeight; height <= bestHeight; height++ {
+		hash, err := chainClient.GetBlockHash(int64(height))
+		if err != nil {
+			return err
+		}
+		header, err := chainClient.GetBlockHeader(hash)
+		if err != nil {
+			return err
+		}
+		blocks = append(blocks, &waddrmgr.BlockStamp{
 			Hash:      *hash,
 			Height:    height,
 			Timestamp: header.Timestamp,
 		})
-	})
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
 
-	// Now that we've reached the chain tip, we can process our final batch
-	// with the remaining blocks if it did not reach its maximum size.
-	blockBatch := recoveryMgr.BlockBatch()
-	err = w.recoverDefaultScopes(
-		chainClient, tx, addrMgrNS, blockBatch, recoveryMgr.State(),
-	)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
+		// It's possible for us to run into blocks before our birthday
+		// if our birthday is after our reorg safe height, so we'll make
+		// sure to not add those to the batch.
+		if height >= birthdayBlock.Height {
+			recoveryMgr.AddToBlockBatch(
+				hash, height, header.Timestamp,
+			)
+		}
 
-	// With the recovery complete, we can persist our new state and exit.
-	if err := tx.Commit(); err != nil {
-		tx.Rollback()
-		return err
-	}
+		// We'll perform our recovery in batches of 2000 blocks.  It's
+		// possible for us to reach our best height without exceeding
+		// the recovery batch size, so we can proceed to commit our
+		// state to disk.
+		recoveryBatch := recoveryMgr.BlockBatch()
+		if len(recoveryBatch) == recoveryBatchSize || height == bestHeight {
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				for _, block := range blocks {
+					err := w.Manager.SetSyncedTo(ns, block)
+					if err != nil {
+						return err
+					}
+				}
+				return w.recoverDefaultScopes(
+					chainClient, tx, ns, recoveryBatch,
+					recoveryMgr.State(),
+				)
+			})
+			if err != nil {
+				return err
+			}
 
-	if len(blockBatch) > 0 {
-		log.Infof("Recovered addresses from blocks %d-%d", blockBatch[0].Height,
-			blockBatch[len(blockBatch)-1].Height)
+			if len(recoveryBatch) > 0 {
+				log.Infof("Recovered addresses from blocks "+
+					"%d-%d", recoveryBatch[0].Height,
+					recoveryBatch[len(recoveryBatch)-1].Height)
+			}
+
+			// Clear the batch of all processed blocks to reuse the
+			// same memory for future batches.
+			blocks = blocks[:0]
+			recoveryMgr.ResetBlockBatch()
+		}
 	}
 
 	return nil
+}
+
+// getSyncRange determines the best height range to sync with the chain to
+// ensure we don't rescan blocks more than once.
+func (w *Wallet) getSyncRange(chainClient chain.Interface,
+	birthdayBlock *waddrmgr.BlockStamp) (int32, int32, error) {
+
+	// The wallet requires to store up to MaxReorgDepth blocks, so we'll
+	// start from there, unless our birthday is before it.
+	_, bestHeight, err := chainClient.GetBestBlock()
+	if err != nil {
+		return 0, 0, err
+	}
+	startHeight := bestHeight - waddrmgr.MaxReorgDepth + 1
+	if startHeight < 0 {
+		startHeight = 0
+	}
+	if birthdayBlock.Height < startHeight {
+		startHeight = birthdayBlock.Height
+	}
+
+	// If the wallet's tip has surpassed our starting height, then we'll
+	// start there as we don't need to rescan blocks we've already
+	// processed.
+	walletHeight := w.Manager.SyncedTo().Height
+	if walletHeight > startHeight {
+		startHeight = walletHeight
+	}
+
+	return startHeight, bestHeight, nil
 }
 
 // defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
