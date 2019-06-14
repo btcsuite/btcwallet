@@ -13,14 +13,16 @@ import (
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
 
+const (
+	// defaultBlockInterval is the default time interval between any two
+	// blocks in a mocked chain.
+	defaultBlockInterval = 10 * time.Minute
+)
+
 var (
 	// chainParams are the chain parameters used throughout the wallet
 	// tests.
 	chainParams = chaincfg.MainNetParams
-
-	// blockInterval is the time interval between any two blocks in a mocked
-	// chain.
-	blockInterval = 10 * time.Minute
 )
 
 // mockChainConn is a mock in-memory implementation of the chainConn interface
@@ -36,9 +38,11 @@ type mockChainConn struct {
 var _ chainConn = (*mockChainConn)(nil)
 
 // createMockChainConn creates a new mock chain connection backed by a chain
-// with N blocks. Each block has a timestamp that is exactly 10 minutes after
+// with N blocks. Each block has a timestamp that is exactly blockInterval after
 // the previous block's timestamp.
-func createMockChainConn(genesis *wire.MsgBlock, n uint32) *mockChainConn {
+func createMockChainConn(genesis *wire.MsgBlock, n uint32,
+	blockInterval time.Duration) *mockChainConn {
+
 	c := &mockChainConn{
 		chainTip:    n,
 		blockHashes: make(map[uint32]chainhash.Hash),
@@ -163,7 +167,9 @@ func TestBirthdaySanityCheckVerifiedBirthdayBlock(t *testing.T) {
 	t.Parallel()
 
 	const chainTip = 5000
-	chainConn := createMockChainConn(chainParams.GenesisBlock, chainTip)
+	chainConn := createMockChainConn(
+		chainParams.GenesisBlock, chainTip, defaultBlockInterval,
+	)
 	expectedBirthdayBlock := waddrmgr.BlockStamp{Height: 1337}
 
 	// Our birthday store reflects that our birthday block has already been
@@ -205,10 +211,12 @@ func TestBirthdaySanityCheckLowerEstimate(t *testing.T) {
 	// We'll start by defining our birthday timestamp to be around the
 	// timestamp of the 1337th block.
 	genesisTimestamp := chainParams.GenesisBlock.Header.Timestamp
-	birthday := genesisTimestamp.Add(1337 * blockInterval)
+	birthday := genesisTimestamp.Add(1337 * defaultBlockInterval)
 
 	// We'll establish a connection to a mock chain of 5000 blocks.
-	chainConn := createMockChainConn(chainParams.GenesisBlock, 5000)
+	chainConn := createMockChainConn(
+		chainParams.GenesisBlock, 5000, defaultBlockInterval,
+	)
 
 	// Our birthday store will reflect that our birthday block is currently
 	// set as the genesis block. This value is too low and should be
@@ -256,10 +264,12 @@ func TestBirthdaySanityCheckHigherEstimate(t *testing.T) {
 	// We'll start by defining our birthday timestamp to be around the
 	// timestamp of the 1337th block.
 	genesisTimestamp := chainParams.GenesisBlock.Header.Timestamp
-	birthday := genesisTimestamp.Add(1337 * blockInterval)
+	birthday := genesisTimestamp.Add(1337 * defaultBlockInterval)
 
 	// We'll establish a connection to a mock chain of 5000 blocks.
-	chainConn := createMockChainConn(chainParams.GenesisBlock, 5000)
+	chainConn := createMockChainConn(
+		chainParams.GenesisBlock, 5000, defaultBlockInterval,
+	)
 
 	// Our birthday store will reflect that our birthday block is currently
 	// set as the chain tip. This value is too high and should be adjusted

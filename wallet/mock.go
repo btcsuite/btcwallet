@@ -41,6 +41,10 @@ func (m *mockChainClient) GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader,
 	return nil, nil
 }
 
+func (m *mockChainClient) IsCurrent() bool {
+	return false
+}
+
 func (m *mockChainClient) FilterBlocks(*chain.FilterBlocksRequest) (
 	*chain.FilterBlocksResponse, error) {
 	return nil, nil

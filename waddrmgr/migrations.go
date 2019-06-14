@@ -31,6 +31,10 @@ var versions = []migration.Version{
 		Number:    7,
 		Migration: resetSyncedBlockToBirthday,
 	},
+	{
+		Number:    8,
+		Migration: storeMaxReorgDepth,
+	},
 }
 
 // getLatestVersion returns the version number of the latest database version.
@@ -371,4 +375,38 @@ func resetSyncedBlockToBirthday(ns walletdb.ReadWriteBucket) error {
 	}
 
 	return PutSyncedTo(ns, &birthdayBlock)
+}
+
+// storeMaxReorgDepth is a migration responsible for allowing the wallet to only
+// maintain MaxReorgDepth block hashes stored in order to recover from long
+// reorgs.
+func storeMaxReorgDepth(ns walletdb.ReadWriteBucket) error {
+	// Retrieve the current tip of the wallet. We'll use this to determine
+	// the highest stale height we currently have stored within it.
+	syncedTo, err := fetchSyncedTo(ns)
+	if err != nil {
+		return err
+	}
+	maxStaleHeight := staleHeight(syncedTo.Height)
+
+	// It's possible for this height to be non-sensical if we have less than
+	// MaxReorgDepth blocks stored, so we can end the migration now.
+	if maxStaleHeight < 1 {
+		return nil
+	}
+
+	log.Infof("Removing block hash entries beyond maximum reorg depth of "+
+		"%v from current tip %v", MaxReorgDepth, syncedTo.Height)
+
+	// Otherwise, since we currently store all block hashes of the chain
+	// before this migration, we'll remove all stale block hash entries
+	// above the genesis block. This would leave us with only MaxReorgDepth
+	// blocks stored.
+	for height := maxStaleHeight; height > 0; height-- {
+		if err := deleteBlockHash(ns, height); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

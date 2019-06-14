@@ -7,7 +7,6 @@ package wallet
 import (
 	"bytes"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -33,17 +32,6 @@ func (w *Wallet) handleChainNotifications() {
 	if err != nil {
 		log.Errorf("handleChainNotifications called without RPC client")
 		return
-	}
-
-	sync := func(w *Wallet, birthdayStamp *waddrmgr.BlockStamp) {
-		// At the moment there is no recourse if the rescan fails for
-		// some reason, however, the wallet will not be marked synced
-		// and many methods will error early since the wallet is known
-		// to be out of date.
-		err := w.syncWithChain(birthdayStamp)
-		if err != nil && !w.ShuttingDown() {
-			log.Warnf("Unable to synchronize wallet to chain: %v", err)
-		}
 	}
 
 	catchUpHashes := func(w *Wallet, client chain.Interface,
@@ -119,29 +107,31 @@ func (w *Wallet) handleChainNotifications() {
 					chainClient, birthdayStore,
 				)
 				if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
-					err := fmt.Errorf("unable to sanity "+
+					panic(fmt.Errorf("Unable to sanity "+
 						"check wallet birthday block: %v",
-						err)
-					log.Error(err)
-					panic(err)
+						err))
 				}
 
-				go sync(w, birthdayBlock)
+				err = w.syncWithChain(birthdayBlock)
+				if err != nil && !w.ShuttingDown() {
+					panic(fmt.Errorf("Unable to synchronize "+
+						"wallet to chain: %v", err))
+				}
 			case chain.BlockConnected:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 					return w.connectBlock(tx, wtxmgr.BlockMeta(n))
 				})
-				notificationName = "blockconnected"
+				notificationName = "block connected"
 			case chain.BlockDisconnected:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 					return w.disconnectBlock(tx, wtxmgr.BlockMeta(n))
 				})
-				notificationName = "blockdisconnected"
+				notificationName = "block disconnected"
 			case chain.RelevantTx:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 					return w.addRelevantTx(tx, n.TxRecord, n.Block)
 				})
-				notificationName = "recvtx/redeemingtx"
+				notificationName = "relevant transaction"
 			case chain.FilteredBlockConnected:
 				// Atomically update for the whole block.
 				if len(n.RelevantTxs) > 0 {
@@ -158,13 +148,13 @@ func (w *Wallet) handleChainNotifications() {
 						return nil
 					})
 				}
-				notificationName = "filteredblockconnected"
+				notificationName = "filtered block connected"
 
 			// The following require some database maintenance, but also
 			// need to be reported to the wallet's rescan goroutine.
 			case *chain.RescanProgress:
 				err = catchUpHashes(w, chainClient, n.Height)
-				notificationName = "rescanprogress"
+				notificationName = "rescan progress"
 				select {
 				case w.rescanNotifications <- n:
 				case <-w.quitChan():
@@ -172,7 +162,7 @@ func (w *Wallet) handleChainNotifications() {
 				}
 			case *chain.RescanFinished:
 				err = catchUpHashes(w, chainClient, n.Height)
-				notificationName = "rescanprogress"
+				notificationName = "rescan finished"
 				w.SetChainSynced(true)
 				select {
 				case w.rescanNotifications <- n:
@@ -181,17 +171,24 @@ func (w *Wallet) handleChainNotifications() {
 				}
 			}
 			if err != nil {
-				// On out-of-sync blockconnected notifications, only
-				// send a debug message.
-				errStr := "Failed to process consensus server " +
-					"notification (name: `%s`, detail: `%v`)"
-				if notificationName == "blockconnected" &&
-					strings.Contains(err.Error(),
-						"couldn't get hash from database") {
-					log.Debugf(errStr, notificationName, err)
-				} else {
-					log.Errorf(errStr, notificationName, err)
+				// If we received a block connected notification
+				// while rescanning, then we can ignore logging
+				// the error as we'll properly catch up once we
+				// process the RescanFinished notification.
+				if notificationName == "block connected" &&
+					waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) &&
+					!w.ChainSynced() {
+
+					log.Debugf("Received block connected "+
+						"notification for height %v "+
+						"while rescanning",
+						n.(chain.BlockConnected).Height)
+					continue
 				}
+
+				log.Errorf("Unable to process chain backend "+
+					"%v notification: %v", notificationName,
+					err)
 			}
 		case <-w.quit:
 			return
@@ -473,140 +470,16 @@ func birthdaySanityCheck(chainConn chainConn,
 		return &birthdayBlock, nil
 	}
 
-	log.Debugf("Starting sanity check for the wallet's birthday block "+
-		"from: height=%d, hash=%v", birthdayBlock.Height,
-		birthdayBlock.Hash)
-
-	// Now, we'll need to determine if our block correctly reflects our
-	// timestamp. To do so, we'll fetch the block header and check its
-	// timestamp in the event that the birthday block's timestamp was not
-	// set (this is possible if it was set through the migration, since we
-	// do not store block timestamps).
-	candidate := birthdayBlock
-	header, err := chainConn.GetBlockHeader(&candidate.Hash)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get header for block hash "+
-			"%v: %v", candidate.Hash, err)
-	}
-	candidate.Timestamp = header.Timestamp
-
-	// We'll go back a day worth of blocks in the chain until we find a
-	// block whose timestamp is below our birthday timestamp.
-	heightDelta := int32(144)
-	for birthdayTimestamp.Before(candidate.Timestamp) {
-		// If the birthday block has reached genesis, then we can exit
-		// our search as there exists no data before this point.
-		if candidate.Height == 0 {
-			break
-		}
-
-		// To prevent requesting blocks out of range, we'll use a lower
-		// bound of the first block in the chain.
-		newCandidateHeight := int64(candidate.Height - heightDelta)
-		if newCandidateHeight < 0 {
-			newCandidateHeight = 0
-		}
-
-		// Then, we'll fetch the current candidate's hash and header to
-		// determine if it is valid.
-		hash, err := chainConn.GetBlockHash(newCandidateHeight)
-		if err != nil {
-			return nil, fmt.Errorf("unable to get block hash for "+
-				"height %d: %v", candidate.Height, err)
-		}
-		header, err := chainConn.GetBlockHeader(hash)
-		if err != nil {
-			return nil, fmt.Errorf("unable to get header for "+
-				"block hash %v: %v", candidate.Hash, err)
-		}
-
-		candidate.Hash = *hash
-		candidate.Height = int32(newCandidateHeight)
-		candidate.Timestamp = header.Timestamp
-
-		log.Debugf("Checking next birthday block candidate: "+
-			"height=%d, hash=%v, timestamp=%v",
-			candidate.Height, candidate.Hash,
-			candidate.Timestamp)
-	}
-
-	// To ensure we have a reasonable birthday block, we'll make sure it
-	// respects our birthday timestamp and it is within a reasonable delta.
-	// The birthday has already been adjusted to two days in the past of the
-	// actual birthday, so we'll make our expected delta to be within two
-	// hours of it to account for the network-adjusted time and prevent
-	// fetching more unnecessary blocks.
-	_, bestHeight, err := chainConn.GetBestBlock()
+	// Otherwise, we'll attempt to locate a better one now that we have
+	// access to the chain.
+	newBirthdayBlock, err := locateBirthdayBlock(chainConn, birthdayTimestamp)
 	if err != nil {
 		return nil, err
 	}
-	timestampDelta := birthdayTimestamp.Sub(candidate.Timestamp)
-	for timestampDelta > birthdayBlockDelta {
-		// We'll determine the height for our next candidate and make
-		// sure it is not out of range. If it is, we'll lower our height
-		// delta until finding a height within range.
-		newHeight := candidate.Height + heightDelta
-		if newHeight > bestHeight {
-			heightDelta /= 2
 
-			// If we've exhausted all of our possible options at a
-			// later height, then we can assume the current birthday
-			// block is our best estimate.
-			if heightDelta == 0 {
-				break
-			}
-
-			continue
-		}
-
-		// We'll fetch the header for the next candidate and compare its
-		// timestamp.
-		hash, err := chainConn.GetBlockHash(int64(newHeight))
-		if err != nil {
-			return nil, fmt.Errorf("unable to get block hash for "+
-				"height %d: %v", candidate.Height, err)
-		}
-		header, err := chainConn.GetBlockHeader(hash)
-		if err != nil {
-			return nil, fmt.Errorf("unable to get header for "+
-				"block hash %v: %v", hash, err)
-		}
-
-		log.Debugf("Checking next birthday block candidate: "+
-			"height=%d, hash=%v, timestamp=%v", newHeight, hash,
-			header.Timestamp)
-
-		// If this block has exceeded our birthday timestamp, we'll look
-		// for the next candidate with a lower height delta.
-		if birthdayTimestamp.Before(header.Timestamp) {
-			heightDelta /= 2
-
-			// If we've exhausted all of our possible options at a
-			// later height, then we can assume the current birthday
-			// block is our best estimate.
-			if heightDelta == 0 {
-				break
-			}
-
-			continue
-		}
-
-		// Otherwise, this is a valid candidate, so we'll check to see
-		// if it meets our expected timestamp delta.
-		candidate.Hash = *hash
-		candidate.Height = newHeight
-		candidate.Timestamp = header.Timestamp
-		timestampDelta = birthdayTimestamp.Sub(header.Timestamp)
-	}
-
-	// At this point, we've found a new, better candidate, so we'll write it
-	// to disk.
-	log.Debugf("Found a new valid wallet birthday block: height=%d, hash=%v",
-		candidate.Height, candidate.Hash)
-
-	if err := birthdayStore.SetBirthdayBlock(candidate); err != nil {
+	if err := birthdayStore.SetBirthdayBlock(*newBirthdayBlock); err != nil {
 		return nil, err
 	}
 
-	return &candidate, nil
+	return newBirthdayBlock, nil
 }
