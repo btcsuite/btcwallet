@@ -3172,7 +3172,10 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 	// Ensure the outputs to be created adhere to the network's consensus
 	// rules.
 	for _, output := range outputs {
-		if err := txrules.CheckOutput(output, satPerKb); err != nil {
+		err := txrules.CheckOutput(
+			output, txrules.DefaultRelayFeePerKb,
+		)
+		if err != nil {
 			return nil, err
 		}
 	}
