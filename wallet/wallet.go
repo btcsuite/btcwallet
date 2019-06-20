@@ -643,23 +643,24 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 		return err
 	}
 
-	// We'll then need to determine the range of our recovery. This properly
-	// handles the case where we resume a previous recovery attempt after a
-	// restart.
-	startHeight, bestHeight, err := w.getSyncRange(chainClient, birthdayBlock)
+	// Fetch the best height from the backend to determine when we should
+	// stop.
+	_, bestHeight, err := chainClient.GetBestBlock()
 	if err != nil {
 		return err
 	}
 
-	// Now we can begin scanning the chain from the specified starting
-	// height. Since the recovery process itself acts as rescan, we'll also
-	// update our wallet's synced state along the way to reflect the blocks
-	// we process and prevent rescanning them later on.
+	// Now we can begin scanning the chain from the wallet's current tip to
+	// ensure we properly handle restarts. Since the recovery process itself
+	// acts as rescan, we'll also update our wallet's synced state along the
+	// way to reflect the blocks we process and prevent rescanning them
+	// later on.
 	//
 	// NOTE: We purposefully don't update our best height since we assume
 	// that a wallet rescan will be performed from the wallet's tip, which
 	// will be of bestHeight after completing the recovery process.
 	var blocks []*waddrmgr.BlockStamp
+	startHeight := w.Manager.SyncedTo().Height + 1
 	for height := startHeight; height <= bestHeight; height++ {
 		hash, err := chainClient.GetBlockHash(int64(height))
 		if err != nil {
