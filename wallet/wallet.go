@@ -359,17 +359,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		// arbitrary height, rather than all the blocks from genesis, so
 		// we persist this height to ensure we don't store any blocks
 		// before it.
-		_, bestHeight, err := chainClient.GetBestBlock()
-		if err != nil {
-			return err
-		}
-		startHeight := bestHeight - waddrmgr.MaxReorgDepth + 1
-		if startHeight < 0 {
-			startHeight = 0
-		}
-		if birthdayStamp.Height < startHeight {
-			startHeight = birthdayStamp.Height
-		}
+		startHeight := birthdayStamp.Height
 
 		// With the starting height obtained, get the remaining block
 		// details required by the wallet.
