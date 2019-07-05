@@ -354,7 +354,7 @@ func populateBirthdayBlock(ns walletdb.ReadWriteBucket) error {
 
 	// NOTE: The timestamp of the birthday block isn't set since we do not
 	// store each block's timestamp.
-	return putBirthdayBlock(ns, BlockStamp{
+	return PutBirthdayBlock(ns, BlockStamp{
 		Height: birthdayHeight,
 		Hash:   *birthdayHash,
 	})

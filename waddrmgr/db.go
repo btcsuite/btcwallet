@@ -2060,13 +2060,27 @@ func FetchBirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, error) {
 	return block, nil
 }
 
-// putBirthdayBlock stores the provided birthday block to the database.
+// DeleteBirthdayBlock removes the birthday block from the database.
+//
+// NOTE: This does not alter the birthday block verification state.
+func DeleteBirthdayBlock(ns walletdb.ReadWriteBucket) error {
+	bucket := ns.NestedReadWriteBucket(syncBucketName)
+	if err := bucket.Delete(birthdayBlockName); err != nil {
+		str := "failed to remove birthday block"
+		return managerError(ErrDatabase, str, err)
+	}
+	return nil
+}
+
+// PutBirthdayBlock stores the provided birthday block to the database.
 //
 // The block is serialized as follows:
 //   [0:4]   block height
 //   [4:36]  block hash
 //   [36:44] block timestamp
-func putBirthdayBlock(ns walletdb.ReadWriteBucket, block BlockStamp) error {
+//
+// NOTE: This does not alter the birthday block verification state.
+func PutBirthdayBlock(ns walletdb.ReadWriteBucket, block BlockStamp) error {
 	var birthdayBlock [44]byte
 	binary.BigEndian.PutUint32(birthdayBlock[:4], uint32(block.Height))
 	copy(birthdayBlock[4:36], block.Hash[:])
