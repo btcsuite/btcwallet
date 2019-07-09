@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -33,17 +34,13 @@ type BitcoindConn struct {
 	// client is the RPC client to the bitcoind node.
 	client *rpcclient.Client
 
-	// zmqBlockHost is the host listening for ZMQ connections that will be
-	// responsible for delivering raw transaction events.
-	zmqBlockHost string
+	// zmqBlockConn is the ZMQ connection we'll use to read raw block
+	// events.
+	zmqBlockConn *gozmq.Conn
 
-	// zmqTxHost is the host listening for ZMQ connections that will be
-	// responsible for delivering raw transaction events.
-	zmqTxHost string
-
-	// zmqPollInterval is the interval at which we'll attempt to retrieve an
-	// event from the ZMQ connection.
-	zmqPollInterval time.Duration
+	// zmqTxConn is the ZMQ connection we'll use to read raw transaction
+	// events.
+	zmqTxConn *gozmq.Conn
 
 	// rescanClients is the set of active bitcoind rescan clients to which
 	// ZMQ event notfications will be sent to.
@@ -55,10 +52,9 @@ type BitcoindConn struct {
 }
 
 // NewBitcoindConn creates a client connection to the node described by the host
-// string. The connection is not established immediately, but must be done using
-// the Start method. If the remote node does not operate on the same bitcoin
-// network as described by the passed chain parameters, the connection will be
-// disconnected.
+// string. The ZMQ connections are established immediately to ensure liveness.
+// If the remote node does not operate on the same bitcoin network as described
+// by the passed chain parameters, the connection will be disconnected.
 func NewBitcoindConn(chainParams *chaincfg.Params,
 	host, user, pass, zmqBlockHost, zmqTxHost string,
 	zmqPollInterval time.Duration) (*BitcoindConn, error) {
@@ -78,14 +74,36 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 		return nil, err
 	}
 
+	// Establish two different ZMQ connections to bitcoind to retrieve block
+	// and transaction event notifications. We'll use two as a separation of
+	// concern to ensure one type of event isn't dropped from the connection
+	// queue due to another type of event filling it up.
+	zmqBlockConn, err := gozmq.Subscribe(
+		zmqBlockHost, []string{"rawblock"}, zmqPollInterval,
+	)
+	if err != nil {
+		client.Disconnect()
+		return nil, fmt.Errorf("unable to subscribe for zmq block "+
+			"events: %v", err)
+	}
+
+	zmqTxConn, err := gozmq.Subscribe(
+		zmqTxHost, []string{"rawtx"}, zmqPollInterval,
+	)
+	if err != nil {
+		client.Disconnect()
+		zmqBlockConn.Close()
+		return nil, fmt.Errorf("unable to subscribe for zmq tx "+
+			"events: %v", err)
+	}
+
 	conn := &BitcoindConn{
-		chainParams:     chainParams,
-		client:          client,
-		zmqBlockHost:    zmqBlockHost,
-		zmqTxHost:       zmqTxHost,
-		zmqPollInterval: zmqPollInterval,
-		rescanClients:   make(map[uint64]*BitcoindClient),
-		quit:            make(chan struct{}),
+		chainParams:   chainParams,
+		client:        client,
+		zmqBlockConn:  zmqBlockConn,
+		zmqTxConn:     zmqTxConn,
+		rescanClients: make(map[uint64]*BitcoindClient),
+		quit:          make(chan struct{}),
 	}
 
 	return conn, nil
@@ -113,31 +131,9 @@ func (c *BitcoindConn) Start() error {
 			c.chainParams.Net, net)
 	}
 
-	// Establish two different ZMQ connections to bitcoind to retrieve block
-	// and transaction event notifications. We'll use two as a separation of
-	// concern to ensure one type of event isn't dropped from the connection
-	// queue due to another type of event filling it up.
-	zmqBlockConn, err := gozmq.Subscribe(
-		c.zmqBlockHost, []string{"rawblock"}, c.zmqPollInterval,
-	)
-	if err != nil {
-		c.client.Disconnect()
-		return fmt.Errorf("unable to subscribe for zmq block events: "+
-			"%v", err)
-	}
-
-	zmqTxConn, err := gozmq.Subscribe(
-		c.zmqTxHost, []string{"rawtx"}, c.zmqPollInterval,
-	)
-	if err != nil {
-		c.client.Disconnect()
-		return fmt.Errorf("unable to subscribe for zmq tx events: %v",
-			err)
-	}
-
 	c.wg.Add(2)
-	go c.blockEventHandler(zmqBlockConn)
-	go c.txEventHandler(zmqTxConn)
+	go c.blockEventHandler()
+	go c.txEventHandler()
 
 	return nil
 }
@@ -155,6 +151,8 @@ func (c *BitcoindConn) Stop() {
 
 	close(c.quit)
 	c.client.Shutdown()
+	c.zmqBlockConn.Close()
+	c.zmqTxConn.Close()
 
 	c.client.WaitForShutdown()
 	c.wg.Wait()
@@ -164,12 +162,11 @@ func (c *BitcoindConn) Stop() {
 // forwards them along to the current rescan clients.
 //
 // NOTE: This must be run as a goroutine.
-func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
+func (c *BitcoindConn) blockEventHandler() {
 	defer c.wg.Done()
-	defer conn.Close()
 
 	log.Info("Started listening for bitcoind block notifications via ZMQ "+
-		"on", c.zmqBlockHost)
+		"on", c.zmqBlockConn.RemoteAddr())
 
 	for {
 		// Before attempting to read from the ZMQ socket, we'll make
@@ -181,8 +178,14 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 		}
 
 		// Poll an event from the ZMQ socket.
-		msgBytes, err := conn.Receive()
+		msgBytes, err := c.zmqBlockConn.Receive()
 		if err != nil {
+			// EOF should only be returned if the connection was
+			// explicitly closed, so we can exit at this point.
+			if err == io.EOF {
+				return
+			}
+
 			// It's possible that the connection to the socket
 			// continuously times out, so we'll prevent logging this
 			// error to prevent spamming the logs.
@@ -240,12 +243,11 @@ func (c *BitcoindConn) blockEventHandler(conn *gozmq.Conn) {
 // them along to the current rescan clients.
 //
 // NOTE: This must be run as a goroutine.
-func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
+func (c *BitcoindConn) txEventHandler() {
 	defer c.wg.Done()
-	defer conn.Close()
 
 	log.Info("Started listening for bitcoind transaction notifications "+
-		"via ZMQ on", c.zmqTxHost)
+		"via ZMQ on", c.zmqTxConn.RemoteAddr())
 
 	for {
 		// Before attempting to read from the ZMQ socket, we'll make
@@ -257,8 +259,14 @@ func (c *BitcoindConn) txEventHandler(conn *gozmq.Conn) {
 		}
 
 		// Poll an event from the ZMQ socket.
-		msgBytes, err := conn.Receive()
+		msgBytes, err := c.zmqTxConn.Receive()
 		if err != nil {
+			// EOF should only be returned if the connection was
+			// explicitly closed, so we can exit at this point.
+			if err == io.EOF {
+				return
+			}
+
 			// It's possible that the connection to the socket
 			// continuously times out, so we'll prevent logging this
 			// error to prevent spamming the logs.
