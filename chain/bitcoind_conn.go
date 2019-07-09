@@ -82,7 +82,6 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 		zmqBlockHost, []string{"rawblock"}, zmqPollInterval,
 	)
 	if err != nil {
-		client.Disconnect()
 		return nil, fmt.Errorf("unable to subscribe for zmq block "+
 			"events: %v", err)
 	}
@@ -91,7 +90,6 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 		zmqTxHost, []string{"rawtx"}, zmqPollInterval,
 	)
 	if err != nil {
-		client.Disconnect()
 		zmqBlockConn.Close()
 		return nil, fmt.Errorf("unable to subscribe for zmq tx "+
 			"events: %v", err)
@@ -122,11 +120,9 @@ func (c *BitcoindConn) Start() error {
 	// Verify that the node is running on the expected network.
 	net, err := c.getCurrentNet()
 	if err != nil {
-		c.client.Disconnect()
 		return err
 	}
 	if net != c.chainParams.Net {
-		c.client.Disconnect()
 		return fmt.Errorf("expected network %v, got %v",
 			c.chainParams.Net, net)
 	}
