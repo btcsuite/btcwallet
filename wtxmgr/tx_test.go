@@ -1460,6 +1460,68 @@ func TestRemoveUnminedTx(t *testing.T) {
 	checkBalance(btcutil.Amount(initialBalance), true)
 }
 
+// TestInsertMempoolTxAlreadyConfirmed ensures that transactions that already
+// exist within the store as confirmed cannot be added as unconfirmed.
+func TestInsertMempoolTxAlreadyConfirmed(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+
+	// In order to reproduce real-world scenarios, we'll use a new database
+	// transaction for each interaction with the wallet.
+	//
+	// We'll start off the test by creating a new coinbase output at height
+	// 100 and inserting it into the store.
+	b100 := &BlockMeta{
+		Block: Block{Height: 100},
+		Time:  time.Now(),
+	}
+	tx := newCoinBase(1e8)
+	txRec, err := NewTxRecordFromMsgTx(tx, b100.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, txRec, b100); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// checkStore is a helper we'll use to ensure the transaction only
+	// exists within the store's confirmed bucket.
+	checkStore := func() {
+		t.Helper()
+		commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+			if existsRawUnmined(ns, txRec.Hash[:]) != nil {
+				t.Fatalf("expected transaction to not exist " +
+					"in unconfirmed bucket")
+			}
+			_, v := existsTxRecord(ns, &txRec.Hash, &b100.Block)
+			if v == nil {
+				t.Fatalf("expected transaction to exist in " +
+					"confirmed bucket")
+			}
+		})
+	}
+
+	checkStore()
+
+	// Inserting the transaction again as unconfirmed should result in a
+	// NOP, i.e., no error should be returned and no disk modifications are
+	// needed.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, txRec, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	checkStore()
+}
+
 // TestOutputsAfterRemoveDoubleSpend ensures that when we remove a transaction
 // that double spends an existing output within the wallet, it doesn't remove
 // any other spending transactions of the same output.
