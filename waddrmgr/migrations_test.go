@@ -247,7 +247,7 @@ func TestMigrationResetSyncedBlockToBirthday(t *testing.T) {
 			Hash: *birthdayHash, Height: birthdayHeight,
 		}
 
-		return putBirthdayBlock(ns, birthdayBlock)
+		return PutBirthdayBlock(ns, birthdayBlock)
 	}
 
 	afterMigration := func(ns walletdb.ReadWriteBucket) error {

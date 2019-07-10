@@ -135,7 +135,17 @@ func mainInt() int {
 			return waddrmgr.PutSyncedTo(ns, startBlock)
 		}
 
-		return waddrmgr.PutSyncedTo(ns, &birthdayBlock)
+		// We'll need to remove our birthday block first because it
+		// serves as a barrier when updating our state to detect reorgs
+		// due to the wallet not storing all block hashes of the chain.
+		if err := waddrmgr.DeleteBirthdayBlock(ns); err != nil {
+			return err
+		}
+
+		if err := waddrmgr.PutSyncedTo(ns, &birthdayBlock); err != nil {
+			return err
+		}
+		return waddrmgr.PutBirthdayBlock(ns, birthdayBlock)
 	})
 	if err != nil {
 		fmt.Println("Failed to drop and re-create namespace:", err)

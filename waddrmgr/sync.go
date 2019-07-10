@@ -128,7 +128,7 @@ func (m *Manager) BirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, bool, error
 func (m *Manager) SetBirthdayBlock(ns walletdb.ReadWriteBucket,
 	block BlockStamp, verified bool) error {
 
-	if err := putBirthdayBlock(ns, block); err != nil {
+	if err := PutBirthdayBlock(ns, block); err != nil {
 		return err
 	}
 	return putBirthdayBlockVerification(ns, verified)
