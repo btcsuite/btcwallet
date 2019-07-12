@@ -3369,7 +3369,7 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		return nil, err
 	}
 
-	txid, err := chainClient.SendRawTransaction(tx, false)
+	_, err = chainClient.SendRawTransaction(tx, false)
 
 	// Determine if this was an RPC error thrown due to the transaction
 	// already confirming.
@@ -3378,9 +3378,10 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		rpcTxConfirmed = rpcErr.Code == btcjson.ErrRPCTxAlreadyInChain
 	}
 
+	txid := tx.TxHash()
 	switch {
 	case err == nil:
-		return txid, nil
+		return &txid, nil
 
 	// Since we have different backends that can be used with the wallet,
 	// we'll need to check specific errors for each one.
@@ -3399,7 +3400,7 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	case strings.Contains(
 		strings.ToLower(err.Error()), "txn-already-in-mempool",
 	):
-		return txid, nil
+		return &txid, nil
 
 	// If the transaction has already confirmed, we can safely remove it
 	// from the unconfirmed store as it should already exist within the
@@ -3434,7 +3435,7 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 				"from unconfirmed store: %v", tx.TxHash(), dbErr)
 		}
 
-		return txid, nil
+		return &txid, nil
 
 	// If the transaction was rejected for whatever other reason, then we'll
 	// remove it from the transaction store, as otherwise, we'll attempt to
