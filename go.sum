@@ -19,7 +19,6 @@ github.com/btcsuite/btcwallet v0.0.0-20180904010540-284e2e0e696e33d5be388f7f3d9a
 github.com/btcsuite/btcwallet v0.0.0-20190313032608-acf3b04b0273/go.mod h1:mkOYY8/psBiL5E+Wb0V7M0o+N7NXi2SZJz6+RKkncIc=
 github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd h1:R/opQEbFEy9JGkIguV40SvRY1uliPX8ifOvi6ICsFCw=
 github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd/go.mod h1:HHNXQzUsZCxOoE+CPiyCTO6x34Zs86zZUiwtpXoGdtg=
-github.com/btcsuite/golangcrypto v0.0.0-20150304025918-53f62d9b43e8 h1:nOsAWScwueMVk/VLm/dvQQD7DuanyvAUb6B3P3eT274=
 github.com/btcsuite/golangcrypto v0.0.0-20150304025918-53f62d9b43e8/go.mod h1:tYvUd8KLhm/oXvUeSEs2VlLghFjQt9+ZaF9ghH0JNjc=
 github.com/btcsuite/goleveldb v0.0.0-20160330041536-7834afc9e8cd/go.mod h1:F+uVaaLLH7j4eDXPRvw78tMflu7Ie2bzYOH4Y8rRKBY=
 github.com/btcsuite/goleveldb v1.0.0 h1:Tvd0BfvqX9o823q1j2UZ/epQo09eJh6dTcRp79ilIN4=
