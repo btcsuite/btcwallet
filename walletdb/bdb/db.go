@@ -344,6 +344,13 @@ func openDB(dbPath string, create bool) (walletdb.DB, error) {
 		return nil, walletdb.ErrDbDoesNotExist
 	}
 
-	boltDB, err := bbolt.Open(dbPath, 0600, nil)
+	// Specify bbolt freelist options to reduce heap pressure in case the
+	// freelist grows to be very large.
+	options := &bbolt.Options{
+		NoFreelistSync: true,
+		FreelistType:   bbolt.FreelistMapType,
+	}
+
+	boltDB, err := bbolt.Open(dbPath, 0600, options)
 	return (*db)(boltDB), convertErr(err)
 }

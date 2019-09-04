@@ -5,7 +5,7 @@ require (
 	github.com/btcsuite/btclog v0.0.0-20170628155309-84c8d2346e9f
 	github.com/btcsuite/btcutil v0.0.0-20190425235716-9e5f4b9a998d
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792
-	github.com/coreos/bbolt v1.3.2
+	github.com/coreos/bbolt v1.3.3
 	github.com/davecgh/go-spew v1.1.1
 	github.com/golang/protobuf v1.2.0
 	github.com/jessevdk/go-flags v1.4.0
