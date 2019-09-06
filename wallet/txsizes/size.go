@@ -7,8 +7,6 @@ package txsizes
 import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/wire"
-
-	h "github.com/btcsuite/btcwallet/internal/helpers"
 )
 
 // Worst case script and input/output size estimates.
@@ -118,6 +116,14 @@ const (
 	RedeemP2WPKHInputWitnessWeight = 1 + 1 + 73 + 1 + 33
 )
 
+// SumOutputSerializeSizes sums up the serialized size of the supplied outputs.
+func SumOutputSerializeSizes(outputs []*wire.TxOut) (serializeSize int) {
+	for _, txOut := range outputs {
+		serializeSize += txOut.SerializeSize()
+	}
+	return serializeSize
+}
+
 // EstimateSerializeSize returns a worst case serialize size estimate for a
 // signed transaction that spends inputCount number of compressed P2PKH outputs
 // and contains each transaction output from txOuts.  The estimated size is
@@ -134,7 +140,7 @@ func EstimateSerializeSize(inputCount int, txOuts []*wire.TxOut, addChangeOutput
 	return 8 + wire.VarIntSerializeSize(uint64(inputCount)) +
 		wire.VarIntSerializeSize(uint64(outputCount)) +
 		inputCount*RedeemP2PKHInputSize +
-		h.SumOutputSerializeSizes(txOuts) +
+		SumOutputSerializeSizes(txOuts) +
 		changeSize
 }
 
@@ -163,7 +169,7 @@ func EstimateVirtualSize(numP2PKHIns, numP2WPKHIns, numNestedP2WPKHIns int,
 		numP2PKHIns*RedeemP2PKHInputSize +
 		numP2WPKHIns*RedeemP2WPKHInputSize +
 		numNestedP2WPKHIns*RedeemNestedP2WPKHInputSize +
-		h.SumOutputSerializeSizes(txOuts) +
+		SumOutputSerializeSizes(txOuts) +
 		changeSize
 
 	// If this transaction has any witness inputs, we must count the
