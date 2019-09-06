@@ -13,10 +13,16 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
-
-	h "github.com/btcsuite/btcwallet/internal/helpers"
-	"github.com/btcsuite/btcwallet/wallet/internal/txsizes"
+	"github.com/btcsuite/btcwallet/wallet/txsizes"
 )
+
+// SumOutputValues sums up the list of TxOuts and returns an Amount.
+func SumOutputValues(outputs []*wire.TxOut) (totalOutput btcutil.Amount) {
+	for _, txOut := range outputs {
+		totalOutput += btcutil.Amount(txOut.Value)
+	}
+	return totalOutput
+}
 
 // InputSource provides transaction inputs referencing spendable outputs to
 // construct a transaction outputting some target amount.  If the target amount
@@ -80,7 +86,7 @@ type ChangeSource func() ([]byte, error)
 func NewUnsignedTransaction(outputs []*wire.TxOut, relayFeePerKb btcutil.Amount,
 	fetchInputs InputSource, fetchChange ChangeSource) (*AuthoredTx, error) {
 
-	targetAmount := h.SumOutputValues(outputs)
+	targetAmount := SumOutputValues(outputs)
 	estimatedSize := txsizes.EstimateVirtualSize(0, 1, 0, outputs, true)
 	targetFee := txrules.FeeForSerializeSize(relayFeePerKb, estimatedSize)
 
