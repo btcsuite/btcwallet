@@ -15,9 +15,10 @@ require (
 	github.com/jrick/logrotate v1.0.0
 	github.com/kkdai/bstream v0.0.0-20181106074824-b3251f7901ec // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20190710231225-cea2a031735d
-	github.com/lightninglabs/neutrino v0.0.0-20190313035638-e1ad4c33fb18
+	github.com/lightninglabs/neutrino v0.0.0-20190906012717-f087198de655
 	golang.org/x/crypto v0.0.0-20190211182817-74369b46fc67
 	golang.org/x/net v0.0.0-20190206173232-65e2d4e15006
+	google.golang.org/genproto v0.0.0-20190201180003-4b09977fb922 // indirect
 	google.golang.org/grpc v1.18.0
 )
 
@@ -30,3 +31,5 @@ replace github.com/btcsuite/btcwallet/wallet/txauthor => ./wallet/txauthor
 replace github.com/btcsuite/btcwallet/wallet/txrules => ./wallet/txrules
 
 replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
+
+go 1.13
