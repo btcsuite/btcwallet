@@ -1152,7 +1152,14 @@ func (c *BitcoindClient) filterBlock(block *wire.MsgBlock, height int32,
 
 	// If this block happened before the client's birthday or we have
 	// nothing to filter for, then we'll skip it entirely.
+	blockHash := block.BlockHash()
 	if !c.shouldFilterBlock(block.Header.Timestamp) {
+		if notify {
+			c.onFilteredBlockConnected(height, &block.Header, nil)
+			c.onBlockConnected(
+				&blockHash, height, block.Header.Timestamp,
+			)
+		}
 		return nil
 	}
 
@@ -1163,7 +1170,6 @@ func (c *BitcoindClient) filterBlock(block *wire.MsgBlock, height int32,
 
 	// Create a block details template to use for all of the confirmed
 	// transactions found within this block.
-	blockHash := block.BlockHash()
 	blockDetails := &btcjson.BlockDetails{
 		Hash:   blockHash.String(),
 		Height: height,
