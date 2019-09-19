@@ -3313,6 +3313,25 @@ func (e *ErrDoubleSpend) Unwrap() error {
 	return e.backendError
 }
 
+// ErrReplacement is an error returned from PublishTransaction in case the
+// published transaction failed to propagate since it was double spending a
+// replacable transaction but did not satisfy the requirements to replace it.
+type ErrReplacement struct {
+	backendError error
+}
+
+// Error returns the string representation of ErrReplacement.
+//
+// NOTE: Satisfies the error interface.
+func (e *ErrReplacement) Error() string {
+	return fmt.Sprintf("unable to replace transaction: %v", e.backendError)
+}
+
+// Unwrap returns the underlying error returned from the backend.
+func (e *ErrReplacement) Unwrap() error {
+	return e.backendError
+}
+
 // PublishTransaction sends the transaction to the consensus RPC server so it
 // can be propagated to other nodes and eventually mined.
 //
@@ -3501,6 +3520,44 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/node/transaction.cpp#L49
 	case match(err, "missing inputs"):
 		returnErr = &ErrDoubleSpend{
+			backendError: err,
+		}
+
+	// Returned by bitcoind if the transaction spends outputs that would be
+	// replaced by it.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L790
+	case match(err, "bad-txns-spends-conflicting-tx"):
+		fallthrough
+
+	// Returned by bitcoind when a replacement transaction did not have
+	// enough fee.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L830
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L894
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L904
+	case match(err, "insufficient fee"):
+		fallthrough
+
+	// Returned by bitcoind in case the transaction would replace too many
+	// transaction in the mempool.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L858
+	case match(err, "too many potential replacements"):
+		fallthrough
+
+	// Returned by bitcoind if the transaction spends an output that is
+	// unconfimed and not spent by the transaction it replaces.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L882
+	case match(err, "replacement-adds-unconfirmed"):
+		fallthrough
+
+	// Returned by btcd when replacement transaction was rejected for
+	// whatever reason.
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L841
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L854
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L875
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L896
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L913
+	case match(err, "replacement transaction"):
+		returnErr = &ErrReplacement{
 			backendError: err,
 		}
 
