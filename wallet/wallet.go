@@ -3294,6 +3294,25 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 	return signErrors, err
 }
 
+// ErrDoubleSpend is an error returned from PublishTransaction in case the
+// published transaction failed to propagate since it was double spending a
+// confirmed transaction or a transaction in the mempool.
+type ErrDoubleSpend struct {
+	backendError error
+}
+
+// Error returns the string representation of ErrDoubleSpend.
+//
+// NOTE: Satisfies the error interface.
+func (e *ErrDoubleSpend) Error() string {
+	return fmt.Sprintf("double spend: %v", e.backendError)
+}
+
+// Unwrap returns the underlying error returned from the backend.
+func (e *ErrDoubleSpend) Unwrap() error {
+	return e.backendError
+}
+
 // PublishTransaction sends the transaction to the consensus RPC server so it
 // can be propagated to other nodes and eventually mined.
 //
@@ -3384,7 +3403,11 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		rpcTxConfirmed = rpcErr.Code == btcjson.ErrRPCTxAlreadyInChain
 	}
 
-	txid := tx.TxHash()
+	var (
+		txid      = tx.TxHash()
+		returnErr error
+	)
+
 	switch {
 	case err == nil:
 		return &txid, nil
@@ -3443,29 +3466,70 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 
 		return &txid, nil
 
-	// If the transaction was rejected for whatever other reason, then we'll
-	// remove it from the transaction store, as otherwise, we'll attempt to
-	// continually re-broadcast it, and the UTXO state of the wallet won't
-	// be accurate.
-	default:
-		dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
-			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-			txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-			if err != nil {
-				return err
-			}
-			return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
-		})
-		if dbErr != nil {
-			log.Warnf("Unable to remove invalid transaction %v: %v",
-				tx.TxHash(), dbErr)
-		} else {
-			log.Infof("Removed invalid transaction: %v",
-				spew.Sdump(tx))
+	// If the transactions is invalid since it attempts to double spend a
+	// transaction already in the mempool or in the chain, we'll remove it
+	// from the store and return an error.
+	//
+	// This error is returned from btcd when there is already a transaction
+	// not signaling replacement in the mempool that spends one of the
+	// referenced outputs.
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L591
+	case match(err, "already spent"):
+		fallthrough
+
+	// This error is returned from btcd when a referenced output cannot be
+	// found, meaning it etiher has been spent or doesn't exist.
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/blockchain/chain.go#L405
+	case match(err, "already been spent"):
+		fallthrough
+
+	// This error is returned from btcd when a transaction is spending
+	// either output that is missing or already spent, and orphans aren't
+	// allowed.
+	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L1409
+	case match(err, "orphan transaction"):
+		fallthrough
+
+	// Error returned from bitcoind when output was spent by other
+	// non-replacable transaction already in the mempool.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L622
+	case match(err, "txn-mempool-conflict"):
+		fallthrough
+
+	// Returned by bitcoind on the RPC when broadcasting a transaction that
+	// is spending either output that is missing or already spent.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/node/transaction.cpp#L49
+	case match(err, "missing inputs"):
+		returnErr = &ErrDoubleSpend{
+			backendError: err,
 		}
 
-		return nil, err
+	// We received an error not matching any of the above cases.
+	default:
+		returnErr = fmt.Errorf("unmatched backend error: %v", err)
 	}
+
+	// If the transaction was rejected for whatever other reason, then
+	// we'll remove it from the transaction store, as otherwise, we'll
+	// attempt to continually re-broadcast it, and the UTXO state of the
+	// wallet won't be accurate.
+	dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+		txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		if err != nil {
+			return err
+		}
+		return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
+	})
+	if dbErr != nil {
+		log.Warnf("Unable to remove invalid transaction %v: %v",
+			tx.TxHash(), dbErr)
+	} else {
+		log.Infof("Removed invalid transaction: %v",
+			spew.Sdump(tx))
+	}
+
+	return nil, returnErr
 }
 
 // ChainParams returns the network parameters for the blockchain the wallet
