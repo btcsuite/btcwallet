@@ -15,41 +15,50 @@ const (
 )
 
 // parseArgs parses the arguments from the walletdb Open/Create methods.
-func parseArgs(funcName string, args ...interface{}) (string, error) {
-	if len(args) != 1 {
-		return "", fmt.Errorf("invalid arguments to %s.%s -- "+
-			"expected database path", dbType, funcName)
+func parseArgs(funcName string, args ...interface{}) (string, bool, error) {
+	if len(args) != 2 {
+		return "", false, fmt.Errorf("invalid arguments to %s.%s -- "+
+			"expected database path and no-freelist-sync option",
+			dbType, funcName)
 	}
 
 	dbPath, ok := args[0].(string)
 	if !ok {
-		return "", fmt.Errorf("first argument to %s.%s is invalid -- "+
-			"expected database path string", dbType, funcName)
+		return "", false, fmt.Errorf("first argument to %s.%s is "+
+			"invalid -- expected database path string", dbType,
+			funcName)
 	}
 
-	return dbPath, nil
+	noFreelistSync, ok := args[1].(bool)
+	if !ok {
+		return "", false, fmt.Errorf("second argument to %s.%s is "+
+			"invalid -- expected no-freelist-sync bool", dbType,
+			funcName)
+	}
+
+	return dbPath, noFreelistSync, nil
 }
 
 // openDBDriver is the callback provided during driver registration that opens
 // an existing database for use.
 func openDBDriver(args ...interface{}) (walletdb.DB, error) {
-	dbPath, err := parseArgs("Open", args...)
+	dbPath, noFreelistSync, err := parseArgs("Open", args...)
 	if err != nil {
 		return nil, err
 	}
 
-	return openDB(dbPath, false)
+	return openDB(dbPath, noFreelistSync, false)
 }
 
 // createDBDriver is the callback provided during driver registration that
 // creates, initializes, and opens a database for use.
 func createDBDriver(args ...interface{}) (walletdb.DB, error) {
-	dbPath, err := parseArgs("Create", args...)
+	dbPath, noFreelistSync, err := parseArgs("Create", args...)
 	if err != nil {
 		return nil, err
 	}
 
-	return openDB(dbPath, true)
+	return openDB(dbPath, noFreelistSync, true)
 }
 
 func init() {

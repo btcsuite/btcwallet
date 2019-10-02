@@ -130,7 +130,7 @@ func TestPersistence(t *testing.T) {
 
 	// Close and reopen the database to ensure the values persist.
 	db.Close()
-	db, err = walletdb.Open(dbType, dbPath)
+	db, err = walletdb.Open(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("Failed to open test database (%s) %v", dbType, err)
 		return
