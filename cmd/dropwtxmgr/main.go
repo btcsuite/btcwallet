@@ -99,7 +99,7 @@ func mainInt() int {
 		fmt.Println("Enter yes or no.")
 	}
 
-	db, err := walletdb.Open("bdb", opts.DbPath)
+	db, err := walletdb.Open("bdb", opts.DbPath, true)
 	if err != nil {
 		fmt.Println("Failed to open database:", err)
 		return 1

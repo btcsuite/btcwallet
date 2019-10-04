@@ -69,7 +69,7 @@ func walletMain() error {
 	}
 
 	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
-	loader := wallet.NewLoader(activeNet.Params, dbDir, 250)
+	loader := wallet.NewLoader(activeNet.Params, dbDir, true, 250)
 
 	// Create and start HTTP server to serve wallet client connections.
 	// This will be updated with the wallet and chain server RPC client

@@ -1651,7 +1651,7 @@ func testWatchingOnly(tc *testContext) bool {
 	defer os.Remove(woMgrName)
 
 	// Open the new database copy and get the address manager namespace.
-	db, err := walletdb.Open("bdb", woMgrName)
+	db, err := walletdb.Open("bdb", woMgrName, true)
 	if err != nil {
 		tc.t.Errorf("openDbNamespace: unexpected error: %v", err)
 		return false
