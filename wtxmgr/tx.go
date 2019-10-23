@@ -7,6 +7,7 @@ package wtxmgr
 
 import (
 	"bytes"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -725,7 +726,8 @@ func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error) {
 		// output amount and pkScript.
 		rec, err := fetchTxRecord(ns, &op.Hash, &block)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to retrieve transaction %v: "+
+				"%v", op.Hash, err)
 		}
 		txOut := rec.MsgTx.TxOut[op.Index]
 		cred := Credit{
@@ -768,7 +770,8 @@ func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error) {
 		var rec TxRecord
 		err = readRawTxRecord(&op.Hash, recVal, &rec)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to retrieve raw transaction "+
+				"%v: %v", op.Hash, err)
 		}
 
 		txOut := rec.MsgTx.TxOut[op.Index]
