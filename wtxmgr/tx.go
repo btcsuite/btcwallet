@@ -404,7 +404,9 @@ func (s *Store) addCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *Blo
 		if existsRawUnminedCredit(ns, k) != nil {
 			return false, nil
 		}
-		if existsRawUnspent(ns, k) != nil {
+		if _, tv := latestTxRecord(ns, &rec.Hash); tv != nil {
+			log.Tracef("Ignoring credit for existing confirmed transaction %v",
+				rec.Hash.String())
 			return false, nil
 		}
 		v := valueUnminedCredit(btcutil.Amount(rec.MsgTx.TxOut[index].Value), change)
