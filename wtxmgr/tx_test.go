@@ -2119,3 +2119,71 @@ func TestAddDuplicateCreditAfterConfirm(t *testing.T) {
 		}
 	})
 }
+
+// TestInsertMempoolTxAndConfirm ensures that there aren't any lingering
+// unconfirmed records for a transaction that existed within the store as
+// unconfirmed before becoming confirmed.
+func TestInsertMempoolTxAndConfirm(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+
+	// Create a transaction which we'll insert into the store as
+	// unconfirmed.
+	tx := newCoinBase(1e8)
+	txRec, err := NewTxRecordFromMsgTx(tx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, txRec, nil); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, txRec, nil, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// Then, proceed to confirm it.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		block := &BlockMeta{
+			Block: Block{Height: 1337},
+			Time:  time.Now(),
+		}
+		if err := store.InsertTx(ns, txRec, block); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, txRec, block, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// We should not see any lingering unconfirmed records for it once it's
+	// been confirmed.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		for _, input := range tx.TxIn {
+			prevOut := input.PreviousOutPoint
+			k := canonicalOutPoint(&prevOut.Hash, prevOut.Index)
+			if existsRawUnminedInput(ns, k) != nil {
+				t.Fatalf("found transaction input %v as "+
+					"unconfirmed", prevOut)
+			}
+		}
+		if existsRawUnmined(ns, txRec.Hash[:]) != nil {
+			t.Fatal("found transaction as unconfirmed")
+		}
+		for i := range tx.TxOut {
+			k := canonicalOutPoint(&txRec.Hash, uint32(i))
+			if existsRawUnminedCredit(ns, k) != nil {
+				t.Fatalf("found transaction output %v as "+
+					"unconfirmed", i)
+			}
+		}
+	})
+}
