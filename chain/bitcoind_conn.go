@@ -16,6 +16,16 @@ import (
 	"github.com/lightninglabs/gozmq"
 )
 
+const (
+	// rawBlockZMQCommand is the command used to receive raw block
+	// notifications from bitcoind through ZMQ.
+	rawBlockZMQCommand = "rawblock"
+
+	// rawTxZMQCommand is the command used to receive raw transaction
+	// notifications from bitcoind through ZMQ.
+	rawTxZMQCommand = "rawtx"
+)
+
 // BitcoindConn represents a persistent client connection to a bitcoind node
 // that listens for events read from a ZMQ connection.
 type BitcoindConn struct {
@@ -79,7 +89,7 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 	// concern to ensure one type of event isn't dropped from the connection
 	// queue due to another type of event filling it up.
 	zmqBlockConn, err := gozmq.Subscribe(
-		zmqBlockHost, []string{"rawblock"}, zmqPollInterval,
+		zmqBlockHost, []string{rawBlockZMQCommand}, zmqPollInterval,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to subscribe for zmq block "+
@@ -87,7 +97,7 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 	}
 
 	zmqTxConn, err := gozmq.Subscribe(
-		zmqTxHost, []string{"rawtx"}, zmqPollInterval,
+		zmqTxHost, []string{rawTxZMQCommand}, zmqPollInterval,
 	)
 	if err != nil {
 		zmqBlockConn.Close()
@@ -190,8 +200,8 @@ func (c *BitcoindConn) blockEventHandler() {
 				continue
 			}
 
-			log.Errorf("Unable to receive ZMQ rawblock message: %v",
-				err)
+			log.Errorf("Unable to receive ZMQ %v message: %v",
+				rawBlockZMQCommand, err)
 			continue
 		}
 
@@ -200,7 +210,7 @@ func (c *BitcoindConn) blockEventHandler() {
 		// clients.
 		eventType := string(msgBytes[0])
 		switch eventType {
-		case "rawblock":
+		case rawBlockZMQCommand:
 			block := &wire.MsgBlock{}
 			r := bytes.NewReader(msgBytes[1])
 			if err := block.Deserialize(r); err != nil {
@@ -229,8 +239,9 @@ func (c *BitcoindConn) blockEventHandler() {
 				continue
 			}
 
-			log.Warnf("Received unexpected event type from "+
-				"rawblock subscription: %v", eventType)
+			log.Warnf("Received unexpected event type from %v "+
+				"subscription: %v", rawBlockZMQCommand,
+				eventType)
 		}
 	}
 }
@@ -271,8 +282,8 @@ func (c *BitcoindConn) txEventHandler() {
 				continue
 			}
 
-			log.Errorf("Unable to receive ZMQ rawtx message: %v",
-				err)
+			log.Errorf("Unable to receive ZMQ %v message: %v",
+				rawTxZMQCommand, err)
 			continue
 		}
 
@@ -281,7 +292,7 @@ func (c *BitcoindConn) txEventHandler() {
 		// clients.
 		eventType := string(msgBytes[0])
 		switch eventType {
-		case "rawtx":
+		case rawTxZMQCommand:
 			tx := &wire.MsgTx{}
 			r := bytes.NewReader(msgBytes[1])
 			if err := tx.Deserialize(r); err != nil {
@@ -310,8 +321,8 @@ func (c *BitcoindConn) txEventHandler() {
 				continue
 			}
 
-			log.Warnf("Received unexpected event type from rawtx "+
-				"subscription: %v", eventType)
+			log.Warnf("Received unexpected event type from %v "+
+				"subscription: %v", rawTxZMQCommand, eventType)
 		}
 	}
 }
