@@ -24,6 +24,18 @@ const (
 	// rawTxZMQCommand is the command used to receive raw transaction
 	// notifications from bitcoind through ZMQ.
 	rawTxZMQCommand = "rawtx"
+
+	// maxRawBlockSize is the maximum size in bytes for a raw block received
+	// from bitcoind through ZMQ.
+	maxRawBlockSize = 4e6
+
+	// maxRawTxSize is the maximum size in bytes for a raw transaction
+	// received from bitcoind through ZMQ.
+	maxRawTxSize = maxRawBlockSize
+
+	// seqNumLen is the length of the sequence number of a message sent from
+	// bitcoind through ZMQ.
+	seqNumLen = 4
 )
 
 // BitcoindConn represents a persistent client connection to a bitcoind node
@@ -174,6 +186,20 @@ func (c *BitcoindConn) blockEventHandler() {
 	log.Info("Started listening for bitcoind block notifications via ZMQ "+
 		"on", c.zmqBlockConn.RemoteAddr())
 
+	// Set up the buffers we expect our messages to consume. ZMQ
+	// messages from bitcoind include three parts: the command, the
+	// data, and the sequence number.
+	//
+	// We'll allocate a fixed data slice that we'll reuse when reading
+	// blocks from bitcoind through ZMQ. There's no need to recycle this
+	// slice (zero out) after using it, as further reads will overwrite the
+	// slice and we'll only be deserializing the bytes needed.
+	var (
+		command [len(rawBlockZMQCommand)]byte
+		seqNum  [seqNumLen]byte
+		data    = make([]byte, maxRawBlockSize)
+	)
+
 	for {
 		// Before attempting to read from the ZMQ socket, we'll make
 		// sure to check if we've been requested to shut down.
@@ -184,7 +210,11 @@ func (c *BitcoindConn) blockEventHandler() {
 		}
 
 		// Poll an event from the ZMQ socket.
-		msgBytes, err := c.zmqBlockConn.Receive()
+		var (
+			bufs = [][]byte{command[:], data, seqNum[:]}
+			err  error
+		)
+		bufs, err = c.zmqBlockConn.Receive(bufs)
 		if err != nil {
 			// EOF should only be returned if the connection was
 			// explicitly closed, so we can exit at this point.
@@ -210,11 +240,11 @@ func (c *BitcoindConn) blockEventHandler() {
 		// We have an event! We'll now ensure it is a block event,
 		// deserialize it, and report it to the different rescan
 		// clients.
-		eventType := string(msgBytes[0])
+		eventType := string(bufs[0])
 		switch eventType {
 		case rawBlockZMQCommand:
 			block := &wire.MsgBlock{}
-			r := bytes.NewReader(msgBytes[1])
+			r := bytes.NewReader(bufs[1])
 			if err := block.Deserialize(r); err != nil {
 				log.Errorf("Unable to deserialize block: %v",
 					err)
@@ -258,6 +288,20 @@ func (c *BitcoindConn) txEventHandler() {
 	log.Info("Started listening for bitcoind transaction notifications "+
 		"via ZMQ on", c.zmqTxConn.RemoteAddr())
 
+	// Set up the buffers we expect our messages to consume. ZMQ
+	// messages from bitcoind include three parts: the command, the
+	// data, and the sequence number.
+	//
+	// We'll allocate a fixed data slice that we'll reuse when reading
+	// transactions from bitcoind through ZMQ. There's no need to recycle
+	// this slice (zero out) after using it, as further reads will overwrite
+	// the slice and we'll only be deserializing the bytes needed.
+	var (
+		command [len(rawTxZMQCommand)]byte
+		seqNum  [seqNumLen]byte
+		data    = make([]byte, maxRawTxSize)
+	)
+
 	for {
 		// Before attempting to read from the ZMQ socket, we'll make
 		// sure to check if we've been requested to shut down.
@@ -268,7 +312,11 @@ func (c *BitcoindConn) txEventHandler() {
 		}
 
 		// Poll an event from the ZMQ socket.
-		msgBytes, err := c.zmqTxConn.Receive()
+		var (
+			bufs = [][]byte{command[:], data, seqNum[:]}
+			err  error
+		)
+		bufs, err = c.zmqTxConn.Receive(bufs)
 		if err != nil {
 			// EOF should only be returned if the connection was
 			// explicitly closed, so we can exit at this point.
@@ -294,11 +342,11 @@ func (c *BitcoindConn) txEventHandler() {
 		// We have an event! We'll now ensure it is a transaction event,
 		// deserialize it, and report it to the different rescan
 		// clients.
-		eventType := string(msgBytes[0])
+		eventType := string(bufs[0])
 		switch eventType {
 		case rawTxZMQCommand:
 			tx := &wire.MsgTx{}
-			r := bytes.NewReader(msgBytes[1])
+			r := bytes.NewReader(bufs[1])
 			if err := tx.Deserialize(r); err != nil {
 				log.Errorf("Unable to deserialize "+
 					"transaction: %v", err)
