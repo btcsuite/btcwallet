@@ -197,6 +197,8 @@ func (c *BitcoindConn) blockEventHandler() {
 			// error to prevent spamming the logs.
 			netErr, ok := err.(net.Error)
 			if ok && netErr.Timeout() {
+				log.Trace("Re-establishing timed out ZMQ " +
+					"block connection")
 				continue
 			}
 
@@ -279,6 +281,8 @@ func (c *BitcoindConn) txEventHandler() {
 			// error to prevent spamming the logs.
 			netErr, ok := err.(net.Error)
 			if ok && netErr.Timeout() {
+				log.Trace("Re-establishing timed out ZMQ " +
+					"transaction connection")
 				continue
 			}
 
