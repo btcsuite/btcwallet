@@ -280,6 +280,13 @@ func (s *Store) updateMinedBalance(ns walletdb.ReadWriteBucket, rec *TxRecord,
 //
 // NOTE: This should only be used once the transaction has been mined.
 func (s *Store) deleteUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) error {
+	for _, input := range rec.MsgTx.TxIn {
+		prevOut := input.PreviousOutPoint
+		k := canonicalOutPoint(&prevOut.Hash, prevOut.Index)
+		if err := deleteRawUnminedInput(ns, k, rec.Hash); err != nil {
+			return err
+		}
+	}
 	for i := range rec.MsgTx.TxOut {
 		k := canonicalOutPoint(&rec.Hash, uint32(i))
 		if err := deleteRawUnminedCredit(ns, k); err != nil {
