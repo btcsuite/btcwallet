@@ -54,6 +54,10 @@ Wallet clients can use one of two RPC servers:
      notifications for changes to the wallet, this is the RPC server to use.
      The gRPC server is documented [here](./rpc/documentation/README.md).
 
+## Requirements
+
+[Go](http://golang.org) 1.12 or newer.
+
 ## Installation and updating
 
 ### Windows - MSIs Available
@@ -66,74 +70,46 @@ https://github.com/btcsuite/btcwallet/releases
 
 ### Windows/Linux/BSD/POSIX - Build from source
 
-Building or updating from source requires the following build dependencies:
+- Install Go according to the installation instructions here:
+  http://golang.org/doc/install
 
-- **Go 1.5 or 1.6**
+- Ensure Go was installed properly and is a supported version:
 
-  Installation instructions can be found here: http://golang.org/doc/install.
-  It is recommended to add `$GOPATH/bin` to your `PATH` at this point.
-
-  **Note:** If you are using Go 1.5, you must manually enable the vendor
-    experiment by setting the `GO15VENDOREXPERIMENT` environment variable to
-    `1`.  This step is not required for Go 1.6.
-
-- **Glide**
-
-  Glide is used to manage project dependencies and provide reproducible builds.
-  To install:
-
-  `go get -u github.com/Masterminds/glide`
-
-Unfortunately, the use of `glide` prevents a handy tool such as `go get` from
-automatically downloading, building, and installing the source in a single
-command.  Instead, the latest project and dependency sources must be first
-obtained manually with `git` and `glide`, and then `go` is used to build and
-install the project.
-
-**Getting the source**:
-
-For a first time installation, the project and dependency sources can be
-obtained manually with `git` and `glide` (create directories as needed):
-
-```
-git clone https://github.com/btcsuite/btcwallet $GOPATH/src/github.com/btcsuite/btcwallet
-cd $GOPATH/src/github.com/btcsuite/btcwallet
-glide install
+```bash
+$ go version
+$ go env GOROOT GOPATH
 ```
 
-To update an existing source tree, pull the latest changes and install the
-matching dependencies:
+NOTE: The `GOROOT` and `GOPATH` above must not be the same path.  It is
+recommended that `GOPATH` is set to a directory in your home directory such as
+`~/goprojects` to avoid write permission issues.  It is also recommended to add
+`$GOPATH/bin` to your `PATH` at this point.
 
-```
-cd $GOPATH/src/github.com/btcsuite/btcwallet
-git pull
-glide install
-```
+- Run the following commands to obtain btcwallet, all dependencies, and install it:
 
-**Building/Installing**:
-
-The `go` tool is used to build or install (to `GOPATH`) the project.  Some
-example build instructions are provided below (all must run from the `btcwallet`
-project directory).
-
-To build and install `btcwallet` and all helper commands (in the `cmd`
-directory) to `$GOPATH/bin/`, as well as installing all compiled packages to
-`$GOPATH/pkg/` (**use this if you are unsure which command to run**):
-
-```
-go install . ./cmd/...
+```bash
+$ cd $GOPATH/src/github.com/btcsuite/btcwallet
+$ GO111MODULE=on go install -v . ./cmd/...
 ```
 
-To build a `btcwallet` executable and install it to `$GOPATH/bin/`:
+- btcwallet (and utilities) will now be installed in ```$GOPATH/bin```.  If you did
+  not already add the bin directory to your system path during Go installation,
+  we recommend you do so now.
 
-```
-go install
-```
+## Updating
 
-To build a `btcwallet` executable and place it in the current directory:
+#### Windows
 
-```
-go build
+Install a newer MSI
+
+#### Linux/BSD/MacOSX/POSIX - Build from Source
+
+- Run the following commands to update btcd, all dependencies, and install it:
+
+```bash
+$ cd $GOPATH/src/github.com/btcsuite/btcwallet
+$ git pull
+$ GO111MODULE=on go install -v . ./cmd/...
 ```
 
 ## Getting Started
