@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"os"
 	"reflect"
 	"testing"
@@ -1049,7 +1050,7 @@ func testImportScript(tc *testContext) bool {
 }
 
 // testMarkUsed ensures used addresses are flagged as such.
-func testMarkUsed(tc *testContext) bool {
+func testMarkUsed(tc *testContext, doScript bool) bool {
 	tests := []struct {
 		name string
 		typ  addrType
@@ -1065,6 +1066,10 @@ func testMarkUsed(tc *testContext) bool {
 			typ:  addrScriptHash,
 			in:   hexToBytes("da6e6a632d96dc5530d7b3c9f3017725d023093e"),
 		},
+	}
+
+	if !doScript {
+		tests = tests[0:1]
 	}
 
 	prefix := "MarkUsed"
@@ -1379,6 +1384,18 @@ func testLookupAccount(tc *testContext) bool {
 		defaultAccountName:      DefaultAccountNum,
 		ImportedAddrAccountName: ImportedAddrAccount,
 	}
+
+	var expectedLastAccount uint32 = 1
+	if !tc.create {
+		// Existing wallet manager will have 3 accounts
+		expectedLastAccount = 2
+	}
+
+	return testLookupExpectedAccount(tc, expectedAccounts, expectedLastAccount)
+}
+
+func testLookupExpectedAccount(tc *testContext, expectedAccounts map[string]uint32,
+	expectedLastAccount uint32) bool {
 	for acctName, expectedAccount := range expectedAccounts {
 		var account uint32
 		err := walletdb.View(tc.db, func(tx walletdb.ReadTx) error {
@@ -1418,19 +1435,12 @@ func testLookupAccount(tc *testContext) bool {
 		lastAccount, err = tc.manager.LastAccount(ns)
 		return err
 	})
-	var expectedLastAccount uint32
-	expectedLastAccount = 1
-	if !tc.create {
-		// Existing wallet manager will have 3 accounts
-		expectedLastAccount = 2
-	}
 	if lastAccount != expectedLastAccount {
 		tc.t.Errorf("LookupAccount "+
 			"account mismatch -- got %d, "+
 			"want %d", lastAccount, expectedLastAccount)
 		return false
 	}
-
 	// Test account lookup for default account adddress
 	var expectedAccount uint32
 	for i, addr := range expectedAddrs {
@@ -1614,7 +1624,7 @@ func testManagerAPI(tc *testContext) {
 	testInternalAddresses(tc)
 	testImportPrivateKey(tc)
 	testImportScript(tc)
-	testMarkUsed(tc)
+	testMarkUsed(tc, true)
 	testChangePassphrase(tc)
 
 	// Reset default account
@@ -1627,6 +1637,21 @@ func testManagerAPI(tc *testContext) {
 	// Rename account 1 "acct-create"
 	tc.account = 1
 	testRenameAccount(tc)
+}
+
+func testManagerAPIWatchingOnly(tc *testContext) {
+	testExternalAddresses(tc)
+	testInternalAddresses(tc)
+	testMarkUsed(tc, false)
+	testChangePassphrase(tc)
+
+	testNewAccount(tc)
+	expectedAccounts := map[string]uint32{
+		defaultAccountName: DefaultAccountNum,
+	}
+	testLookupExpectedAccount(tc, expectedAccounts, 0)
+	//testForEachAccount(tc)
+	testForEachAccountAddress(tc)
 }
 
 // testWatchingOnly tests various facets of a watching-only address
@@ -1799,7 +1824,7 @@ func TestManager(t *testing.T) {
 		_, err := Open(ns, pubPassphrase, &chaincfg.MainNetParams)
 		return err
 	})
-	if !checkManagerError(t, "Open non-existant", err, ErrNoExist) {
+	if !checkManagerError(t, "Open non-existent", err, ErrNoExist) {
 		return
 	}
 
@@ -1904,6 +1929,146 @@ func TestManager(t *testing.T) {
 	if err != nil {
 		t.Errorf("Unlock: unexpected error: %v", err)
 	}
+}
+
+// TestManagerNewWatchOnly is similar to TestManager, but uses the
+// CreateWatchOnly to test watch-only wallets created from export
+// xpubs.
+func TestManagerNewWatchOnly(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// Create a new manager.
+	var mgr *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = CreateWatchOnly(
+			ns, pubPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		_, err = mgr.NewWatchingOnlyScopedKeyManager(ns, KeyScopeBIP0044, ScopeAddrMap[KeyScopeBIP0044])
+
+		return err
+	})
+	if err != nil {
+		t.Errorf("Create/Open: unexpected error: %v", err)
+		return
+	}
+
+	// NOTE: Not using deferred close here since part of the tests is
+	// explicitly closing the manager and then opening the existing one.
+
+	// Attempt to create the manager again to ensure the expected error is
+	// returned.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return CreateWatchOnly(
+			ns, pubPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+	})
+	if !checkManagerError(t, "Create existing", err, ErrAlreadyExists) {
+		mgr.Close()
+		return
+	}
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	if err != nil {
+		t.Fatalf("unable to fetch default scope: %v", err)
+	}
+
+	accountKey := deriveTestAccountKey(t)
+	if accountKey == nil {
+		return
+	}
+
+	// Create the default account
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		_, err = scopedMgr.NewAccountWatchingOnly(ns, defaultAccountName, accountKey)
+		return err
+	})
+	if err != nil {
+		t.Errorf("NewAccountWatchingOnly: unexpected error: %v", err)
+		return
+	}
+
+	// Run all of the manager API tests in create mode and close the
+	// manager after they've completed
+	testManagerAPIWatchingOnly(&testContext{
+		t:            t,
+		db:           db,
+		manager:      scopedMgr,
+		rootManager:  mgr,
+		account:      0,
+		create:       true,
+		watchingOnly: true,
+	})
+	mgr.Close()
+
+	// Open the manager and run all the tests again in open mode which
+	// avoids reinserting new addresses like the create mode tests do.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		var err error
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		return err
+	})
+	if err != nil {
+		t.Errorf("Open: unexpected error: %v", err)
+		return
+	}
+	defer mgr.Close()
+
+	scopedMgr, err = mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	if err != nil {
+		t.Fatalf("unable to fetch default scope: %v", err)
+	}
+	tc := &testContext{
+		t:            t,
+		db:           db,
+		manager:      scopedMgr,
+		rootManager:  mgr,
+		account:      0,
+		create:       false,
+		watchingOnly: true,
+	}
+	testManagerAPIWatchingOnly(tc)
+
+	// Ensure that the manager sync state functionality works as expected.
+	testSync(tc)
+}
+
+func deriveTestAccountKey(t *testing.T) *hdkeychain.ExtendedKey {
+	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
+	if err != nil {
+		t.Errorf("NewMaster: unexpected error: %v", err)
+		return nil
+	}
+	scopeKey, err := deriveCoinTypeKey(masterKey, KeyScopeBIP0044)
+	if err != nil {
+		t.Errorf("derive: unexpected error: %v", err)
+		return nil
+	}
+	accountKey, err := deriveAccountKey(scopeKey, 0)
+	if err != nil {
+		t.Errorf("derive: unexpected error: %v", err)
+		return nil
+	}
+	return accountKey
 }
 
 // TestManagerIncorrectVersion ensures that that the manager cannot be accessed
@@ -2454,10 +2619,77 @@ func TestNewRawAccount(t *testing.T) {
 		t.Fatalf("unable to create new account: %v", err)
 	}
 
+	testNewRawAccount(t, mgr, db, accountNum, scopedMgr)
+}
+
+// TestNewRawAccountWatchingOnly tests that callers are able to properly create, and use
+// watching-only raw accounts created with only an account number, and not a string which is
+// eventually mapped to an account number.
+func TestNewRawAccountWatchingOnly(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = CreateWatchOnly(
+			ns, pubPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		_, err = mgr.NewWatchingOnlyScopedKeyManager(ns, KeyScopeBIP0084, ScopeAddrMap[KeyScopeBIP0084])
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create/open: unexpected error: %v", err)
+	}
+	defer mgr.Close()
+
+	// Now that we have the manager created, we'll fetch one of the default
+	// scopes for usage within this test.
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	if err != nil {
+		t.Fatalf("unable to fetch scope %v: %v", KeyScopeBIP0084, err)
+	}
+
+	accountKey := deriveTestAccountKey(t)
+	if accountKey == nil {
+		return
+	}
+
+	// With the scoped manager retrieved, we'll attempt to create a new raw
+	// account by number.
+	const accountNum = 1000
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return scopedMgr.NewRawAccountWatchingOnly(ns, accountNum, accountKey)
+	})
+	if err != nil {
+		t.Fatalf("unable to create new account: %v", err)
+	}
+
+	testNewRawAccount(t, mgr, db, accountNum, scopedMgr)
+}
+
+func testNewRawAccount(t *testing.T, mgr *Manager, db walletdb.DB, accountNum uint32, scopedMgr *ScopedKeyManager) {
 	// With the account created, we should be able to derive new addresses
 	// from the account.
 	var accountAddrNext ManagedAddress
-	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		addrs, err := scopedMgr.NextExternalAddresses(

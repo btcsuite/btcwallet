@@ -540,6 +540,61 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket, scope KeyScop
 	return m.scopedManagers[scope], nil
 }
 
+// NewWatchingOnlyScopedKeyManager creates a new watching-only scoped key manager
+// from the root manager.
+// A scoped key manager is a sub-manager that only has the coin type key of a
+// particular coin type and BIP0043 purpose. This is useful as it enables
+// callers to create an arbitrary BIP0043 like schema with a stand alone
+// manager.
+func (m *Manager) NewWatchingOnlyScopedKeyManager(ns walletdb.ReadWriteBucket, scope KeyScope,
+	addrSchema ScopeAddrSchema) (*ScopedKeyManager, error) {
+
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	// Now we'll fetch the scope bucket
+	// so we can create the proper internal name spaces.
+	scopeBucket := ns.NestedReadWriteBucket(scopeBucketName)
+
+	// Now that we know it's possible to actually create a new scoped
+	// manager, we'll carve out its bucket space within the database.
+	if err := createScopedManagerNS(scopeBucket, &scope); err != nil {
+		return nil, err
+	}
+
+	// With the database state created, we'll now write down the address
+	// schema of this particular scope type.
+	scopeSchemas := ns.NestedReadWriteBucket(scopeSchemaBucketName)
+	if scopeSchemas == nil {
+		str := "scope schema bucket not found"
+		return nil, managerError(ErrDatabase, str, nil)
+	}
+	scopeKey := scopeToBytes(&scope)
+	schemaBytes := scopeSchemaToBytes(&addrSchema)
+	err := scopeSchemas.Put(scopeKey[:], schemaBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Finally, we'll register this new scoped manager with the root
+	// manager.
+	m.scopedManagers[scope] = &ScopedKeyManager{
+		scope:       scope,
+		addrSchema:  addrSchema,
+		rootManager: m,
+		addrs:       make(map[addrKey]ManagedAddress),
+		acctInfo:    make(map[uint32]*accountInfo),
+	}
+	m.externalAddrSchemas[addrSchema.ExternalAddrType] = append(
+		m.externalAddrSchemas[addrSchema.ExternalAddrType], scope,
+	)
+	m.internalAddrSchemas[addrSchema.InternalAddrType] = append(
+		m.internalAddrSchemas[addrSchema.InternalAddrType], scope,
+	)
+
+	return m.scopedManagers[scope], nil
+}
+
 // FetchScopedKeyManager attempts to fetch an active scoped manager according to
 // its registered scope. If the manger is found, then a nil error is returned
 // along with the active scoped manager. Otherwise, a nil manager and a non-nil
@@ -1298,7 +1353,7 @@ func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 	masterKeyPriv *snacl.SecretKey, cryptoKeyPub EncryptorDecryptor,
 	cryptoKeyPrivEncrypted, cryptoKeyScriptEncrypted []byte, syncInfo *syncState,
 	birthday time.Time, privPassphraseSalt [saltSize]byte,
-	scopedManagers map[KeyScope]*ScopedKeyManager) *Manager {
+	scopedManagers map[KeyScope]*ScopedKeyManager, watchingOnly bool) *Manager {
 
 	m := &Manager{
 		chainParams:              chainParams,
@@ -1316,6 +1371,7 @@ func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 		scopedManagers:           scopedManagers,
 		externalAddrSchemas:      make(map[AddressType][]KeyScope),
 		internalAddrSchemas:      make(map[AddressType][]KeyScope),
+		watchingOnly:             watchingOnly,
 	}
 
 	for _, sMgr := range m.scopedManagers {
@@ -1540,9 +1596,8 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 	mgr := newManager(
 		chainParams, &masterKeyPub, &masterKeyPriv,
 		cryptoKeyPub, cryptoKeyPrivEnc, cryptoKeyScriptEnc, syncInfo,
-		birthday, privPassphraseSalt, scopedManagers,
+		birthday, privPassphraseSalt, scopedManagers, watchingOnly,
 	)
-	mgr.watchingOnly = watchingOnly
 
 	for _, scopedManager := range scopedManagers {
 		scopedManager.rootManager = mgr
@@ -1848,6 +1903,106 @@ func Create(ns walletdb.ReadWriteBucket, seed, pubPassphrase, privPassphrase []b
 	// Save the fact this is not a watching-only address manager to the
 	// database.
 	err = putWatchingOnly(ns, false)
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+
+	// Save the initial synced to state.
+	err = PutSyncedTo(ns, &syncInfo.syncedTo)
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+	err = putStartBlock(ns, &syncInfo.startBlock)
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+
+	// Use 48 hours as margin of safety for wallet birthday.
+	return putBirthday(ns, birthday.Add(-48*time.Hour))
+}
+
+// CreateWatchOnly creates a new watching-only address manager in the given namespace.
+//
+// No default account or scoped manager are created - it is up to the caller to create a new one
+// with NewAccountWatchingOnly and NewWatchingOnlyScopedKeyManager
+//
+// All public keys and information are protected by secret keys
+// derived from the provided public passphrases.  The public
+// passphrase is required on subsequent opens of the address manager.
+//
+// If a config structure is passed to the function, that configuration will
+// override the defaults.
+//
+// A ManagerError with an error code of ErrAlreadyExists will be returned the
+// address manager already exists in the specified namespace.
+func CreateWatchOnly(ns walletdb.ReadWriteBucket,
+	pubPassphrase []byte,
+	chainParams *chaincfg.Params, config *ScryptOptions,
+	birthday time.Time) error {
+
+	// Return an error if the manager has already been created in
+	// the given database namespace.
+	exists := managerExists(ns)
+	if exists {
+		return managerError(ErrAlreadyExists, errAlreadyExists, nil)
+	}
+
+	// Perform the initial bucket creation and database namespace setup.
+	if err := createManagerNS(ns, map[KeyScope]ScopeAddrSchema{}); err != nil {
+		return maybeConvertDbError(err)
+	}
+
+	if config == nil {
+		config = &DefaultScryptOptions
+	}
+
+	// Generate new master keys.  These master keys are used to protect the
+	// crypto keys that will be generated next.
+	masterKeyPub, err := newSecretKey(&pubPassphrase, config)
+	if err != nil {
+		str := "failed to master public key"
+		return managerError(ErrCrypto, str, err)
+	}
+
+	// Generate new crypto public, private, and script keys.  These keys are
+	// used to protect the actual public and private data such as addresses,
+	// extended keys, and scripts.
+	cryptoKeyPub, err := newCryptoKey()
+	if err != nil {
+		str := "failed to generate crypto public key"
+		return managerError(ErrCrypto, str, err)
+	}
+
+	// Encrypt the crypto keys with the associated master keys.
+	cryptoKeyPubEnc, err := masterKeyPub.Encrypt(cryptoKeyPub.Bytes())
+	if err != nil {
+		str := "failed to encrypt crypto public key"
+		return managerError(ErrCrypto, str, err)
+	}
+
+	// Use the genesis block for the passed chain as the created at block
+	// for the default.
+	createdAt := &BlockStamp{Hash: *chainParams.GenesisHash, Height: 0}
+
+	// Create the initial sync state.
+	syncInfo := newSyncState(createdAt, createdAt)
+
+	// Save the master key params to the database.
+	pubParams := masterKeyPub.Marshal()
+	err = putMasterKeyParams(ns, pubParams, nil)
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+
+	// Save the encrypted crypto keys to the database.
+	err = putCryptoKeys(ns, cryptoKeyPubEnc, nil, nil)
+	if err != nil {
+		return maybeConvertDbError(err)
+	}
+
+	// Save the fact this is a watching-only address manager to the
+	// database.
+	err = putWatchingOnly(ns, true)
 	if err != nil {
 		return maybeConvertDbError(err)
 	}
