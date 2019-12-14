@@ -32,8 +32,9 @@ report.  Package waddrmgr is licensed under the liberal ISC license.
   - Import WIF keys
   - Import pay-to-script-hash scripts for things such as multi-signature
     transactions
-  - Ability to export a watching-only version which does not contain any private
+  - Ability to start in watching-only mode which does not contain any private
     key material
+  - Ability to convert to watching-only mode
   - Programmatically detectable errors, including encapsulation of errors from
     packages it relies on
   - Address synchronization capabilities
