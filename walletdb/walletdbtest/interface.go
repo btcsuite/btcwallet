@@ -104,6 +104,51 @@ func testNestedReadWriteBucket(tc *testContext, testBucket walletdb.ReadWriteBuc
 	return true
 }
 
+// testSequence tests that the sequence related methods work as expected.
+func testSequence(tc *testContext, testBucket walletdb.ReadWriteBucket) bool {
+	// Obtaining the current sequence twice should give us the same value.
+	seqNo1 := testBucket.Sequence()
+	seqNo2 := testBucket.Sequence()
+	if seqNo1 != seqNo2 {
+		tc.t.Errorf("Sequence: seq has incremented")
+		return false
+	}
+
+	// Incrementing to the next sequence should give us a value one larger
+	// than the prior number.
+	seqNo3, err := testBucket.NextSequence()
+	if err != nil {
+		tc.t.Errorf("Sequence: unexpected error: %v", err)
+		return false
+	}
+	if seqNo3 != seqNo2+1 {
+		tc.t.Errorf("Sequence: expected seq no of %v, instead got %v",
+			seqNo2+1, seqNo3)
+		return false
+	}
+
+	// We should be able to modify the sequence base number.
+	newBase := uint64(100)
+	if err := testBucket.SetSequence(newBase); err != nil {
+		tc.t.Errorf("Sequence: unexpected error: %v", err)
+		return false
+	}
+
+	// Any offset from this new sequence should now be properly reflected.
+	seqNo4, err := testBucket.NextSequence()
+	if err != nil {
+		tc.t.Errorf("Sequence: unexpected error: %v", err)
+		return false
+	}
+	if seqNo4 != newBase+1 {
+		tc.t.Errorf("Sequence: expected seq no of %v, instead got %v",
+			newBase+1, seqNo4)
+		return false
+	}
+
+	return false
+}
+
 // testReadWriteBucketInterface ensures the bucket interface is working properly by
 // exercising all of its functions.
 func testReadWriteBucketInterface(tc *testContext, bucket walletdb.ReadWriteBucket) bool {
@@ -161,6 +206,11 @@ func testReadWriteBucketInterface(tc *testContext, bucket walletdb.ReadWriteBuck
 		return false
 	}
 	if !testGetValues(tc, bucket, rollbackValues(keyValues)) {
+		return false
+	}
+
+	// Test that the sequence methods work as expected.
+	if !testSequence(tc, bucket) {
 		return false
 	}
 
@@ -678,7 +728,7 @@ func testAdditionalErrors(tc *testContext) bool {
 
 // TestInterface performs all interfaces tests for this database driver.
 func TestInterface(t Tester, dbType, dbPath string) {
-	db, err := walletdb.Create(dbType, dbPath)
+	db, err := walletdb.Create(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("Failed to create test database (%s) %v", dbType, err)
 		return

@@ -68,7 +68,7 @@ func (tx *transaction) ReadWriteBucket(key []byte) walletdb.ReadWriteBucket {
 }
 
 func (tx *transaction) CreateTopLevelBucket(key []byte) (walletdb.ReadWriteBucket, error) {
-	boltBucket, err := tx.boltTx.CreateBucket(key)
+	boltBucket, err := tx.boltTx.CreateBucketIfNotExists(key)
 	if err != nil {
 		return nil, convertErr(err)
 	}
@@ -229,6 +229,21 @@ func (b *bucket) Tx() walletdb.ReadWriteTx {
 	return &transaction{
 		(*bbolt.Bucket)(b).Tx(),
 	}
+}
+
+// NextSequence returns an autoincrementing integer for the bucket.
+func (b *bucket) NextSequence() (uint64, error) {
+	return (*bbolt.Bucket)(b).NextSequence()
+}
+
+// SetSequence updates the sequence number for the bucket.
+func (b *bucket) SetSequence(v uint64) error {
+	return (*bbolt.Bucket)(b).SetSequence(v)
+}
+
+// Sequence returns the current integer for the bucket without incrementing it.
+func (b *bucket) Sequence() uint64 {
+	return (*bbolt.Bucket)(b).Sequence()
 }
 
 // cursor represents a cursor over key/value pairs and nested buckets of a

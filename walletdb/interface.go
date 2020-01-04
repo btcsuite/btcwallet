@@ -126,6 +126,16 @@ type ReadWriteBucket interface {
 
 	// Tx returns the bucket's transaction.
 	Tx() ReadWriteTx
+
+	// NextSequence returns an autoincrementing integer for the bucket.
+	NextSequence() (uint64, error)
+
+	// SetSequence updates the sequence number for the bucket.
+	SetSequence(v uint64) error
+
+	// Sequence returns the current integer for the bucket without
+	// incrementing it.
+	Sequence() uint64
 }
 
 // ReadCursor represents a bucket cursor that can be positioned at the start or
