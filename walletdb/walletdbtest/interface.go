@@ -5,9 +5,11 @@
 package walletdbtest
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"reflect"
+	"sync"
 
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -146,7 +148,7 @@ func testSequence(tc *testContext, testBucket walletdb.ReadWriteBucket) bool {
 		return false
 	}
 
-	return false
+	return true
 }
 
 // testReadWriteBucketInterface ensures the bucket interface is working properly by
@@ -726,6 +728,70 @@ func testAdditionalErrors(tc *testContext) bool {
 	return true
 }
 
+// testBatchInterface tests that if the target database implements the batch
+// method, then the method functions as expected.
+func testBatchInterface(tc *testContext) bool {
+	// If the database doesn't support the batch super-set of the
+	// interface, then we're done here.
+	batchDB, ok := tc.db.(walletdb.BatchDB)
+	if !ok {
+		return true
+	}
+
+	const numGoroutines = 5
+	errChan := make(chan error, numGoroutines)
+
+	var wg sync.WaitGroup
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := walletdb.Batch(batchDB, func(tx walletdb.ReadWriteTx) error {
+				b, err := tx.CreateTopLevelBucket([]byte("test"))
+				if err != nil {
+					return err
+				}
+
+				byteI := []byte{byte(i)}
+				return b.Put(byteI, byteI)
+			})
+			errChan <- err
+		}(i)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		if err != nil {
+			tc.t.Errorf("Batch: unexpected error: %v", err)
+			return false
+		}
+	}
+
+	err := walletdb.View(batchDB, func(tx walletdb.ReadTx) error {
+		b := tx.ReadBucket([]byte("test"))
+
+		for i := 0; i < numGoroutines; i++ {
+			byteI := []byte{byte(i)}
+			if v := b.Get(byteI); v == nil {
+				return fmt.Errorf("key %v not present", byteI)
+			} else if !bytes.Equal(v, byteI) {
+				return fmt.Errorf("key %v not equal to value: "+
+					"%v", byteI, v)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		tc.t.Errorf("Batch: unexpected error: %v", err)
+		return false
+	}
+
+	return true
+}
+
 // TestInterface performs all interfaces tests for this database driver.
 func TestInterface(t Tester, dbType, dbPath string) {
 	db, err := walletdb.Create(dbType, dbPath, true)
@@ -752,6 +818,11 @@ func TestInterface(t Tester, dbType, dbPath string) {
 
 	// Check a few more error conditions not covered elsewhere.
 	if !testAdditionalErrors(&context) {
+		return
+	}
+
+	// If applicable, also test the behavior of the Batch call.
+	if !testBatchInterface(&context) {
 		return
 	}
 }

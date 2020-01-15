@@ -342,6 +342,19 @@ func (db *db) Close() error {
 	return convertErr((*bbolt.DB)(db).Close())
 }
 
+// Batch is similar to the package-level Update method, but it will attempt to
+// optismitcally combine the invocation of several transaction functions into a
+// single db write transaction.
+//
+// This function is part of the walletdb.Db interface implementation.
+func (db *db) Batch(f func(tx walletdb.ReadWriteTx) error) error {
+	return (*bbolt.DB)(db).Batch(func(btx *bbolt.Tx) error {
+		interfaceTx := transaction{btx}
+
+		return f(&interfaceTx)
+	})
+}
+
 // filesExists reports whether the named file or directory exists.
 func fileExists(name string) bool {
 	if _, err := os.Stat(name); err != nil {
