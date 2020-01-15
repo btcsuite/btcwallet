@@ -51,7 +51,7 @@ func testDB() (walletdb.DB, func(), error) {
 	if err != nil {
 		return nil, func() {}, err
 	}
-	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"))
+	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), true)
 	return db, func() { os.RemoveAll(tmpDir) }, err
 }
 
@@ -63,7 +63,7 @@ func testStore() (*Store, walletdb.DB, func(), error) {
 		return nil, nil, func() {}, err
 	}
 
-	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"))
+	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), true)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		return nil, nil, nil, err

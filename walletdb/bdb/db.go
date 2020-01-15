@@ -68,7 +68,7 @@ func (tx *transaction) ReadWriteBucket(key []byte) walletdb.ReadWriteBucket {
 }
 
 func (tx *transaction) CreateTopLevelBucket(key []byte) (walletdb.ReadWriteBucket, error) {
-	boltBucket, err := tx.boltTx.CreateBucket(key)
+	boltBucket, err := tx.boltTx.CreateBucketIfNotExists(key)
 	if err != nil {
 		return nil, convertErr(err)
 	}
@@ -231,6 +231,21 @@ func (b *bucket) Tx() walletdb.ReadWriteTx {
 	}
 }
 
+// NextSequence returns an autoincrementing integer for the bucket.
+func (b *bucket) NextSequence() (uint64, error) {
+	return (*bbolt.Bucket)(b).NextSequence()
+}
+
+// SetSequence updates the sequence number for the bucket.
+func (b *bucket) SetSequence(v uint64) error {
+	return (*bbolt.Bucket)(b).SetSequence(v)
+}
+
+// Sequence returns the current integer for the bucket without incrementing it.
+func (b *bucket) Sequence() uint64 {
+	return (*bbolt.Bucket)(b).Sequence()
+}
+
 // cursor represents a cursor over key/value pairs and nested buckets of a
 // bucket.
 //
@@ -325,6 +340,19 @@ func (db *db) Copy(w io.Writer) error {
 // This function is part of the walletdb.Db interface implementation.
 func (db *db) Close() error {
 	return convertErr((*bbolt.DB)(db).Close())
+}
+
+// Batch is similar to the package-level Update method, but it will attempt to
+// optismitcally combine the invocation of several transaction functions into a
+// single db write transaction.
+//
+// This function is part of the walletdb.Db interface implementation.
+func (db *db) Batch(f func(tx walletdb.ReadWriteTx) error) error {
+	return (*bbolt.DB)(db).Batch(func(btx *bbolt.Tx) error {
+		interfaceTx := transaction{btx}
+
+		return f(&interfaceTx)
+	})
 }
 
 // filesExists reports whether the named file or directory exists.
