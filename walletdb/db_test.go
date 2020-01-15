@@ -55,7 +55,7 @@ func TestAddDuplicateDriver(t *testing.T) {
 	}
 
 	dbPath := "dupdrivertest.db"
-	db, err := walletdb.Create(dbType, dbPath)
+	db, err := walletdb.Create(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("failed to create database: %v", err)
 		return
