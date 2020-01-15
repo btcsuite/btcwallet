@@ -23,7 +23,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure that attempting to open a database that doesn't exist returns
 	// the expected error.
 	wantErr := walletdb.ErrDbDoesNotExist
-	if _, err := walletdb.Open(dbType, "noexist.db"); err != wantErr {
+	if _, err := walletdb.Open(dbType, "noexist.db", true); err != wantErr {
 		t.Errorf("Open: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
 		return
@@ -32,7 +32,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure that attempting to open a database with the wrong number of
 	// parameters returns the expected error.
 	wantErr = fmt.Errorf("invalid arguments to %s.Open -- expected "+
-		"database path", dbType)
+		"database path and no-freelist-sync option", dbType)
 	if _, err := walletdb.Open(dbType, 1, 2, 3); err.Error() != wantErr.Error() {
 		t.Errorf("Open: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
@@ -43,7 +43,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// the first parameter returns the expected error.
 	wantErr = fmt.Errorf("first argument to %s.Open is invalid -- "+
 		"expected database path string", dbType)
-	if _, err := walletdb.Open(dbType, 1); err.Error() != wantErr.Error() {
+	if _, err := walletdb.Open(dbType, 1, true); err.Error() != wantErr.Error() {
 		t.Errorf("Open: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
 		return
@@ -52,7 +52,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure that attempting to create a database with the wrong number of
 	// parameters returns the expected error.
 	wantErr = fmt.Errorf("invalid arguments to %s.Create -- expected "+
-		"database path", dbType)
+		"database path and no-freelist-sync option", dbType)
 	if _, err := walletdb.Create(dbType, 1, 2, 3); err.Error() != wantErr.Error() {
 		t.Errorf("Create: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
@@ -63,7 +63,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// the first parameter returns the expected error.
 	wantErr = fmt.Errorf("first argument to %s.Create is invalid -- "+
 		"expected database path string", dbType)
-	if _, err := walletdb.Create(dbType, 1); err.Error() != wantErr.Error() {
+	if _, err := walletdb.Create(dbType, 1, true); err.Error() != wantErr.Error() {
 		t.Errorf("Create: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
 		return
@@ -72,7 +72,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure operations against a closed database return the expected
 	// error.
 	dbPath := "createfail.db"
-	db, err := walletdb.Create(dbType, dbPath)
+	db, err := walletdb.Create(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
 		return
@@ -93,7 +93,7 @@ func TestCreateOpenFail(t *testing.T) {
 func TestPersistence(t *testing.T) {
 	// Create a new database to run tests against.
 	dbPath := "persistencetest.db"
-	db, err := walletdb.Create(dbType, dbPath)
+	db, err := walletdb.Create(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("Failed to create test database (%s) %v", dbType, err)
 		return
