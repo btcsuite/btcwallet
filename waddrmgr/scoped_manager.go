@@ -1345,10 +1345,6 @@ func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 // NewAccountWatchingOnly is similar to NewAccount, but for watch-only wallets.
 func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, name string,
 	pubKey *hdkeychain.ExtendedKey) (uint32, error) {
-	if !s.rootManager.WatchOnly() {
-		return 0, managerError(ErrMustBeWatchingOnly, errMustBeWatchingOnly, nil)
-	}
-
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
