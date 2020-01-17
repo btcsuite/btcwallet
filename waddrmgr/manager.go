@@ -123,6 +123,15 @@ var DefaultScryptOptions = ScryptOptions{
 	P: 1,
 }
 
+// FastScryptOptions are the scrypt options that are used for testing
+// purposes where speed is more important than security. These options are used
+// when creating a new wallet for regtest or simnet.
+var FastScryptOptions = ScryptOptions{
+	N: 16,
+	R: 8,
+	P: 1,
+}
+
 // addrKey is used to uniquely identify an address even when those addresses
 // would end up being the same bitcoin address (as is the case for
 // pay-to-pubkey and pay-to-pubkey-hash style of addresses).
