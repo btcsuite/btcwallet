@@ -1233,6 +1233,16 @@ func (w *Wallet) walletLocker() {
 	var timeout <-chan time.Time
 	holdChan := make(heldUnlock)
 	quit := w.quitChan()
+
+	// If there is no real value at stake (which is true for regtest and
+	// simnet), we can tune down the scrypt options used for the wallet
+	// encryption key to speed things up in unit and integration tests.
+	scryptOptions := &waddrmgr.DefaultScryptOptions
+	switch w.chainParams.Name {
+	case chaincfg.RegressionNetParams.Name, chaincfg.SimNetParams.Name:
+		scryptOptions = &waddrmgr.FastScryptOptions
+	}
+
 out:
 	for {
 		select {
@@ -1259,7 +1269,7 @@ out:
 				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 				return w.Manager.ChangePassphrase(
 					addrmgrNs, req.old, req.new, req.private,
-					&waddrmgr.DefaultScryptOptions,
+					scryptOptions,
 				)
 			})
 			req.err <- err
@@ -1270,7 +1280,7 @@ out:
 				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 				err := w.Manager.ChangePassphrase(
 					addrmgrNs, req.publicOld, req.publicNew,
-					false, &waddrmgr.DefaultScryptOptions,
+					false, scryptOptions,
 				)
 				if err != nil {
 					return err
@@ -1278,7 +1288,7 @@ out:
 
 				return w.Manager.ChangePassphrase(
 					addrmgrNs, req.privateOld, req.privateNew,
-					true, &waddrmgr.DefaultScryptOptions,
+					true, scryptOptions,
 				)
 			})
 			req.err <- err
@@ -3624,6 +3634,15 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Par
 		return hdkeychain.ErrInvalidSeedLen
 	}
 
+	// If there is no real value at stake (which is true for regtest and
+	// simnet), we can tune down the scrypt options used for the wallet
+	// encryption key to speed things up in unit and integration tests.
+	var scryptOptions *waddrmgr.ScryptOptions = nil
+	switch params.Name {
+	case chaincfg.RegressionNetParams.Name, chaincfg.SimNetParams.Name:
+		scryptOptions = &waddrmgr.FastScryptOptions
+	}
+
 	return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
 		if err != nil {
@@ -3635,8 +3654,8 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Par
 		}
 
 		err = waddrmgr.Create(
-			addrmgrNs, seed, pubPass, privPass, params, nil,
-			birthday,
+			addrmgrNs, seed, pubPass, privPass, params,
+			scryptOptions, birthday,
 		)
 		if err != nil {
 			return err
