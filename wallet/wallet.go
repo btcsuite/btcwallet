@@ -303,18 +303,22 @@ func (w *Wallet) SetChainSynced(synced bool) {
 	w.chainClientSyncMtx.Unlock()
 }
 
-// activeData returns the currently-active receiving addresses and all unspent
-// outputs.  This is primarely intended to provide the parameters for a
-// rescan request.
-func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.Credit, error) {
+// activeData returns the currently-active receiving addresses that exist within
+// the wallet's default key scopes and all unspent outputs. This is primarily
+// intended to provide the parameters for a rescan request.
+func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address,
+	[]wtxmgr.Credit, error) {
+
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
 	var addrs []btcutil.Address
-	err := w.Manager.ForEachActiveAddress(addrmgrNs, func(addr btcutil.Address) error {
-		addrs = append(addrs, addr)
-		return nil
-	})
+	err := w.Manager.ForEachDefaultScopeActiveAddress(
+		addrmgrNs, func(addr btcutil.Address) error {
+			addrs = append(addrs, addr)
+			return nil
+		},
+	)
 	if err != nil {
 		return nil, nil, err
 	}
