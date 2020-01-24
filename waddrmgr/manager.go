@@ -123,6 +123,14 @@ var DefaultScryptOptions = ScryptOptions{
 	P: 1,
 }
 
+// FastScryptOptions are the scrypt options that should be used for testing
+// purposes only where speed is more important than security.
+var FastScryptOptions = ScryptOptions{
+	N: 16,
+	R: 8,
+	P: 1,
+}
+
 // addrKey is used to uniquely identify an address even when those addresses
 // would end up being the same bitcoin address (as is the case for
 // pay-to-pubkey and pay-to-pubkey-hash style of addresses).
