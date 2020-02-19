@@ -7,7 +7,6 @@ package walletdbtest
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"reflect"
 	"sync"
 
@@ -793,13 +792,12 @@ func testBatchInterface(tc *testContext) bool {
 }
 
 // TestInterface performs all interfaces tests for this database driver.
-func TestInterface(t Tester, dbType, dbPath string) {
-	db, err := walletdb.Create(dbType, dbPath, true)
+func TestInterface(t Tester, dbType string, args ...interface{}) {
+	db, err := walletdb.Create(dbType, args...)
 	if err != nil {
 		t.Errorf("Failed to create test database (%s) %v", dbType, err)
 		return
 	}
-	defer os.Remove(dbPath)
 	defer db.Close()
 
 	// Run all of the interface tests against the database.
