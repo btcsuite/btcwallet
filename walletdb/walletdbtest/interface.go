@@ -746,9 +746,14 @@ func testBatchInterface(tc *testContext) bool {
 		go func(i int) {
 			defer wg.Done()
 			err := walletdb.Batch(batchDB, func(tx walletdb.ReadWriteTx) error {
-				b, err := tx.CreateTopLevelBucket([]byte("test"))
+				bucketName := []byte("test")
+				b, err := tx.CreateTopLevelBucket(bucketName)
 				if err != nil {
-					return err
+					if err == walletdb.ErrBucketExists {
+						b = tx.ReadWriteBucket(bucketName)
+					} else {
+						return err
+					}
 				}
 
 				byteI := []byte{byte(i)}
