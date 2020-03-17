@@ -446,46 +446,51 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 
 	var rootPriv *hdkeychain.ExtendedKey
 	if !m.watchingOnly {
-		// If the manager is locked, then we can't create a new scoped manager.
+		// If the manager is locked, then we can't create a new scoped
+		// manager.
 		if m.locked {
 			return nil, managerError(ErrLocked, errLocked, nil)
 		}
 
-		// Now that we know the manager is unlocked, we'll need to fetch the
-		// root master HD private key. This is required as we'll be attempting
-		// the following derivation: m/purpose'/cointype'
+		// Now that we know the manager is unlocked, we'll need to
+		// fetch the root master HD private key. This is required as
+		// we'll be attempting the following derivation:
+		// m/purpose'/cointype'
 		//
-		// Note that the path to the coin type is requires hardened derivation,
-		// therefore this can only be done if the wallet's root key hasn't been
-		// neutered.
+		// Note that the path to the coin type is requires hardened
+		// derivation, therefore this can only be done if the wallet's
+		// root key hasn't been neutered.
 		masterRootPrivEnc, _, err := fetchMasterHDKeys(ns)
 		if err != nil {
 			return nil, err
 		}
 
-		// If the master root private key isn't found within the database, but
-		// we need to bail here as we can't create the cointype key without the
-		// master root private key.
+		// If the master root private key isn't found within the
+		// database, but we need to bail here as we can't create the
+		// cointype key without the master root private key.
 		if masterRootPrivEnc == nil {
 			return nil, managerError(ErrWatchingOnly, "", nil)
 		}
 
-		// Before we can derive any new scoped managers using this key, we'll
-		// need to fully decrypt it.
-		serializedMasterRootPriv, err := m.cryptoKeyPriv.Decrypt(masterRootPrivEnc)
+		// Before we can derive any new scoped managers using this
+		// key, we'll need to fully decrypt it.
+		serializedMasterRootPriv, err :=
+			m.cryptoKeyPriv.Decrypt(masterRootPrivEnc)
 		if err != nil {
-			str := fmt.Sprintf("failed to decrypt master root serialized private key")
+			str := fmt.Sprintf("failed to decrypt master root " +
+				"serialized private key")
 			return nil, managerError(ErrLocked, str, err)
 		}
 
-		// Now that we know the root priv is within the database, we'll decode
-		// it into a usable object.
+		// Now that we know the root priv is within the database,
+		// we'll decode it into a usable object.
 		rootPriv, err = hdkeychain.NewKeyFromString(
 			string(serializedMasterRootPriv),
 		)
 		zero.Bytes(serializedMasterRootPriv)
 		if err != nil {
-			str := fmt.Sprintf("failed to create master extended private key")
+			str := fmt.Sprintf("failed to create master extended " +
+				"private key")
 			return nil, managerError(ErrKeyChain, str, err)
 		}
 	}
@@ -515,9 +520,9 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 	}
 
 	if !m.watchingOnly {
-		// With the database state created, we'll now derive the cointype key
-		// using the master HD private key, then encrypt it along with the
-		// first account using our crypto keys.
+		// With the database state created, we'll now derive the
+		// cointype key using the master HD private key, then encrypt
+		// it along with the first account using our crypto keys.
 		err = createManagerKeyScope(
 			ns, scope, rootPriv, m.cryptoKeyPub, m.cryptoKeyPriv,
 		)
@@ -1690,21 +1695,23 @@ func createManagerKeyScope(ns walletdb.ReadWriteBucket,
 // to be recovered by using the same seed.
 //
 // If the provided seed value is nil the address manager will be
-// created in watchingOnly mode in which case no default account or
-// scoped manager are created - it is up to the caller to create a new
-// one with NewAccount and NewScopedKeyManager
+// created in watchingOnly mode in which case no default accounts or
+// scoped managers are created - it is up to the caller to create a
+// new one with NewAccountWatchingOnly and NewScopedKeyManager.
 //
-// All private and public keys and information are protected by secret keys
-// derived from the provided private and public passphrases.  The public
-// passphrase is required on subsequent opens of the address manager, and the
-// private passphrase is required to unlock the address manager in order to
-// gain access to any private keys and information.
+// All private and public keys and information are protected by secret
+// keys derived from the provided private and public passphrases.  The
+// public passphrase is required on subsequent opens of the address
+// manager, and the private passphrase is required to unlock the
+// address manager in order to gain access to any private keys and
+// information.
 //
-// If a config structure is passed to the function, that configuration will
-// override the defaults.
+// If a config structure is passed to the function, that configuration
+// will override the defaults.
 //
-// A ManagerError with an error code of ErrAlreadyExists will be returned the
-// address manager already exists in the specified namespace.
+// A ManagerError with an error code of ErrAlreadyExists will be
+// returned the address manager already exists in the specified
+// namespace.
 func Create(ns walletdb.ReadWriteBucket,
 	seed, pubPassphrase, privPassphrase []byte,
 	chainParams *chaincfg.Params, config *ScryptOptions,
@@ -1784,9 +1791,9 @@ func Create(ns walletdb.ReadWriteBucket,
 		}
 		defer masterKeyPriv.Zero()
 
-		// Generate the private passphrase salt.  This is used when hashing
-		// passwords to detect whether an unlock can be avoided when the manager
-		// is already unlocked.
+		// Generate the private passphrase salt.  This is used when
+		// hashing passwords to detect whether an unlock can be
+		// avoided when the manager is already unlocked.
 		var privPassphraseSalt [saltSize]byte
 		_, err = rand.Read(privPassphraseSalt[:])
 		if err != nil {
@@ -1807,19 +1814,22 @@ func Create(ns walletdb.ReadWriteBucket,
 		}
 		defer cryptoKeyScript.Zero()
 
-		cryptoKeyPrivEnc, err = masterKeyPriv.Encrypt(cryptoKeyPriv.Bytes())
+		cryptoKeyPrivEnc, err =
+			masterKeyPriv.Encrypt(cryptoKeyPriv.Bytes())
 		if err != nil {
 			str := "failed to encrypt crypto private key"
 			return managerError(ErrCrypto, str, err)
 		}
-		cryptoKeyScriptEnc, err = masterKeyPriv.Encrypt(cryptoKeyScript.Bytes())
+		cryptoKeyScriptEnc, err =
+			masterKeyPriv.Encrypt(cryptoKeyScript.Bytes())
 		if err != nil {
 			str := "failed to encrypt crypto script key"
 			return managerError(ErrCrypto, str, err)
 		}
 
-		// Generate the BIP0044 HD key structure to ensure the provided seed
-		// can generate the required structure with no issues.
+		// Generate the BIP0044 HD key structure to ensure the
+		// provided seed can generate the required structure with no
+		// issues.
 
 		// Derive the master extended key from the seed.
 		rootKey, err := hdkeychain.NewMaster(seed, chainParams)
@@ -1833,8 +1843,9 @@ func Create(ns walletdb.ReadWriteBucket,
 			return managerError(ErrKeyChain, str, err)
 		}
 
-		// Next, for each registers default manager scope, we'll create the
-		// hardened cointype key for it, as well as the first default account.
+		// Next, for each registers default manager scope, we'll
+		// create the hardened cointype key for it, as well as the
+		// first default account.
 		for _, defaultScope := range DefaultKeyScopes {
 			err := createManagerKeyScope(
 				ns, defaultScope, rootKey, cryptoKeyPub, cryptoKeyPriv,
@@ -1844,14 +1855,17 @@ func Create(ns walletdb.ReadWriteBucket,
 			}
 		}
 
-		// Before we proceed, we'll also store the root master private key
-		// within the database in an encrypted format. This is required as in
-		// the future, we may need to create additional scoped key managers.
-		masterHDPrivKeyEnc, err := cryptoKeyPriv.Encrypt([]byte(rootKey.String()))
+		// Before we proceed, we'll also store the root master private
+		// key within the database in an encrypted format. This is
+		// required as in the future, we may need to create additional
+		// scoped key managers.
+		masterHDPrivKeyEnc, err :=
+			cryptoKeyPriv.Encrypt([]byte(rootKey.String()))
 		if err != nil {
 			return maybeConvertDbError(err)
 		}
-		masterHDPubKeyEnc, err := cryptoKeyPub.Encrypt([]byte(rootPubKey.String()))
+		masterHDPubKeyEnc, err :=
+			cryptoKeyPub.Encrypt([]byte(rootPubKey.String()))
 		if err != nil {
 			return maybeConvertDbError(err)
 		}

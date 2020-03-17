@@ -1209,11 +1209,13 @@ func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uin
 	return s.newAccount(ns, number, name)
 }
 
-// NewRawAccountWatchingOnly creates a new watching only account for the scoped manager.
-// This method differs from the NewAccountWatchingOnly method in that this method takes the account
-// number *directly*, rather than taking a string name for the account, then
-// mapping that to the next highest account number.
-func (s *ScopedKeyManager) NewRawAccountWatchingOnly(ns walletdb.ReadWriteBucket, number uint32,
+// NewRawAccountWatchingOnly creates a new watching only account for
+// the scoped manager.  This method differs from the
+// NewAccountWatchingOnly method in that this method takes the account
+// number *directly*, rather than taking a string name for the
+// account, then mapping that to the next highest account number.
+func (s *ScopedKeyManager) NewRawAccountWatchingOnly(
+	ns walletdb.ReadWriteBucket, number uint32,
 	pubKey *hdkeychain.ExtendedKey) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
