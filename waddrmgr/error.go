@@ -33,10 +33,6 @@ var (
 	// errWatchingOnly is the common error description used for the
 	// ErrWatchingOnly error code.
 	errWatchingOnly = "address manager is watching-only"
-
-	// errMustBeWatchingOnly is the common error description used for the
-	// ErrMustBeWatchingOnly error code.
-	errMustBeWatchingOnly = "address manager must be watching-only"
 )
 
 // ErrorCode identifies a kind of error.
@@ -94,11 +90,6 @@ const (
 	// account manager to have access to private data, was requested on
 	// a watching-only account manager.
 	ErrWatchingOnly
-
-	// ErrMustBeWatchingOnly indicates that an operation, which requires the
-	// account manager to be watching only, was requested on
-	// a non-watching-only account manager.
-	ErrMustBeWatchingOnly
 
 	// ErrInvalidAccount indicates that the requested account is not valid.
 	ErrInvalidAccount
