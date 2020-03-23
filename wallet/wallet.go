@@ -336,10 +336,21 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		return err
 	}
 
+	// Neutrino relies on the information given to it by the cfheader server
+	// so it knows exactly whether it's synced up to the server's state or
+	// not, even on dev chains. To recover a Neutrino wallet, we need to
+	// make sure it's synced before we start scanning for addresses,
+	// otherwise we might miss some if we only scan up to its current sync
+	// point.
+	neutrinoRecovery := chainClient.BackEnd() == "neutrino" &&
+		w.recoveryWindow > 0
+
 	// We'll wait until the backend is synced to ensure we get the latest
 	// MaxReorgDepth blocks to store. We don't do this for development
-	// environments as we can't guarantee a lively chain.
-	if !w.isDevEnv() {
+	// environments as we can't guarantee a lively chain, except for
+	// Neutrino, where the cfheader server tells us what it believes the
+	// chain tip is.
+	if !w.isDevEnv() || neutrinoRecovery {
 		log.Debug("Waiting for chain backend to sync to tip")
 		if err := w.waitUntilBackendSynced(chainClient); err != nil {
 			return err
