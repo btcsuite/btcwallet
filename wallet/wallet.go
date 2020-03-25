@@ -3579,23 +3579,45 @@ func (w *Wallet) Database() walletdb.DB {
 // Create creates an new wallet, writing it to an empty database.  If the passed
 // seed is non-nil, it is used.  Otherwise, a secure random seed of the
 // recommended length is generated.
-func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Params,
-	birthday time.Time) error {
+func Create(db walletdb.DB, pubPass, privPass, seed []byte,
+	params *chaincfg.Params, birthday time.Time) error {
 
-	// If a seed was provided, ensure that it is of valid length. Otherwise,
-	// we generate a random seed for the wallet with the recommended seed
-	// length.
-	if seed == nil {
-		hdSeed, err := hdkeychain.GenerateSeed(
-			hdkeychain.RecommendedSeedLen)
-		if err != nil {
-			return err
+	return createInternal(
+		db, pubPass, privPass, seed, params, birthday, false,
+	)
+}
+
+// CreateWatchingOnly creates an new watch-only wallet, writing it to
+// an empty database. No seed can be provided as this wallet will be
+// watching only.  Likewise no private passphrase may be provided
+// either.
+func CreateWatchingOnly(db walletdb.DB, pubPass []byte,
+	params *chaincfg.Params, birthday time.Time) error {
+
+	return createInternal(
+		db, pubPass, nil, nil, params, birthday, true,
+	)
+}
+
+func createInternal(db walletdb.DB, pubPass, privPass, seed []byte,
+	params *chaincfg.Params, birthday time.Time, isWatchingOnly bool) error {
+
+	if !isWatchingOnly {
+		// If a seed was provided, ensure that it is of valid length. Otherwise,
+		// we generate a random seed for the wallet with the recommended seed
+		// length.
+		if seed == nil {
+			hdSeed, err := hdkeychain.GenerateSeed(
+				hdkeychain.RecommendedSeedLen)
+			if err != nil {
+				return err
+			}
+			seed = hdSeed
 		}
-		seed = hdSeed
-	}
-	if len(seed) < hdkeychain.MinSeedBytes ||
-		len(seed) > hdkeychain.MaxSeedBytes {
-		return hdkeychain.ErrInvalidSeedLen
+		if len(seed) < hdkeychain.MinSeedBytes ||
+			len(seed) > hdkeychain.MaxSeedBytes {
+			return hdkeychain.ErrInvalidSeedLen
+		}
 	}
 
 	return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
@@ -3609,8 +3631,7 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte, params *chaincfg.Par
 		}
 
 		err = waddrmgr.Create(
-			addrmgrNs, seed, pubPass, privPass, params, nil,
-			birthday,
+			addrmgrNs, seed, pubPass, privPass, params, nil, birthday,
 		)
 		if err != nil {
 			return err

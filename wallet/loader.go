@@ -100,6 +100,25 @@ func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
 func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte,
 	bday time.Time) (*Wallet, error) {
 
+	return l.createNewWalletInternal(
+		pubPassphrase, privPassphrase, seed, bday, false,
+	)
+}
+
+// CreateNewWatchingOnlyWallet creates a new wallet using the provided
+// public passphrase.  No seed or private passphrase may be provided
+// since the wallet is watching-only.
+func (l *Loader) CreateNewWatchingOnlyWallet(pubPassphrase []byte,
+	bday time.Time) (*Wallet, error) {
+
+	return l.createNewWalletInternal(
+		pubPassphrase, nil, nil, bday, true,
+	)
+}
+
+func (l *Loader) createNewWalletInternal(pubPassphrase, privPassphrase,
+	seed []byte, bday time.Time, isWatchingOnly bool) (*Wallet, error) {
+
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
@@ -127,11 +146,18 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte,
 	}
 
 	// Initialize the newly created database for the wallet before opening.
-	err = Create(
-		db, pubPassphrase, privPassphrase, seed, l.chainParams, bday,
-	)
-	if err != nil {
-		return nil, err
+	if isWatchingOnly {
+		err = CreateWatchingOnly(db, pubPassphrase, l.chainParams, bday)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		err = Create(
+			db, pubPassphrase, privPassphrase, seed, l.chainParams, bday,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Open the newly-created wallet.
