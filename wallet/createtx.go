@@ -135,15 +135,21 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 
 	inputSource := makeInputSource(eligible)
 	changeSource := func() ([]byte, error) {
-		// Derive the change output script.  As a hack to allow
-		// spending from the imported account, change addresses are
-		// created from account 0.
+		// Derive the change output script. We'll use the default key
+		// scope responsible for P2WPKH addresses to do so. As a hack to
+		// allow spending from the imported account, change addresses
+		// are created from account 0.
 		var changeAddr btcutil.Address
 		var err error
+		changeKeyScope := waddrmgr.KeyScopeBIP0084
 		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.newChangeAddress(addrmgrNs, 0)
+			changeAddr, err = w.newChangeAddress(
+				addrmgrNs, 0, changeKeyScope,
+			)
 		} else {
-			changeAddr, err = w.newChangeAddress(addrmgrNs, account)
+			changeAddr, err = w.newChangeAddress(
+				addrmgrNs, account, changeKeyScope,
+			)
 		}
 		if err != nil {
 			return nil, err
