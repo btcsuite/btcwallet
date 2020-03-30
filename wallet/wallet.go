@@ -311,10 +311,12 @@ func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.C
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
 	var addrs []btcutil.Address
-	err := w.Manager.ForEachActiveAddress(addrmgrNs, func(addr btcutil.Address) error {
-		addrs = append(addrs, addr)
-		return nil
-	})
+	err := w.Manager.ForEachRelevantActiveAddress(
+		addrmgrNs, func(addr btcutil.Address) error {
+			addrs = append(addrs, addr)
+			return nil
+		},
+	)
 	if err != nil {
 		return nil, nil, err
 	}
