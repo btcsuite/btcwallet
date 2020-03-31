@@ -738,6 +738,43 @@ func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket, fn func(addr btcu
 	return nil
 }
 
+// ForEachRelevantActiveAddress invokes the given closure on each active
+// address relevant to the wallet. Ideally, only addresses within the default
+// key scopes would be relevant, but due to a bug (now fixed) in which change
+// addresses could be created outside of the default key scopes, we now need to
+// check for those as well.
+func (m *Manager) ForEachRelevantActiveAddress(ns walletdb.ReadBucket,
+	fn func(addr btcutil.Address) error) error {
+
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	for _, scopedMgr := range m.scopedManagers {
+		// If the manager is for a default key scope, we'll return all
+		// addresses, otherwise we'll only return internal addresses, as
+		// that's the branch used for change addresses.
+		isDefaultKeyScope := false
+		for _, defaultKeyScope := range DefaultKeyScopes {
+			if scopedMgr.Scope() == defaultKeyScope {
+				isDefaultKeyScope = true
+				break
+			}
+		}
+
+		var err error
+		if isDefaultKeyScope {
+			err = scopedMgr.ForEachActiveAddress(ns, fn)
+		} else {
+			err = scopedMgr.ForEachInternalActiveAddress(ns, fn)
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // ForEachAccountAddress calls the given function with each address of
 // the given account stored in the manager, breaking early on error.
 func (m *Manager) ForEachAccountAddress(ns walletdb.ReadBucket, account uint32,
@@ -749,29 +786,6 @@ func (m *Manager) ForEachAccountAddress(ns walletdb.ReadBucket, account uint32,
 	for _, scopedMgr := range m.scopedManagers {
 		err := scopedMgr.ForEachAccountAddress(ns, account, fn)
 		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// ForEachDefaultScopeActiveAddress calls the given function with each active
-// address stored in the manager within the default scopes, breaking early on
-// error.
-func (m *Manager) ForEachDefaultScopeActiveAddress(ns walletdb.ReadBucket,
-	fn func(addr btcutil.Address) error) error {
-
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-
-	for _, keyScope := range DefaultKeyScopes {
-		scopedMgr, ok := m.scopedManagers[keyScope]
-		if !ok {
-			return fmt.Errorf("manager for default key scope with "+
-				"purpose %v not found", keyScope.Purpose)
-		}
-		if err := scopedMgr.ForEachActiveAddress(ns, fn); err != nil {
 			return err
 		}
 	}

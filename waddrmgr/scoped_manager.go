@@ -1760,3 +1760,30 @@ func (s *ScopedKeyManager) ForEachActiveAddress(ns walletdb.ReadBucket,
 
 	return nil
 }
+
+// ForEachInternalActiveAddress invokes the given closure on each _internal_
+// active address belonging to the scoped key manager, breaking early on error.
+func (s *ScopedKeyManager) ForEachInternalActiveAddress(ns walletdb.ReadBucket,
+	fn func(addr btcutil.Address) error) error {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	addrFn := func(rowInterface interface{}) error {
+		managedAddr, err := s.rowInterfaceToManaged(ns, rowInterface)
+		if err != nil {
+			return err
+		}
+		// Skip any non-internal branch addresses.
+		if !managedAddr.Internal() {
+			return nil
+		}
+		return fn(managedAddr.Address())
+	}
+
+	if err := forEachActiveAddress(ns, &s.scope, addrFn); err != nil {
+		return maybeConvertDbError(err)
+	}
+
+	return nil
+}

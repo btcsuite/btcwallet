@@ -303,17 +303,15 @@ func (w *Wallet) SetChainSynced(synced bool) {
 	w.chainClientSyncMtx.Unlock()
 }
 
-// activeData returns the currently-active receiving addresses that exist within
-// the wallet's default key scopes and all unspent outputs. This is primarily
-// intended to provide the parameters for a rescan request.
-func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address,
-	[]wtxmgr.Credit, error) {
-
+// activeData returns the currently-active receiving addresses and all unspent
+// outputs.  This is primarely intended to provide the parameters for a
+// rescan request.
+func (w *Wallet) activeData(dbtx walletdb.ReadTx) ([]btcutil.Address, []wtxmgr.Credit, error) {
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
 	var addrs []btcutil.Address
-	err := w.Manager.ForEachDefaultScopeActiveAddress(
+	err := w.Manager.ForEachRelevantActiveAddress(
 		addrmgrNs, func(addr btcutil.Address) error {
 			addrs = append(addrs, addr)
 			return nil
@@ -639,13 +637,15 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	)
 
 	// In the event that this recovery is being resumed, we will need to
-	// repopulate all found addresses from the database. For basic recovery,
-	// we will only do so for the default scopes.
-	scopedMgrs, err := w.defaultScopeManagers()
-	if err != nil {
-		return err
+	// repopulate all found addresses from the database. Ideally, for basic
+	// recovery, we would only do so for the default scopes, but due to a
+	// bug in which the wallet would create change addresses outside of the
+	// default scopes, it's necessary to attempt all registered key scopes.
+	scopedMgrs := make(map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager)
+	for _, scopedMgr := range w.Manager.ActiveScopedKeyManagers() {
+		scopedMgrs[scopedMgr.Scope()] = scopedMgr
 	}
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		txMgrNS := tx.ReadBucket(wtxmgrNamespaceKey)
 		credits, err := w.TxStore.UnspentOutputs(txMgrNS)
 		if err != nil {
@@ -714,9 +714,9 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 						return err
 					}
 				}
-				return w.recoverDefaultScopes(
+				return w.recoverScopedAddresses(
 					chainClient, tx, ns, recoveryBatch,
-					recoveryMgr.State(),
+					recoveryMgr.State(), scopedMgrs,
 				)
 			})
 			if err != nil {
@@ -739,48 +739,10 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	return nil
 }
 
-// defaultScopeManagers fetches the ScopedKeyManagers from the wallet using the
-// default set of key scopes.
-func (w *Wallet) defaultScopeManagers() (
-	map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager, error) {
-
-	scopedMgrs := make(map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager)
-	for _, scope := range waddrmgr.DefaultKeyScopes {
-		scopedMgr, err := w.Manager.FetchScopedKeyManager(scope)
-		if err != nil {
-			return nil, err
-		}
-
-		scopedMgrs[scope] = scopedMgr
-	}
-
-	return scopedMgrs, nil
-}
-
-// recoverDefaultScopes attempts to recover any addresses belonging to any
-// active scoped key managers known to the wallet. Recovery of each scope's
-// default account will be done iteratively against the same batch of blocks.
-// TODO(conner): parallelize/pipeline/cache intermediate network requests
-func (w *Wallet) recoverDefaultScopes(
-	chainClient chain.Interface,
-	tx walletdb.ReadWriteTx,
-	ns walletdb.ReadWriteBucket,
-	batch []wtxmgr.BlockMeta,
-	recoveryState *RecoveryState) error {
-
-	scopedMgrs, err := w.defaultScopeManagers()
-	if err != nil {
-		return err
-	}
-
-	return w.recoverScopedAddresses(
-		chainClient, tx, ns, batch, recoveryState, scopedMgrs,
-	)
-}
-
-// recoverAccountAddresses scans a range of blocks in attempts to recover any
+// recoverScopedAddresses scans a range of blocks in attempts to recover any
 // previously used addresses for a particular account derivation path. At a high
 // level, the algorithm works as follows:
+//
 //  1) Ensure internal and external branch horizons are fully expanded.
 //  2) Filter the entire range of blocks, stopping if a non-zero number of
 //       address are contained in a particular block.
@@ -788,6 +750,8 @@ func (w *Wallet) recoverDefaultScopes(
 //  4) Record any outpoints found in the block that should be watched for spends
 //  5) Trim the range of blocks up to and including the one reporting the addrs.
 //  6) Repeat from (1) if there are still more blocks in the range.
+//
+// TODO(conner): parallelize/pipeline/cache intermediate network requests
 func (w *Wallet) recoverScopedAddresses(
 	chainClient chain.Interface,
 	tx walletdb.ReadWriteTx,
@@ -2946,7 +2910,7 @@ func (w *Wallet) NewChangeAddress(account uint32,
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		var err error
-		addr, err = w.newChangeAddress(addrmgrNs, account)
+		addr, err = w.newChangeAddress(addrmgrNs, account, scope)
 		return err
 	})
 	if err != nil {
@@ -2968,14 +2932,9 @@ func (w *Wallet) NewChangeAddress(account uint32,
 // method in order to detect when an on-chain transaction pays to the address
 // being created.
 func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket,
-	account uint32) (btcutil.Address, error) {
+	account uint32, scope waddrmgr.KeyScope) (btcutil.Address, error) {
 
-	// As we're making a change address, we'll fetch the type of manager
-	// that is able to make p2wkh output as they're the most efficient.
-	scopes := w.Manager.ScopesForExternalAddrType(
-		waddrmgr.WitnessPubKey,
-	)
-	manager, err := w.Manager.FetchScopedKeyManager(scopes[0])
+	manager, err := w.Manager.FetchScopedKeyManager(scope)
 	if err != nil {
 		return nil, err
 	}
