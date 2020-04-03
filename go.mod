@@ -6,7 +6,7 @@ require (
 	github.com/btcsuite/btcutil v0.0.0-20190425235716-9e5f4b9a998d
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.0.0
 	github.com/btcsuite/btcwallet/wallet/txrules v1.0.0
-	github.com/btcsuite/btcwallet/walletdb v1.3.0
+	github.com/btcsuite/btcwallet/walletdb v1.2.0
 	github.com/btcsuite/btcwallet/wtxmgr v1.0.0
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792
 	github.com/davecgh/go-spew v1.1.1
@@ -22,7 +22,10 @@ require (
 	google.golang.org/grpc v1.18.0
 )
 
-replace github.com/btcsuite/btcwallet/walletdb => ./walletdb
+// Prevent using the replace directive as it'll point to the latest walletdb
+// version, which is v1.3.0, rather than what we want: v1.2.0. It should be used
+// again once the btcwallet module depends on the latest version of walletdb.
+// replace github.com/btcsuite/btcwallet/walletdb => ./walletdb
 
 replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
 
