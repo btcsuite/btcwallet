@@ -6,7 +6,9 @@ package walletdb_test
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -54,14 +56,20 @@ func TestAddDuplicateDriver(t *testing.T) {
 			"got %v, want %v", err, walletdb.ErrDbTypeRegistered)
 	}
 
-	dbPath := "dupdrivertest.db"
+	tempDir, err := ioutil.TempDir("", "dupdrivertest")
+	if err != nil {
+		t.Errorf("unable to create temp dir: %v", err)
+		return
+	}
+	defer os.Remove(tempDir)
+
+	dbPath := filepath.Join(tempDir, "db")
 	db, err := walletdb.Create(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("failed to create database: %v", err)
 		return
 	}
 	db.Close()
-	_ = os.Remove(dbPath)
 
 }
 

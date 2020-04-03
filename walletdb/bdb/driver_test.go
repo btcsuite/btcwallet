@@ -6,7 +6,9 @@ package bdb_test
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -71,13 +73,19 @@ func TestCreateOpenFail(t *testing.T) {
 
 	// Ensure operations against a closed database return the expected
 	// error.
-	dbPath := "createfail.db"
+	tempDir, err := ioutil.TempDir("", "createfail")
+	if err != nil {
+		t.Errorf("unable to create temp dir: %v", err)
+		return
+	}
+	defer os.Remove(tempDir)
+
+	dbPath := filepath.Join(tempDir, "db")
 	db, err := walletdb.Create(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
 		return
 	}
-	defer os.Remove(dbPath)
 	db.Close()
 
 	wantErr = walletdb.ErrDbNotOpen
@@ -92,13 +100,19 @@ func TestCreateOpenFail(t *testing.T) {
 // reopening the database.
 func TestPersistence(t *testing.T) {
 	// Create a new database to run tests against.
-	dbPath := "persistencetest.db"
+	tempDir, err := ioutil.TempDir("", "persistencetest")
+	if err != nil {
+		t.Errorf("unable to create temp dir: %v", err)
+		return
+	}
+	defer os.Remove(tempDir)
+
+	dbPath := filepath.Join(tempDir, "db")
 	db, err := walletdb.Create(dbType, dbPath, true)
 	if err != nil {
 		t.Errorf("Failed to create test database (%s) %v", dbType, err)
 		return
 	}
-	defer os.Remove(dbPath)
 	defer db.Close()
 
 	// Create a namespace and put some values into it so they can be tested
