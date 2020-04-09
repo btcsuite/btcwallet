@@ -3582,7 +3582,7 @@ func (w *Wallet) Database() walletdb.DB {
 func Create(db walletdb.DB, pubPass, privPass, seed []byte,
 	params *chaincfg.Params, birthday time.Time) error {
 
-	return createInternal(
+	return create(
 		db, pubPass, privPass, seed, params, birthday, false,
 	)
 }
@@ -3594,12 +3594,12 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte,
 func CreateWatchingOnly(db walletdb.DB, pubPass []byte,
 	params *chaincfg.Params, birthday time.Time) error {
 
-	return createInternal(
+	return create(
 		db, pubPass, nil, nil, params, birthday, true,
 	)
 }
 
-func createInternal(db walletdb.DB, pubPass, privPass, seed []byte,
+func create(db walletdb.DB, pubPass, privPass, seed []byte,
 	params *chaincfg.Params, birthday time.Time, isWatchingOnly bool) error {
 
 	if !isWatchingOnly {

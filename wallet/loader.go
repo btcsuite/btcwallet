@@ -100,7 +100,7 @@ func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
 func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte,
 	bday time.Time) (*Wallet, error) {
 
-	return l.createNewWalletInternal(
+	return l.createNewWallet(
 		pubPassphrase, privPassphrase, seed, bday, false,
 	)
 }
@@ -111,12 +111,12 @@ func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte,
 func (l *Loader) CreateNewWatchingOnlyWallet(pubPassphrase []byte,
 	bday time.Time) (*Wallet, error) {
 
-	return l.createNewWalletInternal(
+	return l.createNewWallet(
 		pubPassphrase, nil, nil, bday, true,
 	)
 }
 
-func (l *Loader) createNewWalletInternal(pubPassphrase, privPassphrase,
+func (l *Loader) createNewWallet(pubPassphrase, privPassphrase,
 	seed []byte, bday time.Time, isWatchingOnly bool) (*Wallet, error) {
 
 	defer l.mu.Unlock()
