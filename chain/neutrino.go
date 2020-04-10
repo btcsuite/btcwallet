@@ -443,13 +443,13 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 // NotifyBlocks replicates the RPC client's NotifyBlocks command.
 func (s *NeutrinoClient) NotifyBlocks() error {
 	s.clientMtx.Lock()
+	defer s.clientMtx.Unlock()
+
 	// If we're scanning, we're already notifying on blocks. Otherwise,
 	// start a rescan without watching any addresses.
 	if !s.isScanning() {
-		s.clientMtx.Unlock()
-		return s.NotifyReceived([]btcutil.Address{})
+		return s.notifyReceived([]btcutil.Address{})
 	}
-	s.clientMtx.Unlock()
 	return nil
 }
 
