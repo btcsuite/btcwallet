@@ -348,9 +348,11 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
 		rescan := s.rescan
-		s.clientMtx.Unlock()
-		rescan.WaitForShutdown()
-		s.clientMtx.Lock()
+		if s.rescan != nil {
+			s.clientMtx.Unlock()
+			rescan.WaitForShutdown()
+			s.clientMtx.Lock()
+		}
 		// If the rescan has changed since unlocking, shut down the new
 		// one as well.
 		if s.rescan != rescan {
