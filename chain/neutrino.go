@@ -338,6 +338,29 @@ func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) 
 func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	outPoints map[wire.OutPoint]btcutil.Address) error {
 
+	bestBlock, err := s.CS.BestBlock()
+	if err != nil {
+		return fmt.Errorf("Can't get chain service's best block: %s", err)
+	}
+	header, err := s.CS.GetBlockHeader(&bestBlock.Hash)
+	if err != nil {
+		return fmt.Errorf("Can't get block header for hash %v: %s",
+			bestBlock.Hash, err)
+	}
+
+	var inputsToWatch []neutrino.InputWithScript
+	for op, addr := range outPoints {
+		addrScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return err
+		}
+
+		inputsToWatch = append(inputsToWatch, neutrino.InputWithScript{
+			OutPoint: op,
+			PkScript: addrScript,
+		})
+	}
+
 	s.clientMtx.Lock()
 	if !s.started {
 		s.clientMtx.Unlock()
@@ -367,23 +390,11 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	s.lastProgressSent = false
 	s.lastFilteredBlockHeader = nil
 	s.isRescan = true
-	s.clientMtx.Unlock()
-
-	bestBlock, err := s.CS.BestBlock()
-	if err != nil {
-		return fmt.Errorf("Can't get chain service's best block: %s", err)
-	}
-	header, err := s.CS.GetBlockHeader(&bestBlock.Hash)
-	if err != nil {
-		return fmt.Errorf("Can't get block header for hash %v: %s",
-			bestBlock.Hash, err)
-	}
 
 	// If the wallet is already fully caught up, or the rescan has started
 	// with state that indicates a "fresh" wallet, we'll send a
 	// notification indicating the rescan has "finished".
 	if header.BlockHash() == *startHash {
-		s.clientMtx.Lock()
 		s.finished = true
 		rescanQuit := s.rescanQuit
 		s.clientMtx.Unlock()
@@ -391,12 +402,14 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		// Release the lock while dispatching the notification since
 		// it's possible for the notificationHandler to be waiting to
 		// acquire it before receiving the notification.
-		select {
-		case s.enqueueNotification <- &RescanFinished{
+		ntfn := &RescanFinished{
 			Hash:   startHash,
 			Height: int32(bestBlock.Height),
 			Time:   header.Timestamp,
-		}:
+		}
+		select {
+		case s.enqueueNotification <- ntfn:
+			s.clientMtx.Lock()
 		case <-s.quit:
 			return nil
 		case <-rescanQuit:
@@ -404,20 +417,6 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		}
 	}
 
-	var inputsToWatch []neutrino.InputWithScript
-	for op, addr := range outPoints {
-		addrScript, err := txscript.PayToAddrScript(addr)
-		if err != nil {
-			return err
-		}
-
-		inputsToWatch = append(inputsToWatch, neutrino.InputWithScript{
-			OutPoint: op,
-			PkScript: addrScript,
-		})
-	}
-
-	s.clientMtx.Lock()
 	newRescan := neutrino.NewRescan(
 		&neutrino.RescanChainSource{
 			ChainService: s.CS,
