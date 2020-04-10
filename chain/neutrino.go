@@ -41,11 +41,14 @@ type NeutrinoClient struct {
 	rescanErr  <-chan error
 	wg         sync.WaitGroup
 	started    bool
-	scanning   bool
 	finished   bool
 	isRescan   bool
 
 	clientMtx sync.Mutex
+}
+
+func (s *NeutrinoClient) isScanning() bool {
+	return s.rescanQuit != nil
 }
 
 // NewNeutrinoClient creates a new NeutrinoClient struct with a backing
@@ -341,7 +344,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		return fmt.Errorf("can't do a rescan when the chain client " +
 			"is not started")
 	}
-	for s.scanning {
+	for s.isScanning() {
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
 		rescan := s.rescan
@@ -358,7 +361,6 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		break
 	}
 	s.rescanQuit = make(chan struct{})
-	s.scanning = true
 	s.finished = false
 	s.lastProgressSent = false
 	s.lastFilteredBlockHeader = nil
@@ -441,7 +443,7 @@ func (s *NeutrinoClient) NotifyBlocks() error {
 	s.clientMtx.Lock()
 	// If we're scanning, we're already notifying on blocks. Otherwise,
 	// start a rescan without watching any addresses.
-	if !s.scanning {
+	if !s.isScanning() {
 		s.clientMtx.Unlock()
 		return s.NotifyReceived([]btcutil.Address{})
 	}
@@ -455,13 +457,12 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 
 	// If we have a rescan running, we just need to add the appropriate
 	// addresses to the watch list.
-	if s.scanning {
+	if s.isScanning() {
 		s.clientMtx.Unlock()
 		return s.rescan.Update(neutrino.AddAddrs(addrs...))
 	}
 
 	s.rescanQuit = make(chan struct{})
-	s.scanning = true
 
 	// Don't need RescanFinished or RescanProgress notifications.
 	s.finished = true
