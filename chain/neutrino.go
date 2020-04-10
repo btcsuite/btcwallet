@@ -456,11 +456,18 @@ func (s *NeutrinoClient) NotifyBlocks() error {
 // NotifyReceived replicates the RPC client's NotifyReceived command.
 func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.clientMtx.Lock()
+	defer s.clientMtx.Unlock()
 
+	return s.notifyReceived(addrs)
+}
+
+// notifyReceived replicates the RPC client's NotifyReceived command.
+//
+// NOTE: The clienMtx MUST be held when invoking.
+func (s *NeutrinoClient) notifyReceived(addrs []btcutil.Address) error {
 	// If we have a rescan running, we just need to add the appropriate
 	// addresses to the watch list.
 	if s.isScanning() {
-		s.clientMtx.Unlock()
 		return s.rescan.Update(neutrino.AddAddrs(addrs...))
 	}
 
@@ -487,7 +494,6 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	)
 	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
-	s.clientMtx.Unlock()
 	return nil
 }
 
