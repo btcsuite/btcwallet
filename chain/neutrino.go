@@ -341,15 +341,21 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		return fmt.Errorf("can't do a rescan when the chain client " +
 			"is not started")
 	}
-	if s.scanning {
+	for s.scanning {
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
 		rescan := s.rescan
 		s.clientMtx.Unlock()
 		rescan.WaitForShutdown()
 		s.clientMtx.Lock()
+		// If the rescan has changed since unlocking, shut down the new
+		// one as well.
+		if s.rescan != rescan {
+			continue
+		}
 		s.rescan = nil
 		s.rescanErr = nil
+		break
 	}
 	s.rescanQuit = make(chan struct{})
 	s.scanning = true
