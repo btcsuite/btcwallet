@@ -850,6 +850,7 @@ func forEachAccount(ns walletdb.ReadBucket, scope *KeyScope,
 }
 
 // fetchLastAccount retrieves the last account from the database.
+// If no accounts, returns twos-complement representation of -1, so that the next account is zero
 func fetchLastAccount(ns walletdb.ReadBucket, scope *KeyScope) (uint32, error) {
 	scopedBucket, err := fetchReadScopeBucket(ns, scope)
 	if err != nil {
@@ -859,6 +860,9 @@ func fetchLastAccount(ns walletdb.ReadBucket, scope *KeyScope) (uint32, error) {
 	metaBucket := scopedBucket.NestedReadBucket(metaBucketName)
 
 	val := metaBucket.Get(lastAccountName)
+	if val == nil {
+		return (1 << 32) - 1, nil
+	}
 	if len(val) != 4 {
 		str := fmt.Sprintf("malformed metadata '%s' stored in database",
 			lastAccountName)

@@ -1187,7 +1187,7 @@ func (s *ScopedKeyManager) LastInternalAddress(ns walletdb.ReadBucket,
 }
 
 // NewRawAccount creates a new account for the scoped manager. This method
-// differs from the NewAccount method in that this method takes the acount
+// differs from the NewAccount method in that this method takes the account
 // number *directly*, rather than taking a string name for the account, then
 // mapping that to the next highest account number.
 func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uint32) error {
@@ -1207,6 +1207,24 @@ func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uin
 	// the account number.
 	name := fmt.Sprintf("act:%v", number)
 	return s.newAccount(ns, number, name)
+}
+
+// NewRawAccountWatchingOnly creates a new watching only account for
+// the scoped manager.  This method differs from the
+// NewAccountWatchingOnly method in that this method takes the account
+// number *directly*, rather than taking a string name for the
+// account, then mapping that to the next highest account number.
+func (s *ScopedKeyManager) NewRawAccountWatchingOnly(
+	ns walletdb.ReadWriteBucket, number uint32,
+	pubKey *hdkeychain.ExtendedKey) error {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	// As this is an ad hoc account that may not follow our normal linear
+	// derivation, we'll create a new name for this account based off of
+	// the account number.
+	name := fmt.Sprintf("act:%v", number)
+	return s.newAccountWatchingOnly(ns, number, name, pubKey)
 }
 
 // NewAccount creates and returns a new account stored in the manager based on
@@ -1317,6 +1335,70 @@ func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 	// database
 	err = putAccountInfo(
 		ns, &s.scope, account, acctPubEnc, acctPrivEnc, 0, 0, name,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Save last account metadata
+	return putLastAccount(ns, &s.scope, account)
+}
+
+// NewAccountWatchingOnly is similar to NewAccount, but for watch-only wallets.
+func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, name string,
+	pubKey *hdkeychain.ExtendedKey) (uint32, error) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	// Fetch latest account, and create a new account in the same
+	// transaction Fetch the latest account number to generate the next
+	// account number
+	account, err := fetchLastAccount(ns, &s.scope)
+	if err != nil {
+		return 0, err
+	}
+	account++
+
+	// With the name validated, we'll create a new account for the new
+	// contiguous account.
+	if err := s.newAccountWatchingOnly(ns, account, name, pubKey); err != nil {
+		return 0, err
+	}
+
+	return account, nil
+}
+
+// newAccountWatchingOnly is similar to newAccount, but for watching-only wallets.
+//
+// NOTE: This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) newAccountWatchingOnly(ns walletdb.ReadWriteBucket, account uint32, name string,
+	pubKey *hdkeychain.ExtendedKey) error {
+
+	// Validate the account name.
+	if err := ValidateAccountName(name); err != nil {
+		return err
+	}
+
+	// Check that account with the same name does not exist
+	_, err := s.lookupAccount(ns, name)
+	if err == nil {
+		str := fmt.Sprintf("account with the same name already exists")
+		return managerError(ErrDuplicateAccount, str, err)
+	}
+
+	// Encrypt the default account keys with the associated crypto keys.
+	acctPubEnc, err := s.rootManager.cryptoKeyPub.Encrypt(
+		[]byte(pubKey.String()),
+	)
+	if err != nil {
+		str := "failed to  encrypt public key for account"
+		return managerError(ErrCrypto, str, err)
+	}
+
+	// We have the encrypted account extended keys, so save them to the
+	// database
+	err = putAccountInfo(
+		ns, &s.scope, account, acctPubEnc, nil, 0, 0, name,
 	)
 	if err != nil {
 		return err
@@ -1700,6 +1782,7 @@ func (s *ScopedKeyManager) ForEachAccount(ns walletdb.ReadBucket,
 }
 
 // LastAccount returns the last account stored in the manager.
+// If no accounts, returns twos-complement representation of -1
 func (s *ScopedKeyManager) LastAccount(ns walletdb.ReadBucket) (uint32, error) {
 	return fetchLastAccount(ns, &s.scope)
 }
