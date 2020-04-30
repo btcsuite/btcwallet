@@ -3094,7 +3094,7 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 // SendOutputs creates and sends payment transactions. It returns the
 // transaction upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32, satPerKb btcutil.Amount) (*wire.MsgTx, error) {
+	minconf int32, satPerKb btcutil.Amount, label string) (*wire.MsgTx, error) {
 
 	// Ensure the outputs to be created adhere to the network's consensus
 	// rules.
@@ -3118,7 +3118,7 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 		return nil, err
 	}
 
-	txHash, err := w.reliablyPublishTransaction(createdTx.Tx, "")
+	txHash, err := w.reliablyPublishTransaction(createdTx.Tx, label)
 	if err != nil {
 		return nil, err
 	}
