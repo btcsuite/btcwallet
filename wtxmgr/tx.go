@@ -7,6 +7,8 @@ package wtxmgr
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,6 +18,28 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/walletdb"
+)
+
+// TxLabelLimit is the length limit we impose on transaction labels.
+const TxLabelLimit = 500
+
+var (
+	// ErrEmptyLabel is returned when an attempt to write a label that is
+	// empty is made.
+	ErrEmptyLabel = errors.New("empty transaction label not allowed")
+
+	// ErrLabelTooLong is returned when an attempt to write a label that is
+	// to long is made.
+	ErrLabelTooLong = errors.New("transaction label exceeds limit")
+
+	// ErrNoLabelBucket is returned when the bucket holding optional
+	// transaction labels is not found. This occurs when no transactions
+	// have been labelled yet.
+	ErrNoLabelBucket = errors.New("labels bucket does not exist")
+
+	// ErrTxLabelNotFound is returned when no label is found for a
+	// transaction hash.
+	ErrTxLabelNotFound = errors.New("label for transaction not found")
 )
 
 // Block contains the minimum amount of data to uniquely identify any block on
@@ -934,4 +958,71 @@ func (s *Store) Balance(ns walletdb.ReadBucket, minConf int32, syncHeight int32)
 	}
 
 	return bal, nil
+}
+
+// PutTxLabel validates transaction labels and writes them to disk if they
+// are non-zero and within the label length limit. The entry is keyed by the
+// transaction hash:
+// [0:32] Transaction hash (32 bytes)
+//
+// The label itself is written to disk in length value format:
+// [0:2] Label length
+// [2: +len] Label
+func (s *Store) PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
+	label string) error {
+
+	if len(label) == 0 {
+		return ErrEmptyLabel
+	}
+
+	if len(label) > TxLabelLimit {
+		return ErrLabelTooLong
+	}
+
+	labelBucket, err := ns.CreateBucketIfNotExists(bucketTxLabels)
+	if err != nil {
+		return err
+	}
+
+	// We expect the label length to be limited on creation, so we can
+	// store the label's length as a uint16.
+	labelLen := uint16(len(label))
+
+	var buf bytes.Buffer
+
+	var b [2]byte
+	binary.BigEndian.PutUint16(b[:], labelLen)
+	if _, err := buf.Write(b[:]); err != nil {
+		return err
+	}
+
+	if _, err := buf.WriteString(label); err != nil {
+		return err
+	}
+
+	return labelBucket.Put(txid[:], buf.Bytes())
+}
+
+// FetchTxLabel reads a transaction label from the tx labels bucket. If a label
+// with 0 length was written, we return an error, since this is unexpected.
+func FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
+	labelBucket := ns.NestedReadBucket(bucketTxLabels)
+	if labelBucket == nil {
+		return "", ErrNoLabelBucket
+	}
+
+	v := labelBucket.Get(txid[:])
+	if v == nil {
+		return "", ErrTxLabelNotFound
+	}
+
+	// If the label is empty, return an error.
+	length := binary.BigEndian.Uint16(v[0:2])
+	if length == 0 {
+		return "", ErrEmptyLabel
+	}
+
+	// Read the remainder of the bytes into a label string.
+	label := string(v[2:])
+	return label, nil
 }
