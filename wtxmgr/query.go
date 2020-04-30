@@ -39,6 +39,7 @@ type TxDetails struct {
 	Block   BlockMeta
 	Credits []CreditRecord
 	Debits  []DebitRecord
+	Label   string
 }
 
 // minedTxDetails fetches the TxDetails for the mined transaction with hash
@@ -90,7 +91,17 @@ func (s *Store) minedTxDetails(ns walletdb.ReadBucket, txHash *chainhash.Hash, r
 
 		details.Debits = append(details.Debits, debIter.elem)
 	}
-	return &details, debIter.err
+	if debIter.err != nil {
+		return nil, debIter.err
+	}
+
+	// Finally, we add the transaction label to details.
+	details.Label, err = s.TxLabel(ns, *txHash)
+	if err != nil {
+		return nil, err
+	}
+
+	return &details, nil
 }
 
 // unminedTxDetails fetches the TxDetails for the unmined transaction with the
@@ -158,7 +169,38 @@ func (s *Store) unminedTxDetails(ns walletdb.ReadBucket, txHash *chainhash.Hash,
 		})
 	}
 
+	// Finally, we add the transaction label to details.
+	details.Label, err = s.TxLabel(ns, *txHash)
+	if err != nil {
+		return nil, err
+	}
+
 	return &details, nil
+}
+
+// TxLabel looks up a transaction label for the txHash provided. If the store
+// has no labels in it, or the specific txHash does not have a label, an empty
+// string and no error are returned.
+func (s *Store) TxLabel(ns walletdb.ReadBucket, txHash chainhash.Hash) (string,
+	error) {
+
+	label, err := FetchTxLabel(ns, txHash)
+	switch err {
+	// If there are no saved labels yet (the bucket has not been created) or
+	// there is not a label for this particular tx, we ignore the error.
+	case ErrNoLabelBucket:
+		fallthrough
+	case ErrTxLabelNotFound:
+		return "", nil
+
+	// If we found the label, we return it.
+	case nil:
+		return label, nil
+	}
+
+	// Otherwise, another error occurred while looking uo the label, so we
+	// return it.
+	return "", err
 }
 
 // TxDetails looks up all recorded details regarding a transaction with some
