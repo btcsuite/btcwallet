@@ -296,52 +296,13 @@ func (s *Store) rangeBlockTransactions(ns walletdb.ReadBucket, begin, end int32,
 					"block %v", txHash, block.Height)
 				return false, storeError(ErrData, str, nil)
 			}
-			detail := TxDetails{
-				Block: BlockMeta{
-					Block: block.Block,
-					Time:  block.Time,
-				},
-			}
-			err := readRawTxRecord(&txHash, v, &detail.TxRecord)
+
+			detail, err := s.minedTxDetails(ns, &txHash, k, v)
 			if err != nil {
 				return false, err
 			}
 
-			credIter := makeReadCreditIterator(ns, k)
-			for credIter.next() {
-				if int(credIter.elem.Index) >= len(detail.MsgTx.TxOut) {
-					str := "saved credit index exceeds number of outputs"
-					return false, storeError(ErrData, str, nil)
-				}
-
-				// The credit iterator does not record whether
-				// this credit was spent by an unmined
-				// transaction, so check that here.
-				if !credIter.elem.Spent {
-					k := canonicalOutPoint(&txHash, credIter.elem.Index)
-					spent := existsRawUnminedInput(ns, k) != nil
-					credIter.elem.Spent = spent
-				}
-				detail.Credits = append(detail.Credits, credIter.elem)
-			}
-			if credIter.err != nil {
-				return false, credIter.err
-			}
-
-			debIter := makeReadDebitIterator(ns, k)
-			for debIter.next() {
-				if int(debIter.elem.Index) >= len(detail.MsgTx.TxIn) {
-					str := "saved debit index exceeds number of inputs"
-					return false, storeError(ErrData, str, nil)
-				}
-
-				detail.Debits = append(detail.Debits, debIter.elem)
-			}
-			if debIter.err != nil {
-				return false, debIter.err
-			}
-
-			details = append(details, detail)
+			details = append(details, *detail)
 		}
 
 		// Every block record must have at least one transaction, so it
