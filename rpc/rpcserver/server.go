@@ -519,7 +519,7 @@ func (s *walletServer) PublishTransaction(ctx context.Context, req *pb.PublishTr
 			"Bytes do not represent a valid raw transaction: %v", err)
 	}
 
-	err = s.wallet.PublishTransaction(&msgTx)
+	err = s.wallet.PublishTransaction(&msgTx, "")
 	if err != nil {
 		return nil, translateError(err)
 	}
