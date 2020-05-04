@@ -14,6 +14,7 @@ import (
 
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"go.etcd.io/bbolt"
 )
 
 // dbType is the database type name for this driver.
@@ -22,10 +23,14 @@ const dbType = "bdb"
 // TestCreateOpenFail ensures that errors related to creating and opening a
 // database are handled properly.
 func TestCreateOpenFail(t *testing.T) {
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+
 	// Ensure that attempting to open a database that doesn't exist returns
 	// the expected error.
 	wantErr := walletdb.ErrDbDoesNotExist
-	if _, err := walletdb.Open(dbType, "noexist.db", true); err != wantErr {
+	if _, err := walletdb.Open(dbType, "noexist.db", opts); err != wantErr {
 		t.Errorf("Open: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
 		return
@@ -34,7 +39,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure that attempting to open a database with the wrong number of
 	// parameters returns the expected error.
 	wantErr = fmt.Errorf("invalid arguments to %s.Open -- expected "+
-		"database path and no-freelist-sync option", dbType)
+		"database path and *bbolt.Option option", dbType)
 	if _, err := walletdb.Open(dbType, 1, 2, 3); err.Error() != wantErr.Error() {
 		t.Errorf("Open: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
@@ -54,7 +59,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure that attempting to create a database with the wrong number of
 	// parameters returns the expected error.
 	wantErr = fmt.Errorf("invalid arguments to %s.Create -- expected "+
-		"database path and no-freelist-sync option", dbType)
+		"database path and *bbolt.Option option", dbType)
 	if _, err := walletdb.Create(dbType, 1, 2, 3); err.Error() != wantErr.Error() {
 		t.Errorf("Create: did not receive expected error - got %v, "+
 			"want %v", err, wantErr)
@@ -81,7 +86,7 @@ func TestCreateOpenFail(t *testing.T) {
 	defer os.Remove(tempDir)
 
 	dbPath := filepath.Join(tempDir, "db")
-	db, err := walletdb.Create(dbType, dbPath, true)
+	db, err := walletdb.Create(dbType, dbPath, opts)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
 		return
@@ -99,6 +104,10 @@ func TestCreateOpenFail(t *testing.T) {
 // TestPersistence ensures that values stored are still valid after closing and
 // reopening the database.
 func TestPersistence(t *testing.T) {
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+
 	// Create a new database to run tests against.
 	tempDir, err := ioutil.TempDir("", "persistencetest")
 	if err != nil {
@@ -108,7 +117,7 @@ func TestPersistence(t *testing.T) {
 	defer os.Remove(tempDir)
 
 	dbPath := filepath.Join(tempDir, "db")
-	db, err := walletdb.Create(dbType, dbPath, true)
+	db, err := walletdb.Create(dbType, dbPath, opts)
 	if err != nil {
 		t.Errorf("Failed to create test database (%s) %v", dbType, err)
 		return
@@ -144,7 +153,7 @@ func TestPersistence(t *testing.T) {
 
 	// Close and reopen the database to ensure the values persist.
 	db.Close()
-	db, err = walletdb.Open(dbType, dbPath, true)
+	db, err = walletdb.Open(dbType, dbPath, opts)
 	if err != nil {
 		t.Errorf("Failed to open test database (%s) %v", dbType, err)
 		return

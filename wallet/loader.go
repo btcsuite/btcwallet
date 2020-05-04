@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"go.etcd.io/bbolt"
 )
 
 const (
@@ -140,7 +141,10 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase,
 	if err != nil {
 		return nil, err
 	}
-	db, err := walletdb.Create("bdb", dbPath, l.noFreelistSync)
+	opts := &bbolt.Options{
+		NoFreelistSync: l.noFreelistSync,
+	}
+	db, err := walletdb.Create("bdb", dbPath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +200,10 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 
 	// Open the database using the boltdb backend.
 	dbPath := filepath.Join(l.dbDirPath, walletDbName)
-	db, err := walletdb.Open("bdb", dbPath, l.noFreelistSync)
+	opts := &bbolt.Options{
+		NoFreelistSync: l.noFreelistSync,
+	}
+	db, err := walletdb.Open("bdb", dbPath, opts)
 	if err != nil {
 		log.Errorf("Failed to open database: %v", err)
 		return nil, err

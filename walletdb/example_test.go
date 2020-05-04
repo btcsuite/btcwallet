@@ -12,6 +12,7 @@ import (
 
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"go.etcd.io/bbolt"
 )
 
 // This example demonstrates creating a new database.
@@ -28,7 +29,10 @@ func ExampleCreate() {
 	// this, but it's done here in the example to ensure the example cleans
 	// up after itself.
 	dbPath := filepath.Join(os.TempDir(), "examplecreate.db")
-	db, err := walletdb.Create("bdb", dbPath, true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err := walletdb.Create("bdb", dbPath, opts)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -47,7 +51,10 @@ var exampleNum = 0
 func exampleLoadDB() (walletdb.DB, func(), error) {
 	dbName := fmt.Sprintf("exampleload%d.db", exampleNum)
 	dbPath := filepath.Join(os.TempDir(), dbName)
-	db, err := walletdb.Create("bdb", dbPath, true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err := walletdb.Create("bdb", dbPath, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -111,7 +118,10 @@ func Example_basicUsage() {
 	// this, but it's done here in the example to ensure the example cleans
 	// up after itself.
 	dbPath := filepath.Join(os.TempDir(), "exampleusage.db")
-	db, err := walletdb.Create("bdb", dbPath, true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err := walletdb.Create("bdb", dbPath, opts)
 	if err != nil {
 		fmt.Println(err)
 		return

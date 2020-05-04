@@ -16,6 +16,7 @@ require (
 	github.com/kkdai/bstream v0.0.0-20181106074824-b3251f7901ec // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf
 	github.com/lightninglabs/neutrino v0.11.0
+	go.etcd.io/bbolt v1.3.3
 	golang.org/x/crypto v0.0.0-20190211182817-74369b46fc67
 	golang.org/x/net v0.0.0-20190206173232-65e2d4e15006
 	google.golang.org/genproto v0.0.0-20190201180003-4b09977fb922 // indirect

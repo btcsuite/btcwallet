@@ -13,6 +13,7 @@ import (
 
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"go.etcd.io/bbolt"
 )
 
 var (
@@ -64,7 +65,10 @@ func TestAddDuplicateDriver(t *testing.T) {
 	defer os.Remove(tempDir)
 
 	dbPath := filepath.Join(tempDir, "db")
-	db, err := walletdb.Create(dbType, dbPath, true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err := walletdb.Create(dbType, dbPath, opts)
 	if err != nil {
 		t.Errorf("failed to create database: %v", err)
 		return

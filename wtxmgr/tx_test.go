@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"go.etcd.io/bbolt"
 )
 
 // Received transaction output for mainnet outpoint
@@ -51,7 +52,10 @@ func testDB() (walletdb.DB, func(), error) {
 	if err != nil {
 		return nil, func() {}, err
 	}
-	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), opts)
 	return db, func() { os.RemoveAll(tmpDir) }, err
 }
 
@@ -63,7 +67,10 @@ func testStore() (*Store, walletdb.DB, func(), error) {
 		return nil, nil, func() {}, err
 	}
 
-	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), opts)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		return nil, nil, nil, err

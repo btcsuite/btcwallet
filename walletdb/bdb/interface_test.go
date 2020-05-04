@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/walletdb/walletdbtest"
+	"go.etcd.io/bbolt"
 )
 
 // TestInterface performs all interfaces tests for this database driver.
@@ -32,5 +33,9 @@ func TestInterface(t *testing.T) {
 
 	dbPath := filepath.Join(tempDir, "db")
 	defer os.RemoveAll(dbPath)
-	walletdbtest.TestInterface(t, dbType, dbPath, true)
+
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	walletdbtest.TestInterface(t, dbType, dbPath, opts)
 }

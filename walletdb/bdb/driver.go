@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/walletdb"
+	"go.etcd.io/bbolt"
 )
 
 const (
@@ -15,50 +16,50 @@ const (
 )
 
 // parseArgs parses the arguments from the walletdb Open/Create methods.
-func parseArgs(funcName string, args ...interface{}) (string, bool, error) {
+func parseArgs(funcName string, args ...interface{}) (string, *bbolt.Options, error) {
 	if len(args) != 2 {
-		return "", false, fmt.Errorf("invalid arguments to %s.%s -- "+
-			"expected database path and no-freelist-sync option",
+		return "", nil, fmt.Errorf("invalid arguments to %s.%s -- "+
+			"expected database path and *bbolt.Option option",
 			dbType, funcName)
 	}
 
 	dbPath, ok := args[0].(string)
 	if !ok {
-		return "", false, fmt.Errorf("first argument to %s.%s is "+
+		return "", nil, fmt.Errorf("first argument to %s.%s is "+
 			"invalid -- expected database path string", dbType,
 			funcName)
 	}
 
-	noFreelistSync, ok := args[1].(bool)
+	options, ok := args[1].(*bbolt.Options)
 	if !ok {
-		return "", false, fmt.Errorf("second argument to %s.%s is "+
-			"invalid -- expected no-freelist-sync bool", dbType,
+		return "", nil, fmt.Errorf("second argument to %s.%s is "+
+			"invalid -- expected *bbolt.Option", dbType,
 			funcName)
 	}
 
-	return dbPath, noFreelistSync, nil
+	return dbPath, options, nil
 }
 
 // openDBDriver is the callback provided during driver registration that opens
 // an existing database for use.
 func openDBDriver(args ...interface{}) (walletdb.DB, error) {
-	dbPath, noFreelistSync, err := parseArgs("Open", args...)
+	dbPath, options, err := parseArgs("Open", args...)
 	if err != nil {
 		return nil, err
 	}
 
-	return openDB(dbPath, noFreelistSync, false)
+	return openDB(dbPath, false, options)
 }
 
 // createDBDriver is the callback provided during driver registration that
 // creates, initializes, and opens a database for use.
 func createDBDriver(args ...interface{}) (walletdb.DB, error) {
-	dbPath, noFreelistSync, err := parseArgs("Create", args...)
+	dbPath, options, err := parseArgs("Create", args...)
 	if err != nil {
 		return nil, err
 	}
 
-	return openDB(dbPath, noFreelistSync, true)
+	return openDB(dbPath, true, options)
 }
 
 func init() {

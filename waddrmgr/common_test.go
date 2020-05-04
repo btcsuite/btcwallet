@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"go.etcd.io/bbolt"
 )
 
 var (
@@ -238,7 +239,10 @@ func emptyDB(t *testing.T) (tearDownFunc func(), db walletdb.DB) {
 		t.Fatalf("Failed to create db temp dir: %v", err)
 	}
 	dbPath := filepath.Join(dirName, "mgrtest.db")
-	db, err = walletdb.Create("bdb", dbPath, true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err = walletdb.Create("bdb", dbPath, opts)
 	if err != nil {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)
@@ -259,7 +263,10 @@ func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *Manag
 		t.Fatalf("Failed to create db temp dir: %v", err)
 	}
 	dbPath := filepath.Join(dirName, "mgrtest.db")
-	db, err = walletdb.Create("bdb", dbPath, true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err = walletdb.Create("bdb", dbPath, opts)
 	if err != nil {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)

@@ -21,6 +21,7 @@ import (
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
+	"go.etcd.io/bbolt"
 )
 
 // failingCryptoKey is an implementation of the EncryptorDecryptor interface
@@ -1683,7 +1684,10 @@ func testConvertWatchingOnly(tc *testContext) bool {
 	defer os.Remove(woMgrName)
 
 	// Open the new database copy and get the address manager namespace.
-	db, err := walletdb.Open("bdb", woMgrName, true)
+	opts := &bbolt.Options{
+		NoFreelistSync: true,
+	}
+	db, err := walletdb.Open("bdb", woMgrName, opts)
 	if err != nil {
 		tc.t.Errorf("openDbNamespace: unexpected error: %v", err)
 		return false
