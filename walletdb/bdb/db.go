@@ -365,6 +365,18 @@ func fileExists(name string) bool {
 	return true
 }
 
+const (
+	// is64Bit tells us if we're running on a 64-bit system or not. If uintptr is
+	// 32 bits, then its complement will be 0xffffffff rather than
+	// 0xffffffffffffffff. The complement of uint64(0) will always be
+	// 0xffffffffffffffff.
+	is64Bit = uint64(^uintptr(0)) == ^uint64(0)
+
+	// max32BitMapSize is the largest mmap size we can support on 32-bit
+	// systems. (2^31)-1 == 0x7FFFFFFF.
+	max32BitMapSize = 0x7FFFFFFF
+)
+
 // openDB opens the database at the provided path.  walletdb.ErrDbDoesNotExist
 // is returned if the database doesn't exist and the create flag is not set.
 func openDB(dbPath string, create bool, options *bbolt.Options) (walletdb.DB, error) {
@@ -375,6 +387,30 @@ func openDB(dbPath string, create bool, options *bbolt.Options) (walletdb.DB, er
 	// Specify bbolt freelist options to reduce heap pressure in case the
 	// freelist grows to be very large.
 	options.FreelistType = bbolt.FreelistMapType
+
+	if !create {
+		// The other value that we want to set is the initial memory
+		// map size.  When bolt expands the mmap, it actually copies
+		// over the entire database. By setting this to a large value
+		// than zero, then we can avoid some of that heap pressure due
+		// to the copies.
+		dbFileInfo, err := os.Stat(dbPath)
+		if err != nil {
+			return nil, err
+		}
+
+		// We'll aim to set the initial memory map to 2x the size of
+		// the database as it exists on disk, meaning the DB size can
+		// double without us having to remap everything.
+		mmapSize := dbFileInfo.Size() * 2
+
+		// If we're on a 32-bit system, then we'll need to limit this
+		// value to ensure we don't run into errors down the line.
+		if !is64Bit {
+			mmapSize = max32BitMapSize
+		}
+
+		options.InitialMmapSize = int(mmapSize)
 	}
 
 	boltDB, err := bbolt.Open(dbPath, 0600, options)
