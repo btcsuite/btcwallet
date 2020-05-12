@@ -62,6 +62,7 @@ var _ [32]byte = chainhash.Hash{}
 var (
 	bucketBlocks         = []byte("b")
 	bucketTxRecords      = []byte("t")
+	bucketTxLabels       = []byte("l")
 	bucketCredits        = []byte("c")
 	bucketUnspent        = []byte("u")
 	bucketDebits         = []byte("d")

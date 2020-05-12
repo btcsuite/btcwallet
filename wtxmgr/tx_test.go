@@ -2263,3 +2263,95 @@ func TestInsertMempoolTxAndConfirm(t *testing.T) {
 		}
 	})
 }
+
+// TestTxLabel tests reading and writing of transaction labels.
+func TestTxLabel(t *testing.T) {
+	t.Parallel()
+
+	store, db, teardown, err := testStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+
+	// txid is the transaction hash we will use to write and get labels for.
+	txid := TstRecvTx.Hash()
+
+	// txidNotFound is distinct from txid, and will not have a label written
+	// to disk.
+	txidNotFound := TstSpendingTx.Hash()
+
+	// getBucket gets the top level bucket, and fails the test if it is
+	// not found.
+	getBucket := func(tx walletdb.ReadWriteTx) walletdb.ReadWriteBucket {
+		testBucket := tx.ReadWriteBucket(namespaceKey)
+		if testBucket == nil {
+			t.Fatalf("could not get bucket: %v", err)
+		}
+
+		return testBucket
+	}
+
+	// tryPutLabel attempts to write a label to disk.
+	tryPutLabel := func(label string) error {
+		return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			// Try to write the label to disk.
+			return store.PutTxLabel(getBucket(tx), *txid, label)
+		})
+	}
+
+	// tryReadLabel attempts to retrieve a label for a given txid.
+	tryReadLabel := func(labelTx chainhash.Hash) (string, error) {
+		var label string
+
+		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			var err error
+			label, err = FetchTxLabel(getBucket(tx), labelTx)
+			return err
+		})
+
+		return label, err
+	}
+
+	// First, try to lookup a label when the labels bucket does not exist
+	// yet.
+	_, err = tryReadLabel(*txid)
+	if err != ErrNoLabelBucket {
+		t.Fatalf("expected: %v, got: %v", ErrNoLabelBucket, err)
+	}
+
+	// Now try to write an empty label, which should fail.
+	err = tryPutLabel("")
+	if err != ErrEmptyLabel {
+		t.Fatalf("expected: %v, got: %v", ErrEmptyLabel, err)
+	}
+
+	// Create a label which exceeds the length limit.
+	longLabel := make([]byte, TxLabelLimit+1)
+	err = tryPutLabel(string(longLabel))
+	if err != ErrLabelTooLong {
+		t.Fatalf("expected: %v, got: %v", ErrLabelTooLong, err)
+	}
+
+	// Write an acceptable length label to disk, this should succeed.
+	testLabel := "test label"
+	err = tryPutLabel(testLabel)
+	if err != nil {
+		t.Fatalf("expected: no error, got: %v", err)
+	}
+
+	diskLabel, err := tryReadLabel(*txid)
+	if err != nil {
+		t.Fatalf("expected: no error, got: %v", err)
+	}
+	if diskLabel != testLabel {
+		t.Fatalf("expected: %v, got: %v", testLabel, diskLabel)
+	}
+
+	// Finally, try to read a label for a transaction which does not have
+	// one.
+	_, err = tryReadLabel(*txidNotFound)
+	if err != ErrTxLabelNotFound {
+		t.Fatalf("expected: %v, got: %v", ErrTxLabelNotFound, err)
+	}
+}

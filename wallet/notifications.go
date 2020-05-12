@@ -148,6 +148,7 @@ func makeTxSummary(dbtx walletdb.ReadTx, w *Wallet, details *wtxmgr.TxDetails) T
 		MyOutputs:   outputs,
 		Fee:         fee,
 		Timestamp:   details.Received.Unix(),
+		Label:       details.Label,
 	}
 }
 
@@ -365,6 +366,7 @@ type TransactionSummary struct {
 	MyOutputs   []TransactionSummaryOutput
 	Fee         btcutil.Amount
 	Timestamp   int64
+	Label       string
 }
 
 // TransactionSummaryInput describes a transaction input that is relevant to the
