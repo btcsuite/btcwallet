@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/lightningnetwork/lnd/clock"
 )
 
 // Received transaction output for mainnet outpoint
@@ -2353,5 +2354,459 @@ func TestTxLabel(t *testing.T) {
 	_, err = tryReadLabel(*txidNotFound)
 	if err != ErrTxLabelNotFound {
 		t.Fatalf("expected: %v, got: %v", ErrTxLabelNotFound, err)
+	}
+}
+
+func assertBalance(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
+	confirmed bool, blockHeight int32, exp btcutil.Amount) {
+
+	t.Helper()
+
+	minConf := int32(0)
+	if confirmed {
+		minConf = 1
+	}
+	balance, err := s.Balance(ns, minConf, blockHeight)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance != exp {
+		t.Fatalf("expected balance %v, got %v", exp, balance)
+	}
+}
+
+func assertUtxos(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
+	exp []wire.OutPoint) {
+
+	t.Helper()
+
+	utxos, err := s.UnspentOutputs(ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expUtxo := range exp {
+		found := false
+		for _, utxo := range utxos {
+			if expUtxo == utxo.OutPoint {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected utxo %v", expUtxo)
+		}
+	}
+}
+
+func assertLocked(t *testing.T, ns walletdb.ReadWriteBucket, op wire.OutPoint,
+	timeNow time.Time, exp bool) {
+
+	t.Helper()
+
+	_, _, locked := isLockedOutput(ns, op, timeNow)
+	if locked && locked != exp {
+		t.Fatalf("expected locked output %v", op)
+	}
+	if !locked && locked != exp {
+		t.Fatalf("unexpected locked output %v", op)
+	}
+}
+
+func assertOutputLocksExist(t *testing.T, s *Store, ns walletdb.ReadBucket,
+	exp ...wire.OutPoint) {
+
+	t.Helper()
+
+	var found []wire.OutPoint
+	forEachLockedOutput(ns, func(op wire.OutPoint, _ LockID, _ time.Time) {
+		found = append(found, op)
+	})
+	if len(found) != len(exp) {
+		t.Fatalf("expected to find %v locked output(s), found %v",
+			len(exp), len(found))
+	}
+
+	for _, expOp := range exp {
+		exists := false
+		for _, foundOp := range found {
+			if expOp == foundOp {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			t.Fatalf("expected output lock for %v to exist", expOp)
+		}
+	}
+}
+
+func lock(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
+	id LockID, op wire.OutPoint, exp error) time.Time {
+
+	t.Helper()
+
+	expiry, err := s.LockOutput(ns, id, op)
+	if err != exp {
+		t.Fatalf("expected err %q, got %q", exp, err)
+	}
+	if exp != nil && exp != ErrOutputAlreadyLocked {
+		assertLocked(t, ns, op, s.clock.Now(), false)
+	} else {
+		assertLocked(t, ns, op, s.clock.Now(), true)
+	}
+	return expiry
+}
+
+func unlock(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
+	id LockID, op wire.OutPoint, exp error) {
+
+	t.Helper()
+
+	if err := s.UnlockOutput(ns, id, op); err != exp {
+		t.Fatalf("expected err %q, got %q", exp, err)
+	}
+	if exp != nil {
+		assertLocked(t, ns, op, s.clock.Now(), true)
+	} else {
+		assertLocked(t, ns, op, s.clock.Now(), false)
+	}
+}
+
+func insertUnconfirmedCredit(t *testing.T, store *Store, db walletdb.DB,
+	tx *wire.MsgTx, idx uint32) {
+
+	t.Helper()
+	insertConfirmedCredit(t, store, db, tx, idx, nil)
+}
+
+func insertConfirmedCredit(t *testing.T, store *Store, db walletdb.DB,
+	tx *wire.MsgTx, idx uint32, block *BlockMeta) {
+
+	t.Helper()
+
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		rec, err := NewTxRecordFromMsgTx(tx, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.InsertTx(ns, rec, block); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddCredit(ns, rec, block, idx, false); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// TestOutputLocks aims to test all cases revolving output locks, ensuring they
+// are and aren't eligible for coin selection after certain operations.
+func TestOutputLocks(t *testing.T) {
+	t.Parallel()
+
+	// Define a series of constants we'll use throughout our tests.
+	block := &BlockMeta{
+		Block: Block{
+			Hash:   chainhash.Hash{1, 3, 3, 7},
+			Height: 1337,
+		},
+		Time: time.Now(),
+	}
+
+	// Create a coinbase transaction with two outputs, which we'll spend.
+	coinbase := newCoinBase(
+		btcutil.SatoshiPerBitcoin, btcutil.SatoshiPerBitcoin*2,
+	)
+	coinbaseHash := coinbase.TxHash()
+
+	// One of the spends will be unconfirmed.
+	const unconfirmedBalance = btcutil.SatoshiPerBitcoin / 2
+	unconfirmedTx := spendOutput(&coinbaseHash, 0, unconfirmedBalance)
+	unconfirmedOutPoint := wire.OutPoint{
+		Hash:  unconfirmedTx.TxHash(),
+		Index: 0,
+	}
+
+	// The other will be confirmed.
+	const confirmedBalance = btcutil.SatoshiPerBitcoin
+	confirmedTx := spendOutput(&coinbaseHash, 1, confirmedBalance)
+	confirmedOutPoint := wire.OutPoint{
+		Hash:  confirmedTx.TxHash(),
+		Index: 0,
+	}
+
+	const balance = unconfirmedBalance + confirmedBalance
+
+	testCases := []struct {
+		name string
+		run  func(*testing.T, *Store, walletdb.ReadWriteBucket)
+	}{
+		{
+			// Asserts that we cannot lock unknown outputs to the
+			// store.
+			name: "unknown output",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				lockID := LockID{1}
+				op := wire.OutPoint{Index: 1}
+				_ = lock(t, s, ns, lockID, op, ErrUnknownOutput)
+			},
+		},
+		{
+			// Asserts that we cannot lock outputs that have already
+			// been locked to someone else.
+			name: "already locked output",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				lockID1 := LockID{1}
+				lockID2 := LockID{2}
+
+				_ = lock(
+					t, s, ns, lockID1, unconfirmedOutPoint,
+					nil,
+				)
+				_ = lock(
+					t, s, ns, lockID2, unconfirmedOutPoint,
+					ErrOutputAlreadyLocked,
+				)
+
+				_ = lock(
+					t, s, ns, lockID1, confirmedOutPoint,
+					nil,
+				)
+				_ = lock(
+					t, s, ns, lockID2, confirmedOutPoint,
+					ErrOutputAlreadyLocked,
+				)
+			},
+		},
+		{
+			// Asserts that only the ID which locked at output can
+			// manually unlock it.
+			name: "unlock output",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				lockID1 := LockID{1}
+				lockID2 := LockID{2}
+
+				_ = lock(t, s, ns, lockID1, confirmedOutPoint, nil)
+				unlock(
+					t, s, ns, lockID2, confirmedOutPoint,
+					ErrOutputUnlockNotAllowed,
+				)
+				unlock(t, s, ns, lockID1, confirmedOutPoint, nil)
+			},
+		},
+		{
+			// Asserts that locking an output that's already locked
+			// with the correct ID results in an extension of the
+			// lock.
+			name: "extend locked output lease",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				// Lock the output and set the clock time a
+				// minute before the expiration. It should
+				// remain locked.
+				lockID := LockID{1}
+				expiry := lock(
+					t, s, ns, lockID, confirmedOutPoint, nil,
+				)
+				s.clock.(*clock.TestClock).SetTime(
+					expiry.Add(-time.Minute),
+				)
+				assertLocked(
+					t, ns, confirmedOutPoint, s.clock.Now(),
+					true,
+				)
+
+				// Lock it once again, extending its expiration,
+				// and set the clock time a second before the
+				// expiration. It should remain locked.
+				s.clock.(*clock.TestClock).SetTime(
+					expiry.Add(-time.Minute),
+				)
+				newExpiry := lock(
+					t, s, ns, lockID, confirmedOutPoint, nil,
+				)
+				if !newExpiry.After(expiry) {
+					t.Fatal("expected output lock " +
+						"duration to be renewed")
+				}
+				s.clock.(*clock.TestClock).SetTime(
+					newExpiry.Add(-time.Second),
+				)
+				assertLocked(
+					t, ns, confirmedOutPoint, s.clock.Now(),
+					true,
+				)
+
+				// Set the clock time to the new expiration, it
+				// should now be unlocked.
+				s.clock.(*clock.TestClock).SetTime(newExpiry)
+				assertLocked(
+					t, ns, confirmedOutPoint, s.clock.Now(),
+					false,
+				)
+			},
+		},
+		{
+			// Asserts that balances are reflected properly after
+			// locking confirmed and unconfirmed outputs.
+			name: "balance after locked outputs",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				// We should see our full balance before locking
+				// any outputs.
+				assertBalance(
+					t, s, ns, false, block.Height, balance,
+				)
+
+				// Lock all of our outputs. Our balance should
+				// be 0.
+				lockID := LockID{1}
+				_ = lock(
+					t, s, ns, lockID, unconfirmedOutPoint, nil,
+				)
+				expiry := lock(
+					t, s, ns, lockID, confirmedOutPoint, nil,
+				)
+				assertBalance(t, s, ns, false, block.Height, 0)
+
+				// Wait for the output locks to expire, causing
+				// our full balance to return .
+				s.clock.(*clock.TestClock).SetTime(expiry)
+				assertBalance(
+					t, s, ns, false, block.Height, balance,
+				)
+			},
+		},
+		{
+			// Asserts that the available utxos are reflected
+			// properly after locking confirmed and unconfirmed
+			// outputs.
+			name: "utxos after locked outputs",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				// We should see all of our utxos before locking
+				// any.
+				assertUtxos(t, s, ns, []wire.OutPoint{
+					unconfirmedOutPoint,
+					confirmedOutPoint,
+				})
+
+				// Lock the unconfirmed utxo, we should now only
+				// see the confirmed.
+				lockID := LockID{1}
+				_ = lock(t, s, ns, lockID, unconfirmedOutPoint, nil)
+				assertUtxos(t, s, ns, []wire.OutPoint{
+					confirmedOutPoint,
+				})
+
+				// Now lock the confirmed utxo, we should no
+				// longer see any utxos available.
+				expiry := lock(
+					t, s, ns, lockID, confirmedOutPoint, nil,
+				)
+				assertUtxos(t, s, ns, nil)
+
+				// Wait for the output locks to expire for the
+				// utxos to become available once again.
+				s.clock.(*clock.TestClock).SetTime(expiry)
+				assertUtxos(t, s, ns, []wire.OutPoint{
+					unconfirmedOutPoint,
+					confirmedOutPoint,
+				})
+			},
+		},
+		{
+			// Asserts that output locks are removed for outputs
+			// which have had a confirmed spend, ensuring the
+			// database doesn't store stale data.
+			name: "clear locked outputs after confirmed spend",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				// Lock an output.
+				lockID := LockID{1}
+				lock(t, s, ns, lockID, confirmedOutPoint, nil)
+
+				// Create a spend and add it to the store as
+				// confirmed.
+				txHash := confirmedTx.TxHash()
+				spendTx := spendOutput(&txHash, 0, 500)
+				spendRec, err := NewTxRecordFromMsgTx(
+					spendTx, time.Now(),
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = s.InsertTx(ns, spendRec, block)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				// The output should no longer be locked.
+				assertLocked(
+					t, ns, confirmedOutPoint, s.clock.Now(),
+					false,
+				)
+			},
+		},
+		{
+			// Assert that deleting expired locked outputs works as
+			// intended.
+			name: "delete expired locked outputs",
+			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
+				// Lock an output.
+				lockID := LockID{1}
+				expiry := lock(
+					t, s, ns, lockID, confirmedOutPoint, nil,
+				)
+
+				// We should expect to find it if we iterate
+				// over the locked outputs bucket.
+				assertOutputLocksExist(t, s, ns, confirmedOutPoint)
+
+				// Delete all expired locked outputs. Since the
+				// lock hasn't expired yet, it should still
+				// exist.
+				err := s.DeleteExpiredLockedOutputs(ns)
+				if err != nil {
+					t.Fatalf("unable to delete expired "+
+						"locked outputs: %v", err)
+				}
+				assertOutputLocksExist(t, s, ns, confirmedOutPoint)
+
+				// Let the output lock expired.
+				s.clock.(*clock.TestClock).SetTime(expiry)
+
+				// Delete all expired locked outputs. We should
+				// no longer see any locked outputs.
+				err = s.DeleteExpiredLockedOutputs(ns)
+				if err != nil {
+					t.Fatalf("unable to delete expired "+
+						"locked outputs: %v", err)
+				}
+				assertOutputLocksExist(t, s, ns)
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, db, teardown, err := testStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer teardown()
+
+			// Replace the store's default clock with a mock one in
+			// order to simulate a real clock and speed up our
+			// tests.
+			store.clock = clock.NewTestClock(time.Time{})
+
+			// Add the spends we created above to the store.
+			insertConfirmedCredit(t, store, db, confirmedTx, 0, block)
+			insertUnconfirmedCredit(t, store, db, unconfirmedTx, 0)
+
+			// Run the test!
+			commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+				testCase.run(t, store, ns)
+			})
+		})
 	}
 }
