@@ -202,7 +202,6 @@ func (s *ScopedKeyManager) Close() {
 
 	// Attempt to clear sensitive public key material from memory too.
 	s.zeroSensitivePublicData()
-	return
 }
 
 // keyToManaged returns a new managed address for the provided derived key and

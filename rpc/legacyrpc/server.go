@@ -473,7 +473,6 @@ out:
 					break out
 				}
 				s.requestProcessShutdown()
-				break
 
 			default:
 				req := req // Copy for the closure

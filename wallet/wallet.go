@@ -596,7 +596,7 @@ func locateBirthdayBlock(chainClient chainConn,
 		if mid == startHeight || mid == bestHeight || mid == left {
 			birthdayBlock = &waddrmgr.BlockStamp{
 				Hash:      *hash,
-				Height:    int32(mid),
+				Height:    mid,
 				Timestamp: header.Timestamp,
 			}
 			break
@@ -618,7 +618,7 @@ func locateBirthdayBlock(chainClient chainConn,
 
 		birthdayBlock = &waddrmgr.BlockStamp{
 			Hash:      *hash,
-			Height:    int32(mid),
+			Height:    mid,
 			Timestamp: header.Timestamp,
 		}
 		break
@@ -2897,7 +2897,7 @@ func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
 		return nil, err
 	}
 
-	sort.Sort(sort.StringSlice(addrStrs))
+	sort.Strings(addrStrs)
 	return addrStrs, nil
 }
 

@@ -2595,7 +2595,7 @@ func (a *btcAddress) ExportPrivKey() (*btcutil.WIF, error) {
 	// as our program's assumptions are so broken that this needs to be
 	// caught immediately, and a stack trace here is more useful than
 	// elsewhere.
-	wif, err := btcutil.NewWIF((*btcec.PrivateKey)(pk), a.store.netParams(),
+	wif, err := btcutil.NewWIF(pk, a.store.netParams(),
 		a.Compressed())
 	if err != nil {
 		panic(err)
