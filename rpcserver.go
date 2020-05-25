@@ -138,16 +138,6 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 			server = grpc.NewServer(grpc.Creds(creds))
 			rpcserver.StartVersionService(server)
 			rpcserver.StartWalletLoaderService(server, walletLoader, activeNet)
-			for _, lis := range listeners {
-				lis := lis
-				go func() {
-					log.Infof("Experimental RPC server listening on %s",
-						lis.Addr())
-					err := server.Serve(lis)
-					log.Tracef("Finished serving expimental RPC: %v",
-						err)
-				}()
-			}
 		}
 	}
 
