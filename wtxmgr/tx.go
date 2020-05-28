@@ -1025,6 +1025,12 @@ func FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
 		return "", ErrTxLabelNotFound
 	}
 
+	return DeserializeLabel(v)
+}
+
+// DeserializeLabel reads a deserializes a length-value encoded label from the
+// byte array provided.
+func DeserializeLabel(v []byte) (string, error) {
 	// If the label is empty, return an error.
 	length := binary.BigEndian.Uint16(v[0:2])
 	if length == 0 {
