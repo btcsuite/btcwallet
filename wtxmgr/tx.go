@@ -984,6 +984,15 @@ func (s *Store) PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
 		return err
 	}
 
+	return PutTxLabel(labelBucket, txid, label)
+}
+
+// PutTxLabel writes a label for a tx to the bucket provided. Note that it does
+// not perform any validation on the label provided, or check whether there is
+// an existing label for the txid.
+func PutTxLabel(labelBucket walletdb.ReadWriteBucket, txid chainhash.Hash,
+	label string) error {
+
 	// We expect the label length to be limited on creation, so we can
 	// store the label's length as a uint16.
 	labelLen := uint16(len(label))
@@ -1016,6 +1025,12 @@ func FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
 		return "", ErrTxLabelNotFound
 	}
 
+	return DeserializeLabel(v)
+}
+
+// DeserializeLabel reads a deserializes a length-value encoded label from the
+// byte array provided.
+func DeserializeLabel(v []byte) (string, error) {
 	// If the label is empty, return an error.
 	length := binary.BigEndian.Uint16(v[0:2])
 	if length == 0 {
