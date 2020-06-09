@@ -3615,8 +3615,12 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 
 	// Returned by bitcoind on the RPC when broadcasting a transaction that
 	// is spending either output that is missing or already spent.
+	//
 	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/node/transaction.cpp#L49
-	case match(err, "missing inputs"):
+	// https://github.com/bitcoin/bitcoin/blob/0.20/src/validation.cpp#L642
+	case match(err, "missing inputs") ||
+		match(err, "bad-txns-inputs-missingorspent"):
+
 		returnErr = &ErrDoubleSpend{
 			backendError: err,
 		}
