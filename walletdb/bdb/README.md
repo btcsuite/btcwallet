@@ -10,19 +10,20 @@ datastore.  Package bdb is licensed under the copyfree ISC license.
 ## Usage
 
 This package is only a driver to the walletdb package and provides the database
-type of "bdb". The only parameters the Open and Create functions take is the
-database path as a string, and an option for the database to not sync its
-freelist to disk as a bool:
+type of "bdb". The only parameters the Open and Create functions take are the
+database path as a string, an option for the database to not sync its freelist
+to disk as a bool, and a timeout value for opening the database as a
+time.Duration:
 
 ```Go
-db, err := walletdb.Open("bdb", "path/to/database.db", true)
+db, err := walletdb.Open("bdb", "path/to/database.db", true, 60*time.Second)
 if err != nil {
 	// Handle error
 }
 ```
 
 ```Go
-db, err := walletdb.Create("bdb", "path/to/database.db", true)
+db, err := walletdb.Create("bdb", "path/to/database.db", true, 60*time.Second)
 if err != nil {
 	// Handle error
 }

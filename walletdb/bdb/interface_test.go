@@ -32,5 +32,5 @@ func TestInterface(t *testing.T) {
 
 	dbPath := filepath.Join(tempDir, "db")
 	defer os.RemoveAll(dbPath)
-	walletdbtest.TestInterface(t, dbType, dbPath, true)
+	walletdbtest.TestInterface(t, dbType, dbPath, true, defaultDBTimeout)
 }
