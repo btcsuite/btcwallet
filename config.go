@@ -33,7 +33,8 @@ const (
 	defaultRPCMaxClients    = 10
 	defaultRPCMaxWebsockets = 25
 
-	walletDbName = "wallet.db"
+	walletDbName     = "wallet.db"
+	defaultDBTimeout = 60 * time.Second
 )
 
 var (
@@ -58,6 +59,7 @@ type config struct {
 	DebugLevel    string                  `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
 	LogDir        string                  `long:"logdir" description:"Directory to log output."`
 	Profile       string                  `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+	DBTimeout     time.Duration           `long:"dbtimeout" description:"The timeout value to use when opening the wallet database."`
 
 	// Wallet options
 	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
@@ -273,6 +275,7 @@ func loadConfig() (*config, []string, error) {
 		MaxPeers:               neutrino.MaxPeers,
 		BanDuration:            neutrino.BanDuration,
 		BanThreshold:           neutrino.BanThreshold,
+		DBTimeout:              defaultDBTimeout,
 	}
 
 	// Pre-parse the command line options to see if an alternative config

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -19,16 +20,24 @@ import (
 
 const defaultNet = "mainnet"
 
-var datadir = btcutil.AppDataDir("btcwallet", false)
+var (
+	datadir = btcutil.AppDataDir("btcwallet", false)
+
+	// defaultTimeout is the default timeout value when opening the wallet
+	// database.
+	defaultTimeout = 60 * time.Second
+)
 
 // Flags.
 var opts = struct {
-	Force      bool   `short:"f" description:"Force removal without prompt"`
-	DbPath     string `long:"db" description:"Path to wallet database"`
-	DropLabels bool   `long:"droplabels" description:"Drop transaction labels"`
+	Force      bool          `short:"f" description:"Force removal without prompt"`
+	DbPath     string        `long:"db" description:"Path to wallet database"`
+	DropLabels bool          `long:"droplabels" description:"Drop transaction labels"`
+	Timeout    time.Duration `long:"timeout" description:"Timeout value when opening the wallet database"`
 }{
-	Force:  false,
-	DbPath: filepath.Join(datadir, defaultNet, "wallet.db"),
+	Force:   false,
+	DbPath:  filepath.Join(datadir, defaultNet, "wallet.db"),
+	Timeout: defaultTimeout,
 }
 
 func init() {
@@ -93,7 +102,7 @@ func mainInt() int {
 		fmt.Println("Enter yes or no.")
 	}
 
-	db, err := walletdb.Open("bdb", opts.DbPath, true)
+	db, err := walletdb.Open("bdb", opts.DbPath, true, opts.Timeout)
 	if err != nil {
 		fmt.Println("Failed to open database:", err)
 		return 1
