@@ -10,6 +10,10 @@ import (
 	"github.com/btcsuite/btcutil/hdkeychain"
 )
 
+// defaultDBTimeout specifies the timeout value when opening the wallet
+// database.
+var defaultDBTimeout = 10 * time.Second
+
 // testWallet creates a test wallet and unlocks it.
 func testWallet(t *testing.T) (*Wallet, func()) {
 	// Set up a wallet.
@@ -32,7 +36,9 @@ func testWallet(t *testing.T) (*Wallet, func()) {
 	pubPass := []byte("hello")
 	privPass := []byte("world")
 
-	loader := NewLoader(&chaincfg.TestNet3Params, dir, true, 250)
+	loader := NewLoader(
+		&chaincfg.TestNet3Params, dir, true, defaultDBTimeout, 250,
+	)
 	w, err := loader.CreateNewWallet(pubPass, privPass, seed, time.Now())
 	if err != nil {
 		t.Fatalf("unable to create wallet: %v", err)
