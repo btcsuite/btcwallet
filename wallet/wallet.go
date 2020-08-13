@@ -95,7 +95,8 @@ type Wallet struct {
 	chainClientSynced  bool
 	chainClientSyncMtx sync.Mutex
 
-	lockedOutpoints map[wire.OutPoint]struct{}
+	lockedOutpoints    map[wire.OutPoint]struct{}
+	lockedOutpointsMtx sync.Mutex
 
 	recoveryWindow uint32
 
@@ -2826,6 +2827,9 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 // LockedOutpoint returns whether an outpoint has been marked as locked and
 // should not be used as an input for created transactions.
 func (w *Wallet) LockedOutpoint(op wire.OutPoint) bool {
+	w.lockedOutpointsMtx.Lock()
+	defer w.lockedOutpointsMtx.Unlock()
+
 	_, locked := w.lockedOutpoints[op]
 	return locked
 }
@@ -2833,18 +2837,27 @@ func (w *Wallet) LockedOutpoint(op wire.OutPoint) bool {
 // LockOutpoint marks an outpoint as locked, that is, it should not be used as
 // an input for newly created transactions.
 func (w *Wallet) LockOutpoint(op wire.OutPoint) {
+	w.lockedOutpointsMtx.Lock()
+	defer w.lockedOutpointsMtx.Unlock()
+
 	w.lockedOutpoints[op] = struct{}{}
 }
 
 // UnlockOutpoint marks an outpoint as unlocked, that is, it may be used as an
 // input for newly created transactions.
 func (w *Wallet) UnlockOutpoint(op wire.OutPoint) {
+	w.lockedOutpointsMtx.Lock()
+	defer w.lockedOutpointsMtx.Unlock()
+
 	delete(w.lockedOutpoints, op)
 }
 
 // ResetLockedOutpoints resets the set of locked outpoints so all may be used
 // as inputs for new transactions.
 func (w *Wallet) ResetLockedOutpoints() {
+	w.lockedOutpointsMtx.Lock()
+	defer w.lockedOutpointsMtx.Unlock()
+
 	w.lockedOutpoints = map[wire.OutPoint]struct{}{}
 }
 
@@ -2852,6 +2865,9 @@ func (w *Wallet) ResetLockedOutpoints() {
 // intended to be used by marshaling the result as a JSON array for
 // listlockunspent RPC results.
 func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
+	w.lockedOutpointsMtx.Lock()
+	defer w.lockedOutpointsMtx.Unlock()
+
 	locked := make([]btcjson.TransactionInput, len(w.lockedOutpoints))
 	i := 0
 	for op := range w.lockedOutpoints {
