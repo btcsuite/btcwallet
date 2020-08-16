@@ -66,7 +66,6 @@ func (s *NeutrinoClient) BackEnd() string {
 
 // Start replicates the RPC client's Start method.
 func (s *NeutrinoClient) Start() error {
-	s.CS.Start()
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {
@@ -75,13 +74,17 @@ func (s *NeutrinoClient) Start() error {
 		s.currentBlock = make(chan *waddrmgr.BlockStamp)
 		s.quit = make(chan struct{})
 		s.started = true
+
 		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
 			select {
 			case s.enqueueNotification <- ClientConnected{}:
 			case <-s.quit:
 			}
 		}()
+
+		s.wg.Add(1)
 		go s.notificationHandler()
 	}
 	return nil
@@ -670,12 +673,13 @@ func (s *NeutrinoClient) dispatchRescanFinished() {
 // no bounds on the queue, so the dequeue channel should be read continually to
 // avoid running out of memory.
 func (s *NeutrinoClient) notificationHandler() {
+	defer s.wg.Done()
+
 	hash, height, err := s.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to get best block from chain service: %s",
 			err)
 		s.Stop()
-		s.wg.Done()
 		return
 	}
 
@@ -750,5 +754,4 @@ out:
 
 	s.Stop()
 	close(s.dequeueNotification)
-	s.wg.Done()
 }

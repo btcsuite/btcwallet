@@ -143,8 +143,39 @@ func walletMain() error {
 // associated with the server for RPC passthrough and to enable additional
 // methods.
 func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Loader) {
-	var certs []byte
-	if !cfg.UseSPV {
+	var (
+		certs        []byte
+		chainService *neutrino.ChainService
+	)
+
+	if cfg.UseSPV {
+		netDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
+		spvdb, err := walletdb.Create(
+			"bdb", filepath.Join(netDir, "neutrino.db"),
+		)
+		if err != nil {
+			log.Errorf("Unable to create Neutrino DB: %s", err)
+			return
+		}
+		defer spvdb.Close()
+
+		chainService, err = neutrino.NewChainService(
+			neutrino.Config{
+				DataDir:      netDir,
+				Database:     spvdb,
+				ChainParams:  *activeNet.Params,
+				ConnectPeers: cfg.ConnectPeers,
+				AddPeers:     cfg.AddPeers,
+			})
+		if err != nil {
+			log.Errorf("Couldn't create Neutrino ChainService: %s",
+				err)
+			return
+		}
+
+		chainService.Start()
+		defer chainService.Stop()
+	} else {
 		certs = readCAFile()
 	}
 
@@ -155,39 +186,20 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 		)
 
 		if cfg.UseSPV {
-			var (
-				chainService *neutrino.ChainService
-				spvdb        walletdb.DB
+			chainClient = chain.NewNeutrinoClient(
+				activeNet.Params, chainService,
 			)
-			netDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
-			spvdb, err = walletdb.Create("bdb",
-				filepath.Join(netDir, "neutrino.db"))
-			defer spvdb.Close()
-			if err != nil {
-				log.Errorf("Unable to create Neutrino DB: %s", err)
-				continue
-			}
-			chainService, err = neutrino.NewChainService(
-				neutrino.Config{
-					DataDir:      netDir,
-					Database:     spvdb,
-					ChainParams:  *activeNet.Params,
-					ConnectPeers: cfg.ConnectPeers,
-					AddPeers:     cfg.AddPeers,
-				})
-			if err != nil {
-				log.Errorf("Couldn't create Neutrino ChainService: %s", err)
-				continue
-			}
-			chainClient = chain.NewNeutrinoClient(activeNet.Params, chainService)
 			err = chainClient.Start()
 			if err != nil {
-				log.Errorf("Couldn't start Neutrino client: %s", err)
+				log.Errorf("Couldn't start Neutrino client: %s",
+					err)
+				continue
 			}
 		} else {
 			chainClient, err = startChainRPC(certs)
 			if err != nil {
-				log.Errorf("Unable to open connection to consensus RPC server: %v", err)
+				log.Errorf("Unable to open connection to "+
+					"consensus RPC server: %v", err)
 				continue
 			}
 		}
