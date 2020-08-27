@@ -6,9 +6,20 @@
 package wallet
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+)
+
+var (
+	// ErrNotMine is an error denoting that a Wallet instance is unable to
+	// spend a specified output.
+	ErrNotMine = errors.New("the passed output does not belong to the " +
+		"wallet")
 )
 
 // OutputSelectionPolicy describes the rules for selecting an output from the
@@ -87,4 +98,74 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 		return nil
 	})
 	return outputResults, err
+}
+
+// FetchInputInfo queries for the wallet's knowledge of the passed outpoint. If
+// the wallet determines this output is under its control, then the original
+// full transaction, the target txout and the number of confirmations are
+// returned. Otherwise, a non-nil error value of ErrNotMine is returned instead.
+func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
+	*wire.TxOut, int64, error) {
+
+	// We manually look up the output within the tx store.
+	txid := &prevOut.Hash
+	txDetail, err := UnstableAPI(w).TxDetails(txid)
+	if err != nil {
+		return nil, nil, 0, err
+	} else if txDetail == nil {
+		return nil, nil, 0, ErrNotMine
+	}
+
+	// With the output retrieved, we'll make an additional check to ensure
+	// we actually have control of this output. We do this because the check
+	// above only guarantees that the transaction is somehow relevant to us,
+	// like in the event of us being the sender of the transaction.
+	numOutputs := uint32(len(txDetail.TxRecord.MsgTx.TxOut))
+	if prevOut.Index >= numOutputs {
+		return nil, nil, 0, fmt.Errorf("invalid output index %v for "+
+			"transaction with %v outputs", prevOut.Index,
+			numOutputs)
+	}
+	pkScript := txDetail.TxRecord.MsgTx.TxOut[prevOut.Index].PkScript
+	if _, err := w.fetchOutputAddr(pkScript); err != nil {
+		return nil, nil, 0, err
+	}
+
+	// Determine the number of confirmations the output currently has.
+	_, currentHeight, err := w.chainClient.GetBestBlock()
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("unable to retrieve current "+
+			"height: %v", err)
+	}
+	confs := int64(0)
+	if txDetail.Block.Height != -1 {
+		confs = int64(currentHeight - txDetail.Block.Height)
+	}
+
+	return &txDetail.TxRecord.MsgTx, &wire.TxOut{
+		Value:    txDetail.TxRecord.MsgTx.TxOut[prevOut.Index].Value,
+		PkScript: pkScript,
+	}, confs, nil
+}
+
+// fetchOutputAddr attempts to fetch the managed address corresponding to the
+// passed output script. This function is used to look up the proper key which
+// should be used to sign a specified input.
+func (w *Wallet) fetchOutputAddr(script []byte) (waddrmgr.ManagedAddress, error) {
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(script, w.chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the case of a multi-sig output, several address may be extracted.
+	// Therefore, we simply select the key for the first address we know
+	// of.
+	for _, addr := range addrs {
+		addr, err := w.AddressInfo(addr)
+		if err == nil {
+			return addr, nil
+		}
+	}
+
+	return nil, ErrNotMine
 }
