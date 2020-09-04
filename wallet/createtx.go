@@ -120,7 +120,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 	}
 	defer dbtx.Rollback()
 
-	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	addrmgrNs, changeSource := w.addrMgrWithChangeSource(dbtx, account)
 
 	// Get current block's height and hash.
 	bs, err := chainClient.BlockStamp()
@@ -134,28 +134,6 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 	}
 
 	inputSource := makeInputSource(eligible)
-	changeSource := func() ([]byte, error) {
-		// Derive the change output script. We'll use the default key
-		// scope responsible for P2WPKH addresses to do so. As a hack to
-		// allow spending from the imported account, change addresses
-		// are created from account 0.
-		var changeAddr btcutil.Address
-		var err error
-		changeKeyScope := waddrmgr.KeyScopeBIP0084
-		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, 0, changeKeyScope,
-			)
-		} else {
-			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, account, changeKeyScope,
-			)
-		}
-		if err != nil {
-			return nil, err
-		}
-		return txscript.PayToAddrScript(changeAddr)
-	}
 	tx, err = txauthor.NewUnsignedTransaction(outputs, feeSatPerKb,
 		inputSource, changeSource)
 	if err != nil {
@@ -268,6 +246,37 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx, account uint32, minco
 		eligible = append(eligible, *output)
 	}
 	return eligible, nil
+}
+
+// addrMgrWithChangeSource returns the address manager bucket and a change
+// source function that returns change addresses from said address manager.
+func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
+	account uint32) (walletdb.ReadWriteBucket, txauthor.ChangeSource) {
+
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	changeSource := func() ([]byte, error) {
+		// Derive the change output script. We'll use the default key
+		// scope responsible for P2WPKH addresses to do so. As a hack to
+		// allow spending from the imported account, change addresses
+		// are created from account 0.
+		var changeAddr btcutil.Address
+		var err error
+		changeKeyScope := waddrmgr.KeyScopeBIP0084
+		if account == waddrmgr.ImportedAddrAccount {
+			changeAddr, err = w.newChangeAddress(
+				addrmgrNs, 0, changeKeyScope,
+			)
+		} else {
+			changeAddr, err = w.newChangeAddress(
+				addrmgrNs, account, changeKeyScope,
+			)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return txscript.PayToAddrScript(changeAddr)
+	}
+	return addrmgrNs, changeSource
 }
 
 // validateMsgTx verifies transaction input scripts for tx.  All previous output
