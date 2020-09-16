@@ -219,7 +219,7 @@ func createSimulationWallet(cfg *config) error {
 	fmt.Println("Creating the wallet...")
 
 	// Create the wallet database backed by bolt db.
-	db, err := walletdb.Create("bdb", dbPath)
+	db, err := walletdb.Create("bdb", dbPath, true)
 	if err != nil {
 		return err
 	}
