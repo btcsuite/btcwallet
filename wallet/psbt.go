@@ -134,7 +134,14 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 		}
 
 		// We can leverage the fee calculation of the txauthor package
-		// if we provide the selected UTXOs as a coin source.
+		// if we provide the selected UTXOs as a coin source. We just
+		// need to make sure we always return the full list of user-
+		// selected UTXOs rather than a subset, otherwise our change
+		// amount will be off (in case the user selected multiple UTXOs
+		// that are large enough on their own). That's why we use our
+		// own static input source creator instead of the more generic
+		// makeInputSource() that selects a subset that is "large
+		// enough".
 		credits := make([]wtxmgr.Credit, len(txIn))
 		for idx, in := range txIn {
 			utxo := packet.Inputs[idx].WitnessUtxo
@@ -144,7 +151,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 				PkScript: utxo.PkScript,
 			}
 		}
-		inputSource := makeInputSource(credits)
+		inputSource := constantInputSource(credits)
 
 		// We also need a change source which needs to be able to insert
 		// a new change addresse into the database.
@@ -318,4 +325,31 @@ func (w *Wallet) FinalizePsbt(packet *psbt.Packet) error {
 	}
 
 	return nil
+}
+
+// constantInputSource creates an input source function that always returns the
+// static set of user-selected UTXOs.
+func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+	// Current inputs and their total value. These won't change over
+	// different invocations as we want our inputs to remain static since
+	// they're selected by the user.
+	currentTotal := btcutil.Amount(0)
+	currentInputs := make([]*wire.TxIn, 0, len(eligible))
+	currentScripts := make([][]byte, 0, len(eligible))
+	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
+
+	for _, credit := range eligible {
+		nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
+		currentTotal += credit.Amount
+		currentInputs = append(currentInputs, nextInput)
+		currentScripts = append(currentScripts, credit.PkScript)
+		currentInputValues = append(currentInputValues, credit.Amount)
+	}
+
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		return currentTotal, currentInputs, currentInputValues,
+			currentScripts, nil
+	}
 }
