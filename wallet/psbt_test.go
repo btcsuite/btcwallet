@@ -142,7 +142,9 @@ func TestFundPsbt(t *testing.T) {
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			err := w.FundPsbt(tc.packet, 0, tc.feeRateSatPerKB)
+			changeIndex, err := w.FundPsbt(
+				tc.packet, 0, tc.feeRateSatPerKB,
+			)
 
 			// Make sure the error is what we expected.
 			if err == nil && tc.expectedErr != "" {
@@ -258,9 +260,10 @@ func TestFundPsbt(t *testing.T) {
 			}
 			p2wkhIndex := -1
 			p2wshIndex := -1
-			changeIndex := -1
+			totalOut := int64(0)
 			for idx, txOut := range txOuts {
 				script := txOut.PkScript
+				totalOut += txOut.Value
 
 				switch {
 				case bytes.Equal(script, testScriptP2WKH):
@@ -269,9 +272,11 @@ func TestFundPsbt(t *testing.T) {
 				case bytes.Equal(script, testScriptP2WSH):
 					p2wshIndex = idx
 
-				default:
-					changeIndex = idx
 				}
+			}
+			totalIn := int64(0)
+			for _, txIn := range packet.Inputs {
+				totalIn += txIn.WitnessUtxo.Value
 			}
 
 			// All outputs must be found.
