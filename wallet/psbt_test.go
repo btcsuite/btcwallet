@@ -68,6 +68,8 @@ func TestFundPsbt(t *testing.T) {
 		feeRateSatPerKB   btcutil.Amount
 		expectedErr       string
 		validatePackage   bool
+		expectedFee       int64
+		expectedChange    int64
 		numExpectedInputs int
 	}{{
 		name: "no outputs provided",
@@ -106,6 +108,8 @@ func TestFundPsbt(t *testing.T) {
 		feeRateSatPerKB:   2000, // 2 sat/byte
 		expectedErr:       "",
 		validatePackage:   true,
+		expectedChange:    1000000 - 150000 - 368,
+		expectedFee:       368,
 		numExpectedInputs: 1,
 	}, {
 		name: "two outputs, two inputs",
@@ -136,13 +140,17 @@ func TestFundPsbt(t *testing.T) {
 		feeRateSatPerKB:   2000, // 2 sat/byte
 		expectedErr:       "",
 		validatePackage:   true,
+		expectedFee:       506,
+		expectedChange:    2000000 - 150000 - 506,
 		numExpectedInputs: 2,
 	}}
 
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			err := w.FundPsbt(tc.packet, 0, tc.feeRateSatPerKB)
+			changeIndex, err := w.FundPsbt(
+				tc.packet, 0, tc.feeRateSatPerKB,
+			)
 
 			// Make sure the error is what we expected.
 			if err == nil && tc.expectedErr != "" {
@@ -258,9 +266,10 @@ func TestFundPsbt(t *testing.T) {
 			}
 			p2wkhIndex := -1
 			p2wshIndex := -1
-			changeIndex := -1
+			totalOut := int64(0)
 			for idx, txOut := range txOuts {
 				script := txOut.PkScript
+				totalOut += txOut.Value
 
 				switch {
 				case bytes.Equal(script, testScriptP2WKH):
@@ -269,9 +278,11 @@ func TestFundPsbt(t *testing.T) {
 				case bytes.Equal(script, testScriptP2WSH):
 					p2wshIndex = idx
 
-				default:
-					changeIndex = idx
 				}
+			}
+			totalIn := int64(0)
+			for _, txIn := range packet.Inputs {
+				totalIn += txIn.WitnessUtxo.Value
 			}
 
 			// All outputs must be found.
@@ -291,15 +302,17 @@ func TestFundPsbt(t *testing.T) {
 					txOuts[p2wshIndex].PkScript)
 			}
 
-			// Finally, check the change output size and that it
-			// belongs to the wallet.
-			expectedFee := int64(368)
-			expectedChange := 1000000 - 150000 - expectedFee
-			if txOuts[changeIndex].Value != expectedChange {
+			// Finally, check the change output size and fee.
+			fee := totalIn - totalOut
+			if fee != tc.expectedFee {
+				t.Fatalf("unexpected fee, got %d wanted %d",
+					fee, tc.expectedFee)
+			}
+			if txOuts[changeIndex].Value != tc.expectedChange {
 				t.Fatalf("unexpected change output size, got "+
 					"%d wanted %d",
 					txOuts[changeIndex].Value,
-					expectedChange)
+					tc.expectedChange)
 			}
 		})
 	}
