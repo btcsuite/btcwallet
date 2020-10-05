@@ -91,8 +91,10 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 			}
 			packet.Inputs[idx].SighashType = txscript.SigHashAll
 
-			// We don't want to include the witness just yet.
+			// We don't want to include the witness or any script
+			// just yet.
 			packet.UnsignedTx.TxIn[idx].Witness = wire.TxWitness{}
+			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
 		}
 
 		return nil
