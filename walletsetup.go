@@ -217,7 +217,7 @@ func createSimulationWallet(cfg *config) error {
 	netDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 
 	// Create the wallet.
-	dbPath := filepath.Join(netDir, walletDbName)
+	dbPath := filepath.Join(netDir, wallet.WalletDBName)
 	fmt.Println("Creating the wallet...")
 
 	// Create the wallet database backed by bolt db.

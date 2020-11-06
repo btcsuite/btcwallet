@@ -18,7 +18,12 @@ import (
 )
 
 const (
-	walletDbName = "wallet.db"
+	// WalletDBName specified the database filename for the wallet.
+	WalletDBName = "wallet.db"
+
+	// DefaultDBTimeout is the default timeout value when opening the wallet
+	// database.
+	DefaultDBTimeout = 60 * time.Second
 )
 
 var (
@@ -129,7 +134,7 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase,
 		return nil, ErrLoaded
 	}
 
-	dbPath := filepath.Join(l.dbDirPath, walletDbName)
+	dbPath := filepath.Join(l.dbDirPath, WalletDBName)
 	exists, err := fileExists(dbPath)
 	if err != nil {
 		return nil, err
@@ -198,7 +203,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 	}
 
 	// Open the database using the boltdb backend.
-	dbPath := filepath.Join(l.dbDirPath, walletDbName)
+	dbPath := filepath.Join(l.dbDirPath, WalletDBName)
 	db, err := walletdb.Open("bdb", dbPath, l.noFreelistSync, l.timeout)
 	if err != nil {
 		log.Errorf("Failed to open database: %v", err)
@@ -237,7 +242,7 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 // WalletExists returns whether a file exists at the loader's database path.
 // This may return an error for unexpected I/O failures.
 func (l *Loader) WalletExists() (bool, error) {
-	dbPath := filepath.Join(l.dbDirPath, walletDbName)
+	dbPath := filepath.Join(l.dbDirPath, WalletDBName)
 	return fileExists(dbPath)
 }
 

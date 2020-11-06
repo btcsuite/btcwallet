@@ -32,9 +32,6 @@ const (
 	defaultLogFilename      = "btcwallet.log"
 	defaultRPCMaxClients    = 10
 	defaultRPCMaxWebsockets = 25
-
-	walletDbName     = "wallet.db"
-	defaultDBTimeout = 60 * time.Second
 )
 
 var (
@@ -275,7 +272,7 @@ func loadConfig() (*config, []string, error) {
 		MaxPeers:               neutrino.MaxPeers,
 		BanDuration:            neutrino.BanDuration,
 		BanThreshold:           neutrino.BanThreshold,
-		DBTimeout:              defaultDBTimeout,
+		DBTimeout:              wallet.DefaultDBTimeout,
 	}
 
 	// Pre-parse the command line options to see if an alternative config
@@ -418,7 +415,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Ensure the wallet exists or create it when the create flag is set.
 	netDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
-	dbPath := filepath.Join(netDir, walletDbName)
+	dbPath := filepath.Join(netDir, wallet.WalletDBName)
 
 	if cfg.CreateTemp && cfg.Create {
 		err := fmt.Errorf("The flags --create and --createtemp can not " +

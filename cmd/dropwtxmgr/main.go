@@ -22,10 +22,6 @@ const defaultNet = "mainnet"
 
 var (
 	datadir = btcutil.AppDataDir("btcwallet", false)
-
-	// defaultTimeout is the default timeout value when opening the wallet
-	// database.
-	defaultTimeout = 60 * time.Second
 )
 
 // Flags.
@@ -36,8 +32,8 @@ var opts = struct {
 	Timeout    time.Duration `long:"timeout" description:"Timeout value when opening the wallet database"`
 }{
 	Force:   false,
-	DbPath:  filepath.Join(datadir, defaultNet, "wallet.db"),
-	Timeout: defaultTimeout,
+	DbPath:  filepath.Join(datadir, defaultNet, wallet.WalletDBName),
+	Timeout: wallet.DefaultDBTimeout,
 }
 
 func init() {
