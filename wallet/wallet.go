@@ -3468,7 +3468,7 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 	// the transaction.
 	var ourAddrs []btcutil.Address
 	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
-		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+		addrmgrNs := dbTx.ReadWriteBucket(waddrmgrNamespaceKey)
 		for _, txOut := range tx.TxOut {
 			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 				txOut.PkScript, w.chainParams,
@@ -3481,7 +3481,7 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 			for _, addr := range addrs {
 				// Skip any addresses which are not relevant to
 				// us.
-				_, err := w.Manager.Address(txmgrNs, addr)
+				_, err := w.Manager.Address(addrmgrNs, addr)
 				if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
 					continue
 				}
@@ -3503,6 +3503,7 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 
 		// If there is a label we should write, get the namespace key
 		// and record it in the tx store.
+		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
 		return w.TxStore.PutTxLabel(txmgrNs, tx.TxHash(), label)
 	})
 	if err != nil {
