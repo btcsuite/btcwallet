@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
@@ -21,6 +22,10 @@ var (
 	// bogus drivers for testing purposes while still allowing other tests
 	// to easily iterate all supported drivers.
 	ignoreDbTypes = map[string]bool{"createopenfail": true}
+
+	// defaultDBTimeout specifies the timeout value when opening the wallet
+	// database.
+	defaultDBTimeout = 10 * time.Second
 )
 
 // TestAddDuplicateDriver ensures that adding a duplicate driver does not
@@ -64,7 +69,7 @@ func TestAddDuplicateDriver(t *testing.T) {
 	defer os.Remove(tempDir)
 
 	dbPath := filepath.Join(tempDir, "db")
-	db, err := walletdb.Create(dbType, dbPath, true)
+	db, err := walletdb.Create(dbType, dbPath, true, defaultDBTimeout)
 	if err != nil {
 		t.Errorf("failed to create database: %v", err)
 		return

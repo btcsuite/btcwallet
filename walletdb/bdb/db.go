@@ -7,6 +7,7 @@ package bdb
 import (
 	"io"
 	"os"
+	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
 	"go.etcd.io/bbolt"
@@ -367,7 +368,9 @@ func fileExists(name string) bool {
 
 // openDB opens the database at the provided path.  walletdb.ErrDbDoesNotExist
 // is returned if the database doesn't exist and the create flag is not set.
-func openDB(dbPath string, noFreelistSync bool, create bool) (walletdb.DB, error) {
+func openDB(dbPath string, noFreelistSync bool,
+	create bool, timeout time.Duration) (walletdb.DB, error) {
+
 	if !create && !fileExists(dbPath) {
 		return nil, walletdb.ErrDbDoesNotExist
 	}
@@ -377,6 +380,7 @@ func openDB(dbPath string, noFreelistSync bool, create bool) (walletdb.DB, error
 	options := &bbolt.Options{
 		NoFreelistSync: noFreelistSync,
 		FreelistType:   bbolt.FreelistMapType,
+		Timeout:        timeout,
 	}
 
 	boltDB, err := bbolt.Open(dbPath, 0600, options)

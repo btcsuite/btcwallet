@@ -45,6 +45,10 @@ var (
 		Block: Block{Hash: *TstSignedTxBlockHash, Height: TstSpendingTxBlockHeight},
 		Time:  time.Unix(1389114091, 0),
 	}
+
+	// defaultDBTimeout specifies the timeout value when opening the wallet
+	// database.
+	defaultDBTimeout = 10 * time.Second
 )
 
 func testDB() (walletdb.DB, func(), error) {
@@ -52,7 +56,9 @@ func testDB() (walletdb.DB, func(), error) {
 	if err != nil {
 		return nil, func() {}, err
 	}
-	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), true)
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(tmpDir, "db"), true, defaultDBTimeout,
+	)
 	return db, func() { os.RemoveAll(tmpDir) }, err
 }
 
@@ -64,7 +70,9 @@ func testStore() (*Store, walletdb.DB, func(), error) {
 		return nil, nil, func() {}, err
 	}
 
-	db, err := walletdb.Create("bdb", filepath.Join(tmpDir, "db"), true)
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(tmpDir, "db"), true, defaultDBTimeout,
+	)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		return nil, nil, nil, err
