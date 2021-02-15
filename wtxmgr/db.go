@@ -1543,7 +1543,8 @@ func deleteBuckets(ns walletdb.ReadWriteBucket) error {
 		str := "failed to delete unmined inputs bucket"
 		return storeError(ErrDatabase, str, err)
 	}
-	if err := ns.DeleteNestedBucket(bucketLockedOutputs); err != nil {
+	err := ns.DeleteNestedBucket(bucketLockedOutputs)
+	if err != nil && err != walletdb.ErrBucketNotFound {
 		str := "failed to delete locked outputs bucket"
 		return storeError(ErrDatabase, str, err)
 	}
