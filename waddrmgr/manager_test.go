@@ -1947,7 +1947,8 @@ func testManagerCase(t *testing.T, caseName string,
 		err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 			_, err = scopedMgr.NewAccountWatchingOnly(
-				ns, defaultAccountName, acctKeyPub)
+				ns, defaultAccountName, acctKeyPub, 0, nil,
+			)
 			return err
 		})
 		if err != nil {
@@ -2648,7 +2649,9 @@ func TestNewRawAccountWatchingOnly(t *testing.T) {
 	const accountNum = 1000
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		return scopedMgr.NewRawAccountWatchingOnly(ns, accountNum, accountKey)
+		return scopedMgr.NewRawAccountWatchingOnly(
+			ns, accountNum, accountKey, 0, nil,
+		)
 	})
 	if err != nil {
 		t.Fatalf("unable to create new account: %v", err)
@@ -2713,7 +2716,9 @@ func TestNewRawAccountHybrid(t *testing.T) {
 	const accountNum = 1000
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		return scopedMgr.NewRawAccountWatchingOnly(ns, accountNum, acctKeyPub)
+		return scopedMgr.NewRawAccountWatchingOnly(
+			ns, accountNum, acctKeyPub, 0, nil,
+		)
 	})
 	if err != nil {
 		t.Fatalf("unable to create new account: %v", err)

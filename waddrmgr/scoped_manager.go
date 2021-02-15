@@ -1271,14 +1271,24 @@ func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uin
 	return s.newAccount(ns, number, name)
 }
 
-// NewRawAccountWatchingOnly creates a new watching only account for
-// the scoped manager.  This method differs from the
-// NewAccountWatchingOnly method in that this method takes the account
-// number *directly*, rather than taking a string name for the
-// account, then mapping that to the next highest account number.
+// NewRawAccountWatchingOnly creates a new watching only account for the scoped
+// manager. This method differs from the NewAccountWatchingOnly method in that
+// this method takes the account number *directly*, rather than taking a string
+// name for the account, then mapping that to the next highest account number.
+//
+// The master key fingerprint denotes the fingerprint of the root key
+// corresponding to the account public key (also known as the key with
+// derivation path m/). This may be required by some hardware wallets for proper
+// identification and signing.
+//
+// An optional address schema may also be provided to override the
+// ScopedKeyManager's address schema. This will affect all addresses derived
+// from the account.
 func (s *ScopedKeyManager) NewRawAccountWatchingOnly(
 	ns walletdb.ReadWriteBucket, number uint32,
-	pubKey *hdkeychain.ExtendedKey) error {
+	pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	addrSchema *ScopeAddrSchema) error {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -1286,7 +1296,9 @@ func (s *ScopedKeyManager) NewRawAccountWatchingOnly(
 	// derivation, we'll create a new name for this account based off of
 	// the account number.
 	name := fmt.Sprintf("act:%v", number)
-	return s.newAccountWatchingOnly(ns, number, name, pubKey)
+	return s.newAccountWatchingOnly(
+		ns, number, name, pubKey, masterKeyFingerprint, addrSchema,
+	)
 }
 
 // NewAccount creates and returns a new account stored in the manager based on
@@ -1407,8 +1419,19 @@ func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 }
 
 // NewAccountWatchingOnly is similar to NewAccount, but for watch-only wallets.
-func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, name string,
-	pubKey *hdkeychain.ExtendedKey) (uint32, error) {
+//
+// The master key fingerprint denotes the fingerprint of the root key
+// corresponding to the account public key (also known as the key with
+// derivation path m/). This may be required by some hardware wallets for proper
+// identification and signing.
+//
+// An optional address schema may also be provided to override the
+// ScopedKeyManager's address schema. This will affect all addresses derived
+// from the account.
+func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket,
+	name string, pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	addrSchema *ScopeAddrSchema) (uint32, error) {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -1423,7 +1446,10 @@ func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, n
 
 	// With the name validated, we'll create a new account for the new
 	// contiguous account.
-	if err := s.newAccountWatchingOnly(ns, account, name, pubKey); err != nil {
+	err = s.newAccountWatchingOnly(
+		ns, account, name, pubKey, masterKeyFingerprint, addrSchema,
+	)
+	if err != nil {
 		return 0, err
 	}
 
@@ -1432,9 +1458,19 @@ func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, n
 
 // newAccountWatchingOnly is similar to newAccount, but for watching-only wallets.
 //
+// The master key fingerprint denotes the fingerprint of the root key
+// corresponding to the account public key (also known as the key with
+// derivation path m/). This may be required by some hardware wallets for proper
+// identification and signing.
+//
+// An optional address schema may also be provided to override the
+// ScopedKeyManager's address schema. This will affect all addresses derived
+// from the account.
+//
 // NOTE: This function MUST be called with the manager lock held for writes.
-func (s *ScopedKeyManager) newAccountWatchingOnly(ns walletdb.ReadWriteBucket, account uint32, name string,
-	pubKey *hdkeychain.ExtendedKey) error {
+func (s *ScopedKeyManager) newAccountWatchingOnly(ns walletdb.ReadWriteBucket,
+	account uint32, name string, pubKey *hdkeychain.ExtendedKey,
+	masterKeyFingerprint uint32, addrSchema *ScopeAddrSchema) error {
 
 	// Validate the account name.
 	if err := ValidateAccountName(name); err != nil {
@@ -1453,15 +1489,15 @@ func (s *ScopedKeyManager) newAccountWatchingOnly(ns walletdb.ReadWriteBucket, a
 		[]byte(pubKey.String()),
 	)
 	if err != nil {
-		str := "failed to  encrypt public key for account"
+		str := "failed to encrypt public key for account"
 		return managerError(ErrCrypto, str, err)
 	}
 
 	// We have the encrypted account extended keys, so save them to the
 	// database
-	// TODO: set master key fingerprint and addr schema.
 	err = putWatchOnlyAccountInfo(
-		ns, &s.scope, account, acctPubEnc, 0, 0, 0, name, nil,
+		ns, &s.scope, account, acctPubEnc, masterKeyFingerprint, 0, 0,
+		name, addrSchema,
 	)
 	if err != nil {
 		return err
