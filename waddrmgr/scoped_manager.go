@@ -168,6 +168,15 @@ var (
 			ExternalAddrType: PubKeyHash,
 		},
 	}
+
+	// KeyScopeBIP0049AddrSchema is the address schema for the traditional
+	// BIP-0049 derivation scheme. This exists in order to support importing
+	// accounts from other wallets that don't use our modified BIP-0049
+	// derivation scheme (internal addresses are P2WKH instead of NP2WKH).
+	KeyScopeBIP0049AddrSchema = ScopeAddrSchema{
+		ExternalAddrType: NestedWitnessPubKey,
+		InternalAddrType: NestedWitnessPubKey,
+	}
 )
 
 // ScopedKeyManager is a sub key manager under the main root key manager. The
@@ -1842,7 +1851,8 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 	// The start block needs to be updated when the newly imported address
 	// is before the current one.
 	s.rootManager.mtx.Lock()
-	updateStartBlock := bs.Height < s.rootManager.syncState.startBlock.Height
+	updateStartBlock := bs != nil &&
+		bs.Height < s.rootManager.syncState.startBlock.Height
 	s.rootManager.mtx.Unlock()
 
 	// Save the new imported address to the db and update start block (if
