@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/zero"
@@ -1527,7 +1528,10 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 		}
 	}
 
-	err := s.importPublicKey(ns, wif.SerializePubKey(), encryptedPrivKey, bs)
+	err := s.importPublicKey(
+		ns, wif.SerializePubKey(), encryptedPrivKey,
+		s.addrSchema.ExternalAddrType, bs,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1550,15 +1554,67 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 	)
 }
 
+// ImportPublicKey imports a public key into the address manager.
+//
+// All imported addresses will be part of the account defined by the
+// ImportedAddrAccount constant.
+func (s *ScopedKeyManager) ImportPublicKey(ns walletdb.ReadWriteBucket,
+	pubKey *btcec.PublicKey, bs *BlockStamp) (ManagedAddress, error) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	serializedPubKey := pubKey.SerializeCompressed()
+	err := s.importPublicKey(
+		ns, serializedPubKey, nil, s.addrSchema.ExternalAddrType, bs,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// The full derivation path for an imported key is incomplete as we
+	// don't know exactly how it was derived.
+	importedDerivationPath := DerivationPath{
+		Account: ImportedAddrAccount,
+	}
+	return s.toPublicManagedAddress(
+		pubKey, true, true, importedDerivationPath,
+	)
+}
+
 // importPublicKey imports a public key into the address manager and updates the
 // wallet's start block if necessary. An error is returned if the public key
 // already exists.
 func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
-	serializedPubKey, encryptedPrivKey []byte, bs *BlockStamp) error {
+	serializedPubKey, encryptedPrivKey []byte, addrType AddressType,
+	bs *BlockStamp) error {
+
+	// Compute the addressID for our key based on its address type.
+	var addressID []byte
+	switch addrType {
+	case PubKeyHash, WitnessPubKey:
+		addressID = btcutil.Hash160(serializedPubKey)
+
+	case NestedWitnessPubKey:
+		pubKeyHash := btcutil.Hash160(serializedPubKey)
+		p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+			pubKeyHash, s.rootManager.chainParams,
+		)
+		if err != nil {
+			return err
+		}
+		witnessScript, err := txscript.PayToAddrScript(p2wkhAddr)
+		if err != nil {
+			return err
+		}
+		addressID = btcutil.Hash160(witnessScript)
+
+	default:
+		return fmt.Errorf("unsupported address type %v", addrType)
+	}
 
 	// Prevent duplicates.
-	pubKeyHash := btcutil.Hash160(serializedPubKey)
-	alreadyExists := s.existsAddress(ns, pubKeyHash)
+	alreadyExists := s.existsAddress(ns, addressID)
 	if alreadyExists {
 		str := fmt.Sprintf("address for public key %x already exists",
 			serializedPubKey)
@@ -1584,7 +1640,7 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
 	err = putImportedAddress(
-		ns, &s.scope, pubKeyHash, ImportedAddrAccount, ssNone,
+		ns, &s.scope, addressID, ImportedAddrAccount, ssNone,
 		encryptedPubKey, encryptedPrivKey,
 	)
 	if err != nil {
