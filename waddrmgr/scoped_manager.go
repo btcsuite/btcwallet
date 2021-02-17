@@ -309,71 +309,95 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 		return nil, maybeConvertDbError(err)
 	}
 
-	// Ensure the account type is a default account.
-	row, ok := rowInterface.(*dbDefaultAccountRow)
-	if !ok {
-		str := fmt.Sprintf("unsupported account type %T", row)
-		return nil, managerError(ErrDatabase, str, nil)
-	}
+	decryptKey := func(cryptoKey EncryptorDecryptor,
+		encryptedKey []byte) (*hdkeychain.ExtendedKey, error) {
 
-	// Use the crypto public key to decrypt the account public extended
-	// key.
-	serializedKeyPub, err := s.rootManager.cryptoKeyPub.Decrypt(row.pubKeyEncrypted)
-	if err != nil {
-		str := fmt.Sprintf("failed to decrypt public key for account %d",
-			account)
-		return nil, managerError(ErrCrypto, str, err)
-	}
-	acctKeyPub, err := hdkeychain.NewKeyFromString(string(serializedKeyPub))
-	if err != nil {
-		str := fmt.Sprintf("failed to create extended public key for "+
-			"account %d", account)
-		return nil, managerError(ErrKeyChain, str, err)
-	}
-
-	// Create the new account info with the known information.  The rest of
-	// the fields are filled out below.
-	acctInfo := &accountInfo{
-		acctName:          row.name,
-		acctKeyEncrypted:  row.privKeyEncrypted,
-		acctKeyPub:        acctKeyPub,
-		nextExternalIndex: row.nextExternalIndex,
-		nextInternalIndex: row.nextInternalIndex,
-	}
-
-	watchOnly := s.rootManager.watchOnly() || len(acctInfo.acctKeyEncrypted) == 0
-	private := !s.rootManager.isLocked() && !watchOnly
-	if private {
-		// Use the crypto private key to decrypt the account private
-		// extended keys.
-		decrypted, err := s.rootManager.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
+		serializedKey, err := cryptoKey.Decrypt(encryptedKey)
 		if err != nil {
-			str := fmt.Sprintf("failed to decrypt private key for "+
+			return nil, err
+		}
+		return hdkeychain.NewKeyFromString(string(serializedKey))
+	}
+
+	// The wallet will only contain private keys for default accounts if the
+	// wallet's not set up as watch-only and it's been unlocked.
+	watchOnly := s.rootManager.watchOnly()
+	hasPrivateKey := !s.rootManager.isLocked() && !watchOnly
+
+	// Create the new account info with the known information. The rest of
+	// the fields are filled out below.
+	var acctInfo *accountInfo
+	switch row := rowInterface.(type) {
+	case *dbDefaultAccountRow:
+		acctInfo = &accountInfo{
+			acctName:          row.name,
+			acctKeyEncrypted:  row.privKeyEncrypted,
+			nextExternalIndex: row.nextExternalIndex,
+			nextInternalIndex: row.nextInternalIndex,
+		}
+
+		// Use the crypto public key to decrypt the account public
+		// extended key.
+		acctInfo.acctKeyPub, err = decryptKey(
+			s.rootManager.cryptoKeyPub, row.pubKeyEncrypted,
+		)
+		if err != nil {
+			str := fmt.Sprintf("failed to decrypt public key for "+
 				"account %d", account)
 			return nil, managerError(ErrCrypto, str, err)
 		}
 
-		acctKeyPriv, err := hdkeychain.NewKeyFromString(string(decrypted))
-		if err != nil {
-			str := fmt.Sprintf("failed to create extended private "+
-				"key for account %d", account)
-			return nil, managerError(ErrKeyChain, str, err)
+		if hasPrivateKey {
+			// Use the crypto private key to decrypt the account
+			// private extended keys.
+			acctInfo.acctKeyPriv, err = decryptKey(
+				s.rootManager.cryptoKeyPriv, row.privKeyEncrypted,
+			)
+			if err != nil {
+				str := fmt.Sprintf("failed to decrypt private "+
+					"key for account %d", account)
+				return nil, managerError(ErrCrypto, str, err)
+			}
 		}
-		acctInfo.acctKeyPriv = acctKeyPriv
+
+	case *dbWatchOnlyAccountRow:
+		acctInfo = &accountInfo{
+			acctName:          row.name,
+			nextExternalIndex: row.nextExternalIndex,
+			nextInternalIndex: row.nextInternalIndex,
+		}
+
+		// Use the crypto public key to decrypt the account public
+		// extended key.
+		acctInfo.acctKeyPub, err = decryptKey(
+			s.rootManager.cryptoKeyPub, row.pubKeyEncrypted,
+		)
+		if err != nil {
+			str := fmt.Sprintf("failed to decrypt public key for "+
+				"account %d", account)
+			return nil, managerError(ErrCrypto, str, err)
+		}
+
+		watchOnly = true
+		hasPrivateKey = false
+
+	default:
+		str := fmt.Sprintf("unsupported account type %T", row)
+		return nil, managerError(ErrDatabase, str, nil)
 	}
 
 	// Derive and cache the managed address for the last external address.
-	branch, index := ExternalBranch, row.nextExternalIndex
+	branch, index := ExternalBranch, acctInfo.nextExternalIndex
 	if index > 0 {
 		index--
 	}
 	lastExtAddrPath := DerivationPath{
 		InternalAccount: account,
-		Account:         acctKeyPub.ChildIndex(),
+		Account:         acctInfo.acctKeyPub.ChildIndex(),
 		Branch:          branch,
 		Index:           index,
 	}
-	lastExtKey, err := s.deriveKey(acctInfo, branch, index, private)
+	lastExtKey, err := s.deriveKey(acctInfo, branch, index, hasPrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -384,17 +408,17 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	acctInfo.lastExternalAddr = lastExtAddr
 
 	// Derive and cache the managed address for the last internal address.
-	branch, index = InternalBranch, row.nextInternalIndex
+	branch, index = InternalBranch, acctInfo.nextInternalIndex
 	if index > 0 {
 		index--
 	}
 	lastIntAddrPath := DerivationPath{
 		InternalAccount: account,
-		Account:         acctKeyPub.ChildIndex(),
+		Account:         acctInfo.acctKeyPub.ChildIndex(),
 		Branch:          branch,
 		Index:           index,
 	}
-	lastIntKey, err := s.deriveKey(acctInfo, branch, index, private)
+	lastIntKey, err := s.deriveKey(acctInfo, branch, index, hasPrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1371,7 +1395,7 @@ func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 
 	// We have the encrypted account extended keys, so save them to the
 	// database
-	err = putAccountInfo(
+	err = putDefaultAccountInfo(
 		ns, &s.scope, account, acctPubEnc, acctPrivEnc, 0, 0, name,
 	)
 	if err != nil {
@@ -1435,8 +1459,9 @@ func (s *ScopedKeyManager) newAccountWatchingOnly(ns walletdb.ReadWriteBucket, a
 
 	// We have the encrypted account extended keys, so save them to the
 	// database
-	err = putAccountInfo(
-		ns, &s.scope, account, acctPubEnc, nil, 0, 0, name,
+	// TODO: set master key fingerprint and addr schema.
+	err = putWatchOnlyAccountInfo(
+		ns, &s.scope, account, acctPubEnc, 0, 0, 0, name, nil,
 	)
 	if err != nil {
 		return err
@@ -1478,29 +1503,45 @@ func (s *ScopedKeyManager) RenameAccount(ns walletdb.ReadWriteBucket,
 		return err
 	}
 
-	// Ensure the account type is a default account.
-	row, ok := rowInterface.(*dbDefaultAccountRow)
-	if !ok {
-		str := fmt.Sprintf("unsupported account type %T", row)
-		err = managerError(ErrDatabase, str, nil)
-	}
-
 	// Remove the old name key from the account id index.
 	if err = deleteAccountIDIndex(ns, &s.scope, account); err != nil {
 		return err
 	}
 
-	// Remove the old name key from the account name index.
-	if err = deleteAccountNameIndex(ns, &s.scope, row.name); err != nil {
-		return err
-	}
-	err = putAccountInfo(
-		ns, &s.scope, account, row.pubKeyEncrypted,
-		row.privKeyEncrypted, row.nextExternalIndex,
-		row.nextInternalIndex, name,
-	)
-	if err != nil {
-		return err
+	switch row := rowInterface.(type) {
+	case *dbDefaultAccountRow:
+		// Remove the old name key from the account name index.
+		if err = deleteAccountNameIndex(ns, &s.scope, row.name); err != nil {
+			return err
+		}
+
+		err = putDefaultAccountInfo(
+			ns, &s.scope, account, row.pubKeyEncrypted,
+			row.privKeyEncrypted, row.nextExternalIndex,
+			row.nextInternalIndex, name,
+		)
+		if err != nil {
+			return err
+		}
+
+	case *dbWatchOnlyAccountRow:
+		// Remove the old name key from the account name index.
+		if err = deleteAccountNameIndex(ns, &s.scope, row.name); err != nil {
+			return err
+		}
+
+		err = putWatchOnlyAccountInfo(
+			ns, &s.scope, account, row.pubKeyEncrypted,
+			row.masterKeyFingerprint, row.nextExternalIndex,
+			row.nextInternalIndex, name, row.addrSchema,
+		)
+		if err != nil {
+			return err
+		}
+
+	default:
+		str := fmt.Sprintf("unsupported account type %T", row)
+		return managerError(ErrDatabase, str, nil)
 	}
 
 	// Update in-memory account info with new name if cached and the db

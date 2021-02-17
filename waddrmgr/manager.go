@@ -1678,7 +1678,7 @@ func createManagerKeyScope(ns walletdb.ReadWriteBucket,
 	}
 
 	// Save the information for the default account to the database.
-	err = putAccountInfo(
+	err = putDefaultAccountInfo(
 		ns, &scope, DefaultAccountNum, acctPubEnc, acctPrivEnc, 0, 0,
 		defaultAccountName,
 	)
@@ -1686,7 +1686,7 @@ func createManagerKeyScope(ns walletdb.ReadWriteBucket,
 		return err
 	}
 
-	return putAccountInfo(
+	return putDefaultAccountInfo(
 		ns, &scope, ImportedAddrAccount, nil, nil, 0, 0,
 		ImportedAddrAccountName,
 	)
