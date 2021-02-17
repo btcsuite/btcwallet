@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 )
@@ -51,9 +52,10 @@ var (
 			privKey:     hexToBytes("c27d6581b92785834b381fa697c4b0ffc4574b495743722e0acb7601b1b68b99"),
 			privKeyWIF:  "L3jmpy54Pc7MLXTN2mL8Xas7BJziwKaUGmgnXXzgGbVRdiAniXZk",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  0,
-				Index:   0,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          0,
+				Index:           0,
 			},
 		},
 		{
@@ -66,9 +68,10 @@ var (
 			privKey:     hexToBytes("18f3b191019e83878a81557abebb2afda199e31d22e150d8bf4df4561671be6c"),
 			privKeyWIF:  "Kx4DNid19W8sjNFN3uPqQE7UYnCqyEp7unCvdkf2LrVUFpnDtwpB",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  0,
-				Index:   1,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          0,
+				Index:           1,
 			},
 		},
 		{
@@ -81,9 +84,10 @@ var (
 			privKey:     hexToBytes("ccb8f6305b73136b363644b647f6efc0fd27b6b7d9c11c7e560662ed38db7b34"),
 			privKeyWIF:  "L45fWF6Yd736fDohuB97vwRRLdQQJr3ZGvbokk9ubiT7aNrg7tTn",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  0,
-				Index:   2,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          0,
+				Index:           2,
 			},
 		},
 		{
@@ -96,9 +100,10 @@ var (
 			privKey:     hexToBytes("d6bc8ff768814fede2adcdb74826bd846924341b3862e3b6e31cdc084e992940"),
 			privKeyWIF:  "L4R8XyxYQyPSpTwj8w96tM86a6j3QA9jbRPj3RA7DVTVWk71ndeP",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  0,
-				Index:   3,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          0,
+				Index:           3,
 			},
 		},
 		{
@@ -111,9 +116,10 @@ var (
 			privKey:     hexToBytes("8563ade061110e03aee50695ffc5cb1c06c8310bde0a3674257c853c966968c0"),
 			privKeyWIF:  "L1h16Hunxomww4FrpyQP2iFmWNgG7U1u3awp6Vd3s2uGf7v5VU8c",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  0,
-				Index:   4,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          0,
+				Index:           4,
 			},
 		},
 		{
@@ -126,9 +132,10 @@ var (
 			privKey:     hexToBytes("fe4f855fcf059ec6ddf7b25f63b19aa49c771d1fcb9850b68ae3d65e20657a60"),
 			privKeyWIF:  "L5k4HivqXvohxBMpuwD38iUgi6uewffwZny91ZNYfM39RXH2x3QR",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  1,
-				Index:   0,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          1,
+				Index:           0,
 			},
 		},
 		{
@@ -141,9 +148,10 @@ var (
 			privKey:     hexToBytes("bfef521317c65b018ae7e6d7ecc3aa700d5d0f7ea84d567be9270382d0b5e3e6"),
 			privKeyWIF:  "L3eomUajnTDM3Pc8GU47qqXUFuCjvpqY7NYN9mH3x1ZFjDgiY4BU",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  1,
-				Index:   1,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          1,
+				Index:           1,
 			},
 		},
 		{
@@ -156,9 +164,10 @@ var (
 			privKey:     hexToBytes("f506dffd4494c24006df7a35f3291f7ca0297a1a431557a1339bfed6f48738ca"),
 			privKeyWIF:  "L5S1bVQUPqQb1Su82fLoSpnGCjcPfdAQE1pJxWRopJSBdYNDHESv",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  1,
-				Index:   2,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          1,
+				Index:           2,
 			},
 		},
 		{
@@ -171,9 +180,10 @@ var (
 			privKey:     hexToBytes("b3629de8ef6a275b4ffae41aa2bbbc2952eb92282ea6402435abbb010ecc1fb8"),
 			privKeyWIF:  "L3EQsGeEnyXmKaux54cG4DQeCSQDvGuvEuy3W2ss4geum7AtWaHw",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  1,
-				Index:   3,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          1,
+				Index:           3,
 			},
 		},
 		{
@@ -186,9 +196,10 @@ var (
 			privKey:     hexToBytes("ca747a7ef815ea0dbe68655272cecbfbd65f2a109019a9ed28e0d3dcaffe05c3"),
 			privKeyWIF:  "L41Frac75RPbTELKzw1EGC2qCkdveiVumpmsyX4daAvyyCMxit1W",
 			derivationInfo: DerivationPath{
-				Account: 0,
-				Branch:  1,
-				Index:   4,
+				InternalAccount: 0,
+				Account:         hdkeychain.HardenedKeyStart,
+				Branch:          1,
+				Index:           4,
 			},
 		},
 	}

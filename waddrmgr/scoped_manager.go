@@ -23,6 +23,10 @@ import (
 // m/purpose'/cointype'/account/branch/index, where purpose' and cointype' are
 // bound by the scope of a particular manager.
 type DerivationPath struct {
+	// InternalAccount is the internal account number used within the
+	// wallet's database to identify accounts.
+	InternalAccount uint32
+
 	// Account is the account, or the first immediate child from the scoped
 	// manager's hardened coin type key.
 	Account uint32
@@ -213,19 +217,13 @@ func (s *ScopedKeyManager) Close() {
 //
 // This function MUST be called with the manager lock held for writes.
 func (s *ScopedKeyManager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
-	account, branch, index uint32) (ManagedAddress, error) {
+	derivationPath DerivationPath) (ManagedAddress, error) {
 
 	var addrType AddressType
-	if branch == InternalBranch {
+	if derivationPath.Branch == InternalBranch {
 		addrType = s.addrSchema.InternalAddrType
 	} else {
 		addrType = s.addrSchema.ExternalAddrType
-	}
-
-	derivationPath := DerivationPath{
-		Account: account,
-		Branch:  branch,
-		Index:   index,
 	}
 
 	// Create a new managed address based on the public or private key
@@ -245,13 +243,13 @@ func (s *ScopedKeyManager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
 		// unlocked.
 		info := unlockDeriveInfo{
 			managedAddr: ma,
-			branch:      branch,
-			index:       index,
+			branch:      derivationPath.Branch,
+			index:       derivationPath.Index,
 		}
 		s.deriveOnUnlock = append(s.deriveOnUnlock, &info)
 	}
 
-	if branch == InternalBranch {
+	if derivationPath.Branch == InternalBranch {
 		ma.internal = true
 	}
 
@@ -343,7 +341,9 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 		nextInternalIndex: row.nextInternalIndex,
 	}
 
-	if !s.rootManager.isLocked() {
+	watchOnly := s.rootManager.watchOnly() || len(acctInfo.acctKeyEncrypted) == 0
+	private := !s.rootManager.isLocked() && !watchOnly
+	if private {
 		// Use the crypto private key to decrypt the account private
 		// extended keys.
 		decrypted, err := s.rootManager.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
@@ -367,13 +367,17 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	if index > 0 {
 		index--
 	}
-	lastExtKey, err := s.deriveKey(
-		acctInfo, branch, index, !s.rootManager.isLocked(),
-	)
+	lastExtAddrPath := DerivationPath{
+		InternalAccount: account,
+		Account:         acctKeyPub.ChildIndex(),
+		Branch:          branch,
+		Index:           index,
+	}
+	lastExtKey, err := s.deriveKey(acctInfo, branch, index, private)
 	if err != nil {
 		return nil, err
 	}
-	lastExtAddr, err := s.keyToManaged(lastExtKey, account, branch, index)
+	lastExtAddr, err := s.keyToManaged(lastExtKey, lastExtAddrPath)
 	if err != nil {
 		return nil, err
 	}
@@ -384,13 +388,17 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	if index > 0 {
 		index--
 	}
-	lastIntKey, err := s.deriveKey(
-		acctInfo, branch, index, !s.rootManager.isLocked(),
-	)
+	lastIntAddrPath := DerivationPath{
+		InternalAccount: account,
+		Account:         acctKeyPub.ChildIndex(),
+		Branch:          branch,
+		Index:           index,
+	}
+	lastIntKey, err := s.deriveKey(acctInfo, branch, index, private)
 	if err != nil {
 		return nil, err
 	}
-	lastIntAddr, err := s.keyToManaged(lastIntKey, account, branch, index)
+	lastIntAddr, err := s.keyToManaged(lastIntKey, lastIntAddrPath)
 	if err != nil {
 		return nil, err
 	}
@@ -452,36 +460,55 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 // DeriveFromKeyPath attempts to derive a maximal child key (under the BIP0044
 // scheme) from a given key path. If key derivation isn't possible, then an
 // error will be returned.
+//
+// NOTE: The key will be derived from the account stored in the database under
+// the InternalAccount number.
 func (s *ScopedKeyManager) DeriveFromKeyPath(ns walletdb.ReadBucket,
 	kp DerivationPath) (ManagedAddress, error) {
 
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	extKey, err := s.deriveKeyFromPath(
-		ns, kp.Account, kp.Branch, kp.Index, !s.rootManager.IsLocked(),
+	watchOnly := s.rootManager.WatchOnly()
+	private := !s.rootManager.IsLocked() && !watchOnly
+
+	addrKey, _, err := s.deriveKeyFromPath(
+		ns, kp.InternalAccount, kp.Branch, kp.Index, private,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.keyToManaged(extKey, kp.Account, kp.Branch, kp.Index)
+	return s.keyToManaged(addrKey, kp)
 }
 
 // deriveKeyFromPath returns either a public or private derived extended key
-// based on the private flag for the given an account, branch, and index.
+// based on the private flag for an address given an account, branch, and index.
+// The account master key is also returned.
 //
 // This function MUST be called with the manager lock held for writes.
-func (s *ScopedKeyManager) deriveKeyFromPath(ns walletdb.ReadBucket, account, branch,
-	index uint32, private bool) (*hdkeychain.ExtendedKey, error) {
+func (s *ScopedKeyManager) deriveKeyFromPath(ns walletdb.ReadBucket,
+	internalAccount, branch, index uint32, private bool) (
+	*hdkeychain.ExtendedKey, *hdkeychain.ExtendedKey, error) {
 
 	// Look up the account key information.
-	acctInfo, err := s.loadAccountInfo(ns, account)
+	acctInfo, err := s.loadAccountInfo(ns, internalAccount)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	private = private && acctInfo.acctKeyPriv != nil
+
+	addrKey, err := s.deriveKey(acctInfo, branch, index, private)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return s.deriveKey(acctInfo, branch, index, private)
+	acctKey := acctInfo.acctKeyPub
+	if private {
+		acctKey = acctInfo.acctKeyPriv
+	}
+
+	return addrKey, acctKey, nil
 }
 
 // chainAddressRowToManaged returns a new managed address based on chained
@@ -493,16 +520,22 @@ func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 
 	// Since the manger's mutex is assumed to held when invoking this
 	// function, we use the internal isLocked to avoid a deadlock.
-	isLocked := s.rootManager.isLocked()
+	private := !s.rootManager.isLocked() && !s.rootManager.watchOnly()
 
-	addressKey, err := s.deriveKeyFromPath(
-		ns, row.account, row.branch, row.index, !isLocked,
+	addressKey, acctKey, err := s.deriveKeyFromPath(
+		ns, row.account, row.branch, row.index, private,
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	return s.keyToManaged(addressKey, row.account, row.branch, row.index)
+	return s.keyToManaged(
+		addressKey, DerivationPath{
+			InternalAccount: row.account,
+			Account:         acctKey.ChildIndex(),
+			Branch:          row.branch,
+			Index:           row.index,
+		},
+	)
 }
 
 // importedAddressRowToManaged returns a new managed address based on imported
@@ -525,7 +558,7 @@ func (s *ScopedKeyManager) importedAddressRowToManaged(row *dbImportedAddressRow
 	// Since this is an imported address, we won't populate the full
 	// derivation path, as we don't have enough information to do so.
 	derivationPath := DerivationPath{
-		Account: row.account,
+		InternalAccount: row.account,
 	}
 
 	compressed := len(pubBytes) == btcec.PubKeyBytesLenCompressed
@@ -688,7 +721,8 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 	// Choose the account key to used based on whether the address manager
 	// is locked.
 	acctKey := acctInfo.acctKeyPub
-	if !s.rootManager.IsLocked() {
+	watchOnly := s.rootManager.WatchOnly() || len(acctInfo.acctKeyEncrypted) == 0
+	if !s.rootManager.IsLocked() && !watchOnly {
 		acctKey = acctInfo.acctKeyPriv
 	}
 
@@ -757,9 +791,10 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		// proper derivation path so this information can be available
 		// to callers.
 		derivationPath := DerivationPath{
-			Account: account,
-			Branch:  branchNum,
-			Index:   nextIndex - 1,
+			InternalAccount: account,
+			Account:         acctKey.ChildIndex(),
+			Branch:          branchNum,
+			Index:           nextIndex - 1,
 		}
 
 		// Create a new managed address based on the public or private
@@ -843,7 +878,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 			// Add the new managed address to the list of addresses
 			// that need their private keys derived when the
 			// address manager is next unlocked.
-			if s.rootManager.isLocked() && !s.rootManager.watchOnly() {
+			if s.rootManager.isLocked() && !watchOnly {
 				s.deriveOnUnlock = append(s.deriveOnUnlock, info)
 			}
 		}
@@ -883,7 +918,8 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	// Choose the account key to used based on whether the address manager
 	// is locked.
 	acctKey := acctInfo.acctKeyPub
-	if !s.rootManager.IsLocked() {
+	watchOnly := s.rootManager.WatchOnly() || acctInfo.acctKeyPriv != nil
+	if !s.rootManager.IsLocked() && !watchOnly {
 		acctKey = acctInfo.acctKeyPriv
 	}
 
@@ -959,9 +995,10 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		// proper derivation path so this information can be available
 		// to callers.
 		derivationPath := DerivationPath{
-			Account: account,
-			Branch:  branchNum,
-			Index:   nextIndex - 1,
+			InternalAccount: account,
+			Account:         acctInfo.acctKeyPub.ChildIndex(),
+			Branch:          branchNum,
+			Index:           nextIndex - 1,
 		}
 
 		// Create a new managed address based on the public or private
@@ -1031,7 +1068,7 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		// Add the new managed address to the list of addresses that
 		// need their private keys derived when the address manager is
 		// next unlocked.
-		if s.rootManager.IsLocked() && !s.rootManager.WatchOnly() {
+		if s.rootManager.IsLocked() && !watchOnly {
 			s.deriveOnUnlock = append(s.deriveOnUnlock, info)
 		}
 	}
@@ -1539,7 +1576,7 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 	// The full derivation path for an imported key is incomplete as we
 	// don't know exactly how it was derived.
 	importedDerivationPath := DerivationPath{
-		Account: ImportedAddrAccount,
+		InternalAccount: ImportedAddrAccount,
 	}
 
 	// Create a new managed address based on the imported address.
@@ -1575,7 +1612,7 @@ func (s *ScopedKeyManager) ImportPublicKey(ns walletdb.ReadWriteBucket,
 	// The full derivation path for an imported key is incomplete as we
 	// don't know exactly how it was derived.
 	importedDerivationPath := DerivationPath{
-		Account: ImportedAddrAccount,
+		InternalAccount: ImportedAddrAccount,
 	}
 	return s.toPublicManagedAddress(
 		pubKey, true, true, importedDerivationPath,
@@ -1724,7 +1761,7 @@ func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 	defer s.mtx.Unlock()
 
 	// The manager must be unlocked to encrypt the imported script.
-	if s.rootManager.IsLocked() && !s.rootManager.WatchOnly() {
+	if s.rootManager.IsLocked() {
 		return nil, managerError(ErrLocked, errLocked, nil)
 	}
 

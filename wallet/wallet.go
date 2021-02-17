@@ -946,18 +946,20 @@ func expandScopeHorizons(ns walletdb.ReadWriteBucket,
 // externalKeyPath returns the relative external derivation path /0/0/index.
 func externalKeyPath(index uint32) waddrmgr.DerivationPath {
 	return waddrmgr.DerivationPath{
-		Account: waddrmgr.DefaultAccountNum,
-		Branch:  waddrmgr.ExternalBranch,
-		Index:   index,
+		InternalAccount: waddrmgr.DefaultAccountNum,
+		Account:         waddrmgr.DefaultAccountNum,
+		Branch:          waddrmgr.ExternalBranch,
+		Index:           index,
 	}
 }
 
 // internalKeyPath returns the relative internal derivation path /0/1/index.
 func internalKeyPath(index uint32) waddrmgr.DerivationPath {
 	return waddrmgr.DerivationPath{
-		Account: waddrmgr.DefaultAccountNum,
-		Branch:  waddrmgr.InternalBranch,
-		Index:   index,
+		InternalAccount: waddrmgr.DefaultAccountNum,
+		Account:         waddrmgr.DefaultAccountNum,
+		Branch:          waddrmgr.InternalBranch,
+		Index:           index,
 	}
 }
 

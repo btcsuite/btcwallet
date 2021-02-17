@@ -1178,9 +1178,9 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 		// We'll also derive any private keys that are pending due to
 		// them being created while the address manager was locked.
 		for _, info := range manager.deriveOnUnlock {
-			addressKey, err := manager.deriveKeyFromPath(
-				ns, info.managedAddr.Account(), info.branch,
-				info.index, true,
+			addressKey, _, err := manager.deriveKeyFromPath(
+				ns, info.managedAddr.InternalAccount(),
+				info.branch, info.index, true,
 			)
 			if err != nil {
 				m.lock()

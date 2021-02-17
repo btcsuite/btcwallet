@@ -54,8 +54,8 @@ const (
 // type may provide further fields to provide information specific to that type
 // of address.
 type ManagedAddress interface {
-	// Account returns the account the address is associated with.
-	Account() uint32
+	// Account returns the internal account the address is associated with.
+	InternalAccount() uint32
 
 	// Address returns a btcutil.Address for the backing address.
 	Address() btcutil.Address
@@ -133,7 +133,7 @@ type managedAddress struct {
 	used             bool
 	addrType         AddressType
 	pubKey           *btcec.PublicKey
-	privKeyEncrypted []byte
+	privKeyEncrypted []byte // nil if part of watch-only account
 	privKeyCT        []byte // non-nil if unlocked
 	privKeyMutex     sync.Mutex
 }
@@ -177,11 +177,12 @@ func (a *managedAddress) lock() {
 	a.privKeyMutex.Unlock()
 }
 
-// Account returns the account number the address is associated with.
+// InternalAccount returns the internal account number the address is associated
+// with.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *managedAddress) Account() uint32 {
-	return a.derivationPath.Account
+func (a *managedAddress) InternalAccount() uint32 {
+	return a.derivationPath.InternalAccount
 }
 
 // AddrType returns the address type of the managed address. This can be used
@@ -544,11 +545,11 @@ func (a *scriptAddress) lock() {
 	a.scriptMutex.Unlock()
 }
 
-// Account returns the account the address is associated with.  This will always
-// be the ImportedAddrAccount constant for script addresses.
+// InternalAccount returns the account the address is associated with. This will
+// always be the ImportedAddrAccount constant for script addresses.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *scriptAddress) Account() uint32 {
+func (a *scriptAddress) InternalAccount() uint32 {
 	return a.account
 }
 
