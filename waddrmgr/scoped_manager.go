@@ -1513,14 +1513,56 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 		return nil, managerError(ErrLocked, errLocked, nil)
 	}
 
+	// Encrypt the private key when not a watching-only address manager.
+	var encryptedPrivKey []byte
+	if !s.rootManager.WatchOnly() {
+		privKeyBytes := wif.PrivKey.Serialize()
+		var err error
+		encryptedPrivKey, err = s.rootManager.cryptoKeyPriv.Encrypt(privKeyBytes)
+		zero.Bytes(privKeyBytes)
+		if err != nil {
+			str := fmt.Sprintf("failed to encrypt private key for %x",
+				wif.PrivKey.PubKey().SerializeCompressed())
+			return nil, managerError(ErrCrypto, str, err)
+		}
+	}
+
+	err := s.importPublicKey(ns, wif.SerializePubKey(), encryptedPrivKey, bs)
+	if err != nil {
+		return nil, err
+	}
+
+	// The full derivation path for an imported key is incomplete as we
+	// don't know exactly how it was derived.
+	importedDerivationPath := DerivationPath{
+		Account: ImportedAddrAccount,
+	}
+
+	// Create a new managed address based on the imported address.
+	if !s.rootManager.WatchOnly() {
+		return s.toPrivateManagedAddress(
+			wif, true, importedDerivationPath,
+		)
+	}
+	pubKey := (*btcec.PublicKey)(&wif.PrivKey.PublicKey)
+	return s.toPublicManagedAddress(
+		pubKey, wif.CompressPubKey, true, importedDerivationPath,
+	)
+}
+
+// importPublicKey imports a public key into the address manager and updates the
+// wallet's start block if necessary. An error is returned if the public key
+// already exists.
+func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
+	serializedPubKey, encryptedPrivKey []byte, bs *BlockStamp) error {
+
 	// Prevent duplicates.
-	serializedPubKey := wif.SerializePubKey()
 	pubKeyHash := btcutil.Hash160(serializedPubKey)
 	alreadyExists := s.existsAddress(ns, pubKeyHash)
 	if alreadyExists {
 		str := fmt.Sprintf("address for public key %x already exists",
 			serializedPubKey)
-		return nil, managerError(ErrDuplicateAddress, str, nil)
+		return managerError(ErrDuplicateAddress, str, nil)
 	}
 
 	// Encrypt public key.
@@ -1530,20 +1572,7 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 	if err != nil {
 		str := fmt.Sprintf("failed to encrypt public key for %x",
 			serializedPubKey)
-		return nil, managerError(ErrCrypto, str, err)
-	}
-
-	// Encrypt the private key when not a watching-only address manager.
-	var encryptedPrivKey []byte
-	if !s.rootManager.WatchOnly() {
-		privKeyBytes := wif.PrivKey.Serialize()
-		encryptedPrivKey, err = s.rootManager.cryptoKeyPriv.Encrypt(privKeyBytes)
-		zero.Bytes(privKeyBytes)
-		if err != nil {
-			str := fmt.Sprintf("failed to encrypt private key for %x",
-				serializedPubKey)
-			return nil, managerError(ErrCrypto, str, err)
-		}
+		return managerError(ErrCrypto, str, err)
 	}
 
 	// The start block needs to be updated when the newly imported address
@@ -1559,13 +1588,13 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 		encryptedPubKey, encryptedPrivKey,
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if updateStartBlock {
 		err := putStartBlock(ns, bs)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
@@ -1577,30 +1606,42 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 		s.rootManager.mtx.Unlock()
 	}
 
-	// The full derivation path for an imported key is incomplete as we
-	// don't know exactly how it was derived.
-	importedDerivationPath := DerivationPath{
-		Account: ImportedAddrAccount,
-	}
+	return nil
+}
+
+// toPrivateManagedAddress converts a private key to a managed address.
+func (s *ScopedKeyManager) toPrivateManagedAddress(wif *btcutil.WIF,
+	imported bool, derivationPath DerivationPath) (*managedAddress, error) {
 
 	// Create a new managed address based on the imported address.
-	var managedAddr *managedAddress
-	if !s.rootManager.WatchOnly() {
-		managedAddr, err = newManagedAddress(
-			s, importedDerivationPath, wif.PrivKey,
-			wif.CompressPubKey, s.addrSchema.ExternalAddrType,
-		)
-	} else {
-		pubKey := (*btcec.PublicKey)(&wif.PrivKey.PublicKey)
-		managedAddr, err = newManagedAddressWithoutPrivKey(
-			s, importedDerivationPath, pubKey, wif.CompressPubKey,
-			s.addrSchema.ExternalAddrType,
-		)
-	}
+	managedAddr, err := newManagedAddress(
+		s, derivationPath, wif.PrivKey, wif.CompressPubKey,
+		s.addrSchema.ExternalAddrType,
+	)
 	if err != nil {
 		return nil, err
 	}
-	managedAddr.imported = true
+	managedAddr.imported = imported
+
+	// Add the new managed address to the cache of recent addresses and
+	// return it.
+	s.addrs[addrKey(managedAddr.Address().ScriptAddress())] = managedAddr
+	return managedAddr, nil
+}
+
+// toPublicManagedAddress converts a public key to a managed address.
+func (s *ScopedKeyManager) toPublicManagedAddress(pubKey *btcec.PublicKey,
+	compressed, imported bool, derivationPath DerivationPath) (*managedAddress, error) {
+
+	// Create a new managed address based on the imported address.
+	managedAddr, err := newManagedAddressWithoutPrivKey(
+		s, derivationPath, pubKey, compressed,
+		s.addrSchema.ExternalAddrType,
+	)
+	if err != nil {
+		return nil, err
+	}
+	managedAddr.imported = imported
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
