@@ -1299,6 +1299,25 @@ func ValidateAccountName(name string) error {
 	return nil
 }
 
+// LookupAccount returns the corresponding key scope and account number for the
+// account with the given name.
+func (m *Manager) LookupAccount(ns walletdb.ReadBucket, name string) (KeyScope,
+	uint32, error) {
+
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	for keyScope, scopedMgr := range m.scopedManagers {
+		acct, err := scopedMgr.LookupAccount(ns, name)
+		if err == nil {
+			return keyScope, acct, nil
+		}
+	}
+
+	str := fmt.Sprintf("account name '%s' not found", name)
+	return KeyScope{}, 0, managerError(ErrAccountNotFound, str, nil)
+}
+
 // selectCryptoKey selects the appropriate crypto key based on the key type. An
 // error is returned when an invalid key type is specified or the requested key
 // requires the manager to be unlocked when it isn't.

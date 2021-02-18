@@ -1762,6 +1762,22 @@ func (w *Wallet) AccountProperties(scope waddrmgr.KeyScope, acct uint32) (*waddr
 	return props, err
 }
 
+// LookupAccount returns the corresponding key scope and account number for the
+// account with the given name.
+func (w *Wallet) LookupAccount(name string) (waddrmgr.KeyScope, uint32, error) {
+	var (
+		keyScope waddrmgr.KeyScope
+		account  uint32
+	)
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		var err error
+		keyScope, account, err = w.Manager.LookupAccount(ns, name)
+		return err
+	})
+	return keyScope, account, err
+}
+
 // RenameAccount sets the name for an account number to newName.
 func (w *Wallet) RenameAccount(scope waddrmgr.KeyScope, account uint32, newName string) error {
 	manager, err := w.Manager.FetchScopedKeyManager(scope)
