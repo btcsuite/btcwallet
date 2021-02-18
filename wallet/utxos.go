@@ -155,7 +155,7 @@ func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
 			PkScript: pkScript,
 		}, &psbt.Bip32Derivation{
 			PubKey:               pubKeyAddr.PubKey().SerializeCompressed(),
-			MasterKeyFingerprint: 0, // TODO
+			MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
 			Bip32Path: []uint32{
 				keyScope.Purpose + hdkeychain.HardenedKeyStart,
 				keyScope.Coin + hdkeychain.HardenedKeyStart,
