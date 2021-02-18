@@ -59,12 +59,14 @@ func TestFetchInputInfo(t *testing.T) {
 		t.Fatalf("expected derivation path of length %v, got %v", 3,
 			len(derivationPath.Bip32Path))
 	}
-	if derivationPath.Bip32Path[0] != waddrmgr.KeyScopeBIP0084.Purpose {
+	if derivationPath.Bip32Path[0] !=
+		waddrmgr.KeyScopeBIP0084.Purpose+hdkeychain.HardenedKeyStart {
 		t.Fatalf("expected purpose %v, got %v",
 			waddrmgr.KeyScopeBIP0084.Purpose,
 			derivationPath.Bip32Path[0])
 	}
-	if derivationPath.Bip32Path[1] != waddrmgr.KeyScopeBIP0084.Coin {
+	if derivationPath.Bip32Path[1] !=
+		waddrmgr.KeyScopeBIP0084.Coin+hdkeychain.HardenedKeyStart {
 		t.Fatalf("expected coin type %v, got %v",
 			waddrmgr.KeyScopeBIP0084.Coin,
 			derivationPath.Bip32Path[1])

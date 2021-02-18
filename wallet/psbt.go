@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/psbt"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -24,17 +25,22 @@ import (
 // is created and the index -1 is returned.
 //
 // NOTE: If the packet doesn't contain any inputs, coin selection is performed
-// automatically. If the packet does contain any inputs, it is assumed that full
-// coin selection happened externally and no additional inputs are added. If the
-// specified inputs aren't enough to fund the outputs with the given fee rate,
-// an error is returned.
+// automatically, only selecting inputs from the account based on the given key
+// scope and account number. If a key scope is not specified, then inputs from
+// accounts matching the account number provided across all key scopes may be
+// selected. This is done to handle the default account case, where a user wants
+// to fund a PSBT with inputs regardless of their type (NP2WKH, P2WKH, etc.). If
+// the packet does contain any inputs, it is assumed that full coin selection
+// happened externally and no additional inputs are added. If the specified
+// inputs aren't enough to fund the outputs with the given fee rate, an error is
+// returned.
 //
 // NOTE: A caller of the method should hold the global coin selection lock of
 // the wallet. However, no UTXO specific lock lease is acquired for any of the
 // selected/validated inputs by this method. It is in the caller's
 // responsibility to lock the inputs before handing the partial transaction out.
-func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
-	feeSatPerKB btcutil.Amount) (int32, error) {
+func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
+	account uint32, feeSatPerKB btcutil.Amount) (int32, error) {
 
 	// Make sure the packet is well formed. We only require there to be at
 	// least one output but not necessarily any inputs.
@@ -113,8 +119,8 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 		// includes everything we need, specifically fee estimation and
 		// change address creation.
 		tx, err = w.CreateSimpleTx(
-			account, packet.UnsignedTx.TxOut, 1, feeSatPerKB,
-			false,
+			keyScope, account, packet.UnsignedTx.TxOut, 1,
+			feeSatPerKB, false,
 		)
 		if err != nil {
 			return 0, fmt.Errorf("error creating funding TX: %v",
@@ -166,7 +172,9 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 		if err != nil {
 			return 0, err
 		}
-		_, changeSource := w.addrMgrWithChangeSource(dbtx, account)
+		_, changeSource := w.addrMgrWithChangeSource(
+			dbtx, keyScope, account,
+		)
 
 		// Ask the txauthor to create a transaction with our selected
 		// coins. This will perform fee estimation and add a change
@@ -232,9 +240,9 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 //
 // NOTE: This method does NOT publish the transaction after it's been finalized
 // successfully.
-//
-// TODO: require account and check if watch only to avoid signing.
-func (w *Wallet) FinalizePsbt(packet *psbt.Packet) error {
+func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
+	packet *psbt.Packet) error {
+
 	// Let's check that this is actually something we can and want to sign.
 	// We need at least one input and one output.
 	err := psbt.VerifyInputOutputLen(packet, true, true)
