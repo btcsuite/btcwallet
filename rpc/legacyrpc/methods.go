@@ -1293,20 +1293,14 @@ func listAllTransactions(icmd interface{}, w *wallet.Wallet) (interface{}, error
 func listUnspent(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListUnspentCmd)
 
-	var addresses map[string]struct{}
-	if cmd.Addresses != nil {
-		addresses = make(map[string]struct{})
-		// confirm that all of them are good:
-		for _, as := range *cmd.Addresses {
-			a, err := decodeAddress(as, w.ChainParams())
-			if err != nil {
-				return nil, err
-			}
-			addresses[a.EncodeAddress()] = struct{}{}
+	if cmd.Addresses != nil && len(*cmd.Addresses) > 0 {
+		return nil, &btcjson.RPCError{
+			Code:    btcjson.ErrRPCInvalidParameter,
+			Message: "Filtering by addresses has been deprecated",
 		}
 	}
 
-	return w.ListUnspent(int32(*cmd.MinConf), int32(*cmd.MaxConf), addresses)
+	return w.ListUnspent(int32(*cmd.MinConf), int32(*cmd.MaxConf), "")
 }
 
 // lockUnspent handles the lockunspent command.

@@ -2186,7 +2186,9 @@ type GetTransactionsResult struct {
 // Transaction results are organized by blocks in ascending order and unmined
 // transactions in an unspecified order.  Mined transactions are saved in a
 // Block structure which records properties about the block.
-func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <-chan struct{}) (*GetTransactionsResult, error) {
+func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
+	accountName string, cancel <-chan struct{}) (*GetTransactionsResult, error) {
+
 	var start, end int32 = 0, -1
 
 	w.chainClientLock.Lock()
@@ -2508,7 +2510,7 @@ func (s creditSlice) Swap(i, j int) {
 // contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
 func (w *Wallet) ListUnspent(minconf, maxconf int32,
-	addresses map[string]struct{}) ([]*btcjson.ListUnspentResult, error) {
+	accountName string) ([]*btcjson.ListUnspentResult, error) {
 
 	var results []*btcjson.ListUnspentResult
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
@@ -2517,7 +2519,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 
 		syncBlock := w.Manager.SyncedTo()
 
-		filter := len(addresses) != 0
+		filter := accountName != ""
 		unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
@@ -2556,7 +2558,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			//
 			// This will be unnecessary once transactions and outputs are
 			// grouped under the associated account in the db.
-			acctName := defaultAccountName
+			outputAcctName := defaultAccountName
 			sc, addrs, _, err := txscript.ExtractPkScriptAddrs(
 				output.PkScript, w.chainParams)
 			if err != nil {
@@ -2567,22 +2569,15 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 				if err == nil {
 					s, err := smgr.AccountName(addrmgrNs, acct)
 					if err == nil {
-						acctName = s
+						outputAcctName = s
 					}
 				}
 			}
 
-			if filter {
-				for _, addr := range addrs {
-					_, ok := addresses[addr.EncodeAddress()]
-					if ok {
-						goto include
-					}
-				}
+			if filter && outputAcctName != accountName {
 				continue
 			}
 
-		include:
 			// At the moment watch-only addresses are not supported, so all
 			// recorded outputs that are not multisig are "spendable".
 			// Multisig outputs are only "spendable" if all keys are
@@ -2622,7 +2617,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			result := &btcjson.ListUnspentResult{
 				TxID:          output.OutPoint.Hash.String(),
 				Vout:          output.OutPoint.Index,
-				Account:       acctName,
+				Account:       outputAcctName,
 				ScriptPubKey:  hex.EncodeToString(output.PkScript),
 				Amount:        output.Amount.ToBTC(),
 				Confirmations: int64(confs),
