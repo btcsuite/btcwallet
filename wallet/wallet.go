@@ -1762,6 +1762,30 @@ func (w *Wallet) AccountProperties(scope waddrmgr.KeyScope, acct uint32) (*waddr
 	return props, err
 }
 
+// AccountPropertiesByName returns the properties of an account by its name. It
+// first fetches the desynced information from the address manager, then updates
+// the indexes based on the address pools.
+func (w *Wallet) AccountPropertiesByName(scope waddrmgr.KeyScope,
+	name string) (*waddrmgr.AccountProperties, error) {
+
+	manager, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var props *waddrmgr.AccountProperties
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		acct, err := manager.LookupAccount(waddrmgrNs, name)
+		if err != nil {
+			return err
+		}
+		props, err = manager.AccountProperties(waddrmgrNs, acct)
+		return err
+	})
+	return props, err
+}
+
 // LookupAccount returns the corresponding key scope and account number for the
 // account with the given name.
 func (w *Wallet) LookupAccount(name string) (waddrmgr.KeyScope, uint32, error) {
