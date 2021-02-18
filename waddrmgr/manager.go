@@ -166,16 +166,57 @@ type accountInfo struct {
 	// could be used to import accounts that use the traditional BIP-0049
 	// derivation scheme into our KeyScopeBIP-0049Plus manager.
 	addrSchema *ScopeAddrSchema
+
+	// masterKeyFingerprint represents the fingerprint of the root key
+	// corresponding to the master public key (also known as the key with
+	// derivation path m/). This may be required by some hardware wallets
+	// for proper identification and signing.
+	masterKeyFingerprint uint32
 }
 
 // AccountProperties contains properties associated with each account, such as
 // the account name, number, and the nubmer of derived and imported keys.
 type AccountProperties struct {
-	AccountNumber    uint32
-	AccountName      string
+	// AccountNumber is the internal number used to reference the account.
+	AccountNumber uint32
+
+	// AccountName is the user-identifying name of the account.
+	AccountName string
+
+	// ExternalKeyCount is the number of internal keys that have been
+	// derived for the account.
 	ExternalKeyCount uint32
+
+	// InternalKeyCount is the number of internal keys that have been
+	// derived for the account.
 	InternalKeyCount uint32
+
+	// ImportedKeyCount is the number of imported keys found within the
+	// account.
 	ImportedKeyCount uint32
+
+	// AccountPubKey is the account's public key that can be used to
+	// derive any address relevant to said account.
+	//
+	// NOTE: This may be nil for imported accounts.
+	AccountPubKey *hdkeychain.ExtendedKey
+
+	// MasterKeyFingerprint represents the fingerprint of the root key
+	// corresponding to the master public key (also known as the key with
+	// derivation path m/). This may be required by some hardware wallets
+	// for proper identification and signing.
+	MasterKeyFingerprint uint32
+
+	// KeyScope is the key scope the account belongs to.
+	KeyScope KeyScope
+
+	// IsWatchOnly indicates whether the is set up as watch-only, i.e., it
+	// doesn't contain any private key information.
+	IsWatchOnly bool
+
+	// AddrSchema, if non-nil, specifies an address schema override for
+	// address generation only applicable to the account.
+	AddrSchema *ScopeAddrSchema
 }
 
 // unlockDeriveInfo houses the information needed to derive a private key for a

@@ -71,7 +71,7 @@ type ScopedIndex struct {
 
 // String returns a human readable version describing the keypath encapsulated
 // by the target key scope.
-func (k *KeyScope) String() string {
+func (k KeyScope) String() string {
 	return fmt.Sprintf("m/%v'/%v'", k.Purpose, k.Coin)
 }
 
@@ -362,10 +362,11 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 
 	case *dbWatchOnlyAccountRow:
 		acctInfo = &accountInfo{
-			acctName:          row.name,
-			nextExternalIndex: row.nextExternalIndex,
-			nextInternalIndex: row.nextInternalIndex,
-			addrSchema:        row.addrSchema,
+			acctName:             row.name,
+			nextExternalIndex:    row.nextExternalIndex,
+			nextInternalIndex:    row.nextInternalIndex,
+			addrSchema:           row.addrSchema,
+			masterKeyFingerprint: row.masterKeyFingerprint,
 		}
 
 		// Use the crypto public key to decrypt the account public
@@ -442,7 +443,10 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 	defer s.mtx.RUnlock()
 	s.mtx.RLock()
 
-	props := &AccountProperties{AccountNumber: account}
+	props := &AccountProperties{
+		AccountNumber: account,
+		KeyScope:      s.scope,
+	}
 
 	// Until keys can be imported into any account, special handling is
 	// required for the imported account.
@@ -463,8 +467,14 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 		props.AccountName = acctInfo.acctName
 		props.ExternalKeyCount = acctInfo.nextExternalIndex
 		props.InternalKeyCount = acctInfo.nextInternalIndex
+		props.AccountPubKey = acctInfo.acctKeyPub
+		props.MasterKeyFingerprint = acctInfo.masterKeyFingerprint
+		props.IsWatchOnly = s.rootManager.WatchOnly() ||
+			acctInfo.acctKeyPriv == nil
+		props.AddrSchema = acctInfo.addrSchema
 	} else {
 		props.AccountName = ImportedAddrAccountName // reserved, nonchangable
+		props.IsWatchOnly = s.rootManager.WatchOnly()
 
 		// Could be more efficient if this was tracked by the db.
 		var importedKeyCount uint32
