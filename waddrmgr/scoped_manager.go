@@ -2186,6 +2186,22 @@ func (s *ScopedKeyManager) ForEachInternalActiveAddress(ns walletdb.ReadBucket,
 	return nil
 }
 
+// IsWatchOnlyAccount determines if the given account belonging to this scoped
+// manager is set up as watch-only.
+func (s *ScopedKeyManager) IsWatchOnlyAccount(ns walletdb.ReadBucket,
+	account uint32) (bool, error) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	acctInfo, err := s.loadAccountInfo(ns, account)
+	if err != nil {
+		return false, err
+	}
+
+	return acctInfo.acctKeyPriv == nil, nil
+}
+
 // cloneKeyWithVersion clones an extended key to use the version corresponding
 // to the manager's key scope. This should only be used for non-watch-only
 // accounts as they are stored within the database using the legacy BIP-0044

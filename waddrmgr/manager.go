@@ -405,6 +405,29 @@ func (m *Manager) watchOnly() bool {
 	return m.watchingOnly
 }
 
+// IsWatchOnlyAccount determines if the account with the given key scope is set
+// up as watch-only.
+func (m *Manager) IsWatchOnlyAccount(ns walletdb.ReadBucket, keyScope KeyScope,
+	account uint32) (bool, error) {
+
+	if m.WatchOnly() {
+		return true, nil
+	}
+
+	// Assume the default imported account has no private keys.
+	//
+	// TODO: Actually check whether it does.
+	if account == ImportedAddrAccount {
+		return true, nil
+	}
+
+	scopedMgr, err := m.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		return false, err
+	}
+	return scopedMgr.IsWatchOnlyAccount(ns, account)
+}
+
 // lock performs a best try effort to remove and zero all secret keys associated
 // with the address manager.
 //

@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -313,8 +314,37 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 			}
 		}
 
-		// Finally, we'll sign the input as is, and populate the input
-		// with the witness and sigScript (if needed).
+		// Finally, if the input doesn't belong to a watch-only account,
+		// then we'll sign it as is, and populate the input with the
+		// witness and sigScript (if needed).
+		watchOnly := false
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			ns := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			if keyScope == nil {
+				// If a key scope wasn't specified, then coin
+				// selection was performed from the default
+				// wallet accounts (NP2WKH, P2WKH), so any key
+				// scope provided doesn't impact the result of
+				// this call.
+				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+					ns, waddrmgr.KeyScopeBIP0084, account,
+				)
+			} else {
+				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+					ns, *keyScope, account,
+				)
+			}
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("unable to determine if account is "+
+				"watch-only: %v", err)
+		}
+		if watchOnly {
+			continue
+		}
+
 		witness, sigScript, err := w.ComputeInputScript(
 			tx, signOutput, idx, sigHashes, in.SighashType, nil,
 		)

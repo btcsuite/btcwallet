@@ -163,14 +163,36 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 		return tx, nil
 	}
 
-	err = tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
+	// Before committing the transaction, we'll sign our inputs. If the
+	// inputs are part of a watch-only account, there's no private key
+	// information stored, so we'll skip signing such.
+	var watchOnly bool
+	if keyScope == nil {
+		// If a key scope wasn't specified, then coin selection was
+		// performed from the default wallet accounts (NP2WKH, P2WKH),
+		// so any key scope provided doesn't impact the result of this
+		// call.
+		watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			addrmgrNs, waddrmgr.KeyScopeBIP0084, account,
+		)
+	} else {
+		watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			addrmgrNs, *keyScope, account,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
+	if !watchOnly {
+		err = tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
+		if err != nil {
+			return nil, err
+		}
 
-	err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
-	if err != nil {
-		return nil, err
+		err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if err := dbtx.Commit(); err != nil {
