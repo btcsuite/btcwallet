@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
@@ -43,7 +44,7 @@ func TestFetchInputInfo(t *testing.T) {
 		Hash:  incomingTx.TxHash(),
 		Index: 0,
 	}
-	tx, out, confirmations, err := w.FetchInputInfo(prevOut)
+	tx, out, derivationPath, confirmations, err := w.FetchInputInfo(prevOut)
 	if err != nil {
 		t.Fatalf("error fetching input info: %v", err)
 	}
@@ -53,6 +54,32 @@ func TestFetchInputInfo(t *testing.T) {
 	if !bytes.Equal(tx.TxOut[prevOut.Index].PkScript, utxOut.PkScript) {
 		t.Fatalf("unexpected TX out, got %v wanted %v",
 			tx.TxOut[prevOut.Index].PkScript, utxOut)
+	}
+	if len(derivationPath.Bip32Path) != 5 {
+		t.Fatalf("expected derivation path of length %v, got %v", 3,
+			len(derivationPath.Bip32Path))
+	}
+	if derivationPath.Bip32Path[0] != waddrmgr.KeyScopeBIP0084.Purpose {
+		t.Fatalf("expected purpose %v, got %v",
+			waddrmgr.KeyScopeBIP0084.Purpose,
+			derivationPath.Bip32Path[0])
+	}
+	if derivationPath.Bip32Path[1] != waddrmgr.KeyScopeBIP0084.Coin {
+		t.Fatalf("expected coin type %v, got %v",
+			waddrmgr.KeyScopeBIP0084.Coin,
+			derivationPath.Bip32Path[1])
+	}
+	if derivationPath.Bip32Path[2] != hdkeychain.HardenedKeyStart {
+		t.Fatalf("expected account %v, got %v",
+			hdkeychain.HardenedKeyStart, derivationPath.Bip32Path[2])
+	}
+	if derivationPath.Bip32Path[3] != 0 {
+		t.Fatalf("expected branch %v, got %v", 0,
+			derivationPath.Bip32Path[3])
+	}
+	if derivationPath.Bip32Path[4] != 0 {
+		t.Fatalf("expected index %v, got %v", 0,
+			derivationPath.Bip32Path[4])
 	}
 	if confirmations != int64(0-testBlockHeight) {
 		t.Fatalf("unexpected number of confirmations, got %d wanted %d",

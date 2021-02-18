@@ -70,7 +70,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 	addInputInfo := func(inputs []*wire.TxIn) error {
 		packet.Inputs = make([]psbt.PInput, len(inputs))
 		for idx, in := range inputs {
-			tx, utxo, _, err := w.FetchInputInfo(
+			tx, utxo, derivationPath, _, err := w.FetchInputInfo(
 				&in.PreviousOutPoint,
 			)
 			if err != nil {
@@ -90,6 +90,11 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 				PkScript: utxo.PkScript,
 			}
 			packet.Inputs[idx].SighashType = txscript.SigHashAll
+
+			// Include the derivation path for each input.
+			packet.Inputs[idx].Bip32Derivation = []*psbt.Bip32Derivation{
+				derivationPath,
+			}
 
 			// We don't want to include the witness or any script
 			// just yet.
@@ -227,6 +232,8 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 //
 // NOTE: This method does NOT publish the transaction after it's been finalized
 // successfully.
+//
+// TODO: require account and check if watch only to avoid signing.
 func (w *Wallet) FinalizePsbt(packet *psbt.Packet) error {
 	// Let's check that this is actually something we can and want to sign.
 	// We need at least one input and one output.
@@ -259,7 +266,7 @@ func (w *Wallet) FinalizePsbt(packet *psbt.Packet) error {
 		// We can only sign this input if it's ours, so we try to map it
 		// to a coin we own. If we can't, then we'll continue as it
 		// isn't our input.
-		fullTx, txOut, _, err := w.FetchInputInfo(
+		fullTx, txOut, _, _, err := w.FetchInputInfo(
 			&txIn.PreviousOutPoint,
 		)
 		if err != nil {
