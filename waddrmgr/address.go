@@ -151,6 +151,12 @@ func (a *managedAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
 	a.privKeyMutex.Lock()
 	defer a.privKeyMutex.Unlock()
 
+	// If the address belongs to a watch-only account, the encrypted private
+	// key won't be present, so we'll return an error.
+	if len(a.privKeyEncrypted) == 0 {
+		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
 	if len(a.privKeyCT) == 0 {
 		privKey, err := key.Decrypt(a.privKeyEncrypted)
 		if err != nil {
