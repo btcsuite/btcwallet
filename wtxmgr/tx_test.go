@@ -2284,11 +2284,11 @@ func TestTxLabel(t *testing.T) {
 	defer teardown()
 
 	// txid is the transaction hash we will use to write and get labels for.
-	txid := TstRecvTx.Hash()
+	txid := &chainhash.Hash{1}
 
 	// txidNotFound is distinct from txid, and will not have a label written
 	// to disk.
-	txidNotFound := TstSpendingTx.Hash()
+	txidNotFound := &chainhash.Hash{2}
 
 	// getBucket gets the top level bucket, and fails the test if it is
 	// not found.
