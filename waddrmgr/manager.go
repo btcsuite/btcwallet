@@ -1783,10 +1783,10 @@ func Create(ns walletdb.ReadWriteBucket,
 
 	pubParams := masterKeyPub.Marshal()
 
-	var privParams []byte = nil
+	var privParams []byte
 	var masterKeyPriv *snacl.SecretKey
-	var cryptoKeyPrivEnc []byte = nil
-	var cryptoKeyScriptEnc []byte = nil
+	var cryptoKeyPrivEnc []byte
+	var cryptoKeyScriptEnc []byte
 	if !isWatchingOnly {
 		masterKeyPriv, err = newSecretKey(&privPassphrase, config)
 		if err != nil {
