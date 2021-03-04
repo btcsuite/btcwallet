@@ -4,7 +4,10 @@
 
 package netparams
 
-import "github.com/btcsuite/btcd/chaincfg"
+import (
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/wire"
+)
 
 // Params is used to group parameters for various networks such as the main
 // network and test networks.
@@ -36,4 +39,24 @@ var SimNetParams = Params{
 	Params:        &chaincfg.SimNetParams,
 	RPCClientPort: "18556",
 	RPCServerPort: "18554",
+}
+
+// SigNetParams contains parameters specific to the signet test network
+// (wire.SigNet).
+var SigNetParams = Params{
+	Params:        &chaincfg.SigNetParams,
+	RPCClientPort: "38334",
+	RPCServerPort: "38332",
+}
+
+// SigNetWire is a helper function that either returns the given chain
+// parameter's net value if the parameter represents a signet network or 0 if
+// it's not. This is necessary because there can be custom signet networks that
+// have a different net value.
+func SigNetWire(params *chaincfg.Params) wire.BitcoinNet {
+	if params.Name == chaincfg.SigNetParams.Name {
+		return params.Net
+	}
+
+	return 0
 }

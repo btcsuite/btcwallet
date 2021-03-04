@@ -484,6 +484,8 @@ func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
 		return chaincfg.TestNet3Params.Net, nil
 	case *chaincfg.RegressionNetParams.GenesisHash:
 		return chaincfg.RegressionNetParams.Net, nil
+	case *chaincfg.SigNetParams.GenesisHash:
+		return chaincfg.SigNetParams.Net, nil
 	case *chaincfg.MainNetParams.GenesisHash:
 		return chaincfg.MainNetParams.Net, nil
 	default:
