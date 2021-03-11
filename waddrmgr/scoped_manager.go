@@ -1,16 +1,48 @@
 package waddrmgr
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/walletdb"
+)
+
+// HDVersion represents the different supported schemes of hierarchical
+// derivation.
+type HDVersion uint32
+
+const (
+	// HDVersionMainNetBIP0044 is the HDVersion for BIP-0044 on the main
+	// network.
+	HDVersionMainNetBIP0044 HDVersion = 0x0488b21e // xpub
+
+	// HDVersionMainNetBIP0049 is the HDVersion for BIP-0049 on the main
+	// network.
+	HDVersionMainNetBIP0049 HDVersion = 0x049d7cb2 // ypub
+
+	// HDVersionMainNetBIP0084 is the HDVersion for BIP-0084 on the main
+	// network.
+	HDVersionMainNetBIP0084 HDVersion = 0x04b24746 // zpub
+
+	// HDVersionTestNetBIP0044 is the HDVersion for BIP-0044 on the test
+	// network.
+	HDVersionTestNetBIP0044 HDVersion = 0x043587cf // tpub
+
+	// HDVersionTestNetBIP0049 is the HDVersion for BIP-0049 on the test
+	// network.
+	HDVersionTestNetBIP0049 HDVersion = 0x044a5262 // upub
+
+	// HDVersionTestNetBIP0084 is the HDVersion for BIP-0084 on the test
+	// network.
+	HDVersionTestNetBIP0084 HDVersion = 0x045f1cf6 // vpub
 )
 
 // DerivationPath represents a derivation path from a particular key manager's
@@ -331,6 +363,7 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	case *dbDefaultAccountRow:
 		acctInfo = &accountInfo{
 			acctName:          row.name,
+			acctType:          row.acctType,
 			acctKeyEncrypted:  row.privKeyEncrypted,
 			nextExternalIndex: row.nextExternalIndex,
 			nextInternalIndex: row.nextInternalIndex,
@@ -363,6 +396,7 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	case *dbWatchOnlyAccountRow:
 		acctInfo = &accountInfo{
 			acctName:             row.name,
+			acctType:             row.acctType,
 			nextExternalIndex:    row.nextExternalIndex,
 			nextInternalIndex:    row.nextInternalIndex,
 			addrSchema:           row.addrSchema,
@@ -472,6 +506,29 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 		props.IsWatchOnly = s.rootManager.WatchOnly() ||
 			acctInfo.acctKeyPriv == nil
 		props.AddrSchema = acctInfo.addrSchema
+
+		// Export the account public key with the correct version
+		// corresponding to the manager's key scope for non-watch-only
+		// accounts. This isn't done for watch-only accounts to maintain
+		// the account public key consistent with what the caller
+		// provided. Note that his is only done for the default key
+		// scopes, as we only know the HD versions for those.
+		isDefaultKeyScope := false
+		for _, scope := range DefaultKeyScopes {
+			if s.scope == scope {
+				isDefaultKeyScope = true
+				break
+			}
+		}
+		if acctInfo.acctType == accountDefault && isDefaultKeyScope {
+			props.AccountPubKey, err = s.cloneKeyWithVersion(
+				acctInfo.acctKeyPub,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to retrieve "+
+					"account public key: %v", err)
+			}
+		}
 	} else {
 		props.AccountName = ImportedAddrAccountName // reserved, nonchangable
 		props.IsWatchOnly = s.rootManager.WatchOnly()
@@ -2117,4 +2174,50 @@ func (s *ScopedKeyManager) ForEachInternalActiveAddress(ns walletdb.ReadBucket,
 	}
 
 	return nil
+}
+
+// cloneKeyWithVersion clones an extended key to use the version corresponding
+// to the manager's key scope. This should only be used for non-watch-only
+// accounts as they are stored within the database using the legacy BIP-0044
+// version by default.
+func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
+	*hdkeychain.ExtendedKey, error) {
+
+	// Determine the appropriate version based on the current network and
+	// key scope.
+	var version HDVersion
+	net := s.rootManager.ChainParams().Net
+	switch net {
+	case wire.MainNet:
+		switch s.scope {
+		case KeyScopeBIP0044:
+			version = HDVersionMainNetBIP0044
+		case KeyScopeBIP0049Plus:
+			version = HDVersionMainNetBIP0049
+		case KeyScopeBIP0084:
+			version = HDVersionMainNetBIP0084
+		default:
+			return nil, fmt.Errorf("unsupported scope %v", s.scope)
+		}
+
+	case wire.TestNet, wire.TestNet3:
+		switch s.scope {
+		case KeyScopeBIP0044:
+			version = HDVersionTestNetBIP0044
+		case KeyScopeBIP0049Plus:
+			version = HDVersionTestNetBIP0049
+		case KeyScopeBIP0084:
+			version = HDVersionTestNetBIP0084
+		default:
+			return nil, fmt.Errorf("unsupported scope %v", s.scope)
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported net %v", net)
+	}
+
+	var versionBytes [4]byte
+	binary.BigEndian.PutUint32(versionBytes[:], uint32(version))
+
+	return key.CloneWithVersion(versionBytes[:])
 }

@@ -144,6 +144,8 @@ type addrKey string
 type accountInfo struct {
 	acctName string
 
+	acctType accountType
+
 	// The account key is used to derive the branches which in turn derive
 	// the internal and external addresses.  The accountKeyPriv will be nil
 	// when the address manager is locked.
