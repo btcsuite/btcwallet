@@ -217,14 +217,14 @@ func (s *ScopedKeyManager) Close() {
 //
 // This function MUST be called with the manager lock held for writes.
 func (s *ScopedKeyManager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
-	derivationPath DerivationPath) (ManagedAddress, error) {
+	derivationPath DerivationPath, acctInfo *accountInfo) (
+	ManagedAddress, error) {
 
-	var addrType AddressType
-	if derivationPath.Branch == InternalBranch {
-		addrType = s.addrSchema.InternalAddrType
-	} else {
-		addrType = s.addrSchema.ExternalAddrType
-	}
+	// Choose the appropriate type of address to derive since it's possible
+	// for a watch-only account to have a different schema from the
+	// manager's.
+	internal := derivationPath.Branch == InternalBranch
+	addrType := s.accountAddrType(acctInfo, internal)
 
 	// Create a new managed address based on the public or private key
 	// depending on whether the passed key is private.  Also, zero the key
@@ -365,6 +365,7 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 			acctName:          row.name,
 			nextExternalIndex: row.nextExternalIndex,
 			nextInternalIndex: row.nextInternalIndex,
+			addrSchema:        row.addrSchema,
 		}
 
 		// Use the crypto public key to decrypt the account public
@@ -401,7 +402,7 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	if err != nil {
 		return nil, err
 	}
-	lastExtAddr, err := s.keyToManaged(lastExtKey, lastExtAddrPath)
+	lastExtAddr, err := s.keyToManaged(lastExtKey, lastExtAddrPath, acctInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -422,7 +423,7 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	if err != nil {
 		return nil, err
 	}
-	lastIntAddr, err := s.keyToManaged(lastIntKey, lastIntAddrPath)
+	lastIntAddr, err := s.keyToManaged(lastIntKey, lastIntAddrPath, acctInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -503,7 +504,11 @@ func (s *ScopedKeyManager) DeriveFromKeyPath(ns walletdb.ReadBucket,
 		return nil, err
 	}
 
-	return s.keyToManaged(addrKey, kp)
+	acctInfo, err := s.loadAccountInfo(ns, kp.InternalAccount)
+	if err != nil {
+		return nil, err
+	}
+	return s.keyToManaged(addrKey, kp, acctInfo)
 }
 
 // deriveKeyFromPath returns either a public or private derived extended key
@@ -552,13 +557,18 @@ func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 	if err != nil {
 		return nil, err
 	}
+
+	acctInfo, err := s.loadAccountInfo(ns, row.account)
+	if err != nil {
+		return nil, err
+	}
 	return s.keyToManaged(
 		addressKey, DerivationPath{
 			InternalAccount: row.account,
 			Account:         acctKey.ChildIndex(),
 			Branch:          row.branch,
 			Index:           row.index,
-		},
+		}, acctInfo,
 	)
 }
 
@@ -728,6 +738,23 @@ func (s *ScopedKeyManager) AddrAccount(ns walletdb.ReadBucket,
 	return account, nil
 }
 
+// accountAddrType determines the type of address that should be generated for
+// an account based on whether it's an internal address or not.
+func (s *ScopedKeyManager) accountAddrType(acctInfo *accountInfo,
+	internal bool) AddressType {
+
+	// If the account has a custom address schema, use it.
+	addrSchema := s.addrSchema
+	if acctInfo.addrSchema != nil {
+		addrSchema = *acctInfo.addrSchema
+	}
+
+	if internal {
+		return addrSchema.InternalAddrType
+	}
+	return addrSchema.ExternalAddrType
+}
+
 // nextAddresses returns the specified number of next chained address from the
 // branch indicated by the internal flag.
 //
@@ -758,10 +785,10 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		nextIndex = acctInfo.nextInternalIndex
 	}
 
-	addrType := s.addrSchema.ExternalAddrType
-	if internal {
-		addrType = s.addrSchema.InternalAddrType
-	}
+	// Choose the appropriate type of address to derive since it's possible
+	// for a watch-only account to have a different schema from the
+	// manager's.
+	addrType := s.accountAddrType(acctInfo, internal)
 
 	// Ensure the requested number of addresses doesn't exceed the maximum
 	// allowed for this account.
@@ -955,10 +982,10 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		nextIndex = acctInfo.nextInternalIndex
 	}
 
-	addrType := s.addrSchema.ExternalAddrType
-	if internal {
-		addrType = s.addrSchema.InternalAddrType
-	}
+	// Choose the appropriate type of address to derive since it's possible
+	// for a watch-only account to have a different schema from the
+	// manager's.
+	addrType := s.accountAddrType(acctInfo, internal)
 
 	// If the last index requested is already lower than the next index, we
 	// can return early.

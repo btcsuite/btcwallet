@@ -160,6 +160,12 @@ type accountInfo struct {
 	// intended for internal wallet use such as change addresses.
 	nextInternalIndex uint32
 	lastInternalAddr  ManagedAddress
+
+	// addrSchema serves as a way for an account to override its
+	// corresponding address schema with a custom one. For example, this
+	// could be used to import accounts that use the traditional BIP-0049
+	// derivation scheme into our KeyScopeBIP-0049Plus manager.
+	addrSchema *ScopeAddrSchema
 }
 
 // AccountProperties contains properties associated with each account, such as
