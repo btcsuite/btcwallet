@@ -177,6 +177,13 @@ var (
 		ExternalAddrType: NestedWitnessPubKey,
 		InternalAddrType: NestedWitnessPubKey,
 	}
+
+	// ImportedDerivationPath is the derivation path for an imported
+	// address. The Account, Branch, and Index members are not known, so
+	// they are left blank.
+	ImportedDerivationPath = DerivationPath{
+		InternalAccount: ImportedAddrAccount,
+	}
 )
 
 // ScopedKeyManager is a sub key manager under the main root key manager. The
@@ -665,15 +672,10 @@ func (s *ScopedKeyManager) importedAddressRowToManaged(row *dbImportedAddressRow
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
-	// Since this is an imported address, we won't populate the full
-	// derivation path, as we don't have enough information to do so.
-	derivationPath := DerivationPath{
-		InternalAccount: row.account,
-	}
-
+	// TODO: Handle imported key being part of internal branch.
 	compressed := len(pubBytes) == btcec.PubKeyBytesLenCompressed
 	ma, err := newManagedAddressWithoutPrivKey(
-		s, derivationPath, pubKey, compressed,
+		s, ImportedDerivationPath, pubKey, compressed,
 		s.addrSchema.ExternalAddrType,
 	)
 	if err != nil {
@@ -1753,22 +1755,12 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
-	// The full derivation path for an imported key is incomplete as we
-	// don't know exactly how it was derived.
-	importedDerivationPath := DerivationPath{
-		InternalAccount: ImportedAddrAccount,
-	}
-
 	// Create a new managed address based on the imported address.
 	if !s.rootManager.WatchOnly() {
-		return s.toPrivateManagedAddress(
-			wif, true, importedDerivationPath,
-		)
+		return s.toImportedPrivateManagedAddress(wif)
 	}
 	pubKey := (*btcec.PublicKey)(&wif.PrivKey.PublicKey)
-	return s.toPublicManagedAddress(
-		pubKey, wif.CompressPubKey, true, importedDerivationPath,
-	)
+	return s.toImportedPublicManagedAddress(pubKey, wif.CompressPubKey)
 }
 
 // ImportPublicKey imports a public key into the address manager.
@@ -1789,14 +1781,7 @@ func (s *ScopedKeyManager) ImportPublicKey(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
-	// The full derivation path for an imported key is incomplete as we
-	// don't know exactly how it was derived.
-	importedDerivationPath := DerivationPath{
-		InternalAccount: ImportedAddrAccount,
-	}
-	return s.toPublicManagedAddress(
-		pubKey, true, true, importedDerivationPath,
-	)
+	return s.toImportedPublicManagedAddress(pubKey, true)
 }
 
 // importPublicKey imports a public key into the address manager and updates the
@@ -1883,19 +1868,22 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 	return nil
 }
 
-// toPrivateManagedAddress converts a private key to a managed address.
-func (s *ScopedKeyManager) toPrivateManagedAddress(wif *btcutil.WIF,
-	imported bool, derivationPath DerivationPath) (*managedAddress, error) {
+// toImportedPrivateManagedAddress converts an imported private key to an
+// imported managed address.
+func (s *ScopedKeyManager) toImportedPrivateManagedAddress(
+	wif *btcutil.WIF) (*managedAddress, error) {
 
 	// Create a new managed address based on the imported address.
+	//
+	// TODO: Handle imported key being part of internal branch.
 	managedAddr, err := newManagedAddress(
-		s, derivationPath, wif.PrivKey, wif.CompressPubKey,
+		s, ImportedDerivationPath, wif.PrivKey, wif.CompressPubKey,
 		s.addrSchema.ExternalAddrType,
 	)
 	if err != nil {
 		return nil, err
 	}
-	managedAddr.imported = imported
+	managedAddr.imported = true
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
@@ -1903,19 +1891,22 @@ func (s *ScopedKeyManager) toPrivateManagedAddress(wif *btcutil.WIF,
 	return managedAddr, nil
 }
 
-// toPublicManagedAddress converts a public key to a managed address.
-func (s *ScopedKeyManager) toPublicManagedAddress(pubKey *btcec.PublicKey,
-	compressed, imported bool, derivationPath DerivationPath) (*managedAddress, error) {
+// toPublicManagedAddress converts an imported public key to an imported managed
+// address.
+func (s *ScopedKeyManager) toImportedPublicManagedAddress(
+	pubKey *btcec.PublicKey, compressed bool) (*managedAddress, error) {
 
 	// Create a new managed address based on the imported address.
+	//
+	// TODO: Handle imported key being part of internal branch.
 	managedAddr, err := newManagedAddressWithoutPrivKey(
-		s, derivationPath, pubKey, compressed,
+		s, ImportedDerivationPath, pubKey, compressed,
 		s.addrSchema.ExternalAddrType,
 	)
 	if err != nil {
 		return nil, err
 	}
-	managedAddr.imported = imported
+	managedAddr.imported = true
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
