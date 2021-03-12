@@ -24,9 +24,6 @@ import (
 const (
 	// TxLabelLimit is the length limit we impose on transaction labels.
 	TxLabelLimit = 500
-
-	// DefaultLockDuration is the default duration used to lock outputs.
-	DefaultLockDuration = 10 * time.Minute
 )
 
 var (
@@ -1162,7 +1159,7 @@ func isKnownOutput(ns walletdb.ReadWriteBucket, op wire.OutPoint) bool {
 // already been locked to a different ID, then ErrOutputAlreadyLocked is
 // returned.
 func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
-	op wire.OutPoint) (time.Time, error) {
+	op wire.OutPoint, duration time.Duration) (time.Time, error) {
 
 	// Make sure the output is known.
 	if !isKnownOutput(ns, op) {
@@ -1175,7 +1172,7 @@ func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
 		return time.Time{}, ErrOutputAlreadyLocked
 	}
 
-	expiry := s.clock.Now().Add(DefaultLockDuration)
+	expiry := s.clock.Now().Add(duration)
 	if err := lockOutput(ns, id, op, expiry); err != nil {
 		return time.Time{}, err
 	}

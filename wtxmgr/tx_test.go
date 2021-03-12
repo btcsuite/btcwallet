@@ -2454,7 +2454,7 @@ func lock(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
 
 	t.Helper()
 
-	expiry, err := s.LockOutput(ns, id, op)
+	expiry, err := s.LockOutput(ns, id, op, 10*time.Minute)
 	if err != exp {
 		t.Fatalf("expected err %q, got %q", exp, err)
 	}
