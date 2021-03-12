@@ -2425,19 +2425,20 @@ func assertOutputLocksExist(t *testing.T, s *Store, ns walletdb.ReadBucket,
 
 	t.Helper()
 
-	var found []wire.OutPoint
-	forEachLockedOutput(ns, func(op wire.OutPoint, _ LockID, _ time.Time) {
-		found = append(found, op)
-	})
-	if len(found) != len(exp) {
+	outputs, err := s.ListLockedOutputs(ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(outputs) != len(exp) {
 		t.Fatalf("expected to find %v locked output(s), found %v",
-			len(exp), len(found))
+			len(exp), len(outputs))
 	}
 
 	for _, expOp := range exp {
 		exists := false
-		for _, foundOp := range found {
-			if expOp == foundOp {
+		for _, found := range outputs {
+			if expOp == found.Outpoint {
 				exists = true
 				break
 			}

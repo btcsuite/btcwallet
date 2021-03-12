@@ -125,6 +125,14 @@ type TxRecord struct {
 	SerializedTx []byte // Optional: may be nil
 }
 
+// LockedOutput is a type that contains an outpoint of an UTXO and its lock
+// lease information.
+type LockedOutput struct {
+	Outpoint   wire.OutPoint
+	LockID     LockID
+	Expiration time.Time
+}
+
 // NewTxRecord creates a new transaction record that may be inserted into the
 // store.  It uses memoization to save the transaction hash and the serialized
 // transaction.
@@ -1225,4 +1233,26 @@ func (s *Store) DeleteExpiredLockedOutputs(ns walletdb.ReadWriteBucket) error {
 	}
 
 	return nil
+}
+
+// ListLockedOutputs returns a list of objects representing the currently locked
+// utxos.
+func (s *Store) ListLockedOutputs(ns walletdb.ReadBucket) ([]*LockedOutput,
+	error) {
+
+	var outputs []*LockedOutput
+	err := forEachLockedOutput(
+		ns, func(op wire.OutPoint, id LockID, expiration time.Time) {
+			outputs = append(outputs, &LockedOutput{
+				Outpoint:   op,
+				LockID:     id,
+				Expiration: expiration,
+			})
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return outputs, nil
 }

@@ -2659,6 +2659,19 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 	return results, err
 }
 
+// ListLeasedOutputs returns a list of objects representing the currently locked
+// utxos.
+func (w *Wallet) ListLeasedOutputs() ([]*wtxmgr.LockedOutput, error) {
+	var outputs []*wtxmgr.LockedOutput
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		var err error
+		outputs, err = w.TxStore.ListLockedOutputs(ns)
+		return err
+	})
+	return outputs, err
+}
+
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
 // private keys in a wallet.
 func (w *Wallet) DumpPrivKeys() ([]string, error) {
