@@ -2659,6 +2659,19 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 	return results, err
 }
 
+// ListLeasedOutputs returns a list of objects representing the currently locked
+// utxos.
+func (w *Wallet) ListLeasedOutputs() ([]*wtxmgr.LockedOutput, error) {
+	var outputs []*wtxmgr.LockedOutput
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		var err error
+		outputs, err = w.TxStore.ListLockedOutputs(ns)
+		return err
+	})
+	return outputs, err
+}
+
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
 // private keys in a wallet.
 func (w *Wallet) DumpPrivKeys() ([]string, error) {
@@ -2895,12 +2908,14 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 //
 // NOTE: This differs from LockOutpoint in that outputs are locked for a limited
 // amount of time and their locks are persisted to disk.
-func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint) (time.Time, error) {
+func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
+	duration time.Duration) (time.Time, error) {
+
 	var expiry time.Time
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		var err error
-		expiry, err = w.TxStore.LockOutput(ns, id, op)
+		expiry, err = w.TxStore.LockOutput(ns, id, op, duration)
 		return err
 	})
 	return expiry, err

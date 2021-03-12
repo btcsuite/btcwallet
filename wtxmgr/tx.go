@@ -24,9 +24,6 @@ import (
 const (
 	// TxLabelLimit is the length limit we impose on transaction labels.
 	TxLabelLimit = 500
-
-	// DefaultLockDuration is the default duration used to lock outputs.
-	DefaultLockDuration = 10 * time.Minute
 )
 
 var (
@@ -123,6 +120,14 @@ type TxRecord struct {
 	Hash         chainhash.Hash
 	Received     time.Time
 	SerializedTx []byte // Optional: may be nil
+}
+
+// LockedOutput is a type that contains an outpoint of an UTXO and its lock
+// lease information.
+type LockedOutput struct {
+	Outpoint   wire.OutPoint
+	LockID     LockID
+	Expiration time.Time
 }
 
 // NewTxRecord creates a new transaction record that may be inserted into the
@@ -1154,7 +1159,7 @@ func isKnownOutput(ns walletdb.ReadWriteBucket, op wire.OutPoint) bool {
 // already been locked to a different ID, then ErrOutputAlreadyLocked is
 // returned.
 func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
-	op wire.OutPoint) (time.Time, error) {
+	op wire.OutPoint, duration time.Duration) (time.Time, error) {
 
 	// Make sure the output is known.
 	if !isKnownOutput(ns, op) {
@@ -1167,7 +1172,7 @@ func (s *Store) LockOutput(ns walletdb.ReadWriteBucket, id LockID,
 		return time.Time{}, ErrOutputAlreadyLocked
 	}
 
-	expiry := s.clock.Now().Add(DefaultLockDuration)
+	expiry := s.clock.Now().Add(duration)
 	if err := lockOutput(ns, id, op, expiry); err != nil {
 		return time.Time{}, err
 	}
@@ -1225,4 +1230,26 @@ func (s *Store) DeleteExpiredLockedOutputs(ns walletdb.ReadWriteBucket) error {
 	}
 
 	return nil
+}
+
+// ListLockedOutputs returns a list of objects representing the currently locked
+// utxos.
+func (s *Store) ListLockedOutputs(ns walletdb.ReadBucket) ([]*LockedOutput,
+	error) {
+
+	var outputs []*LockedOutput
+	err := forEachLockedOutput(
+		ns, func(op wire.OutPoint, id LockID, expiration time.Time) {
+			outputs = append(outputs, &LockedOutput{
+				Outpoint:   op,
+				LockID:     id,
+				Expiration: expiration,
+			})
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return outputs, nil
 }
