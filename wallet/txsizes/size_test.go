@@ -163,8 +163,12 @@ func TestEstimateVirtualSize(t *testing.T) {
 			t.Fatalf("unable to get test tx: %v", err)
 		}
 
+		changeScriptSize := 0
+		if test.change {
+			changeScriptSize = P2WPKHPkScriptSize
+		}
 		est := EstimateVirtualSize(test.p2pkhIns, test.p2wpkhIns,
-			test.nestedp2wpkhIns, tx.TxOut, test.change)
+			test.nestedp2wpkhIns, tx.TxOut, changeScriptSize)
 
 		if est != test.result {
 			t.Fatalf("expected estimated vsize to be %d, "+

@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -123,9 +124,12 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	}
 	defer func() { _ = dbtx.Rollback() }()
 
-	addrmgrNs, changeSource := w.addrMgrWithChangeSource(
+	addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
 		dbtx, keyScope, account,
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get current block's height and hash.
 	bs, err := chainClient.BlockStamp()
@@ -288,25 +292,54 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 }
 
 // addrMgrWithChangeSource returns the address manager bucket and a change
-// source function that returns change addresses from said address manager. The
-// change addresses will come from the specified key scope and account, unless
-// a key scope is not specified. In that case, change addresses will always
-// come from the P2WKH key scope.
+// source that returns change addresses from said address manager. The change
+// addresses will come from the specified key scope and account, unless a key
+// scope is not specified. In that case, change addresses will always come from
+// the P2WKH key scope.
 func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
-	changeKeyScope *waddrmgr.KeyScope, account uint32) (walletdb.ReadWriteBucket,
-	txauthor.ChangeSource) {
+	changeKeyScope *waddrmgr.KeyScope, account uint32) (
+	walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
 
+	// Determine the address type for change addresses of the given account.
+	if changeKeyScope == nil {
+		changeKeyScope = &waddrmgr.KeyScopeBIP0084
+	}
+	addrType := waddrmgr.ScopeAddrMap[*changeKeyScope].InternalAddrType
+
+	// It's possible for the account to have an address schema override, so
+	// prefer that if it exists.
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
-	changeSource := func() ([]byte, error) {
-		// Derive the change output script. We'll use the default key
-		// scope responsible for P2WPKH addresses to do so. As a hack to
-		// allow spending from the imported account, change addresses
-		// are created from account 0.
-		var changeAddr btcutil.Address
-		var err error
-		if changeKeyScope == nil {
-			changeKeyScope = &waddrmgr.KeyScopeBIP0084
-		}
+	scopeMgr, err := w.Manager.FetchScopedKeyManager(*changeKeyScope)
+	if err != nil {
+		return nil, nil, err
+	}
+	accountInfo, err := scopeMgr.AccountProperties(addrmgrNs, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	if accountInfo.AddrSchema != nil {
+		addrType = accountInfo.AddrSchema.InternalAddrType
+	}
+
+	// Compute the expected size of the script for the change address type.
+	var scriptSize int
+	switch addrType {
+	case waddrmgr.PubKeyHash:
+		scriptSize = txsizes.P2PKHPkScriptSize
+	case waddrmgr.NestedWitnessPubKey:
+		scriptSize = txsizes.NestedP2WPKHPkScriptSize
+	case waddrmgr.WitnessPubKey:
+		scriptSize = txsizes.P2WPKHPkScriptSize
+	}
+
+	newChangeScript := func() ([]byte, error) {
+		// Derive the change output script. As a hack to allow spending
+		// from the imported account, change addresses are created from
+		// account 0.
+		var (
+			changeAddr btcutil.Address
+			err        error
+		)
 		if account == waddrmgr.ImportedAddrAccount {
 			changeAddr, err = w.newChangeAddress(
 				addrmgrNs, 0, *changeKeyScope,
@@ -321,7 +354,11 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 		}
 		return txscript.PayToAddrScript(changeAddr)
 	}
-	return addrmgrNs, changeSource
+
+	return addrmgrNs, &txauthor.ChangeSource{
+		ScriptSize: scriptSize,
+		NewScript:  newChangeScript,
+	}, nil
 }
 
 // validateMsgTx verifies transaction input scripts for tx.  All previous output

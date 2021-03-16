@@ -173,9 +173,12 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		if err != nil {
 			return 0, err
 		}
-		_, changeSource := w.addrMgrWithChangeSource(
+		_, changeSource, err := w.addrMgrWithChangeSource(
 			dbtx, keyScope, account,
 		)
+		if err != nil {
+			return 0, err
+		}
 
 		// Ask the txauthor to create a transaction with our selected
 		// coins. This will perform fee estimation and add a change
