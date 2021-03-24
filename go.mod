@@ -3,8 +3,8 @@ module github.com/btcsuite/btcwallet
 require (
 	github.com/btcsuite/btcd v0.20.1-beta.0.20200513120220-b470eee47728
 	github.com/btcsuite/btclog v0.0.0-20170628155309-84c8d2346e9f
-	github.com/btcsuite/btcutil v0.0.0-20190425235716-9e5f4b9a998d
-	github.com/btcsuite/btcutil/psbt v1.0.3-0.20200826194809-5f93e33af2b0
+	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
+	github.com/btcsuite/btcutil/psbt v1.0.3-0.20201208143702-a53e38424cce
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.0.0
 	github.com/btcsuite/btcwallet/wallet/txrules v1.0.0
 	github.com/btcsuite/btcwallet/walletdb v1.3.4
@@ -17,8 +17,9 @@ require (
 	github.com/kkdai/bstream v0.0.0-20181106074824-b3251f7901ec // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf
 	github.com/lightninglabs/neutrino v0.11.0
-	golang.org/x/crypto v0.0.0-20190211182817-74369b46fc67
-	golang.org/x/net v0.0.0-20190206173232-65e2d4e15006
+	github.com/stretchr/testify v1.5.1
+	golang.org/x/crypto v0.0.0-20200115085410-6d4e4cb37c7d
+	golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3
 	google.golang.org/genproto v0.0.0-20190201180003-4b09977fb922 // indirect
 	google.golang.org/grpc v1.18.0
 )

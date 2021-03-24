@@ -144,6 +144,8 @@ type addrKey string
 type accountInfo struct {
 	acctName string
 
+	acctType accountType
+
 	// The account key is used to derive the branches which in turn derive
 	// the internal and external addresses.  The accountKeyPriv will be nil
 	// when the address manager is locked.
@@ -160,16 +162,63 @@ type accountInfo struct {
 	// intended for internal wallet use such as change addresses.
 	nextInternalIndex uint32
 	lastInternalAddr  ManagedAddress
+
+	// addrSchema serves as a way for an account to override its
+	// corresponding address schema with a custom one. For example, this
+	// could be used to import accounts that use the traditional BIP-0049
+	// derivation scheme into our KeyScopeBIP-0049Plus manager.
+	addrSchema *ScopeAddrSchema
+
+	// masterKeyFingerprint represents the fingerprint of the root key
+	// corresponding to the master public key (also known as the key with
+	// derivation path m/). This may be required by some hardware wallets
+	// for proper identification and signing.
+	masterKeyFingerprint uint32
 }
 
 // AccountProperties contains properties associated with each account, such as
 // the account name, number, and the nubmer of derived and imported keys.
 type AccountProperties struct {
-	AccountNumber    uint32
-	AccountName      string
+	// AccountNumber is the internal number used to reference the account.
+	AccountNumber uint32
+
+	// AccountName is the user-identifying name of the account.
+	AccountName string
+
+	// ExternalKeyCount is the number of internal keys that have been
+	// derived for the account.
 	ExternalKeyCount uint32
+
+	// InternalKeyCount is the number of internal keys that have been
+	// derived for the account.
 	InternalKeyCount uint32
+
+	// ImportedKeyCount is the number of imported keys found within the
+	// account.
 	ImportedKeyCount uint32
+
+	// AccountPubKey is the account's public key that can be used to
+	// derive any address relevant to said account.
+	//
+	// NOTE: This may be nil for imported accounts.
+	AccountPubKey *hdkeychain.ExtendedKey
+
+	// MasterKeyFingerprint represents the fingerprint of the root key
+	// corresponding to the master public key (also known as the key with
+	// derivation path m/). This may be required by some hardware wallets
+	// for proper identification and signing.
+	MasterKeyFingerprint uint32
+
+	// KeyScope is the key scope the account belongs to.
+	KeyScope KeyScope
+
+	// IsWatchOnly indicates whether the is set up as watch-only, i.e., it
+	// doesn't contain any private key information.
+	IsWatchOnly bool
+
+	// AddrSchema, if non-nil, specifies an address schema override for
+	// address generation only applicable to the account.
+	AddrSchema *ScopeAddrSchema
 }
 
 // unlockDeriveInfo houses the information needed to derive a private key for a
@@ -1178,9 +1227,9 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 		// We'll also derive any private keys that are pending due to
 		// them being created while the address manager was locked.
 		for _, info := range manager.deriveOnUnlock {
-			addressKey, err := manager.deriveKeyFromPath(
-				ns, info.managedAddr.Account(), info.branch,
-				info.index, true,
+			addressKey, _, err := manager.deriveKeyFromPath(
+				ns, info.managedAddr.InternalAccount(),
+				info.branch, info.index, true,
 			)
 			if err != nil {
 				m.lock()
@@ -1372,13 +1421,17 @@ func deriveCoinTypeKey(masterNode *hdkeychain.ExtendedKey,
 	// The branch is 0 for external addresses and 1 for internal addresses.
 
 	// Derive the purpose key as a child of the master node.
-	purpose, err := masterNode.Child(scope.Purpose + hdkeychain.HardenedKeyStart)
+	purpose, err := masterNode.DeriveNonStandard(
+		scope.Purpose + hdkeychain.HardenedKeyStart,
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	// Derive the coin type key as a child of the purpose key.
-	coinTypeKey, err := purpose.Child(scope.Coin + hdkeychain.HardenedKeyStart)
+	coinTypeKey, err := purpose.DeriveNonStandard(
+		scope.Coin + hdkeychain.HardenedKeyStart,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1401,7 +1454,9 @@ func deriveAccountKey(coinTypeKey *hdkeychain.ExtendedKey,
 	}
 
 	// Derive the account key as a child of the coin type key.
-	return coinTypeKey.Child(account + hdkeychain.HardenedKeyStart)
+	return coinTypeKey.DeriveNonStandard(
+		account + hdkeychain.HardenedKeyStart,
+	)
 }
 
 // checkBranchKeys ensures deriving the extended keys for the internal and
@@ -1416,12 +1471,12 @@ func deriveAccountKey(coinTypeKey *hdkeychain.ExtendedKey,
 // The branch is 0 for external addresses and 1 for internal addresses.
 func checkBranchKeys(acctKey *hdkeychain.ExtendedKey) error {
 	// Derive the external branch as the first child of the account key.
-	if _, err := acctKey.Child(ExternalBranch); err != nil {
+	if _, err := acctKey.DeriveNonStandard(ExternalBranch); err != nil {
 		return err
 	}
 
-	// Derive the external branch as the second child of the account key.
-	_, err := acctKey.Child(InternalBranch)
+	// Derive the internal branch as the second child of the account key.
+	_, err := acctKey.DeriveNonStandard(InternalBranch)
 	return err
 }
 
@@ -1672,7 +1727,7 @@ func createManagerKeyScope(ns walletdb.ReadWriteBucket,
 	}
 
 	// Save the information for the default account to the database.
-	err = putAccountInfo(
+	err = putDefaultAccountInfo(
 		ns, &scope, DefaultAccountNum, acctPubEnc, acctPrivEnc, 0, 0,
 		defaultAccountName,
 	)
@@ -1680,7 +1735,7 @@ func createManagerKeyScope(ns walletdb.ReadWriteBucket,
 		return err
 	}
 
-	return putAccountInfo(
+	return putDefaultAccountInfo(
 		ns, &scope, ImportedAddrAccount, nil, nil, 0, 0,
 		ImportedAddrAccountName,
 	)
@@ -1783,10 +1838,10 @@ func Create(ns walletdb.ReadWriteBucket,
 
 	pubParams := masterKeyPub.Marshal()
 
-	var privParams []byte = nil
+	var privParams []byte
 	var masterKeyPriv *snacl.SecretKey
-	var cryptoKeyPrivEnc []byte = nil
-	var cryptoKeyScriptEnc []byte = nil
+	var cryptoKeyPrivEnc []byte
+	var cryptoKeyScriptEnc []byte
 	if !isWatchingOnly {
 		masterKeyPriv, err = newSecretKey(&privPassphrase, config)
 		if err != nil {
