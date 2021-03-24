@@ -350,7 +350,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 	} else {
 		err := w.chainClient.NotifyReceived([]btcutil.Address{addr})
 		if err != nil {
-			return "", fmt.Errorf("Failed to subscribe for address ntfns for "+
+			return "", fmt.Errorf("failed to subscribe for address ntfns for "+
 				"address %s: %s", addr.EncodeAddress(), err)
 		}
 	}

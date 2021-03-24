@@ -703,7 +703,7 @@ func TestImportPrivateKey(t *testing.T) {
 	}
 
 	// import priv key
-	wif, err := btcutil.NewWIF((*btcec.PrivateKey)(pk), tstNetParams, false)
+	wif, err := btcutil.NewWIF(pk, tstNetParams, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -761,8 +761,8 @@ func TestImportPrivateKey(t *testing.T) {
 		return
 	}
 
-	// Mark imported address as partially synced with a block somewhere inbetween
-	// the import height and the chain height.
+	// Mark imported address as partially synced with a block somewhere in
+	// between the import height and the chain height.
 	partialHeight := (createHeight-importHeight)/2 + importHeight
 	if err := w2.SetSyncStatus(address, PartialSync(partialHeight)); err != nil {
 		t.Errorf("Cannot mark address partially synced: %v", err)
@@ -1037,7 +1037,7 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	if sinfo.RequiredSigs() != sinfo.RequiredSigs() {
+	if sinfo.RequiredSigs() != sinfo2.RequiredSigs() {
 		t.Errorf("original and serailised scriptinfo requiredsigs "+
 			"don't match %d != %d", sinfo.RequiredSigs(),
 			sinfo2.RequiredSigs())
@@ -1063,8 +1063,8 @@ func TestImportScript(t *testing.T) {
 		return
 	}
 
-	// Mark imported address as partially synced with a block somewhere inbetween
-	// the import height and the chain height.
+	// Mark imported address as partially synced with a block somewhere in
+	// between the import height and the chain height.
 	partialHeight := (createHeight-importHeight)/2 + importHeight
 	if err := w2.SetSyncStatus(address, PartialSync(partialHeight)); err != nil {
 		t.Errorf("Cannot mark address partially synced: %v", err)

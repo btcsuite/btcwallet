@@ -34,6 +34,7 @@ func TestComputeInputScript(t *testing.T) {
 	defer cleanup()
 
 	for _, tc := range testCases {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			runTestCase(t, w, tc.scope, tc.expectedScriptLen)
 		})

@@ -30,11 +30,10 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// confirmed checks whether a transaction at height txHeight has met minconf
-// confirmations for a blockchain at height curHeight.
-func confirmed(minconf, txHeight, curHeight int32) bool {
-	return confirms(txHeight, curHeight) >= minconf
-}
+const (
+	// defaultAccountName is the name of the wallet's default account.
+	defaultAccountName = "default"
+)
 
 // confirms returns the number of confirmations for a transaction in a block at
 // height txHeight (or -1 for an unconfirmed tx) given the chain height
@@ -51,7 +50,7 @@ func confirms(txHeight, curHeight int32) int32 {
 // requestHandler is a handler function to handle an unmarshaled and parsed
 // request into a marshalable response.  If the error is a *btcjson.RPCError
 // or any of the above special error classes, the server will respond with
-// the JSON-RPC appropiate error code.  All other errors use the wallet
+// the JSON-RPC appropriate error code.  All other errors use the wallet
 // catch-all error code, btcjson.ErrRPCWallet.
 type requestHandler func(interface{}, *wallet.Wallet) (interface{}, error)
 
@@ -139,7 +138,7 @@ var rpcHandlers = map[string]struct {
 }
 
 // unimplemented handles an unimplemented RPC request with the
-// appropiate error.
+// appropriate error.
 func unimplemented(interface{}, *wallet.Wallet) (interface{}, error) {
 	return nil, &btcjson.RPCError{
 		Code:    btcjson.ErrRPCUnimplemented,
@@ -274,8 +273,7 @@ func jsonError(err error) *btcjson.RPCError {
 	case ParseError:
 		code = btcjson.ErrRPCParse.Code
 	case waddrmgr.ManagerError:
-		switch e.ErrorCode {
-		case waddrmgr.ErrWrongPassphrase:
+		if e.ErrorCode == waddrmgr.ErrWrongPassphrase {
 			code = btcjson.ErrRPCWalletPassphraseIncorrect
 		}
 	}
@@ -375,7 +373,7 @@ func createMultiSig(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 }
 
 // dumpPrivKey handles a dumpprivkey request with the private key
-// for a single address, or an appropiate error if the wallet
+// for a single address, or an appropriate error if the wallet
 // is locked.
 func dumpPrivKey(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.DumpPrivKeyCmd)
@@ -392,18 +390,6 @@ func dumpPrivKey(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, &ErrWalletUnlockNeeded
 	}
 	return key, err
-}
-
-// dumpWallet handles a dumpwallet request by returning  all private
-// keys in a wallet, or an appropiate error if the wallet is locked.
-// TODO: finish this to match bitcoind by writing the dump to a file.
-func dumpWallet(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	keys, err := w.DumpPrivKeys()
-	if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
-		return nil, &ErrWalletUnlockNeeded
-	}
-
-	return keys, err
 }
 
 // getAddressesByAccount handles a getaddressesbyaccount request by returning
@@ -584,7 +570,7 @@ func getAccountAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) 
 func getUnconfirmedBalance(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetUnconfirmedBalanceCmd)
 
-	acctName := "default"
+	acctName := defaultAccountName
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
@@ -669,7 +655,7 @@ func createNewAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 }
 
 // renameAccount handles a renameaccount request by renaming an account.
-// If the account does not exist an appropiate error will be returned.
+// If the account does not exist an appropriate error will be returned.
 func renameAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.RenameAccountCmd)
 
@@ -688,14 +674,14 @@ func renameAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 }
 
 // getNewAddress handles a getnewaddress request by returning a new
-// address for an account.  If the account does not exist an appropiate
+// address for an account.  If the account does not exist an appropriate
 // error is returned.
 // TODO: Follow BIP 0044 and warn if number of unused addresses exceeds
 // the gap limit.
 func getNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetNewAddressCmd)
 
-	acctName := "default"
+	acctName := defaultAccountName
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
@@ -720,7 +706,7 @@ func getNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 func getRawChangeAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.GetRawChangeAddressCmd)
 
-	acctName := "default"
+	acctName := defaultAccountName
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
@@ -926,8 +912,8 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // localeHelpDescs maps from locale strings (e.g. "en_US") to a function that
 // builds a map of help texts for each RPC server method.  This prevents help
 // text maps for every locale map from being rooted and created during init.
-// Instead, the appropiate function is looked up when help text is first needed
-// using the current locale and saved to the global below for futher reuse.
+// Instead, the appropriate function is looked up when help text is first needed
+// using the current locale and saved to the global below for further reuse.
 //
 // requestUsages contains single line usages for every supported request,
 // separated by newlines.  It is set during init.  These usages are used for all
@@ -958,11 +944,11 @@ func helpNoChainRPC(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // methods, or full help for a specific method.  The chainClient is optional,
 // and this is simply a helper function for the HelpNoChainRPC and
 // HelpWithChainRPC handlers.
-func help(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
+func help(icmd interface{}, _ *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	cmd := icmd.(*btcjson.HelpCmd)
 
 	// btcd returns different help messages depending on the kind of
-	// connection the client is using.  Only methods availble to HTTP POST
+	// connection the client is using.  Only methods available to HTTP POST
 	// clients are available to be used by wallet clients, even though
 	// wallet itself is a websocket client to btcd.  Therefore, create a
 	// POST client as needed.
@@ -1177,7 +1163,7 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 
 	// Massage address data into output format.
 	numAddresses := len(allAddrData)
-	ret := make([]btcjson.ListReceivedByAddressResult, numAddresses, numAddresses)
+	ret := make([]btcjson.ListReceivedByAddressResult, numAddresses)
 	idx := 0
 	for address, addrData := range allAddrData {
 		ret[idx] = btcjson.ListReceivedByAddressResult{
@@ -1185,6 +1171,7 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 			Amount:        addrData.amount.ToBTC(),
 			Confirmations: uint64(addrData.confirmations),
 			TxIDs:         addrData.tx,
+			Account:       addrData.account,
 		}
 		idx++
 	}
@@ -1386,8 +1373,7 @@ func sendPairs(w *wallet.Wallet, amounts map[string]btcutil.Amount,
 		if waddrmgr.IsError(err, waddrmgr.ErrLocked) {
 			return "", &ErrWalletUnlockNeeded
 		}
-		switch err.(type) {
-		case btcjson.RPCError:
+		if _, ok := err.(btcjson.RPCError); ok {
 			return "", err
 		}
 
@@ -1558,8 +1544,8 @@ func signMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 
 	var buf bytes.Buffer
-	wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
-	wire.WriteVarString(&buf, 0, cmd.Message)
+	_ = wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
+	_ = wire.WriteVarString(&buf, 0, cmd.Message)
 	messageHash := chainhash.DoubleHashB(buf.Bytes())
 	sigbytes, err := btcec.SignCompact(btcec.S256(), privKey,
 		messageHash, true)
@@ -1600,7 +1586,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	case "SINGLE|ANYONECANPAY":
 		hashType = txscript.SigHashSingle | txscript.SigHashAnyOneCanPay
 	default:
-		e := errors.New("Invalid sighash parameter")
+		e := errors.New("invalid sighash parameter")
 		return nil, InvalidParameterError{e}
 	}
 
@@ -1719,7 +1705,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 	var buf bytes.Buffer
 	buf.Grow(tx.SerializeSize())
 
-	// All returned errors (not OOM, which panics) encounted during
+	// All returned errors (not OOM, which panics) encountered during
 	// bytes.Buffer writes are unexpected.
 	if err = tx.Serialize(&buf); err != nil {
 		panic(err)
@@ -1845,8 +1831,8 @@ func verifyMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	// Validate the signature - this just shows that it was valid at all.
 	// we will compare it with the key next.
 	var buf bytes.Buffer
-	wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
-	wire.WriteVarString(&buf, 0, cmd.Message)
+	_ = wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
+	_ = wire.WriteVarString(&buf, 0, cmd.Message)
 	expectedMessageHash := chainhash.DoubleHashB(buf.Bytes())
 	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
 		expectedMessageHash)

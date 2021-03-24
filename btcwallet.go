@@ -166,11 +166,11 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 				"bdb", filepath.Join(netDir, "neutrino.db"),
 				true, cfg.DBTimeout,
 			)
-			defer spvdb.Close()
 			if err != nil {
 				log.Errorf("Unable to create Neutrino DB: %s", err)
 				continue
 			}
+			defer spvdb.Close()
 			chainService, err = neutrino.NewChainService(
 				neutrino.Config{
 					DataDir:      netDir,

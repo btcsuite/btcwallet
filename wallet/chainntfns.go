@@ -36,7 +36,7 @@ func (w *Wallet) handleChainNotifications() {
 
 	catchUpHashes := func(w *Wallet, client chain.Interface,
 		height int32) error {
-		// TODO(aakselrod): There's a race conditon here, which
+		// TODO(aakselrod): There's a race condition here, which
 		// happens when a reorg occurs between the
 		// rescanProgress notification and the last GetBlockHash
 		// call. The solution when using btcd is to make btcd
@@ -107,14 +107,14 @@ func (w *Wallet) handleChainNotifications() {
 					chainClient, birthdayStore,
 				)
 				if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
-					panic(fmt.Errorf("Unable to sanity "+
+					panic(fmt.Errorf("unable to sanity "+
 						"check wallet birthday block: %v",
 						err))
 				}
 
 				err = w.syncWithChain(birthdayBlock)
 				if err != nil && !w.ShuttingDown() {
-					panic(fmt.Errorf("Unable to synchronize "+
+					panic(fmt.Errorf("unable to synchronize "+
 						"wallet to chain: %v", err))
 				}
 			case chain.BlockConnected:

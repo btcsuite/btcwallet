@@ -25,7 +25,7 @@ import (
 
 // UseLogger sets the logger to use for the gRPC server.
 func UseLogger(l btclog.Logger) {
-	grpclog.SetLogger(logger{l})
+	grpclog.SetLogger(logger{l}) // nolint:staticcheck
 }
 
 // logger uses a btclog.Logger to implement the grpclog.Logger interface.

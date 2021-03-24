@@ -30,6 +30,7 @@ func TestThrottle(t *testing.T) {
 				return
 			}
 			codes <- res.StatusCode
+			_ = res.Body.Close()
 		}()
 	}
 

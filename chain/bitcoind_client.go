@@ -221,7 +221,7 @@ func (c *BitcoindClient) Notifications() <-chan interface{} {
 //
 // NOTE: This is part of the chain.Interface interface.
 func (c *BitcoindClient) NotifyReceived(addrs []btcutil.Address) error {
-	c.NotifyBlocks()
+	_ = c.NotifyBlocks()
 
 	select {
 	case c.rescanUpdate <- addrs:
@@ -235,7 +235,7 @@ func (c *BitcoindClient) NotifyReceived(addrs []btcutil.Address) error {
 // NotifySpent allows the chain backend to notify the caller whenever a
 // transaction spends any of the given outpoints.
 func (c *BitcoindClient) NotifySpent(outPoints []*wire.OutPoint) error {
-	c.NotifyBlocks()
+	_ = c.NotifyBlocks()
 
 	select {
 	case c.rescanUpdate <- outPoints:
@@ -249,7 +249,7 @@ func (c *BitcoindClient) NotifySpent(outPoints []*wire.OutPoint) error {
 // NotifyTx allows the chain backend to notify the caller whenever any of the
 // given transactions confirm within the chain.
 func (c *BitcoindClient) NotifyTx(txids []chainhash.Hash) error {
-	c.NotifyBlocks()
+	_ = c.NotifyBlocks()
 
 	select {
 	case c.rescanUpdate <- txids:
@@ -371,6 +371,8 @@ func (c *BitcoindClient) RescanBlocks(
 
 	rescannedBlocks := make([]btcjson.RescannedBlock, 0, len(blockHashes))
 	for _, hash := range blockHashes {
+		hash := hash
+
 		header, err := c.GetBlockHeaderVerbose(&hash)
 		if err != nil {
 			log.Warnf("Unable to get header %s from bitcoind: %s",
@@ -618,7 +620,7 @@ func (c *BitcoindClient) ntfnHandler() {
 				newBlockHeight := bestBlock.Height + 1
 				_ = c.filterBlock(newBlock, newBlockHeight, true)
 
-				// With the block succesfully filtered, we'll
+				// With the block successfully filtered, we'll
 				// make it our new best block.
 				bestBlock.Hash = newBlock.BlockHash()
 				bestBlock.Height = newBlockHeight
@@ -847,10 +849,11 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 
 		// Our current block should now reflect the previous one to
 		// continue the common ancestor search.
-		currentHeader, err = c.GetBlockHeader(&currentHeader.PrevBlock)
+		prevBlock := &currentHeader.PrevBlock
+		currentHeader, err = c.GetBlockHeader(prevBlock)
 		if err != nil {
 			return fmt.Errorf("unable to get block header for %v: %v",
-				currentHeader.PrevBlock, err)
+				prevBlock, err)
 		}
 
 		currentBlock.Height--

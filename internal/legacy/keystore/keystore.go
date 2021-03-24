@@ -38,10 +38,6 @@ const (
 
 	// Length in bytes of KDF output.
 	kdfOutputBytes = 32
-
-	// Maximum length in bytes of a comment that can have a size represented
-	// as a uint16.
-	maxCommentLen = (1 << 16) - 1
 )
 
 const (
@@ -66,9 +62,9 @@ var fileID = [8]byte{0xba, 'W', 'A', 'L', 'L', 'E', 'T', 0x00}
 type entryHeader byte
 
 const (
-	addrCommentHeader entryHeader = 1 << iota
-	txCommentHeader
-	deletedHeader
+	addrCommentHeader entryHeader = 1 << iota //nolint:varcheck,deadcode,unused
+	txCommentHeader                           // nolint:varcheck,deadcode,unused
+	deletedHeader                             // nolint:varcheck,deadcode,unused
 	scriptHeader
 	addrHeader entryHeader = 0
 )
@@ -233,9 +229,6 @@ func chainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 		return nil, err
 	}
 	newX, newY := btcec.S256().ScalarMult(oldPk.X, oldPk.Y, xorbytes)
-	if err != nil {
-		return nil, err
-	}
 	newPk := &btcec.PublicKey{
 		Curve: btcec.S256(),
 		X:     newX,
@@ -501,9 +494,6 @@ func (net *netParams) WriteTo(w io.Writer) (int64, error) {
 
 // Stringified byte slices for use as map lookup keys.
 type addressKey string
-type transactionHashKey string
-
-type comment []byte
 
 func getAddressKey(addr btcutil.Address) addressKey {
 	return addressKey(addr.ScriptAddress())
@@ -775,7 +765,7 @@ func (s *Store) writeTo(w io.Writer) (n int64, err error) {
 			importedAddrs = append(importedAddrs, e)
 		}
 	}
-	wts = append(chainedAddrs, importedAddrs...)
+	wts = append(chainedAddrs, importedAddrs...) // nolint:gocritic
 	appendedEntries := varEntries{store: s, entries: wts}
 
 	// Iterate through each entry needing to be written.  If data
@@ -1376,7 +1366,7 @@ func (s *Store) SyncedTo() (hash *chainhash.Hash, height int32) {
 			}
 		}
 	}
-	return
+	return // nolint:nakedret
 }
 
 // NewIterateRecentBlocks returns an iterator for recently-seen blocks.
@@ -2108,7 +2098,7 @@ func (k *publicKey) ReadFrom(r io.Reader) (n int64, err error) {
 	n += read
 
 	*k = append([]byte{format}, s...)
-	return
+	return // nolint:nakedret
 }
 
 func (k *publicKey) WriteTo(w io.Writer) (n int64, err error) {
@@ -2595,8 +2585,7 @@ func (a *btcAddress) ExportPrivKey() (*btcutil.WIF, error) {
 	// as our program's assumptions are so broken that this needs to be
 	// caught immediately, and a stack trace here is more useful than
 	// elsewhere.
-	wif, err := btcutil.NewWIF((*btcec.PrivateKey)(pk), a.store.netParams(),
-		a.Compressed())
+	wif, err := btcutil.NewWIF(pk, a.store.netParams(), a.Compressed())
 	if err != nil {
 		panic(err)
 	}

@@ -118,7 +118,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 	if err != nil {
 		return nil, err
 	}
-	defer dbtx.Rollback()
+	defer func() { _ = dbtx.Rollback() }()
 
 	addrmgrNs, changeSource := w.addrMgrWithChangeSource(dbtx, account)
 
@@ -206,7 +206,7 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx, account uint32, minco
 	// should be handled by the call to UnspentOutputs (or similar).
 	// Because one of these filters requires matching the output script to
 	// the desired account, this change depends on making wtxmgr a waddrmgr
-	// dependancy and requesting unspent outputs for a single account.
+	// dependency and requesting unspent outputs for a single account.
 	eligible := make([]wtxmgr.Credit, 0, len(unspent))
 	for i := range unspent {
 		output := &unspent[i]

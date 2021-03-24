@@ -11,7 +11,7 @@ import (
 )
 
 // TODO(jrick): There are several error paths which 'replace' various errors
-// with a more appropiate error from the btcjson package.  Create a map of
+// with a more appropriate error from the btcjson package.  Create a map of
 // these replacements so they can be handled once after an RPC handler has
 // returned and before the error is marshaled.
 

@@ -45,8 +45,6 @@ const (
 	// data in the waddrmgr namespace.  Transactions are not yet encrypted.
 	InsecurePubPassphrase = "public"
 
-	walletDbWatchingOnlyName = "wowallet.db"
-
 	// recoveryBatchSize is the default number of blocks that will be
 	// scanned successively by the recovery manager, in the event that the
 	// wallet is started in recovery mode.
@@ -119,11 +117,6 @@ type Wallet struct {
 	lockState          chan bool
 	changePassphrase   chan changePassphraseRequest
 	changePassphrases  chan changePassphrasesRequest
-
-	// Information for reorganization handling.
-	reorganizingLock sync.Mutex
-	reorganizeToHash chainhash.Hash
-	reorganizing     bool
 
 	NtfnServer *NotificationServer
 
@@ -606,7 +599,7 @@ func locateBirthdayBlock(chainClient chainConn,
 		if mid == startHeight || mid == bestHeight || mid == left {
 			birthdayBlock = &waddrmgr.BlockStamp{
 				Hash:      *hash,
-				Height:    int32(mid),
+				Height:    mid,
 				Timestamp: header.Timestamp,
 			}
 			break
@@ -628,7 +621,7 @@ func locateBirthdayBlock(chainClient chainConn,
 
 		birthdayBlock = &waddrmgr.BlockStamp{
 			Hash:      *hash,
-			Height:    int32(mid),
+			Height:    mid,
 			Timestamp: header.Timestamp,
 		}
 		break
@@ -837,6 +830,7 @@ expandHorizons:
 	// Update the global set of watched outpoints with any that were found
 	// in the block.
 	for outPoint, addr := range filterResp.FoundOutPoints {
+		outPoint := outPoint
 		recoveryState.AddWatchedOutPoint(&outPoint, addr)
 	}
 
@@ -1223,7 +1217,7 @@ type (
 
 	// heldUnlock is a tool to prevent the wallet from automatically
 	// locking after some timeout before an operation which needed
-	// the unlocked wallet has finished.  Any aquired heldUnlock
+	// the unlocked wallet has finished.  Any acquired heldUnlock
 	// *must* be released (preferably with a defer) or the wallet
 	// will forever remain unlocked.
 	heldUnlock chan struct{}
@@ -1423,25 +1417,6 @@ func (w *Wallet) ChangePassphrases(publicOld, publicNew, privateOld,
 		err:        err,
 	}
 	return <-err
-}
-
-// accountUsed returns whether there are any recorded transactions spending to
-// a given account. It returns true if atleast one address in the account was
-// used and false if no address in the account was used.
-func (w *Wallet) accountUsed(addrmgrNs walletdb.ReadWriteBucket, account uint32) (bool, error) {
-	var used bool
-	err := w.Manager.ForEachAccountAddress(addrmgrNs, account,
-		func(maddr waddrmgr.ManagedAddress) error {
-			used = maddr.Used(addrmgrNs)
-			if used {
-				return waddrmgr.Break
-			}
-			return nil
-		})
-	if err == waddrmgr.Break {
-		err = nil
-	}
-	return used, err
 }
 
 // AccountAddresses returns the addresses for every created address for an
@@ -1802,8 +1777,6 @@ func (w *Wallet) RenameAccount(scope waddrmgr.KeyScope, account uint32, newName 
 	return err
 }
 
-const maxEmptyAccounts = 100
-
 // NextAccount creates the next account and returns its account number.  The
 // name must be unique to the account.  In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
@@ -2024,8 +1997,12 @@ func (w *Wallet) ListSinceBlock(start, end, syncHeight int32) ([]btcjson.ListTra
 
 		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
 			for _, detail := range details {
-				jsonResults := listTransactions(tx, &detail,
-					w.Manager, syncHeight, w.chainParams)
+				detail := detail
+
+				jsonResults := listTransactions(
+					tx, &detail, w.Manager, syncHeight,
+					w.chainParams,
+				)
 				txList = append(txList, jsonResults...)
 			}
 			return false, nil
@@ -2123,9 +2100,6 @@ func (w *Wallet) ListAddressTransactions(pkHashes map[string]struct{}) ([]btcjso
 
 					jsonResults := listTransactions(tx, detail,
 						w.Manager, syncBlock.Height, w.chainParams)
-					if err != nil {
-						return false, err
-					}
 					txList = append(txList, jsonResults...)
 					continue loopDetails
 				}
@@ -2874,7 +2848,7 @@ func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
 		return nil, err
 	}
 
-	sort.Sort(sort.StringSlice(addrStrs))
+	sort.Strings(addrStrs)
 	return addrStrs, nil
 }
 

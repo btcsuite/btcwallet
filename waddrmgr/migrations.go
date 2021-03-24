@@ -93,7 +93,7 @@ func (m *MigrationManager) SetVersion(ns walletdb.ReadWriteBucket,
 	if ns == nil {
 		ns = m.ns
 	}
-	return putManagerVersion(m.ns, version)
+	return putManagerVersion(ns, version)
 }
 
 // Versions returns all of the available database versions of the service.
