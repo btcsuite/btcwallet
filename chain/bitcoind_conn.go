@@ -38,20 +38,48 @@ const (
 	seqNumLen = 4
 )
 
+// BitcoindConfig contains all of the parameters required to establish a
+// connection to a bitcoind's RPC.
+type BitcoindConfig struct {
+	// ChainParams are the chain parameters the bitcoind server is running
+	// on.
+	ChainParams *chaincfg.Params
+
+	// Host is the IP address and port of the bitcoind's RPC server.
+	Host string
+
+	// User is the username to use to authenticate to bitcoind's RPC server.
+	User string
+
+	// Pass is the passphrase to use to authenticate to bitcoind's RPC
+	// server.
+	Pass string
+
+	// ZMQBlockHost is the IP address and port of the bitcoind's rawblock
+	// listener.
+	ZMQBlockHost string
+
+	// ZMQTxHost is the IP address and port of the bitcoind's rawtx
+	// listener.
+	ZMQTxHost string
+
+	// ZMQReadDeadline represents the read deadline we'll apply when reading
+	// ZMQ messages from either subscription.
+	ZMQReadDeadline time.Duration
+}
+
 // BitcoindConn represents a persistent client connection to a bitcoind node
 // that listens for events read from a ZMQ connection.
 type BitcoindConn struct {
 	started int32 // To be used atomically.
 	stopped int32 // To be used atomically.
 
+	cfg BitcoindConfig
+
 	// rescanClientCounter is an atomic counter that assigns a unique ID to
 	// each new bitcoind rescan client using the current bitcoind
 	// connection.
 	rescanClientCounter uint64
-
-	// chainParams identifies the current network the bitcoind node is
-	// running on.
-	chainParams *chaincfg.Params
 
 	// client is the RPC client to the bitcoind node.
 	client *rpcclient.Client
@@ -77,20 +105,16 @@ type BitcoindConn struct {
 // string. The ZMQ connections are established immediately to ensure liveness.
 // If the remote node does not operate on the same bitcoin network as described
 // by the passed chain parameters, the connection will be disconnected.
-func NewBitcoindConn(chainParams *chaincfg.Params,
-	host, user, pass, zmqBlockHost, zmqTxHost string,
-	zmqPollInterval time.Duration) (*BitcoindConn, error) {
-
+func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	clientCfg := &rpcclient.ConnConfig{
-		Host:                 host,
-		User:                 user,
-		Pass:                 pass,
+		Host:                 cfg.Host,
+		User:                 cfg.User,
+		Pass:                 cfg.Pass,
 		DisableAutoReconnect: false,
 		DisableConnectOnNew:  true,
 		DisableTLS:           true,
 		HTTPPostMode:         true,
 	}
-
 	client, err := rpcclient.New(clientCfg, nil)
 	if err != nil {
 		return nil, err
@@ -101,7 +125,8 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 	// concern to ensure one type of event isn't dropped from the connection
 	// queue due to another type of event filling it up.
 	zmqBlockConn, err := gozmq.Subscribe(
-		zmqBlockHost, []string{rawBlockZMQCommand}, zmqPollInterval,
+		cfg.ZMQBlockHost, []string{rawBlockZMQCommand},
+		cfg.ZMQReadDeadline,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to subscribe for zmq block "+
@@ -109,7 +134,7 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 	}
 
 	zmqTxConn, err := gozmq.Subscribe(
-		zmqTxHost, []string{rawTxZMQCommand}, zmqPollInterval,
+		cfg.ZMQTxHost, []string{rawTxZMQCommand}, cfg.ZMQReadDeadline,
 	)
 	if err != nil {
 		zmqBlockConn.Close()
@@ -118,7 +143,7 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 	}
 
 	conn := &BitcoindConn{
-		chainParams:   chainParams,
+		cfg:           *cfg,
 		client:        client,
 		zmqBlockConn:  zmqBlockConn,
 		zmqTxConn:     zmqTxConn,
@@ -144,9 +169,9 @@ func (c *BitcoindConn) Start() error {
 	if err != nil {
 		return err
 	}
-	if net != c.chainParams.Net {
+	if net != c.cfg.ChainParams.Net {
 		return fmt.Errorf("expected network %v, got %v",
-			c.chainParams.Net, net)
+			c.cfg.ChainParams.Net, net)
 	}
 
 	c.wg.Add(2)
@@ -407,8 +432,7 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 
 		id: atomic.AddUint64(&c.rescanClientCounter, 1),
 
-		chainParams: c.chainParams,
-		chainConn:   c,
+		chainConn: c,
 
 		rescanUpdate:     make(chan interface{}),
 		watchedAddresses: make(map[string]struct{}),

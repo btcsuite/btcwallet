@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -39,10 +38,6 @@ type BitcoindClient struct {
 	// birthday is the earliest time for which we should begin scanning the
 	// chain.
 	birthday time.Time
-
-	// chainParams are the parameters of the current chain this client is
-	// active under.
-	chainParams *chaincfg.Params
 
 	// id is the unique ID of this client assigned by the backing bitcoind
 	// connection.
@@ -920,7 +915,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 func (c *BitcoindClient) FilterBlocks(
 	req *FilterBlocksRequest) (*FilterBlocksResponse, error) {
 
-	blockFilterer := NewBlockFilterer(c.chainParams, req)
+	blockFilterer := NewBlockFilterer(c.chainConn.cfg.ChainParams, req)
 
 	// Iterate over the requested blocks, fetching each from the rpc client.
 	// Each block will scanned using the reverse addresses indexes generated
@@ -1282,7 +1277,7 @@ func (c *BitcoindClient) filterTx(tx *wire.MsgTx,
 			// Non-standard outputs can be safely skipped.
 			continue
 		}
-		addr, err := pkScript.Address(c.chainParams)
+		addr, err := pkScript.Address(c.chainConn.cfg.ChainParams)
 		if err != nil {
 			// Non-standard outputs can be safely skipped.
 			continue
@@ -1298,7 +1293,7 @@ func (c *BitcoindClient) filterTx(tx *wire.MsgTx,
 	// add it to our watch list.
 	for i, txOut := range tx.TxOut {
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			txOut.PkScript, c.chainParams,
+			txOut.PkScript, c.chainConn.cfg.ChainParams,
 		)
 		if err != nil {
 			// Non-standard outputs can be safely skipped.
