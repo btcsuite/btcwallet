@@ -461,9 +461,13 @@ out:
 				wsc.wg.Add(1)
 				go func() {
 					resp, jsonErr := f()
-					mresp, err := btcjson.MarshalResponse(req.ID, resp, jsonErr)
+					mresp, err := btcjson.MarshalResponse(
+						btcjson.RpcVersion1, req.ID,
+						resp, jsonErr,
+					)
 					if err != nil {
-						log.Errorf("Unable to marshal response: %v", err)
+						log.Errorf("Unable to marshal "+
+							"response: %v", err)
 					} else {
 						_ = wsc.send(mresp)
 					}
@@ -560,7 +564,10 @@ func (s *Server) postClientRPC(w http.ResponseWriter, r *http.Request) {
 	var req btcjson.Request
 	err = json.Unmarshal(rpcRequest, &req)
 	if err != nil {
-		resp, err := btcjson.MarshalResponse(req.ID, nil, btcjson.ErrRPCInvalidRequest)
+		resp, err := btcjson.MarshalResponse(
+			btcjson.RpcVersion1, req.ID, nil,
+			btcjson.ErrRPCInvalidRequest,
+		)
 		if err != nil {
 			log.Errorf("Unable to marshal response: %v", err)
 			http.Error(w, "500 Internal Server Error",
@@ -592,7 +599,9 @@ func (s *Server) postClientRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Marshal and send.
-	mresp, err := btcjson.MarshalResponse(req.ID, res, jsonErr)
+	mresp, err := btcjson.MarshalResponse(
+		btcjson.RpcVersion1, req.ID, res, jsonErr,
+	)
 	if err != nil {
 		log.Errorf("Unable to marshal response: %v", err)
 		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
