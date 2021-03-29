@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -74,7 +75,9 @@ func TestTxToOutputsDryRun(t *testing.T) {
 
 	// First do a few dry-runs, making sure the number of addresses in the
 	// database us not inflated.
-	dryRunTx, err := w.txToOutputs(txOuts, nil, 0, 1, 1000, true)
+	dryRunTx, err := w.txToOutputs(
+		txOuts, nil, 0, 1, 1000, CoinSelectionLargest, true,
+	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
 	}
@@ -89,7 +92,9 @@ func TestTxToOutputsDryRun(t *testing.T) {
 		t.Fatalf("expected 1 address, found %v", len(addresses))
 	}
 
-	dryRunTx2, err := w.txToOutputs(txOuts, nil, 0, 1, 1000, true)
+	dryRunTx2, err := w.txToOutputs(
+		txOuts, nil, 0, 1, 1000, CoinSelectionLargest, true,
+	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
 	}
@@ -122,7 +127,9 @@ func TestTxToOutputsDryRun(t *testing.T) {
 
 	// Now we do a proper, non-dry run. This should add a change address
 	// to the database.
-	tx, err := w.txToOutputs(txOuts, nil, 0, 1, 1000, false)
+	tx, err := w.txToOutputs(
+		txOuts, nil, 0, 1, 1000, CoinSelectionLargest, false,
+	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
 	}
@@ -184,9 +191,14 @@ func addUtxo(t *testing.T, w *Wallet, incomingTx *wire.MsgTx) {
 		if err != nil {
 			return err
 		}
-		err = w.TxStore.AddCredit(ns, rec, block, 0, false)
-		if err != nil {
-			return err
+		// Add all tx outputs as credits.
+		for i := 0; i < len(incomingTx.TxOut); i++ {
+			err = w.TxStore.AddCredit(
+				ns, rec, block, uint32(i), false,
+			)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	}); err != nil {
@@ -210,4 +222,80 @@ func TestInputYield(t *testing.T) {
 
 	// At 20 sat/b this input is yielding negatively.
 	require.False(t, inputYieldsPositively(credit, 20000))
+}
+
+// TestTxToOutputsRandom tests random coin selection.
+func TestTxToOutputsRandom(t *testing.T) {
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create an address we can use to send some coins to.
+	keyScope := waddrmgr.KeyScopeBIP0049Plus
+	addr, err := w.CurrentAddress(0, keyScope)
+	if err != nil {
+		t.Fatalf("unable to get current address: %v", addr)
+	}
+	p2shAddr, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("unable to convert wallet address to p2sh: %v", err)
+	}
+
+	// Add a set of utxos to the wallet.
+	incomingTx := &wire.MsgTx{
+		TxIn: []*wire.TxIn{
+			{},
+		},
+		TxOut: []*wire.TxOut{},
+	}
+	for amt := int64(5000); amt <= 125000; amt += 10000 {
+		incomingTx.AddTxOut(wire.NewTxOut(amt, p2shAddr))
+	}
+
+	addUtxo(t, w, incomingTx)
+
+	// Now tell the wallet to create a transaction paying to the specified
+	// outputs.
+	txOuts := []*wire.TxOut{
+		{
+			PkScript: p2shAddr,
+			Value:    50000,
+		},
+		{
+			PkScript: p2shAddr,
+			Value:    100000,
+		},
+	}
+
+	const (
+		feeSatPerKb   = 100000
+		maxIterations = 100
+	)
+
+	createTx := func() *txauthor.AuthoredTx {
+		tx, err := w.txToOutputs(
+			txOuts, nil, 0, 1, feeSatPerKb, CoinSelectionRandom, true,
+		)
+		require.NoError(t, err)
+		return tx
+	}
+
+	firstTx := createTx()
+	var isRandom bool
+	for iteration := 0; iteration < maxIterations; iteration++ {
+		tx := createTx()
+
+		// Check to see if we are getting a total input value.
+		// We consider this proof that the randomization works.
+		if tx.TotalInput != firstTx.TotalInput {
+			isRandom = true
+		}
+
+		// At the used fee rate of 100 sat/b, the 5000 sat input is
+		// negatively yielding. We don't expect it to ever be selected.
+		for _, inputValue := range tx.PrevInputValues {
+			require.NotEqual(t, inputValue, btcutil.Amount(5000))
+		}
+	}
+
+	require.True(t, isRandom)
 }

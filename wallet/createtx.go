@@ -7,6 +7,7 @@ package wallet
 
 import (
 	"fmt"
+	"math/rand"
 	"sort"
 
 	"github.com/btcsuite/btcd/btcec"
@@ -29,10 +30,6 @@ func (s byAmount) Less(i, j int) bool { return s[i].Amount < s[j].Amount }
 func (s byAmount) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
 func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
-	// Pick largest outputs first.  This is only done for compatibility with
-	// previous tx creation code, not because it's a good idea.
-	sort.Sort(sort.Reverse(byAmount(eligible)))
-
 	// Current inputs and their total value.  These are closed over by the
 	// returned input source and reused across multiple calls.
 	currentTotal := btcutil.Amount(0)
@@ -110,7 +107,8 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 // the database. A tx created with this set to true will intentionally have no
 // input scripts added and SHOULD NOT be broadcasted.
 func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
-	account uint32, minconf int32, feeSatPerKb btcutil.Amount, dryRun bool) (
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
+	coinSelectionStrategy CoinSelectionStrategy, dryRun bool) (
 	tx *txauthor.AuthoredTx, err error) {
 
 	chainClient, err := w.requireChainClient()
@@ -142,6 +140,19 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	switch coinSelectionStrategy {
+	// Pick largest outputs first.
+	case CoinSelectionLargest:
+		sort.Sort(sort.Reverse(byAmount(eligible)))
+
+	// Select coins at random. This prevents the creation of ever smaller
+	// utxos over time that may never become economical to spend.
+	case CoinSelectionRandom:
+		rand.Shuffle(len(eligible), func(i, j int) {
+			eligible[i], eligible[j] = eligible[j], eligible[i]
+		})
 	}
 
 	inputSource := makeInputSource(eligible)
