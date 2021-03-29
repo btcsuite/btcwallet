@@ -104,9 +104,21 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			}
 
 			// We don't want to include the witness or any script
-			// just yet.
+			// on the unsigned TX just yet.
 			packet.UnsignedTx.TxIn[idx].Witness = wire.TxWitness{}
 			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
+
+			// For nested P2WKH we need to add the redeem script to
+			// the input, otherwise an offline wallet won't be able
+			// to sign for it. For normal P2WKH this will be nil.
+			addr, witnessProgram, _, err := w.scriptForOutput(utxo)
+			if err != nil {
+				return fmt.Errorf("error fetching UTXO "+
+					"script: %v", err)
+			}
+			if addr.AddrType() == waddrmgr.NestedWitnessPubKey {
+				packet.Inputs[idx].RedeemScript = witnessProgram
+			}
 		}
 
 		return nil
