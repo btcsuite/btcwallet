@@ -77,6 +77,19 @@ var (
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
 
+type CoinSelectionStrategy int
+
+const (
+	// CoinSelectionLargest always picks the largest available utxo to add
+	// to the transaction next.
+	CoinSelectionLargest CoinSelectionStrategy = iota
+
+	// CoinSelectionRandom randomly selects the next utxo to add to the
+	// transaction. This strategy prevents the creation of ever smaller
+	// utxos over time.
+	CoinSelectionRandom
+)
+
 // Wallet is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style key store
 // addresses and keys),
@@ -1125,13 +1138,14 @@ func logFilterBlocksResp(block wtxmgr.BlockMeta,
 
 type (
 	createTxRequest struct {
-		keyScope    *waddrmgr.KeyScope
-		account     uint32
-		outputs     []*wire.TxOut
-		minconf     int32
-		feeSatPerKB btcutil.Amount
-		dryRun      bool
-		resp        chan createTxResponse
+		keyScope              *waddrmgr.KeyScope
+		account               uint32
+		outputs               []*wire.TxOut
+		minconf               int32
+		feeSatPerKB           btcutil.Amount
+		coinSelectionStrategy CoinSelectionStrategy
+		dryRun                bool
+		resp                  chan createTxResponse
 	}
 	createTxResponse struct {
 		tx  *txauthor.AuthoredTx
@@ -1162,7 +1176,8 @@ out:
 			}
 			tx, err := w.txToOutputs(
 				txr.outputs, txr.keyScope, txr.account,
-				txr.minconf, txr.feeSatPerKB, txr.dryRun,
+				txr.minconf, txr.feeSatPerKB,
+				txr.coinSelectionStrategy, txr.dryRun,
 			)
 			heldUnlock.release()
 			txr.resp <- createTxResponse{tx, err}
@@ -1188,16 +1203,18 @@ out:
 // the database. A tx created with this set to true SHOULD NOT be broadcasted.
 func (w *Wallet) CreateSimpleTx(keyScope *waddrmgr.KeyScope, account uint32,
 	outputs []*wire.TxOut, minconf int32, satPerKb btcutil.Amount,
-	dryRun bool) (*txauthor.AuthoredTx, error) {
+	coinSelectionStrategy CoinSelectionStrategy, dryRun bool) (
+	*txauthor.AuthoredTx, error) {
 
 	req := createTxRequest{
-		keyScope:    keyScope,
-		account:     account,
-		outputs:     outputs,
-		minconf:     minconf,
-		feeSatPerKB: satPerKb,
-		dryRun:      dryRun,
-		resp:        make(chan createTxResponse),
+		keyScope:              keyScope,
+		account:               account,
+		outputs:               outputs,
+		minconf:               minconf,
+		feeSatPerKB:           satPerKb,
+		coinSelectionStrategy: coinSelectionStrategy,
+		dryRun:                dryRun,
+		resp:                  make(chan createTxResponse),
 	}
 	w.createTxRequests <- req
 	resp := <-req.resp
@@ -3156,7 +3173,8 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 // returns the transaction upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, satPerKb btcutil.Amount,
-	label string) (*wire.MsgTx, error) {
+	coinSelectionStrategy CoinSelectionStrategy, label string) (
+	*wire.MsgTx, error) {
 
 	// Ensure the outputs to be created adhere to the network's consensus
 	// rules.
@@ -3174,7 +3192,8 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	// continue to re-broadcast the transaction upon restarts until it has
 	// been confirmed.
 	createdTx, err := w.CreateSimpleTx(
-		keyScope, account, outputs, minconf, satPerKb, false,
+		keyScope, account, outputs, minconf, satPerKb,
+		coinSelectionStrategy, false,
 	)
 	if err != nil {
 		return nil, err
