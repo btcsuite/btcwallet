@@ -66,7 +66,10 @@ func (s *NeutrinoClient) BackEnd() string {
 
 // Start replicates the RPC client's Start method.
 func (s *NeutrinoClient) Start() error {
-	s.CS.Start()
+	if err := s.CS.Start(); err != nil {
+		return fmt.Errorf("error starting chain service: %v", err)
+	}
+
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {
@@ -178,8 +181,8 @@ func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) 
 // FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
 // addresses of interest. For each requested block, the corresponding compact
 // filter will first be checked for matches, skipping those that do not report
-// anything. If the filter returns a postive match, the full block will be
-// fetched and filtered. This method returns a FilterBlocksReponse for the first
+// anything. If the filter returns a positive match, the full block will be
+// fetched and filtered. This method returns a FilterBlocksResponse for the first
 // block containing a matching address. If no matches are found in the range of
 // blocks requested, the returned response will be nil.
 func (s *NeutrinoClient) FilterBlocks(
@@ -361,11 +364,11 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 
 	bestBlock, err := s.CS.BestBlock()
 	if err != nil {
-		return fmt.Errorf("Can't get chain service's best block: %s", err)
+		return fmt.Errorf("can't get chain service's best block: %s", err)
 	}
 	header, err := s.CS.GetBlockHeader(&bestBlock.Hash)
 	if err != nil {
-		return fmt.Errorf("Can't get block header for hash %v: %s",
+		return fmt.Errorf("can't get block header for hash %v: %s",
 			bestBlock.Hash, err)
 	}
 
@@ -384,7 +387,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		select {
 		case s.enqueueNotification <- &RescanFinished{
 			Hash:   startHash,
-			Height: int32(bestBlock.Height),
+			Height: bestBlock.Height,
 			Time:   header.Timestamp,
 		}:
 		case <-s.quit:

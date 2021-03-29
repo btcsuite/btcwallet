@@ -65,7 +65,7 @@ type (
 // delta.
 //
 // NOTE: This should be used before applying any CheckDelta steps.
-func (_ InitialDelta) Apply(i int, h *Harness) {
+func (InitialDelta) Apply(i int, h *Harness) {
 	curHorizon, delta := h.brs.ExtendHorizon()
 	assertHorizon(h.t, i, curHorizon, h.expHorizon)
 	assertDelta(h.t, i, delta, h.recoveryWindow)

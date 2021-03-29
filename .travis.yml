@@ -4,10 +4,11 @@ go:
 sudo: false
 install:
   - GO111MODULE=on go install -v ./...
-  - GO111MODULE=off go get -v golang.org/x/tools/cmd/cover
-  - GO111MODULE=off go get -v golang.org/x/lint/golint
-  - GO111MODULE=off go get -v github.com/davecgh/go-spew/spew
 script:
   - export PATH=$PATH:$HOME/gopath/bin
   - export GO111MODULE=on
-  - ./goclean.sh
+  - make fmt
+  - make lint
+  - make unit-race
+  - make unit-cover
+  - make goveralls

@@ -146,6 +146,8 @@ func makeInputSource(outputs []btcjson.ListUnspentResult) txauthor.InputSource {
 		sourceErr       error
 	)
 	for _, output := range outputs {
+		output := output
+
 		outputAmount, err := btcutil.NewAmount(output.Amount)
 		if err != nil {
 			sourceErr = fmt.Errorf(
@@ -315,7 +317,8 @@ func sweep() error {
 			totalSwept, numPublished, transactionNoun)
 	}
 	if numErrors > 0 {
-		return fmt.Errorf("Failed to publish %d %s", numErrors, transactionNoun)
+		return fmt.Errorf("failed to publish %d %s", numErrors,
+			transactionNoun)
 	}
 
 	return nil

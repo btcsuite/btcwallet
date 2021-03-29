@@ -255,7 +255,6 @@ func (s *ScopedKeyManager) Close() {
 
 	// Attempt to clear sensitive public key material from memory too.
 	s.zeroSensitivePublicData()
-	return
 }
 
 // keyToManaged returns a new managed address for the provided derived key and
@@ -318,15 +317,17 @@ func (s *ScopedKeyManager) deriveKey(acctInfo *accountInfo, branch,
 	}
 
 	// Derive and return the key.
-	branchKey, err := acctKey.DeriveNonStandard(branch)
+	branchKey, err := acctKey.DeriveNonStandard(branch) // nolint:staticcheck
 	if err != nil {
 		str := fmt.Sprintf("failed to derive extended key branch %d",
 			branch)
 		return nil, managerError(ErrKeyChain, str, err)
 	}
 
-	addressKey, err := branchKey.DeriveNonStandard(index)
-	branchKey.Zero() // Zero branch key after it's used.
+	addressKey, err := branchKey.DeriveNonStandard(index) // nolint:staticcheck
+
+	// Zero branch key after it's used.
+	branchKey.Zero()
 	if err != nil {
 		str := fmt.Sprintf("failed to derive child extended key -- "+
 			"branch %d, child %d",
@@ -430,7 +431,6 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 			return nil, managerError(ErrCrypto, str, err)
 		}
 
-		watchOnly = true
 		hasPrivateKey = false
 
 	default:
@@ -879,7 +879,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 	}
 
 	// Derive the appropriate branch key and ensure it is zeroed when done.
-	branchKey, err := acctKey.DeriveNonStandard(branchNum)
+	branchKey, err := acctKey.DeriveNonStandard(branchNum) // nolint:staticcheck
 	if err != nil {
 		str := fmt.Sprintf("failed to derive extended key branch %d",
 			branchNum)
@@ -896,7 +896,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		var nextKey *hdkeychain.ExtendedKey
 		for {
 			// Derive the next child in the external chain branch.
-			key, err := branchKey.DeriveNonStandard(nextIndex)
+			key, err := branchKey.DeriveNonStandard(nextIndex) // nolint:staticcheck
 			if err != nil {
 				// When this particular child is invalid, skip to the
 				// next index.
@@ -1081,7 +1081,7 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	}
 
 	// Derive the appropriate branch key and ensure it is zeroed when done.
-	branchKey, err := acctKey.DeriveNonStandard(branchNum)
+	branchKey, err := acctKey.DeriveNonStandard(branchNum) // nolint:staticcheck
 	if err != nil {
 		str := fmt.Sprintf("failed to derive extended key branch %d",
 			branchNum)
@@ -1100,7 +1100,7 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		var nextKey *hdkeychain.ExtendedKey
 		for {
 			// Derive the next child in the external chain branch.
-			key, err := branchKey.DeriveNonStandard(nextIndex)
+			key, err := branchKey.DeriveNonStandard(nextIndex) // nolint:staticcheck
 			if err != nil {
 				// When this particular child is invalid, skip to the
 				// next index.

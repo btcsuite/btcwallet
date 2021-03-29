@@ -100,8 +100,10 @@ func promptList(reader *bufio.Reader, prefix string, validResponses []string, de
 
 // promptListBool prompts the user for a boolean (yes/no) with the given prefix.
 // The function will repeat the prompt to the user until they enter a valid
-// reponse.
-func promptListBool(reader *bufio.Reader, prefix string, defaultEntry string) (bool, error) {
+// response.
+func promptListBool(reader *bufio.Reader, prefix string,
+	defaultEntry string) (bool, error) { // nolint:unparam
+
 	// Setup the valid responses.
 	valid := []string{"n", "no", "y", "yes"}
 	response, err := promptList(reader, prefix, valid, defaultEntry)
@@ -114,7 +116,7 @@ func promptListBool(reader *bufio.Reader, prefix string, defaultEntry string) (b
 // promptPass prompts the user for a passphrase with the given prefix.  The
 // function will ask the user to confirm the passphrase and will repeat the
 // prompts until they enter a matching response.
-func promptPass(reader *bufio.Reader, prefix string, confirm bool) ([]byte, error) {
+func promptPass(_ *bufio.Reader, prefix string, confirm bool) ([]byte, error) {
 	// Prompt the user until they enter a passphrase.
 	prompt := fmt.Sprintf("%s: ", prefix)
 	for {
@@ -177,7 +179,7 @@ func PrivatePass(reader *bufio.Reader, legacyKeyStore *keystore.Store) ([]byte, 
 		}
 
 		// Keep prompting the user until the passphrase is correct.
-		if err := legacyKeyStore.Unlock([]byte(privPass)); err != nil {
+		if err := legacyKeyStore.Unlock(privPass); err != nil {
 			if err == keystore.ErrWrongPassphrase {
 				fmt.Println(err)
 				continue

@@ -66,7 +66,6 @@ type testCase struct {
 	masterPriv         string
 	accountIndex       uint32
 	addrType           waddrmgr.AddressType
-	addrSchemaOverride *waddrmgr.ScopeAddrSchema
 	expectedScope      waddrmgr.KeyScope
 	expectedAddr       string
 	expectedChangeAddr string
@@ -100,7 +99,6 @@ var (
 			"FD2KeY6G9",
 		accountIndex:       9,
 		addrType:           waddrmgr.NestedWitnessPubKey,
-		addrSchemaOverride: &waddrmgr.KeyScopeBIP0049AddrSchema,
 		expectedScope:      waddrmgr.KeyScopeBIP0049Plus,
 		expectedAddr:       "2NBCJ9WzGXZqpLpXGq3Hacybj3c4eHRcqgh",
 		expectedChangeAddr: "2N3bankFu6F3ZNU41iVJQqyS9MXqp9dvn1M",

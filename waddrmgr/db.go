@@ -61,7 +61,7 @@ type syncStatus uint8
 // of supporting sync status on a per-address basis.
 const (
 	ssNone    syncStatus = 0 // not iota as they need to be stable for db
-	ssPartial syncStatus = 1
+	ssPartial syncStatus = 1 // nolint:varcheck,deadcode,unused
 	ssFull    syncStatus = 2
 )
 
@@ -294,14 +294,6 @@ func uint32ToBytes(number uint32) []byte {
 	return buf
 }
 
-// uint64ToBytes converts a 64 bit unsigned integer into a 8-byte slice in
-// little-endian order: 1 -> [1 0 0 0 0 0 0 0].
-func uint64ToBytes(number uint64) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, number)
-	return buf
-}
-
 // stringToBytes converts a string into a variable length byte slice in
 // little-endian order: "abc" -> [3 0 0 0 61 62 63]
 func stringToBytes(s string) []byte {
@@ -328,15 +320,6 @@ func scopeToBytes(scope *KeyScope) [scopeKeySize]byte {
 	binary.LittleEndian.PutUint32(scopeBytes[4:], scope.Coin)
 
 	return scopeBytes
-}
-
-// scopeFromBytes decodes a serializes manager scope into its concrete manager
-// scope struct.
-func scopeFromBytes(scopeBytes []byte) KeyScope {
-	return KeyScope{
-		Purpose: binary.LittleEndian.Uint32(scopeBytes[:]),
-		Coin:    binary.LittleEndian.Uint32(scopeBytes[4:]),
-	}
 }
 
 // scopeSchemaToBytes encodes the passed scope schema as a set of bytes
@@ -378,22 +361,6 @@ func fetchScopeAddrSchema(ns walletdb.ReadBucket,
 	}
 
 	return scopeSchemaFromBytes(schemaBytes), nil
-}
-
-// putScopeAddrSchema attempts to store the passed addr scehma for the given
-// manager scope.
-func putScopeAddrTypes(ns walletdb.ReadWriteBucket, scope *KeyScope,
-	schema *ScopeAddrSchema) error {
-
-	scopeSchemaBucket := ns.NestedReadWriteBucket(scopeSchemaBucketName)
-	if scopeSchemaBucket == nil {
-		str := fmt.Sprintf("unable to find scope schema bucket")
-		return managerError(ErrScopeNotFound, str, nil)
-	}
-
-	scopeKey := scopeToBytes(scope)
-	schemaBytes := scopeSchemaToBytes(schema)
-	return scopeSchemaBucket.Put(scopeKey[:], schemaBytes)
 }
 
 func fetchReadScopeBucket(ns walletdb.ReadBucket, scope *KeyScope) (walletdb.ReadBucket, error) {
@@ -590,7 +557,7 @@ func putMasterHDKeys(ns walletdb.ReadWriteBucket, masterHDPrivEnc, masterHDPubEn
 // fetchMasterHDKeys attempts to fetch both the master HD private and public
 // keys from the database. If this is a watch only wallet, then it's possible
 // that the master private key isn't stored.
-func fetchMasterHDKeys(ns walletdb.ReadBucket) ([]byte, []byte, error) {
+func fetchMasterHDKeys(ns walletdb.ReadBucket) ([]byte, []byte) {
 	bucket := ns.NestedReadBucket(mainBucketName)
 
 	var masterHDPrivEnc, masterHDPubEnc []byte
@@ -601,16 +568,16 @@ func fetchMasterHDKeys(ns walletdb.ReadBucket) ([]byte, []byte, error) {
 	key := bucket.Get(masterHDPrivName)
 	if key != nil {
 		masterHDPrivEnc = make([]byte, len(key))
-		copy(masterHDPrivEnc[:], key)
+		copy(masterHDPrivEnc, key)
 	}
 
 	key = bucket.Get(masterHDPubName)
 	if key != nil {
 		masterHDPubEnc = make([]byte, len(key))
-		copy(masterHDPubEnc[:], key)
+		copy(masterHDPubEnc, key)
 	}
 
-	return masterHDPrivEnc, masterHDPubEnc, nil
+	return masterHDPrivEnc, masterHDPubEnc
 }
 
 // fetchCryptoKeys loads the encrypted crypto keys which are in turn used to
@@ -993,7 +960,7 @@ func forEachKeyScope(ns walletdb.ReadBucket, fn func(KeyScope) error) error {
 		}
 
 		scope := KeyScope{
-			Purpose: binary.LittleEndian.Uint32(k[:]),
+			Purpose: binary.LittleEndian.Uint32(k),
 			Coin:    binary.LittleEndian.Uint32(k[4:]),
 		}
 
@@ -1545,7 +1512,7 @@ func fetchAddressByHash(ns walletdb.ReadBucket, scope *KeyScope,
 
 	bucket := scopedBucket.NestedReadBucket(addrBucketName)
 
-	serializedRow := bucket.Get(addrHash[:])
+	serializedRow := bucket.Get(addrHash)
 	if serializedRow == nil {
 		str := "address not found"
 		return nil, managerError(ErrAddressNotFound, str, nil)
@@ -2349,7 +2316,7 @@ func fetchBirthdayBlockVerification(ns walletdb.ReadBucket) bool {
 	}
 
 	// Otherwise, we'll determine if it's verified by the value stored.
-	verified := binary.BigEndian.Uint16(verifiedValue[:])
+	verified := binary.BigEndian.Uint16(verifiedValue)
 	return verified != 0
 }
 
@@ -2483,6 +2450,8 @@ func createManagerNS(ns walletdb.ReadWriteBucket,
 	// Next, we'll create the namespace for each of the relevant default
 	// manager scopes.
 	for scope, scopeSchema := range defaultScopes {
+		scope, scopeSchema := scope, scopeSchema
+
 		// Before we create the entire namespace of this scope, we'll
 		// update the schema mapping to note what types of addresses it
 		// prefers.

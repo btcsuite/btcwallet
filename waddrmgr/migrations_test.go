@@ -327,6 +327,7 @@ func TestMigrationStoreMaxReorgDepth(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
+		testCase := testCase
 		success := t.Run(testCase.name, func(t *testing.T) {
 			// We'll start the test by creating the number of blocks
 			// we'll add to the chain. We start from height 1 as the
@@ -387,13 +388,13 @@ func TestMigrationStoreMaxReorgDepth(t *testing.T) {
 					return err
 				}
 				expectedBlock := blocks[len(blocks)-1]
-				if block.Height != block.Height {
+				if expectedBlock.Height != block.Height {
 					return fmt.Errorf("expected synced to "+
 						"block height %v, got %v",
 						expectedBlock.Height,
 						block.Height)
 				}
-				if block.Hash != block.Hash {
+				if expectedBlock.Hash != block.Hash {
 					return fmt.Errorf("expected synced to "+
 						"block hash %v, got %v",
 						expectedBlock.Hash,

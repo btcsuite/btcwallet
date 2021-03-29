@@ -474,7 +474,6 @@ func (m *Manager) Close() {
 	m.masterKeyPub.Zero()
 
 	m.closed = true
-	return
 }
 
 // NewScopedKeyManager creates a new scoped key manager from the root manager. A
@@ -509,10 +508,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		// Note that the path to the coin type is requires hardened
 		// derivation, therefore this can only be done if the wallet's
 		// root key hasn't been neutered.
-		masterRootPrivEnc, _, err := fetchMasterHDKeys(ns)
-		if err != nil {
-			return nil, err
-		}
+		masterRootPrivEnc, _ := fetchMasterHDKeys(ns)
 
 		// If the master root private key isn't found within the
 		// database, but we need to bail here as we can't create the
@@ -636,8 +632,7 @@ func (m *Manager) ScopesForExternalAddrType(addrType AddressType) []KeyScope {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
-	scopes, _ := m.externalAddrSchemas[addrType]
-	return scopes
+	return m.externalAddrSchemas[addrType]
 }
 
 // ScopesForInternalAddrTypes returns the set of key scopes that are able to
@@ -646,8 +641,7 @@ func (m *Manager) ScopesForInternalAddrTypes(addrType AddressType) []KeyScope {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
-	scopes, _ := m.internalAddrSchemas[addrType]
-	return scopes
+	return m.internalAddrSchemas[addrType]
 }
 
 // NeuterRootKey is a special method that should be used once a caller is
@@ -658,10 +652,7 @@ func (m *Manager) NeuterRootKey(ns walletdb.ReadWriteBucket) error {
 	defer m.mtx.Unlock()
 
 	// First, we'll fetch the current master HD keys from the database.
-	masterRootPrivEnc, _, err := fetchMasterHDKeys(ns)
-	if err != nil {
-		return err
-	}
+	masterRootPrivEnc, _ := fetchMasterHDKeys(ns)
 
 	// If the root master private key is already nil, then we'll return a
 	// nil error here as the root key has already been permanently
@@ -984,8 +975,8 @@ func (m *Manager) ChangePassphrase(ns walletdb.ReadWriteBucket, oldPassphrase,
 
 		// Now that the db has been successfully updated, clear the old
 		// key and set the new one.
-		copy(m.cryptoKeyPrivEncrypted[:], encPriv)
-		copy(m.cryptoKeyScriptEncrypted[:], encScript)
+		copy(m.cryptoKeyPrivEncrypted, encPriv)
+		copy(m.cryptoKeyScriptEncrypted, encScript)
 		m.masterKeyPriv.Zero() // Clear the old key.
 		m.masterKeyPriv = newMasterKey
 		m.privPassphraseSalt = passphraseSalt
@@ -1421,7 +1412,7 @@ func deriveCoinTypeKey(masterNode *hdkeychain.ExtendedKey,
 	// The branch is 0 for external addresses and 1 for internal addresses.
 
 	// Derive the purpose key as a child of the master node.
-	purpose, err := masterNode.DeriveNonStandard(
+	purpose, err := masterNode.DeriveNonStandard( // nolint:staticcheck
 		scope.Purpose + hdkeychain.HardenedKeyStart,
 	)
 	if err != nil {
@@ -1429,7 +1420,7 @@ func deriveCoinTypeKey(masterNode *hdkeychain.ExtendedKey,
 	}
 
 	// Derive the coin type key as a child of the purpose key.
-	coinTypeKey, err := purpose.DeriveNonStandard(
+	coinTypeKey, err := purpose.DeriveNonStandard( // nolint:staticcheck
 		scope.Coin + hdkeychain.HardenedKeyStart,
 	)
 	if err != nil {
@@ -1454,7 +1445,7 @@ func deriveAccountKey(coinTypeKey *hdkeychain.ExtendedKey,
 	}
 
 	// Derive the account key as a child of the coin type key.
-	return coinTypeKey.DeriveNonStandard(
+	return coinTypeKey.DeriveNonStandard( // nolint:staticcheck
 		account + hdkeychain.HardenedKeyStart,
 	)
 }
@@ -1471,12 +1462,12 @@ func deriveAccountKey(coinTypeKey *hdkeychain.ExtendedKey,
 // The branch is 0 for external addresses and 1 for internal addresses.
 func checkBranchKeys(acctKey *hdkeychain.ExtendedKey) error {
 	// Derive the external branch as the first child of the account key.
-	if _, err := acctKey.DeriveNonStandard(ExternalBranch); err != nil {
+	if _, err := acctKey.DeriveNonStandard(ExternalBranch); err != nil { // nolint:staticcheck
 		return err
 	}
 
 	// Derive the internal branch as the second child of the account key.
-	_, err := acctKey.DeriveNonStandard(InternalBranch)
+	_, err := acctKey.DeriveNonStandard(InternalBranch) // nolint:staticcheck
 	return err
 }
 

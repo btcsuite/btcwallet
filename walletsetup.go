@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
@@ -30,7 +29,7 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 
 	// For now, we must always name the testnet data directory as "testnet"
 	// and not "testnet3" or any other version, as the chaincfg testnet3
-	// paramaters will likely be switched to being named "testnet3" in the
+	// parameters will likely be switched to being named "testnet3" in the
 	// future.  This is done to future proof that change, and an upgrade
 	// plan to move the testnet3 data directory can be worked out later.
 	if chainParams.Net == wire.TestNet3 {
@@ -43,7 +42,7 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 // convertLegacyKeystore converts all of the addresses in the passed legacy
 // key store to the new waddrmgr.Manager format.  Both the legacy keystore and
 // the new manager must be unlocked.
-func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) error {
+func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) {
 	netParams := legacyKeyStore.Net()
 	blockStamp := waddrmgr.BlockStamp{
 		Height: 0,
@@ -60,8 +59,9 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) err
 				continue
 			}
 
-			wif, err := btcutil.NewWIF((*btcec.PrivateKey)(privKey),
-				netParams, addr.Compressed())
+			wif, err := btcutil.NewWIF(
+				privKey, netParams, addr.Compressed(),
+			)
 			if err != nil {
 				fmt.Printf("WARN: Failed to create wallet "+
 					"import format for address %v: %v\n",
@@ -93,8 +93,6 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) err
 			continue
 		}
 	}
-
-	return nil
 }
 
 // createWallet prompts the user for information needed to generate a new wallet
@@ -114,7 +112,7 @@ func createWallet(cfg *config) error {
 	var legacyKeyStore *keystore.Store
 	_, err := os.Stat(keystorePath)
 	if err != nil && !os.IsNotExist(err) {
-		// A stat error not due to a non-existant file should be
+		// A stat error not due to a non-existent file should be
 		// returned to the caller.
 		return err
 	} else if err == nil {
@@ -146,7 +144,7 @@ func createWallet(cfg *config) error {
 		// Import the addresses in the legacy keystore to the new wallet if
 		// any exist, locking each wallet again when finished.
 		loader.RunAfterLoad(func(w *wallet.Wallet) {
-			defer legacyKeyStore.Lock()
+			defer func() { _ = legacyKeyStore.Lock() }()
 
 			fmt.Println("Importing addresses from existing wallet...")
 
@@ -161,12 +159,7 @@ func createWallet(cfg *config) error {
 				return
 			}
 
-			err = convertLegacyKeystore(legacyKeyStore, w)
-			if err != nil {
-				fmt.Printf("ERR: Failed to import keys from old "+
-					"wallet format: %v", err)
-				return
-			}
+			convertLegacyKeystore(legacyKeyStore, w)
 
 			// Remove the legacy key store.
 			err = os.Remove(keystorePath)

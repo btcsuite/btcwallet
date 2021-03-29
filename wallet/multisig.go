@@ -27,7 +27,7 @@ func (w *Wallet) MakeMultiSigScript(addrs []btcutil.Address, nRequired int) ([]b
 	var addrmgrNs walletdb.ReadBucket
 	defer func() {
 		if dbtx != nil {
-			dbtx.Rollback()
+			_ = dbtx.Rollback()
 		}
 	}()
 
