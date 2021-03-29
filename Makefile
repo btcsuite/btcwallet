@@ -1,12 +1,10 @@
 PKG := github.com/btcsuite/btcwallet
 
-GOVERALLS_PKG := github.com/mattn/goveralls
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOACC_PKG := github.com/ory/go-acc
 GOIMPORTS_PKG := golang.org/x/tools/cmd/goimports
 
 GO_BIN := ${GOPATH}/bin
-GOVERALLS_BIN := $(GO_BIN)/goveralls
 LINT_BIN := $(GO_BIN)/golangci-lint
 GOACC_BIN := $(GO_BIN)/go-acc
 
@@ -48,10 +46,6 @@ all: build check
 # ============
 # DEPENDENCIES
 # ============
-
-$(GOVERALLS_BIN):
-	@$(call print, "Fetching goveralls.")
-	go get -u $(GOVERALLS_PKG)
 
 $(LINT_BIN):
 	@$(call print, "Fetching linter")
@@ -97,10 +91,6 @@ unit-race:
 	@$(call print, "Running unit race tests.")
 	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(GOLIST) | $(XARGS) env $(GOTEST) -race
 
-goveralls: $(GOVERALLS_BIN)
-	@$(call print, "Sending coverage report.")
-	$(GOVERALLS_BIN) -coverprofile=coverage.txt -service=travis-ci
-
 # =========
 # UTILITIES
 # =========
@@ -126,7 +116,6 @@ clean:
 	unit \
 	unit-cover \
 	unit-race \
-	goveralls \
 	fmt \
 	lint \
 	clean

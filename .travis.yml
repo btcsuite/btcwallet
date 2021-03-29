@@ -11,4 +11,3 @@ script:
   - make lint
   - make unit-race
   - make unit-cover
-  - make goveralls
