@@ -9,13 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -189,4 +192,22 @@ func addUtxo(t *testing.T, w *Wallet, incomingTx *wire.MsgTx) {
 	}); err != nil {
 		t.Fatalf("failed inserting tx: %v", err)
 	}
+}
+
+// TestInputYield verifies the functioning of the inputYieldsPositively.
+func TestInputYield(t *testing.T) {
+	addr, _ := btcutil.DecodeAddress("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", &chaincfg.MainNetParams)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	credit := &wtxmgr.Credit{
+		Amount:   1000,
+		PkScript: pkScript,
+	}
+
+	// At 10 sat/b this input is yielding positively.
+	require.True(t, inputYieldsPositively(credit, 10000))
+
+	// At 20 sat/b this input is yielding negatively.
+	require.False(t, inputYieldsPositively(credit, 20000))
 }

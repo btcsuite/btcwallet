@@ -138,7 +138,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	}
 
 	eligible, err := w.findEligibleOutputs(
-		dbtx, keyScope, account, minconf, bs,
+		dbtx, keyScope, account, minconf, bs, feeSatPerKb,
 	)
 	if err != nil {
 		return nil, err
@@ -229,7 +229,8 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 	keyScope *waddrmgr.KeyScope, account uint32, minconf int32,
-	bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
+	bs *waddrmgr.BlockStamp, feeRatePerKb btcutil.Amount) ([]wtxmgr.Credit,
+	error) {
 
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
@@ -286,9 +287,28 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 		if addrAcct != account {
 			continue
 		}
+
+		// Skip inputs that do not raise the total transaction output
+		// value at the requested fee rate.
+		if !inputYieldsPositively(output, feeRatePerKb) {
+			continue
+		}
+
 		eligible = append(eligible, *output)
 	}
 	return eligible, nil
+}
+
+// inputYieldsPositively returns a boolean indicating whether this input yields
+// positively if added to a transaction. This determination is based on the
+// best-case added virtual size. For edge cases this function can return true
+// while the input is yielding slightly negative as part of the final
+// transaction.
+func inputYieldsPositively(credit *wtxmgr.Credit, feeRatePerKb btcutil.Amount) bool {
+	inputSize := txsizes.GetMinInputVirtualSize(credit.PkScript)
+	inputFee := feeRatePerKb * btcutil.Amount(inputSize) / 1000
+
+	return inputFee < credit.Amount
 }
 
 // addrMgrWithChangeSource returns the address manager bucket and a change
