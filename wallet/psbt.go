@@ -12,8 +12,10 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/psbt"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -24,17 +26,22 @@ import (
 // is created and the index -1 is returned.
 //
 // NOTE: If the packet doesn't contain any inputs, coin selection is performed
-// automatically. If the packet does contain any inputs, it is assumed that full
-// coin selection happened externally and no additional inputs are added. If the
-// specified inputs aren't enough to fund the outputs with the given fee rate,
-// an error is returned.
+// automatically, only selecting inputs from the account based on the given key
+// scope and account number. If a key scope is not specified, then inputs from
+// accounts matching the account number provided across all key scopes may be
+// selected. This is done to handle the default account case, where a user wants
+// to fund a PSBT with inputs regardless of their type (NP2WKH, P2WKH, etc.). If
+// the packet does contain any inputs, it is assumed that full coin selection
+// happened externally and no additional inputs are added. If the specified
+// inputs aren't enough to fund the outputs with the given fee rate, an error is
+// returned.
 //
 // NOTE: A caller of the method should hold the global coin selection lock of
 // the wallet. However, no UTXO specific lock lease is acquired for any of the
 // selected/validated inputs by this method. It is in the caller's
 // responsibility to lock the inputs before handing the partial transaction out.
-func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
-	feeSatPerKB btcutil.Amount) (int32, error) {
+func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
+	account uint32, feeSatPerKB btcutil.Amount) (int32, error) {
 
 	// Make sure the packet is well formed. We only require there to be at
 	// least one output but not necessarily any inputs.
@@ -70,7 +77,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 	addInputInfo := func(inputs []*wire.TxIn) error {
 		packet.Inputs = make([]psbt.PInput, len(inputs))
 		for idx, in := range inputs {
-			tx, utxo, _, err := w.FetchInputInfo(
+			tx, utxo, derivationPath, _, err := w.FetchInputInfo(
 				&in.PreviousOutPoint,
 			)
 			if err != nil {
@@ -91,10 +98,27 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 			}
 			packet.Inputs[idx].SighashType = txscript.SigHashAll
 
+			// Include the derivation path for each input.
+			packet.Inputs[idx].Bip32Derivation = []*psbt.Bip32Derivation{
+				derivationPath,
+			}
+
 			// We don't want to include the witness or any script
-			// just yet.
+			// on the unsigned TX just yet.
 			packet.UnsignedTx.TxIn[idx].Witness = wire.TxWitness{}
 			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
+
+			// For nested P2WKH we need to add the redeem script to
+			// the input, otherwise an offline wallet won't be able
+			// to sign for it. For normal P2WKH this will be nil.
+			addr, witnessProgram, _, err := w.scriptForOutput(utxo)
+			if err != nil {
+				return fmt.Errorf("error fetching UTXO "+
+					"script: %v", err)
+			}
+			if addr.AddrType() == waddrmgr.NestedWitnessPubKey {
+				packet.Inputs[idx].RedeemScript = witnessProgram
+			}
 		}
 
 		return nil
@@ -108,8 +132,8 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 		// includes everything we need, specifically fee estimation and
 		// change address creation.
 		tx, err = w.CreateSimpleTx(
-			account, packet.UnsignedTx.TxOut, 1, feeSatPerKB,
-			false,
+			keyScope, account, packet.UnsignedTx.TxOut, 1,
+			feeSatPerKB, false,
 		)
 		if err != nil {
 			return 0, fmt.Errorf("error creating funding TX: %v",
@@ -161,7 +185,12 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 		if err != nil {
 			return 0, err
 		}
-		_, changeSource := w.addrMgrWithChangeSource(dbtx, account)
+		_, changeSource, err := w.addrMgrWithChangeSource(
+			dbtx, keyScope, account,
+		)
+		if err != nil {
+			return 0, err
+		}
 
 		// Ask the txauthor to create a transaction with our selected
 		// coins. This will perform fee estimation and add a change
@@ -227,7 +256,9 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, account uint32,
 //
 // NOTE: This method does NOT publish the transaction after it's been finalized
 // successfully.
-func (w *Wallet) FinalizePsbt(packet *psbt.Packet) error {
+func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
+	packet *psbt.Packet) error {
+
 	// Let's check that this is actually something we can and want to sign.
 	// We need at least one input and one output.
 	err := psbt.VerifyInputOutputLen(packet, true, true)
@@ -259,7 +290,7 @@ func (w *Wallet) FinalizePsbt(packet *psbt.Packet) error {
 		// We can only sign this input if it's ours, so we try to map it
 		// to a coin we own. If we can't, then we'll continue as it
 		// isn't our input.
-		fullTx, txOut, _, err := w.FetchInputInfo(
+		fullTx, txOut, _, _, err := w.FetchInputInfo(
 			&txIn.PreviousOutPoint,
 		)
 		if err != nil {
@@ -298,8 +329,37 @@ func (w *Wallet) FinalizePsbt(packet *psbt.Packet) error {
 			}
 		}
 
-		// Finally, we'll sign the input as is, and populate the input
-		// with the witness and sigScript (if needed).
+		// Finally, if the input doesn't belong to a watch-only account,
+		// then we'll sign it as is, and populate the input with the
+		// witness and sigScript (if needed).
+		watchOnly := false
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			ns := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			if keyScope == nil {
+				// If a key scope wasn't specified, then coin
+				// selection was performed from the default
+				// wallet accounts (NP2WKH, P2WKH), so any key
+				// scope provided doesn't impact the result of
+				// this call.
+				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+					ns, waddrmgr.KeyScopeBIP0084, account,
+				)
+			} else {
+				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+					ns, *keyScope, account,
+				)
+			}
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("unable to determine if account is "+
+				"watch-only: %v", err)
+		}
+		if watchOnly {
+			continue
+		}
+
 		witness, sigScript, err := w.ComputeInputScript(
 			tx, signOutput, idx, sigHashes, in.SighashType, nil,
 		)

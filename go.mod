@@ -7,6 +7,7 @@ require (
 	github.com/btcsuite/btcutil/psbt v1.0.3-0.20201208143702-a53e38424cce
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.0.0
 	github.com/btcsuite/btcwallet/wallet/txrules v1.0.0
+	github.com/btcsuite/btcwallet/wallet/txsizes v1.0.0
 	github.com/btcsuite/btcwallet/walletdb v1.3.4
 	github.com/btcsuite/btcwallet/wtxmgr v1.2.0
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792

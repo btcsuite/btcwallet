@@ -1125,6 +1125,7 @@ func logFilterBlocksResp(block wtxmgr.BlockMeta,
 
 type (
 	createTxRequest struct {
+		keyScope    *waddrmgr.KeyScope
 		account     uint32
 		outputs     []*wire.TxOut
 		minconf     int32
@@ -1159,8 +1160,10 @@ out:
 				txr.resp <- createTxResponse{nil, err}
 				continue
 			}
-			tx, err := w.txToOutputs(txr.outputs, txr.account,
-				txr.minconf, txr.feeSatPerKB, txr.dryRun)
+			tx, err := w.txToOutputs(
+				txr.outputs, txr.keyScope, txr.account,
+				txr.minconf, txr.feeSatPerKB, txr.dryRun,
+			)
 			heldUnlock.release()
 			txr.resp <- createTxResponse{tx, err}
 		case <-quit:
@@ -1170,20 +1173,25 @@ out:
 	w.wg.Done()
 }
 
-// CreateSimpleTx creates a new signed transaction spending unspent P2PKH
-// outputs with at least minconf confirmations spending to any number of
-// address/amount pairs.  Change and an appropriate transaction fee are
-// automatically included, if necessary.  All transaction creation through this
-// function is serialized to prevent the creation of many transactions which
-// spend the same outputs.
+// CreateSimpleTx creates a new signed transaction spending unspent outputs with
+// at least minconf confirmations spending to any number of address/amount
+// pairs. Only unspent outputs belonging to the given key scope and account will
+// be selected, unless a key scope is not specified. In that case, inputs from all
+// accounts may be selected, no matter what key scope they belong to. This is
+// done to handle the default account case, where a user wants to fund a PSBT
+// with inputs regardless of their type (NP2WKH, P2WKH, etc.). Change and an
+// appropriate transaction fee are automatically included, if necessary. All
+// transaction creation through this function is serialized to prevent the
+// creation of many transactions which spend the same outputs.
 //
 // NOTE: The dryRun argument can be set true to create a tx that doesn't alter
 // the database. A tx created with this set to true SHOULD NOT be broadcasted.
-func (w *Wallet) CreateSimpleTx(account uint32, outputs []*wire.TxOut,
-	minconf int32, satPerKb btcutil.Amount, dryRun bool) (
-	*txauthor.AuthoredTx, error) {
+func (w *Wallet) CreateSimpleTx(keyScope *waddrmgr.KeyScope, account uint32,
+	outputs []*wire.TxOut, minconf int32, satPerKb btcutil.Amount,
+	dryRun bool) (*txauthor.AuthoredTx, error) {
 
 	req := createTxRequest{
+		keyScope:    keyScope,
 		account:     account,
 		outputs:     outputs,
 		minconf:     minconf,
@@ -1754,6 +1762,46 @@ func (w *Wallet) AccountProperties(scope waddrmgr.KeyScope, acct uint32) (*waddr
 	return props, err
 }
 
+// AccountPropertiesByName returns the properties of an account by its name. It
+// first fetches the desynced information from the address manager, then updates
+// the indexes based on the address pools.
+func (w *Wallet) AccountPropertiesByName(scope waddrmgr.KeyScope,
+	name string) (*waddrmgr.AccountProperties, error) {
+
+	manager, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var props *waddrmgr.AccountProperties
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		acct, err := manager.LookupAccount(waddrmgrNs, name)
+		if err != nil {
+			return err
+		}
+		props, err = manager.AccountProperties(waddrmgrNs, acct)
+		return err
+	})
+	return props, err
+}
+
+// LookupAccount returns the corresponding key scope and account number for the
+// account with the given name.
+func (w *Wallet) LookupAccount(name string) (waddrmgr.KeyScope, uint32, error) {
+	var (
+		keyScope waddrmgr.KeyScope
+		account  uint32
+	)
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		var err error
+		keyScope, account, err = w.Manager.LookupAccount(ns, name)
+		return err
+	})
+	return keyScope, account, err
+}
+
 // RenameAccount sets the name for an account number to newName.
 func (w *Wallet) RenameAccount(scope waddrmgr.KeyScope, account uint32, newName string) error {
 	manager, err := w.Manager.FetchScopedKeyManager(scope)
@@ -2178,7 +2226,9 @@ type GetTransactionsResult struct {
 // Transaction results are organized by blocks in ascending order and unmined
 // transactions in an unspecified order.  Mined transactions are saved in a
 // Block structure which records properties about the block.
-func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier, cancel <-chan struct{}) (*GetTransactionsResult, error) {
+func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
+	accountName string, cancel <-chan struct{}) (*GetTransactionsResult, error) {
+
 	var start, end int32 = 0, -1
 
 	w.chainClientLock.Lock()
@@ -2500,7 +2550,7 @@ func (s creditSlice) Swap(i, j int) {
 // contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
 func (w *Wallet) ListUnspent(minconf, maxconf int32,
-	addresses map[string]struct{}) ([]*btcjson.ListUnspentResult, error) {
+	accountName string) ([]*btcjson.ListUnspentResult, error) {
 
 	var results []*btcjson.ListUnspentResult
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
@@ -2509,7 +2559,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 
 		syncBlock := w.Manager.SyncedTo()
 
-		filter := len(addresses) != 0
+		filter := accountName != ""
 		unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
@@ -2548,7 +2598,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			//
 			// This will be unnecessary once transactions and outputs are
 			// grouped under the associated account in the db.
-			acctName := defaultAccountName
+			outputAcctName := defaultAccountName
 			sc, addrs, _, err := txscript.ExtractPkScriptAddrs(
 				output.PkScript, w.chainParams)
 			if err != nil {
@@ -2559,22 +2609,15 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 				if err == nil {
 					s, err := smgr.AccountName(addrmgrNs, acct)
 					if err == nil {
-						acctName = s
+						outputAcctName = s
 					}
 				}
 			}
 
-			if filter {
-				for _, addr := range addrs {
-					_, ok := addresses[addr.EncodeAddress()]
-					if ok {
-						goto include
-					}
-				}
+			if filter && outputAcctName != accountName {
 				continue
 			}
 
-		include:
 			// At the moment watch-only addresses are not supported, so all
 			// recorded outputs that are not multisig are "spendable".
 			// Multisig outputs are only "spendable" if all keys are
@@ -2614,7 +2657,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			result := &btcjson.ListUnspentResult{
 				TxID:          output.OutPoint.Hash.String(),
 				Vout:          output.OutPoint.Index,
-				Account:       acctName,
+				Account:       outputAcctName,
 				ScriptPubKey:  hex.EncodeToString(output.PkScript),
 				Amount:        output.Amount.ToBTC(),
 				Confirmations: int64(confs),
@@ -3104,10 +3147,16 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 	return amount, err
 }
 
-// SendOutputs creates and sends payment transactions. It returns the
-// transaction upon success.
-func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32, satPerKb btcutil.Amount, label string) (*wire.MsgTx, error) {
+// SendOutputs creates and sends payment transactions. Coin selection is
+// performed by the wallet, choosing inputs that belong to the given key scope
+// and account, unless a key scope is not specified. In that case, inputs from
+// accounts matching the account number provided across all key scopes may be
+// selected. This is done to handle the default account case, where a user wants
+// to fund a PSBT with inputs regardless of their type (NP2WKH, P2WKH, etc.). It
+// returns the transaction upon success.
+func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, satPerKb btcutil.Amount,
+	label string) (*wire.MsgTx, error) {
 
 	// Ensure the outputs to be created adhere to the network's consensus
 	// rules.
@@ -3125,7 +3174,7 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, account uint32,
 	// continue to re-broadcast the transaction upon restarts until it has
 	// been confirmed.
 	createdTx, err := w.CreateSimpleTx(
-		account, outputs, minconf, satPerKb, false,
+		keyScope, account, outputs, minconf, satPerKb, false,
 	)
 	if err != nil {
 		return nil, err

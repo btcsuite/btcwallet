@@ -219,7 +219,7 @@ func TestFundPsbt(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			changeIndex, err := w.FundPsbt(
-				tc.packet, 0, tc.feeRateSatPerKB,
+				tc.packet, nil, 0, tc.feeRateSatPerKB,
 			)
 
 			// In any case, unlock the UTXO before continuing, we
@@ -391,7 +391,7 @@ func TestFinalizePsbt(t *testing.T) {
 	}
 
 	// Finalize it to add all witness data then extract the final TX.
-	err = w.FinalizePsbt(packet)
+	err = w.FinalizePsbt(nil, 0, packet)
 	if err != nil {
 		t.Fatalf("error finalizing PSBT packet: %v", err)
 	}

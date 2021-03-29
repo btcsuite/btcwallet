@@ -82,6 +82,16 @@ const (
 	//   - 4 bytes sequence
 	RedeemP2WPKHInputSize = 32 + 4 + 1 + RedeemP2WPKHScriptSize + 4
 
+	// NestedP2WPKHPkScriptSize is the size of a transaction output script
+	// that pays to a pay-to-witness-key hash nested in P2SH (P2SH-P2WPKH).
+	// It is calculated as:
+	//
+	//   - OP_HASH160
+	//   - OP_DATA_20
+	//   - 20 bytes script hash
+	//   - OP_EQUAL
+	NestedP2WPKHPkScriptSize = 1 + 1 + 20 + 1
+
 	// RedeemNestedP2WPKHScriptSize is the worst case size of a transaction
 	// input script that redeems a pay-to-witness-key hash nested in P2SH
 	// (P2SH-P2WPKH). It is calculated as:
@@ -150,12 +160,14 @@ func EstimateSerializeSize(inputCount int, txOuts []*wire.TxOut, addChangeOutput
 // from txOuts. The estimate is incremented for an additional P2PKH
 // change output if addChangeOutput is true.
 func EstimateVirtualSize(numP2PKHIns, numP2WPKHIns, numNestedP2WPKHIns int,
-	txOuts []*wire.TxOut, addChangeOutput bool) int {
-	changeSize := 0
+	txOuts []*wire.TxOut, changeScriptSize int) int {
 	outputCount := len(txOuts)
-	if addChangeOutput {
-		// We are always using P2WPKH as change output.
-		changeSize = P2WPKHOutputSize
+
+	changeOutputSize := 0
+	if changeScriptSize > 0 {
+		changeOutputSize = 8 +
+			wire.VarIntSerializeSize(uint64(changeScriptSize)) +
+			changeScriptSize
 		outputCount++
 	}
 
@@ -170,7 +182,7 @@ func EstimateVirtualSize(numP2PKHIns, numP2WPKHIns, numNestedP2WPKHIns int,
 		numP2WPKHIns*RedeemP2WPKHInputSize +
 		numNestedP2WPKHIns*RedeemNestedP2WPKHInputSize +
 		SumOutputSerializeSizes(txOuts) +
-		changeSize
+		changeOutputSize
 
 	// If this transaction has any witness inputs, we must count the
 	// witness data.

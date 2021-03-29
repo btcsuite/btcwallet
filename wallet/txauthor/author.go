@@ -60,8 +60,15 @@ type AuthoredTx struct {
 	ChangeIndex     int // negative if no change
 }
 
-// ChangeSource provides P2PKH change output scripts for transaction creation.
-type ChangeSource func() ([]byte, error)
+// ChangeSource provides change output scripts for transaction creation.
+type ChangeSource struct {
+	// NewScript is a closure that produces unique change output scripts per
+	// invocation.
+	NewScript func() ([]byte, error)
+
+	// ScriptSize is the size in bytes of scripts produced by `NewScript`.
+	ScriptSize int
+}
 
 // NewUnsignedTransaction creates an unsigned transaction paying to one or more
 // non-change outputs.  An appropriate transaction fee is included based on the
@@ -84,10 +91,12 @@ type ChangeSource func() ([]byte, error)
 //
 // BUGS: Fee estimation may be off when redeeming non-compressed P2PKH outputs.
 func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
-	fetchInputs InputSource, fetchChange ChangeSource) (*AuthoredTx, error) {
+	fetchInputs InputSource, changeSource *ChangeSource) (*AuthoredTx, error) {
 
 	targetAmount := SumOutputValues(outputs)
-	estimatedSize := txsizes.EstimateVirtualSize(0, 1, 0, outputs, true)
+	estimatedSize := txsizes.EstimateVirtualSize(
+		0, 1, 0, outputs, changeSource.ScriptSize,
+	)
 	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize)
 
 	for {
@@ -115,8 +124,9 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			}
 		}
 
-		maxSignedSize := txsizes.EstimateVirtualSize(p2pkh, p2wpkh,
-			nested, outputs, true)
+		maxSignedSize := txsizes.EstimateVirtualSize(
+			p2pkh, p2wpkh, nested, outputs, changeSource.ScriptSize,
+		)
 		maxRequiredFee := txrules.FeeForSerializeSize(feeRatePerKb, maxSignedSize)
 		remainingAmount := inputAmount - targetAmount
 		if remainingAmount < maxRequiredFee {
@@ -130,17 +140,15 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			TxOut:    outputs,
 			LockTime: 0,
 		}
+
 		changeIndex := -1
 		changeAmount := inputAmount - targetAmount - maxRequiredFee
 		if changeAmount != 0 && !txrules.IsDustAmount(changeAmount,
-			txsizes.P2WPKHPkScriptSize, txrules.DefaultRelayFeePerKb) {
-			changeScript, err := fetchChange()
+			changeSource.ScriptSize, txrules.DefaultRelayFeePerKb) {
+
+			changeScript, err := changeSource.NewScript()
 			if err != nil {
 				return nil, err
-			}
-			if len(changeScript) > txsizes.P2WPKHPkScriptSize {
-				return nil, errors.New("fee estimation requires change " +
-					"scripts no larger than P2WPKH output scripts")
 			}
 			change := wire.NewTxOut(int64(changeAmount), changeScript)
 			l := len(outputs)

@@ -34,7 +34,8 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	defer cleanup()
 
 	// Create an address we can use to send some coins to.
-	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0044)
+	keyScope := waddrmgr.KeyScopeBIP0049Plus
+	addr, err := w.CurrentAddress(0, keyScope)
 	if err != nil {
 		t.Fatalf("unable to get current address: %v", addr)
 	}
@@ -70,7 +71,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 
 	// First do a few dry-runs, making sure the number of addresses in the
 	// database us not inflated.
-	dryRunTx, err := w.txToOutputs(txOuts, 0, 1, 1000, true)
+	dryRunTx, err := w.txToOutputs(txOuts, nil, 0, 1, 1000, true)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 		t.Fatalf("expected 1 address, found %v", len(addresses))
 	}
 
-	dryRunTx2, err := w.txToOutputs(txOuts, 0, 1, 1000, true)
+	dryRunTx2, err := w.txToOutputs(txOuts, nil, 0, 1, 1000, true)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 
 	// Now we do a proper, non-dry run. This should add a change address
 	// to the database.
-	tx, err := w.txToOutputs(txOuts, 0, 1, 1000, false)
+	tx, err := w.txToOutputs(txOuts, nil, 0, 1, 1000, false)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
 	}

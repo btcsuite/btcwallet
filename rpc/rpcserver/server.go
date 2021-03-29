@@ -408,7 +408,7 @@ func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransacti
 
 	_ = minRecentTxs
 
-	gtr, err := s.wallet.GetTransactions(startBlock, endBlock, ctx.Done())
+	gtr, err := s.wallet.GetTransactions(startBlock, endBlock, "", ctx.Done())
 	if err != nil {
 		return nil, translateError(err)
 	}

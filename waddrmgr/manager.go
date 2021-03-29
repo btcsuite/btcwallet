@@ -405,6 +405,29 @@ func (m *Manager) watchOnly() bool {
 	return m.watchingOnly
 }
 
+// IsWatchOnlyAccount determines if the account with the given key scope is set
+// up as watch-only.
+func (m *Manager) IsWatchOnlyAccount(ns walletdb.ReadBucket, keyScope KeyScope,
+	account uint32) (bool, error) {
+
+	if m.WatchOnly() {
+		return true, nil
+	}
+
+	// Assume the default imported account has no private keys.
+	//
+	// TODO: Actually check whether it does.
+	if account == ImportedAddrAccount {
+		return true, nil
+	}
+
+	scopedMgr, err := m.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		return false, err
+	}
+	return scopedMgr.IsWatchOnlyAccount(ns, account)
+}
+
 // lock performs a best try effort to remove and zero all secret keys associated
 // with the address manager.
 //
@@ -1218,7 +1241,7 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 		// We'll also derive any private keys that are pending due to
 		// them being created while the address manager was locked.
 		for _, info := range manager.deriveOnUnlock {
-			addressKey, _, err := manager.deriveKeyFromPath(
+			addressKey, _, _, err := manager.deriveKeyFromPath(
 				ns, info.managedAddr.InternalAccount(),
 				info.branch, info.index, true,
 			)
@@ -1274,6 +1297,25 @@ func ValidateAccountName(name string) error {
 		return managerError(ErrInvalidAccount, str, nil)
 	}
 	return nil
+}
+
+// LookupAccount returns the corresponding key scope and account number for the
+// account with the given name.
+func (m *Manager) LookupAccount(ns walletdb.ReadBucket, name string) (KeyScope,
+	uint32, error) {
+
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	for keyScope, scopedMgr := range m.scopedManagers {
+		acct, err := scopedMgr.LookupAccount(ns, name)
+		if err == nil {
+			return keyScope, acct, nil
+		}
+	}
+
+	str := fmt.Sprintf("account name '%s' not found", name)
+	return KeyScope{}, 0, managerError(ErrAccountNotFound, str, nil)
 }
 
 // selectCryptoKey selects the appropriate crypto key based on the key type. An

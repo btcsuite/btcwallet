@@ -72,6 +72,12 @@ type DerivationPath struct {
 	// Index is the final child in the derivation path. This denotes the
 	// key index within as a child of the account and branch.
 	Index uint32
+
+	// MasterKeyFingerprint represents the fingerprint of the root key (also
+	// known as the key with derivation path m/) corresponding to the
+	// account public key. This may be required by some hardware wallets for
+	// proper identification and signing.
+	MasterKeyFingerprint uint32
 }
 
 // KeyScope represents a restricted key scope from the primary root key within
@@ -444,10 +450,11 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 		index--
 	}
 	lastExtAddrPath := DerivationPath{
-		InternalAccount: account,
-		Account:         acctInfo.acctKeyPub.ChildIndex(),
-		Branch:          branch,
-		Index:           index,
+		InternalAccount:      account,
+		Account:              acctInfo.acctKeyPub.ChildIndex(),
+		Branch:               branch,
+		Index:                index,
+		MasterKeyFingerprint: acctInfo.masterKeyFingerprint,
 	}
 	lastExtKey, err := s.deriveKey(acctInfo, branch, index, hasPrivateKey)
 	if err != nil {
@@ -465,10 +472,11 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 		index--
 	}
 	lastIntAddrPath := DerivationPath{
-		InternalAccount: account,
-		Account:         acctInfo.acctKeyPub.ChildIndex(),
-		Branch:          branch,
-		Index:           index,
+		InternalAccount:      account,
+		Account:              acctInfo.acctKeyPub.ChildIndex(),
+		Branch:               branch,
+		Index:                index,
+		MasterKeyFingerprint: acctInfo.masterKeyFingerprint,
 	}
 	lastIntKey, err := s.deriveKey(acctInfo, branch, index, hasPrivateKey)
 	if err != nil {
@@ -580,7 +588,7 @@ func (s *ScopedKeyManager) DeriveFromKeyPath(ns walletdb.ReadBucket,
 	watchOnly := s.rootManager.WatchOnly()
 	private := !s.rootManager.IsLocked() && !watchOnly
 
-	addrKey, _, err := s.deriveKeyFromPath(
+	addrKey, _, _, err := s.deriveKeyFromPath(
 		ns, kp.InternalAccount, kp.Branch, kp.Index, private,
 	)
 	if err != nil {
@@ -601,18 +609,18 @@ func (s *ScopedKeyManager) DeriveFromKeyPath(ns walletdb.ReadBucket,
 // This function MUST be called with the manager lock held for writes.
 func (s *ScopedKeyManager) deriveKeyFromPath(ns walletdb.ReadBucket,
 	internalAccount, branch, index uint32, private bool) (
-	*hdkeychain.ExtendedKey, *hdkeychain.ExtendedKey, error) {
+	*hdkeychain.ExtendedKey, *hdkeychain.ExtendedKey, uint32, error) {
 
 	// Look up the account key information.
 	acctInfo, err := s.loadAccountInfo(ns, internalAccount)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	private = private && acctInfo.acctKeyPriv != nil
 
 	addrKey, err := s.deriveKey(acctInfo, branch, index, private)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	acctKey := acctInfo.acctKeyPub
@@ -620,7 +628,7 @@ func (s *ScopedKeyManager) deriveKeyFromPath(ns walletdb.ReadBucket,
 		acctKey = acctInfo.acctKeyPriv
 	}
 
-	return addrKey, acctKey, nil
+	return addrKey, acctKey, acctInfo.masterKeyFingerprint, nil
 }
 
 // chainAddressRowToManaged returns a new managed address based on chained
@@ -634,7 +642,7 @@ func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 	// function, we use the internal isLocked to avoid a deadlock.
 	private := !s.rootManager.isLocked() && !s.rootManager.watchOnly()
 
-	addressKey, acctKey, err := s.deriveKeyFromPath(
+	addressKey, acctKey, masterKeyFingerprint, err := s.deriveKeyFromPath(
 		ns, row.account, row.branch, row.index, private,
 	)
 	if err != nil {
@@ -647,10 +655,11 @@ func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 	}
 	return s.keyToManaged(
 		addressKey, DerivationPath{
-			InternalAccount: row.account,
-			Account:         acctKey.ChildIndex(),
-			Branch:          row.branch,
-			Index:           row.index,
+			InternalAccount:      row.account,
+			Account:              acctKey.ChildIndex(),
+			Branch:               row.branch,
+			Index:                row.index,
+			MasterKeyFingerprint: masterKeyFingerprint,
 		}, acctInfo,
 	)
 }
@@ -2175,6 +2184,22 @@ func (s *ScopedKeyManager) ForEachInternalActiveAddress(ns walletdb.ReadBucket,
 	}
 
 	return nil
+}
+
+// IsWatchOnlyAccount determines if the given account belonging to this scoped
+// manager is set up as watch-only.
+func (s *ScopedKeyManager) IsWatchOnlyAccount(ns walletdb.ReadBucket,
+	account uint32) (bool, error) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	acctInfo, err := s.loadAccountInfo(ns, account)
+	if err != nil {
+		return false, err
+	}
+
+	return acctInfo.acctKeyPriv == nil, nil
 }
 
 // cloneKeyWithVersion clones an extended key to use the version corresponding

@@ -11,6 +11,8 @@ import (
 
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcutil/psbt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -105,15 +107,15 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 // full transaction, the target txout and the number of confirmations are
 // returned. Otherwise, a non-nil error value of ErrNotMine is returned instead.
 func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
-	*wire.TxOut, int64, error) {
+	*wire.TxOut, *psbt.Bip32Derivation, int64, error) {
 
 	// We manually look up the output within the tx store.
 	txid := &prevOut.Hash
 	txDetail, err := UnstableAPI(w).TxDetails(txid)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, 0, err
 	} else if txDetail == nil {
-		return nil, nil, 0, ErrNotMine
+		return nil, nil, nil, 0, ErrNotMine
 	}
 
 	// With the output retrieved, we'll make an additional check to ensure
@@ -122,19 +124,25 @@ func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
 	// like in the event of us being the sender of the transaction.
 	numOutputs := uint32(len(txDetail.TxRecord.MsgTx.TxOut))
 	if prevOut.Index >= numOutputs {
-		return nil, nil, 0, fmt.Errorf("invalid output index %v for "+
+		return nil, nil, nil, 0, fmt.Errorf("invalid output index %v for "+
 			"transaction with %v outputs", prevOut.Index,
 			numOutputs)
 	}
 	pkScript := txDetail.TxRecord.MsgTx.TxOut[prevOut.Index].PkScript
-	if _, err := w.fetchOutputAddr(pkScript); err != nil {
-		return nil, nil, 0, err
+	addr, err := w.fetchOutputAddr(pkScript)
+	if err != nil {
+		return nil, nil, nil, 0, err
 	}
+	pubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, nil, nil, 0, err
+	}
+	keyScope, derivationPath, _ := pubKeyAddr.DerivationInfo()
 
 	// Determine the number of confirmations the output currently has.
 	_, currentHeight, err := w.chainClient.GetBestBlock()
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("unable to retrieve current "+
+		return nil, nil, nil, 0, fmt.Errorf("unable to retrieve current "+
 			"height: %v", err)
 	}
 	confs := int64(0)
@@ -143,9 +151,19 @@ func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
 	}
 
 	return &txDetail.TxRecord.MsgTx, &wire.TxOut{
-		Value:    txDetail.TxRecord.MsgTx.TxOut[prevOut.Index].Value,
-		PkScript: pkScript,
-	}, confs, nil
+			Value:    txDetail.TxRecord.MsgTx.TxOut[prevOut.Index].Value,
+			PkScript: pkScript,
+		}, &psbt.Bip32Derivation{
+			PubKey:               pubKeyAddr.PubKey().SerializeCompressed(),
+			MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
+			Bip32Path: []uint32{
+				keyScope.Purpose + hdkeychain.HardenedKeyStart,
+				keyScope.Coin + hdkeychain.HardenedKeyStart,
+				derivationPath.Account,
+				derivationPath.Branch,
+				derivationPath.Index,
+			},
+		}, confs, nil
 }
 
 // fetchOutputAddr attempts to fetch the managed address corresponding to the

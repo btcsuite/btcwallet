@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -99,14 +100,17 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 // txToOutputs creates a signed transaction which includes each output from
 // outputs.  Previous outputs to reedeem are chosen from the passed account's
 // UTXO set and minconf policy. An additional output may be added to return
-// change to the wallet.  An appropriate fee is included based on the wallet's
-// current relay fee.  The wallet must be unlocked to create the transaction.
+// change to the wallet. This output will have an address generated from the
+// given key scope and account. If a key scope is not specified, the address
+// will always be generated from the P2WKH key scope. An appropriate fee is
+// included based on the wallet's current relay fee. The wallet must be
+// unlocked to create the transaction.
 //
 // NOTE: The dryRun argument can be set true to create a tx that doesn't alter
 // the database. A tx created with this set to true will intentionally have no
 // input scripts added and SHOULD NOT be broadcasted.
-func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
-	minconf int32, feeSatPerKb btcutil.Amount, dryRun bool) (
+func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount, dryRun bool) (
 	tx *txauthor.AuthoredTx, err error) {
 
 	chainClient, err := w.requireChainClient()
@@ -120,7 +124,12 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 	}
 	defer func() { _ = dbtx.Rollback() }()
 
-	addrmgrNs, changeSource := w.addrMgrWithChangeSource(dbtx, account)
+	addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
+		dbtx, keyScope, account,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Get current block's height and hash.
 	bs, err := chainClient.BlockStamp()
@@ -128,14 +137,17 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 		return nil, err
 	}
 
-	eligible, err := w.findEligibleOutputs(dbtx, account, minconf, bs)
+	eligible, err := w.findEligibleOutputs(
+		dbtx, keyScope, account, minconf, bs,
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	inputSource := makeInputSource(eligible)
-	tx, err = txauthor.NewUnsignedTransaction(outputs, feeSatPerKb,
-		inputSource, changeSource)
+	tx, err = txauthor.NewUnsignedTransaction(
+		outputs, feeSatPerKb, inputSource, changeSource,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -155,14 +167,36 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 		return tx, nil
 	}
 
-	err = tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
+	// Before committing the transaction, we'll sign our inputs. If the
+	// inputs are part of a watch-only account, there's no private key
+	// information stored, so we'll skip signing such.
+	var watchOnly bool
+	if keyScope == nil {
+		// If a key scope wasn't specified, then coin selection was
+		// performed from the default wallet accounts (NP2WKH, P2WKH),
+		// so any key scope provided doesn't impact the result of this
+		// call.
+		watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			addrmgrNs, waddrmgr.KeyScopeBIP0084, account,
+		)
+	} else {
+		watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			addrmgrNs, *keyScope, account,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
+	if !watchOnly {
+		err = tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
+		if err != nil {
+			return nil, err
+		}
 
-	err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
-	if err != nil {
-		return nil, err
+		err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if err := dbtx.Commit(); err != nil {
@@ -193,7 +227,10 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, account uint32,
 	return tx, nil
 }
 
-func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx, account uint32, minconf int32, bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
+func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
+	keyScope *waddrmgr.KeyScope, account uint32, minconf int32,
+	bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
+
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -239,8 +276,14 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx, account uint32, minco
 		if err != nil || len(addrs) != 1 {
 			continue
 		}
-		_, addrAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
-		if err != nil || addrAcct != account {
+		scopedMgr, addrAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+		if err != nil {
+			continue
+		}
+		if keyScope != nil && scopedMgr.Scope() != *keyScope {
+			continue
+		}
+		if addrAcct != account {
 			continue
 		}
 		eligible = append(eligible, *output)
@@ -249,26 +292,61 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx, account uint32, minco
 }
 
 // addrMgrWithChangeSource returns the address manager bucket and a change
-// source function that returns change addresses from said address manager.
+// source that returns change addresses from said address manager. The change
+// addresses will come from the specified key scope and account, unless a key
+// scope is not specified. In that case, change addresses will always come from
+// the P2WKH key scope.
 func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
-	account uint32) (walletdb.ReadWriteBucket, txauthor.ChangeSource) {
+	changeKeyScope *waddrmgr.KeyScope, account uint32) (
+	walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
 
+	// Determine the address type for change addresses of the given account.
+	if changeKeyScope == nil {
+		changeKeyScope = &waddrmgr.KeyScopeBIP0084
+	}
+	addrType := waddrmgr.ScopeAddrMap[*changeKeyScope].InternalAddrType
+
+	// It's possible for the account to have an address schema override, so
+	// prefer that if it exists.
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
-	changeSource := func() ([]byte, error) {
-		// Derive the change output script. We'll use the default key
-		// scope responsible for P2WPKH addresses to do so. As a hack to
-		// allow spending from the imported account, change addresses
-		// are created from account 0.
-		var changeAddr btcutil.Address
-		var err error
-		changeKeyScope := waddrmgr.KeyScopeBIP0084
+	scopeMgr, err := w.Manager.FetchScopedKeyManager(*changeKeyScope)
+	if err != nil {
+		return nil, nil, err
+	}
+	accountInfo, err := scopeMgr.AccountProperties(addrmgrNs, account)
+	if err != nil {
+		return nil, nil, err
+	}
+	if accountInfo.AddrSchema != nil {
+		addrType = accountInfo.AddrSchema.InternalAddrType
+	}
+
+	// Compute the expected size of the script for the change address type.
+	var scriptSize int
+	switch addrType {
+	case waddrmgr.PubKeyHash:
+		scriptSize = txsizes.P2PKHPkScriptSize
+	case waddrmgr.NestedWitnessPubKey:
+		scriptSize = txsizes.NestedP2WPKHPkScriptSize
+	case waddrmgr.WitnessPubKey:
+		scriptSize = txsizes.P2WPKHPkScriptSize
+	}
+
+	newChangeScript := func() ([]byte, error) {
+		// Derive the change output script. As a hack to allow spending
+		// from the imported account, change addresses are created from
+		// account 0.
+		var (
+			changeAddr btcutil.Address
+			err        error
+		)
 		if account == waddrmgr.ImportedAddrAccount {
 			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, 0, changeKeyScope,
+				addrmgrNs, 0, *changeKeyScope,
 			)
 		} else {
 			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, account, changeKeyScope,
+				addrmgrNs, account, *changeKeyScope,
 			)
 		}
 		if err != nil {
@@ -276,7 +354,11 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 		}
 		return txscript.PayToAddrScript(changeAddr)
 	}
-	return addrmgrNs, changeSource
+
+	return addrmgrNs, &txauthor.ChangeSource{
+		ScriptSize: scriptSize,
+		NewScript:  newChangeScript,
+	}, nil
 }
 
 // validateMsgTx verifies transaction input scripts for tx.  All previous output
