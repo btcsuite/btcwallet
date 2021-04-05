@@ -9,11 +9,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/gozmq"
+	"github.com/lightningnetwork/lnd/ticker"
 )
 
 const (
@@ -36,7 +38,52 @@ const (
 	// seqNumLen is the length of the sequence number of a message sent from
 	// bitcoind through ZMQ.
 	seqNumLen = 4
+
+	// errBlockPrunedStr is the error message returned by bitcoind upon
+	// calling GetBlock on a pruned block.
+	errBlockPrunedStr = "Block not available (pruned data)"
 )
+
+// BitcoindConfig contains all of the parameters required to establish a
+// connection to a bitcoind's RPC.
+type BitcoindConfig struct {
+	// ChainParams are the chain parameters the bitcoind server is running
+	// on.
+	ChainParams *chaincfg.Params
+
+	// Host is the IP address and port of the bitcoind's RPC server.
+	Host string
+
+	// User is the username to use to authenticate to bitcoind's RPC server.
+	User string
+
+	// Pass is the passphrase to use to authenticate to bitcoind's RPC
+	// server.
+	Pass string
+
+	// ZMQBlockHost is the IP address and port of the bitcoind's rawblock
+	// listener.
+	ZMQBlockHost string
+
+	// ZMQTxHost is the IP address and port of the bitcoind's rawtx
+	// listener.
+	ZMQTxHost string
+
+	// ZMQReadDeadline represents the read deadline we'll apply when reading
+	// ZMQ messages from either subscription.
+	ZMQReadDeadline time.Duration
+
+	// Dialer is a closure we'll use to dial Bitcoin peers. If the chain
+	// backend is running over Tor, this must support dialing peers over Tor
+	// as well.
+	Dialer Dialer
+
+	// PrunedModeMaxPeers is the maximum number of peers we'll attempt to
+	// retrieve pruned blocks from.
+	//
+	// NOTE: This only applies for pruned bitcoind nodes.
+	PrunedModeMaxPeers int
+}
 
 // BitcoindConn represents a persistent client connection to a bitcoind node
 // that listens for events read from a ZMQ connection.
@@ -44,17 +91,20 @@ type BitcoindConn struct {
 	started int32 // To be used atomically.
 	stopped int32 // To be used atomically.
 
+	cfg BitcoindConfig
+
 	// rescanClientCounter is an atomic counter that assigns a unique ID to
 	// each new bitcoind rescan client using the current bitcoind
 	// connection.
 	rescanClientCounter uint64
 
-	// chainParams identifies the current network the bitcoind node is
-	// running on.
-	chainParams *chaincfg.Params
-
 	// client is the RPC client to the bitcoind node.
 	client *rpcclient.Client
+
+	// prunedBlockDispatcher handles all of the pruned block requests.
+	//
+	// NOTE: This is nil when the bitcoind node is not pruned.
+	prunedBlockDispatcher *PrunedBlockDispatcher
 
 	// zmqBlockConn is the ZMQ connection we'll use to read raw block
 	// events.
@@ -73,27 +123,45 @@ type BitcoindConn struct {
 	wg   sync.WaitGroup
 }
 
+// Dialer represents a way to dial Bitcoin peers. If the chain backend is
+// running over Tor, this must support dialing peers over Tor as well.
+type Dialer = func(string) (net.Conn, error)
+
 // NewBitcoindConn creates a client connection to the node described by the host
 // string. The ZMQ connections are established immediately to ensure liveness.
 // If the remote node does not operate on the same bitcoin network as described
 // by the passed chain parameters, the connection will be disconnected.
-func NewBitcoindConn(chainParams *chaincfg.Params,
-	host, user, pass, zmqBlockHost, zmqTxHost string,
-	zmqPollInterval time.Duration) (*BitcoindConn, error) {
-
+func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	clientCfg := &rpcclient.ConnConfig{
-		Host:                 host,
-		User:                 user,
-		Pass:                 pass,
+		Host:                 cfg.Host,
+		User:                 cfg.User,
+		Pass:                 cfg.Pass,
 		DisableAutoReconnect: false,
 		DisableConnectOnNew:  true,
 		DisableTLS:           true,
 		HTTPPostMode:         true,
 	}
-
 	client, err := rpcclient.New(clientCfg, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Verify that the node is running on the expected network.
+	net, err := getCurrentNet(client)
+	if err != nil {
+		return nil, err
+	}
+	if net != cfg.ChainParams.Net {
+		return nil, fmt.Errorf("expected network %v, got %v",
+			cfg.ChainParams.Net, net)
+	}
+
+	// Check if the node is pruned, as we'll need to perform additional
+	// operations if so.
+	chainInfo, err := client.GetBlockChainInfo()
+	if err != nil {
+		return nil, fmt.Errorf("unable to determine if bitcoind is "+
+			"pruned: %v", err)
 	}
 
 	// Establish two different ZMQ connections to bitcoind to retrieve block
@@ -101,7 +169,8 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 	// concern to ensure one type of event isn't dropped from the connection
 	// queue due to another type of event filling it up.
 	zmqBlockConn, err := gozmq.Subscribe(
-		zmqBlockHost, []string{rawBlockZMQCommand}, zmqPollInterval,
+		cfg.ZMQBlockHost, []string{rawBlockZMQCommand},
+		cfg.ZMQReadDeadline,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to subscribe for zmq block "+
@@ -109,7 +178,7 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 	}
 
 	zmqTxConn, err := gozmq.Subscribe(
-		zmqTxHost, []string{rawTxZMQCommand}, zmqPollInterval,
+		cfg.ZMQTxHost, []string{rawTxZMQCommand}, cfg.ZMQReadDeadline,
 	)
 	if err != nil {
 		zmqBlockConn.Close()
@@ -117,16 +186,37 @@ func NewBitcoindConn(chainParams *chaincfg.Params,
 			"events: %v", err)
 	}
 
-	conn := &BitcoindConn{
-		chainParams:   chainParams,
-		client:        client,
-		zmqBlockConn:  zmqBlockConn,
-		zmqTxConn:     zmqTxConn,
-		rescanClients: make(map[uint64]*BitcoindClient),
-		quit:          make(chan struct{}),
+	// Only initialize the PrunedBlockDispatcher when the connected bitcoind
+	// node is pruned.
+	var prunedBlockDispatcher *PrunedBlockDispatcher
+	if chainInfo.Pruned {
+		prunedBlockDispatcher, err = NewPrunedBlockDispatcher(
+			&PrunedBlockDispatcherConfig{
+				ChainParams:      cfg.ChainParams,
+				NumTargetPeers:   cfg.PrunedModeMaxPeers,
+				Dial:             cfg.Dialer,
+				GetPeers:         client.GetPeerInfo,
+				PeerReadyTimeout: defaultPeerReadyTimeout,
+				RefreshPeersTicker: ticker.New(
+					defaultRefreshPeersInterval,
+				),
+				MaxRequestInvs: wire.MaxInvPerMsg,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return conn, nil
+	return &BitcoindConn{
+		cfg:                   *cfg,
+		client:                client,
+		prunedBlockDispatcher: prunedBlockDispatcher,
+		zmqBlockConn:          zmqBlockConn,
+		zmqTxConn:             zmqTxConn,
+		rescanClients:         make(map[uint64]*BitcoindClient),
+		quit:                  make(chan struct{}),
+	}, nil
 }
 
 // Start attempts to establish a RPC and ZMQ connection to a bitcoind node. If
@@ -139,14 +229,13 @@ func (c *BitcoindConn) Start() error {
 		return nil
 	}
 
-	// Verify that the node is running on the expected network.
-	net, err := c.getCurrentNet()
-	if err != nil {
-		return err
-	}
-	if net != c.chainParams.Net {
-		return fmt.Errorf("expected network %v, got %v",
-			c.chainParams.Net, net)
+	// If we're connected to a pruned backend, we'll need to also start our
+	// pruned block dispatcher to handle pruned block requests.
+	if c.prunedBlockDispatcher != nil {
+		log.Debug("Detected pruned bitcoind backend")
+		if err := c.prunedBlockDispatcher.Start(); err != nil {
+			return err
+		}
 	}
 
 	c.wg.Add(2)
@@ -171,6 +260,10 @@ func (c *BitcoindConn) Stop() {
 	c.client.Shutdown()
 	c.zmqBlockConn.Close()
 	c.zmqTxConn.Close()
+
+	if c.prunedBlockDispatcher != nil {
+		c.prunedBlockDispatcher.Stop()
+	}
 
 	c.client.WaitForShutdown()
 	c.wg.Wait()
@@ -380,8 +473,8 @@ func (c *BitcoindConn) txEventHandler() {
 }
 
 // getCurrentNet returns the network on which the bitcoind node is running.
-func (c *BitcoindConn) getCurrentNet() (wire.BitcoinNet, error) {
-	hash, err := c.client.GetBlockHash(0)
+func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
+	hash, err := client.GetBlockHash(0)
 	if err != nil {
 		return 0, err
 	}
@@ -407,8 +500,7 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 
 		id: atomic.AddUint64(&c.rescanClientCounter, 1),
 
-		chainParams: c.chainParams,
-		chainConn:   c,
+		chainConn: c,
 
 		rescanUpdate:     make(chan interface{}),
 		watchedAddresses: make(map[string]struct{}),
@@ -446,6 +538,55 @@ func (c *BitcoindConn) RemoveClient(id uint64) {
 	defer c.rescanClientsMtx.Unlock()
 
 	delete(c.rescanClients, id)
+}
+
+// isBlockPrunedErr determines if the error returned by the GetBlock RPC
+// corresponds to the requested block being pruned.
+func isBlockPrunedErr(err error) bool {
+	rpcErr, ok := err.(*btcjson.RPCError)
+	return ok && rpcErr.Code == btcjson.ErrRPCMisc &&
+		rpcErr.Message == errBlockPrunedStr
+}
+
+// GetBlock returns a raw block from the server given its hash. If the server
+// has already pruned the block, it will be retrieved from one of its peers.
+func (c *BitcoindConn) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
+	block, err := c.client.GetBlock(hash)
+	// Got the block from the backend successfully, return it.
+	if err == nil {
+		return block, nil
+	}
+
+	// We failed getting the block from the backend for whatever reason. If
+	// it wasn't due to the block being pruned, return the error
+	// immediately.
+	if !isBlockPrunedErr(err) || c.prunedBlockDispatcher == nil {
+		return nil, err
+	}
+
+	// Now that we know the block has been pruned for sure, request it from
+	// our backend peers.
+	blockChan, errChan := c.prunedBlockDispatcher.Query(
+		[]*chainhash.Hash{hash},
+	)
+
+	for {
+		select {
+		case block := <-blockChan:
+			return block, nil
+
+		case err := <-errChan:
+			if err != nil {
+				return nil, err
+			}
+
+			// errChan fired before blockChan with a nil error, wait
+			// for the block now.
+
+		case <-c.quit:
+			return nil, ErrBitcoindClientShuttingDown
+		}
+	}
 }
 
 // isASCII is a helper method that checks whether all bytes in `data` would be
