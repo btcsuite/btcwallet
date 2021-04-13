@@ -91,12 +91,12 @@ type BitcoindConn struct {
 	started int32 // To be used atomically.
 	stopped int32 // To be used atomically.
 
-	cfg BitcoindConfig
-
 	// rescanClientCounter is an atomic counter that assigns a unique ID to
 	// each new bitcoind rescan client using the current bitcoind
 	// connection.
 	rescanClientCounter uint64
+
+	cfg BitcoindConfig
 
 	// client is the RPC client to the bitcoind node.
 	client *rpcclient.Client
