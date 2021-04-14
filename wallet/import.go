@@ -37,7 +37,9 @@ func keyScopeFromPubKey(pubKey *hdkeychain.ExtendedKey,
 	// force the standard BIP-0049 derivation scheme (nested witness pubkeys
 	// everywhere), while a witness address type will force the standard
 	// BIP-0084 derivation scheme.
-	case waddrmgr.HDVersionMainNetBIP0044, waddrmgr.HDVersionTestNetBIP0044:
+	case waddrmgr.HDVersionMainNetBIP0044, waddrmgr.HDVersionTestNetBIP0044,
+		waddrmgr.HDVersionSimNetBIP0044:
+
 		if addrType == nil {
 			return waddrmgr.KeyScope{}, nil, errors.New("address " +
 				"type must be specified for account public " +
@@ -110,6 +112,15 @@ func (w *Wallet) isPubKeyForNet(pubKey *hdkeychain.ExtendedKey) bool {
 		return version == waddrmgr.HDVersionTestNetBIP0044 ||
 			version == waddrmgr.HDVersionTestNetBIP0049 ||
 			version == waddrmgr.HDVersionTestNetBIP0084
+
+	// For simnet, we'll also allow the mainnet versions since simnet
+	// doesn't have defined versions for some of our key scopes, and the
+	// mainnet versions are usually used as the default regardless of the
+	// network/key scope.
+	case wire.SimNet:
+		return version == waddrmgr.HDVersionSimNetBIP0044 ||
+			version == waddrmgr.HDVersionMainNetBIP0049 ||
+			version == waddrmgr.HDVersionMainNetBIP0084
 
 	default:
 		return false
