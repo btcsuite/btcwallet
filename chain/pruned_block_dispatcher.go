@@ -392,7 +392,8 @@ func (d *PrunedBlockDispatcher) newQueryPeer(
 				switch msg := msg.(type) {
 				case *wire.MsgBlock:
 					block = msg
-				case *wire.MsgVersion, *wire.MsgVerAck:
+				case *wire.MsgVersion, *wire.MsgVerAck,
+					*wire.MsgPing, *wire.MsgPong:
 					return
 				default:
 					log.Debugf("Received unexpected message "+
