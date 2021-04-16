@@ -99,6 +99,11 @@ type PrunedBlockDispatcherConfig struct {
 	// GetPeers retrieves the active set of peers known to the backend node.
 	GetPeers func() ([]btcjson.GetPeerInfoResult, error)
 
+	// GetNodeAddresses returns random reachable addresses known to the
+	// backend node. An optional number of addresses to return can be
+	// provided, otherwise 8 are returned by default.
+	GetNodeAddresses func(*int32) ([]btcjson.GetNodeAddressesResult, error)
+
 	// PeerReadyTimeout is the amount of time we'll wait for a query peer to
 	// be ready to receive incoming block requests. Peers cannot respond to
 	// requests until the version exchange is completed upon connection
@@ -256,7 +261,7 @@ func (d *PrunedBlockDispatcher) pollPeers() {
 			// If we do, attempt to establish connections until
 			// we've reached our target number.
 			if err := d.connectToPeers(); err != nil {
-				log.Warnf("Unable to establish peer "+
+				log.Warnf("Failed to establish peer "+
 					"connections: %v", err)
 				continue
 			}
@@ -277,90 +282,150 @@ func (d *PrunedBlockDispatcher) connectToPeers() error {
 	if err != nil {
 		return err
 	}
-	peers, err = filterPeers(peers)
+	addrs, err := filterPeers(peers)
 	if err != nil {
 		return err
 	}
-	rand.Shuffle(len(peers), func(i, j int) {
-		peers[i], peers[j] = peers[j], peers[i]
+	rand.Shuffle(len(addrs), func(i, j int) {
+		addrs[i], addrs[j] = addrs[j], addrs[i]
 	})
 
-	// For each unbanned peer we don't already have a connection to, try to
-	// establish one, and if successful, notify the peer.
-	for _, peer := range peers {
-		d.peerMtx.Lock()
-		_, isBanned := d.bannedPeers[peer.Addr]
-		_, isConnected := d.currentPeers[peer.Addr]
-		d.peerMtx.Unlock()
-		if isBanned || isConnected {
-			continue
-		}
-
-		queryPeer, err := d.newQueryPeer(peer)
+	for _, addr := range addrs {
+		needMore, err := d.connectToPeer(addr)
 		if err != nil {
-			return fmt.Errorf("unable to configure query peer %v: "+
-				"%v", peer.Addr, err)
-		}
-		if err := d.connectToPeer(queryPeer); err != nil {
-			log.Debugf("Failed connecting to peer %v: %v",
-				peer.Addr, err)
+			log.Debugf("Failed connecting to peer %v: %v", addr, err)
 			continue
 		}
-
-		select {
-		case d.peersConnected <- queryPeer:
-		case <-d.quit:
-			return errors.New("shutting down")
+		if !needMore {
+			return nil
 		}
+	}
 
-		// If the new peer helped us reach our target number, we're done
-		// and can exit.
-		d.peerMtx.Lock()
-		d.currentPeers[queryPeer.Addr()] = queryPeer.Peer
-		numPeers := len(d.currentPeers)
-		d.peerMtx.Unlock()
-		if numPeers == d.cfg.NumTargetPeers {
-			break
+	// We still need more addresses so we'll also invoke the
+	// `getnodeaddresses` RPC to receive random reachable addresses. We'll
+	// also filter out any that do not meet our requirements. The nil
+	// argument will return a default number of addresses, which is
+	// currently 8. We don't care how many addresses are returned as long as
+	// 1 is returned, since this will be polled regularly if needed.
+	nodeAddrs, err := d.cfg.GetNodeAddresses(nil)
+	if err != nil {
+		return err
+	}
+	addrs = filterNodeAddrs(nodeAddrs)
+	for _, addr := range addrs {
+		if _, err := d.connectToPeer(addr); err != nil {
+			log.Debugf("Failed connecting to peer %v: %v", addr, err)
 		}
 	}
 
 	return nil
 }
 
+// connectToPeer attempts to establish a connection to the given peer and waits
+// up to PeerReadyTimeout for the version exchange to complete so that we can
+// begin sending it our queries.
+func (d *PrunedBlockDispatcher) connectToPeer(addr string) (bool, error) {
+	// Prevent connections to peers we've already connected to or we've
+	// banned.
+	d.peerMtx.Lock()
+	_, isBanned := d.bannedPeers[addr]
+	_, isConnected := d.currentPeers[addr]
+	d.peerMtx.Unlock()
+	if isBanned || isConnected {
+		return true, nil
+	}
+
+	peer, err := d.newQueryPeer(addr)
+	if err != nil {
+		return true, fmt.Errorf("unable to configure query peer %v: "+
+			"%v", addr, err)
+	}
+
+	// Establish the connection and wait for the protocol negotiation to
+	// complete.
+	conn, err := d.cfg.Dial(addr)
+	if err != nil {
+		return true, err
+	}
+	peer.AssociateConnection(conn)
+
+	select {
+	case <-peer.ready:
+	case <-time.After(d.cfg.PeerReadyTimeout):
+		peer.Disconnect()
+		return true, errors.New("timed out waiting for protocol negotiation")
+	case <-d.quit:
+		return false, errors.New("shutting down")
+	}
+
+	// Remove the peer once it has disconnected.
+	peer.signalUponDisconnect(func() {
+		d.peerMtx.Lock()
+		delete(d.currentPeers, peer.Addr())
+		d.peerMtx.Unlock()
+	})
+
+	d.peerMtx.Lock()
+	d.currentPeers[addr] = peer.Peer
+	numPeers := len(d.currentPeers)
+	d.peerMtx.Unlock()
+
+	// Notify the new peer connection to our workManager.
+	select {
+	case d.peersConnected <- peer:
+	case <-d.quit:
+		return false, errors.New("shutting down")
+	}
+
+	// Request more peer connections if we haven't reached our target number
+	// with the new peer.
+	return numPeers < d.cfg.NumTargetPeers, nil
+}
+
 // filterPeers filters out any peers which cannot handle arbitrary witness block
 // requests, i.e., any peer which is not considered a segwit-enabled
 // "full-node".
-func filterPeers(peers []btcjson.GetPeerInfoResult) (
-	[]btcjson.GetPeerInfoResult, error) {
-
-	var eligible []btcjson.GetPeerInfoResult
+func filterPeers(peers []btcjson.GetPeerInfoResult) ([]string, error) {
+	var eligible []string
 	for _, peer := range peers {
 		rawServices, err := hex.DecodeString(peer.Services)
 		if err != nil {
 			return nil, err
 		}
 		services := wire.ServiceFlag(binary.BigEndian.Uint64(rawServices))
-
-		// Skip nodes that cannot serve full block witness data.
-		if services&requiredServices != requiredServices {
+		if !satisfiesRequiredServices(services) {
 			continue
 		}
-		// Skip pruned nodes.
-		if services&prunedNodeService == prunedNodeService {
-			continue
-		}
-
-		eligible = append(eligible, peer)
+		eligible = append(eligible, peer.Addr)
 	}
-
 	return eligible, nil
+}
+
+// filterNodeAddrs filters out any peers which cannot handle arbitrary witness
+// block requests, i.e., any peer which is not considered a segwit-enabled
+// "full-node".
+func filterNodeAddrs(nodeAddrs []btcjson.GetNodeAddressesResult) []string {
+	var eligible []string
+	for _, nodeAddr := range nodeAddrs {
+		services := wire.ServiceFlag(nodeAddr.Services)
+		if !satisfiesRequiredServices(services) {
+			continue
+		}
+		eligible = append(eligible, nodeAddr.Address)
+	}
+	return eligible
+}
+
+// satisfiesRequiredServices determines whether the services signaled by a peer
+// satisfy our requirements for retrieving pruned blocks from them.
+func satisfiesRequiredServices(services wire.ServiceFlag) bool {
+	return services&requiredServices == requiredServices &&
+		services&prunedNodeService != prunedNodeService
 }
 
 // newQueryPeer creates a new peer instance configured to relay any received
 // messages to the internal workManager.
-func (d *PrunedBlockDispatcher) newQueryPeer(
-	peerInfo btcjson.GetPeerInfoResult) (*queryPeer, error) {
-
+func (d *PrunedBlockDispatcher) newQueryPeer(addr string) (*queryPeer, error) {
 	ready := make(chan struct{})
 	msgsRecvd := make(chan wire.Message)
 
@@ -409,7 +474,7 @@ func (d *PrunedBlockDispatcher) newQueryPeer(
 		},
 		AllowSelfConns: true,
 	}
-	p, err := peer.NewOutboundPeer(cfg, peerInfo.Addr)
+	p, err := peer.NewOutboundPeer(cfg, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -420,35 +485,6 @@ func (d *PrunedBlockDispatcher) newQueryPeer(
 		msgsRecvd: msgsRecvd,
 		quit:      make(chan struct{}),
 	}, nil
-}
-
-// connectToPeer attempts to establish a connection to the given peer and waits
-// up to PeerReadyTimeout for the version exchange to complete so that we can
-// begin sending it our queries.
-func (d *PrunedBlockDispatcher) connectToPeer(peer *queryPeer) error {
-	conn, err := d.cfg.Dial(peer.Addr())
-	if err != nil {
-		return err
-	}
-	peer.AssociateConnection(conn)
-
-	select {
-	case <-peer.ready:
-	case <-time.After(d.cfg.PeerReadyTimeout):
-		peer.Disconnect()
-		return errors.New("timed out waiting for protocol negotiation")
-	case <-d.quit:
-		return errors.New("shutting down")
-	}
-
-	// Remove the peer once it has disconnected.
-	peer.signalUponDisconnect(func() {
-		d.peerMtx.Lock()
-		delete(d.currentPeers, peer.Addr())
-		d.peerMtx.Unlock()
-	})
-
-	return nil
 }
 
 // banPeer bans a peer by disconnecting them and ensuring we don't reconnect.

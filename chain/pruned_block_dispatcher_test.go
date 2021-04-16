@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,17 +15,9 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btclog"
 	"github.com/lightningnetwork/lnd/ticker"
 	"github.com/stretchr/testify/require"
 )
-
-func init() {
-	b := btclog.NewBackend(os.Stdout)
-	l := b.Logger("")
-	l.SetLevel(btclog.LevelTrace)
-	UseLogger(l)
-}
 
 var (
 	addrCounter int32 // Increased atomically.
@@ -49,12 +40,13 @@ type prunedBlockDispatcherHarness struct {
 	hashes []*chainhash.Hash
 	blocks map[chainhash.Hash]*wire.MsgBlock
 
-	peerMtx     sync.Mutex
-	peers       map[string]*peer.Peer
-	localConns  map[string]net.Conn // Connections to peers.
-	remoteConns map[string]net.Conn // Connections from peers.
+	peerMtx       sync.Mutex
+	peers         map[string]*peer.Peer
+	fallbackAddrs map[string]*peer.Peer
+	localConns    map[string]net.Conn // Connections to peers.
+	remoteConns   map[string]net.Conn // Connections from peers.
 
-	dialedPeer    chan struct{}
+	dialedPeer    chan string
 	queriedPeer   chan struct{}
 	blocksQueried map[chainhash.Hash]int
 
@@ -68,22 +60,25 @@ func newNetworkBlockTestHarness(t *testing.T, numBlocks,
 
 	h := &prunedBlockDispatcherHarness{
 		t:             t,
+		dispatcher:    &PrunedBlockDispatcher{},
 		peers:         make(map[string]*peer.Peer, numPeers),
+		fallbackAddrs: make(map[string]*peer.Peer, numPeers),
 		localConns:    make(map[string]net.Conn, numPeers),
 		remoteConns:   make(map[string]net.Conn, numPeers),
-		dialedPeer:    make(chan struct{}),
+		dialedPeer:    make(chan string),
 		queriedPeer:   make(chan struct{}),
 		blocksQueried: make(map[chainhash.Hash]int),
+		shouldReply:   0,
 	}
 
 	h.hashes, h.blocks = genBlockChain(numBlocks)
 	for i := uint32(0); i < numPeers; i++ {
-		h.addPeer()
+		h.addPeer(false)
 	}
 
 	dial := func(addr string) (net.Conn, error) {
 		go func() {
-			h.dialedPeer <- struct{}{}
+			h.dialedPeer <- addr
 		}()
 
 		h.peerMtx.Lock()
@@ -98,7 +93,12 @@ func newNetworkBlockTestHarness(t *testing.T, numBlocks,
 			return nil, fmt.Errorf("remote conn %v not found", addr)
 		}
 
-		h.peers[addr].AssociateConnection(remoteConn)
+		if p, ok := h.peers[addr]; ok {
+			p.AssociateConnection(remoteConn)
+		}
+		if p, ok := h.fallbackAddrs[addr]; ok {
+			p.AssociateConnection(remoteConn)
+		}
 		return localConn, nil
 	}
 
@@ -124,6 +124,22 @@ func newNetworkBlockTestHarness(t *testing.T, numBlocks,
 				})
 			}
 
+			return res, nil
+		},
+		GetNodeAddresses: func(*int32) ([]btcjson.GetNodeAddressesResult, error) {
+			h.peerMtx.Lock()
+			defer h.peerMtx.Unlock()
+
+			res := make(
+				[]btcjson.GetNodeAddressesResult, 0,
+				len(h.fallbackAddrs),
+			)
+			for addr, peer := range h.fallbackAddrs {
+				res = append(res, btcjson.GetNodeAddressesResult{
+					Services: uint64(peer.Services()),
+					Address:  addr,
+				})
+			}
 			return res, nil
 		},
 		PeerReadyTimeout:   time.Hour,
@@ -175,20 +191,24 @@ func (h *prunedBlockDispatcherHarness) stop() {
 
 // addPeer adds a new random peer available for use by the
 // PrunedBlockDispatcher.
-func (h *prunedBlockDispatcherHarness) addPeer() string {
+func (h *prunedBlockDispatcherHarness) addPeer(fallback bool) string {
 	addr := nextAddr()
 
 	h.peerMtx.Lock()
 	defer h.peerMtx.Unlock()
 
-	h.resetPeer(addr)
+	h.resetPeer(addr, fallback)
 	return addr
 }
 
 // resetPeer resets the internal peer connection state allowing the
 // PrunedBlockDispatcher to establish a mock connection to it.
-func (h *prunedBlockDispatcherHarness) resetPeer(addr string) {
-	h.peers[addr] = h.newPeer()
+func (h *prunedBlockDispatcherHarness) resetPeer(addr string, fallback bool) {
+	if fallback {
+		h.fallbackAddrs[addr] = h.newPeer()
+	} else {
+		h.peers[addr] = h.newPeer()
+	}
 
 	// Establish a mock connection between us and each peer.
 	inConn, outConn := pipe(
@@ -280,7 +300,7 @@ func (h *prunedBlockDispatcherHarness) refreshPeers() {
 }
 
 // disconnectPeer simulates a peer disconnecting from the PrunedBlockDispatcher.
-func (h *prunedBlockDispatcherHarness) disconnectPeer(addr string) {
+func (h *prunedBlockDispatcherHarness) disconnectPeer(addr string, fallback bool) {
 	h.t.Helper()
 
 	h.peerMtx.Lock()
@@ -303,7 +323,7 @@ func (h *prunedBlockDispatcherHarness) disconnectPeer(addr string) {
 	}, time.Second, 200*time.Millisecond)
 
 	// Reset the peer connection state to allow connections to them again.
-	h.resetPeer(addr)
+	h.resetPeer(addr, fallback)
 }
 
 // assertPeerDialed asserts that a connection was made to the given peer.
@@ -312,6 +332,18 @@ func (h *prunedBlockDispatcherHarness) assertPeerDialed() {
 
 	select {
 	case <-h.dialedPeer:
+	case <-time.After(5 * time.Second):
+		h.t.Fatalf("expected peer to be dialed")
+	}
+}
+
+// assertPeerDialedWithAddr asserts that a connection was made to the given peer.
+func (h *prunedBlockDispatcherHarness) assertPeerDialedWithAddr(addr string) {
+	h.t.Helper()
+
+	select {
+	case dialedAddr := <-h.dialedPeer:
+		require.Equal(h.t, addr, dialedAddr)
 	case <-time.After(5 * time.Second):
 		h.t.Fatalf("expected peer to be dialed")
 	}
@@ -494,7 +526,7 @@ func TestPrunedBlockDispatcherMultipleQueryPeers(t *testing.T) {
 	// We should see one query per block.
 	for i := 0; i < numBlocks; i++ {
 		h.assertPeerQueried()
-		h.assertPeerReplied(blockChans[i], errChans[i], i == numBlocks-1)
+		h.assertPeerReplied(blockChans[i], errChans[i], true)
 	}
 }
 
@@ -523,13 +555,13 @@ func TestPrunedBlockDispatcherPeerPoller(t *testing.T) {
 	// We'll disable replies for now, as we'll want to test the disconnect
 	// case.
 	h.disablePeerReplies()
-	peer := h.addPeer()
+	peer := h.addPeer(false)
 	h.refreshPeers()
-	h.assertPeerDialed()
+	h.assertPeerDialedWithAddr(peer)
 	h.assertPeerQueried()
 
 	// Disconnect our peer and re-enable replies.
-	h.disconnectPeer(peer)
+	h.disconnectPeer(peer, false)
 	h.enablePeerReplies()
 	h.assertNoReply(blockChan, errChan)
 
@@ -539,11 +571,11 @@ func TestPrunedBlockDispatcherPeerPoller(t *testing.T) {
 	h.assertPeerDialed()
 	h.assertPeerQueried()
 
-	// Refresh our peers again. We can afford to have one more query peer,
-	// but there isn't another one available. We also shouldn't dial the one
-	// we're currently connected to again.
+	// Add a fallback addresses and force refresh our peers again. We can
+	// afford to have one more query peer, so a connection should be made.
+	fallbackPeer := h.addPeer(true)
 	h.refreshPeers()
-	h.assertNoPeerDialed()
+	h.assertPeerDialedWithAddr(fallbackPeer)
 
 	// Now that we know we've connected to the peer, we should be able to
 	// receive their response.
@@ -578,7 +610,7 @@ func TestPrunedBlockDispatcherInvalidBlock(t *testing.T) {
 
 	// Signal to our peers to send valid replies and add a new peer.
 	h.enablePeerReplies()
-	_ = h.addPeer()
+	_ = h.addPeer(false)
 
 	// Force a refresh, which should cause our new peer to be dialed and
 	// queried. We expect them to send a valid block and fulfill our
