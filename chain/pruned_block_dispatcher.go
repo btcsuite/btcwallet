@@ -37,8 +37,10 @@ const (
 	requiredServices = wire.SFNodeNetwork | wire.SFNodeWitness
 
 	// prunedNodeService is the service bit signaled by pruned nodes on the
-	// network.
-	prunedNodeService wire.ServiceFlag = 1 << 11
+	// network. Note that this service bit can also be signaled by full
+	// nodes, except that they also signal wire.SFNodeNetwork, where as
+	// pruned nodes don't.
+	prunedNodeService wire.ServiceFlag = 1 << 10
 )
 
 // queryPeer represents a Bitcoin network peer that we'll query for blocks.
