@@ -43,6 +43,11 @@ const (
 	// HDVersionTestNetBIP0084 is the HDVersion for BIP-0084 on the test
 	// network.
 	HDVersionTestNetBIP0084 HDVersion = 0x045f1cf6 // vpub
+
+	// HDVersionSimNetBIP0044 is the HDVersion for BIP-0044 on the
+	// simulation test network. There aren't any other versions defined for
+	// the simulation test network.
+	HDVersionSimNetBIP0044 HDVersion = 0x0420bd3a // spub
 )
 
 // DerivationPath represents a derivation path from a particular key manager's
@@ -2234,6 +2239,21 @@ func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
 			version = HDVersionTestNetBIP0049
 		case KeyScopeBIP0084:
 			version = HDVersionTestNetBIP0084
+		default:
+			return nil, fmt.Errorf("unsupported scope %v", s.scope)
+		}
+
+	case wire.SimNet:
+		switch s.scope {
+		case KeyScopeBIP0044:
+			version = HDVersionSimNetBIP0044
+		// We use the mainnet versions for simnet keys when the keys
+		// belong to a key scope which simnet doesn't have a defined
+		// version for.
+		case KeyScopeBIP0049Plus:
+			version = HDVersionMainNetBIP0049
+		case KeyScopeBIP0084:
+			version = HDVersionMainNetBIP0084
 		default:
 			return nil, fmt.Errorf("unsupported scope %v", s.scope)
 		}
