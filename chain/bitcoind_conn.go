@@ -192,15 +192,14 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	if chainInfo.Pruned {
 		prunedBlockDispatcher, err = NewPrunedBlockDispatcher(
 			&PrunedBlockDispatcherConfig{
-				ChainParams:      cfg.ChainParams,
-				NumTargetPeers:   cfg.PrunedModeMaxPeers,
-				Dial:             cfg.Dialer,
-				GetPeers:         client.GetPeerInfo,
-				PeerReadyTimeout: defaultPeerReadyTimeout,
-				RefreshPeersTicker: ticker.New(
-					defaultRefreshPeersInterval,
-				),
-				MaxRequestInvs: wire.MaxInvPerMsg,
+				ChainParams:        cfg.ChainParams,
+				NumTargetPeers:     cfg.PrunedModeMaxPeers,
+				Dial:               cfg.Dialer,
+				GetPeers:           client.GetPeerInfo,
+				GetNodeAddresses:   client.GetNodeAddresses,
+				PeerReadyTimeout:   defaultPeerReadyTimeout,
+				RefreshPeersTicker: ticker.New(defaultRefreshPeersInterval),
+				MaxRequestInvs:     wire.MaxInvPerMsg,
 			},
 		)
 		if err != nil {
