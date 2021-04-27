@@ -540,6 +540,31 @@ func testNamespaceAndTxInterfaces(tc *testContext, namespaceKey string) bool {
 		return false
 	}
 
+	// Test that we can read the top level buckets.
+	var topLevelBuckets []string
+	walletdb.View(tc.db, func(tx walletdb.ReadTx) error {
+		return tx.ForEachBucket(func(key []byte) error {
+			topLevelBuckets = append(topLevelBuckets, string(key))
+			return nil
+		})
+	})
+	if err != nil {
+		if err != errSubTestFail {
+			tc.t.Errorf("%v", err)
+		}
+		return false
+	}
+
+	if len(topLevelBuckets) != 1 {
+		tc.t.Errorf("ForEachBucket: expected only one top level bucket")
+		return false
+	}
+	if topLevelBuckets[0] != namespaceKey {
+		tc.t.Errorf("ForEachBucket: expected %v, got %v", namespaceKey,
+			topLevelBuckets[0])
+		return false
+	}
+
 	// Test the bucket interface via a managed read-write transaction.
 	// Also, put a series of values and force a rollback so the following
 	// code can ensure the values were not stored.

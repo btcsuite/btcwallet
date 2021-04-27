@@ -60,6 +60,15 @@ func (tx *transaction) ReadBucket(key []byte) walletdb.ReadBucket {
 	return tx.ReadWriteBucket(key)
 }
 
+// ForEachBucket will iterate through all top level buckets.
+func (tx *transaction) ForEachBucket(fn func(key []byte) error) error {
+	return convertErr(tx.boltTx.ForEach(
+		func(name []byte, _ *bbolt.Bucket) error {
+			return fn(name)
+		},
+	))
+}
+
 func (tx *transaction) ReadWriteBucket(key []byte) walletdb.ReadWriteBucket {
 	boltBucket := tx.boltTx.Bucket(key)
 	if boltBucket == nil {
