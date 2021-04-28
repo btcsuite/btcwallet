@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -108,7 +109,7 @@ func (w *Wallet) isPubKeyForNet(pubKey *hdkeychain.ExtendedKey) bool {
 			version == waddrmgr.HDVersionMainNetBIP0049 ||
 			version == waddrmgr.HDVersionMainNetBIP0084
 
-	case wire.TestNet, wire.TestNet3:
+	case wire.TestNet, wire.TestNet3, netparams.SigNetWire(w.chainParams):
 		return version == waddrmgr.HDVersionTestNetBIP0044 ||
 			version == waddrmgr.HDVersionTestNetBIP0049 ||
 			version == waddrmgr.HDVersionTestNetBIP0084
