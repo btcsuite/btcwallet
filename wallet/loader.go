@@ -58,6 +58,7 @@ type Loader struct {
 	wallet         *Wallet
 	localDB        bool
 	walletExists   func() (bool, error)
+	walletCreated  func(db walletdb.ReadWriteTx) error
 	db             walletdb.DB
 	mu             sync.Mutex
 }
@@ -129,6 +130,15 @@ func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
 	}
 }
 
+// OnWalletCreated adds a function that will be executed the wallet structure
+// is initialized in the wallet database. This is useful if users want to add
+// extra fields in the same transaction (eg. to flag wallet existence).
+func (l *Loader) OnWalletCreated(fn func(walletdb.ReadWriteTx) error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.walletCreated = fn
+}
+
 // CreateNewWallet creates a new wallet using the provided public and private
 // passphrases.  The seed is optional.  If non-nil, addresses are derived from
 // this seed.  If nil, a secure random seed is generated.
@@ -187,16 +197,17 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase,
 
 	// Initialize the newly created database for the wallet before opening.
 	if isWatchingOnly {
-		err := CreateWatchingOnly(
+		err := CreateWatchingOnlyWithCallback(
 			l.db, pubPassphrase, l.chainParams, bday,
+			l.walletCreated,
 		)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		err := Create(
+		err := CreateWithCallback(
 			l.db, pubPassphrase, privPassphrase, seed,
-			l.chainParams, bday,
+			l.chainParams, bday, l.walletCreated,
 		)
 		if err != nil {
 			return nil, err
