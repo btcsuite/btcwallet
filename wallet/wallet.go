@@ -3665,6 +3665,29 @@ func (w *Wallet) Database() walletdb.DB {
 	return w.db
 }
 
+// CreateWithCallback is the same as Create with an added callback that will be
+// called in the same transaction the wallet structure is initialized.
+func CreateWithCallback(db walletdb.DB, pubPass, privPass, seed []byte,
+	params *chaincfg.Params, birthday time.Time,
+	cb func(walletdb.ReadWriteTx) error) error {
+
+	return create(
+		db, pubPass, privPass, seed, params, birthday, false, cb,
+	)
+}
+
+// CreateWatchingOnlyWithCallback is the same as CreateWatchingOnly with an
+// added callback that will be called in the same transaction the wallet
+// structure is initialized.
+func CreateWatchingOnlyWithCallback(db walletdb.DB, pubPass []byte,
+	params *chaincfg.Params, birthday time.Time,
+	cb func(walletdb.ReadWriteTx) error) error {
+
+	return create(
+		db, pubPass, nil, nil, params, birthday, true, cb,
+	)
+}
+
 // Create creates an new wallet, writing it to an empty database.  If the passed
 // seed is non-nil, it is used.  Otherwise, a secure random seed of the
 // recommended length is generated.
@@ -3672,7 +3695,7 @@ func Create(db walletdb.DB, pubPass, privPass, seed []byte,
 	params *chaincfg.Params, birthday time.Time) error {
 
 	return create(
-		db, pubPass, privPass, seed, params, birthday, false,
+		db, pubPass, privPass, seed, params, birthday, false, nil,
 	)
 }
 
@@ -3684,12 +3707,13 @@ func CreateWatchingOnly(db walletdb.DB, pubPass []byte,
 	params *chaincfg.Params, birthday time.Time) error {
 
 	return create(
-		db, pubPass, nil, nil, params, birthday, true,
+		db, pubPass, nil, nil, params, birthday, true, nil,
 	)
 }
 
 func create(db walletdb.DB, pubPass, privPass, seed []byte,
-	params *chaincfg.Params, birthday time.Time, isWatchingOnly bool) error {
+	params *chaincfg.Params, birthday time.Time, isWatchingOnly bool,
+	cb func(walletdb.ReadWriteTx) error) error {
 
 	if !isWatchingOnly {
 		// If a seed was provided, ensure that it is of valid length. Otherwise,
@@ -3725,7 +3749,17 @@ func create(db walletdb.DB, pubPass, privPass, seed []byte,
 		if err != nil {
 			return err
 		}
-		return wtxmgr.Create(txmgrNs)
+
+		err = wtxmgr.Create(txmgrNs)
+		if err != nil {
+			return err
+		}
+
+		if cb != nil {
+			return cb(tx)
+		}
+
+		return nil
 	})
 }
 

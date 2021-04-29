@@ -1813,8 +1813,6 @@ func testSync(tc *testContext) bool {
 // It makes use of a test context because the address manager is persistent and
 // much of the testing involves having specific state.
 func TestManager(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		name                string
 		createdWatchingOnly bool
