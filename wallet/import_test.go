@@ -178,6 +178,17 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	acct3ExternalPub, err := acct3ExternalExtPub.ECPubKey()
 	require.NoError(t, err)
 
+	// Do a dry run import first and check that it results in the expected
+	// addresses being derived.
+	_, extAddrs, intAddrs, err := w.ImportAccountDryRun(
+		name+"1", acct1Pub, root.ParentFingerprint(), &tc.addrType, 1,
+	)
+	require.NoError(t, err)
+	require.Len(t, extAddrs, 1)
+	require.Equal(t, tc.expectedAddr, extAddrs[0].Address().String())
+	require.Len(t, intAddrs, 1)
+	require.Equal(t, tc.expectedChangeAddr, intAddrs[0].Address().String())
+
 	// Import the extended public keys into new accounts.
 	acct1, err := w.ImportAccount(
 		name+"1", acct1Pub, root.ParentFingerprint(), &tc.addrType,
@@ -228,12 +239,12 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(0), acct2.ImportedKeyCount)
 
 	// Test address derivation.
-	addr, err := w.NewAddress(acct1.AccountNumber, tc.expectedScope)
+	extAddr, err := w.NewAddress(acct1.AccountNumber, tc.expectedScope)
 	require.NoError(t, err)
-	require.Equal(t, tc.expectedAddr, addr.String())
-	addr, err = w.NewChangeAddress(acct1.AccountNumber, tc.expectedScope)
+	require.Equal(t, tc.expectedAddr, extAddr.String())
+	intAddr, err := w.NewChangeAddress(acct1.AccountNumber, tc.expectedScope)
 	require.NoError(t, err)
-	require.Equal(t, tc.expectedChangeAddr, addr.String())
+	require.Equal(t, tc.expectedChangeAddr, intAddr.String())
 
 	// Make sure the key count was increased.
 	acct1, err = w.AccountProperties(tc.expectedScope, acct1.AccountNumber)
@@ -243,7 +254,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(0), acct1.ImportedKeyCount)
 
 	// Make sure we can't get private keys for the imported accounts.
-	_, err = w.DumpWIFPrivateKey(addr)
+	_, err = w.DumpWIFPrivateKey(intAddr)
 	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrWatchingOnly))
 
 	// Get the address info for the single key we imported.
@@ -258,13 +269,13 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		witnessProg, err := txscript.PayToAddrScript(witnessAddr)
 		require.NoError(t, err)
 
-		addr, err = btcutil.NewAddressScriptHash(
+		intAddr, err = btcutil.NewAddressScriptHash(
 			witnessProg, &chaincfg.TestNet3Params,
 		)
 		require.NoError(t, err)
 
 	case waddrmgr.WitnessPubKey:
-		addr, err = btcutil.NewAddressWitnessPubKeyHash(
+		intAddr, err = btcutil.NewAddressWitnessPubKeyHash(
 			btcutil.Hash160(acct3ExternalPub.SerializeCompressed()),
 			&chaincfg.TestNet3Params,
 		)
@@ -274,7 +285,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		t.Fatalf("unhandled address type %v", tc.addrType)
 	}
 
-	addrManaged, err := w.AddressInfo(addr)
+	addrManaged, err := w.AddressInfo(intAddr)
 	require.NoError(t, err)
 	require.Equal(t, true, addrManaged.Imported())
 }
