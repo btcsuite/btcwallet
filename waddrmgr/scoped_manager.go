@@ -2270,3 +2270,11 @@ func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
 
 	return key.CloneWithVersion(versionBytes[:])
 }
+
+// InvalidateAccountCache invalidates the cache for the given account, forcing a
+// database read to retrieve the account information.
+func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	delete(s.acctInfo, account)
+}
