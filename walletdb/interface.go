@@ -19,6 +19,9 @@ type ReadTx interface {
 	// described by the key does not exist, nil is returned.
 	ReadBucket(key []byte) ReadBucket
 
+	// ForEachBucket will iterate through all top level buckets.
+	ForEachBucket(func(key []byte) error) error
+
 	// Rollback closes the transaction, discarding changes (if any) if the
 	// database was modified by a write transaction.
 	Rollback() error
