@@ -81,7 +81,7 @@ check: unit
 
 unit:
 	@$(call print, "Running unit tests.")
-	$(GOLIST) | $(XARGS) env $(GOTEST)
+	$(GOLIST) | $(XARGS) env $(GOTEST) -test.timeout=20m
 
 unit-cover: $(GOACC_BIN)
 	@$(call print, "Running unit coverage tests.")
@@ -89,7 +89,7 @@ unit-cover: $(GOACC_BIN)
 
 unit-race:
 	@$(call print, "Running unit race tests.")
-	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(GOLIST) | $(XARGS) env $(GOTEST) -race
+	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(GOLIST) | $(XARGS) env $(GOTEST) -race -test.timeout=20m
 
 # =========
 # UTILITIES
