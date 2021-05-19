@@ -6,6 +6,7 @@ package txsizes
 
 import (
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 )
 
@@ -199,4 +200,28 @@ func EstimateVirtualSize(numP2PKHIns, numP2WPKHIns, numNestedP2WPKHIns int,
 	// We add 3 to the witness weight to make sure the result is
 	// always rounded up.
 	return baseSize + (witnessWeight+3)/blockchain.WitnessScaleFactor
+}
+
+// GetMinInputVirtualSize returns the minimum number of vbytes that this input
+// adds to a transaction.
+func GetMinInputVirtualSize(pkScript []byte) int {
+	var baseSize, witnessWeight int
+	switch {
+	// If this is a p2sh output, we assume this is a
+	// nested P2WKH.
+	case txscript.IsPayToScriptHash(pkScript):
+		baseSize = RedeemNestedP2WPKHInputSize
+		witnessWeight = RedeemP2WPKHInputWitnessWeight
+
+	case txscript.IsPayToWitnessPubKeyHash(pkScript):
+		baseSize = RedeemP2WPKHInputSize
+		witnessWeight = RedeemP2WPKHInputWitnessWeight
+
+	default:
+		baseSize = RedeemP2PKHInputSize
+	}
+
+	return baseSize +
+		(witnessWeight+blockchain.WitnessScaleFactor-1)/
+			blockchain.WitnessScaleFactor
 }

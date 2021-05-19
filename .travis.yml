@@ -9,5 +9,8 @@ script:
   - export GO111MODULE=on
   - make fmt
   - make lint
-  - make unit-race
+
+  # Extend unit test timeout with travis_wait
+  - travis_wait make unit-race
+
   - make unit-cover

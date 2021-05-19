@@ -220,6 +220,7 @@ func TestFundPsbt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			changeIndex, err := w.FundPsbt(
 				tc.packet, nil, 0, tc.feeRateSatPerKB,
+				CoinSelectionLargest,
 			)
 
 			// In any case, unlock the UTXO before continuing, we
