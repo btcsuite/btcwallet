@@ -55,6 +55,10 @@ var (
 	// ErrOutputUnlockNotAllowed is an error returned when an output unlock
 	// is attempted with a different ID than the one which locked it.
 	ErrOutputUnlockNotAllowed = errors.New("output unlock not alowed")
+
+	// ErrDuplicateTx is returned when attempting to record a mined or
+	// unmined transaction that is already recorded.
+	ErrDuplicateTx = errors.New("transaction already exists")
 )
 
 // Block contains the minimum amount of data to uniquely identify any block on
@@ -355,11 +359,30 @@ func (s *Store) deleteUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) erro
 // InsertTx records a transaction as belonging to a wallet's transaction
 // history.  If block is nil, the transaction is considered unspent, and the
 // transaction's index must be unset.
-func (s *Store) InsertTx(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta) error {
+func (s *Store) InsertTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	block *BlockMeta) error {
+	_, err := s.InsertTxCheckIfExists(ns, rec, block)
+	return err
+}
+
+// InsertTxCheckIfExists records a transaction as belonging to a wallet's
+// transaction history.  If block is nil, the transaction is considered unspent,
+// and the transaction's index must be unset. It will return true if the
+// transaction was already recorded prior to the call.
+func (s *Store) InsertTxCheckIfExists(ns walletdb.ReadWriteBucket,
+	rec *TxRecord, block *BlockMeta) (bool, error) {
+
+	var err error
 	if block == nil {
-		return s.insertMemPoolTx(ns, rec)
+		if err = s.insertMemPoolTx(ns, rec); err == ErrDuplicateTx {
+			return true, nil
+		}
+		return false, err
 	}
-	return s.insertMinedTx(ns, rec, block)
+	if err = s.insertMinedTx(ns, rec, block); err == ErrDuplicateTx {
+		return true, nil
+	}
+	return false, err
 }
 
 // RemoveUnminedTx attempts to remove an unmined transaction from the
@@ -386,7 +409,7 @@ func (s *Store) insertMinedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 	// If a transaction record for this hash and block already exists, we
 	// can exit early.
 	if _, v := existsTxRecord(ns, &rec.Hash, &block.Block); v != nil {
-		return nil
+		return ErrDuplicateTx
 	}
 
 	// If a block record does not yet exist for any transactions from this
