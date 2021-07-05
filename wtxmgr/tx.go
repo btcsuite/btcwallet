@@ -1240,6 +1240,12 @@ func (s *Store) ListLockedOutputs(ns walletdb.ReadBucket) ([]*LockedOutput,
 	var outputs []*LockedOutput
 	err := forEachLockedOutput(
 		ns, func(op wire.OutPoint, id LockID, expiration time.Time) {
+			// Skip expired leases. They will be cleaned up with the
+			// next call to DeleteExpiredLockedOutputs.
+			if !s.clock.Now().Before(expiration) {
+				return
+			}
+
 			outputs = append(outputs, &LockedOutput{
 				Outpoint:   op,
 				LockID:     id,
