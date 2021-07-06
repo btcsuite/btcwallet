@@ -2780,6 +2780,16 @@ func TestOutputLocks(t *testing.T) {
 				// Let the output lock expired.
 				s.clock.(*clock.TestClock).SetTime(expiry)
 
+				// Lock should not longer be listed.
+				assertOutputLocksExist(t, s, ns)
+
+				// But the lock should still exist and active
+				// when time is turned back.
+				assertLocked(
+					t, ns, confirmedOutPoint, time.Time{},
+					true,
+				)
+
 				// Delete all expired locked outputs. We should
 				// no longer see any locked outputs.
 				err = s.DeleteExpiredLockedOutputs(ns)
@@ -2788,6 +2798,10 @@ func TestOutputLocks(t *testing.T) {
 						"locked outputs: %v", err)
 				}
 				assertOutputLocksExist(t, s, ns)
+				assertLocked(
+					t, ns, confirmedOutPoint, time.Time{},
+					false,
+				)
 			},
 		},
 	}
