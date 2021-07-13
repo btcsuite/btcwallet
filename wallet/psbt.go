@@ -45,10 +45,15 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	coinSelectionStrategy CoinSelectionStrategy) (int32, error) {
 
 	// Make sure the packet is well formed. We only require there to be at
-	// least one output but not necessarily any inputs.
-	err := psbt.VerifyInputOutputLen(packet, false, true)
+	// least one input or output.
+	err := psbt.VerifyInputOutputLen(packet, false, false)
 	if err != nil {
 		return 0, err
+	}
+
+	if len(packet.UnsignedTx.TxIn) == 0 && len(packet.UnsignedTx.TxOut) == 0 {
+		return 0, fmt.Errorf("PSBT packet must contain at least one " +
+			"input or output")
 	}
 
 	txOut := packet.UnsignedTx.TxOut

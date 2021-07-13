@@ -89,7 +89,22 @@ func TestFundPsbt(t *testing.T) {
 			UnsignedTx: &wire.MsgTx{},
 		},
 		feeRateSatPerKB: 0,
-		expectedErr:     "must contain at least one output",
+		expectedErr:     "PSBT packet must contain at least one input or output",
+	}, {
+		name: "single input, no outputs",
+		packet: &psbt.Packet{
+			UnsignedTx: &wire.MsgTx{
+				TxIn: []*wire.TxIn{{
+					PreviousOutPoint: utxo1,
+				}},
+			},
+			Inputs: []psbt.PInput{{}},
+		},
+		feeRateSatPerKB: 20000,
+		validatePackage: true,
+		expectedInputs:  []wire.OutPoint{utxo1},
+		expectedFee:     2200,
+		expectedChange:  997800,
 	}, {
 		name: "no dust outputs",
 		packet: &psbt.Packet{
