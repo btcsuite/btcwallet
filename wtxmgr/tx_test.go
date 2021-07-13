@@ -7,6 +7,7 @@ package wtxmgr
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -192,6 +193,13 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 					return nil, err
 				}
 
+				// Check that the duplicate transaction is found.
+				if exists, _ := s.InsertTxCheckIfExists(ns, rec, nil); !exists {
+					return nil, fmt.Errorf(
+						"duplicate transaction was not found as already recorded",
+					)
+				}
+
 				err = s.AddCredit(ns, rec, nil, 0, false)
 				return s, err
 			},
@@ -242,6 +250,13 @@ func TestInsertsCreditsDebitsRollbacks(t *testing.T) {
 				err = s.InsertTx(ns, rec, TstRecvTxBlockDetails)
 				if err != nil {
 					return nil, err
+				}
+
+				// Make sure the duplicate transaction is found.
+				if exists, _ := s.InsertTxCheckIfExists(ns, rec, TstRecvTxBlockDetails); !exists {
+					return nil, fmt.Errorf(
+						"duplicate transaction was not found as already recorded",
+					)
 				}
 
 				err = s.AddCredit(ns, rec, TstRecvTxBlockDetails, 0, false)

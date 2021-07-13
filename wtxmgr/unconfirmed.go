@@ -22,7 +22,7 @@ func (s *Store) insertMemPoolTx(ns walletdb.ReadWriteBucket, rec *TxRecord) erro
 	// TODO: compare serialized txs to ensure this isn't a hash
 	// collision?
 	if txDetails, _ := s.TxDetails(ns, &rec.Hash); txDetails != nil {
-		return nil
+		return ErrDuplicateTx
 	}
 
 	// Since transaction records within the store are keyed by their
