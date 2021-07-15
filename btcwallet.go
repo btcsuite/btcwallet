@@ -90,6 +90,20 @@ func walletMain() error {
 
 	loader.RunAfterLoad(func(w *wallet.Wallet) {
 		startWalletRPCServices(w, rpcs, legacyRPCServer)
+
+		if len(cfg.ExperimentalRPCListeners) != 0 {
+			listeners := makeListeners(cfg.ExperimentalRPCListeners, net.Listen)
+			for _, lis := range listeners {
+				lis := lis
+				go func() {
+					log.Infof("Experimental RPC server listening on %s",
+						lis.Addr())
+					err := rpcs.Serve(lis)
+					log.Tracef("Finished serving expimental RPC: %v",
+						err)
+				}()
+			}
+		}
 	})
 
 	if !cfg.NoInitialLoad {
