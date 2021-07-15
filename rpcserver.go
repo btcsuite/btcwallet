@@ -5,9 +5,11 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"google.golang.org/grpc/peer"
 	"io/ioutil"
 	"net"
 	"os"
@@ -135,8 +137,12 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 				return nil, nil, err
 			}
 			creds := credentials.NewServerTLSFromCert(&keyPair)
-			server = grpc.NewServer(grpc.Creds(creds))
-			rpcserver.StartVersionService(server)
+			server = grpc.NewServer(
+				grpc.Creds(creds),
+				grpc.StreamInterceptor(interceptStreaming),
+				grpc.UnaryInterceptor(interceptUnary),
+			)
+			rpcserver.RegisterServices(server)
 			rpcserver.StartWalletLoaderService(server, walletLoader, activeNet)
 			for _, lis := range listeners {
 				lis := lis
@@ -174,6 +180,51 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 	}
 
 	return server, legacyServer, nil
+}
+
+// serviceName returns the package.service segment from the full gRPC method
+// name `/package.service/method`.
+func serviceName(method string) string {
+	// Slice off first /
+	method = method[1:]
+	// Keep everything before the next /
+	return method[:strings.IndexRune(method, '/')]
+}
+
+func interceptStreaming(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	p, ok := peer.FromContext(ss.Context())
+	if ok {
+		grpcLog.Infof("Streaming method %s invoked by %s", info.FullMethod,
+			p.Addr.String())
+	}
+	err := rpcserver.ServiceReady(serviceName(info.FullMethod))
+	if err != nil {
+		return err
+	}
+	err = handler(srv, ss)
+	if err != nil && ok {
+		grpcLog.Errorf("Streaming method %s invoked by %s errored: %v",
+			info.FullMethod, p.Addr.String(), err)
+	}
+	return err
+}
+
+func interceptUnary(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+	p, ok := peer.FromContext(ctx)
+	if ok {
+		grpcLog.Infof("Unary method %s invoked by %s", info.FullMethod,
+			p.Addr.String())
+	}
+	err = rpcserver.ServiceReady(serviceName(info.FullMethod))
+	if err != nil {
+		return nil, err
+	}
+	resp, err = handler(ctx, req)
+	if err != nil && ok {
+		grpcLog.Errorf("Unary method %s invoked by %s errored: %v",
+			info.FullMethod, p.Addr.String(), err)
+	}
+	return resp, err
 }
 
 type listenFunc func(net string, laddr string) (net.Listener, error)
@@ -238,17 +289,4 @@ func makeListeners(normalizedListenAddrs []string, listen listenFunc) []net.List
 		listeners = append(listeners, listener)
 	}
 	return listeners
-}
-
-// startWalletRPCServices associates each of the (optionally-nil) RPC servers
-// with a wallet to enable remote wallet access.  For the GRPC server, this
-// registers the WalletService service, and for the legacy JSON-RPC server it
-// enables methods that require a loaded wallet.
-func startWalletRPCServices(wallet *wallet.Wallet, server *grpc.Server, legacyServer *legacyrpc.Server) {
-	if server != nil {
-		rpcserver.StartWalletService(server, wallet)
-	}
-	if legacyServer != nil {
-		legacyServer.RegisterWallet(wallet)
-	}
 }
