@@ -39,6 +39,10 @@ var (
 
 	// ErrInvalid is returned if the specified database is not valid.
 	ErrInvalid = errors.New("invalid database")
+
+	// ErrDryRunRollBack is returned if a database transaction should be
+	// rolled back because its changes were a dry-run only.
+	ErrDryRunRollBack = errors.New("dry run only; should roll back")
 )
 
 // Errors that can occur when beginning or committing a transaction.
