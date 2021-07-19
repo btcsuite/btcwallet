@@ -95,7 +95,7 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 }
 
 // txToOutputs creates a signed transaction which includes each output from
-// outputs.  Previous outputs to reedeem are chosen from the passed account's
+// outputs. Previous outputs to redeem are chosen from the passed account's
 // UTXO set and minconf policy. An additional output may be added to return
 // change to the wallet. This output will have an address generated from the
 // given key scope and account. If a key scope is not specified, the address
@@ -109,22 +109,9 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
 	coinSelectionStrategy CoinSelectionStrategy, dryRun bool) (
-	tx *txauthor.AuthoredTx, err error) {
+	*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
-
-	dbtx, err := w.db.BeginReadWriteTx()
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = dbtx.Rollback() }()
-
-	addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
-		dbtx, keyScope, account,
-	)
 	if err != nil {
 		return nil, err
 	}
@@ -135,122 +122,146 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	eligible, err := w.findEligibleOutputs(
-		dbtx, keyScope, account, minconf, bs,
-	)
-	if err != nil {
-		return nil, err
-	}
+	var tx *txauthor.AuthoredTx
+	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+		addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
+			dbtx, keyScope, account,
+		)
+		if err != nil {
+			return err
+		}
 
-	var inputSource txauthor.InputSource
+		eligible, err := w.findEligibleOutputs(
+			dbtx, keyScope, account, minconf, bs,
+		)
+		if err != nil {
+			return err
+		}
 
-	switch coinSelectionStrategy {
-	// Pick largest outputs first.
-	case CoinSelectionLargest:
-		sort.Sort(sort.Reverse(byAmount(eligible)))
-		inputSource = makeInputSource(eligible)
+		var inputSource txauthor.InputSource
 
-	// Select coins at random. This prevents the creation of ever smaller
-	// utxos over time that may never become economical to spend.
-	case CoinSelectionRandom:
-		// Skip inputs that do not raise the total transaction output
-		// value at the requested fee rate.
-		var positivelyYielding []wtxmgr.Credit
-		for _, output := range eligible {
-			output := output
+		switch coinSelectionStrategy {
+		// Pick largest outputs first.
+		case CoinSelectionLargest:
+			sort.Sort(sort.Reverse(byAmount(eligible)))
+			inputSource = makeInputSource(eligible)
 
-			if !inputYieldsPositively(&output, feeSatPerKb) {
-				continue
+		// Select coins at random. This prevents the creation of ever
+		// smaller utxos over time that may never become economical to
+		// spend.
+		case CoinSelectionRandom:
+			// Skip inputs that do not raise the total transaction
+			// output value at the requested fee rate.
+			var positivelyYielding []wtxmgr.Credit
+			for _, output := range eligible {
+				output := output
+
+				if !inputYieldsPositively(&output, feeSatPerKb) {
+					continue
+				}
+
+				positivelyYielding = append(
+					positivelyYielding, output,
+				)
 			}
 
-			positivelyYielding = append(positivelyYielding, output)
+			rand.Shuffle(len(positivelyYielding), func(i, j int) {
+				positivelyYielding[i], positivelyYielding[j] =
+					positivelyYielding[j], positivelyYielding[i]
+			})
+
+			inputSource = makeInputSource(positivelyYielding)
 		}
 
-		rand.Shuffle(len(positivelyYielding), func(i, j int) {
-			positivelyYielding[i], positivelyYielding[j] =
-				positivelyYielding[j], positivelyYielding[i]
-		})
-
-		inputSource = makeInputSource(positivelyYielding)
-	}
-
-	tx, err = txauthor.NewUnsignedTransaction(
-		outputs, feeSatPerKb, inputSource, changeSource,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Randomize change position, if change exists, before signing.  This
-	// doesn't affect the serialize size, so the change amount will still
-	// be valid.
-	if tx.ChangeIndex >= 0 {
-		tx.RandomizeChangePosition()
-	}
-
-	// If a dry run was requested, we return now before adding the input
-	// scripts, and don't commit the database transaction. The DB will be
-	// rolled back when this method returns to ensure the dry run didn't
-	// alter the DB in any way.
-	if dryRun {
-		return tx, nil
-	}
-
-	// Before committing the transaction, we'll sign our inputs. If the
-	// inputs are part of a watch-only account, there's no private key
-	// information stored, so we'll skip signing such.
-	var watchOnly bool
-	if keyScope == nil {
-		// If a key scope wasn't specified, then coin selection was
-		// performed from the default wallet accounts (NP2WKH, P2WKH),
-		// so any key scope provided doesn't impact the result of this
-		// call.
-		watchOnly, err = w.Manager.IsWatchOnlyAccount(
-			addrmgrNs, waddrmgr.KeyScopeBIP0084, account,
-		)
-	} else {
-		watchOnly, err = w.Manager.IsWatchOnlyAccount(
-			addrmgrNs, *keyScope, account,
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !watchOnly {
-		err = tx.AddAllInputScripts(secretSource{w.Manager, addrmgrNs})
-		if err != nil {
-			return nil, err
-		}
-
-		err = validateMsgTx(tx.Tx, tx.PrevScripts, tx.PrevInputValues)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if err := dbtx.Commit(); err != nil {
-		return nil, err
-	}
-
-	if tx.ChangeIndex >= 0 && account == waddrmgr.ImportedAddrAccount {
-		changeAmount := btcutil.Amount(tx.Tx.TxOut[tx.ChangeIndex].Value)
-		log.Warnf("Spend from imported account produced change: moving"+
-			" %v from imported account into default account.", changeAmount)
-	}
-
-	// Finally, we'll request the backend to notify us of the transaction
-	// that pays to the change address, if there is one, when it confirms.
-	if tx.ChangeIndex >= 0 {
-		changePkScript := tx.Tx.TxOut[tx.ChangeIndex].PkScript
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			changePkScript, w.chainParams,
+		tx, err = txauthor.NewUnsignedTransaction(
+			outputs, feeSatPerKb, inputSource, changeSource,
 		)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if err := chainClient.NotifyReceived(addrs); err != nil {
-			return nil, err
+
+		// Randomize change position, if change exists, before signing.
+		// This doesn't affect the serialize size, so the change amount
+		// will still be valid.
+		if tx.ChangeIndex >= 0 {
+			tx.RandomizeChangePosition()
 		}
+
+		// If a dry run was requested, we return now before adding the
+		// input scripts, and don't commit the database transaction.
+		// By returning an error, we make sure the walletdb.Update call
+		// rolls back the transaction. But we'll react to this specific
+		// error outside of the DB transaction so we can still return
+		// the produced chain TX.
+		if dryRun {
+			return walletdb.ErrDryRunRollBack
+		}
+
+		// Before committing the transaction, we'll sign our inputs. If
+		// the inputs are part of a watch-only account, there's no
+		// private key information stored, so we'll skip signing such.
+		var watchOnly bool
+		if keyScope == nil {
+			// If a key scope wasn't specified, then coin selection
+			// was performed from the default wallet accounts
+			// (NP2WKH, P2WKH), so any key scope provided doesn't
+			// impact the result of this call.
+			watchOnly, err = w.Manager.IsWatchOnlyAccount(
+				addrmgrNs, waddrmgr.KeyScopeBIP0084, account,
+			)
+		} else {
+			watchOnly, err = w.Manager.IsWatchOnlyAccount(
+				addrmgrNs, *keyScope, account,
+			)
+		}
+		if err != nil {
+			return err
+		}
+		if !watchOnly {
+			err = tx.AddAllInputScripts(
+				secretSource{w.Manager, addrmgrNs},
+			)
+			if err != nil {
+				return err
+			}
+
+			err = validateMsgTx(
+				tx.Tx, tx.PrevScripts, tx.PrevInputValues,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		if tx.ChangeIndex >= 0 && account == waddrmgr.ImportedAddrAccount {
+			changeAmount := btcutil.Amount(
+				tx.Tx.TxOut[tx.ChangeIndex].Value,
+			)
+			log.Warnf("Spend from imported account produced "+
+				"change: moving %v from imported account into "+
+				"default account.", changeAmount)
+		}
+
+		// Finally, we'll request the backend to notify us of the
+		// transaction that pays to the change address, if there is one,
+		// when it confirms.
+		if tx.ChangeIndex >= 0 {
+			changePkScript := tx.Tx.TxOut[tx.ChangeIndex].PkScript
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+				changePkScript, w.chainParams,
+			)
+			if err != nil {
+				return err
+			}
+			if err := chainClient.NotifyReceived(addrs); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil && err != walletdb.ErrDryRunRollBack {
+		return nil, err
 	}
 
 	return tx, nil
