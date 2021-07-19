@@ -126,8 +126,9 @@ type ReadWriteBucket interface {
 	// ErrTxNotWritable if attempted against a read-only transaction.
 	Delete(key []byte) error
 
-	// Cursor returns a new cursor, allowing for iteration over the bucket's
-	// key/value pairs and nested buckets in forward or backward order.
+	// ReadWriteCursor returns a new cursor, allowing for iteration over the
+	// bucket's key/value pairs and nested buckets in forward or backward
+	// order.
 	ReadWriteCursor() ReadWriteCursor
 
 	// Tx returns the bucket's transaction.
@@ -190,7 +191,7 @@ func BucketIsEmpty(bucket ReadBucket) bool {
 	return k == nil && v == nil
 }
 
-// DB represents an ACID database.  All database access is performed through
+// DB represents an ACID database. All database access is performed through
 // read or read+write transactions.
 type DB interface {
 	// BeginReadTx opens a database read transaction.
@@ -207,16 +208,47 @@ type DB interface {
 	Close() error
 }
 
-// BatchDB is a special version of the main DB interface that allos the caller
-// to specify write transactions that should be combine dtoegether if multiple
+// BatchDB is a special version of the main DB interface that allows the caller
+// to specify write transactions that should be combined toegether if multiple
 // goroutines are calling the Batch method.
 type BatchDB interface {
 	DB
 
 	// Batch is similar to the package-level Update method, but it will
-	// attempt to optismitcally combine the invocation of several
+	// attempt to optimistically combine the invocation of several
 	// transaction functions into a single db write transaction.
 	Batch(func(tx ReadWriteTx) error) error
+}
+
+// ExtendedDB is a special version of the main DB interface that provides their
+// own implementation of the View and Update methods. The walletdb package will
+// use those methods instead of the package global View/Update functions if the
+// given DB is compatible with this extended interface.
+type ExtendedDB interface {
+	DB
+
+	// PrintStats returns all collected stats pretty printed into a string.
+	PrintStats() string
+
+	// View opens a database read transaction and executes the function f
+	// with the transaction passed as a parameter. After f exits, the
+	// transaction is rolled back. If f errors, its error is returned, not a
+	// rollback error (if any occur). The passed reset function is called
+	// before the start of the transaction and can be used to reset
+	// intermediate state. As callers may expect retries of the f closure
+	// (depending on the database backend used), the reset function will be
+	//called before each retry respectively.
+	View(f func(tx ReadTx) error, reset func()) error
+
+	// Update opens a database read/write transaction and executes the
+	// function f with the transaction passed as a parameter. After f exits,
+	// if f did not error, the transaction is committed. Otherwise, if f did
+	// error, the transaction is rolled back. If the rollback fails, the
+	// original error returned by f is still returned. If the commit fails,
+	// the commit error is returned. As callers may expect retries of the f
+	// closure (depending on the database backend used), the reset function
+	// will be called before each retry respectively.
+	Update(f func(tx ReadWriteTx) error, reset func()) error
 }
 
 // View opens a database read transaction and executes the function f with the
@@ -224,6 +256,12 @@ type BatchDB interface {
 // back.  If f errors, its error is returned, not a rollback error (if any
 // occur).
 func View(db DB, f func(tx ReadTx) error) error {
+	// Allow external/remote DB driver implementations to overwrite the
+	// default view behavior.
+	if edb, ok := db.(ExtendedDB); ok {
+		return edb.View(f, func() {})
+	}
+
 	tx, err := db.BeginReadTx()
 	if err != nil {
 		return err
@@ -255,6 +293,12 @@ func View(db DB, f func(tx ReadTx) error) error {
 // returned by f is still returned.  If the commit fails, the commit error is
 // returned.
 func Update(db DB, f func(tx ReadWriteTx) error) error {
+	// Allow external/remote DB driver implementations to overwrite the
+	// default update behavior.
+	if edb, ok := db.(ExtendedDB); ok {
+		return edb.Update(f, func() {})
+	}
+
 	tx, err := db.BeginReadWriteTx()
 	if err != nil {
 		return err
