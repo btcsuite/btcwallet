@@ -186,33 +186,28 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		inputSource := constantInputSource(credits)
 
 		// We also need a change source which needs to be able to insert
-		// a new change addresse into the database.
-		dbtx, err := w.db.BeginReadWriteTx()
-		if err != nil {
-			return 0, err
-		}
-		_, changeSource, err := w.addrMgrWithChangeSource(
-			dbtx, keyScope, account,
-		)
-		if err != nil {
-			return 0, err
-		}
+		// a new change address into the database.
+		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+			_, changeSource, err := w.addrMgrWithChangeSource(
+				dbtx, keyScope, account,
+			)
+			if err != nil {
+				return err
+			}
 
-		// Ask the txauthor to create a transaction with our selected
-		// coins. This will perform fee estimation and add a change
-		// output if necessary.
-		tx, err = txauthor.NewUnsignedTransaction(
-			txOut, feeSatPerKB, inputSource, changeSource,
-		)
-		if err != nil {
-			_ = dbtx.Rollback()
-			return 0, fmt.Errorf("fee estimation not successful: "+
-				"%v", err)
-		}
+			// Ask the txauthor to create a transaction with our
+			// selected coins. This will perform fee estimation and
+			// add a change output if necessary.
+			tx, err = txauthor.NewUnsignedTransaction(
+				txOut, feeSatPerKB, inputSource, changeSource,
+			)
+			if err != nil {
+				return fmt.Errorf("fee estimation not "+
+					"successful: %v", err)
+			}
 
-		// The transaction could be created, let's commit the DB TX to
-		// store the change address (if one was created).
-		err = dbtx.Commit()
+			return nil
+		})
 		if err != nil {
 			return 0, fmt.Errorf("could not add change address to "+
 				"database: %v", err)

@@ -126,8 +126,9 @@ type ReadWriteBucket interface {
 	// ErrTxNotWritable if attempted against a read-only transaction.
 	Delete(key []byte) error
 
-	// Cursor returns a new cursor, allowing for iteration over the bucket's
-	// key/value pairs and nested buckets in forward or backward order.
+	// ReadWriteCursor returns a new cursor, allowing for iteration over the
+	// bucket's key/value pairs and nested buckets in forward or backward
+	// order.
 	ReadWriteCursor() ReadWriteCursor
 
 	// Tx returns the bucket's transaction.
@@ -190,7 +191,7 @@ func BucketIsEmpty(bucket ReadBucket) bool {
 	return k == nil && v == nil
 }
 
-// DB represents an ACID database.  All database access is performed through
+// DB represents an ACID database. All database access is performed through
 // read or read+write transactions.
 type DB interface {
 	// BeginReadTx opens a database read transaction.
@@ -205,16 +206,45 @@ type DB interface {
 
 	// Close cleanly shuts down the database and syncs all data.
 	Close() error
+
+	// PrintStats returns all collected stats pretty printed into a string.
+	PrintStats() string
+
+	// View opens a database read transaction and executes the function f
+	// with the transaction passed as a parameter. After f exits, the
+	// transaction is rolled back. If f errors, its error is returned, not a
+	// rollback error (if any occur). The passed reset function is called
+	// before the start of the transaction and can be used to reset
+	// intermediate state. As callers may expect retries of the f closure
+	// (depending on the database backend used), the reset function will be
+	// called before each retry respectively.
+	//
+	// NOTE: For new code, this method should be used directly instead of
+	// the package level View() function.
+	View(f func(tx ReadTx) error, reset func()) error
+
+	// Update opens a database read/write transaction and executes the
+	// function f with the transaction passed as a parameter. After f exits,
+	// if f did not error, the transaction is committed. Otherwise, if f did
+	// error, the transaction is rolled back. If the rollback fails, the
+	// original error returned by f is still returned. If the commit fails,
+	// the commit error is returned. As callers may expect retries of the f
+	// closure (depending on the database backend used), the reset function
+	// will be called before each retry respectively.
+	//
+	// NOTE: For new code, this method should be used directly instead of
+	// the package level Update() function.
+	Update(f func(tx ReadWriteTx) error, reset func()) error
 }
 
-// BatchDB is a special version of the main DB interface that allos the caller
-// to specify write transactions that should be combine dtoegether if multiple
+// BatchDB is a special version of the main DB interface that allows the caller
+// to specify write transactions that should be combined toegether if multiple
 // goroutines are calling the Batch method.
 type BatchDB interface {
 	DB
 
 	// Batch is similar to the package-level Update method, but it will
-	// attempt to optismitcally combine the invocation of several
+	// attempt to optimistically combine the invocation of several
 	// transaction functions into a single db write transaction.
 	Batch(func(tx ReadWriteTx) error) error
 }
@@ -223,29 +253,11 @@ type BatchDB interface {
 // transaction passed as a parameter.  After f exits, the transaction is rolled
 // back.  If f errors, its error is returned, not a rollback error (if any
 // occur).
+//
+// NOTE: For new code the database backend's View method should be used directly
+// as this package level function will be phased out in the future.
 func View(db DB, f func(tx ReadTx) error) error {
-	tx, err := db.BeginReadTx()
-	if err != nil {
-		return err
-	}
-
-	// Make sure the transaction rolls back in the event of a panic.
-	defer func() {
-		if tx != nil {
-			tx.Rollback()
-		}
-	}()
-
-	err = f(tx)
-	rollbackErr := tx.Rollback()
-	if err != nil {
-		return err
-	}
-
-	if rollbackErr != nil {
-		return rollbackErr
-	}
-	return nil
+	return db.View(f, func() {})
 }
 
 // Update opens a database read/write transaction and executes the function f
@@ -254,28 +266,11 @@ func View(db DB, f func(tx ReadTx) error) error {
 // transaction is rolled back.  If the rollback fails, the original error
 // returned by f is still returned.  If the commit fails, the commit error is
 // returned.
+//
+// NOTE: For new code the database backend's Update method should be used
+// directly as this package level function will be phased out in the future.
 func Update(db DB, f func(tx ReadWriteTx) error) error {
-	tx, err := db.BeginReadWriteTx()
-	if err != nil {
-		return err
-	}
-
-	// Make sure the transaction rolls back in the event of a panic.
-	defer func() {
-		if tx != nil {
-			tx.Rollback()
-		}
-	}()
-
-	err = f(tx)
-	if err != nil {
-		// Want to return the original error, not a rollback error if
-		// any occur.
-		_ = tx.Rollback()
-		return err
-	}
-
-	return tx.Commit()
+	return db.Update(f, func() {})
 }
 
 // Batch opens a database read/write transaction and executes the function f
