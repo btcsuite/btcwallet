@@ -143,14 +143,14 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 
 		changeIndex := -1
 		changeAmount := inputAmount - targetAmount - maxRequiredFee
-		if changeAmount != 0 && !txrules.IsDustAmount(changeAmount,
-			changeSource.ScriptSize, txrules.DefaultRelayFeePerKb) {
+		changeScript, err := changeSource.NewScript()
+		if err != nil {
+			return nil, err
+		}
+		change := wire.NewTxOut(int64(changeAmount), changeScript)
+		if changeAmount != 0 && !txrules.IsDustOutput(change,
+			txrules.DefaultRelayFeePerKb) {
 
-			changeScript, err := changeSource.NewScript()
-			if err != nil {
-				return nil, err
-			}
-			change := wire.NewTxOut(int64(changeAmount), changeScript)
 			l := len(outputs)
 			unsignedTransaction.TxOut = append(outputs[:l:l], change)
 			changeIndex = l
