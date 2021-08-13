@@ -139,6 +139,10 @@ const (
 	// ErrBlockNotFound is returned when we attempt to retrieve the hash for
 	// a block that we do not know of.
 	ErrBlockNotFound
+
+	// ErrAccountNotCached is returned when we attempt to perform an
+	// operation that relies on an account begin cached but it isn't.
+	ErrAccountNotCached
 )
 
 // Map of ErrorCode values back to their constant names for pretty printing.
@@ -165,6 +169,7 @@ var errorCodeStrings = map[ErrorCode]string{
 	ErrCallBackBreak:     "ErrCallBackBreak",
 	ErrEmptyPassphrase:   "ErrEmptyPassphrase",
 	ErrScopeNotFound:     "ErrScopeNotFound",
+	ErrAccountNotCached:  "ErrAccountNotCached",
 }
 
 // String returns the ErrorCode as a human-readable name.

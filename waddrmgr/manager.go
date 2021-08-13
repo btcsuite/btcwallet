@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/cache/lru"
 )
 
 const (
@@ -602,11 +603,12 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 	// Finally, we'll register this new scoped manager with the root
 	// manager.
 	m.scopedManagers[scope] = &ScopedKeyManager{
-		scope:       scope,
-		addrSchema:  addrSchema,
-		rootManager: m,
-		addrs:       make(map[addrKey]ManagedAddress),
-		acctInfo:    make(map[uint32]*accountInfo),
+		scope:        scope,
+		addrSchema:   addrSchema,
+		rootManager:  m,
+		addrs:        make(map[addrKey]ManagedAddress),
+		acctInfo:     make(map[uint32]*accountInfo),
+		privKeyCache: lru.NewCache(defaultPrivKeyCacheSize),
 	}
 	m.externalAddrSchemas[addrSchema.ExternalAddrType] = append(
 		m.externalAddrSchemas[addrSchema.ExternalAddrType], scope,
@@ -1620,10 +1622,11 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 		}
 
 		scopedManagers[scope] = &ScopedKeyManager{
-			scope:      scope,
-			addrSchema: *scopeSchema,
-			addrs:      make(map[addrKey]ManagedAddress),
-			acctInfo:   make(map[uint32]*accountInfo),
+			scope:        scope,
+			addrSchema:   *scopeSchema,
+			addrs:        make(map[addrKey]ManagedAddress),
+			acctInfo:     make(map[uint32]*accountInfo),
+			privKeyCache: lru.NewCache(defaultPrivKeyCacheSize),
 		}
 
 		return nil
