@@ -1816,32 +1816,35 @@ func TestManager(t *testing.T) {
 	tests := []struct {
 		name                string
 		createdWatchingOnly bool
-		seed                []byte
+		rootKey             *hdkeychain.ExtendedKey
 		privPassphrase      []byte
 	}{
 		{
 			name:                "created with seed",
 			createdWatchingOnly: false,
-			seed:                seed,
+			rootKey:             rootKey,
 			privPassphrase:      privPassphrase,
 		},
 		{
 			name:                "created watch-only",
 			createdWatchingOnly: true,
-			seed:                nil,
+			rootKey:             nil,
 			privPassphrase:      nil,
 		},
 	}
 
 	for _, test := range tests {
 		// Need to wrap in a call so the defers work correctly.
-		testManagerCase(t, test.name, test.createdWatchingOnly,
-			test.seed, test.privPassphrase)
+		testManagerCase(
+			t, test.name, test.createdWatchingOnly,
+			test.privPassphrase, test.rootKey,
+		)
 	}
 }
 
 func testManagerCase(t *testing.T, caseName string,
-	caseCreatedWatchingOnly bool, caseSeed, casePrivPassphrase []byte) {
+	caseCreatedWatchingOnly bool, casePrivPassphrase []byte,
+	caseKey *hdkeychain.ExtendedKey) {
 
 	teardown, db := emptyDB(t)
 	defer teardown()
@@ -1867,7 +1870,7 @@ func testManagerCase(t *testing.T, caseName string,
 			return err
 		}
 		err = Create(
-			ns, caseSeed, pubPassphrase, casePrivPassphrase,
+			ns, caseKey, pubPassphrase, casePrivPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -1897,7 +1900,7 @@ func testManagerCase(t *testing.T, caseName string,
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		return Create(
-			ns, caseSeed, pubPassphrase, casePrivPassphrase,
+			ns, caseKey, pubPassphrase, casePrivPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 	})
@@ -2193,7 +2196,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, seed, pubPassphrase, privPassphrase,
+			ns, rootKey, pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2442,7 +2445,7 @@ func TestRootHDKeyNeutering(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, seed, pubPassphrase, privPassphrase,
+			ns, rootKey, pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2534,7 +2537,7 @@ func TestNewRawAccount(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, seed, pubPassphrase, privPassphrase,
+			ns, rootKey, pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2660,7 +2663,7 @@ func TestNewRawAccountHybrid(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, seed, pubPassphrase, privPassphrase,
+			ns, rootKey, pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {

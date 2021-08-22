@@ -1800,13 +1800,13 @@ func createManagerKeyScope(ns walletdb.ReadWriteBucket,
 // A ManagerError with an error code of ErrAlreadyExists will be
 // returned the address manager already exists in the specified
 // namespace.
-func Create(ns walletdb.ReadWriteBucket,
-	seed, pubPassphrase, privPassphrase []byte,
+func Create(ns walletdb.ReadWriteBucket, rootKey *hdkeychain.ExtendedKey,
+	pubPassphrase, privPassphrase []byte,
 	chainParams *chaincfg.Params, config *ScryptOptions,
 	birthday time.Time) error {
 
 	// If the seed argument is nil we create in watchingOnly mode.
-	isWatchingOnly := seed == nil
+	isWatchingOnly := rootKey == nil
 
 	// Return an error if the manager has already been created in
 	// the given database namespace.
@@ -1922,13 +1922,6 @@ func Create(ns walletdb.ReadWriteBucket,
 		// Generate the BIP0044 HD key structure to ensure the
 		// provided seed can generate the required structure with no
 		// issues.
-
-		// Derive the master extended key from the seed.
-		rootKey, err := hdkeychain.NewMaster(seed, chainParams)
-		if err != nil {
-			str := "failed to derive master extended key"
-			return managerError(ErrKeyChain, str, err)
-		}
 		rootPubKey, err := rootKey.Neuter()
 		if err != nil {
 			str := "failed to neuter master extended key"

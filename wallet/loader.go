@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -145,8 +146,42 @@ func (l *Loader) OnWalletCreated(fn func(walletdb.ReadWriteTx) error) {
 func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte,
 	bday time.Time) (*Wallet, error) {
 
+	var (
+		rootKey *hdkeychain.ExtendedKey
+		err     error
+	)
+
+	// If a seed was specified, we check its length now. If no seed is
+	// passed, the wallet will create a new random one.
+	if seed != nil {
+		if len(seed) < hdkeychain.MinSeedBytes ||
+			len(seed) > hdkeychain.MaxSeedBytes {
+
+			return nil, hdkeychain.ErrInvalidSeedLen
+		}
+
+		// Derive the master extended key from the seed.
+		rootKey, err = hdkeychain.NewMaster(seed, l.chainParams)
+		if err != nil {
+			return nil, fmt.Errorf("failed to derive master " +
+				"extended key")
+		}
+	}
+
 	return l.createNewWallet(
-		pubPassphrase, privPassphrase, seed, bday, false,
+		pubPassphrase, privPassphrase, rootKey, bday, false,
+	)
+}
+
+// CreateNewWalletExtendedKey creates a new wallet from an extended master root
+// key using the provided public and private passphrases.  The root key is
+// optional.  If non-nil, addresses are derived from this root key.  If nil, a
+// secure random seed is generated and the root key is derived from that.
+func (l *Loader) CreateNewWalletExtendedKey(pubPassphrase, privPassphrase []byte,
+	rootKey *hdkeychain.ExtendedKey, bday time.Time) (*Wallet, error) {
+
+	return l.createNewWallet(
+		pubPassphrase, privPassphrase, rootKey, bday, false,
 	)
 }
 
@@ -161,8 +196,9 @@ func (l *Loader) CreateNewWatchingOnlyWallet(pubPassphrase []byte,
 	)
 }
 
-func (l *Loader) createNewWallet(pubPassphrase, privPassphrase,
-	seed []byte, bday time.Time, isWatchingOnly bool) (*Wallet, error) {
+func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
+	rootKey *hdkeychain.ExtendedKey, bday time.Time,
+	isWatchingOnly bool) (*Wallet, error) {
 
 	defer l.mu.Unlock()
 	l.mu.Lock()
@@ -206,7 +242,7 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase,
 		}
 	} else {
 		err := CreateWithCallback(
-			l.db, pubPassphrase, privPassphrase, seed,
+			l.db, pubPassphrase, privPassphrase, rootKey,
 			l.chainParams, bday, l.walletCreated,
 		)
 		if err != nil {
