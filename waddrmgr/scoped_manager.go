@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/lightninglabs/neutrino/cache/lru"
 )
 
 // HDVersion represents the different supported schemes of hierarchical
@@ -49,6 +50,14 @@ const (
 	// simulation test network. There aren't any other versions defined for
 	// the simulation test network.
 	HDVersionSimNetBIP0044 HDVersion = 0x0420bd3a // spub
+)
+
+const (
+	// privKeyCacheSize is the default size of the LRU cache that we'll use
+	// to cache private keys to avoid DB and EC operations within the
+	// wallet. With the default sisize, we'll allocate up to 320 KB to
+	// caching private keys (ignoring pointer overhead, etc).
+	defaultPrivKeyCacheSize = 10_000
 )
 
 // DerivationPath represents a derivation path from a particular key manager's
@@ -220,7 +229,7 @@ type ScopedKeyManager struct {
 	rootManager *Manager
 
 	// addrs is a cached map of all the addresses that we currently
-	// manager.
+	// manage.
 	addrs map[addrKey]ManagedAddress
 
 	// acctInfo houses information about accounts including what is needed
@@ -233,6 +242,11 @@ type ScopedKeyManager struct {
 	// the private extended key (hence nor the underlying private key) in
 	// order to encrypt it.
 	deriveOnUnlock []*unlockDeriveInfo
+
+	// privKeyCache stores the set of private keys that have been marked as
+	// items to be cached to allow us to avoid the database and EC
+	// operations each time a key need to be obtained.
+	privKeyCache *lru.Cache
 
 	mtx sync.RWMutex
 }
@@ -577,6 +591,77 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 	}
 
 	return props, nil
+}
+
+// cachedKey is an entry within the LRU map that stores private keys that are
+// to be used frequently. We use this wrapper struct to be able too report the
+// size of a given element to the cache.
+type cachedKey struct {
+	key *btcec.PrivateKey
+}
+
+// Size returns the size of this element. Rather than have the cache limit
+// based on bytes, we simply report that each element is of size 1, meaning we
+// can set our cached based on the amount of keys we want to store, rather than
+// the total size of all the keys.
+func (c *cachedKey) Size() (uint64, error) {
+	return 1, nil
+}
+
+// DeriveFromKeyPathCache is identical to DeriveFromKeyPath, however it'll fail
+// if the account refracted in the DerivationPath isn't already in the
+// in-memory cache. Callers looking for faster private key retrieval can opt to
+// call this method, which may fail if things aren't in the cache, then fall
+// back to the normal variant. The account can information can be drawn into
+// the cache if the normal DeriveFromKeyPath method is used, or the account is
+// looked up via any other means.
+func (s *ScopedKeyManager) DeriveFromKeyPathCache(
+	kp DerivationPath) (*btcec.PrivateKey, error) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	// First, try to look up the key itself in the proper cache, if the key
+	// is here, then we don't need to do anything further.
+	privKeyVal, err := s.privKeyCache.Get(kp)
+	if err == nil {
+		return privKeyVal.(*cachedKey).key, nil
+	}
+
+	// If the key isn't already in the cache, then we'll try to look up the
+	// account info in the cache, if this fails, then we exit here as we
+	// can't move forward without creating a DB transaction, and the point
+	// of this method is to avoid that.
+	acctInfo, ok := s.acctInfo[kp.InternalAccount]
+	if !ok {
+		return nil, managerError(
+			ErrAccountNotCached,
+			"", fmt.Errorf("acct %v not cached", kp.InternalAccount),
+		)
+	}
+
+	watchOnly := s.rootManager.WatchOnly()
+	private := !s.rootManager.IsLocked() && !watchOnly
+
+	// Now that we have the account information, we can derive the key
+	// directly.
+	addrKey, err := s.deriveKey(acctInfo, kp.Branch, kp.Index, private)
+	if err != nil {
+		return nil, err
+	}
+
+	// Now that we have the key, we'll attempt to insert it into the cache,
+	// and return it as is.
+	privKey, err := addrKey.ECPrivKey()
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.privKeyCache.Put(kp, &cachedKey{key: privKey})
+	if err != nil {
+		return nil, err
+	}
+
+	return privKey, nil
 }
 
 // DeriveFromKeyPath attempts to derive a maximal child key (under the BIP0044

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcutil"
@@ -21,6 +22,7 @@ import (
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/require"
 )
 
 // failingCryptoKey is an implementation of the EncryptorDecryptor interface
@@ -2763,4 +2765,97 @@ func testNewRawAccount(t *testing.T, _ *Manager, db walletdb.DB,
 		t.Fatalf("wrong pubkey hash: %x vs %x", accountAddrNext.AddrHash(),
 			accountTargetAddr.AddrHash())
 	}
+}
+
+// TestDeriveFromKeyPathCache tests that the DeriveFromKeyPathCache method will
+// properly cache items in the cache, and return corresponding errors if the
+// account isn't properly cached.
+func TestDeriveFromKeyPathCache(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = Create(
+			ns, seed, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err, "create/open: unexpected error: %v", err)
+
+	defer mgr.Close()
+
+	// Now that we have the manager created, we'll fetch one of the default
+	// scopes for usage within this test.
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	require.NoError(
+		t, err, "unable to fetch scope %v: %v", KeyScopeBIP0044, err,
+	)
+
+	keyPath := DerivationPath{
+		InternalAccount: 0,
+		Account:         hdkeychain.HardenedKeyStart,
+		Branch:          10,
+		Index:           1,
+	}
+
+	// Our test starts here, we'll attempt to derive a new key using the
+	// cached method. This should fail at first since the account itself
+	// isn't cached.
+	_, err = scopedMgr.DeriveFromKeyPathCache(keyPath)
+	if !IsError(err, ErrAccountNotCached) {
+		t.Fatalf("didn't get account not cached error: %v", err)
+	}
+
+	// Now we'll attempt to derive the key using the normal method that
+	// requires a database transaction.
+	var derivedKey *btcec.PrivateKey
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err := scopedMgr.DeriveFromKeyPath(
+			ns, keyPath,
+		)
+		if err != nil {
+			return err
+		}
+
+		derivedKey, err = managedAddr.(ManagedPubKeyAddress).PrivKey()
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	require.NoError(t, err, "unable to derive addr: %v", err)
+
+	// Next attempt to read the key again from the cache, it should succeed
+	// this time.
+	cachedKey, err := scopedMgr.DeriveFromKeyPathCache(keyPath)
+	require.NoError(t, err, "account wasn't cached")
+
+	// We should be able to read the key again.
+	cachedKey2, err := scopedMgr.DeriveFromKeyPathCache(keyPath)
+	require.NoError(t, err, "account wasn't cached")
+
+	// All three keys we have now should match exactly.
+	require.Equal(t, cachedKey.Serialize(), cachedKey2.Serialize())
+	require.Equal(t, derivedKey.Serialize(), cachedKey2.Serialize())
 }
