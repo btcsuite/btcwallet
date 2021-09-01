@@ -2785,7 +2785,7 @@ func TestDeriveFromKeyPathCache(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, seed, pubPassphrase, privPassphrase,
+			ns, rootKey, pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
