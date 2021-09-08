@@ -1169,17 +1169,27 @@ out:
 	for {
 		select {
 		case txr := <-w.createTxRequests:
-			heldUnlock, err := w.holdUnlock()
-			if err != nil {
-				txr.resp <- createTxResponse{nil, err}
-				continue
+			// If the wallet can be locked because it contains
+			// private key material, we need to prevent it from
+			// doing so while we are assembling the transaction.
+			release := func() {}
+			if !w.Manager.WatchOnly() {
+				heldUnlock, err := w.holdUnlock()
+				if err != nil {
+					txr.resp <- createTxResponse{nil, err}
+					continue
+				}
+
+				release = heldUnlock.release
 			}
+
 			tx, err := w.txToOutputs(
 				txr.outputs, txr.keyScope, txr.account,
 				txr.minconf, txr.feeSatPerKB,
 				txr.coinSelectionStrategy, txr.dryRun,
 			)
-			heldUnlock.release()
+
+			release()
 			txr.resp <- createTxResponse{tx, err}
 		case <-quit:
 			break out
