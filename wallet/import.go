@@ -204,6 +204,30 @@ func (w *Wallet) ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKe
 	return accountProps, err
 }
 
+// ImportAccountWithScope imports an account backed by an account extended
+// public key for a specific key scope which is known in advance.
+// The master key fingerprint denotes the fingerprint of the root key
+// corresponding to the account public key (also known as the key with
+// derivation path m/). This may be required by some hardware wallets for proper
+// identification and signing.
+func (w *Wallet) ImportAccountWithScope(name string,
+	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	keyScope waddrmgr.KeyScope, addrSchema waddrmgr.ScopeAddrSchema) (
+	*waddrmgr.AccountProperties, error) {
+
+	var accountProps *waddrmgr.AccountProperties
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		var err error
+		accountProps, err = w.importAccountScope(
+			ns, name, accountPubKey, masterKeyFingerprint, keyScope,
+			&addrSchema,
+		)
+		return err
+	})
+	return accountProps, err
+}
+
 // importAccount is the internal implementation of ImportAccount -- one should
 // reference its documentation for this method.
 func (w *Wallet) importAccount(ns walletdb.ReadWriteBucket, name string,
@@ -221,9 +245,27 @@ func (w *Wallet) importAccount(ns walletdb.ReadWriteBucket, name string,
 	if err != nil {
 		return nil, err
 	}
+
+	return w.importAccountScope(
+		ns, name, accountPubKey, masterKeyFingerprint, keyScope,
+		addrSchema,
+	)
+}
+
+// importAccountScope imports a watch-only account for a given scope.
+func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
+	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	keyScope waddrmgr.KeyScope, addrSchema *waddrmgr.ScopeAddrSchema) (
+	*waddrmgr.AccountProperties, error) {
+
 	scopedMgr, err := w.Manager.FetchScopedKeyManager(keyScope)
 	if err != nil {
-		return nil, err
+		scopedMgr, err = w.Manager.NewScopedKeyManager(
+			ns, keyScope, *addrSchema,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	account, err := scopedMgr.NewAccountWatchingOnly(
