@@ -72,6 +72,10 @@ var (
 	// to true.
 	ErrTxLabelExists = errors.New("transaction already labelled")
 
+	// ErrTxUnsigned is returned when a transaction is created in the
+	// watch-only mode where we can select coins but not sign any inputs.
+	ErrTxUnsigned = errors.New("watch-only wallet, transaction not signed")
+
 	// Namespace bucket keys.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
@@ -3207,6 +3211,13 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	// If our wallet is read-only, we'll get a transaction with coins
+	// selected but no witness data. In such a case we need to inform our
+	// caller that they'll actually need to go ahead and sign the TX.
+	if w.Manager.WatchOnly() {
+		return createdTx.Tx, ErrTxUnsigned
 	}
 
 	txHash, err := w.reliablyPublishTransaction(createdTx.Tx, label)
