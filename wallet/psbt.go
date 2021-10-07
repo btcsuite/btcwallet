@@ -41,7 +41,7 @@ import (
 // selected/validated inputs by this method. It is in the caller's
 // responsibility to lock the inputs before handing the partial transaction out.
 func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
-	account uint32, feeSatPerKB btcutil.Amount,
+	minConfs int32, account uint32, feeSatPerKB btcutil.Amount,
 	coinSelectionStrategy CoinSelectionStrategy) (int32, error) {
 
 	// Make sure the packet is well formed. We only require there to be at
@@ -138,7 +138,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		// includes everything we need, specifically fee estimation and
 		// change address creation.
 		tx, err = w.CreateSimpleTx(
-			keyScope, account, packet.UnsignedTx.TxOut, 1,
+			keyScope, account, packet.UnsignedTx.TxOut, minConfs,
 			feeSatPerKB, coinSelectionStrategy, false,
 		)
 		if err != nil {

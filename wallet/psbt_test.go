@@ -234,7 +234,7 @@ func TestFundPsbt(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			changeIndex, err := w.FundPsbt(
-				tc.packet, nil, 0, tc.feeRateSatPerKB,
+				tc.packet, nil, 1, 0, tc.feeRateSatPerKB,
 				CoinSelectionLargest,
 			)
 
