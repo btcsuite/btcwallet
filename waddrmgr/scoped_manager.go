@@ -796,7 +796,11 @@ func (s *ScopedKeyManager) scriptAddressRowToManaged(row *dbScriptAddressRow) (M
 		str := "failed to decrypt imported script hash"
 		return nil, managerError(ErrCrypto, str, err)
 	}
-
+	if len(scriptHash) == 32 {
+		return newWitnessScriptAddress(s, row.account, scriptHash,
+			row.encryptedScript,
+		)
+	}
 	return newScriptAddress(s, row.account, scriptHash, row.encryptedScript)
 }
 
@@ -2028,6 +2032,29 @@ func (s *ScopedKeyManager) toImportedPublicManagedAddress(
 // generally unexpected.
 func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 	script []byte, bs *BlockStamp) (ManagedScriptAddress, error) {
+	return s.baseImportScript(ns, script, bs, newScriptAddress)
+}
+
+// ImportWitnessScript imports a user-provided script into the address manager.
+// The imported script will act as a pay-to-witness-script-hash address.
+//
+// All imported script addresses will be part of the account defined by the
+// ImportedAddrAccount constant.
+//
+// When the address manager is watching-only, the script itself will not be
+// stored or available since it is considered private data.
+//
+// This function will return an error if the address manager is locked and not
+// watching-only, or the address already exists.  Any other errors returned are
+// generally unexpected.
+func (s *ScopedKeyManager) ImportWitnessScript(ns walletdb.ReadWriteBucket,
+	script []byte, bs *BlockStamp) (ManagedScriptAddress, error) {
+	return s.baseImportScript(ns, script, bs, newWitnessScriptAddress)
+}
+
+func (s *ScopedKeyManager) baseImportScript(ns walletdb.ReadWriteBucket,
+	script []byte, bs *BlockStamp,
+	newFunc newBaseScriptAddress) (ManagedScriptAddress, error) {
 
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
@@ -2107,15 +2134,15 @@ func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 	// when not a watching-only address manager, make a copy of the script
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
-	scriptAddr, err := newScriptAddress(
+	scriptAddr, err := newFunc(
 		s, ImportedAddrAccount, scriptHash, encryptedScript,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if !s.rootManager.WatchOnly() {
-		scriptAddr.scriptCT = make([]byte, len(script))
-		copy(scriptAddr.scriptCT, script)
+		scriptAddr.BaseScriptAddress().scriptCT = make([]byte, len(script))
+		copy(scriptAddr.BaseScriptAddress().scriptCT, script)
 	}
 
 	// Add the new managed address to the cache of recent addresses and
