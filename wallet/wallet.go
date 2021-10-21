@@ -3468,19 +3468,16 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 			}
 		}
 
-		if err := w.addRelevantTx(dbTx, txRec, nil); err != nil {
-			return err
-		}
-
-		// If the tx label is empty, we can return early.
-		if len(label) == 0 {
-			return nil
-		}
-
 		// If there is a label we should write, get the namespace key
 		// and record it in the tx store.
-		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-		return w.TxStore.PutTxLabel(txmgrNs, tx.TxHash(), label)
+		if len(label) != 0 {
+			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+			if err = w.TxStore.PutTxLabel(txmgrNs, tx.TxHash(), label); err != nil {
+				return err
+			}
+		}
+
+		return w.addRelevantTx(dbTx, txRec, nil)
 	})
 	if err != nil {
 		return nil, err
