@@ -518,8 +518,8 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 	account uint32) (*AccountProperties, error) {
 
-	defer s.mtx.RUnlock()
-	s.mtx.RLock()
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 
 	props := &AccountProperties{
 		AccountNumber: account,
