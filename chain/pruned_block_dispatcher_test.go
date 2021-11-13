@@ -620,3 +620,40 @@ func TestPrunedBlockDispatcherInvalidBlock(t *testing.T) {
 	h.assertPeerQueried()
 	h.assertPeerReplied(blockChan, errChan, true)
 }
+
+func TestSatisfiesRequiredServices(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		services wire.ServiceFlag
+		ok       bool
+	}{
+		{
+			name:     "full node, segwit",
+			services: wire.SFNodeWitness | wire.SFNodeNetwork,
+			ok:       true,
+		},
+		{
+			name:     "full node segwit, signals limited",
+			services: wire.SFNodeWitness | wire.SFNodeNetwork | prunedNodeService,
+			ok:       true,
+		},
+		{
+			name:     "full node, no segwit",
+			services: wire.SFNodeNetwork,
+			ok:       false,
+		},
+		{
+			name:     "segwit, pure pruned",
+			services: wire.SFNodeWitness | prunedNodeService,
+			ok:       false,
+		},
+	}
+	for _, testCase := range testCases {
+		ok := satisfiesRequiredServices(testCase.services)
+		require.Equal(
+			t, testCase.ok, ok, fmt.Sprintf("test case: %v", testCase.name),
+		)
+	}
+}
