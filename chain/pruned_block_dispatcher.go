@@ -417,10 +417,12 @@ func filterNodeAddrs(nodeAddrs []btcjson.GetNodeAddressesResult) []string {
 }
 
 // satisfiesRequiredServices determines whether the services signaled by a peer
-// satisfy our requirements for retrieving pruned blocks from them.
+// satisfy our requirements for retrieving pruned blocks from them. We need the
+// full chain, and witness data as well. Note that we ignore the limited
+// (pruned bit) as nodes can have the full data and set that as well. Pure
+// pruned nodes won't set the network bit.
 func satisfiesRequiredServices(services wire.ServiceFlag) bool {
-	return services&requiredServices == requiredServices &&
-		services&prunedNodeService != prunedNodeService
+	return services&requiredServices == requiredServices
 }
 
 // newQueryPeer creates a new peer instance configured to relay any received
