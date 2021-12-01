@@ -42,6 +42,23 @@ const (
 	// errBlockPrunedStr is the error message returned by bitcoind upon
 	// calling GetBlock on a pruned block.
 	errBlockPrunedStr = "Block not available (pruned data)"
+
+	// defaulPollBlockTime sets how often we'll poll for fresh blocks.
+	defaultPollBlockTime = time.Second * 10
+
+	// defaultTxPollTime sets how oftwen we'll poll for fresh mempool
+	// transactions.
+	defaultPollTxTime = time.Second * 3
+
+	// defaultCheckForOldTxsTime sets how often we'll check for lingering
+	// transactions in the mempool map that may no longer be useful. This
+	// is used when we're using RPC to poll for new txs and blocks, rather
+	// than using ZMQ.
+	defaultCheckForOldTxsTime = time.Hour * 24
+
+	// defaultEvictionTime sets how long a transaction should be in our
+	// mempool map before we kick it out.
+	defaultEvictionTime = time.Hour * 24
 )
 
 // BitcoindConfig contains all of the parameters required to establish a
@@ -61,6 +78,10 @@ type BitcoindConfig struct {
 	// server.
 	Pass string
 
+	// RPCPolling is set if we would rather retrieve new block and
+	// transactions from polling RPC, rather than ZMQ.
+	RPCPolling bool
+
 	// ZMQBlockHost is the IP address and port of the bitcoind's rawblock
 	// listener.
 	ZMQBlockHost string
@@ -72,6 +93,22 @@ type BitcoindConfig struct {
 	// ZMQReadDeadline represents the read deadline we'll apply when reading
 	// ZMQ messages from either subscription.
 	ZMQReadDeadline time.Duration
+
+	// PollBlockTimer sets how often we'll poll for fresh blocks.
+	PollBlockTimer time.Duration
+
+	// PollTxTimer sets how often we'll poll for fresh txs from the mempool.
+	PollTxTimer time.Duration
+
+	// CheckForOldTxsTime sets how often we'll check for lingering
+	// transactions in the mempool map that may no longer be useful. This
+	// is used when we're using RPC to poll for new txs and blocks, rather
+	// than using ZMQ.
+	CheckForOldTxsTime time.Duration
+
+	// EvictionTime sets how long a transaction can sit in our mempool map
+	// before we kick it out.
+	EvictionTime time.Duration
 
 	// Dialer is a closure we'll use to dial Bitcoin peers. If the chain
 	// backend is running over Tor, this must support dialing peers over Tor
@@ -114,8 +151,20 @@ type BitcoindConn struct {
 	// events.
 	zmqTxConn *gozmq.Conn
 
+	// mempool keeps track of all of the transactions, needed
+	// when polling rpc to obtain the latest transactions. This map allows
+	// us to ensure we aren't processing any transactions more than
+	// once.
+	//
+	// We'll keep a timestamp of when we retrieve each transaction, so
+	// that we can prune any transactions that are too old. This helps to
+	// prevent against forever holding transactions that were added to the
+	// mempool, but were never confirmed.
+	mempoolMtx sync.Mutex
+	mempool    map[chainhash.Hash]time.Time
+
 	// rescanClients is the set of active bitcoind rescan clients to which
-	// ZMQ event notfications will be sent to.
+	// ZMQ or RPC polling event notfications will be sent to.
 	rescanClientsMtx sync.Mutex
 	rescanClients    map[uint64]*BitcoindClient
 
@@ -164,26 +213,53 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 			"pruned: %v", err)
 	}
 
-	// Establish two different ZMQ connections to bitcoind to retrieve block
-	// and transaction event notifications. We'll use two as a separation of
-	// concern to ensure one type of event isn't dropped from the connection
-	// queue due to another type of event filling it up.
-	zmqBlockConn, err := gozmq.Subscribe(
-		cfg.ZMQBlockHost, []string{rawBlockZMQCommand},
-		cfg.ZMQReadDeadline,
+	var (
+		zmqBlockConn *gozmq.Conn
+		zmqTxConn    *gozmq.Conn
 	)
-	if err != nil {
-		return nil, fmt.Errorf("unable to subscribe for zmq block "+
-			"events: %v", err)
-	}
+	// If we're polling for blocks and transactions via an RPC connection,
+	// then we don't need to set up zmq connections.
+	if !cfg.RPCPolling {
+		// Establish two different ZMQ connections to bitcoind to
+		// retrieve block and transaction event notifications. We'll
+		// use two as a separation of concern to ensure one type of
+		// event isn't dropped from the connection queue due to another
+		// type of event filling it up.
+		zmqBlockConn, err = gozmq.Subscribe(
+			cfg.ZMQBlockHost, []string{rawBlockZMQCommand},
+			cfg.ZMQReadDeadline,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("unable to subscribe for zmq block "+
+				"events: %v", err)
+		}
 
-	zmqTxConn, err := gozmq.Subscribe(
-		cfg.ZMQTxHost, []string{rawTxZMQCommand}, cfg.ZMQReadDeadline,
-	)
-	if err != nil {
-		zmqBlockConn.Close()
-		return nil, fmt.Errorf("unable to subscribe for zmq tx "+
-			"events: %v", err)
+		zmqTxConn, err = gozmq.Subscribe(
+			cfg.ZMQTxHost, []string{rawTxZMQCommand}, cfg.ZMQReadDeadline,
+		)
+		if err != nil {
+			zmqBlockConn.Close()
+			return nil, fmt.Errorf("unable to subscribe for zmq tx "+
+				"events: %v", err)
+		}
+	} else {
+		// If custom poll times weren't set for polling for blocks and
+		// transactions, we'll set it to the default polling time.
+		if cfg.PollBlockTimer == 0 {
+			cfg.PollBlockTimer = defaultPollBlockTime
+		}
+		if cfg.PollTxTimer == 0 {
+			cfg.PollTxTimer = defaultPollTxTime
+		}
+
+		// Same for the time durations for checking for old txs in the
+		// mempool.
+		if cfg.CheckForOldTxsTime == 0 {
+			cfg.CheckForOldTxsTime = defaultCheckForOldTxsTime
+		}
+		if cfg.EvictionTime == 0 {
+			cfg.EvictionTime = defaultEvictionTime
+		}
 	}
 
 	// Only initialize the PrunedBlockDispatcher when the connected bitcoind
@@ -213,6 +289,7 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		prunedBlockDispatcher: prunedBlockDispatcher,
 		zmqBlockConn:          zmqBlockConn,
 		zmqTxConn:             zmqTxConn,
+		mempool:               make(map[chainhash.Hash]time.Time),
 		rescanClients:         make(map[uint64]*BitcoindClient),
 		quit:                  make(chan struct{}),
 	}, nil
@@ -237,9 +314,16 @@ func (c *BitcoindConn) Start() error {
 		}
 	}
 
-	c.wg.Add(2)
-	go c.blockEventHandler()
-	go c.txEventHandler()
+	if c.cfg.RPCPolling {
+		c.wg.Add(3)
+		go c.blockEventHandlerRPC()
+		go c.txEventHandlerRPC()
+		go c.checkForOldTxs()
+	} else {
+		c.wg.Add(2)
+		go c.blockEventHandlerZMQ()
+		go c.txEventHandlerZMQ()
+	}
 
 	return nil
 }
@@ -257,8 +341,10 @@ func (c *BitcoindConn) Stop() {
 
 	close(c.quit)
 	c.client.Shutdown()
-	c.zmqBlockConn.Close()
-	c.zmqTxConn.Close()
+	if !c.cfg.RPCPolling {
+		c.zmqBlockConn.Close()
+		c.zmqTxConn.Close()
+	}
 
 	if c.prunedBlockDispatcher != nil {
 		c.prunedBlockDispatcher.Stop()
@@ -272,7 +358,7 @@ func (c *BitcoindConn) Stop() {
 // forwards them along to the current rescan clients.
 //
 // NOTE: This must be run as a goroutine.
-func (c *BitcoindConn) blockEventHandler() {
+func (c *BitcoindConn) blockEventHandlerZMQ() {
 	defer c.wg.Done()
 
 	log.Info("Started listening for bitcoind block notifications via ZMQ "+
@@ -343,17 +429,8 @@ func (c *BitcoindConn) blockEventHandler() {
 				continue
 			}
 
-			c.rescanClientsMtx.Lock()
-			for _, client := range c.rescanClients {
-				select {
-				case client.zmqBlockNtfns <- block:
-				case <-client.quit:
-				case <-c.quit:
-					c.rescanClientsMtx.Unlock()
-					return
-				}
-			}
-			c.rescanClientsMtx.Unlock()
+			c.sendBlockToClients(block)
+
 		default:
 			// It's possible that the message wasn't fully read if
 			// bitcoind shuts down, which will produce an unreadable
@@ -370,11 +447,149 @@ func (c *BitcoindConn) blockEventHandler() {
 	}
 }
 
+// blockEventHandlerRPC is a goroutine that uses the rpc client to check if we
+// have a new block every so often.
+func (c *BitcoindConn) blockEventHandlerRPC() {
+	defer c.wg.Done()
+
+	log.Info("Started polling for new bitcoind blocks via RPC.")
+	ticker := time.NewTicker(c.cfg.PollBlockTimer)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Every so many seconds, we poll to see if there's a new
+			// block.
+			newBlockHash, err := c.client.GetBestBlockHash()
+			if err != nil || newBlockHash == nil {
+				log.Errorf("Unable to retrieve best block "+
+					"hash: %v", err)
+				continue
+			}
+			newBlockHeader, err := c.client.GetBlockHeaderVerbose(
+				newBlockHash,
+			)
+			if err != nil {
+				log.Errorf("Unable to retrieve block height: "+
+					"%v", err)
+				continue
+			}
+
+			c.rescanClientsMtx.Lock()
+			if c.rescanClients == nil || len(c.rescanClients) < 1 {
+				log.Errorf("No client added yet")
+				c.rescanClientsMtx.Unlock()
+				continue
+			}
+
+			// Grab one of the clients from the rescanClients map
+			// so we can look at its latest block height.
+			var client *BitcoindClient
+			for _, currClient := range c.rescanClients {
+				client = currClient
+				break
+			}
+			c.rescanClientsMtx.Unlock()
+
+			// Check the block height of one of the clients to see
+			// if we're up to date or not.
+			bestBlock, err := client.BlockStamp()
+			if err != nil {
+				log.Errorf("Unable to get most recent block: "+
+					"%v", err)
+				continue
+			}
+
+			// If the block isn't new, we continue. Else, we need
+			// grab the full block data to send to the clients.
+			// Further, if the new block height is more than
+			// oldBlock+1, we are behind on blocks and need to also
+			// retrieve any missing blocks.
+			switch {
+			case newBlockHeader.Height == bestBlock.Height+1:
+				newBlock, err := c.client.GetBlock(newBlockHash)
+				if err != nil {
+					log.Errorf("Unable to retrieve block: %v",
+						err)
+					continue
+				}
+
+				c.pruneMempoolTransactions(newBlock)
+				c.sendBlockToClients(newBlock)
+
+			case newBlockHeader.Height > bestBlock.Height+1:
+				for i := 1; i < int(newBlockHeader.Height)-int(bestBlock.Height); i++ {
+					blockHash, err := c.client.GetBlockHash(
+						int64(bestBlock.Height) + int64(i),
+					)
+					if err != nil {
+						log.Errorf("Unable to retrieve"+
+							" block hash: %v", err)
+						continue
+					}
+
+					newBlock, err := c.client.GetBlock(blockHash)
+					if err != nil {
+						log.Errorf("Unable to retrieve block: %v",
+							err)
+						continue
+					}
+
+					c.pruneMempoolTransactions(newBlock)
+					c.sendBlockToClients(newBlock)
+				}
+
+			default:
+				continue
+			}
+
+		case <-c.quit:
+			return
+		}
+	}
+}
+
+// pruneMempoolTransactions loops through the txs is in the most recent block,
+// and, since they're no longer in the mempol, deletes them from our local
+// mempool map.
+func (c *BitcoindConn) pruneMempoolTransactions(block *wire.MsgBlock) {
+	// From the local mempool map, remove each
+	// of the transactions that are confirmed in
+	// this new block, since they are no longer in
+	// the mempool.
+	for _, tx := range block.Transactions {
+		// If the transaction is in our mempool
+		// map, we need to delete it.
+		c.mempoolMtx.Lock()
+		if _, ok := c.mempool[tx.TxHash()]; ok {
+			delete(c.mempool, tx.TxHash())
+		}
+		c.mempoolMtx.Unlock()
+	}
+}
+
+// sendBlockToClients sends the block to all of the clients waiting to be
+// notified of the next block.
+func (c *BitcoindConn) sendBlockToClients(block *wire.MsgBlock) {
+	c.rescanClientsMtx.Lock()
+	for _, client := range c.rescanClients {
+		select {
+		case client.blockNtfns <- block:
+		case <-client.quit:
+		case <-c.quit:
+			c.rescanClientsMtx.Unlock()
+			return
+		}
+	}
+	c.rescanClientsMtx.Unlock()
+}
+
 // txEventHandler reads raw blocks events from the ZMQ block socket and forwards
 // them along to the current rescan clients.
 //
 // NOTE: This must be run as a goroutine.
-func (c *BitcoindConn) txEventHandler() {
+func (c *BitcoindConn) txEventHandlerZMQ() {
 	defer c.wg.Done()
 
 	log.Info("Started listening for bitcoind transaction notifications "+
@@ -448,7 +663,7 @@ func (c *BitcoindConn) txEventHandler() {
 			c.rescanClientsMtx.Lock()
 			for _, client := range c.rescanClients {
 				select {
-				case client.zmqTxNtfns <- tx:
+				case client.txNtfns <- tx:
 				case <-client.quit:
 				case <-c.quit:
 					c.rescanClientsMtx.Unlock()
@@ -467,6 +682,115 @@ func (c *BitcoindConn) txEventHandler() {
 
 			log.Warnf("Received unexpected event type from %v "+
 				"subscription: %v", rawTxZMQCommand, eventType)
+		}
+	}
+}
+
+// txEventHandlerRPC is a goroutine that uses the RPC client to check the
+// mempool for new transactions.
+func (c *BitcoindConn) txEventHandlerRPC() {
+	defer c.wg.Done()
+
+	log.Info("Started polling for new bitcoind transactions via RPC.")
+	ticker := time.NewTicker(c.cfg.PollTxTimer)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Every few seconds, we poll the mempool to check for
+			// transactions we haven't seen yet.
+			txs, err := c.client.GetRawMempool()
+			if err != nil {
+				log.Errorf("Unable to retrieve mempool"+
+					" txs: %v", err)
+				continue
+			}
+
+			// We'll scan through the most recent txs in the
+			// mempool to see whether there are new txs that we
+			// need to send to the client.
+			for _, txHash := range txs {
+				// If the transaction isn't in the local
+				// mempool, we'll send it to all of the
+				// clients.
+				c.mempoolMtx.Lock()
+				if _, ok := c.mempool[*txHash]; ok {
+					c.mempoolMtx.Unlock()
+					continue
+				}
+				c.mempoolMtx.Unlock()
+
+				// Grab full mempool transaction from hash.
+				tx, err := c.client.GetRawTransaction(
+					txHash,
+				)
+				if err != nil {
+					log.Errorf("Unable to retrieve raw "+
+						"transaction hash %s: %v",
+						txHash, err)
+					continue
+				}
+
+				c.mempoolMtx.Lock()
+				c.mempool[*txHash] = time.Now()
+				c.mempoolMtx.Unlock()
+
+				c.sendTxToClients(tx.MsgTx())
+			}
+
+		case <-c.quit:
+			return
+		}
+	}
+}
+
+// sendTxToClients sends the tx to all of the clients waiting to be notified
+// of the newest txs.
+func (c *BitcoindConn) sendTxToClients(tx *wire.MsgTx) {
+	c.rescanClientsMtx.Lock()
+	for _, client := range c.rescanClients {
+		select {
+		case client.txNtfns <- tx:
+		case <-client.quit:
+		case <-c.quit:
+			c.rescanClientsMtx.Unlock()
+			return
+		}
+	}
+	c.rescanClientsMtx.Unlock()
+}
+
+// checkForOldTxs looks at our local mempool map once every 24 hours, pruning
+// any transactions that have been in it for a long time.
+func (c *BitcoindConn) checkForOldTxs() {
+	defer c.wg.Done()
+
+	log.Info("Now checking for old unconfirmed transactions once every 24" +
+		" hours.")
+	ticker := time.NewTicker(defaultCheckForOldTxsTime)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.checkForUnconfTxs()
+		case <-c.quit:
+			return
+		}
+	}
+}
+
+// checkForUnconfTxs looks at the local mempool map, pruning any transactions
+// that have been in it for a long time frame, since these mempool transactions
+// might be
+func (c *BitcoindConn) checkForUnconfTxs() {
+	c.mempoolMtx.Lock()
+	defer c.mempoolMtx.Unlock()
+
+	for txHash, timeAdded := range c.mempool {
+		if time.Now().Sub(timeAdded) > (defaultEvictionTime) {
+			delete(c.mempool, txHash)
 		}
 	}
 }
@@ -509,8 +833,8 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 		watchedTxs:       make(map[chainhash.Hash]struct{}),
 
 		notificationQueue: NewConcurrentQueue(20),
-		zmqTxNtfns:        make(chan *wire.MsgTx),
-		zmqBlockNtfns:     make(chan *wire.MsgBlock),
+		txNtfns:           make(chan *wire.MsgTx),
+		blockNtfns:        make(chan *wire.MsgBlock),
 
 		mempool:        make(map[chainhash.Hash]struct{}),
 		expiredMempool: make(map[int32]map[chainhash.Hash]struct{}),
