@@ -1,6 +1,7 @@
 package waddrmgr
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -789,7 +790,9 @@ func (s *ScopedKeyManager) importedAddressRowToManaged(row *dbImportedAddressRow
 
 // scriptAddressRowToManaged returns a new managed address based on script
 // address data loaded from the database.
-func (s *ScopedKeyManager) scriptAddressRowToManaged(row *dbScriptAddressRow) (ManagedAddress, error) {
+func (s *ScopedKeyManager) scriptAddressRowToManaged(
+	row *dbScriptAddressRow) (ManagedAddress, error) {
+
 	// Use the crypto public key to decrypt the imported script hash.
 	scriptHash, err := s.rootManager.cryptoKeyPub.Decrypt(row.encryptedHash)
 	if err != nil {
@@ -798,6 +801,24 @@ func (s *ScopedKeyManager) scriptAddressRowToManaged(row *dbScriptAddressRow) (M
 	}
 
 	return newScriptAddress(s, row.account, scriptHash, row.encryptedScript)
+}
+
+// witnessScriptAddressRowToManaged returns a new managed address based on
+// witness script address data loaded from the database.
+func (s *ScopedKeyManager) witnessScriptAddressRowToManaged(
+	row *dbWitnessScriptAddressRow) (ManagedAddress, error) {
+
+	// Use the crypto public key to decrypt the imported script hash.
+	scriptHash, err := s.rootManager.cryptoKeyPub.Decrypt(row.encryptedHash)
+	if err != nil {
+		str := "failed to decrypt imported witness script hash"
+		return nil, managerError(ErrCrypto, str, err)
+	}
+
+	return newWitnessScriptAddress(
+		s, row.account, scriptHash, row.encryptedScript,
+		row.witnessVersion, row.isSecretScript,
+	)
 }
 
 // rowInterfaceToManaged returns a new managed address based on the given
@@ -817,6 +838,9 @@ func (s *ScopedKeyManager) rowInterfaceToManaged(ns walletdb.ReadBucket,
 
 	case *dbScriptAddressRow:
 		return s.scriptAddressRowToManaged(row)
+
+	case *dbWitnessScriptAddressRow:
+		return s.witnessScriptAddressRowToManaged(row)
 	}
 
 	str := fmt.Sprintf("unsupported address type %T", rowInterface)
@@ -2029,16 +2053,63 @@ func (s *ScopedKeyManager) toImportedPublicManagedAddress(
 func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 	script []byte, bs *BlockStamp) (ManagedScriptAddress, error) {
 
+	return s.importScriptAddress(ns, script, bs, Script, 0, true)
+}
+
+// ImportWitnessScript imports a user-provided script into the address manager.
+// The imported script will act as a pay-to-witness-script-hash address.
+//
+// All imported script addresses will be part of the account defined by the
+// ImportedAddrAccount constant.
+//
+// When the address manager is watching-only, the script itself will not be
+// stored or available since it is considered private data.
+//
+// This function will return an error if the address manager is locked and not
+// watching-only, or the address already exists.  Any other errors returned are
+// generally unexpected.
+func (s *ScopedKeyManager) ImportWitnessScript(ns walletdb.ReadWriteBucket,
+	script []byte, bs *BlockStamp, witnessVersion byte,
+	isSecretScript bool) (ManagedScriptAddress, error) {
+
+	return s.importScriptAddress(
+		ns, script, bs, WitnessScript, witnessVersion, isSecretScript,
+	)
+}
+
+// importScriptAddress imports a new pay-to-script or pay-to-witness-script
+// address.
+func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
+	script []byte, bs *BlockStamp, addrType AddressType,
+	witnessVersion byte, isSecretScript bool) (ManagedScriptAddress,
+	error) {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
 	// The manager must be unlocked to encrypt the imported script.
-	if s.rootManager.IsLocked() {
+	if isSecretScript && s.rootManager.IsLocked() {
 		return nil, managerError(ErrLocked, errLocked, nil)
 	}
 
+	// A secret script can only be used with a non-watch only manager. If
+	// a wallet is watch-only then the script must be encrypted with the
+	// public encryption key.
+	if isSecretScript && s.rootManager.WatchOnly() {
+		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
+	// Witness script addresses use a SHA256.
+	var scriptHash []byte
+	switch addrType {
+	case WitnessScript:
+		digest := sha256.Sum256(script)
+		scriptHash = digest[:]
+	default:
+		scriptHash = btcutil.Hash160(script)
+	}
+
 	// Prevent duplicates.
-	scriptHash := btcutil.Hash160(script)
 	alreadyExists := s.existsAddress(ns, scriptHash)
 	if alreadyExists {
 		str := fmt.Sprintf("address for script hash %x already exists",
@@ -2055,18 +2126,21 @@ func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
-	// Encrypt the script for storage in database using the crypto script
-	// key when not a watching-only address manager.
-	var encryptedScript []byte
-	if !s.rootManager.WatchOnly() {
-		encryptedScript, err = s.rootManager.cryptoKeyScript.Encrypt(
-			script,
-		)
-		if err != nil {
-			str := fmt.Sprintf("failed to encrypt script for %x",
-				scriptHash)
-			return nil, managerError(ErrCrypto, str, err)
-		}
+	// If a key isn't considered to be "secret", we encrypt it with the
+	// public key, so we can create script addresses that also work in
+	// watch-only mode.
+	cryptoKey := s.rootManager.cryptoKeyScript
+	if !isSecretScript {
+		cryptoKey = s.rootManager.cryptoKeyPub
+	}
+
+	// Encrypt the script for storage in database using the selected crypto
+	// key.
+	encryptedScript, err := cryptoKey.Encrypt(script)
+	if err != nil {
+		str := fmt.Sprintf("failed to encrypt script for %x",
+			scriptHash)
+		return nil, managerError(ErrCrypto, str, err)
 	}
 
 	// The start block needs to be updated when the newly imported address
@@ -2080,10 +2154,20 @@ func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
-	err = putScriptAddress(
-		ns, &s.scope, scriptHash, ImportedAddrAccount, ssNone,
-		encryptedHash, encryptedScript,
-	)
+	switch addrType {
+	case WitnessScript:
+		err = putWitnessScriptAddress(
+			ns, &s.scope, scriptHash, ImportedAddrAccount, ssNone,
+			witnessVersion, isSecretScript, encryptedHash,
+			encryptedScript,
+		)
+
+	default:
+		err = putScriptAddress(
+			ns, &s.scope, scriptHash, ImportedAddrAccount, ssNone,
+			encryptedHash, encryptedScript,
+		)
+	}
 	if err != nil {
 		return nil, maybeConvertDbError(err)
 	}
@@ -2107,21 +2191,43 @@ func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 	// when not a watching-only address manager, make a copy of the script
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
-	scriptAddr, err := newScriptAddress(
-		s, ImportedAddrAccount, scriptHash, encryptedScript,
+	var (
+		managedAddr    ManagedScriptAddress
+		baseScriptAddr *baseScriptAddress
 	)
-	if err != nil {
-		return nil, err
+	switch addrType {
+	case WitnessScript:
+		witnessAddr, err := newWitnessScriptAddress(
+			s, ImportedAddrAccount, scriptHash, encryptedScript,
+			witnessVersion, isSecretScript,
+		)
+		if err != nil {
+			return nil, err
+		}
+		managedAddr = witnessAddr
+		baseScriptAddr = &witnessAddr.baseScriptAddress
+
+	default:
+		scriptAddr, err := newScriptAddress(
+			s, ImportedAddrAccount, scriptHash, encryptedScript,
+		)
+		if err != nil {
+			return nil, err
+		}
+		managedAddr = scriptAddr
+		baseScriptAddr = &scriptAddr.baseScriptAddress
 	}
-	if !s.rootManager.WatchOnly() {
-		scriptAddr.scriptClearText = make([]byte, len(script))
-		copy(scriptAddr.scriptClearText, script)
-	}
+
+	// Even if the script is secret, we are currently unlocked, so we keep a
+	// clear text copy of the script around to avoid decrypting it on each
+	// access.
+	baseScriptAddr.scriptClearText = make([]byte, len(script))
+	copy(baseScriptAddr.scriptClearText, script)
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
-	s.addrs[addrKey(scriptHash)] = scriptAddr
-	return scriptAddr, nil
+	s.addrs[addrKey(scriptHash)] = managedAddr
+	return managedAddr, nil
 }
 
 // lookupAccount loads account number stored in the manager for the given
