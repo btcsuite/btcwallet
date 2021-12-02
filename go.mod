@@ -8,8 +8,8 @@ require (
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.1.0
 	github.com/btcsuite/btcwallet/wallet/txrules v1.1.0
 	github.com/btcsuite/btcwallet/wallet/txsizes v1.1.0
-	github.com/btcsuite/btcwallet/walletdb v1.3.5
-	github.com/btcsuite/btcwallet/wtxmgr v1.3.0
+	github.com/btcsuite/btcwallet/walletdb v1.4.0
+	github.com/btcsuite/btcwallet/wtxmgr v1.3.1-0.20211201210108-79de92f527dc
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792
 	github.com/davecgh/go-spew v1.1.1
 	github.com/golang/protobuf v1.4.2
@@ -25,21 +25,5 @@ require (
 	google.golang.org/genproto v0.0.0-20190201180003-4b09977fb922 // indirect
 	google.golang.org/grpc v1.18.0
 )
-
-replace github.com/btcsuite/btcwallet/walletdb => ./walletdb
-
-replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
-
-replace github.com/btcsuite/btcwallet/wallet/txauthor => ./wallet/txauthor
-
-replace github.com/btcsuite/btcwallet/wallet/txrules => ./wallet/txrules
-
-replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
-
-// The old version of ginko that's used in btcd imports an ancient version of
-// gopkg.in/fsnotify.v1 that isn't go mod compatible. We fix that import error
-// by replacing ginko (which is only a test library anyway) with a more recent
-// version.
-replace github.com/onsi/ginkgo => github.com/onsi/ginkgo v1.14.2
 
 go 1.16
