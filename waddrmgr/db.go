@@ -70,9 +70,10 @@ type addressType uint8
 
 // These constants define the various supported address types.
 const (
-	adtChain  addressType = 0
-	adtImport addressType = 1 // not iota as they need to be stable for db
-	adtScript addressType = 2
+	adtChain         addressType = 0
+	adtImport        addressType = 1 // not iota as they need to be stable for db
+	adtScript        addressType = 2
+	adtWitnessScript addressType = 3
 )
 
 // accountType represents a type of address stored in the database.
@@ -152,6 +153,27 @@ type dbImportedAddressRow struct {
 type dbScriptAddressRow struct {
 	dbAddressRow
 	encryptedHash   []byte
+	encryptedScript []byte
+}
+
+// dbWitnessScriptAddressRow houses additional information stored about a
+// witness script address in the database.
+type dbWitnessScriptAddressRow struct {
+	dbAddressRow
+
+	// witnessVersion is the version of the witness script.
+	witnessVersion byte
+
+	// isSecretScript denotes whether the script is considered to be
+	// "secret" and encrypted with the script encryption key or "public" and
+	// therefore only encrypted with the public encryption key.
+	isSecretScript bool
+	encryptedHash  []byte
+
+	// encryptedScript is the actual payload of the script address and
+	// represents the script itself. The encoding of the script is up to the
+	// actual implementation, it is not parsed or interpreted in any way by
+	// the database code. So it can be a plain script or a TLV encoded MAST.
 	encryptedScript []byte
 }
 
@@ -1497,6 +1519,74 @@ func serializeScriptAddress(encryptedHash, encryptedScript []byte) []byte {
 	return rawData
 }
 
+// deserializeWitnessScriptAddress deserializes the raw data from the passed
+// address row as a witness script address.
+func deserializeWitnessScriptAddress(
+	row *dbAddressRow) (*dbWitnessScriptAddressRow, error) {
+
+	// The serialized witness script address raw data format is:
+	//   <witness_version><is_secret_script><encscripthashlen>
+	//   <encscripthash><encscriptlen><encscript>
+	//
+	// 1 byte witness version + 1 byte boolean + 4 bytes encrypted script
+	// hash len + encrypted script hash + 4 bytes encrypted script len +
+	// encrypted script
+	const minLength = 1 + 1 + 4 + 4
+
+	// Given the above, the length of the entry must be at a minimum
+	// the constant value sizes.
+	if len(row.rawData) < minLength {
+		str := "malformed serialized witness script address"
+		return nil, managerError(ErrDatabase, str, nil)
+	}
+
+	retRow := dbWitnessScriptAddressRow{
+		dbAddressRow:   *row,
+		witnessVersion: row.rawData[0],
+		isSecretScript: row.rawData[1] == 1,
+	}
+
+	hashLen := binary.LittleEndian.Uint32(row.rawData[2:6])
+	retRow.encryptedHash = make([]byte, hashLen)
+	copy(retRow.encryptedHash, row.rawData[6:6+hashLen])
+	offset := 6 + hashLen
+	scriptLen := binary.LittleEndian.Uint32(row.rawData[offset : offset+4])
+	offset += 4
+	retRow.encryptedScript = make([]byte, scriptLen)
+	copy(retRow.encryptedScript, row.rawData[offset:offset+scriptLen])
+
+	return &retRow, nil
+}
+
+// serializeWitnessScriptAddress returns the serialization of the raw data field
+// for a witness script address.
+func serializeWitnessScriptAddress(witnessVersion uint8, isSecretScript bool,
+	encryptedHash, encryptedScript []byte) []byte {
+
+	// The serialized witness script address raw data format is:
+	//   <witness_version><is_secret_script><encscripthashlen>
+	//   <encscripthash><encscriptlen><encscript>
+	//
+	// 1 byte witness version + 1 byte boolean + 4 bytes encrypted script
+	// hash len + encrypted script hash + 4 bytes encrypted script len +
+	// encrypted script
+
+	hashLen := uint32(len(encryptedHash))
+	scriptLen := uint32(len(encryptedScript))
+	rawData := make([]byte, 10+hashLen+scriptLen)
+	rawData[0] = witnessVersion
+	if isSecretScript {
+		rawData[1] = 1
+	}
+	binary.LittleEndian.PutUint32(rawData[2:6], hashLen)
+	copy(rawData[6:6+hashLen], encryptedHash)
+	offset := 6 + hashLen
+	binary.LittleEndian.PutUint32(rawData[offset:offset+4], scriptLen)
+	offset += 4
+	copy(rawData[offset:offset+scriptLen], encryptedScript)
+	return rawData
+}
+
 // fetchAddressByHash loads address information for the provided address hash
 // from the database.  The returned value is one of the address rows for the
 // specific address type.  The caller should use type assertions to ascertain
@@ -1530,6 +1620,8 @@ func fetchAddressByHash(ns walletdb.ReadBucket, scope *KeyScope,
 		return deserializeImportedAddress(row)
 	case adtScript:
 		return deserializeScriptAddress(row)
+	case adtWitnessScript:
+		return deserializeWitnessScriptAddress(row)
 	}
 
 	str := fmt.Sprintf("unsupported address type '%d'", row.addrType)
@@ -1735,6 +1827,30 @@ func putScriptAddress(ns walletdb.ReadWriteBucket, scope *KeyScope,
 	rawData := serializeScriptAddress(encryptedHash, encryptedScript)
 	addrRow := dbAddressRow{
 		addrType:   adtScript,
+		account:    account,
+		addTime:    uint64(time.Now().Unix()),
+		syncStatus: status,
+		rawData:    rawData,
+	}
+	if err := putAddress(ns, scope, addressID, &addrRow); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// putWitnessScriptAddress stores the provided witness script address
+// information to the database.
+func putWitnessScriptAddress(ns walletdb.ReadWriteBucket, scope *KeyScope,
+	addressID []byte, account uint32, status syncStatus,
+	witnessVersion uint8, isSecretScript bool, encryptedHash,
+	encryptedScript []byte) error {
+
+	rawData := serializeWitnessScriptAddress(
+		witnessVersion, isSecretScript, encryptedHash, encryptedScript,
+	)
+	addrRow := dbAddressRow{
+		addrType:   adtWitnessScript,
 		account:    account,
 		addTime:    uint64(time.Now().Unix()),
 		syncStatus: status,
@@ -1995,6 +2111,30 @@ func deletePrivateKeys(ns walletdb.ReadWriteBucket) error {
 				// and store it.
 				row.rawData = serializeScriptAddress(srow.encryptedHash,
 					nil)
+				err = bucket.Put(k, serializeAddressRow(row))
+				if err != nil {
+					str := "failed to delete imported script"
+					return managerError(ErrDatabase, str, err)
+				}
+
+			case adtWitnessScript:
+				srow, err := deserializeWitnessScriptAddress(row)
+				if err != nil {
+					return err
+				}
+
+				// If the script is considered to be public, we
+				// don't need to do anything.
+				if !srow.isSecretScript {
+					return nil
+				}
+
+				// Re-serialize the script address without the
+				// script and store it.
+				row.rawData = serializeWitnessScriptAddress(
+					srow.witnessVersion, srow.isSecretScript,
+					srow.encryptedHash, nil,
+				)
 				err = bucket.Put(k, serializeAddressRow(row))
 				if err != nil {
 					str := "failed to delete imported script"
