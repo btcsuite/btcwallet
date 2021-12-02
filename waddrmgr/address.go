@@ -508,7 +508,7 @@ type scriptAddress struct {
 	account         uint32
 	address         *btcutil.AddressScriptHash
 	scriptEncrypted []byte
-	scriptCT        []byte
+	scriptClearText []byte
 	scriptMutex     sync.Mutex
 }
 
@@ -524,7 +524,7 @@ func (a *scriptAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
 	a.scriptMutex.Lock()
 	defer a.scriptMutex.Unlock()
 
-	if len(a.scriptCT) == 0 {
+	if len(a.scriptClearText) == 0 {
 		script, err := key.Decrypt(a.scriptEncrypted)
 		if err != nil {
 			str := fmt.Sprintf("failed to decrypt script for %s",
@@ -532,20 +532,20 @@ func (a *scriptAddress) unlock(key EncryptorDecryptor) ([]byte, error) {
 			return nil, managerError(ErrCrypto, str, err)
 		}
 
-		a.scriptCT = script
+		a.scriptClearText = script
 	}
 
-	scriptCopy := make([]byte, len(a.scriptCT))
-	copy(scriptCopy, a.scriptCT)
+	scriptCopy := make([]byte, len(a.scriptClearText))
+	copy(scriptCopy, a.scriptClearText)
 	return scriptCopy, nil
 }
 
-// lock zeroes the associated clear text private key.
+// lock zeroes the associated clear text script.
 func (a *scriptAddress) lock() {
 	// Zero and nil the clear text script associated with this address.
 	a.scriptMutex.Lock()
-	zero.Bytes(a.scriptCT)
-	a.scriptCT = nil
+	zero.Bytes(a.scriptClearText)
+	a.scriptClearText = nil
 	a.scriptMutex.Unlock()
 }
 

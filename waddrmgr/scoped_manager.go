@@ -2114,8 +2114,8 @@ func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 	if !s.rootManager.WatchOnly() {
-		scriptAddr.scriptCT = make([]byte, len(script))
-		copy(scriptAddr.scriptCT, script)
+		scriptAddr.scriptClearText = make([]byte, len(script))
+		copy(scriptAddr.scriptClearText, script)
 	}
 
 	// Add the new managed address to the cache of recent addresses and
