@@ -1,7 +1,7 @@
 module github.com/btcsuite/btcwallet
 
 require (
-	github.com/btcsuite/btcd v0.22.0-beta.0.20220316175102-8d5c75c28923
+	github.com/btcsuite/btcd v0.23.1-0.20220606230932-8fc2d707f65b
 	github.com/btcsuite/btcd/btcec/v2 v2.1.3
 	github.com/btcsuite/btcd/btcutil v1.1.1
 	github.com/btcsuite/btcd/btcutil/psbt v1.1.4

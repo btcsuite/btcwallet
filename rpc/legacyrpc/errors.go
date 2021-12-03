@@ -52,6 +52,11 @@ var (
 		Message: "address not found in wallet",
 	}
 
+	ErrAddressTypeUnknown = btcjson.RPCError{
+		Code:    btcjson.ErrRPCWalletInvalidAddressType,
+		Message: "unknown address type",
+	}
+
 	ErrAccountNameNotFound = btcjson.RPCError{
 		Code:    btcjson.ErrRPCWalletInvalidAccountName,
 		Message: "account name not found",

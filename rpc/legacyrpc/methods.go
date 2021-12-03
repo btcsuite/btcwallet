@@ -685,11 +685,23 @@ func getNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
-	account, err := w.AccountNumber(waddrmgr.KeyScopeBIP0044, acctName)
+	keyScope := waddrmgr.KeyScopeBIP0044
+	if cmd.AddressType != nil {
+		switch *cmd.AddressType {
+		case "p2sh-segwit":
+			keyScope = waddrmgr.KeyScopeBIP0049Plus
+		case "bech32":
+			keyScope = waddrmgr.KeyScopeBIP0084
+		case "legacy": // default if unset
+		default:
+			return nil, &ErrAddressTypeUnknown
+		}
+	}
+	account, err := w.AccountNumber(keyScope, acctName)
 	if err != nil {
 		return nil, err
 	}
-	addr, err := w.NewAddress(account, waddrmgr.KeyScopeBIP0044)
+	addr, err := w.NewAddress(account, keyScope)
 	if err != nil {
 		return nil, err
 	}
@@ -710,11 +722,23 @@ func getRawChangeAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error
 	if cmd.Account != nil {
 		acctName = *cmd.Account
 	}
-	account, err := w.AccountNumber(waddrmgr.KeyScopeBIP0044, acctName)
+	keyScope := waddrmgr.KeyScopeBIP0044
+	if cmd.AddressType != nil {
+		switch *cmd.AddressType {
+		case "p2sh-segwit":
+			keyScope = waddrmgr.KeyScopeBIP0049Plus
+		case "bech32":
+			keyScope = waddrmgr.KeyScopeBIP0084
+		case "legacy": // default if unset
+		default:
+			return nil, &ErrAddressTypeUnknown
+		}
+	}
+	account, err := w.AccountNumber(keyScope, acctName)
 	if err != nil {
 		return nil, err
 	}
-	addr, err := w.NewChangeAddress(account, waddrmgr.KeyScopeBIP0044)
+	addr, err := w.NewChangeAddress(account, keyScope)
 	if err != nil {
 		return nil, err
 	}
