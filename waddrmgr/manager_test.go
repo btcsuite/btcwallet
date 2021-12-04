@@ -6,6 +6,7 @@ package waddrmgr
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -83,16 +84,17 @@ const (
 // expectedAddr is used to house the expected return values from a managed
 // address.  Not all fields for used for all managed address types.
 type expectedAddr struct {
-	address        string
-	addressHash    []byte
-	internal       bool
-	compressed     bool
-	imported       bool
-	pubKey         []byte
-	privKey        []byte
-	privKeyWIF     string
-	script         []byte
-	derivationInfo DerivationPath
+	address         string
+	addressHash     []byte
+	internal        bool
+	compressed      bool
+	imported        bool
+	pubKey          []byte
+	privKey         []byte
+	privKeyWIF      string
+	script          []byte
+	derivationInfo  DerivationPath
+	scriptNotSecret bool
 }
 
 // testNamePrefix is a helper to return a prefix to show for test errors based
@@ -243,13 +245,16 @@ func testManagedScriptAddress(tc *testContext, prefix string,
 	// the expected error when the manager is locked.
 	gotScript, err := gotAddr.Script()
 	switch {
-	case tc.watchingOnly:
+	case tc.watchingOnly && !wantAddr.scriptNotSecret:
 		// Confirm expected watching-only error.
 		testName := fmt.Sprintf("%s Script", prefix)
 		if !checkManagerError(tc.t, testName, err, ErrWatchingOnly) {
 			return false
 		}
-	case tc.unlocked:
+
+	// Either the manger is unlocked or the script is not considered to
+	// be secret and is encrypted with the public key.
+	case tc.unlocked || wantAddr.scriptNotSecret:
 		if err != nil {
 			tc.t.Errorf("%s Script: unexpected error - got %v",
 				prefix, err)
@@ -260,6 +265,7 @@ func testManagedScriptAddress(tc *testContext, prefix string,
 				"want %x", prefix, gotScript, wantAddr.script)
 			return false
 		}
+
 	default:
 		// Confirm expected locked error.
 		testName := fmt.Sprintf("%s Script", prefix)
@@ -883,10 +889,13 @@ func testImportPrivateKey(tc *testContext) bool {
 // with the manager locked.
 func testImportScript(tc *testContext) bool {
 	tests := []struct {
-		name       string
-		in         []byte
-		blockstamp BlockStamp
-		expected   expectedAddr
+		name           string
+		in             []byte
+		isWitness      bool
+		witnessVersion byte
+		isSecretScript bool
+		blockstamp     BlockStamp
+		expected       expectedAddr
 	}{
 		{
 			name: "p2sh uncompressed pubkey",
@@ -924,6 +933,64 @@ func testImportScript(tc *testContext) bool {
 				// script is set to the in field during tests.
 			},
 		},
+		{
+			name:           "p2wsh multisig",
+			isWitness:      true,
+			witnessVersion: 0,
+			isSecretScript: true,
+			in: hexToBytes("52210305a662958b547fe25a71cd28fc7ef1c2" +
+				"ad4a79b12f34fc40137824b88e61199d21038552c09d9" +
+				"a709c8cbba6e472307d3f8383f46181895a76e01e258f" +
+				"09033b4a7821029dd72aba87324af59508380f9564d34" +
+				"b0f7b20d864d186e7d0428c9ea241c61653ae"),
+			expected: expectedAddr{
+				address:     "bc1q0jljr70qchwtk3ag0w3gyg9mjhg4c95xr7h8ezhvdrfgppcpz4esfdl9an",
+				addressHash: hexToBytes("7cbf21f9e0c5dcbb47a87ba28220bb95d15c16861fae7c8aec68d28087011573"),
+				internal:    false,
+				imported:    true,
+				compressed:  true,
+				// script is set to the in field during tests.
+			},
+		},
+		{
+			name:           "p2wsh multisig as watch-only address",
+			isWitness:      true,
+			witnessVersion: 0,
+			isSecretScript: false,
+			in: hexToBytes("52210305a662958b547fe25a71cd28fc7ef1c2" +
+				"ad4a79b12f34fc40137824b88e61199d21038552c09d9" +
+				"a709c8cbba6e472307d3f8383f46181895a76e01e258f" +
+				"09033b4a7821024794b65a83e9ba415096e59abc4d4d1" +
+				"1710968e52bf5eec56fe0e5bdb3d3ec0e53ae"),
+			expected: expectedAddr{
+				address:         "bc1q3a79gkjulrsgp864yskp4d5zmwm49xsdrfwvdypkqtlpj7spd3fqrl5nes",
+				addressHash:     hexToBytes("8f7c545a5cf8e0809f55242c1ab682dbb7529a0d1a5cc6903602fe197a016c52"),
+				internal:        false,
+				imported:        true,
+				compressed:      true,
+				scriptNotSecret: true,
+				// script is set to the in field during tests.
+			},
+		},
+		{
+			name:           "p2tr multisig",
+			isWitness:      true,
+			witnessVersion: 1,
+			isSecretScript: true,
+			in: hexToBytes("52210305a662958b547fe25a71cd28fc7ef1c2" +
+				"ad4a79b12f34fc40137824b88e61199d21038552c09d9" +
+				"a709c8cbba6e472307d3f8383f46181895a76e01e258f" +
+				"09033b4a78210205ad9a838cff17d79fee2841bec72e9" +
+				"9b6fd4e62fd9214fcf845b1cf8438062053ae"),
+			expected: expectedAddr{
+				address:     "bc1pc57jdm7kcnufnc339fvy2caflj6lkfeqasdfghftl7dd77dfpresqu7vep",
+				addressHash: hexToBytes("c53d26efd6c4f899e2312a584563a9fcb5fb2720ec1a945d2bff9adf79a908f3"),
+				internal:    false,
+				imported:    true,
+				compressed:  true,
+				// script is set to the in field during tests.
+			},
+		},
 	}
 
 	// The manager must be unlocked to import a private key and also for
@@ -955,7 +1022,18 @@ func testImportScript(tc *testContext) bool {
 			err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
 				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 				var err error
-				addr, err = tc.manager.ImportScript(ns, test.in, &test.blockstamp)
+
+				if test.isWitness {
+					addr, err = tc.manager.ImportWitnessScript(
+						ns, test.in, &test.blockstamp,
+						test.witnessVersion,
+						test.isSecretScript,
+					)
+				} else {
+					addr, err = tc.manager.ImportScript(
+						ns, test.in, &test.blockstamp,
+					)
+				}
 				return err
 			})
 			if err != nil {
@@ -979,8 +1057,28 @@ func testImportScript(tc *testContext) bool {
 
 			// Use the Address API to retrieve each of the expected
 			// new addresses and ensure they're accurate.
-			utilAddr, err := btcutil.NewAddressScriptHash(test.in,
-				chainParams)
+			var (
+				utilAddr btcutil.Address
+				err      error
+			)
+			switch {
+			case test.isWitness && test.witnessVersion == 0:
+				scriptHash := sha256.Sum256(test.in)
+				utilAddr, err = btcutil.NewAddressWitnessScriptHash(
+					scriptHash[:], chainParams,
+				)
+
+			case test.isWitness && test.witnessVersion == 1:
+				scriptHash := sha256.Sum256(test.in)
+				utilAddr, err = btcutil.NewAddressTaproot(
+					scriptHash[:], chainParams,
+				)
+
+			default:
+				utilAddr, err = btcutil.NewAddressScriptHash(
+					test.in, chainParams,
+				)
+			}
 			if err != nil {
 				tc.t.Errorf("%s NewAddressScriptHash #%d (%s): "+
 					"unexpected error: %v", prefix, i,
