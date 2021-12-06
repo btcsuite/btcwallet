@@ -1381,7 +1381,13 @@ out:
 			// If recovery is still running, it will end early with an error
 			// once we set the quit flag.
 			atomic.StoreUint32(&recoverySync.quit, 1)
-			<-recoverySync.done
+
+			select {
+			case <-recoverySync.done:
+			case <-quit:
+				break out
+			}
+
 		}
 
 		timeout = nil
