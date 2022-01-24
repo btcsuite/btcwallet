@@ -26,6 +26,8 @@ require (
 	google.golang.org/grpc v1.18.0
 )
 
+replace github.com/btcsuite/btcd => github.com/orbitalturtle/btcd v0.22.0-beta.0.20220124015704-6f63563bde50
+
 replace github.com/btcsuite/btcwallet/walletdb => ./walletdb
 
 replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
