@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
 	"github.com/btcsuite/btcwallet/wallet"

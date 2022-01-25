@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"

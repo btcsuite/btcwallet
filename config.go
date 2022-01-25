@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	"github.com/btcsuite/btcwallet/netparams"

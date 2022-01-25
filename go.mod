@@ -2,9 +2,9 @@ module github.com/btcsuite/btcwallet
 
 require (
 	github.com/btcsuite/btcd v0.22.0-beta.0.20220111222628-c5e6d3cf5f56
+	github.com/btcsuite/btcd/btcutil v1.0.1-0.20220111222628-c5e6d3cf5f56
+	github.com/btcsuite/btcd/btcutil/psbt v1.0.1-0.20220111222628-c5e6d3cf5f56
 	github.com/btcsuite/btclog v0.0.0-20170628155309-84c8d2346e9f
-	github.com/btcsuite/btcutil v1.0.3-0.20210929233259-9cdf59f60c51
-	github.com/btcsuite/btcutil/psbt v1.0.3-0.20210929233259-9cdf59f60c51
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.1.0
 	github.com/btcsuite/btcwallet/wallet/txrules v1.1.0
 	github.com/btcsuite/btcwallet/wallet/txsizes v1.1.0
