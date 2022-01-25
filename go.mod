@@ -44,4 +44,6 @@ replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
 // version.
 replace github.com/onsi/ginkgo => github.com/onsi/ginkgo v1.14.2
 
+replace github.com/lightninglabs/neutrino => github.com/3nprob/neutrino v0.12.1-btcdupgrade
+
 go 1.16

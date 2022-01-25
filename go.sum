@@ -1,4 +1,7 @@
 cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
+github.com/3nprob/neutrino v0.12.1-btcdupgrade h1:cBiob+/Oux45CBCetdUvvGumaA6beY1Yvy4ByPmD5l8=
+github.com/3nprob/neutrino v0.12.1-btcdupgrade/go.mod h1:MhDWEZPgFS629Zz4HtzUwL50dL+Lptizb0tvqh2QNeQ=
+github.com/3nprob/neutrino v0.12.1/go.mod h1:GlKninWpRBbL7b8G0oQ36/8downfnFwKsr0hbRA6E/E=
 github.com/aead/siphash v1.0.1 h1:FwHfE/T45KPKYuuSAKyyvE+oPWcaQ+CUmFW0bPlM+kg=
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/btcsuite/btcd v0.0.0-20190824003749-130ea5bddde3/go.mod h1:3J08xEfcugPacsc34/LKRU2yO7YmuT8yt28J8k2+rrI=
