@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -309,7 +309,7 @@ func (a *managedAddress) PrivKey() (*btcec.PrivateKey, error) {
 		return nil, err
 	}
 
-	privKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), privKeyCopy)
+	privKey, _ := btcec.PrivKeyFromBytes(privKeyCopy)
 	zero.Bytes(privKeyCopy)
 	return privKey, nil
 }
@@ -451,7 +451,7 @@ func newManagedAddress(s *ScopedKeyManager, derivationPath DerivationPath,
 
 	// Leverage the code to create a managed address without a private key
 	// and then add the private key to it.
-	ecPubKey := (*btcec.PublicKey)(&privKey.PublicKey)
+	ecPubKey := privKey.PubKey()
 	managedAddr, err := newManagedAddressWithoutPrivKey(
 		s, derivationPath, ecPubKey, compressed, addrType,
 	)

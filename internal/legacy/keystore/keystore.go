@@ -24,13 +24,15 @@ import (
 
 	"golang.org/x/crypto/ripemd160"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/rename"
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 const (
@@ -98,7 +100,7 @@ func binaryWrite(w io.Writer, order binary.ByteOrder, data interface{}) (n int64
 // 32-byte privkey.  The returned pubkey is 33 bytes if compressed,
 // or 65 bytes if uncompressed.
 func pubkeyFromPrivkey(privkey []byte, compress bool) (pubkey []byte) {
-	_, pk := btcec.PrivKeyFromBytes(btcec.S256(), privkey)
+	_, pk := btcec.PrivKeyFromBytes(privkey)
 
 	if compress {
 		return pk.SerializeCompressed()
@@ -180,7 +182,7 @@ func chainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 			len(chaincode))
 	}
 	switch n := len(pubkey); n {
-	case btcec.PubKeyBytesLenUncompressed, btcec.PubKeyBytesLenCompressed:
+	case secp.PubKeyBytesLenUncompressed, secp.PubKeyBytesLenCompressed:
 		// Correct length
 	default:
 		return nil, fmt.Errorf("invalid pubkey length %d", n)
@@ -205,9 +207,9 @@ func chainedPrivKey(privkey, pubkey, chaincode []byte) ([]byte, error) {
 func chainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 	var compressed bool
 	switch n := len(pubkey); n {
-	case btcec.PubKeyBytesLenUncompressed:
+	case secp.PubKeyBytesLenUncompressed:
 		compressed = false
-	case btcec.PubKeyBytesLenCompressed:
+	case secp.PubKeyBytesLenCompressed:
 		compressed = true
 	default:
 		// Incorrect serialized pubkey length
@@ -218,23 +220,39 @@ func chainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 			len(chaincode))
 	}
 
-	xorbytes := make([]byte, 32)
+	var xorbytes [32]byte
 	chainMod := chainhash.DoubleHashB(pubkey)
 	for i := range xorbytes {
 		xorbytes[i] = chainMod[i] ^ chaincode[i]
 	}
 
-	oldPk, err := btcec.ParsePubKey(pubkey, btcec.S256())
+	oldPk, err := btcec.ParsePubKey(pubkey)
 	if err != nil {
 		return nil, err
 	}
-	newX, newY := btcec.S256().ScalarMult(oldPk.X, oldPk.Y, xorbytes)
-	newPk := &btcec.PublicKey{
-		Curve: btcec.S256(),
-		X:     newX,
-		Y:     newY,
+
+	var xorBytesScalar btcec.ModNScalar
+	overflow := xorBytesScalar.SetBytes(&xorbytes)
+	if overflow != 0 {
+		return nil, fmt.Errorf("unable to create pubkey: %v", err)
 	}
 
+	var (
+		newPointJacobian btcec.JacobianPoint
+		oldPkJacobian    btcec.JacobianPoint
+	)
+
+	oldPk.AsJacobian(&oldPkJacobian)
+
+	btcec.ScalarMultNonConst(
+		&xorBytesScalar, &oldPkJacobian, &newPointJacobian,
+	)
+
+	newPointJacobian.ToAffine()
+
+	newPk := btcec.NewPublicKey(
+		&newPointJacobian.X, &newPointJacobian.Y,
+	)
 	if compressed {
 		return newPk.SerializeCompressed(), nil
 	}
@@ -2155,9 +2173,9 @@ func newBtcAddress(wallet *Store, privkey, iv []byte, bs *BlockStamp, compressed
 func newBtcAddressWithoutPrivkey(s *Store, pubkey, iv []byte, bs *BlockStamp) (addr *btcAddress, err error) {
 	var compressed bool
 	switch n := len(pubkey); n {
-	case btcec.PubKeyBytesLenCompressed:
+	case secp.PubKeyBytesLenCompressed:
 		compressed = true
-	case btcec.PubKeyBytesLenUncompressed:
+	case secp.PubKeyBytesLenUncompressed:
 		compressed = false
 	default:
 		return nil, fmt.Errorf("invalid pubkey length %d", n)
@@ -2171,7 +2189,7 @@ func newBtcAddressWithoutPrivkey(s *Store, pubkey, iv []byte, bs *BlockStamp) (a
 		return nil, errors.New("init vector must be nil or 16 bytes large")
 	}
 
-	pk, err := btcec.ParsePubKey(pubkey, btcec.S256())
+	pk, err := btcec.ParsePubKey(pubkey)
 	if err != nil {
 		return nil, err
 	}
@@ -2235,18 +2253,12 @@ func (a *btcAddress) verifyKeypairs() error {
 		return errors.New("private key unavailable")
 	}
 
-	privKey := &btcec.PrivateKey{
-		PublicKey: *a.pubKey.ToECDSA(),
-		D:         new(big.Int).SetBytes(a.privKeyCT),
-	}
+	privKey, pubKey := btcec.PrivKeyFromBytes(a.privKeyCT)
 
 	data := "String to sign."
-	sig, err := privKey.Sign([]byte(data))
-	if err != nil {
-		return err
-	}
+	sig := ecdsa.Sign(privKey, []byte(data))
 
-	ok := sig.Verify([]byte(data), privKey.PubKey())
+	ok := sig.Verify([]byte(data), pubKey)
 	if !ok {
 		return errors.New("pubkey verification failed")
 	}
@@ -2319,7 +2331,7 @@ func (a *btcAddress) ReadFrom(r io.Reader) (n int64, err error) {
 	if !a.flags.hasPubKey {
 		return n, errors.New("read in an address without a public key")
 	}
-	pk, err := btcec.ParsePubKey(pubKey, btcec.S256())
+	pk, err := btcec.ParsePubKey(pubKey)
 	if err != nil {
 		return n, err
 	}
@@ -2426,12 +2438,12 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 		return nil, err
 	}
 	aesDecrypter := cipher.NewCFBDecrypter(aesBlockDecrypter, a.initVector[:])
-	privkey := make([]byte, 32)
-	aesDecrypter.XORKeyStream(privkey, a.privKey[:])
+	privkeyBytes := make([]byte, 32)
+	aesDecrypter.XORKeyStream(privkeyBytes, a.privKey[:])
 
 	// If secret is already saved, simply compare the bytes.
 	if len(a.privKeyCT) == 32 {
-		if !bytes.Equal(a.privKeyCT, privkey) {
+		if !bytes.Equal(a.privKeyCT, privkeyBytes) {
 			return nil, ErrWrongPassphrase
 		}
 		privKeyCT := make([]byte, 32)
@@ -2439,14 +2451,14 @@ func (a *btcAddress) unlock(key []byte) (privKeyCT []byte, err error) {
 		return privKeyCT, nil
 	}
 
-	x, y := btcec.S256().ScalarBaseMult(privkey)
-	if x.Cmp(a.pubKey.X) != 0 || y.Cmp(a.pubKey.Y) != 0 {
+	_, pubKey := btcec.PrivKeyFromBytes(privkeyBytes)
+	if !pubKey.IsEqual(a.pubKey) {
 		return nil, ErrWrongPassphrase
 	}
 
 	privkeyCopy := make([]byte, 32)
-	copy(privkeyCopy, privkey)
-	a.privKeyCT = privkey
+	copy(privkeyCopy, privkeyBytes)
+	a.privKeyCT = privkeyBytes
 	return privkeyCopy, nil
 }
 
@@ -2573,10 +2585,8 @@ func (a *btcAddress) PrivKey() (*btcec.PrivateKey, error) {
 		return nil, err
 	}
 
-	return &btcec.PrivateKey{
-		PublicKey: *a.pubKey.ToECDSA(),
-		D:         new(big.Int).SetBytes(privKeyCT),
-	}, nil
+	privKey, _ := btcec.PrivKeyFromBytes(privKeyCT)
+	return privKey, nil
 }
 
 // ExportPrivKey exports the private key as a WIF for encoding as a string

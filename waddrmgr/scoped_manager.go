@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -767,7 +767,7 @@ func (s *ScopedKeyManager) importedAddressRowToManaged(row *dbImportedAddressRow
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
-	pubKey, err := btcec.ParsePubKey(pubBytes, btcec.S256())
+	pubKey, err := btcec.ParsePubKey(pubBytes)
 	if err != nil {
 		str := "invalid public key for imported address"
 		return nil, managerError(ErrCrypto, str, err)
@@ -1883,7 +1883,7 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 	if !s.rootManager.WatchOnly() {
 		return s.toImportedPrivateManagedAddress(wif)
 	}
-	pubKey := (*btcec.PublicKey)(&wif.PrivKey.PublicKey)
+	pubKey := wif.PrivKey.PubKey()
 	return s.toImportedPublicManagedAddress(pubKey, wif.CompressPubKey)
 }
 
