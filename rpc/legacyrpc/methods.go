@@ -15,14 +15,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -1545,8 +1545,7 @@ func signMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	_ = wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
 	_ = wire.WriteVarString(&buf, 0, cmd.Message)
 	messageHash := chainhash.DoubleHashB(buf.Bytes())
-	sigbytes, err := btcec.SignCompact(btcec.S256(), privKey,
-		messageHash, true)
+	sigbytes, err := ecdsa.SignCompact(privKey, messageHash, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1832,8 +1831,7 @@ func verifyMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	_ = wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
 	_ = wire.WriteVarString(&buf, 0, cmd.Message)
 	expectedMessageHash := chainhash.DoubleHashB(buf.Bytes())
-	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
-		expectedMessageHash)
+	pk, wasCompressed, err := ecdsa.RecoverCompact(sig, expectedMessageHash)
 	if err != nil {
 		return nil, err
 	}
