@@ -1,20 +1,16 @@
 package chain
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/lightninglabs/gozmq"
 	"github.com/lightningnetwork/lnd/ticker"
 )
 
@@ -61,17 +57,9 @@ type BitcoindConfig struct {
 	// server.
 	Pass string
 
-	// ZMQBlockHost is the IP address and port of the bitcoind's rawblock
-	// listener.
-	ZMQBlockHost string
-
-	// ZMQTxHost is the IP address and port of the bitcoind's rawtx
-	// listener.
-	ZMQTxHost string
-
-	// ZMQReadDeadline represents the read deadline we'll apply when reading
-	// ZMQ messages from either subscription.
-	ZMQReadDeadline time.Duration
+	// ZMQConfig holds the configuration settings required for setting up
+	// zmq connections to bitcoind.
+	ZMQConfig *ZMQConfig
 
 	// Dialer is a closure we'll use to dial Bitcoin peers. If the chain
 	// backend is running over Tor, this must support dialing peers over Tor
@@ -106,16 +94,12 @@ type BitcoindConn struct {
 	// NOTE: This is nil when the bitcoind node is not pruned.
 	prunedBlockDispatcher *PrunedBlockDispatcher
 
-	// zmqBlockConn is the ZMQ connection we'll use to read raw block
-	// events.
-	zmqBlockConn *gozmq.Conn
-
-	// zmqTxConn is the ZMQ connection we'll use to read raw transaction
-	// events.
-	zmqTxConn *gozmq.Conn
+	// events handles the block and transaction events that are received or
+	// retrieved from bitcoind.
+	events BitcoindEvents
 
 	// rescanClients is the set of active bitcoind rescan clients to which
-	// ZMQ event notfications will be sent to.
+	// ZMQ event notifications will be sent to.
 	rescanClientsMtx sync.Mutex
 	rescanClients    map[uint64]*BitcoindClient
 
@@ -164,28 +148,6 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 			"pruned: %v", err)
 	}
 
-	// Establish two different ZMQ connections to bitcoind to retrieve block
-	// and transaction event notifications. We'll use two as a separation of
-	// concern to ensure one type of event isn't dropped from the connection
-	// queue due to another type of event filling it up.
-	zmqBlockConn, err := gozmq.Subscribe(
-		cfg.ZMQBlockHost, []string{rawBlockZMQCommand},
-		cfg.ZMQReadDeadline,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("unable to subscribe for zmq block "+
-			"events: %v", err)
-	}
-
-	zmqTxConn, err := gozmq.Subscribe(
-		cfg.ZMQTxHost, []string{rawTxZMQCommand}, cfg.ZMQReadDeadline,
-	)
-	if err != nil {
-		zmqBlockConn.Close()
-		return nil, fmt.Errorf("unable to subscribe for zmq tx "+
-			"events: %v", err)
-	}
-
 	// Only initialize the PrunedBlockDispatcher when the connected bitcoind
 	// node is pruned.
 	var prunedBlockDispatcher *PrunedBlockDispatcher
@@ -207,15 +169,20 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		}
 	}
 
-	return &BitcoindConn{
+	bc := &BitcoindConn{
 		cfg:                   *cfg,
 		client:                client,
 		prunedBlockDispatcher: prunedBlockDispatcher,
-		zmqBlockConn:          zmqBlockConn,
-		zmqTxConn:             zmqTxConn,
 		rescanClients:         make(map[uint64]*BitcoindClient),
 		quit:                  make(chan struct{}),
-	}, nil
+	}
+
+	bc.events, err = NewBitcoindEventSubscriber(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return bc, nil
 }
 
 // Start attempts to establish a RPC and ZMQ connection to a bitcoind node. If
@@ -238,10 +205,10 @@ func (c *BitcoindConn) Start() error {
 	}
 
 	c.wg.Add(2)
-	go c.blockEventHandler()
-	go c.txEventHandler()
+	go c.sendBlockToClients()
+	go c.sendTxToClients()
 
-	return nil
+	return c.events.Start()
 }
 
 // Stop terminates the RPC and ZMQ connection to a bitcoind node and removes any
@@ -257,8 +224,10 @@ func (c *BitcoindConn) Stop() {
 
 	close(c.quit)
 	c.client.Shutdown()
-	c.zmqBlockConn.Close()
-	c.zmqTxConn.Close()
+
+	if err := c.events.Stop(); err != nil {
+		log.Errorf("error shutting down bitcoind events: %w", err)
+	}
 
 	if c.prunedBlockDispatcher != nil {
 		c.prunedBlockDispatcher.Stop()
@@ -268,206 +237,67 @@ func (c *BitcoindConn) Stop() {
 	c.wg.Wait()
 }
 
-// blockEventHandler reads raw blocks events from the ZMQ block socket and
-// forwards them along to the current rescan clients.
-//
-// NOTE: This must be run as a goroutine.
-func (c *BitcoindConn) blockEventHandler() {
+// sendBlockToClients is used to notify all rescan clients of a new block. It
+// MUST be run in a goroutine.
+func (c *BitcoindConn) sendBlockToClients() {
 	defer c.wg.Done()
 
-	log.Info("Started listening for bitcoind block notifications via ZMQ "+
-		"on", c.zmqBlockConn.RemoteAddr())
+	// sendBlock is a helper function that sends the given block to each
+	// of the rescan clients
+	sendBlock := func(block *wire.MsgBlock) {
+		c.rescanClientsMtx.Lock()
+		defer c.rescanClientsMtx.Unlock()
 
-	// Set up the buffers we expect our messages to consume. ZMQ
-	// messages from bitcoind include three parts: the command, the
-	// data, and the sequence number.
-	//
-	// We'll allocate a fixed data slice that we'll reuse when reading
-	// blocks from bitcoind through ZMQ. There's no need to recycle this
-	// slice (zero out) after using it, as further reads will overwrite the
-	// slice and we'll only be deserializing the bytes needed.
-	var (
-		command [len(rawBlockZMQCommand)]byte
-		seqNum  [seqNumLen]byte
-		data    = make([]byte, maxRawBlockSize)
-	)
-
-	for {
-		// Before attempting to read from the ZMQ socket, we'll make
-		// sure to check if we've been requested to shut down.
-		select {
-		case <-c.quit:
-			return
-		default:
-		}
-
-		// Poll an event from the ZMQ socket.
-		var (
-			bufs = [][]byte{command[:], data, seqNum[:]}
-			err  error
-		)
-		bufs, err = c.zmqBlockConn.Receive(bufs)
-		if err != nil {
-			// EOF should only be returned if the connection was
-			// explicitly closed, so we can exit at this point.
-			if err == io.EOF {
+		for _, client := range c.rescanClients {
+			select {
+			case client.blockNtfns <- block:
+			case <-client.quit:
+			case <-c.quit:
 				return
 			}
+		}
+	}
 
-			// It's possible that the connection to the socket
-			// continuously times out, so we'll prevent logging this
-			// error to prevent spamming the logs.
-			netErr, ok := err.(net.Error)
-			if ok && netErr.Timeout() {
-				log.Trace("Re-establishing timed out ZMQ " +
-					"block connection")
-				continue
-			}
-
-			log.Errorf("Unable to receive ZMQ %v message: %v",
-				rawBlockZMQCommand, err)
-			continue
+	var block *wire.MsgBlock
+	for {
+		select {
+		case block = <-c.events.BlockNotifications():
+		case <-c.quit:
+			return
 		}
 
-		// We have an event! We'll now ensure it is a block event,
-		// deserialize it, and report it to the different rescan
-		// clients.
-		eventType := string(bufs[0])
-		switch eventType {
-		case rawBlockZMQCommand:
-			block := &wire.MsgBlock{}
-			r := bytes.NewReader(bufs[1])
-			if err := block.Deserialize(r); err != nil {
-				log.Errorf("Unable to deserialize block: %v",
-					err)
-				continue
-			}
-
-			c.rescanClientsMtx.Lock()
-			for _, client := range c.rescanClients {
-				select {
-				case client.zmqBlockNtfns <- block:
-				case <-client.quit:
-				case <-c.quit:
-					c.rescanClientsMtx.Unlock()
-					return
-				}
-			}
-			c.rescanClientsMtx.Unlock()
-		default:
-			// It's possible that the message wasn't fully read if
-			// bitcoind shuts down, which will produce an unreadable
-			// event type. To prevent from logging it, we'll make
-			// sure it conforms to the ASCII standard.
-			if eventType == "" || !isASCII(eventType) {
-				continue
-			}
-
-			log.Warnf("Received unexpected event type from %v "+
-				"subscription: %v", rawBlockZMQCommand,
-				eventType)
-		}
+		sendBlock(block)
 	}
 }
 
-// txEventHandler reads raw blocks events from the ZMQ block socket and forwards
-// them along to the current rescan clients.
-//
-// NOTE: This must be run as a goroutine.
-func (c *BitcoindConn) txEventHandler() {
+// sendTxToClients is used to notify all rescan clients of a new transaction.
+// It MUST be run as a goroutine.
+func (c *BitcoindConn) sendTxToClients() {
 	defer c.wg.Done()
 
-	log.Info("Started listening for bitcoind transaction notifications "+
-		"via ZMQ on", c.zmqTxConn.RemoteAddr())
+	sendTx := func(tx *wire.MsgTx) {
+		c.rescanClientsMtx.Lock()
+		defer c.rescanClientsMtx.Unlock()
 
-	// Set up the buffers we expect our messages to consume. ZMQ
-	// messages from bitcoind include three parts: the command, the
-	// data, and the sequence number.
-	//
-	// We'll allocate a fixed data slice that we'll reuse when reading
-	// transactions from bitcoind through ZMQ. There's no need to recycle
-	// this slice (zero out) after using it, as further reads will overwrite
-	// the slice and we'll only be deserializing the bytes needed.
-	var (
-		command [len(rawTxZMQCommand)]byte
-		seqNum  [seqNumLen]byte
-		data    = make([]byte, maxRawTxSize)
-	)
-
-	for {
-		// Before attempting to read from the ZMQ socket, we'll make
-		// sure to check if we've been requested to shut down.
-		select {
-		case <-c.quit:
-			return
-		default:
-		}
-
-		// Poll an event from the ZMQ socket.
-		var (
-			bufs = [][]byte{command[:], data, seqNum[:]}
-			err  error
-		)
-		bufs, err = c.zmqTxConn.Receive(bufs)
-		if err != nil {
-			// EOF should only be returned if the connection was
-			// explicitly closed, so we can exit at this point.
-			if err == io.EOF {
+		for _, client := range c.rescanClients {
+			select {
+			case client.txNtfns <- tx:
+			case <-client.quit:
+			case <-c.quit:
 				return
 			}
+		}
+	}
 
-			// It's possible that the connection to the socket
-			// continuously times out, so we'll prevent logging this
-			// error to prevent spamming the logs.
-			netErr, ok := err.(net.Error)
-			if ok && netErr.Timeout() {
-				log.Trace("Re-establishing timed out ZMQ " +
-					"transaction connection")
-				continue
-			}
-
-			log.Errorf("Unable to receive ZMQ %v message: %v",
-				rawTxZMQCommand, err)
-			continue
+	var tx *wire.MsgTx
+	for {
+		select {
+		case tx = <-c.events.TxNotifications():
+		case <-c.quit:
+			return
 		}
 
-		// We have an event! We'll now ensure it is a transaction event,
-		// deserialize it, and report it to the different rescan
-		// clients.
-		eventType := string(bufs[0])
-		switch eventType {
-		case rawTxZMQCommand:
-			tx := &wire.MsgTx{}
-			r := bytes.NewReader(bufs[1])
-			if err := tx.Deserialize(r); err != nil {
-				log.Errorf("Unable to deserialize "+
-					"transaction: %v", err)
-				continue
-			}
-
-			c.rescanClientsMtx.Lock()
-			for _, client := range c.rescanClients {
-				select {
-				case client.zmqTxNtfns <- tx:
-				case <-client.quit:
-				case <-c.quit:
-					c.rescanClientsMtx.Unlock()
-					return
-				}
-			}
-			c.rescanClientsMtx.Unlock()
-		default:
-			// It's possible that the message wasn't fully read if
-			// bitcoind shuts down, which will produce an unreadable
-			// event type. To prevent from logging it, we'll make
-			// sure it conforms to the ASCII standard.
-			if eventType == "" || !isASCII(eventType) {
-				continue
-			}
-
-			log.Warnf("Received unexpected event type from %v "+
-				"subscription: %v", rawTxZMQCommand, eventType)
-		}
+		sendTx(tx)
 	}
 }
 
@@ -509,8 +339,8 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 		watchedTxs:       make(map[chainhash.Hash]struct{}),
 
 		notificationQueue: NewConcurrentQueue(20),
-		zmqTxNtfns:        make(chan *wire.MsgTx),
-		zmqBlockNtfns:     make(chan *wire.MsgBlock),
+		txNtfns:           make(chan *wire.MsgTx),
+		blockNtfns:        make(chan *wire.MsgBlock),
 
 		mempool:        make(map[chainhash.Hash]struct{}),
 		expiredMempool: make(map[int32]map[chainhash.Hash]struct{}),

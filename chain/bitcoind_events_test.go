@@ -342,13 +342,15 @@ func setupBitcoind(t *testing.T, minerAddr string) *BitcoindClient {
 
 	host := fmt.Sprintf("127.0.0.1:%d", rpcPort)
 	cfg := &BitcoindConfig{
-		ChainParams:     &chaincfg.RegressionNetParams,
-		Host:            host,
-		User:            "weks",
-		Pass:            "weks",
-		ZMQBlockHost:    zmqBlockHost,
-		ZMQTxHost:       zmqTxHost,
-		ZMQReadDeadline: 5 * time.Second,
+		ChainParams: &chaincfg.RegressionNetParams,
+		Host:        host,
+		User:        "weks",
+		Pass:        "weks",
+		ZMQConfig: &ZMQConfig{
+			ZMQBlockHost:    zmqBlockHost,
+			ZMQTxHost:       zmqTxHost,
+			ZMQReadDeadline: 5 * time.Second,
+		},
 		// Fields only required for pruned nodes, not
 		// needed for these tests.
 		Dialer:             nil,

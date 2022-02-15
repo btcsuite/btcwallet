@@ -91,13 +91,14 @@ type BitcoindClient struct {
 	// need to process earlier notifications still waiting to be processed.
 	notificationQueue *ConcurrentQueue
 
-	// zmqTxNtfns is a channel through which ZMQ transaction events will be
-	// retrieved from the backing bitcoind connection.
-	zmqTxNtfns chan *wire.MsgTx
+	// txNtfns is a channel through which transaction events will be
+	// retrieved from the backing bitcoind connection, either via ZMQ or
+	// polling RPC.
+	txNtfns chan *wire.MsgTx
 
-	// zmqBlockNtfns is a channel through which ZMQ block events will be
-	// retrieved from the backing bitcoind connection.
-	zmqBlockNtfns chan *wire.MsgBlock
+	// blockNtfns is a channel through block events will be retrieved from
+	// the backing bitcoind connection, either via ZMQ or polling RPC.
+	blockNtfns chan *wire.MsgBlock
 
 	quit chan struct{}
 	wg   sync.WaitGroup
@@ -597,12 +598,14 @@ func (c *BitcoindClient) ntfnHandler() {
 
 	for {
 		select {
-		case tx := <-c.zmqTxNtfns:
-			if _, _, err := c.filterTx(tx, nil, true); err != nil {
+		case tx := <-c.txNtfns:
+			_, _, err := c.filterTx(tx, nil, true)
+			if err != nil {
 				log.Errorf("Unable to filter transaction %v: %v",
 					tx.TxHash(), err)
 			}
-		case newBlock := <-c.zmqBlockNtfns:
+
+		case newBlock := <-c.blockNtfns:
 			// If the new block's previous hash matches the best
 			// hash known to us, then the new block is the next
 			// successor, so we'll update our best block to reflect
