@@ -74,6 +74,7 @@ const (
 	adtImport        addressType = 1 // not iota as they need to be stable for db
 	adtScript        addressType = 2
 	adtWitnessScript addressType = 3
+	adtTaprootScript addressType = 4
 )
 
 // accountType represents a type of address stored in the database.
@@ -1622,6 +1623,11 @@ func fetchAddressByHash(ns walletdb.ReadBucket, scope *KeyScope,
 		return deserializeScriptAddress(row)
 	case adtWitnessScript:
 		return deserializeWitnessScriptAddress(row)
+	case adtTaprootScript:
+		// A taproot script address is just a normal script address that
+		// TLV encodes more stuff in the raw script part. But in the
+		// database we store the same fields.
+		return deserializeWitnessScriptAddress(row)
 	}
 
 	str := fmt.Sprintf("unsupported address type '%d'", row.addrType)
@@ -1849,8 +1855,17 @@ func putWitnessScriptAddress(ns walletdb.ReadWriteBucket, scope *KeyScope,
 	rawData := serializeWitnessScriptAddress(
 		witnessVersion, isSecretScript, encryptedHash, encryptedScript,
 	)
+
+	addrType := adtWitnessScript
+	if witnessVersion == witnessVersionV1 {
+		// A taproot script stores a TLV encoded blob of data in the
+		// raw data field. So we only really need to use a different
+		// storage type since all other fields stay the same.
+		addrType = adtTaprootScript
+	}
+
 	addrRow := dbAddressRow{
-		addrType:   adtWitnessScript,
+		addrType:   addrType,
 		account:    account,
 		addTime:    uint64(time.Now().Unix()),
 		syncStatus: status,

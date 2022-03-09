@@ -59,6 +59,16 @@ const (
 	TaprootPubKey
 )
 
+const (
+	// witnessVersionV0 is the SegWit v0 witness version used for p2wpkh and
+	// p2wsh outputs and addresses.
+	witnessVersionV0 byte = 0x00
+
+	// witnessVersionV1 is the SegWit v1 witness version used for p2tr
+	// outputs and addresses.
+	witnessVersionV1 byte = 0x01
+)
+
 // ManagedAddress is an interface that provides acces to information regarding
 // an address managed by an address manager. Concrete implementations of this
 // type may provide further fields to provide information specific to that type
