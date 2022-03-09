@@ -3259,6 +3259,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 		addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
+		inputFetcher := txscript.NewMultiPrevOutFetcher(nil)
 		for i, txIn := range tx.TxIn {
 			prevOutScript, ok := additionalPrevScripts[txIn.PreviousOutPoint]
 			if !ok {
@@ -3275,6 +3276,9 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 				}
 				prevOutScript = txDetails.MsgTx.TxOut[prevIndex].PkScript
 			}
+			inputFetcher.AddPrevOut(txIn.PreviousOutPoint, &wire.TxOut{
+				PkScript: prevOutScript,
+			})
 
 			// Set up our callbacks that we pass to txscript so it can
 			// look up the appropriate keys and scripts by address.
@@ -3353,8 +3357,11 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 
 			// Either it was already signed or we just signed it.
 			// Find out if it is completely satisfied or still needs more.
-			vm, err := txscript.NewEngine(prevOutScript, tx, i,
-				txscript.StandardVerifyFlags, nil, nil, 0)
+			vm, err := txscript.NewEngine(
+				prevOutScript, tx, i,
+				txscript.StandardVerifyFlags, nil, nil, 0,
+				inputFetcher,
+			)
 			if err == nil {
 				err = vm.Execute()
 			}

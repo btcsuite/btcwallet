@@ -416,11 +416,22 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 // validateMsgTx verifies transaction input scripts for tx.  All previous output
 // scripts from outputs redeemed by the transaction, in the same order they are
 // spent, must be passed in the prevScripts slice.
-func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte, inputValues []btcutil.Amount) error {
-	hashCache := txscript.NewTxSigHashes(tx)
+func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte,
+	inputValues []btcutil.Amount) error {
+
+	inputFetcher, err := txauthor.TXPrevOutFetcher(
+		tx, prevScripts, inputValues,
+	)
+	if err != nil {
+		return err
+	}
+
+	hashCache := txscript.NewTxSigHashes(tx, inputFetcher)
 	for i, prevScript := range prevScripts {
-		vm, err := txscript.NewEngine(prevScript, tx, i,
-			txscript.StandardVerifyFlags, nil, hashCache, int64(inputValues[i]))
+		vm, err := txscript.NewEngine(
+			prevScript, tx, i, txscript.StandardVerifyFlags, nil,
+			hashCache, int64(inputValues[i]), inputFetcher,
+		)
 		if err != nil {
 			return fmt.Errorf("cannot create script engine: %s", err)
 		}
