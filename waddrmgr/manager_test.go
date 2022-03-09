@@ -2957,3 +2957,128 @@ func TestDeriveFromKeyPathCache(t *testing.T) {
 	require.Equal(t, cachedKey.Serialize(), cachedKey2.Serialize())
 	require.Equal(t, derivedKey.Serialize(), cachedKey2.Serialize())
 }
+
+// TestTaprootPubKeyDerivation tests that p2tr addresses can be derived from the
+// scoped manager when using the BIP0086 key scope.
+func TestTaprootPubKeyDerivation(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// From: https://github.com/bitcoin/bips/blob/master/bip-0086.mediawiki
+	rootKey, _ := hdkeychain.NewKeyFromString(
+		"xprv9s21ZrQH143K3GJpoapnV8SFfukcVBSfeCficPSGfubmSFDxo1kuHnLi" +
+			"sriDvSnRRuL2Qrg5ggqHKNVpxR86QEC8w35uxmGoggxtQTPvfUu",
+	)
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = Create(
+			ns, rootKey, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err, "create/open: unexpected error: %v", err)
+
+	defer mgr.Close()
+
+	// Now that we have the manager created, we'll fetch one of the default
+	// scopes for usage within this test.
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0086)
+	require.NoError(
+		t, err, "unable to fetch scope %v: %v", KeyScopeBIP0086, err,
+	)
+
+	externalPath := DerivationPath{
+		InternalAccount: 0,
+		Account:         hdkeychain.HardenedKeyStart,
+		Branch:          0,
+		Index:           0,
+	}
+	internalPath := DerivationPath{
+		InternalAccount: 0,
+		Account:         hdkeychain.HardenedKeyStart,
+		Branch:          1,
+		Index:           0,
+	}
+
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.DeriveFromKeyPath(ns, externalPath)
+		},
+		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			addrs, err := scopedMgr.NextExternalAddresses(ns, 0, 1)
+			if err != nil {
+				return nil, err
+			}
+			return addrs[0], nil
+		},
+		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.LastExternalAddress(ns, 0)
+		},
+		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.DeriveFromKeyPath(ns, internalPath)
+		},
+		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			addrs, err := scopedMgr.NextInternalAddresses(ns, 0, 1)
+			if err != nil {
+				return nil, err
+			}
+			return addrs[0], nil
+		},
+		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.LastInternalAddress(ns, 0)
+		},
+		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+	)
+}
+
+// assertAddressDerivation makes sure the address derived in the given callback
+// is the one that is expected.
+func assertAddressDerivation(t *testing.T, db walletdb.DB,
+	fn func(walletdb.ReadWriteBucket) (ManagedAddress, error),
+	expectedAddr string) {
+
+	var address ManagedAddress
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		var err error
+		address, err = fn(ns)
+		return err
+	})
+	require.NoError(t, err, "unable to derive addr: %v", err)
+
+	require.Equal(t, expectedAddr, address.Address().String())
+}

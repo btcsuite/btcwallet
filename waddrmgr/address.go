@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/txscript"
@@ -51,6 +52,11 @@ const (
 	// WitnessScript represents a p2wsh (pay-to-witness-script-hash) address
 	// type.
 	WitnessScript
+
+	// TaprootPubKey represents a p2tr (pay-to-taproot) address type that
+	// uses BIP-0086 (for the derivation path and for calculating the tap
+	// root hash/tweak).
+	TaprootPubKey
 )
 
 // ManagedAddress is an interface that provides acces to information regarding
@@ -269,6 +275,9 @@ func (a *managedAddress) PubKey() *btcec.PublicKey {
 // pubKeyBytes returns the serialized public key bytes for the managed address
 // based on whether or not the managed address is marked as compressed.
 func (a *managedAddress) pubKeyBytes() []byte {
+	if a.addrType == TaprootPubKey {
+		return schnorr.SerializePubKey(a.pubKey)
+	}
 	if a.compressed {
 		return a.pubKey.SerializeCompressed()
 	}
@@ -411,6 +420,16 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 	case WitnessPubKey:
 		address, err = btcutil.NewAddressWitnessPubKeyHash(
 			pubKeyHash, m.rootManager.chainParams,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+	case TaprootPubKey:
+		tapKey := txscript.ComputeTaprootKeyNoScript(pubKey)
+		address, err = btcutil.NewAddressTaproot(
+			schnorr.SerializePubKey(tapKey),
+			m.rootManager.chainParams,
 		)
 		if err != nil {
 			return nil, err
