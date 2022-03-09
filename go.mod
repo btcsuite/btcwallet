@@ -22,6 +22,7 @@ require (
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf
 	github.com/lightninglabs/neutrino v0.13.2
 	github.com/lightningnetwork/lnd/ticker v1.0.0
+	github.com/lightningnetwork/lnd/tlv v1.0.2
 	github.com/stretchr/testify v1.7.0
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
 	golang.org/x/net v0.0.0-20200813134508-3edf25e44fcc

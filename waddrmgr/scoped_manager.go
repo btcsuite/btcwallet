@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -144,6 +145,13 @@ func WitnessScriptHashIdentity(script []byte) Identity {
 	return func() []byte {
 		digest := sha256.Sum256(script)
 		return digest[:]
+	}
+}
+
+// TaprootIdentity returns the identity closure for a p2tr script.
+func TaprootIdentity(taprootKey *btcec.PublicKey) Identity {
+	return func() []byte {
+		return schnorr.SerializePubKey(taprootKey)
 	}
 }
 
@@ -2110,6 +2118,36 @@ func (s *ScopedKeyManager) ImportWitnessScript(ns walletdb.ReadWriteBucket,
 	)
 }
 
+// ImportTaprootScript imports a user-provided taproot script into the address
+// manager. The imported script will act as a pay-to-taproot address.
+func (s *ScopedKeyManager) ImportTaprootScript(ns walletdb.ReadWriteBucket,
+	tapscript *Tapscript, bs *BlockStamp, witnessVersion byte,
+	isSecretScript bool) (ManagedTaprootScriptAddress, error) {
+
+	// Make sure we have everything we need to calculate the script root and
+	// tweak the taproot key.
+	taprootKey, err := tapscript.TaprootKey()
+	if err != nil {
+		return nil, fmt.Errorf("error calculating script root: %v", err)
+	}
+
+	script, err := tlvEncodeTaprootScript(tapscript)
+	if err != nil {
+		return nil, fmt.Errorf("error encoding taproot script: %v", err)
+	}
+
+	managedAddr, err := s.importScriptAddress(
+		ns, TaprootIdentity(taprootKey), script, bs,
+		TaprootScript, witnessVersion, isSecretScript,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// We know this is a taproot address at this point.
+	return managedAddr.(ManagedTaprootScriptAddress), nil
+}
+
 // importScriptAddress imports a new pay-to-script or pay-to-witness-script
 // address.
 func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
@@ -2179,7 +2217,7 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
 	switch addrType {
-	case WitnessScript:
+	case WitnessScript, TaprootScript:
 		err = putWitnessScriptAddress(
 			ns, &s.scope, scriptIdent, ImportedAddrAccount, ssNone,
 			witnessVersion, isSecretScript, encryptedHash,
@@ -2217,7 +2255,7 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// should not be cleared out from under the caller.
 	var managedAddr ManagedScriptAddress
 	switch addrType {
-	case WitnessScript:
+	case WitnessScript, TaprootScript:
 		managedAddr, err = newWitnessScriptAddress(
 			s, ImportedAddrAccount, scriptIdent, encryptedScript,
 			witnessVersion, isSecretScript,

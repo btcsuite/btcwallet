@@ -57,6 +57,10 @@ const (
 	// uses BIP-0086 (for the derivation path and for calculating the tap
 	// root hash/tweak).
 	TaprootPubKey
+
+	// TaprootScript represents a p2tr (pay-to-taproot) address type that
+	// commits to a script and not just a single key.
+	TaprootScript
 )
 
 const (
@@ -140,6 +144,17 @@ type ManagedScriptAddress interface {
 
 	// Script returns the script associated with the address.
 	Script() ([]byte, error)
+}
+
+// ManagedTaprootScriptAddress extends ManagedScriptAddress and represents a
+// pay-to-taproot script address. It additionally provides information about the
+// script.
+type ManagedTaprootScriptAddress interface {
+	ManagedScriptAddress
+
+	// TaprootScript returns all the information needed to derive the script
+	// tree root hash needed to arrive at the tweaked taproot key.
+	TaprootScript() (*Tapscript, error)
 }
 
 // managedAddress represents a public key address.  It also may or may not have
@@ -796,38 +811,110 @@ var _ ManagedScriptAddress = (*witnessScriptAddress)(nil)
 
 // newWitnessScriptAddress initializes and returns a new
 // pay-to-witness-script-hash address.
-func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptHash,
+func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptIdent,
 	scriptEncrypted []byte, witnessVersion byte,
-	isSecretScript bool) (*witnessScriptAddress, error) {
-
-	var (
-		address btcutil.Address
-		err     error
-	)
+	isSecretScript bool) (ManagedScriptAddress, error) {
 
 	switch witnessVersion {
-	case 0x00:
-		address, err = btcutil.NewAddressWitnessScriptHash(
-			scriptHash, m.rootManager.chainParams,
+	case witnessVersionV0:
+		address, err := btcutil.NewAddressWitnessScriptHash(
+			scriptIdent, m.rootManager.chainParams,
 		)
+		if err != nil {
+			return nil, err
+		}
 
-	case 0x01:
-		address, err = btcutil.NewAddressTaproot(
-			scriptHash, m.rootManager.chainParams,
+		return &witnessScriptAddress{
+			baseScriptAddress: baseScriptAddress{
+				manager:         m,
+				account:         account,
+				scriptEncrypted: scriptEncrypted,
+			},
+			address:        address,
+			witnessVersion: witnessVersion,
+			isSecretScript: isSecretScript,
+		}, nil
+
+	case witnessVersionV1:
+		address, err := btcutil.NewAddressTaproot(
+			scriptIdent, m.rootManager.chainParams,
 		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Lift the x-only coordinate of the tweaked public key.
+		tweakedPubKey, err := schnorr.ParsePubKey(scriptIdent)
+		if err != nil {
+			return nil, fmt.Errorf("error lifting public key from "+
+				"script ident: %v", err)
+		}
+
+		return &taprootScriptAddress{
+			witnessScriptAddress: witnessScriptAddress{
+				baseScriptAddress: baseScriptAddress{
+					manager:         m,
+					account:         account,
+					scriptEncrypted: scriptEncrypted,
+				},
+				address:        address,
+				witnessVersion: witnessVersion,
+				isSecretScript: isSecretScript,
+			},
+			TweakedPubKey: tweakedPubKey,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported witness version %d",
+			witnessVersion)
 	}
+}
+
+// taprootScriptAddress represents a pay-to-taproot address that commits to a
+// script.
+type taprootScriptAddress struct {
+	witnessScriptAddress
+
+	TweakedPubKey *btcec.PublicKey
+}
+
+// Enforce taprootScriptAddress satisfies the ManagedTaprootScriptAddress
+// interface.
+var _ ManagedTaprootScriptAddress = (*taprootScriptAddress)(nil)
+
+// AddrType returns the address type of the managed address. This can be used
+// to quickly discern the address type without further processing
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *taprootScriptAddress) AddrType() AddressType {
+	return TaprootScript
+}
+
+// Address returns the btcutil.Address which represents the managed address.
+// This will be a pay-to-taproot address.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *taprootScriptAddress) Address() btcutil.Address {
+	return a.address
+}
+
+// AddrHash returns the script hash for the address.
+//
+// This is part of the ManagedAddress interface implementation.
+func (a *taprootScriptAddress) AddrHash() []byte {
+	return schnorr.SerializePubKey(a.TweakedPubKey)
+}
+
+// TaprootScript returns all the information needed to derive the script tree
+// root hash needed to arrive at the tweaked taproot key.
+func (a *taprootScriptAddress) TaprootScript() (*Tapscript, error) {
+	// Need to decrypt our internal script first. We need to be unlocked for
+	// this.
+	script, err := a.Script()
 	if err != nil {
 		return nil, err
 	}
 
-	return &witnessScriptAddress{
-		baseScriptAddress: baseScriptAddress{
-			manager:         m,
-			account:         account,
-			scriptEncrypted: scriptEncrypted,
-		},
-		address:        address,
-		witnessVersion: witnessVersion,
-		isSecretScript: isSecretScript,
-	}, nil
+	// Decode the additional TLV encoded data.
+	return tlvDecodeTaprootTaprootScript(script)
 }
