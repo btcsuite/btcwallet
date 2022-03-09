@@ -2215,38 +2215,29 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// when not a watching-only address manager, make a copy of the script
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
-	var (
-		managedAddr    ManagedScriptAddress
-		baseScriptAddr *baseScriptAddress
-	)
+	var managedAddr ManagedScriptAddress
 	switch addrType {
 	case WitnessScript:
-		witnessAddr, err := newWitnessScriptAddress(
+		managedAddr, err = newWitnessScriptAddress(
 			s, ImportedAddrAccount, scriptIdent, encryptedScript,
 			witnessVersion, isSecretScript,
 		)
-		if err != nil {
-			return nil, err
-		}
-		managedAddr = witnessAddr
-		baseScriptAddr = &witnessAddr.baseScriptAddress
 
 	default:
-		scriptAddr, err := newScriptAddress(
+		managedAddr, err = newScriptAddress(
 			s, ImportedAddrAccount, scriptIdent, encryptedScript,
 		)
-		if err != nil {
-			return nil, err
-		}
-		managedAddr = scriptAddr
-		baseScriptAddr = &scriptAddr.baseScriptAddress
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// Even if the script is secret, we are currently unlocked, so we keep a
 	// clear text copy of the script around to avoid decrypting it on each
 	// access.
-	baseScriptAddr.scriptClearText = make([]byte, len(script))
-	copy(baseScriptAddr.scriptClearText, script)
+	if cts, ok := managedAddr.(clearTextScriptSetter); ok {
+		cts.setClearTextScript(script)
+	}
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.

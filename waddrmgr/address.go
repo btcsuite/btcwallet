@@ -536,6 +536,14 @@ func newManagedAddressFromExtKey(s *ScopedKeyManager,
 	return managedAddr, nil
 }
 
+// clearTextScriptSetter is a non-exported interface to identify script types
+// that allow their clear text script to be set.
+type clearTextScriptSetter interface {
+	// setClearText sets the unencrypted script on the struct after
+	// unlocking/decrypting it.
+	setClearTextScript([]byte)
+}
+
 // baseScriptAddress represents the common fields of a pay-to-script-hash and
 // a pay-to-witness-script-hash address.
 type baseScriptAddress struct {
@@ -546,6 +554,8 @@ type baseScriptAddress struct {
 	scriptClearText []byte
 	scriptMutex     sync.Mutex
 }
+
+var _ clearTextScriptSetter = (*baseScriptAddress)(nil)
 
 // unlock decrypts and stores the associated script.  It will fail if the key is
 // invalid or the encrypted script is not available.  The returned clear text
@@ -603,6 +613,13 @@ func (a *baseScriptAddress) Imported() bool {
 // This is part of the ManagedAddress interface implementation.
 func (a *baseScriptAddress) Internal() bool {
 	return false
+}
+
+// setClearText sets the unencrypted script on the struct after unlocking/
+// decrypting it.
+func (a *baseScriptAddress) setClearTextScript(script []byte) {
+	a.scriptClearText = make([]byte, len(script))
+	copy(a.scriptClearText, script)
 }
 
 // scriptAddress represents a pay-to-script-hash address.
