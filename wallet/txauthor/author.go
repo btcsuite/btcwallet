@@ -229,19 +229,32 @@ func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte,
 		// function which generates both the sigScript, and the witness
 		// script.
 		case txscript.IsPayToScriptHash(pkScript):
-			err := spendNestedWitnessPubKeyHash(inputs[i], pkScript,
-				int64(inputValues[i]), chainParams, secrets,
-				tx, hashCache, i)
+			err := spendNestedWitnessPubKeyHash(
+				inputs[i], pkScript, int64(inputValues[i]),
+				chainParams, secrets, tx, hashCache, i,
+			)
 			if err != nil {
 				return err
 			}
+
 		case txscript.IsPayToWitnessPubKeyHash(pkScript):
-			err := spendWitnessKeyHash(inputs[i], pkScript,
-				int64(inputValues[i]), chainParams, secrets,
-				tx, hashCache, i)
+			err := spendWitnessKeyHash(
+				inputs[i], pkScript, int64(inputValues[i]),
+				chainParams, secrets, tx, hashCache, i,
+			)
 			if err != nil {
 				return err
 			}
+
+		case txscript.IsPayToTaproot(pkScript):
+			err := spendTaprootKey(
+				inputs[i], pkScript, int64(inputValues[i]),
+				chainParams, secrets, tx, hashCache, i,
+			)
+			if err != nil {
+				return err
+			}
+
 		default:
 			sigScript := inputs[i].SignatureScript
 			script, err := txscript.SignTxOutput(chainParams, tx, i,
@@ -300,6 +313,43 @@ func spendWitnessKeyHash(txIn *wire.TxIn, pkScript []byte,
 	}
 	witnessScript, err := txscript.WitnessSignature(tx, hashCache, idx,
 		inputValue, witnessProgram, txscript.SigHashAll, privKey, true)
+	if err != nil {
+		return err
+	}
+
+	txIn.Witness = witnessScript
+
+	return nil
+}
+
+// spendTaprootKey generates, and sets a valid witness for spending the passed
+// pkScript with the specified input amount. The input amount *must*
+// correspond to the output value of the previous pkScript, or else verification
+// will fail since the new sighash digest algorithm defined in BIP0341 includes
+// the input value in the sighash.
+func spendTaprootKey(txIn *wire.TxIn, pkScript []byte,
+	inputValue int64, chainParams *chaincfg.Params, secrets SecretsSource,
+	tx *wire.MsgTx, hashCache *txscript.TxSigHashes, idx int) error {
+
+	// First obtain the key pair associated with this p2tr address. If the
+	// pkScript is incorrect or derived from a different internal key or
+	// with a script root, we simply won't find a corresponding private key
+	// here.
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, chainParams)
+	if err != nil {
+		return err
+	}
+	privKey, _, err := secrets.GetKey(addrs[0])
+	if err != nil {
+		return err
+	}
+
+	// We can now generate a valid witness which will allow us to spend this
+	// output.
+	witnessScript, err := txscript.TaprootWitnessSignature(
+		tx, hashCache, idx, inputValue, pkScript,
+		txscript.SigHashDefault, privKey,
+	)
 	if err != nil {
 		return err
 	}
