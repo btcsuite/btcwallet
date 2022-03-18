@@ -404,6 +404,59 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 	return nil
 }
 
+// ImportTaprootScript imports a user-provided taproot script into the address
+// manager. The imported script will act as a pay-to-taproot address.
+func (w *Wallet) ImportTaprootScript(scope waddrmgr.KeyScope,
+	tapscript *waddrmgr.Tapscript, bs *waddrmgr.BlockStamp,
+	witnessVersion byte, isSecretScript bool) (waddrmgr.ManagedAddress,
+	error) {
+
+	manager, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	// The starting block for the key is the genesis block unless otherwise
+	// specified.
+	if bs == nil {
+		bs = &waddrmgr.BlockStamp{
+			Hash:      *w.chainParams.GenesisHash,
+			Height:    0,
+			Timestamp: w.chainParams.GenesisBlock.Header.Timestamp,
+		}
+	} else if bs.Timestamp.IsZero() {
+		// Only update the new birthday time from default value if we
+		// actually have timestamp info in the header.
+		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
+		if err == nil {
+			bs.Timestamp = header.Timestamp
+		}
+	}
+
+	// TODO: Perform rescan if requested.
+	var addr waddrmgr.ManagedAddress
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		addr, err = manager.ImportTaprootScript(
+			ns, tapscript, bs, witnessVersion, isSecretScript,
+		)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	log.Infof("Imported address %v", addr.Address())
+
+	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
+	if err != nil {
+		return nil, fmt.Errorf("unable to subscribe for address "+
+			"notifications: %v", err)
+	}
+
+	return addr, nil
+}
+
 // ImportPrivateKey imports a private key to the wallet and writes the new
 // wallet to disk.
 //
