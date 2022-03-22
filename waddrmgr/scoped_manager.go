@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -129,6 +130,31 @@ func (k KeyScope) String() string {
 	return fmt.Sprintf("m/%v'/%v'", k.Purpose, k.Coin)
 }
 
+// Identity is a closure that returns the identifier of an address.
+type Identity func() []byte
+
+// ScriptHashIdentity returns the identity closure for a p2sh script.
+func ScriptHashIdentity(script []byte) Identity {
+	return func() []byte {
+		return btcutil.Hash160(script)
+	}
+}
+
+// WitnessScriptHashIdentity returns the identity closure for a p2wsh script.
+func WitnessScriptHashIdentity(script []byte) Identity {
+	return func() []byte {
+		digest := sha256.Sum256(script)
+		return digest[:]
+	}
+}
+
+// TaprootIdentity returns the identity closure for a p2tr script.
+func TaprootIdentity(taprootKey *btcec.PublicKey) Identity {
+	return func() []byte {
+		return schnorr.SerializePubKey(taprootKey)
+	}
+}
+
 // ScopeAddrSchema is the address schema of a particular KeyScope. This will be
 // persisted within the database, and will be consulted when deriving any keys
 // for a particular scope to know how to encode the public keys as addresses.
@@ -157,6 +183,13 @@ var (
 		Coin:    0,
 	}
 
+	// KeyScopeBIP0086 is the key scope for BIP0086 derivation. BIP0086
+	// will be used to derive all p2tr addresses.
+	KeyScopeBIP0086 = KeyScope{
+		Purpose: 86,
+		Coin:    0,
+	}
+
 	// KeyScopeBIP0044 is the key scope for BIP0044 derivation. Legacy
 	// wallets will only be able to use this key scope, and no keys beyond
 	// it.
@@ -170,6 +203,7 @@ var (
 	DefaultKeyScopes = []KeyScope{
 		KeyScopeBIP0049Plus,
 		KeyScopeBIP0084,
+		KeyScopeBIP0086,
 		KeyScopeBIP0044,
 	}
 
@@ -184,6 +218,10 @@ var (
 		KeyScopeBIP0084: {
 			ExternalAddrType: WitnessPubKey,
 			InternalAddrType: WitnessPubKey,
+		},
+		KeyScopeBIP0086: {
+			ExternalAddrType: TaprootPubKey,
+			InternalAddrType: TaprootPubKey,
 		},
 		KeyScopeBIP0044: {
 			InternalAddrType: PubKeyHash,
@@ -2053,7 +2091,9 @@ func (s *ScopedKeyManager) toImportedPublicManagedAddress(
 func (s *ScopedKeyManager) ImportScript(ns walletdb.ReadWriteBucket,
 	script []byte, bs *BlockStamp) (ManagedScriptAddress, error) {
 
-	return s.importScriptAddress(ns, script, bs, Script, 0, true)
+	return s.importScriptAddress(
+		ns, ScriptHashIdentity(script), script, bs, Script, 0, true,
+	)
 }
 
 // ImportWitnessScript imports a user-provided script into the address manager.
@@ -2073,14 +2113,45 @@ func (s *ScopedKeyManager) ImportWitnessScript(ns walletdb.ReadWriteBucket,
 	isSecretScript bool) (ManagedScriptAddress, error) {
 
 	return s.importScriptAddress(
-		ns, script, bs, WitnessScript, witnessVersion, isSecretScript,
+		ns, WitnessScriptHashIdentity(script), script, bs,
+		WitnessScript, witnessVersion, isSecretScript,
 	)
+}
+
+// ImportTaprootScript imports a user-provided taproot script into the address
+// manager. The imported script will act as a pay-to-taproot address.
+func (s *ScopedKeyManager) ImportTaprootScript(ns walletdb.ReadWriteBucket,
+	tapscript *Tapscript, bs *BlockStamp, witnessVersion byte,
+	isSecretScript bool) (ManagedTaprootScriptAddress, error) {
+
+	// Make sure we have everything we need to calculate the script root and
+	// tweak the taproot key.
+	taprootKey, err := tapscript.TaprootKey()
+	if err != nil {
+		return nil, fmt.Errorf("error calculating script root: %v", err)
+	}
+
+	script, err := tlvEncodeTaprootScript(tapscript)
+	if err != nil {
+		return nil, fmt.Errorf("error encoding taproot script: %v", err)
+	}
+
+	managedAddr, err := s.importScriptAddress(
+		ns, TaprootIdentity(taprootKey), script, bs,
+		TaprootScript, witnessVersion, isSecretScript,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// We know this is a taproot address at this point.
+	return managedAddr.(ManagedTaprootScriptAddress), nil
 }
 
 // importScriptAddress imports a new pay-to-script or pay-to-witness-script
 // address.
 func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
-	script []byte, bs *BlockStamp, addrType AddressType,
+	identity Identity, script []byte, bs *BlockStamp, addrType AddressType,
 	witnessVersion byte, isSecretScript bool) (ManagedScriptAddress,
 	error) {
 
@@ -2099,30 +2170,21 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 		return nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
-	// Witness script addresses use a SHA256.
-	var scriptHash []byte
-	switch addrType {
-	case WitnessScript:
-		digest := sha256.Sum256(script)
-		scriptHash = digest[:]
-	default:
-		scriptHash = btcutil.Hash160(script)
-	}
-
 	// Prevent duplicates.
-	alreadyExists := s.existsAddress(ns, scriptHash)
+	scriptIdent := identity()
+	alreadyExists := s.existsAddress(ns, scriptIdent)
 	if alreadyExists {
-		str := fmt.Sprintf("address for script hash %x already exists",
-			scriptHash)
+		str := fmt.Sprintf("address for script hash/key %x already "+
+			"exists", scriptIdent)
 		return nil, managerError(ErrDuplicateAddress, str, nil)
 	}
 
-	// Encrypt the script hash using the crypto public key so it is
+	// Encrypt the script hash/key using the crypto public key, so it is
 	// accessible when the address manager is locked or watching-only.
-	encryptedHash, err := s.rootManager.cryptoKeyPub.Encrypt(scriptHash)
+	encryptedHash, err := s.rootManager.cryptoKeyPub.Encrypt(scriptIdent)
 	if err != nil {
-		str := fmt.Sprintf("failed to encrypt script hash %x",
-			scriptHash)
+		str := fmt.Sprintf("failed to encrypt script hash/key %x",
+			scriptIdent)
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
@@ -2139,7 +2201,7 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	encryptedScript, err := cryptoKey.Encrypt(script)
 	if err != nil {
 		str := fmt.Sprintf("failed to encrypt script for %x",
-			scriptHash)
+			scriptIdent)
 		return nil, managerError(ErrCrypto, str, err)
 	}
 
@@ -2155,16 +2217,16 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
 	switch addrType {
-	case WitnessScript:
+	case WitnessScript, TaprootScript:
 		err = putWitnessScriptAddress(
-			ns, &s.scope, scriptHash, ImportedAddrAccount, ssNone,
+			ns, &s.scope, scriptIdent, ImportedAddrAccount, ssNone,
 			witnessVersion, isSecretScript, encryptedHash,
 			encryptedScript,
 		)
 
 	default:
 		err = putScriptAddress(
-			ns, &s.scope, scriptHash, ImportedAddrAccount, ssNone,
+			ns, &s.scope, scriptIdent, ImportedAddrAccount, ssNone,
 			encryptedHash, encryptedScript,
 		)
 	}
@@ -2191,42 +2253,33 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// when not a watching-only address manager, make a copy of the script
 	// since it will be cleared on lock and the script the caller passed
 	// should not be cleared out from under the caller.
-	var (
-		managedAddr    ManagedScriptAddress
-		baseScriptAddr *baseScriptAddress
-	)
+	var managedAddr ManagedScriptAddress
 	switch addrType {
-	case WitnessScript:
-		witnessAddr, err := newWitnessScriptAddress(
-			s, ImportedAddrAccount, scriptHash, encryptedScript,
+	case WitnessScript, TaprootScript:
+		managedAddr, err = newWitnessScriptAddress(
+			s, ImportedAddrAccount, scriptIdent, encryptedScript,
 			witnessVersion, isSecretScript,
 		)
-		if err != nil {
-			return nil, err
-		}
-		managedAddr = witnessAddr
-		baseScriptAddr = &witnessAddr.baseScriptAddress
 
 	default:
-		scriptAddr, err := newScriptAddress(
-			s, ImportedAddrAccount, scriptHash, encryptedScript,
+		managedAddr, err = newScriptAddress(
+			s, ImportedAddrAccount, scriptIdent, encryptedScript,
 		)
-		if err != nil {
-			return nil, err
-		}
-		managedAddr = scriptAddr
-		baseScriptAddr = &scriptAddr.baseScriptAddress
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// Even if the script is secret, we are currently unlocked, so we keep a
 	// clear text copy of the script around to avoid decrypting it on each
 	// access.
-	baseScriptAddr.scriptClearText = make([]byte, len(script))
-	copy(baseScriptAddr.scriptClearText, script)
+	if cts, ok := managedAddr.(clearTextScriptSetter); ok {
+		cts.setClearTextScript(script)
+	}
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
-	s.addrs[addrKey(scriptHash)] = managedAddr
+	s.addrs[addrKey(scriptIdent)] = managedAddr
 	return managedAddr, nil
 }
 
@@ -2413,7 +2466,7 @@ func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
 	switch net {
 	case wire.MainNet:
 		switch s.scope {
-		case KeyScopeBIP0044:
+		case KeyScopeBIP0044, KeyScopeBIP0086:
 			version = HDVersionMainNetBIP0044
 		case KeyScopeBIP0049Plus:
 			version = HDVersionMainNetBIP0049
@@ -2427,7 +2480,7 @@ func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
 		netparams.SigNetWire(s.rootManager.ChainParams()):
 
 		switch s.scope {
-		case KeyScopeBIP0044:
+		case KeyScopeBIP0044, KeyScopeBIP0086:
 			version = HDVersionTestNetBIP0044
 		case KeyScopeBIP0049Plus:
 			version = HDVersionTestNetBIP0049
@@ -2439,7 +2492,7 @@ func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
 
 	case wire.SimNet:
 		switch s.scope {
-		case KeyScopeBIP0044:
+		case KeyScopeBIP0044, KeyScopeBIP0086:
 			version = HDVersionSimNetBIP0044
 		// We use the mainnet versions for simnet keys when the keys
 		// belong to a key scope which simnet doesn't have a defined

@@ -272,7 +272,7 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 	// ones to sign. If there is any input without witness data that we
 	// cannot sign because it's not our UTXO, this will be a hard failure.
 	tx := packet.UnsignedTx
-	sigHashes := txscript.NewTxSigHashes(tx)
+	sigHashes := txscript.NewTxSigHashes(tx, PsbtPrevOutputFetcher(packet))
 	for idx, txIn := range tx.TxIn {
 		in := packet.Inputs[idx]
 
@@ -388,6 +388,39 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 	}
 
 	return nil
+}
+
+// PsbtPrevOutputFetcher returns a txscript.PrevOutFetcher built from the UTXO
+// information in a PSBT packet.
+func PsbtPrevOutputFetcher(packet *psbt.Packet) *txscript.MultiPrevOutFetcher {
+	fetcher := txscript.NewMultiPrevOutFetcher(nil)
+	for idx, txIn := range packet.UnsignedTx.TxIn {
+		in := packet.Inputs[idx]
+
+		// Skip any input that has no UTXO.
+		if in.WitnessUtxo == nil && in.NonWitnessUtxo == nil {
+			continue
+		}
+
+		if in.NonWitnessUtxo != nil {
+			prevIndex := txIn.PreviousOutPoint.Index
+			fetcher.AddPrevOut(
+				txIn.PreviousOutPoint,
+				in.NonWitnessUtxo.TxOut[prevIndex],
+			)
+
+			continue
+		}
+
+		// Fall back to witness UTXO only for older wallets.
+		if in.WitnessUtxo != nil {
+			fetcher.AddPrevOut(
+				txIn.PreviousOutPoint, in.WitnessUtxo,
+			)
+		}
+	}
+
+	return fetcher
 }
 
 // constantInputSource creates an input source function that always returns the

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -892,6 +893,7 @@ func testImportScript(tc *testContext) bool {
 		name           string
 		in             []byte
 		isWitness      bool
+		isTaproot      bool
 		witnessVersion byte
 		isSecretScript bool
 		blockstamp     BlockStamp
@@ -973,18 +975,23 @@ func testImportScript(tc *testContext) bool {
 			},
 		},
 		{
-			name:           "p2tr multisig",
-			isWitness:      true,
+			name:           "p2tr tapscript with all tap leaves",
+			isTaproot:      true,
 			witnessVersion: 1,
 			isSecretScript: true,
-			in: hexToBytes("52210305a662958b547fe25a71cd28fc7ef1c2" +
-				"ad4a79b12f34fc40137824b88e61199d21038552c09d9" +
-				"a709c8cbba6e472307d3f8383f46181895a76e01e258f" +
-				"09033b4a78210205ad9a838cff17d79fee2841bec72e9" +
-				"9b6fd4e62fd9214fcf845b1cf8438062053ae"),
+			// The encoded *Tapscript struct for a script with all
+			// tap script leaves known.
+			in: hexToBytes(
+				"0101000221c00ef94ee79c07cbd1988fffd6e6aea1e2" +
+					"5c3b033a2fd64fe14a9b955e5355f0c60346" +
+					"1d0101c0021876a914f6c97547d73156abb3" +
+					"00ae059905c4acaadd09dd88270101c00222" +
+					"200ef94ee79c07cbd1988fffd6e6aea1e25c" +
+					"3b033a2fd64fe14a9b955e5355f0c6ac",
+			),
 			expected: expectedAddr{
-				address:     "bc1pc57jdm7kcnufnc339fvy2caflj6lkfeqasdfghftl7dd77dfpresqu7vep",
-				addressHash: hexToBytes("c53d26efd6c4f899e2312a584563a9fcb5fb2720ec1a945d2bff9adf79a908f3"),
+				address:     "bc1pu92qt24cl4spyp4rsj9sa3y4ma6a3fszgewcmway9f6f80vgnduq5lnd0u",
+				addressHash: hexToBytes("e15405aab8fd601206a3848b0ec495df75d8a602465d8dbba42a7493bd889b78"),
 				internal:    false,
 				imported:    true,
 				compressed:  true,
@@ -1023,13 +1030,27 @@ func testImportScript(tc *testContext) bool {
 				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 				var err error
 
-				if test.isWitness {
+				switch {
+				case test.isWitness:
 					addr, err = tc.manager.ImportWitnessScript(
 						ns, test.in, &test.blockstamp,
 						test.witnessVersion,
 						test.isSecretScript,
 					)
-				} else {
+
+				case test.isTaproot:
+					var script *Tapscript
+					script, err = tlvDecodeTaprootTaprootScript(
+						test.in,
+					)
+					require.NoError(tc.t, err)
+					addr, err = tc.manager.ImportTaprootScript(
+						ns, script, &test.blockstamp,
+						test.witnessVersion,
+						test.isSecretScript,
+					)
+
+				default:
 					addr, err = tc.manager.ImportScript(
 						ns, test.in, &test.blockstamp,
 					)
@@ -1068,10 +1089,21 @@ func testImportScript(tc *testContext) bool {
 					scriptHash[:], chainParams,
 				)
 
-			case test.isWitness && test.witnessVersion == 1:
-				scriptHash := sha256.Sum256(test.in)
+			case test.isTaproot:
+				var (
+					script     *Tapscript
+					taprootKey *btcec.PublicKey
+				)
+				script, err = tlvDecodeTaprootTaprootScript(
+					test.in,
+				)
+				require.NoError(tc.t, err)
+				taprootKey, err = script.TaprootKey()
+				require.NoError(tc.t, err)
+
 				utilAddr, err = btcutil.NewAddressTaproot(
-					scriptHash[:], chainParams,
+					schnorr.SerializePubKey(taprootKey),
+					chainParams,
 				)
 
 			default:
@@ -2956,4 +2988,129 @@ func TestDeriveFromKeyPathCache(t *testing.T) {
 	// All three keys we have now should match exactly.
 	require.Equal(t, cachedKey.Serialize(), cachedKey2.Serialize())
 	require.Equal(t, derivedKey.Serialize(), cachedKey2.Serialize())
+}
+
+// TestTaprootPubKeyDerivation tests that p2tr addresses can be derived from the
+// scoped manager when using the BIP0086 key scope.
+func TestTaprootPubKeyDerivation(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// From: https://github.com/bitcoin/bips/blob/master/bip-0086.mediawiki
+	rootKey, _ := hdkeychain.NewKeyFromString(
+		"xprv9s21ZrQH143K3GJpoapnV8SFfukcVBSfeCficPSGfubmSFDxo1kuHnLi" +
+			"sriDvSnRRuL2Qrg5ggqHKNVpxR86QEC8w35uxmGoggxtQTPvfUu",
+	)
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = Create(
+			ns, rootKey, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err, "create/open: unexpected error: %v", err)
+
+	defer mgr.Close()
+
+	// Now that we have the manager created, we'll fetch one of the default
+	// scopes for usage within this test.
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0086)
+	require.NoError(
+		t, err, "unable to fetch scope %v: %v", KeyScopeBIP0086, err,
+	)
+
+	externalPath := DerivationPath{
+		InternalAccount: 0,
+		Account:         hdkeychain.HardenedKeyStart,
+		Branch:          0,
+		Index:           0,
+	}
+	internalPath := DerivationPath{
+		InternalAccount: 0,
+		Account:         hdkeychain.HardenedKeyStart,
+		Branch:          1,
+		Index:           0,
+	}
+
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.DeriveFromKeyPath(ns, externalPath)
+		},
+		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			addrs, err := scopedMgr.NextExternalAddresses(ns, 0, 1)
+			if err != nil {
+				return nil, err
+			}
+			return addrs[0], nil
+		},
+		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.LastExternalAddress(ns, 0)
+		},
+		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.DeriveFromKeyPath(ns, internalPath)
+		},
+		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			addrs, err := scopedMgr.NextInternalAddresses(ns, 0, 1)
+			if err != nil {
+				return nil, err
+			}
+			return addrs[0], nil
+		},
+		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+	)
+	assertAddressDerivation(
+		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
+			return scopedMgr.LastInternalAddress(ns, 0)
+		},
+		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+	)
+}
+
+// assertAddressDerivation makes sure the address derived in the given callback
+// is the one that is expected.
+func assertAddressDerivation(t *testing.T, db walletdb.DB,
+	fn func(walletdb.ReadWriteBucket) (ManagedAddress, error),
+	expectedAddr string) {
+
+	var address ManagedAddress
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		var err error
+		address, err = fn(ns)
+		return err
+	})
+	require.NoError(t, err, "unable to derive addr: %v", err)
+
+	require.Equal(t, expectedAddr, address.Address().String())
 }

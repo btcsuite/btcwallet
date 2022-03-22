@@ -203,11 +203,16 @@ type SecretsSource interface {
 // are passed in prevPkScripts and the slice length must match the number of
 // inputs.  Private keys and redeem scripts are looked up using a SecretsSource
 // based on the previous output script.
-func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte, inputValues []btcutil.Amount,
-	secrets SecretsSource) error {
+func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte,
+	inputValues []btcutil.Amount, secrets SecretsSource) error {
+
+	inputFetcher, err := TXPrevOutFetcher(tx, prevPkScripts, inputValues)
+	if err != nil {
+		return err
+	}
 
 	inputs := tx.TxIn
-	hashCache := txscript.NewTxSigHashes(tx)
+	hashCache := txscript.NewTxSigHashes(tx, inputFetcher)
 	chainParams := secrets.ChainParams()
 
 	if len(inputs) != len(prevPkScripts) {
@@ -224,19 +229,32 @@ func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte, inputValues []bt
 		// function which generates both the sigScript, and the witness
 		// script.
 		case txscript.IsPayToScriptHash(pkScript):
-			err := spendNestedWitnessPubKeyHash(inputs[i], pkScript,
-				int64(inputValues[i]), chainParams, secrets,
-				tx, hashCache, i)
+			err := spendNestedWitnessPubKeyHash(
+				inputs[i], pkScript, int64(inputValues[i]),
+				chainParams, secrets, tx, hashCache, i,
+			)
 			if err != nil {
 				return err
 			}
+
 		case txscript.IsPayToWitnessPubKeyHash(pkScript):
-			err := spendWitnessKeyHash(inputs[i], pkScript,
-				int64(inputValues[i]), chainParams, secrets,
-				tx, hashCache, i)
+			err := spendWitnessKeyHash(
+				inputs[i], pkScript, int64(inputValues[i]),
+				chainParams, secrets, tx, hashCache, i,
+			)
 			if err != nil {
 				return err
 			}
+
+		case txscript.IsPayToTaproot(pkScript):
+			err := spendTaprootKey(
+				inputs[i], pkScript, int64(inputValues[i]),
+				chainParams, secrets, tx, hashCache, i,
+			)
+			if err != nil {
+				return err
+			}
+
 		default:
 			sigScript := inputs[i].SignatureScript
 			script, err := txscript.SignTxOutput(chainParams, tx, i,
@@ -295,6 +313,43 @@ func spendWitnessKeyHash(txIn *wire.TxIn, pkScript []byte,
 	}
 	witnessScript, err := txscript.WitnessSignature(tx, hashCache, idx,
 		inputValue, witnessProgram, txscript.SigHashAll, privKey, true)
+	if err != nil {
+		return err
+	}
+
+	txIn.Witness = witnessScript
+
+	return nil
+}
+
+// spendTaprootKey generates, and sets a valid witness for spending the passed
+// pkScript with the specified input amount. The input amount *must*
+// correspond to the output value of the previous pkScript, or else verification
+// will fail since the new sighash digest algorithm defined in BIP0341 includes
+// the input value in the sighash.
+func spendTaprootKey(txIn *wire.TxIn, pkScript []byte,
+	inputValue int64, chainParams *chaincfg.Params, secrets SecretsSource,
+	tx *wire.MsgTx, hashCache *txscript.TxSigHashes, idx int) error {
+
+	// First obtain the key pair associated with this p2tr address. If the
+	// pkScript is incorrect or derived from a different internal key or
+	// with a script root, we simply won't find a corresponding private key
+	// here.
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, chainParams)
+	if err != nil {
+		return err
+	}
+	privKey, _, err := secrets.GetKey(addrs[0])
+	if err != nil {
+		return err
+	}
+
+	// We can now generate a valid witness which will allow us to spend this
+	// output.
+	witnessScript, err := txscript.TaprootWitnessSignature(
+		tx, hashCache, idx, inputValue, pkScript,
+		txscript.SigHashDefault, privKey,
+	)
 	if err != nil {
 		return err
 	}
@@ -371,5 +426,32 @@ func spendNestedWitnessPubKeyHash(txIn *wire.TxIn, pkScript []byte,
 // for each input of an authored transaction.  Private keys and redeem scripts
 // are looked up using a SecretsSource based on the previous output script.
 func (tx *AuthoredTx) AddAllInputScripts(secrets SecretsSource) error {
-	return AddAllInputScripts(tx.Tx, tx.PrevScripts, tx.PrevInputValues, secrets)
+	return AddAllInputScripts(
+		tx.Tx, tx.PrevScripts, tx.PrevInputValues, secrets,
+	)
+}
+
+// TXPrevOutFetcher creates a txscript.PrevOutFetcher from a given slice of
+// previous pk scripts and input values.
+func TXPrevOutFetcher(tx *wire.MsgTx, prevPkScripts [][]byte,
+	inputValues []btcutil.Amount) (*txscript.MultiPrevOutFetcher, error) {
+
+	if len(tx.TxIn) != len(prevPkScripts) {
+		return nil, errors.New("tx.TxIn and prevPkScripts slices " +
+			"must have equal length")
+	}
+	if len(tx.TxIn) != len(inputValues) {
+		return nil, errors.New("tx.TxIn and inputValues slices " +
+			"must have equal length")
+	}
+
+	fetcher := txscript.NewMultiPrevOutFetcher(nil)
+	for idx, txin := range tx.TxIn {
+		fetcher.AddPrevOut(txin.PreviousOutPoint, &wire.TxOut{
+			Value:    int64(inputValues[idx]),
+			PkScript: prevPkScripts[idx],
+		})
+	}
+
+	return fetcher, nil
 }

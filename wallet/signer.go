@@ -67,7 +67,7 @@ func (w *Wallet) ScriptForOutput(output *wire.TxOut) (
 			return nil, nil, nil, err
 		}
 
-	// Otherwise, this is a regular p2wkh output, so we include the
+	// Otherwise, this is a regular p2wkh or p2tr output, so we include the
 	// witness program itself as the subscript to generate the proper
 	// sighash digest. As part of the new sighash digest algorithm, the
 	// p2wkh witness program will be expanded into a regular p2kh
@@ -108,6 +108,21 @@ func (w *Wallet) ComputeInputScript(tx *wire.MsgTx, output *wire.TxOut,
 		if err != nil {
 			return nil, nil, err
 		}
+	}
+
+	// We need to produce a Schnorr signature for p2tr key spend addresses.
+	if txscript.IsPayToTaproot(output.PkScript) {
+		// We can now generate a valid witness which will allow us to
+		// spend this output.
+		witnessScript, err := txscript.TaprootWitnessSignature(
+			tx, sigHashes, inputIndex, output.Value,
+			output.PkScript, hashType, privKey,
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return witnessScript, nil, nil
 	}
 
 	// Generate a valid witness stack for the input.
