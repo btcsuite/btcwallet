@@ -255,6 +255,8 @@ func (a *managedAddress) AddrHash() []byte {
 		hash = n.Hash160()[:]
 	case *btcutil.AddressWitnessPubKeyHash:
 		hash = n.Hash160()[:]
+	case *btcutil.AddressTaproot:
+		hash = n.WitnessProgram()
 	}
 
 	return hash
