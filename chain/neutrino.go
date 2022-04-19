@@ -397,7 +397,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		}
 	}
 
-	var inputsToWatch []neutrino.InputWithScript
+	inputsToWatch := make([]neutrino.InputWithScript, 0, len(outPoints))
 	for op, addr := range outPoints {
 		addrScript, err := txscript.PayToAddrScript(addr)
 		if err != nil {
