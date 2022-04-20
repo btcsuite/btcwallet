@@ -254,7 +254,7 @@ func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx, detail
 	}
 	txs := s.currentTxNtfn.AttachedBlocks[n-1].Transactions
 	s.currentTxNtfn.AttachedBlocks[n-1].Transactions =
-		append(txs, makeTxSummary(dbtx, s.wallet, details)) //  nolint:gocritic
+		append(txs, makeTxSummary(dbtx, s.wallet, details)) // nolint:gocritic
 }
 
 func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wtxmgr.BlockMeta) {

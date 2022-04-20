@@ -22,7 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/ripemd160"
+	// consider vendoring this deprecated ripemd160 package
+	"golang.org/x/crypto/ripemd160" // nolint:staticcheck
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
@@ -64,9 +65,9 @@ var fileID = [8]byte{0xba, 'W', 'A', 'L', 'L', 'E', 'T', 0x00}
 type entryHeader byte
 
 const (
-	addrCommentHeader entryHeader = 1 << iota //nolint:varcheck,deadcode,unused
-	txCommentHeader                           // nolint:varcheck,deadcode,unused
-	deletedHeader                             // nolint:varcheck,deadcode,unused
+	addrCommentHeader entryHeader = 1 << iota // nolint:varcheck,deadcode
+	txCommentHeader                           // nolint:varcheck,deadcode
+	deletedHeader                             // nolint:varcheck,deadcode
 	scriptHeader
 	addrHeader entryHeader = 0
 )

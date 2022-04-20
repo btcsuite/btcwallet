@@ -61,7 +61,7 @@ type syncStatus uint8
 // of supporting sync status on a per-address basis.
 const (
 	ssNone    syncStatus = 0 // not iota as they need to be stable for db
-	ssPartial syncStatus = 1 // nolint:varcheck,deadcode,unused
+	ssPartial syncStatus = 1 // nolint:varcheck,deadcode
 	ssFull    syncStatus = 2
 )
 
@@ -372,7 +372,7 @@ func fetchScopeAddrSchema(ns walletdb.ReadBucket,
 
 	schemaBucket := ns.NestedReadBucket(scopeSchemaBucketName)
 	if schemaBucket == nil {
-		str := fmt.Sprintf("unable to find scope schema bucket")
+		str := "unable to find scope schema bucket"
 		return nil, managerError(ErrScopeNotFound, str, nil)
 	}
 

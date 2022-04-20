@@ -11,37 +11,29 @@ linters-settings:
     simplify: true
 
 linters:
-  enable-all: true
-  disable:
-    # Global variables are used in many places throughout the code base.
-    - gochecknoglobals
-
-    # Some lines are over 80 characters on purpose and we don't want to make them
-    # even longer by marking them as 'nolint'.
-    - lll
-
-    # We don't care (enough) about misaligned structs to lint that.
-    - maligned
-
-    # We have long functions, especially in tests. Moving or renaming those would
-    # trigger funlen problems that we may not want to solve at that time.
-    - funlen
-
-    # Disable for now as we haven't yet tuned the sensitivity to our codebase
-    # yet.  Enabling by default for example, would also force new contributors to
-    # potentially extensively refactor code, when they want to smaller change to
-    # land.
-    - gocyclo
-
-    # Instances of table driven tests that don't pre-allocate shouldn't trigger
-    # the linter.
+  disable-all: true
+  enable:
+    - asciicheck
+    - deadcode
+    - dupl
+    - errcheck
+    - goimports
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - nolintlint
     - prealloc
-
-    # Init functions are used by loggers throughout the codebase.
-    - gochecknoinits
+    - staticcheck
+    - structcheck
+    - typecheck
+    - unconvert
+    - unused
+    - varcheck
     
-    # Explicit types are okay.
-    - interfacer
+    # Others to consider that do not pass presently:
+    # - nilerr
+    # - makezero
 
 issues:
   exclude-rules:

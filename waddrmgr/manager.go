@@ -643,7 +643,7 @@ func (m *Manager) ActiveScopedKeyManagers() []*ScopedKeyManager {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
-	var scopedManagers []*ScopedKeyManager
+	scopedManagers := make([]*ScopedKeyManager, 0, len(m.scopedManagers))
 	for _, smgr := range m.scopedManagers {
 		scopedManagers = append(scopedManagers, smgr)
 	}

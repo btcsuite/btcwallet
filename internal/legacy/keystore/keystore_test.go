@@ -984,20 +984,20 @@ func TestImportScript(t *testing.T) {
 	}
 
 	if !bytes.Equal(sinfo.Script(), sinfo2.Script()) {
-		t.Error("original and serailised scriptinfo scripts "+
+		t.Errorf("original and serailised scriptinfo scripts "+
 			"don't match %s != %s", spew.Sdump(sinfo.Script()),
 			spew.Sdump(sinfo2.Script()))
 	}
 
 	if sinfo.ScriptClass() != sinfo2.ScriptClass() {
-		t.Error("original and serailised scriptinfo class "+
+		t.Errorf("original and serailised scriptinfo class "+
 			"don't match: %s != %s", sinfo.ScriptClass(),
 			sinfo2.ScriptClass())
 		return
 	}
 
 	if !reflect.DeepEqual(sinfo.Addresses(), sinfo2.Addresses()) {
-		t.Error("original and serailised scriptinfo addresses "+
+		t.Errorf("original and serailised scriptinfo addresses "+
 			"don't match (%s) != (%s)", spew.Sdump(sinfo.Addresses),
 			spew.Sdump(sinfo2.Addresses()))
 		return
