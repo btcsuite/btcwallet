@@ -339,8 +339,8 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 		watchedTxs:       make(map[chainhash.Hash]struct{}),
 
 		notificationQueue: NewConcurrentQueue(20),
-		txNtfns:           make(chan *wire.MsgTx),
-		blockNtfns:        make(chan *wire.MsgBlock),
+		txNtfns:           make(chan *wire.MsgTx, 1000),
+		blockNtfns:        make(chan *wire.MsgBlock, 100),
 
 		mempool:        make(map[chainhash.Hash]struct{}),
 		expiredMempool: make(map[int32]map[chainhash.Hash]struct{}),
