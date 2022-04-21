@@ -61,6 +61,11 @@ type BitcoindConfig struct {
 	// zmq connections to bitcoind.
 	ZMQConfig *ZMQConfig
 
+	// PollingConfig holds the configuration settings required for using
+	// RPC polling for block and transaction notifications instead of the
+	// ZMQ interface.
+	PollingConfig *PollingConfig
+
 	// Dialer is a closure we'll use to dial Bitcoin peers. If the chain
 	// backend is running over Tor, this must support dialing peers over Tor
 	// as well.
@@ -177,7 +182,7 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		quit:                  make(chan struct{}),
 	}
 
-	bc.events, err = NewBitcoindEventSubscriber(cfg)
+	bc.events, err = NewBitcoindEventSubscriber(cfg, client)
 	if err != nil {
 		return nil, err
 	}

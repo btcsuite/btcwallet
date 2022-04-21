@@ -21,21 +21,98 @@ import (
 )
 
 // TestBitcoindEvents ensures that the BitcoindClient correctly delivers tx and
-// block notifications during normal chain growth and during a reorg.
+// block notifications for both the case where a ZMQ subscription is used and
+// for the case where RPC polling is used.
 func TestBitcoindEvents(t *testing.T) {
+	tests := []struct {
+		name       string
+		rpcPolling bool
+	}{
+		{
+			name:       "Events via ZMQ subscriptions",
+			rpcPolling: false,
+		},
+		{
+			name:       "Events via RPC Polling",
+			rpcPolling: true,
+		},
+	}
+
 	// Set up 2 btcd miners.
 	miner1, miner2 := setupMiners(t)
 
-	// Set up a bitcoind node and connect it to miner 1.
-	btcClient := setupBitcoind(t, miner1.P2PAddress())
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			// Set up a bitcoind node and connect it to miner 1.
+			btcClient := setupBitcoind(
+				t, miner1.P2PAddress(), test.rpcPolling,
+			)
 
-	// Test that the correct block `Connect` and `Disconnect` notifications
-	// are received during a re-org.
-	testReorg(t, miner1, miner2, btcClient)
+			// Test that the correct block `Connect` and
+			// `Disconnect` notifications are received during a
+			// re-org.
+			testReorg(t, miner1, miner2, btcClient)
 
-	// Test that the expected block and transaction notifications are
-	// received.
-	testNotifications(t, miner1, btcClient)
+			// Test that the expected block and transaction
+			// notifications are received.
+			testNotifications(t, miner1, btcClient)
+		})
+	}
+}
+
+// TestMempool tests that each method of the mempool struct works as expected.
+func TestMempool(t *testing.T) {
+	m := newMempool()
+
+	// Create a transaction.
+	tx1 := &wire.MsgTx{LockTime: 1}
+
+	// Check that mempool doesn't have the tx yet.
+	require.False(t, m.contains(tx1.TxHash()))
+
+	// Now add the tx.
+	m.add(tx1.TxHash())
+
+	// Mempool should now contain the tx.
+	require.True(t, m.contains(tx1.TxHash()))
+
+	// Add another tx to the mempool.
+	tx2 := &wire.MsgTx{LockTime: 2}
+	m.add(tx2.TxHash())
+	require.True(t, m.contains(tx2.TxHash()))
+
+	// Clean the mempool of tx1 (this simulates a block being confirmed
+	// with tx1 in the block).
+	m.clean([]*wire.MsgTx{tx1})
+
+	// Ensure that tx1 is no longer in the mempool but that tx2 still is.
+	require.False(t, m.contains(tx1.TxHash()))
+	require.True(t, m.contains(tx2.TxHash()))
+
+	// Lastly, we test that only marked transactions are deleted from the
+	// mempool.
+
+	// Let's first re-add tx1 so that we have more txs to work with.
+	m.add(tx1.TxHash())
+
+	// Now, we unmark all the transactions.
+	m.unmarkAll()
+
+	// Add tx3. This should automatically mark tx3.
+	tx3 := &wire.MsgTx{LockTime: 3}
+	m.add(tx3.TxHash())
+
+	// Let us now manually mark tx2.
+	m.mark(tx2.TxHash())
+
+	// Now we delete all unmarked txs. This should leave only tx2 and tx3
+	// in the mempool.
+	m.deleteUnmarked()
+
+	require.False(t, m.contains(tx1.TxHash()))
+	require.True(t, m.contains(tx2.TxHash()))
+	require.True(t, m.contains(tx3.TxHash()))
 }
 
 // testNotifications tests that the correct notifications are received for
@@ -304,7 +381,9 @@ func setupMiners(t *testing.T) (*rpctest.Harness, *rpctest.Harness) {
 
 // setupBitcoind starts up a bitcoind node with either a zmq connection or
 // rpc polling connection and returns a client wrapper of this connection.
-func setupBitcoind(t *testing.T, minerAddr string) *BitcoindClient {
+func setupBitcoind(t *testing.T, minerAddr string,
+	rpcPolling bool) *BitcoindClient {
+
 	// Start a bitcoind instance and connect it to miner1.
 	tempBitcoindDir, err := ioutil.TempDir("", "bitcoind")
 	require.NoError(t, err)
@@ -346,15 +425,23 @@ func setupBitcoind(t *testing.T, minerAddr string) *BitcoindClient {
 		Host:        host,
 		User:        "weks",
 		Pass:        "weks",
-		ZMQConfig: &ZMQConfig{
-			ZMQBlockHost:    zmqBlockHost,
-			ZMQTxHost:       zmqTxHost,
-			ZMQReadDeadline: 5 * time.Second,
-		},
 		// Fields only required for pruned nodes, not
 		// needed for these tests.
 		Dialer:             nil,
 		PrunedModeMaxPeers: 0,
+	}
+
+	if rpcPolling {
+		cfg.PollingConfig = &PollingConfig{
+			BlockPollingInterval: time.Millisecond * 100,
+			TxPollingInterval:    time.Millisecond * 100,
+		}
+	} else {
+		cfg.ZMQConfig = &ZMQConfig{
+			ZMQBlockHost:    zmqBlockHost,
+			ZMQTxHost:       zmqTxHost,
+			ZMQReadDeadline: 5 * time.Second,
+		}
 	}
 
 	chainConn, err := NewBitcoindConn(cfg)
