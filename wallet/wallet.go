@@ -2418,7 +2418,7 @@ type AccountResult struct {
 	TotalBalance btcutil.Amount
 }
 
-// AccountsResult is the resutl of the wallet's Accounts method.  See that
+// AccountsResult is the result of the wallet's Accounts method.  See that
 // method for more details.
 type AccountsResult struct {
 	Accounts           []AccountResult
@@ -2748,17 +2748,45 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 	return results, err
 }
 
+// ListLeasedOutputResult is a single result for the Wallet.ListLeasedOutputs method.
+// See that method for more details.
+type ListLeasedOutputResult struct {
+	*wtxmgr.LockedOutput
+	Value    int64
+	PkScript []byte
+}
+
 // ListLeasedOutputs returns a list of objects representing the currently locked
 // utxos.
-func (w *Wallet) ListLeasedOutputs() ([]*wtxmgr.LockedOutput, error) {
-	var outputs []*wtxmgr.LockedOutput
+func (w *Wallet) ListLeasedOutputs() ([]*ListLeasedOutputResult, error) {
+	var results []*ListLeasedOutputResult
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		var err error
-		outputs, err = w.TxStore.ListLockedOutputs(ns)
-		return err
+		outputs, err := w.TxStore.ListLockedOutputs(ns)
+		if err != nil {
+			return err
+		}
+
+		for _, output := range outputs {
+			details, err := w.TxStore.TxDetails(ns, &output.Outpoint.Hash)
+			if err != nil {
+				return err
+			}
+
+			txOut := details.MsgTx.TxOut[output.Outpoint.Index]
+
+			result := &ListLeasedOutputResult{
+				LockedOutput: output,
+				Value:        txOut.Value,
+				PkScript:     txOut.PkScript,
+			}
+
+			results = append(results, result)
+		}
+
+		return nil
 	})
-	return outputs, err
+	return results, err
 }
 
 // DumpPrivKeys returns the WIF-encoded private keys for all addresses with
