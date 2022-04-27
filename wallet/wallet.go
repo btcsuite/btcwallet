@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -113,6 +114,7 @@ type Wallet struct {
 	lockedOutpoints    map[wire.OutPoint]struct{}
 	lockedOutpointsMtx sync.Mutex
 
+	recovering     atomic.Value
 	recoveryWindow uint32
 
 	// Channels for rescan processing.  Requests are added and merged with
@@ -651,6 +653,15 @@ func locateBirthdayBlock(chainClient chainConn,
 	return birthdayBlock, nil
 }
 
+// recoverySyncer is used to synchronize wallet and address manager locking
+// with the end of recovery. (*Wallet).recovery will store a recoverySyncer
+// when invoked, and will close the done chan upon exit. Setting the quit flag
+// will cause recovery to end after the current batch of blocks.
+type recoverySyncer struct {
+	done chan struct{}
+	quit uint32 // atomic
+}
+
 // recovery attempts to recover any unspent outputs that pay to any of our
 // addresses starting from our birthday, or the wallet's tip (if higher), which
 // would indicate resuming a recovery after a restart.
@@ -659,6 +670,13 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 
 	log.Infof("RECOVERY MODE ENABLED -- rescanning for used addresses "+
 		"with recovery_window=%d", w.recoveryWindow)
+
+	// Wallet locking must synchronize with the end of recovery, since use of
+	// keys in recovery is racy with manager IsLocked checks, which could
+	// result in enrypting data with a zeroed key.
+	syncer := &recoverySyncer{done: make(chan struct{})}
+	w.recovering.Store(syncer)
+	defer close(syncer.done)
 
 	// We'll initialize the recovery manager with a default batch size of
 	// 2000.
@@ -707,6 +725,10 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	var blocks []*waddrmgr.BlockStamp
 	startHeight := w.Manager.SyncedTo().Height + 1
 	for height := startHeight; height <= bestHeight; height++ {
+		if atomic.LoadUint32(&syncer.quit) == 1 {
+			return errors.New("recovery: forced shutdown")
+		}
+
 		hash, err := chainClient.GetBlockHash(int64(height))
 		if err != nil {
 			return err
@@ -1351,6 +1373,23 @@ out:
 
 		// Select statement fell through by an explicit lock or the
 		// timer expiring.  Lock the manager here.
+
+		// We can't lock the manager if recovery is active because we use
+		// cryptoKeyPriv and cryptoKeyScript in recovery.
+		if recoverySyncI := w.recovering.Load(); recoverySyncI != nil {
+			recoverySync := recoverySyncI.(*recoverySyncer)
+			// If recovery is still running, it will end early with an error
+			// once we set the quit flag.
+			atomic.StoreUint32(&recoverySync.quit, 1)
+
+			select {
+			case <-recoverySync.done:
+			case <-quit:
+				break out
+			}
+
+		}
+
 		timeout = nil
 		err := w.Manager.Lock()
 		if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
