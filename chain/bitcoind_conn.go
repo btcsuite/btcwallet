@@ -338,10 +338,11 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 
 		chainConn: c,
 
-		rescanUpdate:     make(chan interface{}),
-		watchedAddresses: make(map[string]struct{}),
-		watchedOutPoints: make(map[wire.OutPoint]struct{}),
-		watchedTxs:       make(map[chainhash.Hash]struct{}),
+		rescanUpdate:         make(chan interface{}),
+		watchedAddresses:     make(map[string]struct{}),
+		watchedOutPoints:     make(map[wire.OutPoint]struct{}),
+		watchedTxs:           make(map[chainhash.Hash]struct{}),
+		watchedRelatedInputs: make(map[wire.OutPoint]struct{}),
 
 		notificationQueue: NewConcurrentQueue(20),
 		txNtfns:           make(chan *wire.MsgTx, 1000),
