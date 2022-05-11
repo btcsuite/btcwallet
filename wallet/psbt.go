@@ -91,22 +91,10 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 					err)
 			}
 
-			// As a fix for CVE-2020-14199 we have to always include
-			// the full non-witness UTXO in the PSBT for segwit v0.
-			packet.Inputs[idx].NonWitnessUtxo = tx
-
-			// To make it more obvious that this is actually a
-			// witness output being spent, we also add the same
-			// information as the witness UTXO.
-			packet.Inputs[idx].WitnessUtxo = &wire.TxOut{
-				Value:    utxo.Value,
-				PkScript: utxo.PkScript,
-			}
-			packet.Inputs[idx].SighashType = txscript.SigHashAll
-
-			// Include the derivation path for each input.
-			packet.Inputs[idx].Bip32Derivation = []*psbt.Bip32Derivation{
-				derivationPath,
+			addr, witnessProgram, _, err := w.ScriptForOutput(utxo)
+			if err != nil {
+				return fmt.Errorf("error fetching UTXO "+
+					"script: %v", err)
 			}
 
 			// We don't want to include the witness or any script
@@ -114,16 +102,18 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			packet.UnsignedTx.TxIn[idx].Witness = wire.TxWitness{}
 			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
 
-			// For nested P2WKH we need to add the redeem script to
-			// the input, otherwise an offline wallet won't be able
-			// to sign for it. For normal P2WKH this will be nil.
-			addr, witnessProgram, _, err := w.ScriptForOutput(utxo)
-			if err != nil {
-				return fmt.Errorf("error fetching UTXO "+
-					"script: %v", err)
-			}
-			if addr.AddrType() == waddrmgr.NestedWitnessPubKey {
-				packet.Inputs[idx].RedeemScript = witnessProgram
+			switch {
+			case txscript.IsPayToTaproot(utxo.PkScript):
+				addInputInfoSegWitV1(
+					&packet.Inputs[idx], utxo,
+					derivationPath,
+				)
+
+			default:
+				addInputInfoSegWitV0(
+					&packet.Inputs[idx], tx, utxo,
+					derivationPath, addr, witnessProgram,
+				)
 			}
 		}
 
@@ -245,6 +235,57 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	}
 
 	return changeIndex, nil
+}
+
+// addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a SegWit v0
+// PSBT input (p2wkh, np2wkh) from the given wallet information.
+func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx, utxo *wire.TxOut,
+	derivationInfo *psbt.Bip32Derivation, addr waddrmgr.ManagedAddress,
+	witnessProgram []byte) {
+
+	// As a fix for CVE-2020-14199 we have to always include the full
+	// non-witness UTXO in the PSBT for segwit v0.
+	in.NonWitnessUtxo = prevTx
+
+	// To make it more obvious that this is actually a witness output being
+	// spent, we also add the same information as the witness UTXO.
+	in.WitnessUtxo = &wire.TxOut{
+		Value:    utxo.Value,
+		PkScript: utxo.PkScript,
+	}
+	in.SighashType = txscript.SigHashAll
+
+	// Include the derivation path for each input.
+	in.Bip32Derivation = []*psbt.Bip32Derivation{
+		derivationInfo,
+	}
+
+	// For nested P2WKH we need to add the redeem script to the input,
+	// otherwise an offline wallet won't be able to sign for it. For normal
+	// P2WKH this will be nil.
+	if addr.AddrType() == waddrmgr.NestedWitnessPubKey {
+		in.RedeemScript = witnessProgram
+	}
+}
+
+// addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a SegWit v1
+// PSBT input (p2tr) from the given wallet information.
+func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
+	derivationInfo *psbt.Bip32Derivation) {
+
+	// For SegWit v1 we only need the witness UTXO information.
+	in.WitnessUtxo = &wire.TxOut{
+		Value:    utxo.Value,
+		PkScript: utxo.PkScript,
+	}
+	in.SighashType = txscript.SigHashDefault
+
+	// Include the derivation path for each input.
+	in.TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{
+		XOnlyPubKey:          derivationInfo.PubKey[1:],
+		MasterKeyFingerprint: derivationInfo.MasterKeyFingerprint,
+		Bip32Path:            derivationInfo.Bip32Path,
+	}}
 }
 
 // FinalizePsbt expects a partial transaction with all inputs and outputs fully
