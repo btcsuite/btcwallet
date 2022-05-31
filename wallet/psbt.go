@@ -280,6 +280,12 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	}
 	in.SighashType = txscript.SigHashDefault
 
+	// Include the derivation path for each input in addition to the
+	// taproot specific info we have below.
+	in.Bip32Derivation = []*psbt.Bip32Derivation{
+		derivationInfo,
+	}
+
 	// Include the derivation path for each input.
 	in.TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{
 		XOnlyPubKey:          derivationInfo.PubKey[1:],
