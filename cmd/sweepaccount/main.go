@@ -196,7 +196,9 @@ func makeDestinationScriptSource(rpcClient *rpcclient.Client, accountName string
 	// GetNewAddress always returns a P2PKH address since it assumes
 	// BIP-0044.
 	newChangeScript := func() ([]byte, error) {
-		destinationAddress, err := rpcClient.GetNewAddress(accountName)
+		destinationAddress, err := rpcClient.GetNewAddress(
+			accountName, "legacy",
+		)
 		if err != nil {
 			return nil, err
 		}
