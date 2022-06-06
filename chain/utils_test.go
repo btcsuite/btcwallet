@@ -1,8 +1,8 @@
 package chain
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"runtime"
@@ -15,48 +15,67 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// conn mocks a network connection by implementing the net.Conn interface. It is
-// used to test peer connection without actually opening a network connection.
-type conn struct {
-	io.Reader
-	io.Writer
-	io.Closer
-	localAddr  string
-	remoteAddr string
-}
+// setupConnPair initiates a tcp connection between two peers.
+func setupConnPair() (net.Conn, net.Conn, error) {
+	// listenFunc is a function closure that listens for a tcp connection.
+	// The tcp connection will be the one the inbound peer uses.
+	listenFunc := func(l *net.TCPListener, errChan chan error,
+		listenChan chan struct{}, connChan chan net.Conn) {
 
-func (c conn) LocalAddr() net.Addr {
-	return &addr{"tcp", c.localAddr}
-}
-func (c conn) RemoteAddr() net.Addr {
-	return &addr{"tcp", c.remoteAddr}
-}
-func (c conn) SetDeadline(t time.Time) error      { return nil }
-func (c conn) SetReadDeadline(t time.Time) error  { return nil }
-func (c conn) SetWriteDeadline(t time.Time) error { return nil }
+		listenChan <- struct{}{}
 
-// addr mocks a network address.
-type addr struct {
-	net, address string
-}
+		conn, err := l.Accept()
+		if err != nil {
+			errChan <- err
+			return
+		}
 
-func (m addr) Network() string { return m.net }
-func (m addr) String() string  { return m.address }
+		connChan <- conn
+	}
 
-// pipe turns two mock connections into a full-duplex connection similar to
-// net.Pipe to allow pipe's with (fake) addresses.
-func pipe(c1, c2 *conn) (*conn, *conn) {
-	r1, w1 := io.Pipe()
-	r2, w2 := io.Pipe()
+	// dialFunc is a function closure that initiates the tcp connection.
+	// This tcp connection will be the one the outbound peer uses.
+	dialFunc := func(addr *net.TCPAddr) (net.Conn, error) {
+		conn, err := net.Dial("tcp", addr.String())
+		if err != nil {
+			return nil, err
+		}
 
-	c1.Writer = w1
-	c1.Closer = w1
-	c2.Reader = r1
-	c1.Reader = r2
-	c2.Writer = w2
-	c2.Closer = w2
+		return conn, nil
+	}
 
-	return c1, c2
+	listenAddr := "localhost:0"
+
+	addr, err := net.ResolveTCPAddr("tcp", listenAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	errChan := make(chan error, 1)
+	listenChan := make(chan struct{}, 1)
+	connChan := make(chan net.Conn, 1)
+
+	go listenFunc(l, errChan, listenChan, connChan)
+	<-listenChan
+
+	outConn, err := dialFunc(l.Addr().(*net.TCPAddr))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	select {
+	case err = <-errChan:
+		return nil, nil, err
+	case inConn := <-connChan:
+		return inConn, outConn, nil
+	case <-time.After(time.Second * 5):
+		return nil, nil, errors.New("failed to create connection")
+	}
 }
 
 // calcMerkleRoot creates a merkle tree from the slice of transactions and
