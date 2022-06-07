@@ -84,14 +84,16 @@ var helpDescsEnUS = map[string]string{
 	"infowalletresult-keypoololdest":   "Unset",
 
 	// GetNewAddressCmd help.
-	"getnewaddress--synopsis": "Generates and returns a new payment address.",
-	"getnewaddress-account":   "DEPRECATED -- Account name the new address will belong to (default=\"default\")",
-	"getnewaddress--result0":  "The payment address",
+	"getnewaddress--synopsis":   "Generates and returns a new payment address.",
+	"getnewaddress-account":     "DEPRECATED -- Account name the new address will belong to (default=\"default\")",
+	"getnewaddress-addresstype": "The address type to use. Options are \"legacy\", \"p2sh-segwit\", and \"bech32\".(default=\"legacy\")",
+	"getnewaddress--result0":    "The payment address",
 
 	// GetRawChangeAddressCmd help.
-	"getrawchangeaddress--synopsis": "Generates and returns a new internal payment address for use as a change address in raw transactions.",
-	"getrawchangeaddress-account":   "Account name the new internal address will belong to (default=\"default\")",
-	"getrawchangeaddress--result0":  "The internal payment address",
+	"getrawchangeaddress--synopsis":   "Generates and returns a new internal payment address for use as a change address in raw transactions.",
+	"getrawchangeaddress-account":     "Account name the new internal address will belong to (default=\"default\")",
+	"getrawchangeaddress-addresstype": "The address type to use. Options are \"legacy\", \"p2sh-segwit\", and \"bech32\".(default=\"legacy\")",
+	"getrawchangeaddress--result0":    "The internal payment address",
 
 	// GetReceivedByAccountCmd help.
 	"getreceivedbyaccount--synopsis": "DEPRECATED -- Returns the total amount received by addresses of some account, including spent outputs.",

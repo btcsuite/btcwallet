@@ -210,11 +210,11 @@ func (h *prunedBlockDispatcherHarness) resetPeer(addr string, fallback bool) {
 		h.peers[addr] = h.newPeer()
 	}
 
-	// Establish a mock connection between us and each peer.
-	inConn, outConn := pipe(
-		&conn{localAddr: addr, remoteAddr: "10.0.0.1:8333"},
-		&conn{localAddr: "10.0.0.1:8333", remoteAddr: addr},
-	)
+	inConn, outConn, err := setupConnPair()
+	if err != nil {
+		h.t.Fatalf("failed to setup conn pair: %v", err)
+	}
+
 	h.localConns[addr] = outConn
 	h.remoteConns[addr] = inConn
 }
