@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -113,6 +114,12 @@ func (c *BitcoindClient) BackEnd() string {
 	return "bitcoind"
 }
 
+// SendAsyncQueue sends a bulk request to the server and waits for the receive
+// call made by the client.
+func (c *BitcoindClient) SendAsyncQueue() error {
+	return c.chainConn.batchClient.Send()
+}
+
 // GetBestBlock returns the highest block known to bitcoind.
 func (c *BitcoindClient) GetBestBlock() (*chainhash.Hash, int32, error) {
 	bcinfo, err := c.chainConn.client.GetBlockChainInfo()
@@ -139,9 +146,27 @@ func (c *BitcoindClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 	return header.Height, nil
 }
 
+// GetBlockAsync returns an instance of a type that can be used to get the
+// result of the RPC at some future time by invoking the Receive function on the
+// returned instance.
+func (c *BitcoindClient) GetBlockAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockResult {
+
+	return c.chainConn.batchClient.GetBlockAsync(hash)
+}
+
 // GetBlock returns a block from the hash.
 func (c *BitcoindClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 	return c.chainConn.GetBlock(hash)
+}
+
+// GetBlockVerboseAsync returns an instance of a type that can be used to get
+// the result of the RPC at some future time by invoking the Receive function on
+// the returned instance.
+func (c *BitcoindClient) GetBlockVerboseAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockVerboseResult {
+
+	return c.chainConn.batchClient.GetBlockVerboseAsync(hash)
 }
 
 // GetBlockVerbose returns a verbose block from the hash.
@@ -151,9 +176,27 @@ func (c *BitcoindClient) GetBlockVerbose(
 	return c.chainConn.client.GetBlockVerbose(hash)
 }
 
+// GetBestBlockHashAsync returns an instance of a type that can be used to get
+// the result of the RPC at some future time by invoking the Receive function on
+// the returned instance.
+func (c *BitcoindClient) GetBlockHashAsync(
+	height int64) rpcclient.FutureGetBlockHashResult {
+
+	return c.chainConn.batchClient.GetBlockHashAsync(height)
+}
+
 // GetBlockHash returns a block hash from the height.
 func (c *BitcoindClient) GetBlockHash(height int64) (*chainhash.Hash, error) {
 	return c.chainConn.client.GetBlockHash(height)
+}
+
+// GetBlockHeaderAsync returns an instance of a type that can be used to get the
+// result of the RPC at some future time by invoking the Receive function on the
+// returned instance.
+func (c *BitcoindClient) GetBlockHeaderAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockHeaderResult {
+
+	return c.chainConn.batchClient.GetBlockHeaderAsync(hash)
 }
 
 // GetBlockHeader returns a block header from the hash.
@@ -161,6 +204,17 @@ func (c *BitcoindClient) GetBlockHeader(
 	hash *chainhash.Hash) (*wire.BlockHeader, error) {
 
 	return c.chainConn.client.GetBlockHeader(hash)
+}
+
+// GetBlockHeaderVerboseAsync returns an instance of a type that can be used to
+// get the result of the RPC at some future time by invoking the Receive
+// function on the returned instance.
+//
+// See GetBlockHeader for the blocking version and more details.
+func (c *BitcoindClient) GetBlockHeaderVerboseAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockHeaderVerboseResult {
+
+	return c.chainConn.batchClient.GetBlockHeaderVerboseAsync(hash)
 }
 
 // GetBlockHeaderVerbose returns a block header from the hash.

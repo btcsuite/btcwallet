@@ -94,6 +94,9 @@ type BitcoindConn struct {
 	// client is the RPC client to the bitcoind node.
 	client *rpcclient.Client
 
+	// batchClient is the batched RPC client to the bitcoind node.
+	batchClient *rpcclient.Client
+
 	// prunedBlockDispatcher handles all of the pruned block requests.
 	//
 	// NOTE: This is nil when the bitcoind node is not pruned.
@@ -131,6 +134,11 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		HTTPPostMode:         true,
 	}
 	client, err := rpcclient.New(clientCfg, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	batchClient, err := rpcclient.NewBatch(clientCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +185,7 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	bc := &BitcoindConn{
 		cfg:                   *cfg,
 		client:                client,
+		batchClient:           batchClient,
 		prunedBlockDispatcher: prunedBlockDispatcher,
 		rescanClients:         make(map[uint64]*BitcoindClient),
 		quit:                  make(chan struct{}),
@@ -234,11 +243,14 @@ func (c *BitcoindConn) Stop() {
 		log.Errorf("error shutting down bitcoind events: %w", err)
 	}
 
+	c.batchClient.Shutdown()
+
 	if c.prunedBlockDispatcher != nil {
 		c.prunedBlockDispatcher.Stop()
 	}
 
 	c.client.WaitForShutdown()
+	c.batchClient.WaitForShutdown()
 	c.wg.Wait()
 }
 
