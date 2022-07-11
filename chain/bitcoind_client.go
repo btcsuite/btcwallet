@@ -469,6 +469,99 @@ func (c *BitcoindClient) RescanBlocks(
 	return rescannedBlocks, nil
 }
 
+// RescanBlocksBatched rescans any blocks passed in batched manner using async
+// calls, returning only the blocks that matched as []btcjson.BlockDetails.
+func (c *BitcoindClient) RescanBlocksBatched(
+	blockHashes []chainhash.Hash) ([]btcjson.RescannedBlock, error) {
+
+	// requests slice will store rpcclient.FutureGetBlockHeaderVerboseResult
+	// for each blockHash index.
+	requests := make(
+		[]rpcclient.FutureGetBlockHeaderVerboseResult, 0, len(blockHashes),
+	)
+
+	for i := range blockHashes {
+		hash := blockHashes[i]
+		headerRequest := c.GetBlockHeaderVerboseAsync(&hash)
+		requests = append(requests, headerRequest)
+	}
+
+	err := c.SendAsyncQueue()
+	if err != nil {
+		return nil, fmt.Errorf("unable to send batchRequests to "+
+			"batchClient: %v", err)
+	}
+
+	blockHashPointers := make([]*chainhash.Hash, 0, len(blockHashes))
+	filteredHeaders := make(
+		map[chainhash.Hash]*btcjson.GetBlockHeaderVerboseResult, len(requests),
+	)
+
+	for i := range blockHashes {
+		hash := blockHashes[i]
+		header, err := requests[i].Receive()
+		if err != nil {
+			return nil, fmt.Errorf("Unable to get header %s from "+
+				"bitcoind: %s", hash, err)
+		}
+
+		// Prevent fetching the block completely if we know we shouldn't
+		// filter it.
+		if !c.shouldFilterBlock(time.Unix(header.Time, 0)) {
+			continue
+		}
+		filteredHeaders[hash] = header
+		blockHashPointers = append(blockHashPointers, &hash)
+	}
+
+	rescannedBlocks := make([]btcjson.RescannedBlock, 0, len(filteredHeaders))
+
+	// Now we fetch blocks in interval of 15 to avoid out of memory errors in
+	// case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(blockHashPointers)
+
+	for i := 0; i < total; i += batchSize {
+		start := i
+		end := i + batchSize
+		if end > total {
+			end = total
+		}
+
+		blocks, err := c.chainConn.GetBlocksBatch(
+			blockHashPointers[start:end],
+		)
+		if err != nil {
+			return nil, err
+		}
+		batchedBlockHashPointers := blockHashPointers[start:end]
+		for j := range batchedBlockHashPointers {
+			hash := batchedBlockHashPointers[j]
+			relevantTxs := c.filterBlock(
+				blocks[j], filteredHeaders[*hash].Height, false,
+			)
+			if len(relevantTxs) > 0 {
+				rescannedBlock := btcjson.RescannedBlock{
+					Hash:         hash.String(),
+					Transactions: make([]string, 0),
+				}
+				for _, tx := range relevantTxs {
+					rescannedBlock.Transactions = append(
+						rescannedBlock.Transactions,
+						hex.EncodeToString(tx.SerializedTx),
+					)
+				}
+
+				rescannedBlocks = append(
+					rescannedBlocks, rescannedBlock,
+				)
+			}
+		}
+	}
+
+	return rescannedBlocks, nil
+}
+
 // Rescan rescans from the block with the given hash until the current block,
 // after adding the passed addresses and outpoints to the client's watch list.
 func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
@@ -1011,6 +1104,70 @@ func (c *BitcoindClient) FilterBlocks(
 		}
 
 		return resp, nil
+	}
+
+	// No addresses were found for this range.
+	return nil, nil
+}
+
+// FilterBlocksBatched scans the blocks in batched manner using async calls
+// contained in the FilterBlocksRequest for any addresses of interest returning
+// a FilterBlocksResponse for the first block containing a matching address.
+// If no matches are found in the range of blocks requested, the returned
+// response will be nil.
+func (c *BitcoindClient) FilterBlocksBatched(
+	req *FilterBlocksRequest) (*FilterBlocksResponse, error) {
+
+	blockFilterer := NewBlockFilterer(c.chainConn.cfg.ChainParams, req)
+
+	blockHashes := make([]*chainhash.Hash, 0, len(req.Blocks))
+	for i := range req.Blocks {
+		blockHashes = append(blockHashes, &req.Blocks[i].Hash)
+	}
+
+	// Now we fetch blocks in interval of 15 to avoid out of memory errors
+	// in case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(blockHashes)
+	for i := 0; i < total; i += batchSize {
+		start := i
+		end := i + batchSize
+		if end > total {
+			end = total
+		}
+
+		rawBlocks, err := c.chainConn.GetBlocksBatch(
+			blockHashes[start:end],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Iterate over the requested blocks, fetching each from the rpc
+		// client. Each block will scanned using the reverse addresses
+		// indexes generated above, breaking out early if any addresses
+		// are found.
+		for j := range rawBlocks {
+			if !blockFilterer.FilterBlock(rawBlocks[j]) {
+				continue
+			}
+
+			// If any external or internal addresses were detected
+			// in this block, we return them to the caller so that
+			// the rescan windows can widened with subsequent addresses.
+			// The `BatchIndex` is returned so that the caller can
+			// compute the *next* block from which to begin again.
+			resp := &FilterBlocksResponse{
+				BatchIndex:         uint32(start + j),
+				BlockMeta:          req.Blocks[start+j],
+				FoundExternalAddrs: blockFilterer.FoundExternal,
+				FoundInternalAddrs: blockFilterer.FoundInternal,
+				FoundOutPoints:     blockFilterer.FoundOutPoints,
+				RelevantTxns:       blockFilterer.RelevantTxns,
+			}
+
+			return resp, nil
+		}
 	}
 
 	// No addresses were found for this range.
