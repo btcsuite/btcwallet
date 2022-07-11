@@ -160,6 +160,13 @@ func (c *BitcoindClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) 
 	return c.chainConn.GetBlock(hash)
 }
 
+// BitcoindConn.GetBlocksBatch() returns batchBlocks from batchHashes.
+func (c *BitcoindClient) GetBlocksBatch(
+	hashes []*chainhash.Hash) ([]*wire.MsgBlock, error) {
+
+	return c.chainConn.GetBlocksBatch(hashes)
+}
+
 // GetBlockVerboseAsync returns an instance of a type that can be used to get
 // the result of the RPC at some future time by invoking the Receive function on
 // the returned instance.
