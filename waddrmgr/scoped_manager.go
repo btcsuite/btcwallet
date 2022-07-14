@@ -1973,6 +1973,16 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 		}
 		addressID = btcutil.Hash160(witnessScript)
 
+	case TaprootPubKey:
+		internalPubKey, err := btcec.ParsePubKey(serializedPubKey)
+		if err != nil {
+			return err
+		}
+		taprootPubKey := txscript.ComputeTaprootKeyNoScript(
+			internalPubKey,
+		)
+		addressID = schnorr.SerializePubKey(taprootPubKey)
+
 	default:
 		return fmt.Errorf("unsupported address type %v", addrType)
 	}
