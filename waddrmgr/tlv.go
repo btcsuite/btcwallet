@@ -14,6 +14,7 @@ const (
 	typeTapscriptControlBlock   tlv.Type = 2
 	typeTapscriptLeaves         tlv.Type = 3
 	typeTapscriptRevealedScript tlv.Type = 4
+	typeTapscriptRootHash       tlv.Type = 5
 
 	typeTapLeafVersion tlv.Type = 1
 	typeTapLeafScript  tlv.Type = 2
@@ -61,6 +62,12 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 		))
 	}
 
+	if len(s.RootHash) > 0 {
+		tlvRecords = append(tlvRecords, tlv.MakePrimitiveRecord(
+			typeTapscriptRootHash, &s.RootHash,
+		))
+	}
+
 	tlvStream, err := tlv.NewStream(tlvRecords...)
 	if err != nil {
 		return nil, err
@@ -98,6 +105,9 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 		),
 		tlv.MakePrimitiveRecord(
 			typeTapscriptRevealedScript, &s.RevealedScript,
+		),
+		tlv.MakePrimitiveRecord(
+			typeTapscriptRootHash, &s.RootHash,
 		),
 	)
 	if err != nil {

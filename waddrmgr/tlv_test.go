@@ -124,6 +124,23 @@ func TestTlvEncodeDecode(t *testing.T) {
 			},
 			RevealedScript: testScript,
 		},
+	}, {
+		name: "root hash only",
+		given: &Tapscript{
+			Type: TaprootKeySpendRootHash,
+			ControlBlock: &txscript.ControlBlock{
+				InternalKey: testPubKey,
+			},
+			RootHash: testScript,
+		},
+		expected: &Tapscript{
+			Type: TaprootKeySpendRootHash,
+			ControlBlock: &txscript.ControlBlock{
+				InternalKey:    testPubKey,
+				InclusionProof: []byte{},
+			},
+			RootHash: testScript,
+		},
 	}}
 
 	for _, tc := range testCases {

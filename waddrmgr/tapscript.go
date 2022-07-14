@@ -20,6 +20,12 @@ const (
 	// a single revealed leaf and the merkle/inclusion proof for the rest of
 	// the tree.
 	TapscriptTypePartialReveal TapscriptType = 1
+
+	// TaprootKeySpendRootHash is the type of tapscript that only knows the
+	// root hash of the Taproot commitment and therefore only allows for key
+	// spends within the wallet, since a full control block cannot be
+	// constructed.
+	TaprootKeySpendRootHash TapscriptType = 2
 )
 
 // Tapscript is a struct that holds either a full taproot tapscript with all
@@ -42,6 +48,11 @@ type Tapscript struct {
 	// RevealedScript is the script of the single revealed script. Is only
 	// set if the Type is TapscriptTypePartialReveal.
 	RevealedScript []byte
+
+	// RootHash is the root hash of a tapscript tree that is committed to in
+	// the Taproot output. This is only set if the Type is
+	// TaprootKeySpendRootHash.
+	RootHash []byte
 }
 
 // TaprootKey calculates the tweaked taproot key from the given internal key and
@@ -72,6 +83,15 @@ func (t *Tapscript) TaprootKey() (*btcec.PublicKey, error) {
 		rootHash := t.ControlBlock.RootHash(t.RevealedScript)
 		return txscript.ComputeTaprootOutputKey(
 			t.ControlBlock.InternalKey, rootHash,
+		), nil
+
+	case TaprootKeySpendRootHash:
+		if len(t.RootHash) == 0 {
+			return nil, fmt.Errorf("root hash is missing")
+		}
+
+		return txscript.ComputeTaprootOutputKey(
+			t.ControlBlock.InternalKey, t.RootHash,
 		), nil
 
 	default:
