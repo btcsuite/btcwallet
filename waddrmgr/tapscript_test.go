@@ -83,6 +83,13 @@ func TestTaprootKey(t *testing.T) {
 			RootHash: []byte("I could be a root hash"),
 		},
 		expected: testTaprootKey2,
+	}, {
+		name: "full key only",
+		given: &Tapscript{
+			Type:          TaprootFullKeyOnly,
+			FullOutputKey: testInternalKey,
+		},
+		expected: schnorr.SerializePubKey(testInternalKey),
 	}}
 
 	for _, tc := range testCases {

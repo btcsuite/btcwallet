@@ -141,6 +141,16 @@ func TestTlvEncodeDecode(t *testing.T) {
 			},
 			RootHash: testScript,
 		},
+	}, {
+		name: "full key only",
+		given: &Tapscript{
+			Type:          TapscriptTypeFullTree,
+			FullOutputKey: testPubKey,
+		},
+		expected: &Tapscript{
+			Type:          TapscriptTypeFullTree,
+			FullOutputKey: testPubKey,
+		},
 	}}
 
 	for _, tc := range testCases {

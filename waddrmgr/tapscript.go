@@ -26,6 +26,13 @@ const (
 	// spends within the wallet, since a full control block cannot be
 	// constructed.
 	TaprootKeySpendRootHash TapscriptType = 2
+
+	// TaprootFullKeyOnly is the type of tapscript that only knows the final
+	// Taproot key and no additional information about its internal key or
+	// the type of tap tweak that was used. This can be useful for tracking
+	// arbitrary Taproot outputs without the goal of ever being able to
+	// spend from them through the internal wallet.
+	TaprootFullKeyOnly TapscriptType = 3
 )
 
 // Tapscript is a struct that holds either a full taproot tapscript with all
@@ -53,13 +60,19 @@ type Tapscript struct {
 	// the Taproot output. This is only set if the Type is
 	// TaprootKeySpendRootHash.
 	RootHash []byte
+
+	// FullOutputKey is the fully tweaked Taproot output key as it appears
+	// on the chain. This is only set if the Type is TaprootFullKeyOnly.
+	FullOutputKey *btcec.PublicKey
 }
 
 // TaprootKey calculates the tweaked taproot key from the given internal key and
 // the tree information in this tapscript struct. If any information required to
 // calculate the root hash is missing, this method returns an error.
 func (t *Tapscript) TaprootKey() (*btcec.PublicKey, error) {
-	if t.ControlBlock == nil || t.ControlBlock.InternalKey == nil {
+	if t.Type != TaprootFullKeyOnly &&
+		(t.ControlBlock == nil || t.ControlBlock.InternalKey == nil) {
+
 		return nil, fmt.Errorf("internal key is missing")
 	}
 
@@ -93,6 +106,9 @@ func (t *Tapscript) TaprootKey() (*btcec.PublicKey, error) {
 		return txscript.ComputeTaprootOutputKey(
 			t.ControlBlock.InternalKey, t.RootHash,
 		), nil
+
+	case TaprootFullKeyOnly:
+		return t.FullOutputKey, nil
 
 	default:
 		return nil, fmt.Errorf("unknown tapscript type %d", t.Type)
