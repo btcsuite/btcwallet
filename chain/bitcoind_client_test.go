@@ -132,3 +132,53 @@ func testBitcoindGetBlocksBatch(t *testing.T, rpcpolling bool) {
 		t, msgBlocksStandard, msgBlocksBatchClient, "blocks result mismatch",
 	)
 }
+
+// TestBitcoindRescanBlocksBatched ensures that we correctly retrieve the required
+// details for the watched txn.
+func TestBitcoindRescanBlocksBatched(t *testing.T) {
+	testBitcoindRescanBlocksBatched(t, true)
+	testBitcoindRescanBlocksBatched(t, false)
+}
+
+func testBitcoindRescanBlocksBatched(t *testing.T, rpcpolling bool) {
+	miner, tearDown := NewMiner(
+		t, []string{"--txindex"}, true, 25,
+	)
+	defer tearDown()
+
+	bitcoindClient := setupBitcoind(t, miner.P2PAddress(), rpcpolling)
+
+	// Here, we'll generate multiple valid testblocks. Moving forward, using
+	// bitcoindClient assign a random txn for watchedTxs. Now, we hit
+	// RescanBlocksBatched (leveraging updated BatchAPI). Further using its
+	// result will try to retrieve blockHash and compare it with actual txn
+	// blockHash which should be equal.
+	broadcastHeight := syncBitcoindWithMiner(t, bitcoindClient, miner)
+	if _, err := miner.Client.Generate(50); err != nil {
+		t.Fatalf("unable to generate blocks: %v", err)
+	}
+	currentHeight := syncBitcoindWithMiner(t, bitcoindClient, miner)
+	blockHashes := make([]chainhash.Hash, 0, uint32(currentHeight)-broadcastHeight)
+
+	for i := uint32(currentHeight); i >= broadcastHeight; i-- {
+		blockHash, err := bitcoindClient.GetBlockHash(int64(i))
+		require.NoError(t, err, "unable to retrieve blockhash")
+		blockHashes = append(blockHashes, *blockHash)
+	}
+
+	block, err := bitcoindClient.GetBlock(&blockHashes[25])
+	require.NoError(t, err, "unable to fetch block")
+
+	txn := block.Transactions[0]
+	bitcoindClient.watchedTxs[txn.TxHash()] = struct{}{}
+
+	rescanBlocksBatchAPI, err := bitcoindClient.RescanBlocksBatched(blockHashes)
+	require.NoError(t, err)
+	require.Equal(t, blockHashes[25].String(), rescanBlocksBatchAPI[0].Hash)
+
+	// We can also compare the results with former implemetation "RescanBlocks"
+	// which should be equal.
+	rescanBlocksSync, err := bitcoindClient.RescanBlocks(blockHashes)
+	require.NoError(t, err)
+	require.Equal(t, rescanBlocksSync, rescanBlocksBatchAPI)
+}
