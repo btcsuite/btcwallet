@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -181,4 +183,87 @@ func testBitcoindRescanBlocksBatched(t *testing.T, rpcpolling bool) {
 	rescanBlocksSync, err := bitcoindClient.RescanBlocks(blockHashes)
 	require.NoError(t, err)
 	require.Equal(t, rescanBlocksSync, rescanBlocksBatchAPI)
+}
+
+// TestBitcoindFilterBlocksBatched ensures that we correctly retrieve the required
+// FilterBlocksResponse for the requested watchPoints.
+func TestBitcoindFilterBlocksBatched(t *testing.T) {
+	testBitcoindFilterBlocksBatched(t, true)
+	testBitcoindFilterBlocksBatched(t, false)
+}
+
+func testBitcoindFilterBlocksBatched(t *testing.T, rpcpolling bool) {
+	miner, tearDown := NewMiner(
+		t, []string{"--txindex"}, true, 25,
+	)
+	defer tearDown()
+
+	bitcoindClient := setupBitcoind(t, miner.P2PAddress(), rpcpolling)
+
+	// Now, we'll create a test transaction, confirm it, and attempt to
+	// retrieve its relevant txn details. The transaction must be in the
+	// chain and not contain any unspent outputs. To ensure this, we'll
+	// create a transaction with only one output, which we will manually
+	// spend.
+	outpoint, output, privKey := CreateSpendableOutput(t, miner)
+	heightHint := syncBitcoindWithMiner(t, bitcoindClient, miner)
+	spendTx := CreateSpendTx(t, outpoint, output, privKey)
+	spendTxHash, err := miner.Client.SendRawTransaction(spendTx, true)
+	require.NoError(t, err, "unable to broadcast tx")
+	err = WaitForMempoolTx(miner, spendTxHash)
+	require.NoError(t, err, "tx not relayed to miner")
+	_, err = miner.Client.Generate(50)
+	require.NoError(t, err, "unable to generate blocks")
+	currentHeight := syncBitcoindWithMiner(t, bitcoindClient, miner)
+
+	blockStore := make([]wtxmgr.BlockMeta, 0, currentHeight-heightHint)
+	for i := currentHeight; i >= heightHint; i-- {
+		blockHash, err := bitcoindClient.GetBlockHash(int64(i))
+		require.NoError(t, err, "unable to retrieve blockhash")
+		block, err := bitcoindClient.GetBlock(blockHash)
+		require.NoError(t, err, "unable to get raw block")
+
+		blockWtxmgr := wtxmgr.Block{
+			Hash:   *blockHash,
+			Height: int32(i),
+		}
+		temp := wtxmgr.BlockMeta{
+			Block: blockWtxmgr,
+			Time:  block.Header.Timestamp,
+		}
+		blockStore = append(blockStore, temp)
+	}
+
+	watchedOutPoint := make(map[wire.OutPoint]btcutil.Address)
+	watchedOutPoint[*outpoint] = &btcutil.AddressWitnessPubKeyHash{}
+
+	// Construct a filter request, watching only for the outpoints above,
+	// and hit FilterBlocksBatched with the request created.
+	req := FilterBlocksRequest{
+		Blocks:           blockStore,
+		WatchedOutPoints: watchedOutPoint,
+	}
+
+	// Now, we hit FilterBlocksBatched (leveraging updated BatchAPI). Further
+	// using its result will reteieve the height, blockHash, txnHash and
+	// compare it with actual spendTxn height, blockHash and spendTxHash.
+	filterBlockResponseBatchAPI, err := bitcoindClient.FilterBlocksBatched(&req)
+	require.NoError(t, err)
+	require.Equal(t, heightHint+1, uint32(filterBlockResponseBatchAPI.BlockMeta.Height))
+	actualBlockHash, err := bitcoindClient.GetBlockHash(int64(heightHint + 1))
+	require.NoError(t, err, "unable to get block hash")
+	require.Equal(t, actualBlockHash.String(), filterBlockResponseBatchAPI.BlockMeta.Hash.String())
+	txnExist := false
+	for _, txn := range filterBlockResponseBatchAPI.RelevantTxns {
+		if txn.TxHash().String() == spendTx.TxHash().String() {
+			txnExist = true
+		}
+	}
+	require.Equal(t, txnExist, true, "txn mismatch")
+
+	// We can also compare the results with former implemetation "FilterBlocks"
+	// which should be equal.
+	filterBlockResponseSync, err := bitcoindClient.FilterBlocks(&req)
+	require.NoError(t, err)
+	require.Equal(t, filterBlockResponseSync, filterBlockResponseBatchAPI)
 }
