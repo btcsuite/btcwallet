@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/lightningnetwork/lnd/tlv"
 )
@@ -14,6 +15,8 @@ const (
 	typeTapscriptControlBlock   tlv.Type = 2
 	typeTapscriptLeaves         tlv.Type = 3
 	typeTapscriptRevealedScript tlv.Type = 4
+	typeTapscriptRootHash       tlv.Type = 5
+	typeTapscriptFullOutputKey  tlv.Type = 6
 
 	typeTapLeafVersion tlv.Type = 1
 	typeTapLeafScript  tlv.Type = 2
@@ -61,6 +64,19 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 		))
 	}
 
+	if len(s.RootHash) > 0 {
+		tlvRecords = append(tlvRecords, tlv.MakePrimitiveRecord(
+			typeTapscriptRootHash, &s.RootHash,
+		))
+	}
+
+	if s.FullOutputKey != nil {
+		keyBytes := schnorr.SerializePubKey(s.FullOutputKey)
+		tlvRecords = append(tlvRecords, tlv.MakePrimitiveRecord(
+			typeTapscriptFullOutputKey, &keyBytes,
+		))
+	}
+
 	tlvStream, err := tlv.NewStream(tlvRecords...)
 	if err != nil {
 		return nil, err
@@ -81,9 +97,10 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 
 	var (
-		typ               uint8
-		controlBlockBytes []byte
-		s                 = &Tapscript{}
+		typ                uint8
+		controlBlockBytes  []byte
+		fullOutputKeyBytes []byte
+		s                  = &Tapscript{}
 	)
 
 	tlvStream, err := tlv.NewStream(
@@ -98,6 +115,12 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 		),
 		tlv.MakePrimitiveRecord(
 			typeTapscriptRevealedScript, &s.RevealedScript,
+		),
+		tlv.MakePrimitiveRecord(
+			typeTapscriptRootHash, &s.RootHash,
+		),
+		tlv.MakePrimitiveRecord(
+			typeTapscriptFullOutputKey, &fullOutputKeyBytes,
 		),
 	)
 	if err != nil {
@@ -119,6 +142,14 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error decoding control block: "+
 				"%v", err)
+		}
+	}
+
+	if t, ok := parsedTypes[typeTapscriptFullOutputKey]; ok && t == nil {
+		s.FullOutputKey, err = schnorr.ParsePubKey(fullOutputKeyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("error decoding full output "+
+				"key: %v", err)
 		}
 	}
 

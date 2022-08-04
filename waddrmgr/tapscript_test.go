@@ -31,6 +31,10 @@ var (
 		"e15405aab8fd601206a3848b0ec495df75d8a602465d8dbba42a7493bd88" +
 			"9b78",
 	)
+	testTaprootKey2 = hexToBytes(
+		"b1ef5fafd9a55b8c4bb3c2eee3fcf033194891ebf89b1d9b666c6306acc3" +
+			"a3df",
+	)
 )
 
 // TestTaprootKey tests that the taproot tweaked key can be calculated correctly
@@ -69,6 +73,23 @@ func TestTaprootKey(t *testing.T) {
 			},
 		},
 		expected: testTaprootKey,
+	}, {
+		name: "root hash only",
+		given: &Tapscript{
+			Type: TaprootKeySpendRootHash,
+			ControlBlock: &txscript.ControlBlock{
+				InternalKey: testInternalKey,
+			},
+			RootHash: []byte("I could be a root hash"),
+		},
+		expected: testTaprootKey2,
+	}, {
+		name: "full key only",
+		given: &Tapscript{
+			Type:          TaprootFullKeyOnly,
+			FullOutputKey: testInternalKey,
+		},
+		expected: schnorr.SerializePubKey(testInternalKey),
 	}}
 
 	for _, tc := range testCases {

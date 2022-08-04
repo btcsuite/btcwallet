@@ -55,6 +55,9 @@ func keyScopeFromPubKey(pubKey *hdkeychain.ExtendedKey,
 		case waddrmgr.WitnessPubKey:
 			return waddrmgr.KeyScopeBIP0084, nil, nil
 
+		case waddrmgr.TaprootPubKey:
+			return waddrmgr.KeyScopeBIP0086, nil, nil
+
 		default:
 			return waddrmgr.KeyScope{}, nil,
 				fmt.Errorf("unsupported address type %v",
@@ -86,12 +89,27 @@ func keyScopeFromPubKey(pubKey *hdkeychain.ExtendedKey,
 					*addrType)
 		}
 
+	// BIP-0086 does not have its own SLIP-0132 HD version byte set (yet?).
+	// So we either expect a user to import it with a BIP-0084 or BIP-0044
+	// encoding.
 	case waddrmgr.HDVersionMainNetBIP0084, waddrmgr.HDVersionTestNetBIP0084:
-		if addrType != nil && *addrType != waddrmgr.WitnessPubKey {
+		if addrType == nil {
+			return waddrmgr.KeyScope{}, nil, errors.New("address " +
+				"type must be specified for account public " +
+				"key with BIP-0084 version")
+		}
+
+		switch *addrType {
+		case waddrmgr.WitnessPubKey:
+			return waddrmgr.KeyScopeBIP0084, nil, nil
+
+		case waddrmgr.TaprootPubKey:
+			return waddrmgr.KeyScopeBIP0086, nil, nil
+
+		default:
 			return waddrmgr.KeyScope{}, nil,
 				errors.New("address type mismatch")
 		}
-		return waddrmgr.KeyScopeBIP0084, nil, nil
 
 	default:
 		return waddrmgr.KeyScope{}, nil, fmt.Errorf("unknown version %x",
@@ -371,8 +389,13 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 	switch addrType {
 	case waddrmgr.NestedWitnessPubKey:
 		keyScope = waddrmgr.KeyScopeBIP0049Plus
+
 	case waddrmgr.WitnessPubKey:
 		keyScope = waddrmgr.KeyScopeBIP0084
+
+	case waddrmgr.TaprootPubKey:
+		keyScope = waddrmgr.KeyScopeBIP0086
+
 	default:
 		return fmt.Errorf("address type %v is not supported", addrType)
 	}
