@@ -5,6 +5,7 @@
 package main
 
 import (
+	"github.com/btcsuite/btcwallet/rpc/rpcserver"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -89,7 +90,12 @@ func walletMain() error {
 	}
 
 	loader.RunAfterLoad(func(w *wallet.Wallet) {
-		startWalletRPCServices(w, rpcs, legacyRPCServer)
+		if rpcs != nil {
+			rpcserver.StartWalletService(rpcs, w)
+		}
+		if legacyRPCServer != nil {
+			legacyRPCServer.RegisterWallet(w)
+		}
 	})
 
 	if !cfg.NoInitialLoad {
