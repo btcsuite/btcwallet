@@ -2,7 +2,6 @@ package chain
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -385,7 +384,7 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	rpcPolling bool) *BitcoindClient {
 
 	// Start a bitcoind instance and connect it to miner1.
-	tempBitcoindDir, err := ioutil.TempDir("", "bitcoind")
+	tempBitcoindDir, err := os.MkdirTemp("", "bitcoind")
 	require.NoError(t, err)
 
 	zmqBlockHost := "ipc:///" + tempBitcoindDir + "/blocks.socket"

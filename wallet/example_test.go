@@ -1,7 +1,6 @@
 package wallet
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
@@ -19,7 +18,7 @@ var defaultDBTimeout = 10 * time.Second
 // testWallet creates a test wallet and unlocks it.
 func testWallet(t *testing.T) (*Wallet, func()) {
 	// Set up a wallet.
-	dir, err := ioutil.TempDir("", "test_wallet")
+	dir, err := os.MkdirTemp("", "test_wallet")
 	if err != nil {
 		t.Fatalf("Failed to create db dir: %v", err)
 	}
@@ -57,7 +56,7 @@ func testWallet(t *testing.T) (*Wallet, func()) {
 // testWalletWatchingOnly creates a test watch only wallet and unlocks it.
 func testWalletWatchingOnly(t *testing.T) (*Wallet, func()) {
 	// Set up a wallet.
-	dir, err := ioutil.TempDir("", "test_wallet_watch_only")
+	dir, err := os.MkdirTemp("", "test_wallet_watch_only")
 	if err != nil {
 		t.Fatalf("Failed to create db dir: %v", err)
 	}

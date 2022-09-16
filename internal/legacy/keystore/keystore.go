@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -843,7 +842,7 @@ func (s *Store) WriteIfDirty() error {
 	}
 
 	// TempFile creates the file 0600, so no need to chmod it.
-	fi, err := ioutil.TempFile(s.dir, s.file)
+	fi, err := os.CreateTemp(s.dir, s.file)
 	if err != nil {
 		s.mtx.RUnlock()
 		return err
