@@ -6,7 +6,6 @@ package bdb_test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -146,7 +145,7 @@ func TestCreateOpenFail(t *testing.T) {
 
 	// Ensure operations against a closed database return the expected
 	// error.
-	tempDir, err := ioutil.TempDir("", "createfail")
+	tempDir, err := os.MkdirTemp("", "createfail")
 	if err != nil {
 		t.Errorf("unable to create temp dir: %v", err)
 		return
@@ -173,7 +172,7 @@ func TestCreateOpenFail(t *testing.T) {
 // reopening the database.
 func TestPersistence(t *testing.T) {
 	// Create a new database to run tests against.
-	tempDir, err := ioutil.TempDir("", "persistencetest")
+	tempDir, err := os.MkdirTemp("", "persistencetest")
 	if err != nil {
 		t.Errorf("unable to create temp dir: %v", err)
 		return

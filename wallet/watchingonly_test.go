@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ import (
 // wallet.
 func TestCreateWatchingOnly(t *testing.T) {
 	// Set up a wallet.
-	dir, err := ioutil.TempDir("", "watchingonly_test")
+	dir, err := os.MkdirTemp("", "watchingonly_test")
 	if err != nil {
 		t.Fatalf("Failed to create db dir: %v", err)
 	}

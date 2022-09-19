@@ -8,7 +8,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -82,12 +81,12 @@ func generateRPCKeyPair(writeKey bool) (tls.Certificate, error) {
 	}
 
 	// Write cert and (potentially) the key files.
-	err = ioutil.WriteFile(cfg.RPCCert.Value, cert, 0600)
+	err = os.WriteFile(cfg.RPCCert.Value, cert, 0600)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
 	if writeKey {
-		err = ioutil.WriteFile(cfg.RPCKey.Value, key, 0600)
+		err = os.WriteFile(cfg.RPCKey.Value, key, 0600)
 		if err != nil {
 			rmErr := os.Remove(cfg.RPCCert.Value)
 			if rmErr != nil {

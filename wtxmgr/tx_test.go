@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,7 +52,7 @@ var (
 )
 
 func testDB() (walletdb.DB, func(), error) {
-	tmpDir, err := ioutil.TempDir("", "wtxmgr_test")
+	tmpDir, err := os.MkdirTemp("", "wtxmgr_test")
 	if err != nil {
 		return nil, func() {}, err
 	}
@@ -66,7 +65,7 @@ func testDB() (walletdb.DB, func(), error) {
 var namespaceKey = []byte("txstore")
 
 func testStore() (*Store, walletdb.DB, func(), error) {
-	tmpDir, err := ioutil.TempDir("", "wtxmgr_test")
+	tmpDir, err := os.MkdirTemp("", "wtxmgr_test")
 	if err != nil {
 		return nil, nil, func() {}, err
 	}
