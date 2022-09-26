@@ -382,6 +382,8 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 		scriptSize = txsizes.NestedP2WPKHPkScriptSize
 	case waddrmgr.WitnessPubKey:
 		scriptSize = txsizes.P2WPKHPkScriptSize
+	case waddrmgr.TaprootPubKey:
+		scriptSize = txsizes.P2TRPkScriptSize
 	}
 
 	newChangeScript := func() ([]byte, error) {
