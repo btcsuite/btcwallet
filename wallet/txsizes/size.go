@@ -161,9 +161,10 @@ const (
 	// a witness for spending P2TR outputs. It
 	// is calculated as:
 	//
+	//   - 1 wu compact int encoding value 1 (number of items)
 	//   - 1 wu compact int encoding value 65
 	//   - 64 wu BIP-340 schnorr signature + 1 wu sighash
-	RedeemP2TRInputWitnessWeight = 1 + 65
+	RedeemP2TRInputWitnessWeight = 1 + 1 + 65
 )
 
 // SumOutputSerializeSizes sums up the serialized size of the supplied outputs.
