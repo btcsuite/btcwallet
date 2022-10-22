@@ -433,47 +433,12 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		}
 	}
 
-	rescanQuit := make(chan struct{})
-	newRescanner := s.getNewRescanner()
-
-	// Wrap the quit channel inside closures to use as handlers.
-	obc := func(hash *chainhash.Hash, height int32, time time.Time) {
-		s.onBlockConnected(rescanQuit, hash, height, time)
-	}
-
-	ofbc := func(height int32, header *wire.BlockHeader, txs []*btcutil.Tx) {
-		s.onFilteredBlockConnected(rescanQuit, height, header, txs)
-	}
-
-	obd := func(hash *chainhash.Hash, height int32, time time.Time) {
-		s.onBlockDisconnected(rescanQuit, hash, height, time)
-	}
-
-	newRescan := newRescanner(
-		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
-			OnBlockConnected:         obc,
-			OnFilteredBlockConnected: ofbc,
-			OnBlockDisconnected:      obd,
-		}),
+	// Create and broadcast a new rescanner.
+	s.createRescanner(
 		neutrino.StartBlock(&headerfs.BlockStamp{Hash: *startHash}),
-		neutrino.StartTime(s.startTime),
-		neutrino.QuitChan(rescanQuit),
 		neutrino.WatchAddrs(addrs...),
 		neutrino.WatchInputs(inputsToWatch...),
 	)
-	s.rescanCh <- newRescan
-	s.rescanQuitCh <- rescanQuit
-
-	// Start the rescanner after it is sucessfully broadcast.
-	errCh := newRescan.Start()
-
-	// Start a goroutine to consume any errors and broadcast them on
-	// s.rescanErr.
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.consumeRescanErr(rescanQuit, errCh)
-	}()
 
 	return nil
 }
@@ -512,53 +477,13 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 		// rescanner.
 	}
 
-	rescanQuit := make(chan struct{})
-
 	// Don't need RescanFinished or RescanProgress notifications.
 	s.finished = true
 	s.lastProgressSent = true
 	s.lastFilteredBlockHeader = nil
 
 	// Rescan with just the specified addresses.
-	newRescanner := s.getNewRescanner()
-
-	// Wrap the quit channel inside closures to use as handlers.
-	obc := func(hash *chainhash.Hash, height int32, time time.Time) {
-		s.onBlockConnected(rescanQuit, hash, height, time)
-	}
-
-	ofbc := func(height int32, header *wire.BlockHeader, txs []*btcutil.Tx) {
-		s.onFilteredBlockConnected(rescanQuit, height, header, txs)
-	}
-
-	obd := func(hash *chainhash.Hash, height int32, time time.Time) {
-		s.onBlockDisconnected(rescanQuit, hash, height, time)
-	}
-
-	newRescan := newRescanner(
-		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
-			OnBlockConnected:         obc,
-			OnFilteredBlockConnected: ofbc,
-			OnBlockDisconnected:      obd,
-		}),
-		neutrino.StartTime(s.startTime),
-		neutrino.QuitChan(rescanQuit),
-		neutrino.WatchAddrs(addrs...),
-	)
-	s.rescanCh <- newRescan
-	s.rescanQuitCh <- rescanQuit
-
-	// Start the rescanner after it is sucessfully broadcast.
-	errCh := newRescan.Start()
-
-	// Start a goroutine to consume any errors and broadcast them on
-	// s.rescanErr.
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.consumeRescanErr(rescanQuit, errCh)
-	}()
-
+	s.createRescanner(neutrino.WatchAddrs(addrs...))
 	return nil
 }
 
@@ -828,6 +753,60 @@ out:
 	s.Stop()
 	close(s.dequeueNotification)
 	s.wg.Done()
+}
+
+// createRescanner is a convenience method to consistently recreate a rescanner.
+func (s *NeutrinoClient) createRescanner(opts ...neutrino.RescanOption) {
+	var (
+		// Create a quit channel for the new rescanner.
+		rescanQuit = make(chan struct{})
+
+		// Inject the rescanner constructor.
+		newRescanner = s.getNewRescanner()
+
+		// Wrap the quit channel inside closures to use as handlers.
+		obc = func(hash *chainhash.Hash, height int32, time time.Time) {
+			s.onBlockConnected(rescanQuit, hash, height, time)
+		}
+
+		ofbc = func(height int32, header *wire.BlockHeader, txs []*btcutil.Tx) {
+			s.onFilteredBlockConnected(rescanQuit, height, header, txs)
+		}
+
+		obd = func(hash *chainhash.Hash, height int32, time time.Time) {
+			s.onBlockDisconnected(rescanQuit, hash, height, time)
+		}
+
+		// Build the default options for the rescanner.
+		defaultOpts = []neutrino.RescanOption{
+			neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
+				OnBlockConnected:         obc,
+				OnFilteredBlockConnected: ofbc,
+				OnBlockDisconnected:      obd,
+			}),
+			neutrino.StartTime(s.startTime),
+			neutrino.QuitChan(rescanQuit),
+		}
+		fullOpts = append(opts, defaultOpts...)
+	)
+
+	// Construct the rescanner.
+	rescanner := newRescanner(fullOpts...)
+
+	// Broadcast the new objects via sends on their respective channels.
+	s.rescanCh <- rescanner
+	s.rescanQuitCh <- rescanQuit
+
+	// Only start the rescanner after it is sucessfully broadcast.
+	errCh := rescanner.Start()
+
+	// Start a goroutine to consume any errors and broadcast them on
+	// s.rescanErr.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.consumeRescanErr(rescanQuit, errCh)
+	}()
 }
 
 // consumeRescanErr forwards errors from the rescan goroutine to the client.
