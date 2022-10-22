@@ -103,19 +103,22 @@ func (s *NeutrinoClient) Start() error {
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {
+		// Reset the client state.
 		s.enqueueNotification = make(chan interface{})
 		s.dequeueNotification = make(chan interface{})
 		s.currentBlock = make(chan *waddrmgr.BlockStamp)
 		s.quit = make(chan struct{})
 		s.started = true
+
+		// Launch the notification handler.
 		s.wg.Add(1)
-		go func() {
-			select {
-			case s.enqueueNotification <- ClientConnected{}:
-			case <-s.quit:
-			}
-		}()
 		go s.notificationHandler()
+
+		// Place a ClientConnected notification onto the queue.
+		select {
+		case s.enqueueNotification <- ClientConnected{}:
+		case <-s.quit:
+		}
 	}
 	return nil
 }
@@ -727,9 +730,6 @@ func (s *NeutrinoClient) notificationHandler() {
 	var next interface{}
 out:
 	for {
-		s.clientMtx.Lock()
-		rescanErr := s.rescanErr
-		s.clientMtx.Unlock()
 		select {
 		case n, ok := <-enqueue:
 			if !ok {
@@ -769,7 +769,7 @@ out:
 				dequeue = nil
 			}
 
-		case err := <-rescanErr:
+		case err := <-s.rescanErr:
 			if err != nil {
 				log.Errorf("Neutrino rescan ended with error: %s", err)
 			}
