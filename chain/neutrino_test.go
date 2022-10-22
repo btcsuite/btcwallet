@@ -14,7 +14,8 @@ import (
 // can sequentially Start and Stop without errors or races.
 func TestNeutrinoClientSequentialStartStop(t *testing.T) {
 	var (
-		ctx, cancel   = context.WithTimeout(context.Background(), 1*time.Second)
+		ctx, cancel = context.WithTimeout(context.Background(),
+			1*time.Second)
 		nc            = newMockNeutrinoClient(t)
 		callStartStop = func() <-chan struct{} {
 			done := make(chan struct{})
@@ -84,12 +85,13 @@ func TestNeutrinoClientNotifyReceived(t *testing.T) {
 // panic on replacing the Rescanner.
 func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
 	var (
-		ctx, cancel = context.WithTimeout(context.Background(), 1*time.Second)
-		wg          sync.WaitGroup
-		addrs       []btcutil.Address
-		startHash   = testBestBlock.Hash
-		done        = make(chan struct{})
-		nc          = newMockNeutrinoClient(t)
+		ctx, cancel = context.WithTimeout(context.Background(),
+			1*time.Second)
+		wg        sync.WaitGroup
+		addrs     []btcutil.Address
+		startHash = testBestBlock.Hash
+		done      = make(chan struct{})
+		nc        = newMockNeutrinoClient(t)
 
 		callRescan = func() {
 			defer wg.Done()
