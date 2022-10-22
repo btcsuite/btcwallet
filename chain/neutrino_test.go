@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,5 +75,73 @@ func TestNeutrinoClientNotifyReceived(t *testing.T) {
 		mockRescan := nc.rescan.(*mockRescanner)
 		gotUpdateCalls := mockRescan.updateArgs.Len()
 		require.Equal(t, wantUpdateCalls, gotUpdateCalls)
+	}
+}
+
+// TestNeutrinoClientNotifyReceivedRescan verifies concurrent calls to
+// NotifyReceived and Rescan do not result in a data race and that there is no
+// panic on replacing the Rescanner.
+func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
+	var (
+		ctx, cancel = context.WithTimeout(context.Background(), 1*time.Second)
+		wg          sync.WaitGroup
+		addrs       []btcutil.Address
+		startHash   = testBestBlock.Hash
+		done        = make(chan struct{})
+		nc          = newMockNeutrinoClient(t)
+
+		callRescan = func() {
+			defer wg.Done()
+			rerr := nc.Rescan(&startHash, addrs, nil)
+			require.NoError(t, rerr)
+		}
+
+		callNotifyReceived = func() {
+			defer wg.Done()
+			err := nc.NotifyReceived(addrs)
+			require.NoError(t, err)
+		}
+
+		callNotifyBlocks = func() {
+			defer wg.Done()
+			err := nc.NotifyBlocks()
+			require.NoError(t, err)
+		}
+
+		wantRoutines = 100
+	)
+
+	t.Cleanup(cancel)
+
+	// Start the client.
+	err := nc.Start()
+	require.NoError(t, err)
+
+	// Launch the wanted number of goroutines, wait for them to finish and
+	// signal all done.
+	wg.Add(wantRoutines)
+	go func() {
+		defer close(done)
+		defer wg.Wait()
+		for i := 0; i < wantRoutines; i++ {
+			if i%3 == 0 {
+				go callRescan()
+				continue
+			}
+
+			if i%10 == 0 {
+				go callNotifyBlocks()
+				continue
+			}
+
+			go callNotifyReceived()
+		}
+	}()
+
+	// Wait for all calls to complete or test to time out.
+	select {
+	case <-ctx.Done():
+		t.Fatal("timed out")
+	case <-done:
 	}
 }
