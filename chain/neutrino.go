@@ -48,6 +48,8 @@ type NeutrinoChainService interface {
 	PeerByAddr(string) *neutrino.ServerPeer
 }
 
+var _ NeutrinoChainService = (*neutrino.ChainService)(nil)
+
 // NeutrinoClient is an implementation of the btcwalet chain.Interface interface.
 type NeutrinoClient struct {
 	CS NeutrinoChainService

@@ -2,6 +2,8 @@ package rescan
 
 import "github.com/lightninglabs/neutrino"
 
+var _ Interface = (*neutrino.Rescan)(nil)
+
 type Updater interface {
 	Update(...neutrino.UpdateOption) error
 }
