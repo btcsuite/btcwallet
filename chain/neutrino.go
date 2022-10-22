@@ -59,6 +59,7 @@ type NeutrinoClient struct {
 	// We currently support one rescan/notifiction goroutine per client
 	rescanCh     chan rescan.Interface
 	rescanQuitCh chan chan struct{}
+	rescanErr    chan error
 	newRescanner rescan.NewFunc
 
 	enqueueNotification     chan interface{}
@@ -68,12 +69,11 @@ type NeutrinoClient struct {
 	lastFilteredBlockHeader *wire.BlockHeader
 	currentBlock            chan *waddrmgr.BlockStamp
 
-	quit      chan struct{}
-	rescanErr <-chan error
-	wg        sync.WaitGroup
-	started   bool
-	finished  bool
-	isRescan  bool
+	quit     chan struct{}
+	wg       sync.WaitGroup
+	started  bool
+	finished bool
+	isRescan bool
 
 	clientMtx sync.Mutex
 }
@@ -88,6 +88,7 @@ func NewNeutrinoClient(chainParams *chaincfg.Params,
 		chainParams:  chainParams,
 		rescanCh:     make(chan rescan.Interface, 1),
 		rescanQuitCh: make(chan chan struct{}, 1),
+		rescanErr:    make(chan error),
 	}
 }
 
@@ -387,7 +388,6 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		rescanQuit := <-s.rescanQuitCh
 		close(rescanQuit)
 		rescanner.WaitForShutdown()
-		s.rescanErr = nil
 	default:
 		// No rescanner exists, nothing to shutdown.
 	}
@@ -463,7 +463,17 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	)
 	s.rescanCh <- newRescan
 	s.rescanQuitCh <- rescanQuit
-	s.rescanErr = newRescan.Start()
+
+	// Start the rescanner after it is sucessfully broadcast.
+	errCh := newRescan.Start()
+
+	// Start a goroutine to consume any errors and broadcast them on
+	// s.rescanErr.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.consumeRescanErr(rescanQuit, errCh)
+	}()
 
 	return nil
 }
@@ -537,7 +547,17 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	)
 	s.rescanCh <- newRescan
 	s.rescanQuitCh <- rescanQuit
-	s.rescanErr = newRescan.Start()
+
+	// Start the rescanner after it is sucessfully broadcast.
+	errCh := newRescan.Start()
+
+	// Start a goroutine to consume any errors and broadcast them on
+	// s.rescanErr.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.consumeRescanErr(rescanQuit, errCh)
+	}()
 
 	return nil
 }
@@ -808,6 +828,35 @@ out:
 	s.Stop()
 	close(s.dequeueNotification)
 	s.wg.Done()
+}
+
+// consumeRescanErr forwards errors from the rescan goroutine to the client.
+// Stops sending errors when either the client signals to quit, the rescanner
+// associated with the error channel is shutdown or the channel of errors is
+// closed.
+func (s *NeutrinoClient) consumeRescanErr(
+	rescanQuit <-chan struct{},
+	errCh <-chan error,
+) {
+	for {
+		select {
+		case <-s.quit:
+			return
+		case <-rescanQuit:
+			return
+		case err, open := <-errCh:
+			if !open {
+				return
+			}
+			select {
+			case s.rescanErr <- err:
+			case <-s.quit:
+				return
+			case <-rescanQuit:
+				return
+			}
+		}
+	}
 }
 
 // getNewRescanner injects the Rescanner constructor when called and defaults
