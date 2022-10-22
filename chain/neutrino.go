@@ -58,7 +58,7 @@ type NeutrinoClient struct {
 
 	// We currently support one rescan/notifiction goroutine per client
 	rescan       rescan.Interface
-	newRescanner rescan.New
+	newRescanner rescan.NewFunc
 
 	enqueueNotification     chan interface{}
 	dequeueNotification     chan interface{}
@@ -785,7 +785,7 @@ out:
 
 // getNewRescanner injects the Rescanner constructor when called and defaults
 // to using neutrino.NewRescan when unspecified.
-func (s *NeutrinoClient) getNewRescanner() rescan.New {
+func (s *NeutrinoClient) getNewRescanner() rescan.NewFunc {
 	if s.newRescanner == nil {
 		s.newRescanner = func(ropts ...neutrino.RescanOption) rescan.Interface {
 			cs := &neutrino.RescanChainSource{

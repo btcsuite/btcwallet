@@ -18,7 +18,11 @@ type Interface interface {
 	Starter
 	Updater
 
+	// WaitForShutdown blocks until the underlying rescan object is shutdown.
+	// Close the quit channel before calling WaitForShutdown.
 	WaitForShutdown()
 }
 
-type New func(...neutrino.RescanOption) Interface
+// NewFunc defines a constructor that accepts rescan options and returns a
+// struct that satisfies Interface
+type NewFunc func(...neutrino.RescanOption) Interface
