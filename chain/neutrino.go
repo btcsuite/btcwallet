@@ -57,10 +57,10 @@ type NeutrinoClient struct {
 	chainParams *chaincfg.Params
 
 	// We currently support one rescan/notifiction goroutine per client
-	rescanCh     chan rescan.Interface
-	rescanQuitCh chan chan struct{}
-	rescanErr    chan error
-	newRescanner rescan.NewFunc
+	rescanCh      chan rescan.Interface
+	rescanQuitCh  chan chan struct{}
+	rescanErr     chan error
+	newRescanFunc rescan.NewFunc
 
 	enqueueNotification     chan interface{}
 	dequeueNotification     chan interface{}
@@ -400,10 +400,11 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 
 	select {
 	case rescan := <-s.rescanCh:
-		// Rescan process exists so get its corresponding quit channel
+		// Rescan process exists so get its corresponding quit channel.
 		rescanQuit := <-s.rescanQuitCh
 
-		// Restart the rescan by killing the existing rescan.
+		// Kill the existing rescan before creating a new rescan
+		// process.
 		close(rescanQuit)
 		rescan.WaitForShutdown()
 	default:
@@ -443,10 +444,10 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 // NotifyBlocks replicates the RPC client's NotifyBlocks command.
 func (s *NeutrinoClient) NotifyBlocks() error {
 	select {
-	case rescanner := <-s.rescanCh:
+	case rescan := <-s.rescanCh:
 		// Rescan is running, put it back and do nothing because
 		// we are already notifying on blocks.
-		s.rescanCh <- rescanner
+		s.rescanCh <- rescan
 		return nil
 	default:
 	}
@@ -763,7 +764,7 @@ func (s *NeutrinoClient) createRescan(opts ...neutrino.RescanOption) {
 		stop = make(chan struct{})
 
 		// Inject the rescanner constructor.
-		newRescan = s.getNewRescanner()
+		newRescan = s.getNewRescanFunc()
 
 		// Wrap the quit channel inside closures to use as handlers.
 		obc = func(hash *chainhash.Hash, height int32, time time.Time) {
@@ -839,18 +840,18 @@ func (s *NeutrinoClient) consumeRescanErr(
 	}
 }
 
-// getNewRescanner injects the Rescanner constructor when called and defaults
+// getNewRescanFunc injects the Rescanner constructor when called and defaults
 // to using neutrino.NewRescan when unspecified.
-func (s *NeutrinoClient) getNewRescanner() rescan.NewFunc {
-	if s.newRescanner == nil {
-		s.newRescanner = func(ropts ...neutrino.RescanOption) rescan.Interface {
+func (s *NeutrinoClient) getNewRescanFunc() rescan.NewFunc {
+	if s.newRescanFunc == nil {
+		s.newRescanFunc = func(ropts ...neutrino.RescanOption) rescan.Interface {
 			cs := &neutrino.RescanChainSource{
 				ChainService: s.CS.(*neutrino.ChainService),
 			}
 			return neutrino.NewRescan(cs, ropts...)
 		}
 	}
-	return s.newRescanner
+	return s.newRescanFunc
 }
 
 // toInputsToWatch transforms an address map into an array of inputs with script.
