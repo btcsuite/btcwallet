@@ -34,8 +34,21 @@ func newMockNeutrinoClient(t *testing.T,
 	opts ...func(*mockRescanner)) *NeutrinoClient {
 	t.Helper()
 
+	// newRescanner returns a mockRescanner with options set by the
+	// newMockNeutrinoClient function
+	newRescanner := func(ro ...neutrino.RescanOption) rescan.Interface {
+		mrs := &mockRescanner{
+			updateArgs: list.New(),
+		}
+		for _, o := range opts {
+			o(mrs)
+		}
+		return mrs
+	}
+
 	return &NeutrinoClient{
-		CS: &mockChainService{},
+		CS:           &mockChainService{},
+		newRescanner: newRescanner,
 	}
 }
 

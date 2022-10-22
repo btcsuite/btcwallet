@@ -20,3 +20,5 @@ type Interface interface {
 
 	WaitForShutdown()
 }
+
+type New func(...neutrino.RescanOption) Interface

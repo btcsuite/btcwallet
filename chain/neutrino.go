@@ -57,7 +57,8 @@ type NeutrinoClient struct {
 	chainParams *chaincfg.Params
 
 	// We currently support one rescan/notifiction goroutine per client
-	rescan rescan.Interface
+	rescan       rescan.Interface
+	newRescanner rescan.New
 
 	enqueueNotification     chan interface{}
 	dequeueNotification     chan interface{}
@@ -444,10 +445,8 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	}
 
 	s.clientMtx.Lock()
-	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{
-			ChainService: s.CS.(*neutrino.ChainService),
-		},
+	newRescanner := s.getNewRescanner()
+	newRescan := newRescanner(
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
@@ -499,10 +498,8 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.lastFilteredBlockHeader = nil
 
 	// Rescan with just the specified addresses.
-	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{
-			ChainService: s.CS.(*neutrino.ChainService),
-		},
+	newRescanner := s.getNewRescanner()
+	newRescan := newRescanner(
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
@@ -784,4 +781,18 @@ out:
 	s.Stop()
 	close(s.dequeueNotification)
 	s.wg.Done()
+}
+
+// getNewRescanner injects the Rescanner constructor when called and defaults
+// to using neutrino.NewRescan when unspecified.
+func (s *NeutrinoClient) getNewRescanner() rescan.New {
+	if s.newRescanner == nil {
+		s.newRescanner = func(ropts ...neutrino.RescanOption) rescan.Interface {
+			cs := &neutrino.RescanChainSource{
+				ChainService: s.CS.(*neutrino.ChainService),
+			}
+			return neutrino.NewRescan(cs, ropts...)
+		}
+	}
+	return s.newRescanner
 }
