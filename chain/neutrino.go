@@ -382,21 +382,6 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 			"is not started")
 	}
 
-	select {
-	case rescanner := <-s.rescanCh:
-		// Restart the rescan by killing the existing rescan.
-		rescanQuit := <-s.rescanQuitCh
-		close(rescanQuit)
-		rescanner.WaitForShutdown()
-	default:
-		// No rescanner exists, nothing to shutdown.
-	}
-
-	s.finished = false
-	s.lastProgressSent = false
-	s.lastFilteredBlockHeader = nil
-	s.isRescan = true
-
 	bestBlock, err := s.CS.BestBlock()
 	if err != nil {
 		return fmt.Errorf("can't get chain service's best block: %s", err)
@@ -413,15 +398,27 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		return err
 	}
 
+	select {
+	case rescan := <-s.rescanCh:
+		// Rescan process exists so get its corresponding quit channel
+		rescanQuit := <-s.rescanQuitCh
+
+		// Restart the rescan by killing the existing rescan.
+		close(rescanQuit)
+		rescan.WaitForShutdown()
+	default:
+		// No rescan process exists, nothing to shutdown.
+	}
+
+	s.finished = header.BlockHash() == *startHash
+	s.lastProgressSent = false
+	s.lastFilteredBlockHeader = nil
+	s.isRescan = true
+
 	// If the wallet is already fully caught up, or the rescan has started
 	// with state that indicates a "fresh" wallet, we'll send a
 	// notification indicating the rescan has "finished".
-	if header.BlockHash() == *startHash {
-		s.finished = true
-
-		// Release the lock while dispatching the notification since
-		// it's possible for the notificationHandler to be waiting to
-		// acquire it before receiving the notification.
+	if s.finished {
 		select {
 		case s.enqueueNotification <- &RescanFinished{
 			Hash:   startHash,
@@ -433,8 +430,8 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		}
 	}
 
-	// Create and broadcast a new rescanner.
-	s.createRescanner(
+	// Initialize a new rescan process.
+	s.createRescan(
 		neutrino.StartBlock(&headerfs.BlockStamp{Hash: *startHash}),
 		neutrino.WatchAddrs(addrs...),
 		neutrino.WatchInputs(inputsToWatch...),
@@ -447,7 +444,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 func (s *NeutrinoClient) NotifyBlocks() error {
 	select {
 	case rescanner := <-s.rescanCh:
-		// Rescanner is running, put it back and do nothing because
+		// Rescan is running, put it back and do nothing because
 		// we are already notifying on blocks.
 		s.rescanCh <- rescanner
 		return nil
@@ -460,21 +457,25 @@ func (s *NeutrinoClient) NotifyBlocks() error {
 }
 
 // NotifyReceived replicates the RPC client's NotifyReceived command.
+//
+// NotifyReceived checks if a rescan process is running, if one exists already
+// it updates the rescan process to include the additional addressess.
+// Otherwise, it initializes a new rescan with the given addresses.
+//
+// TODO(mstreet3) error if the client is not started?
 func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 
-	// If we have a rescan running, we just need to add the appropriate
-	// addresses to the watch list.
 	select {
-	case rescanner := <-s.rescanCh:
-		// The rescanner is running so update the watch list and put it back.
-		err := rescanner.Update(neutrino.AddAddrs(addrs...))
-		s.rescanCh <- rescanner
+	case rescan := <-s.rescanCh:
+		// The rescan is running so update the watch list and put it back.
+		err := rescan.Update(neutrino.AddAddrs(addrs...))
+		s.rescanCh <- rescan
 		return err
 	default:
-		// No rescanner exists, update the client state then create a new
-		// rescanner.
+		// No scanning so update the client state then initialize a new
+		// rescan.
 	}
 
 	// Don't need RescanFinished or RescanProgress notifications.
@@ -483,7 +484,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.lastFilteredBlockHeader = nil
 
 	// Rescan with just the specified addresses.
-	s.createRescanner(neutrino.WatchAddrs(addrs...))
+	s.createRescan(neutrino.WatchAddrs(addrs...))
 	return nil
 }
 
@@ -755,26 +756,26 @@ out:
 	s.wg.Done()
 }
 
-// createRescanner is a convenience method to consistently recreate a rescanner.
-func (s *NeutrinoClient) createRescanner(opts ...neutrino.RescanOption) {
+// createRescan is a convenience method to consistently recreate a rescanner.
+func (s *NeutrinoClient) createRescan(opts ...neutrino.RescanOption) {
 	var (
 		// Create a quit channel for the new rescanner.
-		rescanQuit = make(chan struct{})
+		stop = make(chan struct{})
 
 		// Inject the rescanner constructor.
-		newRescanner = s.getNewRescanner()
+		newRescan = s.getNewRescanner()
 
 		// Wrap the quit channel inside closures to use as handlers.
 		obc = func(hash *chainhash.Hash, height int32, time time.Time) {
-			s.onBlockConnected(rescanQuit, hash, height, time)
+			s.onBlockConnected(stop, hash, height, time)
 		}
 
 		ofbc = func(height int32, header *wire.BlockHeader, txs []*btcutil.Tx) {
-			s.onFilteredBlockConnected(rescanQuit, height, header, txs)
+			s.onFilteredBlockConnected(stop, height, header, txs)
 		}
 
 		obd = func(hash *chainhash.Hash, height int32, time time.Time) {
-			s.onBlockDisconnected(rescanQuit, hash, height, time)
+			s.onBlockDisconnected(stop, hash, height, time)
 		}
 
 		// Build the default options for the rescanner.
@@ -785,27 +786,27 @@ func (s *NeutrinoClient) createRescanner(opts ...neutrino.RescanOption) {
 				OnBlockDisconnected:      obd,
 			}),
 			neutrino.StartTime(s.startTime),
-			neutrino.QuitChan(rescanQuit),
+			neutrino.QuitChan(stop),
 		}
 		fullOpts = append(opts, defaultOpts...)
 	)
 
-	// Construct the rescanner.
-	rescanner := newRescanner(fullOpts...)
+	// Construct the rescan.
+	rescan := newRescan(fullOpts...)
 
 	// Broadcast the new objects via sends on their respective channels.
-	s.rescanCh <- rescanner
-	s.rescanQuitCh <- rescanQuit
+	s.rescanCh <- rescan
+	s.rescanQuitCh <- stop
 
 	// Only start the rescanner after it is sucessfully broadcast.
-	errCh := rescanner.Start()
+	errCh := rescan.Start()
 
 	// Start a goroutine to consume any errors and broadcast them on
 	// s.rescanErr.
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.consumeRescanErr(rescanQuit, errCh)
+		s.consumeRescanErr(stop, errCh)
 	}()
 }
 
