@@ -30,6 +30,8 @@ var (
 	_ NeutrinoChainService = (*mockChainService)(nil)
 )
 
+// newMockNeutrinoClient constructs a neutrino client with a mock chain
+// service implementation and mock rescan Interface implementation.
 func newMockNeutrinoClient(t *testing.T,
 	opts ...func(*mockRescanner)) *NeutrinoClient {
 	t.Helper()
@@ -54,10 +56,10 @@ func newMockNeutrinoClient(t *testing.T,
 	}
 }
 
+// mockRescanner is a mock implementation of a rescan Interface for use in
+// tests.
 type mockRescanner struct {
 	updateArgs *list.List
-	errs       []error
-	rescanQuit <-chan struct{}
 }
 
 func (m *mockRescanner) Start() <-chan error {
@@ -74,6 +76,8 @@ func (m *mockRescanner) Update(opts ...neutrino.UpdateOption) error {
 	return nil
 }
 
+// mockChainService is a mock implementation of a chain service for use in
+// tests.
 type mockChainService struct{}
 
 func (m *mockChainService) Start() error {
