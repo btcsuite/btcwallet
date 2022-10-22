@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain/internal/rescan"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/lightninglabs/neutrino"
@@ -54,7 +55,7 @@ type NeutrinoClient struct {
 	chainParams *chaincfg.Params
 
 	// We currently support one rescan/notifiction goroutine per client
-	rescan *neutrino.Rescan
+	rescan rescan.Interface
 
 	enqueueNotification     chan interface{}
 	dequeueNotification     chan interface{}
