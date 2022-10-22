@@ -72,7 +72,8 @@ func TestNeutrinoClientNotifyReceived(t *testing.T) {
 	case <-done:
 		// Require that the expected number of calls to Update were made
 		// once done sending all NotifyReceived calls.
-		mockRescan := nc.rescan.(*mockRescanner)
+		maybeRescan := <-nc.rescanCh
+		mockRescan := maybeRescan.(*mockRescanner)
 		gotUpdateCalls := mockRescan.updateArgs.Len()
 		require.Equal(t, wantUpdateCalls, gotUpdateCalls)
 	}

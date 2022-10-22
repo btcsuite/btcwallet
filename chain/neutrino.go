@@ -57,7 +57,7 @@ type NeutrinoClient struct {
 	chainParams *chaincfg.Params
 
 	// We currently support one rescan/notifiction goroutine per client
-	rescan       rescan.Interface
+	rescanCh     chan rescan.Interface
 	newRescanner rescan.NewFunc
 
 	enqueueNotification     chan interface{}
@@ -72,7 +72,6 @@ type NeutrinoClient struct {
 	rescanErr  <-chan error
 	wg         sync.WaitGroup
 	started    bool
-	scanning   bool
 	finished   bool
 	isRescan   bool
 
@@ -87,6 +86,7 @@ func NewNeutrinoClient(chainParams *chaincfg.Params,
 	return &NeutrinoClient{
 		CS:          chainService,
 		chainParams: chainParams,
+		rescanCh:    make(chan rescan.Interface, 1),
 	}
 }
 
@@ -373,28 +373,27 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	outPoints map[wire.OutPoint]btcutil.Address) error {
 
 	s.clientMtx.Lock()
+	defer s.clientMtx.Unlock()
+
 	if !s.started {
-		s.clientMtx.Unlock()
 		return fmt.Errorf("can't do a rescan when the chain client " +
 			"is not started")
 	}
-	if s.scanning {
+
+	select {
+	case rescanner := <-s.rescanCh:
 		// Restart the rescan by killing the existing rescan.
 		close(s.rescanQuit)
-		rescan := s.rescan
-		s.clientMtx.Unlock()
-		rescan.WaitForShutdown()
-		s.clientMtx.Lock()
-		s.rescan = nil
+		rescanner.WaitForShutdown()
 		s.rescanErr = nil
+	default:
+		// No rescanner exists, nothing to shutdown.
 	}
 	s.rescanQuit = make(chan struct{})
-	s.scanning = true
 	s.finished = false
 	s.lastProgressSent = false
 	s.lastFilteredBlockHeader = nil
 	s.isRescan = true
-	s.clientMtx.Unlock()
 
 	bestBlock, err := s.CS.BestBlock()
 	if err != nil {
@@ -416,10 +415,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	// with state that indicates a "fresh" wallet, we'll send a
 	// notification indicating the rescan has "finished".
 	if header.BlockHash() == *startHash {
-		s.clientMtx.Lock()
 		s.finished = true
-		rescanQuit := s.rescanQuit
-		s.clientMtx.Unlock()
 
 		// Release the lock while dispatching the notification since
 		// it's possible for the notificationHandler to be waiting to
@@ -432,12 +428,9 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		}:
 		case <-s.quit:
 			return nil
-		case <-rescanQuit:
-			return nil
 		}
 	}
 
-	s.clientMtx.Lock()
 	newRescanner := s.getNewRescanner()
 	newRescan := newRescanner(
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
@@ -451,39 +444,47 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 		neutrino.WatchAddrs(addrs...),
 		neutrino.WatchInputs(inputsToWatch...),
 	)
-	s.rescan = newRescan
-	s.rescanErr = s.rescan.Start()
-	s.clientMtx.Unlock()
+	s.rescanCh <- newRescan
+	s.rescanErr = newRescan.Start()
 
 	return nil
 }
 
 // NotifyBlocks replicates the RPC client's NotifyBlocks command.
 func (s *NeutrinoClient) NotifyBlocks() error {
-	s.clientMtx.Lock()
-	// If we're scanning, we're already notifying on blocks. Otherwise,
-	// start a rescan without watching any addresses.
-	if !s.scanning {
-		s.clientMtx.Unlock()
-		return s.NotifyReceived([]btcutil.Address{})
+	select {
+	case rescanner := <-s.rescanCh:
+		// Rescanner is running, put it back and do nothing because
+		// we are already notifying on blocks.
+		s.rescanCh <- rescanner
+		return nil
+	default:
 	}
-	s.clientMtx.Unlock()
-	return nil
+
+	// Otherwise, start a rescan without watching any addresses.
+	var addrs []btcutil.Address
+	return s.NotifyReceived(addrs)
 }
 
 // NotifyReceived replicates the RPC client's NotifyReceived command.
 func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.clientMtx.Lock()
+	defer s.clientMtx.Unlock()
 
 	// If we have a rescan running, we just need to add the appropriate
 	// addresses to the watch list.
-	if s.scanning {
-		s.clientMtx.Unlock()
-		return s.rescan.Update(neutrino.AddAddrs(addrs...))
+	select {
+	case rescanner := <-s.rescanCh:
+		// The rescanner is running so update the watch list and put it back.
+		err := rescanner.Update(neutrino.AddAddrs(addrs...))
+		s.rescanCh <- rescanner
+		return err
+	default:
+		// No rescanner exists, update the client state then create a new
+		// rescanner.
 	}
 
 	s.rescanQuit = make(chan struct{})
-	s.scanning = true
 
 	// Don't need RescanFinished or RescanProgress notifications.
 	s.finished = true
@@ -502,9 +503,9 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 		neutrino.QuitChan(s.rescanQuit),
 		neutrino.WatchAddrs(addrs...),
 	)
-	s.rescan = newRescan
-	s.rescanErr = s.rescan.Start()
-	s.clientMtx.Unlock()
+	s.rescanCh <- newRescan
+	s.rescanErr = newRescan.Start()
+
 	return nil
 }
 
