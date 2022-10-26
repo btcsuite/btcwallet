@@ -100,24 +100,36 @@ func (s *NeutrinoClient) Start() error {
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
 	if !s.started {
+		// Reset the client state.
 		s.enqueueNotification = make(chan interface{})
 		s.dequeueNotification = make(chan interface{})
 		s.currentBlock = make(chan *waddrmgr.BlockStamp)
 		s.quit = make(chan struct{})
 		s.started = true
+
+		// Go place a ClientConnected notification onto the queue.
 		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
+
 			select {
 			case s.enqueueNotification <- ClientConnected{}:
 			case <-s.quit:
 			}
 		}()
+
+		// Go launch the notification handler.
+		s.wg.Add(1)
 		go s.notificationHandler()
 	}
 	return nil
 }
 
 // Stop replicates the RPC client's Stop method.
+//
+// TODO(mstreet3): The Stop method does not cancel the long-running rescan
+// goroutine.  This is a memory leak.  Stop should shutdown the rescan goroutine
+// and reset the scanning state of the NeutrinoClient to false.
 func (s *NeutrinoClient) Stop() {
 	s.clientMtx.Lock()
 	defer s.clientMtx.Unlock()
