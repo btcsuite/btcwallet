@@ -27,8 +27,14 @@ type NeutrinoClient struct {
 	chainParams *chaincfg.Params
 
 	// We currently support only one rescan/notification goroutine per client.
+	// Therefore there can only be one instance of the rescan object and
+	// the rescanMtx synchronizes its access.  Calls to the NotifyReceived
+	// and Rescan methods of the client must hold the rescan mutex lock for
+	// the length of their execution to ensure that all operations that
+	// affect the rescan object are atomic.
 	rescan    rescanner
 	newRescan newRescanFunc
+	rescanMtx sync.Mutex
 
 	enqueueNotification     chan interface{}
 	dequeueNotification     chan interface{}
@@ -46,6 +52,14 @@ type NeutrinoClient struct {
 	finished   bool
 	isRescan   bool
 
+	// The clientMtx synchronizes access to the state variables of the client.
+	//
+	// TODO(mstreet3): Currently the clientMtx synchronizes access to the
+	// rescanQuit and rescanErr channels, which cancel the current rescan
+	// goroutine when closed and is updated each time a new rescan goroutine
+	// is created, respectively.  All state related to the rescan goroutine
+	// should ideally be synchronized by the same lock or via some other
+	// shared mechanism.
 	clientMtx sync.Mutex
 }
 
@@ -351,6 +365,10 @@ func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) 
 func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	outPoints map[wire.OutPoint]btcutil.Address) error {
 
+	// Obtain and hold the rescan mutex lock for the duration of the call.
+	s.rescanMtx.Lock()
+	defer s.rescanMtx.Unlock()
+
 	s.clientMtx.Lock()
 	if !s.started {
 		s.clientMtx.Unlock()
@@ -458,6 +476,10 @@ func (s *NeutrinoClient) NotifyBlocks() error {
 
 // NotifyReceived replicates the RPC client's NotifyReceived command.
 func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
+	// Obtain and hold the rescan mutex lock for the duration of the call.
+	s.rescanMtx.Lock()
+	defer s.rescanMtx.Unlock()
+
 	s.clientMtx.Lock()
 
 	// If we have a rescan running, we just need to add the appropriate
