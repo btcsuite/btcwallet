@@ -468,7 +468,8 @@ func (c *BitcoindClient) RescanBlocks(
 // Rescan rescans from the block with the given hash until the current block,
 // after adding the passed addresses and outpoints to the client's watch list.
 func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
-	addresses []btcutil.Address, outPoints map[wire.OutPoint]btcutil.Address) error {
+	addresses []btcutil.Address,
+	outPoints map[wire.OutPoint]btcutil.Address) error {
 
 	// A block hash is required to use as the starting point of the rescan.
 	if blockHash == nil {
@@ -476,8 +477,30 @@ func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 	}
 
 	// We'll then update our filters with the given outpoints and addresses.
-	c.updateWatchedFilters(addresses)
-	c.updateWatchedFilters(outPoints)
+	numWatchedAddresses := c.updateWatchedFilters(addresses)
+	numWatchedOutPoints := c.updateWatchedFilters(outPoints)
+
+	// If after adding the new addresses and outpoints there still is
+	// nothing to rescan (empty wallet and no previously ongoing re-scan),
+	// then it doesn't make sense to proceed with scanning the chain. But we
+	// need to notify any listeners that the rescan has finished, otherwise
+	// they'll wait forever.
+	if numWatchedAddresses == 0 && numWatchedOutPoints == 0 {
+		bestHash, bestHeight, err := c.GetBestBlock()
+		if err != nil {
+			return err
+		}
+		bestHeader, err := c.GetBlockHeaderVerbose(bestHash)
+		if err != nil {
+			return err
+		}
+
+		c.onRescanFinished(
+			bestHash, bestHeight, time.Unix(bestHeader.Time, 0),
+		)
+
+		return nil
+	}
 
 	// Once the filters have been updated, we can begin the rescan.
 	c.wg.Add(1)
@@ -1347,8 +1370,9 @@ func (c *BitcoindClient) resetWatchedFilters() {
 }
 
 // updateWatchedFilters is used to update the internal maps that track the
-// watched addresses, outpoints, or txns.
-func (c *BitcoindClient) updateWatchedFilters(update any) {
+// watched addresses, outpoints, or txns. It returns the number of watched
+// elements after the update.
+func (c *BitcoindClient) updateWatchedFilters(update any) int {
 	c.watchMtx.Lock()
 	defer c.watchMtx.Unlock()
 
@@ -1359,16 +1383,22 @@ func (c *BitcoindClient) updateWatchedFilters(update any) {
 			c.watchedAddresses[addr.String()] = struct{}{}
 		}
 
+		return len(c.watchedAddresses)
+
 	// We're adding the outpoints to our filter.
 	case []wire.OutPoint:
 		for _, op := range update {
 			c.watchedOutPoints[op] = struct{}{}
 		}
 
+		return len(c.watchedOutPoints)
+
 	case []*wire.OutPoint:
 		for _, op := range update {
 			c.watchedOutPoints[*op] = struct{}{}
 		}
+
+		return len(c.watchedOutPoints)
 
 	// We're adding the outpoints that map to the scripts
 	// that we should scan for to our filter.
@@ -1377,15 +1407,23 @@ func (c *BitcoindClient) updateWatchedFilters(update any) {
 			c.watchedOutPoints[op] = struct{}{}
 		}
 
+		return len(c.watchedOutPoints)
+
 	// We're adding the transactions to our filter.
 	case []chainhash.Hash:
 		for _, txid := range update {
 			c.watchedTxs[txid] = struct{}{}
 		}
 
+		return len(c.watchedTxs)
+
 	case []*chainhash.Hash:
 		for _, txid := range update {
 			c.watchedTxs[*txid] = struct{}{}
 		}
+
+		return len(c.watchedTxs)
 	}
+
+	return 0
 }
