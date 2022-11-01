@@ -1145,6 +1145,21 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 			if err != nil {
 				return nil, maybeConvertDbError(err)
 			}
+
+		}
+
+		// Now that we've written the address, we'll read it back from
+		// disk to ensure that it's the same address we have in memory.
+		diskAddr, err := s.loadAndCacheAddress(ns, ma.Address())
+		if err != nil {
+			return nil, maybeConvertDbError(err)
+		}
+
+		if ma.Address().String() != diskAddr.Address().String() {
+			return nil, fmt.Errorf("%w (disk read): "+
+				"expected %v, got %v", ErrAddrMismatch,
+				diskAddr.Address().String(),
+				ma.Address().String())
 		}
 	}
 
