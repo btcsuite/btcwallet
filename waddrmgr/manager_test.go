@@ -3137,3 +3137,150 @@ func assertAddressDerivation(t *testing.T, db walletdb.DB,
 	})
 	require.NoError(t, err)
 }
+
+// TestManagedAddressValidation tests that we're able to properly detect and
+// reject various fault cases for address/key derivation.
+func TestManagedAddressValidation(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// We'll start the test by creating a new root manager that will be
+	// used for the duration of the test.
+	var mgr *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = Create(
+			ns, rootKey, pubPassphrase, privPassphrase,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err, "create/open: unexpected error: %v", err)
+
+	defer mgr.Close()
+
+	var testCases = []struct {
+		name        string
+		mutator     func(addr *managedAddress, ogPrivKey *btcec.PrivateKey)
+		expectedErr error
+	}{
+		{
+			// In this case, we'll swap out the public key with some other
+			// random public key.
+			name: "derive diff pubkey",
+			mutator: func(addr *managedAddress, priv *btcec.PrivateKey) {
+				newPriv, err := btcec.NewPrivateKey()
+				if err != nil {
+					t.Fatalf("unable to gen priv key: %v", err)
+				}
+
+				addr.pubKey = newPriv.PubKey()
+			},
+			expectedErr: ErrPubKeyMismatch,
+		},
+		{
+			// In this case, we'll swap out the contained address another
+			// address that's actually a different type. This simulates a
+			// bitflip during the address generation process.
+			name: "addr bitflip",
+			mutator: func(addr *managedAddress, priv *btcec.PrivateKey) {
+				hash160 := btcutil.Hash160(
+					addr.pubKey.SerializeCompressed(),
+				)
+				hash160[0] ^= 0x01
+
+				addr.address, err = btcutil.NewAddressWitnessPubKeyHash(
+					hash160, &chaincfg.MainNetParams,
+				)
+				if err != nil {
+					t.Fatalf("unable to gen addr: %v", err)
+				}
+			},
+			expectedErr: ErrAddrMismatch,
+		},
+		{
+			// In this final case, we'll have the signature generator
+			// return a signature that's actually invalid for the public
+			// key.
+			name: "wrong priv key",
+			mutator: func(addr *managedAddress, priv *btcec.PrivateKey) {
+				// To trigger an invalid private key, we'll
+				// modify the internal decrypted private key.
+				addr.privKeyCT[0] ^= 0x01
+			},
+			expectedErr: ErrInvalidSignature,
+		},
+	}
+
+	// We'll run the tests for all the scopes we generate addresses for.
+	// This'll ensure we test for both ECDSA and schnorr.
+	scopes := DefaultKeyScopes
+
+	for _, testCase := range testCases {
+		testCase := testCase
+
+		for _, scope := range scopes {
+			testCase := testCase
+
+			testName := fmt.Sprintf("%v: scope=%v", testCase.name,
+				scope)
+
+			t.Run(testName, func(t *testing.T) {
+				scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+				require.NoError(
+					t, err, "unable to fetch scope %v: %v",
+					KeyScopeBIP0086, err,
+				)
+
+				var addr ManagedAddress
+
+				// With the scoped managed we created above,
+				// generate a new address.
+				err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+					ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+					addrs, err := scopedMgr.NextExternalAddresses(
+						ns, 0, 1,
+					)
+					if err != nil {
+						return err
+					}
+
+					addr = addrs[0]
+					return nil
+				})
+				require.NoError(t, err)
+
+				pubKeyAddr := addr.(ValidatableManagedAddress)
+
+				privKeyForAddr, err := pubKeyAddr.PrivKey()
+				require.NoError(t, err)
+
+				rawAddr := addr.(*managedAddress)
+
+				// Apply the mutator to the returned address an/or
+				// private key.
+				testCase.mutator(rawAddr, privKeyForAddr)
+
+				var msg [32]byte
+				require.ErrorIs(
+					t, pubKeyAddr.Validate(msg, privKeyForAddr),
+					testCase.expectedErr,
+				)
+			})
+		}
+	}
+
+}

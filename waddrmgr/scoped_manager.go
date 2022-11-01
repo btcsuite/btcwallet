@@ -1156,6 +1156,13 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		}
 
 		if ma.Address().String() != diskAddr.Address().String() {
+			// The address didn't match up, so we'll manually
+			// delete it from the cache.
+			delete(
+				s.addrs,
+				addrKey(diskAddr.Address().ScriptAddress()),
+			)
+
 			return nil, fmt.Errorf("%w (disk read): "+
 				"expected %v, got %v", ErrAddrMismatch,
 				diskAddr.Address().String(),
