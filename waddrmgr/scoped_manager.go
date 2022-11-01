@@ -342,7 +342,7 @@ func (s *ScopedKeyManager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
 	// depending on whether the passed key is private.  Also, zero the key
 	// after creating the managed address from it.
 	ma, err := newManagedAddressFromExtKey(
-		s, derivationPath, derivedKey, addrType,
+		s, derivationPath, derivedKey, addrType, acctInfo,
 	)
 	defer derivedKey.Zero()
 	if err != nil {
@@ -1093,7 +1093,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		// Also, zero the next key after creating the managed address
 		// from it.
 		addr, err := newManagedAddressFromExtKey(
-			s, derivationPath, nextKey, addrType,
+			s, derivationPath, nextKey, addrType, acctInfo,
 		)
 		if err != nil {
 			return nil, err
@@ -1127,8 +1127,11 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 			if err != nil {
 				return nil, maybeConvertDbError(err)
 			}
+
 		case *scriptAddress:
-			encryptedHash, err := s.rootManager.cryptoKeyPub.Encrypt(a.AddrHash())
+			encryptedHash, err := s.rootManager.cryptoKeyPub.Encrypt(
+				a.AddrHash(),
+			)
 			if err != nil {
 				str := fmt.Sprintf("failed to encrypt script hash %x",
 					a.AddrHash())
@@ -1297,7 +1300,7 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		// Also, zero the next key after creating the managed address
 		// from it.
 		addr, err := newManagedAddressFromExtKey(
-			s, derivationPath, nextKey, addrType,
+			s, derivationPath, nextKey, addrType, acctInfo,
 		)
 		if err != nil {
 			return err
@@ -2050,7 +2053,7 @@ func (s *ScopedKeyManager) toImportedPrivateManagedAddress(
 	// TODO: Handle imported key being part of internal branch.
 	managedAddr, err := newManagedAddress(
 		s, ImportedDerivationPath, wif.PrivKey, wif.CompressPubKey,
-		s.addrSchema.ExternalAddrType,
+		s.addrSchema.ExternalAddrType, nil,
 	)
 	if err != nil {
 		return nil, err

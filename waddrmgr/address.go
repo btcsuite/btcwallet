@@ -5,6 +5,7 @@
 package waddrmgr
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -527,7 +528,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 	switch addrType {
 
 	case NestedWitnessPubKey:
-		// For this address type we'l generate an address which is
+		// For this address type we'll generate an address which is
 		// backwards compatible to Bitcoin nodes running 0.6.0 onwards, but
 		// allows us to take advantage of segwit's scripting improvements,
 		// and malleability fixes.
@@ -577,8 +578,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 	case TaprootPubKey:
 		tapKey := txscript.ComputeTaprootKeyNoScript(pubKey)
 		address, err = btcutil.NewAddressTaproot(
-			schnorr.SerializePubKey(tapKey),
-			m.rootManager.chainParams,
+			schnorr.SerializePubKey(tapKey), m.rootManager.chainParams,
 		)
 		if err != nil {
 			return nil, err
@@ -604,7 +604,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 // address will have access to the private and public keys.
 func newManagedAddress(s *ScopedKeyManager, derivationPath DerivationPath,
 	privKey *btcec.PrivateKey, compressed bool,
-	addrType AddressType) (*managedAddress, error) {
+	addrType AddressType, acctInfo *accountInfo) (*managedAddress, error) {
 
 	// Encrypt the private key.
 	//
@@ -629,6 +629,52 @@ func newManagedAddress(s *ScopedKeyManager, derivationPath DerivationPath,
 	managedAddr.privKeyEncrypted = privKeyEncrypted
 	managedAddr.privKeyCT = privKeyBytes
 
+	// At this point, we've derived an address based on a private key which
+	// was the output of a BIP 32 derivation. As a sanity check, we'll make
+	// sure that we can properly generate a valid signature/witness for the
+	// given address type.
+	var msg [32]byte
+	if _, err := rand.Read(msg[:]); err != nil {
+		return nil, fmt.Errorf("unable to read random "+
+			"challenge for addr validation: %w", err)
+	}
+
+	// We'll first validate things against the private key we got
+	// from the original derivation.
+	err = managedAddr.Validate(msg, privKey)
+	if err != nil {
+		return nil, fmt.Errorf("addr validation for addr=%v "+
+			"failed: %w", managedAddr.address, err)
+	}
+
+	// If no account information was specified, then this is an
+	// imported key, so we can't actually re-derive it to ensure
+	// things match up. As a result, we'll exit early here.
+	if acctInfo == nil || acctInfo.acctKeyPriv == nil {
+		return managedAddr, nil
+	}
+
+	// As an additional layer of safety, we'll _re-derive_ this key
+	// and then perform the same set of checks.
+	rederivedKey, err := s.deriveKey(
+		acctInfo, managedAddr.derivationPath.Branch,
+		managedAddr.derivationPath.Index, true,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("unable to re-derive "+
+			"key: %w", err)
+	}
+	freshPrivKey, err := rederivedKey.ECPrivKey()
+	if err != nil {
+		return nil, fmt.Errorf("unable to gen priv key: %w", err)
+	}
+	err = managedAddr.Validate(msg, freshPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("addr validation for addr=%v "+
+			"failed after rederiving: %w",
+			managedAddr.address, err)
+	}
+
 	return managedAddr, nil
 }
 
@@ -638,7 +684,7 @@ func newManagedAddress(s *ScopedKeyManager, derivationPath DerivationPath,
 // will only have access to the public key.
 func newManagedAddressFromExtKey(s *ScopedKeyManager,
 	derivationPath DerivationPath, key *hdkeychain.ExtendedKey,
-	addrType AddressType) (*managedAddress, error) {
+	addrType AddressType, acctInfo *accountInfo) (*managedAddress, error) {
 
 	// Create a new managed address based on the public or private key
 	// depending on whether the generated key is private.
@@ -652,7 +698,7 @@ func newManagedAddressFromExtKey(s *ScopedKeyManager,
 		// Ensure the temp private key big integer is cleared after
 		// use.
 		managedAddr, err = newManagedAddress(
-			s, derivationPath, privKey, true, addrType,
+			s, derivationPath, privKey, true, addrType, acctInfo,
 		)
 		if err != nil {
 			return nil, err
