@@ -55,9 +55,9 @@ const (
 )
 
 const (
-	// privKeyCacheSize is the default size of the LRU cache that we'll use
-	// to cache private keys to avoid DB and EC operations within the
-	// wallet. With the default sisize, we'll allocate up to 320 KB to
+	// defaultPrivKeyCacheSize is the default size of the LRU cache that
+	// we'll use to cache private keys to avoid DB and EC operations within
+	// the wallet. With the default sisize, we'll allocate up to 320 KB to
 	// caching private keys (ignoring pointer overhead, etc).
 	defaultPrivKeyCacheSize = 10_000
 )
@@ -636,7 +636,7 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 // to be used frequently. We use this wrapper struct to be able too report the
 // size of a given element to the cache.
 type cachedKey struct {
-	key *btcec.PrivateKey
+	key btcec.PrivateKey
 }
 
 // Size returns the size of this element. Rather than have the cache limit
@@ -664,7 +664,8 @@ func (s *ScopedKeyManager) DeriveFromKeyPathCache(
 	// is here, then we don't need to do anything further.
 	privKeyVal, err := s.privKeyCache.Get(kp)
 	if err == nil {
-		return privKeyVal.(*cachedKey).key, nil
+		privKey := privKeyVal.(*cachedKey).key
+		return &privKey, nil
 	}
 
 	// If the key isn't already in the cache, then we'll try to look up the
@@ -695,7 +696,7 @@ func (s *ScopedKeyManager) DeriveFromKeyPathCache(
 	if err != nil {
 		return nil, err
 	}
-	_, err = s.privKeyCache.Put(kp, &cachedKey{key: privKey})
+	_, err = s.privKeyCache.Put(kp, &cachedKey{key: *privKey})
 	if err != nil {
 		return nil, err
 	}
