@@ -20,9 +20,9 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 )
 
-// NeutrinoClient is an implementation of the btcwalet chain.Interface interface.
+// NeutrinoClient is an implementation of the btcwallet chain.Interface interface.
 type NeutrinoClient struct {
-	CS *neutrino.ChainService
+	CS NeutrinoChainService
 
 	chainParams *chaincfg.Params
 
