@@ -18,7 +18,7 @@ var (
 )
 
 // TestLocateBirthdayBlock ensures we can properly map a block in the chain to a
-//timestamp.
+// timestamp.
 func TestLocateBirthdayBlock(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +100,8 @@ func TestLocateBirthdayBlock(t *testing.T) {
 // TestLabelTransaction tests labelling of transactions with invalid labels,
 // and failure to label a transaction when it already has a label.
 func TestLabelTransaction(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 

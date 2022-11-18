@@ -22,6 +22,8 @@ func makeInts(value int, n int) []int {
 }
 
 func TestEstimateSerializeSize(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		InputCount           int
 		OutputScriptLengths  []int
@@ -63,6 +65,7 @@ func TestEstimateSerializeSize(t *testing.T) {
 }
 
 func TestEstimateVirtualSize(t *testing.T) {
+	t.Parallel()
 
 	type estimateVSizeTest struct {
 		tx              func() (*wire.MsgTx, error)

@@ -1164,7 +1164,8 @@ func logFilterBlocksResp(block wtxmgr.BlockMeta,
 
 type (
 	createTxRequest struct {
-		keyScope              *waddrmgr.KeyScope
+		coinSelectKeyScope    *waddrmgr.KeyScope
+		changeKeyScope        *waddrmgr.KeyScope
 		account               uint32
 		outputs               []*wire.TxOut
 		minconf               int32
@@ -1210,8 +1211,8 @@ out:
 			}
 
 			tx, err := w.txToOutputs(
-				txr.outputs, txr.keyScope, txr.account,
-				txr.minconf, txr.feeSatPerKB,
+				txr.outputs, txr.changeKeyScope, txr.coinSelectKeyScope,
+				txr.account, txr.minconf, txr.feeSatPerKB,
 				txr.coinSelectionStrategy, txr.dryRun,
 			)
 
@@ -1222,6 +1223,33 @@ out:
 		}
 	}
 	w.wg.Done()
+}
+
+// txCreateOptions is a set of optional arguments to modify the tx creation
+// process. This can be used to do things like use a custom coin selection
+// scope, which otherwise will default to the specified coin selection scope.
+type txCreateOptions struct {
+	changeKeyScope *waddrmgr.KeyScope
+}
+
+// TxCreateOption is a set of optional arguments to modify the tx creation
+// process. This can be used to do things like use a custom coin selection
+// scope, which otherwise will default to the specified coin selection scope.
+type TxCreateOption func(*txCreateOptions)
+
+// defaultTxCreateOptions is the default set of options.
+func defaultTxCreateOptions() *txCreateOptions {
+	return &txCreateOptions{}
+}
+
+// WithCustomChangeScope can be used to specify a change scope for the change
+// address. If unspecified, then the same scope will be used for both inputs
+// and the change addr. Not specifying any scope at all (nil) will use all
+// available coins and the default change scope (P2TR).
+func WithCustomChangeScope(changeScope *waddrmgr.KeyScope) TxCreateOption {
+	return func(opts *txCreateOptions) {
+		opts.changeKeyScope = changeScope
+	}
 }
 
 // CreateSimpleTx creates a new signed transaction spending unspent outputs with
@@ -1235,15 +1263,25 @@ out:
 // transaction creation through this function is serialized to prevent the
 // creation of many transactions which spend the same outputs.
 //
+// A set of functional options can be passed in to apply modifications to the
+// tx creation process such as using a custom change scope, which otherwise
+// defaults to the same as the specified coin selection scope.
+//
 // NOTE: The dryRun argument can be set true to create a tx that doesn't alter
-// the database. A tx created with this set to true SHOULD NOT be broadcasted.
-func (w *Wallet) CreateSimpleTx(keyScope *waddrmgr.KeyScope, account uint32,
-	outputs []*wire.TxOut, minconf int32, satPerKb btcutil.Amount,
-	coinSelectionStrategy CoinSelectionStrategy, dryRun bool) (
-	*txauthor.AuthoredTx, error) {
+// the database. A tx created with this set to true SHOULD NOT be broadcast.
+func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
+	account uint32, outputs []*wire.TxOut, minconf int32,
+	satPerKb btcutil.Amount, coinSelectionStrategy CoinSelectionStrategy,
+	dryRun bool, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
+
+	opts := defaultTxCreateOptions()
+	for _, optFunc := range optFuncs {
+		optFunc(opts)
+	}
 
 	req := createTxRequest{
-		keyScope:              keyScope,
+		coinSelectKeyScope:    coinSelectKeyScope,
+		changeKeyScope:        opts.changeKeyScope,
 		account:               account,
 		outputs:               outputs,
 		minconf:               minconf,
