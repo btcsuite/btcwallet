@@ -17,6 +17,8 @@ import (
 // TestFetchInputInfo checks that the wallet can gather information about an
 // output based on the address.
 func TestFetchInputInfo(t *testing.T) {
+	t.Parallel()
+
 	w, cleanup := testWallet(t)
 	defer cleanup()
 

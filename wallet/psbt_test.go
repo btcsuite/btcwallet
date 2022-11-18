@@ -7,10 +7,11 @@ package wallet
 import (
 	"bytes"
 	"encoding/hex"
+	"testing"
+
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/stretchr/testify/require"
-	"testing"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/psbt"
@@ -31,6 +32,8 @@ var (
 
 // TestFundPsbt tests that a given PSBT packet is funded correctly.
 func TestFundPsbt(t *testing.T) {
+	t.Parallel()
+
 	w, cleanup := testWallet(t)
 	defer cleanup()
 
@@ -325,6 +328,8 @@ func containsUtxo(list []wire.OutPoint, candidate wire.OutPoint) bool {
 
 // TestFinalizePsbt tests that a given PSBT packet can be finalized.
 func TestFinalizePsbt(t *testing.T) {
+	t.Parallel()
+
 	w, cleanup := testWallet(t)
 	defer cleanup()
 

@@ -16,6 +16,8 @@ import (
 // TestComputeInputScript checks that the wallet can create the full
 // witness script for a witness output.
 func TestComputeInputScript(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name              string
 		scope             waddrmgr.KeyScope
