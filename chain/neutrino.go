@@ -26,8 +26,9 @@ type NeutrinoClient struct {
 
 	chainParams *chaincfg.Params
 
-	// We currently support one rescan/notifiction goroutine per client
-	rescan *neutrino.Rescan
+	// We currently support only one rescan/notification goroutine per client.
+	rescan    rescanner
+	newRescan newRescanFunc
 
 	enqueueNotification     chan interface{}
 	dequeueNotification     chan interface{}
@@ -53,9 +54,21 @@ type NeutrinoClient struct {
 func NewNeutrinoClient(chainParams *chaincfg.Params,
 	chainService *neutrino.ChainService) *NeutrinoClient {
 
+	chainSource := &neutrino.RescanChainSource{
+		ChainService: chainService,
+	}
+
+	// Adapt the neutrino.NewRescan constructor to satisfy the
+	// newRescanFunc type by closing over the chainSource and
+	// passing in the rescan options.
+	newRescan := func(ropts ...neutrino.RescanOption) rescanner {
+		return neutrino.NewRescan(chainSource, ropts...)
+	}
+
 	return &NeutrinoClient{
 		CS:          chainService,
 		chainParams: chainParams,
+		newRescan:   newRescan,
 	}
 }
 
@@ -411,10 +424,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 	}
 
 	s.clientMtx.Lock()
-	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{
-			ChainService: s.CS,
-		},
+	newRescan := s.newRescan(
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
@@ -466,10 +476,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.lastFilteredBlockHeader = nil
 
 	// Rescan with just the specified addresses.
-	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{
-			ChainService: s.CS,
-		},
+	newRescan := s.newRescan(
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnBlockConnected:         s.onBlockConnected,
 			OnFilteredBlockConnected: s.onFilteredBlockConnected,
