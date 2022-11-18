@@ -1211,7 +1211,7 @@ out:
 			}
 
 			tx, err := w.txToOutputs(
-				txr.outputs, txr.changeKeyScope, txr.coinSelectKeyScope,
+				txr.outputs, txr.coinSelectKeyScope, txr.changeKeyScope,
 				txr.account, txr.minconf, txr.feeSatPerKB,
 				txr.coinSelectionStrategy, txr.dryRun,
 			)
