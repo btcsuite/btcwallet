@@ -26,6 +26,31 @@ var (
 	ErrBitcoindClientShuttingDown = errors.New("client is shutting down")
 )
 
+// TxConfStatus denotes the status of a transaction's lookup.
+type TxConfStatus uint8
+
+const (
+	// TxFoundMempool denotes that the transaction was found within the
+	// backend node's mempool.
+	TxFoundMempool TxConfStatus = iota
+
+	// TxFoundIndex denotes that the transaction was found within the
+	// backend node's txindex.
+	TxFoundIndex
+
+	// TxNotFoundIndex denotes that the transaction was not found within the
+	// backend node's txindex.
+	TxNotFoundIndex
+
+	// TxFoundManually denotes that the transaction was found within the
+	// chain by scanning for it manually.
+	TxFoundManually
+
+	// TxNotFoundManually denotes that the transaction was not found within
+	// the chain by scanning for it manually.
+	TxNotFoundManually
+)
+
 // BitcoindClient represents a persistent client connection to a bitcoind server
 // for information regarding the current best block chain.
 type BitcoindClient struct {
@@ -112,6 +137,123 @@ var _ Interface = (*BitcoindClient)(nil)
 // BackEnd returns the name of the driver.
 func (c *BitcoindClient) BackEnd() string {
 	return "bitcoind"
+}
+
+// String returns the string representation of the TxConfStatus.
+func (t TxConfStatus) String() string {
+	switch t {
+	case TxFoundMempool:
+		return "TxFoundMempool"
+
+	case TxFoundIndex:
+		return "TxFoundIndex"
+
+	case TxNotFoundIndex:
+		return "TxNotFoundIndex"
+
+	case TxFoundManually:
+		return "TxFoundManually"
+
+	case TxNotFoundManually:
+		return "TxNotFoundManually"
+
+	default:
+		return "unknown"
+	}
+}
+
+// FindTxInBlockRange looks for the mathcing txn over the requested block range
+// using the cb and returns the required txn details if cb isMatch()==true
+func (c *BitcoindClient) FindTxInBlockRange(startHeight, endHeight uint32,
+	isMatch func(tx *wire.MsgTx) bool) (uint32, uint32, *wire.MsgBlock,
+	TxConfStatus, error) {
+
+	// batchRequests will store the scan requests at every height to
+	// determine if the output was spent.
+	batchRequests := make(
+		map[uint32]rpcclient.FutureGetBlockHashResult, endHeight-startHeight,
+	)
+
+	for height := endHeight; height >= startHeight && height > 0; height-- {
+		batchRequests[height] = c.GetBlockHashAsync(int64(height))
+	}
+
+	// Sending the bulk request using updated batchClient.
+	err := c.SendAsyncQueue()
+	if err != nil {
+		return 0, 0, nil, TxNotFoundManually, err
+	}
+
+	blockHashes := make([]*chainhash.Hash, 0, len(batchRequests))
+	for height := endHeight; height >= startHeight && height > 0; height-- {
+		// Ensure we haven't been requested to shut down before
+		// processing the next height.
+		select {
+		case <-c.quit:
+			return 0, 0, nil, TxNotFoundManually,
+				errors.New("bitcoind client shutting down")
+		default:
+		}
+
+		// Receive the next block hash from the async queue.
+		blockHash, err := batchRequests[height].Receive()
+		if err != nil {
+			return 0, 0, nil, TxNotFoundManually,
+				fmt.Errorf("unable to retrieve hash for block "+
+					"with height %d: %v", height, err)
+		}
+
+		blockHashes = append(blockHashes, blockHash)
+	}
+	// Now we fetch blocks in interval of 15 to avoid out of memory
+	// errors in case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(batchRequests)
+	for i := 0; i < total; i += batchSize {
+		// Ensure we haven't been requested to shut down before
+		// processing next set of blocks.
+		select {
+		case <-c.quit:
+			return 0, 0, nil, TxNotFoundManually,
+				errors.New("bitcoind client shutting down")
+		default:
+		}
+
+		start := i
+		end := i + batchSize
+
+		if end > total {
+			end = total
+		}
+
+		blocks, err := c.GetBlocksBatch(blockHashes[start:end])
+
+		if err != nil {
+			return 0, 0, nil, TxNotFoundManually, err
+		}
+
+		// Note:- blockHashes are stored in reverse order
+		// currentHeight --> heightHint, so we maintain the same refs
+		// of currentHeight to return the correct BlockHeight.
+		height := int(endHeight) - start
+
+		for j := range blocks {
+			// For every transaction in the block, check which one
+			// matches our request. If we find one that does, we can
+			// dispatch its confirmation details.
+			for txIndex, tx := range blocks[j].Transactions {
+				if isMatch(tx) {
+					return uint32(height - j),
+						uint32(txIndex), blocks[j],
+						TxFoundManually, nil
+				}
+			}
+		}
+	}
+
+	// If we reach here, then we were not able to find the transaction
+	// within a block, so we avoid returning an error.
+	return 0, 0, nil, TxNotFoundManually, nil
 }
 
 // SendAsyncQueue sends a bulk request to the server and waits for the receive
@@ -1172,6 +1314,80 @@ func (c *BitcoindClient) FilterBlocksBatched(
 
 	// No addresses were found for this range.
 	return nil, nil
+}
+
+func (c *BitcoindClient) ForEachTxOfBlockRange(startHeight, endHeight uint32,
+	inspectTx func(absoluteHeight int, block *wire.MsgBlock,
+		txIndex int, tx *wire.MsgTx) bool) (TxConfStatus,
+	error) {
+
+	// batchRequests will store the scan requests at every height to
+	// determine if the output was spent.
+	batchRequests := make(
+		map[uint32]rpcclient.FutureGetBlockHashResult, endHeight-startHeight,
+	)
+
+	for height := endHeight; height >= startHeight && height > 0; height-- {
+		batchRequests[height] = c.GetBlockHashAsync(int64(height))
+	}
+
+	// Sending the bulk request using updated batchClient.
+	err := c.SendAsyncQueue()
+	if err != nil {
+		return TxNotFoundManually, err
+	}
+
+	blockHashes := make([]*chainhash.Hash, 0, len(batchRequests))
+
+	// Now we fetch blocks in interval of 15 to avoid out of memory
+	// errors in case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(blockHashes)
+
+	for i := 0; i < total; i += batchSize {
+		// Ensure we haven't been requested to shut down before
+		// processing next set of blocks.
+		select {
+		case <-c.quit:
+			return TxNotFoundManually,
+				errors.New("bitcoind client shutting down")
+		default:
+		}
+
+		start := i
+		end := i + batchSize
+
+		if end > total {
+			end = total
+		}
+
+		blocks, err := c.GetBlocksBatch(blockHashes[start:end])
+
+		if err != nil {
+			return TxNotFoundManually, err
+		}
+
+		// Note:- blockHashes are stored in reverse order
+		// currentHeight --> heightHint, so we maintain the same refs
+		// of currentHeight to return the correct BlockHeight.
+		height := int(endHeight) - start
+
+		for j := range blocks {
+			// For every transaction in the block, check which one
+			// matches our request. If we find one that does, we can
+			// dispatch its confirmation details.
+			for txIndex, tx := range blocks[j].Transactions {
+				abort := inspectTx(height, blocks[j], txIndex, tx)
+				if abort {
+					return TxFoundManually, nil
+				}
+			}
+		}
+	}
+
+	// If we reach here, then we were not able to find the transaction
+	// within a block, so we avoid returning an error.
+	return TxNotFoundManually, nil
 }
 
 // rescan performs a rescan of the chain using a bitcoind backend, from the

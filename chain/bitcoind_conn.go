@@ -76,6 +76,10 @@ type BitcoindConfig struct {
 	//
 	// NOTE: This only applies for pruned bitcoind nodes.
 	PrunedModeMaxPeers int
+
+	// BlocksBatchSize value will determine how many blocks in single batch
+	// needs to fetched from the batch client.
+	BlockBatchSize uint
 }
 
 // BitcoindConn represents a persistent client connection to a bitcoind node
