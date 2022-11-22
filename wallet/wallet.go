@@ -1279,6 +1279,12 @@ func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 		optFunc(opts)
 	}
 
+	// If the change scope isn't set, then it should be the same as the
+	// coin selection scope in order to match existing behavior.
+	if opts.changeKeyScope == nil {
+		opts.changeKeyScope = coinSelectKeyScope
+	}
+
 	req := createTxRequest{
 		coinSelectKeyScope:    coinSelectKeyScope,
 		changeKeyScope:        opts.changeKeyScope,
