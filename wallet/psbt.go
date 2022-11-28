@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -211,7 +212,20 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		packet.UnsignedTx.TxOut = append(
 			packet.UnsignedTx.TxOut, changeTxOut,
 		)
-		packet.Outputs = append(packet.Outputs, psbt.POutput{})
+
+		addr, _, _, err := w.ScriptForOutput(changeTxOut)
+		if err != nil {
+			return 0, fmt.Errorf("error querying wallet for "+
+				"change addr: %w", err)
+		}
+
+		changeOutputInfo, err := createOutputInfo(changeTxOut, addr)
+		if err != nil {
+			return 0, fmt.Errorf("error adding output info to "+
+				"change output: %w", err)
+		}
+
+		packet.Outputs = append(packet.Outputs, *changeOutputInfo)
 	}
 
 	// Now that we have the final PSBT ready, we can sort it according to
@@ -292,6 +306,53 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 		MasterKeyFingerprint: derivationInfo.MasterKeyFingerprint,
 		Bip32Path:            derivationInfo.Bip32Path,
 	}}
+}
+
+// createOutputInfo creates the BIP32 derivation info for an output from our
+// internal wallet.
+func createOutputInfo(txOut *wire.TxOut,
+	addr waddrmgr.ManagedPubKeyAddress) (*psbt.POutput, error) {
+
+	// We don't know the derivation path for imported keys. Those shouldn't
+	// be selected as change outputs in the first place, but just to make
+	// sure we don't run into an issue, we return early for imported keys.
+	keyScope, derivationPath, isKnown := addr.DerivationInfo()
+	if !isKnown {
+		return nil, fmt.Errorf("error adding output info to PSBT, " +
+			"change addr is an imported addr with unknown " +
+			"derivation path")
+	}
+
+	// Include the derivation path for this output.
+	derivation := &psbt.Bip32Derivation{
+		PubKey:               addr.PubKey().SerializeCompressed(),
+		MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
+		Bip32Path: []uint32{
+			keyScope.Purpose + hdkeychain.HardenedKeyStart,
+			keyScope.Coin + hdkeychain.HardenedKeyStart,
+			derivationPath.Account,
+			derivationPath.Branch,
+			derivationPath.Index,
+		},
+	}
+	out := &psbt.POutput{
+		Bip32Derivation: []*psbt.Bip32Derivation{
+			derivation,
+		},
+	}
+
+	// Include the Taproot derivation path as well if this is a P2TR output.
+	if txscript.IsPayToTaproot(txOut.PkScript) {
+		schnorrPubKey := derivation.PubKey[1:]
+		out.TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{
+			XOnlyPubKey:          schnorrPubKey,
+			MasterKeyFingerprint: derivation.MasterKeyFingerprint,
+			Bip32Path:            derivation.Bip32Path,
+		}}
+		out.TaprootInternalKey = schnorrPubKey
+	}
+
+	return out, nil
 }
 
 // FinalizePsbt expects a partial transaction with all inputs and outputs fully
