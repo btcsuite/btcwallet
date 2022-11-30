@@ -272,7 +272,9 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 	return nil
 }
 
-func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta) error {
+func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
+	block *wtxmgr.BlockMeta) error {
+
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
@@ -304,28 +306,46 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord, 
 		}
 		for _, addr := range addrs {
 			ma, err := w.Manager.Address(addrmgrNs, addr)
-			if err == nil {
-				// TODO: Credits should be added with the
-				// account they belong to, so wtxmgr is able to
-				// track per-account balances.
-				err = w.TxStore.AddCredit(txmgrNs, rec, block, uint32(i),
-					ma.Internal())
-				if err != nil {
-					return err
-				}
-				err = w.Manager.MarkUsed(addrmgrNs, addr)
-				if err != nil {
-					return err
-				}
-				log.Debugf("Marked address %v used", addr)
+
+			switch {
+			// Missing addresses are skipped.
+			case waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound):
+				continue
+
+			// Other errors should be propagated.
+			case err != nil:
+				return err
+			}
+
+			// Prevent addresses from non-default scopes to be
+			// detected here. We don't watch funds sent to
+			// non-default scopes in other places either, so
+			// detecting them here would mean we'd also not properly
+			// detect them as spent later.
+			scopedManager, _, err := w.Manager.AddrAccount(
+				addrmgrNs, addr,
+			)
+			if err != nil {
+				return err
+			}
+			if !waddrmgr.IsDefaultScope(scopedManager.Scope()) {
 				continue
 			}
 
-			// Missing addresses are skipped.  Other errors should
-			// be propagated.
-			if !waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			// TODO: Credits should be added with the
+			// account they belong to, so wtxmgr is able to
+			// track per-account balances.
+			err = w.TxStore.AddCredit(
+				txmgrNs, rec, block, uint32(i), ma.Internal(),
+			)
+			if err != nil {
 				return err
 			}
+			err = w.Manager.MarkUsed(addrmgrNs, addr)
+			if err != nil {
+				return err
+			}
+			log.Debugf("Marked address %v used", addr)
 		}
 	}
 
