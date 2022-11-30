@@ -246,6 +246,18 @@ var (
 	}
 )
 
+// IsDefaultScope return true if the given scope belongs to the list of default
+// scopes.
+func IsDefaultScope(scope KeyScope) bool {
+	for _, defaultScope := range DefaultKeyScopes {
+		if defaultScope == scope {
+			return true
+		}
+	}
+
+	return false
+}
+
 // ScopedKeyManager is a sub key manager under the main root key manager. The
 // root key manager will handle the root HD key (m/), while each sub scoped key
 // manager will handle the cointype key for a particular key scope
@@ -596,13 +608,7 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 		// the account public key consistent with what the caller
 		// provided. Note that his is only done for the default key
 		// scopes, as we only know the HD versions for those.
-		isDefaultKeyScope := false
-		for _, scope := range DefaultKeyScopes {
-			if s.scope == scope {
-				isDefaultKeyScope = true
-				break
-			}
-		}
+		isDefaultKeyScope := IsDefaultScope(s.scope)
 		if acctInfo.acctType == accountDefault && isDefaultKeyScope {
 			props.AccountPubKey, err = s.cloneKeyWithVersion(
 				acctInfo.acctKeyPub,
