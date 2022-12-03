@@ -293,6 +293,44 @@ func TestFundPsbt(t *testing.T) {
 				t, tc.expectedChangeBeforeFee,
 				txOuts[changeIndex].Value+int64(expectedFee),
 			)
+
+			changeTxOut := txOuts[changeIndex]
+			changeOutput := packet.Outputs[changeIndex]
+
+			require.NotEmpty(t, changeOutput.Bip32Derivation)
+			b32d := changeOutput.Bip32Derivation[0]
+			require.Len(t, b32d.Bip32Path, 5, "derivation path len")
+			require.Len(t, b32d.PubKey, 33, "pubkey len")
+
+			// The third item should be the branch and should belong
+			// to a change output.
+			require.EqualValues(t, 1, b32d.Bip32Path[3])
+
+			if txscript.IsPayToTaproot(changeTxOut.PkScript) {
+				require.NotEmpty(
+					t, changeOutput.TaprootInternalKey,
+				)
+				require.Len(
+					t, changeOutput.TaprootInternalKey, 32,
+					"internal key len",
+				)
+				require.NotEmpty(
+					t, changeOutput.TaprootBip32Derivation,
+				)
+
+				trb32d := changeOutput.TaprootBip32Derivation[0]
+				require.Equal(
+					t, b32d.Bip32Path, trb32d.Bip32Path,
+				)
+				require.Len(
+					t, trb32d.XOnlyPubKey, 32,
+					"schnorr pubkey len",
+				)
+				require.Equal(
+					t, changeOutput.TaprootInternalKey,
+					trb32d.XOnlyPubKey,
+				)
+			}
 		})
 	}
 }
