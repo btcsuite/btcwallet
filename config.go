@@ -37,31 +37,33 @@ const (
 )
 
 var (
-	btcdDefaultCAFile  = filepath.Join(btcutil.AppDataDir("btcd", false), "rpc.cert")
-	defaultAppDataDir  = btcutil.AppDataDir("btcwallet", false)
-	defaultConfigFile  = filepath.Join(defaultAppDataDir, defaultConfigFilename)
-	defaultRPCKeyFile  = filepath.Join(defaultAppDataDir, "rpc.key")
-	defaultRPCCertFile = filepath.Join(defaultAppDataDir, "rpc.cert")
-	defaultLogDir      = filepath.Join(defaultAppDataDir, defaultLogDirname)
+	btcdDefaultCAFile       = filepath.Join(btcutil.AppDataDir("btcd", false), "rpc.cert")
+	defaultAppDataDir       = btcutil.AppDataDir("btcwallet", false)
+	defaultConfigFile       = filepath.Join(defaultAppDataDir, defaultConfigFilename)
+	defaultRPCKeyFile       = filepath.Join(defaultAppDataDir, "rpc.key")
+	defaultRPCCertFile      = filepath.Join(defaultAppDataDir, "rpc.cert")
+	defaultLogDir           = filepath.Join(defaultAppDataDir, defaultLogDirname)
+	defaultSyncLoopInterval = time.Minute
 )
 
 type config struct {
 	// General application behavior
-	ConfigFile      *cfgutil.ExplicitString `short:"C" long:"configfile" description:"Path to configuration file"`
-	ShowVersion     bool                    `short:"V" long:"version" description:"Display version information and exit"`
-	Create          bool                    `long:"create" description:"Create the wallet if it does not exist"`
-	CreateTemp      bool                    `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
-	AppDataDir      *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
-	TestNet3        bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
-	SimNet          bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
-	SigNet          bool                    `long:"signet" description:"Use the signet test network (default mainnet)"`
-	SigNetChallenge string                  `long:"signetchallenge" description:"Connect to a custom signet network defined by this challenge instead of using the global default signet test network -- Can be specified multiple times"`
-	SigNetSeedNode  []string                `long:"signetseednode" description:"Specify a seed node for the signet network instead of using the global default signet network seed nodes"`
-	NoInitialLoad   bool                    `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
-	DebugLevel      string                  `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
-	LogDir          string                  `long:"logdir" description:"Directory to log output."`
-	Profile         string                  `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
-	DBTimeout       time.Duration           `long:"dbtimeout" description:"The timeout value to use when opening the wallet database."`
+	ConfigFile       *cfgutil.ExplicitString `short:"C" long:"configfile" description:"Path to configuration file"`
+	ShowVersion      bool                    `short:"V" long:"version" description:"Display version information and exit"`
+	Create           bool                    `long:"create" description:"Create the wallet if it does not exist"`
+	CreateTemp       bool                    `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
+	AppDataDir       *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
+	TestNet3         bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
+	SimNet           bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
+	SigNet           bool                    `long:"signet" description:"Use the signet test network (default mainnet)"`
+	SigNetChallenge  string                  `long:"signetchallenge" description:"Connect to a custom signet network defined by this challenge instead of using the global default signet test network -- Can be specified multiple times"`
+	SigNetSeedNode   []string                `long:"signetseednode" description:"Specify a seed node for the signet network instead of using the global default signet network seed nodes"`
+	NoInitialLoad    bool                    `long:"noinitialload" description:"Defer wallet creation/opening on startup and enable loading wallets over RPC"`
+	DebugLevel       string                  `short:"d" long:"debuglevel" description:"Logging level {trace, debug, info, warn, error, critical}"`
+	LogDir           string                  `long:"logdir" description:"Directory to log output."`
+	Profile          string                  `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
+	DBTimeout        time.Duration           `long:"dbtimeout" description:"The timeout value to use when opening the wallet database."`
+	SyncLoopInterval time.Duration           `long:"syncloopinterval" description:"Specify the amount of time to wait between errors during initial sync. Valid time units are {s, m, h}. Default is one minute."`
 
 	// Wallet options
 	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
@@ -278,6 +280,7 @@ func loadConfig() (*config, []string, error) {
 		BanDuration:            neutrino.BanDuration,
 		BanThreshold:           neutrino.BanThreshold,
 		DBTimeout:              wallet.DefaultDBTimeout,
+		SyncLoopInterval:       defaultSyncLoopInterval,
 	}
 
 	// Pre-parse the command line options to see if an alternative config

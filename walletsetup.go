@@ -101,7 +101,7 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) {
 func createWallet(cfg *config) error {
 	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 	loader := wallet.NewLoader(
-		activeNet.Params, dbDir, true, cfg.DBTimeout, 250,
+		activeNet.Params, dbDir, true, cfg.DBTimeout, cfg.SyncLoopInterval, 250,
 	)
 
 	// When there is a legacy keystore, open it now to ensure any errors

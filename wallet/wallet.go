@@ -145,6 +145,10 @@ type Wallet struct {
 	started bool
 	quit    chan struct{}
 	quitMu  sync.Mutex
+
+	// syncLoopInterval is the amount of time to wait between errors during
+	// initial sync
+	syncLoopInterval time.Duration
 }
 
 // Start starts the goroutines necessary to manage a wallet.
@@ -3949,7 +3953,8 @@ func create(db walletdb.DB, pubPass, privPass []byte,
 
 // Open loads an already-created wallet from the passed database and namespaces.
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
-	params *chaincfg.Params, recoveryWindow uint32) (*Wallet, error) {
+	params *chaincfg.Params, recoveryWindow uint32,
+	syncLoopInterval time.Duration) (*Wallet, error) {
 
 	var (
 		addrMgr *waddrmgr.Manager
@@ -4015,6 +4020,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		changePassphrases:   make(chan changePassphrasesRequest),
 		chainParams:         params,
 		quit:                make(chan struct{}),
+		syncLoopInterval:    syncLoopInterval,
 	}
 
 	w.NtfnServer = newNotificationServer(w)

@@ -50,34 +50,36 @@ var (
 //
 // Loader is safe for concurrent access.
 type Loader struct {
-	callbacks      []func(*Wallet)
-	chainParams    *chaincfg.Params
-	dbDirPath      string
-	noFreelistSync bool
-	timeout        time.Duration
-	recoveryWindow uint32
-	wallet         *Wallet
-	localDB        bool
-	walletExists   func() (bool, error)
-	walletCreated  func(db walletdb.ReadWriteTx) error
-	db             walletdb.DB
-	mu             sync.Mutex
+	callbacks        []func(*Wallet)
+	chainParams      *chaincfg.Params
+	dbDirPath        string
+	noFreelistSync   bool
+	timeout          time.Duration
+	recoveryWindow   uint32
+	wallet           *Wallet
+	localDB          bool
+	walletExists     func() (bool, error)
+	walletCreated    func(db walletdb.ReadWriteTx) error
+	db               walletdb.DB
+	mu               sync.Mutex
+	syncLoopInterval time.Duration
 }
 
 // NewLoader constructs a Loader with an optional recovery window. If the
 // recovery window is non-zero, the wallet will attempt to recovery addresses
 // starting from the last SyncedTo height.
 func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
-	noFreelistSync bool, timeout time.Duration,
+	noFreelistSync bool, timeout, syncLoopInterval time.Duration,
 	recoveryWindow uint32) *Loader {
 
 	return &Loader{
-		chainParams:    chainParams,
-		dbDirPath:      dbDirPath,
-		noFreelistSync: noFreelistSync,
-		timeout:        timeout,
-		recoveryWindow: recoveryWindow,
-		localDB:        true,
+		chainParams:      chainParams,
+		dbDirPath:        dbDirPath,
+		noFreelistSync:   noFreelistSync,
+		timeout:          timeout,
+		recoveryWindow:   recoveryWindow,
+		localDB:          true,
+		syncLoopInterval: syncLoopInterval,
 	}
 }
 
@@ -86,7 +88,8 @@ func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
 // to store the wallet. Given that the external DB may be shared an additional
 // function is also passed which will override Loader.WalletExists().
 func NewLoaderWithDB(chainParams *chaincfg.Params, recoveryWindow uint32,
-	db walletdb.DB, walletExists func() (bool, error)) (*Loader, error) {
+	db walletdb.DB, syncLoopInterval time.Duration,
+	walletExists func() (bool, error)) (*Loader, error) {
 
 	if db == nil {
 		return nil, fmt.Errorf("no DB provided")
@@ -97,11 +100,12 @@ func NewLoaderWithDB(chainParams *chaincfg.Params, recoveryWindow uint32,
 	}
 
 	return &Loader{
-		chainParams:    chainParams,
-		recoveryWindow: recoveryWindow,
-		localDB:        false,
-		walletExists:   walletExists,
-		db:             db,
+		chainParams:      chainParams,
+		recoveryWindow:   recoveryWindow,
+		localDB:          false,
+		walletExists:     walletExists,
+		db:               db,
+		syncLoopInterval: syncLoopInterval,
 	}, nil
 }
 
@@ -251,7 +255,8 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
 	}
 
 	// Open the newly-created wallet.
-	w, err := Open(l.db, pubPassphrase, nil, l.chainParams, l.recoveryWindow)
+	w, err := Open(l.db, pubPassphrase, nil, l.chainParams,
+		l.recoveryWindow, l.syncLoopInterval)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +314,8 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 			ObtainPrivatePass: noConsole,
 		}
 	}
-	w, err := Open(l.db, pubPassphrase, cbs, l.chainParams, l.recoveryWindow)
+	w, err := Open(l.db, pubPassphrase, cbs, l.chainParams,
+		l.recoveryWindow, l.syncLoopInterval)
 	if err != nil {
 		// If opening the wallet fails (e.g. because of wrong
 		// passphrase), we must close the backing database to

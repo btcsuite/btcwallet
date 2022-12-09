@@ -26,7 +26,7 @@ func TestCreateWatchingOnly(t *testing.T) {
 	pubPass := []byte("hello")
 
 	loader := NewLoader(
-		&chaincfg.TestNet3Params, dir, true, defaultDBTimeout, 250,
+		&chaincfg.TestNet3Params, dir, true, defaultDBTimeout, time.Second, 250,
 	)
 	_, err = loader.CreateNewWatchingOnlyWallet(pubPass, time.Now())
 	if err != nil {
