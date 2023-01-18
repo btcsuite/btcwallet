@@ -76,6 +76,7 @@ func TestFundPsbt(t *testing.T) {
 		name                    string
 		packet                  *psbt.Packet
 		feeRateSatPerKB         btcutil.Amount
+		changeKeyScope          *waddrmgr.KeyScope
 		expectedErr             string
 		validatePackage         bool
 		expectedChangeBeforeFee int64
@@ -217,6 +218,41 @@ func TestFundPsbt(t *testing.T) {
 				"index after sorting",
 			)
 		},
+	}, {
+		name: "one input and a custom change scope: BIP0084",
+		packet: &psbt.Packet{
+			UnsignedTx: &wire.MsgTx{
+				TxIn: []*wire.TxIn{{
+					PreviousOutPoint: utxo1,
+				}},
+			},
+			Inputs: []psbt.PInput{{}},
+		},
+		feeRateSatPerKB:         20000,
+		validatePackage:         true,
+		changeKeyScope:          &waddrmgr.KeyScopeBIP0084,
+		expectedInputs:          []wire.OutPoint{utxo1},
+		expectedChangeBeforeFee: utxo1Amount,
+	}, {
+		name: "no inputs and a custom change scope: BIP0084",
+		packet: &psbt.Packet{
+			UnsignedTx: &wire.MsgTx{
+				TxOut: []*wire.TxOut{{
+					PkScript: testScriptP2WSH,
+					Value:    100000,
+				}, {
+					PkScript: testScriptP2WKH,
+					Value:    50000,
+				}},
+			},
+			Outputs: []psbt.POutput{{}, {}},
+		},
+		feeRateSatPerKB:         2000, // 2 sat/byte
+		expectedErr:             "",
+		validatePackage:         true,
+		changeKeyScope:          &waddrmgr.KeyScopeBIP0084,
+		expectedChangeBeforeFee: utxo1Amount - 150000,
+		expectedInputs:          []wire.OutPoint{utxo1},
 	}}
 
 	calcFee := func(feeRateSatPerKB btcutil.Amount,
@@ -244,8 +280,9 @@ func TestFundPsbt(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			changeIndex, err := w.FundPsbt(
-				tc.packet, nil, 1, 0, tc.feeRateSatPerKB,
-				CoinSelectionLargest,
+				tc.packet, nil, 1, 0,
+				tc.feeRateSatPerKB, CoinSelectionLargest,
+				WithCustomChangeScope(tc.changeKeyScope),
 			)
 
 			// In any case, unlock the UTXO before continuing, we
@@ -306,6 +343,10 @@ func TestFundPsbt(t *testing.T) {
 			// to a change output.
 			require.EqualValues(t, 1, b32d.Bip32Path[3])
 
+			assertChangeOutputScope(
+				t, changeTxOut.PkScript, tc.changeKeyScope,
+			)
+
 			if txscript.IsPayToTaproot(changeTxOut.PkScript) {
 				require.NotEmpty(
 					t, changeOutput.TaprootInternalKey,
@@ -351,6 +392,28 @@ func assertTxInputs(t *testing.T, packet *psbt.Packet,
 
 		require.Empty(t, txIn.SignatureScript)
 		require.Empty(t, txIn.Witness)
+	}
+}
+
+// assertChangeOutputScope checks if the pkScript has the right type.
+func assertChangeOutputScope(t *testing.T, pkScript []byte,
+	changeScope *waddrmgr.KeyScope) {
+
+	// By default (changeScope == nil), the script should
+	// be a pay-to-taproot one.
+	switch changeScope {
+	case nil, &waddrmgr.KeyScopeBIP0086:
+		require.True(t, txscript.IsPayToTaproot(pkScript))
+
+	case &waddrmgr.KeyScopeBIP0049Plus, &waddrmgr.KeyScopeBIP0084:
+		require.True(t, txscript.IsPayToWitnessPubKeyHash(pkScript))
+
+	case &waddrmgr.KeyScopeBIP0044:
+		require.True(t, txscript.IsPayToPubKeyHash(pkScript))
+
+	default:
+		require.Fail(t, "assertChangeOutputScope error",
+			"change scope: %s", changeScope.String())
 	}
 }
 
