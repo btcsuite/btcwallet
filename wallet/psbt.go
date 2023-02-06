@@ -23,8 +23,10 @@ import (
 // FundPsbt creates a fully populated PSBT packet that contains enough inputs to
 // fund the outputs specified in the passed in packet with the specified fee
 // rate. If there is change left, a change output from the wallet is added and
-// the index of the change output is returned. Otherwise no additional output
-// is created and the index -1 is returned.
+// the index of the change output is returned. If no custom change scope is
+// specified, we will use the coin selection scope (if not nil) or the BIP0086
+// scope by default. Otherwise, no additional output is created and the
+// index -1 is returned.
 //
 // NOTE: If the packet doesn't contain any inputs, coin selection is performed
 // automatically, only selecting inputs from the account based on the given key
@@ -43,7 +45,8 @@ import (
 // responsibility to lock the inputs before handing the partial transaction out.
 func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	minConfs int32, account uint32, feeSatPerKB btcutil.Amount,
-	coinSelectionStrategy CoinSelectionStrategy) (int32, error) {
+	coinSelectionStrategy CoinSelectionStrategy,
+	optFuncs ...TxCreateOption) (int32, error) {
 
 	// Make sure the packet is well formed. We only require there to be at
 	// least one input or output.
@@ -131,6 +134,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		tx, err = w.CreateSimpleTx(
 			keyScope, account, packet.UnsignedTx.TxOut, minConfs,
 			feeSatPerKB, coinSelectionStrategy, false,
+			optFuncs...,
 		)
 		if err != nil {
 			return 0, fmt.Errorf("error creating funding TX: %v",
@@ -176,11 +180,21 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		}
 		inputSource := constantInputSource(credits)
 
+		// Build the TxCreateOption to retrieve the change scope.
+		opts := defaultTxCreateOptions()
+		for _, optFunc := range optFuncs {
+			optFunc(opts)
+		}
+
+		if opts.changeKeyScope == nil {
+			opts.changeKeyScope = keyScope
+		}
+
 		// We also need a change source which needs to be able to insert
 		// a new change address into the database.
 		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 			_, changeSource, err := w.addrMgrWithChangeSource(
-				dbtx, keyScope, account,
+				dbtx, opts.changeKeyScope, account,
 			)
 			if err != nil {
 				return err
