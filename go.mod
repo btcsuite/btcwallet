@@ -31,4 +31,4 @@ require (
 	google.golang.org/grpc v1.18.0
 )
 
-go 1.16
+go 1.18

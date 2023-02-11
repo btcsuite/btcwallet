@@ -18,7 +18,7 @@ env:
   GOPATH: /home/runner/work/go
   GO111MODULE: on
 
-  GO_VERSION: '^1.17.0'
+  GO_VERSION: 1.19.x
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
 
