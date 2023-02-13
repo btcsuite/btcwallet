@@ -297,7 +297,7 @@ type ScopedKeyManager struct {
 	// privKeyCache stores the set of private keys that have been marked as
 	// items to be cached to allow us to avoid the database and EC
 	// operations each time a key need to be obtained.
-	privKeyCache *lru.Cache
+	privKeyCache *lru.Cache[DerivationPath, *cachedKey]
 
 	mtx sync.RWMutex
 }
@@ -670,7 +670,7 @@ func (s *ScopedKeyManager) DeriveFromKeyPathCache(
 	// is here, then we don't need to do anything further.
 	privKeyVal, err := s.privKeyCache.Get(kp)
 	if err == nil {
-		privKey := privKeyVal.(*cachedKey).key
+		privKey := privKeyVal.key
 		return &privKey, nil
 	}
 
