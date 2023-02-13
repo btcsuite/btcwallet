@@ -13,7 +13,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
-	"github.com/btcsuite/btcwallet/wallet/txsizes"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // SumOutputValues sums up the list of TxOuts and returns an Amount.
@@ -43,9 +43,12 @@ type InputSourceError interface {
 }
 
 // Default implementation of InputSourceError.
-type insufficientFundsError struct{}
+type insufficientFundsError struct {
+}
 
-func (insufficientFundsError) InputSourceError() {}
+func (insufficientFundsError) InputSourceError() {
+
+}
 func (insufficientFundsError) Error() string {
 	return "insufficient funds available to construct transaction"
 }
@@ -70,102 +73,139 @@ type ChangeSource struct {
 	ScriptSize int
 }
 
-// NewUnsignedTransaction creates an unsigned transaction paying to one or more
+// NewUnsignedTransaction creates an unsigned transaction paying to non or more
 // non-change outputs.  An appropriate transaction fee is included based on the
 // transaction size.
 //
-// Transaction inputs are chosen from repeated calls to fetchInputs with
-// increasing targets amounts.
+// Transaction inputs are added depending on the input selection strategy.
+// In general inputs are selected one at a time and evaluated whether
+// the current inputs suffice the funding amount plus fees.
+// When constant input selection is required all inputs are added in a batch
+// to be more efficient.
 //
-// If any remaining output value can be returned to the wallet via a change
-// output without violating mempool dust rules, a P2WPKH change output is
-// appended to the transaction outputs.  Since the change output may not be
-// necessary, fetchChange is called zero or one times to generate this script.
-// This function must return a P2WPKH script or smaller, otherwise fee estimation
-// will be incorrect.
+// When the input overshoots the amount of outputs an appropriate change is
+// constructed. This change output however is not considered when its below
+// the dust limit of the bitcoin network.
 //
 // If successful, the transaction, total input value spent, and all previous
-// output scripts are returned.  If the input source was unable to provide
-// enough input value to pay for every output any any necessary fees, an
+// output scripts are returned. If the inputs were unable to provide
+// enough value to pay for every output and any necessary fees, an
 // InputSourceError is returned.
 //
-// BUGS: Fee estimation may be off when redeeming non-compressed P2PKH outputs.
+// BUGS: Fee estimation is off when redeeming inputs from a uncompressed P2PKH.
+// Because one cannot evaluate whether an uncompressed or compressed public
+// key was used in the P2PKH output before knowing the ScriptSig.
+// The output of an P2PKH is the HASH160 of the public key. This public key
+// is only provided when signing the transaction (public key is part of the
+// ScriptSig) and can be compressed or uncompressed.
+// We use the compressed format to estimate P2PKH inputs because uncompressed
+// public keys are very rare which would lead to overpaying fees most of the
+// time.
 func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
-	fetchInputs InputSource, changeSource *ChangeSource) (*AuthoredTx, error) {
+	inputs []wtxmgr.Credit, selectionStrategy InputSelectionStrategy,
+	changeSource *ChangeSource) (*AuthoredTx, error) {
+
+	changeScript, err := changeSource.NewScript()
+	if err != nil {
+		return nil, err
+	}
 
 	targetAmount := SumOutputValues(outputs)
-	estimatedSize := txsizes.EstimateVirtualSize(
-		0, 0, 1, 0, outputs, changeSource.ScriptSize,
-	)
-	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize)
 
-	for {
-		inputAmount, inputs, inputValues, scripts, err := fetchInputs(targetAmount + targetFee)
-		if err != nil {
-			return nil, err
-		}
-		if inputAmount < targetAmount+targetFee {
-			return nil, insufficientFundsError{}
-		}
-
-		// We count the types of inputs, which we'll use to estimate
-		// the vsize of the transaction.
-		var nested, p2wpkh, p2tr, p2pkh int
-		for _, pkScript := range scripts {
-			switch {
-			// If this is a p2sh output, we assume this is a
-			// nested P2WKH.
-			case txscript.IsPayToScriptHash(pkScript):
-				nested++
-			case txscript.IsPayToWitnessPubKeyHash(pkScript):
-				p2wpkh++
-			case txscript.IsPayToTaproot(pkScript):
-				p2tr++
-			default:
-				p2pkh++
-			}
-		}
-
-		maxSignedSize := txsizes.EstimateVirtualSize(
-			p2pkh, p2tr, p2wpkh, nested, outputs, changeSource.ScriptSize,
-		)
-		maxRequiredFee := txrules.FeeForSerializeSize(feeRatePerKb, maxSignedSize)
-		remainingAmount := inputAmount - targetAmount
-		if remainingAmount < maxRequiredFee {
-			targetFee = maxRequiredFee
-			continue
-		}
-
-		unsignedTransaction := &wire.MsgTx{
-			Version:  wire.TxVersion,
-			TxIn:     inputs,
-			TxOut:    outputs,
-			LockTime: 0,
-		}
-
-		changeIndex := -1
-		changeAmount := inputAmount - targetAmount - maxRequiredFee
-		changeScript, err := changeSource.NewScript()
-		if err != nil {
-			return nil, err
-		}
-		change := wire.NewTxOut(int64(changeAmount), changeScript)
-		if changeAmount != 0 && !txrules.IsDustOutput(change,
-			txrules.DefaultRelayFeePerKb) {
-
-			l := len(outputs)
-			unsignedTransaction.TxOut = append(outputs[:l:l], change)
-			changeIndex = l
-		}
-
-		return &AuthoredTx{
-			Tx:              unsignedTransaction,
-			PrevScripts:     scripts,
-			PrevInputValues: inputValues,
-			TotalInput:      inputAmount,
-			ChangeIndex:     changeIndex,
-		}, nil
+	inputState := inputState{
+		feeRatePerKb:      feeRatePerKb,
+		targetAmount:      targetAmount,
+		outputs:           outputs,
+		selectionStrategy: selectionStrategy,
+		changeOutpoint: wire.TxOut{
+			PkScript: changeScript,
+		},
 	}
+
+	switch selectionStrategy {
+	case PositiveYieldingSelection, RandomSelection:
+		// We look through all our inputs and add an input until
+		// the amount is enough to pay the target amount and the
+		// transaction fees.
+		for _, input := range inputs {
+			if !inputState.enoughInput() {
+				// In case adding a new input fails in the
+				// positive yielding strategy we fail quickly
+				// because all follow up inputs will be negative
+				// yielding too.
+				if !inputState.add(input) &&
+					selectionStrategy == PositiveYieldingSelection {
+
+					return nil, txSelectionError{
+						targetAmount: inputState.targetAmount,
+						txFee:        inputState.txFee,
+						availableAmt: inputState.inputTotal,
+					}
+				}
+				continue
+			}
+			// We stop considering inputs when the input amount
+			// is enough to fund the transaction.
+			break
+		}
+
+	case ConstantSelection:
+		// In case of a constant selection all inputs are added
+		// although they might be negative yielding so we do not
+		// check for the return value.
+		inputState.add(inputs...)
+	}
+
+	// This check is needed to make sure our input amount suffice
+	// after considering all eligable inputs.
+	if !inputState.enoughInput() {
+		return nil, txSelectionError{
+			targetAmount: inputState.targetAmount,
+			txFee:        inputState.txFee,
+			availableAmt: inputState.inputTotal,
+		}
+	}
+
+	// We need the inputs in the right format.
+	numberInputs := len(inputState.inputs)
+	txIn := make([]*wire.TxIn, 0, numberInputs)
+	inputValues := make([]btcutil.Amount, 0, numberInputs)
+	scripts := make([][]byte, 0, numberInputs)
+
+	for _, input := range inputState.inputs {
+		txIn = append(txIn, wire.NewTxIn(&input.OutPoint, nil, nil))
+		inputValues = append(inputValues, input.Amount)
+		scripts = append(scripts, input.PkScript)
+	}
+
+	unsignedTransaction := &wire.MsgTx{
+		Version:  wire.TxVersion,
+		TxIn:     txIn,
+		TxOut:    outputs,
+		LockTime: 0,
+	}
+
+	// Default is no change output. We check if changeOutpoint in the
+	// input state is above dust, and add the change output to the
+	// transaction.
+	changeIndex := -1
+	if !txrules.IsDustOutput(&inputState.changeOutpoint,
+		txrules.DefaultRelayFeePerKb) {
+
+		l := len(outputs)
+		unsignedTransaction.TxOut = append(outputs[:l:l],
+			&inputState.changeOutpoint)
+		changeIndex = l
+	}
+
+	return &AuthoredTx{
+		Tx:              unsignedTransaction,
+		PrevScripts:     scripts,
+		PrevInputValues: inputValues,
+		TotalInput:      inputState.inputTotal,
+		ChangeIndex:     changeIndex,
+	}, nil
+
 }
 
 // RandomizeOutputPosition randomizes the position of a transaction's output by
