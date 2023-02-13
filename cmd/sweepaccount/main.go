@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/jessevdk/go-flags"
 )
 
@@ -133,16 +134,11 @@ type noInputValue struct {
 
 func (noInputValue) Error() string { return "no input value" }
 
-// makeInputSource creates an InputSource that creates inputs for every unspent
-// output with non-zero output values.  The target amount is ignored since every
-// output is consumed.  The InputSource does not return any previous output
-// scripts as they are not needed for creating the unsinged transaction and are
-// looked up again by the wallet during the call to signrawtransaction.
-func makeInputSource(outputs []btcjson.ListUnspentResult) txauthor.InputSource {
+// fetchInputs fetches every unspent output with non-zero output values.
+func fetchInputs(outputs []btcjson.ListUnspentResult) ([]wtxmgr.Credit, error) {
 	var (
 		totalInputValue btcutil.Amount
-		inputs          = make([]*wire.TxIn, 0, len(outputs))
-		inputValues     = make([]btcutil.Amount, 0, len(outputs))
+		inputs          = make([]wtxmgr.Credit, 0, len(outputs))
 		sourceErr       error
 	)
 	for _, output := range outputs {
@@ -174,17 +170,18 @@ func makeInputSource(outputs []btcjson.ListUnspentResult) txauthor.InputSource {
 			break
 		}
 
-		inputs = append(inputs, wire.NewTxIn(&previousOutPoint, nil, nil))
-		inputValues = append(inputValues, outputAmount)
+		inputs = append(inputs, wtxmgr.Credit{
+			OutPoint: previousOutPoint,
+			Amount:   outputAmount,
+		})
 	}
 
 	if sourceErr == nil && totalInputValue == 0 {
 		sourceErr = noInputValue{}
 	}
 
-	return func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn, []btcutil.Amount, [][]byte, error) {
-		return totalInputValue, inputs, inputValues, nil, sourceErr
-	}
+	return inputs, sourceErr
+
 }
 
 // makeDestinationScriptSource creates a ChangeSource which is used to receive
@@ -277,10 +274,13 @@ func sweep() error {
 		numErrors++
 	}
 	for _, previousOutputs := range sourceOutputs {
-		inputSource := makeInputSource(previousOutputs)
+		inputs, err := fetchInputs(previousOutputs)
+		if err != nil {
+			return err
+		}
 		destinationSource := makeDestinationScriptSource(rpcClient, opts.DestinationAccount)
 		tx, err := txauthor.NewUnsignedTransaction(nil, opts.FeeRate.Amount,
-			inputSource, destinationSource)
+			inputs, txauthor.ConstantSelection, destinationSource)
 		if err != nil {
 			if err != (noInputValue{}) {
 				reportError("Failed to create unsigned transaction: %v", err)
