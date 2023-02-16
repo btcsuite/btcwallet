@@ -29,30 +29,6 @@ func (s byAmount) Len() int           { return len(s) }
 func (s byAmount) Less(i, j int) bool { return s[i].Amount < s[j].Amount }
 func (s byAmount) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 
-func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
-	// Current inputs and their total value.  These are closed over by the
-	// returned input source and reused across multiple calls.
-	currentTotal := btcutil.Amount(0)
-	currentInputs := make([]*wire.TxIn, 0, len(eligible))
-	currentScripts := make([][]byte, 0, len(eligible))
-	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
-
-	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
-		[]btcutil.Amount, [][]byte, error) {
-
-		for currentTotal < target && len(eligible) != 0 {
-			nextCredit := &eligible[0]
-			eligible = eligible[1:]
-			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil, nil)
-			currentTotal += nextCredit.Amount
-			currentInputs = append(currentInputs, nextInput)
-			currentScripts = append(currentScripts, nextCredit.PkScript)
-			currentInputValues = append(currentInputValues, nextCredit.Amount)
-		}
-		return currentTotal, currentInputs, currentInputValues, currentScripts, nil
-	}
-}
-
 // secretSource is an implementation of txauthor.SecretSource for the wallet's
 // address manager.
 type secretSource struct {
@@ -139,13 +115,14 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 			return err
 		}
 
-		var inputSource txauthor.InputSource
+		// We need to define the Selection Strategy
+		var inputSelectionStrategy txauthor.InputSelectionStrategy
 
 		switch coinSelectionStrategy {
 		// Pick largest outputs first.
 		case CoinSelectionLargest:
 			sort.Sort(sort.Reverse(byAmount(eligible)))
-			inputSource = makeInputSource(eligible)
+			inputSelectionStrategy = txauthor.PositiveYieldingSelection
 
 		// Select coins at random. This prevents the creation of ever
 		// smaller utxos over time that may never become economical to
@@ -170,12 +147,12 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 				positivelyYielding[i], positivelyYielding[j] =
 					positivelyYielding[j], positivelyYielding[i]
 			})
-
-			inputSource = makeInputSource(positivelyYielding)
+			inputSelectionStrategy = txauthor.RandomSelection
+			eligible = positivelyYielding
 		}
 
 		tx, err = txauthor.NewUnsignedTransaction(
-			outputs, feeSatPerKb, inputSource, changeSource,
+			outputs, feeSatPerKb, eligible, inputSelectionStrategy, changeSource,
 		)
 		if err != nil {
 			return err
