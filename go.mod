@@ -32,3 +32,5 @@ require (
 )
 
 go 1.16
+
+replace github.com/btcsuite/btcwallet/wallet/txauthor v1.3.2 => github.com/ziggie1984/btcwallet/wallet/txauthor v1.2.4-0.20230216141549-78502da359d1
