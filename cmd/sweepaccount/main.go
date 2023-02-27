@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/crypto/ssh/terminal"
-
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -23,6 +21,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/jessevdk/go-flags"
+	"golang.org/x/term"
 )
 
 var (
@@ -335,7 +334,7 @@ func sweep() error {
 func promptSecret(what string) (string, error) {
 	fmt.Printf("%s: ", what)
 	fd := int(os.Stdin.Fd())
-	input, err := terminal.ReadPassword(fd)
+	input, err := term.ReadPassword(fd)
 	fmt.Println()
 	if err != nil {
 		return "", err
