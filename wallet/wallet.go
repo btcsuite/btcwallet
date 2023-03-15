@@ -3667,6 +3667,7 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	// node that already has it in their mempool.
 	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L590
 	case match(err, "txn-already-in-mempool"):
+		log.Infof("%v: tx already in mempool", txid)
 		return &txid, nil
 
 	// If the transaction has already confirmed, we can safely remove it
@@ -3704,6 +3705,7 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 				"from unconfirmed store: %v", tx.TxHash(), dbErr)
 		}
 
+		log.Infof("%v: tx already confirmed", txid)
 		return &txid, nil
 
 	// If the transactions is invalid since it attempts to double spend a
@@ -3791,6 +3793,9 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		returnErr = fmt.Errorf("unmatched backend error: %v", err)
 	}
 
+	// Log the causing error, even if we know how to handle it.
+	log.Infof("%v: broadcast failed because of: %v", txid, returnErr)
+
 	// If the transaction was rejected for whatever other reason, then
 	// we'll remove it from the transaction store, as otherwise, we'll
 	// attempt to continually re-broadcast it, and the UTXO state of the
@@ -3807,8 +3812,15 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		log.Warnf("Unable to remove invalid transaction %v: %v",
 			tx.TxHash(), dbErr)
 	} else {
-		log.Infof("Removed invalid transaction: %v",
-			spew.Sdump(tx))
+		// The spew output is pretty nice to directly see how many
+		// inputs/outputs of what type there are.
+		log.Infof("Removed invalid transaction: %v", spew.Sdump(tx))
+
+		// The serialized transaction is for logging only, don't fail on
+		// the error.
+		var txRaw bytes.Buffer
+		_ = tx.Serialize(&txRaw)
+		log.Infof("Removed invalid transaction: %x", txRaw.Bytes())
 	}
 
 	return nil, returnErr
