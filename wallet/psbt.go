@@ -383,8 +383,9 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 	packet *psbt.Packet) error {
 
 	// Let's check that this is actually something we can and want to sign.
-	// We need at least one input and one output.
-	err := psbt.VerifyInputOutputLen(packet, true, true)
+	// We need at least one input and one output. In addition each
+	// input needs nonWitness Utxo or witness Utxo data specified.
+	err := psbt.InputsReadyToSign(packet)
 	if err != nil {
 		return err
 	}
@@ -462,9 +463,9 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 			if keyScope == nil {
 				// If a key scope wasn't specified, then coin
 				// selection was performed from the default
-				// wallet accounts (NP2WKH, P2WKH), so any key
-				// scope provided doesn't impact the result of
-				// this call.
+				// wallet accounts (NP2WKH, P2WKH, P2TR), so any
+				// key scope provided doesn't impact the result
+				// of this call.
 				watchOnly, err = w.Manager.IsWatchOnlyAccount(
 					ns, waddrmgr.KeyScopeBIP0084, account,
 				)
