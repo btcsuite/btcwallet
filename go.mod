@@ -39,8 +39,8 @@ require (
 	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	go.etcd.io/bbolt v1.3.5-0.20200615073812-232d8fc87f50 // indirect
-	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
-	golang.org/x/text v0.3.3 // indirect
+	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
+	golang.org/x/text v0.3.8 // indirect
 	google.golang.org/genproto v0.0.0-20190201180003-4b09977fb922 // indirect
 	google.golang.org/protobuf v1.23.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
