@@ -184,11 +184,23 @@ func (c *BitcoindClient) IsCurrent() bool {
 	return bestHeader.Timestamp.After(time.Now().Add(-isCurrentDelta))
 }
 
-// GetRawTransactionVerbose returns a transaction from the tx hash.
+// GetRawTransactionVerbose returns a TxRawResult from the tx hash.
 func (c *BitcoindClient) GetRawTransactionVerbose(
 	hash *chainhash.Hash) (*btcjson.TxRawResult, error) {
 
 	return c.chainConn.client.GetRawTransactionVerbose(hash)
+}
+
+// GetRawTransaction returns a `btcutil.Tx` from the tx hash.
+func (c *BitcoindClient) GetRawTransaction(
+	hash *chainhash.Hash) (*btcutil.Tx, error) {
+
+	return c.chainConn.client.GetRawTransaction(hash)
+}
+
+// GetRawMempool returns the raw mempool.
+func (c *BitcoindClient) GetRawMempool() ([]*chainhash.Hash, error) {
+	return c.chainConn.client.GetRawMempool()
 }
 
 // GetTxOut returns a txout from the outpoint info provided.
@@ -311,6 +323,7 @@ func (c *BitcoindClient) shouldNotifyBlocks() bool {
 // is used to reset the current filters.
 //
 // The current filters supported are of the following types:
+//
 //	[]btcutil.Address
 //	[]wire.OutPoint
 //	[]*wire.OutPoint
