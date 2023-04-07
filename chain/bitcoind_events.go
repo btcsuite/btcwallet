@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -386,8 +387,16 @@ type PollingConfig struct {
 	BlockPollingInterval time.Duration
 
 	// TxPollingInterval is the interval that will be used to poll bitcoind
-	// for new transactions.
+	// for new transactions. If a jitter factor is configed, it will be
+	// applied to this value to provide randomness in the range,
+	// - max: TxPollingInterval * (1 + TxPollingIntervalJitter)
+	// - min: TxPollingInterval * (1 - TxPollingIntervalJitter)
 	TxPollingInterval time.Duration
+
+	// TxPollingIntervalScale defines a factor that's used to simulates
+	// jitter by scaling TxPollingInterval with it. This value must be no
+	// less than 0. Default to 0, meaning no jitter will be applied.
+	TxPollingIntervalJitter float64
 }
 
 // bitcoindRPCPollingEvents delivers block and transaction notifications that
@@ -423,6 +432,13 @@ func newBitcoindRPCPollingEvents(cfg *PollingConfig,
 
 	if cfg.TxPollingInterval == 0 {
 		cfg.TxPollingInterval = defaultTxPollInterval
+	}
+
+	// Floor the jitter value to be 0.
+	if cfg.TxPollingIntervalJitter < 0 {
+		log.Warnf("Jitter value(%v) must be positive, setting to 0",
+			cfg.TxPollingIntervalJitter)
+		cfg.TxPollingIntervalJitter = 0
 	}
 
 	return &bitcoindRPCPollingEvents{
@@ -547,7 +563,13 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 	defer b.wg.Done()
 
 	log.Info("Started polling for new bitcoind transactions via RPC.")
-	ticker := time.NewTicker(b.cfg.TxPollingInterval)
+
+	// Create a ticker that fires randomly.
+	rand.Seed(time.Now().UnixNano())
+	ticker := NewJitterTicker(
+		b.cfg.TxPollingInterval, b.cfg.TxPollingIntervalJitter,
+	)
+
 	defer ticker.Stop()
 
 	for {
