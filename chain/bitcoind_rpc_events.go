@@ -238,7 +238,7 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 				// If the transaction is already in our local
 				// mempool, then we have already sent it to the
 				// client.
-				if b.mempool.contains(*txHash) {
+				if b.mempool.containsTx(*txHash) {
 					// Mark the tx as true so that we know
 					// not to remove it from our internal
 					// mempool.
@@ -262,7 +262,7 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 				// initially fail, then we will retry it on the
 				// next interval since it is still not in our
 				// local mempool.
-				b.mempool.add(*txHash)
+				b.mempool.add(tx.MsgTx())
 
 				select {
 				case b.txNtfns <- tx.MsgTx():
