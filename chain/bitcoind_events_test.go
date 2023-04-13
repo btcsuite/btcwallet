@@ -137,8 +137,6 @@ func testNotifications(t *testing.T, miner *rpctest.Harness,
 
 	ntfns := client.Notifications()
 
-	miner.Client.Generate(1)
-
 	// First, we expect to get a RelevantTx notification.
 	select {
 	case ntfn := <-ntfns:
@@ -153,6 +151,11 @@ func testNotifications(t *testing.T, miner *rpctest.Harness,
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for RelevantTx notification")
 	}
+
+	// Send an event to the ntfns after the tx event has been received.
+	// Otherwise the orders of the events might get messed up if we send
+	// events shortly.
+	miner.Client.Generate(1)
 
 	// Then, we expect to get a FilteredBlockConnected notification.
 	select {
