@@ -56,6 +56,10 @@ func TestBitcoindEvents(t *testing.T) {
 			// Test that the expected block and transaction
 			// notifications are received.
 			testNotifications(t, miner1, btcClient)
+
+			// Test notifications for inputs already found in
+			// mempool.
+			testNotifySpentMempool(t, miner1, btcClient)
 		})
 	}
 }
@@ -128,6 +132,46 @@ func testNotifications(t *testing.T, miner *rpctest.Harness,
 
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for BlockConnected notification")
+	}
+}
+
+// testNotifySpentMempool tests that the client correctly notifies the caller
+// when the requested input has already been spent in mempool.
+func testNotifySpentMempool(t *testing.T, miner *rpctest.Harness,
+	client *BitcoindClient) {
+
+	require := require.New(t)
+
+	script, _, err := randPubKeyHashScript()
+	require.NoError(err)
+
+	// Create a test tx.
+	tx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 1000, PkScript: script}}, 5, false,
+	)
+	require.NoError(err)
+	txid := tx.TxHash()
+
+	// Send the tx which will put it in the mempool.
+	_, err = client.SendRawTransaction(tx, true)
+	require.NoError(err)
+
+	// Subscribe the input of the above tx.
+	op := tx.TxIn[0].PreviousOutPoint
+	err = client.NotifySpent([]*wire.OutPoint{&op})
+	require.NoError(err)
+
+	ntfns := client.Notifications()
+
+	// We expect to get a RelevantTx notification.
+	select {
+	case ntfn := <-ntfns:
+		tx, ok := ntfn.(RelevantTx)
+		require.Truef(ok, "Expected type RelevantTx, got %T", ntfn)
+		require.True(tx.TxRecord.Hash.IsEqual(&txid))
+
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for RelevantTx notification")
 	}
 }
 

@@ -3,6 +3,7 @@ package chain
 import (
 	"fmt"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 )
@@ -17,6 +18,10 @@ type BitcoindEvents interface {
 	// BlockNotifications will return a channel which will deliver new
 	// blocks.
 	BlockNotifications() <-chan *wire.MsgBlock
+
+	// LookupInputSpend will return the transaction found in mempool that
+	// spends the given input.
+	LookupInputSpend(op wire.OutPoint) (chainhash.Hash, bool)
 
 	// Start will kick off any goroutines required for operation.
 	Start() error
