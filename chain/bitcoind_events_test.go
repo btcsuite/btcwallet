@@ -295,7 +295,6 @@ func waitForBlockNtfn(t *testing.T, ntfns <-chan interface{},
 			switch ntfnType := nftn.(type) {
 			case BlockConnected:
 				if !connected {
-					fmt.Println("???")
 					continue
 				}
 
