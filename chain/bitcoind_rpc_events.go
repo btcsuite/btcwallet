@@ -103,6 +103,11 @@ func (b *bitcoindRPCPollingEvents) Start() error {
 		return err
 	}
 
+	// Load the mempool so we don't miss transactions.
+	if err := b.loadMempool(); err != nil {
+		return err
+	}
+
 	b.wg.Add(2)
 	go b.blockEventHandlerRPC(info.Blocks)
 	go b.txEventHandlerRPC()
@@ -124,6 +129,18 @@ func (b *bitcoindRPCPollingEvents) TxNotifications() <-chan *wire.MsgTx {
 // BlockNotifications returns a channel which will deliver new blocks.
 func (b *bitcoindRPCPollingEvents) BlockNotifications() <-chan *wire.MsgBlock {
 	return b.blockNtfns
+}
+
+// LookupInputSpend returns the transaction that spends the given outpoint
+// found in the mempool.
+func (b *bitcoindRPCPollingEvents) LookupInputSpend(
+	op wire.OutPoint) (chainhash.Hash, bool) {
+
+	b.mempool.RLock()
+	defer b.mempool.RUnlock()
+
+	// Check whether the input is in mempool.
+	return b.mempool.containsInput(op)
 }
 
 // blockEventHandlerRPC is a goroutine that uses the rpc client to check if we
@@ -200,6 +217,33 @@ func (b *bitcoindRPCPollingEvents) blockEventHandlerRPC(startHeight int32) {
 			return
 		}
 	}
+}
+
+// loadMempool loads all the raw transactions found in mempool.
+func (b *bitcoindRPCPollingEvents) loadMempool() error {
+	txs, err := b.client.GetRawMempool()
+	if err != nil {
+		log.Errorf("Unable to get raw mempool txs: %v", err)
+		return err
+	}
+
+	b.mempool.Lock()
+	defer b.mempool.Unlock()
+
+	for _, txHash := range txs {
+		// Grab full mempool transaction from hash.
+		tx, err := b.client.GetRawTransaction(txHash)
+		if err != nil {
+			log.Errorf("unable to fetch transaction %s for "+
+				"mempool: %v", txHash, err)
+			continue
+		}
+
+		// Add the transaction to our local mempool.
+		b.mempool.add(tx.MsgTx())
+	}
+
+	return nil
 }
 
 // txEventHandlerRPC is a goroutine that uses the RPC client to check the
