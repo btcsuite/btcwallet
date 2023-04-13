@@ -1301,8 +1301,8 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 	if _, ok := c.mempool[*txDetails.Hash()]; ok {
 		if notify && blockDetails != nil {
 			c.onRelevantTx(rec, blockDetails)
+			return true, rec, nil
 		}
-		return true, rec, nil
 	}
 
 	// Otherwise, this is a new transaction we have yet to see. We'll need
