@@ -34,9 +34,9 @@ func newMempool() *mempool {
 	}
 }
 
-// clean removes any of the given transactions from the mempool if they are
+// Clean removes any of the given transactions from the mempool if they are
 // found there.
-func (m *mempool) clean(txs []*wire.MsgTx) {
+func (m *mempool) Clean(txs []*wire.MsgTx) {
 	m.Lock()
 	defer m.Unlock()
 
@@ -54,30 +54,27 @@ func (m *mempool) clean(txs []*wire.MsgTx) {
 
 // containsTx returns true if the given transaction hash is already in our
 // mempool.
+//
+// NOTE: must be used inside a lock.
 func (m *mempool) containsTx(hash chainhash.Hash) bool {
-	m.RLock()
-	defer m.RUnlock()
-
 	_, ok := m.txs[hash]
 	return ok
 }
 
 // containsInput returns true if the given input is already found spent in our
 // mempool.
+//
+// NOTE: must be used inside a lock.
 func (m *mempool) containsInput(op wire.OutPoint) (chainhash.Hash, bool) {
-	m.RLock()
-	defer m.RUnlock()
-
 	txid, ok := m.inputs[op]
 	return txid, ok
 }
 
 // add inserts the given hash into our mempool and marks it to indicate that it
 // should not be deleted.
+//
+// NOTE: must be used inside a lock.
 func (m *mempool) add(tx *wire.MsgTx) {
-	m.Lock()
-	defer m.Unlock()
-
 	hash := tx.TxHash()
 
 	// Add the txid to the mempool map.
@@ -90,10 +87,9 @@ func (m *mempool) add(tx *wire.MsgTx) {
 // unmarkAll un-marks all the transactions in the mempool. This should be done
 // just before we re-evaluate the contents of our local mempool comared to the
 // chain backend's mempool.
+//
+// NOTE: must be used inside a lock.
 func (m *mempool) unmarkAll() {
-	m.Lock()
-	defer m.Unlock()
-
 	for hash := range m.txs {
 		m.txs[hash] = false
 	}
@@ -101,10 +97,9 @@ func (m *mempool) unmarkAll() {
 
 // mark marks the transaction of the given hash to indicate that it is still
 // present in the chain backend's mempool.
+//
+// NOTE: must be used inside a lock.
 func (m *mempool) mark(hash chainhash.Hash) {
-	m.Lock()
-	defer m.Unlock()
-
 	if _, ok := m.txs[hash]; !ok {
 		return
 	}
@@ -113,10 +108,9 @@ func (m *mempool) mark(hash chainhash.Hash) {
 }
 
 // deleteUnmarked removes all the unmarked transactions from our local mempool.
+//
+// NOTE: must be used inside a lock.
 func (m *mempool) deleteUnmarked() {
-	m.Lock()
-	defer m.Unlock()
-
 	for hash, marked := range m.txs {
 		if marked {
 			continue

@@ -56,7 +56,7 @@ func TestMempool(t *testing.T) {
 
 	// Clean the mempool of tx1 (this simulates a block being confirmed
 	// with tx1 in the block).
-	m.clean([]*wire.MsgTx{tx1})
+	m.Clean([]*wire.MsgTx{tx1})
 
 	// Ensure that tx1 is no longer in the mempool but that tx2 still is.
 	require.False(m.containsTx(tx1.TxHash()))

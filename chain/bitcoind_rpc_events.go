@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 )
@@ -190,7 +191,7 @@ func (b *bitcoindRPCPollingEvents) blockEventHandlerRPC(startHeight int32) {
 				// of the transactions that are confirmed in
 				// this new block, since they are no longer in
 				// the mempool.
-				b.mempool.clean(newBlock.Transactions)
+				b.mempool.Clean(newBlock.Transactions)
 
 				height++
 			}
@@ -228,57 +229,74 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 				continue
 			}
 
-			// Set all mempool txs to false.
-			b.mempool.unmarkAll()
+			// Update our local mempool with the new mempool.
+			newTxs := b.updateMempoolTxes(txs)
 
-			// We'll scan through the most recent txs in the
-			// mempool to see whether there are new txs that we
-			// need to send to the client.
-			for _, txHash := range txs {
-				// If the transaction is already in our local
-				// mempool, then we have already sent it to the
-				// client.
-				if b.mempool.containsTx(*txHash) {
-					// Mark the tx as true so that we know
-					// not to remove it from our internal
-					// mempool.
-					b.mempool.mark(*txHash)
-					continue
-				}
-
-				// Grab full mempool transaction from hash.
-				tx, err := b.client.GetRawTransaction(txHash)
-				if err != nil {
-					log.Errorf("unable to fetch "+
-						"transaction %s from "+
-						"mempool: %v", txHash, err)
-					continue
-				}
-
-				// Add the transaction to our local mempool.
-				// Note that we only do this after fetching
-				// the full raw transaction from bitcoind.
-				// We do this so that if that call happens to
-				// initially fail, then we will retry it on the
-				// next interval since it is still not in our
-				// local mempool.
-				b.mempool.add(tx.MsgTx())
-
+			// Notify the client of each new transaction.
+			for _, tx := range newTxs {
 				select {
-				case b.txNtfns <- tx.MsgTx():
+				case b.txNtfns <- tx:
 				case <-b.quit:
 					return
 				}
 			}
 
-			// Now, we clear our internal mempool of any unmarked
-			// transactions. These are all the transactions that
-			// we still have in the mempool but that were not
-			// returned in the latest GetRawMempool query.
-			b.mempool.deleteUnmarked()
-
 		case <-b.quit:
 			return
 		}
 	}
+}
+
+// updateMempoolTxes takes a slice of transactions from the current mempool and
+// use it to update its internal mempool. It returns a slice of transactions
+// that's new to its internal mempool.
+func (b *bitcoindRPCPollingEvents) updateMempoolTxes(
+	txids []*chainhash.Hash) []*wire.MsgTx {
+
+	b.mempool.Lock()
+	defer b.mempool.Unlock()
+
+	// txesToNotify is a list of txes to be notified to the client.
+	txesToNotify := make([]*wire.MsgTx, 0, len(txids))
+
+	// Set all mempool txs to false.
+	b.mempool.unmarkAll()
+
+	// We'll scan through the most recent txs in the mempool to see whether
+	// there are new txs that we need to send to the client.
+	for _, txHash := range txids {
+		// If the transaction is already in our local mempool, then we
+		// have already sent it to the client.
+		if b.mempool.containsTx(*txHash) {
+			// Mark the tx as true so that we know not to remove it
+			// from our internal mempool.
+			b.mempool.mark(*txHash)
+			continue
+		}
+
+		// Grab full mempool transaction from hash.
+		tx, err := b.client.GetRawTransaction(txHash)
+		if err != nil {
+			log.Errorf("unable to fetch transaction %s from "+
+				"mempool: %v", txHash, err)
+			continue
+		}
+
+		// Add the transaction to our local mempool. Note that we only
+		// do this after fetching the full raw transaction from
+		// bitcoind. We do this so that if that call happens to
+		// initially fail, then we will retry it on the next interval
+		// since it is still not in our local mempool.
+		b.mempool.add(tx.MsgTx())
+
+		// Save the tx to the slice.
+		txesToNotify = append(txesToNotify, tx.MsgTx())
+	}
+
+	// Now, we clear our internal mempool of any unmarked transactions.
+	// These are all the transactions that we still have in the mempool but
+	// that were not returned in the latest GetRawMempool query.
+	b.mempool.deleteUnmarked()
+
+	return txesToNotify
 }
