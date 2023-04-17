@@ -54,5 +54,5 @@ func NewBitcoindEventSubscriber(cfg *BitcoindConfig,
 			"rpcpolling is disabled")
 	}
 
-	return newBitcoindZMQEvents(cfg.ZMQConfig)
+	return newBitcoindZMQEvents(cfg.ZMQConfig, client)
 }

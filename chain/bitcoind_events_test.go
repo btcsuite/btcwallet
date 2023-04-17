@@ -386,9 +386,10 @@ func setupBitcoind(t *testing.T, minerAddr string,
 		}
 	} else {
 		cfg.ZMQConfig = &ZMQConfig{
-			ZMQBlockHost:    zmqBlockHost,
-			ZMQTxHost:       zmqTxHost,
-			ZMQReadDeadline: 5 * time.Second,
+			ZMQBlockHost:           zmqBlockHost,
+			ZMQTxHost:              zmqTxHost,
+			ZMQReadDeadline:        5 * time.Second,
+			MempoolPollingInterval: time.Millisecond * 100,
 		}
 	}
 
