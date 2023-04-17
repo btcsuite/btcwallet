@@ -362,6 +362,9 @@ func (b *bitcoindZMQEvents) txEventHandler() {
 				continue
 			}
 
+			// Add the tx to mempool.
+			b.mempool.Add(tx)
+
 			select {
 			case b.txNtfns <- tx:
 			case <-b.quit:

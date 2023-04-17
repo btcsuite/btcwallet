@@ -52,6 +52,15 @@ func (m *mempool) Clean(txs []*wire.MsgTx) {
 	}
 }
 
+// Add inserts the given hash into our mempool and marks it to indicate that it
+// should not be deleted.
+func (m *mempool) Add(tx *wire.MsgTx) {
+	m.Lock()
+	defer m.Unlock()
+
+	m.add(tx)
+}
+
 // containsTx returns true if the given transaction hash is already in our
 // mempool.
 //
