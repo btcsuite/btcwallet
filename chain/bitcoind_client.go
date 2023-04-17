@@ -245,10 +245,44 @@ func (c *BitcoindClient) NotifyReceived(addrs []btcutil.Address) error {
 func (c *BitcoindClient) NotifySpent(outPoints []*wire.OutPoint) error {
 	_ = c.NotifyBlocks()
 
+	// Send the outpoints so the client will cache them.
 	select {
 	case c.rescanUpdate <- outPoints:
 	case <-c.quit:
 		return ErrBitcoindClientShuttingDown
+	}
+
+	// Now we do a quick check in current mempool to see if we already have
+	// txes that spends the given outpoints.
+	for _, op := range outPoints {
+		op := op
+
+		// Check if the input is seen in mempool.
+		txid, found := c.chainConn.events.LookupInputSpend(*op)
+		if !found {
+			// Nothing found, continue to check the next.
+			continue
+		}
+
+		// Found the tx that spends the input, now we fetch the raw tx
+		// and send notification.
+		tx, err := c.GetRawTransaction(&txid)
+		if err != nil {
+			log.Errorf("Unable to get raw transaction for %v, "+
+				"err: %v", txid, err)
+			continue
+		}
+
+		// Construct a record.
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx.MsgTx(), time.Now())
+		if err != nil {
+			log.Errorf("Cannot create transaction record for tx: "+
+				"%v, err: %v", tx.Hash(), err)
+			continue
+		}
+
+		// Send to notification immediately.
+		c.onRelevantTx(rec, nil)
 	}
 
 	return nil
@@ -1267,8 +1301,8 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 	if _, ok := c.mempool[*txDetails.Hash()]; ok {
 		if notify && blockDetails != nil {
 			c.onRelevantTx(rec, blockDetails)
+			return true, rec, nil
 		}
-		return true, rec, nil
 	}
 
 	// Otherwise, this is a new transaction we have yet to see. We'll need

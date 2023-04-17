@@ -37,151 +37,180 @@ func TestBitcoindEvents(t *testing.T) {
 		},
 	}
 
-	// Set up 2 btcd miners.
-	miner1, miner2 := setupMiners(t)
-
 	for _, test := range tests {
 		test := test
+
+		// Set up 2 btcd miners.
+		miner1, miner2 := setupMiners(t)
+		addr := miner1.P2PAddress()
+
 		t.Run(test.name, func(t *testing.T) {
 			// Set up a bitcoind node and connect it to miner 1.
-			btcClient := setupBitcoind(
-				t, miner1.P2PAddress(), test.rpcPolling,
-			)
+			btcClient := setupBitcoind(t, addr, test.rpcPolling)
 
 			// Test that the correct block `Connect` and
 			// `Disconnect` notifications are received during a
 			// re-org.
 			testReorg(t, miner1, miner2, btcClient)
 
-			// Test that the expected block and transaction
-			// notifications are received.
-			testNotifications(t, miner1, btcClient)
+			// Test that the expected block notifications are
+			// received.
+			btcClient = setupBitcoind(t, addr, test.rpcPolling)
+			testNotifyBlocks(t, miner1, btcClient)
+
+			// Test that the expected tx notifications are
+			// received.
+			btcClient = setupBitcoind(t, addr, test.rpcPolling)
+			testNotifyTx(t, miner1, btcClient)
+
+			// Test notifications for inputs already found in
+			// mempool.
+			btcClient = setupBitcoind(t, addr, test.rpcPolling)
+			testNotifySpentMempool(t, miner1, btcClient)
 		})
 	}
 }
 
-// TestMempool tests that each method of the mempool struct works as expected.
-func TestMempool(t *testing.T) {
-	m := newMempool()
-
-	// Create a transaction.
-	tx1 := &wire.MsgTx{LockTime: 1}
-
-	// Check that mempool doesn't have the tx yet.
-	require.False(t, m.contains(tx1.TxHash()))
-
-	// Now add the tx.
-	m.add(tx1.TxHash())
-
-	// Mempool should now contain the tx.
-	require.True(t, m.contains(tx1.TxHash()))
-
-	// Add another tx to the mempool.
-	tx2 := &wire.MsgTx{LockTime: 2}
-	m.add(tx2.TxHash())
-	require.True(t, m.contains(tx2.TxHash()))
-
-	// Clean the mempool of tx1 (this simulates a block being confirmed
-	// with tx1 in the block).
-	m.clean([]*wire.MsgTx{tx1})
-
-	// Ensure that tx1 is no longer in the mempool but that tx2 still is.
-	require.False(t, m.contains(tx1.TxHash()))
-	require.True(t, m.contains(tx2.TxHash()))
-
-	// Lastly, we test that only marked transactions are deleted from the
-	// mempool.
-
-	// Let's first re-add tx1 so that we have more txs to work with.
-	m.add(tx1.TxHash())
-
-	// Now, we unmark all the transactions.
-	m.unmarkAll()
-
-	// Add tx3. This should automatically mark tx3.
-	tx3 := &wire.MsgTx{LockTime: 3}
-	m.add(tx3.TxHash())
-
-	// Let us now manually mark tx2.
-	m.mark(tx2.TxHash())
-
-	// Now we delete all unmarked txs. This should leave only tx2 and tx3
-	// in the mempool.
-	m.deleteUnmarked()
-
-	require.False(t, m.contains(tx1.TxHash()))
-	require.True(t, m.contains(tx2.TxHash()))
-	require.True(t, m.contains(tx3.TxHash()))
-}
-
-// testNotifications tests that the correct notifications are received for
-// blocks and transactions in the simple non-reorg case.
-func testNotifications(t *testing.T, miner *rpctest.Harness,
-	client *BitcoindClient) {
+// testNotifyTx tests that the correct notifications are received for the
+// subscribed tx.
+func testNotifyTx(t *testing.T, miner *rpctest.Harness, client *BitcoindClient) {
+	require := require.New(t)
 
 	script, _, err := randPubKeyHashScript()
-	require.NoError(t, err)
+	require.NoError(err)
 
 	tx, err := miner.CreateTransaction(
 		[]*wire.TxOut{{Value: 1000, PkScript: script}}, 5, false,
 	)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	hash := tx.TxHash()
 
 	err = client.NotifyTx([]chainhash.Hash{hash})
-	require.NoError(t, err)
+	require.NoError(err)
 
 	_, err = client.SendRawTransaction(tx, true)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	ntfns := client.Notifications()
 
-	// First, we expect to get a RelevantTx notification.
+	// We expect to get a ClientConnected notification.
+	select {
+	case ntfn := <-ntfns:
+		_, ok := ntfn.(ClientConnected)
+		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
+
+	case <-time.After(time.Second):
+		require.Fail("timed out for ClientConnected notification")
+	}
+
+	// We expect to get a RelevantTx notification.
 	select {
 	case ntfn := <-ntfns:
 		tx, ok := ntfn.(RelevantTx)
-		if !ok {
-			t.Fatalf("Expected a notification of type "+
-				"RelevantTx, got %T", ntfn)
-		}
-
-		require.True(t, tx.TxRecord.Hash.IsEqual(&hash))
+		require.Truef(ok, "Expected type RelevantTx, got %T", ntfn)
+		require.True(tx.TxRecord.Hash.IsEqual(&hash))
 
 	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for RelevantTx notification")
+		require.Fail("timed out waiting for RelevantTx notification")
 	}
+}
+
+// testNotifyBlocks tests that the correct notifications are received for
+// blocks in the simple non-reorg case.
+func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
+	client *BitcoindClient) {
+
+	require := require.New(t)
+
+	require.NoError(client.NotifyBlocks())
+	ntfns := client.Notifications()
 
 	// Send an event to the ntfns after the tx event has been received.
 	// Otherwise the orders of the events might get messed up if we send
 	// events shortly.
 	miner.Client.Generate(1)
 
-	// Then, we expect to get a FilteredBlockConnected notification.
+	// We expect to get a ClientConnected notification.
+	select {
+	case ntfn := <-ntfns:
+		_, ok := ntfn.(ClientConnected)
+		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
+
+	case <-time.After(time.Second):
+		require.Fail("timed out for ClientConnected notification")
+	}
+
+	// We expect to get a FilteredBlockConnected notification.
 	select {
 	case ntfn := <-ntfns:
 		_, ok := ntfn.(FilteredBlockConnected)
-		if !ok {
-			t.Fatalf("Expected a notification of type "+
-				"FilteredBlockConnected, got %T", ntfn)
-		}
+		require.Truef(ok, "Expected type FilteredBlockConnected, "+
+			"got %T", ntfn)
 
 	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for FilteredBlockConnected " +
+		require.Fail("timed out for FilteredBlockConnected " +
 			"notification")
 	}
 
-	// Lastly, we expect to get a BlockConnected notification.
+	// We expect to get a BlockConnected notification.
 	select {
 	case ntfn := <-ntfns:
 		_, ok := ntfn.(BlockConnected)
-		if !ok {
-			t.Fatalf("Expected a notification of type "+
-				"BlockConnected, got %T", ntfn)
-		}
+		require.Truef(ok, "Expected type BlockConnected, got %T", ntfn)
 
 	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for BlockConnected notification")
+		require.Fail("timed out for BlockConnected notification")
+	}
+}
+
+// testNotifySpentMempool tests that the client correctly notifies the caller
+// when the requested input has already been spent in mempool.
+func testNotifySpentMempool(t *testing.T, miner *rpctest.Harness,
+	client *BitcoindClient) {
+
+	require := require.New(t)
+
+	script, _, err := randPubKeyHashScript()
+	require.NoError(err)
+
+	// Create a test tx.
+	tx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 1000, PkScript: script}}, 5, false,
+	)
+	require.NoError(err)
+	txid := tx.TxHash()
+
+	// Send the tx which will put it in the mempool.
+	_, err = client.SendRawTransaction(tx, true)
+	require.NoError(err)
+
+	// Subscribe the input of the above tx.
+	op := tx.TxIn[0].PreviousOutPoint
+	err = client.NotifySpent([]*wire.OutPoint{&op})
+	require.NoError(err)
+
+	ntfns := client.Notifications()
+
+	// We expect to get a ClientConnected notification.
+	select {
+	case ntfn := <-ntfns:
+		_, ok := ntfn.(ClientConnected)
+		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
+
+	case <-time.After(time.Second):
+		require.Fail("timed out for ClientConnected notification")
+	}
+
+	// We expect to get a RelevantTx notification.
+	select {
+	case ntfn := <-ntfns:
+		tx, ok := ntfn.(RelevantTx)
+		require.Truef(ok, "Expected type RelevantTx, got %T", ntfn)
+		require.True(tx.TxRecord.Hash.IsEqual(&txid))
+
+	case <-time.After(time.Second):
+		require.Fail("timed out waiting for RelevantTx notification")
 	}
 }
 
@@ -190,36 +219,37 @@ func testNotifications(t *testing.T, miner *rpctest.Harness,
 func testReorg(t *testing.T, miner1, miner2 *rpctest.Harness,
 	client *BitcoindClient) {
 
+	require := require.New(t)
+
 	miner1Hash, commonHeight, err := miner1.Client.GetBestBlock()
-	require.NoError(t, err)
+	require.NoError(err)
 
 	miner2Hash, miner2Height, err := miner2.Client.GetBestBlock()
-	require.NoError(t, err)
+	require.NoError(err)
 
-	require.Equal(t, commonHeight, miner2Height)
-	require.Equal(t, miner1Hash, miner2Hash)
+	require.Equal(commonHeight, miner2Height)
+	require.Equal(miner1Hash, miner2Hash)
 
-	// Let miner2 generate a few blocks and ensure that our bitcoind client
-	// is notified of this block.
-	hashes, err := miner2.Client.Generate(5)
-	require.NoError(t, err)
-	require.Len(t, hashes, 5)
-
+	require.NoError(client.NotifyBlocks())
 	ntfns := client.Notifications()
 
-	for i := 0; i < 5; i++ {
-		commonHeight++
-		ntfnHash := waitForBlockNtfn(t, ntfns, commonHeight, true)
-		require.True(t, ntfnHash.IsEqual(hashes[i]))
+	// We expect to get a ClientConnected notification.
+	select {
+	case ntfn := <-ntfns:
+		_, ok := ntfn.(ClientConnected)
+		require.Truef(ok, "Expected type ClientConnected, got %T", ntfn)
+
+	case <-time.After(time.Second):
+		require.Fail("timed out for ClientConnected notification")
 	}
 
 	// Now disconnect the two miners.
 	err = miner1.Client.AddNode(miner2.P2PAddress(), rpcclient.ANRemove)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	// Generate 5 blocks on miner2.
 	_, err = miner2.Client.Generate(5)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	// Since the miners have been disconnected, we expect not to get any
 	// notifications from our client since our client is connected to
@@ -237,7 +267,7 @@ func testReorg(t *testing.T, miner1, miner2 *rpctest.Harness,
 	// miner2 so that when they reconnect, miner1 does a re-org to switch
 	// to the longer chain.
 	_, err = miner1.Client.Generate(3)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	// Read the notifications for the new blocks
 	for i := 0; i < 3; i++ {
@@ -247,36 +277,36 @@ func testReorg(t *testing.T, miner1, miner2 *rpctest.Harness,
 	// Ensure that the two miners have different ideas of what the best
 	// block is.
 	hash1, height1, err := miner1.Client.GetBestBlock()
-	require.NoError(t, err)
-	require.Equal(t, commonHeight+3, height1)
+	require.NoError(err)
+	require.Equal(commonHeight+3, height1)
 
 	hash2, height2, err := miner2.Client.GetBestBlock()
-	require.NoError(t, err)
-	require.Equal(t, commonHeight+5, height2)
+	require.NoError(err)
+	require.Equal(commonHeight+5, height2)
 
-	require.False(t, hash1.IsEqual(hash2))
+	require.False(hash1.IsEqual(hash2))
 
 	// Reconnect the miners. This should result in miner1 reorging to match
 	// miner2. Since our client is connected to a node connected to miner1,
 	// we should get the expected disconnected and connected notifications.
 	err = rpctest.ConnectNode(miner1, miner2)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	err = rpctest.JoinNodes(
 		[]*rpctest.Harness{miner1, miner2}, rpctest.Blocks,
 	)
-	require.NoError(t, err)
+	require.NoError(err)
 
 	// Check that the miners are now on the same page.
 	hash1, height1, err = miner1.Client.GetBestBlock()
-	require.NoError(t, err)
+	require.NoError(err)
 
 	hash2, height2, err = miner2.Client.GetBestBlock()
-	require.NoError(t, err)
+	require.NoError(err)
 
-	require.Equal(t, commonHeight+5, height2)
-	require.Equal(t, commonHeight+5, height1)
-	require.True(t, hash1.IsEqual(hash2))
+	require.Equal(commonHeight+5, height2)
+	require.Equal(commonHeight+5, height1)
+	require.True(hash1.IsEqual(hash2))
 
 	// We expect our client to get 3 BlockDisconnected notifications first
 	// signaling the unwinding of its top 3 blocks.
@@ -305,7 +335,6 @@ func waitForBlockNtfn(t *testing.T, ntfns <-chan interface{},
 			switch ntfnType := nftn.(type) {
 			case BlockConnected:
 				if !connected {
-					fmt.Println("???")
 					continue
 				}
 
@@ -440,9 +469,10 @@ func setupBitcoind(t *testing.T, minerAddr string,
 		}
 	} else {
 		cfg.ZMQConfig = &ZMQConfig{
-			ZMQBlockHost:    zmqBlockHost,
-			ZMQTxHost:       zmqTxHost,
-			ZMQReadDeadline: 5 * time.Second,
+			ZMQBlockHost:           zmqBlockHost,
+			ZMQTxHost:              zmqTxHost,
+			ZMQReadDeadline:        5 * time.Second,
+			MempoolPollingInterval: time.Millisecond * 100,
 		}
 	}
 
@@ -461,8 +491,6 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	t.Cleanup(func() {
 		btcClient.Stop()
 	})
-
-	require.NoError(t, btcClient.NotifyBlocks())
 
 	return btcClient
 }
