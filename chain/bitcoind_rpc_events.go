@@ -91,7 +91,7 @@ func newBitcoindRPCPollingEvents(cfg *PollingConfig,
 		client:     client,
 		txNtfns:    make(chan *wire.MsgTx),
 		blockNtfns: make(chan *wire.MsgBlock),
-		mempool:    newMempool(),
+		mempool:    newMempool(client),
 		quit:       make(chan struct{}),
 	}
 }
@@ -104,7 +104,7 @@ func (b *bitcoindRPCPollingEvents) Start() error {
 	}
 
 	// Load the mempool so we don't miss transactions.
-	if err := b.loadMempool(); err != nil {
+	if err := b.mempool.LoadMempool(); err != nil {
 		return err
 	}
 
@@ -219,33 +219,6 @@ func (b *bitcoindRPCPollingEvents) blockEventHandlerRPC(startHeight int32) {
 	}
 }
 
-// loadMempool loads all the raw transactions found in mempool.
-func (b *bitcoindRPCPollingEvents) loadMempool() error {
-	txs, err := b.client.GetRawMempool()
-	if err != nil {
-		log.Errorf("Unable to get raw mempool txs: %v", err)
-		return err
-	}
-
-	b.mempool.Lock()
-	defer b.mempool.Unlock()
-
-	for _, txHash := range txs {
-		// Grab full mempool transaction from hash.
-		tx, err := b.client.GetRawTransaction(txHash)
-		if err != nil {
-			log.Errorf("unable to fetch transaction %s for "+
-				"mempool: %v", txHash, err)
-			continue
-		}
-
-		// Add the transaction to our local mempool.
-		b.mempool.add(tx.MsgTx())
-	}
-
-	return nil
-}
-
 // txEventHandlerRPC is a goroutine that uses the RPC client to check the
 // mempool for new transactions.
 func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
@@ -274,7 +247,7 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 			}
 
 			// Update our local mempool with the new mempool.
-			newTxs := b.updateMempoolTxes(txs)
+			newTxs := b.mempool.UpdateMempoolTxes(txs)
 
 			// Notify the client of each new transaction.
 			for _, tx := range newTxs {
@@ -289,58 +262,4 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 			return
 		}
 	}
-}
-
-// updateMempoolTxes takes a slice of transactions from the current mempool and
-// use it to update its internal mempool. It returns a slice of transactions
-// that's new to its internal mempool.
-func (b *bitcoindRPCPollingEvents) updateMempoolTxes(
-	txids []*chainhash.Hash) []*wire.MsgTx {
-
-	b.mempool.Lock()
-	defer b.mempool.Unlock()
-
-	// txesToNotify is a list of txes to be notified to the client.
-	txesToNotify := make([]*wire.MsgTx, 0, len(txids))
-
-	// Set all mempool txs to false.
-	b.mempool.unmarkAll()
-
-	// We'll scan through the most recent txs in the mempool to see whether
-	// there are new txs that we need to send to the client.
-	for _, txHash := range txids {
-		// If the transaction is already in our local mempool, then we
-		// have already sent it to the client.
-		if b.mempool.containsTx(*txHash) {
-			// Mark the tx as true so that we know not to remove it
-			// from our internal mempool.
-			b.mempool.mark(*txHash)
-			continue
-		}
-
-		// Grab full mempool transaction from hash.
-		tx, err := b.client.GetRawTransaction(txHash)
-		if err != nil {
-			log.Errorf("unable to fetch transaction %s from "+
-				"mempool: %v", txHash, err)
-			continue
-		}
-
-		// Add the transaction to our local mempool. Note that we only
-		// do this after fetching the full raw transaction from
-		// bitcoind. We do this so that if that call happens to
-		// initially fail, then we will retry it on the next interval
-		// since it is still not in our local mempool.
-		b.mempool.add(tx.MsgTx())
-
-		// Save the tx to the slice.
-		txesToNotify = append(txesToNotify, tx.MsgTx())
-	}
-
-	// Now, we clear our internal mempool of any unmarked transactions.
-	// These are all the transactions that we still have in the mempool but
-	// that were not returned in the latest GetRawMempool query.
-	b.mempool.deleteUnmarked()
-
-	return txesToNotify
 }

@@ -12,7 +12,7 @@ import (
 func TestMempool(t *testing.T) {
 	require := require.New(t)
 
-	m := newMempool()
+	m := newMempool(nil)
 
 	// Create a transaction.
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}

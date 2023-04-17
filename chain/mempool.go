@@ -5,6 +5,7 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 )
 
@@ -24,13 +25,17 @@ type mempool struct {
 	// TODO(yy): create similar maps to provide faster lookup for output
 	// scripts.
 	inputs map[wire.OutPoint]chainhash.Hash
+
+	// client is the rpc client that we'll use to query for the mempool.
+	client *rpcclient.Client
 }
 
 // newMempool creates a new mempool object.
-func newMempool() *mempool {
+func newMempool(client *rpcclient.Client) *mempool {
 	return &mempool{
 		txs:    make(map[chainhash.Hash]bool),
 		inputs: make(map[wire.OutPoint]chainhash.Hash),
+		client: client,
 	}
 }
 
@@ -178,4 +183,83 @@ func (m *mempool) updateInputs(tx *wire.MsgTx) {
 		// overwrite it.
 		m.inputs[outpoint] = tx.TxHash()
 	}
+}
+
+// LoadMempool loads all the raw transactions found in mempool.
+func (m *mempool) LoadMempool() error {
+	txs, err := m.client.GetRawMempool()
+	if err != nil {
+		log.Errorf("Unable to get raw mempool txs: %v", err)
+		return err
+	}
+
+	m.Lock()
+	defer m.Unlock()
+
+	for _, txHash := range txs {
+		// Grab full mempool transaction from hash.
+		tx, err := m.client.GetRawTransaction(txHash)
+		if err != nil {
+			log.Errorf("unable to fetch transaction %s for "+
+				"mempool: %v", txHash, err)
+			continue
+		}
+
+		// Add the transaction to our local mempool.
+		m.add(tx.MsgTx())
+	}
+
+	return nil
+}
+
+// UpdateMempoolTxes takes a slice of transactions from the current mempool and
+// use it to update its internal mempool. It returns a slice of transactions
+// that's new to its internal mempool.
+func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
+	m.Lock()
+	defer m.Unlock()
+
+	// txesToNotify is a list of txes to be notified to the client.
+	txesToNotify := make([]*wire.MsgTx, 0, len(txids))
+
+	// Set all mempool txs to false.
+	m.unmarkAll()
+
+	// We'll scan through the most recent txs in the mempool to see whether
+	// there are new txs that we need to send to the client.
+	for _, txHash := range txids {
+		// If the transaction is already in our local mempool, then we
+		// have already sent it to the client.
+		if m.containsTx(*txHash) {
+			// Mark the tx as true so that we know not to remove it
+			// from our internal mempool.
+			m.mark(*txHash)
+			continue
+		}
+
+		// Grab full mempool transaction from hash.
+		tx, err := m.client.GetRawTransaction(txHash)
+		if err != nil {
+			log.Errorf("unable to fetch transaction %s from "+
+				"mempool: %v", txHash, err)
+			continue
+		}
+
+		// Add the transaction to our local mempool. Note that we only
+		// do this after fetching the full raw transaction from
+		// bitcoind. We do this so that if that call happens to
+		// initially fail, then we will retry it on the next interval
+		// since it is still not in our local mempool.
+		m.add(tx.MsgTx())
+
+		// Save the tx to the slice.
+		txesToNotify = append(txesToNotify, tx.MsgTx())
+	}
+
+	// Now, we clear our internal mempool of any unmarked transactions.
+	// These are all the transactions that we still have in the mempool but
+	// that were not returned in the latest GetRawMempool query.
+	m.deleteUnmarked()
+
+	return txesToNotify
 }
