@@ -399,6 +399,11 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 	for {
 		select {
 		case <-ticker.C:
+			log.Debugf("Reconciling mempool spends with node " +
+				"mempool...")
+
+			now := time.Now()
+
 			// After each ticker interval, we poll the mempool to
 			// check for transactions we haven't seen yet.
 			txs, err := b.mempool.client.GetRawMempool()
@@ -410,6 +415,9 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 
 			// Update our local mempool with the new mempool.
 			b.mempool.UpdateMempoolTxes(txs)
+
+			log.Debugf("Reconciled mempool spends in %v",
+				time.Since(now))
 
 		case <-b.quit:
 			return

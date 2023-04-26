@@ -2,6 +2,7 @@ package chain
 
 import (
 	"sync"
+	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -187,6 +188,10 @@ func (m *mempool) updateInputs(tx *wire.MsgTx) {
 
 // LoadMempool loads all the raw transactions found in mempool.
 func (m *mempool) LoadMempool() error {
+	log.Debugf("Loading mempool spends...")
+
+	now := time.Now()
+
 	txs, err := m.client.GetRawMempool()
 	if err != nil {
 		log.Errorf("Unable to get raw mempool txs: %v", err)
@@ -200,7 +205,7 @@ func (m *mempool) LoadMempool() error {
 		// Grab full mempool transaction from hash.
 		tx, err := m.client.GetRawTransaction(txHash)
 		if err != nil {
-			log.Errorf("unable to fetch transaction %s for "+
+			log.Warnf("unable to fetch transaction %s for "+
 				"mempool: %v", txHash, err)
 			continue
 		}
@@ -208,6 +213,8 @@ func (m *mempool) LoadMempool() error {
 		// Add the transaction to our local mempool.
 		m.add(tx.MsgTx())
 	}
+
+	log.Debugf("Loaded mempool spends in %v", time.Since(now))
 
 	return nil
 }
@@ -240,7 +247,7 @@ func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
 		// Grab full mempool transaction from hash.
 		tx, err := m.client.GetRawTransaction(txHash)
 		if err != nil {
-			log.Errorf("unable to fetch transaction %s from "+
+			log.Warnf("unable to fetch transaction %s from "+
 				"mempool: %v", txHash, err)
 			continue
 		}
