@@ -386,6 +386,10 @@ func (b *bitcoindZMQEvents) txEventHandler() {
 func (b *bitcoindZMQEvents) mempoolPoller() {
 	defer b.wg.Done()
 
+	// We'll wait to start the main reconciliation loop until we're doing
+	// the initial mempool load.
+	b.mempool.WaitForInit()
+
 	log.Info("Started polling mempool to cache new transactions")
 
 	// Create a ticker that fires randomly.

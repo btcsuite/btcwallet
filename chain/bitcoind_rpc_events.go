@@ -224,7 +224,11 @@ func (b *bitcoindRPCPollingEvents) blockEventHandlerRPC(startHeight int32) {
 func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 	defer b.wg.Done()
 
-	log.Info("Started polling for new bitcoind transactions via RPC.")
+	// We'll wait to start the main reconciliation loop until we're doing
+	// the initial mempool load.
+	b.mempool.WaitForInit()
+
+	log.Info("Started polling mempool for new bitcoind transactions via RPC.")
 
 	// Create a ticker that fires randomly.
 	rand.Seed(time.Now().UnixNano())
