@@ -118,7 +118,7 @@ func (m *mempool) add(tx *wire.MsgTx) {
 }
 
 // UnmarkAll un-marks all the transactions in the mempool. This should be done
-// just before we re-evaluate the contents of our local mempool comared to the
+// just before we re-evaluate the contents of our local mempool compared to the
 // chain backend's mempool.
 func (m *mempool) UnmarkAll() {
 	m.Lock()
@@ -128,7 +128,7 @@ func (m *mempool) UnmarkAll() {
 }
 
 // unmarkAll un-marks all the transactions in the mempool. This should be done
-// just before we re-evaluate the contents of our local mempool comared to the
+// just before we re-evaluate the contents of our local mempool compared to the
 // chain backend's mempool.
 //
 // NOTE: must be used inside a lock.
@@ -138,7 +138,7 @@ func (m *mempool) unmarkAll() {
 	}
 }
 
-// mark marks the transaction of the given hash to indicate that it is still
+// Mark marks the transaction of the given hash to indicate that it is still
 // present in the chain backend's mempool.
 func (m *mempool) Mark(hash chainhash.Hash) {
 	m.Lock()
@@ -273,7 +273,7 @@ func (m *mempool) LoadMempool() error {
 			})
 		}
 
-		eg.Wait()
+		_ = eg.Wait()
 
 		log.Debugf("Loaded mempool spends in %v", time.Since(now))
 
@@ -339,7 +339,7 @@ func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
 		})
 	}
 
-	eg.Wait()
+	_ = eg.Wait()
 
 	// Now, we clear our internal mempool of any unmarked transactions.
 	// These are all the transactions that we still have in the mempool but
