@@ -15,9 +15,9 @@ const (
 	// for new blocks.
 	defaultBlockPollInterval = time.Second * 10
 
-	// defaultTxPollInterval is the default interval used for querying
-	// for new mempool transactions.
-	defaultTxPollInterval = time.Second * 10
+	// defaultTxPollInterval is the default interval used for querying for
+	// new mempool transactions.
+	defaultTxPollInterval = time.Second * 60
 )
 
 // PollingConfig holds all the config options used for setting up
@@ -224,7 +224,11 @@ func (b *bitcoindRPCPollingEvents) blockEventHandlerRPC(startHeight int32) {
 func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 	defer b.wg.Done()
 
-	log.Info("Started polling for new bitcoind transactions via RPC.")
+	// We'll wait to start the main reconciliation loop until we're doing
+	// the initial mempool load.
+	b.mempool.WaitForInit()
+
+	log.Info("Started polling mempool for new bitcoind transactions via RPC.")
 
 	// Create a ticker that fires randomly.
 	rand.Seed(time.Now().UnixNano())
@@ -237,6 +241,11 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 	for {
 		select {
 		case <-ticker.C:
+			log.Debugf("Reconciling mempool spends with node " +
+				"mempool...")
+
+			now := time.Now()
+
 			// After each ticker interval, we poll the mempool to
 			// check for transactions we haven't seen yet.
 			txs, err := b.client.GetRawMempool()
@@ -248,6 +257,9 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 
 			// Update our local mempool with the new mempool.
 			newTxs := b.mempool.UpdateMempoolTxes(txs)
+
+			log.Debugf("Reconciled mempool spends in %v",
+				time.Since(now))
 
 			// Notify the client of each new transaction.
 			for _, tx := range newTxs {
