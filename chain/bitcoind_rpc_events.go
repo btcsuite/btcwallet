@@ -15,9 +15,9 @@ const (
 	// for new blocks.
 	defaultBlockPollInterval = time.Second * 10
 
-	// defaultTxPollInterval is the default interval used for querying
-	// for new mempool transactions.
-	defaultTxPollInterval = time.Second * 10
+	// defaultTxPollInterval is the default interval used for querying for
+	// new mempool transactions.
+	defaultTxPollInterval = time.Second * 60
 )
 
 // PollingConfig holds all the config options used for setting up
