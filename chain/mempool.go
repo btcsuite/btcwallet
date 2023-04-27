@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"runtime"
 	"sync"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
+	"golang.org/x/sync/errgroup"
 )
 
 // mempool represents our view of the mempool and helps to keep track of which
@@ -70,6 +72,17 @@ func (m *mempool) Add(tx *wire.MsgTx) {
 	defer m.Unlock()
 
 	m.add(tx)
+}
+
+// ContainsTx returns true if the given transaction hash is already in our
+// mempool.
+//
+// NOTE: must be used inside a lock.
+func (m *mempool) ContainsTx(hash chainhash.Hash) bool {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.containsTx(hash)
 }
 
 // containsTx returns true if the given transaction hash is already in our
@@ -238,18 +251,29 @@ func (m *mempool) LoadMempool() error {
 	}
 
 	go func() {
-		for _, txHash := range txs {
-			// Grab full mempool transaction from hash.
-			tx, err := m.client.GetRawTransaction(txHash)
-			if err != nil {
-				log.Warnf("unable to fetch transaction %s for "+
-					"mempool: %v", txHash, err)
-				continue
-			}
+		var eg errgroup.Group
+		eg.SetLimit(runtime.NumCPU())
 
-			// Add the transaction to our local mempool.
-			m.Add(tx.MsgTx())
+		for _, txHash := range txs {
+			txHash := txHash
+
+			eg.Go(func() error {
+				// Grab full mempool transaction from hash.
+				tx, err := m.client.GetRawTransaction(txHash)
+				if err != nil {
+					log.Warnf("unable to fetch "+
+						"transaction %s for "+
+						"mempool: %v", txHash, err)
+					return nil
+				}
+
+				// Add the transaction to our local mempool.
+				m.Add(tx.MsgTx())
+				return nil
+			})
 		}
+
+		eg.Wait()
 
 		log.Debugf("Loaded mempool spends in %v", time.Since(now))
 
@@ -266,41 +290,56 @@ func (m *mempool) LoadMempool() error {
 func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
 
 	// txesToNotify is a list of txes to be notified to the client.
+	var notixyMx sync.Mutex
 	txesToNotify := make([]*wire.MsgTx, 0, len(txids))
 
 	// Set all mempool txs to false.
 	m.UnmarkAll()
 
+	var eg errgroup.Group
+	eg.SetLimit(runtime.NumCPU())
+
 	// We'll scan through the most recent txs in the mempool to see whether
 	// there are new txs that we need to send to the client.
 	for _, txHash := range txids {
+		txHash := txHash
+
 		// If the transaction is already in our local mempool, then we
 		// have already sent it to the client.
-		if m.containsTx(*txHash) {
+		if m.ContainsTx(*txHash) {
 			// Mark the tx as true so that we know not to remove it
 			// from our internal mempool.
 			m.Mark(*txHash)
 			continue
 		}
 
-		// Grab full mempool transaction from hash.
-		tx, err := m.client.GetRawTransaction(txHash)
-		if err != nil {
-			log.Warnf("unable to fetch transaction %s from "+
-				"mempool: %v", txHash, err)
-			continue
-		}
+		eg.Go(func() error {
+			// Grab full mempool transaction from hash.
+			tx, err := m.client.GetRawTransaction(txHash)
+			if err != nil {
+				log.Warnf("unable to fetch transaction %s "+
+					"from mempool: %v", txHash, err)
+				return nil
+			}
 
-		// Add the transaction to our local mempool. Note that we only
-		// do this after fetching the full raw transaction from
-		// bitcoind. We do this so that if that call happens to
-		// initially fail, then we will retry it on the next interval
-		// since it is still not in our local mempool.
-		m.Add(tx.MsgTx())
+			// Add the transaction to our local mempool. Note that
+			// we only do this after fetching the full raw
+			// transaction from bitcoind. We do this so that if
+			// that call happens to initially fail, then we will
+			// retry it on the next interval since it is still not
+			// in our local mempool.
+			m.Add(tx.MsgTx())
 
-		// Save the tx to the slice.
-		txesToNotify = append(txesToNotify, tx.MsgTx())
+			// Save the tx to the slice.
+			notixyMx.Lock()
+			txesToNotify = append(txesToNotify, tx.MsgTx())
+			notixyMx.Unlock()
+
+			return nil
+		})
 	}
+
+	eg.Wait()
 
 	// Now, we clear our internal mempool of any unmarked transactions.
 	// These are all the transactions that we still have in the mempool but
