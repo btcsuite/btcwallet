@@ -241,7 +241,7 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 	for {
 		select {
 		case <-ticker.C:
-			log.Debugf("Reconciling mempool spends with node " +
+			log.Tracef("Reconciling mempool spends with node " +
 				"mempool...")
 
 			now := time.Now()
@@ -258,7 +258,7 @@ func (b *bitcoindRPCPollingEvents) txEventHandlerRPC() {
 			// Update our local mempool with the new mempool.
 			newTxs := b.mempool.UpdateMempoolTxes(txs)
 
-			log.Debugf("Reconciled mempool spends in %v",
+			log.Tracef("Reconciled mempool spends in %v",
 				time.Since(now))
 
 			// Notify the client of each new transaction.
