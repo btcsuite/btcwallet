@@ -8,6 +8,88 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestCachedInputs tests that the cachedInputs works as expected.
+func TestCachedInputs(t *testing.T) {
+	require := require.New(t)
+
+	// Create test inputs and tx.
+	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
+	op2 := wire.OutPoint{Hash: chainhash.Hash{2}}
+	tx := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+			{PreviousOutPoint: op2},
+		},
+	}
+
+	c := newCachedInputs()
+
+	// Lookup should give us nothing.
+	txid, ok := c.hasInput(op1)
+	require.False(ok)
+	require.Zero(txid)
+
+	// Add the input.
+	c.addInput(op1, tx.TxHash())
+
+	// Lookup should now give us the txid.
+	txid, ok = c.hasInput(op1)
+	require.True(ok)
+	require.Equal(tx.TxHash(), txid)
+
+	// Add another input.
+	c.addInput(op2, tx.TxHash())
+
+	// Delete the inputs.
+	c.removeInputsFromTx(txid)
+
+	// Lookup should now give us nothing.
+	txid, ok = c.hasInput(op1)
+	require.False(ok)
+	require.Zero(txid)
+
+	txid, ok = c.hasInput(op2)
+	require.False(ok)
+	require.Zero(txid)
+}
+
+func TestCachedInputsAddInput(t *testing.T) {
+	require := require.New(t)
+
+	// Create a test input and tx.
+	op := wire.OutPoint{Hash: chainhash.Hash{1}}
+	tx := &wire.MsgTx{
+		LockTime: 1,
+		TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
+	}
+
+	// replacedTx spends the same input as tx.
+	replacedTx := &wire.MsgTx{
+		// Use a different locktime to ensure the txid is different.
+		LockTime: 2,
+		TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
+	}
+
+	c := newCachedInputs()
+
+	// Add the input.
+	c.addInput(op, tx.TxHash())
+
+	// Lookup should now give us the txid.
+	txid, ok := c.hasInput(op)
+	require.True(ok)
+	require.Equal(tx.TxHash(), txid)
+
+	// Add the input again using the replacement tx.
+	c.addInput(op, replacedTx.TxHash())
+
+	// Lookup should now give us the replacement txid.
+	txid, ok = c.hasInput(op)
+	require.True(ok)
+	require.Equal(replacedTx.TxHash(), txid)
+}
+
 // TestMempool tests that each method of the mempool struct works as expected.
 func TestMempool(t *testing.T) {
 	require := require.New(t)
