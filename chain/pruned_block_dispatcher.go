@@ -134,7 +134,7 @@ type PrunedBlockDispatcher struct {
 
 	// workManager handles satisfying all of our incoming pruned block
 	// requests.
-	workManager *query.WorkManager
+	workManager query.WorkManager
 
 	// blocksQueried represents the set of pruned blocks we've been
 	// requested to query. Each block maps to a list of clients waiting to
@@ -191,7 +191,7 @@ func NewPrunedBlockDispatcher(cfg *PrunedBlockDispatcherConfig) (
 	peersConnected := make(chan query.Peer)
 	return &PrunedBlockDispatcher{
 		cfg: *cfg,
-		workManager: query.New(&query.Config{
+		workManager: query.NewWorkManager(&query.Config{
 			ConnectedPeers: func() (<-chan query.Peer, func(), error) {
 				return peersConnected, func() {}, nil
 			},
