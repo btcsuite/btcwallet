@@ -12,6 +12,69 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// cachedInputs caches the inputs of the transactions in the mempool. This is
+// used to provide fast lookup between txids and inputs.
+type cachedInputs struct {
+	// inputs provides a fast lookup from input -> txid.
+	inputs map[wire.OutPoint]chainhash.Hash
+
+	// txids provides a fast lookup from txid -> inputs.
+	txids map[chainhash.Hash]map[wire.OutPoint]struct{}
+}
+
+// newCachedInputs creates a new cachedInputs.
+func newCachedInputs() *cachedInputs {
+	return &cachedInputs{
+		inputs: make(map[wire.OutPoint]chainhash.Hash),
+		txids:  make(map[chainhash.Hash]map[wire.OutPoint]struct{}),
+	}
+}
+
+// hasInput returns the txid and a boolean to indicate the given input is
+// found.
+func (c *cachedInputs) hasInput(op wire.OutPoint) (chainhash.Hash, bool) {
+	txid, ok := c.inputs[op]
+	return txid, ok
+}
+
+// addInput adds the given input to our cached inputs. If the input already
+// exists, the `inputs` map will be overwritten and the `txids` map will be
+// updated.
+func (c *cachedInputs) addInput(op wire.OutPoint, txid chainhash.Hash) {
+	// Init the map for this txid if it doesn't exist.
+	if _, ok := c.txids[txid]; !ok {
+		c.txids[txid] = make(map[wire.OutPoint]struct{})
+	}
+
+	// Add the input under this txid.
+	c.txids[txid][op] = struct{}{}
+
+	// Check if the input already exists.
+	oldTxid, existed := c.inputs[op]
+
+	// If existed, update the old txid to remove the input.
+	if existed {
+		log.Tracef("Input %s was spent in tx %s, now spent in %s",
+			op, oldTxid, txid)
+
+		delete(c.txids[oldTxid], op)
+	}
+
+	// Add the input to the inputs map with the new txid.
+	c.inputs[op] = txid
+}
+
+// removeInputsFromTx removes the inputs of the given txid from our cached
+// inputs maps.
+func (c *cachedInputs) removeInputsFromTx(txid chainhash.Hash) {
+	// Remove the inputs stored of this tx.
+	for op := range c.txids[txid] {
+		delete(c.inputs, op)
+	}
+
+	delete(c.txids, txid)
+}
+
 // mempool represents our view of the mempool and helps to keep track of which
 // mempool transactions we already know about. The boolean in the txs map is
 // used to indicate if we should remove the tx from our local mempool due to
@@ -27,7 +90,7 @@ type mempool struct {
 	//
 	// TODO(yy): create similar maps to provide faster lookup for output
 	// scripts.
-	inputs map[wire.OutPoint]chainhash.Hash
+	inputs *cachedInputs
 
 	// client is the rpc client that we'll use to query for the mempool.
 	client *rpcclient.Client
@@ -41,7 +104,7 @@ type mempool struct {
 func newMempool(client *rpcclient.Client) *mempool {
 	return &mempool{
 		txs:     make(map[chainhash.Hash]bool),
-		inputs:  make(map[wire.OutPoint]chainhash.Hash),
+		inputs:  newCachedInputs(),
 		initFin: make(chan struct{}),
 		client:  client,
 	}
@@ -99,8 +162,7 @@ func (m *mempool) containsTx(hash chainhash.Hash) bool {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) containsInput(op wire.OutPoint) (chainhash.Hash, bool) {
-	txid, ok := m.inputs[op]
-	return txid, ok
+	return m.inputs.hasInput(op)
 }
 
 // add inserts the given hash into our mempool and marks it to indicate that it
@@ -189,15 +251,8 @@ func (m *mempool) deleteUnmarked() {
 // mempool's inputs map.
 //
 // NOTE: must be used inside a lock.
-//
-// TODO(yy): create a txid -> [inputs] map to make this faster.
 func (m *mempool) removeInputs(tx chainhash.Hash) {
-	for outpoint, txid := range m.inputs {
-		if txid.IsEqual(&tx) {
-			// NOTE: it's safe to delete while iterating go map.
-			delete(m.inputs, outpoint)
-		}
-	}
+	m.inputs.removeInputsFromTx(tx)
 }
 
 // updateInputs takes a txid and populates the inputs of the tx into the
@@ -215,21 +270,8 @@ func (m *mempool) updateInputs(tx *wire.MsgTx) {
 	for _, input := range tx.TxIn {
 		outpoint := input.PreviousOutPoint
 
-		// Check whether this input has been spent in an old tx.
-		oldTxid, ok := m.inputs[outpoint]
-
-		// If not, add it to the map and continue.
-		if !ok {
-			m.inputs[outpoint] = tx.TxHash()
-			continue
-		}
-
-		log.Tracef("Input %s was spent in tx %s, now spent in %s",
-			outpoint, oldTxid, tx.TxHash())
-
-		// If the input has been spent in an old tx, we need to
-		// overwrite it.
-		m.inputs[outpoint] = tx.TxHash()
+		// Add the input to the cache.
+		m.inputs.addInput(outpoint, tx.TxHash())
 	}
 }
 
@@ -288,7 +330,6 @@ func (m *mempool) LoadMempool() error {
 // use it to update its internal mempool. It returns a slice of transactions
 // that's new to its internal mempool.
 func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
-
 	// txesToNotify is a list of txes to be notified to the client.
 	var notixyMx sync.Mutex
 	txesToNotify := make([]*wire.MsgTx, 0, len(txids))

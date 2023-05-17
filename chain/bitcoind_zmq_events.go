@@ -403,7 +403,7 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 	for {
 		select {
 		case <-ticker.C:
-			log.Debugf("Reconciling mempool spends with node " +
+			log.Tracef("Reconciling mempool spends with node " +
 				"mempool...")
 
 			now := time.Now()
@@ -420,7 +420,7 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 			// Update our local mempool with the new mempool.
 			b.mempool.UpdateMempoolTxes(txs)
 
-			log.Debugf("Reconciled mempool spends in %v",
+			log.Tracef("Reconciled mempool spends in %v",
 				time.Since(now))
 
 		case <-b.quit:
