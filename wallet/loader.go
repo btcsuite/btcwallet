@@ -42,6 +42,29 @@ var (
 	ErrExists = errors.New("wallet already exists")
 )
 
+// loaderConfig contains the configuration options for the loader.
+type loaderConfig struct {
+	walletSyncRetryInterval time.Duration
+}
+
+// defaultLoaderConfig returns the default configuration options for the loader.
+func defaultLoaderConfig() *loaderConfig {
+	return &loaderConfig{
+		walletSyncRetryInterval: defaultSyncRetryInterval,
+	}
+}
+
+// LoaderOption is a configuration option for the loader.
+type LoaderOption func(*loaderConfig)
+
+// WithWalletSyncRetryInterval specifies the interval at which the wallet
+// should retry syncing to the chain if it encounters an error.
+func WithWalletSyncRetryInterval(interval time.Duration) LoaderOption {
+	return func(c *loaderConfig) {
+		c.walletSyncRetryInterval = interval
+	}
+}
+
 // Loader implements the creating of new and opening of existing wallets, while
 // providing a callback system for other subsystems to handle the loading of a
 // wallet.  This is primarily intended for use by the RPC servers, to enable
@@ -50,6 +73,7 @@ var (
 //
 // Loader is safe for concurrent access.
 type Loader struct {
+	cfg            *loaderConfig
 	callbacks      []func(*Wallet)
 	chainParams    *chaincfg.Params
 	dbDirPath      string
@@ -68,10 +92,16 @@ type Loader struct {
 // recovery window is non-zero, the wallet will attempt to recovery addresses
 // starting from the last SyncedTo height.
 func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
-	noFreelistSync bool, timeout time.Duration,
-	recoveryWindow uint32) *Loader {
+	noFreelistSync bool, timeout time.Duration, recoveryWindow uint32,
+	opts ...LoaderOption) *Loader {
+
+	cfg := defaultLoaderConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
 
 	return &Loader{
+		cfg:            cfg,
 		chainParams:    chainParams,
 		dbDirPath:      dbDirPath,
 		noFreelistSync: noFreelistSync,
@@ -86,7 +116,8 @@ func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
 // to store the wallet. Given that the external DB may be shared an additional
 // function is also passed which will override Loader.WalletExists().
 func NewLoaderWithDB(chainParams *chaincfg.Params, recoveryWindow uint32,
-	db walletdb.DB, walletExists func() (bool, error)) (*Loader, error) {
+	db walletdb.DB, walletExists func() (bool, error),
+	opts ...LoaderOption) (*Loader, error) {
 
 	if db == nil {
 		return nil, fmt.Errorf("no DB provided")
@@ -96,7 +127,13 @@ func NewLoaderWithDB(chainParams *chaincfg.Params, recoveryWindow uint32,
 		return nil, fmt.Errorf("unable to check if wallet exists")
 	}
 
+	cfg := defaultLoaderConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	return &Loader{
+		cfg:            cfg,
 		chainParams:    chainParams,
 		recoveryWindow: recoveryWindow,
 		localDB:        false,
@@ -251,7 +288,10 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
 	}
 
 	// Open the newly-created wallet.
-	w, err := Open(l.db, pubPassphrase, nil, l.chainParams, l.recoveryWindow)
+	w, err := OpenWithRetry(
+		l.db, pubPassphrase, nil, l.chainParams, l.recoveryWindow,
+		l.cfg.walletSyncRetryInterval,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +311,9 @@ func noConsole() ([]byte, error) {
 // and the public passphrase.  If the loader is being called by a context where
 // standard input prompts may be used during wallet upgrades, setting
 // canConsolePrompt will enables these prompts.
-func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool) (*Wallet, error) {
+func (l *Loader) OpenExistingWallet(pubPassphrase []byte,
+	canConsolePrompt bool) (*Wallet, error) {
+
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
@@ -309,7 +351,10 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte, canConsolePrompt bool)
 			ObtainPrivatePass: noConsole,
 		}
 	}
-	w, err := Open(l.db, pubPassphrase, cbs, l.chainParams, l.recoveryWindow)
+	w, err := OpenWithRetry(
+		l.db, pubPassphrase, cbs, l.chainParams, l.recoveryWindow,
+		l.cfg.walletSyncRetryInterval,
+	)
 	if err != nil {
 		// If opening the wallet fails (e.g. because of wrong
 		// passphrase), we must close the backing database to

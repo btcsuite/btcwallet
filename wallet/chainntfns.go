@@ -6,7 +6,6 @@ package wallet
 
 import (
 	"bytes"
-	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -84,6 +83,42 @@ func (w *Wallet) handleChainNotifications() {
 		return err
 	}
 
+	waitForSync := func(birthdayBlock *waddrmgr.BlockStamp) error {
+		// We start with a retry delay of 0 to execute the first attempt
+		// immediately.
+		var retryDelay time.Duration
+		for {
+			select {
+			case <-time.After(retryDelay):
+				// Set the delay to the configured value in case
+				// we actually need to re-try.
+				retryDelay = w.syncRetryInterval
+
+				// Sync may be interrupted by actions such as
+				// locking the wallet. Try again after waiting a
+				// bit.
+				err = w.syncWithChain(birthdayBlock)
+				if err != nil {
+					if w.ShuttingDown() {
+						return ErrWalletShuttingDown
+					}
+
+					log.Errorf("Unable to synchronize "+
+						"wallet to chain, trying "+
+						"again in %s: %v",
+						w.syncRetryInterval, err)
+
+					continue
+				}
+
+				return nil
+
+			case <-w.quitChan():
+				return ErrWalletShuttingDown
+			}
+		}
+	}
+
 	for {
 		select {
 		case n, ok := <-chainClient.Notifications():
@@ -106,17 +141,23 @@ func (w *Wallet) handleChainNotifications() {
 				birthdayBlock, err := birthdaySanityCheck(
 					chainClient, birthdayStore,
 				)
-				if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
-					panic(fmt.Errorf("unable to sanity "+
-						"check wallet birthday block: %v",
-						err))
+				if err != nil && !waddrmgr.IsError(
+					err, waddrmgr.ErrBirthdayBlockNotSet,
+				) {
+
+					log.Errorf("Unable to sanity check "+
+						"wallet birthday block: %v",
+						err)
 				}
 
-				err = w.syncWithChain(birthdayBlock)
-				if err != nil && !w.ShuttingDown() {
-					panic(fmt.Errorf("unable to synchronize "+
-						"wallet to chain: %v", err))
+				err = waitForSync(birthdayBlock)
+				if err != nil {
+					log.Infof("Stopped waiting for wallet "+
+						"sync due to error: %v", err)
+
+					return
 				}
+
 			case chain.BlockConnected:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 					return w.connectBlock(tx, wtxmgr.BlockMeta(n))

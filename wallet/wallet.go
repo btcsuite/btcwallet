@@ -50,6 +50,10 @@ const (
 	// scanned successively by the recovery manager, in the event that the
 	// wallet is started in recovery mode.
 	recoveryBatchSize = 2000
+
+	// defaultSyncRetryInterval is the default amount of time to wait
+	// between re-tries on errors during initial sync.
+	defaultSyncRetryInterval = 5 * time.Second
 )
 
 var (
@@ -145,6 +149,10 @@ type Wallet struct {
 	started bool
 	quit    chan struct{}
 	quitMu  sync.Mutex
+
+	// syncRetryInterval is the amount of time to wait between re-tries on
+	// errors during initial sync.
+	syncRetryInterval time.Duration
 }
 
 // Start starts the goroutines necessary to manage a wallet.
@@ -3951,6 +3959,18 @@ func create(db walletdb.DB, pubPass, privPass []byte,
 func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	params *chaincfg.Params, recoveryWindow uint32) (*Wallet, error) {
 
+	return OpenWithRetry(
+		db, pubPass, cbs, params, recoveryWindow,
+		defaultSyncRetryInterval,
+	)
+}
+
+// OpenWithRetry loads an already-created wallet from the passed database and
+// namespaces and re-tries on errors during initial sync.
+func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
+	params *chaincfg.Params, recoveryWindow uint32,
+	syncRetryInterval time.Duration) (*Wallet, error) {
+
 	var (
 		addrMgr *waddrmgr.Manager
 		txMgr   *wtxmgr.Store
@@ -4015,6 +4035,7 @@ func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		changePassphrases:   make(chan changePassphrasesRequest),
 		chainParams:         params,
 		quit:                make(chan struct{}),
+		syncRetryInterval:   syncRetryInterval,
 	}
 
 	w.NtfnServer = newNotificationServer(w)
