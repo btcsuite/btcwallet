@@ -3533,6 +3533,25 @@ func (e *ErrReplacement) Unwrap() error {
 	return e.backendError
 }
 
+// ErrMempoolFee is an error returned from PublishTransaction in case the
+// published transaction failed to propagate since it did not match the
+// current mempool fee requirement.
+type ErrMempoolFee struct {
+	backendError error
+}
+
+// Error returns the string representation of ErrMempoolFee.
+//
+// NOTE: Satisfies the error interface.
+func (e *ErrMempoolFee) Error() string {
+	return fmt.Sprintf("mempool fee not met: %v", e.backendError)
+}
+
+// Unwrap returns the underlying error returned from the backend.
+func (e *ErrMempoolFee) Unwrap() error {
+	return e.backendError
+}
+
 // PublishTransaction sends the transaction to the consensus RPC server so it
 // can be propagated to other nodes and eventually mined.
 //
@@ -3785,6 +3804,37 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	// https://github.com/btcsuite/btcd/blob/130ea5bddde33df32b06a1cdb42a6316eb73cff5/mempool/mempool.go#L913
 	case match(err, "replacement transaction"):
 		returnErr = &ErrReplacement{
+			backendError: err,
+		}
+
+	// Returned by bitcoind when a transaction does not meet the fee
+	// requirements to be accepted into mempool. This happens when the
+	// mempool reached its limits and is now purging low fee transactions.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L510
+	case match(err, "mempool min fee not met"):
+		fallthrough
+
+	// Returned by btcd when a transaction does not meet the fee
+	// requirements to be accepted into mempool.
+	// https://github.com/btcsuite/btcd/blob/9c16d23918b15c468c5647c388b9b7db3bc48dc7/mempool/mempool.go#L1151
+	case match(err, "fees which is under the required amount"):
+		fallthrough
+
+	// Returned by btcd when a transaction does not meet the fee
+	// requirements to be accepted into mempool. The error states priority
+	// but decreasing the min relay fee prevents checking for the priority
+	// in the first place therefore we consider this a mempool fee error.
+	// https://github.com/btcsuite/btcd/blob/9c16d23918b15c468c5647c388b9b7db3bc48dc7/mempool/mempool.go#L1162
+	case match(err, "has insufficient priority"):
+		fallthrough
+
+	// Returned by bitcoind when a transaction does not meet the fee
+	// requirements to be accepted into mempool because the policy of the
+	// mempool has a higher min relay fee. Default value for bitcoind is
+	// 1000 sat/kvbyte but this is configurable.
+	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/validation.cpp#L514
+	case match(err, "min relay fee not met"):
+		returnErr = &ErrMempoolFee{
 			backendError: err,
 		}
 
