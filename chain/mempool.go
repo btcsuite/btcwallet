@@ -52,11 +52,19 @@ func (c *cachedInputs) addInput(op wire.OutPoint, txid chainhash.Hash) {
 	// Check if the input already exists.
 	oldTxid, existed := c.inputs[op]
 
-	// If existed, update the old txid to remove the input.
-	if existed {
+	// If the oldTxid exists and is different from the current txid, we
+	// need to update the oldTxid's inputs map.
+	isReplacement := false
+	if existed && oldTxid != txid {
+		isReplacement = true
+	}
+
+	// If the input is replaced, update the old txid to remove the input.
+	if isReplacement {
 		log.Tracef("Input %s was spent in tx %s, now spent in %s",
 			op, oldTxid, txid)
 
+		// Delete the input from the nested map under this old tx.
 		delete(c.txids[oldTxid], op)
 	}
 
