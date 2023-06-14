@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"math"
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -311,4 +312,94 @@ func TestMempool(t *testing.T) {
 	txid, found = m.containsInput(op3)
 	require.True(found)
 	require.Equal(tx3.TxHash(), txid)
+}
+
+// TestMempoolAdd adds a coinbase tx, a normal tx, and a replacement tx to the
+// mempool and checks the mempool's internal state is updated as expected.
+func TestMempoolAdd(t *testing.T) {
+	require := require.New(t)
+
+	m := newMempool(nil)
+
+	// Create a coinbase transaction.
+	tx0 := &wire.MsgTx{
+		TxIn: []*wire.TxIn{
+			{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{},
+					Index: math.MaxUint32,
+				},
+			},
+		},
+	}
+
+	// Create a normal transaction that has two inputs.
+	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
+	op2 := wire.OutPoint{Hash: chainhash.Hash{2}}
+	tx1 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+			{PreviousOutPoint: op2},
+		},
+	}
+
+	// Create a replacement transaction that spends one of the inputs as
+	// tx1.
+	op3 := wire.OutPoint{Hash: chainhash.Hash{3}}
+	tx2 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op2},
+			{PreviousOutPoint: op3},
+		},
+	}
+
+	// Now add all the transactions.
+	m.add(tx0)
+	m.add(tx1)
+	m.add(tx2)
+
+	// Check transactions are updated, mempool should now contain two
+	// transactions.
+	require.False(m.containsTx(tx0.TxHash()))
+	require.True(m.containsTx(tx1.TxHash()))
+	require.True(m.containsTx(tx2.TxHash()))
+
+	// Check inputs are updated.
+	//
+	// Mempool should contain op1 and point it to tx1.
+	txid, found := m.containsInput(op1)
+	require.True(found)
+	require.Equal(tx1.TxHash(), txid)
+
+	// Mempool should contain op2 and point it to tx2 since it's replace.
+	txid, found = m.containsInput(op2)
+	require.True(found)
+	require.Equal(tx2.TxHash(), txid)
+
+	// Mempool should contain op3 and point it to tx2.
+	txid, found = m.containsInput(op3)
+	require.True(found)
+	require.Equal(tx2.TxHash(), txid)
+
+	// Check the mempool's internal state.
+	//
+	// We should see two transactions in the mempool, tx1 and tx2.
+	require.Len(m.txs, 2)
+
+	// Check the internal state of the mempool's inputs.
+	cachedInputs := m.inputs
+
+	// We should see three inputs.
+	require.Len(cachedInputs.inputs, 3)
+
+	// We should see two transactions.
+	require.Len(cachedInputs.txids, 2)
+
+	// We should one input under tx1's nested map.
+	require.Len(cachedInputs.txids[tx1.TxHash()], 1)
+
+	// We should see two input under tx2's nested map.
+	require.Len(cachedInputs.txids[tx2.TxHash()], 2)
 }

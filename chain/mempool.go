@@ -178,6 +178,12 @@ func (m *mempool) containsInput(op wire.OutPoint) (chainhash.Hash, bool) {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) add(tx *wire.MsgTx) {
+	// Skip coinbase inputs.
+	if blockchain.IsCoinBaseTx(tx) {
+		log.Debugf("Skipping coinbase tx %v", tx.TxHash())
+		return
+	}
+
 	hash := tx.TxHash()
 
 	// Add the txid to the mempool map.
@@ -268,12 +274,6 @@ func (m *mempool) removeInputs(tx chainhash.Hash) {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) updateInputs(tx *wire.MsgTx) {
-	// Skip coinbase inputs.
-	if blockchain.IsCoinBaseTx(tx) {
-		log.Debugf("Skipping coinbase tx %v", tx.TxHash())
-		return
-	}
-
 	// Iterate the tx's inputs.
 	for _, input := range tx.TxIn {
 		outpoint := input.PreviousOutPoint
