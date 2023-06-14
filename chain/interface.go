@@ -123,3 +123,9 @@ type (
 		Time   time.Time
 	}
 )
+
+// rpcClient defines an interface that is used to interact with the RPC client.
+type rpcClient interface {
+	GetRawMempool() ([]*chainhash.Hash, error)
+	GetRawTransaction(txHash *chainhash.Hash) (*btcutil.Tx, error)
+}

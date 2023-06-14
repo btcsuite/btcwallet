@@ -7,7 +7,6 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"golang.org/x/sync/errgroup"
 )
@@ -101,7 +100,7 @@ type mempool struct {
 	inputs *cachedInputs
 
 	// client is the rpc client that we'll use to query for the mempool.
-	client *rpcclient.Client
+	client rpcClient
 
 	// initFin is a channel that will be closed once the mempool has been
 	// initialized.
@@ -109,7 +108,7 @@ type mempool struct {
 }
 
 // newMempool creates a new mempool object.
-func newMempool(client *rpcclient.Client) *mempool {
+func newMempool(client rpcClient) *mempool {
 	return &mempool{
 		txs:     make(map[chainhash.Hash]bool),
 		inputs:  newCachedInputs(),

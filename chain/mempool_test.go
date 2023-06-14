@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/stretchr/testify/require"
@@ -402,4 +403,118 @@ func TestMempoolAdd(t *testing.T) {
 
 	// We should see two input under tx2's nested map.
 	require.Len(cachedInputs.txids[tx2.TxHash()], 2)
+}
+
+// TestUpdateMempoolTxes tests that the mempool's internal state is updated as
+// expected when receiving new transactions.
+func TestUpdateMempoolTxes(t *testing.T) {
+	require := require.New(t)
+
+	// Create a mock client and init our mempool.
+	mockRPC := &mockRPCClient{}
+	m := newMempool(mockRPC)
+
+	// Create a normal transaction that has two inputs.
+	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
+	op2 := wire.OutPoint{Hash: chainhash.Hash{2}}
+	tx1 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+			{PreviousOutPoint: op2},
+		},
+	}
+	tx1Hash := tx1.TxHash()
+	btcTx1 := btcutil.NewTx(tx1)
+
+	// Create another transaction.
+	op3 := wire.OutPoint{Hash: chainhash.Hash{3}}
+	tx2 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op3},
+		},
+	}
+	tx2Hash := tx2.TxHash()
+	btctx2 := btcutil.NewTx(tx2)
+
+	// Create the current mempool state.
+	mempool1 := []*chainhash.Hash{&tx1Hash, &tx2Hash}
+
+	// Mock the client to return the txes.
+	mockRPC.On("GetRawTransaction", &tx1Hash).Return(btcTx1, nil).Once()
+	mockRPC.On("GetRawTransaction", &tx2Hash).Return(btctx2, nil).Once()
+
+	// Update our mempool using the above mempool state.
+	newTxes := m.UpdateMempoolTxes(mempool1)
+
+	// We expect two transactions.
+	require.Len(newTxes, 2)
+
+	// Create a new mempool state.
+	//
+	// Create a tx that replaces one input of tx1.
+	tx3 := &wire.MsgTx{
+		LockTime: 2,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+		},
+	}
+	tx3Hash := tx3.TxHash()
+	btctx3 := btcutil.NewTx(tx3)
+
+	// Create a tx that replaces tx2.
+	tx4 := &wire.MsgTx{
+		LockTime: 2,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op3},
+		},
+	}
+	tx4Hash := tx4.TxHash()
+	btctx4 := btcutil.NewTx(tx4)
+
+	// Create the new mempool state, where tx2 is evicted and tx3 and tx4
+	// are added. Technically it's impossible to have tx1 still in the
+	// mempool.
+	mempool2 := []*chainhash.Hash{&tx1Hash, &tx3Hash, &tx4Hash}
+
+	// Mock the client to return the txes.
+	mockRPC.On("GetRawTransaction", &tx3Hash).Return(btctx3, nil).Once()
+	mockRPC.On("GetRawTransaction", &tx4Hash).Return(btctx4, nil).Once()
+
+	// Update our mempool using the above mempool state.
+	newTxes = m.UpdateMempoolTxes(mempool2)
+
+	// We expect two transactions.
+	require.Len(newTxes, 2)
+
+	// Assert the mock client was called the expected number of times.
+	mockRPC.AssertExpectations(t)
+
+	// In addition, we want to check the mempool's internal state.
+	//
+	// We should see three transactions in the mempool.
+	require.Len(m.txs, 3)
+
+	// We should see three inputs.
+	require.Len(m.inputs.inputs, 3)
+
+	// We should see three transactions.
+	require.Len(m.inputs.txids, 3)
+
+	// We should one input under tx1's nested map and it should be op2
+	// since op1 is replaced.
+	require.Len(m.inputs.txids[tx1.TxHash()], 1)
+	require.Contains(m.inputs.txids[tx1.TxHash()], op2)
+
+	// We should one input under tx3's nested map and it should be op1.
+	require.Len(m.inputs.txids[tx3.TxHash()], 1)
+	require.Contains(m.inputs.txids[tx3.TxHash()], op1)
+
+	// We should one input under tx4's nested map and it should be op3.
+	require.Len(m.inputs.txids[tx4.TxHash()], 1)
+	require.Contains(m.inputs.txids[tx4.TxHash()], op3)
+
+	// We should see tx2 being removed.
+	require.NotContains(m.inputs.txids, tx2Hash)
 }

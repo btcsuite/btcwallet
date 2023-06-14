@@ -12,6 +12,7 @@ import (
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/banman"
 	"github.com/lightninglabs/neutrino/headerfs"
+	"github.com/stretchr/testify/mock"
 )
 
 var (
@@ -154,4 +155,24 @@ func (m *mockChainService) Stop() error {
 
 func (m *mockChainService) PeerByAddr(string) *neutrino.ServerPeer {
 	panic(errNotImplemented)
+}
+
+// mockRPCClient mocks the rpcClient interface.
+type mockRPCClient struct {
+	mock.Mock
+}
+
+// Compile time assertion that MockPeer implements lnpeer.Peer.
+var _ rpcClient = (*mockRPCClient)(nil)
+
+func (m *mockRPCClient) GetRawMempool() ([]*chainhash.Hash, error) {
+	args := m.Called()
+	return args.Get(0).([]*chainhash.Hash), args.Error(1)
+}
+
+func (m *mockRPCClient) GetRawTransaction(
+	txHash *chainhash.Hash) (*btcutil.Tx, error) {
+
+	args := m.Called(txHash)
+	return args.Get(0).(*btcutil.Tx), args.Error(1)
 }
