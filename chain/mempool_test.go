@@ -10,6 +10,186 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestCachedInputsHasInput checks that `hasInput` works as expected.
+func TestCachedInputsHasInput(t *testing.T) {
+	require := require.New(t)
+
+	// Create a test input and tx.
+	op := wire.OutPoint{Hash: chainhash.Hash{1}}
+	tx := &wire.MsgTx{
+		LockTime: 1,
+		TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
+	}
+
+	// Mannually construct the state.
+	c := newCachedInputs()
+	c.inputs[op.Hash] = map[txIndex]chainhash.Hash{
+		txIndex(op.Index): tx.TxHash(),
+	}
+
+	// Lookup should now give us the txid.
+	txid, ok := c.hasInput(op)
+	require.True(ok)
+	require.Equal(tx.TxHash(), txid)
+
+	// Lookup a non-existent input.
+	opNotExists := wire.OutPoint{Hash: chainhash.Hash{2}}
+	txid, ok = c.hasInput(opNotExists)
+	require.False(ok)
+	require.Zero(txid)
+
+	// Lookup an input whose tx hash exists but with a different index.
+	op.Index = 2
+	txid, ok = c.hasInput(op)
+	require.False(ok)
+	require.Zero(txid)
+}
+
+// TestCachedInputsUpdateInputs checks `updateInputs` behaves as expected.
+func TestCachedInputsUpdateInputs(t *testing.T) {
+	require := require.New(t)
+
+	// Create twp inputs that share the same tx hash.
+	opHash := chainhash.Hash{1}
+	op1 := wire.OutPoint{
+		Hash:  opHash,
+		Index: 1,
+	}
+	op2 := wire.OutPoint{
+		Hash:  opHash,
+		Index: 2,
+	}
+
+	tx := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+			{PreviousOutPoint: op2},
+		},
+	}
+
+	// Create a new cachedInputs.
+	c := newCachedInputs()
+
+	// Add first input.
+	oldTxid, isReplacement := c.updateInputs(op1, tx.TxHash())
+
+	// We should see an empty txid and isReplacement should be false.
+	require.Empty(oldTxid)
+	require.False(isReplacement)
+
+	// Check the internal state.
+	//
+	// We should have one input tx hash.
+	require.Len(c.inputs, 1)
+	require.Contains(c.inputs, opHash)
+
+	// We should have one input index under this tx hash.
+	require.Len(c.inputs[opHash], 1)
+	require.Contains(c.inputs[opHash], txIndex(op1.Index))
+
+	// The input should point to tx.
+	require.Equal(tx.TxHash(), c.inputs[opHash][txIndex(op1.Index)])
+
+	// Add the second input.
+	oldTxid, isReplacement = c.updateInputs(op2, tx.TxHash())
+
+	// We should see an empty txid and isReplacement should be false.
+	require.Empty(oldTxid)
+	require.False(isReplacement)
+
+	// Check the internal state and it should be updated.
+	//
+	// We should have one input tx hash.
+	require.Len(c.inputs, 1)
+	require.Contains(c.inputs, opHash)
+
+	// We should have two input indexes under this tx hash.
+	require.Len(c.inputs[opHash], 2)
+	require.Contains(c.inputs[opHash], txIndex(op1.Index))
+	require.Contains(c.inputs[opHash], txIndex(op2.Index))
+
+	// They should all point to the txid.
+	require.Equal(tx.TxHash(), c.inputs[opHash][txIndex(op1.Index)])
+	require.Equal(tx.TxHash(), c.inputs[opHash][txIndex(op2.Index)])
+
+	// Create a replacement tx.
+	tx2 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op2},
+		},
+	}
+
+	// Add first input again.
+	oldTxid, isReplacement = c.updateInputs(op2, tx2.TxHash())
+
+	// The old txid should be the same as tx.TxHash and isReplacement
+	// should be true.
+	require.Equal(tx.TxHash(), oldTxid)
+	require.True(isReplacement)
+
+	// Check the internal state and it should be updated.
+	//
+	// We should have one input tx hash.
+	require.Len(c.inputs, 1)
+	require.Contains(c.inputs, opHash)
+
+	// We should have two input indexes under this tx hash.
+	require.Len(c.inputs[opHash], 2)
+	require.Contains(c.inputs[opHash], txIndex(op1.Index))
+	require.Contains(c.inputs[opHash], txIndex(op2.Index))
+
+	// They should point to different txids.
+	require.Equal(tx.TxHash(), c.inputs[opHash][txIndex(op1.Index)])
+	require.Equal(tx2.TxHash(), c.inputs[opHash][txIndex(op2.Index)])
+}
+
+// TestCachedInputsUpdateInputsTwice checks when calling `updateInputs` twice
+// with the same arguments, the internal state should remain the same for the
+// second call.
+func TestCachedInputsUpdateInputsTwice(t *testing.T) {
+	require := require.New(t)
+
+	// Create twp inputs that share the same tx hash.
+	op := wire.OutPoint{Hash: chainhash.Hash{1}}
+	tx := &wire.MsgTx{
+		LockTime: 1,
+		TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
+	}
+
+	// Create a new cachedInputs.
+	c := newCachedInputs()
+
+	// Add the input.
+	oldTxid, isReplacement := c.updateInputs(op, tx.TxHash())
+
+	// We should see an empty txid and isReplacement should be false.
+	require.Empty(oldTxid)
+	require.False(isReplacement)
+
+	// Add the input again.
+	oldTxid, isReplacement = c.updateInputs(op, tx.TxHash())
+
+	// The old txid should be the same as tx.TxHash and isReplacement
+	// should stay false.
+	require.Equal(tx.TxHash(), oldTxid)
+	require.False(isReplacement)
+
+	// Check the internal state.
+	//
+	// We should have one input tx hash.
+	require.Len(c.inputs, 1)
+	require.Contains(c.inputs, op.Hash)
+
+	// We should have one input index under this tx hash.
+	require.Len(c.inputs[op.Hash], 1)
+	require.Contains(c.inputs[op.Hash], txIndex(op.Index))
+
+	// The input should point to tx.
+	require.Equal(tx.TxHash(), c.inputs[op.Hash][txIndex(op.Index)])
+}
+
 // TestCachedInputs tests that the cachedInputs works as expected.
 func TestCachedInputs(t *testing.T) {
 	require := require.New(t)
@@ -155,8 +335,8 @@ func TestCachedInputsAddInputReplacement(t *testing.T) {
 	// The new txid should be present.
 	require.Len(c.txids[replacedTx.TxHash()], 1)
 
-	// The old txid should be an empty map.
-	require.Empty(c.txids[tx.TxHash()])
+	// The nested map under old txid should be empty.
+	require.Empty(c.txids[tx.TxHash()][op.Hash])
 }
 
 // TestCachedInputsAddInputTwice checks that when the same tx is added again it
@@ -200,6 +380,54 @@ func TestCachedInputsAddInputTwice(t *testing.T) {
 	require.Len(c.inputs, 1)
 	require.Len(c.txids, 1)
 	require.Len(c.txids[tx.TxHash()], 1)
+}
+
+// TestCachedInputsAddInputSpendsSameTx checks that when spending inputs that
+// shares the same tx hash, the internal state of cachedInputs is updated as
+// expected.
+func TestCachedInputsAddInputSpendsSameTx(t *testing.T) {
+	require := require.New(t)
+
+	// Create two inputs that share the same tx hash.
+	op1 := wire.OutPoint{
+		Hash:  chainhash.Hash{1},
+		Index: 1,
+	}
+	op2 := wire.OutPoint{
+		Hash:  chainhash.Hash{1},
+		Index: 2,
+	}
+
+	tx := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+			{PreviousOutPoint: op2},
+		},
+	}
+
+	c := newCachedInputs()
+
+	// Add the input.
+	c.addInput(op1, tx.TxHash())
+	c.addInput(op2, tx.TxHash())
+
+	// Check the internal state.
+	//
+	// Expect one input tx hash.
+	require.Len(c.inputs, 1)
+
+	// Expect two input indexes.
+	require.Len(c.inputs[op1.Hash], 2)
+
+	// Expect one txid.
+	require.Len(c.txids, 1)
+
+	// Expect one input tx hash under the txid.
+	require.Len(c.txids[tx.TxHash()], 1)
+
+	// Expect two input indexes under the txid.
+	require.Len(c.txids[tx.TxHash()][op1.Hash], 2)
 }
 
 // TestMempool tests that each method of the mempool struct works as expected.
@@ -398,11 +626,24 @@ func TestMempoolAdd(t *testing.T) {
 	// We should see two transactions.
 	require.Len(cachedInputs.txids, 2)
 
-	// We should one input under tx1's nested map.
-	require.Len(cachedInputs.txids[tx1.TxHash()], 1)
+	// We should see two input tx hashes under tx1's nested map.
+	require.Len(cachedInputs.txids[tx1.TxHash()], 2)
+
+	// We should see one input index under op1 in tx1's nested map.
+	require.Len(cachedInputs.txids[tx1.TxHash()][op1.Hash], 1)
+
+	// We should see an empty map under op2 in tx1's nested map because
+	// it's replaced.
+	require.Empty(cachedInputs.txids[tx1.TxHash()][op2.Hash])
 
 	// We should see two input under tx2's nested map.
 	require.Len(cachedInputs.txids[tx2.TxHash()], 2)
+
+	// We should see one input index under op2 in tx2's nested map.
+	require.Len(cachedInputs.txids[tx2.TxHash()][op2.Hash], 1)
+
+	// We should see one input index under op3 in tx2's nested map.
+	require.Len(cachedInputs.txids[tx2.TxHash()][op3.Hash], 1)
 }
 
 // TestUpdateMempoolTxes tests that the mempool's internal state is updated as
@@ -473,10 +714,11 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	tx4Hash := tx4.TxHash()
 	btctx4 := btcutil.NewTx(tx4)
 
-	// Create the new mempool state, where tx2 is evicted and tx3 and tx4
-	// are added. Technically it's impossible to have tx1 still in the
-	// mempool.
-	mempool2 := []*chainhash.Hash{&tx1Hash, &tx3Hash, &tx4Hash}
+	// Create the new mempool state, where tx1 and tx2 are evicted and tx3
+	// and tx4 are added.
+	//
+	// NOTE: tx1 and tx2 must not exist since they are replaced.
+	mempool2 := []*chainhash.Hash{&tx3Hash, &tx4Hash}
 
 	// Mock the client to return the txes.
 	mockRPC.On("GetRawTransaction", &tx3Hash).Return(btctx3, nil).Once()
@@ -494,27 +736,29 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	// In addition, we want to check the mempool's internal state.
 	//
 	// We should see three transactions in the mempool.
-	require.Len(m.txs, 3)
+	require.Len(m.txs, 2)
 
-	// We should see three inputs.
-	require.Len(m.inputs.inputs, 3)
+	// Get the cachedInputs's internal state.
+	txidsMap := m.inputs.txids
+	inputsMap := m.inputs.inputs
 
-	// We should see three transactions.
-	require.Len(m.inputs.txids, 3)
+	// We should see two input tx hashes.
+	require.Len(inputsMap, 2)
+	require.Equal(tx3Hash, inputsMap[op1.Hash][txIndex(op1.Index)])
+	require.Equal(tx4Hash, inputsMap[op3.Hash][txIndex(op3.Index)])
 
-	// We should one input under tx1's nested map and it should be op2
-	// since op1 is replaced.
-	require.Len(m.inputs.txids[tx1.TxHash()], 1)
-	require.Contains(m.inputs.txids[tx1.TxHash()], op2)
+	// We should see two transactions.
+	require.Len(txidsMap, 2)
 
 	// We should one input under tx3's nested map and it should be op1.
-	require.Len(m.inputs.txids[tx3.TxHash()], 1)
-	require.Contains(m.inputs.txids[tx3.TxHash()], op1)
+	require.Len(txidsMap[tx3.TxHash()], 1)
+	require.Contains(txidsMap[tx3.TxHash()], op1.Hash)
 
 	// We should one input under tx4's nested map and it should be op3.
-	require.Len(m.inputs.txids[tx4.TxHash()], 1)
-	require.Contains(m.inputs.txids[tx4.TxHash()], op3)
+	require.Len(txidsMap[tx4.TxHash()], 1)
+	require.Contains(txidsMap[tx4.TxHash()], op3.Hash)
 
-	// We should see tx2 being removed.
-	require.NotContains(m.inputs.txids, tx2Hash)
+	// We should see tx1 and tx2 being removed.
+	require.NotContains(txidsMap, tx1Hash)
+	require.NotContains(txidsMap, tx2Hash)
 }

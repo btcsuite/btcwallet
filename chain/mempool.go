@@ -11,29 +11,104 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// txIndex defines the transaction index type. We use uint16 here as the max
+// allowed output index cannot exceed 65535.
+type txIndex uint16
+
+// txHashToIndexSet defines a two-level nested map, and can be viewed as,
+// - key: outpoint's tx hash
+// - value: a set of input indexes.
+type txHashToIndexSet map[chainhash.Hash]map[txIndex]struct{}
+
 // cachedInputs caches the inputs of the transactions in the mempool. This is
 // used to provide fast lookup between txids and inputs.
 type cachedInputs struct {
-	// inputs provides a fast lookup from input -> txid.
-	inputs map[wire.OutPoint]chainhash.Hash
+	// inputs provides a fast lookup from input -> txid. It's a two-level
+	// nested maps, with the first level keyed by the input's tx hash, the
+	// second level keyed by the input's tx index. The structure is,
+	// {
+	// 	"outpoint txhash": {
+	// 		"outpoint index1": "spending txid",
+	// 		"outpoint index2": "spending txid",
+	// 		...
+	// 	},
+	// }
+	inputs map[chainhash.Hash]map[txIndex]chainhash.Hash
 
-	// txids provides a fast lookup from txid -> inputs.
-	txids map[chainhash.Hash]map[wire.OutPoint]struct{}
+	// txids provides a fast lookup from txid -> inputs. It's a three-level
+	// nested maps, with the first level keyed by the spending txid, the
+	// second level keyed by the input's tx hash, and the third level keyed
+	// by the input's tx index. The structure is,
+	// {
+	// 	"spending txid": {
+	// 		"outpoint txhash": {
+	// 			"outpoint index1": nil,
+	// 			"outpoint index2": nil,
+	// 			...
+	// 		},
+	// 	},
+	// }
+	txids map[chainhash.Hash]txHashToIndexSet
 }
 
 // newCachedInputs creates a new cachedInputs.
 func newCachedInputs() *cachedInputs {
 	return &cachedInputs{
-		inputs: make(map[wire.OutPoint]chainhash.Hash),
-		txids:  make(map[chainhash.Hash]map[wire.OutPoint]struct{}),
+		inputs: make(map[chainhash.Hash]map[txIndex]chainhash.Hash),
+		txids:  make(map[chainhash.Hash]txHashToIndexSet),
 	}
 }
 
 // hasInput returns the txid and a boolean to indicate the given input is
 // found.
 func (c *cachedInputs) hasInput(op wire.OutPoint) (chainhash.Hash, bool) {
-	txid, ok := c.inputs[op]
+	nested, ok := c.inputs[op.Hash]
+
+	// If the input's tx hash is not found, the input is not found.
+	if !ok {
+		return chainhash.Hash{}, false
+	}
+
+	// Otherwise, check if the input's tx index is found.
+	txid, ok := nested[txIndex(op.Index)]
+
 	return txid, ok
+}
+
+// updateInputs updates the cached inputs of the given transaction. If this is
+// a replacement tx, we will remove the old reference in map `txids` which
+// points the replaced txid to the input.
+func (c *cachedInputs) updateInputs(op wire.OutPoint,
+	txid chainhash.Hash) (chainhash.Hash, bool) {
+
+	// Query the map, which has the structure: txhash:inputIndex:txid.
+	nested, ok := c.inputs[op.Hash]
+
+	// We don't have the tx hash, so it's not a replacement as the input is
+	// never spent. In this case we'll init the map.
+	if !ok {
+		nested = make(map[txIndex]chainhash.Hash)
+		c.inputs[op.Hash] = nested
+	}
+
+	// Check if the input index can be found. If this is the first time we
+	// add this input, the nest map will be empty.
+	oldTxid, ok := nested[txIndex(op.Index)]
+
+	// If found the input index, check if the txid is the same. If not,
+	// this is a replacement tx.
+	//
+	// NOTE: If the input index exists and the txids are the same, it means
+	// the same tx is added twice.
+	isReplacement := false
+	if ok && oldTxid != txid {
+		isReplacement = true
+	}
+
+	// Add the input index to the nested map.
+	nested[txIndex(op.Index)] = txid
+
+	return oldTxid, isReplacement
 }
 
 // addInput adds the given input to our cached inputs. If the input already
@@ -41,44 +116,63 @@ func (c *cachedInputs) hasInput(op wire.OutPoint) (chainhash.Hash, bool) {
 // updated.
 func (c *cachedInputs) addInput(op wire.OutPoint, txid chainhash.Hash) {
 	// Init the map for this txid if it doesn't exist.
-	if _, ok := c.txids[txid]; !ok {
-		c.txids[txid] = make(map[wire.OutPoint]struct{})
+	nested, ok := c.txids[txid]
+	if !ok {
+		nested = make(txHashToIndexSet)
+		c.txids[txid] = nested
 	}
 
-	// Add the input under this txid.
-	c.txids[txid][op] = struct{}{}
-
-	// Check if the input already exists.
-	oldTxid, existed := c.inputs[op]
-
-	// If the oldTxid exists and is different from the current txid, we
-	// need to update the oldTxid's inputs map.
-	isReplacement := false
-	if existed && oldTxid != txid {
-		isReplacement = true
+	// Check if the indexes set exists for this input's tx hash.
+	indexSet, ok := nested[op.Hash]
+	if !ok {
+		indexSet = make(map[txIndex]struct{})
+		nested[op.Hash] = indexSet
 	}
 
-	// If the input is replaced, update the old txid to remove the input.
-	if isReplacement {
-		log.Tracef("Input %s was spent in tx %s, now spent in %s",
-			op, oldTxid, txid)
+	// Add the input to the indexes set.
+	indexSet[txIndex(op.Index)] = struct{}{}
 
-		// Delete the input from the nested map under this old tx.
-		delete(c.txids[oldTxid], op)
+	// Update the inputs map.
+	oldTxid, isReplacement := c.updateInputs(op, txid)
+
+	// Exit early if this is not a replacement tx.
+	if !isReplacement {
+		return
 	}
 
-	// Add the input to the inputs map with the new txid.
-	c.inputs[op] = txid
+	// Otherwise this is a replacement. We need to update the map `txids`
+	// to remove the input index from the old txid's nested map.
+	log.Tracef("Input %s was spent in tx %s, now spent in %s", op,
+		oldTxid, txid)
+
+	// Delete the input index from the nested map under this old tx. We
+	// need to do it here so later when we remove the old txid, we won't
+	// remove the replaced inputs.
+	//
+	// NOTE: this nested map can be empty after this deletion, which is
+	// fine as the replaced transaction will be removed later.
+	delete(c.txids[oldTxid][op.Hash], txIndex(op.Index))
 }
 
 // removeInputsFromTx removes the inputs of the given txid from our cached
 // inputs maps.
 func (c *cachedInputs) removeInputsFromTx(txid chainhash.Hash) {
-	// Remove the inputs stored of this tx.
-	for op := range c.txids[txid] {
-		delete(c.inputs, op)
+	// Iterate through the inputs that's spent by this txid.
+	for txHash, indexSet := range c.txids[txid] {
+		// Iterate all the indexes under this tx hash and remove it
+		// from the inputs nested map.
+		for index := range indexSet {
+			delete(c.inputs[txHash], index)
+		}
+
+		// Remove the tx hash from the inputs map if its nested map is
+		// empty.
+		if len(c.inputs[txHash]) == 0 {
+			delete(c.inputs, txHash)
+		}
 	}
 
+	// Remove the txid from the txids map.
 	delete(c.txids, txid)
 }
 
