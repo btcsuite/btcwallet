@@ -2,14 +2,20 @@ package chain
 
 import (
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"golang.org/x/sync/errgroup"
 )
+
+// txNotFoundErr is an error returned from bitcoind's `getrawtransaction` RPC
+// when the requested txid cannot be found.
+const txNotFoundErr = "-5: No such mempool or blockchain Transaction"
 
 // cachedInputs caches the inputs of the transactions in the mempool. This is
 // used to provide fast lookup between txids and inputs.
@@ -308,11 +314,8 @@ func (m *mempool) LoadMempool() error {
 
 			eg.Go(func() error {
 				// Grab full mempool transaction from hash.
-				tx, err := m.client.GetRawTransaction(txHash)
-				if err != nil {
-					log.Warnf("unable to fetch "+
-						"transaction %s for "+
-						"mempool: %v", txHash, err)
+				tx := m.getRawTxIgnoreErr(txHash)
+				if tx == nil {
 					return nil
 				}
 
@@ -363,10 +366,8 @@ func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
 
 		eg.Go(func() error {
 			// Grab full mempool transaction from hash.
-			tx, err := m.client.GetRawTransaction(txHash)
-			if err != nil {
-				log.Warnf("unable to fetch transaction %s "+
-					"from mempool: %v", txHash, err)
+			tx := m.getRawTxIgnoreErr(txHash)
+			if tx == nil {
 				return nil
 			}
 
@@ -395,4 +396,33 @@ func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
 	m.DeleteUnmarked()
 
 	return txesToNotify
+}
+
+// getRawTxIgnoreErr wraps the GetRawTransaction call to bitcoind, and ignores
+// the error returned since we can't do anything about it here in the mempool.
+//
+// NOTE: if `txindex` is not enabled, `GetRawTransaction` will only look for
+// the txid in bitocind's mempool. If the tx is replaced, confirmed, or not yet
+// included in bitcoind's mempool, the error txNotFoundErr will be returned.
+func (m *mempool) getRawTxIgnoreErr(txid *chainhash.Hash) *btcutil.Tx {
+	tx, err := m.client.GetRawTransaction(txid)
+
+	// Exit early if there's no error.
+	if err == nil {
+		return tx
+	}
+
+	// If this is the txNotFoundErr, we'll create a debug log.
+	if strings.Contains(err.Error(), txNotFoundErr) {
+		log.Debugf("unable to fetch transaction %s from mempool: %v",
+			txid, err)
+
+	} else {
+		// Otherwise, unexpected error is found, we'll create an error
+		// log.
+		log.Errorf("unable to fetch transaction %s from mempool: %v",
+			txid, err)
+	}
+
+	return nil
 }
