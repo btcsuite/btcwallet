@@ -7,7 +7,6 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"golang.org/x/sync/errgroup"
 )
@@ -52,11 +51,19 @@ func (c *cachedInputs) addInput(op wire.OutPoint, txid chainhash.Hash) {
 	// Check if the input already exists.
 	oldTxid, existed := c.inputs[op]
 
-	// If existed, update the old txid to remove the input.
-	if existed {
+	// If the oldTxid exists and is different from the current txid, we
+	// need to update the oldTxid's inputs map.
+	isReplacement := false
+	if existed && oldTxid != txid {
+		isReplacement = true
+	}
+
+	// If the input is replaced, update the old txid to remove the input.
+	if isReplacement {
 		log.Tracef("Input %s was spent in tx %s, now spent in %s",
 			op, oldTxid, txid)
 
+		// Delete the input from the nested map under this old tx.
 		delete(c.txids[oldTxid], op)
 	}
 
@@ -93,7 +100,7 @@ type mempool struct {
 	inputs *cachedInputs
 
 	// client is the rpc client that we'll use to query for the mempool.
-	client *rpcclient.Client
+	client rpcClient
 
 	// initFin is a channel that will be closed once the mempool has been
 	// initialized.
@@ -101,7 +108,7 @@ type mempool struct {
 }
 
 // newMempool creates a new mempool object.
-func newMempool(client *rpcclient.Client) *mempool {
+func newMempool(client rpcClient) *mempool {
 	return &mempool{
 		txs:     make(map[chainhash.Hash]bool),
 		inputs:  newCachedInputs(),
@@ -170,6 +177,12 @@ func (m *mempool) containsInput(op wire.OutPoint) (chainhash.Hash, bool) {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) add(tx *wire.MsgTx) {
+	// Skip coinbase inputs.
+	if blockchain.IsCoinBaseTx(tx) {
+		log.Debugf("Skipping coinbase tx %v", tx.TxHash())
+		return
+	}
+
 	hash := tx.TxHash()
 
 	// Add the txid to the mempool map.
@@ -260,12 +273,6 @@ func (m *mempool) removeInputs(tx chainhash.Hash) {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) updateInputs(tx *wire.MsgTx) {
-	// Skip coinbase inputs.
-	if blockchain.IsCoinBaseTx(tx) {
-		log.Debugf("Skipping coinbase tx %v", tx.TxHash())
-		return
-	}
-
 	// Iterate the tx's inputs.
 	for _, input := range tx.TxIn {
 		outpoint := input.PreviousOutPoint

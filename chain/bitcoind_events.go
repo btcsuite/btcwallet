@@ -30,6 +30,9 @@ type BitcoindEvents interface {
 	Stop() error
 }
 
+// Ensure rpcclient.Client implements the rpcClient interface at compile time.
+var _ rpcClient = (*rpcclient.Client)(nil)
+
 // NewBitcoindEventSubscriber initialises a new BitcoinEvents object impl
 // depending on the config passed.
 func NewBitcoindEventSubscriber(cfg *BitcoindConfig,
