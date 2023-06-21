@@ -174,5 +174,11 @@ func (m *mockRPCClient) GetRawTransaction(
 	txHash *chainhash.Hash) (*btcutil.Tx, error) {
 
 	args := m.Called(txHash)
+
+	tx := args.Get(0)
+	if tx == nil {
+		return nil, args.Error(1)
+	}
+
 	return args.Get(0).(*btcutil.Tx), args.Error(1)
 }

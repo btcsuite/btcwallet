@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -517,4 +518,41 @@ func TestUpdateMempoolTxes(t *testing.T) {
 
 	// We should see tx2 being removed.
 	require.NotContains(m.inputs.txids, tx2Hash)
+}
+
+// TestGetRawTxIgnoreErr tests that the mempool's GetRawTxIgnoreErr method
+// works as expected.
+func TestGetRawTxIgnoreErr(t *testing.T) {
+	require := require.New(t)
+
+	// Create a mock client and init our mempool.
+	mockRPC := &mockRPCClient{}
+	m := newMempool(mockRPC)
+
+	// Create a normal transaction that has two inputs.
+	op := wire.OutPoint{Hash: chainhash.Hash{1}}
+	tx := &wire.MsgTx{
+		LockTime: 1,
+		TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
+	}
+	txid := tx.TxHash()
+	btctx := btcutil.NewTx(tx)
+
+	// Mock the client to return the tx.
+	mockRPC.On("GetRawTransaction", &txid).Return(btctx, nil).Once()
+
+	// Call the method and expect the tx to be returned.
+	resp := m.getRawTxIgnoreErr(&txid)
+	require.Equal(btctx, resp)
+
+	// Mock the client to return an error.
+	dummyErr := errors.New("dummy error")
+	mockRPC.On("GetRawTransaction", &txid).Return(nil, dummyErr).Once()
+
+	// Call the method again and expect nil response.
+	resp = m.getRawTxIgnoreErr(&txid)
+	require.Nil(resp)
+
+	// Assert the mock client was called as expected.
+	mockRPC.AssertExpectations(t)
 }
