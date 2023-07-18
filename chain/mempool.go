@@ -15,7 +15,7 @@ import (
 
 // txNotFoundErr is an error returned from bitcoind's `getrawtransaction` RPC
 // when the requested txid cannot be found.
-const txNotFoundErr = "-5: No such mempool or blockchain Transaction"
+const txNotFoundErr = "-5: No such mempool or blockchain transaction"
 
 // cachedInputs caches the inputs of the transactions in the mempool. This is
 // used to provide fast lookup between txids and inputs.
@@ -413,7 +413,9 @@ func (m *mempool) getRawTxIgnoreErr(txid *chainhash.Hash) *btcutil.Tx {
 	}
 
 	// If this is the txNotFoundErr, we'll create a debug log.
-	if strings.Contains(err.Error(), txNotFoundErr) {
+	errStr := strings.ToLower(err.Error())
+	errExp := strings.ToLower(txNotFoundErr)
+	if strings.Contains(errStr, errExp) {
 		log.Debugf("unable to fetch transaction %s from mempool: %v",
 			txid, err)
 
