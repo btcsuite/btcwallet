@@ -1329,6 +1329,7 @@ type CreateWalletRequest struct {
 	PublicPassphrase  []byte `protobuf:"bytes,1,opt,name=public_passphrase,json=publicPassphrase,proto3" json:"public_passphrase,omitempty"`
 	PrivatePassphrase []byte `protobuf:"bytes,2,opt,name=private_passphrase,json=privatePassphrase,proto3" json:"private_passphrase,omitempty"`
 	Seed              []byte `protobuf:"bytes,3,opt,name=seed,proto3" json:"seed,omitempty"`
+	Birthday          int64  `protobuf:"varint,4,opt,name=birthday,proto3" json:"birthday,omitempty"`
 }
 
 func (m *CreateWalletRequest) Reset()                    { *m = CreateWalletRequest{} }
