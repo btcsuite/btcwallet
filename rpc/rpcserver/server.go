@@ -694,13 +694,13 @@ func (s *loaderServer) CreateWallet(ctx context.Context, req *pb.CreateWalletReq
 	}
 
 	// Use the current time for the birthday when the request's is empty.
-	bday := req.Birthday
-	if bday == 0 {
-		bday = time.Now().Unix()
+	bday := time.Now()
+	if req.Birthday != 0 {
+		bday = time.Unix(req.Birthday, 0)
 	}
 
 	wallet, err := s.loader.CreateNewWallet(
-		pubPassphrase, req.PrivatePassphrase, req.Seed, time.Unix(bday, 0),
+		pubPassphrase, req.PrivatePassphrase, req.Seed, bday,
 	)
 	if err != nil {
 		return nil, translateError(err)
