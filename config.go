@@ -43,6 +43,7 @@ var (
 	defaultRPCKeyFile  = filepath.Join(defaultAppDataDir, "rpc.key")
 	defaultRPCCertFile = filepath.Join(defaultAppDataDir, "rpc.cert")
 	defaultLogDir      = filepath.Join(defaultAppDataDir, defaultLogDirname)
+	defaultBirthday    = time.Now().Unix()
 )
 
 type config struct {
@@ -65,6 +66,7 @@ type config struct {
 
 	// Wallet options
 	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
+	Birthday   int64  `long:"birthday" default-mask:"-" description:"Specify a unix timestamp to be the wallet birthday -- Will be used as the approximate starting time for wallet rescans"`
 
 	// RPC client options
 	RPCConnect       string                  `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:8334, testnet: localhost:18334, simnet: localhost:18556)"`
@@ -278,6 +280,7 @@ func loadConfig() (*config, []string, error) {
 		BanDuration:            neutrino.BanDuration,
 		BanThreshold:           neutrino.BanThreshold,
 		DBTimeout:              wallet.DefaultDBTimeout,
+		Birthday:               defaultBirthday,
 	}
 
 	// Pre-parse the command line options to see if an alternative config

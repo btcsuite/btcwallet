@@ -292,6 +292,7 @@ message CreateWalletRequest {
 	bytes public_passphrase = 1;
 	bytes private_passphrase = 2;
 	bytes seed = 3;
+	int64 birthday = 4;
 }
 message CreateWalletResponse {}
 
