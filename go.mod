@@ -26,7 +26,7 @@ require (
 	github.com/stretchr/testify v1.8.1
 	golang.org/x/crypto v0.7.0
 	golang.org/x/net v0.8.0
-	golang.org/x/sync v0.1.0
+	golang.org/x/sync v0.3.0
 	golang.org/x/term v0.6.0
 	google.golang.org/grpc v1.18.0
 )
@@ -50,3 +50,5 @@ require (
 )
 
 go 1.18
+
+replace github.com/btcsuite/btcd => github.com/yyforyongyu/btcd v0.21.0-beta.0.20230830130829-4a804777fcf1

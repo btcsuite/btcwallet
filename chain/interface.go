@@ -128,4 +128,5 @@ type (
 type rpcClient interface {
 	GetRawMempool() ([]*chainhash.Hash, error)
 	GetRawTransaction(txHash *chainhash.Hash) (*btcutil.Tx, error)
+	GetRawTransactionLazy(txHash *chainhash.Hash) (*btcutil.Tx, error)
 }

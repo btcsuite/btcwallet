@@ -405,7 +405,7 @@ func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
 // the txid in bitocind's mempool. If the tx is replaced, confirmed, or not yet
 // included in bitcoind's mempool, the error txNotFoundErr will be returned.
 func (m *mempool) getRawTxIgnoreErr(txid *chainhash.Hash) *btcutil.Tx {
-	tx, err := m.client.GetRawTransaction(txid)
+	tx, err := m.client.GetRawTransactionLazy(txid)
 
 	// Exit early if there's no error.
 	if err == nil {
