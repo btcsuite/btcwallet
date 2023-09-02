@@ -358,9 +358,6 @@ func (b *bitcoindZMQEvents) txEventHandler() {
 				continue
 			}
 
-			// Add the tx to mempool.
-			b.mempool.Add(tx)
-
 			select {
 			case b.txNtfns <- tx:
 			case <-b.quit:
@@ -418,7 +415,22 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 			}
 
 			// Update our local mempool with the new mempool.
-			b.mempool.UpdateMempoolTxes(txs)
+			newTxs := b.mempool.UpdateMempoolTxes(txs)
+
+			// Send the new txes to BitcoindClient, which is then
+			// handled in `ntfnHandler`. Note that `rawtx` will
+			// send the same tx, which is fine as the
+			// `BitcoindClient.filterTx` will take care of
+			// duplicate unconfirmed txes. We need to send it here
+			// to make sure the subscription of the spending of a
+			// given outpoint is not missed.
+			for _, tx := range newTxs {
+				select {
+				case b.txNtfns <- tx:
+				case <-b.quit:
+					return
+				}
+			}
 
 			log.Tracef("Reconciled mempool spends in %v",
 				time.Since(now))
