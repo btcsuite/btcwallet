@@ -543,7 +543,7 @@ func (d *PrunedBlockDispatcher) newRequest(blocks []*chainhash.Hash) (
 
 		if _, ok := d.blocksQueried[*block]; !ok {
 			log.Debugf("Queuing new block %v for request", *block)
-			inv := wire.NewInvVect(wire.InvTypeBlock, block)
+			inv := wire.NewInvVect(wire.InvTypeWitnessBlock, block)
 			if err := getData.AddInvVect(inv); err != nil {
 				return nil, nil, err
 			}
@@ -619,6 +619,20 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 		btcutil.NewBlock(block), d.cfg.ChainParams.PowLimit,
 		d.timeSource,
 	)
+	if err != nil {
+		d.blockMtx.Unlock()
+
+		log.Warnf("Received invalid block %v from peer %v: %v",
+			blockHash, peer, err)
+		d.banPeer(peer)
+
+		return query.Progress{
+			Progressed: false,
+			Finished:   false,
+		}
+	}
+
+	err = blockchain.ValidateWitnessCommitment(btcutil.NewBlock(block))
 	if err != nil {
 		d.blockMtx.Unlock()
 
