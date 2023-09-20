@@ -17,13 +17,13 @@ const (
 	// `getrawtransaction` RPC when the requested txid cannot be found.
 	txNotFoundErr = "-5: No such mempool or blockchain transaction"
 
-	// getRawTxBatchSize specifies the number of requests to be batched
-	// before sending them to the bitcoind client.
-	getRawTxBatchSize = 1000
+	// DefaultGetRawTxBatchSize specifies the default number of requests to
+	// be batched before sending them to the bitcoind client.
+	DefaultGetRawTxBatchSize = 1000
 
-	// batchWaitInterval defines the time to sleep between each batched
-	// calls.
-	batchWaitInterval = 1 * time.Second
+	// DefaultBatchWaitInterval defines the default time to sleep between
+	// each batched calls.
+	DefaultBatchWaitInterval = 1 * time.Second
 )
 
 // cachedInputs caches the inputs of the transactions in the mempool. This is
@@ -107,6 +107,9 @@ type mempool struct {
 	// stopped is used to make sure we only stop mempool once.
 	stopped sync.Once
 
+	// cfg specifies the config for the mempool.
+	cfg *mempoolConfig
+
 	// txs stores the txids in the mempool.
 	txs map[chainhash.Hash]bool
 
@@ -117,9 +120,6 @@ type mempool struct {
 	// scripts.
 	inputs *cachedInputs
 
-	// client is the rpc client that we'll use to query for the mempool.
-	client batchClient
-
 	// initFin is a channel that will be closed once the mempool has been
 	// initialized.
 	initFin chan struct{}
@@ -128,14 +128,28 @@ type mempool struct {
 	quit chan struct{}
 }
 
+// mempoolConfig holds a list of config values specified by the callers.
+type mempoolConfig struct {
+	// client is the rpc client that we'll use to query for the mempool.
+	client batchClient
+
+	// getRawTxBatchSize specifies the number of getrawtransaction requests
+	// to be batched before sending them to the bitcoind client.
+	getRawTxBatchSize uint32
+
+	// batchWaitInterval defines the default time to sleep between each
+	// batched calls.
+	batchWaitInterval time.Duration
+}
+
 // newMempool creates a new mempool object.
-func newMempool(client batchClient) *mempool {
+func newMempool(cfg *mempoolConfig) *mempool {
 	return &mempool{
+		cfg:     cfg,
 		txs:     make(map[chainhash.Hash]bool),
 		inputs:  newCachedInputs(),
 		initFin: make(chan struct{}),
 		quit:    make(chan struct{}),
-		client:  client,
 	}
 }
 
@@ -418,9 +432,9 @@ func (m *mempool) UpdateMempoolTxes() []*wire.MsgTx {
 // getRawMempool returns all the raw transactions found in mempool.
 func (m *mempool) getRawMempool() ([]*chainhash.Hash, error) {
 	// Create an async request and send it immediately.
-	result := m.client.GetRawMempoolAsync()
+	result := m.cfg.client.GetRawMempoolAsync()
 
-	err := m.client.Send()
+	err := m.cfg.client.Send()
 	if err != nil {
 		log.Errorf("Unable to send GetRawMempool: %v", err)
 		return nil, err
@@ -444,12 +458,12 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 	returnNew bool) ([]*wire.MsgTx, error) {
 
 	log.Debugf("Batching GetRawTransaction in %v batches...",
-		len(txids)/getRawTxBatchSize+1)
+		uint32(len(txids))/m.cfg.getRawTxBatchSize+1)
 	defer log.Debugf("Finished batch GetRawTransaction")
 
 	// respReceivers stores a list of response receivers returned from
 	// batch calling `GetRawTransactionAsync`.
-	respReceivers := make([]getRawTxReceiver, 0, getRawTxBatchSize)
+	respReceivers := make([]getRawTxReceiver, 0, m.cfg.getRawTxBatchSize)
 
 	// Conditionally init a newTxes slice.
 	var newTxes []*wire.MsgTx
@@ -463,7 +477,7 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 	// state and conditionally saved to a slice that will be returned.
 	processBatch := func(results []getRawTxReceiver) error {
 		// Ask the client to send all the batched requests.
-		err := m.client.Send()
+		err := m.cfg.client.Send()
 		if err != nil {
 			return fmt.Errorf("Send GetRawTransaction got %v", err)
 		}
@@ -497,14 +511,14 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 		}
 
 		// Create the async request and save it to txRespReceivers.
-		resp := m.client.GetRawTransactionAsync(txHash)
+		resp := m.cfg.client.GetRawTransactionAsync(txHash)
 		respReceivers = append(respReceivers, resp)
 
 		// When getRawTxBatchSize is reached, we'd ask the batch client
 		// to send the requests and process the responses.
-		if len(respReceivers)%getRawTxBatchSize == 0 {
+		if uint32(len(respReceivers))%m.cfg.getRawTxBatchSize == 0 {
 			log.Debugf("Processing GetRawTransaction for batch "+
-				"%v...", i/getRawTxBatchSize)
+				"%v...", uint32(i)/m.cfg.getRawTxBatchSize)
 
 			if err := processBatch(respReceivers); err != nil {
 				return nil, err
@@ -513,14 +527,14 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 			// We now pause the duration defined in
 			// `batchWaitInterval` or exit on quit signal.
 			select {
-			case <-time.After(batchWaitInterval):
+			case <-time.After(m.cfg.batchWaitInterval):
 			case <-m.quit:
 				return nil, nil
 			}
 
 			// Empty the slice for next batch iteration.
 			respReceivers = make(
-				[]getRawTxReceiver, 0, getRawTxBatchSize,
+				[]getRawTxReceiver, 0, m.cfg.getRawTxBatchSize,
 			)
 		}
 	}

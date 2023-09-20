@@ -38,6 +38,14 @@ type PollingConfig struct {
 	// jitter by scaling TxPollingInterval with it. This value must be no
 	// less than 0. Default to 0, meaning no jitter will be applied.
 	TxPollingIntervalJitter float64
+
+	// RPCBatchSize defines the number of RPC requests to be batches before
+	// sending them to the bitcoind node.
+	RPCBatchSize uint32
+
+	// RPCBatchInterval defines the time to wait before attempting the next
+	// batch when the current one finishes.
+	RPCBatchInterval time.Duration
 }
 
 // bitcoindRPCPollingEvents delivers block and transaction notifications that
@@ -86,12 +94,28 @@ func newBitcoindRPCPollingEvents(cfg *PollingConfig, client *rpcclient.Client,
 		cfg.TxPollingIntervalJitter = 0
 	}
 
+	// Create the config for mempool and attach default values if not
+	// configed.
+	mCfg := &mempoolConfig{
+		client:            bClient,
+		getRawTxBatchSize: cfg.RPCBatchSize,
+		batchWaitInterval: cfg.RPCBatchInterval,
+	}
+
+	if cfg.RPCBatchSize == 0 {
+		mCfg.getRawTxBatchSize = DefaultGetRawTxBatchSize
+	}
+
+	if cfg.RPCBatchInterval == 0 {
+		mCfg.batchWaitInterval = DefaultBatchWaitInterval
+	}
+
 	return &bitcoindRPCPollingEvents{
 		cfg:        cfg,
 		client:     client,
 		txNtfns:    make(chan *wire.MsgTx),
 		blockNtfns: make(chan *wire.MsgBlock),
-		mempool:    newMempool(bClient),
+		mempool:    newMempool(mCfg),
 		quit:       make(chan struct{}),
 	}
 }

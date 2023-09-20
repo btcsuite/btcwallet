@@ -207,7 +207,10 @@ func TestCachedInputsAddInputTwice(t *testing.T) {
 func TestMempool(t *testing.T) {
 	require := require.New(t)
 
-	m := newMempool(nil)
+	m := newMempool(&mempoolConfig{
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a transaction.
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
@@ -321,7 +324,10 @@ func TestMempool(t *testing.T) {
 func TestMempoolAdd(t *testing.T) {
 	require := require.New(t)
 
-	m := newMempool(nil)
+	m := newMempool(&mempoolConfig{
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a coinbase transaction.
 	tx0 := &wire.MsgTx{
@@ -413,7 +419,11 @@ func TestUpdateMempoolTxes(t *testing.T) {
 
 	// Create a mock client and init our mempool.
 	mockRPC := &mockRPCClient{}
-	m := newMempool(mockRPC)
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a normal transaction that has two inputs.
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
@@ -529,7 +539,11 @@ func TestUpdateMempoolTxesOnShutdown(t *testing.T) {
 
 	// Create a mock client and init our mempool.
 	mockRPC := &mockRPCClient{}
-	m := newMempool(mockRPC)
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a normal transaction.
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
@@ -569,7 +583,11 @@ func TestGetRawTxIgnoreErr(t *testing.T) {
 
 	// Create a mock client and init our mempool.
 	mockRPC := &mockRPCClient{}
-	m := newMempool(mockRPC)
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a normal transaction that has two inputs.
 	op := wire.OutPoint{Hash: chainhash.Hash{1}}

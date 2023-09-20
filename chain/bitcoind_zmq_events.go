@@ -47,6 +47,14 @@ type ZMQConfig struct {
 	//
 	// TODO(yy): replace this temp config with SEQUENCE check.
 	PollingIntervalJitter float64
+
+	// RPCBatchSize defines the number of RPC requests to be batches before
+	// sending them to the bitcoind node.
+	RPCBatchSize uint32
+
+	// RPCBatchInterval defines the time to wait before attempting the next
+	// batch when the current one finishes.
+	RPCBatchInterval time.Duration
 }
 
 // bitcoindZMQEvents delivers block and transaction notifications that it gets
@@ -133,6 +141,22 @@ func newBitcoindZMQEvents(cfg *ZMQConfig, client *rpcclient.Client,
 			"events: %v", err)
 	}
 
+	// Create the config for mempool and attach default values if not
+	// configed.
+	mCfg := &mempoolConfig{
+		client:            bClient,
+		getRawTxBatchSize: cfg.RPCBatchSize,
+		batchWaitInterval: cfg.RPCBatchInterval,
+	}
+
+	if cfg.RPCBatchSize == 0 {
+		mCfg.getRawTxBatchSize = DefaultGetRawTxBatchSize
+	}
+
+	if cfg.RPCBatchInterval == 0 {
+		mCfg.batchWaitInterval = DefaultBatchWaitInterval
+	}
+
 	zmqEvents := &bitcoindZMQEvents{
 		cfg:           cfg,
 		client:        client,
@@ -141,11 +165,12 @@ func newBitcoindZMQEvents(cfg *ZMQConfig, client *rpcclient.Client,
 		hasPrevoutRPC: hasRPC,
 		blockNtfns:    make(chan *wire.MsgBlock),
 		txNtfns:       make(chan *wire.MsgTx),
-		mempool:       newMempool(bClient),
+		mempool:       newMempool(mCfg),
 		quit:          make(chan struct{}),
 	}
 
 	return zmqEvents, nil
+
 }
 
 // Start spins off the bitcoindZMQEvent goroutines.
