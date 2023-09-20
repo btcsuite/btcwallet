@@ -163,7 +163,7 @@ type mockRPCClient struct {
 	mock.Mock
 }
 
-// Compile time assertion that MockPeer implements lnpeer.Peer.
+// Compile time assert the implementation.
 var _ batchClient = (*mockRPCClient)(nil)
 
 func (m *mockRPCClient) GetRawMempoolAsync() rpcclient.
@@ -193,6 +193,7 @@ func (m *mockRPCClient) Send() error {
 
 // mockGetRawTxReceiver mocks the getRawTxReceiver interface.
 type mockGetRawTxReceiver struct {
+	*rpcclient.FutureGetRawTransactionResult
 	mock.Mock
 }
 
@@ -207,5 +208,5 @@ func (m *mockGetRawTxReceiver) Receive() (*btcutil.Tx, error) {
 	return args.Get(0).(*btcutil.Tx), args.Error(1)
 }
 
-// Compile time assertion that MockPeer implements lnpeer.Peer.
+// Compile time assert the implementation.
 var _ getRawTxReceiver = (*mockGetRawTxReceiver)(nil)

@@ -140,17 +140,37 @@ type mempoolConfig struct {
 	// batchWaitInterval defines the default time to sleep between each
 	// batched calls.
 	batchWaitInterval time.Duration
+
+	// rawMempoolGetter mounts to `m.getRawMempool` and is only changed in
+	// unit tests.
+	//
+	// TODO(yy): interface rpcclient.FutureGetRawMempoolResult so we can
+	// remove this hack.
+	rawMempoolGetter func() ([]*chainhash.Hash, error)
+
+	// rawTxReceiver mounts to `m.getRawTxIgnoreErr` and is only changed in
+	// unit tests.
+	//
+	// TODO(yy): interface rpcclient.FutureGetRawTransactionResult so we
+	// can remove this hack.
+	rawTxReceiver func(getRawTxReceiver) *btcutil.Tx
 }
 
 // newMempool creates a new mempool object.
 func newMempool(cfg *mempoolConfig) *mempool {
-	return &mempool{
+	m := &mempool{
 		cfg:     cfg,
 		txs:     make(map[chainhash.Hash]bool),
 		inputs:  newCachedInputs(),
 		initFin: make(chan struct{}),
 		quit:    make(chan struct{}),
 	}
+
+	// Mount the default methods.
+	m.cfg.rawMempoolGetter = m.getRawMempool
+	m.cfg.rawTxReceiver = m.getRawTxIgnoreErr
+
+	return m
 }
 
 // Shutdown signals the mempool to exit.
@@ -353,7 +373,7 @@ func (m *mempool) LoadMempool() error {
 	now := time.Now()
 
 	// Fetch the latest mempool.
-	txids, err := m.getRawMempool()
+	txids, err := m.cfg.rawMempoolGetter()
 	if err != nil {
 		log.Errorf("Unable to get raw mempool txs: %v", err)
 		return err
@@ -378,7 +398,7 @@ func (m *mempool) LoadMempool() error {
 // that's new to its internal mempool.
 func (m *mempool) UpdateMempoolTxes() []*wire.MsgTx {
 	// Fetch the latest mempool.
-	txids, err := m.getRawMempool()
+	txids, err := m.cfg.rawMempoolGetter()
 	if err != nil {
 		log.Errorf("Unable to get raw mempool txs: %v", err)
 		return nil
@@ -424,6 +444,7 @@ func (m *mempool) UpdateMempoolTxes() []*wire.MsgTx {
 	txesToNotify, err := m.batchGetRawTxes(newTxids, true)
 	if err != nil {
 		log.Error("Batch getrawtransaction got %v", err)
+
 	}
 
 	return txesToNotify
@@ -484,7 +505,7 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 
 		// Iterate the recievers and fetch the response.
 		for _, resp := range results {
-			tx := m.getRawTxIgnoreErr(resp)
+			tx := m.cfg.rawTxReceiver(resp)
 			if tx == nil {
 				continue
 			}

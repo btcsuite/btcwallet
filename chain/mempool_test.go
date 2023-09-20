@@ -7,6 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/stretchr/testify/require"
 )
@@ -436,7 +437,7 @@ func TestUpdateMempoolTxes(t *testing.T) {
 		},
 	}
 	tx1Hash := tx1.TxHash()
-	btcTx1 := btcutil.NewTx(tx1)
+	btctx1 := btcutil.NewTx(tx1)
 
 	// Create another transaction.
 	op3 := wire.OutPoint{Hash: chainhash.Hash{3}}
@@ -452,10 +453,34 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	// Create the current mempool state.
 	mempool1 := []*chainhash.Hash{&tx1Hash, &tx2Hash}
 
+	// Create mock receivers.
+	mockTx1Receiver := make(rpcclient.FutureGetRawTransactionResult)
+	mockTx2Receiver := make(rpcclient.FutureGetRawTransactionResult)
+	mockTx3Receiver := make(rpcclient.FutureGetRawTransactionResult)
+	mockTx4Receiver := make(rpcclient.FutureGetRawTransactionResult)
+
 	// Mock the client to return the txes.
-	mockRPC.On("GetRawMempool").Return(mempool1)
-	mockRPC.On("GetRawTransaction", &tx1Hash).Return(btcTx1, nil).Once()
-	mockRPC.On("GetRawTransaction", &tx2Hash).Return(btctx2, nil).Once()
+	mockRPC.On("GetRawTransactionAsync", &tx1Hash).Return(
+		mockTx1Receiver).Once()
+	mockRPC.On("GetRawTransactionAsync", &tx2Hash).Return(
+		mockTx2Receiver).Once()
+	mockRPC.On("Send").Return(nil).Twice()
+
+	// Mock our rawMempoolGetter and rawTxReceiver.
+	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
+		return mempool1, nil
+	}
+	m.cfg.rawTxReceiver = func(reciever getRawTxReceiver) *btcutil.Tx {
+		switch reciever {
+		case mockTx1Receiver:
+			return btctx1
+		case mockTx2Receiver:
+			return btctx2
+		}
+
+		require.Fail("unexpected receiver")
+		return nil
+	}
 
 	// Update our mempool using the above mempool state.
 	newTxes := m.UpdateMempoolTxes()
@@ -491,9 +516,27 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	mempool2 := []*chainhash.Hash{&tx1Hash, &tx3Hash, &tx4Hash}
 
 	// Mock the client to return the txes.
-	mockRPC.On("GetRawMempool").Return(mempool2)
-	mockRPC.On("GetRawTransaction", &tx3Hash).Return(btctx3, nil).Once()
-	mockRPC.On("GetRawTransaction", &tx4Hash).Return(btctx4, nil).Once()
+	mockRPC.On("GetRawTransactionAsync",
+		&tx3Hash).Return(mockTx3Receiver).Once()
+	mockRPC.On("GetRawTransactionAsync",
+		&tx4Hash).Return(mockTx4Receiver).Once()
+	mockRPC.On("Send").Return(nil).Twice()
+
+	// Mock our rawMempoolGetter and rawTxReceiver.
+	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
+		return mempool2, nil
+	}
+	m.cfg.rawTxReceiver = func(reciever getRawTxReceiver) *btcutil.Tx {
+		switch reciever {
+		case mockTx3Receiver:
+			return btctx3
+		case mockTx4Receiver:
+			return btctx4
+		}
+
+		require.Fail("unexpected receiver")
+		return nil
+	}
 
 	// Update our mempool using the above mempool state.
 	newTxes = m.UpdateMempoolTxes()
@@ -554,14 +597,14 @@ func TestUpdateMempoolTxesOnShutdown(t *testing.T) {
 		},
 	}
 	tx1Hash := tx1.TxHash()
-	btcTx1 := btcutil.NewTx(tx1)
 
 	// Create the current mempool state.
 	mempool := []*chainhash.Hash{&tx1Hash}
 
-	// Mock the client to return the txes.
-	mockRPC.On("GetRawMempool").Return(mempool)
-	mockRPC.On("GetRawTransaction", &tx1Hash).Return(btcTx1, nil)
+	// Mock our rawMempoolGetter and rawTxReceiver.
+	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
+		return mempool, nil
+	}
 
 	// Shutdown the mempool before updating the txes.
 	m.Shutdown()
@@ -573,7 +616,7 @@ func TestUpdateMempoolTxesOnShutdown(t *testing.T) {
 	require.Empty(newTxes)
 
 	// Assert GetRawTransaction is not called because mempool is quit.
-	mockRPC.AssertNotCalled(t, "GetRawTransaction")
+	mockRPC.AssertNotCalled(t, "GetRawTransactionAsync")
 }
 
 // TestGetRawTxIgnoreErr tests that the mempool's GetRawTxIgnoreErr method
