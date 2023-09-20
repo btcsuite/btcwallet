@@ -95,6 +95,9 @@ func (c *cachedInputs) removeInputsFromTx(txid chainhash.Hash) {
 type mempool struct {
 	sync.RWMutex
 
+	// stopped is used to make sure we only stop mempool once.
+	stopped sync.Once
+
 	// txs stores the txids in the mempool.
 	txs map[chainhash.Hash]bool
 
@@ -111,6 +114,9 @@ type mempool struct {
 	// initFin is a channel that will be closed once the mempool has been
 	// initialized.
 	initFin chan struct{}
+
+	// quit is a channel that will be closed when the mempool exits.
+	quit chan struct{}
 }
 
 // newMempool creates a new mempool object.
@@ -119,8 +125,19 @@ func newMempool(client rpcClient) *mempool {
 		txs:     make(map[chainhash.Hash]bool),
 		inputs:  newCachedInputs(),
 		initFin: make(chan struct{}),
+		quit:    make(chan struct{}),
 		client:  client,
 	}
+}
+
+// Shutdown signals the mempool to exit.
+func (m *mempool) Shutdown() {
+	log.Debug("Local mempool shutting down...")
+	defer log.Debug("Local mempool shutdown complete")
+
+	m.stopped.Do(func() {
+		close(m.quit)
+	})
 }
 
 // Clean removes any of the given transactions from the mempool if they are
@@ -290,7 +307,21 @@ func (m *mempool) updateInputs(tx *wire.MsgTx) {
 
 // WaitForInit waits for the mempool to be initialized.
 func (m *mempool) WaitForInit() {
-	<-m.initFin
+	select {
+	case <-m.initFin:
+	case <-m.quit:
+		log.Debugf("Mempool shutting down before init finished")
+	}
+}
+
+// isShuttingDown returns true if the mempool is shutting down.
+func (m *mempool) isShuttingDown() bool {
+	select {
+	case <-m.quit:
+		return true
+	default:
+		return false
+	}
 }
 
 // LoadMempool loads all the raw transactions found in mempool.
@@ -310,6 +341,13 @@ func (m *mempool) LoadMempool() error {
 		eg.SetLimit(runtime.NumCPU())
 
 		for _, txHash := range txs {
+			// Before we load the tx, we'll check if we're shutting
+			// down. If so, we'll exit early.
+			if m.isShuttingDown() {
+				log.Info("LoadMempool exited due to shutdown")
+				return
+			}
+
 			txHash := txHash
 
 			eg.Go(func() error {
@@ -330,7 +368,6 @@ func (m *mempool) LoadMempool() error {
 		log.Debugf("Loaded mempool spends in %v", time.Since(now))
 
 		close(m.initFin)
-
 	}()
 
 	return nil
@@ -347,12 +384,21 @@ func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
 	// Set all mempool txs to false.
 	m.UnmarkAll()
 
+	// TODO(yy): let the OS manage the number of goroutines?
 	var eg errgroup.Group
 	eg.SetLimit(runtime.NumCPU())
 
 	// We'll scan through the most recent txs in the mempool to see whether
 	// there are new txs that we need to send to the client.
 	for _, txHash := range txids {
+		// Before we load the tx, we'll check if we're shutting down.
+		// If so, we'll exit early.
+		if m.isShuttingDown() {
+			log.Info("UpdateMempoolTxes exited due to shutdown")
+
+			return txesToNotify
+		}
+
 		txHash := txHash
 
 		// If the transaction is already in our local mempool, then we

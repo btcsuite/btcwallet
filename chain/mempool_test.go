@@ -520,6 +520,45 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	require.NotContains(m.inputs.txids, tx2Hash)
 }
 
+// TestUpdateMempoolTxesOnShutdown tests that when the mempool is shutting
+// down, UpdateMempoolTxes will also exit immediately.
+func TestUpdateMempoolTxesOnShutdown(t *testing.T) {
+	require := require.New(t)
+
+	// Create a mock client and init our mempool.
+	mockRPC := &mockRPCClient{}
+	m := newMempool(mockRPC)
+
+	// Create a normal transaction.
+	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
+	tx1 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+		},
+	}
+	tx1Hash := tx1.TxHash()
+	btcTx1 := btcutil.NewTx(tx1)
+
+	// Create the current mempool state.
+	mempool := []*chainhash.Hash{&tx1Hash}
+
+	// Mock the client to return the txes.
+	mockRPC.On("GetRawTransaction", &tx1Hash).Return(btcTx1, nil)
+
+	// Shutdown the mempool before updating the txes.
+	m.Shutdown()
+
+	// Update our mempool using the above mempool state.
+	newTxes := m.UpdateMempoolTxes(mempool)
+
+	// We expect two transactions.
+	require.Empty(newTxes)
+
+	// Assert GetRawTransaction is not called because mempool is quit.
+	mockRPC.AssertNotCalled(t, "GetRawTransaction")
+}
+
 // TestGetRawTxIgnoreErr tests that the mempool's GetRawTxIgnoreErr method
 // works as expected.
 func TestGetRawTxIgnoreErr(t *testing.T) {

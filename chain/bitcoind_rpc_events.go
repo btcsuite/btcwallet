@@ -116,6 +116,8 @@ func (b *bitcoindRPCPollingEvents) Start() error {
 
 // Stop cleans up all the bitcoindRPCPollingEvents resources and goroutines.
 func (b *bitcoindRPCPollingEvents) Stop() error {
+	b.mempool.Shutdown()
+
 	close(b.quit)
 	b.wg.Wait()
 	return nil

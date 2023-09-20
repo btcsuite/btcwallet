@@ -168,6 +168,8 @@ func (b *bitcoindZMQEvents) Start() error {
 
 // Stop cleans up any of the resources and goroutines held by bitcoindZMQEvents.
 func (b *bitcoindZMQEvents) Stop() error {
+	b.mempool.Shutdown()
+
 	var returnErr error
 	if err := b.txConn.Close(); err != nil {
 		returnErr = err
