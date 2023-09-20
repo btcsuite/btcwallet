@@ -109,6 +109,13 @@ clean:
 	@$(call print, "Cleaning source.$(NC)")
 	$(RM) coverage.txt
 
+tidy-module:
+	echo "Running 'go mod tidy' for all modules"
+	scripts/tidy_modules.sh
+
+tidy-module-check: tidy-module
+	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run `make tidy-module` again!"; git status; exit 1; fi
+
 .PHONY: all \
 	default \
 	build \
