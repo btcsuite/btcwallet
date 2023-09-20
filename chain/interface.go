@@ -5,6 +5,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -124,8 +125,35 @@ type (
 	}
 )
 
-// rpcClient defines an interface that is used to interact with the RPC client.
-type rpcClient interface {
-	GetRawMempool() ([]*chainhash.Hash, error)
-	GetRawTransaction(txHash *chainhash.Hash) (*btcutil.Tx, error)
+// batchClient defines an interface that is used to interact with the RPC
+// client.
+//
+// NOTE: the client returned from `rpcclient.NewBatch` will implement this
+// interface. Unlike the client from `rpcclient.New`, calling `GetRawMempool`
+// on this client will block and won't return.
+//
+// TODO(yy): create a new type BatchClient in `rpcclient`.
+type batchClient interface {
+	// GetRawMempoolAsync returns an instance of a type that can be used to
+	// get the result of the RPC at some future time by invoking the
+	// Receive function on the returned instance.
+	GetRawMempoolAsync() rpcclient.FutureGetRawMempoolResult
+
+	// GetRawTransactionAsync returns an instance of a type that can be
+	// used to get the result of the RPC at some future time by invoking
+	// the Receive function on the returned instance.
+	GetRawTransactionAsync(
+		txHash *chainhash.Hash) rpcclient.FutureGetRawTransactionResult
+
+	// Send marshalls bulk requests and sends to the server creates a
+	// response channel to receive the response
+	Send() error
+}
+
+// getRawTxReceiver defines an interface that's used to receive response from
+// `GetRawTransactionAsync`.
+type getRawTxReceiver interface {
+	// Receive waits for the Response promised by the future and returns a
+	// transaction given its hash.
+	Receive() (*btcutil.Tx, error)
 }

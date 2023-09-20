@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/gcs"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/banman"
@@ -163,17 +164,40 @@ type mockRPCClient struct {
 }
 
 // Compile time assertion that MockPeer implements lnpeer.Peer.
-var _ rpcClient = (*mockRPCClient)(nil)
+var _ batchClient = (*mockRPCClient)(nil)
 
-func (m *mockRPCClient) GetRawMempool() ([]*chainhash.Hash, error) {
+func (m *mockRPCClient) GetRawMempoolAsync() rpcclient.
+	FutureGetRawMempoolResult {
+
 	args := m.Called()
-	return args.Get(0).([]*chainhash.Hash), args.Error(1)
+	return args.Get(0).(rpcclient.FutureGetRawMempoolResult)
 }
 
-func (m *mockRPCClient) GetRawTransaction(
-	txHash *chainhash.Hash) (*btcutil.Tx, error) {
+func (m *mockRPCClient) GetRawTransactionAsync(
+	txHash *chainhash.Hash) rpcclient.FutureGetRawTransactionResult {
 
 	args := m.Called(txHash)
+
+	tx := args.Get(0)
+	if tx == nil {
+		return nil
+	}
+
+	return args.Get(0).(rpcclient.FutureGetRawTransactionResult)
+}
+
+func (m *mockRPCClient) Send() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+// mockGetRawTxReceiver mocks the getRawTxReceiver interface.
+type mockGetRawTxReceiver struct {
+	mock.Mock
+}
+
+func (m *mockGetRawTxReceiver) Receive() (*btcutil.Tx, error) {
+	args := m.Called()
 
 	tx := args.Get(0)
 	if tx == nil {
@@ -182,3 +206,6 @@ func (m *mockRPCClient) GetRawTransaction(
 
 	return args.Get(0).(*btcutil.Tx), args.Error(1)
 }
+
+// Compile time assertion that MockPeer implements lnpeer.Peer.
+var _ getRawTxReceiver = (*mockGetRawTxReceiver)(nil)

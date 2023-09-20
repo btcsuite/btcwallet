@@ -577,24 +577,25 @@ func TestGetRawTxIgnoreErr(t *testing.T) {
 		LockTime: 1,
 		TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
 	}
-	txid := tx.TxHash()
 	btctx := btcutil.NewTx(tx)
 
-	// Mock the client to return the tx.
-	mockRPC.On("GetRawTransaction", &txid).Return(btctx, nil).Once()
+	// Mock the receiver.
+	mockReceiver := &mockGetRawTxReceiver{}
+	mockReceiver.On("Receive").Return(btctx, nil).Once()
 
 	// Call the method and expect the tx to be returned.
-	resp := m.getRawTxIgnoreErr(&txid)
+	resp := m.getRawTxIgnoreErr(mockReceiver)
 	require.Equal(btctx, resp)
 
-	// Mock the client to return an error.
+	// Mock the reciever to return an error.
 	dummyErr := errors.New("dummy error")
-	mockRPC.On("GetRawTransaction", &txid).Return(nil, dummyErr).Once()
+	mockReceiver.On("Receive").Return(nil, dummyErr).Once()
 
 	// Call the method again and expect nil response.
-	resp = m.getRawTxIgnoreErr(&txid)
+	resp = m.getRawTxIgnoreErr(mockReceiver)
 	require.Nil(resp)
 
 	// Assert the mock client was called as expected.
 	mockRPC.AssertExpectations(t)
+	mockReceiver.AssertExpectations(t)
 }

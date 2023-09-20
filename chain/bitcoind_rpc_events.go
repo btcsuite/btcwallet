@@ -68,8 +68,8 @@ var _ BitcoindEvents = (*bitcoindRPCPollingEvents)(nil)
 
 // newBitcoindRPCPollingEvents instantiates a new bitcoindRPCPollingEvents
 // object.
-func newBitcoindRPCPollingEvents(cfg *PollingConfig,
-	client *rpcclient.Client) *bitcoindRPCPollingEvents {
+func newBitcoindRPCPollingEvents(cfg *PollingConfig, client *rpcclient.Client,
+	bClient batchClient) *bitcoindRPCPollingEvents {
 
 	if cfg.BlockPollingInterval == 0 {
 		cfg.BlockPollingInterval = defaultBlockPollInterval
@@ -91,7 +91,7 @@ func newBitcoindRPCPollingEvents(cfg *PollingConfig,
 		client:     client,
 		txNtfns:    make(chan *wire.MsgTx),
 		blockNtfns: make(chan *wire.MsgBlock),
-		mempool:    newMempool(client),
+		mempool:    newMempool(bClient),
 		quit:       make(chan struct{}),
 	}
 }

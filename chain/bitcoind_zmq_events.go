@@ -91,8 +91,8 @@ var _ BitcoindEvents = (*bitcoindZMQEvents)(nil)
 // newBitcoindZMQEvents initialises the necessary zmq connections to bitcoind.
 // If bitcoind is on a version with the gettxspendingprevout RPC, we can omit
 // the mempool.
-func newBitcoindZMQEvents(cfg *ZMQConfig,
-	client *rpcclient.Client, hasRPC bool) (*bitcoindZMQEvents, error) {
+func newBitcoindZMQEvents(cfg *ZMQConfig, client *rpcclient.Client,
+	bClient batchClient, hasRPC bool) (*bitcoindZMQEvents, error) {
 
 	// Check polling config.
 	if cfg.MempoolPollingInterval == 0 {
@@ -141,7 +141,7 @@ func newBitcoindZMQEvents(cfg *ZMQConfig,
 		hasPrevoutRPC: hasRPC,
 		blockNtfns:    make(chan *wire.MsgBlock),
 		txNtfns:       make(chan *wire.MsgTx),
-		mempool:       newMempool(client),
+		mempool:       newMempool(bClient),
 		quit:          make(chan struct{}),
 	}
 

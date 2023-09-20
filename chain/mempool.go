@@ -1,7 +1,7 @@
 package chain
 
 import (
-	"runtime"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -10,12 +10,21 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"golang.org/x/sync/errgroup"
 )
 
-// txNotFoundErr is an error returned from bitcoind's `getrawtransaction` RPC
-// when the requested txid cannot be found.
-const txNotFoundErr = "-5: No such mempool or blockchain transaction"
+const (
+	// txNotFoundErr is an error returned from bitcoind's
+	// `getrawtransaction` RPC when the requested txid cannot be found.
+	txNotFoundErr = "-5: No such mempool or blockchain transaction"
+
+	// getRawTxBatchSize specifies the number of requests to be batched
+	// before sending them to the bitcoind client.
+	getRawTxBatchSize = 1000
+
+	// batchWaitInterval defines the time to sleep between each batched
+	// calls.
+	batchWaitInterval = 1 * time.Second
+)
 
 // cachedInputs caches the inputs of the transactions in the mempool. This is
 // used to provide fast lookup between txids and inputs.
@@ -109,7 +118,7 @@ type mempool struct {
 	inputs *cachedInputs
 
 	// client is the rpc client that we'll use to query for the mempool.
-	client rpcClient
+	client batchClient
 
 	// initFin is a channel that will be closed once the mempool has been
 	// initialized.
@@ -120,7 +129,7 @@ type mempool struct {
 }
 
 // newMempool creates a new mempool object.
-func newMempool(client rpcClient) *mempool {
+func newMempool(client batchClient) *mempool {
 	return &mempool{
 		txs:     make(map[chainhash.Hash]bool),
 		inputs:  newCachedInputs(),
@@ -327,46 +336,23 @@ func (m *mempool) isShuttingDown() bool {
 // LoadMempool loads all the raw transactions found in mempool.
 func (m *mempool) LoadMempool() error {
 	log.Debugf("Loading mempool spends...")
-
 	now := time.Now()
 
-	txs, err := m.client.GetRawMempool()
+	// Fetch the latest mempool.
+	txids, err := m.getRawMempool()
 	if err != nil {
 		log.Errorf("Unable to get raw mempool txs: %v", err)
 		return err
 	}
 
+	// Load the mempool in a goroutine and signal it when done.
 	go func() {
-		var eg errgroup.Group
-		eg.SetLimit(runtime.NumCPU())
-
-		for _, txHash := range txs {
-			// Before we load the tx, we'll check if we're shutting
-			// down. If so, we'll exit early.
-			if m.isShuttingDown() {
-				log.Info("LoadMempool exited due to shutdown")
-				return
-			}
-
-			txHash := txHash
-
-			eg.Go(func() error {
-				// Grab full mempool transaction from hash.
-				tx := m.getRawTxIgnoreErr(txHash)
-				if tx == nil {
-					return nil
-				}
-
-				// Add the transaction to our local mempool.
-				m.Add(tx.MsgTx())
-				return nil
-			})
+		_, err := m.batchGetRawTxes(txids, false)
+		if err != nil {
+			log.Errorf("LoadMempool got error: %v", err)
 		}
 
-		_ = eg.Wait()
-
 		log.Debugf("Loaded mempool spends in %v", time.Since(now))
-
 		close(m.initFin)
 	}()
 
@@ -377,35 +363,31 @@ func (m *mempool) LoadMempool() error {
 // use it to update its internal mempool. It returns a slice of transactions
 // that's new to its internal mempool.
 func (m *mempool) UpdateMempoolTxes() []*wire.MsgTx {
-	txids, err := m.client.GetRawMempool()
+	// Fetch the latest mempool.
+	txids, err := m.getRawMempool()
 	if err != nil {
 		log.Errorf("Unable to get raw mempool txs: %v", err)
 		return nil
 	}
 
-	// txesToNotify is a list of txes to be notified to the client.
-	var notixyMx sync.Mutex
-	txesToNotify := make([]*wire.MsgTx, 0, len(txids))
-
 	// Set all mempool txs to false.
 	m.UnmarkAll()
 
-	// TODO(yy): let the OS manage the number of goroutines?
-	var eg errgroup.Group
-	eg.SetLimit(runtime.NumCPU())
+	// newTxids stores a list of unseen txids found in the mempool.
+	newTxids := make([]*chainhash.Hash, 0)
 
 	// We'll scan through the most recent txs in the mempool to see whether
 	// there are new txs that we need to send to the client.
 	for _, txHash := range txids {
+		txHash := txHash
+
 		// Before we load the tx, we'll check if we're shutting down.
 		// If so, we'll exit early.
 		if m.isShuttingDown() {
 			log.Info("UpdateMempoolTxes exited due to shutdown")
 
-			return txesToNotify
+			return nil
 		}
-
-		txHash := txHash
 
 		// If the transaction is already in our local mempool, then we
 		// have already sent it to the client.
@@ -416,48 +398,156 @@ func (m *mempool) UpdateMempoolTxes() []*wire.MsgTx {
 			continue
 		}
 
-		eg.Go(func() error {
-			// Grab full mempool transaction from hash.
-			tx := m.getRawTxIgnoreErr(txHash)
-			if tx == nil {
-				return nil
-			}
-
-			// Add the transaction to our local mempool. Note that
-			// we only do this after fetching the full raw
-			// transaction from bitcoind. We do this so that if
-			// that call happens to initially fail, then we will
-			// retry it on the next interval since it is still not
-			// in our local mempool.
-			m.Add(tx.MsgTx())
-
-			// Save the tx to the slice.
-			notixyMx.Lock()
-			txesToNotify = append(txesToNotify, tx.MsgTx())
-			notixyMx.Unlock()
-
-			return nil
-		})
+		newTxids = append(newTxids, txHash)
 	}
-
-	_ = eg.Wait()
 
 	// Now, we clear our internal mempool of any unmarked transactions.
 	// These are all the transactions that we still have in the mempool but
 	// that were not returned in the latest GetRawMempool query.
 	m.DeleteUnmarked()
 
+	// Fetch the raw transactions in batch.
+	txesToNotify, err := m.batchGetRawTxes(newTxids, true)
+	if err != nil {
+		log.Error("Batch getrawtransaction got %v", err)
+	}
+
 	return txesToNotify
 }
 
-// getRawTxIgnoreErr wraps the GetRawTransaction call to bitcoind, and ignores
-// the error returned since we can't do anything about it here in the mempool.
+// getRawMempool returns all the raw transactions found in mempool.
+func (m *mempool) getRawMempool() ([]*chainhash.Hash, error) {
+	// Create an async request and send it immediately.
+	result := m.client.GetRawMempoolAsync()
+
+	err := m.client.Send()
+	if err != nil {
+		log.Errorf("Unable to send GetRawMempool: %v", err)
+		return nil, err
+	}
+
+	// Receive the response.
+	txids, err := result.Receive()
+	if err != nil {
+		log.Errorf("Unable to get raw mempool txs: %v", err)
+		return nil, err
+	}
+
+	return txids, nil
+}
+
+// batchGetRawTxes makes async GetRawTransaction requests in batches. Each
+// batch has either a default size of 10000, or the value specified in
+// getRawTxBatchSize. Once a batch is processed, it will wait for
+// batchWaitInterval(1s) before attempting the next batch.
+func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
+	returnNew bool) ([]*wire.MsgTx, error) {
+
+	log.Debugf("Batching GetRawTransaction in %v batches...",
+		len(txids)/getRawTxBatchSize+1)
+	defer log.Debugf("Finished batch GetRawTransaction")
+
+	// respReceivers stores a list of response receivers returned from
+	// batch calling `GetRawTransactionAsync`.
+	respReceivers := make([]getRawTxReceiver, 0, getRawTxBatchSize)
+
+	// Conditionally init a newTxes slice.
+	var newTxes []*wire.MsgTx
+	if returnNew {
+		newTxes = make([]*wire.MsgTx, 0, len(txids))
+	}
+
+	// processBatch asks the batch client to send its cached requests to
+	// bitcoind and waits for all the responses to return. Each time a
+	// response is received, it will be used to update the local mempool
+	// state and conditionally saved to a slice that will be returned.
+	processBatch := func(results []getRawTxReceiver) error {
+		// Ask the client to send all the batched requests.
+		err := m.client.Send()
+		if err != nil {
+			return fmt.Errorf("Send GetRawTransaction got %v", err)
+		}
+
+		// Iterate the recievers and fetch the response.
+		for _, resp := range results {
+			tx := m.getRawTxIgnoreErr(resp)
+			if tx == nil {
+				continue
+			}
+
+			// Add the transaction to our local mempool.
+			m.Add(tx.MsgTx())
+
+			// Add the tx to the slice if specified.
+			if returnNew {
+				newTxes = append(newTxes, tx.MsgTx())
+			}
+		}
+
+		return nil
+	}
+
+	// Iterate all the txids.
+	for i, txHash := range txids {
+		// Before we load the tx, we'll check if we're shutting down.
+		// If so, we'll exit early.
+		if m.isShuttingDown() {
+			log.Info("LoadMempool exited due to shutdown")
+			return nil, nil
+		}
+
+		// Create the async request and save it to txRespReceivers.
+		resp := m.client.GetRawTransactionAsync(txHash)
+		respReceivers = append(respReceivers, resp)
+
+		// When getRawTxBatchSize is reached, we'd ask the batch client
+		// to send the requests and process the responses.
+		if len(respReceivers)%getRawTxBatchSize == 0 {
+			log.Debugf("Processing GetRawTransaction for batch "+
+				"%v...", i/getRawTxBatchSize)
+
+			if err := processBatch(respReceivers); err != nil {
+				return nil, err
+			}
+
+			// We now pause the duration defined in
+			// `batchWaitInterval` or exit on quit signal.
+			select {
+			case <-time.After(batchWaitInterval):
+			case <-m.quit:
+				return nil, nil
+			}
+
+			// Empty the slice for next batch iteration.
+			respReceivers = make(
+				[]getRawTxReceiver, 0, getRawTxBatchSize,
+			)
+		}
+	}
+
+	// Exit early if the receivers are all processed.
+	if len(respReceivers) == 0 {
+		return newTxes, nil
+	}
+
+	// Process the remaining recievers.
+	if err := processBatch(respReceivers); err != nil {
+		return nil, err
+	}
+
+	return newTxes, nil
+}
+
+// getRawTxIgnoreErr takes a response receiver returned from
+// `GetRawTransactionAsync` and receives the response. It ignores the error
+// returned since we can't do anything about it here in the mempool.
 //
-// NOTE: if `txindex` is not enabled, `GetRawTransaction` will only look for
-// the txid in bitocind's mempool. If the tx is replaced, confirmed, or not yet
-// included in bitcoind's mempool, the error txNotFoundErr will be returned.
-func (m *mempool) getRawTxIgnoreErr(txid *chainhash.Hash) *btcutil.Tx {
-	tx, err := m.client.GetRawTransaction(txid)
+// NOTE: if `txindex` is not enabled, `GetRawTransactionAsync` will only look
+// for the txid in bitcoind's mempool. If the tx is replaced, confirmed, or not
+// yet included in bitcoind's mempool, the error txNotFoundErr will be
+// returned.
+func (m *mempool) getRawTxIgnoreErr(rawTx getRawTxReceiver) *btcutil.Tx {
+	tx, err := rawTx.Receive()
 
 	// Exit early if there's no error.
 	if err == nil {
@@ -468,14 +558,12 @@ func (m *mempool) getRawTxIgnoreErr(txid *chainhash.Hash) *btcutil.Tx {
 	errStr := strings.ToLower(err.Error())
 	errExp := strings.ToLower(txNotFoundErr)
 	if strings.Contains(errStr, errExp) {
-		log.Debugf("unable to fetch transaction %s from mempool: %v",
-			txid, err)
+		log.Debugf("unable to fetch transaction from mempool: %v", err)
 
 	} else {
 		// Otherwise, unexpected error is found, we'll create an error
 		// log.
-		log.Errorf("unable to fetch transaction %s from mempool: %v",
-			txid, err)
+		log.Errorf("unable to fetch transaction from mempool: %v", err)
 	}
 
 	return nil
