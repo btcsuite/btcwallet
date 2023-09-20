@@ -376,7 +376,13 @@ func (m *mempool) LoadMempool() error {
 // UpdateMempoolTxes takes a slice of transactions from the current mempool and
 // use it to update its internal mempool. It returns a slice of transactions
 // that's new to its internal mempool.
-func (m *mempool) UpdateMempoolTxes(txids []*chainhash.Hash) []*wire.MsgTx {
+func (m *mempool) UpdateMempoolTxes() []*wire.MsgTx {
+	txids, err := m.client.GetRawMempool()
+	if err != nil {
+		log.Errorf("Unable to get raw mempool txs: %v", err)
+		return nil
+	}
+
 	// txesToNotify is a list of txes to be notified to the client.
 	var notixyMx sync.Mutex
 	txesToNotify := make([]*wire.MsgTx, 0, len(txids))

@@ -443,11 +443,12 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	mempool1 := []*chainhash.Hash{&tx1Hash, &tx2Hash}
 
 	// Mock the client to return the txes.
+	mockRPC.On("GetRawMempool").Return(mempool1)
 	mockRPC.On("GetRawTransaction", &tx1Hash).Return(btcTx1, nil).Once()
 	mockRPC.On("GetRawTransaction", &tx2Hash).Return(btctx2, nil).Once()
 
 	// Update our mempool using the above mempool state.
-	newTxes := m.UpdateMempoolTxes(mempool1)
+	newTxes := m.UpdateMempoolTxes()
 
 	// We expect two transactions.
 	require.Len(newTxes, 2)
@@ -480,11 +481,12 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	mempool2 := []*chainhash.Hash{&tx1Hash, &tx3Hash, &tx4Hash}
 
 	// Mock the client to return the txes.
+	mockRPC.On("GetRawMempool").Return(mempool2)
 	mockRPC.On("GetRawTransaction", &tx3Hash).Return(btctx3, nil).Once()
 	mockRPC.On("GetRawTransaction", &tx4Hash).Return(btctx4, nil).Once()
 
 	// Update our mempool using the above mempool state.
-	newTxes = m.UpdateMempoolTxes(mempool2)
+	newTxes = m.UpdateMempoolTxes()
 
 	// We expect two transactions.
 	require.Len(newTxes, 2)
@@ -544,13 +546,14 @@ func TestUpdateMempoolTxesOnShutdown(t *testing.T) {
 	mempool := []*chainhash.Hash{&tx1Hash}
 
 	// Mock the client to return the txes.
+	mockRPC.On("GetRawMempool").Return(mempool)
 	mockRPC.On("GetRawTransaction", &tx1Hash).Return(btcTx1, nil)
 
 	// Shutdown the mempool before updating the txes.
 	m.Shutdown()
 
 	// Update our mempool using the above mempool state.
-	newTxes := m.UpdateMempoolTxes(mempool)
+	newTxes := m.UpdateMempoolTxes()
 
 	// We expect two transactions.
 	require.Empty(newTxes)

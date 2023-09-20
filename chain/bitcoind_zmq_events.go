@@ -504,16 +504,9 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 			now := time.Now()
 
 			// After each ticker interval, we poll the mempool to
-			// check for transactions we haven't seen yet.
-			txs, err := b.mempool.client.GetRawMempool()
-			if err != nil {
-				log.Errorf("Unable to retrieve mempool txs: "+
-					"%v", err)
-				continue
-			}
-
-			// Update our local mempool with the new mempool.
-			b.mempool.UpdateMempoolTxes(txs)
+			// check for transactions we haven't seen yet and
+			// update our local mempool with the new mempool.
+			b.mempool.UpdateMempoolTxes()
 
 			log.Tracef("Reconciled mempool spends in %v",
 				time.Since(now))
