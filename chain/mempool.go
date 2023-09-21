@@ -153,7 +153,7 @@ type mempoolConfig struct {
 	//
 	// TODO(yy): interface rpcclient.FutureGetRawTransactionResult so we
 	// can remove this hack.
-	rawTxReceiver func(getRawTxReceiver) *btcutil.Tx
+	rawTxReceiver func(chainhash.Hash, getRawTxReceiver) *btcutil.Tx
 }
 
 // newMempool creates a new mempool object.
@@ -168,7 +168,7 @@ func newMempool(cfg *mempoolConfig) *mempool {
 
 	// Mount the default methods.
 	m.cfg.rawMempoolGetter = m.getRawMempool
-	m.cfg.rawTxReceiver = m.getRawTxIgnoreErr
+	m.cfg.rawTxReceiver = getRawTxIgnoreErr
 
 	return m
 }
@@ -482,9 +482,13 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 		uint32(len(txids))/m.cfg.getRawTxBatchSize+1)
 	defer log.Debugf("Finished batch GetRawTransaction")
 
+	// txRecievers defines a map that has the txid as its key and the tx's
+	// response reciever as its value.
+	type txRecievers map[chainhash.Hash]getRawTxReceiver
+
 	// respReceivers stores a list of response receivers returned from
 	// batch calling `GetRawTransactionAsync`.
-	respReceivers := make([]getRawTxReceiver, 0, m.cfg.getRawTxBatchSize)
+	respReceivers := make(txRecievers, m.cfg.getRawTxBatchSize)
 
 	// Conditionally init a newTxes slice.
 	var newTxes []*wire.MsgTx
@@ -496,7 +500,7 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 	// bitcoind and waits for all the responses to return. Each time a
 	// response is received, it will be used to update the local mempool
 	// state and conditionally saved to a slice that will be returned.
-	processBatch := func(results []getRawTxReceiver) error {
+	processBatch := func(results txRecievers) error {
 		// Ask the client to send all the batched requests.
 		err := m.cfg.client.Send()
 		if err != nil {
@@ -504,8 +508,8 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 		}
 
 		// Iterate the recievers and fetch the response.
-		for _, resp := range results {
-			tx := m.cfg.rawTxReceiver(resp)
+		for txid, resp := range results {
+			tx := m.cfg.rawTxReceiver(txid, resp)
 			if tx == nil {
 				continue
 			}
@@ -533,7 +537,7 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 
 		// Create the async request and save it to txRespReceivers.
 		resp := m.cfg.client.GetRawTransactionAsync(txHash)
-		respReceivers = append(respReceivers, resp)
+		respReceivers[*txHash] = resp
 
 		// When getRawTxBatchSize is reached, we'd ask the batch client
 		// to send the requests and process the responses.
@@ -555,7 +559,7 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 
 			// Empty the slice for next batch iteration.
 			respReceivers = make(
-				[]getRawTxReceiver, 0, m.cfg.getRawTxBatchSize,
+				txRecievers, m.cfg.getRawTxBatchSize,
 			)
 		}
 	}
@@ -581,7 +585,9 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 // for the txid in bitcoind's mempool. If the tx is replaced, confirmed, or not
 // yet included in bitcoind's mempool, the error txNotFoundErr will be
 // returned.
-func (m *mempool) getRawTxIgnoreErr(rawTx getRawTxReceiver) *btcutil.Tx {
+func getRawTxIgnoreErr(txid chainhash.Hash,
+	rawTx getRawTxReceiver) *btcutil.Tx {
+
 	tx, err := rawTx.Receive()
 
 	// Exit early if there's no error.
@@ -593,12 +599,14 @@ func (m *mempool) getRawTxIgnoreErr(rawTx getRawTxReceiver) *btcutil.Tx {
 	errStr := strings.ToLower(err.Error())
 	errExp := strings.ToLower(txNotFoundErr)
 	if strings.Contains(errStr, errExp) {
-		log.Debugf("unable to fetch transaction from mempool: %v", err)
+		log.Debugf("unable to fetch transaction %s from mempool: %v",
+			txid, err)
 
 	} else {
 		// Otherwise, unexpected error is found, we'll create an error
 		// log.
-		log.Errorf("unable to fetch transaction from mempool: %v", err)
+		log.Errorf("unable to fetch transaction %s from mempool: %v",
+			txid, err)
 	}
 
 	return nil

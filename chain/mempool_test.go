@@ -470,7 +470,9 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
 		return mempool1, nil
 	}
-	m.cfg.rawTxReceiver = func(reciever getRawTxReceiver) *btcutil.Tx {
+	m.cfg.rawTxReceiver = func(txid chainhash.Hash,
+		reciever getRawTxReceiver) *btcutil.Tx {
+
 		switch reciever {
 		case mockTx1Receiver:
 			return btctx1
@@ -526,7 +528,9 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
 		return mempool2, nil
 	}
-	m.cfg.rawTxReceiver = func(reciever getRawTxReceiver) *btcutil.Tx {
+	m.cfg.rawTxReceiver = func(txid chainhash.Hash,
+		reciever getRawTxReceiver) *btcutil.Tx {
+
 		switch reciever {
 		case mockTx3Receiver:
 			return btctx3
@@ -624,14 +628,6 @@ func TestUpdateMempoolTxesOnShutdown(t *testing.T) {
 func TestGetRawTxIgnoreErr(t *testing.T) {
 	require := require.New(t)
 
-	// Create a mock client and init our mempool.
-	mockRPC := &mockRPCClient{}
-	m := newMempool(&mempoolConfig{
-		client:            mockRPC,
-		batchWaitInterval: 0,
-		getRawTxBatchSize: 1,
-	})
-
 	// Create a normal transaction that has two inputs.
 	op := wire.OutPoint{Hash: chainhash.Hash{1}}
 	tx := &wire.MsgTx{
@@ -645,7 +641,7 @@ func TestGetRawTxIgnoreErr(t *testing.T) {
 	mockReceiver.On("Receive").Return(btctx, nil).Once()
 
 	// Call the method and expect the tx to be returned.
-	resp := m.getRawTxIgnoreErr(mockReceiver)
+	resp := getRawTxIgnoreErr(tx.TxHash(), mockReceiver)
 	require.Equal(btctx, resp)
 
 	// Mock the reciever to return an error.
@@ -653,10 +649,9 @@ func TestGetRawTxIgnoreErr(t *testing.T) {
 	mockReceiver.On("Receive").Return(nil, dummyErr).Once()
 
 	// Call the method again and expect nil response.
-	resp = m.getRawTxIgnoreErr(mockReceiver)
+	resp = getRawTxIgnoreErr(tx.TxHash(), mockReceiver)
 	require.Nil(resp)
 
 	// Assert the mock client was called as expected.
-	mockRPC.AssertExpectations(t)
 	mockReceiver.AssertExpectations(t)
 }
