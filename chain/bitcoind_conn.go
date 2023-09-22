@@ -12,6 +12,8 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/ticker"
+
+	"encoding/json"
 )
 
 const (
@@ -108,6 +110,10 @@ type BitcoindConn struct {
 	rescanClientsMtx sync.Mutex
 	rescanClients    map[uint64]*BitcoindClient
 
+	// hasNeutrinoFilters indicates if the bitcoind connection can serve
+	// neutrino filters over RPC.
+	hasNeutrinoFilters bool
+
 	quit chan struct{}
 	wg   sync.WaitGroup
 }
@@ -115,6 +121,32 @@ type BitcoindConn struct {
 // Dialer represents a way to dial Bitcoin peers. If the chain backend is
 // running over Tor, this must support dialing peers over Tor as well.
 type Dialer = func(string) (net.Conn, error)
+
+// hasNeutrinoFilters returns whether or not the bitcoind node is able to serve
+// neutrino filters based on its version.
+func hasNeutrinoFilters(client *rpcclient.Client) (bool, error) {
+	// Fetch the bitcoind version.
+	resp, err := client.RawRequest("getnetworkinfo", nil)
+	if err != nil {
+		return false, err
+	}
+
+	info := struct {
+		Version int64 `json:"version"`
+	}{}
+
+	if err := json.Unmarshal(resp, &info); err != nil {
+		return false, err
+	}
+
+	// Bitcoind returns a single value representing the semantic version:
+	// 10000 * CLIENT_VERSION_MAJOR + 100 * CLIENT_VERSION_MINOR + 1 *
+	// CLIENT_VERSION_BUILD
+	//
+	// The getblockfilter call was added in version 19.0.0, so we return
+	// for versions >= 190000.
+	return info.Version >= 190000, nil
+}
 
 // NewBitcoindConn creates a client connection to the node described by the host
 // string. The ZMQ connections are established immediately to ensure liveness.
@@ -174,11 +206,18 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		}
 	}
 
+	hasNeutrinoFilters, err := hasNeutrinoFilters(client)
+	if err != nil {
+		return nil, fmt.Errorf("unable to determine if bitcoind "+
+			"has neutrino filters: %w", err)
+	}
+
 	bc := &BitcoindConn{
 		cfg:                   *cfg,
 		client:                client,
 		prunedBlockDispatcher: prunedBlockDispatcher,
 		rescanClients:         make(map[uint64]*BitcoindClient),
+		hasNeutrinoFilters:    hasNeutrinoFilters,
 		quit:                  make(chan struct{}),
 	}
 
