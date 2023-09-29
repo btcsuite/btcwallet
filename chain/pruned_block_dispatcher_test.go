@@ -233,7 +233,7 @@ func (h *prunedBlockDispatcherHarness) newPeer() *peer.Peer {
 
 				for _, inv := range msg.InvList {
 					// Invs should always be for blocks.
-					require.Equal(h.t, wire.InvTypeBlock, inv.Type)
+					require.Equal(h.t, wire.InvTypeWitnessBlock, inv.Type)
 
 					// Invs should always be for known blocks.
 					block, ok := h.blocks[inv.Hash]

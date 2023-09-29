@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -62,5 +63,39 @@ func NewBitcoindEventSubscriber(cfg *BitcoindConfig,
 			"rpcpolling is disabled")
 	}
 
-	return newBitcoindZMQEvents(cfg.ZMQConfig, client)
+	// Check if the bitcoind node is on a version that has the
+	// gettxspendingprevout RPC. If it does, then we don't need to maintain
+	// a mempool for ZMQ clients.
+	hasRPC, err := hasSpendingPrevoutRPC(client)
+	if err != nil {
+		return nil, err
+	}
+
+	return newBitcoindZMQEvents(cfg.ZMQConfig, client, hasRPC)
+}
+
+// hasSpendingPrevoutRPC returns whether or not the bitcoind has the newer
+// gettxspendingprevout RPC.
+func hasSpendingPrevoutRPC(client *rpcclient.Client) (bool, error) {
+	// Fetch the bitcoind version.
+	resp, err := client.RawRequest("getnetworkinfo", nil)
+	if err != nil {
+		return false, err
+	}
+
+	info := struct {
+		Version int64 `json:"version"`
+	}{}
+
+	if err := json.Unmarshal(resp, &info); err != nil {
+		return false, err
+	}
+
+	// Bitcoind returns a single value representing the semantic version:
+	// 10000 * CLIENT_VERSION_MAJOR + 100 * CLIENT_VERSION_MINOR
+	// + 1 * CLIENT_VERSION_BUILD
+	//
+	// The gettxspendingprevout call was added in version 24.0.0, so we
+	// return for versions >= 240000.
+	return info.Version >= 240000, nil
 }
