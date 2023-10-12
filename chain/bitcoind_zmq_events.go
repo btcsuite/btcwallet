@@ -47,6 +47,14 @@ type ZMQConfig struct {
 	//
 	// TODO(yy): replace this temp config with SEQUENCE check.
 	PollingIntervalJitter float64
+
+	// RPCBatchSize defines the number of RPC requests to be batches before
+	// sending them to the bitcoind node.
+	RPCBatchSize uint32
+
+	// RPCBatchInterval defines the time to wait before attempting the next
+	// batch when the current one finishes.
+	RPCBatchInterval time.Duration
 }
 
 // bitcoindZMQEvents delivers block and transaction notifications that it gets
@@ -91,8 +99,8 @@ var _ BitcoindEvents = (*bitcoindZMQEvents)(nil)
 // newBitcoindZMQEvents initialises the necessary zmq connections to bitcoind.
 // If bitcoind is on a version with the gettxspendingprevout RPC, we can omit
 // the mempool.
-func newBitcoindZMQEvents(cfg *ZMQConfig,
-	client *rpcclient.Client, hasRPC bool) (*bitcoindZMQEvents, error) {
+func newBitcoindZMQEvents(cfg *ZMQConfig, client *rpcclient.Client,
+	bClient batchClient, hasRPC bool) (*bitcoindZMQEvents, error) {
 
 	// Check polling config.
 	if cfg.MempoolPollingInterval == 0 {
@@ -133,6 +141,22 @@ func newBitcoindZMQEvents(cfg *ZMQConfig,
 			"events: %v", err)
 	}
 
+	// Create the config for mempool and attach default values if not
+	// configed.
+	mCfg := &mempoolConfig{
+		client:            bClient,
+		getRawTxBatchSize: cfg.RPCBatchSize,
+		batchWaitInterval: cfg.RPCBatchInterval,
+	}
+
+	if cfg.RPCBatchSize == 0 {
+		mCfg.getRawTxBatchSize = DefaultGetRawTxBatchSize
+	}
+
+	if cfg.RPCBatchInterval == 0 {
+		mCfg.batchWaitInterval = DefaultBatchWaitInterval
+	}
+
 	zmqEvents := &bitcoindZMQEvents{
 		cfg:           cfg,
 		client:        client,
@@ -141,11 +165,12 @@ func newBitcoindZMQEvents(cfg *ZMQConfig,
 		hasPrevoutRPC: hasRPC,
 		blockNtfns:    make(chan *wire.MsgBlock),
 		txNtfns:       make(chan *wire.MsgTx),
-		mempool:       newMempool(client),
+		mempool:       newMempool(mCfg),
 		quit:          make(chan struct{}),
 	}
 
 	return zmqEvents, nil
+
 }
 
 // Start spins off the bitcoindZMQEvent goroutines.
@@ -168,6 +193,8 @@ func (b *bitcoindZMQEvents) Start() error {
 
 // Stop cleans up any of the resources and goroutines held by bitcoindZMQEvents.
 func (b *bitcoindZMQEvents) Stop() error {
+	b.mempool.Shutdown()
+
 	var returnErr error
 	if err := b.txConn.Close(); err != nil {
 		returnErr = err
@@ -502,16 +529,9 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 			now := time.Now()
 
 			// After each ticker interval, we poll the mempool to
-			// check for transactions we haven't seen yet.
-			txs, err := b.mempool.client.GetRawMempool()
-			if err != nil {
-				log.Errorf("Unable to retrieve mempool txs: "+
-					"%v", err)
-				continue
-			}
-
-			// Update our local mempool with the new mempool.
-			b.mempool.UpdateMempoolTxes(txs)
+			// check for transactions we haven't seen yet and
+			// update our local mempool with the new mempool.
+			b.mempool.UpdateMempoolTxes()
 
 			log.Tracef("Reconciled mempool spends in %v",
 				time.Since(now))

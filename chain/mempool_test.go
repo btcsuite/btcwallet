@@ -4,12 +4,18 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/stretchr/testify/require"
 )
+
+// testTimeout is used to ensure the test will time out if the expected result
+// is not returned in 5 seconds.
+const testTimeout = 5 * time.Second
 
 // TestCachedInputs tests that the cachedInputs works as expected.
 func TestCachedInputs(t *testing.T) {
@@ -207,7 +213,10 @@ func TestCachedInputsAddInputTwice(t *testing.T) {
 func TestMempool(t *testing.T) {
 	require := require.New(t)
 
-	m := newMempool(nil)
+	m := newMempool(&mempoolConfig{
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a transaction.
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
@@ -321,7 +330,10 @@ func TestMempool(t *testing.T) {
 func TestMempoolAdd(t *testing.T) {
 	require := require.New(t)
 
-	m := newMempool(nil)
+	m := newMempool(&mempoolConfig{
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a coinbase transaction.
 	tx0 := &wire.MsgTx{
@@ -413,7 +425,11 @@ func TestUpdateMempoolTxes(t *testing.T) {
 
 	// Create a mock client and init our mempool.
 	mockRPC := &mockRPCClient{}
-	m := newMempool(mockRPC)
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
 
 	// Create a normal transaction that has two inputs.
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
@@ -426,7 +442,7 @@ func TestUpdateMempoolTxes(t *testing.T) {
 		},
 	}
 	tx1Hash := tx1.TxHash()
-	btcTx1 := btcutil.NewTx(tx1)
+	btctx1 := btcutil.NewTx(tx1)
 
 	// Create another transaction.
 	op3 := wire.OutPoint{Hash: chainhash.Hash{3}}
@@ -442,12 +458,39 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	// Create the current mempool state.
 	mempool1 := []*chainhash.Hash{&tx1Hash, &tx2Hash}
 
+	// Create mock receivers.
+	mockTx1Receiver := make(rpcclient.FutureGetRawTransactionResult)
+	mockTx2Receiver := make(rpcclient.FutureGetRawTransactionResult)
+	mockTx3Receiver := make(rpcclient.FutureGetRawTransactionResult)
+	mockTx4Receiver := make(rpcclient.FutureGetRawTransactionResult)
+
 	// Mock the client to return the txes.
-	mockRPC.On("GetRawTransaction", &tx1Hash).Return(btcTx1, nil).Once()
-	mockRPC.On("GetRawTransaction", &tx2Hash).Return(btctx2, nil).Once()
+	mockRPC.On("GetRawTransactionAsync", &tx1Hash).Return(
+		mockTx1Receiver).Once()
+	mockRPC.On("GetRawTransactionAsync", &tx2Hash).Return(
+		mockTx2Receiver).Once()
+	mockRPC.On("Send").Return(nil).Twice()
+
+	// Mock our rawMempoolGetter and rawTxReceiver.
+	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
+		return mempool1, nil
+	}
+	m.cfg.rawTxReceiver = func(txid chainhash.Hash,
+		reciever getRawTxReceiver) *btcutil.Tx {
+
+		switch reciever {
+		case mockTx1Receiver:
+			return btctx1
+		case mockTx2Receiver:
+			return btctx2
+		}
+
+		require.Fail("unexpected receiver")
+		return nil
+	}
 
 	// Update our mempool using the above mempool state.
-	newTxes := m.UpdateMempoolTxes(mempool1)
+	newTxes := m.UpdateMempoolTxes()
 
 	// We expect two transactions.
 	require.Len(newTxes, 2)
@@ -480,11 +523,32 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	mempool2 := []*chainhash.Hash{&tx1Hash, &tx3Hash, &tx4Hash}
 
 	// Mock the client to return the txes.
-	mockRPC.On("GetRawTransaction", &tx3Hash).Return(btctx3, nil).Once()
-	mockRPC.On("GetRawTransaction", &tx4Hash).Return(btctx4, nil).Once()
+	mockRPC.On("GetRawTransactionAsync",
+		&tx3Hash).Return(mockTx3Receiver).Once()
+	mockRPC.On("GetRawTransactionAsync",
+		&tx4Hash).Return(mockTx4Receiver).Once()
+	mockRPC.On("Send").Return(nil).Twice()
+
+	// Mock our rawMempoolGetter and rawTxReceiver.
+	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
+		return mempool2, nil
+	}
+	m.cfg.rawTxReceiver = func(txid chainhash.Hash,
+		reciever getRawTxReceiver) *btcutil.Tx {
+
+		switch reciever {
+		case mockTx3Receiver:
+			return btctx3
+		case mockTx4Receiver:
+			return btctx4
+		}
+
+		require.Fail("unexpected receiver")
+		return nil
+	}
 
 	// Update our mempool using the above mempool state.
-	newTxes = m.UpdateMempoolTxes(mempool2)
+	newTxes = m.UpdateMempoolTxes()
 
 	// We expect two transactions.
 	require.Len(newTxes, 2)
@@ -520,14 +584,54 @@ func TestUpdateMempoolTxes(t *testing.T) {
 	require.NotContains(m.inputs.txids, tx2Hash)
 }
 
-// TestGetRawTxIgnoreErr tests that the mempool's GetRawTxIgnoreErr method
-// works as expected.
-func TestGetRawTxIgnoreErr(t *testing.T) {
+// TestUpdateMempoolTxesOnShutdown tests that when the mempool is shutting
+// down, UpdateMempoolTxes will also exit immediately.
+func TestUpdateMempoolTxesOnShutdown(t *testing.T) {
 	require := require.New(t)
 
 	// Create a mock client and init our mempool.
 	mockRPC := &mockRPCClient{}
-	m := newMempool(mockRPC)
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
+
+	// Create a normal transaction.
+	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
+	tx1 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+		},
+	}
+	tx1Hash := tx1.TxHash()
+
+	// Create the current mempool state.
+	mempool := []*chainhash.Hash{&tx1Hash}
+
+	// Mock our rawMempoolGetter and rawTxReceiver.
+	m.cfg.rawMempoolGetter = func() ([]*chainhash.Hash, error) {
+		return mempool, nil
+	}
+
+	// Shutdown the mempool before updating the txes.
+	m.Shutdown()
+
+	// Update our mempool using the above mempool state.
+	newTxes := m.UpdateMempoolTxes()
+
+	// We expect two transactions.
+	require.Empty(newTxes)
+
+	// Assert GetRawTransaction is not called because mempool is quit.
+	mockRPC.AssertNotCalled(t, "GetRawTransactionAsync")
+}
+
+// TestGetRawTxIgnoreErr tests that the mempool's GetRawTxIgnoreErr method
+// works as expected.
+func TestGetRawTxIgnoreErr(t *testing.T) {
+	require := require.New(t)
 
 	// Create a normal transaction that has two inputs.
 	op := wire.OutPoint{Hash: chainhash.Hash{1}}
@@ -535,24 +639,257 @@ func TestGetRawTxIgnoreErr(t *testing.T) {
 		LockTime: 1,
 		TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
 	}
-	txid := tx.TxHash()
 	btctx := btcutil.NewTx(tx)
 
-	// Mock the client to return the tx.
-	mockRPC.On("GetRawTransaction", &txid).Return(btctx, nil).Once()
+	// Mock the receiver.
+	mockReceiver := &mockGetRawTxReceiver{}
+	mockReceiver.On("Receive").Return(btctx, nil).Once()
 
 	// Call the method and expect the tx to be returned.
-	resp := m.getRawTxIgnoreErr(&txid)
+	resp := getRawTxIgnoreErr(tx.TxHash(), mockReceiver)
 	require.Equal(btctx, resp)
 
-	// Mock the client to return an error.
+	// Mock the reciever to return an error.
 	dummyErr := errors.New("dummy error")
-	mockRPC.On("GetRawTransaction", &txid).Return(nil, dummyErr).Once()
+	mockReceiver.On("Receive").Return(nil, dummyErr).Once()
 
 	// Call the method again and expect nil response.
-	resp = m.getRawTxIgnoreErr(&txid)
+	resp = getRawTxIgnoreErr(tx.TxHash(), mockReceiver)
 	require.Nil(resp)
 
 	// Assert the mock client was called as expected.
+	mockReceiver.AssertExpectations(t)
+}
+
+// TestBatchGetRawTxesOnBatchSize checks that the batch size is properly
+// handled. It defines a testing batch size of 3, and creates 7 testing
+// transactions. Then it asserts there are 3 batches created and handled.
+func TestBatchGetRawTxesOnBatchSize(t *testing.T) {
+	require := require.New(t)
+
+	const (
+		// Define a small batch size for testing only.
+		testBatchSize = 3
+
+		// Create 7 test transactions so we can hit our batching logic
+		// - we should create two full batches and one batch with the
+		// remaining transaction.
+		numTxes = testBatchSize*2 + 1
+	)
+
+	// Create a mock client and init our mempool.
+	mockRPC := &mockRPCClient{}
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: 0,
+		getRawTxBatchSize: testBatchSize,
+	})
+
+	// Create test transactions and mempool state.
+	mempool := make([]*chainhash.Hash, 0, numTxes)
+
+	// Create a map of raw tx response receivers, keyed by txid.
+	mockTxResponses := make(map[chainhash.Hash]*btcutil.Tx, numTxes)
+
+	// Fill up the slices and mock the methods.
+	for i := 0; i < numTxes; i++ {
+		// Create testing transactions.
+		op := wire.OutPoint{Hash: chainhash.Hash{byte(i)}}
+		tx := &wire.MsgTx{
+			LockTime: 1,
+			TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
+		}
+
+		// Fill the testing mempool.
+		txHash := tx.TxHash()
+		mempool = append(mempool, &txHash)
+
+		// Create a testing resposne receiver to be returned by
+		// GetRawTransactionAsync.
+		mockTxReceiver := make(rpcclient.FutureGetRawTransactionResult)
+
+		// Add this tx to our mocked responses.
+		btcTx := btcutil.NewTx(tx)
+		mockTxResponses[txHash] = btcTx
+
+		// Mock `GetRawTransactionAsync` to return the mocked value.
+		mockRPC.On("GetRawTransactionAsync",
+			&txHash).Return(mockTxReceiver).Once()
+	}
+
+	// Mock the rawTxReceiver to find and return the tx found in map
+	// `mockTxResponses`.
+	m.cfg.rawTxReceiver = func(txid chainhash.Hash,
+		reciever getRawTxReceiver) *btcutil.Tx {
+
+		btcTx, ok := mockTxResponses[txid]
+		require.Truef(ok, "unexpected receiver for %v", txid)
+
+		return btcTx
+	}
+
+	// We expect to send the batched requests three times - two for the
+	// full batch and one for the remaining batch.
+	mockRPC.On("Send").Return(nil).Times(3)
+
+	// Call the method under test.
+	newTxes, err := m.batchGetRawTxes(mempool, true)
+	require.NoError(err)
+
+	// Validate we have the expected number of transactions returned.
+	require.Len(newTxes, numTxes)
+
+	// Assert the mock methods are called as expected.
+	mockRPC.AssertExpectations(t)
+}
+
+// TestBatchGetRawTxesOnShutdown checks that the method returns immediately
+// when the mempool is shutting down.
+func TestBatchGetRawTxesOnShutdown(t *testing.T) {
+	require := require.New(t)
+
+	// Create a mock client and init our mempool.
+	mockRPC := &mockRPCClient{}
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+	})
+
+	// Create a normal transaction.
+	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
+	tx1 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+		},
+	}
+	tx1Hash := tx1.TxHash()
+
+	// Create the current mempool state.
+	mempool := []*chainhash.Hash{&tx1Hash}
+
+	// Shutdown the mempool before call the method.
+	m.Shutdown()
+
+	// Call the method under test.
+	newTxes, err := m.batchGetRawTxes(mempool, true)
+
+	// We expect no error and transactions.
+	require.NoError(err)
+	require.Empty(newTxes)
+
+	// Assert GetRawTransaction is not called because mempool has quit.
+	mockRPC.AssertNotCalled(t, "GetRawTransactionAsync")
+	mockRPC.AssertNotCalled(t, "Send")
+}
+
+// TestBatchGetRawTxesOnWait checks that the method stays on hold once the
+// first batch is finished.
+func TestBatchGetRawTxesOnWait(t *testing.T) {
+	require := require.New(t)
+
+	const (
+		// Define a long wait interval for testing only.
+		testWaitInterval = 10 * time.Minute
+
+		// Define a small batch size for testing only.
+		testBatchSize = 3
+
+		// Create 4 test transactions so we can hit our batching logic
+		// once and then starts waiting.
+		numTxes = testBatchSize + 1
+	)
+
+	// Create a mock client and init our mempool.
+	mockRPC := &mockRPCClient{}
+	m := newMempool(&mempoolConfig{
+		client:            mockRPC,
+		batchWaitInterval: testWaitInterval,
+		getRawTxBatchSize: testBatchSize,
+	})
+
+	// Create test transactions and mempool state.
+	mempool := make([]*chainhash.Hash, 0, numTxes)
+
+	// Create a map of raw tx response receivers, keyed by txid.
+	mockTxResponses := make(map[chainhash.Hash]*btcutil.Tx, numTxes)
+
+	// Fill up the slices.
+	for i := 0; i < numTxes; i++ {
+		// Create testing transactions.
+		op := wire.OutPoint{Hash: chainhash.Hash{byte(i)}}
+		tx := &wire.MsgTx{
+			LockTime: 1,
+			TxIn:     []*wire.TxIn{{PreviousOutPoint: op}},
+		}
+
+		// Fill the testing mempool.
+		txHash := tx.TxHash()
+		mempool = append(mempool, &txHash)
+
+		// Add this tx to our mocked responses.
+		btcTx := btcutil.NewTx(tx)
+		mockTxResponses[txHash] = btcTx
+	}
+
+	// Mock GetRawTransactionAsync. We expect it to be called 3 times.
+	for i := 0; i < testBatchSize; i++ {
+		// Create a testing resposne receiver.
+		mockTxReceiver := make(rpcclient.FutureGetRawTransactionResult)
+
+		// Mock `GetRawTransactionAsync` to return the mocked value.
+		mockRPC.On("GetRawTransactionAsync",
+			mempool[i]).Return(mockTxReceiver).Once()
+	}
+
+	// Mock the rawTxReceiver to find and return the tx found in map
+	// `mockTxResponses`.
+	m.cfg.rawTxReceiver = func(txid chainhash.Hash,
+		reciever getRawTxReceiver) *btcutil.Tx {
+
+		btcTx, ok := mockTxResponses[txid]
+		require.Truef(ok, "unexpected receiver for %v", txid)
+
+		return btcTx
+	}
+
+	// We expect to send the batched requests exactly one time as the
+	// second batch will be blocked on the waiting.
+	mockRPC.On("Send").Return(nil).Once()
+
+	var (
+		err     error
+		newTxes []*wire.MsgTx
+		done    = make(chan struct{})
+	)
+
+	// Call the method under test in a goroutine so we don't need to wait.
+	go func() {
+		newTxes, err = m.batchGetRawTxes(mempool, true)
+
+		// Signal it's returned.
+		close(done)
+	}()
+
+	// Sleep one second to allow the mempool moves to the point where the
+	// first batch is finished and it's now blocked on the waiting. We then
+	// shut down the mempool so batchGetRawTxes will return immediately.
+	time.Sleep(1 * time.Second)
+	m.Shutdown()
+
+	// Catch the returned values with timeout.
+	select {
+	case <-done:
+		// Assert no error is returned, and we should get a nil slice
+		// since mempool is shut down.
+		require.NoError(err)
+		require.Nil(newTxes)
+
+	case <-time.After(testTimeout):
+		require.Fail("timeout waiting for batchGetRawTxes")
+	}
+
+	// Assert the mock methods are called as expected.
 	mockRPC.AssertExpectations(t)
 }

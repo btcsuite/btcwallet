@@ -135,6 +135,11 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		return nil, err
 	}
 
+	batchClient, err := rpcclient.NewBatch(clientCfg)
+	if err != nil {
+		return nil, err
+	}
+
 	// Verify that the node is running on the expected network.
 	net, err := getCurrentNet(client)
 	if err != nil {
@@ -182,7 +187,7 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		quit:                  make(chan struct{}),
 	}
 
-	bc.events, err = NewBitcoindEventSubscriber(cfg, client)
+	bc.events, err = NewBitcoindEventSubscriber(cfg, client, batchClient)
 	if err != nil {
 		return nil, err
 	}

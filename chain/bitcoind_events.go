@@ -32,12 +32,12 @@ type BitcoindEvents interface {
 }
 
 // Ensure rpcclient.Client implements the rpcClient interface at compile time.
-var _ rpcClient = (*rpcclient.Client)(nil)
+var _ batchClient = (*rpcclient.Client)(nil)
 
 // NewBitcoindEventSubscriber initialises a new BitcoinEvents object impl
 // depending on the config passed.
-func NewBitcoindEventSubscriber(cfg *BitcoindConfig,
-	client *rpcclient.Client) (BitcoindEvents, error) {
+func NewBitcoindEventSubscriber(cfg *BitcoindConfig, client *rpcclient.Client,
+	bClient batchClient) (BitcoindEvents, error) {
 
 	if cfg.PollingConfig != nil && cfg.ZMQConfig != nil {
 		return nil, fmt.Errorf("either PollingConfig or ZMQConfig " +
@@ -52,7 +52,7 @@ func NewBitcoindEventSubscriber(cfg *BitcoindConfig,
 		}
 
 		pollingEvents := newBitcoindRPCPollingEvents(
-			cfg.PollingConfig, client,
+			cfg.PollingConfig, client, bClient,
 		)
 
 		return pollingEvents, nil
@@ -71,7 +71,7 @@ func NewBitcoindEventSubscriber(cfg *BitcoindConfig,
 		return nil, err
 	}
 
-	return newBitcoindZMQEvents(cfg.ZMQConfig, client, hasRPC)
+	return newBitcoindZMQEvents(cfg.ZMQConfig, client, bClient, hasRPC)
 }
 
 // hasSpendingPrevoutRPC returns whether or not the bitcoind has the newer
