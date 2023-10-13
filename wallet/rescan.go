@@ -17,7 +17,7 @@ import (
 // set of wallet addresses.
 type RescanProgressMsg struct {
 	Addresses    []btcutil.Address
-	Notification *chain.RescanProgress
+	Notification chain.RescanProgress
 }
 
 // RescanFinishedMsg reports the addresses that were rescanned when a
@@ -147,7 +147,7 @@ func (w *Wallet) rescanBatchHandler() {
 				select {
 				case w.rescanProgress <- &RescanProgressMsg{
 					Addresses:    curBatch.addrs,
-					Notification: n,
+					Notification: *n,
 				}:
 				case <-quit:
 					for _, errChan := range curBatch.errChans {
