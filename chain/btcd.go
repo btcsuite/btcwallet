@@ -365,7 +365,7 @@ func (c *RPCClient) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 
 func (c *RPCClient) onRescanProgress(hash *chainhash.Hash, height int32, blkTime time.Time) {
 	select {
-	case c.enqueueNotification <- &RescanProgress{hash, height, blkTime}:
+	case c.enqueueNotification <- &RescanProgress{*hash, height, blkTime}:
 	case <-c.quit:
 	}
 }
