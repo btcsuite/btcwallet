@@ -803,7 +803,7 @@ func (c *BitcoindClient) onRescanProgress(hash *chainhash.Hash, height int32,
 
 	select {
 	case c.notificationQueue.ChanIn() <- &RescanProgress{
-		Hash:   hash,
+		Hash:   *hash,
 		Height: height,
 		Time:   timestamp,
 	}:

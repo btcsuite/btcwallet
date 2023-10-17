@@ -609,7 +609,7 @@ func (s *NeutrinoClient) onBlockConnected(hash *chainhash.Hash, height int32,
 	sendRescanProgress := func() {
 		select {
 		case s.enqueueNotification <- &RescanProgress{
-			Hash:   hash,
+			Hash:   *hash,
 			Height: height,
 			Time:   time,
 		}:

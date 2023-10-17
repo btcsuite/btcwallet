@@ -111,7 +111,7 @@ type (
 	// RescanProgress is a notification describing the current status
 	// of an in-progress rescan.
 	RescanProgress struct {
-		Hash   *chainhash.Hash
+		Hash   chainhash.Hash
 		Height int32
 		Time   time.Time
 	}
