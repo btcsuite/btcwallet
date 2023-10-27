@@ -15,7 +15,8 @@ import (
 const (
 	// txNotFoundErr is an error returned from bitcoind's
 	// `getrawtransaction` RPC when the requested txid cannot be found.
-	txNotFoundErr = "-5: No such mempool or blockchain transaction"
+	// https://github.com/bitcoin/bitcoin/blob/fa05a726c225dc65dee79367bb67f099ae4f99e6/src/rpc/rawtransaction.cpp#L366
+	txNotFoundErr = "-5: No such mempool"
 
 	// DefaultGetRawTxBatchSize specifies the default number of requests to
 	// be batched before sending them to the bitcoind client.
