@@ -2464,6 +2464,148 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 	return &res, err
 }
 
+// GetTransactionResult returns a transaction in the UnminedTransaction
+// field if it is unmined, or in the MinedTransaction field as a Block
+// structure for a mined transaction.
+type GetTransactionResult struct {
+	MinedTransaction   *Block
+	UnminedTransaction *TransactionSummary
+}
+
+// GetTransaction returns data of any transaction given its id. A mined
+// transaction is returned in a Block structure which records properties about
+// the block. A bool is also returned to denote if the transaction previously
+// existed in the database or not.
+// The backend must have a transaction index to poll a confirmed transaction
+// that does not exist in the internal wallet.
+func (w *Wallet) GetTransaction(txHash *chainhash.Hash) (*GetTransactionResult,
+	bool, error) {
+
+	var bestHeight int32
+	var blockHash *chainhash.Hash
+
+	// Use data from the transaction store if it exists.
+	var summary *TransactionSummary
+	var inDB bool
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+		txDetail, err := w.TxStore.TxDetails(txmgrNs, txHash)
+		if err != nil {
+			return err
+		}
+
+		// If the transaction was not found we can exit early.
+		if txDetail == nil {
+			return nil
+		}
+
+		// Otherwise, we create a summary of the transaction detail.
+		dbTx := makeTxSummary(dbtx, w, txDetail)
+		summary, inDB = &dbTx, true
+
+		// If it is a confirmed transaction we set the corresponding
+		// block height and hash.
+		if txDetail.Block.Height != -1 {
+			bestHeight = txDetail.Block.Height
+			blockHash = &txDetail.Block.Hash
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	// If the transaction was not found in the transaction store, we need to
+	// build the TransactionSummary from the backend RPC response.
+	if summary == nil {
+		chainClient, err := w.requireChainClient()
+		if err != nil {
+			return nil, false, err
+		}
+
+		// Get the transaction data from the backend endpoint.
+		var txResult *btcjson.TxRawResult
+		switch client := chainClient.(type) {
+		case *chain.RPCClient:
+			txResult, err = client.GetRawTransactionVerbose(txHash)
+			if err != nil {
+				return nil, false, err
+			}
+		case *chain.BitcoindClient:
+			txResult, err = client.GetRawTransactionVerbose(txHash)
+			if err != nil {
+				return nil, false, err
+			}
+		case *chain.NeutrinoClient:
+			return nil, false, errors.New("not supported with " +
+				"neutrino client")
+		}
+
+		txRaw, err := hex.DecodeString(txResult.Hex)
+		if err != nil {
+			return nil, false, err
+		}
+
+		summary = &TransactionSummary{
+			Hash:        txHash,
+			Transaction: txRaw,
+			MyInputs:    make([]TransactionSummaryInput, 0),
+			MyOutputs:   make([]TransactionSummaryOutput, 0),
+			Timestamp:   txResult.Time,
+		}
+
+		// For a confirmed transaction we must decode the block hash and
+		// get the block height.
+		if txResult.BlockHash != "" {
+			blockHash, err = chainhash.NewHashFromStr(
+				txResult.BlockHash,
+			)
+			if err != nil {
+				return nil, false, err
+			}
+
+			// Obtain the block height from the backend.
+			switch client := chainClient.(type) {
+			case *chain.RPCClient:
+				header, err := client.GetBlockHeaderVerbose(
+					blockHash,
+				)
+				if err != nil {
+					return nil, false, err
+				}
+				bestHeight = header.Height
+			case *chain.BitcoindClient:
+				bestHeight, err = client.GetBlockHeight(
+					blockHash,
+				)
+				if err != nil {
+					return nil, false, err
+				}
+			}
+		}
+	}
+
+	var res GetTransactionResult
+
+	// Add the transaction either as confirmed or unconfirmed to the
+	// response.
+	switch blockHash {
+	case nil:
+		res.UnminedTransaction = summary
+	default:
+		res.MinedTransaction = &Block{
+			Hash:         blockHash,
+			Height:       bestHeight,
+			Timestamp:    summary.Timestamp,
+			Transactions: []TransactionSummary{*summary},
+		}
+	}
+
+	return &res, inDB, nil
+}
+
 // AccountResult is a single account result for the AccountsResult type.
 type AccountResult struct {
 	waddrmgr.AccountProperties
