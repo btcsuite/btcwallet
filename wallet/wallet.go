@@ -77,6 +77,9 @@ var (
 	// to true.
 	ErrTxLabelExists = errors.New("transaction already labelled")
 
+	// ErrNoTx is returned when a transaction can not be found.
+	ErrNoTx = errors.New("can not find transaction")
+
 	// ErrTxUnsigned is returned when a transaction is created in the
 	// watch-only mode where we can select coins but not sign any inputs.
 	ErrTxUnsigned = errors.New("watch-only wallet, transaction not signed")
@@ -2462,6 +2465,56 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 		return w.TxStore.RangeTransactions(txmgrNs, start, end, rangeFn)
 	})
 	return &res, err
+}
+
+// GetTransactionResult returns a summary of the transaction along with
+// other block properties.
+type GetTransactionResult struct {
+	Summary       TransactionSummary
+	Height        int32
+	BlockHash     *chainhash.Hash
+	Confirmations int32
+	Timestamp     int64
+}
+
+// GetTransaction returns detailed data of a transaction given its id. In addition it
+// returns properties about its block.
+func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
+	error) {
+
+	var res GetTransactionResult
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+		txDetail, err := w.TxStore.TxDetails(txmgrNs, &txHash)
+		if err != nil {
+			return err
+		}
+
+		// If the transaction was not found we return an error.
+		if txDetail == nil {
+			return fmt.Errorf("%w: txid %v", ErrNoTx, txHash)
+		}
+
+		res = GetTransactionResult{
+			Summary:       makeTxSummary(dbtx, w, txDetail),
+			Timestamp:     txDetail.Block.Time.Unix(),
+			Confirmations: txDetail.Block.Height,
+		}
+
+		// If it is a confirmed transaction we set the corresponding
+		// block height and hash.
+		if txDetail.Block.Height != -1 {
+			res.Height = txDetail.Block.Height
+			res.BlockHash = &txDetail.Block.Hash
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 // AccountResult is a single account result for the AccountsResult type.
