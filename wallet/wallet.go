@@ -1177,6 +1177,7 @@ type (
 	createTxRequest struct {
 		coinSelectKeyScope    *waddrmgr.KeyScope
 		changeKeyScope        *waddrmgr.KeyScope
+		enableRBF             bool
 		account               uint32
 		outputs               []*wire.TxOut
 		minconf               int32
@@ -1224,7 +1225,7 @@ out:
 			tx, err := w.txToOutputs(
 				txr.outputs, txr.coinSelectKeyScope, txr.changeKeyScope,
 				txr.account, txr.minconf, txr.feeSatPerKB,
-				txr.coinSelectionStrategy, txr.dryRun,
+				txr.coinSelectionStrategy, txr.enableRBF, txr.dryRun,
 			)
 
 			release()
@@ -1241,6 +1242,7 @@ out:
 // scope, which otherwise will default to the specified coin selection scope.
 type txCreateOptions struct {
 	changeKeyScope *waddrmgr.KeyScope
+	enableRBF      bool
 }
 
 // TxCreateOption is a set of optional arguments to modify the tx creation
@@ -1260,6 +1262,13 @@ func defaultTxCreateOptions() *txCreateOptions {
 func WithCustomChangeScope(changeScope *waddrmgr.KeyScope) TxCreateOption {
 	return func(opts *txCreateOptions) {
 		opts.changeKeyScope = changeScope
+	}
+}
+
+// WithRBF signals that the tx should signal RBF.
+func WithRBF() TxCreateOption {
+	return func(o *txCreateOptions) {
+		o.enableRBF = true
 	}
 }
 
@@ -1299,6 +1308,7 @@ func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 	req := createTxRequest{
 		coinSelectKeyScope:    coinSelectKeyScope,
 		changeKeyScope:        opts.changeKeyScope,
+		enableRBF:             opts.enableRBF,
 		account:               account,
 		outputs:               outputs,
 		minconf:               minconf,
@@ -3386,7 +3396,7 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	// been confirmed.
 	createdTx, err := w.CreateSimpleTx(
 		keyScope, account, outputs, minconf, satPerKb,
-		coinSelectionStrategy, false,
+		coinSelectionStrategy, false, WithRBF(),
 	)
 	if err != nil {
 		return nil, err
