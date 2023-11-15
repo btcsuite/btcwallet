@@ -15,6 +15,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -81,6 +82,7 @@ func TestFundPsbt(t *testing.T) {
 		validatePackage         bool
 		expectedChangeBeforeFee int64
 		expectedInputs          []wire.OutPoint
+		disableRBF              bool
 		additionalChecks        func(*testing.T, *psbt.Packet, int32)
 	}{{
 		name: "no outputs provided",
@@ -104,6 +106,21 @@ func TestFundPsbt(t *testing.T) {
 		validatePackage:         true,
 		expectedInputs:          []wire.OutPoint{utxo1},
 		expectedChangeBeforeFee: utxo1Amount,
+	}, {
+		name: "single input, no outputs, no RBF",
+		packet: &psbt.Packet{
+			UnsignedTx: &wire.MsgTx{
+				TxIn: []*wire.TxIn{{
+					PreviousOutPoint: utxo1,
+				}},
+			},
+			Inputs: []psbt.PInput{{}},
+		},
+		feeRateSatPerKB:         20000,
+		validatePackage:         true,
+		expectedInputs:          []wire.OutPoint{utxo1},
+		expectedChangeBeforeFee: utxo1Amount,
+		disableRBF:              true,
 	}, {
 		name: "no dust outputs",
 		packet: &psbt.Packet{
@@ -279,10 +296,14 @@ func TestFundPsbt(t *testing.T) {
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			opts := []TxCreateOption{WithCustomChangeScope(tc.changeKeyScope)}
+			if !tc.disableRBF {
+				opts = append(opts, WithRBF())
+			}
 			changeIndex, err := w.FundPsbt(
 				tc.packet, nil, 1, 0,
 				tc.feeRateSatPerKB, CoinSelectionLargest,
-				WithCustomChangeScope(tc.changeKeyScope),
+				opts...,
 			)
 
 			// In any case, unlock the UTXO before continuing, we
@@ -305,7 +326,7 @@ func TestFundPsbt(t *testing.T) {
 
 			// Check wire inputs.
 			packet := tc.packet
-			assertTxInputs(t, packet, tc.expectedInputs)
+			assertTxInputs(t, packet, tc.expectedInputs, tc.disableRBF)
 
 			// Run any additional tests if available.
 			if tc.additionalChecks != nil {
@@ -377,9 +398,14 @@ func TestFundPsbt(t *testing.T) {
 }
 
 func assertTxInputs(t *testing.T, packet *psbt.Packet,
-	expected []wire.OutPoint) {
+	expected []wire.OutPoint, disableRBF bool) {
 
 	require.Len(t, packet.UnsignedTx.TxIn, len(expected))
+
+	sequence := uint32(mempool.MaxRBFSequence)
+	if disableRBF {
+		sequence = 0
+	}
 
 	// The order of the UTXOs is random, we need to loop through each of
 	// them to make sure they're found. We also check that no signature data
@@ -389,7 +415,7 @@ func assertTxInputs(t *testing.T, packet *psbt.Packet,
 			t.Fatalf("outpoint %v not found in list of expected "+
 				"UTXOs", txIn.PreviousOutPoint)
 		}
-
+		require.Equal(t, sequence, txIn.Sequence)
 		require.Empty(t, txIn.SignatureScript)
 		require.Empty(t, txIn.Witness)
 	}
