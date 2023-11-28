@@ -44,6 +44,15 @@ func NewBitcoindEventSubscriber(cfg *BitcoindConfig, client *rpcclient.Client,
 			"should be specified, not both")
 	}
 
+	// Check if the bitcoind node is on a version that has the
+	// gettxspendingprevout RPC. If it does, then we don't need to maintain
+	// a mempool for ZMQ clients and can maintain a smaller mempool for RPC
+	// clients.
+	hasRPC, err := hasSpendingPrevoutRPC(client)
+	if err != nil {
+		return nil, err
+	}
+
 	if cfg.PollingConfig != nil {
 		if client == nil {
 			return nil, fmt.Errorf("rpc client must be given " +
@@ -52,7 +61,7 @@ func NewBitcoindEventSubscriber(cfg *BitcoindConfig, client *rpcclient.Client,
 		}
 
 		pollingEvents := newBitcoindRPCPollingEvents(
-			cfg.PollingConfig, client, bClient,
+			cfg.PollingConfig, client, bClient, hasRPC,
 		)
 
 		return pollingEvents, nil
@@ -61,14 +70,6 @@ func NewBitcoindEventSubscriber(cfg *BitcoindConfig, client *rpcclient.Client,
 	if cfg.ZMQConfig == nil {
 		return nil, fmt.Errorf("ZMQConfig must be specified if " +
 			"rpcpolling is disabled")
-	}
-
-	// Check if the bitcoind node is on a version that has the
-	// gettxspendingprevout RPC. If it does, then we don't need to maintain
-	// a mempool for ZMQ clients.
-	hasRPC, err := hasSpendingPrevoutRPC(client)
-	if err != nil {
-		return nil, err
 	}
 
 	return newBitcoindZMQEvents(cfg.ZMQConfig, client, bClient, hasRPC)
