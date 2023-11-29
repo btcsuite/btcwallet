@@ -77,7 +77,7 @@ var _ BitcoindEvents = (*bitcoindRPCPollingEvents)(nil)
 // newBitcoindRPCPollingEvents instantiates a new bitcoindRPCPollingEvents
 // object.
 func newBitcoindRPCPollingEvents(cfg *PollingConfig, client *rpcclient.Client,
-	bClient batchClient) *bitcoindRPCPollingEvents {
+	bClient batchClient, hasRPC bool) *bitcoindRPCPollingEvents {
 
 	if cfg.BlockPollingInterval == 0 {
 		cfg.BlockPollingInterval = defaultBlockPollInterval
@@ -100,6 +100,7 @@ func newBitcoindRPCPollingEvents(cfg *PollingConfig, client *rpcclient.Client,
 		client:            bClient,
 		getRawTxBatchSize: cfg.RPCBatchSize,
 		batchWaitInterval: cfg.RPCBatchInterval,
+		hasPrevoutRPC:     hasRPC,
 	}
 
 	if cfg.RPCBatchSize == 0 {
@@ -165,8 +166,16 @@ func (b *bitcoindRPCPollingEvents) LookupInputSpend(
 	b.mempool.RLock()
 	defer b.mempool.RUnlock()
 
-	// Check whether the input is in mempool.
-	return b.mempool.containsInput(op)
+	// If `gettxspendingprevout` is not supported, we need to loop it up in
+	// our local mempool.
+	if !b.mempool.cfg.hasPrevoutRPC {
+		// Check whether the input is in mempool.
+		return b.mempool.containsInput(op)
+	}
+
+	// Otherwise, we can use the `gettxspendingprevout` RPC to look up the
+	// input.
+	return getTxSpendingPrevOut(op, b.client)
 }
 
 // blockEventHandlerRPC is a goroutine that uses the rpc client to check if we

@@ -249,54 +249,8 @@ func (b *bitcoindZMQEvents) LookupInputSpend(
 	}
 
 	// Otherwise, we aren't maintaining a mempool and can use the
-	// gettxspendingprevout RPC. Create an RPC-style prevout that will be
-	// the lone item in an array.
-	prevoutReq := &getTxSpendingPrevOutReq{
-		Txid: op.Hash.String(), Vout: op.Index,
-	}
-
-	// The RPC takes an array of prevouts so we have an array with a single
-	// item since we don't yet batch calls to LookupInputSpend.
-	prevoutArr := []*getTxSpendingPrevOutReq{prevoutReq}
-
-	req, err := json.Marshal(prevoutArr)
-	if err != nil {
-		return chainhash.Hash{}, false
-	}
-
-	resp, err := b.client.RawRequest(
-		"gettxspendingprevout", []json.RawMessage{req},
-	)
-	if err != nil {
-		return chainhash.Hash{}, false
-	}
-
-	var prevoutResps []getTxSpendingPrevOutResp
-	err = json.Unmarshal(resp, &prevoutResps)
-	if err != nil {
-		return chainhash.Hash{}, false
-	}
-
-	// We should only get a single item back since we only requested with a
-	// single item.
-	if len(prevoutResps) != 1 {
-		return chainhash.Hash{}, false
-	}
-
-	result := prevoutResps[0]
-
-	// If the "spendingtxid" field is empty, then the utxo has no spend in
-	// the mempool at the moment.
-	if result.SpendingTxid == "" {
-		return chainhash.Hash{}, false
-	}
-
-	spendHash, err := chainhash.NewHashFromStr(result.SpendingTxid)
-	if err != nil {
-		return chainhash.Hash{}, false
-	}
-
-	return *spendHash, true
+	// gettxspendingprevout RPC.
+	return getTxSpendingPrevOut(op, b.client)
 }
 
 // blockEventHandler reads raw blocks events from the ZMQ block socket and
@@ -540,4 +494,57 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 			return
 		}
 	}
+}
+
+// getTxSpendingPrevOut makes an RPC call to `gettxspendingprevout` and returns
+// the result.
+func getTxSpendingPrevOut(op wire.OutPoint,
+	client *rpcclient.Client) (chainhash.Hash, bool) {
+
+	prevoutReq := &getTxSpendingPrevOutReq{
+		Txid: op.Hash.String(), Vout: op.Index,
+	}
+
+	// The RPC takes an array of prevouts so we have an array with a single
+	// item since we don't yet batch calls to LookupInputSpend.
+	prevoutArr := []*getTxSpendingPrevOutReq{prevoutReq}
+
+	req, err := json.Marshal(prevoutArr)
+	if err != nil {
+		return chainhash.Hash{}, false
+	}
+
+	resp, err := client.RawRequest(
+		"gettxspendingprevout", []json.RawMessage{req},
+	)
+	if err != nil {
+		return chainhash.Hash{}, false
+	}
+
+	var prevoutResps []getTxSpendingPrevOutResp
+	err = json.Unmarshal(resp, &prevoutResps)
+	if err != nil {
+		return chainhash.Hash{}, false
+	}
+
+	// We should only get a single item back since we only requested with a
+	// single item.
+	if len(prevoutResps) != 1 {
+		return chainhash.Hash{}, false
+	}
+
+	result := prevoutResps[0]
+
+	// If the "spendingtxid" field is empty, then the utxo has no spend in
+	// the mempool at the moment.
+	if result.SpendingTxid == "" {
+		return chainhash.Hash{}, false
+	}
+
+	spendHash, err := chainhash.NewHashFromStr(result.SpendingTxid)
+	if err != nil {
+		return chainhash.Hash{}, false
+	}
+
+	return *spendHash, true
 }

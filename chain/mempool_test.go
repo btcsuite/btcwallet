@@ -893,3 +893,117 @@ func TestBatchGetRawTxesOnWait(t *testing.T) {
 	// Assert the mock methods are called as expected.
 	mockRPC.AssertExpectations(t)
 }
+
+// TestNewMempool tests that `newMempool` behaves as expected.
+func TestNewMempool(t *testing.T) {
+	// Create a new mempool with an empty config.
+	cfg := &mempoolConfig{}
+	m := newMempool(cfg)
+
+	// Validate that the mempool is initialized as expected.
+	require.Equal(t, cfg, m.cfg)
+	require.NotNil(t, m.cfg.rawMempoolGetter)
+	require.NotNil(t, m.cfg.rawTxReceiver)
+	require.NotNil(t, m.txs)
+	require.NotNil(t, m.initFin)
+	require.NotNil(t, m.quit)
+	require.NotNil(t, m.inputs)
+
+	// Create a new config to check that the mempool is initialized without
+	// the `inputs` map when `hasPrevoutRPC` is true.
+	cfg = &mempoolConfig{hasPrevoutRPC: true}
+	m = newMempool(cfg)
+
+	// Validate that the mempool is initialized as expected.
+	require.Equal(t, cfg, m.cfg)
+	require.NotNil(t, m.cfg.rawMempoolGetter)
+	require.NotNil(t, m.cfg.rawTxReceiver)
+	require.NotNil(t, m.txs)
+	require.NotNil(t, m.initFin)
+	require.NotNil(t, m.quit)
+	require.Nil(t, m.inputs)
+}
+
+// TestMempoolAddNoInputs adds a coinbase tx, a normal tx, and a replacement tx
+// to the mempool and checks the mempool's internal state is updated as
+// expected when the `hasPrevoutRPC` is set.
+func TestMempoolAddNoInputs(t *testing.T) {
+	require := require.New(t)
+
+	m := newMempool(&mempoolConfig{
+		batchWaitInterval: 0,
+		getRawTxBatchSize: 1,
+		hasPrevoutRPC:     true,
+	})
+
+	// Create a coinbase transaction.
+	tx0 := &wire.MsgTx{
+		TxIn: []*wire.TxIn{
+			{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{},
+					Index: math.MaxUint32,
+				},
+			},
+		},
+	}
+
+	// Create a normal transaction that has two inputs.
+	op1 := wire.OutPoint{Hash: chainhash.Hash{1}}
+	op2 := wire.OutPoint{Hash: chainhash.Hash{2}}
+	tx1 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op1},
+			{PreviousOutPoint: op2},
+		},
+	}
+
+	// Create a replacement transaction that spends one of the inputs as
+	// tx1.
+	op3 := wire.OutPoint{Hash: chainhash.Hash{3}}
+	tx2 := &wire.MsgTx{
+		LockTime: 1,
+		TxIn: []*wire.TxIn{
+			{PreviousOutPoint: op2},
+			{PreviousOutPoint: op3},
+		},
+	}
+
+	// Now add all the transactions.
+	m.add(tx0)
+	m.add(tx1)
+	m.add(tx2)
+
+	// Check transactions are updated, mempool should now contain two
+	// transactions.
+	require.False(m.containsTx(tx0.TxHash()))
+	require.True(m.containsTx(tx1.TxHash()))
+	require.True(m.containsTx(tx2.TxHash()))
+
+	// Check inputs are NOT updated here because we don't track them when
+	// `hasPrevoutRPC` is true.
+	//
+	// Mempool should NOT contain op1.
+	txid, found := m.containsInput(op1)
+	require.False(found)
+	require.Empty(txid)
+
+	// Mempool should NOT contain op2.
+	txid, found = m.containsInput(op2)
+	require.False(found)
+	require.Empty(txid)
+
+	// Mempool should NOT contain op3.
+	txid, found = m.containsInput(op3)
+	require.False(found)
+	require.Empty(txid)
+
+	// Check the mempool's internal state.
+	//
+	// We should see two transactions in the mempool, tx1 and tx2.
+	require.Len(m.txs, 2)
+
+	// The mempool's inputs should be nil.
+	require.Nil(m.inputs)
+}

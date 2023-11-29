@@ -155,6 +155,12 @@ type mempoolConfig struct {
 	// TODO(yy): interface rpcclient.FutureGetRawTransactionResult so we
 	// can remove this hack.
 	rawTxReceiver func(chainhash.Hash, getRawTxReceiver) *btcutil.Tx
+
+	// hasPrevoutRPC is set when the bitcoind version is >= 24.0.0, in
+	// which `gettxspendingprevout` can be used to fetch mempool spent for
+	// a given input so there's no need to create the `inputs` map used in
+	// `mempool` here.
+	hasPrevoutRPC bool
 }
 
 // newMempool creates a new mempool object.
@@ -162,9 +168,14 @@ func newMempool(cfg *mempoolConfig) *mempool {
 	m := &mempool{
 		cfg:     cfg,
 		txs:     make(map[chainhash.Hash]bool),
-		inputs:  newCachedInputs(),
 		initFin: make(chan struct{}),
 		quit:    make(chan struct{}),
+	}
+
+	// Init the `inputs` map if the bitcoind version doesn't support
+	// `gettxspendingprevout`.
+	if !cfg.hasPrevoutRPC {
+		m.inputs = newCachedInputs()
 	}
 
 	// Mount the default methods.
@@ -236,6 +247,11 @@ func (m *mempool) containsTx(hash chainhash.Hash) bool {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) containsInput(op wire.OutPoint) (chainhash.Hash, bool) {
+	// TODO(yy): port `getprevout` to bitcoind and use it here?
+	if m.inputs == nil {
+		return chainhash.Hash{}, false
+	}
+
 	return m.inputs.hasInput(op)
 }
 
@@ -332,6 +348,11 @@ func (m *mempool) deleteUnmarked() {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) removeInputs(tx chainhash.Hash) {
+	// We won't have the `inputs` map if `hasPrevoutRPC` is true.
+	if m.inputs == nil {
+		return
+	}
+
 	m.inputs.removeInputsFromTx(tx)
 }
 
@@ -340,6 +361,11 @@ func (m *mempool) removeInputs(tx chainhash.Hash) {
 //
 // NOTE: must be used inside a lock.
 func (m *mempool) updateInputs(tx *wire.MsgTx) {
+	// We won't have the `inputs` map if `hasPrevoutRPC` is true.
+	if m.inputs == nil {
+		return
+	}
+
 	// Iterate the tx's inputs.
 	for _, input := range tx.TxIn {
 		outpoint := input.PreviousOutPoint
