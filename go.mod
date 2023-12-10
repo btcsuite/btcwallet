@@ -52,3 +52,5 @@ require (
 )
 
 go 1.18
+
+replace github.com/lightninglabs/neutrino v0.16.0 => github.com/ziggie1984/neutrino v0.15.1-0.20231213184926-ca5f91e88713

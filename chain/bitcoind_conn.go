@@ -469,6 +469,9 @@ func (c *BitcoindConn) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 		return nil, err
 	}
 
+	log.Infof("Block with hash=%v was not found on our local backend, "+
+		"now querying bitcoin peers directly", hash)
+
 	// Now that we know the block has been pruned for sure, request it from
 	// our backend peers.
 	blockChan, errChan := c.prunedBlockDispatcher.Query(
