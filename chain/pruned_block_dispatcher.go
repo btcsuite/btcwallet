@@ -542,13 +542,13 @@ func (d *PrunedBlockDispatcher) newRequest(blocks []*chainhash.Hash) (
 		}
 
 		if _, ok := d.blocksQueried[*block]; !ok {
-			log.Debugf("Queuing new block %v for request", *block)
+			log.Infof("Queuing new block %v for request", *block)
 			inv := wire.NewInvVect(wire.InvTypeWitnessBlock, block)
 			if err := getData.AddInvVect(inv); err != nil {
 				return nil, nil, err
 			}
 		} else {
-			log.Debugf("Received new request for pending query of "+
+			log.Infof("Received new request for pending query of "+
 				"block %v", *block)
 		}
 
@@ -609,6 +609,8 @@ func (d *PrunedBlockDispatcher) handleResp(req, resp wire.Message,
 	blockChans, ok := d.blocksQueried[blockHash]
 	if !ok {
 		d.blockMtx.Unlock()
+		log.Warnf("Received block %v from peer %v but is not in our "+
+			"query list(ok=%b)", blockHash, peer, ok)
 		return query.Progress{
 			Progressed: false,
 			Finished:   false,
