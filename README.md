@@ -1,7 +1,7 @@
 btcwallet
 =========
 
-[![Build Status](https://github.com/btcsuite/btcwallet/workflows/CI/badge.svg)](https://github.com/btcsuite/btcwallet/actions/workflows/main.yml?query=workflow%3ACI)
+[![Build Status](https://github.com/btcsuite/btcwallet/workflows/CI/badge.svg)](https://github.com/btcsuite/btcwallet/actions/workflows/main.yml?query=workflow%3ACI+branch%3Amaster)
 [![Build Status](https://travis-ci.org/btcsuite/btcwallet.png?branch=master)](https://travis-ci.org/btcsuite/btcwallet)
 [![Build status](https://ci.appveyor.com/api/projects/status/88nxvckdj8upqr36/branch/master?svg=true)](https://ci.appveyor.com/project/jrick/btcwallet/branch/master)
 
