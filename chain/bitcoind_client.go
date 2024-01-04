@@ -217,6 +217,16 @@ func (c *BitcoindClient) SendRawTransaction(tx *wire.MsgTx,
 	return c.chainConn.client.SendRawTransaction(tx, allowHighFees)
 }
 
+// TestMempoolAcceptCmd returns result of mempool acceptance tests indicating
+// if raw transaction(s) would be accepted by mempool.
+//
+// NOTE: This is part of the chain.Interface interface.
+func (c *BitcoindClient) TestMempoolAccept(txns []*wire.MsgTx,
+	maxFeeRate float64) ([]*btcjson.TestMempoolAcceptResult, error) {
+
+	return c.chainConn.client.TestMempoolAccept(txns, maxFeeRate)
+}
+
 // Notifications returns a channel to retrieve notifications from.
 //
 // NOTE: This is part of the chain.Interface interface.

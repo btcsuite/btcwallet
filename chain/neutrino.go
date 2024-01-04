@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
@@ -19,6 +20,10 @@ import (
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
 )
+
+// ErrUnimplemented is returned when a certain method is not implemented for a
+// given interface.
+var ErrUnimplemented = errors.New("unimplemented")
 
 // NeutrinoClient is an implementation of the btcwallet chain.Interface interface.
 type NeutrinoClient struct {
@@ -62,6 +67,10 @@ type NeutrinoClient struct {
 	// shared mechanism.
 	clientMtx sync.Mutex
 }
+
+// A compile-time check to ensure that RPCClient satisfies the chain.Interface
+// interface.
+var _ Interface = (*NeutrinoClient)(nil)
 
 // NewNeutrinoClient creates a new NeutrinoClient struct with a backing
 // ChainService.
@@ -215,6 +224,16 @@ func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) 
 	}
 	hash := tx.TxHash()
 	return &hash, nil
+}
+
+// TestMempoolAcceptCmd returns result of mempool acceptance tests indicating
+// if raw transaction(s) would be accepted by mempool.
+//
+// NOTE: This is part of the chain.Interface interface.
+func (s *NeutrinoClient) TestMempoolAccept(txns []*wire.MsgTx,
+	maxFeeRate float64) ([]*btcjson.TestMempoolAcceptResult, error) {
+
+	return nil, ErrUnimplemented
 }
 
 // FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
