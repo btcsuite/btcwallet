@@ -4129,9 +4129,8 @@ func MapBroadcastBackendError(err error) error {
 	// Returned by bitcoind on the RPC when broadcasting a transaction that
 	// is spending either output that is missing or already spent.
 	//
-	// https://github.com/bitcoin/bitcoin/blob/9bf5768dd628b3a7c30dd42b5ed477a92c4d3540/src/node/transaction.cpp#L49
-	// https://github.com/bitcoin/bitcoin/blob/0.20/src/validation.cpp#L642
-	case match(err, "missing inputs") ||
+	// https://github.com/bitcoin/bitcoin/blob/3ba8de1b704d590fa4e1975620bd21d830d11666/test/functional/mempool_accept.py#L163C1-L163C1
+	case match(err, "missing-inputs") ||
 		match(err, "bad-txns-inputs-missingorspent"):
 
 		returnErr = &ErrDoubleSpend{
