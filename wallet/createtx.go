@@ -6,6 +6,7 @@
 package wallet
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -255,7 +256,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 
 		return nil
 	})
-	if err != nil && err != walletdb.ErrDryRunRollBack {
+	if err != nil && !errors.Is(err, walletdb.ErrDryRunRollBack) {
 		return nil, err
 	}
 
@@ -284,7 +285,7 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 		output := &unspent[i]
 
 		// Only include this output if it meets the required number of
-		// confirmations.  Coinbase transactions must have have reached
+		// confirmations. Coinbase transactions must have reached
 		// maturity before their outputs may be spent.
 		if !confirmed(minconf, output.Height, bs.Height) {
 			continue
@@ -382,6 +383,9 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 		scriptSize = txsizes.P2WPKHPkScriptSize
 	case waddrmgr.TaprootPubKey:
 		scriptSize = txsizes.P2TRPkScriptSize
+	default:
+		return nil, nil, fmt.Errorf("unsupported address type: %v",
+			addrType)
 	}
 
 	newChangeScript := func() ([]byte, error) {
