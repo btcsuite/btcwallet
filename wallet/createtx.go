@@ -21,16 +21,8 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// byAmount defines the methods needed to satisify sort.Interface to
-// sort credits by their output amount.
-type byAmount []wtxmgr.Credit
-
-func (s byAmount) Len() int           { return len(s) }
-func (s byAmount) Less(i, j int) bool { return s[i].Amount < s[j].Amount }
-func (s byAmount) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-
-func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
-	// Current inputs and their total value.  These are closed over by the
+func makeInputSource(eligible []Coin) txauthor.InputSource {
+	// Current inputs and their total value. These are closed over by the
 	// returned input source and reused across multiple calls.
 	currentTotal := btcutil.Amount(0)
 	currentInputs := make([]*wire.TxIn, 0, len(eligible))
@@ -41,15 +33,25 @@ func makeInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 		[]btcutil.Amount, [][]byte, error) {
 
 		for currentTotal < target && len(eligible) != 0 {
-			nextCredit := &eligible[0]
+			nextCredit := eligible[0]
+			prevOut := nextCredit.TxOut
+			outpoint := nextCredit.OutPoint
 			eligible = eligible[1:]
-			nextInput := wire.NewTxIn(&nextCredit.OutPoint, nil, nil)
-			currentTotal += nextCredit.Amount
+
+			nextInput := wire.NewTxIn(&outpoint, nil, nil)
+			currentTotal += btcutil.Amount(prevOut.Value)
 			currentInputs = append(currentInputs, nextInput)
-			currentScripts = append(currentScripts, nextCredit.PkScript)
-			currentInputValues = append(currentInputValues, nextCredit.Amount)
+			currentScripts = append(
+				currentScripts, prevOut.PkScript,
+			)
+			currentInputValues = append(
+				currentInputValues,
+				btcutil.Amount(prevOut.Value),
+			)
 		}
-		return currentTotal, currentInputs, currentInputValues, currentScripts, nil
+
+		return currentTotal, currentInputs, currentInputValues,
+			currentScripts, nil
 	}
 }
 
@@ -123,6 +125,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		return nil, err
 	}
 
+	// Fall back to default coin selection strategy if none is supplied.
+	if coinSelectionStrategy == nil {
+		coinSelectionStrategy = CoinSelectionLargest
+	}
+
 	var tx *txauthor.AuthoredTx
 	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 		addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
@@ -139,40 +146,27 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 			return err
 		}
 
-		var inputSource txauthor.InputSource
-
-		switch coinSelectionStrategy {
-		// Pick largest outputs first.
-		case CoinSelectionLargest:
-			sort.Sort(sort.Reverse(byAmount(eligible)))
-			inputSource = makeInputSource(eligible)
-
-		// Select coins at random. This prevents the creation of ever
-		// smaller utxos over time that may never become economical to
-		// spend.
-		case CoinSelectionRandom:
-			// Skip inputs that do not raise the total transaction
-			// output value at the requested fee rate.
-			var positivelyYielding []wtxmgr.Credit
-			for _, output := range eligible {
-				output := output
-
-				if !inputYieldsPositively(&output, feeSatPerKb) {
-					continue
-				}
-
-				positivelyYielding = append(
-					positivelyYielding, output,
-				)
+		// Wrap our coins in a type that implements the SelectableCoin
+		// interface, so we can arrange them according to the selected
+		// coin selection strategy.
+		wrappedEligible := make([]Coin, len(eligible))
+		for i := range eligible {
+			wrappedEligible[i] = Coin{
+				TxOut: wire.TxOut{
+					Value:    int64(eligible[i].Amount),
+					PkScript: eligible[i].PkScript,
+				},
+				OutPoint: eligible[i].OutPoint,
 			}
-
-			rand.Shuffle(len(positivelyYielding), func(i, j int) {
-				positivelyYielding[i], positivelyYielding[j] =
-					positivelyYielding[j], positivelyYielding[i]
-			})
-
-			inputSource = makeInputSource(positivelyYielding)
 		}
+		arrangedCoins, err := coinSelectionStrategy.ArrangeCoins(
+			wrappedEligible, feeSatPerKb,
+		)
+		if err != nil {
+			return err
+		}
+
+		inputSource := makeInputSource(arrangedCoins)
 
 		tx, err = txauthor.NewUnsignedTransaction(
 			outputs, feeSatPerKb, inputSource, changeSource,
@@ -337,11 +331,13 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 // best-case added virtual size. For edge cases this function can return true
 // while the input is yielding slightly negative as part of the final
 // transaction.
-func inputYieldsPositively(credit *wtxmgr.Credit, feeRatePerKb btcutil.Amount) bool {
+func inputYieldsPositively(credit *wire.TxOut,
+	feeRatePerKb btcutil.Amount) bool {
+
 	inputSize := txsizes.GetMinInputVirtualSize(credit.PkScript)
 	inputFee := feeRatePerKb * btcutil.Amount(inputSize) / 1000
 
-	return inputFee < credit.Amount
+	return inputFee < btcutil.Amount(credit.Value)
 }
 
 // addrMgrWithChangeSource returns the address manager bucket and a change
@@ -445,4 +441,58 @@ func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte,
 		}
 	}
 	return nil
+}
+
+// sortByAmount is a generic sortable type for sorting coins by their amount.
+type sortByAmount []Coin
+
+func (s sortByAmount) Len() int { return len(s) }
+func (s sortByAmount) Less(i, j int) bool {
+	return s[i].Value < s[j].Value
+}
+func (s sortByAmount) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+
+// LargestFirstCoinSelector is an implementation of the CoinSelectionStrategy
+// that always selects the largest coins first.
+type LargestFirstCoinSelector struct{}
+
+// ArrangeCoins takes a list of coins and arranges them according to the
+// specified coin selection strategy and fee rate.
+func (*LargestFirstCoinSelector) ArrangeCoins(eligible []Coin,
+	_ btcutil.Amount) ([]Coin, error) {
+
+	sort.Sort(sort.Reverse(sortByAmount(eligible)))
+
+	return eligible, nil
+}
+
+// RandomCoinSelector is an implementation of the CoinSelectionStrategy that
+// selects coins at random. This prevents the creation of ever smaller UTXOs
+// over time that may never become economical to spend.
+type RandomCoinSelector struct{}
+
+// ArrangeCoins takes a list of coins and arranges them according to the
+// specified coin selection strategy and fee rate.
+func (*RandomCoinSelector) ArrangeCoins(eligible []Coin,
+	feeSatPerKb btcutil.Amount) ([]Coin, error) {
+
+	// Skip inputs that do not raise the total transaction output
+	// value at the requested fee rate.
+	positivelyYielding := make([]Coin, 0, len(eligible))
+	for _, output := range eligible {
+		output := output
+
+		if !inputYieldsPositively(&output.TxOut, feeSatPerKb) {
+			continue
+		}
+
+		positivelyYielding = append(positivelyYielding, output)
+	}
+
+	rand.Shuffle(len(positivelyYielding), func(i, j int) {
+		positivelyYielding[i], positivelyYielding[j] =
+			positivelyYielding[j], positivelyYielding[i]
+	})
+
+	return positivelyYielding, nil
 }

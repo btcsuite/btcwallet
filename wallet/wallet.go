@@ -89,17 +89,33 @@ var (
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
 
-type CoinSelectionStrategy int
+// Coin represents a spendable UTXO which is available for coin selection.
+type Coin struct {
+	wire.TxOut
 
-const (
+	wire.OutPoint
+}
+
+// CoinSelectionStrategy is an interface that represents a coin selection
+// strategy. A coin selection strategy is responsible for ordering, shuffling or
+// filtering a list of coins before they are passed to the coin selection
+// algorithm.
+type CoinSelectionStrategy interface {
+	// ArrangeCoins takes a list of coins and arranges them according to the
+	// specified coin selection strategy and fee rate.
+	ArrangeCoins(eligible []Coin, feeSatPerKb btcutil.Amount) ([]Coin,
+		error)
+}
+
+var (
 	// CoinSelectionLargest always picks the largest available utxo to add
 	// to the transaction next.
-	CoinSelectionLargest CoinSelectionStrategy = iota
+	CoinSelectionLargest CoinSelectionStrategy = &LargestFirstCoinSelector{}
 
 	// CoinSelectionRandom randomly selects the next utxo to add to the
 	// transaction. This strategy prevents the creation of ever smaller
 	// utxos over time.
-	CoinSelectionRandom
+	CoinSelectionRandom CoinSelectionStrategy = &RandomCoinSelector{}
 )
 
 // Wallet is a structure containing all the components for a
