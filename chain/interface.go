@@ -3,6 +3,7 @@ package chain
 import (
 	"time"
 
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -47,6 +48,7 @@ type Interface interface {
 	NotifyBlocks() error
 	Notifications() <-chan interface{}
 	BackEnd() string
+	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
 }
 
 // Notification types.  These are defined here and processed from from reading

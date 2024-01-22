@@ -39,6 +39,10 @@ type RPCClient struct {
 	quitMtx sync.Mutex
 }
 
+// A compile-time check to ensure that RPCClient satisfies the chain.Interface
+// interface.
+var _ Interface = (*RPCClient)(nil)
+
 // NewRPCClient creates a client connection to the server described by the
 // connect string.  If disableTLS is false, the remote RPC certificate must be
 // provided in the certs slice.  The connection is not established immediately,
