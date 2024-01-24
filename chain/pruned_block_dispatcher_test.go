@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightninglabs/neutrino/query"
 	"github.com/lightningnetwork/lnd/ticker"
 	"github.com/stretchr/testify/require"
 )
@@ -258,12 +259,18 @@ func (h *prunedBlockDispatcherHarness) newPeer() *peer.Peer {
 }
 
 // query requests the given blocks from the PrunedBlockDispatcher.
-func (h *prunedBlockDispatcherHarness) query(blocks []*chainhash.Hash) (
-	<-chan *wire.MsgBlock, <-chan error) {
+func (h *prunedBlockDispatcherHarness) query(blocks []*chainhash.Hash,
+	opts ...query.QueryOption) (
+	<-chan *wire.MsgBlock, <-chan error, <-chan error) {
 
 	h.t.Helper()
 
-	blockChan, errChan := h.dispatcher.Query(blocks)
+	// cancelChan will receive an error msg in case the dependant block
+	// request fails. This is used for block requests already have a pending
+	// request registered and this request fails.
+	cancelChan := make(chan error, 1)
+
+	blockChan, errChan := h.dispatcher.Query(blocks, cancelChan, opts...)
 	select {
 	case err := <-errChan:
 		require.NoError(h.t, err)
@@ -274,7 +281,7 @@ func (h *prunedBlockDispatcherHarness) query(blocks []*chainhash.Hash) (
 		h.blocksQueried[*block]++
 	}
 
-	return blockChan, errChan
+	return blockChan, errChan, cancelChan
 }
 
 // disablePeerReplies prevents the query peer from replying.
@@ -363,7 +370,7 @@ func (h *prunedBlockDispatcherHarness) assertPeerQueried() {
 // assertPeerReplied asserts that the query peer replies with a block the
 // PrunedBlockDispatcher queried for.
 func (h *prunedBlockDispatcherHarness) assertPeerReplied(
-	blockChan <-chan *wire.MsgBlock, errChan <-chan error,
+	blockChan <-chan *wire.MsgBlock, errChan, cancelChan <-chan error,
 	expectCompletionSignal bool) {
 
 	h.t.Helper()
@@ -385,10 +392,18 @@ func (h *prunedBlockDispatcherHarness) assertPeerReplied(
 			delete(h.blocksQueried, blockHash)
 		}
 
+	// We need to check the errChan after a timeout because when a request
+	// was successful a nil error is signaled via the errChan and this
+	// might happen even before the block is received.
 	case <-time.After(5 * time.Second):
 		select {
 		case err := <-errChan:
 			h.t.Fatalf("received unexpected error send: %v", err)
+
+		case err := <-cancelChan:
+			h.t.Fatalf("received unexpected cancel request with "+
+				"error: %v", err)
+
 		default:
 		}
 		h.t.Fatal("expected reply from peer")
@@ -406,6 +421,38 @@ func (h *prunedBlockDispatcherHarness) assertPeerReplied(
 	}
 }
 
+// assertPeerFailed asserts that the query request fails with an expected
+// error.
+func (h *prunedBlockDispatcherHarness) assertPeerFailed(
+	blockChan <-chan *wire.MsgBlock, errChan, cancelChan <-chan error,
+	expectedErr error) {
+
+	h.t.Helper()
+
+	select {
+	case <-blockChan:
+		h.t.Fatalf("expected no reply from peer")
+
+	case err := <-errChan:
+		require.ErrorIs(h.t, err, expectedErr)
+		for _, hash := range h.hashes {
+			h.dispatcher.CancelRequest(*hash, err)
+			// The corresponding block is deleted from the request
+			// queue in `CancelRequest` so we delete it from the
+			// harness as well.
+			delete(h.blocksQueried, *hash)
+		}
+
+	case err := <-cancelChan:
+		require.ErrorIs(h.t, err, expectedErr)
+
+	case <-time.After(5 * time.Second):
+		h.t.Fatalf("expected the error for the block request: %v",
+			expectedErr)
+	}
+
+}
+
 // assertNoPeerDialed asserts that the PrunedBlockDispatcher hasn't established
 // a new peer connection.
 func (h *prunedBlockDispatcherHarness) assertNoPeerDialed() {
@@ -420,15 +467,21 @@ func (h *prunedBlockDispatcherHarness) assertNoPeerDialed() {
 
 // assertNoReply asserts that the peer hasn't replied to a query.
 func (h *prunedBlockDispatcherHarness) assertNoReply(
-	blockChan <-chan *wire.MsgBlock, errChan <-chan error) {
+	blockChan <-chan *wire.MsgBlock, errChan, cancelChan <-chan error) {
 
 	h.t.Helper()
 
 	select {
 	case block := <-blockChan:
 		h.t.Fatalf("received unexpected block %v", block.BlockHash())
+
 	case err := <-errChan:
 		h.t.Fatalf("received unexpected error send: %v", err)
+
+	case err := <-cancelChan:
+		h.t.Fatalf("received unexpected cancel request with error: %v",
+			err)
+
 	case <-time.After(2 * time.Second):
 	}
 }
@@ -449,16 +502,64 @@ func TestPrunedBlockDispatcherQuerySameBlock(t *testing.T) {
 	// Queue all the block requests one by one.
 	blockChans := make([]<-chan *wire.MsgBlock, 0, numRequests)
 	errChans := make([]<-chan error, 0, numRequests)
+	cancelChans := make([]<-chan error, 0, numRequests)
+
 	for i := 0; i < numRequests; i++ {
-		blockChan, errChan := h.query(h.hashes)
+		blockChan, errChan, cancelChan := h.query(h.hashes)
 		blockChans = append(blockChans, blockChan)
 		errChans = append(errChans, errChan)
+		cancelChans = append(cancelChans, cancelChan)
+
 	}
 
 	// We should only see one query.
 	h.assertPeerQueried()
 	for i := 0; i < numRequests; i++ {
-		h.assertPeerReplied(blockChans[i], errChans[i], i == 0)
+		h.assertPeerReplied(blockChans[i], errChans[i], cancelChans[i],
+			i == 0)
+	}
+}
+
+// TestPrunedBlockDispatcherQuerySameBlock tests that client requests for the
+// same block result in only fetching the block once while pending.
+func TestPrunedBlockDispatcherQueryFailSameBlock(t *testing.T) {
+	t.Parallel()
+
+	const numBlocks = 1
+	const numPeers = 5
+	const numRequests = numBlocks * numPeers
+
+	h := newNetworkBlockTestHarness(t, numBlocks, numPeers, numPeers)
+	h.start()
+	defer h.stop()
+
+	// Queue all the block requests one by one.
+	blockChans := make([]<-chan *wire.MsgBlock, 0, numRequests)
+	errChans := make([]<-chan error, 0, numRequests)
+	cancelChans := make([]<-chan error, 0, numRequests)
+
+	// We want to force a timeout.
+	h.disablePeerReplies()
+
+	for i := 0; i < numRequests; i++ {
+		// The default retry number is 2 and is defined in the neutrino
+		// package. We want to fail the request therefore we use 1.
+		// Moreover the default timeout of a single request is 2 seconds
+		// and currently not configurable so we have to make sure when
+		// asserting not not timeout before.
+		blockChan, errChan, cancelChan := h.query(
+			h.hashes, query.NumRetries(1),
+		)
+		blockChans = append(blockChans, blockChan)
+		errChans = append(errChans, errChan)
+		cancelChans = append(cancelChans, cancelChan)
+	}
+
+	// We should only see one query.
+	h.assertPeerQueried()
+	for i := 0; i < numRequests; i++ {
+		h.assertPeerFailed(blockChans[i], errChans[i], cancelChans[i],
+			query.ErrQueryTimeout)
 	}
 }
 
@@ -476,7 +577,7 @@ func TestPrunedBlockDispatcherMultipleGetData(t *testing.T) {
 	defer h.stop()
 
 	// Request all blocks.
-	blockChan, errChan := h.query(h.hashes)
+	blockChan, errChan, cancelChan := h.query(h.hashes)
 
 	// Since we have more blocks than can fit in a single GetData message,
 	// we should expect multiple queries. For each query, we should expect
@@ -491,7 +592,8 @@ func TestPrunedBlockDispatcherMultipleGetData(t *testing.T) {
 		for j := 0; j < maxRequestInvs; j++ {
 			expectCompletionSignal := blocksRecvd == numBlocks-1
 			h.assertPeerReplied(
-				blockChan, errChan, expectCompletionSignal,
+				blockChan, errChan, cancelChan,
+				expectCompletionSignal,
 			)
 
 			blocksRecvd++
@@ -517,16 +619,21 @@ func TestPrunedBlockDispatcherMultipleQueryPeers(t *testing.T) {
 	// Queue all the block requests one by one.
 	blockChans := make([]<-chan *wire.MsgBlock, 0, numBlocks)
 	errChans := make([]<-chan error, 0, numBlocks)
+	cancelChans := make([]<-chan error, 0, numBlocks)
+
 	for i := 0; i < numBlocks; i++ {
-		blockChan, errChan := h.query(h.hashes[i : i+1])
+		blockChan, errChan, cancelChan := h.query(h.hashes[i : i+1])
 		blockChans = append(blockChans, blockChan)
 		errChans = append(errChans, errChan)
+		cancelChans = append(cancelChans, cancelChan)
+
 	}
 
 	// We should see one query per block.
 	for i := 0; i < numBlocks; i++ {
 		h.assertPeerQueried()
-		h.assertPeerReplied(blockChans[i], errChans[i], true)
+		h.assertPeerReplied(blockChans[i], errChans[i], cancelChans[i],
+			true)
 	}
 }
 
@@ -544,7 +651,7 @@ func TestPrunedBlockDispatcherPeerPoller(t *testing.T) {
 	h.assertNoPeerDialed()
 
 	// We'll then query for a block.
-	blockChan, errChan := h.query(h.hashes)
+	blockChan, errChan, cancelChan := h.query(h.hashes)
 
 	// Refresh our peers. This would dial some peers, but we don't have any
 	// yet.
@@ -563,7 +670,7 @@ func TestPrunedBlockDispatcherPeerPoller(t *testing.T) {
 	// Disconnect our peer and re-enable replies.
 	h.disconnectPeer(peer, false)
 	h.enablePeerReplies()
-	h.assertNoReply(blockChan, errChan)
+	h.assertNoReply(blockChan, errChan, cancelChan)
 
 	// Force a refresh once again. Since the peer has disconnected, a new
 	// connection should be made and the peer should be queried again.
@@ -579,7 +686,7 @@ func TestPrunedBlockDispatcherPeerPoller(t *testing.T) {
 
 	// Now that we know we've connected to the peer, we should be able to
 	// receive their response.
-	h.assertPeerReplied(blockChan, errChan, true)
+	h.assertPeerReplied(blockChan, errChan, cancelChan, true)
 }
 
 // TestPrunedBlockDispatcherInvalidBlock ensures that validation is performed on
@@ -597,9 +704,9 @@ func TestPrunedBlockDispatcherInvalidBlock(t *testing.T) {
 
 	// We'll then query for a block. We shouldn't see a response as the
 	// block should have failed validation.
-	blockChan, errChan := h.query(h.hashes)
+	blockChan, errChan, cancelChan := h.query(h.hashes)
 	h.assertPeerQueried()
-	h.assertNoReply(blockChan, errChan)
+	h.assertNoReply(blockChan, errChan, cancelChan)
 
 	// Since the peer sent us an invalid block, they should have been
 	// disconnected and banned. Refreshing our peers shouldn't result in a
@@ -618,7 +725,7 @@ func TestPrunedBlockDispatcherInvalidBlock(t *testing.T) {
 	h.refreshPeers()
 	h.assertPeerDialed()
 	h.assertPeerQueried()
-	h.assertPeerReplied(blockChan, errChan, true)
+	h.assertPeerReplied(blockChan, errChan, cancelChan, true)
 }
 
 func TestSatisfiesRequiredServices(t *testing.T) {
