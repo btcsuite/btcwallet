@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -395,7 +396,25 @@ func (d *PrunedBlockDispatcher) connectToPeer(addr string) (bool, error) {
 // "full-node".
 func filterPeers(peers []btcjson.GetPeerInfoResult) ([]string, error) {
 	var eligible []string // nolint:prealloc
+
+	// First we sort the peers by the measured ping time, to choose the best
+	// peers to fetch blocks from.
+	sort.Slice(peers, func(i, j int) bool {
+		return peers[i].PingTime < peers[j].PingTime
+	})
+
 	for _, peer := range peers {
+		// We cannot use the inbound peers here because the referenced
+		// port in the `addr` field is not the listen port for the p2p
+		// connection but a random outgoing port of the peer.
+		if peer.Inbound {
+			log.Debugf("Inbound peer %v not considering for "+
+				"outbound connection to fetch pruned blocks",
+				peer)
+
+			continue
+		}
+
 		rawServices, err := hex.DecodeString(peer.Services)
 		if err != nil {
 			return nil, err
