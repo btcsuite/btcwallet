@@ -3819,15 +3819,23 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		log.Warnf("Unable to remove invalid transaction %v: %v",
 			tx.TxHash(), dbErr)
 	} else {
-		// The spew output is pretty nice to directly see how many
-		// inputs/outputs of what type there are.
-		log.Infof("Removed invalid transaction: %v", spew.Sdump(tx))
+		log.Infof("Removed invalid transaction: %v", tx.TxHash())
 
-		// The serialized transaction is for logging only, don't fail on
-		// the error.
+		// The serialized transaction is for logging only, don't fail
+		// on the error.
 		var txRaw bytes.Buffer
 		_ = tx.Serialize(&txRaw)
-		log.Infof("Removed invalid transaction: %x", txRaw.Bytes())
+
+		// Optionally log the tx in debug when the size is manageable.
+		if txRaw.Len() < 1_000_000 {
+			log.Debugf("Removed invalid transaction: %v \n hex=%x",
+				newLogClosure(func() string {
+					return spew.Sdump(tx)
+				}), txRaw.Bytes())
+		} else {
+			log.Debug("Removed invalid transaction due to size " +
+				"too large")
+		}
 	}
 
 	return nil, returnErr
