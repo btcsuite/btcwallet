@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -82,48 +83,6 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		amt += output.Value
 	}
 
-	// addInputInfo is a helper function that fetches the UTXO information
-	// of an input and attaches it to the PSBT packet.
-	addInputInfo := func(inputs []*wire.TxIn) error {
-		packet.Inputs = make([]psbt.PInput, len(inputs))
-		for idx, in := range inputs {
-			tx, utxo, derivationPath, _, err := w.FetchInputInfo(
-				&in.PreviousOutPoint,
-			)
-			if err != nil {
-				return fmt.Errorf("error fetching UTXO: %v",
-					err)
-			}
-
-			addr, witnessProgram, _, err := w.ScriptForOutput(utxo)
-			if err != nil {
-				return fmt.Errorf("error fetching UTXO "+
-					"script: %v", err)
-			}
-
-			// We don't want to include the witness or any script
-			// on the unsigned TX just yet.
-			packet.UnsignedTx.TxIn[idx].Witness = wire.TxWitness{}
-			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
-
-			switch {
-			case txscript.IsPayToTaproot(utxo.PkScript):
-				addInputInfoSegWitV1(
-					&packet.Inputs[idx], utxo,
-					derivationPath,
-				)
-
-			default:
-				addInputInfoSegWitV0(
-					&packet.Inputs[idx], tx, utxo,
-					derivationPath, addr, witnessProgram,
-				)
-			}
-		}
-
-		return nil
-	}
-
 	var tx *txauthor.AuthoredTx
 	switch {
 	// We need to do coin selection.
@@ -146,7 +105,16 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		// include the witness as the resulting PSBT isn't expected not
 		// should be signed yet.
 		packet.UnsignedTx.TxIn = tx.Tx.TxIn
-		err = addInputInfo(tx.Tx.TxIn)
+		packet.Inputs = make([]psbt.PInput, len(packet.UnsignedTx.TxIn))
+
+		for idx := range packet.UnsignedTx.TxIn {
+			// We don't want to include the witness or any script
+			// on the unsigned TX just yet.
+			packet.UnsignedTx.TxIn[idx].Witness = wire.TxWitness{}
+			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
+		}
+
+		err := w.DecorateInputs(packet, true)
 		if err != nil {
 			return 0, err
 		}
@@ -155,7 +123,16 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	// a change output if necessary.
 	default:
 		// Make sure all inputs provided are actually ours.
-		err = addInputInfo(txIn)
+		packet.Inputs = make([]psbt.PInput, len(packet.UnsignedTx.TxIn))
+
+		for idx := range packet.UnsignedTx.TxIn {
+			// We don't want to include the witness or any script
+			// on the unsigned TX just yet.
+			packet.UnsignedTx.TxIn[idx].Witness = wire.TxWitness{}
+			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
+		}
+
+		err := w.DecorateInputs(packet, true)
 		if err != nil {
 			return 0, err
 		}
@@ -263,6 +240,51 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	}
 
 	return changeIndex, nil
+}
+
+// DecorateInputs fetches the UTXO information of all inputs it can identify and
+// adds the required information to the package's inputs. The failOnUnknown
+// boolean controls whether the method should return an error if it cannot
+// identify an input or if it should just skip it.
+func (w *Wallet) DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error {
+	for idx := range packet.Inputs {
+		txIn := packet.UnsignedTx.TxIn[idx]
+
+		tx, utxo, derivationPath, _, err := w.FetchInputInfo(
+			&txIn.PreviousOutPoint,
+		)
+
+		switch {
+		// If the error just means it's not an input our wallet controls
+		// and the user doesn't care about that, then we can just skip
+		// this input and continue.
+		case errors.Is(err, ErrNotMine) && !failOnUnknown:
+			continue
+
+		case err != nil:
+			return fmt.Errorf("error fetching UTXO: %v", err)
+		}
+
+		addr, witnessProgram, _, err := w.ScriptForOutput(utxo)
+		if err != nil {
+			return fmt.Errorf("error fetching UTXO script: %v", err)
+		}
+
+		switch {
+		case txscript.IsPayToTaproot(utxo.PkScript):
+			addInputInfoSegWitV1(
+				&packet.Inputs[idx], utxo, derivationPath,
+			)
+
+		default:
+			addInputInfoSegWitV0(
+				&packet.Inputs[idx], tx, utxo, derivationPath,
+				addr, witnessProgram,
+			)
+		}
+	}
+
+	return nil
 }
 
 // addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a SegWit v0

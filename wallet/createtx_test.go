@@ -216,8 +216,8 @@ func TestInputYield(t *testing.T) {
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	credit := &wtxmgr.Credit{
-		Amount:   1000,
+	credit := &wire.TxOut{
+		Value:    1000,
 		PkScript: pkScript,
 	}
 
