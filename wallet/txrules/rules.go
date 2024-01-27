@@ -40,14 +40,26 @@ var (
 // CheckOutput performs simple consensus and policy tests on a transaction
 // output.
 func CheckOutput(output *wire.TxOut, relayFeePerKb btcutil.Amount) error {
+	err := CheckOutputAllowDust(output, relayFeePerKb)
+
+	if err != nil {
+		return err
+	}
+
+	if IsDustOutput(output, relayFeePerKb) {
+		return ErrOutputIsDust
+	}
+	return nil
+}
+
+// CheckOutput performs simple consensus and policy tests on a transaction
+// output.
+func CheckOutputAllowDust(output *wire.TxOut, relayFeePerKb btcutil.Amount) error {
 	if output.Value < 0 {
 		return ErrAmountNegative
 	}
 	if output.Value > btcutil.MaxSatoshi {
 		return ErrAmountExceedsMax
-	}
-	if IsDustOutput(output, relayFeePerKb) {
-		return ErrOutputIsDust
 	}
 	return nil
 }
