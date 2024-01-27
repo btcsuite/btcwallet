@@ -469,10 +469,16 @@ func (c *BitcoindConn) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 		return nil, err
 	}
 
+	// cancelChan is needed in case a block request with the same hash is
+	// already registered and fails via the returned errChan. Because we
+	// don't register a new request in this case this cancelChan is used
+	// to signal the failure of the dependant block request.
+	cancelChan := make(chan error, 1)
+
 	// Now that we know the block has been pruned for sure, request it from
 	// our backend peers.
 	blockChan, errChan := c.prunedBlockDispatcher.Query(
-		[]*chainhash.Hash{hash},
+		[]*chainhash.Hash{hash}, cancelChan,
 	)
 
 	for {
@@ -482,11 +488,31 @@ func (c *BitcoindConn) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 
 		case err := <-errChan:
 			if err != nil {
+				// An error was returned for this block request.
+				// We have to make sure we remove the blockhash
+				// from the list of queried blocks.
+				// Moreover because in case a block is requested
+				// more than once no redundant block requests
+				// are registered but rather a reply channel is
+				// added to the pending block request. This
+				// means we need to cancel all dependent
+				// `GetBlock` calls via the cancel channel when
+				// the fetching of the block was NOT successful.
+				c.prunedBlockDispatcher.CancelRequest(
+					*hash, err,
+				)
+
 				return nil, err
 			}
 
 			// errChan fired before blockChan with a nil error, wait
 			// for the block now.
+
+		// The cancelChan is only used when there is already a pending
+		// block request for this hash and that block request fails via
+		// the error channel above.
+		case err := <-cancelChan:
+			return nil, err
 
 		case <-c.quit:
 			return nil, ErrBitcoindClientShuttingDown
