@@ -135,7 +135,7 @@ func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
 	}
 	pubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
-		return nil, nil, nil, 0, err
+		return nil, nil, nil, 0, ErrNotMine
 	}
 	keyScope, derivationPath, _ := pubKeyAddr.DerivationInfo()
 
