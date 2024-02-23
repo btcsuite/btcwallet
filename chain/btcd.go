@@ -465,3 +465,11 @@ func (c *RPCClient) POSTClient() (*rpcclient.Client, error) {
 	configCopy.HTTPPostMode = true
 	return rpcclient.New(&configCopy, nil)
 }
+
+// LookupInputMempoolSpend returns the transaction hash and true if the given
+// input is found being spent in mempool, otherwise it returns nil and false.
+func (c *RPCClient) LookupInputMempoolSpend(op wire.OutPoint) (
+	chainhash.Hash, bool) {
+
+	return getTxSpendingPrevOut(op, c.Client)
+}
