@@ -2,7 +2,6 @@ package chain
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -217,22 +216,6 @@ func (b *bitcoindZMQEvents) TxNotifications() <-chan *wire.MsgTx {
 // BlockNotifications returns a channel which will deliver new blocks.
 func (b *bitcoindZMQEvents) BlockNotifications() <-chan *wire.MsgBlock {
 	return b.blockNtfns
-}
-
-// getTxSpendingPrevOutReq is the rpc request format for bitcoind's
-// gettxspendingprevout call.
-type getTxSpendingPrevOutReq struct {
-	Txid string `json:"txid"`
-	Vout uint32 `json:"vout"`
-}
-
-// getTxSpendingPrevOutResp is the rpc response format for bitcoind's
-// gettxspendingprevout call. It returns the "spendingtxid" if one exists in
-// the mempool.
-type getTxSpendingPrevOutResp struct {
-	Txid         string  `json:"txid"`
-	Vout         float64 `json:"vout"`
-	SpendingTxid string  `json:"spendingtxid"`
 }
 
 // LookupInputSpend returns the transaction that spends the given outpoint
@@ -501,28 +484,7 @@ func (b *bitcoindZMQEvents) mempoolPoller() {
 func getTxSpendingPrevOut(op wire.OutPoint,
 	client *rpcclient.Client) (chainhash.Hash, bool) {
 
-	prevoutReq := &getTxSpendingPrevOutReq{
-		Txid: op.Hash.String(), Vout: op.Index,
-	}
-
-	// The RPC takes an array of prevouts so we have an array with a single
-	// item since we don't yet batch calls to LookupInputSpend.
-	prevoutArr := []*getTxSpendingPrevOutReq{prevoutReq}
-
-	req, err := json.Marshal(prevoutArr)
-	if err != nil {
-		return chainhash.Hash{}, false
-	}
-
-	resp, err := client.RawRequest(
-		"gettxspendingprevout", []json.RawMessage{req},
-	)
-	if err != nil {
-		return chainhash.Hash{}, false
-	}
-
-	var prevoutResps []getTxSpendingPrevOutResp
-	err = json.Unmarshal(resp, &prevoutResps)
+	prevoutResps, err := client.GetTxSpendingPrevOut([]wire.OutPoint{op})
 	if err != nil {
 		return chainhash.Hash{}, false
 	}
