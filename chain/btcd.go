@@ -49,6 +49,8 @@ var _ Interface = (*RPCClient)(nil)
 // but must be done using the Start method.  If the remote server does not
 // operate on the same bitcoin network as described by the passed chain
 // parameters, the connection will be disconnected.
+//
+// TODO(yy): deprecate it in favor of NewRPCClientWithConfig.
 func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte,
 	disableTLS bool, reconnectAttempts int) (*RPCClient, error) {
 
@@ -87,6 +89,109 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 	if err != nil {
 		return nil, err
 	}
+	client.Client = rpcClient
+	return client, nil
+}
+
+// RPCClientConfig defines the config options used when initializing the RPC
+// Client.
+type RPCClientConfig struct {
+	// Conn describes the connection configuration parameters for the
+	// client.
+	Conn *rpcclient.ConnConfig
+
+	// Params defines a Bitcoin network by its parameters.
+	Chain *chaincfg.Params
+
+	// NotificationHandlers defines callback function pointers to invoke
+	// with notifications. If not set, the default handlers defined in this
+	// client will be used.
+	NotificationHandlers *rpcclient.NotificationHandlers
+
+	// ReconnectAttempts defines the number to reties (each after an
+	// increasing backoff) if the connection can not be established.
+	ReconnectAttempts int
+}
+
+// validate checks the required config options are set.
+func (r *RPCClientConfig) validate() error {
+	if r == nil {
+		return errors.New("missing rpc config")
+	}
+
+	// Make sure retry attempts is positive.
+	if r.ReconnectAttempts < 0 {
+		return errors.New("reconnectAttempts must be positive")
+	}
+
+	// Make sure the chain params are configed.
+	if r.Chain == nil {
+		return errors.New("missing chain params config")
+	}
+
+	// Make sure connection config is supplied.
+	if r.Conn == nil {
+		return errors.New("missing conn config")
+	}
+
+	// If disableTLS is false, the remote RPC certificate must be provided
+	// in the certs slice.
+	if !r.Conn.DisableTLS && r.Conn.Certificates == nil {
+		return errors.New("must provide certs when TLS is enabled")
+	}
+
+	return nil
+}
+
+// NewRPCClientWithConfig creates a client connection to the server based on
+// the config options supplised.
+//
+// The connection is not established immediately, but must be done using the
+// Start method.  If the remote server does not operate on the same bitcoin
+// network as described by the passed chain parameters, the connection will be
+// disconnected.
+func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
+	// Make sure the config is valid.
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
+	// Mimic the old behavior defined in `NewRPCClient`. We will remove
+	// these hard-codings once this package is more properly refactored.
+	cfg.Conn.DisableAutoReconnect = false
+	cfg.Conn.DisableConnectOnNew = true
+
+	client := &RPCClient{
+		connConfig:          cfg.Conn,
+		chainParams:         cfg.Chain,
+		reconnectAttempts:   cfg.ReconnectAttempts,
+		enqueueNotification: make(chan interface{}),
+		dequeueNotification: make(chan interface{}),
+		currentBlock:        make(chan *waddrmgr.BlockStamp),
+		quit:                make(chan struct{}),
+	}
+
+	// Use the configed notification callbacks, if not set, default to the
+	// callbacks defined in this package.
+	ntfnCallbacks := cfg.NotificationHandlers
+	if ntfnCallbacks == nil {
+		ntfnCallbacks = &rpcclient.NotificationHandlers{
+			OnClientConnected:   client.onClientConnect,
+			OnBlockConnected:    client.onBlockConnected,
+			OnBlockDisconnected: client.onBlockDisconnected,
+			OnRecvTx:            client.onRecvTx,
+			OnRedeemingTx:       client.onRedeemingTx,
+			OnRescanFinished:    client.onRescanFinished,
+			OnRescanProgress:    client.onRescanProgress,
+		}
+	}
+
+	// Create the RPC client using the above config.
+	rpcClient, err := rpcclient.New(client.connConfig, ntfnCallbacks)
+	if err != nil {
+		return nil, err
+	}
+
 	client.Client = rpcClient
 	return client, nil
 }
