@@ -1200,6 +1200,7 @@ type (
 		coinSelectionStrategy CoinSelectionStrategy
 		dryRun                bool
 		resp                  chan createTxResponse
+		selectUtxos           []wire.OutPoint
 	}
 	createTxResponse struct {
 		tx  *txauthor.AuthoredTx
@@ -1331,6 +1332,7 @@ func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 		coinSelectionStrategy: coinSelectionStrategy,
 		dryRun:                dryRun,
 		resp:                  make(chan createTxResponse),
+		selectUtxos:           opts.selectUtxos,
 	}
 	w.createTxRequests <- req
 	resp := <-req.resp
