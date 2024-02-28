@@ -1257,6 +1257,7 @@ out:
 // scope, which otherwise will default to the specified coin selection scope.
 type txCreateOptions struct {
 	changeKeyScope *waddrmgr.KeyScope
+	selectUtxos    []wire.OutPoint
 }
 
 // TxCreateOption is a set of optional arguments to modify the tx creation
@@ -1276,6 +1277,14 @@ func defaultTxCreateOptions() *txCreateOptions {
 func WithCustomChangeScope(changeScope *waddrmgr.KeyScope) TxCreateOption {
 	return func(opts *txCreateOptions) {
 		opts.changeKeyScope = changeScope
+	}
+}
+
+// WithCustomSelectUtxos is used to specify the inputs to be used while
+// creating txns.
+func WithCustomSelectUtxos(utxos []wire.OutPoint) TxCreateOption {
+	return func(opts *txCreateOptions) {
+		opts.selectUtxos = utxos
 	}
 }
 
