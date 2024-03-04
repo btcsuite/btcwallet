@@ -3393,8 +3393,33 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 // returns the transaction upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, satPerKb btcutil.Amount,
-	coinSelectionStrategy CoinSelectionStrategy, label string) (
-	*wire.MsgTx, error) {
+	coinSelectionStrategy CoinSelectionStrategy, label string) (*wire.MsgTx,
+	error) {
+
+	return w.sendOutputs(
+		outputs, keyScope, account, minconf, satPerKb,
+		coinSelectionStrategy, label,
+	)
+}
+
+// SendOutputsWithInput creates and sends payment transactions using the
+// provided selected utxos. It returns the transaction upon success.
+func (w *Wallet) SendOutputsWithInput(outputs []*wire.TxOut,
+	keyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, satPerKb btcutil.Amount,
+	coinSelectionStrategy CoinSelectionStrategy, label string,
+	selectedUtxos []wire.OutPoint) (*wire.MsgTx, error) {
+
+	return w.sendOutputs(outputs, keyScope, account, minconf, satPerKb,
+		coinSelectionStrategy, label, selectedUtxos...)
+}
+
+// sendOutputs creates and sends payment transactions.It returns the transaction
+// upon success.
+func (w *Wallet) sendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, satPerKb btcutil.Amount,
+	coinSelectionStrategy CoinSelectionStrategy, label string,
+	selectedUtxos ...wire.OutPoint) (*wire.MsgTx, error) {
 
 	// Ensure the outputs to be created adhere to the network's consensus
 	// rules.
@@ -3413,7 +3438,9 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	// been confirmed.
 	createdTx, err := w.CreateSimpleTx(
 		keyScope, account, outputs, minconf, satPerKb,
-		coinSelectionStrategy, false,
+		coinSelectionStrategy, false, WithCustomSelectUtxos(
+			selectedUtxos,
+		),
 	)
 	if err != nil {
 		return nil, err
