@@ -67,6 +67,9 @@ func TestBitcoindEvents(t *testing.T) {
 			// mempool.
 			btcClient = setupBitcoind(t, addr, test.rpcPolling)
 			testNotifySpentMempool(t, miner1, btcClient)
+
+			// Test looking up mempool for input spent.
+			testLookupInputMempoolSpend(t, miner1, btcClient)
 		})
 	}
 }
@@ -212,6 +215,46 @@ func testNotifySpentMempool(t *testing.T, miner *rpctest.Harness,
 	case <-time.After(time.Second):
 		require.Fail("timed out waiting for RelevantTx notification")
 	}
+}
+
+// testLookupInputMempoolSpend tests that LookupInputMempoolSpend returns the
+// correct tx hash and whether the input has been spent in the mempool.
+func testLookupInputMempoolSpend(t *testing.T, miner *rpctest.Harness,
+	client *BitcoindClient) {
+
+	rt := require.New(t)
+
+	script, _, err := randPubKeyHashScript()
+	rt.NoError(err)
+
+	// Create a test tx.
+	tx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 1000, PkScript: script}}, 5, false,
+	)
+	rt.NoError(err)
+
+	// Lookup the input in mempool.
+	op := tx.TxIn[0].PreviousOutPoint
+	txid, found := client.LookupInputMempoolSpend(op)
+
+	// Expect that the input has not been spent in the mempool.
+	rt.False(found)
+	rt.Zero(txid)
+
+	// Send the tx which will put it in the mempool.
+	_, err = client.SendRawTransaction(tx, true)
+	rt.NoError(err)
+
+	// Lookup the input again should return the spending tx.
+	//
+	// NOTE: We need to wait for the tx to propagate to the mempool.
+	rt.Eventually(func() bool {
+		txid, found = client.LookupInputMempoolSpend(op)
+		return found
+	}, 5*time.Second, 100*time.Millisecond)
+
+	// Check the expected txid is returned.
+	rt.Equal(tx.TxHash(), txid)
 }
 
 // testReorg tests that the given BitcoindClient correctly responds to a chain

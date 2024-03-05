@@ -1400,3 +1400,11 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 
 	return true, rec, nil
 }
+
+// LookupInputMempoolSpend returns the transaction hash and true if the given
+// input is found being spent in mempool, otherwise it returns nil and false.
+func (c *BitcoindClient) LookupInputMempoolSpend(op wire.OutPoint) (
+	chainhash.Hash, bool) {
+
+	return c.chainConn.events.LookupInputSpend(op)
+}
