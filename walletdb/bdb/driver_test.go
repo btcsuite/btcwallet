@@ -203,7 +203,7 @@ func TestPersistence(t *testing.T) {
 
 		for k, v := range storeValues {
 			if err := ns1.Put([]byte(k), []byte(v)); err != nil {
-				return fmt.Errorf("Put: unexpected error: %v", err)
+				return fmt.Errorf("Put: unexpected error: %w", err)
 			}
 		}
 

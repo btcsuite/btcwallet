@@ -690,7 +690,7 @@ func testAdditionalErrors(tc *testContext) bool {
 		// Create a new namespace
 		rootBucket, err := tx.CreateTopLevelBucket(ns3Key)
 		if err != nil {
-			return fmt.Errorf("CreateTopLevelBucket: unexpected error: %v", err)
+			return fmt.Errorf("CreateTopLevelBucket: unexpected error: %w", err)
 		}
 
 		// Ensure CreateBucket returns the expected error when no bucket
