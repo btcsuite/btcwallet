@@ -73,7 +73,7 @@ func (e ErrorCode) String() string {
 // operation.
 type Error struct {
 	Code ErrorCode // Describes the kind of error
-	Desc string    // Human readable description of the issue
+	Desc string    // Human-readable description of the issue
 	Err  error     // Underlying error, optional
 }
 
@@ -83,6 +83,11 @@ func (e Error) Error() string {
 		return e.Desc + ": " + e.Err.Error()
 	}
 	return e.Desc
+}
+
+// Unwrap returns the underlying error, if any.
+func (e Error) Unwrap() error {
+	return e.Err
 }
 
 func storeError(c ErrorCode, desc string, err error) Error {
