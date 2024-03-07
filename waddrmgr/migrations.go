@@ -291,7 +291,7 @@ func populateBirthdayBlock(ns walletdb.ReadWriteBucket) error {
 	// We'll start by fetching our birthday timestamp.
 	birthdayTimestamp, err := fetchBirthday(ns)
 	if err != nil {
-		return fmt.Errorf("unable to fetch birthday timestamp: %v", err)
+		return fmt.Errorf("unable to fetch birthday timestamp: %w", err)
 	}
 
 	log.Infof("Setting the wallet's birthday block from timestamp=%v",
@@ -301,7 +301,7 @@ func populateBirthdayBlock(ns walletdb.ReadWriteBucket) error {
 	// the corresponding chain.
 	genesisHash, err := fetchBlockHash(ns, 0)
 	if err != nil {
-		return fmt.Errorf("unable to fetch genesis block hash: %v", err)
+		return fmt.Errorf("unable to fetch genesis block hash: %w", err)
 	}
 
 	var genesisTimestamp time.Time

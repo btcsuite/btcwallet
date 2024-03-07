@@ -2544,7 +2544,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 
 		_, err := mgr.Address(ns, lastAddr.Address())
 		if err != nil {
-			return fmt.Errorf("unable to find addr: %v", err)
+			return fmt.Errorf("unable to find addr: %w", err)
 		}
 
 		err = mgr.MarkUsed(ns, lastAddr.Address())

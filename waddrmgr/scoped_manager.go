@@ -615,7 +615,7 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to retrieve "+
-					"account public key: %v", err)
+					"account public key: %w", err)
 			}
 		}
 	} else {
@@ -2170,12 +2170,12 @@ func (s *ScopedKeyManager) ImportTaprootScript(ns walletdb.ReadWriteBucket,
 	// tweak the taproot key.
 	taprootKey, err := tapscript.TaprootKey()
 	if err != nil {
-		return nil, fmt.Errorf("error calculating script root: %v", err)
+		return nil, fmt.Errorf("error calculating script root: %w", err)
 	}
 
 	script, err := tlvEncodeTaprootScript(tapscript)
 	if err != nil {
-		return nil, fmt.Errorf("error encoding taproot script: %v", err)
+		return nil, fmt.Errorf("error encoding taproot script: %w", err)
 	}
 
 	managedAddr, err := s.importScriptAddress(

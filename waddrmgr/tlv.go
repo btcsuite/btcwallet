@@ -43,7 +43,7 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 		blockBytes, err := s.ControlBlock.ToBytes()
 		if err != nil {
 			return nil, fmt.Errorf("error encoding control block: "+
-				"%v", err)
+				"%w", err)
 		}
 		tlvRecords = append(tlvRecords, tlv.MakePrimitiveRecord(
 			typeTapscriptControlBlock, &blockBytes,
@@ -141,7 +141,7 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 		)
 		if err != nil {
 			return nil, fmt.Errorf("error decoding control block: "+
-				"%v", err)
+				"%w", err)
 		}
 	}
 
@@ -149,7 +149,7 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 		s.FullOutputKey, err = schnorr.ParsePubKey(fullOutputKeyBytes)
 		if err != nil {
 			return nil, fmt.Errorf("error decoding full output "+
-				"key: %v", err)
+				"key: %w", err)
 		}
 	}
 

@@ -1017,7 +1017,7 @@ func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptIdent,
 		tweakedPubKey, err := schnorr.ParsePubKey(scriptIdent)
 		if err != nil {
 			return nil, fmt.Errorf("error lifting public key from "+
-				"script ident: %v", err)
+				"script ident: %w", err)
 		}
 
 		return &taprootScriptAddress{
