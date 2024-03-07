@@ -1073,14 +1073,17 @@ func listLockUnspent(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 
 // listReceivedByAccount handles a listreceivedbyaccount request by returning
 // a slice of objects, each one containing:
-//  "account": the receiving account;
-//  "amount": total amount received by the account;
-//  "confirmations": number of confirmations of the most recent transaction.
+//
+//	"account": the receiving account;
+//	"amount": total amount received by the account;
+//	"confirmations": number of confirmations of the most recent transaction.
+//
 // It takes two parameters:
-//  "minconf": minimum number of confirmations to consider a transaction -
-//             default: one;
-//  "includeempty": whether or not to include addresses that have no transactions -
-//                  default: false.
+//
+//	"minconf": minimum number of confirmations to consider a transaction -
+//	           default: one;
+//	"includeempty": whether or not to include addresses that have no transactions -
+//	                default: false.
 func listReceivedByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListReceivedByAccountCmd)
 
@@ -1104,15 +1107,18 @@ func listReceivedByAccount(icmd interface{}, w *wallet.Wallet) (interface{}, err
 
 // listReceivedByAddress handles a listreceivedbyaddress request by returning
 // a slice of objects, each one containing:
-//  "account": the account of the receiving address;
-//  "address": the receiving address;
-//  "amount": total amount received by the address;
-//  "confirmations": number of confirmations of the most recent transaction.
+//
+//	"account": the account of the receiving address;
+//	"address": the receiving address;
+//	"amount": total amount received by the address;
+//	"confirmations": number of confirmations of the most recent transaction.
+//
 // It takes two parameters:
-//  "minconf": minimum number of confirmations to consider a transaction -
-//             default: one;
-//  "includeempty": whether or not to include addresses that have no transactions -
-//                  default: false.
+//
+//	"minconf": minimum number of confirmations to consider a transaction -
+//	           default: one;
+//	"includeempty": whether or not to include addresses that have no transactions -
+//	                default: false.
 func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListReceivedByAddressCmd)
 
@@ -1360,12 +1366,12 @@ func makeOutputs(pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) 
 	for addrStr, amt := range pairs {
 		addr, err := btcutil.DecodeAddress(addrStr, chainParams)
 		if err != nil {
-			return nil, fmt.Errorf("cannot decode address: %s", err)
+			return nil, fmt.Errorf("cannot decode address: %w", err)
 		}
 
 		pkScript, err := txscript.PayToAddrScript(addr)
 		if err != nil {
-			return nil, fmt.Errorf("cannot create txout script: %s", err)
+			return nil, fmt.Errorf("cannot create txout script: %w", err)
 		}
 
 		outputs = append(outputs, wire.NewTxOut(int64(amt), pkScript))
