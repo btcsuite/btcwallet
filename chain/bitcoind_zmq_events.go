@@ -123,7 +123,7 @@ func newBitcoindZMQEvents(cfg *ZMQConfig, client *rpcclient.Client,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to subscribe for zmq block "+
-			"events: %v", err)
+			"events: %w", err)
 	}
 
 	zmqTxConn, err := gozmq.Subscribe(
@@ -137,7 +137,7 @@ func newBitcoindZMQEvents(cfg *ZMQConfig, client *rpcclient.Client,
 		}
 
 		return nil, fmt.Errorf("unable to subscribe for zmq tx "+
-			"events: %v", err)
+			"events: %w", err)
 	}
 
 	// Create the config for mempool and attach default values if not

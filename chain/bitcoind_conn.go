@@ -171,7 +171,7 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	chainInfo, err := client.GetBlockChainInfo()
 	if err != nil {
 		return nil, fmt.Errorf("unable to determine if bitcoind is "+
-			"pruned: %v", err)
+			"pruned: %w", err)
 	}
 
 	// Only initialize the PrunedBlockDispatcher when the connected bitcoind

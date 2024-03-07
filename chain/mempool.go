@@ -531,7 +531,7 @@ func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 		// Ask the client to send all the batched requests.
 		err := m.cfg.client.Send()
 		if err != nil {
-			return fmt.Errorf("Send GetRawTransaction got %v", err)
+			return fmt.Errorf("Send GetRawTransaction got %w", err)
 		}
 
 		// Iterate the recievers and fetch the response.

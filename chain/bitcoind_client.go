@@ -330,13 +330,13 @@ func (c *BitcoindClient) NotifyBlocks() error {
 	bestHash, bestHeight, err := c.GetBestBlock()
 	if err != nil {
 		atomic.StoreUint32(&c.notifyBlocks, 0)
-		return fmt.Errorf("unable to retrieve best block: %v", err)
+		return fmt.Errorf("unable to retrieve best block: %w", err)
 	}
 	bestHeader, err := c.GetBlockHeaderVerbose(bestHash)
 	if err != nil {
 		atomic.StoreUint32(&c.notifyBlocks, 0)
 		return fmt.Errorf("unable to retrieve header for best block: "+
-			"%v", err)
+			"%w", err)
 	}
 
 	c.bestBlockMtx.Lock()
@@ -517,12 +517,12 @@ func (c *BitcoindClient) Start() error {
 	// Retrieve the best block of the chain.
 	bestHash, bestHeight, err := c.GetBestBlock()
 	if err != nil {
-		return fmt.Errorf("unable to retrieve best block: %v", err)
+		return fmt.Errorf("unable to retrieve best block: %w", err)
 	}
 	bestHeader, err := c.GetBlockHeaderVerbose(bestHash)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve header for best block: "+
-			"%v", err)
+			"%w", err)
 	}
 
 	c.bestBlockMtx.Lock()
@@ -849,7 +849,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	bestHash := reorgBlock.BlockHash()
 	bestHeight, err := c.GetBlockHeight(&bestHash)
 	if err != nil {
-		return fmt.Errorf("unable to get block height for %v: %v",
+		return fmt.Errorf("unable to get block height for %v: %w",
 			bestHash, err)
 	}
 
@@ -871,7 +871,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	for i := bestHeight - 1; i >= currentBlock.Height; i-- {
 		block, err := c.GetBlock(&previousBlock)
 		if err != nil {
-			return fmt.Errorf("unable to get block %v: %v",
+			return fmt.Errorf("unable to get block %v: %w",
 				previousBlock, err)
 		}
 		blocksToNotify.PushFront(block)
@@ -885,7 +885,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	// We'll start by retrieving the header to the best block known to us.
 	currentHeader, err := c.GetBlockHeader(&currentBlock.Hash)
 	if err != nil {
-		return fmt.Errorf("unable to get block header for %v: %v",
+		return fmt.Errorf("unable to get block header for %v: %w",
 			currentBlock.Hash, err)
 	}
 
@@ -908,7 +908,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		prevBlock := &currentHeader.PrevBlock
 		currentHeader, err = c.GetBlockHeader(prevBlock)
 		if err != nil {
-			return fmt.Errorf("unable to get block header for %v: %v",
+			return fmt.Errorf("unable to get block header for %v: %w",
 				prevBlock, err)
 		}
 
@@ -920,7 +920,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		// once we've found our common ancestor.
 		block, err := c.GetBlock(&previousBlock)
 		if err != nil {
-			return fmt.Errorf("unable to get block %v: %v",
+			return fmt.Errorf("unable to get block %v: %w",
 				previousBlock, err)
 		}
 		blocksToNotify.PushFront(block)
@@ -946,7 +946,7 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 		nextHash := nextBlock.BlockHash()
 		nextHeader, err := c.GetBlockHeader(&nextHash)
 		if err != nil {
-			return fmt.Errorf("unable to get block header for %v: %v",
+			return fmt.Errorf("unable to get block header for %v: %w",
 				nextHash, err)
 		}
 
