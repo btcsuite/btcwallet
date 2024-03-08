@@ -79,6 +79,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	// database us not inflated.
 	dryRunTx, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -96,6 +97,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 
 	dryRunTx2, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -131,6 +133,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	// to the database.
 	tx, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, false,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -280,7 +283,7 @@ func TestTxToOutputsRandom(t *testing.T) {
 	createTx := func() *txauthor.AuthoredTx {
 		tx, err := w.txToOutputs(
 			txOuts, nil, nil, 0, 1, feeSatPerKb,
-			CoinSelectionRandom, true,
+			CoinSelectionRandom, true, nil,
 		)
 		require.NoError(t, err)
 		return tx
@@ -352,7 +355,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	}
 	tx1, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
-		CoinSelectionLargest, true,
+		CoinSelectionLargest, true, nil,
 	)
 	require.NoError(t, err)
 
@@ -378,7 +381,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	tx2, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, &waddrmgr.KeyScopeBIP0086,
 		&waddrmgr.KeyScopeBIP0084, 0, 1, 1000, CoinSelectionLargest,
-		true,
+		true, nil,
 	)
 	require.NoError(t, err)
 
@@ -398,4 +401,88 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 
 		require.Equal(t, scriptType, txscript.WitnessV0PubKeyHashTy)
 	}
+}
+
+// TestSelectUtxosTxoToOutpoint tests that it is possible to use passed
+// selected utxos to craft a transaction in `txToOutpoint`.
+func TestSelectUtxosTxoToOutpoint(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// First, we'll make a P2TR and a P2WKH address to send some coins to.
+	p2wkhAddr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	p2trAddr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0086)
+	require.NoError(t, err)
+
+	// We'll now make a transaction that'll send coins to both outputs,
+	// then "credit" the wallet for that send.
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	p2trScript, err := txscript.PayToAddrScript(p2trAddr)
+	require.NoError(t, err)
+
+	incomingTx := &wire.MsgTx{
+		TxIn: []*wire.TxIn{
+			{},
+		},
+		TxOut: []*wire.TxOut{
+			wire.NewTxOut(1_000_000, p2wkhScript),
+			wire.NewTxOut(2_000_000, p2trScript),
+			wire.NewTxOut(3_000_000, p2trScript),
+			wire.NewTxOut(7_000_000, p2trScript),
+		},
+	}
+	addUtxo(t, w, incomingTx)
+
+	// We expect 4 unspent utxos.
+	unspent, err := w.ListUnspent(0, 80, "")
+	require.NoError(t, err, "unexpected error while calling "+
+		"list unspent")
+
+	require.Len(t, unspent, 4, "expected 4 unspent "+
+		"utxos")
+
+	selectUtxos := []wire.OutPoint{
+		{
+			Hash:  incomingTx.TxHash(),
+			Index: 1,
+		},
+		{
+			Hash:  incomingTx.TxHash(),
+			Index: 2,
+		},
+	}
+
+	// Test by sending 200_000.
+	targetTxOut := &wire.TxOut{
+		Value:    200_000,
+		PkScript: p2trScript,
+	}
+	tx1, err := w.txToOutputs(
+		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
+		CoinSelectionLargest, true, selectUtxos,
+	)
+	require.NoError(t, err)
+
+	// We expect all and only our select utxos to be input in this
+	// transaction.
+	require.Len(t, tx1.Tx.TxIn, len(selectUtxos))
+
+	lookupSelectUtxos := make(map[wire.OutPoint]struct{})
+	for _, utxo := range selectUtxos {
+		lookupSelectUtxos[utxo] = struct{}{}
+	}
+
+	for _, tx := range tx1.Tx.TxIn {
+		_, ok := lookupSelectUtxos[tx.PreviousOutPoint]
+		require.True(t, ok, "unexpected outpoint in txin")
+	}
+
+	// Expect two outputs, change and the actual payment to the address.
+	require.Len(t, tx1.Tx.TxOut, 2)
 }

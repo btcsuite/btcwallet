@@ -1241,7 +1241,7 @@ out:
 			tx, err := w.txToOutputs(
 				txr.outputs, txr.coinSelectKeyScope, txr.changeKeyScope,
 				txr.account, txr.minconf, txr.feeSatPerKB,
-				txr.coinSelectionStrategy, txr.dryRun,
+				txr.coinSelectionStrategy, txr.dryRun, txr.selectUtxos,
 			)
 
 			release()
@@ -3414,8 +3414,8 @@ func (w *Wallet) SendOutputsWithInput(outputs []*wire.TxOut,
 		coinSelectionStrategy, label, selectedUtxos...)
 }
 
-// sendOutputs creates and sends payment transactions.It returns the transaction
-// upon success.
+// sendOutputs creates and sends payment transactions. It returns the
+// transaction upon success.
 func (w *Wallet) sendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, satPerKb btcutil.Amount,
 	coinSelectionStrategy CoinSelectionStrategy, label string,
