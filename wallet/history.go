@@ -87,7 +87,7 @@ func DropTransactionHistory(db walletdb.DB, keepLabels bool) error {
 		return waddrmgr.PutBirthdayBlock(ns, birthdayBlock)
 	})
 	if err != nil {
-		return fmt.Errorf("failed to drop and re-create namespace: %v",
+		return fmt.Errorf("failed to drop and re-create namespace: %w",
 			err)
 	}
 

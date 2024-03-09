@@ -421,7 +421,7 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
 	if err != nil {
 		return fmt.Errorf("unable to subscribe for address "+
-			"notifications: %v", err)
+			"notifications: %w", err)
 	}
 
 	return nil
@@ -474,7 +474,7 @@ func (w *Wallet) ImportTaprootScript(scope waddrmgr.KeyScope,
 	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
 	if err != nil {
 		return nil, fmt.Errorf("unable to subscribe for address "+
-			"notifications: %v", err)
+			"notifications: %w", err)
 	}
 
 	return addr, nil
@@ -571,7 +571,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		err := w.chainClient.NotifyReceived([]btcutil.Address{addr})
 		if err != nil {
 			return "", fmt.Errorf("failed to subscribe for address ntfns for "+
-				"address %s: %s", addr.EncodeAddress(), err)
+				"address %s: %w", addr.EncodeAddress(), err)
 		}
 	}
 

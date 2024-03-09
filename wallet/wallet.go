@@ -422,7 +422,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 			chainClient, w.Manager.Birthday(),
 		)
 		if err != nil {
-			return fmt.Errorf("unable to locate birthday block: %v",
+			return fmt.Errorf("unable to locate birthday block: %w",
 				err)
 		}
 
@@ -458,7 +458,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		})
 		if err != nil {
 			return fmt.Errorf("unable to persist initial sync "+
-				"data: %v", err)
+				"data: %w", err)
 		}
 	}
 
@@ -467,7 +467,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	if w.recoveryWindow > 0 {
 		if err := w.recovery(chainClient, birthdayStamp); err != nil {
 			return fmt.Errorf("unable to perform wallet recovery: "+
-				"%v", err)
+				"%w", err)
 		}
 	}
 
@@ -3463,7 +3463,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 				txDetails, err := w.TxStore.TxDetails(txmgrNs, prevHash)
 				if err != nil {
 					return fmt.Errorf("cannot query previous transaction "+
-						"details for %v: %v", txIn.PreviousOutPoint, err)
+						"details for %v: %w", txIn.PreviousOutPoint, err)
 				}
 				if txDetails == nil {
 					return fmt.Errorf("%v not found",
@@ -4243,7 +4243,7 @@ func MapBroadcastBackendError(err error) error {
 
 	// We received an error not matching any of the above cases.
 	default:
-		returnErr = fmt.Errorf("unmatched backend error: %v", err)
+		returnErr = fmt.Errorf("unmatched backend error: %w", err)
 	}
 
 	return returnErr

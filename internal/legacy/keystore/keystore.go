@@ -234,7 +234,7 @@ func chainedPubKey(pubkey, chaincode []byte) ([]byte, error) {
 	var xorBytesScalar btcec.ModNScalar
 	overflow := xorBytesScalar.SetBytes(&xorbytes)
 	if overflow != 0 {
-		return nil, fmt.Errorf("unable to create pubkey: %v", err)
+		return nil, fmt.Errorf("unable to create pubkey due to overflow")
 	}
 
 	var (

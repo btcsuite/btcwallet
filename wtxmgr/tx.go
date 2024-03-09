@@ -834,7 +834,7 @@ func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error) {
 		rec, err := fetchTxRecord(ns, &op.Hash, &block)
 		if err != nil {
 			return fmt.Errorf("unable to retrieve transaction %v: "+
-				"%v", op.Hash, err)
+				"%w", op.Hash, err)
 		}
 		txOut := rec.MsgTx.TxOut[op.Index]
 		cred := Credit{
@@ -883,7 +883,7 @@ func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error) {
 		err = readRawTxRecord(&op.Hash, recVal, &rec)
 		if err != nil {
 			return fmt.Errorf("unable to retrieve raw transaction "+
-				"%v: %v", op.Hash, err)
+				"%v: %w", op.Hash, err)
 		}
 
 		txOut := rec.MsgTx.TxOut[op.Index]

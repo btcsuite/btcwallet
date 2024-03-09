@@ -184,7 +184,7 @@ func (e ErrorCode) String() string {
 // manager operation.  It is used to indicate several types of failures
 // including errors with caller requests such as invalid accounts or requesting
 // private keys against a locked address manager, errors with the database
-// (ErrDatabase), errors with key chain derivation (ErrKeyChain), and errors
+// (ErrDatabase), errors with keychain derivation (ErrKeyChain), and errors
 // related to crypto (ErrCrypto).
 //
 // The caller can use type assertions to determine if an error is a ManagerError
@@ -195,7 +195,7 @@ func (e ErrorCode) String() string {
 // Err field set with the underlying error.
 type ManagerError struct {
 	ErrorCode   ErrorCode // Describes the kind of error
-	Description string    // Human readable description of the issue
+	Description string    // Human-readable description of the issue
 	Err         error     // Underlying error
 }
 
@@ -205,6 +205,11 @@ func (e ManagerError) Error() string {
 		return e.Description + ": " + e.Err.Error()
 	}
 	return e.Description
+}
+
+// Unwrap returns the underlying error, if any.
+func (e ManagerError) Unwrap() error {
+	return e.Err
 }
 
 // managerError creates a ManagerError given a set of arguments.

@@ -103,7 +103,7 @@ func (s *NeutrinoClient) BackEnd() string {
 // Start replicates the RPC client's Start method.
 func (s *NeutrinoClient) Start() error {
 	if err := s.CS.Start(); err != nil {
-		return fmt.Errorf("error starting chain service: %v", err)
+		return fmt.Errorf("error starting chain service: %w", err)
 	}
 
 	s.clientMtx.Lock()
@@ -426,11 +426,11 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Addre
 
 	bestBlock, err := s.CS.BestBlock()
 	if err != nil {
-		return fmt.Errorf("can't get chain service's best block: %s", err)
+		return fmt.Errorf("can't get chain service's best block: %w", err)
 	}
 	header, err := s.CS.GetBlockHeader(&bestBlock.Hash)
 	if err != nil {
-		return fmt.Errorf("can't get block header for hash %v: %s",
+		return fmt.Errorf("can't get block header for hash %v: %w",
 			bestBlock.Hash, err)
 	}
 

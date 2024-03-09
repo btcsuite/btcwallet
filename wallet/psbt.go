@@ -96,7 +96,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			optFuncs...,
 		)
 		if err != nil {
-			return 0, fmt.Errorf("error creating funding TX: %v",
+			return 0, fmt.Errorf("error creating funding TX: %w",
 				err)
 		}
 
@@ -185,14 +185,14 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			)
 			if err != nil {
 				return fmt.Errorf("fee estimation not "+
-					"successful: %v", err)
+					"successful: %w", err)
 			}
 
 			return nil
 		})
 		if err != nil {
 			return 0, fmt.Errorf("could not add change address to "+
-				"database: %v", err)
+				"database: %w", err)
 		}
 	}
 
@@ -224,7 +224,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	// partial inputs and outputs accordingly.
 	err = psbt.InPlaceSort(packet)
 	if err != nil {
-		return 0, fmt.Errorf("could not sort PSBT: %v", err)
+		return 0, fmt.Errorf("could not sort PSBT: %w", err)
 	}
 
 	// The change output index might have changed after the sorting. We need
@@ -262,12 +262,12 @@ func (w *Wallet) DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error {
 			continue
 
 		case err != nil:
-			return fmt.Errorf("error fetching UTXO: %v", err)
+			return fmt.Errorf("error fetching UTXO: %w", err)
 		}
 
 		addr, witnessProgram, _, err := w.ScriptForOutput(utxo)
 		if err != nil {
-			return fmt.Errorf("error fetching UTXO script: %v", err)
+			return fmt.Errorf("error fetching UTXO script: %w", err)
 		}
 
 		switch {
@@ -500,7 +500,7 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 		})
 		if err != nil {
 			return fmt.Errorf("unable to determine if account is "+
-				"watch-only: %v", err)
+				"watch-only: %w", err)
 		}
 		if watchOnly {
 			continue
@@ -511,7 +511,7 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 		)
 		if err != nil {
 			return fmt.Errorf("error computing input script for "+
-				"input %d: %v", idx, err)
+				"input %d: %w", idx, err)
 		}
 
 		// Serialize the witness format from the stack representation to
@@ -519,7 +519,7 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 		var witnessBytes bytes.Buffer
 		err = psbt.WriteTxWitness(&witnessBytes, witness)
 		if err != nil {
-			return fmt.Errorf("error serializing witness: %v", err)
+			return fmt.Errorf("error serializing witness: %w", err)
 		}
 		packet.Inputs[idx].FinalScriptWitness = witnessBytes.Bytes()
 		packet.Inputs[idx].FinalScriptSig = sigScript
@@ -529,7 +529,7 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 	// broadcast.
 	err = psbt.MaybeFinalizeAll(packet)
 	if err != nil {
-		return fmt.Errorf("error finalizing PSBT: %v", err)
+		return fmt.Errorf("error finalizing PSBT: %w", err)
 	}
 
 	return nil

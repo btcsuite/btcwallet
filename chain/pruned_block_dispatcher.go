@@ -347,7 +347,7 @@ func (d *PrunedBlockDispatcher) connectToPeer(addr string) (bool, error) {
 	peer, err := d.newQueryPeer(addr)
 	if err != nil {
 		return true, fmt.Errorf("unable to configure query peer %v: "+
-			"%v", addr, err)
+			"%w", addr, err)
 	}
 
 	// Establish the connection and wait for the protocol negotiation to

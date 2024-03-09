@@ -36,7 +36,7 @@ func fatalf(format string, args ...interface{}) {
 }
 
 func errContext(err error, context string) error {
-	return fmt.Errorf("%s: %v", context, err)
+	return fmt.Errorf("%s: %w", context, err)
 }
 
 // Flags.
