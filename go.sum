@@ -31,8 +31,8 @@ github.com/btcsuite/btcwallet/wallet/txsizes v1.2.4 h1:nmcKAVTv/cmYrs0A4hbiC6Qw+
 github.com/btcsuite/btcwallet/wallet/txsizes v1.2.4/go.mod h1:YqJR8WAAHiKIPesZTr9Cx9Az4fRhRLcJ6GcxzRUZCAc=
 github.com/btcsuite/btcwallet/walletdb v1.4.2 h1:zwZZ+zaHo4mK+FAN6KeK85S3oOm+92x2avsHvFAhVBE=
 github.com/btcsuite/btcwallet/walletdb v1.4.2/go.mod h1:7ZQ+BvOEre90YT7eSq8bLoxTsgXidUzA/mqbRS114CQ=
-github.com/btcsuite/btcwallet/wtxmgr v1.5.2 h1:n5f/Yu6I8bT0ACLc4XuvvkJ4tw5OlHS700rgW4bQYw4=
-github.com/btcsuite/btcwallet/wtxmgr v1.5.2/go.mod h1:tO4FBSdann0xg/Jtm0grV7t1DzpQMK8nThYVtvSJo/8=
+github.com/btcsuite/btcwallet/wtxmgr v1.5.3 h1:QrWCio9Leh3DwkWfp+A1SURj8pYn3JuTLv3waP5uEro=
+github.com/btcsuite/btcwallet/wtxmgr v1.5.3/go.mod h1:M4nQpxGTXiDlSOODKXboXX7NFthmiBNjzAKKNS7Fhjg=
 github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd h1:R/opQEbFEy9JGkIguV40SvRY1uliPX8ifOvi6ICsFCw=
 github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd/go.mod h1:HHNXQzUsZCxOoE+CPiyCTO6x34Zs86zZUiwtpXoGdtg=
 github.com/btcsuite/goleveldb v0.0.0-20160330041536-7834afc9e8cd/go.mod h1:F+uVaaLLH7j4eDXPRvw78tMflu7Ie2bzYOH4Y8rRKBY=
