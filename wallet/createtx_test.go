@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -76,9 +77,9 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	}
 
 	// First do a few dry-runs, making sure the number of addresses in the
-	// database us not inflated.
+	// database is not inflated.
 	dryRunTx, err := w.txToOutputs(
-		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
+		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, false, true,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -95,7 +96,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	}
 
 	dryRunTx2, err := w.txToOutputs(
-		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
+		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, false, true,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -130,7 +131,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	// Now we do a proper, non-dry run. This should add a change address
 	// to the database.
 	tx, err := w.txToOutputs(
-		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, false,
+		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, false, false,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -280,7 +281,7 @@ func TestTxToOutputsRandom(t *testing.T) {
 	createTx := func() *txauthor.AuthoredTx {
 		tx, err := w.txToOutputs(
 			txOuts, nil, nil, 0, 1, feeSatPerKb,
-			CoinSelectionRandom, true,
+			CoinSelectionRandom, false, true,
 		)
 		require.NoError(t, err)
 		return tx
@@ -352,7 +353,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	}
 	tx1, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
-		CoinSelectionLargest, true,
+		CoinSelectionLargest, false, true,
 	)
 	require.NoError(t, err)
 
@@ -378,7 +379,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	tx2, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, &waddrmgr.KeyScopeBIP0086,
 		&waddrmgr.KeyScopeBIP0084, 0, 1, 1000, CoinSelectionLargest,
-		true,
+		false, true,
 	)
 	require.NoError(t, err)
 
@@ -398,4 +399,76 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 
 		require.Equal(t, scriptType, txscript.WitnessV0PubKeyHashTy)
 	}
+}
+
+// TestRBFSignalling tests that all tx inputs are set to signal
+// RBF when enabled.
+func TestRBFSignalling(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create an address we can use to send some coins to.
+	keyScope := waddrmgr.KeyScopeBIP0049Plus
+	addr, err := w.CurrentAddress(0, keyScope)
+	if err != nil {
+		t.Fatalf("unable to get current address: %v", addr)
+	}
+	p2shAddr, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("unable to convert wallet address to p2sh: %v", err)
+	}
+
+	// Add a set of utxos to the wallet.
+	incomingTx := &wire.MsgTx{
+		TxIn: []*wire.TxIn{
+			{},
+		},
+		TxOut: []*wire.TxOut{},
+	}
+	for amt := int64(5000); amt <= 125000; amt += 10000 {
+		incomingTx.AddTxOut(wire.NewTxOut(amt, p2shAddr))
+	}
+
+	addUtxo(t, w, incomingTx)
+
+	// Now tell the wallet to create a transaction paying to the specified
+	// outputs.
+	txOuts := []*wire.TxOut{
+		{
+			PkScript: p2shAddr,
+			Value:    50000,
+		},
+		{
+			PkScript: p2shAddr,
+			Value:    100000,
+		},
+	}
+
+	const (
+		feeSatPerKb   = 100000
+		maxIterations = 100
+	)
+
+	createTx := func(enableRBF bool) *txauthor.AuthoredTx {
+		tx, err := w.txToOutputs(
+			txOuts, nil, nil, 0, 1, feeSatPerKb,
+			CoinSelectionRandom, enableRBF, true,
+		)
+		require.NoError(t, err)
+		return tx
+	}
+
+	tx := createTx(true)
+	for _, in := range tx.Tx.TxIn {
+		require.Equal(t, uint32(mempool.MaxRBFSequence), in.Sequence,
+			"input sequence does not signal RBF")
+	}
+
+	tx = createTx(false)
+	for _, in := range tx.Tx.TxIn {
+		require.Equal(t, uint32(wire.MaxTxInSequenceNum), in.Sequence)
+	}
+
 }

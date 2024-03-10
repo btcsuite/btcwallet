@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -157,7 +158,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		}
 		inputSource := constantInputSource(credits)
 
-		// Build the TxCreateOption to retrieve the change scope.
+		// Build the TxCreateOption.
 		opts := defaultTxCreateOptions()
 		for _, optFunc := range optFuncs {
 			optFunc(opts)
@@ -194,6 +195,14 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			return 0, fmt.Errorf("could not add change address to "+
 				"database: %w", err)
 		}
+
+		if opts.enableRBF {
+			// Set tx input sequences to signal RBF
+			for _, in := range packet.UnsignedTx.TxIn {
+				in.Sequence = mempool.MaxRBFSequence
+			}
+		}
+
 	}
 
 	// If there is a change output, we need to copy it over to the PSBT now.

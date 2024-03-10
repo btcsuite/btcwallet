@@ -13,6 +13,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -112,7 +113,7 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	coinSelectKeyScope, changeKeyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
-	coinSelectionStrategy CoinSelectionStrategy, dryRun bool) (
+	coinSelectionStrategy CoinSelectionStrategy, enableRBF, dryRun bool) (
 	*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
@@ -174,6 +175,13 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		)
 		if err != nil {
 			return err
+		}
+
+		// Set all tx inputs to signal RBF if enabled
+		if enableRBF {
+			for _, in := range tx.Tx.TxIn {
+				in.Sequence = mempool.MaxRBFSequence
+			}
 		}
 
 		// Randomize change position, if change exists, before signing.
