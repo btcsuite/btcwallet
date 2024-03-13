@@ -505,9 +505,9 @@ func (m *mempool) getRawMempool() ([]*chainhash.Hash, error) {
 func (m *mempool) batchGetRawTxes(txids []*chainhash.Hash,
 	returnNew bool) ([]*wire.MsgTx, error) {
 
-	log.Debugf("Batching GetRawTransaction in %v batches...",
+	log.Tracef("Batching GetRawTransaction in %v batches...",
 		uint32(len(txids))/m.cfg.getRawTxBatchSize+1)
-	defer log.Debugf("Finished batch GetRawTransaction")
+	defer log.Tracef("Finished batch GetRawTransaction")
 
 	// txRecievers defines a map that has the txid as its key and the tx's
 	// response reciever as its value.
