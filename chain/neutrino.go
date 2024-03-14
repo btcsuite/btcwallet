@@ -220,7 +220,7 @@ func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) 
 	*chainhash.Hash, error) {
 	err := s.CS.SendTransaction(tx)
 	if err != nil {
-		return nil, err
+		return nil, rpcclient.MapRPCErr(err)
 	}
 	hash := tx.TxHash()
 	return &hash, nil

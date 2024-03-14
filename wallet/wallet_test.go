@@ -2,7 +2,6 @@ package wallet
 
 import (
 	"encoding/hex"
-	"errors"
 	"testing"
 	"time"
 
@@ -303,70 +302,6 @@ func TestGetTransaction(t *testing.T) {
 
 			// Check the block height.
 			require.Equal(t, test.expectedHeight, tx.Height)
-		})
-	}
-}
-
-// TestMatchBitcoindErr checks that `matchBitcoindErr` can correctly replace
-// the dashes with spaces and turn title cases into lowercases for a given
-// error and match it against the specified string pattern.
-func TestMatchBitcoindErr(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name        string
-		bitcoindErr error
-		matchStr    string
-		matched     bool
-	}{
-		{
-			name:        "error without dashes",
-			bitcoindErr: errors.New("missing input"),
-			matchStr:    "missing input",
-			matched:     true,
-		},
-		{
-			name:        "match str without dashes",
-			bitcoindErr: errors.New("missing-input"),
-			matchStr:    "missing input",
-			matched:     true,
-		},
-		{
-			name:        "error with dashes",
-			bitcoindErr: errors.New("missing-input"),
-			matchStr:    "missing input",
-			matched:     true,
-		},
-		{
-			name:        "match str with dashes",
-			bitcoindErr: errors.New("missing-input"),
-			matchStr:    "missing-input",
-			matched:     true,
-		},
-		{
-			name:        "error with title case and dash",
-			bitcoindErr: errors.New("Missing-Input"),
-			matchStr:    "missing input",
-			matched:     true,
-		},
-		{
-			name:        "match str with title case and dash",
-			bitcoindErr: errors.New("missing-input"),
-			matchStr:    "Missing-Input",
-			matched:     true,
-		},
-		{
-			name:        "unmatched error",
-			bitcoindErr: errors.New("missing input"),
-			matchStr:    "missingorspent",
-			matched:     false,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			matched := matchBitcoindErr(tc.bitcoindErr, tc.matchStr)
-			require.Equal(t, tc.matched, matched)
 		})
 	}
 }
