@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -23,6 +24,31 @@ var (
 	// to receive a notification for a specific item and the bitcoind client
 	// is in the middle of shutting down.
 	ErrBitcoindClientShuttingDown = errors.New("client is shutting down")
+)
+
+// TxConfStatus denotes the status of a transaction's lookup.
+type TxConfStatus uint8
+
+const (
+	// TxFoundMempool denotes that the transaction was found within the
+	// backend node's mempool.
+	TxFoundMempool TxConfStatus = iota
+
+	// TxFoundIndex denotes that the transaction was found within the
+	// backend node's txindex.
+	TxFoundIndex
+
+	// TxNotFoundIndex denotes that the transaction was not found within the
+	// backend node's txindex.
+	TxNotFoundIndex
+
+	// TxFoundManually denotes that the transaction was found within the
+	// chain by scanning for it manually.
+	TxFoundManually
+
+	// TxNotFoundManually denotes that the transaction was not found within
+	// the chain by scanning for it manually.
+	TxNotFoundManually
 )
 
 // BitcoindClient represents a persistent client connection to a bitcoind server
@@ -113,6 +139,129 @@ func (c *BitcoindClient) BackEnd() string {
 	return "bitcoind"
 }
 
+// String returns the string representation of the TxConfStatus.
+func (t TxConfStatus) String() string {
+	switch t {
+	case TxFoundMempool:
+		return "TxFoundMempool"
+
+	case TxFoundIndex:
+		return "TxFoundIndex"
+
+	case TxNotFoundIndex:
+		return "TxNotFoundIndex"
+
+	case TxFoundManually:
+		return "TxFoundManually"
+
+	case TxNotFoundManually:
+		return "TxNotFoundManually"
+
+	default:
+		return "unknown"
+	}
+}
+
+// FindTxInBlockRange looks for the mathcing txn over the requested block range
+// using the cb and returns the required txn details if cb isMatch()==true
+func (c *BitcoindClient) FindTxInBlockRange(startHeight, endHeight uint32,
+	isMatch func(tx *wire.MsgTx) bool) (uint32, uint32, *wire.MsgBlock,
+	TxConfStatus, error) {
+
+	// batchRequests will store the scan requests at every height to
+	// determine if the output was spent.
+	batchRequests := make(
+		map[uint32]rpcclient.FutureGetBlockHashResult, endHeight-startHeight,
+	)
+
+	for height := endHeight; height >= startHeight && height > 0; height-- {
+		batchRequests[height] = c.GetBlockHashAsync(int64(height))
+	}
+
+	// Sending the bulk request using updated batchClient.
+	err := c.SendAsyncQueue()
+	if err != nil {
+		return 0, 0, nil, TxNotFoundManually, err
+	}
+
+	blockHashes := make([]*chainhash.Hash, 0, len(batchRequests))
+	for height := endHeight; height >= startHeight && height > 0; height-- {
+		// Ensure we haven't been requested to shut down before
+		// processing the next height.
+		select {
+		case <-c.quit:
+			return 0, 0, nil, TxNotFoundManually,
+				errors.New("bitcoind client shutting down")
+		default:
+		}
+
+		// Receive the next block hash from the async queue.
+		blockHash, err := batchRequests[height].Receive()
+		if err != nil {
+			return 0, 0, nil, TxNotFoundManually,
+				fmt.Errorf("unable to retrieve hash for block "+
+					"with height %d: %v", height, err)
+		}
+
+		blockHashes = append(blockHashes, blockHash)
+	}
+	// Now we fetch blocks in interval of 15 to avoid out of memory
+	// errors in case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(batchRequests)
+	for i := 0; i < total; i += batchSize {
+		// Ensure we haven't been requested to shut down before
+		// processing next set of blocks.
+		select {
+		case <-c.quit:
+			return 0, 0, nil, TxNotFoundManually,
+				errors.New("bitcoind client shutting down")
+		default:
+		}
+
+		start := i
+		end := i + batchSize
+
+		if end > total {
+			end = total
+		}
+
+		blocks, err := c.GetBlocksBatch(blockHashes[start:end])
+
+		if err != nil {
+			return 0, 0, nil, TxNotFoundManually, err
+		}
+
+		// Note:- blockHashes are stored in reverse order
+		// currentHeight --> heightHint, so we maintain the same refs
+		// of currentHeight to return the correct BlockHeight.
+		height := int(endHeight) - start
+
+		for j := range blocks {
+			// For every transaction in the block, check which one
+			// matches our request. If we find one that does, we can
+			// dispatch its confirmation details.
+			for txIndex, tx := range blocks[j].Transactions {
+				if isMatch(tx) {
+					return uint32(height - j),
+						uint32(txIndex), blocks[j],
+						TxFoundManually, nil
+				}
+			}
+		}
+	}
+
+	// If we reach here, then we were not able to find the transaction
+	// within a block, so we avoid returning an error.
+	return 0, 0, nil, TxNotFoundManually, nil
+}
+
+// SendAsyncQueue sends a bulk request to the server and waits for the receive
+// call made by the client.
+func (c *BitcoindClient) SendAsyncQueue() error {
+	return c.chainConn.batchClient.Send()
+}
+
 // GetBestBlock returns the highest block known to bitcoind.
 func (c *BitcoindClient) GetBestBlock() (*chainhash.Hash, int32, error) {
 	bcinfo, err := c.chainConn.client.GetBlockChainInfo()
@@ -139,9 +288,34 @@ func (c *BitcoindClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
 	return header.Height, nil
 }
 
+// GetBlockAsync returns an instance of a type that can be used to get the
+// result of the RPC at some future time by invoking the Receive function on the
+// returned instance.
+func (c *BitcoindClient) GetBlockAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockResult {
+
+	return c.chainConn.batchClient.GetBlockAsync(hash)
+}
+
 // GetBlock returns a block from the hash.
 func (c *BitcoindClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 	return c.chainConn.GetBlock(hash)
+}
+
+// BitcoindConn.GetBlocksBatch() returns batchBlocks from batchHashes.
+func (c *BitcoindClient) GetBlocksBatch(
+	hashes []*chainhash.Hash) ([]*wire.MsgBlock, error) {
+
+	return c.chainConn.GetBlocksBatch(hashes)
+}
+
+// GetBlockVerboseAsync returns an instance of a type that can be used to get
+// the result of the RPC at some future time by invoking the Receive function on
+// the returned instance.
+func (c *BitcoindClient) GetBlockVerboseAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockVerboseResult {
+
+	return c.chainConn.batchClient.GetBlockVerboseAsync(hash)
 }
 
 // GetBlockVerbose returns a verbose block from the hash.
@@ -151,9 +325,27 @@ func (c *BitcoindClient) GetBlockVerbose(
 	return c.chainConn.client.GetBlockVerbose(hash)
 }
 
+// GetBestBlockHashAsync returns an instance of a type that can be used to get
+// the result of the RPC at some future time by invoking the Receive function on
+// the returned instance.
+func (c *BitcoindClient) GetBlockHashAsync(
+	height int64) rpcclient.FutureGetBlockHashResult {
+
+	return c.chainConn.batchClient.GetBlockHashAsync(height)
+}
+
 // GetBlockHash returns a block hash from the height.
 func (c *BitcoindClient) GetBlockHash(height int64) (*chainhash.Hash, error) {
 	return c.chainConn.client.GetBlockHash(height)
+}
+
+// GetBlockHeaderAsync returns an instance of a type that can be used to get the
+// result of the RPC at some future time by invoking the Receive function on the
+// returned instance.
+func (c *BitcoindClient) GetBlockHeaderAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockHeaderResult {
+
+	return c.chainConn.batchClient.GetBlockHeaderAsync(hash)
 }
 
 // GetBlockHeader returns a block header from the hash.
@@ -161,6 +353,17 @@ func (c *BitcoindClient) GetBlockHeader(
 	hash *chainhash.Hash) (*wire.BlockHeader, error) {
 
 	return c.chainConn.client.GetBlockHeader(hash)
+}
+
+// GetBlockHeaderVerboseAsync returns an instance of a type that can be used to
+// get the result of the RPC at some future time by invoking the Receive
+// function on the returned instance.
+//
+// See GetBlockHeader for the blocking version and more details.
+func (c *BitcoindClient) GetBlockHeaderVerboseAsync(
+	hash *chainhash.Hash) rpcclient.FutureGetBlockHeaderVerboseResult {
+
+	return c.chainConn.batchClient.GetBlockHeaderVerboseAsync(hash)
 }
 
 // GetBlockHeaderVerbose returns a block header from the hash.
@@ -459,6 +662,99 @@ func (c *BitcoindClient) RescanBlocks(
 			}
 
 			rescannedBlocks = append(rescannedBlocks, rescannedBlock)
+		}
+	}
+
+	return rescannedBlocks, nil
+}
+
+// RescanBlocksBatched rescans any blocks passed in batched manner using async
+// calls, returning only the blocks that matched as []btcjson.BlockDetails.
+func (c *BitcoindClient) RescanBlocksBatched(
+	blockHashes []chainhash.Hash) ([]btcjson.RescannedBlock, error) {
+
+	// requests slice will store rpcclient.FutureGetBlockHeaderVerboseResult
+	// for each blockHash index.
+	requests := make(
+		[]rpcclient.FutureGetBlockHeaderVerboseResult, 0, len(blockHashes),
+	)
+
+	for i := range blockHashes {
+		hash := blockHashes[i]
+		headerRequest := c.GetBlockHeaderVerboseAsync(&hash)
+		requests = append(requests, headerRequest)
+	}
+
+	err := c.SendAsyncQueue()
+	if err != nil {
+		return nil, fmt.Errorf("unable to send batchRequests to "+
+			"batchClient: %v", err)
+	}
+
+	blockHashPointers := make([]*chainhash.Hash, 0, len(blockHashes))
+	filteredHeaders := make(
+		map[chainhash.Hash]*btcjson.GetBlockHeaderVerboseResult, len(requests),
+	)
+
+	for i := range blockHashes {
+		hash := blockHashes[i]
+		header, err := requests[i].Receive()
+		if err != nil {
+			return nil, fmt.Errorf("Unable to get header %s from "+
+				"bitcoind: %s", hash, err)
+		}
+
+		// Prevent fetching the block completely if we know we shouldn't
+		// filter it.
+		if !c.shouldFilterBlock(time.Unix(header.Time, 0)) {
+			continue
+		}
+		filteredHeaders[hash] = header
+		blockHashPointers = append(blockHashPointers, &hash)
+	}
+
+	rescannedBlocks := make([]btcjson.RescannedBlock, 0, len(filteredHeaders))
+
+	// Now we fetch blocks in interval of 15 to avoid out of memory errors in
+	// case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(blockHashPointers)
+
+	for i := 0; i < total; i += batchSize {
+		start := i
+		end := i + batchSize
+		if end > total {
+			end = total
+		}
+
+		blocks, err := c.chainConn.GetBlocksBatch(
+			blockHashPointers[start:end],
+		)
+		if err != nil {
+			return nil, err
+		}
+		batchedBlockHashPointers := blockHashPointers[start:end]
+		for j := range batchedBlockHashPointers {
+			hash := batchedBlockHashPointers[j]
+			relevantTxs := c.filterBlock(
+				blocks[j], filteredHeaders[*hash].Height, false,
+			)
+			if len(relevantTxs) > 0 {
+				rescannedBlock := btcjson.RescannedBlock{
+					Hash:         hash.String(),
+					Transactions: make([]string, 0),
+				}
+				for _, tx := range relevantTxs {
+					rescannedBlock.Transactions = append(
+						rescannedBlock.Transactions,
+						hex.EncodeToString(tx.SerializedTx),
+					)
+				}
+
+				rescannedBlocks = append(
+					rescannedBlocks, rescannedBlock,
+				)
+			}
 		}
 	}
 
@@ -1012,6 +1308,144 @@ func (c *BitcoindClient) FilterBlocks(
 
 	// No addresses were found for this range.
 	return nil, nil
+}
+
+// FilterBlocksBatched scans the blocks in batched manner using async calls
+// contained in the FilterBlocksRequest for any addresses of interest returning
+// a FilterBlocksResponse for the first block containing a matching address.
+// If no matches are found in the range of blocks requested, the returned
+// response will be nil.
+func (c *BitcoindClient) FilterBlocksBatched(
+	req *FilterBlocksRequest) (*FilterBlocksResponse, error) {
+
+	blockFilterer := NewBlockFilterer(c.chainConn.cfg.ChainParams, req)
+
+	blockHashes := make([]*chainhash.Hash, 0, len(req.Blocks))
+	for i := range req.Blocks {
+		blockHashes = append(blockHashes, &req.Blocks[i].Hash)
+	}
+
+	// Now we fetch blocks in interval of 15 to avoid out of memory errors
+	// in case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(blockHashes)
+	for i := 0; i < total; i += batchSize {
+		start := i
+		end := i + batchSize
+		if end > total {
+			end = total
+		}
+
+		rawBlocks, err := c.chainConn.GetBlocksBatch(
+			blockHashes[start:end],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		// Iterate over the requested blocks, fetching each from the rpc
+		// client. Each block will scanned using the reverse addresses
+		// indexes generated above, breaking out early if any addresses
+		// are found.
+		for j := range rawBlocks {
+			if !blockFilterer.FilterBlock(rawBlocks[j]) {
+				continue
+			}
+
+			// If any external or internal addresses were detected
+			// in this block, we return them to the caller so that
+			// the rescan windows can widened with subsequent addresses.
+			// The `BatchIndex` is returned so that the caller can
+			// compute the *next* block from which to begin again.
+			resp := &FilterBlocksResponse{
+				BatchIndex:         uint32(start + j),
+				BlockMeta:          req.Blocks[start+j],
+				FoundExternalAddrs: blockFilterer.FoundExternal,
+				FoundInternalAddrs: blockFilterer.FoundInternal,
+				FoundOutPoints:     blockFilterer.FoundOutPoints,
+				RelevantTxns:       blockFilterer.RelevantTxns,
+			}
+
+			return resp, nil
+		}
+	}
+
+	// No addresses were found for this range.
+	return nil, nil
+}
+
+func (c *BitcoindClient) ForEachTxOfBlockRange(startHeight, endHeight uint32,
+	inspectTx func(absoluteHeight int, block *wire.MsgBlock,
+		txIndex int, tx *wire.MsgTx) bool) (TxConfStatus,
+	error) {
+
+	// batchRequests will store the scan requests at every height to
+	// determine if the output was spent.
+	batchRequests := make(
+		map[uint32]rpcclient.FutureGetBlockHashResult, endHeight-startHeight,
+	)
+
+	for height := endHeight; height >= startHeight && height > 0; height-- {
+		batchRequests[height] = c.GetBlockHashAsync(int64(height))
+	}
+
+	// Sending the bulk request using updated batchClient.
+	err := c.SendAsyncQueue()
+	if err != nil {
+		return TxNotFoundManually, err
+	}
+
+	blockHashes := make([]*chainhash.Hash, 0, len(batchRequests))
+
+	// Now we fetch blocks in interval of 15 to avoid out of memory
+	// errors in case of fetching too many blocks with GetBlocksBatch().
+	const batchSize = 15
+	total := len(blockHashes)
+
+	for i := 0; i < total; i += batchSize {
+		// Ensure we haven't been requested to shut down before
+		// processing next set of blocks.
+		select {
+		case <-c.quit:
+			return TxNotFoundManually,
+				errors.New("bitcoind client shutting down")
+		default:
+		}
+
+		start := i
+		end := i + batchSize
+
+		if end > total {
+			end = total
+		}
+
+		blocks, err := c.GetBlocksBatch(blockHashes[start:end])
+
+		if err != nil {
+			return TxNotFoundManually, err
+		}
+
+		// Note:- blockHashes are stored in reverse order
+		// currentHeight --> heightHint, so we maintain the same refs
+		// of currentHeight to return the correct BlockHeight.
+		height := int(endHeight) - start
+
+		for j := range blocks {
+			// For every transaction in the block, check which one
+			// matches our request. If we find one that does, we can
+			// dispatch its confirmation details.
+			for txIndex, tx := range blocks[j].Transactions {
+				abort := inspectTx(height, blocks[j], txIndex, tx)
+				if abort {
+					return TxFoundManually, nil
+				}
+			}
+		}
+	}
+
+	// If we reach here, then we were not able to find the transaction
+	// within a block, so we avoid returning an error.
+	return TxNotFoundManually, nil
 }
 
 // rescan performs a rescan of the chain using a bitcoind backend, from the
