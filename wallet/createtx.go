@@ -56,6 +56,33 @@ func makeInputSource(eligible []Coin) txauthor.InputSource {
 	}
 }
 
+// constantInputSource creates an input source function that always returns the
+// static set of user-selected UTXOs.
+func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+	// Current inputs and their total value. These won't change over
+	// different invocations as we want our inputs to remain static since
+	// they're selected by the user.
+	currentTotal := btcutil.Amount(0)
+	currentInputs := make([]*wire.TxIn, 0, len(eligible))
+	currentScripts := make([][]byte, 0, len(eligible))
+	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
+
+	for _, credit := range eligible {
+		nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
+		currentTotal += credit.Amount
+		currentInputs = append(currentInputs, nextInput)
+		currentScripts = append(currentScripts, credit.PkScript)
+		currentInputValues = append(currentInputValues, credit.Amount)
+	}
+
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		return currentTotal, currentInputs, currentInputValues,
+			currentScripts, nil
+	}
+}
+
 // secretSource is an implementation of txauthor.SecretSource for the wallet's
 // address manager.
 type secretSource struct {
@@ -112,8 +139,8 @@ func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
 func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	coinSelectKeyScope, changeKeyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
-	coinSelectionStrategy CoinSelectionStrategy, dryRun bool) (
-	*txauthor.AuthoredTx, error) {
+	strategy CoinSelectionStrategy, dryRun bool,
+	selectedUtxos []wire.OutPoint) (*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -127,8 +154,8 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	}
 
 	// Fall back to default coin selection strategy if none is supplied.
-	if coinSelectionStrategy == nil {
-		coinSelectionStrategy = CoinSelectionLargest
+	if strategy == nil {
+		strategy = CoinSelectionLargest
 	}
 
 	var tx *txauthor.AuthoredTx
@@ -147,27 +174,57 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 			return err
 		}
 
-		// Wrap our coins in a type that implements the SelectableCoin
-		// interface, so we can arrange them according to the selected
-		// coin selection strategy.
-		wrappedEligible := make([]Coin, len(eligible))
-		for i := range eligible {
-			wrappedEligible[i] = Coin{
-				TxOut: wire.TxOut{
-					Value:    int64(eligible[i].Amount),
-					PkScript: eligible[i].PkScript,
-				},
-				OutPoint: eligible[i].OutPoint,
-			}
-		}
-		arrangedCoins, err := coinSelectionStrategy.ArrangeCoins(
-			wrappedEligible, feeSatPerKb,
-		)
-		if err != nil {
-			return err
-		}
+		var inputSource txauthor.InputSource
+		if len(selectedUtxos) > 0 {
+			eligibleByOutpoint := make(
+				map[wire.OutPoint]wtxmgr.Credit,
+			)
 
-		inputSource := makeInputSource(arrangedCoins)
+			for _, e := range eligible {
+				eligibleByOutpoint[e.OutPoint] = e
+			}
+
+			var eligibleSelectedUtxo []wtxmgr.Credit
+			for _, outpoint := range selectedUtxos {
+				e, ok := eligibleByOutpoint[outpoint]
+
+				if !ok {
+					return fmt.Errorf("selected outpoint "+
+						"not eligible for "+
+						"spending: %v", outpoint)
+				}
+				eligibleSelectedUtxo = append(
+					eligibleSelectedUtxo, e,
+				)
+			}
+
+			inputSource = constantInputSource(eligibleSelectedUtxo)
+
+		} else {
+			// Wrap our coins in a type that implements the
+			// SelectableCoin interface, so we can arrange them
+			// according to the selected coin selection strategy.
+			wrappedEligible := make([]Coin, len(eligible))
+			for i := range eligible {
+				wrappedEligible[i] = Coin{
+					TxOut: wire.TxOut{
+						Value: int64(
+							eligible[i].Amount,
+						),
+						PkScript: eligible[i].PkScript,
+					},
+					OutPoint: eligible[i].OutPoint,
+				}
+			}
+
+			arrangedCoins, err := strategy.ArrangeCoins(
+				wrappedEligible, feeSatPerKb,
+			)
+			if err != nil {
+				return err
+			}
+			inputSource = makeInputSource(arrangedCoins)
+		}
 
 		tx, err = txauthor.NewUnsignedTransaction(
 			outputs, feeSatPerKb, inputSource, changeSource,
