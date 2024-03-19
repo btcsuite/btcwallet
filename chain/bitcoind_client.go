@@ -59,10 +59,11 @@ type BitcoindClient struct {
 	// watchedAddresses, watchedOutPoints, and watchedTxs are the set of
 	// items we should match transactions against while processing a chain
 	// rescan to determine if they are relevant to the client.
-	watchMtx         sync.RWMutex
-	watchedAddresses map[string]struct{}
-	watchedOutPoints map[wire.OutPoint]struct{}
-	watchedTxs       map[chainhash.Hash]struct{}
+	watchMtx             sync.RWMutex
+	watchedAddresses     map[string]struct{}
+	watchedOutPoints     map[wire.OutPoint]struct{}
+	watchedTxs           map[chainhash.Hash]struct{}
+	watchedRelatedInputs map[wire.OutPoint]struct{}
 
 	// mempool keeps track of all relevant transactions that have yet to be
 	// confirmed. This is used to shortcut the filtering process of a
@@ -583,6 +584,7 @@ func (c *BitcoindClient) rescanHandler() {
 				c.watchedOutPoints = make(map[wire.OutPoint]struct{})
 				c.watchedAddresses = make(map[string]struct{})
 				c.watchedTxs = make(map[chainhash.Hash]struct{})
+				c.watchedRelatedInputs = make(map[wire.OutPoint]struct{})
 				c.watchMtx.Unlock()
 
 			// We're adding the addresses to our filter.
@@ -1349,6 +1351,19 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 			isRelevant = true
 			break
 		}
+
+		// A confirmed tx whose inputs are registered as related becomes
+		// relevant once so we remove it from the watch.
+		if blockDetails != nil {
+			op := txIn.PreviousOutPoint
+
+			if _, ok := c.watchedRelatedInputs[op]; ok {
+				delete(c.watchedRelatedInputs, op)
+
+				isRelevant = true
+				break
+			}
+		}
 	}
 
 	// We'll also cycle through its outputs to determine if it pays to
@@ -1371,6 +1386,14 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 					Index: uint32(i),
 				}
 				c.watchedOutPoints[op] = struct{}{}
+
+				// Track related inputs is used to track double-spends and these can
+				// only happen when tx is on the mempool.
+				if blockDetails == nil {
+					for _, txIn := range tx.TxIn {
+						c.watchedRelatedInputs[txIn.PreviousOutPoint] = struct{}{}
+					}
+				}
 			}
 		}
 	}
