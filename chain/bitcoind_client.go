@@ -3,6 +3,7 @@ package chain
 import (
 	"container/list"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/gcs"
+	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -966,6 +969,74 @@ func (c *BitcoindClient) reorg(currentBlock waddrmgr.BlockStamp,
 	return nil
 }
 
+// blockFilterReq is a request to fetch a neutrino filter for a block from the
+// target bitocind node.
+type blockFilterReq struct {
+	BlockHash  string `json:"blockhash"`
+	FilterType string `json:"filtertype"`
+}
+
+// blockFilterResp is a response containing a neutrino filter for a block from
+// bitcond node.
+type blockFilterResp struct {
+	Filter       string `json:"filter"`
+	FilterHeader string `json:"header"`
+}
+
+const (
+	// bitcoindFilterRPC is the name of the RPC used to fetch a block
+	// filter from bitcoind.
+	bitcoindFilterRPC = "getblockfilter"
+
+	// bitcoindFilterType is the type of filter to fetch from bitcoind.
+	bitcoindFilterType = "basic"
+)
+
+// fetchBlockFilter fetches the GCS filter for a block from the remote node.
+func (c *BitcoindClient) fetchBlockFilter(blkHash chainhash.Hash,
+) (*gcs.Filter, error) {
+
+	filterReq := blockFilterReq{
+		BlockHash:  blkHash.String(),
+		FilterType: bitcoindFilterType,
+	}
+	jsonFilterReq, err := json.Marshal(filterReq)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.chainConn.client.RawRequest(
+		bitcoindFilterRPC, []json.RawMessage{jsonFilterReq},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var filterResp blockFilterResp
+	if err := json.Unmarshal(resp, &filterResp); err != nil {
+		return nil, err
+	}
+
+	rawFilter, err := hex.DecodeString(filterResp.Filter)
+	if err != nil {
+		return nil, err
+	}
+
+	filter, err := gcs.FromNBytes(
+		builder.DefaultP, builder.DefaultM, rawFilter,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Skip any empty filters.
+	if filter.N() == 0 {
+		return nil, nil
+	}
+
+	return filter, nil
+}
+
 // FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
 // addresses of interest. Each block will be fetched and filtered sequentially,
 // returning a FilterBlocksReponse for the first block containing a matching
@@ -978,12 +1049,50 @@ func (c *BitcoindClient) FilterBlocks(
 
 	blockFilterer := NewBlockFilterer(c.chainConn.cfg.ChainParams, req)
 
-	// Iterate over the requested blocks, fetching each from the rpc client.
-	// Each block will scanned using the reverse addresses indexes generated
-	// above, breaking out early if any addresses are found.
+	// Construct the watchlist using the addresses and outpoints contained
+	// in the filter blocks request.
+	watchList, err := buildFilterBlocksWatchList(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Iterate over the requested blocks, fetching each from the rpc
+	// client.  Each block will scanned using the reverse addresses indexes
+	// generated above, breaking out early if any addresses are found.
 	for i, block := range req.Blocks {
-		// TODO(conner): add prefetching, since we already know we'll be
-		// fetching *every* block
+		var shouldFetchBlock bool
+
+		switch {
+		// If we don't have filters, then we always need to fetch the
+		// block.
+		case !c.chainConn.hasNeutrinoFilters:
+			shouldFetchBlock = true
+
+		// If we have the filters, then we'll actually query the
+		// bitcoind node.
+		default:
+			shouldFetchBlock, err = maybeShouldFetchBlock(
+				c.fetchBlockFilter, block, watchList,
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// If the filter concluded that there're no matches in this
+		// block, then we don't need to fetch it, as there're no false
+		// negatives.
+		if !shouldFetchBlock {
+			log.Infof("Skipping block height=%d hash=%v, no "+
+				"filter match", block.Height, block.Hash)
+			continue
+		}
+
+		log.Infof("Fetching block height=%d hash=%v",
+			block.Height, block.Hash)
+
+		// TODO(conner): add prefetching, since we already know we'll
+		// be fetching *every* block
 		rawBlock, err := c.GetBlock(&block.Hash)
 		if err != nil {
 			return nil, err

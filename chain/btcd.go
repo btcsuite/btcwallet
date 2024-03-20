@@ -306,6 +306,65 @@ func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	}
 }
 
+// fetchBlockFilter fetches the GCS filter for a block from the remote node.
+func (c *RPCClient) fetchBlockFilter(blkHash chainhash.Hash,
+) (*gcs.Filter, error) {
+
+	rawFilter, err := c.GetCFilter(&blkHash, wire.GCSFilterRegular)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure the filter is large enough to be deserialized.
+	if len(rawFilter.Data) < 4 {
+		return nil, nil
+	}
+
+	filter, err := gcs.FromNBytes(
+		builder.DefaultP, builder.DefaultM, rawFilter.Data,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Skip any empty filters.
+	if filter.N() == 0 {
+		return nil, nil
+	}
+
+	return filter, nil
+}
+
+// blockFilterFetcher is a function that fetches a block filter for a given
+// block hash. A nil filter is returned if a valid filter doesn't exist for a
+// given block.
+type blockFilterFetcher func(blkHash chainhash.Hash) (*gcs.Filter, error)
+
+// maybeShouldFetchBlock returns true if the contents of a block *might* have
+// some items that match our watch list. This uses the neutrino filters to do a
+// quick loop up to see if the block has relevant items to avoid downloading
+// the full block.
+func maybeShouldFetchBlock(blockFilterFetcher blockFilterFetcher,
+	blk wtxmgr.BlockMeta, watchList [][]byte) (bool, error) {
+
+	filter, err := blockFilterFetcher(blk.Hash)
+	if err != nil {
+		return false, err
+	}
+
+	if filter == nil {
+		return false, nil
+	}
+
+	key := builder.DeriveKey(&blk.Hash)
+	matched, err := filter.MatchAny(key, watchList)
+	if err != nil {
+		return false, err
+	}
+
+	return matched, nil
+}
+
 // FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
 // addresses of interest. For each requested block, the corresponding compact
 // filter will first be checked for matches, skipping those that do not report
@@ -330,33 +389,19 @@ func (c *RPCClient) FilterBlocks(
 	// the filter returns a positive match, the full block is then requested
 	// and scanned for addresses using the block filterer.
 	for i, blk := range req.Blocks {
-		rawFilter, err := c.GetCFilter(&blk.Hash, wire.GCSFilterRegular)
-		if err != nil {
-			return nil, err
-		}
-
-		// Ensure the filter is large enough to be deserialized.
-		if len(rawFilter.Data) < 4 {
-			continue
-		}
-
-		filter, err := gcs.FromNBytes(
-			builder.DefaultP, builder.DefaultM, rawFilter.Data,
+		shouldFetchBlock, err := maybeShouldFetchBlock(
+			c.fetchBlockFilter, blk, watchList,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		// Skip any empty filters.
-		if filter.N() == 0 {
-			continue
-		}
-
-		key := builder.DeriveKey(&blk.Hash)
-		matched, err := filter.MatchAny(key, watchList)
-		if err != nil {
-			return nil, err
-		} else if !matched {
+		// If the filter concluded that there're no matches in this
+		// block, then we don't need to fetch it, as there're no false
+		// negatives.
+		if !shouldFetchBlock {
+			log.Infof("Skipping block height=%d hash=%v, no "+
+				"filter match", blk.Height, blk.Hash)
 			continue
 		}
 
