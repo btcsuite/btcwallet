@@ -3,9 +3,10 @@ PKG := github.com/btcsuite/btcwallet
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOACC_PKG := github.com/ory/go-acc
 GOIMPORTS_PKG := golang.org/x/tools/cmd/goimports
+TOOLS_DIR := tools
 
+GOPATH := $(shell go env GOPATH)
 GO_BIN := ${GOPATH}/bin
-LINT_BIN := $(GO_BIN)/golangci-lint
 GOACC_BIN := $(GO_BIN)/go-acc
 
 LINT_COMMIT := v1.46.0
@@ -31,7 +32,10 @@ ifneq ($(workers),)
 LINT_WORKERS = --concurrency=$(workers)
 endif
 
-LINT = $(LINT_BIN) run -v $(LINT_WORKERS)
+DOCKER_TOOLS = docker run \
+  -v $(shell bash -c "go env GOCACHE || (mkdir -p /tmp/go-cache; echo /tmp/go-cache)"):/tmp/build/.cache \
+  -v $(shell bash -c "go env GOMODCACHE || (mkdir -p /tmp/go-modcache; echo /tmp/go-modcache)"):/tmp/build/.modcache \
+  -v $$(pwd):/build btcwallet-tools
 
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
@@ -104,6 +108,10 @@ unit-race:
 # UTILITIES
 # =========
 
+docker-tools:
+	@$(call print, "Building tools docker image.")
+	docker build -q -t btcwallet-tools $(TOOLS_DIR)
+
 #? fmt: Fix imports and formatting source
 fmt: goimports
 	@$(call print, "Fixing imports.")
@@ -112,9 +120,9 @@ fmt: goimports
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
 #? lint: Lint source
-lint: $(LINT_BIN)
+lint: docker-tools
 	@$(call print, "Linting source.")
-	$(LINT)
+	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
 
 #? clean: Clean source
 clean:
