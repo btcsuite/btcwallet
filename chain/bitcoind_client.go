@@ -227,6 +227,14 @@ func (c *BitcoindClient) TestMempoolAccept(txns []*wire.MsgTx,
 	return c.chainConn.client.TestMempoolAccept(txns, maxFeeRate)
 }
 
+// GetMempoolEntry returns ...
+// NOTE: This is part of the chain.Interface interface.
+func (c *BitcoindClient) GetMempoolEntry(txHash string) (
+	*btcjson.GetMempoolEntryResult, error) {
+
+	return c.chainConn.client.GetMempoolEntry(txHash)
+}
+
 // Notifications returns a channel to retrieve notifications from.
 //
 // NOTE: This is part of the chain.Interface interface.

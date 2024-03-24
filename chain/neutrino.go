@@ -236,6 +236,14 @@ func (s *NeutrinoClient) TestMempoolAccept(txns []*wire.MsgTx,
 	return nil, ErrUnimplemented
 }
 
+// GetMempoolEntry returns ...
+// NOTE: This is part of the chain.Interface interface.
+func (s *NeutrinoClient) GetMempoolEntry(txHash string) (
+	*btcjson.GetMempoolEntryResult, error) {
+
+	return nil, ErrUnimplemented
+}
+
 // FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
 // addresses of interest. For each requested block, the corresponding compact
 // filter will first be checked for matches, skipping those that do not report
