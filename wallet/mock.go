@@ -94,3 +94,11 @@ func (m *mockChainClient) TestMempoolAccept(txns []*wire.MsgTx,
 
 	return nil, nil
 }
+
+// GetMempoolEntry returns ...
+// NOTE: This is part of the chain.Interface interface.
+func (m *mockChainClient) GetMempoolEntry(txHash string) (
+	*btcjson.GetMempoolEntryResult, error) {
+
+	return nil, nil
+}
