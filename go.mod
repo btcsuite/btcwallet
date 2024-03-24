@@ -52,3 +52,5 @@ require (
 )
 
 go 1.18
+
+replace github.com/btcsuite/btcd v0.24.1-0.20240318151728-2fc99e0496d2 => github.com/ziggie1984/btcd v0.23.5-0.20240324162431-8a36bb76a43d
