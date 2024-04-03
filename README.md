@@ -163,6 +163,22 @@ $ cp $GOPATH/src/github.com/btcsuite/btcwallet/sample-btcwallet.conf ~/.btcwalle
 $ $EDITOR ~/.btcd/btcd.conf
 $ $EDITOR ~/.btcwallet/btcwallet.conf
 ```
+- Run the following command to  unlock wallet :
+```
+./btcctl --wallet -u test -P "test" --testnet -s btcd-wallet walletpassphrase --skipverify passwd 30
+
+```
+
+- Run the following command to  create  account :
+```
+./btcctl --wallet -u test -P "test" --testnet -s btcd-wallet createnewaccount abc
+```
+
+- Run the following command to  list  account :
+```
+./btcctl --wallet -u test -P "test" --testnet -s btcd-wallet listaccounts
+
+```
 
 ## Issue Tracker
 
