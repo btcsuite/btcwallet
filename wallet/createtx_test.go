@@ -28,6 +28,8 @@ var (
 			"02a4",
 	)
 	testBlockHeight int32 = 276425
+
+	alwaysAllowUtxo = func(utxo wtxmgr.Credit) bool { return true }
 )
 
 // TestTxToOutput checks that no new address is added to he database if we
@@ -79,7 +81,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	// database us not inflated.
 	dryRunTx, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
-		nil,
+		nil, alwaysAllowUtxo,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -97,7 +99,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 
 	dryRunTx2, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
-		nil,
+		nil, alwaysAllowUtxo,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -133,7 +135,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	// to the database.
 	tx, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, false,
-		nil,
+		nil, alwaysAllowUtxo,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -283,7 +285,7 @@ func TestTxToOutputsRandom(t *testing.T) {
 	createTx := func() *txauthor.AuthoredTx {
 		tx, err := w.txToOutputs(
 			txOuts, nil, nil, 0, 1, feeSatPerKb,
-			CoinSelectionRandom, true, nil,
+			CoinSelectionRandom, true, nil, alwaysAllowUtxo,
 		)
 		require.NoError(t, err)
 		return tx
@@ -355,7 +357,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	}
 	tx1, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
-		CoinSelectionLargest, true, nil,
+		CoinSelectionLargest, true, nil, alwaysAllowUtxo,
 	)
 	require.NoError(t, err)
 
@@ -381,7 +383,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	tx2, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, &waddrmgr.KeyScopeBIP0086,
 		&waddrmgr.KeyScopeBIP0084, 0, 1, 1000, CoinSelectionLargest,
-		true, nil,
+		true, nil, alwaysAllowUtxo,
 	)
 	require.NoError(t, err)
 
@@ -465,7 +467,7 @@ func TestSelectUtxosTxoToOutpoint(t *testing.T) {
 	}
 	tx1, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
-		CoinSelectionLargest, true, selectUtxos,
+		CoinSelectionLargest, true, selectUtxos, alwaysAllowUtxo,
 	)
 	require.NoError(t, err)
 
