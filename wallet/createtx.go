@@ -140,7 +140,9 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	coinSelectKeyScope, changeKeyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
 	strategy CoinSelectionStrategy, dryRun bool,
-	selectedUtxos []wire.OutPoint) (*txauthor.AuthoredTx, error) {
+	selectedUtxos []wire.OutPoint,
+	allowUtxo func(utxo wtxmgr.Credit) bool) (
+	*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -168,7 +170,8 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		}
 
 		eligible, err := w.findEligibleOutputs(
-			dbtx, coinSelectKeyScope, account, minconf, bs,
+			dbtx, coinSelectKeyScope, account, minconf,
+			bs, allowUtxo,
 		)
 		if err != nil {
 			return err
@@ -322,7 +325,8 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 	keyScope *waddrmgr.KeyScope, account uint32, minconf int32,
-	bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
+	bs *waddrmgr.BlockStamp,
+	allowUtxo func(utxo wtxmgr.Credit) bool) ([]wtxmgr.Credit, error) {
 
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
@@ -340,6 +344,13 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 	eligible := make([]wtxmgr.Credit, 0, len(unspent))
 	for i := range unspent {
 		output := &unspent[i]
+
+		// Restrict the selected utxos if a filter function is provided.
+		if allowUtxo != nil &&
+			!allowUtxo(*output) {
+
+			continue
+		}
 
 		// Only include this output if it meets the required number of
 		// confirmations. Coinbase transactions must have reached

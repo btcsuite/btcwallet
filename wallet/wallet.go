@@ -1201,6 +1201,7 @@ type (
 		dryRun                bool
 		resp                  chan createTxResponse
 		selectUtxos           []wire.OutPoint
+		allowUtxo             func(wtxmgr.Credit) bool
 	}
 	createTxResponse struct {
 		tx  *txauthor.AuthoredTx
@@ -1239,9 +1240,10 @@ out:
 			}
 
 			tx, err := w.txToOutputs(
-				txr.outputs, txr.coinSelectKeyScope, txr.changeKeyScope,
-				txr.account, txr.minconf, txr.feeSatPerKB,
-				txr.coinSelectionStrategy, txr.dryRun, txr.selectUtxos,
+				txr.outputs, txr.coinSelectKeyScope,
+				txr.changeKeyScope, txr.account, txr.minconf,
+				txr.feeSatPerKB, txr.coinSelectionStrategy,
+				txr.dryRun, txr.selectUtxos, txr.allowUtxo,
 			)
 
 			release()
@@ -1259,6 +1261,7 @@ out:
 type txCreateOptions struct {
 	changeKeyScope *waddrmgr.KeyScope
 	selectUtxos    []wire.OutPoint
+	allowUtxo      func(wtxmgr.Credit) bool
 }
 
 // TxCreateOption is a set of optional arguments to modify the tx creation
@@ -1286,6 +1289,15 @@ func WithCustomChangeScope(changeScope *waddrmgr.KeyScope) TxCreateOption {
 func WithCustomSelectUtxos(utxos []wire.OutPoint) TxCreateOption {
 	return func(opts *txCreateOptions) {
 		opts.selectUtxos = utxos
+	}
+}
+
+// WithUtxoFilter is used to restrict the selection of the internal wallet
+// inputs by further external conditions. Utxos which pass the filter are
+// considered when creating the transaction.
+func WithUtxoFilter(allowUtxo func(utxo wtxmgr.Credit) bool) TxCreateOption {
+	return func(opts *txCreateOptions) {
+		opts.allowUtxo = allowUtxo
 	}
 }
 
@@ -1333,6 +1345,7 @@ func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 		dryRun:                dryRun,
 		resp:                  make(chan createTxResponse),
 		selectUtxos:           opts.selectUtxos,
+		allowUtxo:             opts.allowUtxo,
 	}
 	w.createTxRequests <- req
 	resp := <-req.resp
