@@ -84,7 +84,7 @@ however, only be run when API changes are performed (not with `go generate
 
 ## Step 3: Implement the API change in the RPC server
 
-After the Go code for the API has been regenated, the necessary changes can be
+After the Go code for the API has been regenerated, the necessary changes can be
 implemented in the [`rpcserver`](../rpcserver/) package.
 
 ## Additional Resources
