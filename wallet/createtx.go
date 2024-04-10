@@ -8,10 +8,10 @@ package wallet
 import (
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"math/rand"
 	"sort"
 
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -274,7 +274,10 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 			return err
 		}
 		if !watchOnly {
-			err = tx.AddAllInputScripts(
+
+			keys := getTaprootPubKeys(tx, w)
+			// TODO(dp) we need to be able to process all scopes at once
+			err = tx.AddAllInputScripts(w.FrostSigner, keys,
 				secretSource{w.Manager, addrmgrNs},
 			)
 			if err != nil {
@@ -321,6 +324,28 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	}
 
 	return tx, nil
+}
+
+func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*btcec.PublicKey {
+	keys := make(map[string]*btcec.PublicKey)
+	for i := range tx.Tx.TxIn {
+		pkScript := tx.PrevScripts[i]
+
+		if txscript.IsPayToTaproot(pkScript) {
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, w.chainParams)
+			if err != nil {
+				continue
+			}
+
+			for _, addr := range addrs {
+				pubKey, err := w.PubKeyForAddress(addr)
+				if err != nil {
+					keys[addr.String()] = pubKey
+				}
+			}
+		}
+	}
+	return keys
 }
 
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,

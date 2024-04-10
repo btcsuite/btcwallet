@@ -10,13 +10,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -33,6 +33,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/stroomnetwork/frost"
 )
 
 const (
@@ -125,9 +126,10 @@ type Wallet struct {
 	publicPassphrase []byte
 
 	// Data stores
-	db      walletdb.DB
-	Manager *waddrmgr.Manager
-	TxStore *wtxmgr.Store
+	db          walletdb.DB
+	Manager     *waddrmgr.Manager
+	TxStore     *wtxmgr.Store
+	FrostSigner *frost.Signer
 
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex
