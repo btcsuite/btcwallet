@@ -273,7 +273,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		if err != nil {
 			return err
 		}
-		if !watchOnly {
+		if !watchOnly || containsTaprootInput(tx) {
 
 			keys := getTaprootPubKeys(tx, w)
 			// TODO(dp) we need to be able to process all scopes at once
@@ -326,6 +326,16 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	return tx, nil
 }
 
+func containsTaprootInput(tx *txauthor.AuthoredTx) bool {
+	for i := range tx.PrevScripts {
+		if txscript.IsPayToTaproot(tx.PrevScripts[i]) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*btcec.PublicKey {
 	keys := make(map[string]*btcec.PublicKey)
 	for i := range tx.Tx.TxIn {
@@ -339,7 +349,7 @@ func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*btcec.Pub
 
 			for _, addr := range addrs {
 				pubKey, err := w.PubKeyForAddress(addr)
-				if err != nil {
+				if err == nil {
 					keys[addr.String()] = pubKey
 				}
 			}
