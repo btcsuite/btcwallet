@@ -129,7 +129,7 @@ type Wallet struct {
 	db          walletdb.DB
 	Manager     *waddrmgr.Manager
 	TxStore     *wtxmgr.Store
-	FrostSigner *frost.Signer
+	FrostSigner frost.ISigner
 
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex

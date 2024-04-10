@@ -5,12 +5,12 @@
 package main
 
 import (
+	"github.com/stroomnetwork/frost"
 	"net"
 	"net/http"
 	_ "net/http/pprof" // nolint:gosec
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 
 	"github.com/btcsuite/btcwallet/chain"
@@ -24,27 +24,38 @@ var (
 	cfg *config
 )
 
-func main() {
+/*func main() {
 	// Use all processor cores.
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	// Work around defer not working after os.Exit.
-	if err := walletMain(); err != nil {
+	if err := StartWallet(nil); err != nil {
 		os.Exit(1)
 	}
-}
+}*/
 
-// walletMain is a work-around main function that is required since deferred
+// StartWallet is a work-around main function that is required since deferred
 // functions (such as log flushing) are not called with calls to os.Exit.
 // Instead, main runs this function and checks for a non-nil error, at which
 // point any defers have already run, and if the error is non-nil, the program
 // can be exited with an error exit status.
-func walletMain() error {
+func StartWallet(signer frost.ISigner) error {
+	_, err := RunWallet(signer)
+	if err != nil {
+		return err
+	}
+
+	<-interruptHandlersDone
+	log.Info("Shutdown complete")
+	return nil
+}
+
+func RunWallet(signer frost.ISigner) (*wallet.Wallet, error) {
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.
 	tcfg, _, err := loadConfig()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cfg = tcfg
 	defer func() {
@@ -78,7 +89,7 @@ func walletMain() error {
 	rpcs, legacyRPCServer, err := startRPCServers(loader)
 	if err != nil {
 		log.Errorf("Unable to create RPC servers: %v", err)
-		return err
+		return nil, err
 	}
 
 	// Create and start chain RPC client so it's ready to connect to
@@ -91,13 +102,19 @@ func walletMain() error {
 		startWalletRPCServices(w, rpcs, legacyRPCServer)
 	})
 
+	var w *wallet.Wallet
 	if !cfg.NoInitialLoad {
 		// Load the wallet database.  It must have been created already
 		// or this will return an appropriate error.
-		_, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+		w, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+
+		if signer != nil {
+			w.FrostSigner = signer
+		}
+
 		if err != nil {
 			log.Error(err)
-			return err
+			return nil, err
 		}
 	}
 
@@ -130,10 +147,7 @@ func walletMain() error {
 			simulateInterrupt()
 		}()
 	}
-
-	<-interruptHandlersDone
-	log.Info("Shutdown complete")
-	return nil
+	return w, nil
 }
 
 // rpcClientConnectLoop continuously attempts a connection to the consensus RPC
