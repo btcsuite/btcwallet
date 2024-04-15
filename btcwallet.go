@@ -24,16 +24,6 @@ var (
 	cfg *config
 )
 
-/*func main() {
-	// Use all processor cores.
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
-	// Work around defer not working after os.Exit.
-	if err := StartWallet(nil); err != nil {
-		os.Exit(1)
-	}
-}*/
-
 // StartWallet is a work-around main function that is required since deferred
 // functions (such as log flushing) are not called with calls to os.Exit.
 // Instead, main runs this function and checks for a non-nil error, at which
