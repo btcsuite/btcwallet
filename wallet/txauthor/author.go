@@ -7,6 +7,8 @@ package txauthor
 
 import (
 	"errors"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/stroomnetwork/frost"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -205,8 +207,7 @@ type SecretsSource interface {
 // are passed in prevPkScripts and the slice length must match the number of
 // inputs.  Private keys and redeem scripts are looked up using a SecretsSource
 // based on the previous output script.
-func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte,
-	inputValues []btcutil.Amount, secrets SecretsSource) error {
+func AddAllInputScripts(signer frost.ISigner, keys map[string]*btcec.PublicKey, tx *wire.MsgTx, prevPkScripts [][]byte, inputValues []btcutil.Amount, secrets SecretsSource) error {
 
 	inputFetcher, err := TXPrevOutFetcher(tx, prevPkScripts, inputValues)
 	if err != nil {
@@ -249,9 +250,9 @@ func AddAllInputScripts(tx *wire.MsgTx, prevPkScripts [][]byte,
 			}
 
 		case txscript.IsPayToTaproot(pkScript):
-			err := spendTaprootKey(
+			err := spendTaprootKey(signer, keys,
 				inputs[i], pkScript, int64(inputValues[i]),
-				chainParams, secrets, tx, hashCache, i,
+				chainParams, tx, hashCache, i,
 			)
 			if err != nil {
 				return err
@@ -329,34 +330,33 @@ func spendWitnessKeyHash(txIn *wire.TxIn, pkScript []byte,
 // correspond to the output value of the previous pkScript, or else verification
 // will fail since the new sighash digest algorithm defined in BIP0341 includes
 // the input value in the sighash.
-func spendTaprootKey(txIn *wire.TxIn, pkScript []byte,
-	inputValue int64, chainParams *chaincfg.Params, secrets SecretsSource,
-	tx *wire.MsgTx, hashCache *txscript.TxSigHashes, idx int) error {
+func spendTaprootKey(signer frost.ISigner, keys map[string]*btcec.PublicKey, txIn *wire.TxIn, pkScript []byte,
+	inputValue int64, params *chaincfg.Params, tx *wire.MsgTx, sigHashes *txscript.TxSigHashes, idx int) error {
 
 	// First obtain the key pair associated with this p2tr address. If the
 	// pkScript is incorrect or derived from a different internal key or
 	// with a script root, we simply won't find a corresponding private key
 	// here.
-	_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, chainParams)
-	if err != nil {
-		return err
-	}
-	privKey, _, err := secrets.GetKey(addrs[0])
-	if err != nil {
-		return err
-	}
 
-	// We can now generate a valid witness which will allow us to spend this
-	// output.
-	witnessScript, err := txscript.TaprootWitnessSignature(
-		tx, hashCache, idx, inputValue, pkScript,
-		txscript.SigHashDefault, privKey,
+	sigHash, err := txscript.CalcTaprootSignatureHash(
+		sigHashes, txscript.SigHashDefault, tx, idx,
+		txscript.NewCannedPrevOutputFetcher(pkScript, inputValue),
 	)
 	if err != nil {
-		return err
+		return nil
 	}
 
-	txIn.Witness = witnessScript
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, params)
+	if err != nil {
+		return err
+	}
+	pubKey := keys[addrs[0].String()]
+	signature, err := signer.Sign(sigHash, pubKey)
+	if err != nil {
+		return nil
+	}
+
+	txIn.Witness = wire.TxWitness{signature.Serialize()}
 
 	return nil
 }
@@ -427,9 +427,9 @@ func spendNestedWitnessPubKeyHash(txIn *wire.TxIn, pkScript []byte,
 // AddAllInputScripts modifies an authored transaction by adding inputs scripts
 // for each input of an authored transaction.  Private keys and redeem scripts
 // are looked up using a SecretsSource based on the previous output script.
-func (tx *AuthoredTx) AddAllInputScripts(secrets SecretsSource) error {
+func (tx *AuthoredTx) AddAllInputScripts(signer frost.ISigner, keys map[string]*btcec.PublicKey, secrets SecretsSource) error {
 	return AddAllInputScripts(
-		tx.Tx, tx.PrevScripts, tx.PrevInputValues, secrets,
+		signer, keys, tx.Tx, tx.PrevScripts, tx.PrevInputValues, secrets,
 	)
 }
 
