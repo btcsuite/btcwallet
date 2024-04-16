@@ -42,6 +42,8 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
+      - uses: ./.github/actions/setup-cache
+
       - name: run format
         run: make fmt
 
