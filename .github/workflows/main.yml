@@ -33,6 +33,10 @@ jobs:
       - name: git checkout
         uses: actions/checkout@v2
 
+      - uses: ./.github/actions/setup-git
+        with:
+          access-key: ${{ secrets.STROOM_REPOS_ACCESS_KEY }}
+
       - name: setup go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v2
         with:
@@ -70,6 +74,10 @@ jobs:
 
       - name: git checkout
         uses: actions/checkout@v2
+
+      - uses: ./.github/actions/setup-git
+        with:
+          access-key: ${{ secrets.STROOM_REPOS_ACCESS_KEY }}
 
       - name: go cache
         uses: actions/cache@v1

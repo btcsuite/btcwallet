@@ -13,6 +13,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - uses: ./.github/actions/setup-git
+      with:
+        access-key: ${{ secrets.STROOM_REPOS_ACCESS_KEY }}
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:

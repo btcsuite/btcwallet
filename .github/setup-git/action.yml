@@ -1,0 +1,15 @@
+name: Setup
+description: Setup git access to private stroom repos
+
+inputs:
+  access-key:
+    required: true
+    description: GitHub Access Key (required to access private repos)
+
+runs:
+  using: composite
+  steps:
+    - run: git config --global --add safe.directory /__w/go-stroom/go-stroom
+      shell: bash
+    - run: git config --global url.https://${{ inputs.access-key }}@github.com/.insteadOf https://github.com/
+      shell: bash
