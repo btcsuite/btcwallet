@@ -66,7 +66,7 @@ Install the latest MSIs available here:
 
 https://github.com/btcsuite/btcd/releases
 
-https://github.com/btcsuite/btcwallet/releases
+https://github.com/stroomnetwork/btcwallet/releases
 
 ### Windows/Linux/BSD/POSIX - Build from source
 
@@ -88,7 +88,7 @@ recommended that `GOPATH` is set to a directory in your home directory such as
 - Run the following commands to obtain btcwallet, all dependencies, and install it:
 
 ```bash
-$ cd $GOPATH/src/github.com/btcsuite/btcwallet
+$ cd $GOPATH/src/github.com/stroomnetwork/btcwallet
 $ GO111MODULE=on go install -v . ./cmd/...
 ```
 
@@ -107,7 +107,7 @@ Install a newer MSI
 - Run the following commands to update btcd, all dependencies, and install it:
 
 ```bash
-$ cd $GOPATH/src/github.com/btcsuite/btcwallet
+$ cd $GOPATH/src/github.com/stroomnetwork/btcwallet
 $ git pull
 $ GO111MODULE=on go install -v . ./cmd/...
 ```
@@ -159,14 +159,14 @@ PS> $editor $env:LOCALAPPDATA\Btcwallet\btcwallet.conf
 Linux/BSD/POSIX (Installed from source):
 ```bash
 $ cp $GOPATH/src/github.com/btcsuite/btcd/sample-btcd.conf ~/.btcd/btcd.conf
-$ cp $GOPATH/src/github.com/btcsuite/btcwallet/sample-btcwallet.conf ~/.btcwallet/btcwallet.conf
+$ cp $GOPATH/src/github.com/stroomnetwork/btcwallet/sample-btcwallet.conf ~/.btcwallet/btcwallet.conf
 $ $EDITOR ~/.btcd/btcd.conf
 $ $EDITOR ~/.btcwallet/btcwallet.conf
 ```
 
 ## Issue Tracker
 
-The [integrated github issue tracker](https://github.com/btcsuite/btcwallet/issues)
+The [integrated github issue tracker](https://github.com/stroomnetwork/btcwallet/issues)
 is used for this project.
 
 ## GPG Verification Key

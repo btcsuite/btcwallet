@@ -2,8 +2,8 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package main
+package run
 
-import "github.com/btcsuite/btcwallet/netparams"
+import "github.com/stroomnetwork/btcwallet/netparams"
 
 var activeNet = &netparams.MainNetParams

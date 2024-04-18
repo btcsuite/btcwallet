@@ -2,7 +2,7 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package main
+package run
 
 import (
 	"fmt"
@@ -12,13 +12,13 @@ import (
 
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
-	"github.com/btcsuite/btcwallet/rpc/rpcserver"
-	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/jrick/logrotate/rotator"
 	"github.com/lightninglabs/neutrino"
+	"github.com/stroomnetwork/btcwallet/chain"
+	"github.com/stroomnetwork/btcwallet/rpc/legacyrpc"
+	"github.com/stroomnetwork/btcwallet/rpc/rpcserver"
+	"github.com/stroomnetwork/btcwallet/wallet"
 )
 
 // logWriter implements an io.Writer that outputs to both standard output and
@@ -60,6 +60,7 @@ var (
 	grpcLog      = backendLog.Logger("GRPC")
 	legacyRPCLog = backendLog.Logger("RPCS")
 	btcnLog      = backendLog.Logger("BTCN")
+	ExampleLog   = backendLog.Logger("EXMPL")
 )
 
 // Initialize package-global logger variables.

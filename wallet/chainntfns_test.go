@@ -9,8 +9,8 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/stroomnetwork/btcwallet/waddrmgr"
 )
 
 const (

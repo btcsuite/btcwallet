@@ -17,8 +17,8 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stroomnetwork/btcwallet/waddrmgr"
 )
 
 // RPCClient represents a persistent client connection to a bitcoin RPC server

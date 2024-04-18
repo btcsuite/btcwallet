@@ -10,8 +10,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/stroomnetwork/btcwallet/waddrmgr"
 )
 
 // MakeMultiSigScript creates a multi-signature script that can be redeemed with

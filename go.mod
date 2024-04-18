@@ -1,4 +1,4 @@
-module github.com/btcsuite/btcwallet
+module github.com/stroomnetwork/btcwallet
 
 require (
 	github.com/btcsuite/btcd v0.24.1-0.20240318151728-2fc99e0496d2

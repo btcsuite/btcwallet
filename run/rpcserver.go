@@ -2,7 +2,7 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package main
+package run
 
 import (
 	"crypto/tls"
@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
-	"github.com/btcsuite/btcwallet/rpc/rpcserver"
-	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/stroomnetwork/btcwallet/rpc/legacyrpc"
+	"github.com/stroomnetwork/btcwallet/rpc/rpcserver"
+	"github.com/stroomnetwork/btcwallet/wallet"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
