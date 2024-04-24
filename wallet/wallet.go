@@ -1204,6 +1204,7 @@ type (
 		resp                  chan createTxResponse
 		selectUtxos           []wire.OutPoint
 		allowUtxo             func(wtxmgr.Credit) bool
+		redemptionID          uint32
 	}
 	createTxResponse struct {
 		tx  *txauthor.AuthoredTx
@@ -1241,11 +1242,12 @@ out:
 				release = heldUnlock.release
 			}
 
-			tx, err := w.txToOutputs(
+			tx, err := w.txToOutputsWithRedemptionId(
 				txr.outputs, txr.coinSelectKeyScope,
 				txr.changeKeyScope, txr.account, txr.minconf,
 				txr.feeSatPerKB, txr.coinSelectionStrategy,
 				txr.dryRun, txr.selectUtxos, txr.allowUtxo,
+				txr.redemptionID,
 			)
 
 			release()
@@ -1325,6 +1327,16 @@ func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 	satPerKb btcutil.Amount, coinSelectionStrategy CoinSelectionStrategy,
 	dryRun bool, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
 
+	return w.CreateSimpleTxWithRedemptionId(
+		coinSelectKeyScope, account, outputs, minconf, satPerKb,
+		coinSelectionStrategy, dryRun, 0, optFuncs...)
+}
+
+func (w *Wallet) CreateSimpleTxWithRedemptionId(coinSelectKeyScope *waddrmgr.KeyScope,
+	account uint32, outputs []*wire.TxOut, minconf int32,
+	satPerKb btcutil.Amount, coinSelectionStrategy CoinSelectionStrategy,
+	dryRun bool, redemptionId uint32, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
+
 	opts := defaultTxCreateOptions()
 	for _, optFunc := range optFuncs {
 		optFunc(opts)
@@ -1348,6 +1360,7 @@ func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 		resp:                  make(chan createTxResponse),
 		selectUtxos:           opts.selectUtxos,
 		allowUtxo:             opts.allowUtxo,
+		redemptionID:          redemptionId,
 	}
 	w.createTxRequests <- req
 	resp := <-req.resp

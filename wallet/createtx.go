@@ -143,6 +143,16 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	selectedUtxos []wire.OutPoint,
 	allowUtxo func(utxo wtxmgr.Credit) bool) (
 	*txauthor.AuthoredTx, error) {
+	return w.txToOutputsWithRedemptionId(outputs, coinSelectKeyScope, changeKeyScope, account, minconf, feeSatPerKb, strategy, dryRun, selectedUtxos, allowUtxo, 0)
+}
+
+func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
+	coinSelectKeyScope, changeKeyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
+	strategy CoinSelectionStrategy, dryRun bool,
+	selectedUtxos []wire.OutPoint,
+	allowUtxo func(utxo wtxmgr.Credit) bool, redemptionID uint32) (
+	*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -236,6 +246,10 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 			return err
 		}
 
+		if redemptionID != 0 {
+			tx.Tx.TxIn[0].Sequence = redemptionID
+		}
+
 		// Randomize change position, if change exists, before signing.
 		// This doesn't affect the serialize size, so the change amount
 		// will still be valid.
@@ -276,7 +290,6 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		if !watchOnly || containsTaprootInput(tx) {
 
 			keys := getTaprootPubKeys(tx, w)
-			// TODO(dp) we need to be able to process all scopes at once
 			err = tx.AddAllInputScripts(w.FrostSigner, keys,
 				secretSource{w.Manager, addrmgrNs},
 			)

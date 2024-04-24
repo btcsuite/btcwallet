@@ -24,22 +24,6 @@ var (
 	cfg *config
 )
 
-// StartWallet is a work-around main function that is required since deferred
-// functions (such as log flushing) are not called with calls to os.Exit.
-// Instead, main runs this function and checks for a non-nil error, at which
-// point any defers have already run, and if the error is non-nil, the program
-// can be exited with an error exit status.
-func StartWallet(signer frost.ISigner) error {
-	_, err := RunWallet(signer)
-	if err != nil {
-		return err
-	}
-
-	<-interruptHandlersDone
-	log.Info("Shutdown complete")
-	return nil
-}
-
 func RunWallet(signer frost.ISigner) (*wallet.Wallet, error) {
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func main() {
+func RunExample() {
 	// Use all processor cores.
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
@@ -43,7 +43,7 @@ func main() {
 		log.Info(err)
 		return
 	}
-	txOut := wire.NewTxOut(100000000, p2shAddr)
+	txOut := wire.NewTxOut(10000000, p2shAddr)
 
 	accounts, err := w.Accounts(waddrmgr.KeyScopeBIP0086)
 	if err != nil {
@@ -51,7 +51,7 @@ func main() {
 		return
 	}
 
-	simpleTx, err := w.CreateSimpleTx(&waddrmgr.KeyScopeBIP0086, accounts.Accounts[1].AccountNumber, []*wire.TxOut{txOut}, 1, 1, wallet.CoinSelectionLargest, false)
+	simpleTx, err := w.CheckDoubleSpendAndCreateTxWithRedemptionId(nil, nil, 3, &waddrmgr.KeyScopeBIP0086, accounts.Accounts[1].AccountNumber, []*wire.TxOut{txOut}, 1, 1000, wallet.CoinSelectionLargest, false)
 	if err != nil {
 		log.Info(err)
 		return
