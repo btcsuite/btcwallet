@@ -62,6 +62,7 @@ type config struct {
 	LogDir          string                  `long:"logdir" description:"Directory to log output."`
 	Profile         string                  `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
 	DBTimeout       time.Duration           `long:"dbtimeout" description:"The timeout value to use when opening the wallet database."`
+	GlobalHomeRoot  string                  `short:"g" long:"globalhomeroot" description:"Global root home directory"`
 
 	// Wallet options
 	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
@@ -300,6 +301,28 @@ func loadConfig() (*config, []string, error) {
 	if preCfg.ShowVersion {
 		fmt.Println(appName, "version", version())
 		os.Exit(0)
+	}
+
+	// Check if global home root path  is set and reassigns the config, datadir,
+	// rpc & rpccert paths to the global root
+	if len(preCfg.GlobalHomeRoot) > 0 {
+		globalAppDataDir := filepath.Join(preCfg.GlobalHomeRoot, "Btcwallet")
+		
+		if _, err := os.Stat(globalAppDataDir); os.IsNotExist(err) {
+			perm := os.FileMode(0700)
+			err = os.Mkdir(globalAppDataDir, perm)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating Btcd directory: %v\n",
+						err)
+			}
+		}
+
+		preCfg.ConfigFile = cfgutil.NewExplicitString(filepath.Join(globalAppDataDir, defaultConfigFilename))
+		cfg.AppDataDir    = cfgutil.NewExplicitString(globalAppDataDir)
+		cfg.LogDir    = filepath.Join(globalAppDataDir, defaultLogDirname)
+		cfg.RPCKey     = cfgutil.NewExplicitString(filepath.Join(globalAppDataDir, "rpc.key"))
+		cfg.RPCCert    = cfgutil.NewExplicitString(filepath.Join(globalAppDataDir, "rpc.cert"))
+		cfg.CAFile    = cfgutil.NewExplicitString(filepath.Join(preCfg.GlobalHomeRoot, "Btcd/rpc.cert"))
 	}
 
 	// Load additional config from file.
