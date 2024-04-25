@@ -7,6 +7,7 @@ package txauthor
 
 import (
 	"errors"
+	"fmt"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stroomnetwork/frost"
 
@@ -350,10 +351,14 @@ func spendTaprootKey(signer frost.ISigner, keys map[string]*btcec.PublicKey, txI
 	if err != nil {
 		return err
 	}
-	pubKey := keys[addrs[0].String()]
+	pubKey, ok := keys[addrs[0].String()]
+	if !ok {
+		return fmt.Errorf("key not found for address %v", addrs[0].String())
+	}
+
 	signature, err := signer.Sign(sigHash, pubKey)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	txIn.Witness = wire.TxWitness{signature.Serialize()}

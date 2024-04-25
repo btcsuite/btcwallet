@@ -382,6 +382,11 @@ func (w *Wallet) ImportAccountDryRun(name string,
 // pay-to-pubkey-hash (P2PKH) scheme.
 func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
+	_, err := w.ImportPublicKeyReturnAddress(pubKey, addrType)
+	return err
+}
+
+func (w *Wallet) ImportPublicKeyReturnAddress(pubKey *btcec.PublicKey, addrType waddrmgr.AddressType) (waddrmgr.ManagedAddress, error) {
 
 	// Determine what key scope the public key should belong to and import
 	// it into the key scope's default imported account.
@@ -397,12 +402,12 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 		keyScope = waddrmgr.KeyScopeBIP0086
 
 	default:
-		return fmt.Errorf("address type %v is not supported", addrType)
+		return nil, fmt.Errorf("address type %v is not supported", addrType)
 	}
 
 	scopedKeyManager, err := w.Manager.FetchScopedKeyManager(keyScope)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// TODO: Perform rescan if requested.
@@ -413,18 +418,18 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 		return err
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	log.Infof("Imported address %v", addr.Address())
 
 	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
 	if err != nil {
-		return fmt.Errorf("unable to subscribe for address "+
+		return nil, fmt.Errorf("unable to subscribe for address "+
 			"notifications: %w", err)
 	}
 
-	return nil
+	return addr, nil
 }
 
 // ImportTaprootScript imports a user-provided taproot script into the address

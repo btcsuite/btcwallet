@@ -27,7 +27,7 @@ func doubleSpendTest(t *testing.T, mineTx bool) {
 
 	addUtxoToWallet(t, w)
 
-	tx, err := createTX(t, w)
+	tx, err := createTx(t, w)
 	assert.NoError(t, err)
 	assert.NotNil(t, tx)
 
@@ -38,13 +38,13 @@ func doubleSpendTest(t *testing.T, mineTx bool) {
 	}
 
 	// double spend the same redemptionId
-	tx, err = createTX(t, w)
+	tx, err = createTx(t, w)
 
 	assert.Error(t, err)
 	assert.Nil(t, tx)
 }
 
-func createTX(t *testing.T, w *Wallet) (*txauthor.AuthoredTx, error) {
+func createTx(t *testing.T, w *Wallet) (*txauthor.AuthoredTx, error) {
 
 	var redemptionId uint32 = 1
 
@@ -55,7 +55,9 @@ func createTX(t *testing.T, w *Wallet) (*txauthor.AuthoredTx, error) {
 }
 
 func addUtxoToWallet(t *testing.T, w *Wallet) {
+
 	keyScope := waddrmgr.KeyScopeBIP0049Plus
+
 	addr, err := w.CurrentAddress(0, keyScope)
 	assert.NoError(t, err)
 

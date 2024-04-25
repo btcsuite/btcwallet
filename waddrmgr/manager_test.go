@@ -3054,7 +3054,7 @@ func TestTaprootPubKeyDerivation(t *testing.T) {
 		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
 			return scopedMgr.DeriveFromKeyPath(ns, externalPath)
 		},
-		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+		"bc1pej9yh3jd39aam30mctm8paaghg9nsemezpk0zg3udlza0nt0cy2sqvps98",
 		scopedMgr,
 	)
 	assertAddressDerivation(
@@ -3065,21 +3065,21 @@ func TestTaprootPubKeyDerivation(t *testing.T) {
 			}
 			return addrs[0], nil
 		},
-		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+		"bc1pej9yh3jd39aam30mctm8paaghg9nsemezpk0zg3udlza0nt0cy2sqvps98",
 		scopedMgr,
 	)
 	assertAddressDerivation(
 		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
 			return scopedMgr.LastExternalAddress(ns, 0)
 		},
-		"bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+		"bc1pej9yh3jd39aam30mctm8paaghg9nsemezpk0zg3udlza0nt0cy2sqvps98",
 		scopedMgr,
 	)
 	assertAddressDerivation(
 		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
 			return scopedMgr.DeriveFromKeyPath(ns, internalPath)
 		},
-		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+		"bc1p8x03kt6rj0ef5xxfx7zechwc5ae4qyp32l4csrczarqgy9p80nhsq4l256",
 		scopedMgr,
 	)
 	assertAddressDerivation(
@@ -3090,14 +3090,14 @@ func TestTaprootPubKeyDerivation(t *testing.T) {
 			}
 			return addrs[0], nil
 		},
-		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+		"bc1p8x03kt6rj0ef5xxfx7zechwc5ae4qyp32l4csrczarqgy9p80nhsq4l256",
 		scopedMgr,
 	)
 	assertAddressDerivation(
 		t, db, func(ns walletdb.ReadWriteBucket) (ManagedAddress, error) {
 			return scopedMgr.LastInternalAddress(ns, 0)
 		},
-		"bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7",
+		"bc1p8x03kt6rj0ef5xxfx7zechwc5ae4qyp32l4csrczarqgy9p80nhsq4l256",
 		scopedMgr,
 	)
 }

@@ -2010,10 +2010,7 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 		if err != nil {
 			return err
 		}
-		taprootPubKey := txscript.ComputeTaprootKeyNoScript(
-			internalPubKey,
-		)
-		addressID = schnorr.SerializePubKey(taprootPubKey)
+		addressID = schnorr.SerializePubKey(internalPubKey)
 
 	default:
 		return fmt.Errorf("unsupported address type %v", addrType)
