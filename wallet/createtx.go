@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/stroomnetwork/frost/crypto"
 	"math/rand"
 	"sort"
 
@@ -289,8 +290,8 @@ func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
 		}
 		if !watchOnly || containsTaprootInput(tx) {
 
-			keys := getTaprootPubKeys(tx, w)
-			err = tx.AddAllInputScripts(w.FrostSigner, keys,
+			linearCombinations := getTaprootPubKeys(tx, w)
+			err = tx.AddAllInputScripts(w.FrostSigner, linearCombinations,
 				secretSource{w.Manager, addrmgrNs},
 			)
 			if err != nil {
@@ -349,8 +350,8 @@ func containsTaprootInput(tx *txauthor.AuthoredTx) bool {
 	return false
 }
 
-func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*btcec.PublicKey {
-	keys := make(map[string]*btcec.PublicKey)
+func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*crypto.LinearCombination {
+	linearCombinations := make(map[string]*crypto.LinearCombination)
 	for i := range tx.Tx.TxIn {
 		pkScript := tx.PrevScripts[i]
 
@@ -361,14 +362,14 @@ func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*btcec.Pub
 			}
 
 			for _, addr := range addrs {
-				pubKey, err := w.PubKeyForAddress(addr)
-				if err == nil {
-					keys[addr.String()] = pubKey
+				lc, ok := w.btcAddrToLc[addr.String()]
+				if ok {
+					linearCombinations[addr.String()] = lc
 				}
 			}
 		}
 	}
-	return keys
+	return linearCombinations
 }
 
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,

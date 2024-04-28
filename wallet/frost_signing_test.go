@@ -17,15 +17,22 @@ func TestFrostSigning(t *testing.T) {
 	defer cleanup()
 
 	validators := frost.GetValidators(5, 3)
-	pubKey, err := validators[0].MakePubKey("test")
+	pk1, err := validators[0].MakePubKey("test1")
 	require.NoError(t, err)
-	require.NotNil(t, pubKey)
+	require.NotNil(t, pk1)
+
+	pk2, err := validators[0].MakePubKey("test2")
+	require.NoError(t, err)
+	require.NotNil(t, pk1)
 
 	w.FrostSigner = validators[0]
+	w.Pk1 = pk1
+	w.Pk2 = pk2
+
 	err = w.Unlock([]byte("world"), time.After(10*time.Minute))
 	require.NoError(t, err)
 
-	err = w.ImportPublicKey(pubKey, waddrmgr.TaprootPubKey)
+	pubKey, err := w.ImportBtcAddressWithEthAddr("tb1pgdyx9mulkelunyg9rkj384sajls7xx2y3jlagdpup2l2wl6tppasterqm2", "0x7b3f4f4b3cCf7f3fDf3f3f3f3f3f3f3f3f3f3f3f")
 	require.NoError(t, err)
 
 	p2shAddr, err := txscript.PayToTaprootScript(pubKey)

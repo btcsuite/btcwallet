@@ -5,6 +5,7 @@
 package run
 
 import (
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stroomnetwork/frost"
 	"net"
 	"net/http"
@@ -24,7 +25,7 @@ var (
 	cfg *config
 )
 
-func RunWallet(signer frost.ISigner) (*wallet.Wallet, error) {
+func RunWallet(signer frost.ISigner, pk1, pk2 *btcec.PublicKey) (*wallet.Wallet, error) {
 	// Load configuration and parse command line.  This function also
 	// initializes logging and configures it accordingly.
 	tcfg, _, err := loadConfig()
@@ -82,9 +83,9 @@ func RunWallet(signer frost.ISigner) (*wallet.Wallet, error) {
 		// or this will return an appropriate error.
 		w, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
 
-		if signer != nil {
-			w.FrostSigner = signer
-		}
+		w.FrostSigner = signer
+		w.Pk1 = pk1
+		w.Pk2 = pk2
 
 		if err != nil {
 			log.Error(err)
