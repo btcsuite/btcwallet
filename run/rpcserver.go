@@ -167,11 +167,6 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 		legacyServer = legacyrpc.NewServer(&opts, walletLoader, listeners)
 	}
 
-	// Error when neither the GRPC nor legacy RPC servers can be started.
-	if server == nil && legacyServer == nil {
-		return nil, nil, errors.New("no suitable RPC services can be started")
-	}
-
 	return server, legacyServer, nil
 }
 

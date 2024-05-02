@@ -283,7 +283,7 @@ func loadConfig() (*config, []string, error) {
 	// Pre-parse the command line options to see if an alternative config
 	// file or the version flag was specified.
 	preCfg := cfg
-	preParser := flags.NewParser(&preCfg, flags.Default)
+	preParser := flags.NewParser(&preCfg, flags.IgnoreUnknown)
 	_, err := preParser.Parse()
 	if err != nil {
 		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
@@ -304,7 +304,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Load additional config from file.
 	var configFileError error
-	parser := flags.NewParser(&cfg, flags.Default)
+	parser := flags.NewParser(&cfg, flags.IgnoreUnknown)
 	configFilePath := preCfg.ConfigFile.Value
 	if preCfg.ConfigFile.ExplicitlySet() {
 		configFilePath = cleanAndExpandPath(configFilePath)

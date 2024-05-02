@@ -32,7 +32,7 @@ func TestFrostSigning(t *testing.T) {
 	err = w.Unlock([]byte("world"), time.After(10*time.Minute))
 	require.NoError(t, err)
 
-	pubKey, err := w.ImportBtcAddressWithEthAddr("tb1pgdyx9mulkelunyg9rkj384sajls7xx2y3jlagdpup2l2wl6tppasterqm2", "0x7b3f4f4b3cCf7f3fDf3f3f3f3f3f3f3f3f3f3f3f")
+	pubKey, err := w.ImportBtcAddressWithEthAddr("", "0x7b3f4f4b3cCf7f3fDf3f3f3f3f3f3f3f3f3f3f3f")
 	require.NoError(t, err)
 
 	p2shAddr, err := txscript.PayToTaprootScript(pubKey)

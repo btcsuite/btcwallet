@@ -14,7 +14,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/lightningnetwork/lnd/ticker"
 )
 
 const (
@@ -156,49 +155,10 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		return nil, err
 	}
 
-	// Verify that the node is running on the expected network.
-	net, err := getCurrentNet(client)
-	if err != nil {
-		return nil, err
-	}
-	if net != cfg.ChainParams.Net {
-		return nil, fmt.Errorf("expected network %v, got %v",
-			cfg.ChainParams.Net, net)
-	}
-
-	// Check if the node is pruned, as we'll need to perform additional
-	// operations if so.
-	chainInfo, err := client.GetBlockChainInfo()
-	if err != nil {
-		return nil, fmt.Errorf("unable to determine if bitcoind is "+
-			"pruned: %w", err)
-	}
-
-	// Only initialize the PrunedBlockDispatcher when the connected bitcoind
-	// node is pruned.
-	var prunedBlockDispatcher *PrunedBlockDispatcher
-	if chainInfo.Pruned {
-		prunedBlockDispatcher, err = NewPrunedBlockDispatcher(
-			&PrunedBlockDispatcherConfig{
-				ChainParams:        cfg.ChainParams,
-				NumTargetPeers:     cfg.PrunedModeMaxPeers,
-				Dial:               cfg.Dialer,
-				GetPeers:           client.GetPeerInfo,
-				GetNodeAddresses:   client.GetNodeAddresses,
-				PeerReadyTimeout:   defaultPeerReadyTimeout,
-				RefreshPeersTicker: ticker.New(defaultRefreshPeersInterval),
-				MaxRequestInvs:     wire.MaxInvPerMsg,
-			},
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	bc := &BitcoindConn{
 		cfg:                   *cfg,
 		client:                client,
-		prunedBlockDispatcher: prunedBlockDispatcher,
+		prunedBlockDispatcher: nil,
 		rescanClients:         make(map[uint64]*BitcoindClient),
 		quit:                  make(chan struct{}),
 	}
