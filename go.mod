@@ -21,6 +21,7 @@ require (
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf
 	github.com/lightninglabs/neutrino v0.16.0
 	github.com/lightninglabs/neutrino/cache v1.1.2
+	github.com/lightningnetwork/lnd/fn/v2 v2.0.2
 	github.com/lightningnetwork/lnd/ticker v1.0.0
 	github.com/lightningnetwork/lnd/tlv v1.0.2
 	github.com/stretchr/testify v1.9.0
@@ -45,6 +46,7 @@ require (
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	go.etcd.io/bbolt v1.3.11 // indirect
+	golang.org/x/exp v0.0.0-20231226003508-02704c960a9b // indirect
 	golang.org/x/sys v0.19.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20231030173426-d783a09b4405 // indirect
