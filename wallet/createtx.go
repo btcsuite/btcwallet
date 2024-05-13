@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/lightningnetwork/lnd/fn"
 )
 
 func makeInputSource(eligible []Coin) txauthor.InputSource {
@@ -179,6 +180,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 
 		var inputSource txauthor.InputSource
 		if len(selectedUtxos) > 0 {
+			dedupUtxos := fn.NewSet(selectedUtxos...)
+			if len(dedupUtxos) != len(selectedUtxos) {
+				return errors.New("selected UTXOs contain " +
+					"duplicate values")
+			}
 			eligibleByOutpoint := make(
 				map[wire.OutPoint]wtxmgr.Credit,
 			)
