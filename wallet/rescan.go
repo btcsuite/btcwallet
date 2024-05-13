@@ -257,6 +257,7 @@ out:
 
 			if numAddrs == 0 {
 				batch.done(nil)
+
 				continue
 			}
 
