@@ -17,11 +17,11 @@ func TestFrostSigning(t *testing.T) {
 	defer cleanup()
 
 	validators := frost.GetValidators(5, 3)
-	pk1, err := validators[0].MakePubKey("test1")
+	pk1, err := validators[0].RequestPubKey("test1")
 	require.NoError(t, err)
 	require.NotNil(t, pk1)
 
-	pk2, err := validators[0].MakePubKey("test2")
+	pk2, err := validators[0].RequestPubKey("test2")
 	require.NoError(t, err)
 	require.NotNil(t, pk1)
 

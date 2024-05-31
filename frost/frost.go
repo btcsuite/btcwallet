@@ -11,7 +11,7 @@ import (
 	"github.com/stroomnetwork/frost/approver"
 	frostConfig "github.com/stroomnetwork/frost/config"
 	"github.com/stroomnetwork/frost/crypto"
-	"github.com/stroomnetwork/frost/networking"
+	"github.com/stroomnetwork/frost/network"
 	"github.com/stroomnetwork/frost/storage"
 	_ "net/http/pprof" // nolint:gosec
 	"time"
@@ -27,7 +27,7 @@ func NewApprovalRequests() *ApprovalRequests {
 	}
 }
 
-func GetValidators(n int, k int) []*frost.Signer {
+func GetValidators(n int, k int) []*frost.NetworkSigner {
 	createStorageFunc := func() (storage.Storage, error) {
 		return storage.NewInMemoryStorage(), nil
 	}
@@ -38,7 +38,7 @@ func GetValidators(n int, k int) []*frost.Signer {
 	return validators
 }
 
-func SetupInMemoryNetworkWithGeneratedKeys(n int, k int, createStorage func() (storage.Storage, error)) []*frost.Signer {
+func SetupInMemoryNetworkWithGeneratedKeys(n int, k int, createStorage func() (storage.Storage, error)) []*frost.NetworkSigner {
 
 	pubKeys := make([]*btcec.PublicKey, n)
 	privKeys := make([]*btcec.PrivateKey, n)
@@ -52,9 +52,9 @@ func SetupInMemoryNetworkWithGeneratedKeys(n int, k int, createStorage func() (s
 	return createSigners(createStorage, nodes, bindingInfos)
 }
 
-func createSigners(createStorage func() (storage.Storage, error), nodes []networking.Node, bindingInfos []frostConfig.BindingInfo) []*frost.Signer {
+func createSigners(createStorage func() (storage.Storage, error), nodes []network.Node, bindingInfos []frostConfig.BindingInfo) []*frost.NetworkSigner {
 	n := len(nodes)
-	signers := make([]*frost.Signer, n)
+	signers := make([]*frost.NetworkSigner, n)
 	for i := 0; i < n; i++ {
 		st, _ := createStorage()
 
@@ -71,14 +71,14 @@ func createSigners(createStorage func() (storage.Storage, error), nodes []networ
 
 		// signers[i] is the validator(or frost signer).
 		signers[i], _ = frost.CreateSigner(signerParams)
-		_ = signers[i].Start()
+		_ = signers[i].Start
 	}
 	time.Sleep(10 * time.Millisecond)
 
 	return signers
 }
 
-func SetupInMemoryNetworkWithProvidedKeys(k int) ([]networking.Node, []frostConfig.BindingInfo) {
+func SetupInMemoryNetworkWithProvidedKeys(k int) ([]network.Node, []frostConfig.BindingInfo) {
 
 	privKeys := crypto.GetTestPrivateKeys()
 	n := len(privKeys)
@@ -91,22 +91,22 @@ func SetupInMemoryNetworkWithProvidedKeys(k int) ([]networking.Node, []frostConf
 	return SetupInMemoryNetwork(k, pubKeys, privKeys)
 }
 
-func SetupInMemoryNetwork(k int, pubKeys []*btcec.PublicKey, privKeys []*btcec.PrivateKey) ([]networking.Node, []frostConfig.BindingInfo) {
+func SetupInMemoryNetwork(k int, pubKeys []*btcec.PublicKey, privKeys []*btcec.PrivateKey) ([]network.Node, []frostConfig.BindingInfo) {
 	n := len(pubKeys)
-	network := networking.NewInMemoryNetwork()
-	nodes := make([]networking.Node, n)
+	inMemoryNetwork := network.NewInMemoryNetwork()
+	nodes := make([]network.Node, n)
 
 	for i := 0; i < n; i++ {
-		nodes[i], _ = network.NewNode(pubKeys[i])
+		nodes[i], _ = inMemoryNetwork.NewNode(pubKeys[i])
 	}
 
 	bindingInfos := make([]frostConfig.BindingInfo, n)
 	for i := 0; i < n; i++ {
-		// bindingConfig contains information about the binding of this validator to the validators network.
+		// bindingConfig contains information about the binding of this validator to the validators inMemoryNetwork.
 		bindingConfig := frostConfig.NewBindingConfig(privKeys[i], pubKeys, k)
 
 		// bi is the binding information of this validator.
-		// it is used for the generation of the bound keys which are the original keys modified with this specific network information)
+		// it is used for the generation of the bound keys which are the original keys modified with this specific inMemoryNetwork information)
 		bi, _ := bindingConfig.GetBindingInfo()
 		bindingInfos[i] = *bi
 	}

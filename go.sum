@@ -121,6 +121,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/rogpeppe/go-internal v1.9.0 h1:73kH8U+JUqXU8lRuOHeVHaa/SZPifC7BkcraZVejAe8=
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
+github.com/steveyen/gkvlite v0.0.0-20141117050110-5b47ed6d7458 h1:xPexFI9EsTjMbQAW0Z7414/Y6N6jtcIiL2QG1OIG0Ro=
+github.com/steveyen/gkvlite v0.0.0-20141117050110-5b47ed6d7458/go.mod h1:I50Pwzl9dKZDA6bxpAzy+WYhEbW4yDMkh6/G6iRoock=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
 github.com/stretchr/objx v0.4.0/go.mod h1:YvHI0jy2hoMjB+UWwv71VJQ9isScKT/TqJzVSSt89Yw=
 github.com/stretchr/objx v0.5.0 h1:1zr/of2m5FGMsad5YfcqgdqdWrIhu+EBEJRhR1U7z/c=
@@ -132,6 +134,8 @@ github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcU
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
 github.com/stroomnetwork/frost v0.0.8 h1:7p119MT7uMwfc8m5kkzhXiohhBwC9lh17IsIln7Dm8w=
 github.com/stroomnetwork/frost v0.0.8/go.mod h1:PLGdtwk0v3polO0YQDVvu6xIrlqWaWneEHXGLSh2sNU=
+github.com/stroomnetwork/frost v0.0.9 h1:JZH/mmA0hqqnZUC9kz0Vzm03pSOD8kf1Ge4zIVIlMtw=
+github.com/stroomnetwork/frost v0.0.9/go.mod h1:Dlb0hdxTQ76mdyWSmI8xK3+MLu+cDZnJTa9pzzjo9uQ=
 github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 h1:epCh84lMvA70Z7CTTCmYQn2CKbY8j86K7/FAIr141uY=
 github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7/go.mod h1:q4W45IWZaF22tdD+VEXcAWRA037jwmWEB5VWYORlTpc=
 go.etcd.io/bbolt v1.3.7 h1:j+zJOnnEjF/kyHlDDgGnVL/AIqIJPq8UoB2GSNfkUfQ=

@@ -19,13 +19,13 @@ func Example() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	validators := frost.GetValidators(5, 3)
-	pk1, err := validators[0].MakePubKey("test1")
+	pk1, err := validators[0].RequestPubKey("test1")
 	if err != nil {
 		log.Info(err)
 		return
 	}
 
-	pk2, err := validators[0].MakePubKey("test2")
+	pk2, err := validators[0].RequestPubKey("test2")
 	if err != nil {
 		log.Info(err)
 		return
