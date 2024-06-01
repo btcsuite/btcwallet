@@ -71,7 +71,7 @@ func createSigners(createStorage func() (storage.Storage, error), nodes []networ
 
 		// signers[i] is the validator(or frost signer).
 		signers[i], _ = frost.CreateSigner(signerParams)
-		_ = signers[i].Start
+		signers[i].Start()
 	}
 	time.Sleep(10 * time.Millisecond)
 
