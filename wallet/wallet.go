@@ -130,7 +130,7 @@ type Wallet struct {
 	db          walletdb.DB
 	Manager     *waddrmgr.Manager
 	TxStore     *wtxmgr.Store
-	FrostSigner frost.ISigner
+	FrostSigner frost.Signer
 
 	btcAddrToEthAddr map[string]string
 	btcAddrToLc      map[string]*crypto.LinearCombination

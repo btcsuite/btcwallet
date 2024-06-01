@@ -24,7 +24,7 @@ require (
 	github.com/lightningnetwork/lnd/ticker v1.0.0
 	github.com/lightningnetwork/lnd/tlv v1.0.2
 	github.com/stretchr/testify v1.8.4
-	github.com/stroomnetwork/frost v0.0.8
+	github.com/stroomnetwork/frost v0.0.9
 	golang.org/x/crypto v0.22.0
 	golang.org/x/net v0.24.0
 	golang.org/x/term v0.19.0
@@ -41,6 +41,7 @@ require (
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
 	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/steveyen/gkvlite v0.0.0-20141117050110-5b47ed6d7458 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
 	go.etcd.io/bbolt v1.3.7 // indirect
 	golang.org/x/sys v0.19.0 // indirect

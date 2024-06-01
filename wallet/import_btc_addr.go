@@ -63,7 +63,7 @@ func (w *Wallet) lcFromEthAddr(ethAddrStr string) (*crypto.LinearCombination, er
 		ethAddr,
 	)
 	h1 := crypto.Sha256(b1)
-	c1FromAddr, _ := crypto.PrivkeyFromBytes(h1[:])
+	c1FromAddr, _ := crypto.PrivKeyFromBytes(h1[:])
 
 	b2, _ := arguments.Pack(
 		pk2.X(),
@@ -71,7 +71,7 @@ func (w *Wallet) lcFromEthAddr(ethAddrStr string) (*crypto.LinearCombination, er
 		ethAddr,
 	)
 	h2 := crypto.Sha256(b2)
-	c2FromAddr, _ := crypto.PrivkeyFromBytes(h2[:])
+	c2FromAddr, _ := crypto.PrivKeyFromBytes(h2[:])
 
 	lc, err := crypto.NewLinearCombination(
 		[]*btcec.PublicKey{w.Pk1, w.Pk2},
