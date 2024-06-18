@@ -82,15 +82,21 @@ func InitWallet(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *
 		// Load the wallet database.  It must have been created already
 		// or this will return an appropriate error.
 		w, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+		if err != nil {
+			log.Error(err)
+			return nil, err
+		}
 
 		w.FrostSigner = signer
 		w.Pk1 = pk1
 		w.Pk2 = pk2
 
+		storage, err := wallet.NewAddressMapStorage(cfg.AppDataDir.Value + "/" + wallet.DefaultStorageFileName)
 		if err != nil {
 			log.Error(err)
 			return nil, err
 		}
+		w.AddressMapStorage = storage
 	}
 
 	// Add interrupt handlers to shutdown the various process components

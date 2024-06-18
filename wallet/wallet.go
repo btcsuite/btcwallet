@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/stroomnetwork/frost/crypto"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -132,9 +131,8 @@ type Wallet struct {
 	TxStore     *wtxmgr.Store
 	FrostSigner frost.Signer
 
-	btcAddrToEthAddr map[string]string
-	btcAddrToLc      map[string]*crypto.LinearCombination
-	Pk1, Pk2         *btcec.PublicKey
+	AddressMapStorage *AddressMapStorage
+	Pk1, Pk2          *btcec.PublicKey
 
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex
@@ -4078,8 +4076,6 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		db:                  db,
 		Manager:             addrMgr,
 		TxStore:             txMgr,
-		btcAddrToLc:         make(map[string]*crypto.LinearCombination),
-		btcAddrToEthAddr:    make(map[string]string),
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
 		recoveryWindow:      recoveryWindow,
 		rescanAddJob:        make(chan *RescanJob),

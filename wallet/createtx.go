@@ -290,7 +290,10 @@ func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
 		}
 		if !watchOnly || containsTaprootInput(tx) {
 
-			linearCombinations := getTaprootPubKeys(tx, w)
+			linearCombinations, err := getTaprootPubKeys(tx, w)
+			if err != nil {
+				return err
+			}
 			err = tx.AddAllInputScripts(w.FrostSigner, linearCombinations,
 				secretSource{w.Manager, addrmgrNs},
 			)
@@ -350,7 +353,7 @@ func containsTaprootInput(tx *txauthor.AuthoredTx) bool {
 	return false
 }
 
-func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*crypto.LinearCombination {
+func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) (map[string]*crypto.LinearCombination, error) {
 	linearCombinations := make(map[string]*crypto.LinearCombination)
 	for i := range tx.Tx.TxIn {
 		pkScript := tx.PrevScripts[i]
@@ -362,14 +365,19 @@ func getTaprootPubKeys(tx *txauthor.AuthoredTx, w *Wallet) map[string]*crypto.Li
 			}
 
 			for _, addr := range addrs {
-				lc, ok := w.btcAddrToLc[addr.String()]
-				if ok {
-					linearCombinations[addr.String()] = lc
+				ethAddr, err := w.AddressMapStorage.GetEthAddress(addr.String())
+				if err != nil {
+					return nil, err
 				}
+				lc, err := w.lcFromEthAddr(ethAddr)
+				if err != nil {
+					return nil, err
+				}
+				linearCombinations[addr.String()] = lc
 			}
 		}
 	}
-	return linearCombinations
+	return linearCombinations, nil
 }
 
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,

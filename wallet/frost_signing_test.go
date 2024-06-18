@@ -29,6 +29,10 @@ func TestFrostSigning(t *testing.T) {
 	w.Pk1 = pk1
 	w.Pk2 = pk2
 
+	storage, err := NewAddressMapStorage("")
+	require.NoError(t, err)
+	w.AddressMapStorage = storage
+
 	err = w.Unlock([]byte("world"), time.After(10*time.Minute))
 	require.NoError(t, err)
 

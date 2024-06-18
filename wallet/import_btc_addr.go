@@ -25,10 +25,13 @@ func (w *Wallet) ImportBtcAddressWithEthAddr(btcAddr, ethAddr string) (*btcec.Pu
 	if importedAddress != nil {
 		address := importedAddress.Address().EncodeAddress()
 		if btcAddr != "" && address != btcAddr {
-			return nil, fmt.Errorf("address mismatch: %s != %s", importedAddress, btcAddr)
+			return nil, fmt.Errorf("address mismatch: %s != %s",
+				importedAddress.Address().EncodeAddress(), btcAddr)
 		}
-		w.btcAddrToLc[address] = lc
-		w.btcAddrToEthAddr[address] = ethAddr
+		err := w.AddressMapStorage.SetEthAddress(address, ethAddr)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return pubKey, nil
@@ -52,22 +55,24 @@ func (w *Wallet) lcFromEthAddr(ethAddrStr string) (*crypto.LinearCombination, er
 		},
 	}
 
-	pk1, pk2, err := w.GetSignerPublicKeys()
-	if err != nil {
-		return nil, err
+	if w.Pk1 == nil {
+		return nil, fmt.Errorf("missing pk1")
+	}
+	if w.Pk2 == nil {
+		return nil, fmt.Errorf("missing pk2")
 	}
 
 	b1, _ := arguments.Pack(
-		pk1.X(),
-		pk1.Y(),
+		w.Pk1.X(),
+		w.Pk1.Y(),
 		ethAddr,
 	)
 	h1 := crypto.Sha256(b1)
 	c1FromAddr, _ := crypto.PrivKeyFromBytes(h1[:])
 
 	b2, _ := arguments.Pack(
-		pk2.X(),
-		pk2.Y(),
+		w.Pk2.X(),
+		w.Pk2.Y(),
 		ethAddr,
 	)
 	h2 := crypto.Sha256(b2)
