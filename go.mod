@@ -1,7 +1,7 @@
 module github.com/btcsuite/btcwallet
 
 require (
-	github.com/btcsuite/btcd v0.24.1-0.20240318151728-2fc99e0496d2
+	github.com/btcsuite/btcd v0.24.2-beta.rc1.0.20240625142744-cc26860b4026
 	github.com/btcsuite/btcd/btcec/v2 v2.2.2
 	github.com/btcsuite/btcd/btcutil v1.1.5
 	github.com/btcsuite/btcd/btcutil/psbt v1.1.8
@@ -33,8 +33,10 @@ require (
 require (
 	github.com/aead/siphash v1.0.1 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
+	github.com/btcsuite/winsvc v1.0.0 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.0 // indirect
 	github.com/decred/dcrd/lru v1.0.0 // indirect
+	github.com/golang/snappy v0.0.4 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
@@ -42,6 +44,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
+	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
 	go.etcd.io/bbolt v1.3.7 // indirect
 	golang.org/x/sys v0.8.0 // indirect
 	golang.org/x/text v0.9.0 // indirect
