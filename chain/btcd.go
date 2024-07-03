@@ -6,6 +6,7 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -577,4 +578,33 @@ func (c *RPCClient) LookupInputMempoolSpend(op wire.OutPoint) (
 	chainhash.Hash, bool) {
 
 	return getTxSpendingPrevOut(op, c.Client)
+}
+
+// MapRPCErr takes an error returned from calling RPC methods from various
+// chain backends and maps it to an defined error here. It uses the
+// `BtcdErrMap`, whose keys are btcd error strings and values are errors made
+// from bitcoind error strings.
+func (c *RPCClient) MapRPCErr(rpcErr error) error {
+	// Iterate the map and find the matching error.
+	for btcdErr, matchedErr := range BtcdErrMap {
+		// Match it against btcd's error.
+		if matchErrStr(rpcErr, btcdErr) {
+			return matchedErr
+		}
+	}
+
+	// If not matched, return the original error wrapped.
+	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
+}
+
+// SendRawTransaction sends a raw transaction via btcd.
+func (c *RPCClient) SendRawTransaction(tx *wire.MsgTx,
+	allowHighFees bool) (*chainhash.Hash, error) {
+
+	txid, err := c.Client.SendRawTransaction(tx, allowHighFees)
+	if err != nil {
+		return nil, c.MapRPCErr(err)
+	}
+
+	return txid, nil
 }

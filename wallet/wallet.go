@@ -22,7 +22,6 @@ import (
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
@@ -3793,25 +3792,18 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	}
 
 	txid := tx.TxHash()
-	_, err = chainClient.SendRawTransaction(tx, false)
-	if err == nil {
+	_, rpcErr := chainClient.SendRawTransaction(tx, false)
+	if rpcErr == nil {
 		return &txid, nil
 	}
 
-	// Map the error to an RPC-specific error type.
-	//
-	// NOTE: all the errors returned here are mapped to an error type
-	// defined in `rpcclient` package, where the error strings are taken
-	// from bitcoind.
-	rpcErr := rpcclient.MapRPCErr(err)
-
 	switch {
-	case errors.Is(rpcErr, rpcclient.ErrTxAlreadyInMempool):
+	case errors.Is(rpcErr, chain.ErrTxAlreadyInMempool):
 		log.Infof("%v: tx already in mempool", txid)
 		return &txid, nil
 
-	case errors.Is(rpcErr, rpcclient.ErrTxAlreadyKnown),
-		errors.Is(rpcErr, rpcclient.ErrTxAlreadyConfirmed):
+	case errors.Is(rpcErr, chain.ErrTxAlreadyKnown),
+		errors.Is(rpcErr, chain.ErrTxAlreadyConfirmed):
 
 		dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
