@@ -593,6 +593,36 @@ func (c *RPCClient) MapRPCErr(rpcErr error) error {
 		}
 	}
 
+	// If no matching error is found, we try to match it to an older
+	// version of `btcd`.
+	//
+	// Get the backend's version.
+	backend, bErr := c.BackendVersion()
+	if bErr != nil {
+		// If there's an error getting the backend version, we return
+		// the original error and the backend error.
+		return fmt.Errorf("%w: %v, failed to get backend version %v",
+			ErrUndefined, rpcErr, bErr)
+	}
+
+	// If this version doesn't support `testmempoolaccept`, it must be
+	// below v0.24.2. In this case, we will match the errors defined in
+	// pre-v0.24.2.
+	//
+	// NOTE: `testmempoolaccept` is implemented in v0.24.1, but this
+	// version was never tagged, which means it must be v0.24.2 when it's
+	// supported.
+	if !backend.SupportTestMempoolAccept() {
+		// If the backend is older than v0.24.2, we will try to match
+		// the error to the older version of `btcd`.
+		for btcdErr, matchedErr := range BtcdErrMapPre2402 {
+			// Match it against btcd's error.
+			if matchErrStr(rpcErr, btcdErr) {
+				return matchedErr
+			}
+		}
+	}
+
 	// If not matched, return the original error wrapped.
 	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
 }

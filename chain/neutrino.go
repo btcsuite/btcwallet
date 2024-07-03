@@ -831,6 +831,16 @@ func (s *NeutrinoClient) MapRPCErr(rpcErr error) error {
 		}
 	}
 
+	// Neutrino doesn't support version check, we will try to match the
+	// errors from the older version of `btcd`, which are also used by
+	// neutrino.
+	for btcdErr, matchedErr := range BtcdErrMapPre2402 {
+		// Match it against btcd's error.
+		if matchErrStr(rpcErr, btcdErr) {
+			return matchedErr
+		}
+	}
+
 	// If not matched, return the original error wrapped.
 	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
 }

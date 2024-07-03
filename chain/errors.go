@@ -477,6 +477,52 @@ var BtcdErrMap = map[string]error{
 	"max-fee-exceeded": ErrMaxFeeExceeded,
 }
 
+// BtcdErrMapPre2402 defines the error mapping for btcd versions prior to
+// 0.24.2 - all the errors changed in this commit have been defined here to
+// support older versions:
+// - https://github.com/btcsuite/btcd/pull/2053/commits/ef54c49df443815d50765e8c4f31a87944d950a6
+var BtcdErrMapPre2402 = map[string]error{
+	// A transaction with too large output value.
+	"is higher than max allowed value": ErrLargeOutput,
+
+	// A transaction that conflicts with an unconfirmed tx. Happens when
+	// RBF is not enabled.
+	"already spent by transaction": ErrMempoolConflict,
+
+	// When a transaction causes too many transactions being replaced. This
+	// is set by `MAX_REPLACEMENT_CANDIDATES` in `bitcoind` and defaults to
+	// 100.
+	"evicts more transactions than permitted": ErrTooManyReplacements,
+
+	// A transaction that spends conflicting tx outputs that are rejected.
+	"spends parent transaction": ErrConflictingTx,
+
+	// BIP125 related errors.
+	//
+	// When fee rate used or fees paid doesn't meet the requirements.
+	"has an insufficient fee rate":     ErrInsufficientFee,
+	"has an insufficient absolute fee": ErrInsufficientFee,
+
+	// A transaction in the mempool.
+	"already have transaction": ErrTxAlreadyInMempool,
+
+	// A coinbase transaction.
+	"is an individual coinbase": ErrCoinbaseTx,
+
+	// A transaction already in the blockchain.
+	"transaction already exists": ErrTxAlreadyConfirmed,
+
+	// Some nonstandard transactions - too large tx size.
+	"is larger than max allowed weight of": ErrTxTooLarge,
+
+	// Some nonstandard transactions - too large scriptSig (>1650
+	// bytes).
+	"bytes is larger than max allowed size of": ErrScriptSigSize,
+
+	// Some nonstandard transactions - output too small.
+	"is dust": ErrDust,
+}
+
 // matchErrStr takes an error returned from RPC client and matches it against
 // the specified string. If the expected string pattern is found in the error
 // passed, return true. Both the error strings are normalized before matching.
