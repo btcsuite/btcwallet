@@ -94,3 +94,7 @@ func (m *mockChainClient) TestMempoolAccept(txns []*wire.MsgTx,
 
 	return nil, nil
 }
+
+func (m *mockChainClient) MapRPCErr(err error) error {
+	return nil
+}

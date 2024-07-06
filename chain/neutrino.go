@@ -220,7 +220,7 @@ func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) 
 	*chainhash.Hash, error) {
 	err := s.CS.SendTransaction(tx)
 	if err != nil {
-		return nil, rpcclient.MapRPCErr(err)
+		return nil, s.MapRPCErr(err)
 	}
 	hash := tx.TxHash()
 	return &hash, nil
@@ -814,4 +814,33 @@ out:
 	s.Stop()
 	close(s.dequeueNotification)
 	s.wg.Done()
+}
+
+// MapRPCErr takes an error returned from calling RPC methods from various
+// chain backends and maps it to an defined error here. It uses the
+// `BtcdErrMap`, whose keys are btcd error strings and values are errors made
+// from bitcoind error strings.
+//
+// NOTE: we assume neutrino shares the same error strings as btcd.
+func (s *NeutrinoClient) MapRPCErr(rpcErr error) error {
+	// Iterate the map and find the matching error.
+	for btcdErr, matchedErr := range BtcdErrMap {
+		// Match it against btcd's error.
+		if matchErrStr(rpcErr, btcdErr) {
+			return matchedErr
+		}
+	}
+
+	// Neutrino doesn't support version check, we will try to match the
+	// errors from the older version of `btcd`, which are also used by
+	// neutrino.
+	for btcdErr, matchedErr := range BtcdErrMapPre2402 {
+		// Match it against btcd's error.
+		if matchErrStr(rpcErr, btcdErr) {
+			return matchedErr
+		}
+	}
+
+	// If not matched, return the original error wrapped.
+	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
 }

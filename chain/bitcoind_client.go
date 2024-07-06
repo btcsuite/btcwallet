@@ -214,7 +214,27 @@ func (c *BitcoindClient) GetTxOut(txHash *chainhash.Hash, index uint32,
 func (c *BitcoindClient) SendRawTransaction(tx *wire.MsgTx,
 	allowHighFees bool) (*chainhash.Hash, error) {
 
-	return c.chainConn.client.SendRawTransaction(tx, allowHighFees)
+	txid, err := c.chainConn.client.SendRawTransaction(tx, allowHighFees)
+	if err != nil {
+		return nil, c.MapRPCErr(err)
+	}
+
+	return txid, nil
+}
+
+// MapRPCErr takes an error returned from calling RPC methods from various
+// chain backends and maps it to an defined error here.
+func (c *BitcoindClient) MapRPCErr(rpcErr error) error {
+	// Try to match it against bitcoind's error.
+	for i := uint32(0); i < uint32(errSentinel); i++ {
+		err := RPCErr(i)
+		if matchErrStr(rpcErr, err.Error()) {
+			return err
+		}
+	}
+
+	// If not matched, return the original error wrapped.
+	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
 }
 
 // TestMempoolAcceptCmd returns result of mempool acceptance tests indicating
