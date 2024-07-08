@@ -24,19 +24,17 @@ require (
 	github.com/lightningnetwork/lnd/ticker v1.0.0
 	github.com/lightningnetwork/lnd/tlv v1.0.2
 	github.com/stretchr/testify v1.8.4
-	golang.org/x/crypto v0.7.0
-	golang.org/x/net v0.10.0
-	golang.org/x/term v0.8.0
+	golang.org/x/crypto v0.22.0
+	golang.org/x/net v0.24.0
+	golang.org/x/term v0.19.0
 	google.golang.org/grpc v1.53.0
 )
 
 require (
 	github.com/aead/siphash v1.0.1 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
-	github.com/btcsuite/winsvc v1.0.0 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.0 // indirect
 	github.com/decred/dcrd/lru v1.0.0 // indirect
-	github.com/golang/snappy v0.0.4 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
@@ -44,10 +42,9 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
-	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
 	go.etcd.io/bbolt v1.3.7 // indirect
-	golang.org/x/sys v0.8.0 // indirect
-	golang.org/x/text v0.9.0 // indirect
+	golang.org/x/sys v0.19.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto v0.0.0-20230110181048-76db0878b65f // indirect
 	google.golang.org/protobuf v1.30.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
@@ -55,3 +52,5 @@ require (
 )
 
 go 1.18
+
+replace github.com/btcsuite/btcd => github.com/yyforyongyu/btcd v0.21.0-beta.0.20240702184211-31cf2383abd1
