@@ -20,7 +20,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	flags "github.com/jessevdk/go-flags"
 	"github.com/lightninglabs/neutrino"
-	"github.com/stroomnetwork/btcwallet/internal/cfgutil"
+	"github.com/stroomnetwork/btcwallet/cfgutil"
 	"github.com/stroomnetwork/btcwallet/internal/legacy/keystore"
 	"github.com/stroomnetwork/btcwallet/netparams"
 	"github.com/stroomnetwork/btcwallet/wallet"
@@ -45,7 +45,7 @@ var (
 	defaultLogDir      = filepath.Join(defaultAppDataDir, defaultLogDirname)
 )
 
-type config struct {
+type Config struct {
 	// General application behavior
 	ConfigFile      *cfgutil.ExplicitString `short:"C" long:"configfile" description:"Path to configuration file"`
 	ShowVersion     bool                    `short:"V" long:"version" description:"Display version information and exit"`
@@ -245,21 +245,8 @@ func parseAndSetDebugLevels(debugLevel string) error {
 	return nil
 }
 
-// loadConfig initializes and parses the config using a config file and command
-// line options.
-//
-// The configuration proceeds as follows:
-//  1. Start with a default config with sane settings
-//  2. Pre-parse the command line to check for an alternative config file
-//  3. Load configuration file overwriting defaults with any specified options
-//  4. Parse CLI options and overwrite/add any specified options
-//
-// The above results in btcwallet functioning properly without any config
-// settings while still allowing the user to override settings with config files
-// and command line options.  Command line options always take precedence.
-func loadConfig() (*config, []string, error) {
-	// Default config.
-	cfg := config{
+func DefaultConfig() *Config {
+	return &Config{
 		DebugLevel:             defaultLogLevel,
 		ConfigFile:             cfgutil.NewExplicitString(defaultConfigFile),
 		AppDataDir:             cfgutil.NewExplicitString(defaultAppDataDir),
@@ -279,6 +266,22 @@ func loadConfig() (*config, []string, error) {
 		BanThreshold:           neutrino.BanThreshold,
 		DBTimeout:              wallet.DefaultDBTimeout,
 	}
+}
+
+// parseAndLoadConfig initializes and parses the config using a config file and command
+// line options.
+//
+// The configuration proceeds as follows:
+//  1. Start with a default config with sane settings
+//  2. Pre-parse the command line to check for an alternative config file
+//  3. Load configuration file overwriting defaults with any specified options
+//  4. Parse CLI options and overwrite/add any specified options
+//
+// The above results in btcwallet functioning properly without any config
+// settings while still allowing the user to override settings with config files
+// and command line options.  Command line options always take precedence.
+func parseAndLoadConfig() (*Config, []string, error) {
+	cfg := DefaultConfig()
 
 	// Pre-parse the command line options to see if an alternative config
 	// file or the version flag was specified.
@@ -293,10 +296,9 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Show the version and exit if the version flag was specified.
-	funcName := "loadConfig"
 	appName := filepath.Base(os.Args[0])
 	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
-	usageMessage := fmt.Sprintf("Use %s -h to show usage", appName)
+
 	if preCfg.ShowVersion {
 		fmt.Println(appName, "version", version())
 		os.Exit(0)
@@ -336,6 +338,24 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	err = loadConfig(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+
+	// Warn about missing config file after the final command line parse
+	// succeeds.  This prevents the warning on help messages and invalid
+	// options.
+	if configFileError != nil {
+		log.Warnf("%v", configFileError)
+	}
+
+	return cfg, remainingArgs, nil
+}
+
+func loadConfig(cfg *Config) error {
+	funcName := "loadConfig"
 	// Check deprecated aliases.  The new options receive priority when both
 	// are changed from the default.
 	if cfg.DataDir.ExplicitlySet() {
@@ -382,12 +402,7 @@ func loadConfig() (*config, []string, error) {
 		if cfg.SigNetChallenge != "" {
 			challenge, err := hex.DecodeString(cfg.SigNetChallenge)
 			if err != nil {
-				str := "%s: Invalid signet challenge, hex " +
-					"decode failed: %v"
-				err := fmt.Errorf(str, funcName, err)
-				fmt.Fprintln(os.Stderr, err)
-				fmt.Fprintln(os.Stderr, usageMessage)
-				return nil, nil, err
+				return fmt.Errorf("%s: Invalid signet challenge, hex decode failed: %v", funcName, err)
 			}
 			sigNetChallenge = challenge
 		}
@@ -412,10 +427,7 @@ func loadConfig() (*config, []string, error) {
 	if numNets > 1 {
 		str := "%s: The testnet, signet and simnet params can't be " +
 			"used together -- choose one"
-		err := fmt.Errorf(str, "loadConfig")
-		fmt.Fprintln(os.Stderr, err)
-		parser.WriteHelp(os.Stderr)
-		return nil, nil, err
+		return fmt.Errorf(str, funcName)
 	}
 
 	// Append the network type to the log directory so it is "namespaced"
@@ -435,10 +447,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Parse, validate, and set debug log level(s).
 	if err := parseAndSetDebugLevels(cfg.DebugLevel); err != nil {
-		err := fmt.Errorf("%s: %w", "loadConfig", err)
-		fmt.Fprintln(os.Stderr, err)
-		parser.WriteHelp(os.Stderr)
-		return nil, nil, err
+		return fmt.Errorf("%s: %w", funcName, err)
 	}
 
 	// Exit if you try to use a simulation wallet with a standard
@@ -462,16 +471,13 @@ func loadConfig() (*config, []string, error) {
 	dbPath := filepath.Join(netDir, wallet.WalletDBName)
 
 	if cfg.CreateTemp && cfg.Create {
-		err := fmt.Errorf("the flags --create and --createtemp can not " +
+		return fmt.Errorf("the flags --create and --createtemp can not " +
 			"be specified together. Use --help for more information")
-		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
 	}
 
 	dbFileExists, err := cfgutil.FileExists(dbPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
+		return err
 	}
 
 	if cfg.CreateTemp { // nolint:gocritic
@@ -486,37 +492,32 @@ func loadConfig() (*config, []string, error) {
 
 		// Ensure the data directory for the network exists.
 		if err := checkCreateDir(netDir); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
+			return err
 		}
 
 		if !tempWalletExists {
 			// Perform the initial wallet creation wizard.
-			if err := createSimulationWallet(&cfg); err != nil {
-				fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
-				return nil, nil, err
+			if err := createSimulationWallet(cfg); err != nil {
+				return fmt.Errorf("unable to create wallet: %w", err)
 			}
 		}
 	} else if cfg.Create {
 		// Error if the create flag is set and the wallet already
 		// exists.
 		if dbFileExists {
-			err := fmt.Errorf("the wallet database file `%v` "+
+			return fmt.Errorf("the wallet database file `%v` "+
 				"already exists", dbPath)
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
 		}
 
 		// Ensure the data directory for the network exists.
 		if err := checkCreateDir(netDir); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
+			return err
 		}
 
 		// Perform the initial wallet creation wizard.
-		if err := createWallet(&cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "Unable to create wallet:", err)
-			return nil, nil, err
+		if err := createWallet(cfg); err != nil {
+
+			return fmt.Errorf("unable to create wallet: %w", err)
 		}
 
 		// Created successfully, so exit now with success.
@@ -525,8 +526,7 @@ func loadConfig() (*config, []string, error) {
 		keystorePath := filepath.Join(netDir, keystore.Filename)
 		keystoreExists, err := cfgutil.FileExists(keystorePath)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
+			return err
 		}
 		if !keystoreExists {
 			err = fmt.Errorf("the wallet does not exist, run with " +
@@ -535,8 +535,7 @@ func loadConfig() (*config, []string, error) {
 			err = fmt.Errorf("the wallet is in legacy format, run " +
 				"with the --create option to import it")
 		}
-		fmt.Fprintln(os.Stderr, err)
-		return nil, nil, err
+		return err
 	}
 
 	localhostListeners := map[string]struct{}{
@@ -558,24 +557,19 @@ func loadConfig() (*config, []string, error) {
 		cfg.RPCConnect, err = cfgutil.NormalizeAddress(cfg.RPCConnect,
 			activeNet.RPCClientPort)
 		if err != nil {
-			fmt.Fprintf(os.Stderr,
-				"Invalid rpcconnect network address: %v\n", err)
-			return nil, nil, err
+			return fmt.Errorf("invalid rpcconnect network address: %w", err)
 		}
 
 		RPCHost, _, err := net.SplitHostPort(cfg.RPCConnect)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		if cfg.DisableClientTLS {
 			if _, ok := localhostListeners[RPCHost]; !ok {
 				str := "%s: the --noclienttls option may not be used " +
 					"when connecting RPC to non localhost " +
 					"addresses: %s"
-				err := fmt.Errorf(str, funcName, cfg.RPCConnect)
-				fmt.Fprintln(os.Stderr, err)
-				fmt.Fprintln(os.Stderr, usageMessage)
-				return nil, nil, err
+				return fmt.Errorf(str, funcName, cfg.RPCConnect)
 			}
 		} else {
 			// If CAFile is unset, choose either the copy or local btcd cert.
@@ -586,16 +580,14 @@ func loadConfig() (*config, []string, error) {
 				// a local btcd and switch to its RPC cert if it exists.
 				certExists, err := cfgutil.FileExists(cfg.CAFile.Value)
 				if err != nil {
-					fmt.Fprintln(os.Stderr, err)
-					return nil, nil, err
+					return err
 				}
 				if !certExists {
 					if _, ok := localhostListeners[RPCHost]; ok {
 						btcdCertExists, err := cfgutil.FileExists(
 							btcdDefaultCAFile)
 						if err != nil {
-							fmt.Fprintln(os.Stderr, err)
-							return nil, nil, err
+							return err
 						}
 						if btcdCertExists {
 							cfg.CAFile.Value = btcdDefaultCAFile
@@ -614,7 +606,7 @@ func loadConfig() (*config, []string, error) {
 	if len(cfg.ExperimentalRPCListeners) == 0 && len(cfg.LegacyRPCListeners) == 0 {
 		addrs, err := net.LookupHost("localhost")
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		cfg.LegacyRPCListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
@@ -628,16 +620,12 @@ func loadConfig() (*config, []string, error) {
 	cfg.LegacyRPCListeners, err = cfgutil.NormalizeAddresses(
 		cfg.LegacyRPCListeners, activeNet.RPCServerPort)
 	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"Invalid network address in legacy RPC listeners: %v\n", err)
-		return nil, nil, err
+		return fmt.Errorf("invalid network address in legacy RPC listeners: %w", err)
 	}
 	cfg.ExperimentalRPCListeners, err = cfgutil.NormalizeAddresses(
 		cfg.ExperimentalRPCListeners, activeNet.RPCServerPort)
 	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"Invalid network address in RPC listeners: %v\n", err)
-		return nil, nil, err
+		return fmt.Errorf("invalid network address in RPC listeners: %w", err)
 	}
 
 	// Both RPC servers may not listen on the same interface/port.
@@ -649,11 +637,9 @@ func loadConfig() (*config, []string, error) {
 		for _, addr := range cfg.ExperimentalRPCListeners {
 			_, seen := seenAddresses[addr]
 			if seen {
-				err := fmt.Errorf("address `%s` may not be "+
+				return fmt.Errorf("address `%s` may not be "+
 					"used as a listener address for both "+
 					"RPC servers", addr)
-				fmt.Fprintln(os.Stderr, err)
-				return nil, nil, err
 			}
 		}
 	}
@@ -668,19 +654,13 @@ func loadConfig() (*config, []string, error) {
 			if err != nil {
 				str := "%s: RPC listen interface '%s' is " +
 					"invalid: %v"
-				err := fmt.Errorf(str, funcName, addr, err)
-				fmt.Fprintln(os.Stderr, err)
-				fmt.Fprintln(os.Stderr, usageMessage)
-				return nil, nil, err
+				return fmt.Errorf(str, funcName, addr, err)
 			}
 			if _, ok := localhostListeners[host]; !ok {
 				str := "%s: the --noservertls option may not be used " +
 					"when binding RPC to non localhost " +
 					"addresses: %s"
-				err := fmt.Errorf(str, funcName, addr)
-				fmt.Fprintln(os.Stderr, err)
-				fmt.Fprintln(os.Stderr, usageMessage)
-				return nil, nil, err
+				return fmt.Errorf(str, funcName, addr)
 			}
 		}
 	}
@@ -701,12 +681,5 @@ func loadConfig() (*config, []string, error) {
 		cfg.BtcdPassword = cfg.Password
 	}
 
-	// Warn about missing config file after the final command line parse
-	// succeeds.  This prevents the warning on help messages and invalid
-	// options.
-	if configFileError != nil {
-		log.Warnf("%v", configFileError)
-	}
-
-	return &cfg, remainingArgs, nil
+	return nil
 }

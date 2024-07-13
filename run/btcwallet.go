@@ -5,6 +5,7 @@
 package run
 
 import (
+	"fmt"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stroomnetwork/frost"
 	"net"
@@ -22,17 +23,36 @@ import (
 )
 
 var (
-	cfg *config
+	cfg *Config
 )
 
-func InitWallet(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chain.BitcoindConfig) (*wallet.Wallet, error) {
-	// Load configuration and parse command line.  This function also
-	// initializes logging and configures it accordingly.
-	tcfg, _, err := loadConfig()
+// InitWallet Load configuration and parse command line. This function also
+// initializes logging and configures it accordingly.
+func InitWallet(signer frost.Signer, pk1, pk2 *btcec.PublicKey,
+	bitcoindConfig *chain.BitcoindConfig) (*wallet.Wallet, error) {
+
+	tcfg, _, err := parseAndLoadConfig()
 	if err != nil {
 		return nil, err
 	}
+	return doInit(signer, pk1, pk2, bitcoindConfig, tcfg)
+}
+
+// InitWalletWithConfig creates a new instance of the wallet with provided config
+func InitWalletWithConfig(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chain.BitcoindConfig,
+	walletConfig *Config) (*wallet.Wallet, error) {
+	err := loadConfig(walletConfig)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return nil, err
+	}
+
+	return doInit(signer, pk1, pk2, bitcoindConfig, walletConfig)
+}
+
+func doInit(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chain.BitcoindConfig, tcfg *Config) (*wallet.Wallet, error) {
 	cfg = tcfg
+
 	defer func() {
 		if logRotator != nil {
 			logRotator.Close()

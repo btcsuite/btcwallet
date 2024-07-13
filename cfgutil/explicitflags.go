@@ -21,6 +21,10 @@ func NewExplicitString(defaultValue string) *ExplicitString {
 	return &ExplicitString{Value: defaultValue, explicitlySet: false}
 }
 
+func SetExplicitString(value string) *ExplicitString {
+	return &ExplicitString{Value: value, explicitlySet: true}
+}
+
 // ExplicitlySet returns whether the flag was explicitly set through the
 // flags.Unmarshaler interface.
 func (e *ExplicitString) ExplicitlySet() bool { return e.explicitlySet }

@@ -98,7 +98,7 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) {
 // createWallet prompts the user for information needed to generate a new wallet
 // and generates the wallet accordingly.  The new wallet will reside at the
 // provided path.
-func createWallet(cfg *config) error {
+func createWallet(cfg *Config) error {
 	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 	loader := wallet.NewLoader(
 		activeNet.Params, dbDir, true, cfg.DBTimeout, 250,
@@ -200,7 +200,7 @@ func createWallet(cfg *config) error {
 
 // createSimulationWallet is intended to be called from the rpcclient
 // and used to create a wallet for actors involved in simulations.
-func createSimulationWallet(cfg *config) error {
+func createSimulationWallet(cfg *Config) error {
 	// Simulation wallet password is 'password'.
 	privPass := []byte("password")
 
