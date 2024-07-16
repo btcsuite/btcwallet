@@ -2,15 +2,18 @@ package wallet
 
 import (
 	"encoding/hex"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
-
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -303,5 +306,56 @@ func TestGetTransaction(t *testing.T) {
 			// Check the block height.
 			require.Equal(t, test.expectedHeight, tx.Height)
 		})
+	}
+}
+
+// TestDuplicateAddressDerivation tests that duplicate addresses are not
+// derived when multiple goroutines are concurrently requesting new addresses.
+func TestDuplicateAddressDerivation(t *testing.T) {
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	var (
+		m           sync.Mutex
+		globalAddrs = make(map[string]btcutil.Address)
+	)
+
+	for o := 0; o < 10; o++ {
+		var eg errgroup.Group
+
+		for n := 0; n < 10; n++ {
+			eg.Go(func() error {
+				addrs := make([]btcutil.Address, 10)
+				for i := 0; i < 10; i++ {
+					addr, err := w.NewAddress(
+						0, waddrmgr.KeyScopeBIP0084,
+					)
+					if err != nil {
+						return err
+					}
+
+					addrs[i] = addr
+				}
+
+				m.Lock()
+				defer m.Unlock()
+
+				for idx := range addrs {
+					addrStr := addrs[idx].String()
+					if a, ok := globalAddrs[addrStr]; ok {
+						return fmt.Errorf("duplicate "+
+							"address! already "+
+							"have %v, want to "+
+							"add %v", a, addrs[idx])
+					}
+
+					globalAddrs[addrStr] = addrs[idx]
+				}
+
+				return nil
+			})
+		}
+
+		require.NoError(t, eg.Wait())
 	}
 }

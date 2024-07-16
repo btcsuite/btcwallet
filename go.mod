@@ -26,6 +26,7 @@ require (
 	github.com/stretchr/testify v1.8.4
 	golang.org/x/crypto v0.7.0
 	golang.org/x/net v0.10.0
+	golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f
 	golang.org/x/term v0.8.0
 	google.golang.org/grpc v1.53.0
 )
@@ -33,10 +34,8 @@ require (
 require (
 	github.com/aead/siphash v1.0.1 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
-	github.com/btcsuite/winsvc v1.0.0 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.0 // indirect
 	github.com/decred/dcrd/lru v1.0.0 // indirect
-	github.com/golang/snappy v0.0.4 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
@@ -44,7 +43,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
-	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
 	go.etcd.io/bbolt v1.3.7 // indirect
 	golang.org/x/sys v0.8.0 // indirect
 	golang.org/x/text v0.9.0 // indirect
