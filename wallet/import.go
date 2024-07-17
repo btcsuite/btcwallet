@@ -381,7 +381,7 @@ func (w *Wallet) ImportAccountDryRun(name string,
 // intend to not support importing BIP-44 keys into the wallet using the legacy
 // pay-to-pubkey-hash (P2PKH) scheme.
 func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
-	addrType waddrmgr.AddressType) error {
+	addrType waddrmgr.AddressType, bs *waddrmgr.BlockStamp, rescan bool) error {
 
 	// Determine what key scope the public key should belong to and import
 	// it into the key scope's default imported account.
@@ -410,7 +410,31 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		addr, err = scopedKeyManager.ImportPublicKey(ns, pubKey, nil)
-		return err
+		if err != nil {
+			return err
+		}
+
+		// We'll only update our birthday with the new one if it is
+		// before our current one. Otherwise, if we do, we can
+		// potentially miss detecting relevant chain events that
+		// occurred between them while rescanning.
+		birthdayBlock, _, err := w.Manager.BirthdayBlock(ns)
+		if err != nil {
+			return err
+		}
+		if bs.Height >= birthdayBlock.Height {
+			return nil
+		}
+
+		err = w.Manager.SetBirthday(ns, bs.Timestamp)
+		if err != nil {
+			return err
+		}
+
+		// To ensure this birthday block is correct, we'll mark it as
+		// unverified to prompt a sanity check at the next restart to
+		// ensure it is correct as it was provided by the caller.
+		return w.Manager.SetBirthdayBlock(ns, *bs, false)
 	})
 	if err != nil {
 		return err
@@ -418,10 +442,35 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 
 	log.Infof("Imported address %v", addr.Address())
 
-	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
-	if err != nil {
-		return fmt.Errorf("unable to subscribe for address "+
-			"notifications: %w", err)
+	// Rescan blockchain for transactions with txout scripts paying to the
+	// imported address.
+	if rescan {
+		log.Infof("Rescanning oooooo 09")
+		job := &RescanJob{
+			Addrs:      []btcutil.Address{addr.Address()},
+			OutPoints:  nil,
+			BlockStamp: *bs,
+		}
+
+		// Submit rescan job and log when the import has completed.
+		// Do not block on finishing the rescan.  The rescan success
+		// or failure is logged elsewhere, and the channel is not
+		// required to be read, so discard the return value.
+		errChan := w.SubmitRescan(job)
+
+		err = <-errChan
+		if err != nil {
+			return err
+		}
+
+	} else {
+		err = w.chainClient.NotifyReceived(
+			[]btcutil.Address{addr.Address()},
+		)
+		if err != nil {
+			return fmt.Errorf("unable to subscribe for address "+
+				"notifications: %w", err)
+		}
 	}
 
 	return nil

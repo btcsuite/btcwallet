@@ -204,7 +204,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedScope, acct2.KeyScope)
 
-	err = w.ImportPublicKey(acct3ExternalPub, tc.addrType)
+	err = w.ImportPublicKey(acct3ExternalPub, tc.addrType, nil, false)
 	require.NoError(t, err)
 
 	// If the wallet is watch only, there is no default account and our
