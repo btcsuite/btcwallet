@@ -160,6 +160,18 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		strategy = CoinSelectionLargest
 	}
 
+	// The addrMgrWithChangeSource function of the wallet creates a
+	// new change address. The address manager uses OnCommit on the
+	// walletdb tx to update the in-memory state of the account
+	// state. But because the commit happens _after_ the account
+	// manager internal lock has been released, there is a chance
+	// for the address index to be accessed concurrently, even
+	// though the closure in OnCommit re-acquires the lock. To avoid
+	// this issue, we surround the whole address creation process
+	// with a lock.
+	w.newAddrMtx.Lock()
+	defer w.newAddrMtx.Unlock()
+
 	var tx *txauthor.AuthoredTx
 	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 		addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
