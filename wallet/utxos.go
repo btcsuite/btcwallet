@@ -107,6 +107,8 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 // full transaction, the target txout, the derivation info and the number of
 // confirmations are returned. Otherwise, a non-nil error value of ErrNotMine
 // is returned instead.
+//
+// NOTE: This method is kept for compatibility.
 func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
 	*wire.TxOut, *psbt.Bip32Derivation, int64, error) {
 
@@ -115,28 +117,9 @@ func (w *Wallet) FetchInputInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
 		return nil, nil, nil, 0, err
 	}
 
-	pkScript := txOut.PkScript
-	addr, err := w.fetchOutputAddr(pkScript)
+	derivation, err := w.FetchDerivationInfo(txOut.PkScript)
 	if err != nil {
 		return nil, nil, nil, 0, err
-	}
-
-	pubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return nil, nil, nil, 0, ErrNotMine
-	}
-	keyScope, derivationPath, _ := pubKeyAddr.DerivationInfo()
-
-	derivation := &psbt.Bip32Derivation{
-		PubKey:               pubKeyAddr.PubKey().SerializeCompressed(),
-		MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
-		Bip32Path: []uint32{
-			keyScope.Purpose + hdkeychain.HardenedKeyStart,
-			keyScope.Coin + hdkeychain.HardenedKeyStart,
-			derivationPath.Account,
-			derivationPath.Branch,
-			derivationPath.Index,
-		},
 	}
 
 	return tx, txOut, derivation, confs, nil
@@ -209,4 +192,35 @@ func (w *Wallet) FetchOutpointInfo(prevOut *wire.OutPoint) (*wire.MsgTx,
 		Value:    txDetail.TxRecord.MsgTx.TxOut[prevOut.Index].Value,
 		PkScript: pkScript,
 	}, confs, nil
+}
+
+// FetchDerivationInfo queries for the wallet's knowledge of the passed
+// pkScript and constructs the derivation info and returns it.
+func (w *Wallet) FetchDerivationInfo(pkScript []byte) (*psbt.Bip32Derivation,
+	error) {
+
+	addr, err := w.fetchOutputAddr(pkScript)
+	if err != nil {
+		return nil, err
+	}
+
+	pubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, ErrNotMine
+	}
+	keyScope, derivationPath, _ := pubKeyAddr.DerivationInfo()
+
+	derivation := &psbt.Bip32Derivation{
+		PubKey:               pubKeyAddr.PubKey().SerializeCompressed(),
+		MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
+		Bip32Path: []uint32{
+			keyScope.Purpose + hdkeychain.HardenedKeyStart,
+			keyScope.Coin + hdkeychain.HardenedKeyStart,
+			derivationPath.Account,
+			derivationPath.Branch,
+			derivationPath.Index,
+		},
+	}
+
+	return derivation, nil
 }

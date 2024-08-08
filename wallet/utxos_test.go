@@ -128,3 +128,38 @@ func TestFetchOutpointInfo(t *testing.T) {
 	require.Equal(t, utxOut.PkScript, tx.TxOut[prevOut.Index].PkScript)
 	require.Equal(t, int64(0-testBlockHeight), confirmations)
 }
+
+// TestFetchDerivationInfo checks that the wallet can gather the derivation
+// info about an output based on the pkScript.
+func TestFetchDerivationInfo(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create an address we can use to send some coins to.
+	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+	p2shAddr, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// Add an output paying to the wallet's address to the database.
+	utxOut := wire.NewTxOut(100000, p2shAddr)
+	incomingTx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{utxOut},
+	}
+	addUtxo(t, w, incomingTx)
+
+	info, err := w.FetchDerivationInfo(utxOut.PkScript)
+	require.NoError(t, err)
+
+	require.Len(t, info.Bip32Path, 5)
+	require.Equal(t, waddrmgr.KeyScopeBIP0084.Purpose+
+		hdkeychain.HardenedKeyStart, info.Bip32Path[0])
+	require.Equal(t, waddrmgr.KeyScopeBIP0084.Coin+
+		hdkeychain.HardenedKeyStart, info.Bip32Path[1])
+	require.EqualValues(t, hdkeychain.HardenedKeyStart, info.Bip32Path[2])
+	require.Equal(t, uint32(0), info.Bip32Path[3])
+	require.Equal(t, uint32(0), info.Bip32Path[4])
+}
