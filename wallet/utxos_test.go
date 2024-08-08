@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/stretchr/testify/require"
 )
 
 // TestFetchInputInfo checks that the wallet can gather information about an
@@ -89,4 +90,41 @@ func TestFetchInputInfo(t *testing.T) {
 		t.Fatalf("unexpected number of confirmations, got %d wanted %d",
 			confirmations, 0-testBlockHeight)
 	}
+}
+
+// TestFetchOutpointInfo checks that the wallet can gather information about an
+// output based on the outpoint.
+func TestFetchOutpointInfo(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create an address we can use to send some coins to.
+	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+	p2shAddr, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// Add an output paying to the wallet's address to the database.
+	utxOut := wire.NewTxOut(100000, p2shAddr)
+	incomingTx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{utxOut},
+	}
+	addUtxo(t, w, incomingTx)
+
+	// Look up the UTXO for the outpoint now and compare it to our
+	// expectations.
+	prevOut := &wire.OutPoint{
+		Hash:  incomingTx.TxHash(),
+		Index: 0,
+	}
+	tx, out, confirmations, err := w.FetchOutpointInfo(prevOut)
+	require.NoError(t, err)
+
+	require.Equal(t, utxOut.PkScript, out.PkScript)
+	require.Equal(t, utxOut.Value, out.Value)
+	require.Equal(t, utxOut.PkScript, tx.TxOut[prevOut.Index].PkScript)
+	require.Equal(t, int64(0-testBlockHeight), confirmations)
 }
