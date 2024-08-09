@@ -280,6 +280,8 @@ func (w *Wallet) quitChan() <-chan struct{} {
 
 // Stop signals all wallet goroutines to shutdown.
 func (w *Wallet) Stop() {
+	w.endRecoveryAndWait()
+
 	w.quitMu.Lock()
 	quit := w.quit
 	w.quitMu.Unlock()
@@ -1380,6 +1382,23 @@ type (
 	heldUnlock chan struct{}
 )
 
+// endRecoveryAndWait tells (*Wallet).recovery to stop, if running, and waits
+// for it to exit.
+func (w *Wallet) endRecoveryAndWait() {
+	if recoverySyncI := w.recovering.Load(); recoverySyncI != nil {
+		recoverySync := recoverySyncI.(*recoverySyncer)
+
+		// If recovery is still running, it will end early with an error
+		// once we set the quit flag.
+		atomic.StoreUint32(&recoverySync.quit, 1)
+
+		select {
+		case <-recoverySync.done:
+		case <-w.quitChan():
+		}
+	}
+}
+
 // walletLocker manages the locked/unlocked state of a wallet.
 func (w *Wallet) walletLocker() {
 	var timeout <-chan time.Time
@@ -1472,19 +1491,7 @@ out:
 
 		// We can't lock the manager if recovery is active because we use
 		// cryptoKeyPriv and cryptoKeyScript in recovery.
-		if recoverySyncI := w.recovering.Load(); recoverySyncI != nil {
-			recoverySync := recoverySyncI.(*recoverySyncer)
-			// If recovery is still running, it will end early with an error
-			// once we set the quit flag.
-			atomic.StoreUint32(&recoverySync.quit, 1)
-
-			select {
-			case <-recoverySync.done:
-			case <-quit:
-				break out
-			}
-
-		}
+		w.endRecoveryAndWait()
 
 		timeout = nil
 		err := w.Manager.Lock()
