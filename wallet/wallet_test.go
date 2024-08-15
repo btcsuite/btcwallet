@@ -3,12 +3,16 @@ package wallet
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -357,5 +361,127 @@ func TestDuplicateAddressDerivation(t *testing.T) {
 		}
 
 		require.NoError(t, eg.Wait())
+	}
+}
+
+func TestEndRecovery(t *testing.T) {
+	// This is an unconventional unit test, but I'm trying to keep things as
+	// succint as possible so that this test is readable without having to mock
+	// up literally everything.
+	// The unmonitored goroutine we're looking at is pretty deep:
+	// SynchronizeRPC -> handleChainNotifications -> syncWithChain -> recovery
+	// The "deadlock" we're addressing isn't actually a deadlock, but the wallet
+	// will hang on Stop() -> WaitForShutdown() until (*Wallet).recovery gets
+	// every single block, which could be hours depending on hardware and
+	// network factors. The WaitGroup is incremented in SynchronizeRPC, and
+	// WaitForShutdown will not return until handleChainNotifications returns,
+	// which is blocked by a running (*Wallet).recovery loop.
+	// It is noted that the conditions for long recovery are difficult to hit
+	// when using btcwallet with a fresh seed, because it requires an early
+	// birthday to be set or established.
+
+	w, cleanup := testWallet(t)
+
+	blockHashCalled := make(chan struct{})
+
+	chainClient := &mockChainClient{
+		// Force the loop to iterate about forever.
+		getBestBlockHeight: math.MaxInt32,
+		// Get control of when the loop iterates.
+		getBlockHashFunc: func() (*chainhash.Hash, error) {
+			blockHashCalled <- struct{}{}
+			return &chainhash.Hash{}, nil
+		},
+		// Avoid a panic.
+		getBlockHeader: &wire.BlockHeader{},
+	}
+
+	recoveryDone := make(chan struct{})
+	go func() {
+		defer close(recoveryDone)
+		w.recovery(chainClient, &waddrmgr.BlockStamp{})
+	}()
+
+	getBlockHashCalls := func(expCalls int) {
+		var i int
+		for {
+			select {
+			case <-blockHashCalled:
+				i++
+			case <-time.After(time.Second):
+				t.Fatal("expected BlockHash to be called")
+			}
+			if i == expCalls {
+				break
+			}
+		}
+	}
+
+	// Recovery is running.
+	getBlockHashCalls(3)
+
+	// Closing the quit channel, e.g. Stop() without endRecovery, alone will not
+	// end the recovery loop.
+	w.quitMu.Lock()
+	close(w.quit)
+	w.quitMu.Unlock()
+	// Continues scanning.
+	getBlockHashCalls(3)
+
+	// We're done with this one
+	atomic.StoreUint32(&w.recovering.Load().(*recoverySyncer).quit, 1)
+	select {
+	case <-blockHashCalled:
+	case <-recoveryDone:
+	}
+	cleanup()
+
+	// Try again.
+	w, cleanup = testWallet(t)
+	defer cleanup()
+
+	// We'll catch the error to make sure we're hitting our desired path. The
+	// WaitGroup isn't required for the test, but does show how it completes
+	// shutdown at a higher level.
+	var err error
+	w.wg.Add(1)
+	recoveryDone = make(chan struct{})
+	go func() {
+		defer w.wg.Done()
+		defer close(recoveryDone)
+		err = w.recovery(chainClient, &waddrmgr.BlockStamp{})
+	}()
+
+	waitedForShutdown := make(chan struct{})
+	go func() {
+		w.WaitForShutdown()
+		close(waitedForShutdown)
+	}()
+
+	// Recovery is running.
+	getBlockHashCalls(3)
+
+	// endRecovery is required to exit the unmonitored goroutine.
+	end := w.endRecovery()
+	select {
+	case <-blockHashCalled:
+	case <-recoveryDone:
+	}
+	<-end
+
+	// testWallet starts a couple of other unrelated goroutines that need to be
+	// killed, so we still need to close the quit channel.
+	w.quitMu.Lock()
+	close(w.quit)
+	w.quitMu.Unlock()
+
+	select {
+	case <-waitedForShutdown:
+	case <-time.After(time.Second):
+		t.Fatal("WaitForShutdown never returned")
+	}
+
+	if !strings.EqualFold(err.Error(), "recovery: forced shutdown") {
+		t.Fatal("wrong error")
 	}
 }
