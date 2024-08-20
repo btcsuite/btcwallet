@@ -518,7 +518,7 @@ func loadConfig(cfg *Config) error {
 		}
 
 		// Created successfully, so exit now with success.
-		return nil
+		os.Exit(0)
 	} else if !dbFileExists && !cfg.NoInitialLoad {
 		keystorePath := filepath.Join(netDir, keystore.Filename)
 		keystoreExists, err := cfgutil.FileExists(keystorePath)
