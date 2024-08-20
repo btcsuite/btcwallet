@@ -1208,6 +1208,7 @@ type (
 		selectUtxos           []wire.OutPoint
 		allowUtxo             func(wtxmgr.Credit) bool
 		redemptionID          uint32
+		data                  []byte
 	}
 	createTxResponse struct {
 		tx  *txauthor.AuthoredTx
@@ -1250,7 +1251,7 @@ out:
 				txr.changeKeyScope, txr.account, txr.minconf,
 				txr.feeSatPerKB, txr.coinSelectionStrategy,
 				txr.dryRun, txr.selectUtxos, txr.allowUtxo,
-				txr.redemptionID,
+				txr.redemptionID, txr.data,
 			)
 
 			release()
@@ -1328,17 +1329,17 @@ func WithUtxoFilter(allowUtxo func(utxo wtxmgr.Credit) bool) TxCreateOption {
 func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 	account uint32, outputs []*wire.TxOut, minconf int32,
 	satPerKb btcutil.Amount, coinSelectionStrategy CoinSelectionStrategy,
-	dryRun bool, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
+	dryRun bool, data []byte, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
 
 	return w.CreateSimpleTxWithRedemptionId(
 		coinSelectKeyScope, account, outputs, minconf, satPerKb,
-		coinSelectionStrategy, dryRun, 0, optFuncs...)
+		coinSelectionStrategy, dryRun, 0, data, optFuncs...)
 }
 
 func (w *Wallet) CreateSimpleTxWithRedemptionId(coinSelectKeyScope *waddrmgr.KeyScope,
 	account uint32, outputs []*wire.TxOut, minconf int32,
 	satPerKb btcutil.Amount, coinSelectionStrategy CoinSelectionStrategy,
-	dryRun bool, redemptionId uint32, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
+	dryRun bool, redemptionId uint32, data []byte, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
 
 	opts := defaultTxCreateOptions()
 	for _, optFunc := range optFuncs {
@@ -1364,6 +1365,7 @@ func (w *Wallet) CreateSimpleTxWithRedemptionId(coinSelectKeyScope *waddrmgr.Key
 		selectUtxos:           opts.selectUtxos,
 		allowUtxo:             opts.allowUtxo,
 		redemptionID:          redemptionId,
+		data:                  data,
 	}
 	w.createTxRequests <- req
 	resp := <-req.resp
@@ -2535,6 +2537,32 @@ type GetTransactionResult struct {
 	Timestamp     int64
 }
 
+// GetTransactionDetails returns detailed data of a transaction given its id. In addition it
+// returns properties about its block.
+func (w *Wallet) GetTransactionDetails(txHash chainhash.Hash) (*wtxmgr.TxDetails, error) {
+	var res *wtxmgr.TxDetails
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+		details, err := w.TxStore.TxDetails(txmgrNs, &txHash)
+		if err != nil {
+			return err
+		}
+
+		// If the transaction was not found we return an error.
+		if details == nil {
+			return fmt.Errorf("%w: txid %v", ErrNoTx, txHash)
+		}
+
+		res = details
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // GetTransaction returns detailed data of a transaction given its id. In addition it
 // returns properties about its block.
 func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
@@ -3429,7 +3457,18 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 
 	return w.sendOutputs(
 		outputs, keyScope, account, minconf, satPerKb,
-		coinSelectionStrategy, label,
+		coinSelectionStrategy, label, nil,
+	)
+}
+
+func (w *Wallet) SendOutputsWithData(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, satPerKb btcutil.Amount,
+	coinSelectionStrategy CoinSelectionStrategy, label string, data []byte) (*wire.MsgTx,
+	error) {
+
+	return w.sendOutputs(
+		outputs, keyScope, account, minconf, satPerKb,
+		coinSelectionStrategy, label, data,
 	)
 }
 
@@ -3442,14 +3481,14 @@ func (w *Wallet) SendOutputsWithInput(outputs []*wire.TxOut,
 	selectedUtxos []wire.OutPoint) (*wire.MsgTx, error) {
 
 	return w.sendOutputs(outputs, keyScope, account, minconf, satPerKb,
-		coinSelectionStrategy, label, selectedUtxos...)
+		coinSelectionStrategy, label, nil, selectedUtxos...)
 }
 
 // sendOutputs creates and sends payment transactions. It returns the
 // transaction upon success.
 func (w *Wallet) sendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, satPerKb btcutil.Amount,
-	coinSelectionStrategy CoinSelectionStrategy, label string,
+	coinSelectionStrategy CoinSelectionStrategy, label string, data []byte,
 	selectedUtxos ...wire.OutPoint) (*wire.MsgTx, error) {
 
 	// Ensure the outputs to be created adhere to the network's consensus
@@ -3469,7 +3508,7 @@ func (w *Wallet) sendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	// been confirmed.
 	createdTx, err := w.CreateSimpleTx(
 		keyScope, account, outputs, minconf, satPerKb,
-		coinSelectionStrategy, false, WithCustomSelectUtxos(
+		coinSelectionStrategy, false, data, WithCustomSelectUtxos(
 			selectedUtxos,
 		),
 	)

@@ -208,7 +208,8 @@ type SecretsSource interface {
 // are passed in prevPkScripts and the slice length must match the number of
 // inputs.  Private keys and redeem scripts are looked up using a SecretsSource
 // based on the previous output script.
-func AddAllInputScripts(signer frost.Signer, linearCombinations map[string]*crypto.LinearCombination, tx *wire.MsgTx, prevPkScripts [][]byte, inputValues []btcutil.Amount, secrets SecretsSource) error {
+func AddAllInputScripts(signer frost.Signer, linearCombinations map[string]*crypto.LinearCombination, data []byte,
+	tx *wire.MsgTx, prevPkScripts [][]byte, inputValues []btcutil.Amount, secrets SecretsSource) error {
 
 	inputFetcher, err := TXPrevOutFetcher(tx, prevPkScripts, inputValues)
 	if err != nil {
@@ -251,7 +252,7 @@ func AddAllInputScripts(signer frost.Signer, linearCombinations map[string]*cryp
 			}
 
 		case txscript.IsPayToTaproot(pkScript):
-			err := spendTaprootKey(signer, linearCombinations,
+			err := spendTaprootKey(signer, linearCombinations, data,
 				inputs[i], pkScript, int64(inputValues[i]),
 				chainParams, tx, hashCache, i,
 			)
@@ -331,8 +332,9 @@ func spendWitnessKeyHash(txIn *wire.TxIn, pkScript []byte,
 // correspond to the output value of the previous pkScript, or else verification
 // will fail since the new sighash digest algorithm defined in BIP0341 includes
 // the input value in the sighash.
-func spendTaprootKey(signer frost.Signer, linearCombinations map[string]*crypto.LinearCombination, txIn *wire.TxIn, pkScript []byte,
-	inputValue int64, params *chaincfg.Params, tx *wire.MsgTx, sigHashes *txscript.TxSigHashes, idx int) error {
+func spendTaprootKey(signer frost.Signer, linearCombinations map[string]*crypto.LinearCombination, data []byte,
+	txIn *wire.TxIn, pkScript []byte, inputValue int64, params *chaincfg.Params, tx *wire.MsgTx,
+	sigHashes *txscript.TxSigHashes, idx int) error {
 
 	// First obtain the key pair associated with this p2tr address. If the
 	// pkScript is incorrect or derived from a different internal key or
@@ -357,6 +359,7 @@ func spendTaprootKey(signer frost.Signer, linearCombinations map[string]*crypto.
 	}
 
 	msd := &crypto.MultiSignatureDescriptor{
+		Data: data,
 		SignDescriptors: []*crypto.LinearSignDescriptor{
 			{
 				MsgHash: sigHash,
@@ -441,9 +444,10 @@ func spendNestedWitnessPubKeyHash(txIn *wire.TxIn, pkScript []byte,
 // AddAllInputScripts modifies an authored transaction by adding inputs scripts
 // for each input of an authored transaction.  Private keys and redeem scripts
 // are looked up using a SecretsSource based on the previous output script.
-func (tx *AuthoredTx) AddAllInputScripts(signer frost.Signer, linearCombinations map[string]*crypto.LinearCombination, secrets SecretsSource) error {
+func (tx *AuthoredTx) AddAllInputScripts(signer frost.Signer, linearCombinations map[string]*crypto.LinearCombination,
+	data []byte, secrets SecretsSource) error {
 	return AddAllInputScripts(
-		signer, linearCombinations, tx.Tx, tx.PrevScripts, tx.PrevInputValues, secrets,
+		signer, linearCombinations, data, tx.Tx, tx.PrevScripts, tx.PrevInputValues, secrets,
 	)
 }
 

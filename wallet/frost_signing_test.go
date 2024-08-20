@@ -65,7 +65,7 @@ func TestFrostSigning(t *testing.T) {
 
 	out := wire.NewTxOut(10000, address.ScriptAddress())
 
-	tx, err := w.CreateSimpleTx(&waddrmgr.KeyScopeBIP0086, accounts.Accounts[1].AccountNumber, []*wire.TxOut{out}, 1, 10, CoinSelectionLargest, false)
+	tx, err := w.CreateSimpleTx(&waddrmgr.KeyScopeBIP0086, accounts.Accounts[1].AccountNumber, []*wire.TxOut{out}, 1, 10, CoinSelectionLargest, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, tx)
 

@@ -144,7 +144,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	selectedUtxos []wire.OutPoint,
 	allowUtxo func(utxo wtxmgr.Credit) bool) (
 	*txauthor.AuthoredTx, error) {
-	return w.txToOutputsWithRedemptionId(outputs, coinSelectKeyScope, changeKeyScope, account, minconf, feeSatPerKb, strategy, dryRun, selectedUtxos, allowUtxo, 0)
+	return w.txToOutputsWithRedemptionId(outputs, coinSelectKeyScope, changeKeyScope, account, minconf, feeSatPerKb, strategy, dryRun, selectedUtxos, allowUtxo, 0, nil)
 }
 
 func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
@@ -152,7 +152,7 @@ func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
 	strategy CoinSelectionStrategy, dryRun bool,
 	selectedUtxos []wire.OutPoint,
-	allowUtxo func(utxo wtxmgr.Credit) bool, redemptionID uint32) (
+	allowUtxo func(utxo wtxmgr.Credit) bool, redemptionID uint32, data []byte) (
 	*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
@@ -294,7 +294,7 @@ func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
 			if err != nil {
 				return err
 			}
-			err = tx.AddAllInputScripts(w.FrostSigner, linearCombinations,
+			err = tx.AddAllInputScripts(w.FrostSigner, linearCombinations, data,
 				secretSource{w.Manager, addrmgrNs},
 			)
 			if err != nil {

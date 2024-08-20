@@ -92,7 +92,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		// change address creation.
 		tx, err = w.CreateSimpleTx(
 			keyScope, account, packet.UnsignedTx.TxOut, minConfs,
-			feeSatPerKB, coinSelectionStrategy, false,
+			feeSatPerKB, coinSelectionStrategy, false, nil,
 			optFuncs...,
 		)
 		if err != nil {
