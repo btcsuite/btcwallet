@@ -359,7 +359,7 @@ func loadConfig(cfg *Config) error {
 	// Check deprecated aliases.  The new options receive priority when both
 	// are changed from the default.
 	if cfg.DataDir.ExplicitlySet() {
-		fmt.Fprintln(os.Stderr, "datadir option has been replaced by "+
+		log.Warnf("datadir option has been replaced by " +
 			"appdata -- please update your config")
 		if !cfg.AppDataDir.ExplicitlySet() {
 			cfg.AppDataDir.Value = cfg.DataDir.Value
@@ -437,8 +437,7 @@ func loadConfig(cfg *Config) error {
 
 	// Special show command to list supported subsystems and exit.
 	if cfg.DebugLevel == "show" {
-		fmt.Println("Supported subsystems", supportedSubsystems())
-		os.Exit(0)
+		return fmt.Errorf("Supported subsystems: %s", supportedSubsystems())
 	}
 
 	// Initialize log rotation.  After log rotation has been initialized, the
@@ -453,17 +452,15 @@ func loadConfig(cfg *Config) error {
 	// Exit if you try to use a simulation wallet with a standard
 	// data directory.
 	if !(cfg.AppDataDir.ExplicitlySet() || cfg.DataDir.ExplicitlySet()) && cfg.CreateTemp {
-		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
+		return fmt.Errorf("Tried to create a temporary simulation " +
 			"wallet, but failed to specify data directory!")
-		os.Exit(0)
 	}
 
 	// Exit if you try to use a simulation wallet on anything other than
 	// simnet or testnet3.
 	if !cfg.SimNet && cfg.CreateTemp {
-		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
+		return fmt.Errorf("Tried to create a temporary simulation " +
 			"wallet for network other than simnet!")
-		os.Exit(0)
 	}
 
 	// Ensure the wallet exists or create it when the create flag is set.
@@ -486,7 +483,7 @@ func loadConfig(cfg *Config) error {
 		if dbFileExists {
 			str := fmt.Sprintf("The wallet already exists. Loading this " +
 				"wallet instead.")
-			fmt.Fprintln(os.Stdout, str)
+			log.Debug(str)
 			tempWalletExists = true
 		}
 
@@ -521,7 +518,7 @@ func loadConfig(cfg *Config) error {
 		}
 
 		// Created successfully, so exit now with success.
-		os.Exit(0)
+		return nil
 	} else if !dbFileExists && !cfg.NoInitialLoad {
 		keystorePath := filepath.Join(netDir, keystore.Filename)
 		keystoreExists, err := cfgutil.FileExists(keystorePath)

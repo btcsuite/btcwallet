@@ -72,7 +72,7 @@ func InitWalletWithConfig(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoi
 	walletConfig *Config) (*wallet.Wallet, error) {
 	err := loadConfig(walletConfig)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log.Errorf("Error loading config: %v", err)
 		return nil, err
 	}
 
@@ -130,7 +130,7 @@ func doInit(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chai
 	if !cfg.NoInitialLoad {
 		// Load the wallet database.  It must have been created already
 		// or this will return an appropriate error.
-		w, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), true)
+		w, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), false)
 		if err != nil {
 			log.Error(err)
 			return nil, err
@@ -148,7 +148,7 @@ func doInit(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chai
 		w.AddressMapStorage = storage
 	}
 
-	// Add interrupt handlers to shutdown the various process components
+	// Add interrupt handlers to shut down the various process components
 	// before exiting.  Interrupt handlers run in LIFO order, so the wallet
 	// (which should be closed last) is added first.
 	addInterruptHandler(func() {
