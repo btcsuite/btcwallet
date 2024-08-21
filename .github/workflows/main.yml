@@ -7,6 +7,10 @@ on:
   pull_request:
     branches:
       - "*"
+concurrency:
+  # Cancel any previous workflows if they are from a PR or push.
+  group: ${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -18,7 +22,7 @@ env:
   GOPATH: /home/runner/work/go
   GO111MODULE: on
 
-  GO_VERSION: 1.19.x
+  GO_VERSION: 1.22.x
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
 
@@ -31,10 +35,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: git checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: setup go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
           go-version: '${{ env.GO_VERSION }}'
 
@@ -69,10 +75,10 @@ jobs:
           docker rm $CONTAINER_ID
 
       - name: git checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: go cache
-        uses: actions/cache@v1
+        uses: actions/cache@v4
         with:
           path: /home/runner/work/go
           key: btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
@@ -83,7 +89,7 @@ jobs:
             btcwallet-${{ runner.os }}-go-
 
       - name: setup go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
           go-version: '${{ env.GO_VERSION }}'
 
