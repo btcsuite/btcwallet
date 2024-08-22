@@ -92,7 +92,7 @@ linters:
 
 issues:
   # Only check issues in the new code.
-  new-from-rev: HEAD~1
+  new-from-rev: 3f48b446215c751ea4ba0c30fb04413ab9f1a7c7
 
   exclude-rules:
     # Exclude gosec from running for tests so that tests with weak randomness
