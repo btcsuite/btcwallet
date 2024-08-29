@@ -23,6 +23,7 @@ import (
 // block notifications for both the case where a ZMQ subscription is used and
 // for the case where RPC polling is used.
 func TestBitcoindEvents(t *testing.T) {
+
 	tests := []struct {
 		name       string
 		rpcPolling bool

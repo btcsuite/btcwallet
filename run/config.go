@@ -21,7 +21,6 @@ import (
 	flags "github.com/jessevdk/go-flags"
 	"github.com/lightninglabs/neutrino"
 	"github.com/stroomnetwork/btcwallet/cfgutil"
-	"github.com/stroomnetwork/btcwallet/internal/legacy/keystore"
 	"github.com/stroomnetwork/btcwallet/netparams"
 	"github.com/stroomnetwork/btcwallet/wallet"
 )
@@ -52,6 +51,7 @@ type Config struct {
 	Create          bool                    `long:"create" description:"Create the wallet if it does not exist"`
 	CreateTemp      bool                    `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	AppDataDir      *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
+	Regtest         bool                    `long:"regtest" description:"Use the test Bitcoin regtest network (default mainnet)"`
 	TestNet3        bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
 	SimNet          bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	SigNet          bool                    `long:"signet" description:"Use the signet test network (default mainnet)"`
@@ -64,7 +64,9 @@ type Config struct {
 	DBTimeout       time.Duration           `long:"dbtimeout" description:"The timeout value to use when opening the wallet database."`
 
 	// Wallet options
-	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
+	WalletPrivatePass string `long:"walletprivatepass" default-mask:"-" description:"The private wallet passphrase"`
+	WalletPass        string `long:"walletpass" default-mask:"-" description:"The public wallet passphrase -- Only required if the wallet was created with one"`
+	WalletSeed        string `long:"walletseed" default-mask:"-" description:"The wallet seed"`
 
 	// RPC client options
 	RPCConnect       string                  `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:8334, testnet: localhost:18334, simnet: localhost:18556)"`
@@ -382,6 +384,11 @@ func loadConfig(cfg *Config) error {
 	// Choose the active network params based on the selected network.
 	// Multiple networks can't be selected simultaneously.
 	numNets := 0
+	if cfg.Regtest {
+		activeNet = &netparams.RegtestParams
+		numNets++
+	}
+
 	if cfg.TestNet3 {
 		activeNet = &netparams.TestNet3Params
 		numNets++
@@ -467,11 +474,6 @@ func loadConfig(cfg *Config) error {
 	netDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 	dbPath := filepath.Join(netDir, wallet.WalletDBName)
 
-	if cfg.CreateTemp && cfg.Create {
-		return fmt.Errorf("the flags --create and --createtemp can not " +
-			"be specified together. Use --help for more information")
-	}
-
 	dbFileExists, err := cfgutil.FileExists(dbPath)
 	if err != nil {
 		return err
@@ -498,41 +500,19 @@ func loadConfig(cfg *Config) error {
 				return fmt.Errorf("unable to create wallet: %w", err)
 			}
 		}
-	} else if cfg.Create {
-		// Error if the create flag is set and the wallet already
-		// exists.
-		if dbFileExists {
-			return fmt.Errorf("the wallet database file `%v` "+
-				"already exists", dbPath)
-		}
+	} else {
+		// We consider create flag is always set and create the wallet whenever it does not exist
+		if !dbFileExists {
+			// Ensure the data directory for the specified network exists.
+			if err := checkCreateDir(netDir); err != nil {
+				return err
+			}
 
-		// Ensure the data directory for the network exists.
-		if err := checkCreateDir(netDir); err != nil {
-			return err
+			// Create the wallet using the initial wallet creation wizard.
+			if err := createWallet(cfg); err != nil {
+				return fmt.Errorf("unable to create wallet: %w", err)
+			}
 		}
-
-		// Perform the initial wallet creation wizard.
-		if err := createWallet(cfg); err != nil {
-
-			return fmt.Errorf("unable to create wallet: %w", err)
-		}
-
-		// Created successfully, so exit now with success.
-		os.Exit(0)
-	} else if !dbFileExists && !cfg.NoInitialLoad {
-		keystorePath := filepath.Join(netDir, keystore.Filename)
-		keystoreExists, err := cfgutil.FileExists(keystorePath)
-		if err != nil {
-			return err
-		}
-		if !keystoreExists {
-			err = fmt.Errorf("the wallet does not exist, run with " +
-				"the --create option to initialize and create it")
-		} else {
-			err = fmt.Errorf("the wallet is in legacy format, run " +
-				"with the --create option to import it")
-		}
-		return err
 	}
 
 	localhostListeners := map[string]struct{}{
