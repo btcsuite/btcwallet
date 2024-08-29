@@ -9,32 +9,52 @@ import (
 	"github.com/stroomnetwork/frost/crypto"
 )
 
-func (w *Wallet) ImportBtcAddressWithEthAddr(btcAddr, ethAddr string) (*btcec.PublicKey, error) {
+func (w *Wallet) GenerateAndImportKeyWithCheck(btcAddr, ethAddr string) (*btcec.PublicKey, error) {
 
-	lc, err := w.lcFromEthAddr(ethAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	pubKey := lc.GetCombinedPubKey()
-	importedAddress, err := w.ImportPublicKeyReturnAddress(pubKey, waddrmgr.TaprootPubKey)
+	key, importedAddress, err := w.generateKeyFromEthAddressAndImport(ethAddr)
 	if err != nil {
 		return nil, err
 	}
 
 	if importedAddress != nil {
-		address := importedAddress.Address().EncodeAddress()
-		if btcAddr != "" && address != btcAddr {
+		if btcAddr != "" && importedAddress.Address().EncodeAddress() != btcAddr {
 			return nil, fmt.Errorf("address mismatch: %s != %s",
 				importedAddress.Address().EncodeAddress(), btcAddr)
 		}
-		err := w.AddressMapStorage.SetEthAddress(address, ethAddr)
-		if err != nil {
-			return nil, err
-		}
+
 	}
 
-	return pubKey, nil
+	return key, nil
+}
+
+func (w *Wallet) GenerateKeyFromEthAddressAndImport(ethAddr string) (*btcec.PublicKey, error) {
+	key, _, err := w.generateKeyFromEthAddressAndImport(ethAddr)
+	return key, err
+}
+
+func (w *Wallet) generateKeyFromEthAddressAndImport(ethAddr string) (*btcec.PublicKey, waddrmgr.ManagedAddress, error) {
+
+	lc, err := w.lcFromEthAddr(ethAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pubKey := lc.GetCombinedPubKey()
+	importedAddress, err := w.ImportPublicKeyReturnAddress(pubKey, waddrmgr.TaprootPubKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if importedAddress == nil {
+		return nil, nil, fmt.Errorf("imported address is nil")
+	}
+
+	err = w.AddressMapStorage.SetEthAddress(importedAddress.Address().EncodeAddress(), ethAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return pubKey, importedAddress, nil
 }
 
 func (w *Wallet) lcFromEthAddr(ethAddrStr string) (*crypto.LinearCombination, error) {

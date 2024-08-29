@@ -126,10 +126,11 @@ type Wallet struct {
 	publicPassphrase []byte
 
 	// Data stores
-	db          walletdb.DB
-	Manager     *waddrmgr.Manager
-	TxStore     *wtxmgr.Store
-	FrostSigner frost.Signer
+	db               walletdb.DB
+	Manager          *waddrmgr.Manager
+	TxStore          *wtxmgr.Store
+	FrostSigner      frost.Signer
+	ChangeAddressKey *btcec.PublicKey
 
 	AddressMapStorage *AddressMapStorage
 	Pk1, Pk2          *btcec.PublicKey

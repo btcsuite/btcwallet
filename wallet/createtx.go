@@ -174,7 +174,7 @@ func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
 	var tx *txauthor.AuthoredTx
 	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 		addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
-			dbtx, changeKeyScope, account,
+			dbtx, changeKeyScope, account, w.ChangeAddressKey,
 		)
 		if err != nil {
 			return err
@@ -471,13 +471,12 @@ func inputYieldsPositively(credit *wire.TxOut,
 // addresses will come from the specified key scope and account, unless a key
 // scope is not specified. In that case, change addresses will always come from
 // the P2WKH key scope.
-func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
-	changeKeyScope *waddrmgr.KeyScope, account uint32) (
-	walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
+func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx, changeKeyScope *waddrmgr.KeyScope, account uint32,
+	changeAddress *btcec.PublicKey) (walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
 
 	// Determine the address type for change addresses of the given
 	// account.
-	if changeKeyScope == nil {
+	if changeKeyScope == nil || changeAddress != nil {
 		changeKeyScope = &waddrmgr.KeyScopeBIP0086
 	}
 	addrType := waddrmgr.ScopeAddrMap[*changeKeyScope].InternalAddrType
@@ -521,6 +520,9 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 			changeAddr btcutil.Address
 			err        error
 		)
+		if changeAddress != nil {
+			return txscript.PayToTaprootScript(changeAddress)
+		}
 		if account == waddrmgr.ImportedAddrAccount {
 			changeAddr, err = w.newChangeAddress(
 				addrmgrNs, 0, *changeKeyScope,
