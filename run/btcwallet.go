@@ -5,6 +5,7 @@
 package run
 
 import (
+	"context"
 	"fmt"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stroomnetwork/frost"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino"
@@ -150,8 +152,14 @@ func doInit(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chai
 		}
 		w.AddressMapStorage = storage
 
+		err = waitForChainClientInitialized(w)
+		if err != nil {
+			log.Error(err)
+			return nil, err
+		}
+
 		changeAddressKey, err := w.GenerateKeyFromEthAddressAndImport(ethChangeAddr)
-		if err != nil && !strings.Contains(err.Error(), "already have address") {
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
 			return nil, fmt.Errorf("cannot import change address: %w", err)
 		}
 		w.ChangeAddressKey = changeAddressKey
@@ -187,6 +195,26 @@ func doInit(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chai
 		}()
 	}
 	return w, nil
+}
+
+func waitForChainClientInitialized(wallet *wallet.Wallet) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+
+	for {
+		select {
+		case <-ticker.C:
+			if wallet.ChainClient() != nil {
+				return nil
+			}
+		case <-ctx.Done():
+			if wallet.ChainClient() == nil {
+				return fmt.Errorf("timeout waiting for chainClient to initialize")
+			}
+		}
+	}
 }
 
 // rpcClientConnectLoop continuously attempts a connection to the consensus RPC
