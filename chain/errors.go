@@ -337,6 +337,14 @@ func (r RPCErr) Error() string {
 	return "unknown error"
 }
 
+// Bitcoind28ErrMap contains error messages from bitcoind version v28.0 (and
+// later) that are returned from the `testmempoolaccept` and are different than
+// in previous versions.
+var Bitcoind28ErrMap = map[string]error{
+	// https://github.com/bitcoin/bitcoin/pull/30212
+	"transaction outputs already in utxo set": ErrTxAlreadyConfirmed,
+}
+
 // BtcdErrMap takes the errors returned from btcd's `testmempoolaccept` and
 // `sendrawtransaction` RPCs and map them to the errors defined above, which
 // are results from calling either `testmempoolaccept` or `sendrawtransaction`

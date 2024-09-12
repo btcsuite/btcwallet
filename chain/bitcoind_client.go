@@ -233,6 +233,15 @@ func (c *BitcoindClient) MapRPCErr(rpcErr error) error {
 		}
 	}
 
+	// Perhaps the backend is a newer version of bitcoind, try to match it
+	// against the v28.0 and later errors.
+	for btcdErr, matchedErr := range Bitcoind28ErrMap {
+		// Match it against btcd's error.
+		if matchErrStr(rpcErr, btcdErr) {
+			return matchedErr
+		}
+	}
+
 	// If not matched, return the original error wrapped.
 	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
 }
