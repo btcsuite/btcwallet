@@ -10,8 +10,8 @@ require (
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.5
 	github.com/btcsuite/btcwallet/wallet/txrules v1.2.2
 	github.com/btcsuite/btcwallet/wallet/txsizes v1.2.5
-	github.com/btcsuite/btcwallet/walletdb v1.4.3
-	github.com/btcsuite/btcwallet/wtxmgr v1.5.3
+	github.com/btcsuite/btcwallet/walletdb v1.4.4
+	github.com/btcsuite/btcwallet/wtxmgr v1.5.4
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792
 	github.com/davecgh/go-spew v1.1.1
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0
