@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -1971,7 +1972,7 @@ func (s *ScopedKeyManager) ImportPublicKey(ns walletdb.ReadWriteBucket,
 	err := s.importPublicKey(
 		ns, serializedPubKey, nil, s.addrSchema.ExternalAddrType, bs,
 	)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		return nil, err
 	}
 

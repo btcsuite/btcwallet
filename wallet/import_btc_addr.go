@@ -11,7 +11,7 @@ import (
 
 func (w *Wallet) GenerateAndImportKeyWithCheck(btcAddr, ethAddr string) (*btcec.PublicKey, error) {
 
-	key, importedAddress, err := w.generateKeyFromEthAddressAndImport(ethAddr)
+	key, importedAddress, err := w.GenerateKeyFromEthAddressAndImport(ethAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -27,12 +27,7 @@ func (w *Wallet) GenerateAndImportKeyWithCheck(btcAddr, ethAddr string) (*btcec.
 	return key, nil
 }
 
-func (w *Wallet) GenerateKeyFromEthAddressAndImport(ethAddr string) (*btcec.PublicKey, error) {
-	key, _, err := w.generateKeyFromEthAddressAndImport(ethAddr)
-	return key, err
-}
-
-func (w *Wallet) generateKeyFromEthAddressAndImport(ethAddr string) (*btcec.PublicKey, waddrmgr.ManagedAddress, error) {
+func (w *Wallet) GenerateKeyFromEthAddressAndImport(ethAddr string) (*btcec.PublicKey, waddrmgr.ManagedAddress, error) {
 
 	lc, err := w.lcFromEthAddr(ethAddr)
 	if err != nil {
@@ -42,17 +37,19 @@ func (w *Wallet) generateKeyFromEthAddressAndImport(ethAddr string) (*btcec.Publ
 	pubKey := lc.GetCombinedPubKey()
 	importedAddress, err := w.ImportPublicKeyReturnAddress(pubKey, waddrmgr.TaprootPubKey)
 	if err != nil {
-		return nil, nil, err
+		return pubKey, importedAddress, err
 	}
 
 	if importedAddress == nil {
-		return nil, nil, fmt.Errorf("imported address is nil")
+		return pubKey, nil, fmt.Errorf("imported address is nil")
 	}
 
 	err = w.AddressMapStorage.SetEthAddress(importedAddress.Address().EncodeAddress(), ethAddr)
 	if err != nil {
-		return nil, nil, err
+		return pubKey, nil, err
 	}
+
+	log.Infof("Imported address %s with eth address %s", importedAddress.Address().EncodeAddress(), ethAddr)
 
 	return pubKey, importedAddress, nil
 }

@@ -36,7 +36,7 @@ func TestFrostSigning(t *testing.T) {
 	err = w.Unlock([]byte("world"), time.After(10*time.Minute))
 	require.NoError(t, err)
 
-	pubKey, err := w.GenerateKeyFromEthAddressAndImport("0x7b3f4f4b3cCf7f3fDf3f3f3f3f3f3f3f3f3f3f3f")
+	pubKey, _, err := w.GenerateKeyFromEthAddressAndImport("0x7b3f4f4b3cCf7f3fDf3f3f3f3f3f3f3f3f3f3f3f")
 	require.NoError(t, err)
 
 	p2shAddr, err := txscript.PayToTaprootScript(pubKey)
