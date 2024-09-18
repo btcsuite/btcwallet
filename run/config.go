@@ -63,10 +63,12 @@ type Config struct {
 	Profile         string                  `long:"profile" description:"Enable HTTP profiling on given port -- NOTE port must be between 1024 and 65536"`
 	DBTimeout       time.Duration           `long:"dbtimeout" description:"The timeout value to use when opening the wallet database."`
 
+	// Feature flags used for fallback to the original implementation
+	CanConsolePrompt bool `long:"canconsoleprompt" description:"Enable interaction with Stdin, wallet options are obtained from the configuration provided otherwise"`
+
 	// Wallet options
 	WalletPrivatePass string `long:"walletprivatepass" default-mask:"-" description:"The private wallet passphrase"`
 	WalletPass        string `long:"walletpass" default-mask:"-" description:"The public wallet passphrase -- Only required if the wallet was created with one"`
-	WalletSeed        string `long:"walletseed" default-mask:"-" description:"The wallet seed"`
 
 	// RPC client options
 	RPCConnect       string                  `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:8334, testnet: localhost:18334, simnet: localhost:18556)"`
@@ -253,6 +255,7 @@ func DefaultConfig() *Config {
 		ConfigFile:             cfgutil.NewExplicitString(defaultConfigFile),
 		AppDataDir:             cfgutil.NewExplicitString(defaultAppDataDir),
 		LogDir:                 defaultLogDir,
+		CanConsolePrompt:       true,
 		WalletPass:             wallet.InsecurePubPassphrase,
 		CAFile:                 cfgutil.NewExplicitString(""),
 		RPCKey:                 cfgutil.NewExplicitString(defaultRPCKeyFile),
@@ -495,7 +498,7 @@ func loadConfig(cfg *Config) error {
 		}
 
 		if !tempWalletExists {
-			// Perform the initial wallet creation wizard.
+			// Create the wallet using provided config.
 			if err := createSimulationWallet(cfg); err != nil {
 				return fmt.Errorf("unable to create wallet: %w", err)
 			}
@@ -508,7 +511,7 @@ func loadConfig(cfg *Config) error {
 				return err
 			}
 
-			// Create the wallet using the initial wallet creation wizard.
+			// Create the wallet using the initial wallet creation wizard or provided config.
 			if err := createWallet(cfg); err != nil {
 				return fmt.Errorf("unable to create wallet: %w", err)
 			}

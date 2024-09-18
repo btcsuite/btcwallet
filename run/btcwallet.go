@@ -156,7 +156,7 @@ func doInit(config *BtcwalletConfig) (*wallet.Wallet, error) {
 	if !cfg.NoInitialLoad {
 		// Load the wallet database.  It must have been created already
 		// or this will return an appropriate error.
-		w, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), false)
+		w, err = loader.OpenExistingWallet([]byte(cfg.WalletPass), cfg.CanConsolePrompt)
 		if err != nil {
 			log.Error(err)
 			return nil, err

@@ -5,7 +5,7 @@
 package run
 
 import (
-	//"bufio"
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stroomnetwork/btcwallet/internal/legacy/keystore"
-	//"github.com/stroomnetwork/btcwallet/internal/prompt"
+	"github.com/stroomnetwork/btcwallet/internal/prompt"
 	"github.com/stroomnetwork/btcwallet/waddrmgr"
 	"github.com/stroomnetwork/btcwallet/wallet"
 )
@@ -95,16 +95,14 @@ func convertLegacyKeystore(legacyKeyStore *keystore.Store, w *wallet.Wallet) {
 	}
 }
 
-// createWallet obtains information needed to generate a new wallet from config instead of prompting user
-// and generates the wallet accordingly.  The new wallet will reside at the
-// provided path.
+// createWallet obtains information needed to generate a new wallet from config or prompting user depending
+// 	on CanConsolePrompt flag and generates the wallet accordingly.
+// The new wallet will reside at the provided path.
 func createWallet(cfg *Config) error {
 	dbDir := networkDir(cfg.AppDataDir.Value, activeNet.Params)
 	loader := wallet.NewLoader(
 		activeNet.Params, dbDir, true, cfg.DBTimeout, 250,
 	)
-
-	privPass := []byte(cfg.WalletPrivatePass)
 
 	// When there is a legacy keystore, open it now to ensure any errors
 	// don't end up exiting the process after the user has spent time
@@ -123,6 +121,21 @@ func createWallet(cfg *Config) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+
+	var privPass []byte
+	if cfg.CanConsolePrompt {
+		// Start by prompting for the private passphrase.  When there is an
+		// existing keystore, the user will be promped for that passphrase,
+		// otherwise they will be prompted for a new one.
+		privPass, err = prompt.PrivatePass(reader, legacyKeyStore)
+		if err != nil {
+			return err
+		}
+	} else {
+		privPass = []byte(cfg.WalletPrivatePass)
 	}
 
 	// When there exists a legacy keystore, unlock it now and set up a
@@ -163,13 +176,27 @@ func createWallet(cfg *Config) error {
 		})
 	}
 
-	// Ascertain the public passphrase.  This will either be a value
-	// specified by the user or the default hard-coded public passphrase if
-	// the user does not want the additional public data encryption.
-	pubPass := []byte(cfg.WalletPass)
-	seed := []byte(nil)
-	if len(cfg.WalletSeed) != 0 {
-		seed = []byte(cfg.WalletSeed)
+	var pubPass, seed []byte
+	if cfg.CanConsolePrompt {
+		// Ascertain the public passphrase.  This will either be a value
+		// specified by the user or the default hard-coded public passphrase if
+		// the user does not want the additional public data encryption.
+		pubPass, err = prompt.PublicPass(reader, privPass,
+			[]byte(wallet.InsecurePubPassphrase), []byte(cfg.WalletPass))
+		if err != nil {
+			return err
+		}
+
+		// Ascertain the wallet generation seed.  This will either be an
+		// automatically generated value the user has already confirmed or a
+		// value the user has entered which has already been validated.
+		seed, err = prompt.Seed(reader)
+		if err != nil {
+			return err
+		}
+	} else {
+		pubPass = []byte(cfg.WalletPass)
+		seed = []byte(nil)
 	}
 
 	fmt.Println("Creating the wallet...")
@@ -178,6 +205,7 @@ func createWallet(cfg *Config) error {
 		return err
 	}
 
+	// Unload just created wallet in order to be able to open it within the same process
 	err = loader.UnloadWallet()
 	if err != nil {
 		return err
