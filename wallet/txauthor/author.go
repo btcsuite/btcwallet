@@ -8,15 +8,14 @@ package txauthor
 import (
 	"errors"
 	"fmt"
-	"github.com/stroomnetwork/frost"
-	"github.com/stroomnetwork/frost/crypto"
-
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
+	"github.com/stroomnetwork/frost"
+	"github.com/stroomnetwork/frost/crypto"
 )
 
 // SumOutputValues sums up the list of TxOuts and returns an Amount.
@@ -97,19 +96,24 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 	fetchInputs InputSource, changeSource *ChangeSource) (*AuthoredTx, error) {
 
 	targetAmount := SumOutputValues(outputs)
+	fmt.Printf("targetAmount: %v\n", targetAmount)
 	estimatedSize := txsizes.EstimateVirtualSize(
 		0, 0, 1, 0, outputs, changeSource.ScriptSize,
 	)
 	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize)
+	fmt.Printf("targetFee: %v, estimatedSize: %v\n", targetFee, estimatedSize)
 
 	for {
 		inputAmount, inputs, inputValues, scripts, err := fetchInputs(targetAmount + targetFee)
 		if err != nil {
+			fmt.Errorf("fetchInputs error: %v\n", err)
 			return nil, err
 		}
 		if inputAmount < targetAmount+targetFee {
+			fmt.Errorf("insufficientFundsError\n")
 			return nil, insufficientFundsError{}
 		}
+		fmt.Printf("inputAmount: %v, lengths: %v, %v, %v\n", inputAmount, len(inputs), len(inputValues), len(scripts))
 
 		// We count the types of inputs, which we'll use to estimate
 		// the vsize of the transaction.
@@ -134,9 +138,15 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 		)
 		maxRequiredFee := txrules.FeeForSerializeSize(feeRatePerKb, maxSignedSize)
 		remainingAmount := inputAmount - targetAmount
+		fmt.Printf("maxSignedSize: %v, maxRequiredFee: %v, remainingAmount: %v\n", maxSignedSize, maxRequiredFee, remainingAmount)
 		if remainingAmount < maxRequiredFee {
 			targetFee = maxRequiredFee
 			continue
+		}
+
+		fmt.Printf("inputs size: %v\n", len(inputs))
+		for _, input := range inputs {
+			fmt.Printf("input: %v, amount: %v\n", input.PreviousOutPoint, inputAmount)
 		}
 
 		unsignedTransaction := &wire.MsgTx{
@@ -150,6 +160,7 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 		changeAmount := inputAmount - targetAmount - maxRequiredFee
 		changeScript, err := changeSource.NewScript()
 		if err != nil {
+			fmt.Errorf("changeSource.NewScript error: %v\n", err)
 			return nil, err
 		}
 		change := wire.NewTxOut(int64(changeAmount), changeScript)
