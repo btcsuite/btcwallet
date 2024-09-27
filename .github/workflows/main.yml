@@ -28,7 +28,7 @@ env:
 
 jobs:
   ########################
-  # Format, compileation and lint check
+  # Format, compilation, and lint check
   ########################
   lint-check:
     name: Format, compilation and lint check

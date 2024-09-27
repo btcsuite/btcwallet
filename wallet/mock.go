@@ -48,6 +48,10 @@ func (m *mockChainClient) GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader,
 	return m.getBlockHeader, nil
 }
 
+func (m *mockChainClient) GetBlockHeight(*chainhash.Hash) (int32, error) {
+	return 0, nil
+}
+
 func (m *mockChainClient) IsCurrent() bool {
 	return false
 }
