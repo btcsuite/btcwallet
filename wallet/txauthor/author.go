@@ -6,6 +6,8 @@
 package txauthor
 
 import (
+	"bytes"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/btcutil"
@@ -369,17 +371,20 @@ func spendTaprootKey(signer frost.Signer, linearCombinations map[string]*crypto.
 		return fmt.Errorf("key not found for address %v", addrs[0].String())
 	}
 
-	msd := &crypto.MultiSignatureDescriptor{
-		Data: data,
+	txData, err := SerializeTxData(NewTxData(data, pkScript, inputValue, tx, sigHashes, idx))
+	if err != nil {
+		return err
+	}
+
+	signatures, err := signer.SignAdvanced(&crypto.MultiSignatureDescriptor{
+		Data: txData,
 		SignDescriptors: []*crypto.LinearSignDescriptor{
 			{
 				MsgHash: sigHash,
 				LC:      lc,
 			},
 		},
-	}
-
-	signatures, err := signer.SignAdvanced(msd)
+	})
 	if err != nil {
 		return err
 	}
@@ -387,6 +392,56 @@ func spendTaprootKey(signer frost.Signer, linearCombinations map[string]*crypto.
 	txIn.Witness = wire.TxWitness{signatures[0].Serialize()}
 
 	return nil
+}
+
+type TxData struct {
+	SignatureData []byte
+	PkScript      []byte
+	InputValue    int64
+	Tx            *wire.MsgTx
+	SigHashes     *txscript.TxSigHashes
+	Idx           int
+}
+
+func NewTxData(signatureData []byte, pkScript []byte, inputValue int64, tx *wire.MsgTx,
+	sigHashes *txscript.TxSigHashes, idx int) *TxData {
+
+	return &TxData{
+		SignatureData: signatureData,
+		PkScript:      pkScript,
+		InputValue:    inputValue,
+		Tx:            tx,
+		SigHashes:     sigHashes,
+		Idx:           idx,
+	}
+}
+
+func NewTxDataWithSignatureDataOnly(signatureData []byte) *TxData {
+	return &TxData{
+		SignatureData: signatureData,
+	}
+}
+
+func SerializeTxData(txData *TxData) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := gob.NewEncoder(&buffer)
+
+	err := encoder.Encode(txData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode TxData: %w", err)
+	}
+
+	return buffer.Bytes(), nil
+}
+
+func DeserializeTxData(data []byte) (*TxData, error) {
+	var txData TxData
+	decoder := gob.NewDecoder(bytes.NewBuffer(data))
+	err := decoder.Decode(&txData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode TxData: %w", err)
+	}
+	return &txData, nil
 }
 
 // spendNestedWitnessPubKey generates both a sigScript, and valid witness for
