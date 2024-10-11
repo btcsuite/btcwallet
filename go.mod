@@ -1,8 +1,8 @@
 module github.com/stroomnetwork/btcwallet
 
 require (
-	github.com/btcsuite/btcd v0.24.1-0.20240318151728-2fc99e0496d2
-	github.com/btcsuite/btcd/btcec/v2 v2.3.2
+	github.com/btcsuite/btcd v0.24.2
+	github.com/btcsuite/btcd/btcec/v2 v2.3.3
 	github.com/btcsuite/btcd/btcutil v1.1.5
 	github.com/btcsuite/btcd/btcutil/psbt v1.1.8
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
@@ -13,7 +13,7 @@ require (
 	github.com/btcsuite/btcwallet/wtxmgr v1.5.3
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792
 	github.com/davecgh/go-spew v1.1.1
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0
 	github.com/ethereum/go-ethereum v1.14.0
 	github.com/golang/protobuf v1.5.4
 	github.com/jessevdk/go-flags v1.4.0
@@ -24,11 +24,11 @@ require (
 	github.com/lightningnetwork/lnd/ticker v1.0.0
 	github.com/lightningnetwork/lnd/tlv v1.0.2
 	github.com/steveyen/gkvlite v0.0.0-20141117050110-5b47ed6d7458
-	github.com/stretchr/testify v1.8.4
-	github.com/stroomnetwork/frost v0.0.12
-	golang.org/x/crypto v0.22.0
+	github.com/stretchr/testify v1.9.0
+	github.com/stroomnetwork/frost v0.0.14
+	golang.org/x/crypto v0.25.0
 	golang.org/x/net v0.24.0
-	golang.org/x/term v0.19.0
+	golang.org/x/term v0.22.0
 	google.golang.org/grpc v1.53.0
 )
 
@@ -42,13 +42,12 @@ require (
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
 	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/stretchr/objx v0.5.0 // indirect
+	github.com/stretchr/objx v0.5.2 // indirect
 	go.etcd.io/bbolt v1.3.7 // indirect
-	golang.org/x/sys v0.19.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/text v0.16.0 // indirect
 	google.golang.org/genproto v0.0.0-20230110181048-76db0878b65f // indirect
-	google.golang.org/protobuf v1.33.0 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
+	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 

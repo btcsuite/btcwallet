@@ -28,7 +28,7 @@ func NewApprovalRequests() *ApprovalRequests {
 }
 
 func GetValidators(n int, k int) []*frost.NetworkSigner {
-	createStorageFunc := func() (storage.Storage, error) {
+	createStorageFunc := func() (storage.FrostKeysStorage, error) {
 		return storage.NewInMemoryStorage(), nil
 	}
 
@@ -38,7 +38,7 @@ func GetValidators(n int, k int) []*frost.NetworkSigner {
 	return validators
 }
 
-func SetupInMemoryNetworkWithGeneratedKeys(n int, k int, createStorage func() (storage.Storage, error)) []*frost.NetworkSigner {
+func SetupInMemoryNetworkWithGeneratedKeys(n int, k int, createStorage func() (storage.FrostKeysStorage, error)) []*frost.NetworkSigner {
 
 	pubKeys := make([]*btcec.PublicKey, n)
 	privKeys := make([]*btcec.PrivateKey, n)
@@ -52,7 +52,7 @@ func SetupInMemoryNetworkWithGeneratedKeys(n int, k int, createStorage func() (s
 	return createSigners(createStorage, nodes, bindingInfos)
 }
 
-func createSigners(createStorage func() (storage.Storage, error), nodes []network.Node, bindingInfos []frostConfig.BindingInfo) []*frost.NetworkSigner {
+func createSigners(createStorage func() (storage.FrostKeysStorage, error), nodes []network.Node, bindingInfos []frostConfig.BindingInfo) []*frost.NetworkSigner {
 	n := len(nodes)
 	signers := make([]*frost.NetworkSigner, n)
 	for i := 0; i < n; i++ {
