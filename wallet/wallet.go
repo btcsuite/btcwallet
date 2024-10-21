@@ -2532,6 +2532,7 @@ type GetTransactionResult struct {
 	BlockHash     *chainhash.Hash
 	Confirmations int32
 	Timestamp     int64
+	InDb          bool
 }
 
 // GetTransaction returns detailed data of a transaction given its id. In addition it
@@ -2539,7 +2540,13 @@ type GetTransactionResult struct {
 func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 	error) {
 
-	var res GetTransactionResult
+	var (
+		bestHeight int32
+		blockHash  *chainhash.Hash
+		summary    *TransactionSummary
+		res        GetTransactionResult
+	)
+
 	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -2553,11 +2560,14 @@ func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 			return fmt.Errorf("%w: txid %v", ErrNoTx, txHash)
 		}
 
+		// Otherwise, we create a summary of the transaction detail.
 		res = GetTransactionResult{
 			Summary:       makeTxSummary(dbtx, w, txDetail),
 			Timestamp:     txDetail.Block.Time.Unix(),
 			Confirmations: txDetail.Block.Height,
+			InDb:          true,
 		}
+		summary = &res.Summary
 
 		// If it is a confirmed transaction we set the corresponding
 		// block height and hash.
@@ -2571,6 +2581,95 @@ func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 	if err != nil {
 		return nil, err
 	}
+
+	// If the transaction was not found in the transaction store, we need to
+	// build the TransactionSummary from the backend RPC response.
+	if summary == nil {
+		chainClient, err := w.requireChainClient()
+		if err != nil {
+			return nil, err
+		}
+
+		// Get the transaction data from the backend endpoint.
+		var txResult *btcjson.TxRawResult
+		switch client := chainClient.(type) {
+		case *chain.RPCClient:
+			txResult, err = client.GetRawTransactionVerbose(&txHash)
+			if err != nil {
+				return nil, err
+			}
+		case *chain.BitcoindClient:
+			txResult, err = client.GetRawTransactionVerbose(&txHash)
+			if err != nil {
+				return nil, err
+			}
+		case *chain.NeutrinoClient:
+			return nil, errors.New("not supported with " +
+				"neutrino client")
+		}
+
+		txRaw, err := hex.DecodeString(txResult.Hex)
+		if err != nil {
+			return nil, err
+		}
+
+		summary = &TransactionSummary{
+			Hash:        &txHash,
+			Transaction: txRaw,
+			MyInputs:    nil,
+			MyOutputs:   nil,
+			Timestamp:   txResult.Time,
+		}
+
+		// For a confirmed transaction we must decode the block hash and
+		// get the block height.
+		var confs int32
+		if txResult.BlockHash != "" {
+			blockHash, err = chainhash.NewHashFromStr(
+				txResult.BlockHash,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			// Obtain the block height from the backend.
+			switch client := chainClient.(type) {
+			case *chain.RPCClient:
+				header, err := client.GetBlockHeaderVerbose(
+					blockHash,
+				)
+				if err != nil {
+					return nil, err
+				}
+				bestHeight = header.Height
+			case *chain.BitcoindClient:
+				bestHeight, err = client.GetBlockHeight(
+					blockHash,
+				)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			// Determine the number of confirmations.
+			_, currentHeight, err := chainClient.GetBestBlock()
+			if err != nil {
+				return nil, fmt.Errorf("unable to retrieve current "+
+					"height: %w", err)
+			}
+			confs = int32(currentHeight - bestHeight)
+		}
+
+		// Set the TransactionSummary in the GetTransactionResult.
+		res.Summary = *summary
+		res.Height = bestHeight
+		res.BlockHash = summary.Hash
+		res.Timestamp = summary.Timestamp
+		res.Confirmations = confs
+		res.InDb = false
+	}
+
+	// Return the result.
 	return &res, nil
 }
 
