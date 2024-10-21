@@ -2200,7 +2200,12 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	error) {
 
 	s.mtx.Lock()
-	defer s.mtx.Unlock()
+	unlockNeeded := true
+	defer func() {
+		if unlockNeeded {
+			s.mtx.Unlock()
+		}
+	}()
 
 	// The manager must be unlocked to encrypt the imported script.
 	if isSecretScript && s.rootManager.IsLocked() {
@@ -2252,11 +2257,11 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// The start block needs to be updated when the newly imported address
 	// is before the current one.
 	updateStartBlock := false
-	s.rootManager.mtx.Lock()
+	s.rootManager.mtx.RLock()
 	if bs.Height < s.rootManager.syncState.startBlock.Height {
 		updateStartBlock = true
 	}
-	s.rootManager.mtx.Unlock()
+	s.rootManager.mtx.RUnlock()
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
@@ -2276,21 +2281,6 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	}
 	if err != nil {
 		return nil, maybeConvertDbError(err)
-	}
-
-	if updateStartBlock {
-		err := putStartBlock(ns, bs)
-		if err != nil {
-			return nil, maybeConvertDbError(err)
-		}
-	}
-
-	// Now that the database has been updated, update the start block in
-	// memory too if needed.
-	if updateStartBlock {
-		s.rootManager.mtx.Lock()
-		s.rootManager.syncState.startBlock = *bs
-		s.rootManager.mtx.Unlock()
 	}
 
 	// Create a new managed address based on the imported script.  Also,
@@ -2314,6 +2304,13 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
+	if updateStartBlock {
+		err := putStartBlock(ns, bs)
+		if err != nil {
+			return nil, maybeConvertDbError(err)
+		}
+	}
+
 	// Even if the script is secret, we are currently unlocked, so we keep a
 	// clear text copy of the script around to avoid decrypting it on each
 	// access.
@@ -2324,6 +2321,20 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
 	s.addrs[addrKey(scriptIdent)] = managedAddr
+
+	if updateStartBlock {
+		// Now that the database has been updated, update the start block in
+		// memory too if needed. Ensure the manager lock goes outside the scoped
+		// manager lock.
+		s.mtx.Unlock()
+		unlockNeeded = false
+		s.rootManager.mtx.Lock()
+		if bs.Height < s.rootManager.syncState.startBlock.Height {
+			s.rootManager.syncState.startBlock = *bs
+		}
+		s.rootManager.mtx.Unlock()
+	}
+
 	return managedAddr, nil
 }
 
