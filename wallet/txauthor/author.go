@@ -20,6 +20,8 @@ import (
 	"github.com/stroomnetwork/frost/crypto"
 )
 
+const dustAmount = 546
+
 // SumOutputValues sums up the list of TxOuts and returns an Amount.
 func SumOutputValues(outputs []*wire.TxOut) (totalOutput btcutil.Amount) {
 	for _, txOut := range outputs {
@@ -96,13 +98,22 @@ type ChangeSource struct {
 // BUGS: Fee estimation may be off when redeeming non-compressed P2PKH outputs.
 func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 	fetchInputs InputSource, changeSource *ChangeSource) (*AuthoredTx, error) {
+	return NewUnsignedTransactionWithAddedStroomFee(outputs, feeRatePerKb, fetchInputs, changeSource, 1)
+}
+
+func NewUnsignedTransactionWithAddedStroomFee(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
+	fetchInputs InputSource, changeSource *ChangeSource, feeCoefficient float64) (*AuthoredTx, error) {
+
+	if len(outputs) == 0 {
+		return nil, errors.New("no transaction outputs provided")
+	}
 
 	targetAmount := SumOutputValues(outputs)
 	fmt.Printf("targetAmount: %v\n", targetAmount)
 	estimatedSize := txsizes.EstimateVirtualSize(
 		0, 0, 1, 0, outputs, changeSource.ScriptSize,
 	)
-	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize)
+	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize).MulF64(feeCoefficient)
 	fmt.Printf("targetFee: %v, estimatedSize: %v\n", targetFee, estimatedSize)
 
 	for {
@@ -112,7 +123,8 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			return nil, err
 		}
 		if inputAmount < targetAmount+targetFee {
-			fmt.Errorf("insufficientFundsError\n")
+			fmt.Errorf("insufficientFundsError: inputAmout(%d) < targetAmount(%d) + targetFee(%d)\n",
+				inputAmount, targetAmount, targetFee)
 			return nil, insufficientFundsError{}
 		}
 		fmt.Printf("inputAmount: %v, lengths: %v, %v, %v\n", inputAmount, len(inputs), len(inputValues), len(scripts))
@@ -139,10 +151,18 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			p2pkh, p2tr, p2wpkh, nested, outputs, changeSource.ScriptSize,
 		)
 		maxRequiredFee := txrules.FeeForSerializeSize(feeRatePerKb, maxSignedSize)
+
+		var totalFee btcutil.Amount
+		if feeCoefficient == 0 {
+			totalFee = maxRequiredFee
+		} else {
+			totalFee = maxRequiredFee.MulF64(feeCoefficient)
+		}
 		remainingAmount := inputAmount - targetAmount
-		fmt.Printf("maxSignedSize: %v, maxRequiredFee: %v, remainingAmount: %v\n", maxSignedSize, maxRequiredFee, remainingAmount)
-		if remainingAmount < maxRequiredFee {
-			targetFee = maxRequiredFee
+		fmt.Printf("maxRequiredFee: %v, totalFee: %v, remainingAmount: %v\n", maxRequiredFee, totalFee, remainingAmount)
+		if remainingAmount < totalFee {
+			targetFee = totalFee
+			fmt.Printf("remainingAmount(%v) < totalFee(%v), continue\n", remainingAmount, totalFee)
 			continue
 		}
 
@@ -158,17 +178,23 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			LockTime: 0,
 		}
 
+		// fees should be taken away from the output amount
+		if outputs[0].Value-int64(totalFee) < dustAmount {
+			continue
+		}
+		outputs[0].Value -= int64(totalFee)
+
 		changeIndex := -1
-		changeAmount := inputAmount - targetAmount - maxRequiredFee
+		// the change includes stroom fees
+		// TODO shall we check for dust change amount?
+		changeAmount := inputAmount - targetAmount - maxRequiredFee + totalFee
 		changeScript, err := changeSource.NewScript()
 		if err != nil {
 			fmt.Errorf("changeSource.NewScript error: %v\n", err)
 			return nil, err
 		}
 		change := wire.NewTxOut(int64(changeAmount), changeScript)
-		if changeAmount != 0 && !txrules.IsDustOutput(change,
-			txrules.DefaultRelayFeePerKb) {
-
+		if changeAmount != 0 && !txrules.IsDustOutput(change, txrules.DefaultRelayFeePerKb) {
 			l := len(outputs)
 			unsignedTransaction.TxOut = append(outputs[:l:l], change)
 			changeIndex = l

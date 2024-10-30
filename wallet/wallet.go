@@ -137,6 +137,7 @@ type Wallet struct {
 
 	AddressMapStorage *AddressMapStorage
 	Pk1, Pk2          *btcec.PublicKey
+	FeeCoefficient    float64
 
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex

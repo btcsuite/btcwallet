@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
@@ -93,4 +94,8 @@ func (m *mockChainClient) TestMempoolAccept(txns []*wire.MsgTx,
 	maxFeeRate float64) ([]*btcjson.TestMempoolAcceptResult, error) {
 
 	return nil, nil
+}
+
+func (c *mockChainClient) EstimateFee(numBlocks int64) (float64, error) {
+	return 0, fmt.Errorf("not implemented")
 }

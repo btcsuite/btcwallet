@@ -49,6 +49,7 @@ type Interface interface {
 	Notifications() <-chan interface{}
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
+	EstimateFee(numBlocks int64) (float64, error)
 }
 
 // Notification types.  These are defined here and processed from from reading

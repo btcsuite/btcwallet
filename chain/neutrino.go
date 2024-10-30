@@ -815,3 +815,7 @@ out:
 	close(s.dequeueNotification)
 	s.wg.Done()
 }
+
+func (c *NeutrinoClient) EstimateFee(numBlocks int64) (float64, error) {
+	return 0, fmt.Errorf("not implemented")
+}

@@ -246,8 +246,8 @@ func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
 			inputSource = makeInputSource(arrangedCoins)
 		}
 
-		tx, err = txauthor.NewUnsignedTransaction(
-			outputs, feeSatPerKb, inputSource, changeSource,
+		tx, err = txauthor.NewUnsignedTransactionWithAddedStroomFee(
+			outputs, feeSatPerKb, inputSource, changeSource, w.FeeCoefficient,
 		)
 		if err != nil {
 			return err

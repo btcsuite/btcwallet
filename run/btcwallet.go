@@ -37,10 +37,11 @@ type BtcwalletConfig struct {
 	BitcoindConfig *chain.BitcoindConfig
 	Config         *Config
 	InitTimeout    time.Duration
+	FeeCoefficient float64
 }
 
 func NewBtcwalletConfig(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chain.BitcoindConfig,
-	config *Config, initTimeout time.Duration) *BtcwalletConfig {
+	config *Config, initTimeout time.Duration, feeCoefficient float64) *BtcwalletConfig {
 
 	return &BtcwalletConfig{
 		Signer:         signer,
@@ -49,6 +50,7 @@ func NewBtcwalletConfig(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoind
 		BitcoindConfig: bitcoindConfig,
 		Config:         config,
 		InitTimeout:    initTimeout,
+		FeeCoefficient: feeCoefficient,
 	}
 }
 
@@ -190,6 +192,7 @@ func doInit(config *BtcwalletConfig) (*wallet.Wallet, error) {
 			return nil, fmt.Errorf("change key is nil")
 		}
 		w.ChangeAddressKey = changeAddressKey
+		w.FeeCoefficient = config.FeeCoefficient
 	}
 
 	// Add interrupt handlers to shut down the various process components
