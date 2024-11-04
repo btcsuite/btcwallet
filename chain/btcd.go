@@ -242,6 +242,7 @@ func (c *RPCClient) Stop() {
 	default:
 		close(c.quit)
 		c.Client.Shutdown()
+		c.Client.WaitForShutdown()
 
 		if !c.started {
 			close(c.dequeueNotification)
