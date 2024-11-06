@@ -1410,5 +1410,9 @@ func (c *BitcoindClient) LookupInputMempoolSpend(op wire.OutPoint) (
 }
 
 func (c *BitcoindClient) EstimateFee(numBlocks int64) (float64, error) {
-	return c.chainConn.client.EstimateFee(numBlocks)
+	fee, err := c.chainConn.client.EstimateSmartFee(numBlocks, &btcjson.EstimateModeEconomical)
+	if err != nil {
+		return 0, err
+	}
+	return *fee.FeeRate, nil
 }
