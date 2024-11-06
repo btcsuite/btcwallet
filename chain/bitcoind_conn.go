@@ -3,6 +3,7 @@ package chain
 import (
 	"errors"
 	"fmt"
+	"github.com/stroomnetwork/btcwallet/netparams"
 	"net"
 	"strings"
 	"sync"
@@ -345,6 +346,8 @@ func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
 	switch *hash {
 	case *chaincfg.TestNet3Params.GenesisHash:
 		return chaincfg.TestNet3Params.Net, nil
+	case *netparams.TestNet4Params.GenesisHash:
+		return netparams.TestNet4Params.Net, nil
 	case *chaincfg.RegressionNetParams.GenesisHash:
 		return chaincfg.RegressionNetParams.Net, nil
 	case *chaincfg.SigNetParams.GenesisHash:

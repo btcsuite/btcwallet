@@ -39,6 +39,12 @@ var TestNet3Params = Params{
 	RPCServerPort: "18332",
 }
 
+var TestNet4Params = Params{
+	Params:        &TestNet4ChainParams,
+	RPCClientPort: "48334",
+	RPCServerPort: "48332",
+}
+
 // SimNetParams contains parameters specific to the simulation test network
 // (wire.SimNet).
 var SimNetParams = Params{

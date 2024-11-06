@@ -3,6 +3,7 @@ package waddrmgr
 import (
 	"errors"
 	"fmt"
+	"github.com/stroomnetwork/btcwallet/netparams"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
@@ -313,6 +314,9 @@ func populateBirthdayBlock(ns walletdb.ReadWriteBucket) error {
 	case *chaincfg.TestNet3Params.GenesisHash:
 		genesisTimestamp =
 			chaincfg.TestNet3Params.GenesisBlock.Header.Timestamp
+	case *netparams.TestNet4Params.GenesisHash:
+		genesisTimestamp =
+			netparams.TestNet4Params.GenesisBlock.Header.Timestamp
 
 	case *chaincfg.RegressionNetParams.GenesisHash:
 		genesisTimestamp =

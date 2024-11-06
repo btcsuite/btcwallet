@@ -53,6 +53,7 @@ type Config struct {
 	AppDataDir      *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
 	Regtest         bool                    `long:"regtest" description:"Use the test Bitcoin regtest network (default mainnet)"`
 	TestNet3        bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
+	TestNet4        bool                    `long:"testnet4" description:"Use the test Bitcoin network (version 4) (default mainnet)"`
 	SimNet          bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	SigNet          bool                    `long:"signet" description:"Use the signet test network (default mainnet)"`
 	SigNetChallenge string                  `long:"signetchallenge" description:"Connect to a custom signet network defined by this challenge instead of using the global default signet test network -- Can be specified multiple times"`
@@ -394,6 +395,10 @@ func loadConfig(cfg *Config) error {
 
 	if cfg.TestNet3 {
 		activeNet = &netparams.TestNet3Params
+		numNets++
+	}
+	if cfg.TestNet4 {
+		activeNet = &netparams.TestNet4Params
 		numNets++
 	}
 	if cfg.SimNet {
