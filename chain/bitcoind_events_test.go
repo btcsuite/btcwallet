@@ -263,7 +263,6 @@ func testLookupInputMempoolSpend(t *testing.T, miner *rpctest.Harness,
 // re-org.
 func testReorg(t *testing.T, miner1, miner2 *rpctest.Harness,
 	client *BitcoindClient) {
-
 	require := require.New(t)
 
 	miner1Hash, commonHeight, err := miner1.Client.GetBestBlock()

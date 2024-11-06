@@ -550,6 +550,10 @@ func (s *NeutrinoClient) Notifications() <-chan interface{} {
 	return s.dequeueNotification
 }
 
+func (s *NeutrinoClient) PublicNotifications() <-chan interface{} {
+	return nil
+}
+
 // SetStartTime is a non-interface method to set the birthday of the wallet
 // using this object. Since only a single rescan at a time is currently
 // supported, only one birthday needs to be set. This does not fully restart a

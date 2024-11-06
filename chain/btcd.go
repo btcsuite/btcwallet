@@ -296,6 +296,10 @@ func (c *RPCClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
+func (c *RPCClient) PublicNotifications() <-chan interface{} {
+	return nil
+}
+
 // BlockStamp returns the latest block notified by the client, or an error
 // if the client has been shut down.
 func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
