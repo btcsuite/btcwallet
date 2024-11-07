@@ -114,8 +114,8 @@ func NewUnsignedTransactionWithAddedStroomFee(outputs []*wire.TxOut, feeRatePerK
 	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize).MulF64(feeCoefficient)
 	fmt.Printf("targetFee: %v, estimatedSize: %v\n", targetFee, estimatedSize)
 
-	if outputs[0].Value < int64(targetFee) {
-		return nil, fmt.Errorf("redeem amount(%v) < targetFee(%v) \n", outputs[0].Value, targetFee)
+	if targetAmount < targetFee {
+		return nil, fmt.Errorf("redeem amount(%v) < targetFee(%v) \n", int64(targetAmount), int64(targetFee))
 	}
 
 	for {
@@ -180,10 +180,11 @@ func NewUnsignedTransactionWithAddedStroomFee(outputs []*wire.TxOut, feeRatePerK
 			LockTime: 0,
 		}
 
-		// fees should be taken away from the output amount
-		if outputs[0].Value < int64(totalFee) {
-			return nil, fmt.Errorf("redeem amount(%v) < totalFee(%v) \n", outputs[0].Value, targetFee)
+		if targetAmount < totalFee {
+			return nil, fmt.Errorf("redeem amount(%v) < totalFee(%v) \n", int(targetAmount), int64(totalFee))
 		}
+
+		// fees should be taken away from the output amount
 		outputs[0].Value -= int64(totalFee)
 
 		changeIndex := -1
