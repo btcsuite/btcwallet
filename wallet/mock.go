@@ -13,6 +13,9 @@ import (
 )
 
 type mockChainClient struct {
+	getBestBlockHeight int32
+	getBlockHashFunc   func() (*chainhash.Hash, error)
+	getBlockHeader     *wire.BlockHeader
 }
 
 var _ chain.Interface = (*mockChainClient)(nil)
@@ -27,7 +30,7 @@ func (m *mockChainClient) Stop() {
 func (m *mockChainClient) WaitForShutdown() {}
 
 func (m *mockChainClient) GetBestBlock() (*chainhash.Hash, int32, error) {
-	return nil, 0, nil
+	return nil, m.getBestBlockHeight, nil
 }
 
 func (m *mockChainClient) GetBlock(*chainhash.Hash) (*wire.MsgBlock, error) {
@@ -35,12 +38,15 @@ func (m *mockChainClient) GetBlock(*chainhash.Hash) (*wire.MsgBlock, error) {
 }
 
 func (m *mockChainClient) GetBlockHash(int64) (*chainhash.Hash, error) {
+	if m.getBlockHashFunc != nil {
+		return m.getBlockHashFunc()
+	}
 	return nil, nil
 }
 
 func (m *mockChainClient) GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader,
 	error) {
-	return nil, nil
+	return m.getBlockHeader, nil
 }
 
 func (m *mockChainClient) IsCurrent() bool {
@@ -98,6 +104,10 @@ func (m *mockChainClient) TestMempoolAccept(txns []*wire.MsgTx,
 	maxFeeRate float64) ([]*btcjson.TestMempoolAcceptResult, error) {
 
 	return nil, nil
+}
+
+func (m *mockChainClient) MapRPCErr(err error) error {
+	return nil
 }
 
 func (c *mockChainClient) EstimateFee(numBlocks int64) (float64, error) {

@@ -51,6 +51,7 @@ type Interface interface {
 	PublicNotifications() <-chan interface{}
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
+	MapRPCErr(err error) error
 	EstimateFee(numBlocks int64) (float64, error)
 }
 

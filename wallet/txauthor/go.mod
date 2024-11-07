@@ -1,8 +1,10 @@
-module github.com/btcsuite/btcwallet/wallet/txrules
+module github.com/btcsuite/btcwallet/wallet/txauthor
 
 require (
 	github.com/btcsuite/btcd v0.23.4
-	github.com/btcsuite/btcd/btcutil v1.1.0
+	github.com/btcsuite/btcd/btcutil v1.1.1
+	github.com/btcsuite/btcwallet/wallet/txrules v1.2.0
+	github.com/btcsuite/btcwallet/wallet/txsizes v1.2.3
 )
 
 require (
