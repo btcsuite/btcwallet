@@ -476,9 +476,8 @@ func setupBitcoind(t *testing.T, minerAddr string,
 		"-regtest",
 		"-connect="+minerAddr,
 		"-txindex",
-		"-rpcauth=weks:469e9bb14ab2360f8e226efed5ca6f"+
-			"d$507c670e800a95284294edb5773b05544b"+
-			"220110063096c221be9933c82d38e1",
+		"-rpcuser=weks",
+		"-rpcpassword=weks",
 		fmt.Sprintf("-rpcport=%d", rpcPort),
 		"-disablewallet",
 		"-zmqpubrawblock="+zmqBlockHost,
