@@ -2529,7 +2529,7 @@ func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
 			return nil, fmt.Errorf("unsupported scope %v", s.scope)
 		}
 
-	case wire.TestNet, wire.TestNet3,
+	case wire.TestNet, wire.TestNet3, netparams.Testnet4,
 		netparams.SigNetWire(s.rootManager.ChainParams()):
 
 		switch s.scope {

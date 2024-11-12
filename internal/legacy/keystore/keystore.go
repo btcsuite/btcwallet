@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/stroomnetwork/btcwallet/netparams"
 	"io"
 	"math/big"
 	"os"
@@ -492,6 +493,8 @@ func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
 		*net = (netParams)(chaincfg.MainNetParams)
 	case wire.TestNet3:
 		*net = (netParams)(chaincfg.TestNet3Params)
+	case netparams.Testnet4:
+		*net = (netParams)(netparams.TestNet4ChainParams)
 	case wire.SimNet:
 		*net = (netParams)(chaincfg.SimNetParams)
 
