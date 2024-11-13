@@ -1527,5 +1527,8 @@ func (c *BitcoindClient) EstimateFee(numBlocks int64) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if fee.FeeRate == nil {
+		return 0, fmt.Errorf("fee rate not available")
+	}
 	return *fee.FeeRate, nil
 }
