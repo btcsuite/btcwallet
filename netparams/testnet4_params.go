@@ -9,9 +9,11 @@ import (
 	"time"
 )
 
+const Testnet4 wire.BitcoinNet = 0x1c163f28
+
 var TestNet4ChainParams = chaincfg.Params{
 	Name:        "testnet4",
-	Net:         wire.TestNet3, // TODO change??
+	Net:         Testnet4,
 	DefaultPort: "48333",
 	DNSSeeds: []chaincfg.DNSSeed{
 		{"seed.testnet4.bitcoin.sprovoost.nl", true},

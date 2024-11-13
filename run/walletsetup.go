@@ -32,7 +32,6 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 	// parameters will likely be switched to being named "testnet3" in the
 	// future.  This is done to future proof that change, and an upgrade
 	// plan to move the testnet3 data directory can be worked out later.
-	// TODO is it correct to use the same params for both testnets v3 and v4? Now we use the same
 	if chainParams.Net == wire.TestNet3 {
 		netname = "testnet"
 	}
