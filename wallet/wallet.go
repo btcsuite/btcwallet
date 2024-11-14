@@ -4188,7 +4188,7 @@ func (w *Wallet) GenerateAndImportKeyWithCheck(btcAddr, ethAddr string) (*btcec.
 	if importedAddress != nil {
 		address := importedAddress.Address().String()
 		if btcAddr != "" && address != btcAddr {
-			return nil, fmt.Errorf("address mismatch: %s != %s", address, btcAddr)
+			return nil, fmt.Errorf("address mismatch: %s (in wallet) != %s (in contract)", address, btcAddr)
 		}
 	}
 
