@@ -181,6 +181,7 @@ func (c *BitcoindConn) Start() error {
 	if !atomic.CompareAndSwapInt32(&c.started, 0, 1) {
 		return nil
 	}
+	log.Info("Starting bitcoind connection...")
 
 	// If we're connected to a pruned backend, we'll need to also start our
 	// pruned block dispatcher to handle pruned block requests.
@@ -228,7 +229,7 @@ func (c *BitcoindConn) Stop() {
 // MUST be run in a goroutine.
 func (c *BitcoindConn) sendBlockToClients() {
 	defer c.wg.Done()
-
+	log.Debug("Starting sendBlockToClients...")
 	// sendBlock is a helper function that sends the given block to each
 	// of the rescan clients
 	sendBlock := func(block *wire.MsgBlock) {
@@ -254,6 +255,7 @@ func (c *BitcoindConn) sendBlockToClients() {
 		}
 
 		sendBlock(block)
+		log.Debugf("New block %v sent to clients ", block.BlockHash())
 	}
 }
 

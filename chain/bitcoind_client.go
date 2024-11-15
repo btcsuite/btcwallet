@@ -596,6 +596,7 @@ func (c *BitcoindClient) Stop() {
 	if c.publicNotificationQueue != nil {
 		c.publicNotificationQueue.Stop()
 	}
+	c.chainConn.Stop()
 }
 
 // WaitForShutdown blocks until the client has finished disconnecting and all
