@@ -100,11 +100,6 @@ type BitcoindConn struct {
 	started int32 // To be used atomically.
 	stopped int32 // To be used atomically.
 
-	// rescanClientCounter is an atomic counter that assigns a unique ID to
-	// each new bitcoind rescan client using the current bitcoind
-	// connection.
-	rescanClientCounter uint64
-
 	cfg BitcoindConfig
 
 	// client is the RPC client to the bitcoind node.
@@ -119,10 +114,10 @@ type BitcoindConn struct {
 	// retrieved from bitcoind.
 	events BitcoindEvents
 
-	// rescanClients is the set of active bitcoind rescan clients to which
+	// subscriptions is the set of active clients to which
 	// ZMQ event notifications will be sent to.
-	rescanClientsMtx sync.Mutex
-	rescanClients    map[uint64]*BitcoindClient
+	subscriptions    map[*bitcoindNotificationsImpl]struct{}
+	subscriptionsMtx sync.RWMutex
 
 	quit chan struct{}
 	wg   sync.WaitGroup
@@ -199,7 +194,7 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 		cfg:                   *cfg,
 		client:                client,
 		prunedBlockDispatcher: prunedBlockDispatcher,
-		rescanClients:         make(map[uint64]*BitcoindClient),
+		subscriptions:         make(map[*bitcoindNotificationsImpl]struct{}),
 		quit:                  make(chan struct{}),
 	}
 
@@ -244,9 +239,11 @@ func (c *BitcoindConn) Stop() {
 		return
 	}
 
-	for _, client := range c.rescanClients {
-		client.Stop()
+	for subscription := range c.subscriptions {
+		close(subscription.txNtfns)
+		close(subscription.blockNtfns)
 	}
+	c.subscriptions = nil
 
 	close(c.quit)
 	c.client.Shutdown()
@@ -271,28 +268,26 @@ func (c *BitcoindConn) sendBlockToClients() {
 	// sendBlock is a helper function that sends the given block to each
 	// of the rescan clients
 	sendBlock := func(block *wire.MsgBlock) {
-		c.rescanClientsMtx.Lock()
-		defer c.rescanClientsMtx.Unlock()
+		c.subscriptionsMtx.RLock()
+		defer c.subscriptionsMtx.RUnlock()
 
-		for _, client := range c.rescanClients {
+		for subscription := range c.subscriptions {
 			select {
-			case client.blockNtfns <- block:
-			case <-client.quit:
+			case subscription.blockNtfns <- block:
 			case <-c.quit:
 				return
 			}
 		}
 	}
 
-	var block *wire.MsgBlock
 	for {
 		select {
-		case block = <-c.events.BlockNotifications():
+		case block := <-c.events.BlockNotifications():
+			sendBlock(block)
 		case <-c.quit:
 			return
 		}
 
-		sendBlock(block)
 	}
 }
 
@@ -302,28 +297,25 @@ func (c *BitcoindConn) sendTxToClients() {
 	defer c.wg.Done()
 
 	sendTx := func(tx *wire.MsgTx) {
-		c.rescanClientsMtx.Lock()
-		defer c.rescanClientsMtx.Unlock()
+		c.subscriptionsMtx.RLock()
+		defer c.subscriptionsMtx.RUnlock()
 
-		for _, client := range c.rescanClients {
+		for subscription := range c.subscriptions {
 			select {
-			case client.txNtfns <- tx:
-			case <-client.quit:
+			case subscription.txNtfns <- tx:
 			case <-c.quit:
 				return
 			}
 		}
 	}
 
-	var tx *wire.MsgTx
 	for {
 		select {
-		case tx = <-c.events.TxNotifications():
+		case tx := <-c.events.TxNotifications():
+			sendTx(tx)
 		case <-c.quit:
 			return
 		}
-
-		sendTx(tx)
 	}
 }
 
@@ -396,53 +388,41 @@ func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
 	}
 }
 
-// NewBitcoindClient returns a bitcoind client using the current bitcoind
-// connection. This allows us to share the same connection using multiple
-// clients.
-func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
-	return &BitcoindClient{
-		quit: make(chan struct{}),
-
-		id: atomic.AddUint64(&c.rescanClientCounter, 1),
-
-		chainConn: c,
-
-		rescanUpdate:     make(chan interface{}),
-		watchedAddresses: make(map[string]struct{}),
-		watchedOutPoints: make(map[wire.OutPoint]struct{}),
-		watchedTxs:       make(map[chainhash.Hash]struct{}),
-
-		notificationQueue: NewConcurrentQueue(20),
-		txNtfns:           make(chan *wire.MsgTx, 1000),
-		blockNtfns:        make(chan *wire.MsgBlock, 100),
-
-		mempool:        make(map[chainhash.Hash]struct{}),
-		expiredMempool: make(map[int32]map[chainhash.Hash]struct{}),
-	}
-}
-
-// AddClient adds a client to the set of active rescan clients of the current
+// Subscribe adds a subscription to the set of active subscriptions of the current
 // chain connection. This allows the connection to include the specified client
 // in its notification delivery.
 //
+// NB: the caller is responsible to call Unsubscribe when the subscription is not used anymore
+//
 // NOTE: This function is safe for concurrent access.
-func (c *BitcoindConn) AddClient(client *BitcoindClient) {
-	c.rescanClientsMtx.Lock()
-	defer c.rescanClientsMtx.Unlock()
+func (c *BitcoindConn) Subscribe() BitcoindNotifications {
+	c.subscriptionsMtx.Lock()
+	defer c.subscriptionsMtx.Unlock()
 
-	c.rescanClients[client.id] = client
+	s := &bitcoindNotificationsImpl{
+		txNtfns:    make(chan *wire.MsgTx, 1000),   //nolint: mnd
+		blockNtfns: make(chan *wire.MsgBlock, 100), //nolint: mnd
+	}
+	c.subscriptions[s] = struct{}{}
+
+	return s
 }
 
-// RemoveClient removes the client with the given ID from the set of active
-// rescan clients. Once removed, the client will no longer receive block and
+// Unsubscribe removes the subscription from the set of active subscriptions.
+// Once removed, the client will no longer receive block and
 // transaction notifications from the chain connection.
 //
 // NOTE: This function is safe for concurrent access.
-func (c *BitcoindConn) RemoveClient(id uint64) {
-	c.rescanClientsMtx.Lock()
-	defer c.rescanClientsMtx.Unlock()
-
-	delete(c.rescanClients, id)
+func (c *BitcoindConn) Unsubscribe(subscription BitcoindNotifications) {
+	c.subscriptionsMtx.Lock()
+	defer c.subscriptionsMtx.Unlock()
+	s, ok := subscription.(*bitcoindNotificationsImpl)
+	if !ok {
+		return
+	}
+	close(s.txNtfns)
+	close(s.blockNtfns)
+	delete(c.subscriptions, s)
 }
 
 // isBlockPrunedErr determines if the error returned by the GetBlock RPC

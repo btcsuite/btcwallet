@@ -9,9 +9,8 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// BitcoindEvents is the interface that must be satisfied by any type that
-// serves bitcoind block and transactions events.
-type BitcoindEvents interface {
+// BitcoindNotifications provides channels to listen to block and transaction notifications.
+type BitcoindNotifications interface {
 	// TxNotifications will return a channel which will deliver new
 	// transactions.
 	TxNotifications() <-chan *wire.MsgTx
@@ -19,6 +18,12 @@ type BitcoindEvents interface {
 	// BlockNotifications will return a channel which will deliver new
 	// blocks.
 	BlockNotifications() <-chan *wire.MsgBlock
+}
+
+// BitcoindEvents is the interface that must be satisfied by any type that
+// serves bitcoind block and transactions events.
+type BitcoindEvents interface {
+	BitcoindNotifications
 
 	// LookupInputSpend will return the transaction found in mempool that
 	// spends the given input.
@@ -29,6 +34,21 @@ type BitcoindEvents interface {
 
 	// Stop will clean up any resources and goroutines.
 	Stop() error
+}
+
+type bitcoindNotificationsImpl struct {
+	txNtfns    chan *wire.MsgTx
+	blockNtfns chan *wire.MsgBlock
+}
+
+var _ BitcoindNotifications = (*bitcoindNotificationsImpl)(nil)
+
+func (s *bitcoindNotificationsImpl) TxNotifications() <-chan *wire.MsgTx {
+	return s.txNtfns
+}
+
+func (s *bitcoindNotificationsImpl) BlockNotifications() <-chan *wire.MsgBlock {
+	return s.blockNtfns
 }
 
 // Ensure rpcclient.Client implements the rpcClient interface at compile time.
