@@ -724,7 +724,7 @@ func newManagedAddressFromExtKey(s *ScopedKeyManager,
 // clearTextScriptSetter is a non-exported interface to identify script types
 // that allow their clear text script to be set.
 type clearTextScriptSetter interface {
-	// setClearText sets the unencrypted script on the struct after
+	// setClearTextScript sets the unencrypted script on the struct after
 	// unlocking/decrypting it.
 	setClearTextScript([]byte)
 }
@@ -800,7 +800,7 @@ func (a *baseScriptAddress) Internal() bool {
 	return false
 }
 
-// setClearText sets the unencrypted script on the struct after unlocking/
+// setClearTextScript sets the unencrypted script on the struct after unlocking/
 // decrypting it.
 func (a *baseScriptAddress) setClearTextScript(script []byte) {
 	a.scriptClearText = make([]byte, len(script))
