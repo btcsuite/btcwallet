@@ -416,13 +416,19 @@ func (c *BitcoindConn) Subscribe() BitcoindNotifications {
 func (c *BitcoindConn) Unsubscribe(subscription BitcoindNotifications) {
 	c.subscriptionsMtx.Lock()
 	defer c.subscriptionsMtx.Unlock()
-	s, ok := subscription.(*bitcoindNotificationsImpl)
-	if !ok {
-		return
+
+	switch s := subscription.(type) {
+	case *bitcoindNotificationsImpl:
+		_, found := c.subscriptions[s]
+		if !found {
+			return
+		}
+		close(s.txNtfns)
+		close(s.blockNtfns)
+		delete(c.subscriptions, s)
+	default:
+		// Unexpected type, we can just ignore it
 	}
-	close(s.txNtfns)
-	close(s.blockNtfns)
-	delete(c.subscriptions, s)
 }
 
 // isBlockPrunedErr determines if the error returned by the GetBlock RPC
