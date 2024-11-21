@@ -238,7 +238,8 @@ func (c *BitcoindConn) Stop() {
 	if !atomic.CompareAndSwapInt32(&c.stopped, 0, 1) {
 		return
 	}
-
+	c.subscriptionsMtx.Lock()
+	defer c.subscriptionsMtx.Unlock()
 	for subscription := range c.subscriptions {
 		close(subscription.txNtfns)
 		close(subscription.blockNtfns)
