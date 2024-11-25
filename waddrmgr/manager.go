@@ -9,6 +9,7 @@ import (
 	"crypto/sha512"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -345,7 +346,7 @@ type Manager struct {
 	internalAddrSchemas map[AddressType][]KeyScope
 
 	syncState    syncState
-	watchingOnly bool
+	watchingOnly atomic.Bool
 	birthday     time.Time
 	locked       bool
 	closed       bool
@@ -392,18 +393,7 @@ type Manager struct {
 // WatchOnly returns true if the root manager is in watch only mode, and false
 // otherwise.
 func (m *Manager) WatchOnly() bool {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-
-	return m.watchOnly()
-}
-
-// watchOnly returns true if the root manager is in watch only mode, and false
-// otherwise.
-//
-// NOTE: This method requires the Manager's lock to be held.
-func (m *Manager) watchOnly() bool {
-	return m.watchingOnly
+	return m.watchingOnly.Load()
 }
 
 // IsWatchOnlyAccount determines if the account with the given key scope is set
@@ -489,7 +479,7 @@ func (m *Manager) Close() {
 	}
 
 	// Attempt to clear private key material from memory.
-	if !m.watchingOnly && !m.locked {
+	if !m.WatchOnly() && !m.locked {
 		m.lock()
 	}
 
@@ -517,7 +507,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 	defer m.mtx.Unlock()
 
 	var rootPriv *hdkeychain.ExtendedKey
-	if !m.watchingOnly {
+	if !m.WatchOnly() {
 		// If the manager is locked, then we can't create a new scoped
 		// manager.
 		if m.locked {
@@ -588,7 +578,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
-	if !m.watchingOnly {
+	if !m.WatchOnly() {
 		// With the database state created, we'll now derive the
 		// cointype key using the master HD private key, then encrypt
 		// it along with the first account using our crypto keys.
@@ -888,7 +878,7 @@ func (m *Manager) ChangePassphrase(ns walletdb.ReadWriteBucket, oldPassphrase,
 	newPassphrase []byte, private bool, config *ScryptOptions) error {
 
 	// No private passphrase to change for a watching-only address manager.
-	if private && m.watchingOnly {
+	if private && m.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -1053,7 +1043,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 	defer m.mtx.Unlock()
 
 	// Exit now if the manager is already watching-only.
-	if m.watchingOnly {
+	if m.WatchOnly() {
 		return nil
 	}
 
@@ -1118,7 +1108,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 	m.masterKeyPriv = nil
 
 	// Mark the manager watching-only.
-	m.watchingOnly = true
+	m.watchingOnly.Store(true)
 	return nil
 
 }
@@ -1149,7 +1139,7 @@ func (m *Manager) isLocked() bool {
 // manager.
 func (m *Manager) Lock() error {
 	// A watching-only address manager can't be locked.
-	if m.watchingOnly {
+	if m.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -1175,7 +1165,7 @@ func (m *Manager) Lock() error {
 // manager.
 func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// A watching-only address manager can't be unlocked.
-	if m.watchingOnly {
+	if m.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -1330,7 +1320,7 @@ func (m *Manager) LookupAccount(ns walletdb.ReadBucket, name string) (KeyScope,
 func (m *Manager) selectCryptoKey(keyType CryptoKeyType) (EncryptorDecryptor, error) {
 	if keyType == CKTPrivate || keyType == CKTScript {
 		// The manager must be unlocked to work with the private keys.
-		if m.locked || m.watchingOnly {
+		if m.locked || m.WatchOnly() {
 			return nil, managerError(ErrLocked, errLocked, nil)
 		}
 	}
@@ -1412,8 +1402,8 @@ func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 		scopedManagers:           scopedManagers,
 		externalAddrSchemas:      make(map[AddressType][]KeyScope),
 		internalAddrSchemas:      make(map[AddressType][]KeyScope),
-		watchingOnly:             watchingOnly,
 	}
+	m.watchingOnly.Store(watchingOnly)
 
 	for _, sMgr := range m.scopedManagers {
 		externalType := sMgr.AddrSchema().ExternalAddrType

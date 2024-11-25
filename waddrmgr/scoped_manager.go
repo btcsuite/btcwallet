@@ -447,7 +447,7 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 
 	// The wallet will only contain private keys for default accounts if the
 	// wallet's not set up as watch-only and it's been unlocked.
-	watchOnly := s.rootManager.watchOnly()
+	watchOnly := s.rootManager.WatchOnly()
 	hasPrivateKey := !s.rootManager.isLocked() && !watchOnly
 
 	// Create the new account info with the known information. The rest of
@@ -777,7 +777,7 @@ func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 
 	// Since the manger's mutex is assumed to held when invoking this
 	// function, we use the internal isLocked to avoid a deadlock.
-	private := !s.rootManager.isLocked() && !s.rootManager.watchOnly()
+	private := !s.rootManager.isLocked() && !s.rootManager.WatchOnly()
 
 	addressKey, acctKey, masterKeyFingerprint, err := s.deriveKeyFromPath(
 		ns, row.account, row.branch, row.index, private,
