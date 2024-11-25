@@ -448,7 +448,7 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	// The wallet will only contain private keys for default accounts if the
 	// wallet's not set up as watch-only and it's been unlocked.
 	watchOnly := s.rootManager.WatchOnly()
-	hasPrivateKey := !s.rootManager.isLocked() && !watchOnly
+	hasPrivateKey := !s.rootManager.IsLocked() && !watchOnly
 
 	// Create the new account info with the known information. The rest of
 	// the fields are filled out below.
@@ -775,9 +775,7 @@ func (s *ScopedKeyManager) deriveKeyFromPath(ns walletdb.ReadBucket,
 func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 	row *dbChainAddressRow) (ManagedAddress, error) {
 
-	// Since the manger's mutex is assumed to held when invoking this
-	// function, we use the internal isLocked to avoid a deadlock.
-	private := !s.rootManager.isLocked() && !s.rootManager.WatchOnly()
+	private := !s.rootManager.IsLocked() && !s.rootManager.WatchOnly()
 
 	addressKey, acctKey, masterKeyFingerprint, err := s.deriveKeyFromPath(
 		ns, row.account, row.branch, row.index, private,
@@ -1203,7 +1201,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 			// Add the new managed address to the list of addresses
 			// that need their private keys derived when the
 			// address manager is next unlocked.
-			if s.rootManager.isLocked() && !watchOnly {
+			if s.rootManager.IsLocked() && !watchOnly {
 				s.deriveOnUnlock = append(s.deriveOnUnlock, info)
 			}
 		}

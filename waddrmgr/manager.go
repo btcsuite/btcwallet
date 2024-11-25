@@ -348,7 +348,7 @@ type Manager struct {
 	syncState    syncState
 	watchingOnly atomic.Bool
 	birthday     time.Time
-	locked       bool
+	locked       atomic.Bool
 	closed       bool
 	chainParams  *chaincfg.Params
 
@@ -459,7 +459,7 @@ func (m *Manager) lock() {
 	// which uses a separate derived key from the database even when it is
 	// locked.
 
-	m.locked = true
+	m.locked.Store(true)
 }
 
 // Close cleanly shuts down the manager.  It makes a best try effort to remove
@@ -479,7 +479,7 @@ func (m *Manager) Close() {
 	}
 
 	// Attempt to clear private key material from memory.
-	if !m.WatchOnly() && !m.locked {
+	if !m.WatchOnly() && !m.IsLocked() {
 		m.lock()
 	}
 
@@ -510,7 +510,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 	if !m.WatchOnly() {
 		// If the manager is locked, then we can't create a new scoped
 		// manager.
-		if m.locked {
+		if m.IsLocked() {
 			return nil, managerError(ErrLocked, errLocked, nil)
 		}
 
@@ -969,7 +969,7 @@ func (m *Manager) ChangePassphrase(ns walletdb.ReadWriteBucket, oldPassphrase,
 		// If unlocked, create the new passphrase hash with the new
 		// passphrase and salt.
 		var hashedPassphrase [sha512.Size]byte
-		if m.locked {
+		if m.IsLocked() {
 			newMasterKey.Zero()
 		} else {
 			saltedPassphrase := append(passphraseSalt[:],
@@ -1062,7 +1062,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 
 	// Lock the manager to remove all clear text private key material from
 	// memory if needed.
-	if !m.locked {
+	if !m.IsLocked() {
 		m.lock()
 	}
 
@@ -1117,19 +1117,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 // unlocked, the decryption key needed to decrypt private keys used for signing
 // is in memory.
 func (m *Manager) IsLocked() bool {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-
-	return m.isLocked()
-}
-
-// isLocked is an internal method returning whether or not the address manager
-// is locked via an unprotected read.
-//
-// NOTE: The caller *MUST* acquire the Manager's mutex before invocation to
-// avoid data races.
-func (m *Manager) isLocked() bool {
-	return m.locked
+	return m.locked.Load()
 }
 
 // Lock performs a best try effort to remove and zero all secret keys associated
@@ -1147,7 +1135,7 @@ func (m *Manager) Lock() error {
 	defer m.mtx.Unlock()
 
 	// Error on attempt to lock an already locked manager.
-	if m.locked {
+	if m.IsLocked() {
 		return managerError(ErrLocked, errLocked, nil)
 	}
 
@@ -1174,7 +1162,7 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 
 	// Avoid actually unlocking if the manager is already unlocked
 	// and the passphrases match.
-	if !m.locked {
+	if !m.IsLocked() {
 		saltedPassphrase := append(m.privPassphraseSalt[:],
 			passphrase...)
 		hashedPassphrase := sha512.Sum512(saltedPassphrase)
@@ -1273,7 +1261,7 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 		}
 	}
 
-	m.locked = false
+	m.locked.Store(false)
 	saltedPassphrase := append(m.privPassphraseSalt[:], passphrase...)
 	m.hashedPrivPassphrase = sha512.Sum512(saltedPassphrase)
 	zero.Bytes(saltedPassphrase)
@@ -1320,7 +1308,7 @@ func (m *Manager) LookupAccount(ns walletdb.ReadBucket, name string) (KeyScope,
 func (m *Manager) selectCryptoKey(keyType CryptoKeyType) (EncryptorDecryptor, error) {
 	if keyType == CKTPrivate || keyType == CKTScript {
 		// The manager must be unlocked to work with the private keys.
-		if m.locked || m.WatchOnly() {
+		if m.IsLocked() || m.WatchOnly() {
 			return nil, managerError(ErrLocked, errLocked, nil)
 		}
 	}
@@ -1389,7 +1377,6 @@ func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 	m := &Manager{
 		chainParams:              chainParams,
 		syncState:                *syncInfo,
-		locked:                   true,
 		birthday:                 birthday,
 		masterKeyPub:             masterKeyPub,
 		masterKeyPriv:            masterKeyPriv,
@@ -1403,7 +1390,10 @@ func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 		externalAddrSchemas:      make(map[AddressType][]KeyScope),
 		internalAddrSchemas:      make(map[AddressType][]KeyScope),
 	}
+
+	// Store the atomic.Bool values for the manager.
 	m.watchingOnly.Store(watchingOnly)
+	m.locked.Store(true)
 
 	for _, sMgr := range m.scopedManagers {
 		externalType := sMgr.AddrSchema().ExternalAddrType
