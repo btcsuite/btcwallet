@@ -254,13 +254,17 @@ out:
 			log.Infof("Started rescan from block %v (height %d) for %d %s",
 				batch.bs.Hash, batch.bs.Height, numAddrs, noun)
 
-			err := chainClient.Rescan(&batch.bs.Hash, batch.addrs,
-				batch.outpoints)
-			if err != nil {
-				log.Errorf("Rescan for %d %s failed: %v", numAddrs,
-					noun, err)
+			if numAddrs > 0 {
+				err := chainClient.Rescan(&batch.bs.Hash, batch.addrs,
+					batch.outpoints)
+				if err != nil {
+					log.Errorf("Rescan for %d %s failed: %v", numAddrs,
+						noun, err)
+				}
+				batch.done(err)
+			} else {
+				batch.done(nil)
 			}
-			batch.done(err)
 		case <-quit:
 			break out
 		}
