@@ -92,6 +92,10 @@ type BitcoindConfig struct {
 	//
 	// NOTE: This only applies for pruned bitcoind nodes.
 	PrunedModeMaxPeers int
+
+	// BlocksBatchSize value will determine how many blocks in single batch
+	// needs to fetched from the batch client.
+	BlockBatchSize uint
 }
 
 // BitcoindConn represents a persistent client connection to a bitcoind node
@@ -109,6 +113,9 @@ type BitcoindConn struct {
 
 	// client is the RPC client to the bitcoind node.
 	client *rpcclient.Client
+
+	// batchClient is the batched RPC client to the bitcoind node.
+	batchClient *rpcclient.Client
 
 	// prunedBlockDispatcher handles all of the pruned block requests.
 	//
@@ -198,6 +205,7 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	bc := &BitcoindConn{
 		cfg:                   *cfg,
 		client:                client,
+		batchClient:           batchClient,
 		prunedBlockDispatcher: prunedBlockDispatcher,
 		rescanClients:         make(map[uint64]*BitcoindClient),
 		quit:                  make(chan struct{}),
@@ -255,11 +263,14 @@ func (c *BitcoindConn) Stop() {
 		log.Errorf("error shutting down bitcoind events: %w", err)
 	}
 
+	c.batchClient.Shutdown()
+
 	if c.prunedBlockDispatcher != nil {
 		c.prunedBlockDispatcher.Stop()
 	}
 
 	c.client.WaitForShutdown()
+	c.batchClient.WaitForShutdown()
 	c.wg.Wait()
 }
 
@@ -518,6 +529,69 @@ func (c *BitcoindConn) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 			return nil, ErrBitcoindClientShuttingDown
 		}
 	}
+}
+
+// GetBlocksBatch returns a batch of raw blocks from the server given their
+// hashes. If the server has already pruned some of the blocks, the missing blocks
+// will be retrieved from their peers.
+func (c *BitcoindConn) GetBlocksBatch(
+	hashes []*chainhash.Hash) ([]*wire.MsgBlock, error) {
+
+	batchRequests := make([]rpcclient.FutureGetBlockResult, len(hashes))
+
+	for i := range hashes {
+		batchRequests[i] = c.batchClient.GetBlockAsync(hashes[i])
+	}
+
+	err := c.batchClient.Send()
+	if err != nil {
+		return nil, err
+	}
+
+	batchRawBlocks := make([]*wire.MsgBlock, 0, len(hashes))
+
+	for i := range hashes {
+		block, err := batchRequests[i].Receive()
+		// Got the block from the backend successfully, add to the response.
+		if err == nil {
+			batchRawBlocks = append(batchRawBlocks, block)
+			continue
+		}
+
+		// We failed getting the block from the backend for whatever
+		// reason. If it wasn't due to the block being pruned, return
+		// the error immediately.
+		if !isBlockPrunedErr(err) || c.prunedBlockDispatcher == nil {
+			return nil, err
+		}
+
+		// Now that we know the block has been pruned for sure, request
+		// it from our backend peers.
+		blockChan, errChan := c.prunedBlockDispatcher.Query(
+			[]*chainhash.Hash{hashes[i]},
+		)
+	out:
+		for {
+			select {
+			case block := <-blockChan:
+				batchRawBlocks = append(batchRawBlocks, block)
+				break out
+
+			case err := <-errChan:
+				if err != nil {
+					return nil, err
+				}
+
+				// errChan fired before blockChan with a nil
+				// error, wait for the block now.
+
+			case <-c.quit:
+				return nil, ErrBitcoindClientShuttingDown
+			}
+		}
+	}
+
+	return batchRawBlocks, nil
 }
 
 // isASCII is a helper method that checks whether all bytes in `data` would be
