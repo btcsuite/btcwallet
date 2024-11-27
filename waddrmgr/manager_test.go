@@ -2439,6 +2439,14 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
+		// For this test, since we've fetched the scoped key manager,
+		// we want to check that this runs correctly while the root
+		// manager is locked for another task. This will be possible
+		// with Postgres-backed wallets having multiple connections to
+		// the database backend, executing transactions in parallel.
+		mgr.mtx.Lock()
+		defer mgr.mtx.Unlock()
+
 		// We'll now create a new external address to ensure we
 		// retrieve the proper type.
 		externalAddr, err = scopedMgr.NextExternalAddresses(
