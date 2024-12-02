@@ -9,6 +9,13 @@ func SetupBitcoind(cfg *BitcoindConfig) (*BitcoindClient, error) {
 
 	c := make(chan *BitcoindConn)
 
+	var connTimeout time.Duration
+	if cfg.ConnectionTimeout != 0 {
+		connTimeout = cfg.ConnectionTimeout
+	} else {
+		connTimeout = bitcoindConnectionTimeout
+	}
+
 	go func() {
 		chainConn, err := NewBitcoindConn(cfg)
 		if err != nil {
@@ -29,7 +36,7 @@ func SetupBitcoind(cfg *BitcoindConfig) (*BitcoindClient, error) {
 			return nil, err
 		}
 		return btcClient, nil
-	case <-time.After(2 * time.Second):
+	case <-time.After(connTimeout):
 		fmt.Println("timeout creating bitcoind connection")
 		return nil, fmt.Errorf("timeout creating bitcoind connection")
 	}

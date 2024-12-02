@@ -50,6 +50,9 @@ const (
 	// bitcoindStartTimeout is the time we wait for bitcoind to finish
 	// loading and verifying blocks and become ready to serve RPC requests.
 	bitcoindStartTimeout = 30 * time.Second
+
+	// bitcoindConnectionTimeout is the time we wait for bitcoind to connect.
+	bitcoindConnectionTimeout = 2 * time.Second
 )
 
 // ErrBitcoindStartTimeout is returned when the bitcoind daemon fails to load
@@ -92,6 +95,8 @@ type BitcoindConfig struct {
 	//
 	// NOTE: This only applies for pruned bitcoind nodes.
 	PrunedModeMaxPeers int
+
+	ConnectionTimeout time.Duration
 }
 
 // BitcoindConn represents a persistent client connection to a bitcoind node
