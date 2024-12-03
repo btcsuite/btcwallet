@@ -287,7 +287,7 @@ func (w *Wallet) RescanFor(addr btcutil.Address, startBlock *waddrmgr.BlockStamp
 // none is provided, the rescan will begin from the manager's sync tip.
 func (w *Wallet) rescanWithTarget(addrs []btcutil.Address,
 	unspent []wtxmgr.Credit, startStamp *waddrmgr.BlockStamp) error {
-
+	log.Debugf("rescanWithTarget: addrs=%d, unspent=%d, startStamp=%v", len(addrs), len(unspent), startStamp)
 	outpoints := make(map[wire.OutPoint]btcutil.Address, len(unspent))
 	for _, output := range unspent {
 		_, outputAddrs, _, err := txscript.ExtractPkScriptAddrs(

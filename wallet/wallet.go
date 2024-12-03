@@ -827,6 +827,7 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 			recoveryMgr.ResetBlockBatch()
 		}
 	}
+	log.Infof("RECOVERY -- rescanning for used addresses done")
 
 	return nil
 }
