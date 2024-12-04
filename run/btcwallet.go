@@ -185,12 +185,13 @@ func doInit(config *BtcwalletConfig) (*wallet.Wallet, error) {
 		if err != nil && !strings.Contains(err.Error(), "already exists") {
 			return nil, fmt.Errorf("cannot import change address: %w", err)
 		}
-		if changeAddress != nil {
-			log.Infof("Change address: %s", changeAddress.Address())
-		}
 		if changeAddressKey == nil {
 			return nil, fmt.Errorf("change key is nil")
 		}
+		if changeAddress != nil {
+			log.Infof("Change address: %s", changeAddress.Address())
+		}
+
 		w.ChangeAddressKey = changeAddressKey
 		w.FeeCoefficient = config.FeeCoefficient
 	}

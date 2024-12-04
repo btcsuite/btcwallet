@@ -1048,27 +1048,39 @@ func newFilterBlocksRequest(w *Wallet, batch []wtxmgr.BlockMeta, scopedMgrs map[
 		WatchedOutPoints: recoveryState.WatchedOutPoints(),
 	}
 
+	addresses, err := w.AccountAddresses(waddrmgr.ImportedAddrAccount)
+	if err == nil {
+		log.Infof("newFilterBlocksRequest: imported addresses size: %v", len(addresses))
+		for _, addr := range addresses {
+			log.Infof("newFilterBlocksRequest: address %v", addr)
+		}
+	} else {
+		log.Errorf("newFilterBlocksRequest: error getting imported addresses: %v", err)
+	}
+
 	// Populate the external and internal addresses by merging the addresses
 	// sets belong to all currently tracked scopes.
 	for scope := range scopedMgrs {
 		scopeState := recoveryState.StateForScope(scope)
 
-		log.Infof("Recovery state for scope %v: %v", scope, scopeState)
-
-		addresses, err := w.AccountAddresses(waddrmgr.ImportedAddrAccount)
-		if err == nil {
-			for index, addr := range addresses {
-				log.Infof("ImportedAddrAccount address for scope %v: %v", scope, addr)
-				scopedIndex := waddrmgr.ScopedIndex{
-					Scope: scope,
-					Index: uint32(index),
-				}
-				filterReq.ExternalAddrs[scopedIndex] = addr
+		for index, addr := range scopeState.ExternalBranch.Addrs() {
+			present := isPresent(addresses, addr)
+			if present {
+				log.Infof("ExternalBranch address for scope %v: %v matches an imported address", scope, addr)
 			}
+			scopedIndex := waddrmgr.ScopedIndex{
+				Scope: scope,
+				Index: index,
+			}
+			filterReq.ExternalAddrs[scopedIndex] = addr
+
 		}
 
 		for index, addr := range scopeState.InternalBranch.Addrs() {
-			log.Infof("InternalBranch address for scope %v: %v", scope, addr)
+			present := isPresent(addresses, addr)
+			if present {
+				log.Infof("InternalBranch address for scope %v: %v matches an imported address", scope, addr)
+			}
 			scopedIndex := waddrmgr.ScopedIndex{
 				Scope: scope,
 				Index: index,
@@ -1078,6 +1090,18 @@ func newFilterBlocksRequest(w *Wallet, batch []wtxmgr.BlockMeta, scopedMgrs map[
 	}
 
 	return filterReq
+}
+
+func isPresent(addresses []btcutil.Address, externalBranchAddress btcutil.Address) bool {
+	if addresses == nil || externalBranchAddress == nil {
+		return false
+	}
+	for _, addr := range addresses {
+		if addr.EncodeAddress() == externalBranchAddress.EncodeAddress() {
+			return true
+		}
+	}
+	return false
 }
 
 // extendFoundAddresses accepts a filter blocks response that contains addresses
