@@ -37,7 +37,7 @@ func doubleSpendTest(t *testing.T, mineTx bool) {
 		_ = w.PublishTransaction(tx.Tx, "")
 	}
 
-	// double spend the same redemptionId
+	// double spend the same redeemId
 	tx, err = createTx(t, w)
 
 	assert.Error(t, err)
@@ -46,11 +46,11 @@ func doubleSpendTest(t *testing.T, mineTx bool) {
 
 func createTx(t *testing.T, w *Wallet) (*txauthor.AuthoredTx, error) {
 
-	var redemptionId uint32 = 1
+	var redeemId uint32 = 1
 
-	return w.CheckDoubleSpendAndCreateTxWithRedemptionId(
+	return w.CheckDoubleSpendAndCreateTxWithRedeemId(
 		NewBlockIdentifierFromHeight(0), NewBlockIdentifierFromHeight(testBlockHeight),
-		redemptionId, &waddrmgr.KeyScopeBIP0049Plus, 0, []*wire.TxOut{getTxOut(t)}, 1, 100,
+		redeemId, &waddrmgr.KeyScopeBIP0049Plus, 0, []*wire.TxOut{getTxOut(t)}, 1, 100,
 		CoinSelectionLargest, false)
 }
 

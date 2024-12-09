@@ -148,15 +148,15 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	selectedUtxos []wire.OutPoint,
 	allowUtxo func(utxo wtxmgr.Credit) bool) (
 	*txauthor.AuthoredTx, error) {
-	return w.txToOutputsWithRedemptionId(outputs, coinSelectKeyScope, changeKeyScope, account, minconf, feeSatPerKb, strategy, dryRun, selectedUtxos, allowUtxo, 0, nil)
+	return w.txToOutputsWithReemId(outputs, coinSelectKeyScope, changeKeyScope, account, minconf, feeSatPerKb, strategy, dryRun, selectedUtxos, allowUtxo, 0, nil)
 }
 
-func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
+func (w *Wallet) txToOutputsWithReemId(outputs []*wire.TxOut,
 	coinSelectKeyScope, changeKeyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
 	strategy CoinSelectionStrategy, dryRun bool,
 	selectedUtxos []wire.OutPoint,
-	allowUtxo func(utxo wtxmgr.Credit) bool, redemptionID uint32, data []byte) (
+	allowUtxo func(utxo wtxmgr.Credit) bool, redeemId uint32, data []byte) (
 	*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
@@ -265,8 +265,8 @@ func (w *Wallet) txToOutputsWithRedemptionId(outputs []*wire.TxOut,
 			return err
 		}
 
-		if redemptionID != 0 {
-			tx.Tx.TxIn[0].Sequence = redemptionID
+		if redeemId != 0 {
+			tx.Tx.TxIn[0].Sequence = redeemId
 		}
 
 		// Randomize change position, if change exists, before signing.

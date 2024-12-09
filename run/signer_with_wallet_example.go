@@ -71,7 +71,7 @@ func Example() {
 		return
 	}
 
-	_, err = w.CheckDoubleSpendAndCreateTxWithRedemptionId(nil, nil, 0, &waddrmgr.KeyScopeBIP0086, accounts.Accounts[1].AccountNumber, []*wire.TxOut{txOut}, 1, 1000, wallet.CoinSelectionLargest, false)
+	_, err = w.CheckDoubleSpendAndCreateTxWithRedeemId(nil, nil, 0, &waddrmgr.KeyScopeBIP0086, accounts.Accounts[1].AccountNumber, []*wire.TxOut{txOut}, 1, 1000, wallet.CoinSelectionLargest, false)
 	if err != nil {
 		log.Info(err)
 		return
