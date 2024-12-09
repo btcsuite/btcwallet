@@ -35,6 +35,12 @@ const (
 	defaultAccountName = "default"
 )
 
+var (
+	// errUtxoSpent is an error that is returned if an UTX has already been
+	// spent.
+	errUtxoSpent = errors.New("the utxo has been spent")
+)
+
 // confirms returns the number of confirmations for a transaction in a block at
 // height txHeight (or -1 for an unconfirmed tx) given the chain height
 // curHeight.
@@ -1712,6 +1718,9 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		result, err := resp.Receive()
 		if err != nil {
 			return nil, err
+		}
+		if result == nil {
+			return nil, errUtxoSpent
 		}
 		script, err := hex.DecodeString(result.ScriptPubKey.Hex)
 		if err != nil {
