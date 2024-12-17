@@ -159,6 +159,7 @@ type Wallet struct {
 	rescanNotifications chan interface{} // From chain server
 	rescanProgress      chan *RescanProgressMsg
 	rescanFinished      chan *RescanFinishedMsg
+	rescanLock          sync.Mutex
 
 	// Channel for transaction creation requests.
 	createTxRequests chan createTxRequest

@@ -483,10 +483,9 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 			log.Infof("addr account not match, addrAcct: %v, account: %v", addrAcct, account)
 			continue
 		}
-		log.Infof("eligible output: %v, amount:%v", output, output.Amount)
 		eligible = append(eligible, *output)
 	}
-	log.Infof("eligible size: %v", len(eligible))
+	log.Infof("eligible outputs size: %v", len(eligible))
 	return eligible, nil
 }
 
