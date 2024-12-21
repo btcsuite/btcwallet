@@ -138,10 +138,9 @@ type Wallet struct {
 	Pk1, Pk2          *btcec.PublicKey
 	FeeCoefficient    float64
 
-	chainClient        chain.Interface
-	chainClientLock    sync.Mutex
-	chainClientSynced  bool
-	chainClientSyncMtx sync.Mutex
+	chainClient       chain.Interface
+	chainClientLock   sync.Mutex
+	chainClientSynced atomic.Bool
 
 	newAddrMtx sync.Mutex
 
@@ -338,19 +337,16 @@ func (w *Wallet) SynchronizingToNetwork() bool {
 	// future, when SPV is added, a separate check will also be needed, or
 	// SPV could always be enabled if RPC was not explicitly specified when
 	// creating the wallet.
-	w.chainClientSyncMtx.Lock()
+	w.chainClientLock.Lock()
 	syncing := w.chainClient != nil
-	w.chainClientSyncMtx.Unlock()
+	w.chainClientLock.Unlock()
 	return syncing
 }
 
 // ChainSynced returns whether the wallet has been attached to a chain server
 // and synced up to the best block on the main chain.
 func (w *Wallet) ChainSynced() bool {
-	w.chainClientSyncMtx.Lock()
-	synced := w.chainClientSynced
-	w.chainClientSyncMtx.Unlock()
-	return synced
+	return w.chainClientSynced.Load()
 }
 
 // SetChainSynced marks whether the wallet is connected to and currently in sync
@@ -361,9 +357,7 @@ func (w *Wallet) ChainSynced() bool {
 // until the reconnect notification is received, at which point the wallet can be
 // marked out of sync again until after the next rescan completes.
 func (w *Wallet) SetChainSynced(synced bool) {
-	w.chainClientSyncMtx.Lock()
-	w.chainClientSynced = synced
-	w.chainClientSyncMtx.Unlock()
+	w.chainClientSynced.Store(synced)
 }
 
 // activeData returns the currently-active receiving addresses and all unspent
