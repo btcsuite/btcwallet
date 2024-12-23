@@ -346,6 +346,7 @@ type Manager struct {
 	internalAddrSchemas map[AddressType][]KeyScope
 
 	syncState    syncState
+	syncStateMtx sync.RWMutex
 	watchingOnly atomic.Bool
 	birthday     time.Time
 	locked       atomic.Bool
