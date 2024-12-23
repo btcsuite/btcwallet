@@ -49,8 +49,8 @@ func newSyncState(startBlock, syncedTo *BlockStamp) *syncState {
 // marked as unsynced back to the oldest known point any of the addresses have
 // appeared in the block chain.
 func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
-	m.syncStateMtx.Lock()
-	defer m.syncStateMtx.Unlock()
+	m.syncMtx.Lock()
+	defer m.syncMtx.Unlock()
 
 	// Use the stored start blockstamp and reset recent hashes and height
 	// when the provided blockstamp is nil.
@@ -74,8 +74,8 @@ func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 // can use this information for intelligently initiating rescans to sync back to
 // the best chain from the last known good block.
 func (m *Manager) SyncedTo() BlockStamp {
-	m.syncStateMtx.RLock()
-	defer m.syncStateMtx.RUnlock()
+	m.syncMtx.RLock()
+	defer m.syncMtx.RUnlock()
 
 	return m.syncState.syncedTo
 }
@@ -92,8 +92,8 @@ func (m *Manager) BlockHash(ns walletdb.ReadBucket, height int32) (
 // Birthday returns the birthday, or earliest time a key could have been used,
 // for the manager.
 func (m *Manager) Birthday() time.Time {
-	m.birthdayMtx.RLock()
-	defer m.birthdayMtx.RUnlock()
+	m.syncMtx.RLock()
+	defer m.syncMtx.RUnlock()
 
 	return m.birthday
 }
@@ -102,8 +102,8 @@ func (m *Manager) Birthday() time.Time {
 // for the manager.
 func (m *Manager) SetBirthday(ns walletdb.ReadWriteBucket,
 	birthday time.Time) error {
-	m.birthdayMtx.Lock()
-	defer m.birthdayMtx.Unlock()
+	m.syncMtx.Lock()
+	defer m.syncMtx.Unlock()
 
 	m.birthday = birthday
 	return putBirthday(ns, birthday)
