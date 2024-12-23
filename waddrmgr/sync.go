@@ -92,8 +92,8 @@ func (m *Manager) BlockHash(ns walletdb.ReadBucket, height int32) (
 // Birthday returns the birthday, or earliest time a key could have been used,
 // for the manager.
 func (m *Manager) Birthday() time.Time {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
+	m.birthdayMtx.RLock()
+	defer m.birthdayMtx.RUnlock()
 
 	return m.birthday
 }
@@ -102,8 +102,8 @@ func (m *Manager) Birthday() time.Time {
 // for the manager.
 func (m *Manager) SetBirthday(ns walletdb.ReadWriteBucket,
 	birthday time.Time) error {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
+	m.birthdayMtx.Lock()
+	defer m.birthdayMtx.Unlock()
 
 	m.birthday = birthday
 	return putBirthday(ns, birthday)

@@ -349,6 +349,7 @@ type Manager struct {
 	syncStateMtx sync.RWMutex
 	watchingOnly atomic.Bool
 	birthday     time.Time
+	birthdayMtx  sync.RWMutex
 	locked       atomic.Bool
 	closed       bool
 	chainParams  *chaincfg.Params
