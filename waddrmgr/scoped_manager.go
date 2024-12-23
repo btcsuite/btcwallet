@@ -2037,10 +2037,10 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 
 	// The start block needs to be updated when the newly imported address
 	// is before the current one.
-	s.rootManager.mtx.Lock()
+	s.rootManager.syncMtx.RLock()
 	updateStartBlock := bs != nil &&
 		bs.Height < s.rootManager.syncState.startBlock.Height
-	s.rootManager.mtx.Unlock()
+	s.rootManager.syncMtx.RUnlock()
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
@@ -2062,9 +2062,9 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 	// Now that the database has been updated, update the start block in
 	// memory too if needed.
 	if updateStartBlock {
-		s.rootManager.mtx.Lock()
+		s.rootManager.syncMtx.Lock()
+		defer s.rootManager.syncMtx.Unlock()
 		s.rootManager.syncState.startBlock = *bs
-		s.rootManager.mtx.Unlock()
 	}
 
 	return nil
@@ -2253,11 +2253,11 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	// The start block needs to be updated when the newly imported address
 	// is before the current one.
 	updateStartBlock := false
-	s.rootManager.mtx.RLock()
+	s.rootManager.syncMtx.RLock()
 	if bs.Height < s.rootManager.syncState.startBlock.Height {
 		updateStartBlock = true
 	}
-	s.rootManager.mtx.RUnlock()
+	s.rootManager.syncMtx.RUnlock()
 
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
@@ -2324,11 +2324,12 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 		// manager lock.
 		s.mtx.Unlock()
 		unlockNeeded = false
-		s.rootManager.mtx.Lock()
+		s.rootManager.syncMtx.Lock()
+		defer s.rootManager.syncMtx.Unlock()
+
 		if bs.Height < s.rootManager.syncState.startBlock.Height {
 			s.rootManager.syncState.startBlock = *bs
 		}
-		s.rootManager.mtx.Unlock()
 	}
 
 	return managedAddr, nil
