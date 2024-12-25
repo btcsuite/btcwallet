@@ -33,10 +33,15 @@ func Example() {
 		return
 	}
 
-	w, err := SafeInitWallet(
-		NewBtcwalletConfig(validators[0], pk1, pk2,
-			chain.NewBitcoindConfig("127.0.0.1:38332", "rpcuser", "rpcpassword"),
-			nil, 2, 1))
+	w, err := SafeInitWallet(&BtcwalletConfig{
+		Signer:         validators[0],
+		Pk1:            pk1,
+		Pk2:            pk2,
+		BitcoindConfig: chain.NewBitcoindConfig("127.0.0.1:38332", "rpcuser", "rpcpassword"),
+		Config:         nil,
+		InitTimeout:    2,
+		FeeCoefficient: 1,
+	})
 
 	if err != nil {
 		os.Exit(1)

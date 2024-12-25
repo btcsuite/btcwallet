@@ -159,6 +159,7 @@ type Wallet struct {
 	rescanProgress      chan *RescanProgressMsg
 	rescanFinished      chan *RescanFinishedMsg
 	rescanLock          sync.Mutex
+	RescanStartStamp    *waddrmgr.BlockStamp
 
 	// Channel for transaction creation requests.
 	createTxRequests chan createTxRequest
@@ -275,9 +276,25 @@ func (w *Wallet) requireChainClient() (chain.Interface, error) {
 // the wallet.
 func (w *Wallet) ChainClient() chain.Interface {
 	w.chainClientLock.Lock()
-	chainClient := w.chainClient
-	w.chainClientLock.Unlock()
-	return chainClient
+	defer w.chainClientLock.Unlock()
+	return w.chainClient
+}
+
+func (w *Wallet) GetBlockStamp(height uint64) (*waddrmgr.BlockStamp, error) {
+	hash, err := w.ChainClient().GetBlockHash(int64(height))
+	if err != nil {
+		return nil, err
+	}
+	header, err := w.ChainClient().GetBlockHeader(hash)
+	if err != nil {
+		return nil, err
+	}
+
+	return &waddrmgr.BlockStamp{
+		Height:    int32(height),
+		Hash:      header.BlockHash(),
+		Timestamp: header.Timestamp,
+	}, nil
 }
 
 // quitChan atomically reads the quit channel.
@@ -574,7 +591,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		return err
 	}
 
-	return w.rescanWithTarget(addrs, unspent, nil)
+	return w.rescanWithTarget(addrs, unspent, w.RescanStartStamp)
 }
 
 // isDevEnv determines whether the wallet is currently under a local developer

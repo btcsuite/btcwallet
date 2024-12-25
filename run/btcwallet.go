@@ -38,20 +38,8 @@ type BtcwalletConfig struct {
 	Config         *Config
 	InitTimeout    time.Duration
 	FeeCoefficient float64
-}
-
-func NewBtcwalletConfig(signer frost.Signer, pk1, pk2 *btcec.PublicKey, bitcoindConfig *chain.BitcoindConfig,
-	config *Config, initTimeout time.Duration, feeCoefficient float64) *BtcwalletConfig {
-
-	return &BtcwalletConfig{
-		Signer:         signer,
-		Pk1:            pk1,
-		Pk2:            pk2,
-		BitcoindConfig: bitcoindConfig,
-		Config:         config,
-		InitTimeout:    initTimeout,
-		FeeCoefficient: feeCoefficient,
-	}
+	// RescanStartBlock is the block height to start rescan from; 0 means from the wallet sync block
+	RescanStartBlock uint64
 }
 
 func SafeInitWallet(config *BtcwalletConfig) (*wallet.Wallet, error) {
@@ -194,6 +182,14 @@ func doInit(config *BtcwalletConfig) (*wallet.Wallet, error) {
 
 		w.ChangeAddressKey = changeAddressKey
 		w.FeeCoefficient = config.FeeCoefficient
+
+		if config.RescanStartBlock != 0 {
+			rescanStartStamp, err := w.GetBlockStamp(config.RescanStartBlock)
+			if err != nil {
+				return nil, fmt.Errorf("cannot get rescan block stamp: %w", err)
+			}
+			w.RescanStartStamp = rescanStartStamp
+		}
 	}
 
 	// Add interrupt handlers to shut down the various process components
