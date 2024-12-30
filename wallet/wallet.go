@@ -3531,7 +3531,7 @@ func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 
 	return w.sendOutputs(
 		outputs, keyScope, account, minconf, satPerKb,
-		coinSelectionStrategy, label, 0, nil,
+		coinSelectionStrategy, label, 0, []byte{},
 	)
 }
 

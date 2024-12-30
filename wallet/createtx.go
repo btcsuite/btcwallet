@@ -148,7 +148,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	selectedUtxos []wire.OutPoint,
 	allowUtxo func(utxo wtxmgr.Credit) bool) (
 	*txauthor.AuthoredTx, error) {
-	return w.txToOutputsWithReemId(outputs, coinSelectKeyScope, changeKeyScope, account, minconf, feeSatPerKb, strategy, dryRun, selectedUtxos, allowUtxo, 0, nil)
+	return w.txToOutputsWithReemId(outputs, coinSelectKeyScope, changeKeyScope, account, minconf, feeSatPerKb, strategy, dryRun, selectedUtxos, allowUtxo, 0, []byte{})
 }
 
 func (w *Wallet) txToOutputsWithReemId(outputs []*wire.TxOut,
