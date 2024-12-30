@@ -26,7 +26,7 @@ func (w *Wallet) CheckDoubleSpendAndCreateTxWithRedeemId(start, end *BlockIdenti
 		return nil, fmt.Errorf("redeem id %d already spent in tx %s", redeemId, hash)
 	}
 
-	return w.CreateSimpleTxWithRedeemId(coinSelectKeyScope, account, outputs, minconf, satPerKb, coinSelectionStrategy, dryRun, redeemId, nil, optFuncs...)
+	return w.CreateSimpleTxWithRedeemId(coinSelectKeyScope, account, outputs, minconf, satPerKb, coinSelectionStrategy, dryRun, redeemId, []byte{}, optFuncs...)
 }
 func (w *Wallet) IsRedeemIdAlreadySpent(redeemId uint32, start, end *BlockIdentifier) (bool, chainhash.Hash, error) {
 

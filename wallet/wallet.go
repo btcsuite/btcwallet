@@ -3556,6 +3556,17 @@ func (w *Wallet) SendOutputsWithDataAndRedeemIdCheck(outputs []*wire.TxOut, keyS
 	)
 }
 
+func (w *Wallet) SendOutputsWithData(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, satPerKb btcutil.Amount,
+	coinSelectionStrategy CoinSelectionStrategy, label string, data []byte) (*wire.MsgTx,
+	error) {
+
+	return w.sendOutputs(
+		outputs, keyScope, account, minconf, satPerKb,
+		coinSelectionStrategy, label, 0, data,
+	)
+}
+
 // SendOutputsWithInput creates and sends payment transactions using the
 // provided selected utxos. It returns the transaction upon success.
 func (w *Wallet) SendOutputsWithInput(outputs []*wire.TxOut,

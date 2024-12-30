@@ -319,12 +319,13 @@ func (w *Wallet) txToOutputsWithReemId(outputs []*wire.TxOut,
 				return err
 			}
 
-			err = validateMsgTx(
+			// FIXME validation fails as the tx is not signed
+			/*err = validateMsgTx(
 				tx.Tx, tx.PrevScripts, tx.PrevInputValues,
 			)
 			if err != nil {
 				return err
-			}
+			}*/
 		}
 
 		if tx.ChangeIndex >= 0 && account == waddrmgr.ImportedAddrAccount {

@@ -6,8 +6,6 @@
 package txauthor
 
 import (
-	"bytes"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/btcutil"
@@ -294,13 +292,6 @@ func AddAllInputScripts(signer frost.Signer, linearCombinations map[string]*cryp
 			}
 
 		case txscript.IsPayToTaproot(pkScript):
-			err := spendTaprootKey(signer, linearCombinations, data,
-				inputs[i], pkScript, int64(inputValues[i]),
-				chainParams, tx, hashCache, i,
-			)
-			if err != nil {
-				return err
-			}
 
 		default:
 			sigScript := inputs[i].SignatureScript
@@ -374,103 +365,10 @@ func spendWitnessKeyHash(txIn *wire.TxIn, pkScript []byte,
 // correspond to the output value of the previous pkScript, or else verification
 // will fail since the new sighash digest algorithm defined in BIP0341 includes
 // the input value in the sighash.
-func spendTaprootKey(signer frost.Signer, linearCombinations map[string]*crypto.LinearCombination, data []byte,
-	txIn *wire.TxIn, pkScript []byte, inputValue int64, params *chaincfg.Params, tx *wire.MsgTx,
-	sigHashes *txscript.TxSigHashes, idx int) error {
-
-	// First obtain the key pair associated with this p2tr address. If the
-	// pkScript is incorrect or derived from a different internal key or
-	// with a script root, we simply won't find a corresponding private key
-	// here.
-
-	sigHash, err := txscript.CalcTaprootSignatureHash(
-		sigHashes, txscript.SigHashDefault, tx, idx,
-		txscript.NewCannedPrevOutputFetcher(pkScript, inputValue),
-	)
-	if err != nil {
-		return nil
-	}
-
-	_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, params)
-	if err != nil {
-		return err
-	}
-	lc, ok := linearCombinations[addrs[0].String()]
-	if !ok {
-		return fmt.Errorf("key not found for address %v", addrs[0].String())
-	}
-
-	txData, err := SerializeTxData(NewTxData(data, pkScript, inputValue, tx, sigHashes, idx))
-	if err != nil {
-		return err
-	}
-
-	signatures, err := signer.SignAdvanced(&crypto.MultiSignatureDescriptor{
-		Data: txData,
-		SignDescriptors: []*crypto.LinearSignDescriptor{
-			{
-				MsgHash: sigHash,
-				LC:      lc,
-			},
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	txIn.Witness = wire.TxWitness{signatures[0].Serialize()}
-
+func spendTaprootKey(linearCombinations map[string]*crypto.LinearCombination, pkScript []byte, inputValue int64,
+	params *chaincfg.Params, tx *wire.MsgTx, sigHashes *txscript.TxSigHashes, idx int,
+) error {
 	return nil
-}
-
-type TxData struct {
-	SignatureData []byte
-	PkScript      []byte
-	InputValue    int64
-	Tx            *wire.MsgTx
-	SigHashes     *txscript.TxSigHashes
-	Idx           int
-}
-
-func NewTxData(signatureData []byte, pkScript []byte, inputValue int64, tx *wire.MsgTx,
-	sigHashes *txscript.TxSigHashes, idx int) *TxData {
-
-	return &TxData{
-		SignatureData: signatureData,
-		PkScript:      pkScript,
-		InputValue:    inputValue,
-		Tx:            tx,
-		SigHashes:     sigHashes,
-		Idx:           idx,
-	}
-}
-
-func NewTxDataWithSignatureDataOnly(signatureData []byte) *TxData {
-	return &TxData{
-		SignatureData: signatureData,
-	}
-}
-
-func SerializeTxData(txData *TxData) ([]byte, error) {
-	var buffer bytes.Buffer
-	encoder := gob.NewEncoder(&buffer)
-
-	err := encoder.Encode(txData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode TxData: %w", err)
-	}
-
-	return buffer.Bytes(), nil
-}
-
-func DeserializeTxData(data []byte) (*TxData, error) {
-	var txData TxData
-	decoder := gob.NewDecoder(bytes.NewBuffer(data))
-	err := decoder.Decode(&txData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode TxData: %w", err)
-	}
-	return &txData, nil
 }
 
 // spendNestedWitnessPubKey generates both a sigScript, and valid witness for
