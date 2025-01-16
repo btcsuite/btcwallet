@@ -162,6 +162,7 @@ type Wallet struct {
 	rescanFinished      chan *RescanFinishedMsg
 	rescanLock          sync.Mutex
 	RescanStartStamp    *waddrmgr.BlockStamp
+	RollbackFromStamp   *waddrmgr.BlockStamp
 
 	// Channel for transaction creation requests.
 	createTxRequests chan createTxRequest
@@ -507,28 +508,34 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 
-		for height := rollbackStamp.Height; true; height-- {
-			hash, err := w.Manager.BlockHash(addrmgrNs, height)
-			if err != nil {
-				return err
-			}
-			chainHash, err := chainClient.GetBlockHash(int64(height))
-			if err != nil {
-				return err
-			}
-			header, err := chainClient.GetBlockHeader(chainHash)
-			if err != nil {
-				return err
-			}
-
-			rollbackStamp.Hash = *chainHash
-			rollbackStamp.Height = height
-			rollbackStamp.Timestamp = header.Timestamp
-
-			if bytes.Equal(hash[:], chainHash[:]) {
-				break
-			}
+		// NB: if the rollback specified in config we will do rollback from here
+		if w.RollbackFromStamp != nil {
+			rollbackStamp = *w.RollbackFromStamp
 			rollback = true
+		} else {
+			for height := rollbackStamp.Height; true; height-- {
+				hash, err := w.Manager.BlockHash(addrmgrNs, height)
+				if err != nil {
+					return err
+				}
+				chainHash, err := chainClient.GetBlockHash(int64(height))
+				if err != nil {
+					return err
+				}
+				header, err := chainClient.GetBlockHeader(chainHash)
+				if err != nil {
+					return err
+				}
+
+				rollbackStamp.Hash = *chainHash
+				rollbackStamp.Height = height
+				rollbackStamp.Timestamp = header.Timestamp
+
+				if bytes.Equal(hash[:], chainHash[:]) {
+					break
+				}
+				rollback = true
+			}
 		}
 
 		// If a rollback did not happen, we can proceed safely.
