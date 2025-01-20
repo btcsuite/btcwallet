@@ -1,4 +1,4 @@
-module github.com/btcsuite/btcwallet/wallet/txsizes
+module github.com/stroomnetwork/btcwallet/wallet/txsizes
 
 require github.com/btcsuite/btcd v0.23.4
 

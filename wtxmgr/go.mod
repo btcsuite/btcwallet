@@ -1,4 +1,4 @@
-module github.com/btcsuite/btcwallet/wtxmgr
+module github.com/stroomnetwork/btcwallet/wtxmgr
 
 require (
 	github.com/btcsuite/btcd v0.23.4
