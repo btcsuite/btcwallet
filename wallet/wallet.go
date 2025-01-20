@@ -543,6 +543,8 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 			return nil
 		}
 
+		log.Infof("Starting rollback from block %v", rollbackStamp)
+
 		// Otherwise, we'll mark this as our new synced height.
 		err := w.Manager.SetSyncedTo(addrmgrNs, &rollbackStamp)
 		if err != nil {
