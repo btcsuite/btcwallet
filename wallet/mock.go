@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
@@ -27,6 +28,15 @@ func (m *mockChainClient) Stop() {
 }
 
 func (m *mockChainClient) WaitForShutdown() {}
+
+func (m *mockChainClient) GetPeerInfo() ([]btcjson.GetPeerInfoResult, error) {
+	return nil, nil
+}
+
+func (m *mockChainClient) GetBlockChainInfo() (*btcjson.GetBlockChainInfoResult,
+	error) {
+	return nil, nil
+}
 
 func (m *mockChainClient) GetBestBlock() (*chainhash.Hash, int32, error) {
 	return nil, m.getBestBlockHeight, nil
@@ -67,6 +77,11 @@ func (m *mockChainClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 
 func (m *mockChainClient) SendRawTransaction(*wire.MsgTx, bool) (
 	*chainhash.Hash, error) {
+	return nil, nil
+}
+
+func (m *mockChainClient) RawRequest(_ string,
+	_ []json.RawMessage) (json.RawMessage, error) {
 	return nil, nil
 }
 

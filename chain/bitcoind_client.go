@@ -3,6 +3,7 @@ package chain
 import (
 	"container/list"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -113,9 +114,14 @@ func (c *BitcoindClient) BackEnd() string {
 	return "bitcoind"
 }
 
+// GetPeerInfo returns peer information.
+func (c *BitcoindClient) GetPeerInfo() ([]btcjson.GetPeerInfoResult, error) {
+	return c.chainConn.client.GetPeerInfoAsync().Receive()
+}
+
 // GetBestBlock returns the highest block known to bitcoind.
 func (c *BitcoindClient) GetBestBlock() (*chainhash.Hash, int32, error) {
-	bcinfo, err := c.chainConn.client.GetBlockChainInfo()
+	bcinfo, err := c.GetBlockChainInfo()
 	if err != nil {
 		return nil, 0, err
 	}
@@ -170,6 +176,12 @@ func (c *BitcoindClient) GetBlockHeaderVerbose(
 	return c.chainConn.client.GetBlockHeaderVerbose(hash)
 }
 
+// GetBlockChainInfo returns blockchain info.
+func (c *BitcoindClient) GetBlockChainInfo() (*btcjson.GetBlockChainInfoResult,
+	error) {
+	return c.chainConn.client.GetBlockChainInfoAsync().Receive()
+}
+
 // IsCurrent returns whether the chain backend considers its view of the network
 // as "current".
 func (c *BitcoindClient) IsCurrent() bool {
@@ -220,6 +232,12 @@ func (c *BitcoindClient) SendRawTransaction(tx *wire.MsgTx,
 	}
 
 	return txid, nil
+}
+
+// RawRequest performs a raw RPC request.
+func (c *BitcoindClient) RawRequest(method string,
+	params []json.RawMessage) (json.RawMessage, error) {
+	return c.chainConn.client.RawRequestAsync(method, params).Receive()
 }
 
 // MapRPCErr takes an error returned from calling RPC methods from various
