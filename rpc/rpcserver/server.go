@@ -769,8 +769,9 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, // nolint:golint
 		return nil, status.Errorf(codes.FailedPrecondition, "RPC client already created")
 	}
 
-	networkAddress, err := cfgutil.NormalizeAddress(req.NetworkAddress,
-		s.activeNet.RPCClientPort)
+	networkAddress, err := cfgutil.NormalizeAddress(
+		req.GetNetworkAddress(), s.activeNet.RPCClientPort,
+	)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"Network address is ill-formed: %v", err)
@@ -783,10 +784,18 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, // nolint:golint
 			"wallet is loaded and already synchronizing")
 	}
 
-	rpcClient, err := chain.NewBtcdClient(
-		s.activeNet.Params, networkAddress, req.Username, string(req.Password),
-		req.Certificate, len(req.Certificate) == 0, 1,
-	)
+	chainCfg := &chain.BtcdConfig{
+		Conn: &rpcclient.ConnConfig{
+			Host:         networkAddress,
+			User:         req.GetUsername(),
+			Pass:         string(req.GetPassword()),
+			Certificates: req.GetCertificate(),
+			DisableTLS:   len(req.GetCertificate()) == 0,
+		},
+		Chain:             s.activeNet.Params,
+		ReconnectAttempts: 1,
+	}
+	rpcClient, err := chain.NewBtcdClientWithConfig(chainCfg)
 	if err != nil {
 		return nil, translateError(err)
 	}
