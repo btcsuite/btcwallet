@@ -137,7 +137,7 @@ func (c *BitcoindClient) GetBestBlock() (*chainhash.Hash, int32, error) {
 // GetBlockHeight returns the height for the hash, if known, or returns an
 // error.
 func (c *BitcoindClient) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
-	header, err := c.chainConn.client.GetBlockHeaderVerbose(hash)
+	header, err := c.GetBlockHeaderVerbose(hash)
 	if err != nil {
 		return 0, err
 	}
