@@ -113,7 +113,7 @@ type walletServer struct {
 type loaderServer struct {
 	loader    *wallet.Loader
 	activeNet *netparams.Params
-	rpcClient *chain.RPCClient
+	rpcClient *chain.BtcdClient
 	mu        sync.Mutex
 }
 
@@ -783,8 +783,10 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, // nolint:golint
 			"wallet is loaded and already synchronizing")
 	}
 
-	rpcClient, err := chain.NewRPCClient(s.activeNet.Params, networkAddress, req.Username,
-		string(req.Password), req.Certificate, len(req.Certificate) == 0, 1)
+	rpcClient, err := chain.NewBtcdClient(
+		s.activeNet.Params, networkAddress, req.Username, string(req.Password),
+		req.Certificate, len(req.Certificate) == 0, 1,
+	)
 	if err != nil {
 		return nil, translateError(err)
 	}
