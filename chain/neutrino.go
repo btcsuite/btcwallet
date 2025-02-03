@@ -801,8 +801,17 @@ out:
 
 		case err := <-rescanErr:
 			if err != nil {
-				log.Errorf("Neutrino rescan ended with error: %s", err)
+				log.Errorf("Neutrino rescan ended with "+
+					"error: %s", err)
 			}
+
+			// We need to signal to the client that the rescan
+			// has finished otherwise updates to the rescan
+			// object will fail.
+			log.Info("Neutrino rescan finished")
+			s.clientMtx.Lock()
+			s.scanning = false
+			s.clientMtx.Unlock()
 
 		case s.currentBlock <- bs:
 
