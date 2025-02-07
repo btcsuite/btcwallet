@@ -60,3 +60,11 @@ func SigNetWire(params *chaincfg.Params) wire.BitcoinNet {
 
 	return 0
 }
+
+// RegressionNetParams contains parameters specific to the regression test
+// network (wire.RegressionNet).
+var RegressionNetParams = Params{
+	Params:        &chaincfg.RegressionNetParams,
+	RPCClientPort: "18334",
+	RPCServerPort: "18332",
+}

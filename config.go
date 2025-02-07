@@ -410,9 +410,13 @@ func loadConfig() (*config, []string, error) {
 		)
 		activeNet.Params = &chainParams
 	}
+	if cfg.RegressionNet {
+		activeNet = &netparams.RegressionNetParams
+		numNets++
+	}
 	if numNets > 1 {
-		str := "%s: The testnet, signet and simnet params can't be " +
-			"used together -- choose one"
+		str := "%s: The testnet, signet, simnet, and regtest params " +
+			"can't be used together -- choose one"
 		err := fmt.Errorf(str, "loadConfig")
 		fmt.Fprintln(os.Stderr, err)
 		parser.WriteHelp(os.Stderr)
