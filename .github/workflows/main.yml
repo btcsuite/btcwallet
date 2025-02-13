@@ -99,6 +99,7 @@ jobs:
       - name: Send coverage
         uses: shogo82148/actions-goveralls@v1
         if: matrix.unit_type == 'unit-cover'
+        continue-on-error: true
         with:
           path-to-profile: coverage.txt
           parallel: true
