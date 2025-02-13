@@ -45,6 +45,7 @@ var (
 	defaultLogDir      = filepath.Join(defaultAppDataDir, defaultLogDirname)
 )
 
+//nolint:lll
 type config struct {
 	// General application behavior
 	ConfigFile      *cfgutil.ExplicitString `short:"C" long:"configfile" description:"Path to configuration file"`
