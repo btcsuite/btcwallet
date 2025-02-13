@@ -450,7 +450,7 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Exit if you try to use a simulation wallet on anything other than
-	// simnet or testnet3.
+	// simnet.
 	if !cfg.SimNet && cfg.CreateTemp {
 		fmt.Fprintln(os.Stderr, "Tried to create a temporary simulation "+
 			"wallet for network other than simnet!")
