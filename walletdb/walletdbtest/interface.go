@@ -304,7 +304,7 @@ func testManualTxInterface(tc *testContext, bucketKey []byte) bool {
 
 	// populateValues tests that populating values works as expected.
 	//
-	// When the writable flag is false, a read-only tranasction is created,
+	// When the writable flag is false, a read-only transaction is created,
 	// standard bucket tests for read-only transactions are performed, and
 	// the Commit function is checked to ensure it fails as expected.
 	//
