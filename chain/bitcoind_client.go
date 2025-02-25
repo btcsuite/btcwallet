@@ -39,10 +39,6 @@ type BitcoindClient struct {
 	// chain.
 	birthday time.Time
 
-	// id is the unique ID of this client assigned by the backing bitcoind
-	// connection.
-	id uint64
-
 	// chainConn is the backing client to our rescan client that contains
 	// the RPC and ZMQ connections to a bitcoind node.
 	chainConn *BitcoindConn
@@ -91,15 +87,6 @@ type BitcoindClient struct {
 	// need to process earlier notifications still waiting to be processed.
 	notificationQueue *ConcurrentQueue
 
-	// txNtfns is a channel through which transaction events will be
-	// retrieved from the backing bitcoind connection, either via ZMQ or
-	// polling RPC.
-	txNtfns chan *wire.MsgTx
-
-	// blockNtfns is a channel through block events will be retrieved from
-	// the backing bitcoind connection, either via ZMQ or polling RPC.
-	blockNtfns chan *wire.MsgBlock
-
 	quit chan struct{}
 	wg   sync.WaitGroup
 }
@@ -107,6 +94,27 @@ type BitcoindClient struct {
 // A compile-time check to ensure that BitcoindClient satisfies the
 // chain.Interface interface.
 var _ Interface = (*BitcoindClient)(nil)
+
+// NewBitcoindClient returns a bitcoind client using the current bitcoind
+// connection. This allows us to share the same connection using multiple
+// clients.
+func NewBitcoindClient(c *BitcoindConn) *BitcoindClient {
+	return &BitcoindClient{
+		quit: make(chan struct{}),
+
+		chainConn: c,
+
+		rescanUpdate:     make(chan interface{}),
+		watchedAddresses: make(map[string]struct{}),
+		watchedOutPoints: make(map[wire.OutPoint]struct{}),
+		watchedTxs:       make(map[chainhash.Hash]struct{}),
+
+		notificationQueue: NewConcurrentQueue(20), //nolint: mnd
+
+		mempool:        make(map[chainhash.Hash]struct{}),
+		expiredMempool: make(map[int32]map[chainhash.Hash]struct{}),
+	}
+}
 
 // BackEnd returns the name of the driver.
 func (c *BitcoindClient) BackEnd() string {
@@ -374,11 +382,6 @@ func (c *BitcoindClient) NotifyBlocks() error {
 	c.bestBlock.Timestamp = time.Unix(bestHeader.Time, 0)
 	c.bestBlockMtx.Unlock()
 
-	// Include the client in the set of rescan clients of the backing
-	// bitcoind connection in order to receive ZMQ event notifications for
-	// new blocks and transactions.
-	c.chainConn.AddClient(c)
-
 	c.wg.Add(1)
 	go c.ntfnHandler()
 
@@ -531,6 +534,9 @@ func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 // connection and starts all goroutines necessary in order to process rescans
 // and ZMQ notifications.
 //
+// NB: make sure that the bitcoind connection has been started before otherwise
+// you wouldn't receive notifications
+//
 // NOTE: This is part of the chain.Interface interface.
 func (c *BitcoindClient) Start() error {
 	if !atomic.CompareAndSwapInt32(&c.started, 0, 1) {
@@ -578,10 +584,6 @@ func (c *BitcoindClient) Stop() {
 	}
 
 	close(c.quit)
-
-	// Remove this client's reference from the bitcoind connection to
-	// prevent sending notifications to it after it's been stopped.
-	c.chainConn.RemoveClient(c.id)
 
 	c.notificationQueue.Stop()
 }
@@ -681,10 +683,18 @@ func (c *BitcoindClient) rescanHandler() {
 // NOTE: This must be called as a goroutine.
 func (c *BitcoindClient) ntfnHandler() {
 	defer c.wg.Done()
+	// Subscribe to receive ZMQ event notifications for
+	// new blocks and transactions.
+	subscription := c.chainConn.Subscribe()
+	defer c.chainConn.Unsubscribe(subscription)
 
 	for {
 		select {
-		case tx := <-c.txNtfns:
+		case tx, ok := <-subscription.TxNotifications():
+			if !ok {
+				// source closed the channel
+				return
+			}
 			txDetails := btcutil.NewTx(tx)
 			_, _, err := c.filterTx(txDetails, nil, true)
 			if err != nil {
@@ -692,7 +702,11 @@ func (c *BitcoindClient) ntfnHandler() {
 					txDetails.Hash(), err)
 			}
 
-		case newBlock := <-c.blockNtfns:
+		case newBlock, ok := <-subscription.BlockNotifications():
+			if !ok {
+				// source closed the channel
+				return
+			}
 			// If the new block's previous hash matches the best
 			// hash known to us, then the new block is the next
 			// successor, so we'll update our best block to reflect
