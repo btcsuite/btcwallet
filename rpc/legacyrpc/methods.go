@@ -129,7 +129,7 @@ var rpcHandlers = map[string]struct {
 	// This was an extension but the reference implementation added it as
 	// well, but with a different API (no account parameter).  It's listed
 	// here because it hasn't been update to use the reference
-	// implemenation's API.
+	// implementation's API.
 	"getunconfirmedbalance":   {handler: getUnconfirmedBalance},
 	"listaddresstransactions": {handler: listAddressTransactions},
 	"listalltransactions":     {handler: listAllTransactions},
