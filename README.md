@@ -64,9 +64,9 @@ Wallet clients can use one of two RPC servers:
 
 Install the latest MSIs available here:
 
-https://github.com/btcsuite/btcd/releases
+[BTCD](https://github.com/btcsuite/btcd/releases)
 
-https://github.com/btcsuite/btcwallet/releases
+[BTCWallet](https://github.com/btcsuite/btcwallet/releases)
 
 ### Windows/Linux/BSD/POSIX - Build from source
 
