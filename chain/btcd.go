@@ -22,9 +22,9 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// RPCClient represents a persistent client connection to a bitcoin RPC server
+// BtcdClient represents a persistent client connection to a bitcoin RPC server
 // for information regarding the current best block chain.
-type RPCClient struct {
+type BtcdClient struct {
 	*rpcclient.Client
 	connConfig        *rpcclient.ConnConfig // Work around unexported field
 	chainParams       *chaincfg.Params
@@ -40,26 +40,25 @@ type RPCClient struct {
 	quitMtx sync.Mutex
 }
 
-// A compile-time check to ensure that RPCClient satisfies the chain.Interface
+// A compile-time check to ensure that BtcdClient satisfies the chain.Interface
 // interface.
-var _ Interface = (*RPCClient)(nil)
+var _ Interface = (*BtcdClient)(nil)
 
-// NewRPCClient creates a client connection to the server described by the
+// NewBtcdClient creates a client connection to the server described by the
 // connect string.  If disableTLS is false, the remote RPC certificate must be
 // provided in the certs slice.  The connection is not established immediately,
 // but must be done using the Start method.  If the remote server does not
 // operate on the same bitcoin network as described by the passed chain
 // parameters, the connection will be disconnected.
 //
-// TODO(yy): deprecate it in favor of NewRPCClientWithConfig.
-func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, certs []byte,
-	disableTLS bool, reconnectAttempts int) (*RPCClient, error) {
-
+// TODO(yy): deprecate it in favor of NewBtcdClientWithConfig.
+func NewBtcdClient(chainParams *chaincfg.Params, connect, user, pass string,
+	certs []byte, disableTLS bool, reconnectAttempts int) (*BtcdClient, error) {
 	if reconnectAttempts < 0 {
 		return nil, errors.New("reconnectAttempts must be positive")
 	}
 
-	client := &RPCClient{
+	client := &BtcdClient{
 		connConfig: &rpcclient.ConnConfig{
 			Host:                 connect,
 			Endpoint:             "ws",
@@ -94,9 +93,8 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 	return client, nil
 }
 
-// RPCClientConfig defines the config options used when initializing the RPC
-// Client.
-type RPCClientConfig struct {
+// BtcdConfig defines the config options used when initializing the Btcd Client.
+type BtcdConfig struct {
 	// Conn describes the connection configuration parameters for the
 	// client.
 	Conn *rpcclient.ConnConfig
@@ -115,7 +113,7 @@ type RPCClientConfig struct {
 }
 
 // validate checks the required config options are set.
-func (r *RPCClientConfig) validate() error {
+func (r *BtcdConfig) validate() error {
 	if r == nil {
 		return errors.New("missing rpc config")
 	}
@@ -144,14 +142,14 @@ func (r *RPCClientConfig) validate() error {
 	return nil
 }
 
-// NewRPCClientWithConfig creates a client connection to the server based on
+// NewBtcdClientWithConfig creates a client connection to the server based on
 // the config options supplised.
 //
 // The connection is not established immediately, but must be done using the
 // Start method.  If the remote server does not operate on the same bitcoin
 // network as described by the passed chain parameters, the connection will be
 // disconnected.
-func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
+func NewBtcdClientWithConfig(cfg *BtcdConfig) (*BtcdClient, error) {
 	// Make sure the config is valid.
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -162,7 +160,7 @@ func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
 	cfg.Conn.DisableAutoReconnect = false
 	cfg.Conn.DisableConnectOnNew = true
 
-	client := &RPCClient{
+	client := &BtcdClient{
 		connConfig:          cfg.Conn,
 		chainParams:         cfg.Chain,
 		reconnectAttempts:   cfg.ReconnectAttempts,
@@ -198,7 +196,7 @@ func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
 }
 
 // BackEnd returns the name of the driver.
-func (c *RPCClient) BackEnd() string {
+func (c *BtcdClient) BackEnd() string {
 	return "btcd"
 }
 
@@ -207,7 +205,7 @@ func (c *RPCClient) BackEnd() string {
 // sent by the server.  After a limited number of connection attempts, this
 // function gives up, and therefore will not block forever waiting for the
 // connection to be established to a server that may not exist.
-func (c *RPCClient) Start() error {
+func (c *BtcdClient) Start() error {
 	err := c.Connect(c.reconnectAttempts)
 	if err != nil {
 		return err
@@ -235,7 +233,7 @@ func (c *RPCClient) Start() error {
 
 // Stop disconnects the client and signals the shutdown of all goroutines
 // started by Start.
-func (c *RPCClient) Stop() {
+func (c *BtcdClient) Stop() {
 	c.quitMtx.Lock()
 	select {
 	case <-c.quit:
@@ -253,7 +251,7 @@ func (c *RPCClient) Stop() {
 
 // IsCurrent returns whether the chain backend considers its view of the network
 // as "current".
-func (c *RPCClient) IsCurrent() bool {
+func (c *BtcdClient) IsCurrent() bool {
 	bestHash, _, err := c.GetBestBlock()
 	if err != nil {
 		return false
@@ -269,7 +267,7 @@ func (c *RPCClient) IsCurrent() bool {
 // allows us to map an outpoint to the address in the chain that it pays to.
 // This is useful when using BIP 158 filters as they include the prev pkScript
 // rather than the full outpoint.
-func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
+func (c *BtcdClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	outPoints map[wire.OutPoint]btcutil.Address) error {
 
 	flatOutpoints := make([]*wire.OutPoint, 0, len(outPoints))
@@ -284,7 +282,7 @@ func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 
 // WaitForShutdown blocks until both the client has finished disconnecting
 // and all handlers have exited.
-func (c *RPCClient) WaitForShutdown() {
+func (c *BtcdClient) WaitForShutdown() {
 	c.Client.WaitForShutdown()
 	c.wg.Wait()
 }
@@ -293,13 +291,13 @@ func (c *RPCClient) WaitForShutdown() {
 // bitcoin RPC server.  This channel must be continually read or the process
 // may abort for running out memory, as unread notifications are queued for
 // later reads.
-func (c *RPCClient) Notifications() <-chan interface{} {
+func (c *BtcdClient) Notifications() <-chan interface{} {
 	return c.dequeueNotification
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
 // if the client has been shut down.
-func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
+func (c *BtcdClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 	select {
 	case bs := <-c.currentBlock:
 		return bs, nil
@@ -315,7 +313,7 @@ func (c *RPCClient) BlockStamp() (*waddrmgr.BlockStamp, error) {
 // fetched and filtered. This method returns a FilterBlocksResponse for the first
 // block containing a matching address. If no matches are found in the range of
 // blocks requested, the returned response will be nil.
-func (c *RPCClient) FilterBlocks(
+func (c *BtcdClient) FilterBlocks(
 	req *FilterBlocksRequest) (*FilterBlocksResponse, error) {
 
 	blockFilterer := NewBlockFilterer(c.chainParams, req)
@@ -416,14 +414,15 @@ func parseBlock(block *btcjson.BlockDetails) (*wtxmgr.BlockMeta, error) {
 	return blk, nil
 }
 
-func (c *RPCClient) onClientConnect() {
+func (c *BtcdClient) onClientConnect() {
 	select {
 	case c.enqueueNotification <- ClientConnected{}:
 	case <-c.quit:
 	}
 }
 
-func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time time.Time) {
+func (c *BtcdClient) onBlockConnected(hash *chainhash.Hash, height int32,
+	time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockConnected{
 		Block: wtxmgr.Block{
@@ -436,7 +435,8 @@ func (c *RPCClient) onBlockConnected(hash *chainhash.Hash, height int32, time ti
 	}
 }
 
-func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time time.Time) {
+func (c *BtcdClient) onBlockDisconnected(hash *chainhash.Hash, height int32,
+	time time.Time) {
 	select {
 	case c.enqueueNotification <- BlockDisconnected{
 		Block: wtxmgr.Block{
@@ -449,7 +449,7 @@ func (c *RPCClient) onBlockDisconnected(hash *chainhash.Hash, height int32, time
 	}
 }
 
-func (c *RPCClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+func (c *BtcdClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	blk, err := parseBlock(block)
 	if err != nil {
 		// Log and drop improper notification.
@@ -469,29 +469,31 @@ func (c *RPCClient) onRecvTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
 	}
 }
 
-func (c *RPCClient) onRedeemingTx(tx *btcutil.Tx, block *btcjson.BlockDetails) {
+func (c *BtcdClient) onRedeemingTx(tx *btcutil.Tx,
+	block *btcjson.BlockDetails) {
 	// Handled exactly like recvtx notifications.
 	c.onRecvTx(tx, block)
 }
 
-func (c *RPCClient) onRescanProgress(hash *chainhash.Hash, height int32, blkTime time.Time) {
+func (c *BtcdClient) onRescanProgress(hash *chainhash.Hash, height int32,
+	blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanProgress{*hash, height, blkTime}:
 	case <-c.quit:
 	}
 }
 
-func (c *RPCClient) onRescanFinished(hash *chainhash.Hash, height int32, blkTime time.Time) {
+func (c *BtcdClient) onRescanFinished(hash *chainhash.Hash, height int32,
+	blkTime time.Time) {
 	select {
 	case c.enqueueNotification <- &RescanFinished{hash, height, blkTime}:
 	case <-c.quit:
 	}
-
 }
 
 // handler maintains a queue of notifications and the current state (best
 // block) of the chain.
-func (c *RPCClient) handler() {
+func (c *BtcdClient) handler() {
 	hash, height, err := c.GetBestBlock()
 	if err != nil {
 		log.Errorf("Failed to receive best block from chain server: %v", err)
@@ -567,7 +569,7 @@ out:
 }
 
 // POSTClient creates the equivalent HTTP POST rpcclient.Client.
-func (c *RPCClient) POSTClient() (*rpcclient.Client, error) {
+func (c *BtcdClient) POSTClient() (*rpcclient.Client, error) {
 	configCopy := *c.connConfig
 	configCopy.HTTPPostMode = true
 	return rpcclient.New(&configCopy, nil)
@@ -575,7 +577,7 @@ func (c *RPCClient) POSTClient() (*rpcclient.Client, error) {
 
 // LookupInputMempoolSpend returns the transaction hash and true if the given
 // input is found being spent in mempool, otherwise it returns nil and false.
-func (c *RPCClient) LookupInputMempoolSpend(op wire.OutPoint) (
+func (c *BtcdClient) LookupInputMempoolSpend(op wire.OutPoint) (
 	chainhash.Hash, bool) {
 
 	return getTxSpendingPrevOut(op, c.Client)
@@ -585,7 +587,7 @@ func (c *RPCClient) LookupInputMempoolSpend(op wire.OutPoint) (
 // chain backends and maps it to an defined error here. It uses the
 // `BtcdErrMap`, whose keys are btcd error strings and values are errors made
 // from bitcoind error strings.
-func (c *RPCClient) MapRPCErr(rpcErr error) error {
+func (c *BtcdClient) MapRPCErr(rpcErr error) error {
 	// Iterate the map and find the matching error.
 	for btcdErr, matchedErr := range BtcdErrMap {
 		// Match it against btcd's error.
@@ -629,7 +631,7 @@ func (c *RPCClient) MapRPCErr(rpcErr error) error {
 }
 
 // SendRawTransaction sends a raw transaction via btcd.
-func (c *RPCClient) SendRawTransaction(tx *wire.MsgTx,
+func (c *BtcdClient) SendRawTransaction(tx *wire.MsgTx,
 	allowHighFees bool) (*chainhash.Hash, error) {
 
 	txid, err := c.Client.SendRawTransaction(tx, allowHighFees)
