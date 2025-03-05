@@ -783,30 +783,13 @@ func (s *loaderServer) StartConsensusRpc(ctx context.Context, // nolint:golint
 			"wallet is loaded and already synchronizing")
 	}
 
-	c, err := chain.NewBitcoindConn(&chain.BitcoindConfig{
-		ChainParams: s.activeNet.Params,
-		Host:        networkAddress,
-		User:        req.Username,
-		Pass:        string(req.Password),
-		ZMQConfig: &chain.ZMQConfig{
-			ZMQBlockHost: "tcp://127.0.0.1:28332",
-			ZMQTxHost:    "tcp://127.0.0.1:28333",
-		},
-		PollingConfig: &chain.PollingConfig{
-			BlockPollingInterval:    1,
-			TxPollingInterval:       1,
-			TxPollingIntervalJitter: 1,
-			RPCBatchSize:            1,
-			RPCBatchInterval:        1,
-		},
-		Dialer: nil,
-	})
+	// Start the btds RPC client.
+	// TODO: Support other backends
+	rpcClient, err := chain.NewRPCClient(s.activeNet.Params, networkAddress, req.Username,
+		string(req.Password), req.Certificate, len(req.Certificate) == 0, 1)
 	if err != nil {
 		return nil, translateError(err)
 	}
-
-	rpcClient := c.NewBitcoindClient()
-	c.Start()
 
 	err = rpcClient.Start()
 	if err != nil {
