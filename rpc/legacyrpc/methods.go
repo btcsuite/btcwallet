@@ -183,7 +183,7 @@ func lazyApplyHandler(request *btcjson.Request, w *wallet.Wallet, chainClient ch
 			default:
 				return nil, &btcjson.RPCError{
 					Code:    -1,
-					Message: "Chain RPC is inactive",
+					Message: "Method supported, Chain RPC is inactive",
 				}
 			}
 		}
@@ -1575,10 +1575,7 @@ func signMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	_ = wire.WriteVarString(&buf, 0, "Bitcoin Signed Message:\n")
 	_ = wire.WriteVarString(&buf, 0, cmd.Message)
 	messageHash := chainhash.DoubleHashB(buf.Bytes())
-	sigbytes, err := ecdsa.SignCompact(privKey, messageHash, true)
-	if err != nil {
-		return nil, err
-	}
+	sigbytes := ecdsa.SignCompact(privKey, messageHash, true)
 
 	return base64.StdEncoding.EncodeToString(sigbytes), nil
 }

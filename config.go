@@ -12,12 +12,14 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	"github.com/btcsuite/btcwallet/netparams"
@@ -34,6 +36,7 @@ const (
 	defaultLogFilename      = "btcwallet.log"
 	defaultRPCMaxClients    = 10
 	defaultRPCMaxWebsockets = 25
+	defaultBE               = "btcd"
 )
 
 var (
@@ -54,6 +57,7 @@ type config struct {
 	CreateTemp      bool                    `long:"createtemp" description:"Create a temporary simulation wallet (pass=password) in the data directory indicated; must call with --datadir"`
 	AppDataDir      *cfgutil.ExplicitString `short:"A" long:"appdata" description:"Application data directory for wallet config, databases and logs"`
 	TestNet3        bool                    `long:"testnet" description:"Use the test Bitcoin network (version 3) (default mainnet)"`
+	TestNet4        bool                    `long:"testnet4" description:"Use the test Bitcoin network (version 4) (default mainnet)"`
 	SimNet          bool                    `long:"simnet" description:"Use the simulation test network (default mainnet)"`
 	SigNet          bool                    `long:"signet" description:"Use the signet test network (default mainnet)"`
 	SigNetChallenge string                  `long:"signetchallenge" description:"Connect to a custom signet network defined by this challenge instead of using the global default signet test network -- Can be specified multiple times"`
@@ -67,6 +71,12 @@ type config struct {
 
 	// Wallet options
 	WalletPass string `long:"walletpass" default-mask:"-" description:"The public wallet password -- Only required if the wallet was created with one"`
+
+	// Backend options
+	// this will determine the backend used for the wallet, based on this the wallet will use the appropriate RPC client
+	// to communicate with the backend
+	// TODO: Add support for backend-specific configurations. this should either be a configuration file or a set of flags. preferably a configuration file
+	Backend chain.BackendServer `long:"backend" description:"The backend to use for the wallet" choice:"btcd" choice:"bitcoind" default:"btcd"`
 
 	// RPC client options
 	RPCConnect       string                  `short:"c" long:"rpcconnect" description:"Hostname/IP and port of btcd RPC server to connect to (default localhost:8334, testnet: localhost:18334, simnet: localhost:18556, regtest: localhost:18334)"`
@@ -98,7 +108,7 @@ type config struct {
 	RPCKey                 *cfgutil.ExplicitString `long:"rpckey" description:"File containing the certificate key"`
 	OneTimeTLSKey          bool                    `long:"onetimetlskey" description:"Generate a new TLS certpair at startup, but only write the certificate to disk"`
 	DisableServerTLS       bool                    `long:"noservertls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
-	LegacyRPCListeners     []string                `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 8332, testnet: 18332, simnet: 18554, regtest: 18332)"`
+	LegacyRPCListeners     []string                `long:"rpclisten" description:"Listen for legacy RPC connections on this interface/port (default port: 8332, testnet: 18332, testnet4: 4833, simnet: 18554, regtest: 18332)"`
 	LegacyRPCMaxClients    int64                   `long:"rpcmaxclients" description:"Max number of legacy RPC clients for standard connections"`
 	LegacyRPCMaxWebsockets int64                   `long:"rpcmaxwebsockets" description:"Max number of legacy RPC websocket connections"`
 	Username               string                  `short:"u" long:"username" description:"Username for legacy RPC and btcd authentication (if btcdusername is unset)"`
@@ -280,6 +290,7 @@ func loadConfig() (*config, []string, error) {
 		BanDuration:            neutrino.BanDuration,
 		BanThreshold:           neutrino.BanThreshold,
 		DBTimeout:              wallet.DefaultDBTimeout,
+		Backend:                defaultBE,
 	}
 
 	// Pre-parse the command line options to see if an alternative config
@@ -338,6 +349,13 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	if !slices.Contains(chain.SupportedBackEnds(), cfg.Backend) {
+		err := fmt.Errorf("invalid backend %s", cfg.Backend)
+		fmt.Fprintln(os.Stderr, err)
+		parser.WriteHelp(os.Stderr)
+		return nil, nil, err
+	}
+
 	// Check deprecated aliases.  The new options receive priority when both
 	// are changed from the default.
 	if cfg.DataDir.ExplicitlySet() {
@@ -366,6 +384,10 @@ func loadConfig() (*config, []string, error) {
 	numNets := 0
 	if cfg.TestNet3 {
 		activeNet = &netparams.TestNet3Params
+		numNets++
+	}
+	if cfg.TestNet4 {
+		activeNet = &netparams.TestNet4Params
 		numNets++
 	}
 	if cfg.SimNet {

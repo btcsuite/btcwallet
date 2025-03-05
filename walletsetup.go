@@ -36,6 +36,10 @@ func networkDir(dataDir string, chainParams *chaincfg.Params) string {
 		netname = "testnet"
 	}
 
+	if chainParams.Net == wire.TestNet4 {
+		netname = "testnet4"
+	}
+
 	return filepath.Join(dataDir, netname)
 }
 
