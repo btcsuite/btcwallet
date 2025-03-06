@@ -790,16 +790,25 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 		if len(recoveryBatch) == recoveryBatchSize || height == bestHeight {
 			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				if err := w.recoverScopedAddresses(
+					chainClient, tx, ns, recoveryBatch,
+					recoveryMgr.State(), scopedMgrs,
+				); err != nil {
+					return err
+				}
+
+				// TODO: Any error here will roll back this
+				// entire tx. This may cause the in memory sync
+				// point to become desyncronized. Refactor so
+				// that this cannot happen.
 				for _, block := range blocks {
 					err := w.Manager.SetSyncedTo(ns, block)
 					if err != nil {
 						return err
 					}
 				}
-				return w.recoverScopedAddresses(
-					chainClient, tx, ns, recoveryBatch,
-					recoveryMgr.State(), scopedMgrs,
-				)
+
+				return nil
 			})
 			if err != nil {
 				return err
