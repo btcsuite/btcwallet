@@ -17,15 +17,29 @@ import (
 // the chain.
 const isCurrentDelta = 2 * time.Hour
 
+type BackendServer string
+
+const (
+	// Bitcoind is the backend type for a bitcoind/bitcoind-like RPC server.
+	Bitcoind BackendServer = "bitcoind"
+	Btcd     BackendServer = "btcd"
+	Neutrino BackendServer = "neutrino"
+)
+
 // BackEnds returns a list of the available back ends.
 // TODO: Refactor each into a driver and use dynamic registration.
 func BackEnds() []string {
 	return []string{
-		"bitcoind",
-		"btcd",
-		"neutrino",
-		"bitcoind-rpc-polling",
+		string(Bitcoind),
+		string(Btcd),
+		string(Neutrino),
+		"bitcoind-rpc-polling", // not clear what this is
 	}
+}
+
+func SupportedBackEnds() []BackendServer {
+	return []BackendServer{Bitcoind, Btcd}
+
 }
 
 // Interface allows more than one backing blockchain source, such as a

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	_ "net/http/pprof" // nolint:gosec
@@ -14,10 +15,13 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/lightninglabs/neutrino"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -188,7 +192,7 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 				log.Errorf("Couldn't start Neutrino client: %s", err)
 			}
 		} else {
-			chainClient, err = startChainRPC(certs)
+			chainClient, err = startChain(certs)
 			if err != nil {
 				log.Errorf("Unable to open connection to consensus RPC server: %v", err)
 				continue
@@ -265,13 +269,72 @@ func readCAFile() []byte {
 // services.  This function uses the RPC options from the global config and
 // there is no recovery in case the server is not available or if there is an
 // authentication error.  Instead, all requests to the client will simply error.
-func startChainRPC(certs []byte) (*chain.RPCClient, error) {
+func startChainRPC(certs []byte) (chain.Interface, error) {
 	log.Infof("Attempting RPC client connection to %v", cfg.RPCConnect)
+
 	rpcc, err := chain.NewRPCClient(activeNet.Params, cfg.RPCConnect,
 		cfg.BtcdUsername, cfg.BtcdPassword, certs, cfg.DisableClientTLS, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to create chain bitcoind conn: %v", err)
 	}
+
 	err = rpcc.Start()
-	return rpcc, err
+	if err != nil {
+		return nil, fmt.Errorf("unable to start chain bitcoind client: %v", err)
+	}
+	log.Infof("RPC client connected to %v", cfg.RPCConnect)
+	return rpcc, nil
+}
+
+// startChainBitcoind opens a connection to a bitcoind/bitcoind-like RPC server
+// for blockchain services.  This function uses the RPC options from the global
+// config and there is no recovery in case the server is not available or if
+// there is an authentication error.  Instead, all requests to the client will
+// simply error.
+func startChainBitcoind() (chain.Interface, error) {
+	log.Infof("Attempting to connect to a bitcoind node. Address: %v", cfg.RPCConnect)
+	networkAddress, err := cfgutil.NormalizeAddress(cfg.RPCConnect,
+		activeNet.RPCClientPort)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"Network address is ill-formed: %v", err)
+	}
+
+	c, err := chain.NewBitcoindConn(&chain.BitcoindConfig{
+		ChainParams: activeNet.Params,
+		Host:        networkAddress,
+		User:        cfg.Username,
+		Pass:        cfg.Password,
+		// ZMQConfig: &chain.ZMQConfig{}, // TODO: add ZMQ support
+		PollingConfig: &chain.PollingConfig{}, // TODO: add customize polling support
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create bitcoind conn: %v", err)
+	}
+
+	if err := c.Start(); err != nil {
+		return nil, fmt.Errorf("unable to start bitcoind conn: %v", err)
+	}
+
+	bdc := c.NewBitcoindClient()
+
+	err = bdc.Start()
+	if err != nil {
+		return nil, fmt.Errorf("unable to start chain bitcoind client: %v", err)
+	}
+	log.Infof("Connected successfully to a bitcoind node.")
+
+	return bdc, nil
+}
+
+func startChain(certs []byte) (chain.Interface, error) {
+	switch cfg.Backend {
+	case chain.Bitcoind:
+		return startChainBitcoind()
+	case chain.Btcd:
+		return startChainRPC(certs)
+	default:
+		return nil, fmt.Errorf("unknown chain backend: %v", cfg.Backend)
+	}
+
 }

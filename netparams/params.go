@@ -33,6 +33,14 @@ var TestNet3Params = Params{
 	RPCServerPort: "18332",
 }
 
+// TestNet4Params contains parameters specific running btcwallet and
+// btcd on the test network (version 4) (wire.TestNet4).
+var TestNet4Params = Params{
+	Params:        &chaincfg.TestNet4Params,
+	RPCClientPort: "48332",
+	RPCServerPort: "48331",
+}
+
 // SimNetParams contains parameters specific to the simulation test network
 // (wire.SimNet).
 var SimNetParams = Params{

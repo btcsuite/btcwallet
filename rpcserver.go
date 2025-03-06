@@ -110,7 +110,7 @@ func startRPCServers(walletLoader *wallet.Loader) (*grpc.Server, *legacyrpc.Serv
 		err          error
 	)
 	if cfg.DisableServerTLS {
-		log.Info("Server TLS is disabled.  Only legacy RPC may be used")
+		log.Info("Server TLS is disabled. Only legacy RPC may be used")
 	} else {
 		keyPair, err = openRPCKeyPair()
 		if err != nil {
