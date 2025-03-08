@@ -1,7 +1,6 @@
 package wallet
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -18,16 +17,7 @@ var defaultDBTimeout = 10 * time.Second
 // testWallet creates a test wallet and unlocks it.
 func testWallet(t *testing.T) (*Wallet, func()) {
 	// Set up a wallet.
-	dir, err := os.MkdirTemp("", "test_wallet")
-	if err != nil {
-		t.Fatalf("Failed to create db dir: %v", err)
-	}
-
-	cleanup := func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Fatalf("could not cleanup test: %v", err)
-		}
-	}
+	dir := t.TempDir()
 
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.MinSeedBytes)
 	if err != nil {
@@ -51,22 +41,13 @@ func testWallet(t *testing.T) (*Wallet, func()) {
 		t.Fatalf("unable to unlock wallet: %v", err)
 	}
 
-	return w, cleanup
+	return w, func() {}
 }
 
 // testWalletWatchingOnly creates a test watch only wallet and unlocks it.
 func testWalletWatchingOnly(t *testing.T) (*Wallet, func()) {
 	// Set up a wallet.
-	dir, err := os.MkdirTemp("", "test_wallet_watch_only")
-	if err != nil {
-		t.Fatalf("Failed to create db dir: %v", err)
-	}
-
-	cleanup := func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Fatalf("could not cleanup test: %v", err)
-		}
-	}
+	dir := t.TempDir()
 
 	pubPass := []byte("hello")
 	loader := NewLoader(
@@ -97,5 +78,5 @@ func testWalletWatchingOnly(t *testing.T) (*Wallet, func()) {
 		t.Fatalf("unable to create default scopes: %v", err)
 	}
 
-	return w, cleanup
+	return w, func() {}
 }
