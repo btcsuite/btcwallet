@@ -22,12 +22,7 @@ import (
 
 // TestInterface performs all interfaces tests for this database driver.
 func TestInterface(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "interfacetest")
-	if err != nil {
-		t.Errorf("unable to create temp dir: %v", err)
-		return
-	}
-	defer os.Remove(tempDir)
+	tempDir := t.TempDir()
 
 	dbPath := filepath.Join(tempDir, "db")
 	defer os.RemoveAll(dbPath)
