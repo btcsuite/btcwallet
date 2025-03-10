@@ -6,7 +6,6 @@ package bdb_test
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -145,12 +144,7 @@ func TestCreateOpenFail(t *testing.T) {
 
 	// Ensure operations against a closed database return the expected
 	// error.
-	tempDir, err := os.MkdirTemp("", "createfail")
-	if err != nil {
-		t.Errorf("unable to create temp dir: %v", err)
-		return
-	}
-	defer os.Remove(tempDir)
+	tempDir := t.TempDir()
 
 	dbPath := filepath.Join(tempDir, "db")
 	db, err := walletdb.Create(dbType, dbPath, true, defaultDBTimeout)
@@ -172,12 +166,7 @@ func TestCreateOpenFail(t *testing.T) {
 // reopening the database.
 func TestPersistence(t *testing.T) {
 	// Create a new database to run tests against.
-	tempDir, err := os.MkdirTemp("", "persistencetest")
-	if err != nil {
-		t.Errorf("unable to create temp dir: %v", err)
-		return
-	}
-	defer os.Remove(tempDir)
+	tempDir := t.TempDir()
 
 	dbPath := filepath.Join(tempDir, "db")
 	db, err := walletdb.Create(dbType, dbPath, true, defaultDBTimeout)
