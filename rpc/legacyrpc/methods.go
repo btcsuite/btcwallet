@@ -1713,6 +1713,9 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 		if err != nil {
 			return nil, err
 		}
+		if result == nil {
+			return nil, &ErrUtxoSpent
+		}
 		script, err := hex.DecodeString(result.ScriptPubKey.Hex)
 		if err != nil {
 			return nil, err
