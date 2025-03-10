@@ -90,6 +90,9 @@ linters:
     # will also catch magic numbers that make sense to extract.
     - gomnd
 
+    # Disable tagalign
+    - tagalign
+
 issues:
   # Only check issues in the new code.
   new-from-rev: 3f48b446215c751ea4ba0c30fb04413ab9f1a7c7

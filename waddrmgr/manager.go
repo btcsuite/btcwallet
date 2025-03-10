@@ -9,6 +9,7 @@ import (
 	"crypto/sha512"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -345,9 +346,9 @@ type Manager struct {
 	internalAddrSchemas map[AddressType][]KeyScope
 
 	syncState    syncState
-	watchingOnly bool
+	watchingOnly atomic.Bool
 	birthday     time.Time
-	locked       bool
+	locked       atomic.Bool
 	closed       bool
 	chainParams  *chaincfg.Params
 
@@ -392,18 +393,7 @@ type Manager struct {
 // WatchOnly returns true if the root manager is in watch only mode, and false
 // otherwise.
 func (m *Manager) WatchOnly() bool {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-
-	return m.watchOnly()
-}
-
-// watchOnly returns true if the root manager is in watch only mode, and false
-// otherwise.
-//
-// NOTE: This method requires the Manager's lock to be held.
-func (m *Manager) watchOnly() bool {
-	return m.watchingOnly
+	return m.watchingOnly.Load()
 }
 
 // IsWatchOnlyAccount determines if the account with the given key scope is set
@@ -469,7 +459,7 @@ func (m *Manager) lock() {
 	// which uses a separate derived key from the database even when it is
 	// locked.
 
-	m.locked = true
+	m.locked.Store(true)
 }
 
 // Close cleanly shuts down the manager.  It makes a best try effort to remove
@@ -489,7 +479,7 @@ func (m *Manager) Close() {
 	}
 
 	// Attempt to clear private key material from memory.
-	if !m.watchingOnly && !m.locked {
+	if !m.WatchOnly() && !m.IsLocked() {
 		m.lock()
 	}
 
@@ -517,10 +507,10 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 	defer m.mtx.Unlock()
 
 	var rootPriv *hdkeychain.ExtendedKey
-	if !m.watchingOnly {
+	if !m.WatchOnly() {
 		// If the manager is locked, then we can't create a new scoped
 		// manager.
-		if m.locked {
+		if m.IsLocked() {
 			return nil, managerError(ErrLocked, errLocked, nil)
 		}
 
@@ -588,7 +578,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
-	if !m.watchingOnly {
+	if !m.WatchOnly() {
 		// With the database state created, we'll now derive the
 		// cointype key using the master HD private key, then encrypt
 		// it along with the first account using our crypto keys.
@@ -888,7 +878,7 @@ func (m *Manager) ChangePassphrase(ns walletdb.ReadWriteBucket, oldPassphrase,
 	newPassphrase []byte, private bool, config *ScryptOptions) error {
 
 	// No private passphrase to change for a watching-only address manager.
-	if private && m.watchingOnly {
+	if private && m.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -979,7 +969,7 @@ func (m *Manager) ChangePassphrase(ns walletdb.ReadWriteBucket, oldPassphrase,
 		// If unlocked, create the new passphrase hash with the new
 		// passphrase and salt.
 		var hashedPassphrase [sha512.Size]byte
-		if m.locked {
+		if m.IsLocked() {
 			newMasterKey.Zero()
 		} else {
 			saltedPassphrase := append(passphraseSalt[:],
@@ -1053,7 +1043,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 	defer m.mtx.Unlock()
 
 	// Exit now if the manager is already watching-only.
-	if m.watchingOnly {
+	if m.WatchOnly() {
 		return nil
 	}
 
@@ -1072,7 +1062,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 
 	// Lock the manager to remove all clear text private key material from
 	// memory if needed.
-	if !m.locked {
+	if !m.IsLocked() {
 		m.lock()
 	}
 
@@ -1118,7 +1108,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 	m.masterKeyPriv = nil
 
 	// Mark the manager watching-only.
-	m.watchingOnly = true
+	m.watchingOnly.Store(true)
 	return nil
 
 }
@@ -1127,19 +1117,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 // unlocked, the decryption key needed to decrypt private keys used for signing
 // is in memory.
 func (m *Manager) IsLocked() bool {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
-
-	return m.isLocked()
-}
-
-// isLocked is an internal method returning whether or not the address manager
-// is locked via an unprotected read.
-//
-// NOTE: The caller *MUST* acquire the Manager's mutex before invocation to
-// avoid data races.
-func (m *Manager) isLocked() bool {
-	return m.locked
+	return m.locked.Load()
 }
 
 // Lock performs a best try effort to remove and zero all secret keys associated
@@ -1149,7 +1127,7 @@ func (m *Manager) isLocked() bool {
 // manager.
 func (m *Manager) Lock() error {
 	// A watching-only address manager can't be locked.
-	if m.watchingOnly {
+	if m.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -1157,7 +1135,7 @@ func (m *Manager) Lock() error {
 	defer m.mtx.Unlock()
 
 	// Error on attempt to lock an already locked manager.
-	if m.locked {
+	if m.IsLocked() {
 		return managerError(ErrLocked, errLocked, nil)
 	}
 
@@ -1175,7 +1153,7 @@ func (m *Manager) Lock() error {
 // manager.
 func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// A watching-only address manager can't be unlocked.
-	if m.watchingOnly {
+	if m.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
@@ -1184,7 +1162,7 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 
 	// Avoid actually unlocking if the manager is already unlocked
 	// and the passphrases match.
-	if !m.locked {
+	if !m.IsLocked() {
 		saltedPassphrase := append(m.privPassphraseSalt[:],
 			passphrase...)
 		hashedPassphrase := sha512.Sum512(saltedPassphrase)
@@ -1283,7 +1261,7 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 		}
 	}
 
-	m.locked = false
+	m.locked.Store(false)
 	saltedPassphrase := append(m.privPassphraseSalt[:], passphrase...)
 	m.hashedPrivPassphrase = sha512.Sum512(saltedPassphrase)
 	zero.Bytes(saltedPassphrase)
@@ -1330,7 +1308,7 @@ func (m *Manager) LookupAccount(ns walletdb.ReadBucket, name string) (KeyScope,
 func (m *Manager) selectCryptoKey(keyType CryptoKeyType) (EncryptorDecryptor, error) {
 	if keyType == CKTPrivate || keyType == CKTScript {
 		// The manager must be unlocked to work with the private keys.
-		if m.locked || m.watchingOnly {
+		if m.IsLocked() || m.WatchOnly() {
 			return nil, managerError(ErrLocked, errLocked, nil)
 		}
 	}
@@ -1399,7 +1377,6 @@ func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 	m := &Manager{
 		chainParams:              chainParams,
 		syncState:                *syncInfo,
-		locked:                   true,
 		birthday:                 birthday,
 		masterKeyPub:             masterKeyPub,
 		masterKeyPriv:            masterKeyPriv,
@@ -1412,8 +1389,11 @@ func newManager(chainParams *chaincfg.Params, masterKeyPub *snacl.SecretKey,
 		scopedManagers:           scopedManagers,
 		externalAddrSchemas:      make(map[AddressType][]KeyScope),
 		internalAddrSchemas:      make(map[AddressType][]KeyScope),
-		watchingOnly:             watchingOnly,
 	}
+
+	// Store the atomic.Bool values for the manager.
+	m.watchingOnly.Store(watchingOnly)
+	m.locked.Store(true)
 
 	for _, sMgr := range m.scopedManagers {
 		externalType := sMgr.AddrSchema().ExternalAddrType
