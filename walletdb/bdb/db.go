@@ -224,6 +224,11 @@ func (b *bucket) ReadCursor() walletdb.ReadCursor {
 	return b.ReadWriteCursor()
 }
 
+// Sequence returns the current integer for the bucket without incrementing it.
+func (b *bucket) Sequence() uint64 {
+	return (*bbolt.Bucket)(b).Sequence()
+}
+
 // ReadWriteCursor returns a new cursor, allowing for iteration over the bucket's
 // key/value pairs and nested buckets in forward or backward order.
 //
@@ -249,11 +254,6 @@ func (b *bucket) NextSequence() (uint64, error) {
 // SetSequence updates the sequence number for the bucket.
 func (b *bucket) SetSequence(v uint64) error {
 	return (*bbolt.Bucket)(b).SetSequence(v)
-}
-
-// Sequence returns the current integer for the bucket without incrementing it.
-func (b *bucket) Sequence() uint64 {
-	return (*bbolt.Bucket)(b).Sequence()
 }
 
 // cursor represents a cursor over key/value pairs and nested buckets of a

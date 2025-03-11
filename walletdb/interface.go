@@ -84,6 +84,10 @@ type ReadBucket interface {
 	Get(key []byte) []byte
 
 	ReadCursor() ReadCursor
+
+	// Sequence returns the current integer for the bucket without
+	// incrementing it.
+	Sequence() uint64
 }
 
 // ReadWriteBucket represents a bucket (a hierarchical structure within the
@@ -139,10 +143,6 @@ type ReadWriteBucket interface {
 
 	// SetSequence updates the sequence number for the bucket.
 	SetSequence(v uint64) error
-
-	// Sequence returns the current integer for the bucket without
-	// incrementing it.
-	Sequence() uint64
 }
 
 // ReadCursor represents a bucket cursor that can be positioned at the start or
