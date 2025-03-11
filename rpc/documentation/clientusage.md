@@ -32,7 +32,7 @@ Unless otherwise stated under the language example, it is assumed that
 gRPC is already already installed.  The gRPC installation procedure
 can vary greatly depending on the operating system being used and
 whether a gRPC source install is required.  Follow the [gRPC install
-instructions](https://github.com/grpc/grpc/blob/master/INSTALL) if
+instructions](https://github.com/grpc/grpc/blob/master/BUILDING.md) if
 gRPC is not already installed.  A full gRPC install also includes
 [Protocol Buffers](https://github.com/google/protobuf) (compiled with
 support for the proto3 language version), which contains the protoc
