@@ -343,8 +343,12 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			w.chainParams)
 		if err != nil {
 			// Non-standard outputs are skipped.
+			log.Warnf("Cannot extract non-std pkScript=%x",
+				output.PkScript)
+
 			continue
 		}
+
 		for _, addr := range addrs {
 			ma, err := w.Manager.Address(addrmgrNs, addr)
 
@@ -370,6 +374,9 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 				return err
 			}
 			if !waddrmgr.IsDefaultScope(scopedManager.Scope()) {
+				log.Debugf("Skipping non-default scope "+
+					"address %v", addr)
+
 				continue
 			}
 

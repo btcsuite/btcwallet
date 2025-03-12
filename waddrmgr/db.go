@@ -1200,6 +1200,8 @@ func putAccountIDIndex(ns walletdb.ReadWriteBucket, scope *KeyScope,
 
 // putAddrAccountIndex stores the given key to the address account index of the
 // database.
+//
+// TODO(yy): can remove the `ns` and take the `scopedBucket` instead?
 func putAddrAccountIndex(ns walletdb.ReadWriteBucket, scope *KeyScope,
 	account uint32, addrHash []byte) error {
 
@@ -1216,6 +1218,8 @@ func putAddrAccountIndex(ns walletdb.ReadWriteBucket, scope *KeyScope,
 		return nil
 	}
 
+	// TODO(yy): We already saved the addrHash and account above, so this
+	// may be not needed. Investigate it during the sqlization series.
 	bucket, err = bucket.CreateBucketIfNotExists(uint32ToBytes(account))
 	if err != nil {
 		return err
@@ -2398,9 +2402,10 @@ func putBirthday(ns walletdb.ReadWriteBucket, t time.Time) error {
 // FetchBirthdayBlock retrieves the birthday block from the database.
 //
 // The block is serialized as follows:
-//   [0:4]   block height
-//   [4:36]  block hash
-//   [36:44] block timestamp
+//
+//	[0:4]   block height
+//	[4:36]  block hash
+//	[36:44] block timestamp
 func FetchBirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, error) {
 	var block BlockStamp
 
@@ -2438,9 +2443,10 @@ func DeleteBirthdayBlock(ns walletdb.ReadWriteBucket) error {
 // PutBirthdayBlock stores the provided birthday block to the database.
 //
 // The block is serialized as follows:
-//   [0:4]   block height
-//   [4:36]  block hash
-//   [36:44] block timestamp
+//
+//	[0:4]   block height
+//	[4:36]  block hash
+//	[36:44] block timestamp
 //
 // NOTE: This does not alter the birthday block verification state.
 func PutBirthdayBlock(ns walletdb.ReadWriteBucket, block BlockStamp) error {

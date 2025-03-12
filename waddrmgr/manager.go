@@ -423,6 +423,8 @@ func (m *Manager) IsWatchOnlyAccount(ns walletdb.ReadBucket, keyScope KeyScope,
 // with the address manager.
 //
 // This function MUST be called with the manager lock held for writes.
+//
+// TODO(yy): Rename this to wipe memory for priv keys.
 func (m *Manager) lock() {
 	for _, manager := range m.scopedManagers {
 		// Clear all of the account private keys.

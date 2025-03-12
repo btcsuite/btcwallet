@@ -2543,8 +2543,8 @@ type GetTransactionResult struct {
 	Timestamp     int64
 }
 
-// GetTransaction returns detailed data of a transaction given its id. In addition it
-// returns properties about its block.
+// GetTransaction returns detailed data of a transaction given its id. In
+// addition it returns properties about its block.
 func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 	error) {
 
@@ -3783,8 +3783,11 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 				txOut.PkScript, w.chainParams,
 			)
 			if err != nil {
-				// Non-standard outputs can safely be skipped because
-				// they're not supported by the wallet.
+				// Non-standard outputs can safely be skipped
+				// because they're not supported by the wallet.
+				log.Warnf("Non-standard pkScript=%x in tx=%v",
+					txOut.PkScript, tx.TxHash())
+
 				continue
 			}
 			for _, addr := range addrs {

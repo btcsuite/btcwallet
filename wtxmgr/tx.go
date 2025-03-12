@@ -494,12 +494,17 @@ func (s *Store) AddCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *Blo
 // bool return specifies whether the unspent output is newly added (true) or a
 // duplicate (false).
 func (s *Store) addCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *BlockMeta, index uint32, change bool) (bool, error) {
+	txOutAmt := btcutil.Amount(rec.MsgTx.TxOut[index].Value)
+
 	if block == nil {
 		// If the outpoint that we should mark as credit already exists
 		// within the store, either as unconfirmed or confirmed, then we
 		// have nothing left to do and can exit.
 		k := canonicalOutPoint(&rec.Hash, index)
 		if existsRawUnminedCredit(ns, k) != nil {
+			log.Tracef("Ignoring credit for outpoint %v:%v",
+				rec.Hash.String(), index)
+
 			return false, nil
 		}
 		if _, tv := latestTxRecord(ns, &rec.Hash); tv != nil {
@@ -507,18 +512,24 @@ func (s *Store) addCredit(ns walletdb.ReadWriteBucket, rec *TxRecord, block *Blo
 				rec.Hash.String())
 			return false, nil
 		}
-		v := valueUnminedCredit(btcutil.Amount(rec.MsgTx.TxOut[index].Value), change)
+		v := valueUnminedCredit(txOutAmt, change)
+
+		log.Debugf("Add unmined credit=%v for outpoint %v:%v", txOutAmt,
+			rec.Hash, index)
+
 		return true, putRawUnminedCredit(ns, k, v)
 	}
 
 	k, v := existsCredit(ns, &rec.Hash, index, &block.Block)
 	if v != nil {
+		log.Tracef("Ignoring exsiting credit for outpoint %v:%v",
+			rec.Hash.String(), index)
+
 		return false, nil
 	}
 
-	txOutAmt := btcutil.Amount(rec.MsgTx.TxOut[index].Value)
-	log.Debugf("Marking transaction %v output %d (%v) spendable",
-		rec.Hash, index, txOutAmt)
+	log.Debugf("Add mined credit=%v for outpoint %v:%v", txOutAmt, rec.Hash,
+		index)
 
 	cred := credit{
 		outPoint: wire.OutPoint{
