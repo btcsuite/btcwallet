@@ -42,6 +42,7 @@ func errContext(err error, context string) error {
 // Flags.
 var opts = struct {
 	TestNet3              bool                `long:"testnet" description:"Use the test bitcoin network (version 3)"`
+	TestNet4              bool                `long:"testnet" description:"Use the test bitcoin network (version 3)"`
 	SimNet                bool                `long:"simnet" description:"Use the simulation bitcoin network"`
 	RegressionNet         bool                `long:"regtest" description:"Use the regression bitcoin network"`
 	RPCConnect            string              `short:"c" long:"connect" description:"Hostname[:port] of wallet RPC server"`
@@ -53,6 +54,7 @@ var opts = struct {
 	RequiredConfirmations int64               `long:"minconf" description:"Required confirmations to include an output"`
 }{
 	TestNet3:              false,
+	TestNet4:              false,
 	SimNet:                false,
 	RegressionNet:         false,
 	RPCConnect:            "localhost",
@@ -85,6 +87,9 @@ func init() {
 	if opts.TestNet3 {
 		numNets++
 	}
+	if opts.TestNet4 {
+		numNets++
+	}
 	if opts.SimNet {
 		numNets++
 	}
@@ -97,6 +102,8 @@ func init() {
 	var activeNet = &netparams.MainNetParams
 	if opts.TestNet3 {
 		activeNet = &netparams.TestNet3Params
+	} else if opts.TestNet4 {
+		activeNet = &netparams.TestNet4Params
 	} else if opts.SimNet {
 		activeNet = &netparams.SimNetParams
 	} else if opts.RegressionNet {
