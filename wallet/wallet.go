@@ -1622,6 +1622,38 @@ func (w *Wallet) AccountAddresses(account uint32) (addrs []btcutil.Address, err 
 	return
 }
 
+// AccountManagedAddresses returns the managed addresses for every created
+// address for an account.
+func (w *Wallet) AccountManagedAddresses(scope waddrmgr.KeyScope,
+	accountNum uint32) ([]waddrmgr.ManagedAddress, error) {
+
+	scopedMgr, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	addrs := make([]waddrmgr.ManagedAddress, 0)
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		return scopedMgr.ForEachAccountAddress(
+			addrmgrNs, accountNum,
+			func(a waddrmgr.ManagedAddress) error {
+				addrs = append(addrs, a)
+
+				return nil
+			},
+		)
+	},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return addrs, nil
+}
+
 // CalculateBalance sums the amounts of all unspent transaction
 // outputs to addresses of a wallet and returns the balance.
 //
@@ -3924,6 +3956,220 @@ func (w *Wallet) ChainParams() *chaincfg.Params {
 // with the wallet's database.
 func (w *Wallet) Database() walletdb.DB {
 	return w.db
+}
+
+// RemoveDescendants attempts to remove any transaction from the wallet's tx
+// store (that may be unconfirmed) that spends outputs created by the passed
+// transaction. This remove propagates recursively down the chain of descendent
+// transactions.
+func (w *Wallet) RemoveDescendants(tx *wire.MsgTx) error {
+	txRecord, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	if err != nil {
+		return err
+	}
+
+	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		wtxmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		return w.TxStore.RemoveUnminedTx(wtxmgrNs, txRecord)
+	})
+}
+
+// BirthdayBlock returns the birthday block of the wallet.
+//
+// NOTE: The wallet won't start until the backend is synced, thus the birthday
+// block won't be set and `ErrBirthdayBlockNotSet` will be returned.
+func (w *Wallet) BirthdayBlock() (*waddrmgr.BlockStamp, error) {
+	var birthdayBlock waddrmgr.BlockStamp
+
+	// Query the wallet's birthday block height from db.
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		bb, _, err := w.Manager.BirthdayBlock(addrmgrNs)
+		birthdayBlock = bb
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &birthdayBlock, nil
+}
+
+// AddScopeManager creates a new scoped key manager from the root manager.
+func (w *Wallet) AddScopeManager(scope waddrmgr.KeyScope,
+	addrSchema waddrmgr.ScopeAddrSchema) (
+	*waddrmgr.ScopedKeyManager, error) {
+
+	var scopedManager *waddrmgr.ScopedKeyManager
+
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		manager, err := w.Manager.NewScopedKeyManager(
+			addrmgrNs, scope, addrSchema,
+		)
+		scopedManager = manager
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return scopedManager, nil
+}
+
+// InitAccounts creates a number of accounts specified by `num`, with account
+// number ranges from 1 to `num`.
+func (w *Wallet) InitAccounts(scope *waddrmgr.ScopedKeyManager,
+	watchOnly bool, num uint32) error {
+
+	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		// Generate all accounts that we could ever need. This includes
+		// all key families.
+		for account := uint32(1); account <= num; account++ {
+			// Otherwise, we'll check if the account already exists,
+			// if so, we can once again bail early.
+			_, err := scope.AccountName(addrmgrNs, account)
+			if err == nil {
+				continue
+			}
+
+			// If we reach this point, then the account hasn't yet
+			// been created, so we'll need to create it before we
+			// can proceed.
+			err = scope.NewRawAccount(addrmgrNs, account)
+			if err != nil {
+				return err
+			}
+		}
+
+		// If this is the first startup with remote signing and wallet
+		// migration turned on and the wallet wasn't previously
+		// migrated, we can do that now that we made sure all accounts
+		// that we need were derived correctly.
+		if watchOnly {
+			log.Infof("Migrating wallet to watch-only mode, " +
+				"purging all private key material")
+
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+			return w.Manager.ConvertToWatchingOnly(ns)
+		}
+
+		return nil
+	})
+}
+
+// DeriveFromKeyPath derives a private key using the given derivation path.
+func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
+
+	scopedMgr, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching manager for scope %v: "+
+			"%w", scope, err)
+	}
+
+	// Let's see if we can hit the private key cache.
+	privKey, err := scopedMgr.DeriveFromKeyPathCache(path)
+	if err == nil {
+		return privKey, nil
+	}
+
+	// The key wasn't in the cache, let's fully derive it now.
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		addr, err := scopedMgr.DeriveFromKeyPath(addrmgrNs, path)
+		if err != nil {
+			return fmt.Errorf("error deriving private key: %w", err)
+		}
+
+		privKey, err = addr.(waddrmgr.ManagedPubKeyAddress).PrivKey()
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return privKey, nil
+}
+
+// DeriveFromKeyPathAddAccount derives a private key using the given derivation
+// path. The account will be created if it doesn't exist.
+func (w *Wallet) DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
+
+	scopedMgr, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching manager for scope %v: "+
+			"%w", scope, err)
+	}
+
+	// Let's see if we can hit the private key cache.
+	privKey, err := scopedMgr.DeriveFromKeyPathCache(path)
+	if err == nil {
+		return privKey, nil
+	}
+
+	derivePrivKey := func(addrmgrNs walletdb.ReadWriteBucket) error {
+		addr, err := scopedMgr.DeriveFromKeyPath(addrmgrNs, path)
+
+		// Exit early if there's no error.
+		if err == nil {
+			key, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+			if !ok {
+				return nil
+			}
+
+			// Overwrite the returned private key variable.
+			privKey, err = key.PrivKey()
+
+			return err
+		}
+
+		return err
+	}
+
+	// The key wasn't in the cache, let's fully derive it now.
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := derivePrivKey(addrmgrNs)
+
+		// Exit early if there's no error.
+		if err == nil {
+			return nil
+		}
+
+		// Exit with the error if it's not account not found.
+		if !waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+			return fmt.Errorf("error deriving private key: %w", err)
+		}
+
+		// If we've reached this point, then the account doesn't yet
+		// exist, so we'll create it now to ensure we can sign.
+		err = scopedMgr.NewRawAccount(addrmgrNs, path.Account)
+		if err != nil {
+			return err
+		}
+
+		// Now that we know the account exists, we'll attempt to
+		// re-derive the private key.
+		return derivePrivKey(addrmgrNs)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return privKey, nil
 }
 
 // CreateWithCallback is the same as Create with an added callback that will be
