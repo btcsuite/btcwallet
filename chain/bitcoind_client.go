@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/davecgh/go-spew/spew"
 )
 
 var (
@@ -1359,14 +1360,18 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 			break
 		}
 
+		sig := txIn.SignatureScript
+		witness := txIn.Witness
+
 		// Otherwise, we'll check whether it matches a pkScript in our
 		// watch list encoded as an address. To do so, we'll re-derive
 		// the pkScript of the output the input is attempting to spend.
-		pkScript, err := txscript.ComputePkScript(
-			txIn.SignatureScript, txIn.Witness,
-		)
+		pkScript, err := txscript.ComputePkScript(sig, witness)
 		if err != nil {
 			// Non-standard outputs can be safely skipped.
+			log.Warnf("Received non-standard input sig=%x, "+
+				"witness=%x", sig, witness)
+
 			continue
 		}
 		addr, err := pkScript.Address(c.chainConn.cfg.ChainParams)
@@ -1387,8 +1392,12 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			txOut.PkScript, c.chainConn.cfg.ChainParams,
 		)
+
 		if err != nil {
 			// Non-standard outputs can be safely skipped.
+			log.Warnf("Received non-standard output script=%x",
+				txOut.PkScript)
+
 			continue
 		}
 
@@ -1416,6 +1425,10 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 	if !isRelevant {
 		return false, rec, nil
 	}
+
+	log.Tracef("Found relevant tx %v", NewLogClosure(func() string {
+		return spew.Sdump(txDetails)
+	}))
 
 	// Otherwise, the transaction matched our filters, so we should dispatch
 	// a notification for it. If it's still unconfirmed, we'll include it in
