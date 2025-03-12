@@ -82,6 +82,30 @@ const (
 	TaprootScript
 )
 
+// String returns a human-readbale format of the address type.
+func (a AddressType) String() string {
+	switch a {
+	case PubKeyHash:
+		return "PubKeyHash"
+	case Script:
+		return "Script"
+	case RawPubKey:
+		return "RawPubKey"
+	case NestedWitnessPubKey:
+		return "NestedWitnessPubKey"
+	case WitnessPubKey:
+		return "WitnessPubKey"
+	case WitnessScript:
+		return "WitnessScript"
+	case TaprootPubKey:
+		return "TaprootPubKey"
+	case TaprootScript:
+		return "TaprootScript"
+	default:
+		return "Unknown"
+	}
+}
+
 const (
 	// witnessVersionV0 is the SegWit v0 witness version used for p2wpkh and
 	// p2wsh outputs and addresses.
