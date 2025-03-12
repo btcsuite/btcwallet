@@ -492,6 +492,8 @@ func (net *netParams) ReadFrom(r io.Reader) (int64, error) {
 		*net = (netParams)(chaincfg.MainNetParams)
 	case wire.TestNet3:
 		*net = (netParams)(chaincfg.TestNet3Params)
+	case wire.TestNet4:
+		*net = (netParams)(chaincfg.TestNet4Params)
 	case wire.SimNet:
 		*net = (netParams)(chaincfg.SimNetParams)
 	case wire.TestNet:
