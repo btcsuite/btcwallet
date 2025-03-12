@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -148,6 +149,7 @@ func makeTxSummary(dbtx walletdb.ReadTx, w *Wallet, details *wtxmgr.TxDetails) T
 		Fee:         fee,
 		Timestamp:   details.Received.Unix(),
 		Label:       details.Label,
+		Tx:          &details.MsgTx,
 	}
 }
 
@@ -366,6 +368,7 @@ type TransactionSummary struct {
 	Fee         btcutil.Amount
 	Timestamp   int64
 	Label       string
+	Tx          *wire.MsgTx
 }
 
 // TransactionSummaryInput describes a transaction input that is relevant to the
