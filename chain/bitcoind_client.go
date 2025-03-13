@@ -52,14 +52,12 @@ type BitcoindClient struct {
 	bestBlockMtx sync.RWMutex
 	bestBlock    waddrmgr.BlockStamp
 
-	// rescanUpdate is a channel will be sent items that we should match
-	// transactions against while processing a chain rescan to determine if
-	// they are relevant to the client.
-	rescanUpdate chan interface{}
-
 	// watchedAddresses, watchedOutPoints, and watchedTxs are the set of
 	// items we should match transactions against while processing a chain
 	// rescan to determine if they are relevant to the client.
+	//
+	// TODO(yy): Move the watched filters into a struct so it's easier to
+	// manage them.
 	watchMtx         sync.RWMutex
 	watchedAddresses map[string]struct{}
 	watchedOutPoints map[wire.OutPoint]struct{}
@@ -482,11 +480,15 @@ func (c *BitcoindClient) Rescan(blockHash *chainhash.Hash,
 	c.updateWatchedFilters(outPoints)
 
 	// Once the filters have been updated, we can begin the rescan.
-	select {
-	case c.rescanUpdate <- *blockHash:
-	case <-c.quit:
-		return ErrBitcoindClientShuttingDown
-	}
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+
+		err := c.rescan(*blockHash)
+		if err != nil {
+			log.Errorf("Unable to complete chain rescan: %v", err)
+		}
+	}()
 
 	return nil
 }
@@ -526,9 +528,6 @@ func (c *BitcoindClient) Start() error {
 	}
 	c.bestBlockMtx.Unlock()
 
-	c.wg.Add(1)
-	go c.rescanHandler()
-
 	return nil
 }
 
@@ -556,87 +555,6 @@ func (c *BitcoindClient) Stop() {
 // NOTE: This is part of the chain.Interface interface.
 func (c *BitcoindClient) WaitForShutdown() {
 	c.wg.Wait()
-}
-
-// rescanHandler handles the logic needed for the caller to trigger a chain
-// rescan.
-//
-// NOTE: This must be called as a goroutine.
-func (c *BitcoindClient) rescanHandler() {
-	defer c.wg.Done()
-
-	for {
-		select {
-		case update := <-c.rescanUpdate:
-			switch update := update.(type) {
-
-			// We're clearing the filters.
-			case struct{}:
-				c.watchMtx.Lock()
-				c.watchedOutPoints = make(map[wire.OutPoint]struct{})
-				c.watchedAddresses = make(map[string]struct{})
-				c.watchedTxs = make(map[chainhash.Hash]struct{})
-				c.watchMtx.Unlock()
-
-			// We're adding the addresses to our filter.
-			case []btcutil.Address:
-				c.watchMtx.Lock()
-				for _, addr := range update {
-					c.watchedAddresses[addr.String()] = struct{}{}
-				}
-				c.watchMtx.Unlock()
-
-			// We're adding the outpoints to our filter.
-			case []wire.OutPoint:
-				c.watchMtx.Lock()
-				for _, op := range update {
-					c.watchedOutPoints[op] = struct{}{}
-				}
-				c.watchMtx.Unlock()
-			case []*wire.OutPoint:
-				c.watchMtx.Lock()
-				for _, op := range update {
-					c.watchedOutPoints[*op] = struct{}{}
-				}
-				c.watchMtx.Unlock()
-
-			// We're adding the outpoints that map to the scripts
-			// that we should scan for to our filter.
-			case map[wire.OutPoint]btcutil.Address:
-				c.watchMtx.Lock()
-				for op := range update {
-					c.watchedOutPoints[op] = struct{}{}
-				}
-				c.watchMtx.Unlock()
-
-			// We're adding the transactions to our filter.
-			case []chainhash.Hash:
-				c.watchMtx.Lock()
-				for _, txid := range update {
-					c.watchedTxs[txid] = struct{}{}
-				}
-				c.watchMtx.Unlock()
-			case []*chainhash.Hash:
-				c.watchMtx.Lock()
-				for _, txid := range update {
-					c.watchedTxs[*txid] = struct{}{}
-				}
-				c.watchMtx.Unlock()
-
-			// We're starting a rescan from the hash.
-			case chainhash.Hash:
-				if err := c.rescan(update); err != nil {
-					log.Errorf("Unable to complete chain "+
-						"rescan: %v", err)
-				}
-			default:
-				log.Warnf("Received unexpected filter type %T",
-					update)
-			}
-		case <-c.quit:
-			return
-		}
-	}
 }
 
 // ntfnHandler handles the logic to retrieve ZMQ notifications from the backing
