@@ -267,9 +267,9 @@ func (c *BitcoindClient) Notifications() <-chan interface{} {
 //
 // NOTE: This is part of the chain.Interface interface.
 func (c *BitcoindClient) NotifyReceived(addrs []btcutil.Address) error {
-	_ = c.NotifyBlocks()
-
 	c.updateWatchedFilters(addrs)
+
+	_ = c.NotifyBlocks()
 
 	return nil
 }
@@ -277,10 +277,10 @@ func (c *BitcoindClient) NotifyReceived(addrs []btcutil.Address) error {
 // NotifySpent allows the chain backend to notify the caller whenever a
 // transaction spends any of the given outpoints.
 func (c *BitcoindClient) NotifySpent(outPoints []*wire.OutPoint) error {
-	_ = c.NotifyBlocks()
-
 	// Send the outpoints so the client will cache them.
 	c.updateWatchedFilters(outPoints)
+
+	_ = c.NotifyBlocks()
 
 	// Now we do a quick check in current mempool to see if we already have
 	// txes that spends the given outpoints.
@@ -321,9 +321,9 @@ func (c *BitcoindClient) NotifySpent(outPoints []*wire.OutPoint) error {
 // NotifyTx allows the chain backend to notify the caller whenever any of the
 // given transactions confirm within the chain.
 func (c *BitcoindClient) NotifyTx(txids []chainhash.Hash) error {
-	_ = c.NotifyBlocks()
-
 	c.updateWatchedFilters(txids)
+
+	_ = c.NotifyBlocks()
 
 	return nil
 }
