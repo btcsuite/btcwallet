@@ -196,19 +196,38 @@ func relevantAccounts(_ *Wallet, m map[uint32]btcutil.Amount, txs []TransactionS
 	}
 }
 
-func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx, details *wtxmgr.TxDetails) {
+func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
+	ns walletdb.ReadBucket, txHash chainhash.Hash) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Exit early if there are no clients.
+	clients := s.transactions
+	if len(clients) == 0 {
+		return
+	}
+
+	// It's possible that the transaction was not found within the wallet's
+	// set of unconfirmed transactions due to it already being confirmed,
+	// so we'll avoid notifying it.
+	//
+	// TODO(wilmer): ideally we should find the culprit to why we're
+	// receiving an additional unconfirmed chain.RelevantTx notification
+	// from the chain backend.
+	details, err := s.wallet.TxStore.UniqueTxDetails(ns, &txHash, nil)
+	if err != nil {
+		log.Errorf("Cannot query transaction details for "+
+			"notification: %v", err)
+
+		return
+	}
+
 	// Sanity check: should not be currently coalescing a notification for
 	// mined transactions at the same time that an unmined tx is notified.
 	if s.currentTxNtfn != nil {
 		log.Errorf("Notifying unmined tx notification (%s) while creating notification for blocks",
 			details.Hash)
-	}
-
-	defer s.mu.Unlock()
-	s.mu.Lock()
-	clients := s.transactions
-	if len(clients) == 0 {
-		return
 	}
 
 	unminedTxs := []TransactionSummary{makeTxSummary(dbtx, s.wallet, details)}
@@ -235,13 +254,46 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx, deta
 }
 
 func (s *NotificationServer) notifyDetachedBlock(hash *chainhash.Hash) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Exit early if there are no clients.
+	clients := s.transactions
+	if len(clients) == 0 {
+		return
+	}
+
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
 	s.currentTxNtfn.DetachedBlocks = append(s.currentTxNtfn.DetachedBlocks, hash)
 }
 
-func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx, details *wtxmgr.TxDetails, block *wtxmgr.BlockMeta) {
+func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx,
+	ns walletdb.ReadBucket, txHash chainhash.Hash,
+	block *wtxmgr.BlockMeta) {
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Exit early if there are no clients.
+	clients := s.transactions
+	if len(clients) == 0 {
+		return
+	}
+
+	// We'll only notify the transaction if it was found within the
+	// wallet's set of confirmed transactions.
+	details, err := s.wallet.TxStore.UniqueTxDetails(
+		ns, &txHash, &block.Block,
+	)
+	if err != nil {
+		log.Errorf("Cannot query transaction details for "+
+			"notification: %v", err)
+
+		return
+	}
+
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
@@ -260,6 +312,16 @@ func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx, detail
 }
 
 func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wtxmgr.BlockMeta) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Exit early if there are no clients.
+	clients := s.transactions
+	if len(clients) == 0 {
+		s.currentTxNtfn = nil
+		return
+	}
+
 	if s.currentTxNtfn == nil {
 		s.currentTxNtfn = &TransactionNotifications{}
 	}
@@ -281,14 +343,6 @@ func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wt
 		if len(s.currentTxNtfn.DetachedBlocks) >= len(s.currentTxNtfn.AttachedBlocks) {
 			return
 		}
-	}
-
-	defer s.mu.Unlock()
-	s.mu.Lock()
-	clients := s.transactions
-	if len(clients) == 0 {
-		s.currentTxNtfn = nil
-		return
 	}
 
 	// The UnminedTransactions field is intentionally not set.  Since the
