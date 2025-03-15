@@ -6,7 +6,6 @@ package walletdb_test
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -60,12 +59,7 @@ func TestAddDuplicateDriver(t *testing.T) {
 			"got %v, want %v", err, walletdb.ErrDbTypeRegistered)
 	}
 
-	tempDir, err := os.MkdirTemp("", "dupdrivertest")
-	if err != nil {
-		t.Errorf("unable to create temp dir: %v", err)
-		return
-	}
-	defer os.Remove(tempDir)
+	tempDir := t.TempDir()
 
 	dbPath := filepath.Join(tempDir, "db")
 	db, err := walletdb.Create(dbType, dbPath, true, defaultDBTimeout)
