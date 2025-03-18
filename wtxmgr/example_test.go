@@ -6,6 +6,7 @@ package wtxmgr
 
 import (
 	"fmt"
+	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -43,8 +44,8 @@ var exampleBlock100 = makeBlockMeta(100)
 
 // This example demonstrates reporting the Store balance given an unmined and
 // mined transaction given 0, 1, and 6 block confirmations.
-func ExampleStore_Balance() {
-	s, db, teardown, err := testStore()
+func ExampleStore_Balance(t *testing.T) {
+	s, db, teardown, err := testStore(t)
 	defer teardown()
 	if err != nil {
 		fmt.Println(err)
@@ -114,8 +115,8 @@ func ExampleStore_Balance() {
 	// 10 BTC, 10 BTC, 10 BTC
 }
 
-func ExampleStore_Rollback() {
-	s, db, teardown, err := testStore()
+func ExampleStore_Rollback(t *testing.T) {
+	s, db, teardown, err := testStore(t)
 	defer teardown()
 	if err != nil {
 		fmt.Println(err)
@@ -157,9 +158,9 @@ func ExampleStore_Rollback() {
 	// -1
 }
 
-func Example_basicUsage() {
+func Example_basicUsage(t *testing.T) {
 	// Open the database.
-	db, dbTeardown, err := testDB()
+	db, dbTeardown, err := testDB(t)
 	defer dbTeardown()
 	if err != nil {
 		fmt.Println(err)

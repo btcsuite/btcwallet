@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -17,11 +16,7 @@ import (
 // wallet.
 func TestCreateWatchingOnly(t *testing.T) {
 	// Set up a wallet.
-	dir, err := os.MkdirTemp("", "watchingonly_test")
-	if err != nil {
-		t.Fatalf("Failed to create db dir: %v", err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	pubPass := []byte("hello")
 
@@ -29,7 +24,7 @@ func TestCreateWatchingOnly(t *testing.T) {
 		&chaincfg.TestNet3Params, dir, true, defaultDBTimeout, 250,
 		WithWalletSyncRetryInterval(10*time.Millisecond),
 	)
-	_, err = loader.CreateNewWatchingOnlyWallet(pubPass, time.Now())
+	_, err := loader.CreateNewWatchingOnlyWallet(pubPass, time.Now())
 	if err != nil {
 		t.Fatalf("unable to create wallet: %v", err)
 	}

@@ -249,19 +249,15 @@ func hexToBytes(origHex string) []byte {
 }
 
 func emptyDB(t *testing.T) (tearDownFunc func(), db walletdb.DB) {
-	dirName, err := os.MkdirTemp("", "mgrtest")
-	if err != nil {
-		t.Fatalf("Failed to create db temp dir: %v", err)
-	}
+	dirName := t.TempDir()
 	dbPath := filepath.Join(dirName, "mgrtest.db")
-	db, err = walletdb.Create("bdb", dbPath, true, defaultDBTimeout)
+	db, err := walletdb.Create("bdb", dbPath, true, defaultDBTimeout)
 	if err != nil {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)
 	}
 	tearDownFunc = func() {
 		db.Close()
-		_ = os.RemoveAll(dirName)
 	}
 	return
 }
@@ -270,12 +266,10 @@ func emptyDB(t *testing.T) (tearDownFunc func(), db walletdb.DB) {
 // that should be invoked to ensure it is closed and removed upon completion.
 func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *Manager) {
 	// Create a new manager in a temp directory.
-	dirName, err := os.MkdirTemp("", "mgrtest")
-	if err != nil {
-		t.Fatalf("Failed to create db temp dir: %v", err)
-	}
+	dirName := t.TempDir()
+
 	dbPath := filepath.Join(dirName, "mgrtest.db")
-	db, err = walletdb.Create("bdb", dbPath, true, defaultDBTimeout)
+	db, err := walletdb.Create("bdb", dbPath, true, defaultDBTimeout)
 	if err != nil {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)
@@ -303,7 +297,6 @@ func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *Manag
 	tearDownFunc = func() {
 		mgr.Close()
 		db.Close()
-		_ = os.RemoveAll(dirName)
 	}
 	return tearDownFunc, db, mgr
 }

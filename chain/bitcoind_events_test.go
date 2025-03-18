@@ -3,7 +3,6 @@ package chain
 import (
 	"fmt"
 	"math/rand"
-	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -459,14 +458,10 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	rpcPolling bool) *BitcoindClient {
 
 	// Start a bitcoind instance and connect it to miner1.
-	tempBitcoindDir, err := os.MkdirTemp("", "bitcoind")
-	require.NoError(t, err)
+	tempBitcoindDir := t.TempDir()
 
 	zmqBlockHost := "ipc:///" + tempBitcoindDir + "/blocks.socket"
 	zmqTxHost := "ipc:///" + tempBitcoindDir + "/tx.socket"
-	t.Cleanup(func() {
-		os.RemoveAll(tempBitcoindDir)
-	})
 
 	rpcPort := rand.Int()%(65536-1024) + 1024
 	bitcoind := exec.Command(
