@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
@@ -15,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/internal/cfgutil"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
@@ -42,8 +44,10 @@ func errContext(err error, context string) error {
 // Flags.
 var opts = struct {
 	TestNet3              bool                `long:"testnet" description:"Use the test bitcoin network (version 3)"`
+	TestNet4              bool                `long:"testnet4" description:"Use the test bitcoin network (version 4)"`
 	SimNet                bool                `long:"simnet" description:"Use the simulation bitcoin network"`
 	RegressionNet         bool                `long:"regtest" description:"Use the regression bitcoin network"`
+	Backend               string              `short:"b" long:"backend" description:"The wallet backend to use" default:"btcd" choice:"btcd" choice:"bitcoind"`
 	RPCConnect            string              `short:"c" long:"connect" description:"Hostname[:port] of wallet RPC server"`
 	RPCUsername           string              `short:"u" long:"rpcuser" description:"Wallet RPC username"`
 	RPCCertificateFile    string              `long:"cafile" description:"Wallet RPC TLS certificate"`
@@ -53,8 +57,10 @@ var opts = struct {
 	RequiredConfirmations int64               `long:"minconf" description:"Required confirmations to include an output"`
 }{
 	TestNet3:              false,
+	TestNet4:              false,
 	SimNet:                false,
 	RegressionNet:         false,
+	Backend:               "btcd",
 	RPCConnect:            "localhost",
 	RPCUsername:           "",
 	RPCCertificateFile:    filepath.Join(walletDataDirectory, "rpc.cert"),
@@ -85,6 +91,9 @@ func init() {
 	if opts.TestNet3 {
 		numNets++
 	}
+	if opts.TestNet4 {
+		numNets++
+	}
 	if opts.SimNet {
 		numNets++
 	}
@@ -97,6 +106,8 @@ func init() {
 	var activeNet = &netparams.MainNetParams
 	if opts.TestNet3 {
 		activeNet = &netparams.TestNet3Params
+	} else if opts.TestNet4 {
+		activeNet = &netparams.TestNet4Params
 	} else if opts.SimNet {
 		activeNet = &netparams.SimNetParams
 	} else if opts.RegressionNet {
@@ -114,6 +125,10 @@ func init() {
 
 	if opts.RPCUsername == "" {
 		fatalf("RPC username is required")
+	}
+
+	if !slices.Contains(chain.SupportedBackEnds(), chain.BackendServer(opts.Backend)) {
+		fatalf("Invalid backend `%s`, supported backends are %v", opts.Backend, chain.SupportedBackEnds())
 	}
 
 	certFileExists, err = cfgutil.FileExists(opts.RPCCertificateFile)

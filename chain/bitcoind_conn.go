@@ -148,18 +148,18 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	}
 	client, err := rpcclient.New(clientCfg, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to connect to bitcoind: %w", err)
 	}
 
 	batchClient, err := rpcclient.NewBatch(clientCfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to connect to bitcoind batch: %w", err)
 	}
 
 	// Verify that the node is running on the expected network.
 	net, err := getCurrentNet(client)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to determine bitcoind network: %w", err)
 	}
 	if net != cfg.ChainParams.Net {
 		return nil, fmt.Errorf("expected network %v, got %v",
@@ -191,7 +191,8 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 			},
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("unable to create pruned block "+
+				"dispatcher: %w", err)
 		}
 	}
 
@@ -205,7 +206,8 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 
 	bc.events, err = NewBitcoindEventSubscriber(cfg, client, batchClient)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to create bitcoind event "+
+			"subscriber: %w", err)
 	}
 
 	return bc, nil
@@ -381,10 +383,11 @@ func getCurrentNet(client *rpcclient.Client) (wire.BitcoinNet, error) {
 	if err != nil {
 		return 0, err
 	}
-
 	switch *hash {
 	case *chaincfg.TestNet3Params.GenesisHash:
 		return chaincfg.TestNet3Params.Net, nil
+	case *chaincfg.TestNet4Params.GenesisHash:
+		return chaincfg.TestNet4Params.Net, nil
 	case *chaincfg.RegressionNetParams.GenesisHash:
 		return chaincfg.RegressionNetParams.Net, nil
 	case *chaincfg.SigNetParams.GenesisHash:
