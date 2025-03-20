@@ -6,9 +6,27 @@ linters-settings:
   govet:
     # Don't report about shadowed variables
     check-shadowing: false
+
   gofmt:
     # simplify code: gofmt with `-s` option, true by default
     simplify: true
+
+  nlreturn:
+    # Size of the block (including return statement that is still "OK")
+    # so no return split required.
+    block-size: 3
+
+  funlen:
+    # Checks the number of lines in a function.
+    # If lower than 0, disable the check.
+    lines: 100
+    # Checks the number of statements in a function.
+    statements: 50
+
+  whitespace:
+    multi-func: true
+    multi-if: true
+
 
 linters:
   enable-all: true
@@ -92,6 +110,10 @@ linters:
 
     # Disable tagalign
     - tagalign
+
+    # TODO(yy): create a list of allowed packages to import before enabling
+    # this linter.
+    - depguard
 
 issues:
   # Only check issues in the new code.

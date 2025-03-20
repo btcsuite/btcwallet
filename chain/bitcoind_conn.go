@@ -407,7 +407,6 @@ func (c *BitcoindConn) NewBitcoindClient() *BitcoindClient {
 
 		chainConn: c,
 
-		rescanUpdate:     make(chan interface{}),
 		watchedAddresses: make(map[string]struct{}),
 		watchedOutPoints: make(map[wire.OutPoint]struct{}),
 		watchedTxs:       make(map[chainhash.Hash]struct{}),
