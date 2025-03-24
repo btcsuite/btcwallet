@@ -5,6 +5,8 @@
 package wallet
 
 import (
+	"maps"
+
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -84,9 +86,7 @@ func (b *rescanBatch) merge(job *RescanJob) {
 	}
 	b.addrs = append(b.addrs, job.Addrs...)
 
-	for op, addr := range job.OutPoints {
-		b.outpoints[op] = addr
-	}
+	maps.Copy(b.outpoints, job.OutPoints)
 
 	if job.BlockStamp.Height < b.bs.Height {
 		b.bs = job.BlockStamp
