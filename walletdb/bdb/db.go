@@ -455,7 +455,7 @@ func fileExists(name string) bool {
 // openDB opens the database at the provided path.  walletdb.ErrDbDoesNotExist
 // is returned if the database doesn't exist and the create flag is not set.
 func openDB(dbPath string, noFreelistSync bool,
-	create bool, timeout time.Duration) (walletdb.DB, error) {
+	create bool, timeout time.Duration, readOnly bool) (walletdb.DB, error) {
 
 	if !create && !fileExists(dbPath) {
 		return nil, walletdb.ErrDbDoesNotExist
@@ -467,6 +467,7 @@ func openDB(dbPath string, noFreelistSync bool,
 		NoFreelistSync: noFreelistSync,
 		FreelistType:   bbolt.FreelistMapType,
 		Timeout:        timeout,
+		ReadOnly:       readOnly,
 	}
 
 	boltDB, err := bbolt.Open(dbPath, 0600, options)
