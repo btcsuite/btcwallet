@@ -1,17 +1,20 @@
 #!/bin/bash
 
-SUBMODULES=$(find . -mindepth 2 -name "go.mod" | cut -d'/' -f2)
+# Find all directories containing go.mod files, starting from depth 2
+SUBMODULES=$(find . -mindepth 2 -name "go.mod" -exec dirname {} \;)
 
-
-# Run 'go mod tidy' for root.
+# Run 'go mod tidy' for the root project
 go mod tidy
 
-# Run 'go mod tidy' for each module.
+# Run 'go mod tidy' for each submodule
 for submodule in $SUBMODULES
 do
-  pushd $submodule
+  # Navigate to the submodule directory
+  pushd "$submodule" || exit
 
+  # Run 'go mod tidy' in the submodule
   go mod tidy
 
-  popd
+  # Return to the previous directory
+  popd || exit
 done
