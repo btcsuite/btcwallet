@@ -250,15 +250,17 @@ out:
 		case batch := <-w.rescanBatch:
 			// Log the newly-started rescan.
 			numAddrs := len(batch.addrs)
-			noun := pickNoun(numAddrs, "address", "addresses")
-			log.Infof("Started rescan from block %v (height %d) for %d %s",
-				batch.bs.Hash, batch.bs.Height, numAddrs, noun)
+			numOps := len(batch.outpoints)
+
+			log.Infof("Started rescan from block %v (height %d) "+
+				"for %d addrs, %d outpoints", batch.bs.Hash,
+				batch.bs.Height, numAddrs, numOps)
 
 			err := chainClient.Rescan(&batch.bs.Hash, batch.addrs,
 				batch.outpoints)
 			if err != nil {
-				log.Errorf("Rescan for %d %s failed: %v", numAddrs,
-					noun, err)
+				log.Errorf("Rescan for %d addrs, %d outpoints "+
+					"failed: %v", numAddrs, numOps, err)
 			}
 			batch.done(err)
 		case <-quit:
