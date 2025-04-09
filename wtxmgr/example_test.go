@@ -6,7 +6,6 @@ package wtxmgr
 
 import (
 	"fmt"
-	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -44,13 +43,13 @@ var exampleBlock100 = makeBlockMeta(100)
 
 // This example demonstrates reporting the Store balance given an unmined and
 // mined transaction given 0, 1, and 6 block confirmations.
-func ExampleStore_Balance(t *testing.T) {
-	s, db, teardown, err := testStore(t)
-	defer teardown()
+func ExampleStore_Balance() {
+	s, db, cleanup, err := exampleStore()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	defer cleanup()
 
 	// Prints balances for 0 block confirmations, 1 confirmation, and 6
 	// confirmations.
@@ -115,13 +114,13 @@ func ExampleStore_Balance(t *testing.T) {
 	// 10 BTC, 10 BTC, 10 BTC
 }
 
-func ExampleStore_Rollback(t *testing.T) {
-	s, db, teardown, err := testStore(t)
-	defer teardown()
+func ExampleStore_Rollback() {
+	s, db, cleanup, err := exampleStore()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	defer cleanup()
 
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(namespaceKey)
@@ -158,14 +157,14 @@ func ExampleStore_Rollback(t *testing.T) {
 	// -1
 }
 
-func Example_basicUsage(t *testing.T) {
+func Example_basicUsage() {
 	// Open the database.
-	db, dbTeardown, err := testDB(t)
-	defer dbTeardown()
+	db, cleanup, err := exampleDB()
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
+	defer cleanup()
 
 	// Open a read-write transaction to operate on the database.
 	dbtx, err := db.BeginReadWriteTx()

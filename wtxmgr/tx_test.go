@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -50,12 +51,35 @@ var (
 	defaultDBTimeout = 10 * time.Second
 )
 
-func testDB(t *testing.T) (walletdb.DB, error) {
-	tmpDir := t.TempDir()
+// exampleDB creates a new database in a temporary directory.
+//
+// NOTE: This is used for golang example functions.
+func exampleDB() (walletdb.DB, func(), error) {
+	tmpDir, err := os.MkdirTemp("", "example_*")
+	if err != nil {
+		return nil, nil, err
+	}
+
 	db, err := walletdb.Create(
 		"bdb", filepath.Join(tmpDir, "db"), true, defaultDBTimeout,
+		false,
 	)
-	return db, err
+	if err != nil {
+		err = os.RemoveAll(tmpDir)
+
+		return nil, nil, err
+	}
+
+	return db, func() {
+		err := db.Close()
+		if err != nil {
+			panic(err)
+		}
+		err = os.RemoveAll(tmpDir)
+		if err != nil {
+			panic(err)
+		}
+	}, nil
 }
 
 var namespaceKey = []byte("txstore")
@@ -65,6 +89,7 @@ func testStore(t *testing.T) (*Store, walletdb.DB, error) {
 
 	db, err := walletdb.Create(
 		"bdb", filepath.Join(tmpDir, "db"), true, defaultDBTimeout,
+		false,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -85,6 +110,48 @@ func testStore(t *testing.T) (*Store, walletdb.DB, error) {
 	})
 
 	return s, db, err
+}
+
+// exampleStore creates a new store and database in a temporary directory.
+//
+// NOTE: This is used for golang example functions.
+func exampleStore() (*Store, walletdb.DB, func(), error) {
+	tmpDir, err := os.MkdirTemp("", "example_*")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	db, err := walletdb.Create(
+		"bdb", filepath.Join(tmpDir, "db"), true, defaultDBTimeout,
+		false,
+	)
+	if err != nil {
+		err = os.RemoveAll(tmpDir)
+
+		return nil, nil, nil, err
+	}
+
+	var s *Store
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(namespaceKey)
+		if err != nil {
+			return err
+		}
+		if err := Create(ns); err != nil {
+			return err
+		}
+		s, err = Open(ns, &chaincfg.TestNet3Params)
+		return err
+	})
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		return nil, nil, nil, err
+	}
+
+	return s, db, func() {
+		db.Close()
+		os.RemoveAll(tmpDir)
+	}, nil
 }
 
 func serializeTx(tx *btcutil.Tx) []byte {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/stretchr/testify/require"
 )
 
 // applyMigration is a helper function that allows us to assert the state of the
@@ -18,11 +19,14 @@ func applyMigration(t *testing.T,
 	t.Helper()
 
 	// We'll start by setting up our transaction store backed by a database.
-	store, db, teardown, err := testStore()
+	store, db, err := testStore(t)
 	if err != nil {
 		t.Fatalf("unable to create test store: %v", err)
 	}
-	defer teardown()
+	defer func() {
+		err := db.Close()
+		require.NoError(t, err)
+	}()
 
 	// First, we'll run the beforeMigration closure, which contains the
 	// database modifications/assertions needed before proceeding with the
