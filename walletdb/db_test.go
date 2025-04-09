@@ -34,6 +34,7 @@ func TestAddDuplicateDriver(t *testing.T) {
 		t.Errorf("no backends to test")
 		return
 	}
+
 	dbType := supportedDrivers[0]
 
 	// bogusCreateDB is a function which acts as a bogus create and open
@@ -62,7 +63,9 @@ func TestAddDuplicateDriver(t *testing.T) {
 	tempDir := t.TempDir()
 
 	dbPath := filepath.Join(tempDir, "db")
-	db, err := walletdb.Create(dbType, dbPath, true, defaultDBTimeout)
+	db, err := walletdb.Create(
+		dbType, dbPath, true, defaultDBTimeout, false,
+	)
 	if err != nil {
 		t.Errorf("failed to create database: %v", err)
 		return
