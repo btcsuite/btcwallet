@@ -21,7 +21,7 @@ func parseArgs(funcName string,
 
 	if len(args) != 4 {
 		return "", false, 0, false, fmt.Errorf("invalid arguments to %s.%s "+
-			"-- expected database path, no-freelist-sync "+
+			"-- expected database path, no-freelist-sync, "+
 			"timeout option and read-only flag",
 			dbType, funcName)
 	}
