@@ -251,7 +251,9 @@ func hexToBytes(origHex string) []byte {
 func emptyDB(t *testing.T) (tearDownFunc func(), db walletdb.DB) {
 	dirName := t.TempDir()
 	dbPath := filepath.Join(dirName, "mgrtest.db")
-	db, err := walletdb.Create("bdb", dbPath, true, defaultDBTimeout)
+	db, err := walletdb.Create(
+		"bdb", dbPath, true, defaultDBTimeout, false,
+	)
 	if err != nil {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)
@@ -269,7 +271,7 @@ func setupManager(t *testing.T) (tearDownFunc func(), db walletdb.DB, mgr *Manag
 	dirName := t.TempDir()
 
 	dbPath := filepath.Join(dirName, "mgrtest.db")
-	db, err := walletdb.Create("bdb", dbPath, true, defaultDBTimeout)
+	db, err := walletdb.Create("bdb", dbPath, true, defaultDBTimeout, false)
 	if err != nil {
 		_ = os.RemoveAll(dirName)
 		t.Fatalf("createDbNamespace: unexpected error: %v", err)
