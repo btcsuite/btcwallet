@@ -805,121 +805,214 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 	return putMinedBalance(ns, minedBalance)
 }
 
+// fetchCredits retrieves credits from the store based on the provided filters.
+// It iterates over both mined (unspent) and unmined credits.
+//
+// Parameters:
+//   - ns: The database bucket to read from.
+//   - includeLocked: If true, credits locked by LockOutput are included.
+//   - includeSpentByUnmined: If true, credits spent by unmined transactions
+//     are included.
+//   - populateFullDetails: If true, all fields of the Credit struct are
+//     populated. Otherwise, only OutPoint and PkScript are populated.
+func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
+	includeSpentByUnmined bool,
+	populateFullDetails bool) ([]Credit, error) {
+
+	var credits []Credit
+	now := s.clock.Now() // Cache current time for lock checks
+
+	// Iterate over mined unspent credits (bucketUnspent).
+	unspentBucket := ns.NestedReadBucket(bucketUnspent)
+	if unspentBucket != nil {
+		err := unspentBucket.ForEach(func(k, v []byte) error {
+			var op wire.OutPoint
+			err := readCanonicalOutPoint(k, &op)
+			if err != nil {
+				return err
+			}
+
+			// Check if locked, skip if necessary.
+			if !includeLocked {
+				_, _, isLocked := isLockedOutput(ns, op, now)
+				if isLocked {
+					return nil
+				}
+			}
+
+			// Check if spent by unmined, skip if necessary.
+			if !includeSpentByUnmined {
+				if existsRawUnminedInput(ns, k) != nil {
+					return nil
+				}
+			}
+
+			// Fetch the transaction record to get PkScript and
+			// potentially other details.
+			var block Block
+			err = readUnspentBlock(v, &block)
+			if err != nil {
+				return err
+			}
+
+			// TODO(jrick): reading the entire transaction should
+			// be avoidable. Creating the credit only requires the
+			// output amount and pkScript.
+			rec, err := fetchTxRecord(ns, &op.Hash, &block)
+			if err != nil {
+				// Wrap the error for context.
+				return fmt.Errorf("unable to retrieve tx %v "+
+					"for mined credit: %w", op.Hash, err)
+			}
+
+			txOut := rec.MsgTx.TxOut[op.Index]
+			cred := Credit{
+				OutPoint: op,
+				PkScript: txOut.PkScript,
+			}
+
+			// Populate full details if requested.
+			if populateFullDetails {
+				blockTime, err := fetchBlockTime(
+					ns, block.Height,
+				)
+				if err != nil {
+					// Wrap the error for context.
+					return fmt.Errorf("unable to fetch "+
+						"block time for height %d: %w",
+						block.Height, err)
+				}
+
+				cred.BlockMeta = BlockMeta{
+					Block: block,
+					Time:  blockTime,
+				}
+				cred.Amount = btcutil.Amount(txOut.Value)
+				cred.Received = rec.Received
+				cred.FromCoinBase = blockchain.IsCoinBaseTx(
+					&rec.MsgTx,
+				)
+			}
+
+			credits = append(credits, cred)
+			return nil
+		})
+		if err != nil {
+			// Check if it's already a storeError, otherwise wrap
+			// it.
+			if _, ok := err.(Error); ok {
+				return nil, err
+			}
+
+			str := "failed iterating unspent bucket"
+			return nil, storeError(ErrDatabase, str, err)
+		}
+	}
+
+	// Iterate over unmined credits (bucketUnminedCredits).
+	unminedCreditsBucket := ns.NestedReadBucket(bucketUnminedCredits)
+	if unminedCreditsBucket != nil {
+		err := unminedCreditsBucket.ForEach(func(k, v []byte) error {
+			var op wire.OutPoint
+			if err := readCanonicalOutPoint(k, &op); err != nil {
+				return err
+			}
+
+			// Check if locked, skip if necessary.
+			if !includeLocked {
+				_, _, isLocked := isLockedOutput(ns, op, now)
+				if isLocked {
+					return nil
+				}
+			}
+
+			// Check if spent by unmined, skip if necessary.
+			if !includeSpentByUnmined {
+				if existsRawUnminedInput(ns, k) != nil {
+					return nil
+				}
+			}
+
+			// Fetch the transaction record to get PkScript and
+			// potentially other details.
+			recVal := existsRawUnmined(ns, op.Hash[:])
+
+			// existsRawUnmined should always return a value for a
+			// key in bucketUnminedCredits, but check defensively.
+			if recVal == nil {
+				log.Warnf("Unmined credit %v points to "+
+					"non-existent unmined tx record %v", op,
+					op.Hash)
+
+				// Skip this credit as its tx record is missing.
+				return nil
+			}
+
+			var rec TxRecord
+			err := readRawTxRecord(&op.Hash, recVal, &rec)
+			if err != nil {
+				// Wrap the error for context.
+				return fmt.Errorf("unable to retrieve raw tx "+
+					"%v for unmined credit: %w", op.Hash,
+					err)
+			}
+
+			txOut := rec.MsgTx.TxOut[op.Index]
+			cred := Credit{
+				OutPoint: op,
+				PkScript: txOut.PkScript,
+			}
+
+			// Populate full details if requested.
+			if populateFullDetails {
+				cred.BlockMeta = BlockMeta{
+					// Unmined height.
+					Block: Block{Height: -1},
+				}
+				cred.Amount = btcutil.Amount(txOut.Value)
+				cred.Received = rec.Received
+				cred.FromCoinBase = blockchain.IsCoinBaseTx(
+					&rec.MsgTx,
+				)
+			}
+
+			credits = append(credits, cred)
+			return nil
+		})
+		if err != nil {
+			// Check if it's already a storeError, otherwise wrap
+			// it.
+			if _, ok := err.(Error); ok {
+				return nil, err
+			}
+			str := "failed iterating unmined credits bucket"
+			return nil, storeError(ErrDatabase, str, err)
+		}
+	}
+
+	return credits, nil
+}
+
+// OutputsToWatch returns a list of outputs to monitor during the wallet's
+// startup. The returned items are similar to UnspentOutputs, exccept the
+// locked outputs and unmined credits are also returned here. In addition, we
+// only set the field `OutPoint` and `PkScript` for the `Credit`, as these are
+// the only fields used during the rescan.
+func (s *Store) OutputsToWatch(ns walletdb.ReadBucket) ([]Credit, error) {
+	// OutputsToWatch needs all known outputs (mined and unmined),
+	// including locked ones and those spent by other unmined txs,
+	// but only requires minimal details (OutPoint, PkScript).
+	return s.fetchCredits(ns, true, true, false)
+}
+
 // UnspentOutputs returns all unspent received transaction outputs.
 // The order is undefined.
 func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error) {
-	var unspent []Credit
-
-	var op wire.OutPoint
-	var block Block
-	err := ns.NestedReadBucket(bucketUnspent).ForEach(func(k, v []byte) error {
-		err := readCanonicalOutPoint(k, &op)
-		if err != nil {
-			return err
-		}
-
-		// Skip the output if it's locked.
-		_, _, isLocked := isLockedOutput(ns, op, s.clock.Now())
-		if isLocked {
-			return nil
-		}
-
-		if existsRawUnminedInput(ns, k) != nil {
-			// Output is spent by an unmined transaction.
-			// Skip this k/v pair.
-			return nil
-		}
-
-		err = readUnspentBlock(v, &block)
-		if err != nil {
-			return err
-		}
-
-		blockTime, err := fetchBlockTime(ns, block.Height)
-		if err != nil {
-			return err
-		}
-		// TODO(jrick): reading the entire transaction should
-		// be avoidable.  Creating the credit only requires the
-		// output amount and pkScript.
-		rec, err := fetchTxRecord(ns, &op.Hash, &block)
-		if err != nil {
-			return fmt.Errorf("unable to retrieve transaction %v: "+
-				"%w", op.Hash, err)
-		}
-		txOut := rec.MsgTx.TxOut[op.Index]
-		cred := Credit{
-			OutPoint: op,
-			BlockMeta: BlockMeta{
-				Block: block,
-				Time:  blockTime,
-			},
-			Amount:       btcutil.Amount(txOut.Value),
-			PkScript:     txOut.PkScript,
-			Received:     rec.Received,
-			FromCoinBase: blockchain.IsCoinBaseTx(&rec.MsgTx),
-		}
-		unspent = append(unspent, cred)
-		return nil
-	})
-	if err != nil {
-		if _, ok := err.(Error); ok {
-			return nil, err
-		}
-		str := "failed iterating unspent bucket"
-		return nil, storeError(ErrDatabase, str, err)
-	}
-
-	err = ns.NestedReadBucket(bucketUnminedCredits).ForEach(func(k, v []byte) error {
-		if err := readCanonicalOutPoint(k, &op); err != nil {
-			return err
-		}
-
-		// Skip the output if it's locked.
-		_, _, isLocked := isLockedOutput(ns, op, s.clock.Now())
-		if isLocked {
-			return nil
-		}
-
-		if existsRawUnminedInput(ns, k) != nil {
-			// Output is spent by an unmined transaction.
-			// Skip to next unmined credit.
-			return nil
-		}
-
-		// TODO(jrick): Reading/parsing the entire transaction record
-		// just for the output amount and script can be avoided.
-		recVal := existsRawUnmined(ns, op.Hash[:])
-		var rec TxRecord
-		err = readRawTxRecord(&op.Hash, recVal, &rec)
-		if err != nil {
-			return fmt.Errorf("unable to retrieve raw transaction "+
-				"%v: %w", op.Hash, err)
-		}
-
-		txOut := rec.MsgTx.TxOut[op.Index]
-		cred := Credit{
-			OutPoint: op,
-			BlockMeta: BlockMeta{
-				Block: Block{Height: -1},
-			},
-			Amount:       btcutil.Amount(txOut.Value),
-			PkScript:     txOut.PkScript,
-			Received:     rec.Received,
-			FromCoinBase: blockchain.IsCoinBaseTx(&rec.MsgTx),
-		}
-		unspent = append(unspent, cred)
-		return nil
-	})
-	if err != nil {
-		if _, ok := err.(Error); ok {
-			return nil, err
-		}
-		str := "failed iterating unmined credits bucket"
-		return nil, storeError(ErrDatabase, str, err)
-	}
-
-	return unspent, nil
+	// UnspentOutputs needs outputs that are actually spendable:
+	// - Not locked.
+	// - Not spent by an unmined transaction.
+	// It requires full credit details.
+	return s.fetchCredits(ns, false, false, true)
 }
 
 // Balance returns the spendable wallet balance (total value of all unspent
