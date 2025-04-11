@@ -962,6 +962,9 @@ func (c *BitcoindClient) rescan(start chainhash.Hash) error {
 	}
 	headers.PushBack(previousHeader)
 
+	log.Debugf("Rescanning from block height %v to %v",
+		previousHeader.Height+1, bestBlock.Height)
+
 	// Cycle through all of the blocks known to bitcoind, being mindful of
 	// reorgs.
 	for i := previousHeader.Height + 1; i <= bestBlock.Height; i++ {
