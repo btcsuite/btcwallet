@@ -86,4 +86,9 @@ var (
 		Code:    btcjson.ErrRPCInvalidParameter,
 		Message: "Account name is reserved by RPC server",
 	}
+
+	ErrUtxoSpent = btcjson.RPCError{
+		Code:    btcjson.ErrRPCInvalidParameter,
+		Message: "utxo has been spent",
+	}
 )
