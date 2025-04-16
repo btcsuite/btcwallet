@@ -546,7 +546,7 @@ func TestPrunedBlockDispatcherQueryFailSameBlock(t *testing.T) {
 		// package. We want to fail the request therefore we use 1.
 		// Moreover the default timeout of a single request is 2 seconds
 		// and currently not configurable so we have to make sure when
-		// asserting not not timeout before.
+		// asserting not timeout before.
 		blockChan, errChan, cancelChan := h.query(
 			h.hashes, query.NumRetries(1),
 		)

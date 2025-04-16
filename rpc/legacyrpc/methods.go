@@ -472,7 +472,7 @@ func getBlockCount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	return blk.Height, nil
 }
 
-// getInfo handles a getinfo request by returning the a structure containing
+// getInfo handles a getinfo request by returning the structure containing
 // information about the current state of btcwallet.
 // exist.
 func getInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {

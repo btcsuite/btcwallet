@@ -2160,7 +2160,7 @@ func deriveTestAccountKey(t *testing.T) *hdkeychain.ExtendedKey {
 	return accountKey
 }
 
-// TestManagerIncorrectVersion ensures that that the manager cannot be accessed
+// TestManagerIncorrectVersion ensures that the manager cannot be accessed
 // if its version does not match the latest version.
 func TestManagerHigherVersion(t *testing.T) {
 	t.Parallel()

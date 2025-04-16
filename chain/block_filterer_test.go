@@ -266,7 +266,7 @@ var Block100000 = wire.MsgBlock{
 // finding outpoints that spend from a "watched outpoint", even if they do not
 // send to an address controlled by the wallet.
 func TestBlockFiltererOneInOneOut(t *testing.T) {
-	// Watch for spend from prev in in first and last tx, both of which are
+	// Watch for spend from prev in first and last tx, both of which are
 	// single input/single output.
 	firstTx := Block100000.Transactions[1]
 	lastTx := Block100000.Transactions[3]

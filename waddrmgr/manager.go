@@ -1009,7 +1009,7 @@ func (m *Manager) ChangePassphrase(ns walletdb.ReadWriteBucket, oldPassphrase,
 			return managerError(ErrCrypto, str, err)
 		}
 
-		// Save the new keys and params to the the db in a single
+		// Save the new keys and params to the db in a single
 		// transaction.
 		err = putCryptoKeys(ns, encryptedPub, nil, nil)
 		if err != nil {
@@ -1069,7 +1069,7 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 	}
 
 	// This section clears and removes the encrypted private key material
-	// that is ordinarily used to unlock the manager.  Since the the manager
+	// that is ordinarily used to unlock the manager.  Since the manager
 	// is being converted to watching-only, the encrypted private key
 	// material is no longer needed.
 

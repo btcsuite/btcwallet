@@ -337,7 +337,7 @@ func SupportedDrivers() []string {
 // are specific to the database type driver.  See the documentation for the
 // database driver for further details.
 //
-// ErrDbUnknownType will be returned if the the database type is not registered.
+// ErrDbUnknownType will be returned if the database type is not registered.
 func Create(dbType string, args ...interface{}) (DB, error) {
 	drv, exists := drivers[dbType]
 	if !exists {
@@ -351,7 +351,7 @@ func Create(dbType string, args ...interface{}) (DB, error) {
 // specific to the database type driver.  See the documentation for the database
 // driver for further details.
 //
-// ErrDbUnknownType will be returned if the the database type is not registered.
+// ErrDbUnknownType will be returned if the database type is not registered.
 func Open(dbType string, args ...interface{}) (DB, error) {
 	drv, exists := drivers[dbType]
 	if !exists {
