@@ -29,7 +29,7 @@ different languages:
 - [Python](#python)
 
 Unless otherwise stated under the language example, it is assumed that
-gRPC is already already installed.  The gRPC installation procedure
+gRPC is already installed.  The gRPC installation procedure
 can vary greatly depending on the operating system being used and
 whether a gRPC source install is required.  Follow the [gRPC install
 instructions](https://github.com/grpc/grpc/blob/master/INSTALL) if
