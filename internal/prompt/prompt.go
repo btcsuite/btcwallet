@@ -18,6 +18,8 @@ import (
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/internal/legacy/keystore"
 	"golang.org/x/term"
+
+	"github.com/tyler-smith/go-bip39"
 )
 
 // ProvideSeed is used to prompt for the wallet seed which maybe required during
@@ -267,29 +269,36 @@ func PublicPass(reader *bufio.Reader, privPass []byte,
 // enters a valid response.
 func Seed(reader *bufio.Reader) ([]byte, error) {
 	// Ascertain the wallet generation seed.
-	useUserSeed, err := promptListBool(reader, "Do you have an "+
-		"existing wallet seed you want to use?", "no")
+	useUserSeed, err := promptListBool(reader, "Do you have an existing wallet seed or mnemonic you want to use?", "no")
 	if err != nil {
 		return nil, err
 	}
+
 	if !useUserSeed {
 		seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 		if err != nil {
 			return nil, err
 		}
 
-		fmt.Println("Your wallet generation seed is:")
-		fmt.Printf("%x\n", seed)
-		fmt.Println("IMPORTANT: Keep the seed in a safe place as you\n" +
-			"will NOT be able to restore your wallet without it.")
-		fmt.Println("Please keep in mind that anyone who has access\n" +
-			"to the seed can also restore your wallet thereby\n" +
-			"giving them access to all your funds, so it is\n" +
-			"imperative that you keep it in a secure location.")
+		// Generate mnemonic from seed
+		mnemonic, err := bip39.NewMnemonic(seed)
+		if err != nil {
+			return nil, err
+		}
+
+		fmt.Println("Your wallet generation seed (hex) is:")
+		fmt.Printf("\n%x\n", seed)
+
+		fmt.Println("\nYour wallet mnemonic phrase (VERY IMPORTANT):")
+		fmt.Println("\n" + mnemonic)
+
+		fmt.Println("\nIMPORTANT: Keep the seed *and* mnemonic in a safe place as you\n" +
+			"will NOT be able to restore your wallet without them.")
+		fmt.Println("Anyone with access to the seed or mnemonic can restore your wallet\n" +
+			"and access all your funds, so it is critical to store them securely.")
 
 		for {
-			fmt.Print(`Once you have stored the seed in a safe ` +
-				`and secure location, enter "OK" to continue: `)
+			fmt.Print(`Once you have stored the seed and mnemonic in a safe and secure location, enter "OK" to continue: `)
 			confirmSeed, err := reader.ReadString('\n')
 			if err != nil {
 				return nil, err
@@ -305,24 +314,31 @@ func Seed(reader *bufio.Reader) ([]byte, error) {
 	}
 
 	for {
-		fmt.Print("Enter existing wallet seed: ")
-		seedStr, err := reader.ReadString('\n')
+		fmt.Print("Enter your existing wallet seed (hex) or mnemonic (words): ")
+		input, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, err
 		}
-		seedStr = strings.TrimSpace(strings.ToLower(seedStr))
+		input = strings.TrimSpace(input)
 
-		seed, err := hex.DecodeString(seedStr)
-		if err != nil || len(seed) < hdkeychain.MinSeedBytes ||
-			len(seed) > hdkeychain.MaxSeedBytes {
-
-			fmt.Printf("Invalid seed specified.  Must be a "+
-				"hexadecimal value that is at least %d bits and "+
-				"at most %d bits\n", hdkeychain.MinSeedBytes*8,
-				hdkeychain.MaxSeedBytes*8)
-			continue
+		// Try to decode as hex seed first
+		seed, err := hex.DecodeString(input)
+		if err == nil && len(seed) >= hdkeychain.MinSeedBytes && len(seed) <= hdkeychain.MaxSeedBytes {
+			return seed, nil
 		}
 
-		return seed, nil
+		// If hex decoding fails, try to treat it as mnemonic
+		words := strings.Fields(input)
+		if len(words) >= 12 { // minimal valid mnemonic
+			if bip39.IsMnemonicValid(input) {
+				seed = bip39.NewSeed(input, "")
+				return seed, nil
+			}
+		}
+
+		fmt.Printf("Invalid input. Must be either:\n"+
+			"- a hexadecimal seed (%d to %d bytes)\n"+
+			"- or a valid BIP39 mnemonic (12, 18, or 24 words)\n",
+			hdkeychain.MinSeedBytes, hdkeychain.MaxSeedBytes)
 	}
 }
