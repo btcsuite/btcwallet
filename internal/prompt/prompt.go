@@ -275,30 +275,37 @@ func Seed(reader *bufio.Reader) ([]byte, error) {
 	}
 
 	if !useUserSeed {
-		seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+		// STEP 1: Generate proper BIP39 entropy (256 bits = 24 words)
+		entropy, err := bip39.NewEntropy(256)
 		if err != nil {
 			return nil, err
 		}
 
-		// Generate mnemonic from seed
-		mnemonic, err := bip39.NewMnemonic(seed)
+		// STEP 2: Generate mnemonic from entropy
+		mnemonic, err := bip39.NewMnemonic(entropy)
 		if err != nil {
 			return nil, err
 		}
 
-		fmt.Println("Your wallet generation seed (hex) is:")
-		fmt.Printf("\n%x\n", seed)
+		// STEP 3: Generate seed from mnemonic
+		seed := bip39.NewSeed(mnemonic, "")
 
-		fmt.Println("\nYour wallet mnemonic phrase (VERY IMPORTANT):")
+		fmt.Println("Your wallet mnemonic phrase (VERY IMPORTANT):")
 		fmt.Println("\n" + mnemonic)
 
-		fmt.Println("\nIMPORTANT: Keep the seed *and* mnemonic in a safe place as you\n" +
-			"will NOT be able to restore your wallet without them.")
-		fmt.Println("Anyone with access to the seed or mnemonic can restore your wallet\n" +
-			"and access all your funds, so it is critical to store them securely.")
+		fmt.Println("\nOriginal entropy used (hex):")
+		fmt.Printf("\n%x\n", entropy)
+
+		fmt.Println("\nDerived seed (hex) from mnemonic (for wallet generation):")
+		fmt.Printf("\n%x\n", seed)
+
+		fmt.Println("\nIMPORTANT: Keep the mnemonic and entropy in a safe place as you\n" +
+			"you will NOT be able to restore your wallet without them.")
+		fmt.Println("Anyone with access to the mnemonic or seed can restore your wallet\n" +
+			"and access all your funds, so it is critical to store it securely.")
 
 		for {
-			fmt.Print(`Once you have stored the seed and mnemonic in a safe and secure location, enter "OK" to continue: `)
+			fmt.Print(`Once you have stored the mnemonic and seed securely, enter "OK" to continue: `)
 			confirmSeed, err := reader.ReadString('\n')
 			if err != nil {
 				return nil, err
@@ -321,17 +328,17 @@ func Seed(reader *bufio.Reader) ([]byte, error) {
 		}
 		input = strings.TrimSpace(input)
 
-		// Try to decode as hex seed first
+		// Try hex decode first
 		seed, err := hex.DecodeString(input)
 		if err == nil && len(seed) >= hdkeychain.MinSeedBytes && len(seed) <= hdkeychain.MaxSeedBytes {
 			return seed, nil
 		}
 
-		// If hex decoding fails, try to treat it as mnemonic
+		// Try BIP39 mnemonic
 		words := strings.Fields(input)
-		if len(words) >= 12 { // minimal valid mnemonic
+		if len(words) >= 12 {
 			if bip39.IsMnemonicValid(input) {
-				seed = bip39.NewSeed(input, "")
+				seed := bip39.NewSeed(input, "")
 				return seed, nil
 			}
 		}
