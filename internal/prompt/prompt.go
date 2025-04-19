@@ -293,7 +293,7 @@ func Seed(reader *bufio.Reader) ([]byte, error) {
 		fmt.Println("Your wallet mnemonic phrase (VERY IMPORTANT):")
 		fmt.Println("\n" + mnemonic)
 
-		fmt.Println("\nOriginal entropy used (hex):")
+		fmt.Println("\nOriginal entropy used:")
 		fmt.Printf("\n%x\n", entropy)
 
 		fmt.Println("\nDerived seed (hex) from mnemonic (for wallet generation):")
