@@ -1215,7 +1215,7 @@ func putAddrAccountIndex(ns walletdb.ReadWriteBucket, scope *KeyScope,
 	// Write account keyed by address hash
 	err = bucket.Put(addrHash, uint32ToBytes(account))
 	if err != nil {
-		return nil
+		return err
 	}
 
 	// TODO(yy): We already saved the addrHash and account above, so this
