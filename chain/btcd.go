@@ -639,3 +639,11 @@ func (c *RPCClient) SendRawTransaction(tx *wire.MsgTx,
 
 	return txid, nil
 }
+
+// SubmitPackage is currently unimplemented for btcd. The method is added to
+// satisfy the chain.Interface interface.
+func (c *RPCClient) SubmitPackage(_ []*wire.MsgTx, _ *wire.MsgTx, _ *float64) (
+	*btcjson.SubmitPackageResult, error) {
+
+	return nil, ErrUnimplemented
+}

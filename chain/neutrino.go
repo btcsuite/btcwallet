@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -102,7 +103,7 @@ func (s *NeutrinoClient) BackEnd() string {
 
 // Start replicates the RPC client's Start method.
 func (s *NeutrinoClient) Start() error {
-	if err := s.CS.Start(); err != nil {
+	if err := s.CS.Start(context.TODO()); err != nil {
 		return fmt.Errorf("error starting chain service: %w", err)
 	}
 
@@ -843,4 +844,12 @@ func (s *NeutrinoClient) MapRPCErr(rpcErr error) error {
 
 	// If not matched, return the original error wrapped.
 	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
+}
+
+// SubmitPackage is currently unimplemented for neutrino. The method is added to
+// satisfy the chain.Interface interface.
+func (s *NeutrinoClient) SubmitPackage(_ []*wire.MsgTx, _ *wire.MsgTx,
+	_ *float64) (*btcjson.SubmitPackageResult, error) {
+
+	return nil, ErrUnimplemented
 }

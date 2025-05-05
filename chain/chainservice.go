@@ -1,6 +1,8 @@
 package chain
 
 import (
+	"context"
+
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -14,7 +16,7 @@ import (
 // NeutrinoChainService is an interface that encapsulates all the public
 // methods of a *neutrino.ChainService
 type NeutrinoChainService interface {
-	Start() error
+	Start(context.Context) error
 	GetBlock(chainhash.Hash, ...neutrino.QueryOption) (*btcutil.Block, error)
 	GetBlockHeight(*chainhash.Hash) (int32, error)
 	BestBlock() (*headerfs.BlockStamp, error)
