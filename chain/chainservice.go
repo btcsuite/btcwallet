@@ -16,7 +16,7 @@ import (
 // NeutrinoChainService is an interface that encapsulates all the public
 // methods of a *neutrino.ChainService
 type NeutrinoChainService interface {
-	Start(ctx context.Context) error
+	Start(context.Context) error
 	GetBlock(chainhash.Hash, ...neutrino.QueryOption) (*btcutil.Block, error)
 	GetBlockHeight(*chainhash.Hash) (int32, error)
 	BestBlock() (*headerfs.BlockStamp, error)
