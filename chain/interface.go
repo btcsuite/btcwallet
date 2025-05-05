@@ -49,6 +49,22 @@ type Interface interface {
 	Notifications() <-chan interface{}
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
+
+	// SubmitPackage broadcasts a parents+child package atomically.
+	//
+	// `parents` must contain at least one transaction. The returned slice
+	// holds the txids of every transaction that entered the mempool.
+	//
+	// `maxFeeRateBTCPerVByte` caps the effective feerate the node will
+	// accept for the entire package, expressed in BTC per virtual byte.
+	// Pass nil to leave the limit unset.
+	//
+	// If the active backend cannot relay packages, ErrUnimplemented is
+	// returned.
+	SubmitPackage(parents []*wire.MsgTx, child *wire.MsgTx,
+		maxFeeRateBTCPerVByte *float64) (*btcjson.SubmitPackageResult,
+		error)
+
 	MapRPCErr(err error) error
 }
 

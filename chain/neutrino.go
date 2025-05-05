@@ -844,3 +844,11 @@ func (s *NeutrinoClient) MapRPCErr(rpcErr error) error {
 	// If not matched, return the original error wrapped.
 	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
 }
+
+// SubmitPackage is currently unimplemented for neutrino. The method is added to
+// satisfy the chain.Interface interface.
+func (s *NeutrinoClient) SubmitPackage(_ []*wire.MsgTx, _ *wire.MsgTx,
+	_ *float64) (*btcjson.SubmitPackageResult, error) {
+
+	return nil, ErrUnimplemented
+}
