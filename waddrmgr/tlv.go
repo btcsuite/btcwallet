@@ -52,7 +52,7 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 
 	if len(s.Leaves) > 0 {
 		tlvRecords = append(tlvRecords, tlv.MakeDynamicRecord(
-			typeTapscriptLeaves, &s.Leaves, func() uint64 {
+			typeTapscriptLeaves, &s.Leaves, func() (uint64, error) {
 				return recordSize(leavesEncoder, &s.Leaves)
 			}, leavesEncoder, leavesDecoder,
 		))
@@ -109,7 +109,7 @@ func tlvDecodeTaprootTaprootScript(tlvData []byte) (*Tapscript, error) {
 			typeTapscriptControlBlock, &controlBlockBytes,
 		),
 		tlv.MakeDynamicRecord(
-			typeTapscriptLeaves, &s.Leaves, func() uint64 {
+			typeTapscriptLeaves, &s.Leaves, func() (uint64, error) {
 				return recordSize(leavesEncoder, &s.Leaves)
 			}, leavesEncoder, leavesDecoder,
 		),
@@ -283,7 +283,7 @@ func leavesDecoder(r io.Reader, val interface{}, buf *[8]byte, l uint64) error {
 
 // recordSize returns the amount of bytes this TLV record will occupy when
 // encoded.
-func recordSize(encoder tlv.Encoder, v interface{}) uint64 {
+func recordSize(encoder tlv.Encoder, v interface{}) (uint64, error) {
 	var (
 		b   bytes.Buffer
 		buf [8]byte
@@ -293,10 +293,10 @@ func recordSize(encoder tlv.Encoder, v interface{}) uint64 {
 	// file is checked into, so we'll simplify things and simply encode it
 	// ourselves then report the total amount of bytes used.
 	if err := encoder(&b, v, &buf); err != nil {
-		// This should never error out, but we log it just in case it
+		// This should never error out, but we return it just in case it
 		// does.
-		log.Errorf("encoding the record failed: %v", err)
+		return 0, fmt.Errorf("failed to encode record: %w", err)
 	}
 
-	return uint64(len(b.Bytes()))
+	return uint64(len(b.Bytes())), nil
 }

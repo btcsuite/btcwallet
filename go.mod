@@ -38,19 +38,22 @@ require (
 	github.com/decred/dcrd/lru v1.1.2 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
-	github.com/kr/pretty v0.3.0 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
+	github.com/lightningnetwork/lnd/fn/v2 v2.0.2 // indirect
 	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	go.etcd.io/bbolt v1.3.11 // indirect
+	golang.org/x/exp v0.0.0-20231226003508-02704c960a9b // indirect
 	golang.org/x/sys v0.19.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20231030173426-d783a09b4405 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/lightningnetwork/lnd/tlv => github.com/ellemouton/lnd/tlv v0.0.0-20250507085853-2c656b4cabf1
 
 go 1.22
