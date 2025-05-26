@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -127,6 +128,84 @@ func TestFetchOutpointInfo(t *testing.T) {
 	require.Equal(t, utxOut.Value, out.Value)
 	require.Equal(t, utxOut.PkScript, tx.TxOut[prevOut.Index].PkScript)
 	require.Equal(t, int64(0-testBlockHeight), confirmations)
+}
+
+// TestFetchOutpointInfoErr checks when the wallet cannot find an output, a
+// proper error is returned.
+func TestFetchOutpointInfoErr(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create an address we can use to send some coins to.
+	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+	p2shAddr, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// Create a tx that has two outputs - output1 belongs to the wallet,
+	// output2 is external.
+	output1 := wire.NewTxOut(100000, p2shAddr)
+	output2 := wire.NewTxOut(100000, p2shAddr)
+	tx := &wire.MsgTx{
+		TxIn: []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{
+			output1,
+			output2,
+		},
+	}
+
+	// Add the tx and its first output as the credit.
+	addTxAndCredit(t, w, tx, 0)
+
+	testCases := []struct {
+		name    string
+		prevOut *wire.OutPoint
+
+		// TODO(yy): refator `FetchOutpointInfo` to return wrapped
+		// errors.
+		errExpected string
+	}{
+		{
+			name: "no tx details",
+			prevOut: &wire.OutPoint{
+				Hash:  chainhash.Hash{1, 2, 3},
+				Index: 0,
+			},
+			errExpected: "does not belong to the wallet",
+		},
+		{
+			name: "invalid output index",
+			prevOut: &wire.OutPoint{
+				Hash:  tx.TxHash(),
+				Index: 1000,
+			},
+			errExpected: "invalid output index",
+		},
+		{
+			name: "no credit found",
+			prevOut: &wire.OutPoint{
+				Hash:  tx.TxHash(),
+				Index: 1,
+			},
+			errExpected: "does not belong to the wallet",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Look up the UTXO for the outpoint now and compare it
+			// to the expected error.
+			tx, out, conf, err := w.FetchOutpointInfo(tc.prevOut)
+			require.ErrorContains(t, err, tc.errExpected)
+			require.Nil(t, tx)
+			require.Nil(t, out)
+			require.Zero(t, conf)
+		})
+	}
 }
 
 // TestFetchDerivationInfo checks that the wallet can gather the derivation

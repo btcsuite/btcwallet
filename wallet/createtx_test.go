@@ -213,6 +213,47 @@ func addUtxo(t *testing.T, w *Wallet, incomingTx *wire.MsgTx) {
 	}
 }
 
+// addTxAndCredit adds the given transaction to the wallet's database marked as
+// a confirmed UTXO specified by the creditIndex.
+func addTxAndCredit(t *testing.T, w *Wallet, tx *wire.MsgTx,
+	creditIndex uint32) {
+
+	var b bytes.Buffer
+	require.NoError(t, tx.Serialize(&b), "unable to serialize tx")
+
+	txBytes := b.Bytes()
+
+	rec, err := wtxmgr.NewTxRecord(txBytes, time.Now())
+	require.NoError(t, err)
+
+	// The block meta will be inserted to tell the wallet this is a
+	// confirmed transaction.
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   *testBlockHash,
+			Height: testBlockHeight,
+		},
+		Time: time.Unix(1387737310, 0),
+	}
+
+	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+		ns := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+		err = w.TxStore.InsertTx(ns, rec, block)
+		if err != nil {
+			return err
+		}
+
+		// Add the specified output as credit.
+		err = w.TxStore.AddCredit(ns, rec, block, creditIndex, false)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	require.NoError(t, err, "failed inserting tx")
+}
+
 // TestInputYield verifies the functioning of the inputYieldsPositively.
 func TestInputYield(t *testing.T) {
 	t.Parallel()
