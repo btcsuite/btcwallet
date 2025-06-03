@@ -243,8 +243,8 @@ func (b *bitcoindZMQEvents) LookupInputSpend(
 func (b *bitcoindZMQEvents) blockEventHandler() {
 	defer b.wg.Done()
 
-	log.Info("Started listening for bitcoind block notifications via ZMQ "+
-		"on", b.blockConn.RemoteAddr())
+	log.Infof("Started listening for bitcoind block notifications via ZMQ "+
+		"on %s", b.blockConn.RemoteAddr())
 
 	// Set up the buffers we expect our messages to consume. ZMQ
 	// messages from bitcoind include three parts: the command, the
@@ -340,8 +340,8 @@ func (b *bitcoindZMQEvents) blockEventHandler() {
 func (b *bitcoindZMQEvents) txEventHandler() {
 	defer b.wg.Done()
 
-	log.Info("Started listening for bitcoind transaction notifications "+
-		"via ZMQ on", b.txConn.RemoteAddr())
+	log.Infof("Started listening for bitcoind transaction notifications "+
+		"via ZMQ on %s", b.txConn.RemoteAddr())
 
 	// Set up the buffers we expect our messages to consume. ZMQ
 	// messages from bitcoind include three parts: the command, the
