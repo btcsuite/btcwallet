@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -154,6 +155,11 @@ func (s *NeutrinoClient) WaitForShutdown() {
 	s.wg.Wait()
 }
 
+// GetPeerInfo returns peer information. Currently not implemented.
+func (s *NeutrinoClient) GetPeerInfo() ([]btcjson.GetPeerInfoResult, error) {
+	return nil, ErrUnimplemented
+}
+
 // GetBlock replicates the RPC client's GetBlock command.
 func (s *NeutrinoClient) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
 	// TODO(roasbeef): add a block cache?
@@ -182,6 +188,12 @@ func (s *NeutrinoClient) GetBestBlock() (*chainhash.Hash, int32, error) {
 	}
 
 	return &chainTip.Hash, chainTip.Height, nil
+}
+
+// GetBlockChainInfo returns blockchain info. Currently not implemented.
+func (s *NeutrinoClient) GetBlockChainInfo() (*btcjson.GetBlockChainInfoResult,
+	error) {
+	return nil, ErrUnimplemented
 }
 
 // BlockStamp returns the latest block notified by the client, or an error
@@ -224,6 +236,12 @@ func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) 
 	}
 	hash := tx.TxHash()
 	return &hash, nil
+}
+
+// RawRequest performs a raw RPC request. Currently not implemented.
+func (s *NeutrinoClient) RawRequest(_ string,
+	_ []json.RawMessage) (json.RawMessage, error) {
+	return nil, ErrUnimplemented
 }
 
 // TestMempoolAcceptCmd returns result of mempool acceptance tests indicating

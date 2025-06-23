@@ -2469,7 +2469,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 				return nil, errors.New("no chain server client")
 			}
 			switch client := chainClient.(type) {
-			case *chain.RPCClient:
+			case *chain.BtcdClient:
 				startHeader, err := client.GetBlockHeaderVerbose(
 					startBlock.hash,
 				)
@@ -2500,7 +2500,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 				return nil, errors.New("no chain server client")
 			}
 			switch client := chainClient.(type) {
-			case *chain.RPCClient:
+			case *chain.BtcdClient:
 				endHeader, err := client.GetBlockHeaderVerbose(
 					endBlock.hash,
 				)
