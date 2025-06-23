@@ -5,6 +5,10 @@
 package chain
 
 import (
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/peer"
+	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino/query"
 )
@@ -31,6 +35,10 @@ func DisableLog() {
 func UseLogger(logger btclog.Logger) {
 	log = logger
 	query.UseLogger(logger)
+	peer.UseLogger(logger)
+	blockchain.UseLogger(logger)
+	txscript.UseLogger(logger)
+	rpcclient.UseLogger(logger)
 }
 
 // LogClosure is used to provide a closure over expensive logging operations so
