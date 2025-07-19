@@ -333,7 +333,7 @@ func (b *bitcoindZMQEvents) blockEventHandler() {
 	}
 }
 
-// txEventHandler reads raw blocks events from the ZMQ block socket and forwards
+// txEventHandler reads raw transaction events from the ZMQ transaction socket and forwards
 // them along to the current rescan clients.
 //
 // NOTE: This must be run as a goroutine.
