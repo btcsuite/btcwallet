@@ -53,4 +53,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
+// TODO(bhandras): remove this replace once the upstream PR is merged
+replace github.com/btcsuite/btcd => github.com/bhandras/btcd v0.22.0-beta.0.20250507171227-f18160c86e92
+
 go 1.22
