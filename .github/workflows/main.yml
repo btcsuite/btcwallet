@@ -23,8 +23,9 @@ env:
   GO111MODULE: on
 
   GO_VERSION: 1.24.0
-  BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
+  BITCOIND_IMAGE_TAG: '29'
+  BITCOIND_PATH_VERSION: '29.0'
 
 jobs:
   ########################
@@ -72,9 +73,9 @@ jobs:
     steps:
       - name: extract bitcoind from docker image
         run: |-
-          docker pull ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }}
-          CONTAINER_ID=$(docker create ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }})
-          sudo docker cp $CONTAINER_ID:/opt/bitcoin-${{ env.BITCOIND_VERSION }}/bin/bitcoind /usr/local/bin/bitcoind
+          docker pull ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_IMAGE_TAG }}
+          CONTAINER_ID=$(docker create ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_IMAGE_TAG }})
+          sudo docker cp $CONTAINER_ID:/opt/bitcoin-${{ env.BITCOIND_PATH_VERSION }}/bin/bitcoind /usr/local/bin/bitcoind
           docker rm $CONTAINER_ID
 
       - name: git checkout
