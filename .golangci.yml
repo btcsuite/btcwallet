@@ -2,6 +2,8 @@ run:
   # timeout for analysis
   timeout: 10m
 
+  go: "1.24"
+
 linters-settings:
   govet:
     # Don't report about shadowed variables
@@ -117,7 +119,7 @@ linters:
 
 issues:
   # Only check issues in the new code.
-  new-from-rev: 3f48b446215c751ea4ba0c30fb04413ab9f1a7c7
+  new-from-rev: 038b57795c1f66f99c4ef2d9bd5fc203aea5ae4b
 
   exclude-rules:
     # Exclude gosec from running for tests so that tests with weak randomness

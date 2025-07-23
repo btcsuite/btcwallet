@@ -1,14 +1,12 @@
 PKG := github.com/btcsuite/btcwallet
+TOOLS_DIR := tools
 
-LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOACC_PKG := github.com/ory/go-acc
 GOIMPORTS_PKG := golang.org/x/tools/cmd/goimports
 
 GO_BIN := ${GOPATH}/bin
-LINT_BIN := $(GO_BIN)/golangci-lint
 GOACC_BIN := $(GO_BIN)/go-acc
 
-LINT_VERSION := v1.60.1
 GOACC_VERSION := v0.2.8
 
 GOIMPORTS_COMMIT := v0.1.10
@@ -32,7 +30,12 @@ ifneq ($(workers),)
 LINT_WORKERS = --concurrency=$(workers)
 endif
 
-LINT = $(LINT_BIN) run -v $(LINT_WORKERS)
+DOCKER_TOOLS = docker run \
+  --rm \
+  -v $(shell bash -c "go env GOCACHE || (mkdir -p /tmp/go-cache; echo /tmp/go-cache)"):/tmp/build/.cache \
+  -v $(shell bash -c "go env GOMODCACHE || (mkdir -p /tmp/go-modcache; echo /tmp/go-modcache)"):/tmp/build/.modcache \
+  -v $(shell bash -c "mkdir -p /tmp/go-lint-cache; echo /tmp/go-lint-cache"):/root/.cache/golangci-lint \
+  -v $$(pwd):/build btcwallet-tools
 
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
@@ -49,10 +52,6 @@ all: build check
 # ============
 # DEPENDENCIES
 # ============
-
-$(LINT_BIN):
-	@$(call print, "Fetching linter")
-	$(GOINSTALL) $(LINT_PKG)@$(LINT_VERSION)
 
 $(GOACC_BIN):
 	@$(call print, "Fetching go-acc")
@@ -113,9 +112,13 @@ fmt: goimports
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
 #? lint: Lint source
-lint: $(LINT_BIN)
+lint: docker-tools
 	@$(call print, "Linting source.")
-	$(LINT)
+	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
+
+docker-tools:
+	@$(call print, "Building tools docker image.")
+	docker build -q -t btcwallet-tools $(TOOLS_DIR)
 
 #? clean: Clean source
 clean:
@@ -139,7 +142,6 @@ tidy-module-check: tidy-module
 	unit-cover \
 	unit-race \
 	fmt \
-	lint \
 	clean
 
 #? help: Get more info on make commands

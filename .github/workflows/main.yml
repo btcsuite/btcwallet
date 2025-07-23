@@ -22,7 +22,7 @@ env:
   GOPATH: /home/runner/work/go
   GO111MODULE: on
 
-  GO_VERSION: 1.22.x
+  GO_VERSION: 1.24.0
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
 
@@ -34,6 +34,9 @@ jobs:
     name: Format, compilation and lint check
     runs-on: ubuntu-latest
     steps:
+      - name: cleanup space
+        run: rm -rf /opt/hostedtoolcache
+
       - name: git checkout
         uses: actions/checkout@v4
         with:
