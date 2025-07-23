@@ -395,7 +395,7 @@ func (d *PrunedBlockDispatcher) connectToPeer(addr string) (bool, error) {
 // requests, i.e., any peer which is not considered a segwit-enabled
 // "full-node".
 func filterPeers(peers []btcjson.GetPeerInfoResult) ([]string, error) {
-	var eligible []string // nolint:prealloc
+	var eligible []string //nolint:prealloc
 
 	// First we sort the peers by the measured ping time, to choose the best
 	// peers to fetch blocks from.
@@ -432,7 +432,7 @@ func filterPeers(peers []btcjson.GetPeerInfoResult) ([]string, error) {
 // block requests, i.e., any peer which is not considered a segwit-enabled
 // "full-node".
 func filterNodeAddrs(nodeAddrs []btcjson.GetNodeAddressesResult) []string {
-	var eligible []string // nolint:prealloc
+	var eligible []string //nolint:prealloc
 	for _, nodeAddr := range nodeAddrs {
 		services := wire.ServiceFlag(nodeAddr.Services)
 		if !satisfiesRequiredServices(services) {

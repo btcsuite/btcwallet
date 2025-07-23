@@ -485,7 +485,7 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
-	if cfg.CreateTemp { // nolint:gocritic
+	if cfg.CreateTemp { //nolint:gocritic,nestif
 		tempWalletExists := false
 
 		if dbFileExists {

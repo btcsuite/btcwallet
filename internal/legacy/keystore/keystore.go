@@ -22,7 +22,7 @@ import (
 	"time"
 
 	// consider vendoring this deprecated ripemd160 package
-	"golang.org/x/crypto/ripemd160" // nolint:staticcheck
+	"golang.org/x/crypto/ripemd160" //nolint:staticcheck,gosec
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
@@ -64,9 +64,9 @@ var fileID = [8]byte{0xba, 'W', 'A', 'L', 'L', 'E', 'T', 0x00}
 type entryHeader byte
 
 const (
-	addrCommentHeader entryHeader = 1 << iota // nolint:varcheck,deadcode
-	txCommentHeader                           // nolint:varcheck,deadcode
-	deletedHeader                             // nolint:varcheck,deadcode
+	addrCommentHeader entryHeader = 1 << iota //nolint:varcheck,deadcode
+	txCommentHeader                           //nolint:varcheck,deadcode
+	deletedHeader                             //nolint:varcheck,deadcode
 	scriptHeader
 	addrHeader entryHeader = 0
 )
@@ -792,7 +792,7 @@ func (s *Store) writeTo(w io.Writer) (n int64, err error) {
 			importedAddrs = append(importedAddrs, e)
 		}
 	}
-	wts = append(chainedAddrs, importedAddrs...) // nolint:gocritic
+	wts = append(chainedAddrs, importedAddrs...) //nolint:gocritic
 	appendedEntries := varEntries{store: s, entries: wts}
 
 	// Iterate through each entry needing to be written.  If data
@@ -1393,7 +1393,8 @@ func (s *Store) SyncedTo() (hash *chainhash.Hash, height int32) {
 			}
 		}
 	}
-	return // nolint:nakedret
+
+	return //nolint:nakedret
 }
 
 // NewIterateRecentBlocks returns an iterator for recently-seen blocks.
@@ -2125,7 +2126,8 @@ func (k *publicKey) ReadFrom(r io.Reader) (n int64, err error) {
 	n += read
 
 	*k = append([]byte{format}, s...)
-	return // nolint:nakedret
+
+	return //nolint:nakedret
 }
 
 func (k *publicKey) WriteTo(w io.Writer) (n int64, err error) {

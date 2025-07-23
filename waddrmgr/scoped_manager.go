@@ -394,14 +394,14 @@ func (s *ScopedKeyManager) deriveKey(acctInfo *accountInfo, branch,
 	}
 
 	// Derive and return the key.
-	branchKey, err := acctKey.DeriveNonStandard(branch) // nolint:staticcheck
+	branchKey, err := acctKey.DeriveNonStandard(branch) //nolint:staticcheck
 	if err != nil {
 		str := fmt.Sprintf("failed to derive extended key branch %d",
 			branch)
 		return nil, managerError(ErrKeyChain, str, err)
 	}
 
-	addressKey, err := branchKey.DeriveNonStandard(index) // nolint:staticcheck
+	addressKey, err := branchKey.DeriveNonStandard(index) //nolint:staticcheck
 
 	// Zero branch key after it's used.
 	branchKey.Zero()
@@ -1047,7 +1047,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 	}
 
 	// Derive the appropriate branch key and ensure it is zeroed when done.
-	branchKey, err := acctKey.DeriveNonStandard(branchNum) // nolint:staticcheck
+	branchKey, err := acctKey.DeriveNonStandard(branchNum) //nolint:staticcheck
 	if err != nil {
 		str := fmt.Sprintf("failed to derive extended key branch %d",
 			branchNum)
@@ -1064,7 +1064,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		var nextKey *hdkeychain.ExtendedKey
 		for {
 			// Derive the next child in the external chain branch.
-			key, err := branchKey.DeriveNonStandard(nextIndex) // nolint:staticcheck
+			key, err := branchKey.DeriveNonStandard(nextIndex) //nolint:staticcheck
 			if err != nil {
 				// When this particular child is invalid, skip to the
 				// next index.
@@ -1275,7 +1275,7 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	}
 
 	// Derive the appropriate branch key and ensure it is zeroed when done.
-	branchKey, err := acctKey.DeriveNonStandard(branchNum) // nolint:staticcheck
+	branchKey, err := acctKey.DeriveNonStandard(branchNum) //nolint:staticcheck
 	if err != nil {
 		str := fmt.Sprintf("failed to derive extended key branch %d",
 			branchNum)
@@ -1294,7 +1294,7 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		var nextKey *hdkeychain.ExtendedKey
 		for {
 			// Derive the next child in the external chain branch.
-			key, err := branchKey.DeriveNonStandard(nextIndex) // nolint:staticcheck
+			key, err := branchKey.DeriveNonStandard(nextIndex) //nolint:staticcheck
 			if err != nil {
 				// When this particular child is invalid, skip to the
 				// next index.
