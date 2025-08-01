@@ -210,14 +210,16 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	// If the wallet is watch only, there is no default account and our
 	// imported account will be index 0.
 	firstAccountIndex := uint32(1)
+	numAccounts := 2
 	if watchOnly {
 		firstAccountIndex = 0
+		numAccounts = 1
 	}
 
-	// We should have 3 additional accounts now.
+	// We should have 2 additional accounts now.
 	acctResult, err := w.Accounts(tc.expectedScope)
 	require.NoError(t, err)
-	require.Len(t, acctResult.Accounts, int(firstAccountIndex*2)+2)
+	require.Len(t, acctResult.Accounts, numAccounts+2)
 
 	// Validate the state of the accounts.
 	require.Equal(t, firstAccountIndex, acct1.AccountNumber)

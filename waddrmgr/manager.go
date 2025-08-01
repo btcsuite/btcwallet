@@ -590,6 +590,14 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		err := putDefaultAccountInfo(
+			ns, &scope, ImportedAddrAccount, nil, nil, 0, 0,
+			ImportedAddrAccountName,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Finally, we'll register this new scoped manager with the root
