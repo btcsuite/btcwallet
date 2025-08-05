@@ -20,7 +20,7 @@ type unstableAPI struct {
 // the transition (particularly for the legacy JSON-RPC server) from using
 // exported manager packages to a unified wallet package that exposes all
 // functionality by itself.  New code should not be written using this API.
-func UnstableAPI(w *Wallet) unstableAPI { return unstableAPI{w} } // nolint:golint
+func UnstableAPI(w *Wallet) unstableAPI { return unstableAPI{w} } //nolint:golint,revive
 
 // TxDetails calls wtxmgr.Store.TxDetails under a single database view transaction.
 func (u unstableAPI) TxDetails(txHash *chainhash.Hash) (*wtxmgr.TxDetails, error) {

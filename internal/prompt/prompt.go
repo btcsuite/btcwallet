@@ -105,7 +105,7 @@ func promptList(reader *bufio.Reader, prefix string, validResponses []string, de
 // The function will repeat the prompt to the user until they enter a valid
 // response.
 func promptListBool(reader *bufio.Reader, prefix string,
-	defaultEntry string) (bool, error) { // nolint:unparam
+	defaultEntry string) (bool, error) { //nolint:unparam
 
 	// Setup the valid responses.
 	valid := []string{"n", "no", "y", "yes"}
