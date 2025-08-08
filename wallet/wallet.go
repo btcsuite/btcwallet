@@ -4172,6 +4172,25 @@ func (w *Wallet) DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 	return privKey, nil
 }
 
+// SyncedTo calls the `SyncedTo` method on the wallet's manager.
+func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
+	return w.Manager.SyncedTo()
+}
+
+// AddrManager returns the internal address manager.
+//
+// TODO(yy): Refactor it in lnd and remove the method.
+func (w *Wallet) AddrManager() *waddrmgr.Manager {
+	return w.Manager
+}
+
+// NotificationServer returns the internal NotificationServer.
+//
+// TODO(yy): Refactor it in lnd and remove the method.
+func (w *Wallet) NotificationServer() *NotificationServer {
+	return w.NtfnServer
+}
+
 // CreateWithCallback is the same as Create with an added callback that will be
 // called in the same transaction the wallet structure is initialized.
 func CreateWithCallback(db walletdb.DB, pubPass, privPass []byte,
