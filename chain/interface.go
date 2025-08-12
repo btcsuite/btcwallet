@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
@@ -35,14 +36,17 @@ type Interface interface {
 	Start() error
 	Stop()
 	WaitForShutdown()
+	GetPeerInfo() ([]btcjson.GetPeerInfoResult, error)
 	GetBestBlock() (*chainhash.Hash, int32, error)
 	GetBlock(*chainhash.Hash) (*wire.MsgBlock, error)
 	GetBlockHash(int64) (*chainhash.Hash, error)
 	GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader, error)
+	GetBlockChainInfo() (*btcjson.GetBlockChainInfoResult, error)
 	IsCurrent() bool
 	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
+	RawRequest(method string, params []json.RawMessage) (json.RawMessage, error)
 	Rescan(*chainhash.Hash, []btcutil.Address, map[wire.OutPoint]btcutil.Address) error
 	NotifyReceived([]btcutil.Address) error
 	NotifyBlocks() error
