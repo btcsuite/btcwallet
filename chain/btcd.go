@@ -272,6 +272,12 @@ func (c *RPCClient) IsCurrent() bool {
 func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	outPoints map[wire.OutPoint]btcutil.Address) error {
 
+	// If there are no addresses or outpoints, we don't need to do a
+	// specific check here, as that's already handled by btcd:
+	// https://github.com/btcsuite/btcd/blob/95330bc1/rpcwebsocket.go#L2895
+	// So we don't add a skip check here, because we still want to receive
+	// the best block notification, which is sent even if there are no
+	// addresses or outpoints to rescan for.
 	flatOutpoints := make([]*wire.OutPoint, 0, len(outPoints))
 	for ops := range outPoints {
 		ops := ops

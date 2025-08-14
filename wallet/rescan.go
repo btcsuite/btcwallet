@@ -256,8 +256,9 @@ out:
 				"for %d addrs, %d outpoints", batch.bs.Hash,
 				batch.bs.Height, numAddrs, numOps)
 
-			err := chainClient.Rescan(&batch.bs.Hash, batch.addrs,
-				batch.outpoints)
+			err := chainClient.Rescan(
+				&batch.bs.Hash, batch.addrs, batch.outpoints,
+			)
 			if err != nil {
 				log.Errorf("Rescan for %d addrs, %d outpoints "+
 					"failed: %v", numAddrs, numOps, err)

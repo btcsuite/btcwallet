@@ -482,50 +482,115 @@ func TestSelectUtxosTxoToOutpoint(t *testing.T) {
 	}
 	addUtxo(t, w, incomingTx)
 
-	// We expect 4 unspent utxos.
+	// We expect 4 unspent UTXOs.
 	unspent, err := w.ListUnspent(0, 80, "")
-	require.NoError(t, err, "unexpected error while calling "+
-		"list unspent")
-
-	require.Len(t, unspent, 4, "expected 4 unspent "+
-		"utxos")
-
-	selectUtxos := []wire.OutPoint{
-		{
-			Hash:  incomingTx.TxHash(),
-			Index: 1,
-		},
-		{
-			Hash:  incomingTx.TxHash(),
-			Index: 2,
-		},
-	}
-
-	// Test by sending 200_000.
-	targetTxOut := &wire.TxOut{
-		Value:    200_000,
-		PkScript: p2trScript,
-	}
-	tx1, err := w.txToOutputs(
-		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
-		CoinSelectionLargest, true, selectUtxos, alwaysAllowUtxo,
-	)
 	require.NoError(t, err)
+	require.Len(t, unspent, 4, "expected 4 unspent UTXOs")
 
-	// We expect all and only our select utxos to be input in this
-	// transaction.
-	require.Len(t, tx1.Tx.TxIn, len(selectUtxos))
-
-	lookupSelectUtxos := make(map[wire.OutPoint]struct{})
-	for _, utxo := range selectUtxos {
-		lookupSelectUtxos[utxo] = struct{}{}
+	tCases := []struct {
+		name        string
+		selectUTXOs []wire.OutPoint
+		errString   string
+	}{
+		{
+			name: "Duplicate utxo values",
+			selectUTXOs: []wire.OutPoint{
+				{
+					Hash:  incomingTx.TxHash(),
+					Index: 1,
+				},
+				{
+					Hash:  incomingTx.TxHash(),
+					Index: 1,
+				},
+			},
+			errString: "selected UTXOs contain duplicate values",
+		},
+		{
+			name: "all selected UTXOs not eligible for spending",
+			selectUTXOs: []wire.OutPoint{
+				{
+					Hash:  chainhash.Hash([32]byte{1}),
+					Index: 1,
+				},
+				{
+					Hash:  chainhash.Hash([32]byte{3}),
+					Index: 1,
+				},
+			},
+			errString: "selected outpoint not eligible for " +
+				"spending",
+		},
+		{
+			name: "some select UTXOs not eligible for spending",
+			selectUTXOs: []wire.OutPoint{
+				{
+					Hash:  chainhash.Hash([32]byte{1}),
+					Index: 1,
+				},
+				{
+					Hash:  incomingTx.TxHash(),
+					Index: 1,
+				},
+			},
+			errString: "selected outpoint not eligible for " +
+				"spending",
+		},
+		{
+			name: "select utxo, no duplicates and all eligible " +
+				"for spending",
+			selectUTXOs: []wire.OutPoint{
+				{
+					Hash:  incomingTx.TxHash(),
+					Index: 1,
+				},
+				{
+					Hash:  incomingTx.TxHash(),
+					Index: 2,
+				},
+			},
+		},
 	}
 
-	for _, tx := range tx1.Tx.TxIn {
-		_, ok := lookupSelectUtxos[tx.PreviousOutPoint]
-		require.True(t, ok, "unexpected outpoint in txin")
-	}
+	for _, tc := range tCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Test by sending 200_000.
+			targetTxOut := &wire.TxOut{
+				Value:    200_000,
+				PkScript: p2trScript,
+			}
+			tx1, err := w.txToOutputs(
+				[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1,
+				1000, CoinSelectionLargest, true,
+				tc.selectUTXOs, alwaysAllowUtxo,
+			)
+			if tc.errString != "" {
+				require.ErrorContains(t, err, tc.errString)
+				require.Nil(t, tx1)
 
-	// Expect two outputs, change and the actual payment to the address.
-	require.Len(t, tx1.Tx.TxOut, 2)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, tx1)
+
+			// We expect all and only our select UTXOs to be input
+			// in this transaction.
+			require.Len(t, tx1.Tx.TxIn, len(tc.selectUTXOs))
+
+			lookupSelectUtxos := make(map[wire.OutPoint]struct{})
+			for _, utxo := range tc.selectUTXOs {
+				lookupSelectUtxos[utxo] = struct{}{}
+			}
+
+			for _, tx := range tx1.Tx.TxIn {
+				_, ok := lookupSelectUtxos[tx.PreviousOutPoint]
+				require.True(t, ok)
+			}
+
+			// Expect two outputs, change and the actual payment to
+			// the address.
+			require.Len(t, tx1.Tx.TxOut, 2)
+		})
+	}
 }
