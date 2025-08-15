@@ -4091,7 +4091,14 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 			return fmt.Errorf("error deriving private key: %w", err)
 		}
 
-		privKey, err = addr.(waddrmgr.ManagedPubKeyAddress).PrivKey()
+		managedAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			//nolint:err113
+			return fmt.Errorf("address %v is not a pubkey address",
+				addr.Address().EncodeAddress())
+		}
+
+		privKey, err = managedAddr.PrivKey()
 
 		return err
 	})

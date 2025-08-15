@@ -8,11 +8,11 @@
 // Full documentation of the API implemented by this package is maintained in a
 // language-agnostic document:
 //
-//   https://github.com/btcsuite/btcwallet/blob/master/rpc/documentation/api.md
+//	https://github.com/btcsuite/btcwallet/blob/master/rpc/documentation/api.md
 //
 // Any API changes must be performed according to the steps listed here:
 //
-//   https://github.com/btcsuite/btcwallet/blob/master/rpc/documentation/serverchanges.md
+//	https://github.com/btcsuite/btcwallet/blob/master/rpc/documentation/serverchanges.md
 package rpcserver
 
 import (
@@ -366,7 +366,7 @@ func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransacti
 	resp *pb.GetTransactionsResponse, err error) {
 
 	var startBlock, endBlock *wallet.BlockIdentifier
-	if req.StartingBlockHash != nil && req.StartingBlockHeight != 0 { // nolint:gocritic
+	if req.StartingBlockHash != nil && req.StartingBlockHeight != 0 { //nolint:protogetter,gocritic
 		return nil, errors.New(
 			"starting block hash and height may not be specified simultaneously")
 	} else if req.StartingBlockHash != nil {
@@ -379,7 +379,7 @@ func (s *walletServer) GetTransactions(ctx context.Context, req *pb.GetTransacti
 		startBlock = wallet.NewBlockIdentifierFromHeight(req.StartingBlockHeight)
 	}
 
-	if req.EndingBlockHash != nil && req.EndingBlockHeight != 0 { // nolint:gocritic
+	if req.EndingBlockHash != nil && req.EndingBlockHeight != 0 { //nolint:protogetter,gocritic
 		return nil, status.Errorf(codes.InvalidArgument,
 			"ending block hash and height may not be specified simultaneously")
 	} else if req.EndingBlockHash != nil {
@@ -486,12 +486,12 @@ func (s *walletServer) SignTransaction(ctx context.Context, req *pb.SignTransact
 }
 
 // BUGS:
-// - The transaction is not inspected to be relevant before publishing using
-//   sendrawtransaction, so connection errors to btcd could result in the tx
-//   never being added to the wallet database.
-// - Once the above bug is fixed, wallet will require a way to purge invalid
-//   transactions from the database when they are rejected by the network, other
-//   than double spending them.
+//   - The transaction is not inspected to be relevant before publishing using
+//     sendrawtransaction, so connection errors to btcd could result in the tx
+//     never being added to the wallet database.
+//   - Once the above bug is fixed, wallet will require a way to purge invalid
+//     transactions from the database when they are rejected by the network, other
+//     than double spending them.
 func (s *walletServer) PublishTransaction(ctx context.Context, req *pb.PublishTransactionRequest) (
 	*pb.PublishTransactionResponse, error) {
 
@@ -756,7 +756,7 @@ func (s *loaderServer) CloseWallet(ctx context.Context, req *pb.CloseWalletReque
 	return &pb.CloseWalletResponse{}, nil
 }
 
-func (s *loaderServer) StartConsensusRpc(ctx context.Context, // nolint:golint
+func (s *loaderServer) StartConsensusRpc(_ context.Context, //nolint:stylecheck,revive
 	req *pb.StartConsensusRpcRequest) (*pb.StartConsensusRpcResponse,
 	error) {
 

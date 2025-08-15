@@ -279,7 +279,7 @@ func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 		flatOutpoints = append(flatOutpoints, &ops)
 	}
 
-	return c.Client.Rescan(startHash, addrs, flatOutpoints) // nolint:staticcheck
+	return c.Client.Rescan(startHash, addrs, flatOutpoints) //nolint:staticcheck
 }
 
 // WaitForShutdown blocks until both the client has finished disconnecting
