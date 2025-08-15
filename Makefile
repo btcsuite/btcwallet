@@ -18,6 +18,7 @@ GOINSTALL := GO111MODULE=on go install -v
 GOTEST := GO111MODULE=on go test 
 
 GOLIST := go list -deps $(PKG)/... | grep '$(PKG)'
+GOLIST_IT := go list -tags=integration_test -deps $(PKG)/... | grep '$(PKG)'
 GOLIST_COVER := $$(go list -deps $(PKG)/... | grep '$(PKG)')
 GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -path "./vendor/*")
 
@@ -90,6 +91,11 @@ check: unit
 unit:
 	@$(call print, "Running unit tests.")
 	$(GOLIST) | $(XARGS) env $(GOTEST) -test.timeout=20m
+
+#? integration: Run all integration tests (Docker needed for Postgres)
+integration:
+	@$(call print, "Running integration tests (Postgres + SQLite).")
+	$(GOLIST_IT) | $(XARGS) env $(GOTEST) -tags=integration_test -test.timeout=30m
 
 #? unit-cover: Run unit coverage tests
 unit-cover: $(GOACC_BIN)
