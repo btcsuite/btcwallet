@@ -8,7 +8,8 @@ service VersionService {
     rpc Version (VersionRequest) returns (VersionResponse);
 }
 
-message VersionRequest {}
+message VersionRequest {
+}
 message VersionResponse {
     string version_string = 1;
     uint32 major = 2;
@@ -18,7 +19,7 @@ message VersionResponse {
     string build_metadata = 6;
 }
 
-// WalletService provides wallet functionality including queries, 
+// WalletService provides wallet functionality including queries,
 // notifications, and control operations.
 service WalletService {
     // Queries
@@ -33,24 +34,24 @@ service WalletService {
     // Balance returns the balance for a specific account.
     rpc Balance (BalanceRequest) returns (BalanceResponse);
     // GetTransactions returns transaction history for the wallet.
-    rpc GetTransactions (GetTransactionsRequest) returns (
-        GetTransactionsResponse);
+    rpc GetTransactions (GetTransactionsRequest)
+        returns (GetTransactionsResponse);
 
     // Notifications
     // TransactionNotifications streams transaction notifications.
-    rpc TransactionNotifications (TransactionNotificationsRequest) returns (
-        stream TransactionNotificationsResponse);
+    rpc TransactionNotifications (TransactionNotificationsRequest)
+        returns (stream TransactionNotificationsResponse);
     // SpentnessNotifications streams notifications about output spentness.
-    rpc SpentnessNotifications (SpentnessNotificationsRequest) returns (
-        stream SpentnessNotificationsResponse);
+    rpc SpentnessNotifications (SpentnessNotificationsRequest)
+        returns (stream SpentnessNotificationsResponse);
     // AccountNotifications streams notifications about account changes.
-    rpc AccountNotifications (AccountNotificationsRequest) returns (
-        stream AccountNotificationsResponse);
+    rpc AccountNotifications (AccountNotificationsRequest)
+        returns (stream AccountNotificationsResponse);
 
     // Control
     // ChangePassphrase changes the wallet's private or public passphrase.
-    rpc ChangePassphrase (ChangePassphraseRequest) returns (
-        ChangePassphraseResponse);
+    rpc ChangePassphrase (ChangePassphraseRequest)
+        returns (ChangePassphraseResponse);
     // RenameAccount renames an existing account.
     rpc RenameAccount (RenameAccountRequest) returns (RenameAccountResponse);
     // NextAccount creates a new account.
@@ -58,17 +59,17 @@ service WalletService {
     // NextAddress generates a new address for an account.
     rpc NextAddress (NextAddressRequest) returns (NextAddressResponse);
     // ImportPrivateKey imports a private key into the wallet.
-    rpc ImportPrivateKey (ImportPrivateKeyRequest) returns (
-        ImportPrivateKeyResponse);
+    rpc ImportPrivateKey (ImportPrivateKeyRequest)
+        returns (ImportPrivateKeyResponse);
     // FundTransaction selects inputs to fund a transaction.
-    rpc FundTransaction (FundTransactionRequest) returns (
-        FundTransactionResponse);
+    rpc FundTransaction (FundTransactionRequest)
+        returns (FundTransactionResponse);
     // SignTransaction signs a transaction.
-    rpc SignTransaction (SignTransactionRequest) returns (
-        SignTransactionResponse);
+    rpc SignTransaction (SignTransactionRequest)
+        returns (SignTransactionResponse);
     // PublishTransaction publishes a signed transaction to the network.
-    rpc PublishTransaction (PublishTransactionRequest) returns (
-        PublishTransactionResponse);
+    rpc PublishTransaction (PublishTransactionRequest)
+        returns (PublishTransactionResponse);
 }
 
 // WalletLoaderService provides wallet loading and management operations.
@@ -82,8 +83,8 @@ service WalletLoaderService {
     // CloseWallet closes the currently open wallet.
     rpc CloseWallet (CloseWalletRequest) returns (CloseWalletResponse);
     // StartConsensusRpc starts the consensus RPC connection.
-    rpc StartConsensusRpc (StartConsensusRpcRequest) returns (
-        StartConsensusRpcResponse);
+    rpc StartConsensusRpc (StartConsensusRpcRequest)
+        returns (StartConsensusRpcResponse);
 }
 
 message TransactionDetails {
@@ -118,10 +119,13 @@ message AccountBalance {
     int64 total_balance = 2;
 }
 
-message PingRequest {}
-message PingResponse {}
+message PingRequest {
+}
+message PingResponse {
+}
 
-message NetworkRequest {}
+message NetworkRequest {
+}
 message NetworkResponse {
     uint32 active_network = 1;
 }
@@ -133,7 +137,8 @@ message AccountNumberResponse {
     uint32 account_number = 1;
 }
 
-message AccountsRequest {}
+message AccountsRequest {
+}
 message AccountsResponse {
     message Account {
         uint32 account_number = 1;
@@ -152,7 +157,8 @@ message RenameAccountRequest {
     uint32 account_number = 1;
     string new_name = 2;
 }
-message RenameAccountResponse {}
+message RenameAccountResponse {
+}
 
 message NextAccountRequest {
     bytes passphrase = 1;
@@ -194,25 +200,25 @@ message BalanceResponse {
 }
 
 message GetTransactionsRequest {
-    // Optionally specify the starting block from which to begin including 
-    // all transactions. Either the starting block hash or height may be 
-    // specified, but not both. If a block height is specified and is 
-    // negative, the absolute value becomes the number of last blocks to 
-    // include. That is, given a current chain height of 1000 and a starting 
-    // block height of -3, transaction notifications will be created for 
-    // blocks 998, 999, and 1000. If both options are excluded, transaction 
+    // Optionally specify the starting block from which to begin including
+    // all transactions. Either the starting block hash or height may be
+    // specified, but not both. If a block height is specified and is
+    // negative, the absolute value becomes the number of last blocks to
+    // include. That is, given a current chain height of 1000 and a starting
+    // block height of -3, transaction notifications will be created for
+    // blocks 998, 999, and 1000. If both options are excluded, transaction
     // results are created for transactions since the genesis block.
     bytes starting_block_hash = 1;
     sint32 starting_block_height = 2;
 
-    // Optionally specify the last block that transaction results may appear 
-    // in. Either the ending block hash or height may be specified, but not 
-    // both. If both are excluded, transaction results are created for all 
-    // transactions through the best block, and include all unmined 
+    // Optionally specify the last block that transaction results may appear
+    // in. Either the ending block hash or height may be specified, but not
+    // both. If both are excluded, transaction results are created for all
+    // transactions through the best block, and include all unmined
     // transactions.
     bytes ending_block_hash = 3;
     int32 ending_block_height = 4;
-    
+
     // Include at least this many of the newest transactions if they exist.
     // Cannot be used when the ending block hash is specified.
     //
@@ -235,7 +241,8 @@ message ChangePassphraseRequest {
     bytes old_passphrase = 2;
     bytes new_passphrase = 3;
 }
-message ChangePassphraseResponse {}
+message ChangePassphraseResponse {
+}
 
 message FundTransactionRequest {
     uint32 account = 1;
@@ -260,7 +267,7 @@ message FundTransactionResponse {
 
 message SignTransactionRequest {
     bytes passphrase = 1;
-    
+
     bytes serialized_transaction = 2;
 
     // If no indexes are specified, signatures scripts will be added for
@@ -278,11 +285,13 @@ message SignTransactionResponse {
 message PublishTransactionRequest {
     bytes signed_transaction = 1;
 }
-message PublishTransactionResponse {}
+message PublishTransactionResponse {
+}
 
-message TransactionNotificationsRequest {}
+message TransactionNotificationsRequest {
+}
 message TransactionNotificationsResponse {
-    // Sorted by increasing height. This is a repeated field so many new 
+    // Sorted by increasing height. This is a repeated field so many new
     // blocks in a new best chain can be notified at once during a reorganize.
     repeated BlockDetails attached_blocks = 1;
 
@@ -290,12 +299,12 @@ message TransactionNotificationsResponse {
     // transactions that are no longer in the best chain. These are those
     // block's hashes.
     repeated bytes detached_blocks = 2;
-    
-    // Any new unmined transactions are included here. These unmined 
-    // transactions refer to the current best chain, so transactions from 
-    // detached blocks may be moved to mempool and included here if they are 
-    // not mined or double spent in the new chain. Additionally, if no new 
-    // blocks were attached but a relevant unmined transaction is seen by the 
+
+    // Any new unmined transactions are included here. These unmined
+    // transactions refer to the current best chain, so transactions from
+    // detached blocks may be moved to mempool and included here if they are
+    // not mined or double spent in the new chain. Additionally, if no new
+    // blocks were attached but a relevant unmined transaction is seen by the
     // wallet, it will be reported here.
     repeated TransactionDetails unmined_transactions = 3;
 
@@ -320,7 +329,8 @@ message SpentnessNotificationsResponse {
     Spender spender = 3;
 }
 
-message AccountNotificationsRequest {}
+message AccountNotificationsRequest {
+}
 message AccountNotificationsResponse {
     uint32 account_number = 1;
     string account_name = 2;
@@ -334,17 +344,22 @@ message CreateWalletRequest {
     bytes private_passphrase = 2;
     bytes seed = 3;
 }
-message CreateWalletResponse {}
+message CreateWalletResponse {
+}
 
 message OpenWalletRequest {
     bytes public_passphrase = 1;
 }
-message OpenWalletResponse {}
+message OpenWalletResponse {
+}
 
-message CloseWalletRequest {}
-message CloseWalletResponse {}
+message CloseWalletRequest {
+}
+message CloseWalletResponse {
+}
 
-message WalletExistsRequest {}
+message WalletExistsRequest {
+}
 message WalletExistsResponse {
     bool exists = 1;
 }
@@ -355,4 +370,5 @@ message StartConsensusRpcRequest {
     bytes password = 3;
     bytes certificate = 4;
 }
-message StartConsensusRpcResponse {}
+message StartConsensusRpcResponse {
+}
