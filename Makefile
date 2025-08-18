@@ -141,6 +141,11 @@ rpc-check: rpc
 	@$(call print, "Verifying protos.")
 	if test -n "$$(git status --porcelain rpc/walletrpc/)"; then echo "Generated protobuf files are not up-to-date. Please run 'make rpc' and commit the changes."; git status; git diff rpc/walletrpc/; exit 1; fi
 
+#? protolint: Lint proto files using protolint
+protolint:
+	@$(call print, "Linting proto files.")
+	docker run --rm --volume "$$(pwd):/workspace" --workdir /workspace yoheimuta/protolint lint rpc/
+
 #? clean: Clean source
 clean:
 	@$(call print, "Cleaning source.$(NC)")
@@ -169,6 +174,7 @@ tidy-module-check: tidy-module
 	lint \
 	rpc \
 	rpc-check \
+	protolint \
 	clean
 
 #? help: Get more info on make commands
