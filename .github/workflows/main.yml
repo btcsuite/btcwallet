@@ -45,8 +45,8 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
-      - name: run format
-        run: make fmt
+      - name: Check code format
+        run: make fmt-check
 
       - name: compile code
         run: go install -v ./...
