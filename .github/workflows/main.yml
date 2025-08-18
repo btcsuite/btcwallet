@@ -23,7 +23,7 @@ env:
   GOBIN: /home/runner/work/go/bin
   GO111MODULE: on
 
-  GO_VERSION: 1.22.x
+  GO_VERSION: 1.23.12
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
 
