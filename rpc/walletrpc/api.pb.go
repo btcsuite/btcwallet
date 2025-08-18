@@ -5,9 +5,11 @@
 Package walletrpc is a generated protocol buffer package.
 
 It is generated from these files:
+
 	api.proto
 
 It has these top-level messages:
+
 	VersionRequest
 	VersionResponse
 	TransactionDetails
@@ -62,13 +64,10 @@ package walletrpc
 
 import (
 	fmt "fmt"
-
-	proto "github.com/golang/protobuf/proto"
-
 	math "math"
 
+	proto "github.com/golang/protobuf/proto"
 	context "golang.org/x/net/context"
-
 	grpc "google.golang.org/grpc"
 )
 

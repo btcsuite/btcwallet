@@ -680,21 +680,21 @@ func deleteRawCredit(ns walletdb.ReadWriteBucket, k []byte) error {
 //
 // Example usage:
 //
-//   prefix := keyTxRecord(txHash, block)
-//   it := makeCreditIterator(ns, prefix)
-//   for it.next() {
-//           // Use it.elem
-//           // If necessary, read additional details from it.ck, it.cv
-//   }
-//   if it.err != nil {
-//           // Handle error
-//   }
+//	prefix := keyTxRecord(txHash, block)
+//	it := makeCreditIterator(ns, prefix)
+//	for it.next() {
+//	        // Use it.elem
+//	        // If necessary, read additional details from it.ck, it.cv
+//	}
+//	if it.err != nil {
+//	        // Handle error
+//	}
 //
 // The elem's Spent field is not set to true if the credit is spent by an
 // unmined transaction.  To check for this case:
 //
-//   k := canonicalOutPoint(&txHash, it.elem.Index)
-//   it.elem.Spent = existsRawUnminedInput(ns, k) != nil
+//	k := canonicalOutPoint(&txHash, it.elem.Index)
+//	it.elem.Spent = existsRawUnminedInput(ns, k) != nil
 type creditIterator struct {
 	c      walletdb.ReadWriteCursor // Set to nil after final iteration
 	prefix []byte
@@ -920,15 +920,15 @@ func deleteRawDebit(ns walletdb.ReadWriteBucket, k []byte) error {
 //
 // Example usage:
 //
-//   prefix := keyTxRecord(txHash, block)
-//   it := makeDebitIterator(ns, prefix)
-//   for it.next() {
-//           // Use it.elem
-//           // If necessary, read additional details from it.ck, it.cv
-//   }
-//   if it.err != nil {
-//           // Handle error
-//   }
+//	prefix := keyTxRecord(txHash, block)
+//	it := makeDebitIterator(ns, prefix)
+//	for it.next() {
+//	        // Use it.elem
+//	        // If necessary, read additional details from it.ck, it.cv
+//	}
+//	if it.err != nil {
+//	        // Handle error
+//	}
 type debitIterator struct {
 	c      walletdb.ReadWriteCursor // Set to nil after final iteration
 	prefix []byte
@@ -1097,22 +1097,22 @@ func deleteRawUnminedCredit(ns walletdb.ReadWriteBucket, k []byte) error {
 // unminedCreditIterator allows for cursor iteration over all credits, in order,
 // from a single unmined transaction.
 //
-//  Example usage:
+//	Example usage:
 //
-//   it := makeUnminedCreditIterator(ns, txHash)
-//   for it.next() {
-//           // Use it.elem, it.ck and it.cv
-//           // Optionally, use it.delete() to remove this k/v pair
-//   }
-//   if it.err != nil {
-//           // Handle error
-//   }
+//	 it := makeUnminedCreditIterator(ns, txHash)
+//	 for it.next() {
+//	         // Use it.elem, it.ck and it.cv
+//	         // Optionally, use it.delete() to remove this k/v pair
+//	 }
+//	 if it.err != nil {
+//	         // Handle error
+//	 }
 //
 // The spentness of the credit is not looked up for performance reasons (because
 // for unspent credits, it requires another lookup in another bucket).  If this
 // is needed, it may be checked like this:
 //
-//   spent := existsRawUnminedInput(ns, it.ck) != nil
+//	spent := existsRawUnminedInput(ns, it.ck) != nil
 type unminedCreditIterator struct {
 	c      walletdb.ReadWriteCursor
 	prefix []byte

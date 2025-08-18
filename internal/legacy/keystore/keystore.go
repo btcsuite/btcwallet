@@ -21,9 +21,6 @@ import (
 	"sync"
 	"time"
 
-	// consider vendoring this deprecated ripemd160 package
-	"golang.org/x/crypto/ripemd160" // nolint:staticcheck
-
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil"
@@ -33,6 +30,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/internal/legacy/rename"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"golang.org/x/crypto/ripemd160" //nolint:staticcheck
 )
 
 const (
