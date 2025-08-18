@@ -256,7 +256,8 @@ type TransactionDetails struct {
 	Debits      []*TransactionDetails_Input  `protobuf:"bytes,3,rep,name=debits,proto3" json:"debits,omitempty"`
 	Credits     []*TransactionDetails_Output `protobuf:"bytes,4,rep,name=credits,proto3" json:"credits,omitempty"`
 	Fee         int64                        `protobuf:"varint,5,opt,name=fee,proto3" json:"fee,omitempty"`
-	Timestamp   int64                        `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // May be earlier than a block timestamp, but never later.
+	// May be earlier than a block timestamp, but never later.
+	Timestamp int64 `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 }
 
 func (x *TransactionDetails) Reset() {
@@ -1344,19 +1345,21 @@ type GetTransactionsRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// Optionally specify the starting block from which to begin including all transactions.
-	// Either the starting block hash or height may be specified, but not both.
-	// If a block height is specified and is negative, the absolute value becomes the number of
-	// last blocks to include.  That is, given a current chain height of 1000 and a starting block
-	// height of -3, transaction notifications will be created for blocks 998, 999, and 1000.
-	// If both options are excluded, transaction results are created for transactions since the
-	// genesis block.
+	// Optionally specify the starting block from which to begin including
+	// all transactions. Either the starting block hash or height may be
+	// specified, but not both. If a block height is specified and is
+	// negative, the absolute value becomes the number of last blocks to
+	// include. That is, given a current chain height of 1000 and a starting
+	// block height of -3, transaction notifications will be created for
+	// blocks 998, 999, and 1000. If both options are excluded, transaction
+	// results are created for transactions since the genesis block.
 	StartingBlockHash   []byte `protobuf:"bytes,1,opt,name=starting_block_hash,json=startingBlockHash,proto3" json:"starting_block_hash,omitempty"`
 	StartingBlockHeight int32  `protobuf:"zigzag32,2,opt,name=starting_block_height,json=startingBlockHeight,proto3" json:"starting_block_height,omitempty"`
-	// Optionally specify the last block that transaction results may appear in.
-	// Either the ending block hash or height may be specified, but not both.
-	// If both are excluded, transaction results are created for all transactions
-	// through the best block, and include all unmined transactions.
+	// Optionally specify the last block that transaction results may appear
+	// in. Either the ending block hash or height may be specified, but not
+	// both. If both are excluded, transaction results are created for all
+	// transactions through the best block, and include all unmined
+	// transactions.
 	EndingBlockHash   []byte `protobuf:"bytes,3,opt,name=ending_block_hash,json=endingBlockHash,proto3" json:"ending_block_hash,omitempty"`
 	EndingBlockHeight int32  `protobuf:"varint,4,opt,name=ending_block_height,json=endingBlockHeight,proto3" json:"ending_block_height,omitempty"`
 	// Include at least this many of the newest transactions if they exist.
@@ -1740,7 +1743,7 @@ type SignTransactionRequest struct {
 	SerializedTransaction []byte `protobuf:"bytes,2,opt,name=serialized_transaction,json=serializedTransaction,proto3" json:"serialized_transaction,omitempty"`
 	// If no indexes are specified, signatures scripts will be added for
 	// every input. If any input indexes are specified, only those inputs
-	// will be signed.  Rather than returning an incompletely signed
+	// will be signed. Rather than returning an incompletely signed
 	// transaction if any of the inputs to be signed can not be, the RPC
 	// immediately errors.
 	InputIndexes []uint32 `protobuf:"varint,3,rep,packed,name=input_indexes,json=inputIndexes,proto3" json:"input_indexes,omitempty"`
@@ -1982,18 +1985,19 @@ type TransactionNotificationsResponse struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// Sorted by increasing height.  This is a repeated field so many new blocks
-	// in a new best chain can be notified at once during a reorganize.
+	// Sorted by increasing height. This is a repeated field so many new
+	// blocks in a new best chain can be notified at once during a reorganize.
 	AttachedBlocks []*BlockDetails `protobuf:"bytes,1,rep,name=attached_blocks,json=attachedBlocks,proto3" json:"attached_blocks,omitempty"`
 	// If there was a chain reorganize, there may have been blocks with wallet
-	// transactions that are no longer in the best chain.  These are those
+	// transactions that are no longer in the best chain. These are those
 	// block's hashes.
 	DetachedBlocks [][]byte `protobuf:"bytes,2,rep,name=detached_blocks,json=detachedBlocks,proto3" json:"detached_blocks,omitempty"`
-	// Any new unmined transactions are included here.  These unmined transactions
-	// refer to the current best chain, so transactions from detached blocks may
-	// be moved to mempool and included here if they are not mined or double spent
-	// in the new chain.  Additonally, if no new blocks were attached but a relevant
-	// unmined transaction is seen by the wallet, it will be reported here.
+	// Any new unmined transactions are included here. These unmined
+	// transactions refer to the current best chain, so transactions from
+	// detached blocks may be moved to mempool and included here if they are
+	// not mined or double spent in the new chain. Additionally, if no new
+	// blocks were attached but a relevant unmined transaction is seen by the
+	// wallet, it will be reported here.
 	UnminedTransactions []*TransactionDetails `protobuf:"bytes,3,rep,name=unmined_transactions,json=unminedTransactions,proto3" json:"unmined_transactions,omitempty"`
 	// Instead of notifying all of the removed unmined transactions,
 	// just send all of the current hashes.
@@ -4435,6 +4439,7 @@ const _ = grpc.SupportPackageIsVersion6
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
 type VersionServiceClient interface {
+	// Version returns the version of the wallet.
 	Version(ctx context.Context, in *VersionRequest, opts ...grpc.CallOption) (*VersionResponse, error)
 }
 
@@ -4457,6 +4462,7 @@ func (c *versionServiceClient) Version(ctx context.Context, in *VersionRequest, 
 
 // VersionServiceServer is the server API for VersionService service.
 type VersionServiceServer interface {
+	// Version returns the version of the wallet.
 	Version(context.Context, *VersionRequest) (*VersionResponse, error)
 }
 
@@ -4508,24 +4514,41 @@ var _VersionService_serviceDesc = grpc.ServiceDesc{
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
 type WalletServiceClient interface {
 	// Queries
+	// Ping tests connectivity to the wallet service.
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
+	// Network returns the active network the wallet is connected to.
 	Network(ctx context.Context, in *NetworkRequest, opts ...grpc.CallOption) (*NetworkResponse, error)
+	// AccountNumber returns the account number for a given account name.
 	AccountNumber(ctx context.Context, in *AccountNumberRequest, opts ...grpc.CallOption) (*AccountNumberResponse, error)
+	// Accounts returns information about all accounts in the wallet.
 	Accounts(ctx context.Context, in *AccountsRequest, opts ...grpc.CallOption) (*AccountsResponse, error)
+	// Balance returns the balance for a specific account.
 	Balance(ctx context.Context, in *BalanceRequest, opts ...grpc.CallOption) (*BalanceResponse, error)
+	// GetTransactions returns transaction history for the wallet.
 	GetTransactions(ctx context.Context, in *GetTransactionsRequest, opts ...grpc.CallOption) (*GetTransactionsResponse, error)
 	// Notifications
+	// TransactionNotifications streams transaction notifications.
 	TransactionNotifications(ctx context.Context, in *TransactionNotificationsRequest, opts ...grpc.CallOption) (WalletService_TransactionNotificationsClient, error)
+	// SpentnessNotifications streams notifications about output spentness.
 	SpentnessNotifications(ctx context.Context, in *SpentnessNotificationsRequest, opts ...grpc.CallOption) (WalletService_SpentnessNotificationsClient, error)
+	// AccountNotifications streams notifications about account changes.
 	AccountNotifications(ctx context.Context, in *AccountNotificationsRequest, opts ...grpc.CallOption) (WalletService_AccountNotificationsClient, error)
 	// Control
+	// ChangePassphrase changes the wallet's private or public passphrase.
 	ChangePassphrase(ctx context.Context, in *ChangePassphraseRequest, opts ...grpc.CallOption) (*ChangePassphraseResponse, error)
+	// RenameAccount renames an existing account.
 	RenameAccount(ctx context.Context, in *RenameAccountRequest, opts ...grpc.CallOption) (*RenameAccountResponse, error)
+	// NextAccount creates a new account.
 	NextAccount(ctx context.Context, in *NextAccountRequest, opts ...grpc.CallOption) (*NextAccountResponse, error)
+	// NextAddress generates a new address for an account.
 	NextAddress(ctx context.Context, in *NextAddressRequest, opts ...grpc.CallOption) (*NextAddressResponse, error)
+	// ImportPrivateKey imports a private key into the wallet.
 	ImportPrivateKey(ctx context.Context, in *ImportPrivateKeyRequest, opts ...grpc.CallOption) (*ImportPrivateKeyResponse, error)
+	// FundTransaction selects inputs to fund a transaction.
 	FundTransaction(ctx context.Context, in *FundTransactionRequest, opts ...grpc.CallOption) (*FundTransactionResponse, error)
+	// SignTransaction signs a transaction.
 	SignTransaction(ctx context.Context, in *SignTransactionRequest, opts ...grpc.CallOption) (*SignTransactionResponse, error)
+	// PublishTransaction publishes a signed transaction to the network.
 	PublishTransaction(ctx context.Context, in *PublishTransactionRequest, opts ...grpc.CallOption) (*PublishTransactionResponse, error)
 }
 
@@ -4762,24 +4785,41 @@ func (c *walletServiceClient) PublishTransaction(ctx context.Context, in *Publis
 // WalletServiceServer is the server API for WalletService service.
 type WalletServiceServer interface {
 	// Queries
+	// Ping tests connectivity to the wallet service.
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
+	// Network returns the active network the wallet is connected to.
 	Network(context.Context, *NetworkRequest) (*NetworkResponse, error)
+	// AccountNumber returns the account number for a given account name.
 	AccountNumber(context.Context, *AccountNumberRequest) (*AccountNumberResponse, error)
+	// Accounts returns information about all accounts in the wallet.
 	Accounts(context.Context, *AccountsRequest) (*AccountsResponse, error)
+	// Balance returns the balance for a specific account.
 	Balance(context.Context, *BalanceRequest) (*BalanceResponse, error)
+	// GetTransactions returns transaction history for the wallet.
 	GetTransactions(context.Context, *GetTransactionsRequest) (*GetTransactionsResponse, error)
 	// Notifications
+	// TransactionNotifications streams transaction notifications.
 	TransactionNotifications(*TransactionNotificationsRequest, WalletService_TransactionNotificationsServer) error
+	// SpentnessNotifications streams notifications about output spentness.
 	SpentnessNotifications(*SpentnessNotificationsRequest, WalletService_SpentnessNotificationsServer) error
+	// AccountNotifications streams notifications about account changes.
 	AccountNotifications(*AccountNotificationsRequest, WalletService_AccountNotificationsServer) error
 	// Control
+	// ChangePassphrase changes the wallet's private or public passphrase.
 	ChangePassphrase(context.Context, *ChangePassphraseRequest) (*ChangePassphraseResponse, error)
+	// RenameAccount renames an existing account.
 	RenameAccount(context.Context, *RenameAccountRequest) (*RenameAccountResponse, error)
+	// NextAccount creates a new account.
 	NextAccount(context.Context, *NextAccountRequest) (*NextAccountResponse, error)
+	// NextAddress generates a new address for an account.
 	NextAddress(context.Context, *NextAddressRequest) (*NextAddressResponse, error)
+	// ImportPrivateKey imports a private key into the wallet.
 	ImportPrivateKey(context.Context, *ImportPrivateKeyRequest) (*ImportPrivateKeyResponse, error)
+	// FundTransaction selects inputs to fund a transaction.
 	FundTransaction(context.Context, *FundTransactionRequest) (*FundTransactionResponse, error)
+	// SignTransaction signs a transaction.
 	SignTransaction(context.Context, *SignTransactionRequest) (*SignTransactionResponse, error)
+	// PublishTransaction publishes a signed transaction to the network.
 	PublishTransaction(context.Context, *PublishTransactionRequest) (*PublishTransactionResponse, error)
 }
 
@@ -5243,10 +5283,15 @@ var _WalletService_serviceDesc = grpc.ServiceDesc{
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
 type WalletLoaderServiceClient interface {
+	// WalletExists checks if a wallet exists.
 	WalletExists(ctx context.Context, in *WalletExistsRequest, opts ...grpc.CallOption) (*WalletExistsResponse, error)
+	// CreateWallet creates a new wallet.
 	CreateWallet(ctx context.Context, in *CreateWalletRequest, opts ...grpc.CallOption) (*CreateWalletResponse, error)
+	// OpenWallet opens an existing wallet.
 	OpenWallet(ctx context.Context, in *OpenWalletRequest, opts ...grpc.CallOption) (*OpenWalletResponse, error)
+	// CloseWallet closes the currently open wallet.
 	CloseWallet(ctx context.Context, in *CloseWalletRequest, opts ...grpc.CallOption) (*CloseWalletResponse, error)
+	// StartConsensusRpc starts the consensus RPC connection.
 	StartConsensusRpc(ctx context.Context, in *StartConsensusRpcRequest, opts ...grpc.CallOption) (*StartConsensusRpcResponse, error)
 }
 
@@ -5305,10 +5350,15 @@ func (c *walletLoaderServiceClient) StartConsensusRpc(ctx context.Context, in *S
 
 // WalletLoaderServiceServer is the server API for WalletLoaderService service.
 type WalletLoaderServiceServer interface {
+	// WalletExists checks if a wallet exists.
 	WalletExists(context.Context, *WalletExistsRequest) (*WalletExistsResponse, error)
+	// CreateWallet creates a new wallet.
 	CreateWallet(context.Context, *CreateWalletRequest) (*CreateWalletResponse, error)
+	// OpenWallet opens an existing wallet.
 	OpenWallet(context.Context, *OpenWalletRequest) (*OpenWalletResponse, error)
+	// CloseWallet closes the currently open wallet.
 	CloseWallet(context.Context, *CloseWalletRequest) (*CloseWalletResponse, error)
+	// StartConsensusRpc starts the consensus RPC connection.
 	StartConsensusRpc(context.Context, *StartConsensusRpcRequest) (*StartConsensusRpcResponse, error)
 }
 
