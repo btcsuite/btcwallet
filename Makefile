@@ -126,6 +126,11 @@ fmt-check: fmt
 	@$(call print, "Checking fmt results.")
 	if test -n "$$(git status --porcelain)"; then echo "code not formatted correctly, please run `make fmt` again!"; git status; git diff; exit 1; fi
 
+#? rpc-format: Format protobuf definition files
+rpc-format:
+	@$(call print, "Formatting protos.")
+	cd ./rpc; find . -name "*.proto" | xargs clang-format --style=file -i
+
 #? lint: Lint source
 lint: $(LINT_BIN)
 	@$(call print, "Linting source.")
@@ -171,6 +176,7 @@ tidy-module-check: tidy-module
 	fmt-check \
 	tidy-module \
 	tidy-module-check \
+	rpc-format \
 	lint \
 	rpc \
 	rpc-check \
