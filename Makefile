@@ -1,8 +1,11 @@
 PKG := github.com/btcsuite/btcwallet
+TOOLS_DIR := tools
+
+GOCC ?= go
 
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOACC_PKG := github.com/ory/go-acc
-GOIMPORTS_PKG := golang.org/x/tools/cmd/goimports
+GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 
 GO_BIN := $(shell go env GOBIN)
 
@@ -11,6 +14,7 @@ ifeq ($(GO_BIN),)
 GO_BIN := $(shell go env GOPATH)/bin
 endif
 
+GOIMPORTS_BIN := $(GO_BIN)/gosimports
 LINT_BIN := $(GO_BIN)/golangci-lint
 GOACC_BIN := $(GO_BIN)/go-acc
 
@@ -55,6 +59,10 @@ all: build check
 # ============
 # DEPENDENCIES
 # ============
+
+$(GOIMPORTS_BIN):
+	@$(call print, "Installing goimports.")
+	cd $(TOOLS_DIR); $(GOCC) install -trimpath $(GOIMPORTS_PKG)
 
 $(LINT_BIN):
 	@$(call print, "Fetching linter")
