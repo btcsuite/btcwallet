@@ -72,11 +72,6 @@ $(GOACC_BIN):
 	@$(call print, "Fetching go-acc")
 	$(GOINSTALL) $(GOACC_PKG)@$(GOACC_VERSION)
 
-#? goimports: Install goimports
-goimports:
-	@$(call print, "Installing goimports.")
-	$(GOINSTALL) $(GOIMPORTS_PKG)@${GOIMPORTS_COMMIT}
-
 # ============
 # INSTALLATION
 # ============
@@ -119,10 +114,10 @@ unit-race:
 # UTILITIES
 # =========
 
-#? fmt: Fix imports and formatting source
-fmt: goimports
+#? fmt: Fix imports and format source code
+fmt: $(GOIMPORTS_BIN)
 	@$(call print, "Fixing imports.")
-	goimports -w $(GOFILES_NOVENDOR)
+	$(GOIMPORTS_BIN) -w $(GOFILES_NOVENDOR)
 	@$(call print, "Formatting source.")
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
