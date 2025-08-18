@@ -48,6 +48,9 @@ jobs:
       - name: Check code format
         run: make fmt-check
 
+      - name: Check go modules tidiness
+        run: make tidy-module-check
+
       - name: Check RPC format
         run: make rpc-check
 
