@@ -121,6 +121,11 @@ fmt: $(GOIMPORTS_BIN)
 	@$(call print, "Formatting source.")
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
+#? fmt-check: Make sure source code is formatted and imports are correct
+fmt-check: fmt
+	@$(call print, "Checking fmt results.")
+	if test -n "$$(git status --porcelain)"; then echo "code not formatted correctly, please run `make fmt` again!"; git status; git diff; exit 1; fi
+
 #? lint: Lint source
 lint: $(LINT_BIN)
 	@$(call print, "Linting source.")
@@ -148,6 +153,7 @@ tidy-module-check: tidy-module
 	unit-cover \
 	unit-race \
 	fmt \
+	fmt-check \
 	lint \
 	clean
 
