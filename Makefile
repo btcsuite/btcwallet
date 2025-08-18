@@ -164,6 +164,8 @@ tidy-module-check: tidy-module
 	unit-race \
 	fmt \
 	fmt-check \
+	tidy-module \
+	tidy-module-check \
 	lint \
 	rpc \
 	rpc-check \
