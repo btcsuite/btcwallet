@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/btcsuite/btcd/rpcclient" //nolint:depguard
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -262,13 +263,24 @@ func readCAFile() []byte {
 }
 
 // startChainRPC opens a RPC client connection to a btcd server for blockchain
-// services.  This function uses the RPC options from the global config and
+// services. This function uses the RPC options from the global config and
 // there is no recovery in case the server is not available or if there is an
 // authentication error.  Instead, all requests to the client will simply error.
-func startChainRPC(certs []byte) (*chain.RPCClient, error) {
+func startChainRPC(certs []byte) (*chain.BtcdClient, error) {
 	log.Infof("Attempting RPC client connection to %v", cfg.RPCConnect)
-	rpcc, err := chain.NewRPCClient(activeNet.Params, cfg.RPCConnect,
-		cfg.BtcdUsername, cfg.BtcdPassword, certs, cfg.DisableClientTLS, 0)
+
+	chainCfg := &chain.BtcdConfig{
+		Conn: &rpcclient.ConnConfig{
+			Host:         cfg.RPCConnect,
+			User:         cfg.BtcdUsername,
+			Pass:         cfg.BtcdPassword,
+			Certificates: certs,
+			DisableTLS:   cfg.DisableClientTLS,
+		},
+		Chain:             activeNet.Params,
+		ReconnectAttempts: 0,
+	}
+	rpcc, err := chain.NewBtcdClientWithConfig(chainCfg)
 	if err != nil {
 		return nil, err
 	}
