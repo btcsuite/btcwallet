@@ -131,6 +131,11 @@ lint: $(LINT_BIN)
 	@$(call print, "Linting source.")
 	$(LINT)
 
+#? rpc: Compile protobuf definitions
+rpc:
+	@$(call print, "Compiling protos.")
+	cd ./rpc; ./gen_protos_docker.sh
+
 #? clean: Clean source
 clean:
 	@$(call print, "Cleaning source.$(NC)")
@@ -155,6 +160,7 @@ tidy-module-check: tidy-module
 	fmt \
 	fmt-check \
 	lint \
+	rpc \
 	clean
 
 #? help: Get more info on make commands
