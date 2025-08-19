@@ -55,4 +55,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-go 1.22
+// If you change this please run `make lint` to see where else it needs to be
+// updated as well.
+go 1.24.6

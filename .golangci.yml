@@ -1,4 +1,8 @@
 run:
+  # If you change this please run `make lint` to see where else it needs to be
+  # updated as well.
+  go: "1.24.6"
+
   # timeout for analysis
   timeout: 10m
 
