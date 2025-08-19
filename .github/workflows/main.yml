@@ -48,6 +48,9 @@ jobs:
       - name: Check code format
         run: make fmt-check
 
+      - name: Check RPC format
+        run: make rpc-check
+
       - name: compile code
         run: go install -v ./...
 
