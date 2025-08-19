@@ -4,7 +4,13 @@ LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOACC_PKG := github.com/ory/go-acc
 GOIMPORTS_PKG := golang.org/x/tools/cmd/goimports
 
-GO_BIN := ${GOPATH}/bin
+GO_BIN := $(shell go env GOBIN)
+
+# If GOBIN is not set, default to GOPATH/bin.
+ifeq ($(GO_BIN),)
+GO_BIN := $(shell go env GOPATH)/bin
+endif
+
 LINT_BIN := $(GO_BIN)/golangci-lint
 GOACC_BIN := $(GO_BIN)/go-acc
 
@@ -72,7 +78,7 @@ build:
 	@$(call print, "Compiling btcwallet.")
 	$(GOBUILD) $(PKG)/...
 
-#? install: Install btcwallet, dropwtxmgr and sweepaccount, place them in $GOPATH/bin
+#? install: Install btcwallet, dropwtxmgr and sweepaccount, place them in $GOBIN
 install:
 	@$(call print, "Installing btcwallet.")
 	$(GOINSTALL) $(PKG)
