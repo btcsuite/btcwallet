@@ -36,6 +36,8 @@ CP := cp
 MAKE := make
 XARGS := xargs -L 1
 
+include make/testing_flags.mk
+
 # Linting uses a lot of memory, so keep it under control by limiting the number
 # of workers if requested.
 ifneq ($(workers),)
@@ -98,7 +100,7 @@ check: unit
 #? unit: Run unit tests
 unit:
 	@$(call print, "Running unit tests.")
-	$(GOLIST) | $(XARGS) env $(GOTEST) -test.timeout=20m
+	$(UNIT)
 
 #? unit-cover: Run unit coverage tests
 unit-cover: $(GOACC_BIN)
