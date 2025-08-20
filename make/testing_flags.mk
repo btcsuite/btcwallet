@@ -1,10 +1,13 @@
 TEST_FLAGS =
+COVER_PKG = $$($(GOCC) list -deps ./... | grep '$(PKG)')
+COVER_FLAGS = -coverprofile=coverage.txt -covermode=atomic -coverpkg=$(PKG)/...
 
 # If specific package is being unit tested, construct the full name of the
 # subpackage.
 ifneq ($(pkg),)
 UNITPKG := $(PKG)/$(pkg)
 UNIT_TARGETED = yes
+COVER_PKG = $(PKG)/$(pkg)
 endif
 
 # If a specific unit test case is being target, construct test.run filter.
@@ -44,3 +47,5 @@ endif
 ifeq ($(UNIT_TARGETED), no)
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) $(TEST_FLAGS)
 endif
+
+UNIT_COVER := $(GOTEST) $(COVER_FLAGS) $(TEST_FLAGS) $(COVER_PKG)
