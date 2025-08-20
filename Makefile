@@ -111,6 +111,11 @@ unit-debug:
 	@$(call print, "Running debug unit tests.")
 	$(UNIT_DEBUG)
 
+#? unit-bench: Run benchmark tests
+unit-bench:
+	@$(call print, "Running benchmark tests.")
+	$(UNIT_BENCH)
+
 # =========
 # UTILITIES
 # =========
@@ -179,6 +184,7 @@ tidy-module-check: tidy-module
 	unit-cover \
 	unit-race \
 	unit-debug \
+	unit-bench \
 	fmt \
 	fmt-check \
 	tidy-module \
