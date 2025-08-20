@@ -42,10 +42,12 @@ UNIT_TARGETED ?= no
 # targeted case. Otherwise, default to running all tests.
 ifeq ($(UNIT_TARGETED), yes)
 UNIT := $(GOTEST) $(TEST_FLAGS) $(UNITPKG)
+UNIT_RACE := $(GOTEST) $(TEST_FLAGS) -race $(UNITPKG)
 endif
 
 ifeq ($(UNIT_TARGETED), no)
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) $(TEST_FLAGS)
+UNIT_RACE := $(UNIT) -race
 endif
 
 UNIT_COVER := $(GOTEST) $(COVER_FLAGS) $(TEST_FLAGS) $(COVER_PKG)
