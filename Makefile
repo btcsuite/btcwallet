@@ -4,7 +4,6 @@ TOOLS_DIR := tools
 GOCC ?= go
 
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
-GOACC_PKG := github.com/ory/go-acc
 GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 
 GO_BIN := $(shell go env GOBIN)
@@ -16,7 +15,6 @@ endif
 
 GOIMPORTS_BIN := $(GO_BIN)/gosimports
 LINT_BIN := $(GO_BIN)/golangci-lint
-GOACC_BIN := $(GO_BIN)/go-acc
 
 LINT_VERSION := v1.64.8
 GOACC_VERSION := v0.2.8
@@ -70,10 +68,6 @@ $(LINT_BIN):
 	@$(call print, "Fetching linter")
 	$(GOINSTALL) $(LINT_PKG)@$(LINT_VERSION)
 
-$(GOACC_BIN):
-	@$(call print, "Fetching go-acc")
-	$(GOINSTALL) $(GOACC_PKG)@$(GOACC_VERSION)
-
 # ============
 # INSTALLATION
 # ============
@@ -103,9 +97,9 @@ unit:
 	$(UNIT)
 
 #? unit-cover: Run unit coverage tests
-unit-cover: $(GOACC_BIN)
+unit-cover:
 	@$(call print, "Running unit coverage tests.")
-	$(GOACC_BIN) $(GOLIST_COVER)
+	$(UNIT_COVER)
 
 #? unit-race: Run unit race tests
 unit-race:
