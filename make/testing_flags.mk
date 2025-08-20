@@ -44,12 +44,20 @@ ifeq ($(UNIT_TARGETED), yes)
 UNIT := $(GOTEST) $(TEST_FLAGS) $(UNITPKG)
 UNIT_DEBUG := $(GOTEST) -v $(TEST_FLAGS) $(UNITPKG)
 UNIT_RACE := $(GOTEST) $(TEST_FLAGS) -race $(UNITPKG)
+
+# NONE is a special value which selects no other tests but only executes the
+# benchmark tests here.
+UNIT_BENCH := $(GOTEST) -test.bench=. -test.run=NONE $(UNITPKG)
 endif
 
 ifeq ($(UNIT_TARGETED), no)
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) $(TEST_FLAGS)
 UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v $(TEST_FLAGS)
 UNIT_RACE := $(UNIT) -race
+
+# NONE is a special value which selects no other tests but only executes the
+# benchmark tests here.
+UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -test.bench=. -test.run=NONE
 endif
 
 UNIT_COVER := $(GOTEST) $(COVER_FLAGS) $(TEST_FLAGS) $(COVER_PKG)
