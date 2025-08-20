@@ -189,11 +189,11 @@ func (rm *RecoveryManager) State() *RecoveryState {
 //
 // These are defined as:
 //   - Inter-Block Gap: The maximum difference between the derived child indexes
-//       of the last addresses used in any block and the next address consumed
-//       by a later block.
+//     of the last addresses used in any block and the next address consumed
+//     by a later block.
 //   - Intra-Block Gap: The maximum difference between the derived child indexes
-//       of the first address used in any block and the last address used in the
-//       same block.
+//     of the first address used in any block and the last address used in the
+//     same block.
 type RecoveryState struct {
 	// recoveryWindow defines the key-derivation lookahead used when
 	// attempting to recover the set of used addresses. This value will be
@@ -282,12 +282,12 @@ func NewScopeRecoveryState(recoveryWindow uint32) *ScopeRecoveryState {
 // derivation branch.
 //
 // A branch recovery state supports operations for:
-//  - Expanding the look-ahead horizon based on which indexes have been found.
-//  - Registering derived addresses with indexes within the horizon.
-//  - Reporting an invalid child index that falls into the horizon.
-//  - Reporting that an address has been found.
-//  - Retrieving all currently derived addresses for the branch.
-//  - Looking up a particular address by its child index.
+//   - Expanding the look-ahead horizon based on which indexes have been found.
+//   - Registering derived addresses with indexes within the horizon.
+//   - Reporting an invalid child index that falls into the horizon.
+//   - Reporting that an address has been found.
+//   - Retrieving all currently derived addresses for the branch.
+//   - Looking up a particular address by its child index.
 type BranchRecoveryState struct {
 	// recoveryWindow defines the key-derivation lookahead used when
 	// attempting to recover the set of addresses on this branch.

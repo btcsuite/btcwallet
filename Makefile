@@ -1,10 +1,20 @@
 PKG := github.com/btcsuite/btcwallet
+TOOLS_DIR := tools
+
+GOCC ?= go
 
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOACC_PKG := github.com/ory/go-acc
-GOIMPORTS_PKG := golang.org/x/tools/cmd/goimports
+GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 
-GO_BIN := ${GOPATH}/bin
+GO_BIN := $(shell go env GOBIN)
+
+# If GOBIN is not set, default to GOPATH/bin.
+ifeq ($(GO_BIN),)
+GO_BIN := $(shell go env GOPATH)/bin
+endif
+
+GOIMPORTS_BIN := $(GO_BIN)/gosimports
 LINT_BIN := $(GO_BIN)/golangci-lint
 GOACC_BIN := $(GO_BIN)/go-acc
 
@@ -50,6 +60,10 @@ all: build check
 # DEPENDENCIES
 # ============
 
+$(GOIMPORTS_BIN):
+	@$(call print, "Installing goimports.")
+	cd $(TOOLS_DIR); $(GOCC) install -trimpath $(GOIMPORTS_PKG)
+
 $(LINT_BIN):
 	@$(call print, "Fetching linter")
 	$(GOINSTALL) $(LINT_PKG)@$(LINT_VERSION)
@@ -57,11 +71,6 @@ $(LINT_BIN):
 $(GOACC_BIN):
 	@$(call print, "Fetching go-acc")
 	$(GOINSTALL) $(GOACC_PKG)@$(GOACC_VERSION)
-
-#? goimports: Install goimports
-goimports:
-	@$(call print, "Installing goimports.")
-	$(GOINSTALL) $(GOIMPORTS_PKG)@${GOIMPORTS_COMMIT}
 
 # ============
 # INSTALLATION
@@ -72,7 +81,7 @@ build:
 	@$(call print, "Compiling btcwallet.")
 	$(GOBUILD) $(PKG)/...
 
-#? install: Install btcwallet, dropwtxmgr and sweepaccount, place them in $GOPATH/bin
+#? install: Install btcwallet, dropwtxmgr and sweepaccount, place them in $GOBIN
 install:
 	@$(call print, "Installing btcwallet.")
 	$(GOINSTALL) $(PKG)
@@ -105,12 +114,17 @@ unit-race:
 # UTILITIES
 # =========
 
-#? fmt: Fix imports and formatting source
-fmt: goimports
+#? fmt: Fix imports and format source code
+fmt: $(GOIMPORTS_BIN)
 	@$(call print, "Fixing imports.")
-	goimports -w $(GOFILES_NOVENDOR)
+	$(GOIMPORTS_BIN) -w $(GOFILES_NOVENDOR)
 	@$(call print, "Formatting source.")
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
+
+#? fmt-check: Make sure source code is formatted and imports are correct
+fmt-check: fmt
+	@$(call print, "Checking fmt results.")
+	if test -n "$$(git status --porcelain)"; then echo "code not formatted correctly, please run `make fmt` again!"; git status; git diff; exit 1; fi
 
 #? lint: Lint source
 lint: $(LINT_BIN)
@@ -139,6 +153,7 @@ tidy-module-check: tidy-module
 	unit-cover \
 	unit-race \
 	fmt \
+	fmt-check \
 	lint \
 	clean
 

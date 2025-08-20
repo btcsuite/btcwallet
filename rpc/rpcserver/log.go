@@ -18,9 +18,8 @@ import (
 	"os"
 	"strings"
 
-	"google.golang.org/grpc/grpclog"
-
 	"github.com/btcsuite/btclog"
+	"google.golang.org/grpc/grpclog"
 )
 
 // UseLogger sets the logger to use for the gRPC server.
