@@ -106,6 +106,11 @@ unit-race:
 	@$(call print, "Running unit race tests.")
 	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(UNIT_RACE)
 
+#? unit-debug: Run unit tests with verbose debug output enabled
+unit-debug:
+	@$(call print, "Running debug unit tests.")
+	$(UNIT_DEBUG)
+
 # =========
 # UTILITIES
 # =========
@@ -173,6 +178,7 @@ tidy-module-check: tidy-module
 	unit \
 	unit-cover \
 	unit-race \
+	unit-debug \
 	fmt \
 	fmt-check \
 	tidy-module \
