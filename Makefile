@@ -151,6 +151,11 @@ protolint:
 	@$(call print, "Linting proto files.")
 	docker run --rm --volume "$$(pwd):/workspace" --workdir /workspace yoheimuta/protolint lint rpc/
 
+#? sample-conf-check: Make sure default values in the sample-btcwallet.conf file are set correctly
+sample-conf-check: install
+	@$(call print, "Checking that default values in the sample-btcwallet.conf file are set correctly")
+	scripts/check-sample-btcwallet-conf.sh
+
 #? clean: Clean source
 clean:
 	@$(call print, "Cleaning source.$(NC)")
@@ -181,6 +186,7 @@ tidy-module-check: tidy-module
 	rpc \
 	rpc-check \
 	protolint \
+	sample-conf-check \
 	clean
 
 #? help: Get more info on make commands
