@@ -120,6 +120,9 @@ jobs:
       - name: git checkout
         uses: actions/checkout@v4
 
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
       - name: go cache
         uses: actions/cache@v4
         with:
