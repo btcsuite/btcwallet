@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: git checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -118,7 +118,7 @@ jobs:
           docker rm $CONTAINER_ID
 
       - name: git checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Clean up runner space
         uses: ./.github/actions/cleanup-space
