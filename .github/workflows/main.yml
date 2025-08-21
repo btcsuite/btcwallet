@@ -43,6 +43,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
       - name: setup go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v5
         with:
