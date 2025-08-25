@@ -410,7 +410,7 @@ func TestGetTransactionConfirmations(t *testing.T) {
 						Hash:   chainhash.Hash{},
 					}
 
-					return w.Manager.SetSyncedTo(
+					return w.addrStore.SetSyncedTo(
 						addrmgrNs, bs,
 					)
 				},
