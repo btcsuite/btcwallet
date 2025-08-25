@@ -284,11 +284,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 			// was performed from the default wallet accounts
 			// (NP2WKH, P2WKH, P2TR), so any key scope provided
 			// doesn't impact the result of this call.
-			watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 				addrmgrNs, waddrmgr.KeyScopeBIP0086, account,
 			)
 		} else {
-			watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 				addrmgrNs, *coinSelectKeyScope, account,
 			)
 		}
@@ -297,7 +297,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		}
 		if !watchOnly {
 			err = tx.AddAllInputScripts(
-				secretSource{w.Manager, addrmgrNs},
+				secretSource{w.addrStore, addrmgrNs},
 			)
 			if err != nil {
 				return err
@@ -402,7 +402,7 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 		if err != nil || len(addrs) != 1 {
 			continue
 		}
-		scopedMgr, addrAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(addrmgrNs, addrs[0])
 		if err != nil {
 			continue
 		}
@@ -450,7 +450,7 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 	// It's possible for the account to have an address schema override, so
 	// prefer that if it exists.
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
-	scopeMgr, err := w.Manager.FetchScopedKeyManager(*changeKeyScope)
+	scopeMgr, err := w.addrStore.FetchScopedKeyManager(*changeKeyScope)
 	if err != nil {
 		return nil, nil, err
 	}

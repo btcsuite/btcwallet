@@ -501,11 +501,11 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 				// wallet accounts (NP2WKH, P2WKH, P2TR), so any
 				// key scope provided doesn't impact the result
 				// of this call.
-				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+				watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 					ns, waddrmgr.KeyScopeBIP0084, account,
 				)
 			} else {
-				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+				watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 					ns, *keyScope, account,
 				)
 			}

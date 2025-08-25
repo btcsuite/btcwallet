@@ -46,7 +46,7 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
-		syncBlock := w.Manager.SyncedTo()
+		syncBlock := w.addrStore.SyncedTo()
 
 		// TODO: actually stream outputs from the db instead of fetching
 		// all of them at once.
@@ -72,7 +72,7 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 				// per output.
 				continue
 			}
-			_, outputAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+			_, outputAcct, err := w.addrStore.AddrAccount(addrmgrNs, addrs[0])
 			if err != nil {
 				return err
 			}
