@@ -347,7 +347,7 @@ func addReorgCredit(t *testing.T, w *Wallet, tx walletdb.ReadWriteTx,
 
 	t.Helper()
 	require.NoError(t, w.addRelevantTx(tx, record, block))
-	require.NoError(t, w.TxStore.AddCredit(
+	require.NoError(t, w.txStore.AddCredit(
 		tx.ReadWriteBucket(wtxmgrNamespaceKey), record, block, 0, change,
 	))
 }
@@ -361,7 +361,7 @@ func assertReorgHistory(t *testing.T, w *Wallet,
 
 		var wantConfirmed int64
 		for i, record := range records {
-			detail, err := w.TxStore.TxDetails(ns, &record.Hash)
+			detail, err := w.txStore.TxDetails(ns, &record.Hash)
 			require.NoError(t, err)
 			require.NotNil(t, detail)
 			require.Equal(t, heights[i], detail.Block.Height)
@@ -378,11 +378,11 @@ func assertReorgHistory(t *testing.T, w *Wallet,
 			}
 		}
 
-		confirmed, err := w.TxStore.Balance(ns, 1, 4)
+		confirmed, err := w.txStore.Balance(ns, 1, 4)
 		require.NoError(t, err)
 		require.EqualValues(t, wantConfirmed, confirmed)
 
-		total, err := w.TxStore.Balance(ns, 0, 4)
+		total, err := w.txStore.Balance(ns, 0, 4)
 		require.NoError(t, err)
 		require.EqualValues(t, len(records)*1000, total)
 

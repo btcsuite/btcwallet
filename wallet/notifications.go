@@ -54,7 +54,7 @@ func lookupInputAccount(dbtx walletdb.ReadTx, w *Wallet, details *wtxmgr.TxDetai
 	// TODO: Debits should record which account(s?) they
 	// debit from so this doesn't need to be looked up.
 	prevOP := &details.MsgTx.TxIn[deb.Index].PreviousOutPoint
-	prev, err := w.TxStore.TxDetails(txmgrNs, &prevOP.Hash)
+	prev, err := w.txStore.TxDetails(txmgrNs, &prevOP.Hash)
 	if err != nil {
 		log.Errorf("Cannot query previous transaction details for %v: %v", prevOP.Hash, err)
 		return 0
@@ -155,7 +155,7 @@ func makeTxSummary(dbtx walletdb.ReadTx, w *Wallet, details *wtxmgr.TxDetails) T
 
 func totalBalances(dbtx walletdb.ReadTx, w *Wallet, m map[uint32]btcutil.Amount) error {
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
-	unspent, err := w.TxStore.UnspentOutputs(dbtx.ReadBucket(wtxmgrNamespaceKey))
+	unspent, err := w.txStore.UnspentOutputs(dbtx.ReadBucket(wtxmgrNamespaceKey))
 	if err != nil {
 		return err
 	}
@@ -215,7 +215,7 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
 	// TODO(wilmer): ideally we should find the culprit to why we're
 	// receiving an additional unconfirmed chain.RelevantTx notification
 	// from the chain backend.
-	details, err := s.wallet.TxStore.UniqueTxDetails(ns, &txHash, nil)
+	details, err := s.wallet.txStore.UniqueTxDetails(ns, &txHash, nil)
 	if err != nil {
 		log.Errorf("Cannot query transaction details for "+
 			"notification: %v", err)
@@ -231,7 +231,7 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
 	}
 
 	unminedTxs := []TransactionSummary{makeTxSummary(dbtx, s.wallet, details)}
-	unminedHashes, err := s.wallet.TxStore.UnminedTxHashes(dbtx.ReadBucket(wtxmgrNamespaceKey))
+	unminedHashes, err := s.wallet.txStore.UnminedTxHashes(dbtx.ReadBucket(wtxmgrNamespaceKey))
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
 		return
@@ -284,7 +284,7 @@ func (s *NotificationServer) notifyMinedTransaction(dbtx walletdb.ReadTx,
 
 	// We'll only notify the transaction if it was found within the
 	// wallet's set of confirmed transactions.
-	details, err := s.wallet.TxStore.UniqueTxDetails(
+	details, err := s.wallet.txStore.UniqueTxDetails(
 		ns, &txHash, &block.Block,
 	)
 	if err != nil {
@@ -353,7 +353,7 @@ func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wt
 	// a new, previously unseen transaction appearing in unconfirmed.
 
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
-	unminedHashes, err := s.wallet.TxStore.UnminedTxHashes(txmgrNs)
+	unminedHashes, err := s.wallet.txStore.UnminedTxHashes(txmgrNs)
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
 		return
