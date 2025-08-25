@@ -126,7 +126,7 @@ type Wallet struct {
 	// Data stores
 	db        walletdb.DB
 	addrStore *waddrmgr.Manager
-	TxStore *wtxmgr.Store
+	txStore   *wtxmgr.Store
 
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex
@@ -375,14 +375,14 @@ func (w *Wallet) activeData(dbtx walletdb.ReadWriteTx) ([]btcutil.Address, []wtx
 
 	// Before requesting the list of spendable UTXOs, we'll delete any
 	// expired output locks.
-	err = w.TxStore.DeleteExpiredLockedOutputs(
+	err = w.txStore.DeleteExpiredLockedOutputs(
 		dbtx.ReadWriteBucket(wtxmgrNamespaceKey),
 	)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	unspent, err := w.TxStore.OutputsToWatch(txmgrNs)
+	unspent, err := w.txStore.OutputsToWatch(txmgrNs)
 	return addrs, unspent, err
 }
 
@@ -537,7 +537,7 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		// stale state. `Rollback` unconfirms transactions at and beyond
 		// the passed height, so add one to the new synced-to height to
 		// prevent unconfirming transactions in the synced-to block.
-		return w.TxStore.Rollback(txmgrNs, rollbackStamp.Height+1)
+		return w.txStore.Rollback(txmgrNs, rollbackStamp.Height+1)
 	})
 	if err != nil {
 		return err
@@ -726,7 +726,7 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	}
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		txMgrNS := tx.ReadBucket(wtxmgrNamespaceKey)
-		credits, err := w.TxStore.UnspentOutputs(txMgrNS)
+		credits, err := w.txStore.UnspentOutputs(txMgrNS)
 		if err != nil {
 			return err
 		}
@@ -1669,7 +1669,7 @@ func (w *Wallet) CalculateBalance(confirms int32) (btcutil.Amount, error) {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 		var err error
 		blk := w.addrStore.SyncedTo()
-		balance, err = w.TxStore.Balance(txmgrNs, confirms, blk.Height)
+		balance, err = w.txStore.Balance(txmgrNs, confirms, blk.Height)
 		return err
 	})
 	return balance, err
@@ -1699,7 +1699,7 @@ func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balan
 		// the number of tx confirmations.
 		syncBlock := w.addrStore.SyncedTo()
 
-		unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
+		unspent, err := w.txStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
 		}
@@ -1832,7 +1832,7 @@ func (w *Wallet) LabelTransaction(hash chainhash.Hash, label string,
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
-		dbTx, err := w.TxStore.TxDetails(txmgrNs, &hash)
+		dbTx, err := w.txStore.TxDetails(txmgrNs, &hash)
 		if err != nil {
 			return err
 		}
@@ -1868,7 +1868,7 @@ func (w *Wallet) LabelTransaction(hash chainhash.Hash, label string,
 
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		return w.TxStore.PutTxLabel(txmgrNs, hash, label)
+		return w.txStore.PutTxLabel(txmgrNs, hash, label)
 	})
 }
 
@@ -2280,7 +2280,7 @@ func (w *Wallet) ListSinceBlock(start, end, syncHeight int32) ([]btcjson.ListTra
 			return false, nil
 		}
 
-		return w.TxStore.RangeTransactions(txmgrNs, start, end, rangeFn)
+		return w.txStore.RangeTransactions(txmgrNs, start, end, rangeFn)
 	})
 	return txList, err
 }
@@ -2333,7 +2333,7 @@ func (w *Wallet) ListTransactions(from, count int) ([]btcjson.ListTransactionsRe
 
 		// Return newer results first by starting at mempool height and working
 		// down to the genesis block.
-		return w.TxStore.RangeTransactions(txmgrNs, -1, 0, rangeFn)
+		return w.txStore.RangeTransactions(txmgrNs, -1, 0, rangeFn)
 	})
 	return txList, err
 }
@@ -2379,7 +2379,7 @@ func (w *Wallet) ListAddressTransactions(pkHashes map[string]struct{}) ([]btcjso
 			return false, nil
 		}
 
-		return w.TxStore.RangeTransactions(txmgrNs, 0, -1, rangeFn)
+		return w.txStore.RangeTransactions(txmgrNs, 0, -1, rangeFn)
 	})
 	return txList, err
 }
@@ -2411,7 +2411,7 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult, error)
 
 		// Return newer results first by starting at mempool height and
 		// working down to the genesis block.
-		return w.TxStore.RangeTransactions(txmgrNs, -1, 0, rangeFn)
+		return w.txStore.RangeTransactions(txmgrNs, -1, 0, rangeFn)
 	})
 	return txList, err
 }
@@ -2561,7 +2561,7 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 			}
 		}
 
-		return w.TxStore.RangeTransactions(txmgrNs, start, end, rangeFn)
+		return w.txStore.RangeTransactions(txmgrNs, start, end, rangeFn)
 	})
 	return &res, err
 }
@@ -2585,7 +2585,7 @@ func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
-		txDetail, err := w.TxStore.TxDetails(txmgrNs, &txHash)
+		txDetail, err := w.txStore.TxDetails(txmgrNs, &txHash)
 		if err != nil {
 			return err
 		}
@@ -2654,7 +2654,7 @@ func (w *Wallet) Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error) {
 		syncBlock := w.addrStore.SyncedTo()
 		syncBlockHash = &syncBlock.Hash
 		syncBlockHeight = syncBlock.Height
-		unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
+		unspent, err := w.txStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
 		}
@@ -2745,7 +2745,7 @@ func (w *Wallet) AccountBalances(scope waddrmgr.KeyScope,
 		// Fetch all unspent outputs, and iterate over them tallying each
 		// account's balance where the output script pays to an account address
 		// and the required number of confirmations is met.
-		unspentOutputs, err := w.TxStore.UnspentOutputs(txmgrNs)
+		unspentOutputs, err := w.txStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
 		}
@@ -2834,7 +2834,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 		syncBlock := w.addrStore.SyncedTo()
 
 		filter := accountName != ""
-		unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
+		unspent, err := w.txStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
 		}
@@ -2966,13 +2966,13 @@ func (w *Wallet) ListLeasedOutputs() ([]*ListLeasedOutputResult, error) {
 	var results []*ListLeasedOutputResult
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		outputs, err := w.TxStore.ListLockedOutputs(ns)
+		outputs, err := w.txStore.ListLockedOutputs(ns)
 		if err != nil {
 			return err
 		}
 
 		for _, output := range outputs {
-			details, err := w.TxStore.TxDetails(ns, &output.Outpoint.Hash)
+			details, err := w.txStore.TxDetails(ns, &output.Outpoint.Hash)
 			if err != nil {
 				return err
 			}
@@ -3139,7 +3139,7 @@ func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		var err error
-		expiry, err = w.TxStore.LockOutput(ns, id, op, duration)
+		expiry, err = w.txStore.LockOutput(ns, id, op, duration)
 		return err
 	})
 	return expiry, err
@@ -3151,7 +3151,7 @@ func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 func (w *Wallet) ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error {
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		return w.TxStore.UnlockOutput(ns, id, op)
+		return w.txStore.UnlockOutput(ns, id, op)
 	})
 }
 
@@ -3163,7 +3163,7 @@ func (w *Wallet) resendUnminedTxs() {
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 		var err error
-		txs, err = w.TxStore.UnminedTxs(txmgrNs)
+		txs, err = w.txStore.UnminedTxs(txmgrNs)
 		return err
 	})
 	if err != nil {
@@ -3422,7 +3422,8 @@ func (w *Wallet) TotalReceivedForAccounts(scope waddrmgr.KeyScope,
 			}
 			return false, nil
 		}
-		return w.TxStore.RangeTransactions(txmgrNs, 0, stopHeight, rangeFn)
+
+		return w.txStore.RangeTransactions(txmgrNs, 0, stopHeight, rangeFn)
 	})
 	return results, err
 }
@@ -3469,7 +3470,8 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 			}
 			return false, nil
 		}
-		return w.TxStore.RangeTransactions(txmgrNs, 0, stopHeight, rangeFn)
+
+		return w.txStore.RangeTransactions(txmgrNs, 0, stopHeight, rangeFn)
 	})
 	return amount, err
 }
@@ -3588,7 +3590,7 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 			if !ok {
 				prevHash := &txIn.PreviousOutPoint.Hash
 				prevIndex := txIn.PreviousOutPoint.Index
-				txDetails, err := w.TxStore.TxDetails(txmgrNs, prevHash)
+				txDetails, err := w.txStore.TxDetails(txmgrNs, prevHash)
 				if err != nil {
 					return fmt.Errorf("cannot query previous transaction "+
 						"details for %v: %w", txIn.PreviousOutPoint, err)
@@ -3841,7 +3843,7 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 		// and record it in the tx store.
 		if len(label) != 0 {
 			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-			if err = w.TxStore.PutTxLabel(txmgrNs, tx.TxHash(), label); err != nil {
+			if err = w.txStore.PutTxLabel(txmgrNs, tx.TxHash(), label); err != nil {
 				return err
 			}
 		}
@@ -3892,7 +3894,8 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 			if err != nil {
 				return err
 			}
-			return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
+
+			return w.txStore.RemoveUnminedTx(txmgrNs, txRec)
 		})
 		if dbErr != nil {
 			log.Warnf("Unable to remove confirmed transaction %v "+
@@ -3918,7 +3921,8 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 		if err != nil {
 			return err
 		}
-		return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
+
+		return w.txStore.RemoveUnminedTx(txmgrNs, txRec)
 	})
 	if dbErr != nil {
 		log.Warnf("Unable to remove invalid transaction %v: %v",
@@ -3972,7 +3976,7 @@ func (w *Wallet) RemoveDescendants(tx *wire.MsgTx) error {
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		wtxmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 
-		return w.TxStore.RemoveUnminedTx(wtxmgrNs, txRecord)
+		return w.txStore.RemoveUnminedTx(wtxmgrNs, txRecord)
 	})
 }
 
@@ -4370,8 +4374,8 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	w := &Wallet{
 		publicPassphrase:    pubPass,
 		db:                  db,
-		addrStore:             addrMgr,
-		TxStore:             txMgr,
+		addrStore:           addrMgr,
+		txStore:             txMgr,
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
 		recoveryWindow:      recoveryWindow,
 		rescanAddJob:        make(chan *RescanJob),
@@ -4392,7 +4396,7 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 
 	w.NtfnServer = newNotificationServer(w)
-	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
+	w.txStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
 

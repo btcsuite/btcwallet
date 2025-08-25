@@ -194,13 +194,13 @@ func addUtxo(t *testing.T, w *Wallet, incomingTx *wire.MsgTx) {
 
 	if err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		err = w.TxStore.InsertTx(ns, rec, block)
+		err = w.txStore.InsertTx(ns, rec, block)
 		if err != nil {
 			return err
 		}
 		// Add all tx outputs as credits.
 		for i := 0; i < len(incomingTx.TxOut); i++ {
-			err = w.TxStore.AddCredit(
+			err = w.txStore.AddCredit(
 				ns, rec, block, uint32(i), false,
 			)
 			if err != nil {
@@ -238,13 +238,13 @@ func addTxAndCredit(t *testing.T, w *Wallet, tx *wire.MsgTx,
 
 	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 		ns := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-		err = w.TxStore.InsertTx(ns, rec, block)
+		err = w.txStore.InsertTx(ns, rec, block)
 		if err != nil {
 			return err
 		}
 
 		// Add the specified output as credit.
-		err = w.TxStore.AddCredit(ns, rec, block, creditIndex, false)
+		err = w.txStore.AddCredit(ns, rec, block, creditIndex, false)
 		if err != nil {
 			return err
 		}
