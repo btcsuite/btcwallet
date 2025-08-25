@@ -64,7 +64,7 @@ func testWalletWatchingOnly(t *testing.T) (*Wallet, func()) {
 	err = walletdb.Update(w.Database(), func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		for scope, schema := range waddrmgr.ScopeAddrMap {
-			_, err := w.Manager.NewScopedKeyManager(
+			_, err := w.addrStore.NewScopedKeyManager(
 				ns, scope, schema,
 			)
 			if err != nil {

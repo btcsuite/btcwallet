@@ -51,7 +51,7 @@ func (w *Wallet) handleChainNotifications() {
 		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-			startBlock := w.Manager.SyncedTo()
+			startBlock := w.addrStore.SyncedTo()
 
 			for i := startBlock.Height + 1; i <= height; i++ {
 				hash, err := client.GetBlockHash(int64(i))
@@ -68,7 +68,7 @@ func (w *Wallet) handleChainNotifications() {
 					Hash:      *hash,
 					Timestamp: header.Timestamp,
 				}
-				err = w.Manager.SetSyncedTo(ns, &bs)
+				err = w.addrStore.SetSyncedTo(ns, &bs)
 				if err != nil {
 					return err
 				}
@@ -137,7 +137,7 @@ func (w *Wallet) handleChainNotifications() {
 				// missing relevant events.
 				birthdayStore := &walletBirthdayStore{
 					db:      w.db,
-					manager: w.Manager,
+					manager: w.addrStore,
 				}
 				birthdayBlock, err := birthdaySanityCheck(
 					chainClient, birthdayStore,
@@ -249,7 +249,7 @@ func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) err
 		Hash:      b.Hash,
 		Timestamp: b.Time,
 	}
-	err := w.Manager.SetSyncedTo(addrmgrNs, &bs)
+	err := w.addrStore.SetSyncedTo(addrmgrNs, &bs)
 	if err != nil {
 		return err
 	}
@@ -301,7 +301,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx,
 	if previous != nil {
 		// A delayed connection may leave the manager on the old block
 		// even when the store already holds its replacement.
-		err = w.Manager.SetSyncedTo(addrmgrNs, previous)
+		err = w.addrStore.SetSyncedTo(addrmgrNs, previous)
 		if err != nil {
 			return err
 		}
@@ -565,11 +565,11 @@ func retainedCoinbaseDescendants(details map[chainhash.Hash]wtxmgr.TxDetails,
 func (w *Wallet) disconnectedBlockStamp(ns walletdb.ReadBucket,
 	block *wtxmgr.Block) (*waddrmgr.BlockStamp, error) {
 
-	if block.Height > w.Manager.SyncedTo().Height {
+	if block.Height > w.addrStore.SyncedTo().Height {
 		return nil, nil
 	}
 
-	hash, err := w.Manager.BlockHash(ns, block.Height)
+	hash, err := w.addrStore.BlockHash(ns, block.Height)
 	if waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) {
 		return nil, nil
 	}
@@ -584,7 +584,7 @@ func (w *Wallet) disconnectedBlockStamp(ns walletdb.ReadBucket,
 
 	height := block.Height - 1
 
-	hash, err = w.Manager.BlockHash(ns, height)
+	hash, err = w.addrStore.BlockHash(ns, height)
 	if err != nil {
 		return nil, err
 	}
@@ -638,7 +638,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 		}
 
 		for _, addr := range addrs {
-			ma, err := w.Manager.Address(addrmgrNs, addr)
+			ma, err := w.addrStore.Address(addrmgrNs, addr)
 
 			switch {
 			// Missing addresses are skipped.
@@ -655,7 +655,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			// non-default scopes in other places either, so
 			// detecting them here would mean we'd also not properly
 			// detect them as spent later.
-			scopedManager, _, err := w.Manager.AddrAccount(
+			scopedManager, _, err := w.addrStore.AddrAccount(
 				addrmgrNs, addr,
 			)
 			if err != nil {
@@ -677,7 +677,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			if err != nil {
 				return err
 			}
-			err = w.Manager.MarkUsed(addrmgrNs, addr)
+			err = w.addrStore.MarkUsed(addrmgrNs, addr)
 			if err != nil {
 				return err
 			}

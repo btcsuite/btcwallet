@@ -101,9 +101,9 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 					require.NoError(t, err)
 
 					require.Equal(
-						t, tip.wantHeight, w.Manager.SyncedTo().Height,
+						t, tip.wantHeight, w.addrStore.SyncedTo().Height,
 					)
-					require.Equal(t, tip.wantHash, w.Manager.SyncedTo().Hash)
+					require.Equal(t, tip.wantHash, w.addrStore.SyncedTo().Hash)
 
 					err = walletdb.Update(w.db,
 						func(tx walletdb.ReadWriteTx) error {
@@ -138,7 +138,7 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 						Height:    0,
 						Hash:      *chaincfg.TestNet3Params.GenesisHash,
 						Timestamp: time.Unix(1, 0),
-					}, w.Manager.SyncedTo())
+					}, w.addrStore.SyncedTo())
 					require.NotNil(t, w.NtfnServer.currentTxNtfn)
 					require.Equal(t, []*chainhash.Hash{&old.Hash},
 						w.NtfnServer.currentTxNtfn.DetachedBlocks)
@@ -277,10 +277,10 @@ func TestDisconnectMixedHistory(t *testing.T) {
 						})
 					if wantErr {
 						require.ErrorIs(t, err, errReorgBackend)
-						require.Equal(t, old.Hash, w.Manager.SyncedTo().Hash)
+						require.Equal(t, old.Hash, w.addrStore.SyncedTo().Hash)
 					} else {
 						require.NoError(t, err)
-						require.Zero(t, w.Manager.SyncedTo().Height)
+						require.Zero(t, w.addrStore.SyncedTo().Height)
 					}
 
 					assertReorgHistory(t, w, records, wantHeights)
