@@ -350,7 +350,7 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
-	unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
+	unspent, err := w.txStore.UnspentOutputs(txmgrNs)
 	if err != nil {
 		return nil, err
 	}
