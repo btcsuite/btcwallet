@@ -300,7 +300,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 				return err
 			}
 
-			err = w.TxStore.Rollback(txmgrNs, b.Height)
+			err = w.txStore.Rollback(txmgrNs, b.Height)
 			if err != nil {
 				return err
 			}
@@ -323,7 +323,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 	// relevant.  This assumption will not hold true when SPV support is
 	// added, but until then, simply insert the transaction because there
 	// should either be one or more relevant inputs or outputs.
-	exists, err := w.TxStore.InsertTxCheckIfExists(txmgrNs, rec, block)
+	exists, err := w.txStore.InsertTxCheckIfExists(txmgrNs, rec, block)
 	if err != nil {
 		return err
 	}
@@ -383,7 +383,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			// TODO: Credits should be added with the
 			// account they belong to, so wtxmgr is able to
 			// track per-account balances.
-			err = w.TxStore.AddCredit(
+			err = w.txStore.AddCredit(
 				txmgrNs, rec, block, uint32(i), ma.Internal(),
 			)
 			if err != nil {
