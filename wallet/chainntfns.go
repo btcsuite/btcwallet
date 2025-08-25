@@ -270,7 +270,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx,
 	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 	// A stale sync tip must not override a newer block in the store.
-	storedHash, err := w.TxStore.BlockHash(txmgrNs, b.Height)
+	storedHash, err := w.txStore.BlockHash(txmgrNs, b.Height)
 	if err != nil {
 		return err
 	}
@@ -331,7 +331,7 @@ func (w *Wallet) rollbackBlockHistory(ns walletdb.ReadWriteBucket,
 		return err
 	}
 
-	err = w.TxStore.Rollback(ns, orphaned[0].Block.Height)
+	err = w.txStore.Rollback(ns, orphaned[0].Block.Height)
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func (w *Wallet) rollbackBlockHistory(ns walletdb.ReadWriteBucket,
 	// Store holds only chain parameters, a clock and this callback. Use a
 	// private copy so replay cannot announce temporarily unspent credits
 	// or change notification behavior for other users of the shared store.
-	replay := *w.TxStore
+	replay := *w.txStore
 	replay.NotifyUnspent = nil
 
 	// Restore unmined records first, so replaying canonical transactions
@@ -386,7 +386,7 @@ func (w *Wallet) partitionBlockHistory(ns walletdb.ReadBucket, height int32) (
 
 	var canonical, orphaned []wtxmgr.TxDetails
 
-	err = w.TxStore.RangeTransactions(ns, height, math.MaxInt32,
+	err = w.txStore.RangeTransactions(ns, height, math.MaxInt32,
 		func(details []wtxmgr.TxDetails) (bool, error) {
 			block := details[0].Block
 
@@ -440,13 +440,13 @@ func restoreHistoryTx(store *wtxmgr.Store, ns walletdb.ReadWriteBucket,
 func (w *Wallet) notifyUnspentHistory(ns walletdb.ReadWriteBucket,
 	history []wtxmgr.TxDetails) error {
 
-	notify := w.TxStore.NotifyUnspent
+	notify := w.txStore.NotifyUnspent
 	if notify == nil {
 		return nil
 	}
 
 	for _, before := range history {
-		after, err := w.TxStore.TxDetails(ns, &before.Hash)
+		after, err := w.txStore.TxDetails(ns, &before.Hash)
 		if err != nil {
 			return err
 		}
@@ -501,7 +501,7 @@ func (w *Wallet) preserveCoinbaseSpends(ns walletdb.ReadBucket,
 		details[detail.Hash] = detail
 	}
 
-	err := w.TxStore.RangeTransactions(ns, -1, -1,
+	err := w.txStore.RangeTransactions(ns, -1, -1,
 		func(unmined []wtxmgr.TxDetails) (bool, error) {
 			for _, detail := range unmined {
 				details[detail.Hash] = detail
@@ -611,7 +611,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 	// relevant.  This assumption will not hold true when SPV support is
 	// added, but until then, simply insert the transaction because there
 	// should either be one or more relevant inputs or outputs.
-	exists, err := w.TxStore.InsertTxCheckIfExists(txmgrNs, rec, block)
+	exists, err := w.txStore.InsertTxCheckIfExists(txmgrNs, rec, block)
 	if err != nil {
 		return err
 	}
@@ -671,7 +671,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			// TODO: Credits should be added with the
 			// account they belong to, so wtxmgr is able to
 			// track per-account balances.
-			err = w.TxStore.AddCredit(
+			err = w.txStore.AddCredit(
 				txmgrNs, rec, block, uint32(i), ma.Internal(),
 			)
 			if err != nil {

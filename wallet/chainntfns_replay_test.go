@@ -104,12 +104,12 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 		addReorgCredit(t, w, tx, coinbase, &coinbaseBlock, false)
 
 		for _, index := range []uint32{1, 2} {
-			require.NoError(t, w.TxStore.AddCredit(
+			require.NoError(t, w.txStore.AddCredit(
 				ns, coinbase, &coinbaseBlock, index, false,
 			))
 		}
 
-		_, err := w.TxStore.LockOutput(ns, leaseID, outpoint, time.Hour)
+		_, err := w.txStore.LockOutput(ns, leaseID, outpoint, time.Hour)
 		require.NoError(t, err)
 		addReorgCredit(t, w, tx, parent, &spendBlock, true)
 		addReorgCredit(t, w, tx, child, &spendBlock, false)
@@ -119,7 +119,7 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 		addReorgCredit(t, w, tx, orphanPending, nil, false)
 		addReorgCredit(t, w, tx, orphanPendingChild, nil, false)
 		addReorgCredit(t, w, tx, mixed, nil, false)
-		require.NoError(t, w.TxStore.PutTxLabel(ns, parent.Hash, "retained"))
+		require.NoError(t, w.txStore.PutTxLabel(ns, parent.Hash, "retained"))
 
 		return w.connectBlock(tx, oldBlock)
 	})
@@ -128,8 +128,8 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 	// Record the callback that forwards unspent events to public clients.
 	var unspent []wire.OutPoint
 
-	notify := w.TxStore.NotifyUnspent
-	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
+	notify := w.txStore.NotifyUnspent
+	w.txStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		unspent = append(unspent, wire.OutPoint{Hash: *hash, Index: index})
 		notify(hash, index)
 	}
@@ -172,7 +172,7 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 			{pending, -1, true, true, 800},
 			{pendingChild, -1, false, false, 700},
 		} {
-			detail, err := w.TxStore.TxDetails(ns, &test.rec.Hash)
+			detail, err := w.txStore.TxDetails(ns, &test.rec.Hash)
 			require.NoError(t, err)
 			require.NotNil(t, detail)
 			require.Equal(t, test.height, detail.Block.Height)
@@ -190,12 +190,12 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 		for _, rec := range []*wtxmgr.TxRecord{
 			orphanCoinbase, orphanPending, orphanPendingChild, mixed,
 		} {
-			detail, err := w.TxStore.TxDetails(ns, &rec.Hash)
+			detail, err := w.txStore.TxDetails(ns, &rec.Hash)
 			require.NoError(t, err)
 			require.Nil(t, detail)
 		}
 
-		cbDetail, err := w.TxStore.TxDetails(ns, &coinbase.Hash)
+		cbDetail, err := w.txStore.TxDetails(ns, &coinbase.Hash)
 		require.NoError(t, err)
 		require.NotNil(t, cbDetail)
 		require.Equal(t, coinbaseBlock, cbDetail.Block)
@@ -206,21 +206,21 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 			{Amount: 1000, Index: 2},
 		}, cbDetail.Credits)
 
-		label, err := w.TxStore.TxLabel(ns, parent.Hash)
+		label, err := w.txStore.TxLabel(ns, parent.Hash)
 		require.NoError(t, err)
 		require.Equal(t, "retained", label)
 
-		locks, err := w.TxStore.ListLockedOutputs(ns)
+		locks, err := w.txStore.ListLockedOutputs(ns)
 		require.NoError(t, err)
 		require.Len(t, locks, 1)
 		require.Equal(t, leaseID, locks[0].LockID)
 		require.Equal(t, outpoint, locks[0].Outpoint)
 
-		confirmed, err := w.TxStore.Balance(ns, 1, 200)
+		confirmed, err := w.txStore.Balance(ns, 1, 200)
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, confirmed)
 
-		total, err := w.TxStore.Balance(ns, 0, 200)
+		total, err := w.txStore.Balance(ns, 0, 200)
 		require.NoError(t, err)
 		require.EqualValues(t, 2600, total)
 
@@ -266,19 +266,19 @@ func TestDisconnectConflictingSpends(t *testing.T) {
 	require.NoError(t, walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		for _, rec := range []*wtxmgr.TxRecord{orphan, orphanChild} {
-			detail, err := w.TxStore.TxDetails(ns, &rec.Hash)
+			detail, err := w.txStore.TxDetails(ns, &rec.Hash)
 			require.NoError(t, err)
 			require.Nil(t, detail)
 		}
 
-		detail, err := w.TxStore.TxDetails(ns, &canonical.Hash)
+		detail, err := w.txStore.TxDetails(ns, &canonical.Hash)
 		require.NoError(t, err)
 		require.EqualValues(t, 2, detail.Block.Height)
 		require.Len(t, detail.Debits, 1)
 		require.EqualValues(t, 1000, detail.Debits[0].Amount)
 
 		for _, minConf := range []int32{0, 1} {
-			balance, err := w.TxStore.Balance(ns, minConf, 2)
+			balance, err := w.txStore.Balance(ns, minConf, 2)
 			require.NoError(t, err)
 			require.EqualValues(t, 700, balance)
 		}
@@ -394,19 +394,19 @@ func TestDisconnectOrphanCoinbaseSpend(t *testing.T) {
 	require.NoError(t, walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		for _, rec := range []*wtxmgr.TxRecord{spend, child} {
-			detail, err := w.TxStore.TxDetails(ns, &rec.Hash)
+			detail, err := w.txStore.TxDetails(ns, &rec.Hash)
 			require.NoError(t, err)
 			require.NotNil(t, detail)
 			require.EqualValues(t, -1, detail.Block.Height)
 			require.Len(t, detail.Credits, 1)
 		}
 
-		detail, err := w.TxStore.TxDetails(ns, &coinbase.Hash)
+		detail, err := w.txStore.TxDetails(ns, &coinbase.Hash)
 		require.NoError(t, err)
 		require.EqualValues(t, 2, detail.Block.Height)
 		require.True(t, detail.Credits[0].Spent)
 
-		balance, err := w.TxStore.Balance(ns, 0, 102)
+		balance, err := w.txStore.Balance(ns, 0, 102)
 		require.NoError(t, err)
 		require.EqualValues(t, 1800, balance)
 
