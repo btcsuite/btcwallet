@@ -66,7 +66,7 @@ A `sh` shell script is included to compile the Protocol Buffers descriptor.  It
 must be run from the `rpc` directory.
 
 ```bash
-$ sh regen.sh
+$ sh gen_protos_docker.sh
 ```
 
 If a `sh` shell is unavailable, the command can be run manually instead (again

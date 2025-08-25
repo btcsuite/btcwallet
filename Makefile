@@ -29,7 +29,7 @@ GOTEST := GO111MODULE=on go test
 
 GOLIST := go list -deps $(PKG)/... | grep '$(PKG)'
 GOLIST_COVER := $$(go list -deps $(PKG)/... | grep '$(PKG)')
-GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -path "./vendor/*")
+GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -path "./vendor/*" -not -name "*.pb.go")
 
 RM := rm -f
 CP := cp
@@ -131,6 +131,16 @@ lint: $(LINT_BIN)
 	@$(call print, "Linting source.")
 	$(LINT)
 
+#? rpc: Compile protobuf definitions
+rpc:
+	@$(call print, "Compiling protos.")
+	cd ./rpc; ./gen_protos_docker.sh
+
+#? rpc-check: Make sure protobuf definitions are up to date
+rpc-check: rpc
+	@$(call print, "Verifying protos.")
+	if test -n "$$(git status --porcelain rpc/walletrpc/)"; then echo "Generated protobuf files are not up-to-date. Please run 'make rpc' and commit the changes."; git status; git diff rpc/walletrpc/; exit 1; fi
+
 #? clean: Clean source
 clean:
 	@$(call print, "Cleaning source.$(NC)")
@@ -155,6 +165,8 @@ tidy-module-check: tidy-module
 	fmt \
 	fmt-check \
 	lint \
+	rpc \
+	rpc-check \
 	clean
 
 #? help: Get more info on make commands
