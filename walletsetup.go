@@ -193,7 +193,7 @@ func createWallet(cfg *config) error {
 		return err
 	}
 
-	w.Manager.Close()
+	w.AddrManager().Close()
 	fmt.Println("The wallet has been created successfully.")
 	return nil
 }

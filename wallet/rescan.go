@@ -303,7 +303,7 @@ func (w *Wallet) rescanWithTarget(addrs []address.Address,
 	// starting point for the rescan.
 	if startStamp == nil {
 		startStamp = &waddrmgr.BlockStamp{}
-		*startStamp = w.Manager.SyncedTo()
+		*startStamp = w.addrStore.SyncedTo()
 	}
 
 	job := &RescanJob{

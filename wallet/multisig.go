@@ -55,7 +55,7 @@ func (w *Wallet) MakeMultiSigScript(addrs []address.Address,
 				}
 				addrmgrNs = dbtx.ReadBucket(waddrmgrNamespaceKey)
 			}
-			addrInfo, err := w.Manager.Address(addrmgrNs, addr)
+			addrInfo, err := w.addrStore.Address(addrmgrNs, addr)
 			if err != nil {
 				return nil, err
 			}
@@ -90,7 +90,7 @@ func (w *Wallet) ImportP2SHRedeemScript(
 
 		// As this is a regular P2SH script, we'll import this into the
 		// BIP0044 scope.
-		bip44Mgr, err := w.Manager.FetchScopedKeyManager(
+		bip44Mgr, err := w.addrStore.FetchScopedKeyManager(
 			waddrmgr.KeyScopeBIP0084,
 		)
 		if err != nil {
