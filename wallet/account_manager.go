@@ -511,3 +511,81 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 		CurrentBlockHeight: syncBlock.Height,
 	}, nil
 }
+
+// GetAccount returns the account for a given account name and scope.
+//
+// The time complexity of this method is O(U + A_a), where U is the number of
+// UTXOs in the wallet and A_a is the number of addresses in the account.
+func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
+	name string) (*AccountResult, error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var account *AccountResult
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+
+		// First, we'll look up the account number for the given name.
+		accNum, err := manager.LookupAccount(addrmgrNs, name)
+		if err != nil {
+			return err
+		}
+
+		// Get the account's properties.
+		props, err := manager.AccountProperties(addrmgrNs, accNum)
+		if err != nil {
+			return err
+		}
+
+		account = &AccountResult{
+			AccountProperties: *props,
+		}
+
+		// Now, we'll create a set of all addresses in the account.
+		// This is more efficient than iterating through all UTXOs and
+		// looking up the account for each one.
+		accountAddrs := make(map[string]struct{})
+		err = manager.ForEachAccountAddress(
+			addrmgrNs, accNum,
+			func(addr waddrmgr.ManagedAddress) error {
+				addrStr := addr.Address().String()
+				accountAddrs[addrStr] = struct{}{}
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		// Finally, we'll iterate through all unspent outputs and sum
+		// up the balances for the addresses in our set.
+		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
+		if err != nil {
+			return err
+		}
+		for _, utxo := range utxos {
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+				utxo.PkScript, w.chainParams,
+			)
+			if err != nil || len(addrs) == 0 {
+				continue
+			}
+
+			addrStr := addrs[0].String()
+			if _, ok := accountAddrs[addrStr]; ok {
+				account.TotalBalance += utxo.Amount
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return account, nil
+}
