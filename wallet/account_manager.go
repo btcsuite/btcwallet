@@ -291,3 +291,91 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 		CurrentBlockHeight: syncBlock.Height,
 	}, nil
 }
+
+// ListAccountsByName returns a list of all accounts for a given account name
+// for the wallet, including accounts with a zero balance. The current chain
+// tip is included in the result for reference.
+//
+// The implementation is optimized for performance by first building a map of
+// balances for all addresses with unspent outputs and then iterating through
+// all known accounts to tally up their final balances.
+//
+// The time complexity of this method is O(U + A), where U is the number of
+// UTXOs and A is the number of addresses in the wallet. This is a significant
+// improvement over a naive implementation that would have a complexity of
+// O(U * A), e.g., the old `Accounts` method.
+//
+// A potential future improvement would be to index UTXOs by account directly
+// in the database, which would reduce the complexity to O(A).
+func (w *Wallet) ListAccountsByName(_ context.Context,
+	name string) (*AccountsResult, error) {
+
+	managers := w.addrStore.ActiveScopedKeyManagers()
+
+	var accounts []AccountResult
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+
+		// First, we'll create a map of all addresses to their balances
+		// by iterating through all unspent outputs. This is more
+		// efficient than iterating through all addresses and looking
+		// up their balances individually.
+		addrToBalance := make(map[string]btcutil.Amount)
+		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
+		if err != nil {
+			return err
+		}
+		for _, utxo := range utxos {
+			// Decode the script to find the address.
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+				utxo.PkScript, w.chainParams,
+			)
+			if err != nil {
+				// Silently ignore outputs with scripts that
+				// cannot be parsed.
+				continue
+			}
+
+			if len(addrs) == 0 {
+				continue
+			}
+
+			// Add the UTXO's value to the address's balance.
+			addrStr := addrs[0].String()
+			addrToBalance[addrStr] += utxo.Amount
+		}
+
+		// Now, we'll iterate through all the accounts and calculate
+		// their balances by summing up the balances of all their
+		// addresses.
+		for _, scopeMgr := range managers {
+			results, err := createResultForScope(
+				scopeMgr, addrmgrNs, addrToBalance,
+			)
+			if err != nil {
+				return err
+			}
+
+			for _, acc := range results {
+				if acc.AccountName == name {
+					accounts = append(accounts, acc)
+				}
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the sync tip to ensure atomicity.
+	syncBlock := w.addrStore.SyncedTo()
+
+	return &AccountsResult{
+		Accounts:           accounts,
+		CurrentBlockHash:   syncBlock.Hash,
+		CurrentBlockHeight: syncBlock.Height,
+	}, nil
+}
