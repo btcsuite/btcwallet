@@ -268,3 +268,61 @@ func TestListAccountsByScope(t *testing.T) {
 	require.Equal(t, accBIP49Name, accountsBIP49.Accounts[1].AccountName)
 	require.Equal(t, uint32(1), accountsBIP49.Accounts[1].AccountNumber)
 }
+
+// TestListAccountsByName tests that the ListAccountsByName method works as
+// expected.
+func TestListAccountsByName(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll create two new accounts, one under the BIP0084 scope and one
+	// under the BIP0049 scope.
+	scopeBIP84 := waddrmgr.KeyScopeBIP0084
+	accBIP84Name := "test bip84"
+	_, err := w.NewAccount(context.Background(), scopeBIP84, accBIP84Name)
+	require.NoError(t, err)
+
+	scopeBIP49 := waddrmgr.KeyScopeBIP0049Plus
+	accBIP49Name := "test bip49"
+	_, err = w.NewAccount(context.Background(), scopeBIP49, accBIP49Name)
+	require.NoError(t, err)
+
+	// Now, we'll list the accounts for the BIP0084 scope and check that
+	// we only get the default account for that scope and the new account we
+	// created.
+	accountsBIP84, err := w.ListAccountsByName(
+		context.Background(), accBIP84Name,
+	)
+	require.NoError(t, err)
+
+	// We should have one account.
+	require.Len(t, accountsBIP84.Accounts, 1)
+
+	// The first account should be the new account.
+	require.Equal(t, accBIP84Name, accountsBIP84.Accounts[0].AccountName)
+	require.Equal(t, uint32(1), accountsBIP84.Accounts[0].AccountNumber)
+
+	// Now, we'll do the same for the BIP0049 scope.
+	accountsBIP49, err := w.ListAccountsByName(
+		context.Background(), accBIP49Name,
+	)
+	require.NoError(t, err)
+
+	// We should have one account.
+	require.Len(t, accountsBIP49.Accounts, 1)
+
+	// The first account should be the new account.
+	require.Equal(t, accBIP49Name, accountsBIP49.Accounts[0].AccountName)
+	require.Equal(t, uint32(1), accountsBIP49.Accounts[0].AccountNumber)
+
+	// We should get an empty result if we query for a non-existent
+	// account.
+	accounts, err := w.ListAccountsByName(
+		context.Background(), "non-existent",
+	)
+	require.NoError(t, err)
+	require.Len(t, accounts.Accounts, 0)
+}
