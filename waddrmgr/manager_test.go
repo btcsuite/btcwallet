@@ -1402,11 +1402,7 @@ func testChangePassphrase(tc *testContext) bool {
 func testNewAccount(tc *testContext) bool {
 	if tc.watchingOnly {
 		// Creating new accounts in watching-only mode should return ErrWatchingOnly
-		err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			_, err := tc.manager.NewAccount(ns, "test")
-			return err
-		})
+		err := tc.manager.CanAddAccount()
 		if !checkManagerError(
 			tc.t, "Create account in watching-only mode", err,
 			ErrWatchingOnly,
@@ -1417,11 +1413,7 @@ func testNewAccount(tc *testContext) bool {
 		return true
 	}
 	// Creating new accounts when wallet is locked should return ErrLocked
-	err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		_, err := tc.manager.NewAccount(ns, "test")
-		return err
-	})
+	err := tc.manager.CanAddAccount()
 	if !checkManagerError(
 		tc.t, "Create account when wallet is locked", err, ErrLocked,
 	) {

@@ -2066,6 +2066,12 @@ func (w *Wallet) NextAccount(scope waddrmgr.KeyScope, name string) (uint32, erro
 		return 0, err
 	}
 
+	// Validate that the scope manager can add this new account.
+	err = manager.CanAddAccount()
+	if err != nil {
+		return 0, err
+	}
+
 	var (
 		account uint32
 		props   *waddrmgr.AccountProperties
