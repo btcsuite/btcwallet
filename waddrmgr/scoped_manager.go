@@ -1547,21 +1547,28 @@ func (s *ScopedKeyManager) LastInternalAddress(ns walletdb.ReadBucket,
 	return nil, managerError(ErrAddressNotFound, "no previous internal address", nil)
 }
 
+// CanAddAccount returns an error if a new account cannot be created.
+// This is the case if the manager is watch-only or is locked. A descriptive
+// error is returned in these cases.
+func (s *ScopedKeyManager) CanAddAccount() error {
+	if s.rootManager.WatchOnly() {
+		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
+	if s.rootManager.IsLocked() {
+		return managerError(ErrLocked, errLocked, nil)
+	}
+
+	return nil
+}
+
 // NewRawAccount creates a new account for the scoped manager. This method
 // differs from the NewAccount method in that this method takes the account
 // number *directly*, rather than taking a string name for the account, then
 // mapping that to the next highest account number.
 func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uint32) error {
-	if s.rootManager.WatchOnly() {
-		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
-	}
-
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
-	if s.rootManager.IsLocked() {
-		return managerError(ErrLocked, errLocked, nil)
-	}
 
 	// As this is an ad hoc account that may not follow our normal linear
 	// derivation, we'll create a new name for this account based off of
@@ -1606,16 +1613,8 @@ func (s *ScopedKeyManager) NewRawAccountWatchingOnly(
 // access to the cointype keys (from which extended account keys are derived),
 // it requires the manager to be unlocked.
 func (s *ScopedKeyManager) NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, error) {
-	if s.rootManager.WatchOnly() {
-		return 0, managerError(ErrWatchingOnly, errWatchingOnly, nil)
-	}
-
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
-	if s.rootManager.IsLocked() {
-		return 0, managerError(ErrLocked, errLocked, nil)
-	}
 
 	// Fetch latest account, and create a new account in the same
 	// transaction Fetch the latest account number to generate the next
