@@ -8,6 +8,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -55,4 +57,156 @@ func TestNewAccount(t *testing.T) {
 		t, err, "expected error when creating account while wallet is "+
 			"locked",
 	)
+}
+
+// TestListAccounts tests that the ListAccounts method works as expected.
+func TestListAccounts(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll start by creating a new account under the BIP0084 scope.
+	scope := waddrmgr.KeyScopeBIP0084
+	_, err := w.NewAccount(context.Background(), scope, testAccountName)
+	require.NoError(t, err, "unable to create new account")
+
+	// Now, we'll list all accounts and check that we have the default
+	// account and the new account.
+	accounts, err := w.ListAccounts(context.Background())
+	require.NoError(t, err, "unable to list accounts")
+
+	// We should have five accounts, the four default accounts and the new
+	// account.
+	require.Len(t, accounts.Accounts, 5, "expected five accounts")
+
+	// The first account should be the default account.
+	require.Equal(
+		t, "default", accounts.Accounts[0].AccountName,
+		"expected default account",
+	)
+	require.Equal(
+		t, uint32(0), accounts.Accounts[0].AccountNumber,
+		"expected default account number",
+	)
+	require.Equal(
+		t, btcutil.Amount(0), accounts.Accounts[0].TotalBalance,
+		"expected zero balance for default account",
+	)
+
+	// The new account should also be present.
+	var found bool
+	for _, acc := range accounts.Accounts {
+		if acc.AccountName == testAccountName {
+			found = true
+			require.Equal(
+				t, uint32(1), acc.AccountNumber,
+				"expected new account number",
+			)
+			require.Equal(
+				t, btcutil.Amount(0), acc.TotalBalance,
+				"expected zero balance for new account",
+			)
+		}
+	}
+	require.True(t, found, "expected to find new account")
+}
+
+// getOrCreateAddress is a helper function to get an address for a given
+// account, or create a new one if none exist.
+func getOrCreateAddress(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
+	account uint32) btcutil.Address {
+
+	var addr btcutil.Address
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		scopedMgr, err := w.addrStore.FetchScopedKeyManager(scope)
+		if err != nil {
+			return err
+		}
+
+		var addrs []waddrmgr.ManagedAddress
+		err = scopedMgr.ForEachAccountAddress(
+			addrmgrNs, account,
+			func(addr waddrmgr.ManagedAddress) error {
+				addrs = append(addrs, addr)
+				return nil
+			},
+		)
+		if err != nil || len(addrs) == 0 {
+			derivedAddrs, err := scopedMgr.NextExternalAddresses(
+				addrmgrNs, account, 1,
+			)
+			if err != nil {
+				return err
+			}
+			addr = derivedAddrs[0].Address()
+		} else {
+			addr = addrs[0].Address()
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return addr
+}
+
+// TestCreateResultForScope tests that the createResultForScope helper function
+// works as expected.
+func TestCreateResultForScope(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll create a new account under the BIP0084 scope to have a
+	// predictable state with more than just the default account.
+	scope := waddrmgr.KeyScopeBIP0084
+	acc1Name := "test account"
+	_, err := w.NewAccount(context.Background(), scope, acc1Name)
+	require.NoError(t, err)
+
+	// We'll now create a balance map for a few addresses. We need to
+	// derive some addresses first to have something to work with.
+	addrToBalance := make(map[string]btcutil.Amount)
+	defaultAddr := getOrCreateAddress(t, w, scope, 0)
+	acc1Addr := getOrCreateAddress(t, w, scope, 1)
+
+	// Assign some balances to our derived addresses.
+	addrToBalance[defaultAddr.String()] = 100
+	addrToBalance[acc1Addr.String()] = 200
+
+	// Now, we'll call createResultForScope within a read transaction and
+	// verify the results.
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		scopedMgr, err := w.addrStore.FetchScopedKeyManager(scope)
+		require.NoError(t, err)
+
+		// Call the function under test.
+		results, err := createResultForScope(
+			scopedMgr, addrmgrNs, addrToBalance,
+		)
+		require.NoError(t, err)
+
+		// The BIP0084 scope should have two accounts: the default one
+		// and the one we just created.
+		require.Len(t, results, 2, "expected two accounts for scope")
+
+		// Check the default account's result.
+		require.Equal(t, "default", results[0].AccountName)
+		require.Equal(t, uint32(0), results[0].AccountNumber)
+		require.Equal(t, btcutil.Amount(100), results[0].TotalBalance)
+
+		// Check the new account's result.
+		require.Equal(t, acc1Name, results[1].AccountName)
+		require.Equal(t, uint32(1), results[1].AccountNumber)
+		require.Equal(t, btcutil.Amount(200), results[1].TotalBalance)
+
+		return nil
+	})
+	require.NoError(t, err)
 }
