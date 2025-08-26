@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -324,5 +324,41 @@ func TestListAccountsByName(t *testing.T) {
 		context.Background(), "non-existent",
 	)
 	require.NoError(t, err)
-	require.Len(t, accounts.Accounts, 0)
+	require.Empty(t, accounts.Accounts)
+}
+
+// TestGetAccount tests that the GetAccount method works as expected.
+func TestGetAccount(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll create a new account under the BIP0084 scope.
+	scope := waddrmgr.KeyScopeBIP0084
+	_, err := w.NewAccount(context.Background(), scope, testAccountName)
+	require.NoError(t, err)
+
+	// We should be able to get the new account.
+	account, err := w.GetAccount(context.Background(), scope, testAccountName)
+	require.NoError(t, err)
+	require.Equal(t, testAccountName, account.AccountName)
+	require.Equal(t, uint32(1), account.AccountNumber)
+	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
+
+	// We should also be able to get the default account.
+	account, err = w.GetAccount(context.Background(), scope, "default")
+	require.NoError(t, err)
+	require.Equal(t, "default", account.AccountName)
+	require.Equal(t, uint32(0), account.AccountNumber)
+	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
+
+	// We should get an error when trying to get a non-existent account.
+	_, err = w.GetAccount(context.Background(), scope, "non-existent")
+	require.Error(t, err)
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
+		"expected ErrAccountNotFound",
+	)
 }
