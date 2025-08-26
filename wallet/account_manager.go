@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 // AccountManager provides a high-level interface for managing wallet
@@ -89,4 +90,41 @@ type AccountManager interface {
 		accountKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
 		dryRun bool) (*waddrmgr.AccountProperties, error)
+}
+
+// NewAccount creates the next account and returns its account number. The name
+// must be unique under the kep scope. In order to support automatic seed
+// restoring, new accounts may not be created when all of the previous 100
+// accounts have no transaction history (this is a deviation from the BIP0044
+// spec, which allows no unused account gaps).
+func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
+	name string) (*waddrmgr.AccountProperties, error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate that the scope manager can add this new account.
+	err = manager.CanAddAccount()
+	if err != nil {
+		return nil, err
+	}
+
+	var props *waddrmgr.AccountProperties
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		// Create a new account under the current key scope.
+		accountID, err := manager.NewAccount(addrmgrNs, name)
+		if err != nil {
+			return err
+		}
+
+		// Get the account's properties.
+		props, err = manager.AccountProperties(addrmgrNs, accountID)
+		return err
+	})
+
+	return props, err
 }
