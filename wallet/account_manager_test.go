@@ -362,3 +362,54 @@ func TestGetAccount(t *testing.T) {
 		"expected ErrAccountNotFound",
 	)
 }
+
+// TestRenameAccount tests that the RenameAccount method works as expected.
+func TestRenameAccount(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll create a new account under the BIP0084 scope.
+	scope := waddrmgr.KeyScopeBIP0084
+	oldName := "old name"
+	newName := "new name"
+	_, err := w.NewAccount(context.Background(), scope, oldName)
+	require.NoError(t, err)
+
+	// We should be able to rename the account.
+	err = w.RenameAccount(context.Background(), scope, oldName, newName)
+	require.NoError(t, err)
+
+	// We should be able to get the account by its new name.
+	account, err := w.GetAccount(context.Background(), scope, newName)
+	require.NoError(t, err)
+	require.Equal(t, newName, account.AccountName)
+
+	// We should not be able to get the account by its old name.
+	_, err = w.GetAccount(context.Background(), scope, oldName)
+	require.Error(t, err)
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
+		"expected ErrAccountNotFound",
+	)
+
+	// We should not be able to rename an account to an existing name.
+	err = w.RenameAccount(context.Background(), scope, newName, "default")
+	require.Error(t, err)
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
+		"expected ErrDuplicateAccount",
+	)
+
+	// We should not be able to rename a non-existent account.
+	err = w.RenameAccount(
+		context.Background(), scope, "non-existent", "new name 2",
+	)
+	require.Error(t, err)
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
+		"expected ErrAccountNotFound",
+	)
+}
