@@ -94,6 +94,9 @@ type AccountManager interface {
 		dryRun bool) (*waddrmgr.AccountProperties, error)
 }
 
+// A compile time check to ensure that Wallet implements the interface.
+var _ AccountManager = (*Wallet)(nil)
+
 // NewAccount creates the next account and returns its account number. The name
 // must be unique under the kep scope. In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
@@ -692,3 +695,29 @@ func (w *Wallet) Balance(_ context.Context, conf int32,
 	return balance, nil
 }
 
+// ImportAccount imports an account from an extended public or private key.
+//
+// The time complexity of this method is dominated by the database lookup
+// to ensure the account name is unique within the scope.
+func (w *Wallet) ImportAccount(_ context.Context,
+	name string, accountKey *hdkeychain.ExtendedKey,
+	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
+	dryRun bool) (*waddrmgr.AccountProperties, error) {
+
+	var (
+		props *waddrmgr.AccountProperties
+		err   error
+	)
+
+	if dryRun {
+		props, _, _, err = w.ImportAccountDryRun(
+			name, accountKey, masterKeyFingerprint, &addrType, 0,
+		)
+	} else {
+		props, err = w.ImportAccountDeprecated(
+			name, accountKey, masterKeyFingerprint, &addrType,
+		)
+	}
+
+	return props, err
+}
