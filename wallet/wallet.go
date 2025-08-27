@@ -2026,29 +2026,6 @@ func (w *Wallet) LookupAccount(name string) (waddrmgr.KeyScope, uint32, error) {
 	return keyScope, account, err
 }
 
-// RenameAccount sets the name for an account number to newName.
-func (w *Wallet) RenameAccount(scope waddrmgr.KeyScope, account uint32, newName string) error {
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return err
-	}
-
-	var props *waddrmgr.AccountProperties
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		err := manager.RenameAccount(addrmgrNs, account, newName)
-		if err != nil {
-			return err
-		}
-		props, err = manager.AccountProperties(addrmgrNs, account)
-		return err
-	})
-	if err == nil {
-		w.NtfnServer.notifyAccountProperties(props)
-	}
-	return err
-}
-
 // CreditCategory describes the type of wallet transaction output.  The category
 // of "sent transactions" (debits) is always "send", and is not expressed by
 // this type.
