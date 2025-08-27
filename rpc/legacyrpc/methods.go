@@ -450,7 +450,7 @@ func getBalance(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // getBestBlock handles a getbestblock request by returning a JSON object
 // with the height and hash of the most recently processed block.
 func getBestBlock(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	blk := w.Manager.SyncedTo()
+	blk := w.AddrManager().SyncedTo()
 	result := &btcjson.GetBestBlockResult{
 		Hash:   blk.Hash.String(),
 		Height: blk.Height,
@@ -461,14 +461,14 @@ func getBestBlock(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // getBestBlockHash handles a getbestblockhash request by returning the hash
 // of the most recently processed block.
 func getBestBlockHash(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	blk := w.Manager.SyncedTo()
+	blk := w.AddrManager().SyncedTo()
 	return blk.Hash.String(), nil
 }
 
 // getBlockCount handles a getblockcount request by returning the chain height
 // of the most recently processed block.
 func getBlockCount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	blk := w.Manager.SyncedTo()
+	blk := w.AddrManager().SyncedTo()
 	return blk.Height, nil
 }
 
@@ -670,7 +670,8 @@ func renameAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	return nil, w.RenameAccount(waddrmgr.KeyScopeBIP0044, account, cmd.NewAccount)
+
+	return nil, w.RenameAccountDeprecated(waddrmgr.KeyScopeBIP0044, account, cmd.NewAccount)
 }
 
 // getNewAddress handles a getnewaddress request by returning a new
@@ -811,7 +812,7 @@ func getTransaction(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, &ErrNoTransactionInfo
 	}
 
-	syncBlock := w.Manager.SyncedTo()
+	syncBlock := w.AddrManager().SyncedTo()
 
 	// TODO: The serialized transaction is already in the DB, so
 	// reserializing can be avoided here.
@@ -1134,7 +1135,7 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 		account string
 	}
 
-	syncBlock := w.Manager.SyncedTo()
+	syncBlock := w.AddrManager().SyncedTo()
 
 	// Intermediate data for all addresses.
 	allAddrData := make(map[string]AddrData)
@@ -1213,7 +1214,7 @@ func listReceivedByAddress(icmd interface{}, w *wallet.Wallet) (interface{}, err
 func listSinceBlock(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (interface{}, error) {
 	cmd := icmd.(*btcjson.ListSinceBlockCmd)
 
-	syncBlock := w.Manager.SyncedTo()
+	syncBlock := w.AddrManager().SyncedTo()
 	targetConf := int64(*cmd.TargetConfirmations)
 
 	// For the result we need the block hash for the last block counted
