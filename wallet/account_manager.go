@@ -313,13 +313,13 @@ func createResultForScope(scopeMgr *waddrmgr.ScopedKeyManager,
 // The implementation is optimized for performance by first building a map of
 // balances for all addresses with unspent outputs and then iterating through
 // balances for all addresses with unspent outputs and then iterating
-//
 // through all known accounts to tally up their final balances.
-// UTXOs and A is the number of addresses in the wallet. This is a significant
+//
+// The time complexity of this method is O(U + A), where U is the number of
 // UTXOs and A is the number of addresses in the wallet. This is a
 // significant improvement over a naive implementation that would have a
-//
 // complexity of O(U * A), e.g., the old `Accounts` method.
+//
 // A potential future improvement would be to index UTXOs by account directly
 // in the database, which would reduce the complexity to O(A).
 func (w *Wallet) ListAccountsByScope(_ context.Context,
@@ -614,3 +614,76 @@ func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
 		return manager.RenameAccount(addrmgrNs, accNum, newName)
 	})
 }
+
+// Balance returns the balance for a specific account.
+//
+// The time complexity of this method is O(U + A_a), where U is the
+// number of UTXOs in the wallet and A_a is the number of addresses in the
+// account.
+func (w *Wallet) Balance(_ context.Context, conf int32,
+	scope waddrmgr.KeyScope, accountName string) (btcutil.Amount, error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return 0, err
+	}
+
+	var balance btcutil.Amount
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+
+		// First, we'll look up the account number for the given name.
+		accNum, err := manager.LookupAccount(addrmgrNs, accountName)
+		if err != nil {
+			return err
+		}
+
+		// Now, we'll create a set of all addresses in the account.
+		accountAddrs := make(map[string]struct{})
+		err = manager.ForEachAccountAddress(
+			addrmgrNs, accNum,
+			func(addr waddrmgr.ManagedAddress) error {
+				addrStr := addr.Address().String()
+				accountAddrs[addrStr] = struct{}{}
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		// Finally, we'll iterate through all unspent outputs and sum
+		// up the balances for the addresses in our set.
+		syncBlock := w.addrStore.SyncedTo()
+		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
+		if err != nil {
+			return err
+		}
+		for _, utxo := range utxos {
+			if !confirmed(conf, utxo.Height, syncBlock.Height) {
+				continue
+			}
+
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+				utxo.PkScript, w.chainParams,
+			)
+			if err != nil || len(addrs) == 0 {
+				continue
+			}
+
+			addrStr := addrs[0].String()
+			if _, ok := accountAddrs[addrStr]; ok {
+				balance += utxo.Amount
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return balance, nil
+}
+
