@@ -690,3 +690,29 @@ func (w *Wallet) Balance(_ context.Context, conf int32,
 	return balance, nil
 }
 
+// ImportAccount imports a watch-only account from an extended public key.
+//
+// The time complexity of this method is dominated by the database lookup
+// to ensure the account name is unique within the scope.
+func (w *Wallet) ImportAccount(_ context.Context,
+	name string, accountPubKey *hdkeychain.ExtendedKey,
+	masterKeyFingerprint uint32, addrType *waddrmgr.AddressType,
+	dryRun bool) (*waddrmgr.AccountProperties, error) {
+
+	var (
+		props *waddrmgr.AccountProperties
+		err   error
+	)
+
+	if dryRun {
+		props, _, _, err = w.ImportAccountDryRun(
+			name, accountPubKey, masterKeyFingerprint, addrType, 0,
+		)
+	} else {
+		props, err = w.ImportAccountDeprecated(
+			name, accountPubKey, masterKeyFingerprint, addrType,
+		)
+	}
+
+	return props, err
+}
