@@ -123,3 +123,30 @@ func (w *Wallet) Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error) {
 		CurrentBlockHeight: syncBlockHeight,
 	}, err
 }
+
+// RenameAccountDeprecated sets the name for an account number to newName.
+func (w *Wallet) RenameAccountDeprecated(scope waddrmgr.KeyScope,
+	account uint32, newName string) error {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return err
+	}
+
+	var props *waddrmgr.AccountProperties
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		err := manager.RenameAccount(addrmgrNs, account, newName)
+		if err != nil {
+			return err
+		}
+		props, err = manager.AccountProperties(addrmgrNs, account)
+
+		return err
+	})
+	if err == nil {
+		w.NtfnServer.notifyAccountProperties(props)
+	}
+
+	return err
+}
