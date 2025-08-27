@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -501,4 +502,60 @@ func TestBalance(t *testing.T) {
 	)
 }
 
+// TestImportAccount tests that the ImportAccount works as expected.
+func TestImportAccount(t *testing.T) {
+	t.Parallel()
 
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll start by creating a new account under the BIP0084 scope.
+	scope := waddrmgr.KeyScopeBIP0084
+	addrType := waddrmgr.WitnessPubKey
+	masterPriv := "tprv8ZgxMBicQKsPeWwrFuNjEGTTDSY4mRLwd2KDJAPGa1AY" +
+		"quw38bZqNMSuB3V1Va3hqJBo9Pt8Sx7kBQer5cNMrb8SYquoWPt9" +
+		"Y3BZdhdtUcw"
+	root, err := hdkeychain.NewKeyFromString(masterPriv)
+	require.NoError(t, err)
+	acctPubKey := deriveAcctPubKey(t, root, scope, hardenedKey(0))
+
+	// We should be able to import the account.
+	props, err := w.ImportAccount(
+		context.Background(), testAccountName, acctPubKey,
+		root.ParentFingerprint(), addrType, false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, testAccountName, props.AccountName)
+
+	// We should be able to get the account by its name.
+	_, err = w.GetAccount(context.Background(), scope, testAccountName)
+	require.NoError(t, err)
+
+	// We should not be able to import an account with the same name.
+	_, err = w.ImportAccount(
+		context.Background(), testAccountName, acctPubKey,
+		root.ParentFingerprint(), addrType, false,
+	)
+	require.Error(t, err)
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
+		"expected ErrDuplicateAccount",
+	)
+
+	// We should be able to do a dry run of the import.
+	dryRunName := "dry run"
+	_, err = w.ImportAccount(
+		context.Background(), dryRunName, acctPubKey,
+		root.ParentFingerprint(), addrType, true,
+	)
+	require.NoError(t, err)
+
+	// The account should not have been imported.
+	_, err = w.GetAccount(context.Background(), scope, dryRunName)
+	require.Error(t, err)
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
+		"expected ErrAccountNotFound",
+	)
+}
