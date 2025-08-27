@@ -7,10 +7,14 @@ package wallet
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -413,3 +417,88 @@ func TestRenameAccount(t *testing.T) {
 		"expected ErrAccountNotFound",
 	)
 }
+
+// TestBalance tests that the Balance method works as expected.
+func TestBalance(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll create a new account under the BIP0084 scope.
+	scope := waddrmgr.KeyScopeBIP0084
+	_, err := w.NewAccount(context.Background(), scope, testAccountName)
+	require.NoError(t, err)
+
+	// The balance should be zero initially.
+	balance, err := w.Balance(
+		context.Background(), 1, scope, testAccountName,
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(0), balance)
+
+	// Now, we'll add a UTXO to the account.
+	addr, err := w.NewAddress(1, scope)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(&wire.MsgTx{
+		TxIn: []*wire.TxIn{
+			{},
+		},
+		TxOut: []*wire.TxOut{
+			{
+				Value:    100,
+				PkScript: pkScript,
+			},
+		},
+	}, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		err := w.txStore.InsertTx(ns, rec, &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Height: 1,
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		return w.txStore.AddCredit(ns, rec, &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Height: 1,
+			},
+		}, 0, false)
+	})
+	require.NoError(t, err)
+
+	// Now, we'll update the wallet's sync state.
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return w.addrStore.SetSyncedTo(addrmgrNs, &waddrmgr.BlockStamp{
+			Height: 1,
+		})
+	})
+	require.NoError(t, err)
+
+	// The balance should now be 100.
+	balance, err = w.Balance(
+		context.Background(), 1, scope, testAccountName,
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(100), balance)
+
+	// We should get an error when trying to get the balance of a
+	// non-existent account.
+	_, err = w.Balance(context.Background(), 1, scope, "non-existent")
+	require.Error(t, err)
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
+		"expected ErrAccountNotFound",
+	)
+}
+
+
