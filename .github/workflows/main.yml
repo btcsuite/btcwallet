@@ -57,6 +57,9 @@ jobs:
       - name: compile code
         run: go install -v ./...
 
+      - name: Lint proto files
+        run: make protolint
+
       - name: run lint
         run: make lint
 

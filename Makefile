@@ -126,6 +126,11 @@ fmt-check: fmt
 	@$(call print, "Checking fmt results.")
 	if test -n "$$(git status --porcelain)"; then echo "code not formatted correctly, please run `make fmt` again!"; git status; git diff; exit 1; fi
 
+#? rpc-format: Format protobuf definition files
+rpc-format:
+	@$(call print, "Formatting protos.")
+	cd ./rpc; find . -name "*.proto" | xargs clang-format --style=file -i
+
 #? lint: Lint source
 lint: $(LINT_BIN)
 	@$(call print, "Linting source.")
@@ -140,6 +145,11 @@ rpc:
 rpc-check: rpc
 	@$(call print, "Verifying protos.")
 	if test -n "$$(git status --porcelain rpc/walletrpc/)"; then echo "Generated protobuf files are not up-to-date. Please run 'make rpc' and commit the changes."; git status; git diff rpc/walletrpc/; exit 1; fi
+
+#? protolint: Lint proto files using protolint
+protolint:
+	@$(call print, "Linting proto files.")
+	docker run --rm --volume "$$(pwd):/workspace" --workdir /workspace yoheimuta/protolint lint rpc/
 
 #? clean: Clean source
 clean:
@@ -166,9 +176,11 @@ tidy-module-check: tidy-module
 	fmt-check \
 	tidy-module \
 	tidy-module-check \
+	rpc-format \
 	lint \
 	rpc \
 	rpc-check \
+	protolint \
 	clean
 
 #? help: Get more info on make commands
