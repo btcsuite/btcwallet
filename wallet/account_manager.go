@@ -602,6 +602,11 @@ func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
 		return err
 	}
 
+	// Validate new account name.
+	if err := waddrmgr.ValidateAccountName(newName); err != nil {
+		return err
+	}
+
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
