@@ -113,11 +113,11 @@ func (w *Wallet) Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error) {
 				}
 			}
 		}
+
 		return nil
-
 	})
-	return &AccountsResult{
 
+	return &AccountsResult{
 		Accounts:           accounts,
 		CurrentBlockHash:   *syncBlockHash,
 		CurrentBlockHeight: syncBlockHeight,

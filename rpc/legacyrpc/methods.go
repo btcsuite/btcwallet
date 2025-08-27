@@ -670,6 +670,7 @@ func renameAccount(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return nil, w.RenameAccountDeprecated(waddrmgr.KeyScopeBIP0044, account, cmd.NewAccount)
 }
 
