@@ -189,7 +189,7 @@ func (w *Wallet) validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	return nil
 }
 
-// ImportAccount imports an account backed by an account extended public key.
+// ImportAccountDeprecated imports an account backed by an account extended public key.
 // The master key fingerprint denotes the fingerprint of the root key
 // corresponding to the account public key (also known as the key with
 // derivation path m/). This may be required by some hardware wallets for proper
@@ -208,7 +208,7 @@ func (w *Wallet) validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 // distinction between the traditional BIP-0049 address schema (nested witness
 // pubkeys everywhere) and our own BIP-0049Plus address schema (nested
 // externally, witness internally).
-func (w *Wallet) ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKey,
+func (w *Wallet) ImportAccountDeprecated(name string, accountPubKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType *waddrmgr.AddressType) (
 	*waddrmgr.AccountProperties, error) {
 
