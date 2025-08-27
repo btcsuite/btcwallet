@@ -1827,11 +1827,6 @@ func (s *ScopedKeyManager) RenameAccount(ns walletdb.ReadWriteBucket,
 		return managerError(ErrDuplicateAccount, str, err)
 	}
 
-	// Validate account name
-	if err := ValidateAccountName(name); err != nil {
-		return err
-	}
-
 	rowInterface, err := fetchAccountInfo(ns, &s.scope, account)
 	if err != nil {
 		return err
