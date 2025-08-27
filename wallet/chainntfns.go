@@ -273,6 +273,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 
 	// Disconnect the removed block and all blocks after it if we know about
 	// the disconnected block. Otherwise, the block is in the future.
+	//nolint:nestif
 	if b.Height <= w.addrStore.SyncedTo().Height {
 		hash, err := w.addrStore.BlockHash(addrmgrNs, b.Height)
 		if err != nil {
