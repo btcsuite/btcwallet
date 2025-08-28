@@ -25,6 +25,7 @@ require (
 	github.com/lightningnetwork/lnd/ticker v1.0.0
 	github.com/lightningnetwork/lnd/tlv v1.0.2
 	github.com/stretchr/testify v1.9.0
+	github.com/tyler-smith/go-bip39 v1.1.0
 	golang.org/x/crypto v0.22.0
 	golang.org/x/net v0.24.0
 	golang.org/x/sync v0.7.0
