@@ -154,8 +154,12 @@ type Interface interface {
 	CurrentAddress(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
-	// NewAddress returns a new address for a given account and scope.
-	NewAddress(account uint32, scope waddrmgr.KeyScope) (
+	// NewAddressDeprecated returns a new address for a given account and
+	// scope.
+	//
+	// Deprecated: This method will be removed in a future release. Use the
+	// AddressManager interface instead.
+	NewAddressDeprecated(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
 	// NewChangeAddress returns a new change address for a given account
