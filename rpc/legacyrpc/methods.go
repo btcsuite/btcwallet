@@ -702,7 +702,7 @@ func getNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	addr, err := w.NewAddress(account, keyScope)
+	addr, err := w.NewAddressDeprecated(account, keyScope)
 	if err != nil {
 		return nil, err
 	}
