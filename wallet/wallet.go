@@ -1791,7 +1791,7 @@ func (w *Wallet) CurrentAddress(account uint32, scope waddrmgr.KeyScope) (btcuti
 			// If no address exists yet, create the first external
 			// address.
 			if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
-				addr, props, err = w.newAddress(
+				addr, props, err = w.newAddressDeprecated(
 					addrmgrNs, account, scope,
 				)
 			}
@@ -1801,7 +1801,7 @@ func (w *Wallet) CurrentAddress(account uint32, scope waddrmgr.KeyScope) (btcuti
 		// Get next chained address if the last one has already been
 		// used.
 		if maddr.Used(addrmgrNs) {
-			addr, props, err = w.newAddress(
+			addr, props, err = w.newAddressDeprecated(
 				addrmgrNs, account, scope,
 			)
 			return err
@@ -3122,8 +3122,8 @@ func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
 	return addrStrs, nil
 }
 
-// NewAddress returns the next external chained address for a wallet.
-func (w *Wallet) NewAddress(account uint32,
+// NewAddressDeprecated returns the next external chained address for a wallet.
+func (w *Wallet) NewAddressDeprecated(account uint32,
 	scope waddrmgr.KeyScope) (btcutil.Address, error) {
 
 	chainClient, err := w.requireChainClient()
@@ -3147,7 +3147,10 @@ func (w *Wallet) NewAddress(account uint32,
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		var err error
-		addr, props, err = w.newAddress(addrmgrNs, account, scope)
+
+		addr, props, err = w.newAddressDeprecated(
+			addrmgrNs, account, scope,
+		)
 		return err
 	})
 	if err != nil {
@@ -3163,30 +3166,6 @@ func (w *Wallet) NewAddress(account uint32,
 	w.NtfnServer.notifyAccountProperties(props)
 
 	return addr, nil
-}
-
-func (w *Wallet) newAddress(addrmgrNs walletdb.ReadWriteBucket, account uint32,
-	scope waddrmgr.KeyScope) (btcutil.Address, *waddrmgr.AccountProperties, error) {
-
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Get next address from wallet.
-	addrs, err := manager.NextExternalAddresses(addrmgrNs, account, 1)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	props, err := manager.AccountProperties(addrmgrNs, account)
-	if err != nil {
-		log.Errorf("Cannot fetch account properties for notification "+
-			"after deriving next external address: %v", err)
-		return nil, nil, err
-	}
-
-	return addrs[0].Address(), props, nil
 }
 
 // NewChangeAddress returns a new change address for a wallet.
@@ -4135,6 +4114,32 @@ func (w *Wallet) AddrManager() *waddrmgr.Manager {
 // TODO(yy): Refactor it in lnd and remove the method.
 func (w *Wallet) NotificationServer() *NotificationServer {
 	return w.NtfnServer
+}
+
+func (w *Wallet) newAddressDeprecated(addrmgrNs walletdb.ReadWriteBucket,
+	account uint32, scope waddrmgr.KeyScope) (btcutil.Address,
+	*waddrmgr.AccountProperties, error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Get next address from wallet.
+	addrs, err := manager.NextExternalAddresses(addrmgrNs, account, 1)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	props, err := manager.AccountProperties(addrmgrNs, account)
+	if err != nil {
+		log.Errorf("Cannot fetch account properties for notification "+
+			"after deriving next external address: %v", err)
+
+		return nil, nil, err
+	}
+
+	return addrs[0].Address(), props, nil
 }
 
 // CreateWithCallback is the same as Create with an added callback that will be
