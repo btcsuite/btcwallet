@@ -2571,3 +2571,47 @@ func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
 	defer s.mtx.Unlock()
 	delete(s.acctInfo, account)
 }
+
+// NewAddress returns a new address for the given account. The `change`
+// parameter dictates whether a change address (internal) or a receiving
+// address (external) should be generated. The caller is responsible for
+// providing a database transaction. The method first looks up the account
+// number from the provided account name. It then uses the appropriate
+// method (`NextInternalAddresses` or `NextExternalAddresses`) to derive the
+// next chained address for that account.
+func (s *ScopedKeyManager) NewAddress(addrmgrNs walletdb.ReadWriteBucket,
+	account string, change bool) (btcutil.Address, error) {
+
+	accountNum, err := s.LookupAccount(addrmgrNs, account)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO(yy): get rid of the list, we should always return one address
+	// here.
+	var addrs []ManagedAddress
+
+	if change {
+		// Get next chained change address from wallet for account.
+		addrs, err = s.NextInternalAddresses(addrmgrNs, accountNum, 1)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Get next address from wallet.
+		addrs, err = s.NextExternalAddresses(addrmgrNs, accountNum, 1)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(addrs) == 0 {
+		return nil, managerError(
+			ErrAddressNotFound, "no addresses were generated", nil,
+		)
+	}
+
+	addr := addrs[0].Address()
+
+	return addr, nil
+}
