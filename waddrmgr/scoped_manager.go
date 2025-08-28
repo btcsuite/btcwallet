@@ -1000,6 +1000,41 @@ func (s *ScopedKeyManager) accountAddrType(acctInfo *accountInfo,
 	return addrSchema.ExternalAddrType
 }
 
+// TODO(yy): This method is a "God method" that does too much, leading to
+// several issues. It should be refactored to improve separation of concerns,
+// reduce complexity, and increase robustness.
+//
+// Issues:
+//  1. **Excessive Responsibility:** The method handles account validation, key
+//     derivation, address creation, database persistence, and in-memory state
+//     management, violating the Single Responsibility Principle.
+//  2. **Fragile Concurrency Model:** The use of an `onCommit` closure to sync
+//     the in-memory cache with the database state is prone to race
+//     conditions and deadlocks, as it requires re-acquiring a mutex outside
+//     of the original database transaction's scope.
+//  3. **Inefficiency and Redundancy:** The method performs a read-after-write
+//     validation by loading addresses from the DB immediately after saving
+//     them, which indicates a lack of confidence in the persistence logic.
+//  4. **Complex API:** The method returns a slice of addresses but is almost
+//     always called with a request for a single address, making the API and
+//     its usage unnecessarily complex.
+//
+// Refactoring Tasks:
+//   - **Separate DB Logic:** Encapsulate all database read/write operations
+//     within this package. The method should handle its own transaction
+//     instead of accepting a `walletdb.ReadWriteBucket`.
+//   - **Simplify State Management:** Refactor the in-memory cache (`s.addrs`)
+//     and the next address index (`acctInfo.next...Index`) to be updated
+//     atomically with the database write, removing the fragile `onCommit`
+//     closure.
+//   - **Decompose the Method:** Break this function into smaller, private
+//     helpers for each distinct responsibility: deriving keys, creating
+//     managed addresses, and persisting them.
+//   - **Simplify the API:** Create a new, simpler method that returns a single
+//     address, as this is the most common use case. The batch generation
+//     logic can be deprecated or refactored into a separate method if still
+//     needed.
+//
 // nextAddresses returns the specified number of next chained address from the
 // branch indicated by the internal flag.
 //
