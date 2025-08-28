@@ -331,7 +331,7 @@ func TestDuplicateAddressDerivation(t *testing.T) {
 			eg.Go(func() error {
 				addrs := make([]btcutil.Address, 10)
 				for i := 0; i < 10; i++ {
-					addr, err := w.NewAddress(
+					addr, err := w.NewAddressDeprecated(
 						0, waddrmgr.KeyScopeBIP0084,
 					)
 					if err != nil {
