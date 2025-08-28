@@ -438,7 +438,7 @@ func TestBalance(t *testing.T) {
 	require.Equal(t, btcutil.Amount(0), balance)
 
 	// Now, we'll add a UTXO to the account.
-	addr, err := w.NewAddress(1, scope)
+	addr, err := w.NewAddressDeprecated(1, scope)
 	require.NoError(t, err)
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
