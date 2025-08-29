@@ -14,10 +14,12 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
-// ScriptForOutput returns the address, witness program and redeem script for a
-// given UTXO. An error is returned if the UTXO does not belong to our wallet or
-// it is not a managed pubKey address.
-func (w *Wallet) ScriptForOutput(output *wire.TxOut) (
+// ScriptForOutputDeprecated returns the address, witness program and redeem
+// script for a given UTXO. An error is returned if the UTXO does not
+// belong to our wallet or it is not a managed pubKey address.
+//
+// Deprecated: Use AddressManager.ScriptForOutput instead.
+func (w *Wallet) ScriptForOutputDeprecated(output *wire.TxOut) (
 	waddrmgr.ManagedPubKeyAddress, []byte, []byte, error) {
 
 	// First make sure we can sign for the input by making sure the script
@@ -92,7 +94,7 @@ func (w *Wallet) ComputeInputScript(tx *wire.MsgTx, output *wire.TxOut,
 	hashType txscript.SigHashType, tweaker PrivKeyTweaker) (wire.TxWitness,
 	[]byte, error) {
 
-	walletAddr, witnessProgram, sigScript, err := w.ScriptForOutput(output)
+	walletAddr, witnessProgram, sigScript, err := w.ScriptForOutputDeprecated(output)
 	if err != nil {
 		return nil, nil, err
 	}
