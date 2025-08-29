@@ -405,3 +405,100 @@ func (w *Wallet) AddressInfo(_ context.Context,
 	return managedAddress, err
 }
 
+// ListAddresses lists all addresses for a given account, including their
+// balances.
+//
+// This method provides a comprehensive view of all addresses within a
+// specific account, along with their current confirmed balances.
+//
+// How it works:
+// The method first calculates the balances of all UTXOs in the wallet and
+// stores them in a map. It then iterates through all addresses of the
+// specified account and looks up their balance in the map.
+//
+// Logical Steps:
+//  1. Initiate a read-only database transaction.
+//  2. Create a map to store address balances.
+//  3. Iterate through all unspent transaction outputs (UTXOs) in the
+//     wallet's `wtxmgr` namespace.
+//  4. For each UTXO, extract the address and add the output's value to the
+//     address's balance in the map.
+//  5. Fetch the scoped key manager for the given address type.
+//  6. Look up the account number for the given account name.
+//  7. Iterate through all addresses in that account.
+//  8. For each address, create an `AddressProperty` with the address and its
+//     balance from the map.
+//  9. Return the list of `AddressProperty` objects.
+//
+// Database Actions:
+//   - This method performs a single read-only database transaction
+//     (`walletdb.View`).
+//   - It reads from both the `wtxmgr` and `waddrmgr` namespaces.
+//
+// Time Complexity:
+//   - The complexity is O(U + A), where U is the number of unspent
+//     transaction outputs in the wallet and A is the number of addresses in
+//     the specified account. This is because it iterates through all UTXOs to
+//     build the balance map and then iterates through all account addresses.
+func (w *Wallet) ListAddresses(_ context.Context, accountName string,
+	addrType waddrmgr.AddressType) ([]AddressProperty, error) {
+
+	var properties []AddressProperty
+
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+
+		// First, we'll create a map of address to balance by iterating
+		// through all the unspent outputs.
+		addrToBalance := make(map[string]btcutil.Amount)
+
+		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
+		if err != nil {
+			return err
+		}
+
+		for _, utxo := range utxos {
+			addr := extractAddrFromPKScript(
+				utxo.PkScript, w.chainParams,
+			)
+			if addr == nil {
+				continue
+			}
+
+			addrToBalance[addr.String()] += utxo.Amount
+		}
+
+		keyScope, err := w.keyScopeFromAddrType(addrType)
+		if err != nil {
+			return err
+		}
+
+		manager, err := w.addrStore.FetchScopedKeyManager(keyScope)
+		if err != nil {
+			return err
+		}
+
+		acctNum, err := manager.LookupAccount(addrmgrNs, accountName)
+		if err != nil {
+			return err
+		}
+
+		return manager.ForEachAccountAddress(addrmgrNs, acctNum,
+			func(maddr waddrmgr.ManagedAddress) error {
+				addr := maddr.Address()
+				properties = append(properties, AddressProperty{
+					Address: addr,
+					Balance: addrToBalance[addr.String()],
+				})
+
+				return nil
+			})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return properties, nil
+}
+
