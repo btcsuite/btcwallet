@@ -332,9 +332,11 @@ type Interface interface {
 		hashType txscript.SigHashType,
 		tweaker PrivKeyTweaker) (wire.TxWitness, []byte, error)
 
-	// ScriptForOutput returns the address, witness program and redeem
+	// ScriptForOutputDeprecated returns the address, witness program and redeem
 	// script for a given UTXO.
-	ScriptForOutput(output *wire.TxOut) (waddrmgr.ManagedPubKeyAddress,
+	//
+	// Deprecated: Use AddressManager.ScriptForOutput instead.
+	ScriptForOutputDeprecated(output *wire.TxOut) (waddrmgr.ManagedPubKeyAddress,
 		[]byte, []byte, error)
 }
 
