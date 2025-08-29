@@ -361,3 +361,47 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 	// Otherwise, we'll generate a new one.
 	return w.NewAddress(ctx, accountName, addrType, change)
 }
+
+// AddressInfo returns detailed information regarding a wallet address.
+//
+// This method provides metadata about a managed address, such as its type,
+// derivation path, and whether it's internal or compressed.
+//
+// How it works:
+// The method performs a direct lookup in the address manager to find the
+// requested address.
+//
+// Logical Steps:
+//  1. Initiate a read-only database transaction.
+//  2. Call the underlying address manager's `Address` method to look up the
+//     address.
+//  3. Return the managed address information.
+//
+// Database Actions:
+//   - This method performs a single read-only database transaction
+//     (`walletdb.View`).
+//   - It reads from the `waddrmgr` namespace to find the address.
+//
+// Time Complexity:
+//   - The operation is a direct database lookup, making its complexity roughly
+//     O(1) or O(log N) depending on the database backend's indexing strategy
+//     for addresses. It is a very fast operation.
+func (w *Wallet) AddressInfo(_ context.Context,
+	a btcutil.Address) (waddrmgr.ManagedAddress, error) {
+
+	var (
+		managedAddress waddrmgr.ManagedAddress
+		err            error
+	)
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddress, err = w.addrStore.Address(addrmgrNs, a)
+
+		return err
+	})
+
+	return managedAddress, err
+}
+
