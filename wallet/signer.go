@@ -5,10 +5,9 @@
 package wallet
 
 import (
-	"fmt"
+	"context"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -22,63 +21,7 @@ import (
 func (w *Wallet) ScriptForOutputDeprecated(output *wire.TxOut) (
 	waddrmgr.ManagedPubKeyAddress, []byte, []byte, error) {
 
-	// First make sure we can sign for the input by making sure the script
-	// in the UTXO belongs to our wallet and we have the private key for it.
-	walletAddr, err := w.fetchOutputAddr(output.PkScript)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	pubKeyAddr, ok := walletAddr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("address %s is not a "+
-			"p2wkh or np2wkh address", walletAddr.Address())
-	}
-
-	var (
-		witnessProgram []byte
-		sigScript      []byte
-	)
-
-	switch {
-	// If we're spending p2wkh output nested within a p2sh output, then
-	// we'll need to attach a sigScript in addition to witness data.
-	case walletAddr.AddrType() == waddrmgr.NestedWitnessPubKey:
-		pubKey := pubKeyAddr.PubKey()
-		pubKeyHash := btcutil.Hash160(pubKey.SerializeCompressed())
-
-		// Next, we'll generate a valid sigScript that will allow us to
-		// spend the p2sh output. The sigScript will contain only a
-		// single push of the p2wkh witness program corresponding to
-		// the matching public key of this address.
-		p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
-			pubKeyHash, w.chainParams,
-		)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		witnessProgram, err = txscript.PayToAddrScript(p2wkhAddr)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-
-		bldr := txscript.NewScriptBuilder()
-		bldr.AddData(witnessProgram)
-		sigScript, err = bldr.Script()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-
-	// Otherwise, this is a regular p2wkh or p2tr output, so we include the
-	// witness program itself as the subscript to generate the proper
-	// sighash digest. As part of the new sighash digest algorithm, the
-	// p2wkh witness program will be expanded into a regular p2kh
-	// script.
-	default:
-		witnessProgram = output.PkScript
-	}
-
-	return pubKeyAddr, witnessProgram, sigScript, nil
+	return w.ScriptForOutput(context.Background(), *output)
 }
 
 // PrivKeyTweaker is a function type that can be used to pass in a callback for
