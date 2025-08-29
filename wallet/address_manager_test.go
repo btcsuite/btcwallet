@@ -440,3 +440,36 @@ func TestImportTaprootScript(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, managed)
 }
+
+// TestScriptForOutput tests the ScriptForOutput method to ensure it returns the
+// correct script for a given output.
+func TestScriptForOutput(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create a new p2wkh address and output.
+	addr, err := w.NewAddress(
+		context.Background(), "default", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	output := wire.TxOut{
+		Value:    1000,
+		PkScript: pkScript,
+	}
+
+	// Get the script for the output.
+	_, witnessProgram, sigScript, err := w.ScriptForOutput(
+		context.Background(), output,
+	)
+	require.NoError(t, err)
+
+	// Check that the script is correct.
+	require.Equal(t, pkScript, witnessProgram)
+	require.Nil(t, sigScript)
+}
