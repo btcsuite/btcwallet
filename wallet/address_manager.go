@@ -502,3 +502,52 @@ func (w *Wallet) ListAddresses(_ context.Context, accountName string,
 	return properties, nil
 }
 
+// ImportPublicKey imports a single public key as a watch-only address.
+//
+// This method allows the wallet to track transactions related to a specific
+// public key without having access to the corresponding private key. This is
+// useful for monitoring addresses without compromising their security.
+//
+// How it works:
+// The method determines the appropriate key scope based on the provided
+// address type and then uses the corresponding scoped key manager to import
+// the public key.
+//
+// Logical Steps:
+//  1. Determine the key scope from the address type (e.g., P2WKH, NP2WKH).
+//  2. Fetch the scoped key manager for that scope.
+//  3. Initiate a database transaction.
+//  4. Within the transaction, call the underlying address manager's
+//     ImportPublicKey method to store the key.
+//  5. Commit the transaction.
+//
+// Database Actions:
+//   - This method performs a single database write transaction
+//     (`walletdb.Update`).
+//   - It stores the public key and its associated address information within
+//     the `waddrmgr` namespace.
+//
+// Time Complexity:
+//   - The operation is dominated by the database write, making its complexity
+//     roughly O(1) or O(log N) depending on the database backend's indexing
+//     strategy for keys. It is generally a fast operation.
+func (w *Wallet) ImportPublicKey(_ context.Context, pubKey *btcec.PublicKey,
+	addrType waddrmgr.AddressType) error {
+
+	keyScope, err := w.keyScopeFromAddrType(addrType)
+	if err != nil {
+		return err
+	}
+
+	manager, err := w.addrStore.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		return err
+	}
+
+	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		_, err := manager.ImportPublicKey(addrmgrNs, pubKey, nil)
+
+		return err
+	})
+}

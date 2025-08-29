@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -359,4 +360,35 @@ func TestListAddresses(t *testing.T) {
 	require.Len(t, addrs, 1)
 	require.Equal(t, addr.String(), addrs[0].Address.String())
 	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)
+}
+
+// TestImportPublicKey tests the ImportPublicKey method to ensure it can
+// import a public key as a watch-only address.
+func TestImportPublicKey(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create a new public key to import.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	// Import the public key.
+	err = w.ImportPublicKey(
+		context.Background(), pubKey, waddrmgr.WitnessPubKey,
+	)
+	require.NoError(t, err)
+
+	// Check that the address is now managed by the wallet.
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()), w.chainParams,
+	)
+	require.NoError(t, err)
+	managed, err := w.HaveAddress(addr)
+	require.NoError(t, err)
+	require.True(t, managed)
 }
