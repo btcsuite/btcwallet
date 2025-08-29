@@ -162,7 +162,7 @@ func TestNewAddress(t *testing.T) {
 
 			// Verify that the address is correctly marked as
 			// internal or external.
-			addrInfo, err := w.AddressInfo(addr)
+			addrInfo, err := w.AddressInfoDeprecated(addr)
 			require.NoError(t, err)
 			require.Equal(t, tc.change, addrInfo.Internal())
 		})
