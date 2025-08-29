@@ -289,7 +289,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		t.Fatalf("unhandled address type %v", tc.addrType)
 	}
 
-	addrManaged, err := w.AddressInfo(intAddr)
+	addrManaged, err := w.AddressInfoDeprecated(intAddr)
 	require.NoError(t, err)
 	require.Equal(t, true, addrManaged.Imported())
 }
