@@ -187,8 +187,11 @@ type Interface interface {
 	ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
 		addrType waddrmgr.AddressType) error
 
-	// ImportTaprootScript imports a taproot script into the wallet.
-	ImportTaprootScript(scope waddrmgr.KeyScope,
+	// ImportTaprootScriptDeprecated imports a taproot script into the
+	// wallet.
+	//
+	// Deprecated: Use AddressManager.ImportTaprootScript instead.
+	ImportTaprootScriptDeprecated(scope waddrmgr.KeyScope,
 		tapscript *waddrmgr.Tapscript, bs *waddrmgr.BlockStamp,
 		witnessVersion byte, isSecretScript bool) (
 		waddrmgr.ManagedAddress, error)
