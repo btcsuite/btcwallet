@@ -162,7 +162,7 @@ func TestNewAddress(t *testing.T) {
 
 			// Verify that the address is correctly marked as
 			// internal or external.
-			addrInfo, err := w.AddressInfoDeprecated(addr)
+			addrInfo, err := w.AddressInfo(context.Background(), addr)
 			require.NoError(t, err)
 			require.Equal(t, tc.change, addrInfo.Internal())
 		})
@@ -250,4 +250,48 @@ func TestGetUnusedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, changeAddr.String(), unusedChangeAddr.String())
+}
+
+// TestAddressInfo tests the AddressInfo method to ensure it returns correct
+// information for both internal and external addresses.
+func TestAddressInfo(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Get a new external address to test with.
+	extAddr, err := w.NewAddress(
+		context.Background(), "default", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	// Get the address info for the external address.
+	extInfo, err := w.AddressInfo(context.Background(), extAddr)
+	require.NoError(t, err)
+
+	// Check the external address info.
+	require.Equal(t, extAddr.String(), extInfo.Address().String())
+	require.False(t, extInfo.Internal())
+	require.True(t, extInfo.Compressed())
+	require.False(t, extInfo.Imported())
+	require.Equal(t, waddrmgr.WitnessPubKey, extInfo.AddrType())
+
+	// Get a new internal address to test with.
+	intAddr, err := w.NewAddress(
+		context.Background(), "default", waddrmgr.WitnessPubKey, true,
+	)
+	require.NoError(t, err)
+
+	// Get the address info for the internal address.
+	intInfo, err := w.AddressInfo(context.Background(), intAddr)
+	require.NoError(t, err)
+
+	// Check the internal address info.
+	require.Equal(t, intAddr.String(), intInfo.Address().String())
+	require.True(t, intInfo.Internal())
+	require.True(t, intInfo.Compressed())
+	require.False(t, intInfo.Imported())
+	require.Equal(t, waddrmgr.WitnessPubKey, intInfo.AddrType())
 }
