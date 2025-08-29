@@ -295,3 +295,68 @@ func TestAddressInfo(t *testing.T) {
 	require.False(t, intInfo.Imported())
 	require.Equal(t, waddrmgr.WitnessPubKey, intInfo.AddrType())
 }
+
+// TestListAddresses tests the ListAddresses method to ensure it returns the
+// correct addresses and balances for a given account.
+func TestListAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Get a new address and give it a balance.
+	addr, err := w.NewAddress(
+		context.Background(), "default", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	// "Use" the address by creating a fake UTXO for it.
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// We need to create a realistic transaction that has at least one
+	// input.
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		// Create a new transaction and set the output to the address
+		// we want to mark as used.
+		msgTx := TstTx.MsgTx()
+		msgTx.TxOut = []*wire.TxOut{{
+			PkScript: pkScript,
+			Value:    1000,
+		}}
+
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(msgTx, time.Now())
+		if err != nil {
+			return err
+		}
+
+		err = w.txStore.InsertTx(txmgrNs, rec, nil)
+		if err != nil {
+			return err
+		}
+
+		err = w.txStore.AddCredit(txmgrNs, rec, nil, 0, false)
+		if err != nil {
+			return err
+		}
+
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		return w.addrStore.MarkUsed(addrmgrNs, addr)
+	})
+	require.NoError(t, err)
+
+	// List the addresses for the default account.
+	addrs, err := w.ListAddresses(
+		context.Background(), "default", waddrmgr.WitnessPubKey,
+	)
+	require.NoError(t, err)
+
+	// We should have one address with a balance of 1000.
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.String(), addrs[0].Address.String())
+	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)
+}
