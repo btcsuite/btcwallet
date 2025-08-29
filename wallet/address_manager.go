@@ -551,3 +551,58 @@ func (w *Wallet) ImportPublicKey(_ context.Context, pubKey *btcec.PublicKey,
 		return err
 	})
 }
+
+// ImportTaprootScript imports a taproot script for tracking and spending.
+//
+// This method allows the wallet to import a taproot script, which is
+// necessary for spending from or tracking a taproot address.
+//
+// How it works:
+// The method uses the BIP-0086 key scope to fetch the taproot-specific
+// scoped key manager. It then calls the underlying manager's
+// ImportTaprootScript method to store the script information.
+//
+// Logical Steps:
+//  1. Fetch the scoped key manager for the taproot key scope (BIP-0086).
+//  2. Initiate a database transaction.
+//  3. Within the transaction, get the wallet's current sync state to use as
+//     the "birthday" for the new script.
+//  4. Call the underlying address manager's ImportTaprootScript method.
+//  5. Commit the transaction.
+//
+// Database Actions:
+//   - This method performs a single database write transaction
+//     (`walletdb.Update`).
+//   - It stores the taproot script and its derived address information within
+//     the `waddrmgr` namespace.
+//
+// Time Complexity:
+//   - Similar to ImportPublicKey, this operation is dominated by a database
+//     write, making it a fast operation with a complexity of roughly O(1).
+func (w *Wallet) ImportTaprootScript(_ context.Context,
+	tapscript waddrmgr.Tapscript) (waddrmgr.ManagedAddress, error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(
+		waddrmgr.KeyScopeBIP0086,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var addr waddrmgr.ManagedAddress
+
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		syncedTo := w.addrStore.SyncedTo()
+		addr, err = manager.ImportTaprootScript(
+			ns, &tapscript, &syncedTo, 1, false,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return addr, nil
+}
