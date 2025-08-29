@@ -217,7 +217,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			packet.UnsignedTx.TxOut, changeTxOut,
 		)
 
-		addr, _, _, err := w.ScriptForOutput(changeTxOut)
+		addr, _, _, err := w.ScriptForOutputDeprecated(changeTxOut)
 		if err != nil {
 			return 0, fmt.Errorf("error querying wallet for "+
 				"change addr: %w", err)
@@ -278,7 +278,7 @@ func (w *Wallet) DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error {
 			return fmt.Errorf("error fetching UTXO: %w", err)
 		}
 
-		addr, witnessProgram, _, err := w.ScriptForOutput(utxo)
+		addr, witnessProgram, _, err := w.ScriptForOutputDeprecated(utxo)
 		if err != nil {
 			return fmt.Errorf("error fetching UTXO script: %w", err)
 		}
