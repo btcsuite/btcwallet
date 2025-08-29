@@ -393,7 +393,7 @@ func (w *Wallet) ImportAccountDryRun(name string,
 // case of legacy versions (xpub, tpub), an address type must be specified as we
 // intend to not support importing BIP-44 keys into the wallet using the legacy
 // pay-to-pubkey-hash (P2PKH) scheme.
-func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
+func (w *Wallet) ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
 	// Determine what key scope the public key should belong to and import
