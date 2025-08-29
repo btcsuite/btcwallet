@@ -1967,10 +1967,8 @@ func (w *Wallet) AccountOfAddress(a address.Address) (uint32, error) {
 	return account, err
 }
 
-// AddressInfo returns detailed information regarding a wallet address.
-func (w *Wallet) AddressInfo(
-	a address.Address) (waddrmgr.ManagedAddress, error) {
-
+// AddressInfoDeprecated returns detailed information regarding a wallet address.
+func (w *Wallet) AddressInfoDeprecated(a address.Address) (waddrmgr.ManagedAddress, error) {
 	var managedAddress waddrmgr.ManagedAddress
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
