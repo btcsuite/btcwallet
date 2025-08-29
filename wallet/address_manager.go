@@ -25,6 +25,16 @@ var (
 	// is requested for the default imported account within the wallet.
 	ErrImportedAccountNoAddrGen = errors.New("addresses cannot be " +
 		"generated for the default imported account")
+
+	// ErrNotPubKeyAddress is an error returned when a function requires a
+	// public key address, but a different type of address is provided.
+	ErrNotPubKeyAddress = errors.New(
+		"address is not a p2wkh or np2wkh address",
+	)
+
+	// errStopIteration is a special error used to stop the iteration in
+	// ForEachAccountAddress.
+	errStopIteration = errors.New("stop iteration")
 )
 
 // AddressProperty represents an address and its balance.
@@ -245,4 +255,109 @@ func (w *Wallet) newAddress(manager *waddrmgr.ScopedKeyManager,
 	}
 
 	return addr, nil
+}
+
+// GetUnusedAddress returns the first, oldest, unused address by scanning
+// forward from the start of the derivation path. The address is considered
+// "unused" if it has never appeared in a transaction. This method is the
+// recommended default for obtaining a new receiving address. It prevents
+// address reuse and avoids creating gaps in the address chain, which is
+// critical for reliable wallet recovery under standards like BIP44 that
+// enforce a gap limit of 20 unused addresses. If all previously derived
+// addresses have been used, this method will delegate to NewAddress to
+// generate a new one.
+//
+// TODO(yy): The current implementation of GetUnusedAddress is inefficient for
+// wallets with a large number of used addresses. It iterates from the first
+// address (index 0) forward until it finds an unused one, resulting in an O(n)
+// complexity where n is the number of used addresses.
+//
+// A potential optimization of scanning backwards from the last derived address
+// is UNSAFE. While faster in the common case, it can create gaps in the
+// address chain. For example, if addresses [0, 1, 3] are used but [2] is not,
+// a backward scan would return a new address after 3, leaving 2 as a gap.
+// This violates the BIP44 gap limit (typically 20) and can lead to fund loss
+// upon wallet recovery from seed, as the recovery process would stop scanning
+// at the gap.
+//
+// The correct optimization is to persist a "first unused address pointer"
+// (e.g., `firstUnusedExternalIndex`) for each account in the database.
+//
+// This would change the logic to:
+//  1. `GetUnusedAddress`: Becomes an O(1) lookup. It reads the index from the
+//     database and derives the address at that index.
+//  2. `MarkUsed`: When an address is marked as used, if its index matches the
+//     stored pointer, a one-time forward scan is performed to find the next
+//     unused address, and the pointer is updated in the database.
+//
+// This moves the expensive scan from the frequent "read" operation to the less
+// frequent "write" operation, providing both performance and safety.
+func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
+	addrType waddrmgr.AddressType, change bool) (btcutil.Address, error) {
+
+	if accountName == waddrmgr.ImportedAddrAccountName {
+		return nil, ErrImportedAccountNoAddrGen
+	}
+
+	keyScope, err := w.keyScopeFromAddrType(addrType)
+	if err != nil {
+		return nil, err
+	}
+
+	manager, err := w.addrStore.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		return nil, err
+	}
+
+	var unusedAddr btcutil.Address
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		// First, look up the account number for the passed account
+		// name.
+		acctNum, err := manager.LookupAccount(addrmgrNs, accountName)
+		if err != nil {
+			return err
+		}
+
+		// Now, iterate through all addresses for the account and
+		// return the first one that is unused.
+		return manager.ForEachAccountAddress(
+			addrmgrNs, acctNum,
+			func(maddr waddrmgr.ManagedAddress) error {
+				// We only want to consider addresses that match
+				// the change parameter.
+				if maddr.Internal() != change {
+					return nil
+				}
+
+				if !maddr.Used(addrmgrNs) {
+					unusedAddr = maddr.Address()
+
+					// Return a special error to signal
+					// that the iteration should be
+					// stopped. This is the idiomatic way
+					// to halt a ForEach* loop in this
+					// codebase.
+					return errStopIteration
+				}
+
+				return nil
+			},
+		)
+	})
+
+	// We'll ignore the special error that we use to stop the iteration.
+	if err != nil && !errors.Is(err, errStopIteration) {
+		return nil, err
+	}
+
+	// If we found an unused address, we can return it now.
+	if unusedAddr != nil {
+		return unusedAddr, nil
+	}
+
+	// Otherwise, we'll generate a new one.
+	return w.NewAddress(ctx, accountName, addrType, change)
 }
