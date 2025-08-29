@@ -167,9 +167,15 @@ type Interface interface {
 	NewChangeAddress(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
-	// AddressInfo returns detailed information about a managed address,
-	// including its derivation path and whether it's compressed.
-	AddressInfo(a btcutil.Address) (waddrmgr.ManagedAddress, error)
+	// AddressInfoDeprecated returns detailed information about a managed
+	// address, including its derivation path and whether it's compressed.
+	//
+	// Deprecated: This method leaks internal waddrmgr types. Callers
+	// should use specific methods such as AccountOfAddress,
+	// IsInternalAddress, etc. instead.
+	AddressInfoDeprecated(a btcutil.Address) (
+		waddrmgr.ManagedAddress, error,
+	)
 
 	// HaveAddress returns whether the wallet is the owner of the address.
 	HaveAddress(a btcutil.Address) (bool, error)
