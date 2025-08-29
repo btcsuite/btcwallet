@@ -11,6 +11,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -387,6 +388,53 @@ func TestImportPublicKey(t *testing.T) {
 	// Check that the address is now managed by the wallet.
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		address.Hash160(pubKey.SerializeCompressed()), w.chainParams,
+	)
+	require.NoError(t, err)
+	managed, err := w.HaveAddress(addr)
+	require.NoError(t, err)
+	require.True(t, managed)
+}
+
+// TestImportTaprootScript tests the ImportTaprootScript method to ensure it can
+// import a taproot script as a watch-only address.
+func TestImportTaprootScript(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create a new tapscript to import.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	script, err := txscript.NewScriptBuilder().
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_CHECKSIG).
+		Script()
+	require.NoError(t, err)
+
+	leaf := txscript.NewTapLeaf(txscript.BaseLeafVersion, script)
+	tree := txscript.AssembleTaprootScriptTree(leaf)
+	rootHash := tree.RootNode.TapHash()
+	tapscript := waddrmgr.Tapscript{
+		Type: waddrmgr.TapscriptTypeFullTree,
+		ControlBlock: &txscript.ControlBlock{
+			InternalKey: pubKey,
+		},
+		Leaves: []txscript.TapLeaf{leaf},
+	}
+
+	// Import the tapscript.
+	_, err = w.ImportTaprootScript(context.Background(), tapscript)
+	require.NoError(t, err)
+
+	// Check that the address is now managed by the wallet.
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(txscript.ComputeTaprootOutputKey(
+			pubKey, rootHash[:],
+		)), w.chainParams,
 	)
 	require.NoError(t, err)
 	managed, err := w.HaveAddress(addr)
