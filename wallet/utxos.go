@@ -144,7 +144,7 @@ func (w *Wallet) fetchOutputAddr(script []byte) (waddrmgr.ManagedAddress, error)
 	// Therefore, we simply select the key for the first address we know
 	// of.
 	for _, addr := range addrs {
-		addr, err := w.AddressInfo(addr)
+		addr, err := w.AddressInfoDeprecated(addr)
 		if err == nil {
 			return addr, nil
 		}

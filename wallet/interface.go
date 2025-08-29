@@ -168,9 +168,15 @@ type Interface interface {
 	NewChangeAddress(account uint32, scope waddrmgr.KeyScope) (
 		address.Address, error)
 
-	// AddressInfo returns detailed information about a managed address,
-	// including its derivation path and whether it's compressed.
-	AddressInfo(a address.Address) (waddrmgr.ManagedAddress, error)
+	// AddressInfoDeprecated returns detailed information about a managed
+	// address, including its derivation path and whether it's compressed.
+	//
+	// Deprecated: This method leaks internal waddrmgr types. Callers
+	// should use specific methods such as AccountOfAddress,
+	// IsInternalAddress, etc. instead.
+	AddressInfoDeprecated(a address.Address) (
+		waddrmgr.ManagedAddress, error,
+	)
 
 	// HaveAddress returns whether the wallet is the owner of the address.
 	HaveAddress(a address.Address) (bool, error)
