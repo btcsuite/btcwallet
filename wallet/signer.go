@@ -34,15 +34,19 @@ func (w *Wallet) ScriptForOutputDeprecated(output *wire.TxOut) (
 type PrivKeyTweaker func(*btcec.PrivateKey) (*btcec.PrivateKey, error)
 
 // ComputeInputScript generates a complete InputScript for the passed
-// transaction with the signature as defined within the passed SignDescriptor.
-// This method is capable of generating the proper input script for both
-// regular p2wkh output and p2wkh outputs nested within a regular p2sh output.
+// transaction with the signature as defined within the passed
+// SignDescriptor. This method is capable of generating the proper input
+// script for both regular p2wkh output and p2wkh outputs nested within a
+// regular p2sh output.
 func (w *Wallet) ComputeInputScript(tx *wire.MsgTx, output *wire.TxOut,
 	inputIndex int, sigHashes *txscript.TxSigHashes,
 	hashType txscript.SigHashType, tweaker PrivKeyTweaker) (wire.TxWitness,
 	[]byte, error) {
 
-	walletAddr, witnessProgram, sigScript, err := w.ScriptForOutputDeprecated(output)
+	walletAddr, witnessProgram, sigScript, err :=
+		w.ScriptForOutputDeprecated(
+			output,
+		)
 	if err != nil {
 		return nil, nil, err
 	}
