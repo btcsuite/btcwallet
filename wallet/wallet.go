@@ -1878,7 +1878,7 @@ func (w *Wallet) PrivKeyForAddress(a btcutil.Address) (*btcec.PrivateKey, error)
 	var privKey *btcec.PrivateKey
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		managedAddr, err := w.addrStore.Address(addrmgrNs, a)
+		addr, err := w.addrStore.Address(addrmgrNs, a)
 		if err != nil {
 			return err
 		}
