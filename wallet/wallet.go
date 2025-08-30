@@ -1878,17 +1878,21 @@ func (w *Wallet) PrivKeyForAddress(a btcutil.Address) (*btcec.PrivateKey, error)
 	var privKey *btcec.PrivateKey
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		managedAddr, err := w.addrStore.Address(addrmgrNs, a)
+		addr, err := w.addrStore.Address(addrmgrNs, a)
 		if err != nil {
 			return err
 		}
-		managedPubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+
+		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
 		if !ok {
-			return errors.New("address does not have an associated private key")
+			return errors.New("address does not have an " +
+				"associated private key")
 		}
+
 		privKey, err = managedPubKeyAddr.PrivKey()
 		return err
 	})
+
 	return privKey, err
 }
 
@@ -3966,8 +3970,8 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 
 			return err
 		}
-		privKey, err = mpka.PrivKey()
 
+		privKey, err = mpka.PrivKey()
 		return err
 	})
 	if err != nil {
