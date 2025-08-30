@@ -1882,13 +1882,17 @@ func (w *Wallet) PrivKeyForAddress(a btcutil.Address) (*btcec.PrivateKey, error)
 		if err != nil {
 			return err
 		}
-		managedPubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+
+		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
 		if !ok {
-			return errors.New("address does not have an associated private key")
+			return errors.New("address does not have an " +
+				"associated private key")
 		}
+
 		privKey, err = managedPubKeyAddr.PrivKey()
 		return err
 	})
+
 	return privKey, err
 }
 
@@ -3958,7 +3962,11 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 			return fmt.Errorf("error deriving private key: %w", err)
 		}
 
-		privKey, err = addr.(waddrmgr.ManagedPubKeyAddress).PrivKey()
+		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			return errors.New("address is not a pubkey address")
+		}
+		privKey, err = managedPubKeyAddr.PrivKey()
 
 		return err
 	})
