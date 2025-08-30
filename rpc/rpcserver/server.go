@@ -234,7 +234,9 @@ func (s *walletServer) NextAddress(ctx context.Context, req *pb.NextAddressReque
 	)
 	switch req.Kind {
 	case pb.NextAddressRequest_BIP0044_EXTERNAL:
-		addr, err = s.wallet.NewAddressDeprecated(req.GetAccount(), waddrmgr.KeyScopeBIP0044)
+		addr, err = s.wallet.NewAddressDeprecated(
+			req.GetAccount(), waddrmgr.KeyScopeBIP0044,
+		)
 	case pb.NextAddressRequest_BIP0044_INTERNAL:
 		addr, err = s.wallet.NewChangeAddress(req.Account, waddrmgr.KeyScopeBIP0044)
 	default:

@@ -329,9 +329,9 @@ type Interface interface {
 	DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 		path waddrmgr.DerivationPath) (*btcec.PrivateKey, error)
 
-	// ComputeInputScript generates a complete InputScript for the passed
-	// transaction with the signature as defined within the passed
-	// SignDescriptor.
+	// ComputeInputScript generates a complete InputScript for the
+	// passed transaction with the signature as defined within the
+	// passed SignDescriptor.
 	ComputeInputScript(tx *wire.MsgTx, output *wire.TxOut,
 		inputIndex int, sigHashes *txscript.TxSigHashes,
 		hashType txscript.SigHashType,
@@ -341,8 +341,8 @@ type Interface interface {
 	// redeem script for a given UTXO.
 	//
 	// Deprecated: Use AddressManager.ScriptForOutput instead.
-	ScriptForOutputDeprecated(output *wire.TxOut) (waddrmgr.ManagedPubKeyAddress,
-		[]byte, []byte, error)
+	ScriptForOutputDeprecated(output *wire.TxOut) (
+		waddrmgr.ManagedPubKeyAddress, []byte, []byte, error)
 }
 
 // A compile time check to ensure that Wallet implements the interface.
