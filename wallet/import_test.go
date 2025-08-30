@@ -243,7 +243,9 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(0), acct2.ImportedKeyCount)
 
 	// Test address derivation.
-	extAddr, err := w.NewAddressDeprecated(acct1.AccountNumber, tc.expectedScope)
+	extAddr, err := w.NewAddressDeprecated(
+		acct1.AccountNumber, tc.expectedScope,
+	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedAddr, extAddr.String())
 	intAddr, err := w.NewChangeAddress(acct1.AccountNumber, tc.expectedScope)
@@ -257,7 +259,8 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(1), acct1.ExternalKeyCount)
 	require.Equal(t, uint32(0), acct1.ImportedKeyCount)
 
-	// Make sure we can't get private keys for the imported accounts.
+	// Make sure we can't get private keys for the imported
+	// accounts.
 	_, err = w.DumpWIFPrivateKey(intAddr)
 	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrWatchingOnly))
 

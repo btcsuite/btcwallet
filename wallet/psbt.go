@@ -278,7 +278,9 @@ func (w *Wallet) DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error {
 			return fmt.Errorf("error fetching UTXO: %w", err)
 		}
 
-		addr, witnessProgram, _, err := w.ScriptForOutputDeprecated(utxo)
+		addr, witnessProgram, _, err := w.ScriptForOutputDeprecated(
+			utxo,
+		)
 		if err != nil {
 			return fmt.Errorf("error fetching UTXO script: %w", err)
 		}
@@ -300,8 +302,9 @@ func (w *Wallet) DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error {
 	return nil
 }
 
-// addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a SegWit v0
-// PSBT input (p2wkh, np2wkh) from the given wallet information.
+// addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a
+// SegWit v0 PSBT input (p2wkh, np2wkh) from the given wallet
+// information.
 func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx, utxo *wire.TxOut,
 	derivationInfo *psbt.Bip32Derivation, addr waddrmgr.ManagedAddress,
 	witnessProgram []byte) {
