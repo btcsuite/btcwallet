@@ -90,6 +90,11 @@ var (
 	// watch-only mode where we can select coins but not sign any inputs.
 	ErrTxUnsigned = errors.New("watch-only wallet, transaction not signed")
 
+	// ErrNoAssocPrivateKey is returned when a private key is requested for
+	// an address that has no associated private key.
+	ErrNoAssocPrivateKey = errors.New("address does not have an " +
+		"associated private key")
+
 	// Namespace bucket keys.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
@@ -1565,6 +1570,7 @@ func (w *Wallet) Locked() bool {
 //
 // TODO: To prevent the above scenario, perhaps closures should be passed
 // to the walletLocker goroutine and disallow callers from explicitly
+
 // handling the locking mechanism.
 func (w *Wallet) holdUnlock() (heldUnlock, error) {
 	req := make(chan heldUnlock)
@@ -1913,17 +1919,20 @@ func (w *Wallet) PrivKeyForAddress(a btcutil.Address) (*btcec.PrivateKey, error)
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
-		managedAddr, err := w.addrStore.Address(addrmgrNs, a)
+		addr, err := w.addrStore.Address(addrmgrNs, a)
 		if err != nil {
 			return err
 		}
-		managedPubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+
+		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
 		if !ok {
-			return errors.New("address does not have an associated private key")
+			return ErrNoAssocPrivateKey
 		}
+
 		privKey, err = managedPubKeyAddr.PrivKey()
 		return err
 	})
+
 	return privKey, err
 }
 
@@ -1956,8 +1965,11 @@ func (w *Wallet) AccountOfAddress(a btcutil.Address) (uint32, error) {
 	return account, err
 }
 
-// AddressInfoDeprecated returns detailed information regarding a wallet address.
-func (w *Wallet) AddressInfoDeprecated(a btcutil.Address) (waddrmgr.ManagedAddress, error) {
+// AddressInfoDeprecated returns detailed information regarding a wallet
+// address.
+func (w *Wallet) AddressInfoDeprecated(a btcutil.Address) (
+	waddrmgr.ManagedAddress, error) {
+
 	var managedAddress waddrmgr.ManagedAddress
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
@@ -4058,8 +4070,8 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 
 			return err
 		}
-		privKey, err = mpka.PrivKey()
 
+		privKey, err = mpka.PrivKey()
 		return err
 	})
 	if err != nil {

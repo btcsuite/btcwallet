@@ -164,7 +164,9 @@ func TestNewAddress(t *testing.T) {
 
 			// Verify that the address is correctly marked as
 			// internal or external.
-			addrInfo, err := w.AddressInfo(context.Background(), addr)
+			addrInfo, err := w.AddressInfo(
+				context.Background(), addr,
+			)
 			require.NoError(t, err)
 			require.Equal(t, tc.change, addrInfo.Internal())
 		})
