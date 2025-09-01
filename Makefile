@@ -18,7 +18,7 @@ GOIMPORTS_BIN := $(GO_BIN)/gosimports
 LINT_BIN := $(GO_BIN)/golangci-lint
 GOACC_BIN := $(GO_BIN)/go-acc
 
-LINT_VERSION := v1.60.1
+LINT_VERSION := v1.64.8
 GOACC_VERSION := v0.2.8
 
 GOIMPORTS_COMMIT := v0.1.10
