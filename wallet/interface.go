@@ -254,10 +254,12 @@ type Interface interface {
 	LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 		duration time.Duration) (time.Time, error)
 
-	// ReleaseOutput unlocks an output, allowing it to be available for
+	// ReleaseOutputDeprecated unlocks an output, allowing it to be available for
 	// coin selection if it remains unspent. The ID should match the one
 	// used to originally lock the output.
-	ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error
+	//
+	// Deprecated: Use UtxoManager.ReleaseOutput instead.
+	ReleaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint) error
 
 	// ListLeasedOutputs returns a list of all currently leased outputs.
 	ListLeasedOutputs() ([]*ListLeasedOutputResult, error)

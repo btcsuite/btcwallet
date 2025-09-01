@@ -3075,10 +3075,12 @@ func (w *Wallet) LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 	return expiry, err
 }
 
-// ReleaseOutput unlocks an output, allowing it to be available for coin
+// ReleaseOutputDeprecated unlocks an output, allowing it to be available for coin
 // selection if it remains unspent. The ID should match the one used to
 // originally lock the output.
-func (w *Wallet) ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error {
+//
+// Deprecated: Use UtxoManager.ReleaseOutput instead.
+func (w *Wallet) ReleaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint) error {
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		return w.txStore.UnlockOutput(ns, id, op)
