@@ -2728,12 +2728,16 @@ func (s creditSlice) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-// ListUnspent returns a slice of objects representing the unspent wallet
+// ListUnspentDeprecated returns a slice of objects representing the unspent wallet
 // transactions fitting the given criteria. The confirmations will be more than
 // minconf, less than maxconf and if addresses is populated only the addresses
 // contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
-func (w *Wallet) ListUnspent(minconf, maxconf int32,
+//
+// Deprecated: Use UtxoManager.ListUnspent instead.
+//
+//nolint:funlen
+func (w *Wallet) ListUnspentDeprecated(minconf, maxconf int32,
 	accountName string) ([]*btcjson.ListUnspentResult, error) {
 
 	var results []*btcjson.ListUnspentResult

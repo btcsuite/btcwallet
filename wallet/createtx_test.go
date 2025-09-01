@@ -484,7 +484,7 @@ func TestSelectUtxosTxoToOutpoint(t *testing.T) {
 	addUtxo(t, w, incomingTx)
 
 	// We expect 4 unspent UTXOs.
-	unspent, err := w.ListUnspent(0, 80, "")
+	unspent, err := w.ListUnspentDeprecated(0, 80, "")
 	require.NoError(t, err)
 	require.Len(t, unspent, 4, "expected 4 unspent UTXOs")
 
