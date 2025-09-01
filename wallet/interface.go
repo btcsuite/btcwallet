@@ -208,9 +208,11 @@ type Interface interface {
 	CalculateAccountBalances(account uint32, requiredConfirmations int32) (
 		Balances, error)
 
-	// ListUnspent returns all unspent transaction outputs for a given
+	// ListUnspentDeprecated returns all unspent transaction outputs for a given
 	// account and confirmation requirement.
-	ListUnspent(minconf, maxconf int32, accountName string) (
+	//
+	// Deprecated: Use UtxoManager.ListUnspent instead.
+	ListUnspentDeprecated(minconf, maxconf int32, accountName string) (
 		[]*btcjson.ListUnspentResult, error)
 
 	// FetchOutpointInfo returns the output information for a given
