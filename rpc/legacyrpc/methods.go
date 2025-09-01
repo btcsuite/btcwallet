@@ -702,7 +702,7 @@ func getNewAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	addr, err := w.NewAddress(account, keyScope)
+	addr, err := w.NewAddressDeprecated(account, keyScope)
 	if err != nil {
 		return nil, err
 	}
@@ -1778,7 +1778,7 @@ func validateAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	result.Address = addr.EncodeAddress()
 	result.IsValid = true
 
-	ainfo, err := w.AddressInfo(addr)
+	ainfo, err := w.AddressInfoDeprecated(addr)
 	if err != nil {
 		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
 			// No additional information available about the address.

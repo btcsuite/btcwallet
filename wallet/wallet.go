@@ -1764,7 +1764,7 @@ func (w *Wallet) CurrentAddress(account uint32, scope waddrmgr.KeyScope) (btcuti
 			// If no address exists yet, create the first external
 			// address.
 			if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
-				addr, props, err = w.newAddress(
+				addr, props, err = w.newAddressDeprecated(
 					addrmgrNs, account, scope,
 				)
 			}
@@ -1774,7 +1774,7 @@ func (w *Wallet) CurrentAddress(account uint32, scope waddrmgr.KeyScope) (btcuti
 		// Get next chained address if the last one has already been
 		// used.
 		if maddr.Used(addrmgrNs) {
-			addr, props, err = w.newAddress(
+			addr, props, err = w.newAddressDeprecated(
 				addrmgrNs, account, scope,
 			)
 			return err
@@ -1878,17 +1878,21 @@ func (w *Wallet) PrivKeyForAddress(a btcutil.Address) (*btcec.PrivateKey, error)
 	var privKey *btcec.PrivateKey
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		managedAddr, err := w.addrStore.Address(addrmgrNs, a)
+		addr, err := w.addrStore.Address(addrmgrNs, a)
 		if err != nil {
 			return err
 		}
-		managedPubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+
+		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
 		if !ok {
-			return errors.New("address does not have an associated private key")
+			return errors.New("address does not have an " +
+				"associated private key")
 		}
+
 		privKey, err = managedPubKeyAddr.PrivKey()
 		return err
 	})
+
 	return privKey, err
 }
 
@@ -1920,8 +1924,8 @@ func (w *Wallet) AccountOfAddress(a btcutil.Address) (uint32, error) {
 	return account, err
 }
 
-// AddressInfo returns detailed information regarding a wallet address.
-func (w *Wallet) AddressInfo(a btcutil.Address) (waddrmgr.ManagedAddress, error) {
+// AddressInfoDeprecated returns detailed information regarding a wallet address.
+func (w *Wallet) AddressInfoDeprecated(a btcutil.Address) (waddrmgr.ManagedAddress, error) {
 	var managedAddress waddrmgr.ManagedAddress
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
@@ -3064,7 +3068,7 @@ func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
 }
 
 // NewAddress returns the next external chained address for a wallet.
-func (w *Wallet) NewAddress(account uint32,
+func (w *Wallet) NewAddressDeprecated(account uint32,
 	scope waddrmgr.KeyScope) (btcutil.Address, error) {
 
 	chainClient, err := w.requireChainClient()
@@ -3088,7 +3092,9 @@ func (w *Wallet) NewAddress(account uint32,
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		var err error
-		addr, props, err = w.newAddress(addrmgrNs, account, scope)
+		addr, props, err = w.newAddressDeprecated(
+			addrmgrNs, account, scope,
+		)
 		return err
 	})
 	if err != nil {
@@ -3106,8 +3112,9 @@ func (w *Wallet) NewAddress(account uint32,
 	return addr, nil
 }
 
-func (w *Wallet) newAddress(addrmgrNs walletdb.ReadWriteBucket, account uint32,
-	scope waddrmgr.KeyScope) (btcutil.Address, *waddrmgr.AccountProperties, error) {
+func (w *Wallet) newAddressDeprecated(addrmgrNs walletdb.ReadWriteBucket,
+	account uint32, scope waddrmgr.KeyScope) (btcutil.Address,
+	*waddrmgr.AccountProperties, error) {
 
 	manager, err := w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
@@ -3955,7 +3962,11 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 			return fmt.Errorf("error deriving private key: %w", err)
 		}
 
-		privKey, err = addr.(waddrmgr.ManagedPubKeyAddress).PrivKey()
+		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			return errors.New("address is not a pubkey address")
+		}
+		privKey, err = managedPubKeyAddr.PrivKey()
 
 		return err
 	})
