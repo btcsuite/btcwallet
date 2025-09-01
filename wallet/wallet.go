@@ -3044,7 +3044,7 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 	return locked
 }
 
-// LeaseOutput locks an output to the given ID, preventing it from being
+// LeaseOutputDeprecated locks an output to the given ID, preventing it from being
 // available for coin selection. The absolute time of the lock's expiration is
 // returned. The expiration of the lock can be extended by successive
 // invocations of this call.
@@ -3059,7 +3059,9 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 //
 // NOTE: This differs from LockOutpoint in that outputs are locked for a limited
 // amount of time and their locks are persisted to disk.
-func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
+//
+// Deprecated: Use UtxoManager.LeaseOutput instead.
+func (w *Wallet) LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 	duration time.Duration) (time.Time, error) {
 
 	var expiry time.Time
