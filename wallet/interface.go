@@ -261,8 +261,10 @@ type Interface interface {
 	// Deprecated: Use UtxoManager.ReleaseOutput instead.
 	ReleaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint) error
 
-	// ListLeasedOutputs returns a list of all currently leased outputs.
-	ListLeasedOutputs() ([]*ListLeasedOutputResult, error)
+	// ListLeasedOutputsDeprecated returns a list of all currently leased outputs.
+	//
+	// Deprecated: Use UtxoManager.ListLeasedOutputs instead.
+	ListLeasedOutputsDeprecated() ([]*ListLeasedOutputResult, error)
 
 	// CreateSimpleTx creates a new transaction to the specified outputs,
 	// automatically performing coin selection and creating a change output
