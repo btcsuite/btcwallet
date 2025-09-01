@@ -2879,9 +2879,11 @@ type ListLeasedOutputResult struct {
 	PkScript []byte
 }
 
-// ListLeasedOutputs returns a list of objects representing the currently locked
+// ListLeasedOutputsDeprecated returns a list of objects representing the currently locked
 // utxos.
-func (w *Wallet) ListLeasedOutputs() ([]*ListLeasedOutputResult, error) {
+//
+// Deprecated: Use UtxoManager.ListLeasedOutputs instead.
+func (w *Wallet) ListLeasedOutputsDeprecated() ([]*ListLeasedOutputResult, error) {
 	var results []*ListLeasedOutputResult
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
