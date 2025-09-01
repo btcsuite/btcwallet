@@ -1331,7 +1331,7 @@ func listUnspent(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		}
 	}
 
-	return w.ListUnspent(int32(*cmd.MinConf), int32(*cmd.MaxConf), "")
+	return w.ListUnspentDeprecated(int32(*cmd.MinConf), int32(*cmd.MaxConf), "") //nolint:gosec,staticcheck
 }
 
 // lockUnspent handles the lockunspent command.
