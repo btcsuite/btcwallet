@@ -2,7 +2,7 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package main
+package build
 
 import (
 	"bytes"
@@ -30,9 +30,9 @@ const (
 // contain characters from semanticAlphabet per the semantic versioning spec.
 var appBuild string
 
-// version returns the application version as a properly formed string per the
+// Version returns the application version as a properly formed string per the
 // semantic versioning 2.0.0 spec (http://semver.org/).
-func version() string {
+func Version() string {
 	// Start with the major, minor, and path versions.
 	version := fmt.Sprintf("%d.%d.%d", appMajor, appMinor, appPatch)
 
