@@ -13,11 +13,13 @@ package wallet
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -68,7 +70,8 @@ type UtxoQuery struct {
 // UTXO set.
 type UtxoManager interface {
 	// ListUnspent returns a slice of all unspent transaction outputs that
-	// match the query.
+	// match the query. The returned UTXOs are sorted by amount in
+	// ascending order.
 	ListUnspent(ctx context.Context, query UtxoQuery) ([]*Utxo, error)
 
 	// GetUtxoInfo returns the output information for a given outpoint.
@@ -88,3 +91,175 @@ type UtxoManager interface {
 	ListLeasedOutputs(ctx context.Context) ([]*ListLeasedOutputResult, error)
 }
 
+// ListUnspent returns a slice of unspent transaction outputs that match the
+// query.
+//
+// This method provides a comprehensive view of the wallet's UTXO set, allowing
+// for filtering by account and confirmation status. The results are enriched
+// with detailed information about each UTXO, such as its address, account,
+// and spendability.
+//
+// How it works:
+// The method performs a full scan of all UTXOs in the wallet's transaction
+// store (`wtxmgr`). For each UTXO, it applies the specified filters (account,
+// confirmations). If a UTXO matches, the method then performs an additional
+// lookup in the address manager (`waddrmgr`) to enrich the UTXO data with
+// details like the owning account name, address type, and spendability. This
+// process of fetching a list and then performing a lookup for each item is
+// known as the "N+1 query problem" and is a known inefficiency (see TODO).
+//
+// Logical Steps:
+//  1. Initiate a single, read-only database transaction to ensure a
+//     consistent view of the data.
+//  2. Fetch all unspent transaction outputs from the `wtxmgr` namespace.
+//  3. Sort the outputs in ascending order of value. This is a convention to
+//     make the list more predictable and potentially useful for coin
+//     selection algorithms that prefer larger UTXOs.
+//  4. Iterate through each UTXO:
+//     a. Calculate its current confirmation status based on the wallet's
+//     synced block height.
+//     b. Apply the `MinConfs` and `MaxConfs` filters from the query.
+//     c. Extract the address from the UTXO's public key script. For
+//     multi-address scripts, the first address is used.
+//     d. Call `waddrmgr.AddressDetails` to get the spendability status,
+//     account name, and address type in a single, efficient lookup.
+//     e. Apply the `Account` filter from the query.
+//     f. If all filters pass, construct the final `Utxo` struct with all
+//     the combined data.
+//  5. Append the `Utxo` to the result slice.
+//  6. After iterating through all UTXOs, return the final slice.
+//
+// Database Actions:
+//   - This method performs a single read-only database transaction
+//     (`walletdb.View`).
+//   - It reads from both the `wtxmgr` (for UTXOs) and `waddrmgr` (for
+//     address details) namespaces.
+//
+// Time Complexity:
+//   - The complexity is O(U * A_l), where U is the total number of unspent
+//     transaction outputs in the wallet and A_l is the average cost of the
+//     address and account lookups (`AddressDetails`). This is due to the N+1
+//     query problem where each UTXO requires additional lookups.
+//
+// TODO(yy): The current implementation of ListUnspent fetches all UTXOs
+// from the database and then filters them in memory. This is inefficient for
+// wallets with a large number of UTXOs. The upcoming SQL schema redesign should
+// address the following issues:
+//
+//  1. **N+1 Query Problem:** The function iterates through all unspent outputs
+//     and performs separate database lookups for each one to retrieve its full
+//     details. The database schema should be denormalized to include this data
+//     directly in the `unspent` value, which would turn the N+1 query into a
+//     single, efficient bucket scan.
+//
+//  2. **Lack of Pagination:** The function loads all results into a single
+//     in-memory slice, which can be memory-intensive for wallets with a large
+//     UTXO set. A more scalable approach would use an iterator pattern.
+//
+// NOTE: This is part of the UtxoManager interface implementation.
+func (w *Wallet) ListUnspent(_ context.Context,
+	query UtxoQuery) ([]*Utxo, error) {
+
+	log.Debugf("ListUnspent using query: %v", query)
+
+	syncBlock := w.addrStore.SyncedTo()
+	currentHeight := syncBlock.Height
+
+	var utxos []*Utxo
+
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+
+		// First, fetch all unspent transaction outputs from the UTXO
+		// set.
+		unspent, err := w.txStore.UnspentOutputs(txmgrNs)
+		if err != nil {
+			return err
+		}
+
+		// Iterate through each UTXO to apply filters and enrich it with
+		// address-specific details.
+		for _, output := range unspent {
+			// Calculate the current confirmation status based on the
+			// wallet's synced block height.
+			confs := int32(0)
+			if output.Height != -1 {
+				confs = currentHeight - output.Height
+			}
+
+			log.Tracef("Checking utxo[%v]: current height=%v, "+
+				"confirm height=%v, conf=%v", output.OutPoint,
+				currentHeight, output.Height, confs)
+
+			// Apply the MinConfs and MaxConfs filters from the
+			// query.
+			if confs < query.MinConfs || confs > query.MaxConfs {
+				continue
+			}
+
+			// Extract the address from the UTXO's public key script.
+			// For multi-address scripts, the first address is used.
+			addr := extractAddrFromPKScript(
+				output.PkScript, w.chainParams,
+			)
+			if addr == nil {
+				continue
+			}
+
+			// Get all the required address-related details.
+			//
+			// NOTE: This lookup is the source of the N+1 query
+			// problem.
+			spendable, account, addrType := w.addrStore.
+				AddressDetails(addrmgrNs, addr)
+
+			log.Debugf("Found address: %s from account: %s",
+				addr.String(), account)
+
+			// Apply the Account filter from the query.
+			if query.Account != "" && account != query.Account {
+				continue
+			}
+
+			// A UTXO is also unspendable if it is an immature
+			// coinbase output.
+			if output.FromCoinBase {
+				maturity := w.chainParams.CoinbaseMaturity
+				if confs < int32(maturity) {
+					spendable = false
+				}
+			}
+
+			// TODO(yy): This should be a column in the new utxo
+			// SQL table.
+			locked := w.LockedOutpoint(output.OutPoint)
+
+			// If all filters pass, construct the final Utxo struct
+			// with all the combined data.
+			utxo := &Utxo{
+				OutPoint:      output.OutPoint,
+				Amount:        output.Amount,
+				PkScript:      output.PkScript,
+				Confirmations: confs,
+				Spendable:     spendable,
+				Address:       addr,
+				Account:       account,
+				AddressType:   addrType,
+				Locked:        locked,
+			}
+			utxos = append(utxos, utxo)
+		}
+
+		return nil
+	})
+
+	// Sort the outputs in ascending order of value. This is a convention
+	// to make the list more predictable and potentially useful for coin
+	// selection algorithms that prefer smaller UTXOs.
+	sort.Slice(utxos, func(i, j int) bool {
+		return utxos[i].Amount < utxos[j].Amount
+	})
+
+	return utxos, err
+}
