@@ -809,6 +809,34 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 	return putMinedBalance(ns, minedBalance)
 }
 
+// TODO(yy): The fetchCredits method suffers from several architectural and
+// performance issues that should be addressed in a future refactoring:
+//
+//  1. **N+1 Query Problem:** The function iterates through all unspent outputs
+//     and performs a separate database lookup (`fetchTxRecord`) for each one to
+//     retrieve its full details. For a wallet with a large number of UTXOs,
+//     this results in an excessive number of database reads, leading to poor
+//     performance.
+//
+//  2. **Inefficient Data Storage:** The root cause of the N+1 problem is that
+//     the `unspent` bucket only stores a reference to the transaction, not the
+//     critical data (Amount, PkScript) itself. The schema should be
+//     denormalized to include this data directly in the `unspent` value, which
+//     would turn the N+1 query into a single, efficient bucket scan.
+//
+//  3. **Code Duplication:** The logic for iterating over mined and unmined
+//     credits is nearly identical, leading to significant code duplication. This
+//     should be consolidated into a more generic helper function.
+//
+//  4. **Leaky Abstraction:** The use of multiple boolean flags
+//     (`includeLocked`, `populateFullDetails`) to control behavior is a sign of
+//     a leaky abstraction. A better API would provide more specific query
+//     functions rather than a single, complex function with many toggles.
+//
+//  5. **Lack of Pagination:** The function loads all results into a single
+//     in-memory slice, which can be memory-intensive for wallets with a large
+//     UTXO set. A more scalable approach would use an iterator pattern.
+//
 // fetchCredits retrieves credits from the store based on the provided filters.
 // It iterates over both mined (unspent) and unmined credits.
 //
