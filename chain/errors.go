@@ -74,8 +74,18 @@ const (
 	ErrTooManyReplacements
 
 	// ErrMempoolMinFeeNotMet is returned when the transaction doesn't meet
-	// the minimum relay fee.
+	// the minimum mempool fee.
+	//
+	//nolint:lll
+	// See also: https://github.com/bitcoin/bitcoin/blob/7cc9a087069bfcdb79a08ce77eb3a60adf9483af/src/validation.cpp#L703-L722
 	ErrMempoolMinFeeNotMet
+
+	// ErrMinRelayFeeNotMet is returned when the transaction doesn't meet
+	// the minimum relay fee. This is a static value in the bitcoind config.
+	//
+	//nolint:lll
+	// See also: https://github.com/bitcoin/bitcoin/blob/7cc9a087069bfcdb79a08ce77eb3a60adf9483af/src/validation.cpp#L703-L722
+	ErrMinRelayFeeNotMet
 
 	// ErrConflictingTx is returned when a transaction that spends
 	// conflicting tx outputs that are rejected.
@@ -245,6 +255,9 @@ func (r RPCErr) Error() string {
 
 	case ErrMempoolMinFeeNotMet:
 		return "mempool min fee not met"
+
+	case ErrMinRelayFeeNotMet:
+		return "min relay fee not met"
 
 	case ErrConflictingTx:
 		return "bad txns spends conflicting tx"
