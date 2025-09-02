@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btcwallet/build"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -18,7 +19,7 @@ var log btclog.Logger
 
 // The default amount of logging is none.
 func init() {
-	DisableLog()
+	UseLogger(build.NewSubLogger("BTWL", nil))
 }
 
 // DisableLog disables all library log output.  Logging output is disabled

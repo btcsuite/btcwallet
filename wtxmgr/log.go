@@ -4,7 +4,10 @@
 
 package wtxmgr
 
-import "github.com/btcsuite/btclog"
+import (
+	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btcwallet/build"
+)
 
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
@@ -13,7 +16,7 @@ var log btclog.Logger
 
 // The default amount of logging is none.
 func init() {
-	DisableLog()
+	UseLogger(build.NewSubLogger("TMGR", nil))
 }
 
 // DisableLog disables all library log output.  Logging output is disabled

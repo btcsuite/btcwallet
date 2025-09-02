@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/rpc/rpcserver"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/jrick/logrotate/rotator"
@@ -54,9 +55,10 @@ var (
 	logRotatorPipe *io.PipeWriter
 
 	log          = backendLog.Logger("BTCW")
-	walletLog    = backendLog.Logger("WLLT")
+	walletLog    = backendLog.Logger("BTWL")
+	waddrmgrLog  = backendLog.Logger("AMGR")
 	txmgrLog     = backendLog.Logger("TMGR")
-	chainLog     = backendLog.Logger("CHNS")
+	chainLog     = backendLog.Logger("CHIO")
 	grpcLog      = backendLog.Logger("GRPC")
 	legacyRPCLog = backendLog.Logger("RPCS")
 	btcnLog      = backendLog.Logger("BTCN")
@@ -65,6 +67,7 @@ var (
 // Initialize package-global logger variables.
 func init() {
 	wallet.UseLogger(walletLog)
+	waddrmgr.UseLogger(waddrmgrLog)
 	wtxmgr.UseLogger(txmgrLog)
 	chain.UseLogger(chainLog)
 	rpcclient.UseLogger(chainLog)
@@ -76,9 +79,10 @@ func init() {
 // subsystemLoggers maps each subsystem identifier to its associated logger.
 var subsystemLoggers = map[string]btclog.Logger{
 	"BTCW": log,
-	"WLLT": walletLog,
+	"BTWL": walletLog,
+	"AMGR": waddrmgrLog,
 	"TMGR": txmgrLog,
-	"CHNS": chainLog,
+	"CHIO": chainLog,
 	"GRPC": grpcLog,
 	"RPCS": legacyRPCLog,
 	"BTCN": btcnLog,

@@ -45,7 +45,6 @@ func NewSubLogger(subsystem string,
 	genSubLogger func(string) btclog.Logger) btclog.Logger {
 
 	switch Deployment {
-
 	// For production builds, generate a new subsystem logger from the
 	// primary log backend. If no function is provided, logging will be
 	// disabled.
@@ -58,7 +57,6 @@ func NewSubLogger(subsystem string,
 	// unit tests and running the live daemon, e.g. for integration testing.
 	case Development:
 		switch LoggingType {
-
 		// Default logging is used when running the standalone daemon.
 		// We'll use the optional sublogger constructor to mimic the
 		// production behavior.
