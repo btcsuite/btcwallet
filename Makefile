@@ -1,5 +1,4 @@
 PKG := github.com/btcsuite/btcwallet
-TOOLS_DIR := tools
 
 GOCC ?= go
 
@@ -13,13 +12,10 @@ ifeq ($(GO_BIN),)
 GO_BIN := $(shell go env GOPATH)/bin
 endif
 
-GOIMPORTS_BIN := $(GO_BIN)/gosimports
 LINT_BIN := $(GO_BIN)/golangci-lint
 
 LINT_VERSION := v1.64.8
 GOACC_VERSION := v0.2.8
-
-GOIMPORTS_COMMIT := v0.1.10
 
 GOBUILD := GO111MODULE=on go build -v
 GOINSTALL := GO111MODULE=on go install -v
@@ -59,10 +55,6 @@ all: build check
 # ============
 # DEPENDENCIES
 # ============
-
-$(GOIMPORTS_BIN):
-	@$(call print, "Installing goimports.")
-	cd $(TOOLS_DIR); $(GOCC) install -trimpath $(GOIMPORTS_PKG)
 
 $(LINT_BIN):
 	@$(call print, "Fetching linter")
@@ -123,7 +115,7 @@ unit-bench:
 #? fmt: Fix imports and format source code
 fmt: $(GOIMPORTS_BIN)
 	@$(call print, "Fixing imports.")
-	$(GOIMPORTS_BIN) -w $(GOFILES_NOVENDOR)
+	go tool $(GOIMPORTS_PKG) -w $(GOFILES_NOVENDOR)
 	@$(call print, "Formatting source.")
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
