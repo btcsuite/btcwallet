@@ -1,5 +1,8 @@
+DEV_TAGS = dev
+LOG_TAGS =
+
 TEST_FLAGS =
-COVER_PKG = $$($(GOCC) list -deps ./... | grep '$(PKG)')
+COVER_PKG = $$($(GOCC) list -deps -tags="$(DEV_TAGS)" ./... | grep '$(PKG)')
 COVER_FLAGS = -coverprofile=coverage.txt -covermode=atomic -coverpkg=$(PKG)/...
 
 # If specific package is being unit tested, construct the full name of the
@@ -32,7 +35,16 @@ ifneq ($(nocache),)
 TEST_FLAGS += -test.count=1
 endif
 
-GOLIST := $(GOCC) list -deps $(PKG)/... | grep '$(PKG)'
+# Define the log tags that will be applied only when running unit tests. If none
+# are provided, we default to "debug stdlog" which will be standard debug log
+# output.
+ifneq ($(log),)
+LOG_TAGS := $(log)
+else
+LOG_TAGS := debug stdlog
+endif
+
+GOLIST := $(GOCC) list -tags="$(DEV_TAGS)" -deps $(PKG)/... | grep '$(PKG)'
 
 # UNIT_TARGETED is undefined iff a specific package and/or unit test case is
 # not being targeted.
@@ -41,23 +53,23 @@ UNIT_TARGETED ?= no
 # If a specific package/test case was requested, run the unit test for the
 # targeted case. Otherwise, default to running all tests.
 ifeq ($(UNIT_TARGETED), yes)
-UNIT := $(GOTEST) $(TEST_FLAGS) $(UNITPKG)
-UNIT_DEBUG := $(GOTEST) -v $(TEST_FLAGS) $(UNITPKG)
-UNIT_RACE := $(GOTEST) $(TEST_FLAGS) -race $(UNITPKG)
+UNIT := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(UNITPKG)
+UNIT_DEBUG := $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(UNITPKG)
+UNIT_RACE := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -race $(UNITPKG)
 
 # NONE is a special value which selects no other tests but only executes the
 # benchmark tests here.
-UNIT_BENCH := $(GOTEST) -test.bench=. -test.run=NONE $(UNITPKG)
+UNIT_BENCH := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE $(UNITPKG)
 endif
 
 ifeq ($(UNIT_TARGETED), no)
-UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) $(TEST_FLAGS)
-UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v $(TEST_FLAGS)
-UNIT_RACE := $(UNIT) -race
+UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS)
+UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS)
 
 # NONE is a special value which selects no other tests but only executes the
 # benchmark tests here.
-UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -test.bench=. -test.run=NONE
+UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE
+UNIT_RACE := $(UNIT) -race
 endif
 
-UNIT_COVER := $(GOTEST) $(COVER_FLAGS) $(TEST_FLAGS) $(COVER_PKG)
+UNIT_COVER := $(GOTEST) $(COVER_FLAGS) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(COVER_PKG)
