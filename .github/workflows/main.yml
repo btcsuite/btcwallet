@@ -48,6 +48,9 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
+      - name: Check default values in sample-btcwallet.conf file
+        run: make sample-conf-check
+
       - name: Check code format
         run: make fmt-check
 
