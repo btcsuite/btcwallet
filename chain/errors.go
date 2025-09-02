@@ -351,11 +351,22 @@ func (r RPCErr) Error() string {
 }
 
 // Bitcoind28ErrMap contains error messages from bitcoind version v28.0 (and
-// later) that are returned from the `testmempoolaccept` and are different than
-// in previous versions.
+// later) that are returned  and are different than in previous versions.
+// For example when using the bitcoind rpc method `testmempoolaccept` or
+// `sendrawtransaction`.
 var Bitcoind28ErrMap = map[string]error{
 	// https://github.com/bitcoin/bitcoin/pull/30212
 	"transaction outputs already in utxo set": ErrTxAlreadyConfirmed,
+
+	// The error message was changed in
+	// https://github.com/bitcoin/bitcoin/pull/33050 which will be included
+	// in bitcoind v30.0 and beyond.
+	"mempool script verify flag failed": ErrNonMandatoryScriptVerifyFlag,
+
+	// The error message was changed in
+	// https://github.com/bitcoin/bitcoin/pull/33183 which will also be
+	// included in bitcoind v30.0 and beyond.
+	"block script verify flag failed": ErrScriptVerifyFlag,
 }
 
 // BtcdErrMap takes the errors returned from btcd's `testmempoolaccept` and
