@@ -27,7 +27,7 @@ GOTEST := GO111MODULE=on go test
 
 GOLIST := go list -deps $(PKG)/... | grep '$(PKG)'
 GOLIST_COVER := $$(go list -deps $(PKG)/... | grep '$(PKG)')
-GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -path "./vendor/*" -not -name "*.pb.go")
+GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
 RM := rm -f
 CP := cp
