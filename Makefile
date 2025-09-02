@@ -5,18 +5,6 @@ GOCC ?= go
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
 GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 
-GO_BIN := $(shell go env GOBIN)
-
-# If GOBIN is not set, default to GOPATH/bin.
-ifeq ($(GO_BIN),)
-GO_BIN := $(shell go env GOPATH)/bin
-endif
-
-LINT_BIN := $(GO_BIN)/golangci-lint
-
-LINT_VERSION := v1.64.8
-GOACC_VERSION := v0.2.8
-
 GOBUILD := GO111MODULE=on go build -v
 GOINSTALL := GO111MODULE=on go install -v
 GOTEST := GO111MODULE=on go test 
@@ -38,8 +26,6 @@ ifneq ($(workers),)
 LINT_WORKERS = --concurrency=$(workers)
 endif
 
-LINT = $(LINT_BIN) run -v $(LINT_WORKERS)
-
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
 define print
@@ -51,14 +37,6 @@ default: build
 
 #? all: Run `make build` and `make check`
 all: build check
-
-# ============
-# DEPENDENCIES
-# ============
-
-$(LINT_BIN):
-	@$(call print, "Fetching linter")
-	$(GOINSTALL) $(LINT_PKG)@$(LINT_VERSION)
 
 # ============
 # INSTALLATION
@@ -130,9 +108,9 @@ rpc-format:
 	cd ./rpc; find . -name "*.proto" | xargs clang-format --style=file -i
 
 #? lint: Lint source
-lint: $(LINT_BIN)
+lint:
 	@$(call print, "Linting source.")
-	$(LINT)
+	go tool $(LINT_PKG) run -v $(LINT_WORKERS)
 
 #? rpc: Compile protobuf definitions
 rpc:
