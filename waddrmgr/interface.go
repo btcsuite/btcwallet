@@ -109,6 +109,12 @@ type AddrStore interface {
 	AddrAccount(ns walletdb.ReadBucket,
 		address btcutil.Address) (AccountStore, uint32, error)
 
+	// AddressDetails determines whether the wallet has access to the
+	// private keys required to sign for a given address, and returns other
+	// address details.
+	AddressDetails(ns walletdb.ReadBucket,
+		addr btcutil.Address) (bool, string, AddressType)
+
 	// ForEachRelevantActiveAddress invokes the given closure on each active
 	// address relevant to the wallet.
 	ForEachRelevantActiveAddress(ns walletdb.ReadBucket,

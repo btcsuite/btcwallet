@@ -55,6 +55,9 @@ const (
 	// used to refer to (and only to) the default account.
 	defaultAccountName = "default"
 
+	// unknownAccountName is the string returned when an account is unknown.
+	unknownAccountName = "unknown"
+
 	// The hierarchy described by BIP0043 is:
 	//  m/<purpose>'/*
 	// This is further extended by BIP0044 to:
@@ -776,6 +779,53 @@ func (m *Manager) AddrAccount(ns walletdb.ReadBucket,
 	// any of the managers, so we'll exit with an error.
 	str := fmt.Sprintf("unable to find key for addr %v", address)
 	return nil, 0, managerError(ErrAddressNotFound, str, nil)
+}
+
+// AddressDetails determines whether the wallet has access to the private keys
+// required to sign for a given address, and returns other address details.
+func (m *Manager) AddressDetails(ns walletdb.ReadBucket,
+	addr btcutil.Address) (bool, string, AddressType) {
+
+	managedAddr, err := m.Address(ns, addr)
+	if err != nil {
+		// If we don't know the address, we can't spend it.
+		return false, unknownAccountName, 0
+	}
+
+	addrType := managedAddr.AddrType()
+
+	// A global watch-only wallet can't spend anything.
+	if m.WatchOnly() {
+		return false, unknownAccountName, addrType
+	}
+
+	// Imported addresses are considered unspendable by policy.
+	if managedAddr.Imported() {
+		return false, ImportedAddrAccountName, addrType
+	}
+
+	// Check if the specific account for this address is watch-only.
+	scopedMgr, account, err := m.AddrAccount(ns, addr)
+	if err != nil {
+		return false, unknownAccountName, addrType
+	}
+
+	accountName, err := scopedMgr.AccountName(ns, account)
+	if err != nil {
+		return false, unknownAccountName, addrType
+	}
+
+	isWatchOnlyAccount, err := scopedMgr.IsWatchOnlyAccount(ns, account)
+	if err != nil {
+		return false, accountName, addrType
+	}
+
+	if isWatchOnlyAccount {
+		return false, accountName, addrType
+	}
+
+	// If all checks pass, the address is spendable.
+	return true, accountName, addrType
 }
 
 // ForEachActiveAccountAddress calls the given function with each active
