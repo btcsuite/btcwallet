@@ -4,4 +4,7 @@
 package build
 
 // LogLevel specifies no logging.
-var LogLevel = LogTypeNone
+var LogLevel = "none"
+
+// LoggingType is a log type that disables all logging.
+const LoggingType = LogTypeNone

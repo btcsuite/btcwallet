@@ -1,5 +1,5 @@
-//go:build !info && !debug && !trace && !warn && !error && !critical && !off
-// +build !info,!debug,!trace,!warn,!error,!critical,!off
+//go:build !info && !debug && !trace && !warn && !error && !critical && !off && !nolog
+// +build !info,!debug,!trace,!warn,!error,!critical,!off,!nolog
 
 package build
 
