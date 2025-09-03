@@ -148,6 +148,14 @@ type TxStore interface {
 	FetchTxLabel(ns walletdb.ReadBucket,
 		txid chainhash.Hash) (string, error)
 
+	// GetUtxo returns the credit for a given outpoint, if it is known to
+	// the store as a UTXO. It checks for mined (confirmed) UTXOs first,
+	// and then unmined (unconfirmed) credits. If the UTXO is not found,
+	// ErrUtxoNotFound is returned. This function does not determine if the
+	// UTXO is spent by an unmined transaction or locked.
+	GetUtxo(ns walletdb.ReadBucket,
+		outpoint wire.OutPoint) (*Credit, error)
+
 	// UnminedTxs returns the underlying transactions for all unmined
 	// transactions which are not known to have been mined in a block.
 	// Transactions are guaranteed to be sorted by their dependency order.
