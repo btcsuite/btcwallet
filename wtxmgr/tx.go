@@ -198,6 +198,10 @@ type Store struct {
 	NotifyUnspent func(hash *chainhash.Hash, index uint32)
 }
 
+// A compile-time assertion to ensure that Store implements the TxStore
+// interface.
+var _ TxStore = (*Store)(nil)
+
 // Open opens the wallet transaction store from a walletdb namespace.  If the
 // store does not exist, ErrNoExist is returned. `lockDuration` represents how
 // long outputs are locked for.
@@ -1232,7 +1236,7 @@ func PutTxLabel(labelBucket walletdb.ReadWriteBucket, txid chainhash.Hash,
 
 // FetchTxLabel reads a transaction label from the tx labels bucket. If a label
 // with 0 length was written, we return an error, since this is unexpected.
-func FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
+func (s *Store) FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
 	labelBucket := ns.NestedReadBucket(bucketTxLabels)
 	if labelBucket == nil {
 		return "", ErrNoLabelBucket

@@ -139,7 +139,7 @@ type Wallet struct {
 	// Data stores
 	db      walletdb.DB
 	addrStore *waddrmgr.Manager
-	txStore   *wtxmgr.Store
+	txStore   wtxmgr.TxStore
 
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex
@@ -1892,7 +1892,7 @@ func (w *Wallet) LabelTransaction(hash chainhash.Hash, label string,
 			return ErrUnknownTransaction
 		}
 
-		_, err = wtxmgr.FetchTxLabel(txmgrNs, hash)
+		_, err = w.txStore.FetchTxLabel(txmgrNs, hash)
 		return err
 	})
 
@@ -4432,7 +4432,7 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 
 	w.NtfnServer = newNotificationServer(w)
-	w.txStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
+	txMgr.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
 
