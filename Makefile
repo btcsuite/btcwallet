@@ -1,8 +1,8 @@
 PKG := github.com/btcsuite/btcwallet
+TOOLS_DIR := tools
 
 GOCC ?= go
 
-LINT_PKG := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 TOOLS_DIR := ./tools
 TOOLS_MODFILE := $(TOOLS_DIR)/go.mod
@@ -28,6 +28,11 @@ include make/testing_flags.mk
 ifneq ($(workers),)
 LINT_WORKERS = --concurrency=$(workers)
 endif
+
+DOCKER_TOOLS = docker run \
+  --rm \
+  -v $(shell bash -c "mkdir -p /tmp/go-build-cache; echo /tmp/go-build-cache"):/root/.cache/go-build \
+  -v $$(pwd):/build btcwallet-tools
 
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
@@ -111,9 +116,14 @@ rpc-format:
 	cd ./rpc; find . -name "*.proto" | xargs clang-format --style=file -i
 
 #? lint: Lint source
-lint:
+lint: docker-tools
 	@$(call print, "Linting source.")
-	$(GOTOOL) $(LINT_PKG) run -v $(LINT_WORKERS) 
+	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
+
+#? docker-tools: Build tools docker image
+docker-tools:
+	@$(call print, "Building tools docker image.")
+	docker build -q -t btcwallet-tools -f $(TOOLS_DIR)/Dockerfile .
 
 #? rpc: Compile protobuf definitions
 rpc:
@@ -164,6 +174,7 @@ tidy-module-check: tidy-module
 	tidy-module-check \
 	rpc-format \
 	lint \
+	docker-tools \
 	rpc \
 	rpc-check \
 	protolint \
