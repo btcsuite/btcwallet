@@ -184,7 +184,7 @@ func (s *Store) unminedTxDetails(ns walletdb.ReadBucket, txHash *chainhash.Hash,
 func (s *Store) TxLabel(ns walletdb.ReadBucket, txHash chainhash.Hash) (string,
 	error) {
 
-	label, err := FetchTxLabel(ns, txHash)
+	label, err := s.FetchTxLabel(ns, txHash)
 	switch err {
 	// If there are no saved labels yet (the bucket has not been created) or
 	// there is not a label for this particular tx, we ignore the error.
