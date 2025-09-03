@@ -241,7 +241,7 @@ func TestGetTransaction(t *testing.T) {
 		expectedHeight int32
 
 		// Store function.
-		f func(*wtxmgr.Store, walletdb.ReadWriteBucket) (*wtxmgr.Store, error)
+		f func(wtxmgr.TxStore, walletdb.ReadWriteBucket) (wtxmgr.TxStore, error)
 
 		// The error we expect to be returned.
 		expectedErr error
@@ -251,8 +251,8 @@ func TestGetTransaction(t *testing.T) {
 			txid:           *TstTxHash,
 			expectedHeight: -1,
 			// We write txdetail for the tx to disk.
-			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
-				*wtxmgr.Store, error) {
+			f: func(s wtxmgr.TxStore, ns walletdb.ReadWriteBucket) (
+				wtxmgr.TxStore, error) {
 
 				err = s.InsertTx(ns, rec, nil)
 				return s, err
@@ -263,8 +263,8 @@ func TestGetTransaction(t *testing.T) {
 			name: "existing mined transaction",
 			txid: *TstTxHash,
 			// We write txdetail for the tx to disk.
-			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
-				*wtxmgr.Store, error) {
+			f: func(s wtxmgr.TxStore, ns walletdb.ReadWriteBucket) (
+				wtxmgr.TxStore, error) {
 
 				err = s.InsertTx(ns, rec, TstMinedSignedTxBlockDetails)
 				return s, err
@@ -276,8 +276,8 @@ func TestGetTransaction(t *testing.T) {
 			name: "non-existing transaction",
 			txid: *TstTxHash,
 			// Write no txdetail to disk.
-			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
-				*wtxmgr.Store, error) {
+			f: func(s wtxmgr.TxStore, ns walletdb.ReadWriteBucket) (
+				wtxmgr.TxStore, error) {
 
 				return s, nil
 			},
