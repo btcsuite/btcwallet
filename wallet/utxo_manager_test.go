@@ -189,3 +189,80 @@ func TestListUnspent(t *testing.T) {
 	}
 }
 
+// TestGetUtxo tests the GetUtxo method.
+func TestGetUtxo(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet with mocks.
+	w, mocks := testWalletWithMocks(t)
+
+	// Define account names.
+	account1 := "default"
+
+	// Create the addresses that our mocks will return.
+	privKeyDefault, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrDefault, err := btcutil.NewAddressPubKey(
+		privKeyDefault.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	// Set the current block height to be 100.
+	currentHeight := int32(100)
+	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Height: currentHeight,
+	})
+
+	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
+		false, account1, waddrmgr.WitnessPubKey,
+	)
+
+	// Now that the mocks are set up, we can create the pkScripts.
+	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
+	require.NoError(t, err)
+
+	// Create a UTXO.
+	utxo1 := wtxmgr.Credit{
+		OutPoint: wire.OutPoint{
+			Hash:  [32]byte{1},
+			Index: 0,
+		},
+		Amount:   100000,
+		PkScript: pkScriptDefault,
+		BlockMeta: wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Height: currentHeight - 1,
+			},
+		},
+	}
+
+	// Mock the GetUtxo method to return the UTXO.
+	mocks.txStore.On("GetUtxo", mock.Anything, utxo1.OutPoint).Return(
+		&utxo1, nil,
+	)
+
+	// Now, try to get the UTXO.
+	utxo, err := w.GetUtxo(t.Context(), utxo1.OutPoint)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	require.Equal(t, utxo1.OutPoint, utxo.OutPoint)
+	require.Equal(t, utxo1.Amount, utxo.Amount)
+	require.Equal(t, utxo1.PkScript, utxo.PkScript)
+	require.Equal(t, int32(1), utxo.Confirmations)
+	require.False(t, utxo.Spendable)
+	require.Equal(t, addrDefault.String(), utxo.Address.String())
+	require.Equal(t, account1, utxo.Account)
+	require.Equal(t, waddrmgr.WitnessPubKey, utxo.AddressType)
+
+	// Now, test the case where the UTXO is not found.
+	utxoNotFound := wire.OutPoint{
+		Hash:  [32]byte{2},
+		Index: 0,
+	}
+	mocks.txStore.On("GetUtxo", mock.Anything, utxoNotFound).Return(
+		nil, wtxmgr.ErrUtxoNotFound,
+	)
+	utxo, err = w.GetUtxo(t.Context(), utxoNotFound)
+	require.ErrorIs(t, err, wtxmgr.ErrUtxoNotFound)
+	require.Nil(t, utxo)
+}
