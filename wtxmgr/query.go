@@ -8,8 +8,10 @@ package wtxmgr
 import (
 	"fmt"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -455,4 +457,124 @@ func (s *Store) PreviousPkScripts(ns walletdb.ReadBucket, rec *TxRecord, block *
 	}
 
 	return pkScripts, nil
+}
+
+// getMinedUtxo constructs a Credit for a mined UTXO from the raw database
+// value.
+func (s *Store) getMinedUtxo(ns walletdb.ReadBucket, outpoint wire.OutPoint,
+	unspentVal []byte) (*Credit, error) {
+
+	var block Block
+	err := readUnspentBlock(unspentVal, &block)
+	if err != nil {
+		return nil, err
+	}
+
+	// We have the block, now fetch the full transaction record.
+	rec, err := fetchTxRecord(ns, &outpoint.Hash, &block)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure the output index is valid for the transaction.
+	if int(outpoint.Index) >= len(rec.MsgTx.TxOut) {
+		str := fmt.Sprintf("mined credit %v references "+
+			"non-existent output index", outpoint)
+		return nil, storeError(ErrData, str, nil)
+	}
+	txOut := rec.MsgTx.TxOut[outpoint.Index]
+
+	blockTime, err := fetchBlockTime(ns, block.Height)
+	if err != nil {
+		return nil, err
+	}
+
+	credit := &Credit{
+		OutPoint: outpoint,
+		BlockMeta: BlockMeta{
+			Block: block,
+			Time:  blockTime,
+		},
+		Amount:       btcutil.Amount(txOut.Value),
+		PkScript:     txOut.PkScript,
+		Received:     rec.Received,
+		FromCoinBase: blockchain.IsCoinBaseTx(&rec.MsgTx),
+	}
+	return credit, nil
+}
+
+// getUnminedUtxo constructs a Credit for an unmined UTXO.
+func (s *Store) getUnminedUtxo(ns walletdb.ReadBucket,
+	outpoint wire.OutPoint) (*Credit, error) {
+
+	// The outpoint is an unmined credit. We need to fetch the
+	// full transaction to get all the credit details.
+	recVal := existsRawUnmined(ns, outpoint.Hash[:])
+	if recVal == nil {
+		// This would indicate a store inconsistency.
+		str := fmt.Sprintf("unmined credit %v has no matching "+
+			"unmined tx record", outpoint)
+		return nil, storeError(ErrData, str, nil)
+	}
+
+	var rec TxRecord
+	err := readRawTxRecord(&outpoint.Hash, recVal, &rec)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure the output index is valid for the transaction.
+	if int(outpoint.Index) >= len(rec.MsgTx.TxOut) {
+		str := fmt.Sprintf("unmined credit %v references "+
+			"non-existent output index", outpoint)
+		return nil, storeError(ErrData, str, nil)
+	}
+	txOut := rec.MsgTx.TxOut[outpoint.Index]
+
+	credit := &Credit{
+		OutPoint: outpoint,
+		BlockMeta: BlockMeta{
+			Block: Block{Height: -1},
+		},
+		Amount:       btcutil.Amount(txOut.Value),
+		PkScript:     txOut.PkScript,
+		Received:     rec.Received,
+		FromCoinBase: false, // Unmined can't be coinbase.
+	}
+	return credit, nil
+}
+
+// TODO(yy): This method is inefficient as it requires multiple database
+// lookups (unspent, tx records) to construct the full credit. This
+// should be optimized by denormalizing the unspent bucket to include
+// the amount and pkScript directly.
+//
+// TODO(yy): This function only confirms the existence of a UTXO but does
+// not guarantee its spendability. A more comprehensive version should
+// also check the 'unminedInputs' and 'lockedOutputs' buckets.
+//
+// GetUtxo returns the credit for a given outpoint, if it is known to the
+// store as a UTXO. It checks for mined (confirmed) UTXOs first, and then
+// unmined (unconfirmed) credits. If the UTXO is not found, ErrUtxoNotFound is
+// returned. This function does not determine if the UTXO is spent by an
+// unmined transaction or locked.
+func (s *Store) GetUtxo(ns walletdb.ReadBucket,
+	outpoint wire.OutPoint) (*Credit, error) {
+
+	k := canonicalOutPoint(&outpoint.Hash, outpoint.Index)
+
+	// First, check if the UTXO is a mined and unspent credit.
+	unspentVal := ns.NestedReadBucket(bucketUnspent).Get(k)
+	if unspentVal != nil {
+		return s.getMinedUtxo(ns, outpoint, unspentVal)
+	}
+
+	// If not found in mined, check if it's an unconfirmed credit.
+	v := existsRawUnminedCredit(ns, k)
+	if v != nil {
+		return s.getUnminedUtxo(ns, outpoint)
+	}
+
+	// If not found in either bucket, it's not a known UTXO.
+	return nil, ErrUtxoNotFound
 }
