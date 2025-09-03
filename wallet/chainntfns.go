@@ -271,8 +271,10 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx,
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
+	// Legacy wallets always own a concrete wtxmgr store. Its block
+	// identity query is intentionally outside the modern TxStore interface.
 	// A stale sync tip must not override a newer block in the store.
-	storedHash, err := w.txStore.BlockHash(txmgrNs, b.Height)
+	storedHash, err := w.txStore.(*wtxmgr.Store).BlockHash(txmgrNs, b.Height)
 	if err != nil {
 		return err
 	}
@@ -341,7 +343,7 @@ func (w *Wallet) rollbackBlockHistory(ns walletdb.ReadWriteBucket,
 	// Store holds only chain parameters, a clock and this callback. Use a
 	// private copy so replay cannot announce temporarily unspent credits
 	// or change notification behavior for other users of the shared store.
-	replay := *w.txStore
+	replay := *w.txStore.(*wtxmgr.Store)
 	replay.NotifyUnspent = nil
 
 	// Restore unmined records first, so replaying canonical transactions
@@ -442,7 +444,7 @@ func restoreHistoryTx(store *wtxmgr.Store, ns walletdb.ReadWriteBucket,
 func (w *Wallet) notifyUnspentHistory(ns walletdb.ReadWriteBucket,
 	history []wtxmgr.TxDetails) error {
 
-	notify := w.txStore.NotifyUnspent
+	notify := w.txStore.(*wtxmgr.Store).NotifyUnspent
 	if notify == nil {
 		return nil
 	}
