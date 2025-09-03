@@ -193,3 +193,98 @@ func TestListUnspent(t *testing.T) {
 	}
 }
 
+// TestGetUtxo tests that the GetUtxo method can successfully retrieve a UTXO.
+func TestGetUtxo(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet with mocks.
+	w, mocks := testWalletWithMocks(t)
+
+	// Define account names.
+	account1 := "default"
+
+	// Create the addresses that our mocks will return.
+	privKeyDefault, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrDefault, err := btcutil.NewAddressPubKey(
+		privKeyDefault.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	// Set the current block height to be 100.
+	currentHeight := int32(100)
+	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Height: currentHeight,
+	})
+
+	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
+		false, account1, waddrmgr.WitnessPubKey,
+	)
+
+	// Now that the mocks are set up, we can create the pkScripts.
+	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
+	require.NoError(t, err)
+
+	// Create a UTXO.
+	utxo1 := wtxmgr.Credit{
+		OutPoint: wire.OutPoint{
+			Hash:  [32]byte{1},
+			Index: 0,
+		},
+		Amount:   100000,
+		PkScript: pkScriptDefault,
+		BlockMeta: wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Height: currentHeight - 1,
+			},
+		},
+	}
+
+	// Mock the GetUtxo method to return the UTXO.
+	mocks.txStore.On("GetUtxo", mock.Anything, utxo1.OutPoint).Return(
+		&utxo1, nil,
+	)
+
+	// Construct the expected Utxo.
+	expectedUtxo := &Utxo{
+		OutPoint:      utxo1.OutPoint,
+		Amount:        utxo1.Amount,
+		PkScript:      utxo1.PkScript,
+		Confirmations: 1,
+		Spendable:     false,
+		Address:       addrDefault,
+		Account:       account1,
+		AddressType:   waddrmgr.WitnessPubKey,
+	}
+
+	// Now, try to get the UTXO and compare it to our expected result.
+	utxo, err := w.GetUtxo(t.Context(), utxo1.OutPoint)
+	require.NoError(t, err)
+	require.Equal(t, expectedUtxo, utxo)
+}
+
+// TestGetUtxo_Err tests the error conditions of the GetUtxo method.
+func TestGetUtxo_Err(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet with mocks.
+	w, mocks := testWalletWithMocks(t)
+
+	// Set the current block height to be 100.
+	currentHeight := int32(100)
+	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Height: currentHeight,
+	})
+
+	// Test the case where the UTXO is not found.
+	utxoNotFound := wire.OutPoint{
+		Hash:  [32]byte{2},
+		Index: 0,
+	}
+	mocks.txStore.On("GetUtxo", mock.Anything, utxoNotFound).Return(
+		nil, wtxmgr.ErrUtxoNotFound,
+	)
+	utxo, err := w.GetUtxo(t.Context(), utxoNotFound)
+	require.ErrorIs(t, err, wtxmgr.ErrUtxoNotFound)
+	require.Nil(t, utxo)
+}
