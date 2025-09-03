@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/btcsuite/btcwallet/build"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/rpc/legacyrpc"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -54,7 +55,7 @@ func walletMain() error {
 	}()
 
 	// Show version at startup.
-	log.Infof("Version %s", version())
+	log.Infof("Version %s", build.Version())
 
 	if cfg.Profile != "" {
 		go func() {

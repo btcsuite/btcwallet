@@ -4,9 +4,16 @@
 
 package legacyrpc
 
-import "github.com/btcsuite/btclog"
+import (
+	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btcwallet/build"
+)
 
 var log = btclog.Disabled
+
+func init() {
+	UseLogger(build.NewSubLogger("RPCS", nil))
+}
 
 // UseLogger sets the package-wide logger.  Any calls to this function must be
 // made before a server is created and used (it is not concurrent safe).

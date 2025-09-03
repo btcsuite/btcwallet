@@ -4,7 +4,6 @@ TOOLS_DIR := tools
 GOCC ?= go
 
 LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
-GOACC_PKG := github.com/ory/go-acc
 GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 
 GO_BIN := $(shell go env GOBIN)
@@ -16,7 +15,6 @@ endif
 
 GOIMPORTS_BIN := $(GO_BIN)/gosimports
 LINT_BIN := $(GO_BIN)/golangci-lint
-GOACC_BIN := $(GO_BIN)/go-acc
 
 LINT_VERSION := v1.64.8
 GOACC_VERSION := v0.2.8
@@ -35,6 +33,8 @@ RM := rm -f
 CP := cp
 MAKE := make
 XARGS := xargs -L 1
+
+include make/testing_flags.mk
 
 # Linting uses a lot of memory, so keep it under control by limiting the number
 # of workers if requested.
@@ -68,10 +68,6 @@ $(LINT_BIN):
 	@$(call print, "Fetching linter")
 	$(GOINSTALL) $(LINT_PKG)@$(LINT_VERSION)
 
-$(GOACC_BIN):
-	@$(call print, "Fetching go-acc")
-	$(GOINSTALL) $(GOACC_PKG)@$(GOACC_VERSION)
-
 # ============
 # INSTALLATION
 # ============
@@ -98,17 +94,27 @@ check: unit
 #? unit: Run unit tests
 unit:
 	@$(call print, "Running unit tests.")
-	$(GOLIST) | $(XARGS) env $(GOTEST) -test.timeout=20m
+	$(UNIT)
 
 #? unit-cover: Run unit coverage tests
-unit-cover: $(GOACC_BIN)
+unit-cover:
 	@$(call print, "Running unit coverage tests.")
-	$(GOACC_BIN) $(GOLIST_COVER)
+	$(UNIT_COVER)
 
 #? unit-race: Run unit race tests
 unit-race:
 	@$(call print, "Running unit race tests.")
-	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(GOLIST) | $(XARGS) env $(GOTEST) -race -test.timeout=20m
+	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(UNIT_RACE)
+
+#? unit-debug: Run unit tests with verbose debug output enabled
+unit-debug:
+	@$(call print, "Running debug unit tests.")
+	$(UNIT_DEBUG)
+
+#? unit-bench: Run benchmark tests
+unit-bench:
+	@$(call print, "Running benchmark tests.")
+	$(UNIT_BENCH)
 
 # =========
 # UTILITIES
@@ -177,6 +183,8 @@ tidy-module-check: tidy-module
 	unit \
 	unit-cover \
 	unit-race \
+	unit-debug \
+	unit-bench \
 	fmt \
 	fmt-check \
 	tidy-module \

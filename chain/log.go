@@ -6,6 +6,7 @@ package chain
 
 import (
 	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btcwallet/build"
 	"github.com/lightninglabs/neutrino/query"
 )
 
@@ -16,7 +17,7 @@ var log btclog.Logger
 
 // The default amount of logging is none.
 func init() {
-	DisableLog()
+	UseLogger(build.NewSubLogger("CHIO", nil))
 }
 
 // DisableLog disables all library log output.  Logging output is disabled
