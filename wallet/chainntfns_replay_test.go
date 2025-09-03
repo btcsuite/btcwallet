@@ -128,8 +128,11 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 	// Record the callback that forwards unspent events to public clients.
 	var unspent []wire.OutPoint
 
-	notify := w.txStore.NotifyUnspent
-	w.txStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
+	store, ok := w.txStore.(*wtxmgr.Store)
+	require.True(t, ok)
+
+	notify := store.NotifyUnspent
+	store.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		unspent = append(unspent, wire.OutPoint{Hash: *hash, Index: index})
 		notify(hash, index)
 	}
@@ -206,7 +209,7 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 			{Amount: 1000, Index: 2},
 		}, cbDetail.Credits)
 
-		label, err := w.txStore.TxLabel(ns, parent.Hash)
+		label, err := w.txStore.FetchTxLabel(ns, parent.Hash)
 		require.NoError(t, err)
 		require.Equal(t, "retained", label)
 
