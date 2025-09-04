@@ -302,6 +302,10 @@ type ScopedKeyManager struct {
 	mtx sync.RWMutex
 }
 
+// A compile-time assertion to ensure that ScopedKeyManager implements the
+// AccountStore interface.
+var _ AccountStore = (*ScopedKeyManager)(nil)
+
 // Scope returns the exact KeyScope of this scoped key manager.
 func (s *ScopedKeyManager) Scope() KeyScope {
 	return s.scope
