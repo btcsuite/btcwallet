@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -44,10 +43,10 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 			wantHeight int32
 			wantHash   chainhash.Hash
 		}{
-			{"behind", 0, *chaincfg.TestNet3Params.GenesisHash,
-				0, *chaincfg.TestNet3Params.GenesisHash},
+			{"behind", 0, *chainParams.GenesisHash,
+				0, *chainParams.GenesisHash},
 			{"matching", 1, chainhash.Hash{1},
-				0, *chaincfg.TestNet3Params.GenesisHash},
+				0, *chainParams.GenesisHash},
 			{"replacement", 1, chainhash.Hash{2},
 				1, chainhash.Hash{2}},
 			{"sparse", 2, chainhash.Hash{5},
@@ -136,7 +135,7 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 					require.NoError(t, err)
 					require.Equal(t, waddrmgr.BlockStamp{
 						Height:    0,
-						Hash:      *chaincfg.TestNet3Params.GenesisHash,
+						Hash:      *chainParams.GenesisHash,
 						Timestamp: time.Unix(1, 0),
 					}, w.addrStore.SyncedTo())
 					require.NotNil(t, w.NtfnServer.currentTxNtfn)
