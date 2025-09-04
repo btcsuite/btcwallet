@@ -137,8 +137,8 @@ type Wallet struct {
 	publicPassphrase []byte
 
 	// Data stores
-	db      walletdb.DB
-	addrStore *waddrmgr.Manager
+	db        walletdb.DB
+	addrStore waddrmgr.AddrStore
 	txStore   wtxmgr.TxStore
 
 	chainClient        chain.Interface
@@ -2153,7 +2153,7 @@ func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32,
 //
 //nolint:cyclop,gocognit
 func listTransactions(tx walletdb.ReadTx, details *wtxmgr.TxDetails,
-	addrMgr *waddrmgr.Manager, syncHeight int32,
+	addrMgr waddrmgr.AddrStore, syncHeight int32,
 	net *chaincfg.Params) []btcjson.ListTransactionsResult {
 
 	addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
@@ -4203,7 +4203,7 @@ func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
 // AddrManager returns the internal address manager.
 //
 // TODO(yy): Refactor it in lnd and remove the method.
-func (w *Wallet) AddrManager() *waddrmgr.Manager {
+func (w *Wallet) AddrManager() waddrmgr.AddrStore {
 	return w.addrStore
 }
 
