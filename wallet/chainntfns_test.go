@@ -22,7 +22,7 @@ const (
 var (
 	// chainParams are the chain parameters used throughout the wallet
 	// tests.
-	chainParams = chaincfg.MainNetParams
+	chainParams = chaincfg.RegressionNetParams
 )
 
 // mockChainConn is a mock in-memory implementation of the chainConn interface
