@@ -81,7 +81,7 @@ type Interface interface {
 	NotificationServer() *NotificationServer
 
 	// AddrManager returns the internal address manager.
-	AddrManager() *waddrmgr.Manager
+	AddrManager() waddrmgr.AddrStore
 
 	// Accounts returns all accounts for a particular scope.
 	Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error)
