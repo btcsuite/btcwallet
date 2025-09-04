@@ -317,3 +317,27 @@ func TestLeaseOutput(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expiration, actualExpiration)
 }
+
+// TestReleaseOutput tests the ReleaseOutput method.
+func TestReleaseOutput(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet with mocks.
+	w, mocks := testWalletWithMocks(t)
+
+	// Create a UTXO.
+	utxo := wire.OutPoint{
+		Hash:  [32]byte{1},
+		Index: 0,
+	}
+
+	// Mock the UnlockOutput method to return nil.
+	mocks.txStore.On("UnlockOutput",
+		mock.Anything, mock.Anything, utxo,
+	).Return(nil)
+
+	// Now, try to release the output.
+	leaseID := wtxmgr.LockID{1}
+	err := w.ReleaseOutput(t.Context(), leaseID, utxo)
+	require.NoError(t, err)
+}
