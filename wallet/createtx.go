@@ -87,7 +87,8 @@ func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 // secretSource is an implementation of txauthor.SecretSource for the wallet's
 // address manager.
 type secretSource struct {
-	*waddrmgr.Manager
+	waddrmgr.AddrStore
+
 	addrmgrNs walletdb.ReadBucket
 }
 

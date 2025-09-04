@@ -137,7 +137,7 @@ type Wallet struct {
 
 	// Data stores
 	db        walletdb.DB
-	addrStore *waddrmgr.Manager
+	addrStore waddrmgr.AddrStore
 	txStore   wtxmgr.TxStore
 
 	chainClient        chain.Interface
@@ -2131,8 +2131,9 @@ func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg.Par
 // for a listtransactions RPC.
 //
 // TODO: This should be moved to the legacyrpc package.
-func listTransactions(tx walletdb.ReadTx, details *wtxmgr.TxDetails, addrMgr *waddrmgr.Manager,
-	syncHeight int32, net *chaincfg.Params) []btcjson.ListTransactionsResult {
+func listTransactions(tx walletdb.ReadTx, details *wtxmgr.TxDetails,
+	addrMgr waddrmgr.AddrStore, syncHeight int32,
+	net *chaincfg.Params) []btcjson.ListTransactionsResult {
 
 	addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
@@ -4169,7 +4170,7 @@ func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
 // AddrManager returns the internal address manager.
 //
 // TODO(yy): Refactor it in lnd and remove the method.
-func (w *Wallet) AddrManager() *waddrmgr.Manager {
+func (w *Wallet) AddrManager() waddrmgr.AddrStore {
 	return w.addrStore
 }
 
