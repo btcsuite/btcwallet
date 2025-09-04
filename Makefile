@@ -1,25 +1,9 @@
 PKG := github.com/btcsuite/btcwallet
-TOOLS_DIR := tools
 
 GOCC ?= go
 
-LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
+LINT_PKG := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
-
-GO_BIN := $(shell go env GOBIN)
-
-# If GOBIN is not set, default to GOPATH/bin.
-ifeq ($(GO_BIN),)
-GO_BIN := $(shell go env GOPATH)/bin
-endif
-
-GOIMPORTS_BIN := $(GO_BIN)/gosimports
-LINT_BIN := $(GO_BIN)/golangci-lint
-
-LINT_VERSION := v1.64.8
-GOACC_VERSION := v0.2.8
-
-GOIMPORTS_COMMIT := v0.1.10
 
 GOBUILD := GO111MODULE=on go build -v
 GOINSTALL := GO111MODULE=on go install -v
@@ -27,7 +11,7 @@ GOTEST := GO111MODULE=on go test
 
 GOLIST := go list -deps $(PKG)/... | grep '$(PKG)'
 GOLIST_COVER := $$(go list -deps $(PKG)/... | grep '$(PKG)')
-GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -path "./vendor/*" -not -name "*.pb.go")
+GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
 RM := rm -f
 CP := cp
@@ -42,8 +26,6 @@ ifneq ($(workers),)
 LINT_WORKERS = --concurrency=$(workers)
 endif
 
-LINT = $(LINT_BIN) run -v $(LINT_WORKERS)
-
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
 define print
@@ -55,18 +37,6 @@ default: build
 
 #? all: Run `make build` and `make check`
 all: build check
-
-# ============
-# DEPENDENCIES
-# ============
-
-$(GOIMPORTS_BIN):
-	@$(call print, "Installing goimports.")
-	cd $(TOOLS_DIR); $(GOCC) install -trimpath $(GOIMPORTS_PKG)
-
-$(LINT_BIN):
-	@$(call print, "Fetching linter")
-	$(GOINSTALL) $(LINT_PKG)@$(LINT_VERSION)
 
 # ============
 # INSTALLATION
@@ -123,7 +93,7 @@ unit-bench:
 #? fmt: Fix imports and format source code
 fmt: $(GOIMPORTS_BIN)
 	@$(call print, "Fixing imports.")
-	$(GOIMPORTS_BIN) -w $(GOFILES_NOVENDOR)
+	go tool $(GOIMPORTS_PKG) -w $(GOFILES_NOVENDOR)
 	@$(call print, "Formatting source.")
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
@@ -138,9 +108,9 @@ rpc-format:
 	cd ./rpc; find . -name "*.proto" | xargs clang-format --style=file -i
 
 #? lint: Lint source
-lint: $(LINT_BIN)
+lint:
 	@$(call print, "Linting source.")
-	$(LINT)
+	go tool $(LINT_PKG) run -v $(LINT_WORKERS)
 
 #? rpc: Compile protobuf definitions
 rpc:
