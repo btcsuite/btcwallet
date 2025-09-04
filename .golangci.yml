@@ -1,3 +1,4 @@
+version: 2
 run:
   # If you change this please run `make lint` to see where else it needs to be
   # updated as well.
@@ -61,12 +62,6 @@ linters:
     - tparallel
     - unparam
     - wastedassign
-    - execinquery
-
-    # Disable gofumpt as it has weird behavior regarding formatting multiple
-    # lines for a function which is in conflict with our contribution
-    # guidelines. See https://github.com/mvdan/gofumpt/issues/235.
-    - gofumpt
 
     # Disable whitespace linter as it has conflict rules against our
     # contribution guidelines. See https://github.com/bombsimon/wsl/issues/109.
@@ -108,20 +103,10 @@ linters:
     # exactly a test failed in the generated failure stack trace.
     - thelper
     
-    # The linter is too aggressive and doesn't add much value since reviewers
-    # will also catch magic numbers that make sense to extract.
-    - gomnd
-    
     # Some of the tests cannot be parallelized. On the other hand, we don't
     # gain much performance with this check so we disable it for now until
     # unit tests become our CI bottleneck.
     - paralleltest
-
-    # Allow dynamic errors.
-    - goerr113
-
-    # New linters that we haven't had time to address yet.
-    - depguard
 
     # Disable tagalign
     - tagalign

@@ -2,7 +2,7 @@ PKG := github.com/btcsuite/btcwallet
 
 GOCC ?= go
 
-LINT_PKG := github.com/golangci/golangci-lint/cmd/golangci-lint
+LINT_PKG := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
 
 GOBUILD := GO111MODULE=on go build -v
