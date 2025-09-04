@@ -74,8 +74,18 @@ const (
 	ErrTooManyReplacements
 
 	// ErrMempoolMinFeeNotMet is returned when the transaction doesn't meet
-	// the minimum relay fee.
+	// the minimum mempool fee.
+	//
+	//nolint:lll
+	// See also: https://github.com/bitcoin/bitcoin/blob/7cc9a087069bfcdb79a08ce77eb3a60adf9483af/src/validation.cpp#L703-L722
 	ErrMempoolMinFeeNotMet
+
+	// ErrMinRelayFeeNotMet is returned when the transaction doesn't meet
+	// the minimum relay fee. This is a static value in the bitcoind config.
+	//
+	//nolint:lll
+	// See also: https://github.com/bitcoin/bitcoin/blob/7cc9a087069bfcdb79a08ce77eb3a60adf9483af/src/validation.cpp#L703-L722
+	ErrMinRelayFeeNotMet
 
 	// ErrConflictingTx is returned when a transaction that spends
 	// conflicting tx outputs that are rejected.
@@ -246,6 +256,9 @@ func (r RPCErr) Error() string {
 	case ErrMempoolMinFeeNotMet:
 		return "mempool min fee not met"
 
+	case ErrMinRelayFeeNotMet:
+		return "min relay fee not met"
+
 	case ErrConflictingTx:
 		return "bad txns spends conflicting tx"
 
@@ -338,11 +351,22 @@ func (r RPCErr) Error() string {
 }
 
 // Bitcoind28ErrMap contains error messages from bitcoind version v28.0 (and
-// later) that are returned from the `testmempoolaccept` and are different than
-// in previous versions.
+// later) that are returned  and are different than in previous versions.
+// For example when using the bitcoind rpc method `testmempoolaccept` or
+// `sendrawtransaction`.
 var Bitcoind28ErrMap = map[string]error{
 	// https://github.com/bitcoin/bitcoin/pull/30212
 	"transaction outputs already in utxo set": ErrTxAlreadyConfirmed,
+
+	// The error message was changed in
+	// https://github.com/bitcoin/bitcoin/pull/33050 which will be included
+	// in bitcoind v30.0 and beyond.
+	"mempool script verify flag failed": ErrNonMandatoryScriptVerifyFlag,
+
+	// The error message was changed in
+	// https://github.com/bitcoin/bitcoin/pull/33183 which will also be
+	// included in bitcoind v30.0 and beyond.
+	"block script verify flag failed": ErrScriptVerifyFlag,
 }
 
 // BtcdErrMap takes the errors returned from btcd's `testmempoolaccept` and
