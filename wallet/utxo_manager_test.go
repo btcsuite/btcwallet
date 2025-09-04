@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
@@ -287,4 +288,32 @@ func TestGetUtxo_Err(t *testing.T) {
 	utxo, err := w.GetUtxo(t.Context(), utxoNotFound)
 	require.ErrorIs(t, err, wtxmgr.ErrUtxoNotFound)
 	require.Nil(t, utxo)
+}
+
+// TestLeaseOutput tests the LeaseOutput method.
+func TestLeaseOutput(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet with mocks.
+	w, mocks := testWalletWithMocks(t)
+
+	// Create a UTXO.
+	utxo := wire.OutPoint{
+		Hash:  [32]byte{1},
+		Index: 0,
+	}
+
+	// Mock the LockOutput method to return a fixed expiration time.
+	expiration := time.Now().Add(time.Hour)
+	mocks.txStore.On("LockOutput", mock.Anything, mock.Anything, utxo,
+		mock.Anything).Return(expiration, nil)
+
+	// Now, try to lease the output.
+	leaseID := wtxmgr.LockID{1}
+	leaseDuration := time.Hour
+	actualExpiration, err := w.LeaseOutput(
+		t.Context(), leaseID, utxo, leaseDuration,
+	)
+	require.NoError(t, err)
+	require.Equal(t, expiration, actualExpiration)
 }
