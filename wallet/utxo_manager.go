@@ -88,7 +88,7 @@ type UtxoManager interface {
 		op wire.OutPoint) error
 
 	// ListLeasedOutputs returns a list of all currently leased outputs.
-	ListLeasedOutputs(ctx context.Context) ([]*ListLeasedOutputResult, error)
+	ListLeasedOutputs(ctx context.Context) ([]*wtxmgr.LockedOutput, error)
 }
 
 // ListUnspent returns a slice of unspent transaction outputs that match the
@@ -474,4 +474,54 @@ func (w *Wallet) ReleaseOutput(_ context.Context, id wtxmgr.LockID,
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		return w.txStore.UnlockOutput(txmgrNs, id, op)
 	})
+}
+
+// ListLeasedOutputs returns a list of all currently leased outputs.
+//
+// This method provides a way to inspect which UTXOs are currently locked and
+// when their leases expire. This can be useful for debugging and for managing
+// long-lived locks.
+//
+// How it works:
+// The method delegates the listing operation to the underlying transaction
+// store (`wtxmgr`), which scans its record of all leased outputs.
+//
+// Logical Steps:
+//  1. Initiate a read-only database transaction.
+//  2. Call the `wtxmgr.ListLeasedOutputs` method.
+//  3. The `wtxmgr` iterates through all the recorded locks and returns them
+//     as a slice.
+//
+// Database Actions:
+//   - This method performs a single read-only database transaction
+//     (`walletdb.View`).
+//   - It reads from the `wtxmgr` namespace to get the list of leased
+//     outputs.
+//
+// Time Complexity:
+//   - The complexity is O(L), where L is the number of leased outputs, as it
+//     involves a full scan of the leased outputs bucket.
+//
+// TODO(yy): The current `wtxmgr.ListLeasedOutputs` implementation returns a
+// struct from the `wtxmgr` package. This is a leaky abstraction. The method
+// should return a struct defined in the `wallet` package to maintain a clean
+// separation of concerns.
+//
+// NOTE: This is part of the UtxoManager interface implementation.
+func (w *Wallet) ListLeasedOutputs(
+	_ context.Context) ([]*wtxmgr.LockedOutput, error) {
+
+	var (
+		leasedOutputs []*wtxmgr.LockedOutput
+		err           error
+	)
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+		leasedOutputs, err = w.txStore.ListLockedOutputs(txmgrNs)
+
+		return err
+	})
+
+	return leasedOutputs, err
 }
