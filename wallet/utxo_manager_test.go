@@ -341,3 +341,32 @@ func TestReleaseOutput(t *testing.T) {
 	err := w.ReleaseOutput(t.Context(), leaseID, utxo)
 	require.NoError(t, err)
 }
+
+// TestListLeasedOutputs tests the ListLeasedOutputs method.
+func TestListLeasedOutputs(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet with mocks.
+	w, mocks := testWalletWithMocks(t)
+
+	// Create a leased output.
+	leasedOutput := &wtxmgr.LockedOutput{
+		Outpoint: wire.OutPoint{
+			Hash:  [32]byte{1},
+			Index: 0,
+		},
+		LockID:     wtxmgr.LockID{1},
+		Expiration: time.Now().Add(time.Hour),
+	}
+
+	// Mock the ListLockedOutputs method to return the leased output.
+	mocks.txStore.On("ListLockedOutputs", mock.Anything).Return(
+		[]*wtxmgr.LockedOutput{leasedOutput}, nil,
+	)
+
+	// Now, try to list the leased outputs.
+	leasedOutputs, err := w.ListLeasedOutputs(t.Context())
+	require.NoError(t, err)
+	require.Len(t, leasedOutputs, 1)
+	require.Equal(t, leasedOutput, leasedOutputs[0])
+}
