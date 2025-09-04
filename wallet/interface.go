@@ -146,7 +146,7 @@ type Interface interface {
 	// AddScopeManager adds a new scope manager to the wallet.
 	AddScopeManager(scope waddrmgr.KeyScope,
 		addrSchema waddrmgr.ScopeAddrSchema) (
-		*waddrmgr.ScopedKeyManager, error)
+		waddrmgr.AccountStore, error)
 
 	// CurrentAddress returns the current, most recently generated address
 	// for a given account and scope. If the current address has been used,

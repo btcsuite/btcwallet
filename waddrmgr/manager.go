@@ -503,7 +503,7 @@ func (m *Manager) Close() {
 // TODO(roasbeef): addrtype of raw key means it'll look in scripts to possibly
 // mark as gucci?
 func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
-	scope KeyScope, addrSchema ScopeAddrSchema) (*ScopedKeyManager, error) {
+	scope KeyScope, addrSchema ScopeAddrSchema) (AccountStore, error) {
 
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -626,7 +626,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 // its registered scope. If the manger is found, then a nil error is returned
 // along with the active scoped manager. Otherwise, a nil manager and a non-nil
 // error will be returned.
-func (m *Manager) FetchScopedKeyManager(scope KeyScope) (*ScopedKeyManager, error) {
+func (m *Manager) FetchScopedKeyManager(scope KeyScope) (AccountStore, error) {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
@@ -641,11 +641,11 @@ func (m *Manager) FetchScopedKeyManager(scope KeyScope) (*ScopedKeyManager, erro
 
 // ActiveScopedKeyManagers returns a slice of all the active scoped key
 // managers currently known by the root key manager.
-func (m *Manager) ActiveScopedKeyManagers() []*ScopedKeyManager {
+func (m *Manager) ActiveScopedKeyManagers() []AccountStore {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
-	scopedManagers := make([]*ScopedKeyManager, 0, len(m.scopedManagers))
+	scopedManagers := make([]AccountStore, 0, len(m.scopedManagers))
 	for _, smgr := range m.scopedManagers {
 		scopedManagers = append(scopedManagers, smgr)
 	}
@@ -751,7 +751,7 @@ func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket, address btcutil.Address)
 // AddrAccount returns the account to which the given address belongs. We also
 // return the scoped manager that owns the addr+account combo.
 func (m *Manager) AddrAccount(ns walletdb.ReadBucket,
-	address btcutil.Address) (*ScopedKeyManager, uint32, error) {
+	address btcutil.Address) (AccountStore, uint32, error) {
 
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()

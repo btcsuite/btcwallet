@@ -736,7 +736,7 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	// recovery, we would only do so for the default scopes, but due to a
 	// bug in which the wallet would create change addresses outside of the
 	// default scopes, it's necessary to attempt all registered key scopes.
-	scopedMgrs := make(map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager)
+	scopedMgrs := make(map[waddrmgr.KeyScope]waddrmgr.AccountStore)
 	for _, scopedMgr := range w.addrStore.ActiveScopedKeyManagers() {
 		scopedMgrs[scopedMgr.Scope()] = scopedMgr
 	}
@@ -870,7 +870,7 @@ func (w *Wallet) recoverScopedAddresses(
 	ns walletdb.ReadWriteBucket,
 	batch []wtxmgr.BlockMeta,
 	recoveryState *RecoveryState,
-	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager) error {
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore) error {
 
 	// If there are no blocks in the batch, we are done.
 	if len(batch) == 0 {
@@ -970,7 +970,7 @@ expandHorizons:
 // horizon will be properly extended such that our lookahead always includes the
 // proper number of valid child keys.
 func expandScopeHorizons(ns walletdb.ReadWriteBucket,
-	scopedMgr *waddrmgr.ScopedKeyManager,
+	scopedMgr waddrmgr.AccountStore,
 	scopeState *ScopeRecoveryState) error {
 
 	// Compute the current external horizon and the number of addresses we
@@ -1059,7 +1059,7 @@ func internalKeyPath(index uint32) waddrmgr.DerivationPath {
 // newFilterBlocksRequest constructs FilterBlocksRequests using our current
 // block range, scoped managers, and recovery state.
 func newFilterBlocksRequest(batch []wtxmgr.BlockMeta,
-	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
 	recoveryState *RecoveryState) *chain.FilterBlocksRequest {
 
 	filterReq := &chain.FilterBlocksRequest{
@@ -1097,7 +1097,7 @@ func newFilterBlocksRequest(batch []wtxmgr.BlockMeta,
 // match the highest found child index for each branch.
 func extendFoundAddresses(ns walletdb.ReadWriteBucket,
 	filterResp *chain.FilterBlocksResponse,
-	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
 	recoveryState *RecoveryState) error {
 
 	// Mark all recovered external addresses as used. This will be done only
@@ -3983,9 +3983,9 @@ func (w *Wallet) BirthdayBlock() (*waddrmgr.BlockStamp, error) {
 // AddScopeManager creates a new scoped key manager from the root manager.
 func (w *Wallet) AddScopeManager(scope waddrmgr.KeyScope,
 	addrSchema waddrmgr.ScopeAddrSchema) (
-	*waddrmgr.ScopedKeyManager, error) {
+	waddrmgr.AccountStore, error) {
 
-	var scopedManager *waddrmgr.ScopedKeyManager
+	var scopedManager waddrmgr.AccountStore
 
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)

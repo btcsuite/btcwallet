@@ -7,7 +7,9 @@ package waddrmgr
 import (
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -92,11 +94,11 @@ type AddrStore interface {
 
 	// ActiveScopedKeyManagers returns a slice of all the active scoped key
 	// managers currently known by the root key manager.
-	ActiveScopedKeyManagers() []*ScopedKeyManager
+	ActiveScopedKeyManagers() []AccountStore
 
 	// FetchScopedKeyManager attempts to fetch an active scoped manager
 	// according to its registered scope.
-	FetchScopedKeyManager(scope KeyScope) (*ScopedKeyManager, error)
+	FetchScopedKeyManager(scope KeyScope) (AccountStore, error)
 
 	// Address returns a managed address given the passed address if it is
 	// known to the address manager.
@@ -105,7 +107,7 @@ type AddrStore interface {
 
 	// AddrAccount returns the account to which the given address belongs.
 	AddrAccount(ns walletdb.ReadBucket,
-		address btcutil.Address) (*ScopedKeyManager, uint32, error)
+		address btcutil.Address) (AccountStore, uint32, error)
 
 	// ForEachRelevantActiveAddress invokes the given closure on each active
 	// address relevant to the wallet.
@@ -145,7 +147,7 @@ type AddrStore interface {
 	// NewScopedKeyManager creates a new scoped key manager from the root
 	// manager.
 	NewScopedKeyManager(ns walletdb.ReadWriteBucket,
-		scope KeyScope, addrSchema ScopeAddrSchema) (*ScopedKeyManager, error)
+		scope KeyScope, addrSchema ScopeAddrSchema) (AccountStore, error)
 
 	// SetBirthday sets the birthday of the address store.
 	SetBirthday(ns walletdb.ReadWriteBucket, birthday time.Time) error
@@ -174,4 +176,124 @@ type AddrStore interface {
 
 	// Close cleanly shuts down the manager.
 	Close()
+}
+
+// AccountStore is an interface that describes a scoped key manager.
+//
+// TODO(yy): remove this interface and hide the details inside AddrStore.
+//
+//nolint:interfacebloat
+type AccountStore interface {
+	// Scope returns the key scope of the manager.
+	Scope() KeyScope
+
+	// AccountProperties returns the properties of an account, including
+	// address indexes and name.
+	AccountProperties(ns walletdb.ReadBucket,
+		account uint32) (*AccountProperties, error)
+
+	// LastExternalAddress returns the last external address for an account.
+	LastExternalAddress(ns walletdb.ReadBucket,
+		account uint32) (ManagedAddress, error)
+
+	// LastInternalAddress returns the last internal address for an account.
+	LastInternalAddress(ns walletdb.ReadBucket,
+		account uint32) (ManagedAddress, error)
+
+	// ForEachAccountAddress calls the given function with each address of
+	// the given account stored in the manager, breaking early on error.
+	ForEachAccountAddress(ns walletdb.ReadBucket, account uint32,
+		fn func(maddr ManagedAddress) error) error
+
+	// LookupAccount returns the account number for the given account name.
+	LookupAccount(ns walletdb.ReadBucket, name string) (uint32, error)
+
+	// AccountName returns the name of an account.
+	AccountName(ns walletdb.ReadBucket, account uint32) (string, error)
+
+	// ExtendExternalAddresses extends the external addresses for an account.
+	ExtendExternalAddresses(ns walletdb.ReadWriteBucket, account uint32,
+		count uint32) error
+
+	// ExtendInternalAddresses extends the internal addresses for an account.
+	ExtendInternalAddresses(ns walletdb.ReadWriteBucket, account uint32,
+		count uint32) error
+
+	// MarkUsed updates the used flag for the provided address.
+	MarkUsed(ns walletdb.ReadWriteBucket, address btcutil.Address) error
+
+	// DeriveFromKeyPath derives a key from the given key path.
+	DeriveFromKeyPath(ns walletdb.ReadBucket,
+		path DerivationPath) (ManagedAddress, error)
+
+	// CanAddAccount returns an error if a new account cannot be created.
+	CanAddAccount() error
+
+	// NewAccount creates a new account.
+	NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, error)
+
+	// LastAccount returns the last account number.
+	LastAccount(ns walletdb.ReadBucket) (uint32, error)
+
+	// RenameAccount renames an account.
+	RenameAccount(ns walletdb.ReadWriteBucket, account uint32,
+		name string) error
+
+	// NextExternalAddresses returns the next external addresses for an
+	// account.
+	NextExternalAddresses(ns walletdb.ReadWriteBucket, account uint32,
+		count uint32) ([]ManagedAddress, error)
+
+	// NextInternalAddresses returns the next internal addresses for an
+	// account.
+	NextInternalAddresses(ns walletdb.ReadWriteBucket, account uint32,
+		count uint32) ([]ManagedAddress, error)
+
+	// NewAddress creates a new address for an account.
+	NewAddress(ns walletdb.ReadWriteBucket, account string,
+		internal bool) (btcutil.Address, error)
+
+	// ImportPublicKey imports a public key.
+	ImportPublicKey(ns walletdb.ReadWriteBucket, pubKey *btcec.PublicKey,
+		bs *BlockStamp) (ManagedAddress, error)
+
+	// ImportTaprootScript imports a taproot script.
+	ImportTaprootScript(ns walletdb.ReadWriteBucket,
+		script *Tapscript, bs *BlockStamp, privKeyType byte,
+		isInternal bool) (ManagedTaprootScriptAddress, error)
+
+	// ForEachAccount calls the given function with each account stored in
+	// the manager, breaking early on error.
+	ForEachAccount(ns walletdb.ReadBucket,
+		fn func(account uint32) error) error
+
+	// IsWatchOnlyAccount determines if the account is watch-only.
+	IsWatchOnlyAccount(ns walletdb.ReadBucket, account uint32) (bool, error)
+
+	// NewAccountWatchingOnly creates a new watch-only account.
+	NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, name string,
+		pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+		addrSchema *ScopeAddrSchema) (uint32, error)
+
+	// InvalidateAccountCache invalidates the account cache.
+	InvalidateAccountCache(account uint32)
+
+	// ImportPrivateKey imports a private key.
+	ImportPrivateKey(ns walletdb.ReadWriteBucket, wif *btcutil.WIF,
+		bs *BlockStamp) (ManagedPubKeyAddress, error)
+
+	// AddrAccount returns the account for a given address.
+	AddrAccount(ns walletdb.ReadBucket,
+		address btcutil.Address) (uint32, error)
+
+	// DeriveFromKeyPathCache derives a key from the given key path, using
+	// the cache.
+	DeriveFromKeyPathCache(kp DerivationPath) (*btcec.PrivateKey, error)
+
+	// NewRawAccount creates a new account with a raw account number.
+	NewRawAccount(ns walletdb.ReadWriteBucket, number uint32) error
+
+	// ImportScript imports a script.
+	ImportScript(ns walletdb.ReadWriteBucket, script []byte,
+		bs *BlockStamp) (ManagedScriptAddress, error)
 }
