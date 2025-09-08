@@ -39,6 +39,10 @@ const (
 	// `testmempoolaccept`, but the tx pays more fees than specified.
 	ErrMaxFeeExceeded
 
+	// ErrMaxFeeRateExceeded is an error returned when a transaction's fee
+	// rate exceeds the max fee rate limit for entering the mempool.
+	ErrMaxFeeRateExceeded
+
 	// ErrTxAlreadyKnown is used in the `reject-reason` field of
 	// `testmempoolaccept` when a transaction is already in the blockchain.
 	ErrTxAlreadyKnown
@@ -86,6 +90,21 @@ const (
 	//nolint:lll
 	// See also: https://github.com/bitcoin/bitcoin/blob/7cc9a087069bfcdb79a08ce77eb3a60adf9483af/src/validation.cpp#L703-L722
 	ErrMinRelayFeeNotMet
+
+	// ErrMempoolChainTooLong is returned when the chain of transactions
+	// currently in the mempool is too long.
+	ErrMempoolChainTooLong
+
+	// ErrTRUCViolation is returned when the transaction violates the TRUC
+	// rules.
+	ErrTRUCViolation
+
+	// ErrNoMemPool is returned when the mempool is disabled.
+	ErrNoMemPool
+
+	// ErrMempoolFull is returned when the mempool is full and cannot
+	// accept more transactions.
+	ErrMempoolFull
 
 	// ErrConflictingTx is returned when a transaction that spends
 	// conflicting tx outputs that are rejected.
@@ -204,6 +223,18 @@ const (
 	// program hash mismatch).
 	ErrNonMandatoryScriptVerifyFlag
 
+	// ErrBIP125ReplacementDisallowed is returned when a transaction is
+	// rejected because it violates the BIP125 replacement rules.
+	ErrBIP125ReplacementDisallowed
+
+	// ErrNonStandardInputs is returned when a transaction is rejected
+	// because it contains non-standard inputs.
+	ErrNonStandardInputs
+
+	// ErrBadWitnessNonStandard is returned when a transaction is rejected
+	// because it contains a bad witness.
+	ErrBadWitnessNonStandard
+
 	// errSentinel is used to indicate the end of the error list. This
 	// should always be the last error code.
 	errSentinel
@@ -235,6 +266,9 @@ func (r RPCErr) Error() string {
 	case ErrMaxFeeExceeded:
 		return "max fee exceeded"
 
+	case ErrMaxFeeRateExceeded:
+		return "max feerate exceeded"
+
 	case ErrTxAlreadyKnown:
 		return "txn already known"
 
@@ -258,6 +292,18 @@ func (r RPCErr) Error() string {
 
 	case ErrMinRelayFeeNotMet:
 		return "min relay fee not met"
+
+	case ErrMempoolChainTooLong:
+		return "too long mempool chain"
+
+	case ErrTRUCViolation:
+		return "TRUC violation"
+
+	case ErrNoMemPool:
+		return "no mempool"
+
+	case ErrMempoolFull:
+		return "mempool full"
 
 	case ErrConflictingTx:
 		return "bad txns spends conflicting tx"
@@ -345,6 +391,15 @@ func (r RPCErr) Error() string {
 
 	case ErrNonMandatoryScriptVerifyFlag:
 		return "non mandatory script verify flag"
+
+	case ErrBIP125ReplacementDisallowed:
+		return "bip125 replacement disallowed"
+
+	case ErrNonStandardInputs:
+		return "bad txns nonstandard inputs"
+
+	case ErrBadWitnessNonStandard:
+		return "bad witness nonstandard"
 	}
 
 	return "unknown error"
