@@ -11,6 +11,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -558,4 +559,103 @@ func TestImportAccount(t *testing.T) {
 		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
 		"expected ErrAccountNotFound",
 	)
+}
+
+// TestExtractAddrFromPKScript tests that the extractAddrFromPKScript
+// helper function works as expected.
+func TestExtractAddrFromPKScript(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	w.chainParams = &chaincfg.MainNetParams
+
+	p2pkhAddr, err := btcutil.DecodeAddress(
+		"17VZNX1SN5NtKa8UQFxwQbFeFc3iqRYhem", w.chainParams,
+	)
+	require.NoError(t, err)
+
+	p2shAddr, err := btcutil.DecodeAddress(
+		"347N1Thc213QqfYCz3PZkjoJpNv5b14kBd", w.chainParams,
+	)
+	require.NoError(t, err)
+
+	p2wpkhAddr, err := btcutil.DecodeAddress(
+		"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", w.chainParams,
+	)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name   string
+		script func() []byte
+		addr   string
+	}{
+		{
+			name: "p2pkh",
+			script: func() []byte {
+				pkScript, err := txscript.PayToAddrScript(
+					p2pkhAddr,
+				)
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: p2pkhAddr.String(),
+		},
+		{
+			name: "p2sh",
+			script: func() []byte {
+				pkScript, err := txscript.PayToAddrScript(
+					p2shAddr,
+				)
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: p2shAddr.String(),
+		},
+		{
+			name: "p2wpkh",
+			script: func() []byte {
+				pkScript, err := txscript.PayToAddrScript(
+					p2wpkhAddr,
+				)
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: p2wpkhAddr.String(),
+		},
+		{
+			name: "op_return",
+			script: func() []byte {
+				pkScript, err := txscript.NewScriptBuilder().
+					AddOp(txscript.OP_RETURN).
+					AddData([]byte("test")).
+					Script()
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: "",
+		},
+		{
+			name:   "invalid script",
+			script: func() []byte { return []byte("invalid") },
+			addr:   "",
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			addr := extractAddrFromPKScript(
+				testCase.script(), w.chainParams,
+			)
+			require.Equal(t, testCase.addr, addr)
+		})
+	}
 }
