@@ -208,8 +208,8 @@ type Interface interface {
 	CalculateAccountBalances(account uint32, requiredConfirmations int32) (
 		Balances, error)
 
-	// ListUnspentDeprecated returns all unspent transaction outputs for a given
-	// account and confirmation requirement.
+	// ListUnspentDeprecated returns all unspent transaction outputs for a
+	// given account and confirmation requirement.
 	//
 	// Deprecated: Use UtxoManager.ListUnspent instead.
 	ListUnspentDeprecated(minconf, maxconf int32, accountName string) (
@@ -233,10 +233,10 @@ type Interface interface {
 	// and should not be used as an input for created transactions.
 	LockedOutpoint(op wire.OutPoint) bool
 
-	// LeaseOutputDeprecated locks an output to the given ID, preventing it from
-	// being available for coin selection. The absolute time of the lock's
-	// expiration is returned. The expiration of the lock can be extended by
-	// successive invocations of this call.
+	// LeaseOutputDeprecated locks an output to the given ID, preventing it
+	// from being available for coin selection. The absolute time of the
+	// lock's expiration is returned. The expiration of the lock can be
+	// extended by successive invocations of this call.
 	//
 	// Outputs can be unlocked before their expiration through
 	// `UnlockOutput`. Otherwise, they are unlocked lazily through calls
@@ -254,14 +254,15 @@ type Interface interface {
 	LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 		duration time.Duration) (time.Time, error)
 
-	// ReleaseOutputDeprecated unlocks an output, allowing it to be available for
-	// coin selection if it remains unspent. The ID should match the one
-	// used to originally lock the output.
+	// ReleaseOutputDeprecated unlocks an output, allowing it to be
+	// available for coin selection if it remains unspent. The ID should
+	// match the one used to originally lock the output.
 	//
 	// Deprecated: Use UtxoManager.ReleaseOutput instead.
 	ReleaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint) error
 
-	// ListLeasedOutputsDeprecated returns a list of all currently leased outputs.
+	// ListLeasedOutputsDeprecated returns a list of all currently leased
+	// outputs.
 	//
 	// Deprecated: Use UtxoManager.ListLeasedOutputs instead.
 	ListLeasedOutputsDeprecated() ([]*ListLeasedOutputResult, error)

@@ -80,8 +80,8 @@ type AddrStore interface {
 	// recently-seen block described by the blockstamp.
 	SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 
-	// SetBirthdayBlock sets the birthday block, or earliest time a key could
-	// have been used, for the manager.
+	// SetBirthdayBlock sets the birthday block, or earliest time a key
+	// could have been used, for the manager.
 	SetBirthdayBlock(ns walletdb.ReadWriteBucket, block BlockStamp,
 		verified bool) error
 
@@ -153,7 +153,8 @@ type AddrStore interface {
 	// NewScopedKeyManager creates a new scoped key manager from the root
 	// manager.
 	NewScopedKeyManager(ns walletdb.ReadWriteBucket,
-		scope KeyScope, addrSchema ScopeAddrSchema) (AccountStore, error)
+		scope KeyScope,
+		addrSchema ScopeAddrSchema) (AccountStore, error)
 
 	// SetBirthday sets the birthday of the address store.
 	SetBirthday(ns walletdb.ReadWriteBucket, birthday time.Time) error
@@ -168,13 +169,13 @@ type AddrStore interface {
 	LookupAccount(ns walletdb.ReadBucket,
 		name string) (KeyScope, uint32, error)
 
-	// ForEachActiveAddress calls the given function with each active address
-	// stored in the manager, breaking early on error.
+	// ForEachActiveAddress calls the given function with each active
+	// address stored in the manager, breaking early on error.
 	ForEachActiveAddress(ns walletdb.ReadBucket,
 		fn func(addr btcutil.Address) error) error
 
-	// ConvertToWatchingOnly converts the current address manager to a locked
-	// watching-only address manager.
+	// ConvertToWatchingOnly converts the current address manager to a
+	// locked watching-only address manager.
 	ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error
 
 	// ChainParams returns the chain parameters for this address manager.
@@ -217,11 +218,13 @@ type AccountStore interface {
 	// AccountName returns the name of an account.
 	AccountName(ns walletdb.ReadBucket, account uint32) (string, error)
 
-	// ExtendExternalAddresses extends the external addresses for an account.
+	// ExtendExternalAddresses extends the external addresses for an
+	// account.
 	ExtendExternalAddresses(ns walletdb.ReadWriteBucket, account uint32,
 		count uint32) error
 
-	// ExtendInternalAddresses extends the internal addresses for an account.
+	// ExtendInternalAddresses extends the internal addresses for an
+	// account.
 	ExtendInternalAddresses(ns walletdb.ReadWriteBucket, account uint32,
 		count uint32) error
 

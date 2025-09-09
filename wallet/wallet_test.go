@@ -241,7 +241,8 @@ func TestGetTransaction(t *testing.T) {
 		expectedHeight int32
 
 		// Store function.
-		f func(wtxmgr.TxStore, walletdb.ReadWriteBucket) (wtxmgr.TxStore, error)
+		f func(wtxmgr.TxStore,
+			walletdb.ReadWriteBucket) (wtxmgr.TxStore, error)
 
 		// The error we expect to be returned.
 		expectedErr error
@@ -275,7 +276,7 @@ func TestGetTransaction(t *testing.T) {
 			name: "non-existing transaction",
 			txid: *TstTxHash,
 			// Write no txdetail to disk.
-			f: func(s wtxmgr.TxStore, ns walletdb.ReadWriteBucket) (
+			f: func(s wtxmgr.TxStore, _ walletdb.ReadWriteBucket) (
 				wtxmgr.TxStore, error) {
 
 				return s, nil

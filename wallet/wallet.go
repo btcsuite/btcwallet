@@ -9,7 +9,7 @@
 //
 // TODO(yy): bring wrapcheck back when implementing the `Store` interface.
 //
-//nolint:wrapcheck
+//nolint:wrapcheck,cyclop,gocognit
 package wallet
 
 import (
@@ -1701,6 +1701,7 @@ func (w *Wallet) CalculateBalance(confirms int32) (btcutil.Amount, error) {
 
 		blk := w.addrStore.SyncedTo()
 		balance, err = w.txStore.Balance(txmgrNs, confirms, blk.Height)
+
 		return err
 	})
 	return balance, err
@@ -2729,8 +2730,9 @@ func (s creditSlice) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-// ListUnspentDeprecated returns a slice of objects representing the unspent wallet
-// transactions fitting the given criteria. The confirmations will be more than
+// ListUnspentDeprecated returns a slice of objects representing the
+// unspent wallet transactions fitting the given criteria. The confirmations
+// will be more than
 // minconf, less than maxconf and if addresses is populated only the addresses
 // contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
@@ -2880,11 +2882,13 @@ type ListLeasedOutputResult struct {
 	PkScript []byte
 }
 
-// ListLeasedOutputsDeprecated returns a list of objects representing the currently locked
-// utxos.
+// ListLeasedOutputsDeprecated returns a list of objects representing the
+// currently locked utxos.
 //
 // Deprecated: Use UtxoManager.ListLeasedOutputs instead.
-func (w *Wallet) ListLeasedOutputsDeprecated() ([]*ListLeasedOutputResult, error) {
+func (w *Wallet) ListLeasedOutputsDeprecated() (
+	[]*ListLeasedOutputResult, error) {
+
 	var results []*ListLeasedOutputResult
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
@@ -3047,8 +3051,9 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 	return locked
 }
 
-// LeaseOutputDeprecated locks an output to the given ID, preventing it from being
-// available for coin selection. The absolute time of the lock's expiration is
+// LeaseOutputDeprecated locks an output to the given ID, preventing it from
+// being available for coin selection. The absolute time of the lock's
+// expiration is
 // returned. The expiration of the lock can be extended by successive
 // invocations of this call.
 //
@@ -3078,12 +3083,14 @@ func (w *Wallet) LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 	return expiry, err
 }
 
-// ReleaseOutputDeprecated unlocks an output, allowing it to be available for coin
-// selection if it remains unspent. The ID should match the one used to
+// ReleaseOutputDeprecated unlocks an output, allowing it to be available for
+// coin selection if it remains unspent. The ID should match the one used to
 // originally lock the output.
 //
 // Deprecated: Use UtxoManager.ReleaseOutput instead.
-func (w *Wallet) ReleaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint) error {
+func (w *Wallet) ReleaseOutputDeprecated(
+	id wtxmgr.LockID, op wire.OutPoint) error {
+
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		return w.txStore.UnlockOutput(ns, id, op)
@@ -4041,6 +4048,7 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 		}
 
 		privKey, err = mpka.PrivKey()
+
 		return err
 	})
 	if err != nil {

@@ -71,6 +71,7 @@ type testCase struct {
 }
 
 var (
+	//nolint:lll
 	testCases = []*testCase{{
 		name: "bip44 with nested witness address type",
 		masterPriv: "tprv8ZgxMBicQKsPeWwrFuNjEGTTDSY4mRLwd2KDJAPGa1AY" +
