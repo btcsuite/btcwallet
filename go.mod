@@ -58,3 +58,8 @@ require (
 // If you change this please run `make lint` to see where else it needs to be
 // updated as well.
 go 1.24.6
+
+// We use a replace directive here for our internal wtxmgr module. This ensures
+// that we can freely move between tagged releases and development commits of
+// this module without needing to constantly update the go.mod file.
+replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
