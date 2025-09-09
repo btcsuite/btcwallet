@@ -189,8 +189,8 @@ func (w *Wallet) ListUnspent(_ context.Context,
 		// Iterate through each UTXO to apply filters and enrich it with
 		// address-specific details.
 		for _, output := range unspent {
-			// Calculate the current confirmation status based on the
-			// wallet's synced block height.
+			// Calculate the current confirmation status based on
+			// the wallet's synced block height.
 			confs := int32(0)
 			if output.Height != -1 {
 				confs = currentHeight - output.Height
@@ -206,7 +206,8 @@ func (w *Wallet) ListUnspent(_ context.Context,
 				continue
 			}
 
-			// Extract the address from the UTXO's public key script.
+			// Extract the address from the UTXO's public key
+			// script.
 			// For multi-address scripts, the first address is used.
 			addr := extractAddrFromPKScript(
 				output.PkScript, w.chainParams,
@@ -408,7 +409,9 @@ func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
 
 		var err error
 
-		expiration, err = w.txStore.LockOutput(txmgrNs, id, op, duration)
+		expiration, err = w.txStore.LockOutput(
+			txmgrNs, id, op, duration,
+		)
 
 		return err
 	})

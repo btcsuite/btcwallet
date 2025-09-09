@@ -122,7 +122,9 @@ func (m *mockTxStore) RangeTransactions(ns walletdb.ReadBucket, begin,
 }
 
 // Rollback implements the wtxmgr.TxStore interface.
-func (m *mockTxStore) Rollback(ns walletdb.ReadWriteBucket, height int32) error {
+func (m *mockTxStore) Rollback(
+	ns walletdb.ReadWriteBucket, height int32) error {
+
 	args := m.Called(ns, height)
 	return args.Error(0)
 }
@@ -400,7 +402,9 @@ func (m *mockAddrStore) LookupAccount(ns walletdb.ReadBucket,
 	name string) (waddrmgr.KeyScope, uint32, error) {
 
 	args := m.Called(ns, name)
-	return args.Get(0).(waddrmgr.KeyScope), args.Get(1).(uint32), args.Error(2)
+
+	return args.Get(0).(waddrmgr.KeyScope),
+		args.Get(1).(uint32), args.Error(2)
 }
 
 // ForEachActiveAddress calls the given function with each active address
@@ -663,7 +667,8 @@ func (m *mockAccountStore) NewRawAccount(ns walletdb.ReadWriteBucket,
 }
 
 // NewRawAccountWatchingOnly implements the waddrmgr.AccountStore interface.
-func (m *mockAccountStore) NewRawAccountWatchingOnly(ns walletdb.ReadWriteBucket,
+func (m *mockAccountStore) NewRawAccountWatchingOnly(
+	ns walletdb.ReadWriteBucket,
 	number uint32, pubKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32,
 	addrSchema *waddrmgr.ScopeAddrSchema) error {
@@ -673,8 +678,9 @@ func (m *mockAccountStore) NewRawAccountWatchingOnly(ns walletdb.ReadWriteBucket
 }
 
 // ImportScript implements the waddrmgr.AccountStore interface.
-func (m *mockAccountStore) ImportScript(ns walletdb.ReadWriteBucket,
-	script []byte, bs *waddrmgr.BlockStamp) (waddrmgr.ManagedScriptAddress, error) {
+func (m *mockAccountStore) ImportScript(
+	ns walletdb.ReadWriteBucket, script []byte,
+	bs *waddrmgr.BlockStamp) (waddrmgr.ManagedScriptAddress, error) {
 
 	args := m.Called(ns, script, bs)
 	return args.Get(0).(waddrmgr.ManagedScriptAddress), args.Error(1)
@@ -739,7 +745,11 @@ func (m *mockManagedAddress) InternalAccount() uint32 {
 }
 
 // DerivationInfo implements the waddrmgr.ManagedAddress interface.
-func (m *mockManagedAddress) DerivationInfo() (waddrmgr.KeyScope, waddrmgr.DerivationPath, bool) {
+func (m *mockManagedAddress) DerivationInfo() (
+	waddrmgr.KeyScope, waddrmgr.DerivationPath, bool) {
+
 	args := m.Called()
-	return args.Get(0).(waddrmgr.KeyScope), args.Get(1).(waddrmgr.DerivationPath), args.Bool(2)
+
+	return args.Get(0).(waddrmgr.KeyScope),
+		args.Get(1).(waddrmgr.DerivationPath), args.Bool(2)
 }
