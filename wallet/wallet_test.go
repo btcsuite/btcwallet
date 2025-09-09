@@ -275,7 +275,7 @@ func TestGetTransaction(t *testing.T) {
 			name: "non-existing transaction",
 			txid: *TstTxHash,
 			// Write no txdetail to disk.
-			f: func(s wtxmgr.TxStore, ns walletdb.ReadWriteBucket) (
+			f: func(s wtxmgr.TxStore, _ walletdb.ReadWriteBucket) (
 				wtxmgr.TxStore, error) {
 
 				return s, nil

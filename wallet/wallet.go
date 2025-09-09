@@ -1670,6 +1670,7 @@ func (w *Wallet) CalculateBalance(confirms int32) (btcutil.Amount, error) {
 		var err error
 		blk := w.addrStore.SyncedTo()
 		balance, err = w.txStore.Balance(txmgrNs, confirms, blk.Height)
+
 		return err
 	})
 	return balance, err
@@ -3983,6 +3984,7 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 		}
 
 		privKey, err = mpka.PrivKey()
+
 		return err
 	})
 	if err != nil {
