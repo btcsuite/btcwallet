@@ -2,6 +2,7 @@ package chain
 
 import (
 	"container/list"
+	"context"
 	"errors"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -68,7 +69,7 @@ func (m *mockRescanner) WaitForShutdown() {
 type mockChainService struct {
 }
 
-func (m *mockChainService) Start() error {
+func (m *mockChainService) Start(_ context.Context) error {
 	return nil
 }
 
