@@ -83,6 +83,14 @@ linters:
       multi-func: true
       multi-if: true
 
+    gomoddirectives:
+      replace-local: true
+      replace-allow-list:
+        # This package will be downgrade to internal so we will import it
+        # directly here.
+        - github.com/btcsuite/btcwallet/wtxmgr
+
+
   # Defines a set of rules to ignore issues.
   # It does not skip the analysis, and so does not ignore "typecheck" errors.
   exclusions:
