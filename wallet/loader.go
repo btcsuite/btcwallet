@@ -295,7 +295,6 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
 	if err != nil {
 		return nil, err
 	}
-	w.Start()
 
 	l.onLoaded(w)
 	return w, nil
