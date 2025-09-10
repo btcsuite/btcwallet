@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -152,7 +151,7 @@ func TestNewAddress(t *testing.T) {
 			// Attempt to generate a new address with the specified
 			// parameters.
 			addr, err := w.NewAddress(
-				context.Background(), tc.account, tc.addrType,
+				t.Context(), tc.account, tc.addrType,
 				tc.change,
 			)
 
@@ -205,13 +204,13 @@ func TestGetUnusedAddress(t *testing.T) {
 
 	// Get a new address to start with.
 	addr, err := w.NewAddress(
-		context.Background(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), "default", waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 
 	// The first unused address should be the one we just created.
 	unusedAddr, err := w.GetUnusedAddress(
-		context.Background(), "default", waddrmgr.WitnessPubKey,
+		t.Context(), "default", waddrmgr.WitnessPubKey,
 	)
 	require.NoError(t, err)
 	require.Equal(t, addr.String(), unusedAddr.String())
@@ -262,7 +261,7 @@ func TestGetUnusedAddress(t *testing.T) {
 
 	// Get the next unused address.
 	nextAddr, err := w.GetUnusedAddress(
-		context.Background(), "default", waddrmgr.WitnessPubKey,
+		t.Context(), "default", waddrmgr.WitnessPubKey,
 	)
 	require.NoError(t, err)
 
@@ -281,12 +280,12 @@ func TestAddressInfo(t *testing.T) {
 
 	// Get a new external address to test with.
 	extAddr, err := w.NewAddress(
-		context.Background(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), "default", waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 
 	// Get the address info for the external address.
-	extInfo, err := w.AddressInfo(context.Background(), extAddr)
+	extInfo, err := w.AddressInfo(t.Context(), extAddr)
 	require.NoError(t, err)
 
 	// Check the external address info.
@@ -298,12 +297,12 @@ func TestAddressInfo(t *testing.T) {
 
 	// Get a new internal address to test with.
 	intAddr, err := w.NewAddress(
-		context.Background(), "default", waddrmgr.WitnessPubKey, true,
+		t.Context(), "default", waddrmgr.WitnessPubKey, true,
 	)
 	require.NoError(t, err)
 
 	// Get the address info for the internal address.
-	intInfo, err := w.AddressInfo(context.Background(), intAddr)
+	intInfo, err := w.AddressInfo(t.Context(), intAddr)
 	require.NoError(t, err)
 
 	// Check the internal address info.
@@ -325,7 +324,7 @@ func TestListAddresses(t *testing.T) {
 
 	// Get a new address and give it a balance.
 	addr, err := w.NewAddress(
-		context.Background(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), "default", waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 
@@ -375,7 +374,7 @@ func TestListAddresses(t *testing.T) {
 
 	// List the addresses for the default account.
 	addrs, err := w.ListAddresses(
-		context.Background(), "default", waddrmgr.WitnessPubKey,
+		t.Context(), "default", waddrmgr.WitnessPubKey,
 	)
 	require.NoError(t, err)
 
@@ -401,7 +400,7 @@ func TestImportPublicKey(t *testing.T) {
 
 	// Import the public key.
 	err = w.ImportPublicKey(
-		context.Background(), pubKey, waddrmgr.WitnessPubKey,
+		t.Context(), pubKey, waddrmgr.WitnessPubKey,
 	)
 	require.NoError(t, err)
 
@@ -445,7 +444,7 @@ func TestImportTaprootScript(t *testing.T) {
 	}
 
 	// Import the tapscript.
-	_, err = w.ImportTaprootScript(context.Background(), &tapscript)
+	_, err = w.ImportTaprootScript(t.Context(), &tapscript)
 	require.NoError(t, err)
 
 	// Check that the address is now managed by the wallet.
@@ -471,7 +470,7 @@ func TestScriptForOutput(t *testing.T) {
 
 	// Create a new p2wkh address and output.
 	addr, err := w.NewAddress(
-		context.Background(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), "default", waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 	pkScript, err := txscript.PayToAddrScript(addr)
@@ -483,7 +482,7 @@ func TestScriptForOutput(t *testing.T) {
 
 	// Get the script for the output.
 	_, witnessProgram, sigScript, err := w.ScriptForOutput(
-		context.Background(), output,
+		t.Context(), output,
 	)
 	require.NoError(t, err)
 

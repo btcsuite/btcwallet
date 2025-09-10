@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/stretchr/testify/require"
 )
 
 type queryState struct {
@@ -214,7 +215,8 @@ func equalTxs(got, exp *wire.MsgTx) error {
 
 // Returns time.Now() with seconds resolution, this is what Store saves.
 func timeNow() time.Time {
-	return time.Unix(time.Now().Unix(), 0)
+	// Truncate to the second to match the precision of the database.
+	return time.Now().Truncate(time.Second)
 }
 
 // Returns a copy of a TxRecord without the serialized tx.
@@ -740,4 +742,66 @@ func TestPreviousPkScripts(t *testing.T) {
 	if t.Failed() {
 		t.Fatal("Failed after inserting tx D")
 	}
+}
+
+// TestGetUtxo tests the GetUtxo method to ensure it correctly retrieves both
+// mined and unmined UTXOs, and that it returns the expected error when a UTXO
+// cannot be found.
+func TestGetUtxo(t *testing.T) {
+	t.Parallel()
+
+	s, db, err := testStore(t)
+	require.NoError(t, err)
+	defer db.Close()
+
+	dbtx, err := db.BeginReadWriteTx()
+	require.NoError(t, err)
+	defer dbtx.Commit()
+	ns := dbtx.ReadWriteBucket(namespaceKey)
+
+	// We'll start by querying for a UTXO that does not exist in the
+	// store. This should result in a ErrUtxoNotFound error.
+	op := wire.OutPoint{Hash: chainhash.Hash{}, Index: 0}
+	cred, err := s.GetUtxo(ns, op)
+	require.ErrorIs(t, err, ErrUtxoNotFound)
+	require.Nil(t, cred)
+
+	// Now, we'll add a mined transaction and its credit to the store. This
+	// will serve as our confirmed UTXO.
+	b100 := makeBlockMeta(100)
+	txA := spendOutput(&chainhash.Hash{}, 0, 100e8)
+	recA, err := NewTxRecordFromMsgTx(txA, timeNow())
+	require.NoError(t, err)
+
+	err = s.InsertTx(ns, recA, &b100)
+	require.NoError(t, err)
+	err = s.AddCredit(ns, recA, &b100, 0, false)
+	require.NoError(t, err)
+
+	// We should now be able to query for the mined UTXO and get back the
+	// correct credit details.
+	op = wire.OutPoint{Hash: recA.Hash, Index: 0}
+	cred, err = s.GetUtxo(ns, op)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.Equal(t, op, cred.OutPoint)
+
+	// We'll do the same for an unmined transaction and its credit. This
+	// will serve as our unconfirmed UTXO.
+	txB := spendOutput(&recA.Hash, 0, 50e8)
+	recB, err := NewTxRecordFromMsgTx(txB, timeNow())
+	require.NoError(t, err)
+
+	err = s.InsertTx(ns, recB, nil)
+	require.NoError(t, err)
+	err = s.AddCredit(ns, recB, nil, 0, false)
+	require.NoError(t, err)
+
+	// We should now be able to query for the unmined UTXO and get back
+	// the correct credit details.
+	op = wire.OutPoint{Hash: recB.Hash, Index: 0}
+	cred, err = s.GetUtxo(ns, op)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.Equal(t, op, cred.OutPoint)
 }

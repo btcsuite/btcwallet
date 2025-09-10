@@ -281,7 +281,7 @@ func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
 // used to efficiently calculate the balance for each account.
 //
 // The function returns a slice of AccountResult, and an error if any occurred.
-func createResultForScope(scopeMgr *waddrmgr.ScopedKeyManager,
+func createResultForScope(scopeMgr waddrmgr.AccountStore,
 	addrmgrNs walletdb.ReadBucket,
 	addrToBalance map[string]btcutil.Amount) ([]AccountResult, error) {
 
