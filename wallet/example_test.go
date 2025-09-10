@@ -36,8 +36,13 @@ func testWallet(t *testing.T) (*Wallet, func()) {
 	if err != nil {
 		t.Fatalf("unable to create wallet: %v", err)
 	}
+
 	chainClient := &mockChainClient{}
 	w.chainClient = chainClient
+
+	// Start the wallet.
+	w.Start()
+
 	if err := w.Unlock(privPass, time.After(10*time.Minute)); err != nil {
 		t.Fatalf("unable to unlock wallet: %v", err)
 	}
@@ -84,6 +89,9 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 	w.chainClient = chainClient
 	w.txStore = txStore
 	w.addrStore = addrStore
+
+	// Start the wallet.
+	w.Start()
 
 	err = w.Unlock(privPass, time.After(60*time.Minute))
 	require.NoError(t, err)
