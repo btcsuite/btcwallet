@@ -391,7 +391,7 @@ func (w *Wallet) ImportAccountDryRun(name string,
 // case of legacy versions (xpub, tpub), an address type must be specified as we
 // intend to not support importing BIP-44 keys into the wallet using the legacy
 // pay-to-pubkey-hash (P2PKH) scheme.
-func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
+func (w *Wallet) ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
 	// Determine what key scope the public key should belong to and import
@@ -438,9 +438,11 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 	return nil
 }
 
-// ImportTaprootScript imports a user-provided taproot script into the address
-// manager. The imported script will act as a pay-to-taproot address.
-func (w *Wallet) ImportTaprootScript(scope waddrmgr.KeyScope,
+// ImportTaprootScriptDeprecated imports a user-provided taproot script into the
+// address manager. The imported script will act as a pay-to-taproot address.
+//
+// Deprecated: Use AddressManager.ImportTaprootScript instead.
+func (w *Wallet) ImportTaprootScriptDeprecated(scope waddrmgr.KeyScope,
 	tapscript *waddrmgr.Tapscript, bs *waddrmgr.BlockStamp,
 	witnessVersion byte, isSecretScript bool) (waddrmgr.ManagedAddress,
 	error) {
