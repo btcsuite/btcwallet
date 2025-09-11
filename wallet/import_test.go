@@ -125,9 +125,9 @@ var (
 	}}
 )
 
-// TestImportAccount tests that extended public keys can successfully be
-// imported into both watch only and normal wallets.
-func TestImportAccount(t *testing.T) {
+// TestImportAccountDeprecated tests that extended public keys can successfully
+// be imported into both watch only and normal wallets.
+func TestImportAccountDeprecated(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range testCases {
@@ -192,13 +192,13 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, tc.expectedChangeAddr, intAddrs[0].Address().String())
 
 	// Import the extended public keys into new accounts.
-	acct1, err := w.ImportAccount(
+	acct1, err := w.ImportAccountDeprecated(
 		name+"1", acct1Pub, root.ParentFingerprint(), &tc.addrType,
 	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedScope, acct1.KeyScope)
 
-	acct2, err := w.ImportAccount(
+	acct2, err := w.ImportAccountDeprecated(
 		name+"2", acct2Pub, root.ParentFingerprint(), &tc.addrType,
 	)
 	require.NoError(t, err)
