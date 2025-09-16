@@ -115,8 +115,13 @@ rpc-format:
 	@$(call print, "Formatting protos.")
 	cd ./rpc; find . -name "*.proto" | xargs clang-format --style=file -i
 
+#? lint-config-check: Verify golangci-lint configuration
+lint-config-check: docker-tools
+	@$(call print, "Verifying golangci-lint configuration.")
+	$(DOCKER_TOOLS) golangci-lint config verify -v
+
 #? lint: Lint source
-lint: docker-tools
+lint: lint-config-check
 	@$(call print, "Linting source.")
 	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
 
@@ -174,6 +179,7 @@ tidy-module-check: tidy-module
 	tidy-module-check \
 	rpc-format \
 	lint \
+	lint-config-check \
 	docker-tools \
 	rpc \
 	rpc-check \
