@@ -11,6 +11,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -558,4 +559,381 @@ func TestImportAccount(t *testing.T) {
 		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
 		"expected ErrAccountNotFound",
 	)
+}
+
+// TestExtractAddrFromPKScript tests that the extractAddrFromPKScript
+// helper function works as expected.
+func TestExtractAddrFromPKScript(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	w.chainParams = &chaincfg.MainNetParams
+
+	p2pkhAddr, err := btcutil.DecodeAddress(
+		"17VZNX1SN5NtKa8UQFxwQbFeFc3iqRYhem", w.chainParams,
+	)
+	require.NoError(t, err)
+
+	p2shAddr, err := btcutil.DecodeAddress(
+		"347N1Thc213QqfYCz3PZkjoJpNv5b14kBd", w.chainParams,
+	)
+	require.NoError(t, err)
+
+	p2wpkhAddr, err := btcutil.DecodeAddress(
+		"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", w.chainParams,
+	)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name   string
+		script func() []byte
+		addr   string
+	}{
+		{
+			name: "p2pkh",
+			script: func() []byte {
+				pkScript, err := txscript.PayToAddrScript(
+					p2pkhAddr,
+				)
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: p2pkhAddr.String(),
+		},
+		{
+			name: "p2sh",
+			script: func() []byte {
+				pkScript, err := txscript.PayToAddrScript(
+					p2shAddr,
+				)
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: p2shAddr.String(),
+		},
+		{
+			name: "p2wpkh",
+			script: func() []byte {
+				pkScript, err := txscript.PayToAddrScript(
+					p2wpkhAddr,
+				)
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: p2wpkhAddr.String(),
+		},
+		{
+			name: "op_return",
+			script: func() []byte {
+				pkScript, err := txscript.NewScriptBuilder().
+					AddOp(txscript.OP_RETURN).
+					AddData([]byte("test")).
+					Script()
+				require.NoError(t, err)
+
+				return pkScript
+			},
+			addr: "",
+		},
+		{
+			name:   "invalid script",
+			script: func() []byte { return []byte("invalid") },
+			addr:   "",
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			addr := extractAddrFromPKScript(
+				testCase.script(), w.chainParams,
+			)
+			if addr == nil {
+				require.Equal(t, testCase.addr, "")
+			} else {
+				require.Equal(t, testCase.addr, addr.String())
+			}
+		})
+	}
+}
+
+// addTestUTXOForBalance is a helper function to add a UTXO to the wallet.
+func addTestUTXOForBalance(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
+	account uint32, amount btcutil.Amount) {
+
+	addr, err := w.NewAddress(account, scope)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(&wire.MsgTx{
+		TxIn: []*wire.TxIn{
+			{},
+		},
+		TxOut: []*wire.TxOut{
+			{
+				Value:    int64(amount),
+				PkScript: pkScript,
+			},
+		},
+	}, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		block := &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: 1},
+		}
+		err := w.txStore.InsertTx(ns, rec, block)
+		if err != nil {
+			return err
+		}
+		return w.txStore.AddCredit(ns, rec, block, 0, false)
+	})
+	require.NoError(t, err)
+}
+
+// TestFetchAccountBalances tests that the fetchAccountBalances helper function
+// works as expected.
+func TestFetchAccountBalances(t *testing.T) {
+	t.Parallel()
+
+	// setupTestCase is a helper closure to set up a test case.
+	//
+	// This function initializes a new test wallet and populates it with a
+	// predictable set of accounts and unspent transaction outputs (UTXOs).
+	// This provides a consistent starting state for each test case,
+	// ensuring that tests are isolated and repeatable.
+	//
+	// The initial state of the wallet is as follows:
+	//
+	// Accounts:
+	// - The default account (number 0) is implicitly created for each key
+	//   scope.
+	// - "acc1-bip84": A named account (number 1) under the BIP0084 key
+	//   scope.
+	// - "acc1-bip49": A named account (number 1) under the BIP0049 key
+	//   scope.
+	//
+	// UTXOs:
+	// - 100 satoshis are credited to the default account in the BIP0084
+	//   scope.
+	// - 200 satoshis are credited to the "acc1-bip84" account.
+	// - 300 satoshis are credited to the "acc1-bip49" account.
+	//
+	// Sync State:
+	// - The wallet is marked as synced up to block height 1. This is
+	//   necessary for the UTXOs to be considered confirmed and spendable.
+	//
+	// The function returns the fully initialized wallet and a cleanup
+	// function that should be deferred by the caller to ensure that the
+	// wallet's resources are properly released after the test completes.
+	setupTestCase := func(t *testing.T) (*Wallet, func()) {
+		w, cleanup := testWallet(t)
+		ctx := context.Background()
+
+		// Create accounts.
+		_, err := w.NewAccount(
+			ctx, waddrmgr.KeyScopeBIP0084, "acc1-bip84",
+		)
+		require.NoError(t, err)
+		_, err = w.NewAccount(
+			ctx, waddrmgr.KeyScopeBIP0049Plus, "acc1-bip49",
+		)
+		require.NoError(t, err)
+
+		// Add UTXOs.
+		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 0, 100)
+		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 1, 200)
+		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0049Plus, 1, 300)
+
+		// Update sync state.
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			bs := &waddrmgr.BlockStamp{Height: 1}
+			return w.addrStore.SetSyncedTo(addrmgrNs, bs)
+		})
+		require.NoError(t, err)
+
+		return w, cleanup
+	}
+
+	testCases := []struct {
+		name             string
+		setup            func(t *testing.T, w *Wallet)
+		filters          []filterOption
+		expectedBalances scopedBalances
+	}{
+		{
+			name:    "no filters",
+			filters: nil,
+			expectedBalances: scopedBalances{
+				waddrmgr.KeyScopeBIP0084:     {0: 100, 1: 200},
+				waddrmgr.KeyScopeBIP0049Plus: {1: 300},
+			},
+		},
+		{
+			name:    "filter by name",
+			filters: []filterOption{withName("acc1-bip84")},
+			expectedBalances: scopedBalances{
+				waddrmgr.KeyScopeBIP0084: {1: 200},
+			},
+		},
+		{
+			name: "filter by scope",
+			filters: []filterOption{
+				withScope(waddrmgr.KeyScopeBIP0084),
+			},
+			expectedBalances: scopedBalances{
+				waddrmgr.KeyScopeBIP0084: {0: 100, 1: 200},
+			},
+		},
+		{
+			name: "filter by name and scope",
+			filters: []filterOption{
+				withName("acc1-bip84"),
+				withScope(waddrmgr.KeyScopeBIP0084),
+			},
+			expectedBalances: scopedBalances{
+				waddrmgr.KeyScopeBIP0084: {1: 200},
+			},
+		},
+		{
+			name:             "filter by non-existent name",
+			filters:          []filterOption{withName("non-existent")},
+			expectedBalances: scopedBalances{},
+		},
+		{
+			name: "account with no balance",
+			setup: func(t *testing.T, w *Wallet) {
+				_, err := w.NewAccount(
+					context.Background(),
+					waddrmgr.KeyScopeBIP0084, "no-balance",
+				)
+				require.NoError(t, err)
+			},
+			filters: nil,
+			expectedBalances: scopedBalances{
+				waddrmgr.KeyScopeBIP0084:     {0: 100, 1: 200},
+				waddrmgr.KeyScopeBIP0049Plus: {1: 300},
+			},
+		},
+		{
+			name: "filter by name that exists in multiple scopes",
+			setup: func(t *testing.T, w *Wallet) {
+				_, err := w.NewAccount(
+					context.Background(),
+					waddrmgr.KeyScopeBIP0049Plus, "acc1-bip84",
+				)
+				require.NoError(t, err)
+				addTestUTXOForBalance(
+					t, w, waddrmgr.KeyScopeBIP0049Plus, 2, 400,
+				)
+			},
+			filters: []filterOption{withName("acc1-bip84")},
+			expectedBalances: scopedBalances{
+				waddrmgr.KeyScopeBIP0084:     {1: 200},
+				waddrmgr.KeyScopeBIP0049Plus: {2: 400},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, cleanup := setupTestCase(t)
+			defer cleanup()
+
+			if tc.setup != nil {
+				tc.setup(t, w)
+			}
+
+			var balances scopedBalances
+			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+				var err error
+				balances, err = w.fetchAccountBalances(
+					tx, tc.filters...,
+				)
+				return err
+			})
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedBalances, balances)
+		})
+	}
+}
+
+// TestListAccountsWithBalances tests that the listAccountsWithBalances helper
+// function works as expected.
+func TestListAccountsWithBalances(t *testing.T) {
+	t.Parallel()
+
+	// Create a new test wallet.
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// We'll create two new accounts under the BIP0084 scope to have a
+	// predictable state.
+	scope := waddrmgr.KeyScopeBIP0084
+	acc1Name := "test account"
+	_, err := w.NewAccount(context.Background(), scope, acc1Name)
+	require.NoError(t, err)
+
+	acc2Name := "no balance account"
+	_, err = w.NewAccount(context.Background(), scope, acc2Name)
+	require.NoError(t, err)
+
+	// We'll now create a balance map for some of the accounts. We
+	// intentionally leave out the second new account to test the zero
+	// balance case.
+	balances := map[uint32]btcutil.Amount{
+		0: 100, // Default account
+		1: 200, // "test account"
+	}
+
+	// Now, we'll call listAccountsWithBalances within a read transaction
+	// and verify the results.
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		scopedMgr, err := w.addrStore.FetchScopedKeyManager(scope)
+		require.NoError(t, err)
+
+		// Call the function under test.
+		results, err := listAccountsWithBalances(
+			scopedMgr, addrmgrNs, balances,
+		)
+		require.NoError(t, err)
+
+		// The BIP0084 scope should have three accounts: the default
+		// one and the two we just created.
+		require.Len(t, results, 3, "expected three accounts for scope")
+
+		// Check the default account's result.
+		require.Equal(t, "default", results[0].AccountName)
+		require.Equal(t, uint32(0), results[0].AccountNumber)
+		require.Equal(t, btcutil.Amount(100), results[0].TotalBalance)
+
+		// Check the first new account's result.
+		require.Equal(t, acc1Name, results[1].AccountName)
+		require.Equal(t, uint32(1), results[1].AccountNumber)
+		require.Equal(t, btcutil.Amount(200), results[1].TotalBalance)
+
+		// Check the second new account's result (zero balance).
+		require.Equal(t, acc2Name, results[2].AccountName)
+		require.Equal(t, uint32(2), results[2].AccountNumber)
+		require.Equal(t, btcutil.Amount(0), results[2].TotalBalance)
+
+		return nil
+	})
+	require.NoError(t, err)
 }
