@@ -83,7 +83,7 @@ type AccountManager interface {
 	// Balance returns the balance for a specific account, identified by its
 	// scope and name, for a given number of required confirmations.
 	Balance(ctx context.Context, conf int32, scope waddrmgr.KeyScope,
-		accountName string) (btcutil.Amount, error)
+		name string) (btcutil.Amount, error)
 
 	// ImportAccount imports an account from an extended public or private
 	// key. The key scope is derived from the version bytes of the
@@ -122,13 +122,13 @@ func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// Create a new account under the current key scope.
-		accountID, err := manager.NewAccount(addrmgrNs, name)
+		accNum, err := manager.NewAccount(addrmgrNs, name)
 		if err != nil {
 			return err
 		}
 
 		// Get the account's properties.
-		props, err = manager.AccountProperties(addrmgrNs, accountID)
+		props, err = manager.AccountProperties(addrmgrNs, accNum)
 		return err
 	})
 
