@@ -135,8 +135,7 @@ func TestImportAccountDeprecated(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, cleanup := testWallet(t)
-			defer cleanup()
+			w := testWallet(t)
 
 			testImportAccount(t, w, tc, false, tc.name)
 		})
@@ -145,8 +144,7 @@ func TestImportAccountDeprecated(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			w, cleanup := testWalletWatchingOnly(t)
-			defer cleanup()
+			w := testWalletWatchingOnly(t)
 
 			testImportAccount(t, w, tc, true, name)
 		})
