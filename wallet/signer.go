@@ -21,7 +21,12 @@ import (
 func (w *Wallet) ScriptForOutputDeprecated(output *wire.TxOut) (
 	waddrmgr.ManagedPubKeyAddress, []byte, []byte, error) {
 
-	return w.ScriptForOutput(context.Background(), *output)
+	script, err := w.ScriptForOutput(context.Background(), *output)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return script.Addr, script.WitnessProgram, script.RedeemScript, nil
 }
 
 // PrivKeyTweaker is a function type that can be used to pass in a callback for
