@@ -13,11 +13,13 @@ package wallet
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/wallet/txrules"
 )
 
 var (
@@ -28,6 +30,55 @@ var (
 	// ErrDuplicatedUtxo is returned when a UTXO is specified multiple
 	// times.
 	ErrDuplicatedUtxo = errors.New("duplicated utxo")
+
+	// ErrUnsupportedTxInputs is returned when the `Inputs` field of a
+	// TxIntent is not of a supported type.
+	ErrUnsupportedTxInputs = errors.New("unsupported tx inputs type")
+
+	// ErrUtxoNotEligible is returned when a UTXO is not eligible to be
+	// spent.
+	ErrUtxoNotEligible = errors.New("utxo not eligible to spend")
+
+	// ErrAccountNotFound is returned when an account is not found.
+	ErrAccountNotFound = errors.New("account not found")
+
+	// ErrNoTxOutputs is returned when a transaction is created without any
+	// outputs.
+	ErrNoTxOutputs = errors.New("tx has no outputs")
+
+	// ErrFeeRateTooLarge is returned when a transaction is created with a
+	// fee rate that is larger than the configured max allowed fee rate.
+	// The default max fee rate is 1000 sat/vb.
+	ErrFeeRateTooLarge = errors.New("fee rate too large")
+
+	// ErrMissingFeeRate is returned when a transaction is created without
+	// a fee rate.
+	ErrMissingFeeRate = errors.New("missing fee rate")
+
+	// ErrMissingAccountName is returned when an account name is required
+	// but not provided.
+	ErrMissingAccountName = errors.New("account name cannot be empty")
+
+	// ErrUnsupportedCoinSource is returned when the `Source` field of a
+	// CoinSelectionPolicy is not of a supported type.
+	ErrUnsupportedCoinSource = errors.New("unsupported coin source type")
+
+	// ErrMissingInputs is returned when a transaction is created without
+	// any inputs.
+	ErrMissingInputs = errors.New("tx has no inputs")
+
+	// ErrNilTxIntent is returned when a nil `TxIntent` is provided.
+	ErrNilTxIntent = errors.New("nil TxIntent")
+)
+
+const (
+	// DefaultMaxFeeRate is the default maximum fee rate in sat/kvb that
+	// the wallet will consider sane. This is currently set to 1000 sat/vb
+	// (1,000,000 sat/kvb).
+	//
+	// TODO(yy): The max fee rate should be made configurable as part of
+	// the WalletController interface implementation.
+	DefaultMaxFeeRate SatPerKVByte = 1000 * 1000
 )
 
 // TxCreator provides an interface for creating transactions. Its primary
@@ -161,6 +212,11 @@ type Inputs interface {
 	// within this package. This ensures that only the intended types
 	// can be used as an Inputs implementation.
 	isInputs()
+
+	// validate performs a series of checks on the input source to ensure
+	// it is well-formed. This method is called before any database
+	// transactions are opened, allowing for early, efficient validation.
+	validate() error
 }
 
 // InputsManual implements the Inputs interface and specifies the exact UTXOs
@@ -194,9 +250,41 @@ type InputsPolicy struct {
 // isInputs marks InputsManual as an implementation of the Inputs interface.
 func (*InputsManual) isInputs() {}
 
+// validate performs validation on the manual inputs.
+func (i *InputsManual) validate() error {
+	return validateOutPoints(i.UTXOs)
+}
+
 // isInputs marks InputsPolicy as an implementation of the Inputs
 // interface.
 func (*InputsPolicy) isInputs() {}
+
+// validate performs validation on the input policy.
+func (i *InputsPolicy) validate() error {
+	if i.Source == nil {
+		return nil
+	}
+
+	switch source := i.Source.(type) {
+	// If the source is a scoped account, it must have a non-empty account
+	// name.
+	case *ScopedAccount:
+		if source.AccountName == "" {
+			return ErrMissingAccountName
+		}
+
+	// If the source is a list of UTXOs, it must not be empty and must not
+	// contain duplicates.
+	case *CoinSourceUTXOs:
+		return validateOutPoints(source.UTXOs)
+
+	// Any other source type is unsupported.
+	default:
+		return fmt.Errorf("%w: %T", ErrUnsupportedCoinSource, source)
+	}
+
+	return nil
+}
 
 // A compile-time assertion to ensure that all types implementing the Inputs
 // interface adhere to it.
@@ -266,3 +354,64 @@ func validateOutPoints(outpoints []wire.OutPoint) error {
 // interface adhere to it.
 var _ CoinSource = (*ScopedAccount)(nil)
 var _ CoinSource = (*CoinSourceUTXOs)(nil)
+
+// validateTxIntent performs a series of checks on a TxIntent to ensure it is
+// well-formed. This function is called before any transaction creation logic
+// to ensure that the caller has provided a valid intent. This function is for
+// validation only and does not modify the TxIntent.
+//
+// The following checks are performed:
+//   - The intent must have at least one output.
+//   - Each output must not be a dust output.
+//   - If a change source is specified, it must have a non-empty account name.
+//   - The intent must have a valid, non-nil input source.
+//   - The input source itself is validated via the `validate` method.
+func validateTxIntent(intent *TxIntent) error {
+	// The intent must have at least one output.
+	if len(intent.Outputs) == 0 {
+		return ErrNoTxOutputs
+	}
+
+	// Each output must not be a dust output according to the default relay
+	// fee policy.
+	for _, output := range intent.Outputs {
+		err := txrules.CheckOutput(
+			&output, txrules.DefaultRelayFeePerKb,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	// If a change source is specified, it must have a non-empty account
+	// name.
+	if intent.ChangeSource != nil && intent.ChangeSource.AccountName == "" {
+		return ErrMissingAccountName
+	}
+
+	// If no input source is specified, an error is returned.
+	if intent.Inputs == nil {
+		return ErrMissingInputs
+	}
+
+	// Validate the inputs.
+	err := intent.Inputs.validate()
+	if err != nil {
+		return err
+	}
+
+	// The intent must have a non-zero fee rate.
+	if intent.FeeRate == 0 {
+		return ErrMissingFeeRate
+	}
+
+	// Ensure the fee rate is not "insane". This prevents users from
+	// accidentally paying exorbitant fees.
+	if intent.FeeRate > DefaultMaxFeeRate {
+		return fmt.Errorf("%w: fee rate of %d sat/kvb is too high, "+
+			"max sane fee rate is %d sat/kvb", ErrFeeRateTooLarge,
+			intent.FeeRate, DefaultMaxFeeRate)
+	}
+
+	return nil
+}
