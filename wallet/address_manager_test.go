@@ -464,12 +464,10 @@ func TestScriptForOutput(t *testing.T) {
 	}
 
 	// Get the script for the output.
-	_, witnessProgram, sigScript, err := w.ScriptForOutput(
-		context.Background(), output,
-	)
+	script, err := w.ScriptForOutput(context.Background(), output)
 	require.NoError(t, err)
 
 	// Check that the script is correct.
-	require.Equal(t, pkScript, witnessProgram)
-	require.Nil(t, sigScript)
+	require.Equal(t, pkScript, script.WitnessProgram)
+	require.Nil(t, script.RedeemScript)
 }
