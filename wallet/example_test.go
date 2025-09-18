@@ -16,7 +16,8 @@ import (
 var defaultDBTimeout = 10 * time.Second
 
 // testWallet creates a test wallet and unlocks it.
-func testWallet(t *testing.T) (*Wallet, func()) {
+func testWallet(t *testing.T) *Wallet {
+	t.Helper()
 	// Set up a wallet.
 	dir := t.TempDir()
 
@@ -43,11 +44,17 @@ func testWallet(t *testing.T) (*Wallet, func()) {
 	// Start the wallet.
 	w.Start()
 
+	// Add the shutdown to the test's cleanup process.
+	t.Cleanup(func() {
+		w.Stop()
+		w.WaitForShutdown()
+	})
+
 	if err := w.Unlock(privPass, time.After(10*time.Minute)); err != nil {
 		t.Fatalf("unable to unlock wallet: %v", err)
 	}
 
-	return w, func() {}
+	return w
 }
 
 // mockers is a struct that holds all the mocked interfaces that can be
@@ -115,7 +122,8 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 }
 
 // testWalletWatchingOnly creates a test watch only wallet and unlocks it.
-func testWalletWatchingOnly(t *testing.T) (*Wallet, func()) {
+func testWalletWatchingOnly(t *testing.T) *Wallet {
+	t.Helper()
 	// Set up a wallet.
 	dir := t.TempDir()
 
@@ -148,5 +156,11 @@ func testWalletWatchingOnly(t *testing.T) (*Wallet, func()) {
 		t.Fatalf("unable to create default scopes: %v", err)
 	}
 
-	return w, func() {}
+	w.Start()
+	t.Cleanup(func() {
+		w.Stop()
+		w.WaitForShutdown()
+	})
+
+	return w
 }
