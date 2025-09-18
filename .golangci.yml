@@ -126,4 +126,8 @@ issues:
       linters:
         - gosec
         - errcheck
+        # Allow duplications in tests so it's easier to follow a single unit
+        # test.
         - dupl
+        # Allow long functions to build table-driven test cases.
+        - funlen
