@@ -31,7 +31,7 @@ func TestNewAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll start by creating a new account under the BIP0084 scope. We
 	// expect this to succeed.
@@ -71,7 +71,7 @@ func TestListAccounts(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll start by creating a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -128,7 +128,7 @@ func TestListAccountsByScope(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create two new accounts, one under the BIP0084 scope and one
 	// under the BIP0049 scope.
@@ -186,7 +186,7 @@ func TestListAccountsByName(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create two new accounts, one under the BIP0084 scope and one
 	// under the BIP0049 scope.
@@ -243,7 +243,7 @@ func TestGetAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -281,7 +281,7 @@ func TestRenameAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -332,7 +332,7 @@ func TestBalance(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -420,7 +420,7 @@ func TestImportAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll start by creating a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -749,7 +749,7 @@ func TestFetchAccountBalances(t *testing.T) {
 			t.Parallel()
 
 			w, cleanup := setupTestCase(t)
-			defer cleanup()
+			t.Cleanup(cleanup)
 
 			if tc.setup != nil {
 				tc.setup(t, w)
@@ -781,7 +781,7 @@ func TestListAccountsWithBalances(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create two new accounts under the BIP0084 scope to have a
 	// predictable state.

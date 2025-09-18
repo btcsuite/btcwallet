@@ -83,7 +83,7 @@ func TestNewAddress(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// Define a set of test cases to cover different address types and
 	// scenarios.
@@ -178,7 +178,7 @@ func TestGetUnusedAddress(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// Get a new address to start with.
 	addr, err := w.NewAddress(
@@ -261,7 +261,7 @@ func TestAddressInfo(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// Get a new external address to test with.
 	extAddr, err := w.NewAddress(
@@ -305,7 +305,7 @@ func TestListAddresses(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// Get a new address and give it a balance.
 	addr, err := w.NewAddress(
@@ -370,7 +370,7 @@ func TestImportPublicKey(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// Create a new public key to import.
 	privKey, err := btcec.NewPrivateKey()
@@ -401,7 +401,7 @@ func TestImportTaprootScript(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// Create a new tapscript to import.
 	privKey, err := btcec.NewPrivateKey()
@@ -448,7 +448,7 @@ func TestScriptForOutput(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// Create a new p2wkh address and output.
 	addr, err := w.NewAddress(
