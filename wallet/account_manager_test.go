@@ -347,7 +347,10 @@ func TestBalance(t *testing.T) {
 	require.Equal(t, btcutil.Amount(0), balance)
 
 	// Now, we'll add a UTXO to the account.
-	addr, err := w.NewAddressDeprecated(1, scope)
+	addr, err := w.NewAddress(
+		context.Background(), testAccountName,
+		waddrmgr.WitnessPubKey, false,
+	)
 	require.NoError(t, err)
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
@@ -573,11 +576,21 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 
 // addTestUTXOForBalance is a helper function to add a UTXO to the wallet.
 func addTestUTXOForBalance(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
-	account uint32, amount btcutil.Amount) {
+	accountName string, amount btcutil.Amount) {
 
 	t.Helper()
 
-	addr, err := w.NewAddressDeprecated(account, scope)
+	// This is a hack to ensure that we generate the correct address type
+	// for the given scope. A better solution would be to pass the
+	// address type as a parameter to this function.
+	addrType := waddrmgr.WitnessPubKey
+	if scope == waddrmgr.KeyScopeBIP0049Plus {
+		addrType = waddrmgr.NestedWitnessPubKey
+	}
+
+	addr, err := w.NewAddress(
+		context.Background(), accountName, addrType, false,
+	)
 	require.NoError(t, err)
 
 	pkScript, err := txscript.PayToAddrScript(addr)
@@ -664,10 +677,14 @@ func TestFetchAccountBalances(t *testing.T) {
 		require.NoError(t, err)
 
 		// Add UTXOs.
-		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 0, 100)
-		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 1, 200)
 		addTestUTXOForBalance(
-			t, w, waddrmgr.KeyScopeBIP0049Plus, 1, 300,
+			t, w, waddrmgr.KeyScopeBIP0084, "default", 100,
+		)
+		addTestUTXOForBalance(
+			t, w, waddrmgr.KeyScopeBIP0084, "acc1-bip84", 200,
+		)
+		addTestUTXOForBalance(
+			t, w, waddrmgr.KeyScopeBIP0049Plus, "acc1-bip49", 300,
 		)
 
 		// Update sync state.
