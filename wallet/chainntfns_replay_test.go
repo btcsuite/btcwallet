@@ -46,9 +46,12 @@ func reorgCoinbase(t *testing.T, tag byte) *wtxmgr.TxRecord {
 func TestDisconnectCoinbaseSpends(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWalletWatchingOnly(t)
-	t.Cleanup(cleanup)
-	t.Cleanup(func() { require.NoError(t, w.db.Close()) })
+	w := testWalletWatchingOnly(t)
+	t.Cleanup(func() {
+		w.Stop()
+		w.WaitForShutdown()
+		require.NoError(t, w.db.Close())
+	})
 
 	w.chainClient = &reorgChainClient{
 		mockChainClient: &mockChainClient{
@@ -236,9 +239,12 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 func TestDisconnectConflictingSpends(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWalletWatchingOnly(t)
-	t.Cleanup(cleanup)
-	t.Cleanup(func() { require.NoError(t, w.db.Close()) })
+	w := testWalletWatchingOnly(t)
+	t.Cleanup(func() {
+		w.Stop()
+		w.WaitForShutdown()
+		require.NoError(t, w.db.Close())
+	})
 
 	w.chainClient = &reorgChainClient{
 		mockChainClient: &mockChainClient{
@@ -326,9 +332,12 @@ func (b failingReorgBucket) Put(key, value []byte) error {
 func TestDisconnectReplayFailure(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWalletWatchingOnly(t)
-	t.Cleanup(cleanup)
-	t.Cleanup(func() { require.NoError(t, w.db.Close()) })
+	w := testWalletWatchingOnly(t)
+	t.Cleanup(func() {
+		w.Stop()
+		w.WaitForShutdown()
+		require.NoError(t, w.db.Close())
+	})
 
 	w.chainClient = &reorgChainClient{
 		mockChainClient: &mockChainClient{getBestBlockHeight: 3},
@@ -364,9 +373,12 @@ func TestDisconnectReplayFailure(t *testing.T) {
 func TestDisconnectOrphanCoinbaseSpend(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWalletWatchingOnly(t)
-	t.Cleanup(cleanup)
-	t.Cleanup(func() { require.NoError(t, w.db.Close()) })
+	w := testWalletWatchingOnly(t)
+	t.Cleanup(func() {
+		w.Stop()
+		w.WaitForShutdown()
+		require.NoError(t, w.db.Close())
+	})
 
 	w.chainClient = &reorgChainClient{
 		mockChainClient: &mockChainClient{

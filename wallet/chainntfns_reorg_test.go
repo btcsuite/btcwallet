@@ -56,9 +56,10 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 
-					w, cleanup := testWalletWatchingOnly(t)
-					t.Cleanup(cleanup)
+					w := testWalletWatchingOnly(t)
 					t.Cleanup(func() {
+						w.Stop()
+						w.WaitForShutdown()
 						require.NoError(t, w.db.Close())
 					})
 					w.SetChainSynced(synced)
@@ -223,9 +224,12 @@ func TestDisconnectMixedHistory(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 
-					w, cleanup := testWalletWatchingOnly(t)
-					t.Cleanup(cleanup)
-					t.Cleanup(func() { require.NoError(t, w.db.Close()) })
+					w := testWalletWatchingOnly(t)
+					t.Cleanup(func() {
+						w.Stop()
+						w.WaitForShutdown()
+						require.NoError(t, w.db.Close())
+					})
 
 					client := &reorgChainClient{
 						mockChainClient: &mockChainClient{
