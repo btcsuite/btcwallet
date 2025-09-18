@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -30,14 +29,13 @@ func TestNewAccount(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll start by creating a new account under the BIP0084 scope. We
 	// expect this to succeed.
 	scope := waddrmgr.KeyScopeBIP0084
 	account, err := w.NewAccount(
-		context.Background(), scope, testAccountName,
+		t.Context(), scope, testAccountName,
 	)
 	require.NoError(t, err, "unable to create new account")
 
@@ -50,7 +48,7 @@ func TestNewAccount(t *testing.T) {
 	require.NoError(t, err, "unable to retrieve account")
 
 	// We should not be able to create a new account with the same name.
-	_, err = w.NewAccount(context.Background(), scope, testAccountName)
+	_, err = w.NewAccount(t.Context(), scope, testAccountName)
 	require.Error(t, err, "expected error when creating duplicate account")
 
 	// We should not be able to create a new account when the wallet is
@@ -58,7 +56,7 @@ func TestNewAccount(t *testing.T) {
 	err = w.addrStore.Lock()
 	require.NoError(t, err)
 
-	_, err = w.NewAccount(context.Background(), scope, "test2")
+	_, err = w.NewAccount(t.Context(), scope, "test2")
 	require.Error(
 		t, err, "expected error when creating account while wallet is "+
 			"locked",
@@ -70,17 +68,16 @@ func TestListAccounts(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll start by creating a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
-	_, err := w.NewAccount(context.Background(), scope, testAccountName)
+	_, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err, "unable to create new account")
 
 	// Now, we'll list all accounts and check that we have the default
 	// account and the new account.
-	accounts, err := w.ListAccounts(context.Background())
+	accounts, err := w.ListAccounts(t.Context())
 	require.NoError(t, err, "unable to list accounts")
 
 	// We should have five accounts, the four default accounts and the new
@@ -125,26 +122,25 @@ func TestListAccountsByScope(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll create two new accounts, one under the BIP0084 scope and one
 	// under the BIP0049 scope.
 	scopeBIP84 := waddrmgr.KeyScopeBIP0084
 	accBIP84Name := "test bip84"
-	_, err := w.NewAccount(context.Background(), scopeBIP84, accBIP84Name)
+	_, err := w.NewAccount(t.Context(), scopeBIP84, accBIP84Name)
 	require.NoError(t, err)
 
 	scopeBIP49 := waddrmgr.KeyScopeBIP0049Plus
 	accBIP49Name := "test bip49"
-	_, err = w.NewAccount(context.Background(), scopeBIP49, accBIP49Name)
+	_, err = w.NewAccount(t.Context(), scopeBIP49, accBIP49Name)
 	require.NoError(t, err)
 
 	// Now, we'll list the accounts for the BIP0084 scope and check that
 	// we only get the default account for that scope and the new account we
 	// created.
 	accountsBIP84, err := w.ListAccountsByScope(
-		context.Background(), scopeBIP84,
+		t.Context(), scopeBIP84,
 	)
 	require.NoError(t, err)
 
@@ -161,7 +157,7 @@ func TestListAccountsByScope(t *testing.T) {
 
 	// Now, we'll do the same for the BIP0049 scope.
 	accountsBIP49, err := w.ListAccountsByScope(
-		context.Background(), scopeBIP49,
+		t.Context(), scopeBIP49,
 	)
 	require.NoError(t, err)
 
@@ -183,26 +179,25 @@ func TestListAccountsByName(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll create two new accounts, one under the BIP0084 scope and one
 	// under the BIP0049 scope.
 	scopeBIP84 := waddrmgr.KeyScopeBIP0084
 	accBIP84Name := "test bip84"
-	_, err := w.NewAccount(context.Background(), scopeBIP84, accBIP84Name)
+	_, err := w.NewAccount(t.Context(), scopeBIP84, accBIP84Name)
 	require.NoError(t, err)
 
 	scopeBIP49 := waddrmgr.KeyScopeBIP0049Plus
 	accBIP49Name := "test bip49"
-	_, err = w.NewAccount(context.Background(), scopeBIP49, accBIP49Name)
+	_, err = w.NewAccount(t.Context(), scopeBIP49, accBIP49Name)
 	require.NoError(t, err)
 
 	// Now, we'll list the accounts for the BIP0084 scope and check that
 	// we only get the default account for that scope and the new account we
 	// created.
 	accountsBIP84, err := w.ListAccountsByName(
-		context.Background(), accBIP84Name,
+		t.Context(), accBIP84Name,
 	)
 	require.NoError(t, err)
 
@@ -215,7 +210,7 @@ func TestListAccountsByName(t *testing.T) {
 
 	// Now, we'll do the same for the BIP0049 scope.
 	accountsBIP49, err := w.ListAccountsByName(
-		context.Background(), accBIP49Name,
+		t.Context(), accBIP49Name,
 	)
 	require.NoError(t, err)
 
@@ -229,7 +224,7 @@ func TestListAccountsByName(t *testing.T) {
 	// We should get an empty result if we query for a non-existent
 	// account.
 	accounts, err := w.ListAccountsByName(
-		context.Background(), "non-existent",
+		t.Context(), "non-existent",
 	)
 	require.NoError(t, err)
 	require.Empty(t, accounts.Accounts)
@@ -240,30 +235,29 @@ func TestGetAccount(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
-	_, err := w.NewAccount(context.Background(), scope, testAccountName)
+	_, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 
 	// We should be able to get the new account.
-	account, err := w.GetAccount(context.Background(), scope, testAccountName)
+	account, err := w.GetAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, account.AccountName)
 	require.Equal(t, uint32(1), account.AccountNumber)
 	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
 
 	// We should also be able to get the default account.
-	account, err = w.GetAccount(context.Background(), scope, "default")
+	account, err = w.GetAccount(t.Context(), scope, "default")
 	require.NoError(t, err)
 	require.Equal(t, "default", account.AccountName)
 	require.Equal(t, uint32(0), account.AccountNumber)
 	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
 
 	// We should get an error when trying to get a non-existent account.
-	_, err = w.GetAccount(context.Background(), scope, "non-existent")
+	_, err = w.GetAccount(t.Context(), scope, "non-existent")
 	require.Error(t, err)
 	require.True(
 		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
@@ -276,27 +270,26 @@ func TestRenameAccount(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
 	oldName := "old name"
 	newName := "new name"
-	_, err := w.NewAccount(context.Background(), scope, oldName)
+	_, err := w.NewAccount(t.Context(), scope, oldName)
 	require.NoError(t, err)
 
 	// We should be able to rename the account.
-	err = w.RenameAccount(context.Background(), scope, oldName, newName)
+	err = w.RenameAccount(t.Context(), scope, oldName, newName)
 	require.NoError(t, err)
 
 	// We should be able to get the account by its new name.
-	account, err := w.GetAccount(context.Background(), scope, newName)
+	account, err := w.GetAccount(t.Context(), scope, newName)
 	require.NoError(t, err)
 	require.Equal(t, newName, account.AccountName)
 
 	// We should not be able to get the account by its old name.
-	_, err = w.GetAccount(context.Background(), scope, oldName)
+	_, err = w.GetAccount(t.Context(), scope, oldName)
 	require.Error(t, err)
 	require.True(
 		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
@@ -304,7 +297,7 @@ func TestRenameAccount(t *testing.T) {
 	)
 
 	// We should not be able to rename an account to an existing name.
-	err = w.RenameAccount(context.Background(), scope, newName, "default")
+	err = w.RenameAccount(t.Context(), scope, newName, "default")
 	require.Error(t, err)
 	require.True(
 		t, waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
@@ -313,7 +306,7 @@ func TestRenameAccount(t *testing.T) {
 
 	// We should not be able to rename a non-existent account.
 	err = w.RenameAccount(
-		context.Background(), scope, "non-existent", "new name 2",
+		t.Context(), scope, "non-existent", "new name 2",
 	)
 	require.Error(t, err)
 	require.True(
@@ -327,25 +320,23 @@ func TestBalance(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
-	_, err := w.NewAccount(context.Background(), scope, testAccountName)
+	_, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 
 	// The balance should be zero initially.
 	balance, err := w.Balance(
-		context.Background(), 1, scope, testAccountName,
+		t.Context(), 1, scope, testAccountName,
 	)
 	require.NoError(t, err)
 	require.Equal(t, btcutil.Amount(0), balance)
 
 	// Now, we'll add a UTXO to the account.
 	addr, err := w.NewAddress(
-		context.Background(), testAccountName,
-		waddrmgr.WitnessPubKey, false,
+		t.Context(), testAccountName, waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 	pkScript, err := txscript.PayToAddrScript(addr)
@@ -393,14 +384,14 @@ func TestBalance(t *testing.T) {
 
 	// The balance should now be 100.
 	balance, err = w.Balance(
-		context.Background(), 1, scope, testAccountName,
+		t.Context(), 1, scope, testAccountName,
 	)
 	require.NoError(t, err)
 	require.Equal(t, btcutil.Amount(100), balance)
 
 	// We should get an error when trying to get the balance of a
 	// non-existent account.
-	_, err = w.Balance(context.Background(), 1, scope, "non-existent")
+	_, err = w.Balance(t.Context(), 1, scope, "non-existent")
 	require.Error(t, err)
 	require.True(
 		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
@@ -413,8 +404,7 @@ func TestImportAccount(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll start by creating a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -428,19 +418,19 @@ func TestImportAccount(t *testing.T) {
 
 	// We should be able to import the account.
 	props, err := w.ImportAccount(
-		context.Background(), testAccountName, acctPubKey,
+		t.Context(), testAccountName, acctPubKey,
 		root.ParentFingerprint(), addrType, false,
 	)
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
 
 	// We should be able to get the account by its name.
-	_, err = w.GetAccount(context.Background(), scope, testAccountName)
+	_, err = w.GetAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 
 	// We should not be able to import an account with the same name.
 	_, err = w.ImportAccount(
-		context.Background(), testAccountName, acctPubKey,
+		t.Context(), testAccountName, acctPubKey,
 		root.ParentFingerprint(), addrType, false,
 	)
 	require.Error(t, err)
@@ -452,13 +442,13 @@ func TestImportAccount(t *testing.T) {
 	// We should be able to do a dry run of the import.
 	dryRunName := "dry run"
 	_, err = w.ImportAccount(
-		context.Background(), dryRunName, acctPubKey,
+		t.Context(), dryRunName, acctPubKey,
 		root.ParentFingerprint(), addrType, true,
 	)
 	require.NoError(t, err)
 
 	// The account should not have been imported.
-	_, err = w.GetAccount(context.Background(), scope, dryRunName)
+	_, err = w.GetAccount(t.Context(), scope, dryRunName)
 	require.Error(t, err)
 	require.True(
 		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
@@ -471,8 +461,7 @@ func TestImportAccount(t *testing.T) {
 func TestExtractAddrFromPKScript(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	w.chainParams = &chaincfg.MainNetParams
 
@@ -581,7 +570,7 @@ func addTestUTXOForBalance(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 		addrType = waddrmgr.NestedWitnessPubKey
 	}
 	addr, err := w.NewAddress(
-		context.Background(), accountName, addrType, false,
+		t.Context(), accountName, addrType, false,
 	)
 	require.NoError(t, err)
 
@@ -650,9 +639,9 @@ func TestFetchAccountBalances(t *testing.T) {
 	// The function returns the fully initialized wallet and a cleanup
 	// function that should be deferred by the caller to ensure that the
 	// wallet's resources are properly released after the test completes.
-	setupTestCase := func(t *testing.T) (*Wallet, func()) {
-		w, cleanup := testWallet(t)
-		ctx := context.Background()
+	setupTestCase := func(t *testing.T) *Wallet {
+		w := testWallet(t)
+		ctx := t.Context()
 
 		// Create accounts.
 		_, err := w.NewAccount(
@@ -683,7 +672,7 @@ func TestFetchAccountBalances(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		return w, cleanup
+		return w
 	}
 
 	testCases := []struct {
@@ -737,7 +726,7 @@ func TestFetchAccountBalances(t *testing.T) {
 			name: "account with no balance",
 			setup: func(t *testing.T, w *Wallet) {
 				_, err := w.NewAccount(
-					context.Background(),
+					t.Context(),
 					waddrmgr.KeyScopeBIP0084, "no-balance",
 				)
 				require.NoError(t, err)
@@ -752,7 +741,7 @@ func TestFetchAccountBalances(t *testing.T) {
 			name: "filter by name that exists in multiple scopes",
 			setup: func(t *testing.T, w *Wallet) {
 				_, err := w.NewAccount(
-					context.Background(),
+					t.Context(),
 					waddrmgr.KeyScopeBIP0049Plus,
 					"acc1-bip84",
 				)
@@ -775,8 +764,7 @@ func TestFetchAccountBalances(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, cleanup := setupTestCase(t)
-			t.Cleanup(cleanup)
+			w := setupTestCase(t)
 
 			if tc.setup != nil {
 				tc.setup(t, w)
@@ -803,18 +791,17 @@ func TestListAccountsWithBalances(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, cleanup := testWallet(t)
-	t.Cleanup(cleanup)
+	w := testWallet(t)
 
 	// We'll create two new accounts under the BIP0084 scope to have a
 	// predictable state.
 	scope := waddrmgr.KeyScopeBIP0084
 	acc1Name := "test account"
-	_, err := w.NewAccount(context.Background(), scope, acc1Name)
+	_, err := w.NewAccount(t.Context(), scope, acc1Name)
 	require.NoError(t, err)
 
 	acc2Name := "no balance account"
-	_, err = w.NewAccount(context.Background(), scope, acc2Name)
+	_, err = w.NewAccount(t.Context(), scope, acc2Name)
 	require.NoError(t, err)
 
 	// We'll now create a balance map for some of the accounts. We

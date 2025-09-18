@@ -452,7 +452,7 @@ type birthdayStore interface {
 // manager that satisfies the birthdayStore interface.
 type walletBirthdayStore struct {
 	db      walletdb.DB
-	manager *waddrmgr.Manager
+	manager waddrmgr.AddrStore
 }
 
 var _ birthdayStore = (*walletBirthdayStore)(nil)
