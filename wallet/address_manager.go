@@ -38,6 +38,18 @@ type AddressProperty struct {
 	Balance btcutil.Amount
 }
 
+// Script represents the script information required to spend a UTXO.
+type Script struct {
+	// Addr is the managed address of the UTXO.
+	Addr waddrmgr.ManagedPubKeyAddress
+
+	// WitnessProgram is the witness program of the UTXO.
+	WitnessProgram []byte
+
+	// RedeemScript is the redeem script of the UTXO.
+	RedeemScript []byte
+}
+
 // AddressManager provides an interface for generating and inspecting wallet
 // addresses and scripts.
 type AddressManager interface {
@@ -84,8 +96,7 @@ type AddressManager interface {
 
 	// ScriptForOutput returns the address, witness program, and redeem
 	// script for a given UTXO.
-	ScriptForOutput(ctx context.Context, output wire.TxOut) (
-		waddrmgr.ManagedPubKeyAddress, []byte, []byte, error)
+	ScriptForOutput(ctx context.Context, output wire.TxOut) (Script, error)
 }
 
 // A compile time check to ensure that Wallet implements the interface.
@@ -622,18 +633,18 @@ func (w *Wallet) ImportTaprootScript(_ context.Context,
 //     is typically fast (O(log N) or O(1) with indexing). The script
 //     generation is a constant-time operation.
 func (w *Wallet) ScriptForOutput(_ context.Context, output wire.TxOut) (
-	waddrmgr.ManagedPubKeyAddress, []byte, []byte, error) {
+	Script, error) {
 
 	// First make sure we can sign for the input by making sure the script
 	// in the UTXO belongs to our wallet and we have the private key for it.
 	walletAddr, err := w.fetchOutputAddr(output.PkScript)
 	if err != nil {
-		return nil, nil, nil, err
+		return Script{}, err
 	}
 
 	pubKeyAddr, ok := walletAddr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
-		return nil, nil, nil, fmt.Errorf("address %s is not a "+
+		return Script{}, fmt.Errorf("address %s is not a "+
 			"p2wkh or np2wkh address", walletAddr.Address())
 	}
 
@@ -657,18 +668,18 @@ func (w *Wallet) ScriptForOutput(_ context.Context, output wire.TxOut) (
 			pubKeyHash, w.chainParams,
 		)
 		if err != nil {
-			return nil, nil, nil, err
+			return Script{}, err
 		}
 		witnessProgram, err = txscript.PayToAddrScript(p2wkhAddr)
 		if err != nil {
-			return nil, nil, nil, err
+			return Script{}, err
 		}
 
 		bldr := txscript.NewScriptBuilder()
 		bldr.AddData(witnessProgram)
 		sigScript, err = bldr.Script()
 		if err != nil {
-			return nil, nil, nil, err
+			return Script{}, err
 		}
 
 	// Otherwise, this is a regular p2wkh or p2tr output, so we include the
@@ -680,5 +691,9 @@ func (w *Wallet) ScriptForOutput(_ context.Context, output wire.TxOut) (
 		witnessProgram = output.PkScript
 	}
 
-	return pubKeyAddr, witnessProgram, sigScript, nil
+	return Script{
+		Addr:           pubKeyAddr,
+		WitnessProgram: witnessProgram,
+		RedeemScript:   sigScript,
+	}, nil
 }
