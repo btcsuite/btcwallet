@@ -18,6 +18,8 @@ import (
 func TestComputeInputScript(t *testing.T) {
 	t.Parallel()
 
+	w := testWallet(t)
+
 	testCases := []struct {
 		name              string
 		scope             waddrmgr.KeyScope
@@ -31,9 +33,6 @@ func TestComputeInputScript(t *testing.T) {
 		scope:             waddrmgr.KeyScopeBIP0049Plus,
 		expectedScriptLen: 23,
 	}}
-
-	w, cleanup := testWallet(t)
-	defer cleanup()
 
 	for _, tc := range testCases {
 		tc := tc
