@@ -39,8 +39,7 @@ var (
 func TestTxToOutputsDryRun(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	keyScope := waddrmgr.KeyScopeBIP0049Plus
@@ -282,8 +281,7 @@ func TestInputYield(t *testing.T) {
 func TestTxToOutputsRandom(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	keyScope := waddrmgr.KeyScopeBIP0049Plus
@@ -363,8 +361,7 @@ func TestTxToOutputsRandom(t *testing.T) {
 func TestCreateSimpleCustomChange(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// First, we'll make a P2TR and a P2WKH address to send some coins to
 	// (two different coin scopes).
@@ -455,8 +452,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 func TestSelectUtxosTxoToOutpoint(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// First, we'll make a P2TR and a P2WKH address to send some coins to.
 	p2wkhAddr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)

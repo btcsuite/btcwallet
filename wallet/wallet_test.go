@@ -170,10 +170,7 @@ func TestLabelTransaction(t *testing.T) {
 		test := test
 
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			w, cleanup := testWallet(t)
-			defer cleanup()
+			w := testWallet(t)
 
 			// If the transaction should be known to the store, we
 			// write txdetail to disk.
@@ -290,8 +287,7 @@ func TestGetTransaction(t *testing.T) {
 		test := test
 
 		t.Run(test.name, func(t *testing.T) {
-			w, cleanup := testWallet(t)
-			defer cleanup()
+			w := testWallet(t)
 
 			err := walletdb.Update(w.db, func(rw walletdb.ReadWriteTx) error {
 				ns := rw.ReadWriteBucket(wtxmgrNamespaceKey)
@@ -397,8 +393,7 @@ func TestGetTransactionConfirmations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			w, cleanup := testWallet(t)
-			t.Cleanup(cleanup)
+			w := testWallet(t)
 
 			// Set the wallet's synced height.
 			err := walletdb.Update(
@@ -494,9 +489,7 @@ func TestGetTransactionConfirmations(t *testing.T) {
 // TestDuplicateAddressDerivation tests that duplicate addresses are not
 // derived when multiple goroutines are concurrently requesting new addresses.
 func TestDuplicateAddressDerivation(t *testing.T) {
-	w, cleanup := testWallet(t)
-	defer cleanup()
-
+	w := testWallet(t)
 	var (
 		m           sync.Mutex
 		globalAddrs = make(map[string]address.Address)
@@ -558,7 +551,7 @@ func TestEndRecovery(t *testing.T) {
 	// when using btcwallet with a fresh seed, because it requires an early
 	// birthday to be set or established.
 
-	w, cleanup := testWallet(t)
+	w := testWallet(t)
 
 	blockHashCalled := make(chan struct{})
 
@@ -612,11 +605,9 @@ func TestEndRecovery(t *testing.T) {
 	case <-blockHashCalled:
 	case <-recoveryDone:
 	}
-	cleanup()
 
 	// Try again.
-	w, cleanup = testWallet(t)
-	defer cleanup()
+	w = testWallet(t)
 
 	// We'll catch the error to make sure we're hitting our desired path. The
 	// WaitGroup isn't required for the test, but does show how it completes

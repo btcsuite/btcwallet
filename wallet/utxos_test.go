@@ -21,8 +21,7 @@ import (
 func TestFetchInputInfo(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
@@ -98,8 +97,7 @@ func TestFetchInputInfo(t *testing.T) {
 func TestFetchOutpointInfo(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
@@ -135,8 +133,7 @@ func TestFetchOutpointInfo(t *testing.T) {
 func TestFetchOutpointInfoErr(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
@@ -213,8 +210,7 @@ func TestFetchOutpointInfoErr(t *testing.T) {
 func TestFetchDerivationInfo(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
