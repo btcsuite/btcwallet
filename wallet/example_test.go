@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/stretchr/testify/require"
 )
 
 // defaultDBTimeout specifies the timeout value when opening the wallet
@@ -18,11 +20,12 @@ var defaultDBTimeout = 10 * time.Second
 func testWallet(t *testing.T) (*Wallet, func()) {
 	// Set up a wallet.
 	dir := t.TempDir()
+	c1 := func() {
+		require.NoError(t, os.RemoveAll(dir))
+	}
 
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.MinSeedBytes)
-	if err != nil {
-		t.Fatalf("unable to create seed: %v", err)
-	}
+	require.NoError(t, err)
 
 	pubPass := []byte("hello")
 	privPass := []byte("world")
@@ -31,17 +34,23 @@ func testWallet(t *testing.T) (*Wallet, func()) {
 		&chaincfg.TestNet3Params, dir, true, defaultDBTimeout, 250,
 		WithWalletSyncRetryInterval(10*time.Millisecond),
 	)
+
 	w, err := loader.CreateNewWallet(pubPass, privPass, seed, time.Now())
-	if err != nil {
-		t.Fatalf("unable to create wallet: %v", err)
+	cleanup := func() {
+		err := w.db.Close()
+		c1()
+		require.NoError(t, err)
 	}
+	require.NoError(t, err)
+
 	chainClient := &mockChainClient{}
 	w.chainClient = chainClient
 	if err := w.Unlock(privPass, time.After(10*time.Minute)); err != nil {
-		t.Fatalf("unable to unlock wallet: %v", err)
+		cleanup()
+		require.NoError(t, err)
 	}
 
-	return w, func() {}
+	return w, cleanup
 }
 
 // testWalletWatchingOnly creates a test watch only wallet and unlocks it.
