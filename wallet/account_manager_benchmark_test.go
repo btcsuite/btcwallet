@@ -15,6 +15,47 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// BenchmarkAccountsAPI compares ListAccountsByScope and deprecated Accounts
+// APIs using identical test data across multiple dataset sizes. Test names
+// start with dataset size to group API comparisons for benchstat analysis.
+func BenchmarkAccountsAPI(b *testing.B) {
+	benchmarkSizes := generateBenchmarkSizes()
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name()+"/ListAccountsByScope", func(b *testing.B) {
+			w, cleanup := setupBenchmarkWallet(
+				b, size.numAccounts, size.numUTXOs,
+			)
+			b.Cleanup(cleanup)
+
+			scope := waddrmgr.KeyScopeBIP0044
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := w.ListAccountsByScope(
+					b.Context(), scope,
+				)
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name()+"/AccountsDeprecated", func(b *testing.B) {
+			w, cleanup := setupBenchmarkWallet(
+				b, size.numAccounts, size.numUTXOs,
+			)
+			b.Cleanup(cleanup)
+
+			scope := waddrmgr.KeyScopeBIP0044
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := w.Accounts(scope)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
 // setupBenchmarkWallet creates a wallet with test data for benchmarking. It
 // also returns a cleanup function to remove the wallet database.
 func setupBenchmarkWallet(b *testing.B, numAccounts,
