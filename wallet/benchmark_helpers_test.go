@@ -353,7 +353,6 @@ func listAccountsByNameDeprecated(w *Wallet,
 
 	for _, scopeMgr := range scopeManagers {
 		scope := scopeMgr.Scope()
-
 		result, err := w.Accounts(scope)
 		if err != nil {
 			return nil, err

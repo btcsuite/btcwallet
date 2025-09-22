@@ -146,7 +146,6 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
-
 			for b.Loop() {
 				_, err := listAccountsByNameDeprecated(
 					w, accountName,
@@ -166,7 +165,6 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
-
 			for b.Loop() {
 				_, err := w.ListAccountsByName(
 					b.Context(), accountName,
