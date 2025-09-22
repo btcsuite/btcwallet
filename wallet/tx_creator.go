@@ -418,6 +418,125 @@ func validateTxIntent(intent *TxIntent) error {
 	return nil
 }
 
+// createInputSource creates a txauthor.InputSource that will be used to select
+// inputs for a transaction. It acts as a dispatcher, delegating to either the
+// manual or policy-based input source creator based on the type of the intent's
+// Inputs field.
+//
+// TODO(yy): We use customized queries here to make the utxo lookups atomic
+// inside a big tx that's created in `CreateTransaction`, however, we should
+// instead have methods made on the `txStore`, which takes a db tx and use them
+// here, as the logic will be largely overlapped with the interface methods used
+// in `wallet/utxo_manager.go`.
+func (w *Wallet) createInputSource(dbtx walletdb.ReadTx, intent *TxIntent) (
+	txauthor.InputSource, error) {
+
+	switch inputs := intent.Inputs.(type) {
+	// If the inputs are manually specified, we create a "constant" input
+	// source that will only ever return the specified UTXOs.
+	case *InputsManual:
+		return w.createManualInputSource(dbtx, inputs)
+
+	// If the inputs are policy-based, we create an input source that will
+	// perform coin selection.
+	case *InputsPolicy:
+		return w.createPolicyInputSource(dbtx, inputs, intent.FeeRate)
+
+	// Any other type is unsupported.
+	default:
+		return nil, ErrUnsupportedTxInputs
+	}
+}
+
+// createManualInputSource creates an input source from a list of manually
+// specified UTXOs. It fetches the UTXOs directly from the database and ensures
+// that they are eligible for spending.
+func (w *Wallet) createManualInputSource(dbtx walletdb.ReadTx,
+	inputs *InputsManual) (
+	txauthor.InputSource, error) {
+
+	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+	// Create a slice to hold the eligible UTXOs.
+	eligibleSelectedUtxo := make(
+		[]wtxmgr.Credit, 0, len(inputs.UTXOs),
+	)
+
+	// Iterate through the manually specified UTXOs and ensure that each
+	// one is eligible for spending.
+	for _, outpoint := range inputs.UTXOs {
+		// Fetch the UTXO from the database.
+		credit, err := w.txStore.GetUtxo(txmgrNs, outpoint)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrUtxoNotEligible,
+				outpoint)
+		}
+
+		// TODO(yy): check for locked utxos and log a warning.
+		eligibleSelectedUtxo = append(eligibleSelectedUtxo, *credit)
+	}
+
+	// Return a constant input source that will only provide the selected
+	// UTXOs.
+	return constantInputSource(eligibleSelectedUtxo), nil
+}
+
+// createPolicyInputSource creates an input source that will perform automatic
+// coin selection based on the provided policy.
+func (w *Wallet) createPolicyInputSource(dbtx walletdb.ReadTx,
+	policy *InputsPolicy, feeRate SatPerKVByte) (
+	txauthor.InputSource, error) {
+
+	// Fall back to the default coin selection strategy if none is supplied.
+	strategy := policy.Strategy
+	if strategy == nil {
+		strategy = CoinSelectionLargest
+	}
+
+	// Get the full set of eligible UTXOs based on the policy's source
+	// and confirmation requirements.
+	eligible, err := w.getEligibleUTXOs(
+		dbtx, policy.Source, policy.MinConfs,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap our wtxmgr.Credit coins in a `Coin` type that implements the
+	// SelectableCoin interface. This allows the coin selection strategy
+	// to operate on them.
+	//
+	// TODO(yy): unify the types here - we should use `Utxo` instead of
+	// `Credit` or `Coin`.
+	wrappedEligible := make([]Coin, len(eligible))
+	for i := range eligible {
+		wrappedEligible[i] = Coin{
+			TxOut: wire.TxOut{
+				Value: int64(
+					eligible[i].Amount,
+				),
+				PkScript: eligible[i].PkScript,
+			},
+			OutPoint: eligible[i].OutPoint,
+		}
+	}
+
+	// Arrange the eligible coins according to the chosen strategy (e.g.,
+	// sort by largest first, or shuffle for random selection).
+	feeSatPerKb := btcutil.Amount(feeRate)
+
+	arrangedCoins, err := strategy.ArrangeCoins(
+		wrappedEligible, feeSatPerKb,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return an input source that will dispense the arranged coins one by
+	// one as requested by the txauthor.
+	return makeInputSource(arrangedCoins), nil
+}
+
 // getEligibleUTXOs returns a slice of eligible UTXOs that can be used as
 // inputs for a transaction, based on the specified source and confirmation
 // requirements. A UTXO is considered ineligible if it is not found in the
