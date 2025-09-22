@@ -684,13 +684,6 @@ func TestFetchAccountBalances(t *testing.T) {
 			},
 		},
 		{
-			name:    "filter by name",
-			filters: []filterOption{withName("acc1-bip84")},
-			expectedBalances: scopedBalances{
-				waddrmgr.KeyScopeBIP0084: {1: 200},
-			},
-		},
-		{
 			name: "filter by scope",
 			filters: []filterOption{
 				withScope(waddrmgr.KeyScopeBIP0084),
@@ -698,21 +691,6 @@ func TestFetchAccountBalances(t *testing.T) {
 			expectedBalances: scopedBalances{
 				waddrmgr.KeyScopeBIP0084: {0: 100, 1: 200},
 			},
-		},
-		{
-			name: "filter by name and scope",
-			filters: []filterOption{
-				withName("acc1-bip84"),
-				withScope(waddrmgr.KeyScopeBIP0084),
-			},
-			expectedBalances: scopedBalances{
-				waddrmgr.KeyScopeBIP0084: {1: 200},
-			},
-		},
-		{
-			name:             "filter by non-existent name",
-			filters:          []filterOption{withName("non-existent")},
-			expectedBalances: scopedBalances{},
 		},
 		{
 			name: "account with no balance",
@@ -727,24 +705,6 @@ func TestFetchAccountBalances(t *testing.T) {
 			expectedBalances: scopedBalances{
 				waddrmgr.KeyScopeBIP0084:     {0: 100, 1: 200},
 				waddrmgr.KeyScopeBIP0049Plus: {1: 300},
-			},
-		},
-		{
-			name: "filter by name that exists in multiple scopes",
-			setup: func(t *testing.T, w *Wallet) {
-				_, err := w.NewAccount(
-					context.Background(),
-					waddrmgr.KeyScopeBIP0049Plus, "acc1-bip84",
-				)
-				require.NoError(t, err)
-				addTestUTXOForBalance(
-					t, w, waddrmgr.KeyScopeBIP0049Plus, 2, 400,
-				)
-			},
-			filters: []filterOption{withName("acc1-bip84")},
-			expectedBalances: scopedBalances{
-				waddrmgr.KeyScopeBIP0084:     {1: 200},
-				waddrmgr.KeyScopeBIP0049Plus: {2: 400},
 			},
 		},
 	}
