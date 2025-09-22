@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -32,11 +30,6 @@ func linearGrowth(i int) int {
 // exponentialGrowth scales the parameter value exponentially.
 func exponentialGrowth(i int) int {
 	return 1 << i
-}
-
-// constantGrowth returns a constant value regardless of iteration.
-func constantGrowth(i int) int {
-	return 0
 }
 
 // benchmarkDataSize represents different test data sizes for stress testing.
@@ -307,40 +300,6 @@ func generateAccountName(numAccounts int,
 	return accountName, accountNumber
 }
 
-// generateTestExtendedKey generates a test extended public key for benchmarking
-// ImportAccount operations. It uses a deterministic seed based on the
-// iteration index to ensure consistent results across benchmark runs.
-func generateTestExtendedKey(t testing.TB,
-	i int) (*hdkeychain.ExtendedKey, uint32, waddrmgr.AddressType) {
-
-	t.Helper()
-
-	// Use a simple deterministic seed based on iteration index.
-	seed := make([]byte, 32)
-	for j := range seed {
-		seed[j] = byte(i + j)
-	}
-
-	// Create master key from seed.
-	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.TestNet3Params)
-	require.NoError(t, err)
-
-	// Derive account key for BIP0084 (m/84'/1'/i').
-	purpose, err := masterKey.Derive(hdkeychain.HardenedKeyStart + 84)
-	require.NoError(t, err)
-
-	coin, err := purpose.Derive(hdkeychain.HardenedKeyStart + 1)
-	require.NoError(t, err)
-
-	account, err := coin.Derive(hdkeychain.HardenedKeyStart + uint32(i))
-	require.NoError(t, err)
-
-	accountPubKey, err := account.Neuter()
-	require.NoError(t, err)
-
-	return accountPubKey, uint32(i), waddrmgr.WitnessPubKey
-}
-
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts API across all active key scopes
 // and aggregating the results.
@@ -367,6 +326,46 @@ func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
 
 	return &AccountsResult{
 		Accounts:           allAccounts,
+		CurrentBlockHash:   finalBlockHash,
+		CurrentBlockHeight: finalBlockHeight,
+	}, nil
+}
+
+// listAccountsByNameDeprecated wraps the deprecated Accounts API to satisfy the
+// same contract as ListAccountsByName by calling Accounts API across all active
+// key scopes, filtering by account name, and aggregating the results.
+func listAccountsByNameDeprecated(w *Wallet,
+	name string) (*AccountsResult, error) {
+
+	var (
+		matchingAccounts []AccountResult
+		finalBlockHash   chainhash.Hash
+		finalBlockHeight int32
+		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
+	)
+
+	for _, scopeMgr := range scopeManagers {
+		scope := scopeMgr.Scope()
+		result, err := w.Accounts(scope)
+		if err != nil {
+			return nil, err
+		}
+
+		// Filter accounts by name from this scope's results.
+		for _, account := range result.Accounts {
+			if account.AccountName == name {
+				matchingAccounts = append(
+					matchingAccounts, account,
+				)
+			}
+		}
+
+		finalBlockHash = result.CurrentBlockHash
+		finalBlockHeight = result.CurrentBlockHeight
+	}
+
+	return &AccountsResult{
+		Accounts:           matchingAccounts,
 		CurrentBlockHash:   finalBlockHash,
 		CurrentBlockHeight: finalBlockHeight,
 	}, nil
