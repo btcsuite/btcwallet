@@ -112,14 +112,19 @@ type Interface interface {
 	AccountManagedAddresses(scope waddrmgr.KeyScope,
 		accountNum uint32) ([]waddrmgr.ManagedAddress, error)
 
-	// RenameAccount renames an existing account. It is an error to rename
-	// a reserved account or to choose a name that is already in use.
-	RenameAccount(scope waddrmgr.KeyScope, account uint32,
+	// RenameAccountDeprecated renames an existing account. It is an error
+	// to rename a reserved account or to choose a name that is already in
+	// use.
+	//
+	// Deprecated: Use AccountManager.RenameAccount instead.
+	RenameAccountDeprecated(scope waddrmgr.KeyScope, account uint32,
 		newName string) error
 
-	// ImportAccount imports an account backed by an extended public key.
+	// ImportAccountDeprecated imports an account backed by an extended public key.
 	// This creates a watch-only account.
-	ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKey,
+	//
+	// Deprecated: Use AccountManager.ImportAccount instead.
+	ImportAccountDeprecated(name string, accountPubKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType *waddrmgr.AddressType,
 	) (*waddrmgr.AccountProperties, error)
 

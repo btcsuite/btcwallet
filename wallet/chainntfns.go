@@ -50,7 +50,7 @@ func (w *Wallet) handleChainNotifications() {
 		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-			startBlock := w.Manager.SyncedTo()
+			startBlock := w.addrStore.SyncedTo()
 
 			for i := startBlock.Height + 1; i <= height; i++ {
 				hash, err := client.GetBlockHash(int64(i))
@@ -67,7 +67,7 @@ func (w *Wallet) handleChainNotifications() {
 					Hash:      *hash,
 					Timestamp: header.Timestamp,
 				}
-				err = w.Manager.SetSyncedTo(ns, &bs)
+				err = w.addrStore.SetSyncedTo(ns, &bs)
 				if err != nil {
 					return err
 				}
@@ -136,7 +136,7 @@ func (w *Wallet) handleChainNotifications() {
 				// missing relevant events.
 				birthdayStore := &walletBirthdayStore{
 					db:      w.db,
-					manager: w.Manager,
+					manager: w.addrStore,
 				}
 				birthdayBlock, err := birthdaySanityCheck(
 					chainClient, birthdayStore,
@@ -248,7 +248,7 @@ func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) err
 		Hash:      b.Hash,
 		Timestamp: b.Time,
 	}
-	err := w.Manager.SetSyncedTo(addrmgrNs, &bs)
+	err := w.addrStore.SetSyncedTo(addrmgrNs, &bs)
 	if err != nil {
 		return err
 	}
@@ -273,8 +273,9 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 
 	// Disconnect the removed block and all blocks after it if we know about
 	// the disconnected block. Otherwise, the block is in the future.
-	if b.Height <= w.Manager.SyncedTo().Height {
-		hash, err := w.Manager.BlockHash(addrmgrNs, b.Height)
+	//nolint:nestif
+	if b.Height <= w.addrStore.SyncedTo().Height {
+		hash, err := w.addrStore.BlockHash(addrmgrNs, b.Height)
 		if err != nil {
 			return err
 		}
@@ -282,7 +283,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 			bs := waddrmgr.BlockStamp{
 				Height: b.Height - 1,
 			}
-			hash, err = w.Manager.BlockHash(addrmgrNs, bs.Height)
+			hash, err = w.addrStore.BlockHash(addrmgrNs, bs.Height)
 			if err != nil {
 				return err
 			}
@@ -295,12 +296,12 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 			}
 
 			bs.Timestamp = header.Timestamp
-			err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
+			err = w.addrStore.SetSyncedTo(addrmgrNs, &bs)
 			if err != nil {
 				return err
 			}
 
-			err = w.TxStore.Rollback(txmgrNs, b.Height)
+			err = w.txStore.Rollback(txmgrNs, b.Height)
 			if err != nil {
 				return err
 			}
@@ -323,7 +324,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 	// relevant.  This assumption will not hold true when SPV support is
 	// added, but until then, simply insert the transaction because there
 	// should either be one or more relevant inputs or outputs.
-	exists, err := w.TxStore.InsertTxCheckIfExists(txmgrNs, rec, block)
+	exists, err := w.txStore.InsertTxCheckIfExists(txmgrNs, rec, block)
 	if err != nil {
 		return err
 	}
@@ -350,7 +351,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 		}
 
 		for _, addr := range addrs {
-			ma, err := w.Manager.Address(addrmgrNs, addr)
+			ma, err := w.addrStore.Address(addrmgrNs, addr)
 
 			switch {
 			// Missing addresses are skipped.
@@ -367,7 +368,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			// non-default scopes in other places either, so
 			// detecting them here would mean we'd also not properly
 			// detect them as spent later.
-			scopedManager, _, err := w.Manager.AddrAccount(
+			scopedManager, _, err := w.addrStore.AddrAccount(
 				addrmgrNs, addr,
 			)
 			if err != nil {
@@ -383,13 +384,13 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			// TODO: Credits should be added with the
 			// account they belong to, so wtxmgr is able to
 			// track per-account balances.
-			err = w.TxStore.AddCredit(
+			err = w.txStore.AddCredit(
 				txmgrNs, rec, block, uint32(i), ma.Internal(),
 			)
 			if err != nil {
 				return err
 			}
-			err = w.Manager.MarkUsed(addrmgrNs, addr)
+			err = w.addrStore.MarkUsed(addrmgrNs, addr)
 			if err != nil {
 				return err
 			}

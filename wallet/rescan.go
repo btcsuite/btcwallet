@@ -301,7 +301,7 @@ func (w *Wallet) rescanWithTarget(addrs []btcutil.Address,
 	// starting point for the rescan.
 	if startStamp == nil {
 		startStamp = &waddrmgr.BlockStamp{}
-		*startStamp = w.Manager.SyncedTo()
+		*startStamp = w.addrStore.SyncedTo()
 	}
 
 	job := &RescanJob{

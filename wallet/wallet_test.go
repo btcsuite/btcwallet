@@ -191,7 +191,7 @@ func TestLabelTransaction(t *testing.T) {
 							wtxmgrNamespaceKey,
 						)
 
-						return w.TxStore.InsertTx(
+						return w.txStore.InsertTx(
 							ns, rec, nil,
 						)
 					})
@@ -292,7 +292,7 @@ func TestGetTransaction(t *testing.T) {
 
 			err := walletdb.Update(w.db, func(rw walletdb.ReadWriteTx) error {
 				ns := rw.ReadWriteBucket(wtxmgrNamespaceKey)
-				_, err := test.f(w.TxStore, ns)
+				_, err := test.f(w.txStore, ns)
 				return err
 			})
 			require.NoError(t, err)
