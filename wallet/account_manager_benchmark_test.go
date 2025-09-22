@@ -380,3 +380,61 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkGetBalanceAPI benchmarks Balance API and a deprecated wrapper API
+// using identical balance lookups across multiple dataset sizes. Test names
+// start with dataset size to group API comparisons for benchstat analysis.
+func BenchmarkGetBalanceAPI(b *testing.B) {
+	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+		accountGrowth: linearGrowth,
+		utxoGrowth:    exponentialGrowth,
+		maxIterations: 14,
+		startIndex:    0,
+	})
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	confirmations := int32(0)
+
+	for _, size := range benchmarkSizes {
+		accountName, _ := generateAccountName(size.numAccounts, scopes)
+
+		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					numUTXOs:    size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := getBalanceDeprecated(
+					w, scopes[0], accountName,
+					confirmations,
+				)
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name()+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					numUTXOs:    size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := w.Balance(
+					b.Context(), confirmations, scopes[0],
+					accountName,
+				)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
