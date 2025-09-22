@@ -20,6 +20,8 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -394,4 +396,114 @@ func validateTxIntent(intent *TxIntent) error {
 	}
 
 	return nil
+}
+
+// getEligibleUTXOs returns a slice of eligible UTXOs that can be used as
+// inputs for a transaction, based on the specified source and confirmation
+// requirements.
+func (w *Wallet) getEligibleUTXOs(dbtx walletdb.ReadTx,
+	source CoinSource, minconf uint32) ([]wtxmgr.Credit, error) {
+
+	// TODO(yy): remove this requireChainClient. The block stamp should be
+	// passed in as a parameter.
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the current block's height and hash. This is needed to determine
+	// the number of confirmations for UTXOs.
+	bs, err := chainClient.BlockStamp()
+	if err != nil {
+		return nil, err
+	}
+
+	// Dispatch based on the type of the coin source.
+	switch source := source.(type) {
+	// If the source is nil, we'll use the default account.
+	case nil:
+		return w.findEligibleOutputs(
+			dbtx, &waddrmgr.KeyScopeBIP0086,
+			waddrmgr.DefaultAccountNum, int32(minconf), bs, nil,
+		)
+
+	// If the source is a scoped account, we find all eligible outputs for
+	// that specific account and key scope.
+	case *ScopedAccount:
+		return w.getEligibleUTXOsFromAccount(dbtx, source, minconf, bs)
+
+	// If the source is a list of UTXOs, we validate and fetch each UTXO
+	// from the provided list.
+	case *CoinSourceUTXOs:
+		return w.getEligibleUTXOsFromList(dbtx, source, minconf, bs)
+
+	// Any other source type is unsupported.
+	default:
+		return nil, ErrUnsupportedCoinSource
+	}
+}
+
+// getEligibleUTXOsFromAccount returns a slice of eligible UTXOs for a specific
+// account and key scope.
+func (w *Wallet) getEligibleUTXOsFromAccount(dbtx walletdb.ReadTx,
+	source *ScopedAccount, minconf uint32, bs *waddrmgr.BlockStamp) (
+	[]wtxmgr.Credit, error) {
+
+	keyScope := &source.KeyScope
+
+	account, err := w.AccountNumber(*keyScope, source.AccountName)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+			source.AccountName)
+	}
+
+	return w.findEligibleOutputs(
+		dbtx, keyScope, account, int32(minconf), bs, nil,
+	)
+}
+
+// getEligibleUTXOsFromList returns a slice of eligible UTXOs from a specified
+// list of outpoints.
+func (w *Wallet) getEligibleUTXOsFromList(dbtx walletdb.ReadTx,
+	source *CoinSourceUTXOs, minconf uint32, bs *waddrmgr.BlockStamp) (
+	[]wtxmgr.Credit, error) {
+
+	// Create a slice to hold the eligible UTXOs.
+	eligible := make([]wtxmgr.Credit, 0, len(source.UTXOs))
+
+	// Get the transaction manager's namespace.
+	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+	// Iterate through the manually specified UTXOs and ensure that each
+	// one is eligible for spending.
+	for _, outpoint := range source.UTXOs {
+		// Fetch the UTXO from the database.
+		credit, err := w.txStore.GetUtxo(txmgrNs, outpoint)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v",
+				ErrUtxoNotEligible, outpoint)
+		}
+
+		// A UTXO is only eligible if it has reached the required
+		// number of confirmations.
+		if !confirmed(int32(minconf), credit.Height, bs.Height) {
+			// Calculate the number of confirmations for the
+			// warning message.
+			confs := int32(0)
+			if credit.Height != -1 {
+				confs = bs.Height - credit.Height + 1
+			}
+
+			log.Warnf("Skipping user-specified UTXO %v "+
+				"because it has %d confs but needs %d",
+				credit.OutPoint, confs, minconf)
+
+			continue
+		}
+
+		// If the UTXO is eligible, add it to the list.
+		eligible = append(eligible, *credit)
+	}
+
+	return eligible, nil
 }
