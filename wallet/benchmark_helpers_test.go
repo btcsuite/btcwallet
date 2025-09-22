@@ -382,3 +382,23 @@ func listAccountsByNameDeprecated(w *Wallet,
 		CurrentBlockHeight: finalBlockHeight,
 	}, nil
 }
+
+// getAccountDeprecated wraps the deprecated Accounts API to satisfy the same
+// contract as GetAccount by calling Accounts API across all active key scopes
+// and filtering by account name.
+func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
+	accountName string) (*AccountResult, error) {
+
+	result, err := w.Accounts(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, account := range result.Accounts {
+		if account.AccountName == accountName {
+			return &account, nil
+		}
+	}
+
+	return nil, fmt.Errorf("account '%s' not found", accountName)
+}
