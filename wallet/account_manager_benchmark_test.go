@@ -112,3 +112,61 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkListAccountsByNameAPI benchmarks ListAccountsByName API and a
+// deprecated variant of it using same key scopes and identical test data across
+// multiple dataset sizes. Test names start with dataset size to group API
+// comparisons for benchstat analysis.
+func BenchmarkListAccountsByNameAPI(b *testing.B) {
+	benchmarkSizes := generateBenchmarkSizes(
+		benchmarkConfig{
+			accountGrowth: linearGrowth,
+			utxoGrowth:    exponentialGrowth,
+			maxIterations: 14,
+			startIndex:    0,
+		},
+	)
+	scopes := waddrmgr.DefaultKeyScopes
+
+	for _, size := range benchmarkSizes {
+		accountName, _ := generateAccountName(size.numAccounts, scopes)
+
+		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					numUTXOs:    size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := listAccountsByNameDeprecated(
+					w, accountName,
+				)
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name()+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					numUTXOs:    size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := w.ListAccountsByName(
+					b.Context(), accountName,
+				)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
