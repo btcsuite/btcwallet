@@ -243,3 +243,58 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkGetAccountAPI benchmarks GetAccount API and a deprecated wrapper API
+// using identical account lookups across multiple dataset sizes. Test names
+// start with dataset size to group API comparisons for benchstat analysis.
+func BenchmarkGetAccountAPI(b *testing.B) {
+	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+		accountGrowth: exponentialGrowth,
+		utxoGrowth:    exponentialGrowth,
+		maxIterations: 14,
+		startIndex:    0,
+	})
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+
+	for _, size := range benchmarkSizes {
+		accountName, _ := generateAccountName(size.numAccounts, scopes)
+
+		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					numUTXOs:    size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := getAccountDeprecated(
+					w, scopes[0], accountName,
+				)
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name()+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					numUTXOs:    size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, err := w.GetAccount(
+					b.Context(), scopes[0], accountName,
+				)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
