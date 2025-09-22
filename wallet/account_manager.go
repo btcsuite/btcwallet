@@ -298,7 +298,7 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 		// First, calculate the balances for any accounts that match the
 		// given name. This is efficient as it iterates over the UTXO
 		// set, not accounts.
-		scopedBalances, err := w.fetchAccountBalances(tx, withName(name))
+		scopedBalances, err := w.fetchAccountBalances(tx)
 		if err != nil {
 			return err
 		}
@@ -397,7 +397,7 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 		// Calculate the balance for this specific account by fetching
 		// the UTXOs that belong to it.
 		scopedBalances, err := w.fetchAccountBalances(
-			tx, withScope(scope), withName(name),
+			tx, withScope(scope),
 		)
 		if err != nil {
 			return err
@@ -591,7 +591,6 @@ func extractAddrFromPKScript(pkScript []byte,
 // balance queries.
 type accountFilter struct {
 	scope *waddrmgr.KeyScope
-	name  string
 }
 
 // filterOption is a functional option type for account filtering.
@@ -602,14 +601,6 @@ type filterOption func(*accountFilter)
 func withScope(scope waddrmgr.KeyScope) filterOption {
 	return func(f *accountFilter) {
 		f.scope = &scope
-	}
-}
-
-// withName is a filter option to limit account queries to a specific account
-// name.
-func withName(name string) filterOption {
-	return func(f *accountFilter) {
-		f.name = name
 	}
 }
 
@@ -644,7 +635,6 @@ type scopedBalances map[waddrmgr.KeyScope]map[uint32]btcutil.Amount
 // Filters:
 // The function's behavior can be customized by passing one or more filterOption
 // functions. This allows the caller to restrict the balance calculation to:
-//   - A specific account name (withName).
 //   - A specific key scope (withScope).
 //
 // If no filters are provided, balances for all accounts across all scopes will
@@ -703,23 +693,7 @@ func (w *Wallet) fetchAccountBalances(tx walletdb.ReadTx,
 			continue
 		}
 
-		// If any filters were provided, we'll apply them now to
-		// determine if this UTXO should be included in the final
-		// balance calculation.
-		if filter.name != "" {
-			accName, err := scope.AccountName(addrmgrNs, accNum)
-			if err != nil {
-				// This indicates a potential database
-				// corruption, as we should always be able to
-				// look up the name for a valid account number.
-				log.Errorf("Unable to query account name for "+
-					"account %d: %v", accNum, err)
-				continue
-			}
-			if accName != filter.name {
-				continue
-			}
-		}
+		// If a scope filter was provided, apply it now.
 		if filter.scope != nil {
 			if scope.Scope() != *filter.scope {
 				continue
