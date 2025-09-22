@@ -94,6 +94,9 @@ type TxCreator interface {
 		*txauthor.AuthoredTx, error)
 }
 
+// A compile time check to ensure that Wallet implements the interface.
+var _ TxCreator = (*Wallet)(nil)
+
 // SatPerKVByte is a type that represents a fee rate in satoshis per
 // kilo-virtual-byte. This is the standard unit for fee estimation in modern
 // Bitcoin transactions that use SegWit.
@@ -416,6 +419,129 @@ func validateTxIntent(intent *TxIntent) error {
 	}
 
 	return nil
+}
+
+// CreateTransaction creates a new unsigned transaction spending unspent outputs
+// to the given outputs. It is the main implementation of the TxCreator
+// interface. The method will produce a valid, unsigned transaction, which can
+// then be passed to the Signer interface to be signed.
+func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
+	*txauthor.AuthoredTx, error) {
+
+	// Check that the intent is not nil.
+	if intent == nil {
+		return nil, ErrNilTxIntent
+	}
+
+	// If no input source is specified, an auto coin selection with the
+	// default account will be used.
+	if intent.Inputs == nil {
+		log.Debug("No input source specified, using default policy " +
+			"for automatic coin selection")
+
+		intent.Inputs = &InputsPolicy{}
+	}
+
+	err := validateTxIntent(intent)
+	if err != nil {
+		return nil, err
+	}
+
+	// The addrMgrWithChangeSource function of the wallet creates a new
+	// change address. The address manager uses OnCommit on the walletdb tx
+	// to update the in-memory state of the account state. But because the
+	// commit happens _after_ the account manager internal lock has been
+	// released, there is a chance for the address index to be accessed
+	// concurrently, even though the closure in OnCommit re-acquires the
+	// lock. To avoid this issue, we surround the whole address creation
+	// process with a lock.
+	w.newAddrMtx.Lock()
+	defer w.newAddrMtx.Unlock()
+
+	var (
+		changeSource *txauthor.ChangeSource
+		inputSource  txauthor.InputSource
+	)
+
+	// We perform the core logic of creating the input and change sources
+	// within a single database transaction to ensure atomicity.
+	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+		changeKeyScope := &intent.ChangeSource.KeyScope
+		accountName := intent.ChangeSource.AccountName
+
+		// Query the account's number using the account name.
+		//
+		// TODO(yy): Remove this query in upcoming SQL.
+		account, err := w.AccountNumber(*changeKeyScope, accountName)
+		if err != nil {
+			return fmt.Errorf("%w: %s", ErrAccountNotFound,
+				accountName)
+		}
+
+		// Create the change source, which is a closure that the
+		// txauthor package will use to generate a new change address
+		// when needed.
+		//
+		// TODO(yy): Refactor to ensure atomicity. The underlying
+		// `GetUnusedAddress` call creates its own database
+		// transaction, breaking the atomicity of this
+		// `walletdb.Update` block. A new method should be added to
+		// `AccountStore` that accepts an active database transaction
+		// and returns an unused address. This will allow the address
+		// derivation to occur within the same atomic transaction as
+		// the rest of the tx creation logic. Once fixed, we can remove
+		// the above `w.newAddrMtx` lock.
+		_, changeSource, err = w.addrMgrWithChangeSource(
+			dbtx, changeKeyScope, account,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Create the input source, which is a closure that the
+		// txauthor package will use to select coins.
+		inputSource, err = w.createInputSource(dbtx, intent)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// The txauthor.NewUnsignedTransaction function expects a slice of
+	// *wire.TxOut, but our intent has a slice of wire.TxOut. We perform
+	// the conversion here.
+	//
+	// TODO(yy): change the signature of `NewUnsignedTransaction` to take a
+	// list of `wire.TxOut`.
+	outputs := make([]*wire.TxOut, 0, len(intent.Outputs))
+	for _, output := range intent.Outputs {
+		outputs = append(outputs, &output)
+	}
+
+	// With the input source and change source prepared, we can now call the
+	// txauthor package to perform the actual coin selection and create the
+	// unsigned transaction.
+	feeSatPerKb := btcutil.Amount(intent.FeeRate)
+
+	tx, err := txauthor.NewUnsignedTransaction(
+		outputs, feeSatPerKb, inputSource, changeSource,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Randomize the position of the change output, if one was created. This
+	// helps to improve privacy by making it harder to distinguish change
+	// outputs from other outputs.
+	if tx.ChangeIndex >= 0 {
+		tx.RandomizeChangePosition()
+	}
+
+	return tx, nil
 }
 
 // createInputSource creates a txauthor.InputSource that will be used to select
