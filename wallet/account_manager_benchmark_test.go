@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -170,6 +171,74 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 					b.Context(), accountName,
 				)
 				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+// BenchmarkNewAccountAPI benchmarks NewAccount API and NextAccount API using
+// identical account creation operations across multiple dataset sizes. Test
+// names start with dataset size to group API comparisons for benchstat
+// analysis.
+func BenchmarkNewAccountAPI(b *testing.B) {
+	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+		accountGrowth: linearGrowth,
+		utxoGrowth:    constantGrowth,
+		maxIterations: 10,
+		startIndex:    0,
+	})
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					skipUTXOs:   true,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			count := 0
+			for b.Loop() {
+				// Generate a unique account name for each
+				// iteration to ensure the idempotent nature of
+				// the benchmark.
+				accountName := fmt.Sprintf("new-account-%d",
+					count)
+
+				_, err := w.NextAccount(scopes[0], accountName)
+				require.NoError(b, err)
+				count++
+			}
+		})
+
+		b.Run(size.name()+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					skipUTXOs:   true,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			count := 0
+			for b.Loop() {
+				// Generate a unique account name for each
+				// iteration to ensure the idempotent nature of
+				// the benchmark.
+				accountName := fmt.Sprintf("new-account-%d",
+					count)
+
+				_, err := w.NewAccount(
+					b.Context(), scopes[0], accountName,
+				)
+				require.NoError(b, err)
+				count++
 			}
 		})
 	}
