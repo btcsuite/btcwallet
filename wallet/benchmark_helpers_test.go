@@ -33,6 +33,11 @@ func exponentialGrowth(i int) int {
 	return 1 << i
 }
 
+// constantGrowth scales the parameter value to a constant value.
+func constantGrowth(i int) int {
+	return 5
+}
+
 // benchmarkDataSize represents different test data sizes for stress testing.
 type benchmarkDataSize struct {
 	// numAccounts is the number of accounts to create.
