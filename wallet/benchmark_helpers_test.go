@@ -340,3 +340,34 @@ func generateTestExtendedKey(t testing.TB,
 
 	return accountPubKey, uint32(i), waddrmgr.WitnessPubKey
 }
+
+// listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
+// contract as ListAccounts by calling Accounts API across all active key scopes
+// and aggregating the results.
+func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
+	var (
+		allAccounts      []AccountResult
+		finalBlockHash   chainhash.Hash
+		finalBlockHeight int32
+		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
+	)
+
+	for _, scopeMgr := range scopeManagers {
+		scope := scopeMgr.Scope()
+		result, err := w.Accounts(scope)
+		if err != nil {
+			return nil, err
+		}
+
+		allAccounts = append(allAccounts, result.Accounts...)
+
+		finalBlockHash = result.CurrentBlockHash
+		finalBlockHeight = result.CurrentBlockHeight
+	}
+
+	return &AccountsResult{
+		Accounts:           allAccounts,
+		CurrentBlockHash:   finalBlockHash,
+		CurrentBlockHeight: finalBlockHeight,
+	}, nil
+}
