@@ -298,3 +298,85 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkRenameAccountAPI benchmarks RenameAccount API and
+// RenameAccountDeprecated API using identical rename operations across multiple
+// dataset sizes. Test names start with dataset size to group API comparisons
+// for benchstat analysis.
+func BenchmarkRenameAccountAPI(b *testing.B) {
+	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+		accountGrowth: exponentialGrowth,
+		utxoGrowth:    constantGrowth,
+		maxIterations: 11,
+		startIndex:    0,
+	})
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+
+	for _, size := range benchmarkSizes {
+		accountName, accountNumber := generateAccountName(
+			size.numAccounts, scopes,
+		)
+		newName := accountName + "-renamed"
+
+		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					skipUTXOs:   true,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			count := 0
+			for b.Loop() {
+				newName2 := fmt.Sprintf("%s-%d", newName, count)
+				err := w.RenameAccountDeprecated(
+					scopes[0], accountNumber, newName2,
+				)
+				require.NoError(b, err)
+
+				// Rename back to original to keep the benchmark
+				// idempotent.
+				err = w.RenameAccountDeprecated(
+					scopes[0], accountNumber, accountName,
+				)
+				require.NoError(b, err)
+				count++
+			}
+		})
+
+		b.Run(size.name()+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:      scopes,
+					numAccounts: size.numAccounts,
+					skipUTXOs:   true,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			count := 0
+			for b.Loop() {
+				newName2 := fmt.Sprintf("%s-%d", newName, count)
+				err := w.RenameAccount(
+					b.Context(), scopes[0], accountName,
+					newName2,
+				)
+				require.NoError(b, err)
+
+				// Rename back to original to keep the benchmark
+				// idempotent.
+				err = w.RenameAccount(
+					b.Context(), scopes[0], newName2,
+					accountName,
+				)
+				require.NoError(b, err)
+
+				count++
+			}
+		})
+	}
+}
