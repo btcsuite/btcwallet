@@ -526,6 +526,31 @@ func mustPayToAddrScript(addr btcutil.Address) []byte {
 	return pkScript
 }
 
+// TestRemoveUnminedTx tests the removeUnminedTx method to ensure it correctly
+// removes a transaction from the unconfirmed store.
+func TestRemoveUnminedTx(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Create a sample transaction with one input and one output.
+	tx := &wire.MsgTx{
+		TxIn: []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{
+			Value: 10000,
+		}},
+	}
+
+	// Set up the mock for the transaction store.
+	mocks.txStore.On(
+		"RemoveUnminedTx", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	// Call the method under test.
+	err := w.removeUnminedTx(tx)
+	require.NoError(t, err)
+}
+
 // TestCheckMempool tests the checkMempool helper function.
 func TestCheckMempool(t *testing.T) {
 	t.Parallel()
@@ -599,6 +624,67 @@ func TestCheckMempool(t *testing.T) {
 			}
 
 			err := w.checkMempool(ctx, tx)
+			require.ErrorIs(t, err, tc.expectedErr)
+		})
+	}
+}
+
+// TestPublishTx tests the publishTx helper function.
+func TestPublishTx(t *testing.T) {
+	t.Parallel()
+
+	tx := &wire.MsgTx{}
+	addrs := []btcutil.Address{&btcutil.AddressPubKey{}}
+
+	testCases := []struct {
+		name        string
+		notifyErr   error
+		sendErr     error
+		expectedErr error
+	}{
+		{
+			name:        "success",
+			notifyErr:   nil,
+			sendErr:     nil,
+			expectedErr: nil,
+		},
+		{
+			name:        "notify received fails",
+			notifyErr:   errDummy,
+			sendErr:     nil,
+			expectedErr: errDummy,
+		},
+		{
+			name:        "send raw transaction fails",
+			notifyErr:   nil,
+			sendErr:     errDummy,
+			expectedErr: errDummy,
+		},
+		{
+			name:        "already in mempool",
+			notifyErr:   nil,
+			sendErr:     chain.ErrTxAlreadyInMempool,
+			expectedErr: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, m := testWalletWithMocks(t)
+
+			m.chain.On("NotifyReceived",
+				mock.Anything).Return(tc.notifyErr)
+
+			// We only expect SendRawTransaction to be called if
+			// NotifyReceived succeeds.
+			if tc.notifyErr == nil {
+				m.chain.On("SendRawTransaction",
+					mock.Anything, mock.Anything,
+				).Return(nil, tc.sendErr)
+			}
+
+			err := w.publishTx(tx, addrs)
 			require.ErrorIs(t, err, tc.expectedErr)
 		})
 	}
