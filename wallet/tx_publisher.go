@@ -11,6 +11,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/davecgh/go-spew/spew"
 )
 
 var (
@@ -377,4 +379,87 @@ func (w *Wallet) filterOwnedAddresses(
 	}
 
 	return ownedAddrs, nil
+}
+
+// publishTx is a helper function that handles the process of broadcasting a
+// transaction to the network. This includes getting a chain client,
+// registering for notifications, and sending the raw transaction.
+func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []btcutil.Address) error {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
+	// We'll also ask to be notified of the tx once it confirms on-chain.
+	// This is done outside of the database tx to prevent backend
+	// interaction within it.
+	err = chainClient.NotifyReceived(ourAddrs)
+	if err != nil {
+		return err
+	}
+
+	txid := tx.TxHash()
+
+	_, rpcErr := chainClient.SendRawTransaction(tx, false)
+	if rpcErr == nil {
+		return nil
+	}
+
+	// If the tx was rejected, we need to determine why and act
+	// accordingly.
+	//
+	// NOTE: This check for ErrTxAlreadyInMempool should only be triggered
+	// if the wallet is running without mempool acceptance checks (e.g.,
+	// with an older version of the chain backend or with Neutrino).
+	// Otherwise, this condition should have been caught earlier by the
+	// `checkMempool` function.
+	if errors.Is(rpcErr, chain.ErrTxAlreadyInMempool) {
+		log.Infof("%v: tx already in mempool", txid)
+		return nil
+	}
+
+	// If the tx was rejected for any other reason, then we'll return the
+	// error and let the caller handle the cleanup.
+	return rpcErr
+}
+
+// removeUnminedTx removes a tx from the unconfirmed store.
+func (w *Wallet) removeUnminedTx(tx *wire.MsgTx) error {
+	txHash := tx.TxHash()
+
+	dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		if err != nil {
+			return err
+		}
+
+		return w.txStore.RemoveUnminedTx(txmgrNs, txRec)
+	})
+	if dbErr != nil {
+		log.Warnf("Unable to remove invalid tx %v: %v", txHash, dbErr)
+		return dbErr
+	}
+
+	log.Infof("Removed invalid tx: %v", txHash)
+
+	// The serialized tx is for logging only, don't fail on the error.
+	var txRaw bytes.Buffer
+
+	_ = tx.Serialize(&txRaw)
+
+	// Optionally log the tx in debug when the size is manageable.
+	const maxTxSizeForLog = 1_000_000
+	if txRaw.Len() < maxTxSizeForLog {
+		log.Debugf("Removed invalid tx: %v \n hex=%x",
+			newLogClosure(func() string {
+				return spew.Sdump(tx)
+			}), txRaw.Bytes())
+	} else {
+		log.Debugf("Removed invalid tx %v due to its size "+
+			"being too large", txHash)
+	}
+
+	return nil
 }
