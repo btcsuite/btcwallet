@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -775,4 +777,147 @@ func (m *mockCoinSelectionStrategy) ArrangeCoins(coins []Coin,
 	}
 
 	return args.Get(0).([]Coin), args.Error(1)
+}
+
+// mockChain is a mock implementation of the chain.Interface.
+type mockChain struct {
+	mock.Mock
+}
+
+// A compile-time assertion to ensure that mockChain implements the
+// chain.Interface.
+var _ chain.Interface = (*mockChain)(nil)
+
+// Start implements the chain.Interface interface.
+func (m *mockChain) Start() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+// Stop implements the chain.Interface interface.
+func (m *mockChain) Stop() {
+	m.Called()
+}
+
+// WaitForShutdown implements the chain.Interface interface.
+func (m *mockChain) WaitForShutdown() {
+	m.Called()
+}
+
+// GetBestBlock implements the chain.Interface interface.
+func (m *mockChain) GetBestBlock() (*chainhash.Hash, int32, error) {
+	args := m.Called()
+	hash, _ := args.Get(0).(*chainhash.Hash)
+
+	return hash, int32(args.Int(1)), args.Error(2)
+}
+
+// GetBlock implements the chain.Interface interface.
+func (m *mockChain) GetBlock(hash *chainhash.Hash) (*wire.MsgBlock, error) {
+	args := m.Called(hash)
+	block, _ := args.Get(0).(*wire.MsgBlock)
+
+	return block, args.Error(1)
+}
+
+// GetBlockHash implements the chain.Interface interface.
+func (m *mockChain) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	args := m.Called(height)
+	hash, _ := args.Get(0).(*chainhash.Hash)
+
+	return hash, args.Error(1)
+}
+
+// GetBlockHeader implements the chain.Interface interface.
+func (m *mockChain) GetBlockHeader(
+	hash *chainhash.Hash) (*wire.BlockHeader, error) {
+
+	args := m.Called(hash)
+	header, _ := args.Get(0).(*wire.BlockHeader)
+
+	return header, args.Error(1)
+}
+
+// IsCurrent implements the chain.Interface interface.
+func (m *mockChain) IsCurrent() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
+// FilterBlocks implements the chain.Interface interface.
+func (m *mockChain) FilterBlocks(req *chain.FilterBlocksRequest) (
+	*chain.FilterBlocksResponse, error) {
+
+	args := m.Called(req)
+	resp, _ := args.Get(0).(*chain.FilterBlocksResponse)
+
+	return resp, args.Error(1)
+}
+
+// BlockStamp implements the chain.Interface interface.
+func (m *mockChain) BlockStamp() (*waddrmgr.BlockStamp, error) {
+	args := m.Called()
+	stamp, _ := args.Get(0).(*waddrmgr.BlockStamp)
+
+	return stamp, args.Error(1)
+}
+
+// SendRawTransaction implements the chain.Interface interface.
+func (m *mockChain) SendRawTransaction(tx *wire.MsgTx,
+	allowHighFees bool) (*chainhash.Hash, error) {
+
+	args := m.Called(tx, allowHighFees)
+	hash, _ := args.Get(0).(*chainhash.Hash)
+
+	return hash, args.Error(1)
+}
+
+// Rescan implements the chain.Interface interface.
+func (m *mockChain) Rescan(hash *chainhash.Hash, addrs []btcutil.Address,
+	outpoints map[wire.OutPoint]btcutil.Address) error {
+
+	args := m.Called(hash, addrs, outpoints)
+	return args.Error(0)
+}
+
+// NotifyReceived implements the chain.Interface interface.
+func (m *mockChain) NotifyReceived(addrs []btcutil.Address) error {
+	args := m.Called(addrs)
+	return args.Error(0)
+}
+
+// NotifyBlocks implements the chain.Interface interface.
+func (m *mockChain) NotifyBlocks() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+// Notifications implements the chain.Interface interface.
+func (m *mockChain) Notifications() <-chan any {
+	args := m.Called()
+	ch, _ := args.Get(0).(<-chan any)
+
+	return ch
+}
+
+// BackEnd implements the chain.Interface interface.
+func (m *mockChain) BackEnd() string {
+	args := m.Called()
+	return args.String(0)
+}
+
+// TestMempoolAccept implements the chain.Interface interface.
+func (m *mockChain) TestMempoolAccept(txns []*wire.MsgTx,
+	maxFeeRate float64) ([]*btcjson.TestMempoolAcceptResult, error) {
+
+	args := m.Called(txns, maxFeeRate)
+	res, _ := args.Get(0).([]*btcjson.TestMempoolAcceptResult)
+
+	return res, args.Error(1)
+}
+
+// MapRPCErr implements the chain.Interface interface.
+func (m *mockChain) MapRPCErr(err error) error {
+	args := m.Called(err)
+	return args.Error(0)
 }
