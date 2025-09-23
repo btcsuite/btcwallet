@@ -13,8 +13,11 @@ package wallet
 import (
 	"context"
 	"errors"
+	"fmt"
 
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain"
 )
 
 var (
@@ -78,4 +81,53 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	err = errors.New(result.RejectReason)
 
 	return chainClient.MapRPCErr(err)
+}
+
+var (
+	// errAlreadyBroadcasted is a sentinel error used to indicate that a tx
+	// has already been broadcast.
+	errAlreadyBroadcasted = errors.New("tx already broadcasted")
+)
+
+// checkMempool is a helper function that checks if a tx is acceptable to the
+// mempool before broadcasting.
+func (w *Wallet) checkMempool(ctx context.Context,
+	tx *wire.MsgTx) error {
+
+	// We'll start by checking if the tx is acceptable to the mempool.
+	err := w.CheckMempoolAcceptance(ctx, tx)
+
+	switch {
+	// If the tx is already in the mempool or confirmed, we can return
+	// early.
+	case errors.Is(err, chain.ErrTxAlreadyInMempool),
+		errors.Is(err, chain.ErrTxAlreadyKnown),
+		errors.Is(err, chain.ErrTxAlreadyConfirmed):
+
+		log.Infof("Tx %v already broadcasted", tx.TxHash())
+
+		// TODO(yy): Add a new method UpdateTxLabel to allow updating
+		// the label of a tx. With this change, the label passed in
+		// will be ignored if the tx is already known.
+		return errAlreadyBroadcasted
+
+	// If the backend does not support the mempool acceptance test, we'll
+	// just attempt to publish the tx.
+	case errors.Is(err, rpcclient.ErrBackendVersion),
+		errors.Is(err, chain.ErrUnimplemented):
+
+		log.Warnf("Backend does not support mempool acceptance test, "+
+			"broadcasting directly: %v", err)
+
+		return nil
+
+	// If the tx was rejected for any other reason, we'll return the error
+	// directly.
+	case err != nil:
+		return fmt.Errorf("tx rejected by mempool: %w", err)
+
+	// Otherwise, the tx is valid and we can publish it.
+	default:
+		return nil
+	}
 }
