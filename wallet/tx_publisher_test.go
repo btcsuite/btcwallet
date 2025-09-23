@@ -689,3 +689,210 @@ func TestPublishTx(t *testing.T) {
 		})
 	}
 }
+
+// TestBroadcastSuccess tests the Broadcast method for a successful broadcast.
+func TestBroadcastSuccess(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	label := testTxLabel
+	w, m := testWalletWithMocks(t)
+
+	// Create a transaction with an owned output.
+	ownedPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	ownedAddr, err := btcutil.NewAddressPubKey(
+		ownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(ownedAddr)
+	require.NoError(t, err)
+
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
+	}
+
+	// Mock checkMempool to succeed.
+	m.chain.On("TestMempoolAccept",
+		mock.Anything, mock.Anything,
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+
+	// Mock addTxToWallet to succeed.
+	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr.On("Internal").Return(false)
+	m.addrStore.On("Address",
+		mock.Anything, ownedAddr,
+	).Return(mockManagedAddr, nil).Once()
+	m.txStore.On("PutTxLabel",
+		mock.Anything, tx.TxHash(), label,
+	).Return(nil).Once()
+	m.txStore.On("InsertTxCheckIfExists",
+		mock.Anything, mock.Anything, mock.Anything,
+	).Return(false, nil).Once()
+	m.txStore.On("AddCredit",
+		mock.Anything, mock.Anything, mock.Anything, uint32(0), false,
+	).Return(nil).Once()
+	m.addrStore.On("MarkUsed",
+		mock.Anything, ownedAddr,
+	).Return(nil).Once()
+
+	// Mock publishTx to succeed.
+	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
+	m.chain.On("SendRawTransaction",
+		mock.Anything, mock.Anything,
+	).Return(nil, nil)
+
+	err = w.Broadcast(ctx, tx, label)
+	require.NoError(t, err)
+}
+
+// TestBroadcastAlreadyBroadcasted tests the Broadcast method when the
+// transaction has already been broadcasted.
+func TestBroadcastAlreadyBroadcasted(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	label := testTxLabel
+	w, m := testWalletWithMocks(t)
+
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 10000}},
+	}
+
+	// Mock checkMempool to return already broadcasted.
+	m.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
+		Return(nil, chain.ErrTxAlreadyInMempool)
+
+	err := w.Broadcast(ctx, tx, label)
+	require.NoError(t, err)
+}
+
+// TestBroadcastPublishFailsRemoveSucceeds tests the Broadcast method when
+// publishing fails but removing the transaction from the wallet succeeds.
+func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	label := testTxLabel
+	w, m := testWalletWithMocks(t)
+
+	// Create a transaction with an owned output.
+	ownedPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	ownedAddr, err := btcutil.NewAddressPubKey(
+		ownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(ownedAddr)
+	require.NoError(t, err)
+
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
+	}
+
+	// Mock checkMempool to succeed.
+	m.chain.On("TestMempoolAccept",
+		mock.Anything, mock.Anything,
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+
+	// Mock addTxToWallet to succeed.
+	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr.On("Internal").Return(false)
+	m.addrStore.On("Address",
+		mock.Anything, ownedAddr,
+	).Return(mockManagedAddr, nil).Once()
+	m.txStore.On("PutTxLabel",
+		mock.Anything, tx.TxHash(), label,
+	).Return(nil).Once()
+	m.txStore.On("InsertTxCheckIfExists",
+		mock.Anything, mock.Anything, mock.Anything,
+	).Return(false, nil).Once()
+	m.txStore.On("AddCredit",
+		mock.Anything, mock.Anything, mock.Anything, uint32(0), false,
+	).Return(nil).Once()
+	m.addrStore.On("MarkUsed",
+		mock.Anything, ownedAddr,
+	).Return(nil).Once()
+
+	// Mock publishTx to fail.
+	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
+	m.chain.On("SendRawTransaction",
+		mock.Anything, mock.Anything,
+	).Return(nil, errPublish)
+
+	// Mock removeUnminedTx to succeed.
+	m.txStore.On("RemoveUnminedTx",
+		mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	err = w.Broadcast(ctx, tx, label)
+	require.ErrorIs(t, err, errPublish)
+}
+
+// TestBroadcastPublishFailsRemoveFails tests the Broadcast method when both
+// publishing and removing the transaction from the wallet fail.
+func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	label := testTxLabel
+	w, m := testWalletWithMocks(t)
+
+	// Create a transaction with an owned output.
+	ownedPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	ownedAddr, err := btcutil.NewAddressPubKey(
+		ownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(ownedAddr)
+	require.NoError(t, err)
+
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
+	}
+
+	// Mock checkMempool to succeed.
+	m.chain.On("TestMempoolAccept",
+		mock.Anything, mock.Anything,
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+
+	// Mock addTxToWallet to succeed.
+	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr.On("Internal").Return(false)
+	m.addrStore.On("Address",
+		mock.Anything, ownedAddr,
+	).Return(mockManagedAddr, nil).Once()
+	m.txStore.On("PutTxLabel",
+		mock.Anything, tx.TxHash(), label,
+	).Return(nil).Once()
+	m.txStore.On("InsertTxCheckIfExists",
+		mock.Anything, mock.Anything, mock.Anything,
+	).Return(false, nil).Once()
+	m.txStore.On("AddCredit",
+		mock.Anything, mock.Anything, mock.Anything, uint32(0), false,
+	).Return(nil).Once()
+	m.addrStore.On("MarkUsed",
+		mock.Anything, ownedAddr,
+	).Return(nil).Once()
+
+	// Mock publishTx to fail.
+	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
+	m.chain.On("SendRawTransaction",
+		mock.Anything, mock.Anything,
+	).Return(nil, errPublish)
+
+	// Mock removeUnminedTx to fail.
+	m.txStore.On("RemoveUnminedTx",
+		mock.Anything, mock.Anything,
+	).Return(errRemove).Once()
+
+	err = w.Broadcast(ctx, tx, label)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), errPublish.Error())
+	require.Contains(t, err.Error(), errRemove.Error())
+}

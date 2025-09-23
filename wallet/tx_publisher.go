@@ -46,6 +46,9 @@ type TxPublisher interface {
 	Broadcast(ctx context.Context, tx *wire.MsgTx, label string) error
 }
 
+// A compile time check to ensure that Wallet implements the interface.
+var _ TxPublisher = (*Wallet)(nil)
+
 // CheckMempoolAcceptance checks if a transaction would be accepted by the
 // mempool without broadcasting.
 func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
@@ -89,6 +92,55 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	err = errors.New(result.RejectReason)
 
 	return chainClient.MapRPCErr(err)
+}
+
+// Broadcast broadcasts a tx to the network. It is the main implementation of
+// the TxPublisher interface.
+func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
+	label string) error {
+
+	// We'll start by checking if the tx is acceptable to the mempool.
+	err := w.checkMempool(ctx, tx)
+	if errors.Is(err, errAlreadyBroadcasted) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// First, we'll attempt to add the tx to our wallet's DB. This will
+	// allow us to track the tx's confirmation status, and also
+	// re-broadcast it upon startup. If any of the subsequent steps fail,
+	// this tx must be removed.
+	ourAddrs, err := w.addTxToWallet(tx, label)
+	if err != nil {
+		return err
+	}
+
+	// Now, we'll attempt to publish the tx.
+	err = w.publishTx(tx, ourAddrs)
+	if err == nil {
+		return nil
+	}
+
+	txid := tx.TxHash()
+	log.Errorf("%v: broadcast failed: %v", txid, err)
+
+	// If the tx was rejected for any other reason, then we'll remove it
+	// from the tx store, as otherwise, we'll attempt to continually
+	// re-broadcast it, and the UTXO state of the wallet won't be accurate.
+	removeErr := w.removeUnminedTx(tx)
+	if removeErr != nil {
+		log.Warnf("Unable to remove tx %v after broadcast failed: %v",
+			txid, removeErr)
+
+		// Return a wrapped error to give the caller full context.
+		return fmt.Errorf("broadcast failed: %w; and failed to "+
+			"remove from wallet: %v", err, removeErr)
+	}
+
+	return err
 }
 
 var (
