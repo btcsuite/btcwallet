@@ -4,10 +4,13 @@ GOCC ?= go
 
 LINT_PKG := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
+TOOLS_DIR := ./tools
+TOOLS_MODFILE := $(TOOLS_DIR)/go.mod
 
 GOBUILD := GO111MODULE=on go build -v
 GOINSTALL := GO111MODULE=on go install -v
 GOTEST := GO111MODULE=on go test 
+GOTOOL := GOWORK=off go tool --modfile=$(TOOLS_MODFILE)
 
 GOLIST := go list -deps $(PKG)/... | grep '$(PKG)'
 GOLIST_COVER := $$(go list -deps $(PKG)/... | grep '$(PKG)')
@@ -93,7 +96,7 @@ unit-bench:
 #? fmt: Fix imports and format source code
 fmt: $(GOIMPORTS_BIN)
 	@$(call print, "Fixing imports.")
-	go tool $(GOIMPORTS_PKG) -w $(GOFILES_NOVENDOR)
+	$(GOTOOL) $(GOIMPORTS_PKG) -w $(GOFILES_NOVENDOR) 
 	@$(call print, "Formatting source.")
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
@@ -110,7 +113,7 @@ rpc-format:
 #? lint: Lint source
 lint:
 	@$(call print, "Linting source.")
-	go tool $(LINT_PKG) run -v $(LINT_WORKERS)
+	$(GOTOOL) $(LINT_PKG) run -v $(LINT_WORKERS) 
 
 #? rpc: Compile protobuf definitions
 rpc:
