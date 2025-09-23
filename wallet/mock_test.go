@@ -283,6 +283,10 @@ func (m *mockAddrStore) Address(ns walletdb.ReadBucket,
 	address address.Address) (waddrmgr.ManagedAddress, error) {
 
 	args := m.Called(ns, address)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
 	return args.Get(0).(waddrmgr.ManagedAddress), args.Error(1)
 }
 
