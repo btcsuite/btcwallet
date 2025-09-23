@@ -495,7 +495,12 @@ func TestGetEligibleUTXOs(t *testing.T) {
 			setupMocks: func(
 				m *mockers, source CoinSource,
 			) {
-				scopedSrc := source.(*ScopedAccount)
+
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				)
+				scopedSrc, ok := source.(*ScopedAccount)
+				require.True(t, ok)
 				accountStore := &mockAccountStore{}
 
 				m.addrStore.On("FetchScopedKeyManager",
@@ -517,6 +522,9 @@ func TestGetEligibleUTXOs(t *testing.T) {
 				UTXOs: []wire.OutPoint{utxo},
 			},
 			setupMocks: func(m *mockers, source CoinSource) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				)
 				m.txStore.On("GetUtxo", mock.Anything, utxo).
 					Return(credit, nil)
 			},
@@ -525,15 +533,22 @@ func TestGetEligibleUTXOs(t *testing.T) {
 			name:   "nil source",
 			source: nil,
 			setupMocks: func(m *mockers, source CoinSource) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				)
 				m.txStore.On("UnspentOutputs",
 					mock.Anything,
 				).Return([]wtxmgr.Credit{}, nil)
 			},
 		},
 		{
-			name:        "unsupported source",
-			source:      &unsupportedCoinSource{},
-			setupMocks:  func(m *mockers, source CoinSource) {},
+			name:   "unsupported source",
+			source: &unsupportedCoinSource{},
+			setupMocks: func(m *mockers, source CoinSource) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				)
+			},
 			expectedErr: ErrUnsupportedCoinSource,
 		},
 	}
@@ -667,6 +682,9 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				MinConfs: 1,
 			},
 			setupMocks: func(m *mockers) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				).Once()
 				m.txStore.On("UnspentOutputs", mock.Anything).
 					Return(eligibleUtxos, nil).Once()
 			},
@@ -679,6 +697,9 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				MinConfs: 1,
 			},
 			setupMocks: func(m *mockers) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				).Once()
 				m.txStore.On("UnspentOutputs", mock.Anything).
 					Return(eligibleUtxos, nil).Once()
 			},
@@ -690,6 +711,9 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				MinConfs: 1,
 			},
 			setupMocks: func(m *mockers) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				).Once()
 				m.txStore.On("UnspentOutputs",
 					mock.Anything,
 				).Return(nil, errDB).Once()
@@ -704,6 +728,9 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				MinConfs: 1,
 			},
 			setupMocks: func(m *mockers) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				).Once()
 				m.txStore.On("UnspentOutputs", mock.Anything).
 					Return(eligibleUtxos, nil).Once()
 			},
@@ -775,6 +802,9 @@ func TestCreateInputSource(t *testing.T) {
 			name:   "policy inputs",
 			intent: intentPolicy,
 			setupMocks: func(m *mockers) {
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				).Once()
 				m.txStore.On("UnspentOutputs",
 					mock.Anything,
 				).Return([]wtxmgr.Credit{*credit}, nil).Once()
