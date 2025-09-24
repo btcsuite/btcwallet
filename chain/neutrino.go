@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -102,7 +103,7 @@ func (s *NeutrinoClient) BackEnd() string {
 
 // Start replicates the RPC client's Start method.
 func (s *NeutrinoClient) Start() error {
-	if err := s.CS.Start(); err != nil {
+	if err := s.CS.Start(context.TODO()); err != nil {
 		return fmt.Errorf("error starting chain service: %w", err)
 	}
 
