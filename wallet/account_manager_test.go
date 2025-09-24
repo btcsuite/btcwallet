@@ -31,7 +31,7 @@ func TestNewAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll start by creating a new account under the BIP0084 scope. We
 	// expect this to succeed.
@@ -71,7 +71,7 @@ func TestListAccounts(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll start by creating a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -126,7 +126,7 @@ func TestListAccountsByScope(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create two new accounts, one under the BIP0084 scope and one
 	// under the BIP0049 scope.
@@ -184,7 +184,7 @@ func TestListAccountsByName(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create two new accounts, one under the BIP0084 scope and one
 	// under the BIP0049 scope.
@@ -241,7 +241,7 @@ func TestGetAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -277,7 +277,7 @@ func TestRenameAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -328,7 +328,7 @@ func TestBalance(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -343,7 +343,10 @@ func TestBalance(t *testing.T) {
 	require.Equal(t, btcutil.Amount(0), balance)
 
 	// Now, we'll add a UTXO to the account.
-	addr, err := w.NewAddress(1, scope)
+	addr, err := w.NewAddress(
+		context.Background(), testAccountName,
+		waddrmgr.WitnessPubKey, false,
+	)
 	require.NoError(t, err)
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
@@ -411,7 +414,7 @@ func TestImportAccount(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll start by creating a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
@@ -469,7 +472,7 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 	t.Parallel()
 
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	w.chainParams = &chaincfg.MainNetParams
 
@@ -568,9 +571,18 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 
 // addTestUTXOForBalance is a helper function to add a UTXO to the wallet.
 func addTestUTXOForBalance(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
-	account uint32, amount btcutil.Amount) {
+	accountName string, amount btcutil.Amount) {
 
-	addr, err := w.NewAddress(account, scope)
+	// This is a hack to ensure that we generate the correct address type
+	// for the given scope. A better solution would be to pass the
+	// address type as a parameter to this function.
+	addrType := waddrmgr.WitnessPubKey
+	if scope == waddrmgr.KeyScopeBIP0049Plus {
+		addrType = waddrmgr.NestedWitnessPubKey
+	}
+	addr, err := w.NewAddress(
+		context.Background(), accountName, addrType, false,
+	)
 	require.NoError(t, err)
 
 	pkScript, err := txscript.PayToAddrScript(addr)
@@ -653,9 +665,15 @@ func TestFetchAccountBalances(t *testing.T) {
 		require.NoError(t, err)
 
 		// Add UTXOs.
-		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 0, 100)
-		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 1, 200)
-		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0049Plus, 1, 300)
+		addTestUTXOForBalance(
+			t, w, waddrmgr.KeyScopeBIP0084, "default", 100,
+		)
+		addTestUTXOForBalance(
+			t, w, waddrmgr.KeyScopeBIP0084, "acc1-bip84", 200,
+		)
+		addTestUTXOForBalance(
+			t, w, waddrmgr.KeyScopeBIP0049Plus, "acc1-bip49", 300,
+		)
 
 		// Update sync state.
 		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
@@ -714,7 +732,7 @@ func TestFetchAccountBalances(t *testing.T) {
 			t.Parallel()
 
 			w, cleanup := setupTestCase(t)
-			defer cleanup()
+			t.Cleanup(cleanup)
 
 			if tc.setup != nil {
 				tc.setup(t, w)
@@ -742,7 +760,7 @@ func TestListAccountsWithBalances(t *testing.T) {
 
 	// Create a new test wallet.
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	// We'll create two new accounts under the BIP0084 scope to have a
 	// predictable state.
