@@ -1,6 +1,10 @@
 DEV_TAGS = dev
 LOG_TAGS =
 
+GOCC ?= go
+GOLIST := $(GOCC) list -tags="$(DEV_TAGS)" -deps $(PKG)/... | grep '$(PKG)'
+GOTEST := GO111MODULE=on $(GOCC) test
+
 TEST_FLAGS =
 COVER_PKG = $$($(GOCC) list -deps -tags="$(DEV_TAGS)" ./... | grep '$(PKG)')
 COVER_FLAGS = -coverprofile=coverage.txt -covermode=atomic -coverpkg=$(PKG)/...
@@ -43,8 +47,6 @@ LOG_TAGS := $(log)
 else
 LOG_TAGS := debug stdlog
 endif
-
-GOLIST := $(GOCC) list -tags="$(DEV_TAGS)" -deps $(PKG)/... | grep '$(PKG)'
 
 # UNIT_TARGETED is undefined iff a specific package and/or unit test case is
 # not being targeted.

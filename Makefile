@@ -1,20 +1,10 @@
 PKG := github.com/btcsuite/btcwallet
 TOOLS_DIR := tools
 
-GOCC ?= go
-
-GOIMPORTS_PKG := github.com/rinchsan/gosimports/cmd/gosimports
-TOOLS_DIR := ./tools
-TOOLS_MODFILE := $(TOOLS_DIR)/go.mod
-
 GOBUILD := GO111MODULE=on go build -v
 GOINSTALL := GO111MODULE=on go install -v
-GOTEST := GO111MODULE=on go test 
-GOTOOL := GOWORK=off go tool --modfile=$(TOOLS_MODFILE)
 
-GOLIST := go list -deps $(PKG)/... | grep '$(PKG)'
-GOLIST_COVER := $$(go list -deps $(PKG)/... | grep '$(PKG)')
-GOFILES_NOVENDOR = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
+GOFILES = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
 RM := rm -f
 CP := cp
@@ -101,9 +91,9 @@ unit-bench:
 #? fmt: Fix imports and format source code
 fmt: docker-tools
 	@$(call print, "Fixing imports.")
-	$(DOCKER_TOOLS) gosimports -w $(GOFILES_NOVENDOR)
+	$(DOCKER_TOOLS) gosimports -w $(GOFILES)
 	@$(call print, "Formatting source.")
-	$(DOCKER_TOOLS) gofmt -l -w -s $(GOFILES_NOVENDOR)
+	$(DOCKER_TOOLS) gofmt -l -w -s $(GOFILES)
 
 #? fmt-check: Make sure source code is formatted and imports are correct
 fmt-check: fmt
