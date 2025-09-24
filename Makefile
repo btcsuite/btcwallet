@@ -99,11 +99,11 @@ unit-bench:
 # =========
 
 #? fmt: Fix imports and format source code
-fmt: $(GOIMPORTS_BIN)
+fmt: docker-tools
 	@$(call print, "Fixing imports.")
-	$(GOTOOL) $(GOIMPORTS_PKG) -w $(GOFILES_NOVENDOR) 
+	$(DOCKER_TOOLS) gosimports -w $(GOFILES_NOVENDOR)
 	@$(call print, "Formatting source.")
-	gofmt -l -w -s $(GOFILES_NOVENDOR)
+	$(DOCKER_TOOLS) gofmt -l -w -s $(GOFILES_NOVENDOR)
 
 #? fmt-check: Make sure source code is formatted and imports are correct
 fmt-check: fmt
