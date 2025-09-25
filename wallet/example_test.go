@@ -59,9 +59,9 @@ func testWallet(t *testing.T) *Wallet {
 // mockers is a struct that holds all the mocked interfaces that can be
 // used to test the wallet.
 type mockers struct {
-	chainClient *mockChainClient
-	addrStore   *mockAddrStore
-	txStore     *mockTxStore
+	chain     *mockChain
+	addrStore *mockAddrStore
+	txStore   *mockTxStore
 }
 
 // testWalletWithMocks creates a test wallet and unlocks it. In contrast to
@@ -84,14 +84,14 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 	w, err := loader.CreateNewWallet(pubPass, privPass, seed, time.Now())
 	require.NoError(t, err)
 
-	chainClient := &mockChainClient{}
+	chain := &mockChain{}
 	txStore := &mockTxStore{}
 	addrStore := &mockAddrStore{}
 
 	addrStore.On("IsLocked").Return(false)
 	addrStore.On("Unlock", mock.Anything, mock.Anything).Return(nil)
 
-	w.chainClient = chainClient
+	w.chainClient = chain
 	w.txStore = txStore
 	w.addrStore = addrStore
 
@@ -104,14 +104,15 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 	// Create the mockers struct so it can be used by the tests to mock
 	// methods.
 	m := &mockers{
-		chainClient: chainClient,
-		txStore:     txStore,
-		addrStore:   addrStore,
+		chain:     chain,
+		txStore:   txStore,
+		addrStore: addrStore,
 	}
 
 	// When the test finishes, we need to assert the mocked methods are
 	// called or not called as expected.
 	t.Cleanup(func() {
+		chain.AssertExpectations(t)
 		txStore.AssertExpectations(t)
 		addrStore.AssertExpectations(t)
 	})
