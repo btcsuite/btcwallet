@@ -7,13 +7,18 @@ package wallet
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/pkg/unit"
+	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -127,4 +132,234 @@ type TxDetail struct {
 
 	// Label is an optional tx label.
 	Label string
+}
+
+// GetTx returns a detailed description of a tx given its tx hash.
+//
+// NOTE: This method is part of the TxReader interface.
+//
+// Time complexity: O(log n + I + O), where n is the number of
+// transactions in the database, I is the number of inputs, and O is the
+// number of outputs. The lookup is dominated by a key-based B-tree lookup
+// in the database and the processing of the transaction's inputs and
+// outputs.
+func (w *Wallet) GetTx(_ context.Context, txHash chainhash.Hash) (
+	*TxDetail, error) {
+
+	txDetails, err := w.fetchTxDetails(&txHash)
+	if err != nil {
+		return nil, err
+	}
+
+	bestBlock := w.SyncedTo()
+	currentHeight := bestBlock.Height
+
+	return w.buildTxDetail(txDetails, currentHeight), nil
+}
+
+// fetchTxDetails fetches the tx details for the given tx hash
+// from the wallet's tx store.
+func (w *Wallet) fetchTxDetails(txHash *chainhash.Hash) (
+	*wtxmgr.TxDetails, error) {
+
+	var txDetails *wtxmgr.TxDetails
+
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+		var err error
+
+		txDetails, err = w.txStore.TxDetails(txmgrNs, txHash)
+		if err != nil {
+			return fmt.Errorf("failed to fetch tx details: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to view wallet db: %w", err)
+	}
+
+	// TxDetails will return nil when the tx is not found.
+	//
+	// TODO(yy): We should instead return an error when the tx cannot be
+	// found in the db.
+	if txDetails == nil {
+		return nil, ErrTxNotFound
+	}
+
+	return txDetails, nil
+}
+
+// buildTxDetail builds a TxDetail from the given wtxmgr.TxDetails.
+func (w *Wallet) buildTxDetail(txDetails *wtxmgr.TxDetails,
+	currentHeight int32) *TxDetail {
+
+	details := w.buildBasicTxDetail(txDetails)
+
+	w.populateBlockDetails(details, txDetails, currentHeight)
+	w.calculateValueAndFee(details, txDetails)
+	w.populateOutputs(details, txDetails)
+	w.populatePrevOuts(details, txDetails)
+
+	return details
+}
+
+// buildBasicTxDetail builds the basic TxDetail from the given wtxmgr.TxDetails.
+func (w *Wallet) buildBasicTxDetail(txDetails *wtxmgr.TxDetails) *TxDetail {
+	txWeight := blockchain.GetTransactionWeight(
+		btcutil.NewTx(&txDetails.MsgTx),
+	)
+
+	return &TxDetail{
+		Hash:         txDetails.Hash,
+		RawTx:        txDetails.SerializedTx,
+		Label:        txDetails.Label,
+		ReceivedTime: txDetails.Received,
+		Weight:       safeInt64ToWeightUnit(txWeight),
+	}
+}
+
+// populateBlockDetails populates the block details for the given TxDetail.
+func (w *Wallet) populateBlockDetails(details *TxDetail,
+	txDetails *wtxmgr.TxDetails, currentHeight int32) {
+
+	height := txDetails.Block.Height
+	if height == -1 {
+		return
+	}
+
+	details.Block = &BlockDetails{
+		Hash:      txDetails.Block.Hash,
+		Height:    txDetails.Block.Height,
+		Timestamp: txDetails.Block.Time.Unix(),
+	}
+
+	details.Confirmations = calcConf(height, currentHeight)
+}
+
+// calculateValueAndFee calculates the value and fee for the given TxDetail.
+func (w *Wallet) calculateValueAndFee(details *TxDetail,
+	txDetails *wtxmgr.TxDetails) {
+
+	var balanceDelta btcutil.Amount
+	for _, debit := range txDetails.Debits {
+		balanceDelta -= debit.Amount
+	}
+
+	for _, credit := range txDetails.Credits {
+		balanceDelta += credit.Amount
+	}
+
+	details.Value = balanceDelta
+
+	// If not all inputs are ours, we can't calculate the total fee.
+	// txDetails.Debits contains only our inputs, while
+	// txDetails.MsgTx.TxIn contains all inputs. If they differ, some
+	// inputs belong to external wallets and we don't know their input
+	// values.
+	if len(txDetails.Debits) != len(txDetails.MsgTx.TxIn) {
+		return
+	}
+
+	var totalInput btcutil.Amount
+	for _, debit := range txDetails.Debits {
+		totalInput += debit.Amount
+	}
+
+	var totalOutput btcutil.Amount
+	for _, txOut := range txDetails.MsgTx.TxOut {
+		totalOutput += btcutil.Amount(txOut.Value)
+	}
+
+	details.Fee = totalInput - totalOutput
+	details.FeeRate = unit.NewSatPerVByte(
+		details.Fee, details.Weight.ToVB(),
+	)
+}
+
+// populateOutputs populates the outputs for the given TxDetail.
+func (w *Wallet) populateOutputs(details *TxDetail,
+	txDetails *wtxmgr.TxDetails) {
+
+	isOurAddress := make(map[uint32]bool)
+	for _, credit := range txDetails.Credits {
+		isOurAddress[credit.Index] = true
+	}
+
+	for i, txOut := range txDetails.MsgTx.TxOut {
+		sc, outAddresses, _, err := txscript.ExtractPkScriptAddrs(
+			txOut.PkScript, w.chainParams,
+		)
+
+		var addresses []btcutil.Address
+		if err != nil {
+			log.Warnf("Cannot extract addresses from pkScript for "+
+				"tx %v, output %d: %v", details.Hash, i, err)
+		} else {
+			addresses = outAddresses
+		}
+
+		idx, ok := safeIntToUint32(i)
+		if !ok {
+			log.Warnf("Output index %d out of uint32 range", i)
+			continue
+		}
+
+		details.Outputs = append(
+			details.Outputs, Output{
+				Type:      sc,
+				Addresses: addresses,
+				PkScript:  txOut.PkScript,
+				Index:     i,
+				Amount:    btcutil.Amount(txOut.Value),
+				IsOurs:    isOurAddress[idx],
+			},
+		)
+	}
+}
+
+// populatePrevOuts populates the previous outputs for the given TxDetail.
+func (w *Wallet) populatePrevOuts(details *TxDetail,
+	txDetails *wtxmgr.TxDetails) {
+
+	isOurOutput := make(map[uint32]bool)
+	for _, debit := range txDetails.Debits {
+		isOurOutput[debit.Index] = true
+	}
+
+	for i, txIn := range txDetails.MsgTx.TxIn {
+		idx, ok := safeIntToUint32(i)
+		if !ok {
+			log.Warnf("Input index %d out of uint32 range", i)
+			continue
+		}
+
+		details.PrevOuts = append(
+			details.PrevOuts, PrevOut{
+				OutPoint: txIn.PreviousOutPoint,
+				IsOurs:   isOurOutput[idx],
+			},
+		)
+	}
+}
+
+// safeInt64ToWeightUnit converts an int64 to a unit.WeightUnit, ensuring the
+// value is non-negative.
+func safeInt64ToWeightUnit(w int64) unit.WeightUnit {
+	if w < 0 {
+		return 0
+	}
+
+	return unit.WeightUnit(w)
+}
+
+// safeIntToUint32 converts an int to a uint32, returning false if the
+// conversion would overflow.
+func safeIntToUint32(i int) (uint32, bool) {
+	if i < 0 || i > math.MaxUint32 {
+		return 0, false
+	}
+
+	return uint32(i), true
 }
