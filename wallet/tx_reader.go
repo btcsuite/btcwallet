@@ -38,6 +38,10 @@ type TxReader interface {
 		[]*TxDetail, error)
 }
 
+// A compile-time assertion to ensure that Wallet implements the TxReader
+// interface.
+var _ TxReader = (*Wallet)(nil)
+
 // Output contains details for a tx output.
 type Output struct {
 	// Addresses are the addresses associated with the output script.
@@ -155,6 +159,67 @@ func (w *Wallet) GetTx(_ context.Context, txHash chainhash.Hash) (
 	currentHeight := bestBlock.Height
 
 	return w.buildTxDetail(txDetails, currentHeight), nil
+}
+
+// ListTxns returns a list of all txns which are relevant to the
+// wallet over a given block range. The block range is inclusive of the
+// start and end heights.
+//
+// The underlying transaction store allows for reverse iteration, so if
+// startHeight > endHeight, the transactions will be returned in reverse
+// order.
+//
+// The special height -1 may be used to include unmined transactions. For
+// example, to get all transactions from block 100 to the current tip including
+// unmined, use a startHeight of 100 and an endHeight of -1. To get all
+// transactions in the wallet, use a startHeight of 0 and an endHeight of -1.
+//
+// NOTE: This method is part of the TxReader interface.
+//
+// Time complexity: O(B + N), where B is the number of blocks in the
+// range and N is the total number of inputs and outputs across all
+// transactions in the range.
+func (w *Wallet) ListTxns(_ context.Context, startHeight,
+	endHeight int32) ([]*TxDetail, error) {
+
+	bestBlock := w.SyncedTo()
+	currentHeight := bestBlock.Height
+
+	// We'll first fetch all the transaction records from the database
+	// within a single database transaction. This is done to minimize the
+	// time we hold the database lock.
+	var records []wtxmgr.TxDetails
+
+	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+		err := w.txStore.RangeTransactions(
+			txmgrNs, startHeight, endHeight,
+			func(d []wtxmgr.TxDetails) (bool, error) {
+				records = append(records, d...)
+
+				return false, nil
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("tx range failed: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to view wallet db: %w", err)
+	}
+
+	// Now that we have all the records, we can build the detailed
+	// response without holding the database lock.
+	details := make([]*TxDetail, 0, len(records))
+	for _, detail := range records {
+		txDetail := w.buildTxDetail(&detail, currentHeight)
+		details = append(details, txDetail)
+	}
+
+	return details, nil
 }
 
 // fetchTxDetails fetches the tx details for the given tx hash
