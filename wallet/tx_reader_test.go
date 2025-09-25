@@ -137,6 +137,45 @@ func TestGetTxNotFound(t *testing.T) {
 	require.ErrorIs(t, err, ErrTxNotFound)
 }
 
+// TestListTxnsSuccess tests the ListTxns method of the wallet.
+func TestListTxnsSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a test wallet with mocks and a mock tx record.
+	w, mocks := testWalletWithMocks(t)
+	_, expectedTxDetail := createMinedTxDetail(t)
+
+	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Height: 100,
+	})
+
+	// Set up the mock for the tx store. We use .Run to execute the
+	// callback function that's passed in as an argument to the mock.
+	mocks.txStore.On("RangeTransactions",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+	).Run(func(args mock.Arguments) {
+		// Get the callback function from the arguments.
+		f, ok := args.Get(3).(func([]wtxmgr.TxDetails) (bool, error))
+		require.True(t, ok)
+
+		// Create the mock details to pass to the callback.
+		minedDetails, _ := createMinedTxDetail(t)
+		details := []wtxmgr.TxDetails{*minedDetails}
+
+		// Call the callback.
+		_, err := f(details)
+		require.NoError(t, err)
+	}).Return(nil).Once()
+
+	// Act: List txns.
+	details, err := w.ListTxns(t.Context(), 0, 1000)
+
+	// Assert: Check that the correct details are returned.
+	require.NoError(t, err)
+	require.Len(t, details, 1)
+	require.Equal(t, expectedTxDetail, details[0])
+}
+
 // createUnminedTxDetail creates a test transaction that sends funds from the
 // wallet to two of its own addresses. The transaction is unmined and has no
 // confirmations.
