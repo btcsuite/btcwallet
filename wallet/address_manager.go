@@ -17,6 +17,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -24,6 +26,12 @@ import (
 )
 
 var (
+	// ErrDerivationPathNotFound is returned when the derivation path for a
+	// given script cannot be found. This may be because the script does
+	// not belong to the wallet, is imported, or is not a pubkey-based
+	// script.
+	ErrDerivationPathNotFound = errors.New("derivation path not found")
+
 	// ErrUnknownAddrType is an error returned when a wallet function is
 	// called with an unknown address type.
 	ErrUnknownAddrType = errors.New("unknown address type")
@@ -113,6 +121,11 @@ type AddressManager interface {
 	// ScriptForOutput returns the address, witness program, and redeem
 	// script for a given UTXO.
 	ScriptForOutput(ctx context.Context, output wire.TxOut) (Script, error)
+
+	// GetDerivationInfo returns the BIP-32 derivation path for a given
+	// address.
+	GetDerivationInfo(ctx context.Context,
+		addr btcutil.Address) (*psbt.Bip32Derivation, error)
 }
 
 // A compile time check to ensure that Wallet implements the interface.
@@ -744,4 +757,53 @@ func (w *Wallet) ScriptForOutput(_ context.Context, output wire.TxOut) (
 		WitnessProgram: witnessProgram,
 		RedeemScript:   sigScript,
 	}, nil
+}
+
+// GetDerivationInfo returns the BIP-32 derivation path for a given address.
+func (w *Wallet) GetDerivationInfo(ctx context.Context,
+	addr btcutil.Address) (*psbt.Bip32Derivation, error) {
+
+	// We'll use the address to look up the derivation path.
+	managedAddr, err := w.AddressInfo(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	// We only care about pubkey addresses, as they are the only
+	// ones with derivation paths.
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, fmt.Errorf("%w: addr=%v not found",
+			ErrDerivationPathNotFound, addr)
+	}
+
+	// Imported addresses don't have derivation paths.
+	if pubKeyAddr.Imported() {
+		return nil, fmt.Errorf("%w: addr=%v is imported",
+			ErrDerivationPathNotFound, addr)
+	}
+
+	// Get the derivation info.
+	keyScope, derivPath, ok := pubKeyAddr.DerivationInfo()
+	if !ok {
+		return nil, fmt.Errorf("%w: derivation info not found for %v",
+			ErrDerivationPathNotFound, addr)
+	}
+
+	// Get the public key.
+	pubKey := pubKeyAddr.PubKey()
+
+	derivationInfo := &psbt.Bip32Derivation{
+		PubKey:               pubKey.SerializeCompressed(),
+		MasterKeyFingerprint: derivPath.MasterKeyFingerprint,
+		Bip32Path: []uint32{
+			keyScope.Purpose + hdkeychain.HardenedKeyStart,
+			keyScope.Coin + hdkeychain.HardenedKeyStart,
+			derivPath.Account,
+			derivPath.Branch,
+			derivPath.Index,
+		},
+	}
+
+	return derivationInfo, nil
 }
