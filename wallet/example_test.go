@@ -60,9 +60,23 @@ func testWallet(t *testing.T) *Wallet {
 // mockers is a struct that holds all the mocked interfaces that can be
 // used to test the wallet.
 type mockers struct {
-	chain     *mockChain
+	// chain is the mock blockchain backend.
+	chain *mockChain
+
+	// addrStore is the mock address store.
 	addrStore *mockAddrStore
-	txStore   *mockTxStore
+
+	// txStore is the mock transaction store.
+	txStore *mockTxStore
+
+	// addr is the mock managed address.
+	addr *mockManagedAddress
+
+	// accountManager is the mock account manager.
+	accountManager *mockAccountStore
+
+	// pubKeyAddr is the mock managed public key address.
+	pubKeyAddr *mockManagedPubKeyAddr
 }
 
 // testWalletWithMocks creates a test wallet and unlocks it. In contrast to
@@ -89,6 +103,9 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 	chain := &mockChain{}
 	txStore := &mockTxStore{}
 	addrStore := &mockAddrStore{}
+	addr := &mockManagedAddress{}
+	accountManager := &mockAccountStore{}
+	pubKeyAddr := &mockManagedPubKeyAddr{}
 
 	addrStore.On("IsLocked").Return(false)
 	addrStore.On("Unlock", mock.Anything, mock.Anything).Return(nil)
@@ -106,9 +123,12 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 	// Create the mockers struct so it can be used by the tests to mock
 	// methods.
 	m := &mockers{
-		chain:     chain,
-		txStore:   txStore,
-		addrStore: addrStore,
+		chain:          chain,
+		txStore:        txStore,
+		addrStore:      addrStore,
+		addr:           addr,
+		accountManager: accountManager,
+		pubKeyAddr:     pubKeyAddr,
 	}
 
 	// When the test finishes, we need to assert the mocked methods are
@@ -117,6 +137,9 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 		chain.AssertExpectations(t)
 		txStore.AssertExpectations(t)
 		addrStore.AssertExpectations(t)
+		addr.AssertExpectations(t)
+		accountManager.AssertExpectations(t)
+		pubKeyAddr.AssertExpectations(t)
 	})
 
 	return w, m
