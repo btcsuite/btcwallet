@@ -3,6 +3,7 @@ package wallet
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -167,7 +168,14 @@ func (w *Wallet) ScriptForOutputDeprecated(output *wire.TxOut) (
 		return nil, nil, nil, err
 	}
 
-	return script.Addr, script.WitnessProgram, script.RedeemScript, nil
+	addr := script.Addr
+	pubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("%w: addr %s",
+			ErrNotPubKeyAddress, addr.Address())
+	}
+
+	return pubKeyAddr, script.WitnessProgram, script.RedeemScript, nil
 }
 
 // ComputeInputScript generates a complete InputScript for the passed

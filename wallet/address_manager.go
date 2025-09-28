@@ -47,6 +47,10 @@ var (
 		"address is not a p2wkh or np2wkh address",
 	)
 
+	// ErrUnableToExtractAddress is returned when an address cannot be
+	// extracted from a pkscript.
+	ErrUnableToExtractAddress = errors.New("unable to extract address")
+
 	// errStopIteration is a special error used to stop the iteration in
 	// ForEachAccountAddress.
 	errStopIteration = errors.New("stop iteration")
@@ -65,7 +69,7 @@ type AddressProperty struct {
 // Script represents the script information required to spend a UTXO.
 type Script struct {
 	// Addr is the managed address of the UTXO.
-	Addr waddrmgr.ManagedPubKeyAddress
+	Addr waddrmgr.ManagedAddress
 
 	// WitnessProgram is the witness program of the UTXO.
 	WitnessProgram []byte
@@ -691,20 +695,28 @@ func (w *Wallet) ImportTaprootScript(_ context.Context,
 //   - The operation is dominated by the database lookup for the address, which
 //     is typically fast (O(log N) or O(1) with indexing). The script
 //     generation is a constant-time operation.
-func (w *Wallet) ScriptForOutput(_ context.Context, output wire.TxOut) (
+func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
 	Script, error) {
 
-	// First make sure we can sign for the input by making sure the script
-	// in the UTXO belongs to our wallet and we have the private key for it.
-	walletAddr, err := w.fetchOutputAddr(output.PkScript)
-	if err != nil {
-		return Script{}, err
+	// First, we'll extract the address from the output's pkScript.
+	addr := extractAddrFromPKScript(output.PkScript, w.chainParams)
+	if addr == nil {
+		return Script{}, fmt.Errorf("%w: from pkscript %x",
+			ErrUnableToExtractAddress, output.PkScript)
 	}
 
-	pubKeyAddr, ok := walletAddr.(waddrmgr.ManagedPubKeyAddress)
+	// We'll then use the address to look up the managed address from the
+	// database.
+	managedAddr, err := w.AddressInfo(ctx, addr)
+	if err != nil {
+		return Script{}, fmt.Errorf("unable to get address info "+
+			"for %s: %w", addr.String(), err)
+	}
+
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
-		return Script{}, fmt.Errorf("%w: %s", ErrNotPubKeyAddress,
-			walletAddr.Address())
+		return Script{}, fmt.Errorf("%w: addr %s",
+			ErrNotPubKeyAddress, managedAddr.Address())
 	}
 
 	var (
@@ -715,7 +727,7 @@ func (w *Wallet) ScriptForOutput(_ context.Context, output wire.TxOut) (
 	switch {
 	// If we're spending p2wkh output nested within a p2sh output, then
 	// we'll need to attach a sigScript in addition to witness data.
-	case walletAddr.AddrType() == waddrmgr.NestedWitnessPubKey:
+	case managedAddr.AddrType() == waddrmgr.NestedWitnessPubKey:
 		pubKey := pubKeyAddr.PubKey()
 		pubKeyHash := btcutil.Hash160(pubKey.SerializeCompressed())
 
@@ -753,7 +765,7 @@ func (w *Wallet) ScriptForOutput(_ context.Context, output wire.TxOut) (
 	}
 
 	return Script{
-		Addr:           pubKeyAddr,
+		Addr:           managedAddr,
 		WitnessProgram: witnessProgram,
 		RedeemScript:   sigScript,
 	}, nil
