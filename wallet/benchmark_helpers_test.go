@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -21,6 +23,11 @@ import (
 // data sizes with different growth patterns (linear, exponential, logarithmic,
 // etc.).
 type growthFunc func(i int) int
+
+// constantGrowth returns a constant value regardless of iteration.
+func constantGrowth(i int) int {
+	return 0
+}
 
 // linearGrowth scales the parameter value linearly.
 func linearGrowth(i int) int {
@@ -288,6 +295,63 @@ func createTestUTXOs(t testing.TB, w *Wallet,
 	require.NoError(t, err, "failed to create test UTXOs: %v", err)
 }
 
+// generateAccountName generates a consistent account name and number for
+// benchmarking based on the given number of accounts and scopes. It returns
+// the first account name and number in the last scope, which provides a good
+// heuristic case for evaluating search performance.
+func generateAccountName(numAccounts int,
+	scopes []waddrmgr.KeyScope) (string, uint32) {
+
+	accountsPerScope := numAccounts / len(scopes)
+
+	lastScopeIndex := len(scopes) - 1
+	lastScope := scopes[lastScopeIndex]
+	lastScopeOffset := lastScopeIndex * accountsPerScope
+
+	accountName := fmt.Sprintf("bench-scope-%d-%d-account-%d",
+		lastScope.Purpose, lastScope.Coin, lastScopeOffset)
+
+	// Account numbers start from 1, not 0. Account 0 is reserved for
+	// "default".
+	accountNumber := uint32(lastScopeOffset + 1)
+
+	return accountName, accountNumber
+}
+
+// generateTestExtendedKey generates a test extended public key for benchmarking
+// ImportAccount operations. It uses a deterministic seed based on the
+// iteration index to ensure consistent results across benchmark runs.
+func generateTestExtendedKey(t testing.TB,
+	i int) (*hdkeychain.ExtendedKey, uint32, waddrmgr.AddressType) {
+
+	t.Helper()
+
+	// Use a simple deterministic seed based on iteration index.
+	seed := make([]byte, 32)
+	for j := range seed {
+		seed[j] = byte(i + j)
+	}
+
+	// Create master key from seed.
+	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.TestNet3Params)
+	require.NoError(t, err)
+
+	// Derive account key for BIP0084 (m/84'/1'/i').
+	purpose, err := masterKey.Derive(hdkeychain.HardenedKeyStart + 84)
+	require.NoError(t, err)
+
+	coin, err := purpose.Derive(hdkeychain.HardenedKeyStart + 1)
+	require.NoError(t, err)
+
+	account, err := coin.Derive(hdkeychain.HardenedKeyStart + uint32(i))
+	require.NoError(t, err)
+
+	accountPubKey, err := account.Neuter()
+	require.NoError(t, err)
+
+	return accountPubKey, uint32(i), waddrmgr.WitnessPubKey
+}
+
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts API across all active key scopes
 // and aggregating the results.
@@ -317,4 +381,87 @@ func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
 		CurrentBlockHash:   finalBlockHash,
 		CurrentBlockHeight: finalBlockHeight,
 	}, nil
+}
+
+// listAccountsByNameDeprecated wraps the deprecated Accounts API to satisfy the
+// same contract as ListAccountsByName by calling Accounts API across all active
+// key scopes, filtering by account name, and aggregating the results.
+func listAccountsByNameDeprecated(w *Wallet,
+	name string) (*AccountsResult, error) {
+
+	var (
+		matchingAccounts []AccountResult
+		finalBlockHash   chainhash.Hash
+		finalBlockHeight int32
+		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
+	)
+
+	for _, scopeMgr := range scopeManagers {
+		scope := scopeMgr.Scope()
+		result, err := w.Accounts(scope)
+		if err != nil {
+			return nil, err
+		}
+
+		// Filter accounts by name from this scope's results.
+		for _, account := range result.Accounts {
+			if account.AccountName == name {
+				matchingAccounts = append(
+					matchingAccounts, account,
+				)
+			}
+		}
+
+		finalBlockHash = result.CurrentBlockHash
+		finalBlockHeight = result.CurrentBlockHeight
+	}
+
+	return &AccountsResult{
+		Accounts:           matchingAccounts,
+		CurrentBlockHash:   finalBlockHash,
+		CurrentBlockHeight: finalBlockHeight,
+	}, nil
+}
+
+// getAccountDeprecated wraps the deprecated Accounts API to satisfy the same
+// contract as GetAccount by calling Accounts API across all active key scopes
+// and filtering by account name.
+func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
+	accountName string) (*AccountResult, error) {
+
+	result, err := w.Accounts(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, account := range result.Accounts {
+		if account.AccountName == accountName {
+			return &account, nil
+		}
+	}
+
+	return nil, fmt.Errorf("account '%s' not found", accountName)
+}
+
+// getBalanceDeprecated wraps the deprecated Accounts API to satisfy the same
+// contract as GetBalance by calling Accounts API across all active key scopes
+// and filtering by account name.
+func getBalanceDeprecated(w *Wallet, scope waddrmgr.KeyScope,
+	accountName string, _ int32) (btcutil.Amount, error) {
+
+	result, err := w.Accounts(scope)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, account := range result.Accounts {
+		if account.AccountName == accountName {
+			// The deprecated Accounts API doesn't support
+			// confirmation filtering. It always returns total
+			// balance.
+			return account.TotalBalance, nil
+		}
+	}
+
+	return 0, fmt.Errorf("account '%s' not found", accountName)
 }
