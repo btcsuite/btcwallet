@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -74,6 +75,19 @@ type Signer interface {
 // used with extreme care and only when absolutely necessary.
 type UnsafeSigner interface {
 	Signer
+
+	// DerivePrivKey derives a private key from a full BIP-32 derivation
+	// path.
+	//
+	// DANGER: This method exports sensitive key material.
+	DerivePrivKey(ctx context.Context, path BIP32Path) (
+		*btcec.PrivateKey, error)
+
+	// GetPrivKeyForAddress returns the private key for a given address.
+	//
+	// DANGER: This method exports sensitive key material.
+	GetPrivKeyForAddress(ctx context.Context, a address.Address) (
+		*btcec.PrivateKey, error)
 }
 
 // BIP32Path contains the full information needed to derive a key from the
