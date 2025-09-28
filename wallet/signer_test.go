@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -237,4 +238,97 @@ func TestDerivePubKeyNotPubKeyAddr(t *testing.T) {
 	// Assert: Check that the specific ErrNotPubKeyAddress is returned.
 	require.ErrorIs(t, err, ErrNotPubKeyAddress)
 	require.ErrorContains(t, err, "addr "+addr.String())
+}
+
+// TestECDHSuccess tests the successful ECDH key exchange.
+func TestECDHSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, mocks, and test keys.
+	w, mocks := testWalletWithMocks(t)
+
+	// Use a hardcoded private key for deterministic test results.
+	privKey, _ := deterministicPrivKey(t)
+
+	remoteKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	remotePubKey := remoteKey.PubKey()
+
+	path := BIP32Path{
+		KeyScope: waddrmgr.KeyScopeBIP0084,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Branch:          0,
+			Index:           0,
+		},
+	}
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
+	).Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+
+	// Act: Perform the ECDH operation.
+	sharedSecret, err := w.ECDH(t.Context(), path, remotePubKey)
+
+	// Assert: Check that the correct shared secret is returned.
+	require.NoError(t, err)
+
+	// Calculate the expected secret independently to verify.
+	expectedSecret := btcec.GenerateSharedSecret(privKey, remotePubKey)
+
+	var expectedSecretArray [32]byte
+	copy(expectedSecretArray[:], expectedSecret)
+
+	require.Equal(t, expectedSecretArray, sharedSecret)
+
+	// Finally, assert that the private key is zeroed out.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
+
+// TestECDHFails tests the failure case where the key derivation fails during
+// an ECDH operation.
+func TestECDHFails(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet and configure the mock addrStore to return
+	// an error.
+	w, mocks := testWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	remoteKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	remotePubKey := remoteKey.PubKey()
+
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return((*mockAccountStore)(nil), errDerivationFailed).Once()
+
+	// Act: Attempt to perform the ECDH operation.
+	_, err = w.ECDH(t.Context(), path, remotePubKey)
+
+	// Assert: Check that the error is propagated correctly.
+	require.ErrorIs(t, err, errDerivationFailed)
+}
+
+// deterministicPrivKey is a helper function that returns a deterministic
+// private and public key pair for testing purposes.
+func deterministicPrivKey(t *testing.T) (*btcec.PrivateKey, *btcec.PublicKey) {
+	t.Helper()
+
+	pkBytes, err := hex.DecodeString("22a47fa09a223f2aa079edf85a7c2d4f87" +
+		"20ee63e502ee2869afab7de234b80c")
+	require.NoError(t, err)
+
+	privKey, pubKey := btcec.PrivKeyFromBytes(pkBytes)
+
+	return privKey, pubKey
 }

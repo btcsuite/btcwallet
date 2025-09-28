@@ -507,3 +507,31 @@ func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
 
 	return managedPubKeyAddr, nil
 }
+
+// ECDH performs a scalar multiplication (ECDH-like operation) between a key
+// from the wallet and a remote public key. The output returned will be the
+// sha256 of the resulting shared point serialized in compressed format.
+func (w *Wallet) ECDH(_ context.Context, path BIP32Path,
+	pub *btcec.PublicKey) ([32]byte, error) {
+
+	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	// Get the private key for the derived address.
+	privKey, err := managedPubKeyAddr.PrivKey()
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("cannot get private key: %w",
+			err)
+	}
+	defer privKey.Zero()
+
+	// Perform the scalar multiplication and hash the result.
+	secret := btcec.GenerateSharedSecret(privKey, pub)
+
+	var sharedSecret [32]byte
+	copy(sharedSecret[:], secret)
+
+	return sharedSecret, nil
+}
