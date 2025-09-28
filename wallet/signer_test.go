@@ -11,6 +11,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
@@ -480,4 +481,310 @@ func TestSignMessage(t *testing.T) {
 			require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 		})
 	}
+}
+
+// TestComputeUnlockingScriptP2PKH tests that the wallet can generate a valid
+// unlocking script for a P2PKH output.
+func TestComputeUnlockingScriptP2PKH(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, keys, and a dummy transaction that will
+	// be used to spend the P2PKH output.
+	w, mocks := testWalletWithMocks(t)
+	privKey, pubKey := deterministicPrivKey(t)
+
+	// Create a P2PKH address and the corresponding previous output script.
+	// This is the output we want to create an unlocking script for.
+	addr, err := btcutil.NewAddressPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()), w.chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// The wallet needs to be able to find the private key for the given
+	// address. We mock the address store to return a mock address that,
+	// when queried, will provide the private key for signing. This
+	// simulates a real scenario where the wallet's address manager would
+	// fetch the key from the database.
+	mocks.addrStore.On("Address",
+		mock.Anything, addr,
+	).Return(mocks.pubKeyAddr, nil)
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash).Twice()
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+
+	// Act: With the setup complete, we can now ask the wallet to compute
+	// the unlocking script.
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &UnlockingScriptParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+	}
+	script, err := w.ComputeUnlockingScript(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: The computed script should be a valid unlocking script for
+	// the P2PKH output. We verify this by creating a new script engine
+	// and executing it with the generated script. A successful execution
+	// proves the script is correct.
+	require.NotNil(t, script.SigScript)
+	require.Nil(t, script.Witness)
+	tx.TxIn[0].SignatureScript = script.SigScript
+
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "script execution failed")
+
+	// Finally, we ensure that the private key was not mutated during the
+	// signing process.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
+
+// TestComputeUnlockingScriptP2WKH tests that the wallet can generate a valid
+// unlocking script for a P2WKH output.
+func TestComputeUnlockingScriptP2WKH(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, keys, and a dummy transaction that will
+	// be used to spend the P2WKH output.
+	w, mocks := testWalletWithMocks(t)
+	privKey, pubKey := deterministicPrivKey(t)
+
+	// Create a P2WKH address and the corresponding previous output script.
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()), w.chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// The wallet needs to be able to find the private key for the given
+	// address. We mock the address store to return a mock address that,
+	// when queried, will provide the private key for signing.
+	mocks.addrStore.On("Address",
+		mock.Anything, addr,
+	).Return(mocks.pubKeyAddr, nil)
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Twice()
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+
+	// Act: With the setup complete, we can now ask the wallet to compute
+	// the unlocking script.
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &UnlockingScriptParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+	}
+	script, err := w.ComputeUnlockingScript(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: The computed script should be a valid unlocking script. For
+	// P2WKH, this means a nil SigScript and a non-nil Witness. We verify
+	// this by creating a new script engine and executing it.
+	require.Nil(t, script.SigScript)
+	require.NotNil(t, script.Witness)
+	tx.TxIn[0].Witness = script.Witness
+
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "script execution failed")
+
+	// Finally, we ensure that the private key was not mutated during the
+	// signing process.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
+
+// TestComputeUnlockingScriptNP2WKH tests that the wallet can generate a valid
+// unlocking script for a nested P2WKH output.
+func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, keys, and a dummy transaction.
+	w, mocks := testWalletWithMocks(t)
+	privKey, pubKey := deterministicPrivKey(t)
+
+	// Create a NP2WKH address. This is a P2WKH output nested within a
+	// P2SH output. This is done by creating the witness program first,
+	// and then using its hash in a P2SH script.
+	p2sh, err := txscript.NewScriptBuilder().
+		AddOp(txscript.OP_0).
+		AddData(btcutil.Hash160(pubKey.SerializeCompressed())).
+		Script()
+	require.NoError(t, err)
+	addr, err := btcutil.NewAddressScriptHash(p2sh, w.chainParams)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// The wallet needs to be able to find the private key for the given
+	// address. We mock the address store to return a mock address that,
+	// when queried, will provide the private key for signing. For NP2WKH,
+	// the wallet also needs the public key to reconstruct the witness
+	// program, so we mock that as well.
+	mocks.addrStore.On("Address",
+		mock.Anything, addr,
+	).Return(mocks.pubKeyAddr, nil)
+	mocks.pubKeyAddr.On("AddrType").Return(
+		waddrmgr.NestedWitnessPubKey).Twice()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+
+	// Act: With the setup complete, we can now ask the wallet to compute
+	// the unlocking script.
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &UnlockingScriptParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+	}
+	script, err := w.ComputeUnlockingScript(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: The computed script should be a valid unlocking script. For
+	// NP2WKH, this means both a non-nil SigScript (containing the redeem
+	// script) and a non-nil Witness. We verify this by creating a new
+	// script engine and executing it.
+	require.NotNil(t, script.SigScript)
+	require.NotNil(t, script.Witness)
+	tx.TxIn[0].SignatureScript = script.SigScript
+	tx.TxIn[0].Witness = script.Witness
+
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "script execution failed")
+
+	// Finally, we ensure that the private key was not mutated during the
+	// signing process.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
+
+// TestComputeUnlockingScriptP2TR tests that the wallet can generate a valid
+// unlocking script for a P2TR key-path spend.
+func TestComputeUnlockingScriptP2TR(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, keys, and a dummy transaction.
+	w, mocks := testWalletWithMocks(t)
+	privKey, pubKey := deterministicPrivKey(t)
+
+	// Create a P2TR address for a key-path spend. This involves computing
+	// the taproot output key from the internal public key.
+	addr, err := btcutil.NewAddressTaproot(
+		schnorr.SerializePubKey(
+			txscript.ComputeTaprootOutputKey(pubKey, nil),
+		), w.chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// The wallet needs to be able to find the private key for the given
+	// address. We mock the address store to return a mock address that,
+	// when queried, will provide the private key for signing.
+	mocks.addrStore.On("Address",
+		mock.Anything, addr,
+	).Return(mocks.pubKeyAddr, nil)
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.TaprootPubKey).Twice()
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+
+	// Act: With the setup complete, we can now ask the wallet to compute
+	// the unlocking script. For Taproot, we must use a multi-output
+	// fetcher, as the sighash calculation (specifically with
+	// SigHashDefault) requires access to all previous outputs being spent
+	// in the transaction.
+	fetcher := txscript.NewMultiPrevOutFetcher(
+		map[wire.OutPoint]*wire.TxOut{{Index: 0}: prevOut},
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &UnlockingScriptParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashDefault,
+	}
+	script, err := w.ComputeUnlockingScript(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: The computed script should be a valid unlocking script. For a
+	// P2TR key-path spend, this means a nil SigScript and a non-nil
+	// Witness containing just the Schnorr signature. We verify this by
+	// creating a new script engine and executing it.
+	require.Nil(t, script.SigScript)
+	require.NotNil(t, script.Witness)
+	tx.TxIn[0].Witness = script.Witness
+
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "script execution failed")
+
+	// Finally, we ensure that the private key was not mutated during the
+	// signing process.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
+
+// createDummyTestTx creates a dummy transaction for testing purposes.
+func createDummyTestTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
+	prevOut := wire.NewTxOut(100000, pkScript)
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 0}, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(90000, nil))
+
+	return prevOut, tx
 }

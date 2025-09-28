@@ -623,3 +623,110 @@ func signMessageECDSA(privKey *btcec.PrivateKey,
 
 	return ECDSASignature{sig}, nil
 }
+
+// ComputeUnlockingScript generates the full sigScript and witness required to
+// spend a UTXO.
+func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
+	params *UnlockingScriptParams) (*UnlockingScript, error) {
+
+	// First, we'll fetch the managed address that corresponds to the
+	// output being spent. This will be used to look up the private key
+	// required for signing.
+	scriptInfo, err := w.ScriptForOutput(ctx, *params.Output)
+	if err != nil {
+		return nil, err
+	}
+
+	// The address must be a public key address.
+	pubKeyAddr, ok := scriptInfo.Addr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, fmt.Errorf("%w: addr %s",
+			ErrNotPubKeyAddress, scriptInfo.Addr.Address())
+	}
+
+	// Get the private key for the derived address.
+	privKey, err := pubKeyAddr.PrivKey()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get private key: %w", err)
+	}
+	defer privKey.Zero()
+
+	// If a tweaker is provided, we'll use it to tweak the private key.
+	if params.Tweaker != nil {
+		privKey, err = params.Tweaker(privKey)
+		if err != nil {
+			return nil, fmt.Errorf("error tweaking private key: %w",
+				err)
+		}
+	}
+
+	// With the private key retrieved and tweaked, we can now generate the
+	// unlocking script.
+	return signAndAssembleScript(params, privKey, &scriptInfo)
+}
+
+// signAndAssembleScript is a helper function that performs the final signing
+// and script assembly for a given set of parameters and a private key.
+func signAndAssembleScript(params *UnlockingScriptParams,
+	privKey *btcec.PrivateKey,
+	scriptInfo *Script) (*UnlockingScript, error) {
+
+	// Dispatch to the correct signing logic based on the address type of
+	// the output.
+	switch scriptInfo.Addr.AddrType() {
+	// For Taproot key-path spends, we produce a Schnorr signature.
+	case waddrmgr.TaprootPubKey:
+		witness, err := txscript.TaprootWitnessSignature(
+			params.Tx, params.SigHashes, params.InputIndex,
+			params.Output.Value, params.Output.PkScript,
+			params.HashType, privKey,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("taproot witness error: %w", err)
+		}
+
+		return &UnlockingScript{
+			Witness: witness,
+		}, nil
+
+	// For SegWit v0 outputs, we'll generate a standard ECDSA signature.
+	case waddrmgr.WitnessPubKey, waddrmgr.NestedWitnessPubKey:
+		witness, err := txscript.WitnessSignature(
+			params.Tx, params.SigHashes, params.InputIndex,
+			params.Output.Value, scriptInfo.WitnessProgram,
+			params.HashType, privKey, true,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("witness sig error: %w", err)
+		}
+
+		return &UnlockingScript{
+			Witness:   witness,
+			SigScript: scriptInfo.RedeemScript,
+		}, nil
+
+	// For legacy P2PKH outputs, we'll generate a signature script.
+	case waddrmgr.PubKeyHash:
+		sigScript, err := txscript.SignatureScript(
+			params.Tx, params.InputIndex, params.Output.PkScript,
+			params.HashType, privKey, true,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("sig script error: %w", err)
+		}
+
+		return &UnlockingScript{
+			SigScript: sigScript,
+		}, nil
+
+	// The following address types are not supported by this function.
+	case waddrmgr.Script, waddrmgr.RawPubKey, waddrmgr.WitnessScript,
+		waddrmgr.TaprootScript:
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			scriptInfo.Addr.AddrType())
+
+	default:
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			scriptInfo.Addr.AddrType())
+	}
+}
