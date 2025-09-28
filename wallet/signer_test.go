@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -331,4 +333,151 @@ func deterministicPrivKey(t *testing.T) (*btcec.PrivateKey, *btcec.PublicKey) {
 	privKey, pubKey := btcec.PrivKeyFromBytes(pkBytes)
 
 	return privKey, pubKey
+}
+
+// TestSignMessage tests the signing of a message with different signature
+// types.
+func TestSignMessage(t *testing.T) {
+	t.Parallel()
+
+	// We'll use a common set of parameters for all signing test cases to
+	// ensure the only variable is the signing intent itself.
+	privKey, pubKey := deterministicPrivKey(t)
+	path := BIP32Path{
+		KeyScope: waddrmgr.KeyScopeBIP0084,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Branch:          0,
+			Index:           0,
+		},
+	}
+	msg := []byte("test message")
+
+	testCases := []struct {
+		// name is the name of the test case.
+		name string
+
+		// intent is the signing intent to use for the test.
+		intent *SignMessageIntent
+
+		// verify is a function that verifies the signature produced by
+		// the signing intent.
+		verify func(t *testing.T, sig Signature,
+			pubKey *btcec.PublicKey)
+	}{
+		{
+			name: "ECDSA success",
+			intent: &SignMessageIntent{
+				Msg:        msg,
+				DoubleHash: false,
+				CompactSig: false,
+			},
+			verify: func(t *testing.T, sig Signature,
+				pubKey *btcec.PublicKey) {
+
+				t.Helper()
+
+				ecdsaSig, ok := sig.(ECDSASignature)
+				require.True(t, ok, "expected ECDSASignature")
+				msgHash := btcutil.Hash160(msg)
+				require.True(
+					t, ecdsaSig.Verify(msgHash, pubKey),
+					"signature invalid",
+				)
+			},
+		},
+		{
+			name: "ECDSA compact success",
+			intent: &SignMessageIntent{
+				Msg:        msg,
+				DoubleHash: true,
+				CompactSig: true,
+			},
+			verify: func(t *testing.T, sig Signature,
+				pubKey *btcec.PublicKey) {
+
+				t.Helper()
+
+				compactSig, ok := sig.(CompactSignature)
+				require.True(t, ok, "expected CompactSignature")
+				msgHash := chainhash.DoubleHashB(msg)
+				recoveredKey, _, err := ecdsa.RecoverCompact(
+					compactSig, msgHash,
+				)
+				require.NoError(t, err)
+				require.True(
+					t, recoveredKey.IsEqual(pubKey),
+					"recovered key mismatch",
+				)
+			},
+		},
+		{
+			name: "Schnorr success",
+			intent: &SignMessageIntent{
+				Msg: msg,
+				Schnorr: &SchnorrSignOpts{
+					Tag: []byte("test tag"),
+				},
+			},
+			verify: func(t *testing.T, sig Signature,
+				pubKey *btcec.PublicKey) {
+
+				t.Helper()
+
+				schnorrSig, ok := sig.(SchnorrSignature)
+				require.True(t, ok, "expected SchnorrSignature")
+
+				msgHash := chainhash.TaggedHash(
+					[]byte("test tag"), msg,
+				)
+				require.True(t,
+					schnorrSig.Verify(msgHash[:], pubKey),
+					"signature invalid",
+				)
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Set up a mock wallet that will return our
+			// deterministic private key for the specified
+			// derivation path. This allows us to test the signing
+			// logic in isolation.
+			w, mocks := testWalletWithMocks(t)
+
+			// Configure the full mock chain to return the test
+			// private key.
+			//
+			// NOTE: We must use a copy since the ECDH method will
+			// zero out the key.
+			privKeyCopy, _ := btcec.PrivKeyFromBytes(
+				privKey.Serialize(),
+			)
+
+			mocks.addrStore.On(
+				"FetchScopedKeyManager", path.KeyScope,
+			).Return(mocks.accountManager, nil).Once()
+			mocks.accountManager.On(
+				"DeriveFromKeyPath", mock.Anything,
+				path.DerivationPath,
+			).Return(mocks.pubKeyAddr, nil).Once()
+			mocks.pubKeyAddr.On("PrivKey").Return(
+				privKeyCopy, nil,
+			).Once()
+
+			// Act: Attempt to sign the message with the wallet.
+			sig, err := w.SignMessage(t.Context(), path, tc.intent)
+
+			// Assert: Verify that the signature was created
+			// successfully and is valid for the given public key.
+			// We also assert that the private key was cleared from
+			// memory after the operation.
+			require.NoError(t, err)
+			tc.verify(t, sig, pubKey)
+			require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+		})
+	}
 }

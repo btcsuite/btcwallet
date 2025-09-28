@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -534,4 +535,91 @@ func (w *Wallet) ECDH(_ context.Context, path BIP32Path,
 	copy(sharedSecret[:], secret)
 
 	return sharedSecret, nil
+}
+
+// SignMessage signs a message based on the provided intent.
+func (w *Wallet) SignMessage(_ context.Context, path BIP32Path,
+	intent *SignMessageIntent) (Signature, error) {
+
+	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the private key for the derived address.
+	privKey, err := managedPubKeyAddr.PrivKey()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get private key: %w", err)
+	}
+	defer privKey.Zero()
+
+	// Now, sign the message using the derived private key. This is all
+	// pure computation, so it can be done outside the DB transaction.
+	return signMessageWithPrivKey(privKey, intent)
+}
+
+// signMessageWithPrivKey performs the actual signing of a message with a given
+// private key, based on the options specified in the SignMessageIntent. It
+// acts as a dispatcher to the appropriate signing algorithm.
+func signMessageWithPrivKey(privKey *btcec.PrivateKey,
+	intent *SignMessageIntent) (Signature, error) {
+
+	// If Schnorr options are provided, we'll generate a Schnorr signature.
+	if intent.Schnorr != nil {
+		return signMessageSchnorr(privKey, intent)
+	}
+
+	// Otherwise, we'll generate an ECDSA signature.
+	return signMessageECDSA(privKey, intent)
+}
+
+// signMessageSchnorr performs the actual signing of a message with a given
+// private key, using the Schnorr signature algorithm.
+func signMessageSchnorr(privKey *btcec.PrivateKey,
+	intent *SignMessageIntent) (Signature, error) {
+
+	if intent.Schnorr.Tweak != nil {
+		privKey = txscript.TweakTaprootPrivKey(
+			*privKey, intent.Schnorr.Tweak,
+		)
+	}
+
+	var digest []byte
+	if intent.Schnorr.Tag != nil {
+		taggedHash := chainhash.TaggedHash(
+			intent.Schnorr.Tag, intent.Msg,
+		)
+		digest = taggedHash[:]
+	} else {
+		digest = btcutil.Hash160(intent.Msg)
+	}
+
+	sig, err := schnorr.Sign(privKey, digest)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create schnorr sig: %w", err)
+	}
+
+	return SchnorrSignature{sig}, nil
+}
+
+// signMessageECDSA performs the actual signing of a message with a given
+// private key, using the ECDSA signature algorithm.
+func signMessageECDSA(privKey *btcec.PrivateKey,
+	intent *SignMessageIntent) (Signature, error) {
+
+	var digest []byte
+	if intent.DoubleHash {
+		digest = chainhash.DoubleHashB(intent.Msg)
+	} else {
+		digest = btcutil.Hash160(intent.Msg)
+	}
+
+	if intent.CompactSig {
+		sig := ecdsa.SignCompact(privKey, digest, true)
+		return CompactSignature(sig), nil
+	}
+
+	sig := ecdsa.Sign(privKey, digest)
+
+	return ECDSASignature{sig}, nil
 }
