@@ -1021,3 +1021,60 @@ func TestComputeRawSigTaproot(t *testing.T) {
 	// Finally, assert that the private key is zeroed out.
 	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
+
+// TestDerivePrivKeySuccess tests the successful derivation of a private key.
+func TestDerivePrivKeySuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet with mocks, a test key, and a
+	// derivation path.
+	w, mocks := testWalletWithMocks(t)
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	path := BIP32Path{
+		KeyScope: waddrmgr.KeyScopeBIP0084,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Branch:          0,
+			Index:           0,
+		},
+	}
+
+	// Set up the mock account manager and the mock address that will be
+	// returned by the derivation call.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
+	).Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+
+	// Act: Derive the private key.
+	derivedKey, err := w.DerivePrivKey(t.Context(), path)
+
+	// Assert: Check that the correct key is returned without error.
+	require.NoError(t, err)
+	require.Equal(t, privKey.Serialize(), derivedKey.Serialize())
+}
+
+// TestDerivePrivKeyFails tests the failure case where the key derivation fails.
+func TestDerivePrivKeyFails(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet and a test path. Configure the mock
+	// addrStore to return an error when fetching the key manager.
+	w, mocks := testWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
+
+	// Act: Attempt to derive the private key.
+	_, err := w.DerivePrivKey(t.Context(), path)
+
+	// Assert: Check that the error is propagated correctly.
+	require.ErrorIs(t, err, errManagerNotFound)
+}
