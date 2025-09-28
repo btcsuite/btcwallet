@@ -1,10 +1,8 @@
-package wallet_test
+package wallet
 
 import (
 	"runtime"
 	"testing"
-
-	"github.com/btcsuite/btcwallet/wallet"
 )
 
 // Harness holds the BranchRecoveryState being tested, the recovery window being
@@ -12,7 +10,7 @@ import (
 // and next unfound values.
 type Harness struct {
 	t              *testing.T
-	brs            *wallet.BranchRecoveryState
+	brs            *BranchRecoveryState
 	recoveryWindow uint32
 	expHorizon     uint32
 	expNextUnfound uint32
@@ -209,7 +207,7 @@ func TestBranchRecoveryState(t *testing.T) {
 		// Expected horizon: 30.
 	}
 
-	brs := wallet.NewBranchRecoveryState(recoveryWindow)
+	brs := NewBranchRecoveryState(recoveryWindow)
 	harness := &Harness{
 		t:              t,
 		brs:            brs,
