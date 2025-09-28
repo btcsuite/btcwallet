@@ -730,3 +730,41 @@ func signAndAssembleScript(params *UnlockingScriptParams,
 			scriptInfo.Addr.AddrType())
 	}
 }
+
+// ComputeRawSig generates a raw signature for a single transaction input. The
+// caller is responsible for assembling the final witness.
+func (w *Wallet) ComputeRawSig(_ context.Context, params *RawSigParams) (
+	RawSignature, error) {
+
+	// Get the managed address for the specified derivation path. This will
+	// be used to retrieve the private key.
+	managedAddr, err := w.fetchManagedPubKeyAddress(params.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the private key for the address.
+	privKey, err := managedAddr.PrivKey()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get private key: %w", err)
+	}
+	defer privKey.Zero()
+
+	// If a tweaker is provided, we'll use it to tweak the private key.
+	if params.Tweaker != nil {
+		privKey, err = params.Tweaker(privKey)
+		if err != nil {
+			return nil, fmt.Errorf("error tweaking private key: %w",
+				err)
+		}
+	}
+
+	// With the private key retrieved and tweaked, we can now delegate the
+	// actual signing to the version-specific details object.
+	rawSig, err := params.Details.Sign(params, privKey)
+	if err != nil {
+		return nil, fmt.Errorf("cannot sign transaction: %w", err)
+	}
+
+	return rawSig, nil
+}

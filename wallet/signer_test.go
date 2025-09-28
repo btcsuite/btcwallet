@@ -788,3 +788,236 @@ func createDummyTestTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
 
 	return prevOut, tx
 }
+
+// TestComputeRawSigLegacy tests the successful signing of a legacy P2PKH
+// input.
+func TestComputeRawSigLegacy(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	w, mocks := testWalletWithMocks(t)
+	privKey, pubKey := deterministicPrivKey(t)
+
+	// Create a P2PKH address from the public key.
+	pubKeyHash := btcutil.Hash160(pubKey.SerializeCompressed())
+	addr, err := btcutil.NewAddressPubKeyHash(
+		pubKeyHash, w.chainParams,
+	)
+	require.NoError(t, err)
+
+	// Create a previous output and a transaction to spend it.
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, mock.Anything,
+	).Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+
+	// Create the raw signature parameters.
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+	params := &RawSigParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+		Path:       path,
+		Details:    LegacySpendDetails{},
+	}
+
+	// Act: Compute the raw signature.
+	rawSig, err := w.ComputeRawSig(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: Verify that the signature is valid.
+	sigScript, err := txscript.NewScriptBuilder().
+		AddData(rawSig).
+		AddData(pubKey.SerializeCompressed()).
+		Script()
+	require.NoError(t, err)
+
+	tx.TxIn[0].SignatureScript = sigScript
+
+	// The signature is valid if the script engine executes without error.
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, txscript.NewCannedPrevOutputFetcher(
+			prevOut.PkScript, prevOut.Value,
+		),
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "signature verification failed")
+
+	// Finally, assert that the private key is zeroed out.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
+
+// TestComputeRawSigSegwitV0 tests the successful signing of a SegWit v0 P2WKH
+// input.
+func TestComputeRawSigSegwitV0(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	w, mocks := testWalletWithMocks(t)
+	privKey, pubKey := deterministicPrivKey(t)
+
+	// Create a P2WKH address from the public key.
+	pubKeyHash := btcutil.Hash160(pubKey.SerializeCompressed())
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		pubKeyHash, w.chainParams,
+	)
+	require.NoError(t, err)
+
+	// Create a previous output and a transaction to spend it.
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, mock.Anything,
+	).Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+
+	// Create the raw signature parameters.
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	witnessScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	params := &RawSigParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+		Path:       path,
+		Details: SegwitV0SpendDetails{
+			WitnessScript: witnessScript,
+		},
+	}
+
+	// Act: Compute the raw signature.
+	rawSig, err := w.ComputeRawSig(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: Verify that the signature is valid.
+	// We need to append the sighash type to the raw signature.
+	rawSig = append(rawSig, byte(txscript.SigHashAll))
+	tx.TxIn[0].Witness = wire.TxWitness{
+		rawSig, pubKey.SerializeCompressed(),
+	}
+
+	// The signature is valid if the script engine executes without error.
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, txscript.NewCannedPrevOutputFetcher(
+			prevOut.PkScript, prevOut.Value,
+		),
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "signature verification failed")
+
+	// Finally, assert that the private key is zeroed out.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
+
+// TestComputeRawSigTaproot tests the successful signing of a Taproot P2TR
+// input using the key-path spend.
+func TestComputeRawSigTaproot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	w, mocks := testWalletWithMocks(t)
+	privKey, internalKey := deterministicPrivKey(t)
+
+	// Create a P2TR address from the public key.
+	addr, err := btcutil.NewAddressTaproot(
+		schnorr.SerializePubKey(
+			txscript.ComputeTaprootOutputKey(internalKey, nil),
+		), w.chainParams,
+	)
+	require.NoError(t, err)
+
+	// Create a previous output and a transaction to spend it.
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// Configure the full mock chain to return the test private key.
+	//
+	// NOTE: We must use a copy since the ECDH method will zero out the key.
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, mock.Anything,
+	).Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+
+	// Create the raw signature parameters.
+	fetcher := txscript.NewMultiPrevOutFetcher(
+		map[wire.OutPoint]*wire.TxOut{
+			{Index: 0}: prevOut,
+		},
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+	params := &RawSigParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashDefault,
+		Path:       path,
+		Details: TaprootSpendDetails{
+			SpendPath: KeyPathSpend,
+		},
+	}
+
+	// Act: Compute the raw signature.
+	rawSig, err := w.ComputeRawSig(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: Verify that the signature is valid.
+	tx.TxIn[0].Witness = wire.TxWitness{rawSig}
+	vm, err := txscript.NewEngine(
+		pkScript, tx, 0, txscript.StandardVerifyFlags, nil, sigHashes,
+		prevOut.Value, txscript.NewCannedPrevOutputFetcher(
+			prevOut.PkScript, prevOut.Value,
+		),
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "signature verification failed")
+
+	// Finally, assert that the private key is zeroed out.
+	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+}
