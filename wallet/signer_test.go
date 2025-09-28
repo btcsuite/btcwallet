@@ -5,12 +5,24 @@
 package wallet
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+)
+
+var (
+	// errManagerNotFound is returned when a scoped manager cannot be found.
+	errManagerNotFound = errors.New("manager not found")
+
+	// errDerivationFailed is returned when a key derivation fails.
+	errDerivationFailed = errors.New("derivation failed")
 )
 
 // TestComputeInputScript checks that the wallet can create the full
@@ -105,4 +117,124 @@ func runTestCase(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 	if err != nil {
 		t.Fatalf("error validating tx: %v", err)
 	}
+}
+
+// TestDerivePubKeySuccess tests the successful derivation of a public key.
+func TestDerivePubKeySuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet with mocks, a test key, and a
+	// derivation path.
+	w, mocks := testWalletWithMocks(t)
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	path := BIP32Path{
+		KeyScope: waddrmgr.KeyScopeBIP0084,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Branch:          0,
+			Index:           0,
+		},
+	}
+
+	// Set up the mock account manager and the mock address that will be
+	// returned by the derivation call.
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
+	).Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+
+	// Act: Derive the public key.
+	derivedKey, err := w.DerivePubKey(t.Context(), path)
+
+	// Assert: Check that the correct key is returned without error.
+	require.NoError(t, err)
+	require.True(t, pubKey.IsEqual(derivedKey))
+}
+
+// TestDerivePubKeyFetchManagerFails tests the failure case where the scoped
+// key manager cannot be fetched.
+func TestDerivePubKeyFetchManagerFails(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet and a test path. Configure the mock
+	// addrStore to return an error when fetching the key manager.
+	w, mocks := testWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
+
+	// Act: Attempt to derive the public key.
+	_, err := w.DerivePubKey(t.Context(), path)
+
+	// Assert: Check that the error is propagated correctly.
+	require.ErrorIs(t, err, errManagerNotFound)
+	mocks.addrStore.AssertExpectations(t)
+}
+
+// TestDerivePubKeyDeriveFails tests the failure case where the key derivation
+// from the path fails.
+func TestDerivePubKeyDeriveFails(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet, mocks, and a test path. Configure the
+	// mock account manager to return an error on derivation.
+	w, mocks := testWalletWithMocks(t)
+	path := BIP32Path{
+		KeyScope: waddrmgr.KeyScopeBIP0084,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Branch:          0,
+			Index:           0,
+		},
+	}
+
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
+	).Return((*mockManagedPubKeyAddr)(nil), errDerivationFailed).Once()
+
+	// Act: Attempt to derive the public key.
+	_, err := w.DerivePubKey(t.Context(), path)
+
+	// Assert: Check that the error is propagated correctly.
+	require.ErrorIs(t, err, errDerivationFailed)
+}
+
+// TestDerivePubKeyNotPubKeyAddr tests the failure case where the derived
+// address is not a public key address.
+func TestDerivePubKeyNotPubKeyAddr(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet and mocks. Configure the mock derivation
+	// to return a managed address that is NOT a ManagedPubKeyAddress.
+	w, mocks := testWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	// We need a valid address for the error message.
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.chainParams,
+	)
+	require.NoError(t, err)
+
+	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On("DeriveFromKeyPath",
+		mock.Anything, mock.Anything,
+	).Return(mocks.addr, nil).Once()
+	mocks.addr.On("Address").Return(addr).Once()
+
+	// Act: Attempt to derive the public key.
+	_, err = w.DerivePubKey(t.Context(), path)
+
+	// Assert: Check that the specific ErrNotPubKeyAddress is returned.
+	require.ErrorIs(t, err, ErrNotPubKeyAddress)
+	require.ErrorContains(t, err, "addr "+addr.String())
 }

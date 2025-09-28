@@ -12,12 +12,17 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 var (
 	// ErrUnknownSignMethod is returned when a transaction is signed with an
 	// unknown sign method.
 	ErrUnknownSignMethod = errors.New("unknown sign method")
+
+	// ErrUnsupportedAddressType is returned when a transaction is signed
+	// for an unsupported address type.
+	ErrUnsupportedAddressType = errors.New("unsupported address type")
 )
 
 // Signer provides an interface for common, safe cryptographic operations,
@@ -414,4 +419,91 @@ func (t TaprootSpendDetails) Sign(params *RawSigParams,
 	}
 
 	return rawSig, nil
+}
+
+// isSpendDetails implements the sealed interface.
+func (t TaprootSpendDetails) isSpendDetails() {}
+
+// A compile-time assertion to ensure that all SpendDetails implementations
+// adhere to the interface.
+var _ SpendDetails = (*LegacySpendDetails)(nil)
+var _ SpendDetails = (*SegwitV0SpendDetails)(nil)
+var _ SpendDetails = (*TaprootSpendDetails)(nil)
+
+// DerivePubKey derives a public key from a full BIP-32 derivation path.
+func (w *Wallet) DerivePubKey(_ context.Context, path BIP32Path) (
+	*btcec.PublicKey, error) {
+
+	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return managedPubKeyAddr.PubKey(), nil
+}
+
+// fetchManagedPubKeyAddress is a helper function that encapsulates the common
+// logic of fetching a scoped key manager, deriving a managed address from a
+// BIP32 path, and ensuring it is a public key address.
+//
+// Time Complexity:
+//   - Average Case: O(1) - This is the common case where the account
+//     information is already cached in memory. The function performs a few
+//     map lookups and constant-time cryptographic operations.
+//   - Worst Case: O(log N) - This occurs on a cache miss (e.g., the first
+//     time an account is used). The function must perform a single, indexed
+//     database lookup to fetch the account's master key. N is the number of
+//     accounts in the wallet.
+//
+// Database Actions:
+//   - This method performs a single read-only database transaction
+//     (`walletdb.View`).
+//   - The transaction's only purpose is to call `DeriveFromKeyPath`, which
+//     performs at most one indexed database lookup for account information if
+//     that information is not already in the in-memory cache.
+func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
+	waddrmgr.ManagedPubKeyAddress, error) {
+
+	// Fetch the scoped key manager for the given key scope. This can be
+	// done outside of the database transaction as it only deals with
+	// in-memory state.
+	manager, err := w.addrStore.FetchScopedKeyManager(path.KeyScope)
+	if err != nil {
+		return nil, fmt.Errorf("cannot fetch scoped key manager: %w",
+			err)
+	}
+
+	// The derivation of the address is the only part that requires a
+	// database transaction.
+	var addr waddrmgr.ManagedAddress
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		// Derive the managed address from the derivation path.
+		derivedAddr, err := manager.DeriveFromKeyPath(
+			addrmgrNs, path.DerivationPath,
+		)
+		if err != nil {
+			return fmt.Errorf("cannot derive from key path: %w",
+				err)
+		}
+
+		addr = derivedAddr
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot view wallet database: %w", err)
+	}
+
+	// The post-processing of the address can be done outside of the
+	// database transaction as it only deals with the in-memory struct.
+	managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
+			addr.Address())
+	}
+
+	return managedPubKeyAddr, nil
 }
