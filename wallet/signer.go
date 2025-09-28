@@ -6,6 +6,8 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
@@ -27,6 +29,21 @@ type Signer interface {
 	// concrete signature types, ECDSASignature or SchnorrSignature.
 	SignMessage(ctx context.Context, path BIP32Path,
 		intent *SignMessageIntent) (Signature, error)
+
+	// ComputeUnlockingScript generates the full sigScript and witness
+	// required to spend a UTXO. The resulting UnlockingScript struct
+	// contains the raw witness and/or sigScript, which can be used to
+	// populate the final transaction input.
+	//
+	// This method is designed for spending single-signature outputs, which
+	// are outputs that can be spent with a single signature from a single
+	// private key. This includes P2PKH, P2WKH, NP2WKH, and P2TR key-path
+	// spends. For more complex script-based spends, such as P2SH or P2WSH
+	// multisig, the ComputeRawSig method should be used to generate the raw
+	// signature, which can then be manually assembled into the final
+	// witness.
+	ComputeUnlockingScript(ctx context.Context,
+		params *UnlockingScriptParams) (*UnlockingScript, error)
 }
 
 // UnsafeSigner provides an interface for security-sensitive cryptographic
@@ -150,3 +167,42 @@ func (CompactSignature) isSignature() {}
 
 // isSignature implements the Signature marker interface.
 func (SchnorrSignature) isSignature() {}
+
+// UnlockingScript is a struct that contains the witness and sigScript for a
+// transaction input.
+type UnlockingScript struct {
+	// Witness is the witness stack for the input. For non-SegWit inputs,
+	// this will be nil.
+	Witness wire.TxWitness
+
+	// SigScript is the signature script for the input. For native SegWit
+	// inputs, this will be nil.
+	SigScript []byte
+}
+
+// PrivKeyTweaker is a function type that can be used to pass in a callback for
+// tweaking a private key before it's used to sign an input.
+type PrivKeyTweaker func(*btcec.PrivateKey) (*btcec.PrivateKey, error)
+
+// UnlockingScriptParams provides all the necessary parameters to generate an
+// unlocking script (witness and sigScript) for a transaction input.
+type UnlockingScriptParams struct {
+	// Tx is the transaction containing the input to be signed.
+	Tx *wire.MsgTx
+
+	// InputIndex is the index of the input to be signed.
+	InputIndex int
+
+	// Output is the previous output that is being spent.
+	Output *wire.TxOut
+
+	// SigHashes is the sighash cache for the transaction.
+	SigHashes *txscript.TxSigHashes
+
+	// HashType is the signature hash type to use.
+	HashType txscript.SigHashType
+
+	// Tweaker is an optional function that can be used to tweak the
+	// private key before signing.
+	Tweaker PrivKeyTweaker
+}

@@ -4,7 +4,6 @@ package wallet
 import (
 	"context"
 
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
@@ -170,10 +169,6 @@ func (w *Wallet) ScriptForOutputDeprecated(output *wire.TxOut) (
 
 	return script.Addr, script.WitnessProgram, script.RedeemScript, nil
 }
-
-// PrivKeyTweaker is a function type that can be used to pass in a callback for
-// tweaking a private key before it's used to sign an input.
-type PrivKeyTweaker func(*btcec.PrivateKey) (*btcec.PrivateKey, error)
 
 // ComputeInputScript generates a complete InputScript for the passed
 // transaction with the signature as defined within the passed
