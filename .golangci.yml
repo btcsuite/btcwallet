@@ -24,7 +24,9 @@ linters:
 
     # Disable whitespace linter as it has conflict rules against our
     # contribution guidelines. See https://github.com/bombsimon/wsl/issues/109.
+    - whitespace
     - wsl
+    - wsl_v5
 
     # Allow using default empty values.
     - exhaustruct
@@ -52,10 +54,6 @@ linters:
       lines: 100
       # Checks the number of statements in a function.
       statements: 50
-
-    whitespace:
-      multi-func: true
-      multi-if: true
 
   # Defines a set of rules to ignore issues.
   # It does not skip the analysis, and so does not ignore "typecheck" errors.
