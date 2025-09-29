@@ -3,6 +3,13 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
+// Package wallet provides a bitcoin wallet that is capable of fulfilling all
+// the duties of a typical bitcoin wallet such as creating and managing keys,
+// creating and signing transactions, and customizing of transaction fees.
+//
+// TODO(yy): bring wrapcheck back when implementing the `Store` interface.
+//
+//nolint:wrapcheck
 package wallet
 
 import (
