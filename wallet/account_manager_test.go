@@ -473,7 +473,7 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 	t.Parallel()
 
 	w, cleanup := testWallet(t)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	w.chainParams = &chaincfg.MainNetParams
 
@@ -573,6 +573,8 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 func addTestUTXOForBalance(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 	account uint32, amount btcutil.Amount) {
 
+	t.Helper()
+
 	addr, err := w.NewAddress(account, scope)
 	require.NoError(t, err)
 
@@ -644,6 +646,8 @@ func TestFetchAccountBalances(t *testing.T) {
 	// function that should be deferred by the caller to ensure that the
 	// wallet's resources are properly released after the test completes.
 	setupTestCase := func(t *testing.T) (*Wallet, func()) {
+		t.Helper()
+
 		w, cleanup := testWallet(t)
 		ctx := context.Background()
 
@@ -700,6 +704,8 @@ func TestFetchAccountBalances(t *testing.T) {
 		{
 			name: "account with no balance",
 			setup: func(t *testing.T, w *Wallet) {
+				t.Helper()
+
 				_, err := w.NewAccount(
 					context.Background(),
 					waddrmgr.KeyScopeBIP0084, "no-balance",
