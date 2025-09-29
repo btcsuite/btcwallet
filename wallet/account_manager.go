@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // AccountManager provides a high-level interface for managing wallet
@@ -516,29 +517,9 @@ func (w *Wallet) Balance(_ context.Context, conf int32,
 				continue
 			}
 
-			// Extract the address from the UTXO's public key script.
-			addr := extractAddrFromPKScript(
-				utxo.PkScript, w.chainParams,
+			balance += w.balanceForUTXO(
+				addrmgrNs, scope, accNum, utxo,
 			)
-			if addr == nil {
-				continue
-			}
-
-			// Look up the account that owns the address.
-			addrScope, addrAcc, err := w.addrStore.AddrAccount(
-				addrmgrNs, addr,
-			)
-			if err != nil {
-				// Ignore addresses that are not found in the
-				// wallet.
-				continue
-			}
-
-			// If the address belongs to the target account, add the
-			// UTXO's value to the total balance.
-			if addrScope.Scope() == scope && addrAcc == accNum {
-				balance += utxo.Amount
-			}
 		}
 
 		return nil
@@ -548,6 +529,34 @@ func (w *Wallet) Balance(_ context.Context, conf int32,
 	}
 
 	return balance, nil
+}
+
+// balanceForUTXO is a helper function for Balance that calculates the balance
+// of a single UTXO if it belongs to the target account.
+func (w *Wallet) balanceForUTXO(addrmgrNs walletdb.ReadBucket,
+	scope waddrmgr.KeyScope, accNum uint32,
+	utxo wtxmgr.Credit) btcutil.Amount {
+
+	// Extract the address from the UTXO's public key script.
+	addr := extractAddrFromPKScript(utxo.PkScript, w.chainParams)
+	if addr == nil {
+		return 0
+	}
+
+	// Look up the account that owns the address.
+	addrScope, addrAcc, err := w.addrStore.AddrAccount(addrmgrNs, addr)
+	if err != nil {
+		// Ignore addresses that are not found in the wallet.
+		return 0
+	}
+
+	// If the address belongs to the target account, add the UTXO's value
+	// to the total balance.
+	if addrScope.Scope() == scope && addrAcc == accNum {
+		return utxo.Amount
+	}
+
+	return 0
 }
 
 // ImportAccount imports an account from an extended public or private key.
