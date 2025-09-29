@@ -35,6 +35,9 @@ linters:
     # this linter.
     - depguard
 
+    # Deprecated - this is replaced by wsl_v5.
+    - wsl
+
   # All available settings of specific linters.
   settings:
     nlreturn:
@@ -48,6 +51,20 @@ linters:
       lines: 100
       # Checks the number of statements in a function.
       statements: 50
+
+    wsl_v5:
+      # We adopt a more relaxed cuddling rule by enabling
+      # `allow-whole-block`. This allows a variable declaration to be
+      # "cuddled" with a following block if the variable is used anywhere
+      # within that block, not just as the first statement.
+      allow-whole-block: true
+      allow-first-in-block: false
+
+      # Disable the leading-whitespace check to resolve a conflict with the
+      # whitespace linter, which requires a blank line after a function
+      # signature. This is the standard Go style.
+      disable:
+        - leading-whitespace
 
     whitespace:
       multi-func: true
