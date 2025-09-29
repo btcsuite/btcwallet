@@ -10,6 +10,9 @@ run:
 linters:
   default: all
   disable:
+    # TODO(yy): Re-enable this linter once the refactoring series is done.
+    - ireturn
+
     # Global variables are used in many places throughout the code base.
     - gochecknoglobals
 
