@@ -22,10 +22,6 @@ linters:
     # Init functions are used by loggers throughout the codebase.
     - gochecknoinits
 
-    # Disable whitespace linter as it has conflict rules against our
-    # contribution guidelines. See https://github.com/bombsimon/wsl/issues/109.
-    - wsl
-
     # Allow using default empty values.
     - exhaustruct
 
