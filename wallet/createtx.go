@@ -400,7 +400,9 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 			continue
 		}
 
-		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(addrmgrNs, addrs[0])
+		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(
+			addrmgrNs, addrs[0],
+		)
 		if err != nil {
 			continue
 		}
