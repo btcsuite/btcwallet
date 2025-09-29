@@ -124,6 +124,7 @@ func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 	}
 
 	var props *waddrmgr.AccountProperties
+
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
@@ -135,6 +136,7 @@ func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 
 		// Get the account's properties.
 		props, err = manager.AccountProperties(addrmgrNs, accNum)
+
 		return err
 	})
 
@@ -182,6 +184,7 @@ func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
 	scopes := w.addrStore.ActiveScopedKeyManagers()
 
 	var accounts []AccountResult
+
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
@@ -223,6 +226,7 @@ func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
 	// Include the wallet's current sync state in the result to provide a
 	// point-in-time reference for the balances.
 	syncBlock := w.addrStore.SyncedTo()
+
 	return &AccountsResult{
 		Accounts:           accounts,
 		CurrentBlockHash:   syncBlock.Hash,
@@ -252,6 +256,7 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 	}
 
 	var accounts []AccountResult
+
 	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
@@ -269,6 +274,7 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 		accounts, err = listAccountsWithBalances(
 			manager, addrmgrNs, scopedBalances[scope],
 		)
+
 		return err
 	})
 	if err != nil {
@@ -277,6 +283,7 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 
 	// Include the wallet's current sync state in the result.
 	syncBlock := w.addrStore.SyncedTo()
+
 	return &AccountsResult{
 		Accounts:           accounts,
 		CurrentBlockHash:   syncBlock.Hash,
@@ -300,6 +307,7 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 	scopes := w.addrStore.ActiveScopedKeyManagers()
 
 	var accounts []AccountResult
+
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		// First, calculate the balances for any accounts that match the
 		// given name. This is efficient as it iterates over the UTXO
@@ -339,6 +347,7 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 			// Get the pre-calculated balance for this account. If
 			// the account has no balance, it will be zero.
 			var balance btcutil.Amount
+
 			balances, ok := scopedBalances[scopeMgr.Scope()]
 			if ok {
 				balance = balances[accNum]
@@ -357,6 +366,7 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 	}
 
 	syncBlock := w.addrStore.SyncedTo()
+
 	return &AccountsResult{
 		Accounts:           accounts,
 		CurrentBlockHash:   syncBlock.Hash,
@@ -380,6 +390,7 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 	}
 
 	var account *AccountResult
+
 	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
@@ -473,6 +484,7 @@ func (w *Wallet) Balance(_ context.Context, conf int32,
 	scope waddrmgr.KeyScope, name string) (btcutil.Amount, error) {
 
 	var balance btcutil.Amount
+
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
@@ -482,6 +494,7 @@ func (w *Wallet) Balance(_ context.Context, conf int32,
 		if err != nil {
 			return err
 		}
+
 		accNum, err := manager.LookupAccount(addrmgrNs, name)
 		if err != nil {
 			return err
@@ -490,10 +503,12 @@ func (w *Wallet) Balance(_ context.Context, conf int32,
 		// Iterate through all unspent outputs and sum the balances for
 		// the addresses that belong to the target account.
 		syncBlock := w.addrStore.SyncedTo()
+
 		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
 		}
+
 		for _, utxo := range utxos {
 			// Skip any UTXOs that have not yet reached the required
 			// number of confirmations.
@@ -696,6 +711,7 @@ func (w *Wallet) fetchAccountBalances(tx walletdb.ReadTx,
 		if err != nil {
 			log.Errorf("Unable to query account using address %v: "+
 				"%v", addr, err)
+
 			continue
 		}
 
@@ -750,6 +766,7 @@ func listAccountsWithBalances(scopeMgr *waddrmgr.ScopedKeyManager,
 	accountBalances map[uint32]btcutil.Amount) ([]AccountResult, error) {
 
 	var accounts []AccountResult
+
 	lastAccount, err := scopeMgr.LastAccount(addrmgrNs)
 	if err != nil {
 		// If the scope has no accounts, we can just return an empty
@@ -757,6 +774,7 @@ func listAccountsWithBalances(scopeMgr *waddrmgr.ScopedKeyManager,
 		if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
 			return nil, nil
 		}
+
 		return nil, err
 	}
 

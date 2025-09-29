@@ -67,6 +67,7 @@ func (w *Wallet) handleChainNotifications() {
 					Hash:      *hash,
 					Timestamp: header.Timestamp,
 				}
+
 				err = w.addrStore.SetSyncedTo(ns, &bs)
 				if err != nil {
 					return err
@@ -248,6 +249,7 @@ func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) err
 		Hash:      b.Hash,
 		Timestamp: b.Time,
 	}
+
 	err := w.addrStore.SetSyncedTo(addrmgrNs, &bs)
 	if err != nil {
 		return err
@@ -283,6 +285,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 			bs := waddrmgr.BlockStamp{
 				Height: b.Height - 1,
 			}
+
 			hash, err = w.addrStore.BlockHash(addrmgrNs, bs.Height)
 			if err != nil {
 				return err
@@ -296,6 +299,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 			}
 
 			bs.Timestamp = header.Timestamp
+
 			err = w.addrStore.SetSyncedTo(addrmgrNs, &bs)
 			if err != nil {
 				return err
@@ -390,6 +394,7 @@ func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
 			if err != nil {
 				return err
 			}
+
 			err = w.addrStore.MarkUsed(addrmgrNs, addr)
 			if err != nil {
 				return err
