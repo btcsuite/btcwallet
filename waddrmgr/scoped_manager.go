@@ -1566,7 +1566,9 @@ func (s *ScopedKeyManager) CanAddAccount() error {
 // differs from the NewAccount method in that this method takes the account
 // number *directly*, rather than taking a string name for the account, then
 // mapping that to the next highest account number.
-func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uint32) error {
+func (s *ScopedKeyManager) NewRawAccount(
+	ns walletdb.ReadWriteBucket, number uint32) error {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
