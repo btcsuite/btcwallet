@@ -238,6 +238,7 @@ func addTxAndCredit(t *testing.T, w *Wallet, tx *wire.MsgTx,
 
 	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 		ns := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+
 		err = w.txStore.InsertTx(ns, rec, block)
 		if err != nil {
 			return err
