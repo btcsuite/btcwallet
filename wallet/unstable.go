@@ -28,6 +28,7 @@ func (u unstableAPI) TxDetails(txHash *chainhash.Hash) (*wtxmgr.TxDetails, error
 	err := walletdb.View(u.w.db, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 		var err error
+
 		details, err = u.w.txStore.TxDetails(txmgrNs, txHash)
 		return err
 	})
