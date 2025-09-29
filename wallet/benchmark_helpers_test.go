@@ -26,7 +26,7 @@ type growthFunc func(i int) int
 
 // constantGrowth returns a constant value regardless of iteration.
 func constantGrowth(i int) int {
-	return 0
+	return 5
 }
 
 // linearGrowth scales the parameter value linearly.
