@@ -204,7 +204,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedScope, acct2.KeyScope)
 
-	err = w.ImportPublicKey(acct3ExternalPub, tc.addrType)
+	err = w.ImportPublicKeyDeprecated(acct3ExternalPub, tc.addrType)
 	require.NoError(t, err)
 
 	// If the wallet is watch only, there is no default account and our
@@ -243,7 +243,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(0), acct2.ImportedKeyCount)
 
 	// Test address derivation.
-	extAddr, err := w.NewAddress(acct1.AccountNumber, tc.expectedScope)
+	extAddr, err := w.NewAddressDeprecated(acct1.AccountNumber, tc.expectedScope)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedAddr, extAddr.String())
 	intAddr, err := w.NewChangeAddress(acct1.AccountNumber, tc.expectedScope)
@@ -289,7 +289,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		t.Fatalf("unhandled address type %v", tc.addrType)
 	}
 
-	addrManaged, err := w.AddressInfo(intAddr)
+	addrManaged, err := w.AddressInfoDeprecated(intAddr)
 	require.NoError(t, err)
 	require.Equal(t, true, addrManaged.Imported())
 }
