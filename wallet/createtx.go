@@ -399,6 +399,7 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 		if err != nil || len(addrs) != 1 {
 			continue
 		}
+
 		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(addrmgrNs, addrs[0])
 		if err != nil {
 			continue
@@ -447,6 +448,7 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 	// It's possible for the account to have an address schema override, so
 	// prefer that if it exists.
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+
 	scopeMgr, err := w.addrStore.FetchScopedKeyManager(*changeKeyScope)
 	if err != nil {
 		return nil, nil, err

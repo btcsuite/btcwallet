@@ -52,6 +52,7 @@ func (w *Wallet) MakeMultiSigScript(addrs []btcutil.Address, nRequired int) ([]b
 				}
 				addrmgrNs = dbtx.ReadBucket(waddrmgrNamespaceKey)
 			}
+
 			addrInfo, err := w.addrStore.Address(addrmgrNs, addr)
 			if err != nil {
 				return nil, err

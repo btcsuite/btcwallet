@@ -106,6 +106,7 @@ func TestListAccounts(t *testing.T) {
 	for _, acc := range accounts.Accounts {
 		if acc.AccountName == testAccountName {
 			found = true
+
 			require.Equal(
 				t, uint32(1), acc.AccountNumber,
 				"expected new account number",
@@ -116,6 +117,7 @@ func TestListAccounts(t *testing.T) {
 			)
 		}
 	}
+
 	require.True(t, found, "expected to find new account")
 }
 
@@ -362,6 +364,7 @@ func TestBalance(t *testing.T) {
 
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
 		err := w.txStore.InsertTx(ns, rec, &wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{
 				Height: 1,
@@ -382,6 +385,7 @@ func TestBalance(t *testing.T) {
 	// Now, we'll update the wallet's sync state.
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
 		return w.addrStore.SetSyncedTo(addrmgrNs, &waddrmgr.BlockStamp{
 			Height: 1,
 		})
@@ -550,7 +554,6 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -558,7 +561,7 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 				testCase.script(), w.chainParams,
 			)
 			if addr == nil {
-				require.Equal(t, testCase.addr, "")
+				require.Empty(t, testCase.addr)
 			} else {
 				require.Equal(t, testCase.addr, addr.String())
 			}
@@ -594,10 +597,12 @@ func addTestUTXOForBalance(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 		block := &wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{Height: 1},
 		}
+
 		err := w.txStore.InsertTx(ns, rec, block)
 		if err != nil {
 			return err
 		}
+
 		return w.txStore.AddCredit(ns, rec, block, 0, false)
 	})
 	require.NoError(t, err)
@@ -661,8 +666,9 @@ func TestFetchAccountBalances(t *testing.T) {
 		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 			bs := &waddrmgr.BlockStamp{Height: 1}
-			return w.addrStore.SetSyncedTo(addrmgrNs, bs)
-		})
+
+				return w.addrStore.SetSyncedTo(addrmgrNs, bs)
+			})
 		require.NoError(t, err)
 
 		return w, cleanup
@@ -709,7 +715,6 @@ func TestFetchAccountBalances(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -721,13 +726,16 @@ func TestFetchAccountBalances(t *testing.T) {
 			}
 
 			var balances scopedBalances
+
 			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 				var err error
-				balances, err = w.fetchAccountBalances(
-					tx, tc.filters...,
-				)
-				return err
-			})
+
+					balances, err = w.fetchAccountBalances(
+						tx, tc.filters...,
+					)
+
+					return err
+				})
 
 			require.NoError(t, err)
 			require.Equal(t, tc.expectedBalances, balances)
