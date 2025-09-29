@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -16,6 +17,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
 			utxoGrowth:    exponentialGrowth,
+			addressGrowth: constantGrowth,
 			maxIterations: 14,
 			startIndex:    0,
 		},
@@ -70,6 +72,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
 			utxoGrowth:    exponentialGrowth,
+			addressGrowth: constantGrowth,
 			maxIterations: 14,
 			startIndex:    0,
 		},
