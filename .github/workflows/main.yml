@@ -70,7 +70,7 @@ jobs:
         run: make protolint
 
       - name: run lint
-        run: make lint
+        run: make lint-check
 
   check-commits:
     if: github.event_name == 'pull_request'
