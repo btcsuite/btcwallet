@@ -196,8 +196,8 @@ func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
 			return err
 		}
 
-		// Now, iterate through each key scope to assemble the final list
-		// of accounts with their properties and balances.
+		// Now, iterate through all key scopes to assemble the final
+		// list of accounts with their properties and balances.
 		for _, scopeMgr := range scopes {
 			scope := scopeMgr.Scope()
 			accountBalances := scopedBalances[scope]

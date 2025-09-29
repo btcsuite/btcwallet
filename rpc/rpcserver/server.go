@@ -188,7 +188,10 @@ func (s *walletServer) Accounts(ctx context.Context, req *pb.AccountsRequest) (
 func (s *walletServer) RenameAccount(ctx context.Context, req *pb.RenameAccountRequest) (
 	*pb.RenameAccountResponse, error) {
 
-	err := s.wallet.RenameAccountDeprecated(waddrmgr.KeyScopeBIP0044, req.GetAccountNumber(), req.GetNewName())
+	err := s.wallet.RenameAccountDeprecated(
+		waddrmgr.KeyScopeBIP0044, req.GetAccountNumber(),
+		req.GetNewName(),
+	)
 	if err != nil {
 		return nil, translateError(err)
 	}

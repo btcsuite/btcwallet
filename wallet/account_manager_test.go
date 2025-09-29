@@ -41,8 +41,8 @@ func TestNewAccount(t *testing.T) {
 	)
 	require.NoError(t, err, "unable to create new account")
 
-	// The new account should be the first account created, so it should have
-	// an index of 1.
+	// The new account should be the first account created, so it should
+	// have an index of 1.
 	require.Equal(t, uint32(1), account.AccountNumber, "expected account 1")
 
 	// We should be able to retrieve the account by its name.
@@ -251,7 +251,9 @@ func TestGetAccount(t *testing.T) {
 	require.NoError(t, err)
 
 	// We should be able to get the new account.
-	account, err := w.GetAccount(context.Background(), scope, testAccountName)
+	account, err := w.GetAccount(
+		context.Background(), scope, testAccountName,
+	)
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, account.AccountName)
 	require.Equal(t, uint32(1), account.AccountNumber)
@@ -664,12 +666,17 @@ func TestFetchAccountBalances(t *testing.T) {
 		// Add UTXOs.
 		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 0, 100)
 		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0084, 1, 200)
-		addTestUTXOForBalance(t, w, waddrmgr.KeyScopeBIP0049Plus, 1, 300)
+		addTestUTXOForBalance(
+			t, w, waddrmgr.KeyScopeBIP0049Plus, 1, 300,
+		)
 
 		// Update sync state.
-		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			bs := &waddrmgr.BlockStamp{Height: 1}
+		err = walletdb.Update(
+			w.db, func(tx walletdb.ReadWriteTx) error {
+				addrmgrNs := tx.ReadWriteBucket(
+					waddrmgrNamespaceKey,
+				)
+				bs := &waddrmgr.BlockStamp{Height: 1}
 
 				return w.addrStore.SetSyncedTo(addrmgrNs, bs)
 			})
@@ -733,8 +740,9 @@ func TestFetchAccountBalances(t *testing.T) {
 
 			var balances scopedBalances
 
-			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-				var err error
+			err := walletdb.View(
+				w.db, func(tx walletdb.ReadTx) error {
+					var err error
 
 					balances, err = w.fetchAccountBalances(
 						tx, tc.filters...,
