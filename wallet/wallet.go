@@ -815,7 +815,9 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 				// point to become desyncronized. Refactor so
 				// that this cannot happen.
 				for _, block := range blocks {
-					err := w.addrStore.SetSyncedTo(ns, block)
+					err := w.addrStore.SetSyncedTo(
+						ns, block,
+					)
 					if err != nil {
 						return err
 					}
@@ -1432,7 +1434,10 @@ out:
 		case req := <-w.unlockRequests:
 			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-				return w.addrStore.Unlock(addrmgrNs, req.passphrase)
+
+				return w.addrStore.Unlock(
+					addrmgrNs, req.passphrase,
+				)
 			})
 			if err != nil {
 				req.err <- err
@@ -1737,7 +1742,9 @@ func (w *Wallet) CalculateAccountBalances(account uint32,
 			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 				output.PkScript, w.chainParams)
 			if err == nil && len(addrs) > 0 {
-				_, outputAcct, err = w.addrStore.AddrAccount(addrmgrNs, addrs[0])
+				_, outputAcct, err = w.addrStore.AddrAccount(
+					addrmgrNs, addrs[0],
+				)
 			}
 			if err != nil || outputAcct != account {
 				continue
@@ -2327,8 +2334,10 @@ func (w *Wallet) ListTransactions(from,
 					return true, nil
 				}
 
-				jsonResults := listTransactions(tx, &details[i],
-					w.addrStore, syncBlock.Height, w.chainParams)
+				jsonResults := listTransactions(
+					tx, &details[i], w.addrStore,
+					syncBlock.Height, w.chainParams,
+				)
 				txList = append(txList, jsonResults...)
 
 				if len(jsonResults) > 0 {
@@ -2381,8 +2390,10 @@ func (w *Wallet) ListAddressTransactions(
 						continue
 					}
 
-					jsonResults := listTransactions(tx, detail,
-						w.addrStore, syncBlock.Height, w.chainParams)
+					jsonResults := listTransactions(
+						tx, detail, w.addrStore,
+						syncBlock.Height, w.chainParams,
+					)
 					txList = append(txList, jsonResults...)
 					continue loopDetails
 				}
@@ -2415,8 +2426,10 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult,
 			// unsorted, but it will process mined transactions in the
 			// reverse order they were marked mined.
 			for i := len(details) - 1; i >= 0; i-- {
-				jsonResults := listTransactions(tx, &details[i], w.addrStore,
-					syncBlock.Height, w.chainParams)
+				jsonResults := listTransactions(
+					tx, &details[i], w.addrStore,
+					syncBlock.Height, w.chainParams,
+				)
 				txList = append(txList, jsonResults...)
 			}
 			return false, nil
@@ -2831,7 +2844,9 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 				continue
 			}
 			if len(addrs) > 0 {
-				smgr, acct, err := w.addrStore.AddrAccount(addrmgrNs, addrs[0])
+				smgr, acct, err := w.addrStore.AddrAccount(
+					addrmgrNs, addrs[0],
+				)
 				if err == nil {
 					s, err := smgr.AccountName(addrmgrNs, acct)
 					if err == nil {
@@ -2868,7 +2883,9 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 				spendable = true
 			case txscript.MultiSigTy:
 				for _, a := range addrs {
-					_, err := w.addrStore.Address(addrmgrNs, a)
+					_, err := w.addrStore.Address(
+						addrmgrNs, a,
+					)
 					if err == nil {
 						continue
 					}
@@ -2925,7 +2942,9 @@ func (w *Wallet) ListLeasedOutputs() ([]*ListLeasedOutputResult, error) {
 		}
 
 		for _, output := range outputs {
-			details, err := w.txStore.TxDetails(ns, &output.Outpoint.Hash)
+			details, err := w.txStore.TxDetails(
+				ns, &output.Outpoint.Hash,
+			)
 			if err != nil {
 				return err
 			}
@@ -3370,6 +3389,7 @@ func (w *Wallet) TotalReceivedForAccounts(scope waddrmgr.KeyScope,
 			stopHeight = -1
 		}
 
+		//nolint:lll
 		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
 			for i := range details {
 				detail := &details[i]
@@ -3572,7 +3592,9 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 				prevHash := &txIn.PreviousOutPoint.Hash
 				prevIndex := txIn.PreviousOutPoint.Index
 
-				txDetails, err := w.txStore.TxDetails(txmgrNs, prevHash)
+				txDetails, err := w.txStore.TxDetails(
+					txmgrNs, prevHash,
+				)
 				if err != nil {
 					return fmt.Errorf("cannot query previous transaction "+
 						"details for %v: %w", txIn.PreviousOutPoint, err)
