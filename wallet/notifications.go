@@ -157,7 +157,9 @@ func makeTxSummary(dbtx walletdb.ReadTx, w *Wallet, details *wtxmgr.TxDetails) T
 func totalBalances(dbtx walletdb.ReadTx, w *Wallet, m map[uint32]btcutil.Amount) error {
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 
-	unspent, err := w.txStore.UnspentOutputs(dbtx.ReadBucket(wtxmgrNamespaceKey))
+	unspent, err := w.txStore.UnspentOutputs(
+		dbtx.ReadBucket(wtxmgrNamespaceKey),
+	)
 	if err != nil {
 		return err
 	}
@@ -167,7 +169,9 @@ func totalBalances(dbtx walletdb.ReadTx, w *Wallet, m map[uint32]btcutil.Amount)
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			output.PkScript, w.chainParams)
 		if err == nil && len(addrs) > 0 {
-			_, outputAcct, err = w.addrStore.AddrAccount(addrmgrNs, addrs[0])
+			_, outputAcct, err = w.addrStore.AddrAccount(
+				addrmgrNs, addrs[0],
+			)
 		}
 		if err == nil {
 			_, ok := m[outputAcct]
@@ -234,7 +238,9 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
 
 	unminedTxs := []TransactionSummary{makeTxSummary(dbtx, s.wallet, details)}
 
-	unminedHashes, err := s.wallet.txStore.UnminedTxHashes(dbtx.ReadBucket(wtxmgrNamespaceKey))
+	unminedHashes, err := s.wallet.txStore.UnminedTxHashes(
+		dbtx.ReadBucket(wtxmgrNamespaceKey),
+	)
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
 		return
