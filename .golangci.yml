@@ -68,6 +68,13 @@ linters:
     # Default: strict
     generated: lax
 
+    # Which file paths to exclude: they will be analyzed, but issues from them won't be reported.
+    # "/" will be replaced by the current OS file path separator to properly work on Windows.
+    # Default: []
+    paths:
+      - rpc/legacyrpc/
+      - wallet/deprecated.go
+
     rules:
       # Exclude gosec from running for tests so that tests with weak randomness
       # (math/rand) will pass the linter.
@@ -79,6 +86,8 @@ linters:
           # Allow duplications in tests so it's easier to follow a single unit
           # test.
           - dupl
+          # Allow returning unwrapped errors in tests.
+          - wrapcheck
 
       - path: mock*
         linters:
@@ -102,3 +111,14 @@ issues:
   # Show only new issues created after git revision `REV`.
   # Default: ""
   new-from-rev: a3684825d0b7511fbc5793f0c22cbfeb6f67121f
+  # Maximum issues count per one linter.
+  # Set to 0 to disable.
+  # Default: 50
+  max-issues-per-linter: 0
+  # Maximum count of issues with the same text.
+  # Set to 0 to disable.
+  # Default: 3
+  max-same-issues: 0
+  # Make issues output unique by line.
+  # Default: true
+  uniq-by-line: false
