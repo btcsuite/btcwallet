@@ -54,6 +54,7 @@ func lookupInputAccount(dbtx walletdb.ReadTx, w *Wallet, details *wtxmgr.TxDetai
 	// TODO: Debits should record which account(s?) they
 	// debit from so this doesn't need to be looked up.
 	prevOP := &details.MsgTx.TxIn[deb.Index].PreviousOutPoint
+
 	prev, err := w.txStore.TxDetails(txmgrNs, &prevOP.Hash)
 	if err != nil {
 		log.Errorf("Cannot query previous transaction details for %v: %v", prevOP.Hash, err)
@@ -155,6 +156,7 @@ func makeTxSummary(dbtx walletdb.ReadTx, w *Wallet, details *wtxmgr.TxDetails) T
 
 func totalBalances(dbtx walletdb.ReadTx, w *Wallet, m map[uint32]btcutil.Amount) error {
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+
 	unspent, err := w.txStore.UnspentOutputs(dbtx.ReadBucket(wtxmgrNamespaceKey))
 	if err != nil {
 		return err
@@ -231,6 +233,7 @@ func (s *NotificationServer) notifyUnminedTransaction(dbtx walletdb.ReadTx,
 	}
 
 	unminedTxs := []TransactionSummary{makeTxSummary(dbtx, s.wallet, details)}
+
 	unminedHashes, err := s.wallet.txStore.UnminedTxHashes(dbtx.ReadBucket(wtxmgrNamespaceKey))
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
@@ -353,6 +356,7 @@ func (s *NotificationServer) notifyAttachedBlock(dbtx walletdb.ReadTx, block *wt
 	// a new, previously unseen transaction appearing in unconfirmed.
 
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
 	unminedHashes, err := s.wallet.txStore.UnminedTxHashes(txmgrNs)
 	if err != nil {
 		log.Errorf("Cannot fetch unmined transaction hashes: %v", err)
