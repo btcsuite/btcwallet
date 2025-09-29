@@ -2,6 +2,12 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
+// Package wallet provides the AddressManager interface for generating and
+// inspecting wallet addresses and scripts.
+//
+// TODO(yy): bring wrapcheck back when implementing the `Store` interface.
+//
+//nolint:wrapcheck
 package wallet
 
 import (
