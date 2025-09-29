@@ -199,24 +199,14 @@ func (w *Wallet) NewAddress(_ context.Context, accountName string,
 // address type. This function maps a high-level address type (like P2WKH,
 // NP2WKH, P2TR) to the corresponding low-level BIP-defined key scope used for
 // derivation.
-func (w *Wallet) keyScopeFromAddrType(
-	addrType waddrmgr.AddressType) (waddrmgr.KeyScope, error) {
-
-	// Map the requested address type to its key scope.
-	var addrKeyScope waddrmgr.KeyScope
-	switch addrType {
-	case waddrmgr.WitnessPubKey:
-		addrKeyScope = waddrmgr.KeyScopeBIP0084
-	case waddrmgr.NestedWitnessPubKey:
-		addrKeyScope = waddrmgr.KeyScopeBIP0049Plus
-	case waddrmgr.TaprootPubKey:
-		addrKeyScope = waddrmgr.KeyScopeBIP0086
-	default:
-		return waddrmgr.KeyScope{}, fmt.Errorf("%w: %v",
-			ErrUnknownAddrType, addrType)
+func (w *Wallet) keyScopeFromAddrType(addrType waddrmgr.AddressType) (waddrmgr.KeyScope, error) {
+	for keyScope, schema := range waddrmgr.ScopeAddrMap {
+		if schema.ExternalAddrType == addrType || schema.InternalAddrType == addrType {
+			return keyScope, nil
+		}
 	}
 
-	return addrKeyScope, nil
+	return waddrmgr.KeyScope{}, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
 }
 
 // newAddress returns the next external chained address for a wallet. It
@@ -391,13 +381,14 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 func (w *Wallet) AddressInfo(_ context.Context,
 	a btcutil.Address) (waddrmgr.ManagedAddress, error) {
 
-	var managedAddress waddrmgr.ManagedAddress
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	var (
+		managedAddress waddrmgr.ManagedAddress
+		err            error
+	)
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		var err error
 		managedAddress, err = w.addrStore.Address(addrmgrNs, a)
-
 		return err
 	})
 
