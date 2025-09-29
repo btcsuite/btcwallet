@@ -451,7 +451,8 @@ func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
 
 	// Validate the new account name to ensure it meets the required
 	// criteria.
-	if err := waddrmgr.ValidateAccountName(newName); err != nil {
+	err = waddrmgr.ValidateAccountName(newName)
+	if err != nil {
 		return err
 	}
 
@@ -578,6 +579,11 @@ func (w *Wallet) ImportAccount(_ context.Context,
 
 // extractAddrFromPKScript extracts an address from a public key script. If the
 // script cannot be parsed or does not contain any addresses, it returns nil.
+//
+// The btcutil.Address is an interface that abstracts over different address
+// types. Returning the interface is idiomatic in this context.
+//
+//nolint:ireturn
 func extractAddrFromPKScript(pkScript []byte,
 	chainParams *chaincfg.Params) btcutil.Address {
 
