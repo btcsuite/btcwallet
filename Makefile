@@ -159,6 +159,16 @@ tidy-module:
 tidy-module-check: tidy-module
 	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run `make tidy-module` again!"; git status; exit 1; fi
 
+#? sqlc: Generate sql models and queries in Go
+sqlc:
+	@$(call print, "Generating sql models and queries in Go")
+	$(DOCKER_TOOLS) internal/db/sqldb/sqlc/sqlc_generate.sh
+
+#? sqlc-check: Make sure sql models and queries are up to date
+sqlc-check: sqlc
+	@$(call print, "Verifying sql code generation.")
+	if test -n "$$(git status --porcelain '*.go')"; then echo "SQL models not properly generated!"; git status --porcelain '*.go'; exit 1; fi
+
 .PHONY: all \
 	default \
 	build \
@@ -172,6 +182,8 @@ tidy-module-check: tidy-module
 	fmt-check \
 	tidy-module \
 	tidy-module-check \
+	sqlc \
+	sqlc-check \
 	rpc-format \
 	lint \
 	lint-config-check \
