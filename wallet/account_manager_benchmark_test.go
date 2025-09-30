@@ -147,6 +147,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := listAccountsByNameDeprecated(
 					w, accountName,
@@ -166,6 +167,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := w.ListAccountsByName(
 					b.Context(), accountName,
@@ -201,6 +203,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			count := 0
 			for b.Loop() {
 				// Generate a unique account name for each
@@ -211,6 +214,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 
 				_, err := w.NextAccount(scopes[0], accountName)
 				require.NoError(b, err)
+
 				count++
 			}
 		})
@@ -226,6 +230,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			count := 0
 			for b.Loop() {
 				// Generate a unique account name for each
@@ -238,6 +243,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 					b.Context(), scopes[0], accountName,
 				)
 				require.NoError(b, err)
+
 				count++
 			}
 		})
@@ -270,6 +276,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := getAccountDeprecated(
 					w, scopes[0], accountName,
@@ -289,6 +296,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := w.GetAccount(
 					b.Context(), scopes[0], accountName,
@@ -329,6 +337,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			count := 0
 			for b.Loop() {
 				newName2 := fmt.Sprintf("%s-%d", newName, count)
@@ -343,6 +352,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 					scopes[0], accountNumber, accountName,
 				)
 				require.NoError(b, err)
+
 				count++
 			}
 		})
@@ -358,6 +368,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			count := 0
 			for b.Loop() {
 				newName2 := fmt.Sprintf("%s-%d", newName, count)
@@ -408,6 +419,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := getBalanceDeprecated(
 					w, scopes[0], accountName,
@@ -428,6 +440,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := w.Balance(
 					b.Context(), confirmations, scopes[0],
@@ -469,6 +482,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			count := 0
 			for b.Loop() {
 				// Generate a unique account name for each
@@ -482,6 +496,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 					masterFingerprint, &addrT,
 				)
 				require.NoError(b, err)
+
 				count++
 			}
 		})
@@ -497,6 +512,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			count := 0
 			for b.Loop() {
 				// Generate a unique account name for each
@@ -510,6 +526,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 					masterFingerprint, addrT, dryRun,
 				)
 				require.NoError(b, err)
+
 				count++
 			}
 		})
