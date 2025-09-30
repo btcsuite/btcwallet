@@ -34,6 +34,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := w.Accounts(scopes[0])
 				require.NoError(b, err)
@@ -51,6 +52,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := w.ListAccountsByScope(
 					b.Context(), scopes[0],
@@ -88,6 +90,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := listAccountsDeprecated(w)
 				require.NoError(b, err)
@@ -105,6 +108,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			for b.Loop() {
 				_, err := w.ListAccounts(b.Context())
 				require.NoError(b, err)
