@@ -27,7 +27,7 @@ env:
   # updated as well.
   GO_VERSION: 1.24.6
 
-  BITCOIND_VERSION: '22.0'
+  BITCOIND_VERSION: '29'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
 
 jobs:
@@ -114,7 +114,7 @@ jobs:
         run: |-
           docker pull ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }}
           CONTAINER_ID=$(docker create ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }})
-          sudo docker cp $CONTAINER_ID:/opt/bitcoin-${{ env.BITCOIND_VERSION }}/bin/bitcoind /usr/local/bin/bitcoind
+          sudo docker cp $CONTAINER_ID:/opt/bitcoin-${{ env.BITCOIND_VERSION }}.0/bin/bitcoind /usr/local/bin/bitcoind
           docker rm $CONTAINER_ID
 
       - name: git checkout
