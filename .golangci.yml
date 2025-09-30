@@ -22,10 +22,6 @@ linters:
     # Init functions are used by loggers throughout the codebase.
     - gochecknoinits
 
-    # Disable whitespace linter as it has conflict rules against our
-    # contribution guidelines. See https://github.com/bombsimon/wsl/issues/109.
-    - wsl
-
     # Allow using default empty values.
     - exhaustruct
 
@@ -38,6 +34,9 @@ linters:
     # TODO(yy): create a list of allowed packages to import before enabling
     # this linter.
     - depguard
+
+    # Deprecated - this is replaced by wsl_v5.
+    - wsl
 
   # All available settings of specific linters.
   settings:
@@ -52,6 +51,30 @@ linters:
       lines: 100
       # Checks the number of statements in a function.
       statements: 50
+
+    wsl_v5:
+      # We adopt a more relaxed cuddling rule by enabling
+      # `allow-whole-block`. This allows a variable declaration to be
+      # "cuddled" with a following block if the variable is used anywhere
+      # within that block, not just as the first statement.
+      allow-whole-block: true
+      allow-first-in-block: false
+
+      # Disable the leading-whitespace check to resolve a conflict with the
+      # whitespace linter, which requires a blank line after a function
+      # signature. This is the standard Go style.
+      disable:
+        - leading-whitespace
+
+    lll:
+      # Max line length, lines longer will be reported.
+      # '\t' is counted as 1 character by default, and can be changed with the
+      # tab-width option. 
+      # Default: 120.
+      line-length: 80
+      # Tab width in spaces.
+      # Default: 1
+      tab-width: 8
 
     whitespace:
       multi-func: true
@@ -72,6 +95,13 @@ linters:
     # Default: strict
     generated: lax
 
+    # Which file paths to exclude: they will be analyzed, but issues from them won't be reported.
+    # "/" will be replaced by the current OS file path separator to properly work on Windows.
+    # Default: []
+    paths:
+      - rpc/legacyrpc/
+      - wallet/deprecated.go
+
     rules:
       # Exclude gosec from running for tests so that tests with weak randomness
       # (math/rand) will pass the linter.
@@ -83,6 +113,8 @@ linters:
           # Allow duplications in tests so it's easier to follow a single unit
           # test.
           - dupl
+          # Allow returning unwrapped errors in tests.
+          - wrapcheck
 
       - path: mock*
         linters:
@@ -106,3 +138,14 @@ issues:
   # Show only new issues created after git revision `REV`.
   # Default: ""
   new-from-rev: a3684825d0b7511fbc5793f0c22cbfeb6f67121f
+  # Maximum issues count per one linter.
+  # Set to 0 to disable.
+  # Default: 50
+  max-issues-per-linter: 0
+  # Maximum count of issues with the same text.
+  # Set to 0 to disable.
+  # Default: 3
+  max-same-issues: 0
+  # Make issues output unique by line.
+  # Default: true
+  uniq-by-line: false
