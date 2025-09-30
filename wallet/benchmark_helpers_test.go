@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -52,14 +53,14 @@ type benchmarkDataSize struct {
 // UTXOs. Uses dynamic padding based on maximum values for proper sorting in
 // visualization tools. If numUTXOs is 0, it's omitted from the name.
 func (b benchmarkDataSize) name() string {
-	accountDigits := len(fmt.Sprintf("%d", b.maxAccounts))
+	accountDigits := len(strconv.Itoa(b.maxAccounts))
 
 	if b.numUTXOs == 0 {
 		return fmt.Sprintf("%0*d-Accounts", accountDigits,
 			b.numAccounts)
 	}
 
-	utxoDigits := len(fmt.Sprintf("%d", b.maxUTXOs))
+	utxoDigits := len(strconv.Itoa(b.maxUTXOs))
 
 	return fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
 		accountDigits, b.numAccounts, utxoDigits, b.numUTXOs)
@@ -117,21 +118,23 @@ type benchmarkWalletConfig struct {
 
 // setupBenchmarkWallet creates a wallet with test data based on the provided
 // configuration. It distributes accounts evenly across the specified scopes.
-func setupBenchmarkWallet(t testing.TB, config benchmarkWalletConfig) *Wallet {
-	t.Helper()
+func setupBenchmarkWallet(tb testing.TB, config benchmarkWalletConfig) *Wallet {
+	tb.Helper()
 
 	// Since testWallet requires a *testing.T, we can't pass the benchmark's
 	// *testing.B. Instead, we create a dummy *testing.T and manually fail
 	// the benchmark if the setup fails.
 	dummyT := &testing.T{}
 	w, cleanup := testWallet(dummyT)
-	t.Cleanup(cleanup)
-	require.False(t, dummyT.Failed(), "testWallet setup failed")
+	tb.Cleanup(cleanup)
+	require.False(tb, dummyT.Failed(), "testWallet setup failed")
 
-	addresses := createTestAccounts(t, w, config.scopes, config.numAccounts)
+	addresses := createTestAccounts(
+		tb, w, config.scopes, config.numAccounts,
+	)
 
 	if !config.skipUTXOs && config.numUTXOs > 0 {
-		createTestUTXOs(t, w, addresses, config.numUTXOs)
+		createTestUTXOs(tb, w, addresses, config.numUTXOs)
 	}
 
 	return w
@@ -139,10 +142,10 @@ func setupBenchmarkWallet(t testing.TB, config benchmarkWalletConfig) *Wallet {
 
 // createTestAccounts creates test accounts across the specified key scopes
 // and returns all generated addresses.
-func createTestAccounts(t testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
+func createTestAccounts(tb testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
 	numAccounts int) []waddrmgr.ManagedAddress {
 
-	t.Helper()
+	tb.Helper()
 
 	var allAddresses []waddrmgr.ManagedAddress
 
@@ -158,17 +161,19 @@ func createTestAccounts(t testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
 				scopeAccounts++
 			}
 
-			if err := createAccountsInScope(
+			err := createAccountsInScope(
 				w, tx, scope, scopeAccounts, i*accountsPerScope,
 				&allAddresses,
-			); err != nil {
+			)
+			if err != nil {
 				return err
 			}
 		}
+
 		return nil
 	})
 
-	require.NoError(t, err, "failed to create test accounts: %v", err)
+	require.NoError(tb, err, "failed to create test accounts: %v", err)
 
 	return allAddresses
 }
@@ -210,10 +215,10 @@ func createAccountsInScope(w *Wallet, tx walletdb.ReadWriteTx,
 
 // createTestUTXOs creates the specified number of test UTXOs using the provided
 // addresses for benchmark data setup.
-func createTestUTXOs(t testing.TB, w *Wallet,
+func createTestUTXOs(tb testing.TB, w *Wallet,
 	addresses []waddrmgr.ManagedAddress, numUTXOs int) {
 
-	t.Helper()
+	tb.Helper()
 
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
@@ -264,9 +269,10 @@ func createTestUTXOs(t testing.TB, w *Wallet,
 			}
 
 			// Mark the output as unspent.
-			if err = w.txStore.AddCredit(
+			err = w.txStore.AddCredit(
 				txmgrNs, rec, blockMeta, 0, false,
-			); err != nil {
+			)
+			if err != nil {
 				return err
 			}
 		}
@@ -274,7 +280,7 @@ func createTestUTXOs(t testing.TB, w *Wallet,
 		return nil
 	})
 
-	require.NoError(t, err, "failed to create test UTXOs: %v", err)
+	require.NoError(tb, err, "failed to create test UTXOs: %v", err)
 }
 
 // generateAccountName generates a consistent account name and number for
@@ -313,6 +319,7 @@ func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
 
 	for _, scopeMgr := range scopeManagers {
 		scope := scopeMgr.Scope()
+
 		result, err := w.Accounts(scope)
 		if err != nil {
 			return nil, err
@@ -346,6 +353,7 @@ func listAccountsByNameDeprecated(w *Wallet,
 
 	for _, scopeMgr := range scopeManagers {
 		scope := scopeMgr.Scope()
+
 		result, err := w.Accounts(scope)
 		if err != nil {
 			return nil, err
