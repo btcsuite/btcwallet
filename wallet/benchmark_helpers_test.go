@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -17,6 +18,8 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
+
+var errAccountNotFound = errors.New("account not found")
 
 // growthFunc defines how a benchmark parameter should scale with iteration
 // index. It takes an iteration index i (0-based) and returns the parameter
@@ -316,10 +319,10 @@ func generateAccountName(numAccounts int,
 // generateTestExtendedKey generates a test extended public key for benchmarking
 // ImportAccount operations. It uses a deterministic seed based on the
 // iteration index to ensure consistent results across benchmark runs.
-func generateTestExtendedKey(t testing.TB,
+func generateTestExtendedKey(tb testing.TB,
 	i int) (*hdkeychain.ExtendedKey, uint32, waddrmgr.AddressType) {
 
-	t.Helper()
+	tb.Helper()
 
 	// Use a simple deterministic seed based on iteration index.
 	seed := make([]byte, 32)
@@ -329,20 +332,20 @@ func generateTestExtendedKey(t testing.TB,
 
 	// Create master key from seed.
 	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.TestNet3Params)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	// Derive account key for BIP0084 (m/84'/1'/i').
 	purpose, err := masterKey.Derive(hdkeychain.HardenedKeyStart + 84)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	coin, err := purpose.Derive(hdkeychain.HardenedKeyStart + 1)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	account, err := coin.Derive(hdkeychain.HardenedKeyStart + uint32(i))
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	accountPubKey, err := account.Neuter()
-	require.NoError(t, err)
+	require.NoError(tb, err)
 
 	return accountPubKey, uint32(i), waddrmgr.WitnessPubKey
 }
@@ -394,6 +397,7 @@ func listAccountsByNameDeprecated(w *Wallet,
 
 	for _, scopeMgr := range scopeManagers {
 		scope := scopeMgr.Scope()
+
 		result, err := w.Accounts(scope)
 		if err != nil {
 			return nil, err
@@ -436,7 +440,7 @@ func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 		}
 	}
 
-	return nil, fmt.Errorf("account '%s' not found", accountName)
+	return nil, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
 }
 
 // getBalanceDeprecated wraps the deprecated Accounts API to satisfy the same
@@ -459,5 +463,5 @@ func getBalanceDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 		}
 	}
 
-	return 0, fmt.Errorf("account '%s' not found", accountName)
+	return 0, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
 }
