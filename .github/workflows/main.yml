@@ -63,6 +63,9 @@ jobs:
       - name: Check RPC format
         run: make rpc-check
 
+      - name: Check SQL models
+        run: make sqlc-check
+
       - name: compile code
         run: go install -v ./...
 
