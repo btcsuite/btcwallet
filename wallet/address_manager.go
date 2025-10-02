@@ -196,17 +196,48 @@ func (w *Wallet) NewAddress(_ context.Context, accountName string,
 }
 
 // keyScopeFromAddrType determines the appropriate key scope for a given
-// address type. This function maps a high-level address type (like P2WKH,
-// NP2WKH, P2TR) to the corresponding low-level BIP-defined key scope used for
-// derivation.
-func (w *Wallet) keyScopeFromAddrType(addrType waddrmgr.AddressType) (waddrmgr.KeyScope, error) {
-	for keyScope, schema := range waddrmgr.ScopeAddrMap {
-		if schema.ExternalAddrType == addrType || schema.InternalAddrType == addrType {
-			return keyScope, nil
-		}
+// address type.
+//
+// NOTE: While it may seem intuitive to iterate over the waddrmgr.ScopeAddrMap
+// to act as a single source of truth, doing so is unsafe. The map contains
+// ambiguities where a single address type, such as waddrmgr.WitnessPubKey, can
+// map to multiple key scopes (e.g., KeyScopeBIP0084 and
+// KeyScopeBIP0049Plus). Because map iteration in Go is non-deterministic, this
+// would lead to unpredictable behavior. The switch statement is used here
+// intentionally to enforce a clear, deterministic policy, ensuring that
+// ambiguous types always resolve to their preferred, modern key scope.
+func (w *Wallet) keyScopeFromAddrType(
+	addrType waddrmgr.AddressType) (waddrmgr.KeyScope, error) {
+
+	// Map the requested address type to its key scope.
+	var addrKeyScope waddrmgr.KeyScope
+	switch addrType {
+	case waddrmgr.PubKeyHash:
+		addrKeyScope = waddrmgr.KeyScopeBIP0044
+
+	case waddrmgr.WitnessPubKey:
+		addrKeyScope = waddrmgr.KeyScopeBIP0084
+
+	case waddrmgr.NestedWitnessPubKey:
+		addrKeyScope = waddrmgr.KeyScopeBIP0049Plus
+
+	case waddrmgr.TaprootPubKey:
+		addrKeyScope = waddrmgr.KeyScopeBIP0086
+
+	// The following address types are not supported by this function as
+	// they are not derived from a single public key using a key scope.
+	// They are typically imported or involve more complex script-based
+	// constructions.
+	case waddrmgr.Script, waddrmgr.RawPubKey,
+		waddrmgr.WitnessScript, waddrmgr.TaprootScript:
+		return waddrmgr.KeyScope{}, fmt.Errorf("%w: %v",
+			ErrUnknownAddrType, addrType)
+	default:
+		return waddrmgr.KeyScope{}, fmt.Errorf("%w: %v",
+			ErrUnknownAddrType, addrType)
 	}
 
-	return waddrmgr.KeyScope{}, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
+	return addrKeyScope, nil
 }
 
 // newAddress returns the next external chained address for a wallet. It

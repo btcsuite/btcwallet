@@ -398,7 +398,9 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 	confirmations := int32(0)
 
 	for _, size := range benchmarkSizes {
-		accountName, _ := generateAccountName(size.numAccounts, scopes)
+		accountName, accountNumber := generateAccountName(
+			size.numAccounts, scopes,
+		)
 
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
@@ -412,9 +414,8 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				_, err := getBalanceDeprecated(
-					w, scopes[0], accountName,
-					confirmations,
+				_, err := w.CalculateAccountBalances(
+					accountNumber, confirmations,
 				)
 				require.NoError(b, err)
 			}

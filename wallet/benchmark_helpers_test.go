@@ -167,7 +167,6 @@ func setupBenchmarkWallet(t testing.TB, config benchmarkWalletConfig) *Wallet {
 	require.False(t, setupT.Failed(), "testWallet setup failed")
 
 	addresses := createTestAccounts(t, w, config.scopes, config.numAccounts)
-
 	if !config.skipUTXOs && config.numUTXOs > 0 {
 		createTestUTXOs(t, w, addresses, config.numUTXOs)
 	}
@@ -255,6 +254,7 @@ func createTestUTXOs(t testing.TB, w *Wallet,
 
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		msgTx := TstTx.MsgTx()
 
 		for i := 0; i < numUTXOs && i < len(addresses); i++ {
@@ -307,6 +307,12 @@ func createTestUTXOs(t testing.TB, w *Wallet,
 			); err != nil {
 				return err
 			}
+
+			if err = w.addrStore.MarkUsed(
+				addrmgrNs, addr.Address(),
+			); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -340,45 +346,65 @@ func generateAccountName(numAccounts int,
 
 // generateTestExtendedKey generates a test extended public key for benchmarking
 // ImportAccount operations. It uses a deterministic seed based on the
-// iteration index to ensure consistent results across benchmark runs.
-func generateTestExtendedKey(t testing.TB,
-	i int) (*hdkeychain.ExtendedKey, uint32, waddrmgr.AddressType) {
+// seed index to ensure consistent and unique results across benchmark runs.
+func generateTestExtendedKey(b testing.TB,
+	seedIndex int) (*hdkeychain.ExtendedKey, uint32, waddrmgr.AddressType) {
 
-	t.Helper()
+	b.Helper()
 
-	// Use a simple deterministic seed based on iteration index.
+	// Use a simple deterministic seed based on seed index.
 	seed := make([]byte, 32)
 	for j := range seed {
-		seed[j] = byte(i + j)
+		seed[j] = byte(seedIndex + j)
 	}
 
 	// Create master key from seed.
 	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.TestNet3Params)
-	require.NoError(t, err)
+	require.NoError(b, err)
 
-	// Derive account key for BIP0084 (m/84'/1'/i').
+	// Derive account key for BIP0084 (m/84'/1'/seedIndex').
 	purpose, err := masterKey.Derive(hdkeychain.HardenedKeyStart + 84)
-	require.NoError(t, err)
+	require.NoError(b, err)
 
 	coin, err := purpose.Derive(hdkeychain.HardenedKeyStart + 1)
-	require.NoError(t, err)
+	require.NoError(b, err)
 
-	account, err := coin.Derive(hdkeychain.HardenedKeyStart + uint32(i))
-	require.NoError(t, err)
+	account, err := coin.Derive(
+		hdkeychain.HardenedKeyStart + uint32(seedIndex),
+	)
+	require.NoError(b, err)
 
 	accountPubKey, err := account.Neuter()
-	require.NoError(t, err)
+	require.NoError(b, err)
 
-	return accountPubKey, uint32(i), waddrmgr.WitnessPubKey
+	return accountPubKey, uint32(seedIndex), waddrmgr.WitnessPubKey
 }
 
 // getMedianTestAddress returns a median address from a median account for
 // benchmarking purposes.
-func getTestAddress(t testing.TB, w *Wallet, numAccounts int) btcutil.Address {
+func getTestAddress(b testing.TB, w *Wallet, numAccounts int) btcutil.Address {
+	b.Helper()
 	medianAccount := uint32(numAccounts / 2)
 	addresses, err := w.AccountAddresses(medianAccount)
-	require.NoError(t, err)
+	require.NoError(b, err)
 	return addresses[len(addresses)/2]
+}
+
+// markAddressAsUsed marks an address as used in the wallet database. This is
+// useful for making benchmark iterations idempotent.
+func markAddressAsUsed(b *testing.B, w *Wallet, addr btcutil.Address) {
+	b.Helper()
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		manager, err := w.addrStore.FetchScopedKeyManager(
+			waddrmgr.KeyScopeBIP0044,
+		)
+		if err != nil {
+			return err
+		}
+		return manager.MarkUsed(addrmgrNs, addr)
+	})
+	require.NoError(b, err)
 }
 
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
