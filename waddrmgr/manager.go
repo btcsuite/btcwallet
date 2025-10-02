@@ -55,6 +55,9 @@ const (
 	// used to refer to (and only to) the default account.
 	defaultAccountName = "default"
 
+	// unknownAccountName is the string returned when an account is unknown.
+	unknownAccountName = "unknown"
+
 	// The hierarchy described by BIP0043 is:
 	//  m/<purpose>'/*
 	// This is further extended by BIP0044 to:
@@ -503,7 +506,7 @@ func (m *Manager) Close() {
 // TODO(roasbeef): addrtype of raw key means it'll look in scripts to possibly
 // mark as gucci?
 func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
-	scope KeyScope, addrSchema ScopeAddrSchema) (*ScopedKeyManager, error) {
+	scope KeyScope, addrSchema ScopeAddrSchema) (AccountStore, error) {
 
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -626,7 +629,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 // its registered scope. If the manger is found, then a nil error is returned
 // along with the active scoped manager. Otherwise, a nil manager and a non-nil
 // error will be returned.
-func (m *Manager) FetchScopedKeyManager(scope KeyScope) (*ScopedKeyManager, error) {
+func (m *Manager) FetchScopedKeyManager(scope KeyScope) (AccountStore, error) {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
@@ -641,11 +644,11 @@ func (m *Manager) FetchScopedKeyManager(scope KeyScope) (*ScopedKeyManager, erro
 
 // ActiveScopedKeyManagers returns a slice of all the active scoped key
 // managers currently known by the root key manager.
-func (m *Manager) ActiveScopedKeyManagers() []*ScopedKeyManager {
+func (m *Manager) ActiveScopedKeyManagers() []AccountStore {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
-	scopedManagers := make([]*ScopedKeyManager, 0, len(m.scopedManagers))
+	scopedManagers := make([]AccountStore, 0, len(m.scopedManagers))
 	for _, smgr := range m.scopedManagers {
 		scopedManagers = append(scopedManagers, smgr)
 	}
@@ -751,7 +754,7 @@ func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket, address btcutil.Address)
 // AddrAccount returns the account to which the given address belongs. We also
 // return the scoped manager that owns the addr+account combo.
 func (m *Manager) AddrAccount(ns walletdb.ReadBucket,
-	address btcutil.Address) (*ScopedKeyManager, uint32, error) {
+	address btcutil.Address) (AccountStore, uint32, error) {
 
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
@@ -776,6 +779,53 @@ func (m *Manager) AddrAccount(ns walletdb.ReadBucket,
 	// any of the managers, so we'll exit with an error.
 	str := fmt.Sprintf("unable to find key for addr %v", address)
 	return nil, 0, managerError(ErrAddressNotFound, str, nil)
+}
+
+// AddressDetails determines whether the wallet has access to the private keys
+// required to sign for a given address, and returns other address details.
+func (m *Manager) AddressDetails(ns walletdb.ReadBucket,
+	addr btcutil.Address) (bool, string, AddressType) {
+
+	managedAddr, err := m.Address(ns, addr)
+	if err != nil {
+		// If we don't know the address, we can't spend it.
+		return false, unknownAccountName, 0
+	}
+
+	addrType := managedAddr.AddrType()
+
+	// A global watch-only wallet can't spend anything.
+	if m.WatchOnly() {
+		return false, unknownAccountName, addrType
+	}
+
+	// Imported addresses are considered unspendable by policy.
+	if managedAddr.Imported() {
+		return false, ImportedAddrAccountName, addrType
+	}
+
+	// Check if the specific account for this address is watch-only.
+	scopedMgr, account, err := m.AddrAccount(ns, addr)
+	if err != nil {
+		return false, unknownAccountName, addrType
+	}
+
+	accountName, err := scopedMgr.AccountName(ns, account)
+	if err != nil {
+		return false, unknownAccountName, addrType
+	}
+
+	isWatchOnlyAccount, err := scopedMgr.IsWatchOnlyAccount(ns, account)
+	if err != nil {
+		return false, accountName, addrType
+	}
+
+	if isWatchOnlyAccount {
+		return false, accountName, addrType
+	}
+
+	// If all checks pass, the address is spendable.
+	return true, accountName, addrType
 }
 
 // ForEachActiveAccountAddress calls the given function with each active

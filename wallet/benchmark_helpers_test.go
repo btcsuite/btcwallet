@@ -135,8 +135,7 @@ func setupBenchmarkWallet(tb testing.TB, config benchmarkWalletConfig) *Wallet {
 	// *testing.B. Instead, we create a dummy *testing.T and manually fail
 	// the benchmark if the setup fails.
 	dummyT := &testing.T{}
-	w, cleanup := testWallet(dummyT)
-	tb.Cleanup(cleanup)
+	w := testWallet(dummyT)
 	require.False(tb, dummyT.Failed(), "testWallet setup failed")
 
 	addresses := createTestAccounts(

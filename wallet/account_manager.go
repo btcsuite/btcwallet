@@ -775,7 +775,7 @@ func (w *Wallet) fetchAccountBalances(tx walletdb.ReadTx,
 // that we can efficiently gather all necessary data in distinct phases, rather
 // than mixing database reads and balance calculations in a less efficient
 // manner.
-func listAccountsWithBalances(scopeMgr *waddrmgr.ScopedKeyManager,
+func listAccountsWithBalances(scopeMgr waddrmgr.AccountStore,
 	addrmgrNs walletdb.ReadBucket,
 	accountBalances map[uint32]btcutil.Amount) ([]AccountResult, error) {
 
