@@ -189,7 +189,8 @@ func (w *Wallet) validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	return nil
 }
 
-// ImportAccount imports an account backed by an account extended public key.
+// ImportAccountDeprecated imports an account backed by an account extended
+// public key.
 // The master key fingerprint denotes the fingerprint of the root key
 // corresponding to the account public key (also known as the key with
 // derivation path m/). This may be required by some hardware wallets for proper
@@ -208,7 +209,8 @@ func (w *Wallet) validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 // distinction between the traditional BIP-0049 address schema (nested witness
 // pubkeys everywhere) and our own BIP-0049Plus address schema (nested
 // externally, witness internally).
-func (w *Wallet) ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKey,
+func (w *Wallet) ImportAccountDeprecated(
+	name string, accountPubKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType *waddrmgr.AddressType) (
 	*waddrmgr.AccountProperties, error) {
 
@@ -278,9 +280,9 @@ func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
 	keyScope waddrmgr.KeyScope, addrSchema *waddrmgr.ScopeAddrSchema) (
 	*waddrmgr.AccountProperties, error) {
 
-	scopedMgr, err := w.Manager.FetchScopedKeyManager(keyScope)
+	scopedMgr, err := w.addrStore.FetchScopedKeyManager(keyScope)
 	if err != nil {
-		scopedMgr, err = w.Manager.NewScopedKeyManager(
+		scopedMgr, err = w.addrStore.NewScopedKeyManager(
 			ns, keyScope, *addrSchema,
 		)
 		if err != nil {
@@ -341,7 +343,7 @@ func (w *Wallet) ImportAccountDryRun(name string,
 		// we go through the ScopedKeyManager instead to ensure
 		// addresses will be derived as expected from the wallet's
 		// point-of-view.
-		manager, err := w.Manager.FetchScopedKeyManager(
+		manager, err := w.addrStore.FetchScopedKeyManager(
 			accountProps.KeyScope,
 		)
 		if err != nil {
@@ -391,7 +393,7 @@ func (w *Wallet) ImportAccountDryRun(name string,
 // case of legacy versions (xpub, tpub), an address type must be specified as we
 // intend to not support importing BIP-44 keys into the wallet using the legacy
 // pay-to-pubkey-hash (P2PKH) scheme.
-func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
+func (w *Wallet) ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
 	// Determine what key scope the public key should belong to and import
@@ -411,7 +413,7 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 		return fmt.Errorf("address type %v is not supported", addrType)
 	}
 
-	scopedKeyManager, err := w.Manager.FetchScopedKeyManager(keyScope)
+	scopedKeyManager, err := w.addrStore.FetchScopedKeyManager(keyScope)
 	if err != nil {
 		return err
 	}
@@ -438,14 +440,16 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 	return nil
 }
 
-// ImportTaprootScript imports a user-provided taproot script into the address
-// manager. The imported script will act as a pay-to-taproot address.
-func (w *Wallet) ImportTaprootScript(scope waddrmgr.KeyScope,
+// ImportTaprootScriptDeprecated imports a user-provided taproot script into the
+// address manager. The imported script will act as a pay-to-taproot address.
+//
+// Deprecated: Use AddressManager.ImportTaprootScript instead.
+func (w *Wallet) ImportTaprootScriptDeprecated(scope waddrmgr.KeyScope,
 	tapscript *waddrmgr.Tapscript, bs *waddrmgr.BlockStamp,
 	witnessVersion byte, isSecretScript bool) (waddrmgr.ManagedAddress,
 	error) {
 
-	manager, err := w.Manager.FetchScopedKeyManager(scope)
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +503,7 @@ func (w *Wallet) ImportTaprootScript(scope waddrmgr.KeyScope,
 func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 	bs *waddrmgr.BlockStamp, rescan bool) (string, error) {
 
-	manager, err := w.Manager.FetchScopedKeyManager(scope)
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
 		return "", err
 	}
@@ -542,7 +546,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		// before our current one. Otherwise, if we do, we can
 		// potentially miss detecting relevant chain events that
 		// occurred between them while rescanning.
-		birthdayBlock, _, err := w.Manager.BirthdayBlock(addrmgrNs)
+		birthdayBlock, _, err := w.addrStore.BirthdayBlock(addrmgrNs)
 		if err != nil {
 			return err
 		}
@@ -550,7 +554,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 			return nil
 		}
 
-		err = w.Manager.SetBirthday(addrmgrNs, bs.Timestamp)
+		err = w.addrStore.SetBirthday(addrmgrNs, bs.Timestamp)
 		if err != nil {
 			return err
 		}
@@ -558,7 +562,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		// To ensure this birthday block is correct, we'll mark it as
 		// unverified to prompt a sanity check at the next restart to
 		// ensure it is correct as it was provided by the caller.
-		return w.Manager.SetBirthdayBlock(addrmgrNs, *bs, false)
+		return w.addrStore.SetBirthdayBlock(addrmgrNs, *bs, false)
 	})
 	if err != nil {
 		return "", err

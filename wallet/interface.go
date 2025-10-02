@@ -112,14 +112,22 @@ type Interface interface {
 	AccountManagedAddresses(scope waddrmgr.KeyScope,
 		accountNum uint32) ([]waddrmgr.ManagedAddress, error)
 
-	// RenameAccount renames an existing account. It is an error to rename
-	// a reserved account or to choose a name that is already in use.
-	RenameAccount(scope waddrmgr.KeyScope, account uint32,
+	// RenameAccountDeprecated renames an existing account. It is an error
+	// to rename a reserved account or to choose a name that is already in
+	// use.
+	//
+	// Deprecated: Use AccountManager.RenameAccount instead.
+	RenameAccountDeprecated(scope waddrmgr.KeyScope, account uint32,
 		newName string) error
 
-	// ImportAccount imports an account backed by an extended public key.
+	// ImportAccountDeprecated imports an account backed by an extended
+	// public key.
+	//
 	// This creates a watch-only account.
-	ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKey,
+	//
+	// Deprecated: Use AccountManager.ImportAccount instead.
+	ImportAccountDeprecated(name string,
+		accountPubKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType *waddrmgr.AddressType,
 	) (*waddrmgr.AccountProperties, error)
 
@@ -146,8 +154,12 @@ type Interface interface {
 	CurrentAddress(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
-	// NewAddress returns a new address for a given account and scope.
-	NewAddress(account uint32, scope waddrmgr.KeyScope) (
+	// NewAddressDeprecated returns a new address for a given account and
+	// scope.
+	//
+	// Deprecated: This method will be removed in a future release. Use the
+	// AddressManager interface instead.
+	NewAddressDeprecated(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
 	// NewChangeAddress returns a new change address for a given account
@@ -155,19 +167,31 @@ type Interface interface {
 	NewChangeAddress(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
-	// AddressInfo returns detailed information about a managed address,
-	// including its derivation path and whether it's compressed.
-	AddressInfo(a btcutil.Address) (waddrmgr.ManagedAddress, error)
+	// AddressInfoDeprecated returns detailed information about a managed
+	// address, including its derivation path and whether it's compressed.
+	//
+	// Deprecated: This method leaks internal waddrmgr types. Callers
+	// should use specific methods such as AccountOfAddress,
+	// IsInternalAddress, etc. instead.
+	AddressInfoDeprecated(a btcutil.Address) (
+		waddrmgr.ManagedAddress, error,
+	)
 
 	// HaveAddress returns whether the wallet is the owner of the address.
 	HaveAddress(a btcutil.Address) (bool, error)
 
-	// ImportPublicKey imports a public key as a watch-only address.
-	ImportPublicKey(pubKey *btcec.PublicKey,
+	// ImportPublicKeyDeprecated imports a public key as a watch-only
+	// address.
+	//
+	// Deprecated: Use AddressManager.ImportPublicKey instead.
+	ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
 		addrType waddrmgr.AddressType) error
 
-	// ImportTaprootScript imports a taproot script into the wallet.
-	ImportTaprootScript(scope waddrmgr.KeyScope,
+	// ImportTaprootScriptDeprecated imports a taproot script into the
+	// wallet.
+	//
+	// Deprecated: Use AddressManager.ImportTaprootScript instead.
+	ImportTaprootScriptDeprecated(scope waddrmgr.KeyScope,
 		tapscript *waddrmgr.Tapscript, bs *waddrmgr.BlockStamp,
 		witnessVersion byte, isSecretScript bool) (
 		waddrmgr.ManagedAddress, error)
@@ -305,18 +329,20 @@ type Interface interface {
 	DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 		path waddrmgr.DerivationPath) (*btcec.PrivateKey, error)
 
-	// ComputeInputScript generates a complete InputScript for the passed
-	// transaction with the signature as defined within the passed
-	// SignDescriptor.
+	// ComputeInputScript generates a complete InputScript for the
+	// passed transaction with the signature as defined within the
+	// passed SignDescriptor.
 	ComputeInputScript(tx *wire.MsgTx, output *wire.TxOut,
 		inputIndex int, sigHashes *txscript.TxSigHashes,
 		hashType txscript.SigHashType,
 		tweaker PrivKeyTweaker) (wire.TxWitness, []byte, error)
 
-	// ScriptForOutput returns the address, witness program and redeem
-	// script for a given UTXO.
-	ScriptForOutput(output *wire.TxOut) (waddrmgr.ManagedPubKeyAddress,
-		[]byte, []byte, error)
+	// ScriptForOutputDeprecated returns the address, witness program and
+	// redeem script for a given UTXO.
+	//
+	// Deprecated: Use AddressManager.ScriptForOutput instead.
+	ScriptForOutputDeprecated(output *wire.TxOut) (
+		waddrmgr.ManagedPubKeyAddress, []byte, []byte, error)
 }
 
 // A compile time check to ensure that Wallet implements the interface.

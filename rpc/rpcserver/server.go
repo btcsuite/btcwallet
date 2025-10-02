@@ -188,7 +188,10 @@ func (s *walletServer) Accounts(ctx context.Context, req *pb.AccountsRequest) (
 func (s *walletServer) RenameAccount(ctx context.Context, req *pb.RenameAccountRequest) (
 	*pb.RenameAccountResponse, error) {
 
-	err := s.wallet.RenameAccount(waddrmgr.KeyScopeBIP0044, req.AccountNumber, req.NewName)
+	err := s.wallet.RenameAccountDeprecated(
+		waddrmgr.KeyScopeBIP0044, req.GetAccountNumber(),
+		req.GetNewName(),
+	)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -231,7 +234,9 @@ func (s *walletServer) NextAddress(ctx context.Context, req *pb.NextAddressReque
 	)
 	switch req.Kind {
 	case pb.NextAddressRequest_BIP0044_EXTERNAL:
-		addr, err = s.wallet.NewAddress(req.Account, waddrmgr.KeyScopeBIP0044)
+		addr, err = s.wallet.NewAddressDeprecated(
+			req.GetAccount(), waddrmgr.KeyScopeBIP0044,
+		)
 	case pb.NextAddressRequest_BIP0044_INTERNAL:
 		addr, err = s.wallet.NewChangeAddress(req.Account, waddrmgr.KeyScopeBIP0044)
 	default:

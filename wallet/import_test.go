@@ -125,9 +125,9 @@ var (
 	}}
 )
 
-// TestImportAccount tests that extended public keys can successfully be
-// imported into both watch only and normal wallets.
-func TestImportAccount(t *testing.T) {
+// TestImportAccountDeprecated tests that extended public keys can successfully
+// be imported into both watch only and normal wallets.
+func TestImportAccountDeprecated(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range testCases {
@@ -192,19 +192,19 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, tc.expectedChangeAddr, intAddrs[0].Address().String())
 
 	// Import the extended public keys into new accounts.
-	acct1, err := w.ImportAccount(
+	acct1, err := w.ImportAccountDeprecated(
 		name+"1", acct1Pub, root.ParentFingerprint(), &tc.addrType,
 	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedScope, acct1.KeyScope)
 
-	acct2, err := w.ImportAccount(
+	acct2, err := w.ImportAccountDeprecated(
 		name+"2", acct2Pub, root.ParentFingerprint(), &tc.addrType,
 	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedScope, acct2.KeyScope)
 
-	err = w.ImportPublicKey(acct3ExternalPub, tc.addrType)
+	err = w.ImportPublicKeyDeprecated(acct3ExternalPub, tc.addrType)
 	require.NoError(t, err)
 
 	// If the wallet is watch only, there is no default account and our
@@ -243,7 +243,9 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(0), acct2.ImportedKeyCount)
 
 	// Test address derivation.
-	extAddr, err := w.NewAddress(acct1.AccountNumber, tc.expectedScope)
+	extAddr, err := w.NewAddressDeprecated(
+		acct1.AccountNumber, tc.expectedScope,
+	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedAddr, extAddr.String())
 	intAddr, err := w.NewChangeAddress(acct1.AccountNumber, tc.expectedScope)
@@ -257,7 +259,8 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(1), acct1.ExternalKeyCount)
 	require.Equal(t, uint32(0), acct1.ImportedKeyCount)
 
-	// Make sure we can't get private keys for the imported accounts.
+	// Make sure we can't get private keys for the imported
+	// accounts.
 	_, err = w.DumpWIFPrivateKey(intAddr)
 	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrWatchingOnly))
 
@@ -289,7 +292,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		t.Fatalf("unhandled address type %v", tc.addrType)
 	}
 
-	addrManaged, err := w.AddressInfo(intAddr)
+	addrManaged, err := w.AddressInfoDeprecated(intAddr)
 	require.NoError(t, err)
 	require.Equal(t, true, addrManaged.Imported())
 }
