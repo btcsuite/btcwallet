@@ -16,13 +16,20 @@ var defaultDBTimeout = 10 * time.Second
 
 // testWallet creates a test wallet and unlocks it.
 func testWallet(t *testing.T) (*Wallet, func()) {
-	// Set up a wallet.
-	dir := t.TempDir()
-
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.MinSeedBytes)
 	if err != nil {
 		t.Fatalf("unable to create seed: %v", err)
 	}
+
+	return testWalletWithSeed(t, seed)
+}
+
+// testWalletWithSeed creates a test wallet with the given seed and unlocks it.
+func testWalletWithSeed(t *testing.T, seed []byte) (*Wallet, func()) {
+	t.Helper()
+
+	// Set up a wallet.
+	dir := t.TempDir()
 
 	pubPass := []byte("hello")
 	privPass := []byte("world")
