@@ -335,3 +335,38 @@ func TestEquivalence_ImportTaprootScript(t *testing.T) {
 	require.True(t, newHave)
 	require.True(t, oldHave)
 }
+
+// TestEquivalence_ScriptForOutput compares the ScriptForOutput results from
+// the new and deprecated APIs.
+func TestEquivalence_ScriptForOutput(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	t.Cleanup(cleanup)
+
+	addr, err := w.NewAddress(
+		context.Background(),
+		"default",
+		waddrmgr.WitnessPubKey,
+		false,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	out := wire.TxOut{
+		Value:    1000,
+		PkScript: pkScript,
+	}
+
+	var am AddressManager = w
+
+	scriptNew, err := am.ScriptForOutput(context.Background(), out)
+	require.NoError(t, err)
+
+	_, wpOld, rsOld, err := w.ScriptForOutputDeprecated(&out)
+	require.NoError(t, err)
+
+	require.Equal(t, wpOld, scriptNew.WitnessProgram)
+	require.Equal(t, rsOld, scriptNew.RedeemScript)
+}
