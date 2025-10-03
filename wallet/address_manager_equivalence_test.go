@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -231,4 +232,47 @@ func TestEquivalence_AddressInfo(t *testing.T) {
 			require.Equal(t, infoOld.AddrType(), infoNew.AddrType())
 		})
 	}
+}
+
+// TestEquivalence_ImportPublicKey compares importing a public key with the new
+// and deprecated APIs.
+func TestEquivalence_ImportPublicKey(t *testing.T) {
+	t.Parallel()
+
+	seed := bytes.Repeat([]byte{0x11}, 32)
+	wNewWallet, cleanup := testWalletWithSeed(t, seed)
+	t.Cleanup(cleanup)
+
+	var wNew AddressManager = wNewWallet
+
+	wOld, cleanupOld := testWalletWithSeed(t, seed)
+	t.Cleanup(cleanupOld)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	err = wNew.ImportPublicKey(
+		context.Background(),
+		pubKey,
+		waddrmgr.WitnessPubKey,
+	)
+	require.NoError(t, err)
+
+	err = wOld.ImportPublicKeyDeprecated(pubKey, waddrmgr.WitnessPubKey)
+	require.NoError(t, err)
+
+	expAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()),
+		wNewWallet.chainParams,
+	)
+	require.NoError(t, err)
+
+	newHave, err := wNewWallet.HaveAddress(expAddr)
+	require.NoError(t, err)
+	oldHave, err := wOld.HaveAddress(expAddr)
+	require.NoError(t, err)
+	require.True(t, newHave)
+	require.True(t, oldHave)
 }
