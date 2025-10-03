@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -272,6 +273,64 @@ func TestEquivalence_ImportPublicKey(t *testing.T) {
 	newHave, err := wNewWallet.HaveAddress(expAddr)
 	require.NoError(t, err)
 	oldHave, err := wOld.HaveAddress(expAddr)
+	require.NoError(t, err)
+	require.True(t, newHave)
+	require.True(t, oldHave)
+}
+
+// TestEquivalence_ImportTaprootScript compares importing a taproot script with
+// the new and deprecated APIs.
+func TestEquivalence_ImportTaprootScript(t *testing.T) {
+	t.Parallel()
+
+	seed := bytes.Repeat([]byte{0x33}, 32)
+	wNewWallet, cleanup := testWalletWithSeed(t, seed)
+	t.Cleanup(cleanup)
+
+	var wNew AddressManager = wNewWallet
+
+	wOld, cleanupOld := testWalletWithSeed(t, seed)
+	t.Cleanup(cleanupOld)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	script, err := txscript.NewScriptBuilder().
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_CHECKSIG).Script()
+	require.NoError(t, err)
+
+	leaf := txscript.NewTapLeaf(txscript.BaseLeafVersion, script)
+	tree := txscript.AssembleTaprootScriptTree(leaf)
+	rootHash := tree.RootNode.TapHash()
+
+	tapscript := waddrmgr.Tapscript{
+		Type: waddrmgr.TapscriptTypeFullTree,
+		ControlBlock: &txscript.ControlBlock{
+			InternalKey: pubKey,
+		},
+		Leaves: []txscript.TapLeaf{leaf},
+	}
+
+	_, err = wNew.ImportTaprootScript(context.Background(), tapscript)
+	require.NoError(t, err)
+
+	_, err = wOld.ImportTaprootScriptDeprecated(
+		waddrmgr.KeyScopeBIP0086, &tapscript, nil, 1, false,
+	)
+	require.NoError(t, err)
+
+	outKey := txscript.ComputeTaprootOutputKey(pubKey, rootHash[:])
+	trAddr, err := btcutil.NewAddressTaproot(
+		schnorr.SerializePubKey(outKey), wNewWallet.chainParams,
+	)
+	require.NoError(t, err)
+
+	newHave, err := wNewWallet.HaveAddress(trAddr)
+	require.NoError(t, err)
+	oldHave, err := wOld.HaveAddress(trAddr)
 	require.NoError(t, err)
 	require.True(t, newHave)
 	require.True(t, oldHave)
