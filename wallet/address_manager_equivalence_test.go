@@ -175,3 +175,60 @@ func TestEquivalence_GetUnusedAddress(t *testing.T) {
 		markAddressAsUsed(t, wOld, aOld, 1000)
 	}
 }
+
+// TestEquivalence_AddressInfo compares AddressInfo results from the new and
+// deprecated APIs.
+func TestEquivalence_AddressInfo(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	t.Cleanup(cleanup)
+
+	cases := []struct {
+		name     string
+		addrType waddrmgr.AddressType
+		change   bool
+	}{
+		{"p2wkh-external", waddrmgr.WitnessPubKey, false},
+		{"p2wkh-internal", waddrmgr.WitnessPubKey, true},
+		{"np2wkh-external", waddrmgr.NestedWitnessPubKey, false},
+		{"np2wkh-internal", waddrmgr.NestedWitnessPubKey, true},
+		{"p2tr-external", waddrmgr.TaprootPubKey, false},
+		{"p2tr-internal", waddrmgr.TaprootPubKey, true},
+		{"p2pkh-external", waddrmgr.PubKeyHash, false},
+		{"p2pkh-internal", waddrmgr.PubKeyHash, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			addr, err := w.NewAddress(
+				context.Background(),
+				"default",
+				tc.addrType,
+				tc.change,
+			)
+			require.NoError(t, err)
+
+			infoNew, err := w.AddressInfo(
+				context.Background(), addr,
+			)
+			require.NoError(t, err)
+			infoOld, err := w.AddressInfoDeprecated(addr)
+			require.NoError(t, err)
+
+			require.Equal(
+				t,
+				infoOld.Address().String(),
+				infoNew.Address().String(),
+			)
+			require.Equal(t, infoOld.Internal(), infoNew.Internal())
+			require.Equal(
+				t, infoOld.Compressed(), infoNew.Compressed(),
+			)
+			require.Equal(t, infoOld.Imported(), infoNew.Imported())
+			require.Equal(t, infoOld.AddrType(), infoNew.AddrType())
+		})
+	}
+}
