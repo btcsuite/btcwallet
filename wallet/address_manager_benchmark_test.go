@@ -461,3 +461,71 @@ func BenchmarkImportTaprootScriptAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkScriptForOutputAPI benchmarks ScriptForOutput API and its deprecated
+// variant ScriptForOutputDeprecated using identical TxOut datasets across
+// multiple dataset sizes. Test names start with dataset size to group API
+// comparisons for benchstat analysis. The benchmark demonstrates that the new
+// API maintains performance parity with the deprecated API.
+func BenchmarkScriptForOutputAPI(b *testing.B) {
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
+		benchmarkConfig{
+			accountGrowth: constantGrowth,
+			utxoGrowth:    constantGrowth,
+			addressGrowth: exponentialGrowth,
+			maxIterations: 10,
+			startIndex:    0,
+		},
+	)
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			testAddr := getTestAddress(b, w, size.numAccounts)
+			testTxOut := generateTestTxOut(b, testAddr)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, _, _, err := w.ScriptForOutputDeprecated(
+					&testTxOut,
+				)
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			testAddr := getTestAddress(b, w, size.numAccounts)
+			testTxOut := generateTestTxOut(b, testAddr)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := w.ScriptForOutput(
+					b.Context(), testTxOut,
+				)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
