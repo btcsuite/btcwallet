@@ -448,6 +448,20 @@ func generateTestTapscript(tb testing.TB,
 	}
 }
 
+// generateTestTxOut generates a test TxOut for benchmarking purposes.
+// It creates a TxOut with the provided address as the PkScript.
+func generateTestTxOut(tb testing.TB, addr btcutil.Address) wire.TxOut {
+	tb.Helper()
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(tb, err)
+
+	return wire.TxOut{
+		Value:    1e8,
+		PkScript: pkScript,
+	}
+}
+
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts API across all active key scopes
 // and aggregating the results.
