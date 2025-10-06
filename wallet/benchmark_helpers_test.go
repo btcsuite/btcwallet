@@ -401,6 +401,26 @@ func getTestAddress(tb testing.TB, w *Wallet, numAccounts int) btcutil.Address {
 	return addresses[len(addresses)/2]
 }
 
+// markAddressAsUsed marks an address as used in the wallet database. This is
+// useful for making benchmark iterations idempotent.
+func markAddressAsUsed(b *testing.B, w *Wallet, addr btcutil.Address) {
+	b.Helper()
+
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		manager, err := w.addrStore.FetchScopedKeyManager(
+			waddrmgr.KeyScopeBIP0044,
+		)
+		if err != nil {
+			return err
+		}
+
+		return manager.MarkUsed(addrmgrNs, addr)
+	})
+	require.NoError(b, err)
+}
+
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts API across all active key scopes
 // and aggregating the results.
