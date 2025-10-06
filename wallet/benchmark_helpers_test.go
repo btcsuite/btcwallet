@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -420,6 +421,32 @@ func markAddressAsUsed(b *testing.B, w *Wallet, addr address.Address) {
 		return manager.MarkUsed(addrmgrNs, addr)
 	})
 	require.NoError(b, err)
+}
+
+// generateTestTapscript generates a test tapscript for benchmarking purposes.
+// It creates a simple script that checks a signature against the provided
+// public key, wraps it in a tap leaf, and returns a complete Tapscript
+// structure ready for import.
+func generateTestTapscript(tb testing.TB,
+	pubKey *btcec.PublicKey) waddrmgr.Tapscript {
+
+	tb.Helper()
+
+	script, err := txscript.NewScriptBuilder().
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_CHECKSIG).
+		Script()
+	require.NoError(tb, err)
+
+	leaf := txscript.NewTapLeaf(txscript.BaseLeafVersion, script)
+
+	return waddrmgr.Tapscript{
+		Type: waddrmgr.TapscriptTypeFullTree,
+		ControlBlock: &txscript.ControlBlock{
+			InternalKey: pubKey,
+		},
+		Leaves: []txscript.TapLeaf{leaf},
+	}
 }
 
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
