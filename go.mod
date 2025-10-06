@@ -31,6 +31,7 @@ require (
 	golang.org/x/term v0.35.0
 	google.golang.org/grpc v1.75.0
 	google.golang.org/protobuf v1.36.9
+	modernc.org/sqlite v1.38.2
 )
 
 require (
@@ -92,7 +93,6 @@ require (
 	modernc.org/libc v1.66.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.38.2 // indirect
 )
 
 tool github.com/sqlc-dev/sqlc/cmd/sqlc
