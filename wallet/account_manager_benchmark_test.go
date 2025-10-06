@@ -13,7 +13,7 @@ import (
 // multiple dataset sizes. Test names start with dataset size to group API
 // comparisons for benchstat analysis.
 func BenchmarkListAccountsByScopeAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
 			utxoGrowth:    exponentialGrowth,
@@ -24,7 +24,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
 
 	for _, size := range benchmarkSizes {
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -42,7 +42,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -69,7 +69,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 // sizes. Test names start with dataset size to group API comparisons for
 // benchstat analysis.
 func BenchmarkListAccountsAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
 			utxoGrowth:    exponentialGrowth,
@@ -80,7 +80,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 	scopes := waddrmgr.DefaultKeyScopes
 
 	for _, size := range benchmarkSizes {
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -98,7 +98,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -123,7 +123,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 // multiple dataset sizes. Test names start with dataset size to group API
 // comparisons for benchstat analysis.
 func BenchmarkListAccountsByNameAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
 			utxoGrowth:    exponentialGrowth,
@@ -136,7 +136,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 	for _, size := range benchmarkSizes {
 		accountName, _ := generateAccountName(size.numAccounts, scopes)
 
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -156,7 +156,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -183,7 +183,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 // names start with dataset size to group API comparisons for benchstat
 // analysis.
 func BenchmarkNewAccountAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: linearGrowth,
 		utxoGrowth:    constantGrowth,
 		maxIterations: 10,
@@ -192,7 +192,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
 
 	for _, size := range benchmarkSizes {
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -219,7 +219,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -254,7 +254,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 // using identical account lookups across multiple dataset sizes. Test names
 // start with dataset size to group API comparisons for benchstat analysis.
 func BenchmarkGetAccountAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: exponentialGrowth,
 		utxoGrowth:    exponentialGrowth,
 		maxIterations: 14,
@@ -265,7 +265,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 	for _, size := range benchmarkSizes {
 		accountName, _ := generateAccountName(size.numAccounts, scopes)
 
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -285,7 +285,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -312,7 +312,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 // dataset sizes. Test names start with dataset size to group API comparisons
 // for benchstat analysis.
 func BenchmarkRenameAccountAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: exponentialGrowth,
 		utxoGrowth:    constantGrowth,
 		maxIterations: 11,
@@ -326,7 +326,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 		)
 		newName := accountName + "-renamed"
 
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -357,7 +357,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -396,7 +396,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 // using identical balance lookups across multiple dataset sizes. Test names
 // start with dataset size to group API comparisons for benchstat analysis.
 func BenchmarkGetBalanceAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: linearGrowth,
 		utxoGrowth:    exponentialGrowth,
 		maxIterations: 14,
@@ -408,7 +408,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 	for _, size := range benchmarkSizes {
 		accountName, _ := generateAccountName(size.numAccounts, scopes)
 
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -429,7 +429,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -457,7 +457,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 // across multiple dataset sizes. Test names start with dataset size to group
 // API comparisons for benchstat analysis.
 func BenchmarkImportAccountAPI(b *testing.B) {
-	benchmarkSizes := generateBenchmarkSizes(benchmarkConfig{
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: linearGrowth,
 		utxoGrowth:    constantGrowth,
 		maxIterations: 10,
@@ -471,7 +471,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 			b, size.numAccounts,
 		)
 
-		b.Run(size.name()+"/0-Before", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
@@ -501,7 +501,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name()+"/1-After", func(b *testing.B) {
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:      scopes,
