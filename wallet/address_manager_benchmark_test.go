@@ -278,3 +278,90 @@ func BenchmarkNewAddressAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkImportPublicKeyAPI benchmarks ImportPublicKey API and its deprecated
+// variant ImportPublicKeyDeprecated using identical public key datasets across
+// multiple dataset sizes. Test names start with dataset size to group API
+// comparisons for benchstat analysis. The benchmark demonstrates that the new
+// API maintains performance parity with the deprecated API.
+func BenchmarkImportPublicKeyAPI(b *testing.B) {
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
+		benchmarkConfig{
+			accountGrowth: linearGrowth,
+			utxoGrowth:    constantGrowth,
+			addressGrowth: linearGrowth,
+			maxIterations: 14,
+			startIndex:    0,
+		},
+	)
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	addrType := waddrmgr.WitnessPubKey
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			iterCount := 0
+			for b.Loop() {
+				// Generate a unique key for each iteration to
+				// avoid in-memory cache collision and for an
+				// idempotent benchmark iteration test.
+				seedIndex := size.numAccounts + iterCount
+				key, _, _ := generateTestExtendedKey(
+					b, seedIndex,
+				)
+				pubKey, err := key.ECPubKey()
+				require.NoError(b, err)
+
+				err = w.ImportPublicKeyDeprecated(
+					pubKey, addrType,
+				)
+				require.NoError(b, err)
+
+				iterCount++
+			}
+		})
+
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			iterCount := 0
+			for b.Loop() {
+				// Generate a unique key for each iteration to
+				// avoid in-memory cache collision and for an
+				// idempotent benchmark iteration test.
+				seedIndex := size.numAccounts + iterCount
+				key, _, _ := generateTestExtendedKey(
+					b, seedIndex,
+				)
+				pubKey, err := key.ECPubKey()
+				require.NoError(b, err)
+
+				err = w.ImportPublicKey(
+					b.Context(), pubKey, addrType,
+				)
+				require.NoError(b, err)
+
+				iterCount++
+			}
+		})
+	}
+}
