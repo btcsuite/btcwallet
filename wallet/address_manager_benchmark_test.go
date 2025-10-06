@@ -72,3 +72,64 @@ func BenchmarkListAddressesAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkAddressInfoAPI benchmarks AddressInfo API and its deprecated
+// variant using same key scope and identical test data across multiple
+// dataset sizes. Test names start with dataset size to group API comparisons
+// for benchstat analysis.
+func BenchmarkAddressInfoAPI(b *testing.B) {
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
+		benchmarkConfig{
+			accountGrowth: linearGrowth,
+			utxoGrowth:    constantGrowth,
+			addressGrowth: exponentialGrowth,
+			maxIterations: 14,
+			startIndex:    0,
+		},
+	)
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			testAddr := getTestAddress(b, w, size.numAccounts)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := w.AddressInfoDeprecated(testAddr)
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			testAddr := getTestAddress(b, w, size.numAccounts)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := w.AddressInfo(b.Context(), testAddr)
+				require.NoError(b, err)
+			}
+		})
+	}
+}

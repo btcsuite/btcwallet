@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -387,6 +388,18 @@ func generateTestExtendedKey(tb testing.TB,
 	require.NoError(tb, err)
 
 	return accountPubKey, uint32(seedIndex), waddrmgr.WitnessPubKey
+}
+
+// getMedianTestAddress returns a median address from a median account for
+// benchmarking purposes.
+func getTestAddress(tb testing.TB, w *Wallet, numAccounts int) address.Address {
+	tb.Helper()
+
+	medianAccount := uint32(numAccounts / 2)
+	addresses, err := w.AccountAddresses(medianAccount)
+	require.NoError(tb, err)
+
+	return addresses[len(addresses)/2]
 }
 
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
