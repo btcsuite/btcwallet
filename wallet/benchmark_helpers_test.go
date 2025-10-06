@@ -51,6 +51,9 @@ type benchmarkDataSize struct {
 
 	// numUTXOs is the number of UTXOs to create.
 	numUTXOs int
+
+	// numAddresses is the number of addresses to create.
+	numAddresses int
 }
 
 // benchmarkNamingInfo holds metadata for generating benchmark names.
@@ -63,16 +66,26 @@ type benchmarkNamingInfo struct {
 	// maxUTXOs is the maximum number of UTXOs in the benchmark series. That
 	// would helpful in determining the dynamic padding for the UTXO digits.
 	maxUTXOs int
+
+	// maxAddresses is the maximum number of addresses in the benchmark
+	// series. That would helpful in determining the dynamic padding for the
+	// address digits.
+	maxAddresses int
 }
 
 // name returns a dynamically generated benchmark name based on accounts,
 // UTXOs, and addresses. Uses dynamic padding based on maximum values for
-// proper sorting in visualization tools. If numUTXOs is 0, it's omitted
-// from the name.
+// proper sorting in visualization tools.
 func (b benchmarkDataSize) name(namingInfo benchmarkNamingInfo) string {
 	accountDigits := len(strconv.Itoa(namingInfo.maxAccounts))
 
 	name := fmt.Sprintf("%0*d-Accounts", accountDigits, b.numAccounts)
+
+	if b.numAddresses > 0 {
+		addressDigits := len(fmt.Sprintf("%d", namingInfo.maxAddresses))
+		name += fmt.Sprintf("-%0*d-Addresses", addressDigits,
+			b.numAddresses)
+	}
 
 	if b.numUTXOs > 0 {
 		utxoDigits := len(strconv.Itoa(namingInfo.maxUTXOs))
@@ -90,6 +103,9 @@ type benchmarkConfig struct {
 	// utxoGrowth is the function to use to grow the number of UTXOs.
 	utxoGrowth growthFunc
 
+	// addressGrowth is the function to use to grow the number of addresses.
+	addressGrowth growthFunc
+
 	// maxIterations is the maximum number of iterations to run.
 	maxIterations int
 
@@ -106,16 +122,19 @@ func generateBenchmarkSizes(
 	// Calculate maximum values for proper padding.
 	maxAccounts := config.accountGrowth(config.maxIterations)
 	maxUTXOs := config.utxoGrowth(config.maxIterations)
+	maxAddresses := config.addressGrowth(config.maxIterations)
 
 	namingInfo := benchmarkNamingInfo{
-		maxAccounts: maxAccounts,
-		maxUTXOs:    maxUTXOs,
+		maxAccounts:  maxAccounts,
+		maxUTXOs:     maxUTXOs,
+		maxAddresses: maxAddresses,
 	}
 
 	for i := config.startIndex; i <= config.maxIterations; i++ {
 		sizes = append(sizes, benchmarkDataSize{
-			numAccounts: config.accountGrowth(i),
-			numUTXOs:    config.utxoGrowth(i),
+			numAccounts:  config.accountGrowth(i),
+			numUTXOs:     config.utxoGrowth(i),
+			numAddresses: config.addressGrowth(i),
 		})
 	}
 
@@ -133,8 +152,8 @@ type benchmarkWalletConfig struct {
 	// numUTXOs is the number of UTXOs to create.
 	numUTXOs int
 
-	// skipUTXOs skips UTXO creation for account-only benchmarks.
-	skipUTXOs bool
+	// numAddresses is the number of addresses to create.
+	numAddresses int
 }
 
 // setupBenchmarkWallet creates a wallet with test data based on the provided
@@ -152,10 +171,10 @@ func setupBenchmarkWallet(tb testing.TB, config benchmarkWalletConfig) *Wallet {
 
 	addresses := createTestAccounts(
 		tb, w, config.scopes, config.numAccounts,
+		config.numAddresses,
 	)
-	if !config.skipUTXOs && config.numUTXOs > 0 {
-		createTestUTXOs(tb, w, addresses, config.numUTXOs)
-	}
+
+	createTestUTXOs(tb, w, addresses, config.numUTXOs)
 
 	return w
 }
@@ -163,7 +182,7 @@ func setupBenchmarkWallet(tb testing.TB, config benchmarkWalletConfig) *Wallet {
 // createTestAccounts creates test accounts across the specified key scopes
 // and returns all generated addresses.
 func createTestAccounts(tb testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
-	numAccounts int) []waddrmgr.ManagedAddress {
+	numAccounts, numAddresses int) []waddrmgr.ManagedAddress {
 
 	tb.Helper()
 
@@ -182,8 +201,8 @@ func createTestAccounts(tb testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
 			}
 
 			err := createAccountsInScope(
-				w, tx, scope, scopeAccounts, i*accountsPerScope,
-				&allAddresses,
+				w, tx, scope, scopeAccounts, numAddresses,
+				i*accountsPerScope, &allAddresses,
 			)
 			if err != nil {
 				return err
@@ -201,7 +220,7 @@ func createTestAccounts(tb testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
 // createAccountsInScope creates accounts within a specific scope with unique
 // naming across scopes.
 func createAccountsInScope(w *Wallet, tx walletdb.ReadWriteTx,
-	scope waddrmgr.KeyScope, numAccounts, offset int,
+	scope waddrmgr.KeyScope, numAccounts, numAddresses, offset int,
 	allAddresses *[]waddrmgr.ManagedAddress) error {
 
 	manager, err := w.addrStore.FetchScopedKeyManager(scope)
@@ -221,7 +240,7 @@ func createAccountsInScope(w *Wallet, tx walletdb.ReadWriteTx,
 		}
 
 		addrs, err := manager.NextExternalAddresses(
-			addrmgrNs, account, 5,
+			addrmgrNs, account, uint32(numAddresses),
 		)
 		if err != nil {
 			return err

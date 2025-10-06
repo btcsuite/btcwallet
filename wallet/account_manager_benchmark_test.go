@@ -16,6 +16,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
+			addressGrowth: constantGrowth,
 			utxoGrowth:    exponentialGrowth,
 			maxIterations: 14,
 			startIndex:    0,
@@ -27,9 +28,10 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -45,9 +47,10 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -72,6 +75,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
+			addressGrowth: constantGrowth,
 			utxoGrowth:    exponentialGrowth,
 			maxIterations: 14,
 			startIndex:    0,
@@ -83,9 +87,10 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -101,9 +106,10 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -126,6 +132,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(
 		benchmarkConfig{
 			accountGrowth: linearGrowth,
+			addressGrowth: constantGrowth,
 			utxoGrowth:    exponentialGrowth,
 			maxIterations: 14,
 			startIndex:    0,
@@ -139,9 +146,10 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -159,9 +167,10 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -185,6 +194,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 func BenchmarkNewAccountAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: linearGrowth,
+		addressGrowth: constantGrowth,
 		utxoGrowth:    constantGrowth,
 		maxIterations: 10,
 		startIndex:    0,
@@ -195,9 +205,10 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					skipUTXOs:   true,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -222,9 +233,10 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					skipUTXOs:   true,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -256,6 +268,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 func BenchmarkGetAccountAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: exponentialGrowth,
+		addressGrowth: constantGrowth,
 		utxoGrowth:    exponentialGrowth,
 		maxIterations: 14,
 		startIndex:    0,
@@ -268,9 +281,10 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -288,9 +302,10 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -314,6 +329,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 func BenchmarkRenameAccountAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: exponentialGrowth,
+		addressGrowth: constantGrowth,
 		utxoGrowth:    constantGrowth,
 		maxIterations: 11,
 		startIndex:    0,
@@ -329,9 +345,10 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					skipUTXOs:   true,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -360,9 +377,10 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					skipUTXOs:   true,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -398,6 +416,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 func BenchmarkGetBalanceAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: linearGrowth,
+		addressGrowth: constantGrowth,
 		utxoGrowth:    exponentialGrowth,
 		maxIterations: 14,
 		startIndex:    0,
@@ -411,9 +430,10 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -432,9 +452,10 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					numUTXOs:    size.numUTXOs,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -459,6 +480,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 func BenchmarkImportAccountAPI(b *testing.B) {
 	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
 		accountGrowth: linearGrowth,
+		addressGrowth: constantGrowth,
 		utxoGrowth:    constantGrowth,
 		maxIterations: 10,
 		startIndex:    0,
@@ -474,9 +496,10 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					skipUTXOs:   true,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
@@ -504,9 +527,10 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
-					scopes:      scopes,
-					numAccounts: size.numAccounts,
-					skipUTXOs:   true,
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
 				},
 			)
 
