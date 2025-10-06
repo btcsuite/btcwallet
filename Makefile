@@ -163,6 +163,8 @@ tidy-module-check: tidy-module
 sqlc:
 	@$(call print, "Generating sql models and queries in Go")
 	./internal/store/sqldb/sqlc/sqlc_generate.sh
+	@$(call print, "Merging SQL migrations into consolidated schemas")
+	go run ./cmd/merge-sql-schemas/main.go
 
 #? sqlc-check: Make sure sql models and queries are up to date
 sqlc-check: sqlc
