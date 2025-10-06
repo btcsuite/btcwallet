@@ -389,6 +389,18 @@ func generateTestExtendedKey(tb testing.TB,
 	return accountPubKey, uint32(seedIndex), waddrmgr.WitnessPubKey
 }
 
+// getMedianTestAddress returns a median address from a median account for
+// benchmarking purposes.
+func getTestAddress(tb testing.TB, w *Wallet, numAccounts int) btcutil.Address {
+	tb.Helper()
+
+	medianAccount := uint32(numAccounts / 2)
+	addresses, err := w.AccountAddresses(medianAccount)
+	require.NoError(tb, err)
+
+	return addresses[len(addresses)/2]
+}
+
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts API across all active key scopes
 // and aggregating the results.
