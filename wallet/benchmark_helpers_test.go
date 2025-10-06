@@ -82,7 +82,7 @@ func (b benchmarkDataSize) name(namingInfo benchmarkNamingInfo) string {
 	name := fmt.Sprintf("%0*d-Accounts", accountDigits, b.numAccounts)
 
 	if b.numAddresses > 0 {
-		addressDigits := len(fmt.Sprintf("%d", namingInfo.maxAddresses))
+		addressDigits := len(strconv.Itoa(namingInfo.maxAddresses))
 		name += fmt.Sprintf("-%0*d-Addresses", addressDigits,
 			b.numAddresses)
 	}
@@ -503,4 +503,32 @@ func getBalanceDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 	}
 
 	return 0, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
+}
+
+// listAddressesDeprecated wraps the deprecated AccountAddresses and
+// TotalReceivedForAddr APIs to satisfy the same contract as ListAddresses by
+// calling the old APIs and aggregating the results with balances.
+func listAddressesDeprecated(w *Wallet,
+	accountID uint32) ([]AddressProperty, error) {
+
+	addresses, err := w.AccountAddresses(accountID)
+	if err != nil {
+		return nil, err
+	}
+
+	allProperties := make([]AddressProperty, 0, len(addresses))
+
+	for _, addr := range addresses {
+		balance, err := w.TotalReceivedForAddr(addr, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		allProperties = append(allProperties, AddressProperty{
+			Address: addr,
+			Balance: balance,
+		})
+	}
+
+	return allProperties, nil
 }
