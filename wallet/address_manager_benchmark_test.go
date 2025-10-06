@@ -365,3 +365,99 @@ func BenchmarkImportPublicKeyAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkImportTaprootScriptAPI benchmarks ImportTaprootScript API and its
+// deprecated variant ImportTaprootScriptDeprecated using identical tapscript
+// datasets across multiple dataset sizes. Test names start with dataset size
+// to group API comparisons for benchstat analysis. The benchmark demonstrates
+// that the new API maintains performance parity with the deprecated API.
+func BenchmarkImportTaprootScriptAPI(b *testing.B) {
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
+		benchmarkConfig{
+			accountGrowth: linearGrowth,
+			utxoGrowth:    constantGrowth,
+			addressGrowth: linearGrowth,
+			maxIterations: 10,
+			startIndex:    0,
+		},
+	)
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0086}
+	witnessVersion := 1
+	isSecretScript := false
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			iterCount := 0
+			for b.Loop() {
+				// Generate a unique tapscript for each
+				// iteration to avoid in-memory cache collision
+				// and for an idempotent benchmark iteration
+				// test.
+				seedIndex := size.numAccounts + iterCount
+				key, _, _ := generateTestExtendedKey(
+					b, seedIndex,
+				)
+				pubKey, err := key.ECPubKey()
+				require.NoError(b, err)
+
+				tapscript := generateTestTapscript(b, pubKey)
+
+				syncedTo := w.addrStore.SyncedTo()
+				_, err = w.ImportTaprootScriptDeprecated(
+					scopes[0], &tapscript, &syncedTo,
+					byte(witnessVersion), isSecretScript,
+				)
+				require.NoError(b, err)
+
+				iterCount++
+			}
+		})
+
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			iterCount := 0
+			for b.Loop() {
+				// Generate a unique tapscript for each
+				// iteration to avoid in-memory cache collision
+				// and for an idempotent benchmark iteration
+				// test.
+				seedIndex := size.numAccounts + iterCount
+				key, _, _ := generateTestExtendedKey(
+					b, seedIndex,
+				)
+				pubKey, err := key.ECPubKey()
+				require.NoError(b, err)
+
+				tapscript := generateTestTapscript(b, pubKey)
+
+				_, err = w.ImportTaprootScript(
+					b.Context(), tapscript,
+				)
+				require.NoError(b, err)
+
+				iterCount++
+			}
+		})
+	}
+}
