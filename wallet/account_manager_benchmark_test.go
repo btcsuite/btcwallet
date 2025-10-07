@@ -85,7 +85,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 
 	for _, size := range benchmarkSizes {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -98,7 +98,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := listAccountsDeprecated(w)
+				_, err := listAccountsDeprecated(bw.Wallet)
 				require.NoError(b, err)
 			}
 		})
@@ -144,7 +144,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 		accountName, _ := generateAccountName(size.numAccounts, scopes)
 
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -158,7 +158,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 
 			for b.Loop() {
 				_, err := listAccountsByNameDeprecated(
-					w, accountName,
+					bw.Wallet, accountName,
 				)
 				require.NoError(b, err)
 			}
@@ -203,7 +203,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 
 	for _, size := range benchmarkSizes {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -223,7 +223,9 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 				accountName := fmt.Sprintf("new-account-%d",
 					count)
 
-				_, err := w.NextAccount(scopes[0], accountName)
+				_, err := bw.NextAccount(
+					scopes[0], accountName,
+				)
 				require.NoError(b, err)
 
 				count++
@@ -279,7 +281,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 		accountName, _ := generateAccountName(size.numAccounts, scopes)
 
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -293,7 +295,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 
 			for b.Loop() {
 				_, err := getAccountDeprecated(
-					w, scopes[0], accountName,
+					bw.Wallet, scopes[0], accountName,
 				)
 				require.NoError(b, err)
 			}
@@ -428,7 +430,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 		accountName, _ := generateAccountName(size.numAccounts, scopes)
 
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -442,7 +444,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 
 			for b.Loop() {
 				_, err := getBalanceDeprecated(
-					w, scopes[0], accountName,
+					bw.Wallet, scopes[0], accountName,
 					confirmations,
 				)
 				require.NoError(b, err)
@@ -450,7 +452,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 		})
 
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -463,7 +465,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := w.Balance(
+				_, err := bw.Balance(
 					b.Context(), confirmations, scopes[0],
 					accountName,
 				)
