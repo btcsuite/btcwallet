@@ -636,3 +636,56 @@ func listAddressesDeprecated(w *Wallet,
 
 	return allProperties, nil
 }
+
+// getUtxoDeprecated wraps the deprecated FetchOutpointInfo API to satisfy the
+// same contract as GetUtxo by calling FetchOutpointInfo and performing
+// additional lookups to construct a complete Utxo struct. This demonstrates
+// the inefficiency of the old API which returns raw data requiring the caller
+// to perform multiple additional lookups.
+func getUtxoDeprecated(w *Wallet, prevOut wire.OutPoint) (*Utxo, error) {
+	_, txOut, confs, err := w.FetchOutpointInfo(&prevOut)
+	if err != nil {
+		return nil, err
+	}
+
+	// Additional lookup 1: Extract address from pkScript.
+	addr := extractAddrFromPKScript(txOut.PkScript, w.chainParams)
+	if addr == nil {
+		return nil, ErrNotMine
+	}
+
+	// Additional lookup 2: Get address details (spendability, account,
+	// address type) from the address manager.
+	var (
+		spendable bool
+		account   string
+		addrType  waddrmgr.AddressType
+	)
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		spendable, account, addrType = w.addrStore.AddressDetails(
+			addrmgrNs, addr,
+		)
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Additional lookup 3: Check if the output is locked.
+	locked := w.LockedOutpoint(prevOut)
+
+	return &Utxo{
+		OutPoint:      prevOut,
+		Amount:        btcutil.Amount(txOut.Value),
+		PkScript:      txOut.PkScript,
+		Confirmations: int32(confs),
+		Spendable:     spendable,
+		Address:       addr,
+		Account:       account,
+		AddressType:   addrType,
+		Locked:        locked,
+	}, nil
+}
