@@ -512,6 +512,24 @@ func generateTestTxOut(tb testing.TB, addr btcutil.Address) wire.TxOut {
 	}
 }
 
+// leaseAllOutputs leases all outputs in the wallet with unique lock IDs. This
+// is used to set up benchmarks for ListLeasedOutputs where we want to maximize
+// the N+1 query impact when comparing the new vs deprecated ListLeasedOutputs
+// APIs.
+func leaseAllOutputs(tb testing.TB, w *Wallet, outpoints []wire.OutPoint,
+	duration time.Duration) {
+
+	tb.Helper()
+
+	for i, outpoint := range outpoints {
+		lockID := wtxmgr.LockID{byte(i)}
+		_, err := w.LeaseOutput(
+			tb.Context(), lockID, outpoint, duration,
+		)
+		require.NoError(tb, err, "failed to lease output %v", outpoint)
+	}
+}
+
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts API across all active key scopes
 // and aggregating the results.
