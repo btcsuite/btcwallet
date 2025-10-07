@@ -157,9 +157,19 @@ type benchmarkWalletConfig struct {
 	numAddresses int
 }
 
+// benchmarkWallet holds a wallet and its created UTXO outpoints.
+type benchmarkWallet struct {
+	*Wallet
+
+	outpoints []wire.OutPoint
+}
+
 // setupBenchmarkWallet creates a wallet with test data based on the provided
-// configuration. It distributes accounts evenly across the specified scopes.
-func setupBenchmarkWallet(tb testing.TB, config benchmarkWalletConfig) *Wallet {
+// configuration. It distributes accounts evenly across the specified scopes
+// and returns the wallet along with the outpoints of all created UTXOs.
+func setupBenchmarkWallet(tb testing.TB,
+	config benchmarkWalletConfig) *benchmarkWallet {
+
 	tb.Helper()
 
 	// Since testWallet requires a *testing.T, we can't pass the benchmark's
@@ -174,9 +184,12 @@ func setupBenchmarkWallet(tb testing.TB, config benchmarkWalletConfig) *Wallet {
 		config.numAddresses,
 	)
 
-	createTestUTXOs(tb, w, addresses, config.numUTXOs)
+	outpoints := createTestUTXOs(tb, w, addresses, config.numUTXOs)
 
-	return w
+	return &benchmarkWallet{
+		Wallet:    w,
+		outpoints: outpoints,
+	}
 }
 
 // createTestAccounts creates test accounts across the specified key scopes
@@ -253,11 +266,14 @@ func createAccountsInScope(w *Wallet, tx walletdb.ReadWriteTx,
 }
 
 // createTestUTXOs creates the specified number of test UTXOs using the provided
-// addresses for benchmark data setup.
+// addresses for benchmark data setup. It returns the outpoints of all created
+// UTXOs.
 func createTestUTXOs(tb testing.TB, w *Wallet,
-	addresses []waddrmgr.ManagedAddress, numUTXOs int) {
+	addresses []waddrmgr.ManagedAddress, numUTXOs int) []wire.OutPoint {
 
 	tb.Helper()
+
+	var outpoints []wire.OutPoint
 
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
@@ -322,12 +338,20 @@ func createTestUTXOs(tb testing.TB, w *Wallet,
 			if err != nil {
 				return err
 			}
+
+			// Store the actual outpoint for later use.
+			outpoints = append(outpoints, wire.OutPoint{
+				Hash:  rec.Hash,
+				Index: 0,
+			})
 		}
 
 		return nil
 	})
 
 	require.NoError(tb, err, "failed to create test UTXOs: %v", err)
+
+	return outpoints
 }
 
 // generateAccountName generates a consistent account name and number for
@@ -419,6 +443,14 @@ func markAddressAsUsed(b *testing.B, w *Wallet, addr btcutil.Address) {
 		return manager.MarkUsed(addrmgrNs, addr)
 	})
 	require.NoError(b, err)
+}
+
+// getTestUtxoOutpoint returns a median UTXO outpoint from the provided list
+// for benchmarking purposes. It returns the outpoint from the middle of the
+// list to provide a representative test case.
+func getTestUtxoOutpoint(outpoints []wire.OutPoint) wire.OutPoint {
+	medianIndex := len(outpoints) / 2
+	return outpoints[medianIndex]
 }
 
 // generateTestTapscript generates a test tapscript for benchmarking purposes.
