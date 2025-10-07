@@ -30,7 +30,7 @@ func BenchmarkListAddressesAPI(b *testing.B) {
 		)
 
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -44,7 +44,7 @@ func BenchmarkListAddressesAPI(b *testing.B) {
 
 			for b.Loop() {
 				_, err := listAddressesDeprecated(
-					w, accountNumber,
+					bw.Wallet, accountNumber,
 				)
 				require.NoError(b, err)
 			}
@@ -91,7 +91,7 @@ func BenchmarkAddressInfoAPI(b *testing.B) {
 
 	for _, size := range benchmarkSizes {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -100,19 +100,21 @@ func BenchmarkAddressInfoAPI(b *testing.B) {
 				},
 			)
 
-			testAddr := getTestAddress(b, w, size.numAccounts)
+			testAddr := getTestAddress(
+				b, bw.Wallet, size.numAccounts,
+			)
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := w.AddressInfoDeprecated(testAddr)
+				_, err := bw.AddressInfoDeprecated(testAddr)
 				require.NoError(b, err)
 			}
 		})
 
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -121,13 +123,15 @@ func BenchmarkAddressInfoAPI(b *testing.B) {
 				},
 			)
 
-			testAddr := getTestAddress(b, w, size.numAccounts)
+			testAddr := getTestAddress(
+				b, bw.Wallet, size.numAccounts,
+			)
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := w.AddressInfo(b.Context(), testAddr)
+				_, err := bw.AddressInfo(b.Context(), testAddr)
 				require.NoError(b, err)
 			}
 		})
@@ -159,7 +163,7 @@ func BenchmarkGetUnusedAddressAPI(b *testing.B) {
 		)
 
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -172,19 +176,19 @@ func BenchmarkGetUnusedAddressAPI(b *testing.B) {
 			b.ResetTimer()
 
 			for b.Loop() {
-				addr, err := w.NewAddressDeprecated(
+				addr, err := bw.NewAddressDeprecated(
 					accountNumber, scopes[0],
 				)
 				require.NoError(b, err)
 
 				// Mark the address as used to make the
 				// benchmark iteration idempotent.
-				markAddressAsUsed(b, w, addr)
+				markAddressAsUsed(b, bw.Wallet, addr)
 			}
 		})
 
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -197,7 +201,7 @@ func BenchmarkGetUnusedAddressAPI(b *testing.B) {
 			b.ResetTimer()
 
 			for b.Loop() {
-				addr, err := w.GetUnusedAddress(
+				addr, err := bw.GetUnusedAddress(
 					b.Context(), accountName, addrType,
 					false,
 				)
@@ -205,7 +209,7 @@ func BenchmarkGetUnusedAddressAPI(b *testing.B) {
 
 				// Mark the address as used to make the
 				// benchmark iteration idempotent.
-				markAddressAsUsed(b, w, addr)
+				markAddressAsUsed(b, bw.Wallet, addr)
 			}
 		})
 	}
@@ -235,7 +239,7 @@ func BenchmarkNewAddressAPI(b *testing.B) {
 		)
 
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -248,7 +252,7 @@ func BenchmarkNewAddressAPI(b *testing.B) {
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := w.NewAddressDeprecated(
+				_, err := bw.NewAddressDeprecated(
 					accountNumber, scopes[0],
 				)
 				require.NoError(b, err)
@@ -485,7 +489,7 @@ func BenchmarkScriptForOutputAPI(b *testing.B) {
 
 	for _, size := range benchmarkSizes {
 		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -494,14 +498,16 @@ func BenchmarkScriptForOutputAPI(b *testing.B) {
 				},
 			)
 
-			testAddr := getTestAddress(b, w, size.numAccounts)
+			testAddr := getTestAddress(
+				b, bw.Wallet, size.numAccounts,
+			)
 			testTxOut := generateTestTxOut(b, testAddr)
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, _, _, err := w.ScriptForOutputDeprecated(
+				_, _, _, err := bw.ScriptForOutputDeprecated(
 					&testTxOut,
 				)
 				require.NoError(b, err)
@@ -509,7 +515,7 @@ func BenchmarkScriptForOutputAPI(b *testing.B) {
 		})
 
 		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
-			w := setupBenchmarkWallet(
+			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
 					numAccounts:  size.numAccounts,
@@ -518,14 +524,16 @@ func BenchmarkScriptForOutputAPI(b *testing.B) {
 				},
 			)
 
-			testAddr := getTestAddress(b, w, size.numAccounts)
+			testAddr := getTestAddress(
+				b, bw.Wallet, size.numAccounts,
+			)
 			testTxOut := generateTestTxOut(b, testAddr)
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			for b.Loop() {
-				_, err := w.ScriptForOutput(
+				_, err := bw.ScriptForOutput(
 					b.Context(), testTxOut,
 				)
 				require.NoError(b, err)
