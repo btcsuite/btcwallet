@@ -212,3 +212,82 @@ func BenchmarkLeaseOutputAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkReleaseOutputAPI benchmarks ReleaseOutput API and its deprecated
+// variant ReleaseOutputDeprecated. Although ReleaseOutput is an O(1) operation,
+// testing across different dataset sizes helps identify any database bucket
+// depth effects or positional bias as the UTXO set grows. Outputs must be
+// leased before they can be released.
+func BenchmarkReleaseOutputAPI(b *testing.B) {
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
+		benchmarkConfig{
+			accountGrowth: constantGrowth,
+			utxoGrowth:    linearGrowth,
+			addressGrowth: constantGrowth,
+			maxIterations: 14,
+			startIndex:    0,
+		},
+	)
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	lockID := wtxmgr.LockID{0x01, 0x02, 0x03, 0x04}
+	duration := time.Hour
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			testOutpoint := getTestUtxoOutpoint(bw.outpoints)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := bw.LeaseOutputDeprecated(
+					lockID, testOutpoint, duration,
+				)
+				require.NoError(b, err)
+
+				err = bw.ReleaseOutputDeprecated(
+					lockID, testOutpoint,
+				)
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			testOutpoint := getTestUtxoOutpoint(bw.outpoints)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := bw.LeaseOutput(
+					b.Context(), lockID, testOutpoint,
+					duration,
+				)
+				require.NoError(b, err)
+
+				err = bw.ReleaseOutput(
+					b.Context(), lockID, testOutpoint,
+				)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
