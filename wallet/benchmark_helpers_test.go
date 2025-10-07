@@ -186,10 +186,29 @@ func setupBenchmarkWallet(tb testing.TB,
 
 	outpoints := createTestUTXOs(tb, w, addresses, config.numUTXOs)
 
+	// Sync wallet to the block height where UTXOs were created.
+	setSyncedToHeight(tb, w, 1)
+
 	return &benchmarkWallet{
 		Wallet:    w,
 		outpoints: outpoints,
 	}
+}
+
+// setSyncedToHeight updates the wallet's synced block height. This is useful
+// for benchmark tests to ensure confirmation calculations work correctly.
+func setSyncedToHeight(tb testing.TB, w *Wallet, height int32) {
+	tb.Helper()
+
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		return w.addrStore.SetSyncedTo(addrmgrNs, &waddrmgr.BlockStamp{
+			Height: height,
+			Hash:   chainhash.Hash{},
+		})
+	})
+	require.NoError(tb, err, "failed to set synced height to %d", height)
 }
 
 // createTestAccounts creates test accounts across the specified key scopes
@@ -280,6 +299,14 @@ func createTestUTXOs(tb testing.TB, w *Wallet,
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		msgTx := TstTx.MsgTx()
 
+		blockMeta := &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Hash:   chainhash.Hash{},
+				Height: 1,
+			},
+			Time: time.Now(),
+		}
+
 		for i := 0; i < numUTXOs && i < len(addresses); i++ {
 			newMsgTx := wire.NewMsgTx(msgTx.Version)
 			addr := addresses[i%len(addresses)]
@@ -309,14 +336,6 @@ func createTestUTXOs(tb testing.TB, w *Wallet,
 			)
 			if err != nil {
 				return err
-			}
-
-			blockMeta := &wtxmgr.BlockMeta{
-				Block: wtxmgr.Block{
-					Hash:   chainhash.Hash{},
-					Height: 1,
-				},
-				Time: time.Now(),
 			}
 
 			err = w.txStore.InsertTx(txmgrNs, rec, blockMeta)
