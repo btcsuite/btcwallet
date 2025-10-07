@@ -291,3 +291,68 @@ func BenchmarkReleaseOutputAPI(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkListLeasedOutputsAPI benchmarks ListLeasedOutputs API and its
+// deprecated variant ListLeasedOutputsDeprecated. The deprecated API performs
+// N+1 transaction lookups to enrich each leased output with value and pkScript,
+// while the new API returns minimal lock metadata in a single scan. Performance
+// difference scales with the number of leased outputs.
+func BenchmarkListLeasedOutputsAPI(b *testing.B) {
+	benchmarkSizes, namingInfo := generateBenchmarkSizes(
+		benchmarkConfig{
+			accountGrowth: constantGrowth,
+			utxoGrowth:    exponentialGrowth,
+			addressGrowth: constantGrowth,
+			maxIterations: 14,
+			startIndex:    0,
+		},
+	)
+	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	duration := time.Hour
+
+	for _, size := range benchmarkSizes {
+		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			// Lease all outputs to maximize the N+1 query impact.
+			leaseAllOutputs(b, bw.Wallet, bw.outpoints, duration)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := bw.ListLeasedOutputsDeprecated()
+				require.NoError(b, err)
+			}
+		})
+
+		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  size.numAccounts,
+					numAddresses: size.numAddresses,
+					numUTXOs:     size.numUTXOs,
+				},
+			)
+
+			// Lease all outputs to maximize the N+1 query impact.
+			leaseAllOutputs(b, bw.Wallet, bw.outpoints, duration)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := bw.ListLeasedOutputs(b.Context())
+				require.NoError(b, err)
+			}
+		})
+	}
+}
