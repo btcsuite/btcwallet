@@ -223,7 +223,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 				accountName := fmt.Sprintf("new-account-%d",
 					count)
 
-				_, err := bw.Wallet.NextAccount(
+				_, err := bw.NextAccount(
 					scopes[0], accountName,
 				)
 				require.NoError(b, err)
