@@ -120,3 +120,48 @@ func TestPutBlockRecordSQL(t *testing.T) {
 	_, err = store.queries.GetBlockByHeight(t.Context(), 101)
 	require.NoError(t, err)
 }
+
+// TestDeleteBlockRecordSQL tests deleting block records (reorg scenario).
+func TestDeleteBlockRecordSQL(t *testing.T) {
+	// Create in-memory SQLite database
+	db, err := sql.Open("sqlite3", ":memory:")
+	t.Cleanup(func() {
+		db.Close()
+	})
+	require.NoError(t, err)
+
+	schemaFile := "000002__blocks.up.sql"
+	schemaLoaded := loadSchema(t, schemaFile)
+
+	if _, err := db.Exec(schemaLoaded); err != nil {
+		t.Fatalf("Failed to create schema: %v", err)
+	}
+
+	store := NewSQLStore(db)
+
+	hash, _ := chainhash.NewHashFromStr(
+		"00000000000000017188b968a371bab95aa43522665353b646e41865abae" +
+			"02a4",
+	)
+	txHash, _ := chainhash.NewHashFromStr("8c18cf9ad4a950f7bd0174da3ddbde" +
+		"77269091c47ac3a7471fbd9888953f4645",
+	)
+
+	block := &BlockMeta{
+		Block: Block{
+			Height: 100,
+			Hash:   *hash,
+		},
+		Time: time.Unix(1387737310, 0),
+	}
+
+	err = store.putBlockRecordSQL(t.Context(), block, txHash)
+	require.NoError(t, err)
+
+	err = store.deleteBlockRecordSQL(t.Context(), 100)
+	require.NoError(t, err)
+
+	_, err = store.queries.GetBlockByHeight(t.Context(), 100)
+	require.Error(t, err)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+}

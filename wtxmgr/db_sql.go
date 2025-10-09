@@ -76,3 +76,9 @@ func (s *SQLStore) putBlockRecordSQL(
 	// Transaction associations will be handled in future iterations.
 	return nil
 }
+
+// deleteBlockRecordSQL removes a block record from the SQL database.
+// This is a parallel implementation for block deletion (used during reorgs).
+func (s *SQLStore) deleteBlockRecordSQL(ctx context.Context, height int32) error {
+	return s.queries.DeleteBlock(ctx, int64(height))
+}
