@@ -217,7 +217,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			packet.UnsignedTx.TxOut, changeTxOut,
 		)
 
-		addr, _, _, err := w.ScriptForOutput(changeTxOut)
+		addr, _, _, err := w.ScriptForOutputDeprecated(changeTxOut)
 		if err != nil {
 			return 0, fmt.Errorf("error querying wallet for "+
 				"change addr: %w", err)
@@ -278,7 +278,7 @@ func (w *Wallet) DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error {
 			return fmt.Errorf("error fetching UTXO: %w", err)
 		}
 
-		addr, witnessProgram, _, err := w.ScriptForOutput(utxo)
+		addr, witnessProgram, _, err := w.ScriptForOutputDeprecated(utxo)
 		if err != nil {
 			return fmt.Errorf("error fetching UTXO script: %w", err)
 		}
@@ -501,11 +501,11 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 				// wallet accounts (NP2WKH, P2WKH, P2TR), so any
 				// key scope provided doesn't impact the result
 				// of this call.
-				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+				watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 					ns, waddrmgr.KeyScopeBIP0084, account,
 				)
 			} else {
-				watchOnly, err = w.Manager.IsWatchOnlyAccount(
+				watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 					ns, *keyScope, account,
 				)
 			}
