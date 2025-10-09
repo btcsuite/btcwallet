@@ -4,6 +4,8 @@
 
 package sqlc
 
-type Dummy struct {
-	ID int64
+type Block struct {
+	BlockHeight int64
+	HeaderHash  []byte
+	Timestamp   int64
 }

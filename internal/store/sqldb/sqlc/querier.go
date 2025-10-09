@@ -9,9 +9,9 @@ import (
 )
 
 type Querier interface {
-	DeleteDummy(ctx context.Context, id int64) error
-	GetDummyById(ctx context.Context, id int64) (int64, error)
-	InsertDummy(ctx context.Context, id int64) error
+	DeleteBlock(ctx context.Context, blockHeight int64) error
+	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
+	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 }
 
 var _ Querier = (*Queries)(nil)
