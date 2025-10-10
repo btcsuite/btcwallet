@@ -310,6 +310,7 @@ func BenchmarkImportPublicKeyAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			iterCount := 0
 			for b.Loop() {
 				// Generate a unique key for each iteration to
@@ -343,6 +344,7 @@ func BenchmarkImportPublicKeyAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			iterCount := 0
 			for b.Loop() {
 				// Generate a unique key for each iteration to
@@ -398,6 +400,7 @@ func BenchmarkImportTaprootScriptAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			iterCount := 0
 			for b.Loop() {
 				// Generate a unique tapscript for each
@@ -436,6 +439,7 @@ func BenchmarkImportTaprootScriptAPI(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
+
 			iterCount := 0
 			for b.Loop() {
 				// Generate a unique tapscript for each
