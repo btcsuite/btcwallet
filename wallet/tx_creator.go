@@ -691,7 +691,7 @@ func (w *Wallet) getEligibleUTXOs(dbtx walletdb.ReadTx,
 	case nil:
 		return w.findEligibleOutputs(
 			dbtx, &waddrmgr.KeyScopeBIP0086,
-			waddrmgr.DefaultAccountNum, int32(minconf), bs, nil,
+			waddrmgr.DefaultAccountNum, minconf, bs, nil,
 		)
 
 	// If the source is a scoped account, we find all eligible outputs for
@@ -725,7 +725,7 @@ func (w *Wallet) getEligibleUTXOsFromAccount(dbtx walletdb.ReadTx,
 	}
 
 	return w.findEligibleOutputs(
-		dbtx, keyScope, account, int32(minconf), bs, nil,
+		dbtx, keyScope, account, minconf, bs, nil,
 	)
 }
 
@@ -753,7 +753,7 @@ func (w *Wallet) getEligibleUTXOsFromList(dbtx walletdb.ReadTx,
 
 		// A UTXO is only eligible if it has reached the required
 		// number of confirmations.
-		if !confirmed(int32(minconf), credit.Height, bs.Height) {
+		if !confirmed(minconf, credit.Height, bs.Height) {
 			// Calculate the number of confirmations for the
 			// warning message.
 			confs := calcConf(bs.Height, credit.Height)
