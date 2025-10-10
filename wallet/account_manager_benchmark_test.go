@@ -466,8 +466,8 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 
 			for b.Loop() {
 				_, err := bw.Balance(
-					b.Context(), confirmations, scopes[0],
-					accountName,
+					b.Context(), uint32(confirmations),
+					scopes[0], accountName,
 				)
 				require.NoError(b, err)
 			}
