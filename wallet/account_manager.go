@@ -88,7 +88,7 @@ type AccountManager interface {
 
 	// Balance returns the balance for a specific account, identified by its
 	// scope and name, for a given number of required confirmations.
-	Balance(ctx context.Context, conf int32, scope waddrmgr.KeyScope,
+	Balance(ctx context.Context, conf uint32, scope waddrmgr.KeyScope,
 		name string) (btcutil.Amount, error)
 
 	// ImportAccount imports an account from an extended public or private
@@ -481,7 +481,7 @@ func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
 //
 // The time complexity of this method is O(U*logA), where U is the number of
 // UTXOs and logA is the cost of an account lookup.
-func (w *Wallet) Balance(_ context.Context, conf int32,
+func (w *Wallet) Balance(_ context.Context, conf uint32,
 	scope waddrmgr.KeyScope, name string) (btcutil.Amount, error) {
 
 	var balance btcutil.Amount

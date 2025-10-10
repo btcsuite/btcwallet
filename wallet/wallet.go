@@ -1752,13 +1752,15 @@ func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balan
 
 			bals.Total += output.Amount
 			if output.FromCoinBase && !confirmed(
-				int32(w.chainParams.CoinbaseMaturity),
+				uint32(w.chainParams.CoinbaseMaturity),
 				output.Height, syncBlock.Height,
 			) {
 
 				bals.ImmatureReward += output.Amount
 			} else if confirmed(
-				confirms, output.Height, syncBlock.Height,
+				//nolint:gosec
+				uint32(confirms), output.Height,
+				syncBlock.Height,
 			) {
 
 				bals.Spendable += output.Amount
@@ -2116,11 +2118,8 @@ func (c CreditCategory) String() string {
 // this package at a later time.
 func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg.Params) CreditCategory {
 	if blockchain.IsCoinBaseTx(&details.MsgTx) {
-		if confirmed(
-			int32(net.CoinbaseMaturity), details.Block.Height,
-			syncHeight,
-		) {
-
+		if confirmed(uint32(net.CoinbaseMaturity), details.Block.Height,
+			syncHeight) {
 			return CreditGenerate
 		}
 		return CreditImmature
@@ -2684,14 +2683,16 @@ func (w *Wallet) AccountBalances(scope waddrmgr.KeyScope,
 		for i := range unspentOutputs {
 			output := &unspentOutputs[i]
 			if !confirmed(
-				requiredConfs, output.Height, syncBlock.Height,
+				//nolint:gosec
+				uint32(requiredConfs), output.Height,
+				syncBlock.Height,
 			) {
 
 				continue
 			}
 
 			if output.FromCoinBase && !confirmed(
-				int32(w.ChainParams().CoinbaseMaturity),
+				uint32(w.ChainParams().CoinbaseMaturity),
 				output.Height, syncBlock.Height,
 			) {
 
@@ -2800,7 +2801,9 @@ func (w *Wallet) ListUnspentDeprecated(minconf, maxconf int32,
 
 			// Only mature coinbase outputs are included.
 			if output.FromCoinBase {
-				target := int32(w.ChainParams().CoinbaseMaturity)
+				target := uint32(
+					w.ChainParams().CoinbaseMaturity,
+				)
 				if !confirmed(
 					target, output.Height, syncBlock.Height,
 				) {
@@ -3288,10 +3291,15 @@ func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket,
 	return addrs[0].Address(), nil
 }
 
-// confirmed returns whether a transaction has met at least minConf
-// confirmations at the current block height.
-func confirmed(minConf, txHeight, curHeight int32) bool {
-	return confirms(txHeight, curHeight) >= minConf
+// confirmed checks whether a transaction at height txHeight has met minconf
+// confirmations for a blockchain at height curHeight.
+func confirmed(minconf uint32, txHeight, curHeight int32) bool {
+	confs := confirms(txHeight, curHeight)
+	if confs < 0 {
+		return false
+	}
+
+	return uint32(confs) >= minconf
 }
 
 // confirms returns the number of confirmations for a transaction given its

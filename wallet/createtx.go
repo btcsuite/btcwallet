@@ -184,7 +184,9 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		}
 
 		eligible, err := w.findEligibleOutputs(
-			dbtx, coinSelectKeyScope, account, minconf,
+			dbtx, coinSelectKeyScope, account,
+			//nolint:gosec
+			uint32(minconf),
 			bs, allowUtxo,
 		)
 		if err != nil {
@@ -344,7 +346,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 }
 
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
-	keyScope *waddrmgr.KeyScope, account uint32, minconf int32,
+	keyScope *waddrmgr.KeyScope, account uint32, minconf uint32,
 	bs *waddrmgr.BlockStamp,
 	allowUtxo func(utxo wtxmgr.Credit) bool) ([]wtxmgr.Credit, error) {
 
@@ -379,8 +381,11 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 			continue
 		}
 		if output.FromCoinBase {
-			target := int32(w.chainParams.CoinbaseMaturity)
-			if !confirmed(target, output.Height, bs.Height) {
+			target := w.chainParams.CoinbaseMaturity
+			if !confirmed(
+				uint32(target), output.Height, bs.Height,
+			) {
+
 				continue
 			}
 		}
