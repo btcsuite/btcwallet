@@ -81,7 +81,7 @@ type Interface interface {
 	NotificationServer() *NotificationServer
 
 	// AddrManager returns the internal address manager.
-	AddrManager() *waddrmgr.Manager
+	AddrManager() waddrmgr.AddrStore
 
 	// Accounts returns all accounts for a particular scope.
 	Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error)
@@ -146,7 +146,7 @@ type Interface interface {
 	// AddScopeManager adds a new scope manager to the wallet.
 	AddScopeManager(scope waddrmgr.KeyScope,
 		addrSchema waddrmgr.ScopeAddrSchema) (
-		*waddrmgr.ScopedKeyManager, error)
+		waddrmgr.AccountStore, error)
 
 	// CurrentAddress returns the current, most recently generated address
 	// for a given account and scope. If the current address has been used,
@@ -208,9 +208,11 @@ type Interface interface {
 	CalculateAccountBalances(account uint32, requiredConfirmations int32) (
 		Balances, error)
 
-	// ListUnspent returns all unspent transaction outputs for a given
-	// account and confirmation requirement.
-	ListUnspent(minconf, maxconf int32, accountName string) (
+	// ListUnspentDeprecated returns all unspent transaction outputs for a
+	// given account and confirmation requirement.
+	//
+	// Deprecated: Use UtxoManager.ListUnspent instead.
+	ListUnspentDeprecated(minconf, maxconf int32, accountName string) (
 		[]*btcjson.ListUnspentResult, error)
 
 	// FetchOutpointInfo returns the output information for a given
@@ -231,10 +233,10 @@ type Interface interface {
 	// and should not be used as an input for created transactions.
 	LockedOutpoint(op wire.OutPoint) bool
 
-	// LeaseOutput locks an output to the given ID, preventing it from
-	// being available for coin selection. The absolute time of the lock's
-	// expiration is returned. The expiration of the lock can be extended by
-	// successive invocations of this call.
+	// LeaseOutputDeprecated locks an output to the given ID, preventing it
+	// from being available for coin selection. The absolute time of the
+	// lock's expiration is returned. The expiration of the lock can be
+	// extended by successive invocations of this call.
 	//
 	// Outputs can be unlocked before their expiration through
 	// `UnlockOutput`. Otherwise, they are unlocked lazily through calls
@@ -247,16 +249,23 @@ type Interface interface {
 	//
 	// NOTE: This differs from LockOutpoint in that outputs are locked for
 	// a limited amount of time and their locks are persisted to disk.
-	LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
+	//
+	// Deprecated: Use UtxoManager.LeaseOutput instead.
+	LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 		duration time.Duration) (time.Time, error)
 
-	// ReleaseOutput unlocks an output, allowing it to be available for
-	// coin selection if it remains unspent. The ID should match the one
-	// used to originally lock the output.
-	ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error
+	// ReleaseOutputDeprecated unlocks an output, allowing it to be
+	// available for coin selection if it remains unspent. The ID should
+	// match the one used to originally lock the output.
+	//
+	// Deprecated: Use UtxoManager.ReleaseOutput instead.
+	ReleaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint) error
 
-	// ListLeasedOutputs returns a list of all currently leased outputs.
-	ListLeasedOutputs() ([]*ListLeasedOutputResult, error)
+	// ListLeasedOutputsDeprecated returns a list of all currently leased
+	// outputs.
+	//
+	// Deprecated: Use UtxoManager.ListLeasedOutputs instead.
+	ListLeasedOutputsDeprecated() ([]*ListLeasedOutputResult, error)
 
 	// CreateSimpleTx creates a new transaction to the specified outputs,
 	// automatically performing coin selection and creating a change output

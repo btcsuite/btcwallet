@@ -33,8 +33,7 @@ var (
 func TestFundPsbt(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create a P2WKH address we can use to send some coins to.
 	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
@@ -430,8 +429,7 @@ func containsUtxo(list []wire.OutPoint, candidate wire.OutPoint) bool {
 func TestFinalizePsbt(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create a P2WKH address we can use to send some coins to.
 	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
