@@ -181,12 +181,7 @@ func (w *Wallet) ListUnspent(_ context.Context,
 		// Iterate through each UTXO to apply filters and enrich it with
 		// address-specific details.
 		for _, output := range unspent {
-			// Calculate the current confirmation status based on
-			// the wallet's synced block height.
-			confs := int32(0)
-			if output.Height != -1 {
-				confs = currentHeight - output.Height
-			}
+			confs := calcConf(currentHeight, output.Height)
 
 			log.Tracef("Checking utxo[%v]: current height=%v, "+
 				"confirm height=%v, conf=%v", output.OutPoint,
@@ -265,6 +260,17 @@ func (w *Wallet) ListUnspent(_ context.Context,
 	return utxos, err
 }
 
+// calcConf calculates the current confirmation status based on the wallet's
+// synced block height.
+func calcConf(currentHeight, outputHeight int32) int32 {
+	confs := int32(0)
+	if outputHeight != -1 {
+		confs = currentHeight - outputHeight
+	}
+
+	return confs
+}
+
 // GetUtxo returns the output information for a given outpoint.
 //
 // This method provides a detailed view of a single UTXO, identified by its
@@ -334,10 +340,7 @@ func (w *Wallet) GetUtxo(_ context.Context,
 			return wtxmgr.ErrUtxoNotFound
 		}
 
-		confs := int32(0)
-		if output.Height != -1 {
-			confs = currentHeight - output.Height
-		}
+		confs := calcConf(currentHeight, output.Height)
 
 		// Extract the address from the UTXO's public key script.
 		// For multi-address scripts, the first address is used.
