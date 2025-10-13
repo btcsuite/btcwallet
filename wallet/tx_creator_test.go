@@ -278,6 +278,82 @@ type unsupportedCoinSource struct{}
 
 func (u *unsupportedCoinSource) isCoinSource() {}
 
+// TestDetermineChangeSource tests the behavior of the determineChangeSource
+// method, ensuring that it correctly selects a change source based on the
+// transaction intent. It covers scenarios where the change source is
+// explicitly provided, derived from the input policy, or falls back to the
+// default P2TR account.
+func TestDetermineChangeSource(t *testing.T) {
+	t.Parallel()
+
+	w, _ := testWalletWithMocks(t)
+
+	// Define a set of accounts to be reused across test cases.
+	explicitChangeSource := &ScopedAccount{
+		AccountName: "explicit",
+		KeyScope:    waddrmgr.KeyScopeBIP0044,
+	}
+	policyAccountSource := &ScopedAccount{
+		AccountName: "policy",
+		KeyScope:    waddrmgr.KeyScopeBIP0049Plus,
+	}
+	defaultAccountSource := &ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    waddrmgr.KeyScopeBIP0086,
+	}
+
+	testCases := []struct {
+		name           string
+		intent         *TxIntent
+		expectedSource *ScopedAccount
+	}{
+		{
+			name: "explicit change source",
+			intent: &TxIntent{
+				ChangeSource: explicitChangeSource,
+			},
+			expectedSource: explicitChangeSource,
+		},
+		{
+			name: "nil change source with policy account",
+			intent: &TxIntent{
+				Inputs: &InputsPolicy{
+					Source: policyAccountSource,
+				},
+				ChangeSource: nil,
+			},
+			expectedSource: policyAccountSource,
+		},
+		{
+			name: "nil change source with manual inputs",
+			intent: &TxIntent{
+				Inputs:       &InputsManual{},
+				ChangeSource: nil,
+			},
+			expectedSource: defaultAccountSource,
+		},
+		{
+			name: "nil change source with non-account policy",
+			intent: &TxIntent{
+				Inputs: &InputsPolicy{
+					Source: &CoinSourceUTXOs{},
+				},
+				ChangeSource: nil,
+			},
+			expectedSource: defaultAccountSource,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			source := w.determineChangeSource(tc.intent)
+			require.Equal(t, tc.expectedSource, source)
+		})
+	}
+}
+
 type mockReadBucket struct {
 	walletdb.ReadBucket
 }
@@ -936,6 +1012,128 @@ func TestCreateTransaction(t *testing.T) {
 			},
 		},
 		{
+			name: "success nil change source manual inputs",
+			intent: &TxIntent{
+				Outputs: []wire.TxOut{validOutput},
+				Inputs: &InputsManual{
+					UTXOs: []wire.OutPoint{validUTXO},
+				},
+				ChangeSource: nil,
+				FeeRate:      1000,
+			},
+			setupMocks: func(m *mockers) {
+				accountStore := &mockAccountStore{}
+				m.addrStore.On("FetchScopedKeyManager",
+					waddrmgr.KeyScopeBIP0086,
+				).Return(accountStore, nil)
+
+				// Should look up the default account
+				accountStore.On("LookupAccount",
+					mock.Anything, "default",
+				).Return(uint32(0), nil)
+
+				accountProps := &waddrmgr.AccountProperties{
+					AccountNumber: 0,
+					AccountName:   "default",
+				}
+				accountStore.On("AccountProperties",
+					mock.Anything, uint32(0),
+				).Return(accountProps, nil)
+
+				accountStore.On(
+					"NextInternalAddresses", mock.Anything,
+					uint32(0), uint32(1),
+				).Return(
+					[]waddrmgr.ManagedAddress{
+						mockChangeAddr,
+					}, nil,
+				)
+
+				m.txStore.On("GetUtxo",
+					mock.Anything, validUTXO,
+				).Return(credit, nil)
+			},
+		},
+		{
+			name: "success nil change source policy inputs",
+			intent: &TxIntent{
+				Outputs: []wire.TxOut{validOutput},
+				Inputs: &InputsPolicy{
+					Source: &ScopedAccount{
+						AccountName: "test-account",
+						KeyScope: waddrmgr.
+							KeyScopeBIP0086,
+					},
+				},
+				ChangeSource: nil,
+				FeeRate:      1000,
+			},
+			setupMocks: func(m *mockers) {
+				accountStore := &mockAccountStore{}
+				m.addrStore.On("FetchScopedKeyManager",
+					waddrmgr.KeyScopeBIP0086,
+				).Return(accountStore, nil)
+
+				// Should look up the "test-account" for the
+				// change source.
+				accountStore.On("LookupAccount",
+					mock.Anything, "test-account",
+				).Return(uint32(1), nil)
+
+				accountProps := &waddrmgr.AccountProperties{
+					AccountNumber: 1,
+					AccountName:   "test-account",
+				}
+				accountStore.On("AccountProperties",
+					mock.Anything, uint32(1),
+				).Return(accountProps, nil)
+
+				accountStore.On(
+					"NextInternalAddresses", mock.Anything,
+					uint32(1), uint32(1),
+				).Return(
+					[]waddrmgr.ManagedAddress{
+						mockChangeAddr,
+					}, nil,
+				)
+
+				// Mocks for createPolicyInputSource.
+				m.chain.On("BlockStamp").Return(
+					&waddrmgr.BlockStamp{}, nil,
+				)
+
+				// We need to return the credit for the
+				// test-account.
+				changePubKey := changeKey.PubKey()
+				testAddr, err := btcutil.NewAddressPubKey(
+					changePubKey.SerializeCompressed(),
+					&chainParams,
+				)
+				require.NoError(t, err)
+				testPkScript, err := txscript.PayToAddrScript(
+					testAddr,
+				)
+				require.NoError(t, err)
+				credit.PkScript = testPkScript
+
+				// We'll also need to set up the address store
+				// to know about the test account.
+				mockAddr := &mockManagedAddress{}
+				mockAddr.On("Account").Return(uint32(1))
+				accountStore.On("Address", mock.Anything,
+					testAddr).Return(mockAddr, nil)
+				m.addrStore.On("AddrAccount", mock.Anything,
+					testAddr,
+				).Return(accountStore, uint32(1), nil)
+				accountStore.On("Scope").Return(
+					waddrmgr.KeyScopeBIP0086,
+				)
+
+				m.txStore.On("UnspentOutputs",
+					mock.Anything,
+				).Return([]wtxmgr.Credit{*credit}, nil)
+			},
+		}, {
 			name: "invalid intent",
 			intent: &TxIntent{
 				Outputs: []wire.TxOut{}, // No outputs
