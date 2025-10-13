@@ -1494,7 +1494,7 @@ func testNewAccount(tc *testContext) bool {
 func testLookupAccount(tc *testContext) bool {
 	// Lookup accounts created earlier in testNewAccount
 	expectedAccounts := map[string]uint32{
-		defaultAccountName:      DefaultAccountNum,
+		DefaultAccountName:      DefaultAccountNum,
 		ImportedAddrAccountName: ImportedAddrAccount,
 	}
 
@@ -1765,7 +1765,7 @@ func testManagerAPI(tc *testContext, caseCreatedWatchingOnly bool) {
 
 		testNewAccount(tc)
 		expectedAccounts := map[string]uint32{
-			defaultAccountName: DefaultAccountNum,
+			DefaultAccountName: DefaultAccountNum,
 		}
 		testLookupExpectedAccount(tc, expectedAccounts, 0)
 		//testForEachAccount(tc)
@@ -2067,7 +2067,7 @@ func testManagerCase(t *testing.T, caseName string,
 		err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 			_, err = scopedMgr.NewAccountWatchingOnly(
-				ns, defaultAccountName, acctKeyPub, 0, nil,
+				ns, DefaultAccountName, acctKeyPub, 0, nil,
 			)
 			return err
 		})
