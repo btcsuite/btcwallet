@@ -447,6 +447,10 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 		return nil, err
 	}
 
+	// Determine the change source. If not specified, a default will be
+	// used.
+	changeAccount := w.determineChangeSource(intent)
+
 	// The addrMgrWithChangeSource function of the wallet creates a new
 	// change address. The address manager uses OnCommit on the walletdb tx
 	// to update the in-memory state of the account state. But because the
@@ -466,8 +470,8 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 	// We perform the core logic of creating the input and change sources
 	// within a single database transaction to ensure atomicity.
 	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
-		changeKeyScope := &intent.ChangeSource.KeyScope
-		accountName := intent.ChangeSource.AccountName
+		changeKeyScope := &changeAccount.KeyScope
+		accountName := changeAccount.AccountName
 
 		// Query the account's number using the account name.
 		//
@@ -542,6 +546,33 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 	}
 
 	return tx, nil
+}
+
+// determineChangeSource determines the source for the transaction's change
+// output. If a source is specified in the intent, it is used. Otherwise, a
+// default is determined based on the input source or the wallet's default
+// account. When falling back to the default account, the P2TR (Taproot) key
+// scope is used.
+func (w *Wallet) determineChangeSource(intent *TxIntent) *ScopedAccount {
+	// If a change source is specified in the intent, use it.
+	if intent.ChangeSource != nil {
+		return intent.ChangeSource
+	}
+
+	// If the inputs are from a specific account, use that for change.
+	if policy, ok := intent.Inputs.(*InputsPolicy); ok {
+		if account, ok := policy.Source.(*ScopedAccount); ok {
+			return account
+		}
+	}
+
+	// Otherwise, use the default account.
+	// TODO(yy): The default key scope is currently hardcoded to P2TR
+	// (Taproot). This should be made configurable.
+	return &ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    waddrmgr.KeyScopeBIP0086,
+	}
 }
 
 // createInputSource creates a txauthor.InputSource that will be used to select
