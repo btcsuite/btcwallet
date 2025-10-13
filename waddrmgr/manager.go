@@ -46,14 +46,14 @@ const (
 	// DefaultAccountNum is the number of the default account.
 	DefaultAccountNum = 0
 
-	// defaultAccountName is the initial name of the default account.  Note
+	// DefaultAccountName is the initial name of the default account.  Note
 	// that the default account may be renamed and is not a reserved name,
 	// so the default account might not be named "default" and non-default
 	// accounts may be named "default".
 	//
 	// Account numbers never change, so the DefaultAccountNum should be
 	// used to refer to (and only to) the default account.
-	defaultAccountName = "default"
+	DefaultAccountName = "default"
 
 	// unknownAccountName is the string returned when an account is unknown.
 	unknownAccountName = "unknown"
@@ -1811,7 +1811,7 @@ func createManagerKeyScope(ns walletdb.ReadWriteBucket,
 	// Save the information for the default account to the database.
 	err = putDefaultAccountInfo(
 		ns, &scope, DefaultAccountNum, acctPubEnc, acctPrivEnc, 0, 0,
-		defaultAccountName,
+		DefaultAccountName,
 	)
 	if err != nil {
 		return err
