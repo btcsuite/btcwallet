@@ -29,7 +29,7 @@ func TestBuildTxDetail(t *testing.T) {
 	unminedNoFeeDetails, unminedNoFeeTxDetail := createUnminedTxDetail(t)
 	unminedNoFeeDetails.Debits = nil
 	unminedNoFeeTxDetail.Fee = 0
-	unminedNoFeeTxDetail.FeeRate = 0
+	unminedNoFeeTxDetail.FeeRate = unit.SatPerVByte{Amount: 0}
 	unminedNoFeeTxDetail.Value = unminedNoFeeDetails.Credits[0].Amount +
 		unminedNoFeeDetails.Credits[1].Amount
 	unminedNoFeeTxDetail.PrevOuts[0].IsOurs = false
@@ -277,7 +277,7 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 		Label:         testLabel,
 		Value:         totalCredits - debitAmt,
 		Fee:           fee,
-		FeeRate:       4,
+		FeeRate:       unit.SatPerVByte{Amount: 4},
 		Confirmations: 0,
 		Weight: unit.WeightUnit(blockchain.GetTransactionWeight(
 			btcutil.NewTx(&rec.MsgTx),
