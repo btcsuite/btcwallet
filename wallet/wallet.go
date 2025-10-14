@@ -9,7 +9,7 @@
 //
 // TODO(yy): bring wrapcheck back when implementing the `Store` interface.
 //
-//nolint:wrapcheck
+//nolint:wrapcheck,cyclop,gocognit
 package wallet
 
 import (
@@ -137,8 +137,8 @@ type Wallet struct {
 
 	// Data stores
 	db        walletdb.DB
-	addrStore *waddrmgr.Manager
-	txStore   *wtxmgr.Store
+	addrStore waddrmgr.AddrStore
+	txStore   wtxmgr.TxStore
 
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex
@@ -736,7 +736,7 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	// recovery, we would only do so for the default scopes, but due to a
 	// bug in which the wallet would create change addresses outside of the
 	// default scopes, it's necessary to attempt all registered key scopes.
-	scopedMgrs := make(map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager)
+	scopedMgrs := make(map[waddrmgr.KeyScope]waddrmgr.AccountStore)
 	for _, scopedMgr := range w.addrStore.ActiveScopedKeyManagers() {
 		scopedMgrs[scopedMgr.Scope()] = scopedMgr
 	}
@@ -870,7 +870,7 @@ func (w *Wallet) recoverScopedAddresses(
 	ns walletdb.ReadWriteBucket,
 	batch []wtxmgr.BlockMeta,
 	recoveryState *RecoveryState,
-	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager) error {
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore) error {
 
 	// If there are no blocks in the batch, we are done.
 	if len(batch) == 0 {
@@ -970,7 +970,7 @@ expandHorizons:
 // horizon will be properly extended such that our lookahead always includes the
 // proper number of valid child keys.
 func expandScopeHorizons(ns walletdb.ReadWriteBucket,
-	scopedMgr *waddrmgr.ScopedKeyManager,
+	scopedMgr waddrmgr.AccountStore,
 	scopeState *ScopeRecoveryState) error {
 
 	// Compute the current external horizon and the number of addresses we
@@ -1059,7 +1059,7 @@ func internalKeyPath(index uint32) waddrmgr.DerivationPath {
 // newFilterBlocksRequest constructs FilterBlocksRequests using our current
 // block range, scoped managers, and recovery state.
 func newFilterBlocksRequest(batch []wtxmgr.BlockMeta,
-	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
 	recoveryState *RecoveryState) *chain.FilterBlocksRequest {
 
 	filterReq := &chain.FilterBlocksRequest{
@@ -1097,7 +1097,7 @@ func newFilterBlocksRequest(batch []wtxmgr.BlockMeta,
 // match the highest found child index for each branch.
 func extendFoundAddresses(ns walletdb.ReadWriteBucket,
 	filterResp *chain.FilterBlocksResponse,
-	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
 	recoveryState *RecoveryState) error {
 
 	// Mark all recovered external addresses as used. This will be done only
@@ -1701,6 +1701,7 @@ func (w *Wallet) CalculateBalance(confirms int32) (btcutil.Amount, error) {
 
 		blk := w.addrStore.SyncedTo()
 		balance, err = w.txStore.Balance(txmgrNs, confirms, blk.Height)
+
 		return err
 	})
 	return balance, err
@@ -1877,7 +1878,7 @@ func (w *Wallet) LabelTransaction(hash chainhash.Hash, label string,
 			return ErrUnknownTransaction
 		}
 
-		_, err = wtxmgr.FetchTxLabel(txmgrNs, hash)
+		_, err = w.txStore.FetchTxLabel(txmgrNs, hash)
 		return err
 	})
 
@@ -2122,8 +2123,9 @@ func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg.Par
 // for a listtransactions RPC.
 //
 // TODO: This should be moved to the legacyrpc package.
-func listTransactions(tx walletdb.ReadTx, details *wtxmgr.TxDetails, addrMgr *waddrmgr.Manager,
-	syncHeight int32, net *chaincfg.Params) []btcjson.ListTransactionsResult {
+func listTransactions(tx walletdb.ReadTx, details *wtxmgr.TxDetails,
+	addrMgr waddrmgr.AddrStore, syncHeight int32,
+	net *chaincfg.Params) []btcjson.ListTransactionsResult {
 
 	addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
@@ -2728,12 +2730,17 @@ func (s creditSlice) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-// ListUnspent returns a slice of objects representing the unspent wallet
-// transactions fitting the given criteria. The confirmations will be more than
+// ListUnspentDeprecated returns a slice of objects representing the
+// unspent wallet transactions fitting the given criteria. The confirmations
+// will be more than
 // minconf, less than maxconf and if addresses is populated only the addresses
 // contained within it will be considered.  If we know nothing about a
 // transaction an empty array will be returned.
-func (w *Wallet) ListUnspent(minconf, maxconf int32,
+//
+// Deprecated: Use UtxoManager.ListUnspent instead.
+//
+//nolint:funlen
+func (w *Wallet) ListUnspentDeprecated(minconf, maxconf int32,
 	accountName string) ([]*btcjson.ListUnspentResult, error) {
 
 	var results []*btcjson.ListUnspentResult
@@ -2875,9 +2882,13 @@ type ListLeasedOutputResult struct {
 	PkScript []byte
 }
 
-// ListLeasedOutputs returns a list of objects representing the currently locked
-// utxos.
-func (w *Wallet) ListLeasedOutputs() ([]*ListLeasedOutputResult, error) {
+// ListLeasedOutputsDeprecated returns a list of objects representing the
+// currently locked utxos.
+//
+// Deprecated: Use UtxoManager.ListLeasedOutputs instead.
+func (w *Wallet) ListLeasedOutputsDeprecated() (
+	[]*ListLeasedOutputResult, error) {
+
 	var results []*ListLeasedOutputResult
 	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
@@ -3040,8 +3051,9 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 	return locked
 }
 
-// LeaseOutput locks an output to the given ID, preventing it from being
-// available for coin selection. The absolute time of the lock's expiration is
+// LeaseOutputDeprecated locks an output to the given ID, preventing it from
+// being available for coin selection. The absolute time of the lock's
+// expiration is
 // returned. The expiration of the lock can be extended by successive
 // invocations of this call.
 //
@@ -3055,7 +3067,9 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 //
 // NOTE: This differs from LockOutpoint in that outputs are locked for a limited
 // amount of time and their locks are persisted to disk.
-func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
+//
+// Deprecated: Use UtxoManager.LeaseOutput instead.
+func (w *Wallet) LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 	duration time.Duration) (time.Time, error) {
 
 	var expiry time.Time
@@ -3069,10 +3083,14 @@ func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 	return expiry, err
 }
 
-// ReleaseOutput unlocks an output, allowing it to be available for coin
-// selection if it remains unspent. The ID should match the one used to
+// ReleaseOutputDeprecated unlocks an output, allowing it to be available for
+// coin selection if it remains unspent. The ID should match the one used to
 // originally lock the output.
-func (w *Wallet) ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error {
+//
+// Deprecated: Use UtxoManager.ReleaseOutput instead.
+func (w *Wallet) ReleaseOutputDeprecated(
+	id wtxmgr.LockID, op wire.OutPoint) error {
+
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		return w.txStore.UnlockOutput(ns, id, op)
@@ -3930,9 +3948,9 @@ func (w *Wallet) BirthdayBlock() (*waddrmgr.BlockStamp, error) {
 // AddScopeManager creates a new scoped key manager from the root manager.
 func (w *Wallet) AddScopeManager(scope waddrmgr.KeyScope,
 	addrSchema waddrmgr.ScopeAddrSchema) (
-	*waddrmgr.ScopedKeyManager, error) {
+	waddrmgr.AccountStore, error) {
 
-	var scopedManager *waddrmgr.ScopedKeyManager
+	var scopedManager waddrmgr.AccountStore
 
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
@@ -4030,6 +4048,7 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 		}
 
 		privKey, err = mpka.PrivKey()
+
 		return err
 	})
 	if err != nil {
@@ -4117,7 +4136,7 @@ func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
 // AddrManager returns the internal address manager.
 //
 // TODO(yy): Refactor it in lnd and remove the method.
-func (w *Wallet) AddrManager() *waddrmgr.Manager {
+func (w *Wallet) AddrManager() waddrmgr.AddrStore {
 	return w.addrStore
 }
 
@@ -4346,7 +4365,7 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 
 	w.NtfnServer = newNotificationServer(w)
-	w.txStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
+	txMgr.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
 		w.NtfnServer.notifyUnspentOutput(0, hash, index)
 	}
 

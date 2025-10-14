@@ -260,7 +260,7 @@ func (w *Wallet) keyScopeFromAddrType(
 // wraps the database transaction and the call to the scoped key manager's
 // NewAddress method. A mutex is used to protect the in-memory state of the
 // address manager from concurrent access during address creation.
-func (w *Wallet) newAddress(manager *waddrmgr.ScopedKeyManager,
+func (w *Wallet) newAddress(manager waddrmgr.AccountStore,
 	accountName string, change bool) (btcutil.Address, error) {
 
 	// The address manager uses OnCommit on the walletdb tx to update the
