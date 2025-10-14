@@ -20,78 +20,86 @@ const (
 )
 
 // SatPerVByte represents a fee rate in sat/vbyte.
-type SatPerVByte btcutil.Amount
+type SatPerVByte struct {
+	btcutil.Amount
+}
 
 // NewSatPerVByte creates a new fee rate in sat/vb.
 func NewSatPerVByte(fee btcutil.Amount, vb VByte) SatPerVByte {
 	if vb == 0 {
-		return 0
+		return SatPerVByte{0}
 	}
 
-	return SatPerVByte(fee.MulF64(1 / float64(vb)))
+	return SatPerVByte{fee.MulF64(1 / float64(vb))}
 }
 
 // FeePerKWeight converts the current fee rate from sat/vb to sat/kw.
 func (s SatPerVByte) FeePerKWeight() SatPerKWeight {
-	return SatPerKWeight(s * SatsPerKilo / blockchain.WitnessScaleFactor)
+	return SatPerKWeight{
+		s.Amount * SatsPerKilo / blockchain.WitnessScaleFactor,
+	}
 }
 
 // FeePerKVByte converts the current fee rate from sat/vb to sat/kvb.
 func (s SatPerVByte) FeePerKVByte() SatPerKVByte {
-	return SatPerKVByte(s * SatsPerKilo)
+	return SatPerKVByte{s.Amount * SatsPerKilo}
 }
 
 // String returns a human-readable string of the fee rate.
 func (s SatPerVByte) String() string {
-	return fmt.Sprintf("%v sat/vb", int64(s))
+	return fmt.Sprintf("%v sat/vb", int64(s.Amount))
 }
 
 // SatPerKVByte represents a fee rate in sat/kb.
-type SatPerKVByte btcutil.Amount
+type SatPerKVByte struct {
+	btcutil.Amount
+}
 
 // NewSatPerKVByte creates a new fee rate in sat/kvb.
 func NewSatPerKVByte(fee btcutil.Amount, kvb VByte) SatPerKVByte {
 	if kvb == 0 {
-		return 0
+		return SatPerKVByte{0}
 	}
 
-	return SatPerKVByte(fee.MulF64(SatsPerKilo / float64(kvb)))
+	return SatPerKVByte{fee.MulF64(SatsPerKilo / float64(kvb))}
 }
 
 // FeeForVSize calculates the fee resulting from this fee rate and the given
 // vsize in vbytes.
 func (s SatPerKVByte) FeeForVSize(vbytes VByte) btcutil.Amount {
-	return btcutil.Amount(s) *
+	return s.Amount *
 		btcutil.Amount(safeUint64ToInt64(uint64(vbytes))) / SatsPerKilo
 }
 
 // FeePerKWeight converts the current fee rate from sat/kb to sat/kw.
 func (s SatPerKVByte) FeePerKWeight() SatPerKWeight {
-	return SatPerKWeight(s / blockchain.WitnessScaleFactor)
+	return SatPerKWeight{s.Amount / blockchain.WitnessScaleFactor}
 }
 
 // String returns a human-readable string of the fee rate.
 func (s SatPerKVByte) String() string {
-	return fmt.Sprintf("%v sat/kvb", int64(s))
+	return fmt.Sprintf("%v sat/kvb", int64(s.Amount))
 }
 
 // SatPerKWeight represents a fee rate in sat/kw.
-type SatPerKWeight btcutil.Amount
+type SatPerKWeight struct {
+	btcutil.Amount
+}
 
 // NewSatPerKWeight creates a new fee rate in sat/kw.
 func NewSatPerKWeight(fee btcutil.Amount, wu WeightUnit) SatPerKWeight {
 	if wu == 0 {
-		return 0
+		return SatPerKWeight{0}
 	}
 
-	return SatPerKWeight(fee.MulF64(SatsPerKilo / float64(wu)))
+	return SatPerKWeight{fee.MulF64(SatsPerKilo / float64(wu))}
 }
 
 // FeeForWeight calculates the fee resulting from this fee rate and the given
 // weight in weight units (wu).
 func (s SatPerKWeight) FeeForWeight(wu WeightUnit) btcutil.Amount {
 	// The resulting fee is rounded down, as specified in BOLT#03.
-	return btcutil.Amount(s) *
+	return s.Amount *
 		btcutil.Amount(safeUint64ToInt64(uint64(wu))) / SatsPerKilo
 }
 
@@ -105,7 +113,7 @@ func (s SatPerKWeight) FeeForWeightRoundUp(
 	//
 	// This ensures that any fractional part of the fee is rounded up to
 	// the next whole satoshi.
-	fee := btcutil.Amount(s) * btcutil.Amount(safeUint64ToInt64(uint64(wu)))
+	fee := s.Amount * btcutil.Amount(safeUint64ToInt64(uint64(wu)))
 	fee += SatsPerKilo - 1
 
 	return fee / SatsPerKilo
@@ -119,17 +127,19 @@ func (s SatPerKWeight) FeeForVByte(vb VByte) btcutil.Amount {
 
 // FeePerKVByte converts the current fee rate from sat/kw to sat/kb.
 func (s SatPerKWeight) FeePerKVByte() SatPerKVByte {
-	return SatPerKVByte(s * blockchain.WitnessScaleFactor)
+	return SatPerKVByte{s.Amount * blockchain.WitnessScaleFactor}
 }
 
 // FeePerVByte converts the current fee rate from sat/kw to sat/vb.
 func (s SatPerKWeight) FeePerVByte() SatPerVByte {
-	return SatPerVByte(s * blockchain.WitnessScaleFactor / SatsPerKilo)
+	return SatPerVByte{
+		s.Amount * blockchain.WitnessScaleFactor / SatsPerKilo,
+	}
 }
 
 // String returns a human-readable string of the fee rate.
 func (s SatPerKWeight) String() string {
-	return fmt.Sprintf("%v sat/kw", int64(s))
+	return fmt.Sprintf("%v sat/kw", int64(s.Amount))
 }
 
 // safeUint64ToInt64 converts a uint64 to an int64, capping at math.MaxInt64.
