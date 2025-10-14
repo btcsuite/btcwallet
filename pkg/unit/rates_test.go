@@ -22,26 +22,26 @@ func TestFeeRateConversions(t *testing.T) {
 	}{
 		{
 			name:         "1 sat/vb",
-			rate:         SatPerVByte(1),
-			expectedVB:   SatPerVByte(1),
-			expectedKVB:  SatPerKVByte(1000),
-			expectedKW:   SatPerKWeight(250),
+			rate:         SatPerVByte{1},
+			expectedVB:   SatPerVByte{1},
+			expectedKVB:  SatPerKVByte{1000},
+			expectedKW:   SatPerKWeight{250},
 			expectedSats: 1,
 		},
 		{
 			name:         "1000 sat/kvb",
-			rate:         SatPerKVByte(1000),
-			expectedVB:   SatPerVByte(1),
-			expectedKVB:  SatPerKVByte(1000),
-			expectedKW:   SatPerKWeight(250),
+			rate:         SatPerKVByte{1000},
+			expectedVB:   SatPerVByte{1},
+			expectedKVB:  SatPerKVByte{1000},
+			expectedKW:   SatPerKWeight{250},
 			expectedSats: 1000,
 		},
 		{
 			name:         "250 sat/kw",
-			rate:         SatPerKWeight(250),
-			expectedVB:   SatPerVByte(1),
-			expectedKVB:  SatPerKVByte(1000),
-			expectedKW:   SatPerKWeight(250),
+			rate:         SatPerKWeight{250},
+			expectedVB:   SatPerVByte{1},
+			expectedKVB:  SatPerKVByte{1000},
+			expectedKW:   SatPerKWeight{250},
 			expectedSats: 250,
 		},
 	}
@@ -60,7 +60,7 @@ func TestFeeRateConversions(t *testing.T) {
 					t, tc.expectedKW, r.FeePerKWeight(),
 				)
 				require.Equal(
-					t, tc.expectedSats, btcutil.Amount(r),
+					t, tc.expectedSats, r.Amount,
 				)
 
 			case SatPerKVByte:
@@ -73,7 +73,7 @@ func TestFeeRateConversions(t *testing.T) {
 					t, tc.expectedKW, r.FeePerKWeight(),
 				)
 				require.Equal(
-					t, tc.expectedSats, btcutil.Amount(r),
+					t, tc.expectedSats, r.Amount,
 				)
 
 			case SatPerKWeight:
@@ -85,7 +85,7 @@ func TestFeeRateConversions(t *testing.T) {
 				)
 				require.Equal(t, tc.expectedKW, r)
 				require.Equal(
-					t, tc.expectedSats, btcutil.Amount(r),
+					t, tc.expectedSats, r.Amount,
 				)
 			}
 		})
@@ -97,7 +97,7 @@ func TestFeeRateConversions(t *testing.T) {
 func TestFeeForWeightRoundUp(t *testing.T) {
 	t.Parallel()
 
-	feeRate := SatPerVByte(1).FeePerKWeight()
+	feeRate := SatPerVByte{1}.FeePerKWeight()
 	txWeight := WeightUnit(674) // 674 weight units is 168.5 vb.
 
 	require.EqualValues(t, 168, feeRate.FeeForWeight(txWeight))
@@ -112,16 +112,16 @@ func TestNewFeeRateConstructors(t *testing.T) {
 	// Test NewSatPerKWeight.
 	fee := btcutil.Amount(1000)
 	wu := WeightUnit(1000)
-	expectedRate := SatPerKWeight(1000)
+	expectedRate := SatPerKWeight{1000}
 	require.Equal(t, expectedRate, NewSatPerKWeight(fee, wu))
 
 	// Test NewSatPerVByte.
 	vb := VByte(250)
-	expectedRateVB := SatPerVByte(4)
+	expectedRateVB := SatPerVByte{4}
 	require.Equal(t, expectedRateVB, NewSatPerVByte(fee, vb))
 
 	// Test NewSatPerKVByte.
 	kvb := VByte(1)
-	expectedRateKVB := SatPerKVByte(1000000)
+	expectedRateKVB := SatPerKVByte{1000000}
 	require.Equal(t, expectedRateKVB, NewSatPerKVByte(fee, kvb))
 }
