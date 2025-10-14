@@ -1,7 +1,6 @@
 package wallet
 
 import (
-	"context"
 	"errors"
 	"testing"
 
@@ -914,14 +913,13 @@ func TestCreateInputSource(t *testing.T) {
 	}
 }
 
-// TestCreateTransaction provides an end-to-end test of the CreateTransaction
-// method. It covers the main success path for creating a transaction with
-// manually specified inputs, ensuring that all dependencies are called as
-// expected. It also includes failure cases to verify that errors, such as an
-// invalid transaction intent or a database-level account lookup failure, are
-// handled correctly and propagated to the caller.
-func TestCreateTransaction(t *testing.T) {
+// TestCreateTransactionSuccessManualInputs tests the success path for creating
+// a transaction with manually specified inputs.
+func TestCreateTransactionSuccessManualInputs(t *testing.T) {
 	t.Parallel()
+
+	// Arrange.
+	w, mocks := testWalletWithMocks(t)
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -933,7 +931,6 @@ func TestCreateTransaction(t *testing.T) {
 	validPkScript, err := txscript.PayToAddrScript(p2wkhAddr)
 	require.NoError(t, err)
 
-	// Common variables for test cases
 	validOutput := wire.TxOut{Value: 10000, PkScript: validPkScript}
 	validUTXO := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
 
@@ -960,235 +957,341 @@ func TestCreateTransaction(t *testing.T) {
 		PkScript: []byte{4, 5, 6},
 	}
 
-	testCases := []struct {
-		name        string
-		intent      *TxIntent
-		setupMocks  func(m *mockers)
-		expectedErr error
-	}{
-		{
-			name: "success manual inputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: "default",
-					KeyScope:    waddrmgr.KeyScopeBIP0086,
-				},
-				FeeRate: 1000,
-			},
-			setupMocks: func(m *mockers) {
-				accountStore := &mockAccountStore{}
-				m.addrStore.On("FetchScopedKeyManager",
-					waddrmgr.KeyScopeBIP0086,
-				).Return(accountStore, nil)
-
-				accountStore.On("LookupAccount",
-					mock.Anything, "default",
-				).Return(uint32(0), nil)
-
-				accountProps := &waddrmgr.AccountProperties{
-					AccountNumber: 0,
-					AccountName:   "default",
-				}
-				accountStore.On("AccountProperties",
-					mock.Anything, uint32(0),
-				).Return(accountProps, nil)
-
-				accountStore.On(
-					"NextInternalAddresses", mock.Anything,
-					uint32(0), uint32(1),
-				).Return(
-					[]waddrmgr.ManagedAddress{
-						mockChangeAddr,
-					}, nil,
-				)
-
-				m.txStore.On("GetUtxo",
-					mock.Anything, validUTXO,
-				).Return(credit, nil)
-			},
+	intent := &TxIntent{
+		Outputs: []wire.TxOut{validOutput},
+		Inputs: &InputsManual{
+			UTXOs: []wire.OutPoint{validUTXO},
 		},
-		{
-			name: "success nil change source manual inputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: nil,
-				FeeRate:      1000,
-			},
-			setupMocks: func(m *mockers) {
-				accountStore := &mockAccountStore{}
-				m.addrStore.On("FetchScopedKeyManager",
-					waddrmgr.KeyScopeBIP0086,
-				).Return(accountStore, nil)
-
-				// Should look up the default account
-				accountStore.On("LookupAccount",
-					mock.Anything, "default",
-				).Return(uint32(0), nil)
-
-				accountProps := &waddrmgr.AccountProperties{
-					AccountNumber: 0,
-					AccountName:   "default",
-				}
-				accountStore.On("AccountProperties",
-					mock.Anything, uint32(0),
-				).Return(accountProps, nil)
-
-				accountStore.On(
-					"NextInternalAddresses", mock.Anything,
-					uint32(0), uint32(1),
-				).Return(
-					[]waddrmgr.ManagedAddress{
-						mockChangeAddr,
-					}, nil,
-				)
-
-				m.txStore.On("GetUtxo",
-					mock.Anything, validUTXO,
-				).Return(credit, nil)
-			},
+		ChangeSource: &ScopedAccount{
+			AccountName: "default",
+			KeyScope:    waddrmgr.KeyScopeBIP0086,
 		},
-		{
-			name: "success nil change source policy inputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsPolicy{
-					Source: &ScopedAccount{
-						AccountName: "test-account",
-						KeyScope: waddrmgr.
-							KeyScopeBIP0086,
-					},
-				},
-				ChangeSource: nil,
-				FeeRate:      1000,
-			},
-			setupMocks: func(m *mockers) {
-				accountStore := &mockAccountStore{}
-				m.addrStore.On("FetchScopedKeyManager",
-					waddrmgr.KeyScopeBIP0086,
-				).Return(accountStore, nil)
-
-				// Should look up the "test-account" for the
-				// change source.
-				accountStore.On("LookupAccount",
-					mock.Anything, "test-account",
-				).Return(uint32(1), nil)
-
-				accountProps := &waddrmgr.AccountProperties{
-					AccountNumber: 1,
-					AccountName:   "test-account",
-				}
-				accountStore.On("AccountProperties",
-					mock.Anything, uint32(1),
-				).Return(accountProps, nil)
-
-				accountStore.On(
-					"NextInternalAddresses", mock.Anything,
-					uint32(1), uint32(1),
-				).Return(
-					[]waddrmgr.ManagedAddress{
-						mockChangeAddr,
-					}, nil,
-				)
-
-				// Mocks for createPolicyInputSource.
-				m.chain.On("BlockStamp").Return(
-					&waddrmgr.BlockStamp{}, nil,
-				)
-
-				// We need to return the credit for the
-				// test-account.
-				changePubKey := changeKey.PubKey()
-				testAddr, err := btcutil.NewAddressPubKey(
-					changePubKey.SerializeCompressed(),
-					&chainParams,
-				)
-				require.NoError(t, err)
-				testPkScript, err := txscript.PayToAddrScript(
-					testAddr,
-				)
-				require.NoError(t, err)
-				credit.PkScript = testPkScript
-
-				// We'll also need to set up the address store
-				// to know about the test account.
-				mockAddr := &mockManagedAddress{}
-				mockAddr.On("Account").Return(uint32(1))
-				accountStore.On("Address", mock.Anything,
-					testAddr).Return(mockAddr, nil)
-				m.addrStore.On("AddrAccount", mock.Anything,
-					testAddr,
-				).Return(accountStore, uint32(1), nil)
-				accountStore.On("Scope").Return(
-					waddrmgr.KeyScopeBIP0086,
-				)
-
-				m.txStore.On("UnspentOutputs",
-					mock.Anything,
-				).Return([]wtxmgr.Credit{*credit}, nil)
-			},
-		}, {
-			name: "invalid intent",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{}, // No outputs
-			},
-			setupMocks:  func(m *mockers) {},
-			expectedErr: ErrNoTxOutputs,
-		},
-		{
-			name: "account not found",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: "unknown",
-					KeyScope:    waddrmgr.KeyScopeBIP0086,
-				},
-				FeeRate: 1000,
-			},
-			setupMocks: func(m *mockers) {
-				accountStore := &mockAccountStore{}
-				m.addrStore.On("FetchScopedKeyManager",
-					waddrmgr.KeyScopeBIP0086).Return(
-					accountStore, nil,
-				)
-				errNotFound := waddrmgr.ManagerError{
-					ErrorCode: waddrmgr.ErrAccountNotFound,
-				}
-				accountStore.On("LookupAccount",
-					mock.Anything, "unknown",
-				).Return(uint32(0), errNotFound)
-			},
-			expectedErr: ErrAccountNotFound,
-		},
+		FeeRate: 1000,
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	accountStore := &mockAccountStore{}
+	mocks.addrStore.On("FetchScopedKeyManager",
+		waddrmgr.KeyScopeBIP0086).Return(accountStore, nil)
 
-			w, mocks := testWalletWithMocks(t)
-			tc.setupMocks(mocks)
+	accountStore.On("LookupAccount",
+		mock.Anything, "default",
+	).Return(uint32(0), nil)
 
-			tx, err := w.CreateTransaction(
-				context.Background(), tc.intent,
-			)
-
-			require.ErrorIs(t, err, tc.expectedErr)
-
-			if err == nil {
-				require.NotNil(t, tx)
-			} else {
-				require.Nil(t, tx)
-			}
-		})
+	accountProps := &waddrmgr.AccountProperties{
+		AccountNumber: 0,
+		AccountName:   "default",
 	}
+	accountStore.On("AccountProperties",
+		mock.Anything, uint32(0),
+	).Return(accountProps, nil)
+
+	accountStore.On("NextInternalAddresses",
+		mock.Anything, uint32(0), uint32(1),
+	).Return(
+		[]waddrmgr.ManagedAddress{
+			mockChangeAddr,
+		}, nil,
+	)
+
+	mocks.txStore.On("GetUtxo",
+		mock.Anything, validUTXO,
+	).Return(credit, nil)
+
+	// Act.
+	tx, err := w.CreateTransaction(t.Context(), intent)
+
+	// Assert.
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+}
+
+// TestCreateTransactionSuccessNilChangeSourceManualInputs tests the success
+// path for creating a transaction with manually specified inputs and a nil
+// change source.
+func TestCreateTransactionSuccessNilChangeSourceManualInputs(t *testing.T) {
+	t.Parallel()
+
+	// Arrange.
+	w, mocks := testWalletWithMocks(t)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(privKey.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+	validPkScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	validOutput := wire.TxOut{Value: 10000, PkScript: validPkScript}
+	validUTXO := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	changeKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	changeAddr, err := btcutil.NewAddressPubKey(
+		changeKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	mockChangeAddr := &mockManagedAddress{}
+	mockChangeAddr.On("Address").Return(changeAddr)
+	mockChangeAddr.On("Internal").Return(true)
+	mockChangeAddr.On("Compressed").Return(true)
+	mockChangeAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	mockChangeAddr.On("InternalAccount").Return(uint32(0))
+	mockChangeAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0086, waddrmgr.DerivationPath{}, true,
+	)
+
+	credit := &wtxmgr.Credit{
+		OutPoint: validUTXO,
+		Amount:   btcutil.Amount(50000), // Generous amount
+		PkScript: []byte{4, 5, 6},
+	}
+
+	intent := &TxIntent{
+		Outputs: []wire.TxOut{validOutput},
+		Inputs: &InputsManual{
+			UTXOs: []wire.OutPoint{validUTXO},
+		},
+		ChangeSource: nil,
+		FeeRate:      1000,
+	}
+
+	accountStore := &mockAccountStore{}
+	mocks.addrStore.On("FetchScopedKeyManager",
+		waddrmgr.KeyScopeBIP0086,
+	).Return(accountStore, nil)
+
+	// Should look up the default account
+	accountStore.On("LookupAccount",
+		mock.Anything, "default",
+	).Return(uint32(0), nil)
+
+	accountProps := &waddrmgr.AccountProperties{
+		AccountNumber: 0,
+		AccountName:   "default",
+	}
+	accountStore.On("AccountProperties",
+		mock.Anything, uint32(0),
+	).Return(accountProps, nil)
+
+	accountStore.On("NextInternalAddresses",
+		mock.Anything, uint32(0), uint32(1),
+	).Return(
+		[]waddrmgr.ManagedAddress{
+			mockChangeAddr,
+		}, nil,
+	)
+
+	mocks.txStore.On("GetUtxo",
+		mock.Anything, validUTXO,
+	).Return(credit, nil)
+
+	// Act.
+	tx, err := w.CreateTransaction(t.Context(), intent)
+
+	// Assert.
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+}
+
+// TestCreateTransactionSuccessNilChangeSourcePolicyInputs tests the success
+// path for creating a transaction with policy-based inputs and a nil change
+// source.
+func TestCreateTransactionSuccessNilChangeSourcePolicyInputs(t *testing.T) {
+	t.Parallel()
+
+	// Arrange.
+	w, mocks := testWalletWithMocks(t)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(privKey.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+	validPkScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	validOutput := wire.TxOut{Value: 10000, PkScript: validPkScript}
+	validUTXO := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	changeKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	changeAddr, err := btcutil.NewAddressPubKey(
+		changeKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	mockChangeAddr := &mockManagedAddress{}
+	mockChangeAddr.On("Address").Return(changeAddr)
+	mockChangeAddr.On("Internal").Return(true)
+	mockChangeAddr.On("Compressed").Return(true)
+	mockChangeAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	mockChangeAddr.On("InternalAccount").Return(uint32(0))
+	mockChangeAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0086, waddrmgr.DerivationPath{}, true,
+	)
+
+	credit := &wtxmgr.Credit{
+		OutPoint: validUTXO,
+		Amount:   btcutil.Amount(50000), // Generous amount
+		PkScript: []byte{4, 5, 6},
+	}
+
+	intent := &TxIntent{
+		Outputs: []wire.TxOut{validOutput},
+		Inputs: &InputsPolicy{
+			Source: &ScopedAccount{
+				AccountName: "test-account",
+				KeyScope:    waddrmgr.KeyScopeBIP0086,
+			},
+		},
+		ChangeSource: nil,
+		FeeRate:      1000,
+	}
+
+	accountStore := &mockAccountStore{}
+	mocks.addrStore.On("FetchScopedKeyManager",
+		waddrmgr.KeyScopeBIP0086,
+	).Return(accountStore, nil)
+
+	// Should look up the "test-account" for the change source.
+	accountStore.On("LookupAccount",
+		mock.Anything, "test-account",
+	).Return(uint32(1), nil)
+
+	accountProps := &waddrmgr.AccountProperties{
+		AccountNumber: 1,
+		AccountName:   "test-account",
+	}
+	accountStore.On("AccountProperties",
+		mock.Anything, uint32(1),
+	).Return(accountProps, nil)
+
+	accountStore.On(
+		"NextInternalAddresses", mock.Anything,
+		uint32(1), uint32(1),
+	).Return(
+		[]waddrmgr.ManagedAddress{
+			mockChangeAddr,
+		}, nil,
+	)
+
+	// Mocks for createPolicyInputSource.
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{}, nil,
+	)
+
+	// We need to return the credit for the test-account.
+	testAddr, err := btcutil.NewAddressPubKey(
+		changeKey.PubKey().SerializeCompressed(),
+		&chainParams,
+	)
+	require.NoError(t, err)
+	testPkScript, err := txscript.PayToAddrScript(
+		testAddr,
+	)
+	require.NoError(t, err)
+
+	credit.PkScript = testPkScript
+
+	// We'll also need to set up the address store to know about the test
+	// account.
+	mockAddr := &mockManagedAddress{}
+	mockAddr.On("Account").Return(uint32(1))
+	accountStore.On("Address",
+		mock.Anything, testAddr,
+	).Return(mockAddr, nil)
+	mocks.addrStore.On("AddrAccount",
+		mock.Anything, testAddr,
+	).Return(accountStore, uint32(1), nil)
+	accountStore.On("Scope").Return(waddrmgr.KeyScopeBIP0086)
+
+	mocks.txStore.On("UnspentOutputs",
+		mock.Anything,
+	).Return([]wtxmgr.Credit{*credit}, nil)
+
+	// Act.
+	tx, err := w.CreateTransaction(t.Context(), intent)
+
+	// Assert.
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+}
+
+// TestCreateTransactionInvalidIntent tests that an error is returned when an
+// invalid transaction intent is provided.
+func TestCreateTransactionInvalidIntent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange.
+	w, _ := testWalletWithMocks(t)
+
+	intent := &TxIntent{
+		Outputs: []wire.TxOut{}, // No outputs
+	}
+
+	// Act.
+	tx, err := w.CreateTransaction(t.Context(), intent)
+
+	// Assert.
+	require.ErrorIs(t, err, ErrNoTxOutputs)
+	require.Nil(t, tx)
+}
+
+// TestCreateTransactionAccountNotFound tests that an error is returned when
+// the specified account is not found.
+func TestCreateTransactionAccountNotFound(t *testing.T) {
+	t.Parallel()
+
+	// Arrange.
+	w, mocks := testWalletWithMocks(t)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(privKey.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+	validPkScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	validOutput := wire.TxOut{Value: 10000, PkScript: validPkScript}
+	validUTXO := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	intent := &TxIntent{
+		Outputs: []wire.TxOut{validOutput},
+		Inputs: &InputsManual{
+			UTXOs: []wire.OutPoint{validUTXO},
+		},
+		ChangeSource: &ScopedAccount{
+			AccountName: "unknown",
+			KeyScope:    waddrmgr.KeyScopeBIP0086,
+		},
+		FeeRate: 1000,
+	}
+
+	accountStore := &mockAccountStore{}
+	mocks.addrStore.On("FetchScopedKeyManager",
+		waddrmgr.KeyScopeBIP0086).Return(
+		accountStore, nil,
+	)
+	errNotFound := waddrmgr.ManagerError{
+		ErrorCode: waddrmgr.ErrAccountNotFound,
+	}
+	accountStore.On("LookupAccount",
+		mock.Anything, "unknown",
+	).Return(uint32(0), errNotFound)
+
+	// Act.
+	tx, err := w.CreateTransaction(t.Context(), intent)
+
+	// Assert.
+	require.ErrorIs(t, err, ErrAccountNotFound)
+	require.Nil(t, tx)
 }
