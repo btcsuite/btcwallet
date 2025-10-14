@@ -54,6 +54,10 @@ var _ TxPublisher = (*Wallet)(nil)
 func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	tx *wire.MsgTx) error {
 
+	if tx == nil {
+		return ErrTxCannotBeNil
+	}
+
 	// TODO(yy): thread context through.
 	chainClient, err := w.requireChainClient()
 	if err != nil {
@@ -98,6 +102,10 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 // the TxPublisher interface.
 func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
+
+	if tx == nil {
+		return ErrTxCannotBeNil
+	}
 
 	// We'll start by checking if the tx is acceptable to the mempool.
 	err := w.checkMempool(ctx, tx)
@@ -147,6 +155,10 @@ var (
 	// errAlreadyBroadcasted is a sentinel error used to indicate that a tx
 	// has already been broadcast.
 	errAlreadyBroadcasted = errors.New("tx already broadcasted")
+
+	// ErrTxCannotBeNil is returned when a nil transaction is passed to a
+	// function.
+	ErrTxCannotBeNil = errors.New("tx cannot be nil")
 )
 
 // checkMempool is a helper function that checks if a tx is acceptable to the

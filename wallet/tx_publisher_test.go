@@ -53,24 +53,33 @@ func TestCheckMempoolAcceptance(t *testing.T) {
 
 	testCases := []struct {
 		name        string
+		tx          *wire.MsgTx
 		rpcResult   []*btcjson.TestMempoolAcceptResult
 		rpcErr      error
 		expectedErr error
 	}{
 		{
+			name:        "nil tx",
+			tx:          nil,
+			expectedErr: ErrTxCannotBeNil,
+		},
+		{
 			name:        "accepted",
+			tx:          tx,
 			rpcResult:   mempoolAcceptResultAllowed,
 			rpcErr:      nil,
 			expectedErr: nil,
 		},
 		{
 			name:        "rejected",
+			tx:          tx,
 			rpcResult:   mempoolAcceptResultRejected,
 			rpcErr:      nil,
 			expectedErr: errInsufficientFee,
 		},
 		{
 			name:        "rpc error",
+			tx:          tx,
 			rpcResult:   nil,
 			rpcErr:      errRpc,
 			expectedErr: errRpc,
@@ -82,20 +91,24 @@ func TestCheckMempoolAcceptance(t *testing.T) {
 			t.Parallel()
 			w, m := testWalletWithMocks(t)
 
-			m.chain.On("TestMempoolAccept",
-				mock.Anything, mock.Anything,
-			).Return(tc.rpcResult, tc.rpcErr)
+			if tc.tx != nil {
+				m.chain.On("TestMempoolAccept",
+					mock.Anything, mock.Anything,
+				).Return(tc.rpcResult, tc.rpcErr)
+			}
 
 			// We only need to mock the MapRPCErr function if the
 			// RPC call is expected to succeed but the tx is
 			// rejected.
-			if tc.rpcErr == nil && !tc.rpcResult[0].Allowed {
+			if tc.rpcErr == nil && tc.rpcResult != nil &&
+				!tc.rpcResult[0].Allowed {
+
 				m.chain.On("MapRPCErr",
 					mock.Anything,
 				).Return(errInsufficientFee)
 			}
 
-			err := w.CheckMempoolAcceptance(ctx, tx)
+			err := w.CheckMempoolAcceptance(ctx, tc.tx)
 			require.ErrorIs(t, err, tc.expectedErr)
 		})
 	}
@@ -895,4 +908,17 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), errPublish.Error())
 	require.Contains(t, err.Error(), errRemove.Error())
+}
+
+// TestBroadcastNilTx tests that the Broadcast method returns an error when a
+// nil transaction is passed.
+func TestBroadcastNilTx(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	label := testTxLabel
+	w, _ := testWalletWithMocks(t)
+
+	err := w.Broadcast(ctx, nil, label)
+	require.ErrorIs(t, err, ErrTxCannotBeNil)
 }
