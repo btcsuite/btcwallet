@@ -18,4 +18,8 @@ avoid conversion errors and make their code more readable and self-documenting.
 - **Transaction Size**: `WeightUnit` and `VByte` for handling transaction
   weight and virtual size according to SegWit (BIP-141) standards.
 - **Fee Rates**: `SatPerVByte`, `SatPerKVByte`, and `SatPerKWeight` for
-  expressing fee rates in the most common industry formats.
+  expressing fee rates in the most common industry formats. These types use
+  `math/big.Rat` internally to allow for fractional (sub-satoshi) values,
+  ensuring precision in fee calculations. These types use
+  `math/big.Rat` internally to allow for fractional (sub-satoshi) values,
+  ensuring precision in fee calculations.
