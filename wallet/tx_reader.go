@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -282,6 +283,7 @@ func (w *Wallet) buildBasicTxDetail(txDetails *wtxmgr.TxDetails) *TxDetail {
 		Label:        txDetails.Label,
 		ReceivedTime: txDetails.Received,
 		Weight:       safeInt64ToWeightUnit(txWeight),
+		FeeRate:      unit.SatPerVByte{Rat: big.NewRat(0, 1)},
 	}
 }
 
