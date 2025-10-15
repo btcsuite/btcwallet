@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"math/big"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestBuildTxDetail(t *testing.T) {
 	unminedNoFeeDetails, unminedNoFeeTxDetail := createUnminedTxDetail(t)
 	unminedNoFeeDetails.Debits = nil
 	unminedNoFeeTxDetail.Fee = 0
-	unminedNoFeeTxDetail.FeeRate = unit.SatPerVByte{Amount: 0}
+	unminedNoFeeTxDetail.FeeRate = unit.SatPerVByte{Rat: big.NewRat(0, 1)}
 	unminedNoFeeTxDetail.Value = unminedNoFeeDetails.Credits[0].Amount +
 		unminedNoFeeDetails.Credits[1].Amount
 	unminedNoFeeTxDetail.PrevOuts[0].IsOurs = false
@@ -271,20 +272,21 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 	}
 
 	// Define the expected TxDetail for the unmined case.
+	weight := unit.WeightUnit(blockchain.GetTransactionWeight(
+		btcutil.NewTx(&rec.MsgTx),
+	))
 	unminedTxDetail := &TxDetail{
 		Hash:          *TstTxHash,
 		RawTx:         TstSerializedTx,
 		Label:         testLabel,
 		Value:         totalCredits - debitAmt,
 		Fee:           fee,
-		FeeRate:       unit.SatPerVByte{Amount: 4},
+		FeeRate:       unit.NewSatPerVByte(fee, weight.ToVB()),
 		Confirmations: 0,
-		Weight: unit.WeightUnit(blockchain.GetTransactionWeight(
-			btcutil.NewTx(&rec.MsgTx),
-		)),
-		ReceivedTime: txTime,
-		Outputs:      expectedOutputs,
-		PrevOuts:     expectedPrevOuts,
+		Weight:        weight,
+		ReceivedTime:  txTime,
+		Outputs:       expectedOutputs,
+		PrevOuts:      expectedPrevOuts,
 	}
 
 	return unminedDetails, unminedTxDetail
