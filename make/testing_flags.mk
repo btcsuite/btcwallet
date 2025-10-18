@@ -1,26 +1,26 @@
-DEV_TAGS = dev
-LOG_TAGS =
+DEV_TAGS := dev
+LOG_TAGS :=
 
 GOCC ?= go
 GOLIST := $(GOCC) list -tags="$(DEV_TAGS)" -deps $(PKG)/... | grep '$(PKG)'
 GOTEST := GO111MODULE=on $(GOCC) test
 
-TEST_FLAGS =
-COVER_PKG = $$($(GOCC) list -deps -tags="$(DEV_TAGS)" ./... | grep '$(PKG)')
-COVER_FLAGS = -coverprofile=coverage.txt -covermode=atomic -coverpkg=$(PKG)/...
+TEST_FLAGS :=
+COVER_PKG := $$($(GOCC) list -deps -tags="$(DEV_TAGS)" ./... | grep '$(PKG)')
+COVER_FLAGS := -coverprofile=coverage.txt -covermode=atomic -coverpkg=$(PKG)/...
 
 # If specific package is being unit tested, construct the full name of the
 # subpackage.
 ifneq ($(pkg),)
 UNITPKG := $(PKG)/$(pkg)
-UNIT_TARGETED = yes
-COVER_PKG = $(PKG)/$(pkg)
+UNIT_TARGETED := yes
+COVER_PKG := $(PKG)/$(pkg)
 endif
 
 # If a specific unit test case is being target, construct test.run filter.
 ifneq ($(case),)
 TEST_FLAGS += -test.run=$(case)
-UNIT_TARGETED = yes
+UNIT_TARGETED := yes
 endif
 
 # If a timeout was requested, construct initialize the proper flag for the go
@@ -71,7 +71,7 @@ UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAG
 # NONE is a special value which selects no other tests but only executes the
 # benchmark tests here.
 UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE
-UNIT_RACE := $(UNIT) -race
+UNIT_RACE := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -race $(COVER_PKG)
 endif
 
 UNIT_COVER := $(GOTEST) $(COVER_FLAGS) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(COVER_PKG)
