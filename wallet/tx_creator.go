@@ -421,55 +421,21 @@ func validateTxIntent(intent *TxIntent) error {
 	return nil
 }
 
-// CreateTransaction creates a new unsigned transaction spending unspent outputs
-// to the given outputs. It is the main implementation of the TxCreator
-// interface. The method will produce a valid, unsigned transaction, which can
-// then be passed to the Signer interface to be signed.
-func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
-	*txauthor.AuthoredTx, error) {
-
-	// Check that the intent is not nil.
-	if intent == nil {
-		return nil, ErrNilTxIntent
-	}
-
-	// If no input source is specified, an auto coin selection with the
-	// default account will be used.
-	if intent.Inputs == nil {
-		log.Debug("No input source specified, using default policy " +
-			"for automatic coin selection")
-
-		intent.Inputs = &InputsPolicy{}
-	}
-
-	err := validateTxIntent(intent)
-	if err != nil {
-		return nil, err
-	}
-
+// prepareTxAuthSources creates the input and change sources required to
+// author a transaction.
+func (w *Wallet) prepareTxAuthSources(intent *TxIntent) (
+	txauthor.InputSource, *txauthor.ChangeSource, error) {
 	// Determine the change source. If not specified, a default will be
 	// used.
 	changeAccount := w.determineChangeSource(intent)
-
-	// The addrMgrWithChangeSource function of the wallet creates a new
-	// change address. The address manager uses OnCommit on the walletdb tx
-	// to update the in-memory state of the account state. But because the
-	// commit happens _after_ the account manager internal lock has been
-	// released, there is a chance for the address index to be accessed
-	// concurrently, even though the closure in OnCommit re-acquires the
-	// lock. To avoid this issue, we surround the whole address creation
-	// process with a lock.
-	w.newAddrMtx.Lock()
-	defer w.newAddrMtx.Unlock()
 
 	var (
 		changeSource *txauthor.ChangeSource
 		inputSource  txauthor.InputSource
 	)
-
 	// We perform the core logic of creating the input and change sources
 	// within a single database transaction to ensure atomicity.
-	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 		changeKeyScope := &changeAccount.KeyScope
 		accountName := changeAccount.AccountName
 
@@ -511,6 +477,51 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 
 		return nil
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return inputSource, changeSource, nil
+}
+
+// CreateTransaction creates a new unsigned transaction spending unspent outputs
+// to the given outputs. It is the main implementation of the TxCreator
+// interface. The method will produce a valid, unsigned transaction, which can
+// then be passed to the Signer interface to be signed.
+func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
+	*txauthor.AuthoredTx, error) {
+
+	// Check that the intent is not nil.
+	if intent == nil {
+		return nil, ErrNilTxIntent
+	}
+
+	// If no input source is specified, an auto coin selection with the
+	// default account will be used.
+	if intent.Inputs == nil {
+		log.Debug("No input source specified, using default policy " +
+			"for automatic coin selection")
+
+		intent.Inputs = &InputsPolicy{}
+	}
+
+	err := validateTxIntent(intent)
+	if err != nil {
+		return nil, err
+	}
+
+	// The addrMgrWithChangeSource function of the wallet creates a new
+	// change address. The address manager uses OnCommit on the walletdb tx
+	// to update the in-memory state of the account state. But because the
+	// commit happens _after_ the account manager internal lock has been
+	// released, there is a chance for the address index to be accessed
+	// concurrently, even though the closure in OnCommit re-acquires the
+	// lock. To avoid this issue, we surround the whole address creation
+	// process with a lock.
+	w.newAddrMtx.Lock()
+	defer w.newAddrMtx.Unlock()
+
+	inputSource, changeSource, err := w.prepareTxAuthSources(intent)
 	if err != nil {
 		return nil, err
 	}
