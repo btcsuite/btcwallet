@@ -1,0 +1,45 @@
+# sqlc configuration file for generating type-safe Go code from SQL.
+# For full documentation, see: https://docs.sqlc.dev/en/stable/reference/config.html
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "../migrations/postgres"
+    queries: "../queries/postgres"
+    gen:
+      go:
+        out: "postgres"
+        package: "sqlcpg"
+
+        # This is the driver package that sqlc will use in the generated code.
+        sql_package: database/sql
+
+        # Generate a `Querier` interface of all query methods. It's useful for
+        # mocking in tests.
+        emit_interface: true
+
+        # Export generated SQL statements so they're usable from other packages.
+        emit_exported_queries: true
+
+        # Generate prepared statements for better performance with database/sql.
+        emit_prepared_queries: true
+
+  - engine: "sqlite"
+    schema: "../migrations/sqlite"
+    queries: "../queries/sqlite"
+    gen:
+      go:
+        out: "sqlite"
+        package: "sqlcsqlite"
+
+        # This is the driver package that sqlc will use in the generated code.
+        sql_package: database/sql
+
+        # Generate a `Querier` interface of all query methods. It's useful for
+        # mocking in tests.
+        emit_interface: true
+
+        # Export generated SQL statements so they're usable from other packages.
+        emit_exported_queries: true
+
+        # Generate prepared statements for better performance with database/sql.
+        emit_prepared_queries: true
