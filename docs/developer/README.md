@@ -33,3 +33,11 @@ Best practices for writing clear, effective, and maintainable unit tests.
 A deep dive into the core design philosophy, architectural patterns, and Go implementation details that guide the development of `btcwallet`.
 
 **[➡️ Read the Engineering Guide](./ENGINEERING_GUIDE.md)**
+
+---
+
+## 📝 Architecture Decision Records (ADRs)
+
+Formal documentation of significant architectural decisions, their context, and consequences.
+
+**[➡️ View Architecture Decision Records](./adr/README.md)**
