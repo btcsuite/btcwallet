@@ -150,7 +150,7 @@ func TestFeeForWeightRoundUp(t *testing.T) {
 	t.Parallel()
 
 	feeRate := SatPerVByte{big.NewRat(1, 1)}.FeePerKWeight()
-	txWeight := WeightUnit(674) // 674 weight units is 168.5 vb.
+	txWeight := NewWeightUnit(674) // 674 weight units is 168.5 vb.
 
 	require.EqualValues(t, 168, feeRate.FeeForWeight(txWeight))
 	require.EqualValues(t, 169, feeRate.FeeForWeightRoundUp(txWeight))
@@ -163,21 +163,21 @@ func TestNewFeeRateConstructors(t *testing.T) {
 
 	// Test NewSatPerKWeight.
 	fee := btcutil.Amount(1000)
-	wu := WeightUnit(1000)
+	wu := NewWeightUnit(1000)
 	expectedRate := SatPerKWeight{big.NewRat(1000, 1)}
 	require.Zero(
 		t, expectedRate.Cmp(NewSatPerKWeight(fee, wu).Rat),
 	)
 
 	// Test NewSatPerVByte.
-	vb := VByte(250)
+	vb := NewVByte(250)
 	expectedRateVB := SatPerVByte{big.NewRat(4, 1)}
 	require.Zero(
 		t, expectedRateVB.Cmp(NewSatPerVByte(fee, vb).Rat),
 	)
 
 	// Test NewSatPerKVByte.
-	kvb := VByte(1)
+	kvb := NewVByte(1)
 	expectedRateKVB := SatPerKVByte{big.NewRat(1000000, 1)}
 	require.Zero(
 		t, expectedRateKVB.Cmp(NewSatPerKVByte(fee, kvb).Rat),
@@ -278,10 +278,10 @@ func TestFeeForSize(t *testing.T) {
 	r2 := SatPerKWeight{big.NewRat(250, 1)}
 
 	// Test FeeForVSize.
-	require.Equal(t, btcutil.Amount(250), r1.FeeForVSize(250))
+	require.Equal(t, btcutil.Amount(250), r1.FeeForVSize(NewVByte(250)))
 
 	// Test FeeForVByte.
-	require.Equal(t, btcutil.Amount(250), r2.FeeForVByte(250))
+	require.Equal(t, btcutil.Amount(250), r2.FeeForVByte(NewVByte(250)))
 }
 
 // TestNewFeeRateConstructorsZero tests the New* fee rate constructors with
@@ -291,21 +291,21 @@ func TestNewFeeRateConstructorsZero(t *testing.T) {
 
 	// Test NewSatPerKWeight with zero weight.
 	fee := btcutil.Amount(1000)
-	wu := WeightUnit(0)
+	wu := NewWeightUnit(0)
 	expectedRate := SatPerKWeight{big.NewRat(0, 1)}
 	require.Zero(
 		t, expectedRate.Cmp(NewSatPerKWeight(fee, wu).Rat),
 	)
 
 	// Test NewSatPerVByte with zero vbytes.
-	vb := VByte(0)
+	vb := NewVByte(0)
 	expectedRateVB := SatPerVByte{big.NewRat(0, 1)}
 	require.Zero(
 		t, expectedRateVB.Cmp(NewSatPerVByte(fee, vb).Rat),
 	)
 
 	// Test NewSatPerKVByte with zero kvbytes.
-	kvb := VByte(0)
+	kvb := NewVByte(0)
 	expectedRateKVB := SatPerKVByte{big.NewRat(0, 1)}
 	require.Zero(
 		t, expectedRateKVB.Cmp(NewSatPerKVByte(fee, kvb).Rat),
@@ -318,7 +318,7 @@ func TestSafeUint64ToInt64Overflow(t *testing.T) {
 	t.Parallel()
 
 	fee := btcutil.Amount(1)
-	overflowVByte := VByte(math.MaxInt64 + 1)
+	overflowVByte := NewVByte(math.MaxInt64 + 1)
 
 	// Test NewSatPerVByte with an overflowing vbyte value.
 	// The denominator should be capped at math.MaxInt64.
@@ -332,7 +332,7 @@ func TestSafeUint64ToInt64Overflow(t *testing.T) {
 	require.Zero(t, expectedDenom.Cmp(rateKVB.Denom()))
 
 	// Test NewSatPerKWeight with an overflowing weight unit value.
-	overflowWU := WeightUnit(math.MaxInt64 + 1)
+	overflowWU := NewWeightUnit(math.MaxInt64 + 1)
 	rateKW := NewSatPerKWeight(fee, overflowWU)
 	require.Zero(t, expectedDenom.Cmp(rateKW.Denom()))
 }
