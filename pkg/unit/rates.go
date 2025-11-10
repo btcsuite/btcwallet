@@ -32,12 +32,12 @@ type SatPerVByte struct {
 // NewSatPerVByte creates a new fee rate in sat/vb. The given fee and vbytes
 // are used to calculate the fee rate.
 func NewSatPerVByte(fee btcutil.Amount, vb VByte) SatPerVByte {
-	if vb == 0 {
+	if vb.val == 0 {
 		return SatPerVByte{big.NewRat(0, 1)}
 	}
 
 	return SatPerVByte{
-		big.NewRat(int64(fee), safeUint64ToInt64(uint64(vb))),
+		big.NewRat(int64(fee), safeUint64ToInt64(vb.val)),
 	}
 }
 
@@ -98,14 +98,14 @@ type SatPerKVByte struct {
 // NewSatPerKVByte creates a new fee rate in sat/kvb. The given fee and kvbytes
 // are used to calculate the fee rate.
 func NewSatPerKVByte(fee btcutil.Amount, kvb VByte) SatPerKVByte {
-	if kvb == 0 {
+	if kvb.val == 0 {
 		return SatPerKVByte{big.NewRat(0, 1)}
 	}
 
 	return SatPerKVByte{
 		big.NewRat(
 			int64(fee)*SatsPerKilo,
-			safeUint64ToInt64(uint64(kvb)),
+			safeUint64ToInt64(kvb.val),
 		),
 	}
 }
@@ -115,7 +115,7 @@ func NewSatPerKVByte(fee btcutil.Amount, kvb VByte) SatPerKVByte {
 func (s SatPerKVByte) FeeForVSize(vbytes VByte) btcutil.Amount {
 	fee := new(big.Rat).Mul(
 		s.Rat,
-		big.NewRat(safeUint64ToInt64(uint64(vbytes)), SatsPerKilo),
+		big.NewRat(safeUint64ToInt64(vbytes.val), SatsPerKilo),
 	)
 
 	return roundToAmount(fee)
@@ -170,14 +170,14 @@ type SatPerKWeight struct {
 // NewSatPerKWeight creates a new fee rate in sat/kw. The given fee and weight
 // are used to calculate the fee rate.
 func NewSatPerKWeight(fee btcutil.Amount, wu WeightUnit) SatPerKWeight {
-	if wu == 0 {
+	if wu.val == 0 {
 		return SatPerKWeight{big.NewRat(0, 1)}
 	}
 
 	return SatPerKWeight{
 		big.NewRat(
 			int64(fee)*SatsPerKilo,
-			safeUint64ToInt64(uint64(wu)),
+			safeUint64ToInt64(wu.val),
 		),
 	}
 }
@@ -187,7 +187,7 @@ func NewSatPerKWeight(fee btcutil.Amount, wu WeightUnit) SatPerKWeight {
 func (s SatPerKWeight) FeeForWeight(wu WeightUnit) btcutil.Amount {
 	// The resulting fee is rounded down, as specified in BOLT#03.
 	fee := new(big.Rat).Mul(
-		s.Rat, big.NewRat(safeUint64ToInt64(uint64(wu)), SatsPerKilo),
+		s.Rat, big.NewRat(safeUint64ToInt64(wu.val), SatsPerKilo),
 	)
 
 	return btcutil.Amount(new(big.Int).Div(fee.Num(), fee.Denom()).Int64())
@@ -204,7 +204,7 @@ func (s SatPerKWeight) FeeForWeightRoundUp(
 	// This ensures that any fractional part of the fee is rounded up to
 	// the next whole satoshi.
 	feeRat := new(big.Rat).Mul(
-		s.Rat, big.NewRat(safeUint64ToInt64(uint64(wu)), SatsPerKilo),
+		s.Rat, big.NewRat(safeUint64ToInt64(wu.val), SatsPerKilo),
 	)
 
 	num := feeRat.Num()

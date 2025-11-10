@@ -415,10 +415,10 @@ func (w *Wallet) populatePrevOuts(details *TxDetail,
 // value is non-negative.
 func safeInt64ToWeightUnit(w int64) unit.WeightUnit {
 	if w < 0 {
-		return 0
+		return unit.NewWeightUnit(0)
 	}
 
-	return unit.WeightUnit(w)
+	return unit.NewWeightUnit(uint64(w))
 }
 
 // safeIntToUint32 converts an int to a uint32, returning false if the

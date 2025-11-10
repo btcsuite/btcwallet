@@ -272,9 +272,9 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 	}
 
 	// Define the expected TxDetail for the unmined case.
-	weight := unit.WeightUnit(blockchain.GetTransactionWeight(
+	weight := unit.NewWeightUnit(uint64(blockchain.GetTransactionWeight(
 		btcutil.NewTx(&rec.MsgTx),
-	))
+	)))
 	unminedTxDetail := &TxDetail{
 		Hash:          *TstTxHash,
 		RawTx:         TstSerializedTx,
