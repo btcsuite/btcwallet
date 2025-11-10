@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"math"
 	"math/big"
 	"testing"
 
@@ -181,4 +182,157 @@ func TestNewFeeRateConstructors(t *testing.T) {
 	require.Zero(
 		t, expectedRateKVB.Cmp(NewSatPerKVByte(fee, kvb).Rat),
 	)
+}
+
+// TestStringer tests the stringer methods of the fee rate types.
+func TestStringer(t *testing.T) {
+	t.Parallel()
+
+	// Create a set of fee rates to test.
+	r1 := SatPerVByte{big.NewRat(1, 1)}
+	r2 := SatPerKVByte{big.NewRat(1000, 1)}
+	r3 := SatPerKWeight{big.NewRat(250, 1)}
+
+	// Test String.
+	require.Equal(t, "1.00 sat/vb", r1.String())
+	require.Equal(t, "1000.00 sat/kvb", r2.String())
+	require.Equal(t, "250.00 sat/kw", r3.String())
+}
+
+// TestFeeRateComparisonsKVB tests the comparison methods of the SatPerKVByte
+// type.
+func TestFeeRateComparisonsKVB(t *testing.T) {
+	t.Parallel()
+
+	// Create a set of fee rates to compare.
+	r1 := SatPerKVByte{big.NewRat(1, 1)}
+	r2 := SatPerKVByte{big.NewRat(2, 1)}
+	r3 := SatPerKVByte{big.NewRat(1, 1)}
+
+	// Test Equal.
+	require.True(t, r1.Equal(r3))
+	require.False(t, r1.Equal(r2))
+
+	// Test GreaterThan.
+	require.True(t, r2.GreaterThan(r1))
+	require.False(t, r1.GreaterThan(r2))
+	require.False(t, r1.GreaterThan(r3))
+
+	// Test LessThan.
+	require.True(t, r1.LessThan(r2))
+	require.False(t, r2.LessThan(r1))
+	require.False(t, r1.LessThan(r3))
+
+	// Test GreaterThanOrEqual.
+	require.True(t, r2.GreaterThanOrEqual(r1))
+	require.True(t, r1.GreaterThanOrEqual(r3))
+	require.False(t, r1.GreaterThanOrEqual(r2))
+
+	// Test LessThanOrEqual.
+	require.True(t, r1.LessThanOrEqual(r2))
+	require.True(t, r1.LessThanOrEqual(r3))
+	require.False(t, r2.LessThanOrEqual(r1))
+}
+
+// TestFeeRateComparisonsKW tests the comparison methods of the SatPerKWeight
+// type.
+func TestFeeRateComparisonsKW(t *testing.T) {
+	t.Parallel()
+
+	// Create a set of fee rates to compare.
+	r1 := SatPerKWeight{big.NewRat(1, 1)}
+	r2 := SatPerKWeight{big.NewRat(2, 1)}
+	r3 := SatPerKWeight{big.NewRat(1, 1)}
+
+	// Test Equal.
+	require.True(t, r1.Equal(r3))
+	require.False(t, r1.Equal(r2))
+
+	// Test GreaterThan.
+	require.True(t, r2.GreaterThan(r1))
+	require.False(t, r1.GreaterThan(r2))
+	require.False(t, r1.GreaterThan(r3))
+
+	// Test LessThan.
+	require.True(t, r1.LessThan(r2))
+	require.False(t, r2.LessThan(r1))
+	require.False(t, r1.LessThan(r3))
+
+	// Test GreaterThanOrEqual.
+	require.True(t, r2.GreaterThanOrEqual(r1))
+	require.True(t, r1.GreaterThanOrEqual(r3))
+	require.False(t, r1.GreaterThanOrEqual(r2))
+
+	// Test LessThanOrEqual.
+	require.True(t, r1.LessThanOrEqual(r2))
+	require.True(t, r1.LessThanOrEqual(r3))
+	require.False(t, r2.LessThanOrEqual(r1))
+}
+
+// TestFeeForSize tests the FeeForVSize and FeeForVByte methods.
+func TestFeeForSize(t *testing.T) {
+	t.Parallel()
+
+	// Create a set of fee rates to test.
+	r1 := SatPerKVByte{big.NewRat(1000, 1)}
+	r2 := SatPerKWeight{big.NewRat(250, 1)}
+
+	// Test FeeForVSize.
+	require.Equal(t, btcutil.Amount(250), r1.FeeForVSize(250))
+
+	// Test FeeForVByte.
+	require.Equal(t, btcutil.Amount(250), r2.FeeForVByte(250))
+}
+
+// TestNewFeeRateConstructorsZero tests the New* fee rate constructors with
+// zero values.
+func TestNewFeeRateConstructorsZero(t *testing.T) {
+	t.Parallel()
+
+	// Test NewSatPerKWeight with zero weight.
+	fee := btcutil.Amount(1000)
+	wu := WeightUnit(0)
+	expectedRate := SatPerKWeight{big.NewRat(0, 1)}
+	require.Zero(
+		t, expectedRate.Cmp(NewSatPerKWeight(fee, wu).Rat),
+	)
+
+	// Test NewSatPerVByte with zero vbytes.
+	vb := VByte(0)
+	expectedRateVB := SatPerVByte{big.NewRat(0, 1)}
+	require.Zero(
+		t, expectedRateVB.Cmp(NewSatPerVByte(fee, vb).Rat),
+	)
+
+	// Test NewSatPerKVByte with zero kvbytes.
+	kvb := VByte(0)
+	expectedRateKVB := SatPerKVByte{big.NewRat(0, 1)}
+	require.Zero(
+		t, expectedRateKVB.Cmp(NewSatPerKVByte(fee, kvb).Rat),
+	)
+}
+
+// TestSafeUint64ToInt64Overflow tests the overflow condition in
+// safeUint64ToInt64 through the New* constructors.
+func TestSafeUint64ToInt64Overflow(t *testing.T) {
+	t.Parallel()
+
+	fee := btcutil.Amount(1)
+	overflowVByte := VByte(math.MaxInt64 + 1)
+
+	// Test NewSatPerVByte with an overflowing vbyte value.
+	// The denominator should be capped at math.MaxInt64.
+	rateVB := NewSatPerVByte(fee, overflowVByte)
+	expectedDenom := big.NewInt(math.MaxInt64)
+	require.Zero(t, expectedDenom.Cmp(rateVB.Denom()))
+
+	// Test NewSatPerKVByte with an overflowing kvb value.
+	// The denominator should be capped at math.MaxInt64.
+	rateKVB := NewSatPerKVByte(fee, overflowVByte)
+	require.Zero(t, expectedDenom.Cmp(rateKVB.Denom()))
+
+	// Test NewSatPerKWeight with an overflowing weight unit value.
+	overflowWU := WeightUnit(math.MaxInt64 + 1)
+	rateKW := NewSatPerKWeight(fee, overflowWU)
+	require.Zero(t, expectedDenom.Cmp(rateKW.Denom()))
 }

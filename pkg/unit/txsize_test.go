@@ -20,3 +20,16 @@ func TestTxSizeConversion(t *testing.T) {
 	// 250 vb should be equal to 1000 wu.
 	require.Equal(t, wu, VByte(250).ToWU())
 }
+
+// TestTxSizeStringer tests the stringer methods of the tx size types.
+func TestTxSizeStringer(t *testing.T) {
+	t.Parallel()
+
+	// Create a test weight of 1000 wu.
+	wu := WeightUnit(1000)
+	vb := VByte(250)
+
+	// Test String.
+	require.Equal(t, "1000 wu", wu.String())
+	require.Equal(t, "250 vb", vb.String())
+}
