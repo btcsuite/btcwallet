@@ -162,7 +162,7 @@ tidy-module-check: tidy-module
 #? sqlc: Generate sql models and queries in Go
 sqlc: docker-tools
 	@$(call print, "Generating sql models and queries in Go")
-	$(DOCKER_TOOLS) sqlc generate -f internal/db/sqlc/sqlc.yaml
+	$(DOCKER_TOOLS) sqlc generate -f wallet/internal/db/sqlc/sqlc.yaml
 
 #? sqlc-check: Make sure sql models and queries are up to date
 sqlc-check: sqlc
