@@ -1,4 +1,4 @@
-package unit
+package btcunit
 
 import (
 	"fmt"
