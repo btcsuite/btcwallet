@@ -277,11 +277,12 @@ func TestStoreQueries(t *testing.T) {
 	newState.blocks = [][]TxDetails{
 		{
 			{
-				TxRecord: *stripSerializedTx(recA),
+				TxRecord: *recA,
 				Block:    BlockMeta{Block: Block{Height: -1}},
 			},
 		},
 	}
+
 	newState.txDetails[recA.Hash] = []TxDetails{
 		newState.blocks[0][0],
 	}
@@ -324,7 +325,7 @@ func TestStoreQueries(t *testing.T) {
 	newState = lastState.deepCopy()
 	newState.blocks[0][0].Credits[0].Spent = true
 	newState.blocks[0] = append(newState.blocks[0], TxDetails{
-		TxRecord: *stripSerializedTx(recB),
+		TxRecord: *recB,
 		Block:    BlockMeta{Block: Block{Height: -1}},
 		Debits: []DebitRecord{
 			{
