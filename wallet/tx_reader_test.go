@@ -13,7 +13,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcwallet/pkg/unit"
+	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -30,7 +30,9 @@ func TestBuildTxDetail(t *testing.T) {
 	unminedNoFeeDetails, unminedNoFeeTxDetail := createUnminedTxDetail(t)
 	unminedNoFeeDetails.Debits = nil
 	unminedNoFeeTxDetail.Fee = 0
-	unminedNoFeeTxDetail.FeeRate = unit.SatPerVByte{Rat: big.NewRat(0, 1)}
+	unminedNoFeeTxDetail.FeeRate = btcunit.SatPerVByte{
+		Rat: big.NewRat(0, 1),
+	}
 	unminedNoFeeTxDetail.Value = unminedNoFeeDetails.Credits[0].Amount +
 		unminedNoFeeDetails.Credits[1].Amount
 	unminedNoFeeTxDetail.PrevOuts[0].IsOurs = false
@@ -272,7 +274,7 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 	}
 
 	// Define the expected TxDetail for the unmined case.
-	weight := unit.NewWeightUnit(uint64(blockchain.GetTransactionWeight(
+	weight := btcunit.NewWeightUnit(uint64(blockchain.GetTransactionWeight(
 		btcutil.NewTx(&rec.MsgTx),
 	)))
 	unminedTxDetail := &TxDetail{
@@ -281,7 +283,7 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 		Label:         testLabel,
 		Value:         totalCredits - debitAmt,
 		Fee:           fee,
-		FeeRate:       unit.NewSatPerVByte(fee, weight.ToVB()),
+		FeeRate:       btcunit.NewSatPerVByte(fee, weight.ToVB()),
 		Confirmations: 0,
 		Weight:        weight,
 		ReceivedTime:  txTime,

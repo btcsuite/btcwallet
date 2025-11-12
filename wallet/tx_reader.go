@@ -17,7 +17,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcwallet/pkg/unit"
+	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -114,10 +114,10 @@ type TxDetail struct {
 	//
 	// NOTE: This is only calculated if all inputs are known to the wallet.
 	// Otherwise, it will be zero.
-	FeeRate unit.SatPerVByte
+	FeeRate btcunit.SatPerVByte
 
 	// Weight is the tx's weight.
-	Weight unit.WeightUnit
+	Weight btcunit.WeightUnit
 
 	// Confirmations is the number of confirmations this tx has.
 	// This will be 0 for unconfirmed txns.
@@ -283,7 +283,7 @@ func (w *Wallet) buildBasicTxDetail(txDetails *wtxmgr.TxDetails) *TxDetail {
 		Label:        txDetails.Label,
 		ReceivedTime: txDetails.Received,
 		Weight:       safeInt64ToWeightUnit(txWeight),
-		FeeRate:      unit.SatPerVByte{Rat: big.NewRat(0, 1)},
+		FeeRate:      btcunit.SatPerVByte{Rat: big.NewRat(0, 1)},
 	}
 }
 
@@ -340,7 +340,7 @@ func (w *Wallet) calculateValueAndFee(details *TxDetail,
 	}
 
 	details.Fee = totalInput - totalOutput
-	details.FeeRate = unit.NewSatPerVByte(
+	details.FeeRate = btcunit.NewSatPerVByte(
 		details.Fee, details.Weight.ToVB(),
 	)
 }
@@ -413,12 +413,12 @@ func (w *Wallet) populatePrevOuts(details *TxDetail,
 
 // safeInt64ToWeightUnit converts an int64 to a unit.WeightUnit, ensuring the
 // value is non-negative.
-func safeInt64ToWeightUnit(w int64) unit.WeightUnit {
+func safeInt64ToWeightUnit(w int64) btcunit.WeightUnit {
 	if w < 0 {
-		return unit.NewWeightUnit(0)
+		return btcunit.NewWeightUnit(0)
 	}
 
-	return unit.NewWeightUnit(uint64(w))
+	return btcunit.NewWeightUnit(uint64(w))
 }
 
 // safeIntToUint32 converts an int to a uint32, returning false if the

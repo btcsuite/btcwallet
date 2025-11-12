@@ -2,8 +2,8 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-// Package unit provides a set of types for dealing with bitcoin units.
-package unit
+// Package btcunit provides a set of types for dealing with bitcoin units.
+package btcunit
 
 import (
 	"log/slog"
