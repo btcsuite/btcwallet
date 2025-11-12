@@ -1,4 +1,4 @@
-# btcwallet/unit
+# btcwallet/btcunit
 
 This package provides a set of idiomatic, type-safe units for handling common
 Bitcoin quantities like transaction sizes, weights, and fee rates.
