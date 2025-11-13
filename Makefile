@@ -163,6 +163,8 @@ tidy-module-check: tidy-module
 sqlc: docker-tools
 	@$(call print, "Generating sql models and queries in Go")
 	$(DOCKER_TOOLS) sqlc generate -f wallet/internal/db/sqlc/sqlc.yaml
+	@$(call print, "Merging SQL migrations into consolidated schemas")
+	go run ./cmd/merge-sql-schemas/main.go
 
 #? sqlc-check: Make sure sql models and queries are up to date
 sqlc-check: sqlc
