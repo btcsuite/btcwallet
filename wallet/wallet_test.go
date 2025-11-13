@@ -247,8 +247,9 @@ func TestGetTransaction(t *testing.T) {
 		expectedErr error
 	}{
 		{
-			name: "existing unmined transaction",
-			txid: *TstTxHash,
+			name:           "existing unmined transaction",
+			txid:           *TstTxHash,
+			expectedHeight: -1,
 			// We write txdetail for the tx to disk.
 			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
 				*wtxmgr.Store, error) {

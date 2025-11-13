@@ -2607,15 +2607,24 @@ func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 
 		res = GetTransactionResult{
 			Summary:       makeTxSummary(dbtx, w, txDetail),
-			Timestamp:     txDetail.Block.Time.Unix(),
-			Confirmations: txDetail.Block.Height,
+			BlockHash:     nil,
+			Height:        -1,
+			Confirmations: 0,
+			Timestamp:     0,
 		}
 
 		// If it is a confirmed transaction we set the corresponding
-		// block height and hash.
+		// block height, timestamp, hash, and confirmations.
 		if txDetail.Block.Height != -1 {
 			res.Height = txDetail.Block.Height
+			res.Timestamp = txDetail.Block.Time.Unix()
 			res.BlockHash = &txDetail.Block.Hash
+
+			bestBlock := w.SyncedTo()
+			blockHeight := txDetail.Block.Height
+			res.Confirmations = calcConf(
+				blockHeight, bestBlock.Height,
+			)
 		}
 
 		return nil
