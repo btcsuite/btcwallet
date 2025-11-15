@@ -1333,57 +1333,6 @@ func WithUtxoFilter(allowUtxo func(utxo wtxmgr.Credit) bool) TxCreateOption {
 	}
 }
 
-// CreateSimpleTx creates a new signed transaction spending unspent outputs with
-// at least minconf confirmations spending to any number of address/amount
-// pairs. Only unspent outputs belonging to the given key scope and account will
-// be selected, unless a key scope is not specified. In that case, inputs from all
-// accounts may be selected, no matter what key scope they belong to. This is
-// done to handle the default account case, where a user wants to fund a PSBT
-// with inputs regardless of their type (NP2WKH, P2WKH, etc.). Change and an
-// appropriate transaction fee are automatically included, if necessary. All
-// transaction creation through this function is serialized to prevent the
-// creation of many transactions which spend the same outputs.
-//
-// A set of functional options can be passed in to apply modifications to the
-// tx creation process such as using a custom change scope, which otherwise
-// defaults to the same as the specified coin selection scope.
-//
-// NOTE: The dryRun argument can be set true to create a tx that doesn't alter
-// the database. A tx created with this set to true SHOULD NOT be broadcast.
-func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
-	account uint32, outputs []*wire.TxOut, minconf int32,
-	satPerKb btcutil.Amount, coinSelectionStrategy CoinSelectionStrategy,
-	dryRun bool, optFuncs ...TxCreateOption) (*txauthor.AuthoredTx, error) {
-
-	opts := defaultTxCreateOptions()
-	for _, optFunc := range optFuncs {
-		optFunc(opts)
-	}
-
-	// If the change scope isn't set, then it should be the same as the
-	// coin selection scope in order to match existing behavior.
-	if opts.changeKeyScope == nil {
-		opts.changeKeyScope = coinSelectKeyScope
-	}
-
-	req := createTxRequest{
-		coinSelectKeyScope:    coinSelectKeyScope,
-		changeKeyScope:        opts.changeKeyScope,
-		account:               account,
-		outputs:               outputs,
-		minconf:               minconf,
-		feeSatPerKB:           satPerKb,
-		coinSelectionStrategy: coinSelectionStrategy,
-		dryRun:                dryRun,
-		resp:                  make(chan createTxResponse),
-		selectUtxos:           opts.selectUtxos,
-		allowUtxo:             opts.allowUtxo,
-	}
-	w.createTxRequests <- req
-	resp := <-req.resp
-	return resp.tx, resp.err
-}
-
 type (
 	unlockRequest struct {
 		passphrase []byte
