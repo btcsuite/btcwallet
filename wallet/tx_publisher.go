@@ -219,6 +219,18 @@ type creditInfo struct {
 	addr btcutil.Address
 }
 
+// ownedAddrInfo holds information about a wallet-owned address and the
+// transaction output indices that pay to it.
+type ownedAddrInfo struct {
+	// managedAddr represents the managed address.
+	managedAddr waddrmgr.ManagedAddress
+
+	// outputIndices contains the transaction output indices that contain
+	// this address. The indices are not guaranteed to be sorted in any
+	// order.
+	outputIndices []uint32
+}
+
 // addTxToWallet adds a tx to the wallet's database. This function is a critical
 // part of the wallet's transaction processing pipeline and is designed for high
 // performance and atomicity. It follows a four-stage process:
@@ -271,34 +283,31 @@ func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
 	// Stage 3: Prepare a definitive "write plan". This plan is created in
 	// memory and contains all the information needed for the final atomic
 	// database update.
-	var (
-		creditsToWrite []creditInfo
-		ourAddrs       []btcutil.Address
-	)
+	//
+	// Pre-allocate slices with exact capacity to avoid reallocations.
+	// We know the exact number of credits from the total output indices
+	// across all owned addresses.
+	var totalCredits int
+	for _, info := range ownedAddrs {
+		totalCredits += len(info.outputIndices)
+	}
 
-	// The nested loop structure here is critical. It iterates through the
-	// original transaction outputs and uses the `ownedAddrs` map as a
-	// quick lookup table. This correctly handles the edge case where a
-	// single transaction has multiple outputs paying to the same address,
-	// as it ensures a distinct entry in the `creditsToWrite` slice is
-	// created for each individual output. For example, if a transaction
-	// has two outputs (index 0 and 1) that both pay to `addr_A`, this
-	// loop will create two separate entries in `creditsToWrite`, one for
-	// each index, ensuring both UTXOs are correctly credited.
-	for index, addrs := range txOutAddrs {
-		for _, addr := range addrs {
-			ma, ok := ownedAddrs[addr]
-			if !ok {
-				continue
-			}
+	creditsToWrite := make([]creditInfo, 0, totalCredits)
+	ourAddrs := make([]btcutil.Address, 0, len(ownedAddrs))
 
+	// Iterate directly over owned addresses and their pre-computed output
+	// indices. This correctly handles the edge case where a single
+	// transaction has multiple outputs paying to the same address.
+	for addr, info := range ownedAddrs {
+		for _, index := range info.outputIndices {
 			creditsToWrite = append(creditsToWrite, creditInfo{
 				index: index,
-				ma:    ma,
+				ma:    info.managedAddr,
 				addr:  addr,
 			})
-			ourAddrs = append(ourAddrs, addr)
 		}
+
+		ourAddrs = append(ourAddrs, addr)
 	}
 
 	// Stage 4: Atomically execute the write plan. This is the only stage
@@ -408,22 +417,22 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]btcutil.Address {
 // performed only once for each unique address.
 func (w *Wallet) filterOwnedAddresses(
 	txOutAddrs map[uint32][]btcutil.Address) (
-	map[btcutil.Address]waddrmgr.ManagedAddress, error) {
+	map[btcutil.Address]ownedAddrInfo, error) {
 
-	ownedAddrs := make(map[btcutil.Address]waddrmgr.ManagedAddress)
+	ownedAddrs := make(map[btcutil.Address]ownedAddrInfo)
 
 	// Pre-deduplicate addresses outside the DB transaction.
-	uniqueAddrs := make(map[btcutil.Address]struct{})
-	for _, addrs := range txOutAddrs {
+	uniqueAddrs := make(map[btcutil.Address][]uint32)
+	for index, addrs := range txOutAddrs {
 		for _, addr := range addrs {
-			uniqueAddrs[addr] = struct{}{}
+			uniqueAddrs[addr] = append(uniqueAddrs[addr], index)
 		}
 	}
 
 	err := walletdb.View(w.db, func(dbTx walletdb.ReadTx) error {
 		addrmgrNs := dbTx.ReadBucket(waddrmgrNamespaceKey)
 
-		for addr := range uniqueAddrs {
+		for addr, indices := range uniqueAddrs {
 			ma, err := w.addrStore.Address(addrmgrNs, addr)
 
 			// If the address is not found, it simply means
@@ -440,7 +449,10 @@ func (w *Wallet) filterOwnedAddresses(
 				return err
 			}
 
-			ownedAddrs[addr] = ma
+			ownedAddrs[addr] = ownedAddrInfo{
+				managedAddr:   ma,
+				outputIndices: indices,
+			}
 		}
 
 		return nil
