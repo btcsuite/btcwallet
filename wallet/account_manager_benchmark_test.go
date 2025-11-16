@@ -13,25 +13,55 @@ import (
 // multiple dataset sizes. Test names start with dataset size to group API
 // comparisons for benchstat analysis.
 func BenchmarkListAccountsByScopeAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(
-		benchmarkConfig{
-			accountGrowth: linearGrowth,
-			addressGrowth: constantGrowth,
-			utxoGrowth:    exponentialGrowth,
-			maxIterations: 14,
-			startIndex:    0,
-		},
-	)
-	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
 
-	for _, size := range benchmarkSizes {
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 14
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		utxoGrowthPadding = decimalWidth(
+			utxoGrowth[len(utxoGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
+			accountGrowthPadding, accountGrowth[i],
+			utxoGrowthPadding, utxoGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -44,13 +74,13 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -72,25 +102,55 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 // sizes. Test names start with dataset size to group API comparisons for
 // benchstat analysis.
 func BenchmarkListAccountsAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(
-		benchmarkConfig{
-			accountGrowth: linearGrowth,
-			addressGrowth: constantGrowth,
-			utxoGrowth:    exponentialGrowth,
-			maxIterations: 14,
-			startIndex:    0,
-		},
-	)
-	scopes := waddrmgr.DefaultKeyScopes
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
 
-	for _, size := range benchmarkSizes {
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 14
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		utxoGrowthPadding = decimalWidth(
+			utxoGrowth[len(utxoGrowth)-1],
+		)
+
+		scopes = waddrmgr.DefaultKeyScopes
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
+			accountGrowthPadding, accountGrowth[i],
+			utxoGrowthPadding, utxoGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -103,13 +163,13 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -129,27 +189,57 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 // multiple dataset sizes. Test names start with dataset size to group API
 // comparisons for benchstat analysis.
 func BenchmarkListAccountsByNameAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(
-		benchmarkConfig{
-			accountGrowth: linearGrowth,
-			addressGrowth: constantGrowth,
-			utxoGrowth:    exponentialGrowth,
-			maxIterations: 14,
-			startIndex:    0,
-		},
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
+
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 14
 	)
-	scopes := waddrmgr.DefaultKeyScopes
 
-	for _, size := range benchmarkSizes {
-		accountName, _ := generateAccountName(size.numAccounts, scopes)
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
 
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		utxoGrowthPadding = decimalWidth(
+			utxoGrowth[len(utxoGrowth)-1],
+		)
+
+		scopes = waddrmgr.DefaultKeyScopes
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		accountName, _ := generateAccountName(accountGrowth[i], scopes)
+
+		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
+			accountGrowthPadding, accountGrowth[i],
+			utxoGrowthPadding, utxoGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -164,13 +254,13 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -192,23 +282,50 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 // names start with dataset size to group API comparisons for benchstat
 // analysis.
 func BenchmarkNewAccountAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
-		accountGrowth: linearGrowth,
-		addressGrowth: constantGrowth,
-		utxoGrowth:    constantGrowth,
-		maxIterations: 10,
-		startIndex:    0,
-	})
-	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
 
-	for _, size := range benchmarkSizes {
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 10
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("%0*d-Accounts", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -232,13 +349,13 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -268,25 +385,57 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 // using identical account lookups across multiple dataset sizes. Test names
 // start with dataset size to group API comparisons for benchstat analysis.
 func BenchmarkGetAccountAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
-		accountGrowth: exponentialGrowth,
-		addressGrowth: constantGrowth,
-		utxoGrowth:    exponentialGrowth,
-		maxIterations: 14,
-		startIndex:    0,
-	})
-	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
 
-	for _, size := range benchmarkSizes {
-		accountName, _ := generateAccountName(size.numAccounts, scopes)
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 14
+	)
 
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		utxoGrowthPadding = decimalWidth(
+			utxoGrowth[len(utxoGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		accountName, _ := generateAccountName(accountGrowth[i], scopes)
+
+		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
+			accountGrowthPadding, accountGrowth[i],
+			utxoGrowthPadding, utxoGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -301,13 +450,13 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -329,28 +478,55 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 // dataset sizes. Test names start with dataset size to group API comparisons
 // for benchstat analysis.
 func BenchmarkRenameAccountAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
-		accountGrowth: exponentialGrowth,
-		addressGrowth: constantGrowth,
-		utxoGrowth:    constantGrowth,
-		maxIterations: 11,
-		startIndex:    0,
-	})
-	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
 
-	for _, size := range benchmarkSizes {
-		accountName, accountNumber := generateAccountName(
-			size.numAccounts, scopes,
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 11
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
 		)
-		newName := accountName + "-renamed"
 
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		accountName, accountNumber := generateAccountName(
+			accountGrowth[i], scopes,
+		)
+		newAccountName := accountName + "-renamed"
+
+		name := fmt.Sprintf("%0*d-Accounts", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -359,9 +535,12 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 
 			count := 0
 			for b.Loop() {
-				newName2 := fmt.Sprintf("%s-%d", newName, count)
+				newAccountName2 := fmt.Sprintf("%s-%d",
+					newAccountName, count)
+
 				err := w.RenameAccountDeprecated(
-					scopes[0], accountNumber, newName2,
+					scopes[0], accountNumber,
+					newAccountName2,
 				)
 				require.NoError(b, err)
 
@@ -376,32 +555,36 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
+
+			newAccountName := accountName + "-renamed"
 
 			b.ReportAllocs()
 			b.ResetTimer()
 
 			count := 0
 			for b.Loop() {
-				newName2 := fmt.Sprintf("%s-%d", newName, count)
+				newAccountName2 := fmt.Sprintf("%s-%d",
+					newAccountName, count)
+
 				err := w.RenameAccount(
 					b.Context(), scopes[0], accountName,
-					newName2,
+					newAccountName2,
 				)
 				require.NoError(b, err)
 
 				// Rename back to original to keep the benchmark
 				// idempotent.
 				err = w.RenameAccount(
-					b.Context(), scopes[0], newName2,
+					b.Context(), scopes[0], newAccountName2,
 					accountName,
 				)
 				require.NoError(b, err)
@@ -416,26 +599,59 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 // using identical balance lookups across multiple dataset sizes. Test names
 // start with dataset size to group API comparisons for benchstat analysis.
 func BenchmarkGetBalanceAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
-		accountGrowth: linearGrowth,
-		addressGrowth: constantGrowth,
-		utxoGrowth:    exponentialGrowth,
-		maxIterations: 14,
-		startIndex:    0,
-	})
-	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
-	confirmations := int32(0)
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
 
-	for _, size := range benchmarkSizes {
-		accountName, _ := generateAccountName(size.numAccounts, scopes)
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 14
+	)
 
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		utxoGrowthPadding = decimalWidth(
+			utxoGrowth[len(utxoGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
+
+		confirmations = int32(0)
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		accountName, _ := generateAccountName(accountGrowth[i], scopes)
+
+		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
+			accountGrowthPadding, accountGrowth[i],
+			utxoGrowthPadding, utxoGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -451,13 +667,13 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			bw := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -480,28 +696,56 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 // across multiple dataset sizes. Test names start with dataset size to group
 // API comparisons for benchstat analysis.
 func BenchmarkImportAccountAPI(b *testing.B) {
-	benchmarkSizes, namingInfo := generateBenchmarkSizes(benchmarkConfig{
-		accountGrowth: linearGrowth,
-		addressGrowth: constantGrowth,
-		utxoGrowth:    constantGrowth,
-		maxIterations: 10,
-		startIndex:    0,
-	})
-	scopes := []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
-	dryRun := false
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
 
-	for _, size := range benchmarkSizes {
-		accountKey, masterFingerprint, addrT := generateTestExtendedKey(
-			b, size.numAccounts,
+		// maxGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		maxGrowthIteration = 10
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
 		)
 
-		b.Run(size.name(namingInfo)+"/0-Before", func(b *testing.B) {
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+
+		dryRun = false
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		accountKey, masterFingerprint, addrT := generateTestExtendedKey(
+			b, accountGrowth[i],
+		)
+
+		name := fmt.Sprintf("%0*d-Accounts", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name+"/0-Before", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
@@ -526,13 +770,13 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 			}
 		})
 
-		b.Run(size.name(namingInfo)+"/1-After", func(b *testing.B) {
+		b.Run(name+"/1-After", func(b *testing.B) {
 			w := setupBenchmarkWallet(
 				b, benchmarkWalletConfig{
 					scopes:       scopes,
-					numAccounts:  size.numAccounts,
-					numAddresses: size.numAddresses,
-					numUTXOs:     size.numUTXOs,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
 				},
 			)
 
