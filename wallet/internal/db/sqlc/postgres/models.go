@@ -4,8 +4,40 @@
 
 package sqlcpg
 
+import (
+	"database/sql"
+	"time"
+)
+
 type Block struct {
 	BlockHeight int32
 	HeaderHash  []byte
 	Timestamp   int64
+}
+
+type Wallet struct {
+	ID                      int64
+	Name                    string
+	IsImported              bool
+	ManagerVersion          int32
+	IsWatchOnly             bool
+	MasterPubParams         []byte
+	EncryptedCryptoPubKey   []byte
+	EncryptedMasterHdPubKey []byte
+}
+
+type WalletSecret struct {
+	WalletID                 int64
+	MasterPrivParams         []byte
+	EncryptedCryptoPrivKey   []byte
+	EncryptedCryptoScriptKey []byte
+	EncryptedMasterHdPrivKey []byte
+}
+
+type WalletSyncState struct {
+	WalletID         int64
+	SyncedHeight     sql.NullInt32
+	BirthdayHeight   sql.NullInt32
+	BirthdayVerified bool
+	UpdatedAt        time.Time
 }
