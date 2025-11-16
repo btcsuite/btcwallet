@@ -30,116 +30,73 @@ var errAccountNotFound = errors.New("account not found")
 type growthFunc func(i int) int
 
 // constantGrowth returns a constant value regardless of iteration.
+//
+// Use when: The parameter is a control variable not under test and should
+// remain fixed across all iterations.
+//
+// Example: accountGrowth when testing transaction complexity (not account
+// scaling).
+//
+// Note: Ideal for CI as it produces predictable, stable results for regression
+// detection.
+//
+// Result: 5, 5, 5, 5, 5...
 func constantGrowth(i int) int {
 	return 5
 }
 
-// linearGrowth scales the parameter value linearly.
+// linearGrowth scales the parameter value linearly with arithmetic progression.
+//
+// Use when: Testing gradual scaling behavior, O(n) or O(n²) algorithms, or
+// when detailed granularity is needed across a moderate range.
+//
+// Example: Transaction I/O counts, address counts, or database record counts
+// where you want to see how performance degrades proportionally.
+//
+// Note: Safe for CI when used with limited range (e.g., i = 0..9 yields 5..50)
+// for regression detection. Avoid for O(log n) algorithms as x grows linearly
+// while y grows logarithmically, making regressions harder to detect.
+//
+// Result: 5, 10, 15, 20, 25, 30, 35...
 func linearGrowth(i int) int {
 	return 5 + (i * 5)
 }
 
-// exponentialGrowth scales the parameter value exponentially.
+// exponentialGrowth scales the parameter value exponentially (powers of 2).
+//
+// Use when: Stress testing scalability limits, testing concurrency levels, or
+// quickly covering a wide range from small to large values. Works well for
+// algorithms with O(log n) complexity as it creates a linear relationship when
+// plotted (e.g., y = log₂(x) when x grows exponentially, y grows linearly).
+//
+// Example: Concurrent worker counts, cache sizes, or finding performance
+// breaking points.
+//
+// Note: Avoid running in CI due to large values and long execution times. Use
+// for local performance analysis only.
+//
+// Result: 1, 2, 4, 8, 16, 32, 64, 128, 256...
 func exponentialGrowth(i int) int {
 	return 1 << i
 }
 
-// benchmarkDataSize represents the test data size for a single benchmark
-// iteration.
-type benchmarkDataSize struct {
-	// numAccounts is the number of accounts to create.
-	numAccounts int
-
-	// numUTXOs is the number of UTXOs to create.
-	numUTXOs int
-
-	// numAddresses is the number of addresses to create.
-	numAddresses int
-}
-
-// benchmarkNamingInfo holds metadata for generating benchmark names.
-type benchmarkNamingInfo struct {
-	// maxAccounts is the maximum number of accounts in the benchmark
-	// series. That would helpful in determining the dynamic padding for the
-	// account digits
-	maxAccounts int
-
-	// maxUTXOs is the maximum number of UTXOs in the benchmark series. That
-	// would helpful in determining the dynamic padding for the UTXO digits.
-	maxUTXOs int
-
-	// maxAddresses is the maximum number of addresses in the benchmark
-	// series. That would helpful in determining the dynamic padding for the
-	// address digits.
-	maxAddresses int
-}
-
-// name returns a dynamically generated benchmark name based on accounts,
-// UTXOs, and addresses. Uses dynamic padding based on maximum values for
-// proper sorting in visualization tools.
-func (b benchmarkDataSize) name(namingInfo benchmarkNamingInfo) string {
-	accountDigits := len(strconv.Itoa(namingInfo.maxAccounts))
-
-	name := fmt.Sprintf("%0*d-Accounts", accountDigits, b.numAccounts)
-
-	if b.numAddresses > 0 {
-		addressDigits := len(strconv.Itoa(namingInfo.maxAddresses))
-		name += fmt.Sprintf("-%0*d-Addresses", addressDigits,
-			b.numAddresses)
+// mapRange maps fn over indices [start..end] (inclusive) and returns the
+// results. This provides functional-style array generation for benchmarks.
+//
+//nolint:unparam // Different benchmarks may intentionally use different values
+func mapRange(start, end int, fn growthFunc) []int {
+	result := make([]int, end-start+1)
+	for i := range result {
+		result[i] = fn(start + i)
 	}
 
-	if b.numUTXOs > 0 {
-		utxoDigits := len(strconv.Itoa(namingInfo.maxUTXOs))
-		name += fmt.Sprintf("-%0*d-UTXOs", utxoDigits, b.numUTXOs)
-	}
-
-	return name
+	return result
 }
 
-// benchmarkConfig holds configuration for benchmark wallet setup.
-type benchmarkConfig struct {
-	// accountGrowth is the function to use to grow the number of accounts.
-	accountGrowth growthFunc
-
-	// utxoGrowth is the function to use to grow the number of UTXOs.
-	utxoGrowth growthFunc
-
-	// addressGrowth is the function to use to grow the number of addresses.
-	addressGrowth growthFunc
-
-	// maxIterations is the maximum number of iterations to run.
-	maxIterations int
-
-	// startIndex is the index to start the benchmark at.
-	startIndex int
-}
-
-// generateBenchmarkSizes creates benchmark data sizes programmatically.
-func generateBenchmarkSizes(
-	config benchmarkConfig) ([]benchmarkDataSize, benchmarkNamingInfo) {
-
-	var sizes []benchmarkDataSize
-
-	// Calculate maximum values for proper padding.
-	maxAccounts := config.accountGrowth(config.maxIterations)
-	maxUTXOs := config.utxoGrowth(config.maxIterations)
-	maxAddresses := config.addressGrowth(config.maxIterations)
-
-	namingInfo := benchmarkNamingInfo{
-		maxAccounts:  maxAccounts,
-		maxUTXOs:     maxUTXOs,
-		maxAddresses: maxAddresses,
-	}
-
-	for i := config.startIndex; i <= config.maxIterations; i++ {
-		sizes = append(sizes, benchmarkDataSize{
-			numAccounts:  config.accountGrowth(i),
-			numUTXOs:     config.utxoGrowth(i),
-			numAddresses: config.addressGrowth(i),
-		})
-	}
-
-	return sizes, namingInfo
+// decimalWidth returns the number of characters in the decimal representation
+// of given value.
+func decimalWidth(value int) int {
+	return len(strconv.Itoa(value))
 }
 
 // benchmarkWalletConfig holds configuration for benchmark wallet setup.
@@ -150,25 +107,42 @@ type benchmarkWalletConfig struct {
 	// numAccounts is the number of accounts to create.
 	numAccounts int
 
-	// numUTXOs is the number of UTXOs to create.
-	numUTXOs int
+	// numWalletTxs is the number of wallet transactions to create.
+	numWalletTxs int
 
 	// numAddresses is the number of addresses to create.
 	numAddresses int
+
+	// numTxInputs is the number of inputs per transaction. If 0, defaults
+	// to 1 input per transaction.
+	numTxInputs int
+
+	// numTxOutputs is the number of outputs per transaction. If 0,
+	// defaults to 1 output per transaction.
+	numTxOutputs int
 }
 
-// benchmarkWallet holds a wallet and its created UTXO outpoints.
+// benchmarkWallet holds a wallet and its created wallet transactions.
 type benchmarkWallet struct {
 	*Wallet
 
-	outpoints []wire.OutPoint
+	// confirmedTxs contains confirmed wallet transactions created during
+	// benchmark setup. These are spending transactions with both debits
+	// (inputs) and credits (outputs) that have been mined in blocks.
+	confirmedTxs []*wire.MsgTx
+
+	// unconfirmedTxs contains unconfirmed wallet transactions created
+	// during benchmark setup. These are spending transactions with both
+	// debits (inputs) and credits (outputs) that are in the mempool.
+	unconfirmedTxs []*wire.MsgTx
 }
 
 // setupBenchmarkWallet creates a wallet with test data based on the provided
 // configuration. It distributes accounts evenly across the specified scopes
-// and returns the wallet along with the outpoints of all created UTXOs.
+// and returns the wallet along with the outpoints of all created UTXOs. If
+// config.miner is provided, the wallet is connected to the btcd node via RPC.
 func setupBenchmarkWallet(tb testing.TB,
-	config benchmarkWalletConfig) *benchmarkWallet {
+	cfg benchmarkWalletConfig) *benchmarkWallet {
 
 	tb.Helper()
 
@@ -180,24 +154,35 @@ func setupBenchmarkWallet(tb testing.TB,
 	require.False(tb, setupT.Failed(), "testWallet setup failed")
 
 	addresses := createTestAccounts(
-		tb, w, config.scopes, config.numAccounts,
-		config.numAddresses,
+		tb, w, cfg.scopes, cfg.numAccounts, cfg.numAddresses,
 	)
 
-	outpoints := createTestUTXOs(tb, w, addresses, config.numUTXOs)
-
-	// Sync wallet to the block height where UTXOs were created.
-	setSyncedToHeight(tb, w, 1)
+	var txsResult *testWalletTxsResult
+	if cfg.numWalletTxs > 0 {
+		txsResult = createTestWalletTxs(
+			tb, w, addresses, cfg.numWalletTxs, cfg.numTxInputs,
+			cfg.numTxOutputs,
+		)
+	} else {
+		// Return empty result if no transactions requested.
+		txsResult = &testWalletTxsResult{
+			confirmed:   []*wire.MsgTx{},
+			unconfirmed: []*wire.MsgTx{},
+		}
+	}
 
 	return &benchmarkWallet{
-		Wallet:    w,
-		outpoints: outpoints,
+		Wallet:         w,
+		confirmedTxs:   txsResult.confirmed,
+		unconfirmedTxs: txsResult.unconfirmed,
 	}
 }
 
 // setSyncedToHeight updates the wallet's synced block height. This is useful
 // for benchmark tests to ensure confirmation calculations work correctly.
-func setSyncedToHeight(tb testing.TB, w *Wallet, height int32) {
+func setSyncedToHeight(tb testing.TB, w *Wallet, height int32,
+	hash chainhash.Hash) {
+
 	tb.Helper()
 
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
@@ -205,7 +190,7 @@ func setSyncedToHeight(tb testing.TB, w *Wallet, height int32) {
 
 		return w.addrStore.SetSyncedTo(addrmgrNs, &waddrmgr.BlockStamp{
 			Height: height,
-			Hash:   chainhash.Hash{},
+			Hash:   hash,
 		})
 	})
 	require.NoError(tb, err, "failed to set synced height to %d", height)
@@ -284,93 +269,269 @@ func createAccountsInScope(w *Wallet, tx walletdb.ReadWriteTx,
 	return nil
 }
 
-// createTestUTXOs creates the specified number of test UTXOs using the provided
-// addresses for benchmark data setup. It returns the outpoints of all created
-// UTXOs.
-func createTestUTXOs(tb testing.TB, w *Wallet,
-	addresses []waddrmgr.ManagedAddress, numUTXOs int) []wire.OutPoint {
+// testWalletTxsResult holds the result of creating test wallet transactions.
+type testWalletTxsResult struct {
+	// confirmed contains confirmed spending transactions.
+	confirmed []*wire.MsgTx
+
+	// unconfirmed contains unconfirmed spending transactions.
+	unconfirmed []*wire.MsgTx
+
+	// highestBlockMeta is the metadata for the highest block containing
+	// confirmed transactions.
+	highestBlockMeta wtxmgr.BlockMeta
+}
+
+// createTestWalletTxs creates diverse test wallet transactions with both
+// confirmed and unconfirmed transaction history. The goal is diversity for more
+// comprehensive benchmark testing. The function creates four passes of
+// transactions:
+//  1. Initial confirmed UTXOs for confirmed spending txs (credits only)
+//  2. Confirmed spending transactions (debits + credits, mined in blocks)
+//  3. Initial confirmed UTXOs for unconfirmed spending txs (credits only)
+//  4. Unconfirmed spending transactions (debits + credits, unmined/mempool)
+//
+// Each set of spending transactions uses separate UTXOs to avoid double-spend
+// conflicts. numInputs and numOutputs control transaction complexity. Returns
+// both confirmed and unconfirmed spending transactions.
+func createTestWalletTxs(tb testing.TB, w *Wallet,
+	addresses []waddrmgr.ManagedAddress, numTxs,
+	numInputs, numOutputs int) *testWalletTxsResult {
 
 	tb.Helper()
 
-	var outpoints []wire.OutPoint
+	var (
+		txsConfirmed     []*wire.MsgTx
+		txsUnconfirmed   []*wire.MsgTx
+		highestBlockMeta wtxmgr.BlockMeta
+	)
 
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		msgTx := TstTx.MsgTx()
 
-		blockMeta := &wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Hash:   chainhash.Hash{},
-				Height: 1,
-			},
-			Time: time.Now(),
-		}
+		var (
+			initialCreditsConfirmed []*wire.MsgTx
+			prevOutpointsConfirmed  []wire.OutPoint
+		)
 
-		for i := 0; i < numUTXOs && i < len(addresses); i++ {
-			newMsgTx := wire.NewMsgTx(msgTx.Version)
-			addr := addresses[i%len(addresses)]
+		var (
+			baseBlockHeight int32 = 1
+			mined                 = true
+		)
 
-			pkScript, err := txscript.PayToAddrScript(
-				addr.Address(),
-			)
-			if err != nil {
-				return err
-			}
+		// First pass: Create initial UTXOs (credits only, no debits).
+		initialCreditsConfirmed, highestBlockMeta = createTxBatch(
+			tb, w, txmgrNs, addrmgrNs, addresses, numTxs,
+			msgTx.Version, baseBlockHeight, 200000, nil, 0,
+			numOutputs, mined,
+		)
 
-			// Add a dummy tx output to make it valid.
-			amount := btcutil.Amount(100000 + i*1000)
-			txOut := wire.NewTxOut(int64(amount), pkScript)
-			newMsgTx.AddTxOut(txOut)
+		prevOutpointsConfirmed = txsToOutpoints(
+			initialCreditsConfirmed,
+		)
 
-			// Add a dummy tx input to make it valid.
-			prevHash := chainhash.Hash{}
-			prevHash[0] = byte(i)
-			txIn := wire.NewTxIn(
-				wire.NewOutPoint(&prevHash, 0), nil, nil,
-			)
-			newMsgTx.AddTxIn(txIn)
+		// Second pass: Create confirmed spending transactions
+		baseBlockHeight = highestBlockMeta.Height + 1
+		txsConfirmed, highestBlockMeta = createTxBatch(
+			tb, w, txmgrNs, addrmgrNs, addresses, numTxs,
+			msgTx.Version, baseBlockHeight, 100000,
+			prevOutpointsConfirmed, numInputs, numOutputs, mined,
+		)
 
-			rec, err := wtxmgr.NewTxRecordFromMsgTx(
-				newMsgTx, time.Now(),
-			)
-			if err != nil {
-				return err
-			}
+		// Third pass: Create initial UTXOs for unconfirmed spending
+		// txs.
+		baseBlockHeight = highestBlockMeta.Height + 1
+		initialCreditsConfirmed, highestBlockMeta = createTxBatch(
+			tb, w, txmgrNs, addrmgrNs, addresses, numTxs,
+			msgTx.Version, baseBlockHeight, 200000, nil, 0,
+			numOutputs, mined,
+		)
 
-			err = w.txStore.InsertTx(txmgrNs, rec, blockMeta)
-			if err != nil {
-				return err
-			}
+		prevOutpointsConfirmed = txsToOutpoints(initialCreditsConfirmed)
 
-			// Mark the output as unspent.
-			err = w.txStore.AddCredit(
-				txmgrNs, rec, blockMeta, 0, false,
-			)
-			if err != nil {
-				return err
-			}
-
-			err = w.addrStore.MarkUsed(
-				addrmgrNs, addr.Address(),
-			)
-			if err != nil {
-				return err
-			}
-
-			// Store the actual outpoint for later use.
-			outpoints = append(outpoints, wire.OutPoint{
-				Hash:  rec.Hash,
-				Index: 0,
-			})
-		}
+		// Fourth pass: Create unconfirmed spending transactions.
+		baseBlockHeight = -1
+		mined = false
+		txsUnconfirmed, _ = createTxBatch(
+			tb, w, txmgrNs, addrmgrNs, addresses, numTxs,
+			msgTx.Version, baseBlockHeight, 110000,
+			prevOutpointsConfirmed, numInputs, numOutputs, mined,
+		)
 
 		return nil
 	})
 
-	require.NoError(tb, err, "failed to create test UTXOs: %v", err)
+	require.NoError(tb, err, "failed to create test wallet txs: %v", err)
+
+	// Sync wallet to the highest block containing confirmed transactions.
+	setSyncedToHeight(
+		tb, w, highestBlockMeta.Height,
+		highestBlockMeta.Hash,
+	)
+
+	return &testWalletTxsResult{
+		confirmed:        txsConfirmed,
+		unconfirmed:      txsUnconfirmed,
+		highestBlockMeta: highestBlockMeta,
+	}
+}
+
+// txsToOutpoints converts all transaction outputs to outpoints. For X txs with
+// Y outputs per tx outputs, returns X*Y outpoints.
+func txsToOutpoints(txs []*wire.MsgTx) []wire.OutPoint {
+	var outpoints []wire.OutPoint
+	for _, tx := range txs {
+		txHash := tx.TxHash()
+		for j := range tx.TxOut {
+			outpoints = append(
+				outpoints, wire.OutPoint{
+					Hash:  txHash,
+					Index: uint32(j),
+				},
+			)
+		}
+	}
 
 	return outpoints
+}
+
+// createTxBatch is a helper that creates a batch of transactions.
+// If prevOutpoints is nil, creates receiving transactions (credits only).
+// If prevOutpoints is provided, creates spending transactions
+// (debits + credits). If mined is true, each transaction is placed in its own
+// block (blockHeight + i). If mined is false, transactions are unmined
+// (unconfirmed). numInputs and numOutputs control transaction complexity; if 0,
+// defaults to 1 input and 1 output per transaction. Returns the created
+// transactions and the block metadata for the highest block (only meaningful if
+// mined is true).
+func createTxBatch(tb testing.TB, w *Wallet, txmgrNs,
+	addrmgrNs walletdb.ReadWriteBucket, addresses []waddrmgr.ManagedAddress,
+	count int, txVersion int32, startBlockHeight int32, baseAmount int64,
+	prevOutpoints []wire.OutPoint, numInputs, numOutputs int,
+	mined bool) ([]*wire.MsgTx, wtxmgr.BlockMeta) {
+
+	tb.Helper()
+
+	// Default to 1 input and 1 output if not specified.
+	if numInputs == 0 {
+		numInputs = 1
+	}
+
+	if numOutputs == 0 {
+		numOutputs = 1
+	}
+
+	var (
+		transactions  []*wire.MsgTx
+		lastBlockMeta wtxmgr.BlockMeta
+	)
+
+	for i := 0; i < count && i < len(addresses); i++ {
+		var blockMeta *wtxmgr.BlockMeta
+		if mined {
+			// Each transaction goes in its own block with unique
+			// hash.
+			blockHash := chainhash.Hash{}
+			blockHash[0] = byte(startBlockHeight + int32(i))
+			blockHash[1] = byte((startBlockHeight + int32(i)) >> 8)
+
+			blockMeta = &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{
+					Hash:   blockHash,
+					Height: startBlockHeight + int32(i),
+				},
+				Time: time.Now(),
+			}
+			lastBlockMeta = *blockMeta
+		}
+
+		tx := buildTxForBatch(
+			tb, addresses, txVersion, i, baseAmount,
+			prevOutpoints, numInputs, numOutputs,
+		)
+
+		rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+		require.NoError(tb, err)
+
+		err = w.txStore.InsertTx(txmgrNs, rec, blockMeta)
+		require.NoError(tb, err)
+
+		// Add credits for all outputs belonging to our wallet.
+		for j := range numOutputs {
+			err = w.txStore.AddCredit(
+				txmgrNs, rec, blockMeta, uint32(j), false,
+			)
+			require.NoError(tb, err)
+		}
+
+		// Mark all addresses as used.
+		for j := range numOutputs {
+			addr := addresses[(i+j)%len(addresses)]
+			err = w.addrStore.MarkUsed(addrmgrNs, addr.Address())
+			require.NoError(tb, err)
+		}
+
+		transactions = append(transactions, tx)
+	}
+
+	return transactions, lastBlockMeta
+}
+
+// buildTxForBatch creates a single transaction with the specified inputs and
+// outputs.
+func buildTxForBatch(tb testing.TB, addresses []waddrmgr.ManagedAddress,
+	txVersion int32, i int, baseAmount int64, prevOutpoints []wire.OutPoint,
+	numInputs, numOutputs int) *wire.MsgTx {
+
+	tb.Helper()
+
+	tx := wire.NewMsgTx(txVersion)
+
+	// Add multiple outputs to our wallet (creates credits).
+	for j := range numOutputs {
+		addr := addresses[(i+j)%len(addresses)]
+		pkScript, err := txscript.PayToAddrScript(addr.Address())
+		require.NoError(tb, err)
+
+		// Add random jitter based on timestamp to ensure unique
+		// transaction hashes across benchmark runs, preventing
+		// duplicate transaction errors when the same test data is
+		// created multiple times. This is necessary for
+		// representative benchmarking.
+		randomJitter := time.Now().UnixNano() % 1000
+		amount := btcutil.Amount(
+			baseAmount + int64(i*1000+j*100) + randomJitter,
+		)
+		txOut := wire.NewTxOut(int64(amount), pkScript)
+		tx.AddTxOut(txOut)
+	}
+
+	// Add multiple inputs - either external or from our wallet.
+	for j := range numInputs {
+		outpointIdx := i*numInputs + j
+		if prevOutpoints != nil && outpointIdx < len(prevOutpoints) {
+			// Spend from our previous UTXO (creates debit).
+			txIn := wire.NewTxIn(
+				&prevOutpoints[outpointIdx], nil, nil,
+			)
+			tx.AddTxIn(txIn)
+		} else {
+			// External input (no debit). Needed for tx to be
+			// syntactically valid.
+			prevHash := chainhash.Hash{}
+			prevHash[0] = byte(i)
+			prevHash[1] = byte(j)
+			txIn := wire.NewTxIn(
+				wire.NewOutPoint(&prevHash, uint32(j)), nil,
+				nil,
+			)
+			tx.AddTxIn(txIn)
+		}
+	}
+
+	return tx
 }
 
 // generateAccountName generates a consistent account name and number for
