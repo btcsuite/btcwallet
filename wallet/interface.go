@@ -294,21 +294,21 @@ type Interface interface {
 	// PublishTransaction broadcasts a transaction to the network.
 	PublishTransaction(tx *wire.MsgTx, label string) error
 
-	// FundPsbt creates a PSBT with enough inputs to fund the specified
-	// outputs, adding a change output if necessary.
-	FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
+	// FundPsbtDeprecated creates a PSBT with enough inputs to fund the
+	// specified outputs, adding a change output if necessary.
+	FundPsbtDeprecated(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		minConfs int32, account uint32, feeSatPerKB btcutil.Amount,
 		strategy CoinSelectionStrategy,
 		optFuncs ...TxCreateOption) (int32, error)
 
-	// FinalizePsbt signs and finalizes a PSBT, making it ready for
-	// broadcast. The wallet must be the last signer.
-	FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
+	// FinalizePsbtDeprecated signs and finalizes a PSBT, making it ready
+	// for broadcast. The wallet must be the last signer.
+	FinalizePsbtDeprecated(keyScope *waddrmgr.KeyScope, account uint32,
 		packet *psbt.Packet) error
 
-	// DecorateInputs decorates the inputs of a PSBT with the necessary
-	// information to sign it.
-	DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error
+	// DecorateInputsDeprecated decorates the inputs of a PSBT with the
+	// necessary information to sign it.
+	DecorateInputsDeprecated(packet *psbt.Packet, failOnUnknown bool) error
 
 	// GetTransaction returns the details for a transaction given its hash.
 	GetTransaction(txHash chainhash.Hash) (*GetTransactionResult, error)
