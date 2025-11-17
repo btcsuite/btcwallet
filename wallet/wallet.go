@@ -1716,13 +1716,13 @@ func (w *Wallet) CalculateAccountBalances(account uint32, confirms int32) (Balan
 			}
 
 			bals.Total += output.Amount
-			if output.FromCoinBase && !hasMinConfs(
+			if output.FromCoinBase && !confirmed(
 				int32(w.chainParams.CoinbaseMaturity),
 				output.Height, syncBlock.Height,
 			) {
 
 				bals.ImmatureReward += output.Amount
-			} else if hasMinConfs(
+			} else if confirmed(
 				confirms, output.Height, syncBlock.Height,
 			) {
 
@@ -2126,7 +2126,7 @@ func (c CreditCategory) String() string {
 // this package at a later time.
 func RecvCategory(details *wtxmgr.TxDetails, syncHeight int32, net *chaincfg.Params) CreditCategory {
 	if blockchain.IsCoinBaseTx(&details.MsgTx) {
-		if hasMinConfs(
+		if confirmed(
 			int32(net.CoinbaseMaturity), details.Block.Height,
 			syncHeight,
 		) {
@@ -2156,7 +2156,7 @@ func listTransactions(tx walletdb.ReadTx, details *wtxmgr.TxDetails, addrMgr *wa
 		blockHashStr = details.Block.Hash.String()
 		blockTime = details.Block.Time.Unix()
 		confirmations = int64(
-			calcConf(details.Block.Height, syncHeight),
+			confirms(details.Block.Height, syncHeight),
 		)
 	}
 
@@ -2622,7 +2622,7 @@ func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 
 			bestBlock := w.SyncedTo()
 			blockHeight := txDetail.Block.Height
-			res.Confirmations = calcConf(
+			res.Confirmations = confirms(
 				blockHeight, bestBlock.Height,
 			)
 		}
@@ -2770,14 +2770,14 @@ func (w *Wallet) AccountBalances(scope waddrmgr.KeyScope,
 		}
 		for i := range unspentOutputs {
 			output := &unspentOutputs[i]
-			if !hasMinConfs(
+			if !confirmed(
 				requiredConfs, output.Height, syncBlock.Height,
 			) {
 
 				continue
 			}
 
-			if output.FromCoinBase && !hasMinConfs(
+			if output.FromCoinBase && !confirmed(
 				int32(w.ChainParams().CoinbaseMaturity),
 				output.Height, syncBlock.Height,
 			) {
@@ -2874,7 +2874,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 
 			// Outputs with fewer confirmations than the minimum or
 			// more confs than the maximum are excluded.
-			confs := calcConf(output.Height, syncBlock.Height)
+			confs := confirms(output.Height, syncBlock.Height)
 			if confs < minconf || confs > maxconf {
 				continue
 			}
@@ -2882,7 +2882,7 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 			// Only mature coinbase outputs are included.
 			if output.FromCoinBase {
 				target := int32(w.ChainParams().CoinbaseMaturity)
-				if !hasMinConfs(
+				if !confirmed(
 					target, output.Height, syncBlock.Height,
 				) {
 
@@ -3360,16 +3360,16 @@ func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket,
 	return addrs[0].Address(), nil
 }
 
-// hasMinConfs returns whether a transaction has met at least minConf
+// confirmed returns whether a transaction has met at least minConf
 // confirmations at the current block height.
-func hasMinConfs(minConf, txHeight, curHeight int32) bool {
-	return calcConf(txHeight, curHeight) >= minConf
+func confirmed(minConf, txHeight, curHeight int32) bool {
+	return confirms(txHeight, curHeight) >= minConf
 }
 
-// calcConf returns the number of confirmations for a transaction given its
+// confirms returns the number of confirmations for a transaction given its
 // containing block height and the current best block height. Unconfirmed
 // transactions have a height of -1 and are considered to have 0 confirmations.
-func calcConf(txHeight, curHeight int32) int32 {
+func confirms(txHeight, curHeight int32) int32 {
 	switch {
 	// Unconfirmed transactions have 0 confirmations.
 	case txHeight == -1:
@@ -3453,7 +3453,7 @@ func (w *Wallet) TotalReceivedForAccounts(scope waddrmgr.KeyScope,
 						res := &results[acctIndex]
 						res.TotalReceived += cred.Amount
 
-						confs := calcConf(
+						confs := confirms(
 							detail.Block.Height,
 							syncBlock.Height,
 						)
