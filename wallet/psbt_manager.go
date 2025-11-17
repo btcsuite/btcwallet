@@ -6,9 +6,20 @@ package wallet
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+)
+
+var (
+	// ErrUtxoLocked is returned when a UTXO is locked.
+	ErrUtxoLocked = errors.New("utxo is locked")
 )
 
 // FundIntent represents the user's intent for funding a PSBT. It serves as a
@@ -206,4 +217,191 @@ type PsbtManager interface {
 	// CoinJoin) where no single party holds all necessary keys.
 	CombinePsbt(ctx context.Context, psbts ...*psbt.Packet) (
 		*psbt.Packet, error)
+}
+
+// DecorateInputs enriches a PSBT's inputs with UTXO and derivation information.
+//
+// It iterates through all inputs in the PSBT and:
+//  1. Validates ownership: Calls `fetchAndValidateUtxo` to check if the input
+//     references a UTXO owned by the wallet.
+//  2. Enriches: If owned, calls `decorateInput` to add the full previous
+//     transaction (`NonWitnessUtxo`) or output (`WitnessUtxo`), along with
+//     BIP32 derivation paths (`Bip32Derivation` or `TaprootBip32Derivation`)
+//     and script information.
+func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
+	skipUnknown bool) (*psbt.Packet, error) {
+
+	// We'll iterate through all the inputs of the PSBT and decorate them
+	// if they are owned by the wallet. The `skipUnknown` parameter
+	// determines whether an error is returned if an input is not owned
+	// by the wallet.
+	for i, txIn := range packet.UnsignedTx.TxIn {
+		// Attempt to fetch the transaction details for the current
+		// input from our transaction store and validate that we own
+		// the UTXO. The `fetchAndValidateUtxo` function will return an
+		// `ErrNotMine` error if the UTXO is not found or not owned by
+		// the wallet.
+		tx, utxo, err := w.fetchAndValidateUtxo(txIn)
+		if err != nil {
+			// If the error is `ErrNotMine` and `skipUnknown` is
+			// true, we'll simply continue to the next input, as we
+			// don't own it and are not required to fail.
+			if errors.Is(err, ErrNotMine) && skipUnknown {
+				continue
+			}
+
+			// Otherwise, we'll return the error. This includes the
+			// case where the UTXO is locked.
+			return nil, err
+		}
+
+		// If we own the UTXO, we'll proceed to decorate the
+		// corresponding PSBT input with detailed information from the
+		// wallet.
+		err = w.decorateInput(ctx, &packet.Inputs[i], tx, utxo)
+		if err != nil {
+			return nil, fmt.Errorf("error decorating input %d: %w",
+				i, err)
+		}
+	}
+
+	return packet, nil
+}
+
+// decorateInput is a helper function that decorates a single PSBT input with
+// UTXO information from the wallet.
+//
+// NOTE: The `pInput` parameter is modified in-place by this function.
+func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
+	tx *wire.MsgTx, utxo *wire.TxOut) error {
+
+	// We'll start by extracting the address from the UTXO's pkScript.
+	// This will be used to look up the managed address from the
+	// database.
+	addr := extractAddrFromPKScript(utxo.PkScript, w.chainParams)
+	if addr == nil {
+		return fmt.Errorf("%w: from pkscript %x",
+			ErrUnableToExtractAddress, utxo.PkScript)
+	}
+
+	// We'll then use the address to look up the managed address from the
+	// database. This will give us access to the derivation information.
+	managedAddr, err := w.AddressInfo(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("unable to get address info for %s: %w",
+			addr.String(), err)
+	}
+
+	// We'll ensure that the managed address is a public key address, as
+	// we can only decorate inputs for which we have the private key.
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
+			managedAddr.Address())
+	}
+
+	// With the managed address, we can now get the derivation information
+	// for the address.
+	derivation, err := derivationForManagedAddress(pubKeyAddr)
+	if err != nil {
+		return err
+	}
+
+	// With all the information gathered, we'll now populate the PSBT
+	// input based on its address type by calling the existing, non-
+	// deprecated helper functions.
+	switch {
+	// For SegWit v1 (Taproot) inputs, we'll use the SegWit v1 helper.
+	case txscript.IsPayToTaproot(utxo.PkScript):
+		addInputInfoSegWitV1(pInput, utxo, derivation)
+
+	// For SegWit v0 inputs, we'll use the SegWit v0 helper.
+	default:
+		// We'll need to build the redeem script for the input.
+		_, redeemScript, err := buildScriptsForManagedAddress(
+			pubKeyAddr, utxo.PkScript, w.chainParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		// With the redeem script, we can now populate the PSBT
+		// input.
+		addInputInfoSegWitV0(
+			pInput, tx, utxo, derivation, managedAddr, redeemScript,
+		)
+	}
+
+	return nil
+}
+
+// fetchAndValidateUtxo fetches the transaction details for a given input,
+// validates that the wallet owns the UTXO, and ensures it is not locked.
+//
+// This function serves as a crucial pre-check before decorating a PSBT input.
+// It performs three key validation steps:
+//  1. Transaction Lookup: It first attempts to fetch the full transaction
+//     details from the wallet's transaction store using the input's previous
+//     outpoint. If the transaction is not found, it returns an `ErrNotMine`
+//     error.
+//  2. Ownership Verification: If the transaction is found, it verifies that the
+//     specific output index is a credit to the wallet. This ensures that the
+//     wallet actually owns the UTXO. If this check fails, it also returns
+//     `ErrNotMine`.
+//  3. Lock Status Check: After confirming ownership, it checks if the UTXO has
+//     been locked. If the UTXO is locked, it returns an `ErrUtxoLocked`
+//     error.
+//
+// Only if all these checks pass, the function returns the full parent
+// transaction (`*wire.MsgTx`) and the specific unspent transaction output
+// (`*wire.TxOut`).
+func (w *Wallet) fetchAndValidateUtxo(txIn *wire.TxIn) (
+	*wire.MsgTx, *wire.TxOut, error) {
+
+	// First, we'll attempt to fetch the transaction details from our
+	// transaction store.
+	txDetail, err := w.fetchTxDetails(&txIn.PreviousOutPoint.Hash)
+	if errors.Is(err, ErrTxNotFound) {
+		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine,
+			txIn.PreviousOutPoint)
+	}
+
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch tx details: %w",
+			err)
+	}
+
+	// With the transaction details retrieved, we'll make an additional
+	// check to ensure we actually have control of this output.
+	if !findCredit(txDetail, txIn.PreviousOutPoint.Index) {
+		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine,
+			txIn.PreviousOutPoint)
+	}
+
+	// Now that we've confirmed we know about the UTXO, we'll check if it
+	// is locked.
+	if w.LockedOutpoint(txIn.PreviousOutPoint) {
+		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked,
+			txIn.PreviousOutPoint)
+	}
+
+	// Now that we've confirmed we know about the UTXO, we'll proceed to
+	// gather the rest of the information required to decorate the PSBT
+	// input.
+	tx := &txDetail.MsgTx
+	utxo := tx.TxOut[txIn.PreviousOutPoint.Index]
+
+	return tx, utxo, nil
+}
+
+// findCredit determines whether a transaction's details contain a credit for a
+// specific output index.
+func findCredit(txDetail *wtxmgr.TxDetails, outputIndex uint32) bool {
+	for _, cred := range txDetail.Credits {
+		if cred.Index == outputIndex {
+			return true
+		}
+	}
+
+	return false
 }
