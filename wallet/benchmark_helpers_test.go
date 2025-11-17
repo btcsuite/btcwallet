@@ -135,6 +135,10 @@ type benchmarkWallet struct {
 	// during benchmark setup. These are spending transactions with both
 	// debits (inputs) and credits (outputs) that are in the mempool.
 	unconfirmedTxs []*wire.MsgTx
+
+	// allTxs contains all wallet transactions (both confirmed and
+	// unconfirmed) combined.
+	allTxs []*wire.MsgTx
 }
 
 // setupBenchmarkWallet creates a wallet with test data based on the provided
@@ -171,10 +175,14 @@ func setupBenchmarkWallet(tb testing.TB,
 		}
 	}
 
+	allTxs := append([]*wire.MsgTx{}, txsResult.confirmed...)
+	allTxs = append(allTxs, txsResult.unconfirmed...)
+
 	return &benchmarkWallet{
 		Wallet:         w,
 		confirmedTxs:   txsResult.confirmed,
 		unconfirmedTxs: txsResult.unconfirmed,
+		allTxs:         allTxs,
 	}
 }
 
