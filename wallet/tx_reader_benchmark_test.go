@@ -482,6 +482,143 @@ func BenchmarkListTxnsAPI(b *testing.B) {
 	}
 }
 
+// BenchmarkListTxnsAPIConcurrently benchmarks ListTxns API and its deprecated
+// variant GetTransactions using identical test data under concurrent load.
+// Test names start with complexity metrics to group API comparisons for
+// benchstat analysis.
+//
+// Time Complexity Analysis:
+// Under concurrent load, the API maintains the same per-request complexity
+// of O(B * T * (I + O)) as the sequential benchmark, where:
+//   - B: number of blocks in the range [startHeight, endHeight]
+//   - T: average transactions per block
+//   - I: average inputs per transaction
+//   - O: average outputs per transaction
+//
+// This benchmark stresses lock contention characteristics during database
+// reads, demonstrating scalability under concurrent read operations.
+func BenchmarkListTxnsAPIConcurrently(b *testing.B) {
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
+
+		// endGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		endGrowthIteration = 5
+	)
+
+	var (
+		// accountGrowth uses constantGrowth since account count doesn't
+		// affect the API's time complexity.
+		accountGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration,
+			constantGrowth,
+		)
+
+		// addressGrowth uses constantGrowth since address count doesn't
+		// affect the API's time complexity.
+		addressGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration,
+			constantGrowth,
+		)
+
+		// txPoolGrowth uses linearGrowth for CI-friendly execution
+		// while still testing scaling behavior.
+		txPoolGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration, linearGrowth,
+		)
+
+		// txIOGrowth uses linearGrowth for CI-friendly execution
+		// while still testing scaling behavior.
+		txIOGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration, linearGrowth,
+		)
+
+		txPoolGrowthPadding = decimalWidth(
+			txPoolGrowth[len(txPoolGrowth)-1],
+		)
+
+		txIOGrowthPadding = decimalWidth(
+			txIOGrowth[len(txIOGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	for i := 0; i <= endGrowthIteration; i++ {
+		name := fmt.Sprintf("TxPool-%0*d-Ins-%0*d-Outs-%0*d",
+			txPoolGrowthPadding, txPoolGrowth[i], txIOGrowthPadding,
+			txIOGrowth[i], txIOGrowthPadding, txIOGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: txPoolGrowth[i],
+					numTxInputs:  txIOGrowth[i],
+					numTxOutputs: txIOGrowth[i],
+				},
+			)
+
+			// List all transactions (no height filter).
+			var (
+				startBlock  *BlockIdentifier
+				endBlock    *BlockIdentifier
+				startHeight int32 = 0
+				endHeight   int32 = -1
+			)
+
+			var (
+				beforeResult *GetTransactionsResult
+				afterResult  []*TxDetail
+			)
+
+			b.Run("0-Before", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						res, err := bw.GetTransactions(
+							startBlock, endBlock,
+							"", nil,
+						)
+						beforeResult = res
+
+						require.NoError(b, err)
+						require.NotNil(b, res)
+					}
+				})
+			})
+
+			b.Run("1-After", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						res, err := bw.ListTxns(
+							b.Context(),
+							startHeight, endHeight,
+						)
+						afterResult = res
+
+						require.NoError(b, err)
+						require.NotNil(b, res)
+					}
+				})
+			})
+
+			assertListTxnsAPIsEquivalent(
+				b, bw.Wallet, beforeResult, afterResult,
+			)
+		})
+	}
+}
+
 // assertGetTxAPIsEquivalent verifies that GetTransaction (legacy) and GetTx
 // (new) return equivalent data for the same transaction.
 func assertGetTxAPIsEquivalent(b *testing.B, w *Wallet,
