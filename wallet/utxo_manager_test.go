@@ -78,7 +78,7 @@ func TestListUnspent(t *testing.T) {
 		PkScript: pkScriptDefault,
 		BlockMeta: wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{
-				Height: currentHeight - minConf,
+				Height: currentHeight - minConf + 1,
 			},
 		},
 	}
@@ -91,7 +91,7 @@ func TestListUnspent(t *testing.T) {
 		PkScript: pkScriptTest,
 		BlockMeta: wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{
-				Height: currentHeight - maxConf,
+				Height: currentHeight - maxConf + 1,
 			},
 		},
 	}
@@ -236,7 +236,7 @@ func TestGetUtxo(t *testing.T) {
 		PkScript: pkScriptDefault,
 		BlockMeta: wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{
-				Height: currentHeight - 1,
+				Height: currentHeight,
 			},
 		},
 	}
