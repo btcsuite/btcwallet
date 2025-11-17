@@ -247,8 +247,9 @@ func TestGetTransaction(t *testing.T) {
 		expectedErr error
 	}{
 		{
-			name: "existing unmined transaction",
-			txid: *TstTxHash,
+			name:           "existing unmined transaction",
+			txid:           *TstTxHash,
+			expectedHeight: -1,
 			// We write txdetail for the tx to disk.
 			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
 				*wtxmgr.Store, error) {
@@ -309,6 +310,181 @@ func TestGetTransaction(t *testing.T) {
 
 			// Check the block height.
 			require.Equal(t, test.expectedHeight, tx.Height)
+		})
+	}
+}
+
+// TestGetTransactionConfirmations tests that GetTransaction correctly
+// calculates confirmations for both confirmed and unconfirmed transactions.
+// This is a regression test for a bug where confirmations were set to the
+// block height instead of being calculated as currentHeight - blockHeight + 1.
+//
+// The bug had several negative impacts:
+//   - Unconfirmed transactions showed -1 confirmations instead of 0, breaking
+//     zero-conf (accepting transactions before block inclusion)
+//   - Confirmed transactions showed block height instead of actual confirmation
+//     count
+//   - LND and other consumers would make incorrect decisions based on wrong
+//     counts
+func TestGetTransactionConfirmations(t *testing.T) {
+	t.Parallel()
+
+	rec, err := wtxmgr.NewTxRecord(TstSerializedTx, time.Now())
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+
+		// Block height where transaction is mined (-1 for unmined).
+		txBlockHeight int32
+
+		// Current wallet sync height.
+		currentHeight int32
+
+		// Expected confirmations.
+		expectedConfirmations int32
+
+		// Expected height in result.
+		expectedHeight int32
+
+		// Whether to check for non-zero timestamp.
+		expectTimestamp bool
+	}{
+		{
+			name:                  "unconfirmed tx",
+			txBlockHeight:         -1,
+			currentHeight:         100,
+			expectedConfirmations: 0,
+			expectedHeight:        -1,
+			expectTimestamp:       false,
+		},
+		{
+			name:                  "tx with 1 confirmation",
+			txBlockHeight:         100,
+			currentHeight:         100,
+			expectedConfirmations: 1,
+			expectedHeight:        100,
+			expectTimestamp:       true,
+		},
+		{
+			name:                  "tx with 3 confirmations",
+			txBlockHeight:         8,
+			currentHeight:         10,
+			expectedConfirmations: 3,
+			expectedHeight:        8,
+			expectTimestamp:       true,
+		},
+		{
+			name:                  "old tx with many confirmations",
+			txBlockHeight:         1,
+			currentHeight:         1000,
+			expectedConfirmations: 1000,
+			expectedHeight:        1,
+			expectTimestamp:       true,
+		},
+		{
+			name:                  "tx in future block",
+			txBlockHeight:         105,
+			currentHeight:         100,
+			expectedConfirmations: 0,
+			expectedHeight:        105,
+			expectTimestamp:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w, cleanup := testWallet(t)
+			t.Cleanup(cleanup)
+
+			// Set the wallet's synced height.
+			err := walletdb.Update(
+				w.db, func(tx walletdb.ReadWriteTx) error {
+					addrmgrNs := tx.ReadWriteBucket(
+						waddrmgrNamespaceKey,
+					)
+					bs := &waddrmgr.BlockStamp{
+						Height: tt.currentHeight,
+						Hash:   chainhash.Hash{},
+					}
+
+					return w.Manager.SetSyncedTo(
+						addrmgrNs, bs,
+					)
+				},
+			)
+			require.NoError(t, err)
+
+			// Insert transaction into wallet.
+			err = walletdb.Update(
+				w.db, func(tx walletdb.ReadWriteTx) error {
+					ns := tx.ReadWriteBucket(
+						wtxmgrNamespaceKey,
+					)
+
+					// Create block metadata if transaction
+					// is mined.
+					var blockMeta *wtxmgr.BlockMeta
+					if tt.txBlockHeight != -1 {
+						hash := chainhash.Hash{}
+						height := tt.txBlockHeight
+						block := wtxmgr.Block{
+							Hash:   hash,
+							Height: height,
+						}
+						blockMeta = &wtxmgr.BlockMeta{
+							Block: block,
+							Time:  time.Now(),
+						}
+					}
+
+					return w.TxStore.InsertTx(
+						ns, rec, blockMeta,
+					)
+				},
+			)
+			require.NoError(t, err)
+
+			result, err := w.GetTransaction(*TstTxHash)
+			require.NoError(t, err)
+
+			require.Equal(
+				t, tt.expectedConfirmations,
+				result.Confirmations,
+			)
+
+			require.Equal(t, tt.expectedHeight, result.Height)
+
+			if tt.expectTimestamp {
+				require.NotZero(t, result.Timestamp)
+			} else {
+				require.Zero(t, result.Timestamp)
+			}
+
+			// Additional checks for unconfirmed transactions.
+			if tt.txBlockHeight == -1 {
+				require.Nil(t, result.BlockHash)
+				require.Equal(t, int32(0), result.Confirmations)
+			} else {
+				require.NotNil(t, result.BlockHash)
+				// Only expect positive confirmations when tx is
+				// not in a future block.
+				if tt.txBlockHeight <= tt.currentHeight {
+					require.Positive(
+						t, result.Confirmations,
+					)
+				} else {
+					// Confirmed txns in future blocks for
+					// example due to reorg should be
+					// treated as unconfirmed and have 0
+					// confirmations.
+					require.Equal(
+						t, int32(0),
+						result.Confirmations,
+					)
+				}
+			}
 		})
 	}
 }
