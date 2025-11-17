@@ -9,9 +9,18 @@ import (
 )
 
 type Querier interface {
+	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int32) error
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
+	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
+	GetWalletByName(ctx context.Context, name string) (GetWalletByNameRow, error)
+	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
+	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
+	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
+	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
+	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
+	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)
