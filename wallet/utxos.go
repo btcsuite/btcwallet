@@ -35,7 +35,7 @@ type OutputSelectionPolicy struct {
 func (p *OutputSelectionPolicy) meetsRequiredConfs(txHeight,
 	curHeight int32) bool {
 
-	return confirmed(
+	return hasMinConfs(
 		//nolint:gosec
 		uint32(p.RequiredConfirmations), txHeight, curHeight,
 	)

@@ -795,10 +795,10 @@ func (w *Wallet) getEligibleUTXOsFromList(dbtx walletdb.ReadTx,
 
 		// A UTXO is only eligible if it has reached the required
 		// number of confirmations.
-		if !confirmed(minconf, credit.Height, bs.Height) {
+		if !hasMinConfs(minconf, credit.Height, bs.Height) {
 			// Calculate the number of confirmations for the
 			// warning message.
-			confs := calcConf(bs.Height, credit.Height)
+			confs := calcConf(credit.Height, bs.Height)
 
 			log.Warnf("Skipping user-specified UTXO %v "+
 				"because it has %d confs but needs %d",
