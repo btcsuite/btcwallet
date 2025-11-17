@@ -513,7 +513,7 @@ func (w *Wallet) Balance(_ context.Context, conf uint32,
 		for _, utxo := range utxos {
 			// Skip any UTXOs that have not yet reached the required
 			// number of confirmations.
-			if !confirmed(conf, utxo.Height, syncBlock.Height) {
+			if !hasMinConfs(conf, utxo.Height, syncBlock.Height) {
 				continue
 			}
 

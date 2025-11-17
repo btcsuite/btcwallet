@@ -377,12 +377,12 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 		// Only include this output if it meets the required number of
 		// confirmations. Coinbase transactions must have reached
 		// maturity before their outputs may be spent.
-		if !confirmed(minconf, output.Height, bs.Height) {
+		if !hasMinConfs(minconf, output.Height, bs.Height) {
 			continue
 		}
 		if output.FromCoinBase {
 			target := w.chainParams.CoinbaseMaturity
-			if !confirmed(
+			if !hasMinConfs(
 				uint32(target), output.Height, bs.Height,
 			) {
 
