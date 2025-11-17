@@ -24,20 +24,52 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.createWalletStmt, err = db.PrepareContext(ctx, CreateWallet); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateWallet: %w", err)
+	}
 	if q.deleteBlockStmt, err = db.PrepareContext(ctx, DeleteBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteBlock: %w", err)
 	}
 	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
 	}
+	if q.getWalletByIDStmt, err = db.PrepareContext(ctx, GetWalletByID); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletByID: %w", err)
+	}
+	if q.getWalletByNameStmt, err = db.PrepareContext(ctx, GetWalletByName); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletByName: %w", err)
+	}
+	if q.getWalletSecretsStmt, err = db.PrepareContext(ctx, GetWalletSecrets); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletSecrets: %w", err)
+	}
 	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
+	}
+	if q.insertWalletSecretsStmt, err = db.PrepareContext(ctx, InsertWalletSecrets); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertWalletSecrets: %w", err)
+	}
+	if q.insertWalletSyncStateStmt, err = db.PrepareContext(ctx, InsertWalletSyncState); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertWalletSyncState: %w", err)
+	}
+	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
+		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
+	}
+	if q.updateWalletSecretsStmt, err = db.PrepareContext(ctx, UpdateWalletSecrets); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateWalletSecrets: %w", err)
+	}
+	if q.updateWalletSyncStateStmt, err = db.PrepareContext(ctx, UpdateWalletSyncState); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateWalletSyncState: %w", err)
 	}
 	return &q, nil
 }
 
 func (q *Queries) Close() error {
 	var err error
+	if q.createWalletStmt != nil {
+		if cerr := q.createWalletStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createWalletStmt: %w", cerr)
+		}
+	}
 	if q.deleteBlockStmt != nil {
 		if cerr := q.deleteBlockStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteBlockStmt: %w", cerr)
@@ -48,9 +80,49 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getBlockByHeightStmt: %w", cerr)
 		}
 	}
+	if q.getWalletByIDStmt != nil {
+		if cerr := q.getWalletByIDStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletByIDStmt: %w", cerr)
+		}
+	}
+	if q.getWalletByNameStmt != nil {
+		if cerr := q.getWalletByNameStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletByNameStmt: %w", cerr)
+		}
+	}
+	if q.getWalletSecretsStmt != nil {
+		if cerr := q.getWalletSecretsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletSecretsStmt: %w", cerr)
+		}
+	}
 	if q.insertBlockStmt != nil {
 		if cerr := q.insertBlockStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertBlockStmt: %w", cerr)
+		}
+	}
+	if q.insertWalletSecretsStmt != nil {
+		if cerr := q.insertWalletSecretsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertWalletSecretsStmt: %w", cerr)
+		}
+	}
+	if q.insertWalletSyncStateStmt != nil {
+		if cerr := q.insertWalletSyncStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertWalletSyncStateStmt: %w", cerr)
+		}
+	}
+	if q.listWalletsStmt != nil {
+		if cerr := q.listWalletsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
+		}
+	}
+	if q.updateWalletSecretsStmt != nil {
+		if cerr := q.updateWalletSecretsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateWalletSecretsStmt: %w", cerr)
+		}
+	}
+	if q.updateWalletSyncStateStmt != nil {
+		if cerr := q.updateWalletSyncStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateWalletSyncStateStmt: %w", cerr)
 		}
 	}
 	return err
@@ -90,19 +162,37 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                   DBTX
-	tx                   *sql.Tx
-	deleteBlockStmt      *sql.Stmt
-	getBlockByHeightStmt *sql.Stmt
-	insertBlockStmt      *sql.Stmt
+	db                        DBTX
+	tx                        *sql.Tx
+	createWalletStmt          *sql.Stmt
+	deleteBlockStmt           *sql.Stmt
+	getBlockByHeightStmt      *sql.Stmt
+	getWalletByIDStmt         *sql.Stmt
+	getWalletByNameStmt       *sql.Stmt
+	getWalletSecretsStmt      *sql.Stmt
+	insertBlockStmt           *sql.Stmt
+	insertWalletSecretsStmt   *sql.Stmt
+	insertWalletSyncStateStmt *sql.Stmt
+	listWalletsStmt           *sql.Stmt
+	updateWalletSecretsStmt   *sql.Stmt
+	updateWalletSyncStateStmt *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                   tx,
-		tx:                   tx,
-		deleteBlockStmt:      q.deleteBlockStmt,
-		getBlockByHeightStmt: q.getBlockByHeightStmt,
-		insertBlockStmt:      q.insertBlockStmt,
+		db:                        tx,
+		tx:                        tx,
+		createWalletStmt:          q.createWalletStmt,
+		deleteBlockStmt:           q.deleteBlockStmt,
+		getBlockByHeightStmt:      q.getBlockByHeightStmt,
+		getWalletByIDStmt:         q.getWalletByIDStmt,
+		getWalletByNameStmt:       q.getWalletByNameStmt,
+		getWalletSecretsStmt:      q.getWalletSecretsStmt,
+		insertBlockStmt:           q.insertBlockStmt,
+		insertWalletSecretsStmt:   q.insertWalletSecretsStmt,
+		insertWalletSyncStateStmt: q.insertWalletSyncStateStmt,
+		listWalletsStmt:           q.listWalletsStmt,
+		updateWalletSecretsStmt:   q.updateWalletSecretsStmt,
+		updateWalletSyncStateStmt: q.updateWalletSyncStateStmt,
 	}
 }
