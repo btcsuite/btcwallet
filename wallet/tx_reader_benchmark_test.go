@@ -174,6 +174,139 @@ func BenchmarkGetTxAPI(b *testing.B) {
 	}
 }
 
+// BenchmarkGetTxAPIConcurrently benchmarks GetTx API and its deprecated
+// variant GetTransaction using identical test data under concurrent load.
+// Test names start with transaction pool size to group API comparisons for
+// benchstat analysis.
+//
+// Time Complexity Analysis:
+// Under concurrent load, the API maintains the same per-transaction complexity
+// of O(log n + I + O) as the sequential benchmark, where:
+//   - n: number of transactions in the database (B-tree lookup)
+//   - I: number of inputs in the transaction
+//   - O: number of outputs in the transaction
+//
+// This benchmark stresses the lock contention characteristics during database
+// reads, demonstrating scalability under concurrent read operations.
+func BenchmarkGetTxAPIConcurrently(b *testing.B) {
+	const (
+		// startGrowthIteration is the starting iteration index for the
+		// growth sequence.
+		startGrowthIteration = 0
+
+		// endGrowthIteration is the maximum iteration index for the
+		// growth sequence.
+		endGrowthIteration = 5
+	)
+
+	var (
+		// accountGrowth uses constantGrowth since account count doesn't
+		// affect the API's time complexity.
+		accountGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration,
+			constantGrowth,
+		)
+
+		// addressGrowth uses constantGrowth since address count doesn't
+		// affect the API's time complexity.
+		addressGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration,
+			constantGrowth,
+		)
+
+		// txPoolGrowth uses linearGrowth to test O(log n) B-tree lookup
+		// scaling. As database size grows linearly, lookup time should
+		// grow logarithmically, demonstrating sublinear scaling.
+		txPoolGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration, linearGrowth,
+		)
+
+		// txIOGrowth uses symmetric linearGrowth for both inputs
+		// and outputs to stress test the O(I + O) processing cost with
+		// rapidly growing transaction complexity, exposing potential
+		// performance bottlenecks in input/output iteration and address
+		// extraction.
+		txIOGrowth = mapRange(
+			startGrowthIteration, endGrowthIteration, linearGrowth,
+		)
+
+		txPoolGrowthPadding = decimalWidth(
+			txPoolGrowth[len(txPoolGrowth)-1],
+		)
+
+		txIOGrowthPadding = decimalWidth(
+			txIOGrowth[len(txIOGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	for i := 0; i <= endGrowthIteration; i++ {
+		name := fmt.Sprintf("TxPool-%0*d-Ins-%0*d-Outs-%0*d",
+			txPoolGrowthPadding, txPoolGrowth[i], txIOGrowthPadding,
+			txIOGrowth[i], txIOGrowthPadding, txIOGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: txPoolGrowth[i],
+					numTxInputs:  txIOGrowth[i],
+					numTxOutputs: txIOGrowth[i],
+				},
+			)
+
+			// Get a transaction hash from the middle of the dataset
+			// for representative benchmarking.
+			medianIndex := len(bw.allTxs) / 2
+			testTxHash := bw.allTxs[medianIndex].TxHash()
+
+			var (
+				before *GetTransactionResult
+				after  *TxDetail
+			)
+
+			b.Run("0-Before", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						res, err := bw.GetTransaction(
+							testTxHash,
+						)
+						before = res
+
+						require.NoError(b, err)
+						require.NotNil(b, before)
+					}
+				})
+			})
+
+			b.Run("1-After", func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						res, err := bw.GetTx(
+							b.Context(), testTxHash,
+						)
+						after = res
+
+						require.NoError(b, err)
+						require.NotNil(b, after)
+					}
+				})
+			})
+
+			assertGetTxAPIsEquivalent(b, bw.Wallet, before, after)
+		})
+	}
+}
+
 // assertGetTxAPIsEquivalent verifies that GetTransaction (legacy) and GetTx
 // (new) return equivalent data for the same transaction.
 func assertGetTxAPIsEquivalent(b *testing.B, w *Wallet,
