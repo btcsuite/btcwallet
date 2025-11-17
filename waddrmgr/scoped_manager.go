@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -2653,4 +2654,28 @@ func (s *ScopedKeyManager) NewAddress(addrmgrNs walletdb.ReadWriteBucket,
 	addr := addrs[0].Address()
 
 	return addr, nil
+}
+
+// accountInfo returns a copy of the account info map.
+func (s *ScopedKeyManager) accountInfo() map[uint32]*accountInfo {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	acctInfoCopy := make(map[uint32]*accountInfo, len(s.acctInfo))
+	maps.Copy(acctInfoCopy, s.acctInfo)
+
+	return acctInfoCopy
+}
+
+// addresses returns a slice of all managed addresses.
+func (s *ScopedKeyManager) addresses() []ManagedAddress {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	addrs := make([]ManagedAddress, 0, len(s.addrs))
+	for _, ma := range s.addrs {
+		addrs = append(addrs, ma)
+	}
+
+	return addrs
 }
