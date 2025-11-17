@@ -21,12 +21,12 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
-// FundPsbt creates a fully populated PSBT packet that contains enough inputs to
-// fund the outputs specified in the passed in packet with the specified fee
-// rate. If there is change left, a change output from the wallet is added and
-// the index of the change output is returned. If no custom change scope is
-// specified, we will use the coin selection scope (if not nil) or the BIP0086
-// scope by default. Otherwise, no additional output is created and the
+// FundPsbtDeprecated creates a fully populated PSBT packet that contains
+// enough inputs to fund the outputs specified in the passed in packet with the
+// specified fee rate. If there is change left, a change output from the wallet
+// is added and the index of the change output is returned. If no custom change
+// scope is specified, we will use the coin selection scope (if not nil) or the
+// BIP0086 scope by default. Otherwise, no additional output is created and the
 // index -1 is returned.
 //
 // NOTE: If the packet doesn't contain any inputs, coin selection is performed
@@ -44,7 +44,7 @@ import (
 // the wallet. However, no UTXO specific lock lease is acquired for any of the
 // selected/validated inputs by this method. It is in the caller's
 // responsibility to lock the inputs before handing the partial transaction out.
-func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
+func (w *Wallet) FundPsbtDeprecated(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	minConfs int32, account uint32, feeSatPerKB btcutil.Amount,
 	coinSelectionStrategy CoinSelectionStrategy,
 	optFuncs ...TxCreateOption) (int32, error) {
@@ -114,7 +114,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
 		}
 
-		err := w.DecorateInputs(packet, true)
+		err := w.DecorateInputsDeprecated(packet, true)
 		if err != nil {
 			return 0, err
 		}
@@ -132,7 +132,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 			packet.UnsignedTx.TxIn[idx].SignatureScript = nil
 		}
 
-		err := w.DecorateInputs(packet, true)
+		err := w.DecorateInputsDeprecated(packet, true)
 		if err != nil {
 			return 0, err
 		}
@@ -255,11 +255,11 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	return changeIndex, nil
 }
 
-// DecorateInputs fetches the UTXO information of all inputs it can identify and
+// DecorateInputsDeprecated fetches the UTXO information of all inputs it can identify and
 // adds the required information to the package's inputs. The failOnUnknown
 // boolean controls whether the method should return an error if it cannot
 // identify an input or if it should just skip it.
-func (w *Wallet) DecorateInputs(packet *psbt.Packet, failOnUnknown bool) error {
+func (w *Wallet) DecorateInputsDeprecated(packet *psbt.Packet, failOnUnknown bool) error {
 	for idx := range packet.Inputs {
 		txIn := packet.UnsignedTx.TxIn[idx]
 
@@ -417,7 +417,7 @@ func createOutputInfo(txOut *wire.TxOut,
 //
 // NOTE: This method does NOT publish the transaction after it's been finalized
 // successfully.
-func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
+func (w *Wallet) FinalizePsbtDeprecated(keyScope *waddrmgr.KeyScope, account uint32,
 	packet *psbt.Packet) error {
 
 	// Let's check that this is actually something we can and want to sign.

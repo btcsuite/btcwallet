@@ -277,7 +277,7 @@ func TestFundPsbt(t *testing.T) {
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			changeIndex, err := w.FundPsbt(
+			changeIndex, err := w.FundPsbtDeprecated(
 				tc.packet, nil, 1, 0,
 				tc.feeRateSatPerKB, CoinSelectionLargest,
 				WithCustomChangeScope(tc.changeKeyScope),
@@ -496,7 +496,7 @@ func TestFinalizePsbt(t *testing.T) {
 	}
 
 	// Finalize it to add all witness data then extract the final TX.
-	err = w.FinalizePsbt(nil, 0, packet)
+	err = w.FinalizePsbtDeprecated(nil, 0, packet)
 	if err != nil {
 		t.Fatalf("error finalizing PSBT packet: %v", err)
 	}
