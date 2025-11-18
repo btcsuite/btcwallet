@@ -285,6 +285,15 @@ func CalcSatPerKVByte(fee btcutil.Amount, kvb KVByte) SatPerKVByte {
 	return SatPerKVByte{newBaseFeeRate(numerator, denominator)}
 }
 
+// Val returns the fee rate in sat/kvb.
+//
+// NOTE: This method is provided for backward compatibility with legacy APIs
+// that expect a raw integer fee rate. New code should use the btcunit types
+// directly.
+func (s SatPerKVByte) Val() btcutil.Amount {
+	return s.FeeForKVByte(NewKVByte(1))
+}
+
 // String returns a human-readable string of the fee rate.
 func (s SatPerKVByte) String() string {
 	// Calculate the fee rate in sat/kvb from the canonical sat/kwu.
@@ -352,6 +361,15 @@ func CalcSatPerKWeight(fee btcutil.Amount, kwu KWeightUnit) SatPerKWeight {
 	denominator := kwu.wu
 
 	return SatPerKWeight{newBaseFeeRate(numerator, denominator)}
+}
+
+// Val returns the fee rate in sat/kw.
+//
+// NOTE: This method is provided for backward compatibility with legacy APIs
+// that expect a raw integer fee rate. New code should use the btcunit types
+// directly.
+func (s SatPerKWeight) Val() btcutil.Amount {
+	return s.FeeForKWeight(NewKWeightUnit(1))
 }
 
 // String returns a human-readable string of the fee rate.

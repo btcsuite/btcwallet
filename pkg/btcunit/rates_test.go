@@ -570,3 +570,179 @@ func TestSafeUint64ToInt64Overflow(t *testing.T) {
 	require.Zero(t, expectedDenom.Cmp(rateW.satsPerKWU.Denom()))
 }
 
+// TestVal checks that the Val method returns the correct integer fee rate.
+func TestVal(t *testing.T) {
+	t.Parallel()
+
+	// Test SatPerKVByte.Val().
+	rateKVB := NewSatPerKVByte(1000)
+	require.Equal(t, btcutil.Amount(1000), rateKVB.Val())
+
+	// Test SatPerKWeight.Val().
+	rateKW := NewSatPerKWeight(250)
+	require.Equal(t, btcutil.Amount(250), rateKW.Val())
+}
+
+// TestRatePrecision checks that baseFeeRate preserves precision for
+// non-integer rates (e.g., repeating decimals) during conversions and fee
+// calculations for all rate units.
+func TestRatePrecision(t *testing.T) {
+	t.Parallel()
+
+	// We choose a test payload size of 12,000 weight units.
+	// This specific number is chosen because it is cleanly divisible by
+	// all unit factors, allowing us to pass exact integer amounts to all
+	// FeeFor... methods.
+	//
+	// 12,000 wu = 12 kwu
+	// 12,000 wu = 3,000 vb
+	// 12,000 wu = 3 kvb
+	const (
+		payloadWU  = 12000
+		payloadKWU = 12
+		payloadVB  = 3000
+		payloadKVB = 3
+	)
+
+	// expectedFee is always 1 satoshi because we define the rate in each
+	// test case as (1 sat / payload_size).
+	const expectedFee = btcutil.Amount(1)
+
+	// 1. Test SatPerWeight.
+	// Rate: 1 sat / 12,000 wu = 0.0000833... sat/wu.
+	t.Run("SatPerWeight", func(t *testing.T) {
+		t.Parallel()
+
+		rate := CalcSatPerWeight(1, NewWeightUnit(payloadWU))
+
+		// The rate 0.0000833... rounds to 0.000 when displayed with 3
+		// decimal places, but the internal precision is preserved.
+		require.Equal(t, "0.000 sat/wu", rate.String())
+		require.Equal(t, expectedFee,
+			rate.FeeForWeight(NewWeightUnit(payloadWU)))
+
+		// Convert to SatPerKWeight.
+		// Rate: 1 sat / 12 kwu = 0.0833... sat/kw.
+		kw := rate.ToSatPerKWeight()
+		require.Equal(t, "0.083 sat/kw", kw.String())
+		require.Equal(t, expectedFee,
+			kw.FeeForKWeight(NewKWeightUnit(payloadKWU)))
+
+		// Convert to SatPerVByte.
+		// Rate: 1 sat / 3,000 vb = 0.00033... sat/vb.
+		// This rounds to 0.000 at 3 decimals.
+		vb := rate.ToSatPerVByte()
+		require.Equal(t, "0.000 sat/vb", vb.String())
+		require.Equal(t, expectedFee,
+			vb.FeeForVByte(NewVByte(payloadVB)))
+
+		// Convert to SatPerKVByte.
+		// Rate: 1 sat / 3 kvb = 0.333... sat/kvb.
+		kvb := rate.ToSatPerKVByte()
+		require.Equal(t, "0.333 sat/kvb", kvb.String())
+		require.Equal(t, expectedFee,
+			kvb.FeeForKVByte(NewKVByte(payloadKVB)))
+	})
+
+	// 2. Test SatPerKWeight.
+	// Rate: 1 sat / 12 kwu = 0.0833... sat/kw.
+	t.Run("SatPerKWeight", func(t *testing.T) {
+		t.Parallel()
+
+		rate := CalcSatPerKWeight(1, NewKWeightUnit(payloadKWU))
+		require.Equal(t, "0.083 sat/kw", rate.String())
+		require.Equal(t, expectedFee,
+			rate.FeeForKWeight(NewKWeightUnit(payloadKWU)))
+
+		// Convert to SatPerWeight.
+		// Rate: 1 sat / 12,000 wu = 0.0000833... sat/wu.
+		// Rounds to 0.000.
+		w := rate.ToSatPerWeight()
+		require.Equal(t, "0.000 sat/wu", w.String())
+		require.Equal(t, expectedFee,
+			w.FeeForWeight(NewWeightUnit(payloadWU)))
+
+		// Convert to SatPerVByte.
+		// Rate: 1 sat / 3,000 vb = 0.00033... sat/vb.
+		// Rounds to 0.000.
+		vb := rate.ToSatPerVByte()
+		require.Equal(t, "0.000 sat/vb", vb.String())
+		require.Equal(t, expectedFee,
+			vb.FeeForVByte(NewVByte(payloadVB)))
+
+		// Convert to SatPerKVByte.
+		// Rate: 1 sat / 3 kvb = 0.333... sat/kvb.
+		kvb := rate.ToSatPerKVByte()
+		require.Equal(t, "0.333 sat/kvb", kvb.String())
+		require.Equal(t, expectedFee,
+			kvb.FeeForKVByte(NewKVByte(payloadKVB)))
+	})
+
+	// 3. Test SatPerVByte.
+	// Rate: 1 sat / 3,000 vb = 0.00033... sat/vb.
+	t.Run("SatPerVByte", func(t *testing.T) {
+		t.Parallel()
+
+		rate := CalcSatPerVByte(1, NewVByte(payloadVB))
+		// Rounds to 0.000 at 3 decimals.
+		require.Equal(t, "0.000 sat/vb", rate.String())
+		require.Equal(t, expectedFee,
+			rate.FeeForVByte(NewVByte(payloadVB)))
+
+		// Convert to SatPerKVByte.
+		// Rate: 1 sat / 3 kvb = 0.333... sat/kvb.
+		kvb := rate.ToSatPerKVByte()
+		require.Equal(t, "0.333 sat/kvb", kvb.String())
+		require.Equal(t, expectedFee,
+			kvb.FeeForKVByte(NewKVByte(payloadKVB)))
+
+		// Convert to SatPerKWeight.
+		// Rate: 1 sat / 12 kwu = 0.0833... sat/kw.
+		kw := rate.ToSatPerKWeight()
+		require.Equal(t, "0.083 sat/kw", kw.String())
+		require.Equal(t, expectedFee,
+			kw.FeeForKWeight(NewKWeightUnit(payloadKWU)))
+
+		// Convert to SatPerWeight.
+		// Rate: 1 sat / 12,000 wu = 0.0000833... sat/wu.
+		// Rounds to 0.000.
+		w := rate.ToSatPerWeight()
+		require.Equal(t, "0.000 sat/wu", w.String())
+		require.Equal(t, expectedFee,
+			w.FeeForWeight(NewWeightUnit(payloadWU)))
+	})
+
+	// 4. Test SatPerKVByte.
+	// Rate: 1 sat / 3 kvb = 0.333... sat/kvb.
+	t.Run("SatPerKVByte", func(t *testing.T) {
+		t.Parallel()
+
+		rate := CalcSatPerKVByte(1, NewKVByte(payloadKVB))
+		require.Equal(t, "0.333 sat/kvb", rate.String())
+		require.Equal(t, expectedFee,
+			rate.FeeForKVByte(NewKVByte(payloadKVB)))
+
+		// Convert to SatPerVByte.
+		// Rate: 1 sat / 3,000 vb = 0.00033... sat/vb.
+		// Rounds to 0.000.
+		vb := rate.ToSatPerVByte()
+		require.Equal(t, "0.000 sat/vb", vb.String())
+		require.Equal(t, expectedFee,
+			vb.FeeForVByte(NewVByte(payloadVB)))
+
+		// Convert to SatPerKWeight.
+		// Rate: 1 sat / 12 kwu = 0.0833... sat/kw.
+		kw := rate.ToSatPerKWeight()
+		require.Equal(t, "0.083 sat/kw", kw.String())
+		require.Equal(t, expectedFee,
+			kw.FeeForKWeight(NewKWeightUnit(payloadKWU)))
+
+		// Convert to SatPerWeight.
+		// Rate: 1 sat / 12,000 wu = 0.0000833... sat/wu.
+		// Rounds to 0.000.
+		w := rate.ToSatPerWeight()
+		require.Equal(t, "0.000 sat/wu", w.String())
+		require.Equal(t, expectedFee,
+			w.FeeForWeight(NewWeightUnit(payloadWU)))
+	})
+}
