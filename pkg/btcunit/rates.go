@@ -27,16 +27,16 @@ const (
 
 var (
 	// ZeroSatPerVByte is a fee rate of 0 sat/vb.
-	ZeroSatPerVByte = NewSatPerVByte(0, NewVByte(1))
+	ZeroSatPerVByte = NewSatPerVByte(0)
 
 	// ZeroSatPerKVByte is a fee rate of 0 sat/kvb.
-	ZeroSatPerKVByte = NewSatPerKVByte(0, NewKVByte(1))
+	ZeroSatPerKVByte = NewSatPerKVByte(0)
 
 	// ZeroSatPerKWeight is a fee rate of 0 sat/kw.
-	ZeroSatPerKWeight = NewSatPerKWeight(0, NewKWeightUnit(1))
+	ZeroSatPerKWeight = NewSatPerKWeight(0)
 
 	// ZeroSatPerWeight is a fee rate of 0 sat/wu.
-	ZeroSatPerWeight = NewSatPerWeight(0, NewWeightUnit(1))
+	ZeroSatPerWeight = NewSatPerWeight(0)
 )
 
 // baseFeeRate stores the canonical representation of a fee rate, which is
@@ -199,19 +199,19 @@ type SatPerVByte struct {
 	baseFeeRate
 }
 
-// NewSatPerVByte creates a new fee rate in sat/vb. The given fee and vbytes
-// are used to calculate the fee rate.
-func NewSatPerVByte(fee btcutil.Amount, vb VByte) SatPerVByte {
-	// The fee is provided in satoshis. To convert this to our internal
-	// canonical unit of satoshis per kilo-weight-unit (sat/kwu), we need
-	// to scale the numerator. Multiplying by `kilo` (1000) effectively
-	// converts the 'per vbyte' rate to a 'per kilo-vbyte' rate, which then
-	// aligns with the 'kilo' in sat/kwu after the denominator is processed.
-	numerator := fee.MulF64(kilo)
+// NewSatPerVByte creates a new fee rate in sat/vb.
+func NewSatPerVByte(rate btcutil.Amount) SatPerVByte {
+	return CalcSatPerVByte(rate, NewVByte(1))
+}
 
-	// The denominator is the size in vbytes. `vb.wu` provides the
-	// equivalent transaction weight in weight units (wu), which implicitly
-	// accounts for the `WitnessScaleFactor` (4).
+// CalcSatPerVByte calculates the fee rate in sat/vb for a given fee and size.
+func CalcSatPerVByte(fee btcutil.Amount, vb VByte) SatPerVByte {
+	// To convert the rate to the canonical sat/kwu unit, we use the
+	// formula: (fee * 1000) / size_in_wu.
+	//
+	// vb.wu provides the size in weight units (wu), implicitly accounting
+	// for the WitnessScaleFactor.
+	numerator := fee * kilo
 	denominator := vb.wu
 
 	return SatPerVByte{newBaseFeeRate(numerator, denominator)}
@@ -267,20 +267,19 @@ type SatPerKVByte struct {
 	baseFeeRate
 }
 
-// NewSatPerKVByte creates a new fee rate in sat/kvb. The given fee and
-// kvbytes are used to calculate the fee rate.
-func NewSatPerKVByte(fee btcutil.Amount, kvb KVByte) SatPerKVByte {
-	// The fee is provided in satoshis. To convert this to our internal
-	// canonical unit of satoshis per kilo-weight-unit (sat/kwu), we need
-	// to scale the numerator. Multiplying by `kilo` (1000) effectively
-	// scales the fee to align with the 'kilo' in sat/kwu after the
-	// denominator is processed.
-	numerator := fee.MulF64(kilo)
+// NewSatPerKVByte creates a new fee rate in sat/kvb.
+func NewSatPerKVByte(rate btcutil.Amount) SatPerKVByte {
+	return CalcSatPerKVByte(rate, NewKVByte(1))
+}
 
-	// The denominator is the size in kilo-vbytes. `kvb.wu` provides the
-	// equivalent transaction weight in weight units (wu), which implicitly
-	// accounts for the `WitnessScaleFactor` (4) and the `kilo` scaling for
-	// kilo-vbytes.
+// CalcSatPerKVByte calculates the fee rate in sat/kvb for a given fee and size.
+func CalcSatPerKVByte(fee btcutil.Amount, kvb KVByte) SatPerKVByte {
+	// To convert the rate to the canonical sat/kwu unit, we use the
+	// formula: (fee * 1000) / size_in_wu.
+	//
+	// kvb.wu provides the size in weight units (wu), implicitly accounting
+	// for the WitnessScaleFactor and kilo scaling.
+	numerator := fee * kilo
 	denominator := kvb.wu
 
 	return SatPerKVByte{newBaseFeeRate(numerator, denominator)}
@@ -337,18 +336,19 @@ type SatPerKWeight struct {
 	baseFeeRate
 }
 
-// NewSatPerKWeight creates a new fee rate in sat/kw. The given fee and
-// kweight units are used to calculate the fee rate.
-func NewSatPerKWeight(fee btcutil.Amount, kwu KWeightUnit) SatPerKWeight {
-	// The fee is provided in satoshis. To convert this to our internal
-	// canonical unit of satoshis per kilo-weight-unit (sat/kwu), we need
-	// to scale the numerator. Multiplying by `kilo` (1000) is consistent
-	// with the definition of sat/kwu.
-	numerator := fee.MulF64(kilo)
+// NewSatPerKWeight creates a new fee rate in sat/kw.
+func NewSatPerKWeight(rate btcutil.Amount) SatPerKWeight {
+	return CalcSatPerKWeight(rate, NewKWeightUnit(1))
+}
 
-	// The denominator is the size in kilo-weight-units. `kwu.wu` provides
-	// the equivalent transaction weight in weight units (wu), which
-	// implicitly accounts for the `kilo` scaling for kilo-weight-units.
+// CalcSatPerKWeight calculates the fee rate in sat/kw for a given fee and size.
+func CalcSatPerKWeight(fee btcutil.Amount, kwu KWeightUnit) SatPerKWeight {
+	// To convert the rate to the canonical sat/kwu unit, we use the
+	// formula: (fee * 1000) / size_in_wu.
+	//
+	// kwu.wu provides the size in weight units (wu), implicitly accounting
+	// for the kilo scaling.
+	numerator := fee * kilo
 	denominator := kwu.wu
 
 	return SatPerKWeight{newBaseFeeRate(numerator, denominator)}
@@ -395,17 +395,18 @@ type SatPerWeight struct {
 	baseFeeRate
 }
 
-// NewSatPerWeight creates a new fee rate in sat/wu. The given fee and
-// weight units are used to calculate the fee rate.
-func NewSatPerWeight(fee btcutil.Amount, wu WeightUnit) SatPerWeight {
-	// The fee is provided in satoshis. To convert this to our internal
-	// canonical unit of satoshis per kilo-weight-unit (sat/kwu), we need
-	// to scale the numerator. Multiplying by `kilo` (1000) is consistent
-	// with the definition of sat/kwu (1 sat/wu = 1000 sat/kwu).
-	numerator := fee.MulF64(kilo)
+// NewSatPerWeight creates a new fee rate in sat/wu.
+func NewSatPerWeight(rate btcutil.Amount) SatPerWeight {
+	return CalcSatPerWeight(rate, NewWeightUnit(1))
+}
 
-	// The denominator is the size in weight units. `wu.wu` provides the
-	// equivalent transaction weight in weight units (wu).
+// CalcSatPerWeight calculates the fee rate in sat/wu for a given fee and size.
+func CalcSatPerWeight(fee btcutil.Amount, wu WeightUnit) SatPerWeight {
+	// To convert the rate to the canonical sat/kwu unit, we use the
+	// formula: (fee * 1000) / size_in_wu.
+	//
+	// wu.wu provides the size in weight units (wu).
+	numerator := fee * kilo
 	denominator := wu.wu
 
 	return SatPerWeight{newBaseFeeRate(numerator, denominator)}
