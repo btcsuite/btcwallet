@@ -177,8 +177,8 @@ func TestNewFeeRateConstructors(t *testing.T) {
 	)
 
 	// Test NewSatPerKVByte.
-	kvb := NewVByte(1)
-	expectedRateKVB := SatPerKVByte{big.NewRat(1000000, 1)}
+	kvb := NewKVByte(1)
+	expectedRateKVB := SatPerKVByte{big.NewRat(1000, 1)}
 	require.Zero(
 		t, expectedRateKVB.Cmp(NewSatPerKVByte(fee, kvb).Rat),
 	)
@@ -276,12 +276,36 @@ func TestFeeForSize(t *testing.T) {
 	// Create a set of fee rates to test.
 	r1 := SatPerKVByte{big.NewRat(1000, 1)}
 	r2 := SatPerKWeight{big.NewRat(250, 1)}
+	r3 := SatPerVByte{big.NewRat(1, 1)}
 
 	// Test FeeForVSize.
 	require.Equal(t, btcutil.Amount(250), r1.FeeForVSize(NewVByte(250)))
 
 	// Test FeeForVByte.
 	require.Equal(t, btcutil.Amount(250), r2.FeeForVByte(NewVByte(250)))
+
+	// Test FeeForVSize with SatPerVByte.
+	require.Equal(t, btcutil.Amount(1000), r3.FeeForVSize(NewVByte(1000)))
+
+	// Test FeeForKVByte with SatPerVByte.
+	require.Equal(t, btcutil.Amount(1000), r3.FeeForKVByte(NewKVByte(1)))
+
+	// Test FeeForWeight with SatPerVByte.
+	require.Equal(t, btcutil.Amount(250),
+		r3.FeeForWeight(NewWeightUnit(1000)))
+
+	// Test FeePerVByte with SatPerKVByte.
+	require.True(t, r3.Equal(r1.FeePerVByte()))
+
+	// Test FeeForKVByte with SatPerKVByte.
+	require.Equal(t, btcutil.Amount(1000), r1.FeeForKVByte(NewKVByte(1)))
+
+	// Test FeeForWeight with SatPerKVByte.
+	require.Equal(t, btcutil.Amount(250),
+		r1.FeeForWeight(NewWeightUnit(1000)))
+
+	// Test FeeForKVByte with SatPerKWeight.
+	require.Equal(t, btcutil.Amount(1000), r2.FeeForKVByte(NewKVByte(1)))
 }
 
 // TestNewFeeRateConstructorsZero tests the New* fee rate constructors with
@@ -305,7 +329,7 @@ func TestNewFeeRateConstructorsZero(t *testing.T) {
 	)
 
 	// Test NewSatPerKVByte with zero kvbytes.
-	kvb := NewVByte(0)
+	kvb := NewKVByte(0)
 	expectedRateKVB := SatPerKVByte{big.NewRat(0, 1)}
 	require.Zero(
 		t, expectedRateKVB.Cmp(NewSatPerKVByte(fee, kvb).Rat),
@@ -328,7 +352,8 @@ func TestSafeUint64ToInt64Overflow(t *testing.T) {
 
 	// Test NewSatPerKVByte with an overflowing kvb value.
 	// The denominator should be capped at math.MaxInt64.
-	rateKVB := NewSatPerKVByte(fee, overflowVByte)
+	overflowKVByte := NewKVByte(math.MaxInt64 + 1)
+	rateKVB := NewSatPerKVByte(fee, overflowKVByte)
 	require.Zero(t, expectedDenom.Cmp(rateKVB.Denom()))
 
 	// Test NewSatPerKWeight with an overflowing weight unit value.
