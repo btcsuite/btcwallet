@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -48,6 +49,7 @@ func TestValidateTxIntent(t *testing.T) {
 		AccountName: validAccountName,
 		KeyScope:    waddrmgr.KeyScopeBIP0086,
 	}
+	defaultFeeRate := btcunit.NewSatPerKVByte(1000)
 
 	// Define the test cases, each representing a different scenario for
 	// validating a TxIntent.
@@ -66,7 +68,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: nil,
 		},
@@ -81,7 +83,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: nil,
 		},
@@ -99,7 +101,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: nil,
 		},
@@ -111,7 +113,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: nil,
 		},
@@ -123,7 +125,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrMissingInputs,
 		},
@@ -137,7 +139,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrNoTxOutputs,
 		},
@@ -151,7 +153,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: txrules.ErrOutputIsDust,
 		},
@@ -165,7 +167,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrManualInputsEmpty,
 		},
@@ -181,7 +183,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrDuplicatedUtxo,
 		},
@@ -195,7 +197,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrMissingAccountName,
 		},
@@ -211,7 +213,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrManualInputsEmpty,
 		},
@@ -229,7 +231,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrDuplicatedUtxo,
 		},
@@ -243,7 +245,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrUnsupportedCoinSource,
 		},
@@ -255,7 +257,7 @@ func TestValidateTxIntent(t *testing.T) {
 				ChangeSource: &ScopedAccount{
 					AccountName: defaultAccountName,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: nil,
 		},
@@ -270,7 +272,7 @@ func TestValidateTxIntent(t *testing.T) {
 					AccountName: "",
 					KeyScope:    waddrmgr.KeyScopeBIP0086,
 				},
-				FeeRate: 1000,
+				FeeRate: defaultFeeRate,
 			},
 			expectedErr: ErrMissingAccountName,
 		},
@@ -285,7 +287,7 @@ func TestValidateTxIntent(t *testing.T) {
 					AccountName: defaultAccountName,
 					KeyScope:    waddrmgr.KeyScopeBIP0086,
 				},
-				FeeRate: 0,
+				FeeRate: btcunit.ZeroSatPerKVByte,
 			},
 			expectedErr: ErrMissingFeeRate,
 		},
@@ -300,7 +302,7 @@ func TestValidateTxIntent(t *testing.T) {
 					AccountName: defaultAccountName,
 					KeyScope:    waddrmgr.KeyScopeBIP0086,
 				},
-				FeeRate: DefaultMaxFeeRate + 1,
+				FeeRate: btcunit.NewSatPerKVByte(2_000_000),
 			},
 			expectedErr: ErrFeeRateTooLarge,
 		},
@@ -778,7 +780,7 @@ func TestCreatePolicyInputSource(t *testing.T) {
 	t.Parallel()
 
 	dbtx := &mockReadTx{}
-	feeRate := SatPerKVByte(1000)
+	feeRate := btcunit.NewSatPerKVByte(1000)
 
 	utxo1 := wtxmgr.Credit{
 		OutPoint: wire.OutPoint{Hash: [32]byte{1}, Index: 0},
@@ -911,7 +913,10 @@ func TestCreateInputSource(t *testing.T) {
 	unsupported := &unsupportedInputs{}
 
 	intentManual := &TxIntent{Inputs: manualInputs}
-	intentPolicy := &TxIntent{Inputs: policyInputs, FeeRate: 1000}
+	intentPolicy := &TxIntent{
+		Inputs:  policyInputs,
+		FeeRate: btcunit.NewSatPerKVByte(1000),
+	}
 	intentUnsupported := &TxIntent{Inputs: unsupported}
 
 	testCases := []struct {
@@ -1021,7 +1026,7 @@ func TestCreateTransactionSuccessManualInputs(t *testing.T) {
 			AccountName: defaultAccountName,
 			KeyScope:    waddrmgr.KeyScopeBIP0086,
 		},
-		FeeRate: 1000,
+		FeeRate: btcunit.NewSatPerKVByte(1000),
 	}
 
 	accountStore := &mockAccountStore{}
@@ -1111,7 +1116,7 @@ func TestCreateTransactionSuccessNilChangeSourceManualInputs(t *testing.T) {
 			UTXOs: []wire.OutPoint{validUTXO},
 		},
 		ChangeSource: nil,
-		FeeRate:      1000,
+		FeeRate:      btcunit.NewSatPerKVByte(1000),
 	}
 
 	accountStore := &mockAccountStore{}
@@ -1206,7 +1211,7 @@ func TestCreateTransactionSuccessNilChangeSourcePolicyInputs(t *testing.T) {
 			},
 		},
 		ChangeSource: nil,
-		FeeRate:      1000,
+		FeeRate:      btcunit.NewSatPerKVByte(1000),
 	}
 
 	accountStore := &mockAccountStore{}
@@ -1328,7 +1333,7 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 			AccountName: "unknown",
 			KeyScope:    waddrmgr.KeyScopeBIP0086,
 		},
-		FeeRate: 1000,
+		FeeRate: btcunit.NewSatPerKVByte(1000),
 	}
 
 	accountStore := &mockAccountStore{}
