@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"math/big"
 	"testing"
 	"time"
 
@@ -30,9 +29,7 @@ func TestBuildTxDetail(t *testing.T) {
 	unminedNoFeeDetails, unminedNoFeeTxDetail := createUnminedTxDetail(t)
 	unminedNoFeeDetails.Debits = nil
 	unminedNoFeeTxDetail.Fee = 0
-	unminedNoFeeTxDetail.FeeRate = btcunit.SatPerVByte{
-		Rat: big.NewRat(0, 1),
-	}
+	unminedNoFeeTxDetail.FeeRate = btcunit.ZeroSatPerVByte
 	unminedNoFeeTxDetail.Value = unminedNoFeeDetails.Credits[0].Amount +
 		unminedNoFeeDetails.Credits[1].Amount
 	unminedNoFeeTxDetail.PrevOuts[0].IsOurs = false
