@@ -64,10 +64,10 @@ func TestFeeRateConversions(t *testing.T) {
 			case SatPerVByte:
 				require.True(t, tc.expectedVB.Equal(r))
 				require.True(t, tc.expectedKVB.Equal(
-					r.FeePerKVByte()),
+					r.ToSatPerKVByte()),
 				)
 				require.True(t, tc.expectedKW.Equal(
-					r.FeePerKWeight()),
+					r.ToSatPerKWeight()),
 				)
 
 				// The expected sats is the floor of the fee
@@ -80,11 +80,11 @@ func TestFeeRateConversions(t *testing.T) {
 
 			case SatPerKVByte:
 				require.True(t, tc.expectedVB.Equal(
-					r.FeePerKWeight().FeePerVByte()),
+					r.ToSatPerKWeight().ToSatPerVByte()),
 				)
 				require.True(t, tc.expectedKVB.Equal(r))
 				require.True(t, tc.expectedKW.Equal(
-					r.FeePerKWeight()),
+					r.ToSatPerKWeight()),
 				)
 				floor := new(big.Int).Div(r.Num(), r.Denom())
 				require.Equal(
@@ -94,10 +94,10 @@ func TestFeeRateConversions(t *testing.T) {
 
 			case SatPerKWeight:
 				require.True(t, tc.expectedVB.Equal(
-					r.FeePerVByte()),
+					r.ToSatPerVByte()),
 				)
 				require.True(t, tc.expectedKVB.Equal(
-					r.FeePerKVByte()),
+					r.ToSatPerKVByte()),
 				)
 				require.True(t, tc.expectedKW.Equal(r))
 				floor := new(big.Int).Div(r.Num(), r.Denom())
@@ -110,8 +110,9 @@ func TestFeeRateConversions(t *testing.T) {
 	}
 }
 
-// TestFeeRateComparisons tests the comparison methods of the fee rate types.
-func TestFeeRateComparisons(t *testing.T) {
+// TestFeeRateComparisonsVB tests the comparison methods of the SatPerVByte
+// type.
+func TestFeeRateComparisonsVB(t *testing.T) {
 	t.Parallel()
 
 	// Create a set of fee rates to compare.
@@ -149,7 +150,7 @@ func TestFeeRateComparisons(t *testing.T) {
 func TestFeeForWeightRoundUp(t *testing.T) {
 	t.Parallel()
 
-	feeRate := SatPerVByte{big.NewRat(1, 1)}.FeePerKWeight()
+	feeRate := SatPerVByte{big.NewRat(1, 1)}.ToSatPerKWeight()
 	txWeight := NewWeightUnit(674) // 674 weight units is 168.5 vb.
 
 	require.EqualValues(t, 168, feeRate.FeeForWeight(txWeight))
@@ -294,8 +295,8 @@ func TestFeeForSize(t *testing.T) {
 	require.Equal(t, btcutil.Amount(250),
 		r3.FeeForWeight(NewWeightUnit(1000)))
 
-	// Test FeePerVByte with SatPerKVByte.
-	require.True(t, r3.Equal(r1.FeePerVByte()))
+	// Test ToSatPerVByte with SatPerKVByte.
+	require.True(t, r3.Equal(r1.ToSatPerVByte()))
 
 	// Test FeeForKVByte with SatPerKVByte.
 	require.Equal(t, btcutil.Amount(1000), r1.FeeForKVByte(NewKVByte(1)))
