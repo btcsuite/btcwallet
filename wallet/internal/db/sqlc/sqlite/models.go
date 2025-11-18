@@ -7,5 +7,5 @@ package sqlcsqlite
 type Block struct {
 	BlockHeight int64
 	HeaderHash  []byte
-	Timestamp   int64
+	CreatedAt   int64
 }

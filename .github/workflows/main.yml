@@ -63,7 +63,7 @@ jobs:
       - name: Check RPC format
         run: make rpc-check
 
-      - name: Check SQL models
+      - name: Check SQL models and formatting
         run: make sqlc-check
 
       - name: compile code

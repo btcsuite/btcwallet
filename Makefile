@@ -6,12 +6,22 @@ GOINSTALL := GO111MODULE=on go install -v
 
 GOFILES = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
+# SQL directories.
+SQL_MIGRATIONS_DIR := wallet/internal/db/migrations
+SQL_QUERIES_DIR := wallet/internal/db/queries
+
+# SQL file paths.
+SQL_POSTGRES_MIGRATIONS := $(SQL_MIGRATIONS_DIR)/postgres/*.sql
+SQL_POSTGRES_QUERIES := $(SQL_QUERIES_DIR)/postgres/*.sql
+SQL_SQLITE_MIGRATIONS := $(SQL_MIGRATIONS_DIR)/sqlite/*.sql
+SQL_SQLITE_QUERIES := $(SQL_QUERIES_DIR)/sqlite/*.sql
+
 RM := rm -f
 CP := cp
 MAKE := make
 XARGS := xargs -L 1
 
-include make/testing_flags.mk
+include config/testing_flags.mk
 
 # Linting uses a lot of memory, so keep it under control by limiting the number
 # of workers if requested.
@@ -108,17 +118,17 @@ rpc-format:
 #? lint-config-check: Verify golangci-lint configuration
 lint-config-check: docker-tools
 	@$(call print, "Verifying golangci-lint configuration.")
-	$(DOCKER_TOOLS) golangci-lint config verify -v
+	$(DOCKER_TOOLS) golangci-lint config verify -v -c config/golangci.yml
 
 #? lint: Lint source and check errors
 lint-check: lint-config-check
 	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
+	$(DOCKER_TOOLS) golangci-lint run -v -c config/golangci.yml $(LINT_WORKERS)
 
 #? lint: Lint source and fix
 lint: lint-config-check
 	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v --fix $(LINT_WORKERS)
+	$(DOCKER_TOOLS) golangci-lint run -v -c config/golangci.yml --fix $(LINT_WORKERS)
 
 #? docker-tools: Build tools docker image
 docker-tools:
@@ -159,15 +169,70 @@ tidy-module:
 tidy-module-check: tidy-module
 	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run `make tidy-module` again!"; git status; exit 1; fi
 
-#? sqlc: Generate sql models and queries in Go
-sqlc: docker-tools
-	@$(call print, "Generating sql models and queries in Go")
-	$(DOCKER_TOOLS) sqlc generate -f wallet/internal/db/sqlc/sqlc.yaml
+#? sql-parse: Validate SQL files can be parsed
+sql-parse: docker-tools
+	@$(call print, "Validating SQL files (postgres).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff parse --config config/sqlfluff.cfg -d postgres $(SQL_MIGRATIONS_DIR)/postgres && sqlfluff parse --config config/sqlfluff.cfg -d postgres $(SQL_QUERIES_DIR)/postgres"
+	@$(call print, "Validating SQL files (sqlite).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff parse --config config/sqlfluff.cfg -d sqlite $(SQL_MIGRATIONS_DIR)/sqlite && sqlfluff parse --config config/sqlfluff.cfg -d sqlite $(SQL_QUERIES_DIR)/sqlite"
 
-#? sqlc-check: Make sure sql models and queries are up to date
-sqlc-check: sqlc
+#? sql-compile: Generate sql models and queries in Go
+sql-compile: docker-tools sql-parse
+	@$(call print, "Generating sql models and queries in Go")
+	$(DOCKER_TOOLS) sqlc generate -f config/sqlc.yaml
+
+#? sqlc: Alias for sql-compile
+sqlc: sql-compile
+
+#? sql-compile-check: Make sure sql models and queries are up to date and formatted correctly
+sql-compile-check: sql-compile sql-check
 	@$(call print, "Verifying sql code generation.")
 	if test -n "$$(git status --porcelain '*.go')"; then echo "SQL models not properly generated!"; git status --porcelain '*.go'; exit 1; fi
+
+#? sqlc-check: Alias for sql-compile-check
+sqlc-check: sql-compile-check
+
+#? sql-format: Format SQL migration and query files
+sql-format: docker-tools
+	@$(call print, "Formatting SQL files (postgres).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff format --config config/sqlfluff.cfg -d postgres $(SQL_POSTGRES_MIGRATIONS) $(SQL_POSTGRES_QUERIES)"
+	@$(call print, "Formatting SQL files (sqlite).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff format --config config/sqlfluff.cfg -d sqlite $(SQL_SQLITE_MIGRATIONS) $(SQL_SQLITE_QUERIES)"
+
+#? sql-lint: Lint SQL migration and query files
+sql-lint: docker-tools
+	@$(call print, "Linting SQL files (postgres).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff lint --config config/sqlfluff.cfg -d postgres $(SQL_POSTGRES_MIGRATIONS) $(SQL_POSTGRES_QUERIES)"
+	@$(call print, "Linting SQL files (sqlite).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff lint --config config/sqlfluff.cfg -d sqlite $(SQL_SQLITE_MIGRATIONS) $(SQL_SQLITE_QUERIES)"
+
+#? sql-fix: Fix SQL migration and query files
+sql-fix: docker-tools
+	@$(call print, "Fixing SQL files (postgres).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff fix --config config/sqlfluff.cfg -d postgres $(SQL_POSTGRES_MIGRATIONS) $(SQL_POSTGRES_QUERIES)"
+	@$(call print, "Fixing SQL files (sqlite).")
+	$(DOCKER_TOOLS) bash -c "sqlfluff fix --config config/sqlfluff.cfg -d sqlite $(SQL_SQLITE_MIGRATIONS) $(SQL_SQLITE_QUERIES)"
+
+#? sql-check: Verify SQL migration and query files are formatted correctly
+sql-check: sql-format
+	@$(call print, "Checking SQL formatting.")
+	if test -n "$$(git status --porcelain '$(SQL_MIGRATIONS_DIR)/**/*.sql' '$(SQL_QUERIES_DIR)/**/*.sql')"; then echo "SQL files not formatted correctly, please run 'make sql-format' again!"; git status; git diff; exit 1; fi
+
+#? sql-merge-migrations: Merge SQL migration files into single files (up/down for postgres/sqlite)
+sql-merge-migrations: docker-tools
+	@$(call print, "Merging SQL migrations.")
+	$(DOCKER_TOOLS) ./scripts/merge_migrations.sh
+
+#? migrate-sqlite-to-postgres: Migrate SQLite to PostgreSQL (SQLITE_DB=/path/to/db POSTGRES_URL=postgresql://...)
+migrate-sqlite-to-postgres: docker-tools
+	@$(call print, "Migrating SQLite to PostgreSQL.")
+	$(DOCKER_TOOLS) bash -c "SQLITE_DB_PATH='$(SQLITE_DB)' POSTGRES_URL='$(POSTGRES_URL)' ./scripts/migrate_sqlite_to_postgres.sh"
+
+#? test-db-equivalence: Test equivalence between SQLite and PostgreSQL schemas and migrations
+test-db-equivalence:
+	@$(call print, "Testing database equivalence.")
+	./scripts/test_db_equivalence.sh
+
 
 .PHONY: all \
 	default \
@@ -182,8 +247,18 @@ sqlc-check: sqlc
 	fmt-check \
 	tidy-module \
 	tidy-module-check \
+	sql-parse \
+	sql-compile \
 	sqlc \
+	sql-compile-check \
 	sqlc-check \
+	sql-format \
+	sql-lint \
+	sql-fix \
+	sql-check \
+	sql-merge-migrations \
+	migrate-sqlite-to-postgres \
+	test-db-equivalence \
 	rpc-format \
 	lint \
 	lint-config-check \
