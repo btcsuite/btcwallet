@@ -15,8 +15,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -73,14 +73,16 @@ var (
 	ErrNilTxIntent = errors.New("nil TxIntent")
 )
 
-const (
+var (
 	// DefaultMaxFeeRate is the default maximum fee rate in sat/kvb that
 	// the wallet will consider sane. This is currently set to 1000 sat/vb
 	// (1,000,000 sat/kvb).
 	//
 	// TODO(yy): The max fee rate should be made configurable as part of
 	// the WalletController interface implementation.
-	DefaultMaxFeeRate SatPerKVByte = 1000 * 1000
+	//
+	//nolint:mnd // 1M sat/kvb default max fee.
+	DefaultMaxFeeRate = btcunit.NewSatPerKVByte(1_000_000)
 )
 
 // TxCreator provides an interface for creating transactions. Its primary
@@ -96,11 +98,6 @@ type TxCreator interface {
 
 // A compile time check to ensure that Wallet implements the interface.
 var _ TxCreator = (*Wallet)(nil)
-
-// SatPerKVByte is a type that represents a fee rate in satoshis per
-// kilo-virtual-byte. This is the standard unit for fee estimation in modern
-// Bitcoin transactions that use SegWit.
-type SatPerKVByte btcutil.Amount
 
 // TxIntent represents the user's intent to create a transaction. It serves as
 // a blueprint for the TxCreator, bundling all the parameters required to
@@ -198,7 +195,7 @@ type TxIntent struct {
 	// FeeRate specifies the desired fee rate for the transaction,
 	// expressed in satoshis per kilo-virtual-byte (sat/kvb). This field is
 	// required.
-	FeeRate SatPerKVByte
+	FeeRate btcunit.SatPerKVByte
 
 	// Label is an optional, human-readable label for the transaction. This
 	// can be used to associate a memo with the transaction for later
@@ -406,15 +403,15 @@ func validateTxIntent(intent *TxIntent) error {
 	}
 
 	// The intent must have a non-zero fee rate.
-	if intent.FeeRate == 0 {
+	if intent.FeeRate.LessThanOrEqual(btcunit.ZeroSatPerKVByte) {
 		return ErrMissingFeeRate
 	}
 
 	// Ensure the fee rate is not "insane". This prevents users from
 	// accidentally paying exorbitant fees.
-	if intent.FeeRate > DefaultMaxFeeRate {
-		return fmt.Errorf("%w: fee rate of %d sat/kvb is too high, "+
-			"max sane fee rate is %d sat/kvb", ErrFeeRateTooLarge,
+	if intent.FeeRate.GreaterThan(DefaultMaxFeeRate) {
+		return fmt.Errorf("%w: fee rate of %s is too high, "+
+			"max sane fee rate is %s", ErrFeeRateTooLarge,
 			intent.FeeRate, DefaultMaxFeeRate)
 	}
 
@@ -540,7 +537,7 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 	// With the input source and change source prepared, we can now call the
 	// txauthor package to perform the actual coin selection and create the
 	// unsigned transaction.
-	feeSatPerKb := btcutil.Amount(intent.FeeRate)
+	feeSatPerKb := intent.FeeRate.Val()
 
 	tx, err := txauthor.NewUnsignedTransaction(
 		outputs, feeSatPerKb, inputSource, changeSource,
@@ -652,7 +649,7 @@ func (w *Wallet) createManualInputSource(dbtx walletdb.ReadTx,
 // createPolicyInputSource creates an input source that will perform automatic
 // coin selection based on the provided policy.
 func (w *Wallet) createPolicyInputSource(dbtx walletdb.ReadTx,
-	policy *InputsPolicy, feeRate SatPerKVByte) (
+	policy *InputsPolicy, feeRate btcunit.SatPerKVByte) (
 	txauthor.InputSource, error) {
 
 	// Fall back to the default coin selection strategy if none is supplied.
@@ -691,7 +688,7 @@ func (w *Wallet) createPolicyInputSource(dbtx walletdb.ReadTx,
 
 	// Arrange the eligible coins according to the chosen strategy (e.g.,
 	// sort by largest first, or shuffle for random selection).
-	feeSatPerKb := btcutil.Amount(feeRate)
+	feeSatPerKb := feeRate.Val()
 
 	arrangedCoins, err := strategy.ArrangeCoins(
 		wrappedEligible, feeSatPerKb,
