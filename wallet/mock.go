@@ -104,3 +104,9 @@ func (m *mockChainClient) TestMempoolAccept(txns []*wire.MsgTx,
 func (m *mockChainClient) MapRPCErr(err error) error {
 	return nil
 }
+
+func (m *mockChainClient) SubmitPackage(_ []*wire.MsgTx, _ *wire.MsgTx,
+	_ *float64) (*btcjson.SubmitPackageResult, error) {
+
+	return &btcjson.SubmitPackageResult{}, nil
+}

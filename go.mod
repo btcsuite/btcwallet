@@ -1,7 +1,7 @@
 module github.com/btcsuite/btcwallet
 
 require (
-	github.com/btcsuite/btcd v0.24.3-0.20250318170759-4f4ea81776d6
+	github.com/btcsuite/btcd v0.25.0-beta.rc1.0.20250925015248-b7d070601def
 	github.com/btcsuite/btcd/btcec/v2 v2.3.5
 	github.com/btcsuite/btcd/btcutil v1.1.6
 	github.com/btcsuite/btcd/btcutil/psbt v1.1.10
@@ -35,26 +35,25 @@ require (
 
 require (
 	github.com/aead/siphash v1.0.1 // indirect
+	github.com/btcsuite/btcd/v2transport v1.0.1 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/lru v1.1.2 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
 	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	go.etcd.io/bbolt v1.3.11 // indirect
-	go.opentelemetry.io/otel v1.36.0 // indirect
-	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
+	golang.org/x/exp v0.0.0-20250811191247-51f88131bc50 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250603155806-513f23925822 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250324211829-b45e905df463 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// If you change this please run `make lint` to see where else it needs to be
-// updated as well.
+// Temporary replace to bump btcd dependency within neutrino.
+replace github.com/lightninglabs/neutrino => github.com/bhandras/neutrino v0.0.0-20251027194105-5cf9b10c1b51
+
 go 1.24.6
