@@ -41,16 +41,16 @@ func NewSatPerVByte(fee btcutil.Amount, vb VByte) SatPerVByte {
 	}
 }
 
-// FeePerKWeight converts the current fee rate from sat/vb to sat/kw.
-func (s SatPerVByte) FeePerKWeight() SatPerKWeight {
+// ToSatPerKWeight converts the current fee rate from sat/vb to sat/kw.
+func (s SatPerVByte) ToSatPerKWeight() SatPerKWeight {
 	vbToKwRate := big.NewRat(SatsPerKilo, blockchain.WitnessScaleFactor)
 	kwRate := new(big.Rat).Mul(s.Rat, vbToKwRate)
 
 	return SatPerKWeight{kwRate}
 }
 
-// FeePerKVByte converts the current fee rate from sat/vb to sat/kvb.
-func (s SatPerVByte) FeePerKVByte() SatPerKVByte {
+// ToSatPerKVByte converts the current fee rate from sat/vb to sat/kvb.
+func (s SatPerVByte) ToSatPerKVByte() SatPerKVByte {
 	vbToKvbRate := big.NewRat(SatsPerKilo, 1)
 	kvbRate := new(big.Rat).Mul(s.Rat, vbToKvbRate)
 
@@ -157,16 +157,16 @@ func (s SatPerKVByte) FeeForWeight(wu WeightUnit) btcutil.Amount {
 	return s.FeeForVSize(wu.ToVB())
 }
 
-// FeePerKWeight converts the current fee rate from sat/kb to sat/kw.
-func (s SatPerKVByte) FeePerKWeight() SatPerKWeight {
+// ToSatPerKWeight converts the current fee rate from sat/kb to sat/kw.
+func (s SatPerKVByte) ToSatPerKWeight() SatPerKWeight {
 	kvbToKwRate := big.NewRat(1, blockchain.WitnessScaleFactor)
 	kwRate := new(big.Rat).Mul(s.Rat, kvbToKwRate)
 
 	return SatPerKWeight{kwRate}
 }
 
-// FeePerVByte converts the current fee rate from sat/kvb to sat/vb.
-func (s SatPerKVByte) FeePerVByte() SatPerVByte {
+// ToSatPerVByte converts the current fee rate from sat/kvb to sat/vb.
+func (s SatPerKVByte) ToSatPerVByte() SatPerVByte {
 	kvbToVbRate := new(big.Rat).Quo(
 		s.Rat, new(big.Rat).SetInt64(SatsPerKilo),
 	)
@@ -264,7 +264,7 @@ func (s SatPerKWeight) FeeForWeightRoundUp(
 // FeeForVByte calculates the fee resulting from this fee rate and the given
 // size in vbytes (vb).
 func (s SatPerKWeight) FeeForVByte(vb VByte) btcutil.Amount {
-	return s.FeePerKVByte().FeeForVSize(vb)
+	return s.ToSatPerKVByte().FeeForVSize(vb)
 }
 
 // FeeForKVByte calculates the fee resulting from this fee rate and the given
@@ -273,16 +273,16 @@ func (s SatPerKWeight) FeeForKVByte(kvb KVByte) btcutil.Amount {
 	return s.FeeForVByte(kvb.ToVB())
 }
 
-// FeePerKVByte converts the current fee rate from sat/kw to sat/kb.
-func (s SatPerKWeight) FeePerKVByte() SatPerKVByte {
+// ToSatPerKVByte converts the current fee rate from sat/kw to sat/kb.
+func (s SatPerKWeight) ToSatPerKVByte() SatPerKVByte {
 	kwToKvbRate := big.NewRat(blockchain.WitnessScaleFactor, 1)
 	kwRate := new(big.Rat).Mul(s.Rat, kwToKvbRate)
 
 	return SatPerKVByte{kwRate}
 }
 
-// FeePerVByte converts the current fee rate from sat/kw to sat/vb.
-func (s SatPerKWeight) FeePerVByte() SatPerVByte {
+// ToSatPerVByte converts the current fee rate from sat/kw to sat/vb.
+func (s SatPerKWeight) ToSatPerVByte() SatPerVByte {
 	kwToVbRate := big.NewRat(blockchain.WitnessScaleFactor, SatsPerKilo)
 	vbRate := new(big.Rat).Mul(s.Rat, kwToVbRate)
 
