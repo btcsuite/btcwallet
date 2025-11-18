@@ -343,22 +343,24 @@ func TestSafeUint64ToInt64Overflow(t *testing.T) {
 	t.Parallel()
 
 	fee := btcutil.Amount(1)
-	overflowVByte := NewVByte(math.MaxInt64 + 1)
 
 	// Test NewSatPerVByte with an overflowing vbyte value.
 	// The denominator should be capped at math.MaxInt64.
+	// We manually construct the VByte to ensure wu > MaxInt64 without
+	// overflowing the constructor's internal multiplication.
+	overflowVByte := VByte{baseUnit{wu: math.MaxInt64 + 1}}
 	rateVB := NewSatPerVByte(fee, overflowVByte)
 	expectedDenom := big.NewInt(math.MaxInt64)
 	require.Zero(t, expectedDenom.Cmp(rateVB.Denom()))
 
 	// Test NewSatPerKVByte with an overflowing kvb value.
 	// The denominator should be capped at math.MaxInt64.
-	overflowKVByte := NewKVByte(math.MaxInt64 + 1)
+	overflowKVByte := KVByte{baseUnit{wu: math.MaxInt64 + 1}}
 	rateKVB := NewSatPerKVByte(fee, overflowKVByte)
 	require.Zero(t, expectedDenom.Cmp(rateKVB.Denom()))
 
 	// Test NewSatPerKWeight with an overflowing weight unit value.
-	overflowWU := NewWeightUnit(math.MaxInt64 + 1)
+	overflowWU := WeightUnit{baseUnit{wu: math.MaxInt64 + 1}}
 	rateKW := NewSatPerKWeight(fee, overflowWU)
 	require.Zero(t, expectedDenom.Cmp(rateKW.Denom()))
 }
