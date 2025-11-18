@@ -280,7 +280,7 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 		Label:         testLabel,
 		Value:         totalCredits - debitAmt,
 		Fee:           fee,
-		FeeRate:       btcunit.NewSatPerVByte(fee, weight.ToVB()),
+		FeeRate:       btcunit.CalcSatPerVByte(fee, weight.ToVB()),
 		Confirmations: 0,
 		Weight:        weight,
 		ReceivedTime:  txTime,
