@@ -7,5 +7,5 @@ package sqlcpg
 type Block struct {
 	BlockHeight int32
 	HeaderHash  []byte
-	Timestamp   int64
+	CreatedAt   int64
 }

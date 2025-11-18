@@ -2,7 +2,7 @@ FROM golang:1.24.6-alpine
 
 ENV GOFLAGS="-buildvcs=false"
 
-RUN apk update && apk add --no-cache git bash
+RUN apk update && apk add --no-cache git bash python3 py3-pip pgloader
 
 WORKDIR /build
 
@@ -16,6 +16,8 @@ RUN go install -trimpath \
     && rm -rf /root/.cache/go-build \
     && rm -rf /go/src \
     && rm -rf /tmp/*
+
+RUN pip3 install --no-cache-dir sqlfluff --break-system-packages
 
 RUN chmod -R 777 /build \
     && git config --global --add safe.directory /build

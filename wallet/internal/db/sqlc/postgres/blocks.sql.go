@@ -20,7 +20,10 @@ func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int32) error {
 }
 
 const GetBlockByHeight = `-- name: GetBlockByHeight :one
-SELECT block_height, header_hash, timestamp
+SELECT
+    block_height,
+    header_hash,
+    created_at
 FROM blocks
 WHERE block_height = $1
 `
@@ -28,22 +31,22 @@ WHERE block_height = $1
 func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error) {
 	row := q.queryRow(ctx, q.getBlockByHeightStmt, GetBlockByHeight, blockHeight)
 	var i Block
-	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.Timestamp)
+	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.CreatedAt)
 	return i, err
 }
 
 const InsertBlock = `-- name: InsertBlock :exec
-INSERT INTO blocks (block_height, header_hash, timestamp)
+INSERT INTO blocks (block_height, header_hash, created_at)
 VALUES ($1, $2, $3)
 `
 
 type InsertBlockParams struct {
 	BlockHeight int32
 	HeaderHash  []byte
-	Timestamp   int64
+	CreatedAt   int64
 }
 
 func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error {
-	_, err := q.exec(ctx, q.insertBlockStmt, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.Timestamp)
+	_, err := q.exec(ctx, q.insertBlockStmt, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.CreatedAt)
 	return err
 }
