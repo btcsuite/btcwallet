@@ -34,6 +34,9 @@ var (
 
 	// ZeroSatPerKWeight is a fee rate of 0 sat/kw.
 	ZeroSatPerKWeight = NewSatPerKWeight(0, NewKWeightUnit(1))
+
+	// ZeroSatPerWeight is a fee rate of 0 sat/wu.
+	ZeroSatPerWeight = NewSatPerWeight(0, NewWeightUnit(1))
 )
 
 // baseFeeRate stores the canonical representation of a fee rate, which is
@@ -74,6 +77,11 @@ func (f baseFeeRate) ToSatPerKVByte() SatPerKVByte {
 // ToSatPerKWeight converts the fee rate to sat/kw.
 func (f baseFeeRate) ToSatPerKWeight() SatPerKWeight {
 	return SatPerKWeight{f}
+}
+
+// ToSatPerWeight converts the fee rate to sat/wu.
+func (f baseFeeRate) ToSatPerWeight() SatPerWeight {
+	return SatPerWeight{f}
 }
 
 // FeeForWeight calculates the fee resulting from this fee rate and the given
@@ -375,6 +383,68 @@ func (s SatPerKWeight) GreaterThanOrEqual(other SatPerKWeight) bool {
 // LessThanOrEqual returns true if the fee rate is less than or equal to the
 // other fee rate.
 func (s SatPerKWeight) LessThanOrEqual(other SatPerKWeight) bool {
+	return s.lessThanOrEqual(other.baseFeeRate)
+}
+
+// SatPerWeight represents a fee rate in sat/wu. Internally, all fee rates
+// are stored and operated on as satoshis per kilo-weight-unit (sat/kw).
+// Conversions to other units and fee calculations are performed using this
+// canonical internal representation. The `String()` method is the only one
+// that presents the fee rate in its specific sat/wu unit.
+type SatPerWeight struct {
+	baseFeeRate
+}
+
+// NewSatPerWeight creates a new fee rate in sat/wu. The given fee and
+// weight units are used to calculate the fee rate.
+func NewSatPerWeight(fee btcutil.Amount, wu WeightUnit) SatPerWeight {
+	// The fee is provided in satoshis. To convert this to our internal
+	// canonical unit of satoshis per kilo-weight-unit (sat/kwu), we need
+	// to scale the numerator. Multiplying by `kilo` (1000) is consistent
+	// with the definition of sat/kwu (1 sat/wu = 1000 sat/kwu).
+	numerator := fee.MulF64(kilo)
+
+	// The denominator is the size in weight units. `wu.wu` provides the
+	// equivalent transaction weight in weight units (wu).
+	denominator := wu.wu
+
+	return SatPerWeight{newBaseFeeRate(numerator, denominator)}
+}
+
+// String returns a human-readable string of the fee rate.
+func (s SatPerWeight) String() string {
+	// Calculate the fee rate in sat/wu from the canonical sat/kwu.
+	// 1 sat/wu = 1000 sat/kwu. So we need to divide by kilo.
+	wuRate := big.NewRat(0, 1)
+	wuRate.Mul(s.satsPerKWU, big.NewRat(1, kilo))
+
+	return wuRate.FloatString(floatStringPrecision) + " sat/wu"
+}
+
+// Equal returns true if the fee rate is equal to the other fee rate.
+func (s SatPerWeight) Equal(other SatPerWeight) bool {
+	return s.equal(other.baseFeeRate)
+}
+
+// GreaterThan returns true if the fee rate is greater than the other fee rate.
+func (s SatPerWeight) GreaterThan(other SatPerWeight) bool {
+	return s.greaterThan(other.baseFeeRate)
+}
+
+// LessThan returns true if the fee rate is less than the other fee rate.
+func (s SatPerWeight) LessThan(other SatPerWeight) bool {
+	return s.lessThan(other.baseFeeRate)
+}
+
+// GreaterThanOrEqual returns true if the fee rate is greater than or equal to
+// the other fee rate.
+func (s SatPerWeight) GreaterThanOrEqual(other SatPerWeight) bool {
+	return s.greaterThanOrEqual(other.baseFeeRate)
+}
+
+// LessThanOrEqual returns true if the fee rate is less than or equal to the
+// other fee rate.
+func (s SatPerWeight) LessThanOrEqual(other SatPerWeight) bool {
 	return s.lessThanOrEqual(other.baseFeeRate)
 }
 
