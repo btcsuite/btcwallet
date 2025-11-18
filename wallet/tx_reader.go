@@ -340,7 +340,7 @@ func (w *Wallet) calculateValueAndFee(details *TxDetail,
 	}
 
 	details.Fee = totalInput - totalOutput
-	details.FeeRate = btcunit.NewSatPerVByte(
+	details.FeeRate = btcunit.CalcSatPerVByte(
 		details.Fee, details.Weight.ToVB(),
 	)
 }
