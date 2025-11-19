@@ -11,11 +11,14 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -833,5 +836,937 @@ func TestDecorateInputsErrDecorationFailed(t *testing.T) {
 	_, err = w.DecorateInputs(t.Context(), packet, true)
 
 	// Assert: Error is errDb.
+	require.ErrorIs(t, err, errDb)
+}
+
+// TestValidateFundIntentSuccess tests that validateFundIntent returns no error
+// for valid funding intents.
+func TestValidateFundIntentSuccess(t *testing.T) {
+	t.Parallel()
+
+	w, _ := testWalletWithMocks(t)
+
+	// Arrange: Create a valid PSBT packet with one output (for auto
+	// selection).
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	// Arrange: Create a FundIntent for automatic coin selection (no inputs
+	// in packet).
+	intentAuto := &FundIntent{
+		Packet: packet,
+	}
+
+	// Arrange: Create a valid PSBT packet with one input and one output
+	// (for manual selection).
+	txWithInputs := wire.NewMsgTx(2)
+	txWithInputs.AddTxIn(&wire.TxIn{})
+	txWithInputs.AddTxOut(&wire.TxOut{})
+	packetWithInputs, err := psbt.NewFromUnsignedTx(txWithInputs)
+	require.NoError(t, err)
+
+	// Arrange: Create a FundIntent for manual coin selection (inputs
+	// present in packet).
+	intentManual := &FundIntent{
+		Packet: packetWithInputs,
+	}
+
+	// Act & Assert: Validate the auto selection intent. Expect no error.
+	err = w.validateFundIntent(intentAuto)
+	require.NoError(t, err)
+
+	// Act & Assert: Validate the manual selection intent. Expect no error.
+	err = w.validateFundIntent(intentManual)
+	require.NoError(t, err)
+}
+
+// TestValidateFundIntentError tests that validateFundIntent returns expected
+// errors for invalid funding intents.
+func TestValidateFundIntentError(t *testing.T) {
+	t.Parallel()
+
+	w, _ := testWalletWithMocks(t)
+
+	// Arrange: Helper function to create a PSBT packet with specified
+	// inputs and outputs.
+	createPacket := func(numInputs, numOutputs int) *psbt.Packet {
+		tx := wire.NewMsgTx(2)
+		for range numInputs {
+			tx.AddTxIn(&wire.TxIn{})
+		}
+
+		for range numOutputs {
+			tx.AddTxOut(&wire.TxOut{})
+		}
+
+		p, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		return p
+	}
+
+	// Arrange: Define test cases for various error scenarios.
+	testCases := []struct {
+		name        string
+		intent      *FundIntent
+		expectedErr error
+	}{
+		{
+			name:        "nil packet",
+			intent:      &FundIntent{Packet: nil},
+			expectedErr: ErrNilTxIntent,
+		},
+		{
+			name:        "no inputs and no outputs",
+			intent:      &FundIntent{Packet: createPacket(0, 0)},
+			expectedErr: ErrPacketOutputsMissing,
+		},
+		{
+			name: "inputs and policy conflict",
+			intent: &FundIntent{
+				Packet: createPacket(1, 1),
+				Policy: &InputsPolicy{},
+			},
+			expectedErr: ErrInputsAndPolicy,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Call validateFundIntent with the configured
+			// invalid intent.
+			err := w.validateFundIntent(tc.intent)
+
+			// Assert: Verify that the returned error matches the
+			// expected error.
+			require.ErrorIs(t, err, tc.expectedErr)
+		})
+	}
+}
+
+// TestCreateTxIntentAuto tests that createTxIntent correctly converts
+// FundIntent to TxIntent for automatic coin selection.
+func TestCreateTxIntentAuto(t *testing.T) {
+	t.Parallel()
+
+	w, _ := testWalletWithMocks(t)
+
+	// Arrange: Create a PSBT packet with two outputs and no inputs,
+	// which signals automatic coin selection.
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{Value: 1})
+	tx.AddTxOut(&wire.TxOut{Value: 2})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	// Arrange: Define the fee rate, coin selection policy, and change
+	// source.
+	feeRate := btcunit.NewSatPerKVByte(1000)
+	policy := &InputsPolicy{
+		MinConfs: 1,
+	}
+	changeSource := &ScopedAccount{}
+
+	// Arrange: Create the FundIntent with the above parameters.
+	intent := &FundIntent{
+		Packet:       packet,
+		Policy:       policy,
+		FeeRate:      feeRate,
+		Label:        "test",
+		ChangeSource: changeSource,
+	}
+
+	// Act: Call createTxIntent to convert the FundIntent.
+	txIntent := w.createTxIntent(intent)
+
+	// Assert: Verify that the basic fields of the resulting TxIntent
+	// match the input FundIntent.
+	expectedOutputs := []wire.TxOut{{Value: 1}, {Value: 2}}
+	require.Equal(t, expectedOutputs, txIntent.Outputs)
+	require.Equal(t, feeRate, txIntent.FeeRate)
+	require.Equal(t, "test", txIntent.Label)
+	require.Equal(t, changeSource, txIntent.ChangeSource)
+
+	// Assert: Verify that the Inputs field of TxIntent is of type
+	// *InputsPolicy and matches the expected policy for auto selection.
+	inputsPolicy, ok := txIntent.Inputs.(*InputsPolicy)
+	require.True(t, ok)
+	require.Equal(t, policy, inputsPolicy)
+}
+
+// TestCreateTxIntentManual tests that createTxIntent correctly converts
+// FundIntent to TxIntent for manual coin selection.
+func TestCreateTxIntentManual(t *testing.T) {
+	t.Parallel()
+
+	w, _ := testWalletWithMocks(t)
+
+	// Arrange: Create a PSBT packet with two inputs and one output,
+	// which signals manual coin selection.
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Index: 0},
+	})
+	tx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Index: 1},
+	})
+	tx.AddTxOut(&wire.TxOut{Value: 1})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	// Arrange: Define the fee rate and change source. Policy is not needed
+	// for manual selection.
+	feeRate := btcunit.NewSatPerKVByte(1000)
+	changeSource := &ScopedAccount{}
+
+	// Arrange: Create the FundIntent with the above parameters.
+	intent := &FundIntent{
+		Packet:       packet,
+		FeeRate:      feeRate,
+		Label:        "manual",
+		ChangeSource: changeSource,
+	}
+
+	// Act: Call createTxIntent to convert the FundIntent.
+	txIntent := w.createTxIntent(intent)
+
+	// Assert: Verify that the basic fields of the resulting TxIntent
+	// match the input FundIntent.
+	expectedOutputs := []wire.TxOut{{Value: 1}}
+	require.Equal(t, expectedOutputs, txIntent.Outputs)
+	require.Equal(t, feeRate, txIntent.FeeRate)
+	require.Equal(t, "manual", txIntent.Label)
+	require.Equal(t, changeSource, txIntent.ChangeSource)
+
+	// Assert: Verify that the Inputs field of TxIntent is of type
+	// *InputsManual and contains the expected UTXOs from the packet inputs.
+	inputsManual, ok := txIntent.Inputs.(*InputsManual)
+	require.True(t, ok)
+
+	expectedUTXOs := []wire.OutPoint{{Index: 0}, {Index: 1}}
+	require.Equal(t, expectedUTXOs, inputsManual.UTXOs)
+}
+
+// TestFindChangeIndex tests that findChangeIndex correctly locates the change
+// output in the sorted PSBT packet.
+func TestFindChangeIndex(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create three distinct transaction outputs.
+	out1 := &wire.TxOut{Value: 1000, PkScript: []byte{1}}
+	out2 := &wire.TxOut{Value: 2000, PkScript: []byte{2}}
+
+	// Identified as the change output.
+	changeOut := &wire.TxOut{Value: 500, PkScript: []byte{3}}
+
+	// Arrange: Setup a PSBT Packet where the outputs are sorted
+	// differently, with the change output now at index 0: [changeOut,
+	// out1, out2].
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxOut: []*wire.TxOut{changeOut, out1, out2},
+		},
+	}
+
+	// Act: Call findChangeIndex to locate the change output within the
+	// sorted packet.
+	idx, err := findChangeIndex(changeOut, packet)
+
+	// Assert: Verify that no error occurred and the change index found in
+	// the packet is 0, matching its new sorted position.
+	require.NoError(t, err)
+	require.Equal(t, int32(0), idx)
+
+	// Act: Call findChangeIndex for the case with no change output (nil).
+	idx, err = findChangeIndex(nil, packet)
+
+	// Assert: Verify that no error occurred and the returned index is -1,
+	// correctly indicating the absence of a change output.
+	require.NoError(t, err)
+	require.Equal(t, int32(-1), idx)
+
+	// Act: Call findChangeIndex for a change output not present in the
+	// packet.
+	unknownOut := &wire.TxOut{Value: 9999, PkScript: []byte{4}}
+	idx, err = findChangeIndex(unknownOut, packet)
+
+	// Assert: Verify that no error occurred and the returned index is -1.
+	require.NoError(t, err)
+	require.Equal(t, int32(-1), idx)
+}
+
+// TestAddChangeOutputInfoSuccess tests that addChangeOutputInfo correctly adds
+// derivation information to the change output.
+func TestAddChangeOutputInfoSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys and address.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	// Arrange: Create an AuthoredTx with a change output at index 0.
+	changeOut := &wire.TxOut{
+		Value:    500,
+		PkScript: p2wkhScript,
+	}
+	authoredTx := &txauthor.AuthoredTx{
+		Tx: &wire.MsgTx{
+			TxOut: []*wire.TxOut{changeOut},
+		},
+		ChangeIndex: 0,
+	}
+
+	// Arrange: Create a PSBT packet with a corresponding output.
+	packet, err := psbt.NewFromUnsignedTx(authoredTx.Tx)
+	require.NoError(t, err)
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Arrange: Mock Address lookup.
+	mocks.addrStore.On(
+		"Address", mock.Anything,
+		mock.MatchedBy(func(addr address.Address) bool {
+			return addr.String() == p2wkhAddr.String()
+		}),
+	).Return(mocks.pubKeyAddr, nil)
+
+	// Arrange: Mock ManagedPubKeyAddress methods.
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
+	// Removed Imported() as addChangeOutputInfo does not call it.
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+	)
+
+	// Act: Call addChangeOutputInfo.
+	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
+
+	// Assert: Verify success and that derivation info is added.
+	require.NoError(t, err)
+	require.Len(t, packet.Outputs[0].Bip32Derivation, 1)
+	require.Equal(
+		t, pubKey.SerializeCompressed(),
+		packet.Outputs[0].Bip32Derivation[0].PubKey,
+	)
+}
+
+// TestAddChangeOutputInfoErrScriptFail tests that addChangeOutputInfo returns
+// an error if the script cannot be resolved (e.g. address lookup fails).
+func TestAddChangeOutputInfoErrScriptFail(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys/address.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	// Arrange: Create authoredTx with change output.
+	authoredTx := &txauthor.AuthoredTx{
+		Tx: &wire.MsgTx{
+			TxOut: []*wire.TxOut{{
+				Value: 500, PkScript: p2wkhScript,
+			}},
+		},
+		ChangeIndex: 0,
+	}
+	packet, err := psbt.NewFromUnsignedTx(authoredTx.Tx)
+	require.NoError(t, err)
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Arrange: Mock Address lookup to fail.
+	mocks.addrStore.On(
+		"Address", mock.Anything, mock.Anything,
+	).Return(nil, errDb)
+
+	// Act: Call addChangeOutputInfo.
+	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
+
+	// Assert: Verify error (from ScriptForOutput).
+	require.ErrorIs(t, err, errDb)
+}
+
+// TestAddChangeOutputInfoErrNotPubKey tests that addChangeOutputInfo returns
+// ErrChangeAddressNotManagedPubKey if the change address is not a pubkey addr.
+func TestAddChangeOutputInfoErrNotPubKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys/address.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	authoredTx := &txauthor.AuthoredTx{
+		Tx: &wire.MsgTx{
+			TxOut: []*wire.TxOut{{
+				Value: 500, PkScript: p2wkhScript,
+			}},
+		},
+		ChangeIndex: 0,
+	}
+	packet, err := psbt.NewFromUnsignedTx(authoredTx.Tx)
+	require.NoError(t, err)
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Arrange: Mock Address lookup to return a generic address.
+	mocks.addrStore.On(
+		"Address", mock.Anything, mock.Anything,
+	).Return(mocks.addr, nil)
+	mocks.addr.On("Address").Return(p2wkhAddr)
+
+	// Act: Call addChangeOutputInfo.
+	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
+
+	// Assert: Verify error (ErrNotPubKeyAddress from ScriptForOutput
+	// check).
+	require.ErrorIs(t, err, ErrNotPubKeyAddress)
+}
+
+// TestAddChangeOutputInfoErrDerivationUnknown tests that addChangeOutputInfo
+// returns an error if the change address has no derivation info.
+func TestAddChangeOutputInfoErrDerivationUnknown(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys/address.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	authoredTx := &txauthor.AuthoredTx{
+		Tx: &wire.MsgTx{
+			TxOut: []*wire.TxOut{{
+				Value: 500, PkScript: p2wkhScript,
+			}},
+		},
+		ChangeIndex: 0,
+	}
+	packet, err := psbt.NewFromUnsignedTx(authoredTx.Tx)
+	require.NoError(t, err)
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Arrange: Mock Address lookup.
+	mocks.addrStore.On(
+		"Address", mock.Anything, mock.Anything,
+	).Return(mocks.pubKeyAddr, nil)
+
+	// Arrange: Mock ManagedPubKeyAddress methods.
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	// PubKey is not called because DerivationInfo returns false.
+	// DerivationInfo returns false (unknown/imported).
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
+	)
+
+	// Act: Call addChangeOutputInfo.
+	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
+
+	// Assert: Verify error.
+	require.ErrorContains(t, err, "change addr is an imported addr")
+}
+
+// TestPopulatePsbtPacketErrors tests error paths in populatePsbtPacket.
+func TestPopulatePsbtPacketErrors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	// Input Address (Valid)
+	addrIn, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	scriptIn, err := txscript.PayToAddrScript(addrIn)
+	require.NoError(t, err)
+
+	// Output Address (Valid struct, but will mock failure)
+	addrOut, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	scriptOut, err := txscript.PayToAddrScript(addrOut)
+	require.NoError(t, err)
+
+	txHash := chainhash.Hash{1}
+	authoredTx := &txauthor.AuthoredTx{
+		Tx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  txHash,
+					Index: 0,
+				},
+			}},
+			TxOut: []*wire.TxOut{{
+				Value:    500,
+				PkScript: scriptOut,
+			}},
+		},
+		ChangeIndex: 0, // Output 0 is change
+	}
+	packet := &psbt.Packet{}
+
+	t.Run("DecorateInputs fails", func(t *testing.T) {
+		t.Parallel()
+		w, mocks := testWalletWithMocks(t)
+
+		// Mock TxDetails failure (DecorateInputs ->
+		// fetchAndValidateUtxo)
+		mocks.txStore.On("TxDetails", mock.Anything, mock.Anything).
+			Return(nil, errDb)
+
+		_, _, err := w.populatePsbtPacket(
+			t.Context(), packet, authoredTx,
+		)
+		require.ErrorIs(t, err, errDb)
+	})
+
+	t.Run("addChangeOutputInfo fails", func(t *testing.T) {
+		t.Parallel()
+		w, mocks := testWalletWithMocks(t)
+
+		// Mock TxDetails success (DecorateInputs)
+		txDetails := &wtxmgr.TxDetails{
+			TxRecord: wtxmgr.TxRecord{
+				MsgTx: wire.MsgTx{
+					TxOut: []*wire.TxOut{{
+						Value:    1000,
+						PkScript: scriptIn,
+					}},
+				},
+			},
+			Credits: []wtxmgr.CreditRecord{{Index: 0}},
+		}
+		mocks.txStore.On("TxDetails", mock.Anything, mock.Anything).
+			Return(txDetails, nil)
+
+		// Mock Address lookup for Input (Success)
+		mocks.addrStore.On(
+			"Address", mock.Anything,
+			mock.MatchedBy(func(a address.Address) bool {
+				return a.String() == addrIn.String()
+			}),
+		).Return(mocks.pubKeyAddr, nil)
+
+		mocks.pubKeyAddr.On("Imported").Return(false)
+		mocks.pubKeyAddr.On("DerivationInfo").Return(
+			waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{},
+			true,
+		)
+		mocks.pubKeyAddr.On("PubKey").Return(pubKey)
+		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+
+		// Mock Address lookup for Output (Fail)
+		mocks.addrStore.On(
+			"Address", mock.Anything,
+			mock.MatchedBy(func(a address.Address) bool {
+				return a.String() == addrOut.String()
+			}),
+		).Return(nil, errDb)
+
+		_, _, err := w.populatePsbtPacket(
+			t.Context(), packet, authoredTx,
+		)
+		require.ErrorIs(t, err, errDb)
+	})
+}
+
+// TestPopulatePsbtPacketSuccess tests that populatePsbtPacket correctly
+// updates the packet with the transaction, decorates inputs, adds change info,
+// and sorts the packet.
+func TestPopulatePsbtPacketSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys/address.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	// Arrange: Create AuthoredTx with 1 input and 2 outputs.
+	// Output 0: Change (Value 1001)
+	// Output 1: Payment (Value 1000)
+	txHash := chainhash.Hash{}
+	changeOut := &wire.TxOut{
+		Value:    1001,
+		PkScript: p2wkhScript,
+	}
+	paymentOut := &wire.TxOut{
+		Value:    1000,
+		PkScript: []byte{0x00}, // Simple script
+	}
+
+	authoredTx := &txauthor.AuthoredTx{
+		Tx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  txHash,
+					Index: 0,
+				},
+			}},
+			TxOut: []*wire.TxOut{changeOut, paymentOut},
+		},
+		ChangeIndex: 0,
+	}
+
+	// Arrange: Create empty packet (will be overwritten).
+	packet := &psbt.Packet{}
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Arrange: Mock TxDetails for input decoration.
+	txDetails := &wtxmgr.TxDetails{
+		TxRecord: wtxmgr.TxRecord{
+			MsgTx: wire.MsgTx{
+				TxOut: []*wire.TxOut{{
+					Value: 1000, PkScript: p2wkhScript,
+				}},
+			},
+		},
+		Credits: []wtxmgr.CreditRecord{{Index: 0}},
+	}
+	mocks.txStore.On("TxDetails", mock.Anything, mock.Anything).
+		Return(txDetails, nil)
+
+	// Arrange: Mock Address lookup (used for both input decoration and
+	// change output info).
+	mocks.addrStore.On("Address", mock.Anything, mock.Anything).
+		Return(mocks.pubKeyAddr, nil)
+
+	// Arrange: Mock ManagedPubKeyAddress methods.
+	mocks.pubKeyAddr.On("Imported").Return(false)
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+	)
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+
+	// Act: Call populatePsbtPacket.
+	updatedPacket, changeIdx, err := w.populatePsbtPacket(
+		t.Context(), packet, authoredTx,
+	)
+
+	// Assert: Verify success.
+	require.NoError(t, err)
+	require.NotNil(t, updatedPacket)
+
+	// Assert: Verify that the returned changeIdx points to the change
+	// output. We know the change output has Value 1001.
+	require.GreaterOrEqual(t, changeIdx, int32(0))
+	require.Less(t, changeIdx, int32(len(updatedPacket.UnsignedTx.TxOut)))
+	require.Equal(
+		t, int64(1001), updatedPacket.UnsignedTx.TxOut[changeIdx].Value,
+	)
+
+	// Assert: Verify that the decorated output is indeed the change
+	// output. The test setup ensures only the change address (p2wkhAddr)
+	// returns derivation info in the mock. The payment output (simple
+	// script) won't trigger address lookup that leads to derivation info
+	// in this specific mock setup.
+	require.Len(t, updatedPacket.Outputs[changeIdx].Bip32Derivation, 1)
+	require.Equal(
+		t, pubKey.SerializeCompressed(),
+		updatedPacket.Outputs[changeIdx].Bip32Derivation[0].PubKey,
+	)
+
+	// Assert: Input decorated.
+	require.Len(t, updatedPacket.Inputs, 1)
+	require.NotNil(t, updatedPacket.Inputs[0].WitnessUtxo)
+}
+
+// TestFundPsbtWorkflow tests the high-level FundPsbt workflow with manual
+// inputs.
+func TestFundPsbtWorkflow(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup private and public keys for a P2WKH address.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	// Arrange: Create a PSBT with one input and one output to simulate a
+	// transaction that needs funding and decoration.
+	// Input: 1.0 BTC (100,000,000 sat)
+	// Output: 0.5 BTC (50,000,000 sat)
+	// Fee: ~1000 sat (simplified)
+	// Expected Change: ~0.5 BTC (after fees)
+	txHash := chainhash.Hash{1}
+	outPoint := wire.OutPoint{Hash: txHash, Index: 0}
+	inputAmount := btcutil.Amount(100000000)
+	outputAmount := btcutil.Amount(50000000)
+
+	unsignedTx := wire.NewMsgTx(2)
+	unsignedTx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+	unsignedTx.AddTxOut(&wire.TxOut{
+		Value: int64(outputAmount), PkScript: p2wkhScript,
+	})
+
+	packet, err := psbt.NewFromUnsignedTx(unsignedTx)
+	require.NoError(t, err)
+
+	// Arrange: Mock data for UTXO and Transaction Details required by
+	// internal calls.
+	credit := &wtxmgr.Credit{
+		OutPoint: outPoint,
+		Amount:   inputAmount,
+		PkScript: p2wkhScript,
+	}
+
+	txDetails := &wtxmgr.TxDetails{
+		TxRecord: wtxmgr.TxRecord{
+			MsgTx: wire.MsgTx{
+				TxOut: []*wire.TxOut{
+					{
+						Value:    int64(inputAmount),
+						PkScript: p2wkhScript,
+					},
+				},
+			},
+		},
+		Credits: []wtxmgr.CreditRecord{
+			{Index: 0},
+		},
+	}
+
+	// Arrange: Define the FundIntent for the PSBT, including fee rate and
+	// change source.
+	intent := &FundIntent{
+		Packet:  packet,
+		FeeRate: btcunit.NewSatPerKVByte(1000),
+		ChangeSource: &ScopedAccount{
+			AccountName: "default",
+			KeyScope:    waddrmgr.KeyScopeBIP0084,
+		},
+	}
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Arrange: Mock the internal dependencies for the FundPsbt workflow.
+	// 1. Mock `txStore.GetUtxo` for `createManualInputSource`:
+	//    Expect a call with any context and the specified outpoint,
+	//    returning our predefined credit and no error.
+	mocks.txStore.On("GetUtxo", mock.Anything, outPoint).Return(credit, nil)
+
+	// 2. Mock `addrStore.FetchScopedKeyManager` to retrieve the account
+	//    manager:
+	//    Expect a call with the BIP0084 key scope, returning the mock
+	//    account manager and no error.
+	mocks.addrStore.On(
+		"FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084,
+	).Return(mocks.accountManager, nil)
+
+	// 3. Mock `accountManager.LookupAccount` for the default account:
+	//    Expect a call with any context and "default" account name,
+	//    returning the default account number and no error.
+	mocks.accountManager.On("LookupAccount", mock.Anything, "default").
+		Return(uint32(waddrmgr.DefaultAccountNum), nil)
+
+	// 4. Mock `accountManager.AccountProperties` to return properties for
+	//    the default account:
+	//    Expect a call with any context and the default account number,
+	//    returning predefined account properties and no error.
+	mocks.accountManager.On(
+		"AccountProperties",
+		mock.Anything,
+		uint32(waddrmgr.DefaultAccountNum),
+	).Return(&waddrmgr.AccountProperties{
+		AccountName: "default",
+		KeyScope:    waddrmgr.KeyScopeBIP0084,
+	}, nil)
+
+	// 5. Mock `accountManager.NextInternalAddresses` to generate a change
+	//    address:
+	//    Expect a call to generate one internal address for the default
+	//    account, returning our mock managed address and no error.
+	changeAddr := p2wkhAddr // Reusing p2wkhAddr for simplicity as change
+	mockManagedAddr := mocks.pubKeyAddr
+	mocks.accountManager.On(
+		"NextInternalAddresses",
+		mock.Anything,
+		uint32(waddrmgr.DefaultAccountNum),
+		uint32(1),
+	).Return([]waddrmgr.ManagedAddress{mockManagedAddr}, nil)
+
+	// 6. Mock `mockManagedAddr.Address` to return the change address:
+	//    Expect a call to get the address from the mock managed address,
+	//    returning our predefined P2WKH address.
+	mockManagedAddr.On("Address").Return(changeAddr)
+
+	// 7. Mock `txStore.TxDetails` for `fetchAndValidateUtxo` during
+	//    `DecorateInputs`:
+	//    Expect a call to retrieve transaction details for the input's
+	//    hash, returning our predefined `txDetails` and no error.
+	mocks.txStore.On(
+		"TxDetails",
+		mock.Anything,
+		mock.MatchedBy(func(h *chainhash.Hash) bool {
+			return h.IsEqual(&txHash)
+		}),
+	).Return(txDetails, nil)
+
+	// 8. Mock `addrStore.Address` for `decorateInput` during
+	//    `DecorateInputs`:
+	//    Expect a call to look up the address by script, returning our
+	//    mock managed public key address and no error.
+	mocks.addrStore.On(
+		"Address",
+		mock.Anything,
+		mock.MatchedBy(func(addr address.Address) bool {
+			return addr.String() == p2wkhAddr.String()
+		}),
+	).Return(mocks.pubKeyAddr, nil)
+
+	// 9. Mock `ManagedPubKeyAddress` methods for `decorateInput`:
+	//    Expect calls to get imported status, derivation info, public key,
+	//    and address type, returning predefined values.
+	mocks.pubKeyAddr.On("Imported").Return(false)
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+	)
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+
+	// Act: Execute the FundPsbt workflow with the configured intent.
+	fundedPacket, changeIndex, err := w.FundPsbt(t.Context(), intent)
+
+	// Assert: Verify that no error occurred, a funded PSBT packet is
+	// returned, and a valid change index is provided.
+	require.NoError(t, err)
+	require.NotNil(t, fundedPacket)
+	require.GreaterOrEqual(t, changeIndex, int32(0))
+}
+
+// TestFundPsbtDecorateFailure tests that FundPsbt returns an error if the
+// internal DecorateInputs call fails (e.g. due to database error).
+func TestFundPsbtDecorateFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys/address.
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	// Arrange: Create packet with 1 input.
+	txHash := chainhash.Hash{1}
+	outPoint := wire.OutPoint{Hash: txHash, Index: 0}
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+	tx.AddTxOut(&wire.TxOut{Value: 90000, PkScript: p2wkhScript})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	// Arrange: Intent with manual inputs (so CreateTransaction uses
+	// GetUtxo).
+	intent := &FundIntent{
+		Packet:  packet,
+		FeeRate: btcunit.NewSatPerKVByte(1000),
+		ChangeSource: &ScopedAccount{
+			AccountName: "default",
+			KeyScope:    waddrmgr.KeyScopeBIP0084,
+		},
+	}
+
+	w, mocks := testWalletWithMocks(t)
+
+	// Arrange: Mock GetUtxo for CreateTransaction (Success).
+	credit := &wtxmgr.Credit{
+		OutPoint: outPoint,
+		Amount:   100000,
+		PkScript: p2wkhScript,
+	}
+	mocks.txStore.On("GetUtxo", mock.Anything, outPoint).Return(credit, nil)
+
+	// Arrange: Mock TxDetails for DecorateInputs (Failure).
+	// This triggers the error in populatePsbtPacket -> DecorateInputs.
+	mocks.txStore.On(
+		"TxDetails", mock.Anything,
+		mock.MatchedBy(func(h *chainhash.Hash) bool {
+			return h.IsEqual(&txHash)
+		}),
+	).Return(nil, errDb)
+
+	// Arrange: Mock account manager for change address generation, which is
+	// required because the input (100k) exceeds the output (90k) + fees.
+	mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).
+		Return(mocks.accountManager, nil)
+	mocks.accountManager.On("LookupAccount", mock.Anything, "default").
+		Return(uint32(waddrmgr.DefaultAccountNum), nil)
+	mocks.accountManager.On(
+		"AccountProperties", mock.Anything,
+		uint32(waddrmgr.DefaultAccountNum),
+	).Return(&waddrmgr.AccountProperties{
+		AccountName: "default",
+		KeyScope:    waddrmgr.KeyScopeBIP0084,
+	}, nil)
+	// Change address generation.
+	mocks.accountManager.On(
+		"NextInternalAddresses", mock.Anything, mock.Anything,
+		mock.Anything,
+	).Return([]waddrmgr.ManagedAddress{mocks.pubKeyAddr}, nil)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+
+	// Act: FundPsbt.
+	_, _, err = w.FundPsbt(t.Context(), intent)
+
+	// Assert: Should fail due to DecorateInputs error.
 	require.ErrorIs(t, err, errDb)
 }
