@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -292,6 +293,125 @@ func TestAddressInfo(t *testing.T) {
 	require.True(t, intInfo.Compressed())
 	require.False(t, intInfo.Imported())
 	require.Equal(t, waddrmgr.WitnessPubKey, intInfo.AddrType())
+}
+
+// TestGetDerivationInfoExternalAddressSuccess tests that we can successfully
+// get the derivation info for an external address.
+func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a new test wallet and a new p2wkh address to test
+	// with.
+	w := testWallet(t)
+	addr, err := w.NewAddress(
+		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	// Act: Get the derivation info for the address.
+	derivationInfo, err := w.GetDerivationInfo(t.Context(), addr)
+
+	// Assert: Check that the correct derivation info is returned.
+	require.NoError(t, err)
+	require.NotNil(t, derivationInfo)
+
+	addrInfo, err := w.AddressInfo(t.Context(), addr)
+	require.NoError(t, err)
+
+	pubKeyAddr, ok := addrInfo.(waddrmgr.ManagedPubKeyAddress)
+	require.True(t, ok)
+
+	pubKey := pubKeyAddr.PubKey()
+	keyScope, derivPath, ok := pubKeyAddr.DerivationInfo()
+	require.True(t, ok)
+
+	expectedPath := []uint32{
+		keyScope.Purpose + hdkeychain.HardenedKeyStart,
+		keyScope.Coin + hdkeychain.HardenedKeyStart,
+		derivPath.Account,
+		derivPath.Branch,
+		derivPath.Index,
+	}
+
+	require.Equal(t, pubKey.SerializeCompressed(), derivationInfo.PubKey)
+	require.Equal(
+		t, derivPath.MasterKeyFingerprint,
+		derivationInfo.MasterKeyFingerprint,
+	)
+	require.Equal(t, expectedPath, derivationInfo.Bip32Path)
+}
+
+// TestGetDerivationInfoInternalAddressSuccess tests that we can successfully
+// get the derivation info for an internal address.
+func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a new test wallet and a new p2wkh change address to
+	// test with.
+	w := testWallet(t)
+	addr, err := w.NewAddress(
+		t.Context(), "default", waddrmgr.WitnessPubKey, true,
+	)
+	require.NoError(t, err)
+
+	// Act: Get the derivation info for the address.
+	derivationInfo, err := w.GetDerivationInfo(t.Context(), addr)
+
+	// Assert: Check that the correct derivation info is returned.
+	require.NoError(t, err)
+	require.NotNil(t, derivationInfo)
+
+	addrInfo, err := w.AddressInfo(t.Context(), addr)
+	require.NoError(t, err)
+
+	pubKeyAddr, ok := addrInfo.(waddrmgr.ManagedPubKeyAddress)
+	require.True(t, ok)
+	keyScope, derivPath, ok := pubKeyAddr.DerivationInfo()
+	require.True(t, ok)
+
+	expectedPath := []uint32{
+		keyScope.Purpose + hdkeychain.HardenedKeyStart,
+		keyScope.Coin + hdkeychain.HardenedKeyStart,
+		derivPath.Account,
+		derivPath.Branch,
+		derivPath.Index,
+	}
+	require.Equal(t, expectedPath, derivationInfo.Bip32Path)
+	require.Equal(t, uint32(1), derivPath.Branch)
+}
+
+// TestGetDerivationInfoNoDerivationInfo tests that we get an error when trying
+// to get the derivation info for an address that is not in the wallet or is
+// imported.
+func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a new test wallet and a key and address that is not
+	// in the wallet.
+	w := testWallet(t)
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()),
+		w.chainParams,
+	)
+	require.NoError(t, err)
+
+	// Act & Assert: Check that we get an error for an address not in the
+	// wallet.
+	_, err = w.GetDerivationInfo(t.Context(), addr)
+	require.Error(t, err)
+
+	// Arrange: Import the key as a watch-only address.
+	err = w.ImportPublicKey(t.Context(), pubKey, waddrmgr.WitnessPubKey)
+	require.NoError(t, err)
+
+	// Act & Assert: Check that we still get an error because it's an
+	// imported key.
+	_, err = w.GetDerivationInfo(t.Context(), addr)
+	require.ErrorIs(t, err, ErrDerivationPathNotFound)
 }
 
 // TestListAddresses tests the ListAddresses method to ensure it returns the

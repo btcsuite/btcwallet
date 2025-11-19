@@ -272,6 +272,10 @@ func (m *mockAddrStore) FetchScopedKeyManager(
 	scope waddrmgr.KeyScope) (waddrmgr.AccountStore, error) {
 
 	args := m.Called(scope)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
 	return args.Get(0).(waddrmgr.AccountStore), args.Error(1)
 }
 
@@ -540,6 +544,10 @@ func (m *mockAccountStore) DeriveFromKeyPath(ns walletdb.ReadBucket,
 	path waddrmgr.DerivationPath) (waddrmgr.ManagedAddress, error) {
 
 	args := m.Called(ns, path)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
 	return args.Get(0).(waddrmgr.ManagedAddress), args.Error(1)
 }
 
@@ -924,4 +932,116 @@ func (m *mockChain) TestMempoolAccept(txns []*wire.MsgTx,
 func (m *mockChain) MapRPCErr(err error) error {
 	args := m.Called(err)
 	return args.Error(0)
+}
+
+// mockManagedPubKeyAddr is a mock implementation of the
+// waddrmgr.ManagedPubKeyAddress interface, used for testing.
+type mockManagedPubKeyAddr struct {
+	mock.Mock
+}
+
+// A compile-time check to ensure that mockManagedPubKeyAddr implements the
+// ManagedPubKeyAddress interface.
+var _ waddrmgr.ManagedPubKeyAddress = (*mockManagedPubKeyAddr)(nil)
+
+// PubKey implements the waddrmgr.ManagedPubKeyAddress interface.
+func (m *mockManagedPubKeyAddr) PubKey() *btcec.PublicKey {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+
+	return args.Get(0).(*btcec.PublicKey)
+}
+
+// ExportPrivKey implements the waddrmgr.ManagedPubKeyAddress interface.
+func (m *mockManagedPubKeyAddr) ExportPrivKey() (*btcutil.WIF, error) {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*btcutil.WIF), args.Error(1)
+}
+
+// ExportPubKey implements the waddrmgr.ManagedPubKeyAddress interface.
+func (m *mockManagedPubKeyAddr) ExportPubKey() string {
+	args := m.Called()
+	return args.String(0)
+}
+
+// PrivKey implements the waddrmgr.ManagedPubKeyAddress interface.
+func (m *mockManagedPubKeyAddr) PrivKey() (*btcec.PrivateKey, error) {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*btcec.PrivateKey), args.Error(1)
+}
+
+// Address implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) Address() btcutil.Address {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+
+	return args.Get(0).(btcutil.Address)
+}
+
+// AddrHash implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) AddrHash() []byte {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+
+	return args.Get(0).([]byte)
+}
+
+// Imported implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) Imported() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
+// Internal implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) Internal() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
+// Compressed implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) Compressed() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
+// Used implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) Used(ns walletdb.ReadBucket) bool {
+	args := m.Called(ns)
+	return args.Bool(0)
+}
+
+// AddrType implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) AddrType() waddrmgr.AddressType {
+	args := m.Called()
+	return args.Get(0).(waddrmgr.AddressType)
+}
+
+// InternalAccount implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) InternalAccount() uint32 {
+	args := m.Called()
+	return args.Get(0).(uint32)
+}
+
+// DerivationInfo implements the waddrmgr.ManagedAddress interface.
+func (m *mockManagedPubKeyAddr) DerivationInfo() (waddrmgr.KeyScope,
+	waddrmgr.DerivationPath, bool) {
+
+	args := m.Called()
+
+	return args.Get(0).(waddrmgr.KeyScope),
+		args.Get(1).(waddrmgr.DerivationPath), args.Bool(2)
 }
