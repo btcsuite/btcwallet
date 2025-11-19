@@ -8,18 +8,43 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
 	// ErrUtxoLocked is returned when a UTXO is locked.
 	ErrUtxoLocked = errors.New("utxo is locked")
+
+	// ErrChangeAddressNotManagedPubKey is returned when a change address is
+	// not a managed public key address.
+	ErrChangeAddressNotManagedPubKey = errors.New(
+		"change address is not a managed pubkey address",
+	)
+
+	// ErrChangeIndexOutOfRange is returned when the change index is out of
+	// range.
+	ErrChangeIndexOutOfRange = errors.New("change index out of range")
+
+	// ErrPacketOutputsMissing is returned when a PSBT is provided for
+	// funding with no outputs.
+	ErrPacketOutputsMissing = errors.New("psbt packet has no outputs")
+
+	// ErrInputsAndPolicy is returned when a PSBT is provided with inputs,
+	// but a coin selection policy is also specified.
+	ErrInputsAndPolicy = errors.New(
+		"cannot specify both psbt inputs and a coin selection policy",
+	)
+
+	// ErrFeeRateNegative is returned when a negative fee rate is provided.
+	ErrFeeRateNegative = errors.New("fee rate cannot be negative")
 )
 
 // FundIntent represents the user's intent for funding a PSBT. It serves as a
@@ -404,4 +429,275 @@ func findCredit(txDetail *wtxmgr.TxDetails, outputIndex uint32) bool {
 	}
 
 	return false
+}
+
+// FundPsbt performs coin selection and funds the PSBT.
+//
+// It executes the funding logic by:
+//  1. Validation: Checking the `FundIntent` for consistency.
+//  2. Creation: Converting the intent into a `TxIntent` and delegating to the
+//     `CreateTransaction` method (which handles the underlying coin selection
+//     and change calculation algorithms).
+//  3. Population: Calling `populatePsbtPacket` to apply the selected inputs and
+//     change output to the PSBT structure and sort it according to BIP 69.
+func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
+	*psbt.Packet, int32, error) {
+
+	// Validate the funding intent before proceeding.
+	err := w.validateFundIntent(intent)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Create a TxIntent from the FundIntent.
+	txIntent := w.createTxIntent(intent)
+
+	// Create the transaction.
+	authoredTx, err := w.CreateTransaction(ctx, txIntent)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Populate the PSBT packet with the new transaction details.
+	packet, changeIndex, err := w.populatePsbtPacket(
+		ctx, intent.Packet, authoredTx,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return packet, changeIndex, nil
+}
+
+// populatePsbtPacket updates the PSBT packet with the new transaction details,
+// decorates the inputs, and handles the change output. It returns the modified
+// packet and the index of the change output, or -1 if no change output was
+// added.
+func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
+	authoredTx *txauthor.AuthoredTx) (*psbt.Packet, int32, error) {
+
+	// The authored transaction contains the selected inputs and the change
+	// output (if any). We'll update the PSBT packet with this new
+	// unsigned transaction.
+	packet.UnsignedTx = authoredTx.Tx
+
+	// We'll also re-initialize the input and output slices to match the
+	// dimensions of the new transaction. This is crucial because the
+	// `authoredTx` may have a different output order than the original PSBT
+	// (e.g., due to change output randomization in txauthor.AuthoredTx),
+	// which would otherwise cause a misalignment between the wire outputs
+	// and the PSBT's output metadata. By resetting, we ensure consistency.
+	packet.Inputs = make([]psbt.PInput, len(authoredTx.Tx.TxIn))
+	packet.Outputs = make([]psbt.POutput, len(authoredTx.Tx.TxOut))
+
+	// With the new inputs in place, we'll decorate them with UTXO and
+	// derivation information from the wallet. We set `skipUnknown` to
+	// false because all inputs in the `authoredTx` must be known to the
+	// wallet.
+	_, err := w.DecorateInputs(ctx, packet, false)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// If a change output was created, we need to add its derivation
+	// information to the corresponding PSBT output.
+	var changeOutput *wire.TxOut
+	if authoredTx.ChangeIndex >= 0 {
+		err := w.addChangeOutputInfo(ctx, packet, authoredTx)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		changeOutput = authoredTx.Tx.TxOut[authoredTx.ChangeIndex]
+	}
+
+	// The PSBT specification recommends that inputs and outputs are
+	// sorted. This is done for privacy and standardization. We'll sort
+	// the packet in place.
+	err = psbt.InPlaceSort(packet)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cannot sort psbt: %w", err)
+	}
+
+	// After sorting, the original change index from `authoredTx` is no
+	// longer valid. We need to find the new index of the change output in
+	// the sorted list.
+	changeIndex, err := findChangeIndex(changeOutput, packet)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return packet, changeIndex, nil
+}
+
+// addChangeOutputInfo is a helper function that adds the derivation information
+// for a change output to a PSBT packet.
+func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
+	authoredTx *txauthor.AuthoredTx) error {
+
+	// TODO(yy): The calls to `w.ScriptForOutput` and `w.AddressInfo` both
+	// involve database lookups. This could be optimized to a single
+	// database call to fetch all necessary address information. However,
+	// for now, this approach favors readability over micro-optimization,
+	// as this path is not performance-critical.
+	//
+	// First, we'll get the script information for the change output.
+	changeScriptInfo, err := w.ScriptForOutput(
+		ctx, *authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
+	)
+	if err != nil {
+		return err
+	}
+
+	// Then, we'll get the managed address for the change output.
+	changeAddr, err := w.AddressInfo(ctx, changeScriptInfo.Addr.Address())
+	if err != nil {
+		return err
+	}
+
+	// We'll ensure that the change address is a public key address.
+	managedPubKeyAddr, ok := changeAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return ErrChangeAddressNotManagedPubKey
+	}
+
+	// With the managed address, we can now create the PSBT output
+	// information.
+	changeOutputInfo, err := createOutputInfo(
+		authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
+		managedPubKeyAddr,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Finally, we'll add the change output information to the PSBT packet.
+	packet.Outputs[authoredTx.ChangeIndex] = *changeOutputInfo
+
+	return nil
+}
+
+// validateFundIntent performs a series of checks on a FundIntent to ensure it
+// is well-formed and unambiguous. This function is called before any funding
+// logic to ensure that the caller has provided a valid intent.
+//
+// The following checks are performed:
+//  1. The PSBT packet must not be nil.
+//  2. If the PSBT has no inputs (automatic coin selection mode), it must have
+//     at least one output.
+//  3. If the PSBT has inputs, a coin selection policy must not be specified
+//     (mutual exclusivity).
+func (w *Wallet) validateFundIntent(intent *FundIntent) error {
+	// The PSBT packet must not be nil.
+	if intent.Packet == nil {
+		return fmt.Errorf(
+			"%w: psbt packet cannot be nil", ErrNilTxIntent,
+		)
+	}
+
+	// If the PSBT has no inputs (automatic coin selection mode), it must
+	// have at least one output.
+	if len(intent.Packet.UnsignedTx.TxIn) == 0 &&
+		len(intent.Packet.UnsignedTx.TxOut) == 0 {
+
+		return ErrPacketOutputsMissing
+	}
+
+	// If the PSBT has inputs, a coin selection policy must not be
+	// specified (mutual exclusivity).
+	if len(intent.Packet.UnsignedTx.TxIn) > 0 && intent.Policy != nil {
+		return ErrInputsAndPolicy
+	}
+
+	return nil
+}
+
+// findChangeIndex finds the new index of the change output after the PSBT has
+// been sorted.
+func findChangeIndex(changeOutput *wire.TxOut,
+	packet *psbt.Packet) (int32, error) {
+
+	if changeOutput == nil {
+		return -1, nil
+	}
+
+	for i, txOut := range packet.UnsignedTx.TxOut {
+		if i > math.MaxInt32 {
+			return 0, ErrChangeIndexOutOfRange
+		}
+
+		if psbt.TxOutsEqual(changeOutput, txOut) {
+			// The above check ensures that the conversion to int32
+			// is safe.
+			//
+			//nolint:gosec
+			return int32(i), nil
+		}
+	}
+
+	return -1, nil
+}
+
+// createTxIntent creates a TxIntent from a FundIntent. This helper function
+// acts as a pure adapter, translating the high-level funding request into a
+// concrete transaction creation plan for the wallet's underlying `TxCreator`.
+//
+// It does not perform any database lookups or validation. Instead, it relies
+// on the API contract that the caller must provide a fully specified
+// `InputsPolicy` (with both `AccountName` and `KeyScope`) if automatic coin
+// selection is desired. The underlying `TxCreator` is responsible for
+// validating the existence of the specified account.
+//
+// The function is responsible for two main pieces of logic:
+//  1. Input Source Determination: It inspects the incoming PSBT. If it has no
+//     inputs, it uses the `InputsPolicy` from the intent. If it has inputs,
+//     it creates an `InputsManual` source.
+//  2. Change Source Mapping: It directly maps the `FundIntent.ChangeSource`
+//     to `TxIntent.ChangeSource`. Any default change source determination
+//     (e.g., when `FundIntent.ChangeSource` is `nil`) is delegated to the
+//     underlying `TxCreator`'s `determineChangeSource` method.
+func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
+	// First, we'll copy the outputs from the PSBT packet to the TxIntent.
+	outputs := make([]wire.TxOut, len(intent.Packet.UnsignedTx.TxOut))
+	for i, txOut := range intent.Packet.UnsignedTx.TxOut {
+		outputs[i] = *txOut
+	}
+
+	// The fee rate and label are passed through directly.
+	txIntent := &TxIntent{
+		Outputs: outputs,
+		FeeRate: intent.FeeRate,
+		Label:   intent.Label,
+	}
+
+	// Now, we'll determine the input source based on whether the PSBT
+	// packet already contains inputs.
+	if len(intent.Packet.UnsignedTx.TxIn) == 0 {
+		// If the packet has no inputs, we'll use the policy-based input
+		// source from the intent. This will trigger automatic coin
+		// selection by the wallet. The caller is responsible for
+		// providing a complete `ScopedAccount` with both `AccountName`
+		// and `KeyScope`.
+		txIntent.Inputs = intent.Policy
+	} else {
+		// If the packet already has inputs, we'll use a manual input
+		// source. This bypasses coin selection and tells the wallet to
+		// use the exact inputs provided in the PSBT.
+		utxos := make(
+			[]wire.OutPoint, len(intent.Packet.UnsignedTx.TxIn),
+		)
+		for i, txIn := range intent.Packet.UnsignedTx.TxIn {
+			utxos[i] = txIn.PreviousOutPoint
+		}
+
+		txIntent.Inputs = &InputsManual{
+			UTXOs: utxos,
+		}
+	}
+
+	// The change source is directly mapped from the FundIntent. If it is
+	// nil, the underlying `TxCreator` will determine a default.
+	txIntent.ChangeSource = intent.ChangeSource
+
+	return txIntent
 }
