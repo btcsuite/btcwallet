@@ -7,7 +7,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/require"
@@ -36,7 +35,7 @@ func deriveAcctPubKey(t *testing.T, root *hdkeychain.ExtendedKey,
 	// non-standard methods. We need to convert them to standard, neuter,
 	// then convert them back with the target extended public key version.
 	pubVersionBytes := make([]byte, 4)
-	copy(pubVersionBytes, chaincfg.TestNet3Params.HDPublicKeyID[:])
+	copy(pubVersionBytes, chainParams.HDPublicKeyID[:])
 	switch {
 	case strings.HasPrefix(root.String(), "uprv"):
 		binary.BigEndian.PutUint32(pubVersionBytes, uint32(
@@ -50,7 +49,7 @@ func deriveAcctPubKey(t *testing.T, root *hdkeychain.ExtendedKey,
 	}
 
 	currentKey, err = currentKey.CloneWithVersion(
-		chaincfg.TestNet3Params.HDPrivateKeyID[:],
+		chainParams.HDPrivateKeyID[:],
 	)
 	require.NoError(t, err)
 	currentKey, err = currentKey.Neuter()
@@ -72,6 +71,7 @@ type testCase struct {
 }
 
 var (
+	//nolint:lll
 	testCases = []*testCase{{
 		name: "bip44 with nested witness address type",
 		masterPriv: "tprv8ZgxMBicQKsPeWwrFuNjEGTTDSY4mRLwd2KDJAPGa1AY" +
@@ -90,8 +90,8 @@ var (
 		accountIndex:       777,
 		addrType:           waddrmgr.WitnessPubKey,
 		expectedScope:      waddrmgr.KeyScopeBIP0084,
-		expectedAddr:       "tb1qllxcutkzsukf8u8c8stkp464j0esu9xq7qju8x",
-		expectedChangeAddr: "tb1qu6jmqglrthscptjqj3egx54wy8xqvzn5hslgw7",
+		expectedAddr:       "bcrt1qllxcutkzsukf8u8c8stkp464j0esu9xquft3s0",
+		expectedChangeAddr: "bcrt1qu6jmqglrthscptjqj3egx54wy8xqvzn54ex9eh",
 	}, {
 		name: "traditional bip49",
 		masterPriv: "uprv8tXDerPXZ1QsVp8y6GAMSMYxPQgWi3LSY8qS5ZH9x1YRu" +
@@ -111,7 +111,7 @@ var (
 		addrType:           waddrmgr.WitnessPubKey,
 		expectedScope:      waddrmgr.KeyScopeBIP0049Plus,
 		expectedAddr:       "2NBCJ9WzGXZqpLpXGq3Hacybj3c4eHRcqgh",
-		expectedChangeAddr: "tb1qeqn05w2hfq6axpdprhs4y7x65gxkkvfvyxqk4u",
+		expectedChangeAddr: "bcrt1qeqn05w2hfq6axpdprhs4y7x65gxkkvfvx0emz4",
 	}, {
 		name: "bip84",
 		masterPriv: "vprv9DMUxX4ShgxMM7L5vcwyeSeTZNpxefKwTFMerxB3L1vJ" +
@@ -120,14 +120,14 @@ var (
 		accountIndex:       1,
 		addrType:           waddrmgr.WitnessPubKey,
 		expectedScope:      waddrmgr.KeyScopeBIP0084,
-		expectedAddr:       "tb1q5vepvcl0z8xj7kps4rsux722r4dvfwlhk6j532",
-		expectedChangeAddr: "tb1qlwe2kgxcsa8x4huu79yff4rze0l5mwafg5c7xd",
+		expectedAddr:       "bcrt1q5vepvcl0z8xj7kps4rsux722r4dvfwlh5ntexr",
+		expectedChangeAddr: "bcrt1qlwe2kgxcsa8x4huu79yff4rze0l5mwaf2apn3y",
 	}}
 )
 
-// TestImportAccount tests that extended public keys can successfully be
-// imported into both watch only and normal wallets.
-func TestImportAccount(t *testing.T) {
+// TestImportAccountDeprecated tests that extended public keys can successfully
+// be imported into both watch only and normal wallets.
+func TestImportAccountDeprecated(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range testCases {
@@ -136,8 +136,7 @@ func TestImportAccount(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, cleanup := testWallet(t)
-			defer cleanup()
+			w := testWallet(t)
 
 			testImportAccount(t, w, tc, false, tc.name)
 		})
@@ -146,8 +145,7 @@ func TestImportAccount(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			w, cleanup := testWalletWatchingOnly(t)
-			defer cleanup()
+			w := testWalletWatchingOnly(t)
 
 			testImportAccount(t, w, tc, true, name)
 		})
@@ -192,19 +190,19 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, tc.expectedChangeAddr, intAddrs[0].Address().String())
 
 	// Import the extended public keys into new accounts.
-	acct1, err := w.ImportAccount(
+	acct1, err := w.ImportAccountDeprecated(
 		name+"1", acct1Pub, root.ParentFingerprint(), &tc.addrType,
 	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedScope, acct1.KeyScope)
 
-	acct2, err := w.ImportAccount(
+	acct2, err := w.ImportAccountDeprecated(
 		name+"2", acct2Pub, root.ParentFingerprint(), &tc.addrType,
 	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedScope, acct2.KeyScope)
 
-	err = w.ImportPublicKey(acct3ExternalPub, tc.addrType)
+	err = w.ImportPublicKeyDeprecated(acct3ExternalPub, tc.addrType)
 	require.NoError(t, err)
 
 	// If the wallet is watch only, there is no default account and our
@@ -243,7 +241,9 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(0), acct2.ImportedKeyCount)
 
 	// Test address derivation.
-	extAddr, err := w.NewAddress(acct1.AccountNumber, tc.expectedScope)
+	extAddr, err := w.NewAddressDeprecated(
+		acct1.AccountNumber, tc.expectedScope,
+	)
 	require.NoError(t, err)
 	require.Equal(t, tc.expectedAddr, extAddr.String())
 	intAddr, err := w.NewChangeAddress(acct1.AccountNumber, tc.expectedScope)
@@ -257,7 +257,8 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	require.Equal(t, uint32(1), acct1.ExternalKeyCount)
 	require.Equal(t, uint32(0), acct1.ImportedKeyCount)
 
-	// Make sure we can't get private keys for the imported accounts.
+	// Make sure we can't get private keys for the imported
+	// accounts.
 	_, err = w.DumpWIFPrivateKey(intAddr)
 	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrWatchingOnly))
 
@@ -266,7 +267,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	case waddrmgr.NestedWitnessPubKey:
 		witnessAddr, err := btcutil.NewAddressWitnessPubKeyHash(
 			btcutil.Hash160(acct3ExternalPub.SerializeCompressed()),
-			&chaincfg.TestNet3Params,
+			w.chainParams,
 		)
 		require.NoError(t, err)
 
@@ -274,14 +275,14 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		require.NoError(t, err)
 
 		intAddr, err = btcutil.NewAddressScriptHash(
-			witnessProg, &chaincfg.TestNet3Params,
+			witnessProg, w.chainParams,
 		)
 		require.NoError(t, err)
 
 	case waddrmgr.WitnessPubKey:
 		intAddr, err = btcutil.NewAddressWitnessPubKeyHash(
 			btcutil.Hash160(acct3ExternalPub.SerializeCompressed()),
-			&chaincfg.TestNet3Params,
+			w.chainParams,
 		)
 		require.NoError(t, err)
 
@@ -289,7 +290,7 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		t.Fatalf("unhandled address type %v", tc.addrType)
 	}
 
-	addrManaged, err := w.AddressInfo(intAddr)
+	addrManaged, err := w.AddressInfoDeprecated(intAddr)
 	require.NoError(t, err)
 	require.Equal(t, true, addrManaged.Imported())
 }

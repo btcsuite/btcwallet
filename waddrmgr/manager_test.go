@@ -1402,11 +1402,7 @@ func testChangePassphrase(tc *testContext) bool {
 func testNewAccount(tc *testContext) bool {
 	if tc.watchingOnly {
 		// Creating new accounts in watching-only mode should return ErrWatchingOnly
-		err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			_, err := tc.manager.NewAccount(ns, "test")
-			return err
-		})
+		err := tc.manager.CanAddAccount()
 		if !checkManagerError(
 			tc.t, "Create account in watching-only mode", err,
 			ErrWatchingOnly,
@@ -1417,11 +1413,7 @@ func testNewAccount(tc *testContext) bool {
 		return true
 	}
 	// Creating new accounts when wallet is locked should return ErrLocked
-	err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		_, err := tc.manager.NewAccount(ns, "test")
-		return err
-	})
+	err := tc.manager.CanAddAccount()
 	if !checkManagerError(
 		tc.t, "Create account when wallet is locked", err, ErrLocked,
 	) {
@@ -1502,7 +1494,7 @@ func testNewAccount(tc *testContext) bool {
 func testLookupAccount(tc *testContext) bool {
 	// Lookup accounts created earlier in testNewAccount
 	expectedAccounts := map[string]uint32{
-		defaultAccountName:      DefaultAccountNum,
+		DefaultAccountName:      DefaultAccountNum,
 		ImportedAddrAccountName: ImportedAddrAccount,
 	}
 
@@ -1773,7 +1765,7 @@ func testManagerAPI(tc *testContext, caseCreatedWatchingOnly bool) {
 
 		testNewAccount(tc)
 		expectedAccounts := map[string]uint32{
-			defaultAccountName: DefaultAccountNum,
+			DefaultAccountName: DefaultAccountNum,
 		}
 		testLookupExpectedAccount(tc, expectedAccounts, 0)
 		//testForEachAccount(tc)
@@ -1839,11 +1831,15 @@ func testConvertWatchingOnly(tc *testContext) bool {
 	// Run all of the manager API tests against the converted manager and
 	// close it. We'll also retrieve the default scope (BIP0044) from the
 	// manager in order to use.
-	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	sMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
 	if err != nil {
 		tc.t.Errorf("unable to fetch bip 44 scope %v", err)
 		return false
 	}
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(tc.t, ok)
+
 	testManagerAPI(&testContext{
 		t:               tc.t,
 		caseName:        tc.caseName,
@@ -1869,11 +1865,14 @@ func testConvertWatchingOnly(tc *testContext) bool {
 	}
 	defer mgr.Close()
 
-	scopedMgr, err = mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	sMgr, err = mgr.FetchScopedKeyManager(KeyScopeBIP0044)
 	if err != nil {
 		tc.t.Errorf("unable to fetch bip 44 scope %v", err)
 		return false
 	}
+
+	scopedMgr, ok = sMgr.(*ScopedKeyManager)
+	require.True(tc.t, ok)
 
 	testManagerAPI(&testContext{
 		t:               tc.t,
@@ -2044,10 +2043,13 @@ func testManagerCase(t *testing.T, caseName string,
 		return
 	}
 
-	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	sMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
 	if err != nil {
 		t.Fatalf("(%s) unable to fetch default scope: %v", caseName, err)
 	}
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	if caseCreatedWatchingOnly {
 		accountKey := deriveTestAccountKey(t)
@@ -2065,7 +2067,7 @@ func testManagerCase(t *testing.T, caseName string,
 		err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 			_, err = scopedMgr.NewAccountWatchingOnly(
-				ns, defaultAccountName, acctKeyPub, 0, nil,
+				ns, DefaultAccountName, acctKeyPub, 0, nil,
 			)
 			return err
 		})
@@ -2103,10 +2105,13 @@ func testManagerCase(t *testing.T, caseName string,
 	}
 	defer mgr.Close()
 
-	scopedMgr, err = mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	sMgr, err = mgr.FetchScopedKeyManager(KeyScopeBIP0044)
 	if err != nil {
 		t.Fatalf("(%s) unable to fetch default scope: %v", caseName, err)
 	}
+
+	scopedMgr, ok = sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 	tc := &testContext{
 		t:               t,
 		caseName:        caseName,
@@ -2369,7 +2374,10 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 				t.Fatalf("unable to fetch scope %v: %v", scope, err)
 			}
 
-			externalAddr, err := sMgr.NextExternalAddresses(
+			scopedMgr, ok := sMgr.(*ScopedKeyManager)
+			require.True(t, ok)
+
+			externalAddr, err := scopedMgr.NextExternalAddresses(
 				ns, DefaultAccountNum, 1,
 			)
 			if err != nil {
@@ -2384,7 +2392,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 					ScopeAddrMap[scope].ExternalAddrType)
 			}
 
-			internalAddr, err := sMgr.NextInternalAddresses(
+			internalAddr, err := scopedMgr.NextInternalAddresses(
 				ns, DefaultAccountNum, 1,
 			)
 			if err != nil {
@@ -2416,11 +2424,12 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 		ExternalAddrType: NestedWitnessPubKey,
 		InternalAddrType: WitnessPubKey,
 	}
-	var scopedMgr *ScopedKeyManager
+
+	var sMgr AccountStore
 	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-		scopedMgr, err = mgr.NewScopedKeyManager(ns, testScope, addrSchema)
+		sMgr, err = mgr.NewScopedKeyManager(ns, testScope, addrSchema)
 		if err != nil {
 			return err
 		}
@@ -2430,6 +2439,9 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to read db: %v", err)
 	}
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	// The manager was just created, we should be able to look it up within
 	// the root manager.
@@ -2475,7 +2487,8 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 		t.Fatalf("addr type mismatch: expected %v, got %v",
 			NestedWitnessPubKey, externalAddr[0].AddrType())
 	}
-	_, ok := externalAddr[0].Address().(*btcutil.AddressScriptHash)
+
+	_, ok = externalAddr[0].Address().(*btcutil.AddressScriptHash)
 	if !ok {
 		t.Fatalf("wrong type: %T", externalAddr[0].Address())
 	}
@@ -2511,10 +2524,13 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 
 	// We should be able to retrieve the new scoped manager that we just
 	// created.
-	scopedMgr, err = mgr.FetchScopedKeyManager(testScope)
+	sMgr, err = mgr.FetchScopedKeyManager(testScope)
 	if err != nil {
 		t.Fatalf("attempt to read created mgr failed: %v", err)
 	}
+
+	scopedMgr, ok = sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	// If we fetch the last generated external address, it should map
 	// exactly to the address that we just generated.
@@ -2700,10 +2716,13 @@ func TestNewRawAccount(t *testing.T) {
 
 	// Now that we have the manager created, we'll fetch one of the default
 	// scopes for usage within this test.
-	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	sMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
 	if err != nil {
 		t.Fatalf("unable to fetch scope %v: %v", KeyScopeBIP0084, err)
 	}
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	// With the scoped manager retrieved, we'll attempt to create a new raw
 	// account by number.
@@ -2760,10 +2779,13 @@ func TestNewRawAccountWatchingOnly(t *testing.T) {
 
 	// Now that we have the manager created, we'll fetch one of the default
 	// scopes for usage within this test.
-	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	sMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
 	if err != nil {
 		t.Fatalf("unable to fetch scope %v: %v", KeyScopeBIP0044, err)
 	}
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	accountKey := deriveTestAccountKey(t)
 	if accountKey == nil {
@@ -2821,10 +2843,13 @@ func TestNewRawAccountHybrid(t *testing.T) {
 
 	// Now that we have the manager created, we'll fetch one of the default
 	// scopes for usage within this test.
-	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	sMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
 	if err != nil {
 		t.Fatalf("unable to fetch scope %v: %v", KeyScopeBIP0044, err)
 	}
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	accountKey := deriveTestAccountKey(t)
 	if accountKey == nil {
@@ -2944,10 +2969,13 @@ func TestDeriveFromKeyPathCache(t *testing.T) {
 
 	// Now that we have the manager created, we'll fetch one of the default
 	// scopes for usage within this test.
-	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	sMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
 	require.NoError(
 		t, err, "unable to fetch scope %v: %v", KeyScopeBIP0044, err,
 	)
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	keyPath := DerivationPath{
 		InternalAccount: 0,
@@ -3042,10 +3070,13 @@ func TestTaprootPubKeyDerivation(t *testing.T) {
 
 	// Now that we have the manager created, we'll fetch one of the default
 	// scopes for usage within this test.
-	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0086)
+	sMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0086)
 	require.NoError(
 		t, err, "unable to fetch scope %v: %v", KeyScopeBIP0086, err,
 	)
+
+	scopedMgr, ok := sMgr.(*ScopedKeyManager)
+	require.True(t, ok)
 
 	externalPath := DerivationPath{
 		InternalAccount: 0,
@@ -3249,11 +3280,14 @@ func TestManagedAddressValidation(t *testing.T) {
 				scope)
 
 			t.Run(testName, func(t *testing.T) {
-				scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+				sMgr, err := mgr.FetchScopedKeyManager(scope)
 				require.NoError(
 					t, err, "unable to fetch scope %v: %v",
 					KeyScopeBIP0086, err,
 				)
+
+				scopedMgr, ok := sMgr.(*ScopedKeyManager)
+				require.True(t, ok)
 
 				var addr ManagedAddress
 

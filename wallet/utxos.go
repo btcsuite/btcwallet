@@ -35,7 +35,10 @@ type OutputSelectionPolicy struct {
 func (p *OutputSelectionPolicy) meetsRequiredConfs(txHeight,
 	curHeight int32) bool {
 
-	return hasMinConfs(p.RequiredConfirmations, txHeight, curHeight)
+	return hasMinConfs(
+		//nolint:gosec
+		uint32(p.RequiredConfirmations), txHeight, curHeight,
+	)
 }
 
 // UnspentOutputs fetches all unspent outputs from the wallet that match rules
@@ -46,11 +49,11 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
-		syncBlock := w.Manager.SyncedTo()
+		syncBlock := w.addrStore.SyncedTo()
 
 		// TODO: actually stream outputs from the db instead of fetching
 		// all of them at once.
-		outputs, err := w.TxStore.UnspentOutputs(txmgrNs)
+		outputs, err := w.txStore.UnspentOutputs(txmgrNs)
 		if err != nil {
 			return err
 		}
@@ -72,7 +75,10 @@ func (w *Wallet) UnspentOutputs(policy OutputSelectionPolicy) ([]*TransactionOut
 				// per output.
 				continue
 			}
-			_, outputAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+
+			_, outputAcct, err := w.addrStore.AddrAccount(
+				addrmgrNs, addrs[0],
+			)
 			if err != nil {
 				return err
 			}
@@ -141,7 +147,7 @@ func (w *Wallet) fetchOutputAddr(script []byte) (waddrmgr.ManagedAddress, error)
 	// Therefore, we simply select the key for the first address we know
 	// of.
 	for _, addr := range addrs {
-		addr, err := w.AddressInfo(addr)
+		addr, err := w.AddressInfoDeprecated(addr)
 		if err == nil {
 			return addr, nil
 		}

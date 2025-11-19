@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -301,6 +302,10 @@ type ScopedKeyManager struct {
 
 	mtx sync.RWMutex
 }
+
+// A compile-time assertion to ensure that ScopedKeyManager implements the
+// AccountStore interface.
+var _ AccountStore = (*ScopedKeyManager)(nil)
 
 // Scope returns the exact KeyScope of this scoped key manager.
 func (s *ScopedKeyManager) Scope() KeyScope {
@@ -1000,6 +1005,41 @@ func (s *ScopedKeyManager) accountAddrType(acctInfo *accountInfo,
 	return addrSchema.ExternalAddrType
 }
 
+// TODO(yy): This method is a "God method" that does too much, leading to
+// several issues. It should be refactored to improve separation of concerns,
+// reduce complexity, and increase robustness.
+//
+// Issues:
+//  1. **Excessive Responsibility:** The method handles account validation, key
+//     derivation, address creation, database persistence, and in-memory state
+//     management, violating the Single Responsibility Principle.
+//  2. **Fragile Concurrency Model:** The use of an `onCommit` closure to sync
+//     the in-memory cache with the database state is prone to race
+//     conditions and deadlocks, as it requires re-acquiring a mutex outside
+//     of the original database transaction's scope.
+//  3. **Inefficiency and Redundancy:** The method performs a read-after-write
+//     validation by loading addresses from the DB immediately after saving
+//     them, which indicates a lack of confidence in the persistence logic.
+//  4. **Complex API:** The method returns a slice of addresses but is almost
+//     always called with a request for a single address, making the API and
+//     its usage unnecessarily complex.
+//
+// Refactoring Tasks:
+//   - **Separate DB Logic:** Encapsulate all database read/write operations
+//     within this package. The method should handle its own transaction
+//     instead of accepting a `walletdb.ReadWriteBucket`.
+//   - **Simplify State Management:** Refactor the in-memory cache (`s.addrs`)
+//     and the next address index (`acctInfo.next...Index`) to be updated
+//     atomically with the database write, removing the fragile `onCommit`
+//     closure.
+//   - **Decompose the Method:** Break this function into smaller, private
+//     helpers for each distinct responsibility: deriving keys, creating
+//     managed addresses, and persisting them.
+//   - **Simplify the API:** Create a new, simpler method that returns a single
+//     address, as this is the most common use case. The batch generation
+//     logic can be deprecated or refactored into a separate method if still
+//     needed.
+//
 // nextAddresses returns the specified number of next chained address from the
 // branch indicated by the internal flag.
 //
@@ -1547,21 +1587,30 @@ func (s *ScopedKeyManager) LastInternalAddress(ns walletdb.ReadBucket,
 	return nil, managerError(ErrAddressNotFound, "no previous internal address", nil)
 }
 
-// NewRawAccount creates a new account for the scoped manager. This method
-// differs from the NewAccount method in that this method takes the account
-// number *directly*, rather than taking a string name for the account, then
-// mapping that to the next highest account number.
-func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uint32) error {
+// CanAddAccount returns an error if a new account cannot be created.
+// This is the case if the manager is watch-only or is locked. A descriptive
+// error is returned in these cases.
+func (s *ScopedKeyManager) CanAddAccount() error {
 	if s.rootManager.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-
 	if s.rootManager.IsLocked() {
 		return managerError(ErrLocked, errLocked, nil)
 	}
+
+	return nil
+}
+
+// NewRawAccount creates a new account for the scoped manager. This method
+// differs from the NewAccount method in that this method takes the account
+// number *directly*, rather than taking a string name for the account, then
+// mapping that to the next highest account number.
+func (s *ScopedKeyManager) NewRawAccount(
+	ns walletdb.ReadWriteBucket, number uint32) error {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 
 	// As this is an ad hoc account that may not follow our normal linear
 	// derivation, we'll create a new name for this account based off of
@@ -1606,16 +1655,8 @@ func (s *ScopedKeyManager) NewRawAccountWatchingOnly(
 // access to the cointype keys (from which extended account keys are derived),
 // it requires the manager to be unlocked.
 func (s *ScopedKeyManager) NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, error) {
-	if s.rootManager.WatchOnly() {
-		return 0, managerError(ErrWatchingOnly, errWatchingOnly, nil)
-	}
-
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
-	if s.rootManager.IsLocked() {
-		return 0, managerError(ErrLocked, errLocked, nil)
-	}
 
 	// Fetch latest account, and create a new account in the same
 	// transaction Fetch the latest account number to generate the next
@@ -1826,11 +1867,6 @@ func (s *ScopedKeyManager) RenameAccount(ns walletdb.ReadWriteBucket,
 	if err == nil {
 		str := "account with the same name already exists"
 		return managerError(ErrDuplicateAccount, str, err)
-	}
-
-	// Validate account name
-	if err := ValidateAccountName(name); err != nil {
-		return err
 	}
 
 	rowInterface, err := fetchAccountInfo(ns, &s.scope, account)
@@ -2574,4 +2610,72 @@ func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	delete(s.acctInfo, account)
+}
+
+// NewAddress returns a new address for the given account. The `change`
+// parameter dictates whether a change address (internal) or a receiving
+// address (external) should be generated. The caller is responsible for
+// providing a database transaction. The method first looks up the account
+// number from the provided account name. It then uses the appropriate
+// method (`NextInternalAddresses` or `NextExternalAddresses`) to derive the
+// next chained address for that account.
+func (s *ScopedKeyManager) NewAddress(addrmgrNs walletdb.ReadWriteBucket,
+	account string, change bool) (btcutil.Address, error) {
+
+	accountNum, err := s.LookupAccount(addrmgrNs, account)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO(yy): get rid of the list, we should always return one address
+	// here.
+	var addrs []ManagedAddress
+
+	if change {
+		// Get next chained change address from wallet for account.
+		addrs, err = s.NextInternalAddresses(addrmgrNs, accountNum, 1)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Get next address from wallet.
+		addrs, err = s.NextExternalAddresses(addrmgrNs, accountNum, 1)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(addrs) == 0 {
+		return nil, managerError(
+			ErrAddressNotFound, "no addresses were generated", nil,
+		)
+	}
+
+	addr := addrs[0].Address()
+
+	return addr, nil
+}
+
+// accountInfo returns a copy of the account info map.
+func (s *ScopedKeyManager) accountInfo() map[uint32]*accountInfo {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	acctInfoCopy := make(map[uint32]*accountInfo, len(s.acctInfo))
+	maps.Copy(acctInfoCopy, s.acctInfo)
+
+	return acctInfoCopy
+}
+
+// addresses returns a slice of all managed addresses.
+func (s *ScopedKeyManager) addresses() []ManagedAddress {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	addrs := make([]ManagedAddress, 0, len(s.addrs))
+	for _, ma := range s.addrs {
+		addrs = append(addrs, ma)
+	}
+
+	return addrs
 }

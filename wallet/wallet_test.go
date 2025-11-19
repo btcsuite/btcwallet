@@ -169,10 +169,7 @@ func TestLabelTransaction(t *testing.T) {
 		test := test
 
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			w, cleanup := testWallet(t)
-			defer cleanup()
+			w := testWallet(t)
 
 			// If the transaction should be known to the store, we
 			// write txdetail to disk.
@@ -191,7 +188,7 @@ func TestLabelTransaction(t *testing.T) {
 							wtxmgrNamespaceKey,
 						)
 
-						return w.TxStore.InsertTx(
+						return w.txStore.InsertTx(
 							ns, rec, nil,
 						)
 					})
@@ -241,7 +238,8 @@ func TestGetTransaction(t *testing.T) {
 		expectedHeight int32
 
 		// Store function.
-		f func(*wtxmgr.Store, walletdb.ReadWriteBucket) (*wtxmgr.Store, error)
+		f func(wtxmgr.TxStore,
+			walletdb.ReadWriteBucket) (wtxmgr.TxStore, error)
 
 		// The error we expect to be returned.
 		expectedErr error
@@ -251,8 +249,8 @@ func TestGetTransaction(t *testing.T) {
 			txid:           *TstTxHash,
 			expectedHeight: -1,
 			// We write txdetail for the tx to disk.
-			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
-				*wtxmgr.Store, error) {
+			f: func(s wtxmgr.TxStore, ns walletdb.ReadWriteBucket) (
+				wtxmgr.TxStore, error) {
 
 				err = s.InsertTx(ns, rec, nil)
 				return s, err
@@ -263,8 +261,8 @@ func TestGetTransaction(t *testing.T) {
 			name: "existing mined transaction",
 			txid: *TstTxHash,
 			// We write txdetail for the tx to disk.
-			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
-				*wtxmgr.Store, error) {
+			f: func(s wtxmgr.TxStore, ns walletdb.ReadWriteBucket) (
+				wtxmgr.TxStore, error) {
 
 				err = s.InsertTx(ns, rec, TstMinedSignedTxBlockDetails)
 				return s, err
@@ -276,8 +274,8 @@ func TestGetTransaction(t *testing.T) {
 			name: "non-existing transaction",
 			txid: *TstTxHash,
 			// Write no txdetail to disk.
-			f: func(s *wtxmgr.Store, ns walletdb.ReadWriteBucket) (
-				*wtxmgr.Store, error) {
+			f: func(s wtxmgr.TxStore, _ walletdb.ReadWriteBucket) (
+				wtxmgr.TxStore, error) {
 
 				return s, nil
 			},
@@ -288,12 +286,11 @@ func TestGetTransaction(t *testing.T) {
 		test := test
 
 		t.Run(test.name, func(t *testing.T) {
-			w, cleanup := testWallet(t)
-			defer cleanup()
+			w := testWallet(t)
 
 			err := walletdb.Update(w.db, func(rw walletdb.ReadWriteTx) error {
 				ns := rw.ReadWriteBucket(wtxmgrNamespaceKey)
-				_, err := test.f(w.TxStore, ns)
+				_, err := test.f(w.txStore, ns)
 				return err
 			})
 			require.NoError(t, err)
@@ -395,8 +392,7 @@ func TestGetTransactionConfirmations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			w, cleanup := testWallet(t)
-			t.Cleanup(cleanup)
+			w := testWallet(t)
 
 			// Set the wallet's synced height.
 			err := walletdb.Update(
@@ -409,7 +405,7 @@ func TestGetTransactionConfirmations(t *testing.T) {
 						Hash:   chainhash.Hash{},
 					}
 
-					return w.Manager.SetSyncedTo(
+					return w.addrStore.SetSyncedTo(
 						addrmgrNs, bs,
 					)
 				},
@@ -439,7 +435,7 @@ func TestGetTransactionConfirmations(t *testing.T) {
 						}
 					}
 
-					return w.TxStore.InsertTx(
+					return w.txStore.InsertTx(
 						ns, rec, blockMeta,
 					)
 				},
@@ -492,9 +488,7 @@ func TestGetTransactionConfirmations(t *testing.T) {
 // TestDuplicateAddressDerivation tests that duplicate addresses are not
 // derived when multiple goroutines are concurrently requesting new addresses.
 func TestDuplicateAddressDerivation(t *testing.T) {
-	w, cleanup := testWallet(t)
-	defer cleanup()
-
+	w := testWallet(t)
 	var (
 		m           sync.Mutex
 		globalAddrs = make(map[string]btcutil.Address)
@@ -507,7 +501,7 @@ func TestDuplicateAddressDerivation(t *testing.T) {
 			eg.Go(func() error {
 				addrs := make([]btcutil.Address, 10)
 				for i := 0; i < 10; i++ {
-					addr, err := w.NewAddress(
+					addr, err := w.NewAddressDeprecated(
 						0, waddrmgr.KeyScopeBIP0084,
 					)
 					if err != nil {
@@ -556,7 +550,7 @@ func TestEndRecovery(t *testing.T) {
 	// when using btcwallet with a fresh seed, because it requires an early
 	// birthday to be set or established.
 
-	w, cleanup := testWallet(t)
+	w := testWallet(t)
 
 	blockHashCalled := make(chan struct{})
 
@@ -610,11 +604,9 @@ func TestEndRecovery(t *testing.T) {
 	case <-blockHashCalled:
 	case <-recoveryDone:
 	}
-	cleanup()
 
 	// Try again.
-	w, cleanup = testWallet(t)
-	defer cleanup()
+	w = testWallet(t)
 
 	// We'll catch the error to make sure we're hitting our desired path. The
 	// WaitGroup isn't required for the test, but does show how it completes

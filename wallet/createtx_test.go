@@ -38,8 +38,7 @@ var (
 func TestTxToOutputsDryRun(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	keyScope := waddrmgr.KeyScopeBIP0049Plus
@@ -194,13 +193,13 @@ func addUtxo(t *testing.T, w *Wallet, incomingTx *wire.MsgTx) {
 
 	if err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		err = w.TxStore.InsertTx(ns, rec, block)
+		err = w.txStore.InsertTx(ns, rec, block)
 		if err != nil {
 			return err
 		}
 		// Add all tx outputs as credits.
 		for i := 0; i < len(incomingTx.TxOut); i++ {
-			err = w.TxStore.AddCredit(
+			err = w.txStore.AddCredit(
 				ns, rec, block, uint32(i), false,
 			)
 			if err != nil {
@@ -238,13 +237,14 @@ func addTxAndCredit(t *testing.T, w *Wallet, tx *wire.MsgTx,
 
 	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
 		ns := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-		err = w.TxStore.InsertTx(ns, rec, block)
+
+		err = w.txStore.InsertTx(ns, rec, block)
 		if err != nil {
 			return err
 		}
 
 		// Add the specified output as credit.
-		err = w.TxStore.AddCredit(ns, rec, block, creditIndex, false)
+		err = w.txStore.AddCredit(ns, rec, block, creditIndex, false)
 		if err != nil {
 			return err
 		}
@@ -278,8 +278,7 @@ func TestInputYield(t *testing.T) {
 func TestTxToOutputsRandom(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// Create an address we can use to send some coins to.
 	keyScope := waddrmgr.KeyScopeBIP0049Plus
@@ -359,8 +358,7 @@ func TestTxToOutputsRandom(t *testing.T) {
 func TestCreateSimpleCustomChange(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// First, we'll make a P2TR and a P2WKH address to send some coins to
 	// (two different coin scopes).
@@ -451,8 +449,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 func TestSelectUtxosTxoToOutpoint(t *testing.T) {
 	t.Parallel()
 
-	w, cleanup := testWallet(t)
-	defer cleanup()
+	w := testWallet(t)
 
 	// First, we'll make a P2TR and a P2WKH address to send some coins to.
 	p2wkhAddr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
@@ -483,7 +480,7 @@ func TestSelectUtxosTxoToOutpoint(t *testing.T) {
 	addUtxo(t, w, incomingTx)
 
 	// We expect 4 unspent UTXOs.
-	unspent, err := w.ListUnspent(0, 80, "")
+	unspent, err := w.ListUnspentDeprecated(0, 80, "")
 	require.NoError(t, err)
 	require.Len(t, unspent, 4, "expected 4 unspent UTXOs")
 

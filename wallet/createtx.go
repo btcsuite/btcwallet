@@ -87,7 +87,8 @@ func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 // secretSource is an implementation of txauthor.SecretSource for the wallet's
 // address manager.
 type secretSource struct {
-	*waddrmgr.Manager
+	waddrmgr.AddrStore
+
 	addrmgrNs walletdb.ReadBucket
 }
 
@@ -183,7 +184,9 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		}
 
 		eligible, err := w.findEligibleOutputs(
-			dbtx, coinSelectKeyScope, account, minconf,
+			dbtx, coinSelectKeyScope, account,
+			//nolint:gosec
+			uint32(minconf),
 			bs, allowUtxo,
 		)
 		if err != nil {
@@ -281,11 +284,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 			// was performed from the default wallet accounts
 			// (NP2WKH, P2WKH, P2TR), so any key scope provided
 			// doesn't impact the result of this call.
-			watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 				addrmgrNs, waddrmgr.KeyScopeBIP0086, account,
 			)
 		} else {
-			watchOnly, err = w.Manager.IsWatchOnlyAccount(
+			watchOnly, err = w.addrStore.IsWatchOnlyAccount(
 				addrmgrNs, *coinSelectKeyScope, account,
 			)
 		}
@@ -294,7 +297,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 		}
 		if !watchOnly {
 			err = tx.AddAllInputScripts(
-				secretSource{w.Manager, addrmgrNs},
+				secretSource{w.addrStore, addrmgrNs},
 			)
 			if err != nil {
 				return err
@@ -343,14 +346,14 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 }
 
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
-	keyScope *waddrmgr.KeyScope, account uint32, minconf int32,
+	keyScope *waddrmgr.KeyScope, account uint32, minconf uint32,
 	bs *waddrmgr.BlockStamp,
 	allowUtxo func(utxo wtxmgr.Credit) bool) ([]wtxmgr.Credit, error) {
 
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
-	unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
+	unspent, err := w.txStore.UnspentOutputs(txmgrNs)
 	if err != nil {
 		return nil, err
 	}
@@ -378,8 +381,11 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 			continue
 		}
 		if output.FromCoinBase {
-			target := int32(w.chainParams.CoinbaseMaturity)
-			if !hasMinConfs(target, output.Height, bs.Height) {
+			target := w.chainParams.CoinbaseMaturity
+			if !hasMinConfs(
+				uint32(target), output.Height, bs.Height,
+			) {
+
 				continue
 			}
 		}
@@ -399,7 +405,10 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 		if err != nil || len(addrs) != 1 {
 			continue
 		}
-		scopedMgr, addrAcct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
+
+		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(
+			addrmgrNs, addrs[0],
+		)
 		if err != nil {
 			continue
 		}
@@ -447,7 +456,8 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 	// It's possible for the account to have an address schema override, so
 	// prefer that if it exists.
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
-	scopeMgr, err := w.Manager.FetchScopedKeyManager(*changeKeyScope)
+
+	scopeMgr, err := w.addrStore.FetchScopedKeyManager(*changeKeyScope)
 	if err != nil {
 		return nil, nil, err
 	}

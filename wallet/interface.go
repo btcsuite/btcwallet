@@ -81,7 +81,7 @@ type Interface interface {
 	NotificationServer() *NotificationServer
 
 	// AddrManager returns the internal address manager.
-	AddrManager() *waddrmgr.Manager
+	AddrManager() waddrmgr.AddrStore
 
 	// Accounts returns all accounts for a particular scope.
 	Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error)
@@ -112,14 +112,22 @@ type Interface interface {
 	AccountManagedAddresses(scope waddrmgr.KeyScope,
 		accountNum uint32) ([]waddrmgr.ManagedAddress, error)
 
-	// RenameAccount renames an existing account. It is an error to rename
-	// a reserved account or to choose a name that is already in use.
-	RenameAccount(scope waddrmgr.KeyScope, account uint32,
+	// RenameAccountDeprecated renames an existing account. It is an error
+	// to rename a reserved account or to choose a name that is already in
+	// use.
+	//
+	// Deprecated: Use AccountManager.RenameAccount instead.
+	RenameAccountDeprecated(scope waddrmgr.KeyScope, account uint32,
 		newName string) error
 
-	// ImportAccount imports an account backed by an extended public key.
+	// ImportAccountDeprecated imports an account backed by an extended
+	// public key.
+	//
 	// This creates a watch-only account.
-	ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKey,
+	//
+	// Deprecated: Use AccountManager.ImportAccount instead.
+	ImportAccountDeprecated(name string,
+		accountPubKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType *waddrmgr.AddressType,
 	) (*waddrmgr.AccountProperties, error)
 
@@ -138,7 +146,7 @@ type Interface interface {
 	// AddScopeManager adds a new scope manager to the wallet.
 	AddScopeManager(scope waddrmgr.KeyScope,
 		addrSchema waddrmgr.ScopeAddrSchema) (
-		*waddrmgr.ScopedKeyManager, error)
+		waddrmgr.AccountStore, error)
 
 	// CurrentAddress returns the current, most recently generated address
 	// for a given account and scope. If the current address has been used,
@@ -146,8 +154,12 @@ type Interface interface {
 	CurrentAddress(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
-	// NewAddress returns a new address for a given account and scope.
-	NewAddress(account uint32, scope waddrmgr.KeyScope) (
+	// NewAddressDeprecated returns a new address for a given account and
+	// scope.
+	//
+	// Deprecated: This method will be removed in a future release. Use the
+	// AddressManager interface instead.
+	NewAddressDeprecated(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
 	// NewChangeAddress returns a new change address for a given account
@@ -155,19 +167,31 @@ type Interface interface {
 	NewChangeAddress(account uint32, scope waddrmgr.KeyScope) (
 		btcutil.Address, error)
 
-	// AddressInfo returns detailed information about a managed address,
-	// including its derivation path and whether it's compressed.
-	AddressInfo(a btcutil.Address) (waddrmgr.ManagedAddress, error)
+	// AddressInfoDeprecated returns detailed information about a managed
+	// address, including its derivation path and whether it's compressed.
+	//
+	// Deprecated: This method leaks internal waddrmgr types. Callers
+	// should use specific methods such as AccountOfAddress,
+	// IsInternalAddress, etc. instead.
+	AddressInfoDeprecated(a btcutil.Address) (
+		waddrmgr.ManagedAddress, error,
+	)
 
 	// HaveAddress returns whether the wallet is the owner of the address.
 	HaveAddress(a btcutil.Address) (bool, error)
 
-	// ImportPublicKey imports a public key as a watch-only address.
-	ImportPublicKey(pubKey *btcec.PublicKey,
+	// ImportPublicKeyDeprecated imports a public key as a watch-only
+	// address.
+	//
+	// Deprecated: Use AddressManager.ImportPublicKey instead.
+	ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
 		addrType waddrmgr.AddressType) error
 
-	// ImportTaprootScript imports a taproot script into the wallet.
-	ImportTaprootScript(scope waddrmgr.KeyScope,
+	// ImportTaprootScriptDeprecated imports a taproot script into the
+	// wallet.
+	//
+	// Deprecated: Use AddressManager.ImportTaprootScript instead.
+	ImportTaprootScriptDeprecated(scope waddrmgr.KeyScope,
 		tapscript *waddrmgr.Tapscript, bs *waddrmgr.BlockStamp,
 		witnessVersion byte, isSecretScript bool) (
 		waddrmgr.ManagedAddress, error)
@@ -184,9 +208,11 @@ type Interface interface {
 	CalculateAccountBalances(account uint32, requiredConfirmations int32) (
 		Balances, error)
 
-	// ListUnspent returns all unspent transaction outputs for a given
-	// account and confirmation requirement.
-	ListUnspent(minconf, maxconf int32, accountName string) (
+	// ListUnspentDeprecated returns all unspent transaction outputs for a
+	// given account and confirmation requirement.
+	//
+	// Deprecated: Use UtxoManager.ListUnspent instead.
+	ListUnspentDeprecated(minconf, maxconf int32, accountName string) (
 		[]*btcjson.ListUnspentResult, error)
 
 	// FetchOutpointInfo returns the output information for a given
@@ -207,10 +233,10 @@ type Interface interface {
 	// and should not be used as an input for created transactions.
 	LockedOutpoint(op wire.OutPoint) bool
 
-	// LeaseOutput locks an output to the given ID, preventing it from
-	// being available for coin selection. The absolute time of the lock's
-	// expiration is returned. The expiration of the lock can be extended by
-	// successive invocations of this call.
+	// LeaseOutputDeprecated locks an output to the given ID, preventing it
+	// from being available for coin selection. The absolute time of the
+	// lock's expiration is returned. The expiration of the lock can be
+	// extended by successive invocations of this call.
 	//
 	// Outputs can be unlocked before their expiration through
 	// `UnlockOutput`. Otherwise, they are unlocked lazily through calls
@@ -223,16 +249,23 @@ type Interface interface {
 	//
 	// NOTE: This differs from LockOutpoint in that outputs are locked for
 	// a limited amount of time and their locks are persisted to disk.
-	LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
+	//
+	// Deprecated: Use UtxoManager.LeaseOutput instead.
+	LeaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint,
 		duration time.Duration) (time.Time, error)
 
-	// ReleaseOutput unlocks an output, allowing it to be available for
-	// coin selection if it remains unspent. The ID should match the one
-	// used to originally lock the output.
-	ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error
+	// ReleaseOutputDeprecated unlocks an output, allowing it to be
+	// available for coin selection if it remains unspent. The ID should
+	// match the one used to originally lock the output.
+	//
+	// Deprecated: Use UtxoManager.ReleaseOutput instead.
+	ReleaseOutputDeprecated(id wtxmgr.LockID, op wire.OutPoint) error
 
-	// ListLeasedOutputs returns a list of all currently leased outputs.
-	ListLeasedOutputs() ([]*ListLeasedOutputResult, error)
+	// ListLeasedOutputsDeprecated returns a list of all currently leased
+	// outputs.
+	//
+	// Deprecated: Use UtxoManager.ListLeasedOutputs instead.
+	ListLeasedOutputsDeprecated() ([]*ListLeasedOutputResult, error)
 
 	// CreateSimpleTx creates a new transaction to the specified outputs,
 	// automatically performing coin selection and creating a change output
@@ -305,18 +338,20 @@ type Interface interface {
 	DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 		path waddrmgr.DerivationPath) (*btcec.PrivateKey, error)
 
-	// ComputeInputScript generates a complete InputScript for the passed
-	// transaction with the signature as defined within the passed
-	// SignDescriptor.
+	// ComputeInputScript generates a complete InputScript for the
+	// passed transaction with the signature as defined within the
+	// passed SignDescriptor.
 	ComputeInputScript(tx *wire.MsgTx, output *wire.TxOut,
 		inputIndex int, sigHashes *txscript.TxSigHashes,
 		hashType txscript.SigHashType,
 		tweaker PrivKeyTweaker) (wire.TxWitness, []byte, error)
 
-	// ScriptForOutput returns the address, witness program and redeem
-	// script for a given UTXO.
-	ScriptForOutput(output *wire.TxOut) (waddrmgr.ManagedPubKeyAddress,
-		[]byte, []byte, error)
+	// ScriptForOutputDeprecated returns the address, witness program and
+	// redeem script for a given UTXO.
+	//
+	// Deprecated: Use AddressManager.ScriptForOutput instead.
+	ScriptForOutputDeprecated(output *wire.TxOut) (
+		waddrmgr.ManagedPubKeyAddress, []byte, []byte, error)
 }
 
 // A compile time check to ensure that Wallet implements the interface.

@@ -28,7 +28,8 @@ func (u unstableAPI) TxDetails(txHash *chainhash.Hash) (*wtxmgr.TxDetails, error
 	err := walletdb.View(u.w.db, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 		var err error
-		details, err = u.w.TxStore.TxDetails(txmgrNs, txHash)
+
+		details, err = u.w.txStore.TxDetails(txmgrNs, txHash)
 		return err
 	})
 	return details, err
@@ -39,6 +40,6 @@ func (u unstableAPI) TxDetails(txHash *chainhash.Hash) (*wtxmgr.TxDetails, error
 func (u unstableAPI) RangeTransactions(begin, end int32, f func([]wtxmgr.TxDetails) (bool, error)) error {
 	return walletdb.View(u.w.db, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
-		return u.w.TxStore.RangeTransactions(txmgrNs, begin, end, f)
+		return u.w.txStore.RangeTransactions(txmgrNs, begin, end, f)
 	})
 }
