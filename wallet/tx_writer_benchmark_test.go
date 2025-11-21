@@ -118,6 +118,12 @@ func BenchmarkLabelTxAPI(b *testing.B) {
 				b.ResetTimer()
 
 				for i := 0; b.Loop(); i++ {
+					// INTENTIONAL REGRESSION: Allocate extra memory to test CI detection
+					_ = make([]byte, 5000)  // ~5KB extra bytes allocation
+					for j := 0; j < 20; j++ { // 20 extra allocations
+						_ = make([]byte, 1)
+					}
+
 					err = bw.LabelTx(
 						b.Context(), testTxHash,
 						testLabel,
