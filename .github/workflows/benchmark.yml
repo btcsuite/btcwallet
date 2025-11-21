@@ -49,8 +49,8 @@ jobs:
 
       - name: Run benchmarks on PR branch
         run: |
-          git fetch origin ${{ github.head_ref }}
-          git checkout origin/${{ github.head_ref }}
+          # The PR head is already checked out by actions/checkout, just use it
+          git checkout ${{ github.event.pull_request.head.sha }}
           make unit-bench pkg=wallet bench=BenchmarkLabelTxAPI benchmem=1 log=error 2>&1 | tee pr-bench.txt
           echo "PR branch benchmarks completed"
 
