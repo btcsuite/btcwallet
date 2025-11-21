@@ -3,7 +3,7 @@ name: Benchmark Comparison
 on:
   pull_request:
     branches:
-      - "*"
+      - "CI-benchmark-experiments"
   workflow_dispatch:
 
 defaults:
