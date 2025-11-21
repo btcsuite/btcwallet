@@ -1,4 +1,4 @@
-name: Benchmark Comparison
+name: Benchmark Comparison (10% regression threshold)
 
 on:
   pull_request:
@@ -16,6 +16,7 @@ env:
   GOBIN: /home/runner/work/go/bin
   GO111MODULE: on
   GO_VERSION: 1.24.6
+  REGRESSION_THRESHOLD: 10
 
 jobs:
   benchmark:
@@ -72,12 +73,12 @@ jobs:
           # Save for PR comment
           cat benchstat-output.txt > $GITHUB_STEP_SUMMARY
 
-      - name: Check for performance regressions
+      - name: Check for performance regressions (threshold: ${{ env.REGRESSION_THRESHOLD }}%)
         run: |
-          # Performance regression thresholds
-          MAX_TIME_REGRESSION=10       # Maximum allowed time regression percentage
-          MAX_ALLOC_BYTES_REGRESSION=10 # Maximum allowed bytes/op regression percentage
-          MAX_ALLOC_COUNT_REGRESSION=10 # Maximum allowed allocs/op regression percentage
+          # Performance regression thresholds from environment
+          MAX_TIME_REGRESSION=${{ env.REGRESSION_THRESHOLD }}
+          MAX_ALLOC_BYTES_REGRESSION=${{ env.REGRESSION_THRESHOLD }}
+          MAX_ALLOC_COUNT_REGRESSION=${{ env.REGRESSION_THRESHOLD }}
 
           echo "Checking for performance regressions..."
           echo "Thresholds: ${MAX_TIME_REGRESSION}% for time, ${MAX_ALLOC_BYTES_REGRESSION}% for bytes, ${MAX_ALLOC_COUNT_REGRESSION}% for alloc count"
