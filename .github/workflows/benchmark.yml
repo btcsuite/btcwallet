@@ -60,11 +60,96 @@ jobs:
           echo "Comparing \`${{ github.base_ref }}\` (base) vs \`${{ github.head_ref }}\` (PR)" >> benchstat-output.txt
           echo "" >> benchstat-output.txt
           echo '```' >> benchstat-output.txt
-          benchstat base-bench.txt pr-bench.txt >> benchstat-output.txt || true
+          benchstat base-bench.txt pr-bench.txt | tee benchstat-raw.txt >> benchstat-output.txt || true
           echo '```' >> benchstat-output.txt
 
           # Save for PR comment
           cat benchstat-output.txt > $GITHUB_STEP_SUMMARY
+
+      - name: Check for performance regressions
+        run: |
+          # Performance regression thresholds
+          MAX_TIME_REGRESSION=10       # Maximum allowed time regression percentage
+          MAX_ALLOC_BYTES_REGRESSION=10 # Maximum allowed bytes/op regression percentage
+          MAX_ALLOC_COUNT_REGRESSION=10 # Maximum allowed allocs/op regression percentage
+
+          echo "Checking for performance regressions..."
+          echo "Thresholds: ${MAX_TIME_REGRESSION}% for time, ${MAX_ALLOC_BYTES_REGRESSION}% for bytes, ${MAX_ALLOC_COUNT_REGRESSION}% for alloc count"
+
+          # Parse benchstat output for regressions
+          # Format: "name  old time/op  new time/op  delta"
+          # A "+" delta means regression (slower), "-" means improvement (faster)
+
+          REGRESSIONS_FOUND=false
+
+          # Check time regressions (lines with "ns/op" and positive delta > threshold)
+          while IFS= read -r line; do
+            # Skip header and non-benchmark lines
+            if [[ $line =~ ^name ]] || [[ ! $line =~ ns/op ]]; then
+              continue
+            fi
+
+            # Extract delta percentage (e.g., "+12.5%" -> "12.5")
+            if [[ $line =~ \+([0-9]+\.[0-9]+)% ]]; then
+              delta="${BASH_REMATCH[1]}"
+              benchmark_name=$(echo "$line" | awk '{print $1}')
+
+              # Compare with threshold (use bc for floating point)
+              if (( $(echo "$delta > $MAX_TIME_REGRESSION" | bc -l) )); then
+                echo "❌ TIME REGRESSION: $benchmark_name regressed by ${delta}% (threshold: ${MAX_TIME_REGRESSION}%)"
+                REGRESSIONS_FOUND=true
+              fi
+            fi
+          done < benchstat-raw.txt
+
+          # Check memory bytes allocation regressions (lines with "B/op" and positive delta > threshold)
+          while IFS= read -r line; do
+            # Skip header and non-benchmark lines
+            if [[ $line =~ ^name ]] || [[ ! $line =~ B/op ]]; then
+              continue
+            fi
+
+            # Extract delta percentage
+            if [[ $line =~ \+([0-9]+\.[0-9]+)% ]]; then
+              delta="${BASH_REMATCH[1]}"
+              benchmark_name=$(echo "$line" | awk '{print $1}')
+
+              # Compare with threshold
+              if (( $(echo "$delta > $MAX_ALLOC_BYTES_REGRESSION" | bc -l) )); then
+                echo "❌ MEMORY BYTES REGRESSION: $benchmark_name memory usage increased by ${delta}% (threshold: ${MAX_ALLOC_BYTES_REGRESSION}%)"
+                REGRESSIONS_FOUND=true
+              fi
+            fi
+          done < benchstat-raw.txt
+
+          # Check allocation count regressions (lines with "allocs/op" and positive delta > threshold)
+          while IFS= read -r line; do
+            # Skip header and non-benchmark lines
+            if [[ $line =~ ^name ]] || [[ ! $line =~ allocs/op ]]; then
+              continue
+            fi
+
+            # Extract delta percentage
+            if [[ $line =~ \+([0-9]+\.[0-9]+)% ]]; then
+              delta="${BASH_REMATCH[1]}"
+              benchmark_name=$(echo "$line" | awk '{print $1}')
+
+              # Compare with threshold
+              if (( $(echo "$delta > $MAX_ALLOC_COUNT_REGRESSION" | bc -l) )); then
+                echo "❌ ALLOCATION COUNT REGRESSION: $benchmark_name allocation count increased by ${delta}% (threshold: ${MAX_ALLOC_COUNT_REGRESSION}%)"
+                REGRESSIONS_FOUND=true
+              fi
+            fi
+          done < benchstat-raw.txt
+
+          if [ "$REGRESSIONS_FOUND" = true ]; then
+            echo ""
+            echo "⚠️  Performance regressions detected above threshold!"
+            echo "Review the benchmark results and consider optimizing before merging."
+            exit 1
+          else
+            echo "✅ No significant performance regressions detected."
+          fi
 
       - name: Comment PR with benchmark results
         uses: actions/github-script@v7
