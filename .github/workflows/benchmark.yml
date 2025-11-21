@@ -1,0 +1,117 @@
+name: Benchmark Comparison
+
+on:
+  pull_request:
+    branches:
+      - "*"
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOCACHE: /home/runner/work/go/pkg/build
+  GOPATH: /home/runner/work/go
+  GOBIN: /home/runner/work/go/bin
+  GO111MODULE: on
+  GO_VERSION: 1.24.6
+
+jobs:
+  benchmark:
+    name: Run Benchmarks and Compare
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      - name: Run benchmarks on base branch
+        run: |
+          git checkout ${{ github.base_ref }}
+          make unit-bench pkg=wallet benchmem=1 log=error 2>&1 | tee base-bench.txt
+          echo "Base branch benchmarks completed"
+
+      - name: Run benchmarks on PR branch
+        run: |
+          git checkout ${{ github.head_ref }}
+          make unit-bench pkg=wallet benchmem=1 log=error 2>&1 | tee pr-bench.txt
+          echo "PR branch benchmarks completed"
+
+      - name: Compare benchmarks with benchstat
+        id: benchstat
+        run: |
+          echo "## Benchmark Comparison Results" > benchstat-output.txt
+          echo "" >> benchstat-output.txt
+          echo "Comparing \`${{ github.base_ref }}\` (base) vs \`${{ github.head_ref }}\` (PR)" >> benchstat-output.txt
+          echo "" >> benchstat-output.txt
+          echo '```' >> benchstat-output.txt
+          benchstat base-bench.txt pr-bench.txt >> benchstat-output.txt || true
+          echo '```' >> benchstat-output.txt
+
+          # Save for PR comment
+          cat benchstat-output.txt > $GITHUB_STEP_SUMMARY
+
+      - name: Comment PR with benchmark results
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const fs = require('fs');
+            const benchstatOutput = fs.readFileSync('benchstat-output.txt', 'utf8');
+
+            // Find existing benchmark comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.data.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('Benchmark Comparison Results')
+            );
+
+            const commentBody = benchstatOutput + '\n\n---\n*Benchmarks run with `make unit-bench pkg=wallet benchmem=1 log=error`*';
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+
+      - name: Upload benchmark results as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            base-bench.txt
+            pr-bench.txt
+            benchstat-output.txt
+          retention-days: 30
