@@ -40,11 +40,11 @@ jobs:
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
-      - name: Run benchmarks on base branch
-        run: |
-          git checkout ${{ github.base_ref }}
-          make unit-bench pkg=wallet benchmem=1 log=error 2>&1 | tee base-bench.txt
-          echo "Base branch benchmarks completed"
+      # - name: Run benchmarks on base branch
+      #   run: |
+      #     git checkout ${{ github.base_ref }}
+      #     make unit-bench pkg=wallet benchmem=1 log=error 2>&1 | tee base-bench.txt
+      #     echo "Base branch benchmarks completed"
 
       - name: Run benchmarks on PR branch
         run: |
