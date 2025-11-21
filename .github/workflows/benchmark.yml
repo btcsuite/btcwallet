@@ -3,6 +3,7 @@ name: Benchmark Comparison
 on:
   pull_request:
     branches:
+      - "*"
   workflow_dispatch:
 
 defaults:
