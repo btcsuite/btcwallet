@@ -42,13 +42,15 @@ jobs:
 
       # - name: Run benchmarks on base branch
       #   run: |
-      #     git checkout ${{ github.base_ref }}
+      #     git fetch origin ${{ github.base_ref }}
+      #     git checkout origin/${{ github.base_ref }}
       #     make unit-bench pkg=wallet benchmem=1 log=error 2>&1 | tee base-bench.txt
       #     echo "Base branch benchmarks completed"
 
       - name: Run benchmarks on PR branch
         run: |
-          git checkout ${{ github.head_ref }}
+          git fetch origin ${{ github.head_ref }}
+          git checkout origin/${{ github.head_ref }}
           make unit-bench pkg=wallet benchmem=1 log=error 2>&1 | tee pr-bench.txt
           echo "PR branch benchmarks completed"
 
