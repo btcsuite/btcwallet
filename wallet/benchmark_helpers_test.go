@@ -3,6 +3,7 @@ package wallet
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"testing"
 	"time"
@@ -80,6 +81,140 @@ func exponentialGrowth(i int) int {
 	return 1 << i
 }
 
+// InterleavePattern defines how to interleave two slices of any type.
+type InterleavePattern int
+
+const (
+
+	// Alternating pattern interleaves elements one-by-one from each slice.
+	//
+	// Use when: Testing iteration logic that needs to handle mixed element
+	// types or simulating varied element ordering.
+	//
+	// Pattern: A B A B A B ...
+	//
+	// Example: Testing APIs that filter or group elements by type during
+	// iteration.
+	Alternating InterleavePattern = iota
+
+	// Sequential pattern concatenates all elements from first slice
+	// followed by all elements from second slice.
+	//
+	// Use when: Testing best/worst case scenarios where elements are
+	// perfectly sorted by type, or when element order doesn't affect the
+	// algorithm being tested.
+	//
+	// Pattern: A ... B ...
+	Sequential
+
+	// Grouped pattern interleaves elements in batches of specified size.
+	//
+	// Use when: Testing batch processing scenarios or simulating elements
+	// that arrive in groups.
+	//
+	// Pattern (groupSize=2): A B A B ...
+	//
+	// Example: Testing batch transaction processing or cache locality
+	// effects.
+	Grouped
+
+	// Random pattern shuffles elements from both slices randomly.
+	//
+	// Use when: Testing performance with unpredictable ordering or
+	// verifying that algorithms handle arbitrary element arrangements.
+	//
+	// Pattern: B A B A ...
+	//
+	// Note: Uses simple pseudo-random shuffle, not cryptographically
+	// secure.
+	Random
+)
+
+// Interleave combines two slices according to the specified pattern.
+func Interleave[T any](pattern InterleavePattern, groupSize int, a, b []T) []T {
+	switch pattern {
+	case Sequential:
+		return sequentialInterleave(a, b)
+	case Alternating:
+		return alternatingInterleave(a, b)
+	case Grouped:
+		return groupedInterleave(groupSize, a, b)
+	case Random:
+		return randomInterleave(a, b)
+	default:
+		return alternatingInterleave(a, b)
+	}
+}
+
+// sequentialInterleave concatenates all elements from a followed by all
+// elements from b.
+func sequentialInterleave[T any](a, b []T) []T {
+	result := make([]T, 0, len(a)+len(b))
+	result = append(result, a...)
+	result = append(result, b...)
+
+	return result
+}
+
+// alternatingInterleave interleaves elements one-by-one from a and b.
+func alternatingInterleave[T any](a, b []T) []T {
+	result := make([]T, 0, len(a)+len(b))
+	aIdx, bIdx := 0, 0
+
+	for aIdx < len(a) || bIdx < len(b) {
+		if aIdx < len(a) {
+			result = append(result, a[aIdx])
+			aIdx++
+		}
+
+		if bIdx < len(b) {
+			result = append(result, b[bIdx])
+			bIdx++
+		}
+	}
+
+	return result
+}
+
+// groupedInterleave interleaves elements in batches of groupSize from a and b.
+func groupedInterleave[T any](groupSize int, a, b []T) []T {
+	if groupSize <= 0 {
+		groupSize = 1
+	}
+
+	result := make([]T, 0, len(a)+len(b))
+	aIdx, bIdx := 0, 0
+
+	for aIdx < len(a) || bIdx < len(b) {
+		// Add batch from a.
+		for i := 0; i < groupSize && aIdx < len(a); i++ {
+			result = append(result, a[aIdx])
+			aIdx++
+		}
+
+		// Add batch from b.
+		for i := 0; i < groupSize && bIdx < len(b); i++ {
+			result = append(result, b[bIdx])
+			bIdx++
+		}
+	}
+
+	return result
+}
+
+// randomInterleave combines elements from a and b in pseudo-random order.
+func randomInterleave[T any](a, b []T) []T {
+	result := make([]T, 0, len(a)+len(b))
+	result = append(result, a...)
+	result = append(result, b...)
+
+	rand.Shuffle(len(result), func(i, j int) {
+		result[i], result[j] = result[j], result[i]
+	})
+
+	return result
+}
+
 // mapRange maps fn over indices [start..end] (inclusive) and returns the
 // results. This provides functional-style array generation for benchmarks.
 //
@@ -120,6 +255,10 @@ type benchmarkWalletConfig struct {
 	// numTxOutputs is the number of outputs per transaction. If 0,
 	// defaults to 1 output per transaction.
 	numTxOutputs int
+
+	// txInterleavePattern specifies the interleaving pattern for organizing
+	// transactions with different states (confirmed vs unconfirmed).
+	txInterleavePattern InterleavePattern
 }
 
 // benchmarkWallet holds a wallet and its created wallet transactions.
@@ -135,6 +274,10 @@ type benchmarkWallet struct {
 	// during benchmark setup. These are spending transactions with both
 	// debits (inputs) and credits (outputs) that are in the mempool.
 	unconfirmedTxs []*wire.MsgTx
+
+	// allTxs contains all wallet transactions (both confirmed and
+	// unconfirmed) combined.
+	allTxs []*wire.MsgTx
 }
 
 // setupBenchmarkWallet creates a wallet with test data based on the provided
@@ -171,10 +314,21 @@ func setupBenchmarkWallet(tb testing.TB,
 		}
 	}
 
+	// Combine confirmed and unconfirmed transactions using the specified
+	// pattern. This ensures diverse transaction states in allTxs even with
+	// small dataset sizes (e.g., when using constantGrowth which defaults
+	// to 5 elements), allowing benchmarks to test iteration logic that
+	// handles mixed confirmation states.
+	allTxs := Interleave(
+		cfg.txInterleavePattern, 0, txsResult.confirmed,
+		txsResult.unconfirmed,
+	)
+
 	return &benchmarkWallet{
 		Wallet:         w,
 		confirmedTxs:   txsResult.confirmed,
 		unconfirmedTxs: txsResult.unconfirmed,
+		allTxs:         allTxs,
 	}
 }
 
