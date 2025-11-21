@@ -724,6 +724,7 @@ func BenchmarkScriptForOutputAPI(b *testing.B) {
 					numWalletTxs: utxoGrowth[i],
 				},
 			)
+			fmt.Println("SETUP benchmarking wallet")
 
 			testAddr := getTestAddress(
 				b, bw.Wallet, accountGrowth[i],
