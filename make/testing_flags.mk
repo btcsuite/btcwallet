@@ -39,6 +39,21 @@ ifneq ($(nocache),)
 TEST_FLAGS += -test.count=1
 endif
 
+ifneq ($(benchmem),)
+TEST_FLAGS += -test.benchmem
+endif
+
+# BENCH_PATTERN is the pattern to filter benchmarks. If not specified, all
+# benchmarks are run (default is ".").
+BENCH_PATTERN ?= .
+
+# If a specific benchmark pattern is provided, update the pattern and mark as
+# targeted.
+ifneq ($(bench),)
+BENCH_PATTERN = $(bench)
+UNIT_TARGETED = yes
+endif
+
 # Define the log tags that will be applied only when running unit tests. If none
 # are provided, we default to "debug stdlog" which will be standard debug log
 # output.
@@ -61,7 +76,7 @@ UNIT_RACE := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -race $(UNI
 
 # NONE is a special value which selects no other tests but only executes the
 # benchmark tests here.
-UNIT_BENCH := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE $(UNITPKG)
+UNIT_BENCH := $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -test.bench=$(BENCH_PATTERN) -test.run=NONE $(UNITPKG)
 endif
 
 ifeq ($(UNIT_TARGETED), no)
@@ -70,7 +85,7 @@ UNIT_DEBUG := $(GOLIST) | $(XARGS) env $(GOTEST) -v -tags="$(DEV_TAGS) $(LOG_TAG
 
 # NONE is a special value which selects no other tests but only executes the
 # benchmark tests here.
-UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" -test.bench=. -test.run=NONE
+UNIT_BENCH := $(GOLIST) | $(XARGS) env $(GOTEST) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) -test.bench=$(BENCH_PATTERN) -test.run=NONE
 UNIT_RACE := $(UNIT) -race
 endif
 
