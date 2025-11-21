@@ -20,7 +20,7 @@ env:
 
 jobs:
   benchmark:
-    name: Run Benchmarks and Compare (${{ env.REGRESSION_THRESHOLD }}% threshold)
+    name: Run Benchmarks and Compare
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     permissions:
