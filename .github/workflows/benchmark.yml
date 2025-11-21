@@ -157,46 +157,6 @@ jobs:
             echo "✅ No significant performance regressions detected."
           fi
 
-      - name: Comment PR with benchmark results
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
-          script: |
-            const fs = require('fs');
-            const benchstatOutput = fs.readFileSync('benchstat-output.txt', 'utf8');
-
-            // Find existing benchmark comment
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            const botComment = comments.data.find(comment =>
-              comment.user.type === 'Bot' &&
-              comment.body.includes('Benchmark Comparison Results')
-            );
-
-            const commentBody = benchstatOutput + '\n\n---\n*Benchmarks run with `make unit-bench pkg=wallet benchmem=1 log=error`*';
-
-            if (botComment) {
-              // Update existing comment
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: commentBody
-              });
-            } else {
-              // Create new comment
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: commentBody
-              });
-            }
-
       - name: Upload benchmark results as artifacts
         uses: actions/upload-artifact@v4
         with:
