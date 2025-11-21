@@ -117,11 +117,15 @@ func BenchmarkLabelTxAPI(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 
+				// INTENTIONAL REGRESSION: Store allocations to prevent optimization
+				var sink []byte
+				var sinkSlice [][]byte
+
 				for i := 0; b.Loop(); i++ {
-					// INTENTIONAL REGRESSION: Allocate extra memory to test CI detection
-					_ = make([]byte, 5000)  // ~5KB extra bytes allocation
-					for j := 0; j < 20; j++ { // 20 extra allocations
-						_ = make([]byte, 1)
+					// Allocate extra memory to test CI detection
+					sink = make([]byte, 5000)  // ~5KB extra bytes
+					for j := 0; j < 20; j++ {  // 20 extra allocations
+						sinkSlice = append(sinkSlice[:0], make([]byte, 1))
 					}
 
 					err = bw.LabelTx(
@@ -130,6 +134,9 @@ func BenchmarkLabelTxAPI(b *testing.B) {
 					)
 					require.NoError(b, err)
 				}
+				// Use sink to prevent dead code elimination
+				_ = sink
+				_ = sinkSlice
 			})
 
 			// Verification: Ensure the label was successfully
