@@ -21,25 +21,25 @@ func BenchmarkGetUtxoAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 14
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -57,7 +57,7 @@ func BenchmarkGetUtxoAPI(b *testing.B) {
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-Addresses-%0*d-UTXOs",
 			accountGrowthPadding, accountGrowth[i],
 			addressGrowthPadding, addressGrowth[i],
@@ -123,25 +123,25 @@ func BenchmarkListUnspentAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 14
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -163,7 +163,7 @@ func BenchmarkListUnspentAPI(b *testing.B) {
 		maxConfs = math.MaxInt32
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		accountName, _ := generateAccountName(accountGrowth[i], scopes)
 
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-Addresses-%0*d-UTXOs",
@@ -230,24 +230,24 @@ func BenchmarkLeaseOutputAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 14
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
@@ -270,7 +270,7 @@ func BenchmarkLeaseOutputAPI(b *testing.B) {
 		duration = time.Hour
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-Addresses-%0*d-UTXOs",
 			accountGrowthPadding, accountGrowth[i],
 			addressGrowthPadding, addressGrowth[i],
@@ -338,24 +338,24 @@ func BenchmarkReleaseOutputAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 14
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
@@ -378,7 +378,7 @@ func BenchmarkReleaseOutputAPI(b *testing.B) {
 		duration = time.Hour
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-Addresses-%0*d-UTXOs",
 			accountGrowthPadding, accountGrowth[i],
 			addressGrowthPadding, addressGrowth[i],
@@ -456,25 +456,25 @@ func BenchmarkListLeasedOutputsAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// linearGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		linearGrowthIteration = 14
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, linearGrowthIteration,
 			constantGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, linearGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, linearGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -494,7 +494,7 @@ func BenchmarkListLeasedOutputsAPI(b *testing.B) {
 		duration = time.Hour
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= linearGrowthIteration; i++ {
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-Addresses-%0*d-UTXOs",
 			accountGrowthPadding, accountGrowth[i],
 			addressGrowthPadding, addressGrowth[i],

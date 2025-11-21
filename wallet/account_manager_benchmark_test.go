@@ -18,25 +18,25 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -50,7 +50,7 @@ func BenchmarkListAccountsByScopeAPI(b *testing.B) {
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
 			accountGrowthPadding, accountGrowth[i],
 			utxoGrowthPadding, utxoGrowth[i])
@@ -109,23 +109,23 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 
 		// maxGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -139,7 +139,7 @@ func BenchmarkListAccountsAPI(b *testing.B) {
 		scopes = waddrmgr.DefaultKeyScopes
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
 			accountGrowthPadding, accountGrowth[i],
 			utxoGrowthPadding, utxoGrowth[i])
@@ -196,23 +196,23 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 
 		// maxGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -226,7 +226,7 @@ func BenchmarkListAccountsByNameAPI(b *testing.B) {
 		scopes = waddrmgr.DefaultKeyScopes
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		accountName, _ := generateAccountName(accountGrowth[i], scopes)
 
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
@@ -287,24 +287,24 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 10
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
@@ -315,7 +315,7 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		name := fmt.Sprintf("%0*d-Accounts", accountGrowthPadding,
 			accountGrowth[i])
 
@@ -390,25 +390,25 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -422,7 +422,7 @@ func BenchmarkGetAccountAPI(b *testing.B) {
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		accountName, _ := generateAccountName(accountGrowth[i], scopes)
 
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
@@ -483,24 +483,24 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 11
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
@@ -511,7 +511,7 @@ func BenchmarkRenameAccountAPI(b *testing.B) {
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0044}
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		accountName, accountNumber := generateAccountName(
 			accountGrowth[i], scopes,
 		)
@@ -604,25 +604,25 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 14
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
-			exponentialGrowth,
+			startGrowthIteration, endGrowthIteration,
+			linearGrowth,
 		)
 
 		accountGrowthPadding = decimalWidth(
@@ -638,7 +638,7 @@ func BenchmarkGetBalanceAPI(b *testing.B) {
 		confirmations = int32(0)
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		accountName, _ := generateAccountName(accountGrowth[i], scopes)
 
 		name := fmt.Sprintf("%0*d-Accounts-%0*d-UTXOs",
@@ -701,24 +701,24 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 		// growth sequence.
 		startGrowthIteration = 0
 
-		// maxGrowthIteration is the maximum iteration index for the
+		// endGrowthIteration is the maximum iteration index for the
 		// growth sequence.
-		maxGrowthIteration = 10
+		endGrowthIteration = 5
 	)
 
 	var (
 		accountGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			linearGrowth,
 		)
 
 		addressGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
 		utxoGrowth = mapRange(
-			startGrowthIteration, maxGrowthIteration,
+			startGrowthIteration, endGrowthIteration,
 			constantGrowth,
 		)
 
@@ -731,7 +731,7 @@ func BenchmarkImportAccountAPI(b *testing.B) {
 		dryRun = false
 	)
 
-	for i := 0; i <= maxGrowthIteration; i++ {
+	for i := 0; i <= endGrowthIteration; i++ {
 		accountKey, masterFingerprint, addrT := generateTestExtendedKey(
 			b, accountGrowth[i],
 		)
