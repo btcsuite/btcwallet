@@ -159,6 +159,10 @@ type WalletInfo struct {
 	// seed or was created as a new wallet.
 	IsImported bool
 
+	// ManagerVersion is the version of the wallet manager that created this
+	// wallet.
+	ManagerVersion int32
+
 	// IsWatchOnly indicates whether the wallet is in watch-only mode,
 	// meaning it does not have private keys and cannot sign transactions.
 	IsWatchOnly bool
@@ -198,6 +202,10 @@ type CreateWalletParams struct {
 	// IsImported should be set to true if the wallet is being created from
 	// an existing seed.
 	IsImported bool
+
+	// ManagerVersion is the version of the wallet manager that created this
+	// wallet.
+	ManagerVersion int32
 
 	// IsWatchOnly indicates whether the wallet is being created in
 	// watch-only mode.
