@@ -37,13 +37,9 @@ type WalletStore interface {
 	// encrypted seed as a byte slice or an error if the retrieval fails.
 	GetEncryptedHDSeed(ctx context.Context, walletID uint32) ([]byte, error)
 
-	// ChangePassphrase changes the passphrase for the wallet. It takes the
-	// old and new passphrases as byte slices, and a boolean indicating
-	// whether to change the private passphrase (true) or the public
-	// passphrase (false). It returns an error if the passphrase change
-	// fails (e.g., incorrect old passphrase).
-	ChangePassphrase(ctx context.Context,
-		params ChangePassphraseParams) error
+	// UpdateWalletSecrets updates the secrets for the wallet.
+	UpdateWalletSecrets(ctx context.Context,
+		params UpdateWalletSecretsParams) error
 }
 
 // AccountStore defines the database actions for managing accounts.

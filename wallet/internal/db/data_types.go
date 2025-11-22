@@ -257,24 +257,29 @@ type UpdateWalletParams struct {
 	SyncedTo *Block
 }
 
-// ChangePassphraseParams contains the parameters for changing a wallet's
-// passphrase.
-type ChangePassphraseParams struct {
+// UpdateWalletSecretsParams contains the parameters for updating a wallet's
+// secrets.
+type UpdateWalletSecretsParams struct {
 	// WalletID is the ID of the wallet to update.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// OldPassphrase is the current passphrase.
-	OldPassphrase []byte
+	// MasterPrivParams are the parameters (e.g. salt, scrypt N/R/P) used
+	// to derive the master private key.
+	MasterPrivParams []byte
 
-	// NewPassphrase is the new passphrase to set.
-	NewPassphrase []byte
+	// EncryptedCryptoPrivKey is the encrypted private crypto key, used to
+	// protect private keys in the database.
+	EncryptedCryptoPrivKey []byte
 
-	// IsPrivate specifies whether to change the private (true) or public
-	// (false) passphrase.
-	IsPrivate bool
+	// EncryptedCryptoScriptKey is the encrypted script crypto key, used to
+	// protect scripts in the database.
+	EncryptedCryptoScriptKey []byte
+
+	// EncryptedMasterHdPrivKey is the encrypted master HD private key.
+	EncryptedMasterHdPrivKey []byte
 }
 
 // --------------------
