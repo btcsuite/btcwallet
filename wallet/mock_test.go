@@ -1057,3 +1057,27 @@ func (m *mockManagedPubKeyAddr) DerivationInfo() (waddrmgr.KeyScope,
 	return args.Get(0).(waddrmgr.KeyScope),
 		args.Get(1).(waddrmgr.DerivationPath), args.Bool(2)
 }
+
+// mockSpendDetails is a mock implementation of the SpendDetails interface.
+type mockSpendDetails struct {
+	mock.Mock
+}
+
+// A compile-time assertion to ensure that mockSpendDetails implements the
+// SpendDetails interface.
+var _ SpendDetails = (*mockSpendDetails)(nil)
+
+// Sign implements the SpendDetails interface.
+func (m *mockSpendDetails) Sign(params *RawSigParams,
+	privKey *btcec.PrivateKey) (RawSignature, error) {
+
+	args := m.Called(params, privKey)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(RawSignature), args.Error(1)
+}
+
+// isSpendDetails implements the SpendDetails interface.
+func (m *mockSpendDetails) isSpendDetails() {}
