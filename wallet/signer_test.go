@@ -346,9 +346,9 @@ func deterministicPrivKey(t *testing.T) (*btcec.PrivateKey, *btcec.PublicKey) {
 	return privKey, pubKey
 }
 
-// TestSignMessage tests the signing of a message with different signature
+// TestSignDigest tests the signing of a message digest with different signature
 // types.
-func TestSignMessage(t *testing.T) {
+func TestSignDigest(t *testing.T) {
 	t.Parallel()
 
 	// We'll use a common set of parameters for all signing test cases to
@@ -363,13 +363,17 @@ func TestSignMessage(t *testing.T) {
 		},
 	}
 	msg := []byte("test message")
+	msgHash := chainhash.HashB(msg)
+	msgDoubleHash := chainhash.DoubleHashB(msg)
+	tag := []byte("test tag")
+	taggedHash := chainhash.TaggedHash(tag, msg)
 
 	testCases := []struct {
 		// name is the name of the test case.
 		name string
 
 		// intent is the signing intent to use for the test.
-		intent *SignMessageIntent
+		intent *SignDigestIntent
 
 		// verify is a function that verifies the signature produced by
 		// the signing intent.
@@ -378,9 +382,9 @@ func TestSignMessage(t *testing.T) {
 	}{
 		{
 			name: "ECDSA success",
-			intent: &SignMessageIntent{
-				Msg:        msg,
-				DoubleHash: false,
+			intent: &SignDigestIntent{
+				Digest:     msgHash,
+				SigType:    SigTypeECDSA,
 				CompactSig: false,
 			},
 			verify: func(t *testing.T, sig Signature,
@@ -390,7 +394,6 @@ func TestSignMessage(t *testing.T) {
 
 				ecdsaSig, ok := sig.(ECDSASignature)
 				require.True(t, ok, "expected ECDSASignature")
-				msgHash := chainhash.HashB(msg)
 				require.True(
 					t, ecdsaSig.Verify(msgHash, pubKey),
 					"signature invalid",
@@ -399,9 +402,9 @@ func TestSignMessage(t *testing.T) {
 		},
 		{
 			name: "ECDSA compact success",
-			intent: &SignMessageIntent{
-				Msg:        msg,
-				DoubleHash: true,
+			intent: &SignDigestIntent{
+				Digest:     msgDoubleHash,
+				SigType:    SigTypeECDSA,
 				CompactSig: true,
 			},
 			verify: func(t *testing.T, sig Signature,
@@ -411,9 +414,8 @@ func TestSignMessage(t *testing.T) {
 
 				compactSig, ok := sig.(CompactSignature)
 				require.True(t, ok, "expected CompactSignature")
-				msgHash := chainhash.DoubleHashB(msg)
 				recoveredKey, _, err := ecdsa.RecoverCompact(
-					compactSig, msgHash,
+					compactSig, msgDoubleHash,
 				)
 				require.NoError(t, err)
 				require.True(
@@ -424,11 +426,9 @@ func TestSignMessage(t *testing.T) {
 		},
 		{
 			name: "Schnorr success",
-			intent: &SignMessageIntent{
-				Msg: msg,
-				Schnorr: &SchnorrSignOpts{
-					Tag: []byte("test tag"),
-				},
+			intent: &SignDigestIntent{
+				Digest:  taggedHash[:],
+				SigType: SigTypeSchnorr,
 			},
 			verify: func(t *testing.T, sig Signature,
 				pubKey *btcec.PublicKey) {
@@ -438,22 +438,20 @@ func TestSignMessage(t *testing.T) {
 				schnorrSig, ok := sig.(SchnorrSignature)
 				require.True(t, ok, "expected SchnorrSignature")
 
-				msgHash := chainhash.TaggedHash(
-					[]byte("test tag"), msg,
-				)
 				require.True(t,
-					schnorrSig.Verify(msgHash[:], pubKey),
+					schnorrSig.Verify(
+						taggedHash[:], pubKey,
+					),
 					"signature invalid",
 				)
 			},
 		},
 		{
 			name: "Schnorr success with tweak",
-			intent: &SignMessageIntent{
-				Msg: msg,
-				Schnorr: &SchnorrSignOpts{
-					Tweak: []byte("test tweak"),
-				},
+			intent: &SignDigestIntent{
+				Digest:       msgHash,
+				SigType:      SigTypeSchnorr,
+				TaprootTweak: []byte("test tweak"),
 			},
 			verify: func(t *testing.T, sig Signature,
 				pubKey *btcec.PublicKey) {
@@ -469,7 +467,6 @@ func TestSignMessage(t *testing.T) {
 					*privKey, tweak,
 				)
 				tweakedPub := tweakedKey.PubKey()
-				msgHash := chainhash.HashB(msg)
 
 				require.True(t,
 					schnorrSig.Verify(msgHash, tweakedPub),
@@ -510,7 +507,7 @@ func TestSignMessage(t *testing.T) {
 			).Once()
 
 			// Act: Attempt to sign the message with the wallet.
-			sig, err := w.SignMessage(t.Context(), path, tc.intent)
+			sig, err := w.SignDigest(t.Context(), path, tc.intent)
 
 			// Assert: Verify that the signature was created
 			// successfully and is valid for the given public key.
@@ -523,20 +520,22 @@ func TestSignMessage(t *testing.T) {
 	}
 }
 
-// TestSignMessageFail tests failure modes of SignMessage.
-func TestSignMessageFail(t *testing.T) {
+// TestSignDigestFail tests failure modes of SignDigest.
+func TestSignDigestFail(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := testWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	intent := &SignMessageIntent{Msg: []byte("test")}
+
+	digest := make([]byte, 32)
+	intent := &SignDigestIntent{Digest: digest}
 
 	// Test Case 1: Fetching the key manager fails.
 	// We expect an `errManagerNotFound` error to be returned.
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
 
-	_, err := w.SignMessage(t.Context(), path, intent)
+	_, err := w.SignDigest(t.Context(), path, intent)
 	require.ErrorIs(t, err, errManagerNotFound)
 
 	// Test Case 2: Obtaining the private key for signing fails.
@@ -549,8 +548,86 @@ func TestSignMessageFail(t *testing.T) {
 	mocks.pubKeyAddr.On("PrivKey").Return((*btcec.PrivateKey)(nil),
 		errPrivKeyMock).Once()
 
-	_, err = w.SignMessage(t.Context(), path, intent)
+	_, err = w.SignDigest(t.Context(), path, intent)
 	require.ErrorContains(t, err, "privkey error")
+}
+
+// TestValidateSignDigestIntent tests the validation logic for SignDigestIntent.
+func TestValidateSignDigestIntent(t *testing.T) {
+	t.Parallel()
+
+	validDigest := make([]byte, 32)
+	invalidDigest := make([]byte, 31)
+
+	testCases := []struct {
+		name    string
+		intent  *SignDigestIntent
+		wantErr error
+	}{
+		{
+			// A valid ECDSA intent with a 32-byte digest and no
+			// restricted fields should pass validation.
+			name: "valid ECDSA",
+			intent: &SignDigestIntent{
+				Digest:  validDigest,
+				SigType: SigTypeECDSA,
+			},
+			wantErr: nil,
+		},
+		{
+			// A valid Schnorr intent with a 32-byte digest and no
+			// restricted fields should pass validation.
+			name: "valid Schnorr",
+			intent: &SignDigestIntent{
+				Digest:  validDigest,
+				SigType: SigTypeSchnorr,
+			},
+			wantErr: nil,
+		},
+		{
+			// If the digest length is not 32 bytes, we expect an
+			// ErrInvalidDigestSize error.
+			name: "invalid digest length",
+			intent: &SignDigestIntent{
+				Digest:  invalidDigest,
+				SigType: SigTypeECDSA,
+			},
+			wantErr: ErrInvalidDigestSize,
+		},
+		{
+			// If an ECDSA intent provides a Taproot Tweak, we
+			// expect an ErrInvalidSignParam error as tweaks are
+			// Schnorr-specific.
+			name: "ECDSA with Taproot Tweak",
+			intent: &SignDigestIntent{
+				Digest:       validDigest,
+				SigType:      SigTypeECDSA,
+				TaprootTweak: []byte("tweak"),
+			},
+			wantErr: ErrInvalidSignParam,
+		},
+		{
+			// If a Schnorr intent requests a Compact Signature, we
+			// expect an ErrInvalidSignParam error as compact sigs
+			// are ECDSA-specific.
+			name: "Schnorr with CompactSig",
+			intent: &SignDigestIntent{
+				Digest:     validDigest,
+				SigType:    SigTypeSchnorr,
+				CompactSig: true,
+			},
+			wantErr: ErrInvalidSignParam,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateSignDigestIntent(tc.intent)
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
 }
 
 // TestComputeUnlockingScriptP2PKH tests that the wallet can generate a valid
