@@ -5,7 +5,10 @@
 package wallet
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -2057,6 +2060,551 @@ func TestShouldSkipInput(t *testing.T) {
 			// expectation (true for skippable inputs, false
 			// otherwise).
 			require.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// TestShouldSkipSigningError tests that shouldSkipSigningError correctly
+// determines whether a signing error is non-critical (and thus the input can
+// be skipped) or critical.
+func TestShouldSkipSigningError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "already signed error should be skipped",
+			err:      errAlreadySigned,
+			expected: true,
+		},
+		{
+			name:     "compute raw sig error should be skipped",
+			err:      fmt.Errorf("wrapped: %w", errComputeRawSig),
+			expected: true,
+		},
+		{
+			name: "unknown BIP32 purpose error should be " +
+				"skipped",
+			err:      ErrUnknownBip32Purpose,
+			expected: true,
+		},
+
+		{
+			name:     "generic error should not be skipped",
+			err:      errDb,
+			expected: false,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Call shouldSkipSigningError with the test error.
+			result := shouldSkipSigningError(tc.err, i)
+
+			// Assert: Verify that the function correctly identifies
+			// whether the error should cause the input to be
+			// skipped (true) or treated as a failure (false).
+			require.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// TestValidateDerivation tests that validateDerivation correctly identifies the
+// derivation type (Taproot vs. BIP32) and validates that there are no
+// conflicting or multiple derivation paths.
+func TestValidateDerivation(t *testing.T) {
+	t.Parallel()
+
+	// Define shared variables for long literals.
+	taprootDerivation := []*psbt.TaprootBip32Derivation{{}}
+	multiTapDerivation := []*psbt.TaprootBip32Derivation{{}, {}}
+	multiBip32Derivation := []*psbt.Bip32Derivation{{}, {}}
+	singleBip32Derivation := []*psbt.Bip32Derivation{{}}
+
+	// Arrange: Define test cases for derivation validation.
+	tests := []struct {
+		name      string
+		pInput    *psbt.PInput
+		isTaproot bool
+		err       error
+	}{
+		{
+			name: "single BIP32 derivation",
+			pInput: &psbt.PInput{
+				Bip32Derivation: []*psbt.Bip32Derivation{{}},
+			},
+			isTaproot: false,
+			err:       nil,
+		},
+		{
+			name: "single Taproot derivation",
+			pInput: &psbt.PInput{
+				TaprootBip32Derivation: taprootDerivation,
+			},
+			isTaproot: true,
+			err:       nil,
+		},
+		{
+			name: "multiple BIP32 derivations error",
+			pInput: &psbt.PInput{
+				Bip32Derivation: multiBip32Derivation,
+			},
+			isTaproot: false,
+			err:       ErrUnsupportedMultipleBip32Derivation,
+		},
+		{
+			name: "multiple Taproot derivations error",
+			pInput: &psbt.PInput{
+				TaprootBip32Derivation: multiTapDerivation,
+			},
+			isTaproot: false,
+			err:       ErrUnsupportedMultipleTaprootDerivation,
+		},
+		{
+			name: "ambiguous derivation",
+			pInput: &psbt.PInput{
+				Bip32Derivation:        singleBip32Derivation,
+				TaprootBip32Derivation: taprootDerivation,
+			},
+			isTaproot: false,
+			err:       ErrAmbiguousDerivation,
+		},
+		{
+			name:      "no derivation info (valid)",
+			pInput:    &psbt.PInput{},
+			isTaproot: false,
+			err:       nil,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Act: Call validateDerivation with the configured
+			// input to check for validity and determine if it's a
+			// Taproot input.
+			isTaproot, err := validateDerivation(tc.pInput, i)
+
+			// Assert: Verify that the returned error matches the
+			// expected error (e.g., for ambiguous or multiple
+			// derivations) and that the Taproot flag is set
+			// correctly for valid inputs.
+			require.ErrorIs(t, err, tc.err)
+			require.Equal(t, tc.isTaproot, isTaproot)
+		})
+	}
+}
+
+// TestFetchPsbtUtxo tests that fetchPsbtUtxo correctly prioritizes WitnessUtxo
+// over NonWitnessUtxo when retrieving the UTXO for a PSBT input, and safely
+// handles missing data.
+func TestFetchPsbtUtxo(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create dummy UTXOs for testing.
+	witnessUtxo := &wire.TxOut{Value: 1000, PkScript: []byte{0x00}}
+	nonWitnessUtxo := &wire.TxOut{Value: 2000, PkScript: []byte{0x01}}
+
+	// Arrange: Create a transaction that has the nonWitnessUtxo at index 0
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(nonWitnessUtxo)
+
+	// Arrange: Define test cases for fetching UTXOs.
+	tests := []struct {
+		name        string
+		packet      *psbt.Packet
+		inputIdx    int
+		expected    *wire.TxOut
+		expectedErr error
+	}{
+		{
+			name: "prioritize WitnessUtxo",
+			// Arrange: PSBT input with both WitnessUtxo and
+			// NonWitnessUtxo.
+			packet: &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{}},
+				},
+				Inputs: []psbt.PInput{{
+					WitnessUtxo:    witnessUtxo,
+					NonWitnessUtxo: tx,
+				}},
+			},
+			inputIdx: 0,
+			// Assert: Expect WitnessUtxo to be returned.
+			expected:    witnessUtxo,
+			expectedErr: nil,
+		},
+		{
+			name: "fallback to NonWitnessUtxo",
+			// Arrange: PSBT input with only NonWitnessUtxo.
+			packet: &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: wire.OutPoint{
+							Index: 0,
+						},
+					}},
+				},
+				Inputs: []psbt.PInput{{
+					WitnessUtxo:    nil,
+					NonWitnessUtxo: tx,
+				}},
+			},
+			inputIdx: 0,
+			// Assert: Expect NonWitnessUtxo to be returned.
+			expected:    nonWitnessUtxo,
+			expectedErr: nil,
+		},
+		{
+			name: "missing all utxo info",
+			packet: &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{}},
+				},
+				Inputs: []psbt.PInput{{
+					WitnessUtxo:    nil,
+					NonWitnessUtxo: nil,
+				}},
+			},
+			inputIdx:    0,
+			expected:    nil,
+			expectedErr: ErrInputMissingUtxoInfo,
+		},
+		{
+			name: "input index out of bounds",
+			packet: &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{},
+				},
+				Inputs: []psbt.PInput{},
+			},
+			inputIdx:    0,
+			expected:    nil,
+			expectedErr: ErrPsbtInputIndexOutOfBounds,
+		},
+		{
+			name: "prevout index out of bounds",
+			packet: &psbt.Packet{
+				UnsignedTx: &wire.MsgTx{
+					TxIn: []*wire.TxIn{{
+						PreviousOutPoint: wire.OutPoint{
+							Index: 99,
+						},
+					}},
+				},
+				Inputs: []psbt.PInput{{
+					NonWitnessUtxo: tx,
+				}},
+			},
+			inputIdx:    0,
+			expected:    nil,
+			expectedErr: ErrPrevOutIndexOutOfBounds,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Act: Call fetchPsbtUtxo with the configured packet
+			// and input index.
+			got, err := fetchPsbtUtxo(tc.packet, tc.inputIdx)
+
+			// Assert: Verify that the function returns the correct
+			// UTXO (or nil on error) and the expected error
+			// status.
+			require.ErrorIs(t, err, tc.expectedErr)
+			require.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+// TestCheckTaprootScriptSpendSig tests that checkTaprootScriptSpendSig
+// correctly detects if a Taproot script spend signature already exists for the
+// given key and leaf.
+func TestCheckTaprootScriptSpendSig(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create dummy public key and leaf hash for Taproot
+	// signatures.
+	xOnlyPubKey := bytes.Repeat([]byte{0x01}, 32)
+	leafHash := bytes.Repeat([]byte{0x02}, 32)
+
+	// Pre-define complex slice literals.
+	diffKeySig := []*psbt.TaprootScriptSpendSig{
+		{
+			XOnlyPubKey: bytes.Repeat(
+				[]byte{0x03}, 32,
+			),
+			LeafHash: leafHash,
+		},
+	}
+
+	sameKeySig := []*psbt.TaprootScriptSpendSig{
+		{
+			XOnlyPubKey: xOnlyPubKey,
+			LeafHash:    leafHash,
+		},
+	}
+
+	// Arrange: Define test cases for checking existing Taproot script
+	// spend signatures.
+	tests := []struct {
+		name          string
+		pInput        *psbt.PInput
+		tapDerivation *psbt.TaprootBip32Derivation
+		err           error
+	}{
+		{
+			name: "no existing signature",
+			// Arrange: No TaprootScriptSpendSig in the input.
+			pInput: &psbt.PInput{
+				TaprootScriptSpendSig: nil,
+			},
+			tapDerivation: &psbt.TaprootBip32Derivation{
+				XOnlyPubKey: xOnlyPubKey,
+				LeafHashes:  [][]byte{leafHash},
+			},
+			err: nil,
+		},
+		{
+			name: "existing signature for different key",
+			// Arrange: A TaprootScriptSpendSig exists, but for a
+			// different XOnlyPubKey.
+			pInput: &psbt.PInput{
+				TaprootScriptSpendSig: diffKeySig,
+			},
+			tapDerivation: &psbt.TaprootBip32Derivation{
+				XOnlyPubKey: xOnlyPubKey,
+				LeafHashes:  [][]byte{leafHash},
+			},
+			err: nil,
+		},
+		{
+			name: "existing signature for same key and leaf",
+			// Arrange: A matching TaprootScriptSpendSig already
+			// exists.
+			pInput: &psbt.PInput{
+				TaprootScriptSpendSig: sameKeySig,
+			},
+			tapDerivation: &psbt.TaprootBip32Derivation{
+				XOnlyPubKey: xOnlyPubKey,
+				LeafHashes:  [][]byte{leafHash},
+			},
+			// Assert: Expect errAlreadySigned.
+			err: errAlreadySigned,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Act: Call checkTaprootScriptSpendSig with the
+			// configured input and derivation info.
+			err := checkTaprootScriptSpendSig(
+				tc.pInput, tc.tapDerivation,
+			)
+
+			// Assert: Verify that the function returns an error
+			// only if a valid signature for the same key and leaf
+			// hash already exists.
+			require.ErrorIs(t, err, tc.err)
+		})
+	}
+}
+
+// TestAddTaprootSigToPInput tests that addTaprootSigToPInput correctly adds a
+// generated Taproot signature to the PSBT input, handling both Key Spend and
+// Script Spend paths.
+func TestAddTaprootSigToPInput(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Define dummy signature, public key, and leaf hash.
+	sig := []byte{0x01, 0x02}
+	xOnlyPubKey := bytes.Repeat([]byte{0x03}, 32)
+	leafHash := bytes.Repeat([]byte{0x04}, 32)
+
+	// Helper to create signature with appended sighash
+	sigWithHash := append(slices.Clone(sig), byte(txscript.SigHashAll))
+
+	// Arrange: Define test cases for adding Taproot signatures.
+	tests := []struct {
+		name           string
+		initialPInput  *psbt.PInput
+		sighashType    txscript.SigHashType
+		details        TaprootSpendDetails
+		tapDerivation  *psbt.TaprootBip32Derivation
+		expectedPInput *psbt.PInput
+	}{
+		{
+			name: "key path spend default sighash",
+			// Arrange: Initial empty PSBT input.
+			initialPInput: &psbt.PInput{},
+			sighashType:   txscript.SigHashDefault,
+			// Arrange: Key path spend details.
+			details: TaprootSpendDetails{
+				SpendPath: KeyPathSpend,
+			},
+			tapDerivation: nil, // Not used for key path spend
+			// Assert: Expect TaprootKeySpendSig to be set.
+			expectedPInput: &psbt.PInput{
+				TaprootKeySpendSig: sig,
+			},
+		},
+		{
+			name: "key path spend non-default sighash",
+			// Arrange: Initial empty PSBT input.
+			initialPInput: &psbt.PInput{},
+			sighashType:   txscript.SigHashAll,
+			// Arrange: Key path spend details.
+			details: TaprootSpendDetails{
+				SpendPath: KeyPathSpend,
+			},
+			tapDerivation: nil,
+			// Assert: Expect TaprootKeySpendSig with appended
+			// sighash.
+			expectedPInput: &psbt.PInput{
+				TaprootKeySpendSig: sigWithHash,
+			},
+		},
+		{
+			name: "script path spend",
+			// Arrange: Initial PSBT input with default SighashType.
+			initialPInput: &psbt.PInput{
+				SighashType: txscript.SigHashDefault,
+			},
+			sighashType: txscript.SigHashDefault,
+			// Arrange: Script path spend details.
+			details: TaprootSpendDetails{
+				SpendPath: ScriptPathSpend,
+			},
+			// Arrange: Taproot BIP32 derivation with XOnlyPubKey
+			// and LeafHashes.
+			tapDerivation: &psbt.TaprootBip32Derivation{
+				XOnlyPubKey: xOnlyPubKey,
+				LeafHashes:  [][]byte{leafHash},
+			},
+			// Assert: Expect TaprootScriptSpendSig to be appended.
+			//nolint:lll
+			expectedPInput: &psbt.PInput{
+				SighashType: txscript.SigHashDefault,
+				TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{{
+					XOnlyPubKey: xOnlyPubKey,
+					LeafHash:    leafHash,
+					Signature:   sig,
+					SigHash:     txscript.SigHashDefault,
+				}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange: Create a copy of the initial input to ensure
+			// test isolation and avoid side effects.
+			pInput := *tc.initialPInput
+
+			// Act: Call addTaprootSigToPInput to add the signature
+			// to the PSBT input.
+			addTaprootSigToPInput(
+				&pInput, sig, tc.sighashType, tc.details,
+				tc.tapDerivation,
+			)
+
+			// Assert: Verify that the resulting PSBT input matches
+			// the expected state.
+			require.Equal(t, tc.expectedPInput, &pInput)
+		})
+	}
+}
+
+// TestAddBip32SigToPInput tests that addBip32SigToPInput correctly adds a
+// generated BIP32 signature to the PSBT input's partial signatures, appending
+// the sighash type if necessary.
+func TestAddBip32SigToPInput(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Define dummy signature and public key.
+	sig := []byte{0x01, 0x02}
+	pubKey := bytes.Repeat([]byte{0x03}, 33)
+
+	// Helper to create signature with appended sighash
+	sigWithHash := append(slices.Clone(sig), byte(txscript.SigHashAll))
+
+	// Arrange: Define test cases for adding BIP32 signatures.
+	tests := []struct {
+		name           string
+		initialPInput  *psbt.PInput
+		sighashType    txscript.SigHashType
+		addrType       waddrmgr.AddressType
+		derivation     *psbt.Bip32Derivation
+		expectedPInput *psbt.PInput
+	}{
+		{
+			name: "legacy p2pkh (no sighash append)",
+			// Arrange: Initial empty PSBT input.
+			initialPInput: &psbt.PInput{},
+			sighashType:   txscript.SigHashAll,
+			// Arrange: Public Key Hash address type.
+			addrType: waddrmgr.PubKeyHash,
+			// Arrange: BIP32 derivation with PubKey.
+			derivation: &psbt.Bip32Derivation{
+				PubKey: pubKey,
+			},
+			// Assert: Expect PartialSigs to be appended with raw
+			// sig.
+			expectedPInput: &psbt.PInput{
+				PartialSigs: []*psbt.PartialSig{{
+					PubKey:    pubKey,
+					Signature: sig,
+				}},
+			},
+		},
+		{
+			name: "segwit p2wkh (append sighash)",
+			// Arrange: Initial empty PSBT input.
+			initialPInput: &psbt.PInput{},
+			sighashType:   txscript.SigHashAll,
+			// Arrange: Witness Public Key Hash address type.
+			addrType: waddrmgr.WitnessPubKey,
+			// Arrange: BIP32 derivation with PubKey.
+			derivation: &psbt.Bip32Derivation{
+				PubKey: pubKey,
+			},
+			// Assert: Expect PartialSigs to be appended with sig +
+			// sighash.
+			expectedPInput: &psbt.PInput{
+				PartialSigs: []*psbt.PartialSig{{
+					PubKey:    pubKey,
+					Signature: sigWithHash,
+				}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange: Create a copy of the initial input to ensure
+			// test isolation.
+			pInput := *tc.initialPInput
+
+			// Act: Call addBip32SigToPInput to add the signature
+			// to the PSBT input.
+			addBip32SigToPInput(
+				&pInput, sig, tc.sighashType, tc.derivation,
+				tc.addrType,
+			)
+
+			// Assert: Verify that the resulting PSBT input matches
+			// the expected state.
+			require.Equal(t, tc.expectedPInput, &pInput)
 		})
 	}
 }
