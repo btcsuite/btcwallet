@@ -9,6 +9,14 @@ import (
 )
 
 var (
+	// ErrWalletNotFound is returned when a wallet is not found in the
+	// database.
+	ErrWalletNotFound = errors.New("wallet not found")
+
+	// ErrSecretNotFound is returned when a secret is not found or is empty
+	// in the database.
+	ErrSecretNotFound = errors.New("secret not found")
+
 	// ErrNilDB is returned when a nil database connection pointer is
 	// provided to the wallet.
 	ErrNilDB = errors.New(
