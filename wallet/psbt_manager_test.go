@@ -11,7 +11,9 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -1773,4 +1775,288 @@ func TestFundPsbtDecorateFailure(t *testing.T) {
 
 	// Assert: Should fail due to DecorateInputs error.
 	require.ErrorIs(t, err, errDb)
+}
+
+// TestFundPsbtErrors tests various error conditions in FundPsbt.
+func TestFundPsbtErrors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Common intent setup (auto coin selection).
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x00}})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	intent := &FundIntent{
+		Packet:  packet,
+		FeeRate: btcunit.NewSatPerKVByte(1000),
+		// Policy implies auto selection
+		Policy: &InputsPolicy{
+			Source: &ScopedAccount{
+				AccountName: "default",
+				KeyScope:    waddrmgr.KeyScopeBIP0084,
+			},
+		},
+	}
+
+	t.Run("validate intent fails", func(t *testing.T) {
+		t.Parallel()
+		w, _ := testWalletWithMocks(t)
+		// Invalid intent (nil packet)
+		_, _, err := w.FundPsbt(t.Context(), &FundIntent{})
+		require.ErrorIs(t, err, ErrNilTxIntent)
+	})
+
+	t.Run("CreateTransaction fails", func(t *testing.T) {
+		t.Parallel()
+		w, mocks := testWalletWithMocks(t)
+
+		// Mock CreateTransaction failure via Account lookup failure
+		mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).
+			Return(nil, errDb)
+
+		_, _, err := w.FundPsbt(t.Context(), intent)
+		// AccountNumber failure is wrapped in ErrAccountNotFound by
+		// prepareTxAuthSources.
+		require.ErrorIs(t, err, ErrAccountNotFound)
+	})
+}
+
+// TestParseBip32Path tests that parseBip32Path correctly parses valid BIP32
+// paths and returns the appropriate KeyScope and DerivationPath, while also
+// flagging invalid paths.
+func TestParseBip32Path(t *testing.T) {
+	t.Parallel()
+
+	// Use mainnet params for testing (HDCoinType = 0).
+	chainParams := &chaincfg.MainNetParams
+	w := &Wallet{chainParams: chainParams}
+
+	hardened := func(i uint32) uint32 {
+		return i + hdkeychain.HardenedKeyStart
+	}
+
+	tests := []struct {
+		name        string
+		path        []uint32
+		wantPath    BIP32Path
+		expectedErr error // Use error type for require.ErrorIs
+	}{
+		{
+			name: "valid BIP44",
+			path: []uint32{
+				hardened(44), hardened(0), hardened(0), 0, 0,
+			},
+			wantPath: BIP32Path{
+				KeyScope: waddrmgr.KeyScopeBIP0044,
+				DerivationPath: waddrmgr.DerivationPath{
+					Account: 0,
+					Branch:  0,
+					Index:   0,
+				},
+			},
+		},
+		{
+			name: "valid BIP84",
+			path: []uint32{
+				hardened(84), hardened(0), hardened(1), 0, 5,
+			},
+			wantPath: BIP32Path{
+				KeyScope: waddrmgr.KeyScopeBIP0084,
+				DerivationPath: waddrmgr.DerivationPath{
+					Account: 1,
+					Branch:  0,
+					Index:   5,
+				},
+			},
+		},
+		{
+			name:        "invalid length",
+			path:        []uint32{hardened(84)},
+			expectedErr: ErrInvalidBip32PathLength,
+		},
+		{
+			name: "unhardened purpose",
+			path: []uint32{
+				84, hardened(0), hardened(0), 0, 0,
+			},
+			expectedErr: ErrInvalidBip32PathElementHardened,
+		},
+		{
+			name: "unhardened coin type",
+			path: []uint32{
+				hardened(84), 0, hardened(0), 0, 0,
+			},
+			expectedErr: ErrInvalidBip32PathElementHardened,
+		},
+		{
+			name: "unhardened account",
+			path: []uint32{
+				hardened(84), hardened(0), 0, 0, 0,
+			},
+			expectedErr: ErrInvalidBip32PathElementHardened,
+		},
+		{
+			name: "coin type mismatch",
+			path: []uint32{
+				hardened(84), hardened(1), hardened(0), 0, 0,
+			},
+			expectedErr: ErrInvalidBip32DerivationCoinType,
+		},
+		{
+			name: "unknown purpose (now allowed in parseBip32Path)",
+			path: []uint32{
+				hardened(999), hardened(0), hardened(0), 0, 0,
+			},
+			wantPath: BIP32Path{
+				KeyScope: waddrmgr.KeyScope{
+					Purpose: 999, Coin: 0,
+				},
+				DerivationPath: waddrmgr.DerivationPath{
+					Account: 0,
+					Branch:  0,
+					Index:   0,
+				},
+			},
+			expectedErr: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Call parseBip32Path with the test path.
+			gotPath, err := w.parseBip32Path(tc.path)
+
+			// Assert: Verify that the function returns the expected
+			// error (if any) or that the parsed path components
+			// (KeyScope, DerivationPath) match the expected
+			// structure.
+			require.ErrorIs(t, err, tc.expectedErr)
+			require.Equal(t, tc.wantPath, gotPath)
+		})
+	}
+}
+
+// TestAddressTypeFromPurpose tests that addressTypeFromPurpose returns the
+// correct AddressType for supported BIP32 purposes and returns an error for
+// unknown purposes.
+func TestAddressTypeFromPurpose(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		purpose     uint32
+		want        waddrmgr.AddressType
+		expectedErr error
+	}{
+		{
+			name:    "BIP44",
+			purpose: waddrmgr.KeyScopeBIP0044.Purpose,
+			want:    waddrmgr.PubKeyHash,
+		},
+		{
+			name:    "BIP49",
+			purpose: waddrmgr.KeyScopeBIP0049Plus.Purpose,
+			want:    waddrmgr.NestedWitnessPubKey,
+		},
+		{
+			name:    "BIP84",
+			purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			want:    waddrmgr.WitnessPubKey,
+		},
+		{
+			name:    "BIP86",
+			purpose: waddrmgr.KeyScopeBIP0086.Purpose,
+			want:    waddrmgr.TaprootPubKey,
+		},
+		{
+			name:        "unknown",
+			purpose:     999,
+			expectedErr: ErrUnknownBip32Purpose,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Call addressTypeFromPurpose with the test
+			// purpose.
+			got, err := addressTypeFromPurpose(tc.purpose)
+
+			// Assert: Verify that the returned address type matches
+			// the expected type for the given purpose, or that the
+			// expected error is returned for unknown purposes.
+			require.ErrorIs(t, err, tc.expectedErr)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestShouldSkipInput tests that shouldSkipInput correctly identifies inputs
+// that should be skipped during signing (e.g., finalized inputs, inputs with
+// no derivation info) and those that should be processed.
+func TestShouldSkipInput(t *testing.T) {
+	t.Parallel()
+
+	// Define shared variables for long literals to satisfy linter.
+	taprootDerivation := []*psbt.TaprootBip32Derivation{{
+		XOnlyPubKey: []byte{0x01},
+	}}
+
+	tests := []struct {
+		name     string
+		pInput   *psbt.PInput
+		expected bool
+	}{
+		{
+			name: "finalized input should be skipped",
+			pInput: &psbt.PInput{
+				FinalScriptWitness: []byte{1, 2, 3},
+			},
+			expected: true,
+		},
+		{
+			name: "no derivation info should be skipped",
+			pInput: &psbt.PInput{
+				FinalScriptWitness:     nil,
+				Bip32Derivation:        nil,
+				TaprootBip32Derivation: nil,
+			},
+			expected: true,
+		},
+		{
+			name: "valid BIP32 derivation, not skipped",
+			pInput: &psbt.PInput{
+				Bip32Derivation: []*psbt.Bip32Derivation{{
+					PubKey: []byte{0x01},
+				}},
+			},
+			expected: false,
+		},
+		{
+			name: "valid Taproot derivation, not skipped",
+			pInput: &psbt.PInput{
+				TaprootBip32Derivation: taprootDerivation,
+			},
+			expected: false,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Call shouldSkipInput with the configured PSBT
+			// input.
+			result := shouldSkipInput(tc.pInput, i)
+
+			// Assert: Verify that the returned boolean matches the
+			// expectation (true for skippable inputs, false
+			// otherwise).
+			require.Equal(t, tc.expected, result)
+		})
+	}
 }

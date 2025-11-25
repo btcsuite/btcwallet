@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -43,11 +44,182 @@ var (
 		"cannot specify both psbt inputs and a coin selection policy",
 	)
 
-	// ErrFeeRateNegative is returned when a negative fee rate is provided.
-	ErrFeeRateNegative = errors.New("fee rate cannot be negative")
-
 	// ErrNilFundIntent is returned when a nil FundIntent is provided.
 	ErrNilFundIntent = errors.New("nil FundIntent")
+
+	// ErrNoPsbtsToCombine is returned when no PSBTs are provided to
+	// combine.
+	ErrNoPsbtsToCombine = errors.New("no psbts to combine")
+
+	// ErrDifferentTransactions is returned when PSBTs do not refer to the
+	// same transaction.
+	ErrDifferentTransactions = errors.New(
+		"psbts do not refer to the same transaction",
+	)
+
+	// ErrInputCountMismatch is returned when PSBTs have different input
+	// counts.
+	ErrInputCountMismatch = errors.New("input count mismatch")
+
+	// ErrOutputCountMismatch is returned when PSBTs have different output
+	// counts.
+	ErrOutputCountMismatch = errors.New("output count mismatch")
+
+	// ErrUnknownAddressType is returned when an unknown address type is
+	// encountered.
+	ErrUnknownAddressType = errors.New("unknown address type")
+
+	// ErrInvalidBip32PathLength is returned when a BIP32 path does not
+	// have the expected length of 5.
+	ErrInvalidBip32PathLength = errors.New("invalid BIP32 path length")
+
+	// ErrUnknownBip32Purpose is returned when a BIP32 path has a purpose
+	// that is not supported by the wallet.
+	ErrUnknownBip32Purpose = errors.New("unknown BIP32 purpose")
+
+	// ErrUnsupportedTaprootLeafCount is returned when a Taproot derivation
+	// info contains an unsupported number of leaf hashes (e.g. > 1).
+	ErrUnsupportedTaprootLeafCount = errors.New("unsupported number of " +
+		"leaf hashes in Taproot derivation")
+
+	// ErrMissingTaprootLeafScript is returned when a Taproot derivation
+	// specifies a leaf hash but the corresponding Taproot leaf script is
+	// missing from the PSBT.
+	ErrMissingTaprootLeafScript = errors.New("specified leaf hash in " +
+		"taproot BIP0032 derivation but missing taproot leaf script")
+
+	// ErrTaprootLeafHashMismatch is returned when the calculated hash of
+	// the provided Taproot leaf script does not match the leaf hash
+	// specified in the derivation info.
+	ErrTaprootLeafHashMismatch = errors.New("specified leaf hash in " +
+		"taproot BIP0032 derivation but corresponding taproot leaf " +
+		"script was not found")
+
+	// ErrUnsupportedMultipleTaprootDerivation is returned when a Taproot
+	// input has multiple derivation paths, which is not supported.
+	ErrUnsupportedMultipleTaprootDerivation = errors.New(
+		"unsupported multiple taproot BIP0032 derivation info found",
+	)
+
+	// ErrUnsupportedMultipleBip32Derivation is returned when a BIP32
+	// input has multiple derivation paths, which is not supported.
+	ErrUnsupportedMultipleBip32Derivation = errors.New(
+		"unsupported multiple BIP0032 derivation info found",
+	)
+
+	// ErrAmbiguousDerivation is returned when an input has both Taproot and
+	// BIP32 derivation information, which is an ambiguous state.
+	ErrAmbiguousDerivation = errors.New(
+		"both Taproot and BIP32 derivation info found",
+	)
+
+	// ErrInvalidTaprootMerkleRootLength is returned when the Taproot
+	// Merkle Root has an invalid length.
+	ErrInvalidTaprootMerkleRootLength = errors.New(
+		"invalid taproot merkle root length",
+	)
+
+	// ErrInvalidBip32PathElementHardened is returned when a BIP32 path
+	// element that should be hardened is not.
+	ErrInvalidBip32PathElementHardened = errors.New(
+		"invalid BIP32 derivation path, element must be hardened",
+	)
+
+	// ErrInvalidBip32DerivationCoinType is returned when the coin type in
+	// a BIP32 derivation path does not match the wallet's chain parameters.
+	ErrInvalidBip32DerivationCoinType = errors.New(
+		"invalid BIP32 derivation path, coin type mismatch",
+	)
+
+	// ErrSighashMismatch is returned when merging PSBTs with conflicting
+	// sighash types.
+	ErrSighashMismatch = errors.New("sighash type mismatch")
+
+	// ErrRedeemScriptMismatch is returned when merging PSBTs with
+	// conflicting redeem scripts.
+	ErrRedeemScriptMismatch = errors.New("redeem script mismatch")
+
+	// ErrWitnessScriptMismatch is returned when merging PSBTs with
+	// conflicting witness scripts.
+	ErrWitnessScriptMismatch = errors.New("witness script mismatch")
+
+	// ErrFinalScriptSigMismatch is returned when merging PSBTs with
+	// conflicting final script sigs.
+	ErrFinalScriptSigMismatch = errors.New("final script sig mismatch")
+
+	// ErrFinalScriptWitnessMismatch is returned when merging PSBTs with
+	// conflicting final script witnesses.
+	ErrFinalScriptWitnessMismatch = errors.New("final script witness " +
+		"mismatch")
+
+	// ErrTaprootKeySpendSigMismatch is returned when merging PSBTs with
+	// conflicting Taproot key spend signatures.
+	ErrTaprootKeySpendSigMismatch = errors.New("taproot key spend sig " +
+		"mismatch")
+
+	// ErrWitnessUtxoMismatch is returned when merging PSBTs with
+	// conflicting witness UTXOs.
+	ErrWitnessUtxoMismatch = errors.New("witness utxo mismatch")
+
+	// ErrNonWitnessUtxoMismatch is returned when merging PSBTs with
+	// conflicting non-witness UTXOs.
+	ErrNonWitnessUtxoMismatch = errors.New("non-witness utxo mismatch")
+
+	// ErrTaprootInternalKeyMismatch is returned when merging PSBTs with
+	// conflicting Taproot internal keys.
+	ErrTaprootInternalKeyMismatch = errors.New("taproot internal key " +
+		"mismatch")
+
+	// ErrImportedAddrNoDerivation is returned when trying to add output
+	// info for an imported address that has no derivation path.
+	ErrImportedAddrNoDerivation = errors.New("change addr is an " +
+		"imported addr with unknown derivation path")
+
+	// ErrNilSignPsbtParams is returned when nil SignPsbtParams are
+	// provided.
+	ErrNilSignPsbtParams = errors.New("nil SignPsbtParams")
+
+	// ErrPsbtInputIndexOutOfBounds is returned when an input index is out
+	// of bounds.
+	ErrPsbtInputIndexOutOfBounds = errors.New("psbt input index out of " +
+		"bounds")
+
+	// ErrInputMissingUtxoInfo is returned when an input lacks both
+	// WitnessUtxo and NonWitnessUtxo.
+	ErrInputMissingUtxoInfo = errors.New("input missing both " +
+		"WitnessUtxo and NonWitnessUtxo")
+
+	// ErrUnsignedTxInputIndexOutOfBounds is returned when an input index
+	// is out of bounds for the unsigned transaction.
+	ErrUnsignedTxInputIndexOutOfBounds = errors.New("psbt input index " +
+		"out of bounds for UnsignedTx inputs")
+
+	// ErrPrevOutIndexOutOfBounds is returned when a previous output index
+	// is out of bounds for the NonWitnessUtxo.
+	ErrPrevOutIndexOutOfBounds = errors.New("prevOut index out of " +
+		"bounds for NonWitnessUtxo")
+
+	// errAlreadySigned is returned when an input is already signed.
+	//
+	// NOTE: This error is private because it is used for internal control
+	// flow within the signing loop (to skip inputs) and should not be
+	// returned to the caller.
+	errAlreadySigned = errors.New("input already signed")
+
+	// errComputeRawSig is returned when the wallet cannot produce a
+	// signature for the input (e.g. key not found, signing error).
+	//
+	// NOTE: This error is private because it is used for internal control
+	// flow (skipping inputs that don't belong to this wallet) and should
+	// not be exposed to the caller.
+	errComputeRawSig = errors.New("cannot compute raw signature")
+)
+
+const (
+	// BIP32PathLength is the expected length of a BIP32 derivation path. A
+	// full path follows the structure:
+	// m / purpose' / coin_type' / account' / branch / index.
+	BIP32PathLength = 5
 )
 
 // FundIntent represents the user's intent for funding a PSBT. It serves as a
@@ -709,4 +881,127 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 	txIntent.ChangeSource = intent.ChangeSource
 
 	return txIntent
+}
+
+// parseBip32Path parses a raw BIP32 derivation path (slice of uint32) into a
+// strongly-typed structure containing the key scope and specific derivation
+// components (Account, Branch, Index).
+//
+// It enforces the following wallet-specific constraints (based on BIP44/49/84
+// conventions):
+//  1. Path length must be exactly 5.
+//  2. First 3 elements must be hardened.
+//  3. Coin type must match the wallet's chain parameters.
+//
+// NOTE: While the underlying cryptographic derivation is defined by BIP32, the
+// specific requirement for a 5-level path with hardened prefixes is strictly a
+// convention of the BIP44/49/84/86 standards, not a constraint of BIP32
+// itself.
+//
+// Returns `ErrInvalidBip32Path` if the path is invalid.
+func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
+	// The BIP32 path must have exactly 5 elements:
+	// m / purpose' / coin_type' / account' / branch / index
+	if len(path) != BIP32PathLength {
+		return BIP32Path{}, fmt.Errorf("%w: %d",
+			ErrInvalidBip32PathLength, len(path))
+	}
+
+	// The first 3 elements (Purpose, CoinType, Account) must be hardened.
+	// We check this by verifying they are >= HardenedKeyStart.
+	for i := range 3 {
+		if path[i] < hdkeychain.HardenedKeyStart {
+			return BIP32Path{}, fmt.Errorf("%w: element %d",
+				ErrInvalidBip32PathElementHardened, i)
+		}
+	}
+
+	// Helper to extract values (remove hardened flag).
+	purpose := path[0] - hdkeychain.HardenedKeyStart
+	coinType := path[1] - hdkeychain.HardenedKeyStart
+	account := path[2] - hdkeychain.HardenedKeyStart
+	branch := path[3]
+	index := path[4]
+
+	// Verify that the coin type matches the wallet's chain parameters.
+	if coinType != w.chainParams.HDCoinType {
+		return BIP32Path{}, fmt.Errorf("%w: expected %d, got %d",
+			ErrInvalidBip32DerivationCoinType,
+			w.chainParams.HDCoinType, coinType)
+	}
+
+	scope := waddrmgr.KeyScope{
+		Purpose: purpose,
+		Coin:    coinType,
+	}
+
+	bip32Path := BIP32Path{
+		KeyScope: scope,
+		DerivationPath: waddrmgr.DerivationPath{
+			Account: account,
+			Branch:  branch,
+			Index:   index,
+		},
+	}
+
+	return bip32Path, nil
+}
+
+// addressTypeFromPurpose maps a BIP purpose to a wallet address type.
+func addressTypeFromPurpose(purpose uint32) (waddrmgr.AddressType, error) {
+	// TODO(yy): Currently, we hardcode the supported BIP purposes.
+	// A more robust solution would dynamically query the `waddrmgr` to
+	// determine supported key scopes configured in the database, allowing
+	// for custom purposes (e.g., LND's 1017 purpose key) to be seamlessly
+	// supported without code changes here.
+	switch purpose {
+	case waddrmgr.KeyScopeBIP0044.Purpose:
+		return waddrmgr.PubKeyHash, nil
+
+	case waddrmgr.KeyScopeBIP0049Plus.Purpose:
+		return waddrmgr.NestedWitnessPubKey, nil
+
+	case waddrmgr.KeyScopeBIP0084.Purpose:
+		return waddrmgr.WitnessPubKey, nil
+
+	case waddrmgr.KeyScopeBIP0086.Purpose:
+		return waddrmgr.TaprootPubKey, nil
+
+	default:
+		return 0, fmt.Errorf("%w: %d", ErrUnknownBip32Purpose, purpose)
+	}
+}
+
+// shouldSkipInput determines whether the input at the given index should be
+// skipped during the signing process.
+//
+// It checks for two conditions:
+//  1. If the input already has a final script witness, it is considered
+//     complete and is skipped.
+//  2. If the input lacks any derivation information (both Taproot and BIP32),
+//     it implies that the wallet does not have the key to sign it, so it is
+//     skipped.
+func shouldSkipInput(pInput *psbt.PInput, idx int) bool {
+	// Skip if already finalized.
+	if len(pInput.FinalScriptWitness) > 0 {
+		log.Debugf("Skipping input %d: already has final "+
+			"script witness", idx)
+
+		return true
+	}
+
+	// Check if we have any derivation info.
+	tapCount := len(pInput.TaprootBip32Derivation)
+	bip32Count := len(pInput.Bip32Derivation)
+
+	if tapCount == 0 && bip32Count == 0 {
+		// No derivation info, so we can't sign this input. We skip it
+		// silently, assuming it's not ours or not meant to be signed
+		// by us.
+		log.Debugf("Skipping input %d: no derivation info", idx)
+
+		return true
+	}
+
+	return false
 }
