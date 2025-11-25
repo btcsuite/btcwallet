@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1004,4 +1005,185 @@ func shouldSkipInput(pInput *psbt.PInput, idx int) bool {
 	}
 
 	return false
+}
+
+// shouldSkipSigningError determines whether a signing error should be skipped
+// (logged and ignored) or returned as a fatal error.
+//
+// It handles cases typical in collaborative workflows where an input might
+// belong to another signer, already be signed, or use an unknown derivation
+// scheme.
+func shouldSkipSigningError(err error, idx int) bool {
+	// If the input is already signed, we can just skip it.
+	if errors.Is(err, errAlreadySigned) {
+		log.Debugf("Skipping input %d: already signed", idx)
+		return true
+	}
+
+	// In a collaborative PSBT workflow, the transaction may contain inputs
+	// that belong to other parties. Even if a derivation path is present
+	// and valid (e.g. BIP-84), it might correspond to a different signer's
+	// key (same path, different seed).
+	//
+	// If we encounter `errComputeRawSig`, it means we failed to produce a
+	// signature. This usually happens because we don't have the private
+	// key for the derived address (it's someone else's input). In this
+	// case, we skip the input and log a debug message, allowing us to
+	// proceed and sign the inputs that we DO own.
+	if errors.Is(err, errComputeRawSig) {
+		log.Debugf("Skipping input %d: %v", idx, err)
+		return true
+	}
+
+	// If the derivation path has an unknown purpose, it likely belongs to
+	// another signer or a scheme we don't support. We skip these as well.
+	if errors.Is(err, ErrUnknownBip32Purpose) {
+		log.Debugf("Skipping input %d: unknown BIP32 purpose", idx)
+		return true
+	}
+
+	return false
+}
+
+// validateDerivation inspects the derivation information for the input and
+// ensures it conforms to the supported signing modes.
+//
+// It enforces the following rules:
+//  1. Only one derivation path per type is supported.
+//  2. Taproot and BIP32 derivation information cannot be present
+//     simultaneously. This avoids ambiguity about which signing path to take.
+//
+// It returns a boolean indicating whether the input is a Taproot input (true)
+// or a legacy/SegWit input (false), and an error if the validation fails.
+func validateDerivation(pInput *psbt.PInput, idx int) (bool, error) {
+	tapCount := len(pInput.TaprootBip32Derivation)
+	bip32Count := len(pInput.Bip32Derivation)
+
+	if tapCount > 1 {
+		return false, fmt.Errorf("input %d: %w", idx,
+			ErrUnsupportedMultipleTaprootDerivation)
+	}
+
+	if bip32Count > 1 {
+		return false, fmt.Errorf("input %d: %w", idx,
+			ErrUnsupportedMultipleBip32Derivation)
+	}
+
+	if tapCount == 1 && bip32Count == 1 {
+		// This is ambiguous/invalid state in the PSBT.
+		return false, fmt.Errorf("input %d: %w", idx,
+			ErrAmbiguousDerivation)
+	}
+
+	// If we have Taproot info, it's a Taproot input.
+	return tapCount == 1, nil
+}
+
+// fetchPsbtUtxo extracts the UTXO for the given input index from the PSBT
+// packet. It prioritizes the WitnessUtxo if present, otherwise falls back to
+// the NonWitnessUtxo.
+//
+// NOTE: While psbt.InputsReadyToSign guarantees that at least one of these
+// fields is set, this function performs additional checks and returns an error
+// if the UTXO information is missing or the index is out of bounds, preventing
+// panics on malformed packets.
+func fetchPsbtUtxo(packet *psbt.Packet, idx int) (*wire.TxOut, error) {
+	if idx >= len(packet.Inputs) {
+		return nil, fmt.Errorf("%w: %d",
+			ErrPsbtInputIndexOutOfBounds, idx)
+	}
+
+	pInput := &packet.Inputs[idx]
+
+	if pInput.WitnessUtxo != nil {
+		return pInput.WitnessUtxo, nil
+	}
+
+	if pInput.NonWitnessUtxo == nil {
+		return nil, fmt.Errorf("%w: %d",
+			ErrInputMissingUtxoInfo, idx)
+	}
+
+	if idx >= len(packet.UnsignedTx.TxIn) {
+		return nil, fmt.Errorf("%w: %d",
+			ErrUnsignedTxInputIndexOutOfBounds, idx)
+	}
+
+	prevIdx := packet.UnsignedTx.TxIn[idx].PreviousOutPoint.Index
+
+	if int(prevIdx) >= len(pInput.NonWitnessUtxo.TxOut) {
+		return nil, fmt.Errorf("%w: input %d prevOut index %d",
+			ErrPrevOutIndexOutOfBounds, idx, prevIdx)
+	}
+
+	return pInput.NonWitnessUtxo.TxOut[prevIdx], nil
+}
+
+// checkTaprootScriptSpendSig checks if a Taproot script-path signature already
+// exists for the given input and derivation details. It returns
+// errAlreadySigned, if a matching signature is found, otherwise nil.
+func checkTaprootScriptSpendSig(pInput *psbt.PInput,
+	tapDerivation *psbt.TaprootBip32Derivation) error {
+
+	for _, sig := range pInput.TaprootScriptSpendSig {
+		if bytes.Equal(
+			sig.XOnlyPubKey, tapDerivation.XOnlyPubKey,
+		) && bytes.Equal(
+			sig.LeafHash, tapDerivation.LeafHashes[0],
+		) {
+
+			return errAlreadySigned
+		}
+	}
+
+	return nil
+}
+
+// addTaprootSigToPInput adds the generated signature to the PSBT input.
+//
+// NOTE: This method modifies the `pInput` in-place.
+func addTaprootSigToPInput(pInput *psbt.PInput, sig []byte,
+	sighashType txscript.SigHashType, details TaprootSpendDetails,
+	tapDerivation *psbt.TaprootBip32Derivation) {
+
+	if details.SpendPath == KeyPathSpend {
+		if sighashType != txscript.SigHashDefault {
+			sig = append(sig, byte(sighashType))
+		}
+
+		pInput.TaprootKeySpendSig = sig
+	} else {
+		tsSig := &psbt.TaprootScriptSpendSig{
+			XOnlyPubKey: tapDerivation.XOnlyPubKey,
+			LeafHash:    tapDerivation.LeafHashes[0],
+			Signature:   sig,
+			SigHash:     pInput.SighashType,
+		}
+		pInput.TaprootScriptSpendSig = append(
+			pInput.TaprootScriptSpendSig, tsSig,
+		)
+	}
+}
+
+// addBip32SigToPInput adds the generated signature to the PSBT input for
+// non-Taproot (Legacy/SegWit) inputs.
+//
+// NOTE: This method modifies the `pInput` in-place.
+func addBip32SigToPInput(pInput *psbt.PInput, sig []byte,
+	sighashType txscript.SigHashType, derivation *psbt.Bip32Derivation,
+	addrType waddrmgr.AddressType) {
+
+	// Append sighash type if needed (SegWit v0).
+	if addrType == waddrmgr.NestedWitnessPubKey ||
+		addrType == waddrmgr.WitnessPubKey {
+
+		sig = append(sig, byte(sighashType))
+	}
+
+	pInput.PartialSigs = append(pInput.PartialSigs,
+		&psbt.PartialSig{
+			PubKey:    derivation.PubKey,
+			Signature: sig,
+		},
+	)
 }
