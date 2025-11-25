@@ -188,3 +188,9 @@ func testWalletWatchingOnly(t *testing.T) *Wallet {
 
 	return w
 }
+
+func init() {
+	// Use fast scrypt options for tests to avoid CPU exhaustion and
+	// timeouts, especially when running with -race.
+	waddrmgr.DefaultScryptOptions = waddrmgr.FastScryptOptions
+}
