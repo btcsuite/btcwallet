@@ -2,9 +2,18 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+)
+
+var (
+	// ErrNilDB is returned when a nil database connection pointer is
+	// provided to the wallet.
+	ErrNilDB = errors.New(
+		"wallet requires a non-nil database connection",
+	)
 )
 
 // WalletStore defines the methods for wallet-level operations.
