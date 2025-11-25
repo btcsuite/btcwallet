@@ -24,6 +24,14 @@ var (
 	// ErrUnsupportedAddressType is returned when a transaction is signed
 	// for an unsupported address type.
 	ErrUnsupportedAddressType = errors.New("unsupported address type")
+
+	// ErrInvalidDigestSize is returned when a signature digest is not 32
+	// bytes.
+	ErrInvalidDigestSize = errors.New("digest must be 32 bytes")
+
+	// ErrInvalidSignParam is returned when the parameters for the signing
+	// operation are invalid.
+	ErrInvalidSignParam = errors.New("invalid signing parameters")
 )
 
 // Signer provides an interface for common, safe cryptographic operations,
@@ -41,11 +49,11 @@ type Signer interface {
 	ECDH(ctx context.Context, path BIP32Path, pub *btcec.PublicKey) (
 		[32]byte, error)
 
-	// SignMessage signs a message based on the provided intent. The
+	// SignDigest signs a message digest based on the provided intent. The
 	// returned Signature is a marker interface that can be asserted to the
 	// concrete signature types, ECDSASignature or SchnorrSignature.
-	SignMessage(ctx context.Context, path BIP32Path,
-		intent *SignMessageIntent) (Signature, error)
+	SignDigest(ctx context.Context, path BIP32Path,
+		intent *SignDigestIntent) (Signature, error)
 
 	// ComputeUnlockingScript generates the full sigScript and witness
 	// required to spend a UTXO. The resulting UnlockingScript struct
@@ -113,75 +121,72 @@ type BIP32Path struct {
 	DerivationPath waddrmgr.DerivationPath
 }
 
-// SignMessageIntent represents the user's intent to sign a message. It
+// SignatureType represents the type of signature to produce.
+type SignatureType uint8
+
+const (
+	// SigTypeECDSA represents an ECDSA signature.
+	SigTypeECDSA SignatureType = iota
+
+	// SigTypeSchnorr represents a Schnorr signature.
+	SigTypeSchnorr
+)
+
+// SignDigestIntent represents the user's intent to sign a message digest. It
 // serves as a blueprint for the Signer, bundling all the parameters
 // required to produce a signature into a single, coherent structure.
 //
 // # Usage Examples
 //
 // ## Standard ECDSA Signature (DER Encoded)
-// To produce a standard ECDSA signature, set CompactSig to false and leave the
-// Schnorr field nil.
+// To produce a standard ECDSA signature, set SigType to SigTypeECDSA.
 //
-//	intent := &wallet.SignMessageIntent{
-//	    Msg:        []byte("a message"),
-//	    DoubleHash: true,
-//	    CompactSig: false,
+//	intent := &wallet.SignDigestIntent{
+//	    Digest:     chainhash.HashB([]byte("a message")),
+//	    SigType:    wallet.SigTypeECDSA,
 //	}
-//	rawSig, err := signer.SignMessage(ctx, path, intent)
+//	rawSig, err := signer.SignDigest(ctx, path, intent)
 //	// Type-assert the result to ECDSASignature.
 //	ecdsaSig := rawSig.(wallet.ECDSASignature)
 //
 // ## Compact, Recoverable ECDSA Signature
 // To produce a compact, recoverable signature, set CompactSig to true.
 //
-//	intent := &wallet.SignMessageIntent{
-//	    Msg:        []byte("a message"),
-//	    DoubleHash: true,
+//	intent := &wallet.SignDigestIntent{
+//	    Digest:     chainhash.DoubleHashB([]byte("a message")),
+//	    SigType:    wallet.SigTypeECDSA,
 //	    CompactSig: true,
 //	}
-//	rawSig, err := signer.SignMessage(ctx, path, intent)
+//	rawSig, err := signer.SignDigest(ctx, path, intent)
 //	// Type-assert the result to CompactSignature.
 //	compactSig := rawSig.(wallet.CompactSignature)
 //
 // ## Schnorr Signature
-// To produce a Schnorr signature, populate the Schnorr field. When this field
-// is non-nil, all ECDSA-related fields (like CompactSig) are ignored.
+// To produce a Schnorr signature, set SigType to SigTypeSchnorr.
 //
-//	intent := &wallet.SignMessageIntent{
-//	    Msg: []byte("a message"),
-//	    Schnorr: &wallet.SchnorrSignOpts{
-//	        Tag: []byte("my_protocol_tag"),
-//	    },
+//	intent := &wallet.SignDigestIntent{
+//	    Digest: chainhash.TaggedHash(
+//	        []byte("my_protocol_tag"), []byte("a message"),
+//	    ),
+//	    SigType: wallet.SigTypeSchnorr,
 //	}
-//	rawSig, err := signer.SignMessage(ctx, path, intent)
+//	rawSig, err := signer.SignDigest(ctx, path, intent)
 //	// Type-assert the result to SchnorrSignature.
 //	schnorrSig := rawSig.(wallet.SchnorrSignature)
-type SignMessageIntent struct {
-	// Msg is the raw message to be signed.
-	Msg []byte
+type SignDigestIntent struct {
+	// Digest is the 32-byte hash digest to be signed.
+	Digest []byte
 
-	// DoubleHash specifies whether the message should be double-hashed
-	// (SHA256d) before signing. If false, a single SHA256 hash is used.
-	DoubleHash bool
+	// SigType specifies the type of signature to generate.
+	SigType SignatureType
 
 	// CompactSig specifies whether the signature should be returned in the
 	// compact, recoverable format. This is only valid for ECDSA signatures.
 	CompactSig bool
 
-	// Schnorr specifies the options for a Schnorr signature. If this is
-	// nil, an ECDSA signature will be produced.
-	Schnorr *SchnorrSignOpts
-}
-
-// SchnorrSignOpts contains the specific parameters for a Schnorr signature.
-type SchnorrSignOpts struct {
-	// Tweak is an optional private key tweak to be applied before signing.
-	Tweak []byte
-
-	// Tag is an optional BIP-340 tagged hash to use. If nil, the standard
-	// SHA256 hash of the message is used.
-	Tag []byte
+	// TaprootTweak is an optional private key tweak to be applied before
+	// signing. This is only valid for Schnorr signatures.
+	TaprootTweak []byte
 }
 
 // Signature is an interface that represents a cryptographic signature.
@@ -558,9 +563,39 @@ func (w *Wallet) ECDH(_ context.Context, path BIP32Path,
 	return sharedSecret, nil
 }
 
-// SignMessage signs a message based on the provided intent.
-func (w *Wallet) SignMessage(_ context.Context, path BIP32Path,
-	intent *SignMessageIntent) (Signature, error) {
+// validateSignDigestIntent validates the parameters of a SignDigestIntent.
+func validateSignDigestIntent(intent *SignDigestIntent) error {
+	// The digest must be exactly 32 bytes.
+	if len(intent.Digest) != chainhash.HashSize {
+		return ErrInvalidDigestSize
+	}
+
+	// Validate parameters based on signature type.
+	switch intent.SigType {
+	case SigTypeECDSA:
+		if intent.TaprootTweak != nil {
+			return fmt.Errorf("%w: taproot tweak cannot be used "+
+				"with ECDSA", ErrInvalidSignParam)
+		}
+
+	case SigTypeSchnorr:
+		if intent.CompactSig {
+			return fmt.Errorf("%w: compact signature cannot be "+
+				"used with Schnorr", ErrInvalidSignParam)
+		}
+	}
+
+	return nil
+}
+
+// SignDigest signs a message digest based on the provided intent.
+func (w *Wallet) SignDigest(_ context.Context, path BIP32Path,
+	intent *SignDigestIntent) (Signature, error) {
+
+	err := validateSignDigestIntent(intent)
+	if err != nil {
+		return nil, err
+	}
 
 	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
 	if err != nil {
@@ -576,46 +611,36 @@ func (w *Wallet) SignMessage(_ context.Context, path BIP32Path,
 
 	// Now, sign the message using the derived private key. This is all
 	// pure computation, so it can be done outside the DB transaction.
-	return signMessageWithPrivKey(privKey, intent)
+	return signDigestWithPrivKey(privKey, intent)
 }
 
-// signMessageWithPrivKey performs the actual signing of a message with a given
-// private key, based on the options specified in the SignMessageIntent. It
+// signDigestWithPrivKey performs the actual signing of a digest with a given
+// private key, based on the options specified in the SignDigestIntent. It
 // acts as a dispatcher to the appropriate signing algorithm.
-func signMessageWithPrivKey(privKey *btcec.PrivateKey,
-	intent *SignMessageIntent) (Signature, error) {
+func signDigestWithPrivKey(privKey *btcec.PrivateKey,
+	intent *SignDigestIntent) (Signature, error) {
 
-	// If Schnorr options are provided, we'll generate a Schnorr signature.
-	if intent.Schnorr != nil {
-		return signMessageSchnorr(privKey, intent)
+	// If Schnorr is specified, we'll generate a Schnorr signature.
+	if intent.SigType == SigTypeSchnorr {
+		return signDigestSchnorr(privKey, intent)
 	}
 
 	// Otherwise, we'll generate an ECDSA signature.
-	return signMessageECDSA(privKey, intent)
+	return signDigestECDSA(privKey, intent)
 }
 
-// signMessageSchnorr performs the actual signing of a message with a given
+// signDigestSchnorr performs the actual signing of a digest with a given
 // private key, using the Schnorr signature algorithm.
-func signMessageSchnorr(privKey *btcec.PrivateKey,
-	intent *SignMessageIntent) (Signature, error) {
+func signDigestSchnorr(privKey *btcec.PrivateKey,
+	intent *SignDigestIntent) (Signature, error) {
 
-	if intent.Schnorr.Tweak != nil {
+	if intent.TaprootTweak != nil {
 		privKey = txscript.TweakTaprootPrivKey(
-			*privKey, intent.Schnorr.Tweak,
+			*privKey, intent.TaprootTweak,
 		)
 	}
 
-	var digest []byte
-	if intent.Schnorr.Tag != nil {
-		taggedHash := chainhash.TaggedHash(
-			intent.Schnorr.Tag, intent.Msg,
-		)
-		digest = taggedHash[:]
-	} else {
-		digest = chainhash.HashB(intent.Msg)
-	}
-
-	sig, err := schnorr.Sign(privKey, digest)
+	sig, err := schnorr.Sign(privKey, intent.Digest)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create schnorr sig: %w", err)
 	}
@@ -623,24 +648,17 @@ func signMessageSchnorr(privKey *btcec.PrivateKey,
 	return SchnorrSignature{sig}, nil
 }
 
-// signMessageECDSA performs the actual signing of a message with a given
+// signDigestECDSA performs the actual signing of a digest with a given
 // private key, using the ECDSA signature algorithm.
-func signMessageECDSA(privKey *btcec.PrivateKey,
-	intent *SignMessageIntent) (Signature, error) {
-
-	var digest []byte
-	if intent.DoubleHash {
-		digest = chainhash.DoubleHashB(intent.Msg)
-	} else {
-		digest = chainhash.HashB(intent.Msg)
-	}
+func signDigestECDSA(privKey *btcec.PrivateKey,
+	intent *SignDigestIntent) (Signature, error) {
 
 	if intent.CompactSig {
-		sig := ecdsa.SignCompact(privKey, digest, true)
+		sig := ecdsa.SignCompact(privKey, intent.Digest, true)
 		return CompactSignature(sig), nil
 	}
 
-	sig := ecdsa.Sign(privKey, digest)
+	sig := ecdsa.Sign(privKey, intent.Digest)
 
 	return ECDSASignature{sig}, nil
 }
