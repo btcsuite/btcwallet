@@ -3631,3 +3631,748 @@ func TestFinalizePsbtErrors(t *testing.T) {
 		require.ErrorContains(t, err, "error finalizing PSBT")
 	})
 }
+
+// TestValidatePsbtMerge tests the validatePsbtMerge helper function.
+func TestValidatePsbtMerge(t *testing.T) {
+	t.Parallel()
+
+	// Helper to create a dummy packet with specific tx hash and IO counts.
+	createPacket := func(txHash byte, inCount, outCount int) *psbt.Packet {
+		tx := wire.NewMsgTx(2)
+		// Add dummy inputs/outputs to affect count and hash.
+		for i := range inCount {
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{txHash},
+					Index: uint32(i),
+				},
+			})
+		}
+
+		for i := range outCount {
+			tx.AddTxOut(&wire.TxOut{Value: int64(i)})
+		}
+
+		p, _ := psbt.NewFromUnsignedTx(tx)
+
+		return p
+	}
+
+	base := createPacket(1, 1, 1)
+
+	tests := []struct {
+		name    string
+		psbts   []*psbt.Packet
+		wantErr error
+	}{
+		{
+			name:    "success single",
+			psbts:   []*psbt.Packet{base},
+			wantErr: nil,
+		},
+		{
+			name:    "success multiple identical",
+			psbts:   []*psbt.Packet{base, base},
+			wantErr: nil,
+		},
+		{
+			name:    "empty list",
+			psbts:   []*psbt.Packet{},
+			wantErr: ErrNoPsbtsToCombine,
+		},
+		{
+			name:    "mismatched txid",
+			psbts:   []*psbt.Packet{base, createPacket(2, 1, 1)},
+			wantErr: ErrDifferentTransactions,
+		},
+		{
+			name: "mismatched input count",
+			psbts: func() []*psbt.Packet {
+				// Create a packet with same TXID but corrupted
+				// input count.
+				p2 := createPacket(1, 1, 1)
+				p2.Inputs = append(p2.Inputs, psbt.PInput{})
+
+				return []*psbt.Packet{base, p2}
+			}(),
+			wantErr: ErrInputCountMismatch,
+		},
+		{
+			name: "mismatched output count",
+			psbts: func() []*psbt.Packet {
+				// Create a packet with same TXID but corrupted
+				// output count.
+				p2 := createPacket(1, 1, 1)
+				p2.Outputs = append(p2.Outputs, psbt.POutput{})
+
+				return []*psbt.Packet{base, p2}
+			}(),
+			wantErr: ErrOutputCountMismatch,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := validatePsbtMerge(tc.psbts)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				require.Nil(t, got)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, got)
+
+				// Verify it is a different object (copy).
+				require.NotSame(t, tc.psbts[0], got)
+
+				// Verify structure matches base.
+				require.Equal(t,
+					tc.psbts[0].UnsignedTx.TxHash(),
+					got.UnsignedTx.TxHash(),
+				)
+				require.Len(t, got.Inputs,
+					len(tc.psbts[0].Inputs))
+				require.Len(t, got.Outputs,
+					len(tc.psbts[0].Outputs))
+			}
+		})
+	}
+}
+
+// TestMergePsbtInputs tests that mergePsbtInputs correctly merges and
+// deduplicates input fields.
+func TestMergePsbtInputs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("partial sigs deduplication", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a destination input with one signature, and
+		// a source input with the same signature (duplicate) plus a
+		// new one. This simulates merging updates from multiple
+		// signers where some data overlaps.
+		dest := &psbt.PInput{
+			PartialSigs: []*psbt.PartialSig{
+				{
+					PubKey:    []byte{1},
+					Signature: []byte{10},
+				},
+			},
+		}
+		src := &psbt.PInput{
+			PartialSigs: []*psbt.PartialSig{
+				{
+					PubKey:    []byte{1},
+					Signature: []byte{10},
+				}, // Duplicate
+				{
+					PubKey:    []byte{2},
+					Signature: []byte{20},
+				}, // New
+			},
+		}
+
+		// Act: Merge the source input into the destination.
+		err := mergePsbtInputs(dest, src)
+		require.NoError(t, err)
+
+		// Assert: Verify that the destination now contains exactly two
+		// signatures. The first one should be preserved, and the
+		// second one should be the new signature from the source.
+		require.Len(t, dest.PartialSigs, 2)
+		require.Equal(t, []byte{1}, dest.PartialSigs[0].PubKey)
+		require.Equal(t, []byte{2}, dest.PartialSigs[1].PubKey)
+	})
+
+	t.Run("sighash type adoption", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a destination input with the default sighash
+		// type (0) and a source input with a specific type
+		// (SigHashSingle).
+		dest := &psbt.PInput{SighashType: 0} // Default
+		src := &psbt.PInput{SighashType: txscript.SigHashSingle}
+
+		// Act: Merge the inputs.
+		err := mergePsbtInputs(dest, src)
+
+		// Assert: Verify that the destination adopted the source's
+		// sighash type, as 0 is treated as "unset".
+		require.NoError(t, err)
+		require.Equal(t, txscript.SigHashSingle, dest.SighashType)
+
+		// Arrange: Create a scenario with conflicting sighash types.
+		// Destination has SigHashAll, Source has SigHashSingle.
+		dest.SighashType = txscript.SigHashAll
+		src.SighashType = txscript.SigHashSingle
+
+		// Act: Attempt to merge conflicting inputs.
+		err = mergePsbtInputs(dest, src)
+
+		// Assert: Verify that the merge returns an error indicating
+		// the mismatch.
+		require.ErrorContains(t, err, "sighash type mismatch")
+	})
+
+	t.Run("scripts merging", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a destination input missing script info, and
+		// a source input containing it.
+		dest := &psbt.PInput{}
+		src := &psbt.PInput{
+			RedeemScript:  []byte{1, 2, 3},
+			WitnessScript: []byte{4, 5, 6},
+		}
+
+		// Act: Merge the inputs.
+		err := mergePsbtInputs(dest, src)
+
+		// Assert: Verify that the scripts were successfully copied to
+		// the destination.
+		require.NoError(t, err)
+		require.Equal(t, src.RedeemScript, dest.RedeemScript)
+		require.Equal(t, src.WitnessScript, dest.WitnessScript)
+	})
+}
+
+// TestMergePsbtOutputs tests that mergePsbtOutputs correctly merges and
+// deduplicates output fields.
+func TestMergePsbtOutputs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bip32 derivation deduplication", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create destination and source outputs with
+		// overlapping BIP32 derivation paths.
+		dest := &psbt.POutput{
+			Bip32Derivation: []*psbt.Bip32Derivation{
+				{
+					PubKey:               []byte{1},
+					MasterKeyFingerprint: 10,
+				},
+			},
+		}
+		src := &psbt.POutput{
+			Bip32Derivation: []*psbt.Bip32Derivation{
+				{
+					PubKey:               []byte{1},
+					MasterKeyFingerprint: 10,
+				}, // Duplicate
+				{
+					PubKey:               []byte{2},
+					MasterKeyFingerprint: 20,
+				}, // New
+			},
+		}
+
+		// Act: Merge the outputs.
+		err := mergePsbtOutputs(dest, src)
+		require.NoError(t, err)
+
+		// Assert: Verify that the destination now contains both unique
+		// derivations.
+		require.Len(t, dest.Bip32Derivation, 2)
+		require.Equal(t, []byte{1}, dest.Bip32Derivation[0].PubKey)
+		require.Equal(t, []byte{2}, dest.Bip32Derivation[1].PubKey)
+	})
+
+	t.Run("taproot internal key adoption", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a destination output missing the Taproot
+		// internal key, and a source output that has it.
+		dest := &psbt.POutput{}
+		src := &psbt.POutput{
+			TaprootInternalKey: []byte{1, 2, 3},
+		}
+
+		// Act: Merge the outputs.
+		err := mergePsbtOutputs(dest, src)
+
+		require.NoError(t, err)
+		require.Equal(t, src.TaprootInternalKey,
+			dest.TaprootInternalKey)
+	})
+}
+
+// TestMergeSighashType tests the mergeSighashType helper function.
+//
+// It verifies two key behaviors:
+//  1. Conflict Detection: It ensures that an error is returned if the
+//     destination and source inputs have different, non-zero sighash types.
+//  2. Adoption: It ensures that if the destination has a default (0) sighash
+//     type, it correctly adopts the type from the source.
+func TestMergeSighashType(t *testing.T) {
+	t.Parallel()
+
+	t.Run("detect mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Construct a 'destination' PSBT input that has
+		// already declared a sighash type of SigHashAll.
+		dest := &psbt.PInput{SighashType: txscript.SigHashAll}
+
+		// Arrange: Construct a 'source' PSBT input that declares a
+		// different, conflicting sighash type of SigHashSingle.
+		src := &psbt.PInput{SighashType: txscript.SigHashSingle}
+
+		// Act: Attempt to merge the source into the destination using
+		// the mergeSighashType helper.
+		err := mergeSighashType(dest, src)
+
+		// Assert: Verify that the function identified the conflict and
+		// returned the expected ErrSighashMismatch error.
+		require.ErrorIs(t, err, ErrSighashMismatch)
+	})
+
+	t.Run("adopt source type", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Construct a 'destination' PSBT input with the
+		// default (zero) sighash type, indicating it hasn't been set
+		// yet.
+		dest := &psbt.PInput{SighashType: 0}
+
+		// Arrange: Construct a 'source' PSBT input with a specific
+		// sighash type (SigHashSingle) that should be propagated.
+		src := &psbt.PInput{SighashType: txscript.SigHashSingle}
+
+		// Act: Merge the source into the destination.
+		err := mergeSighashType(dest, src)
+
+		// Assert: Verify that the operation was successful (no error)
+		// and that the destination input has been updated to match the
+		// source's sighash type.
+		require.NoError(t, err)
+		require.Equal(t, txscript.SigHashSingle, dest.SighashType)
+	})
+}
+
+// TestMergeRedeemScript tests the mergeRedeemScript helper function.
+//
+// It verifies that:
+// 1. Conflicting redeem scripts cause an error.
+// 2. A missing redeem script in the destination is populated from the source.
+func TestMergeRedeemScript(t *testing.T) {
+	t.Parallel()
+
+	t.Run("detect mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a 'destination' input with a specific redeem
+		// script (byte sequence {1}).
+		dest := &psbt.PInput{RedeemScript: []byte{1}}
+
+		// Arrange: Create a 'source' input with a different redeem
+		// script (byte sequence {2}).
+		src := &psbt.PInput{RedeemScript: []byte{2}}
+
+		// Act: Attempt to merge the source into the destination.
+		err := mergeRedeemScript(dest, src)
+
+		// Assert: Verify that the function returns
+		// ErrRedeemScriptMismatch, preventing the corruption of the
+		// redeem script.
+		require.ErrorIs(t, err, ErrRedeemScriptMismatch)
+	})
+
+	t.Run("adopt source script", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a 'destination' input with no redeem script
+		// (nil or empty).
+		dest := &psbt.PInput{}
+
+		// Arrange: Create a 'source' input that contains a valid
+		// redeem script.
+		src := &psbt.PInput{RedeemScript: []byte{1, 2, 3}}
+
+		// Act: Merge the source into the destination.
+		err := mergeRedeemScript(dest, src)
+
+		// Assert: Verify that the merge succeeded and the destination
+		// now contains the redeem script from the source.
+		require.NoError(t, err)
+		require.Equal(t, src.RedeemScript, dest.RedeemScript)
+	})
+}
+
+// TestMergeWitnessUtxo tests the mergeWitnessUtxo helper function.
+//
+// It verifies that:
+//  1. Conflicting Witness UTXO values (amount or script) trigger an error.
+//  2. A missing Witness UTXO in the destination is correctly copied from the
+//     source.
+func TestMergeWitnessUtxo(t *testing.T) {
+	t.Parallel()
+
+	t.Run("detect value mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a 'destination' input with a Witness UTXO
+		// valued at 1000 sats.
+		dest := &psbt.PInput{WitnessUtxo: &wire.TxOut{Value: 1000}}
+
+		// Arrange: Create a 'source' input with a Witness UTXO valued
+		// at 2000 sats (conflicting).
+		src := &psbt.PInput{WitnessUtxo: &wire.TxOut{Value: 2000}}
+
+		// Act: Attempt to merge the inputs.
+		err := mergeWitnessUtxo(dest, src)
+
+		// Assert: Verify that the function returns
+		// ErrWitnessUtxoMismatch.
+		require.ErrorIs(t, err, ErrWitnessUtxoMismatch)
+	})
+
+	t.Run("detect script mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a 'destination' input with a Witness UTXO
+		// script {1}.
+		dest := &psbt.PInput{
+			WitnessUtxo: &wire.TxOut{
+				Value: 1000, PkScript: []byte{1},
+			},
+		}
+
+		// Arrange: Create a 'source' input with the same value but a
+		// different script {2}.
+		src := &psbt.PInput{
+			WitnessUtxo: &wire.TxOut{
+				Value: 1000, PkScript: []byte{2},
+			},
+		}
+
+		// Act: Attempt to merge the inputs.
+		err := mergeWitnessUtxo(dest, src)
+
+		// Assert: Verify that the function returns
+		// ErrWitnessUtxoMismatch due to the script difference.
+		require.ErrorIs(t, err, ErrWitnessUtxoMismatch)
+	})
+
+	t.Run("adopt source utxo", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a 'destination' input with no Witness UTXO
+		// info.
+		dest := &psbt.PInput{}
+
+		// Arrange: Create a 'source' input with a full Witness UTXO.
+		src := &psbt.PInput{
+			WitnessUtxo: &wire.TxOut{
+				Value: 1000, PkScript: []byte{1},
+			},
+		}
+
+		// Act: Merge the source into the destination.
+		err := mergeWitnessUtxo(dest, src)
+
+		// Assert: Verify that the destination structure now holds the
+		// exact Witness UTXO pointer/value from the source.
+		require.NoError(t, err)
+		require.Equal(t, src.WitnessUtxo, dest.WitnessUtxo)
+	})
+}
+
+// TestMergeNonWitnessUtxo tests the mergeNonWitnessUtxo helper function.
+//
+// It ensures that full transaction data (for legacy/SegWit v0 inputs) is
+// merged safely, rejecting conflicts where the transaction hash differs.
+func TestMergeNonWitnessUtxo(t *testing.T) {
+	t.Parallel()
+
+	t.Run("detect mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create two distinct wire transactions to serve as
+		// conflicting NonWitnessUtxo data.
+		tx1 := wire.NewMsgTx(1)
+		tx2 := wire.NewMsgTx(2)
+
+		// Arrange: Assign tx1 to destination and tx2 to source.
+		dest := &psbt.PInput{NonWitnessUtxo: tx1}
+		src := &psbt.PInput{NonWitnessUtxo: tx2}
+
+		// Act: Attempt to merge.
+		err := mergeNonWitnessUtxo(dest, src)
+
+		// Assert: Verify that ErrNonWitnessUtxoMismatch is returned
+		// because the transactions differ.
+		require.ErrorIs(t, err, ErrNonWitnessUtxoMismatch)
+	})
+
+	t.Run("adopt source utxo", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create a 'destination' input with no
+		// NonWitnessUtxo.
+		dest := &psbt.PInput{}
+
+		// Arrange: Create a 'source' input with a valid NonWitnessUtxo
+		// transaction.
+		tx := wire.NewMsgTx(1)
+		src := &psbt.PInput{NonWitnessUtxo: tx}
+
+		// Act: Merge the inputs.
+		err := mergeNonWitnessUtxo(dest, src)
+
+		// Assert: Verify that the destination adopted the
+		// NonWitnessUtxo from the source.
+		require.NoError(t, err)
+		require.Equal(t, src.NonWitnessUtxo, dest.NonWitnessUtxo)
+	})
+}
+
+// TestMergeTaprootInternalKeyMismatch verifies that conflicting Taproot
+// internal keys are detected.
+func TestMergeTaprootInternalKeyMismatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup conflicting Taproot internal keys (byte {1} vs
+	// byte {2}).
+	dest := &psbt.POutput{TaprootInternalKey: []byte{1}}
+	src := &psbt.POutput{TaprootInternalKey: []byte{2}}
+
+	// Act: Attempt to merge the outputs.
+	err := mergeTaprootInternalKey(dest, src)
+
+	// Assert: Verify that ErrTaprootInternalKeyMismatch is returned.
+	require.ErrorIs(t, err, ErrTaprootInternalKeyMismatch)
+}
+
+// TestMergeTaprootInternalKeyAdoption verifies that a source key is adopted
+// if the destination key is missing.
+func TestMergeTaprootInternalKeyAdoption(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a destination output with no internal key.
+	dest := &psbt.POutput{}
+
+	// Arrange: Create a source output with a valid internal key.
+	src := &psbt.POutput{TaprootInternalKey: []byte{1, 2, 3}}
+
+	// Act: Merge the outputs.
+	err := mergeTaprootInternalKey(dest, src)
+
+	// Assert: Verify that the internal key was successfully copied to
+	// the destination.
+	require.NoError(t, err)
+	require.Equal(t, src.TaprootInternalKey, dest.TaprootInternalKey)
+}
+
+// TestDeduplicateTaprootBip32Derivations tests the deduplication logic for
+// Taproot BIP32 derivations.
+func TestDeduplicateTaprootBip32Derivations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("deduplicate", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Setup destination with one derivation.
+		dest := []*psbt.TaprootBip32Derivation{
+			{XOnlyPubKey: []byte{1}},
+		}
+
+		// Arrange: Setup source with duplicate and new derivation.
+		src := []*psbt.TaprootBip32Derivation{
+			{XOnlyPubKey: []byte{1}}, // Duplicate
+			{XOnlyPubKey: []byte{2}}, // New
+		}
+
+		// Act.
+		got := deduplicateTaprootBip32Derivations(dest, src)
+
+		// Assert: Verify deduplication.
+		require.Len(t, got, 2)
+		require.Equal(t, []byte{1}, got[0].XOnlyPubKey)
+		require.Equal(t, []byte{2}, got[1].XOnlyPubKey)
+	})
+}
+
+// TestMergeInputScripts tests the aggregate mergeInputScripts function to
+// ensure it propagates errors from all sub-steps.
+func TestMergeInputScripts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fail on redeem script", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.PInput{RedeemScript: []byte{1}}
+		src := &psbt.PInput{RedeemScript: []byte{2}}
+		err := mergeInputScripts(dest, src)
+		require.ErrorIs(t, err, ErrRedeemScriptMismatch)
+	})
+
+	t.Run("fail on witness script", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.PInput{WitnessScript: []byte{1}}
+		src := &psbt.PInput{WitnessScript: []byte{2}}
+		err := mergeInputScripts(dest, src)
+		require.ErrorIs(t, err, ErrWitnessScriptMismatch)
+	})
+
+	t.Run("fail on final script sig", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.PInput{FinalScriptSig: []byte{1}}
+		src := &psbt.PInput{FinalScriptSig: []byte{2}}
+		err := mergeInputScripts(dest, src)
+		require.ErrorIs(t, err, ErrFinalScriptSigMismatch)
+	})
+
+	t.Run("fail on final script witness", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.PInput{FinalScriptWitness: []byte{1}}
+		src := &psbt.PInput{FinalScriptWitness: []byte{2}}
+		err := mergeInputScripts(dest, src)
+		require.ErrorIs(t, err, ErrFinalScriptWitnessMismatch)
+	})
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.PInput{}
+		src := &psbt.PInput{
+			RedeemScript:       []byte{1},
+			WitnessScript:      []byte{2},
+			FinalScriptSig:     []byte{3},
+			FinalScriptWitness: []byte{4},
+		}
+		err := mergeInputScripts(dest, src)
+		require.NoError(t, err)
+		require.Equal(t, src.RedeemScript, dest.RedeemScript)
+		require.Equal(t, src.WitnessScript, dest.WitnessScript)
+		require.Equal(t, src.FinalScriptSig, dest.FinalScriptSig)
+		require.Equal(t, src.FinalScriptWitness,
+			dest.FinalScriptWitness)
+	})
+}
+
+// TestMergeOutputScripts tests the aggregate mergeOutputScripts function.
+func TestMergeOutputScripts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fail on redeem script", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.POutput{RedeemScript: []byte{1}}
+		src := &psbt.POutput{RedeemScript: []byte{2}}
+		err := mergeOutputScripts(dest, src)
+		require.ErrorIs(t, err, ErrRedeemScriptMismatch)
+	})
+
+	t.Run("fail on witness script", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.POutput{WitnessScript: []byte{1}}
+		src := &psbt.POutput{WitnessScript: []byte{2}}
+		err := mergeOutputScripts(dest, src)
+		require.ErrorIs(t, err, ErrWitnessScriptMismatch)
+	})
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		dest := &psbt.POutput{}
+		src := &psbt.POutput{
+			RedeemScript:  []byte{1},
+			WitnessScript: []byte{2},
+		}
+		err := mergeOutputScripts(dest, src)
+		require.NoError(t, err)
+		require.Equal(t, src.RedeemScript, dest.RedeemScript)
+		require.Equal(t, src.WitnessScript, dest.WitnessScript)
+	})
+}
+
+// TestCombinePsbt tests that CombinePsbt correctly merges multiple PSBTs.
+func TestCombinePsbt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+		w, _ := testWalletWithMocks(t)
+
+		// Arrange: Create a base transaction with 1 input and 1 output.
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{})
+		tx.AddTxOut(&wire.TxOut{Value: 1000}) // Add output
+
+		// Arrange: Create two PSBT packets from this transaction.
+		packet1, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		packet2, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		// Arrange: Add UTXO info to satisfy structural validation
+		// checks.
+		dummyUtxo := &wire.TxOut{Value: 1000, PkScript: []byte{0x00}}
+		packet1.Inputs[0].WitnessUtxo = dummyUtxo
+		packet2.Inputs[0].WitnessUtxo = dummyUtxo
+
+		// Arrange: Add a unique partial signature to the second
+		// packet.
+		packet2.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+			PubKey: []byte{1}, Signature: []byte{1},
+		}}
+
+		// Act: Combine the two packets.
+		combined, err := w.CombinePsbt(t.Context(), packet1, packet2)
+
+		// Assert: Verify the merge was successful and the resulting
+		// packet contains the signature from packet2.
+		require.NoError(t, err)
+		require.Len(t, combined.Inputs[0].PartialSigs, 1)
+		require.Equal(t, []byte{1},
+			combined.Inputs[0].PartialSigs[0].PubKey)
+	})
+
+	t.Run("empty inputs", func(t *testing.T) {
+		t.Parallel()
+		w, _ := testWalletWithMocks(t)
+
+		// Act: Attempt to combine with no packets.
+		_, err := w.CombinePsbt(t.Context())
+
+		// Assert: Verify it returns the expected error.
+		require.ErrorIs(t, err, ErrNoPsbtsToCombine)
+	})
+
+	t.Run("mismatch tx", func(t *testing.T) {
+		t.Parallel()
+		w, _ := testWalletWithMocks(t)
+
+		// Arrange: Create two packets with DIFFERENT transactions.
+		tx1 := wire.NewMsgTx(2)
+		tx1.AddTxIn(&wire.TxIn{
+			PreviousOutPoint: wire.OutPoint{
+				Hash: chainhash.Hash{1},
+			},
+		})
+		packet1, err := psbt.NewFromUnsignedTx(tx1)
+		require.NoError(t, err)
+
+		tx2 := wire.NewMsgTx(2)
+		tx2.AddTxIn(&wire.TxIn{
+			PreviousOutPoint: wire.OutPoint{
+				Hash: chainhash.Hash{2},
+			},
+		})
+		packet2, err := psbt.NewFromUnsignedTx(tx2)
+		require.NoError(t, err)
+
+		// Act: Attempt to combine conflicting packets.
+		_, err = w.CombinePsbt(t.Context(), packet1, packet2)
+
+		// Assert: Verify it returns the specific mismatch error.
+		require.ErrorIs(t, err, ErrDifferentTransactions)
+	})
+}
