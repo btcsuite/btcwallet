@@ -3898,6 +3898,92 @@ func TestMergePsbtOutputs(t *testing.T) {
 	})
 }
 
+// TestAddInputInfoSegWitV0 tests the legacy helper for adding SegWit v0 input
+// info.
+func TestAddInputInfoSegWitV0(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup input parameters (prevTx, utxo, derivation).
+	in := &psbt.PInput{}
+	prevTx := wire.NewMsgTx(1)
+	utxo := &wire.TxOut{Value: 1000, PkScript: []byte{1}}
+	derivation := &psbt.Bip32Derivation{PubKey: []byte{2}}
+	witnessProgram := []byte{3}
+
+	// Mock address type.
+	mockAddr := &mockManagedAddress{}
+	mockAddr.On("AddrType").Return(waddrmgr.NestedWitnessPubKey)
+
+	// Act: Call the helper.
+	addInputInfoSegWitV0(in, prevTx, utxo, derivation, mockAddr,
+		witnessProgram)
+
+	// Assert: Verify fields are populated correctly.
+	require.Equal(t, prevTx, in.NonWitnessUtxo)
+	require.Equal(t, utxo.Value, in.WitnessUtxo.Value)
+	require.Equal(t, utxo.PkScript, in.WitnessUtxo.PkScript)
+	require.Equal(t, txscript.SigHashAll, in.SighashType)
+	require.Equal(t, derivation, in.Bip32Derivation[0])
+	require.Equal(t, witnessProgram, in.RedeemScript)
+}
+
+// TestAddInputInfoSegWitV1 tests the legacy helper for adding SegWit v1 input
+// info.
+func TestAddInputInfoSegWitV1(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup input parameters.
+	in := &psbt.PInput{}
+	utxo := &wire.TxOut{Value: 1000, PkScript: []byte{1}}
+	// PubKey must be valid length for slicing [1:].
+	pubKey := make([]byte, 33)
+	pubKey[0] = 0x02
+	derivation := &psbt.Bip32Derivation{PubKey: pubKey}
+
+	// Act: Call the helper.
+	addInputInfoSegWitV1(in, utxo, derivation)
+
+	// Assert: Verify fields are populated correctly.
+	require.Equal(t, utxo.Value, in.WitnessUtxo.Value)
+	require.Equal(t, txscript.SigHashDefault, in.SighashType)
+	require.Equal(t, derivation, in.Bip32Derivation[0])
+	require.Equal(t, pubKey[1:], in.TaprootBip32Derivation[0].XOnlyPubKey)
+}
+
+// TestPsbtPrevOutputFetcher tests that the prev output fetcher correctly
+// retrieves UTXOs from the PSBT packet.
+func TestPsbtPrevOutputFetcher(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a PSBT packet with multiple inputs.
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{Index: 0}})
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{Index: 1}})
+
+	packet, _ := psbt.NewFromUnsignedTx(tx)
+
+	// Input 0: NonWitnessUtxo.
+	prevTx := wire.NewMsgTx(1)
+	prevTx.AddTxOut(&wire.TxOut{Value: 1000})
+	packet.Inputs[0].NonWitnessUtxo = prevTx
+
+	// Input 1: WitnessUtxo.
+	packet.Inputs[1].WitnessUtxo = &wire.TxOut{Value: 2000}
+
+	// Act: Create the fetcher.
+	fetcher := PsbtPrevOutputFetcher(packet)
+
+	// Assert: Check input 0 (NonWitness).
+	out0 := fetcher.FetchPrevOutput(wire.OutPoint{Index: 0})
+	require.NotNil(t, out0)
+	require.Equal(t, int64(1000), out0.Value)
+
+	// Assert: Check input 1 (Witness).
+	out1 := fetcher.FetchPrevOutput(wire.OutPoint{Index: 1})
+	require.NotNil(t, out1)
+	require.Equal(t, int64(2000), out1.Value)
+}
+
 // TestMergeSighashType tests the mergeSighashType helper function.
 //
 // It verifies two key behaviors:
