@@ -1745,3 +1745,451 @@ func addScriptToPInput(pInput *psbt.PInput,
 
 	return nil
 }
+
+// CombinePsbt merges multiple PSBTs into one.
+//
+// It implements the "Combiner" role by performing two passes:
+//  1. Validation Pass: It iterates through all packets to ensure they refer to
+//     the exact same global transaction (TXID) and have matching input/output
+//     counts.
+//  2. Construction Pass: It creates a new, combined PSBT packet (to avoid
+//     mutating inputs). It then iterates through every provided packet
+//     (including the first) and merges its data into the combined result. This
+//     includes deduplicating signatures and aggregating scripts/derivations.
+func (w *Wallet) CombinePsbt(_ context.Context, psbts ...*psbt.Packet) (
+	*psbt.Packet, error) {
+
+	// 1. Validation Pass: Ensure compatibility of all packets and prepare
+	//    a fresh result packet.
+	combined, err := validatePsbtMerge(psbts)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Construction Pass: Merge data into the prepared packet.
+	//
+	// Iterate through ALL packets (including the first) and merge their
+	// contents into the combined packet.
+	for _, p := range psbts {
+		// Merge Inputs.
+		for j := range combined.Inputs {
+			err := mergePsbtInputs(
+				&combined.Inputs[j], &p.Inputs[j],
+			)
+			if err != nil {
+				return nil, fmt.Errorf("input %d merge "+
+					"failed: %w", j, err)
+			}
+		}
+
+		// Merge Outputs.
+		for j := range combined.Outputs {
+			err := mergePsbtOutputs(
+				&combined.Outputs[j], &p.Outputs[j],
+			)
+			if err != nil {
+				return nil, fmt.Errorf("output %d merge "+
+					"failed: %w", j, err)
+			}
+		}
+	}
+
+	// Post-merge Validation: Ensure the resulting packet is structurally
+	// sound (e.g. has necessary UTXO info). This acts as a final sanity
+	// check.
+	err = psbt.InputsReadyToSign(combined)
+	if err != nil {
+		return nil, fmt.Errorf("combined psbt validation failed: %w",
+			err)
+	}
+
+	return combined, nil
+}
+
+// validatePsbtMerge checks that a set of PSBT packets are compatible for
+// merging and returns a new, empty packet initialized with the transaction
+// structure, ready to be populated.
+func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
+	if len(psbts) == 0 {
+		return nil, ErrNoPsbtsToCombine
+	}
+
+	base := psbts[0]
+	baseTxHash := base.UnsignedTx.TxHash()
+	nInputs := len(base.Inputs)
+	nOutputs := len(base.Outputs)
+
+	for i, p := range psbts[1:] {
+		if p.UnsignedTx.TxHash() != baseTxHash {
+			return nil, fmt.Errorf("%w: packet index %d",
+				ErrDifferentTransactions, i+1)
+		}
+
+		if len(p.Inputs) != nInputs {
+			return nil, fmt.Errorf("%w: packet index %d",
+				ErrInputCountMismatch, i+1)
+		}
+
+		if len(p.Outputs) != nOutputs {
+			return nil, fmt.Errorf("%w: packet index %d",
+				ErrOutputCountMismatch, i+1)
+		}
+	}
+
+	// Initialize a fresh packet using a deep copy of the unsigned
+	// transaction to ensure we don't mutate any of the input packets.
+	combined := &psbt.Packet{
+		UnsignedTx: base.UnsignedTx.Copy(),
+		Inputs:     make([]psbt.PInput, nInputs),
+		Outputs:    make([]psbt.POutput, nOutputs),
+		Unknowns:   base.Unknowns,
+	}
+
+	return combined, nil
+}
+
+// mergePsbtInputs merges the source input into the destination input.
+//
+// It returns an error if any immutable fields (Scripts, UTXOs, SighashType)
+// conflict between the two inputs.
+func mergePsbtInputs(dest, src *psbt.PInput) error {
+	// Merge PartialSigs (deduplicating by pubkey).
+	dest.PartialSigs = deduplicatePartialSigs(
+		dest.PartialSigs, src.PartialSigs,
+	)
+
+	var err error
+
+	err = mergeSighashType(dest, src)
+	if err != nil {
+		return err
+	}
+
+	err = mergeInputScripts(dest, src)
+	if err != nil {
+		return err
+	}
+
+	// Merge BIP32 Derivations (deduplicating by pubkey).
+	dest.Bip32Derivation = deduplicateBip32Derivations(
+		dest.Bip32Derivation, src.Bip32Derivation,
+	)
+
+	// Merge Taproot Derivations (deduplicating by x-only pubkey).
+	dest.TaprootBip32Derivation = deduplicateTaprootBip32Derivations(
+		dest.TaprootBip32Derivation, src.TaprootBip32Derivation,
+	)
+
+	err = mergeTaprootKeySpendSig(dest, src)
+	if err != nil {
+		return err
+	}
+
+	mergeTaprootScriptSpendSigs(dest, src)
+
+	err = mergeWitnessUtxo(dest, src)
+	if err != nil {
+		return err
+	}
+
+	err = mergeNonWitnessUtxo(dest, src)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// mergePsbtOutputs merges the source output into the destination output.
+//
+// It returns an error if any immutable fields (Taproot Internal Key, Scripts)
+// conflict.
+func mergePsbtOutputs(dest, src *psbt.POutput) error {
+	// Merge BIP32 Derivations for outputs.
+	dest.Bip32Derivation = deduplicateBip32Derivations(
+		dest.Bip32Derivation, src.Bip32Derivation,
+	)
+
+	var err error
+
+	err = mergeTaprootInternalKey(dest, src)
+	if err != nil {
+		return err
+	}
+
+	// Merge Taproot BIP32 Derivations for outputs.
+	dest.TaprootBip32Derivation = deduplicateTaprootBip32Derivations(
+		dest.TaprootBip32Derivation, src.TaprootBip32Derivation,
+	)
+
+	err = mergeOutputScripts(dest, src)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// deduplicatePartialSigs adds new partial signatures from src to dest,
+// avoiding duplicates based on pubkey.
+func deduplicatePartialSigs(dest, src []*psbt.PartialSig) []*psbt.PartialSig {
+	for _, sig := range src {
+		found := false
+		for _, dSig := range dest {
+			if bytes.Equal(dSig.PubKey, sig.PubKey) {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			dest = append(dest, sig)
+		}
+	}
+
+	return dest
+}
+
+// deduplicateBip32Derivations adds new BIP32 derivations from src to dest,
+// avoiding duplicates based on pubkey.
+func deduplicateBip32Derivations(
+	dest, src []*psbt.Bip32Derivation) []*psbt.Bip32Derivation {
+
+	for _, der := range src {
+		found := false
+		for _, dDer := range dest {
+			if bytes.Equal(dDer.PubKey, der.PubKey) {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			dest = append(dest, der)
+		}
+	}
+
+	return dest
+}
+
+// deduplicateTaprootBip32Derivations adds new Taproot BIP32 derivations
+// from src to dest, avoiding duplicates based on x-only pubkey.
+func deduplicateTaprootBip32Derivations(dest,
+	src []*psbt.TaprootBip32Derivation) []*psbt.TaprootBip32Derivation {
+
+	for _, der := range src {
+		found := false
+		for _, dDer := range dest {
+			if bytes.Equal(dDer.XOnlyPubKey, der.XOnlyPubKey) {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			dest = append(dest, der)
+		}
+	}
+
+	return dest
+}
+
+// mergeSighashType merges the SighashType field. Returns error on conflict.
+func mergeSighashType(dest, src *psbt.PInput) error {
+	if dest.SighashType != 0 && src.SighashType != 0 &&
+		dest.SighashType != src.SighashType {
+
+		return fmt.Errorf("%w: %v vs %v", ErrSighashMismatch,
+			dest.SighashType, src.SighashType)
+	}
+
+	if dest.SighashType == 0 {
+		dest.SighashType = src.SighashType
+	}
+
+	return nil
+}
+
+// mergeInputScripts merges RedeemScript, WitnessScript, FinalScriptSig, and
+// FinalScriptWitness for inputs. Returns error on conflict.
+func mergeInputScripts(dest, src *psbt.PInput) error {
+	err := mergeRedeemScript(dest, src)
+	if err != nil {
+		return err
+	}
+
+	err = mergeWitnessScript(dest, src)
+	if err != nil {
+		return err
+	}
+
+	err = mergeFinalScriptSig(dest, src)
+	if err != nil {
+		return err
+	}
+
+	return mergeFinalScriptWitness(dest, src)
+}
+
+// mergeRedeemScript merges the RedeemScript field.
+func mergeRedeemScript(dest, src *psbt.PInput) error {
+	if len(dest.RedeemScript) > 0 && len(src.RedeemScript) > 0 &&
+		!bytes.Equal(dest.RedeemScript, src.RedeemScript) {
+
+		return ErrRedeemScriptMismatch
+	}
+
+	if len(dest.RedeemScript) == 0 {
+		dest.RedeemScript = src.RedeemScript
+	}
+
+	return nil
+}
+
+// mergeWitnessScript merges the WitnessScript field.
+func mergeWitnessScript(dest, src *psbt.PInput) error {
+	if len(dest.WitnessScript) > 0 && len(src.WitnessScript) > 0 &&
+		!bytes.Equal(dest.WitnessScript, src.WitnessScript) {
+
+		return ErrWitnessScriptMismatch
+	}
+
+	if len(dest.WitnessScript) == 0 {
+		dest.WitnessScript = src.WitnessScript
+	}
+
+	return nil
+}
+
+// mergeFinalScriptSig merges the FinalScriptSig field.
+func mergeFinalScriptSig(dest, src *psbt.PInput) error {
+	if len(dest.FinalScriptSig) > 0 && len(src.FinalScriptSig) > 0 &&
+		!bytes.Equal(dest.FinalScriptSig, src.FinalScriptSig) {
+
+		return ErrFinalScriptSigMismatch
+	}
+
+	if len(dest.FinalScriptSig) == 0 {
+		dest.FinalScriptSig = src.FinalScriptSig
+	}
+
+	return nil
+}
+
+// mergeFinalScriptWitness merges the FinalScriptWitness field.
+func mergeFinalScriptWitness(dest, src *psbt.PInput) error {
+	if len(dest.FinalScriptWitness) > 0 &&
+		len(src.FinalScriptWitness) > 0 &&
+		!bytes.Equal(dest.FinalScriptWitness, src.FinalScriptWitness) {
+
+		return ErrFinalScriptWitnessMismatch
+	}
+
+	if len(dest.FinalScriptWitness) == 0 {
+		dest.FinalScriptWitness = src.FinalScriptWitness
+	}
+
+	return nil
+}
+
+// mergeTaprootKeySpendSig merges the Taproot Key Spend Signature.
+// Returns error on conflict.
+func mergeTaprootKeySpendSig(dest, src *psbt.PInput) error {
+	if len(dest.TaprootKeySpendSig) > 0 &&
+		len(src.TaprootKeySpendSig) > 0 &&
+		!bytes.Equal(dest.TaprootKeySpendSig, src.TaprootKeySpendSig) {
+
+		return ErrTaprootKeySpendSigMismatch
+	}
+
+	if len(dest.TaprootKeySpendSig) == 0 {
+		dest.TaprootKeySpendSig = src.TaprootKeySpendSig
+	}
+
+	return nil
+}
+
+// mergeTaprootScriptSpendSigs appends Taproot Script Spend Signatures from src
+// to dest.
+func mergeTaprootScriptSpendSigs(dest, src *psbt.PInput) {
+	dest.TaprootScriptSpendSig = append(
+		dest.TaprootScriptSpendSig, src.TaprootScriptSpendSig...,
+	)
+}
+
+// mergeWitnessUtxo merges the Witness UTXO field. Returns error on conflict.
+func mergeWitnessUtxo(dest, src *psbt.PInput) error {
+	if dest.WitnessUtxo != nil && src.WitnessUtxo != nil {
+		if dest.WitnessUtxo.Value != src.WitnessUtxo.Value ||
+			!bytes.Equal(dest.WitnessUtxo.PkScript,
+				src.WitnessUtxo.PkScript) {
+
+			return ErrWitnessUtxoMismatch
+		}
+	}
+
+	if dest.WitnessUtxo == nil {
+		dest.WitnessUtxo = src.WitnessUtxo
+	}
+
+	return nil
+}
+
+// mergeNonWitnessUtxo merges the Non-Witness UTXO field. Returns error on
+// conflict (by TXID).
+func mergeNonWitnessUtxo(dest, src *psbt.PInput) error {
+	if dest.NonWitnessUtxo != nil && src.NonWitnessUtxo != nil {
+		if dest.NonWitnessUtxo.TxHash() != src.NonWitnessUtxo.TxHash() {
+			return ErrNonWitnessUtxoMismatch
+		}
+	}
+
+	if dest.NonWitnessUtxo == nil {
+		dest.NonWitnessUtxo = src.NonWitnessUtxo
+	}
+
+	return nil
+}
+
+// mergeTaprootInternalKey merges the Taproot Internal Key for outputs.
+// Returns error on conflict.
+func mergeTaprootInternalKey(dest, src *psbt.POutput) error {
+	if len(dest.TaprootInternalKey) > 0 &&
+		len(src.TaprootInternalKey) > 0 &&
+		!bytes.Equal(dest.TaprootInternalKey, src.TaprootInternalKey) {
+
+		return ErrTaprootInternalKeyMismatch
+	}
+
+	if len(dest.TaprootInternalKey) == 0 {
+		dest.TaprootInternalKey = src.TaprootInternalKey
+	}
+
+	return nil
+}
+
+// mergeOutputScripts merges RedeemScript and WitnessScript for outputs.
+// Returns error on conflict.
+func mergeOutputScripts(dest, src *psbt.POutput) error {
+	if len(dest.RedeemScript) > 0 && len(src.RedeemScript) > 0 &&
+		!bytes.Equal(dest.RedeemScript, src.RedeemScript) {
+
+		return ErrRedeemScriptMismatch
+	}
+
+	if len(dest.RedeemScript) == 0 {
+		dest.RedeemScript = src.RedeemScript
+	}
+
+	if len(dest.WitnessScript) > 0 && len(src.WitnessScript) > 0 &&
+		!bytes.Equal(dest.WitnessScript, src.WitnessScript) {
+
+		return ErrWitnessScriptMismatch
+	}
+
+	if len(dest.WitnessScript) == 0 {
+		dest.WitnessScript = src.WitnessScript
+	}
+
+	return nil
+}
