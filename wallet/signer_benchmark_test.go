@@ -765,3 +765,118 @@ func BenchmarkComputeRawSigSegwitV0(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkComputeRawSigTaproot benchmarks the ComputeRawSig method for
+// Taproot key-path spends. Since ComputeRawSig uses an explicit path and
+// doesn't search through accounts, wallet size shouldn't affect performance -
+// we use constantGrowth to verify performance remains constant regardless of
+// wallet size.
+func BenchmarkComputeRawSigTaproot(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 10
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0086}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("Accounts-%0*d", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			// Get a test Taproot address.
+			testAddr := getTestAddress(
+				b, bw.Wallet, accountGrowth[i],
+			)
+			pkScript, err := txscript.PayToAddrScript(testAddr)
+			require.NoError(b, err)
+
+			prevOut := &wire.TxOut{
+				Value:    100000,
+				PkScript: pkScript,
+			}
+
+			// Create a spending transaction.
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{},
+					Index: 0,
+				},
+			})
+			tx.AddTxOut(&wire.TxOut{
+				Value:    50000,
+				PkScript: pkScript,
+			})
+
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				prevOut.PkScript, prevOut.Value,
+			)
+			sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+			accountIndex := uint32(accountGrowth[i] / 2)
+			addressIndex := uint32(addressGrowth[i] / 2)
+			path := BIP32Path{
+				KeyScope: scopes[0],
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: accountIndex,
+					Branch:          0,
+					Index:           addressIndex,
+				},
+			}
+
+			params := &RawSigParams{
+				Tx:         tx,
+				InputIndex: 0,
+				Output:     prevOut,
+				SigHashes:  sigHashes,
+				HashType:   txscript.SigHashDefault,
+				Path:       path,
+				Details: TaprootSpendDetails{
+					SpendPath: KeyPathSpend,
+				},
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				sig, err := bw.ComputeRawSig(
+					b.Context(), params,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, sig)
+			}
+		})
+	}
+}
