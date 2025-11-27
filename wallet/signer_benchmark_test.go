@@ -880,3 +880,83 @@ func BenchmarkComputeRawSigTaproot(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkDerivePrivKey benchmarks the DerivePrivKey method (UnsafeSigner)
+// across different wallet sizes. This benchmark measures the performance of
+// deriving a private key from a BIP-32 path.
+func BenchmarkDerivePrivKey(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 10
+	)
+
+	var (
+		// accountGrowth uses linearGrowth to test scaling with wallet
+		// size. Signature operations derive keys using the account
+		// index in the BIP-32 path.
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		// addressGrowth uses constantGrowth since address count doesn't
+		// affect the signature generation's time complexity when using
+		// an explicit path.
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		// utxoGrowth uses constantGrowth since UTXO count doesn't
+		// affect the signature generation's time complexity.
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("Accounts-%0*d", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			accountIndex := uint32(accountGrowth[i] / 2)
+
+			path := BIP32Path{
+				KeyScope: scopes[0],
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: accountIndex,
+					Branch:          0,
+					Index:           0,
+				},
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				privKey, err := w.DerivePrivKey(
+					b.Context(), path,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, privKey)
+				privKey.Zero()
+			}
+		})
+	}
+}
