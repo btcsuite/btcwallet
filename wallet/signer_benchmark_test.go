@@ -1359,3 +1359,102 @@ func BenchmarkComputeUnlockingScriptWithTweaker(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkDifferentAddressTypes compares signing performance across
+// different address types (P2PKH, P2WKH, P2TR).
+func BenchmarkDifferentAddressTypes(b *testing.B) {
+	const (
+		numAccounts  = 5
+		numAddresses = 10
+	)
+
+	testCases := []struct {
+		name     string
+		scope    waddrmgr.KeyScope
+		hashType txscript.SigHashType
+	}{
+		{
+			name:     "P2PKH-Legacy",
+			scope:    waddrmgr.KeyScopeBIP0044,
+			hashType: txscript.SigHashAll,
+		},
+		{
+			name:     "P2WKH-SegWit",
+			scope:    waddrmgr.KeyScopeBIP0084,
+			hashType: txscript.SigHashAll,
+		},
+		{
+			name:     "P2TR-Taproot",
+			scope:    waddrmgr.KeyScopeBIP0086,
+			hashType: txscript.SigHashDefault,
+		},
+	}
+
+	for _, tc := range testCases {
+		b.Run(tc.name, func(b *testing.B) {
+			scopes := []waddrmgr.KeyScope{tc.scope}
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  numAccounts,
+					numAddresses: numAddresses,
+					numWalletTxs: 0,
+				},
+			)
+
+			// Get a test address for this scope.
+			testAddr, err := bw.CurrentAddress(0, tc.scope)
+			if err != nil {
+				// Fallback to getting any address.
+				testAddr = getTestAddress(
+					b, bw.Wallet, numAccounts,
+				)
+			}
+
+			pkScript, err := txscript.PayToAddrScript(testAddr)
+			require.NoError(b, err)
+
+			prevOut := &wire.TxOut{
+				Value:    100000,
+				PkScript: pkScript,
+			}
+
+			// Create a spending transaction.
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{},
+					Index: 0,
+				},
+			})
+			tx.AddTxOut(&wire.TxOut{
+				Value:    50000,
+				PkScript: pkScript,
+			})
+
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				prevOut.PkScript, prevOut.Value,
+			)
+			sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+			params := &UnlockingScriptParams{
+				Tx:         tx,
+				InputIndex: 0,
+				Output:     prevOut,
+				SigHashes:  sigHashes,
+				HashType:   tc.hashType,
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				unlockScript, err := bw.ComputeUnlockingScript(
+					b.Context(), params,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, unlockScript)
+			}
+		})
+	}
+}
