@@ -6,6 +6,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -422,6 +424,108 @@ func BenchmarkSignDigestSchnorr(b *testing.B) {
 				)
 				require.NoError(b, err)
 				require.NotNil(b, sig)
+			}
+		})
+	}
+}
+
+// BenchmarkComputeUnlockingScriptP2WKH benchmarks the ComputeUnlockingScript
+// method for P2WKH outputs across different wallet sizes and UTXO counts.
+func BenchmarkComputeUnlockingScriptP2WKH(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 5
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			exponentialGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		utxoGrowthPadding = decimalWidth(
+			utxoGrowth[len(utxoGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("Accounts-%0*d/UTXOs-%0*d",
+			accountGrowthPadding, accountGrowth[i],
+			utxoGrowthPadding, utxoGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			// Get a test address and create a P2WKH output.
+			testAddr := getTestAddress(
+				b, bw.Wallet, accountGrowth[i],
+			)
+			pkScript, err := txscript.PayToAddrScript(testAddr)
+			require.NoError(b, err)
+
+			prevOut := &wire.TxOut{
+				Value:    100000,
+				PkScript: pkScript,
+			}
+
+			// Create a spending transaction.
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{},
+					Index: 0,
+				},
+			})
+			tx.AddTxOut(&wire.TxOut{
+				Value:    50000,
+				PkScript: pkScript,
+			})
+
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				prevOut.PkScript, prevOut.Value,
+			)
+			sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+			params := &UnlockingScriptParams{
+				Tx:         tx,
+				InputIndex: 0,
+				Output:     prevOut,
+				SigHashes:  sigHashes,
+				HashType:   txscript.SigHashAll,
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				unlockScript, err := bw.ComputeUnlockingScript(
+					b.Context(), params,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, unlockScript)
 			}
 		})
 	}
