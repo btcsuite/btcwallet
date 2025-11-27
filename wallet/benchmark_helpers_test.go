@@ -691,6 +691,56 @@ func leaseAllOutputs(tb testing.TB, w *Wallet, outpoints []wire.OutPoint,
 	}
 }
 
+// signMultipleInputs is a helper function that signs multiple transaction
+// inputs using ComputeUnlockingScript. This is useful for benchmarks that test
+// multi-input transaction signing performance.
+//
+// IMPORTANT: sigHashes should be pre-computed outside the benchmark loop to
+// avoid measuring setup time. The caller should create a single sigHashes
+// instance using all prevOuts before the benchmark loop, then pass it here.
+func signMultipleInputs(tb testing.TB, w *Wallet, tx *wire.MsgTx,
+	prevOuts []*wire.TxOut, sigHashes *txscript.TxSigHashes,
+	hashType txscript.SigHashType) {
+
+	tb.Helper()
+
+	signMultipleInputsWithTweaker(
+		tb, w, tx, prevOuts, sigHashes, hashType, nil,
+	)
+}
+
+// signMultipleInputsWithTweaker is a helper function that signs multiple
+// transaction inputs using ComputeUnlockingScript with an optional tweaker
+// function. This is useful for benchmarks that test multi-input transaction
+// signing performance with custom key tweaking.
+//
+// IMPORTANT: sigHashes should be pre-computed outside the benchmark loop to
+// avoid measuring setup time. The caller should create a single sigHashes
+// instance using all prevOuts before the benchmark loop, then pass it here.
+func signMultipleInputsWithTweaker(tb testing.TB, w *Wallet, tx *wire.MsgTx,
+	prevOuts []*wire.TxOut, sigHashes *txscript.TxSigHashes,
+	hashType txscript.SigHashType, tweaker PrivKeyTweaker) {
+
+	tb.Helper()
+
+	for j := range prevOuts {
+		params := &UnlockingScriptParams{
+			Tx:         tx,
+			InputIndex: j,
+			Output:     prevOuts[j],
+			SigHashes:  sigHashes,
+			HashType:   hashType,
+			Tweaker:    tweaker,
+		}
+
+		unlockingScript, err := w.ComputeUnlockingScript(
+			tb.Context(), params,
+		)
+		require.NoError(tb, err)
+		require.NotNil(tb, unlockingScript)
+	}
+}
+
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts API across all active key scopes
 // and aggregating the results.

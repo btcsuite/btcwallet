@@ -1122,3 +1122,111 @@ func BenchmarkSignDigestComparisonECDSAvsSchnorr(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkMultiInputTransaction benchmarks signing a transaction with
+// multiple inputs.
+func BenchmarkMultiInputTransaction(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 5
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		// Test with growing number of inputs using linear growth.
+		inputGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		inputGrowthPadding = decimalWidth(
+			inputGrowth[len(inputGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		numInputs := inputGrowth[i]
+
+		name := fmt.Sprintf("Inputs-%0*d", inputGrowthPadding,
+			numInputs)
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			// Get test addresses for outputs.
+			testAddr := getTestAddress(
+				b, bw.Wallet, accountGrowth[i],
+			)
+			pkScript, err := txscript.PayToAddrScript(testAddr)
+			require.NoError(b, err)
+
+			tx := wire.NewMsgTx(2)
+
+			// Create previous outputs for each input.
+			prevOuts := make([]*wire.TxOut, numInputs)
+			for j := range numInputs {
+				prevOuts[j] = &wire.TxOut{
+					Value:    100000,
+					PkScript: pkScript,
+				}
+
+				tx.AddTxIn(&wire.TxIn{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  chainhash.Hash{byte(j)},
+						Index: 0,
+					},
+				})
+			}
+
+			// Add a single output.
+			tx.AddTxOut(&wire.TxOut{
+				Value:    int64(numInputs) * 100000,
+				PkScript: pkScript,
+			})
+
+			// Pre-compute sigHashes.
+			fetcher := txscript.NewMultiPrevOutFetcher(nil)
+			for j, prevOut := range prevOuts {
+				fetcher.AddPrevOut(wire.OutPoint{
+					Hash:  chainhash.Hash{byte(j)},
+					Index: 0,
+				}, prevOut)
+			}
+
+			sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				signMultipleInputs(
+					b, bw.Wallet, tx, prevOuts, sigHashes,
+					txscript.SigHashAll,
+				)
+			}
+		})
+	}
+}
