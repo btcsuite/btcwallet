@@ -926,164 +926,190 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
-// TestComputeUnlockingScriptFail tests various failure modes of
-// ComputeUnlockingScript.
-func TestComputeUnlockingScriptFail(t *testing.T) {
+// TestComputeUnlockingScriptFail_ScriptForOutput tests failure when
+// ScriptForOutput returns an error.
+func TestComputeUnlockingScriptFail_ScriptForOutput(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up common test data (keys, address, transaction) used
-	// across subtests.
-	privKey, pubKey := deterministicPrivKey(t)
-
-	// Create P2PKH for testing.
+	// Arrange: Set up keys, address, and transaction.
+	_, pubKey := deterministicPrivKey(t)
 	addr, err := address.NewAddressPubKeyHash(
 		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
 	)
 	require.NoError(t, err)
-
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
+	// Create fresh mutable state.
 	prevOut, tx := createDummyTestTx(pkScript)
 	fetcher := txscript.NewCannedPrevOutputFetcher(
 		prevOut.PkScript, prevOut.Value,
 	)
-
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-	t.Run("ScriptForOutput Fail", func(t *testing.T) {
-		t.Parallel()
+	// Arrange: Set up the wallet and mocks.
+	w, mocks := testWalletWithMocks(t)
 
-		// Arrange: Set up the wallet and mocks.
-		w, mocks := testWalletWithMocks(t)
+	// Mock the address store to return an error.
+	mocks.addrStore.On("Address", mock.Anything, addr).
+		Return((*mockManagedAddress)(nil), errManagerNotFound).Once()
 
-		// Mock the address store to return an error when looking up
-		// the address info. This simulates a case where the address is
-		// not found or there is a database error.
-		mocks.addrStore.On("Address", mock.Anything, addr).
-			Return((*mockManagedAddress)(nil),
-				errManagerNotFound).Once()
+	params := &UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: sigHashes,
+		HashType:  txscript.SigHashAll,
+	}
 
-		params := &UnlockingScriptParams{
-			Tx:        tx,
-			Output:    prevOut,
-			SigHashes: sigHashes,
-			HashType:  txscript.SigHashAll,
-		}
+	// Act: Attempt to compute the unlocking script.
+	_, err = w.ComputeUnlockingScript(t.Context(), params)
 
-		// Act: Attempt to compute the unlocking script.
-		_, err = w.ComputeUnlockingScript(t.Context(), params)
+	// Assert: Verify error.
+	require.ErrorContains(t, err, "unable to get address info")
+}
 
-		// Assert: Verify that the error from the address store is
-		// wrapped and returned.
-		require.ErrorContains(t, err, "unable to get address info")
-	})
+// TestComputeUnlockingScriptFail_PrivKey tests failure when private key
+// retrieval fails.
+func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
+	t.Parallel()
 
-	t.Run("PrivKey Fail", func(t *testing.T) {
-		t.Parallel()
+	// Arrange: Set up keys, address, and transaction.
+	_, pubKey := deterministicPrivKey(t)
+	addr, err := address.NewAddressPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
 
-		// Arrange: Set up the wallet and mocks.
-		w, mocks := testWalletWithMocks(t)
+	// Create fresh mutable state.
+	prevOut, tx := createDummyTestTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-		// Mock the address store to return a valid managed address.
-		mocks.addrStore.On("Address", mock.Anything, addr).
-			Return(mocks.pubKeyAddr, nil).Once()
+	// Arrange: Set up the wallet and mocks.
+	w, mocks := testWalletWithMocks(t)
 
-		// Mock the managed address to return the correct type (P2PKH).
-		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash)
+	// Mock address store and managed address.
+	mocks.addrStore.On("Address", mock.Anything, addr).
+		Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash)
 
-		// Mock the private key retrieval to fail. This simulates a
-		// case where the private key cannot be decrypted or found.
-		mocks.pubKeyAddr.On("PrivKey").Return((*btcec.PrivateKey)(nil),
-			errPrivKeyMock).Once()
+	// Mock private key retrieval failure.
+	mocks.pubKeyAddr.On("PrivKey").Return((*btcec.PrivateKey)(nil),
+		errPrivKeyMock).Once()
 
-		params := &UnlockingScriptParams{
-			Tx:        tx,
-			Output:    prevOut,
-			SigHashes: sigHashes,
-			HashType:  txscript.SigHashAll,
-		}
+	params := &UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: sigHashes,
+		HashType:  txscript.SigHashAll,
+	}
 
-		// Act: Attempt to compute the unlocking script.
-		_, err = w.ComputeUnlockingScript(t.Context(), params)
+	// Act: Attempt to compute the unlocking script.
+	_, err = w.ComputeUnlockingScript(t.Context(), params)
 
-		// Assert: Verify that the private key retrieval error is
-		// returned.
-		require.ErrorContains(t, err, "privkey error")
-	})
+	// Assert: Verify error.
+	require.ErrorContains(t, err, "privkey error")
+}
 
-	t.Run("Tweak Fail", func(t *testing.T) {
-		t.Parallel()
+// TestComputeUnlockingScriptFail_Tweak tests failure when the tweaker fails.
+func TestComputeUnlockingScriptFail_Tweak(t *testing.T) {
+	t.Parallel()
 
-		// Arrange: Set up the wallet and mocks.
-		w, mocks := testWalletWithMocks(t)
+	// Arrange: Set up keys, address, and transaction.
+	privKey, pubKey := deterministicPrivKey(t)
+	addr, err := address.NewAddressPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
 
-		// Mock the address store to return a valid managed address.
-		mocks.addrStore.On("Address", mock.Anything, addr).
-			Return(mocks.pubKeyAddr, nil).Once()
+	// Create fresh mutable state.
+	prevOut, tx := createDummyTestTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-		// Mock the managed address to return the correct type (P2PKH).
-		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash)
+	// Arrange: Set up the wallet and mocks.
+	w, mocks := testWalletWithMocks(t)
 
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	// Mock address store and managed address.
+	mocks.addrStore.On("Address", mock.Anything, addr).
+		Return(mocks.pubKeyAddr, nil).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash)
 
-		// Mock the private key retrieval to succeed.
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
-		// Define a custom tweaker function that always fails.
-		params := &UnlockingScriptParams{
-			Tx:        tx,
-			Output:    prevOut,
-			SigHashes: sigHashes,
-			HashType:  txscript.SigHashAll,
-			Tweaker: func(*btcec.PrivateKey) (
-				*btcec.PrivateKey, error) {
+	// Define failing tweaker.
+	params := &UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: sigHashes,
+		HashType:  txscript.SigHashAll,
+		Tweaker: func(*btcec.PrivateKey) (*btcec.PrivateKey, error) {
+			return nil, errTweakMock
+		},
+	}
 
-				return nil, errTweakMock
-			},
-		}
+	// Act: Attempt to compute the unlocking script.
+	_, err = w.ComputeUnlockingScript(t.Context(), params)
 
-		// Act: Attempt to compute the unlocking script with the
-		// failing tweaker.
-		_, err = w.ComputeUnlockingScript(t.Context(), params)
+	// Assert: Verify error.
+	require.ErrorContains(t, err, "tweak error")
+}
 
-		// Assert: Verify that the tweaker error is returned.
-		require.ErrorContains(t, err, "tweak error")
-	})
+// TestComputeUnlockingScriptFail_UnsupportedAddr tests failure when the
+// address type is unsupported.
+func TestComputeUnlockingScriptFail_UnsupportedAddr(t *testing.T) {
+	t.Parallel()
 
-	t.Run("Unsupported Address Type", func(t *testing.T) {
-		t.Parallel()
+	// Arrange: Set up keys, address, and transaction.
+	privKey, pubKey := deterministicPrivKey(t)
+	addr, err := address.NewAddressPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
 
-		// Arrange: Set up the wallet and mocks.
-		w, mocks := testWalletWithMocks(t)
+	// Create fresh mutable state.
+	prevOut, tx := createDummyTestTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-		// Mock the address store to return a valid managed address.
-		mocks.addrStore.On("Address", mock.Anything, addr).
-			Return(mocks.pubKeyAddr, nil).Once()
+	// Arrange: Set up the wallet and mocks.
+	w, mocks := testWalletWithMocks(t)
 
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	// Mock address store and managed address.
+	mocks.addrStore.On("Address", mock.Anything, addr).
+		Return(mocks.pubKeyAddr, nil).Once()
 
-		// Mock the private key retrieval to succeed.
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
-		// Mock the address type to be one that is not supported for
-		// unlocking script generation (e.g., RawPubKey).
-		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.RawPubKey)
+	// Mock unsupported address type.
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.RawPubKey)
 
-		params := &UnlockingScriptParams{
-			Tx:        tx,
-			Output:    prevOut,
-			SigHashes: sigHashes,
-			HashType:  txscript.SigHashAll,
-		}
+	params := &UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: sigHashes,
+		HashType:  txscript.SigHashAll,
+	}
 
-		// Act: Attempt to compute the unlocking script.
-		_, err = w.ComputeUnlockingScript(t.Context(), params)
+	// Act: Attempt to compute the unlocking script.
+	_, err = w.ComputeUnlockingScript(t.Context(), params)
 
-		// Assert: Verify that the unsupported address type error is
-		// returned.
-		require.ErrorIs(t, err, ErrUnsupportedAddressType)
-	})
+	// Assert: Verify error.
+	require.ErrorIs(t, err, ErrUnsupportedAddressType)
 }
 
 // TestComputeUnlockingScriptUnknownAddrType tests the default case in
