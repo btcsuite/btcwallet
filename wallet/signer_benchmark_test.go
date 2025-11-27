@@ -1230,3 +1230,132 @@ func BenchmarkMultiInputTransaction(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkComputeUnlockingScriptWithTweaker benchmarks the
+// ComputeUnlockingScript method with a custom private key tweaker function
+// across different numbers of inputs.
+func BenchmarkComputeUnlockingScriptWithTweaker(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 5
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		// Test with growing number of inputs to see tweaker overhead
+		// with multiple inputs.
+		inputGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		inputGrowthPadding = decimalWidth(
+			inputGrowth[len(inputGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	// Create a tweaker function that adds a scalar to the key.
+	tweakScalar := new(btcec.ModNScalar)
+	tweakScalar.SetByteSlice([]byte{0x01, 0x02, 0x03})
+
+	// Without that ignore linting directive getting result 1 (error) is
+	// always nil. This is acceptable since it is used for convenient
+	// testing purposes.
+	//
+	//nolint:unparam
+	tweaker := func(privKey *btcec.PrivateKey) (*btcec.PrivateKey, error) {
+		// Add the tweak to the private key scalar.
+		var privKeyScalar btcec.ModNScalar
+		privKeyScalar.Set(&privKey.Key)
+		privKeyScalar.Add(tweakScalar)
+
+		return btcec.PrivKeyFromScalar(&privKeyScalar), nil
+	}
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		numInputs := inputGrowth[i]
+
+		name := fmt.Sprintf("Inputs-%0*d", inputGrowthPadding,
+			numInputs)
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			// Get a test address and create P2WKH outputs.
+			testAddr := getTestAddress(
+				b, bw.Wallet, accountGrowth[i],
+			)
+			pkScript, err := txscript.PayToAddrScript(testAddr)
+			require.NoError(b, err)
+
+			// Create multiple previous outputs.
+			prevOuts := make([]*wire.TxOut, numInputs)
+			for j := range numInputs {
+				prevOuts[j] = &wire.TxOut{
+					Value:    100000,
+					PkScript: pkScript,
+				}
+			}
+
+			// Create a spending transaction with multiple inputs.
+			tx := wire.NewMsgTx(2)
+			for j := range numInputs {
+				tx.AddTxIn(&wire.TxIn{
+					PreviousOutPoint: wire.OutPoint{
+						Hash:  chainhash.Hash{byte(j)},
+						Index: 0,
+					},
+				})
+			}
+
+			tx.AddTxOut(&wire.TxOut{
+				Value:    int64(numInputs) * 50000,
+				PkScript: pkScript,
+			})
+
+			// Pre-compute sigHashes.
+			fetcher := txscript.NewMultiPrevOutFetcher(nil)
+			for j, prevOut := range prevOuts {
+				fetcher.AddPrevOut(wire.OutPoint{
+					Hash:  chainhash.Hash{byte(j)},
+					Index: 0,
+				}, prevOut)
+			}
+
+			sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				signMultipleInputsWithTweaker(
+					b, bw.Wallet, tx, prevOuts, sigHashes,
+					txscript.SigHashAll, tweaker,
+				)
+			}
+		})
+	}
+}
