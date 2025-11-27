@@ -1607,3 +1607,141 @@ func (w *Wallet) signBip32PsbtInput(ctx context.Context, packet *psbt.Packet,
 
 	return nil
 }
+
+// FinalizePsbt finalizes the PSBT.
+//
+// It performs the finalization by:
+//  1. Auto-Signing: Iterating through all inputs and calling `finalizeInput`.
+//     This helper attempts to generate a signature and script witness for any
+//     inputs owned by the wallet that are missing them.
+//  2. Completion: Calling `psbt.MaybeFinalizeAll`, which checks if every input
+//     in the packet has the necessary data to pass script validation. If so, it
+//     constructs the final witnesses and strips the PSBT metadata, leaving a
+//     ready-to-broadcast transaction.
+func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
+	// Check that the PSBT is structurally ready to be signed/finalized.
+	err := psbt.InputsReadyToSign(packet)
+	if err != nil {
+		return fmt.Errorf("psbt inputs not ready: %w", err)
+	}
+
+	tx := packet.UnsignedTx
+
+	// We create a `PrevOutputFetcher` to allow `txscript` to retrieve the
+	// previous transaction outputs needed for sighash generation. This is
+	// required for generating valid signatures, as the value and script of
+	// the UTXO being spent are part of the signed digest.
+	prevOutFetcher := PsbtPrevOutputFetcher(packet)
+
+	// Compute the transaction's sighashes. This is an optimization to
+	// calculate the sighashes once and reuse them for all inputs, rather
+	// than recalculating them for each signature. This is particularly
+	// beneficial for transactions with many inputs.
+	sigHashes := txscript.NewTxSigHashes(tx, prevOutFetcher)
+
+	// Iterate through each input in the PSBT. For each input, we will
+	// check if we can sign and finalize it (i.e., if we own the UTXO and
+	// have the private key).
+	for i := range packet.Inputs {
+		err := w.finalizeInput(ctx, packet, i, sigHashes)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Finally, attempt to finalize the entire PSBT. This will check if all
+	// inputs have final scripts (either added by us above or constructed
+	// from PartialSigs by the psbt library) and strip the partial data.
+	err = psbt.MaybeFinalizeAll(packet)
+	if err != nil {
+		return fmt.Errorf("error finalizing PSBT: %w", err)
+	}
+
+	return nil
+}
+
+// finalizeInput attempts to finalize a single input of the PSBT.
+func (w *Wallet) finalizeInput(ctx context.Context, packet *psbt.Packet,
+	idx int, sigHashes *txscript.TxSigHashes) error {
+
+	pInput := &packet.Inputs[idx]
+
+	// If the input is already finalized, we can skip it.
+	if len(pInput.FinalScriptWitness) > 0 ||
+		len(pInput.FinalScriptSig) > 0 {
+
+		log.Debugf("Skipping input %d: already finalized", idx)
+		return nil
+	}
+
+	// Fetch the UTXO for this input.
+	utxo, err := fetchPsbtUtxo(packet, idx)
+	if err != nil {
+		// This should not happen if InputsReadyToSign passed (which is
+		// called at the start of the function), as it guarantees the
+		// presence of WitnessUtxo or NonWitnessUtxo. However, for
+		// defensive programming, we log an error and continue to avoid
+		// aborting the process in case of unexpected data
+		// inconsistency.
+		log.Errorf("Input %d has no UTXO info: %v", idx, err)
+		return nil
+	}
+
+	// Attempt to compute the unlocking script (witness and/or
+	// sigScript) for this input.
+	params := &UnlockingScriptParams{
+		Tx:         packet.UnsignedTx,
+		InputIndex: idx,
+		Output:     utxo,
+		SigHashes:  sigHashes,
+		HashType:   pInput.SighashType,
+	}
+
+	unlockingScript, err := w.ComputeUnlockingScript(ctx, params)
+	if err != nil {
+		// If we can't generate the script (e.g. we don't own the key,
+		// or it's a type we don't support yet, or the account is
+		// watch-only), we just skip this input and let the finalizer
+		// try to use any existing partial signatures.
+		log.Debugf("Could not compute unlocking script for "+
+			"input %d: %v", idx, err)
+
+		return nil
+	}
+
+	err = addScriptToPInput(pInput, unlockingScript)
+	if err != nil {
+		return fmt.Errorf("failed to patch input %d: %w",
+			idx, err)
+	}
+
+	return nil
+}
+
+// addScriptToPInput applies the generated witness and/or sigScript to the PSBT
+// input.
+func addScriptToPInput(pInput *psbt.PInput,
+	unlockingScript *UnlockingScript) error {
+
+	// If we successfully generated a witness, serialize and attach
+	// it.
+	if len(unlockingScript.Witness) > 0 {
+		var witnessBuf bytes.Buffer
+
+		err := psbt.WriteTxWitness(&witnessBuf, unlockingScript.Witness)
+		if err != nil {
+			return fmt.Errorf("failed to serialize witness: %w",
+				err)
+		}
+
+		pInput.FinalScriptWitness = witnessBuf.Bytes()
+	}
+
+	// If we generated a sigScript (for legacy/nested P2SH), attach
+	// it.
+	if len(unlockingScript.SigScript) > 0 {
+		pInput.FinalScriptSig = unlockingScript.SigScript
+	}
+
+	return nil
+}
