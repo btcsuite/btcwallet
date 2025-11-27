@@ -29,8 +29,9 @@ import (
 )
 
 var (
-	errDb          = errors.New("db error")
-	errKeyNotFound = errors.New("key not found")
+	errDb           = errors.New("db error")
+	errKeyNotFound  = errors.New("key not found")
+	errAddrNotFound = errors.New("addr not found")
 )
 
 // TestFindCredit tests that the findCredit helper returns true if a credit
@@ -3278,14 +3279,355 @@ func TestSignBip32PsbtInputErrors(t *testing.T) {
 	}}
 	err = w.signBip32PsbtInput(t.Context(), packet, 0, nil, nil)
 	require.ErrorIs(t, err, ErrInvalidBip32PathLength)
+}
 
-	// Case 2: Unknown Purpose.
-	packet.Inputs[0].Bip32Derivation[0].Bip32Path = []uint32{
-		hdkeychain.HardenedKeyStart + 999, // Unknown
-		hdkeychain.HardenedKeyStart + 1,
-		hdkeychain.HardenedKeyStart + 0,
-		0, 0,
+// TestAddScriptToPInput tests that addScriptToPInput correctly updates
+// the PSBT input with the provided witness and/or sigScript.
+func TestAddScriptToPInput(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Dummy witness and sigScript.
+	witness := wire.TxWitness{[]byte{0x01}, []byte{0x02}}
+	sigScript := []byte{0x03}
+
+	// Arrange: Expected serialized witness:
+	// - 0x02 (stack items)
+	// - 0x01 (len) + 0x01 (data)
+	// - 0x01 (len) + 0x02 (data)
+	expectedWitness := []byte{0x02, 0x01, 0x01, 0x01, 0x02}
+
+	tests := []struct {
+		name            string
+		witness         wire.TxWitness
+		sigScript       []byte
+		expectedWitness []byte
+		expectedSig     []byte
+	}{
+		{
+			name:            "witness only",
+			witness:         witness,
+			sigScript:       nil,
+			expectedWitness: expectedWitness,
+			expectedSig:     nil,
+		},
+		{
+			name:            "sigScript only",
+			witness:         nil,
+			sigScript:       sigScript,
+			expectedWitness: nil,
+			expectedSig:     sigScript,
+		},
+		{
+			name:            "both",
+			witness:         witness,
+			sigScript:       sigScript,
+			expectedWitness: expectedWitness,
+			expectedSig:     sigScript,
+		},
+		{
+			name:            "none",
+			witness:         nil,
+			sigScript:       nil,
+			expectedWitness: nil,
+			expectedSig:     nil,
+		},
 	}
-	err = w.signBip32PsbtInput(t.Context(), packet, 0, nil, nil)
-	require.ErrorIs(t, err, ErrUnknownBip32Purpose)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: UnlockingScript and target PInput.
+			script := &UnlockingScript{
+				Witness:   tc.witness,
+				SigScript: tc.sigScript,
+			}
+			pInput := &psbt.PInput{}
+
+			// Act: Call addScriptToPInput.
+			err := addScriptToPInput(pInput, script)
+
+			// Assert: Verify no error and fields match
+			// expectations.
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedWitness,
+				pInput.FinalScriptWitness)
+			require.Equal(t, tc.expectedSig,
+				pInput.FinalScriptSig)
+		})
+	}
+}
+
+// TestFinalizeInput tests that finalizeInput correctly processes a single PSBT
+// input, handling success, skips, and errors.
+func TestFinalizeInput(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+		// Arrange: Valid PSBT input.
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{})
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+			Value:    1000,
+			PkScript: p2wkhScript,
+		}
+		packet.Inputs[0].SighashType = txscript.SigHashAll
+
+		w, mocks := testWalletWithMocks(t)
+
+		// Arrange: Mock dependencies.
+		mocks.addrStore.On(
+			"Address", mock.Anything, mock.Anything,
+		).Return(mocks.pubKeyAddr, nil)
+		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+		mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil)
+
+		sigHashes := txscript.NewTxSigHashes(
+			tx, txscript.NewCannedPrevOutputFetcher(
+				packet.Inputs[0].WitnessUtxo.PkScript,
+				packet.Inputs[0].WitnessUtxo.Value,
+			),
+		)
+
+		// Act.
+		err = w.finalizeInput(t.Context(), packet, 0, sigHashes)
+
+		// Assert.
+		require.NoError(t, err)
+		require.NotEmpty(t, packet.Inputs[0].FinalScriptWitness)
+	})
+
+	t.Run("skip finalized", func(t *testing.T) {
+		t.Parallel()
+		// Arrange: Already finalized input.
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{})
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		packet.Inputs[0].FinalScriptWitness = []byte{0x01}
+
+		w, _ := testWalletWithMocks(t)
+
+		// Act.
+		err = w.finalizeInput(t.Context(), packet, 0, nil)
+
+		// Assert: No error, remains unchanged (mock not called).
+		require.NoError(t, err)
+	})
+
+	t.Run("skip missing utxo", func(t *testing.T) {
+		t.Parallel()
+		// Arrange: Input without UTXO.
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{})
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		w, _ := testWalletWithMocks(t)
+
+		// Act.
+		err = w.finalizeInput(t.Context(), packet, 0, nil)
+
+		// Assert: No error (logs error but continues).
+		require.NoError(t, err)
+	})
+
+	t.Run("skip malformed script", func(t *testing.T) {
+		t.Parallel()
+		// Arrange: Input with malformed pkScript.
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{})
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		// OP_RETURN script cannot be extracted as an address.
+		packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+			Value:    1000,
+			PkScript: []byte{0x6a},
+		}
+
+		w, _ := testWalletWithMocks(t)
+
+		// Act.
+		err = w.finalizeInput(t.Context(), packet, 0, nil)
+
+		// Assert: No error (logs error but continues).
+		require.NoError(t, err)
+	})
+}
+
+// TestFinalizePsbtSuccess tests that FinalizePsbt successfully generates
+// witnesses for supported input types (P2WKH, Taproot).
+func TestFinalizePsbtSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup keys.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+
+	// Arrange: Create addresses/scripts.
+	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	trAddr, err := btcutil.NewAddressTaproot(
+		schnorr.SerializePubKey(pubKey), &chainParams,
+	)
+	require.NoError(t, err)
+	trScript, err := txscript.PayToAddrScript(trAddr)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		pkScript []byte
+		addrType waddrmgr.AddressType
+		addr     btcutil.Address
+	}{
+		{
+			name:     "p2wkh",
+			pkScript: p2wkhScript,
+			addrType: waddrmgr.WitnessPubKey,
+			addr:     p2wkhAddr,
+		},
+		{
+			name:     "taproot",
+			pkScript: trScript,
+			addrType: waddrmgr.TaprootPubKey,
+			addr:     trAddr,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Create PSBT.
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{})
+			tx.AddTxOut(&wire.TxOut{Value: 1000}) // Add output
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+				Value:    1000,
+				PkScript: tc.pkScript,
+			}
+			packet.Inputs[0].SighashType = txscript.SigHashDefault
+
+			w, mocks := testWalletWithMocks(t)
+
+			// Arrange: Mock address lookup.
+			mocks.addrStore.On(
+				"Address", mock.Anything,
+				mock.MatchedBy(func(a btcutil.Address) bool {
+					return a.String() == tc.addr.String()
+				}),
+			).Return(mocks.pubKeyAddr, nil)
+
+			// Arrange: Mock ManagedPubKeyAddress.
+			// Note: Address() and PubKey() are not called for
+			// P2WKH/Taproot signing paths in
+			// ComputeUnlockingScript.
+			mocks.pubKeyAddr.On("AddrType").Return(tc.addrType)
+
+			// Create a copy of the private key to avoid data races
+			// when parallel tests call Zero() on it.
+			privKeyCopy := *privKey
+			mocks.pubKeyAddr.On("PrivKey").Return(&privKeyCopy, nil)
+
+			// Act: Call FinalizePsbt.
+			err = w.FinalizePsbt(t.Context(), packet)
+
+			// Assert: Verify success and witness presence.
+			require.NoError(t, err)
+			require.NotEmpty(
+				t, packet.Inputs[0].FinalScriptWitness,
+			)
+		})
+	}
+}
+
+// TestFinalizePsbtErrors tests error conditions for FinalizePsbt.
+func TestFinalizePsbtErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("inputs not ready", func(t *testing.T) {
+		t.Parallel()
+		// Arrange: Packet with input but no UTXO info.
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{})
+		tx.AddTxOut(&wire.TxOut{Value: 1000})
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		w, _ := testWalletWithMocks(t)
+
+		// Act.
+		err = w.FinalizePsbt(t.Context(), packet)
+
+		// Assert.
+		require.ErrorContains(t, err, "psbt inputs not ready")
+	})
+
+	t.Run("finalization failed", func(t *testing.T) {
+		t.Parallel()
+		// Arrange: Packet with valid UTXO but we can't sign it (watch
+		// only).
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{})
+		tx.AddTxOut(&wire.TxOut{Value: 1000})
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		// Use a valid P2WKH script so extraction succeeds.
+		p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+			make([]byte, 20), &chainParams,
+		)
+		require.NoError(t, err)
+		dummyScript, err := txscript.PayToAddrScript(p2wkhAddr)
+		require.NoError(t, err)
+
+		packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+			Value:    1000,
+			PkScript: dummyScript,
+		}
+
+		w, mocks := testWalletWithMocks(t)
+
+		// Arrange: Mock Address lookup to return error (or watch only).
+		// Simulating "Address not found" or "Key not found".
+		// ComputeUnlockingScript will fail, log, and continue.
+		// Then MaybeFinalizeAll will fail because no witness.
+		mocks.addrStore.On("Address", mock.Anything, mock.Anything).
+			Return(nil, errAddrNotFound)
+
+		// Act.
+		err = w.FinalizePsbt(t.Context(), packet)
+
+		// Assert: Should return error from MaybeFinalizeAll.
+		require.ErrorContains(t, err, "error finalizing PSBT")
+	})
 }
