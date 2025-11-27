@@ -1037,3 +1037,88 @@ func BenchmarkGetPrivKeyForAddress(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkSignDigestComparisonECDSAvsSchnorr compares ECDSA and Schnorr
+// signature performance side-by-side. This benchmark helps understand the
+// performance characteristics of different signature algorithms.
+func BenchmarkSignDigestComparisonECDSAvsSchnorr(b *testing.B) {
+	const numAccounts = 5
+
+	scopes := []waddrmgr.KeyScope{
+		waddrmgr.KeyScopeBIP0084, // For ECDSA
+		waddrmgr.KeyScopeBIP0086, // For Schnorr
+	}
+
+	ecdsaDigest := chainhash.HashB([]byte("test message"))
+	schnorrDigest := chainhash.TaggedHash(
+		[]byte("BIP0340/challenge"), []byte("test message"),
+	)
+
+	b.Run("ECDSA", func(b *testing.B) {
+		w := setupBenchmarkWallet(
+			b, benchmarkWalletConfig{
+				scopes:       []waddrmgr.KeyScope{scopes[0]},
+				numAccounts:  numAccounts,
+				numAddresses: 5,
+				numWalletTxs: 0,
+			},
+		)
+
+		path := BIP32Path{
+			KeyScope: scopes[0],
+			DerivationPath: waddrmgr.DerivationPath{
+				InternalAccount: 0,
+				Branch:          0,
+				Index:           0,
+			},
+		}
+
+		intent := &SignDigestIntent{
+			Digest:  ecdsaDigest,
+			SigType: SigTypeECDSA,
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for b.Loop() {
+			sig, err := w.SignDigest(b.Context(), path, intent)
+			require.NoError(b, err)
+			require.NotNil(b, sig)
+		}
+	})
+
+	b.Run("Schnorr", func(b *testing.B) {
+		w := setupBenchmarkWallet(
+			b, benchmarkWalletConfig{
+				scopes:       []waddrmgr.KeyScope{scopes[1]},
+				numAccounts:  numAccounts,
+				numAddresses: 5,
+				numWalletTxs: 0,
+			},
+		)
+
+		path := BIP32Path{
+			KeyScope: scopes[1],
+			DerivationPath: waddrmgr.DerivationPath{
+				InternalAccount: 0,
+				Branch:          0,
+				Index:           0,
+			},
+		}
+
+		intent := &SignDigestIntent{
+			Digest:  schnorrDigest[:],
+			SigType: SigTypeSchnorr,
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for b.Loop() {
+			sig, err := w.SignDigest(b.Context(), path, intent)
+			require.NoError(b, err)
+			require.NotNil(b, sig)
+		}
+	})
+}
