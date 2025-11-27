@@ -960,3 +960,80 @@ func BenchmarkDerivePrivKey(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkGetPrivKeyForAddress benchmarks the GetPrivKeyForAddress method
+// (UnsafeSigner) across different wallet sizes and address counts.
+func BenchmarkGetPrivKeyForAddress(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 10
+	)
+
+	var (
+		// accountGrowth uses linearGrowth since the account is part of
+		// the address search space.
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		// addressGrowth uses linearGrowth to test how address lookup
+		// performance scales. GetPrivKeyForAddress searches through
+		// the address manager to find the matching address, so
+		// performance scales with total address count.
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		// utxoGrowth uses constantGrowth since UTXO count doesn't
+		// affect the address lookup's time complexity.
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		addressGrowthPadding = decimalWidth(
+			addressGrowth[len(addressGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("Accounts-%0*d/Addresses-%0*d",
+			accountGrowthPadding, accountGrowth[i],
+			addressGrowthPadding, addressGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			testAddr := getTestAddress(
+				b, bw.Wallet, accountGrowth[i],
+			)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				privKey, err := bw.GetPrivKeyForAddress(
+					b.Context(), testAddr,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, privKey)
+				privKey.Zero()
+			}
+		})
+	}
+}
