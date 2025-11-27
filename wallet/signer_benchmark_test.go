@@ -347,3 +347,82 @@ func BenchmarkSignDigestECDSACompact(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkSignDigestSchnorr benchmarks the SignDigest method for Schnorr
+// signatures across different wallet sizes. The benchmark measures the
+// performance of signing a digest with Schnorr signatures.
+func BenchmarkSignDigestSchnorr(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 5
+	)
+
+	var (
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0086}
+	)
+
+	digest := chainhash.TaggedHash(
+		[]byte("BIP0340/challenge"), []byte("test message"),
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("Accounts-%0*d", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			accountIndx := uint32(accountGrowth[i] / 2)
+			path := BIP32Path{
+				KeyScope: scopes[0],
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: accountIndx,
+					Branch:          0,
+					Index:           0,
+				},
+			}
+
+			intent := &SignDigestIntent{
+				Digest:  digest[:],
+				SigType: SigTypeSchnorr,
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				sig, err := w.SignDigest(
+					b.Context(), path, intent,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, sig)
+			}
+		})
+	}
+}
