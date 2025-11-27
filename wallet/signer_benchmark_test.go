@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -170,6 +171,92 @@ func BenchmarkECDH(b *testing.B) {
 					b.Context(), path, remotePubKey,
 				)
 				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+// BenchmarkSignDigestECDSA benchmarks the SignDigest method for ECDSA
+// signatures across different wallet sizes. The benchmark measures the
+// performance of signing a digest with ECDSA.
+func BenchmarkSignDigestECDSA(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 5
+	)
+
+	var (
+		// accountGrowth uses linearGrowth to test scaling with wallet
+		// size. Signature operations derive keys using the account
+		// index in the BIP-32 path.
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			linearGrowth,
+		)
+
+		// addressGrowth uses constantGrowth since address count doesn't
+		// affect the signature generation's time complexity when using
+		// an explicit path.
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		// utxoGrowth uses constantGrowth since UTXO count doesn't
+		// affect the signature generation's time complexity.
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	// Create a test digest to sign.
+	digest := chainhash.HashB([]byte("test message"))
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("Accounts-%0*d", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			w := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			accountIndex := uint32(accountGrowth[i] / 2)
+			path := BIP32Path{
+				KeyScope: scopes[0],
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: accountIndex,
+					Branch:          0,
+					Index:           0,
+				},
+			}
+
+			intent := &SignDigestIntent{
+				Digest:  digest,
+				SigType: SigTypeECDSA,
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				sig, err := w.SignDigest(
+					b.Context(), path, intent,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, sig)
 			}
 		})
 	}
