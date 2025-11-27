@@ -634,3 +634,134 @@ func BenchmarkComputeUnlockingScriptP2TR(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkComputeRawSigSegwitV0 benchmarks the ComputeRawSig method for
+// SegWit v0 inputs.
+func BenchmarkComputeRawSigSegwitV0(b *testing.B) {
+	const (
+		startGrowthIteration = 0
+		maxGrowthIteration   = 5
+	)
+
+	var (
+		// accountGrowth uses constantGrowth to verify that wallet size
+		// doesn't affect performance. ComputeRawSig uses an explicit
+		// BIP-32 path, so performance should be constant regardless of
+		// account count.
+		accountGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		// addressGrowth uses constantGrowth since address count doesn't
+		// affect the ComputeRawSig operation's time complexity - it
+		// uses an explicit BIP-32 path.
+		addressGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		// utxoGrowth uses constantGrowth since UTXO count doesn't
+		// affect the ComputeRawSig operation's time complexity.
+		utxoGrowth = mapRange(
+			startGrowthIteration, maxGrowthIteration,
+			constantGrowth,
+		)
+
+		accountGrowthPadding = decimalWidth(
+			accountGrowth[len(accountGrowth)-1],
+		)
+
+		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
+	)
+
+	for i := 0; i <= maxGrowthIteration; i++ {
+		name := fmt.Sprintf("Accounts-%0*d", accountGrowthPadding,
+			accountGrowth[i])
+
+		b.Run(name, func(b *testing.B) {
+			bw := setupBenchmarkWallet(
+				b, benchmarkWalletConfig{
+					scopes:       scopes,
+					numAccounts:  accountGrowth[i],
+					numAddresses: addressGrowth[i],
+					numWalletTxs: utxoGrowth[i],
+				},
+			)
+
+			// Get a test address and create witness script.
+			testAddr := getTestAddress(
+				b, bw.Wallet, accountGrowth[i],
+			)
+			witnessPubKeyHash := testAddr.ScriptAddress()
+			witnessScript, err := txscript.NewScriptBuilder().
+				AddOp(txscript.OP_DUP).
+				AddOp(txscript.OP_HASH160).
+				AddData(witnessPubKeyHash).
+				AddOp(txscript.OP_EQUALVERIFY).
+				AddOp(txscript.OP_CHECKSIG).
+				Script()
+			require.NoError(b, err)
+
+			pkScript, err := txscript.PayToAddrScript(testAddr)
+			require.NoError(b, err)
+
+			prevOut := &wire.TxOut{
+				Value:    100000,
+				PkScript: pkScript,
+			}
+
+			// Create a spending transaction.
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{},
+					Index: 0,
+				},
+			})
+			tx.AddTxOut(&wire.TxOut{
+				Value:    50000,
+				PkScript: pkScript,
+			})
+
+			fetcher := txscript.NewCannedPrevOutputFetcher(
+				prevOut.PkScript, prevOut.Value,
+			)
+			sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+
+			accountIndex := uint32(accountGrowth[i] / 2)
+			addressIndex := uint32(addressGrowth[i] / 2)
+			path := BIP32Path{
+				KeyScope: scopes[0],
+				DerivationPath: waddrmgr.DerivationPath{
+					InternalAccount: accountIndex,
+					Branch:          0,
+					Index:           addressIndex,
+				},
+			}
+
+			params := &RawSigParams{
+				Tx:         tx,
+				InputIndex: 0,
+				Output:     prevOut,
+				SigHashes:  sigHashes,
+				HashType:   txscript.SigHashAll,
+				Path:       path,
+				Details: SegwitV0SpendDetails{
+					WitnessScript: witnessScript,
+				},
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				sig, err := bw.ComputeRawSig(
+					b.Context(), params,
+				)
+				require.NoError(b, err)
+				require.NotNil(b, sig)
+			}
+		})
+	}
+}
