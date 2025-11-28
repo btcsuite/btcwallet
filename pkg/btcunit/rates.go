@@ -51,11 +51,10 @@ type baseFeeRate struct {
 }
 
 // newBaseFeeRate creates a new baseFeeRate with the given numerator and
-// denominator. It handles the zero denominator case by returning a zero fee
-// rate.
+// denominator. It panics if the denominator is zero.
 func newBaseFeeRate(numerator btcutil.Amount, denominator uint64) baseFeeRate {
 	if denominator == 0 {
-		return baseFeeRate{satsPerKWU: big.NewRat(0, 1)}
+		panic("fee rate calculation: denominator cannot be zero")
 	}
 
 	return baseFeeRate{satsPerKWU: big.NewRat(
