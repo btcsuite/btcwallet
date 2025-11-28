@@ -487,44 +487,33 @@ func TestFeeForSize(t *testing.T) {
 func TestNewFeeRateConstructorsZero(t *testing.T) {
 	t.Parallel()
 
-	// Test CalcSatPerKWeight with zero weight.
+	// Test CalcSatPerKWeight with zero weight should panic.
 	fee := btcutil.Amount(1000)
-	kwu := NewKWeightUnit(0)
-	expectedRate := NewSatPerKWeight(0)
-	require.Zero(
-		t, expectedRate.satsPerKWU.Cmp(
-			CalcSatPerKWeight(fee, kwu).satsPerKWU,
-		),
-	)
+	require.Panics(t, func() {
+		kwu := NewKWeightUnit(0)
+		_ = CalcSatPerKWeight(fee, kwu)
+	})
 
-	// Test CalcSatPerVByte with zero vbytes.
-	vb := NewVByte(0)
-	expectedRateVB := NewSatPerVByte(0)
-	require.Zero(
-		t, expectedRateVB.satsPerKWU.Cmp(
-			CalcSatPerVByte(fee, vb).satsPerKWU,
-		),
-	)
+	// Test CalcSatPerVByte with zero vbytes should panic.
+	require.Panics(t, func() {
+		vb := NewVByte(0)
+		_ = CalcSatPerVByte(fee, vb)
+	})
 
-	// Test CalcSatPerKVByte with zero kvbytes.
-	kvb := NewKVByte(0)
-	expectedRateKVB := NewSatPerKVByte(0)
-	require.Zero(
-		t, expectedRateKVB.satsPerKWU.Cmp(
-			CalcSatPerKVByte(fee, kvb).satsPerKWU,
-		),
-	)
+	// Test CalcSatPerKVByte with zero kvbytes should panic.
+	require.Panics(t, func() {
+		kvb := NewKVByte(0)
+		_ = CalcSatPerKVByte(fee, kvb)
+	})
 
-	// Test CalcSatPerWeight with zero weight units.
-	wu := NewWeightUnit(0)
-	expectedRateW := NewSatPerWeight(0)
-	require.Zero(
-		t, expectedRateW.satsPerKWU.Cmp(
-			CalcSatPerWeight(fee, wu).satsPerKWU,
-		),
-	)
+	// Test CalcSatPerWeight with zero weight units should panic.
+	require.Panics(t, func() {
+		wu := NewWeightUnit(0)
+		_ = CalcSatPerWeight(fee, wu)
+	})
 
 	// Test zero constants.
+	// NewSatPerVByte(0) -> Rate 0 sats / 1 vb. Valid.
 	require.True(t, ZeroSatPerVByte.Equal(NewSatPerVByte(0)))
 	require.True(t, ZeroSatPerKVByte.Equal(NewSatPerKVByte(0)))
 	require.True(t, ZeroSatPerKWeight.Equal(NewSatPerKWeight(0)))
