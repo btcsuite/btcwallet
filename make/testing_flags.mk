@@ -1,5 +1,16 @@
 DEV_TAGS = dev
 LOG_TAGS =
+IT_TAGS ?=
+
+# Integration test DB selections derived from the `db` variable (sqlite, postgres).
+# Defaults to sqlite if not specified.
+ifeq ($(db),postgres)
+IT_TAGS += test_db_postgres
+IT_DB_LABEL := PostgreSQL
+else
+IT_TAGS :=
+IT_DB_LABEL := SQLite
+endif
 
 GOCC ?= go
 GOLIST := $(GOCC) list -tags="$(DEV_TAGS)" -deps $(PKG)/... | grep '$(PKG)'
@@ -75,3 +86,6 @@ UNIT_RACE := $(UNIT) -race
 endif
 
 UNIT_COVER := $(GOTEST) $(COVER_FLAGS) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(COVER_PKG)
+
+ITEST_DB := $(GOTEST) -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" $(TEST_FLAGS) $(PKG)/wallet/internal/db/itest
+ITEST_DB_RACE := $(GOTEST) -race -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" $(TEST_FLAGS) $(PKG)/wallet/internal/db/itest
