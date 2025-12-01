@@ -84,6 +84,24 @@ unit-bench:
 	@$(call print, "Running benchmark tests.")
 	$(UNIT_BENCH)
 
+#? itest-db: Run integration tests for wallet database
+itest-db:
+	@if [ -z "$(IT_DB_LABEL)" ]; then \
+		echo "Unknown integration test database '$(db)'. Use db=sqlite or db=postgres." ; \
+		exit 1 ; \
+	fi
+	@$(call print, "Running $(IT_DB_LABEL) integration tests.")
+	$(ITEST_DB)
+
+#? itest-db-race: Run integration tests for wallet database with race detector
+itest-db-race:
+	@if [ -z "$(IT_DB_LABEL)" ]; then \
+		echo "Unknown integration test database '$(db)'. Use db=sqlite or db=postgres." ; \
+		exit 1 ; \
+	fi
+	@$(call print, "Running $(IT_DB_LABEL) integration tests (race).")
+	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(ITEST_DB_RACE)
+
 # =========
 # UTILITIES
 # =========
@@ -178,6 +196,8 @@ sqlc-check: sqlc
 	unit-race \
 	unit-debug \
 	unit-bench \
+	itest-db \
+	itest-db-race \
 	fmt \
 	fmt-check \
 	tidy-module \
