@@ -58,7 +58,7 @@ func TestDisconnectBlockDuringSync(t *testing.T) {
 
 					w := testWalletWatchingOnly(t)
 					t.Cleanup(func() {
-						w.Stop()
+						w.StopDeprecated()
 						w.WaitForShutdown()
 						require.NoError(t, w.db.Close())
 					})
@@ -226,7 +226,7 @@ func TestDisconnectMixedHistory(t *testing.T) {
 
 					w := testWalletWatchingOnly(t)
 					t.Cleanup(func() {
-						w.Stop()
+						w.StopDeprecated()
 						w.WaitForShutdown()
 						require.NoError(t, w.db.Close())
 					})

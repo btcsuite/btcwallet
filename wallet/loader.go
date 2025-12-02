@@ -367,7 +367,8 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte,
 
 		return nil, err
 	}
-	w.Start()
+
+	w.StartDeprecated()
 
 	l.onLoaded(w)
 	return w, nil
@@ -406,7 +407,7 @@ func (l *Loader) UnloadWallet() error {
 		return ErrNotLoaded
 	}
 
-	l.wallet.Stop()
+	l.wallet.StopDeprecated()
 	l.wallet.WaitForShutdown()
 	if l.localDB {
 		err := l.db.Close()

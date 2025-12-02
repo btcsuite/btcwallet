@@ -213,7 +213,11 @@ func (s *walletServer) NextAccount(ctx context.Context, req *pb.NextAccountReque
 	defer func() {
 		lock <- time.Time{} // send matters, not the value
 	}()
-	err := s.wallet.Unlock(req.Passphrase, lock)
+
+	//nolint:staticcheck // This should be fixed once the interface
+	// refactor is finished, and new wallet RPC is built.
+	err := s.wallet.UnlockDeprecated(req.GetPassphrase(),
+		lock)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -265,7 +269,11 @@ func (s *walletServer) ImportPrivateKey(ctx context.Context, req *pb.ImportPriva
 	defer func() {
 		lock <- time.Time{} // send matters, not the value
 	}()
-	err = s.wallet.Unlock(req.Passphrase, lock)
+
+	//nolint:staticcheck // This should be fixed once the interface
+	// refactor is finished, and new wallet RPC is built.
+	err = s.wallet.UnlockDeprecated(req.GetPassphrase(),
+		lock)
 	if err != nil {
 		return nil, translateError(err)
 	}
@@ -461,7 +469,11 @@ func (s *walletServer) SignTransaction(ctx context.Context, req *pb.SignTransact
 	defer func() {
 		lock <- time.Time{} // send matters, not the value
 	}()
-	err = s.wallet.Unlock(req.Passphrase, lock)
+
+	//nolint:staticcheck // This should be fixed once the interface
+	// refactor is finished, and new wallet RPC is built.
+	err = s.wallet.UnlockDeprecated(req.GetPassphrase(),
+		lock)
 	if err != nil {
 		return nil, translateError(err)
 	}
