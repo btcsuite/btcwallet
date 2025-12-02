@@ -1897,7 +1897,7 @@ func walletIsLocked(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 // wallets, returning an error if any wallet is not encrypted (for example,
 // a watching-only wallet).
 func walletLock(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
-	w.Lock()
+	w.LockDeprecated()
 	return nil, nil
 }
 
@@ -1912,7 +1912,7 @@ func walletPassphrase(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	if timeout != 0 {
 		unlockAfter = time.After(timeout)
 	}
-	err := w.Unlock([]byte(cmd.Passphrase), unlockAfter)
+	err := w.UnlockDeprecated([]byte(cmd.Passphrase), unlockAfter)
 	return nil, err
 }
 

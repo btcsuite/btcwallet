@@ -63,11 +63,6 @@ const (
 )
 
 var (
-	// ErrNotSynced describes an error where an operation cannot complete
-	// due wallet being out of sync (and perhaps currently syncing with)
-	// the remote chain server.
-	ErrNotSynced = errors.New("wallet is not synchronized with the chain server")
-
 	// ErrWalletShuttingDown is an error returned when we attempt to make a
 	// request to the wallet but it is in the process of or has already shut
 	// down.
@@ -187,29 +182,6 @@ type Wallet struct {
 	syncRetryInterval time.Duration
 }
 
-// Start starts the goroutines necessary to manage a wallet.
-func (w *Wallet) Start() {
-	w.quitMu.Lock()
-	select {
-	case <-w.quit:
-		// Restart the wallet goroutines after shutdown finishes.
-		w.WaitForShutdown()
-		w.quit = make(chan struct{})
-	default:
-		// Ignore when the wallet is still running.
-		if w.started {
-			w.quitMu.Unlock()
-			return
-		}
-		w.started = true
-	}
-	w.quitMu.Unlock()
-
-	w.wg.Add(2)
-	go w.txCreator()
-	go w.walletLocker()
-}
-
 // SynchronizeRPC associates the wallet with the consensus RPC client,
 // synchronizes the wallet with the latest changes to the blockchain, and
 // continuously updates the wallet through RPC notifications.
@@ -288,27 +260,6 @@ func (w *Wallet) quitChan() <-chan struct{} {
 	c := w.quit
 	w.quitMu.Unlock()
 	return c
-}
-
-// Stop signals all wallet goroutines to shutdown.
-func (w *Wallet) Stop() {
-	<-w.endRecovery()
-
-	w.quitMu.Lock()
-	quit := w.quit
-	w.quitMu.Unlock()
-
-	select {
-	case <-quit:
-	default:
-		close(quit)
-		w.chainClientLock.Lock()
-		if w.chainClient != nil {
-			w.chainClient.Stop()
-			w.chainClient = nil
-		}
-		w.chainClientLock.Unlock()
-	}
 }
 
 // ShuttingDown returns whether the wallet is currently in the process of
@@ -1487,26 +1438,6 @@ out:
 		}
 	}
 	w.wg.Done()
-}
-
-// Unlock unlocks the wallet's address manager and relocks it after timeout has
-// expired.  If the wallet is already unlocked and the new passphrase is
-// correct, the current timeout is replaced with the new one.  The wallet will
-// be locked if the passphrase is incorrect or any other error occurs during the
-// unlock.
-func (w *Wallet) Unlock(passphrase []byte, lock <-chan time.Time) error {
-	err := make(chan error, 1)
-	w.unlockRequests <- unlockRequest{
-		passphrase: passphrase,
-		lockAfter:  lock,
-		err:        err,
-	}
-	return <-err
-}
-
-// Lock locks the wallet's address manager.
-func (w *Wallet) Lock() {
-	w.lockRequests <- struct{}{}
 }
 
 // Locked returns whether the account manager for a wallet is locked.
@@ -4196,10 +4127,12 @@ func CreateWatchingOnlyWithCallback(db walletdb.DB, pubPass []byte,
 	)
 }
 
-// Create creates an new wallet, writing it to an empty database.  If the passed
-// root key is non-nil, it is used.  Otherwise, a secure random seed of the
-// recommended length is generated.
-func Create(db walletdb.DB, pubPass, privPass []byte,
+// CreateDeprecated creates an new wallet, writing it to an empty database.
+// If the passed root key is non-nil, it is used.  Otherwise, a secure
+// random seed of the recommended length is generated.
+//
+// Deprecated: Use wallet.Create instead.
+func CreateDeprecated(db walletdb.DB, pubPass, privPass []byte,
 	rootKey *hdkeychain.ExtendedKey, params *chaincfg.Params,
 	birthday time.Time) error {
 

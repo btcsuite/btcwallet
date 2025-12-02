@@ -29,11 +29,15 @@ import (
 //
 //nolint:interfacebloat
 type Interface interface {
-	// Start starts the goroutines necessary to manage a wallet.
-	Start()
+	// StartDeprecated starts the goroutines necessary to manage a wallet.
+	//
+	// Deprecated: Use WalletController.Start instead.
+	StartDeprecated()
 
-	// Stop signals all wallet goroutines to shutdown.
-	Stop()
+	// StopDeprecated signals all wallet goroutines to shutdown.
+	//
+	// Deprecated: Use WalletController.Stop instead.
+	StopDeprecated()
 
 	// WaitForShutdown blocks until all wallet goroutines have finished.
 	WaitForShutdown()
@@ -46,14 +50,14 @@ type Interface interface {
 	// will fail.
 	Locked() bool
 
-	// Unlock unlocks the wallet with a passphrase. The wallet will
-	// automatically re-lock after the timeout has expired. If the timeout
-	// channel is nil, the wallet remains unlocked indefinitely.
-	Unlock(passphrase []byte, lock <-chan time.Time) error
+	// UnlockDeprecated unlocks the wallet with a passphrase. The wallet
+	// will remain unlocked until the returned lock channel is closed or
+	// the timeout expires.
+	UnlockDeprecated(passphrase []byte, lock <-chan time.Time) error
 
-	// Lock locks the wallet. Any operations that require private keys will
-	// fail until the wallet is unlocked again.
-	Lock()
+	// LockDeprecated locks the wallet. Any operations that require private
+	// keys will fail if the wallet is locked.
+	LockDeprecated()
 
 	// ChainSynced returns whether the wallet is synchronized with the
 	// blockchain. Certain operations may fail if the wallet is not synced.

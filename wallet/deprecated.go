@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -813,7 +814,7 @@ func (w *Wallet) DecorateInputsDeprecated(packet *psbt.Packet, failOnUnknown boo
 	return nil
 }
 
-// FinalizePsbt expects a partial transaction with all inputs and outputs fully
+// FinalizePsbtDeprecated expects a partial transaction with all inputs and outputs fully
 // declared and tries to sign all inputs that belong to the wallet. Our wallet
 // must be the last signer of the transaction. That means, if there are any
 // unsigned non-witness inputs or inputs without UTXO information attached or
@@ -959,4 +960,76 @@ func (w *Wallet) FinalizePsbtDeprecated(keyScope *waddrmgr.KeyScope, account uin
 	}
 
 	return nil
+}
+
+// StartDeprecated starts the goroutines necessary to manage a wallet.
+//
+// Deprecated: Use WalletController.Start instead.
+func (w *Wallet) StartDeprecated() {
+	w.quitMu.Lock()
+	select {
+	case <-w.quit:
+		// Restart the wallet goroutines after shutdown finishes.
+		w.WaitForShutdown()
+		w.quit = make(chan struct{})
+	default:
+		// Ignore when the wallet is still running.
+		if w.started {
+			w.quitMu.Unlock()
+			return
+		}
+		w.started = true
+	}
+	w.quitMu.Unlock()
+
+	w.wg.Add(2)
+	go w.txCreator()
+	go w.walletLocker()
+}
+
+// StopDeprecated signals all wallet goroutines to shutdown.
+//
+// Deprecated: Use WalletController.Stop instead.
+func (w *Wallet) StopDeprecated() {
+	<-w.endRecovery()
+
+	w.quitMu.Lock()
+	quit := w.quit
+	w.quitMu.Unlock()
+
+	select {
+	case <-quit:
+	default:
+		close(quit)
+		w.chainClientLock.Lock()
+		if w.chainClient != nil {
+			w.chainClient.Stop()
+			w.chainClient = nil
+		}
+		w.chainClientLock.Unlock()
+	}
+}
+
+// UnlockDeprecated unlocks the wallet's address manager and relocks it after timeout has
+// expired.  If the wallet is already unlocked and the new passphrase is
+// correct, the current timeout is replaced with the new one.  The wallet will
+// be locked if the passphrase is incorrect or any other error occurs during the
+// unlock.
+//
+// Deprecated: Use WalletController.Unlock instead.
+func (w *Wallet) UnlockDeprecated(passphrase []byte, lock <-chan time.Time) error {
+	err := make(chan error, 1)
+	w.unlockRequests <- unlockRequest{
+		passphrase: passphrase,
+		lockAfter:  lock,
+		err:        err,
+	}
+	return <-err
+}
+
+// LockDeprecated locks the wallet's address manager.
+//
+// Deprecated: Use WalletController.Lock instead.
+func (w *Wallet) LockDeprecated() {
+	w.lockRequests <- struct{}{}
 }
