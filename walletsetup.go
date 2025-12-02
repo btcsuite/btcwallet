@@ -152,7 +152,14 @@ func createWallet(cfg *config) error {
 			defer func() {
 				lockChan <- time.Time{}
 			}()
-			err := w.Unlock(privPass, lockChan)
+
+			//nolint:staticcheck // This should be fixed once
+			// the interface refactor is finished, and new wallet
+			// RPC is built.
+			err := w.UnlockDeprecated(
+				privPass,
+				lockChan,
+			)
 			if err != nil {
 				fmt.Printf("ERR: Failed to unlock new wallet "+
 					"during old wallet key import: %v", err)
@@ -221,7 +228,13 @@ func createSimulationWallet(cfg *config) error {
 	defer db.Close()
 
 	// Create the wallet.
-	err = wallet.Create(db, pubPass, privPass, nil, activeNet.Params, time.Now())
+	//
+	//nolint:staticcheck // This should be fixed once the interface
+	// refactor is finished, and new wallet RPC is built.
+	err = wallet.CreateDeprecated(
+		db, pubPass, privPass, nil, activeNet.Params,
+		time.Now(),
+	)
 	if err != nil {
 		return err
 	}

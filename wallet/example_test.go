@@ -42,15 +42,16 @@ func testWallet(t *testing.T) *Wallet {
 	w.chainClient = chainClient
 
 	// Start the wallet.
-	w.Start()
+	w.StartDeprecated()
 
 	// Add the shutdown to the test's cleanup process.
 	t.Cleanup(func() {
-		w.Stop()
+		w.StopDeprecated()
 		w.WaitForShutdown()
 	})
 
-	if err := w.Unlock(privPass, time.After(10*time.Minute)); err != nil {
+	err = w.UnlockDeprecated(privPass, time.After(10*time.Minute))
+	if err != nil {
 		t.Fatalf("unable to unlock wallet: %v", err)
 	}
 
@@ -115,9 +116,9 @@ func testWalletWithMocks(t *testing.T) (*Wallet, *mockers) {
 	w.addrStore = addrStore
 
 	// Start the wallet.
-	w.Start()
+	w.StartDeprecated()
 
-	err = w.Unlock(privPass, time.After(60*time.Minute))
+	err = w.UnlockDeprecated(privPass, time.After(60*time.Minute))
 	require.NoError(t, err)
 
 	// Create the mockers struct so it can be used by the tests to mock
@@ -180,9 +181,9 @@ func testWalletWatchingOnly(t *testing.T) *Wallet {
 		t.Fatalf("unable to create default scopes: %v", err)
 	}
 
-	w.Start()
+	w.StartDeprecated()
 	t.Cleanup(func() {
-		w.Stop()
+		w.StopDeprecated()
 		w.WaitForShutdown()
 	})
 
