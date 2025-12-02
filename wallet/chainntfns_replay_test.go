@@ -48,7 +48,7 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
-		w.Stop()
+		w.StopDeprecated()
 		w.WaitForShutdown()
 		require.NoError(t, w.db.Close())
 	})
@@ -241,7 +241,7 @@ func TestDisconnectConflictingSpends(t *testing.T) {
 
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
-		w.Stop()
+		w.StopDeprecated()
 		w.WaitForShutdown()
 		require.NoError(t, w.db.Close())
 	})
@@ -334,7 +334,7 @@ func TestDisconnectReplayFailure(t *testing.T) {
 
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
-		w.Stop()
+		w.StopDeprecated()
 		w.WaitForShutdown()
 		require.NoError(t, w.db.Close())
 	})
@@ -375,7 +375,7 @@ func TestDisconnectOrphanCoinbaseSpend(t *testing.T) {
 
 	w := testWalletWatchingOnly(t)
 	t.Cleanup(func() {
-		w.Stop()
+		w.StopDeprecated()
 		w.WaitForShutdown()
 		require.NoError(t, w.db.Close())
 	})
