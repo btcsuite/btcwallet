@@ -11,7 +11,7 @@ CP := cp
 MAKE := make
 XARGS := xargs -L 1
 
-include make/testing_flags.mk
+include config/testing_flags.mk
 
 # Linting uses a lot of memory, so keep it under control by limiting the number
 # of workers if requested.
