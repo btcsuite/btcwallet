@@ -126,17 +126,17 @@ rpc-format:
 #? lint-config-check: Verify golangci-lint configuration
 lint-config-check: docker-tools
 	@$(call print, "Verifying golangci-lint configuration.")
-	$(DOCKER_TOOLS) golangci-lint config verify -v
+	$(DOCKER_TOOLS) golangci-lint config verify -v --config config/.golangci.yml
 
 #? lint: Lint source and check errors
 lint-check: lint-config-check
 	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
+	$(DOCKER_TOOLS) golangci-lint run -v --config config/.golangci.yml $(LINT_WORKERS)
 
 #? lint: Lint source and fix
 lint: lint-config-check
 	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v --fix $(LINT_WORKERS)
+	$(DOCKER_TOOLS) golangci-lint run -v --fix --config config/.golangci.yml $(LINT_WORKERS)
 
 #? docker-tools: Build tools docker image
 docker-tools:
