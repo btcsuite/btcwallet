@@ -152,3 +152,40 @@ jobs:
         with:
           path-to-profile: coverage.txt
           parallel: true
+
+  ########################
+  # run integration tests (SQLite + Postgres)
+  ########################
+  itest-db:
+    name: integration tests (${{ matrix.db }}, ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, postgres]
+        target: [itest-db, itest-db-race]
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v5
+
+      - name: Clean up runner space
+        uses: ./.github/actions/cleanup-space
+
+      - name: go cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/work/go
+          key: btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
+            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-
+            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-
+            btcwallet-${{ runner.os }}-go-
+
+      - name: setup go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '${{ env.GO_VERSION }}'
+
+      - name: run ${{ matrix.db }} ${{ matrix.target }}
+        run: make ${{ matrix.target }} db=${{ matrix.db }}
