@@ -156,7 +156,7 @@ rpc-check: rpc
 #? protolint: Lint proto files using protolint
 protolint:
 	@$(call print, "Linting proto files.")
-	docker run --rm --volume "$$(pwd):/workspace" --workdir /workspace yoheimuta/protolint lint rpc/
+	$(DOCKER_TOOLS) protolint lint rpc/
 
 #? sample-conf-check: Make sure default values in the sample-btcwallet.conf file are set correctly
 sample-conf-check: install
