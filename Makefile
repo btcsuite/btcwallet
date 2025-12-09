@@ -156,7 +156,7 @@ rpc-check: rpc
 #? protolint: Lint proto files using protolint
 protolint:
 	@$(call print, "Linting proto files.")
-	$(DOCKER_TOOLS) protolint lint rpc/
+	$(DOCKER_TOOLS) protolint lint -config_dir_path=config rpc/
 
 #? sample-conf-check: Make sure default values in the sample-btcwallet.conf file are set correctly
 sample-conf-check: install
