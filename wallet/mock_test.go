@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -856,6 +857,18 @@ func (m *mockChain) GetBlockHeader(
 func (m *mockChain) IsCurrent() bool {
 	args := m.Called()
 	return args.Bool(0)
+}
+
+// GetCFilter implements the chain.Interface interface.
+func (m *mockChain) GetCFilter(hash *chainhash.Hash,
+	filterType wire.FilterType) (*gcs.Filter, error) {
+
+	args := m.Called(hash, filterType)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*gcs.Filter), args.Error(1)
 }
 
 // FilterBlocks implements the chain.Interface interface.
