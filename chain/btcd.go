@@ -282,6 +282,28 @@ func (c *RPCClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	return c.Client.Rescan(startHash, addrs, flatOutpoints) // nolint:staticcheck
 }
 
+// GetCFilter returns a compact filter for the given block hash and filter
+// type. It wraps the underlying rpcclient method and converts the result to a
+// *gcs.Filter.
+func (c *RPCClient) GetCFilter(hash *chainhash.Hash,
+	filterType wire.FilterType) (*gcs.Filter, error) {
+
+	rawFilter, err := c.Client.GetCFilter(hash, filterType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get filter: %w", err)
+	}
+
+	filter, err := gcs.FromNBytes(
+		builder.DefaultP, builder.DefaultM, rawFilter.Data,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create filter from bytes: %w",
+			err)
+	}
+
+	return filter, nil
+}
+
 // WaitForShutdown blocks until both the client has finished disconnecting
 // and all handlers have exited.
 func (c *RPCClient) WaitForShutdown() {
@@ -332,7 +354,9 @@ func (c *RPCClient) FilterBlocks(
 	// the filter returns a positive match, the full block is then requested
 	// and scanned for addresses using the block filterer.
 	for i, blk := range req.Blocks {
-		rawFilter, err := c.GetCFilter(&blk.Hash, wire.GCSFilterRegular)
+		rawFilter, err := c.Client.GetCFilter(
+			&blk.Hash, wire.GCSFilterRegular,
+		)
 		if err != nil {
 			return nil, err
 		}

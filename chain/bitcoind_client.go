@@ -3,6 +3,7 @@ package chain
 import (
 	"container/list"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/gcs"
+	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -24,6 +27,10 @@ var (
 	// to receive a notification for a specific item and the bitcoind client
 	// is in the middle of shutting down.
 	ErrBitcoindClientShuttingDown = errors.New("client is shutting down")
+
+	// ErrOnlyBasicFilters is an error returned when a filter type other
+	// than basic is requested.
+	ErrOnlyBasicFilters = errors.New("only basic filters are supported")
 )
 
 // BitcoindClient represents a persistent client connection to a bitcoind server
@@ -110,6 +117,56 @@ var _ Interface = (*BitcoindClient)(nil)
 // BackEnd returns the name of the driver.
 func (c *BitcoindClient) BackEnd() string {
 	return "bitcoind"
+}
+
+// GetCFilter returns a compact filter for the given block hash and filter
+// type.
+//
+// NOTE: This is part of the chain.Interface interface.
+func (c *BitcoindClient) GetCFilter(hash *chainhash.Hash,
+	filterType wire.FilterType) (*gcs.Filter, error) {
+
+	if filterType != wire.GCSFilterRegular {
+		return nil, ErrOnlyBasicFilters
+	}
+
+	// The getblockfilter RPC takes the block hash and the filter type.
+	// Filter type defaults to "basic" if omitted, but we specify it for
+	// clarity.
+	params := []json.RawMessage{
+		json.RawMessage(fmt.Sprintf("%q", hash.String())),
+		json.RawMessage(fmt.Sprintf("%q", "basic")),
+	}
+
+	resp, err := c.chainConn.client.RawRequest("getblockfilter", params)
+	if err != nil {
+		return nil, c.MapRPCErr(err)
+	}
+
+	var res struct {
+		Filter string `json:"filter"`
+		Header string `json:"header"`
+	}
+
+	err = json.Unmarshal(resp, &res)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal filter: %w", err)
+	}
+
+	filterBytes, err := hex.DecodeString(res.Filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode filter: %w", err)
+	}
+
+	filter, err := gcs.FromNBytes(
+		builder.DefaultP, builder.DefaultM, filterBytes,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create filter from bytes: %w",
+			err)
+	}
+
+	return filter, nil
 }
 
 // GetBestBlock returns the highest block known to bitcoind.

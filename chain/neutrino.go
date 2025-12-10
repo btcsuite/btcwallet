@@ -215,6 +215,22 @@ func (s *NeutrinoClient) IsCurrent() bool {
 	return s.CS.IsCurrent()
 }
 
+// GetCFilter returns a compact filter for the given block hash and filter
+// type.
+//
+// NOTE: This is part of the chain.Interface interface.
+func (s *NeutrinoClient) GetCFilter(blockHash *chainhash.Hash,
+	filterType wire.FilterType) (*gcs.Filter, error) {
+
+	filter, err := s.CS.GetCFilter(*blockHash, filterType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get filter from "+
+			"neutrino: %w", err)
+	}
+
+	return filter, nil
+}
+
 // SendRawTransaction replicates the RPC client's SendRawTransaction command.
 func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) (
 	*chainhash.Hash, error) {
