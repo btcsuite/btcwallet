@@ -8,6 +8,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/gcs"
+	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/integration/rpctest"
@@ -68,7 +70,12 @@ func TestBitcoindEvents(t *testing.T) {
 			testNotifySpentMempool(t, miner1, btcClient)
 
 			// Test looking up mempool for input spent.
+			btcClient = setupBitcoind(t, addr, test.rpcPolling)
 			testLookupInputMempoolSpend(t, miner1, btcClient)
+
+			// Test GetCFilter method.
+			btcClient = setupBitcoind(t, addr, test.rpcPolling)
+			testBitcoindClientGetCFilter(t, miner1, btcClient)
 		})
 	}
 }
@@ -480,6 +487,7 @@ func setupBitcoind(t *testing.T, minerAddr string,
 		"-disablewallet",
 		"-zmqpubrawblock="+zmqBlockHost,
 		"-zmqpubrawtx="+zmqTxHost,
+		"-blockfilterindex=1",
 	)
 	require.NoError(t, bitcoind.Start())
 
@@ -558,4 +566,59 @@ func randPubKeyHashScript() ([]byte, *btcec.PrivateKey, error) {
 	}
 
 	return pkScript, privKey, nil
+}
+
+// testBitcoindClientGetCFilter verifies the BitcoindClient's GetCFilter
+// implementation by interacting with a live bitcoind node.
+func testBitcoindClientGetCFilter(t *testing.T, miner *rpctest.Harness,
+	client *BitcoindClient) {
+
+	t.Helper()
+
+	require := require.New(t)
+
+	// Generate a block to have something to query a filter for.
+	hashes, err := miner.Client.Generate(1)
+	require.NoError(err)
+
+	blockHash := hashes[0]
+
+	// Get the CFilter using the BitcoindClient. This might take a few
+	// attempts as the filter index might not be immediately available.
+	var gcsFilter *gcs.Filter
+	require.Eventually(func() bool {
+		gcsFilter, err = client.GetCFilter(
+			blockHash, wire.GCSFilterRegular,
+		)
+
+		return err == nil
+	}, 5*time.Second, 100*time.Millisecond, "GetCFilter should succeed")
+	require.NotNil(gcsFilter, "GCS filter should not be nil")
+	require.IsType(&gcs.Filter{}, gcsFilter)
+
+	// Verify the filter matches the block data.
+	block, err := client.GetBlock(blockHash)
+	require.NoError(err)
+
+	// Use the first transaction's first output script.
+	script := block.Transactions[0].TxOut[0].PkScript
+
+	// Derive the filter key.
+	key := builder.DeriveKey(blockHash)
+
+	// Check match.
+	matched, err := gcsFilter.Match(key, script)
+	require.NoError(err)
+	require.True(matched, "Filter should match script from block")
+
+	// Test with an unsupported filter type.
+	_, err = client.GetCFilter(blockHash, wire.FilterType(99))
+	require.ErrorContains(err, "only basic filters are supported",
+		"Unsupported filter type should return an error")
+
+	// Test GetCFilter for a non-existent block.
+	dummyHash := &chainhash.Hash{0x01, 0x02, 0x03}
+	_, err = client.GetCFilter(dummyHash, wire.GCSFilterRegular)
+	require.ErrorContains(err, "Block not found",
+		"Non-existent block should return an error")
 }
