@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
@@ -110,6 +111,12 @@ func (m *mockChainClient) GetMempool() (map[chainhash.Hash]*wire.MsgTx, error) {
 
 func (m *mockChainClient) IsCurrent() bool {
 	return false
+}
+
+func (m *mockChainClient) GetCFilter(hash *chainhash.Hash,
+	filterType wire.FilterType) (*gcs.Filter, error) {
+
+	return nil, ErrNotImplemented
 }
 
 func (m *mockChainClient) FilterBlocks(*chain.FilterBlocksRequest) (

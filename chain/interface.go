@@ -7,6 +7,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -44,6 +45,8 @@ type Interface interface {
 	GetBlockHash(int64) (*chainhash.Hash, error)
 	GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader, error)
 	IsCurrent() bool
+	GetCFilter(hash *chainhash.Hash,
+		filterType wire.FilterType) (*gcs.Filter, error)
 	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
