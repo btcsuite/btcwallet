@@ -2,7 +2,6 @@ package chain
 
 import (
 	"fmt"
-	"math/rand"
 	"os/exec"
 	"testing"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain/port"
 	"github.com/stretchr/testify/require"
 )
 
@@ -460,10 +460,13 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	// Start a bitcoind instance and connect it to miner1.
 	tempBitcoindDir := t.TempDir()
 
-	zmqBlockHost := "ipc:///" + tempBitcoindDir + "/blocks.socket"
-	zmqTxHost := "ipc:///" + tempBitcoindDir + "/tx.socket"
+	zmqBlockPort := port.NextAvailablePort()
+	zmqTxPort := port.NextAvailablePort()
 
-	rpcPort := rand.Int()%(65536-1024) + 1024
+	zmqBlockHost := fmt.Sprintf("tcp://127.0.0.1:%d", zmqBlockPort)
+	zmqTxHost := fmt.Sprintf("tcp://127.0.0.1:%d", zmqTxPort)
+
+	rpcPort := port.NextAvailablePort()
 	bitcoind := exec.Command(
 		"bitcoind",
 		"-datadir="+tempBitcoindDir,
