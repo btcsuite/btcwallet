@@ -2014,6 +2014,82 @@ func (s *ScopedKeyManager) ImportPublicKey(ns walletdb.ReadWriteBucket,
 	return s.toImportedPublicManagedAddress(pubKey, true)
 }
 
+// DeriveAddr derives a single address and its corresponding pkScript for the
+// given account, branch, and index. This method relies on the in-memory
+// account state and extended public keys, avoiding database access.
+func (s *ScopedKeyManager) DeriveAddr(account uint32, branch uint32,
+	index uint32) (btcutil.Address, []byte, error) {
+
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	acctInfo, ok := s.acctInfo[account]
+	if !ok {
+		return nil, nil, managerError(ErrAccountNotCached,
+			"account not cached", nil)
+	}
+
+	return s.deriveAddr(acctInfo, account, branch, index)
+}
+
+// DeriveAddrs derives a range of addresses and their corresponding pkScripts
+// for the given account and branch. It generates `count` addresses starting
+// from `startIndex`. This method relies on the in-memory account state and
+// extended public keys, avoiding database access.
+//
+// It returns:
+// - A slice of derived addresses.
+// - A slice of corresponding pkScripts.
+// - An error if the account is not cached or derivation fails.
+func (s *ScopedKeyManager) DeriveAddrs(account uint32, branch uint32,
+	startIndex uint32, count uint32) ([]btcutil.Address, [][]byte, error) {
+
+	// Make sure the index is sane.
+	if startIndex+count < startIndex {
+		str := fmt.Sprintf("child index overflow: %d + %d",
+			startIndex, count)
+
+		return nil, nil, managerError(ErrTooManyAddresses, str, nil)
+	}
+
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	// Ensure the account information is cached. If not, we cannot proceed
+	// without a DB transaction, so we return an error. The caller is
+	// expected to ensure the account is loaded (e.g. via AccountProperties)
+	// before calling this method.
+	acctInfo, ok := s.acctInfo[account]
+	if !ok {
+		return nil, nil, managerError(ErrAccountNotCached,
+			"account not cached", nil)
+	}
+
+	addrs := make([]btcutil.Address, 0, count)
+	scripts := make([][]byte, 0, count)
+
+	// Iterate through the requested range of child indexes (startIndex to
+	// startIndex+count). For each index, we derive the corresponding
+	// extended key and convert it into a payment address and script.
+	//
+	// TODO(yy): Optimize by deriving the branch key once outside the loop
+	// instead of re-deriving it for every index via s.deriveKey.
+	endIndex := startIndex + count
+	for index := startIndex; index < endIndex; index++ {
+		addr, script, err := s.deriveAddr(
+			acctInfo, account, branch, index,
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		addrs = append(addrs, addr)
+		scripts = append(scripts, script)
+	}
+
+	return addrs, scripts, nil
+}
+
 // importPublicKey imports a public key into the address manager and updates the
 // wallet's start block if necessary. An error is returned if the public key
 // already exists.
@@ -2654,6 +2730,64 @@ func (s *ScopedKeyManager) NewAddress(addrmgrNs walletdb.ReadWriteBucket,
 	addr := addrs[0].Address()
 
 	return addr, nil
+}
+
+// deriveAddr performs the actual derivation logic for a single address using
+// the provided account info. It assumes the manager lock is held.
+func (s *ScopedKeyManager) deriveAddr(acctInfo *accountInfo, account, branch,
+	index uint32) (btcutil.Address, []byte, error) {
+
+	// Determine the address type (schema) for this account and branch.
+	// This tells us whether to generate P2PKH (BIP44), P2WPKH (BIP84),
+	// Nested P2WPKH (BIP49), or Taproot (BIP86) addresses.
+	// Internal branch usually implies change addresses.
+	internal := branch == InternalBranch
+	addrType := s.accountAddrType(acctInfo, internal)
+
+	// Derive the extended key for this index.
+	// We pass 'false' for the private flag because we only need the
+	// public key to derive the address. This allows operation even
+	// if the wallet is locked (encrypted private keys unavailable).
+	key, err := s.deriveKey(acctInfo, branch, index, false)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pubKey, err := key.ECPubKey()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse public key: %w",
+			err)
+	}
+
+	// Construct the derivation path metadata. This is required by
+	// newManagedAddressWithoutPrivKey to properly tag the address.
+	derivationPath := DerivationPath{
+		InternalAccount:      account,
+		Account:              acctInfo.acctKeyPub.ChildIndex(),
+		Branch:               branch,
+		Index:                index,
+		MasterKeyFingerprint: acctInfo.masterKeyFingerprint,
+	}
+
+	// Create a temporary managed address. We use this helper because
+	// it encapsulates the complex logic for converting a public key
+	// into the correct address format (e.g. P2SH wrapping for nested
+	// SegWit) based on the addrType.
+	ma, err := newManagedAddressWithoutPrivKey(
+		s, derivationPath, pubKey, true, addrType,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	addr := ma.Address()
+
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create script: %w", err)
+	}
+
+	return addr, script, nil
 }
 
 // accountInfo returns a copy of the account info map.
