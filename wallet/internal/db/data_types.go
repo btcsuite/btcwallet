@@ -167,13 +167,15 @@ type WalletInfo struct {
 	// meaning it does not have private keys and cannot sign transactions.
 	IsWatchOnly bool
 
-	// Birthday is the timestamp of the wallet's creation, used as a
-	// starting point for rescans.
+	// Birthday is the user-provided timestamp for when to start rescanning.
+	// This is stored directly in the database and may be zero if not set.
+	// If zero, means the wallet should be rescanned from the genesis block.
 	Birthday time.Time
 
-	// BirthdayBlock is the block hash and height from which to start a
-	// rescan.
-	BirthdayBlock Block
+	// BirthdayBlock is the verified block reference for starting a rescan.
+	// When this is non-nil, it indicates the block has been verified.
+	// A nil value means the birthday block has not been set or verified.
+	BirthdayBlock *Block
 
 	// SyncedTo represents the wallet's current synchronization state with
 	// the blockchain.
@@ -211,6 +213,11 @@ type CreateWalletParams struct {
 	// watch-only mode.
 	IsWatchOnly bool
 
+	// Birthday is the user-provided birthday timestamp for the wallet.
+	// The zero value is treated as "no birthday" and is stored as NULL in
+	// the database.
+	Birthday time.Time
+
 	// EncryptedMasterPrivKey is the encrypted master HD private key.
 	EncryptedMasterPrivKey []byte
 
@@ -247,10 +254,12 @@ type UpdateWalletParams struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// Birthday is the new birthday for the wallet.
+	// Birthday is the user-provided birthday timestamp for the wallet.
+	// Setting this does NOT set BirthdayBlock.
 	Birthday *time.Time
 
-	// BirthdayBlock is the new birthday block for the wallet.
+	// BirthdayBlock is the verified birthday block for the wallet.
+	// When this is set, it indicates the block is already verified.
 	BirthdayBlock *Block
 
 	// SyncedTo is the new synchronization state for the wallet.

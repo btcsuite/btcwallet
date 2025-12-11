@@ -17,7 +17,7 @@ INSERT INTO wallet_sync_states (
     wallet_id,
     synced_height,
     birthday_height,
-    birthday_verified,
+    birthday,
     updated_at
 ) VALUES (
     $1, $2, $3, $4, CURRENT_TIMESTAMP
@@ -32,8 +32,8 @@ SET
     -- If birthday_height param is NOT NULL, use it. Otherwise, keep existing value.
     birthday_height = COALESCE(sqlc.narg('birthday_height'), birthday_height),
 
-    -- If birthday_verified param is NOT NULL, use it. Otherwise, keep existing value.
-    birthday_verified = COALESCE(sqlc.narg('birthday_verified'), birthday_verified),
+    -- If birthday param is NOT NULL, use it. Otherwise, keep existing value.
+    birthday = COALESCE(sqlc.narg('birthday'), birthday),
 
     -- Always update timestamp to current database time.
     updated_at = CURRENT_TIMESTAMP
@@ -49,7 +49,7 @@ SELECT
     w.is_watch_only,
     s.synced_height,
     s.birthday_height,
-    s.birthday_verified,
+    s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
     b_synced.timestamp AS synced_block_timestamp,
@@ -70,7 +70,7 @@ SELECT
     w.is_watch_only,
     s.synced_height,
     s.birthday_height,
-    s.birthday_verified,
+    s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
     b_synced.timestamp AS synced_block_timestamp,
@@ -91,7 +91,7 @@ SELECT
     w.is_watch_only,
     s.synced_height,
     s.birthday_height,
-    s.birthday_verified,
+    s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
     b_synced.timestamp AS synced_block_timestamp,
