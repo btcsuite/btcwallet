@@ -35,9 +35,9 @@ type WalletSecret struct {
 }
 
 type WalletSyncState struct {
-	WalletID         int64
-	SyncedHeight     sql.NullInt64
-	BirthdayHeight   sql.NullInt64
-	BirthdayVerified bool
-	UpdatedAt        time.Time
+	WalletID       int64
+	SyncedHeight   sql.NullInt64
+	BirthdayHeight sql.NullInt64
+	Birthday       sql.NullTime
+	UpdatedAt      time.Time
 }

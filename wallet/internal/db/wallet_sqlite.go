@@ -52,11 +52,19 @@ func (w *SQLiteWalletDB) CreateWallet(ctx context.Context,
 			)
 		}
 
+		birthday := sql.NullTime{}
+		if !params.Birthday.IsZero() {
+			birthday = sql.NullTime{
+				Time:  params.Birthday,
+				Valid: true,
+			}
+		}
+
 		syncParams := sqlcsqlite.InsertWalletSyncStateParams{
-			WalletID:         id,
-			SyncedHeight:     sql.NullInt64{},
-			BirthdayHeight:   sql.NullInt64{},
-			BirthdayVerified: false,
+			WalletID:       id,
+			SyncedHeight:   sql.NullInt64{},
+			BirthdayHeight: sql.NullInt64{},
+			Birthday:       birthday,
 		}
 
 		err = qtx.InsertWalletSyncState(ctx, syncParams)
@@ -83,6 +91,7 @@ func (w *SQLiteWalletDB) CreateWallet(ctx context.Context,
 			syncedBlockHash:        row.SyncedBlockHash,
 			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
 			birthdayHeight:         row.BirthdayHeight,
+			birthday:               row.Birthday,
 			birthdayBlockHash:      row.BirthdayBlockHash,
 			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
 		})
@@ -125,6 +134,7 @@ func (w *SQLiteWalletDB) GetWallet(ctx context.Context,
 		syncedBlockHash:        row.SyncedBlockHash,
 		syncedBlockTimestamp:   row.SyncedBlockTimestamp,
 		birthdayHeight:         row.BirthdayHeight,
+		birthday:               row.Birthday,
 		birthdayBlockHash:      row.BirthdayBlockHash,
 		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
 	})
@@ -153,6 +163,7 @@ func (w *SQLiteWalletDB) ListWallets(ctx context.Context) ([]WalletInfo,
 			syncedBlockHash:        row.SyncedBlockHash,
 			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
 			birthdayHeight:         row.BirthdayHeight,
+			birthday:               row.Birthday,
 			birthdayBlockHash:      row.BirthdayBlockHash,
 			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
 		})
@@ -187,16 +198,16 @@ func (w *SQLiteWalletDB) UpdateWallet(ctx context.Context,
 			}
 		}
 
+		if params.Birthday != nil {
+			syncParams.Birthday = sql.NullTime{
+				Time:  *params.Birthday,
+				Valid: true,
+			}
+		}
+
 		if params.BirthdayBlock != nil {
 			syncParams.BirthdayHeight = sql.NullInt64{
 				Int64: int64(params.BirthdayBlock.Height),
-				Valid: true,
-			}
-
-			// Set birthday verified flag to true if the birthday
-			// block is set.
-			syncParams.BirthdayVerified = sql.NullBool{
-				Bool:  true,
 				Valid: true,
 			}
 		}
@@ -278,6 +289,7 @@ type sqliteWalletRowParams struct {
 	syncedBlockHash        []byte
 	syncedBlockTimestamp   sql.NullInt64
 	birthdayHeight         sql.NullInt64
+	birthday               sql.NullTime
 	birthdayBlockHash      []byte
 	birthdayBlockTimestamp sql.NullInt64
 }
@@ -303,6 +315,10 @@ func buildSqliteWalletInfo(row sqliteWalletRowParams) (*WalletInfo, error) {
 		IsWatchOnly:    row.isWatchOnly,
 	}
 
+	if row.birthday.Valid {
+		info.Birthday = row.birthday.Time
+	}
+
 	if row.syncedHeight.Valid {
 		block, err := buildSqliteBlock(
 			row.syncedHeight,
@@ -326,8 +342,7 @@ func buildSqliteWalletInfo(row sqliteWalletRowParams) (*WalletInfo, error) {
 			return nil, fmt.Errorf("birthday block: %w", err)
 		}
 
-		info.BirthdayBlock = *block
-		info.Birthday = block.Timestamp
+		info.BirthdayBlock = block
 	}
 
 	return info, nil
