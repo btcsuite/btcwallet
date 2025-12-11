@@ -188,4 +188,4 @@ jobs:
           go-version: '${{ env.GO_VERSION }}'
 
       - name: run ${{ matrix.db }} ${{ matrix.target }}
-        run: make ${{ matrix.target }} db=${{ matrix.db }}
+        run: make ${{ matrix.target }} db=${{ matrix.db }} verbose=1
