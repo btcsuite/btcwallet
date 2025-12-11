@@ -13,5 +13,5 @@ CREATE TABLE blocks (
     header_hash BLOB NOT NULL UNIQUE CHECK (length(header_hash) = 32),
 
     -- Unix timestamp - when the block was mined (seconds since epoch).
-    timestamp INTEGER NOT NULL CHECK (timestamp >= 0)
+    block_timestamp INTEGER NOT NULL CHECK (block_timestamp >= 0)
 );

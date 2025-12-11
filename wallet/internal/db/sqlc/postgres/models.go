@@ -10,14 +10,14 @@ import (
 )
 
 type Block struct {
-	BlockHeight int32
-	HeaderHash  []byte
-	Timestamp   int64
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
 }
 
 type Wallet struct {
 	ID                      int64
-	Name                    string
+	WalletName              string
 	IsImported              bool
 	ManagerVersion          int32
 	IsWatchOnly             bool
