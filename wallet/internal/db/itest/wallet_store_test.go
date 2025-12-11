@@ -4,6 +4,7 @@ package itest
 
 import (
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
@@ -16,7 +17,6 @@ func TestCreateWallet(t *testing.T) {
 
 	store, _ := NewTestStore(t)
 	params := CreateWalletParamsFixture("test-wallet")
-
 	info, err := store.CreateWallet(t.Context(), params)
 	require.NoError(t, err)
 	require.NotNil(t, info)
@@ -28,7 +28,27 @@ func TestCreateWallet(t *testing.T) {
 	require.Equal(t, params.IsWatchOnly, info.IsWatchOnly)
 
 	require.Nil(t, info.SyncedTo)
-	require.Equal(t, uint32(0), info.BirthdayBlock.Height)
+	require.Nil(t, info.BirthdayBlock)
+	require.True(t, info.Birthday.IsZero())
+}
+
+// TestCreateWallet_WithBirthday checks that CreateWallet correctly sets the
+// wallet's birthday timestamp.
+func TestCreateWallet_WithBirthday(t *testing.T) {
+	t.Parallel()
+
+	store, _ := NewTestStore(t)
+
+	params := CreateWalletParamsFixture("birthday-wallet")
+	birthday := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	params.Birthday = birthday
+
+	info, err := store.CreateWallet(t.Context(), params)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+
+	require.Equal(t, birthday.Unix(), info.Birthday.Unix())
+	require.Nil(t, info.BirthdayBlock)
 }
 
 // TestCreateWallet_DuplicateName verifies that creating a wallet with a
@@ -187,8 +207,7 @@ func TestUpdateWallet_SyncedTo(t *testing.T) {
 	require.Equal(t, created.IsImported, retrieved.IsImported)
 	require.Equal(t, created.ManagerVersion, retrieved.ManagerVersion)
 	require.Equal(t, created.IsWatchOnly, retrieved.IsWatchOnly)
-	require.Equal(t, created.BirthdayBlock.Height,
-		retrieved.BirthdayBlock.Height)
+	require.Nil(t, retrieved.BirthdayBlock)
 }
 
 // TestUpdateWallet_BirthdayBlock checks that updating the wallet's birthday
@@ -202,6 +221,9 @@ func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 	created, err := store.CreateWallet(t.Context(), params)
 	require.NoError(t, err)
 
+	// Initially, BirthdayBlock should be nil.
+	require.Nil(t, created.BirthdayBlock)
+
 	block := CreateBlockFixture(t, dbConn, 50)
 
 	updateParams := db.UpdateWalletParams{
@@ -213,8 +235,11 @@ func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 
 	retrieved, err := store.GetWallet(t.Context(), created.Name)
 	require.NoError(t, err)
+	require.NotNil(t, retrieved.BirthdayBlock)
 	require.Equal(t, block.Height, retrieved.BirthdayBlock.Height)
 	require.Equal(t, block.Hash, retrieved.BirthdayBlock.Hash)
+	require.Equal(t, block.Timestamp.Unix(),
+		retrieved.BirthdayBlock.Timestamp.Unix())
 
 	// Assert fields that were not updated remain unchanged.
 	require.Equal(t, created.ID, retrieved.ID)
@@ -222,6 +247,40 @@ func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 	require.Equal(t, created.IsImported, retrieved.IsImported)
 	require.Equal(t, created.ManagerVersion, retrieved.ManagerVersion)
 	require.Equal(t, created.IsWatchOnly, retrieved.IsWatchOnly)
+	require.Nil(t, retrieved.SyncedTo)
+}
+
+// TestUpdateWallet_Birthday checks that updating the wallet's birthday
+// timestamp works correctly.
+func TestUpdateWallet_Birthday(t *testing.T) {
+	t.Parallel()
+
+	store, _ := NewTestStore(t)
+
+	params := CreateWalletParamsFixture("birthday-timestamp-wallet")
+	created, err := store.CreateWallet(t.Context(), params)
+	require.NoError(t, err)
+
+	// Set birthday timestamp without setting birthday block.
+	birthdayTime := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	updateParams := db.UpdateWalletParams{
+		WalletID: created.ID,
+		Birthday: &birthdayTime,
+	}
+	err = store.UpdateWallet(t.Context(), updateParams)
+	require.NoError(t, err)
+
+	retrieved, err := store.GetWallet(t.Context(), created.Name)
+	require.NoError(t, err)
+	require.Equal(t, birthdayTime.Unix(), retrieved.Birthday.Unix())
+
+	// Assert fields that were not updated remain unchanged.
+	require.Equal(t, created.ID, retrieved.ID)
+	require.Equal(t, created.Name, retrieved.Name)
+	require.Equal(t, created.IsImported, retrieved.IsImported)
+	require.Equal(t, created.ManagerVersion, retrieved.ManagerVersion)
+	require.Equal(t, created.IsWatchOnly, retrieved.IsWatchOnly)
+	require.Nil(t, retrieved.BirthdayBlock)
 	require.Nil(t, retrieved.SyncedTo)
 }
 
