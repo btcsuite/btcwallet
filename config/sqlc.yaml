@@ -3,11 +3,11 @@
 version: "2"
 sql:
   - engine: "postgresql"
-    schema: "../migrations/postgres"
-    queries: "../queries/postgres"
+    schema: "../wallet/internal/db/migrations/postgres"
+    queries: "../wallet/internal/db/queries/postgres"
     gen:
       go:
-        out: "postgres"
+        out: "../wallet/internal/db/sqlc/postgres"
         package: "sqlcpg"
 
         # This is the driver package that sqlc will use in the generated code.
@@ -24,11 +24,11 @@ sql:
         emit_prepared_queries: true
 
   - engine: "sqlite"
-    schema: "../migrations/sqlite"
-    queries: "../queries/sqlite"
+    schema: "../wallet/internal/db/migrations/sqlite"
+    queries: "../wallet/internal/db/queries/sqlite"
     gen:
       go:
-        out: "sqlite"
+        out: "../wallet/internal/db/sqlc/sqlite"
         package: "sqlcsqlite"
 
         # This is the driver package that sqlc will use in the generated code.
