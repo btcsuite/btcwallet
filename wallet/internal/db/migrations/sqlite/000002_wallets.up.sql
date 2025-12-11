@@ -7,7 +7,7 @@ CREATE TABLE wallets (
     id INTEGER PRIMARY KEY,
 
     -- Human friendly name for the wallet.
-    name TEXT NOT NULL,
+    wallet_name TEXT NOT NULL,
 
     -- Defines if the wallet was imported, all its accounts would also be imported.
     is_imported BOOLEAN NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE wallets (
 );
 
 -- Unique index to prevent duplicate wallet names.
-CREATE UNIQUE INDEX uidx_wallets_name ON wallets (name);
+CREATE UNIQUE INDEX uidx_wallets_name ON wallets (wallet_name);
 
 -- Wallet Secrets table to store rarely accessed, highly sensitive encrypted
 -- material with a strict one-to-one relationship with the wallets table.
@@ -58,7 +58,7 @@ CREATE TABLE wallet_secrets (
 
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if secrets still exist.
-    FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE RESTRICT
+    FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT
 );
 
 -- Enforces one-to-one relationship: each wallet has at most one secrets record.
@@ -90,20 +90,20 @@ CREATE TABLE wallet_sync_states (
 
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if sync state still exists.
-    FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE RESTRICT,
+    FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT,
 
     -- Foreign key constraint to blocks. Using ON DELETE RESTRICT to ensure
     -- that the block cannot be deleted if it is referenced by the sync state.
-    FOREIGN KEY (synced_height) REFERENCES blocks(block_height)
-        ON DELETE RESTRICT,
+    FOREIGN KEY (synced_height) REFERENCES blocks (block_height)
+    ON DELETE RESTRICT,
 
     -- Foreign key constraint to blocks. Using ON DELETE RESTRICT to ensure
     -- that the block cannot be deleted if it is referenced by the sync state.
-    FOREIGN KEY (birthday_height) REFERENCES blocks(block_height)
-        ON DELETE RESTRICT
+    FOREIGN KEY (birthday_height) REFERENCES blocks (block_height)
+    ON DELETE RESTRICT
 );
 
 -- Enforces one-to-one relationship: each wallet has exactly one sync state record.
 -- Also serves as the effective primary key for this table.
 CREATE UNIQUE INDEX uidx_wallet_sync_states_wallet
-    ON wallet_sync_states (wallet_id);
+ON wallet_sync_states (wallet_id);

@@ -13,7 +13,7 @@ type Querier interface {
 	DeleteBlock(ctx context.Context, blockHeight int32) error
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
-	GetWalletByName(ctx context.Context, name string) (GetWalletByNameRow, error)
+	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
