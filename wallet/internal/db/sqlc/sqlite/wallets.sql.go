@@ -59,7 +59,7 @@ SELECT
     w.is_watch_only,
     s.synced_height,
     s.birthday_height,
-    s.birthday_verified,
+    s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
     b_synced.timestamp AS synced_block_timestamp,
@@ -80,7 +80,7 @@ type GetWalletByIDRow struct {
 	IsWatchOnly            bool
 	SyncedHeight           sql.NullInt64
 	BirthdayHeight         sql.NullInt64
-	BirthdayVerified       sql.NullBool
+	Birthday               sql.NullTime
 	UpdatedAt              sql.NullTime
 	SyncedBlockHash        []byte
 	SyncedBlockTimestamp   sql.NullInt64
@@ -99,7 +99,7 @@ func (q *Queries) GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow
 		&i.IsWatchOnly,
 		&i.SyncedHeight,
 		&i.BirthdayHeight,
-		&i.BirthdayVerified,
+		&i.Birthday,
 		&i.UpdatedAt,
 		&i.SyncedBlockHash,
 		&i.SyncedBlockTimestamp,
@@ -118,7 +118,7 @@ SELECT
     w.is_watch_only,
     s.synced_height,
     s.birthday_height,
-    s.birthday_verified,
+    s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
     b_synced.timestamp AS synced_block_timestamp,
@@ -139,7 +139,7 @@ type GetWalletByNameRow struct {
 	IsWatchOnly            bool
 	SyncedHeight           sql.NullInt64
 	BirthdayHeight         sql.NullInt64
-	BirthdayVerified       sql.NullBool
+	Birthday               sql.NullTime
 	UpdatedAt              sql.NullTime
 	SyncedBlockHash        []byte
 	SyncedBlockTimestamp   sql.NullInt64
@@ -158,7 +158,7 @@ func (q *Queries) GetWalletByName(ctx context.Context, name string) (GetWalletBy
 		&i.IsWatchOnly,
 		&i.SyncedHeight,
 		&i.BirthdayHeight,
-		&i.BirthdayVerified,
+		&i.Birthday,
 		&i.UpdatedAt,
 		&i.SyncedBlockHash,
 		&i.SyncedBlockTimestamp,
@@ -228,7 +228,7 @@ INSERT INTO wallet_sync_states (
     wallet_id,
     synced_height,
     birthday_height,
-    birthday_verified,
+    birthday,
     updated_at
 ) VALUES (
     ?, ?, ?, ?, CURRENT_TIMESTAMP
@@ -236,10 +236,10 @@ INSERT INTO wallet_sync_states (
 `
 
 type InsertWalletSyncStateParams struct {
-	WalletID         int64
-	SyncedHeight     sql.NullInt64
-	BirthdayHeight   sql.NullInt64
-	BirthdayVerified bool
+	WalletID       int64
+	SyncedHeight   sql.NullInt64
+	BirthdayHeight sql.NullInt64
+	Birthday       sql.NullTime
 }
 
 func (q *Queries) InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error {
@@ -247,7 +247,7 @@ func (q *Queries) InsertWalletSyncState(ctx context.Context, arg InsertWalletSyn
 		arg.WalletID,
 		arg.SyncedHeight,
 		arg.BirthdayHeight,
-		arg.BirthdayVerified,
+		arg.Birthday,
 	)
 	return err
 }
@@ -261,7 +261,7 @@ SELECT
     w.is_watch_only,
     s.synced_height,
     s.birthday_height,
-    s.birthday_verified,
+    s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
     b_synced.timestamp AS synced_block_timestamp,
@@ -282,7 +282,7 @@ type ListWalletsRow struct {
 	IsWatchOnly            bool
 	SyncedHeight           sql.NullInt64
 	BirthdayHeight         sql.NullInt64
-	BirthdayVerified       sql.NullBool
+	Birthday               sql.NullTime
 	UpdatedAt              sql.NullTime
 	SyncedBlockHash        []byte
 	SyncedBlockTimestamp   sql.NullInt64
@@ -307,7 +307,7 @@ func (q *Queries) ListWallets(ctx context.Context) ([]ListWalletsRow, error) {
 			&i.IsWatchOnly,
 			&i.SyncedHeight,
 			&i.BirthdayHeight,
-			&i.BirthdayVerified,
+			&i.Birthday,
 			&i.UpdatedAt,
 			&i.SyncedBlockHash,
 			&i.SyncedBlockTimestamp,
@@ -368,8 +368,8 @@ SET
     -- If birthday_height param is NOT NULL, use it. Otherwise, keep existing value.
     birthday_height = COALESCE(?2, birthday_height),
 
-    -- If birthday_verified param is NOT NULL, use it. Otherwise, keep existing value.
-    birthday_verified = COALESCE(?3, birthday_verified),
+    -- If birthday param is NOT NULL, use it. Otherwise, keep existing value.
+    birthday = COALESCE(?3, birthday),
 
     -- Always update timestamp to current database time.
     updated_at = CURRENT_TIMESTAMP
@@ -378,17 +378,17 @@ WHERE
 `
 
 type UpdateWalletSyncStateParams struct {
-	SyncedHeight     sql.NullInt64
-	BirthdayHeight   sql.NullInt64
-	BirthdayVerified sql.NullBool
-	WalletID         int64
+	SyncedHeight   sql.NullInt64
+	BirthdayHeight sql.NullInt64
+	Birthday       sql.NullTime
+	WalletID       int64
 }
 
 func (q *Queries) UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error) {
 	result, err := q.exec(ctx, q.updateWalletSyncStateStmt, UpdateWalletSyncState,
 		arg.SyncedHeight,
 		arg.BirthdayHeight,
-		arg.BirthdayVerified,
+		arg.Birthday,
 		arg.WalletID,
 	)
 	if err != nil {
