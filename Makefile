@@ -24,6 +24,10 @@ DOCKER_TOOLS = docker run \
   -v $(shell bash -c "mkdir -p /tmp/go-build-cache; echo /tmp/go-build-cache"):/root/.cache/go-build \
   -v $$(pwd):/build btcwallet-tools
 
+SQLFLUFF = docker run \
+	--rm \
+    -v $$(pwd):/sql sqlfluff/sqlfluff
+
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
 define print
