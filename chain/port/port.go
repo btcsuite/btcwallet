@@ -1,6 +1,9 @@
+// Package port provides functionality for managing network ports, including
+// finding available ports and ensuring exclusive access using lock files.
 package port
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -29,6 +32,17 @@ const (
 	// the same port is not used by multiple nodes at the same time. The
 	// file is located in the temp directory of a system.
 	uniquePortFile = "rpctest-port"
+
+	// filePerms is the file permission used for the lock file and port
+	// file.
+	filePerms = 0600
+
+	// retryInterval is the interval to wait before retrying to acquire the
+	// lock file.
+	retryInterval = 10 * time.Millisecond
+
+	// maxPort is the maximum valid port number.
+	maxPort = 65535
 )
 
 var (
@@ -49,30 +63,8 @@ func NextAvailablePort() int {
 	defer portFileMutex.Unlock()
 
 	lockFile := filepath.Join(os.TempDir(), uniquePortFile+".lock")
-	timeout := time.After(defaultTimeout)
-
-	var (
-		lockFileHandle *os.File
-		err            error
-	)
-	for {
-		// Attempt to acquire the lock file. If it already exists, wait
-		// for a bit and retry.
-		lockFileHandle, err = os.OpenFile(
-			lockFile, os.O_CREATE|os.O_EXCL, 0600,
-		)
-		if err == nil {
-			// Lock acquired.
-			break
-		}
-
-		// Wait for a bit and retry.
-		select {
-		case <-timeout:
-			panic("timeout waiting for lock file")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
+	lockFile = filepath.Clean(lockFile)
+	lockFileHandle := acquireLockFile(lockFile)
 
 	// Release the lock file when we're done.
 	defer func() {
@@ -87,6 +79,7 @@ func NextAvailablePort() int {
 	}()
 
 	portFile := filepath.Join(os.TempDir(), uniquePortFile)
+	portFile = filepath.Clean(portFile)
 
 	port, err := os.ReadFile(portFile)
 	if err != nil {
@@ -104,7 +97,7 @@ func NextAvailablePort() int {
 
 	// We take the next one.
 	lastPort++
-	for lastPort < 65535 {
+	for lastPort < maxPort {
 		// If there are no errors while attempting to listen on this
 		// port, close the socket and return it as available. While it
 		// could be the case that some other process picks up this port
@@ -114,13 +107,16 @@ func NextAvailablePort() int {
 		// bound at the start of the tests.
 		addr := fmt.Sprintf(ListenerFormat, lastPort)
 
-		l, err := net.Listen("tcp4", addr)
+		lc := &net.ListenConfig{}
+
+		l, err := lc.Listen(context.Background(), "tcp4", addr)
 		if err == nil {
 			err := l.Close()
 			if err == nil {
 				err := os.WriteFile(
 					portFile,
-					[]byte(strconv.Itoa(lastPort)), 0600,
+					[]byte(strconv.Itoa(lastPort)),
+					filePerms,
 				)
 				if err != nil {
 					panic(fmt.Errorf("error updating "+
@@ -139,11 +135,46 @@ func NextAvailablePort() int {
 		// boot/uptime cycle. So in order to make this work on
 		// developer's machines, we need to reset the port to the
 		// default value when we reach the end of the range.
-		if lastPort == 65535 {
+		if lastPort == maxPort {
 			lastPort = defaultNodePort
 		}
 	}
 
 	// No ports available? Must be a mistake.
 	panic("no ports available for listening")
+}
+
+// acquireLockFile attempts to acquire the lock file. If it already exists, it
+// waits for a bit and retries until the timeout is reached. If the process is
+// killed before the lock file is removed, this function will timeout and panic.
+// In that case, the lock file must be manually removed.
+func acquireLockFile(lockFile string) *os.File {
+	timeout := time.After(defaultTimeout)
+
+	var (
+		lockFileHandle *os.File
+		err            error
+	)
+	for {
+		// Attempt to acquire the lock file. If it already exists, wait
+		// for a bit and retry.
+		//
+		//nolint:gosec // lockFile is constructed from os.TempDir() and
+		// a constant, not from user input.
+		lockFileHandle, err = os.OpenFile(
+			lockFile, os.O_CREATE|os.O_EXCL, filePerms,
+		)
+		if err == nil {
+			// Lock acquired.
+			return lockFileHandle
+		}
+
+		// Wait for a bit and retry.
+		select {
+		case <-timeout:
+			str := "timeout waiting for lock file: " + lockFile
+			panic(str)
+		case <-time.After(retryInterval):
+		}
+	}
 }
