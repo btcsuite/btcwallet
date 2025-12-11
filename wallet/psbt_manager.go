@@ -45,6 +45,9 @@ var (
 
 	// ErrFeeRateNegative is returned when a negative fee rate is provided.
 	ErrFeeRateNegative = errors.New("fee rate cannot be negative")
+
+	// ErrNilFundIntent is returned when a nil FundIntent is provided.
+	ErrNilFundIntent = errors.New("nil FundIntent")
 )
 
 // FundIntent represents the user's intent for funding a PSBT. It serves as a
@@ -582,12 +585,18 @@ func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 // logic to ensure that the caller has provided a valid intent.
 //
 // The following checks are performed:
-//  1. The PSBT packet must not be nil.
-//  2. If the PSBT has no inputs (automatic coin selection mode), it must have
+//  1. The intent must not be nil.
+//  2. The PSBT packet must not be nil.
+//  3. If the PSBT has no inputs (automatic coin selection mode), it must have
 //     at least one output.
-//  3. If the PSBT has inputs, a coin selection policy must not be specified
+//  4. If the PSBT has inputs, a coin selection policy must not be specified
 //     (mutual exclusivity).
 func (w *Wallet) validateFundIntent(intent *FundIntent) error {
+	// The intent must not be nil.
+	if intent == nil {
+		return ErrNilFundIntent
+	}
+
 	// The PSBT packet must not be nil.
 	if intent.Packet == nil {
 		return fmt.Errorf(
