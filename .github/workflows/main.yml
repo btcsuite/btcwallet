@@ -63,8 +63,14 @@ jobs:
       - name: Check RPC format
         run: make rpc-check
 
-      - name: Check SQL models
+      - name: Check generated SQL code is up-to-date
         run: make sqlc-check
+
+      - name: Check SQL formatting
+        run: make sql-format-check
+
+      - name: Check SQL linting
+        run: make sql-lint-check
 
       - name: compile code
         run: go install -v ./...
