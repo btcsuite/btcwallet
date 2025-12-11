@@ -59,7 +59,7 @@ func CreateBlockFixture(t *testing.T, dbConn *sql.DB, height uint32) db.Block {
 	// TODO(gustavostingelin): use the block store to insert the block when
 	// available.
 	query := `
-		INSERT INTO blocks (block_height, header_hash, timestamp)
+		INSERT INTO blocks (block_height, header_hash, block_timestamp)
 		VALUES ($1, $2, $3)
 	`
 	_, err := dbConn.ExecContext(t.Context(), query,

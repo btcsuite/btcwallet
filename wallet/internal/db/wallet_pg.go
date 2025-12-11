@@ -22,7 +22,7 @@ func (w *PostgresWalletDB) CreateWallet(ctx context.Context,
 
 	err := w.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
 		walletParams := sqlcpg.CreateWalletParams{
-			Name:                    params.Name,
+			WalletName:              params.Name,
 			IsImported:              params.IsImported,
 			ManagerVersion:          params.ManagerVersion,
 			IsWatchOnly:             params.IsWatchOnly,
@@ -83,7 +83,7 @@ func (w *PostgresWalletDB) CreateWallet(ctx context.Context,
 
 		info, err = buildPgWalletInfo(pgWalletRowParams{
 			id:                     row.ID,
-			name:                   row.Name,
+			name:                   row.WalletName,
 			isImported:             row.IsImported,
 			managerVersion:         row.ManagerVersion,
 			isWatchOnly:            row.IsWatchOnly,
@@ -126,7 +126,7 @@ func (w *PostgresWalletDB) GetWallet(ctx context.Context,
 
 	return buildPgWalletInfo(pgWalletRowParams{
 		id:                     row.ID,
-		name:                   row.Name,
+		name:                   row.WalletName,
 		isImported:             row.IsImported,
 		managerVersion:         row.ManagerVersion,
 		isWatchOnly:            row.IsWatchOnly,
@@ -155,7 +155,7 @@ func (w *PostgresWalletDB) ListWallets(ctx context.Context) ([]WalletInfo,
 	for i, row := range rows {
 		info, err := buildPgWalletInfo(pgWalletRowParams{
 			id:                     row.ID,
-			name:                   row.Name,
+			name:                   row.WalletName,
 			isImported:             row.IsImported,
 			managerVersion:         row.ManagerVersion,
 			isWatchOnly:            row.IsWatchOnly,

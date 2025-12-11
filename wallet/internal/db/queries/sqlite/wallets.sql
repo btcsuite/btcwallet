@@ -1,6 +1,6 @@
 -- name: CreateWallet :one
 INSERT INTO wallets (
-    name,
+    wallet_name,
     is_imported,
     manager_version,
     is_watch_only,
@@ -20,30 +20,30 @@ INSERT INTO wallet_sync_states (
     birthday,
     updated_at
 ) VALUES (
-    ?, ?, ?, ?, CURRENT_TIMESTAMP
+    ?, ?, ?, ?, current_timestamp
 );
 
 -- name: UpdateWalletSyncState :execrows
 UPDATE wallet_sync_states
 SET
     -- If synced_height param is NOT NULL, use it. Otherwise, keep existing value.
-    synced_height = COALESCE(sqlc.narg('synced_height'), synced_height),
+    synced_height = coalesce(sqlc.narg('synced_height'), synced_height),
 
     -- If birthday_height param is NOT NULL, use it. Otherwise, keep existing value.
-    birthday_height = COALESCE(sqlc.narg('birthday_height'), birthday_height),
+    birthday_height = coalesce(sqlc.narg('birthday_height'), birthday_height),
 
     -- If birthday param is NOT NULL, use it. Otherwise, keep existing value.
-    birthday = COALESCE(sqlc.narg('birthday'), birthday),
+    birthday = coalesce(sqlc.narg('birthday'), birthday),
 
     -- Always update timestamp to current database time.
-    updated_at = CURRENT_TIMESTAMP
+    updated_at = current_timestamp
 WHERE
     wallet_id = sqlc.arg('wallet_id');
 
 -- name: GetWalletByName :one
 SELECT
     w.id,
-    w.name,
+    w.wallet_name,
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
@@ -52,19 +52,19 @@ SELECT
     s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
-    b_synced.timestamp AS synced_block_timestamp,
+    b_synced.block_timestamp AS synced_block_timestamp,
     b_birthday.header_hash AS birthday_block_hash,
-    b_birthday.timestamp AS birthday_block_timestamp
-FROM wallets w
-LEFT JOIN wallet_sync_states s ON s.wallet_id = w.id
-LEFT JOIN blocks b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks b_birthday ON s.birthday_height = b_birthday.block_height
-WHERE w.name = ?;
+    b_birthday.block_timestamp AS birthday_block_timestamp
+FROM wallets AS w
+LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
+LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
+LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+WHERE w.wallet_name = ?;
 
 -- name: ListWallets :many
 SELECT
     w.id,
-    w.name,
+    w.wallet_name,
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
@@ -73,19 +73,19 @@ SELECT
     s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
-    b_synced.timestamp AS synced_block_timestamp,
+    b_synced.block_timestamp AS synced_block_timestamp,
     b_birthday.header_hash AS birthday_block_hash,
-    b_birthday.timestamp AS birthday_block_timestamp
-FROM wallets w
-LEFT JOIN wallet_sync_states s ON s.wallet_id = w.id
-LEFT JOIN blocks b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks b_birthday ON s.birthday_height = b_birthday.block_height
+    b_birthday.block_timestamp AS birthday_block_timestamp
+FROM wallets AS w
+LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
+LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
+LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
 ORDER BY w.id;
 
 -- name: GetWalletByID :one
 SELECT
     w.id,
-    w.name,
+    w.wallet_name,
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
@@ -94,13 +94,13 @@ SELECT
     s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
-    b_synced.timestamp AS synced_block_timestamp,
+    b_synced.block_timestamp AS synced_block_timestamp,
     b_birthday.header_hash AS birthday_block_hash,
-    b_birthday.timestamp AS birthday_block_timestamp
-FROM wallets w
-LEFT JOIN wallet_sync_states s ON s.wallet_id = w.id
-LEFT JOIN blocks b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks b_birthday ON s.birthday_height = b_birthday.block_height
+    b_birthday.block_timestamp AS birthday_block_timestamp
+FROM wallets AS w
+LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
+LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
+LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
 WHERE w.id = ?;
 
 -- name: InsertWalletSecrets :exec

@@ -12,7 +12,7 @@ import (
 
 const CreateWallet = `-- name: CreateWallet :one
 INSERT INTO wallets (
-    name,
+    wallet_name,
     is_imported,
     manager_version,
     is_watch_only,
@@ -26,7 +26,7 @@ RETURNING id
 `
 
 type CreateWalletParams struct {
-	Name                    string
+	WalletName              string
 	IsImported              bool
 	ManagerVersion          int64
 	IsWatchOnly             bool
@@ -37,7 +37,7 @@ type CreateWalletParams struct {
 
 func (q *Queries) CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error) {
 	row := q.queryRow(ctx, q.createWalletStmt, CreateWallet,
-		arg.Name,
+		arg.WalletName,
 		arg.IsImported,
 		arg.ManagerVersion,
 		arg.IsWatchOnly,
@@ -53,7 +53,7 @@ func (q *Queries) CreateWallet(ctx context.Context, arg CreateWalletParams) (int
 const GetWalletByID = `-- name: GetWalletByID :one
 SELECT
     w.id,
-    w.name,
+    w.wallet_name,
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
@@ -62,19 +62,19 @@ SELECT
     s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
-    b_synced.timestamp AS synced_block_timestamp,
+    b_synced.block_timestamp AS synced_block_timestamp,
     b_birthday.header_hash AS birthday_block_hash,
-    b_birthday.timestamp AS birthday_block_timestamp
-FROM wallets w
-LEFT JOIN wallet_sync_states s ON s.wallet_id = w.id
-LEFT JOIN blocks b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks b_birthday ON s.birthday_height = b_birthday.block_height
+    b_birthday.block_timestamp AS birthday_block_timestamp
+FROM wallets AS w
+LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
+LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
+LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
 WHERE w.id = ?
 `
 
 type GetWalletByIDRow struct {
 	ID                     int64
-	Name                   string
+	WalletName             string
 	IsImported             bool
 	ManagerVersion         int64
 	IsWatchOnly            bool
@@ -93,7 +93,7 @@ func (q *Queries) GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow
 	var i GetWalletByIDRow
 	err := row.Scan(
 		&i.ID,
-		&i.Name,
+		&i.WalletName,
 		&i.IsImported,
 		&i.ManagerVersion,
 		&i.IsWatchOnly,
@@ -112,7 +112,7 @@ func (q *Queries) GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow
 const GetWalletByName = `-- name: GetWalletByName :one
 SELECT
     w.id,
-    w.name,
+    w.wallet_name,
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
@@ -121,19 +121,19 @@ SELECT
     s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
-    b_synced.timestamp AS synced_block_timestamp,
+    b_synced.block_timestamp AS synced_block_timestamp,
     b_birthday.header_hash AS birthday_block_hash,
-    b_birthday.timestamp AS birthday_block_timestamp
-FROM wallets w
-LEFT JOIN wallet_sync_states s ON s.wallet_id = w.id
-LEFT JOIN blocks b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks b_birthday ON s.birthday_height = b_birthday.block_height
-WHERE w.name = ?
+    b_birthday.block_timestamp AS birthday_block_timestamp
+FROM wallets AS w
+LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
+LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
+LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+WHERE w.wallet_name = ?
 `
 
 type GetWalletByNameRow struct {
 	ID                     int64
-	Name                   string
+	WalletName             string
 	IsImported             bool
 	ManagerVersion         int64
 	IsWatchOnly            bool
@@ -147,12 +147,12 @@ type GetWalletByNameRow struct {
 	BirthdayBlockTimestamp sql.NullInt64
 }
 
-func (q *Queries) GetWalletByName(ctx context.Context, name string) (GetWalletByNameRow, error) {
-	row := q.queryRow(ctx, q.getWalletByNameStmt, GetWalletByName, name)
+func (q *Queries) GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error) {
+	row := q.queryRow(ctx, q.getWalletByNameStmt, GetWalletByName, walletName)
 	var i GetWalletByNameRow
 	err := row.Scan(
 		&i.ID,
-		&i.Name,
+		&i.WalletName,
 		&i.IsImported,
 		&i.ManagerVersion,
 		&i.IsWatchOnly,
@@ -231,7 +231,7 @@ INSERT INTO wallet_sync_states (
     birthday,
     updated_at
 ) VALUES (
-    ?, ?, ?, ?, CURRENT_TIMESTAMP
+    ?, ?, ?, ?, current_timestamp
 )
 `
 
@@ -255,7 +255,7 @@ func (q *Queries) InsertWalletSyncState(ctx context.Context, arg InsertWalletSyn
 const ListWallets = `-- name: ListWallets :many
 SELECT
     w.id,
-    w.name,
+    w.wallet_name,
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
@@ -264,19 +264,19 @@ SELECT
     s.birthday,
     s.updated_at,
     b_synced.header_hash AS synced_block_hash,
-    b_synced.timestamp AS synced_block_timestamp,
+    b_synced.block_timestamp AS synced_block_timestamp,
     b_birthday.header_hash AS birthday_block_hash,
-    b_birthday.timestamp AS birthday_block_timestamp
-FROM wallets w
-LEFT JOIN wallet_sync_states s ON s.wallet_id = w.id
-LEFT JOIN blocks b_synced ON s.synced_height = b_synced.block_height
-LEFT JOIN blocks b_birthday ON s.birthday_height = b_birthday.block_height
+    b_birthday.block_timestamp AS birthday_block_timestamp
+FROM wallets AS w
+LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
+LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
+LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
 ORDER BY w.id
 `
 
 type ListWalletsRow struct {
 	ID                     int64
-	Name                   string
+	WalletName             string
 	IsImported             bool
 	ManagerVersion         int64
 	IsWatchOnly            bool
@@ -301,7 +301,7 @@ func (q *Queries) ListWallets(ctx context.Context) ([]ListWalletsRow, error) {
 		var i ListWalletsRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.Name,
+			&i.WalletName,
 			&i.IsImported,
 			&i.ManagerVersion,
 			&i.IsWatchOnly,
@@ -363,16 +363,16 @@ const UpdateWalletSyncState = `-- name: UpdateWalletSyncState :execrows
 UPDATE wallet_sync_states
 SET
     -- If synced_height param is NOT NULL, use it. Otherwise, keep existing value.
-    synced_height = COALESCE(?1, synced_height),
+    synced_height = coalesce(?1, synced_height),
 
     -- If birthday_height param is NOT NULL, use it. Otherwise, keep existing value.
-    birthday_height = COALESCE(?2, birthday_height),
+    birthday_height = coalesce(?2, birthday_height),
 
     -- If birthday param is NOT NULL, use it. Otherwise, keep existing value.
-    birthday = COALESCE(?3, birthday),
+    birthday = coalesce(?3, birthday),
 
     -- Always update timestamp to current database time.
-    updated_at = CURRENT_TIMESTAMP
+    updated_at = current_timestamp
 WHERE
     wallet_id = ?4
 `
