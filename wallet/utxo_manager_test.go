@@ -26,7 +26,7 @@ func TestListUnspent(t *testing.T) {
 	w, mocks := testWalletWithMocks(t)
 
 	// Define account names.
-	account1 := "default"
+	account1 := defaultAccountName
 	account2 := "test"
 
 	// Create the addresses that our mocks will return.
