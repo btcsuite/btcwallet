@@ -78,11 +78,12 @@ CREATE TABLE wallet_sync_states (
     synced_height INTEGER,
 
     -- Birthday block height of the wallet (references blocks table). NULL if the
-    -- wallet has no known birthday block.
+    -- wallet has no known birthday block. When set, indicates the block has been
+    -- verified.
     birthday_height INTEGER,
 
-    -- Indicates if the birthday block has been verified.
-    birthday_verified BOOLEAN NOT NULL,
+    -- User-provided birthday timestamp for wallet rescan. NULL if not set.
+    birthday TIMESTAMP,
 
     -- Last updated timestamp stored in UTC without timezone info.
     updated_at TIMESTAMP NOT NULL,
