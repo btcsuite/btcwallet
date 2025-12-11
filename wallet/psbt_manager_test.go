@@ -914,6 +914,11 @@ func TestValidateFundIntentError(t *testing.T) {
 		expectedErr error
 	}{
 		{
+			name:        "nil intent",
+			intent:      nil,
+			expectedErr: ErrNilFundIntent,
+		},
+		{
 			name:        "nil packet",
 			intent:      &FundIntent{Packet: nil},
 			expectedErr: ErrNilTxIntent,
