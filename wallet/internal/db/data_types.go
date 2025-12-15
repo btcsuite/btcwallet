@@ -30,6 +30,9 @@ type KeyScope struct {
 
 // AddressType specifies the type of a managed address. This is used to
 // identify the script type of an address, such as P2PKH, P2SH, P2WKH, etc.
+//
+// The enum values MUST match the IDs in the address_types database table.
+// See migration 000003_address_types for the canonical descriptions.
 type AddressType uint8
 
 const (
@@ -43,6 +46,10 @@ const (
 	// address.
 	WitnessPubKey
 
+	// WitnessScript represents a pay-to-witness-script-hash (P2WSH)
+	// address.
+	WitnessScript
+
 	// NestedWitnessPubKey represents a P2WKH output nested within a P2SH
 	// address.
 	NestedWitnessPubKey
@@ -50,6 +57,18 @@ const (
 	// TaprootPubKey represents a pay-to-taproot (P2TR) address.
 	TaprootPubKey
 )
+
+// AddressTypeInfo groups an address type identifier with its readable
+// description.
+type AddressTypeInfo struct {
+	// Type is the AddressType value used as the unique identifier on both
+	// the application side and the database side.
+	Type AddressType
+
+	// Description is a readable description of the address type.
+	// It is intended for argument parsing, logging, and user-facing output.
+	Description string
+}
 
 const (
 	// BIP0044Purpose is the purpose field for BIP0044 derivation.
