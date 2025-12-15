@@ -100,6 +100,106 @@ func TestInt64ToInt32(t *testing.T) {
 	}
 }
 
+// TestInt64ToUint8 checks that an int64 value is converted to uint8 only
+// when it is non-negative and fits within the uint8 range. It should fail
+// loudly for any value outside those bounds.
+func TestInt64ToUint8(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		val     int64
+		want    uint8
+		wantErr bool
+	}{
+		{
+			name: "zero",
+			val:  0,
+			want: 0,
+		},
+		{
+			name: "max uint8",
+			val:  int64(math.MaxUint8),
+			want: math.MaxUint8,
+		},
+		{
+			name:    "negative",
+			val:     -1,
+			wantErr: true,
+		},
+		{
+			name:    "too large",
+			val:     int64(math.MaxUint8) + 1,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := int64ToUint8(tc.val)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrCastingOverflow)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestInt16ToUint8 checks that an int16 value is converted to uint8 only
+// when it is non-negative and fits within the uint8 range. It should fail
+// loudly for any value outside those bounds.
+func TestInt16ToUint8(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		val     int16
+		want    uint8
+		wantErr bool
+	}{
+		{
+			name: "zero",
+			val:  0,
+			want: 0,
+		},
+		{
+			name: "max uint8",
+			val:  int16(math.MaxUint8),
+			want: math.MaxUint8,
+		},
+		{
+			name:    "negative",
+			val:     -1,
+			wantErr: true,
+		},
+		{
+			name:    "too large",
+			val:     int16(math.MaxUint8) + 1,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := int16ToUint8(tc.val)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrCastingOverflow)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // TestUint32ToInt32 checks that an uint32 value is safely converted to int32
 // only when it fits within the signed 32 bit range. It should fail loudly
 // for any value that exceeds those limits.
