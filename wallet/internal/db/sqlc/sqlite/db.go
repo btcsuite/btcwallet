@@ -30,6 +30,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteBlockStmt, err = db.PrepareContext(ctx, DeleteBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteBlock: %w", err)
 	}
+	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
+	}
 	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
 	}
@@ -50,6 +53,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.insertWalletSyncStateStmt, err = db.PrepareContext(ctx, InsertWalletSyncState); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertWalletSyncState: %w", err)
+	}
+	if q.listAddressTypesStmt, err = db.PrepareContext(ctx, ListAddressTypes); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAddressTypes: %w", err)
 	}
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
@@ -73,6 +79,11 @@ func (q *Queries) Close() error {
 	if q.deleteBlockStmt != nil {
 		if cerr := q.deleteBlockStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteBlockStmt: %w", cerr)
+		}
+	}
+	if q.getAddressTypeByIDStmt != nil {
+		if cerr := q.getAddressTypeByIDStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAddressTypeByIDStmt: %w", cerr)
 		}
 	}
 	if q.getBlockByHeightStmt != nil {
@@ -108,6 +119,11 @@ func (q *Queries) Close() error {
 	if q.insertWalletSyncStateStmt != nil {
 		if cerr := q.insertWalletSyncStateStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertWalletSyncStateStmt: %w", cerr)
+		}
+	}
+	if q.listAddressTypesStmt != nil {
+		if cerr := q.listAddressTypesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAddressTypesStmt: %w", cerr)
 		}
 	}
 	if q.listWalletsStmt != nil {
@@ -166,6 +182,7 @@ type Queries struct {
 	tx                        *sql.Tx
 	createWalletStmt          *sql.Stmt
 	deleteBlockStmt           *sql.Stmt
+	getAddressTypeByIDStmt    *sql.Stmt
 	getBlockByHeightStmt      *sql.Stmt
 	getWalletByIDStmt         *sql.Stmt
 	getWalletByNameStmt       *sql.Stmt
@@ -173,6 +190,7 @@ type Queries struct {
 	insertBlockStmt           *sql.Stmt
 	insertWalletSecretsStmt   *sql.Stmt
 	insertWalletSyncStateStmt *sql.Stmt
+	listAddressTypesStmt      *sql.Stmt
 	listWalletsStmt           *sql.Stmt
 	updateWalletSecretsStmt   *sql.Stmt
 	updateWalletSyncStateStmt *sql.Stmt
@@ -184,6 +202,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		tx:                        tx,
 		createWalletStmt:          q.createWalletStmt,
 		deleteBlockStmt:           q.deleteBlockStmt,
+		getAddressTypeByIDStmt:    q.getAddressTypeByIDStmt,
 		getBlockByHeightStmt:      q.getBlockByHeightStmt,
 		getWalletByIDStmt:         q.getWalletByIDStmt,
 		getWalletByNameStmt:       q.getWalletByNameStmt,
@@ -191,6 +210,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertBlockStmt:           q.insertBlockStmt,
 		insertWalletSecretsStmt:   q.insertWalletSecretsStmt,
 		insertWalletSyncStateStmt: q.insertWalletSyncStateStmt,
+		listAddressTypesStmt:      q.listAddressTypesStmt,
 		listWalletsStmt:           q.listWalletsStmt,
 		updateWalletSecretsStmt:   q.updateWalletSecretsStmt,
 		updateWalletSyncStateStmt: q.updateWalletSyncStateStmt,
