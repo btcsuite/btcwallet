@@ -673,6 +673,39 @@ func (m *mockAccountStore) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 	return args.Get(0).(waddrmgr.ManagedPubKeyAddress), args.Error(1)
 }
 
+// ActiveAccounts implements the waddrmgr.AccountStore interface.
+func (m *mockAccountStore) ActiveAccounts() []uint32 {
+	args := m.Called()
+	return args.Get(0).([]uint32)
+}
+
+// ExtendAddresses implements the waddrmgr.AccountStore interface.
+func (m *mockAccountStore) ExtendAddresses(ns walletdb.ReadWriteBucket,
+	account uint32, lastIndex uint32, branch uint32) error {
+
+	args := m.Called(ns, account, lastIndex, branch)
+	return args.Error(0)
+}
+
+// DeriveAddr implements the waddrmgr.AccountStore interface.
+func (m *mockAccountStore) DeriveAddr(account, branch, index uint32) (
+	address.Address, []byte, error) {
+
+	args := m.Called(account, branch, index)
+
+	var addr address.Address
+	if args.Get(0) != nil {
+		addr = args.Get(0).(address.Address)
+	}
+
+	var script []byte
+	if args.Get(1) != nil {
+		script = args.Get(1).([]byte)
+	}
+
+	return addr, script, args.Error(2)
+}
+
 // AddrAccount implements the waddrmgr.AccountStore interface.
 func (m *mockAccountStore) AddrAccount(ns walletdb.ReadBucket,
 	address address.Address) (uint32, error) {
