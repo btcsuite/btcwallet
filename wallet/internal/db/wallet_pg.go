@@ -193,7 +193,8 @@ func (w *PostgresWalletDB) UpdateWallet(ctx context.Context,
 
 		if params.SyncedTo != nil {
 			syncedHeight, err := uint32ToNullInt32(
-				params.SyncedTo.Height)
+				params.SyncedTo.Height,
+			)
 			if err != nil {
 				return err
 			}
@@ -210,7 +211,8 @@ func (w *PostgresWalletDB) UpdateWallet(ctx context.Context,
 
 		if params.BirthdayBlock != nil {
 			birthdayHeight, err := uint32ToNullInt32(
-				params.BirthdayBlock.Height)
+				params.BirthdayBlock.Height,
+			)
 			if err != nil {
 				return err
 			}
