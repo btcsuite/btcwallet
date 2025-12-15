@@ -73,6 +73,15 @@ func (m *mockTxStore) InsertTxCheckIfExists(ns walletdb.ReadWriteBucket,
 	return args.Bool(0), args.Error(1)
 }
 
+// InsertConfirmedTx implements the wtxmgr.TxStore interface.
+func (m *mockTxStore) InsertConfirmedTx(ns walletdb.ReadWriteBucket,
+	rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta,
+	credits []wtxmgr.CreditEntry) error {
+
+	args := m.Called(ns, rec, block, credits)
+	return args.Error(0)
+}
+
 // AddCredit implements the wtxmgr.TxStore interface.
 func (m *mockTxStore) AddCredit(ns walletdb.ReadWriteBucket,
 	rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta, index uint32,
