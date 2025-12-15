@@ -131,6 +131,60 @@ func (k KeyScope) String() string {
 	return fmt.Sprintf("m/%v'/%v'", k.Purpose, k.Coin)
 }
 
+// AccountScope uniquely identifies a specific account within a key scope.
+type AccountScope struct {
+	// Scope is the BIP44 account' used to derive the child key.
+	Scope KeyScope
+
+	// Account is the account number.
+	Account uint32
+}
+
+// String returns a human readable version describing the account scope.
+func (as AccountScope) String() string {
+	return fmt.Sprintf("%s/%d'", as.Scope, as.Account)
+}
+
+// BranchScope uniquely identifies a specific derivation branch within an
+// account.
+type BranchScope struct {
+	// Scope is the key scope of the branch.
+	Scope KeyScope
+
+	// Account is the account number of the branch.
+	Account uint32
+
+	// Branch is the branch number (e.g. waddrmgr.ExternalBranch or
+	// waddrmgr.InternalBranch).
+	Branch uint32
+}
+
+// String returns a human readable version describing the branch scope.
+func (bs BranchScope) String() string {
+	return fmt.Sprintf("%s/%d/%d'", bs.Scope, bs.Account, bs.Branch)
+}
+
+// IsChange returns true if the branch matches the internal (change) branch.
+func (bs BranchScope) IsChange() bool {
+	return bs.Branch == InternalBranch
+}
+
+// AddrScope uniquely identifies a specific address within a derivation branch.
+type AddrScope struct {
+	BranchScope BranchScope
+	Index       uint32
+}
+
+// String returns a human readable version describing the address scope.
+func (as AddrScope) String() string {
+	return fmt.Sprintf("%s/%d", as.BranchScope, as.Index)
+}
+
+// IsChange returns true if the address belongs to an internal (change) branch.
+func (as AddrScope) IsChange() bool {
+	return as.BranchScope.IsChange()
+}
+
 // Identity is a closure that returns the identifier of an address.
 type Identity func() []byte
 
@@ -306,6 +360,20 @@ type ScopedKeyManager struct {
 // A compile-time assertion to ensure that ScopedKeyManager implements the
 // AccountStore interface.
 var _ AccountStore = (*ScopedKeyManager)(nil)
+
+// ActiveAccounts returns the account numbers of all accounts currently loaded
+// in memory.
+func (s *ScopedKeyManager) ActiveAccounts() []uint32 {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	accounts := make([]uint32, 0, len(s.acctInfo))
+	for account := range s.acctInfo {
+		accounts = append(accounts, account)
+	}
+
+	return accounts
+}
 
 // Scope returns the exact KeyScope of this scoped key manager.
 func (s *ScopedKeyManager) Scope() KeyScope {
@@ -1447,6 +1515,24 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	}
 
 	return nil
+}
+
+// ExtendAddresses ensures that all valid keys through lastIndex are
+// derived and stored in the wallet for the specified branch.
+func (s *ScopedKeyManager) ExtendAddresses(ns walletdb.ReadWriteBucket,
+	account uint32, lastIndex uint32, branch uint32) error {
+
+	if account > MaxAccountNum {
+		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
+		return err
+	}
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	return s.extendAddresses(
+		ns, account, lastIndex, branch == InternalBranch,
+	)
 }
 
 // NextExternalAddresses returns the specified number of next chained addresses

@@ -228,6 +228,11 @@ type AccountStore interface {
 	ExtendInternalAddresses(ns walletdb.ReadWriteBucket, account uint32,
 		count uint32) error
 
+	// ExtendAddresses ensures that all valid keys through lastIndex are
+	// derived and stored in the wallet for the specified branch.
+	ExtendAddresses(ns walletdb.ReadWriteBucket, account uint32,
+		lastIndex uint32, branch uint32) error
+
 	// MarkUsed updates the used flag for the provided address.
 	MarkUsed(ns walletdb.ReadWriteBucket, address btcutil.Address) error
 
@@ -305,4 +310,13 @@ type AccountStore interface {
 	// ImportScript imports a script.
 	ImportScript(ns walletdb.ReadWriteBucket, script []byte,
 		bs *BlockStamp) (ManagedScriptAddress, error)
+
+	// ActiveAccounts returns the account numbers of all accounts currently
+	// loaded in memory.
+	ActiveAccounts() []uint32
+
+	// DeriveAddr derives a single address for the given account, branch,
+	// and index.
+	DeriveAddr(account uint32, branch uint32, index uint32) (
+		btcutil.Address, []byte, error)
 }
