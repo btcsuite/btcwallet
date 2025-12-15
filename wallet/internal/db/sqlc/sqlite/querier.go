@@ -11,6 +11,8 @@ import (
 type Querier interface {
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int64) error
+	// Returns a single address type by its ID.
+	GetAddressTypeByID(ctx context.Context, id int64) (AddressType, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
@@ -18,6 +20,8 @@ type Querier interface {
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
+	// Returns all address types ordered by ID.
+	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
 	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
 	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)

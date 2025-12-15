@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+type AddressType struct {
+	ID          int16
+	Description string
+}
+
 type Block struct {
 	BlockHeight    int32
 	HeaderHash     []byte
