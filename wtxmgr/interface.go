@@ -76,6 +76,11 @@ type TxStore interface {
 	InsertTxCheckIfExists(ns walletdb.ReadWriteBucket, rec *TxRecord,
 		block *BlockMeta) (bool, error)
 
+	// InsertConfirmedTx records a mined transaction and its associated
+	// credits in a single operation.
+	InsertConfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+		block *BlockMeta, credits []CreditEntry) error
+
 	// AddCredit marks a transaction record as containing a transaction
 	// output spendable by wallet. The output is added unspent, and is
 	// marked spent when a new transaction spending the output is inserted
