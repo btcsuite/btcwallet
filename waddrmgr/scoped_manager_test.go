@@ -107,7 +107,7 @@ func TestDeriveAddrs(t *testing.T) {
 
 		t.Helper()
 
-		err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		err := walletdb.View(db, func(tx walletdb.ReadTx) error {
 			ns := tx.ReadBucket(waddrmgrNamespaceKey)
 
 			for i := range tc.count {
