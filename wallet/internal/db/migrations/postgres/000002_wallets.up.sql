@@ -83,7 +83,7 @@ CREATE TABLE wallet_sync_states (
     birthday_height INTEGER,
 
     -- User-provided birthday timestamp for wallet rescan. NULL if not set.
-    birthday TIMESTAMP,
+    birthday_timestamp TIMESTAMP,
 
     -- Last updated timestamp stored in UTC without timezone info.
     updated_at TIMESTAMP NOT NULL,
