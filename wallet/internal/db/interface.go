@@ -13,6 +13,9 @@ var (
 	// database.
 	ErrWalletNotFound = errors.New("wallet not found")
 
+	// ErrAddressTypeNotFound is returned when an address type is not found.
+	ErrAddressTypeNotFound = errors.New("address type not found")
+
 	// ErrSecretNotFound is returned when a secret is not found or is empty
 	// in the database.
 	ErrSecretNotFound = errors.New("secret not found")
@@ -134,6 +137,15 @@ type AddressStore interface {
 	// imports.
 	GetPrivateKey(ctx context.Context, params GetPrivateKeyParams) (
 		*btcec.PrivateKey, error)
+
+	// ListAddressTypes returns all supported address types along with their
+	// readable descriptions, wrapped in AddressTypeInfo values.
+	ListAddressTypes(ctx context.Context) ([]AddressTypeInfo, error)
+
+	// GetAddressType returns the AddressTypeInfo associated with the given
+	// address type identifier. An error is returned if the type is unknown.
+	GetAddressType(ctx context.Context, id AddressType) (AddressTypeInfo,
+		error)
 }
 
 // TxStore defines the database actions for managing transaction records.
