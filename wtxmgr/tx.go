@@ -134,6 +134,13 @@ type LockedOutput struct {
 	Expiration time.Time
 }
 
+// CreditEntry specifies a transaction output that should be recorded as a
+// credit (spendable output) for the wallet.
+type CreditEntry struct {
+	Index  uint32
+	Change bool
+}
+
 // NewTxRecord creates a new transaction record that may be inserted into the
 // store.  It uses memoization to save the transaction hash and the serialized
 // transaction.
@@ -387,6 +394,28 @@ func (s *Store) InsertTxCheckIfExists(ns walletdb.ReadWriteBucket,
 		return true, nil
 	}
 	return false, err
+}
+
+// InsertConfirmedTx records a mined transaction and its associated credits in
+// a single operation. This is more efficient than calling InsertTx followed by
+// AddCredit for each output.
+func (s *Store) InsertConfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	block *BlockMeta, credits []CreditEntry) error {
+
+	if err := s.insertMinedTx(ns, rec, block); err != nil && err != ErrDuplicateTx {
+		return err
+	}
+
+	for _, c := range credits {
+		isNew, err := s.addCredit(ns, rec, block, c.Index, c.Change)
+		if err != nil {
+			return err
+		}
+		if isNew && s.NotifyUnspent != nil {
+			s.NotifyUnspent(&rec.Hash, c.Index)
+		}
+	}
+	return nil
 }
 
 // RemoveUnminedTx attempts to remove an unmined transaction from the
