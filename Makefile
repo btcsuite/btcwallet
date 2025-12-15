@@ -6,12 +6,23 @@ GOINSTALL := GO111MODULE=on go install -v
 
 GOFILES = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
+
+# SQL directories.
+SQL_MIGRATIONS_DIR := wallet/internal/db/migrations
+SQL_QUERIES_DIR := wallet/internal/db/queries
+
+# SQL file paths.
+SQL_POSTGRES_MIGRATIONS := $(SQL_MIGRATIONS_DIR)/postgres
+SQL_POSTGRES_QUERIES := $(SQL_QUERIES_DIR)/postgres
+SQL_SQLITE_MIGRATIONS := $(SQL_MIGRATIONS_DIR)/sqlite
+SQL_SQLITE_QUERIES := $(SQL_QUERIES_DIR)/sqlite
+
 RM := rm -f
 CP := cp
 MAKE := make
 XARGS := xargs -L 1
 
-include make/testing_flags.mk
+include config/testing_flags.mk
 
 # Linting uses a lot of memory, so keep it under control by limiting the number
 # of workers if requested.
@@ -23,6 +34,13 @@ DOCKER_TOOLS = docker run \
   --rm \
   -v $(shell bash -c "mkdir -p /tmp/go-build-cache; echo /tmp/go-build-cache"):/root/.cache/go-build \
   -v $$(pwd):/build btcwallet-tools
+
+SQLFLUFF = docker run \
+	--rm \
+	--user $$(id -u):$$(id -g) \
+    -v $$(pwd):/sql \
+    -w /sql \
+    sqlfluff/sqlfluff
 
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
@@ -126,17 +144,17 @@ rpc-format:
 #? lint-config-check: Verify golangci-lint configuration
 lint-config-check: docker-tools
 	@$(call print, "Verifying golangci-lint configuration.")
-	$(DOCKER_TOOLS) golangci-lint config verify -v
+	$(DOCKER_TOOLS) golangci-lint config verify -v --config config/.golangci.yml
 
 #? lint: Lint source and check errors
 lint-check: lint-config-check
 	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
+	$(DOCKER_TOOLS) golangci-lint run -v --config config/.golangci.yml $(LINT_WORKERS)
 
 #? lint: Lint source and fix
 lint: lint-config-check
 	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v --fix $(LINT_WORKERS)
+	$(DOCKER_TOOLS) golangci-lint run -v --fix --config config/.golangci.yml $(LINT_WORKERS)
 
 #? docker-tools: Build tools docker image
 docker-tools:
@@ -156,7 +174,7 @@ rpc-check: rpc
 #? protolint: Lint proto files using protolint
 protolint:
 	@$(call print, "Linting proto files.")
-	docker run --rm --volume "$$(pwd):/workspace" --workdir /workspace yoheimuta/protolint lint rpc/
+	$(DOCKER_TOOLS) protolint lint -config_dir_path=config rpc/
 
 #? sample-conf-check: Make sure default values in the sample-btcwallet.conf file are set correctly
 sample-conf-check: install
@@ -177,15 +195,64 @@ tidy-module:
 tidy-module-check: tidy-module
 	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run `make tidy-module` again!"; git status; exit 1; fi
 
-#? sqlc: Generate sql models and queries in Go
-sqlc: docker-tools
-	@$(call print, "Generating sql models and queries in Go")
-	$(DOCKER_TOOLS) sqlc generate -f wallet/internal/db/sqlc/sqlc.yaml
+#? sql-parse: Ensures SQL files are syntactically valid
+sql-parse:
+	@$(call print, "Validating SQL files (postgres migrations).")
+	$(SQLFLUFF) parse --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Validating SQL files (postgres queries).")
+	$(SQLFLUFF) parse --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_QUERIES)
+	@$(call print, "Validating SQL files (sqlite migrations).")
+	$(SQLFLUFF) parse --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Validating SQL files (sqlite queries).")
+	$(SQLFLUFF) parse --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_QUERIES)
 
-#? sqlc-check: Make sure sql models and queries are up to date
+#? sqlc: Generate Go code from SQL queries and migrations
+sqlc: sql-parse docker-tools
+	@$(call print, "Generating sql models and queries in Go")
+	$(DOCKER_TOOLS) sqlc generate -f config/sqlc.yaml
+
+#? sqlc-check: Verify generated Go SQL queries and migrations are up-to-date
 sqlc-check: sqlc
 	@$(call print, "Verifying sql code generation.")
 	if test -n "$$(git status --porcelain '*.go')"; then echo "SQL models not properly generated!"; git status --porcelain '*.go'; exit 1; fi
+
+#? sql-format: Format SQL migration and query files (like 'make fmt')
+sql-format:
+	@$(call print, "Formatting SQL files (postgres migrations).")
+	$(SQLFLUFF) format --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Formatting SQL files (postgres queries).")
+	$(SQLFLUFF) format --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_QUERIES)
+	@$(call print, "Formatting SQL files (sqlite migrations).")
+	$(SQLFLUFF) format --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Formatting SQL files (sqlite queries).")
+	$(SQLFLUFF) format --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_QUERIES)
+
+#? sql-check: Verify SQL migration and query files are formatted correctly (like 'make fmt-check')
+sql-format-check: sql-format
+	@$(call print, "Checking SQL formatting.")
+	if test -n "$$(git status --porcelain '$(SQL_MIGRATIONS_DIR)/**/*.sql' '$(SQL_QUERIES_DIR)/**/*.sql')"; then echo "SQL files not formatted correctly, please run 'make sql-format' again!"; git status; git diff; exit 1; fi
+
+#? sql-lint: Lint SQL migration and query files and fix issues (like 'make lint')
+sql-lint:
+	@$(call print, "Linting SQL files (postgres migrations).")
+	$(SQLFLUFF) fix --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Linting SQL files (postgres queries).")
+	$(SQLFLUFF) fix --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_QUERIES)
+	@$(call print, "Linting SQL files (sqlite migrations).")
+	$(SQLFLUFF) fix --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Linting SQL files (sqlite queries).")
+	$(SQLFLUFF) fix --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_QUERIES)
+
+#? sql-lint-check: Lint SQL files and report errors (like 'make lint-check')
+sql-lint-check:
+	@$(call print, "Linting SQL files (postgres migrations).")
+	$(SQLFLUFF) lint --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Linting SQL files (postgres queries).")
+	$(SQLFLUFF) lint --config /sql/config/sqlfluff.cfg --dialect postgres $(SQL_POSTGRES_QUERIES)
+	@$(call print, "Linting SQL files (sqlite migrations).")
+	$(SQLFLUFF) lint --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Linting SQL files (sqlite queries).")
+	$(SQLFLUFF) lint --config /sql/config/sqlfluff.cfg --dialect sqlite $(SQL_SQLITE_QUERIES)
 
 .PHONY: all \
 	default \
@@ -202,8 +269,13 @@ sqlc-check: sqlc
 	fmt-check \
 	tidy-module \
 	tidy-module-check \
+	sql-parse \
 	sqlc \
 	sqlc-check \
+	sql-format \
+	sql-lint \
+	sql-lint-check \
+	sql-format-check \
 	rpc-format \
 	lint \
 	lint-config-check \

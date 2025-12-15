@@ -22,7 +22,7 @@ func (w *SQLiteWalletDB) CreateWallet(ctx context.Context,
 
 	err := w.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		walletParams := sqlcsqlite.CreateWalletParams{
-			Name:                    params.Name,
+			WalletName:              params.Name,
 			IsImported:              params.IsImported,
 			ManagerVersion:          int64(params.ManagerVersion),
 			IsWatchOnly:             params.IsWatchOnly,
@@ -83,7 +83,7 @@ func (w *SQLiteWalletDB) CreateWallet(ctx context.Context,
 
 		info, err = buildSqliteWalletInfo(sqliteWalletRowParams{
 			id:                     row.ID,
-			name:                   row.Name,
+			name:                   row.WalletName,
 			isImported:             row.IsImported,
 			managerVersion:         row.ManagerVersion,
 			isWatchOnly:            row.IsWatchOnly,
@@ -126,7 +126,7 @@ func (w *SQLiteWalletDB) GetWallet(ctx context.Context,
 
 	return buildSqliteWalletInfo(sqliteWalletRowParams{
 		id:                     row.ID,
-		name:                   row.Name,
+		name:                   row.WalletName,
 		isImported:             row.IsImported,
 		managerVersion:         row.ManagerVersion,
 		isWatchOnly:            row.IsWatchOnly,
@@ -155,7 +155,7 @@ func (w *SQLiteWalletDB) ListWallets(ctx context.Context) ([]WalletInfo,
 	for i, row := range rows {
 		info, err := buildSqliteWalletInfo(sqliteWalletRowParams{
 			id:                     row.ID,
-			name:                   row.Name,
+			name:                   row.WalletName,
 			isImported:             row.IsImported,
 			managerVersion:         row.ManagerVersion,
 			isWatchOnly:            row.IsWatchOnly,
