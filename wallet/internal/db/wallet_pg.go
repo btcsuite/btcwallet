@@ -52,19 +52,19 @@ func (w *PostgresWalletDB) CreateWallet(ctx context.Context,
 			)
 		}
 
-		birthday := sql.NullTime{}
+		birthdayTimestamp := sql.NullTime{}
 		if !params.Birthday.IsZero() {
-			birthday = sql.NullTime{
+			birthdayTimestamp = sql.NullTime{
 				Time:  params.Birthday,
 				Valid: true,
 			}
 		}
 
 		syncParams := sqlcpg.InsertWalletSyncStateParams{
-			WalletID:       id,
-			SyncedHeight:   sql.NullInt32{},
-			BirthdayHeight: sql.NullInt32{},
-			Birthday:       birthday,
+			WalletID:          id,
+			SyncedHeight:      sql.NullInt32{},
+			BirthdayHeight:    sql.NullInt32{},
+			BirthdayTimestamp: birthdayTimestamp,
 		}
 
 		err = qtx.InsertWalletSyncState(ctx, syncParams)
@@ -91,7 +91,7 @@ func (w *PostgresWalletDB) CreateWallet(ctx context.Context,
 			syncedBlockHash:        row.SyncedBlockHash,
 			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
 			birthdayHeight:         row.BirthdayHeight,
-			birthday:               row.Birthday,
+			birthdayTimestamp:      row.BirthdayTimestamp,
 			birthdayBlockHash:      row.BirthdayBlockHash,
 			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
 		})
@@ -134,7 +134,7 @@ func (w *PostgresWalletDB) GetWallet(ctx context.Context,
 		syncedBlockHash:        row.SyncedBlockHash,
 		syncedBlockTimestamp:   row.SyncedBlockTimestamp,
 		birthdayHeight:         row.BirthdayHeight,
-		birthday:               row.Birthday,
+		birthdayTimestamp:      row.BirthdayTimestamp,
 		birthdayBlockHash:      row.BirthdayBlockHash,
 		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
 	})
@@ -163,7 +163,7 @@ func (w *PostgresWalletDB) ListWallets(ctx context.Context) ([]WalletInfo,
 			syncedBlockHash:        row.SyncedBlockHash,
 			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
 			birthdayHeight:         row.BirthdayHeight,
-			birthday:               row.Birthday,
+			birthdayTimestamp:      row.BirthdayTimestamp,
 			birthdayBlockHash:      row.BirthdayBlockHash,
 			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
 		})
@@ -203,7 +203,7 @@ func (w *PostgresWalletDB) UpdateWallet(ctx context.Context,
 		}
 
 		if params.Birthday != nil {
-			syncParams.Birthday = sql.NullTime{
+			syncParams.BirthdayTimestamp = sql.NullTime{
 				Time:  *params.Birthday,
 				Valid: true,
 			}
@@ -297,7 +297,7 @@ type pgWalletRowParams struct {
 	syncedBlockHash        []byte
 	syncedBlockTimestamp   sql.NullInt64
 	birthdayHeight         sql.NullInt32
-	birthday               sql.NullTime
+	birthdayTimestamp      sql.NullTime
 	birthdayBlockHash      []byte
 	birthdayBlockTimestamp sql.NullInt64
 }
@@ -318,8 +318,8 @@ func buildPgWalletInfo(row pgWalletRowParams) (*WalletInfo, error) {
 		IsWatchOnly:    row.isWatchOnly,
 	}
 
-	if row.birthday.Valid {
-		info.Birthday = row.birthday.Time
+	if row.birthdayTimestamp.Valid {
+		info.Birthday = row.birthdayTimestamp.Time
 	}
 
 	if row.syncedHeight.Valid {
