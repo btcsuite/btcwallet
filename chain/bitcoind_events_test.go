@@ -83,6 +83,15 @@ func runBitcoindEventsTests(t *testing.T, rpcPolling bool) {
 			name:   "GetCFilter",
 			testFn: testBitcoindClientGetCFilter,
 		},
+		{
+			name: "Batch RPCs",
+			testFn: func(t *testing.T, h *rpctest.Harness,
+				bc *BitcoindClient) {
+
+				t.Helper()
+				testInterfaceBatchMethods(t, h, bc)
+			},
+		},
 	}
 
 	for _, test := range tests {
