@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/gcs"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -54,6 +55,15 @@ type BitcoindClient struct {
 	// chainConn is the backing client to our rescan client that contains
 	// the RPC and ZMQ connections to a bitcoind node.
 	chainConn *BitcoindConn
+
+	// batchClient is a secondary RPC client dedicated for batch requests.
+	// This client is created specifically for batch operations because the
+	// rpcclient.Client in batch mode is stateful, accumulating requests
+	// until `Send()` is called. Using a dedicated instance avoids race
+	// conditions and ensures isolation from other concurrent RPC calls
+	// made by the main `chainConn.client` or other `BitcoindClient`
+	// instances.
+	batchClient *rpcclient.Client
 
 	// bestBlock keeps track of the tip of the current best chain.
 	bestBlockMtx sync.RWMutex
@@ -602,6 +612,9 @@ func (c *BitcoindClient) Stop() {
 	// Remove this client's reference from the bitcoind connection to
 	// prevent sending notifications to it after it's been stopped.
 	c.chainConn.RemoveClient(c.id)
+
+	c.batchClient.Shutdown()
+	c.batchClient.WaitForShutdown()
 
 	c.notificationQueue.Stop()
 }
@@ -1445,4 +1458,158 @@ func (c *BitcoindClient) updateWatchedFilters(update any) {
 			c.watchedTxs[*txid] = struct{}{}
 		}
 	}
+}
+
+// GetBlockHashes returns a slice of block hashes for the given height range.
+func (c *BitcoindClient) GetBlockHashes(startHeight,
+	endHeight int64) ([]chainhash.Hash, error) {
+
+	if startHeight > endHeight {
+		return nil, fmt.Errorf("%w: start height %d, end height %d",
+			ErrInvalidParam, startHeight, endHeight)
+	}
+
+	client := c.batchClient
+	count := endHeight - startHeight + 1
+	hashes := make([]chainhash.Hash, 0, count)
+	futures := make([]rpcclient.FutureGetBlockHashResult, 0, count)
+
+	for h := startHeight; h <= endHeight; h++ {
+		futures = append(futures, client.GetBlockHashAsync(h))
+	}
+
+	err := client.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		hash, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive block hash: %w", err)
+		}
+
+		hashes = append(hashes, *hash)
+	}
+
+	return hashes, nil
+}
+
+// GetCFilters returns a slice of filters for the given block hashes.
+func (c *BitcoindClient) GetCFilters(hashes []chainhash.Hash,
+	filterType wire.FilterType) ([]*gcs.Filter, error) {
+
+	if filterType != wire.GCSFilterRegular {
+		return nil, ErrOnlyBasicFilters
+	}
+
+	client := c.batchClient
+	filters := make([]*gcs.Filter, 0, len(hashes))
+	futures := make([]rpcclient.FutureRawResult, 0, len(hashes))
+
+	for _, hash := range hashes {
+		params := []json.RawMessage{
+			json.RawMessage(fmt.Sprintf("%q", hash.String())),
+			json.RawMessage(fmt.Sprintf("%q", "basic")),
+		}
+		futures = append(futures, client.RawRequestAsync(
+			"getblockfilter", params,
+		))
+	}
+
+	err := client.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		resp, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive cfilter: %w", err)
+		}
+
+		var res struct {
+			Filter string `json:"filter"`
+			Header string `json:"header"`
+		}
+
+		err = json.Unmarshal(resp, &res)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal cfilter: %w", err)
+		}
+
+		filterBytes, err := hex.DecodeString(res.Filter)
+		if err != nil {
+			return nil, fmt.Errorf("decode cfilter: %w", err)
+		}
+
+		filter, err := gcs.FromNBytes(
+			builder.DefaultP, builder.DefaultM, filterBytes,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("parse cfilter: %w", err)
+		}
+
+		filters = append(filters, filter)
+	}
+
+	return filters, nil
+}
+
+// GetBlocks returns a slice of full blocks for the given block hashes.
+func (c *BitcoindClient) GetBlocks(hashes []chainhash.Hash) (
+	[]*wire.MsgBlock, error) {
+
+	client := c.batchClient
+	blocks := make([]*wire.MsgBlock, 0, len(hashes))
+	futures := make([]rpcclient.FutureGetBlockResult, 0, len(hashes))
+
+	for _, hash := range hashes {
+		futures = append(futures, client.GetBlockAsync(&hash))
+	}
+
+	err := client.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		block, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive block: %w", err)
+		}
+
+		blocks = append(blocks, block)
+	}
+
+	return blocks, nil
+}
+
+// GetBlockHeaders returns a slice of block headers for the given block hashes.
+func (c *BitcoindClient) GetBlockHeaders(hashes []chainhash.Hash) (
+	[]*wire.BlockHeader, error) {
+
+	client := c.batchClient
+	headers := make([]*wire.BlockHeader, 0, len(hashes))
+	futures := make([]rpcclient.FutureGetBlockHeaderResult, 0, len(hashes))
+
+	for _, hash := range hashes {
+		futures = append(futures, client.GetBlockHeaderAsync(&hash))
+	}
+
+	err := client.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		header, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive header: %w", err)
+		}
+
+		headers = append(headers, header)
+	}
+
+	return headers, nil
 }
