@@ -40,6 +40,8 @@ type RPCClient struct {
 	wg      sync.WaitGroup
 	started bool
 	quitMtx sync.Mutex
+
+	batchClient *rpcclient.Client
 }
 
 // A compile-time check to ensure that RPCClient satisfies the chain.Interface
@@ -92,7 +94,25 @@ func NewRPCClient(chainParams *chaincfg.Params, connect, user, pass string, cert
 	if err != nil {
 		return nil, err
 	}
+
+	batchConfig := *client.connConfig
+
+	// The batch client is exclusively used for batch RPC calls, which
+	// require HTTP POST mode. Therefore, we explicitly set HTTPPostMode to
+	// true and clear the Endpoint field to ensure the batch client is
+	// correctly configured, regardless of the main client's WebSocket (ws)
+	// or HTTP POST configuration.
+	batchConfig.HTTPPostMode = true
+	batchConfig.Endpoint = ""
+
+	batchClient, err := rpcclient.NewBatch(&batchConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch client: %w", err)
+	}
+
+	client.batchClient = batchClient
 	client.Client = rpcClient
+
 	return client, nil
 }
 
@@ -195,7 +215,24 @@ func NewRPCClientWithConfig(cfg *RPCClientConfig) (*RPCClient, error) {
 		return nil, err
 	}
 
+	batchConfig := *cfg.Conn
+
+	// The batch client is exclusively used for batch RPC calls, which
+	// require HTTP POST mode. Therefore, we explicitly set HTTPPostMode to
+	// true and clear the Endpoint field to ensure the batch client is
+	// correctly configured, regardless of the main client's WebSocket (ws)
+	// or HTTP POST configuration.
+	batchConfig.HTTPPostMode = true
+	batchConfig.Endpoint = ""
+
+	batchClient, err := rpcclient.NewBatch(&batchConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch client: %w", err)
+	}
+
+	client.batchClient = batchClient
 	client.Client = rpcClient
+
 	return client, nil
 }
 
@@ -258,6 +295,8 @@ func (c *RPCClient) Stop() {
 		close(c.quit)
 		c.Client.Shutdown()
 		c.Client.WaitForShutdown()
+		c.batchClient.Shutdown()
+		c.batchClient.WaitForShutdown()
 
 		if !c.started {
 			close(c.dequeueNotification)
@@ -677,4 +716,134 @@ func (c *RPCClient) SendRawTransaction(tx *wire.MsgTx,
 	}
 
 	return txid, nil
+}
+
+// GetBlockHashes returns a slice of block hashes for the given height range.
+func (c *RPCClient) GetBlockHashes(startHeight,
+	endHeight int64) ([]chainhash.Hash, error) {
+
+	if startHeight > endHeight {
+		return nil, fmt.Errorf("%w: start height %d, end height %d",
+			ErrInvalidParam, startHeight, endHeight)
+	}
+
+	count := endHeight - startHeight + 1
+	hashes := make([]chainhash.Hash, 0, count)
+	futures := make([]rpcclient.FutureGetBlockHashResult, 0, count)
+
+	for h := startHeight; h <= endHeight; h++ {
+		futures = append(futures, c.batchClient.GetBlockHashAsync(h))
+	}
+
+	err := c.batchClient.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		hash, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive block hash: %w", err)
+		}
+
+		hashes = append(hashes, *hash)
+	}
+
+	return hashes, nil
+}
+
+// GetCFilters returns a slice of filters for the given block hashes.
+func (c *RPCClient) GetCFilters(hashes []chainhash.Hash,
+	filterType wire.FilterType) ([]*gcs.Filter, error) {
+
+	filters := make([]*gcs.Filter, 0, len(hashes))
+	futures := make([]rpcclient.FutureGetCFilterResult, 0, len(hashes))
+
+	for _, hash := range hashes {
+		futures = append(
+			futures,
+			c.batchClient.GetCFilterAsync(&hash, filterType),
+		)
+	}
+
+	err := c.batchClient.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		msgFilter, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive cfilter: %w", err)
+		}
+
+		filter, err := gcs.FromNBytes(
+			builder.DefaultP, builder.DefaultM, msgFilter.Data,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("parse cfilter: %w", err)
+		}
+
+		filters = append(filters, filter)
+	}
+
+	return filters, nil
+}
+
+// GetBlocks returns a slice of full blocks for the given block hashes.
+func (c *RPCClient) GetBlocks(hashes []chainhash.Hash) (
+	[]*wire.MsgBlock, error) {
+
+	blocks := make([]*wire.MsgBlock, 0, len(hashes))
+	futures := make([]rpcclient.FutureGetBlockResult, 0, len(hashes))
+
+	for _, hash := range hashes {
+		futures = append(futures, c.batchClient.GetBlockAsync(&hash))
+	}
+
+	err := c.batchClient.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		block, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive block: %w", err)
+		}
+
+		blocks = append(blocks, block)
+	}
+
+	return blocks, nil
+}
+
+// GetBlockHeaders returns a slice of block headers for the given block hashes.
+func (c *RPCClient) GetBlockHeaders(hashes []chainhash.Hash) (
+	[]*wire.BlockHeader, error) {
+
+	headers := make([]*wire.BlockHeader, 0, len(hashes))
+	futures := make([]rpcclient.FutureGetBlockHeaderResult, 0, len(hashes))
+
+	for _, hash := range hashes {
+		futures = append(
+			futures, c.batchClient.GetBlockHeaderAsync(&hash),
+		)
+	}
+
+	err := c.batchClient.Send()
+	if err != nil {
+		return nil, fmt.Errorf("batch send: %w", err)
+	}
+
+	for _, f := range futures {
+		header, err := f.Receive()
+		if err != nil {
+			return nil, fmt.Errorf("receive header: %w", err)
+		}
+
+		headers = append(headers, header)
+	}
+
+	return headers, nil
 }
