@@ -53,6 +53,32 @@ type Interface interface {
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
 	MapRPCErr(err error) error
+
+	// Batching methods for optimized scanning.
+	//
+	// GetBlockHashes returns a slice of block hashes for the given height
+	// range (inclusive).
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetBlockHashes(startHeight, endHeight int64) ([]chainhash.Hash, error)
+
+	// GetCFilters returns a slice of compact filters for the given block
+	// hashes and filter type.
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetCFilters(hashes []chainhash.Hash,
+		filterType wire.FilterType) ([]*gcs.Filter, error)
+
+	// GetBlocks returns a slice of full blocks for the given block hashes.
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetBlocks(hashes []chainhash.Hash) ([]*wire.MsgBlock, error)
+
+	// GetBlockHeaders returns a slice of block headers for the given block
+	// hashes.
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetBlockHeaders(hashes []chainhash.Hash) ([]*wire.BlockHeader, error)
 }
 
 // Notification types.  These are defined here and processed from from reading

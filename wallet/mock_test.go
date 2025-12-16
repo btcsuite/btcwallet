@@ -851,6 +851,30 @@ func (m *mockChain) GetBlockHeader(
 	return header, args.Error(1)
 }
 
+func (m *mockChain) GetBlockHashes(int64, int64) ([]chainhash.Hash, error) {
+	args := m.Called()
+	return args.Get(0).([]chainhash.Hash), args.Error(1)
+}
+
+func (m *mockChain) GetBlockHeaders(
+	[]chainhash.Hash) ([]*wire.BlockHeader, error) {
+
+	args := m.Called()
+	return args.Get(0).([]*wire.BlockHeader), args.Error(1)
+}
+
+func (m *mockChain) GetCFilters([]chainhash.Hash, wire.FilterType) (
+	[]*gcs.Filter, error) {
+
+	args := m.Called()
+	return args.Get(0).([]*gcs.Filter), args.Error(1)
+}
+
+func (m *mockChain) GetBlocks([]chainhash.Hash) ([]*wire.MsgBlock, error) {
+	args := m.Called()
+	return args.Get(0).([]*wire.MsgBlock), args.Error(1)
+}
+
 // IsCurrent implements the chain.Interface interface.
 func (m *mockChain) IsCurrent() bool {
 	args := m.Called()
