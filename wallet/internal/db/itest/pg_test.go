@@ -142,6 +142,13 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 	// Connect to the default database to create our test database.
 	adminDB, err := sql.Open("pgx", connStr)
 	require.NoError(t, err, "failed to open admin connection")
+	require.NotNil(t, adminDB, "admin connection is nil")
+
+	// Close the connection to avoid leaking an idle connection during tests.
+	// The container is reused across all tests, so we explicitly clean this up.
+	t.Cleanup(func() {
+		_ = adminDB.Close()
+	})
 
 	// Create a database name based on the test name.
 	dbName := sanitizedPgDBName(t)
@@ -158,6 +165,13 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 	// connection constructor when available.
 	dbConn, err := sql.Open("pgx", testConnStr)
 	require.NoError(t, err, "failed to open test database connection")
+	require.NotNil(t, dbConn, "test database connection is nil")
+
+	// Close the connection to avoid leaking an idle connection during tests.
+	// The container is reused across all tests, so we explicitly clean this up.
+	t.Cleanup(func() {
+		_ = dbConn.Close()
+	})
 
 	err = db.ApplyPostgresMigrations(dbConn)
 	require.NoError(t, err, "failed to apply migrations")
