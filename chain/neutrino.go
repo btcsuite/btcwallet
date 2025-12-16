@@ -604,6 +604,85 @@ func (s *NeutrinoClient) SetStartTime(startTime time.Time) {
 	s.startTime = startTime
 }
 
+// GetBlockHashes returns a slice of block hashes for the given height range.
+func (s *NeutrinoClient) GetBlockHashes(startHeight, endHeight int64) (
+	[]chainhash.Hash, error) {
+
+	if startHeight > endHeight {
+		return nil, fmt.Errorf("%w: start height %d, end height %d",
+			ErrInvalidParam, startHeight, endHeight)
+	}
+
+	count := endHeight - startHeight + 1
+
+	hashes := make([]chainhash.Hash, 0, count)
+
+	for h := startHeight; h <= endHeight; h++ {
+		hash, err := s.CS.GetBlockHash(h)
+		if err != nil {
+			return nil, fmt.Errorf("get block hash: %w", err)
+		}
+
+		hashes = append(hashes, *hash)
+	}
+
+	return hashes, nil
+}
+
+// GetCFilters returns a slice of filters for the given block hashes.
+func (s *NeutrinoClient) GetCFilters(hashes []chainhash.Hash,
+	filterType wire.FilterType) ([]*gcs.Filter, error) {
+
+	filters := make([]*gcs.Filter, 0, len(hashes))
+
+	for _, hash := range hashes {
+		filter, err := s.CS.GetCFilter(hash, filterType)
+		if err != nil {
+			return nil, fmt.Errorf("get cfilter: %w", err)
+		}
+
+		filters = append(filters, filter)
+	}
+
+	return filters, nil
+}
+
+// GetBlocks returns a slice of full blocks for the given block hashes.
+func (s *NeutrinoClient) GetBlocks(hashes []chainhash.Hash) (
+	[]*wire.MsgBlock, error) {
+
+	blocks := make([]*wire.MsgBlock, 0, len(hashes))
+
+	for _, hash := range hashes {
+		block, err := s.CS.GetBlock(hash)
+		if err != nil {
+			return nil, fmt.Errorf("get block: %w", err)
+		}
+
+		blocks = append(blocks, block.MsgBlock())
+	}
+
+	return blocks, nil
+}
+
+// GetBlockHeaders returns a slice of block headers for the given block hashes.
+func (s *NeutrinoClient) GetBlockHeaders(hashes []chainhash.Hash) (
+	[]*wire.BlockHeader, error) {
+
+	headers := make([]*wire.BlockHeader, 0, len(hashes))
+
+	for _, hash := range hashes {
+		header, err := s.CS.GetBlockHeader(&hash)
+		if err != nil {
+			return nil, fmt.Errorf("get block header: %w", err)
+		}
+
+		headers = append(headers, header)
+	}
+
+	return headers, nil
+}
+
 // onFilteredBlockConnected sends appropriate notifications to the notification
 // channel.
 func (s *NeutrinoClient) onFilteredBlockConnected(height int32,
