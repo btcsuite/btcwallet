@@ -925,9 +925,8 @@ func TestValidateFundIntentError(t *testing.T) {
 		{
 			name:        "nil intent",
 			intent:      nil,
-			expectedErr: ErrNilFundIntent,
-		},
-		{
+			expectedErr: ErrNilArguments,
+		}, {
 			name:        "nil packet",
 			intent:      &FundIntent{Packet: nil},
 			expectedErr: ErrNilTxIntent,
@@ -1881,35 +1880,35 @@ func TestParseBip32Path(t *testing.T) {
 		{
 			name:        "invalid length",
 			path:        []uint32{hardened(84)},
-			expectedErr: ErrInvalidBip32PathLength,
+			expectedErr: ErrInvalidBip32Path,
 		},
 		{
 			name: "unhardened purpose",
 			path: []uint32{
 				84, hardened(0), hardened(0), 0, 0,
 			},
-			expectedErr: ErrInvalidBip32PathElementHardened,
+			expectedErr: ErrInvalidBip32Path,
 		},
 		{
 			name: "unhardened coin type",
 			path: []uint32{
 				hardened(84), 0, hardened(0), 0, 0,
 			},
-			expectedErr: ErrInvalidBip32PathElementHardened,
+			expectedErr: ErrInvalidBip32Path,
 		},
 		{
 			name: "unhardened account",
 			path: []uint32{
 				hardened(84), hardened(0), 0, 0, 0,
 			},
-			expectedErr: ErrInvalidBip32PathElementHardened,
+			expectedErr: ErrInvalidBip32Path,
 		},
 		{
 			name: "coin type mismatch",
 			path: []uint32{
 				hardened(84), hardened(1), hardened(0), 0, 0,
 			},
-			expectedErr: ErrInvalidBip32DerivationCoinType,
+			expectedErr: ErrInvalidBip32Path,
 		},
 		{
 			name: "unknown purpose (now allowed in parseBip32Path)",
@@ -2291,7 +2290,7 @@ func TestFetchPsbtUtxo(t *testing.T) {
 			},
 			inputIdx:    0,
 			expected:    nil,
-			expectedErr: ErrPsbtInputIndexOutOfBounds,
+			expectedErr: ErrIndexOutOfBounds,
 		},
 		{
 			name: "prevout index out of bounds",
@@ -2309,7 +2308,7 @@ func TestFetchPsbtUtxo(t *testing.T) {
 			},
 			inputIdx:    0,
 			expected:    nil,
-			expectedErr: ErrPrevOutIndexOutOfBounds,
+			expectedErr: ErrIndexOutOfBounds,
 		},
 	}
 
@@ -3037,7 +3036,7 @@ func TestSignPsbtFailNilParams(t *testing.T) {
 	_, err := w.SignPsbt(t.Context(), nil)
 
 	// Assert: Verify error.
-	require.ErrorIs(t, err, ErrNilSignPsbtParams)
+	require.ErrorIs(t, err, ErrNilArguments)
 }
 
 // TestSignPsbt tests the high-level SignPsbt method, ensuring it correctly
@@ -3171,7 +3170,7 @@ func TestSignPsbtInvalidDerivationPath(t *testing.T) {
 	_, err = w.SignPsbt(t.Context(), signParams)
 
 	// Assert.
-	require.ErrorIs(t, err, ErrInvalidBip32PathLength)
+	require.ErrorIs(t, err, ErrInvalidBip32Path)
 }
 
 // TestSignPsbtSignErrorSkippable tests that SignPsbt skips an input if
@@ -3246,7 +3245,7 @@ func TestSignTaprootPsbtInputErrors(t *testing.T) {
 	}}
 	packet.Inputs[0].TaprootBip32Derivation = tapDerivation
 	err = w.signTaprootPsbtInput(t.Context(), packet, 0, nil, nil)
-	require.ErrorIs(t, err, ErrInvalidBip32PathLength)
+	require.ErrorIs(t, err, ErrInvalidBip32Path)
 
 	// Case 2: CreateTaprootSpendDetails error (e.g. invalid merkle root).
 	packet.Inputs[0].TaprootBip32Derivation[0].Bip32Path = []uint32{
@@ -3279,7 +3278,17 @@ func TestSignBip32PsbtInputErrors(t *testing.T) {
 		Bip32Path: []uint32{1}, // Too short
 	}}
 	err = w.signBip32PsbtInput(t.Context(), packet, 0, nil, nil)
-	require.ErrorIs(t, err, ErrInvalidBip32PathLength)
+	require.ErrorIs(t, err, ErrInvalidBip32Path)
+
+	// Case 2: Unknown Purpose.
+	packet.Inputs[0].Bip32Derivation[0].Bip32Path = []uint32{
+		hdkeychain.HardenedKeyStart + 999, // Unknown
+		hdkeychain.HardenedKeyStart + 1,
+		hdkeychain.HardenedKeyStart + 0,
+		0, 0,
+	}
+	err = w.signBip32PsbtInput(t.Context(), packet, 0, nil, nil)
+	require.ErrorIs(t, err, ErrUnknownBip32Purpose)
 }
 
 // TestAddScriptToPInput tests that addScriptToPInput correctly updates
@@ -4006,13 +4015,12 @@ func TestMergeSighashType(t *testing.T) {
 		// different, conflicting sighash type of SigHashSingle.
 		src := &psbt.PInput{SighashType: txscript.SigHashSingle}
 
-		// Act: Attempt to merge the source into the destination using
-		// the mergeSighashType helper.
+		// Act: Attempt to merge the conflicting inputs.
 		err := mergeSighashType(dest, src)
 
 		// Assert: Verify that the function identified the conflict and
-		// returned the expected ErrSighashMismatch error.
-		require.ErrorIs(t, err, ErrSighashMismatch)
+		// returned the expected error.
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("adopt source type", func(t *testing.T) {
@@ -4061,9 +4069,9 @@ func TestMergeRedeemScript(t *testing.T) {
 		err := mergeRedeemScript(dest, src)
 
 		// Assert: Verify that the function returns
-		// ErrRedeemScriptMismatch, preventing the corruption of the
+		// ErrPsbtMergeConflict, preventing the corruption of the
 		// redeem script.
-		require.ErrorIs(t, err, ErrRedeemScriptMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("adopt source script", func(t *testing.T) {
@@ -4111,8 +4119,8 @@ func TestMergeWitnessUtxo(t *testing.T) {
 		err := mergeWitnessUtxo(dest, src)
 
 		// Assert: Verify that the function returns
-		// ErrWitnessUtxoMismatch.
-		require.ErrorIs(t, err, ErrWitnessUtxoMismatch)
+		// ErrPsbtMergeConflict.
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("detect script mismatch", func(t *testing.T) {
@@ -4138,8 +4146,8 @@ func TestMergeWitnessUtxo(t *testing.T) {
 		err := mergeWitnessUtxo(dest, src)
 
 		// Assert: Verify that the function returns
-		// ErrWitnessUtxoMismatch due to the script difference.
-		require.ErrorIs(t, err, ErrWitnessUtxoMismatch)
+		// ErrPsbtMergeConflict due to the script difference.
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("adopt source utxo", func(t *testing.T) {
@@ -4188,9 +4196,9 @@ func TestMergeNonWitnessUtxo(t *testing.T) {
 		// Act: Attempt to merge.
 		err := mergeNonWitnessUtxo(dest, src)
 
-		// Assert: Verify that ErrNonWitnessUtxoMismatch is returned
+		// Assert: Verify that ErrPsbtMergeConflict is returned
 		// because the transactions differ.
-		require.ErrorIs(t, err, ErrNonWitnessUtxoMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("adopt source utxo", func(t *testing.T) {
@@ -4228,8 +4236,8 @@ func TestMergeTaprootInternalKeyMismatch(t *testing.T) {
 	// Act: Attempt to merge the outputs.
 	err := mergeTaprootInternalKey(dest, src)
 
-	// Assert: Verify that ErrTaprootInternalKeyMismatch is returned.
-	require.ErrorIs(t, err, ErrTaprootInternalKeyMismatch)
+	// Assert: Verify that ErrPsbtMergeConflict is returned.
+	require.ErrorIs(t, err, ErrPsbtMergeConflict)
 }
 
 // TestMergeTaprootInternalKeyAdoption verifies that a source key is adopted
@@ -4292,7 +4300,7 @@ func TestMergeInputScripts(t *testing.T) {
 		dest := &psbt.PInput{RedeemScript: []byte{1}}
 		src := &psbt.PInput{RedeemScript: []byte{2}}
 		err := mergeInputScripts(dest, src)
-		require.ErrorIs(t, err, ErrRedeemScriptMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("fail on witness script", func(t *testing.T) {
@@ -4301,7 +4309,7 @@ func TestMergeInputScripts(t *testing.T) {
 		dest := &psbt.PInput{WitnessScript: []byte{1}}
 		src := &psbt.PInput{WitnessScript: []byte{2}}
 		err := mergeInputScripts(dest, src)
-		require.ErrorIs(t, err, ErrWitnessScriptMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("fail on final script sig", func(t *testing.T) {
@@ -4310,7 +4318,7 @@ func TestMergeInputScripts(t *testing.T) {
 		dest := &psbt.PInput{FinalScriptSig: []byte{1}}
 		src := &psbt.PInput{FinalScriptSig: []byte{2}}
 		err := mergeInputScripts(dest, src)
-		require.ErrorIs(t, err, ErrFinalScriptSigMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("fail on final script witness", func(t *testing.T) {
@@ -4319,7 +4327,7 @@ func TestMergeInputScripts(t *testing.T) {
 		dest := &psbt.PInput{FinalScriptWitness: []byte{1}}
 		src := &psbt.PInput{FinalScriptWitness: []byte{2}}
 		err := mergeInputScripts(dest, src)
-		require.ErrorIs(t, err, ErrFinalScriptWitnessMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("success", func(t *testing.T) {
@@ -4337,8 +4345,9 @@ func TestMergeInputScripts(t *testing.T) {
 		require.Equal(t, src.RedeemScript, dest.RedeemScript)
 		require.Equal(t, src.WitnessScript, dest.WitnessScript)
 		require.Equal(t, src.FinalScriptSig, dest.FinalScriptSig)
-		require.Equal(t, src.FinalScriptWitness,
-			dest.FinalScriptWitness)
+		require.Equal(
+			t, src.FinalScriptWitness, dest.FinalScriptWitness,
+		)
 	})
 }
 
@@ -4352,7 +4361,7 @@ func TestMergeOutputScripts(t *testing.T) {
 		dest := &psbt.POutput{RedeemScript: []byte{1}}
 		src := &psbt.POutput{RedeemScript: []byte{2}}
 		err := mergeOutputScripts(dest, src)
-		require.ErrorIs(t, err, ErrRedeemScriptMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("fail on witness script", func(t *testing.T) {
@@ -4361,7 +4370,7 @@ func TestMergeOutputScripts(t *testing.T) {
 		dest := &psbt.POutput{WitnessScript: []byte{1}}
 		src := &psbt.POutput{WitnessScript: []byte{2}}
 		err := mergeOutputScripts(dest, src)
-		require.ErrorIs(t, err, ErrWitnessScriptMismatch)
+		require.ErrorIs(t, err, ErrPsbtMergeConflict)
 	})
 
 	t.Run("success", func(t *testing.T) {

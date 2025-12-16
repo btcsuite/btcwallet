@@ -23,6 +23,9 @@ import (
 )
 
 var (
+	// ErrNilArguments is returned when a required argument is nil.
+	ErrNilArguments = errors.New("nil arguments")
+
 	// ErrUtxoLocked is returned when a UTXO is locked.
 	ErrUtxoLocked = errors.New("utxo is locked")
 
@@ -46,9 +49,6 @@ var (
 		"cannot specify both psbt inputs and a coin selection policy",
 	)
 
-	// ErrNilFundIntent is returned when a nil FundIntent is provided.
-	ErrNilFundIntent = errors.New("nil FundIntent")
-
 	// ErrNoPsbtsToCombine is returned when no PSBTs are provided to
 	// combine.
 	ErrNoPsbtsToCombine = errors.New("no psbts to combine")
@@ -71,13 +71,13 @@ var (
 	// encountered.
 	ErrUnknownAddressType = errors.New("unknown address type")
 
-	// ErrInvalidBip32PathLength is returned when a BIP32 path does not
-	// have the expected length of 5.
-	ErrInvalidBip32PathLength = errors.New("invalid BIP32 path length")
-
 	// ErrUnknownBip32Purpose is returned when a BIP32 path has a purpose
 	// that is not supported by the wallet.
 	ErrUnknownBip32Purpose = errors.New("unknown BIP32 purpose")
+
+	// ErrInvalidBip32Path is returned when a BIP32 derivation path is
+	// invalid (e.g. wrong length, missing hardening, wrong coin type).
+	ErrInvalidBip32Path = errors.New("invalid BIP32 path")
 
 	// ErrUnsupportedTaprootLeafCount is returned when a Taproot derivation
 	// info contains an unsupported number of leaf hashes (e.g. > 1).
@@ -121,85 +121,22 @@ var (
 		"invalid taproot merkle root length",
 	)
 
-	// ErrInvalidBip32PathElementHardened is returned when a BIP32 path
-	// element that should be hardened is not.
-	ErrInvalidBip32PathElementHardened = errors.New(
-		"invalid BIP32 derivation path, element must be hardened",
-	)
-
-	// ErrInvalidBip32DerivationCoinType is returned when the coin type in
-	// a BIP32 derivation path does not match the wallet's chain parameters.
-	ErrInvalidBip32DerivationCoinType = errors.New(
-		"invalid BIP32 derivation path, coin type mismatch",
-	)
-
-	// ErrSighashMismatch is returned when merging PSBTs with conflicting
-	// sighash types.
-	ErrSighashMismatch = errors.New("sighash type mismatch")
-
-	// ErrRedeemScriptMismatch is returned when merging PSBTs with
-	// conflicting redeem scripts.
-	ErrRedeemScriptMismatch = errors.New("redeem script mismatch")
-
-	// ErrWitnessScriptMismatch is returned when merging PSBTs with
-	// conflicting witness scripts.
-	ErrWitnessScriptMismatch = errors.New("witness script mismatch")
-
-	// ErrFinalScriptSigMismatch is returned when merging PSBTs with
-	// conflicting final script sigs.
-	ErrFinalScriptSigMismatch = errors.New("final script sig mismatch")
-
-	// ErrFinalScriptWitnessMismatch is returned when merging PSBTs with
-	// conflicting final script witnesses.
-	ErrFinalScriptWitnessMismatch = errors.New("final script witness " +
-		"mismatch")
-
-	// ErrTaprootKeySpendSigMismatch is returned when merging PSBTs with
-	// conflicting Taproot key spend signatures.
-	ErrTaprootKeySpendSigMismatch = errors.New("taproot key spend sig " +
-		"mismatch")
-
-	// ErrWitnessUtxoMismatch is returned when merging PSBTs with
-	// conflicting witness UTXOs.
-	ErrWitnessUtxoMismatch = errors.New("witness utxo mismatch")
-
-	// ErrNonWitnessUtxoMismatch is returned when merging PSBTs with
-	// conflicting non-witness UTXOs.
-	ErrNonWitnessUtxoMismatch = errors.New("non-witness utxo mismatch")
-
-	// ErrTaprootInternalKeyMismatch is returned when merging PSBTs with
-	// conflicting Taproot internal keys.
-	ErrTaprootInternalKeyMismatch = errors.New("taproot internal key " +
-		"mismatch")
+	// ErrPsbtMergeConflict is returned when merging PSBTs with conflicting
+	// fields (e.g. different sighash types, scripts, or signatures).
+	ErrPsbtMergeConflict = errors.New("psbt merge conflict")
 
 	// ErrImportedAddrNoDerivation is returned when trying to add output
 	// info for an imported address that has no derivation path.
 	ErrImportedAddrNoDerivation = errors.New("change addr is an " +
 		"imported addr with unknown derivation path")
 
-	// ErrNilSignPsbtParams is returned when nil SignPsbtParams are
-	// provided.
-	ErrNilSignPsbtParams = errors.New("nil SignPsbtParams")
-
-	// ErrPsbtInputIndexOutOfBounds is returned when an input index is out
-	// of bounds.
-	ErrPsbtInputIndexOutOfBounds = errors.New("psbt input index out of " +
-		"bounds")
+	// ErrIndexOutOfBounds is returned when an index is out of bounds.
+	ErrIndexOutOfBounds = errors.New("index out of bounds")
 
 	// ErrInputMissingUtxoInfo is returned when an input lacks both
 	// WitnessUtxo and NonWitnessUtxo.
 	ErrInputMissingUtxoInfo = errors.New("input missing both " +
 		"WitnessUtxo and NonWitnessUtxo")
-
-	// ErrUnsignedTxInputIndexOutOfBounds is returned when an input index
-	// is out of bounds for the unsigned transaction.
-	ErrUnsignedTxInputIndexOutOfBounds = errors.New("psbt input index " +
-		"out of bounds for UnsignedTx inputs")
-
-	// ErrPrevOutIndexOutOfBounds is returned when a previous output index
-	// is out of bounds for the NonWitnessUtxo.
-	ErrPrevOutIndexOutOfBounds = errors.New("prevOut index out of " +
-		"bounds for NonWitnessUtxo")
 
 	// errAlreadySigned is returned when an input is already signed.
 	//
@@ -768,7 +705,7 @@ func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 func (w *Wallet) validateFundIntent(intent *FundIntent) error {
 	// The intent must not be nil.
 	if intent == nil {
-		return ErrNilFundIntent
+		return ErrNilArguments
 	}
 
 	// The PSBT packet must not be nil.
@@ -901,7 +838,7 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	*SignPsbtResult, error) {
 
 	if params == nil {
-		return nil, ErrNilSignPsbtParams
+		return nil, ErrNilArguments
 	}
 
 	packet := params.Packet
@@ -1036,16 +973,16 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	// The BIP32 path must have exactly 5 elements:
 	// m / purpose' / coin_type' / account' / branch / index
 	if len(path) != BIP32PathLength {
-		return BIP32Path{}, fmt.Errorf("%w: %d",
-			ErrInvalidBip32PathLength, len(path))
+		return BIP32Path{}, fmt.Errorf("%w: length %d",
+			ErrInvalidBip32Path, len(path))
 	}
 
 	// The first 3 elements (Purpose, CoinType, Account) must be hardened.
 	// We check this by verifying they are >= HardenedKeyStart.
 	for i := range 3 {
 		if path[i] < hdkeychain.HardenedKeyStart {
-			return BIP32Path{}, fmt.Errorf("%w: element %d",
-				ErrInvalidBip32PathElementHardened, i)
+			return BIP32Path{}, fmt.Errorf("%w: element %d not "+
+				"hardened", ErrInvalidBip32Path, i)
 		}
 	}
 
@@ -1058,8 +995,8 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 
 	// Verify that the coin type matches the wallet's chain parameters.
 	if coinType != w.chainParams.HDCoinType {
-		return BIP32Path{}, fmt.Errorf("%w: expected %d, got %d",
-			ErrInvalidBip32DerivationCoinType,
+		return BIP32Path{}, fmt.Errorf("%w: expected coin type %d, "+
+			"got %d", ErrInvalidBip32Path,
 			w.chainParams.HDCoinType, coinType)
 	}
 
@@ -1221,8 +1158,8 @@ func validateDerivation(pInput *psbt.PInput, idx int) (bool, error) {
 // panics on malformed packets.
 func fetchPsbtUtxo(packet *psbt.Packet, idx int) (*wire.TxOut, error) {
 	if idx >= len(packet.Inputs) {
-		return nil, fmt.Errorf("%w: %d",
-			ErrPsbtInputIndexOutOfBounds, idx)
+		return nil, fmt.Errorf("%w: psbt input index %d",
+			ErrIndexOutOfBounds, idx)
 	}
 
 	pInput := &packet.Inputs[idx]
@@ -1237,15 +1174,15 @@ func fetchPsbtUtxo(packet *psbt.Packet, idx int) (*wire.TxOut, error) {
 	}
 
 	if idx >= len(packet.UnsignedTx.TxIn) {
-		return nil, fmt.Errorf("%w: %d",
-			ErrUnsignedTxInputIndexOutOfBounds, idx)
+		return nil, fmt.Errorf("%w: psbt input index %d for "+
+			"UnsignedTx inputs", ErrIndexOutOfBounds, idx)
 	}
 
 	prevIdx := packet.UnsignedTx.TxIn[idx].PreviousOutPoint.Index
 
 	if int(prevIdx) >= len(pInput.NonWitnessUtxo.TxOut) {
 		return nil, fmt.Errorf("%w: input %d prevOut index %d",
-			ErrPrevOutIndexOutOfBounds, idx, prevIdx)
+			ErrIndexOutOfBounds, idx, prevIdx)
 	}
 
 	return pInput.NonWitnessUtxo.TxOut[prevIdx], nil
@@ -1999,8 +1936,8 @@ func mergeSighashType(dest, src *psbt.PInput) error {
 	if dest.SighashType != 0 && src.SighashType != 0 &&
 		dest.SighashType != src.SighashType {
 
-		return fmt.Errorf("%w: %v vs %v", ErrSighashMismatch,
-			dest.SighashType, src.SighashType)
+		return fmt.Errorf("%w: sighash type mismatch %v vs %v",
+			ErrPsbtMergeConflict, dest.SighashType, src.SighashType)
 	}
 
 	if dest.SighashType == 0 {
@@ -2036,7 +1973,8 @@ func mergeRedeemScript(dest, src *psbt.PInput) error {
 	if len(dest.RedeemScript) > 0 && len(src.RedeemScript) > 0 &&
 		!bytes.Equal(dest.RedeemScript, src.RedeemScript) {
 
-		return ErrRedeemScriptMismatch
+		return fmt.Errorf("%w: redeem script mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.RedeemScript) == 0 {
@@ -2051,7 +1989,8 @@ func mergeWitnessScript(dest, src *psbt.PInput) error {
 	if len(dest.WitnessScript) > 0 && len(src.WitnessScript) > 0 &&
 		!bytes.Equal(dest.WitnessScript, src.WitnessScript) {
 
-		return ErrWitnessScriptMismatch
+		return fmt.Errorf("%w: witness script mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.WitnessScript) == 0 {
@@ -2066,7 +2005,8 @@ func mergeFinalScriptSig(dest, src *psbt.PInput) error {
 	if len(dest.FinalScriptSig) > 0 && len(src.FinalScriptSig) > 0 &&
 		!bytes.Equal(dest.FinalScriptSig, src.FinalScriptSig) {
 
-		return ErrFinalScriptSigMismatch
+		return fmt.Errorf("%w: final script sig mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.FinalScriptSig) == 0 {
@@ -2082,7 +2022,8 @@ func mergeFinalScriptWitness(dest, src *psbt.PInput) error {
 		len(src.FinalScriptWitness) > 0 &&
 		!bytes.Equal(dest.FinalScriptWitness, src.FinalScriptWitness) {
 
-		return ErrFinalScriptWitnessMismatch
+		return fmt.Errorf("%w: final script witness mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.FinalScriptWitness) == 0 {
@@ -2099,7 +2040,8 @@ func mergeTaprootKeySpendSig(dest, src *psbt.PInput) error {
 		len(src.TaprootKeySpendSig) > 0 &&
 		!bytes.Equal(dest.TaprootKeySpendSig, src.TaprootKeySpendSig) {
 
-		return ErrTaprootKeySpendSigMismatch
+		return fmt.Errorf("%w: taproot key spend sig mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.TaprootKeySpendSig) == 0 {
@@ -2124,7 +2066,8 @@ func mergeWitnessUtxo(dest, src *psbt.PInput) error {
 			!bytes.Equal(dest.WitnessUtxo.PkScript,
 				src.WitnessUtxo.PkScript) {
 
-			return ErrWitnessUtxoMismatch
+			return fmt.Errorf("%w: witness utxo mismatch",
+				ErrPsbtMergeConflict)
 		}
 	}
 
@@ -2140,7 +2083,8 @@ func mergeWitnessUtxo(dest, src *psbt.PInput) error {
 func mergeNonWitnessUtxo(dest, src *psbt.PInput) error {
 	if dest.NonWitnessUtxo != nil && src.NonWitnessUtxo != nil {
 		if dest.NonWitnessUtxo.TxHash() != src.NonWitnessUtxo.TxHash() {
-			return ErrNonWitnessUtxoMismatch
+			return fmt.Errorf("%w: non-witness utxo mismatch",
+				ErrPsbtMergeConflict)
 		}
 	}
 
@@ -2158,7 +2102,8 @@ func mergeTaprootInternalKey(dest, src *psbt.POutput) error {
 		len(src.TaprootInternalKey) > 0 &&
 		!bytes.Equal(dest.TaprootInternalKey, src.TaprootInternalKey) {
 
-		return ErrTaprootInternalKeyMismatch
+		return fmt.Errorf("%w: taproot internal key mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.TaprootInternalKey) == 0 {
@@ -2174,7 +2119,8 @@ func mergeOutputScripts(dest, src *psbt.POutput) error {
 	if len(dest.RedeemScript) > 0 && len(src.RedeemScript) > 0 &&
 		!bytes.Equal(dest.RedeemScript, src.RedeemScript) {
 
-		return ErrRedeemScriptMismatch
+		return fmt.Errorf("%w: redeem script mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.RedeemScript) == 0 {
@@ -2184,7 +2130,8 @@ func mergeOutputScripts(dest, src *psbt.POutput) error {
 	if len(dest.WitnessScript) > 0 && len(src.WitnessScript) > 0 &&
 		!bytes.Equal(dest.WitnessScript, src.WitnessScript) {
 
-		return ErrWitnessScriptMismatch
+		return fmt.Errorf("%w: witness script mismatch",
+			ErrPsbtMergeConflict)
 	}
 
 	if len(dest.WitnessScript) == 0 {
