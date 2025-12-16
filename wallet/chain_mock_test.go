@@ -90,6 +90,30 @@ func (m *mockChainClient) GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader,
 	return m.getBlockHeader, nil
 }
 
+func (m *mockChainClient) GetBlockHashes(int64,
+	int64) ([]chainhash.Hash, error) {
+
+	return nil, ErrNotImplemented
+}
+
+func (m *mockChainClient) GetBlockHeaders(
+	[]chainhash.Hash) ([]*wire.BlockHeader, error) {
+
+	return nil, ErrNotImplemented
+}
+
+func (m *mockChainClient) GetCFilters([]chainhash.Hash, wire.FilterType) (
+	[]*gcs.Filter, error) {
+
+	return nil, ErrNotImplemented
+}
+
+func (m *mockChainClient) GetBlocks(
+	[]chainhash.Hash) ([]*wire.MsgBlock, error) {
+
+	return nil, ErrNotImplemented
+}
+
 func (m *mockChainClient) GetMempool() (map[chainhash.Hash]*wire.MsgTx, error) {
 	// Acquire read lock non-exclusively. It allows concurrent readers and
 	// blocks writers.
