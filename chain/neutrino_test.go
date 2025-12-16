@@ -7,13 +7,84 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/gcs"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
 // maxDur is the max duration a test has to execute successfully.
 var maxDur = 5 * time.Second
+
+// TestNeutrinoClientBatchFetch verifies that the batch fetching methods
+// correctly loop over the range/list and call the underlying service.
+func TestNeutrinoClientBatchFetch(t *testing.T) {
+	t.Parallel()
+
+	nc := newMockNeutrinoClient()
+	mockCS, ok := nc.CS.(*mockChainService)
+	require.True(t, ok)
+
+	// Clear default expectations set in newMockNeutrinoClient so we can
+	// set strict expectations for this test.
+
+	// Test GetBlockHashes
+	startHeight := int64(100)
+	endHeight := int64(102)
+	hash1 := chainhash.Hash{1}
+	hash2 := chainhash.Hash{2}
+	hash3 := chainhash.Hash{3}
+
+	mockCS.On("GetBlockHash", int64(100)).Return(&hash1, nil).Once()
+	mockCS.On("GetBlockHash", int64(101)).Return(&hash2, nil).Once()
+	mockCS.On("GetBlockHash", int64(102)).Return(&hash3, nil).Once()
+
+	hashes, err := nc.GetBlockHashes(startHeight, endHeight)
+	require.NoError(t, err)
+	require.Len(t, hashes, 3)
+	require.Equal(t, hash1, hashes[0])
+	require.Equal(t, hash2, hashes[1])
+	require.Equal(t, hash3, hashes[2])
+
+	// Test GetCFilters
+	filterType := wire.GCSFilterRegular
+	filter1 := &gcs.Filter{} // Empty filter
+	mockCS.On("GetCFilter", hash1, filterType, mock.Anything).
+		Return(filter1, nil).Once()
+	mockCS.On("GetCFilter", hash2, filterType, mock.Anything).
+		Return(filter1, nil).Once()
+	mockCS.On("GetCFilter", hash3, filterType, mock.Anything).
+		Return(filter1, nil).Once()
+
+	filters, err := nc.GetCFilters(hashes, filterType)
+	require.NoError(t, err)
+	require.Len(t, filters, 3)
+
+	// Test GetBlocks
+	block1 := btcutil.NewBlock(&wire.MsgBlock{})
+	mockCS.On("GetBlock", hash1, mock.Anything).Return(block1, nil).Once()
+	mockCS.On("GetBlock", hash2, mock.Anything).Return(block1, nil).Once()
+	mockCS.On("GetBlock", hash3, mock.Anything).Return(block1, nil).Once()
+
+	blocks, err := nc.GetBlocks(hashes)
+	require.NoError(t, err)
+	require.Len(t, blocks, 3)
+
+	// Test GetBlockHeaders
+	header1 := &wire.BlockHeader{}
+	mockCS.On("GetBlockHeader", &hash1).Return(header1, nil).Once()
+	mockCS.On("GetBlockHeader", &hash2).Return(header1, nil).Once()
+	mockCS.On("GetBlockHeader", &hash3).Return(header1, nil).Once()
+
+	headers, err := nc.GetBlockHeaders(hashes)
+	require.NoError(t, err)
+	require.Len(t, headers, 3)
+
+	mockCS.AssertExpectations(t)
+}
 
 // TestNeutrinoClientSequentialStartStop ensures that the client
 // can sequentially Start and Stop without errors or races.
@@ -22,6 +93,18 @@ func TestNeutrinoClientSequentialStartStop(t *testing.T) {
 		nc           = newMockNeutrinoClient()
 		wantRestarts = 50
 	)
+
+	mockCS, ok := nc.CS.(*mockChainService)
+	require.True(t, ok)
+
+	testBestBlock := &headerfs.BlockStamp{
+		Hash:   chainhash.Hash(make([]byte, 32)),
+		Height: 1,
+	}
+
+	mockCS.On("Start").Return(nil).Times(wantRestarts)
+	mockCS.On("Stop").Return(nil).Times(wantRestarts)
+	mockCS.On("BestBlock").Return(testBestBlock, nil).Maybe()
 
 	// callStartStop starts the neutrino client, requires no error on
 	// startup, immediately stops the client and waits for shutdown.
@@ -118,12 +201,28 @@ func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
 		gotMsgs   = 0
 		msgCh     = make(chan string, wantMsgs)
 		msgPrefix = "successfully called"
-
-		// sendMsg writes a message to the buffered message channel.
-		sendMsg = func(s string) {
-			msgCh <- fmt.Sprintf("%s %s", msgPrefix, s)
-		}
 	)
+
+	mockCS, ok := nc.CS.(*mockChainService)
+	require.True(t, ok)
+
+	testBestBlock := &headerfs.BlockStamp{
+		Hash:   chainhash.Hash(make([]byte, 32)),
+		Height: 1,
+	}
+
+	testBlockHeader := &wire.BlockHeader{Timestamp: time.Unix(1, 0)}
+
+	mockCS.On("Start").Return(nil).Once()
+	mockCS.On("Stop").Return(nil).Once()
+	mockCS.On("BestBlock").Return(testBestBlock, nil).Maybe()
+	mockCS.On("GetBlockHeader", mock.Anything).
+		Return(testBlockHeader, nil).Maybe()
+
+	// sendMsg writes a message to the buffered message channel.
+	sendMsg := func(s string) {
+		msgCh <- fmt.Sprintf("%s %s", msgPrefix, s)
+	}
 
 	// Define closures to wrap desired neutrino client method calls.
 
