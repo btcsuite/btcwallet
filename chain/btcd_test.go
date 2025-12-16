@@ -1,12 +1,62 @@
 package chain
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/stretchr/testify/require"
 )
+
+// setupBtcd starts up a btcd node with cfilters enabled and returns a client
+// wrapper of this connection.
+func setupBtcd(t *testing.T) (*rpctest.Harness, *RPCClient) {
+	t.Helper()
+
+	trickle := fmt.Sprintf("--trickleinterval=%v", 10*time.Millisecond)
+	args := []string{trickle}
+
+	miner, err := rpctest.New(
+		&chaincfg.RegressionNetParams, nil, args, "",
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, miner.SetUp(true, 1))
+
+	t.Cleanup(func() {
+		require.NoError(t, miner.TearDown())
+	})
+
+	rpcConf := miner.RPCConfig()
+	client, err := NewRPCClientWithConfig(&RPCClientConfig{
+		ReconnectAttempts: 1,
+		Chain:             &chaincfg.RegressionNetParams,
+		Conn: &rpcclient.ConnConfig{
+			Host:                 rpcConf.Host,
+			User:                 rpcConf.User,
+			Pass:                 rpcConf.Pass,
+			Certificates:         rpcConf.Certificates,
+			DisableTLS:           false,
+			DisableAutoReconnect: false,
+			DisableConnectOnNew:  true,
+			HTTPPostMode:         false,
+			Endpoint:             "ws",
+		},
+	})
+	require.NoError(t, err)
+
+	err = client.Start(t.Context())
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		client.Stop()
+	})
+
+	return miner, client
+}
 
 // TestValidateConfig checks the `validate` method on the RPCClientConfig
 // behaves as expected.
