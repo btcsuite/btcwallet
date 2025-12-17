@@ -18,12 +18,14 @@ func TestListAddressTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	want := []db.AddressTypeInfo{
+		{Type: db.RawPubKey, Description: "P2PK"},
 		{Type: db.PubKeyHash, Description: "P2PKH"},
 		{Type: db.ScriptHash, Description: "P2SH"},
+		{Type: db.NestedWitnessPubKey, Description: "P2SH-P2WPKH"},
 		{Type: db.WitnessPubKey, Description: "P2WPKH"},
 		{Type: db.WitnessScript, Description: "P2WSH"},
-		{Type: db.NestedWitnessPubKey, Description: "P2SH-P2WPKH"},
 		{Type: db.TaprootPubKey, Description: "P2TR"},
+		{Type: db.Anchor, Description: "P2A"},
 	}
 
 	require.Equal(t, want, types)
@@ -41,48 +43,62 @@ func TestGetAddressType(t *testing.T) {
 		{
 			id: 0,
 			wantResult: &db.AddressTypeInfo{
+				Type:        db.RawPubKey,
+				Description: "P2PK",
+			},
+		},
+		{
+			id: 1,
+			wantResult: &db.AddressTypeInfo{
 				Type:        db.PubKeyHash,
 				Description: "P2PKH",
 			},
 		},
 		{
-			id: 1,
+			id: 2,
 			wantResult: &db.AddressTypeInfo{
 				Type:        db.ScriptHash,
 				Description: "P2SH",
 			},
 		},
 		{
-			id: 2,
-			wantResult: &db.AddressTypeInfo{
-				Type:        db.WitnessPubKey,
-				Description: "P2WPKH",
-			},
-		},
-		{
 			id: 3,
-			wantResult: &db.AddressTypeInfo{
-				Type:        db.WitnessScript,
-				Description: "P2WSH",
-			},
-		},
-		{
-			id: 4,
 			wantResult: &db.AddressTypeInfo{
 				Type:        db.NestedWitnessPubKey,
 				Description: "P2SH-P2WPKH",
 			},
 		},
 		{
+			id: 4,
+			wantResult: &db.AddressTypeInfo{
+				Type:        db.WitnessPubKey,
+				Description: "P2WPKH",
+			},
+		},
+		{
 			id: 5,
+			wantResult: &db.AddressTypeInfo{
+				Type:        db.WitnessScript,
+				Description: "P2WSH",
+			},
+		},
+		{
+			id: 6,
 			wantResult: &db.AddressTypeInfo{
 				Type:        db.TaprootPubKey,
 				Description: "P2TR",
 			},
 		},
 		{
+			id: 7,
+			wantResult: &db.AddressTypeInfo{
+				Type:        db.Anchor,
+				Description: "P2A",
+			},
+		},
+		{
 			// Means last valid plus one, so it should be invalid
-			id:      6,
+			id:      8,
 			wantErr: db.ErrAddressTypeNotFound,
 		},
 		{
