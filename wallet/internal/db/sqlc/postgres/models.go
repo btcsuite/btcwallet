@@ -20,6 +20,21 @@ type Block struct {
 	BlockTimestamp int64
 }
 
+type KeyScope struct {
+	ID                  int64
+	WalletID            int64
+	Purpose             int64
+	CoinType            int64
+	EncryptedCoinPubKey []byte
+	InternalTypeID      int16
+	ExternalTypeID      int16
+}
+
+type KeyScopeSecret struct {
+	ScopeID              int64
+	EncryptedCoinPrivKey []byte
+}
+
 type Wallet struct {
 	ID                      int64
 	WalletName              string
