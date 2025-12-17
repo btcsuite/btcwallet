@@ -1830,7 +1830,9 @@ func mergePsbtInputs(dest, src *psbt.PInput) error {
 		return err
 	}
 
-	mergeTaprootScriptSpendSigs(dest, src)
+	dest.TaprootScriptSpendSig = deduplicateTaprootScriptSpendSigs(
+		dest.TaprootScriptSpendSig, src.TaprootScriptSpendSig,
+	)
 
 	err = mergeWitnessUtxo(dest, src)
 	if err != nil {
@@ -1924,6 +1926,29 @@ func deduplicateTaprootBip32Derivations(dest,
 		) {
 
 			dest = append(dest, der)
+		}
+	}
+
+	return dest
+}
+
+// deduplicateTaprootScriptSpendSigs adds new Taproot Script Spend Signatures
+// from src to dest, avoiding duplicates based on XOnlyPubKey and LeafHash.
+func deduplicateTaprootScriptSpendSigs(dest,
+	src []*psbt.TaprootScriptSpendSig) []*psbt.TaprootScriptSpendSig {
+
+	for _, srcSig := range src {
+		if !slices.ContainsFunc(
+			dest, func(destSig *psbt.TaprootScriptSpendSig) bool {
+				return bytes.Equal(
+					destSig.XOnlyPubKey, srcSig.XOnlyPubKey,
+				) && bytes.Equal(
+					destSig.LeafHash, srcSig.LeafHash,
+				)
+			},
+		) {
+
+			dest = append(dest, srcSig)
 		}
 	}
 
@@ -2048,14 +2073,6 @@ func mergeTaprootKeySpendSig(dest, src *psbt.PInput) error {
 	}
 
 	return nil
-}
-
-// mergeTaprootScriptSpendSigs appends Taproot Script Spend Signatures from src
-// to dest.
-func mergeTaprootScriptSpendSigs(dest, src *psbt.PInput) {
-	dest.TaprootScriptSpendSig = append(
-		dest.TaprootScriptSpendSig, src.TaprootScriptSpendSig...,
-	)
 }
 
 // mergeWitnessUtxo merges the Witness UTXO field. Returns error on conflict.
