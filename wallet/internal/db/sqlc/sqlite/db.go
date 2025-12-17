@@ -24,17 +24,35 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.createKeyScopeStmt, err = db.PrepareContext(ctx, CreateKeyScope); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateKeyScope: %w", err)
+	}
 	if q.createWalletStmt, err = db.PrepareContext(ctx, CreateWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateWallet: %w", err)
 	}
 	if q.deleteBlockStmt, err = db.PrepareContext(ctx, DeleteBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteBlock: %w", err)
 	}
+	if q.deleteKeyScopeStmt, err = db.PrepareContext(ctx, DeleteKeyScope); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteKeyScope: %w", err)
+	}
+	if q.deleteKeyScopeSecretsStmt, err = db.PrepareContext(ctx, DeleteKeyScopeSecrets); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteKeyScopeSecrets: %w", err)
+	}
 	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
 	}
 	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
+	}
+	if q.getKeyScopeByIDStmt, err = db.PrepareContext(ctx, GetKeyScopeByID); err != nil {
+		return nil, fmt.Errorf("error preparing query GetKeyScopeByID: %w", err)
+	}
+	if q.getKeyScopeByWalletAndScopeStmt, err = db.PrepareContext(ctx, GetKeyScopeByWalletAndScope); err != nil {
+		return nil, fmt.Errorf("error preparing query GetKeyScopeByWalletAndScope: %w", err)
+	}
+	if q.getKeyScopeSecretsStmt, err = db.PrepareContext(ctx, GetKeyScopeSecrets); err != nil {
+		return nil, fmt.Errorf("error preparing query GetKeyScopeSecrets: %w", err)
 	}
 	if q.getWalletByIDStmt, err = db.PrepareContext(ctx, GetWalletByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetWalletByID: %w", err)
@@ -48,6 +66,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
 	}
+	if q.insertKeyScopeSecretsStmt, err = db.PrepareContext(ctx, InsertKeyScopeSecrets); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertKeyScopeSecrets: %w", err)
+	}
 	if q.insertWalletSecretsStmt, err = db.PrepareContext(ctx, InsertWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertWalletSecrets: %w", err)
 	}
@@ -56,6 +77,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listAddressTypesStmt, err = db.PrepareContext(ctx, ListAddressTypes); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAddressTypes: %w", err)
+	}
+	if q.listKeyScopesByWalletStmt, err = db.PrepareContext(ctx, ListKeyScopesByWallet); err != nil {
+		return nil, fmt.Errorf("error preparing query ListKeyScopesByWallet: %w", err)
 	}
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
@@ -71,6 +95,11 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 
 func (q *Queries) Close() error {
 	var err error
+	if q.createKeyScopeStmt != nil {
+		if cerr := q.createKeyScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createKeyScopeStmt: %w", cerr)
+		}
+	}
 	if q.createWalletStmt != nil {
 		if cerr := q.createWalletStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createWalletStmt: %w", cerr)
@@ -81,6 +110,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteBlockStmt: %w", cerr)
 		}
 	}
+	if q.deleteKeyScopeStmt != nil {
+		if cerr := q.deleteKeyScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteKeyScopeStmt: %w", cerr)
+		}
+	}
+	if q.deleteKeyScopeSecretsStmt != nil {
+		if cerr := q.deleteKeyScopeSecretsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteKeyScopeSecretsStmt: %w", cerr)
+		}
+	}
 	if q.getAddressTypeByIDStmt != nil {
 		if cerr := q.getAddressTypeByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAddressTypeByIDStmt: %w", cerr)
@@ -89,6 +128,21 @@ func (q *Queries) Close() error {
 	if q.getBlockByHeightStmt != nil {
 		if cerr := q.getBlockByHeightStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getBlockByHeightStmt: %w", cerr)
+		}
+	}
+	if q.getKeyScopeByIDStmt != nil {
+		if cerr := q.getKeyScopeByIDStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getKeyScopeByIDStmt: %w", cerr)
+		}
+	}
+	if q.getKeyScopeByWalletAndScopeStmt != nil {
+		if cerr := q.getKeyScopeByWalletAndScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getKeyScopeByWalletAndScopeStmt: %w", cerr)
+		}
+	}
+	if q.getKeyScopeSecretsStmt != nil {
+		if cerr := q.getKeyScopeSecretsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getKeyScopeSecretsStmt: %w", cerr)
 		}
 	}
 	if q.getWalletByIDStmt != nil {
@@ -111,6 +165,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertBlockStmt: %w", cerr)
 		}
 	}
+	if q.insertKeyScopeSecretsStmt != nil {
+		if cerr := q.insertKeyScopeSecretsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertKeyScopeSecretsStmt: %w", cerr)
+		}
+	}
 	if q.insertWalletSecretsStmt != nil {
 		if cerr := q.insertWalletSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertWalletSecretsStmt: %w", cerr)
@@ -124,6 +183,11 @@ func (q *Queries) Close() error {
 	if q.listAddressTypesStmt != nil {
 		if cerr := q.listAddressTypesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAddressTypesStmt: %w", cerr)
+		}
+	}
+	if q.listKeyScopesByWalletStmt != nil {
+		if cerr := q.listKeyScopesByWalletStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listKeyScopesByWalletStmt: %w", cerr)
 		}
 	}
 	if q.listWalletsStmt != nil {
@@ -178,41 +242,57 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                        DBTX
-	tx                        *sql.Tx
-	createWalletStmt          *sql.Stmt
-	deleteBlockStmt           *sql.Stmt
-	getAddressTypeByIDStmt    *sql.Stmt
-	getBlockByHeightStmt      *sql.Stmt
-	getWalletByIDStmt         *sql.Stmt
-	getWalletByNameStmt       *sql.Stmt
-	getWalletSecretsStmt      *sql.Stmt
-	insertBlockStmt           *sql.Stmt
-	insertWalletSecretsStmt   *sql.Stmt
-	insertWalletSyncStateStmt *sql.Stmt
-	listAddressTypesStmt      *sql.Stmt
-	listWalletsStmt           *sql.Stmt
-	updateWalletSecretsStmt   *sql.Stmt
-	updateWalletSyncStateStmt *sql.Stmt
+	db                              DBTX
+	tx                              *sql.Tx
+	createKeyScopeStmt              *sql.Stmt
+	createWalletStmt                *sql.Stmt
+	deleteBlockStmt                 *sql.Stmt
+	deleteKeyScopeStmt              *sql.Stmt
+	deleteKeyScopeSecretsStmt       *sql.Stmt
+	getAddressTypeByIDStmt          *sql.Stmt
+	getBlockByHeightStmt            *sql.Stmt
+	getKeyScopeByIDStmt             *sql.Stmt
+	getKeyScopeByWalletAndScopeStmt *sql.Stmt
+	getKeyScopeSecretsStmt          *sql.Stmt
+	getWalletByIDStmt               *sql.Stmt
+	getWalletByNameStmt             *sql.Stmt
+	getWalletSecretsStmt            *sql.Stmt
+	insertBlockStmt                 *sql.Stmt
+	insertKeyScopeSecretsStmt       *sql.Stmt
+	insertWalletSecretsStmt         *sql.Stmt
+	insertWalletSyncStateStmt       *sql.Stmt
+	listAddressTypesStmt            *sql.Stmt
+	listKeyScopesByWalletStmt       *sql.Stmt
+	listWalletsStmt                 *sql.Stmt
+	updateWalletSecretsStmt         *sql.Stmt
+	updateWalletSyncStateStmt       *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                        tx,
-		tx:                        tx,
-		createWalletStmt:          q.createWalletStmt,
-		deleteBlockStmt:           q.deleteBlockStmt,
-		getAddressTypeByIDStmt:    q.getAddressTypeByIDStmt,
-		getBlockByHeightStmt:      q.getBlockByHeightStmt,
-		getWalletByIDStmt:         q.getWalletByIDStmt,
-		getWalletByNameStmt:       q.getWalletByNameStmt,
-		getWalletSecretsStmt:      q.getWalletSecretsStmt,
-		insertBlockStmt:           q.insertBlockStmt,
-		insertWalletSecretsStmt:   q.insertWalletSecretsStmt,
-		insertWalletSyncStateStmt: q.insertWalletSyncStateStmt,
-		listAddressTypesStmt:      q.listAddressTypesStmt,
-		listWalletsStmt:           q.listWalletsStmt,
-		updateWalletSecretsStmt:   q.updateWalletSecretsStmt,
-		updateWalletSyncStateStmt: q.updateWalletSyncStateStmt,
+		db:                              tx,
+		tx:                              tx,
+		createKeyScopeStmt:              q.createKeyScopeStmt,
+		createWalletStmt:                q.createWalletStmt,
+		deleteBlockStmt:                 q.deleteBlockStmt,
+		deleteKeyScopeStmt:              q.deleteKeyScopeStmt,
+		deleteKeyScopeSecretsStmt:       q.deleteKeyScopeSecretsStmt,
+		getAddressTypeByIDStmt:          q.getAddressTypeByIDStmt,
+		getBlockByHeightStmt:            q.getBlockByHeightStmt,
+		getKeyScopeByIDStmt:             q.getKeyScopeByIDStmt,
+		getKeyScopeByWalletAndScopeStmt: q.getKeyScopeByWalletAndScopeStmt,
+		getKeyScopeSecretsStmt:          q.getKeyScopeSecretsStmt,
+		getWalletByIDStmt:               q.getWalletByIDStmt,
+		getWalletByNameStmt:             q.getWalletByNameStmt,
+		getWalletSecretsStmt:            q.getWalletSecretsStmt,
+		insertBlockStmt:                 q.insertBlockStmt,
+		insertKeyScopeSecretsStmt:       q.insertKeyScopeSecretsStmt,
+		insertWalletSecretsStmt:         q.insertWalletSecretsStmt,
+		insertWalletSyncStateStmt:       q.insertWalletSyncStateStmt,
+		listAddressTypesStmt:            q.listAddressTypesStmt,
+		listKeyScopesByWalletStmt:       q.listKeyScopesByWalletStmt,
+		listWalletsStmt:                 q.listWalletsStmt,
+		updateWalletSecretsStmt:         q.updateWalletSecretsStmt,
+		updateWalletSyncStateStmt:       q.updateWalletSyncStateStmt,
 	}
 }
