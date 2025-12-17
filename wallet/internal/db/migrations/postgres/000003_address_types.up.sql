@@ -24,9 +24,11 @@ ON address_types (description);
 -- These values are static and represent the Bitcoin address types.
 -- IDs MUST match the iota values in wallet/internal/db/data_types.go.
 INSERT INTO address_types (id, description) VALUES
-(0, 'P2PKH'),          -- Pay-to-PubKey-Hash
-(1, 'P2SH'),           -- Pay-to-Script-Hash
-(2, 'P2WPKH'),         -- Pay-to-Witness-PubKey-Hash
-(3, 'P2WSH'),          -- Pay-to-Witness-Script-Hash
-(4, 'P2SH-P2WPKH'),    -- Nested Witness PubKey
-(5, 'P2TR');           -- Pay-to-Taproot
+(0, 'P2PK'),           -- Pay-to-PubKey
+(1, 'P2PKH'),          -- Pay-to-PubKey-Hash
+(2, 'P2SH'),           -- Pay-to-Script-Hash
+(3, 'P2SH-P2WPKH'),    -- Nested Witness PubKey
+(4, 'P2WPKH'),         -- Pay-to-Witness-PubKey-Hash
+(5, 'P2WSH'),          -- Pay-to-Witness-Script-Hash
+(6, 'P2TR'),           -- Pay-to-Taproot
+(7, 'P2A');            -- Pay-to-Anchor
