@@ -3980,7 +3980,8 @@ func TestPsbtPrevOutputFetcher(t *testing.T) {
 	packet.Inputs[1].WitnessUtxo = &wire.TxOut{Value: 2000}
 
 	// Act: Create the fetcher.
-	fetcher := PsbtPrevOutputFetcher(packet)
+	fetcher, err := PsbtPrevOutputFetcher(packet)
+	require.NoError(t, err)
 
 	// Assert: Check input 0 (NonWitness).
 	out0 := fetcher.FetchPrevOutput(wire.OutPoint{Index: 0})
