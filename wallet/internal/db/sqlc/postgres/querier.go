@@ -9,19 +9,36 @@ import (
 )
 
 type Querier interface {
+	// Creates a new key scope for a wallet and returns its ID.
+	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int32) error
+	// Deletes a key scope by its ID.
+	DeleteKeyScope(ctx context.Context, id int64) (int64, error)
+	// Deletes the secrets for a key scope.
+	DeleteKeyScopeSecrets(ctx context.Context, scopeID int64) (int64, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
+	// Retrieves a key scope by its ID.
+	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
+	// Retrieves a key scope by wallet ID, purpose, and coin type.
+	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error)
+	// Retrieves the secrets for a key scope.
+	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
+	// Inserts secrets for a key scope. encrypted_coin_priv_key may be NULL for
+	// watch-only scopes.
+	InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
+	// Lists all key scopes for a wallet, ordered by ID.
+	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
 	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
 	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
