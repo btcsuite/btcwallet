@@ -36,11 +36,18 @@ type KeyScope struct {
 type AddressType uint8
 
 const (
+	// RawPubKey represents a pay-to-pubkey (P2PK) address.
+	RawPubKey AddressType = iota
+
 	// PubKeyHash represents a pay-to-pubkey-hash (P2PKH) address.
-	PubKeyHash AddressType = iota
+	PubKeyHash
 
 	// ScriptHash represents a pay-to-script-hash (P2SH) address.
 	ScriptHash
+
+	// NestedWitnessPubKey represents a P2WKH output nested within a P2SH
+	// address.
+	NestedWitnessPubKey
 
 	// WitnessPubKey represents a pay-to-witness-pubkey-hash (P2WKH)
 	// address.
@@ -50,12 +57,11 @@ const (
 	// address.
 	WitnessScript
 
-	// NestedWitnessPubKey represents a P2WKH output nested within a P2SH
-	// address.
-	NestedWitnessPubKey
-
 	// TaprootPubKey represents a pay-to-taproot (P2TR) address.
 	TaprootPubKey
+
+	// Anchor represents a pay-to-anchor (P2A) address.
+	Anchor
 )
 
 // AddressTypeInfo groups an address type identifier with its readable
