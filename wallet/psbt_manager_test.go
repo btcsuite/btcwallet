@@ -4289,6 +4289,158 @@ func TestDeduplicateTaprootBip32Derivations(t *testing.T) {
 	})
 }
 
+// TestDeduplicateTaprootScriptSpendSigs tests the deduplication logic for
+// Taproot script spend signatures based on XOnlyPubKey and LeafHash.
+func TestDeduplicateTaprootScriptSpendSigs(t *testing.T) {
+	t.Parallel()
+
+	// Define common elements for signatures.
+	xOnlyPubKey1 := []byte{1}
+	xOnlyPubKey2 := []byte{2}
+	leafHash1 := []byte{10}
+	leafHash2 := []byte{20}
+
+	tests := []struct {
+		name string
+		dest []*psbt.TaprootScriptSpendSig
+		src  []*psbt.TaprootScriptSpendSig
+		want []*psbt.TaprootScriptSpendSig
+	}{
+		{
+			name: "empty slices",
+			dest: nil,
+			src:  nil,
+			want: nil,
+		},
+		{
+			name: "add unique from src",
+			dest: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+			},
+			src: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey2,
+					LeafHash:    leafHash2,
+				},
+			},
+			want: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+				{
+					XOnlyPubKey: xOnlyPubKey2,
+					LeafHash:    leafHash2,
+				},
+			},
+		},
+		{
+			name: "skip duplicate from src",
+			dest: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+			},
+			src: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+			}, // Duplicate
+			want: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+			},
+		},
+		{
+			name: "mix unique and duplicate",
+			dest: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+			},
+			src: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				}, // Duplicate
+				{
+					XOnlyPubKey: xOnlyPubKey2,
+					LeafHash:    leafHash2,
+				}, // Unique
+			},
+			want: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+				{
+					XOnlyPubKey: xOnlyPubKey2,
+					LeafHash:    leafHash2,
+				},
+			},
+		},
+		{
+			name: "complex mix",
+			dest: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+				{
+					XOnlyPubKey: xOnlyPubKey2,
+					LeafHash:    leafHash1,
+				}, // Same LeafHash, diff PubKey
+			},
+			src: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				}, // Duplicate of dest[0]
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash2,
+				}, // Unique
+			},
+			want: []*psbt.TaprootScriptSpendSig{
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash1,
+				},
+				{
+					XOnlyPubKey: xOnlyPubKey2,
+					LeafHash:    leafHash1,
+				},
+				{
+					XOnlyPubKey: xOnlyPubKey1,
+					LeafHash:    leafHash2,
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Deduplicate the signatures.
+			got := deduplicateTaprootScriptSpendSigs(
+				tc.dest, tc.src,
+			)
+
+			// Assert: Verify the result.
+			require.ElementsMatch(t, tc.want, got)
+		})
+	}
+}
+
 // TestMergeInputScripts tests the aggregate mergeInputScripts function to
 // ensure it propagates errors from all sub-steps.
 func TestMergeInputScripts(t *testing.T) {
