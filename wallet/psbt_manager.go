@@ -866,7 +866,11 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// are part of the data signed. Following this, we compute the
 	// transaction's sighashes, which are integral to producing valid
 	// signatures for each input.
-	prevOutFetcher := PsbtPrevOutputFetcher(packet)
+	prevOutFetcher, err := PsbtPrevOutputFetcher(packet)
+	if err != nil {
+		return nil, fmt.Errorf("error creating prevOutFetcher: %w", err)
+	}
+
 	sigHashes := txscript.NewTxSigHashes(
 		packet.UnsignedTx, prevOutFetcher,
 	)
@@ -1569,7 +1573,10 @@ func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 	// previous transaction outputs needed for sighash generation. This is
 	// required for generating valid signatures, as the value and script of
 	// the UTXO being spent are part of the signed digest.
-	prevOutFetcher := PsbtPrevOutputFetcher(packet)
+	prevOutFetcher, err := PsbtPrevOutputFetcher(packet)
+	if err != nil {
+		return fmt.Errorf("error creating prevOutFetcher: %w", err)
+	}
 
 	// Compute the transaction's sighashes. This is an optimization to
 	// calculate the sighashes once and reuse them for all inputs, rather
@@ -2237,35 +2244,29 @@ func createOutputInfo(txOut *wire.TxOut,
 	return out, nil
 }
 
-// PsbtPrevOutputFetcher returns a txscript.PrevOutFetcher built from the UTXO
-// information in a PSBT packet.
-func PsbtPrevOutputFetcher(packet *psbt.Packet) *txscript.MultiPrevOutFetcher {
+// PsbtPrevOutputFetcher returns a txscript.PrevOutputFetcher that is
+// backed by the UTXO information in a PSBT packet.
+func PsbtPrevOutputFetcher(packet *psbt.Packet) (
+	*txscript.MultiPrevOutFetcher, error) {
+
 	fetcher := txscript.NewMultiPrevOutFetcher(nil)
 	for idx, txIn := range packet.UnsignedTx.TxIn {
-		in := packet.Inputs[idx]
+		// Use the robust fetchPsbtUtxo helper.
+		utxo, err := fetchPsbtUtxo(packet, idx)
+		if err != nil {
+			// If the input is missing UTXO info entirely, we skip
+			// it (matching previous behavior).
+			if errors.Is(err, ErrInputMissingUtxoInfo) {
+				continue
+			}
 
-		// Skip any input that has no UTXO.
-		if in.WitnessUtxo == nil && in.NonWitnessUtxo == nil {
-			continue
+			// Other errors (e.g. index out of bounds) are fatal
+			// as they indicate a malformed PSBT.
+			return nil, err
 		}
 
-		if in.NonWitnessUtxo != nil {
-			prevIndex := txIn.PreviousOutPoint.Index
-			fetcher.AddPrevOut(
-				txIn.PreviousOutPoint,
-				in.NonWitnessUtxo.TxOut[prevIndex],
-			)
-
-			continue
-		}
-
-		// Fall back to witness UTXO only for older wallets.
-		if in.WitnessUtxo != nil {
-			fetcher.AddPrevOut(
-				txIn.PreviousOutPoint, in.WitnessUtxo,
-			)
-		}
+		fetcher.AddPrevOut(txIn.PreviousOutPoint, utxo)
 	}
 
-	return fetcher
+	return fetcher, nil
 }
