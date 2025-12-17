@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
@@ -1871,15 +1872,10 @@ func mergePsbtOutputs(dest, src *psbt.POutput) error {
 // avoiding duplicates based on pubkey.
 func deduplicatePartialSigs(dest, src []*psbt.PartialSig) []*psbt.PartialSig {
 	for _, sig := range src {
-		found := false
-		for _, dSig := range dest {
-			if bytes.Equal(dSig.PubKey, sig.PubKey) {
-				found = true
-				break
-			}
-		}
+		if !slices.ContainsFunc(dest, func(dSig *psbt.PartialSig) bool {
+			return bytes.Equal(dSig.PubKey, sig.PubKey)
+		}) {
 
-		if !found {
 			dest = append(dest, sig)
 		}
 	}
@@ -1893,15 +1889,12 @@ func deduplicateBip32Derivations(
 	dest, src []*psbt.Bip32Derivation) []*psbt.Bip32Derivation {
 
 	for _, der := range src {
-		found := false
-		for _, dDer := range dest {
-			if bytes.Equal(dDer.PubKey, der.PubKey) {
-				found = true
-				break
-			}
-		}
+		if !slices.ContainsFunc(
+			dest, func(dDer *psbt.Bip32Derivation) bool {
+				return bytes.Equal(dDer.PubKey, der.PubKey)
+			},
+		) {
 
-		if !found {
 			dest = append(dest, der)
 		}
 	}
@@ -1915,15 +1908,14 @@ func deduplicateTaprootBip32Derivations(dest,
 	src []*psbt.TaprootBip32Derivation) []*psbt.TaprootBip32Derivation {
 
 	for _, der := range src {
-		found := false
-		for _, dDer := range dest {
-			if bytes.Equal(dDer.XOnlyPubKey, der.XOnlyPubKey) {
-				found = true
-				break
-			}
-		}
+		if !slices.ContainsFunc(
+			dest, func(dDer *psbt.TaprootBip32Derivation) bool {
+				return bytes.Equal(
+					dDer.XOnlyPubKey, der.XOnlyPubKey,
+				)
+			},
+		) {
 
-		if !found {
 			dest = append(dest, der)
 		}
 	}
