@@ -185,6 +185,25 @@ func (w *PostgresWalletDB) UpdateWallet(ctx context.Context,
 	params UpdateWalletParams) error {
 
 	return w.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+		// Insert blocks if needed.
+		if params.SyncedTo != nil {
+			err := ensureBlockExistsPg(ctx, qtx, params.SyncedTo)
+			if err != nil {
+				return fmt.Errorf("ensure synced block: %w",
+					err)
+			}
+		}
+
+		if params.BirthdayBlock != nil {
+			err := ensureBlockExistsPg(
+				ctx, qtx, params.BirthdayBlock,
+			)
+			if err != nil {
+				return fmt.Errorf("ensure birthday block: %w",
+					err)
+			}
+		}
+
 		// Build sync state update params directly from input.
 		// Only set fields that are being updated (leave others as nil).
 		syncParams := sqlcpg.UpdateWalletSyncStateParams{
