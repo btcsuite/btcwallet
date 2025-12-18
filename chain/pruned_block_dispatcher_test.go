@@ -67,7 +67,7 @@ func newNetworkBlockTestHarness(t *testing.T, numBlocks,
 		localConns:    make(map[string]net.Conn, numPeers),
 		remoteConns:   make(map[string]net.Conn, numPeers),
 		dialedPeer:    make(chan string),
-		queriedPeer:   make(chan struct{}),
+		queriedPeer:   make(chan struct{}, numBlocks*numPeers),
 		blocksQueried: make(map[chainhash.Hash]int),
 		shouldReply:   0,
 	}
@@ -327,7 +327,7 @@ func (h *prunedBlockDispatcherHarness) disconnectPeer(addr string, fallback bool
 		h.dispatcher.peerMtx.Lock()
 		defer h.dispatcher.peerMtx.Unlock()
 		return len(h.dispatcher.currentPeers) == numPeers-1
-	}, time.Second, 200*time.Millisecond)
+	}, defaultTestTimeout, 200*time.Millisecond)
 
 	// Reset the peer connection state to allow connections to them again.
 	h.resetPeer(addr, fallback)
@@ -339,7 +339,7 @@ func (h *prunedBlockDispatcherHarness) assertPeerDialed() {
 
 	select {
 	case <-h.dialedPeer:
-	case <-time.After(5 * time.Second):
+	case <-time.After(defaultTestTimeout):
 		h.t.Fatalf("expected peer to be dialed")
 	}
 }
@@ -351,7 +351,7 @@ func (h *prunedBlockDispatcherHarness) assertPeerDialedWithAddr(addr string) {
 	select {
 	case dialedAddr := <-h.dialedPeer:
 		require.Equal(h.t, addr, dialedAddr)
-	case <-time.After(5 * time.Second):
+	case <-time.After(defaultTestTimeout):
 		h.t.Fatalf("expected peer to be dialed")
 	}
 }
@@ -362,7 +362,7 @@ func (h *prunedBlockDispatcherHarness) assertPeerQueried() {
 
 	select {
 	case <-h.queriedPeer:
-	case <-time.After(5 * time.Second):
+	case <-time.After(defaultTestTimeout):
 		h.t.Fatalf("expected a peer to be queried")
 	}
 }
@@ -395,7 +395,7 @@ func (h *prunedBlockDispatcherHarness) assertPeerReplied(
 	// We need to check the errChan after a timeout because when a request
 	// was successful a nil error is signaled via the errChan and this
 	// might happen even before the block is received.
-	case <-time.After(5 * time.Second):
+	case <-time.After(defaultTestTimeout):
 		select {
 		case err := <-errChan:
 			h.t.Fatalf("received unexpected error send: %v", err)
@@ -415,7 +415,7 @@ func (h *prunedBlockDispatcherHarness) assertPeerReplied(
 		select {
 		case err := <-errChan:
 			require.NoError(h.t, err)
-		case <-time.After(5 * time.Second):
+		case <-time.After(defaultTestTimeout):
 			h.t.Fatal("expected nil err to signal completion")
 		}
 	}
@@ -446,7 +446,7 @@ func (h *prunedBlockDispatcherHarness) assertPeerFailed(
 	case err := <-cancelChan:
 		require.ErrorIs(h.t, err, expectedErr)
 
-	case <-time.After(5 * time.Second):
+	case <-time.After(defaultTestTimeout):
 		h.t.Fatalf("expected the error for the block request: %v",
 			expectedErr)
 	}
@@ -461,7 +461,7 @@ func (h *prunedBlockDispatcherHarness) assertNoPeerDialed() {
 	select {
 	case peer := <-h.dialedPeer:
 		h.t.Fatalf("unexpected connection established with peer %v", peer)
-	case <-time.After(2 * time.Second):
+	case <-time.After(1 * time.Second):
 	}
 }
 
@@ -482,7 +482,7 @@ func (h *prunedBlockDispatcherHarness) assertNoReply(
 		h.t.Fatalf("received unexpected cancel request with error: %v",
 			err)
 
-	case <-time.After(2 * time.Second):
+	case <-time.After(1 * time.Second):
 	}
 }
 
