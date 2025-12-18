@@ -204,39 +204,9 @@ func (w *PostgresWalletDB) UpdateWallet(ctx context.Context,
 			}
 		}
 
-		// Build sync state update params directly from input.
-		// Only set fields that are being updated (leave others as nil).
-		syncParams := sqlcpg.UpdateWalletSyncStateParams{
-			WalletID: int64(params.WalletID),
-		}
-
-		if params.SyncedTo != nil {
-			syncedHeight, err := uint32ToNullInt32(
-				params.SyncedTo.Height,
-			)
-			if err != nil {
-				return err
-			}
-
-			syncParams.SyncedHeight = syncedHeight
-		}
-
-		if params.Birthday != nil {
-			syncParams.BirthdayTimestamp = sql.NullTime{
-				Time:  *params.Birthday,
-				Valid: true,
-			}
-		}
-
-		if params.BirthdayBlock != nil {
-			birthdayHeight, err := uint32ToNullInt32(
-				params.BirthdayBlock.Height,
-			)
-			if err != nil {
-				return err
-			}
-
-			syncParams.BirthdayHeight = birthdayHeight
+		syncParams, err := buildUpdateSyncParamsPg(params)
+		if err != nil {
+			return err
 		}
 
 		rowsAffected, err := qtx.UpdateWalletSyncState(ctx, syncParams)
@@ -368,4 +338,43 @@ func buildPgWalletInfo(row pgWalletRowParams) (*WalletInfo, error) {
 	}
 
 	return info, nil
+}
+
+// buildUpdateSyncParamsPg constructs the UpdateWalletSyncStateParams from
+// the given UpdateWalletParams.
+func buildUpdateSyncParamsPg(params UpdateWalletParams) (
+	sqlcpg.UpdateWalletSyncStateParams, error) {
+
+	syncParams := sqlcpg.UpdateWalletSyncStateParams{
+		WalletID: int64(params.WalletID),
+	}
+
+	if params.SyncedTo != nil {
+		syncedHeight, err := uint32ToNullInt32(params.SyncedTo.Height)
+		if err != nil {
+			return syncParams, err
+		}
+
+		syncParams.SyncedHeight = syncedHeight
+	}
+
+	if params.Birthday != nil {
+		syncParams.BirthdayTimestamp = sql.NullTime{
+			Time:  *params.Birthday,
+			Valid: true,
+		}
+	}
+
+	if params.BirthdayBlock != nil {
+		birthdayHeight, err := uint32ToNullInt32(
+			params.BirthdayBlock.Height,
+		)
+		if err != nil {
+			return syncParams, err
+		}
+
+		syncParams.BirthdayHeight = birthdayHeight
+	}
+
+	return syncParams, nil
 }
