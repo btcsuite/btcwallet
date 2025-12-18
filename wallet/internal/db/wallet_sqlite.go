@@ -206,32 +206,7 @@ func (w *SQLiteWalletDB) UpdateWallet(ctx context.Context,
 			}
 		}
 
-		// Build sync state update params directly from input.
-		// Only set fields that are being updated (leave others as nil).
-		syncParams := sqlcsqlite.UpdateWalletSyncStateParams{
-			WalletID: int64(params.WalletID),
-		}
-
-		if params.SyncedTo != nil {
-			syncParams.SyncedHeight = sql.NullInt64{
-				Int64: int64(params.SyncedTo.Height),
-				Valid: true,
-			}
-		}
-
-		if params.Birthday != nil {
-			syncParams.BirthdayTimestamp = sql.NullTime{
-				Time:  *params.Birthday,
-				Valid: true,
-			}
-		}
-
-		if params.BirthdayBlock != nil {
-			syncParams.BirthdayHeight = sql.NullInt64{
-				Int64: int64(params.BirthdayBlock.Height),
-				Valid: true,
-			}
-		}
+		syncParams := buildUpdateSyncParamsSqlite(params)
 
 		rowsAffected, err := qtx.UpdateWalletSyncState(ctx, syncParams)
 		if err != nil {
@@ -367,4 +342,37 @@ func buildSqliteWalletInfo(row sqliteWalletRowParams) (*WalletInfo, error) {
 	}
 
 	return info, nil
+}
+
+// buildUpdateSyncParamsSqlite constructs the UpdateWalletSyncStateParams from
+// the given UpdateWalletParams.
+func buildUpdateSyncParamsSqlite(
+	params UpdateWalletParams) sqlcsqlite.UpdateWalletSyncStateParams {
+
+	syncParams := sqlcsqlite.UpdateWalletSyncStateParams{
+		WalletID: int64(params.WalletID),
+	}
+
+	if params.SyncedTo != nil {
+		syncParams.SyncedHeight = sql.NullInt64{
+			Int64: int64(params.SyncedTo.Height),
+			Valid: true,
+		}
+	}
+
+	if params.Birthday != nil {
+		syncParams.BirthdayTimestamp = sql.NullTime{
+			Time:  *params.Birthday,
+			Valid: true,
+		}
+	}
+
+	if params.BirthdayBlock != nil {
+		syncParams.BirthdayHeight = sql.NullInt64{
+			Int64: int64(params.BirthdayBlock.Height),
+			Valid: true,
+		}
+	}
+
+	return syncParams
 }
