@@ -1357,11 +1357,11 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 		},
 		ChangeIndex: 0, // Output 0 is change
 	}
-	packet := &psbt.Packet{}
 
 	t.Run("DecorateInputs fails", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := testWalletWithMocks(t)
+		packet := &psbt.Packet{}
 
 		// Mock TxDetails failure (DecorateInputs ->
 		// fetchAndValidateUtxo)
@@ -1377,6 +1377,7 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 	t.Run("addChangeOutputInfo fails", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := testWalletWithMocks(t)
+		packet := &psbt.Packet{}
 
 		// Mock TxDetails success (DecorateInputs)
 		txDetails := &wtxmgr.TxDetails{
