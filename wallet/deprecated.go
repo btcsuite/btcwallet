@@ -4,6 +4,7 @@ package wallet
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -23,12 +24,14 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
 // NextAccount creates the next account and returns its account number.  The
@@ -2942,7 +2945,6 @@ func (w *Wallet) newChangeAddress(addrmgrNs walletdb.ReadWriteBucket,
 	return addrs[0].Address(), nil
 }
 
-
 // AccountTotalReceivedResult is a single result for the
 // Wallet.TotalReceivedForAccounts method.
 type AccountTotalReceivedResult struct {
@@ -4553,8 +4555,6 @@ func (s creditSlice) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-
-
 // ListLeasedOutputResult is a single result for the Wallet.ListLeasedOutputs method.
 // See that method for more details.
 type ListLeasedOutputResult struct {
@@ -4770,6 +4770,1403 @@ func (w *Wallet) DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 	}
 
 	return privKey, nil
+}
+
+func (w *Wallet) handleChainNotifications() {
+	defer w.wg.Done()
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Errorf("handleChainNotifications called without RPC client")
+		return
+	}
+
+	catchUpHashes := func(w *Wallet, client chain.Interface,
+		height int32) error {
+		// TODO(aakselrod): There's a race condition here, which
+		// happens when a reorg occurs between the
+		// rescanProgress notification and the last GetBlockHash
+		// call. The solution when using btcd is to make btcd
+		// send blockconnected notifications with each block
+		// the way Neutrino does, and get rid of the loop. The
+		// other alternative is to check the final hash and,
+		// if it doesn't match the original hash returned by
+		// the notification, to roll back and restart the
+		// rescan.
+		log.Infof("Catching up block hashes to height %d, this"+
+			" might take a while", height)
+		err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+			startBlock := w.addrStore.SyncedTo()
+
+			for i := startBlock.Height + 1; i <= height; i++ {
+				hash, err := client.GetBlockHash(int64(i))
+				if err != nil {
+					return err
+				}
+				header, err := chainClient.GetBlockHeader(hash)
+				if err != nil {
+					return err
+				}
+
+				bs := waddrmgr.BlockStamp{
+					Height:    i,
+					Hash:      *hash,
+					Timestamp: header.Timestamp,
+				}
+
+				err = w.addrStore.SetSyncedTo(ns, &bs)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			log.Errorf("Failed to update address manager "+
+				"sync state for height %d: %v", height, err)
+		}
+
+		log.Info("Done catching up block hashes")
+		return err
+	}
+
+	waitForSync := func(birthdayBlock *waddrmgr.BlockStamp) error {
+		// We start with a retry delay of 0 to execute the first attempt
+		// immediately.
+		var retryDelay time.Duration
+		for {
+			select {
+			case <-time.After(retryDelay):
+				// Set the delay to the configured value in case
+				// we actually need to re-try.
+				retryDelay = w.syncRetryInterval
+
+				// Sync may be interrupted by actions such as
+				// locking the wallet. Try again after waiting a
+				// bit.
+				err = w.syncWithChain(birthdayBlock)
+				if err != nil {
+					if w.ShuttingDown() {
+						return ErrWalletShuttingDown
+					}
+
+					log.Errorf("Unable to synchronize "+
+						"wallet to chain, trying "+
+						"again in %s: %v",
+						w.syncRetryInterval, err)
+
+					continue
+				}
+
+				return nil
+
+			case <-w.quitChan():
+				return ErrWalletShuttingDown
+			}
+		}
+	}
+
+	for {
+		select {
+		case n, ok := <-chainClient.Notifications():
+			if !ok {
+				return
+			}
+
+			var notificationName string
+			var err error
+			switch n := n.(type) {
+			case chain.ClientConnected:
+				// Before attempting to sync with our backend,
+				// we'll make sure that our birthday block has
+				// been set correctly to potentially prevent
+				// missing relevant events.
+				birthdayStore := &walletBirthdayStore{
+					db:      w.db,
+					manager: w.addrStore,
+				}
+				birthdayBlock, err := birthdaySanityCheck(
+					chainClient, birthdayStore,
+				)
+				if err != nil && !waddrmgr.IsError(
+					err, waddrmgr.ErrBirthdayBlockNotSet,
+				) {
+
+					log.Errorf("Unable to sanity check "+
+						"wallet birthday block: %v",
+						err)
+				}
+
+				err = waitForSync(birthdayBlock)
+				if err != nil {
+					log.Infof("Stopped waiting for wallet "+
+						"sync due to error: %v", err)
+
+					return
+				}
+
+			case chain.BlockConnected:
+				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+					return w.connectBlock(tx, wtxmgr.BlockMeta(n))
+				})
+				notificationName = "block connected"
+			case chain.BlockDisconnected:
+				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+					return w.disconnectBlock(tx, wtxmgr.BlockMeta(n))
+				})
+				notificationName = "block disconnected"
+			case chain.RelevantTx:
+				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+					return w.addRelevantTx(tx, n.TxRecord, n.Block)
+				})
+				notificationName = "relevant transaction"
+			case chain.FilteredBlockConnected:
+				// Atomically update for the whole block.
+				if len(n.RelevantTxs) > 0 {
+					err = walletdb.Update(w.db, func(
+						tx walletdb.ReadWriteTx) error {
+						var err error
+						for _, rec := range n.RelevantTxs {
+							err = w.addRelevantTx(tx, rec,
+								n.Block)
+							if err != nil {
+								return err
+							}
+						}
+						return nil
+					})
+				}
+				notificationName = "filtered block connected"
+
+			// The following require some database maintenance, but also
+			// need to be reported to the wallet's rescan goroutine.
+			case *chain.RescanProgress:
+				err = catchUpHashes(w, chainClient, n.Height)
+				notificationName = "rescan progress"
+				select {
+				case w.rescanNotifications <- n:
+				case <-w.quitChan():
+					return
+				}
+			case *chain.RescanFinished:
+				err = catchUpHashes(w, chainClient, n.Height)
+				notificationName = "rescan finished"
+				w.SetChainSynced(true)
+				select {
+				case w.rescanNotifications <- n:
+				case <-w.quitChan():
+					return
+				}
+			}
+			if err != nil {
+				// If we received a block connected notification
+				// while rescanning, then we can ignore logging
+				// the error as we'll properly catch up once we
+				// process the RescanFinished notification.
+				if notificationName == "block connected" &&
+					waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) &&
+					!w.ChainSynced() {
+
+					log.Debugf("Received block connected "+
+						"notification for height %v "+
+						"while rescanning",
+						n.(chain.BlockConnected).Height)
+					continue
+				}
+
+				log.Errorf("Unable to process chain backend "+
+					"%v notification: %v", notificationName,
+					err)
+			}
+		case <-w.quit:
+			return
+		}
+	}
+}
+
+// connectBlock handles a chain server notification by marking a wallet
+// that's currently in-sync with the chain server as being synced up to
+// the passed block.
+func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+	bs := waddrmgr.BlockStamp{
+		Height:    b.Height,
+		Hash:      b.Hash,
+		Timestamp: b.Time,
+	}
+
+	err := w.addrStore.SetSyncedTo(addrmgrNs, &bs)
+	if err != nil {
+		return err
+	}
+
+	// Notify interested clients of the connected block.
+	//
+	// TODO: move all notifications outside of the database transaction.
+	w.NtfnServer.notifyAttachedBlock(dbtx, &b)
+	return nil
+}
+
+// disconnectBlock handles a chain server reorganize by rolling back all
+// block history from the reorged block for a wallet in-sync with the chain
+// server.
+func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+	if !w.ChainSynced() {
+		return nil
+	}
+
+	// Disconnect the removed block and all blocks after it if we know about
+	// the disconnected block. Otherwise, the block is in the future.
+	//nolint:nestif
+	if b.Height <= w.addrStore.SyncedTo().Height {
+		hash, err := w.addrStore.BlockHash(addrmgrNs, b.Height)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(hash[:], b.Hash[:]) {
+			bs := waddrmgr.BlockStamp{
+				Height: b.Height - 1,
+			}
+
+			hash, err = w.addrStore.BlockHash(addrmgrNs, bs.Height)
+			if err != nil {
+				return err
+			}
+			b.Hash = *hash
+
+			client := w.ChainClient()
+			header, err := client.GetBlockHeader(hash)
+			if err != nil {
+				return err
+			}
+
+			bs.Timestamp = header.Timestamp
+
+			err = w.addrStore.SetSyncedTo(addrmgrNs, &bs)
+			if err != nil {
+				return err
+			}
+
+			err = w.txStore.Rollback(txmgrNs, b.Height)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// Notify interested clients of the disconnected block.
+	w.NtfnServer.notifyDetachedBlock(&b.Hash)
+
+	return nil
+}
+
+func (w *Wallet) addRelevantTx(dbtx walletdb.ReadWriteTx, rec *wtxmgr.TxRecord,
+	block *wtxmgr.BlockMeta) error {
+
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+	// At the moment all notified transactions are assumed to actually be
+	// relevant.  This assumption will not hold true when SPV support is
+	// added, but until then, simply insert the transaction because there
+	// should either be one or more relevant inputs or outputs.
+	exists, err := w.txStore.InsertTxCheckIfExists(txmgrNs, rec, block)
+	if err != nil {
+		return err
+	}
+
+	// If the transaction has already been recorded, we can return early.
+	// Note: Returning here is safe as we're within the context of an atomic
+	// database transaction, so we don't need to worry about the MarkUsed
+	// calls below.
+	if exists {
+		return nil
+	}
+
+	// Check every output to determine whether it is controlled by a wallet
+	// key.  If so, mark the output as a credit.
+	for i, output := range rec.MsgTx.TxOut {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(output.PkScript,
+			w.chainParams)
+		if err != nil {
+			// Non-standard outputs are skipped.
+			log.Warnf("Cannot extract non-std pkScript=%x",
+				output.PkScript)
+
+			continue
+		}
+
+		for _, addr := range addrs {
+			ma, err := w.addrStore.Address(addrmgrNs, addr)
+
+			switch {
+			// Missing addresses are skipped.
+			case waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound):
+				continue
+
+			// Other errors should be propagated.
+			case err != nil:
+				return err
+			}
+
+			// Prevent addresses from non-default scopes to be
+			// detected here. We don't watch funds sent to
+			// non-default scopes in other places either, so
+			// detecting them here would mean we'd also not properly
+			// detect them as spent later.
+			scopedManager, _, err := w.addrStore.AddrAccount(
+				addrmgrNs, addr,
+			)
+			if err != nil {
+				return err
+			}
+			if !waddrmgr.IsDefaultScope(scopedManager.Scope()) {
+				log.Debugf("Skipping non-default scope "+
+					"address %v", addr)
+
+				continue
+			}
+
+			// TODO: Credits should be added with the
+			// account they belong to, so wtxmgr is able to
+			// track per-account balances.
+			err = w.txStore.AddCredit(
+				txmgrNs, rec, block, uint32(i), ma.Internal(),
+			)
+			if err != nil {
+				return err
+			}
+
+			err = w.addrStore.MarkUsed(addrmgrNs, addr)
+			if err != nil {
+				return err
+			}
+			log.Debugf("Marked address %v used", addr)
+		}
+	}
+
+	// Send notification of mined or unmined transaction to any interested
+	// clients.
+	//
+	// TODO: Avoid the extra db hits.
+	if block == nil {
+		w.NtfnServer.notifyUnminedTransaction(dbtx, txmgrNs, rec.Hash)
+	} else {
+		w.NtfnServer.notifyMinedTransaction(
+			dbtx, txmgrNs, rec.Hash, block,
+		)
+	}
+
+	return nil
+}
+
+// chainConn is an interface that abstracts the chain connection logic required
+// to perform a wallet's birthday block sanity check.
+type chainConn interface {
+	// GetBestBlock returns the hash and height of the best block known to
+	// the backend.
+	GetBestBlock() (*chainhash.Hash, int32, error)
+
+	// GetBlockHash returns the hash of the block with the given height.
+	GetBlockHash(int64) (*chainhash.Hash, error)
+
+	// GetBlockHeader returns the header for the block with the given hash.
+	GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader, error)
+}
+
+// birthdayStore is an interface that abstracts the wallet's sync-related
+// information required to perform a birthday block sanity check.
+type birthdayStore interface {
+	// Birthday returns the birthday timestamp of the wallet.
+	Birthday() time.Time
+
+	// BirthdayBlock returns the birthday block of the wallet. The boolean
+	// returned should signal whether the wallet has already verified the
+	// correctness of its birthday block.
+	BirthdayBlock() (waddrmgr.BlockStamp, bool, error)
+
+	// SetBirthdayBlock updates the birthday block of the wallet to the
+	// given block. The boolean can be used to signal whether this block
+	// should be sanity checked the next time the wallet starts.
+	//
+	// NOTE: This should also set the wallet's synced tip to reflect the new
+	// birthday block. This will allow the wallet to rescan from this point
+	// to detect any potentially missed events.
+	SetBirthdayBlock(waddrmgr.BlockStamp) error
+}
+
+// walletBirthdayStore is a wrapper around the wallet's database and address
+// manager that satisfies the birthdayStore interface.
+type walletBirthdayStore struct {
+	db      walletdb.DB
+	manager waddrmgr.AddrStore
+}
+
+var _ birthdayStore = (*walletBirthdayStore)(nil)
+
+// Birthday returns the birthday timestamp of the wallet.
+func (s *walletBirthdayStore) Birthday() time.Time {
+	return s.manager.Birthday()
+}
+
+// BirthdayBlock returns the birthday block of the wallet.
+func (s *walletBirthdayStore) BirthdayBlock() (waddrmgr.BlockStamp, bool, error) {
+	var (
+		birthdayBlock         waddrmgr.BlockStamp
+		birthdayBlockVerified bool
+	)
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		var err error
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		birthdayBlock, birthdayBlockVerified, err = s.manager.BirthdayBlock(ns)
+		return err
+	})
+
+	return birthdayBlock, birthdayBlockVerified, err
+}
+
+// SetBirthdayBlock updates the birthday block of the wallet to the
+// given block. The boolean can be used to signal whether this block
+// should be sanity checked the next time the wallet starts.
+//
+// NOTE: This should also set the wallet's synced tip to reflect the new
+// birthday block. This will allow the wallet to rescan from this point
+// to detect any potentially missed events.
+func (s *walletBirthdayStore) SetBirthdayBlock(block waddrmgr.BlockStamp) error {
+	return walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		err := s.manager.SetBirthdayBlock(ns, block, true)
+		if err != nil {
+			return err
+		}
+		return s.manager.SetSyncedTo(ns, &block)
+	})
+}
+
+// birthdaySanityCheck is a helper function that ensures a birthday block
+// correctly reflects the birthday timestamp within a reasonable timestamp
+// delta. It's intended to be run after the wallet establishes its connection
+// with the backend, but before it begins syncing. This is done as the second
+// part to the wallet's address manager migration where we populate the birthday
+// block to ensure we do not miss any relevant events throughout rescans.
+// waddrmgr.ErrBirthdayBlockNotSet is returned if the birthday block has not
+// been set yet.
+func birthdaySanityCheck(chainConn chainConn,
+	birthdayStore birthdayStore) (*waddrmgr.BlockStamp, error) {
+
+	// We'll start by fetching our wallet's birthday timestamp and block.
+	birthdayTimestamp := birthdayStore.Birthday()
+	birthdayBlock, birthdayBlockVerified, err := birthdayStore.BirthdayBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// If the birthday block has already been verified to be correct, we can
+	// exit our sanity check to prevent potentially fetching a better
+	// candidate.
+	if birthdayBlockVerified {
+		log.Debugf("Birthday block has already been verified: "+
+			"height=%d, hash=%v", birthdayBlock.Height,
+			birthdayBlock.Hash)
+
+		return &birthdayBlock, nil
+	}
+
+	// Otherwise, we'll attempt to locate a better one now that we have
+	// access to the chain.
+	newBirthdayBlock, err := locateBirthdayBlock(chainConn, birthdayTimestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := birthdayStore.SetBirthdayBlock(*newBirthdayBlock); err != nil {
+		return nil, err
+	}
+
+	return newBirthdayBlock, nil
+}
+
+// secretSource is an implementation of txauthor.SecretSource for the wallet's
+// address manager.
+type secretSource struct {
+	waddrmgr.AddrStore
+
+	addrmgrNs walletdb.ReadBucket
+}
+
+func (s secretSource) GetKey(addr btcutil.Address) (*btcec.PrivateKey, bool, error) {
+	ma, err := s.Address(s.addrmgrNs, addr)
+	if err != nil {
+		return nil, false, err
+	}
+
+	mpka, ok := ma.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		e := fmt.Errorf("managed address type for %v is `%T` but "+
+			"want waddrmgr.ManagedPubKeyAddress", addr, ma)
+		return nil, false, e
+	}
+	privKey, err := mpka.PrivKey()
+	if err != nil {
+		return nil, false, err
+	}
+	return privKey, ma.Compressed(), nil
+}
+
+func (s secretSource) GetScript(addr btcutil.Address) ([]byte, error) {
+	ma, err := s.Address(s.addrmgrNs, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	msa, ok := ma.(waddrmgr.ManagedScriptAddress)
+	if !ok {
+		e := fmt.Errorf("managed address type for %v is `%T` but "+
+			"want waddrmgr.ManagedScriptAddress", addr, ma)
+		return nil, e
+	}
+	return msa.Script()
+}
+
+// txToOutputs creates a signed transaction which includes each output from
+// outputs. Previous outputs to redeem are chosen from the passed account's
+// UTXO set and minconf policy. An additional output may be added to return
+// change to the wallet. This output will have an address generated from the
+// given key scope and account. If a key scope is not specified, the address
+// will always be generated from the P2WKH key scope. An appropriate fee is
+// included based on the wallet's current relay fee. The wallet must be
+// unlocked to create the transaction.
+//
+// NOTE: The dryRun argument can be set true to create a tx that doesn't alter
+// the database. A tx created with this set to true will intentionally have no
+// input scripts added and SHOULD NOT be broadcasted.
+func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
+	coinSelectKeyScope, changeKeyScope *waddrmgr.KeyScope,
+	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
+	strategy CoinSelectionStrategy, dryRun bool,
+	selectedUtxos []wire.OutPoint,
+	allowUtxo func(utxo wtxmgr.Credit) bool) (
+	*txauthor.AuthoredTx, error) {
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	// Get current block's height and hash.
+	bs, err := chainClient.BlockStamp()
+	if err != nil {
+		return nil, err
+	}
+
+	// Fall back to default coin selection strategy if none is supplied.
+	if strategy == nil {
+		strategy = CoinSelectionLargest
+	}
+
+	// The addrMgrWithChangeSource function of the wallet creates a
+	// new change address. The address manager uses OnCommit on the
+	// walletdb tx to update the in-memory state of the account
+	// state. But because the commit happens _after_ the account
+	// manager internal lock has been released, there is a chance
+	// for the address index to be accessed concurrently, even
+	// though the closure in OnCommit re-acquires the lock. To avoid
+	// this issue, we surround the whole address creation process
+	// with a lock.
+	w.newAddrMtx.Lock()
+	defer w.newAddrMtx.Unlock()
+
+	var tx *txauthor.AuthoredTx
+	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+		addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
+			dbtx, changeKeyScope, account,
+		)
+		if err != nil {
+			return err
+		}
+
+		eligible, err := w.findEligibleOutputs(
+			dbtx, coinSelectKeyScope, account,
+			//nolint:gosec
+			uint32(minconf),
+			bs, allowUtxo,
+		)
+		if err != nil {
+			return err
+		}
+
+		var inputSource txauthor.InputSource
+		if len(selectedUtxos) > 0 {
+			dedupUtxos := fn.NewSet(selectedUtxos...)
+			if len(dedupUtxos) != len(selectedUtxos) {
+				return errors.New("selected UTXOs contain " +
+					"duplicate values")
+			}
+
+			eligibleByOutpoint := make(
+				map[wire.OutPoint]wtxmgr.Credit,
+			)
+
+			for _, e := range eligible {
+				eligibleByOutpoint[e.OutPoint] = e
+			}
+
+			var eligibleSelectedUtxo []wtxmgr.Credit
+			for _, outpoint := range selectedUtxos {
+				e, ok := eligibleByOutpoint[outpoint]
+
+				if !ok {
+					return fmt.Errorf("selected outpoint "+
+						"not eligible for "+
+						"spending: %v", outpoint)
+				}
+				eligibleSelectedUtxo = append(
+					eligibleSelectedUtxo, e,
+				)
+			}
+
+			inputSource = constantInputSource(eligibleSelectedUtxo)
+
+		} else {
+			// Wrap our coins in a type that implements the
+			// SelectableCoin interface, so we can arrange them
+			// according to the selected coin selection strategy.
+			wrappedEligible := make([]Coin, len(eligible))
+			for i := range eligible {
+				wrappedEligible[i] = Coin{
+					TxOut: wire.TxOut{
+						Value: int64(
+							eligible[i].Amount,
+						),
+						PkScript: eligible[i].PkScript,
+					},
+					OutPoint: eligible[i].OutPoint,
+				}
+			}
+
+			arrangedCoins, err := strategy.ArrangeCoins(
+				wrappedEligible, feeSatPerKb,
+			)
+			if err != nil {
+				return err
+			}
+			inputSource = makeInputSource(arrangedCoins)
+		}
+
+		tx, err = txauthor.NewUnsignedTransaction(
+			outputs, feeSatPerKb, inputSource, changeSource,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Randomize change position, if change exists, before signing.
+		// This doesn't affect the serialize size, so the change amount
+		// will still be valid.
+		if tx.ChangeIndex >= 0 {
+			tx.RandomizeChangePosition()
+		}
+
+		// If a dry run was requested, we return now before adding the
+		// input scripts, and don't commit the database transaction.
+		// By returning an error, we make sure the walletdb.Update call
+		// rolls back the transaction. But we'll react to this specific
+		// error outside of the DB transaction so we can still return
+		// the produced chain TX.
+		if dryRun {
+			return walletdb.ErrDryRunRollBack
+		}
+
+		// Before committing the transaction, we'll sign our inputs. If
+		// the inputs are part of a watch-only account, there's no
+		// private key information stored, so we'll skip signing such.
+		var watchOnly bool
+		if coinSelectKeyScope == nil {
+			// If a key scope wasn't specified, then coin selection
+			// was performed from the default wallet accounts
+			// (NP2WKH, P2WKH, P2TR), so any key scope provided
+			// doesn't impact the result of this call.
+			watchOnly, err = w.addrStore.IsWatchOnlyAccount(
+				addrmgrNs, waddrmgr.KeyScopeBIP0086, account,
+			)
+		} else {
+			watchOnly, err = w.addrStore.IsWatchOnlyAccount(
+				addrmgrNs, *coinSelectKeyScope, account,
+			)
+		}
+		if err != nil {
+			return err
+		}
+		if !watchOnly {
+			err = tx.AddAllInputScripts(
+				secretSource{w.addrStore, addrmgrNs},
+			)
+			if err != nil {
+				return err
+			}
+
+			err = validateMsgTx(
+				tx.Tx, tx.PrevScripts, tx.PrevInputValues,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		if tx.ChangeIndex >= 0 && account == waddrmgr.ImportedAddrAccount {
+			changeAmount := btcutil.Amount(
+				tx.Tx.TxOut[tx.ChangeIndex].Value,
+			)
+			log.Warnf("Spend from imported account produced "+
+				"change: moving %v from imported account into "+
+				"default account.", changeAmount)
+		}
+
+		// Finally, we'll request the backend to notify us of the
+		// transaction that pays to the change address, if there is one,
+		// when it confirms.
+		if tx.ChangeIndex >= 0 {
+			changePkScript := tx.Tx.TxOut[tx.ChangeIndex].PkScript
+			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+				changePkScript, w.chainParams,
+			)
+			if err != nil {
+				return err
+			}
+			if err := chainClient.NotifyReceived(addrs); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	if err != nil && !errors.Is(err, walletdb.ErrDryRunRollBack) {
+		return nil, err
+	}
+
+	return tx, nil
+}
+
+// validateMsgTx verifies transaction input scripts for tx.  All previous output
+// scripts from outputs redeemed by the transaction, in the same order they are
+// spent, must be passed in the prevScripts slice.
+func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte,
+	inputValues []btcutil.Amount) error {
+
+	inputFetcher, err := txauthor.TXPrevOutFetcher(
+		tx, prevScripts, inputValues,
+	)
+	if err != nil {
+		return err
+	}
+
+	hashCache := txscript.NewTxSigHashes(tx, inputFetcher)
+	for i, prevScript := range prevScripts {
+		vm, err := txscript.NewEngine(
+			prevScript, tx, i, txscript.StandardVerifyFlags, nil,
+			hashCache, int64(inputValues[i]), inputFetcher,
+		)
+		if err != nil {
+			return fmt.Errorf("cannot create script engine: %w", err)
+		}
+		err = vm.Execute()
+		if err != nil {
+			return fmt.Errorf("cannot validate transaction: %w", err)
+		}
+	}
+	return nil
+}
+
+const (
+	// accountPubKeyDepth is the maximum depth of an extended key for an
+	// account public key.
+	accountPubKeyDepth = 3
+
+	// pubKeyDepth is the depth of an extended key for a derived public key.
+	pubKeyDepth = 5
+)
+
+// keyScopeFromPubKey returns the corresponding wallet key scope for the given
+// extended public key. The address type can usually be inferred from the key's
+// version, but may be required for certain keys to map them into the proper
+// scope.
+func keyScopeFromPubKey(pubKey *hdkeychain.ExtendedKey,
+	addrType *waddrmgr.AddressType) (waddrmgr.KeyScope,
+	*waddrmgr.ScopeAddrSchema, error) {
+
+	switch waddrmgr.HDVersion(binary.BigEndian.Uint32(pubKey.Version())) {
+	// For BIP-0044 keys, an address type must be specified as we intend to
+	// not support importing BIP-0044 keys into the wallet using the legacy
+	// pay-to-pubkey-hash (P2PKH) scheme. A nested witness address type will
+	// force the standard BIP-0049 derivation scheme (nested witness pubkeys
+	// everywhere), while a witness address type will force the standard
+	// BIP-0084 derivation scheme.
+	case waddrmgr.HDVersionMainNetBIP0044, waddrmgr.HDVersionTestNetBIP0044,
+		waddrmgr.HDVersionSimNetBIP0044:
+
+		if addrType == nil {
+			return waddrmgr.KeyScope{}, nil, errors.New("address " +
+				"type must be specified for account public " +
+				"key with legacy version")
+		}
+
+		switch *addrType {
+		case waddrmgr.NestedWitnessPubKey:
+			return waddrmgr.KeyScopeBIP0049Plus,
+				&waddrmgr.KeyScopeBIP0049AddrSchema, nil
+
+		case waddrmgr.WitnessPubKey:
+			return waddrmgr.KeyScopeBIP0084, nil, nil
+
+		case waddrmgr.TaprootPubKey:
+			return waddrmgr.KeyScopeBIP0086, nil, nil
+
+		default:
+			return waddrmgr.KeyScope{}, nil,
+				fmt.Errorf("unsupported address type %v",
+					*addrType)
+		}
+
+	// For BIP-0049 keys, we'll need to make a distinction between the
+	// traditional BIP-0049 address schema (nested witness pubkeys
+	// everywhere) and our own BIP-0049Plus address schema (nested
+	// externally, witness internally).
+	case waddrmgr.HDVersionMainNetBIP0049, waddrmgr.HDVersionTestNetBIP0049:
+		if addrType == nil {
+			return waddrmgr.KeyScope{}, nil, errors.New("address " +
+				"type must be specified for account public " +
+				"key with BIP-0049 version")
+		}
+
+		switch *addrType {
+		case waddrmgr.NestedWitnessPubKey:
+			return waddrmgr.KeyScopeBIP0049Plus,
+				&waddrmgr.KeyScopeBIP0049AddrSchema, nil
+
+		case waddrmgr.WitnessPubKey:
+			return waddrmgr.KeyScopeBIP0049Plus, nil, nil
+
+		default:
+			return waddrmgr.KeyScope{}, nil,
+				fmt.Errorf("unsupported address type %v",
+					*addrType)
+		}
+
+	// BIP-0086 does not have its own SLIP-0132 HD version byte set (yet?).
+	// So we either expect a user to import it with a BIP-0084 or BIP-0044
+	// encoding.
+	case waddrmgr.HDVersionMainNetBIP0084, waddrmgr.HDVersionTestNetBIP0084:
+		if addrType == nil {
+			return waddrmgr.KeyScope{}, nil, errors.New("address " +
+				"type must be specified for account public " +
+				"key with BIP-0084 version")
+		}
+
+		switch *addrType {
+		case waddrmgr.WitnessPubKey:
+			return waddrmgr.KeyScopeBIP0084, nil, nil
+
+		case waddrmgr.TaprootPubKey:
+			return waddrmgr.KeyScopeBIP0086, nil, nil
+
+		default:
+			return waddrmgr.KeyScope{}, nil,
+				errors.New("address type mismatch")
+		}
+
+	default:
+		return waddrmgr.KeyScope{}, nil, fmt.Errorf("unknown version %x",
+			pubKey.Version())
+	}
+}
+
+// isPubKeyForNet determines if the given public key is for the current network
+// the wallet is operating under.
+func (w *Wallet) isPubKeyForNet(pubKey *hdkeychain.ExtendedKey) bool {
+	version := waddrmgr.HDVersion(binary.BigEndian.Uint32(pubKey.Version()))
+	switch w.chainParams.Net {
+	case wire.MainNet:
+		return version == waddrmgr.HDVersionMainNetBIP0044 ||
+			version == waddrmgr.HDVersionMainNetBIP0049 ||
+			version == waddrmgr.HDVersionMainNetBIP0084
+
+	case wire.TestNet, wire.TestNet3, wire.TestNet4,
+		netparams.SigNetWire(w.chainParams):
+
+		return version == waddrmgr.HDVersionTestNetBIP0044 ||
+			version == waddrmgr.HDVersionTestNetBIP0049 ||
+			version == waddrmgr.HDVersionTestNetBIP0084
+
+	// For simnet, we'll also allow the mainnet versions since simnet
+	// doesn't have defined versions for some of our key scopes, and the
+	// mainnet versions are usually used as the default regardless of the
+	// network/key scope.
+	case wire.SimNet:
+		return version == waddrmgr.HDVersionSimNetBIP0044 ||
+			version == waddrmgr.HDVersionMainNetBIP0049 ||
+			version == waddrmgr.HDVersionMainNetBIP0084
+
+	default:
+		return false
+	}
+}
+
+// validateExtendedPubKey ensures a sane derived public key is provided.
+func (w *Wallet) validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
+	isAccountKey bool) error {
+
+	// Private keys are not allowed.
+	if pubKey.IsPrivate() {
+		return errors.New("private keys cannot be imported")
+	}
+
+	// The public key must have a version corresponding to the current
+	// chain.
+	if !w.isPubKeyForNet(pubKey) {
+		return fmt.Errorf("expected extended public key for current "+
+			"network %v", w.chainParams.Name)
+	}
+
+	// Verify the extended public key's depth and child index based on
+	// whether it's an account key or not.
+	if isAccountKey {
+		if pubKey.Depth() != accountPubKeyDepth {
+			return errors.New("invalid account key, must be of the " +
+				"form m/purpose'/coin_type'/account'")
+		}
+		if pubKey.ChildIndex() < hdkeychain.HardenedKeyStart {
+			return errors.New("invalid account key, must be hardened")
+		}
+	} else {
+		if pubKey.Depth() != pubKeyDepth {
+			return errors.New("invalid account key, must be of the " +
+				"form m/purpose'/coin_type'/account'/change/" +
+				"address_index")
+		}
+		if pubKey.ChildIndex() >= hdkeychain.HardenedKeyStart {
+			return errors.New("invalid pulic key, must not be " +
+				"hardened")
+		}
+	}
+
+	return nil
+}
+
+// ImportAccountDeprecated imports an account backed by an account extended
+// public key.
+// The master key fingerprint denotes the fingerprint of the root key
+// corresponding to the account public key (also known as the key with
+// derivation path m/). This may be required by some hardware wallets for proper
+// identification and signing.
+//
+// The address type can usually be inferred from the key's version, but may be
+// required for certain keys to map them into the proper scope.
+//
+// For BIP-0044 keys, an address type must be specified as we intend to not
+// support importing BIP-0044 keys into the wallet using the legacy
+// pay-to-pubkey-hash (P2PKH) scheme. A nested witness address type will force
+// the standard BIP-0049 derivation scheme, while a witness address type will
+// force the standard BIP-0084 derivation scheme.
+//
+// For BIP-0049 keys, an address type must also be specified to make a
+// distinction between the traditional BIP-0049 address schema (nested witness
+// pubkeys everywhere) and our own BIP-0049Plus address schema (nested
+// externally, witness internally).
+func (w *Wallet) ImportAccountDeprecated(
+	name string, accountPubKey *hdkeychain.ExtendedKey,
+	masterKeyFingerprint uint32, addrType *waddrmgr.AddressType) (
+	*waddrmgr.AccountProperties, error) {
+
+	var accountProps *waddrmgr.AccountProperties
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		var err error
+		accountProps, err = w.importAccount(
+			ns, name, accountPubKey, masterKeyFingerprint, addrType,
+		)
+		return err
+	})
+	return accountProps, err
+}
+
+// ImportAccountWithScope imports an account backed by an account extended
+// public key for a specific key scope which is known in advance.
+// The master key fingerprint denotes the fingerprint of the root key
+// corresponding to the account public key (also known as the key with
+// derivation path m/). This may be required by some hardware wallets for proper
+// identification and signing.
+func (w *Wallet) ImportAccountWithScope(name string,
+	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	keyScope waddrmgr.KeyScope, addrSchema waddrmgr.ScopeAddrSchema) (
+	*waddrmgr.AccountProperties, error) {
+
+	var accountProps *waddrmgr.AccountProperties
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		var err error
+		accountProps, err = w.importAccountScope(
+			ns, name, accountPubKey, masterKeyFingerprint, keyScope,
+			&addrSchema,
+		)
+		return err
+	})
+	return accountProps, err
+}
+
+// importAccount is the internal implementation of ImportAccount -- one should
+// reference its documentation for this method.
+func (w *Wallet) importAccount(ns walletdb.ReadWriteBucket, name string,
+	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	addrType *waddrmgr.AddressType) (*waddrmgr.AccountProperties, error) {
+
+	// Ensure we have a valid account public key.
+	if err := w.validateExtendedPubKey(accountPubKey, true); err != nil {
+		return nil, err
+	}
+
+	// Determine what key scope the account public key should belong to and
+	// whether it should use a custom address schema.
+	keyScope, addrSchema, err := keyScopeFromPubKey(accountPubKey, addrType)
+	if err != nil {
+		return nil, err
+	}
+
+	return w.importAccountScope(
+		ns, name, accountPubKey, masterKeyFingerprint, keyScope,
+		addrSchema,
+	)
+}
+
+// importAccountScope imports a watch-only account for a given scope.
+func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
+	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	keyScope waddrmgr.KeyScope, addrSchema *waddrmgr.ScopeAddrSchema) (
+	*waddrmgr.AccountProperties, error) {
+
+	scopedMgr, err := w.addrStore.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		scopedMgr, err = w.addrStore.NewScopedKeyManager(
+			ns, keyScope, *addrSchema,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	account, err := scopedMgr.NewAccountWatchingOnly(
+		ns, name, accountPubKey, masterKeyFingerprint, addrSchema,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return scopedMgr.AccountProperties(ns, account)
+}
+
+// ImportAccountDryRun serves as a dry run implementation of ImportAccount. This
+// method also returns the first N external and internal addresses, which can be
+// presented to users to confirm whether the account has been imported
+// correctly.
+func (w *Wallet) ImportAccountDryRun(name string,
+	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	addrType *waddrmgr.AddressType, numAddrs uint32) (
+	*waddrmgr.AccountProperties, []waddrmgr.ManagedAddress,
+	[]waddrmgr.ManagedAddress, error) {
+
+	// The address manager uses OnCommit on the walletdb tx to update the
+	// in-memory state of the account state. But because the commit happens
+	// _after_ the account manager internal lock has been released, there
+	// is a chance for the address index to be accessed concurrently, even
+	// though the closure in OnCommit re-acquires the lock. To avoid this
+	// issue, we surround the whole address creation process with a lock.
+	w.newAddrMtx.Lock()
+	defer w.newAddrMtx.Unlock()
+
+	var (
+		accountProps  *waddrmgr.AccountProperties
+		externalAddrs []waddrmgr.ManagedAddress
+		internalAddrs []waddrmgr.ManagedAddress
+	)
+
+	// Start a database transaction that we'll never commit and always
+	// rollback because we'll return a specific error in the end.
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		// Import the account as usual.
+		var err error
+		accountProps, err = w.importAccount(
+			ns, name, accountPubKey, masterKeyFingerprint, addrType,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Derive the external and internal addresses. Note that we
+		// could do this based on the provided accountPubKey alone, but
+		// we go through the ScopedKeyManager instead to ensure
+		// addresses will be derived as expected from the wallet's
+		// point-of-view.
+		manager, err := w.addrStore.FetchScopedKeyManager(
+			accountProps.KeyScope,
+		)
+		if err != nil {
+			return err
+		}
+
+		// The importAccount method above will cache the imported
+		// account within the scoped manager. Since this is a dry-run
+		// attempt, we'll want to invalidate the cache for it.
+		defer manager.InvalidateAccountCache(accountProps.AccountNumber)
+
+		externalAddrs, err = manager.NextExternalAddresses(
+			ns, accountProps.AccountNumber, numAddrs,
+		)
+		if err != nil {
+			return err
+		}
+		internalAddrs, err = manager.NextInternalAddresses(
+			ns, accountProps.AccountNumber, numAddrs,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Refresh the account's properties after generating the
+		// addresses.
+		accountProps, err = manager.AccountProperties(
+			ns, accountProps.AccountNumber,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Make sure we always roll back the dry-run transaction by
+		// returning an error here.
+		return walletdb.ErrDryRunRollBack
+	})
+	if err != nil && err != walletdb.ErrDryRunRollBack {
+		return nil, nil, nil, err
+	}
+
+	return accountProps, externalAddrs, internalAddrs, nil
+}
+
+// ImportPublicKey imports a single derived public key into the address manager.
+// The address type can usually be inferred from the key's version, but in the
+// case of legacy versions (xpub, tpub), an address type must be specified as we
+// intend to not support importing BIP-44 keys into the wallet using the legacy
+// pay-to-pubkey-hash (P2PKH) scheme.
+func (w *Wallet) ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
+	addrType waddrmgr.AddressType) error {
+
+	// Determine what key scope the public key should belong to and import
+	// it into the key scope's default imported account.
+	var keyScope waddrmgr.KeyScope
+	switch addrType {
+	case waddrmgr.NestedWitnessPubKey:
+		keyScope = waddrmgr.KeyScopeBIP0049Plus
+
+	case waddrmgr.WitnessPubKey:
+		keyScope = waddrmgr.KeyScopeBIP0084
+
+	case waddrmgr.TaprootPubKey:
+		keyScope = waddrmgr.KeyScopeBIP0086
+
+	default:
+		return fmt.Errorf("address type %v is not supported", addrType)
+	}
+
+	scopedKeyManager, err := w.addrStore.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		return err
+	}
+
+	// TODO: Perform rescan if requested.
+	var addr waddrmgr.ManagedAddress
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		addr, err = scopedKeyManager.ImportPublicKey(ns, pubKey, nil)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Imported address %v", addr.Address())
+
+	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
+	if err != nil {
+		return fmt.Errorf("unable to subscribe for address "+
+			"notifications: %w", err)
+	}
+
+	return nil
+}
+
+// ImportTaprootScriptDeprecated imports a user-provided taproot script into the
+// address manager. The imported script will act as a pay-to-taproot address.
+//
+// Deprecated: Use AddressManager.ImportTaprootScript instead.
+func (w *Wallet) ImportTaprootScriptDeprecated(scope waddrmgr.KeyScope,
+	tapscript *waddrmgr.Tapscript, bs *waddrmgr.BlockStamp,
+	witnessVersion byte, isSecretScript bool) (waddrmgr.ManagedAddress,
+	error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	// The starting block for the key is the genesis block unless otherwise
+	// specified.
+	if bs == nil {
+		bs = &waddrmgr.BlockStamp{
+			Hash:      *w.chainParams.GenesisHash,
+			Height:    0,
+			Timestamp: w.chainParams.GenesisBlock.Header.Timestamp,
+		}
+	} else if bs.Timestamp.IsZero() {
+		// Only update the new birthday time from default value if we
+		// actually have timestamp info in the header.
+		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
+		if err == nil {
+			bs.Timestamp = header.Timestamp
+		}
+	}
+
+	// TODO: Perform rescan if requested.
+	var addr waddrmgr.ManagedAddress
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		addr, err = manager.ImportTaprootScript(
+			ns, tapscript, bs, witnessVersion, isSecretScript,
+		)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	log.Infof("Imported address %v", addr.Address())
+
+	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
+	if err != nil {
+		return nil, fmt.Errorf("unable to subscribe for address "+
+			"notifications: %w", err)
+	}
+
+	return addr, nil
+}
+
+// ImportPrivateKey imports a private key to the wallet and writes the new
+// wallet to disk.
+//
+// NOTE: If a block stamp is not provided, then the wallet's birthday will be
+// set to the genesis block of the corresponding chain.
+func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
+	bs *waddrmgr.BlockStamp, rescan bool) (string, error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return "", err
+	}
+
+	// The starting block for the key is the genesis block unless otherwise
+	// specified.
+	if bs == nil {
+		bs = &waddrmgr.BlockStamp{
+			Hash:      *w.chainParams.GenesisHash,
+			Height:    0,
+			Timestamp: w.chainParams.GenesisBlock.Header.Timestamp,
+		}
+	} else if bs.Timestamp.IsZero() {
+		// Only update the new birthday time from default value if we
+		// actually have timestamp info in the header.
+		header, err := w.chainClient.GetBlockHeader(&bs.Hash)
+		if err == nil {
+			bs.Timestamp = header.Timestamp
+		}
+	}
+
+	// Attempt to import private key into wallet.
+	var addr btcutil.Address
+	var props *waddrmgr.AccountProperties
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		maddr, err := manager.ImportPrivateKey(addrmgrNs, wif, bs)
+		if err != nil {
+			return err
+		}
+		addr = maddr.Address()
+		props, err = manager.AccountProperties(
+			addrmgrNs, waddrmgr.ImportedAddrAccount,
+		)
+		if err != nil {
+			return err
+		}
+
+		// We'll only update our birthday with the new one if it is
+		// before our current one. Otherwise, if we do, we can
+		// potentially miss detecting relevant chain events that
+		// occurred between them while rescanning.
+		birthdayBlock, _, err := w.addrStore.BirthdayBlock(addrmgrNs)
+		if err != nil {
+			return err
+		}
+		if bs.Height >= birthdayBlock.Height {
+			return nil
+		}
+
+		err = w.addrStore.SetBirthday(addrmgrNs, bs.Timestamp)
+		if err != nil {
+			return err
+		}
+
+		// To ensure this birthday block is correct, we'll mark it as
+		// unverified to prompt a sanity check at the next restart to
+		// ensure it is correct as it was provided by the caller.
+		return w.addrStore.SetBirthdayBlock(addrmgrNs, *bs, false)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	// Rescan blockchain for transactions with txout scripts paying to the
+	// imported address.
+	if rescan {
+		job := &RescanJob{
+			Addrs:      []btcutil.Address{addr},
+			OutPoints:  nil,
+			BlockStamp: *bs,
+		}
+
+		// Submit rescan job and log when the import has completed.
+		// Do not block on finishing the rescan.  The rescan success
+		// or failure is logged elsewhere, and the channel is not
+		// required to be read, so discard the return value.
+		_ = w.SubmitRescan(job)
+	} else {
+		err := w.chainClient.NotifyReceived([]btcutil.Address{addr})
+		if err != nil {
+			return "", fmt.Errorf("failed to subscribe for address ntfns for "+
+				"address %s: %w", addr.EncodeAddress(), err)
+		}
+	}
+
+	addrStr := addr.EncodeAddress()
+	log.Infof("Imported payment address %s", addrStr)
+
+	w.NtfnServer.notifyAccountProperties(props)
+
+	// Return the payment address string of the imported private key.
+	return addrStr, nil
 }
 
 // walletDeprecated encapsulates the legacy state and communication channels

@@ -14,13 +14,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
+	"sort"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -838,4 +842,301 @@ func (w *Wallet) getEligibleUTXOsFromList(dbtx walletdb.ReadTx,
 	}
 
 	return eligible, nil
+}
+
+func makeInputSource(eligible []Coin) txauthor.InputSource {
+	// Current inputs and their total value. These are closed over by the
+	// returned input source and reused across multiple calls.
+	currentTotal := btcutil.Amount(0)
+	currentInputs := make([]*wire.TxIn, 0, len(eligible))
+	currentScripts := make([][]byte, 0, len(eligible))
+	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
+
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		for currentTotal < target && len(eligible) != 0 {
+			nextCredit := eligible[0]
+			prevOut := nextCredit.TxOut
+			outpoint := nextCredit.OutPoint
+			eligible = eligible[1:]
+
+			nextInput := wire.NewTxIn(&outpoint, nil, nil)
+			currentTotal += btcutil.Amount(prevOut.Value)
+
+			currentInputs = append(currentInputs, nextInput)
+			currentScripts = append(
+				currentScripts, prevOut.PkScript,
+			)
+			currentInputValues = append(
+				currentInputValues,
+				btcutil.Amount(prevOut.Value),
+			)
+		}
+
+		return currentTotal, currentInputs, currentInputValues,
+			currentScripts, nil
+	}
+}
+
+// constantInputSource creates an input source function that always returns the
+// static set of user-selected UTXOs.
+func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+	// Current inputs and their total value. These won't change over
+	// different invocations as we want our inputs to remain static since
+	// they're selected by the user.
+	currentTotal := btcutil.Amount(0)
+	currentInputs := make([]*wire.TxIn, 0, len(eligible))
+	currentScripts := make([][]byte, 0, len(eligible))
+	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
+
+	for _, credit := range eligible {
+		nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
+		currentTotal += credit.Amount
+
+		currentInputs = append(currentInputs, nextInput)
+		currentScripts = append(currentScripts, credit.PkScript)
+		currentInputValues = append(currentInputValues, credit.Amount)
+	}
+
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		return currentTotal, currentInputs, currentInputValues,
+			currentScripts, nil
+	}
+}
+
+// findEligibleOutputs finds eligible outputs for the given key scope and
+// account.
+func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
+	keyScope *waddrmgr.KeyScope, account uint32, minconf uint32,
+	bs *waddrmgr.BlockStamp,
+	allowUtxo func(utxo wtxmgr.Credit) bool) ([]wtxmgr.Credit, error) {
+
+	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+	unspent, err := w.txStore.UnspentOutputs(txmgrNs)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: Eventually all of these filters (except perhaps output locking)
+	// should be handled by the call to UnspentOutputs (or similar).
+	// Because one of these filters requires matching the output script to
+	// the desired account, this change depends on making wtxmgr a waddrmgr
+	// dependency and requesting unspent outputs for a single account.
+	eligible := make([]wtxmgr.Credit, 0, len(unspent))
+	for i := range unspent {
+		output := &unspent[i]
+
+		// Restrict the selected utxos if a filter function is provided.
+		if allowUtxo != nil &&
+			!allowUtxo(*output) {
+
+			continue
+		}
+
+		// Only include this output if it meets the required number of
+		// confirmations. Coinbase transactions must have reached
+		// maturity before their outputs may be spent.
+		if !hasMinConfs(minconf, output.Height, bs.Height) {
+			continue
+		}
+
+		if output.FromCoinBase {
+			target := w.chainParams.CoinbaseMaturity
+			if !hasMinConfs(
+				uint32(target), output.Height, bs.Height,
+			) {
+
+				continue
+			}
+		}
+
+		// Locked unspent outputs are skipped.
+		if w.LockedOutpoint(output.OutPoint) {
+			continue
+		}
+
+		// Only include the output if it is associated with the passed
+		// account.
+		//
+		// TODO: Handle multisig outputs by determining if enough of the
+		// addresses are controlled.
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, w.chainParams)
+		if err != nil || len(addrs) != 1 {
+			continue
+		}
+
+		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(
+			addrmgrNs, addrs[0],
+		)
+		if err != nil {
+			continue
+		}
+
+		if keyScope != nil && scopedMgr.Scope() != *keyScope {
+			continue
+		}
+
+		if addrAcct != account {
+			continue
+		}
+
+		eligible = append(eligible, *output)
+	}
+
+	return eligible, nil
+}
+
+// inputYieldsPositively returns a boolean indicating whether this input yields
+// positively if added to a transaction. This determination is based on the
+// best-case added virtual size. For edge cases this function can return true
+// while the input is yielding slightly negative as part of the final
+// transaction.
+func inputYieldsPositively(credit *wire.TxOut,
+	feeRatePerKb btcutil.Amount) bool {
+
+	inputSize := txsizes.GetMinInputVirtualSize(credit.PkScript)
+	inputFee := feeRatePerKb * btcutil.Amount(inputSize) / 1000
+
+	return inputFee < btcutil.Amount(credit.Value)
+}
+
+// addrMgrWithChangeSource returns the address manager bucket and a change
+// source that returns change addresses from said address manager. The change
+// addresses will come from the specified key scope and account, unless a key
+// scope is not specified. In that case, change addresses will always come from
+// the P2WKH key scope.
+func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
+	changeKeyScope *waddrmgr.KeyScope, account uint32) (
+	walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
+
+	// Determine the address type for change addresses of the given
+	// account.
+	if changeKeyScope == nil {
+		changeKeyScope = &waddrmgr.KeyScopeBIP0086
+	}
+
+	addrType := waddrmgr.ScopeAddrMap[*changeKeyScope].InternalAddrType
+
+	// It's possible for the account to have an address schema override, so
+	// prefer that if it exists.
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+	scopeMgr, err := w.addrStore.FetchScopedKeyManager(*changeKeyScope)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	accountInfo, err := scopeMgr.AccountProperties(addrmgrNs, account)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if accountInfo.AddrSchema != nil {
+		addrType = accountInfo.AddrSchema.InternalAddrType
+	}
+
+	// Compute the expected size of the script for the change address type.
+	var scriptSize int
+	switch addrType {
+	case waddrmgr.PubKeyHash:
+		scriptSize = txsizes.P2PKHPkScriptSize
+	case waddrmgr.NestedWitnessPubKey:
+		scriptSize = txsizes.NestedP2WPKHPkScriptSize
+	case waddrmgr.WitnessPubKey:
+		scriptSize = txsizes.P2WPKHPkScriptSize
+	case waddrmgr.TaprootPubKey:
+		scriptSize = txsizes.P2TRPkScriptSize
+	default:
+		return nil, nil, fmt.Errorf("unsupported address type: %v",
+			addrType)
+	}
+
+	newChangeScript := func() ([]byte, error) {
+		// Derive the change output script. As a hack to allow spending
+		// from the imported account, change addresses are created from
+		// account 0.
+		var (
+			changeAddr btcutil.Address
+			err        error
+		)
+		if account == waddrmgr.ImportedAddrAccount {
+			changeAddr, err = w.newChangeAddress(
+				addrmgrNs, 0, *changeKeyScope,
+			)
+		} else {
+			changeAddr, err = w.newChangeAddress(
+				addrmgrNs, account, *changeKeyScope,
+			)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		return txscript.PayToAddrScript(changeAddr)
+	}
+
+	return addrmgrNs, &txauthor.ChangeSource{
+		ScriptSize: scriptSize,
+		NewScript:  newChangeScript,
+	}, nil
+}
+
+// sortByAmount is a generic sortable type for sorting coins by their amount.
+type sortByAmount []Coin
+
+func (s sortByAmount) Len() int { return len(s) }
+func (s sortByAmount) Less(i, j int) bool {
+	return s[i].Value < s[j].Value
+}
+func (s sortByAmount) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+
+// LargestFirstCoinSelector is an implementation of the CoinSelectionStrategy
+// that always selects the largest coins first.
+type LargestFirstCoinSelector struct{}
+
+// ArrangeCoins takes a list of coins and arranges them according to the
+// specified coin selection strategy and fee rate.
+func (*LargestFirstCoinSelector) ArrangeCoins(eligible []Coin,
+	_ btcutil.Amount) ([]Coin, error) {
+
+	sort.Sort(sort.Reverse(sortByAmount(eligible)))
+
+	return eligible, nil
+}
+
+// RandomCoinSelector is an implementation of the CoinSelectionStrategy that
+// selects coins at random. This prevents the creation of ever smaller UTXOs
+// over time that may never become economical to spend.
+type RandomCoinSelector struct{}
+
+// ArrangeCoins takes a list of coins and arranges them according to the
+// specified coin selection strategy and fee rate.
+func (*RandomCoinSelector) ArrangeCoins(eligible []Coin,
+	feeSatPerKb btcutil.Amount) ([]Coin, error) {
+
+	// Skip inputs that do not raise the total transaction output
+	// value at the requested fee rate.
+	positivelyYielding := make([]Coin, 0, len(eligible))
+	for _, output := range eligible {
+
+		if !inputYieldsPositively(&output.TxOut, feeSatPerKb) {
+			continue
+		}
+
+		positivelyYielding = append(positivelyYielding, output)
+	}
+
+	rand.Shuffle(len(positivelyYielding), func(i, j int) {
+		positivelyYielding[i], positivelyYielding[j] =
+			positivelyYielding[j], positivelyYielding[i]
+	})
+
+	return positivelyYielding, nil
 }

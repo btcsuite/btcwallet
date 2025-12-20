@@ -47,6 +47,11 @@ const (
 	// defaultSyncRetryInterval is the default amount of time to wait
 	// between re-tries on errors during initial sync.
 	defaultSyncRetryInterval = 5 * time.Second
+
+	// birthdayBlockDelta is the maximum time delta allowed between our
+	// birthday timestamp and our birthday block's timestamp when searching
+	// for a better birthday block candidate (if possible).
+	birthdayBlockDelta = 2 * time.Hour
 )
 
 var (
@@ -81,7 +86,6 @@ var (
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
-
 
 // locateBirthdayBlock returns a block that meets the given birthday timestamp
 // by a margin of +/-2 hours. This is safe to do as the timestamp is already 2
@@ -205,7 +209,6 @@ type Wallet struct {
 
 // AccountAddresses returns the addresses for every created address for an
 // account.
-
 
 // ChainParams returns the network parameters for the blockchain the wallet
 // belongs to.
