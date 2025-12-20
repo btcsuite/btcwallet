@@ -47,6 +47,11 @@ const (
 	// defaultSyncRetryInterval is the default amount of time to wait
 	// between re-tries on errors during initial sync.
 	defaultSyncRetryInterval = 5 * time.Second
+
+	// birthdayBlockDelta is the maximum time delta allowed between our
+	// birthday timestamp and our birthday block's timestamp when searching
+	// for a better birthday block candidate (if possible).
+	birthdayBlockDelta = 2 * time.Hour
 )
 
 var (
