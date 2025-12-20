@@ -1837,7 +1837,11 @@ func TestParseBip32Path(t *testing.T) {
 
 	// Use mainnet params for testing (HDCoinType = 0).
 	chainParams := &chaincfg.MainNetParams
-	w := &Wallet{chainParams: chainParams}
+	w := &Wallet{
+		walletDeprecated: &walletDeprecated{
+			chainParams: chainParams,
+		},
+	}
 
 	hardened := func(i uint32) uint32 {
 		return i + hdkeychain.HardenedKeyStart

@@ -6,14 +6,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -1032,4 +1036,63 @@ func (w *Wallet) UnlockDeprecated(passphrase []byte, lock <-chan time.Time) erro
 // Deprecated: Use WalletController.Lock instead.
 func (w *Wallet) LockDeprecated() {
 	w.lockRequests <- struct{}{}
+}
+
+// walletDeprecated encapsulates the legacy state and communication channels
+// that are being phased out in favor of the modern Controller and Syncer
+// architecture.
+//
+// Embedding this struct in the Wallet allows old logic to continue functioning
+// while clearly marking the fields as legacy. Access to these fields should
+// ideally be restricted to methods moved to this file.
+type walletDeprecated struct {
+	// Deprecated fields.
+	//
+	// NOTE: Listing below are deprecated fields and will be removed once
+	// the sqlization series is finished.
+	started bool
+	quit    chan struct{}
+	quitMu  sync.Mutex
+
+	chainClient        chain.Interface
+	chainClientLock    sync.Mutex
+	chainClientSynced  bool
+	chainClientSyncMtx sync.Mutex
+
+	newAddrMtx sync.Mutex
+
+	lockedOutpoints    map[wire.OutPoint]struct{}
+	lockedOutpointsMtx sync.Mutex
+
+	chainParams *chaincfg.Params
+
+	recovering atomic.Value
+
+	// Channels for rescan processing.  Requests are added and merged with
+	// any waiting requests, before being sent to another goroutine to
+	// call the rescan RPC.
+	rescanAddJob        chan *RescanJob
+	rescanBatch         chan *rescanBatch
+	rescanNotifications chan any // From chain server
+	rescanProgress      chan *RescanProgressMsg
+	rescanFinished      chan *RescanFinishedMsg
+
+	// Channels for the manager locker.
+	unlockRequests     chan unlockRequest
+	lockRequests       chan struct{}
+	holdUnlockRequests chan chan heldUnlock
+	lockState          chan bool
+	changePassphrase   chan changePassphraseRequest
+	changePassphrases  chan changePassphrasesRequest
+
+	// Channel for transaction creation requests.
+	createTxRequests chan createTxRequest
+
+	// rescanFinishedChan is a channel used to signal the completion of a
+	// rescan operation from the main loop to the rescan loop.
+	rescanFinishedChan chan *chain.RescanFinished
+
+	// syncRetryInterval is the amount of time to wait between re-tries on
+	// errors during initial sync.
+	syncRetryInterval time.Duration
 }

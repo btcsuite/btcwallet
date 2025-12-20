@@ -127,59 +127,42 @@ var (
 // Wallet is a structure containing all the components for a
 // complete wallet.  It contains the Armory-style key store
 // addresses and keys),
+// Wallet is a structure containing all the components for a complete wallet.
+// It manages the cryptographic keys, transaction history, and synchronization
+// with the blockchain.
 type Wallet struct {
+	// walletDeprecated embeds the legacy state and channels. Access to these
+	// should be phased out as refactoring progresses.
+	*walletDeprecated
+
+	// publicPassphrase is the passphrase used to encrypt and decrypt public
+	// data in the address manager.
 	publicPassphrase []byte
 
-	// Data stores
-	db        walletdb.DB
+	// db is the underlying key-value database where all wallet data is
+	// persisted.
+	db walletdb.DB
+
+	// addrStore is the address and key manager responsible for hierarchical
+	// deterministic (HD) derivation and storage of cryptographic keys.
 	addrStore waddrmgr.AddrStore
-	txStore   wtxmgr.TxStore
 
-	chainClient        chain.Interface
-	chainClientLock    sync.Mutex
-	chainClientSynced  bool
-	chainClientSyncMtx sync.Mutex
+	// txStore is the transaction manager responsible for storing and
+	// querying the wallet's transaction history and unspent outputs.
+	txStore wtxmgr.TxStore
 
-	newAddrMtx sync.Mutex
-
-	lockedOutpoints    map[wire.OutPoint]struct{}
-	lockedOutpointsMtx sync.Mutex
-
-	recovering     atomic.Value
+	// recoveryWindow specifies the number of additional keys to derive
+	// beyond the last used one to look for previously used addresses
+	// during a rescan or recovery.
 	recoveryWindow uint32
 
-	// Channels for rescan processing.  Requests are added and merged with
-	// any waiting requests, before being sent to another goroutine to
-	// call the rescan RPC.
-	rescanAddJob        chan *RescanJob
-	rescanBatch         chan *rescanBatch
-	rescanNotifications chan interface{} // From chain server
-	rescanProgress      chan *RescanProgressMsg
-	rescanFinished      chan *RescanFinishedMsg
-
-	// Channel for transaction creation requests.
-	createTxRequests chan createTxRequest
-
-	// Channels for the manager locker.
-	unlockRequests     chan unlockRequest
-	lockRequests       chan struct{}
-	holdUnlockRequests chan chan heldUnlock
-	lockState          chan bool
-	changePassphrase   chan changePassphraseRequest
-	changePassphrases  chan changePassphrasesRequest
-
+	// NtfnServer handles the delivery of wallet-related events (e.g., new
+	// transactions, block connections) to connected clients.
 	NtfnServer *NotificationServer
 
-	chainParams *chaincfg.Params
-	wg          sync.WaitGroup
-
-	started bool
-	quit    chan struct{}
-	quitMu  sync.Mutex
-
-	// syncRetryInterval is the amount of time to wait between re-tries on
-	// errors during initial sync.
-	syncRetryInterval time.Duration
+	// wg is a wait group used to track and wait for all long-running
+	// background goroutines to finish during a graceful shutdown.
+	wg sync.WaitGroup
 }
 
 // SynchronizeRPC associates the wallet with the consensus RPC client,
@@ -4273,13 +4256,8 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
 
-	w := &Wallet{
-		publicPassphrase:    pubPass,
-		db:                  db,
-		addrStore:           addrMgr,
-		txStore:             txMgr,
+	deprecated := &walletDeprecated{
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
-		recoveryWindow:      recoveryWindow,
 		rescanAddJob:        make(chan *RescanJob),
 		rescanBatch:         make(chan *rescanBatch),
 		rescanNotifications: make(chan interface{}),
@@ -4295,6 +4273,15 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		chainParams:         params,
 		quit:                make(chan struct{}),
 		syncRetryInterval:   syncRetryInterval,
+	}
+
+	w := &Wallet{
+		publicPassphrase: pubPass,
+		db:               db,
+		addrStore:        addrMgr,
+		txStore:          txMgr,
+		recoveryWindow:   recoveryWindow,
+		walletDeprecated: deprecated,
 	}
 
 	w.NtfnServer = newNotificationServer(w)
