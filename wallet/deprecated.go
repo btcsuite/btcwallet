@@ -1038,6 +1038,1278 @@ func (w *Wallet) LockDeprecated() {
 	w.lockRequests <- struct{}{}
 }
 
+// AddressInfoDeprecated returns detailed information regarding a wallet
+// address.
+func (w *Wallet) AddressInfoDeprecated(a btcutil.Address) (
+	waddrmgr.ManagedAddress, error) {
+
+	var managedAddress waddrmgr.ManagedAddress
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		var err error
+
+		managedAddress, err = w.addrStore.Address(addrmgrNs, a)
+		return err
+	})
+	return managedAddress, err
+}
+
+// SynchronizeRPC associates the wallet with the consensus RPC client,
+// synchronizes the wallet with the latest changes to the blockchain, and
+// continuously updates the wallet through RPC notifications.
+//
+// This method is unstable and will be removed when all syncing logic is moved
+// outside of the wallet package.
+func (w *Wallet) SynchronizeRPC(chainClient chain.Interface) {
+	w.quitMu.Lock()
+	select {
+	case <-w.quit:
+		w.quitMu.Unlock()
+		return
+	default:
+	}
+	w.quitMu.Unlock()
+
+	// TODO: Ignoring the new client when one is already set breaks callers
+	// who are replacing the client, perhaps after a disconnect.
+	w.chainClientLock.Lock()
+	if w.chainClient != nil {
+		w.chainClientLock.Unlock()
+		return
+	}
+	w.chainClient = chainClient
+
+	// If the chain client is a NeutrinoClient instance, set a birthday so
+	// we don't download all the filters as we go.
+	switch cc := chainClient.(type) {
+	case *chain.NeutrinoClient:
+		cc.SetStartTime(w.addrStore.Birthday())
+	case *chain.BitcoindClient:
+		cc.SetBirthday(w.addrStore.Birthday())
+	}
+	w.chainClientLock.Unlock()
+
+	// TODO: It would be preferable to either run these goroutines
+	// separately from the wallet (use wallet mutator functions to
+	// make changes from the RPC client) and not have to stop and
+	// restart them each time the client disconnects and reconnets.
+	w.wg.Add(4)
+	go w.handleChainNotifications()
+	go w.rescanBatchHandler()
+	go w.rescanProgressHandler()
+	go w.rescanRPCHandler()
+}
+
+// requireChainClient marks that a wallet method can only be completed when the
+// consensus RPC server is set.  This function and all functions that call it
+// are unstable and will need to be moved when the syncing code is moved out of
+// the wallet.
+func (w *Wallet) requireChainClient() (chain.Interface, error) {
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+	if chainClient == nil {
+		return nil, errors.New("blockchain RPC is inactive")
+	}
+	return chainClient, nil
+}
+
+// ChainClient returns the optional consensus RPC client associated with the
+// wallet.
+//
+// This function is unstable and will be removed once sync logic is moved out of
+// the wallet.
+func (w *Wallet) ChainClient() chain.Interface {
+	w.chainClientLock.Lock()
+	chainClient := w.chainClient
+	w.chainClientLock.Unlock()
+	return chainClient
+}
+
+// quitChan atomically reads the quit channel.
+func (w *Wallet) quitChan() <-chan struct{} {
+	w.quitMu.Lock()
+	c := w.quit
+	w.quitMu.Unlock()
+	return c
+}
+
+// ShuttingDown returns whether the wallet is currently in the process of
+// shutting down or not.
+func (w *Wallet) ShuttingDown() bool {
+	select {
+	case <-w.quitChan():
+		return true
+	default:
+		return false
+	}
+}
+
+// WaitForShutdown blocks until all wallet goroutines have finished executing.
+func (w *Wallet) WaitForShutdown() {
+	w.chainClientLock.Lock()
+	if w.chainClient != nil {
+		w.chainClient.WaitForShutdown()
+	}
+	w.chainClientLock.Unlock()
+	w.wg.Wait()
+}
+
+// SynchronizingToNetwork returns whether the wallet is currently synchronizing
+// with the Bitcoin network.
+func (w *Wallet) SynchronizingToNetwork() bool {
+	// At the moment, RPC is the only synchronization method.  In the
+	// future, when SPV is added, a separate check will also be needed, or
+	// SPV could always be enabled if RPC was not explicitly specified when
+	// creating the wallet.
+	w.chainClientSyncMtx.Lock()
+	syncing := w.chainClient != nil
+	w.chainClientSyncMtx.Unlock()
+	return syncing
+}
+
+// ChainSynced returns whether the wallet has been attached to a chain server
+// and synced up to the best block on the main chain.
+func (w *Wallet) ChainSynced() bool {
+	w.chainClientSyncMtx.Lock()
+	synced := w.chainClientSynced
+	w.chainClientSyncMtx.Unlock()
+	return synced
+}
+
+// SetChainSynced marks whether the wallet is connected to and currently in sync
+// with the latest block notified by the chain server.
+//
+// NOTE: Due to an API limitation with rpcclient, this may return true after
+// the client disconnected (and is attempting a reconnect).  This will be unknown
+// until the reconnect notification is received, at which point the wallet can be
+// marked out of sync again until after the next rescan completes.
+func (w *Wallet) SetChainSynced(synced bool) {
+	w.chainClientSyncMtx.Lock()
+	w.chainClientSynced = synced
+	w.chainClientSyncMtx.Unlock()
+}
+
+// activeData returns the currently-active receiving addresses and all unspent
+// outputs.  This is primarely intended to provide the parameters for a
+// rescan request.
+func (w *Wallet) activeData(dbtx walletdb.ReadWriteTx) ([]btcutil.Address, []wtxmgr.Credit, error) {
+	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+	var addrs []btcutil.Address
+
+	err := w.addrStore.ForEachRelevantActiveAddress(
+		addrmgrNs, func(addr btcutil.Address) error {
+			addrs = append(addrs, addr)
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Before requesting the list of spendable UTXOs, we'll delete any
+	// expired output locks.
+	err = w.txStore.DeleteExpiredLockedOutputs(
+		dbtx.ReadWriteBucket(wtxmgrNamespaceKey),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	unspent, err := w.txStore.OutputsToWatch(txmgrNs)
+	return addrs, unspent, err
+}
+
+// syncWithChain brings the wallet up to date with the current chain server
+// connection. It creates a rescan request and blocks until the rescan has
+// finished. The birthday block can be passed in, if set, to ensure we can
+// properly detect if it gets rolled back.
+func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return err
+	}
+
+	// Neutrino relies on the information given to it by the cfheader server
+	// so it knows exactly whether it's synced up to the server's state or
+	// not, even on dev chains. To recover a Neutrino wallet, we need to
+	// make sure it's synced before we start scanning for addresses,
+	// otherwise we might miss some if we only scan up to its current sync
+	// point.
+	neutrinoRecovery := chainClient.BackEnd() == "neutrino" &&
+		w.recoveryWindow > 0
+
+	// We'll wait until the backend is synced to ensure we get the latest
+	// MaxReorgDepth blocks to store. We don't do this for development
+	// environments as we can't guarantee a lively chain, except for
+	// Neutrino, where the cfheader server tells us what it believes the
+	// chain tip is.
+	if !w.isDevEnv() || neutrinoRecovery {
+		log.Debug("Waiting for chain backend to sync to tip")
+		if err := w.waitUntilBackendSynced(chainClient); err != nil {
+			return err
+		}
+		log.Debug("Chain backend synced to tip!")
+	}
+
+	// If we've yet to find our birthday block, we'll do so now.
+	if birthdayStamp == nil {
+		var err error
+		birthdayStamp, err = locateBirthdayBlock(
+			chainClient, w.addrStore.Birthday(),
+		)
+		if err != nil {
+			return fmt.Errorf("unable to locate birthday block: %w",
+				err)
+		}
+
+		// We'll also determine our initial sync starting height. This
+		// is needed as the wallet can now begin storing blocks from an
+		// arbitrary height, rather than all the blocks from genesis, so
+		// we persist this height to ensure we don't store any blocks
+		// before it.
+		startHeight := birthdayStamp.Height
+
+		// With the starting height obtained, get the remaining block
+		// details required by the wallet.
+		startHash, err := chainClient.GetBlockHash(int64(startHeight))
+		if err != nil {
+			return err
+		}
+		startHeader, err := chainClient.GetBlockHeader(startHash)
+		if err != nil {
+			return err
+		}
+
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+			err := w.addrStore.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+				Hash:      *startHash,
+				Height:    startHeight,
+				Timestamp: startHeader.Timestamp,
+			})
+			if err != nil {
+				return err
+			}
+
+			return w.addrStore.SetBirthdayBlock(
+				ns, *birthdayStamp, true,
+			)
+		})
+		if err != nil {
+			return fmt.Errorf("unable to persist initial sync "+
+				"data: %w", err)
+		}
+	}
+
+	// If the wallet requested an on-chain recovery of its funds, we'll do
+	// so now.
+	if w.recoveryWindow > 0 {
+		if err := w.recovery(chainClient, birthdayStamp); err != nil {
+			return fmt.Errorf("unable to perform wallet recovery: "+
+				"%w", err)
+		}
+	}
+
+	// Compare previously-seen blocks against the current chain. If any of
+	// these blocks no longer exist, rollback all of the missing blocks
+	// before catching up with the rescan.
+	rollback := false
+	rollbackStamp := w.addrStore.SyncedTo()
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		for height := rollbackStamp.Height; true; height-- {
+			hash, err := w.addrStore.BlockHash(addrmgrNs, height)
+			if err != nil {
+				return err
+			}
+			chainHash, err := chainClient.GetBlockHash(int64(height))
+			if err != nil {
+				return err
+			}
+			header, err := chainClient.GetBlockHeader(chainHash)
+			if err != nil {
+				return err
+			}
+
+			rollbackStamp.Hash = *chainHash
+			rollbackStamp.Height = height
+			rollbackStamp.Timestamp = header.Timestamp
+
+			if bytes.Equal(hash[:], chainHash[:]) {
+				break
+			}
+			rollback = true
+		}
+
+		// If a rollback did not happen, we can proceed safely.
+		if !rollback {
+			return nil
+		}
+
+		// Otherwise, we'll mark this as our new synced height.
+		err := w.addrStore.SetSyncedTo(addrmgrNs, &rollbackStamp)
+		if err != nil {
+			return err
+		}
+
+		// If the rollback happened to go beyond our birthday stamp,
+		// we'll need to find a new one by syncing with the chain again
+		// until finding one.
+		if rollbackStamp.Height <= birthdayStamp.Height &&
+			rollbackStamp.Hash != birthdayStamp.Hash {
+
+			err := w.addrStore.SetBirthdayBlock(
+				addrmgrNs, rollbackStamp, true,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Finally, we'll roll back our transaction store to reflect the
+		// stale state. `Rollback` unconfirms transactions at and beyond
+		// the passed height, so add one to the new synced-to height to
+		// prevent unconfirming transactions in the synced-to block.
+		return w.txStore.Rollback(txmgrNs, rollbackStamp.Height+1)
+	})
+	if err != nil {
+		return err
+	}
+
+	// Request notifications for connected and disconnected blocks.
+	//
+	// TODO(jrick): Either request this notification only once, or when
+	// rpcclient is modified to allow some notification request to not
+	// automatically resent on reconnect, include the notifyblocks request
+	// as well.  I am leaning towards allowing off all rpcclient
+	// notification re-registrations, in which case the code here should be
+	// left as is.
+	if err := chainClient.NotifyBlocks(); err != nil {
+		return err
+	}
+
+	// Finally, we'll trigger a wallet rescan and request notifications for
+	// transactions sending to all wallet addresses and spending all wallet
+	// UTXOs.
+	var (
+		addrs   []btcutil.Address
+		unspent []wtxmgr.Credit
+	)
+	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+		addrs, unspent, err = w.activeData(dbtx)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	return w.rescanWithTarget(addrs, unspent, nil)
+}
+
+// isDevEnv determines whether the wallet is currently under a local developer
+// environment, e.g. simnet or regtest.
+func (w *Wallet) isDevEnv() bool {
+	switch uint32(w.ChainParams().Net) {
+	case uint32(chaincfg.RegressionNetParams.Net):
+	case uint32(chaincfg.SimNetParams.Net):
+	default:
+		return false
+	}
+	return true
+}
+
+// waitUntilBackendSynced blocks until the chain backend considers itself
+// "current".
+func (w *Wallet) waitUntilBackendSynced(chainClient chain.Interface) error {
+	// We'll poll every second to determine if our chain considers itself
+	// "current".
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C:
+			if chainClient.IsCurrent() {
+				return nil
+			}
+		case <-w.quitChan():
+			return ErrWalletShuttingDown
+		}
+	}
+}
+
+// recoverySyncer is used to synchronize wallet and address manager locking
+// with the end of recovery. (*Wallet).recovery will store a recoverySyncer
+// when invoked, and will close the done chan upon exit. Setting the quit flag
+// will cause recovery to end after the current batch of blocks.
+type recoverySyncer struct {
+	done chan struct{}
+	quit uint32 // atomic
+}
+
+// recovery attempts to recover any unspent outputs that pay to any of our
+// addresses starting from our birthday, or the wallet's tip (if higher), which
+// would indicate resuming a recovery after a restart.
+func (w *Wallet) recovery(chainClient chain.Interface,
+	birthdayBlock *waddrmgr.BlockStamp) error {
+
+	log.Infof("RECOVERY MODE ENABLED -- rescanning for used addresses "+
+		"with recovery_window=%d", w.recoveryWindow)
+
+	// Wallet locking must synchronize with the end of recovery, since use of
+	// keys in recovery is racy with manager IsLocked checks, which could
+	// result in enrypting data with a zeroed key.
+	syncer := &recoverySyncer{done: make(chan struct{})}
+	w.recovering.Store(syncer)
+	defer close(syncer.done)
+
+	// We'll initialize the recovery manager with a default batch size of
+	// 2000.
+	recoveryMgr := NewRecoveryManager(
+		w.recoveryWindow, recoveryBatchSize, w.chainParams,
+	)
+
+	// In the event that this recovery is being resumed, we will need to
+	// repopulate all found addresses from the database. Ideally, for basic
+	// recovery, we would only do so for the default scopes, but due to a
+	// bug in which the wallet would create change addresses outside of the
+	// default scopes, it's necessary to attempt all registered key scopes.
+	scopedMgrs := make(map[waddrmgr.KeyScope]waddrmgr.AccountStore)
+	for _, scopedMgr := range w.addrStore.ActiveScopedKeyManagers() {
+		scopedMgrs[scopedMgr.Scope()] = scopedMgr
+	}
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		txMgrNS := tx.ReadBucket(wtxmgrNamespaceKey)
+
+		credits, err := w.txStore.UnspentOutputs(txMgrNS)
+		if err != nil {
+			return err
+		}
+		addrMgrNS := tx.ReadBucket(waddrmgrNamespaceKey)
+		return recoveryMgr.Resurrect(addrMgrNS, scopedMgrs, credits)
+	})
+	if err != nil {
+		return err
+	}
+
+	// Fetch the best height from the backend to determine when we should
+	// stop.
+	_, bestHeight, err := chainClient.GetBestBlock()
+	if err != nil {
+		return err
+	}
+
+	// Now we can begin scanning the chain from the wallet's current tip to
+	// ensure we properly handle restarts. Since the recovery process itself
+	// acts as rescan, we'll also update our wallet's synced state along the
+	// way to reflect the blocks we process and prevent rescanning them
+	// later on.
+	//
+	// NOTE: We purposefully don't update our best height since we assume
+	// that a wallet rescan will be performed from the wallet's tip, which
+	// will be of bestHeight after completing the recovery process.
+	var blocks []*waddrmgr.BlockStamp
+
+	startHeight := w.addrStore.SyncedTo().Height + 1
+	for height := startHeight; height <= bestHeight; height++ {
+		if atomic.LoadUint32(&syncer.quit) == 1 {
+			return errors.New("recovery: forced shutdown")
+		}
+
+		hash, err := chainClient.GetBlockHash(int64(height))
+		if err != nil {
+			return err
+		}
+		header, err := chainClient.GetBlockHeader(hash)
+		if err != nil {
+			return err
+		}
+		blocks = append(blocks, &waddrmgr.BlockStamp{
+			Hash:      *hash,
+			Height:    height,
+			Timestamp: header.Timestamp,
+		})
+
+		// It's possible for us to run into blocks before our birthday
+		// if our birthday is after our reorg safe height, so we'll make
+		// sure to not add those to the batch.
+		if height >= birthdayBlock.Height {
+			recoveryMgr.AddToBlockBatch(
+				hash, height, header.Timestamp,
+			)
+		}
+
+		// We'll perform our recovery in batches of 2000 blocks.  It's
+		// possible for us to reach our best height without exceeding
+		// the recovery batch size, so we can proceed to commit our
+		// state to disk.
+		recoveryBatch := recoveryMgr.BlockBatch()
+		if len(recoveryBatch) == recoveryBatchSize || height == bestHeight {
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				if err := w.recoverScopedAddresses(
+					chainClient, tx, ns, recoveryBatch,
+					recoveryMgr.State(), scopedMgrs,
+				); err != nil {
+					return err
+				}
+
+				// TODO: Any error here will roll back this
+				// entire tx. This may cause the in memory sync
+				// point to become desyncronized. Refactor so
+				// that this cannot happen.
+				for _, block := range blocks {
+					err := w.addrStore.SetSyncedTo(
+						ns, block,
+					)
+					if err != nil {
+						return err
+					}
+				}
+
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			if len(recoveryBatch) > 0 {
+				log.Infof("Recovered addresses from blocks "+
+					"%d-%d", recoveryBatch[0].Height,
+					recoveryBatch[len(recoveryBatch)-1].Height)
+			}
+
+			// Clear the batch of all processed blocks to reuse the
+			// same memory for future batches.
+			blocks = blocks[:0]
+			recoveryMgr.ResetBlockBatch()
+		}
+	}
+
+	return nil
+}
+
+// recoverScopedAddresses scans a range of blocks in attempts to recover any
+// previously used addresses for a particular account derivation path. At a high
+// level, the algorithm works as follows:
+//
+//  1. Ensure internal and external branch horizons are fully expanded.
+//  2. Filter the entire range of blocks, stopping if a non-zero number of
+//     address are contained in a particular block.
+//  3. Record all internal and external addresses found in the block.
+//  4. Record any outpoints found in the block that should be watched for spends
+//  5. Trim the range of blocks up to and including the one reporting the addrs.
+//  6. Repeat from (1) if there are still more blocks in the range.
+//
+// TODO(conner): parallelize/pipeline/cache intermediate network requests
+func (w *Wallet) recoverScopedAddresses(
+	chainClient chain.Interface,
+	tx walletdb.ReadWriteTx,
+	ns walletdb.ReadWriteBucket,
+	batch []wtxmgr.BlockMeta,
+	recoveryState *RecoveryState,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore) error {
+
+	// If there are no blocks in the batch, we are done.
+	if len(batch) == 0 {
+		return nil
+	}
+
+	log.Infof("Scanning %d blocks for recoverable addresses", len(batch))
+
+expandHorizons:
+	for scope, scopedMgr := range scopedMgrs {
+		scopeState := recoveryState.StateForScope(scope)
+		err := expandScopeHorizons(ns, scopedMgr, scopeState)
+		if err != nil {
+			return err
+		}
+	}
+
+	// With the internal and external horizons properly expanded, we now
+	// construct the filter blocks request. The request includes the range
+	// of blocks we intend to scan, in addition to the scope-index -> addr
+	// map for all internal and external branches.
+	filterReq := newFilterBlocksRequest(batch, scopedMgrs, recoveryState)
+
+	// Initiate the filter blocks request using our chain backend. If an
+	// error occurs, we are unable to proceed with the recovery.
+	filterResp, err := chainClient.FilterBlocks(filterReq)
+	if err != nil {
+		return err
+	}
+
+	// If the filter response is empty, this signals that the rest of the
+	// batch was completed, and no other addresses were discovered. As a
+	// result, no further modifications to our recovery state are required
+	// and we can proceed to the next batch.
+	if filterResp == nil {
+		return nil
+	}
+
+	// Otherwise, retrieve the block info for the block that detected a
+	// non-zero number of address matches.
+	block := batch[filterResp.BatchIndex]
+
+	// Log any non-trivial findings of addresses or outpoints.
+	logFilterBlocksResp(block, filterResp)
+
+	// Report any external or internal addresses found as a result of the
+	// appropriate branch recovery state. Adding indexes above the
+	// last-found index of either will result in the horizons being expanded
+	// upon the next iteration. Any found addresses are also marked used
+	// using the scoped key manager.
+	err = extendFoundAddresses(ns, filterResp, scopedMgrs, recoveryState)
+	if err != nil {
+		return err
+	}
+
+	// Update the global set of watched outpoints with any that were found
+	// in the block.
+	for outPoint, addr := range filterResp.FoundOutPoints {
+		outPoint := outPoint
+		recoveryState.AddWatchedOutPoint(&outPoint, addr)
+	}
+
+	// Finally, record all of the relevant transactions that were returned
+	// in the filter blocks response. This ensures that these transactions
+	// and their outputs are tracked when the final rescan is performed.
+	for _, txn := range filterResp.RelevantTxns {
+		txRecord, err := wtxmgr.NewTxRecordFromMsgTx(
+			txn, filterResp.BlockMeta.Time,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = w.addRelevantTx(tx, txRecord, &filterResp.BlockMeta)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Update the batch to indicate that we've processed all block through
+	// the one that returned found addresses.
+	batch = batch[filterResp.BatchIndex+1:]
+
+	// If this was not the last block in the batch, we will repeat the
+	// filtering process again after expanding our horizons.
+	if len(batch) > 0 {
+		goto expandHorizons
+	}
+
+	return nil
+}
+
+// expandScopeHorizons ensures that the ScopeRecoveryState has an adequately
+// sized look ahead for both its internal and external branches. The keys
+// derived here are added to the scope's recovery state, but do not affect the
+// persistent state of the wallet. If any invalid child keys are detected, the
+// horizon will be properly extended such that our lookahead always includes the
+// proper number of valid child keys.
+func expandScopeHorizons(ns walletdb.ReadWriteBucket,
+	scopedMgr waddrmgr.AccountStore,
+	scopeState *ScopeRecoveryState) error {
+
+	// Compute the current external horizon and the number of addresses we
+	// must derive to ensure we maintain a sufficient recovery window for
+	// the external branch.
+	exHorizon, exWindow := scopeState.ExternalBranch.ExtendHorizon()
+	count, childIndex := uint32(0), exHorizon
+	for count < exWindow {
+		keyPath := externalKeyPath(childIndex)
+		addr, err := scopedMgr.DeriveFromKeyPath(ns, keyPath)
+		switch {
+		case err == hdkeychain.ErrInvalidChild:
+			// Record the existence of an invalid child with the
+			// external branch's recovery state. This also
+			// increments the branch's horizon so that it accounts
+			// for this skipped child index.
+			scopeState.ExternalBranch.MarkInvalidChild(childIndex)
+			childIndex++
+			continue
+
+		case err != nil:
+			return err
+		}
+
+		// Register the newly generated external address and child index
+		// with the external branch recovery state.
+		scopeState.ExternalBranch.AddAddr(childIndex, addr.Address())
+
+		childIndex++
+		count++
+	}
+
+	// Compute the current internal horizon and the number of addresses we
+	// must derive to ensure we maintain a sufficient recovery window for
+	// the internal branch.
+	inHorizon, inWindow := scopeState.InternalBranch.ExtendHorizon()
+	count, childIndex = 0, inHorizon
+	for count < inWindow {
+		keyPath := internalKeyPath(childIndex)
+		addr, err := scopedMgr.DeriveFromKeyPath(ns, keyPath)
+		switch {
+		case err == hdkeychain.ErrInvalidChild:
+			// Record the existence of an invalid child with the
+			// internal branch's recovery state. This also
+			// increments the branch's horizon so that it accounts
+			// for this skipped child index.
+			scopeState.InternalBranch.MarkInvalidChild(childIndex)
+			childIndex++
+			continue
+
+		case err != nil:
+			return err
+		}
+
+		// Register the newly generated internal address and child index
+		// with the internal branch recovery state.
+		scopeState.InternalBranch.AddAddr(childIndex, addr.Address())
+
+		childIndex++
+		count++
+	}
+
+	return nil
+}
+
+// externalKeyPath returns the relative external derivation path /0/0/index.
+func externalKeyPath(index uint32) waddrmgr.DerivationPath {
+	return waddrmgr.DerivationPath{
+		InternalAccount: waddrmgr.DefaultAccountNum,
+		Account:         waddrmgr.DefaultAccountNum,
+		Branch:          waddrmgr.ExternalBranch,
+		Index:           index,
+	}
+}
+
+// internalKeyPath returns the relative internal derivation path /0/1/index.
+func internalKeyPath(index uint32) waddrmgr.DerivationPath {
+	return waddrmgr.DerivationPath{
+		InternalAccount: waddrmgr.DefaultAccountNum,
+		Account:         waddrmgr.DefaultAccountNum,
+		Branch:          waddrmgr.InternalBranch,
+		Index:           index,
+	}
+}
+
+// newFilterBlocksRequest constructs FilterBlocksRequests using our current
+// block range, scoped managers, and recovery state.
+func newFilterBlocksRequest(batch []wtxmgr.BlockMeta,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
+	recoveryState *RecoveryState) *chain.FilterBlocksRequest {
+
+	filterReq := &chain.FilterBlocksRequest{
+		Blocks:           batch,
+		ExternalAddrs:    make(map[waddrmgr.ScopedIndex]btcutil.Address),
+		InternalAddrs:    make(map[waddrmgr.ScopedIndex]btcutil.Address),
+		WatchedOutPoints: recoveryState.WatchedOutPoints(),
+	}
+
+	// Populate the external and internal addresses by merging the addresses
+	// sets belong to all currently tracked scopes.
+	for scope := range scopedMgrs {
+		scopeState := recoveryState.StateForScope(scope)
+		for index, addr := range scopeState.ExternalBranch.Addrs() {
+			scopedIndex := waddrmgr.ScopedIndex{
+				Scope: scope,
+				Index: index,
+			}
+			filterReq.ExternalAddrs[scopedIndex] = addr
+		}
+		for index, addr := range scopeState.InternalBranch.Addrs() {
+			scopedIndex := waddrmgr.ScopedIndex{
+				Scope: scope,
+				Index: index,
+			}
+			filterReq.InternalAddrs[scopedIndex] = addr
+		}
+	}
+
+	return filterReq
+}
+
+// extendFoundAddresses accepts a filter blocks response that contains addresses
+// found on chain, and advances the state of all relevant derivation paths to
+// match the highest found child index for each branch.
+func extendFoundAddresses(ns walletdb.ReadWriteBucket,
+	filterResp *chain.FilterBlocksResponse,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
+	recoveryState *RecoveryState) error {
+
+	// Mark all recovered external addresses as used. This will be done only
+	// for scopes that reported a non-zero number of external addresses in
+	// this block.
+	for scope, indexes := range filterResp.FoundExternalAddrs {
+		// First, report all external child indexes found for this
+		// scope. This ensures that the external last-found index will
+		// be updated to include the maximum child index seen thus far.
+		scopeState := recoveryState.StateForScope(scope)
+		for index := range indexes {
+			scopeState.ExternalBranch.ReportFound(index)
+		}
+
+		scopedMgr := scopedMgrs[scope]
+
+		// Now, with all found addresses reported, derive and extend all
+		// external addresses up to and including the current last found
+		// index for this scope.
+		exNextUnfound := scopeState.ExternalBranch.NextUnfound()
+
+		exLastFound := exNextUnfound
+		if exLastFound > 0 {
+			exLastFound--
+		}
+
+		err := scopedMgr.ExtendExternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, exLastFound,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Finally, with the scope's addresses extended, we mark used
+		// the external addresses that were found in the block and
+		// belong to this scope.
+		for index := range indexes {
+			addr := scopeState.ExternalBranch.GetAddr(index)
+			err := scopedMgr.MarkUsed(ns, addr)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// Mark all recovered internal addresses as used. This will be done only
+	// for scopes that reported a non-zero number of internal addresses in
+	// this block.
+	for scope, indexes := range filterResp.FoundInternalAddrs {
+		// First, report all internal child indexes found for this
+		// scope. This ensures that the internal last-found index will
+		// be updated to include the maximum child index seen thus far.
+		scopeState := recoveryState.StateForScope(scope)
+		for index := range indexes {
+			scopeState.InternalBranch.ReportFound(index)
+		}
+
+		scopedMgr := scopedMgrs[scope]
+
+		// Now, with all found addresses reported, derive and extend all
+		// internal addresses up to and including the current last found
+		// index for this scope.
+		inNextUnfound := scopeState.InternalBranch.NextUnfound()
+
+		inLastFound := inNextUnfound
+		if inLastFound > 0 {
+			inLastFound--
+		}
+		err := scopedMgr.ExtendInternalAddresses(
+			ns, waddrmgr.DefaultAccountNum, inLastFound,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Finally, with the scope's addresses extended, we mark used
+		// the internal addresses that were found in the blockand belong
+		// to this scope.
+		for index := range indexes {
+			addr := scopeState.InternalBranch.GetAddr(index)
+			err := scopedMgr.MarkUsed(ns, addr)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// logFilterBlocksResp provides useful logging information when filtering
+// succeeded in finding relevant transactions.
+func logFilterBlocksResp(block wtxmgr.BlockMeta,
+	resp *chain.FilterBlocksResponse) {
+
+	// Log the number of external addresses found in this block.
+	var nFoundExternal int
+	for _, indexes := range resp.FoundExternalAddrs {
+		nFoundExternal += len(indexes)
+	}
+	if nFoundExternal > 0 {
+		log.Infof("Recovered %d external addrs at height=%d hash=%v",
+			nFoundExternal, block.Height, block.Hash)
+	}
+
+	// Log the number of internal addresses found in this block.
+	var nFoundInternal int
+	for _, indexes := range resp.FoundInternalAddrs {
+		nFoundInternal += len(indexes)
+	}
+	if nFoundInternal > 0 {
+		log.Infof("Recovered %d internal addrs at height=%d hash=%v",
+			nFoundInternal, block.Height, block.Hash)
+	}
+
+	// Log the number of outpoints found in this block.
+	nFoundOutPoints := len(resp.FoundOutPoints)
+	if nFoundOutPoints > 0 {
+		log.Infof("Found %d spends from watched outpoints at "+
+			"height=%d hash=%v",
+			nFoundOutPoints, block.Height, block.Hash)
+	}
+}
+
+type (
+	createTxRequest struct {
+		coinSelectKeyScope    *waddrmgr.KeyScope
+		changeKeyScope        *waddrmgr.KeyScope
+		account               uint32
+		outputs               []*wire.TxOut
+		minconf               int32
+		feeSatPerKB           btcutil.Amount
+		coinSelectionStrategy CoinSelectionStrategy
+		dryRun                bool
+		resp                  chan createTxResponse
+		selectUtxos           []wire.OutPoint
+		allowUtxo             func(wtxmgr.Credit) bool
+	}
+	createTxResponse struct {
+		tx  *txauthor.AuthoredTx
+		err error
+	}
+)
+
+// txCreator is responsible for the input selection and creation of
+// transactions.  These functions are the responsibility of this method
+// (designed to be run as its own goroutine) since input selection must be
+// serialized, or else it is possible to create double spends by choosing the
+// same inputs for multiple transactions.  Along with input selection, this
+// method is also responsible for the signing of transactions, since we don't
+// want to end up in a situation where we run out of inputs as multiple
+// transactions are being created.  In this situation, it would then be possible
+// for both requests, rather than just one, to fail due to not enough available
+// inputs.
+func (w *Wallet) txCreator() {
+	quit := w.quitChan()
+out:
+	for {
+		select {
+		case txr := <-w.createTxRequests:
+			// If the wallet can be locked because it contains
+			// private key material, we need to prevent it from
+			// doing so while we are assembling the transaction.
+			release := func() {}
+			if !w.addrStore.WatchOnly() {
+				heldUnlock, err := w.holdUnlock()
+				if err != nil {
+					txr.resp <- createTxResponse{nil, err}
+					continue
+				}
+
+				release = heldUnlock.release
+			}
+
+			tx, err := w.txToOutputs(
+				txr.outputs, txr.coinSelectKeyScope,
+				txr.changeKeyScope, txr.account, txr.minconf,
+				txr.feeSatPerKB, txr.coinSelectionStrategy,
+				txr.dryRun, txr.selectUtxos, txr.allowUtxo,
+			)
+
+			release()
+			txr.resp <- createTxResponse{tx, err}
+		case <-quit:
+			break out
+		}
+	}
+	w.wg.Done()
+}
+
+// txCreateOptions is a set of optional arguments to modify the tx creation
+// process. This can be used to do things like use a custom coin selection
+// scope, which otherwise will default to the specified coin selection scope.
+type txCreateOptions struct {
+	changeKeyScope *waddrmgr.KeyScope
+	selectUtxos    []wire.OutPoint
+	allowUtxo      func(wtxmgr.Credit) bool
+}
+
+// TxCreateOption is a set of optional arguments to modify the tx creation
+// process. This can be used to do things like use a custom coin selection
+// scope, which otherwise will default to the specified coin selection scope.
+type TxCreateOption func(*txCreateOptions)
+
+// defaultTxCreateOptions is the default set of options.
+func defaultTxCreateOptions() *txCreateOptions {
+	return &txCreateOptions{}
+}
+
+// WithCustomChangeScope can be used to specify a change scope for the change
+// address. If unspecified, then the same scope will be used for both inputs
+// and the change addr. Not specifying any scope at all (nil) will use all
+// available coins and the default change scope (P2TR).
+func WithCustomChangeScope(changeScope *waddrmgr.KeyScope) TxCreateOption {
+	return func(opts *txCreateOptions) {
+		opts.changeKeyScope = changeScope
+	}
+}
+
+// WithCustomSelectUtxos is used to specify the inputs to be used while
+// creating txns.
+func WithCustomSelectUtxos(utxos []wire.OutPoint) TxCreateOption {
+	return func(opts *txCreateOptions) {
+		opts.selectUtxos = utxos
+	}
+}
+
+// WithUtxoFilter is used to restrict the selection of the internal wallet
+// inputs by further external conditions. Utxos which pass the filter are
+// considered when creating the transaction.
+func WithUtxoFilter(allowUtxo func(utxo wtxmgr.Credit) bool) TxCreateOption {
+	return func(opts *txCreateOptions) {
+		opts.allowUtxo = allowUtxo
+	}
+}
+
+type (
+	unlockRequest struct {
+		passphrase []byte
+		lockAfter  <-chan time.Time // nil prevents the timeout.
+		err        chan error
+	}
+
+	changePassphraseRequest struct {
+		old, new []byte
+		private  bool
+		err      chan error
+	}
+
+	changePassphrasesRequest struct {
+		publicOld, publicNew   []byte
+		privateOld, privateNew []byte
+		err                    chan error
+	}
+
+	// heldUnlock is a tool to prevent the wallet from automatically
+	// locking after some timeout before an operation which needed
+	// the unlocked wallet has finished.  Any acquired heldUnlock
+	// *must* be released (preferably with a defer) or the wallet
+	// will forever remain unlocked.
+	heldUnlock chan struct{}
+)
+
+// endRecovery tells (*Wallet).recovery to stop, if running, and returns a
+// channel that will be closed when the recovery routine exits.
+func (w *Wallet) endRecovery() <-chan struct{} {
+	if recoverySyncI := w.recovering.Load(); recoverySyncI != nil {
+		recoverySync := recoverySyncI.(*recoverySyncer)
+
+		// If recovery is still running, it will end early with an error
+		// once we set the quit flag.
+		atomic.StoreUint32(&recoverySync.quit, 1)
+
+		return recoverySync.done
+	}
+	c := make(chan struct{})
+	close(c)
+	return c
+}
+
+// walletLocker manages the locked/unlocked state of a wallet.
+func (w *Wallet) walletLocker() {
+	var timeout <-chan time.Time
+	holdChan := make(heldUnlock)
+	quit := w.quitChan()
+out:
+	for {
+		select {
+		case req := <-w.unlockRequests:
+			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+				return w.addrStore.Unlock(
+					addrmgrNs, req.passphrase,
+				)
+			})
+			if err != nil {
+				req.err <- err
+				continue
+			}
+			timeout = req.lockAfter
+			if timeout == nil {
+				log.Info("The wallet has been unlocked without a time limit")
+			} else {
+				log.Info("The wallet has been temporarily unlocked")
+			}
+			req.err <- nil
+			continue
+
+		case req := <-w.changePassphrase:
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+				return w.addrStore.ChangePassphrase(
+					addrmgrNs, req.old, req.new, req.private,
+					&waddrmgr.DefaultScryptOptions,
+				)
+			})
+			req.err <- err
+			continue
+
+		case req := <-w.changePassphrases:
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+				err := w.addrStore.ChangePassphrase(
+					addrmgrNs, req.publicOld, req.publicNew,
+					false, &waddrmgr.DefaultScryptOptions,
+				)
+				if err != nil {
+					return err
+				}
+
+				return w.addrStore.ChangePassphrase(
+					addrmgrNs, req.privateOld, req.privateNew,
+					true, &waddrmgr.DefaultScryptOptions,
+				)
+			})
+			req.err <- err
+			continue
+
+		case req := <-w.holdUnlockRequests:
+			if w.addrStore.IsLocked() {
+				close(req)
+				continue
+			}
+
+			req <- holdChan
+			<-holdChan // Block until the lock is released.
+
+			// If, after holding onto the unlocked wallet for some
+			// time, the timeout has expired, lock it now instead
+			// of hoping it gets unlocked next time the top level
+			// select runs.
+			select {
+			case <-timeout:
+				// Let the top level select fallthrough so the
+				// wallet is locked.
+			default:
+				continue
+			}
+
+		case w.lockState <- w.addrStore.IsLocked():
+			continue
+
+		case <-quit:
+			break out
+
+		case <-w.lockRequests:
+		case <-timeout:
+		}
+
+		// Select statement fell through by an explicit lock or the
+		// timer expiring.  Lock the manager here.
+
+		// We can't lock the manager if recovery is active because we use
+		// cryptoKeyPriv and cryptoKeyScript in recovery.
+		<-w.endRecovery()
+
+		timeout = nil
+
+		err := w.addrStore.Lock()
+		if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+			log.Errorf("Could not lock wallet: %v", err)
+		} else {
+			log.Info("The wallet has been locked")
+		}
+	}
+	w.wg.Done()
+}
+
+// Locked returns whether the account manager for a wallet is locked.
+func (w *Wallet) Locked() bool {
+	return <-w.lockState
+}
+
+// holdUnlock prevents the wallet from being locked.  The heldUnlock object
+// *must* be released, or the wallet will forever remain unlocked.
+//
+// TODO: To prevent the above scenario, perhaps closures should be passed
+// to the walletLocker goroutine and disallow callers from explicitly
+
+// handling the locking mechanism.
+func (w *Wallet) holdUnlock() (heldUnlock, error) {
+	req := make(chan heldUnlock)
+	w.holdUnlockRequests <- req
+	hl, ok := <-req
+	if !ok {
+		// TODO(davec): This should be defined and exported from
+		// waddrmgr.
+		return nil, waddrmgr.ManagerError{
+			ErrorCode:   waddrmgr.ErrLocked,
+			Description: "address manager is locked",
+		}
+	}
+	return hl, nil
+}
+
+// release releases the hold on the unlocked-state of the wallet and allows the
+// wallet to be locked again.  If a lock timeout has already expired, the
+// wallet is locked again as soon as release is called.
+func (c heldUnlock) release() {
+	c <- struct{}{}
+}
+
+// ChangePrivatePassphrase attempts to change the passphrase for a wallet from
+// old to new.  Changing the passphrase is synchronized with all other address
+// manager locking and unlocking.  The lock state will be the same as it was
+// before the password change.
+func (w *Wallet) ChangePrivatePassphrase(old, new []byte) error {
+	err := make(chan error, 1)
+	w.changePassphrase <- changePassphraseRequest{
+		old:     old,
+		new:     new,
+		private: true,
+		err:     err,
+	}
+	return <-err
+}
+
+// ChangePublicPassphrase modifies the public passphrase of the wallet.
+func (w *Wallet) ChangePublicPassphrase(old, new []byte) error {
+	err := make(chan error, 1)
+	w.changePassphrase <- changePassphraseRequest{
+		old:     old,
+		new:     new,
+		private: false,
+		err:     err,
+	}
+	return <-err
+}
+
+// ChangePassphrases modifies the public and private passphrase of the wallet
+// atomically.
+func (w *Wallet) ChangePassphrases(publicOld, publicNew, privateOld,
+	privateNew []byte) error {
+
+	err := make(chan error, 1)
+	w.changePassphrases <- changePassphrasesRequest{
+		publicOld:  publicOld,
+		publicNew:  publicNew,
+		privateOld: privateOld,
+		privateNew: privateNew,
+		err:        err,
+	}
+	return <-err
+}
+
 // walletDeprecated encapsulates the legacy state and communication channels
 // that are being phased out in favor of the modern Controller and Syncer
 // architecture.
