@@ -518,3 +518,14 @@ func (w *Wallet) ListLeasedOutputs(
 
 	return leasedOutputs, err
 }
+
+// LockedOutpoint returns whether an outpoint has been marked as locked and
+// should not be used as an input for created transactions.
+func (w *Wallet) LockedOutpoint(op wire.OutPoint) bool {
+	w.lockedOutpointsMtx.Lock()
+	defer w.lockedOutpointsMtx.Unlock()
+
+	_, locked := w.lockedOutpoints[op]
+
+	return locked
+}

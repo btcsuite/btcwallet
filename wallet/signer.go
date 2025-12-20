@@ -836,3 +836,38 @@ func (w *Wallet) GetPrivKeyForAddress(_ context.Context, a btcutil.Address) (
 
 	return w.PrivKeyForAddress(a)
 }
+
+// PrivKeyForAddress looks up the associated private key for a P2PKH or P2PK
+// address.
+func (w *Wallet) PrivKeyForAddress(a btcutil.Address) (
+	*btcec.PrivateKey, error) {
+
+	var privKey *btcec.PrivateKey
+
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		addr, err := w.addrStore.Address(addrmgrNs, a)
+		if err != nil {
+			return fmt.Errorf("failed to get address: %w", err)
+		}
+
+		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			return ErrNoAssocPrivateKey
+		}
+
+		privKey, err = managedPubKeyAddr.PrivKey()
+		if err != nil {
+			return fmt.Errorf("failed to get private key: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to view database: %w", err)
+	}
+
+	return privKey, nil
+}

@@ -18,8 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -84,34 +82,6 @@ var (
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
 
-// Coin represents a spendable UTXO which is available for coin selection.
-type Coin struct {
-	wire.TxOut
-
-	wire.OutPoint
-}
-
-// CoinSelectionStrategy is an interface that represents a coin selection
-// strategy. A coin selection strategy is responsible for ordering, shuffling or
-// filtering a list of coins before they are passed to the coin selection
-// algorithm.
-type CoinSelectionStrategy interface {
-	// ArrangeCoins takes a list of coins and arranges them according to the
-	// specified coin selection strategy and fee rate.
-	ArrangeCoins(eligible []Coin, feeSatPerKb btcutil.Amount) ([]Coin,
-		error)
-}
-
-var (
-	// CoinSelectionLargest always picks the largest available utxo to add
-	// to the transaction next.
-	CoinSelectionLargest CoinSelectionStrategy = &LargestFirstCoinSelector{}
-
-	// CoinSelectionRandom randomly selects the next utxo to add to the
-	// transaction. This strategy prevents the creation of ever smaller
-	// utxos over time.
-	CoinSelectionRandom CoinSelectionStrategy = &RandomCoinSelector{}
-)
 
 // locateBirthdayBlock returns a block that meets the given birthday timestamp
 // by a margin of +/-2 hours. This is safe to do as the timestamp is already 2
@@ -236,44 +206,6 @@ type Wallet struct {
 // AccountAddresses returns the addresses for every created address for an
 // account.
 
-// PrivKeyForAddress looks up the associated private key for a P2PKH or P2PK
-// address.
-func (w *Wallet) PrivKeyForAddress(a btcutil.Address) (
-	*btcec.PrivateKey, error) {
-
-	var privKey *btcec.PrivateKey
-
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		addr, err := w.addrStore.Address(addrmgrNs, a)
-		if err != nil {
-			return err
-		}
-
-		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
-		if !ok {
-			return ErrNoAssocPrivateKey
-		}
-
-		privKey, err = managedPubKeyAddr.PrivKey()
-
-		return err
-	})
-
-	return privKey, err
-}
-
-// LockedOutpoint returns whether an outpoint has been marked as locked and
-// should not be used as an input for created transactions.
-func (w *Wallet) LockedOutpoint(op wire.OutPoint) bool {
-	w.lockedOutpointsMtx.Lock()
-	defer w.lockedOutpointsMtx.Unlock()
-
-	_, locked := w.lockedOutpoints[op]
-
-	return locked
-}
 
 // ChainParams returns the network parameters for the blockchain the wallet
 // belongs to.

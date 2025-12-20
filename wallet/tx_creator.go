@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -83,6 +84,34 @@ var (
 	//
 	//nolint:mnd // 1M sat/kvb default max fee.
 	DefaultMaxFeeRate = btcunit.NewSatPerKVByte(1_000_000)
+)
+
+// Coin represents a spendable UTXO which is available for coin selection.
+type Coin struct {
+	wire.TxOut
+	wire.OutPoint
+}
+
+// CoinSelectionStrategy is an interface that represents a coin selection
+// strategy. A coin selection strategy is responsible for ordering, shuffling or
+// filtering a list of coins before they are passed to the coin selection
+// algorithm.
+type CoinSelectionStrategy interface {
+	// ArrangeCoins takes a list of coins and arranges them according to the
+	// specified coin selection strategy and fee rate.
+	ArrangeCoins(eligible []Coin, feeSatPerKb btcutil.Amount) ([]Coin,
+		error)
+}
+
+var (
+	// CoinSelectionLargest always picks the largest available utxo to add
+	// to the transaction next.
+	CoinSelectionLargest CoinSelectionStrategy = &LargestFirstCoinSelector{}
+
+	// CoinSelectionRandom randomly selects the next utxo to add to the
+	// transaction. This strategy prevents the creation of ever smaller
+	// utxos over time.
+	CoinSelectionRandom CoinSelectionStrategy = &RandomCoinSelector{}
 )
 
 // TxCreator provides an interface for creating transactions. Its primary
