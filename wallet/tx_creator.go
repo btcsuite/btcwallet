@@ -761,9 +761,9 @@ func (w *Wallet) getEligibleUTXOs(dbtx walletdb.ReadTx,
 	switch source := source.(type) {
 	// If the source is nil, we'll use the default account.
 	case nil:
-		return w.findEligibleOutputs(
+		return w.filterEligibleOutputs(
 			dbtx, &waddrmgr.KeyScopeBIP0086,
-			waddrmgr.DefaultAccountNum, minconf, bs, nil,
+			waddrmgr.DefaultAccountNum, minconf, bs,
 		)
 
 	// If the source is a scoped account, we find all eligible outputs for
@@ -796,9 +796,7 @@ func (w *Wallet) getEligibleUTXOsFromAccount(dbtx walletdb.ReadTx,
 			source.AccountName)
 	}
 
-	return w.findEligibleOutputs(
-		dbtx, keyScope, account, minconf, bs, nil,
-	)
+	return w.filterEligibleOutputs(dbtx, keyScope, account, minconf, bs)
 }
 
 // getEligibleUTXOsFromList returns a slice of eligible UTXOs from a specified
@@ -899,7 +897,7 @@ func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 		currentInputValues = append(currentInputValues, credit.Amount)
 	}
 
-	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+	return func(_ btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
 		[]btcutil.Amount, [][]byte, error) {
 
 		return currentTotal, currentInputs, currentInputValues,
@@ -907,12 +905,15 @@ func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 	}
 }
 
-// findEligibleOutputs finds eligible outputs for the given key scope and
+// filterEligibleOutputs finds eligible outputs for the given key scope and
 // account.
-func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
+//
+// We will build a single query for this operation, so skip the linter for now.
+//
+//nolint:cyclop
+func (w *Wallet) filterEligibleOutputs(dbtx walletdb.ReadTx,
 	keyScope *waddrmgr.KeyScope, account uint32, minconf uint32,
-	bs *waddrmgr.BlockStamp,
-	allowUtxo func(utxo wtxmgr.Credit) bool) ([]wtxmgr.Credit, error) {
+	bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
 
 	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
@@ -930,13 +931,6 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 	eligible := make([]wtxmgr.Credit, 0, len(unspent))
 	for i := range unspent {
 		output := &unspent[i]
-
-		// Restrict the selected utxos if a filter function is provided.
-		if allowUtxo != nil &&
-			!allowUtxo(*output) {
-
-			continue
-		}
 
 		// Only include this output if it meets the required number of
 		// confirmations. Coinbase transactions must have reached
@@ -1001,9 +995,35 @@ func inputYieldsPositively(credit *wire.TxOut,
 	feeRatePerKb btcutil.Amount) bool {
 
 	inputSize := txsizes.GetMinInputVirtualSize(credit.PkScript)
-	inputFee := feeRatePerKb * btcutil.Amount(inputSize) / 1000
+	feeRate := btcunit.NewSatPerKVByte(feeRatePerKb)
+	inputFee := feeRate.FeeForVByte(btcunit.NewVByte(inputSize))
 
 	return inputFee < btcutil.Amount(credit.Value)
+}
+
+func getScriptSize(addrType waddrmgr.AddressType) (int, error) {
+	switch addrType {
+	case waddrmgr.PubKeyHash:
+		return txsizes.P2PKHPkScriptSize, nil
+
+	case waddrmgr.NestedWitnessPubKey:
+		return txsizes.NestedP2WPKHPkScriptSize, nil
+
+	case waddrmgr.WitnessPubKey:
+		return txsizes.P2WPKHPkScriptSize, nil
+
+	case waddrmgr.TaprootPubKey:
+		return txsizes.P2TRPkScriptSize, nil
+
+	case waddrmgr.Script, waddrmgr.RawPubKey, waddrmgr.WitnessScript,
+		waddrmgr.TaprootScript:
+		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			addrType)
+
+	default:
+		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			addrType)
+	}
 }
 
 // addrMgrWithChangeSource returns the address manager bucket and a change
@@ -1042,19 +1062,9 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 	}
 
 	// Compute the expected size of the script for the change address type.
-	var scriptSize int
-	switch addrType {
-	case waddrmgr.PubKeyHash:
-		scriptSize = txsizes.P2PKHPkScriptSize
-	case waddrmgr.NestedWitnessPubKey:
-		scriptSize = txsizes.NestedP2WPKHPkScriptSize
-	case waddrmgr.WitnessPubKey:
-		scriptSize = txsizes.P2WPKHPkScriptSize
-	case waddrmgr.TaprootPubKey:
-		scriptSize = txsizes.P2TRPkScriptSize
-	default:
-		return nil, nil, fmt.Errorf("unsupported address type: %v",
-			addrType)
+	scriptSize, err := getScriptSize(addrType)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	newChangeScript := func() ([]byte, error) {
@@ -1125,7 +1135,6 @@ func (*RandomCoinSelector) ArrangeCoins(eligible []Coin,
 	// value at the requested fee rate.
 	positivelyYielding := make([]Coin, 0, len(eligible))
 	for _, output := range eligible {
-
 		if !inputYieldsPositively(&output.TxOut, feeSatPerKb) {
 			continue
 		}

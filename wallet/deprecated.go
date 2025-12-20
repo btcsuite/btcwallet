@@ -6227,3 +6227,86 @@ type walletDeprecated struct {
 	// errors during initial sync.
 	syncRetryInterval time.Duration
 }
+
+// findEligibleOutputs finds eligible outputs for the given key scope and
+// account.
+func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
+	keyScope *waddrmgr.KeyScope, account uint32, minconf uint32,
+	bs *waddrmgr.BlockStamp,
+	allowUtxo func(utxo wtxmgr.Credit) bool) ([]wtxmgr.Credit, error) {
+
+	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+
+	unspent, err := w.txStore.UnspentOutputs(txmgrNs)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: Eventually all of these filters (except perhaps output locking)
+	// should be handled by the call to UnspentOutputs (or similar).
+	// Because one of these filters requires matching the output script to
+	// the desired account, this change depends on making wtxmgr a waddrmgr
+	// dependency and requesting unspent outputs for a single account.
+	eligible := make([]wtxmgr.Credit, 0, len(unspent))
+	for i := range unspent {
+		output := &unspent[i]
+
+		// Restrict the selected utxos if a filter function is provided.
+		if allowUtxo != nil && !allowUtxo(*output) {
+			continue
+		}
+
+		// Only include this output if it meets the required number of
+		// confirmations. Coinbase transactions must have reached
+		// maturity before their outputs may be spent.
+		if !hasMinConfs(minconf, output.Height, bs.Height) {
+			continue
+		}
+
+		if output.FromCoinBase {
+			target := w.chainParams.CoinbaseMaturity
+			if !hasMinConfs(
+				uint32(target), output.Height, bs.Height,
+			) {
+
+				continue
+			}
+		}
+
+		// Locked unspent outputs are skipped.
+		if w.LockedOutpoint(output.OutPoint) {
+			continue
+		}
+
+		// Only include the output if it is associated with the passed
+		// account.
+		//
+		// TODO: Handle multisig outputs by determining if enough of the
+		// addresses are controlled.
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, w.chainParams)
+		if err != nil || len(addrs) != 1 {
+			continue
+		}
+
+		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(
+			addrmgrNs, addrs[0],
+		)
+		if err != nil {
+			continue
+		}
+
+		if keyScope != nil && scopedMgr.Scope() != *keyScope {
+			continue
+		}
+
+		if addrAcct != account {
+			continue
+		}
+
+		eligible = append(eligible, *output)
+	}
+
+	return eligible, nil
+}

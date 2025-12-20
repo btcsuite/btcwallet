@@ -63,3 +63,5 @@ go 1.24.6
 // that we can freely move between tagged releases and development commits of
 // this module without needing to constantly update the go.mod file.
 replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
+
+replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
