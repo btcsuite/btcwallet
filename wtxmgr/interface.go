@@ -81,6 +81,11 @@ type TxStore interface {
 	InsertConfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 		block *BlockMeta, credits []CreditEntry) error
 
+	// InsertUnconfirmedTx records an unmined transaction and its associated
+	// credits in a single operation.
+	InsertUnconfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+		credits []CreditEntry) error
+
 	// AddCredit marks a transaction record as containing a transaction
 	// output spendable by wallet. The output is added unspent, and is
 	// marked spent when a new transaction spending the output is inserted
