@@ -40,6 +40,7 @@ func testWallet(t *testing.T) *Wallet {
 
 	chainClient := &mockChainClient{}
 	w.chainClient = chainClient
+	w.cfg.Chain = chainClient
 
 	// Start the wallet.
 	w.StartDeprecated()
