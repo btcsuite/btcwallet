@@ -1255,8 +1255,13 @@ func (c *BitcoindClient) filterBlock(block *wire.MsgBlock, height int32,
 		// transaction.
 		blockDetails.Index = i
 		txDetails := btcutil.NewTx(tx)
+
+		// We disable individual transaction notifications here because
+		// the full set of relevant transactions will be dispatched
+		// atomically via FilteredBlockConnected at the end of block
+		// processing.
 		isRelevant, rec, err := c.filterTx(
-			txDetails, blockDetails, notify,
+			txDetails, blockDetails, false,
 		)
 		if err != nil {
 			log.Warnf("Unable to filter transaction %v: %v",
@@ -1419,8 +1424,9 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 		c.mempool[*txDetails.Hash()] = struct{}{}
 	}
 
-	c.onRelevantTx(rec, blockDetails)
-
+	if notify {
+		c.onRelevantTx(rec, blockDetails)
+	}
 	return true, rec, nil
 }
 
