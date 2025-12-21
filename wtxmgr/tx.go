@@ -418,6 +418,28 @@ func (s *Store) InsertConfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
 	return nil
 }
 
+// InsertUnconfirmedTx records an unmined transaction and its associated credits
+// in a single operation. This is more efficient than calling InsertTx followed
+// by AddCredit for each output.
+func (s *Store) InsertUnconfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	credits []CreditEntry) error {
+
+	if err := s.insertMemPoolTx(ns, rec); err != nil && err != ErrDuplicateTx {
+		return err
+	}
+
+	for _, c := range credits {
+		isNew, err := s.addCredit(ns, rec, nil, c.Index, c.Change)
+		if err != nil {
+			return err
+		}
+		if isNew && s.NotifyUnspent != nil {
+			s.NotifyUnspent(&rec.Hash, c.Index)
+		}
+	}
+	return nil
+}
+
 // RemoveUnminedTx attempts to remove an unmined transaction from the
 // transaction store. This is to be used in the scenario that a transaction
 // that we attempt to rebroadcast, turns out to double spend one of our
