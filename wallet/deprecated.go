@@ -6311,3 +6311,13 @@ func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 
 	return eligible, nil
 }
+
+// RescanDeprecated begins a rescan for all active addresses and unspent outputs
+// of a wallet.  This is intended to be used to sync a wallet back up to the
+// current best block in the main chain, and is considered an initial sync
+// rescan.
+func (w *Wallet) RescanDeprecated(addrs []address.Address,
+	unspent []wtxmgr.Credit) error {
+
+	return w.rescanWithTarget(addrs, unspent, nil)
+}

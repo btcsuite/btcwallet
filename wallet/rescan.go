@@ -272,16 +272,6 @@ out:
 	w.wg.Done()
 }
 
-// Rescan begins a rescan for all active addresses and unspent outputs of
-// a wallet.  This is intended to be used to sync a wallet back up to the
-// current best block in the main chain, and is considered an initial sync
-// rescan.
-func (w *Wallet) Rescan(addrs []address.Address,
-	unspent []wtxmgr.Credit) error {
-
-	return w.rescanWithTarget(addrs, unspent, nil)
-}
-
 // rescanWithTarget performs a rescan starting at the optional startStamp. If
 // none is provided, the rescan will begin from the manager's sync tip.
 func (w *Wallet) rescanWithTarget(addrs []address.Address,
