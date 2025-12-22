@@ -95,9 +95,33 @@ func NextAvailablePort() int {
 		panic(fmt.Errorf("error parsing port: %w", err))
 	}
 
-	// We take the next one.
-	lastPort++
-	for lastPort < maxPort {
+	// lastPort has reached the max allowed port, we start with the default
+	// node port.
+	if lastPort >= maxPort {
+		lastPort = defaultNodePort
+	}
+
+	// Determine the first port to try.
+	nextPort := lastPort + 1
+
+	availablePort := findAvailablePort(nextPort)
+
+	err = os.WriteFile(
+		portFile, []byte(strconv.Itoa(availablePort)), filePerms,
+	)
+	if err != nil {
+		panic(fmt.Errorf("error updating port file: %w", err))
+	}
+
+	return availablePort
+}
+
+// findAvailablePort searches for an available port starting from the given
+// port. If it reaches the maximum port number, it wraps around to the default
+// node port and continues searching until it has checked the entire range.
+func findAvailablePort(startPort int) int {
+	currentPort := startPort
+	for {
 		// If there are no errors while attempting to listen on this
 		// port, close the socket and return it as available. While it
 		// could be the case that some other process picks up this port
@@ -105,29 +129,17 @@ func NextAvailablePort() int {
 		// the harness node, in practice in CI servers this seems much
 		// less likely than simply some other process already being
 		// bound at the start of the tests.
-		addr := fmt.Sprintf(ListenerFormat, lastPort)
+		addr := fmt.Sprintf(ListenerFormat, currentPort)
 
 		lc := &net.ListenConfig{}
 
 		l, err := lc.Listen(context.Background(), "tcp4", addr)
 		if err == nil {
-			err := l.Close()
-			if err == nil {
-				err := os.WriteFile(
-					portFile,
-					[]byte(strconv.Itoa(lastPort)),
-					filePerms,
-				)
-				if err != nil {
-					panic(fmt.Errorf("error updating "+
-						"port file: %w", err))
-				}
-
-				return lastPort
-			}
+			_ = l.Close()
+			return currentPort
 		}
 
-		lastPort++
+		currentPort++
 
 		// Start from the beginning if we reached the end of the port
 		// range. We need to do this because the lock file now is
@@ -135,8 +147,14 @@ func NextAvailablePort() int {
 		// boot/uptime cycle. So in order to make this work on
 		// developer's machines, we need to reset the port to the
 		// default value when we reach the end of the range.
-		if lastPort == maxPort {
-			lastPort = defaultNodePort
+		if currentPort > maxPort {
+			currentPort = defaultNodePort
+		}
+
+		// If we reached the start port again, it means no ports are
+		// available.
+		if currentPort == startPort {
+			break
 		}
 	}
 
