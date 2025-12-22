@@ -36,7 +36,7 @@ func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int64) (Bloc
 }
 
 const InsertBlock = `-- name: InsertBlock :exec
-INSERT INTO blocks (block_height, header_hash, block_timestamp)
+INSERT OR IGNORE INTO blocks (block_height, header_hash, block_timestamp)
 VALUES (?, ?, ?)
 `
 
