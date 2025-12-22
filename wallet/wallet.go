@@ -136,6 +136,7 @@ func locateBirthdayBlock(chainClient chainConn,
 
 	// Retrieve the lookup range for our block.
 	startHeight := int32(0)
+
 	_, bestHeight, err := chainClient.GetBestBlock()
 	if err != nil {
 		return nil, err
@@ -154,11 +155,15 @@ func locateBirthdayBlock(chainClient chainConn,
 	for {
 		// Retrieve the timestamp for the block halfway through our
 		// range.
+		//
+		//nolint:mnd // Division by 2 is standard for binary search.
 		mid := left + (right-left)/2
+
 		hash, err := chainClient.GetBlockHash(int64(mid))
 		if err != nil {
 			return nil, err
 		}
+
 		header, err := chainClient.GetBlockHeader(hash)
 		if err != nil {
 			return nil, err
@@ -175,6 +180,7 @@ func locateBirthdayBlock(chainClient chainConn,
 				Height:    mid,
 				Timestamp: header.Timestamp,
 			}
+
 			break
 		}
 
@@ -197,6 +203,7 @@ func locateBirthdayBlock(chainClient chainConn,
 			Height:    mid,
 			Timestamp: header.Timestamp,
 		}
+
 		break
 	}
 
