@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -189,4 +190,54 @@ func TestHandleChangePassphraseReq(t *testing.T) {
 	// Assert: Verify that the response indicates success.
 	resp := <-req.resp
 	require.NoError(t, resp)
+}
+
+// TestControllerStart verifies that the Start method correctly initializes the
+// wallet, verifying the birthday block, loading accounts, cleaning up locks,
+// and starting the syncer.
+func TestControllerStart(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a test wallet and mock all dependencies required for
+	// startup.
+	w, deps := createTestWalletWithMocks(t)
+
+	// 1. Mock verifyBirthday: Expect a call to retrieve the birthday
+	//    block.
+	bs := waddrmgr.BlockStamp{Height: 100}
+	deps.addrStore.On(
+		"BirthdayBlock", mock.Anything,
+	).Return(bs, true, nil).Once()
+
+	// 2. Mock DBGetAllAccounts: Expect a call to load active account
+	//    managers.
+	deps.addrStore.On(
+		"ActiveScopedKeyManagers",
+	).Return([]waddrmgr.AccountStore(nil)).Once()
+
+	// 3. Mock deleteExpiredLockedOutputs: Expect a call to cleanup expired
+	//    locks in the transaction store.
+	deps.txStore.On(
+		"DeleteExpiredLockedOutputs", mock.Anything,
+	).Return(nil).Once()
+
+	// 4. Mock syncer.run: Expect the syncer to be started.
+	deps.syncer.On(
+		"run", mock.Anything,
+	).Return(nil).Once()
+
+	// Act: Start the wallet.
+	err := w.Start(t.Context())
+
+	// Assert: Verify that Start returned no error and the wallet state is
+	// 'Started'.
+	require.NoError(t, err)
+	require.True(t, w.state.isStarted())
+
+	// Clean up
+	if w.cancel != nil {
+		w.cancel()
+	}
+
+	w.wg.Wait()
 }
