@@ -5,11 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -776,4 +779,80 @@ func TestAdvanceChainSync(t *testing.T) {
 	finished, err = s.advanceChainSync(t.Context())
 	require.NoError(t, err)
 	require.False(t, finished)
+}
+
+// TestHandleChainUpdate verifies notification handling.
+func TestHandleChainUpdate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock its dependencies for
+	// handling chain updates.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockChain := &mockChain{}
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, mockAddrStore, mockTxStore,
+		mockPublisher,
+	)
+
+	// Case 1: Test handling of a BlockConnected notification.
+	meta := wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 100}}
+
+	mockAddrStore.On(
+		"SetSyncedTo", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	// Act & Assert: Verify that a BlockConnected notification is
+	// correctly processed.
+	err := s.handleChainUpdate(t.Context(), chain.BlockConnected(meta))
+	require.NoError(t, err)
+
+	// Case 2: Test handling of a RelevantTx notification.
+	tx := wire.NewMsgTx(1)
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	require.NoError(t, err)
+	mockTxStore.On(
+		"InsertUnconfirmedTx", mock.Anything, mock.Anything,
+		mock.Anything,
+	).Return(nil).Once()
+
+	// Act & Assert: Verify that a RelevantTx notification is correctly
+	// processed.
+	err = s.handleChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+	require.NoError(t, err)
+}
+
+// TestExtractAddrEntries verifies address extraction from outputs.
+func TestExtractAddrEntries(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and create a P2PKH output for address
+	// extraction.
+	mockPublisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chaincfg.MainNetParams}, nil, nil,
+		mockPublisher,
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	txOut := &wire.TxOut{Value: 1000, PkScript: pkScript}
+
+	// Act: Extract address entries from the output.
+	entries := s.extractAddrEntries([]*wire.TxOut{txOut})
+
+	// Assert: Verify that the correct address was extracted.
+	require.Len(t, entries, 1)
+	require.Equal(t, addr.String(), entries[0].Address.String())
+	require.Equal(t, uint32(0), entries[0].Credit.Index)
 }
