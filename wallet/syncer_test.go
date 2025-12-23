@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -423,6 +425,70 @@ func TestScanBatchWithFullBlocks(t *testing.T) {
 	)
 
 	// Assert: Verify that the scan returned the expected block result.
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, int32(10), results[0].meta.Height)
+}
+
+// TestScanBatchWithCFilters verifies CFilter-based scan logic.
+func TestScanBatchWithCFilters(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and set up a recovery state.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, nil, nil, mockPublisher,
+	)
+
+	mockAddrStore := &mockAddrStore{}
+	scanState := NewRecoveryState(
+		10, &chaincfg.MainNetParams, mockAddrStore,
+	)
+
+	hashes := []chainhash.Hash{{0x01}}
+
+	// Mock retrieval of compact filters for the block batch.
+	filter, err := gcs.BuildGCSFilter(
+		builder.DefaultP, builder.DefaultM, [16]byte{}, nil,
+	)
+	require.NoError(t, err)
+	mockChain.On(
+		"GetCFilters", hashes, wire.GCSFilterRegular,
+	).Return([]*gcs.Filter{filter}, nil).Once()
+
+	// Mock retrieval of block headers for the batch.
+	headers := []*wire.BlockHeader{{Timestamp: time.Unix(100, 0)}}
+	mockChain.On("GetBlockHeaders", hashes).Return(headers, nil).Once()
+
+	// Mock retrieval of full blocks for the batch (simulating a filter
+	// match).
+	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(
+		1, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
+	))
+	mockChain.On("GetBlocks", hashes).Return(
+		[]*wire.MsgBlock{msgBlock}, nil,
+	).Once()
+
+	// Mock address store failures to simplify the test path and avoid
+	// deep derivation logic.
+	mockAddrStore.On(
+		"Address", mock.Anything, mock.Anything,
+	).Return(nil, waddrmgr.ErrAddressNotFound).Maybe()
+	mockAddrStore.On(
+		"FetchScopedKeyManager", mock.Anything,
+	).Return(nil, waddrmgr.ErrAddressNotFound).Maybe()
+
+	// Act: Perform a batch scan using CFilters.
+	results, err := s.scanBatchWithCFilters(
+		t.Context(), scanState, 10, hashes,
+	)
+
+	// Assert: Verify that the scan results are correct.
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Equal(t, int32(10), results[0].meta.Height)
