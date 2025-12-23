@@ -259,6 +259,27 @@ func (w *Wallet) Stop(stopCtx context.Context) error {
 	return nil
 }
 
+// Lock locks the wallet.
+//
+// This is part of the Controller interface.
+func (w *Wallet) Lock(ctx context.Context) error {
+	// Ensure the wallet is in a state that allows locking.
+	err := w.state.canLock()
+	if err != nil {
+		return err
+	}
+
+	r := newLockReq()
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Wait for the result.
+	return w.waitForResp(ctx, r.resp)
+}
+
 // mainLoop is the central event loop for the wallet, responsible for
 // coordinating and serializing all lifecycle and authentication requests. It
 // manages the transition between locked and unlocked states and handles the
@@ -510,4 +531,33 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 
 	// Report the result back to the caller.
 	req.resp <- err
+}
+
+// sendReq sends an operation request to the main loop or handles cancellation.
+func (w *Wallet) sendReq(ctx context.Context, req any) error {
+	select {
+	case w.requestChan <- req:
+		return nil
+
+	case <-w.lifetimeCtx.Done():
+		return ErrWalletShuttingDown
+
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// waitForResp waits for the response from an operation request or handles
+// cancellation.
+func (w *Wallet) waitForResp(ctx context.Context, resp <-chan error) error {
+	select {
+	case err := <-resp:
+		return err
+
+	case <-w.lifetimeCtx.Done():
+		return ErrWalletShuttingDown
+
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
