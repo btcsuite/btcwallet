@@ -33,6 +33,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteBlockStmt, err = db.PrepareContext(ctx, DeleteBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteBlock: %w", err)
 	}
+	if q.deleteBlocksFromHeightOnwardsStmt, err = db.PrepareContext(ctx, DeleteBlocksFromHeightOnwards); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteBlocksFromHeightOnwards: %w", err)
+	}
 	if q.deleteKeyScopeStmt, err = db.PrepareContext(ctx, DeleteKeyScope); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteKeyScope: %w", err)
 	}
@@ -108,6 +111,11 @@ func (q *Queries) Close() error {
 	if q.deleteBlockStmt != nil {
 		if cerr := q.deleteBlockStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteBlockStmt: %w", cerr)
+		}
+	}
+	if q.deleteBlocksFromHeightOnwardsStmt != nil {
+		if cerr := q.deleteBlocksFromHeightOnwardsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteBlocksFromHeightOnwardsStmt: %w", cerr)
 		}
 	}
 	if q.deleteKeyScopeStmt != nil {
@@ -242,57 +250,59 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                              DBTX
-	tx                              *sql.Tx
-	createKeyScopeStmt              *sql.Stmt
-	createWalletStmt                *sql.Stmt
-	deleteBlockStmt                 *sql.Stmt
-	deleteKeyScopeStmt              *sql.Stmt
-	deleteKeyScopeSecretsStmt       *sql.Stmt
-	getAddressTypeByIDStmt          *sql.Stmt
-	getBlockByHeightStmt            *sql.Stmt
-	getKeyScopeByIDStmt             *sql.Stmt
-	getKeyScopeByWalletAndScopeStmt *sql.Stmt
-	getKeyScopeSecretsStmt          *sql.Stmt
-	getWalletByIDStmt               *sql.Stmt
-	getWalletByNameStmt             *sql.Stmt
-	getWalletSecretsStmt            *sql.Stmt
-	insertBlockStmt                 *sql.Stmt
-	insertKeyScopeSecretsStmt       *sql.Stmt
-	insertWalletSecretsStmt         *sql.Stmt
-	insertWalletSyncStateStmt       *sql.Stmt
-	listAddressTypesStmt            *sql.Stmt
-	listKeyScopesByWalletStmt       *sql.Stmt
-	listWalletsStmt                 *sql.Stmt
-	updateWalletSecretsStmt         *sql.Stmt
-	updateWalletSyncStateStmt       *sql.Stmt
+	db                                DBTX
+	tx                                *sql.Tx
+	createKeyScopeStmt                *sql.Stmt
+	createWalletStmt                  *sql.Stmt
+	deleteBlockStmt                   *sql.Stmt
+	deleteBlocksFromHeightOnwardsStmt *sql.Stmt
+	deleteKeyScopeStmt                *sql.Stmt
+	deleteKeyScopeSecretsStmt         *sql.Stmt
+	getAddressTypeByIDStmt            *sql.Stmt
+	getBlockByHeightStmt              *sql.Stmt
+	getKeyScopeByIDStmt               *sql.Stmt
+	getKeyScopeByWalletAndScopeStmt   *sql.Stmt
+	getKeyScopeSecretsStmt            *sql.Stmt
+	getWalletByIDStmt                 *sql.Stmt
+	getWalletByNameStmt               *sql.Stmt
+	getWalletSecretsStmt              *sql.Stmt
+	insertBlockStmt                   *sql.Stmt
+	insertKeyScopeSecretsStmt         *sql.Stmt
+	insertWalletSecretsStmt           *sql.Stmt
+	insertWalletSyncStateStmt         *sql.Stmt
+	listAddressTypesStmt              *sql.Stmt
+	listKeyScopesByWalletStmt         *sql.Stmt
+	listWalletsStmt                   *sql.Stmt
+	updateWalletSecretsStmt           *sql.Stmt
+	updateWalletSyncStateStmt         *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                              tx,
-		tx:                              tx,
-		createKeyScopeStmt:              q.createKeyScopeStmt,
-		createWalletStmt:                q.createWalletStmt,
-		deleteBlockStmt:                 q.deleteBlockStmt,
-		deleteKeyScopeStmt:              q.deleteKeyScopeStmt,
-		deleteKeyScopeSecretsStmt:       q.deleteKeyScopeSecretsStmt,
-		getAddressTypeByIDStmt:          q.getAddressTypeByIDStmt,
-		getBlockByHeightStmt:            q.getBlockByHeightStmt,
-		getKeyScopeByIDStmt:             q.getKeyScopeByIDStmt,
-		getKeyScopeByWalletAndScopeStmt: q.getKeyScopeByWalletAndScopeStmt,
-		getKeyScopeSecretsStmt:          q.getKeyScopeSecretsStmt,
-		getWalletByIDStmt:               q.getWalletByIDStmt,
-		getWalletByNameStmt:             q.getWalletByNameStmt,
-		getWalletSecretsStmt:            q.getWalletSecretsStmt,
-		insertBlockStmt:                 q.insertBlockStmt,
-		insertKeyScopeSecretsStmt:       q.insertKeyScopeSecretsStmt,
-		insertWalletSecretsStmt:         q.insertWalletSecretsStmt,
-		insertWalletSyncStateStmt:       q.insertWalletSyncStateStmt,
-		listAddressTypesStmt:            q.listAddressTypesStmt,
-		listKeyScopesByWalletStmt:       q.listKeyScopesByWalletStmt,
-		listWalletsStmt:                 q.listWalletsStmt,
-		updateWalletSecretsStmt:         q.updateWalletSecretsStmt,
-		updateWalletSyncStateStmt:       q.updateWalletSyncStateStmt,
+		db:                                tx,
+		tx:                                tx,
+		createKeyScopeStmt:                q.createKeyScopeStmt,
+		createWalletStmt:                  q.createWalletStmt,
+		deleteBlockStmt:                   q.deleteBlockStmt,
+		deleteBlocksFromHeightOnwardsStmt: q.deleteBlocksFromHeightOnwardsStmt,
+		deleteKeyScopeStmt:                q.deleteKeyScopeStmt,
+		deleteKeyScopeSecretsStmt:         q.deleteKeyScopeSecretsStmt,
+		getAddressTypeByIDStmt:            q.getAddressTypeByIDStmt,
+		getBlockByHeightStmt:              q.getBlockByHeightStmt,
+		getKeyScopeByIDStmt:               q.getKeyScopeByIDStmt,
+		getKeyScopeByWalletAndScopeStmt:   q.getKeyScopeByWalletAndScopeStmt,
+		getKeyScopeSecretsStmt:            q.getKeyScopeSecretsStmt,
+		getWalletByIDStmt:                 q.getWalletByIDStmt,
+		getWalletByNameStmt:               q.getWalletByNameStmt,
+		getWalletSecretsStmt:              q.getWalletSecretsStmt,
+		insertBlockStmt:                   q.insertBlockStmt,
+		insertKeyScopeSecretsStmt:         q.insertKeyScopeSecretsStmt,
+		insertWalletSecretsStmt:           q.insertWalletSecretsStmt,
+		insertWalletSyncStateStmt:         q.insertWalletSyncStateStmt,
+		listAddressTypesStmt:              q.listAddressTypesStmt,
+		listKeyScopesByWalletStmt:         q.listKeyScopesByWalletStmt,
+		listWalletsStmt:                   q.listWalletsStmt,
+		updateWalletSecretsStmt:           q.updateWalletSecretsStmt,
+		updateWalletSyncStateStmt:         q.updateWalletSyncStateStmt,
 	}
 }

@@ -19,6 +19,18 @@ func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int32) error {
 	return err
 }
 
+const DeleteBlocksFromHeightOnwards = `-- name: DeleteBlocksFromHeightOnwards :exec
+DELETE FROM blocks
+WHERE block_height >= $1
+`
+
+// Deletes all blocks at or after a given height.
+// Used during blockchain reorganizations.
+func (q *Queries) DeleteBlocksFromHeightOnwards(ctx context.Context, blockHeight int32) error {
+	_, err := q.exec(ctx, q.deleteBlocksFromHeightOnwardsStmt, DeleteBlocksFromHeightOnwards, blockHeight)
+	return err
+}
+
 const GetBlockByHeight = `-- name: GetBlockByHeight :one
 SELECT
     block_height,

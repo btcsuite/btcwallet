@@ -13,3 +13,9 @@ VALUES (?, ?, ?);
 -- name: DeleteBlock :exec
 DELETE FROM blocks
 WHERE block_height = ?;
+
+-- name: DeleteBlocksFromHeightOnwards :exec
+-- Deletes all blocks at or after a given height.
+-- Used during blockchain reorganizations.
+DELETE FROM blocks
+WHERE block_height >= ?;

@@ -13,6 +13,9 @@ type Querier interface {
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int32) error
+	// Deletes all blocks at or after a given height.
+	// Used during blockchain reorganizations.
+	DeleteBlocksFromHeightOnwards(ctx context.Context, blockHeight int32) error
 	// Deletes a key scope by its ID.
 	DeleteKeyScope(ctx context.Context, id int64) (int64, error)
 	// Deletes the secrets for a key scope.

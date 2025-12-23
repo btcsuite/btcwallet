@@ -14,3 +14,9 @@ ON CONFLICT (block_height) DO NOTHING;
 -- name: DeleteBlock :exec
 DELETE FROM blocks
 WHERE block_height = $1;
+
+-- name: DeleteBlocksFromHeightOnwards :exec
+-- Deletes all blocks at or after a given height.
+-- Used during blockchain reorganizations.
+DELETE FROM blocks
+WHERE block_height >= $1;
