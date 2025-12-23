@@ -80,6 +80,16 @@ type scanReq struct {
 	targets []waddrmgr.AccountScope
 }
 
+// scanResult holds the result of processing a single block during a batch
+// scan.
+type scanResult struct {
+	// BlockProcessResult embeds the results of filtering the block.
+	*BlockProcessResult
+
+	// meta contains block metadata (hash, height, time).
+	meta *wtxmgr.BlockMeta
+}
+
 // chainSyncer is a private interface that abstracts the chain synchronization
 // logic, allowing it to be mocked for testing the wallet and controller.
 type chainSyncer interface {
