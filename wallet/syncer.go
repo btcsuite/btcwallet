@@ -3,16 +3,83 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+)
+
+var (
+	// ErrCFiltersUnavailable is returned when the chain backend cannot
+	// serve compact filters.
+	ErrCFiltersUnavailable = errors.New("cfilters unavailable")
+
+	// ErrUnknownSyncMethod is returned when an unknown synchronization
+	// method is specified.
+	ErrUnknownSyncMethod = errors.New("unknown sync method")
+
+	// ErrScanBatchEmpty is returned when a scan batch contains no blocks.
+	ErrScanBatchEmpty = errors.New("scan batch empty")
+
+	// ErrUnknownRescanJobType is returned when an unknown rescan job type
+	// is encountered.
+	ErrUnknownRescanJobType = errors.New("unknown rescan job type")
+
+	// ErrInvalidStartHeight is returned when a resync or rescan is
+	// requested with an invalid start height (e.g., zero if not allowed).
+	ErrInvalidStartHeight = errors.New("invalid start height")
+
+	// ErrStartHeightTooHigh is returned when a resync or rescan is
+	// requested with a start height that is greater than the current
+	// chain tip.
+	ErrStartHeightTooHigh = errors.New("start height is greater than " +
+		"current chain tip")
+
+	// ErrStartHeightTooLarge is returned when a resync or rescan is
+	// requested with a start height that exceeds the maximum value of
+	// an int32, which is the underlying type for block heights.
+	ErrStartHeightTooLarge = errors.New("start height too large, exceeds " +
+		"maximum int32 value")
+
+	// ErrNoScanTargets is returned when a targeted rescan is requested with
+	// no targets.
+	ErrNoScanTargets = errors.New("at least one target must be specified")
+)
+
+const (
+	// syncStateSwitchThreshold is the number of blocks behind the chain
+	// tip at which the wallet switches to the "Syncing" state. Gaps
+	// smaller than this are handled silently (blocking DB lock) to avoid
+	// disrupting UX with "Wallet Busy" errors for minor lags.
+	//
+	// Value 6 (approx 1 hour) is chosen based on a balance of two factors:
+	//
+	// 1. Database Contention: Synchronization requires a database write
+	//    lock. Processing 6 blocks typically takes less than 1 second,
+	//    which is an acceptable duration for other operations (like
+	//    CreateTx) to block (wait) on the database lock. Gaps larger than
+	//    this would result in noticeable UI hangs, so we switch to the
+	//    explicit "Syncing" state which allows the wallet to return an
+	//    immediate error instead of blocking.
+	//
+	// 2. Data Integrity vs. UX: While in a silent sync, the wallet might
+	//    allow the user to initiate actions based on slightly outdated
+	//    data (e.g., spending an output that was actually spent in one of
+	//    the missing blocks). For a 6-block gap, the risk is minimal, and
+	//    such transactions would be rejected by the network mempool or
+	//    miners. However, for large gaps, the risk of false "Insufficient
+	//    Funds" errors or extremely inaccurate fee estimates increases,
+	//    making the explicit "Syncing" state a necessary safeguard.
+	syncStateSwitchThreshold = 6
 )
 
 // syncState represents the synchronization status of the wallet with the
@@ -475,6 +542,231 @@ func (s *syncer) scanBatchWithFullBlocks(_ context.Context,
 			meta:               meta,
 			BlockProcessResult: res,
 		})
+	}
+
+	return results, nil
+}
+
+// initResultsForCFilterScan fetches block headers for the given hashes and
+// initializes a slice of scanResult with basic metadata (hash, height, time).
+// This is a preparatory step specifically for CFilter-based scans.
+func (s *syncer) initResultsForCFilterScan(_ context.Context,
+	startHeight int32, hashes []chainhash.Hash) ([]scanResult, error) {
+
+	headers, err := s.cfg.Chain.GetBlockHeaders(hashes)
+	if err != nil {
+		return nil, fmt.Errorf("batch get block headers: %w", err)
+	}
+
+	results := make([]scanResult, len(hashes))
+	for i := range hashes {
+		results[i] = scanResult{
+			meta: &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{
+					Hash: hashes[i],
+
+					//nolint:gosec // i is bounded by batch
+					// size (2000), so addition to
+					// startHeight won't overflow int32.
+					Height: startHeight + int32(i),
+				},
+				Time: headers[i].Timestamp,
+			},
+			// Initialize with empty result to avoid nil
+			// dereference if block is not processed.
+			BlockProcessResult: &BlockProcessResult{},
+		}
+	}
+
+	return results, nil
+}
+
+// filterBatch iterates over the scan results and matches them against the
+// provided filters using the watchlist. It returns a list of block hashes that
+// matched the filter.
+func (s *syncer) filterBatch(ctx context.Context, results []scanResult,
+	filters []*gcs.Filter,
+	blockMap map[chainhash.Hash]*wire.MsgBlock,
+	watchList [][]byte) ([]chainhash.Hash, error) {
+
+	var matchedHashes []chainhash.Hash
+	for i := range results {
+		// Check context cancellation.
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context done: %w", ctx.Err())
+		default:
+		}
+
+		// Skip if we already fetched this block.
+		if _, ok := blockMap[results[i].meta.Hash]; ok {
+			continue
+		}
+
+		filter := filters[i]
+
+		// If the filter is nil or has no elements (N=0), it indicates
+		// a potential issue with the chain backend (e.g., filter not
+		// available, corrupted, or for an invalid block). While N=0 is
+		// theoretically impossible for valid Bitcoin blocks with
+		// regular filters (due to coinbase transactions), we
+		// conservatively treat both cases as a match to ensure no
+		// relevant transactions are missed. This prioritizes safety
+		// over strict filter efficiency, forcing the download of the
+		// full block for later processing.
+		if filter == nil || filter.N() == 0 {
+			var n uint32
+			if filter != nil {
+				n = filter.N()
+			}
+
+			log.Errorf("Filter missing or empty for block %v "+
+				"(nil=%v, N=%d), forcing download",
+				results[i].meta.Hash, filter == nil, n)
+
+			matchedHashes = append(
+				matchedHashes, results[i].meta.Hash,
+			)
+
+			continue
+		}
+
+		key := builder.DeriveKey(&results[i].meta.Hash)
+
+		matched, err := filter.MatchAny(key, watchList)
+		if err != nil {
+			return nil, fmt.Errorf("filter match failed: %w", err)
+		}
+
+		if matched {
+			matchedHashes = append(
+				matchedHashes, results[i].meta.Hash,
+			)
+		}
+	}
+
+	return matchedHashes, nil
+}
+
+// matchAndFetchBatch performs the core logic of matching CFilters against the
+// wallet's watchlist and fetching the corresponding blocks. It iterates over
+// the provided `results`, checking filters for each. Blocks that match (and
+// haven't been fetched yet) are downloaded and added to the `blockMap`.
+//
+// NOTE: This method mutates the provided `blockMap` parameter by adding new
+// blocks to it.
+func (s *syncer) matchAndFetchBatch(ctx context.Context, state *RecoveryState,
+	results []scanResult,
+	filters []*gcs.Filter,
+	blockMap map[chainhash.Hash]*wire.MsgBlock) error {
+
+	// Generate the watchlist for CFilter matching.
+	watchList, err := state.BuildCFilterData()
+	if err != nil {
+		return fmt.Errorf("build cfilter data: %w", err)
+	}
+
+	matchedHashes, err := s.filterBatch(
+		ctx, results, filters, blockMap, watchList,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Fetch Matched Blocks.
+	if len(matchedHashes) > 0 {
+		blocks, err := s.cfg.Chain.GetBlocks(matchedHashes)
+		if err != nil {
+			return fmt.Errorf("batch get blocks: %w", err)
+		}
+
+		for i, block := range blocks {
+			blockMap[matchedHashes[i]] = block
+		}
+	}
+
+	return nil
+}
+
+// scanBatchWithCFilters implements the fast-path scanning using Compact
+// Filters. It fetches filters, matches them locally, fetches only matched
+// blocks, and handles horizon expansion with an in-place resume logic.
+func (s *syncer) scanBatchWithCFilters(ctx context.Context,
+	scanState *RecoveryState, startHeight int32,
+	hashes []chainhash.Hash) ([]scanResult, error) {
+
+	// Fetch CFilters for the batch.
+	filters, err := s.cfg.Chain.GetCFilters(
+		hashes, wire.GCSFilterRegular,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrCFiltersUnavailable, err)
+	}
+
+	// Fetch headers and initialize results with metadata.
+	results, err := s.initResultsForCFilterScan(ctx, startHeight, hashes)
+	if err != nil {
+		return nil, err
+	}
+
+	// blockMap serves as a cache for full block data that has been
+	// fetched. It is populated by `matchAndFetchBatch` during both the
+	// initial matching phase and any subsequent re-matching due to horizon
+	// expansion. This map ensures that once a block is identified as
+	// relevant and downloaded, it's available for processing without
+	// redundant network requests, maintaining I/O efficiency across the
+	// processing loops.
+	blockMap := make(map[chainhash.Hash]*wire.MsgBlock, len(hashes))
+
+	// Initial Match: Optimistically match the entire batch of filters
+	// against the current watchlist. This allows us to fetch all likely
+	// relevant blocks in a single batch operation, maximizing I/O
+	// parallelism.
+	err = s.matchAndFetchBatch(ctx, scanState, results, filters, blockMap)
+	if err != nil {
+		return nil, err
+	}
+
+	// Process Blocks: Iterate through the results and process any blocks
+	// that were matched and fetched.
+	for i := range results {
+		res := &results[i]
+		block := blockMap[res.meta.Hash]
+
+		// If block was not matched/fetched, skip processing.
+		if block == nil {
+			continue
+		}
+
+		processRes, err := scanState.ProcessBlock(block)
+		if err != nil {
+			return nil, fmt.Errorf("process block %d (%s): %w",
+				res.meta.Height, res.meta.Hash, err)
+		}
+
+		// Attach the real result to the pre-allocated scanResult.
+		res.BlockProcessResult = processRes
+
+		// Move to the next if the horizon is not expanded.
+		if !processRes.Expanded {
+			continue
+		}
+
+		log.Debugf("Horizon expanded at height %d, updating filters",
+			res.meta.Height)
+
+		// If the horizon expanded, our watchlist has changed. We must
+		// re-evaluate the remaining filters in the batch (i+1 onwards)
+		// against the new addresses or outpoints to ensure we don't
+		// miss any relevant transactions that were previously skipped.
+		// This "in-place resume" logic ensures correctness despite the
+		// batch pre-fetching optimization.
+		err = s.matchAndFetchBatch(
+			ctx, scanState, results[i+1:], filters[i+1:], blockMap,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return results, nil
