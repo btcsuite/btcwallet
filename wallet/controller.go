@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -210,11 +211,52 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	return w.DBDeleteExpiredLockedOutputs(startCtx)
 }
 
-// deleteExpiredLockedOutputs removes any expired output locks from the
-// transaction store. This is typically called on startup to clean up any stale
-// state.
-func (w *Wallet) deleteExpiredLockedOutputs(ctx context.Context) error {
-	return w.DBDeleteExpiredLockedOutputs(ctx)
+// Stop signals all wallet background processes to shutdown and blocks until
+// they have all exited. It returns an error if the context is canceled before
+// the shutdown is complete.
+//
+// This is part of the Controller interface.
+func (w *Wallet) Stop(stopCtx context.Context) error {
+	// Attempt to transition from Started to Stopping.
+	err := w.state.toStopping()
+	if err != nil {
+		// If the wallet is not started, we can consider it stopped.
+		log.Warnf("Wallet already stopped: %v", err)
+		return nil
+	}
+
+	// Signal all background processes to stop.
+	//
+	// It is safe to call w.cancel() here because the successful transition
+	// to Stopping guarantees that we were previously in the Started state,
+	// which in turn guarantees that start() has completed initialization
+	// of w.lifetimeCtx and w.cancel.
+	//
+	// Additionally, w.cancel() is idempotent, so it is safe to call even
+	// if it has effectively already been called (though the state machine
+	// guarantees we only reach this point once).
+	w.cancel()
+
+	// Wait for all goroutines to finish.
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-stopCtx.Done():
+		return fmt.Errorf("stop request cancelled: %w", stopCtx.Err())
+	}
+
+	// Mark the wallet as stopped.
+	err = w.state.toStopped()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // mainLoop is the central event loop for the wallet, responsible for
