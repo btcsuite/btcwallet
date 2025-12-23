@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
@@ -351,4 +352,97 @@ func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
 	case <-ctx.Done():
 		return fmt.Errorf("context done: %w", ctx.Err())
 	}
+}
+
+// scanBatchHeadersOnly performs a lightweight scan by only fetching block
+// headers. This is used when the wallet has no addresses or outpoints to
+// watch, allowing it to fast-forward its sync state.
+func (s *syncer) scanBatchHeadersOnly(_ context.Context,
+	startHeight, endHeight int32) ([]scanResult, error) {
+
+	// Batch 1: Fetch Block Hashes.
+	hashes, err := s.cfg.Chain.GetBlockHashes(
+		int64(startHeight), int64(endHeight),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("batch get block hashes: %w", err)
+	}
+
+	// Batch 2: Fetch Block Headers (for timestamps).
+	headers, err := s.cfg.Chain.GetBlockHeaders(hashes)
+	if err != nil {
+		return nil, fmt.Errorf("batch get block headers: %w", err)
+	}
+
+	results := make([]scanResult, 0, len(hashes))
+	for i := range hashes {
+		hash := hashes[i]
+		header := headers[i]
+
+		//nolint:gosec // i is bounded by batch size (2000), so
+		// addition to startHeight won't overflow int32.
+		height := startHeight + int32(i)
+
+		meta := &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Hash: hash, Height: height},
+			Time:  header.Timestamp,
+		}
+
+		results = append(results, scanResult{
+			meta: meta,
+			// We provide an empty BlockProcessResult to avoid nil
+			// pointer dereferences when accessing embedded fields
+			// (like RelevantTxs) in commitSyncBatch. This
+			// effectively acts as a "no-op" result.
+			BlockProcessResult: &BlockProcessResult{},
+		})
+	}
+
+	return results, nil
+}
+
+// loadFullScanState initializes a fresh recovery state for a new batch scan.
+// It loads active data, syncs horizons from DB, and prepares the initial
+// lookahead window.
+func (s *syncer) loadFullScanState(
+	ctx context.Context) (*RecoveryState, error) {
+
+	horizonData, initialAddrs, initialUnspent, err := s.loadWalletScanData(
+		ctx,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize a fresh recovery state for this batch to ensure no stale
+	// state leaks between batches.
+	scanState := NewRecoveryState(
+		s.cfg.RecoveryWindow, s.cfg.ChainParams, s.addrStore,
+	)
+
+	// Initialize Batch State (History + Lookahead)
+	err = scanState.Initialize(horizonData, initialAddrs, initialUnspent)
+	if err != nil {
+		return nil, fmt.Errorf("init scan state: %w", err)
+	}
+
+	return scanState, nil
+}
+
+// loadWalletScanData retrieves all necessary data from the database.
+func (s *syncer) loadWalletScanData(ctx context.Context) (
+	[]*waddrmgr.AccountProperties, []address.Address,
+	[]wtxmgr.Credit, error) {
+
+	var targets []waddrmgr.AccountScope
+	for _, scopedMgr := range s.addrStore.ActiveScopedKeyManagers() {
+		for _, accNum := range scopedMgr.ActiveAccounts() {
+			targets = append(targets, waddrmgr.AccountScope{
+				Scope:   scopedMgr.Scope(),
+				Account: accNum,
+			})
+		}
+	}
+
+	return s.DBGetScanData(ctx, targets)
 }
