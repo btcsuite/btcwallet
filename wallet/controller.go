@@ -123,6 +123,100 @@ type Controller interface {
 		targets []waddrmgr.AccountScope) error
 }
 
+// Start starts the background processes necessary to manage the wallet.
+//
+// This is part of the Controller interface.
+func (w *Wallet) Start(startCtx context.Context) error {
+	// 1. Attempt to transition from Stopped to Starting.
+	err := w.state.toStarting()
+	if err != nil {
+		return err
+	}
+
+	// 2. Setup background resources.
+	//
+	// w.lifetimeCtx governs the lifecycle of all background goroutines.
+	// It is canceled when stop() is called.
+	w.lifetimeCtx, w.cancel = context.WithCancel(context.Background())
+
+	// 3. Perform runtime setup.
+	//
+	// We use startCtx here because these operations must complete
+	// synchronously before the wallet is considered "started". If
+	// startCtx is canceled, the startup sequence aborts.
+	err = w.performRuntimeSetup(startCtx)
+	if err != nil {
+		// Cleanup resources.
+		w.cancel()
+
+		// Revert state if setup fails.
+		stopErr := w.state.toStopped()
+		if stopErr != nil {
+			log.Warnf("Failed to revert state to stopped: %v",
+				stopErr)
+		}
+
+		return err
+	}
+
+	// 4. Start background goroutines.
+	w.wg.Add(1)
+
+	go w.mainLoop()
+
+	w.wg.Add(1)
+
+	go func() {
+		defer w.wg.Done()
+
+		// TODO(yy): build a retry loop.
+		err := w.sync.run(w.lifetimeCtx)
+		if err != nil {
+			log.Errorf("Chain sync loop exited with error: %v", err)
+		}
+	}()
+
+	// 5. Mark the wallet as fully started.
+	err = w.state.toStarted()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// performRuntimeSetup executes the synchronous initialization tasks required
+// before the wallet's main loops can start. This includes sanity checking the
+// birthday block, loading accounts into memory, and cleaning up expired locks.
+func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
+	// Perform the birthday sanity check synchronously to ensure we are
+	// connected and our status is valid before starting the main loop.
+	//
+	// This also initializes the birthday block cache used by the Info
+	// method.
+	err := w.verifyBirthday(startCtx)
+	if err != nil {
+		return err
+	}
+
+	// Ensure all accounts are loaded into memory so we can efficiently
+	// access them during the scan loop without database lookups.
+	err = w.DBGetAllAccounts(startCtx)
+	if err != nil {
+		return err
+	}
+
+	// Cleanup any expired output locks.
+	return w.DBDeleteExpiredLockedOutputs(startCtx)
+}
+
+// deleteExpiredLockedOutputs removes any expired output locks from the
+// transaction store. This is typically called on startup to clean up any stale
+// state.
+func (w *Wallet) deleteExpiredLockedOutputs(ctx context.Context) error {
+	return w.DBDeleteExpiredLockedOutputs(ctx)
+}
+
 // mainLoop is the central event loop for the wallet, responsible for
 // coordinating and serializing all lifecycle and authentication requests. It
 // manages the transition between locked and unlocked states and handles the
@@ -165,6 +259,70 @@ func (w *Wallet) mainLoop() {
 			return
 		}
 	}
+}
+
+// verifyBirthday performs a sanity check on the wallet's birthday block to
+// ensure it is set and valid.
+//
+// Logical Steps:
+//  1. Fetch the current birthday block from the database.
+//  2. If the block is already verified, initialize the memory cache and
+//     return.
+//  3. If the block is missing or unverified, fetch the wallet's birthday
+//     timestamp.
+//  4. Use the chain backend to locate a suitable block matching the
+//     birthday timestamp.
+//  5. Persist the new birthday block, mark it as verified, and update the
+//     wallet's sync tip to this point to ensure a clean rescan range.
+//  6. Update the memory cache.
+func (w *Wallet) verifyBirthday(ctx context.Context) error {
+	// We'll start by fetching our wallet's birthday block.
+	birthdayBlock, verified, err := w.DBGetBirthdayBlock(ctx)
+	if err != nil {
+		var mgrErr waddrmgr.ManagerError
+		if !errors.As(err, &mgrErr) ||
+			mgrErr.ErrorCode != waddrmgr.ErrBirthdayBlockNotSet {
+
+			log.Errorf("Unable to sanity check wallet birthday "+
+				"block: %v", err)
+
+			return err
+		}
+		// If not set, we proceed to locate it.
+	}
+
+	// If the birthday block has already been verified, we initialize the
+	// cache and exit our sanity check to avoid redundant lookups.
+	if verified {
+		log.Infof("Birthday block verified: height=%d, hash=%v",
+			birthdayBlock.Height, birthdayBlock.Hash)
+		w.birthdayBlock = birthdayBlock
+
+		return nil
+	}
+	// Otherwise, we'll attempt to locate a better one now that we have
+	// access to the chain.
+	timestamp := w.addrStore.Birthday()
+
+	newBirthdayBlock, err := locateBirthdayBlock(w.cfg.Chain, timestamp)
+	if err != nil {
+		log.Errorf("Unable to sanity check wallet birthday "+
+			"block: %v", err)
+
+		return err
+	}
+
+	err = w.DBPutBirthdayBlock(ctx, *newBirthdayBlock)
+	if err != nil {
+		log.Errorf("Unable to sanity check wallet birthday "+
+			"block: %v", err)
+
+		return err
+	}
+
+	w.birthdayBlock = *newBirthdayBlock
+
+	return nil
 }
 
 // resultChan is a generic channel for returning errors to callers.
