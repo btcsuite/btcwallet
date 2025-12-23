@@ -308,6 +308,29 @@ func (w *Wallet) Lock(ctx context.Context) error {
 	return w.waitForResp(ctx, r.resp)
 }
 
+// ChangePassphrase changes the wallet's passphrases according to the request.
+//
+// This is part of the Controller interface.
+func (w *Wallet) ChangePassphrase(ctx context.Context,
+	req ChangePassphraseRequest) error {
+
+	// Ensure the wallet is in a state that allows changing the passphrase.
+	err := w.state.canChangePassphrase()
+	if err != nil {
+		return err
+	}
+
+	r := newChangePassphraseReq(req)
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Wait for the result.
+	return w.waitForResp(ctx, r.resp)
+}
+
 // mainLoop is the central event loop for the wallet, responsible for
 // coordinating and serializing all lifecycle and authentication requests. It
 // manages the transition between locked and unlocked states and handles the
