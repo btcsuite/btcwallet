@@ -371,3 +371,70 @@ func TestControllerUnlock(t *testing.T) {
 	w.wg.Wait()
 }
 
+// TestControllerChangePassphrase verifies the ChangePassphrase method. It
+// ensures that the wallet forwards the request to the address manager to
+// update the passphrases.
+func TestControllerChangePassphrase(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and start a test wallet.
+	w, deps := createTestWalletWithMocks(t)
+
+	// Setup mocks for startup.
+	deps.addrStore.On(
+		"BirthdayBlock", mock.Anything,
+	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
+	deps.addrStore.On(
+		"ActiveScopedKeyManagers",
+	).Return([]waddrmgr.AccountStore(nil)).Once()
+	deps.txStore.On(
+		"DeleteExpiredLockedOutputs", mock.Anything,
+	).Return(nil).Once()
+	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+
+	require.NoError(t, w.Start(t.Context()))
+
+	req := ChangePassphraseRequest{
+		ChangePrivate: true,
+		PrivateOld:    []byte("old"),
+		PrivateNew:    []byte("new"),
+	}
+
+	// Expect a call to ChangePassphrase in the address store.
+	deps.addrStore.On(
+		"ChangePassphrase", mock.Anything, []byte("old"), []byte("new"),
+		true, mock.Anything,
+	).Return(nil).Once()
+
+	// Act: Call ChangePassphrase.
+	err := w.ChangePassphrase(t.Context(), req)
+
+	// Assert: Verify that the operation completed without error.
+	require.NoError(t, err)
+
+	// Cleanup: Stop the wallet to release resources.
+	err = w.Stop(t.Context())
+	require.NoError(t, err)
+	w.wg.Wait()
+}
+
+// TestHandleChangePassphraseReq_Errors verifies error handling for the
+// internal change passphrase request handler.
+func TestHandleChangePassphraseReq_Errors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a test wallet in the default 'Stopped' state.
+	w, _ := createTestWalletWithMocks(t)
+
+	req := changePassphraseReq{
+		req:  ChangePassphraseRequest{},
+		resp: make(chan error, 1),
+	}
+
+	// Act: Call the internal handler while the wallet is stopped.
+	w.handleChangePassphraseReq(req)
+
+	// Assert: Verify that the request fails with ErrStateForbidden.
+	err := <-req.resp
+	require.ErrorIs(t, err, ErrStateForbidden)
+}
