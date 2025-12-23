@@ -438,3 +438,52 @@ func TestHandleChangePassphraseReq_Errors(t *testing.T) {
 	err := <-req.resp
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
+
+// TestControllerInfo verifies the Info method. It checks that the wallet
+// correctly aggregates information from its subsystems (chain backend,
+// address manager, and syncer).
+func TestControllerInfo(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and start a test wallet with mocked subsystems.
+	w, deps := createTestWalletWithMocks(t)
+
+	bs := waddrmgr.BlockStamp{Height: 100}
+	deps.addrStore.On(
+		"BirthdayBlock", mock.Anything,
+	).Return(bs, true, nil).Once()
+	deps.addrStore.On(
+		"ActiveScopedKeyManagers",
+	).Return([]waddrmgr.AccountStore(nil)).Once()
+	deps.txStore.On(
+		"DeleteExpiredLockedOutputs", mock.Anything,
+	).Return(nil).Once()
+	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+
+	// Mock the chain backend to return a specific name.
+	deps.chain.On("BackEnd").Return("mock")
+
+	// Mock SyncedTo to return a known block stamp.
+	deps.addrStore.On("SyncedTo").Return(bs)
+
+	// Mock syncState to indicate the wallet is fully synced.
+	deps.syncer.On("syncState").Return(syncStateSynced)
+
+	require.NoError(t, w.Start(t.Context()))
+
+	// Act: Call the Info method.
+	info, err := w.Info(t.Context())
+
+	// Assert: Verify that the returned information matches the mocked
+	// values and current wallet state.
+	require.NoError(t, err)
+	require.Equal(t, "mock", info.Backend)
+	require.Equal(t, int32(100), info.BirthdayBlock.Height)
+	require.True(t, info.Synced)
+	require.True(t, info.Locked)
+
+	// Cleanup: Stop the wallet to release resources.
+	err = w.Stop(t.Context())
+	require.NoError(t, err)
+	w.wg.Wait()
+}

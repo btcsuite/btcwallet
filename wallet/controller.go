@@ -331,6 +331,25 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 	return w.waitForResp(ctx, r.resp)
 }
 
+// Info returns a comprehensive snapshot of the wallet's static configuration
+// and dynamic synchronization state.
+//
+// This is part of the Controller interface.
+func (w *Wallet) Info(_ context.Context) (*Info, error) {
+	info := &Info{
+		BirthdayBlock:    w.birthdayBlock,
+		Backend:          w.cfg.Chain.BackEnd(),
+		ChainParams:      w.cfg.ChainParams,
+		Locked:           !w.state.isUnlocked(),
+		Synced:           w.state.isSynced(),
+		SyncedTo:         w.SyncedTo(),
+		IsRecoveryMode:   w.state.isRecoveryMode(),
+		RecoveryProgress: 0,
+	}
+
+	return info, nil
+}
+
 // mainLoop is the central event loop for the wallet, responsible for
 // coordinating and serializing all lifecycle and authentication requests. It
 // manages the transition between locked and unlocked states and handles the
