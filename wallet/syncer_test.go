@@ -390,3 +390,40 @@ func TestSyncerLoadScanState(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state)
 }
+
+// TestScanBatchWithFullBlocks verifies fallback scan logic.
+func TestScanBatchWithFullBlocks(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and a recovery state for scanning.
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
+
+	mockAddrStore := &mockAddrStore{}
+	scanState := NewRecoveryState(
+		10, &chaincfg.MainNetParams, mockAddrStore,
+	)
+
+	hashes := []chainhash.Hash{{0x01}}
+
+	// Create a mock block message for testing.
+	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(
+		1, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
+	))
+	blocks := []*wire.MsgBlock{msgBlock}
+	mockChain.On(
+		"GetBlocks", hashes,
+	).Return(blocks, nil).Once()
+
+	// Act: Perform a batch scan using full blocks.
+	results, err := s.scanBatchWithFullBlocks(
+		t.Context(), scanState, 10, hashes,
+	)
+
+	// Assert: Verify that the scan returned the expected block result.
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, int32(10), results[0].meta.Height)
+}
