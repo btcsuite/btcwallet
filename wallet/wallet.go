@@ -13,6 +13,7 @@
 package wallet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -313,6 +314,35 @@ type Wallet struct {
 	// Lifecycle (System), Synchronization (Chain), and Authentication
 	// (Security).
 	state walletState
+
+	// lifetimeCtx defines the runtime scope of the wallet. It is created
+	// when the wallet starts and canceled when it stops, providing a
+	// standard way to signal shutdown to all context-aware background
+	// routines.
+	//
+	// Storing a context in a struct is generally considered an
+	// anti-pattern because contexts are usually request-scoped. However,
+	// for long-lived service objects that manage their own background
+	// goroutines, maintaining a parent context for those routines is a
+	// valid exception.
+	//
+	//nolint:containedctx
+	lifetimeCtx context.Context
+
+	// cancel is the cancellation function for lifetimeCtx.
+	cancel context.CancelFunc
+
+	// requestChan is the central communication channel for incoming
+	// lifecycle and authentication requests.
+	requestChan chan any
+
+	// lockTimer is the timer used to automatically lock the wallet after a
+	// timeout.
+	lockTimer *time.Timer
+
+	// birthdayBlock is the block from which the wallet started scanning.
+	// It is loaded on startup and cached to avoid database lookups.
+	birthdayBlock waddrmgr.BlockStamp
 }
 
 // hasMinConfs checks whether a transaction at height txHeight has met minconf

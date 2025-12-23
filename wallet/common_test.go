@@ -1,12 +1,14 @@
 package wallet
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/require"
@@ -75,16 +77,27 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	mockChain := &mockChain{}
 
 	w := &Wallet{
-		addrStore: mockAddrStore,
-		txStore:   mockTxStore,
-		sync:      mockSyncer,
-		state:     newWalletState(mockSyncer),
+		addrStore:   mockAddrStore,
+		txStore:     mockTxStore,
+		sync:        mockSyncer,
+		state:       newWalletState(mockSyncer),
+		lifetimeCtx: context.Background(),
+		cancel:      func() {},
+		requestChan: make(chan any, 1),
+		lockTimer:   time.NewTimer(time.Hour),
+		birthdayBlock: waddrmgr.BlockStamp{
+			Height: 100,
+		},
+
 		cfg: Config{
 			DB:          db,
 			Chain:       mockChain,
 			ChainParams: &chaincfg.MainNetParams,
 		},
 	}
+
+	// Stop the timer immediately to avoid leaks.
+	w.lockTimer.Stop()
 
 	deps := &mockWalletDeps{
 		addrStore: mockAddrStore,
