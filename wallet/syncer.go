@@ -772,6 +772,168 @@ func (s *syncer) scanBatchWithCFilters(ctx context.Context,
 	return results, nil
 }
 
+// fetchAndFilterBlocks retrieves and processes a batch of blocks from the
+// chain backend. It handles CFilter matching, block fetching, local filtering,
+// and dynamic address discovery (expanding horizons in memory/read-only DB).
+func (s *syncer) fetchAndFilterBlocks(ctx context.Context,
+	scanState *RecoveryState, startHeight, chainTip int32) (
+	[]scanResult, error) {
+
+	// Cap the batch size to recoveryBatchSize to manage memory usage.
+	endHeight := min(startHeight+int32(recoveryBatchSize)-1, chainTip)
+
+	// Optimization: If we have nothing to watch, performing a
+	// "header-only" scan to advance the wallet's sync state without
+	// downloading full blocks or filters.
+	//
+	// NOTE: For targeted rescans, the state will never be empty as it is
+	// initialized with specific targets.
+	if scanState.Empty() {
+		log.Debugf("Performing header-only scan for %d blocks",
+			endHeight-startHeight+1)
+
+		return s.scanBatchHeadersOnly(ctx, startHeight, endHeight)
+	}
+
+	log.Debugf("Scanning %d blocks (height %d to %d) with %s",
+		endHeight-startHeight+1, startHeight, endHeight, scanState)
+
+	// Batch 1: Fetch all Block Hashes.
+	// TODO: Pass ctx when chainClient supports it.
+	hashes, err := s.cfg.Chain.GetBlockHashes(
+		int64(startHeight), int64(endHeight),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("batch get block hashes: %w", err)
+	}
+
+	return s.dispatchScanStrategy(ctx, scanState, startHeight, hashes)
+}
+
+// defaultMaxCFilterItems is the heuristic threshold for the number of items
+// (addresses + outpoints) in the watchlist at which the cost of client-side
+// GCS filter matching exceeds the cost of downloading and parsing full blocks.
+//
+// Calculation:
+//   - CFilter Match: ~50ns per item (SIP hash). 100k items = 5ms per block.
+//   - Full Block: ~10ms transfer (local) + ~10ms parse. Total ~20ms per block.
+//
+// While 100k items suggests ~5ms matching time, this is for a single filter.
+// In a batch of 200 blocks, total matching time is 1 second. However, if the
+// match rate is non-zero, we incur additional block download costs.
+//
+// At >100k items, the CPU load of matching becomes significant enough that
+// bypassing filters and streaming full blocks (especially from a local node)
+// is often more performant and uses less CPU time overall. This threshold is
+// conservative to favor CFilters for typical wallet sizes (<10k items).
+const defaultMaxCFilterItems = 100000
+
+// dispatchScanStrategy chooses and executes the appropriate scanning strategy
+// based on the wallet's configuration and heuristics.
+func (s *syncer) dispatchScanStrategy(ctx context.Context,
+	scanState *RecoveryState, startHeight int32,
+	hashes []chainhash.Hash) ([]scanResult, error) {
+
+	switch s.cfg.SyncMethod {
+	case SyncMethodFullBlocks:
+		return s.scanBatchWithFullBlocks(
+			ctx, scanState, startHeight, hashes,
+		)
+
+	// Attempt to use CFilters. If this fails (e.g. not supported by
+	// backend), we return the error directly as the user explicitly
+	// requested this method.
+	case SyncMethodCFilters:
+		return s.scanBatchWithCFilters(
+			ctx, scanState, startHeight, hashes,
+		)
+
+	case SyncMethodAuto:
+		// Check address/UTXO count heuristic. If we have > 100k items
+		// to watch, full block scanning is likely faster due to
+		// client-side filter matching CPU bottleneck.
+		threshold := s.cfg.MaxCFilterItems
+		if threshold == 0 {
+			threshold = defaultMaxCFilterItems
+		}
+
+		if scanState.WatchListSize() > threshold {
+			log.Infof("Auto sync: Watchlist size %d > %d, "+
+				"switching to full blocks for performance",
+				scanState.WatchListSize(), threshold)
+
+			return s.scanBatchWithFullBlocks(
+				ctx, scanState, startHeight, hashes,
+			)
+		}
+
+		// Try CFilters (Fast Path).
+		results, err := s.scanBatchWithCFilters(
+			ctx, scanState, startHeight, hashes,
+		)
+		if err == nil {
+			return results, nil
+		}
+
+		// If CFilters are unavailable (e.g. backend doesn't support
+		// them), fall back to full block scanning.
+		if errors.Is(err, ErrCFiltersUnavailable) {
+			log.Warnf("Batch GetCFilters unavailable: %v. "+
+				"Falling back to full block download.", err)
+
+			return s.scanBatchWithFullBlocks(
+				ctx, scanState, startHeight, hashes,
+			)
+		}
+
+		// If scanBatchWithCFilters failed for another reason, return
+		// the error.
+		return nil, err
+
+	default:
+		return nil, fmt.Errorf("%w: %v", ErrUnknownSyncMethod,
+			s.cfg.SyncMethod)
+	}
+}
+
+// scanBatch fetches and processes a batch of blocks from the chain backend.
+func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
+	bestHeight int32) error {
+
+	// Prepare the full recovery state for syncing.
+	scanState, err := s.loadFullScanState(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Fetch and Filter Blocks. The `fetchAndFilterBlocks` method is
+	// responsible for fetching a batch of blocks from the chain backend,
+	// filtering them for relevant transactions, and expanding address
+	// horizons. This phase primarily involves network I/O and in-memory
+	// processing. While it internally performs brief read-only database
+	// accesses (e.g., in `loadFullScanState`), it avoids holding
+	// long-lived write locks during potentially extensive network
+	// operations.
+	results, err := s.fetchAndFilterBlocks(
+		ctx, scanState, syncedTo.Height+1, bestHeight,
+	)
+	if err != nil {
+		return err
+	}
+	// Batch might be empty if:
+	// 1. We were interrupted by a quit signal or rescan job (handled
+	//    above).
+	// 2. We encountered a backend error fetching the first block
+	//    hash or filter (loop broke early).
+	// In either case, we return an error to let the chain loop sleep and
+	// retry.
+	if len(results) == 0 {
+		return fmt.Errorf("%w: scan batch empty", ErrScanBatchEmpty)
+	}
+	// Process Batch (Update). We do this in a single DB transaction.
+	return s.DBPutSyncBatch(ctx, results)
+}
+
 // loadWalletScanData retrieves all necessary data from the database.
 func (s *syncer) loadWalletScanData(ctx context.Context) (
 	[]*waddrmgr.AccountProperties, []address.Address,

@@ -493,3 +493,157 @@ func TestScanBatchWithCFilters(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Equal(t, int32(10), results[0].meta.Height)
 }
+
+// TestDispatchScanStrategy verifies strategy selection.
+func TestDispatchScanStrategy(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock dependencies.
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
+
+	scanState := NewRecoveryState(10, &chaincfg.MainNetParams, nil)
+	hashes := []chainhash.Hash{{0x01}}
+
+	// 1. Test the SyncMethodFullBlocks strategy.
+	s.cfg.SyncMethod = SyncMethodFullBlocks
+	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(
+		1, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
+	))
+	mockChain.On(
+		"GetBlocks", hashes,
+	).Return([]*wire.MsgBlock{msgBlock}, nil).Once()
+
+	// Act: Dispatch the scan strategy for full blocks.
+	results, err := s.dispatchScanStrategy(
+		t.Context(), scanState, 10, hashes,
+	)
+
+	// Assert: Verify that full blocks strategy was used.
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	// 2. Test the SyncMethodCFilters strategy.
+	s.cfg.SyncMethod = SyncMethodCFilters
+	filter, err := gcs.BuildGCSFilter(
+		builder.DefaultP, builder.DefaultM, [16]byte{}, nil,
+	)
+	require.NoError(t, err)
+
+	mockChain.On(
+		"GetCFilters", hashes, wire.GCSFilterRegular,
+	).Return([]*gcs.Filter{filter}, nil).Once()
+	mockChain.On(
+		"GetBlockHeaders", hashes,
+	).Return([]*wire.BlockHeader{{}}, nil).Once()
+
+	// Simulate a filter match (N=0) to force a full block download.
+	mockChain.On(
+		"GetBlocks", hashes,
+	).Return([]*wire.MsgBlock{msgBlock}, nil).Once()
+
+	// Act: Dispatch the scan strategy for CFilters.
+	results, err = s.dispatchScanStrategy(
+		t.Context(), scanState, 10, hashes,
+	)
+
+	// Assert: Verify that CFilters strategy was used.
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+}
+
+// TestScanBatch verifies the batch scanning entry point.
+func TestScanBatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer with a test database and set up mocks
+	// for the batch scan.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, mockAddrStore, nil,
+		mockPublisher,
+	)
+
+	// Mock loading of the full scan state required by the batch scan.
+	scopedMgr := &mockAccountStore{}
+	scopedMgr.On("ActiveAccounts").Return([]uint32{0}).Once()
+	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
+	scopedMgr.On(
+		"AccountProperties", mock.Anything, uint32(0),
+	).Return(&waddrmgr.AccountProperties{}, nil).Twice()
+	mockAddrStore.On(
+		"ActiveScopedKeyManagers",
+	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
+	mockAddrStore.On(
+		"FetchScopedKeyManager", mock.Anything,
+	).Return(scopedMgr, nil).Times(3)
+	mockAddrStore.On(
+		"ForEachRelevantActiveAddress", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	mockTxStore := &mockTxStore{}
+	s.txStore = mockTxStore
+	mockTxStore.On(
+		"OutputsToWatch", mock.Anything,
+	).Return([]wtxmgr.Credit(nil), nil).Once()
+
+	// Mock expectations for header-only scanning when no targets are
+	// present.
+	hashes := []chainhash.Hash{{0x01}}
+	mockChain.On(
+		"GetBlockHashes", int64(11), int64(11),
+	).Return(hashes, nil).Once()
+	mockChain.On(
+		"GetBlockHeaders", hashes,
+	).Return([]*wire.BlockHeader{{}}, nil).Once()
+
+	// Expect the sync progress to be updated in the database.
+	mockAddrStore.On(
+		"SetSyncedTo", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	// Act: Perform a batch scan from height 10 to 11.
+	err := s.scanBatch(t.Context(), waddrmgr.BlockStamp{Height: 10}, 11)
+
+	// Assert: Verify that the batch scan completed successfully.
+	require.NoError(t, err)
+}
+
+// TestFetchAndFilterBlocks verifies the block fetching and filtering helper.
+func TestFetchAndFilterBlocks(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock chain for block fetching.
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
+
+	// Create an empty recovery state for testing.
+	scanState := NewRecoveryState(10, &chaincfg.MainNetParams, nil)
+	hashes := []chainhash.Hash{{0x01}}
+
+	// Mock expectations for header-only scanning when the recovery state
+	// is empty.
+	mockChain.On(
+		"GetBlockHashes", int64(10), int64(11),
+	).Return(hashes, nil).Once()
+	mockChain.On(
+		"GetBlockHeaders", hashes,
+	).Return([]*wire.BlockHeader{{}}, nil).Once()
+
+	// Act: Fetch and filter blocks for heights 10 to 11.
+	results, err := s.fetchAndFilterBlocks(t.Context(), scanState, 10, 11)
+
+	// Assert: Verify that the block results are correct.
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+}
