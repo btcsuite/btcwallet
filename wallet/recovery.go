@@ -16,6 +16,8 @@ import (
 
 // RecoveryManager maintains the state required to recover previously used
 // addresses, and coordinates batched processing of the blocks to search.
+//
+// TODO(yy): Deprecated, remove.
 type RecoveryManager struct {
 	// recoveryWindow defines the key-derivation lookahead used when
 	// attempting to recover the set of used addresses.
@@ -40,6 +42,8 @@ type RecoveryManager struct {
 // NewRecoveryManager initializes a new RecoveryManager with a derivation
 // look-ahead of `recoveryWindow` child indexes, and pre-allocates a backing
 // array for `batchSize` blocks to scan at once.
+//
+// TODO(yy): Deprecated, remove.
 func NewRecoveryManager(recoveryWindow, batchSize uint32,
 	chainParams *chaincfg.Params) *RecoveryManager {
 
@@ -56,6 +60,8 @@ func NewRecoveryManager(recoveryWindow, batchSize uint32,
 // have been previously found. This method ensures that the recovery state's
 // horizons properly start from the last found address of a prior recovery
 // attempt.
+//
+// TODO(yy): Deprecated, remove.
 func (rm *RecoveryManager) Resurrect(ns walletdb.ReadBucket,
 	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
 	credits []wtxmgr.Credit) error {
@@ -145,6 +151,8 @@ func (rm *RecoveryManager) Resurrect(ns walletdb.ReadBucket,
 
 // AddToBlockBatch appends the block information, consisting of hash and height,
 // to the batch of blocks to be searched.
+//
+// TODO(yy): Deprecated, remove.
 func (rm *RecoveryManager) AddToBlockBatch(hash *chainhash.Hash, height int32,
 	timestamp time.Time) {
 
@@ -166,16 +174,22 @@ func (rm *RecoveryManager) AddToBlockBatch(hash *chainhash.Hash, height int32,
 }
 
 // BlockBatch returns a buffer of blocks that have not yet been searched.
+//
+// TODO(yy): Deprecated, remove.
 func (rm *RecoveryManager) BlockBatch() []wtxmgr.BlockMeta {
 	return rm.blockBatch
 }
 
 // ResetBlockBatch resets the internal block buffer to conserve memory.
+//
+// TODO(yy): Deprecated, remove.
 func (rm *RecoveryManager) ResetBlockBatch() {
 	rm.blockBatch = rm.blockBatch[:0]
 }
 
 // State returns the current RecoveryState.
+//
+// TODO(yy): Deprecated, remove.
 func (rm *RecoveryManager) State() *RecoveryState {
 	return rm.state
 }
@@ -201,12 +215,16 @@ type RecoveryState struct {
 	recoveryWindow uint32
 
 	// scopes maintains a map of each requested key scope to its active
-	// RecoveryState.
+	// RecoveryState. Used for legacy compatibility.
+	//
+	// TODO(yy): Deprecated, remove.
 	scopes map[waddrmgr.KeyScope]*ScopeRecoveryState
 
 	// watchedOutPoints contains the set of all outpoints known to the
 	// wallet. This is updated iteratively as new outpoints are found during
 	// a rescan.
+	//
+	// TODO(yy): Deprecated, remove.
 	watchedOutPoints map[wire.OutPoint]address.Address
 }
 
@@ -223,9 +241,11 @@ func NewRecoveryState(recoveryWindow uint32) *RecoveryState {
 	}
 }
 
-// StateForScope returns a ScopeRecoveryState for the provided key scope. If one
-// does not already exist, a new one will be generated with the RecoveryState's
-// recoveryWindow.
+// StateForScope returns the recovery state for the default account of the
+// provided key scope. This exists for backward compatibility with legacy
+// recovery logic which only supports the default account.
+//
+// TODO(yy): Deprecated, remove.
 func (rs *RecoveryState) StateForScope(
 	keyScope waddrmgr.KeyScope) *ScopeRecoveryState {
 
@@ -243,12 +263,16 @@ func (rs *RecoveryState) StateForScope(
 
 // WatchedOutPoints returns the global set of outpoints that are known to belong
 // to the wallet during recovery.
+//
+// TODO(yy): Deprecated, remove.
 func (rs *RecoveryState) WatchedOutPoints() map[wire.OutPoint]address.Address {
 	return rs.watchedOutPoints
 }
 
 // AddWatchedOutPoint updates the recovery state's set of known outpoints that
 // we will monitor for spends during recovery.
+//
+// TODO(yy): Deprecated, remove.
 func (rs *RecoveryState) AddWatchedOutPoint(outPoint *wire.OutPoint,
 	addr address.Address) {
 
@@ -258,6 +282,8 @@ func (rs *RecoveryState) AddWatchedOutPoint(outPoint *wire.OutPoint,
 // ScopeRecoveryState is used to manage the recovery of addresses generated
 // under a particular BIP32 account. Each account tracks both an external and
 // internal branch recovery state, both of which use the same recovery window.
+//
+// TODO(yy): Deprecated, remove.
 type ScopeRecoveryState struct {
 	// ExternalBranch is the recovery state of addresses generated for
 	// external use, i.e. receiving addresses.
@@ -270,6 +296,8 @@ type ScopeRecoveryState struct {
 
 // NewScopeRecoveryState initializes an ScopeRecoveryState with the chosen
 // recovery window.
+//
+// TODO(yy): Deprecated, remove.
 func NewScopeRecoveryState(recoveryWindow uint32) *ScopeRecoveryState {
 	return &ScopeRecoveryState{
 		ExternalBranch: NewBranchRecoveryState(recoveryWindow),
