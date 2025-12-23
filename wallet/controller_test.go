@@ -234,10 +234,56 @@ func TestControllerStart(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, w.state.isStarted())
 
-	// Clean up
-	if w.cancel != nil {
-		w.cancel()
-	}
-
+	// Cleanup: Stop the wallet to release resources.
+	err = w.Stop(t.Context())
+	require.NoError(t, err)
 	w.wg.Wait()
+}
+
+// TestControllerStop verifies that the Stop method correctly shuts down the
+// wallet, waiting for the syncer and other background processes to exit.
+func TestControllerStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and start a test wallet.
+	w, deps := createTestWalletWithMocks(t)
+
+	// Setup mocks for the startup sequence.
+	deps.addrStore.On(
+		"BirthdayBlock", mock.Anything,
+	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
+	deps.addrStore.On(
+		"ActiveScopedKeyManagers",
+	).Return([]waddrmgr.AccountStore(nil)).Once()
+	deps.txStore.On(
+		"DeleteExpiredLockedOutputs", mock.Anything,
+	).Return(nil).Once()
+
+	// Mock syncer.run to simulate a long-running process that exits when
+	// the context is cancelled.
+	deps.syncer.On("run", mock.Anything).Run(func(args mock.Arguments) {
+		ctx, ok := args.Get(0).(context.Context)
+		if !ok {
+			return
+		}
+		<-ctx.Done()
+	}).Return(nil).Once()
+
+	require.NoError(t, w.Start(t.Context()))
+	require.True(t, w.state.isStarted())
+
+	// Act: Stop the wallet.
+	err := w.Stop(t.Context())
+
+	// Assert: Verify that Stop returned no error and the wallet state is
+	// no longer 'Started'.
+	require.NoError(t, err)
+	require.False(t, w.state.isStarted())
+
+	// Act: Call Stop again to verify idempotency.
+	err = w.Stop(t.Context())
+
+	// Assert: Verify that subsequent Stop calls are safe and return no
+	// error.
+	require.NoError(t, err)
 }
