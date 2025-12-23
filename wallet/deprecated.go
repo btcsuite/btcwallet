@@ -6186,6 +6186,19 @@ type walletDeprecated struct {
 	quit    chan struct{}
 	quitMu  sync.Mutex
 
+	// publicPassphrase is the passphrase used to encrypt and decrypt public
+	// data in the address manager.
+	publicPassphrase []byte
+
+	// db is the underlying key-value database where all wallet data is
+	// persisted.
+	db walletdb.DB
+
+	// recoveryWindow specifies the number of additional keys to derive
+	// beyond the last used one to look for previously used addresses
+	// during a rescan or recovery.
+	recoveryWindow uint32
+
 	chainClient        chain.Interface
 	chainClientLock    sync.Mutex
 	chainClientSynced  bool
