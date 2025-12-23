@@ -5,7 +5,11 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"time"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -153,6 +157,184 @@ func (s *syncer) syncState() syncState {
 func (s *syncer) isRecoveryMode() bool {
 	status := s.syncState()
 	return status == syncStateSyncing || status == syncStateRescanning
+}
+
+// initChainSync performs the initial setup for the chain synchronization loop.
+// This includes waiting for the backend to sync, checking for rollbacks, and
+// enabling block notifications. It returns an error if any of these setup
+// steps fail.
+func (s *syncer) initChainSync(ctx context.Context) error {
+	var err error
+
+	// Inform the backend about our birthday for optimization. For backends
+	// like Neutrino (SPV), this provides a starting point for the internal
+	// synchronization of block headers and compact filters. Without this
+	// hint, the backend might attempt to sync from genesis or its latest
+	// checkpoint, leading to unnecessary network I/O and delayed wallet
+	// readiness.
+	if cc, ok := s.cfg.Chain.(*chain.NeutrinoClient); ok {
+		cc.SetStartTime(s.addrStore.Birthday())
+	}
+
+	// Wait for the backend to be synced to the network. We require the
+	// backend to be synced before we start scanning to ensure we have a
+	// consistent view of the chain and can perform recovery correctly.
+	s.state.Store(uint32(syncStateBackendSyncing))
+
+	err = s.waitUntilBackendSynced(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to wait for backend sync: %w", err)
+	}
+
+	// Check for any reorgs that happened while we were down.
+	err = s.checkRollback(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to check for rollback: %w", err)
+	}
+
+	// Enable block notifications from the chain backend.
+	err = s.cfg.Chain.NotifyBlocks()
+	if err != nil {
+		return fmt.Errorf("unable to start block notifications: %w",
+			err)
+	}
+
+	return nil
+}
+
+// waitUntilBackendSynced blocks until the chain backend considers itself
+// "current".
+func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
+	// We'll poll every second to determine if our chain considers itself
+	// "current".
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C:
+			if s.cfg.Chain.IsCurrent() {
+				return nil
+			}
+
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// checkRollback ensures the wallet is synchronized with the current chain tip.
+// It checks if the wallet's synced tip is still on the main chain, and if not,
+// rewinds the wallet state to the common ancestor.
+func (s *syncer) checkRollback(ctx context.Context) error {
+	var err error
+
+	// batchSize is the number of blocks to fetch from the chain backend in
+	// a single batch when checking for a rollback. A value of 10 is chosen
+	// as a conservative default that covers the vast majority of reorg
+	// scenarios (typically 1-3 blocks) while keeping individual batch
+	// requests lightweight.
+	const batchSize = 10
+
+	syncedTo := s.addrStore.SyncedTo()
+	syncedHeight := syncedTo.Height
+
+	var (
+		localHashes  []*chainhash.Hash
+		remoteHashes []chainhash.Hash
+		header       *wire.BlockHeader
+	)
+
+	for syncedHeight > 0 {
+		// Calculate the range for this batch. We scan backwards:
+		// [startHeight, endHeight] where endHeight is syncedHeight.
+		endHeight := syncedHeight
+		startHeight := max(0, endHeight-batchSize+1)
+
+		// Fetch Local Batch (from wallet's database).
+		localHashes, err = s.DBGetSyncedBlocks(
+			ctx, startHeight, endHeight,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Fetch Remote Batch - Fetch corresponding hashes from the
+		// chain backend.
+		remoteHashes, err = s.cfg.Chain.GetBlockHashes(
+			int64(startHeight), int64(endHeight),
+		)
+		if err != nil {
+			return fmt.Errorf("remote get block hashes: %w", err)
+		}
+
+		// Compare Batches. Iterate backwards to find the last matching
+		// block (the fork point).
+		matchIndex := s.findForkPoint(localHashes, remoteHashes)
+
+		// Case A: Tip matches. No rollback needed (if we are at the
+		// tip). If syncedHeight == syncedTo.Height and matchIndex is
+		// the last element, then we are fully synced on the main
+		// chain.
+		if syncedHeight == syncedTo.Height &&
+			matchIndex == len(localHashes)-1 {
+
+			return nil
+		}
+
+		// Case B: Mismatch found within this batch. A fork point has
+		// been detected. This indicates a blockchain reorganization
+		// where the wallet's local chain history diverges from the
+		// chain backend's view within the current batch of blocks.
+		if matchIndex != -1 {
+			//nolint:gosec // matchIndex < batchSize (10).
+			forkHeight := startHeight + int32(matchIndex)
+			forkHash := localHashes[matchIndex]
+
+			log.Infof("Rollback detected! Rewinding to height %d "+
+				"(%v)", forkHeight, forkHash)
+
+			// Fetch the block header outside the DB transaction to
+			// avoid holding the lock during an RPC call.
+			header, err = s.cfg.Chain.GetBlockHeader(forkHash)
+			if err != nil {
+				return fmt.Errorf("get fork header: %w", err)
+			}
+
+			// Perform the rollback.
+			return s.DBPutRewind(ctx, waddrmgr.BlockStamp{
+				Height:    forkHeight,
+				Hash:      *forkHash,
+				Timestamp: header.Timestamp,
+			})
+		}
+
+		// Case C: No match in this batch. The fork point is deeper.
+		// Move syncedHeight back and continue loop.
+		syncedHeight = startHeight - 1
+	}
+
+	return nil
+}
+
+// findForkPoint compares local and remote block hashes to find the last
+// matching block (fork point). It returns the index of the last match in the
+// slices, or -1 if no match is found.
+func (s *syncer) findForkPoint(localHashes []*chainhash.Hash,
+	remoteHashes []chainhash.Hash) int {
+
+	// Compare up to the length of the shortest slice to avoid
+	// out-of-bounds panics if the chain backend returns fewer hashes than
+	// expected.
+	minLen := min(len(localHashes), len(remoteHashes))
+
+	for i := minLen - 1; i >= 0; i-- {
+		if localHashes[i].IsEqual(&remoteHashes[i]) {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // run executes the main synchronization loop.
