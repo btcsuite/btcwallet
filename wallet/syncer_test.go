@@ -856,3 +856,112 @@ func TestExtractAddrEntries(t *testing.T) {
 	require.Equal(t, addr.String(), entries[0].Address.String())
 	require.Equal(t, uint32(0), entries[0].Credit.Index)
 }
+
+// TestHandleScanReq verifies scan request handling.
+func TestHandleScanReq(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer with a test database and mocks to
+	// test handling of different scan request types.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, mockPublisher,
+	)
+
+	// Case 1: Test handling of a rewind scan request.
+	req := &scanReq{
+		typ:        scanTypeRewind,
+		startBlock: waddrmgr.BlockStamp{Height: 50},
+	}
+	mockAddrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
+	).Once()
+
+	// Expect sync state update and transaction rollback for the rewind.
+	mockAddrStore.On(
+		"SetSyncedTo", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	mockTxStore := &mockTxStore{}
+	s.txStore = mockTxStore
+	mockTxStore.On("Rollback", mock.Anything, int32(51)).Return(nil).Once()
+
+	// Act & Assert: Verify that a rewind scan request is correctly handled.
+	err := s.handleScanReq(t.Context(), req)
+	require.NoError(t, err)
+
+	// Case 2: Test handling of a targeted scan request.
+	req = &scanReq{
+		typ:        scanTypeTargeted,
+		startBlock: waddrmgr.BlockStamp{Height: 100},
+		targets:    []waddrmgr.AccountScope{{Account: 1}},
+	}
+	mockChain := &mockChain{}
+	s.cfg.Chain = mockChain
+	mockChain.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(101), nil,
+	).Once()
+
+	// Mock loading of targeted scan data.
+	scopedMgr := &mockAccountStore{}
+	mockAddrStore.On(
+		"FetchScopedKeyManager", mock.Anything,
+	).Return(scopedMgr, nil).Times(3)
+
+	// Set up mocks for initializing targeted scan state.
+	props := &waddrmgr.AccountProperties{
+		AccountNumber: 1,
+		KeyScope:      waddrmgr.KeyScopeBIP0084,
+	}
+	scopedMgr.On(
+		"AccountProperties", mock.Anything, uint32(1),
+	).Return(props, nil).Twice()
+	// ActiveAccounts might not be called in targeted scan flow.
+	scopedMgr.On("ActiveAccounts").Return([]uint32{1}).Maybe()
+	mockAddrStore.On(
+		"ForEachRelevantActiveAddress", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+	mockTxStore.On(
+		"OutputsToWatch", mock.Anything,
+	).Return([]wtxmgr.Credit(nil), nil).Once()
+
+	// DeriveAddr is called multiple times during state initialization.
+	// Use Maybe() to avoid assertions on specific iteration counts.
+	scopedMgr.On(
+		"DeriveAddr", mock.Anything, mock.Anything, mock.Anything,
+	).Return(&mockAddress{}, []byte{}, nil).Maybe()
+
+	// Mock block hash retrieval for the targeted scan range.
+	mockChain.On(
+		"GetBlockHashes", int64(100), int64(101),
+	).Return([]chainhash.Hash{{0x01}, {0x02}}, nil).Once()
+
+	// Mock CFilter-based scanning for the targeted scan.
+	mockChain.On(
+		"GetCFilters", mock.Anything, mock.Anything,
+	).Return([]*gcs.Filter{nil, nil}, nil).Once()
+	mockChain.On(
+		"GetBlockHeaders", mock.Anything,
+	).Return([]*wire.BlockHeader{{}, {}}, nil).Once()
+
+	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(
+		1, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
+	))
+
+	blocks := make([]*wire.MsgBlock, 2)
+	for i := range 2 {
+		blocks[i] = msgBlock
+	}
+
+	mockChain.On("GetBlocks", mock.Anything).Return(blocks, nil).Once()
+
+	// Act & Assert: Verify that a targeted scan request is correctly
+	// handled.
+	err = s.handleScanReq(t.Context(), req)
+	require.NoError(t, err)
+}
